@@ -2784,11 +2784,24 @@ server.start().then(async () => {
 
   await registerWithManager();
   
-  // Check if manager is running
-  const managerRunning = await checkManager();
+  // Check if manager is running, auto-start if not
+  let managerRunning = await checkManager();
   if (!managerRunning) {
-    console.log(`${colors.yellow}⚠️  Manager is not running${colors.reset}`);
-    console.log(`${colors.gray}   Start it with: ${colors.cyan}node dist/start-agent-manager.js${colors.reset}\n`);
+    console.log(`${colors.yellow}Starting manager on port ${MANAGER_PORT}...${colors.reset}`);
+    const managerScript = path.resolve(__cli_dirname, 'start-agent-manager.js');
+    spawn('node', [managerScript], {
+      detached: true,
+      stdio: 'ignore',
+      env: { ...process.env, AGENT_MANAGER_PORT: String(MANAGER_PORT) }
+    }).unref();
+    await new Promise(resolve => setTimeout(resolve, 3000));
+    managerRunning = await checkManager();
+    if (!managerRunning) {
+      console.log(`${colors.yellow}⚠️  Manager did not start in time${colors.reset}`);
+      console.log(`${colors.gray}   Try manually: ${colors.cyan}node dist/start-agent-manager.js${colors.reset}\n`);
+    } else {
+      console.log(`${colors.green}✓ Manager started${colors.reset}\n`);
+    }
   }
   
   console.log(`${colors.bold}📬 Listening for messages from other agents...${colors.reset}\n`);

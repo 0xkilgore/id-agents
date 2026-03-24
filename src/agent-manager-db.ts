@@ -2710,20 +2710,9 @@ export class AgentManagerDb {
 
 
     // ==================== REMOTE CLI ENDPOINT ====================
-    // Allows external tools to execute CLI-style commands with API key auth
+    // Allows external tools to execute CLI-style commands
 
     this.managementApp.post('/remote', async (req, res) => {
-      // API key authentication
-      const apiKey = req.headers['x-api-key'] as string;
-      const expectedKey = process.env.ID_CONTROL_API_KEY || process.env.ADMIN_API_KEY;
-
-      if (!expectedKey) {
-        return res.status(500).json({ error: 'Server not configured with API key (set ID_CONTROL_API_KEY)' });
-      }
-
-      if (!safeCompare(apiKey, expectedKey)) {
-        return res.status(401).json({ error: 'Invalid or missing API key' });
-      }
 
       const { command } = req.body;
       if (!command || typeof command !== 'string') {
