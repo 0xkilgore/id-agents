@@ -1,0 +1,34 @@
+node_modules/
+dist/
+*.log
+*.tgz
+.DS_Store
+nohup.out
+temp/
+workspaces/**
+workspace/**
+
+# Personal configs (contain local paths and keys)
+configs/idchain.yaml
+
+# Environment and secrets
+.env
+.env.*
+!.env.example
+**/agent-wallets.json
+**/.env.wallet
+*.pem
+*.key
+
+# IDE and editor
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Claude Code personal settings (use plugin instead)
+.claude/
+
+# Coverage and test artifacts
+coverage/
+.nyc_output/

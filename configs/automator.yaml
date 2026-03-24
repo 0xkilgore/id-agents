@@ -1,0 +1,50 @@
+# Automator Agent Config
+# =======================
+# Deploys a "manager brain" agent that coordinates other agents via the
+# Manager API. The automator acts as the central coordinator, distributing
+# tasks, monitoring progress, and handling errors.
+#
+# Key Features:
+# - Uses Opus model for high-quality coordination decisions
+# - Hidden from /agents list (type: automator) - only the brain, not a worker
+# - Receives heartbeat messages to stay proactive
+# - Brain instructions loaded from claudeMd-manager.md
+#
+# Error Handling Policy:
+# - The automator will NOT reassign work when agents have issues
+# - It reports errors to the user and retries with the same agent
+# - This preserves agent context and avoids wasted work
+# - The user decides if/when to reassign work to different agents
+#
+# Usage: /deploy automator [name]
+#
+# IMPORTANT: The first automator MUST be named "manager" (the default).
+# Additional automators can have custom names.
+#
+# Examples:
+#   /deploy automator           # Creates "manager" (required first)
+#   /deploy automator assistant # Creates additional automator
+
+version: "1.0"
+
+parameters:
+  - name: name
+    default: manager
+    description: Name for the automator (first one must be "manager")
+
+defaults:
+  runtime: claude-code-cli  # Uses Max plan credentials
+  model: opus
+
+agents:
+  - name: ${name}
+    type: automator      # Hidden from /agents, this is the manager's brain
+    claudeMdFile: claudeMd-manager.md  # See configs/claudeMd-manager.md for brain instructions
+    # Restrict tools to coordination only - NO code writing
+    # Note: Write/Edit allowed ONLY for PROGRESS.md (enforced by instructions)
+    allowedTools:
+      - Read           # Read documentation and project specs
+      - Bash           # Run curl for /talk-to API calls
+      - Write          # ONLY for PROGRESS.md tracking
+      - Edit           # ONLY for PROGRESS.md tracking
+      - Glob           # Find files to understand project structure

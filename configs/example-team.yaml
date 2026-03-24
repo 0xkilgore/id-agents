@@ -1,0 +1,57 @@
+# Example: Multi-Agent Team Configuration
+# Deploy with: /deploy configs/example-team.yaml
+#
+# Team context is stored in: /workspace/teams/<team>/TEAM.md
+# Agents can read this file to understand their team and role.
+
+version: "1"
+
+# Onchain registration settings
+onchain:
+  register: true  # Auto-register all agents on deploy
+
+# Team name - agents will look for TEAM.md at /workspace/teams/dev-team/TEAM.md
+team: dev-team
+
+# Default settings applied to all agents (can be overridden per-agent)
+defaults:
+  model: claude-haiku-4-5-20251001
+  requireAuth: true
+  apiKey: ${env:ID_AGENT_API_KEY}
+  plugins:
+    - name: id-rest-ap
+      path: ../plugins/claude-code/id-rest-ap
+  container:
+    memory: 1g
+    cpus: 0.5
+
+# Agent definitions
+agents:
+  - name: architect
+    description: "System design and architecture lead"
+    model: claude-opus-4-20250514
+    plugins:
+      - name: id-rest-ap
+        path: ../plugins/claude-code/id-rest-ap
+    container:
+      memory: 4g
+      cpus: 2.0
+
+  - name: coder
+    description: "Implementation specialist"
+    # Uses default model (haiku) and plugins
+    allowedTools:
+      - Read
+      - Write
+      - Edit
+      - Bash
+      - Glob
+      - Grep
+
+  - name: reviewer
+    description: "Code review and quality assurance"
+    # Uses default model (haiku)
+    allowedTools:
+      - Read
+      - Glob
+      - Grep

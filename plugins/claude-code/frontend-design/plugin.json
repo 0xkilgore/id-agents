@@ -1,0 +1,8 @@
+{
+  "name": "frontend-design",
+  "version": "1.0.0",
+  "description": "Frontend design skills for creating UI components, layouts, and visual designs",
+  "type": "local",
+  "entrypoint": "SKILL.md",
+  "scripts": []
+}

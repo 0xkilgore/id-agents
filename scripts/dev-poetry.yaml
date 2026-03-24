@@ -1,0 +1,11 @@
+# Dev Poetry Script
+# Run with: /run dev-poetry
+#
+# Encourages dev to keep finding and adding poetry to the site
+
+interval: 5m
+delay: 2
+loop: true
+
+commands:
+  - /hey dev Thanks for finding and adding poetry to the site! Can you keep going and find more poetry and add it to the site?

@@ -1,0 +1,26 @@
+# Test Configuration
+# Used by integration tests - DO NOT use for production
+# Note: requireAuth is intentionally false for simplified testing
+
+version: "1"
+
+# Onchain registration settings
+onchain:
+  register: true  # Auto-register all agents on deploy
+
+parameters:
+  - name: name
+    default: test-agent
+    description: Name for the test agent
+
+defaults:
+  model: claude-haiku-4-5-20251001
+  requireAuth: false  # No auth for easier testing
+  apiKey: ${env:ID_AGENT_API_KEY}
+  plugins:
+    - name: id-rest-ap
+      path: ../plugins/claude-code/id-rest-ap
+
+agents:
+  - name: ${name}
+    description: Test agent for integration tests

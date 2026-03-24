@@ -1,0 +1,14 @@
+{
+  "name": "id-rest-ap",
+  "version": "1.0.0",
+  "description": "ID implementation of the REST-AP protocol for inter-agent communication",
+  "type": "local",
+  "entrypoint": "SKILL.md",
+  "scripts": [
+    "list-agents.sh",
+    "talk-to-agent.sh",
+    "broadcast-to-agents.sh",
+    "wait-for-response.sh",
+    "pay-agent.sh"
+  ]
+}

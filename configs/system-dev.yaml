@@ -1,0 +1,36 @@
+# System Developer Agent Configuration
+# Deploy with: /deploy system-dev [name]
+# Example: /deploy system-dev sysdev1
+
+version: "1"
+
+# Onchain registration settings
+onchain:
+  register: true  # Auto-register all agents on deploy
+
+parameters:
+  - name: name
+    default: system-dev
+    description: Name for this agent (e.g., sysdev1, memory-expert)
+  - name: model
+    default: claude-sonnet-4-20250514
+    description: Claude model (sonnet recommended for complex analysis)
+  - name: description
+    default: Low-level systems engineer specializing in performance and memory optimization
+    description: What this agent does
+
+defaults:
+  model: ${model}
+  runtime: claude-code-cli  # Uses Max plan credentials
+  requireAuth: true
+  apiKey: ${env:ID_AGENT_API_KEY}
+  plugins:
+    - name: js-static-analysis
+      path: ../plugins/claude-code/js-static-analysis
+    - name: id-rest-ap
+      path: ../plugins/claude-code/id-rest-ap
+
+agents:
+  - name: ${name}
+    local: true             # Run locally to use Max plan
+    description: ${description}

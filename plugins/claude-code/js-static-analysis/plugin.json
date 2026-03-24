@@ -1,0 +1,8 @@
+{
+  "name": "js-static-analysis",
+  "version": "1.0.0",
+  "description": "JavaScript static analysis skills for memory optimization, performance profiling, and low-level debugging",
+  "type": "local",
+  "entrypoint": "SKILL.md",
+  "scripts": []
+}

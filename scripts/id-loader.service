@@ -1,0 +1,16 @@
+[Unit]
+Description=ID Agents Loader Service
+After=network.target postgresql.service
+
+[Service]
+Type=simple
+WorkingDirectory=/root/id-agents
+ExecStart=/usr/bin/node dist/loader-service.js
+Restart=always
+RestartSec=5
+Environment=NODE_ENV=production
+Environment=LOADER_WORK_DIR=/root/id-agents
+EnvironmentFile=-/root/id-agents/.env
+
+[Install]
+WantedBy=multi-user.target

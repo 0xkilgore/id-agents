@@ -1,0 +1,44 @@
+# Local Agent Configuration Template
+# Deploy with: /deploy local-agent [name]
+# Example: /deploy local-agent my-assistant
+#
+# Local agents run outside Docker containers and use your existing
+# Claude Code authentication. This is useful for:
+# - Development and debugging
+# - Using your Claude Code login instead of API keys
+# - Full filesystem access without container isolation
+
+version: "1"
+
+parameters:
+  - name: name
+    default: local-assistant
+    description: Name for this local agent
+  - name: model
+    default: claude-opus-4-20250514
+    description: Claude model to use
+  - name: port
+    default: ""
+    description: Port to listen on (leave empty for auto-allocation)
+  - name: verbose
+    default: "true"
+    description: Enable detailed logging (show tool calls, progress)
+  - name: register
+    default: "true"
+    description: Auto-register onchain to get token ID (e.g., agent.42)
+
+# Auto-register agents onchain to get their token ID
+onchain:
+  register: ${register}
+
+defaults:
+  local: true
+  model: ${model}
+  verbose: ${verbose}
+  requireAuth: true
+  apiKey: ${env:ID_AGENT_API_KEY}
+
+agents:
+  - name: ${name}
+    description: Local Claude Code agent using your authentication
+    local: true

@@ -1,0 +1,30 @@
+# Example Script Configuration
+# Run with: /run example
+#
+# Demonstrates both simple commands and cycling sets
+
+# Time between runs
+interval: 5m
+
+# Delay between commands within a set (seconds)
+delay: 2
+
+# Whether to repeat after all sets complete (default: false)
+loop: true
+
+# Option 1: Simple - single set of commands (uncomment to use)
+# commands:
+#   - /hey dev How's it going?
+#   - /hey poet Keep writing!
+
+# Option 2: Sets - cycle through different command groups
+sets:
+  # Set 1: Check on dev
+  - - /hey dev How's progress on the current task?
+
+  # Set 2: Check on poet
+  - - /hey poet Are you working on any new poems?
+
+  # Set 3: General check
+  - - /hey dev Keep going, you're doing great!
+    - /hey poet Any inspiration today?

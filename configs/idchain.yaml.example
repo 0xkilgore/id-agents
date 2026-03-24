@@ -1,0 +1,79 @@
+# ID Chain System Team
+# Deploy with: /deploy idchain
+#
+# Agents for each component of the ID Chain ecosystem.
+# Each agent runs locally using your Max plan subscription
+# with its working directory set to the respective project repo.
+
+version: "1"
+
+team: idchain
+
+onchain:
+  register: false  # Register manually with /register when ready
+  chainId: 11155111
+  registryAddress: "0xceb79FcAfe0E9F3513fb70fB8A3841302dB4f477"
+
+defaults:
+  local: true
+  runtime: claude-code-cli
+  model: claude-opus-4-6
+  dangerouslySkipPermissions: true
+  verbose: "true"
+  plugins:
+    - name: id-rest-ap
+      path: ../plugins/claude-code/id-rest-ap
+
+agents:
+  - name: contracts
+    description: "Smart contracts (IDRegistry, IDAgentRegistrar, resolvers) — Foundry/Solidity"
+    workingDirectory: /Users/nxt3d/projects/idx
+    domain: contracts.agent-21.sep.xid.eth
+    tokenId: "0x90d88118658044eb9f863922a7d9ce307443597737c32d325ae3a49acf668f19"
+    address: "0x451b2e23313f495ACb541a9690Ffae8F2eA97f00"
+
+  - name: web
+    description: "id-app Next.js frontend — registration UI, wallet integration, CCIP-Read"
+    workingDirectory: /Users/nxt3d/projects/id2/id-app
+    domain: web.agent-20.sep.xid.eth
+    tokenId: "0x34b39723a4872e3fc67cba73a02013997ccc619ae36a1f25c022ebd37f02c637"
+    address: "0xB4e92329A907b22f499747998e9b37147cA1412f"
+
+  - name: gateway
+    description: "idx-gateway CCIP-Read server — ECDSA signing, cross-chain resolution"
+    workingDirectory: /Users/nxt3d/projects/idx-gateway
+    domain: gateway.agent-19.sep.xid.eth
+    tokenId: "0xe9c90d3c9238449966da702159b308039c602b7761cd160217f542d09a410522"
+    address: "0xc3524873772D3aDf9637658E697759eBCa81ec05"
+
+  - name: indexer
+    description: "idx-indexer Ponder.js service — event processing, REST API, multi-chain"
+    workingDirectory: /Users/nxt3d/projects/idx-indexer
+    domain: indexer.agent-18.sep.xid.eth
+    tokenId: "0x3f86b5c3a533e7042be839bd8a6ca65123b895e3928da9b96803fe1a584948bc"
+    address: "0x5e0aA4BD544c5821003f7F518B72345eb76946D0"
+
+  - name: cli
+    description: "id-cli — agent registration, ENS linking, record management"
+    workingDirectory: /Users/nxt3d/projects/id-cli
+    domain: cli.agent-17.sep.xid.eth
+    tokenId: "0xd6ebed7fae12e32c7728667e1ac4b82a0e7d1eeefc4c37b05418191dfe76895b"
+    address: "0xC7a4d8F2CCdBDE4089e1BaF6ec8A1722b53D7fEB"
+
+  - name: x
+    description: "ID Chain X/Twitter — social media monitoring, trend analysis, community engagement, content drafting"
+    workingDirectory: /Users/nxt3d/projects/id-chain-x
+    domain: x.agent-15.sep.xid.eth
+    tokenId: "0xaa6fc00d4ad72a03c6f53b2223e4f9f1157210945106e49ee01f8ddf621e3864"
+    address: "0x22667dE24796893Fc868FFaa50E2dc6907D51e63"
+
+  - name: id-agents-app
+    description: "id-agents website — marketing, docs, landing page"
+    workingDirectory: /Users/nxt3d/projects/id-agents-app
+
+  - name: agents
+    description: "id-agents orchestration platform — multi-agent system, REST-AP protocol"
+    workingDirectory: /Users/nxt3d/projects/id2/id-agents
+    domain: agents.agent-16.sep.xid.eth
+    tokenId: "0x293bce15082a9c7b19e39b3333a9059ad49046fe3f3959db3a132cb3478af558"
+    address: "0x81Dd73CA0e941C8bdF8F323887EfD980D7Ad9141"

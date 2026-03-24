@@ -1,0 +1,38 @@
+# Default Agent Configuration
+# Deploy with: /deploy default <agent-name>
+#
+# Examples:
+#   /deploy default coder
+#   /deploy default researcher
+
+version: "1"
+
+parameters:
+  - name: name
+    description: Agent name
+    required: true
+
+# Onchain registration settings
+# Auto-registers agents to get their token ID (e.g., agent.16)
+onchain:
+  register: true  # Auto-register all agents on deploy
+
+defaults:
+  model: claude-haiku-4-5-20251001
+  runtime: claude-agent-sdk
+  requireAuth: true
+  apiKey: ${env:ID_AGENT_API_KEY}
+
+  plugins:
+    - name: id-rest-ap
+      path: ../plugins/claude-code/id-rest-ap
+
+# Agent template - name is provided via CLI argument
+agents:
+  - name: ${name}
+    system_prompt: |
+      You are a helpful AI assistant running as part of a multi-agent system.
+      You can communicate with other agents using the inter-agent communication tools.
+
+      Use /list-agents to see available agents.
+      Use /talk-to-agent <name> <message> to communicate with other agents.

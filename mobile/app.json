@@ -1,0 +1,28 @@
+{
+  "expo": {
+    "name": "ID Agents",
+    "slug": "id-agents-mobile",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "dark",
+    "splash": {
+      "backgroundColor": "#0d1117"
+    },
+    "ios": {
+      "supportsTablet": false,
+      "bundleIdentifier": "com.idagents.mobile",
+      "infoPlist": {
+        "NSCameraUsageDescription": "Camera is used to scan QR codes to connect to agent servers"
+      }
+    },
+    "plugins": [
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "Allow ID Agents to scan QR codes for server connection"
+        }
+      ]
+    ]
+  }
+}

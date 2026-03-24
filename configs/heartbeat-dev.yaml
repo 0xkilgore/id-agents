@@ -1,0 +1,20 @@
+# Heartbeat Config for Developer Agents
+# Keeps dev agents focused on implementation tasks
+
+interval: 600  # seconds (10 minutes - devs need longer focus time)
+
+message: |
+  **From: Manager**
+
+  **Instruction:** Development check-in time.
+
+  [TESTING] Send a brief status update to me via /talk-to after completing this.
+
+  ToDo:
+  1. What are you currently implementing?
+  2. Have you hit any blockers or errors?
+  3. Is the code ready for testing?
+  4. Do you need clarification from the PM?
+
+  If your task is complete, report back to whoever assigned it.
+  If blocked, ask for help rather than spinning.

@@ -1,0 +1,35 @@
+# Poetry Research Script
+# Run with: /run poetry-research <agent>
+# Example: /run poetry-research max.69
+#
+# Asks an agent to find and add poetry to the WikiPoetry site
+
+# Parameters (like deploy configs)
+parameters:
+  - name: agent
+    description: The agent to use for poetry research (e.g., max.69)
+
+interval: 5m
+delay: 2
+loop: true
+
+# Commands to run once at startup (before first interval)
+# Also re-run automatically during recovery to restore context
+init:
+  - /hey ${agent} can you check out /workspace/teams/hetzner/wikipoetry we are working on adding more poets and adding their most famous poems. All the poetry should be out of copyright (this is important!). Start working on it right away.
+
+# Recovery configuration - auto-recover from content filter errors
+recovery:
+  # Patterns that trigger recovery (supports regex)
+  # - Simple strings: case-insensitive substring match
+  # - Regex: /pattern/flags (e.g., /blocked.*policy/i)
+  clear_on:
+    - /Output blocked by content filtering/i
+    - /blocked.*policy/i
+    - /API Error: 400.*blocked/i
+  # On recovery: clears session, re-runs init commands, then retries failed command
+  retry: true
+  max_retries: 3
+
+commands:
+  - /hey ${agent} Thanks for your work on WikiPoetry! Can you find more poetry and add it to the site? Look for public domain poems, poets, or poetry forms to add.

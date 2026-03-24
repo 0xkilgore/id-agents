@@ -1,0 +1,11 @@
+# Poet Series Script
+# Run with: /run poet-series
+#
+# Asks poet.51 to write another poem in the series every 20 seconds
+
+interval: 20s
+delay: 2
+loop: true
+
+commands:
+  - /hey poet.51 Can you do another poem in the series?
