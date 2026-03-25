@@ -1,0 +1,29 @@
+# Personal App Development Team
+# Deploy with: /deploy apps
+#
+# Agents for building personal productivity apps:
+# scheduling, CRM, task management, utilities, etc.
+
+version: "1"
+
+team: apps
+
+defaults:
+  local: true
+  runtime: claude-code-cli
+  model: claude-opus-4-6
+  dangerouslySkipPermissions: true
+  verbose: "true"
+
+agents:
+  - name: architect
+    description: "App architect — system design, database schema, API design, tech stack decisions"
+    workingDirectory: /Users/nxt3d/projects/apps
+
+  - name: frontend
+    description: "Frontend developer — React, Next.js, Tailwind, responsive UI, component design"
+    workingDirectory: /Users/nxt3d/projects/apps
+
+  - name: backend
+    description: "Backend developer — APIs, database, auth, integrations, deployment"
+    workingDirectory: /Users/nxt3d/projects/apps
