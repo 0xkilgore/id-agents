@@ -538,32 +538,14 @@ export class AgentManagerDb {
     }
   }
 
-  private async dbNextPort(teamId: string): Promise<number> {
-    // Get team's port range
-    const team = await this.db.pool.query<{ port_start: number; port_end: number }>(
-      'SELECT port_start, port_end FROM teams WHERE id = $1',
-      [teamId]
-    );
-    if (!team.rowCount) throw new Error(`Team ${teamId} not found`);
-
-    const { port_start, port_end } = team.rows[0];
-
-    // Find next available port in this team's range
-    // Only consider ports within the team's allocated range (ports outside this range may be assigned externally)
+  private async dbNextPort(_teamId?: string): Promise<number> {
+    // Global sequential port allocation: find max port across ALL agents in all teams
     const r = await this.db.pool.query<{ max_port: number | null }>(
       `SELECT MAX(port) as max_port FROM agents
-       WHERE team_id = $1 AND deleted_at IS NULL AND type = 'claude'
-       AND port >= $2 AND port <= $3`,
-      [teamId, port_start, port_end]
+       WHERE deleted_at IS NULL AND type = 'claude' AND port > 0`
     );
     const maxPort = r.rows[0]?.max_port ?? null;
-    const nextPort = maxPort ? maxPort + 1 : port_start;
-
-    if (nextPort > port_end) {
-      throw new Error(`No available ports in range ${port_start}-${port_end} for team ${teamId}`);
-    }
-
-    return nextPort;
+    return maxPort ? maxPort + 1 : 4101;
   }
 
   /**

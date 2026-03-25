@@ -61,31 +61,10 @@ async function findAvailablePort(startPort: number, maxAttempts: number = 100): 
 }
 
 /**
- * Get team's port range from manager
+ * Get port search range for local agents (global sequential allocation, starting at 4101)
  */
-async function getTeamPortRange(managerUrl: string, teamName: string, apiKey?: string): Promise<{ portStart: number; portEnd: number }> {
-  try {
-    const headers: Record<string, string> = {
-      'Content-Type': 'application/json',
-      'X-Id-Team': teamName
-    };
-    if (apiKey) {
-      headers['X-API-Key'] = apiKey;
-    }
-
-    const response = await fetch(`${managerUrl}/team`, { headers });
-    if (response.ok) {
-      const data = await response.json() as { port_start?: number; port_end?: number };
-      return {
-        portStart: data.port_start || 24000,
-        portEnd: data.port_end || 24100
-      };
-    }
-  } catch (err) {
-    console.warn(`Could not fetch team port range: ${err}`);
-  }
-  // Default port range for local agents
-  return { portStart: 24000, portEnd: 24100 };
+async function getPortSearchRange(): Promise<{ portStart: number; portEnd: number }> {
+  return { portStart: 4101, portEnd: 65535 };
 }
 
 /**
@@ -188,8 +167,8 @@ export async function startLocalAgent(config: LocalAgentConfig): Promise<{
       throw new Error(`Requested port ${requestedPort} is not available`);
     }
   } else {
-    // Get team's port range and find available port
-    const portRange = await getTeamPortRange(managerUrl, team, apiKey);
+    // Find available port using global sequential allocation
+    const portRange = await getPortSearchRange();
     port = await findAvailablePort(portRange.portStart, portRange.portEnd - portRange.portStart);
   }
 

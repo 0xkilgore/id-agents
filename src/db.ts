@@ -329,17 +329,10 @@ export async function getOrCreateTeamId(db: Db, teamName: string): Promise<strin
   const existing = await db.pool.query<{ id: string }>('SELECT id FROM teams WHERE name = $1', [name]);
   if (existing.rowCount && existing.rows[0]?.id) return existing.rows[0].id;
 
-  // Assign non-overlapping port ranges (25 ports per team)
-  const existingRanges = await db.pool.query<{ port_end: number }>(
-    'SELECT port_end FROM teams ORDER BY port_end DESC LIMIT 1'
-  );
-  const lastPortEnd = existingRanges.rows[0]?.port_end ?? 4100;
-  const portStart = lastPortEnd + 1;
-  const portEnd = portStart + 24; // 25 ports per team
-
+  // Port allocation is now global and sequential (handled by dbNextPort), no per-team ranges needed
   const inserted = await db.pool.query<{ id: string }>(
-    'INSERT INTO teams (name, port_start, port_end) VALUES ($1, $2, $3) ON CONFLICT (name) DO UPDATE SET name = EXCLUDED.name RETURNING id',
-    [name, portStart, portEnd]
+    'INSERT INTO teams (name) VALUES ($1) ON CONFLICT (name) DO UPDATE SET name = EXCLUDED.name RETURNING id',
+    [name]
   );
   return inserted.rows[0].id;
 }
