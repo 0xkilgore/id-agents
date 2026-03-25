@@ -1080,12 +1080,29 @@ export class ClaudeAgentServer {
     });
 
     // Identity update endpoint - called by manager after onchain registration
-    this.app.patch('/identity', express.json(), (req, res) => {
+    this.app.patch('/identity', express.json({ limit: '10kb' }), (req, res) => {
       try {
         const { tokenId, registry, registry7930, metadata, domain } = req.body;
 
         if (!tokenId && !registry && !registry7930 && !metadata && !domain) {
           return res.status(400).json({ error: 'No identity fields provided' });
+        }
+
+        // Type validation on identity fields
+        if (tokenId !== undefined && typeof tokenId !== 'string') {
+          return res.status(400).json({ error: 'tokenId must be a string' });
+        }
+        if (domain !== undefined && typeof domain !== 'string') {
+          return res.status(400).json({ error: 'domain must be a string' });
+        }
+        if (registry7930 !== undefined && typeof registry7930 !== 'string') {
+          return res.status(400).json({ error: 'registry7930 must be a string' });
+        }
+        if (registry !== undefined && (typeof registry !== 'object' || registry === null || Array.isArray(registry))) {
+          return res.status(400).json({ error: 'registry must be an object' });
+        }
+        if (metadata !== undefined && (typeof metadata !== 'object' || metadata === null || Array.isArray(metadata))) {
+          return res.status(400).json({ error: 'metadata must be an object' });
         }
 
         // Merge new fields into existing identity

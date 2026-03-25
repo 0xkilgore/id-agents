@@ -45,7 +45,7 @@ export interface CreateTeamResult {
 // ==================== Agent Types ====================
 
 export type AgentType = 'claude' | 'virtual' | 'interactive';
-export type AgentStatus = 'running' | 'stopped' | 'starting' | 'error' | 'unknown';
+export type AgentStatus = 'running' | 'stopped' | 'starting' | 'error' | 'unknown' | 'offline';
 
 export interface AgentRegistry {
   chainId: number;

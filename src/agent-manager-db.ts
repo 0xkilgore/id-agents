@@ -117,7 +117,7 @@ async function discoverRestAPEndpoints(baseEndpoint: string): Promise<{ talk: st
 }
 
 type AgentType = 'claude' | 'virtual' | 'interactive' | 'automator';
-type AgentStatus = 'starting' | 'running' | 'stopped' | 'error';
+type AgentStatus = 'starting' | 'running' | 'stopped' | 'error' | 'offline';
 
 type AgentRegistryId = {
   chainId: number;
@@ -184,6 +184,8 @@ export class AgentManagerDb {
   private heartbeatCounts: Map<string, number> = new Map(); // key: agentId, value: beats sent
   private heartbeatStartTimes: Map<string, number> = new Map(); // key: agentId, value: start timestamp
   private queryWaiters: Map<string, QueryWaiter> = new Map(); // key: query_id
+  private healthStatus: Map<string, { status: 'online' | 'offline' | 'unknown'; lastCheck: number }> = new Map(); // key: `${teamId}:${agentId}`
+  private healthCheckInterval: NodeJS.Timeout | null = null;
   private logBuffer: Array<{ ts: number; msg: string }> = [];
   private readonly LOG_BUFFER_SIZE = 500;
 
@@ -440,7 +442,9 @@ export class AgentManagerDb {
       tokenId: a.token_id,
       registry7930: a.registry_7930,
       domain,
-      displayId
+      displayId,
+      // Health monitoring
+      ...this.getHealthForAgent(a)
     };
   }
 
@@ -2856,12 +2860,20 @@ export class AgentManagerDb {
       case 'status': {
         const agents = await this.dbListAgents(teamId);
         const running = agents.filter(a => a.status === 'running').length;
+        const offline = agents.filter(a => a.status === 'offline').length;
+        const agentHealth = agents.map(a => {
+          const h = this.getHealthForAgent(a);
+          const alias = (a.metadata as any)?.alias || normalizeAlias(a.name);
+          return { name: alias, status: a.status, health: h.health, lastHealthCheck: h.lastHealthCheck };
+        });
         return {
           ok: true,
           result: {
             team: teamName,
             totalAgents: agents.length,
             runningAgents: running,
+            offlineAgents: offline,
+            agents: agentHealth,
             status: 'ok'
           }
         };
@@ -3920,6 +3932,77 @@ export class AgentManagerDb {
     }
   }
 
+  /**
+   * Get health info for an agent to include in API responses.
+   */
+  private getHealthForAgent(a: AgentRow): { health: string; lastHealthCheck: number | null } {
+    const key = `${a.team_id}:${a.id}`;
+    const h = this.healthStatus.get(key);
+    if (!h) return { health: 'unknown', lastHealthCheck: null };
+    return { health: h.status, lastHealthCheck: h.lastCheck };
+  }
+
+  /**
+   * Start periodic health monitoring of all running agents (every 30s).
+   */
+  private startHealthMonitor(): void {
+    // Run immediately, then every 30 seconds
+    this.runHealthChecks();
+    this.healthCheckInterval = setInterval(() => this.runHealthChecks(), 30_000);
+  }
+
+  private async runHealthChecks(): Promise<void> {
+    try {
+      const teams = await this.db.pool.query(`SELECT id FROM teams`);
+      for (const team of teams.rows) {
+        const agents = await this.dbListAgents(team.id, true);
+        for (const agent of agents) {
+          // Skip virtual agents — they don't have a local /health endpoint
+          if (agent.type === 'virtual') continue;
+
+          const key = this.key(team.id, agent.id);
+          const agentUrl = agent.type === 'interactive' ? agent.endpoint : `http://localhost:${agent.port}`;
+
+          if (!agentUrl) {
+            this.healthStatus.set(key, { status: 'unknown', lastCheck: Date.now() });
+            continue;
+          }
+
+          try {
+            const resp = await fetch(`${agentUrl}/health`, {
+              signal: AbortSignal.timeout(3000)
+            });
+            const isOnline = resp.ok;
+            this.healthStatus.set(key, { status: isOnline ? 'online' : 'offline', lastCheck: Date.now() });
+
+            // Update DB status if it changed
+            if (isOnline && agent.status === 'offline') {
+              await this.db.pool.query(
+                `UPDATE agents SET status = 'running' WHERE team_id = $1 AND id = $2`,
+                [team.id, agent.id]
+              );
+            } else if (!isOnline && agent.status === 'running') {
+              await this.db.pool.query(
+                `UPDATE agents SET status = 'offline' WHERE team_id = $1 AND id = $2`,
+                [team.id, agent.id]
+              );
+            }
+          } catch {
+            this.healthStatus.set(key, { status: 'offline', lastCheck: Date.now() });
+            if (agent.status === 'running') {
+              await this.db.pool.query(
+                `UPDATE agents SET status = 'offline' WHERE team_id = $1 AND id = $2`,
+                [team.id, agent.id]
+              ).catch(() => {});
+            }
+          }
+        }
+      }
+    } catch (err: any) {
+      // Don't crash the interval on transient DB errors
+    }
+  }
+
   async start(port: number = 4100): Promise<void> {
     return new Promise((resolve) => {
       // Create HTTP server from Express app
@@ -3941,6 +4024,9 @@ export class AgentManagerDb {
 
         // Start heartbeats for all running agents with heartbeat enabled across all teams
         this.initAllHeartbeats();
+
+        // Start periodic health monitoring (every 30s)
+        this.startHealthMonitor();
 
         resolve();
       });
