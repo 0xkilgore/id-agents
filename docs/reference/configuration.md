@@ -123,7 +123,6 @@ Default settings applied to all agents unless overridden.
 defaults:
   runtime: claude-code
   model: claude-haiku-4-5-20251001
-  requireAuth: true
   plugins:
     - name: id-rest-ap
       path: plugins/id-rest-ap
@@ -135,7 +134,6 @@ defaults:
 |-------|------|-------------|
 | `runtime` | String | Default agent runtime (`claude-code`, `open-code`, `codex`) |
 | `model` | String | Default LLM model |
-| `requireAuth` | Boolean | Require API key authentication for all agents |
 | `plugins` | Array | Default plugins for Claude Code agents |
 | `skills` | Array | Default skills for OpenCode/Codex agents |
 | `allowedTools` | Array | Default tool restrictions for all agents |
@@ -168,8 +166,6 @@ Each agent can have the following fields:
 | `model` | No | From defaults | LLM model to use |
 | `runtime` | No | From defaults | Agent runtime/harness |
 | `systemPrompt` | No | - | Custom system prompt |
-| `apiKey` | No | - | Static API key for this agent (legacy) |
-| `requireAuth` | No | From defaults | Require client API key authentication |
 | `plugins` | No | From defaults | Plugins for Claude Code agents |
 | `skills` | No | From defaults | Skills for OpenCode/Codex agents (.md files) |
 | `allowedTools` | No | From defaults | Restrict agent to specific tools |
@@ -186,7 +182,6 @@ agents:
     systemPrompt: |
       You are a senior software developer.
       Focus on code quality and best practices.
-    apiKey: "sk-agent-lead-secret-key"
     plugins:
       - name: id-rest-ap
         path: plugins/id-rest-ap
@@ -194,65 +189,6 @@ agents:
         path: plugins/git-tools
     register: true
 ```
-
-### Agent Authentication
-
-There are two ways to protect agents with API keys:
-
-#### 1. Manager-Issued Keys (Recommended)
-
-Use `requireAuth: true` to require clients to authenticate with keys issued by the manager:
-
-```yaml
-defaults:
-  requireAuth: true  # All agents require auth
-
-agents:
-  - name: public-agent
-    requireAuth: false  # Override: this agent allows unauthenticated access
-  - name: protected-agent
-    # Uses defaults.requireAuth = true
-```
-
-When `requireAuth` is enabled:
-- Clients must include a valid API key in the `X-API-Key` header
-- Keys are issued via the manager's `/keys/issue` endpoint
-- Agents validate keys by calling the manager's `/keys/validate` endpoint
-- Inter-agent communication using `ID_AGENT_API_KEY` is always trusted
-
-```bash
-# Issue a client key (requires ID_CONTROL_API_KEY)
-curl -X POST http://localhost:4100/keys/issue \
-  -H "Content-Type: application/json" \
-  -H "X-API-Key: $ID_CONTROL_API_KEY" \
-  -d '{"name": "my-client", "scopes": ["talk"]}'
-
-# Use the key to talk to an agent
-curl http://localhost:4101/talk \
-  -H "X-API-Key: sk-id-xxxxxxxxxxxx" \
-  -H "Content-Type: application/json" \
-  -d '{"message": "hello"}'
-```
-
-See [API Key Authentication](./api-keys.md) for full details on key management.
-
-#### 2. Static API Key (Legacy)
-
-For simple deployments, you can set a static `apiKey` directly on an agent:
-
-```yaml
-agents:
-  - name: my-agent
-    apiKey: "sk-agent-my-secret-key"
-```
-
-The key is passed to the agent process as `AGENT_API_KEY`. This approach is simpler but doesn't support key rotation or revocation.
-
-#### Public Endpoints
-
-The following endpoints are always accessible without authentication:
-- `/health` - Health check for monitoring
-- `/.well-known/restap.json` - REST-AP discovery
 
 ---
 
@@ -388,18 +324,16 @@ Parameters can be overridden at deploy time via CLI or API.
 Use `${env:VAR_NAME}` syntax to reference environment variables:
 
 ```yaml
-defaults:
-  apiKey: ${env:ID_AGENT_API_KEY}
-
 agents:
   - name: my-agent
-    # API key is read from environment, not stored in config file
+    env:
+      MY_SECRET: ${env:MY_SECRET_VALUE}
 ```
 
-This keeps sensitive values like API keys out of config files. Set the variable in your `.env` file or shell environment:
+This keeps sensitive values out of config files. Set the variable in your `.env` file or shell environment:
 
 ```bash
-export ID_AGENT_API_KEY=sk-idagent-your-secret-key
+export MY_SECRET_VALUE=some-secret
 ```
 
 ---
@@ -423,7 +357,6 @@ onchain:
 defaults:
   runtime: claude-code
   model: claude-haiku-4-5-20251001
-  requireAuth: true  # All agents require client API keys
   plugins:
     - name: id-rest-ap
       path: plugins/id-rest-ap
@@ -445,11 +378,6 @@ agents:
   - name: dev-backend
     systemPrompt: "You specialize in Node.js and databases."
 
-  # Public assistant - no auth required
-  - name: public-assistant
-    requireAuth: false
-    systemPrompt: "You are a helpful public assistant."
-
   # Researcher with different runtime
   - name: researcher
     runtime: open-code
@@ -464,13 +392,11 @@ Configuration can also be provided via environment variables:
 
 | Variable | Description |
 |----------|-------------|
-| `ANTHROPIC_API_KEY` | Anthropic API key (required) |
+| `ANTHROPIC_API_KEY` | Anthropic API key (not needed with Claude Max plan) |
 | `CLAUDE_MODEL` | Default model override |
 | `DATABASE_URL` | PostgreSQL connection string |
 | `ORCHESTRATOR_TYPE` | Agent runtime type |
-| `ID_PROJECT` | Default team/project name |
-| `ID_CONTROL_API_KEY` | API key for the `/remote` endpoint |
-| `ID_AGENT_API_KEY` | Default API key for agent authentication (used via `${env:ID_AGENT_API_KEY}`) |
+| `PUBLIC_BASE_URL` | Public URL base for agents (e.g., `https://idbot.live`) |
 
 Environment variables take precedence over config file values for most settings.
 

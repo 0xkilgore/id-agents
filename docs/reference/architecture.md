@@ -14,9 +14,9 @@ The central process running on port 4100 (configurable via `--port` or `MANAGER_
 
 **Responsibilities:**
 - Stores agent state in PostgreSQL
-- Handles the `/remote` API for programmatic access
+- Handles the `/remote` API for programmatic access (no auth required)
 - Proxies messages between agents via `/message`
-- Spawns and kills agent processes
+- Spawns and stops agent processes
 - Manages onchain ENS registration via id-cli
 - Runs health checks every 30 seconds (marks agents online/offline)
 - Serves the `/agents` list with health status
@@ -29,12 +29,12 @@ The central process running on port 4100 (configurable via `--port` or `MANAGER_
 
 ### 2. Agent Processes (`src/local-agent-server.ts` + `src/claude-agent-server.ts`)
 
-Each agent runs as a separate Node.js process with its own Express server on a unique port (4101+).
+Each agent runs as a separate Node.js process with its own Express server on a dynamically assigned port (4101+, sequential).
 
 **Responsibilities:**
 - Hosts REST-AP endpoints (`/talk`, `/news`, `/health`)
-- When a message arrives on `/talk`, spawns a Claude Code CLI session to process it
-- Stores replies in an in-memory news feed
+- When a message arrives on `/talk`, spawns an LLM session to process it
+- Stores replies in an in-memory news feed (backed by PostgreSQL)
 - Serves `/.well-known/restap.json` for discovery
 
 **REST-AP endpoints per agent:**
@@ -42,6 +42,7 @@ Each agent runs as a separate Node.js process with its own Express server on a u
 - `GET /news` — Poll for replies (free, no LLM cost)
 - `GET /health` — Agent health check
 - `GET /.well-known/restap.json` — Service discovery catalog
+- `PATCH /catalog` — Update agent catalog metadata
 - `PATCH /identity` — Update agent's onchain identity (called by manager)
 
 ### 3. Interactive CLI (`src/interactive-agent-cli.ts`)
@@ -57,15 +58,15 @@ The user-facing terminal interface.
 ## Message Flow
 
 ```
-User types: /ask agents hello
+User types: /ask coder hello
 
-1. CLI → POST /remote {"command": "/ask agents hello"}
-2. Manager resolves "agents" → finds agent on port 4107
-3. Manager → POST http://localhost:4107/talk {"message": "hello"}
-4. Agent spawns Claude Code CLI session
-5. Claude processes the message, generates a reply
+1. CLI resolves "coder" → finds agent on port 4101
+2. CLI → POST http://localhost:4101/talk {"message": "hello"}
+3. Agent queues the request and returns 202 with query_id
+4. Agent spawns LLM session (Claude Agent SDK or Claude Code CLI)
+5. LLM processes the message, generates a reply
 6. Reply stored in agent's news feed
-7. CLI polls → GET /news on the agent
+7. Agent auto-sends reply to the CLI's /news endpoint
 8. Reply displayed to user
 ```
 
@@ -73,7 +74,7 @@ User types: /ask agents hello
 
 | Table | Purpose |
 |-------|---------|
-| `teams` | Team isolation (default: net3) |
+| `teams` | Team isolation (default: default) |
 | `agents` | Agent state — name, port, status, registry (ENS domain), metadata |
 | `news_items` | Async message feed per agent (with timestamps for polling) |
 | `queries` | Query tracking for reply routing between agents |
@@ -90,7 +91,6 @@ User types: /ask agents hello
 | `src/config-parser.ts` | YAML config parsing and parameter substitution |
 | `src/onchain/idchain-register.ts` | ENS registration via id-cli |
 | `src/core/agent-identifier.ts` | ENS name parsing and display |
-| `src/core/safe-compare.ts` | Timing-safe string comparison |
 | `src/db.ts` | PostgreSQL schema, migrations, connection pool |
 | `src/inter-agent-skill.ts` | Inter-agent communication skill injection |
 | `src/harness/claude-code-cli.ts` | Claude Code CLI harness for spawning LLM sessions |

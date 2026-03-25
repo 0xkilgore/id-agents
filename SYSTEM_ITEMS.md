@@ -14,7 +14,7 @@ Generated: 2026-03-24
 4. `src/claude-agent-cli.ts` — Claude agent CLI entrypoint
 5. `src/claude-restap-cli.ts` — Claude REST-AP CLI entrypoint
 6. `src/config-parser.ts` — YAML config parsing, parameter substitution, plugin resolution
-7. `src/db.ts` — PostgreSQL schema, migrations, connection pool
+7. `src/db.ts` — PostgreSQL schema, migrations, connection pool [STATUS: PASS] Idempotent migration chain, parameterized queries, safe FK cascades; silent catch in port backfill, no Pool tuning
 8. `src/human-agent-cli.ts` — Human-in-the-loop agent CLI
 9. `src/id-agents-cli.ts` — Main CLI entrypoint (npm run id-agents)
 10. `src/index.ts` — Package index and re-exports
@@ -23,7 +23,7 @@ Generated: 2026-03-24
 13. `src/interactive-agent-cli.ts` — Interactive terminal CLI (commands, readline, prompt, all /commands)
 14. `src/interactive-agent-server.ts` — CLI's HTTP server (REST-AP endpoints for the interactive agent)
 15. `src/loader-service.ts` — Loader/watchdog service for auto-starting and monitoring manager
-16. `src/local-agent-server.ts` — Local agent process spawner and lifecycle manager
+16. `src/local-agent-server.ts` — Local agent process spawner and lifecycle manager [STATUS: PASS] Solid lifecycle manager; process.env mutation is non-reentrant but safe in practice since each agent is a separate process
 17. `src/start-agent-manager.ts` — Manager startup script
 18. `src/start-claude-server.ts` — Worker agent startup script
 19. `src/test-claude-agent.ts` — Test/demo script for Claude agent [STATUS: PASS] Clean smoke test, minor `as any` cast and stale pricing strings, no functional issues
@@ -133,7 +133,7 @@ Generated: 2026-03-24
 ## D. Express Routes — Worker Agent (claude-agent-server.ts)
 
 110. `GET /health` — Worker health check
-111. `GET /.well-known/restap.json` — REST-AP catalog (endpoint discovery)
+111. `GET /.well-known/restap.json` — REST-AP catalog (endpoint discovery) [STATUS: PASS] Clean discovery endpoint, correct auth bypass, comprehensive capability docs, catalog spread is public-by-design
 112. `GET /catalog` — View agent catalog metadata [STATUS: PASS] Clean read-only endpoint with identity overlay, properly synced to DB and restap.json
 113. `PATCH /catalog` — Update agent catalog metadata
 114. `POST /talk` — Send message to agent (triggers LLM) [STATUS: PASS] Async 202 pattern, serialized query queue prevents concurrency issues, proper session continuity and auto-reply logic
@@ -146,7 +146,7 @@ Generated: 2026-03-24
 121. `PATCH /identity` — Update agent identity [STATUS: PASS] Fixed: added type validation (string/object checks) and 10KB body limit to prevent abuse
 122. `GET /files/list` — List available files
 123. `GET /files` — Browse files
-124. `POST /files/upload` — Upload file to agent (50MB limit)
+124. `POST /files/upload` — Upload file to agent (50MB limit) [STATUS: PASS] Clean traversal protection via path.basename, UTF-8 only, auth consistent with local-first model
 125. `USE /files` — Static file serving (working directory)
 126. `USE /files/teams` — Static file serving (team shared directory)
 127. `USE /files/shared` — Static file serving (global shared directory)
@@ -159,7 +159,7 @@ Generated: 2026-03-24
 129. `POST /remote` — Remote command execution for CLI
 130. `POST /talk` — Send message to CLI agent
 131. `GET /news` — Poll CLI agent news
-132. `POST /news` — Receive reply to CLI agent
+132. `POST /news` — Receive reply to CLI agent [STATUS: PASS] Solid passive ingest with thorough loop/noise filtering, minor dead-code nit in pending-question block
 
 ---
 

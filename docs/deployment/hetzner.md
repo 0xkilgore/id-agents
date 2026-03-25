@@ -18,7 +18,7 @@ Hetzner VPS (CX11 - €3.29/month)
 ├── Ubuntu + Node.js
 ├── Manager Service (port 4100)
 │   └── Spawns/stops agent processes
-└── Agent Processes (ports 4101-4200, 4201-4300, etc.)
+└── Agent Processes (ports 4101+, dynamic sequential)
 
 Railway/PlanetScale
 └── PostgreSQL Database (external)
@@ -137,7 +137,6 @@ DATABASE_URL=postgresql://... (Railway/PlanetScale)
 # Optional
 CLAUDE_MODEL=claude-haiku-4-5-20251001
 NODE_ENV=production
-ID_CONTROL_API_KEY=your-secret-key
 ```
 
 ### Security
@@ -149,11 +148,6 @@ sudo ufw allow ssh
 sudo ufw allow 4100  # Manager service
 sudo ufw --force enable
 ```
-
-#### API Keys
-- Set `ID_CONTROL_API_KEY` for authentication
-- Use strong, random keys
-- Rotate keys regularly
 
 ## Monitoring & Maintenance
 

@@ -87,7 +87,7 @@ agents:
     runtime: claude-agent-sdk
     plugins:
       - name: id-rest-ap
-        path: /app/plugins/id-rest-ap
+        path: plugins/id-rest-ap
 ```
 
 Plugins are passed to the SDK as local plugins and provide additional tools and instructions.
@@ -175,8 +175,7 @@ interface HarnessMessage {
 
 **Via CLI:**
 ```bash
-/spawn my-agent haiku claude-agent-sdk
-/spawn my-agent haiku claude-code-cli
+/deploy local-agent my-agent
 ```
 
 **Via YAML Config:**
@@ -195,8 +194,7 @@ agents:
 ```bash
 curl -X POST http://localhost:4100/remote \
   -H "Content-Type: application/json" \
-  -H "X-API-Key: $ID_CONTROL_API_KEY" \
-  -d '{"command": "/spawn my-agent --runtime claude-agent-sdk"}'
+  -d '{"command": "/deploy local-agent my-agent"}'
 ```
 
 ### Checking Available Harnesses

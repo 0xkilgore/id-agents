@@ -72,9 +72,6 @@ ID_HOST_CLAUDE_DIR=/root/.claude
 OPENROUTER_API_KEY=sk-or-v1-xxx
 OPENAI_API_KEY=sk-xxx
 
-# Optional: security keys
-ID_CONTROL_API_KEY=your-admin-key
-ID_AGENT_API_KEY=your-agent-key
 ```
 
 ## Using Claude Max Plan (Recommended)
@@ -119,7 +116,7 @@ cd /root/id-agents
 Use the `claude-code-cli` runtime to use Max plan credentials:
 
 ```bash
-curl -X POST http://localhost:3100/agents/spawn \
+curl -X POST http://localhost:4100/agents/spawn \
   -H "Content-Type: application/json" \
   -d '{"name": "my-agent", "model": "sonnet", "runtime": "claude-code-cli"}'
 ```
@@ -133,12 +130,12 @@ The agent will automatically use OAuth credentials instead of API key.
 │                     Hetzner VPS                              │
 │  ┌─────────────────┐                    ┌────────────────┐  │
 │  │   PostgreSQL    │                    │    Manager     │  │
-│  │   (port 5432)   │                    │  (port 3100)   │  │
+│  │   (port 5432)   │                    │  (port 4100)   │  │
 │  └─────────────────┘                    └────────────────┘  │
 │                                                │             │
 │                                                ▼             │
 │  ┌─────────────────────────────────────────────────────────┐│
-│  │              Agent Processes (port 4100+)               ││
+│  │              Agent Processes (port 4101+)               ││
 │  │   ┌─────────┐  ┌─────────┐  ┌─────────┐                 ││
 │  │   │ dev.1   │  │ coder.2 │  │  ...    │                 ││
 │  │   └─────────┘  └─────────┘  └─────────┘                 ││
@@ -151,8 +148,8 @@ The agent will automatically use OAuth credentials instead of API key.
 | Service | Port | Description |
 |---------|------|-------------|
 | PostgreSQL | 5432 | Agent state, queries, news |
-| Manager | 3100 | REST-AP orchestration, /agents API |
-| Agents | 4100+ | Individual Claude Code agent processes |
+| Manager | 4100 | REST-AP orchestration, /agents API |
+| Agents | 4101+ | Individual Claude Code agent processes |
 
 ## Runtime Options
 
@@ -165,33 +162,33 @@ The agent will automatically use OAuth credentials instead of API key.
 
 ### List Agents
 ```bash
-curl http://YOUR_SERVER_IP:3100/agents
+curl http://YOUR_SERVER_IP:4100/agents
 ```
 
 ### Spawn Agent (with API Key)
 ```bash
-curl -X POST http://YOUR_SERVER_IP:3100/agents/spawn \
+curl -X POST http://YOUR_SERVER_IP:4100/agents/spawn \
   -H "Content-Type: application/json" \
   -d '{"name": "dev", "model": "haiku"}'
 ```
 
 ### Spawn Agent (with Max Plan)
 ```bash
-curl -X POST http://YOUR_SERVER_IP:3100/agents/spawn \
+curl -X POST http://YOUR_SERVER_IP:4100/agents/spawn \
   -H "Content-Type: application/json" \
   -d '{"name": "dev", "model": "sonnet", "runtime": "claude-code-cli"}'
 ```
 
 ### Talk to Agent
 ```bash
-curl -X POST http://YOUR_SERVER_IP:3100/agents/{agent-id}/talk \
+curl -X POST http://YOUR_SERVER_IP:4100/agents/{agent-id}/talk \
   -H "Content-Type: application/json" \
   -d '{"message": "Hello!"}'
 ```
 
 ### Poll for Response
 ```bash
-curl http://YOUR_SERVER_IP:3100/agents/{agent-id}/news
+curl http://YOUR_SERVER_IP:4100/agents/{agent-id}/news
 ```
 
 ## Alternative: Local Agents with Remote Manager
@@ -201,12 +198,12 @@ Run agents on your Mac (using local Max plan) while connecting to the remote man
 ```bash
 # On your Mac
 cd /path/to/id-agents
-MANAGER_URL=http://YOUR_SERVER_IP:3100 npx tsx src/local-agent-server.ts dev --team default
+MANAGER_URL=http://YOUR_SERVER_IP:4100 npx tsx src/local-agent-server.ts dev --team default
 ```
 
 Or use the interactive CLI:
 ```bash
-MANAGER_URL=http://YOUR_SERVER_IP:3100 npm run id-agents
+MANAGER_URL=http://YOUR_SERVER_IP:4100 npm run id-agents
 # Then: /deploy local-agent dev
 ```
 
@@ -252,16 +249,15 @@ ssh root@YOUR_SERVER_IP "cd /root/id-agents && npm install && npm run build && s
 If using ufw or similar:
 ```bash
 ufw allow 22        # SSH
-ufw allow 3100      # Manager API
-ufw allow 4100:4200/tcp  # Agent ports (optional, for direct access)
+ufw allow 4100      # Manager API
+ufw allow 4101:4200/tcp  # Agent ports (optional, for direct access)
 ```
 
 ## Security Considerations
 
-1. **API Keys**: Never commit `.env` files with real keys
-2. **ID_CONTROL_API_KEY**: Set this to protect admin endpoints like `/remote`
-3. **Firewall**: Consider restricting port 3100 to known IPs
-4. **Max Plan Credentials**: The `/root/.claude` directory contains OAuth tokens - protect server access
+1. **Environment files**: Never commit `.env` files with real keys
+2. **Firewall**: Consider restricting port 4100 to known IPs
+3. **Max Plan Credentials**: The `/root/.claude` directory contains OAuth tokens - protect server access
 
 ## Updating the Deployment
 

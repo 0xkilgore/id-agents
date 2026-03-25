@@ -43,9 +43,8 @@ CREATE TABLE teams (
 | `created_at` | timestamptz | Creation timestamp |
 
 **Notes:**
-- Each team gets 25 ports by default (configurable)
-- Port ranges are non-overlapping across teams
-- Ranges auto-expand if needed to cover existing agent ports
+- Port allocation is dynamic and sequential across all teams (starting from 4101)
+- The `port_start`/`port_end` columns are legacy — actual allocation uses `dbNextPort()` which finds the next globally available port
 
 ---
 
@@ -283,14 +282,10 @@ WHERE team_id = $1
 
 ### Allocate next port
 ```sql
--- Get team's port range
-SELECT port_start, port_end FROM teams WHERE id = $1;
-
--- Find next available port
-SELECT COALESCE(MAX(port), port_start - 1) + 1 as next_port
+-- Dynamic sequential port allocation (global across all teams)
+SELECT COALESCE(MAX(port), 4100) + 1 as next_port
 FROM agents
-WHERE team_id = $1
-  AND port > 0
+WHERE port > 0
   AND deleted_at IS NULL;
 ```
 

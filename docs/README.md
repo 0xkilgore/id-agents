@@ -1,6 +1,6 @@
 # ID Agents Documentation
 
-**Version 0.1.3-beta**
+**Version 0.1.7-beta**
 
 Documentation for the ID Agents multi-agent orchestration platform.
 
@@ -21,6 +21,13 @@ Documentation for the ID Agents multi-agent orchestration platform.
 - [Architecture](./reference/architecture.md) - System architecture, message flow, database schema, key files
 - [Configuration](./reference/configuration.md) - YAML configuration file reference
 - [Database Schema](./reference/database.md) - PostgreSQL database tables and schema
+- [Harnesses](./reference/harnesses.md) - LLM runtime backends (Claude Agent SDK, Claude Code CLI)
+- [ID Indexer API](./reference/id-indexer-api.md) - Onchain agent registry indexer API
+
+## Deployment
+
+- [Hetzner Cloud Deployment](./deployment/hetzner.md) - Single VM deployment guide
+- [Hetzner VPS Setup](./deployment/hetzner-setup.md) - Detailed VPS setup guide
 
 ## ERC Drafts
 
@@ -38,4 +45,3 @@ Skills extend agent capabilities:
 ## Plugins
 
 - [Plugins Overview](../plugins/README.md) - Plugin system and configuration
-
