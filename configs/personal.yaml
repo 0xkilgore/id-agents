@@ -1,0 +1,22 @@
+# Personal Assistant Team
+# Deploy with: /deploy personal
+
+version: "1"
+
+team: personal
+
+defaults:
+  local: true
+  runtime: claude-code-cli
+  model: claude-opus-4-6
+  dangerouslySkipPermissions: true
+  verbose: "true"
+
+agents:
+  - name: x
+    description: "Personal X/Twitter — social media monitoring, engagement, content drafting"
+    workingDirectory: /Users/nxt3d/projects/id-chain-x
+
+  - name: home
+    description: "Personal EA — email triage, calendar, scheduling, personal productivity"
+    workingDirectory: /Users/nxt3d/projects/home

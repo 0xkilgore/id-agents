@@ -3173,7 +3173,19 @@ export class AgentManagerDb {
             return { ok: false, error: `Config file not found: ${filePath}` };
           }
         }
-        const { agents, errors, onchain } = processConfig(absolutePath, this.baseWorkDir, deployArgs);
+        const { agents, errors, onchain, teamName: configTeam } = processConfig(absolutePath, this.baseWorkDir, deployArgs);
+
+        // If config specifies a team, use that instead of the request's team
+        let effectiveTeamId = teamId;
+        let effectiveTeamName = teamName;
+        if (configTeam && configTeam !== teamName) {
+          effectiveTeamId = await getOrCreateTeamId(this.db, configTeam);
+          effectiveTeamName = configTeam;
+          // Ensure team directory exists
+          const configTeamDir = `${this.baseWorkDir}/teams/${configTeam}`;
+          if (!existsSync(configTeamDir)) mkdirSync(configTeamDir, { recursive: true });
+          console.log(`[Deploy] Using team from config: ${configTeam}`);
+        }
 
         if (errors.length > 0) {
           return {
@@ -3192,7 +3204,7 @@ export class AgentManagerDb {
           // Check if "manager" automator already exists in database
           const existingManagerResult = await this.db.pool.query(
             `SELECT id FROM agents WHERE team_id = $1 AND type = 'automator' AND name = 'manager'`,
-            [teamId]
+            [effectiveTeamId]
           );
           const hasManagerAutomator = existingManagerResult.rows.length > 0;
 
@@ -3215,7 +3227,7 @@ export class AgentManagerDb {
           // Generate unique agent ID outside try so it's available for cleanup
           const agentId = `agent_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
           try {
-            const port = await this.dbNextPort(teamId);
+            const port = await this.dbNextPort(effectiveTeamId);
             const workingDirectory = `${this.baseWorkDir}/agents/${agentId}`;
 
             if (!existsSync(workingDirectory)) {
@@ -3288,7 +3300,7 @@ export class AgentManagerDb {
             await this.db.pool.query(
               `INSERT INTO agents (team_id, id, name, type, model, port, endpoint, working_directory, status, created_at, metadata, runtime, token_id, registry)
                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'starting', $9, $10, $11, $12, $13)`,
-              [teamId, agentId, agentName, agentType, agentConfig.model || 'haiku', port, null, workingDirectory, Date.now(), metadata, effectiveRuntime,
+              [effectiveTeamId, agentId, agentName, agentType, agentConfig.model || 'haiku', port, null, workingDirectory, Date.now(), metadata, effectiveRuntime,
                configTokenId || null,
                configDomain ? { chainId: onchain?.chainId || 11155111, registryAddress: onchain?.registryAddress, tokenId: configTokenId, domain: configDomain } : null]
             );
@@ -3298,11 +3310,11 @@ export class AgentManagerDb {
             const finalMeta = { ...metadata, endpoint: url, local: true };
             await this.db.pool.query(
               `UPDATE agents SET status = 'pending', port = $3, endpoint = $4, metadata = $5 WHERE team_id = $1 AND id = $2`,
-              [teamId, agentId, port, url, finalMeta]
+              [effectiveTeamId, agentId, port, url, finalMeta]
             );
 
             // Spawn the agent process
-            const spawnResult = await this.spawnLocalAgentProcess(teamId, teamName, {
+            const spawnResult = await this.spawnLocalAgentProcess(effectiveTeamId, effectiveTeamName, {
               name: agentConfig.name,
               id: agentId,
               port,
@@ -3314,7 +3326,7 @@ export class AgentManagerDb {
 
             // Start heartbeat timer if config file was specified
             if (heartbeatConfig) {
-              this.startHeartbeatForAgent(teamId, agentId, agentConfig.name, workingDirectory, heartbeatConfig.interval);
+              this.startHeartbeatForAgent(effectiveTeamId, agentId, agentConfig.name, workingDirectory, heartbeatConfig.interval);
             }
 
             const result: { name: string; id: string; port: number; success: boolean; tokenId?: string; domain?: string; txHash?: string; local: boolean; workingDirectory: string; pid?: number; logFile?: string } = {
@@ -3332,7 +3344,7 @@ export class AgentManagerDb {
               // Update status to running
               await this.db.pool.query(
                 `UPDATE agents SET status = 'running' WHERE team_id = $1 AND id = $2`,
-                [teamId, agentId]
+                [effectiveTeamId, agentId]
               );
             }
 
@@ -3343,10 +3355,10 @@ export class AgentManagerDb {
                 // Fetch the agent row for registration
                 const agentRow = await this.db.pool.query<AgentRow>(
                   `SELECT * FROM agents WHERE team_id = $1 AND id = $2`,
-                  [teamId, agentId]
+                  [effectiveTeamId, agentId]
                 );
                 if (agentRow.rows[0]) {
-                  const regResult = await this.registerOnchainAndUpdateAgent(teamId, agentRow.rows[0]);
+                  const regResult = await this.registerOnchainAndUpdateAgent(effectiveTeamId, agentRow.rows[0]);
                   console.log(`[Deploy] Registration result: domain=${regResult.domain}, tokenId=${regResult.tokenId}, txHash=${regResult.txHash}`);
                   result.tokenId = regResult.tokenId;
                   result.domain = regResult.domain;
@@ -3381,7 +3393,7 @@ export class AgentManagerDb {
               try {
                 await this.db.pool.query(
                   `DELETE FROM agents WHERE team_id = $1 AND id = $2`,
-                  [teamId, agentId]
+                  [effectiveTeamId, agentId]
                 );
                 console.log(`[Deploy] Cleaned up failed agent record: ${agentId}`);
               } catch (cleanupErr) {
