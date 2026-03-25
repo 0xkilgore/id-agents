@@ -1487,7 +1487,7 @@ export class AgentManagerDb {
     // List all teams from database
     this.managementApp.get('/teams', async (req, res) => {
       const teams = await this.db.pool.query(
-        `SELECT id, name, port_start, port_end, created_at FROM teams ORDER BY created_at DESC`
+        `SELECT id, name, created_at FROM teams ORDER BY created_at DESC`
       );
 
       const teamList = await Promise.all(
@@ -1499,8 +1499,6 @@ export class AgentManagerDb {
           return {
             id: team.id,
             name: team.name,
-            portStart: team.port_start,
-            portEnd: team.port_end,
             agentCount: parseInt(agentCount.rows[0]?.count || '0'),
             createdAt: team.created_at
           };
@@ -1524,7 +1522,7 @@ export class AgentManagerDb {
         }
 
         const team = await this.db.pool.query(
-          'SELECT id, name, port_start, port_end, created_at FROM teams WHERE id = $1',
+          'SELECT id, name, created_at FROM teams WHERE id = $1',
           [teamId]
         );
         if (team.rows.length === 0) {
@@ -1534,8 +1532,6 @@ export class AgentManagerDb {
         res.json({
           id: row.id,
           name: row.name,
-          portStart: row.port_start,
-          portEnd: row.port_end,
           createdAt: row.created_at
         });
       } catch (error: any) {
@@ -1544,47 +1540,20 @@ export class AgentManagerDb {
       }
     });
 
-    // Update team settings (port range)
+    // Update team settings (port ranges removed — ports are now globally sequential)
     this.managementApp.patch('/teams/:name', async (req, res) => {
       const { name } = req.params;
-      const { portStart, portEnd } = req.body || {};
 
       try {
         const team = await this.db.pool.query(
-          'SELECT id, name, port_start, port_end FROM teams WHERE name = $1',
+          'SELECT id, name FROM teams WHERE name = $1',
           [name]
         );
         if (!team.rows.length) {
           return res.status(404).json({ error: `Team "${name}" not found` });
         }
 
-        const updates: string[] = [];
-        const params: any[] = [team.rows[0].id];
-
-        if (portStart !== undefined) {
-          params.push(portStart);
-          updates.push(`port_start = $${params.length}`);
-        }
-        if (portEnd !== undefined) {
-          params.push(portEnd);
-          updates.push(`port_end = $${params.length}`);
-        }
-
-        if (updates.length === 0) {
-          return res.status(400).json({ error: 'Nothing to update. Provide portStart and/or portEnd.' });
-        }
-
-        await this.db.pool.query(
-          `UPDATE teams SET ${updates.join(', ')} WHERE id = $1`,
-          params
-        );
-
-        const updated = await this.db.pool.query(
-          'SELECT id, name, port_start, port_end FROM teams WHERE id = $1',
-          [team.rows[0].id]
-        );
-        const row = updated.rows[0];
-        res.json({ name: row.name, portStart: row.port_start, portEnd: row.port_end });
+        res.json({ name: team.rows[0].name, message: 'Port ranges are no longer used. Ports are allocated globally.' });
       } catch (error: any) {
         res.status(500).json({ error: error.message || 'Failed to update team' });
       }
@@ -1640,15 +1609,7 @@ export class AgentManagerDb {
     // Backwards compatibility: /projects endpoints
     this.managementApp.get('/projects', async (req, res) => {
       const teams = await this.db.pool.query(
-        `SELECT
-          id,
-          name,
-          config,
-          port_start,
-          port_end,
-          created_at
-        FROM teams
-        ORDER BY created_at DESC`
+        `SELECT id, name, config, created_at FROM teams ORDER BY created_at DESC`
       );
 
       const projectList = await Promise.all(
@@ -1670,7 +1631,6 @@ export class AgentManagerDb {
           return {
             id: team.id,
             name: team.name,
-            portRange: `${team.port_start}-${team.port_end}`,
             agentCount: parseInt(agentCount.rows[0]?.count || '0'),
             registry: registryInfo,
             createdAt: team.created_at
@@ -1692,7 +1652,7 @@ export class AgentManagerDb {
 
         // Get the created team details
         const team = await this.db.pool.query(
-          'SELECT id, name, port_start, port_end, created_at FROM teams WHERE id = $1',
+          'SELECT id, name, created_at FROM teams WHERE id = $1',
           [teamId]
         );
 
@@ -1704,7 +1664,6 @@ export class AgentManagerDb {
         res.json({
           id: row.id,
           name: row.name,
-          portRange: `${row.port_start}-${row.port_end}`,
           createdAt: row.created_at
         });
       } catch (error: any) {
@@ -3615,7 +3574,7 @@ export class AgentManagerDb {
       case 'teams': {
         // List all teams
         const teams = await this.db.pool.query(
-          `SELECT id, name, port_start, port_end, created_at FROM teams ORDER BY created_at DESC`
+          `SELECT id, name, created_at FROM teams ORDER BY created_at DESC`
         );
         const teamList = await Promise.all(
           teams.rows.map(async (team: any) => {
@@ -3626,8 +3585,6 @@ export class AgentManagerDb {
             return {
               id: team.id,
               name: team.name,
-              portStart: team.port_start,
-              portEnd: team.port_end,
               agentCount: parseInt(agentCount.rows[0]?.count || '0')
             };
           })
@@ -3638,7 +3595,7 @@ export class AgentManagerDb {
       case 'team': {
         // /team - show current team (from header)
         const team = await this.db.pool.query(
-          `SELECT id, name, port_start, port_end FROM teams WHERE id = $1`,
+          `SELECT id, name FROM teams WHERE id = $1`,
           [teamId]
         );
         if (team.rows.length === 0) {
@@ -3654,8 +3611,6 @@ export class AgentManagerDb {
           result: {
             id: t.id,
             name: t.name,
-            portStart: t.port_start,
-            portEnd: t.port_end,
             agentCount: parseInt(agentCount.rows[0]?.count || '0')
           }
         };

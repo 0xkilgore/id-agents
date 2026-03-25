@@ -1556,7 +1556,7 @@ async function handleLine(line: string) {
       try {
         const resp = await managerFetch('/teams');
         if (resp.ok) {
-          const data = await resp.json() as { teams: Array<{ name: string; agentCount: number; portStart: number; portEnd: number }> };
+          const data = await resp.json() as { teams: Array<{ name: string; agentCount: number }> };
           if (data.teams.length === 0) {
             console.log(`${colors.gray}  No teams yet. Use /team <name> to create one.${colors.reset}`);
           } else {
@@ -1564,7 +1564,7 @@ async function handleLine(line: string) {
               const isCurrent = team.name === activeTeam;
               const marker = isCurrent ? `${colors.green}●${colors.reset}` : ' ';
               const nameColor = isCurrent ? colors.cyan : '';
-              console.log(`  ${marker} ${nameColor}${team.name}${colors.reset} ${colors.gray}(${team.agentCount} agents, ports ${team.portStart}-${team.portEnd})${colors.reset}`);
+              console.log(`  ${marker} ${nameColor}${team.name}${colors.reset} ${colors.gray}(${team.agentCount} agents)${colors.reset}`);
             }
           }
         } else {
