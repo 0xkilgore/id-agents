@@ -4054,14 +4054,20 @@ async function deployFromConfig(filePath: string, args: string[] = []) {
     }
     console.log(`${colors.bold}${colors.cyan}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${colors.reset}\n`);
 
-    // Restore previous team if we switched for this deploy
-    if (activeTeam !== savedTeam) {
+    // Keep the config team active after successful deploy so /ask, /agents etc. work against it
+    if (configTeam && activeTeam !== savedTeam && successful > 0) {
+      console.log(`${colors.green}   Active team switched to "${configTeam}"${colors.reset}\n`);
+      updatePrompt();
+      // Re-register CLI with the new team
+      registerWithManager().catch(() => {});
+    } else if (activeTeam !== savedTeam && successful === 0) {
+      // Restore if nothing deployed successfully
       activeTeam = savedTeam;
-      console.log(`${colors.gray}   Restored active team: ${savedTeam}${colors.reset}\n`);
+      console.log(`${colors.gray}   Restored active team: ${savedTeam} (no agents deployed)${colors.reset}\n`);
     }
 
   } catch (error: any) {
-    activeTeam = savedTeam;  // Always restore on error
+    activeTeam = savedTeam;  // Restore on error
     console.log(`\n${colors.red}❌ Error: ${error.message}${colors.reset}\n`);
   }
 }
