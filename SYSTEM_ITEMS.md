@@ -95,7 +95,7 @@ Generated: 2026-03-24
 75. `GET /agents/by-name/:name` — Get agent by name [STATUS: PASS] Parameterized SQL, two-stage resolution (exact then flexible), team-scoped, read-only
 76. `GET /agents/:id` — Get agent by ID
 77. `GET /agents/:name/news` — Get news items for specific agent
-78. `POST /agents/spawn` — Spawn a new agent process
+78. `POST /agents/spawn` — Spawn a new agent process [STATUS: REVIEW] Triple metadata UPDATE, no name format validation, non-atomic port allocation
 79. `POST /agents/register` — Register agent in database
 80. `POST /agents/:id/metadata` — Update agent metadata by ID
 81. `POST /agents/by-name/:name/metadata` — Update agent metadata by name
@@ -110,7 +110,7 @@ Generated: 2026-03-24
 90. `POST /talk-to` — Alias for /message with wait:true
 91. `POST /news` — Receive reply or post news item
 92. `GET /news` — Poll for manager news updates
-93. `POST /news/archive` — Archive old news items
+93. `POST /news/archive` — Archive old news items [STATUS: REVIEW] SELECT+DELETE not transactional, no bounds on `days` param
 94. `GET /registry/default` — Get default onchain registry config
 95. `POST /registry/default` — Set default onchain registry config
 96. `GET /registry/registrar` — Get registrar address
@@ -134,7 +134,7 @@ Generated: 2026-03-24
 
 110. `GET /health` — Worker health check
 111. `GET /.well-known/restap.json` — REST-AP catalog (endpoint discovery)
-112. `GET /catalog` — View agent catalog metadata
+112. `GET /catalog` — View agent catalog metadata [STATUS: PASS] Clean read-only endpoint with identity overlay, properly synced to DB and restap.json
 113. `PATCH /catalog` — Update agent catalog metadata
 114. `POST /talk` — Send message to agent (triggers LLM) [STATUS: PASS] Async 202 pattern, serialized query queue prevents concurrency issues, proper session continuity and auto-reply logic
 115. `POST /clear` — Clear agent session
