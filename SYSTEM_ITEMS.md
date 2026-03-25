@@ -102,7 +102,7 @@ Generated: 2026-03-24
 82. `POST /agents/:id/onchain/register` — Register agent onchain by ID
 83. `POST /agents/by-name/:name/onchain/register` — Register agent onchain by name
 84. `POST /agents/:id/model` — Change agent model
-85. `POST /agents/by-name/:name/move` — Move agent to different team
+85. `POST /agents/by-name/:name/move` — Move agent to different team [STATUS: REMOVED] Deleted — team transfers not supported; contained buggy news_items copy query (item 136)
 86. `DELETE /agents/:id` — Delete agent by ID
 87. `DELETE /agents/by-name/:name` — Delete agent by name [STATUS: PASS] Safe workspace cleanup with path guard, cascading DB delete; empty catch blocks unlike sibling route (minor)
 88. `POST /talk` — Send message to manager (triggers LLM)
@@ -168,5 +168,5 @@ Generated: 2026-03-24
 133. Table `teams` — Namespace/tenant config (id, name, config jsonb, port_start, port_end)
 134. Table `agents` — Agent registry (team_id, id, name, type, model, port, endpoint, status, registry jsonb, metadata jsonb, token_id, registry_7930, api_key, runtime)
 135. Table `wallets` — Agent Ethereum wallets [deprecated] (team_id, agent_id, address, private_key)
-136. Table `news_items` — Async message feed (team_id, agent_id, timestamp, type, message, data jsonb, query_id)
+136. Table `news_items` — Async message feed (team_id, agent_id, timestamp, type, message, data jsonb, query_id) [STATUS: FIXED] Bug resolved — deleted the broken transfer function (item 85) that referenced non-existent columns
 137. Table `queries` — Work/request tracking (team_id, agent_id, query_id, status, prompt, result jsonb, session_id, sender_name)
