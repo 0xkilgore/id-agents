@@ -3169,7 +3169,9 @@ export class AgentManagerDb {
           const agentId = `agent_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
           try {
             const port = await this.dbNextPort(effectiveTeamId);
-            const workingDirectory = `${this.baseWorkDir}/agents/${agentId}`;
+            const workingDirectory = agentConfig.workingDirectory && path.isAbsolute(agentConfig.workingDirectory)
+              ? agentConfig.workingDirectory
+              : `${this.baseWorkDir}/agents/${agentId}`;
 
             if (!existsSync(workingDirectory)) {
               mkdirSync(workingDirectory, { recursive: true });
