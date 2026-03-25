@@ -120,7 +120,7 @@ Generated: 2026-03-24
 100. `GET /teams` — List all teams
 101. `POST /teams` — Create a team
 102. `PATCH /teams/:name` — Update team config
-103. `DELETE /teams/:name` — Delete a team
+103. `DELETE /teams/:name` — Delete a team [STATUS: REVIEW] No default team protection, soft-deleted agents silently cascade-deleted
 104. `GET /projects` — List projects (alias for teams)
 105. `POST /projects` — Create project (alias for teams)
 106. `GET /logs` — Get manager activity log

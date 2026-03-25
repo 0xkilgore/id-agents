@@ -564,7 +564,7 @@ export function processConfig(
   filePath: string,
   workspacePath: string = '/workspace',
   args: string[] = []
-): { agents: AgentSpec[]; teamContext: string | null; errors: ValidationError[]; parameters?: ConfigParameter[]; onchain?: OnchainConfig } {
+): { agents: AgentSpec[]; teamContext: string | null; teamName: string | null; errors: ValidationError[]; parameters?: ConfigParameter[]; onchain?: OnchainConfig } {
   // Get parameters first (for error messages)
   const parameters = getConfigParameters(filePath);
 
@@ -574,13 +574,13 @@ export function processConfig(
   // Validate config structure
   const validation = validateConfig(config);
   if (!validation.valid) {
-    return { agents: [], teamContext: null, errors: validation.errors, parameters };
+    return { agents: [], teamContext: null, teamName: null, errors: validation.errors, parameters };
   }
 
   // Verify plugins exist
   const pluginValidation = verifyPlugins(config, basePath);
   if (!pluginValidation.valid) {
-    return { agents: [], teamContext: null, errors: pluginValidation.errors, parameters };
+    return { agents: [], teamContext: null, teamName: null, errors: pluginValidation.errors, parameters };
   }
 
   // Resolve plugin paths
@@ -630,5 +630,5 @@ export function processConfig(
     ? loadTeamContext(resolvedConfig.team, workspacePath)
     : null;
 
-  return { agents, teamContext, errors: [], parameters, onchain: resolvedConfig.onchain };
+  return { agents, teamContext, teamName: resolvedConfig.team || null, errors: [], parameters, onchain: resolvedConfig.onchain };
 }

@@ -1628,16 +1628,16 @@ export class AgentManagerDb {
 
         const teamId = team.rows[0].id;
 
-        // Check if team has any agents
+        // Check if team has ANY agents (including soft-deleted)
         const agents = await this.db.pool.query(
-          'SELECT COUNT(*)::text as count FROM agents WHERE team_id = $1 AND deleted_at IS NULL',
+          'SELECT COUNT(*)::text as count FROM agents WHERE team_id = $1',
           [teamId]
         );
         const agentCount = parseInt(agents.rows[0]?.count || '0');
 
         if (agentCount > 0) {
           return res.status(400).json({
-            error: `Team "${name}" has ${agentCount} agent(s). Delete agents first.`
+            error: `Team "${name}" has ${agentCount} agent(s) (including archived). Delete all agents first.`
           });
         }
 

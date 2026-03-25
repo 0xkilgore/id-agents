@@ -67,6 +67,10 @@ const HELP_ITEMS: Array<{ cmd: string; desc: string; indent?: boolean }> = [
   { cmd: '/news [-l] <agent>', desc: 'Check recent messages (-l for full content)' },
   { cmd: '/register <agent>', desc: 'Register agent onchain' },
   { cmd: '/status', desc: 'Check agent status' },
+  { cmd: '/team', desc: 'Show current team' },
+  { cmd: '/team <name>', desc: 'Switch to or create team' },
+  { cmd: '/teams', desc: 'List all teams' },
+  { cmd: '/team delete <name>', desc: 'Delete a team' },
   { cmd: '/quit', desc: 'Exit' },
 ];
 
@@ -1442,6 +1446,12 @@ async function handleLine(line: string) {
 
       (async () => {
         try {
+          if (nameArg === activeTeam) {
+            console.log(`\n${colors.red}❌ Cannot delete the active team "${nameArg}". Switch to another team first.${colors.reset}\n`);
+            rl.prompt();
+            return;
+          }
+
           const confirmed = await confirmAction(
             rl,
             `Delete team "${nameArg}" from database?`,
@@ -1462,11 +1472,6 @@ async function handleLine(line: string) {
             console.log(`\n${colors.red}❌ ${data.error || 'Failed to delete team'}${colors.reset}\n`);
           } else {
             console.log(`\n${colors.green}✅ ${data.message}${colors.reset}\n`);
-            // If we deleted the current team, switch to default
-            if (activeTeam === nameArg) {
-              activeTeam = 'default';
-              console.log(`${colors.gray}Switched to team "default"${colors.reset}\n`);
-            }
           }
         } catch (err: any) {
           console.log(`\n${colors.red}❌ ${err.message}${colors.reset}\n`);
@@ -3737,6 +3742,7 @@ async function broadcastToAllAgents(message: string) {
 }
 
 async function deployFromConfig(filePath: string, args: string[] = []) {
+  const savedTeam = activeTeam;
   try {
     console.log(`\n${colors.gray}📄 Loading config from: ${filePath}${colors.reset}`);
     if (args.length > 0) {
@@ -3757,7 +3763,7 @@ async function deployFromConfig(filePath: string, args: string[] = []) {
     }
 
     // Process config file with parameters
-    const { agents, teamContext, errors, parameters, onchain } = processConfig(absolutePath, '/workspace', args);
+    const { agents, teamContext, teamName: configTeam, errors, parameters, onchain } = processConfig(absolutePath, '/workspace', args);
 
     if (errors.length > 0) {
       console.log(`\n${colors.red}❌ Config validation errors:${colors.reset}`);
@@ -3781,6 +3787,12 @@ async function deployFromConfig(filePath: string, args: string[] = []) {
     }
 
     console.log(`${colors.gray}   Found ${agents.length} agent(s) to deploy${colors.reset}`);
+
+    // Switch to config's team if specified
+    if (configTeam && configTeam !== activeTeam) {
+      activeTeam = configTeam;
+      console.log(`${colors.gray}   Using team from config: ${configTeam}${colors.reset}`);
+    }
     if (teamContext) {
       console.log(`${colors.gray}   Team context loaded${colors.reset}`);
     }
@@ -4042,7 +4054,14 @@ async function deployFromConfig(filePath: string, args: string[] = []) {
     }
     console.log(`${colors.bold}${colors.cyan}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${colors.reset}\n`);
 
+    // Restore previous team if we switched for this deploy
+    if (activeTeam !== savedTeam) {
+      activeTeam = savedTeam;
+      console.log(`${colors.gray}   Restored active team: ${savedTeam}${colors.reset}\n`);
+    }
+
   } catch (error: any) {
+    activeTeam = savedTeam;  // Always restore on error
     console.log(`\n${colors.red}❌ Error: ${error.message}${colors.reset}\n`);
   }
 }
