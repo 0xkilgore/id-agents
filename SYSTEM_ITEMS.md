@@ -26,7 +26,7 @@ Generated: 2026-03-24
 16. `src/local-agent-server.ts` — Local agent process spawner and lifecycle manager
 17. `src/start-agent-manager.ts` — Manager startup script
 18. `src/start-claude-server.ts` — Worker agent startup script
-19. `src/test-claude-agent.ts` — Test/demo script for Claude agent
+19. `src/test-claude-agent.ts` — Test/demo script for Claude agent [STATUS: PASS] Clean smoke test, minor `as any` cast and stale pricing strings, no functional issues
 20. `src/core/agent-identifier.ts` — Agent display ID, alias normalization, identity resolution
 21. `src/core/agent-service.ts` — Shared agent CRUD operations (DB queries)
 22. `src/core/config-utils.ts` — Config utilities (findProjectRoot, readDotEnvFile)
@@ -80,7 +80,7 @@ Generated: 2026-03-24
 65. `/logs [N]` — Show manager activity log
 66. `/cancel <agent>` — Cancel running query
 67. `/heartbeats` — Heartbeat monitoring
-68. `/register-me` — Register CLI agent onchain
+68. `/register-me` — Register CLI agent onchain [STATUS: PASS] Solid self-registration with stable ID persistence and idempotent upsert
 69. `/news top <agent>` — Show last few messages
 70. `/news archive [days]` — Archive old news to files
 
