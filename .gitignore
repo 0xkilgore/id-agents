@@ -10,6 +10,7 @@ workspace/**
 
 # Personal configs (contain local paths and keys)
 configs/idchain.yaml
+configs/personal.yaml
 
 # Environment and secrets
 .env
