@@ -307,6 +307,7 @@ const port = MANAGER_PORT - 100; // CLI runs 100 below manager (e.g. 4000 for ma
 let activeTeam = process.env.ID_TEAM || process.env.ID_PROJECT || 'default';
 
 let activeServerName = activeTeam;
+let lastAskedAgent: string | null = null;
 
 // Manager URL - derived from MANAGER_PORT
 const MANAGER_URL = process.env.MANAGER_URL || `http://localhost:${MANAGER_PORT}`;
@@ -2496,6 +2497,8 @@ async function handleLine(line: string) {
       return;
     }
 
+    lastAskedAgent = agentName;
+    updatePrompt();
     askAgent(agentName, message, true); // Continue session (use /clear to start fresh)
     // Prompt immediately so user can continue typing, even if askAgent errors early (e.g. agent not found).
     setImmediate(() => rl.prompt());
@@ -2531,6 +2534,8 @@ async function handleLine(line: string) {
       return;
     }
 
+    lastAskedAgent = agentName;
+    updatePrompt();
     askAgent(agentName, message, true); // Continue session
     setImmediate(() => rl.prompt());
     return;
@@ -2544,8 +2549,10 @@ async function handleLine(line: string) {
       // Clear all sessions
       const count = agentSessions.size;
       agentSessions.clear();
+      lastAskedAgent = null;
+      updatePrompt();
       console.log(`\n${colors.green}✓ Cleared all sessions (${count} agent${count !== 1 ? 's' : ''})${colors.reset}`);
-      console.log(`${colors.gray}Next /hey will start a fresh conversation.${colors.reset}\n`);
+      console.log(`${colors.gray}Next /ask will start a fresh conversation.${colors.reset}\n`);
     } else {
       // Clear specific agent session
       const sanitized = sanitizeAgentName(agentName);
@@ -2718,6 +2725,13 @@ async function handleLine(line: string) {
     return;
   }
 
+  // Plain text with no / prefix — send to last asked agent
+  if (!input.startsWith('/') && lastAskedAgent) {
+    askAgent(lastAskedAgent, input, true);
+    setImmediate(() => rl.prompt());
+    return;
+  }
+
   // Unknown command - show help
   console.log(`\n${colors.yellow}💡 Unknown command. Type /help for available commands.${colors.reset}\n`);
   rl.prompt();
@@ -2731,7 +2745,8 @@ const agentSessions: Map<string, string> = new Map();
 
 function updatePrompt() {
   const displayTeam = activeServerName || activeTeam;
-  rl.setPrompt(`${colors.green}> [${name}@${displayTeam}]${colors.reset} `);
+  const agentSuffix = lastAskedAgent ? `:${lastAskedAgent}` : '';
+  rl.setPrompt(`${colors.green}> [${name}@${displayTeam}${agentSuffix}]${colors.reset} `);
 }
 
 async function displayPendingQuestions(force: boolean = false) {
