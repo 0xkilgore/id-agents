@@ -2762,15 +2762,15 @@ async function displayPendingQuestions(force: boolean = false) {
 
 // Display startup banner
 console.log(`
-${colors.bold}${colors.cyan}╭───────────────────────────────────────────────────╮${colors.reset}
-${colors.bold}${colors.cyan}│${colors.reset}                                                   ${colors.bold}${colors.cyan}│${colors.reset}
-${colors.bold}${colors.cyan}│${colors.reset}   ${colors.bold}ID Agents${colors.reset}  ${colors.gray}v${PKG_INFO.version}${colors.reset}                            ${colors.bold}${colors.cyan}│${colors.reset}
-${colors.bold}${colors.cyan}│${colors.reset}   ${colors.gray}Multi-agent coordination${colors.reset}                       ${colors.bold}${colors.cyan}│${colors.reset}
-${colors.bold}${colors.cyan}│${colors.reset}   ${colors.gray}Supports Claude Agent SDK & OpenCode${colors.reset}           ${colors.bold}${colors.cyan}│${colors.reset}
-${colors.bold}${colors.cyan}│${colors.reset}                                                   ${colors.bold}${colors.cyan}│${colors.reset}
-${colors.bold}${colors.cyan}│${colors.reset}   ${colors.gray}Open source (${PKG_INFO.license}) - github.com/idchain-world/id-agents${colors.reset}   ${colors.bold}${colors.cyan}│${colors.reset}
-${colors.bold}${colors.cyan}│${colors.reset}                                                   ${colors.bold}${colors.cyan}│${colors.reset}
-${colors.bold}${colors.cyan}╰───────────────────────────────────────────────────╯${colors.reset}
+${colors.bold}${colors.cyan}  ██╗██████╗       █████╗  ██████╗ ███████╗███╗   ██╗████████╗███████╗${colors.reset}
+${colors.bold}${colors.cyan}  ██║██╔══██╗     ██╔══██╗██╔════╝ ██╔════╝████╗  ██║╚══██╔══╝██╔════╝${colors.reset}
+${colors.bold}${colors.cyan}  ██║██║  ██║     ███████║██║  ███╗█████╗  ██╔██╗ ██║   ██║   ███████╗${colors.reset}
+${colors.bold}${colors.cyan}  ██║██║  ██║     ██╔══██║██║   ██║██╔══╝  ██║╚██╗██║   ██║   ╚════██║${colors.reset}
+${colors.bold}${colors.cyan}  ██║██████╔╝     ██║  ██║╚██████╔╝███████╗██║ ╚████║   ██║   ███████║${colors.reset}
+${colors.bold}${colors.cyan}  ╚═╝╚═════╝      ╚═╝  ╚═╝ ╚═════╝ ╚══════╝╚═╝  ╚═══╝   ╚═╝   ╚══════╝${colors.reset}
+
+  ${colors.gray}v${PKG_INFO.version}  •  Multi-agent orchestration  •  ${PKG_INFO.license}${colors.reset}
+  ${colors.gray}github.com/idchain-world/id-agents${colors.reset}
 `);
 
 server.start().then(async () => {
