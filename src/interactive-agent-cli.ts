@@ -2158,7 +2158,7 @@ async function handleLine(line: string) {
   if (input === '/deploy') {
     // List available configs
     const configsDir = path.resolve(process.cwd(), 'configs');
-    if (!existsSync(configsDir)) {
+    if (!fs.existsSync(configsDir)) {
       console.log(`\n${colors.yellow}No configs/ directory found.${colors.reset}\n`);
       rl.prompt();
       return;
