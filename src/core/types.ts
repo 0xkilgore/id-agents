@@ -47,14 +47,6 @@ export interface CreateTeamResult {
 export type AgentType = 'claude' | 'virtual' | 'interactive';
 export type AgentStatus = 'running' | 'stopped' | 'starting' | 'error' | 'unknown' | 'offline';
 
-export interface AgentRegistry {
-  chainId: number;
-  registryAddress: string;
-  tokenId?: string;
-  registry7930?: string;  // ERC-7930 encoded registry address
-  domain?: string;        // ENS domain name (e.g., "agent-5.base.xid.eth")
-}
-
 export interface AgentMetadata {
   name?: string;
   description?: string;
@@ -78,11 +70,9 @@ export interface AgentInfo {
   workingDirectory?: string;
   createdAt?: string;
   metadata?: AgentMetadata;
-  registry?: AgentRegistry;
   // Identity fields
-  tokenId?: string;           // Legacy token ID (backward compat)
-  registry7930?: string;      // ERC-7930 encoded registry address
-  domain?: string;            // ENS domain name (e.g., "agent-5.base.xid.eth")
+  tokenId?: string;           // Token ID / label (e.g., "agent-5")
+  domain?: string;            // ENS domain name (e.g., "agent-5.base.xid.eth") — the identity
   displayId?: string;         // Formatted display identifier
 }
 

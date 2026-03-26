@@ -23,7 +23,6 @@ export type {
   CreateTeamResult,
   AgentType,
   AgentStatus,
-  AgentRegistry,
   AgentMetadata,
   AgentInfo,
   SpawnAgentOptions,

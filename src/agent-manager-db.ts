@@ -28,7 +28,6 @@ import fetch from 'node-fetch';
 import type { PluginConfig, DeployConfig, HeartbeatConfig } from './config-parser.js';
 import { processConfig } from './config-parser.js';
 import { parseAgentRef, normalizeAlias, buildAmbiguityWarning, type AgentMatch } from './core/agent-identifier.js';
-import { encodeERC7930 } from './core/erc7930.js';
 import { safeCompare } from './core/safe-compare.js';
 import type { HarnessType } from './harness/types.js';
 
@@ -122,8 +121,6 @@ type AgentStatus = 'starting' | 'running' | 'stopped' | 'error' | 'offline';
 type AgentRegistryId = {
   chainId: number;
   registryAddress: string;
-  tokenId?: string;
-  domain?: string;
 };
 
 type AgentMetadata = Record<string, any> & {
@@ -149,7 +146,7 @@ type AgentRow = {
   metadata: any;
   deleted_at: number | null;
   token_id: string | null;
-  registry_7930: string | null;
+  domain: string | null;
 };
 
 // WebSocket client tracking
@@ -419,7 +416,7 @@ export class AgentManagerDb {
     // After registration, a.name IS the ENS domain and the original local alias
     // is preserved in metadata.alias.
     const alias = (a.metadata as any)?.alias || normalizeAlias(a.name);
-    const domain = (a.metadata as any)?.idchain_domain || (a.registry as any)?.domain;
+    const domain = a.domain || (a.metadata as any)?.idchain_domain;
     const displayId = domain || alias;
 
     return {
@@ -435,12 +432,9 @@ export class AgentManagerDb {
       createdAt: a.created_at,
       type: a.type,
       url,
-      // Note: internalUrl removed - agents should use /talk-to for inter-agent communication
-      registry: a.registry,
       metadata: a.metadata,
       // Identity fields
       tokenId: a.token_id,
-      registry7930: a.registry_7930,
       domain,
       displayId,
       // Health monitoring
@@ -506,19 +500,19 @@ export class AgentManagerDb {
       let query: string;
       let params: any[];
 
-      if (parsed.isFullySpecified) {
-        // tokenId + registry - exact match
-        query = `SELECT * FROM agents WHERE team_id = $1 AND (token_id = $2 OR (registry->>'tokenId')::text = $2) AND registry_7930 = $3 AND deleted_at IS NULL`;
-        params = [teamId, parsed.tokenId, parsed.registry];
+      if (parsed.isFullySpecified && parsed.domain) {
+        // ENS domain - exact match
+        query = `SELECT * FROM agents WHERE team_id = $1 AND (LOWER(name) = $2 OR LOWER(domain) = $2 OR metadata->>'idchain_domain' = $2) AND deleted_at IS NULL`;
+        params = [teamId, parsed.domain];
       } else if (parsed.tokenId && parsed.alias) {
         // alias + tokenId - must match both (name OR metadata alias) AND tokenId exactly
         // Do NOT fall back to tokenId-only, as that could return a wrong agent
-        query = `SELECT * FROM agents WHERE team_id = $1 AND (token_id = $2 OR (registry->>'tokenId')::text = $2) AND (LOWER(name) = $3 OR LOWER(metadata->>'alias') = $3) AND deleted_at IS NULL`;
+        query = `SELECT * FROM agents WHERE team_id = $1 AND token_id = $2 AND (LOWER(name) = $3 OR LOWER(metadata->>'alias') = $3) AND deleted_at IS NULL`;
         params = [teamId, parsed.tokenId, parsed.alias];
         console.log(`[Resolve] Query: tokenId=${parsed.tokenId}, alias=${parsed.alias}`);
       } else if (parsed.tokenId) {
         // Just tokenId - match by token
-        query = `SELECT * FROM agents WHERE team_id = $1 AND (token_id = $2 OR (registry->>'tokenId')::text = $2) AND deleted_at IS NULL`;
+        query = `SELECT * FROM agents WHERE team_id = $1 AND token_id = $2 AND deleted_at IS NULL`;
         params = [teamId, parsed.tokenId];
       } else if (parsed.alias) {
         // Just alias - match by name or original alias (could be ambiguous)
@@ -640,15 +634,6 @@ export class AgentManagerDb {
 
     // Use the label as tokenId for backward compat; domain is the primary identifier
     const tokenId = result.label;
-    const newRegistry: AgentRegistryId = {
-      chainId: result.chainId,
-      registryAddress,
-      tokenId,
-      domain: result.domain,
-    };
-
-    // Encode registry as ERC-7930
-    const registry7930 = encodeERC7930(result.chainId, registryAddress);
 
     // Update metadata – preserve the original local alias so the agent
     // can still be found by its pre-registration name after `name` is
@@ -679,7 +664,6 @@ export class AgentManagerDb {
         privateKey: pk,
       });
       newName = subResult.domain;
-      newRegistry.domain = newName;
       metadata.idchain_domain = newName;
       console.log(`[Register] Subname created: ${newName} (tx: ${subResult.txHash})`);
     } catch (subErr: any) {
@@ -687,14 +671,14 @@ export class AgentManagerDb {
     }
 
     await this.db.pool.query(
-      `UPDATE agents SET name = $3, registry = $4, token_id = $5, registry_7930 = $6, endpoint = $7, metadata = $8 WHERE team_id = $1 AND id = $2`,
-      [teamId, agent.id, newName, newRegistry, tokenId, registry7930, dbEndpoint, metadata]
+      `UPDATE agents SET name = $3, token_id = $4, domain = $5, endpoint = $6, metadata = $7 WHERE team_id = $1 AND id = $2`,
+      [teamId, agent.id, newName, tokenId, newName, dbEndpoint, metadata]
     );
 
     // Update running server identity
     const server = this.runningServers.get(this.key(teamId, agent.id));
     if (server) {
-      server.setIdentity({ name: newName, registry: newRegistry, metadata, tokenId, registry7930, domain: result.domain });
+      server.setIdentity({ name: newName, metadata, tokenId, domain: newName });
     }
 
     // Push identity to running agent process
@@ -711,7 +695,7 @@ export class AgentManagerDb {
         const identityRes = await fetch(`${agentUrl}/identity`, {
           method: 'PATCH',
           headers,
-          body: JSON.stringify({ tokenId, registry: newRegistry, registry7930, domain: newName })
+          body: JSON.stringify({ tokenId, domain: newName })
         });
         if (identityRes.ok) {
           console.log(`✅ Updated identity for ${originalAlias}: ${newName}`);
@@ -1451,7 +1435,7 @@ export class AgentManagerDb {
           id: a.id,
           alias: normalizeAlias(a.name),
           tokenId: a.token_id || undefined,
-          registry: a.registry_7930 || undefined,
+          domain: a.domain || undefined,
           port: a.port,
           status: a.status
         }));
@@ -1737,13 +1721,6 @@ export class AgentManagerDb {
         // Copy plugins to agent's working directory (agent owns its plugins)
         const localPlugins = this.copyPluginsToAgent(mergedPlugins, workingDirectory);
 
-        const defaultReg = await this.getDefaultRegistry(teamId);
-        const registry: AgentRegistryId = {
-          ...defaultReg,
-          ...(domain && { domain }),
-          ...(tokenId && { tokenId }),
-        };
-
         // Determine effective agent type (default to 'claude')
         const effectiveAgentType = agentType || 'claude';
         const isAutomator = effectiveAgentType === 'automator';
@@ -1764,9 +1741,9 @@ export class AgentManagerDb {
         };
 
         await this.db.pool.query(
-          `INSERT INTO agents (team_id, id, name, type, model, port, endpoint, working_directory, status, created_at, registry, metadata, api_key)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
-          [teamId, id, name, effectiveAgentType, effectiveModel, 0, null, workingDirectory, 'starting', Date.now(), registry, metadata, apiKey || null]
+          `INSERT INTO agents (team_id, id, name, type, model, port, endpoint, working_directory, status, created_at, metadata, api_key, token_id, domain)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
+          [teamId, id, name, effectiveAgentType, effectiveModel, 0, null, workingDirectory, 'starting', Date.now(), metadata, apiKey || null, tokenId || null, domain || null]
         );
 
         // Derive agent_account from request address, or fall back to shared deployer key
@@ -1811,7 +1788,6 @@ export class AgentManagerDb {
           local: true,
           url,
           restap: `${url}/.well-known/restap.json`,
-          registry,
           metadata: finalMeta,
           // Info for CLI to spawn local agent process
           teamId,
@@ -1875,8 +1851,6 @@ export class AgentManagerDb {
         );
       }
 
-      const defaultReg = await this.getDefaultRegistry(teamId);
-      const reg: AgentRegistryId = registry && registry.chainId && registry.registryAddress ? registry : { ...defaultReg };
       const meta: AgentMetadata = {
         name,
         service_type: (metadata && metadata.service_type) || 'REST-AP',
@@ -1884,19 +1858,22 @@ export class AgentManagerDb {
         ...(metadata || {})
       };
 
+      // Extract domain from request body if provided
+      const reqDomain = (req.body as any).domain || null;
+
       await this.db.pool.query(
-        `INSERT INTO agents (team_id, id, name, type, model, port, endpoint, working_directory, status, created_at, registry, metadata)
-         VALUES ($1,$2,$3,$8,'external',0,$4,'','running',$5,$6,$7)
+        `INSERT INTO agents (team_id, id, name, type, model, port, endpoint, working_directory, status, created_at, metadata, domain)
+         VALUES ($1,$2,$3,$7,'external',0,$4,'','running',$5,$6,$8)
          ON CONFLICT (team_id, id)
          DO UPDATE SET name = EXCLUDED.name,
                        type = EXCLUDED.type,
                        endpoint = EXCLUDED.endpoint,
                        status = EXCLUDED.status,
-                       registry = EXCLUDED.registry,
                        metadata = EXCLUDED.metadata,
                        created_at = EXCLUDED.created_at,
+                       domain = COALESCE(EXCLUDED.domain, agents.domain),
                        deleted_at = NULL`,
-        [teamId, id, name, endpoint, Date.now(), reg, meta, type]
+        [teamId, id, name, endpoint, Date.now(), meta, type, reqDomain]
       );
 
       // Set agent_account from shared deployer key for display/identity purposes
@@ -1914,7 +1891,7 @@ export class AgentManagerDb {
         status: 'running',
         url: endpoint,
         restap: `${endpoint}/.well-known/restap.json`,
-        registry: reg,
+        domain: reqDomain,
         metadata: nextMeta
       });
     });
@@ -1924,14 +1901,12 @@ export class AgentManagerDb {
       const agent = await this.dbQueryAgentById(teamId, req.params.id);
       if (!agent) return res.status(404).json({ error: 'Agent not found' });
 
-      const { registry, metadata } = req.body || {};
-      const nextRegistry = registry ? { ...(agent.registry || {}), ...(registry || {}) } : agent.registry;
+      const { metadata } = req.body || {};
       const nextMetadata = metadata ? { ...(agent.metadata || {}), ...(metadata || {}) } : agent.metadata;
 
-      await this.db.pool.query(`UPDATE agents SET registry = $3, metadata = $4 WHERE team_id = $1 AND id = $2`, [
+      await this.db.pool.query(`UPDATE agents SET metadata = $3 WHERE team_id = $1 AND id = $2`, [
         teamId,
         agent.id,
-        nextRegistry,
         nextMetadata
       ]);
 
@@ -1939,28 +1914,25 @@ export class AgentManagerDb {
       if (server && agent.type === 'claude') {
         server.setIdentity({
           name: agent.name,
-          registry: nextRegistry,
           metadata: nextMetadata,
           tokenId: agent.token_id || undefined,
-          registry7930: agent.registry_7930 || undefined
+          domain: agent.domain || undefined
         });
       }
 
-      res.json({ id: agent.id, name: agent.name, registry: nextRegistry, metadata: nextMetadata });
+      res.json({ id: agent.id, name: agent.name, metadata: nextMetadata });
     });
 
     this.managementApp.post('/agents/by-name/:name/metadata', async (req, res) => {
       const { id: teamId } = await this.getTeam(req);
       const agent = await this.dbQueryAgentByNameMostRecent(teamId, req.params.name);
       if (!agent) return res.status(404).json({ error: 'Agent not found' });
-      const { registry, metadata } = req.body || {};
-      const nextRegistry = registry ? { ...(agent.registry || {}), ...(registry || {}) } : agent.registry;
+      const { metadata } = req.body || {};
       const nextMetadata = metadata ? { ...(agent.metadata || {}), ...(metadata || {}) } : agent.metadata;
 
-      await this.db.pool.query(`UPDATE agents SET registry = $3, metadata = $4 WHERE team_id = $1 AND id = $2`, [
+      await this.db.pool.query(`UPDATE agents SET metadata = $3 WHERE team_id = $1 AND id = $2`, [
         teamId,
         agent.id,
-        nextRegistry,
         nextMetadata
       ]);
 
@@ -1968,14 +1940,13 @@ export class AgentManagerDb {
       if (server && agent.type === 'claude') {
         server.setIdentity({
           name: agent.name,
-          registry: nextRegistry,
           metadata: nextMetadata,
           tokenId: agent.token_id || undefined,
-          registry7930: agent.registry_7930 || undefined
+          domain: agent.domain || undefined
         });
       }
 
-      res.json({ id: agent.id, name: agent.name, registry: nextRegistry, metadata: nextMetadata });
+      res.json({ id: agent.id, name: agent.name, metadata: nextMetadata });
     });
 
     // Note: Agent catalogs are managed by agents themselves via their /catalog endpoint
@@ -2004,7 +1975,7 @@ export class AgentManagerDb {
         }
 
         const fresh = await this.dbQueryAgentById(teamId, agent.id);
-        res.json({ ok: true, ...result, agent: { id: agent.id, name: agent.name, registry: fresh?.registry, registry7930: fresh?.registry_7930 } });
+        res.json({ ok: true, ...result, agent: { id: agent.id, name: agent.name, domain: fresh?.domain, tokenId: fresh?.token_id } });
       } catch (e: any) {
         res.status(500).json({ error: e?.message || String(e) });
       }
@@ -2032,7 +2003,7 @@ export class AgentManagerDb {
         }
 
         const fresh = await this.dbQueryAgentById(teamId, agent.id);
-        res.json({ ok: true, ...result, agent: { id: agent.id, name: agent.name, registry: fresh?.registry, registry7930: fresh?.registry_7930 } });
+        res.json({ ok: true, ...result, agent: { id: agent.id, name: agent.name, domain: fresh?.domain, tokenId: fresh?.token_id } });
       } catch (e: any) {
         res.status(500).json({ error: e?.message || String(e) });
       }
@@ -2177,9 +2148,9 @@ export class AgentManagerDb {
       let failed = 0;
 
       for (const agent of targets) {
-        if (agent.registry?.tokenId) {
+        if (agent.token_id || agent.domain) {
           skipped++;
-          results.push({ name: agent.name, id: agent.id, status: 'skipped', reason: 'already-registered', tokenId: agent.registry.tokenId });
+          results.push({ name: agent.name, id: agent.id, status: 'skipped', reason: 'already-registered', tokenId: agent.token_id, domain: agent.domain });
           continue;
         }
         if (agent.type === 'virtual' && !agent.metadata?.agent_account) {
@@ -2316,12 +2287,10 @@ export class AgentManagerDb {
                FROM agents
                WHERE team_id = $1
                  AND deleted_at IS NULL
-                 AND (registry->>'chainId') = $2
-                 AND LOWER(registry->>'registryAddress') = LOWER($3)
-                 AND (registry->>'tokenId') = $4
+                 AND token_id = $2
                ORDER BY created_at DESC
                LIMIT 1`,
-              [teamId, String(chainId), regAddr, tokenId]
+              [teamId, tokenId]
             );
 
             if (existing.rowCount && existing.rows[0]?.id) {
@@ -2337,12 +2306,12 @@ export class AgentManagerDb {
 
               await this.db.pool.query(
                 `UPDATE agents
-                 SET registry = $3,
+                 SET token_id = $3,
                      metadata = $4,
                      endpoint = CASE WHEN $5 = 'virtual' THEN $6 ELSE endpoint END,
                      deleted_at = NULL
                  WHERE team_id = $1 AND id = $2`,
-                [teamId, existingId, reg, mergedMeta, existingType, ra.endpoint || null]
+                [teamId, existingId, tokenId, mergedMeta, existingType, ra.endpoint || null]
               );
 
               // Clean up any previously-created onchain_* virtual row for the same token (from older pulls).
@@ -2359,16 +2328,16 @@ export class AgentManagerDb {
             // Otherwise upsert as a stable virtual id
             const id = `onchain_${chainId}_${regAddr}_${tokenId}`;
             await this.db.pool.query(
-              `INSERT INTO agents (team_id, id, name, type, model, port, endpoint, working_directory, status, created_at, registry, metadata)
+              `INSERT INTO agents (team_id, id, name, type, model, port, endpoint, working_directory, status, created_at, metadata, token_id)
                VALUES ($1,$2,$3,'virtual','external',0,$4,'','running',$5,$6,$7)
                ON CONFLICT (team_id, id)
                DO UPDATE SET name = EXCLUDED.name,
                              endpoint = EXCLUDED.endpoint,
                              status = EXCLUDED.status,
-                             registry = EXCLUDED.registry,
                              metadata = EXCLUDED.metadata,
+                             token_id = EXCLUDED.token_id,
                              deleted_at = NULL`,
-              [teamId, id, nameHint, ra.endpoint || null, Date.now(), reg, metadata]
+              [teamId, id, nameHint, ra.endpoint || null, Date.now(), metadata, tokenId]
             );
             discovery.upserted += 1;
           } catch (e: any) {
@@ -2515,18 +2484,17 @@ export class AgentManagerDb {
       let skipped = 0;
       let failed = 0;
 
+      const defaultReg = await this.getDefaultRegistry(teamId);
       for (const agent of agents) {
-        const chainId = agent.registry?.chainId;
-        const registryAddress = agent.registry?.registryAddress;
-        const tokenId = agent.registry?.tokenId;
-        if (!chainId || !registryAddress || !tokenId) {
+        const tokenId = agent.token_id;
+        if (!tokenId) {
           skipped++;
-          results.push({ name: agent.name, id: agent.id, status: 'skipped', reason: 'missing-chainId/registry/tokenId' });
+          results.push({ name: agent.name, id: agent.id, status: 'skipped', reason: 'missing-tokenId' });
           continue;
         }
 
         try {
-          const url = `${baseUrl}/api/agents/${chainId}/${registryAddress}/${tokenId}/metadata`;
+          const url = `${baseUrl}/api/agents/${defaultReg.chainId}/${defaultReg.registryAddress}/${tokenId}/metadata`;
           const resp = await fetch(url, {
             headers: indexerApiKey ? { Authorization: `Bearer ${indexerApiKey}` } : undefined
           });
@@ -2578,10 +2546,9 @@ export class AgentManagerDb {
           if (server && agent.type === 'claude') {
             server.setIdentity({
               name: agent.name,
-              registry: agent.registry,
               metadata: nextMetadata,
               tokenId: agent.token_id || undefined,
-              registry7930: agent.registry_7930 || undefined
+              domain: agent.domain || undefined
             });
           }
 
@@ -2941,7 +2908,7 @@ export class AgentManagerDb {
 
         if (matches.length > 1) {
           const matchList = matches.map(a => {
-            const domain = (a.metadata as any)?.idchain_domain || (a.registry as any)?.domain;
+            const domain = a.domain || (a.metadata as any)?.idchain_domain;
             const displayId = domain || a.name || a.id;
             return `  - ${displayId} (${a.status})`;
           }).join('\n');
@@ -2992,7 +2959,7 @@ export class AgentManagerDb {
 
         if (matches.length > 1) {
           const matchList = matches.map(a => {
-            const domain = (a.metadata as any)?.idchain_domain || (a.registry as any)?.domain;
+            const domain = a.domain || (a.metadata as any)?.idchain_domain;
             const displayId = domain || a.name || a.id;
             return `  - ${displayId} (${a.status})`;
           }).join('\n');
@@ -3695,22 +3662,20 @@ export class AgentManagerDb {
 
         if (subCmd === 'setid') {
           const agentName = args[1];
-          const chainId = args[2];
-          const registryAddr = args[3];
-          const tokenId = args[4];
-          if (!agentName || !chainId || !registryAddr) {
-            return { ok: false, error: 'Usage: /meta setid <agent> <chainId> <registryAddress> [tokenId]' };
+          const domainArg = args[2];
+          const tokenIdArg = args[3];
+          if (!agentName || !domainArg) {
+            return { ok: false, error: 'Usage: /meta setid <agent> <domain> [tokenId]' };
           }
           const agent = await this.dbQueryAgentByNameMostRecent(teamId, agentName);
           if (!agent) {
             return { ok: false, error: `Agent "${agentName}" not found` };
           }
-          const newRegistry = { chainId: parseInt(chainId), registryAddress: registryAddr, tokenId: tokenId || null };
           await this.db.pool.query(
-            `UPDATE agents SET registry = $3, token_id = $4 WHERE team_id = $1 AND id = $2`,
-            [teamId, agent.id, newRegistry, tokenId || null]
+            `UPDATE agents SET domain = $3, token_id = $4 WHERE team_id = $1 AND id = $2`,
+            [teamId, agent.id, domainArg, tokenIdArg || null]
           );
-          return { ok: true, result: { name: agent.name, registry: newRegistry } };
+          return { ok: true, result: { name: agent.name, domain: domainArg, tokenId: tokenIdArg || null } };
         }
 
         // /meta <agent> - show metadata
@@ -3728,7 +3693,7 @@ export class AgentManagerDb {
             name: agent.name,
             id: agent.id,
             tokenId: agent.token_id,
-            registry: agent.registry,
+            domain: agent.domain,
             metadata: agent.metadata
           }
         };

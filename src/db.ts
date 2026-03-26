@@ -297,14 +297,14 @@ export async function migrateDb(db: Db): Promise<void> {
     END $$;
   `);
 
-  // 8) Add token_id and registry_7930 columns for ERC-based agent identifiers
+  // 8) Add token_id and domain columns for ENS-based agent identifiers
   await db.pool.query(`ALTER TABLE agents ADD COLUMN IF NOT EXISTS token_id text;`);
-  await db.pool.query(`ALTER TABLE agents ADD COLUMN IF NOT EXISTS registry_7930 text;`);
+  await db.pool.query(`ALTER TABLE agents ADD COLUMN IF NOT EXISTS domain text;`);
 
   // 9) Index for token lookups
   await db.pool.query(`
-    CREATE INDEX IF NOT EXISTS agents_token_registry_idx
-    ON agents(token_id, registry_7930)
+    CREATE INDEX IF NOT EXISTS agents_token_idx
+    ON agents(token_id)
     WHERE token_id IS NOT NULL;
   `);
 
@@ -315,6 +315,16 @@ export async function migrateDb(db: Db): Promise<void> {
     WHERE registry->>'tokenId' IS NOT NULL
       AND token_id IS NULL;
   `);
+  await db.pool.query(`
+    UPDATE agents
+    SET domain = COALESCE(registry->>'domain', metadata->>'idchain_domain')
+    WHERE domain IS NULL
+      AND (registry->>'domain' IS NOT NULL OR metadata->>'idchain_domain' IS NOT NULL);
+  `);
+
+  // Drop legacy registry_7930 column and index if they exist
+  await db.pool.query(`DROP INDEX IF EXISTS agents_token_registry_idx;`);
+  await db.pool.query(`ALTER TABLE agents DROP COLUMN IF EXISTS registry_7930;`);
 
   // 11) Add api_key column for agent authentication
   await db.pool.query(`ALTER TABLE agents ADD COLUMN IF NOT EXISTS api_key text;`);

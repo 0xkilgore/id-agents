@@ -16,7 +16,6 @@ import {
   findProjectRoot as coreFindProjectRoot,
   readDotEnvFile as coreReadDotEnvFile,
 } from './core/index.js';
-import { encodeERC7930 } from './core/erc7930.js';
 
 const colors = {
   reset: '\x1b[0m',
@@ -3535,8 +3534,6 @@ async function registerAgentOnchain(agentName: string) {
       try {
         const identityPayload = {
           tokenId: data.tokenId,
-          registry: data.agent.registry,
-          registry7930: data.agent.registry7930,
           domain: fullDomain
         };
         const identityRes = await fetch(`${agentUrl}/identity`, {
@@ -3609,22 +3606,6 @@ async function listAgents(_showAll: boolean = false) {
       // Show alias if different from displayId (e.g., "coder" when name is ENS domain)
       if (agent.alias && agent.alias !== agent.name) {
         console.log(`   ${colors.gray}Alias:${colors.reset} ${agent.alias}`);
-      }
-      // Display registry as full ERC-7930 address
-      if (agent.registry7930) {
-        // Use pre-encoded ERC-7930 address
-        console.log(`   ${colors.gray}Registry:${colors.reset} ${agent.registry7930}`);
-      } else if (agent.registry?.chainId && agent.registry?.registryAddress) {
-        // Encode on the fly for backwards compatibility
-        try {
-          const registry7930 = encodeERC7930(agent.registry.chainId, agent.registry.registryAddress);
-          console.log(`   ${colors.gray}Registry:${colors.reset} ${registry7930}`);
-        } catch {
-          // Fallback to old format if encoding fails
-          const addr = String(agent.registry.registryAddress);
-          const shortAddr = addr.slice(0, 6) + '…' + addr.slice(-4);
-          console.log(`   ${colors.gray}Registry:${colors.reset} ${agent.registry.chainId}:${shortAddr}`);
-        }
       }
       // Show runtime if available, otherwise fall back to type
       const runtime = agent.metadata?.runtime || agent.type || 'claude';
@@ -4128,8 +4109,6 @@ async function deployFromConfig(filePath: string, args: string[] = []) {
                   try {
                     const identityPayload = {
                       tokenId: regData.tokenId,
-                      registry: regData.agent.registry,
-                      registry7930: regData.agent.registry7930,
                       domain: regDomain
                     };
                     const identityRes = await fetch(`${agentUrl}/identity`, {

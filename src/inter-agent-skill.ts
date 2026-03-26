@@ -368,20 +368,19 @@ export function withInterAgentSkill(
         name?: string;
         team?: string;
         project?: string; // deprecated, use team
-        registry?: { chainId: number; registryAddress: string; tokenId?: string };
         metadata?: Record<string, any>;
+        domain?: string;
       },
   options?: { lightweight?: boolean }
 ): string {
   const agentName = typeof identity === 'string' ? identity : identity?.name;
   // Support 'team' (new) and 'project' (legacy) for backwards compatibility
   const team = typeof identity === 'string' ? undefined : (identity?.team || identity?.project);
-  const registry = typeof identity === 'string' ? undefined : identity?.registry;
   const managerUrl = process.env.MANAGER_URL || 'http://localhost:4100';
 
   // Display identity: ENS domain after registration, local name before
   const domain = typeof identity === 'string' ? undefined
-    : ((identity as any)?.domain || identity?.metadata?.idchain_domain || (identity?.registry as any)?.domain);
+    : ((identity as any)?.domain || identity?.metadata?.idchain_domain);
   const displayIdentity = domain || agentName;
 
   // Use lightweight skill for non-Claude models (reduces tokens significantly)
@@ -400,8 +399,9 @@ export function withInterAgentSkill(
     ? `\n\n## Your Team\n\n**You are in team "${team}".** Your team files directory is at:\n\`\`\`\n/workspace/teams/${team}/\n\`\`\`\n\n**IMPORTANT**: When writing files to the team folder, always use this path: \`/workspace/teams/${team}/filename\`. All agents in your team can read and write files here.\n`
     : `\n\n## Your Team\n\nYou are part of a team. Check the manager (${managerUrl}/agents) to find your team name. Your team directory is at \`/workspace/teams/<team-name>/\`.\n`;
 
-  const registrySection = registry
-    ? `\n\n## Your Onchain Identity\n\nYou have an onchain identity in an AgentRegistry (ERC-6909):\n- chainId: ${registry.chainId}\n- registry: ${registry.registryAddress}\n- tokenId: ${registry.tokenId ? registry.tokenId : '(not registered yet)'}\n\nIf tokenId is not set, ask the manager to register you and/or check the manager's agent list (${managerUrl}/agents) to see your latest registry assignment.\n`
+  const identityDomain = typeof identity === 'string' ? undefined : (identity as any)?.domain;
+  const registrySection = identityDomain
+    ? `\n\n## Your Onchain Identity\n\nYour onchain identity is your ENS domain: **${identityDomain}**\nThe chain is encoded in the domain name (e.g., sep.xid.eth = Sepolia, base.xid.eth = Base).\n`
     : `\n\n## Your Onchain Identity\n\nYour onchain identity (chainId/registry/tokenId) may be managed by the manager. If you need it, ask the manager or check ${managerUrl}/agents.\n`;
 
   const newsFeedReminder = `\n\n## Important: Check Your News Feed\n\n**Before starting any new task or responding to a message, always check your news feed first.** Your news feed contains:\n- Incoming messages from other agents\n- Previous conversation history\n- Updates about completed tasks\n- Context about what you've been working on\n\nTo check your news feed, use:\n\`\`\`bash\ncurl -s "http://localhost:PORT/news?since=0" | jq\n\`\`\`\n\nOr use the \`talk-to-agent.sh\` script which automatically includes news feed context. Checking your news feed helps you maintain context and avoid repeating work.\n`;

@@ -115,7 +115,7 @@ async function startWorkerAgent(agentId?: string) {
 
   // Fetch full identity (including tokenId) from manager
   // Initialize with env vars as fallback (tokenId from ID_AGENT_TOKEN_ID)
-  let agentIdentity: { name?: string; team?: string; registry?: any; metadata?: any; tokenId?: string; registry7930?: string } = {
+  let agentIdentity: { name?: string; team?: string; metadata?: any; tokenId?: string; domain?: string } = {
     name: agentAlias,
     team: teamName,
     tokenId: agentTokenId  // Use env var tokenId as initial fallback
@@ -136,14 +136,13 @@ async function startWorkerAgent(agentId?: string) {
       console.log(`🔧 Manager returned: alias=${agentData.alias}, tokenId=${agentData.tokenId}, name=${agentData.name}`);
       // Use alias from response, or fall back to env var alias
       const fetchedAlias = agentData.alias || agentAlias;
-      const fetchedTokenId = agentData.tokenId || agentData.registry?.tokenId || agentTokenId;
+      const fetchedTokenId = agentData.tokenId || agentTokenId;
       agentIdentity = {
         name: fetchedAlias,  // Use just the alias, not the displayId (getDisplayId will construct it)
         team: teamName,
-        registry: agentData.registry,
         metadata: agentData.metadata,
         tokenId: fetchedTokenId,
-        registry7930: agentData.registry7930
+        domain: agentData.domain
       };
       console.log(`📋 Loaded identity: ${fetchedAlias}`);
     } else {

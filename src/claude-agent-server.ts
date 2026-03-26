@@ -157,7 +157,7 @@ export class ClaudeAgentServer {
   private sharedDirectory: string;
   private allowedTools: string[];
   private agentName: string | undefined;
-  private agentIdentity: { name?: string; team?: string; registry?: any; metadata?: any; tokenId?: string; registry7930?: string; domain?: string } | undefined;
+  private agentIdentity: { name?: string; team?: string; metadata?: any; tokenId?: string; domain?: string } | undefined;
   private maxNewsItems: number = 100; // Keep last 100 news items
   private newsCleanupInterval: NodeJS.Timeout;
   private httpServer: http.Server | undefined;
@@ -184,7 +184,7 @@ export class ClaudeAgentServer {
     allowedTools?: string[];
     port?: number;
     agentName?: string;
-    agentIdentity?: { name?: string; team?: string; network?: string; registry?: any; metadata?: any; tokenId?: string; registry7930?: string; domain?: string };
+    agentIdentity?: { name?: string; team?: string; network?: string; metadata?: any; tokenId?: string; domain?: string };
     db?: { db: Db; teamId: string; agentId: string };
   } = {}) {
     this.model = options.model || process.env.CLAUDE_MODEL || CLAUDE_MODELS.HAIKU;
@@ -1082,9 +1082,9 @@ export class ClaudeAgentServer {
     // Identity update endpoint - called by manager after onchain registration
     this.app.patch('/identity', express.json({ limit: '10kb' }), (req, res) => {
       try {
-        const { tokenId, registry, registry7930, metadata, domain } = req.body;
+        const { tokenId, metadata, domain } = req.body;
 
-        if (!tokenId && !registry && !registry7930 && !metadata && !domain) {
+        if (!tokenId && !metadata && !domain) {
           return res.status(400).json({ error: 'No identity fields provided' });
         }
 
@@ -1095,12 +1095,6 @@ export class ClaudeAgentServer {
         if (domain !== undefined && typeof domain !== 'string') {
           return res.status(400).json({ error: 'domain must be a string' });
         }
-        if (registry7930 !== undefined && typeof registry7930 !== 'string') {
-          return res.status(400).json({ error: 'registry7930 must be a string' });
-        }
-        if (registry !== undefined && (typeof registry !== 'object' || registry === null || Array.isArray(registry))) {
-          return res.status(400).json({ error: 'registry must be an object' });
-        }
         if (metadata !== undefined && (typeof metadata !== 'object' || metadata === null || Array.isArray(metadata))) {
           return res.status(400).json({ error: 'metadata must be an object' });
         }
@@ -1109,8 +1103,6 @@ export class ClaudeAgentServer {
         const updatedIdentity = {
           ...this.agentIdentity,
           ...(tokenId !== undefined && { tokenId }),
-          ...(registry !== undefined && { registry }),
-          ...(registry7930 !== undefined && { registry7930 }),
           ...(domain !== undefined && { domain }),
           ...(metadata !== undefined && { metadata: { ...this.agentIdentity?.metadata, ...metadata } })
         };
@@ -1125,7 +1117,7 @@ export class ClaudeAgentServer {
           identity: {
             name: this.agentName,
             tokenId: updatedIdentity.tokenId,
-            registry7930: updatedIdentity.registry7930
+            domain: updatedIdentity.domain
           }
         });
       } catch (err: any) {
@@ -1135,7 +1127,7 @@ export class ClaudeAgentServer {
     });
   }
 
-  public setIdentity(identity: { name?: string; team?: string; registry?: any; metadata?: any; tokenId?: string; registry7930?: string; domain?: string }) {
+  public setIdentity(identity: { name?: string; team?: string; metadata?: any; tokenId?: string; domain?: string }) {
     this.agentIdentity = identity;
     if (identity?.name) {
       this.agentName = identity.name;
