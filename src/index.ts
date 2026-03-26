@@ -5,7 +5,7 @@
  * A framework for running multiple Claude agents locally
  * with REST-AP interfaces for communication.
  *
- * @version 0.1.13-beta
+ * @version 0.1.14-beta
  * @license MIT
  */
 
