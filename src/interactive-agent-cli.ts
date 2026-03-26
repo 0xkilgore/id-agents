@@ -2762,30 +2762,24 @@ async function displayPendingQuestions(force: boolean = false) {
 
 // Display startup banner
 console.log(`
-${colors.bold}${colors.cyan}  ██╗██████╗       █████╗  ██████╗ ███████╗███╗   ██╗████████╗███████╗${colors.reset}
-${colors.bold}${colors.cyan}  ██║██╔══██╗     ██╔══██╗██╔════╝ ██╔════╝████╗  ██║╚══██╔══╝██╔════╝${colors.reset}
-${colors.bold}${colors.cyan}  ██║██║  ██║     ███████║██║  ███╗█████╗  ██╔██╗ ██║   ██║   ███████╗${colors.reset}
-${colors.bold}${colors.cyan}  ██║██║  ██║     ██╔══██║██║   ██║██╔══╝  ██║╚██╗██║   ██║   ╚════██║${colors.reset}
-${colors.bold}${colors.cyan}  ██║██████╔╝     ██║  ██║╚██████╔╝███████╗██║ ╚████║   ██║   ███████║${colors.reset}
-${colors.bold}${colors.cyan}  ╚═╝╚═════╝      ╚═╝  ╚═╝ ╚═════╝ ╚══════╝╚═╝  ╚═══╝   ╚═╝   ╚══════╝${colors.reset}
+${colors.bold}  ██╗██████╗       █████╗  ██████╗ ███████╗███╗   ██╗████████╗███████╗${colors.reset}
+${colors.bold}  ██║██╔══██╗     ██╔══██╗██╔════╝ ██╔════╝████╗  ██║╚══██╔══╝██╔════╝${colors.reset}
+${colors.bold}  ██║██║  ██║     ███████║██║  ███╗█████╗  ██╔██╗ ██║   ██║   ███████╗${colors.reset}
+${colors.bold}  ██║██║  ██║     ██╔══██║██║   ██║██╔══╝  ██║╚██╗██║   ██║   ╚════██║${colors.reset}
+${colors.bold}  ██║██████╔╝     ██║  ██║╚██████╔╝███████╗██║ ╚████║   ██║   ███████║${colors.reset}
+${colors.bold}  ╚═╝╚═════╝      ╚═╝  ╚═╝ ╚═════╝ ╚══════╝╚═╝  ╚═══╝   ╚═╝   ╚══════╝${colors.reset}
 
   ${colors.gray}v${PKG_INFO.version}  •  Multi-agent orchestration  •  ${PKG_INFO.license}${colors.reset}
   ${colors.gray}github.com/idchain-world/id-agents${colors.reset}
 `);
 
 server.start().then(async () => {
-  console.log(`${colors.green}✓${colors.reset} Agent ${colors.bold}"${name}"${colors.reset} running on port ${port}`);
-  console.log(`${colors.gray}  Catalog: http://localhost:${port}/.well-known/restap.json${colors.reset}\n`);
-
-  // Initialize admin API key
+  // Initialize admin API key (silent)
   adminApiKey = loadOrGenerateAdminKey();
-  console.log(`${colors.bold}🔐 Admin API Key:${colors.reset} ${colors.cyan}${adminApiKey}${colors.reset}`);
-  console.log(`${colors.gray}   (stored in ~/.id-agents/admin.key)${colors.reset}\n`);
 
   // Set up API key validator and command handler for remote access
   server.setApiKeyValidator(validateAdminKey);
   server.setCommandHandler(remoteCommandHandler);
-  console.log(`${colors.gray}   Remote endpoint: POST /remote (requires API key)${colors.reset}\n`);
 
   await registerWithManager();
   

@@ -605,8 +605,6 @@ export class InteractiveAgentServer extends EventEmitter {
   start() {
     return new Promise<void>((resolve) => {
       this.app.listen(this.port, '0.0.0.0', () => {
-        console.log(`🤖 Agent "${this.name}" listening on http://localhost:${this.port}`);
-        console.log(`📋 Catalog: http://localhost:${this.port}/.well-known/restap.json`);
         resolve();
       });
     });
