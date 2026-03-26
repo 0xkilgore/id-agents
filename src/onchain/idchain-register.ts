@@ -285,9 +285,9 @@ export async function setMultiChainAddresses(opts: {
       '--output', 'json',
     ];
 
-    // Add each coin-type:address pair
+    // Add each coinType=address pair
     for (let i = 0; i < coinTypes.length; i++) {
-      args.push('--addr', `${coinTypes[i]}:${addrs[i]}`);
+      args.push('--addr', `${coinTypes[i]}=${addrs[i]}`);
     }
 
     await execFileAsync('id-cli', args, {

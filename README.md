@@ -9,7 +9,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-**Version 0.1.21-beta**
+**Version 0.1.22-beta**
 
 A multi-agent orchestration platform built on the Claude Agent SDK.
 
@@ -159,6 +159,8 @@ When you run `npm run id-agents`, you're just running a normal Claude Code CLI s
 /news [-l] <agent>          # Check recent messages (-l for full content)
 /register <agent>           # Register agent onchain
 /status                     # Check agent status
+/update <agent> [--wallet|--name]  # Update agent properties
+/wallet <agent> [chain]     # Show agent wallet addresses
 /quit                       # Exit
 ```
 
