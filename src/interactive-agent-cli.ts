@@ -67,11 +67,11 @@ const HELP_ITEMS: Array<{ cmd: string; desc: string; indent?: boolean }> = [
   { cmd: '/register <agent>', desc: 'Register agent onchain' },
   { cmd: '/status', desc: 'Check agent status' },
   { cmd: '/update <agent> [--wallet <addr>] [--name <name>]', desc: 'Update agent properties' },
+  { cmd: '/wallet <agent> [chain]', desc: 'Show agent wallet address (chain: eip155:1, solana, etc.)' },
   { cmd: '/team', desc: 'Show current team' },
   { cmd: '/team <name>', desc: 'Switch to or create team' },
   { cmd: '/teams', desc: 'List all teams' },
   { cmd: '/team delete <name>', desc: 'Delete a team' },
-  { cmd: '/update <agent> [--wallet|--name]', desc: 'Update agent wallet or name' },
   { cmd: '/quit', desc: 'Exit' },
 ];
 
@@ -2383,6 +2383,68 @@ async function handleLine(line: string) {
     }
 
     await deleteAgent(target);
+    rl.prompt();
+    return;
+  }
+
+  // /wallet <agent> [chain] — show agent's OWS wallet address
+  if (input.startsWith('/wallet ')) {
+    const parts = input.substring('/wallet '.length).trim().split(/\s+/);
+    const agentName = parts[0];
+    const chain = parts[1] || 'eip155:1';
+
+    if (!agentName) {
+      console.log(`\n${colors.red}❌ Usage: /wallet <agent> [chain]${colors.reset}`);
+      console.log(`${colors.gray}  Examples: /wallet contracts eip155:11155111${colors.reset}`);
+      console.log(`${colors.gray}           /wallet contracts solana${colors.reset}`);
+      console.log(`${colors.gray}           /wallet contracts all${colors.reset}\n`);
+      rl.prompt();
+      return;
+    }
+
+    try {
+      const agent = await resolveAgent(agentName);
+      if (!agent) { rl.prompt(); return; }
+
+      const walletName = (agent as any).metadata?.ows_wallet;
+      if (!walletName) {
+        console.log(`\n${colors.yellow}⚠️  Agent "${agentName}" has no OWS wallet.${colors.reset}`);
+        console.log(`${colors.gray}  Create one with: ows wallet create --name ${activeTeam}-${agentName}${colors.reset}\n`);
+        rl.prompt();
+        return;
+      }
+
+      const { execFileSync } = await import('child_process');
+      const output = execFileSync('ows', ['wallet', 'list'], { encoding: 'utf8' });
+      const lines = output.split('\n');
+      let inWallet = false;
+      let found = false;
+      console.log(`\n${colors.bold}🔑 ${walletName}${colors.reset}`);
+      for (const line of lines) {
+        if (line.includes('Name:') && line.includes(walletName)) { inWallet = true; continue; }
+        if (inWallet && line.includes('Name:')) break;
+        if (inWallet && line.includes('→')) {
+          const trimmed = line.trim();
+          if (chain === 'all' || trimmed.startsWith(chain)) {
+            const match = trimmed.match(/(.+?)\s*→\s*(\S+)/);
+            if (match) {
+              console.log(`  ${colors.gray}${match[1].trim()}${colors.reset} → ${colors.bold}${match[2]}${colors.reset}`);
+              found = true;
+            }
+          }
+        }
+      }
+      if (!found) {
+        console.log(`${colors.yellow}  Chain "${chain}" not found. Try: /wallet ${agentName} all${colors.reset}`);
+      }
+      console.log('');
+    } catch (err: any) {
+      if (err.message?.includes('ENOENT')) {
+        console.log(`\n${colors.yellow}⚠️  OWS CLI not installed. Install with: npm install -g @open-wallet-standard/core${colors.reset}\n`);
+      } else {
+        console.log(`\n${colors.red}❌ Error: ${err.message}${colors.reset}\n`);
+      }
+    }
     rl.prompt();
     return;
   }
