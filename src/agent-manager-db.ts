@@ -4297,6 +4297,10 @@ export class AgentManagerDb {
       }
 
       // Set environment
+      // Look up OWS wallet name from agent metadata
+      const agentRow = await this.dbQueryAgentById(teamId, id);
+      const owsWallet = (agentRow?.metadata as any)?.ows_wallet || null;
+
       const localEnv: Record<string, string> = {
         ...process.env as Record<string, string>,
         ID_TEAM: teamName,
@@ -4304,7 +4308,8 @@ export class AgentManagerDb {
         ...(process.env.ID_AGENT_API_KEY && { ID_AGENT_API_KEY: process.env.ID_AGENT_API_KEY }),
         ...(process.env.ID_CONTROL_API_KEY && { ID_AGENT_API_KEY: process.env.ID_CONTROL_API_KEY }),
         ...(model && { CLAUDE_MODEL: model }),
-        ...(tokenId && { ID_AGENT_TOKEN_ID: tokenId })
+        ...(tokenId && { ID_AGENT_TOKEN_ID: tokenId }),
+        ...(owsWallet && { OWS_WALLET: owsWallet })
       };
 
       // Create log file
