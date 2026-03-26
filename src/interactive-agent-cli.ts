@@ -2391,7 +2391,7 @@ async function handleLine(line: string) {
   if (input.startsWith('/wallet ')) {
     const parts = input.substring('/wallet '.length).trim().split(/\s+/);
     const agentName = parts[0];
-    const chain = parts[1] || 'eip155:1';
+    const chain = parts[1] || 'all';
 
     if (!agentName) {
       console.log(`\n${colors.red}❌ Usage: /wallet <agent> [chain]${colors.reset}`);
