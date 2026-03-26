@@ -706,7 +706,8 @@ function handleWebSocketMessage(data: WebSocket.Data) {
 
     switch (message.type) {
       case 'connected':
-        console.log(`${colors.green}🔌 WebSocket connected to ${activeTeam}${colors.reset}`);
+        console.log(`\n${colors.green}🔌 WebSocket connected to ${activeTeam}${colors.reset}`);
+        rl.prompt();
         break;
 
       case 'news': {
@@ -767,7 +768,7 @@ function connectManagerWebSocket() {
     managerWs = new WebSocket(wsUrl);
 
     managerWs.on('open', () => {
-      console.log(`${colors.gray}🔌 Connected to manager${colors.reset}`);
+      // Silent connection — don't clutter the prompt
       // Stop polling if WebSocket is connected
       if (newsPollInterval) {
         clearInterval(newsPollInterval);
