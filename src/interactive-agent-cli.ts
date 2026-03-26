@@ -2804,9 +2804,6 @@ server.start().then(async () => {
     }
   }
   
-  console.log(`${colors.bold}📬 Listening for messages from other agents...${colors.reset}\n`);
-  printHelp();
-
   // Poll for new queries every 2 seconds
   setInterval(() => {
     displayPendingQuestions().catch(() => {});
@@ -2817,6 +2814,8 @@ server.start().then(async () => {
   
   updatePrompt();
   rl.prompt();
+  // Pre-fill /help so user sees it ready to press enter
+  rl.write('/help');
 });
 
 rl.on('line', handleLine);
