@@ -662,14 +662,16 @@ server.on('reply', (reply: IncomingReply) => {
     console.log(`${colors.gray}   (to: "${originalMsg.substring(0, 50)}${originalMsg.length > 50 ? '...' : ''}")${colors.reset}`);
   }
   console.log(`\n${reply.message}\n`);
-  process.stdout.write(`> [${name}@${activeServerName || activeTeam}] `);
+  updatePrompt();
+  rl.prompt();
 });
 
 // Handle incoming messages (not replies)
 server.on('message', (msg: { type: string; from: string; message: string; timestamp: number }) => {
   console.log(`\n${colors.cyan}📨 New message from ${msg.from}:${colors.reset}`);
   console.log(`\n${msg.message}\n`);
-  process.stdout.write(`> [${name}@${activeServerName || activeTeam}] `);
+  updatePrompt();
+  rl.prompt();
 });
 
 // Handle pending questions (from POST /news - allows manager to reply)
@@ -681,7 +683,8 @@ server.on('pending_question', (q: { query_id: string; from: string; message: str
   const preview = q.message.length > 200 ? q.message.substring(0, 200) + '...' : q.message;
   console.log(preview);
   console.log(`${colors.bold}${colors.yellow}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${colors.reset}\n`);
-  process.stdout.write(`> [${name}@${activeServerName || activeTeam}] `);
+  updatePrompt();
+  rl.prompt();
 });
 
 // ==================== WebSocket Connection to Manager ====================
