@@ -9,7 +9,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-**Version 0.1.22-beta**
+**Version 0.1.23-beta**
 
 A multi-agent orchestration platform built on the Claude Agent SDK.
 

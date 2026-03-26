@@ -179,13 +179,15 @@ export async function getAgentInfo(opts: {
  * Maps CAIP-2-style chain prefixes from OWS output to ENSIP-11 coin types.
  */
 const CHAIN_COIN_TYPES: Array<{ prefix: string; coinType: number; label: string }> = [
+  // EVM wildcard — one address covers all EVM chains (ENSIP-11)
   { prefix: 'eip155:1',        coinType: 2147483648, label: 'EVM wildcard' },    // 0x80000000
-  { prefix: 'bip122:',         coinType: 0,          label: 'Bitcoin' },
-  { prefix: 'cosmos:',         coinType: 118,        label: 'Cosmos' },
-  { prefix: 'tron:',           coinType: 195,        label: 'Tron' },
-  { prefix: 'ton:',            coinType: 607,        label: 'TON' },
-  { prefix: 'fil:',            coinType: 461,        label: 'Filecoin' },
-  { prefix: 'sui:',            coinType: 784,        label: 'Sui' },
+  // Non-EVM chains need special address encoding — TODO: add when id-cli supports bech32/base58
+  // { prefix: 'bip122:',         coinType: 0,          label: 'Bitcoin' },
+  // { prefix: 'cosmos:',         coinType: 118,        label: 'Cosmos' },
+  // { prefix: 'tron:',           coinType: 195,        label: 'Tron' },
+  // { prefix: 'ton:',            coinType: 607,        label: 'TON' },
+  // { prefix: 'fil:',            coinType: 461,        label: 'Filecoin' },
+  // { prefix: 'sui:',            coinType: 784,        label: 'Sui' },
 ];
 
 /**
@@ -298,7 +300,9 @@ export async function setMultiChainAddresses(opts: {
 
     console.log(`[ID Chain] Set ${set.length} addresses in one transaction: ${set.join(', ')}`);
   } catch (err: any) {
+    const stderr = err.stderr || err.stdout || '';
     console.warn(`[ID Chain] Failed to set addresses: ${err.message}`);
+    if (stderr) console.warn(`[ID Chain] stderr: ${stderr.slice(0, 500)}`);
     // Fall back to individual calls if batch fails
     set.length = 0;
     skipped.push('batch-failed');
