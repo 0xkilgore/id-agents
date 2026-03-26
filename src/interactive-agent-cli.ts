@@ -2163,7 +2163,7 @@ async function handleLine(line: string) {
       rl.prompt();
       return;
     }
-    const files = readdirSync(configsDir).filter((f: string) => (f.endsWith('.yaml') || f.endsWith('.yml')) && !f.endsWith('.example'));
+    const files = fs.readdirSync(configsDir).filter((f: string) => (f.endsWith('.yaml') || f.endsWith('.yml')) && !f.endsWith('.example'));
     if (files.length === 0) {
       console.log(`\n${colors.yellow}No config files found in configs/${colors.reset}\n`);
     } else {
