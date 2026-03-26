@@ -1159,9 +1159,8 @@ export class ClaudeAgentServer {
    */
   public getDisplayId(): string {
     // Prefer ENS domain name if available
-    const domain = (this.agentIdentity as any)?.domain ||
-                   this.agentIdentity?.metadata?.idchain_domain ||
-                   this.agentIdentity?.registry?.domain;
+    const domain = this.agentIdentity?.domain ||
+                   this.agentIdentity?.metadata?.idchain_domain;
     if (domain) {
       return domain;
     }

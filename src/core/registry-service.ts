@@ -192,7 +192,7 @@ export async function registerOnchain(
       data: {
         txHash: data.txHash,
         tokenId: data.tokenId,
-        domain: data.domain || data.agent?.registry?.domain
+        domain: data.domain || data.agent?.domain
       }
     };
   } catch (err: any) {

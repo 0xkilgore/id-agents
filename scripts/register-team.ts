@@ -1,6 +1,5 @@
 // Register Claude Code team members onchain via AgentRegistrar
 import { registerAgentOnchain } from '../src/onchain/agent-registry.js';
-import { encodeERC7930 } from '../src/core/erc7930.js';
 import { privateKeyToAccount, generatePrivateKey } from 'viem/accounts';
 import { writeFileSync, readFileSync, mkdirSync } from 'fs';
 import { join } from 'path';
@@ -44,7 +43,6 @@ async function main() {
         name,
       });
 
-      const erc7930 = encodeERC7930(chainId, result.registryAddress);
       const displayId = result.domain || name;
 
       results[name] = {
@@ -53,7 +51,7 @@ async function main() {
         registryAddress: result.registryAddress,
         wallet: account.address,
         privateKey,
-        erc7930,
+        domain: result.domain,
         displayId,
       };
 

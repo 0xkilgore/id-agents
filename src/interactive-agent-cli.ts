@@ -3246,7 +3246,7 @@ async function checkAgentStatus(longFormat: boolean = false) {
 
           // Token ID
           if (agent.tokenId) {
-            const tokenDisplay = agent.domain || agent.registry?.domain || agent.tokenId;
+            const tokenDisplay = agent.domain || agent.tokenId;
             console.log(`   ${colors.gray}Token ID:${colors.reset} ${tokenDisplay}`);
           }
 
@@ -3488,7 +3488,7 @@ async function registerAgentOnchain(agentName: string) {
       return;
     }
 
-    const currentDomain = agent?.registry?.domain ? String(agent.registry.domain) : (agent?.registry?.tokenId ? String(agent.registry.tokenId) : '');
+    const currentDomain = agent?.domain ? String(agent.domain) : (agent?.tokenId ? String(agent.tokenId) : '');
     if (currentDomain) {
       console.log(`\n${colors.yellow}⚠️  "${agentName}" already has an ID Chain registration (${currentDomain}).${colors.reset}`);
       console.log(
@@ -3520,13 +3520,10 @@ async function registerAgentOnchain(agentName: string) {
       return;
     }
     const data: any = await response.json();
-    const fullDomain = data.domain || data.agent?.registry?.domain || data.tokenId;
+    const fullDomain = data.domain || data.agent?.domain || data.tokenId;
     console.log(`\n${colors.green}✅ Agent "${agentName}" registered on ID Chain${colors.reset}`);
     console.log(`   ${colors.gray}Domain:${colors.reset} ${fullDomain}`);
     console.log(`   ${colors.gray}Transaction:${colors.reset} ${data.txHash}`);
-    if (data.agent?.registry) {
-      console.log(`   ${colors.gray}Chain:${colors.reset} ${data.agent.registry.chainId}`);
-    }
 
     // Push updated identity to the running agent
     const agentUrl = agent.internal_url || agent.url;
@@ -4026,7 +4023,7 @@ async function deployFromConfig(filePath: string, args: string[] = []) {
 
               if (regResponse.ok) {
                 const regData: any = await regResponse.json();
-                const regDomain = regData.domain || regData.agent?.registry?.domain || agent.name;
+                const regDomain = regData.domain || regData.agent?.domain || agent.name;
                 console.log(`   ${colors.green}✅ Registered: ${regDomain}${colors.reset}`);
                 console.log(`   ${colors.gray}   TX: ${regData.txHash}${colors.reset}`);
               } else {
@@ -4099,7 +4096,7 @@ async function deployFromConfig(filePath: string, args: string[] = []) {
 
               if (regResponse.ok) {
                 const regData: any = await regResponse.json();
-                const regDomain = regData.domain || regData.agent?.registry?.domain || result.name;
+                const regDomain = regData.domain || regData.agent?.domain || result.name;
                 console.log(`   ${colors.green}✅ Registered: ${regDomain}${colors.reset}`);
                 console.log(`   ${colors.gray}   TX: ${regData.txHash}${colors.reset}`);
 

@@ -492,11 +492,10 @@ export class AgentManagerDb {
   private async dbResolveAgents(teamId: string, ref: string): Promise<AgentRow[]> {
     try {
       const parsed = parseAgentRef(ref);
-      console.log(`[Resolve] Parsed "${ref}" -> alias="${parsed.alias}", tokenId="${parsed.tokenId}", registry="${parsed.registry}"`);
+      console.log(`[Resolve] Parsed "${ref}" -> alias="${parsed.alias}", tokenId="${parsed.tokenId}", domain="${parsed.domain}"`);
 
       // Build query based on what was provided
-      // Note: We check both token_id column AND registry->>'tokenId' for backwards compatibility
-      // Also cast to text to handle numeric JSONB values
+      // Build query based on what was provided
       let query: string;
       let params: any[];
 
@@ -1814,7 +1813,7 @@ export class AgentManagerDb {
 
     this.managementApp.post('/agents/register', async (req, res) => {
       const { id: teamId } = await this.getTeam(req);
-      const { id: requestedIdRaw, name, endpoint, registry, metadata, type: requestedTypeRaw } = req.body || {};
+      const { id: requestedIdRaw, name, endpoint, metadata, type: requestedTypeRaw } = req.body || {};
       if (!name || !endpoint) return res.status(400).json({ error: 'Missing name or endpoint' });
 
       const requestedId = typeof requestedIdRaw === 'string' ? requestedIdRaw.trim() : undefined;
@@ -2402,7 +2401,7 @@ export class AgentManagerDb {
                     workingDirectory,
                     sharedDirectory,
                     agentName: a.name,
-                    agentIdentity: { name: a.name, network: teamName, registry: { chainId: agent.chainId, registryAddress: agent.registryAddress, tokenId }, metadata: (a.metadata || {}) as any },
+                    agentIdentity: { name: a.name, network: teamName, tokenId, metadata: (a.metadata || {}) as any },
                     db: { db: this.db, teamId: teamId, agentId: a.id }
                   });
                   await server.start(a.port);
@@ -2439,9 +2438,9 @@ export class AgentManagerDb {
             };
 
             await this.db.pool.query(
-              `INSERT INTO agents (team_id, id, name, type, model, port, endpoint, working_directory, status, created_at, registry, metadata)
+              `INSERT INTO agents (team_id, id, name, type, model, port, endpoint, working_directory, status, created_at, metadata, token_id)
                VALUES ($1,$2,$3,'claude',$4,$5,$6,$7,'starting',$8,$9,$10)`,
-              [teamId, claudeId, handle, defaultModel, port, null, workingDirectory, Date.now(), { chainId: agent.chainId, registryAddress: agent.registryAddress, tokenId }, metadata]
+              [teamId, claudeId, handle, defaultModel, port, null, workingDirectory, Date.now(), metadata, tokenId]
             );
 
             const deployerAddress = this.getDeployerAddress();
@@ -2457,7 +2456,7 @@ export class AgentManagerDb {
               workingDirectory,
               sharedDirectory,
               agentName: handle,
-              agentIdentity: { name: handle, network: teamName, registry: { chainId: agent.chainId, registryAddress: agent.registryAddress, tokenId }, metadata: updatedMeta },
+              agentIdentity: { name: handle, network: teamName, tokenId, metadata: updatedMeta },
               db: { db: this.db, teamId: teamId, agentId: claudeId }
             });
             await server.start(port);
@@ -3250,11 +3249,10 @@ export class AgentManagerDb {
             // Insert into database
             console.log(`[Deploy] Storing agent: name=${agentName}, type=${agentType}, configType=${agentConfig.type}`);
             await this.db.pool.query(
-              `INSERT INTO agents (team_id, id, name, type, model, port, endpoint, working_directory, status, created_at, metadata, runtime, token_id, registry)
+              `INSERT INTO agents (team_id, id, name, type, model, port, endpoint, working_directory, status, created_at, metadata, runtime, token_id, domain)
                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'starting', $9, $10, $11, $12, $13)`,
               [effectiveTeamId, agentId, agentName, agentType, agentConfig.model || 'haiku', port, null, workingDirectory, Date.now(), metadata, effectiveRuntime,
-               configTokenId || null,
-               configDomain ? { chainId: onchain?.chainId || 11155111, registryAddress: onchain?.registryAddress, tokenId: configTokenId, domain: configDomain } : null]
+               configTokenId || null, configDomain || null]
             );
 
             // All agents run locally - set up database and let CLI spawn the process
@@ -3630,7 +3628,7 @@ export class AgentManagerDb {
       case 'meta': {
         // /meta <agent> - show metadata
         // /meta set <agent> <key> <value> - set metadata key
-        // /meta setid <agent> <chainId> <addr> [tokenId] - set registry id
+        // /meta setid <agent> <domain> [tokenId] - set agent identity
         const subCmd = args[0];
 
         if (subCmd === 'set') {

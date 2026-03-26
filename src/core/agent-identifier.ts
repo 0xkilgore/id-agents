@@ -14,21 +14,17 @@
  *   - gateway (unregistered, local name only)
  */
 
-import { isERC7930 } from './erc7930.js';
-
 export interface AgentIdentifier {
   alias?: string;       // Human readable local name (e.g., "gateway")
-  tokenId?: string;     // Token ID from registry (e.g., "agent-5")
-  registry?: string;    // ERC-7930 registry address
+  tokenId?: string;     // Token ID / label (e.g., "agent-5")
   domain?: string;      // ENS domain name (e.g., "agent-5.sep.xid.eth") - primary identity
 }
 
 export interface ParsedAgentRef {
   alias?: string;
   tokenId?: string;
-  registry?: string;
   domain?: string;      // ENS domain name if the ref looks like one
-  isFullySpecified: boolean;  // Has domain OR (tokenId + registry)
+  isFullySpecified: boolean;  // Has domain
 }
 
 /**
@@ -37,7 +33,6 @@ export interface ParsedAgentRef {
  * Supported formats:
  *   - agent-5.sep.xid.eth (ENS domain – primary)
  *   - myagent.eth (ENS domain – primary)
- *   - tokenId@registry (lookup by tokenId + registry)
  *   - alias (lookup by local name)
  */
 export function parseAgentRef(ref: string): ParsedAgentRef {
@@ -57,43 +52,15 @@ export function parseAgentRef(ref: string): ParsedAgentRef {
     };
   }
 
-  // ----- Format: contains "@" → tokenId@registry -----
-  const atIndex = trimmed.indexOf('@');
-  let identPart: string;
-  let registry: string | undefined;
-
-  if (atIndex !== -1) {
-    identPart = trimmed.slice(0, atIndex);
-    registry = trimmed.slice(atIndex + 1);
-
-    // Validate registry is ERC-7930
-    if (registry && !isERC7930(registry)) {
-      throw new Error(`Invalid ERC-7930 registry address: ${registry}`);
-    }
-  } else {
-    identPart = trimmed;
-  }
-
-  // The identifier is either a tokenId (if registry is present) or an alias
-  let alias: string | undefined;
-  let tokenId: string | undefined;
-
-  if (registry) {
-    // With registry: identPart is the tokenId
-    tokenId = identPart || undefined;
-  } else {
-    // No registry: identPart is an alias (local name)
-    alias = identPart || undefined;
-  }
+  // ----- Local alias -----
+  const alias = trimmed || undefined;
 
   // Validate alias format (URI label rules)
   if (alias && !isValidAlias(alias)) {
     throw new Error(`Invalid alias format: ${alias}. Must use only lowercase letters, digits, and hyphens, and not start or end with a hyphen.`);
   }
 
-  const isFullySpecified = !!tokenId && !!registry;
-
-  return { alias, tokenId, registry, isFullySpecified };
+  return { alias, isFullySpecified: false };
 }
 
 /**
@@ -114,8 +81,7 @@ export function formatAgentId(id: AgentIdentifier): string {
  * Returns the ENS domain if available, otherwise the local alias.
  */
 export function formatAgentDisplay(
-  id: AgentIdentifier,
-  options?: { showRegistry?: boolean }
+  id: AgentIdentifier
 ): string {
   if (id.domain) {
     return id.domain;
@@ -175,7 +141,6 @@ export interface AgentMatch {
   id: string;           // Internal UUID
   alias?: string;
   tokenId?: string;
-  registry?: string;
   domain?: string;      // ENS domain name
   port?: number;
   status?: string;
