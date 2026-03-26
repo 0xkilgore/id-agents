@@ -195,17 +195,25 @@ const CHAIN_COIN_TYPES: Array<{ prefix: string; coinType: number; label: string 
 function parseOwsWalletAddresses(walletName: string): Map<string, string> {
   const addresses = new Map<string, string>();
   try {
-    const output = execFileSync('ows', ['wallet', 'list', '--name', walletName], {
+    const output = execFileSync('ows', ['wallet', 'list'], {
       encoding: 'utf8',
       stdio: ['pipe', 'pipe', 'pipe'],
       timeout: 10000,
     });
 
-    // Parse lines like "eip155:1 → 0xabc123..." or "bip122:000...→ bc1q..."
+    // Find the section for our wallet and parse its addresses
+    let inWallet = false;
     for (const line of output.split('\n')) {
-      const match = line.trim().match(/^(.+?)\s*→\s*(\S+)/);
-      if (match) {
-        addresses.set(match[1].trim(), match[2].trim());
+      if (line.includes('Name:') && line.includes(walletName)) {
+        inWallet = true;
+        continue;
+      }
+      if (inWallet && line.includes('Name:')) break; // next wallet
+      if (inWallet) {
+        const match = line.trim().match(/^(.+?)\s*(?:\([^)]*\)\s*)?→\s*(\S+)/);
+        if (match) {
+          addresses.set(match[1].trim(), match[2].trim());
+        }
       }
     }
   } catch {
@@ -242,8 +250,11 @@ export async function setMultiChainAddresses(opts: {
     env.PRIVATE_KEY = opts.privateKey;
   }
 
+  // Build batch of coin types and addresses for a single set-record call
+  const coinTypes: string[] = [];
+  const addrs: string[] = [];
+
   for (const { prefix, coinType, label } of CHAIN_COIN_TYPES) {
-    // Find the first address whose chain key starts with this prefix
     let addr: string | undefined;
     for (const [key, value] of addresses) {
       if (key.startsWith(prefix)) {
@@ -257,27 +268,40 @@ export async function setMultiChainAddresses(opts: {
       continue;
     }
 
-    try {
-      const args = [
-        'set-addr', opts.name,
-        '--coin-type', String(coinType),
-        '--address', addr,
-        '--chain', idCliChain,
-        '--output', 'json',
-      ];
+    coinTypes.push(String(coinType));
+    addrs.push(addr);
+    set.push(label);
+  }
 
-      await execFileAsync('id-cli', args, {
-        encoding: 'utf8',
-        env,
-        timeout: 60000,
-      });
+  if (coinTypes.length === 0) {
+    return { set, skipped };
+  }
 
-      console.log(`[ID Chain] Set ${label} address (coinType ${coinType}): ${addr.slice(0, 10)}...`);
-      set.push(label);
-    } catch (err: any) {
-      console.warn(`[ID Chain] Failed to set ${label} address: ${err.message}`);
-      skipped.push(label);
+  // Use set-record to batch all addresses in one transaction
+  try {
+    const args = [
+      'set-record', opts.name,
+      '--chain', idCliChain,
+      '--output', 'json',
+    ];
+
+    // Add each coin-type:address pair
+    for (let i = 0; i < coinTypes.length; i++) {
+      args.push('--addr', `${coinTypes[i]}:${addrs[i]}`);
     }
+
+    await execFileAsync('id-cli', args, {
+      encoding: 'utf8',
+      env,
+      timeout: 120000,
+    });
+
+    console.log(`[ID Chain] Set ${set.length} addresses in one transaction: ${set.join(', ')}`);
+  } catch (err: any) {
+    console.warn(`[ID Chain] Failed to set addresses: ${err.message}`);
+    // Fall back to individual calls if batch fails
+    set.length = 0;
+    skipped.push('batch-failed');
   }
 
   return { set, skipped };

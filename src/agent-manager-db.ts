@@ -3911,7 +3911,7 @@ export class AgentManagerDb {
       }
 
       default:
-        return { ok: false, error: `Unknown command: ${action}. Available: agents, status, delete, ask, hey, news, register, deploy, agent, model, tasks, task, configs, registry, teams, team, keys, meta, pay, heartbeat, heartbeats, cancel, clear, list, update` };
+        return { ok: false, error: `Unknown command: ${action}. Available: agents, status, delete, ask, hey, news, register, deploy, agent, model, tasks, task, configs, registry, teams, team, keys, meta, pay, heartbeat, heartbeats, cancel, clear, list, update, sync-wallets` };
     }
   }
 
