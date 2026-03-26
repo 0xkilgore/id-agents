@@ -2155,6 +2155,29 @@ async function handleLine(line: string) {
     }
   }
 
+  if (input === '/deploy') {
+    // List available configs
+    const configsDir = path.resolve(process.cwd(), 'configs');
+    if (!existsSync(configsDir)) {
+      console.log(`\n${colors.yellow}No configs/ directory found.${colors.reset}\n`);
+      rl.prompt();
+      return;
+    }
+    const files = readdirSync(configsDir).filter((f: string) => (f.endsWith('.yaml') || f.endsWith('.yml')) && !f.endsWith('.example'));
+    if (files.length === 0) {
+      console.log(`\n${colors.yellow}No config files found in configs/${colors.reset}\n`);
+    } else {
+      console.log(`\n${colors.bold}Available configs:${colors.reset}`);
+      for (const f of files) {
+        const name = f.replace(/\.(yaml|yml)$/, '');
+        console.log(`  ${colors.cyan}/deploy ${name}${colors.reset}`);
+      }
+      console.log('');
+    }
+    rl.prompt();
+    return;
+  }
+
   if (input.startsWith('/deploy ')) {
     if (!(await checkManager())) {
       showManagerNotRunningError();
