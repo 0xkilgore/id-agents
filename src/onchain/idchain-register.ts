@@ -179,15 +179,13 @@ export async function getAgentInfo(opts: {
  * Maps CAIP-2-style chain prefixes from OWS output to ENSIP-11 coin types.
  */
 const CHAIN_COIN_TYPES: Array<{ prefix: string; coinType: number; label: string }> = [
-  // EVM wildcard — one address covers all EVM chains (ENSIP-11)
   { prefix: 'eip155:1',        coinType: 2147483648, label: 'EVM wildcard' },    // 0x80000000
-  // Non-EVM chains need special address encoding — TODO: add when id-cli supports bech32/base58
-  // { prefix: 'bip122:',         coinType: 0,          label: 'Bitcoin' },
-  // { prefix: 'cosmos:',         coinType: 118,        label: 'Cosmos' },
-  // { prefix: 'tron:',           coinType: 195,        label: 'Tron' },
-  // { prefix: 'ton:',            coinType: 607,        label: 'TON' },
-  // { prefix: 'fil:',            coinType: 461,        label: 'Filecoin' },
-  // { prefix: 'sui:',            coinType: 784,        label: 'Sui' },
+  { prefix: 'bip122:',         coinType: 0,          label: 'Bitcoin' },
+  { prefix: 'cosmos:',         coinType: 118,        label: 'Cosmos' },
+  { prefix: 'tron:',           coinType: 195,        label: 'Tron' },
+  { prefix: 'ton:',            coinType: 607,        label: 'TON' },
+  { prefix: 'fil:',            coinType: 461,        label: 'Filecoin' },
+  { prefix: 'sui:',            coinType: 784,        label: 'Sui' },
 ];
 
 /**
