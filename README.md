@@ -120,9 +120,9 @@ MANAGER_PORT=5000 npm run id-agents  # Same, via env var
 
 ### Mobile Access
 
-To manage your agent team from your phone, connect **the Claude Code CLI session running the manager** to a mobile device (e.g., via Telegram channels or the Claude Code app). This gives you a single entry point to your entire team — you send messages to the manager, and it routes them to the right agents.
+When you run `npm run id-agents`, you're just running a normal Claude Code CLI session. You can connect it to your phone the same way you'd connect any Claude Code session — via Telegram, the Claude Code app, or any other channel. There's nothing special about the manager; it's just a Claude Code session with your agent team available via `/remote`.
 
-> **Important:** Connect your mobile device to the manager session, not to individual agents. The manager is your central hub — it knows about all agents across all teams and handles routing, deployment, and status. See the [Claude Code docs](https://docs.anthropic.com/en/docs/claude-code) for mobile connection options.
+> **Tip:** Connect your mobile device to this session (the one running the manager), not to individual agent sessions. From here you can `/ask` any agent, `/deploy` teams, check `/status`, and manage everything through one connection. See the [Claude Code docs](https://docs.anthropic.com/en/docs/claude-code) for mobile setup options.
 
 ## REST-AP Protocol
 
