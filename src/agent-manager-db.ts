@@ -6,7 +6,7 @@
  * Runtime (live HTTP servers) still live in-memory, but all durable state is in the DB.
  *
  * Wallet management: agents no longer have individual wallets stored in the DB.
- * A shared deployer key (AGENT_PRIVATE_KEY from .env) is used for onchain operations.
+ * Onchain operations use either an OWS wallet (OWS_REGISTRAR_WALLET) or raw key (PRIVATE_KEY).
  * Per-agent keys can be provided via .env.<agent_id> files in the repo root.
  */
 
@@ -542,13 +542,30 @@ export class AgentManagerDb {
   }
 
   /**
-   * Get the shared deployer address derived from the AGENT_PRIVATE_KEY env var.
-   * All agents share a single deployer key for onchain operations.
-   * Per-agent keys are provided via .env.<agent_id> files at spawn time, not stored in DB.
+   * Get the shared deployer address.
+   * Uses OWS wallet if OWS_REGISTRAR_WALLET is set, otherwise derives from PRIVATE_KEY.
    */
   private getDeployerAddress(): string {
+    const owsWallet = process.env.OWS_REGISTRAR_WALLET;
+    if (owsWallet) {
+      try {
+        const output = execFileSync('ows', ['wallet', 'list'], { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'], timeout: 10000 });
+        let inWallet = false;
+        for (const line of output.split('\n')) {
+          if (line.includes('Name:') && line.includes(owsWallet)) { inWallet = true; continue; }
+          if (inWallet && line.includes('Name:')) break;
+          if (inWallet) {
+            const match = line.trim().match(/^eip155:1\s.*→\s*(0x[0-9a-fA-F]+)/);
+            if (match) return match[1];
+          }
+        }
+        throw new Error(`OWS wallet "${owsWallet}" not found or has no EVM address`);
+      } catch (err: any) {
+        throw new Error(`Failed to get deployer address from OWS: ${err.message}`);
+      }
+    }
     const pk = process.env.AGENT_PRIVATE_KEY || process.env.PRIVATE_KEY;
-    if (!pk) throw new Error('Missing env var AGENT_PRIVATE_KEY (or PRIVATE_KEY)');
+    if (!pk) throw new Error('Missing signer. Set OWS_REGISTRAR_WALLET or PRIVATE_KEY.');
     const account = privateKeyToAccount(pk as Hex);
     return account.address;
   }
@@ -595,8 +612,11 @@ export class AgentManagerDb {
   }
 
   private async registerOnchainAndUpdateAgent(teamId: string, agent: AgentRow): Promise<{ txHash: string; tokenId: string; domain: string }> {
-    const pk = process.env.ID_REGISTRAR_PRIVATE_KEY || process.env.PRIVATE_KEY;
-    if (!pk) throw new Error('Missing env var PRIVATE_KEY or ID_REGISTRAR_PRIVATE_KEY');
+    // Support OWS wallet or raw private key for signing
+    const owsRegistrarWallet = process.env.OWS_REGISTRAR_WALLET;
+    const pk = !owsRegistrarWallet ? (process.env.ID_REGISTRAR_PRIVATE_KEY || process.env.PRIVATE_KEY) : undefined;
+    if (!owsRegistrarWallet && !pk) throw new Error('Missing signer. Set OWS_REGISTRAR_WALLET or PRIVATE_KEY.');
+    const signerOpts = owsRegistrarWallet ? { wallet: owsRegistrarWallet } : { privateKey: pk! };
 
     const defaultReg = await this.getDefaultRegistry(teamId);
     const chainId = defaultReg.chainId;
@@ -624,7 +644,7 @@ export class AgentManagerDb {
     const result = await registerOnIdChain({
       chain,
       textRecords,
-      privateKey: pk,
+      ...signerOpts,
     });
 
     // ENSIP-26 agent endpoints can be set later via:
@@ -660,7 +680,7 @@ export class AgentManagerDb {
         sublabel,
         parent: result.label,
         chain,
-        privateKey: pk,
+        ...signerOpts,
       });
       newName = subResult.domain;
       metadata.idchain_domain = newName;
@@ -677,7 +697,7 @@ export class AgentManagerDb {
           name: newName,
           walletName: owsWalletName,
           chain,
-          privateKey: pk,
+          ...signerOpts,
         });
         if (addrResult.set.length > 0) {
           console.log(`[Register] Set ${addrResult.set.length} address records: ${addrResult.set.join(', ')}`);
@@ -3094,10 +3114,12 @@ export class AgentManagerDb {
 
       case 'sync-wallets': {
         // Set multi-chain wallet addresses for all registered agents
-        const pk = process.env.ID_REGISTRAR_PRIVATE_KEY || process.env.PRIVATE_KEY;
-        if (!pk) {
-          return { ok: false, error: 'Missing env var PRIVATE_KEY or ID_REGISTRAR_PRIVATE_KEY' };
+        const owsRegWallet = process.env.OWS_REGISTRAR_WALLET;
+        const syncPk = !owsRegWallet ? (process.env.ID_REGISTRAR_PRIVATE_KEY || process.env.PRIVATE_KEY) : undefined;
+        if (!owsRegWallet && !syncPk) {
+          return { ok: false, error: 'Missing signer. Set OWS_REGISTRAR_WALLET or PRIVATE_KEY.' };
         }
+        const syncSignerOpts = owsRegWallet ? { wallet: owsRegWallet } : { privateKey: syncPk! };
 
         const defaultReg = await this.getDefaultRegistry(teamId);
         const chainNames: Record<number, string> = { 8453: 'base', 1: 'eth', 10: 'op', 42161: 'arb', 11155111: 'sepolia' };
@@ -3129,7 +3151,7 @@ export class AgentManagerDb {
               name: domain,
               walletName: owsWallet,
               chain,
-              privateKey: pk,
+              ...syncSignerOpts,
             });
             synced++;
             results.push({ name: agent.name, domain, status: 'synced', set: addrResult.set, skipped: addrResult.skipped });

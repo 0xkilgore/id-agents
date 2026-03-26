@@ -14,6 +14,17 @@ import { promisify } from 'util';
 
 const execFileAsync = promisify(execFile);
 
+/** Build env for id-cli, setting either OWS_WALLET or PRIVATE_KEY. */
+function buildIdCliEnv(opts: { privateKey?: string; wallet?: string }): Record<string, string> {
+  const env: Record<string, string> = { ...process.env } as Record<string, string>;
+  if (opts.wallet) {
+    env.OWS_WALLET = opts.wallet;
+  } else if (opts.privateKey) {
+    env.PRIVATE_KEY = opts.privateKey;
+  }
+  return env;
+}
+
 export interface IdChainRegisterResult {
   domain: string;       // e.g. "agent-10.base.xid.eth"
   label: string;        // e.g. "agent-10"
@@ -36,6 +47,7 @@ export async function registerOnIdChain(opts: {
   chain?: string;
   textRecords?: Record<string, string>;
   privateKey?: string;
+  wallet?: string;
 }): Promise<IdChainRegisterResult> {
   const chain = opts.chain || 'base';
   const args = ['register', '--chain', chain, '--output', 'json'];
@@ -46,10 +58,7 @@ export async function registerOnIdChain(opts: {
     }
   }
 
-  const env: Record<string, string> = { ...process.env } as Record<string, string>;
-  if (opts.privateKey) {
-    env.PRIVATE_KEY = opts.privateKey;
-  }
+  const env = buildIdCliEnv(opts);
 
   console.log(`[ID Chain] Registering agent on ${chain} via id-cli...`);
 
@@ -82,6 +91,7 @@ export async function setAgentEndpoints(opts: {
   name: string;
   chain?: string;
   privateKey?: string;
+  wallet?: string;
   mcp?: string;
   a2a?: string;
   web?: string;
@@ -95,10 +105,7 @@ export async function setAgentEndpoints(opts: {
   if (opts.web) args.push('--web', opts.web);
   if (opts.context) args.push('--context', opts.context);
 
-  const env: Record<string, string> = { ...process.env } as Record<string, string>;
-  if (opts.privateKey) {
-    env.PRIVATE_KEY = opts.privateKey;
-  }
+  const env = buildIdCliEnv(opts);
 
   console.log(`[ID Chain] Setting endpoints on ${opts.name}...`);
 
@@ -130,6 +137,7 @@ export async function createSubnameOnIdChain(opts: {
   parent: string;
   chain?: string;
   privateKey?: string;
+  wallet?: string;
   owner?: string;
 }): Promise<{ domain: string; txHash: string }> {
   const chain = opts.chain || 'base';
@@ -137,10 +145,7 @@ export async function createSubnameOnIdChain(opts: {
 
   if (opts.owner) args.push('--owner', opts.owner);
 
-  const env: Record<string, string> = { ...process.env } as Record<string, string>;
-  if (opts.privateKey) {
-    env.PRIVATE_KEY = opts.privateKey;
-  }
+  const env = buildIdCliEnv(opts);
 
   const { stdout } = await execFileAsync('id-cli', args, {
     encoding: 'utf8',
@@ -235,6 +240,7 @@ export async function setMultiChainAddresses(opts: {
   walletName: string;
   chain?: string;
   privateKey?: string;
+  wallet?: string;
 }): Promise<{ set: string[]; skipped: string[] }> {
   const set: string[] = [];
   const skipped: string[] = [];
@@ -245,10 +251,7 @@ export async function setMultiChainAddresses(opts: {
   }
 
   const idCliChain = opts.chain || 'base';
-  const env: Record<string, string> = { ...process.env } as Record<string, string>;
-  if (opts.privateKey) {
-    env.PRIVATE_KEY = opts.privateKey;
-  }
+  const env = buildIdCliEnv(opts);
 
   // Build batch of coin types and addresses for a single set-record call
   const coinTypes: string[] = [];
