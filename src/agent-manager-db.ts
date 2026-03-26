@@ -2074,6 +2074,41 @@ export class AgentManagerDb {
       }
     });
 
+    // PATCH /agents/:id/metadata — update agent properties (wallet, name, etc.)
+    this.managementApp.patch('/agents/:id/metadata', async (req, res) => {
+      try {
+        const { id: teamId } = await this.getTeam(req);
+        const agent = await this.dbQueryAgentById(teamId, req.params.id);
+        if (!agent) return res.status(404).json({ error: 'Agent not found' });
+
+        const { wallet, name: newName } = req.body;
+        const updates: string[] = [];
+        const params: any[] = [teamId, agent.id];
+        let paramIdx = 3;
+
+        if (wallet) {
+          const metadata = { ...(agent.metadata as any || {}), wallet_address: wallet };
+          updates.push(`metadata = $${paramIdx++}`);
+          params.push(metadata);
+        }
+        if (newName) {
+          updates.push(`name = $${paramIdx++}`);
+          params.push(newName);
+        }
+
+        if (updates.length === 0) return res.status(400).json({ error: 'No updates provided' });
+
+        await this.db.pool.query(
+          `UPDATE agents SET ${updates.join(', ')} WHERE team_id = $1 AND id = $2`,
+          params
+        );
+
+        res.json({ ok: true, updated: Object.keys(req.body) });
+      } catch (err: any) {
+        res.status(500).json({ error: err.message });
+      }
+    });
+
     this.managementApp.delete('/agents/:id', async (req, res) => {
       const { id: teamId } = await this.getTeam(req);
       const agent = await this.dbQueryAgentById(teamId, req.params.id);
@@ -3238,6 +3273,13 @@ export class AgentManagerDb {
               metadata.alias = agentConfig.name;
             }
 
+            // Auto-create OWS wallet if ows CLI is available
+            const owsWallet = this.getOrCreateAgentWallet(effectiveTeamName, agentConfig.name);
+            if (owsWallet) {
+              metadata.ows_wallet = owsWallet.walletName;
+              metadata.ows_address = owsWallet.address;
+            }
+
             // Insert into database
             console.log(`[Deploy] Storing agent: name=${agentName}, type=${agentType}, configType=${agentConfig.type}`);
             await this.db.pool.query(
@@ -3788,8 +3830,57 @@ export class AgentManagerDb {
         };
       }
 
+      case 'update': {
+        // /update <agent> --wallet <address> --name <newname>
+        const agentName = args[0];
+        if (!agentName) {
+          return { ok: false, error: 'Usage: /update <agent> [--wallet <address>] [--name <newname>]' };
+        }
+
+        const matches = await this.dbResolveAgents(teamId, agentName);
+        if (matches.length === 0) {
+          return { ok: false, error: `Agent "${agentName}" not found` };
+        }
+        if (matches.length > 1) {
+          return { ok: false, error: `Multiple agents match "${agentName}". Be more specific.` };
+        }
+        const agent = matches[0];
+        const updates: string[] = [];
+        const newMetadata = { ...agent.metadata };
+
+        // Parse --wallet and --name flags
+        for (let i = 1; i < args.length; i++) {
+          if (args[i] === '--wallet' && args[i + 1]) {
+            const walletAddr = args[i + 1];
+            newMetadata.ows_address = walletAddr;
+            updates.push(`wallet → ${walletAddr}`);
+            i++;
+          } else if (args[i] === '--name' && args[i + 1]) {
+            const newName = args[i + 1];
+            await this.db.pool.query(
+              `UPDATE agents SET name = $3 WHERE team_id = $1 AND id = $2`,
+              [teamId, agent.id, newName]
+            );
+            newMetadata.alias = newMetadata.alias || agent.name;
+            updates.push(`name → ${newName}`);
+            i++;
+          }
+        }
+
+        if (updates.length === 0) {
+          return { ok: false, error: 'Nothing to update. Use --wallet <address> or --name <newname>' };
+        }
+
+        await this.db.pool.query(
+          `UPDATE agents SET metadata = $3 WHERE team_id = $1 AND id = $2`,
+          [teamId, agent.id, newMetadata]
+        );
+
+        return { ok: true, result: { message: `Updated ${agent.name}: ${updates.join(', ')}` } };
+      }
+
       default:
-        return { ok: false, error: `Unknown command: ${action}. Available: agents, status, delete, ask, hey, news, register, deploy, agent, model, tasks, task, configs, registry, teams, team, keys, meta, pay, heartbeat, heartbeats, cancel, clear, list` };
+        return { ok: false, error: `Unknown command: ${action}. Available: agents, status, delete, ask, hey, news, register, deploy, agent, model, tasks, task, configs, registry, teams, team, keys, meta, pay, heartbeat, heartbeats, cancel, clear, list, update` };
     }
   }
 
@@ -4159,6 +4250,61 @@ export class AgentManagerDb {
   }
 
   /**
+   * Check if the OWS (Open Wallet Standard) CLI is installed and on PATH.
+   */
+  private checkOwsInstalled(): boolean {
+    try {
+      execFileSync('ows', ['--version'], { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Get or create an OWS wallet for an agent.
+   * Returns { walletName, address } or null if OWS is not installed or creation fails.
+   */
+  private getOrCreateAgentWallet(team: string, agentName: string): { walletName: string; address: string } | null {
+    if (!this.checkOwsInstalled()) return null;
+    const walletName = `${team}-${agentName}`;
+    try {
+      // Try to get existing wallet first
+      const existing = execFileSync('ows', ['wallet', 'get', '--name', walletName], { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
+      if (existing) {
+        // Parse address from output (expect JSON or address string)
+        try {
+          const parsed = JSON.parse(existing);
+          const address = parsed.address || parsed.ethAddress || existing;
+          console.log(`[OWS] Found existing wallet "${walletName}": ${address}`);
+          return { walletName, address: String(address) };
+        } catch {
+          // Output is raw address string
+          console.log(`[OWS] Found existing wallet "${walletName}": ${existing}`);
+          return { walletName, address: existing };
+        }
+      }
+    } catch {
+      // Wallet doesn't exist yet, create it
+    }
+    try {
+      const output = execFileSync('ows', ['wallet', 'create', '--name', walletName], { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
+      try {
+        const parsed = JSON.parse(output);
+        const address = parsed.address || parsed.ethAddress || output;
+        console.log(`[OWS] Created wallet "${walletName}": ${address}`);
+        return { walletName, address: String(address) };
+      } catch {
+        console.log(`[OWS] Created wallet "${walletName}": ${output}`);
+        return { walletName, address: output };
+      }
+    } catch (err: any) {
+      console.warn(`[OWS] Failed to create wallet "${walletName}": ${err.message}`);
+      return null;
+    }
+  }
+
+  /**
    * Spawn a local agent process on the server.
    * Used by executeRemoteCommand to start agents server-side.
    */
@@ -4197,31 +4343,6 @@ export class AgentManagerDb {
         ...(model && { CLAUDE_MODEL: model }),
         ...(tokenId && { ID_AGENT_TOKEN_ID: tokenId })
       };
-
-      // Load per-agent .env file if it exists
-      // Try .env.<name>.<address> first (stable across deploys), then .env.<id> (legacy)
-      const repoRoot = path.resolve(__dirname, '..');
-      const agentEnvFile = (address && existsSync(path.join(repoRoot, `.env.${name}.${address}`)))
-        ? path.join(repoRoot, `.env.${name}.${address}`)
-        : path.join(repoRoot, `.env.${id}`);
-      if (existsSync(agentEnvFile)) {
-        try {
-          const envContent = readFileSync(agentEnvFile, 'utf-8');
-          for (const line of envContent.split('\n')) {
-            const trimmed = line.trim();
-            if (!trimmed || trimmed.startsWith('#')) continue;
-            const eqIdx = trimmed.indexOf('=');
-            if (eqIdx > 0) {
-              const key = trimmed.slice(0, eqIdx).trim();
-              const val = trimmed.slice(eqIdx + 1).trim();
-              localEnv[key] = val;
-            }
-          }
-          console.log(`[Manager] Loaded per-agent env from ${agentEnvFile}`);
-        } catch (envErr: any) {
-          console.warn(`[Manager] Failed to read per-agent env ${agentEnvFile}: ${envErr.message}`);
-        }
-      }
 
       // Create log file
       const logFile = `/tmp/${name}.log`;

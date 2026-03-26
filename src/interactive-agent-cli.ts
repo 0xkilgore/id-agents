@@ -67,10 +67,12 @@ const HELP_ITEMS: Array<{ cmd: string; desc: string; indent?: boolean }> = [
   { cmd: '/news [-l] <agent>', desc: 'Check recent messages (-l for full content)' },
   { cmd: '/register <agent>', desc: 'Register agent onchain' },
   { cmd: '/status', desc: 'Check agent status' },
+  { cmd: '/update <agent> [--wallet <addr>] [--name <name>]', desc: 'Update agent properties' },
   { cmd: '/team', desc: 'Show current team' },
   { cmd: '/team <name>', desc: 'Switch to or create team' },
   { cmd: '/teams', desc: 'List all teams' },
   { cmd: '/team delete <name>', desc: 'Delete a team' },
+  { cmd: '/update <agent> [--wallet|--name]', desc: 'Update agent wallet or name' },
   { cmd: '/quit', desc: 'Exit' },
 ];
 
@@ -2386,6 +2388,37 @@ async function handleLine(line: string) {
     return;
   }
 
+  if (input.startsWith('/update ')) {
+    if (!(await checkManager())) {
+      showManagerNotRunningError();
+      rl.prompt();
+      return;
+    }
+    const updateArgs = input.substring(8).trim();
+    if (!updateArgs) {
+      console.log(`\n${colors.red}❌ Usage: /update <agent> [--wallet <address>] [--name <newname>]${colors.reset}\n`);
+      rl.prompt();
+      return;
+    }
+    try {
+      const resp = await managerFetch('/remote', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ command: `/update ${updateArgs}` })
+      });
+      const data = await resp.json() as any;
+      if (!resp.ok || !data.ok) {
+        console.log(`\n${colors.red}❌ ${data.error || 'Update failed'}${colors.reset}\n`);
+      } else {
+        console.log(`\n${colors.green}✅ ${data.result?.message || 'Agent updated'}${colors.reset}\n`);
+      }
+    } catch (e: any) {
+      console.log(`\n${colors.red}❌ Error: ${e?.message || String(e)}${colors.reset}\n`);
+    }
+    rl.prompt();
+    return;
+  }
+
   if (input === '/registry') {
     if (!(await checkManager())) {
       showManagerNotRunningError();
@@ -2470,6 +2503,55 @@ async function handleLine(line: string) {
       return;
     }
     await setRegistrarAddress(registrarAddress);
+    rl.prompt();
+    return;
+  }
+
+  // /update <agent> [--wallet <addr>] [--name <newname>]
+  if (input.startsWith('/update ')) {
+    if (!(await checkManager())) {
+      showManagerNotRunningError();
+      rl.prompt();
+      return;
+    }
+    const parts = input.substring('/update '.length).trim().split(/\s+/);
+    const agentName = parts[0];
+    if (!agentName) {
+      console.log(`\n${colors.red}❌ Usage: /update <agent> [--wallet <addr>] [--name <newname>]${colors.reset}\n`);
+      rl.prompt();
+      return;
+    }
+    const updates: Record<string, string> = {};
+    for (let i = 1; i < parts.length; i++) {
+      if (parts[i] === '--wallet' && parts[i + 1]) { updates.wallet = parts[++i]; }
+      else if (parts[i] === '--name' && parts[i + 1]) { updates.name = parts[++i]; }
+    }
+    if (Object.keys(updates).length === 0) {
+      console.log(`\n${colors.yellow}No updates specified. Use --wallet <addr> or --name <newname>${colors.reset}\n`);
+      rl.prompt();
+      return;
+    }
+    try {
+      const agent = await resolveAgent(agentName);
+      if (!agent) { rl.prompt(); return; }
+      const resp = await managerFetch(`/agents/${encodeURIComponent(agent.id)}/metadata`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(updates)
+      });
+      if (resp.ok) {
+        console.log(`\n${colors.green}✓ Updated ${agentName}${colors.reset}`);
+        for (const [k, v] of Object.entries(updates)) {
+          console.log(`  ${colors.gray}${k}: ${v}${colors.reset}`);
+        }
+        console.log('');
+      } else {
+        const text = await resp.text();
+        console.log(`\n${colors.red}❌ Update failed: ${text}${colors.reset}\n`);
+      }
+    } catch (err: any) {
+      console.log(`\n${colors.red}❌ Error: ${err.message}${colors.reset}\n`);
+    }
     rl.prompt();
     return;
   }

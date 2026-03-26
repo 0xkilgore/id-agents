@@ -81,6 +81,7 @@ ID Agents enables autonomous AI agents to run as local processes, communicate vi
 - **Claude Code CLI** — install from [claude.ai/code](https://claude.ai/code) and run `claude login` in your terminal
 - **Claude Pro or Max plan** (agents use your Claude Code subscription — no API key needed)
 - **[id-cli](https://github.com/idchain-world/id-cli)** (optional, for onchain agent registration via `/register`)
+- **[OWS CLI](https://github.com/anthropics/ows)** (optional, for automatic agent wallet creation via Open Wallet Standard)
 
 > **Important:** You must be logged into Claude Code CLI before starting ID Agents. Run `claude login` in your terminal and complete the authentication. If you use Claude Code in VS Code, you still need to log in via the terminal — open VS Code's integrated terminal and run `claude login` there.
 
