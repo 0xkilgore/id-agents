@@ -118,6 +118,12 @@ MANAGER_PORT=5000 npm run id-agents  # Same, via env var
 /ask coder1 Write a hello world function
 ```
 
+### Mobile Access
+
+To manage your agent team from your phone, connect **the Claude Code CLI session running the manager** to a mobile device (e.g., via Telegram channels or the Claude Code app). This gives you a single entry point to your entire team — you send messages to the manager, and it routes them to the right agents.
+
+> **Important:** Connect your mobile device to the manager session, not to individual agents. The manager is your central hub — it knows about all agents across all teams and handles routing, deployment, and status. See the [Claude Code docs](https://docs.anthropic.com/en/docs/claude-code) for mobile connection options.
+
 ## REST-AP Protocol
 
 [REST-AP (REST Agent Protocol)](https://github.com/nxt3d/rest-ap) defines how agents communicate ([local docs](./docs/protocol/rest-ap.md)):
