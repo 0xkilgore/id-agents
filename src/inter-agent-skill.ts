@@ -355,10 +355,12 @@ curl -s -X PATCH http://localhost:$PORT/catalog \\
 `;
 
 /**
- * Helper to inject inter-agent communication skill into agent prompt
- * @param basePrompt The user's prompt/message
- * @param identity Agent identity info
- * @param options.lightweight Use shorter skill for non-Claude models (default: false)
+ * Helper to inject inter-agent communication skill into agent prompt.
+ *
+ * Skills are now file-based — deployed to each agent's .claude/skills/ folder
+ * at deploy time (see deploySkillsToAgent in agent-manager-db.ts).
+ * This function is kept as a thin passthrough for backward compatibility
+ * with non-Claude models that use the lightweight inline skill.
  */
 export function withInterAgentSkill(
   basePrompt: string,
@@ -367,52 +369,28 @@ export function withInterAgentSkill(
     | {
         name?: string;
         team?: string;
-        project?: string; // deprecated, use team
+        project?: string;
         metadata?: Record<string, any>;
         domain?: string;
       },
   options?: { lightweight?: boolean }
 ): string {
-  const agentName = typeof identity === 'string' ? identity : identity?.name;
-  // Support 'team' (new) and 'project' (legacy) for backwards compatibility
-  const team = typeof identity === 'string' ? undefined : (identity?.team || identity?.project);
-  const managerUrl = process.env.MANAGER_URL || 'http://localhost:4100';
-
-  // Display identity: ENS domain after registration, local name before
-  const domain = typeof identity === 'string' ? undefined
-    : ((identity as any)?.domain || identity?.metadata?.idchain_domain);
-  const displayIdentity = domain || agentName;
-
-  // Use lightweight skill for non-Claude models (reduces tokens significantly)
+  // Lightweight mode for non-Claude models: still inject inline (no .claude/skills/ support)
   if (options?.lightweight) {
+    const agentName = typeof identity === 'string' ? identity : identity?.name;
+    const team = typeof identity === 'string' ? undefined : (identity?.team || identity?.project);
+    const domain = typeof identity === 'string' ? undefined
+      : ((identity as any)?.domain || identity?.metadata?.idchain_domain);
+    const displayIdentity = domain || agentName;
+
     const lightSkill = INTER_AGENT_SKILL_LIGHT
       .replace(/\{\{AGENT_NAME\}\}/g, displayIdentity || 'unknown')
       .replace(/\{\{TEAM_NAME\}\}/g, team || 'default');
     return `${lightSkill}\n\n---\n\n${basePrompt}`;
   }
 
-  const agentNameSection = agentName
-    ? `\n\n## Your Identity\n\n**Your name is "${displayIdentity}".** This is your agent identifier in the network. When someone asks "who are you?" or "what is your name?", respond with "${displayIdentity}", not "Claude Code" or "Claude".\n\nWhen communicating with other agents using the \`talk-to-agent.sh\` script, you can optionally include your name as the third parameter to identify yourself.\n`
-    : '';
-
-  const teamSection = team
-    ? `\n\n## Your Team\n\n**You are in team "${team}".** Your team files directory is at:\n\`\`\`\n/workspace/teams/${team}/\n\`\`\`\n\n**IMPORTANT**: When writing files to the team folder, always use this path: \`/workspace/teams/${team}/filename\`. All agents in your team can read and write files here.\n`
-    : `\n\n## Your Team\n\nYou are part of a team. Check the manager (${managerUrl}/agents) to find your team name. Your team directory is at \`/workspace/teams/<team-name>/\`.\n`;
-
-  const identityDomain = typeof identity === 'string' ? undefined : (identity as any)?.domain;
-  const registrySection = identityDomain
-    ? `\n\n## Your Onchain Identity\n\nYour onchain identity is your ENS domain: **${identityDomain}**\nThe chain is encoded in the domain name (e.g., sep.xid.eth = Sepolia, base.xid.eth = Base).\n`
-    : `\n\n## Your Onchain Identity\n\nYour onchain identity (chainId/registry/tokenId) may be managed by the manager. If you need it, ask the manager or check ${managerUrl}/agents.\n`;
-
-  const newsFeedReminder = `\n\n## Important: Check Your News Feed\n\n**Before starting any new task or responding to a message, always check your news feed first.** Your news feed contains:\n- Incoming messages from other agents\n- Previous conversation history\n- Updates about completed tasks\n- Context about what you've been working on\n\nTo check your news feed, use:\n\`\`\`bash\ncurl -s "http://localhost:PORT/news?since=0" | jq\n\`\`\`\n\nOr use the \`talk-to-agent.sh\` script which automatically includes news feed context. Checking your news feed helps you maintain context and avoid repeating work.\n`;
-
-  const catalogSkillSection = `\n\n${CATALOG_SKILL}`;
-
-  return `${INTER_AGENT_SKILL}${agentNameSection}${teamSection}${registrySection}${newsFeedReminder}${catalogSkillSection}
-
----
-
-${basePrompt}`;
+  // For Claude models: skills are loaded from .claude/skills/ files — just pass through
+  return basePrompt;
 }
 
 /**

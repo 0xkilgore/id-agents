@@ -3312,42 +3312,16 @@ export class AgentManagerDb {
             if (owsWallet) {
               metadata.ows_wallet = owsWallet.walletName;
               metadata.ows_address = owsWallet.address;
-
-              // Write wallet skill into the agent's .claude/skills/ folder
-              try {
-                const skillDir = path.join(workingDirectory, '.claude', 'skills');
-                if (!existsSync(skillDir)) mkdirSync(skillDir, { recursive: true });
-                const walletSkill = `# Wallet Skill
-
-You have an OWS (Open Wallet Standard) wallet named **"${owsWallet.walletName}"**.
-
-It holds addresses for multiple blockchains derived from a single mnemonic.
-
-## View your addresses
-
-\`\`\`bash
-ows wallet list 2>/dev/null | awk '/Name:.*${owsWallet.walletName}/{found=1} found && /Name:/ && !/Name:.*${owsWallet.walletName}/{exit} found'
-\`\`\`
-
-## Chains supported
-
-| Chain | Example format |
-|-------|---------------|
-| Ethereum/EVM | 0x... (works on Base, Optimism, Arbitrum, etc.) |
-| Bitcoin | bc1... |
-| Cosmos | cosmos1... |
-| Tron | T... |
-| TON | UQ... |
-| Filecoin | f1... |
-| Sui | 0x... (64 bytes) |
-
-When asked for your wallet address, run the command above and report the relevant chain address.
-`;
-                writeFileSync(path.join(skillDir, 'wallet.md'), walletSkill);
-              } catch (err: any) {
-                console.warn(`[Deploy] Could not write wallet skill: ${err.message}`);
-              }
             }
+
+            // Deploy skills to agent's .claude/skills/ folder
+            this.deploySkillsToAgent(workingDirectory, {
+              DISPLAY_NAME: configDomain || agentConfig.name,
+              TEAM: effectiveTeamName,
+              ONCHAIN_IDENTITY: configDomain
+                ? `Your onchain identity is your ENS domain: **${configDomain}**\nThe chain is encoded in the domain name (e.g., sep.xid.eth = Sepolia, base.xid.eth = Base).`
+                : '',
+            }, { hasWallet: !!owsWallet });
 
             // Insert into database
             console.log(`[Deploy] Storing agent: name=${agentName}, type=${agentType}, configType=${agentConfig.type}`);
@@ -4374,6 +4348,61 @@ When asked for your wallet address, run the command above and report the relevan
     } catch (err: any) {
       console.warn(`[OWS] Failed to create wallet "${walletName}": ${err.message}`);
       return null;
+    }
+  }
+
+  /**
+   * Deploy skill files from skills/ templates to an agent's .claude/skills/ folder.
+   * Reads skill.md from each skill directory, substitutes {{VAR}} placeholders,
+   * and writes to the agent's working directory.
+   */
+  // Skills that get deployed to each agent's .claude/skills/ folder.
+  // Other skills in skills/ are operational tools (admin-control, local-agent, etc.)
+  // and are not deployed automatically.
+  private static DEPLOY_SKILLS = ['identity', 'inter-agent', 'catalog', 'wallet'];
+
+  /**
+   * Deploy skill files from skills/ templates to an agent's .claude/skills/ folder.
+   * Uses standard Claude Code skill format: .claude/skills/<name>/SKILL.md
+   * Substitutes {{VAR}} placeholders with deploy-time values.
+   */
+  private deploySkillsToAgent(
+    workDir: string,
+    vars: Record<string, string>,
+    opts: { hasWallet?: boolean } = {}
+  ): void {
+    try {
+      const skillsSource = path.resolve(__dirname, '..', 'skills');
+      if (!existsSync(skillsSource)) return;
+
+      let deployed = 0;
+
+      for (const skillName of AgentManagerDb.DEPLOY_SKILLS) {
+        const skillFile = path.join(skillsSource, skillName, 'SKILL.md');
+        if (!existsSync(skillFile)) continue;
+
+        // Skip wallet skill if agent has no wallet
+        if (skillName === 'wallet' && !opts.hasWallet) continue;
+
+        let content = readFileSync(skillFile, 'utf8');
+
+        // Substitute {{VAR}} placeholders
+        for (const [key, value] of Object.entries(vars)) {
+          content = content.replace(new RegExp(`\\{\\{${key}\\}\\}`, 'g'), value);
+        }
+
+        // Write to .claude/skills/<name>/SKILL.md (standard Claude Code format)
+        const targetSkillDir = path.join(workDir, '.claude', 'skills', skillName);
+        if (!existsSync(targetSkillDir)) mkdirSync(targetSkillDir, { recursive: true });
+        writeFileSync(path.join(targetSkillDir, 'SKILL.md'), content);
+        deployed++;
+      }
+
+      if (deployed > 0) {
+        console.log(`[Deploy] Copied ${deployed} skills to ${path.basename(workDir)}/.claude/skills/`);
+      }
+    } catch (err: any) {
+      console.warn(`[Deploy] Could not deploy skills: ${err.message}`);
     }
   }
 
