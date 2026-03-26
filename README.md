@@ -157,13 +157,33 @@ MANAGER_PORT=5000 npm run id-agents  # Same, via env var
 
 ## Remote API
 
-The Manager exposes a `/remote` endpoint for programmatic CLI-like access:
+The Manager exposes a `/remote` endpoint that lets any external tool — including another Claude Code session — interact with your agent team programmatically. This is how you manage agents from outside the interactive CLI.
+
+**From a terminal or script:**
 
 ```bash
 curl -X POST http://localhost:4100/remote \
   -H "Content-Type: application/json" \
   -d '{"command":"/agents"}'
 ```
+
+**From another Claude Code session:** If you're working in Claude Code on a different project, you can dispatch tasks to your agent team by calling the `/remote` endpoint via Bash. For example, ask your contracts agent to review code:
+
+```bash
+curl -s -X POST http://localhost:4100/remote \
+  -H "Content-Type: application/json" \
+  -d '{"command":"/ask contracts Review the latest changes to IDRegistry.sol"}'
+```
+
+Then check for the reply:
+
+```bash
+curl -s -X POST http://localhost:4100/remote \
+  -H "Content-Type: application/json" \
+  -d '{"command":"/news contracts"}'
+```
+
+This means any Claude Code instance on the same machine can coordinate with your agent team — dispatching work, checking results, and managing the fleet without switching to the interactive CLI.
 
 **Available Commands:**
 - `/agent <name> rebuild` - Rebuild a single agent
@@ -172,6 +192,7 @@ curl -X POST http://localhost:4100/remote \
 - `/ask <name> <message>` - Send message to agent
 - `/clear [agent]` - Clear session
 - `/delete <name>` - Delete agent
+- `/deploy` - List available configs
 - `/deploy <config>` - Deploy agents from YAML config
 - `/news [-l] <name>` - Check recent messages
 - `/register <name>` - Register agent onchain
