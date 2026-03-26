@@ -4300,35 +4300,42 @@ export class AgentManagerDb {
     if (!this.checkOwsInstalled()) return null;
     const walletName = `${team}-${agentName}`;
     try {
-      // Try to get existing wallet first
-      const existing = execFileSync('ows', ['wallet', 'get', '--name', walletName], { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
-      if (existing) {
-        // Parse address from output (expect JSON or address string)
-        try {
-          const parsed = JSON.parse(existing);
-          const address = parsed.address || parsed.ethAddress || existing;
-          console.log(`[OWS] Found existing wallet "${walletName}": ${address}`);
-          return { walletName, address: String(address) };
-        } catch {
-          // Output is raw address string
-          console.log(`[OWS] Found existing wallet "${walletName}": ${existing}`);
-          return { walletName, address: existing };
+      // Check if wallet exists by parsing `ows wallet list` output
+      const listOutput = execFileSync('ows', ['wallet', 'list'], { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] });
+      let found = false;
+      let ethAddress = '';
+      let inWallet = false;
+      for (const line of listOutput.split('\n')) {
+        if (line.includes('Name:') && line.includes(walletName)) {
+          inWallet = true;
+          found = true;
+          continue;
+        }
+        if (inWallet && line.includes('Name:')) break;
+        if (inWallet) {
+          const match = line.trim().match(/^eip155:1\s.*→\s*(0x[0-9a-fA-F]+)/);
+          if (match) ethAddress = match[1];
         }
       }
+      if (found && ethAddress) {
+        console.log(`[OWS] Found existing wallet "${walletName}": ${ethAddress}`);
+        return { walletName, address: ethAddress };
+      }
     } catch {
-      // Wallet doesn't exist yet, create it
+      // ows wallet list failed, try creating
     }
     try {
       const output = execFileSync('ows', ['wallet', 'create', '--name', walletName], { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
-      try {
-        const parsed = JSON.parse(output);
-        const address = parsed.address || parsed.ethAddress || output;
-        console.log(`[OWS] Created wallet "${walletName}": ${address}`);
-        return { walletName, address: String(address) };
-      } catch {
-        console.log(`[OWS] Created wallet "${walletName}": ${output}`);
-        return { walletName, address: output };
+      // Parse EVM address from create output
+      for (const line of output.split('\n')) {
+        const match = line.trim().match(/eip155:1\s.*→\s*(0x[0-9a-fA-F]+)/);
+        if (match) {
+          console.log(`[OWS] Created wallet "${walletName}": ${match[1]}`);
+          return { walletName, address: match[1] };
+        }
       }
+      console.log(`[OWS] Created wallet "${walletName}" (no EVM address found in output)`);
+      return { walletName, address: '' };
     } catch (err: any) {
       console.warn(`[OWS] Failed to create wallet "${walletName}": ${err.message}`);
       return null;
