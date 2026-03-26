@@ -3312,6 +3312,41 @@ export class AgentManagerDb {
             if (owsWallet) {
               metadata.ows_wallet = owsWallet.walletName;
               metadata.ows_address = owsWallet.address;
+
+              // Write wallet skill into the agent's .claude/skills/ folder
+              try {
+                const skillDir = path.join(workingDirectory, '.claude', 'skills');
+                if (!existsSync(skillDir)) mkdirSync(skillDir, { recursive: true });
+                const walletSkill = `# Wallet Skill
+
+You have an OWS (Open Wallet Standard) wallet named **"${owsWallet.walletName}"**.
+
+It holds addresses for multiple blockchains derived from a single mnemonic.
+
+## View your addresses
+
+\`\`\`bash
+ows wallet list 2>/dev/null | awk '/Name:.*${owsWallet.walletName}/{found=1} found && /Name:/ && !/Name:.*${owsWallet.walletName}/{exit} found'
+\`\`\`
+
+## Chains supported
+
+| Chain | Example format |
+|-------|---------------|
+| Ethereum/EVM | 0x... (works on Base, Optimism, Arbitrum, etc.) |
+| Bitcoin | bc1... |
+| Cosmos | cosmos1... |
+| Tron | T... |
+| TON | UQ... |
+| Filecoin | f1... |
+| Sui | 0x... (64 bytes) |
+
+When asked for your wallet address, run the command above and report the relevant chain address.
+`;
+                writeFileSync(path.join(skillDir, 'wallet.md'), walletSkill);
+              } catch (err: any) {
+                console.warn(`[Deploy] Could not write wallet skill: ${err.message}`);
+              }
             }
 
             // Insert into database
