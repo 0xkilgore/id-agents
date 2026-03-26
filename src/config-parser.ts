@@ -39,6 +39,7 @@ export interface AgentSpec {
   apiKey?: string;                    // API key for authenticating requests to this agent
   requireAuth?: boolean;              // Require API key authentication for /talk endpoint
   plugins?: PluginConfig[];           // Skill plugins
+  skills?: string[];                  // Skills to deploy (names match skills/<name>/SKILL.md)
   allowedTools?: string[];
   resources?: ResourceConfig;
   register?: boolean;                 // Auto-register onchain after deploy
@@ -82,6 +83,7 @@ export interface DeployConfig {
     claudeMdFile?: string;              // Path to default claudeMd file (relative to config)
     requireAuth?: boolean;              // Require API key auth for all agents
     plugins?: PluginConfig[];           // Skill plugins
+    skills?: string[];                  // Default skills for all agents
     allowedTools?: string[];
     resources?: ResourceConfig;
     local?: boolean;                    // Run all agents locally by default
@@ -506,6 +508,12 @@ export function mergeDefaults(agent: AgentSpec, defaults: DeployConfig['defaults
     const agentPluginNames = new Set((merged.plugins || []).map(p => p.name));
     const defaultPluginsToAdd = defaults.plugins.filter(p => !agentPluginNames.has(p.name));
     merged.plugins = [...(merged.plugins || []), ...defaultPluginsToAdd];
+  }
+
+  // Skills: merge (agent skills added to defaults, deduped)
+  if (defaults.skills && defaults.skills.length > 0) {
+    const allSkills = new Set([...defaults.skills, ...(merged.skills || [])]);
+    merged.skills = [...allSkills];
   }
 
   // AllowedTools: agent overrides defaults entirely

@@ -3315,7 +3315,8 @@ export class AgentManagerDb {
             }
 
             // Deploy skills to agent's .claude/skills/ folder
-            this.deploySkillsToAgent(workingDirectory, {
+            const agentSkills: string[] = agentConfig.skills || [];
+            this.deploySkillsToAgent(workingDirectory, agentSkills, {
               DISPLAY_NAME: configDomain || agentConfig.name,
               TEAM: effectiveTeamName,
               ONCHAIN_IDENTITY: configDomain
@@ -4356,30 +4357,33 @@ export class AgentManagerDb {
    * Reads skill.md from each skill directory, substitutes {{VAR}} placeholders,
    * and writes to the agent's working directory.
    */
-  // Skills that get deployed to each agent's .claude/skills/ folder.
-  // Other skills in skills/ are operational tools (admin-control, local-agent, etc.)
-  // and are not deployed automatically.
-  private static DEPLOY_SKILLS = ['identity', 'inter-agent', 'catalog', 'wallet'];
-
   /**
    * Deploy skill files from skills/ templates to an agent's .claude/skills/ folder.
    * Uses standard Claude Code skill format: .claude/skills/<name>/SKILL.md
+   *
+   * Skills are specified in the YAML config (defaults.skills + per-agent skills).
+   * Plugins can also bundle skills in their own skills/ subdirectory.
    * Substitutes {{VAR}} placeholders with deploy-time values.
    */
   private deploySkillsToAgent(
     workDir: string,
+    skillNames: string[],
     vars: Record<string, string>,
     opts: { hasWallet?: boolean } = {}
   ): void {
+    if (skillNames.length === 0) return;
     try {
       const skillsSource = path.resolve(__dirname, '..', 'skills');
       if (!existsSync(skillsSource)) return;
 
       let deployed = 0;
 
-      for (const skillName of AgentManagerDb.DEPLOY_SKILLS) {
+      for (const skillName of skillNames) {
         const skillFile = path.join(skillsSource, skillName, 'SKILL.md');
-        if (!existsSync(skillFile)) continue;
+        if (!existsSync(skillFile)) {
+          console.warn(`[Deploy] Skill "${skillName}" not found at ${skillFile}`);
+          continue;
+        }
 
         // Skip wallet skill if agent has no wallet
         if (skillName === 'wallet' && !opts.hasWallet) continue;
