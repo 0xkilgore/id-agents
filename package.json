@@ -27,7 +27,7 @@
     "claude:server": "npm run build && node dist/start-claude-server.js",
     "claude:manager": "npm run build && node dist/start-agent-manager.js",
     "claude:talk": "npm run build && node dist/claude-restap-cli.js",
-    "id-agents": "npm run build --silent && node dist/interactive-agent-cli.js",
+    "id-agents": "tsc 2>/dev/null; node dist/interactive-agent-cli.js",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:claude": "npm run build && node dist/test-claude-agent.js",
