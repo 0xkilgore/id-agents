@@ -22,7 +22,7 @@ import { type Address, type Hex } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
 import yaml from 'js-yaml';
 import { ClaudeAgentServer } from './claude-agent-server.js';
-import { registerOnIdChain, createSubnameOnIdChain } from './onchain/idchain-register.js';
+import { registerOnIdChain, createSubnameOnIdChain, setMultiChainAddresses } from './onchain/idchain-register.js';
 import { type Db, getOrCreateTeamId } from './db.js';
 import fetch from 'node-fetch';
 import type { PluginConfig, DeployConfig, HeartbeatConfig } from './config-parser.js';
@@ -667,6 +667,24 @@ export class AgentManagerDb {
       console.log(`[Register] Subname created: ${newName} (tx: ${subResult.txHash})`);
     } catch (subErr: any) {
       console.warn(`[Register] Subname creation failed: ${subErr.message}. Using base domain: ${result.domain}`);
+    }
+
+    // Set multi-chain address records if agent has an OWS wallet
+    const owsWalletName = (metadata as any).ows_wallet;
+    if (owsWalletName) {
+      try {
+        const addrResult = await setMultiChainAddresses({
+          name: newName,
+          walletName: owsWalletName,
+          chain,
+          privateKey: pk,
+        });
+        if (addrResult.set.length > 0) {
+          console.log(`[Register] Set ${addrResult.set.length} address records: ${addrResult.set.join(', ')}`);
+        }
+      } catch (addrErr: any) {
+        console.warn(`[Register] Multi-chain address setting failed: ${addrErr.message}`);
+      }
     }
 
     await this.db.pool.query(

@@ -9,7 +9,7 @@
  * different NFT contract directly via viem.
  */
 
-import { execFile } from 'child_process';
+import { execFile, execFileSync } from 'child_process';
 import { promisify } from 'util';
 
 const execFileAsync = promisify(execFile);
@@ -172,4 +172,113 @@ export async function getAgentInfo(opts: {
 
   const parsed = JSON.parse(stdout);
   return parsed.data;
+}
+
+/**
+ * ENSIP-11 coin types for multi-chain address records.
+ * Maps CAIP-2-style chain prefixes from OWS output to ENSIP-11 coin types.
+ */
+const CHAIN_COIN_TYPES: Array<{ prefix: string; coinType: number; label: string }> = [
+  { prefix: 'eip155:1',        coinType: 2147483648, label: 'EVM wildcard' },    // 0x80000000
+  { prefix: 'bip122:',         coinType: 0,          label: 'Bitcoin' },
+  { prefix: 'cosmos:',         coinType: 118,        label: 'Cosmos' },
+  { prefix: 'tron:',           coinType: 195,        label: 'Tron' },
+  { prefix: 'ton:',            coinType: 607,        label: 'TON' },
+  { prefix: 'fil:',            coinType: 461,        label: 'Filecoin' },
+  { prefix: 'sui:',            coinType: 784,        label: 'Sui' },
+];
+
+/**
+ * Parse addresses from `ows wallet list` output for a specific wallet.
+ * Returns a map of CAIP-2 chain prefix → address.
+ */
+function parseOwsWalletAddresses(walletName: string): Map<string, string> {
+  const addresses = new Map<string, string>();
+  try {
+    const output = execFileSync('ows', ['wallet', 'list', '--name', walletName], {
+      encoding: 'utf8',
+      stdio: ['pipe', 'pipe', 'pipe'],
+      timeout: 10000,
+    });
+
+    // Parse lines like "eip155:1 → 0xabc123..." or "bip122:000...→ bc1q..."
+    for (const line of output.split('\n')) {
+      const match = line.trim().match(/^(.+?)\s*→\s*(\S+)/);
+      if (match) {
+        addresses.set(match[1].trim(), match[2].trim());
+      }
+    }
+  } catch {
+    // OWS not installed or wallet not found — skip silently
+  }
+  return addresses;
+}
+
+/**
+ * Set multi-chain address records on a registered ENS name.
+ * Reads addresses from an OWS wallet and calls `id-cli set-addr` for each
+ * supported chain (ENSIP-11 coin types).
+ *
+ * Skips silently if OWS is not installed, wallet has no addresses,
+ * or id-cli set-addr fails for a given chain.
+ */
+export async function setMultiChainAddresses(opts: {
+  name: string;
+  walletName: string;
+  chain?: string;
+  privateKey?: string;
+}): Promise<{ set: string[]; skipped: string[] }> {
+  const set: string[] = [];
+  const skipped: string[] = [];
+
+  const addresses = parseOwsWalletAddresses(opts.walletName);
+  if (addresses.size === 0) {
+    return { set, skipped: ['no-addresses'] };
+  }
+
+  const idCliChain = opts.chain || 'base';
+  const env: Record<string, string> = { ...process.env } as Record<string, string>;
+  if (opts.privateKey) {
+    env.PRIVATE_KEY = opts.privateKey;
+  }
+
+  for (const { prefix, coinType, label } of CHAIN_COIN_TYPES) {
+    // Find the first address whose chain key starts with this prefix
+    let addr: string | undefined;
+    for (const [key, value] of addresses) {
+      if (key.startsWith(prefix)) {
+        addr = value;
+        break;
+      }
+    }
+
+    if (!addr) {
+      skipped.push(label);
+      continue;
+    }
+
+    try {
+      const args = [
+        'set-addr', opts.name,
+        '--coin-type', String(coinType),
+        '--address', addr,
+        '--chain', idCliChain,
+        '--output', 'json',
+      ];
+
+      await execFileAsync('id-cli', args, {
+        encoding: 'utf8',
+        env,
+        timeout: 60000,
+      });
+
+      console.log(`[ID Chain] Set ${label} address (coinType ${coinType}): ${addr.slice(0, 10)}...`);
+      set.push(label);
+    } catch (err: any) {
+      console.warn(`[ID Chain] Failed to set ${label} address: ${err.message}`);
+      skipped.push(label);
+    }
+  }
+
+  return { set, skipped };
 }
