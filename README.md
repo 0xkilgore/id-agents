@@ -278,7 +278,8 @@ See [Skills README](./skills/README.md) for the full skill directory listing.
 | `DATABASE_URL` | Yes | PostgreSQL connection string |
 | `ANTHROPIC_API_KEY` | No | Anthropic API key (not needed with Claude Pro or Max — run `claude login` instead) |
 | `CLAUDE_MODEL` | No | Default model (e.g., `claude-opus-4-6`) |
-| `ID_REGISTRAR_PRIVATE_KEY` | No | Wallet private key for onchain agent registration |
+| `OWS_REGISTRAR_WALLET` | No | OWS wallet name for onchain signing (recommended over raw key) |
+| `ID_REGISTRAR_PRIVATE_KEY` | No | Wallet private key for onchain registration (fallback if OWS not used) |
 | `PUBLIC_BASE_URL` | No | Public URL base for agents (e.g., `https://idbot.live`) |
 
 ### YAML Configuration
@@ -339,6 +340,37 @@ The subname is the agent's primary identity. The `tokenId` is the bytes32 nameha
 - `myagent.eth` (custom ENS name, linked via ENS)
 
 Once registered, the `domain` and `tokenId` can be saved in the YAML config to persist the identity across redeploys.
+
+## Agent Wallets (OWS)
+
+If [OWS](https://github.com/open-wallet-standard/core) (Open Wallet Standard) is installed, each agent automatically gets a multi-chain wallet at deploy time. Wallets are encrypted in the OWS vault at `~/.ows/`.
+
+**What happens at deploy:**
+1. Manager creates an OWS wallet per agent (e.g., `idchain-contracts`)
+2. Wallet addresses are written as ENS records via `/sync-wallets`
+3. A `wallet` skill is deployed so the agent knows its own addresses
+
+**Asking an agent for its address:**
+```
+/ask contracts What is your Bitcoin address?
+→ bc1q3aat33mm4jd602y8q7g3w972g0a8zle72srkkz
+```
+
+**Onchain signing:** The manager uses a separate registrar wallet (`OWS_REGISTRAR_WALLET`) for signing registration and record-setting transactions. The private key never leaves the OWS vault — signing is delegated to `ows sign tx` via [id-cli](https://github.com/idchain-world/id-cli).
+
+```bash
+# .env
+OWS_REGISTRAR_WALLET=idchain-registrar
+```
+
+**OWS policies** can restrict which chains and contracts the registrar wallet can interact with. Create a policy and attach it to an API key for scoped access:
+
+```bash
+ows policy create --file idchain-policy.json
+ows key create --name "id-agents" --wallet idchain-registrar --policy idchain-only
+# Set the API key for policy enforcement:
+# OWS_PASSPHRASE=ows_key_...
+```
 
 ## Ports and Networking
 
