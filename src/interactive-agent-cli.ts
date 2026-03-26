@@ -2617,6 +2617,44 @@ async function handleLine(line: string) {
     return;
   }
 
+  if (input === '/sync-wallets') {
+    if (!(await checkManager())) {
+      showManagerNotRunningError();
+      rl.prompt();
+      return;
+    }
+    console.log(`\n${colors.gray}⛓️  Syncing wallet addresses for registered agents...${colors.reset}\n`);
+    try {
+      const response = await managerFetch('/remote', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ command: '/sync-wallets' })
+      });
+      const result: any = await response.json();
+      if (!result.ok) {
+        console.log(`${colors.red}❌ ${result.error}${colors.reset}\n`);
+      } else {
+        const data = result.result;
+        if (data.results) {
+          for (const r of data.results) {
+            if (r.status === 'synced') {
+              console.log(`${colors.green}✅ ${r.name}${colors.reset} — ${r.set.join(', ') || 'no chains set'}`);
+            } else if (r.status === 'skipped') {
+              console.log(`${colors.gray}⏭️  ${r.name}${colors.reset} — ${r.reason}`);
+            } else {
+              console.log(`${colors.red}❌ ${r.name}${colors.reset} — ${r.error || 'unknown error'}`);
+            }
+          }
+          console.log(`\n${colors.bold}Summary:${colors.reset} ${data.synced} synced, ${data.skipped} skipped, ${data.failed} failed\n`);
+        }
+      }
+    } catch (err: any) {
+      console.log(`${colors.red}❌ Error: ${err.message}${colors.reset}\n`);
+    }
+    rl.prompt();
+    return;
+  }
+
   if (input.startsWith('/register ')) {
     if (!(await checkManager())) {
       showManagerNotRunningError();

@@ -3092,6 +3092,56 @@ export class AgentManagerDb {
         }
       }
 
+      case 'sync-wallets': {
+        // Set multi-chain wallet addresses for all registered agents
+        const pk = process.env.ID_REGISTRAR_PRIVATE_KEY || process.env.PRIVATE_KEY;
+        if (!pk) {
+          return { ok: false, error: 'Missing env var PRIVATE_KEY or ID_REGISTRAR_PRIVATE_KEY' };
+        }
+
+        const defaultReg = await this.getDefaultRegistry(teamId);
+        const chainNames: Record<number, string> = { 8453: 'base', 1: 'eth', 10: 'op', 42161: 'arb', 11155111: 'sepolia' };
+        const chain = chainNames[defaultReg.chainId] || 'base';
+
+        const agents = await this.dbListAgents(teamId);
+        const results: any[] = [];
+        let synced = 0;
+        let skipped = 0;
+        let failed = 0;
+
+        for (const agent of agents) {
+          const domain = agent.domain || (agent.metadata as any)?.idchain_domain;
+          const owsWallet = (agent.metadata as any)?.ows_wallet;
+
+          if (!domain) {
+            skipped++;
+            results.push({ name: agent.name, status: 'skipped', reason: 'no domain' });
+            continue;
+          }
+          if (!owsWallet) {
+            skipped++;
+            results.push({ name: agent.name, status: 'skipped', reason: 'no OWS wallet' });
+            continue;
+          }
+
+          try {
+            const addrResult = await setMultiChainAddresses({
+              name: domain,
+              walletName: owsWallet,
+              chain,
+              privateKey: pk,
+            });
+            synced++;
+            results.push({ name: agent.name, domain, status: 'synced', set: addrResult.set, skipped: addrResult.skipped });
+          } catch (err: any) {
+            failed++;
+            results.push({ name: agent.name, status: 'failed', error: err.message });
+          }
+        }
+
+        return { ok: true, result: { synced, skipped, failed, results } };
+      }
+
       case 'deploy': {
         // Deploy agents from a config file
         // Usage: /deploy <config> [param1=value1] [param2=value2] ...
