@@ -9,7 +9,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-**Version 0.1.24-beta**
+**Version 0.1.27-beta**
 
 A multi-agent orchestration platform built on the Claude Agent SDK.
 
@@ -23,7 +23,8 @@ ID Agents enables autonomous AI agents to run as local processes, communicate vi
 - **Multiple runtimes** - Support for Claude Agent SDK and Claude Code CLI harnesses
 - **Onchain identity** - ENS-based agent identity via ID Chain (agents get names like `x.agent-15.sep.xid.eth`)
 - **Remote API** - Programmatic management via `/remote` endpoint
-- **Skills system** - Extensible capabilities (inter-agent communication, admin control, memory)
+- **Skills & plugins** - Standard Claude Code skills and plugins, declared in config and deployed to each agent
+- **Agent wallets** - Automatic multi-chain wallets via [OWS](https://github.com/open-wallet-standard/core) (Open Wallet Standard)
 
 ## Architecture
 
@@ -207,16 +208,66 @@ This means any Claude Code instance on the same machine can coordinate with your
 - `/register <name>` - Register agent onchain
 - `/status` - Show status
 
-## Skills
+## Skills & Plugins
 
-Skills extend agent capabilities:
+Skills and plugins extend agent capabilities. Both are declared in the YAML config and automatically deployed to each agent's working directory at deploy time.
+
+### Skills
+
+Skills use the standard [Claude Code skill format](https://docs.anthropic.com/en/docs/claude-code/skills) — a `SKILL.md` file with YAML frontmatter inside a named directory. Drop any skill into `skills/` and reference it by name in your config.
+
+**Built-in skills:**
 
 | Skill | Description |
 |-------|-------------|
-| [inter-agent-communication](./skills/inter-agent-communication/) | `/talk-to` for agent-to-agent messaging |
-| [admin-control](./skills/admin-control/) | Remote management of manager CLI |
+| `identity` | Agent name, team, and onchain ENS domain |
+| `inter-agent` | Messaging, delegation, news feed for multi-agent coordination |
+| `catalog` | REST-AP self-description visible to other agents |
+| `wallet` | OWS multi-chain wallet addresses (skipped if no wallet) |
 
-See [Skills README](./skills/README.md) for details.
+**Adding a skill:**
+
+1. Create a directory in `skills/` with a `SKILL.md` file:
+
+```
+skills/my-skill/
+  SKILL.md
+```
+
+2. Add YAML frontmatter to `SKILL.md`:
+
+```markdown
+---
+name: my-skill
+description: What this skill does. Claude uses this to decide when to invoke it.
+---
+
+# My Skill
+
+Instructions for the agent...
+```
+
+3. Reference it in your config:
+
+```yaml
+defaults:
+  skills: [identity, inter-agent, catalog, wallet, my-skill]
+```
+
+Skills from defaults and per-agent lists are merged (deduped). You can also download skills from Anthropic or the community and drop them in.
+
+### Plugins
+
+Plugins are [Claude Code plugins](https://docs.anthropic.com/en/docs/claude-code/plugins) (MCP servers, tool providers). They can also bundle skills in their own `skills/` subdirectory.
+
+```yaml
+defaults:
+  plugins:
+    - name: id-rest-ap
+      path: ../plugins/claude-code/id-rest-ap
+```
+
+See [Skills README](./skills/README.md) for the full skill directory listing.
 
 ## Configuration
 
@@ -246,6 +297,14 @@ defaults:
   local: true
   runtime: claude-code-cli
   model: claude-opus-4-6
+  skills:
+    - identity
+    - inter-agent
+    - catalog
+    - wallet
+  plugins:
+    - name: id-rest-ap
+      path: ../plugins/claude-code/id-rest-ap
 
 agents:
   - name: coder
@@ -256,6 +315,7 @@ agents:
   - name: researcher
     description: "Research and analysis"
     workingDirectory: /path/to/research
+    skills: [custom-research-skill]    # Added to defaults
 ```
 
 See [Configuration Reference](./docs/reference/configuration.md) for full options.
