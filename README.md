@@ -78,18 +78,24 @@ ID Agents enables autonomous AI agents to run as local processes, communicate vi
 
 - **Node.js** 20+
 - **PostgreSQL** (for agent state persistence)
-- **Claude Code** or Anthropic API key
+- **Claude Code CLI** — install from [claude.ai/code](https://claude.ai/code) and run `claude login` in your terminal
+- **Claude Pro or Max plan** (agents use your Claude Code subscription — no API key needed)
 - **[id-cli](https://github.com/idchain-world/id-cli)** (optional, for onchain agent registration via `/register`)
+
+> **Important:** You must be logged into Claude Code CLI before starting ID Agents. Run `claude login` in your terminal and complete the authentication. If you use Claude Code in VS Code, you still need to log in via the terminal — open VS Code's integrated terminal and run `claude login` there.
 
 ### 1) Setup
 
 ```bash
+# First, make sure Claude Code CLI is installed and logged in
+claude login
+
+# Then clone and set up ID Agents
 git clone https://github.com/idchain-world/id-agents.git
 cd id-agents
 npm install
 cp env.example .env
 # edit .env: set DATABASE_URL
-# For Claude Max plan: run `claude login` first (no API key needed)
 ```
 
 ### 2) Run the interactive CLI
@@ -189,7 +195,7 @@ See [Skills README](./skills/README.md) for details.
 | Variable | Required | Description |
 |----------|----------|-------------|
 | `DATABASE_URL` | Yes | PostgreSQL connection string |
-| `ANTHROPIC_API_KEY` | No | Anthropic API key (not needed with Claude Max plan — run `claude login` instead) |
+| `ANTHROPIC_API_KEY` | No | Anthropic API key (not needed with Claude Pro or Max — run `claude login` instead) |
 | `CLAUDE_MODEL` | No | Default model (e.g., `claude-opus-4-6`) |
 | `ID_REGISTRAR_PRIVATE_KEY` | No | Wallet private key for onchain agent registration |
 | `PUBLIC_BASE_URL` | No | Public URL base for agents (e.g., `https://idbot.live`) |
