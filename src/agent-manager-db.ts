@@ -3093,6 +3093,12 @@ export class AgentManagerDb {
                 : '',
             }, { hasWallet: !!owsWallet });
 
+            // Remove any existing agent with this name to avoid duplicates on redeploy
+            const existing = await this.db.agents.getByName(effectiveTeamId, agentName);
+            if (existing) {
+              await this.db.agents.deleteAgent(effectiveTeamId, existing.id);
+            }
+
             // Insert into database
             console.log(`[Deploy] Storing agent: name=${agentName}, type=${agentType}, configType=${agentConfig.type}`);
             await this.db.agents.create({
