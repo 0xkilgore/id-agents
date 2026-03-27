@@ -76,12 +76,8 @@ export interface OrgNode {
   subgroups?: Record<string, OrgNode>;
 }
 
-export interface OrgGroup extends OrgNode {
-  lead: string;
-}
-
 export interface OrgConfig {
-  groups: Record<string, OrgGroup>;
+  groups: Record<string, OrgNode>;
   tags?: Record<string, string[]>;
 }
 
