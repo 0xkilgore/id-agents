@@ -313,10 +313,6 @@ let lastAskedAgent: string | null = null;
 // Manager URL - derived from MANAGER_PORT
 const MANAGER_URL = process.env.MANAGER_URL || `http://localhost:${MANAGER_PORT}`;
 
-// API key for authentication
-let MANAGER_API_KEY = process.env.ID_CONTROL_API_KEY || '';
-
-
 // ==================== Agent Display Helpers ====================
 
 /**
@@ -444,10 +440,6 @@ async function managerFetch(pathname: string, init: any = {}) {
     // Backwards compatibility
     'X-Id-Project': activeTeam
   };
-  // Add API key if configured
-  if (MANAGER_API_KEY) {
-    headers['X-Api-Key'] = MANAGER_API_KEY;
-  }
   return await fetch(`${MANAGER_URL}${pathname}`, { ...init, headers });
 }
 
@@ -701,8 +693,7 @@ function getWebSocketUrl(): string {
   // Convert http(s)://host:port to ws(s)://host:port/ws
   const url = new URL(MANAGER_URL);
   const protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
-  // Use MANAGER_API_KEY which includes server config's apiKey
-  return `${protocol}//${url.host}/ws?team=${encodeURIComponent(activeTeam)}&apiKey=${encodeURIComponent(MANAGER_API_KEY)}`;
+  return `${protocol}//${url.host}/ws?team=${encodeURIComponent(activeTeam)}`;
 }
 
 function handleWebSocketMessage(data: WebSocket.Data) {
@@ -994,8 +985,6 @@ async function startLocalAgentProcess(agentData: any): Promise<{ success: boolea
       ...process.env,
       ID_TEAM: activeTeam,
       MANAGER_URL: MANAGER_URL,
-      // Pass API key for broadcast to manager
-      ...(MANAGER_API_KEY && { ID_AGENT_API_KEY: MANAGER_API_KEY }),
       ...(sharedDir && { ID_SHARED_DIR: sharedDir }),
       ...(agentModel && { CLAUDE_MODEL: agentModel }),
       // Pass tokenId so agent knows its registry identity
@@ -1209,10 +1198,7 @@ async function saveNewsFeeds() {
       try {
         const newsUrl = `${t.url}/news?since=0`;
         const resp = await fetch(newsUrl, {
-          signal: AbortSignal.timeout(5000),
-          headers: {
-            ...(process.env.ID_AGENT_API_KEY && { 'X-API-Key': process.env.ID_AGENT_API_KEY })
-          }
+          signal: AbortSignal.timeout(5000)
         });
         if (!resp.ok) {
           const text = await resp.text().catch(() => resp.statusText);
@@ -1269,10 +1255,7 @@ async function saveAgentNewsFeed(targetName: string) {
     const stamp = new Date().toISOString().replace(/[:.]/g, '-');
     const newsUrl = `${resolved.url}/news?since=0`;
     const resp = await fetch(newsUrl, {
-      signal: AbortSignal.timeout(8000),
-      headers: {
-        ...(process.env.ID_AGENT_API_KEY && { 'X-API-Key': process.env.ID_AGENT_API_KEY })
-      }
+      signal: AbortSignal.timeout(8000)
     });
     if (!resp.ok) {
       const text = await resp.text().catch(() => resp.statusText);
@@ -1541,7 +1524,6 @@ async function handleLine(line: string) {
 
         activeTeam = teamName;
         activeServerName = teamName;
-        MANAGER_API_KEY = process.env.ID_CONTROL_API_KEY || '';
         updatePrompt();
         console.log(`\n${colors.green}✅ Switched to ${colors.cyan}${teamName}${colors.reset}`);
         console.log(`${colors.gray}   Server: ${MANAGER_URL}${colors.reset}\n`);
@@ -3151,10 +3133,7 @@ async function checkAgentStatus(longFormat: boolean = false) {
             // Try to get recent news to check activity
             try {
               const newsResponse = await fetch(`${agentUrl}/news?since=0&limit=50`, {
-                signal: AbortSignal.timeout(2000),
-                headers: {
-                  ...(process.env.ID_AGENT_API_KEY && { 'X-API-Key': process.env.ID_AGENT_API_KEY })
-                }
+                signal: AbortSignal.timeout(2000)
               });
               if (newsResponse.ok) {
                 const newsData: any = await newsResponse.json();
@@ -3777,8 +3756,7 @@ async function askAgent(agentName: string, message: string, useSession: boolean 
       talkResponse = await fetch(`${agent.url}/talk`, {
         method: 'POST',
         headers: {
-          'Content-Type': 'application/json',
-          ...(process.env.ID_AGENT_API_KEY && { 'X-API-Key': process.env.ID_AGENT_API_KEY })
+          'Content-Type': 'application/json'
         },
         body: JSON.stringify({ message, from: name, session_id: sessionId })
       });
@@ -3886,8 +3864,7 @@ async function broadcastToAllAgents(message: string) {
         const talkResponse = await fetch(talkUrl, {
           method: 'POST',
           headers: {
-            'Content-Type': 'application/json',
-            ...(process.env.ID_AGENT_API_KEY && { 'X-API-Key': process.env.ID_AGENT_API_KEY })
+            'Content-Type': 'application/json'
           },
           body: JSON.stringify({
             message,
@@ -4010,7 +3987,6 @@ async function deployFromConfig(filePath: string, args: string[] = []) {
             model: agent.model,
             local: true,  // Local agent
             runtime: agent.runtime || 'claude-code-cli',
-            requireAuth: agent.requireAuth,
             plugins: agent.plugins,
             verbose: agent.verbose,
             workingDirectory: agent.workingDirectory,
@@ -4154,7 +4130,6 @@ async function deployFromConfig(filePath: string, args: string[] = []) {
         runtime: agent.runtime,
         plugins: agent.plugins,
         allowedTools: agent.allowedTools,
-        requireAuth: agent.requireAuth,
         claudeMd: agent.claudeMd,  // CLAUDE.md content (resolved by processConfig)
         heartbeat: agent.heartbeat,  // Heartbeat config {interval, message} (resolved by processConfig)
         domain: agent.domain,
@@ -4164,8 +4139,7 @@ async function deployFromConfig(filePath: string, args: string[] = []) {
           description: agent.description,
           runtime: agent.runtime,
           plugins: agent.plugins,
-          allowed_tools: agent.allowedTools,
-          requireAuth: agent.requireAuth
+          allowed_tools: agent.allowedTools
         }
       };
 
@@ -4402,11 +4376,7 @@ async function checkAgentNews(agentName: string) {
 
     console.log(`${colors.green}✓${colors.reset} Found ${getAgentDisplayName(agent)}\n`);
 
-    const response = await fetch(`${agent.url}/news?since=0&limit=50`, {
-      headers: {
-        ...(process.env.ID_AGENT_API_KEY && { 'X-API-Key': process.env.ID_AGENT_API_KEY })
-      }
-    });
+    const response = await fetch(`${agent.url}/news?since=0&limit=50`);
 
     if (!response.ok) {
       console.log(`${colors.red}❌ Failed to fetch news: ${response.status} ${response.statusText}${colors.reset}\n`);
@@ -4593,11 +4563,7 @@ async function showAgentNewsTop(agentName: string, long: boolean = false) {
     console.log(`${colors.green}✓${colors.reset} Found ${getAgentDisplayName(agent)}\n`);
     console.log(`${colors.gray}📰 Fetching recent news...${colors.reset}\n`);
 
-    const response = await fetch(`${agent.url}/news?since=0&limit=10`, {
-      headers: {
-        ...(process.env.ID_AGENT_API_KEY && { 'X-API-Key': process.env.ID_AGENT_API_KEY })
-      }
-    });
+    const response = await fetch(`${agent.url}/news?since=0&limit=10`);
 
     if (!response.ok) {
       console.log(`${colors.red}❌ Failed to fetch news: ${response.status} ${response.statusText}${colors.reset}\n`);

@@ -29,7 +29,6 @@ import fetch from 'node-fetch';
 import type { PluginConfig, DeployConfig, HeartbeatConfig } from './config-parser.js';
 import { processConfig } from './config-parser.js';
 import { parseAgentRef, normalizeAlias, buildAmbiguityWarning, type AgentMatch } from './core/agent-identifier.js';
-import { safeCompare } from './core/safe-compare.js';
 import type { HarnessType } from './harness/types.js';
 
 // ES module equivalent of __dirname
@@ -126,7 +125,6 @@ type AgentMetadata = Record<string, any> & {
   service_type?: string;  // e.g., "REST-AP", "MCP", "A2A"
   service?: string;       // The service URL (e.g., https://idbot.live/{id})
   agent_account?: string;
-  requireAuth?: boolean;
 };
 
 // WebSocket client tracking
@@ -184,9 +182,6 @@ export class AgentManagerDb {
 
     this.managementApp = express();
     this.managementApp.use(express.json());
-
-    // Auth removed — local-only system, no API keys needed
-    this.managementApp.use((_req, _res, next) => next());
 
     // Ensure teams + manager dirs exist in the mounted workspace
     const teamsDir = `${baseWorkDir}/teams`;
@@ -265,11 +260,6 @@ export class AgentManagerDb {
       ID_HARNESS: (agent.metadata?.runtime as string) || 'claude-agent-sdk',
       ID_PLUGINS: JSON.stringify(plugins)
     };
-
-    // Add requireAuth setting from metadata (set during deploy)
-    if (agent.metadata?.requireAuth) {
-      env.ID_REQUIRE_CLIENT_AUTH = 'true';
-    }
 
     // Add talkTimeout setting from metadata (default timeout for /talk-to requests)
     if (agent.metadata?.talkTimeout) {
@@ -618,11 +608,7 @@ export class AgentManagerDb {
         const agentUrl = isLocalAgent
           ? (agent.endpoint || `http://localhost:${agent.port}`)
           : `http://id-agent-${agent.id}:4100`;
-        const agentApiKey = process.env.ID_AGENT_API_KEY;
         const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-        if (agentApiKey) {
-          headers['X-API-Key'] = agentApiKey;
-        }
         const identityRes = await fetch(`${agentUrl}/identity`, {
           method: 'PATCH',
           headers,
@@ -699,10 +685,6 @@ export class AgentManagerDb {
     data: any;
   } | { ok: false; status: number; error: string }> {
     const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-    const agentApiKey = process.env.ID_AGENT_API_KEY;
-    if (agentApiKey) {
-      headers['X-API-Key'] = agentApiKey;
-    }
 
     const talkRes = await fetch(`${targetUrl}/talk`, {
       method: 'POST',
@@ -866,10 +848,7 @@ export class AgentManagerDb {
           if (isResponding && !isInteractive) {
             try {
               const newsResp = await fetch(`${agentUrl}/news?since=0&limit=50`, {
-                signal: AbortSignal.timeout(2000),
-                headers: {
-                  ...(process.env.ID_AGENT_API_KEY && { 'X-API-Key': process.env.ID_AGENT_API_KEY })
-                }
+                signal: AbortSignal.timeout(2000)
               });
               if (newsResp.ok) {
                 const newsData: any = await newsResp.json();
@@ -910,10 +889,7 @@ export class AgentManagerDb {
         const limit = req.query.limit || '50';
 
         const newsResp = await fetch(`${agentUrl}/news?since=${since}&limit=${limit}`, {
-          signal: AbortSignal.timeout(5000),
-          headers: {
-            ...(process.env.ID_AGENT_API_KEY && { 'X-API-Key': process.env.ID_AGENT_API_KEY })
-          }
+          signal: AbortSignal.timeout(5000)
         });
 
         if (!newsResp.ok) {
@@ -1503,7 +1479,7 @@ export class AgentManagerDb {
         teamId = team.id;
         teamName = team.name;
 
-        const { name, type: agentType, model, runtime, allowedTools, pluginPath, plugins, skills, apiKey, requireAuth, metadata: reqMetadata, local, claudeMd, heartbeat, workingDirectory: configWorkDir, verbose, domain, tokenId, address } = req.body || {};
+        const { name, type: agentType, model, runtime, allowedTools, pluginPath, plugins, skills, metadata: reqMetadata, local, claudeMd, heartbeat, workingDirectory: configWorkDir, verbose, domain, tokenId, address } = req.body || {};
         if (!name) return res.status(400).json({ error: 'Missing name' });
 
         // Local agent: runs locally, uses user's Claude Code auth
@@ -1572,7 +1548,6 @@ export class AgentManagerDb {
           ...(reqMetadata?.description && { description: reqMetadata.description }),
           plugins: localPlugins, // Use local paths (agent owns its plugins)
           ...(allowedTools && { allowed_tools: allowedTools }),
-          ...(requireAuth !== undefined && { requireAuth }),
           ...(isAutomator && { isAutomator: true }),
           // Flag that heartbeat is enabled (actual config read from HEARTBEAT.yaml)
           ...(heartbeat && { heartbeat: true })
@@ -1590,7 +1565,7 @@ export class AgentManagerDb {
           status: 'starting',
           created_at: Date.now(),
           metadata,
-          api_key: apiKey || null,
+          api_key: null,
           token_id: tokenId || null,
           domain: domain || null,
         });
@@ -2456,15 +2431,11 @@ export class AgentManagerDb {
       const targetUrl = `${internalUrl.replace(/\/+$/, '')}/${pathAfterTokenId}`;
 
       try {
-        // Proxy the request - use ID_CONTROL_API_KEY which is shared between manager and agents
-        const controlApiKey = process.env.ID_CONTROL_API_KEY;
         const proxyRes = await fetch(targetUrl, {
           method: req.method,
           headers: {
             'Content-Type': req.headers['content-type'] || 'application/json',
-            'Accept': req.headers['accept'] || 'application/json',
-            // Use control API key for internal proxying
-            ...(controlApiKey ? { 'X-Api-Key': controlApiKey } : {})
+            'Accept': req.headers['accept'] || 'application/json'
           },
           body: ['GET', 'HEAD'].includes(req.method) ? undefined : JSON.stringify(req.body)
         });
@@ -2776,9 +2747,6 @@ export class AgentManagerDb {
 
         // Send message to agent's /talk endpoint
         const talkHeaders: Record<string, string> = { 'Content-Type': 'application/json' };
-        if (process.env.ID_AGENT_API_KEY) {
-          talkHeaders['X-API-Key'] = process.env.ID_AGENT_API_KEY;
-        }
         const talkResp = await fetch(talkUrl, {
           method: 'POST',
           headers: talkHeaders,
@@ -2819,11 +2787,7 @@ export class AgentManagerDb {
         const endpoints = await discoverRestAPEndpoints(baseEndpoint);
         const newsUrl = `${baseEndpoint.replace(/\/+$/, '')}${endpoints.news}`;
 
-        const newsHeaders: Record<string, string> = {};
-        if (process.env.ID_AGENT_API_KEY) {
-          newsHeaders['X-API-Key'] = process.env.ID_AGENT_API_KEY;
-        }
-        const newsResp = await fetch(newsUrl, { headers: newsHeaders });
+        const newsResp = await fetch(newsUrl);
         if (!newsResp.ok) {
           return { ok: false, error: 'Failed to fetch news' };
         }
@@ -3061,7 +3025,6 @@ export class AgentManagerDb {
               plugins: localPlugins,
               allowed_tools: agentConfig.allowedTools,
               description: agentConfig.description,
-              requireAuth: agentConfig.requireAuth,
               ...(isAutomator && { isAutomator: true }),
               // Flag that heartbeat is enabled (actual config read from HEARTBEAT.yaml in working dir)
               ...(heartbeatConfig && { heartbeat: true })
@@ -3773,18 +3736,7 @@ export class AgentManagerDb {
    */
   private async handleWebSocketConnection(ws: WebSocket, req: any) {
     const url = new URL(req.url || '', `http://${req.headers.host}`);
-    const apiKey = url.searchParams.get('apiKey') || req.headers['x-api-key'];
     const teamHeader = req.headers['x-id-team'] || req.headers['x-id-project'] || url.searchParams.get('team');
-
-    // Authenticate
-    const controlApiKey = process.env.ID_CONTROL_API_KEY;
-    const agentApiKey = process.env.ID_AGENT_API_KEY;
-
-    if (controlApiKey && !safeCompare(apiKey, controlApiKey) && !safeCompare(apiKey, agentApiKey)) {
-      ws.send(JSON.stringify({ type: 'error', error: 'Unauthorized' }));
-      ws.close(1008, 'Unauthorized');
-      return;
-    }
 
     // Resolve team
     let teamId: string;
@@ -4164,8 +4116,6 @@ export class AgentManagerDb {
         ...process.env as Record<string, string>,
         ID_TEAM: teamName,
         MANAGER_URL: `http://localhost:4100`,
-        ...(process.env.ID_AGENT_API_KEY && { ID_AGENT_API_KEY: process.env.ID_AGENT_API_KEY }),
-        ...(process.env.ID_CONTROL_API_KEY && { ID_AGENT_API_KEY: process.env.ID_CONTROL_API_KEY }),
         ...(model && { CLAUDE_MODEL: model }),
         ...(tokenId && { ID_AGENT_TOKEN_ID: tokenId }),
         ...(owsWallet && { OWS_WALLET: owsWallet })
@@ -4282,8 +4232,7 @@ export class AgentManagerDb {
       const response = await fetch(`${endpoint}/talk`, {
         method: 'POST',
         headers: {
-          'Content-Type': 'application/json',
-          ...(process.env.ID_AGENT_API_KEY && { 'X-Api-Key': process.env.ID_AGENT_API_KEY })
+          'Content-Type': 'application/json'
         },
         body: JSON.stringify({
           from: 'manager',

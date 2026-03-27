@@ -72,7 +72,6 @@ npx tsx src/local-agent-server.ts <agent-name> [options]
 | `MANAGER_URL` | Manager URL | `http://localhost:4100` |
 | `DATABASE_URL` | PostgreSQL connection (optional) | - |
 | `CLAUDE_MODEL` | Default model | `claude-sonnet-4-20250514` |
-| `ID_AGENT_API_KEY` | API key for inter-agent auth | - |
 
 ## How It Works
 

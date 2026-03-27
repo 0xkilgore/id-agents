@@ -16,8 +16,6 @@ import { fileURLToPath } from 'url';
 import fs from 'fs';
 import type http from 'http';
 import type { Db } from './db/db-service.js';
-import { safeCompare } from './core/safe-compare.js';
-
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
@@ -228,49 +226,6 @@ export class ClaudeAgentServer {
       }
       next(err);
     });
-
-    // Optional API key authentication middleware
-    // When ID_AGENT_API_KEY is set, requests must include it in X-API-Key header
-    const agentApiKey = process.env.ID_AGENT_API_KEY || process.env.AGENT_API_KEY;
-    const requireAuth = process.env.ID_REQUIRE_CLIENT_AUTH === 'true';
-
-    if (agentApiKey || requireAuth) {
-      this.app.use(async (req, res, next) => {
-        // Allow health check and discovery without auth
-        if (req.path === '/health' || req.path === '/.well-known/restap.json') {
-          return next();
-        }
-
-        // Allow agent to access its own endpoints from localhost (for self-checks and inter-agent)
-        // This lets the agent check its own news feed and use /talk-to without needing the API key
-        const clientIp = req.ip || req.socket?.remoteAddress || '';
-        const isLocalhost = clientIp === '127.0.0.1' || clientIp === '::1' || clientIp === '::ffff:127.0.0.1';
-        if (isLocalhost && (req.path === '/news' || req.path === '/talk-to')) {
-          return next();
-        }
-
-        const providedKey = req.headers['x-api-key'] as string;
-
-        // No key provided
-        if (!providedKey) {
-          if (requireAuth) {
-            return res.status(401).json({ error: 'API key required' });
-          }
-          return next(); // Auth not strictly required
-        }
-
-        // Check if it's the inter-agent key (trusted)
-        if (agentApiKey && safeCompare(providedKey, agentApiKey)) {
-          return next();
-        }
-
-        // Unknown key format
-        if (requireAuth) {
-          return res.status(401).json({ error: 'Invalid API key' });
-        }
-        next();
-      });
-    }
 
     this.setupRoutes();
     
@@ -933,15 +888,10 @@ export class ClaudeAgentServer {
         // Look up target agent via manager
         const managerUrl = process.env.MANAGER_URL || 'http://id-agent-manager:4100';
         const team = this.agentIdentity?.team || process.env.ID_TEAM || process.env.ID_PROJECT || '';
-        const agentApiKey = process.env.ID_AGENT_API_KEY;
-
         const headers: Record<string, string> = { 'Content-Type': 'application/json' };
         if (team) {
           headers['X-Id-Team'] = team;
           headers['X-Id-Project'] = team; // backwards compatibility
-        }
-        if (agentApiKey) {
-          headers['X-API-Key'] = agentApiKey;
         }
 
         const agentsRes = await fetch(`${managerUrl}/agents`, { headers });
@@ -964,9 +914,6 @@ export class ClaudeAgentServer {
 
         // Send message to target agent
         const talkHeaders: Record<string, string> = { 'Content-Type': 'application/json' };
-        if (agentApiKey) {
-          talkHeaders['X-API-Key'] = agentApiKey;
-        }
         const talkRes = await fetch(`${targetUrl}/talk`, {
           method: 'POST',
           headers: talkHeaders,
@@ -1181,12 +1128,6 @@ What would you like to do with this information?`;
         headers['X-Id-Team'] = team;
         headers['X-Id-Project'] = team; // backwards compatibility
       }
-      // Include API key for inter-agent communication
-      const agentApiKey = process.env.ID_AGENT_API_KEY;
-      if (agentApiKey) {
-        headers['X-API-Key'] = agentApiKey;
-      }
-
       const agentsRes = await fetch(`${managerUrl}/agents`, { headers });
       if (!agentsRes.ok) {
         console.error(`[Agent] Failed to fetch agents list: ${agentsRes.status}`);
@@ -1225,10 +1166,6 @@ What would you like to do with this information?`;
         newsHeaders['X-Id-Team'] = team;
         newsHeaders['X-Id-Project'] = team; // backwards compatibility
       }
-      if (agentApiKey) {
-        newsHeaders['X-API-Key'] = agentApiKey;
-      }
-
       // Route through team manager for "manager" sender, unknown, or external senders
       // Team manager handles forwarding to automator brain internally
       const routeThroughManager = isUnknownSender || isManagerSender || isExternalSender;
@@ -1564,17 +1501,15 @@ ${prompt}`
    */
   private async broadcastToManager(type: string, message: string, data: any, timestamp: number) {
     const managerUrl = process.env.MANAGER_URL;
-    const agentApiKey = process.env.ID_AGENT_API_KEY;
     const teamId = process.env.ID_TEAM;
 
-    if (!managerUrl || !agentApiKey) return;
+    if (!managerUrl) return;
 
     try {
       await fetch(`${managerUrl}/news`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'X-Api-Key': agentApiKey,
           'X-Id-Team': teamId || ''
         },
         body: JSON.stringify({

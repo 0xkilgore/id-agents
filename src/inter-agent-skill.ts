@@ -19,14 +19,14 @@ You are agent "{{AGENT_NAME}}" in team "{{TEAM_NAME}}".
 \`\`\`bash
 curl -s -X POST http://localhost:4100/message \\
   -H "Content-Type: application/json" \\
-  -H "X-Api-Key: $ID_AGENT_API_KEY" -H "X-Id-Team: $ID_TEAM" \\
+  -H "X-Id-Team: $ID_TEAM" \\
   -d '{"to": "agent-name", "message": "your message"}'
 \`\`\`
 Add \`"wait": true\` only if you need the reply to continue your work.
 
 ## List Agents
 \`\`\`bash
-curl -s http://localhost:4100/agents -H "X-Api-Key: $ID_AGENT_API_KEY" -H "X-Id-Team: $ID_TEAM" | jq '.agents[].name'
+curl -s http://localhost:4100/agents -H "X-Id-Team: $ID_TEAM" | jq '.agents[].name'
 \`\`\`
 
 ## Key Rules
@@ -51,7 +51,7 @@ Use the \`/message\` endpoint to contact other agents:
 \`\`\`bash
 curl -s -X POST http://localhost:4100/message \\
   -H "Content-Type: application/json" \\
-  -H "X-Api-Key: $ID_AGENT_API_KEY" -H "X-Id-Team: $ID_TEAM" \\
+  -H "X-Id-Team: $ID_TEAM" \\
   -d '{"to": "agent-name", "message": "Your message here"}'
 \`\`\`
 
@@ -74,7 +74,7 @@ If you need the agent's answer to complete your response, add \`"wait": true\`:
 \`\`\`bash
 curl -s -X POST http://localhost:4100/message \\
   -H "Content-Type: application/json" \\
-  -H "X-Api-Key: $ID_AGENT_API_KEY" -H "X-Id-Team: $ID_TEAM" \\
+  -H "X-Id-Team: $ID_TEAM" \\
   -d '{"to": "agent-name", "message": "Did you send a message to manager?", "wait": true, "timeout": 120000}'
 \`\`\`
 
@@ -90,7 +90,7 @@ curl -s -X POST http://localhost:4100/message \\
 ## List Available Agents
 
 \`\`\`bash
-curl -s http://localhost:4100/agents -H "X-Api-Key: $ID_AGENT_API_KEY" -H "X-Id-Team: $ID_TEAM" | jq
+curl -s http://localhost:4100/agents -H "X-Id-Team: $ID_TEAM" | jq
 \`\`\`
 
 Returns:
@@ -112,7 +112,7 @@ Returns:
 # "Tell dev to contact the manager" — just deliver and move on
 curl -s -X POST http://localhost:4100/message \\
   -H "Content-Type: application/json" \\
-  -H "X-Api-Key: $ID_AGENT_API_KEY" -H "X-Id-Team: $ID_TEAM" \\
+  -H "X-Id-Team: $ID_TEAM" \\
   -d '{"to": "dev", "message": "Please contact the manager about the deployment."}'
 \`\`\`
 
@@ -121,7 +121,7 @@ curl -s -X POST http://localhost:4100/message \\
 # "Ask dev if he finished and report back" — need the answer
 curl -s -X POST http://localhost:4100/message \\
   -H "Content-Type: application/json" \\
-  -H "X-Api-Key: $ID_AGENT_API_KEY" -H "X-Id-Team: $ID_TEAM" \\
+  -H "X-Id-Team: $ID_TEAM" \\
   -d '{"to": "dev", "message": "Did you finish the deployment?", "wait": true, "timeout": 120000}'
 \`\`\`
 
@@ -130,7 +130,7 @@ curl -s -X POST http://localhost:4100/message \\
 # "Tell coder to fix the bug" — fire and forget
 curl -s -X POST http://localhost:4100/message \\
   -H "Content-Type: application/json" \\
-  -H "X-Api-Key: $ID_AGENT_API_KEY" -H "X-Id-Team: $ID_TEAM" \\
+  -H "X-Id-Team: $ID_TEAM" \\
   -d '{"to": "coder", "message": "Please fix the login validation bug in auth.ts"}'
 \`\`\`
 
@@ -225,8 +225,8 @@ When you receive a **triggered message** (a late reply or notification), the sys
 **Checking another agent's saved responses:**
 \`\`\`bash
 # Check an agent's news feed for saved responses
-curl -s "http://localhost:4100/agents" -H "X-Api-Key: $ID_AGENT_API_KEY" -H "X-Id-Team: $ID_TEAM" | jq  # Get agent URLs first
-curl -s "http://<agent-url>/news?since=0" -H "X-Api-Key: $ID_AGENT_API_KEY" | jq '.items[] | select(.type == "response.saved")'
+curl -s "http://localhost:4100/agents" -H "X-Id-Team: $ID_TEAM" | jq  # Get agent URLs first
+curl -s "http://<agent-url>/news?since=0" | jq '.items[] | select(.type == "response.saved")'
 \`\`\`
 
 **The saved response format:**
@@ -269,7 +269,7 @@ If the user says anything like **"ask coder1 ..."**, **"go ask the manager ..."*
 \`\`\`bash
 curl -s -X POST http://localhost:4100/message \\
   -H "Content-Type: application/json" \\
-  -H "X-Api-Key: $ID_AGENT_API_KEY" -H "X-Id-Team: $ID_TEAM" \\
+  -H "X-Id-Team: $ID_TEAM" \\
   -d '{"to": "<agent-name>", "message": "<request>"}'
 \`\`\`
 
@@ -291,7 +291,7 @@ Your news feed at \`/news\` contains:
 - Completed task results
 
 \`\`\`bash
-curl -s "http://localhost:4100/news?since=0" -H "X-Api-Key: $ID_AGENT_API_KEY" -H "X-Id-Team: $ID_TEAM" | jq
+curl -s "http://localhost:4100/news?since=0" -H "X-Id-Team: $ID_TEAM" | jq
 \`\`\`
 `;
 

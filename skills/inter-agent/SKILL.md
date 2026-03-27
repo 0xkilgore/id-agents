@@ -15,7 +15,7 @@ Use the `/message` endpoint to contact other agents:
 ```bash
 curl -s -X POST $MANAGER_URL/message \
   -H "Content-Type: application/json" \
-  -H "X-Api-Key: $ID_AGENT_API_KEY" -H "X-Id-Team: $ID_TEAM" \
+  -H "X-Id-Team: $ID_TEAM" \
   -d '{"to": "agent-name", "message": "Your message here"}'
 ```
 
@@ -28,7 +28,7 @@ If you need the agent's answer to complete your response, add `"wait": true`:
 ```bash
 curl -s -X POST $MANAGER_URL/message \
   -H "Content-Type: application/json" \
-  -H "X-Api-Key: $ID_AGENT_API_KEY" -H "X-Id-Team: $ID_TEAM" \
+  -H "X-Id-Team: $ID_TEAM" \
   -d '{"to": "agent-name", "message": "Your question?", "wait": true, "timeout": 120000}'
 ```
 
@@ -38,7 +38,7 @@ curl -s -X POST $MANAGER_URL/message \
 ## List Available Agents
 
 ```bash
-curl -s $MANAGER_URL/agents -H "X-Api-Key: $ID_AGENT_API_KEY" -H "X-Id-Team: $ID_TEAM" | jq
+curl -s $MANAGER_URL/agents -H "X-Id-Team: $ID_TEAM" | jq
 ```
 
 The `name` field is the agent's full identifier (ENS domain after registration, or local name). Always use this name when sending messages.
@@ -74,7 +74,7 @@ If the user says "ask coder1 ...", "go ask the manager ...", or requests you to 
 Your news feed contains incoming messages, conversation history, and task results:
 
 ```bash
-curl -s "$MANAGER_URL/news?since=0" -H "X-Api-Key: $ID_AGENT_API_KEY" -H "X-Id-Team: $ID_TEAM" | jq
+curl -s "$MANAGER_URL/news?since=0" -H "X-Id-Team: $ID_TEAM" | jq
 ```
 
 Check your news feed before starting new tasks to maintain context.

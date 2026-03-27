@@ -36,8 +36,6 @@ export interface AgentSpec {
   systemPrompt?: string;              // Custom system prompt for the agent
   claudeMd?: string;                  // Content to prepend to agent's .claude/CLAUDE.md file
   claudeMdFile?: string;              // Path to file containing claudeMd content (relative to config)
-  apiKey?: string;                    // API key for authenticating requests to this agent
-  requireAuth?: boolean;              // Require API key authentication for /talk endpoint
   plugins?: PluginConfig[];           // Skill plugins
   skills?: string[];                  // Skills to deploy (names match skills/<name>/SKILL.md)
   allowedTools?: string[];
@@ -81,7 +79,6 @@ export interface DeployConfig {
     model?: string;
     claudeMd?: string;                  // Default CLAUDE.md content for all agents
     claudeMdFile?: string;              // Path to default claudeMd file (relative to config)
-    requireAuth?: boolean;              // Require API key auth for all agents
     plugins?: PluginConfig[];           // Skill plugins
     skills?: string[];                  // Default skills for all agents
     allowedTools?: string[];
@@ -519,11 +516,6 @@ export function mergeDefaults(agent: AgentSpec, defaults: DeployConfig['defaults
   // AllowedTools: agent overrides defaults entirely
   if (!merged.allowedTools && defaults.allowedTools) {
     merged.allowedTools = [...defaults.allowedTools];
-  }
-
-  // RequireAuth: agent overrides defaults
-  if (merged.requireAuth === undefined && defaults.requireAuth !== undefined) {
-    merged.requireAuth = defaults.requireAuth;
   }
 
   // Resources: deep merge

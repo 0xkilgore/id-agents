@@ -30,7 +30,6 @@ if [ -z "$1" ] || [ "$1" = "--help" ] || [ "$1" = "-h" ]; then
     echo "  MANAGER_URL          Manager URL (default: http://localhost:4100)"
     echo "  DATABASE_URL         PostgreSQL connection string (optional)"
     echo "  CLAUDE_MODEL         Default model"
-    echo "  ID_AGENT_API_KEY     API key for inter-agent communication"
     echo ""
     echo "Examples:"
     echo "  $0 my-agent"

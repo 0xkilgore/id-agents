@@ -15,7 +15,7 @@ import path from 'node:path';
 
 const LOADER_PORT = parseInt(process.env.LOADER_PORT || '3100');
 const MANAGER_PORT = parseInt(process.env.AGENT_MANAGER_PORT || '4100');
-const API_KEY = process.env.ID_CONTROL_API_KEY || '';
+// Trusted local setup — no auth
 const WORK_DIR = process.env.LOADER_WORK_DIR || process.cwd();
 const LOG_FILE = process.env.MANAGER_LOG_FILE || '/tmp/manager.log';
 
@@ -34,9 +34,8 @@ function safeCompare(a: string | undefined, b: string | undefined): boolean {
   return crypto.timingSafeEqual(bufA, bufB);
 }
 
-function checkAuth(req: http.IncomingMessage): boolean {
-  if (!API_KEY) return true; // no key configured = open
-  return safeCompare(req.headers['x-api-key'] as string, API_KEY);
+function checkAuth(_req: http.IncomingMessage): boolean {
+  return true; // Trusted local setup
 }
 
 function json(res: http.ServerResponse, status: number, data: unknown) {

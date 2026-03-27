@@ -76,8 +76,7 @@ async function registerWithManager(
   agentId: string,
   name: string,
   team: string,
-  port: number,
-  apiKey?: string
+  port: number
 ): Promise<void> {
   const endpoint = `http://localhost:${port}`;
 
@@ -85,9 +84,6 @@ async function registerWithManager(
     'Content-Type': 'application/json',
     'X-Id-Team': team
   };
-  if (apiKey) {
-    headers['X-API-Key'] = apiKey;
-  }
 
   const response = await fetch(`${managerUrl}/agents/register`, {
     method: 'POST',
@@ -139,7 +135,6 @@ export async function startLocalAgent(config: LocalAgentConfig): Promise<{
     agentId: preRegisteredId
   } = config;
 
-  const apiKey = process.env.ID_AGENT_API_KEY || process.env.ID_CONTROL_API_KEY;
   const tokenId = process.env.ID_AGENT_TOKEN_ID;
 
   // Use pre-registered ID or generate one
@@ -222,11 +217,6 @@ export async function startLocalAgent(config: LocalAgentConfig): Promise<{
   // Set manager URL for ClaudeAgentServer to use
   process.env.MANAGER_URL = managerUrl;
 
-  // Ensure API key is set for inter-agent communication (replies to manager)
-  if (apiKey && !process.env.ID_AGENT_API_KEY) {
-    process.env.ID_AGENT_API_KEY = apiKey;
-  }
-
   // Enable verbose logging if configured
   if (config.verbose || process.env.ID_AGENT_VERBOSE === 'true') {
     process.env.ID_AGENT_VERBOSE = 'true';
@@ -249,7 +239,7 @@ export async function startLocalAgent(config: LocalAgentConfig): Promise<{
   // Register with manager (only if not pre-registered)
   if (!isPreRegistered) {
     try {
-      await registerWithManager(managerUrl, agentId, name, team, port, apiKey);
+      await registerWithManager(managerUrl, agentId, name, team, port);
     } catch (err) {
       console.warn(`⚠️  Could not register with manager: ${err}`);
       console.log(`   Agent is running but may not be discoverable by other agents.`);
@@ -349,8 +339,6 @@ Environment Variables:
   MANAGER_URL          Manager URL (default: http://localhost:4100)
   DATABASE_URL         PostgreSQL connection string (optional)
   CLAUDE_MODEL         Default model (default: claude-opus-4-20250514)
-  ID_AGENT_API_KEY     API key for inter-agent communication
-
 Examples:
   node dist/local-agent-server.js my-agent
   node dist/local-agent-server.js coder --team myproject --port 24001

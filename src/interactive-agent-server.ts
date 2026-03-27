@@ -169,17 +169,6 @@ export class InteractiveAgentServer extends EventEmitter {
     // Remote command endpoint - admin only, requires API key
     this.app.post('/remote', async (req, res) => {
       try {
-        // Extract API key from header or body
-        const apiKey = req.headers['x-api-key'] as string || req.headers['authorization']?.replace(/^Bearer\s+/i, '') || req.body?.api_key;
-
-        // Validate API key
-        if (!this.apiKeyValidator || !this.apiKeyValidator(apiKey)) {
-          return res.status(401).json({
-            error: 'Unauthorized',
-            message: 'Valid API key required. Provide via X-API-Key header, Authorization: Bearer <key>, or api_key in body.'
-          });
-        }
-
         const { command, from } = req.body || {};
 
         if (!command || typeof command !== 'string') {

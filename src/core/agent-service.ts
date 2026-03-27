@@ -15,16 +15,9 @@ import type {
 
 /**
  * Build headers for manager API requests
- * Includes API key authentication if ID_CONTROL_API_KEY is set
  */
 function buildHeaders(teamName?: string, contentType?: string): Record<string, string> {
   const headers: Record<string, string> = {};
-
-  // Add API key for authentication
-  const apiKey = process.env.ID_CONTROL_API_KEY;
-  if (apiKey) {
-    headers['X-Api-Key'] = apiKey;
-  }
 
   // Add team header if specified
   if (teamName) {
