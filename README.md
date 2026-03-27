@@ -371,6 +371,67 @@ ows key create --name "id-agents" --wallet idchain-registrar --policy idchain-on
 # OWS_PASSPHRASE=ows_key_...
 ```
 
+## Org Chart
+
+Teams can define an organizational structure in their YAML config under the `org:` key. This gives agents awareness of who they work with, who leads what, and how the team is organized.
+
+**Two primitives:**
+
+- **Groups** — recursive hierarchy with optional `lead`, `members`, `description`, and nested `groups`
+- **Tags** — flat labels that cut across groups (e.g., `reviewers: [alice, bob]`)
+
+**What happens at deploy:**
+
+1. The org chart is rendered into `ORG_CHART.md` and written to the shared team folder
+2. Each agent's `identity` skill is populated with their role context — which group they belong to, their peers, their lead, and any tags they carry
+
+**Example config:**
+
+```yaml
+org:
+  groups:
+    - name: engineering
+      lead: alice
+      description: Core product development
+      members: [bob, carol]
+      groups:
+        - name: infra
+          lead: carol
+          members: [dave]
+    - name: security
+      lead: eve
+      members: [frank]
+
+  tags:
+    reviewers: [alice, eve]
+    oncall: [carol, frank]
+```
+
+**Generated `ORG_CHART.md`:**
+
+```markdown
+# Team Org Chart
+
+## engineering
+Core product development
+- **Lead:** alice
+- **Members:** bob, carol
+
+### infra
+- **Lead:** carol
+- **Members:** dave
+
+## security
+- **Lead:** eve
+- **Members:** frank
+
+## Tags
+- **reviewers:** alice, eve
+- **oncall:** carol, frank
+```
+
+When `alice` is deployed, her identity skill knows she leads `engineering`, is tagged as a `reviewer`, and can see the full org chart for context on who to delegate to or consult.
+
 ## Ports and Networking
 
 | Component | Port | Description |
