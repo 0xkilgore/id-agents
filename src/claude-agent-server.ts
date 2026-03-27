@@ -1326,9 +1326,14 @@ What would you like to do with this information?`;
       console.log(`${logTime()} [Claude Agent] Processing query ${queryId}${from ? ` from ${from}` : ''}${options?.noAutoReply ? ' (no auto-reply)' : ''}: ${prompt.substring(0, 60)}...`);
 
       // Prepend sender info if present so Claude knows who sent the message
-      // Include timing hint: sender polls for 2 min, then relies on trigger notification
+      const isManager = from === 'manager' || from === 'remote';
       const promptWithSender = from
-        ? `[Message from agent "${from}" | Query ID: ${queryId}]
+        ? isManager
+          ? `[Message from the manager (your owner/operator) | Query ID: ${queryId}]
+[Respond directly and helpfully — this is the person who manages you.]
+
+${prompt}`
+          : `[Message from agent "${from}" | Query ID: ${queryId}]
 [Note: ${from} will poll for your reply for ~2 minutes. Your reply will be sent with trigger notification, so ${from} will be notified even for longer tasks.]
 
 ${prompt}`
