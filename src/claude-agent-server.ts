@@ -15,7 +15,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import fs from 'fs';
 import type http from 'http';
-import type { Db } from './db.js';
+import type { Db } from './db/db-service.js';
 import { safeCompare } from './core/safe-compare.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -287,37 +287,27 @@ export class ClaudeAgentServer {
   private async dbAddNews(type: string, message: string, data?: any) {
     if (!this.db || !this.dbTeamId || !this.dbAgentId) return;
     const queryId = data?.query_id;
-    await this.db.pool.query(
-      `INSERT INTO news_items (team_id, agent_id, timestamp, type, message, data, query_id)
-       VALUES ($1,$2,$3,$4,$5,$6,$7)`,
-      [this.dbTeamId, this.dbAgentId, Date.now(), type, message, data || null, queryId || null]
-    );
+    await this.db.news.add(this.dbTeamId, this.dbAgentId, {
+      timestamp: Date.now(),
+      type,
+      message: message || undefined,
+      data: data ?? undefined,
+      query_id: queryId ?? undefined,
+    });
   }
 
   private async dbUpsertQuery(query: ActiveQuery & { sessionId?: string }) {
     if (!this.db || !this.dbTeamId || !this.dbAgentId) return;
-    await this.db.pool.query(
-      `INSERT INTO queries (team_id, agent_id, query_id, status, prompt, created, completed, result, error, session_id)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
-       ON CONFLICT (team_id, agent_id, query_id)
-       DO UPDATE SET status = EXCLUDED.status,
-                     completed = EXCLUDED.completed,
-                     result = EXCLUDED.result,
-                     error = EXCLUDED.error,
-                     session_id = EXCLUDED.session_id`,
-      [
-        this.dbTeamId,
-        this.dbAgentId,
-        query.id,
-        query.status,
-        query.prompt,
-        query.created,
-        query.completed || null,
-        query.result || null,
-        query.error || null,
-        query.sessionId || null
-      ]
-    );
+    await this.db.queries.upsert(this.dbTeamId, this.dbAgentId, {
+      query_id: query.id,
+      status: query.status,
+      prompt: query.prompt,
+      created: query.created,
+      completed: query.completed ?? null,
+      result: query.result ?? null,
+      error: query.error ?? null,
+      session_id: query.sessionId ?? null,
+    });
   }
 
   private setupRoutes() {
@@ -630,14 +620,10 @@ export class ClaudeAgentServer {
       // Sync to database if connected
       if (this.db && this.dbTeamId && this.dbAgentId) {
         try {
-          // Merge catalog into agent metadata
-          await this.db.pool.query(
-            `UPDATE agents
-             SET metadata = COALESCE(metadata, '{}'::jsonb) || $3::jsonb,
-                 updated_at = $4
-             WHERE team_id = $1 AND id = $2`,
-            [this.dbTeamId, this.dbAgentId, JSON.stringify({ catalog: this.catalog }), Date.now()]
-          );
+          // Read current metadata, merge catalog, then write back
+          const agent = await this.db.agents.getById(this.dbTeamId, this.dbAgentId);
+          const merged = { ...(agent?.metadata || {}), catalog: this.catalog };
+          await this.db.agents.updateMetadata(this.dbTeamId, this.dbAgentId, merged);
         } catch (err: any) {
           console.error(`${logTime()} [Agent] Failed to sync catalog to database:`, err.message);
         }
@@ -761,26 +747,15 @@ export class ClaudeAgentServer {
         let recentNews: NewsItem[] = [];
 
         if (this.db && this.dbTeamId && this.dbAgentId) {
-          const params: any[] = [this.dbTeamId, this.dbAgentId, since];
-          let where = `team_id = $1 AND agent_id = $2 AND timestamp > $3`;
-          if (query_id) {
-            params.push(query_id);
-            where += ` AND query_id = $4`;
-          }
-
-          const rows = await this.db.pool.query<any>(
-            `SELECT type, timestamp, message, data
-             FROM news_items
-             WHERE ${where}
-             ORDER BY timestamp DESC
-             LIMIT 1000`,
-            params
-          );
-          recentNews = rows.rows.map((r: any) => ({
+          const rows = await this.db.news.poll(this.dbTeamId, this.dbAgentId, since, {
+            limit: 1000,
+            queryId: query_id,
+          });
+          recentNews = rows.map((r) => ({
             type: r.type,
             timestamp: Number(r.timestamp),
             message: r.message || undefined,
-            data: r.data || undefined
+            data: r.data || undefined,
           }));
         } else {
           recentNews = this.newsItems.filter(item => item.timestamp > since);
@@ -903,14 +878,8 @@ export class ClaudeAgentServer {
       const run = async () => {
         const qid = req.params.id;
         if (this.db && this.dbTeamId && this.dbAgentId) {
-          const r = await this.db.pool.query<any>(
-            `SELECT query_id, status, prompt, created, completed, result, error, session_id
-             FROM queries
-             WHERE team_id = $1 AND agent_id = $2 AND query_id = $3`,
-            [this.dbTeamId, this.dbAgentId, qid]
-          );
-          if (!r.rowCount) return res.status(404).json({ error: 'Query not found' });
-          const q = r.rows[0];
+          const q = await this.db.queries.getById(this.dbTeamId, this.dbAgentId, qid);
+          if (!q) return res.status(404).json({ error: 'Query not found' });
           return res.json({
             id: q.query_id,
             prompt: q.prompt,

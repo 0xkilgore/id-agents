@@ -905,19 +905,21 @@ function startManagerConnection() {
 
 // ==================== Database Setup ====================
 // Optional: if DATABASE_URL is set (and Postgres is reachable), persist this interactive agent's news feed and queries.
-try {
-  if (process.env.DATABASE_URL) {
-    localDb = createDb();
-    // Best-effort; manager also runs migrations.
-    migrateDb(localDb).catch(() => {});
-    getOrCreateTeamId(localDb, activeTeam)
-      .then((id) => {
-        localDbTeamId = id;
-      })
-      .catch(() => {});
-  }
-} catch {
-  // ignore DB init errors; CLI still works in-memory
+if (process.env.DATABASE_URL) {
+  createDb()
+    .then((db) => {
+      localDb = db;
+      // Best-effort; manager also runs migrations.
+      migrateDb(db).catch(() => {});
+      getOrCreateTeamId(db, activeTeam)
+        .then((id) => {
+          localDbTeamId = id;
+        })
+        .catch(() => {});
+    })
+    .catch(() => {
+      // ignore DB init errors; CLI still works in-memory
+    });
 }
 
 // Determine endpoint URL for registration

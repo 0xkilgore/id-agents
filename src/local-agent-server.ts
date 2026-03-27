@@ -15,7 +15,8 @@
 
 import 'dotenv/config';
 import { ClaudeAgentServer } from './claude-agent-server.js';
-import { createDb, getOrCreateTeamId, type Db } from './db.js';
+import { createDb } from './db/index.js';
+import type { Db } from './db/db-service.js';
 import fetch from 'node-fetch';
 import { mkdirSync, existsSync } from 'fs';
 import path from 'path';
@@ -178,36 +179,29 @@ export async function startLocalAgent(config: LocalAgentConfig): Promise<{
 
   if (process.env.DATABASE_URL) {
     try {
-      db = createDb();
+      db = await createDb();
       // Use pre-configured team ID if available
-      dbTeamId = process.env.ID_DB_TEAM_ID || await getOrCreateTeamId(db, team);
+      dbTeamId = process.env.ID_DB_TEAM_ID || await db.teams.getOrCreateTeamId(team);
 
       if (isPreRegistered) {
         // Just update status to 'running' - agent was already registered by manager
-        await db.pool.query(
-          `UPDATE agents SET status = 'running' WHERE team_id = $1 AND id = $2`,
-          [dbTeamId, agentId]
-        );
+        await db.agents.updateStatus(dbTeamId, agentId, 'running');
         console.log(`📦 Updated status to running in database`);
       } else {
         // Register agent in database (standalone mode)
-        await db.pool.query(
-          `INSERT INTO agents (team_id, id, name, type, model, port, endpoint, working_directory, status, created_at, metadata)
-           VALUES ($1, $2, $3, 'claude', $4, $5, $6, $7, 'running', $8, $9)
-           ON CONFLICT (team_id, id)
-           DO UPDATE SET status = 'running', port = EXCLUDED.port, endpoint = EXCLUDED.endpoint`,
-          [
-            dbTeamId,
-            agentId,
-            name,
-            model,
-            port,
-            `http://localhost:${port}`,
-            workingDirectory,
-            Date.now(),
-            { name, service_type: 'REST-AP', service: `http://localhost:${port}`, runtime: 'claude-code-local', local: true }
-          ]
-        );
+        await db.agents.upsert({
+          team_id: dbTeamId,
+          id: agentId,
+          name,
+          type: 'claude',
+          model,
+          port,
+          endpoint: `http://localhost:${port}`,
+          working_directory: workingDirectory,
+          status: 'running',
+          created_at: Date.now(),
+          metadata: { name, service_type: 'REST-AP', service: `http://localhost:${port}`, runtime: 'claude-code-local', local: true },
+        });
         console.log(`📦 Registered in database (team: ${team})`);
       }
     } catch (err) {
@@ -275,36 +269,23 @@ export async function startLocalAgent(config: LocalAgentConfig): Promise<{
         const ts = Date.now();
 
         // Cancel pending queries so they don't show as orphaned
-        const pendingQueries = await db.pool.query<{ query_id: string }>(
-          `SELECT query_id FROM queries
-           WHERE team_id = $1 AND agent_id = $2 AND status IN ('pending', 'processing')`,
-          [dbTeamId, agentId]
-        );
+        const queryIds = await db.queries.cancel(dbTeamId, agentId, ts);
 
-        if (pendingQueries.rows.length > 0) {
-          const queryIds = pendingQueries.rows.map(r => r.query_id);
-
-          await db.pool.query(
-            `UPDATE queries SET status = 'cancelled', completed = $3
-             WHERE team_id = $1 AND agent_id = $2 AND status IN ('pending', 'processing')`,
-            [dbTeamId, agentId, ts]
-          );
-
+        if (queryIds.length > 0) {
           // Add query.cancelled news items
           for (const queryId of queryIds) {
-            await db.pool.query(
-              `INSERT INTO news_items (team_id, agent_id, timestamp, type, message, data, query_id)
-               VALUES ($1, $2, $3, 'query.cancelled', 'Query cancelled (agent stopped)', $4, $5)`,
-              [dbTeamId, agentId, ts, { reason: 'agent_stopped', query_id: queryId }, queryId]
-            );
+            await db.news.add(dbTeamId, agentId, {
+              timestamp: ts,
+              type: 'query.cancelled',
+              message: 'Query cancelled (agent stopped)',
+              data: { reason: 'agent_stopped', query_id: queryId },
+              query_id: queryId,
+            });
           }
           console.log(`📋 Cancelled ${queryIds.length} pending queries`);
         }
 
-        await db.pool.query(
-          `UPDATE agents SET status = 'stopped' WHERE team_id = $1 AND id = $2`,
-          [dbTeamId, agentId]
-        );
+        await db.agents.updateStatus(dbTeamId, agentId, 'stopped');
       } catch {
         // Ignore errors
       }
@@ -315,7 +296,7 @@ export async function startLocalAgent(config: LocalAgentConfig): Promise<{
 
     // Close database connection
     if (db) {
-      await db.pool.end();
+      await db.close();
     }
   };
 

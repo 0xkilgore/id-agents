@@ -2,7 +2,7 @@
 import express from 'express';
 import { EventEmitter } from 'events';
 import { NewsItem } from './claude-agent-server.js';
-import type { Db } from './db.js';
+import type { Db } from './db/db-service.js';
 
 export interface IncomingReply {
   type: string;
@@ -98,11 +98,13 @@ export class InteractiveAgentServer extends EventEmitter {
   private async dbAddNews(item: NewsItem) {
     if (!this.db || !this.dbTeamId || !this.dbAgentId) return;
     const queryId = item.data?.query_id;
-    await this.db.pool.query(
-      `INSERT INTO news_items (team_id, agent_id, timestamp, type, message, data, query_id)
-       VALUES ($1,$2,$3,$4,$5,$6,$7)`,
-      [this.dbTeamId, this.dbAgentId, item.timestamp, item.type, item.message || null, item.data || null, queryId || null]
-    );
+    await this.db.news.add(this.dbTeamId, this.dbAgentId, {
+      timestamp: item.timestamp,
+      type: item.type,
+      message: item.message || undefined,
+      data: item.data ?? undefined,
+      query_id: queryId ?? undefined,
+    });
   }
 
   private async dbUpsertQuery(params: {
@@ -116,28 +118,16 @@ export class InteractiveAgentServer extends EventEmitter {
     sessionId?: string;
   }) {
     if (!this.db || !this.dbTeamId || !this.dbAgentId) return;
-    await this.db.pool.query(
-      `INSERT INTO queries (team_id, agent_id, query_id, status, prompt, created, completed, result, error, session_id)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
-       ON CONFLICT (team_id, agent_id, query_id)
-       DO UPDATE SET status = EXCLUDED.status,
-                     completed = EXCLUDED.completed,
-                     result = EXCLUDED.result,
-                     error = EXCLUDED.error,
-                     session_id = EXCLUDED.session_id`,
-      [
-        this.dbTeamId,
-        this.dbAgentId,
-        params.queryId,
-        params.status,
-        params.prompt || null,
-        params.created,
-        params.completed || null,
-        params.result || null,
-        params.error || null,
-        params.sessionId || null
-      ]
-    );
+    await this.db.queries.upsert(this.dbTeamId, this.dbAgentId, {
+      query_id: params.queryId,
+      status: params.status,
+      prompt: params.prompt ?? null,
+      created: params.created,
+      completed: params.completed ?? null,
+      result: params.result ?? null,
+      error: params.error ?? null,
+      session_id: params.sessionId ?? null,
+    });
   }
   
   private setupRoutes() {
@@ -325,26 +315,15 @@ export class InteractiveAgentServer extends EventEmitter {
         let recentNews: NewsItem[] = [];
 
         if (this.db && this.dbTeamId && this.dbAgentId) {
-          const params: any[] = [this.dbTeamId, this.dbAgentId, since];
-          let where = `team_id = $1 AND agent_id = $2 AND timestamp > $3`;
-          if (query_id) {
-            params.push(query_id);
-            where += ` AND query_id = $4`;
-          }
-
-          const rows = await this.db.pool.query<any>(
-            `SELECT type, timestamp, message, data
-             FROM news_items
-             WHERE ${where}
-             ORDER BY timestamp DESC
-             LIMIT 1000`,
-            params
-          );
-          recentNews = rows.rows.map((r: any) => ({
+          const rows = await this.db.news.poll(this.dbTeamId, this.dbAgentId, since, {
+            limit: 1000,
+            queryId: query_id,
+          });
+          recentNews = rows.map((r) => ({
             type: r.type,
             timestamp: Number(r.timestamp),
             message: r.message || undefined,
-            data: r.data || undefined
+            data: r.data || undefined,
           }));
         } else {
           recentNews = this.newsItems.filter(item => item.timestamp > since);
@@ -524,20 +503,14 @@ export class InteractiveAgentServer extends EventEmitter {
   // Get pending queries for the CLI
   async getPendingQueries(): Promise<PendingQuery[]> {
     if (this.db && this.dbTeamId && this.dbAgentId) {
-      const r = await this.db.pool.query<any>(
-        `SELECT query_id, prompt, created, result
-         FROM queries
-         WHERE team_id = $1 AND agent_id = $2 AND status = 'pending'
-         ORDER BY created ASC`,
-        [this.dbTeamId, this.dbAgentId]
-      );
-      return r.rows.map((row: any) => ({
+      const rows = await this.db.queries.getPending(this.dbTeamId, this.dbAgentId);
+      return rows.map((row) => ({
         query_id: row.query_id,
-        message: row.prompt || row.result?.message || '',
+        message: row.prompt || (row.result as any)?.message || '',
         timestamp: Number(row.created),
         responded: false,
-        from: row.result?.from,
-        reply_endpoint: row.result?.reply_endpoint
+        from: (row.result as any)?.from,
+        reply_endpoint: (row.result as any)?.reply_endpoint,
       }));
     }
     return Array.from(this.pendingQueries.values()).filter(q => !q.responded);

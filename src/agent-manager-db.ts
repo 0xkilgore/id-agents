@@ -23,7 +23,8 @@ import { privateKeyToAccount } from 'viem/accounts';
 import yaml from 'js-yaml';
 import { ClaudeAgentServer } from './claude-agent-server.js';
 import { registerOnIdChain, createSubnameOnIdChain, setMultiChainAddresses } from './onchain/idchain-register.js';
-import { type Db, getOrCreateTeamId } from './db.js';
+import { type Db } from './db/db-service.js';
+import type { AgentRow } from './db/types.js';
 import fetch from 'node-fetch';
 import type { PluginConfig, DeployConfig, HeartbeatConfig } from './config-parser.js';
 import { processConfig } from './config-parser.js';
@@ -115,9 +116,6 @@ async function discoverRestAPEndpoints(baseEndpoint: string): Promise<{ talk: st
   return { talk: '/talk', news: '/news' };
 }
 
-type AgentType = 'claude' | 'virtual' | 'interactive' | 'automator';
-type AgentStatus = 'starting' | 'running' | 'stopped' | 'error' | 'offline';
-
 type AgentRegistryId = {
   chainId: number;
   registryAddress: string;
@@ -129,24 +127,6 @@ type AgentMetadata = Record<string, any> & {
   service?: string;       // The service URL (e.g., https://idbot.live/{id})
   agent_account?: string;
   requireAuth?: boolean;
-};
-
-type AgentRow = {
-  team_id: string;
-  id: string;
-  name: string;
-  type: AgentType;
-  model: string;
-  port: number;
-  endpoint: string | null;
-  working_directory: string | null;
-  status: AgentStatus;
-  created_at: number;
-  registry: any;
-  metadata: any;
-  deleted_at: number | null;
-  token_id: string | null;
-  domain: string | null;
 };
 
 // WebSocket client tracking
@@ -282,7 +262,7 @@ export class AgentManagerDb {
       ID_SHARED_DIR: `${this.baseWorkDir}/teams/${teamName}`,
       ID_DB_TEAM_ID: teamId,
       ID_DB_AGENT_ID: agent.id,
-      ID_HARNESS: agent.metadata?.runtime || 'claude-agent-sdk',
+      ID_HARNESS: (agent.metadata?.runtime as string) || 'claude-agent-sdk',
       ID_PLUGINS: JSON.stringify(plugins)
     };
 
@@ -395,7 +375,7 @@ export class AgentManagerDb {
 
   private async getTeam(req: express.Request): Promise<{ name: string; id: string }> {
     const name = this.getTeamName(req);
-    const id = await getOrCreateTeamId(this.db, name);
+    const id = await this.db.teams.getOrCreateTeamId(name);
     // Ensure per-team directory exists (no cross-team shared files).
     const teamDir = `${this.baseWorkDir}/teams/${name}`;
     if (!existsSync(teamDir)) mkdirSync(teamDir, { recursive: true });
@@ -443,46 +423,15 @@ export class AgentManagerDb {
   }
 
   private async dbQueryAgentById(teamId: string, id: string): Promise<AgentRow | null> {
-    const r = await this.db.pool.query<AgentRow>(
-      `SELECT * FROM agents WHERE team_id = $1 AND id = $2 AND deleted_at IS NULL`,
-      [teamId, id]
-    );
-    return r.rows[0] || null;
+    return this.db.agents.getById(teamId, id);
   }
 
   private async dbQueryAgentByNameMostRecent(teamId: string, name: string): Promise<AgentRow | null> {
-    // First try exact name match (also check metadata->>'alias' for pre-registration local names)
-    const r = await this.db.pool.query<AgentRow>(
-      `SELECT * FROM agents WHERE team_id = $1 AND (name = $2 OR metadata->>'alias' = $2) AND deleted_at IS NULL ORDER BY created_at DESC LIMIT 1`,
-      [teamId, name]
-    );
-    if (r.rows[0]) return r.rows[0];
-
-    // If not found, try flexible resolution (handles displayId like "agent.20")
-    try {
-      const matches = await this.dbResolveAgents(teamId, name);
-      if (matches.length === 1) return matches[0];
-      if (matches.length > 1) {
-        // Return the most recent if ambiguous
-        return matches.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())[0];
-      }
-    } catch {
-      // parseAgentRef may throw on invalid format - fall through to return null
-    }
-    return null;
+    return this.db.agents.getByName(teamId, name);
   }
 
   private async dbListAgents(teamId: string, includeAutomator: boolean = false): Promise<AgentRow[]> {
-    // By default, hide automator agents from the list (they're the manager's brain, not regular agents)
-    const typeFilter = includeAutomator ? '' : `AND type != 'automator'`;
-    const r = await this.db.pool.query<AgentRow>(
-      `SELECT *
-       FROM agents
-       WHERE team_id = $1 AND deleted_at IS NULL ${typeFilter}
-       ORDER BY created_at DESC`,
-      [teamId]
-    );
-    return r.rows;
+    return this.db.agents.list(teamId, includeAutomator);
   }
 
   /**
@@ -490,55 +439,11 @@ export class AgentManagerDb {
    * Returns all matches for ambiguity detection
    */
   private async dbResolveAgents(teamId: string, ref: string): Promise<AgentRow[]> {
-    try {
-      const parsed = parseAgentRef(ref);
-      console.log(`[Resolve] Parsed "${ref}" -> alias="${parsed.alias}", tokenId="${parsed.tokenId}", domain="${parsed.domain}"`);
-
-      // Build query based on what was provided
-      // Build query based on what was provided
-      let query: string;
-      let params: any[];
-
-      if (parsed.isFullySpecified && parsed.domain) {
-        // ENS domain - exact match
-        query = `SELECT * FROM agents WHERE team_id = $1 AND (LOWER(name) = $2 OR LOWER(domain) = $2 OR metadata->>'idchain_domain' = $2) AND deleted_at IS NULL`;
-        params = [teamId, parsed.domain];
-      } else if (parsed.tokenId && parsed.alias) {
-        // alias + tokenId - must match both (name OR metadata alias) AND tokenId exactly
-        // Do NOT fall back to tokenId-only, as that could return a wrong agent
-        query = `SELECT * FROM agents WHERE team_id = $1 AND token_id = $2 AND (LOWER(name) = $3 OR LOWER(metadata->>'alias') = $3) AND deleted_at IS NULL`;
-        params = [teamId, parsed.tokenId, parsed.alias];
-        console.log(`[Resolve] Query: tokenId=${parsed.tokenId}, alias=${parsed.alias}`);
-      } else if (parsed.tokenId) {
-        // Just tokenId - match by token
-        query = `SELECT * FROM agents WHERE team_id = $1 AND token_id = $2 AND deleted_at IS NULL`;
-        params = [teamId, parsed.tokenId];
-      } else if (parsed.alias) {
-        // Just alias - match by name or original alias (could be ambiguous)
-        query = `SELECT * FROM agents WHERE team_id = $1 AND (LOWER(name) = $2 OR LOWER(metadata->>'alias') = $2) AND deleted_at IS NULL ORDER BY created_at DESC`;
-        params = [teamId, parsed.alias];
-      } else {
-        return [];
-      }
-
-      const r = await this.db.pool.query<AgentRow>(query, params);
-      console.log(`[Resolve] Found ${r.rows.length} matches`);
-      return r.rows;
-    } catch (e: any) {
-      // Log the error for debugging
-      console.error(`[Resolve] Error resolving "${ref}":`, e?.message || e);
-      return [];
-    }
+    return this.db.agents.resolve(teamId, ref);
   }
 
   private async dbNextPort(_teamId?: string): Promise<number> {
-    // Global sequential port allocation: find max port across ALL agents in all teams
-    const r = await this.db.pool.query<{ max_port: number | null }>(
-      `SELECT MAX(port) as max_port FROM agents
-       WHERE deleted_at IS NULL AND type = 'claude' AND port > 0`
-    );
-    const maxPort = r.rows[0]?.max_port ?? null;
-    return maxPort ? maxPort + 1 : 4101;
+    return this.db.agents.nextPort();
   }
 
   /**
@@ -571,8 +476,7 @@ export class AgentManagerDb {
   }
 
   private async getDefaultRegistry(teamId: string): Promise<AgentRegistryId> {
-    const r = await this.db.pool.query<{ config: any }>('SELECT config FROM teams WHERE id = $1', [teamId]);
-    const cfg = (r.rows[0]?.config || {}) as any;
+    const cfg = await this.db.teams.getConfig(teamId);
     const chainId = parseInt(String(cfg.default_chain_id || process.env.ID_DEFAULT_CHAIN_ID || '11155111'));
     const registryAddress =
       (cfg.default_registry_address ||
@@ -583,8 +487,7 @@ export class AgentManagerDb {
   }
 
   private async getRegistrarAddress(teamId: string): Promise<Address> {
-    const r = await this.db.pool.query<{ config: any }>('SELECT config FROM teams WHERE id = $1', [teamId]);
-    const cfg = (r.rows[0]?.config || {}) as any;
+    const cfg = await this.db.teams.getConfig(teamId);
     const registrarAddressEnv = process.env.AGENT_REGISTRAR_ADDRESS || process.env.SEPOLIA_REGISTRAR_ADDRESS || process.env.ID_REGISTRAR_ADDRESS;
     const addr = (cfg.sepolia_registrar_address || registrarAddressEnv) as string | undefined;
     if (!addr) throw new Error('Missing registrar address (set config.sepolia_registrar_address or env AGENT_REGISTRAR_ADDRESS)');
@@ -592,23 +495,11 @@ export class AgentManagerDb {
   }
 
   private async setRegistrarAddress(teamId: string, registrarAddress: string): Promise<void> {
-    await this.db.pool.query(
-      `UPDATE teams
-       SET config = jsonb_set(config, '{sepolia_registrar_address}', to_jsonb($2::text), true)
-       WHERE id = $1`,
-      [teamId, String(registrarAddress)]
-    );
+    await this.db.teams.setRegistrarAddress(teamId, String(registrarAddress));
   }
 
   private async setDefaultRegistry(teamId: string, chainId: number, registryAddress: string): Promise<void> {
-    // Merge into config JSON
-    await this.db.pool.query(
-      `UPDATE teams
-       SET config = jsonb_set(jsonb_set(config, '{default_chain_id}', to_jsonb($2::text), true),
-                              '{default_registry_address}', to_jsonb($3::text), true)
-       WHERE id = $1`,
-      [teamId, String(chainId), String(registryAddress)]
-    );
+    await this.db.teams.setDefaultRegistry(teamId, String(chainId), String(registryAddress));
   }
 
   private async registerOnchainAndUpdateAgent(teamId: string, agent: AgentRow): Promise<{ txHash: string; tokenId: string; domain: string }> {
@@ -707,10 +598,13 @@ export class AgentManagerDb {
       }
     }
 
-    await this.db.pool.query(
-      `UPDATE agents SET name = $3, token_id = $4, domain = $5, endpoint = $6, metadata = $7 WHERE team_id = $1 AND id = $2`,
-      [teamId, agent.id, newName, tokenId, newName, dbEndpoint, metadata]
-    );
+    await this.db.agents.updateIdentity(teamId, agent.id, {
+      name: newName,
+      token_id: tokenId,
+      domain: newName,
+      endpoint: dbEndpoint,
+      metadata,
+    });
 
     // Update running server identity
     const server = this.runningServers.get(this.key(teamId, agent.id));
@@ -772,44 +666,25 @@ export class AgentManagerDb {
 
     // After registration, agent.name becomes the ENS domain and the original
     // local alias is in metadata->>'alias'.  Queries must check both.
-    const agentRows = tokenId
-      ? await this.db.pool.query<any>(
-          `SELECT id, name, type, endpoint, metadata, token_id FROM agents
-           WHERE team_id = $1 AND (name = $2 OR metadata->>'alias' = $2) AND token_id = $3
-           AND deleted_at IS NULL
-           LIMIT 1`,
-          [teamId, baseName, tokenId]
-        )
-      : await this.db.pool.query<any>(
-          `SELECT id, name, type, endpoint, metadata, token_id FROM agents
-           WHERE team_id = $1 AND (
-             name = $2 OR id = $2 OR
-             (metadata->>'alias' = $2)
-           )
-           AND deleted_at IS NULL
-           ORDER BY created_at DESC LIMIT 1`,
-          [teamId, agent]
-        );
+    const targetAgent = await this.db.agents.getForRouting(teamId, agent, tokenId ?? undefined);
 
-    if (agentRows.rows.length === 0) {
+    if (!targetAgent) {
       return { error: `Agent "${agent}" not found`, status: 404 };
     }
-
-    const targetAgent = agentRows.rows[0];
 
     const isLocalAgent = targetAgent.metadata?.local === true;
     const targetUrl = isLocalAgent
       ? (targetAgent.endpoint || `http://localhost:${targetAgent.port}`)
       : targetAgent.type === 'claude'
         ? `http://id-agent-${targetAgent.id}:4100`
-        : (targetAgent.metadata?.internal_url || targetAgent.endpoint);
+        : ((targetAgent.metadata?.internal_url as string | undefined) || targetAgent.endpoint);
 
     if (!targetUrl) {
       return { error: `Agent "${agent}" has no endpoint`, status: 400 };
     }
 
     // Prefer ENS domain as display ID, fall back to local name
-    const targetDomain = targetAgent.metadata?.idchain_domain;
+    const targetDomain = targetAgent.metadata?.idchain_domain as string | undefined;
     const targetDisplayId = targetDomain || targetAgent.name;
 
     return { targetAgent, targetUrl, targetDisplayId };
@@ -888,12 +763,7 @@ export class AgentManagerDb {
 
       // Store the query so replies can be routed correctly
       if (queryId) {
-        await this.db.pool.query(
-          `INSERT INTO queries (team_id, query_id, agent_id, prompt, status, created)
-           VALUES ($1, $2, $3, $4, 'pending', $5)
-           ON CONFLICT (team_id, agent_id, query_id) DO NOTHING`,
-          [teamId, queryId, targetAgent.id, message, Date.now()]
-        );
+        await this.db.queries.create(teamId, queryId, targetAgent.id, message, Date.now());
       }
 
       // Fire-and-forget: return immediately
@@ -965,11 +835,8 @@ export class AgentManagerDb {
   private setupRoutes() {
     this.managementApp.get('/health', async (req, res) => {
       const { id: teamId, name: teamName } = await this.getTeam(req);
-      const count = await this.db.pool.query<{ c: string }>(
-        `SELECT COUNT(*)::text as c FROM agents WHERE team_id = $1 AND deleted_at IS NULL`,
-        [teamId]
-      );
-      res.json({ status: 'ok', team: teamName, agents: parseInt(count.rows[0]?.c || '0'), timestamp: Date.now() });
+      const count = await this.db.agents.count(teamId);
+      res.json({ status: 'ok', team: teamName, agents: parseInt(count || '0'), timestamp: Date.now() });
     });
 
     // GET /agents/status - check health of all agents (server-side ping)
@@ -1113,19 +980,16 @@ export class AgentManagerDb {
         const senderName = from || 'external';
 
         // Store the query in the queries table
-        await this.db.pool.query(
-          `INSERT INTO queries (team_id, query_id, agent_id, created, prompt, status, session_id)
-           VALUES ($1, $2, $3, $4, $5, 'pending', $6)`,
-          [teamId, queryId, managerId, ts, `[From: ${senderName}] ${message}`, session_id || null]
-        );
+        await this.db.queries.create(teamId, queryId, managerId, `[From: ${senderName}] ${message}`, ts, session_id || undefined);
 
         // Also store as a news item so the CLI can see incoming queries
-        await this.db.pool.query(
-          `INSERT INTO news_items (team_id, agent_id, timestamp, type, message, data, query_id)
-           VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-          [teamId, managerId, ts, 'query.received', `Query from ${senderName}: ${message.slice(0, 100)}${message.length > 100 ? '...' : ''}`,
-           { from: senderName, message, session_id, query_id: queryId }, queryId]
-        );
+        await this.db.news.add(teamId, managerId, {
+          timestamp: ts,
+          type: 'query.received',
+          message: `Query from ${senderName}: ${message.slice(0, 100)}${message.length > 100 ? '...' : ''}`,
+          data: { from: senderName, message, session_id, query_id: queryId },
+          query_id: queryId,
+        });
 
         this.managerLog(`Received query ${queryId} from ${senderName}: ${message.slice(0, 50)}...`);
 
@@ -1169,12 +1033,9 @@ export class AgentManagerDb {
         // If this is a reply to a query, look up the original query's team
         // This ensures replies go to the correct team even if sender doesn't specify
         if (in_reply_to) {
-          const queryResult = await this.db.pool.query<{ team_id: string }>(
-            `SELECT team_id FROM queries WHERE query_id = $1 LIMIT 1`,
-            [in_reply_to]
-          );
-          if (queryResult.rows.length > 0) {
-            teamId = queryResult.rows[0].team_id;
+          const queryTeamId = await this.db.queries.findTeam(in_reply_to);
+          if (queryTeamId) {
+            teamId = queryTeamId;
             this.managerLog(`Reply to ${in_reply_to} - using query's team ${teamId}`);
           }
         }
@@ -1185,29 +1046,24 @@ export class AgentManagerDb {
 
         // Store in news_items table for the CLI (interactive agent)
         // Look up the actual interactive agent for this team
-        const cliAgent = await this.db.pool.query<any>(
-          `SELECT id FROM agents WHERE team_id = $1 AND type = 'interactive' AND deleted_at IS NULL LIMIT 1`,
-          [teamId]
-        );
+        const cliAgent = await this.db.agents.findInteractive(teamId);
 
-        if (cliAgent.rows.length > 0) {
-          const cliId = cliAgent.rows[0].id;
-          await this.db.pool.query(
-            `INSERT INTO news_items (team_id, agent_id, timestamp, type, message, data, query_id)
-             VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-            [teamId, cliId, ts, newsType, newsMessage, { from, in_reply_to, message, ...data }, in_reply_to || null]
-          );
+        if (cliAgent) {
+          const cliId = cliAgent.id;
+          await this.db.news.add(teamId, cliId, {
+            timestamp: ts,
+            type: newsType,
+            message: newsMessage,
+            data: { from, in_reply_to, message, ...data },
+            query_id: in_reply_to || undefined,
+          });
         } else {
           this.managerLog(`Warning: No interactive agent found for team ${teamId}, cannot store news`);
         }
 
         // If this is a reply to a query, update the query status and resolve any waiting /talk-to
         if (in_reply_to) {
-          await this.db.pool.query(
-            `UPDATE queries SET status = 'completed', completed = $3, result = $4
-             WHERE team_id = $1 AND query_id = $2 AND status = 'pending'`,
-            [teamId, in_reply_to, ts, { from, message, ...data }]
-          );
+          await this.db.queries.complete(teamId, in_reply_to, ts, { from, message, ...data });
 
           // Resolve any waiting /talk-to request (waiter may still exist even if HTTP timed out)
           const waiter = this.queryWaiters.get(in_reply_to);
@@ -1234,15 +1090,10 @@ export class AgentManagerDb {
 
         // Try to forward to CLI if it can receive direct messages
         // Look up the CLI (interactive agent) to check if it's reachable
-        const recipientRows = await this.db.pool.query<any>(
-          `SELECT endpoint, metadata FROM agents
-           WHERE team_id = $1 AND type = 'interactive' AND deleted_at IS NULL
-           ORDER BY created_at DESC LIMIT 1`,
-          [teamId]
-        );
+        const recipientAgent = await this.db.agents.findInteractive(teamId);
 
-        if (recipientRows.rows.length > 0) {
-          const recipient = recipientRows.rows[0];
+        if (recipientAgent) {
+          const recipient = recipientAgent;
           const canReceive = recipient.metadata?.canReceiveDirectMessages === true;
 
           if (canReceive && recipient.endpoint) {
@@ -1292,35 +1143,20 @@ export class AgentManagerDb {
         const query_id = req.query.query_id as string | undefined;
 
         // Look up the actual interactive agent (CLI) for this team
-        const cliAgent = await this.db.pool.query<any>(
-          `SELECT id FROM agents WHERE team_id = $1 AND type = 'interactive' AND deleted_at IS NULL LIMIT 1`,
-          [teamId]
-        );
+        const cliAgentRow = await this.db.agents.findInteractive(teamId);
 
-        if (cliAgent.rows.length === 0) {
+        if (!cliAgentRow) {
           return res.json({ items: [] });
         }
 
-        const cliId = cliAgent.rows[0].id;
+        const cliId = cliAgentRow.id;
 
-        let whereClause = `team_id = $1 AND agent_id = $2 AND timestamp > $3`;
-        const params: any[] = [teamId, cliId, since];
+        const newsRows = await this.db.news.poll(teamId, cliId, since, {
+          limit,
+          queryId: query_id,
+        });
 
-        if (query_id) {
-          params.push(query_id);
-          whereClause += ` AND query_id = $${params.length}`;
-        }
-
-        const rows = await this.db.pool.query<any>(
-          `SELECT type, timestamp, message, data
-           FROM news_items
-           WHERE ${whereClause}
-           ORDER BY timestamp DESC
-           LIMIT $${params.length + 1}`,
-          [...params, limit]
-        );
-
-        const items = rows.rows.map((r: any) => ({
+        const items = newsRows.map((r: any) => ({
           type: r.type,
           timestamp: Number(r.timestamp),
           message: r.message || undefined,
@@ -1346,15 +1182,7 @@ export class AgentManagerDb {
         const cutoffTimestamp = Date.now() - (days * 24 * 60 * 60 * 1000);
 
         // Get all news items older than cutoff
-        const result = await this.db.pool.query<any>(
-          `SELECT type, timestamp, message, data, agent_id, query_id
-           FROM news_items
-           WHERE team_id = $1 AND timestamp < $2
-           ORDER BY timestamp ASC`,
-          [teamId, cutoffTimestamp]
-        );
-
-        const items = result.rows;
+        const items = await this.db.news.fetchForArchive(teamId, cutoffTimestamp);
         if (items.length === 0) {
           return res.json({ archived: 0, message: 'No items to archive' });
         }
@@ -1384,10 +1212,7 @@ export class AgentManagerDb {
         writeFileSync(filepath, JSON.stringify(archiveData, null, 2));
 
         // Delete archived items from database
-        await this.db.pool.query(
-          `DELETE FROM news_items WHERE team_id = $1 AND timestamp < $2`,
-          [teamId, cutoffTimestamp]
-        );
+        await this.db.news.deleteArchived(teamId, cutoffTimestamp);
 
         console.log(`[Manager] Archived ${items.length} news items to ${filepath}`);
         res.json({
@@ -1507,20 +1332,15 @@ export class AgentManagerDb {
 
     // List all teams from database
     this.managementApp.get('/teams', async (req, res) => {
-      const teams = await this.db.pool.query(
-        `SELECT id, name, created_at FROM teams ORDER BY created_at DESC`
-      );
+      const teams = await this.db.teams.listTeams();
 
       const teamList = await Promise.all(
-        teams.rows.map(async (team: any) => {
-          const agentCount = await this.db.pool.query<{ count: string }>(
-            'SELECT COUNT(*)::text as count FROM agents WHERE team_id = $1 AND deleted_at IS NULL',
-            [team.id]
-          );
+        teams.map(async (team) => {
+          const agentCount = await this.db.agents.count(team.id);
           return {
             id: team.id,
             name: team.name,
-            agentCount: parseInt(agentCount.rows[0]?.count || '0'),
+            agentCount: parseInt(agentCount || '0'),
             createdAt: team.created_at
           };
         })
@@ -1534,7 +1354,7 @@ export class AgentManagerDb {
       const { name } = req.body || {};
       if (!name) return res.status(400).json({ error: 'Missing team name' });
       try {
-        const teamId = await getOrCreateTeamId(this.db, name);
+        const teamId = await this.db.teams.getOrCreateTeamId(name);
 
         // Create team directory
         const teamDir = `${this.baseWorkDir}/teams/${name}`;
@@ -1542,18 +1362,14 @@ export class AgentManagerDb {
           mkdirSync(teamDir, { recursive: true });
         }
 
-        const team = await this.db.pool.query(
-          'SELECT id, name, created_at FROM teams WHERE id = $1',
-          [teamId]
-        );
-        if (team.rows.length === 0) {
+        const team = await this.db.teams.getTeam(teamId);
+        if (!team) {
           return res.status(500).json({ error: 'Failed to create team' });
         }
-        const row = team.rows[0];
         res.json({
-          id: row.id,
-          name: row.name,
-          createdAt: row.created_at
+          id: team.id,
+          name: team.name,
+          createdAt: team.created_at
         });
       } catch (error: any) {
         console.error('Error creating team:', error);
@@ -1566,15 +1382,12 @@ export class AgentManagerDb {
       const { name } = req.params;
 
       try {
-        const team = await this.db.pool.query(
-          'SELECT id, name FROM teams WHERE name = $1',
-          [name]
-        );
-        if (!team.rows.length) {
+        const team = await this.db.teams.getTeamByName(name);
+        if (!team) {
           return res.status(404).json({ error: `Team "${name}" not found` });
         }
 
-        res.json({ name: team.rows[0].name, message: 'Port ranges are no longer used. Ports are allocated globally.' });
+        res.json({ name: team.name, message: 'Port ranges are no longer used. Ports are allocated globally.' });
       } catch (error: any) {
         res.status(500).json({ error: error.message || 'Failed to update team' });
       }
@@ -1589,23 +1402,20 @@ export class AgentManagerDb {
 
       try {
         // Find the team
-        const team = await this.db.pool.query(
-          'SELECT id, name FROM teams WHERE name = $1',
-          [name]
-        );
+        const team = await this.db.teams.getTeamByName(name);
 
-        if (team.rows.length === 0) {
+        if (!team) {
           return res.status(404).json({ error: `Team "${name}" not found` });
         }
 
-        const teamId = team.rows[0].id;
+        const teamId = team.id;
 
-        // Check if team has ANY agents (including soft-deleted)
-        const agents = await this.db.pool.query(
+        // TODO: move to repository — unfiltered agent count (including soft-deleted)
+        const countResult = await this.db.adapter.query<{ count: string }>(
           'SELECT COUNT(*)::text as count FROM agents WHERE team_id = $1',
           [teamId]
         );
-        const agentCount = parseInt(agents.rows[0]?.count || '0');
+        const agentCount = parseInt(countResult.rows[0]?.count || '0');
 
         if (agentCount > 0) {
           return res.status(400).json({
@@ -1614,7 +1424,7 @@ export class AgentManagerDb {
         }
 
         // Delete the team
-        await this.db.pool.query('DELETE FROM teams WHERE id = $1', [teamId]);
+        await this.db.teams.deleteTeam(teamId);
 
         // Optionally remove the team directory (but keep files as backup)
         // const teamDir = `${this.baseWorkDir}/teams/${name}`;
@@ -1629,30 +1439,25 @@ export class AgentManagerDb {
 
     // Backwards compatibility: /projects endpoints
     this.managementApp.get('/projects', async (req, res) => {
-      const teams = await this.db.pool.query(
-        `SELECT id, name, config, created_at FROM teams ORDER BY created_at DESC`
-      );
+      const teams = await this.db.teams.listTeamsWithConfig();
 
       const projectList = await Promise.all(
-        teams.rows.map(async (team: any) => {
+        teams.map(async (team) => {
           // Count agents in this team
-          const agentCount = await this.db.pool.query<{ count: string }>(
-            'SELECT COUNT(*)::text as count FROM agents WHERE team_id = $1 AND deleted_at IS NULL',
-            [team.id]
-          );
+          const agentCount = await this.db.agents.count(team.id);
 
           // Get registry info from config
           const config = team.config || {};
           const registryInfo = {
-            chainId: config.default_chain_id,
-            registryAddress: config.default_registry_address,
-            registrarAddress: config.sepolia_registrar_address
+            chainId: (config as any).default_chain_id,
+            registryAddress: (config as any).default_registry_address,
+            registrarAddress: (config as any).sepolia_registrar_address
           };
 
           return {
             id: team.id,
             name: team.name,
-            agentCount: parseInt(agentCount.rows[0]?.count || '0'),
+            agentCount: parseInt(agentCount || '0'),
             registry: registryInfo,
             createdAt: team.created_at
           };
@@ -1669,23 +1474,19 @@ export class AgentManagerDb {
 
       try {
         // Create team in database (will auto-assign port range)
-        const teamId = await getOrCreateTeamId(this.db, name);
+        const teamId = await this.db.teams.getOrCreateTeamId(name);
 
         // Get the created team details
-        const team = await this.db.pool.query(
-          'SELECT id, name, created_at FROM teams WHERE id = $1',
-          [teamId]
-        );
+        const team = await this.db.teams.getTeam(teamId);
 
-        if (team.rows.length === 0) {
+        if (!team) {
           return res.status(500).json({ error: 'Failed to create project' });
         }
 
-        const row = team.rows[0];
         res.json({
-          id: row.id,
-          name: row.name,
-          createdAt: row.created_at
+          id: team.id,
+          name: team.name,
+          createdAt: team.created_at
         });
       } catch (error: any) {
         console.error('Error creating project:', error);
@@ -1777,16 +1578,27 @@ export class AgentManagerDb {
           ...(heartbeat && { heartbeat: true })
         };
 
-        await this.db.pool.query(
-          `INSERT INTO agents (team_id, id, name, type, model, port, endpoint, working_directory, status, created_at, metadata, api_key, token_id, domain)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
-          [teamId, id, name, effectiveAgentType, effectiveModel, 0, null, workingDirectory, 'starting', Date.now(), metadata, apiKey || null, tokenId || null, domain || null]
-        );
+        await this.db.agents.create({
+          team_id: teamId,
+          id,
+          name,
+          type: effectiveAgentType,
+          model: effectiveModel,
+          port: 0,
+          endpoint: null,
+          working_directory: workingDirectory,
+          status: 'starting',
+          created_at: Date.now(),
+          metadata,
+          api_key: apiKey || null,
+          token_id: tokenId || null,
+          domain: domain || null,
+        });
 
         // Derive agent_account from request address, or fall back to shared deployer key
         const deployerAddress = this.getDeployerAddress();
         const updatedMeta = { ...metadata, agent_account: address || deployerAddress };
-        await this.db.pool.query(`UPDATE agents SET metadata = $3 WHERE team_id = $1 AND id = $2`, [teamId, id, updatedMeta]);
+        await this.db.agents.updateMetadata(teamId, id, updatedMeta);
 
         // All agents run locally
         const allocatedPort = await this.dbNextPort(teamId);
@@ -1798,10 +1610,11 @@ export class AgentManagerDb {
           local: true,
           runtime: effectiveRuntime
         };
-        await this.db.pool.query(
-          `UPDATE agents SET status = 'pending', port = $3, endpoint = $4, metadata = $5 WHERE team_id = $1 AND id = $2`,
-          [teamId, id, allocatedPort, url, finalMeta]
-        );
+        await this.db.agents.updateStatus(teamId, id, 'pending', {
+          port: allocatedPort,
+          endpoint: url,
+          metadata: finalMeta,
+        });
 
         // Use host paths for local agents
         // If configWorkDir is an absolute path, use it directly (project repo)
@@ -1836,10 +1649,7 @@ export class AgentManagerDb {
         // Ensure we never return Express's default HTML error page (CLI expects JSON).
         try {
           if (teamId && id) {
-            await this.db.pool.query(
-              `UPDATE agents SET status = 'error' WHERE team_id = $1 AND id = $2`,
-              [teamId, id]
-            );
+            await this.db.agents.updateStatus(teamId, id, 'error');
           }
         } catch {
           // ignore
@@ -1881,11 +1691,7 @@ export class AgentManagerDb {
       // Backwards-compat: if client didn't provide an id, keep the old "dedupe by name" behavior.
       // If client provides an id, treat id as canonical and do not delete other agents that happen to share the same name.
       if (!requestedId) {
-        await this.db.pool.query(
-          `UPDATE agents SET deleted_at = $3
-           WHERE team_id = $1 AND name = $2 AND type IN ('virtual','interactive') AND id <> $4 AND deleted_at IS NULL`,
-          [teamId, name, Date.now(), id]
-        );
+        await this.db.agents.softDelete(teamId, name, id, Date.now());
       }
 
       const meta: AgentMetadata = {
@@ -1898,27 +1704,27 @@ export class AgentManagerDb {
       // Extract domain from request body if provided
       const reqDomain = (req.body as any).domain || null;
 
-      await this.db.pool.query(
-        `INSERT INTO agents (team_id, id, name, type, model, port, endpoint, working_directory, status, created_at, metadata, domain)
-         VALUES ($1,$2,$3,$7,'external',0,$4,'','running',$5,$6,$8)
-         ON CONFLICT (team_id, id)
-         DO UPDATE SET name = EXCLUDED.name,
-                       type = EXCLUDED.type,
-                       endpoint = EXCLUDED.endpoint,
-                       status = EXCLUDED.status,
-                       metadata = EXCLUDED.metadata,
-                       created_at = EXCLUDED.created_at,
-                       domain = COALESCE(EXCLUDED.domain, agents.domain),
-                       deleted_at = NULL`,
-        [teamId, id, name, endpoint, Date.now(), meta, type, reqDomain]
-      );
+      await this.db.agents.upsert({
+        team_id: teamId,
+        id,
+        name,
+        type,
+        model: 'external',
+        port: 0,
+        endpoint,
+        working_directory: '',
+        status: 'running',
+        created_at: Date.now(),
+        metadata: meta,
+        domain: reqDomain,
+      });
 
       // Set agent_account from shared deployer key for display/identity purposes
       let nextMeta = meta;
       if (!nextMeta.agent_account) {
         const deployerAddress = this.getDeployerAddress();
         nextMeta = { ...nextMeta, agent_account: deployerAddress };
-        await this.db.pool.query(`UPDATE agents SET metadata = $3 WHERE team_id = $1 AND id = $2`, [teamId, id, nextMeta]);
+        await this.db.agents.updateMetadata(teamId, id, nextMeta);
       }
 
       res.status(201).json({
@@ -1941,11 +1747,7 @@ export class AgentManagerDb {
       const { metadata } = req.body || {};
       const nextMetadata = metadata ? { ...(agent.metadata || {}), ...(metadata || {}) } : agent.metadata;
 
-      await this.db.pool.query(`UPDATE agents SET metadata = $3 WHERE team_id = $1 AND id = $2`, [
-        teamId,
-        agent.id,
-        nextMetadata
-      ]);
+      await this.db.agents.updateMetadata(teamId, agent.id, nextMetadata);
 
       const server = this.runningServers.get(this.key(teamId, agent.id));
       if (server && agent.type === 'claude') {
@@ -1967,11 +1769,7 @@ export class AgentManagerDb {
       const { metadata } = req.body || {};
       const nextMetadata = metadata ? { ...(agent.metadata || {}), ...(metadata || {}) } : agent.metadata;
 
-      await this.db.pool.query(`UPDATE agents SET metadata = $3 WHERE team_id = $1 AND id = $2`, [
-        teamId,
-        agent.id,
-        nextMetadata
-      ]);
+      await this.db.agents.updateMetadata(teamId, agent.id, nextMetadata);
 
       const server = this.runningServers.get(this.key(teamId, agent.id));
       if (server && agent.type === 'claude') {
@@ -2063,10 +1861,7 @@ export class AgentManagerDb {
 
       try {
         // Update model in database - agent needs restart to pick up new model
-        await this.db.pool.query(
-          'UPDATE agents SET model = $1, status = $2 WHERE team_id = $3 AND id = $4',
-          [model, 'pending', teamId, agent.id]
-        );
+        await this.db.agents.updateStatus(teamId, agent.id, 'pending', { model });
 
         console.log(`[Manager] Updated model for ${agent.name} to ${model} - restart required`);
 
@@ -2090,26 +1885,17 @@ export class AgentManagerDb {
         if (!agent) return res.status(404).json({ error: 'Agent not found' });
 
         const { wallet, name: newName } = req.body;
-        const updates: string[] = [];
-        const params: any[] = [teamId, agent.id];
-        let paramIdx = 3;
+        const hasUpdates = wallet || newName;
+
+        if (!hasUpdates) return res.status(400).json({ error: 'No updates provided' });
 
         if (wallet) {
           const metadata = { ...(agent.metadata as any || {}), wallet_address: wallet };
-          updates.push(`metadata = $${paramIdx++}`);
-          params.push(metadata);
+          await this.db.agents.updateMetadata(teamId, agent.id, metadata);
         }
         if (newName) {
-          updates.push(`name = $${paramIdx++}`);
-          params.push(newName);
+          await this.db.agents.updateIdentity(teamId, agent.id, { name: newName });
         }
-
-        if (updates.length === 0) return res.status(400).json({ error: 'No updates provided' });
-
-        await this.db.pool.query(
-          `UPDATE agents SET ${updates.join(', ')} WHERE team_id = $1 AND id = $2`,
-          params
-        );
 
         res.json({ ok: true, updated: Object.keys(req.body) });
       } catch (err: any) {
@@ -2147,7 +1933,7 @@ export class AgentManagerDb {
       }
 
       // Delete record (cascades wallets/news/queries)
-      await this.db.pool.query(`DELETE FROM agents WHERE team_id = $1 AND id = $2`, [teamId, agent.id]);
+      await this.db.agents.deleteAgent(teamId, agent.id);
       res.json({ message: 'Agent deleted', id: agent.id, name: agent.name });
     });
 
@@ -2169,7 +1955,7 @@ export class AgentManagerDb {
           if (agent.working_directory === expectedDir) rmSync(agent.working_directory, { recursive: true, force: true });
         } catch {}
       }
-      await this.db.pool.query(`DELETE FROM agents WHERE team_id = $1 AND id = $2`, [teamId, agent.id]);
+      await this.db.agents.deleteAgent(teamId, agent.id);
       res.json({ message: 'Agent deleted', id: agent.id, name: agent.name });
     });
 
@@ -2319,7 +2105,8 @@ export class AgentManagerDb {
 
             // If we already have this onchain agent locally (e.g., a spawned claude agent with the same tokenId),
             // merge into that record instead of creating a separate virtual duplicate.
-            const existing = await this.db.pool.query<{ id: string; type: string }>(
+            // TODO: move to repository — token_id-only lookup across types
+            const existing = await this.db.adapter.query<{ id: string; type: string }>(
               `SELECT id, type
                FROM agents
                WHERE team_id = $1
@@ -2334,14 +2121,12 @@ export class AgentManagerDb {
               const existingId = existing.rows[0].id;
               const existingType = existing.rows[0].type;
               // Merge metadata; don't stomp local endpoint/port for claude agents.
-              const current = await this.db.pool.query<any>(
-                `SELECT metadata, endpoint FROM agents WHERE team_id = $1 AND id = $2`,
-                [teamId, existingId]
-              );
-              const currentMeta = (current.rows[0]?.metadata || {}) as any;
+              const currentAgent = await this.db.agents.getById(teamId, existingId);
+              const currentMeta = (currentAgent?.metadata || {}) as any;
               const mergedMeta = { ...currentMeta, ...metadata, name: currentMeta.name || metadata.name };
 
-              await this.db.pool.query(
+              // TODO: move to repository — conditional endpoint update
+              await this.db.adapter.query(
                 `UPDATE agents
                  SET token_id = $3,
                      metadata = $4,
@@ -2351,9 +2136,9 @@ export class AgentManagerDb {
                 [teamId, existingId, tokenId, mergedMeta, existingType, ra.endpoint || null]
               );
 
-              // Clean up any previously-created onchain_* virtual row for the same token (from older pulls).
+              // TODO: move to repository — delete virtual agent by id with type guard
               const onchainId = `onchain_${chainId}_${regAddr}_${tokenId}`;
-              await this.db.pool.query(`DELETE FROM agents WHERE team_id = $1 AND id = $2 AND type = 'virtual'`, [
+              await this.db.adapter.query(`DELETE FROM agents WHERE team_id = $1 AND id = $2 AND type = 'virtual'`, [
                 teamId,
                 onchainId
               ]);
@@ -2364,18 +2149,20 @@ export class AgentManagerDb {
 
             // Otherwise upsert as a stable virtual id
             const id = `onchain_${chainId}_${regAddr}_${tokenId}`;
-            await this.db.pool.query(
-              `INSERT INTO agents (team_id, id, name, type, model, port, endpoint, working_directory, status, created_at, metadata, token_id)
-               VALUES ($1,$2,$3,'virtual','external',0,$4,'','running',$5,$6,$7)
-               ON CONFLICT (team_id, id)
-               DO UPDATE SET name = EXCLUDED.name,
-                             endpoint = EXCLUDED.endpoint,
-                             status = EXCLUDED.status,
-                             metadata = EXCLUDED.metadata,
-                             token_id = EXCLUDED.token_id,
-                             deleted_at = NULL`,
-              [teamId, id, nameHint, ra.endpoint || null, Date.now(), metadata, tokenId]
-            );
+            await this.db.agents.upsert({
+              team_id: teamId,
+              id,
+              name: nameHint,
+              type: 'virtual',
+              model: 'external',
+              port: 0,
+              endpoint: ra.endpoint || null,
+              working_directory: '',
+              status: 'running',
+              created_at: Date.now(),
+              metadata,
+              token_id: tokenId,
+            });
             discovery.upserted += 1;
           } catch (e: any) {
             discovery.errors.push(`agent ${agentId}: ${e?.message || String(e)}`);
@@ -2399,36 +2186,17 @@ export class AgentManagerDb {
             const tokenId = agent.tokenId;
 
             // Never spawn a Claude copy for an interactive agent already linked to this token.
-            const hasInteractive = await this.db.pool.query(
-              `SELECT 1
-               FROM agents
-               WHERE team_id = $1
-                 AND deleted_at IS NULL
-                 AND type = 'interactive'
-                 AND (registry->>'chainId') = $2
-                 AND LOWER(registry->>'registryAddress') = LOWER($3)
-                 AND (registry->>'tokenId') = $4
-               LIMIT 1`,
-              [teamId, String(agent.chainId), String(agent.registryAddress), tokenId]
+            const interactiveAgent = await this.db.agents.findByRegistry(
+              teamId, String(agent.chainId), String(agent.registryAddress), tokenId
             );
-            if (hasInteractive.rowCount) continue;
+            if (interactiveAgent && interactiveAgent.type === 'interactive') continue;
 
             // If a Claude agent already exists for this token, ensure server is running.
-            const existingClaude = await this.db.pool.query<AgentRow>(
-              `SELECT *
-               FROM agents
-               WHERE team_id = $1
-                 AND deleted_at IS NULL
-                 AND type = 'claude'
-                 AND (registry->>'chainId') = $2
-                 AND LOWER(registry->>'registryAddress') = LOWER($3)
-                 AND (registry->>'tokenId') = $4
-               ORDER BY created_at DESC
-               LIMIT 1`,
-              [teamId, String(agent.chainId), String(agent.registryAddress), tokenId]
+            const existingClaudeAgent = await this.db.agents.findByRegistry(
+              teamId, String(agent.chainId), String(agent.registryAddress), tokenId
             );
-            if (existingClaude.rowCount && existingClaude.rows[0]) {
-              const a = existingClaude.rows[0];
+            if (existingClaudeAgent && existingClaudeAgent.type === 'claude') {
+              const a = existingClaudeAgent;
               const key = this.key(teamId, a.id);
               if (!this.runningServers.get(key)) {
                 try {
@@ -2461,11 +2229,8 @@ export class AgentManagerDb {
 
             // Ensure handle uniqueness (keep handles stable and unique even if onchain display names collide)
             let handle = nameHint;
-            const handleExists = await this.db.pool.query(
-              `SELECT 1 FROM agents WHERE team_id = $1 AND deleted_at IS NULL AND name = $2 LIMIT 1`,
-              [teamId, handle]
-            );
-            if (handleExists.rowCount) {
+            const existingByName = await this.db.agents.getByName(teamId, handle);
+            if (existingByName) {
               handle = `${nameHint}_${tokenId}`;
             }
 
@@ -2475,19 +2240,24 @@ export class AgentManagerDb {
               endpoint: `http://localhost:${port}`
             };
 
-            await this.db.pool.query(
-              `INSERT INTO agents (team_id, id, name, type, model, port, endpoint, working_directory, status, created_at, metadata, token_id)
-               VALUES ($1,$2,$3,'claude',$4,$5,$6,$7,'starting',$8,$9,$10)`,
-              [teamId, claudeId, handle, defaultModel, port, null, workingDirectory, Date.now(), metadata, tokenId]
-            );
+            await this.db.agents.create({
+              team_id: teamId,
+              id: claudeId,
+              name: handle,
+              type: 'claude',
+              model: defaultModel,
+              port,
+              endpoint: null,
+              working_directory: workingDirectory,
+              status: 'starting',
+              created_at: Date.now(),
+              metadata,
+              token_id: tokenId,
+            });
 
             const deployerAddress = this.getDeployerAddress();
             const updatedMeta = { ...metadata, agent_account: deployerAddress };
-            await this.db.pool.query(`UPDATE agents SET metadata = $3 WHERE team_id = $1 AND id = $2`, [
-              teamId,
-              claudeId,
-              updatedMeta
-            ]);
+            await this.db.agents.updateMetadata(teamId, claudeId, updatedMeta);
 
             const server = new ClaudeAgentServer({
               model: defaultModel,
@@ -2499,10 +2269,7 @@ export class AgentManagerDb {
             });
             await server.start(port);
             this.runningServers.set(this.key(teamId, claudeId), server);
-            await this.db.pool.query(`UPDATE agents SET status = 'running' WHERE team_id = $1 AND id = $2`, [
-              teamId,
-              claudeId
-            ]);
+            await this.db.agents.updateStatus(teamId, claudeId, 'running');
 
             spawned++;
           }
@@ -2576,7 +2343,7 @@ export class AgentManagerDb {
             agent_account: agentAccount || agent.metadata?.agent_account
           };
 
-          await this.db.pool.query(`UPDATE agents SET metadata = $3 WHERE team_id = $1 AND id = $2`, [teamId, agent.id, nextMetadata]);
+          await this.db.agents.updateMetadata(teamId, agent.id, nextMetadata);
 
           // Update running server identity
           const server = this.runningServers.get(this.key(teamId, agent.id));
@@ -2801,10 +2568,7 @@ export class AgentManagerDb {
             }
             // Update metadata to enable heartbeat
             const newMetadata = { ...agent.metadata, heartbeat: true };
-            await this.db.pool.query(
-              `UPDATE agents SET metadata = $3 WHERE team_id = $1 AND id = $2`,
-              [teamId, agent.id, newMetadata]
-            );
+            await this.db.agents.updateMetadata(teamId, agent.id, newMetadata);
             // Start heartbeat timer if agent is running
             if (agent.status === 'running') {
               this.startHeartbeatForAgent(teamId, agent.id, agent.name, agent.working_directory, config.interval);
@@ -2814,10 +2578,7 @@ export class AgentManagerDb {
             // Disable heartbeat
             const newMetadata = { ...agent.metadata };
             delete newMetadata.heartbeat;
-            await this.db.pool.query(
-              `UPDATE agents SET metadata = $3 WHERE team_id = $1 AND id = $2`,
-              [teamId, agent.id, newMetadata]
-            );
+            await this.db.agents.updateMetadata(teamId, agent.id, newMetadata);
             this.stopHeartbeatForAgent(agent.id);
             return { ok: true, result: { message: `Heartbeat disabled for ${agent.name}` } };
           }
@@ -2884,17 +2645,14 @@ export class AgentManagerDb {
 
       case 'heartbeats': {
         // /heartbeats - show all agents with heartbeat enabled
-        const agents = await this.db.pool.query(
-          `SELECT id, name, status, working_directory FROM agents WHERE team_id = $1 AND metadata->>'heartbeat' = 'true'`,
-          [teamId]
-        );
+        const heartbeatAgents = await this.db.agents.findHeartbeat(teamId);
         const activeTimers = Array.from(this.heartbeatTimers.keys());
         const now = Date.now();
         return {
           ok: true,
           result: {
-            agents: agents.rows.map(a => {
-              const config = this.readHeartbeatConfig(a.working_directory);
+            agents: heartbeatAgents.map(a => {
+              const config = a.working_directory ? this.readHeartbeatConfig(a.working_directory) : null;
               const lastSent = this.heartbeatLastSent.get(a.id);
               const intervalMs = this.heartbeatIntervals.get(a.id);
               let nextIn: string | null = null;
@@ -2970,7 +2728,9 @@ export class AgentManagerDb {
         // Cancel any pending queries so they don't show as orphaned
         await this.cancelPendingQueriesForAgent(teamId, a.id);
 
-        await this.db.pool.query(
+        // Soft-delete by setting deleted_at and status
+        // TODO: move to repository — soft-delete by id
+        await this.db.adapter.query(
           `UPDATE agents SET deleted_at = $3, status = 'stopped' WHERE team_id = $1 AND id = $2`,
           [teamId, a.id, Date.now()]
         );
@@ -3047,16 +2807,11 @@ export class AgentManagerDb {
           return { ok: false, error: 'Usage: /news <agent-name>' };
         }
 
-        const agent = await this.db.pool.query<AgentRow>(
-          `SELECT * FROM agents WHERE team_id = $1 AND name = $2 AND deleted_at IS NULL`,
-          [teamId, agentName]
-        );
+        const a = await this.db.agents.getByName(teamId, agentName);
 
-        if (!agent.rows[0]) {
+        if (!a) {
           return { ok: false, error: `Agent "${agentName}" not found` };
         }
-
-        const a = agent.rows[0];
         // Use endpoint if set, otherwise construct from port using localhost
         const baseEndpoint = a.endpoint || `http://localhost:${a.port}`;
 
@@ -3084,16 +2839,11 @@ export class AgentManagerDb {
           return { ok: false, error: 'Usage: /register <agent-name>' };
         }
 
-        const agent = await this.db.pool.query<AgentRow>(
-          `SELECT * FROM agents WHERE team_id = $1 AND name = $2 AND deleted_at IS NULL`,
-          [teamId, agentName]
-        );
+        const a = await this.db.agents.getByName(teamId, agentName);
 
-        if (!agent.rows[0]) {
+        if (!a) {
           return { ok: false, error: `Agent "${agentName}" not found` };
         }
-
-        const a = agent.rows[0];
 
         // Call the existing onchain register endpoint
         try {
@@ -3211,7 +2961,7 @@ export class AgentManagerDb {
         let effectiveTeamId = teamId;
         let effectiveTeamName = teamName;
         if (configTeam && configTeam !== teamName) {
-          effectiveTeamId = await getOrCreateTeamId(this.db, configTeam);
+          effectiveTeamId = await this.db.teams.getOrCreateTeamId(configTeam);
           effectiveTeamName = configTeam;
           // Ensure team directory exists
           const configTeamDir = `${this.baseWorkDir}/teams/${configTeam}`;
@@ -3234,11 +2984,8 @@ export class AgentManagerDb {
         const automatorAgents = agents.filter(a => a.type === 'automator');
         if (automatorAgents.length > 0) {
           // Check if "manager" automator already exists in database
-          const existingManagerResult = await this.db.pool.query(
-            `SELECT id FROM agents WHERE team_id = $1 AND type = 'automator' AND name = 'manager'`,
-            [effectiveTeamId]
-          );
-          const hasManagerAutomator = existingManagerResult.rows.length > 0;
+          const existingManager = await this.db.agents.getByName(effectiveTeamId, 'manager');
+          const hasManagerAutomator = existingManager !== null && existingManager.type === 'automator';
 
           // If no manager automator exists, the first one being deployed must be named "manager"
           if (!hasManagerAutomator) {
@@ -3348,20 +3095,31 @@ export class AgentManagerDb {
 
             // Insert into database
             console.log(`[Deploy] Storing agent: name=${agentName}, type=${agentType}, configType=${agentConfig.type}`);
-            await this.db.pool.query(
-              `INSERT INTO agents (team_id, id, name, type, model, port, endpoint, working_directory, status, created_at, metadata, runtime, token_id, domain)
-               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'starting', $9, $10, $11, $12, $13)`,
-              [effectiveTeamId, agentId, agentName, agentType, agentConfig.model || 'haiku', port, null, workingDirectory, Date.now(), metadata, effectiveRuntime,
-               configTokenId || null, configDomain || null]
-            );
+            await this.db.agents.create({
+              team_id: effectiveTeamId,
+              id: agentId,
+              name: agentName,
+              type: agentType,
+              model: agentConfig.model || 'haiku',
+              port,
+              endpoint: null,
+              working_directory: workingDirectory,
+              status: 'starting',
+              created_at: Date.now(),
+              metadata,
+              runtime: effectiveRuntime,
+              token_id: configTokenId || null,
+              domain: configDomain || null,
+            });
 
             // All agents run locally - set up database and let CLI spawn the process
             const url = `http://localhost:${port}`;
             const finalMeta = { ...metadata, endpoint: url, local: true };
-            await this.db.pool.query(
-              `UPDATE agents SET status = 'pending', port = $3, endpoint = $4, metadata = $5 WHERE team_id = $1 AND id = $2`,
-              [effectiveTeamId, agentId, port, url, finalMeta]
-            );
+            await this.db.agents.updateStatus(effectiveTeamId, agentId, 'pending', {
+              port,
+              endpoint: url,
+              metadata: finalMeta,
+            });
 
             // Spawn the agent process
             const spawnResult = await this.spawnLocalAgentProcess(effectiveTeamId, effectiveTeamName, {
@@ -3392,10 +3150,7 @@ export class AgentManagerDb {
               result.pid = spawnResult.pid;
               result.logFile = spawnResult.logFile;
               // Update status to running
-              await this.db.pool.query(
-                `UPDATE agents SET status = 'running' WHERE team_id = $1 AND id = $2`,
-                [effectiveTeamId, agentId]
-              );
+              await this.db.agents.updateStatus(effectiveTeamId, agentId, 'running');
             }
 
             // Auto-register onchain if enabled (automators never register)
@@ -3403,12 +3158,9 @@ export class AgentManagerDb {
             if (shouldRegister) {
               try {
                 // Fetch the agent row for registration
-                const agentRow = await this.db.pool.query<AgentRow>(
-                  `SELECT * FROM agents WHERE team_id = $1 AND id = $2`,
-                  [effectiveTeamId, agentId]
-                );
-                if (agentRow.rows[0]) {
-                  const regResult = await this.registerOnchainAndUpdateAgent(effectiveTeamId, agentRow.rows[0]);
+                const agentRow = await this.db.agents.getById(effectiveTeamId, agentId);
+                if (agentRow) {
+                  const regResult = await this.registerOnchainAndUpdateAgent(effectiveTeamId, agentRow);
                   console.log(`[Deploy] Registration result: domain=${regResult.domain}, tokenId=${regResult.tokenId}, txHash=${regResult.txHash}`);
                   result.tokenId = regResult.tokenId;
                   result.domain = regResult.domain;
@@ -3441,10 +3193,7 @@ export class AgentManagerDb {
             // Clean up the database record if deployment failed
             if (agentId) {
               try {
-                await this.db.pool.query(
-                  `DELETE FROM agents WHERE team_id = $1 AND id = $2`,
-                  [effectiveTeamId, agentId]
-                );
+                await this.db.agents.deleteAgent(effectiveTeamId, agentId);
                 console.log(`[Deploy] Cleaned up failed agent record: ${agentId}`);
               } catch (cleanupErr) {
                 console.warn(`[Deploy] Failed to clean up agent record: ${cleanupErr}`);
@@ -3491,10 +3240,7 @@ export class AgentManagerDb {
                 tokenId: agent.token_id ?? undefined
               });
               if (spawnResult.success) {
-                await this.db.pool.query(
-                  `UPDATE agents SET status = 'running' WHERE team_id = $1 AND id = $2`,
-                  [teamId, agent.id]
-                );
+                await this.db.agents.updateStatus(teamId, agent.id, 'running');
                 return { ok: true, result: { action: 'started', name: agent.name, pid: spawnResult.pid, logFile: spawnResult.logFile } };
               } else {
                 return { ok: false, error: `Failed to start ${agent.name}: ${spawnResult.error}` };
@@ -3503,10 +3249,7 @@ export class AgentManagerDb {
             case 'stop': {
               const killResult = await this.killAgentProcess(agent.port);
               const cancelled = await this.cancelPendingQueriesForAgent(teamId, agent.id);
-              await this.db.pool.query(
-                `UPDATE agents SET status = 'stopped' WHERE team_id = $1 AND id = $2`,
-                [teamId, agent.id]
-              );
+              await this.db.agents.updateStatus(teamId, agent.id, 'stopped');
               return { ok: true, result: { action: 'stopped', name: agent.name, ...killResult, queriesCancelled: cancelled } };
             }
             case 'rebuild': {
@@ -3518,10 +3261,7 @@ export class AgentManagerDb {
                 tokenId: agent.token_id ?? undefined
               });
               if (spawnResult.success) {
-                await this.db.pool.query(
-                  `UPDATE agents SET status = 'running' WHERE team_id = $1 AND id = $2`,
-                  [teamId, agent.id]
-                );
+                await this.db.agents.updateStatus(teamId, agent.id, 'running');
                 return { ok: true, result: { action: 'rebuilt', name: agent.name, pid: spawnResult.pid, logFile: spawnResult.logFile } };
               } else {
                 return { ok: false, error: `Failed to rebuild ${agent.name}: ${spawnResult.error}` };
@@ -3579,10 +3319,7 @@ export class AgentManagerDb {
 
         // Update model and mark for restart if running
         const newStatus = agent.status === 'running' ? 'pending' : agent.status;
-        await this.db.pool.query(
-          `UPDATE agents SET model = $3, status = $4 WHERE team_id = $1 AND id = $2`,
-          [teamId, agent.id, resolvedModel, newStatus]
-        );
+        await this.db.agents.updateStatus(teamId, agent.id, newStatus, { model: resolvedModel });
 
         return {
           ok: true,
@@ -3682,19 +3419,14 @@ export class AgentManagerDb {
 
       case 'teams': {
         // List all teams
-        const teams = await this.db.pool.query(
-          `SELECT id, name, created_at FROM teams ORDER BY created_at DESC`
-        );
+        const teams = await this.db.teams.listTeams();
         const teamList = await Promise.all(
-          teams.rows.map(async (team: any) => {
-            const agentCount = await this.db.pool.query<{ count: string }>(
-              'SELECT COUNT(*)::text as count FROM agents WHERE team_id = $1 AND deleted_at IS NULL',
-              [team.id]
-            );
+          teams.map(async (team) => {
+            const agentCount = await this.db.agents.count(team.id);
             return {
               id: team.id,
               name: team.name,
-              agentCount: parseInt(agentCount.rows[0]?.count || '0')
+              agentCount: parseInt(agentCount || '0')
             };
           })
         );
@@ -3703,24 +3435,17 @@ export class AgentManagerDb {
 
       case 'team': {
         // /team - show current team (from header)
-        const team = await this.db.pool.query(
-          `SELECT id, name FROM teams WHERE id = $1`,
-          [teamId]
-        );
-        if (team.rows.length === 0) {
+        const team = await this.db.teams.getTeam(teamId);
+        if (!team) {
           return { ok: false, error: 'Team not found' };
         }
-        const t = team.rows[0];
-        const agentCount = await this.db.pool.query<{ count: string }>(
-          'SELECT COUNT(*)::text as count FROM agents WHERE team_id = $1 AND deleted_at IS NULL',
-          [teamId]
-        );
+        const agentCount = await this.db.agents.count(teamId);
         return {
           ok: true,
           result: {
-            id: t.id,
-            name: t.name,
-            agentCount: parseInt(agentCount.rows[0]?.count || '0')
+            id: team.id,
+            name: team.name,
+            agentCount: parseInt(agentCount || '0')
           }
         };
       }
@@ -3745,15 +3470,12 @@ export class AgentManagerDb {
           const newMetadata = { ...(agent.metadata || {}), [key]: value || null };
           // When setting 'endpoint', also update the endpoint column (used for routing)
           if (key === 'endpoint') {
-            await this.db.pool.query(
-              `UPDATE agents SET metadata = $3, endpoint = $4 WHERE team_id = $1 AND id = $2`,
-              [teamId, agent.id, newMetadata, value || null]
-            );
+            await this.db.agents.updateIdentity(teamId, agent.id, {
+              endpoint: value || undefined,
+              metadata: newMetadata,
+            });
           } else {
-            await this.db.pool.query(
-              `UPDATE agents SET metadata = $3 WHERE team_id = $1 AND id = $2`,
-              [teamId, agent.id, newMetadata]
-            );
+            await this.db.agents.updateMetadata(teamId, agent.id, newMetadata);
           }
           return { ok: true, result: { name: agent.name, metadata: newMetadata } };
         }
@@ -3769,10 +3491,10 @@ export class AgentManagerDb {
           if (!agent) {
             return { ok: false, error: `Agent "${agentName}" not found` };
           }
-          await this.db.pool.query(
-            `UPDATE agents SET domain = $3, token_id = $4 WHERE team_id = $1 AND id = $2`,
-            [teamId, agent.id, domainArg, tokenIdArg || null]
-          );
+          await this.db.agents.updateIdentity(teamId, agent.id, {
+            domain: domainArg,
+            token_id: tokenIdArg || undefined,
+          });
           return { ok: true, result: { name: agent.name, domain: domainArg, tokenId: tokenIdArg || null } };
         }
 
@@ -3870,19 +3592,12 @@ export class AgentManagerDb {
 
       case 'list': {
         // /list - Show all pending queries
-        const result = await this.db.pool.query(
-          `SELECT id, query_id, type, message, timestamp, data
-           FROM news_items
-           WHERE team_id = $1 AND type IN ('query', 'query.pending', 'pending_question')
-           ORDER BY timestamp DESC
-           LIMIT 50`,
-          [teamId]
-        );
+        const newsItems = await this.db.news.getRecent(teamId, ['query', 'query.pending', 'pending_question'], 50);
 
         return {
           ok: true,
           result: {
-            queries: result.rows.map((r: any) => ({
+            queries: newsItems.map((r: any) => ({
               id: r.query_id || r.id,
               type: r.type,
               message: r.message,
@@ -3920,10 +3635,7 @@ export class AgentManagerDb {
             i++;
           } else if (args[i] === '--name' && args[i + 1]) {
             const newName = args[i + 1];
-            await this.db.pool.query(
-              `UPDATE agents SET name = $3 WHERE team_id = $1 AND id = $2`,
-              [teamId, agent.id, newName]
-            );
+            await this.db.agents.updateIdentity(teamId, agent.id, { name: newName });
             newMetadata.alias = newMetadata.alias || agent.name;
             updates.push(`name → ${newName}`);
             i++;
@@ -3934,10 +3646,7 @@ export class AgentManagerDb {
           return { ok: false, error: 'Nothing to update. Use --wallet <address> or --name <newname>' };
         }
 
-        await this.db.pool.query(
-          `UPDATE agents SET metadata = $3 WHERE team_id = $1 AND id = $2`,
-          [teamId, agent.id, newMetadata]
-        );
+        await this.db.agents.updateMetadata(teamId, agent.id, newMetadata);
 
         return { ok: true, result: { message: `Updated ${agent.name}: ${updates.join(', ')}` } };
       }
@@ -3968,8 +3677,8 @@ export class AgentManagerDb {
 
   private async runHealthChecks(): Promise<void> {
     try {
-      const teams = await this.db.pool.query(`SELECT id FROM teams`);
-      for (const team of teams.rows) {
+      const teams = await this.db.teams.listTeams();
+      for (const team of teams) {
         const agents = await this.dbListAgents(team.id, true);
         for (const agent of agents) {
           // Skip virtual agents — they don't have a local /health endpoint
@@ -3992,23 +3701,14 @@ export class AgentManagerDb {
 
             // Update DB status if it changed
             if (isOnline && agent.status === 'offline') {
-              await this.db.pool.query(
-                `UPDATE agents SET status = 'running' WHERE team_id = $1 AND id = $2`,
-                [team.id, agent.id]
-              );
+              await this.db.agents.updateStatus(team.id, agent.id, 'running');
             } else if (!isOnline && agent.status === 'running') {
-              await this.db.pool.query(
-                `UPDATE agents SET status = 'offline' WHERE team_id = $1 AND id = $2`,
-                [team.id, agent.id]
-              );
+              await this.db.agents.updateStatus(team.id, agent.id, 'offline');
             }
           } catch {
             this.healthStatus.set(key, { status: 'offline', lastCheck: Date.now() });
             if (agent.status === 'running') {
-              await this.db.pool.query(
-                `UPDATE agents SET status = 'offline' WHERE team_id = $1 AND id = $2`,
-                [team.id, agent.id]
-              ).catch(() => {});
+              await this.db.agents.updateStatus(team.id, agent.id, 'offline').catch(() => {});
             }
           }
         }
@@ -4053,8 +3753,8 @@ export class AgentManagerDb {
    */
   private async initAllHeartbeats(): Promise<void> {
     try {
-      const teams = await this.db.pool.query(`SELECT id FROM teams`);
-      for (const team of teams.rows) {
+      const teams = await this.db.teams.listTeams();
+      for (const team of teams) {
         await this.startAgentHeartbeats(team.id);
       }
     } catch (error: any) {
@@ -4085,10 +3785,10 @@ export class AgentManagerDb {
     let teamName: string;
     if (teamHeader) {
       teamName = String(teamHeader);
-      teamId = await getOrCreateTeamId(this.db, teamName);
+      teamId = await this.db.teams.getOrCreateTeamId(teamName);
     } else {
       teamName = process.env.ID_TEAM || 'default';
-      teamId = await getOrCreateTeamId(this.db, teamName);
+      teamId = await this.db.teams.getOrCreateTeamId(teamName);
     }
 
     const client: WSClient = { ws, teamId, teamName, authenticated: true };
@@ -4203,20 +3903,19 @@ export class AgentManagerDb {
    */
   async startAgentHeartbeats(teamId: string): Promise<void> {
     // Query for agents with heartbeat enabled (metadata.heartbeat = true)
-    const result = await this.db.pool.query(
-      `SELECT id, name, working_directory FROM agents WHERE team_id = $1 AND status = 'running' AND metadata->>'heartbeat' = 'true'`,
-      [teamId]
-    );
+    const allHeartbeat = await this.db.agents.findHeartbeat(teamId);
+    const rows = allHeartbeat.filter(a => a.status === 'running');
 
-    for (const row of result.rows) {
+    for (const row of rows) {
+      if (!row.working_directory) continue;
       const config = this.readHeartbeatConfig(row.working_directory);
       if (config) {
         this.startHeartbeatForAgent(teamId, row.id, row.name, row.working_directory, config.interval);
       }
     }
 
-    if (result.rows.length > 0) {
-      console.log(`[Heartbeat] Started heartbeats for ${result.rows.length} agent(s)`);
+    if (rows.length > 0) {
+      console.log(`[Heartbeat] Started heartbeats for ${rows.length} agent(s)`);
     }
   }
 
@@ -4275,33 +3974,22 @@ export class AgentManagerDb {
     try {
       const ts = Date.now();
 
-      // Find all pending/processing queries for this agent
-      const pendingQueries = await this.db.pool.query<{ query_id: string }>(
-        `SELECT query_id FROM queries
-         WHERE team_id = $1 AND agent_id = $2 AND status IN ('pending', 'processing')`,
-        [teamId, agentId]
-      );
+      // Cancel all pending/processing queries and get their IDs
+      const queryIds = await this.db.queries.cancel(teamId, agentId, ts);
 
-      if (pendingQueries.rows.length === 0) {
+      if (queryIds.length === 0) {
         return 0;
       }
 
-      const queryIds = pendingQueries.rows.map(r => r.query_id);
-
-      // Update queries to cancelled status
-      await this.db.pool.query(
-        `UPDATE queries SET status = 'cancelled', completed = $3
-         WHERE team_id = $1 AND agent_id = $2 AND status IN ('pending', 'processing')`,
-        [teamId, agentId, ts]
-      );
-
       // Add query.cancelled news items for each
       for (const queryId of queryIds) {
-        await this.db.pool.query(
-          `INSERT INTO news_items (team_id, agent_id, timestamp, type, message, data, query_id)
-           VALUES ($1, $2, $3, 'query.cancelled', 'Query cancelled (agent stopped)', $4, $5)`,
-          [teamId, agentId, ts, { reason: 'agent_stopped', query_id: queryId }, queryId]
-        );
+        await this.db.news.add(teamId, agentId, {
+          timestamp: ts,
+          type: 'query.cancelled',
+          message: 'Query cancelled (agent stopped)',
+          data: { reason: 'agent_stopped', query_id: queryId },
+          query_id: queryId,
+        });
       }
 
       console.log(`[Manager] Cancelled ${queryIds.length} pending queries for agent ${agentId}`);
@@ -4544,18 +4232,15 @@ export class AgentManagerDb {
   private async sendHeartbeat(teamId: string, agentId: string, agentName: string, workingDirectory: string): Promise<void> {
     try {
       // Get agent status and endpoint
-      const agent = await this.db.pool.query(
-        `SELECT status, endpoint FROM agents WHERE team_id = $1 AND id = $2`,
-        [teamId, agentId]
-      );
+      const agent = await this.db.agents.getById(teamId, agentId);
 
-      if (agent.rows.length === 0 || agent.rows[0].status !== 'running') {
+      if (!agent || agent.status !== 'running') {
         console.log(`[Heartbeat] Agent ${agentName} not running, stopping heartbeat`);
         this.stopHeartbeatForAgent(agentId);
         return;
       }
 
-      const endpoint = agent.rows[0].endpoint;
+      const endpoint = agent.endpoint;
       if (!endpoint) {
         console.log(`[Heartbeat] Agent ${agentName} has no endpoint`);
         return;

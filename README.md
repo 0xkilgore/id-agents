@@ -9,7 +9,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-**Version 0.1.27-beta**
+**Version 0.1.29-beta**
 
 A multi-agent orchestration platform built on the Claude Agent SDK.
 
@@ -62,8 +62,8 @@ ID Agents enables autonomous AI agents to run as local processes, communicate vi
                     ▼                   ▼
              ┌────────────┐     ┌────────────┐
              │            │     │            │
-             │ PostgreSQL │     │ Workspace  │
-             │   :5432    │     │   Files    │
+             │  Database  │     │ Workspace  │
+             │  (SQLite)  │     │   Files    │
              │            │     │            │
              └────────────┘     └────────────┘
 ```
@@ -78,11 +78,10 @@ ID Agents enables autonomous AI agents to run as local processes, communicate vi
 ### Prerequisites
 
 - **Node.js** 20+
-- **PostgreSQL** (for agent state persistence)
 - **Claude Code CLI** — install from [claude.ai/code](https://claude.ai/code) and run `claude login` in your terminal
 - **Claude Pro or Max plan** (agents use your Claude Code subscription — no API key needed)
 - **[id-cli](https://github.com/idchain-world/id-cli)** (optional, for onchain agent registration via `/register`)
-- **[OWS CLI](https://github.com/anthropics/ows)** (optional, for automatic agent wallet creation via Open Wallet Standard)
+- **[OWS CLI](https://github.com/open-wallet-standard/core)** (optional, for automatic agent wallet creation via Open Wallet Standard)
 
 > **Important:** You must be logged into Claude Code CLI before starting ID Agents. Run `claude login` in your terminal and complete the authentication. If you use Claude Code in VS Code, you still need to log in via the terminal — open VS Code's integrated terminal and run `claude login` there.
 
@@ -96,9 +95,9 @@ claude login
 git clone https://github.com/idchain-world/id-agents.git
 cd id-agents
 npm install
-cp env.example .env
-# edit .env: set DATABASE_URL
 ```
+
+That's it — no database setup needed. ID Agents uses SQLite by default (stored at `~/.id-agents/id-agents.db`). For PostgreSQL, set `DATABASE_URL` in a `.env` file.
 
 ### 2) Run the interactive CLI
 
@@ -275,7 +274,7 @@ See [Skills README](./skills/README.md) for the full skill directory listing.
 
 | Variable | Required | Description |
 |----------|----------|-------------|
-| `DATABASE_URL` | Yes | PostgreSQL connection string |
+| `DATABASE_URL` | No | PostgreSQL connection string (SQLite used by default if not set) |
 | `ANTHROPIC_API_KEY` | No | Anthropic API key (not needed with Claude Pro or Max — run `claude login` instead) |
 | `CLAUDE_MODEL` | No | Default model (e.g., `claude-opus-4-6`) |
 | `OWS_REGISTRAR_WALLET` | No | OWS wallet name for onchain signing (recommended over raw key) |
@@ -378,7 +377,6 @@ ows key create --name "id-agents" --wallet idchain-registrar --policy idchain-on
 |-----------|------|-------------|
 | Manager | 4100 | Main API + `/remote` endpoint |
 | Workers | 4101+ | Dynamic per-team range (25 ports per team) |
-| PostgreSQL | 5432 | Database |
 
 ## Documentation
 

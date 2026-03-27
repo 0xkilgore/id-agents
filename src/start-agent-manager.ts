@@ -52,7 +52,7 @@ async function startManagerAgent() {
   const workingDir = process.env.AGENT_MANAGER_WORKDIR || '/workspace';
 
   // Initialize DB (required for persistence)
-  const db = createDb();
+  const db = await createDb();
   await migrateDb(db);
 
   const manager = new AgentManagerDb(workingDir, db);
@@ -105,7 +105,7 @@ async function startWorkerAgent(agentId?: string) {
     const dbTeamId = process.env.ID_DB_TEAM_ID;
     const dbAgentId = process.env.ID_DB_AGENT_ID || agentId;
     if (dbTeamId) {
-      const db = createDb();
+      const db = await createDb();
       await migrateDb(db);
       dbCtx = { db, teamId: dbTeamId, agentId: dbAgentId };
     }
