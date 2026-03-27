@@ -69,15 +69,17 @@ export interface ConfigParameter {
   description?: string;
 }
 
-export interface OrgNode {
+/** A group — the recursive building block of org structure. */
+export interface Group {
   lead?: string;
   members?: string[];
   description?: string;
-  subgroups?: Record<string, OrgNode>;
+  groups?: Record<string, Group>;
 }
 
+/** Org config — groups and tags. */
 export interface OrgConfig {
-  groups: Record<string, OrgNode>;
+  groups: Record<string, Group>;
   tags?: Record<string, string[]>;
 }
 

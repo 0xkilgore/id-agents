@@ -6,7 +6,7 @@
  * Supports infinitely nested groups with leads, members, and tags.
  */
 
-import type { OrgConfig, OrgNode } from './config-parser.js';
+import type { OrgConfig, Group } from './config-parser.js';
 
 interface AgentInfo {
   name: string;
@@ -17,11 +17,11 @@ interface AgentInfo {
 /**
  * Recursively collect all members from a node and its subgroups.
  */
-function collectMembers(node: OrgNode): string[] {
+function collectMembers(node: Group): string[] {
   const members = new Set<string>(node.members || []);
   if (node.lead) members.add(node.lead);
-  if (node.subgroups) {
-    for (const sub of Object.values(node.subgroups)) {
+  if (node.groups) {
+    for (const sub of Object.values(node.groups)) {
       for (const m of collectMembers(sub)) members.add(m);
     }
   }
@@ -33,7 +33,7 @@ function collectMembers(node: OrgNode): string[] {
  */
 function renderTreeNode(
   name: string,
-  node: OrgNode,
+  node: Group,
   agentMap: Map<string, AgentInfo>,
   prefix: string,
   isLast: boolean,
@@ -52,7 +52,7 @@ function renderTreeNode(
 
   // Direct members (not in subgroups)
   const directMembers = (node.members || []).filter(m => m !== node.lead);
-  const hasSubgroups = node.subgroups && Object.keys(node.subgroups).length > 0;
+  const hasSubgroups = node.groups && Object.keys(node.groups).length > 0;
 
   directMembers.forEach((member, mi) => {
     const memberDomain = agentMap.get(member)?.domain;
@@ -64,11 +64,11 @@ function renderTreeNode(
 
   // Subgroups (recursive)
   if (hasSubgroups) {
-    const subNames = Object.keys(node.subgroups!);
+    const subNames = Object.keys(node.groups!);
     subNames.forEach((subName, si) => {
       const subLines = renderTreeNode(
         subName,
-        node.subgroups![subName],
+        node.groups![subName],
         agentMap,
         childPrefix,
         si === subNames.length - 1,
@@ -85,7 +85,7 @@ function renderTreeNode(
  */
 function renderGroupDetail(
   name: string,
-  node: OrgNode,
+  node: Group,
   agentMap: Map<string, AgentInfo>,
   depth: number,
 ): string[] {
@@ -115,8 +115,8 @@ function renderGroupDetail(
   }
 
   // Recurse into subgroups
-  if (node.subgroups) {
-    for (const [subName, sub] of Object.entries(node.subgroups)) {
+  if (node.groups) {
+    for (const [subName, sub] of Object.entries(node.groups)) {
       lines.push(...renderGroupDetail(subName, sub, agentMap, depth + 1));
     }
   }
@@ -220,7 +220,7 @@ export function generateAgentOrgContext(
 ): string {
   const parts: string[] = [];
 
-  function findInNode(nodeName: string, node: OrgNode, groupName: string, path: string[]): void {
+  function findInNode(nodeName: string, node: Group, groupName: string, path: string[]): void {
     const isLead = node.lead === agentName;
     const isDirect = (node.members || []).includes(agentName);
     const allMembers = collectMembers(node);
@@ -237,8 +237,8 @@ export function generateAgentOrgContext(
     }
 
     // Recurse into subgroups
-    if (node.subgroups) {
-      for (const [subName, sub] of Object.entries(node.subgroups)) {
+    if (node.groups) {
+      for (const [subName, sub] of Object.entries(node.groups)) {
         findInNode(subName, sub, groupName, [...path, nodeName]);
       }
     }
