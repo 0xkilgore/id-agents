@@ -69,15 +69,15 @@ export interface ConfigParameter {
   description?: string;
 }
 
-export interface OrgSubgroup {
-  members: string[];
+export interface OrgNode {
+  lead?: string;
+  members?: string[];
   description?: string;
+  subgroups?: Record<string, OrgNode>;
 }
 
-export interface OrgGroup {
+export interface OrgGroup extends OrgNode {
   lead: string;
-  description?: string;
-  subgroups?: Record<string, OrgSubgroup>;
 }
 
 export interface OrgConfig {

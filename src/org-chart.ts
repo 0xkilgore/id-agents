@@ -3,11 +3,10 @@
  * Org Chart Generator
  *
  * Generates a markdown org chart from the YAML config's `org` section.
- * Supports groups with subgroups, leads, and tags.
- * Written to the shared team folder so all agents can read it.
+ * Supports infinitely nested groups with leads, members, and tags.
  */
 
-import type { OrgConfig } from './config-parser.js';
+import type { OrgConfig, OrgNode } from './config-parser.js';
 
 interface AgentInfo {
   name: string;
@@ -16,16 +15,113 @@ interface AgentInfo {
 }
 
 /**
- * Get all members of a group (flattened from subgroups).
+ * Recursively collect all members from a node and its subgroups.
  */
-function getGroupMembers(group: OrgConfig['groups'][string]): string[] {
-  const members = new Set<string>();
-  if (group.subgroups) {
-    for (const sub of Object.values(group.subgroups)) {
-      for (const m of sub.members) members.add(m);
+function collectMembers(node: OrgNode): string[] {
+  const members = new Set<string>(node.members || []);
+  if (node.lead) members.add(node.lead);
+  if (node.subgroups) {
+    for (const sub of Object.values(node.subgroups)) {
+      for (const m of collectMembers(sub)) members.add(m);
     }
   }
   return [...members];
+}
+
+/**
+ * Render an org node as ASCII tree lines (recursive).
+ */
+function renderTreeNode(
+  name: string,
+  node: OrgNode,
+  agentMap: Map<string, AgentInfo>,
+  prefix: string,
+  isLast: boolean,
+): string[] {
+  const lines: string[] = [];
+  const connector = isLast ? '└── ' : '├── ';
+  const childPrefix = prefix + (isLast ? '    ' : '│   ');
+
+  lines.push(`${prefix}${connector}${name} — ${node.description || ''}`);
+
+  if (node.lead) {
+    const leadDomain = agentMap.get(node.lead)?.domain;
+    const leadSuffix = leadDomain ? ` (${leadDomain})` : '';
+    lines.push(`${childPrefix}lead: ${node.lead}${leadSuffix}`);
+  }
+
+  // Direct members (not in subgroups)
+  const directMembers = (node.members || []).filter(m => m !== node.lead);
+  const hasSubgroups = node.subgroups && Object.keys(node.subgroups).length > 0;
+
+  directMembers.forEach((member, mi) => {
+    const memberDomain = agentMap.get(member)?.domain;
+    const memberSuffix = memberDomain ? ` (${memberDomain})` : '';
+    const mIsLast = !hasSubgroups && mi === directMembers.length - 1;
+    const mConnector = mIsLast ? '└── ' : '├── ';
+    lines.push(`${childPrefix}${mConnector}${member}${memberSuffix}`);
+  });
+
+  // Subgroups (recursive)
+  if (hasSubgroups) {
+    const subNames = Object.keys(node.subgroups!);
+    subNames.forEach((subName, si) => {
+      const subLines = renderTreeNode(
+        subName,
+        node.subgroups![subName],
+        agentMap,
+        childPrefix,
+        si === subNames.length - 1,
+      );
+      lines.push(...subLines);
+    });
+  }
+
+  return lines;
+}
+
+/**
+ * Render a group detail section (recursive).
+ */
+function renderGroupDetail(
+  name: string,
+  node: OrgNode,
+  agentMap: Map<string, AgentInfo>,
+  depth: number,
+): string[] {
+  const lines: string[] = [];
+  const heading = '#'.repeat(Math.min(depth + 2, 6));
+
+  lines.push(`${heading} ${name}`);
+  if (node.description) lines.push(`${node.description}`);
+  lines.push('');
+
+  if (node.lead) {
+    const leadAgent = agentMap.get(node.lead);
+    lines.push(`**Lead:** ${node.lead} — ${leadAgent?.description || ''}`);
+    lines.push('');
+  }
+
+  // Direct members
+  const directMembers = (node.members || []).filter(m => m !== node.lead);
+  if (directMembers.length > 0) {
+    lines.push('| Agent | Description |');
+    lines.push('|-------|-------------|');
+    for (const member of directMembers) {
+      const a = agentMap.get(member);
+      lines.push(`| ${member} | ${a?.description || ''} |`);
+    }
+    lines.push('');
+  }
+
+  // Recurse into subgroups
+  if (node.subgroups) {
+    for (const [subName, sub] of Object.entries(node.subgroups)) {
+      lines.push(...renderGroupDetail(subName, sub, agentMap, depth + 1));
+    }
+  }
+
+  return lines;
 }
 
 /**
@@ -52,34 +148,14 @@ export function generateOrgChart(
 
   const groupNames = Object.keys(org.groups);
   groupNames.forEach((groupName, gi) => {
-    const group = org.groups[groupName];
-    const isLastGroup = gi === groupNames.length - 1;
-    const gPrefix = isLastGroup ? '└── ' : '├── ';
-    const gChild = isLastGroup ? '    ' : '│   ';
-
-    const leadDomain = agentMap.get(group.lead)?.domain;
-    const leadSuffix = leadDomain ? ` (${leadDomain})` : '';
-    lines.push(`${gPrefix}${groupName} — ${group.description || ''}`);
-    lines.push(`${gChild}lead: ${group.lead}${leadSuffix}`);
-
-    if (group.subgroups) {
-      const subNames = Object.keys(group.subgroups);
-      subNames.forEach((subName, si) => {
-        const sub = group.subgroups![subName];
-        const isLastSub = si === subNames.length - 1;
-        const sPrefix = isLastSub ? '└── ' : '├── ';
-        const sChild = isLastSub ? '    ' : '│   ';
-
-        lines.push(`${gChild}${sPrefix}${subName} — ${sub.description || ''}`);
-
-        sub.members.forEach((member, mi) => {
-          const memberDomain = agentMap.get(member)?.domain;
-          const memberSuffix = memberDomain ? ` (${memberDomain})` : '';
-          const mPrefix = mi === sub.members.length - 1 ? '└── ' : '├── ';
-          lines.push(`${gChild}${sChild}${mPrefix}${member}${memberSuffix}`);
-        });
-      });
-    }
+    const treeLines = renderTreeNode(
+      groupName,
+      org.groups[groupName],
+      agentMap,
+      '',
+      gi === groupNames.length - 1,
+    );
+    lines.push(...treeLines);
   });
 
   lines.push('```');
@@ -88,35 +164,13 @@ export function generateOrgChart(
   // Group details
   lines.push('## Groups');
   lines.push('');
-
   for (const [groupName, group] of Object.entries(org.groups)) {
-    lines.push(`### ${groupName}`);
-    if (group.description) lines.push(`${group.description}`);
-    lines.push('');
-
-    const leadAgent = agentMap.get(group.lead);
-    lines.push(`**Lead:** ${group.lead} — ${leadAgent?.description || ''}`);
-    lines.push('');
-
-    if (group.subgroups) {
-      for (const [subName, sub] of Object.entries(group.subgroups)) {
-        lines.push(`**${subName}** — ${sub.description || ''}`);
-        lines.push('| Agent | Description |');
-        lines.push('|-------|-------------|');
-        for (const member of sub.members) {
-          const a = agentMap.get(member);
-          lines.push(`| ${member} | ${a?.description || ''} |`);
-        }
-        lines.push('');
-      }
-    }
+    lines.push(...renderGroupDetail(groupName, group, agentMap, 1));
   }
 
   // Tags
   if (org.tags && Object.keys(org.tags).length > 0) {
     lines.push('## Tags');
-    lines.push('');
-    lines.push('Shared capabilities and technologies across agents.');
     lines.push('');
     lines.push('| Tag | Agents |');
     lines.push('|-----|--------|');
@@ -125,7 +179,7 @@ export function generateOrgChart(
     }
     lines.push('');
 
-    // Reverse lookup: agent → tags
+    // Reverse lookup
     lines.push('### Agent Tags');
     lines.push('');
     lines.push('| Agent | Tags |');
@@ -149,7 +203,7 @@ export function generateOrgChart(
   lines.push('| Topic | Ask |');
   lines.push('|-------|-----|');
   for (const [groupName, group] of Object.entries(org.groups)) {
-    const allMembers = [group.lead, ...getGroupMembers(group).filter(m => m !== group.lead)];
+    const allMembers = collectMembers(group);
     lines.push(`| ${group.description || groupName} | ${allMembers.join(', ')} |`);
   }
   lines.push('');
@@ -158,7 +212,7 @@ export function generateOrgChart(
 }
 
 /**
- * Generate a short org context string for a specific agent.
+ * Generate a short org context string for a specific agent (recursive search).
  */
 export function generateAgentOrgContext(
   agentName: string,
@@ -166,31 +220,35 @@ export function generateAgentOrgContext(
 ): string {
   const parts: string[] = [];
 
-  // Find group role
-  for (const [groupName, group] of Object.entries(org.groups)) {
-    const isLead = group.lead === agentName;
-    const allMembers = getGroupMembers(group);
-    const isMember = allMembers.includes(agentName);
+  function findInNode(nodeName: string, node: OrgNode, groupName: string, path: string[]): void {
+    const isLead = node.lead === agentName;
+    const isDirect = (node.members || []).includes(agentName);
+    const allMembers = collectMembers(node);
 
     if (isLead) {
-      const members = allMembers.filter(m => m !== agentName);
-      parts.push(`You are the **lead** of the **${groupName}** group (${group.description || ''}). Your team members: ${members.join(', ')}.`);
-    } else if (isMember) {
-      // Find which subgroup
-      if (group.subgroups) {
-        for (const [subName, sub] of Object.entries(group.subgroups)) {
-          if (sub.members.includes(agentName)) {
-            const peers = sub.members.filter(m => m !== agentName);
-            const peerStr = peers.length > 0 ? ` Peers: ${peers.join(', ')}.` : '';
-            parts.push(`You are in the **${groupName}** group, **${subName}** subgroup (${sub.description || ''}). Your group lead: ${group.lead}.${peerStr}`);
-            break;
-          }
-        }
+      const team = allMembers.filter(m => m !== agentName);
+      const pathStr = path.length > 0 ? ` (${path.join(' > ')})` : '';
+      parts.push(`You are the **lead** of **${nodeName}**${pathStr} (${node.description || ''}). Your team: ${team.join(', ')}.`);
+    } else if (isDirect) {
+      const peers = (node.members || []).filter(m => m !== agentName);
+      const peerStr = peers.length > 0 ? ` Peers: ${peers.join(', ')}.` : '';
+      const leadStr = node.lead ? ` Lead: ${node.lead}.` : '';
+      parts.push(`You are in **${nodeName}** (${node.description || ''}).${leadStr}${peerStr}`);
+    }
+
+    // Recurse into subgroups
+    if (node.subgroups) {
+      for (const [subName, sub] of Object.entries(node.subgroups)) {
+        findInNode(subName, sub, groupName, [...path, nodeName]);
       }
     }
   }
 
-  // Find tags
+  for (const [groupName, group] of Object.entries(org.groups)) {
+    findInNode(groupName, group, groupName, []);
+  }
+
+  // Tags
   if (org.tags) {
     const myTags: string[] = [];
     for (const [tag, members] of Object.entries(org.tags)) {
