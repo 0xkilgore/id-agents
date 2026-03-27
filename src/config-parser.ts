@@ -69,11 +69,22 @@ export interface ConfigParameter {
   description?: string;
 }
 
+export interface OrgGroup {
+  lead: string;
+  members: string[];
+  description?: string;
+}
+
+export interface OrgConfig {
+  groups: Record<string, OrgGroup>;
+}
+
 export interface DeployConfig {
   version: string;
   team?: string;
   parameters?: ConfigParameter[];
   onchain?: OnchainConfig;              // Onchain registration settings
+  org?: OrgConfig;                      // Organization chart
   defaults?: {
     runtime?: HarnessType;              // Default harness for all agents
     model?: string;
@@ -564,7 +575,7 @@ export function processConfig(
   filePath: string,
   workspacePath: string = '/workspace',
   args: string[] = []
-): { agents: AgentSpec[]; teamContext: string | null; teamName: string | null; errors: ValidationError[]; parameters?: ConfigParameter[]; onchain?: OnchainConfig } {
+): { agents: AgentSpec[]; teamContext: string | null; teamName: string | null; errors: ValidationError[]; parameters?: ConfigParameter[]; onchain?: OnchainConfig; org?: OrgConfig } {
   // Get parameters first (for error messages)
   const parameters = getConfigParameters(filePath);
 
@@ -630,5 +641,5 @@ export function processConfig(
     ? loadTeamContext(resolvedConfig.team, workspacePath)
     : null;
 
-  return { agents, teamContext, teamName: resolvedConfig.team || null, errors: [], parameters, onchain: resolvedConfig.onchain };
+  return { agents, teamContext, teamName: resolvedConfig.team || null, errors: [], parameters, onchain: resolvedConfig.onchain, org: resolvedConfig.org };
 }

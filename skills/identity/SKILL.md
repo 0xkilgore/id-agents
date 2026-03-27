@@ -10,3 +10,4 @@ Your name is **"{{DISPLAY_NAME}}"**. This is your agent identifier. When someone
 You are in team **"{{TEAM}}"**.
 
 {{ONCHAIN_IDENTITY}}
+{{ORG_CONTEXT}}

@@ -2919,7 +2919,7 @@ export class AgentManagerDb {
             return { ok: false, error: `Config file not found: ${filePath}` };
           }
         }
-        const { agents, errors, onchain, teamName: configTeam } = processConfig(absolutePath, this.baseWorkDir, deployArgs);
+        const { agents, errors, onchain, teamName: configTeam, org } = processConfig(absolutePath, this.baseWorkDir, deployArgs);
 
         // If config specifies a team, use that instead of the request's team
         let effectiveTeamId = teamId;
@@ -2942,6 +2942,24 @@ export class AgentManagerDb {
 
         if (agents.length === 0) {
           return { ok: false, error: 'No agents defined in config' };
+        }
+
+        // Generate org chart if defined in config
+        if (org?.groups) {
+          try {
+            const { generateOrgChart } = await import('./org-chart.js');
+            const orgMd = generateOrgChart(effectiveTeamName, org, agents.map(a => ({
+              name: a.name,
+              description: a.description,
+              domain: a.domain,
+            })));
+            const teamDir = `${this.baseWorkDir}/teams/${effectiveTeamName}`;
+            if (!existsSync(teamDir)) mkdirSync(teamDir, { recursive: true });
+            writeFileSync(`${teamDir}/ORG_CHART.md`, orgMd);
+            console.log(`[Deploy] Org chart written to teams/${effectiveTeamName}/ORG_CHART.md`);
+          } catch (err: any) {
+            console.warn(`[Deploy] Could not generate org chart: ${err.message}`);
+          }
         }
 
         // Validate automator naming: first automator must be named "manager"
@@ -3048,11 +3066,21 @@ export class AgentManagerDb {
 
             // Deploy skills to agent's .claude/skills/ folder
             const agentSkills: string[] = agentConfig.skills || [];
+            let orgContext = '';
+            if (org?.groups) {
+              try {
+                const { generateAgentOrgContext } = await import('./org-chart.js');
+                orgContext = generateAgentOrgContext(agentConfig.name, org);
+              } catch { /* ignore */ }
+            }
             this.deploySkillsToAgent(workingDirectory, agentSkills, {
               DISPLAY_NAME: configDomain || agentConfig.name,
               TEAM: effectiveTeamName,
               ONCHAIN_IDENTITY: configDomain
                 ? `Your onchain identity is your ENS domain: **${configDomain}**\nThe chain is encoded in the domain name (e.g., sep.xid.eth = Sepolia, base.xid.eth = Base).`
+                : '',
+              ORG_CONTEXT: orgContext
+                ? `\n## Your Role\n\n${orgContext}\n\nSee the full org chart at the shared team folder for details on all groups.`
                 : '',
             }, { hasWallet: !!owsWallet });
 
