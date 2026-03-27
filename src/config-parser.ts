@@ -69,14 +69,20 @@ export interface ConfigParameter {
   description?: string;
 }
 
-export interface OrgGroup {
-  lead: string;
+export interface OrgSubgroup {
   members: string[];
   description?: string;
 }
 
+export interface OrgGroup {
+  lead: string;
+  description?: string;
+  subgroups?: Record<string, OrgSubgroup>;
+}
+
 export interface OrgConfig {
   groups: Record<string, OrgGroup>;
+  tags?: Record<string, string[]>;
 }
 
 export interface DeployConfig {
