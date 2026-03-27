@@ -352,7 +352,7 @@ export class AgentManagerDb {
     const oldProjectHeader = req.headers['x-id-project'];
     const oldProjectHeaderName = Array.isArray(oldProjectHeader) ? oldProjectHeader[0] : oldProjectHeader;
     const oldProjectQueryName = typeof req.query.project === 'string' ? req.query.project : undefined;
-    return (
+    const resolved = (
       headerName ||
       queryName ||
       oldProjectHeaderName ||
@@ -361,6 +361,11 @@ export class AgentManagerDb {
       process.env.ID_PROJECT ||
       'default'
     ).toString();
+    // Validate team name to prevent path traversal
+    if (!/^[a-zA-Z0-9_.-]+$/.test(resolved)) {
+      throw new Error(`Invalid team name: "${resolved}". Only letters, numbers, hyphens, dots, and underscores allowed.`);
+    }
+    return resolved;
   }
 
   private async getTeam(req: express.Request): Promise<{ name: string; id: string }> {
@@ -4140,13 +4145,19 @@ export class AgentManagerDb {
       const agentRow = await this.dbQueryAgentById(teamId, id);
       const owsWallet = (agentRow?.metadata as any)?.ows_wallet || null;
 
+      // Allowlist: only pass env vars that agents need
       const localEnv: Record<string, string> = {
-        ...process.env as Record<string, string>,
+        PATH: process.env.PATH || '',
+        HOME: process.env.HOME || '',
+        SHELL: process.env.SHELL || '',
+        TMPDIR: process.env.TMPDIR || '',
         ID_TEAM: teamName,
         MANAGER_URL: `http://localhost:4100`,
         ...(model && { CLAUDE_MODEL: model }),
         ...(tokenId && { ID_AGENT_TOKEN_ID: tokenId }),
-        ...(owsWallet && { OWS_WALLET: owsWallet })
+        ...(owsWallet && { OWS_WALLET: owsWallet }),
+        ...(process.env.ANTHROPIC_API_KEY && { ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY }),
+        ...(process.env.DATABASE_URL && { DATABASE_URL: process.env.DATABASE_URL }),
       };
 
       // Create log file
