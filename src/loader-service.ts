@@ -221,7 +221,7 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-server.listen(LOADER_PORT, () => {
+server.listen(LOADER_PORT, '127.0.0.1', () => {
   log(`Listening on port ${LOADER_PORT}`);
   log(`Manager port: ${MANAGER_PORT}`);
   log(`Work dir: ${WORK_DIR}`);

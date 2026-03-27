@@ -1527,7 +1527,7 @@ ${prompt}`
 
   async start(port: number = 4101): Promise<void> {
     return new Promise((resolve) => {
-      this.httpServer = this.app.listen(port, () => {
+      this.httpServer = this.app.listen(port, '127.0.0.1', () => {
         console.log(`\n🤖 Agent REST-AP Server`);
         console.log(`================================`);
         console.log(`Harness: ${this.harnessType}`);

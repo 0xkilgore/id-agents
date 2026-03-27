@@ -3699,7 +3699,7 @@ export class AgentManagerDb {
         this.handleWebSocketConnection(ws, req);
       });
 
-      this.httpServer.listen(port, async () => {
+      this.httpServer.listen(port, '127.0.0.1', async () => {
         console.log(`\n🚀 ID Agent Manager (DB-backed)`);
         console.log(`===============================`);
         console.log(`Management API: http://localhost:${port}`);

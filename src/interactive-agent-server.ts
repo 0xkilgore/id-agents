@@ -566,7 +566,7 @@ export class InteractiveAgentServer extends EventEmitter {
 
   start() {
     return new Promise<void>((resolve) => {
-      this.app.listen(this.port, '0.0.0.0', () => {
+      this.app.listen(this.port, '127.0.0.1', () => {
         resolve();
       });
     });
