@@ -147,7 +147,7 @@ When you run `npm run id-agents`, you're just running a normal Claude Code CLI s
 ## Scheduling
 
 ID Agents has one manager-owned scheduling system with two schedule kinds:
-- `interval` schedules for recurring work every N seconds
+- `heartbeat` schedules for recurring work every N seconds
 - `calendar` schedules for one-off or recurring wall-clock events
 
 The manager is the only component that decides when a run is due. Agents do not run independent schedulers. Every due run is logged in the database before dispatch, which makes scheduling restart-safe and prevents double-fires.

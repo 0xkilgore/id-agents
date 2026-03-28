@@ -142,9 +142,9 @@ export function evaluateIntervalSchedule(
 
     runs.push({
       scheduleId: def.id,
-      scheduledKey: `interval:${scheduledAt}`,
+      scheduledKey: `heartbeat:${scheduledAt}`,
       scheduledAt,
-      kind: 'interval',
+      kind: 'heartbeat',
     });
 
     if (def.catch_up_policy === 'fire_once') break;

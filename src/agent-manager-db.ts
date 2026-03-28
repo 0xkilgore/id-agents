@@ -2667,12 +2667,12 @@ export class AgentManagerDb {
 
         if (subCmd === 'add') {
           const kind = args[1]?.toLowerCase();
-          if (kind !== 'interval' && kind !== 'calendar') {
-            return { ok: false, error: 'Usage: /schedule add <interval|calendar> ...' };
+          if (kind !== 'heartbeat' && kind !== 'calendar') {
+            return { ok: false, error: 'Usage: /schedule add <heartbeat|calendar> ...' };
           }
 
           const rawArgs = args.slice(2);
-          let delivery: ScheduleDeliveryMode = kind === 'interval' ? 'internal' : 'talk';
+          let delivery: ScheduleDeliveryMode = kind === 'heartbeat' ? 'internal' : 'talk';
           let timezone: string | undefined;
           let sender: string | undefined;
           const positionals: string[] = [];
@@ -2707,14 +2707,14 @@ export class AgentManagerDb {
             positionals.push(token);
           }
 
-          if (kind === 'interval') {
+          if (kind === 'heartbeat') {
             const [agentName, secondsRaw, ...messageParts] = positionals;
             const message = messageParts.join(' ').trim();
 
             if (!agentName || !secondsRaw || !message) {
               return {
                 ok: false,
-                error: 'Usage: /schedule add interval <agent> <seconds> <message> [--delivery internal|talk]',
+                error: 'Usage: /schedule add heartbeat <agent> <seconds> <message> [--delivery internal|talk]',
               };
             }
 
@@ -2735,7 +2735,7 @@ export class AgentManagerDb {
             const scheduleId = `sch_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
             const definition: ScheduleDefinitionRow = {
               id: scheduleId,
-              kind: 'interval',
+              kind: 'heartbeat',
               title: `Interval: ${agent.name}`,
               description: null,
               active: true,

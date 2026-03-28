@@ -69,7 +69,7 @@ export interface NewsItemRow {
 /** schedule_definitions table row */
 export interface ScheduleDefinitionRow {
   id: string;
-  kind: 'interval' | 'calendar';
+  kind: 'heartbeat' | 'calendar';
   title: string;
   description: string | null;
   active: boolean;

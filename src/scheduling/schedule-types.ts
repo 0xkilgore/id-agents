@@ -10,7 +10,7 @@ export interface DueRun {
   scheduleId: string;
   scheduledKey: string;     // e.g. "interval:1711737600" or "calendar:2026-04-01@32400"
   scheduledAt: number;       // unix seconds — logical scheduled instant
-  kind: 'interval' | 'calendar';
+  kind: 'heartbeat' | 'calendar';
 }
 
 /**
@@ -32,7 +32,7 @@ export interface SchedulePayload {
   mode: ScheduleDeliveryMode;
   schedule: {
     id: string;
-    kind: 'interval' | 'calendar';
+    kind: 'heartbeat' | 'calendar';
     title: string;
     scheduledKey: string;
   };

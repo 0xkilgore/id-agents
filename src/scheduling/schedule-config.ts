@@ -80,7 +80,7 @@ export function heartbeatToSchedule(
 
   const definition: ScheduleDefinitionRow = {
     id: `hb_${agentId}`,
-    kind: 'interval',
+    kind: 'heartbeat',
     title: `Heartbeat: ${agentName}`,
     description: null,
     active: true,

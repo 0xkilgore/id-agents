@@ -45,7 +45,7 @@ export class SchedulerService {
 
       const allDueRuns: DueRun[] = [];
       for (const def of defs) {
-        const runs = def.kind === 'interval'
+        const runs = def.kind === 'heartbeat'
           ? evaluateIntervalSchedule(def, windowStart, windowEnd)
           : evaluateCalendarSchedule(def, windowStart, windowEnd);
         allDueRuns.push(...runs);

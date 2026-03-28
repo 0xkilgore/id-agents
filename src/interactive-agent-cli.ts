@@ -66,7 +66,7 @@ const HELP_ITEMS: Array<{ cmd: string; desc: string; indent?: boolean }> = [
   { cmd: '/news [-l] <agent>', desc: 'Check recent messages (-l for full content)' },
   { cmd: '/register <agent>', desc: 'Register agent onchain' },
   { cmd: '/schedule', desc: 'List active schedules' },
-  { cmd: '/schedule add interval <agent> <s> <msg>', desc: 'Add heartbeat' },
+  { cmd: '/schedule add heartbeat <agent> <s> <msg>', desc: 'Add heartbeat' },
   { cmd: '/schedule add calendar <agent> <time> <days> <msg>', desc: 'Add calendar event' },
   { cmd: '/schedule pause|resume|remove <id>', desc: 'Manage schedules' },
   { cmd: '/status', desc: 'Check agent status' },
@@ -2941,10 +2941,10 @@ async function handleLine(line: string) {
             for (const s of result.schedules) {
               const targets = (s.targets || []).join(', ');
               const statusIcon = s.active ? '🟢' : '🟡';
-              const kindIcon = s.kind === 'interval' ? '🔁' : '📆';
+              const kindIcon = s.kind === 'heartbeat' ? '🔁' : '📆';
 
               let timing = '';
-              if (s.kind === 'interval') {
+              if (s.kind === 'heartbeat') {
                 const mins = Math.floor(s.intervalSeconds / 60);
                 timing = mins >= 60 ? `${Math.floor(mins / 60)}h${mins % 60 ? mins % 60 + 'm' : ''}` : `${mins}m`;
               } else {
