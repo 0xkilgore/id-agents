@@ -4430,6 +4430,10 @@ export class AgentManagerDb {
             .filter(([k]) => k.startsWith('CLAUDE'))
             .map(([k, v]) => [k, v || ''])
         ),
+        // Runtime harness (codex, claude-code-cli, etc.)
+        ...(agentRow?.runtime && { ID_HARNESS: agentRow.runtime }),
+        // Pass OPENAI_API_KEY for codex agents
+        ...(agentRow?.runtime === 'codex' && process.env.OPENAI_API_KEY && { OPENAI_API_KEY: process.env.OPENAI_API_KEY }),
         ID_TEAM: teamName,
         MANAGER_URL: `http://localhost:4100`,
         ...(model && { CLAUDE_MODEL: model }),
