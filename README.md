@@ -226,13 +226,12 @@ See [Scheduling Plan](./docs/SCHEDULING_PLAN.md) for the full design.
 /news [-l] <agent>          # Check recent messages (-l for full content)
 /register <agent>           # Register agent onchain
 /status                     # Check agent status
-/schedule list               # List all active schedules
-/schedule show <id>          # Show schedule details
-/schedule add interval <agent> <seconds> <message>  # Add heartbeat
-/schedule add calendar <agent> <time> <days|date> <message>  # Add calendar event
-/schedule pause <id>         # Pause a schedule
-/schedule resume <id>        # Resume a paused schedule
-/schedule remove <id>        # Remove a schedule
+/heartbeat                   # List heartbeats
+/heartbeat add <agent> <seconds> <message>  # Add heartbeat
+/heartbeat pause|resume|remove <id>         # Manage heartbeat
+/calendar                    # List calendar events
+/calendar add <agent> <time> <days|date> <message>  # Add calendar event
+/calendar pause|resume|remove <id>          # Manage calendar event
 /update <agent> [--wallet|--name]  # Update agent properties
 /wallet <agent> [chain]     # Show agent wallet addresses
 /quit                       # Exit
@@ -280,13 +279,12 @@ This means any Claude Code instance on the same machine can coordinate with your
 - `/news [-l] <name>` - Check recent messages
 - `/register <name>` - Register agent onchain
 - `/status` - Show status
-- `/schedule list` - List active schedules
-- `/schedule show <id>` - Show schedule details
-- `/schedule add interval <agent> <seconds> <message>` - Add heartbeat
-- `/schedule add calendar <agent> <time> <days|date> <message>` - Add calendar event
-- `/schedule pause <id>` - Pause schedule
-- `/schedule resume <id>` - Resume schedule
-- `/schedule remove <id>` - Remove schedule
+- `/heartbeat` - List heartbeats
+- `/heartbeat add <agent> <seconds> <message>` - Add heartbeat
+- `/heartbeat pause|resume|remove <id>` - Manage heartbeat
+- `/calendar` - List calendar events
+- `/calendar add <agent> <time> <days|date> <message>` - Add calendar event
+- `/calendar pause|resume|remove <id>` - Manage calendar event
 
 ## Skills & Plugins
 
