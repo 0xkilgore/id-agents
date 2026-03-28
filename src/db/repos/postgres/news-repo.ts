@@ -34,13 +34,12 @@ export class PgNewsRepo implements NewsRepository {
   }
 
   async poll(
-    teamId: string,
     agentId: string,
     since: number,
     opts?: { limit?: number; queryId?: string },
   ): Promise<NewsItemRow[]> {
-    const params: unknown[] = [teamId, agentId, since];
-    let where = `team_id = $1 AND agent_id = $2 AND timestamp > $3`;
+    const params: unknown[] = [agentId, since];
+    let where = `agent_id = $1 AND timestamp > $2`;
 
     if (opts?.queryId) {
       params.push(opts.queryId);

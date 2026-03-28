@@ -55,8 +55,8 @@ export interface TeamsRepository {
 // ---------------------------------------------------------------------------
 
 export interface AgentsRepository {
-  /** Look up an agent by its composite primary key (team_id, id). Non-deleted only. */
-  getById(teamId: string, agentId: string): Promise<AgentRow | null>;
+  /** Look up an agent by its primary key (id). Non-deleted only. */
+  getById(agentId: string): Promise<AgentRow | null>;
 
   /**
    * Look up the most recent non-deleted agent by exact name match
@@ -138,7 +138,6 @@ export interface AgentsRepository {
    * endpoint, and/or metadata (full replace).
    */
   updateIdentity(
-    teamId: string,
     agentId: string,
     fields: {
       name?: string;
@@ -150,14 +149,13 @@ export interface AgentsRepository {
   ): Promise<void>;
 
   /** Replace the full metadata JSON for an agent. */
-  updateMetadata(teamId: string, agentId: string, metadata: Record<string, unknown>): Promise<void>;
+  updateMetadata(agentId: string, metadata: Record<string, unknown>): Promise<void>;
 
   /**
    * Update agent status, with optional extra column updates
    * (port, endpoint, metadata, model).
    */
   updateStatus(
-    teamId: string,
     agentId: string,
     status: string,
     extra?: {
@@ -176,7 +174,7 @@ export interface AgentsRepository {
   softDelete(teamId: string, name: string, excludeId: string, timestamp: number): Promise<void>;
 
   /** Permanently delete an agent row (cascades to wallets, news, queries). */
-  deleteAgent(teamId: string, agentId: string): Promise<void>;
+  deleteAgent(agentId: string): Promise<void>;
 }
 
 // ---------------------------------------------------------------------------
@@ -194,11 +192,11 @@ export interface QueriesRepository {
     sessionId?: string,
   ): Promise<void>;
 
-  /** Look up a single query by team_id, agent_id, and query_id. */
-  getById(teamId: string, agentId: string, queryId: string): Promise<QueryRow | null>;
+  /** Look up a single query by agent_id and query_id. */
+  getById(agentId: string, queryId: string): Promise<QueryRow | null>;
 
   /**
-   * Insert-or-update a query row (ON CONFLICT by team_id, agent_id, query_id).
+   * Insert-or-update a query row (ON CONFLICT by agent_id, query_id).
    * On conflict, updates status, completed, result, error, and session_id.
    */
   upsert(
@@ -227,14 +225,14 @@ export interface QueriesRepository {
   /**
    * Get all pending/processing queries for an agent, ordered by created ascending.
    */
-  getPending(teamId: string, agentId: string): Promise<QueryRow[]>;
+  getPending(agentId: string): Promise<QueryRow[]>;
 
   /**
    * Cancel all pending/processing queries for an agent.
    * Sets status='cancelled' and completed timestamp.
    * Returns the list of cancelled query_ids.
    */
-  cancel(teamId: string, agentId: string, completed: number): Promise<string[]>;
+  cancel(agentId: string, completed: number): Promise<string[]>;
 }
 
 // ---------------------------------------------------------------------------
@@ -260,7 +258,6 @@ export interface NewsRepository {
    * Ordered by timestamp descending. Supports optional limit and query_id filter.
    */
   poll(
-    teamId: string,
     agentId: string,
     since: number,
     opts?: { limit?: number; queryId?: string },

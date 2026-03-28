@@ -40,14 +40,13 @@ export class SqliteNewsRepo implements NewsRepository {
   }
 
   async poll(
-    teamId: string,
     agentId: string,
     since: number,
     opts?: { limit?: number; queryId?: string },
   ): Promise<NewsItemRow[]> {
     let sql =
-      'SELECT type, timestamp, message, data FROM news_items WHERE team_id = ? AND agent_id = ? AND timestamp > ?';
-    const params: unknown[] = [teamId, agentId, since];
+      'SELECT type, timestamp, message, data FROM news_items WHERE agent_id = ? AND timestamp > ?';
+    const params: unknown[] = [agentId, since];
 
     if (opts?.queryId) {
       sql += ' AND query_id = ?';

@@ -12,10 +12,10 @@ export class PgAgentsRepo implements AgentsRepository {
   // Single-row lookups
   // ---------------------------------------------------------------------------
 
-  async getById(teamId: string, agentId: string): Promise<AgentRow | null> {
+  async getById(agentId: string): Promise<AgentRow | null> {
     const r = await this.db.query<AgentRow>(
-      `SELECT * FROM agents WHERE team_id = $1 AND id = $2 AND deleted_at IS NULL`,
-      [teamId, agentId],
+      `SELECT * FROM agents WHERE id = $1 AND deleted_at IS NULL`,
+      [agentId],
     );
     return r.rows[0] || null;
   }
@@ -249,7 +249,7 @@ export class PgAgentsRepo implements AgentsRepository {
     await this.db.query(
       `INSERT INTO agents (team_id, id, name, type, model, port, endpoint, working_directory, status, created_at, metadata, token_id, domain)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
-       ON CONFLICT (team_id, id)
+       ON CONFLICT (id)
        DO UPDATE SET name = EXCLUDED.name,
                      type = EXCLUDED.type,
                      endpoint = EXCLUDED.endpoint,
@@ -277,7 +277,6 @@ export class PgAgentsRepo implements AgentsRepository {
   }
 
   async updateIdentity(
-    teamId: string,
     agentId: string,
     fields: {
       name?: string;
@@ -288,9 +287,8 @@ export class PgAgentsRepo implements AgentsRepository {
     },
   ): Promise<void> {
     await this.db.query(
-      `UPDATE agents SET name = $3, token_id = $4, domain = $5, endpoint = $6, metadata = $7 WHERE team_id = $1 AND id = $2`,
+      `UPDATE agents SET name = $2, token_id = $3, domain = $4, endpoint = $5, metadata = $6 WHERE id = $1`,
       [
-        teamId,
         agentId,
         fields.name ?? null,
         fields.token_id ?? null,
@@ -302,18 +300,16 @@ export class PgAgentsRepo implements AgentsRepository {
   }
 
   async updateMetadata(
-    teamId: string,
     agentId: string,
     metadata: Record<string, unknown>,
   ): Promise<void> {
     await this.db.query(
-      `UPDATE agents SET metadata = $3 WHERE team_id = $1 AND id = $2`,
-      [teamId, agentId, metadata],
+      `UPDATE agents SET metadata = $2 WHERE id = $1`,
+      [agentId, metadata],
     );
   }
 
   async updateStatus(
-    teamId: string,
     agentId: string,
     status: string,
     extra?: {
@@ -325,16 +321,16 @@ export class PgAgentsRepo implements AgentsRepository {
   ): Promise<void> {
     if (!extra || Object.keys(extra).length === 0) {
       await this.db.query(
-        `UPDATE agents SET status = $3 WHERE team_id = $1 AND id = $2`,
-        [teamId, agentId, status],
+        `UPDATE agents SET status = $2 WHERE id = $1`,
+        [agentId, status],
       );
       return;
     }
 
     // Build a dynamic SET clause for the optional extra fields
-    const setClauses: string[] = ['status = $3'];
-    const params: unknown[] = [teamId, agentId, status];
-    let idx = 4;
+    const setClauses: string[] = ['status = $2'];
+    const params: unknown[] = [agentId, status];
+    let idx = 3;
 
     if (extra.port !== undefined) {
       setClauses.push(`port = $${idx++}`);
@@ -354,7 +350,7 @@ export class PgAgentsRepo implements AgentsRepository {
     }
 
     await this.db.query(
-      `UPDATE agents SET ${setClauses.join(', ')} WHERE team_id = $1 AND id = $2`,
+      `UPDATE agents SET ${setClauses.join(', ')} WHERE id = $1`,
       params,
     );
   }
@@ -376,10 +372,10 @@ export class PgAgentsRepo implements AgentsRepository {
     );
   }
 
-  async deleteAgent(teamId: string, agentId: string): Promise<void> {
+  async deleteAgent(agentId: string): Promise<void> {
     await this.db.query(
-      `DELETE FROM agents WHERE team_id = $1 AND id = $2`,
-      [teamId, agentId],
+      `DELETE FROM agents WHERE id = $1`,
+      [agentId],
     );
   }
 }

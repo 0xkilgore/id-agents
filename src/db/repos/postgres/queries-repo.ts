@@ -7,12 +7,12 @@ import type { QueryRow } from '../../types.js';
 export class PgQueriesRepo implements QueriesRepository {
   constructor(private db: DbAdapter) {}
 
-  async getById(teamId: string, agentId: string, queryId: string): Promise<QueryRow | null> {
+  async getById(agentId: string, queryId: string): Promise<QueryRow | null> {
     const { rows } = await this.db.query<QueryRow>(
       `SELECT team_id, agent_id, query_id, status, prompt, created, completed, result, error, session_id
        FROM queries
-       WHERE team_id = $1 AND agent_id = $2 AND query_id = $3`,
-      [teamId, agentId, queryId],
+       WHERE agent_id = $1 AND query_id = $2`,
+      [agentId, queryId],
     );
     return rows[0] ?? null;
   }
@@ -28,7 +28,7 @@ export class PgQueriesRepo implements QueriesRepository {
     await this.db.query(
       `INSERT INTO queries (team_id, query_id, agent_id, prompt, status, created, session_id)
        VALUES ($1, $2, $3, $4, 'pending', $5, $6)
-       ON CONFLICT (team_id, agent_id, query_id) DO NOTHING`,
+       ON CONFLICT (agent_id, query_id) DO NOTHING`,
       [teamId, queryId, agentId, prompt, created, sessionId || null],
     );
   }
@@ -41,7 +41,7 @@ export class PgQueriesRepo implements QueriesRepository {
     await this.db.query(
       `INSERT INTO queries (team_id, agent_id, query_id, status, prompt, created, completed, result, error, session_id)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
-       ON CONFLICT (team_id, agent_id, query_id)
+       ON CONFLICT (agent_id, query_id)
        DO UPDATE SET status = EXCLUDED.status,
                      completed = EXCLUDED.completed,
                      result = EXCLUDED.result,
@@ -83,23 +83,23 @@ export class PgQueriesRepo implements QueriesRepository {
     return rows[0]?.team_id ?? null;
   }
 
-  async getPending(teamId: string, agentId: string): Promise<QueryRow[]> {
+  async getPending(agentId: string): Promise<QueryRow[]> {
     const { rows } = await this.db.query<QueryRow>(
       `SELECT query_id, status, prompt, created, completed, result, error, session_id
        FROM queries
-       WHERE team_id = $1 AND agent_id = $2 AND status IN ('pending', 'processing')
+       WHERE agent_id = $1 AND status IN ('pending', 'processing')
        ORDER BY created ASC`,
-      [teamId, agentId],
+      [agentId],
     );
     return rows;
   }
 
-  async cancel(teamId: string, agentId: string, completed: number): Promise<string[]> {
+  async cancel(agentId: string, completed: number): Promise<string[]> {
     // Find all pending/processing queries for this agent
     const { rows } = await this.db.query<{ query_id: string }>(
       `SELECT query_id FROM queries
-       WHERE team_id = $1 AND agent_id = $2 AND status IN ('pending', 'processing')`,
-      [teamId, agentId],
+       WHERE agent_id = $1 AND status IN ('pending', 'processing')`,
+      [agentId],
     );
 
     if (rows.length === 0) return [];
@@ -108,9 +108,9 @@ export class PgQueriesRepo implements QueriesRepository {
 
     // Update queries to cancelled status
     await this.db.query(
-      `UPDATE queries SET status = 'cancelled', completed = $3
-       WHERE team_id = $1 AND agent_id = $2 AND status IN ('pending', 'processing')`,
-      [teamId, agentId, completed],
+      `UPDATE queries SET status = 'cancelled', completed = $2
+       WHERE agent_id = $1 AND status IN ('pending', 'processing')`,
+      [agentId, completed],
     );
 
     return queryIds;

@@ -14,8 +14,8 @@ export function migrateSqlite(adapter: SqliteAdapter): void {
     );
 
     CREATE TABLE IF NOT EXISTS agents (
+      id TEXT PRIMARY KEY,
       team_id TEXT NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
-      id TEXT NOT NULL,
       name TEXT NOT NULL,
       type TEXT NOT NULL,
       model TEXT NOT NULL,
@@ -30,35 +30,32 @@ export function migrateSqlite(adapter: SqliteAdapter): void {
       runtime TEXT DEFAULT 'claude-agent-sdk',
       token_id TEXT,
       domain TEXT,
-      api_key TEXT,
-      PRIMARY KEY (team_id, id)
+      api_key TEXT
     );
 
     CREATE TABLE IF NOT EXISTS wallets (
+      agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
       team_id TEXT NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
-      agent_id TEXT NOT NULL,
       address TEXT NOT NULL,
       private_key TEXT NOT NULL,
       created_at INTEGER NOT NULL,
-      PRIMARY KEY (team_id, agent_id),
-      FOREIGN KEY (team_id, agent_id) REFERENCES agents(team_id, id) ON DELETE CASCADE
+      PRIMARY KEY (agent_id)
     );
 
     CREATE TABLE IF NOT EXISTS news_items (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       team_id TEXT NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
-      agent_id TEXT NOT NULL,
+      agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
       timestamp INTEGER NOT NULL,
       type TEXT NOT NULL,
       message TEXT,
       data TEXT,
-      query_id TEXT,
-      FOREIGN KEY (team_id, agent_id) REFERENCES agents(team_id, id) ON DELETE CASCADE
+      query_id TEXT
     );
 
     CREATE TABLE IF NOT EXISTS queries (
       team_id TEXT NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
-      agent_id TEXT NOT NULL,
+      agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
       query_id TEXT NOT NULL,
       status TEXT NOT NULL,
       prompt TEXT,
@@ -67,8 +64,7 @@ export function migrateSqlite(adapter: SqliteAdapter): void {
       result TEXT,
       error TEXT,
       session_id TEXT,
-      FOREIGN KEY (team_id, agent_id) REFERENCES agents(team_id, id) ON DELETE CASCADE,
-      PRIMARY KEY (team_id, agent_id, query_id)
+      PRIMARY KEY (agent_id, query_id)
     );
 
     CREATE INDEX IF NOT EXISTS agents_team_name_idx ON agents(team_id, name);

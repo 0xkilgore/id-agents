@@ -30,10 +30,10 @@ export class SqliteAgentsRepo implements AgentsRepository {
   // Reads
   // ---------------------------------------------------------------------------
 
-  async getById(teamId: string, agentId: string): Promise<AgentRow | null> {
+  async getById(agentId: string): Promise<AgentRow | null> {
     const { rows } = await this.db.query(
-      `SELECT * FROM agents WHERE team_id = ? AND id = ? AND deleted_at IS NULL`,
-      [teamId, agentId],
+      `SELECT * FROM agents WHERE id = ? AND deleted_at IS NULL`,
+      [agentId],
     );
     return this.parseRow(rows[0]);
   }
@@ -285,7 +285,7 @@ export class SqliteAgentsRepo implements AgentsRepository {
          (team_id, id, name, type, model, port, endpoint, working_directory,
           status, created_at, metadata, registry, runtime, token_id, domain, api_key)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-       ON CONFLICT (team_id, id) DO UPDATE SET
+       ON CONFLICT (id) DO UPDATE SET
          name       = excluded.name,
          type       = COALESCE(excluded.type, agents.type),
          endpoint   = COALESCE(excluded.endpoint, agents.endpoint),
@@ -316,7 +316,6 @@ export class SqliteAgentsRepo implements AgentsRepository {
   }
 
   async updateIdentity(
-    teamId: string,
     agentId: string,
     fields: {
       name?: string;
@@ -352,26 +351,24 @@ export class SqliteAgentsRepo implements AgentsRepository {
 
     if (sets.length === 0) return;
 
-    params.push(teamId, agentId);
+    params.push(agentId);
     await this.db.query(
-      `UPDATE agents SET ${sets.join(', ')} WHERE team_id = ? AND id = ?`,
+      `UPDATE agents SET ${sets.join(', ')} WHERE id = ?`,
       params,
     );
   }
 
   async updateMetadata(
-    teamId: string,
     agentId: string,
     metadata: Record<string, unknown>,
   ): Promise<void> {
     await this.db.query(
-      `UPDATE agents SET metadata = ? WHERE team_id = ? AND id = ?`,
-      [stringifyJson(metadata), teamId, agentId],
+      `UPDATE agents SET metadata = ? WHERE id = ?`,
+      [stringifyJson(metadata), agentId],
     );
   }
 
   async updateStatus(
-    teamId: string,
     agentId: string,
     status: string,
     extra?: {
@@ -401,9 +398,9 @@ export class SqliteAgentsRepo implements AgentsRepository {
       params.push(extra.model);
     }
 
-    params.push(teamId, agentId);
+    params.push(agentId);
     await this.db.query(
-      `UPDATE agents SET ${sets.join(', ')} WHERE team_id = ? AND id = ?`,
+      `UPDATE agents SET ${sets.join(', ')} WHERE id = ?`,
       params,
     );
   }
@@ -424,10 +421,10 @@ export class SqliteAgentsRepo implements AgentsRepository {
     );
   }
 
-  async deleteAgent(teamId: string, agentId: string): Promise<void> {
+  async deleteAgent(agentId: string): Promise<void> {
     await this.db.query(
-      `DELETE FROM agents WHERE team_id = ? AND id = ?`,
-      [teamId, agentId],
+      `DELETE FROM agents WHERE id = ?`,
+      [agentId],
     );
   }
 }

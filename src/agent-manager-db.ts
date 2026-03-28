@@ -418,7 +418,7 @@ export class AgentManagerDb {
   }
 
   private async dbQueryAgentById(teamId: string, id: string): Promise<AgentRow | null> {
-    return this.db.agents.getById(teamId, id);
+    return this.db.agents.getById(id);
   }
 
   private async dbQueryAgentByNameMostRecent(teamId: string, name: string): Promise<AgentRow | null> {
@@ -593,7 +593,7 @@ export class AgentManagerDb {
       }
     }
 
-    await this.db.agents.updateIdentity(teamId, agent.id, {
+    await this.db.agents.updateIdentity(agent.id, {
       name: newName,
       token_id: tokenId,
       domain: newName,
@@ -1132,7 +1132,7 @@ export class AgentManagerDb {
 
         const cliId = cliAgentRow.id;
 
-        const newsRows = await this.db.news.poll(teamId, cliId, since, {
+        const newsRows = await this.db.news.poll(cliId, since, {
           limit,
           queryId: query_id,
         });
@@ -1578,7 +1578,7 @@ export class AgentManagerDb {
         // Derive agent_account from request address, or fall back to shared deployer key
         const deployerAddress = this.getDeployerAddress();
         const updatedMeta = { ...metadata, agent_account: address || deployerAddress };
-        await this.db.agents.updateMetadata(teamId, id, updatedMeta);
+        await this.db.agents.updateMetadata(id, updatedMeta);
 
         // All agents run locally
         const allocatedPort = await this.dbNextPort(teamId);
@@ -1590,7 +1590,7 @@ export class AgentManagerDb {
           local: true,
           runtime: effectiveRuntime
         };
-        await this.db.agents.updateStatus(teamId, id, 'pending', {
+        await this.db.agents.updateStatus(id, 'pending', {
           port: allocatedPort,
           endpoint: url,
           metadata: finalMeta,
@@ -1629,7 +1629,7 @@ export class AgentManagerDb {
         // Ensure we never return Express's default HTML error page (CLI expects JSON).
         try {
           if (teamId && id) {
-            await this.db.agents.updateStatus(teamId, id, 'error');
+            await this.db.agents.updateStatus(id, 'error');
           }
         } catch {
           // ignore
@@ -1704,7 +1704,7 @@ export class AgentManagerDb {
       if (!nextMeta.agent_account) {
         const deployerAddress = this.getDeployerAddress();
         nextMeta = { ...nextMeta, agent_account: deployerAddress };
-        await this.db.agents.updateMetadata(teamId, id, nextMeta);
+        await this.db.agents.updateMetadata(id, nextMeta);
       }
 
       res.status(201).json({
@@ -1727,7 +1727,7 @@ export class AgentManagerDb {
       const { metadata } = req.body || {};
       const nextMetadata = metadata ? { ...(agent.metadata || {}), ...(metadata || {}) } : agent.metadata;
 
-      await this.db.agents.updateMetadata(teamId, agent.id, nextMetadata);
+      await this.db.agents.updateMetadata(agent.id, nextMetadata);
 
       const server = this.runningServers.get(this.key(teamId, agent.id));
       if (server && agent.type === 'claude') {
@@ -1749,7 +1749,7 @@ export class AgentManagerDb {
       const { metadata } = req.body || {};
       const nextMetadata = metadata ? { ...(agent.metadata || {}), ...(metadata || {}) } : agent.metadata;
 
-      await this.db.agents.updateMetadata(teamId, agent.id, nextMetadata);
+      await this.db.agents.updateMetadata(agent.id, nextMetadata);
 
       const server = this.runningServers.get(this.key(teamId, agent.id));
       if (server && agent.type === 'claude') {
@@ -1841,7 +1841,7 @@ export class AgentManagerDb {
 
       try {
         // Update model in database - agent needs restart to pick up new model
-        await this.db.agents.updateStatus(teamId, agent.id, 'pending', { model });
+        await this.db.agents.updateStatus(agent.id, 'pending', { model });
 
         console.log(`[Manager] Updated model for ${agent.name} to ${model} - restart required`);
 
@@ -1871,10 +1871,10 @@ export class AgentManagerDb {
 
         if (wallet) {
           const metadata = { ...(agent.metadata as any || {}), wallet_address: wallet };
-          await this.db.agents.updateMetadata(teamId, agent.id, metadata);
+          await this.db.agents.updateMetadata(agent.id, metadata);
         }
         if (newName) {
-          await this.db.agents.updateIdentity(teamId, agent.id, { name: newName });
+          await this.db.agents.updateIdentity(agent.id, { name: newName });
         }
 
         res.json({ ok: true, updated: Object.keys(req.body) });
@@ -1913,7 +1913,7 @@ export class AgentManagerDb {
       }
 
       // Delete record (cascades wallets/news/queries)
-      await this.db.agents.deleteAgent(teamId, agent.id);
+      await this.db.agents.deleteAgent(agent.id);
       res.json({ message: 'Agent deleted', id: agent.id, name: agent.name });
     });
 
@@ -1935,7 +1935,7 @@ export class AgentManagerDb {
           if (agent.working_directory === expectedDir) rmSync(agent.working_directory, { recursive: true, force: true });
         } catch {}
       }
-      await this.db.agents.deleteAgent(teamId, agent.id);
+      await this.db.agents.deleteAgent(agent.id);
       res.json({ message: 'Agent deleted', id: agent.id, name: agent.name });
     });
 
@@ -2101,7 +2101,7 @@ export class AgentManagerDb {
               const existingId = existing.rows[0].id;
               const existingType = existing.rows[0].type;
               // Merge metadata; don't stomp local endpoint/port for claude agents.
-              const currentAgent = await this.db.agents.getById(teamId, existingId);
+              const currentAgent = await this.db.agents.getById(existingId);
               const currentMeta = (currentAgent?.metadata || {}) as any;
               const mergedMeta = { ...currentMeta, ...metadata, name: currentMeta.name || metadata.name };
 
@@ -2237,7 +2237,7 @@ export class AgentManagerDb {
 
             const deployerAddress = this.getDeployerAddress();
             const updatedMeta = { ...metadata, agent_account: deployerAddress };
-            await this.db.agents.updateMetadata(teamId, claudeId, updatedMeta);
+            await this.db.agents.updateMetadata(claudeId, updatedMeta);
 
             const server = new ClaudeAgentServer({
               model: defaultModel,
@@ -2249,7 +2249,7 @@ export class AgentManagerDb {
             });
             await server.start(port);
             this.runningServers.set(this.key(teamId, claudeId), server);
-            await this.db.agents.updateStatus(teamId, claudeId, 'running');
+            await this.db.agents.updateStatus(claudeId, 'running');
 
             spawned++;
           }
@@ -2323,7 +2323,7 @@ export class AgentManagerDb {
             agent_account: agentAccount || agent.metadata?.agent_account
           };
 
-          await this.db.agents.updateMetadata(teamId, agent.id, nextMetadata);
+          await this.db.agents.updateMetadata(agent.id, nextMetadata);
 
           // Update running server identity
           const server = this.runningServers.get(this.key(teamId, agent.id));
@@ -2544,7 +2544,7 @@ export class AgentManagerDb {
             }
             // Update metadata to enable heartbeat
             const newMetadata = { ...agent.metadata, heartbeat: true };
-            await this.db.agents.updateMetadata(teamId, agent.id, newMetadata);
+            await this.db.agents.updateMetadata(agent.id, newMetadata);
             // Start heartbeat timer if agent is running
             if (agent.status === 'running') {
               this.startHeartbeatForAgent(teamId, agent.id, agent.name, agent.working_directory, config.interval);
@@ -2554,7 +2554,7 @@ export class AgentManagerDb {
             // Disable heartbeat
             const newMetadata = { ...agent.metadata };
             delete newMetadata.heartbeat;
-            await this.db.agents.updateMetadata(teamId, agent.id, newMetadata);
+            await this.db.agents.updateMetadata(agent.id, newMetadata);
             this.stopHeartbeatForAgent(agent.id);
             return { ok: true, result: { message: `Heartbeat disabled for ${agent.name}` } };
           }
@@ -3092,7 +3092,7 @@ export class AgentManagerDb {
             // Remove any existing agent with this name to avoid duplicates on redeploy
             const existing = await this.db.agents.getByName(effectiveTeamId, agentName);
             if (existing) {
-              await this.db.agents.deleteAgent(effectiveTeamId, existing.id);
+              await this.db.agents.deleteAgent(existing.id);
             }
 
             // Insert into database
@@ -3117,7 +3117,7 @@ export class AgentManagerDb {
             // All agents run locally - set up database and let CLI spawn the process
             const url = `http://localhost:${port}`;
             const finalMeta = { ...metadata, endpoint: url, local: true };
-            await this.db.agents.updateStatus(effectiveTeamId, agentId, 'pending', {
+            await this.db.agents.updateStatus(agentId, 'pending', {
               port,
               endpoint: url,
               metadata: finalMeta,
@@ -3152,7 +3152,7 @@ export class AgentManagerDb {
               result.pid = spawnResult.pid;
               result.logFile = spawnResult.logFile;
               // Update status to running
-              await this.db.agents.updateStatus(effectiveTeamId, agentId, 'running');
+              await this.db.agents.updateStatus(agentId, 'running');
             }
 
             // Auto-register onchain if enabled (automators never register)
@@ -3160,7 +3160,7 @@ export class AgentManagerDb {
             if (shouldRegister) {
               try {
                 // Fetch the agent row for registration
-                const agentRow = await this.db.agents.getById(effectiveTeamId, agentId);
+                const agentRow = await this.db.agents.getById(agentId);
                 if (agentRow) {
                   const regResult = await this.registerOnchainAndUpdateAgent(effectiveTeamId, agentRow);
                   console.log(`[Deploy] Registration result: domain=${regResult.domain}, tokenId=${regResult.tokenId}, txHash=${regResult.txHash}`);
@@ -3195,7 +3195,7 @@ export class AgentManagerDb {
             // Clean up the database record if deployment failed
             if (agentId) {
               try {
-                await this.db.agents.deleteAgent(effectiveTeamId, agentId);
+                await this.db.agents.deleteAgent(agentId);
                 console.log(`[Deploy] Cleaned up failed agent record: ${agentId}`);
               } catch (cleanupErr) {
                 console.warn(`[Deploy] Failed to clean up agent record: ${cleanupErr}`);
@@ -3242,7 +3242,7 @@ export class AgentManagerDb {
                 tokenId: agent.token_id ?? undefined
               });
               if (spawnResult.success) {
-                await this.db.agents.updateStatus(teamId, agent.id, 'running');
+                await this.db.agents.updateStatus(agent.id, 'running');
                 return { ok: true, result: { action: 'started', name: agent.name, pid: spawnResult.pid, logFile: spawnResult.logFile } };
               } else {
                 return { ok: false, error: `Failed to start ${agent.name}: ${spawnResult.error}` };
@@ -3251,7 +3251,7 @@ export class AgentManagerDb {
             case 'stop': {
               const killResult = await this.killAgentProcess(agent.port);
               const cancelled = await this.cancelPendingQueriesForAgent(teamId, agent.id);
-              await this.db.agents.updateStatus(teamId, agent.id, 'stopped');
+              await this.db.agents.updateStatus(agent.id, 'stopped');
               return { ok: true, result: { action: 'stopped', name: agent.name, ...killResult, queriesCancelled: cancelled } };
             }
             case 'rebuild': {
@@ -3263,7 +3263,7 @@ export class AgentManagerDb {
                 tokenId: agent.token_id ?? undefined
               });
               if (spawnResult.success) {
-                await this.db.agents.updateStatus(teamId, agent.id, 'running');
+                await this.db.agents.updateStatus(agent.id, 'running');
                 return { ok: true, result: { action: 'rebuilt', name: agent.name, pid: spawnResult.pid, logFile: spawnResult.logFile } };
               } else {
                 return { ok: false, error: `Failed to rebuild ${agent.name}: ${spawnResult.error}` };
@@ -3321,7 +3321,7 @@ export class AgentManagerDb {
 
         // Update model and mark for restart if running
         const newStatus = agent.status === 'running' ? 'pending' : agent.status;
-        await this.db.agents.updateStatus(teamId, agent.id, newStatus, { model: resolvedModel });
+        await this.db.agents.updateStatus(agent.id, newStatus, { model: resolvedModel });
 
         return {
           ok: true,
@@ -3472,12 +3472,12 @@ export class AgentManagerDb {
           const newMetadata = { ...(agent.metadata || {}), [key]: value || null };
           // When setting 'endpoint', also update the endpoint column (used for routing)
           if (key === 'endpoint') {
-            await this.db.agents.updateIdentity(teamId, agent.id, {
+            await this.db.agents.updateIdentity(agent.id, {
               endpoint: value || undefined,
               metadata: newMetadata,
             });
           } else {
-            await this.db.agents.updateMetadata(teamId, agent.id, newMetadata);
+            await this.db.agents.updateMetadata(agent.id, newMetadata);
           }
           return { ok: true, result: { name: agent.name, metadata: newMetadata } };
         }
@@ -3493,7 +3493,7 @@ export class AgentManagerDb {
           if (!agent) {
             return { ok: false, error: `Agent "${agentName}" not found` };
           }
-          await this.db.agents.updateIdentity(teamId, agent.id, {
+          await this.db.agents.updateIdentity(agent.id, {
             domain: domainArg,
             token_id: tokenIdArg || undefined,
           });
@@ -3637,7 +3637,7 @@ export class AgentManagerDb {
             i++;
           } else if (args[i] === '--name' && args[i + 1]) {
             const newName = args[i + 1];
-            await this.db.agents.updateIdentity(teamId, agent.id, { name: newName });
+            await this.db.agents.updateIdentity(agent.id, { name: newName });
             newMetadata.alias = newMetadata.alias || agent.name;
             updates.push(`name → ${newName}`);
             i++;
@@ -3648,7 +3648,7 @@ export class AgentManagerDb {
           return { ok: false, error: 'Nothing to update. Use --wallet <address> or --name <newname>' };
         }
 
-        await this.db.agents.updateMetadata(teamId, agent.id, newMetadata);
+        await this.db.agents.updateMetadata(agent.id, newMetadata);
 
         return { ok: true, result: { message: `Updated ${agent.name}: ${updates.join(', ')}` } };
       }
@@ -3703,14 +3703,14 @@ export class AgentManagerDb {
 
             // Update DB status if it changed
             if (isOnline && agent.status === 'offline') {
-              await this.db.agents.updateStatus(team.id, agent.id, 'running');
+              await this.db.agents.updateStatus(agent.id, 'running');
             } else if (!isOnline && agent.status === 'running') {
-              await this.db.agents.updateStatus(team.id, agent.id, 'offline');
+              await this.db.agents.updateStatus(agent.id, 'offline');
             }
           } catch {
             this.healthStatus.set(key, { status: 'offline', lastCheck: Date.now() });
             if (agent.status === 'running') {
-              await this.db.agents.updateStatus(team.id, agent.id, 'offline').catch(() => {});
+              await this.db.agents.updateStatus(agent.id, 'offline').catch(() => {});
             }
           }
         }
@@ -3966,7 +3966,7 @@ export class AgentManagerDb {
       const ts = Date.now();
 
       // Cancel all pending/processing queries and get their IDs
-      const queryIds = await this.db.queries.cancel(teamId, agentId, ts);
+      const queryIds = await this.db.queries.cancel(agentId, ts);
 
       if (queryIds.length === 0) {
         return 0;
@@ -4227,7 +4227,7 @@ export class AgentManagerDb {
   private async sendHeartbeat(teamId: string, agentId: string, agentName: string, workingDirectory: string): Promise<void> {
     try {
       // Get agent status and endpoint
-      const agent = await this.db.agents.getById(teamId, agentId);
+      const agent = await this.db.agents.getById(agentId);
 
       if (!agent || agent.status !== 'running') {
         console.log(`[Heartbeat] Agent ${agentName} not running, stopping heartbeat`);

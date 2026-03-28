@@ -576,9 +576,9 @@ export class ClaudeAgentServer {
       if (this.db && this.dbTeamId && this.dbAgentId) {
         try {
           // Read current metadata, merge catalog, then write back
-          const agent = await this.db.agents.getById(this.dbTeamId, this.dbAgentId);
+          const agent = await this.db.agents.getById(this.dbAgentId);
           const merged = { ...(agent?.metadata || {}), catalog: this.catalog };
-          await this.db.agents.updateMetadata(this.dbTeamId, this.dbAgentId, merged);
+          await this.db.agents.updateMetadata(this.dbAgentId, merged);
         } catch (err: any) {
           console.error(`${logTime()} [Agent] Failed to sync catalog to database:`, err.message);
         }
@@ -702,7 +702,7 @@ export class ClaudeAgentServer {
         let recentNews: NewsItem[] = [];
 
         if (this.db && this.dbTeamId && this.dbAgentId) {
-          const rows = await this.db.news.poll(this.dbTeamId, this.dbAgentId, since, {
+          const rows = await this.db.news.poll(this.dbAgentId, since, {
             limit: 1000,
             queryId: query_id,
           });
@@ -833,7 +833,7 @@ export class ClaudeAgentServer {
       const run = async () => {
         const qid = req.params.id;
         if (this.db && this.dbTeamId && this.dbAgentId) {
-          const q = await this.db.queries.getById(this.dbTeamId, this.dbAgentId, qid);
+          const q = await this.db.queries.getById(this.dbAgentId, qid);
           if (!q) return res.status(404).json({ error: 'Query not found' });
           return res.json({
             id: q.query_id,

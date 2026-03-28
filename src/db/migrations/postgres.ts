@@ -203,8 +203,8 @@ export async function migratePostgres(adapter: DbAdapter): Promise<void> {
   // 6) Create tables (fresh installs)
   await adapter.query(`
     CREATE TABLE IF NOT EXISTS agents (
+      id text PRIMARY KEY,
       team_id uuid NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
-      id text NOT NULL,
       name text NOT NULL,
       type text NOT NULL,
       model text NOT NULL,
@@ -216,8 +216,7 @@ export async function migratePostgres(adapter: DbAdapter): Promise<void> {
       registry jsonb,
       metadata jsonb,
       deleted_at bigint,
-      runtime text DEFAULT 'claude-agent-sdk',
-      PRIMARY KEY (team_id, id)
+      runtime text DEFAULT 'claude-agent-sdk'
     );
   `);
 
@@ -226,13 +225,12 @@ export async function migratePostgres(adapter: DbAdapter): Promise<void> {
   // Table kept for backward compatibility with existing databases (migration safety).
   await adapter.query(`
     CREATE TABLE IF NOT EXISTS wallets (
+      agent_id text NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
       team_id uuid NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
-      agent_id text NOT NULL,
       address text NOT NULL,
       private_key text NOT NULL,
       created_at bigint NOT NULL,
-      PRIMARY KEY (team_id, agent_id),
-      FOREIGN KEY (team_id, agent_id) REFERENCES agents(team_id, id) ON DELETE CASCADE
+      PRIMARY KEY (agent_id)
     );
   `);
 
@@ -240,20 +238,19 @@ export async function migratePostgres(adapter: DbAdapter): Promise<void> {
     CREATE TABLE IF NOT EXISTS news_items (
       id bigserial PRIMARY KEY,
       team_id uuid NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
-      agent_id text NOT NULL,
+      agent_id text NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
       timestamp bigint NOT NULL,
       type text NOT NULL,
       message text,
       data jsonb,
-      query_id text,
-      FOREIGN KEY (team_id, agent_id) REFERENCES agents(team_id, id) ON DELETE CASCADE
+      query_id text
     );
   `);
 
   await adapter.query(`
     CREATE TABLE IF NOT EXISTS queries (
       team_id uuid NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
-      agent_id text NOT NULL,
+      agent_id text NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
       query_id text NOT NULL,
       status text NOT NULL,
       prompt text,
@@ -262,8 +259,7 @@ export async function migratePostgres(adapter: DbAdapter): Promise<void> {
       result jsonb,
       error text,
       session_id text,
-      FOREIGN KEY (team_id, agent_id) REFERENCES agents(team_id, id) ON DELETE CASCADE,
-      PRIMARY KEY (team_id, agent_id, query_id)
+      PRIMARY KEY (agent_id, query_id)
     );
   `);
 
@@ -318,4 +314,60 @@ export async function migratePostgres(adapter: DbAdapter): Promise<void> {
 
   // 12) Add runtime column for harness type
   await adapter.query(`ALTER TABLE agents ADD COLUMN IF NOT EXISTS runtime text DEFAULT 'claude-agent-sdk';`);
+
+  // 13) Migrate agents PK from (team_id, id) to (id).
+  //     Child table FKs change from (team_id, agent_id) -> agents(team_id, id)
+  //     to (agent_id) -> agents(id).
+  await adapter.query(`
+    DO $$
+    DECLARE
+      fk_name text;
+    BEGIN
+      -- Only run if agents still has a composite PK including team_id
+      IF NOT EXISTS (
+        SELECT 1 FROM information_schema.key_column_usage
+        WHERE table_schema = 'public' AND table_name = 'agents'
+          AND constraint_name = 'agents_pkey' AND column_name = 'team_id'
+      ) THEN
+        RETURN;
+      END IF;
+
+      -- Drop all FKs on child tables that reference agents
+      FOR fk_name IN
+        SELECT tc.constraint_name
+        FROM information_schema.table_constraints tc
+        JOIN information_schema.referential_constraints rc
+          ON rc.constraint_name = tc.constraint_name AND rc.constraint_schema = tc.table_schema
+        JOIN information_schema.table_constraints tc2
+          ON tc2.constraint_name = rc.unique_constraint_name AND tc2.constraint_schema = rc.unique_constraint_schema
+        WHERE tc.constraint_type = 'FOREIGN KEY'
+          AND tc2.table_name = 'agents'
+          AND tc.table_name IN ('wallets', 'news_items', 'queries')
+      LOOP
+        EXECUTE format('ALTER TABLE %I DROP CONSTRAINT %I',
+          (SELECT table_name FROM information_schema.table_constraints WHERE constraint_name = fk_name AND constraint_type = 'FOREIGN KEY' LIMIT 1),
+          fk_name);
+      END LOOP;
+
+      -- Change agents PK from (team_id, id) to (id)
+      ALTER TABLE agents DROP CONSTRAINT agents_pkey;
+      ALTER TABLE agents ADD PRIMARY KEY (id);
+
+      -- Change wallets PK from (team_id, agent_id) to (agent_id)
+      ALTER TABLE wallets DROP CONSTRAINT wallets_pkey;
+      ALTER TABLE wallets ADD PRIMARY KEY (agent_id);
+      ALTER TABLE wallets ADD CONSTRAINT wallets_agent_fk
+        FOREIGN KEY (agent_id) REFERENCES agents(id) ON DELETE CASCADE;
+
+      -- Change queries PK from (team_id, agent_id, query_id) to (agent_id, query_id)
+      ALTER TABLE queries DROP CONSTRAINT queries_pkey;
+      ALTER TABLE queries ADD PRIMARY KEY (agent_id, query_id);
+      ALTER TABLE queries ADD CONSTRAINT queries_agent_fk
+        FOREIGN KEY (agent_id) REFERENCES agents(id) ON DELETE CASCADE;
+
+      -- Add new FK for news_items
+      ALTER TABLE news_items ADD CONSTRAINT news_items_agent_fk
+        FOREIGN KEY (agent_id) REFERENCES agents(id) ON DELETE CASCADE;
+    END $$;
+  `);
 }

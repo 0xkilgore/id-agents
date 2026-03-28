@@ -304,7 +304,7 @@ export class InteractiveAgentServer extends EventEmitter {
         let recentNews: NewsItem[] = [];
 
         if (this.db && this.dbTeamId && this.dbAgentId) {
-          const rows = await this.db.news.poll(this.dbTeamId, this.dbAgentId, since, {
+          const rows = await this.db.news.poll(this.dbAgentId, since, {
             limit: 1000,
             queryId: query_id,
           });
@@ -492,7 +492,7 @@ export class InteractiveAgentServer extends EventEmitter {
   // Get pending queries for the CLI
   async getPendingQueries(): Promise<PendingQuery[]> {
     if (this.db && this.dbTeamId && this.dbAgentId) {
-      const rows = await this.db.queries.getPending(this.dbTeamId, this.dbAgentId);
+      const rows = await this.db.queries.getPending(this.dbAgentId);
       return rows.map((row) => ({
         query_id: row.query_id,
         message: row.prompt || (row.result as any)?.message || '',

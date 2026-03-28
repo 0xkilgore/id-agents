@@ -180,7 +180,7 @@ export async function startLocalAgent(config: LocalAgentConfig): Promise<{
 
       if (isPreRegistered) {
         // Just update status to 'running' - agent was already registered by manager
-        await db.agents.updateStatus(dbTeamId, agentId, 'running');
+        await db.agents.updateStatus(agentId, 'running');
         console.log(`📦 Updated status to running in database`);
       } else {
         // Register agent in database (standalone mode)
@@ -259,7 +259,7 @@ export async function startLocalAgent(config: LocalAgentConfig): Promise<{
         const ts = Date.now();
 
         // Cancel pending queries so they don't show as orphaned
-        const queryIds = await db.queries.cancel(dbTeamId, agentId, ts);
+        const queryIds = await db.queries.cancel(agentId, ts);
 
         if (queryIds.length > 0) {
           // Add query.cancelled news items
@@ -275,7 +275,7 @@ export async function startLocalAgent(config: LocalAgentConfig): Promise<{
           console.log(`📋 Cancelled ${queryIds.length} pending queries`);
         }
 
-        await db.agents.updateStatus(dbTeamId, agentId, 'stopped');
+        await db.agents.updateStatus(agentId, 'stopped');
       } catch {
         // Ignore errors
       }

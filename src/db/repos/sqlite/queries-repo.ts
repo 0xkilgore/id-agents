@@ -13,12 +13,12 @@ export class SqliteQueriesRepo implements QueriesRepository {
     return { ...row, result: parseJsonObject(row.result) };
   }
 
-  async getById(teamId: string, agentId: string, queryId: string): Promise<QueryRow | null> {
+  async getById(agentId: string, queryId: string): Promise<QueryRow | null> {
     const r = await this.db.query<QueryRow>(
       `SELECT team_id, agent_id, query_id, status, prompt, created, completed, result, error, session_id
        FROM queries
-       WHERE team_id = ? AND agent_id = ? AND query_id = ?`,
-      [teamId, agentId, queryId],
+       WHERE agent_id = ? AND query_id = ?`,
+      [agentId, queryId],
     );
     return r.rows[0] ? this.parseQueryRow(r.rows[0]) : null;
   }
@@ -34,7 +34,7 @@ export class SqliteQueriesRepo implements QueriesRepository {
     await this.db.query(
       `INSERT INTO queries (team_id, query_id, agent_id, prompt, status, created, session_id)
        VALUES (?, ?, ?, ?, 'pending', ?, ?)
-       ON CONFLICT (team_id, agent_id, query_id) DO NOTHING`,
+       ON CONFLICT (agent_id, query_id) DO NOTHING`,
       [teamId, queryId, agentId, prompt, created, sessionId ?? null],
     );
   }
@@ -47,7 +47,7 @@ export class SqliteQueriesRepo implements QueriesRepository {
     await this.db.query(
       `INSERT INTO queries (team_id, agent_id, query_id, status, prompt, created, completed, result, error, session_id)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-       ON CONFLICT (team_id, agent_id, query_id) DO UPDATE SET
+       ON CONFLICT (agent_id, query_id) DO UPDATE SET
          status = excluded.status,
          completed = excluded.completed,
          result = excluded.result,
@@ -89,29 +89,29 @@ export class SqliteQueriesRepo implements QueriesRepository {
     return r.rows[0]?.team_id ?? null;
   }
 
-  async getPending(teamId: string, agentId: string): Promise<QueryRow[]> {
+  async getPending(agentId: string): Promise<QueryRow[]> {
     const r = await this.db.query<QueryRow>(
       `SELECT query_id, status, prompt, created, completed, result, error, session_id
        FROM queries
-       WHERE team_id = ? AND agent_id = ? AND status IN ('pending', 'processing')`,
-      [teamId, agentId],
+       WHERE agent_id = ? AND status IN ('pending', 'processing')`,
+      [agentId],
     );
     return r.rows.map((row) => this.parseQueryRow(row)!);
   }
 
-  async cancel(teamId: string, agentId: string, completed: number): Promise<string[]> {
+  async cancel(agentId: string, completed: number): Promise<string[]> {
     const r = await this.db.query<{ query_id: string }>(
       `SELECT query_id FROM queries
-       WHERE team_id = ? AND agent_id = ? AND status IN ('pending', 'processing')`,
-      [teamId, agentId],
+       WHERE agent_id = ? AND status IN ('pending', 'processing')`,
+      [agentId],
     );
     const queryIds = r.rows.map((row) => row.query_id);
 
     if (queryIds.length > 0) {
       await this.db.query(
         `UPDATE queries SET status = 'cancelled', completed = ?
-         WHERE team_id = ? AND agent_id = ? AND status IN ('pending', 'processing')`,
-        [completed, teamId, agentId],
+         WHERE agent_id = ? AND status IN ('pending', 'processing')`,
+        [completed, agentId],
       );
     }
 

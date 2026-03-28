@@ -1,8 +1,9 @@
-# Security Audit: New Features (2025-03-27)
+# Security Audit: ID Agents (2026-03-27)
 
 **Audited by:** agents.agent-16.sep.xid.eth
-**Scope:** SQLite database layer, OWS signer, skill deployment, manager identity, deploy-upsert fix
-**Method:** Parallel sub-agent audits with manual consolidation
+**Scope:** Full codebase — input validation, injection, secrets, path traversal, deploy-upsert, changes since last review
+**Method:** Parallel sub-agent audits (4 agents) with manual consolidation
+**Architecture note:** API key auth intentionally removed (trusted local setup). All servers bind to `127.0.0.1`.
 
 ---
 
@@ -10,280 +11,196 @@
 
 | Severity | Count |
 |----------|-------|
-| **HIGH** | 11 |
-| **MEDIUM** | 14 |
-| **LOW** | 10 |
+| **HIGH** | 7 |
+| **MEDIUM** | 11 |
+| **LOW** | 8 |
 
-The most critical systemic issue is **disabled authentication on the manager** (`agent-manager-db.ts:188-189`), which amplifies nearly every other finding. The second systemic issue is **manager identity spoofing** -- the `from` field in request bodies is trusted without verification, allowing any network client to impersonate the manager or any agent. The third is the **deploy-upsert pattern** which performs a cascading hard delete without transactions, destroying agent history on every redeploy.
+The top systemic issues are:
+
+1. **Path traversal via team names** — The `X-Id-Team` header flows unsanitized into filesystem paths, enabling arbitrary directory creation and file writes by any local process.
+2. **Full `process.env` propagated to agent subprocesses** — Every spawned agent inherits all manager secrets (`PRIVATE_KEY`, `ANTHROPIC_API_KEY`, `DATABASE_URL`).
+3. **Deploy-upsert cascading hard delete** — Redeploy destroys all agent history (news, queries, wallets) with no transaction safety and no process cleanup.
+
+Previous audit findings that were **resolved**: All `ID_CONTROL_API_KEY`, `ID_AGENT_API_KEY`, `X-Api-Key` references removed. Auth middleware no-op removed. `safeCompare` imports cleaned from target files.
+
+Previous findings **still open**: env propagation, path traversal, deploy-upsert, manager identity spoofing, plaintext wallet keys, metadata exposure, symlink following.
 
 ---
 
 ## Table of Contents
 
-1. [Authentication & Authorization](#1-authentication--authorization)
-2. [Manager Identity Spoofing](#2-manager-identity-spoofing)
-3. [Path Traversal & Filesystem](#3-path-traversal--filesystem)
-4. [Secrets & Key Material](#4-secrets--key-material)
-5. [Deploy-Upsert Race Conditions](#5-deploy-upsert-race-conditions)
-6. [SQLite Database Layer](#6-sqlite-database-layer)
-7. [Input Validation](#7-input-validation)
-8. [Information Disclosure](#8-information-disclosure)
-9. [Positive Findings](#9-positive-findings)
-10. [Remediation Priority](#10-remediation-priority)
+1. [Path Traversal & Filesystem](#1-path-traversal--filesystem)
+2. [Secrets & Key Material](#2-secrets--key-material)
+3. [Deploy-Upsert & Race Conditions](#3-deploy-upsert--race-conditions)
+4. [Manager Identity Spoofing](#4-manager-identity-spoofing)
+5. [Input Validation & Injection](#5-input-validation--injection)
+6. [Information Disclosure](#6-information-disclosure)
+7. [Positive Findings](#7-positive-findings)
+8. [Remediation Priority](#8-remediation-priority)
 
 ---
 
-## 1. Authentication & Authorization
+## 1. Path Traversal & Filesystem
 
-### HIGH-1: Manager API authentication is disabled -- all endpoints publicly accessible
+### HIGH-1: Team name path traversal — arbitrary directory creation and file writes
 
-**File:** `src/agent-manager-db.ts:188-189`
-
-```typescript
-// Auth removed -- local-only system, no API keys needed
-this.managementApp.use((_req, _res, next) => next());
-```
-
-The `/remote` endpoint executes arbitrary CLI commands. `/agents/spawn` creates agent processes. `DELETE /agents/:id` deletes agents. All are unauthenticated. When deployed behind Caddy on the Hetzner VPS (`idbot.live`), this exposes full administrative control to the internet.
-
-**Recommendation:** Reinstate API key middleware checking `ID_CONTROL_API_KEY` on administrative endpoints. The WebSocket handler at line 3780 already implements auth -- apply the same pattern.
-
-### HIGH-2: WebSocket auth bypass when ID_CONTROL_API_KEY is unset
-
-**File:** `src/agent-manager-db.ts:3780-3787`
+**File:** `src/agent-manager-db.ts:346-372`
 
 ```typescript
-if (controlApiKey && !safeCompare(apiKey, controlApiKey) && !safeCompare(apiKey, agentApiKey)) {
+private async getTeam(req: express.Request): Promise<{ name: string; id: string }> {
+    const name = this.getTeamName(req);  // raw X-Id-Team header, no validation
+    const teamDir = `${this.baseWorkDir}/teams/${name}`;
+    if (!existsSync(teamDir)) mkdirSync(teamDir, { recursive: true });
 ```
 
-The `controlApiKey &&` guard means if `ID_CONTROL_API_KEY` is not set, the entire auth block is skipped. Any WebSocket client can execute CLI commands via `type: 'command'` messages.
+A request with `X-Id-Team: ../../etc/cron.d` creates directories outside the workspace. The same unsanitized name flows into archive paths (line 1167), deploy paths (line 2931), and shared directory creation (line 1336).
 
-**Recommendation:** Always require authentication for WebSocket connections regardless of env var presence.
+**Recommendation:** Validate team names in `getTeamName()`: `if (!/^[a-zA-Z0-9][a-zA-Z0-9_-]*$/.test(name)) throw new Error('Invalid team name');`
 
-### MEDIUM-1: PATCH /identity endpoint allows unauthenticated identity modification
+### HIGH-2: Working directory injection via POST body
 
-**File:** `src/claude-agent-server.ts:1051-1096`
-
-When `ID_REQUIRE_CLIENT_AUTH` is not `true` (the default), the `/identity` endpoint allows unauthenticated updates to `tokenId`, `domain`, and metadata -- effectively reassigning an agent's onchain identity.
-
-**Recommendation:** Always require authentication for `/identity` regardless of the `ID_REQUIRE_CLIENT_AUTH` setting.
-
----
-
-## 2. Manager Identity Spoofing
-
-### HIGH-3: Manager identity spoofing via `from` field in /talk
-
-**File:** `src/claude-agent-server.ts:656-680, 1329-1339`
-
-```typescript
-const { message, session_id, from } = req.body;
-// ...
-const isManager = from === 'manager' || from === 'remote';
-```
-
-Any HTTP client can POST `{"from": "manager", "message": "..."}` to any agent's `/talk` endpoint. The agent's LLM receives: `"[Message from the manager (your owner/operator)]"` with `"Respond directly and helpfully"`. No verification of the `from` field occurs.
-
-**Recommendation:** Do not trust `from` from the request body. Require a separate manager-only secret to claim manager identity, or derive `from` from the authenticated API key.
-
-### HIGH-4: Manager's /message endpoint passes through arbitrary `from`
-
-**File:** `src/agent-manager-db.ts:730, 756`
-
-```typescript
-const result = await this.forwardToAgent(targetUrl, message, from || 'manager', session_id);
-```
-
-Combined with disabled auth (HIGH-1), any network client can send `POST /message` with `{"to": "any-agent", "from": "manager"}` and the target agent treats it as a manager message.
-
-**Recommendation:** The manager should override `from` based on authenticated identity, not accept it from the request body.
-
-### HIGH-5: Proxy route forwards `from` field verbatim with internal API key
-
-**File:** `src/agent-manager-db.ts:2430-2480`
-
-The `/:tokenId/*` proxy route forwards the entire request body to agents, including any `from` field, while also injecting the internal API key (`X-Api-Key`). An external unauthenticated user at `https://idbot.live/23/talk` can claim manager identity with the proxy's own auth credentials.
-
-**Recommendation:** Strip `from` from forwarded requests or set it to `"external"`.
-
-### MEDIUM-2: POST /news allows identity spoofing with LLM triggering
-
-**File:** `src/claude-agent-server.ts:799-853`
-
-The `/news` endpoint accepts `from` and `trigger: true`, invoking LLM execution with the spoofed identity.
-
-**Recommendation:** Verify `from` against authenticated identity.
-
-### MEDIUM-3: Agent-to-agent communication uses shared API key
-
-**File:** `src/agent-manager-db.ts:4168`
-
-All agents share the same `ID_AGENT_API_KEY` (derived from `ID_CONTROL_API_KEY`). Even with key verification, there is no way to distinguish which agent made a request.
-
-**Recommendation:** Issue per-agent API keys. The `api_key` column already exists in the agents table.
-
----
-
-## 3. Path Traversal & Filesystem
-
-### HIGH-6: Path traversal via unvalidated skill names
-
-**File:** `src/agent-manager-db.ts:4097-4117`
-
-```typescript
-const skillFile = path.join(skillsSource, skillName, 'SKILL.md');
-const targetSkillDir = path.join(workDir, '.claude', 'skills', skillName);
-```
-
-A skill name like `../../etc` resolves outside the target directory. Skill names flow from YAML configs and the `/agents/spawn` POST body. **No validation exists for skill names** (unlike agent names which have `/^[a-zA-Z0-9_-]+$/`).
-
-**Recommendation:** Add `if (!/^[a-zA-Z0-9_-]+$/.test(skillName)) continue;`
-
-### HIGH-7: Path traversal via unvalidated plugin names
-
-**File:** `src/agent-manager-db.ts:286-322`
-
-```typescript
-const targetDir = path.join(pluginsDir, plugin.name);
-```
-
-Same pattern as skills -- `plugin.name` from configs or API body is used in path construction without validation.
-
-**Recommendation:** Validate plugin names in `validateConfig()` with the same regex as agent names.
-
-### HIGH-8: Arbitrary working directory via POST body
-
-**File:** `src/agent-manager-db.ts:1506, 1522`
+**File:** `src/agent-manager-db.ts:1498, 1515`
 
 ```typescript
 const workingDirectory = configWorkDir || `${this.baseWorkDir}/agents/${id}`;
 mkdirSync(workingDirectory, { recursive: true });
 ```
 
-The `/agents/spawn` endpoint accepts `workingDirectory` from the request body. An attacker can set it to any path, and the code will create directories, write `CLAUDE.md`, copy plugins, and deploy skills there.
+The `/agents/spawn` endpoint accepts any absolute path as `workingDirectory`. The server creates directories, writes `CLAUDE.md`, copies plugins, and spawns agents there.
 
-**Recommendation:** Validate that `workingDirectory` resolves within `this.baseWorkDir`.
+**Recommendation:** Validate that resolved path starts with `this.baseWorkDir`.
 
-### MEDIUM-4: Path traversal via team name in directory creation
+### MEDIUM-1: Skill name path traversal in `deploySkillsToAgent`
 
-**File:** `src/agent-manager-db.ts:356-382`
-
-Team names from `X-Id-Team` header or `team` query param are used directly in `path.join(baseWorkDir, 'teams', name)` with no sanitization.
-
-**Recommendation:** Validate team names: `/^[a-zA-Z0-9_-]+$/`
-
-### MEDIUM-5: `claudeMdFile` allows reading arbitrary files
-
-**File:** `src/config-parser.ts:430-449`
+**File:** `src/agent-manager-db.ts:4050, 4067`
 
 ```typescript
-const filePath = path.resolve(basePath, spec.claudeMdFile);
+const skillFile = path.join(skillsSource, skillName, 'SKILL.md');
+const targetSkillDir = path.join(workDir, '.claude', 'skills', skillName);
 ```
 
-A config with `claudeMdFile: "../../../../etc/passwd"` reads arbitrary files into the agent's system prompt.
+Skill names from YAML configs or API body are used directly in `path.join()`. A name like `../../foo` escapes the target directory. Unlike agent names, **skill names have no validation anywhere**.
 
-**Recommendation:** Validate resolved path stays within config directory or workspace.
+**Recommendation:** Add `if (!/^[a-zA-Z0-9_-]+$/.test(skillName)) continue;`
 
-### MEDIUM-6: Symlink following in `copyDirRecursive`
+### MEDIUM-2: Plugin name path traversal in `copyPluginToAgent`
 
-**File:** `src/agent-manager-db.ts:327-343`
+**File:** `src/agent-manager-db.ts:278`
 
-Uses `statSync` which follows symlinks. A symlink in a plugin source directory pointing to `/etc/passwd` or `~/.ssh/id_rsa` would be copied into the agent workspace.
+Same pattern as skills — `plugin.name` used in `path.join()` without validation.
+
+**Recommendation:** Validate in `validateConfig()` with the same regex as agent names.
+
+### MEDIUM-3: Agent name validation only in CLI, not server API
+
+**File:** `src/agent-manager-db.ts:1483` vs `src/interactive-agent-cli.ts:256`
+
+`VALID_AGENT_NAME_REGEX` (`/^[a-z0-9][a-z0-9-]*[a-z0-9]$|^[a-z0-9]$/`) is enforced only in the CLI. The `/agents/spawn` endpoint checks only truthiness. Agent names flow into log file paths and OWS wallet names.
+
+**Recommendation:** Extract validation to a shared module and enforce in the API endpoint.
+
+### MEDIUM-4: Symlink following in `copyDirRecursive`
+
+**File:** `src/agent-manager-db.ts:327`
+
+```typescript
+const stat = statSync(srcPath);  // follows symlinks
+```
+
+A symlink in a plugin source directory pointing to `/etc/` or `~/.ssh/` would be followed and copied into the agent workspace.
 
 **Recommendation:** Use `lstatSync` and skip symlinks.
 
+### LOW-1: `claudeMdFile` can read files outside config directory
+
+**File:** `src/config-parser.ts:432`
+
+`path.resolve(basePath, spec.claudeMdFile)` with a value like `../../../../etc/passwd` reads arbitrary files. Low risk since config files are authored by the operator.
+
+**Recommendation:** Validate resolved path stays within config directory, or document configs as trusted input.
+
+### LOW-2 (positive): `rmSync` properly guarded
+
+**File:** `src/agent-manager-db.ts:1901`
+
+The `rmSync` calls check `agent.working_directory === expectedDir` before deleting. No issue.
+
+### LOW-3 (positive): File upload/download properly sanitized
+
+**File:** `src/claude-agent-server.ts:404`
+
+Uses `path.basename(filename)` and `express.static()` root containment. No traversal risk.
+
 ---
 
-## 4. Secrets & Key Material
+## 2. Secrets & Key Material
 
-### HIGH-9: Full process.env propagated to all child processes
+### HIGH-3: Full `process.env` propagated to all child processes
 
-**File:** `src/agent-manager-db.ts:4163-4172`
-
-```typescript
-const localEnv: Record<string, string> = {
-    ...process.env as Record<string, string>,
-    // ...
-};
-```
-
-Every spawned agent receives `ID_REGISTRAR_PRIVATE_KEY`, `PRIVATE_KEY`, `ANTHROPIC_API_KEY`, `ID_CONTROL_API_KEY`, `DATABASE_URL`, and all other secrets. A compromised agent with Bash access can read `process.env`.
-
-Same pattern in:
-- `src/onchain/idchain-register.ts:19` (`buildIdCliEnv`)
+**Files:**
+- `src/agent-manager-db.ts:4115` — `...process.env as Record<string, string>`
+- `src/interactive-agent-cli.ts:984`
 - `src/harness/claude-code-cli.ts:66`
-- `src/interactive-agent-cli.ts:993-1003`
+- `src/harness/claude-agent-sdk.ts:125`
+- `src/onchain/idchain-register.ts:19`
 
-**Recommendation:** Build an explicit allowlist: `ID_TEAM`, `MANAGER_URL`, `ID_AGENT_API_KEY`, `CLAUDE_MODEL`, `ID_AGENT_TOKEN_ID`, `OWS_WALLET`, `PATH`, `HOME`.
+Every spawned agent inherits `PRIVATE_KEY`, `ID_REGISTRAR_PRIVATE_KEY`, `ANTHROPIC_API_KEY`, `DATABASE_URL`, and all other secrets. Agents run LLM-generated code that can execute `printenv`.
 
-### HIGH-10: Wallet private keys stored in plaintext in database
+Note: `src/claude-agent.ts:83-99` correctly uses an explicit allowlist — this is the pattern to follow.
 
-**File:** `src/db/migrations/sqlite.ts:37-45`, `src/db/migrations/postgres.ts:228-237`
+**Recommendation:** Build a minimal allowlist: `PATH`, `HOME`, `ID_TEAM`, `MANAGER_URL`, `CLAUDE_MODEL`, `ID_AGENT_TOKEN_ID`, `OWS_WALLET`. Only pass `ANTHROPIC_API_KEY` to agents that need it for SDK mode.
 
-The `wallets` table stores raw private keys as `TEXT NOT NULL`. The Postgres migration comments it as "DEPRECATED" but both migrations still create the table.
+### HIGH-4: Wallet private keys stored in plaintext in database
 
-**Recommendation:** Remove the table from new installs or encrypt at rest. If deprecated, stop creating it.
+**Files:** `src/db/migrations/sqlite.ts:37-45`, `src/db/migrations/postgres.ts:228-237`
 
-### MEDIUM-7: ID_CONTROL_API_KEY overwrites ID_AGENT_API_KEY in child env
+The `wallets` table has `private_key TEXT NOT NULL`. Postgres migration comments it as "DEPRECATED" but both backends still create the table. The SQLite file at `~/.id-agents/id-agents.db` has no restrictive permissions.
 
-**File:** `src/agent-manager-db.ts:4168`
+**Recommendation:** Stop creating the table on new installs, or drop the `private_key` column. If data exists, encrypt or redact.
+
+### MEDIUM-5: SQLite database directory created without restrictive permissions
+
+**File:** `src/db/index.ts:23`
 
 ```typescript
-...(process.env.ID_AGENT_API_KEY && { ID_AGENT_API_KEY: process.env.ID_AGENT_API_KEY }),
-...(process.env.ID_CONTROL_API_KEY && { ID_AGENT_API_KEY: process.env.ID_CONTROL_API_KEY }),
+mkdirSync(dataDir, { recursive: true });  // default umask, world-readable
 ```
 
-If both are set, the admin control key silently overwrites the agent key. Every agent process receives admin privileges.
+Contrast with `interactive-agent-cli.ts:344` which correctly uses `mode: 0o700`.
 
-**Recommendation:** Only fall back to `ID_CONTROL_API_KEY` if `ID_AGENT_API_KEY` is unset. Never pass the control key to agents.
+**Recommendation:** `mkdirSync(dataDir, { recursive: true, mode: 0o700 });`
 
-### MEDIUM-8: Registrar private key passed via env var to id-cli
+### MEDIUM-6: Vestigial `api_key` column — plaintext, unused
+
+**Files:** `src/db/migrations/sqlite.ts:33`, `src/db/types.ts:30`, `src/agent-manager-db.ts:1568`
+
+Always set to `null` during creation. Stored in plaintext with no hashing. The REST-AP catalog in `interactive-agent-server.ts:163` still advertises `auth: 'api_key'`.
+
+**Recommendation:** Remove the column via migration, or hash if planning to reuse. Remove stale `auth: 'api_key'` from catalog.
+
+### LOW-4: Stale auth reference in REST-AP catalog
+
+**File:** `src/interactive-agent-server.ts:162-163`
+
+The catalog describes `/remote` as requiring API key authentication (`auth: 'api_key'`). Auth has been removed.
+
+**Recommendation:** Update catalog description to reflect current state.
+
+### LOW-5: Registrar private key passed via env to id-cli
 
 **File:** `src/onchain/idchain-register.ts:18-26`
 
-When OWS is not configured, the raw `PRIVATE_KEY` is passed as an environment variable to `id-cli`. Env vars are readable via `/proc/<pid>/environ` on Linux.
+`buildIdCliEnv()` spreads full `process.env` plus `PRIVATE_KEY`. The id-cli is trusted, but the full env propagation violates least privilege.
 
-**Recommendation:** Use OWS exclusively in production. If raw key path is needed, pass via stdin or temp file.
-
-### MEDIUM-9: Agent API keys stored in plaintext in database
-
-**File:** `src/db/migrations/sqlite.ts:33`, `src/db/repos/sqlite/agents-repo.ts:257,275`
-
-The `api_key` column stores keys as plaintext. While `agentToResponse()` correctly omits it from API responses, the raw value is available throughout the codebase.
-
-**Recommendation:** Store hashed keys and compare hashes during authentication.
-
-### LOW-1: SQLite database file created without restrictive permissions
-
-**File:** `src/db/index.ts:22-25`
-
-`mkdirSync` uses default umask (0o755 for dirs). The database file is created world-readable (0o644) by `better-sqlite3`.
-
-**Recommendation:** Set directory to `0o700` and file to `0o600`.
-
-### LOW-2: scripts/register-team.ts writes private keys to JSON file
-
-**File:** `scripts/register-team.ts:53, 70`
-
-Generated private keys are written in plaintext to `.claude/team-registry/web-dev-team.json`.
-
-**Recommendation:** Add to `.gitignore`. Consider encrypting or storing only addresses.
-
-### LOW-3: Error messages may leak wallet configuration details
-
-**File:** `src/agent-manager-db.ts:467, 469`
-
-Error messages include OWS wallet names and internal details, potentially returned to API callers.
-
-**Recommendation:** Return generic errors to callers; log details server-side only.
+**Recommendation:** Pass only `PATH`, `HOME`, and the key/wallet variable.
 
 ---
 
-## 5. Deploy-Upsert Race Conditions
+## 3. Deploy-Upsert & Race Conditions
 
-### HIGH-11: Cascading hard delete destroys all agent history on redeploy
+### HIGH-5: Cascading hard delete destroys all agent history on redeploy
 
-**File:** `src/agent-manager-db.ts:3096-3100`
+**File:** `src/agent-manager-db.ts:3059-3063`
 
 ```typescript
 const existing = await this.db.agents.getByName(effectiveTeamId, agentName);
@@ -292,193 +209,215 @@ if (existing) {
 }
 ```
 
-`deleteAgent` performs `DELETE FROM agents`. All child tables (`wallets`, `news_items`, `queries`) have `ON DELETE CASCADE`. Every redeploy permanently destroys the agent's entire conversation history, query results, and wallet associations.
+`deleteAgent` performs `DELETE FROM agents`. Child tables (`news_items`, `queries`, `wallets`) have `ON DELETE CASCADE`. Every redeploy permanently destroys the agent's message history, query records, and wallet links.
 
-Compare: the `/delete` CLI command uses soft delete (`UPDATE SET deleted_at`), making the deploy path more destructive than explicit deletion.
+The CLI `/delete` command (line 2704) correctly uses soft delete (`UPDATE SET deleted_at`). The deploy path is inconsistent and more destructive.
 
-**Recommendation:** Use soft delete, or reuse the existing agent ID and call `upsert()`.
+**Recommendation:** Use soft delete or reuse the existing agent ID with `upsert()`.
 
-### MEDIUM-10: No transaction wrapping -- crash between delete and create loses agent
+### HIGH-6: No transaction wrapping — crash between delete and create loses agent
 
-**File:** `src/agent-manager-db.ts:3099-3119`, `src/db/db-adapter.ts`
+**File:** `src/agent-manager-db.ts:3059-3082`, `src/db/db-adapter.ts`
 
-Delete and create are separate operations with no transaction boundary. The `DbAdapter` interface has no transaction support at all. A crash between lines 3099 and 3104 permanently deletes the agent with no replacement.
+The `DbAdapter` interface has no transaction support (`beginTransaction`, `commit`, `rollback`). If the process crashes after DELETE but before CREATE, the agent is permanently gone.
 
-**Recommendation:** Add transaction support to `DbAdapter`. For SQLite, use `db.transaction()`.
+**Recommendation:** Add transaction support. For SQLite use `better-sqlite3`'s `.transaction()`. For PostgreSQL wrap in `BEGIN`/`COMMIT`.
 
-### MEDIUM-11: Old agent process orphaned on redeploy
+### HIGH-7: Orphaned agent process on redeploy
 
-**File:** `src/agent-manager-db.ts:3096-3100`
+**File:** `src/agent-manager-db.ts:3059-3102`
 
-The existing agent's database row is deleted without stopping its process. The new agent gets a new port. The old process continues running as an orphan, consuming resources and potentially serving stale requests.
+The old agent's database row is deleted without stopping its process. A new port is allocated and a new process spawned. The old process becomes an orphan consuming resources on its old port.
 
-Compare: the `/delete` and `DELETE /agents/:id` handlers properly stop the runtime before database changes.
+Contrast: `/delete` (line 2688), `/agent stop` (line 3218), and `DELETE /agents/:id` (line 1881) all properly stop the process first.
 
-**Recommendation:** Kill the existing agent's process before the database delete:
+**Recommendation:** Before database delete, call `killAgentProcess(existing.port)` and `stopHeartbeatForAgent(existing.id)`.
+
+### MEDIUM-7: Port allocation TOCTOU race
+
+**File:** `src/db/repos/sqlite/agents-repo.ts:181-188`, `src/db/repos/postgres/agents-repo.ts:152-159`
+
+`nextPort()` reads `MAX(port)` and returns `max+1`, but the port isn't reserved until the agent row is inserted later. Two concurrent `/agents/spawn` requests can allocate the same port.
+
+**Recommendation:** Add `UNIQUE` constraint on port (where port > 0) and retry on conflict, or use a port sequence.
+
+### MEDIUM-8: SQLite read-merge-write race in teams config
+
+**File:** `src/db/repos/sqlite/teams-repo.ts:64-82`
+
+`setRegistrarAddress` and `setDefaultRegistry` perform read-modify-write without transactions. Concurrent updates lose data. The Postgres backend correctly uses atomic `jsonb_set`.
+
+**Recommendation:** Wrap in SQLite transaction or use `json_set()`.
+
+### MEDIUM-9: Inconsistent deletion semantics across 4 code paths
+
+**File:** `src/agent-manager-db.ts` (multiple locations)
+
+| Path | Stops process | Cancels queries | Stops heartbeat | DB action |
+|------|:---:|:---:|:---:|-----------|
+| CLI `/delete` (line 2662) | Yes | Yes | Yes | Soft delete |
+| HTTP `DELETE /agents/:id` (line 1881) | Yes | No | No | Hard delete |
+| HTTP `DELETE /agents/by-name/:name` (line 1915) | Yes | No | No | Hard delete |
+| Deploy redeploy (line 3059) | **No** | **No** | **No** | Hard delete |
+
+**Recommendation:** Centralize into a single `removeAgent(teamId, agentId, options)` method.
+
+### LOW-6: PostgreSQL `updateIdentity` overwrites all fields unconditionally
+
+**File:** `src/db/repos/postgres/agents-repo.ts:279-302`
+
+Always updates ALL five columns even if only one was provided. Partial updates null out unspecified fields. The SQLite version correctly builds a dynamic SET clause.
+
+**Recommendation:** Port the SQLite dynamic-SET approach to PostgreSQL.
+
+---
+
+## 4. Manager Identity Spoofing
+
+### MEDIUM-10: Manager identity spoofing via unvalidated `from` field
+
+**File:** `src/claude-agent-server.ts:1266`
+
 ```typescript
-if (existing) {
-  await this.killAgentProcess(existing.port);
-  this.stopHeartbeatForAgent(existing.id);
-  await this.db.agents.deleteAgent(effectiveTeamId, existing.id);
+const isManager = from === 'manager' || from === 'remote';
+```
+
+The `from` field comes directly from the HTTP request body (line 613). Any local process can POST `{"from": "manager", "message": "..."}` to any agent's `/talk` endpoint, causing the LLM to receive `"[Message from the manager (your owner/operator)]"`.
+
+The manager at line 738 sets `from || 'manager'` as the default, with no cryptographic signature or header to distinguish real manager messages from spoofed ones.
+
+**Mitigating factor:** With 127.0.0.1 binding, only local processes can reach agents. But a compromised agent can impersonate the manager to other agents.
+
+**Recommendation:** Add a shared secret or HMAC signature that only the manager process can produce. Or derive `from` from a trusted source rather than the request body.
+
+---
+
+## 5. Input Validation & Injection
+
+### MEDIUM-11: Prototype pollution via PATCH /catalog
+
+**File:** `src/claude-agent-server.ts:563-573`
+
+```typescript
+for (const [key, value] of Object.entries(updates)) {
+    this.catalog[key] = value;
 }
 ```
 
-### MEDIUM-12: Race condition -- concurrent deploys create duplicates
+Any key-value pair accepted without validation. Keys like `__proto__` or `constructor` could cause prototype pollution.
 
-**File:** `src/agent-manager-db.ts:2487, 3096-3119`
+**Recommendation:** Filter with an explicit key allowlist. Use `Object.create(null)` for the catalog object.
 
-No mutex or lock on deploy. Two simultaneous `/remote` requests deploying the same agent will both find the existing row, both delete it, and both create new entries -- resulting in duplicate agents with the same name and possible port collisions from the TOCTOU gap in `nextPort()`.
+### LOW-7: Missing type checks on message fields
 
-**Recommendation:** Add a per-agent-name deploy mutex. For port allocation, use atomic `INSERT ... RETURNING`.
+**Files:** `src/agent-manager-db.ts:949`, `src/claude-agent-server.ts:615`
 
-### LOW-4: Agent briefly missing from DB during redeploy
+The `message` field is checked for truthiness but not type. Non-string values (numbers, objects) pass validation and could cause downstream errors.
 
-**File:** `src/agent-manager-db.ts:3099-3104`
+**Recommendation:** Add `typeof message !== 'string'` checks.
 
-Between delete and create, the agent does not exist. Concurrent message routing returns "not found".
+### LOW-8: RegExp replacement `$`-pattern injection in template substitution
 
-**Recommendation:** Use `upsert()` instead of delete-then-create to eliminate the availability gap.
-
-### LOW-5: Existing upsert() method not used
-
-**File:** `src/db/repos/sqlite/agents-repo.ts:280-316` vs `src/agent-manager-db.ts:3099`
-
-A well-implemented `upsert()` with `ON CONFLICT DO UPDATE` already exists but isn't used by the deploy path. The deploy generates a new ID each time, so the existing upsert on `(team_id, id)` doesn't match.
-
-**Recommendation:** Look up the existing agent's ID and reuse it, or add a `UNIQUE` constraint on `(team_id, name) WHERE deleted_at IS NULL`.
-
----
-
-## 6. SQLite Database Layer
-
-### MEDIUM-13: Wallet name substring match allows cross-wallet data leakage
-
-**File:** `src/agent-manager-db.ts:460`, `src/onchain/idchain-register.ts:212`, `src/interactive-agent-cli.ts:2426`
+**File:** `src/agent-manager-db.ts:4063`
 
 ```typescript
-if (line.includes('Name:') && line.includes(owsWallet)) { inWallet = true; }
+content = content.replace(new RegExp(`\\{\\{${key}\\}\\}`, 'g'), value);
 ```
 
-`String.includes()` performs substring matching. Wallet name `"dev-agent"` matches `"dev-agent-backup"`.
+The replacement `value` can contain `$'`, `$&`, `$1` etc., which JavaScript's `String.replace()` interprets specially. Currently safe because keys are hardcoded, but the values (agent display name, team name) could contain `$`.
 
-**Recommendation:** Use exact match or regex with word boundaries.
-
-### MEDIUM-14: Read-merge-write race condition in SQLite teams config
-
-**File:** `src/db/repos/sqlite/teams-repo.ts:64-83`
-
-`setRegistrarAddress` and `setDefaultRegistry` read config, modify in JS, then write back -- with no transaction. Concurrent updates lose data. The Postgres implementation uses atomic `jsonb_set`.
-
-**Recommendation:** Wrap in a SQLite transaction or use `json_set()`.
-
-### LOW-6: `SQLITE_PATH` env var allows arbitrary file path
-
-**File:** `src/db/index.ts:24`
-
-No validation on the override path. Low risk since controlling env vars implies local access.
-
-**Recommendation:** Validate path is within home directory or log a warning.
-
-### LOW-7: `SELECT *` exposes sensitive columns in application code
-
-**File:** `src/db/repos/sqlite/agents-repo.ts` (25 occurrences)
-
-All queries return `api_key` even when not needed. Any future code that serializes raw rows could leak keys.
-
-**Recommendation:** Use explicit column lists or create a `AgentPublicRow` type.
-
-### LOW-8: `exec()` method is public on SqliteAdapter
-
-**File:** `src/db/sqlite-adapter.ts:30-32`
-
-Accepts raw SQL without parameterization. Currently only called with hardcoded strings but is a public API surface.
-
-**Recommendation:** Make `exec()` private.
-
-### LOW-9: Migration runs as single exec() block
-
-**File:** `src/db/migrations/sqlite.ts:5-79`
-
-The entire schema is a single `exec()` call. A failure mid-way leaves partial DDL applied with no rollback.
-
-**Recommendation:** Split into individual statements or wrap in a transaction.
+**Recommendation:** Escape `$` in replacement values or use `split().join()`.
 
 ---
 
-## 7. Input Validation
+## 6. Information Disclosure
 
-### LOW-10: No input validation on agent name in /agents/spawn API
+### MEDIUM-12 (renumbered): Full metadata exposed in API responses
 
-**File:** `src/agent-manager-db.ts:1506-1507`
-
-The API endpoint does not enforce `VALID_AGENT_NAME_REGEX`. The CLI-side code validates at line 256, but direct API callers bypass this.
-
-**Recommendation:** Apply `isValidAgentName()` from `src/core/config-utils.ts`.
-
----
-
-## 8. Information Disclosure
-
-### MEDIUM-15 (note: renumbered from above): Agent metadata exposed in all API responses
-
-**File:** `src/agent-manager-db.ts:415`
+**File:** `src/agent-manager-db.ts:392-412`
 
 ```typescript
-metadata: a.metadata,  // includes ows_wallet, plugins, allowed_tools, internal_url, etc.
+return { ...metadata: a.metadata, workingDirectory: a.working_directory, ... };
 ```
 
-The unfiltered metadata object is returned on every `GET /agents` call, with no auth required.
+Metadata includes `plugins` (filesystem paths), `agent_account` (ETH address), `ows_wallet`, `host_pid`, `runtime`, `internal_url`. Working directory exposes absolute paths.
 
-**Recommendation:** Filter to public-safe fields only.
+**Recommendation:** Strip sensitive fields before returning. Create a `sanitizeMetadata()` helper.
 
-*(This finding was reported by both the OWS and Manager Identity audits.)*
+### LOW-9: Error messages expose internal details
 
----
+**File:** `src/agent-manager-db.ts:2363-2364, 978-979`
 
-## 9. Positive Findings
+Error handlers return `error.message` directly, which can contain file paths or connection strings.
 
-- **No SQL injection:** All queries across all 17 database files use parameterized queries consistently. Dynamic query construction uses hardcoded fragments with parameterized values.
-- **Safe JSON parsing:** `parseJsonObject()` and `parseJsonArray()` in `src/db/db-json.ts` wrap `JSON.parse` in try-catch with type validation.
-- **`execFileSync` used for OWS/id-cli:** All external CLI invocations use `execFileSync` (not `execSync`), preventing shell injection.
-- **Timing-safe key comparison:** `src/core/safe-compare.ts` implements proper `crypto.timingSafeEqual` with length normalization.
-- **OWS architecture is sound:** Private keys stay in `~/.ows/` encrypted storage; agents interact only via the `ows` CLI.
-- **Agent wallet isolation:** Each agent gets its own OWS wallet (`{team}-{agentName}`).
-- **Safe YAML parsing:** `js-yaml` v4 defaults to the safe `CORE_SCHEMA` -- no arbitrary code execution.
-- **Agent name validation exists** in config parsing (`/^[a-zA-Z0-9_-]+$/` at `config-parser.ts:263`).
-- **Working directory deletion validates path** before `rmSync`.
-- **`.gitignore` correctly excludes** `.env` and `.env.*`.
+**Recommendation:** Log full errors server-side, return generic messages to clients.
 
 ---
 
-## 10. Remediation Priority
+## 7. Positive Findings
 
-### Immediate (fixes amplifying vulnerabilities)
-
-| # | Finding | Impact |
-|---|---------|--------|
-| HIGH-1 | Re-enable manager authentication | Blocks nearly all remote exploitation |
-| HIGH-3,4,5 | Fix manager identity spoofing | Prevents agent manipulation via forged `from` |
-| HIGH-9 | Allowlist env vars for child processes | Contains blast radius of compromised agents |
-
-### Short-term (data loss and filesystem risks)
-
-| # | Finding | Impact |
-|---|---------|--------|
-| HIGH-11 | Replace hard delete with soft delete/upsert in deploy | Prevents history loss on redeploy |
-| HIGH-6,7,8 | Validate skill/plugin/team names and working directories | Blocks path traversal attacks |
-| MEDIUM-10 | Add transaction support to DbAdapter | Prevents data loss on crash |
-| MEDIUM-11 | Stop old agent process before deploy delete | Prevents orphan process leak |
-| MEDIUM-7 | Fix ID_CONTROL_API_KEY overwrite logic | Prevents privilege escalation |
-
-### Medium-term (defense in depth)
-
-| # | Finding | Impact |
-|---|---------|--------|
-| HIGH-10 | Encrypt or remove plaintext private keys | Reduces exposure from DB file access |
-| MEDIUM-3 | Issue per-agent API keys | Enables identity verification |
-| MEDIUM-12 | Add deploy mutex | Prevents race conditions |
-| LOW-1 | Restrictive file permissions on SQLite DB | Limits access on shared systems |
+- **No SQL injection.** All queries across all 17 database files use parameterized queries consistently.
+- **No command injection.** All `child_process` calls use `execFileSync`/`execFile` (not `exec`), avoiding shell interpretation. Arguments passed as arrays.
+- **Safe YAML parsing.** `js-yaml` v4 defaults to safe `CORE_SCHEMA` — no arbitrary code execution.
+- **Safe JSON parsing.** `db-json.ts` wraps all `JSON.parse` in try/catch with type validation and safe defaults.
+- **Agent ID validation.** `/agents/register` validates ID format: `/^[a-zA-Z0-9_:-]{1,200}$/`.
+- **File upload sanitized.** Uses `path.basename()` and `express.static()` root containment.
+- **`rmSync` properly guarded.** Checks exact path match before recursive delete.
+- **Timing-safe comparison.** `safe-compare.ts` implements proper `crypto.timingSafeEqual` (ready for future use).
+- **Servers bind to 127.0.0.1.** Limits all network exposure to local processes only.
+- **Admin key file permissions.** `~/.id-agents/admin.key` written with `mode: 0o600`.
+- **Auth removal was clean.** No stale `ID_CONTROL_API_KEY`, `ID_AGENT_API_KEY`, `X-Api-Key`, `safeCompare` references remain in the 6 target source files.
 
 ---
 
-*Generated by parallel sub-agent audit. Each area was audited independently by a specialized security agent. Findings were deduplicated and consolidated where multiple agents reported the same issue (e.g., disabled auth, metadata exposure).*
+## 8. Remediation Priority
+
+### Immediate — prevents filesystem and data compromise
+
+| # | Finding | Impact |
+|---|---------|--------|
+| HIGH-1 | Validate team names in `getTeamName()` | Blocks all team-name path traversal (also fixes archive writes) |
+| HIGH-2 | Validate `workingDirectory` against `baseWorkDir` | Blocks arbitrary directory/file writes via API |
+| HIGH-3 | Allowlist env vars for child processes | Contains blast radius of compromised agents |
+
+### Short-term — prevents data loss and process leaks
+
+| # | Finding | Impact |
+|---|---------|--------|
+| HIGH-5 | Replace hard delete with soft delete/upsert in deploy | Prevents history loss on redeploy |
+| HIGH-6 | Add transaction support to DbAdapter | Prevents data loss on crash |
+| HIGH-7 | Stop old agent process before deploy delete | Prevents orphan process leak |
+| MEDIUM-1,2,3 | Validate skill/plugin/agent names server-side | Blocks remaining path traversal vectors |
+
+### Medium-term — defense in depth
+
+| # | Finding | Impact |
+|---|---------|--------|
+| HIGH-4 | Encrypt or remove plaintext wallet keys | Reduces exposure from DB access |
+| MEDIUM-5 | Restrictive SQLite directory permissions | Limits access on shared systems |
+| MEDIUM-10 | Add manager message signing | Prevents inter-agent impersonation |
+| MEDIUM-11 | Filter PATCH /catalog keys | Prevents prototype pollution |
+| MEDIUM-12 | Sanitize metadata in API responses | Reduces information disclosure |
+
+---
+
+## Changes Since Previous Audit (2025-03-27)
+
+| Previous Finding | Status |
+|-----------------|--------|
+| Auth disabled on manager (prev HIGH-1) | **By design** — auth intentionally removed, servers now bind 127.0.0.1 |
+| WebSocket auth bypass (prev HIGH-2) | **By design** — auth code removed |
+| Manager identity spoofing (prev HIGH-3,4,5) | **Reduced to MEDIUM** — 127.0.0.1 binding limits to local processes only |
+| Full env propagation (prev HIGH-9) | **Still open** — HIGH-3 in this report |
+| Plaintext wallet keys (prev HIGH-10) | **Still open** — HIGH-4 in this report |
+| Deploy-upsert cascading delete (prev HIGH-11) | **Still open** — HIGH-5 in this report |
+| Path traversal via skills/plugins (prev HIGH-6,7,8) | **Still open** — MEDIUM-1,2 in this report |
+| Metadata exposure (prev MEDIUM-2) | **Still open** — MEDIUM-12 in this report |
+| ID_CONTROL_API_KEY overwrites ID_AGENT_API_KEY | **Resolved** — both env vars removed from code |
+| All X-Api-Key header sending/checking | **Resolved** — removed from all 6 target files + skill files |
+| `requireAuth` field and `ID_REQUIRE_CLIENT_AUTH` | **Resolved** — removed from config parser, agent metadata, and worker auth |
+| Stale `auth: 'api_key'` in REST-AP catalog | **NEW** — found in `interactive-agent-server.ts:163` |
+
+---
+
+*Generated by parallel sub-agent audit (4 specialized agents). Findings deduplicated across audit domains.*
