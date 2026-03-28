@@ -85,7 +85,7 @@ export function heartbeatToSchedule(
     description: null,
     active: true,
     message: config.message,
-    sender: 'manager',
+    sender: 'heartbeat',
     delivery_mode: config.delivery ?? 'internal',
     timezone: null,
     catch_up_policy: 'fire_once',
