@@ -65,6 +65,10 @@ const HELP_ITEMS: Array<{ cmd: string; desc: string; indent?: boolean }> = [
   { cmd: '/help', desc: 'Show this help' },
   { cmd: '/news [-l] <agent>', desc: 'Check recent messages (-l for full content)' },
   { cmd: '/register <agent>', desc: 'Register agent onchain' },
+  { cmd: '/schedule list', desc: 'List active schedules' },
+  { cmd: '/schedule add interval <agent> <s> <msg>', desc: 'Add heartbeat schedule' },
+  { cmd: '/schedule add calendar <agent> <time> <days> <msg>', desc: 'Add calendar event' },
+  { cmd: '/schedule pause|resume|remove <id>', desc: 'Manage schedules' },
   { cmd: '/status', desc: 'Check agent status' },
   { cmd: '/update <agent> [--wallet <addr>] [--name <name>]', desc: 'Update agent properties' },
   { cmd: '/wallet <agent> [chain]', desc: 'Show agent wallet address (chain: eip155:1, solana, etc.)' },
@@ -2912,6 +2916,56 @@ async function handleLine(line: string) {
       console.log(`\n${colors.red}❌ Error: ${error.message}${colors.reset}\n`);
     }
 
+    rl.prompt();
+    return;
+  }
+
+  // /schedule — route through manager's remote command handler
+  if (input.startsWith('/schedule')) {
+    try {
+      const response = await managerFetch('/remote', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ command: input })
+      });
+      const data = await response.json() as any;
+      if (data.ok) {
+        const result = data.result;
+        if (result.schedules) {
+          // /schedule list
+          if (result.schedules.length === 0) {
+            console.log(`\n${colors.gray}No active schedules.${colors.reset}\n`);
+          } else {
+            console.log(`\n${colors.bold}Active Schedules:${colors.reset}`);
+            for (const s of result.schedules) {
+              const targets = s.targets?.join(', ') || '';
+              const detail = s.kind === 'interval'
+                ? `every ${s.intervalSeconds}s`
+                : `${Math.floor((s.localTimeSeconds || 0) / 3600)}:${String(Math.floor(((s.localTimeSeconds || 0) % 3600) / 60)).padStart(2, '0')} ${s.daysOfWeek || s.localDate || ''}`;
+              const status = s.active ? `${colors.green}active${colors.reset}` : `${colors.yellow}paused${colors.reset}`;
+              console.log(`  ${colors.gray}${s.id}${colors.reset} ${s.title} | ${s.kind} | ${detail} | ${targets} | ${status}`);
+            }
+            console.log('');
+          }
+        } else if (result.schedule) {
+          // /schedule add or /schedule show
+          const s = result.schedule;
+          console.log(`\n${colors.green}✅ Schedule ${s.id}${colors.reset}`);
+          console.log(`   ${s.kind} | ${s.target || s.targets?.join(', ') || ''}`);
+          if (s.intervalSeconds) console.log(`   Every ${s.intervalSeconds}s`);
+          if (s.time) console.log(`   Time: ${s.time} ${s.recurrence || s.date || ''} ${s.timezone || ''}`);
+          console.log('');
+        } else if (result.action) {
+          console.log(`\n${colors.green}✅ ${result.action}: ${result.scheduleId || ''}${colors.reset}\n`);
+        } else {
+          console.log(`\n${colors.green}✅${colors.reset}`, JSON.stringify(result, null, 2), '\n');
+        }
+      } else {
+        console.log(`\n${colors.red}❌ ${data.error}${colors.reset}\n`);
+      }
+    } catch (error: any) {
+      console.log(`\n${colors.red}❌ Error: ${error.message}${colors.reset}\n`);
+    }
     rl.prompt();
     return;
   }
