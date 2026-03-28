@@ -2590,13 +2590,7 @@ export class AgentManagerDb {
           return { ok: false, error: 'Scheduler service is not running' };
         }
 
-        const subCmd = args[0]?.toLowerCase();
-        if (!subCmd) {
-          return {
-            ok: false,
-            error: 'Usage: /schedule <list|show|add|pause|resume|remove> ...'
-          };
-        }
+        const subCmd = args[0]?.toLowerCase() || 'list';
 
         if (subCmd === 'list') {
           const schedules = await this.listTeamSchedules(teamId);
