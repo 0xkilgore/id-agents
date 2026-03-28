@@ -4408,7 +4408,7 @@ export class AgentManagerDb {
       const owsWallet = (agentRow?.metadata as any)?.ows_wallet || null;
 
       // Allowlist: only pass env vars that agents need
-      // Includes system vars needed by Claude Code CLI to find auth and node
+      // Excludes secrets like PRIVATE_KEY, registrar keys, RPC keys, DATABASE_URL
       const localEnv: Record<string, string> = {
         PATH: process.env.PATH || '',
         HOME: process.env.HOME || '',
@@ -4419,6 +4419,12 @@ export class AgentManagerDb {
         TERM: process.env.TERM || 'xterm-256color',
         ...(process.env.NVM_DIR && { NVM_DIR: process.env.NVM_DIR }),
         ...(process.env.XDG_CONFIG_HOME && { XDG_CONFIG_HOME: process.env.XDG_CONFIG_HOME }),
+        // Pass all CLAUDE_* vars for CLI auth/session
+        ...Object.fromEntries(
+          Object.entries(process.env)
+            .filter(([k]) => k.startsWith('CLAUDE'))
+            .map(([k, v]) => [k, v || ''])
+        ),
         ID_TEAM: teamName,
         MANAGER_URL: `http://localhost:4100`,
         ...(model && { CLAUDE_MODEL: model }),
