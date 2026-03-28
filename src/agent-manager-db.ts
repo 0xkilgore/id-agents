@@ -4419,7 +4419,6 @@ export class AgentManagerDb {
         ...(tokenId && { ID_AGENT_TOKEN_ID: tokenId }),
         ...(owsWallet && { OWS_WALLET: owsWallet }),
         ...(process.env.ANTHROPIC_API_KEY && { ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY }),
-        ...(process.env.DATABASE_URL && { DATABASE_URL: process.env.DATABASE_URL }),
       };
 
       // Create log file
