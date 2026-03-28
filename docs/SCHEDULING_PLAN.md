@@ -1,412 +1,753 @@
-# Scheduling System Plan
+# Scheduling System Implementation Plan
 
-> Two-tier scheduling: heartbeat wheel for sub-hourly intervals, calendar for day/time events.
-> Both backed by the database. Both use window-based polling to avoid missed ticks.
-> Agent-linked rows are cleaned up automatically on agent delete.
-
----
-
-## Overview
-
-Two primitives:
-
-1. **Heartbeat** — sub-hourly recurring tasks. Agent gets poked every N seconds. Based on a 3600-second wheel with slot-to-agent pairings in the DB, but processed using an elapsed time window so manager start time does not matter.
-
-2. **Calendar** — day/time scheduled events. One-off (specific local date) or recurring (days of week). Time stored as seconds since midnight in the scheduler timezone. Events can have multiple agents.
-
-Both are configured in the YAML deploy config and stored in the DB at deploy time.
+> Build one scheduling platform for `id-agents`, not two separate features glued together.
+> Support both interval work (current heartbeat behavior) and wall-clock calendar events.
+> Make it restart-safe, timezone-correct, agent-centric, observable, and consistent across SQLite and PostgreSQL.
 
 ---
 
-## Tier 1: Heartbeat Wheel
+## Goals
 
-### Concept
+The scheduling system should:
+- replace timer-per-agent heartbeat scheduling in `agent-manager-db.ts`
+- preserve current heartbeat product behavior where it still matters (`interval`, `message`, optional `maxBeats`, optional `expiresAfter`)
+- add first-class calendar scheduling for one-off and recurring local-time events
+- use the existing repository-based database architecture in `src/db/`
+- target agents directly by global `agent.id` (team is only metadata)
+- behave correctly across manager restarts, timer drift, and normal downtime
+- work the same on SQLite and PostgreSQL
 
-A 3600-second (1-hour) wheel. Each second (0–3599) can have agents mapped to it. Every 60 seconds, the manager checks the full elapsed slot window since the previous tick and fires any matched agents. This avoids drift and works regardless of which second the manager process started.
+The scheduling system should not:
+- rely on broad SQL translation tricks
+- depend on in-memory timer maps as the source of truth
+- mix local wall time with UTC date logic
+- store scheduling state in agent working-directory files unless that is an explicit compatibility shim
 
-An agent with `every: 5m` (300s) gets mapped to 12 slots: 0, 300, 600, ..., 3300.
-An agent with `every: 30m` (1800s) gets mapped to 2 slots: 0, 1800.
-An agent with `every: 1h` (3600s) gets mapped to 1 slot: 0.
+---
 
-### Database
+## Current Codebase Reality
+
+The project already has important pieces in place:
+
+- `src/db/` now uses repository interfaces with PostgreSQL and SQLite implementations
+- `agents.id` is globally unique and is the correct scheduling target key
+- heartbeat logic still lives in `src/agent-manager-db.ts` as in-memory timer maps plus `HEARTBEAT.yaml` reads
+- `config-parser.ts` already has a `HeartbeatConfig` type with `interval`, `message`, `maxBeats`, `expiresAfter`
+- SQLite and PostgreSQL migrations are already split cleanly
+
+This means the best implementation path is:
+- add scheduling tables and repositories under `src/db/`
+- move heartbeat state and calendar state into the database
+- keep one manager scheduler loop
+- phase out timer-per-agent scheduling and file-based runtime heartbeat config
+
+---
+
+## Recommended Architecture
+
+Use one unified scheduling system with two schedule kinds:
+
+1. `interval`
+- for sub-hourly and recurring background work
+- replaces current heartbeat timers
+
+2. `calendar`
+- for local-time schedules such as daily/weekly or one-off dated events
+
+Both kinds share the same:
+- schedule definition storage
+- target association
+- due-run evaluation pipeline
+- execution log and dedupe model
+- delivery path into agents
+
+### Core Principle
+
+The source of truth is:
+- `schedule_definitions`: what should happen
+- `schedule_targets`: which agents should receive it
+- `schedule_runs`: what actually happened
+
+Do not use `last_fired_at` on the schedule row as the primary dedupe mechanism.
+Use an append-only run log with a uniqueness constraint.
+
+---
+
+## Data Model
+
+### 1. `schedule_definitions`
+
+One row per schedule.
 
 ```sql
-CREATE TABLE heartbeat_slots (
-  slot INTEGER NOT NULL,          -- 0-3599
-  team_id TEXT NOT NULL,
-  agent_id TEXT NOT NULL,
-  message TEXT NOT NULL,           -- what to tell the agent
-  PRIMARY KEY (slot, team_id, agent_id),
-  FOREIGN KEY (team_id, agent_id) REFERENCES agents(team_id, id) ON DELETE CASCADE
-);
-
-CREATE INDEX heartbeat_slot_idx ON heartbeat_slots(slot);
-```
-
-### Tick (every 60 seconds, window-based)
-
-```typescript
-const nowSec = Math.floor(Date.now() / 1000);
-const prevSec = this.lastSchedulerTickSec ?? (nowSec - 60);
-
-const slots = new Set<number>();
-for (let t = prevSec + 1; t <= nowSec; t++) {
-  slots.add(t % 3600);
-}
-
-const matches = await db.query(
-  `SELECT DISTINCT slot, team_id, agent_id, message
-   FROM heartbeat_slots
-   WHERE slot IN (${Array.from(slots).map(() => '?').join(',')})`,
-  Array.from(slots)
-);
-
-for (const match of matches.rows) {
-  sendToAgent(match.agent_id, match.message, 'heartbeat');
-}
-
-this.lastSchedulerTickSec = nowSec;
-```
-
-Notes:
-- The manager tracks `lastSchedulerTickSec` in memory.
-- On first boot, default to `now - 60` so the first pass checks the last minute.
-- `SELECT DISTINCT` prevents duplicate sends when the elapsed window wraps across the hour boundary and the same slot appears twice.
-- This design tolerates normal timer drift and manager start at arbitrary seconds.
-
-### Slot Calculation on Deploy
-
-```typescript
-function computeSlots(everySeconds: number): number[] {
-  const slots: number[] = [];
-  for (let s = 0; s < 3600; s += everySeconds) {
-    slots.push(s);
-  }
-  return slots;
-}
-```
-
-### YAML Config
-
-```yaml
-agents:
-  - name: contracts
-    heartbeat:
-      every: 300          # seconds (5 minutes)
-      message: "Run test suite and report results"
-
-  - name: indexer
-    heartbeat:
-      every: 600          # 10 minutes
-      message: "Check indexer health and sync status"
-```
-
-### Cleanup
-
-Agent deleted → `ON DELETE CASCADE` removes all its slots. No orphan timers.
-Agent redeployed → old rows deleted with agent, new rows inserted on deploy.
-
-### Constraints
-
-- Minimum interval: 60 seconds (matches tick rate)
-- Maximum interval: 3600 seconds (1 hour — use calendar for longer)
-- `every` must divide evenly into 3600 (60, 120, 180, 300, 600, 900, 1200, 1800, 3600)
-- Reject invalid intervals at config/deploy time instead of rounding silently
-- Heartbeat-specific limits such as `maxBeats` and `expiresAfter` should remain part of the stored schedule model if the current product behavior is preserved
-
----
-
-## Tier 2: Calendar
-
-### Concept
-
-Events scheduled by day and time. Time stored as seconds since midnight (0–86399). Events can be one-off (specific date) or recurring (days of week). An event can have multiple agents.
-
-### Database
-
-```sql
-CREATE TABLE events (
+CREATE TABLE schedule_definitions (
   id TEXT PRIMARY KEY,
-  team_id TEXT NOT NULL,
+  kind TEXT NOT NULL,                    -- 'interval' | 'calendar'
   title TEXT NOT NULL,
   description TEXT,
-  location TEXT,
-  timezone TEXT NOT NULL DEFAULT 'America/New_York',
-  time INTEGER NOT NULL,          -- seconds since midnight (0-86399) in event timezone
-  date TEXT,                      -- local date like "2026-04-01" for one-off, NULL for recurring
-  days TEXT,                      -- "mon,wed,fri" for recurring, NULL for one-off
   active INTEGER NOT NULL DEFAULT 1,
-  last_fired_key TEXT,            -- e.g. "2026-04-01@32400" to prevent duplicate firing in a window
-  created_at INTEGER NOT NULL
-);
 
-CREATE TABLE event_agents (
-  event_id TEXT NOT NULL REFERENCES events(id) ON DELETE CASCADE,
-  team_id TEXT NOT NULL,
-  agent_id TEXT NOT NULL,
-  PRIMARY KEY (event_id, team_id, agent_id),
-  FOREIGN KEY (team_id, agent_id) REFERENCES agents(team_id, id) ON DELETE CASCADE
-);
+  -- common payload
+  message TEXT NOT NULL,
+  timezone TEXT,                        -- used by calendar schedules
+  catch_up_policy TEXT NOT NULL DEFAULT 'skip',   -- 'skip' | 'fire_once'
+  dedupe_window_seconds INTEGER NOT NULL DEFAULT 90,
 
-CREATE INDEX events_time_idx ON events(time);
-CREATE INDEX events_active_idx ON events(active) WHERE active = 1;
-CREATE INDEX events_team_active_time_idx ON events(team_id, active, time);
+  -- interval schedules
+  interval_seconds INTEGER,
+  anchor_at INTEGER,                    -- unix seconds; aligns recurring cadence
+  max_runs INTEGER,
+  expires_at INTEGER,                   -- unix seconds absolute expiry
+
+  -- calendar schedules
+  local_time_seconds INTEGER,           -- 0..86399
+  local_date TEXT,                      -- YYYY-MM-DD for one-off schedules
+  days_of_week TEXT,                    -- normalized csv: 'mon,tue,wed'
+
+  -- lifecycle
+  source_type TEXT NOT NULL DEFAULT 'yaml',       -- 'yaml' | 'cli' | 'api'
+  source_key TEXT,                      -- stable key for idempotent reseeding
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
 ```
 
-### Tick (every 60 seconds, same timer as heartbeat)
+### 2. `schedule_targets`
+
+Many-to-many mapping from schedules to agents.
+
+```sql
+CREATE TABLE schedule_targets (
+  schedule_id TEXT NOT NULL REFERENCES schedule_definitions(id) ON DELETE CASCADE,
+  agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+  PRIMARY KEY (schedule_id, agent_id)
+);
+```
+
+This is intentionally agent-centric. Team membership should not affect schedule identity.
+
+### 3. `schedule_runs`
+
+Append-only execution and dedupe log.
+
+```sql
+CREATE TABLE schedule_runs (
+  schedule_id TEXT NOT NULL REFERENCES schedule_definitions(id) ON DELETE CASCADE,
+  agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+  scheduled_key TEXT NOT NULL,          -- deterministic logical run key
+  scheduled_at INTEGER NOT NULL,        -- logical scheduled instant (unix seconds)
+  fired_at INTEGER NOT NULL,            -- actual execution instant
+  status TEXT NOT NULL,                 -- 'sent' | 'failed' | 'skipped'
+  error TEXT,
+  PRIMARY KEY (schedule_id, agent_id, scheduled_key)
+);
+
+CREATE INDEX schedule_runs_schedule_idx ON schedule_runs(schedule_id, fired_at);
+CREATE INDEX schedule_runs_agent_idx ON schedule_runs(agent_id, fired_at);
+```
+
+The unique key is what prevents double-delivery after overlap, retries, or restart.
+
+---
+
+## Schedule Semantics
+
+## Interval Schedules
+
+Use interval math, not a persisted slot wheel.
+
+Each interval schedule has:
+- `interval_seconds`
+- `anchor_at`
+
+A schedule is due when an interval boundary falls inside the elapsed window `(last_tick, now]`.
+
+Logical run number:
+
+```text
+n = floor((t - anchor_at) / interval_seconds)
+```
+
+Logical scheduled instant:
+
+```text
+scheduled_at = anchor_at + n * interval_seconds
+```
+
+Logical run key:
+
+```text
+interval:<scheduled_at>
+```
+
+This is better than slot rows because it:
+- avoids row explosion
+- avoids divisibility restrictions like “must divide 3600”
+- avoids startup alignment bugs
+- supports arbitrary intervals cleanly
+- makes catch-up handling explicit
+
+### Interval Constraints
+
+Recommended initial policy:
+- minimum interval: 60 seconds
+- maximum interval: 86400 seconds
+- reject invalid config at parse/deploy time instead of rounding
+
+For v1, `catch_up_policy` should support:
+- `skip`
+- `fire_once`
+
+Recommended defaults:
+- interval schedules: `fire_once`
+
+Meaning:
+- if the manager was down or delayed, send at most one missed interval run on recovery
+- do not replay a backlog of 50 missed heartbeats
+
+### Mapping Existing Heartbeat Behavior
+
+Current `HeartbeatConfig` fields map directly:
+
+| Current | New schedule field |
+|---------|--------------------|
+| `interval` | `interval_seconds` |
+| `message` | `message` |
+| `maxBeats` | `max_runs` |
+| `expiresAfter` | `expires_at` computed from schedule activation time |
+
+The current heartbeat feature becomes a specialized interval schedule, not a separate subsystem.
+
+---
+
+## Calendar Schedules
+
+Calendar schedules are local wall-clock schedules.
+
+Each calendar schedule has:
+- `timezone`
+- `local_time_seconds`
+- either `local_date` for one-off schedules
+- or `days_of_week` for recurring schedules
+
+Examples:
+- one-off launch event on `2026-04-01` at `08:00` America/New_York
+- recurring Mon-Fri event at `09:00` America/New_York
+
+Logical run key:
+
+```text
+calendar:<local-date>@<local_time_seconds>
+```
+
+Example:
+
+```text
+calendar:2026-04-01@32400
+```
+
+### Timezone Policy
+
+All calendar matching must be done in the event timezone.
+Never mix:
+- local `Date.getHours()`
+- UTC `toISOString()`
+
+Use one explicit timezone pipeline end-to-end.
+
+### DST Policy
+
+Document and implement this explicitly:
+- recurring schedules are local wall-clock schedules
+- if a local time does not exist on spring-forward day, skip that occurrence
+- if a local time occurs twice on fall-back day, fire once per logical local key
+
+That policy is simple, predictable, and operationally safe.
+
+### Calendar Catch-Up Policy
+
+Recommended default:
+- calendar schedules: `skip`
+
+Meaning:
+- if the manager was down at 09:00 and comes back at 09:43, do not fire the 09:00 calendar event late by default
+
+This matches normal calendar expectations.
+
+---
+
+## Manager Runtime Design
+
+Use one scheduler loop in the manager process.
 
 ```typescript
-const now = new Date();
-const parts = new Intl.DateTimeFormat('en-CA', {
-  timeZone: schedulerTimeZone,
-  year: 'numeric',
-  month: '2-digit',
-  day: '2-digit',
-  weekday: 'short',
-  hour: '2-digit',
-  minute: '2-digit',
-  second: '2-digit',
-  hourCycle: 'h23',
-}).formatToParts(now);
-
-const get = (type: string) => parts.find(p => p.type === type)?.value ?? '';
-const today = `${get('year')}-${get('month')}-${get('day')}`;
-const dayOfWeek = get('weekday').toLowerCase().slice(0, 3);
-const secondsSinceMidnight = Number(get('hour')) * 3600 + Number(get('minute')) * 60 + Number(get('second'));
-
-const prevSec = this.lastCalendarTickSec ?? (secondsSinceMidnight - 60);
-const dueTimes = new Set<number>();
-for (let t = prevSec + 1; t <= secondsSinceMidnight; t++) {
-  dueTimes.add((t + 86400) % 86400);
-}
-
-const dueParams = Array.from(dueTimes);
-const placeholders = dueParams.map(() => '?').join(',');
-
-const rows = await db.query(
-  `SELECT e.*, ea.agent_id
-   FROM events e
-   JOIN event_agents ea ON e.id = ea.event_id
-   WHERE e.active = 1
-     AND e.time IN (${placeholders})
-     AND ((e.date = ? AND e.days IS NULL)
-       OR (e.date IS NULL AND e.days LIKE ?))`,
-  [...dueParams, today, `%${dayOfWeek}%`]
-);
-
-for (const event of rows.rows) {
-  const fireKey = `${today}@${event.time}`;
-  if (event.last_fired_key === fireKey) continue;
-
-  sendToAgent(event.agent_id, formatEventMessage(event), 'calendar');
-  await db.query('UPDATE events SET last_fired_key = ? WHERE id = ?', [fireKey, event.id]);
-
-  if (event.date) {
-    await db.query('UPDATE events SET active = 0 WHERE id = ?', [event.id]);
-  }
-}
-
-this.lastCalendarTickSec = secondsSinceMidnight;
+setInterval(() => this.schedulerTick(), 30_000);
 ```
 
-Notes:
-- Use one explicit scheduler timezone for all comparisons, or store a timezone per event and group processing by timezone. Do not mix local wall time with UTC `toISOString()`.
-- `last_fired_key` is more precise than a raw timestamp for deduplicating repeated polling windows.
-- If per-event timezone support is not needed now, keep one team-wide scheduler timezone and add per-event timezone later.
+A 30-second cadence is preferable to 60 seconds because:
+- tighter delivery jitter
+- easier window handling
+- still operationally cheap
 
-### YAML Config
+The only in-memory state needed is tick bookkeeping:
+- `lastSchedulerTickAtSec`
+
+That state is only for evaluating the current elapsed window.
+It is not the source of truth for schedule progress.
+
+### Scheduler Tick Pipeline
+
+Each tick should:
+
+1. capture `nowSec`
+2. compute window `(lastSchedulerTickAtSec, nowSec]`
+3. evaluate due interval schedule runs
+4. evaluate due calendar schedule runs
+5. expand each due logical run to target agents
+6. try to insert a `schedule_runs` row for each target
+7. only dispatch if insert succeeds
+8. update success/failure status in `schedule_runs`
+9. update `lastSchedulerTickAtSec`
+
+### Why This Is Restart-Safe
+
+Because dedupe is enforced by `schedule_runs` uniqueness:
+- restarting the manager does not re-send already logged runs
+- a long tick window still produces deterministic logical run keys
+- overlapping windows do not double-fire
+
+---
+
+## Repository Layer Plan
+
+This project already has repository interfaces and per-dialect implementations.
+Scheduling should follow the same pattern.
+
+### Add New Repository Interfaces
+
+In `src/db/db-service.ts`, add:
+
+```typescript
+export interface ScheduleDefinitionRow {
+  id: string;
+  kind: 'interval' | 'calendar';
+  title: string;
+  description: string | null;
+  active: boolean;
+  message: string;
+  timezone: string | null;
+  catch_up_policy: 'skip' | 'fire_once';
+  dedupe_window_seconds: number;
+  interval_seconds: number | null;
+  anchor_at: number | null;
+  max_runs: number | null;
+  expires_at: number | null;
+  local_time_seconds: number | null;
+  local_date: string | null;
+  days_of_week: string | null;
+  source_type: string;
+  source_key: string | null;
+  created_at: number;
+  updated_at: number;
+}
+
+export interface ScheduleRunRow {
+  schedule_id: string;
+  agent_id: string;
+  scheduled_key: string;
+  scheduled_at: number;
+  fired_at: number;
+  status: 'sent' | 'failed' | 'skipped';
+  error: string | null;
+}
+
+export interface SchedulesRepository {
+  upsertDefinition(def: ScheduleDefinitionRow): Promise<void>;
+  replaceTargets(scheduleId: string, agentIds: string[]): Promise<void>;
+  listActiveDefinitions(): Promise<ScheduleDefinitionRow[]>;
+  listTargets(scheduleId: string): Promise<string[]>;
+  insertRun(run: ScheduleRunRow): Promise<boolean>;   // true if inserted, false if duplicate
+  updateRunStatus(scheduleId: string, agentId: string, scheduledKey: string, status: 'sent' | 'failed' | 'skipped', error?: string | null): Promise<void>;
+  listSchedulesForAgent(agentId: string): Promise<ScheduleDefinitionRow[]>;
+  deleteBySource(sourceType: string, sourceKeyPrefix?: string): Promise<void>;
+}
+```
+
+### Add Repository Implementations
+
+Create:
+- `src/db/repos/postgres/schedules-repo.ts`
+- `src/db/repos/sqlite/schedules-repo.ts`
+
+Use explicit SQL per dialect.
+No SQL translation layer.
+
+### Compose into `Db`
+
+Extend the DB factory in `src/db/index.ts` to include:
+- `schedules: new PgSchedulesRepo(adapter)`
+- `schedules: new SqliteSchedulesRepo(adapter)`
+
+---
+
+## Service Layer Plan
+
+Create a scheduler service rather than putting all logic directly into `agent-manager-db.ts`.
+
+Recommended new files:
+
+```text
+src/scheduling/
+  schedule-types.ts
+  schedule-config.ts
+  schedule-evaluator.ts
+  schedule-dispatcher.ts
+  scheduler-service.ts
+```
+
+### `schedule-evaluator.ts`
+
+Responsible for:
+- computing due logical interval runs in a window
+- computing due logical calendar runs in a window
+- generating deterministic `scheduled_key`
+
+It should be pure or mostly pure logic so it is easy to unit test.
+
+### `schedule-dispatcher.ts`
+
+Responsible for:
+- loading target agent details
+- delivering the schedule payload to the agent endpoint
+- returning structured success/failure results
+
+### `scheduler-service.ts`
+
+Responsible for:
+- orchestration of the tick
+- repository calls
+- run insertion and dedupe
+- updating run status
+- exposing helper methods for startup, reseed, and listing schedules
+
+This separation is important. It keeps the manager code from becoming another giant mixed-responsibility file.
+
+---
+
+## Config Model
+
+Move toward one unified schedule config shape.
+
+### Recommended Future Shape
 
 ```yaml
-calendar:
+schedules:
+  - title: "Contracts test loop"
+    kind: interval
+    every: 300
+    agents: [contracts]
+    message: "Run tests and report status"
+    maxRuns: 20
+    expiresAfter: 7200
+
   - title: "Morning X engagement"
+    kind: calendar
     time: "09:00"
+    timezone: "America/New_York"
     days: [mon, tue, wed, thu, fri]
     agents: [x]
-    description: "Find tweets to engage with and suggest replies"
+    message: "Find tweets to engage with and suggest replies"
 
-  - title: "Afternoon X roundup"
-    time: "13:00"
-    days: [mon, tue, wed, thu, fri]
-    agents: [x]
-
-  - title: "Evening X summary"
-    time: "18:00"
-    days: [mon, tue, wed, thu, fri]
-    agents: [x]
-    description: "Summarize today's engagement and metrics"
-
-  - title: "Weekly security review"
-    time: "10:00"
-    days: [mon]
-    agents: [contracts, gateway, cli]
-    description: "Run security audit on your codebase"
-
-  - title: "DevHunt launch"
-    time: "08:00"
+  - title: "Launch day"
+    kind: calendar
     date: "2026-04-01"
+    time: "08:00"
+    timezone: "America/New_York"
     agents: [x, id-agents-app]
-    description: "Launch day — post announcements and monitor response"
+    message: "Launch day — post announcements and monitor response"
 ```
 
-### Time Parsing
+### Transitional Compatibility
 
-YAML `time: "09:00"` → stored as integer: `9 * 3600 = 32400`
-YAML `time: "18:30"` → stored as integer: `18 * 3600 + 30 * 60 = 66600`
+For v1 implementation, continue supporting current heartbeat config input from `config-parser.ts`:
+- per-agent `heartbeat:` blocks
+- resolved `HeartbeatConfig`
 
-```typescript
-function parseTime(timeStr: string): number {
-  const [h, m] = timeStr.split(':').map(Number);
-  return h * 3600 + (m || 0) * 60;
+During config normalization:
+- convert each heartbeat block into an `interval` schedule definition
+- support top-level `calendar:` as a temporary alias or convert directly to unified `schedules:`
+
+This avoids a big config break while moving the internal model to something much cleaner.
+
+---
+
+## Delivery Contract to Agents
+
+Stop treating heartbeat and calendar as unrelated message origins.
+
+Use one structured schedule payload:
+
+```json
+{
+  "from": "schedule",
+  "schedule": {
+    "id": "sch_123",
+    "kind": "interval",
+    "title": "Contracts test loop",
+    "scheduledKey": "interval:1711737600"
+  },
+  "message": "Run tests and report status"
 }
 ```
 
-### Message Format
+Advantages:
+- agents can distinguish scheduled work from human messages
+- future schedule types can reuse the same contract
+- logs and telemetry become cleaner
 
-When a calendar event fires, the agent receives:
-
-```
-[Calendar Event: "Morning X engagement"]
-Find tweets to engage with and suggest replies
-```
-
-With `from: "calendar"` so the agent knows it's a scheduled event, not a human message.
-
-### Cleanup
-
-- Deleting an event removes its `event_agents` rows via `ON DELETE CASCADE`.
-- Deleting an agent removes all linked `event_agents` rows via the `(team_id, agent_id)` foreign key.
-- Events are seeded from YAML config at deploy time.
-- One-off events auto-deactivate after firing.
-- `last_fired_key` prevents double-firing if the polling window overlaps.
+If needed for compatibility, the manager can temporarily preserve `from: "heartbeat"` / `from: "calendar"` at the edges, but the internal system should unify them.
 
 ---
 
-## Manager Tick
+## CLI / UX Plan
 
-One single `setInterval` in the manager handles both tiers:
+Do not start with a large interactive scheduling editor.
+Start with visibility and safe basic control.
 
-```typescript
-// Start on manager boot
-setInterval(() => this.schedulerTick(), 60 * 1000);
+### Recommended Commands
 
-private async schedulerTick(): Promise<void> {
-  await this.processHeartbeats();
-  await this.processCalendarEvents();
-}
-```
+- `/schedules`
+  - list active schedules, grouped by agent or kind
+- `/schedule <id>`
+  - show a single schedule definition and targets
+- `/schedule runs <id>`
+  - show recent run history
+- `/schedule pause <id>`
+- `/schedule resume <id>`
+- `/schedule remove <id>`
 
-No per-agent timers. The only in-memory scheduler state should be the previous tick markers needed to compute elapsed windows (`lastSchedulerTickSec`, `lastCalendarTickSec`).
+Compatibility layer:
+- keep `/heartbeat` and `/heartbeats` initially
+- reimplement them on top of schedule data
+- mark them as heartbeat-specific views over interval schedules
 
----
-
-## Deploy Flow
-
-At deploy time, the manager:
-
-1. Reads `heartbeat` from each agent config → validates interval → computes slots → inserts into `heartbeat_slots`
-2. Reads `calendar` from the top-level config → parses time in scheduler timezone → inserts into `events` + `event_agents`
-3. Re-seeding should be idempotent: replace existing schedule rows for the deploy target rather than relying on agent deletion as the only cleanup path
+This keeps the user-facing workflow stable while the backend changes dramatically.
 
 ---
 
-## Migration
+## Migration Strategy
 
-### Remove
+### Database Migrations
 
-- `heartbeatTimers` Map
-- `heartbeatTimers` Map
-- `heartbeatLastSent` Map
-- `heartbeatIntervals` Map
-- `heartbeatCounts` Map
-- `heartbeatStartTimes` Map
-- `heartbeatIntervalMs` field
-- `startHeartbeatForAgent()` method
-- `stopHeartbeatForAgent()` method
-- timer-based `sendHeartbeat()` scheduling
-- `initAllHeartbeats()` method
-- `startAgentHeartbeats()` method
+Add the same new tables to both:
+- `src/db/migrations/postgres.ts`
+- `src/db/migrations/sqlite.ts`
 
-Keep or replace explicitly:
-- `HeartbeatConfig.maxBeats` / `expiresAfter` semantics if those are still product requirements
-- `/heartbeat` status/management commands, backed by DB schedule state instead of in-memory timers
-- runtime-editable config only if you still want file-based overrides; otherwise move heartbeat config fully into DB/YAML and remove `HEARTBEAT.yaml` intentionally
+Required objects:
+- `schedule_definitions`
+- `schedule_targets`
+- `schedule_runs`
+- supporting indexes
 
-### Add
+### Code Migration
 
-- `heartbeat_slots` table (SQLite + PG migrations)
-- `events` table (SQLite + PG migrations)
-- `event_agents` table (SQLite + PG migrations)
-- `schedulerTick()` method (replaces timer-based heartbeat scheduling)
-- `processHeartbeats()` method using elapsed slot windows
-- `processCalendarEvents()` method using elapsed time windows in a consistent timezone
-- `seedHeartbeatSlots()` method (called during deploy)
-- `seedCalendarEvents()` method (called during deploy)
-- `/schedule` or `/calendar` CLI command to view upcoming events
+#### Remove over time
+From `src/agent-manager-db.ts`:
+- `heartbeatTimers`
+- `heartbeatLastSent`
+- `heartbeatIntervals`
+- `heartbeatCounts`
+- `heartbeatStartTimes`
+- timer-based `startHeartbeatForAgent()`
+- timer-based `stopHeartbeatForAgent()`
+- file-driven `sendHeartbeat()` orchestration
+- `initAllHeartbeats()` / `startAgentHeartbeats()` as timer bootstrapping
 
----
+#### Keep temporarily as compatibility behavior
+- `/heartbeat` and `/heartbeats` commands
+- `HeartbeatConfig` parsing from config
+- deploy-time heartbeat config loading
 
-## CLI Commands
+#### Remove intentionally later
+- `HEARTBEAT.yaml` runtime file reads
+- working-directory heartbeat state as authoritative source
 
-```
-/calendar                    # Show all scheduled events and heartbeats
-/calendar add <event>        # Add a one-off event (interactive)
-/calendar remove <id>        # Remove an event
-```
+The DB should become authoritative for scheduling.
 
 ---
 
-## Example Full Config
+## Reseeding / Deploy Behavior
 
-```yaml
-version: "1"
-team: idchain
+Schedule seeding must be idempotent.
+Do not rely on deleting agents to clean up stale schedules.
 
-calendar:
-  - title: "Morning X engagement"
-    time: "09:00"
-    days: [mon, tue, wed, thu, fri]
-    agents: [x]
-    description: "Find tweets to engage with"
+### Recommended Source Identity
 
-  - title: "Evening X summary"
-    time: "18:00"
-    days: [mon, tue, wed, thu, fri]
-    agents: [x]
+Use:
+- `source_type = 'yaml'`
+- `source_key = <stable config path + logical schedule name>`
 
-  - title: "Weekly security review"
-    time: "10:00"
-    days: [mon]
-    agents: [contracts, gateway, cli]
+Deploy flow:
+1. parse config
+2. normalize into schedule definitions
+3. upsert definitions by `source_type + source_key`
+4. replace target mappings for those definitions
+5. deactivate or delete prior YAML-derived definitions that are no longer present in the current config scope
 
-  - title: "DevHunt launch"
-    time: "08:00"
-    date: "2026-04-01"
-    agents: [x, id-agents-app]
-    description: "Launch day"
+This gives clean redeploy behavior without duplicate schedules.
 
-agents:
-  - name: contracts
-    description: "Smart contracts"
-    heartbeat:
-      every: 300
-      message: "Run tests and report status"
+---
 
-  - name: x
-    description: "Social media"
-    # No heartbeat — uses calendar for scheduled engagement
-```
+## Observability
+
+A world-class scheduler needs visibility.
+
+### Metrics
+
+Track:
+- active schedule count
+- due schedule count per tick
+- successful sends
+- failed sends
+- skipped sends
+- scheduler lag (`now - scheduled_at`)
+- average dispatch latency
+
+### Logs
+
+Log at least:
+- schedule evaluated due
+- dedupe insert accepted/rejected
+- dispatch success/failure
+- schedule pause/resume/remove actions
+
+### Run History
+
+The `schedule_runs` table should power:
+- `/schedule runs <id>`
+- debugging restart behavior
+- verifying missed-event handling
+- answering “did this actually fire?”
+
+---
+
+## Testing Plan
+
+### Unit Tests
+
+Pure evaluator tests for:
+- interval due-run calculation across normal windows
+- interval due-run calculation across restart/downtime windows
+- `fire_once` vs `skip`
+- calendar due-run matching by timezone
+- day-of-week evaluation
+- one-off date evaluation
+- DST spring-forward skip behavior
+- DST fall-back single-fire behavior
+- deterministic `scheduled_key` generation
+
+### Repository Tests
+
+For both PostgreSQL and SQLite:
+- insert schedule definition
+- replace targets
+- dedupe insert into `schedule_runs`
+- duplicate insert returns false / no-op
+- delete agent cascades schedule target cleanup
+- delete schedule cascades run cleanup
+
+### Integration Tests
+
+- manager startup initializes scheduler loop without per-agent timers
+- heartbeat config seeds interval schedules
+- calendar config seeds calendar schedules
+- interval schedule fires once on cadence
+- one-off calendar schedule fires once then stops
+- recurring calendar schedule fires on the correct local day/time
+- manager restart does not duplicate sends
+- manager downtime obeys catch-up policy
+- `/heartbeat` compatibility commands still return meaningful status
+
+---
+
+## Implementation Order
+
+### Phase 1: Schema + DB layer
+
+1. add schedule row types and repository interfaces
+2. add PostgreSQL schedule repository
+3. add SQLite schedule repository
+4. wire `db.schedules` into `src/db/index.ts`
+5. add migrations for scheduling tables
+
+### Phase 2: Pure scheduling engine
+
+6. implement `schedule-evaluator.ts`
+7. implement config normalization from current heartbeat/calendar config shapes
+8. implement `scheduler-service.ts`
+9. implement `schedule-dispatcher.ts`
+
+### Phase 3: Manager integration
+
+10. add one scheduler loop to manager boot
+11. seed schedules on deploy/startup
+12. replace timer-based heartbeat startup logic
+13. route schedule dispatches through existing agent delivery code
+
+### Phase 4: CLI compatibility + visibility
+
+14. reimplement `/heartbeat` and `/heartbeats` on top of schedule state
+15. add `/schedules` and `/schedule runs <id>`
+16. expose recent run status in manager responses where useful
+
+### Phase 5: Cleanup
+
+17. remove timer maps and old timer lifecycle code
+18. remove `HEARTBEAT.yaml` as authoritative source
+19. collapse config docs to unified `schedules:` model once compatibility is no longer needed
+
+---
+
+## Open Design Decisions
+
+These should be decided explicitly before implementation finishes:
+
+1. Tick cadence
+- recommended: 30 seconds
+
+2. Catch-up policy defaults
+- interval: `fire_once`
+- calendar: `skip`
+
+3. Schedule payload compatibility
+- whether to preserve `from: "heartbeat"` / `from: "calendar"` temporarily
+
+4. Runtime config mutability
+- whether file edits to `HEARTBEAT.yaml` should still affect behavior after deploy
+- recommendation: no, move authority to DB/YAML config and explicit reseed
+
+5. Calendar timezone scope
+- per-schedule timezone from day one, or one global/team default initially
+- recommendation: keep per-schedule column now, even if config uses one default most of the time
 
 ---
 
 ## Summary
 
-| Aspect | Heartbeat (Tier 1) | Calendar (Tier 2) |
-|--------|-------------------|-------------------|
-| Frequency | Sub-hourly (60s–3600s) | Daily/weekly |
-| Config | Per-agent `heartbeat:` | Top-level `calendar:` |
-| Storage | `heartbeat_slots` table | `events` + `event_agents` tables |
-| Lookup | Elapsed slot window over `unix % 3600` | Elapsed local-time window + day/date match |
-| Cleanup | CASCADE on agent delete | CASCADE on event delete |
-| One-off | No | Yes (date field) |
-| Multi-agent | No (one agent per heartbeat) | Yes (event_agents join) |
-| `from` field | `"heartbeat"` | `"calendar"` |
+The right system for this project is:
+- unified
+- agent-centric
+- repository-backed
+- timezone-correct
+- run-log deduped
+- restart-safe
+- compatible with both SQLite and PostgreSQL
+
+In concrete terms:
+- current heartbeat becomes `interval` schedules
+- new calendar support becomes `calendar` schedules
+- one scheduler loop replaces many in-memory timers
+- database state becomes authoritative
+- `schedule_runs` becomes the backbone for correctness and observability
+
+This is more work than adding a wheel table and an events table, but it is the correct long-term design for `id-agents`.

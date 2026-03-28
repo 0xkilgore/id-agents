@@ -30,6 +30,8 @@ import type { PluginConfig, DeployConfig, HeartbeatConfig } from './config-parse
 import { processConfig } from './config-parser.js';
 import { parseAgentRef, normalizeAlias, buildAmbiguityWarning, type AgentMatch } from './core/agent-identifier.js';
 import type { HarnessType } from './harness/types.js';
+import { SchedulerService } from './scheduling/scheduler-service.js';
+import { heartbeatToSchedule } from './scheduling/schedule-config.js';
 
 // ES module equivalent of __dirname
 const __filename = fileURLToPath(import.meta.url);
@@ -152,12 +154,7 @@ export class AgentManagerDb {
   private runningServers: Map<string, ClaudeAgentServer> = new Map(); // key: `${teamId}:${agentId}`
   private agentRole: 'manager' | 'worker' = 'manager';
   private defaultConfig: DeployConfig['defaults'] | null = null;
-  private heartbeatTimers: Map<string, NodeJS.Timeout> = new Map(); // key: agentId
-  private heartbeatLastSent: Map<string, number> = new Map(); // key: agentId, value: timestamp (ms)
-  private heartbeatIntervals: Map<string, number> = new Map(); // key: agentId, value: interval (ms)
-  private heartbeatIntervalMs: number = 5 * 60 * 1000; // 5 minutes default
-  private heartbeatCounts: Map<string, number> = new Map(); // key: agentId, value: beats sent
-  private heartbeatStartTimes: Map<string, number> = new Map(); // key: agentId, value: start timestamp
+  private schedulerService: SchedulerService | null = null;
   private queryWaiters: Map<string, QueryWaiter> = new Map(); // key: query_id
   private healthStatus: Map<string, { status: 'online' | 'offline' | 'unknown'; lastCheck: number }> = new Map(); // key: `${teamId}:${agentId}`
   private healthCheckInterval: NodeJS.Timeout | null = null;
@@ -1602,9 +1599,10 @@ export class AgentManagerDb {
         const hostWorkingDirectory = configWorkDir && path.isAbsolute(configWorkDir) ? configWorkDir : `${hostWorkspaceDir}/agents/${id}`;
         const hostSharedDirectory = `${hostWorkspaceDir}/teams/${teamName}`;
 
-        // Start heartbeat timer if enabled
-        if (heartbeat && heartbeat.interval) {
-          this.startHeartbeatForAgent(teamId, id, name, workingDirectory, heartbeat.interval);
+        // Seed heartbeat schedule if enabled
+        if (heartbeat && heartbeat.interval && this.schedulerService) {
+          const { definition, agentIds } = heartbeatToSchedule(id, name, heartbeat as HeartbeatConfig);
+          await this.schedulerService.seedSchedule(definition, agentIds);
         }
 
         res.status(201).json({
@@ -2537,17 +2535,15 @@ export class AgentManagerDb {
             if (!agent.working_directory) {
               return { ok: false, error: `Agent "${agent.name}" has no working directory` };
             }
-            // Check for HEARTBEAT.yaml in working directory
             const config = this.readHeartbeatConfig(agent.working_directory);
             if (!config) {
               return { ok: false, error: `Agent "${agent.name}" has no HEARTBEAT.yaml in working directory` };
             }
-            // Update metadata to enable heartbeat
             const newMetadata = { ...agent.metadata, heartbeat: true };
             await this.db.agents.updateMetadata(agent.id, newMetadata);
-            // Start heartbeat timer if agent is running
-            if (agent.status === 'running') {
-              this.startHeartbeatForAgent(teamId, agent.id, agent.name, agent.working_directory, config.interval);
+            if (this.schedulerService) {
+              const { definition, agentIds } = heartbeatToSchedule(agent.id, agent.name, config);
+              await this.schedulerService.seedSchedule(definition, agentIds);
             }
             return { ok: true, result: { message: `Heartbeat enabled for ${agent.name} (interval: ${config.interval}s)` } };
           } else {
@@ -2555,7 +2551,9 @@ export class AgentManagerDb {
             const newMetadata = { ...agent.metadata };
             delete newMetadata.heartbeat;
             await this.db.agents.updateMetadata(agent.id, newMetadata);
-            this.stopHeartbeatForAgent(agent.id);
+            if (this.schedulerService) {
+              await this.schedulerService.removeAgentSchedules(agent.id);
+            }
             return { ok: true, result: { message: `Heartbeat disabled for ${agent.name}` } };
           }
         }
@@ -2578,25 +2576,9 @@ export class AgentManagerDb {
             return { ok: false, error: `Agent "${agent.name}" has no working directory` };
           }
           const config = this.readHeartbeatConfig(agent.working_directory);
-          const lastSent = this.heartbeatLastSent.get(agent.id);
-          const intervalMs = this.heartbeatIntervals.get(agent.id);
-          let nextIn: string | null = null;
-          if (lastSent && intervalMs) {
-            const nextTime = lastSent + intervalMs;
-            const remainingMs = nextTime - Date.now();
-            if (remainingMs > 0) {
-              const remainingSec = Math.round(remainingMs / 1000);
-              if (remainingSec >= 60) {
-                const mins = Math.floor(remainingSec / 60);
-                const secs = remainingSec % 60;
-                nextIn = secs > 0 ? `${mins}m ${secs}s` : `${mins}m`;
-              } else {
-                nextIn = `${remainingSec}s`;
-              }
-            } else {
-              nextIn = 'imminent';
-            }
-          }
+          const schedules = await this.db.schedules.listSchedulesForAgent(agent.id);
+          const hbSchedule = schedules.find(s => s.source_key === `heartbeat:${agent.id}`);
+          const runCount = hbSchedule ? await this.db.schedules.countRuns(hbSchedule.id, agent.id) : 0;
           return {
             ok: true,
             result: {
@@ -2604,12 +2586,11 @@ export class AgentManagerDb {
                 name: agent.name,
                 id: agent.id,
                 status: agent.status,
-                heartbeatActive: this.heartbeatTimers.has(agent.id),
-                intervalSeconds: config?.interval || 'no file',
-                nextIn,
-                beatsSent: this.heartbeatCounts.get(agent.id) || 0,
-                maxBeats: config?.maxBeats ?? 20,
-                expiresAfter: config?.expiresAfter ?? 7200
+                scheduleActive: hbSchedule?.active ?? false,
+                intervalSeconds: hbSchedule?.interval_seconds || config?.interval || 'no file',
+                runsSent: runCount,
+                maxRuns: hbSchedule?.max_runs ?? config?.maxBeats ?? 20,
+                expiresAt: hbSchedule?.expires_at ?? null
               }
             }
           };
@@ -2622,44 +2603,27 @@ export class AgentManagerDb {
       case 'heartbeats': {
         // /heartbeats - show all agents with heartbeat enabled
         const heartbeatAgents = await this.db.agents.findHeartbeat(teamId);
-        const activeTimers = Array.from(this.heartbeatTimers.keys());
-        const now = Date.now();
+        const agentResults = [];
+        for (const a of heartbeatAgents) {
+          const schedules = await this.db.schedules.listSchedulesForAgent(a.id);
+          const hbSchedule = schedules.find(s => s.source_key === `heartbeat:${a.id}`);
+          const runCount = hbSchedule ? await this.db.schedules.countRuns(hbSchedule.id, a.id) : 0;
+          const config = a.working_directory ? this.readHeartbeatConfig(a.working_directory) : null;
+          agentResults.push({
+            name: a.name,
+            id: a.id,
+            status: a.status,
+            scheduleActive: hbSchedule?.active ?? false,
+            intervalSeconds: hbSchedule?.interval_seconds || config?.interval || 'no file',
+            runsSent: runCount,
+            maxRuns: hbSchedule?.max_runs ?? config?.maxBeats ?? 20,
+            expiresAt: hbSchedule?.expires_at ?? null
+          });
+        }
         return {
           ok: true,
           result: {
-            agents: heartbeatAgents.map(a => {
-              const config = a.working_directory ? this.readHeartbeatConfig(a.working_directory) : null;
-              const lastSent = this.heartbeatLastSent.get(a.id);
-              const intervalMs = this.heartbeatIntervals.get(a.id);
-              let nextIn: string | null = null;
-              if (lastSent && intervalMs) {
-                const nextTime = lastSent + intervalMs;
-                const remainingMs = nextTime - now;
-                if (remainingMs > 0) {
-                  const remainingSec = Math.round(remainingMs / 1000);
-                  if (remainingSec >= 60) {
-                    const mins = Math.floor(remainingSec / 60);
-                    const secs = remainingSec % 60;
-                    nextIn = secs > 0 ? `${mins}m ${secs}s` : `${mins}m`;
-                  } else {
-                    nextIn = `${remainingSec}s`;
-                  }
-                } else {
-                  nextIn = 'imminent';
-                }
-              }
-              return {
-                name: a.name,
-                id: a.id,
-                status: a.status,
-                heartbeatActive: activeTimers.includes(a.id),
-                intervalSeconds: config?.interval || 'no file',
-                nextIn,
-                beatsSent: this.heartbeatCounts.get(a.id) || 0,
-                maxBeats: config?.maxBeats ?? 20,
-                expiresAfter: config?.expiresAfter ?? 7200
-              };
-            })
+            agents: agentResults
           }
         };
       }
@@ -2698,8 +2662,10 @@ export class AgentManagerDb {
           this.runningServers.delete(serverKey);
         }
 
-        // Stop heartbeat if this agent had one
-        this.stopHeartbeatForAgent(a.id);
+        // Remove any schedules for this agent
+        if (this.schedulerService) {
+          await this.schedulerService.removeAgentSchedules(a.id);
+        }
 
         // Cancel any pending queries so they don't show as orphaned
         await this.cancelPendingQueriesForAgent(teamId, a.id);
@@ -3134,9 +3100,10 @@ export class AgentManagerDb {
               address: (agentConfig as any).address || undefined
             });
 
-            // Start heartbeat timer if config file was specified
-            if (heartbeatConfig) {
-              this.startHeartbeatForAgent(effectiveTeamId, agentId, agentConfig.name, workingDirectory, heartbeatConfig.interval);
+            // Seed heartbeat schedule if config specified
+            if (heartbeatConfig && this.schedulerService) {
+              const { definition, agentIds } = heartbeatToSchedule(agentId, agentConfig.name, heartbeatConfig);
+              await this.schedulerService.seedSchedule(definition, agentIds);
             }
 
             const result: { name: string; id: string; port: number; success: boolean; tokenId?: string; domain?: string; txHash?: string; local: boolean; workingDirectory: string; pid?: number; logFile?: string } = {
@@ -3288,11 +3255,21 @@ export class AgentManagerDb {
               if (!config) {
                 return { ok: false, error: `Agent "${agent.name}" has no HEARTBEAT.yaml file` };
               }
-              // Send immediate heartbeat
-              await this.sendHeartbeat(teamId, agent.id, agent.name, agent.working_directory);
-              // Restart timer with interval from file (resets back to 0)
-              this.startHeartbeatForAgent(teamId, agent.id, agent.name, agent.working_directory, config.interval);
-              return { ok: true, result: { action: 'heartbeat', name: agent.name, intervalSeconds: config.interval, message: 'Heartbeat sent and timer reset' } };
+              // Send one immediate message and reseed the schedule
+              if (agent.endpoint) {
+                try {
+                  await fetch(`${agent.endpoint}/talk`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ from: 'schedule', message: config.message }),
+                  });
+                } catch { /* ignore */ }
+              }
+              if (this.schedulerService) {
+                const { definition, agentIds } = heartbeatToSchedule(agent.id, agent.name, config);
+                await this.schedulerService.seedSchedule(definition, agentIds);
+              }
+              return { ok: true, result: { action: 'heartbeat', name: agent.name, intervalSeconds: config.interval, message: 'Heartbeat sent and schedule reseeded' } };
             }
             default:
               return { ok: false, error: `Unknown agent action: ${subAction}. Available: start, stop, rebuild, logs, heartbeat` };
@@ -3739,8 +3716,14 @@ export class AgentManagerDb {
         console.log(`WebSocket: ws://localhost:${port}/ws`);
         console.log(`\n`);
 
-        // Start heartbeats for all running agents with heartbeat enabled across all teams
-        this.initAllHeartbeats();
+        // Initialize and start the scheduler service
+        this.schedulerService = new SchedulerService(this.db, async (agentId: string) => {
+          const agent = await this.db.agents.getById(agentId);
+          if (!agent || !agent.endpoint) return null;
+          return { id: agent.id, name: agent.name, endpoint: agent.endpoint, status: agent.status };
+        });
+        await this.initSchedules();
+        this.schedulerService.start();
 
         // Start periodic health monitoring (every 30s)
         this.startHealthMonitor();
@@ -3750,17 +3733,22 @@ export class AgentManagerDb {
     });
   }
 
-  /**
-   * Initialize heartbeats for all running agents with heartbeat enabled across all teams
-   */
-  private async initAllHeartbeats(): Promise<void> {
+  private async initSchedules(): Promise<void> {
+    if (!this.schedulerService) return;
     try {
       const teams = await this.db.teams.listTeams();
       for (const team of teams) {
-        await this.startAgentHeartbeats(team.id);
+        const agents = await this.db.agents.findHeartbeat(team.id);
+        for (const agent of agents) {
+          if (agent.status !== 'running' || !agent.working_directory) continue;
+          const config = this.readHeartbeatConfig(agent.working_directory);
+          if (!config) continue;
+          const { definition, agentIds } = heartbeatToSchedule(agent.id, agent.name, config);
+          await this.schedulerService.seedSchedule(definition, agentIds);
+        }
       }
     } catch (error: any) {
-      console.log(`[Heartbeat] Error initializing: ${error.message}`);
+      console.log(`[Scheduler] Error initializing schedules: ${error.message}`);
     }
   }
 
@@ -3889,73 +3877,6 @@ export class AgentManagerDb {
     }
   }
 
-  /**
-   * Start heartbeat timers for all agents with heartbeat enabled in a team
-   */
-  async startAgentHeartbeats(teamId: string): Promise<void> {
-    // Query for agents with heartbeat enabled (metadata.heartbeat = true)
-    const allHeartbeat = await this.db.agents.findHeartbeat(teamId);
-    const rows = allHeartbeat.filter(a => a.status === 'running');
-
-    for (const row of rows) {
-      if (!row.working_directory) continue;
-      const config = this.readHeartbeatConfig(row.working_directory);
-      if (config) {
-        this.startHeartbeatForAgent(teamId, row.id, row.name, row.working_directory, config.interval);
-      }
-    }
-
-    if (rows.length > 0) {
-      console.log(`[Heartbeat] Started heartbeats for ${rows.length} agent(s)`);
-    }
-  }
-
-  /**
-   * Start heartbeat timer for an agent
-   * @param intervalSeconds Interval in seconds between heartbeats
-   */
-  private startHeartbeatForAgent(teamId: string, agentId: string, agentName: string, workingDirectory: string, intervalSeconds: number): void {
-    const intervalMs = intervalSeconds * 1000;
-
-    // Clear existing timer if any
-    const existingTimer = this.heartbeatTimers.get(agentId);
-    if (existingTimer) {
-      clearInterval(existingTimer);
-    }
-
-    // Send initial heartbeat after a short delay (give agent time to initialize)
-    setTimeout(() => {
-      this.sendHeartbeat(teamId, agentId, agentName, workingDirectory);
-    }, 30 * 1000); // 30 seconds after start
-
-    // Set up recurring heartbeat
-    const timer = setInterval(() => {
-      this.sendHeartbeat(teamId, agentId, agentName, workingDirectory);
-    }, intervalMs);
-
-    this.heartbeatTimers.set(agentId, timer);
-    this.heartbeatIntervals.set(agentId, intervalMs);
-    this.heartbeatLastSent.set(agentId, Date.now()); // Track start time
-    this.heartbeatCounts.set(agentId, 0);
-    this.heartbeatStartTimes.set(agentId, Date.now());
-    console.log(`[Heartbeat] Timer started for ${agentName} (${agentId}), interval: ${intervalSeconds}s`);
-  }
-
-  /**
-   * Stop heartbeat timer for an agent
-   */
-  stopHeartbeatForAgent(agentId: string): void {
-    const timer = this.heartbeatTimers.get(agentId);
-    if (timer) {
-      clearInterval(timer);
-      this.heartbeatTimers.delete(agentId);
-      this.heartbeatLastSent.delete(agentId);
-      this.heartbeatIntervals.delete(agentId);
-      this.heartbeatCounts.delete(agentId);
-      this.heartbeatStartTimes.delete(agentId);
-      console.log(`[Heartbeat] Timer stopped for ${agentId}`);
-    }
-  }
 
   /**
    * Cancel all pending/processing queries for an agent when it stops.
@@ -4220,86 +4141,5 @@ export class AgentManagerDb {
     return { killed: false, pids: [] };
   }
 
-  /**
-   * Send a heartbeat message to an agent
-   * Message is read from agent's HEARTBEAT.yaml file (allows runtime editing)
-   */
-  private async sendHeartbeat(teamId: string, agentId: string, agentName: string, workingDirectory: string): Promise<void> {
-    try {
-      // Get agent status and endpoint
-      const agent = await this.db.agents.getById(agentId);
-
-      if (!agent || agent.status !== 'running') {
-        console.log(`[Heartbeat] Agent ${agentName} not running, stopping heartbeat`);
-        this.stopHeartbeatForAgent(agentId);
-        return;
-      }
-
-      const endpoint = agent.endpoint;
-      if (!endpoint) {
-        console.log(`[Heartbeat] Agent ${agentName} has no endpoint`);
-        return;
-      }
-
-      // Read message from HEARTBEAT.yaml file (allows runtime editing)
-      const config = this.readHeartbeatConfig(workingDirectory);
-      if (!config?.message) {
-        console.log(`[Heartbeat] Agent ${agentName} has no HEARTBEAT.yaml or invalid config`);
-        return;
-      }
-
-      // Check heartbeat limits
-      const beatCount = (this.heartbeatCounts.get(agentId) || 0);
-      const startTime = this.heartbeatStartTimes.get(agentId) || Date.now();
-      const maxBeats = config.maxBeats ?? 20; // Default: 20 beats
-      const expiresAfter = config.expiresAfter ?? 7200; // Default: 2 hours (in seconds)
-
-      if (beatCount >= maxBeats) {
-        console.log(`[Heartbeat] Agent ${agentName} reached max beats (${maxBeats}), stopping`);
-        this.stopHeartbeatForAgent(agentId);
-        return;
-      }
-
-      const elapsedSeconds = (Date.now() - startTime) / 1000;
-      if (elapsedSeconds >= expiresAfter) {
-        console.log(`[Heartbeat] Agent ${agentName} heartbeat expired after ${Math.round(elapsedSeconds / 60)}m, stopping`);
-        this.stopHeartbeatForAgent(agentId);
-        return;
-      }
-
-      // Send message via /talk endpoint
-      const response = await fetch(`${endpoint}/talk`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-          from: 'manager',
-          message: config.message
-        })
-      });
-
-      if (response.ok) {
-        this.heartbeatLastSent.set(agentId, Date.now());
-        this.heartbeatCounts.set(agentId, beatCount + 1);
-        console.log(`[Heartbeat] Sent to ${agentName} (beat ${beatCount + 1}/${maxBeats})`);
-      } else {
-        console.log(`[Heartbeat] Failed to send to ${agentName}: ${response.status}`);
-      }
-    } catch (error: any) {
-      console.log(`[Heartbeat] Error sending to ${agentName}: ${error.message}`);
-    }
-  }
-
-  /**
-   * Stop all heartbeat timers
-   */
-  stopAllHeartbeats(): void {
-    for (const [agentId, timer] of this.heartbeatTimers) {
-      clearInterval(timer);
-    }
-    this.heartbeatTimers.clear();
-    console.log(`[Heartbeat] All timers stopped`);
-  }
 }
 

@@ -12,7 +12,7 @@
  */
 
 import type { DbAdapter } from './db-adapter.js';
-import type { AgentRow, TeamRow, QueryRow, NewsItemRow } from './types.js';
+import type { AgentRow, TeamRow, QueryRow, NewsItemRow, ScheduleDefinitionRow, ScheduleRunRow } from './types.js';
 
 // ---------------------------------------------------------------------------
 // TeamsRepository
@@ -280,6 +280,61 @@ export interface NewsRepository {
 }
 
 // ---------------------------------------------------------------------------
+// SchedulesRepository
+// ---------------------------------------------------------------------------
+
+export interface SchedulesRepository {
+  /** Insert or update a schedule definition by id. */
+  upsertDefinition(def: ScheduleDefinitionRow): Promise<void>;
+
+  /** Replace target agents for a schedule (delete existing, insert new). */
+  replaceTargets(scheduleId: string, agentIds: string[]): Promise<void>;
+
+  /** List all active schedule definitions. */
+  listActiveDefinitions(): Promise<ScheduleDefinitionRow[]>;
+
+  /** List target agent IDs for a schedule. */
+  listTargets(scheduleId: string): Promise<string[]>;
+
+  /**
+   * Attempt to insert a run log entry.
+   * Returns true if inserted, false if the (schedule_id, agent_id, scheduled_key)
+   * already exists (dedupe).
+   */
+  insertRun(run: ScheduleRunRow): Promise<boolean>;
+
+  /** Update status (and optional error) on an existing run log entry. */
+  updateRunStatus(
+    scheduleId: string,
+    agentId: string,
+    scheduledKey: string,
+    status: 'sent' | 'failed' | 'skipped',
+    error?: string | null,
+  ): Promise<void>;
+
+  /** List all active schedules targeting a given agent. */
+  listSchedulesForAgent(agentId: string): Promise<ScheduleDefinitionRow[]>;
+
+  /** Delete all schedule definitions matching a source_type (and optional source_key prefix). */
+  deleteBySource(sourceType: string, sourceKeyPrefix?: string): Promise<void>;
+
+  /** Get a single schedule definition by id. */
+  getDefinition(scheduleId: string): Promise<ScheduleDefinitionRow | null>;
+
+  /** List recent runs for a schedule, ordered by fired_at desc. */
+  listRuns(scheduleId: string, limit?: number): Promise<ScheduleRunRow[]>;
+
+  /** Count completed runs for a schedule+agent pair. */
+  countRuns(scheduleId: string, agentId: string): Promise<number>;
+
+  /** Set the active flag on a schedule definition. */
+  setActive(scheduleId: string, active: boolean): Promise<void>;
+
+  /** Delete a schedule definition by id (cascades to targets and runs). */
+  deleteDefinition(scheduleId: string): Promise<void>;
+}
+
+// ---------------------------------------------------------------------------
 // Db — composite service
 // ---------------------------------------------------------------------------
 
@@ -300,6 +355,7 @@ export interface Db {
   agents: AgentsRepository;
   queries: QueriesRepository;
   news: NewsRepository;
+  schedules: SchedulesRepository;
 
   /** Close the database connection / file handle. */
   close(): Promise<void>;

@@ -71,5 +71,48 @@ export function migrateSqlite(adapter: SqliteAdapter): void {
     CREATE INDEX IF NOT EXISTS news_items_agent_time_idx ON news_items(team_id, agent_id, timestamp);
     CREATE INDEX IF NOT EXISTS news_items_query_idx ON news_items(team_id, agent_id, query_id);
     CREATE INDEX IF NOT EXISTS agents_token_idx ON agents(token_id) WHERE token_id IS NOT NULL;
+
+    CREATE TABLE IF NOT EXISTS schedule_definitions (
+      id TEXT PRIMARY KEY,
+      kind TEXT NOT NULL,
+      title TEXT NOT NULL,
+      description TEXT,
+      active INTEGER NOT NULL DEFAULT 1,
+      message TEXT NOT NULL,
+      timezone TEXT,
+      catch_up_policy TEXT NOT NULL DEFAULT 'skip',
+      dedupe_window_seconds INTEGER NOT NULL DEFAULT 90,
+      interval_seconds INTEGER,
+      anchor_at INTEGER,
+      max_runs INTEGER,
+      expires_at INTEGER,
+      local_time_seconds INTEGER,
+      local_date TEXT,
+      days_of_week TEXT,
+      source_type TEXT NOT NULL DEFAULT 'yaml',
+      source_key TEXT,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS schedule_targets (
+      schedule_id TEXT NOT NULL REFERENCES schedule_definitions(id) ON DELETE CASCADE,
+      agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+      PRIMARY KEY (schedule_id, agent_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS schedule_runs (
+      schedule_id TEXT NOT NULL REFERENCES schedule_definitions(id) ON DELETE CASCADE,
+      agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+      scheduled_key TEXT NOT NULL,
+      scheduled_at INTEGER NOT NULL,
+      fired_at INTEGER NOT NULL,
+      status TEXT NOT NULL,
+      error TEXT,
+      PRIMARY KEY (schedule_id, agent_id, scheduled_key)
+    );
+
+    CREATE INDEX IF NOT EXISTS schedule_runs_schedule_idx ON schedule_runs(schedule_id, fired_at);
+    CREATE INDEX IF NOT EXISTS schedule_runs_agent_idx ON schedule_runs(agent_id, fired_at);
   `);
 }

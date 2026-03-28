@@ -65,3 +65,38 @@ export interface NewsItemRow {
   data: Record<string, unknown> | null;
   query_id: string | null;
 }
+
+/** schedule_definitions table row */
+export interface ScheduleDefinitionRow {
+  id: string;
+  kind: 'interval' | 'calendar';
+  title: string;
+  description: string | null;
+  active: boolean;
+  message: string;
+  timezone: string | null;
+  catch_up_policy: 'skip' | 'fire_once';
+  dedupe_window_seconds: number;
+  interval_seconds: number | null;
+  anchor_at: number | null;
+  max_runs: number | null;
+  expires_at: number | null;
+  local_time_seconds: number | null;
+  local_date: string | null;
+  days_of_week: string | null;
+  source_type: string;
+  source_key: string | null;
+  created_at: number;
+  updated_at: number;
+}
+
+/** schedule_runs table row */
+export interface ScheduleRunRow {
+  schedule_id: string;
+  agent_id: string;
+  scheduled_key: string;
+  scheduled_at: number;
+  fired_at: number;
+  status: 'sent' | 'failed' | 'skipped';
+  error: string | null;
+}

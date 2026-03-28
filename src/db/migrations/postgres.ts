@@ -370,4 +370,54 @@ export async function migratePostgres(adapter: DbAdapter): Promise<void> {
         FOREIGN KEY (agent_id) REFERENCES agents(id) ON DELETE CASCADE;
     END $$;
   `);
+
+  // 14) Scheduling tables
+  await adapter.query(`
+    CREATE TABLE IF NOT EXISTS schedule_definitions (
+      id text PRIMARY KEY,
+      kind text NOT NULL,
+      title text NOT NULL,
+      description text,
+      active boolean NOT NULL DEFAULT true,
+      message text NOT NULL,
+      timezone text,
+      catch_up_policy text NOT NULL DEFAULT 'skip',
+      dedupe_window_seconds integer NOT NULL DEFAULT 90,
+      interval_seconds integer,
+      anchor_at bigint,
+      max_runs integer,
+      expires_at bigint,
+      local_time_seconds integer,
+      local_date text,
+      days_of_week text,
+      source_type text NOT NULL DEFAULT 'yaml',
+      source_key text,
+      created_at bigint NOT NULL,
+      updated_at bigint NOT NULL
+    );
+  `);
+
+  await adapter.query(`
+    CREATE TABLE IF NOT EXISTS schedule_targets (
+      schedule_id text NOT NULL REFERENCES schedule_definitions(id) ON DELETE CASCADE,
+      agent_id text NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+      PRIMARY KEY (schedule_id, agent_id)
+    );
+  `);
+
+  await adapter.query(`
+    CREATE TABLE IF NOT EXISTS schedule_runs (
+      schedule_id text NOT NULL REFERENCES schedule_definitions(id) ON DELETE CASCADE,
+      agent_id text NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+      scheduled_key text NOT NULL,
+      scheduled_at bigint NOT NULL,
+      fired_at bigint NOT NULL,
+      status text NOT NULL,
+      error text,
+      PRIMARY KEY (schedule_id, agent_id, scheduled_key)
+    );
+  `);
+
+  await adapter.query(`CREATE INDEX IF NOT EXISTS schedule_runs_schedule_idx ON schedule_runs(schedule_id, fired_at);`);
+  await adapter.query(`CREATE INDEX IF NOT EXISTS schedule_runs_agent_idx ON schedule_runs(agent_id, fired_at);`);
 }
