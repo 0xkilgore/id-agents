@@ -380,6 +380,7 @@ export async function migratePostgres(adapter: DbAdapter): Promise<void> {
       description text,
       active boolean NOT NULL DEFAULT true,
       message text NOT NULL,
+      sender text NOT NULL DEFAULT 'schedule',
       delivery_mode text NOT NULL DEFAULT 'talk',
       timezone text,
       catch_up_policy text NOT NULL DEFAULT 'skip',

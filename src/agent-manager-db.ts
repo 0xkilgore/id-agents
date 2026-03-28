@@ -2680,6 +2680,7 @@ export class AgentManagerDb {
           const rawArgs = args.slice(2);
           let delivery: ScheduleDeliveryMode = kind === 'interval' ? 'internal' : 'talk';
           let timezone: string | undefined;
+          let sender: string | undefined;
           const positionals: string[] = [];
 
           for (let i = 0; i < rawArgs.length; i++) {
@@ -2697,6 +2698,14 @@ export class AgentManagerDb {
               timezone = rawArgs[i + 1];
               if (!timezone) {
                 return { ok: false, error: 'Missing value for --timezone' };
+              }
+              i++;
+              continue;
+            }
+            if (token === '--sender') {
+              sender = rawArgs[i + 1];
+              if (!sender) {
+                return { ok: false, error: 'Missing value for --sender' };
               }
               i++;
               continue;
@@ -2750,6 +2759,7 @@ export class AgentManagerDb {
               days_of_week: null,
               source_type: 'cli',
               source_key: `cli:${teamId}:${scheduleId}`,
+              sender: sender ?? 'schedule',
               created_at: nowSec,
               updated_at: nowSec,
             };
@@ -2801,6 +2811,7 @@ export class AgentManagerDb {
           }
           definition.source_type = 'cli';
           definition.source_key = scheduleKey;
+          definition.sender = sender ?? 'schedule';
           await this.schedulerService.seedSchedule(definition, [agent.id]);
 
           return {

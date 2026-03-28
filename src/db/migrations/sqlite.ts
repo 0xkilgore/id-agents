@@ -79,6 +79,7 @@ export function migrateSqlite(adapter: SqliteAdapter): void {
       description TEXT,
       active INTEGER NOT NULL DEFAULT 1,
       message TEXT NOT NULL,
+      sender TEXT NOT NULL DEFAULT 'schedule',
       delivery_mode TEXT NOT NULL DEFAULT 'talk',
       timezone TEXT,
       catch_up_policy TEXT NOT NULL DEFAULT 'skip',

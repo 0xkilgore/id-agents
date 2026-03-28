@@ -74,6 +74,7 @@ export interface ScheduleDefinitionRow {
   description: string | null;
   active: boolean;
   message: string;
+  sender: string;
   delivery_mode: 'talk' | 'internal';
   timezone: string | null;
   catch_up_policy: 'skip' | 'fire_once';

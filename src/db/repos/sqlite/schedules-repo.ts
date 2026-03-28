@@ -33,8 +33,8 @@ export class SqliteSchedulesRepo implements SchedulesRepository {
          (id, kind, title, description, active, message, delivery_mode, timezone,
           catch_up_policy, dedupe_window_seconds, interval_seconds, anchor_at,
           max_runs, expires_at, local_time_seconds, local_date, days_of_week,
-          source_type, source_key, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          source_type, source_key, sender, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT (id) DO UPDATE SET
          kind                 = excluded.kind,
          title                = excluded.title,
@@ -54,6 +54,7 @@ export class SqliteSchedulesRepo implements SchedulesRepository {
          days_of_week         = excluded.days_of_week,
          source_type          = excluded.source_type,
          source_key           = excluded.source_key,
+         sender               = excluded.sender,
          updated_at           = excluded.updated_at`,
       [
         def.id,
@@ -75,6 +76,7 @@ export class SqliteSchedulesRepo implements SchedulesRepository {
         def.days_of_week,
         def.source_type,
         def.source_key,
+        def.sender ?? 'schedule',
         def.created_at,
         def.updated_at,
       ],

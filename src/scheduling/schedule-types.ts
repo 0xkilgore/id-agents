@@ -28,7 +28,7 @@ export interface DispatchResult {
  * Schedule payload sent to agents via /talk endpoint.
  */
 export interface SchedulePayload {
-  from: 'manager';
+  from: string;
   mode: ScheduleDeliveryMode;
   schedule: {
     id: string;
