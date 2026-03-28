@@ -23,7 +23,7 @@ agents:
   - name: coder
     description: "Implementation specialist — writes and reviews code"
     runtime: codex
-    model: o3
+    model: gpt-5.4
     workingDirectory: /path/to/project
 
   - name: reviewer
