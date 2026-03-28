@@ -65,10 +65,12 @@ const HELP_ITEMS: Array<{ cmd: string; desc: string; indent?: boolean }> = [
   { cmd: '/help', desc: 'Show this help' },
   { cmd: '/news [-l] <agent>', desc: 'Check recent messages (-l for full content)' },
   { cmd: '/register <agent>', desc: 'Register agent onchain' },
-  { cmd: '/schedule', desc: 'List active schedules' },
-  { cmd: '/schedule add heartbeat <agent> <s> <msg>', desc: 'Add heartbeat' },
-  { cmd: '/schedule add calendar <agent> <time> <days> <msg>', desc: 'Add calendar event' },
-  { cmd: '/schedule pause|resume|remove <id>', desc: 'Manage schedules' },
+  { cmd: '/heartbeat', desc: 'List heartbeats' },
+  { cmd: '/heartbeat add <agent> <seconds> <message>', desc: 'Add heartbeat' },
+  { cmd: '/heartbeat pause|resume|remove <id>', desc: 'Manage heartbeat' },
+  { cmd: '/calendar', desc: 'List calendar events' },
+  { cmd: '/calendar add <agent> <time> <days|date> <message>', desc: 'Add calendar event' },
+  { cmd: '/calendar pause|resume|remove <id>', desc: 'Manage calendar event' },
   { cmd: '/status', desc: 'Check agent status' },
   { cmd: '/update <agent> [--wallet <addr>] [--name <name>]', desc: 'Update agent properties' },
   { cmd: '/wallet <agent> [chain]', desc: 'Show agent wallet address (chain: eip155:1, solana, etc.)' },
@@ -2920,10 +2922,24 @@ async function handleLine(line: string) {
     return;
   }
 
-  // /schedule — route through manager's remote command handler
-  if (input.startsWith('/schedule')) {
-    // Bare /schedule defaults to /schedule list
-    const cmd = input.trim() === '/schedule' ? '/schedule list' : input;
+  // /heartbeat and /calendar — map to /schedule commands on the manager
+  if (input.startsWith('/heartbeat') || input.startsWith('/calendar')) {
+    const isHeartbeat = input.startsWith('/heartbeat');
+    const kind = isHeartbeat ? 'heartbeat' : 'calendar';
+    const rest = input.replace(/^\/(heartbeat|calendar)\s*/, '').trim();
+
+    // Map to /schedule commands
+    let cmd: string;
+    if (!rest || rest === 'list') {
+      cmd = '/schedule list';
+    } else if (rest.startsWith('add ')) {
+      cmd = `/schedule add ${kind} ${rest.slice(4)}`;
+    } else if (rest.startsWith('show ') || rest.startsWith('pause ') || rest.startsWith('resume ') || rest.startsWith('remove ')) {
+      cmd = `/schedule ${rest}`;
+    } else {
+      cmd = `/schedule list`;
+    }
+
     try {
       const response = await managerFetch('/remote', {
         method: 'POST',
@@ -2934,14 +2950,16 @@ async function handleLine(line: string) {
       if (data.ok) {
         const result = data.result;
         if (result.schedules) {
-          if (result.schedules.length === 0) {
-            console.log(`\n${colors.gray}No active schedules.${colors.reset}\n`);
+          // Filter by kind for /heartbeat or /calendar
+          const filtered = result.schedules.filter((s: any) => s.kind === kind);
+          if (filtered.length === 0) {
+            console.log(`\n${colors.gray}No active ${kind}s.${colors.reset}\n`);
           } else {
-            console.log(`\n${colors.bold}📅 Schedules (${result.schedules.length})${colors.reset}\n`);
-            for (const s of result.schedules) {
+            const icon = isHeartbeat ? '🔁' : '📆';
+            console.log(`\n${colors.bold}${icon} ${kind === 'heartbeat' ? 'Heartbeats' : 'Calendar Events'} (${filtered.length})${colors.reset}\n`);
+            for (const s of filtered) {
               const targets = (s.targets || []).join(', ');
               const statusIcon = s.active ? '🟢' : '🟡';
-              const kindIcon = s.kind === 'heartbeat' ? '🔁' : '📆';
 
               let timing = '';
               if (s.kind === 'heartbeat') {
@@ -2953,15 +2971,15 @@ async function handleLine(line: string) {
                 timing = `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')} ${s.daysOfWeek || s.localDate || ''}`;
               }
 
-              console.log(`${kindIcon} ${s.title}`);
-              console.log(`   ${statusIcon} ${s.kind} ${colors.gray}|${colors.reset} ${timing} ${colors.gray}|${colors.reset} ${targets}`);
+              console.log(`${statusIcon} ${s.title}`);
+              console.log(`   ${timing} ${colors.gray}|${colors.reset} ${targets}`);
               console.log(`   ${colors.gray}${s.id}${colors.reset}`);
               console.log('');
             }
           }
         } else if (result.schedule) {
           const s = result.schedule;
-          console.log(`\n${colors.green}✅ Schedule ${s.id}${colors.reset}`);
+          console.log(`\n${colors.green}✅ ${s.id}${colors.reset}`);
           console.log(`   ${s.kind} | ${s.target || s.targets?.join(', ') || ''}`);
           if (s.intervalSeconds) console.log(`   Every ${s.intervalSeconds}s`);
           if (s.time) console.log(`   Time: ${s.time} ${s.recurrence || s.date || ''} ${s.timezone || ''}`);
