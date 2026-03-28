@@ -10,11 +10,13 @@
 import { HarnessType, AgentHarness } from './types.js';
 import { ClaudeAgentSdkHarness } from './claude-agent-sdk.js';
 import { ClaudeCodeCliHarness } from './claude-code-cli.js';
+import { CodexHarness } from './codex.js';
 
 // Export all types
 export * from './types.js';
 export { ClaudeAgentSdkHarness } from './claude-agent-sdk.js';
 export { ClaudeCodeCliHarness } from './claude-code-cli.js';
+export { CodexHarness } from './codex.js';
 
 /**
  * Create a harness instance by type.
@@ -30,8 +32,10 @@ export function createHarness(type: HarnessType = 'claude-agent-sdk'): AgentHarn
     case 'claude-code-cli':
     case 'claude-code-local':  // Local agents use the CLI harness
       return new ClaudeCodeCliHarness();
+    case 'codex':
+      return new CodexHarness();
     default:
-      throw new Error(`Unknown harness type: ${type}. Valid types: claude-code, claude-code-cli`);
+      throw new Error(`Unknown harness type: ${type}. Valid types: claude-agent-sdk, claude-code-cli, codex`);
   }
 }
 
@@ -39,7 +43,7 @@ export function createHarness(type: HarnessType = 'claude-agent-sdk'): AgentHarn
  * Get all available harness types.
  */
 export function getAvailableHarnesses(): HarnessType[] {
-  return ['claude-agent-sdk', 'claude-code-cli', 'claude-code-local'];
+  return ['claude-agent-sdk', 'claude-code-cli', 'claude-code-local', 'codex'];
 }
 
 /**
