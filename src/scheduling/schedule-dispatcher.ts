@@ -34,7 +34,7 @@ export class ScheduleDispatcher {
     }
 
     const payload: SchedulePayload = {
-      from: 'schedule',
+      from: 'manager',
       mode: def.delivery_mode,
       schedule: {
         id: def.id,
