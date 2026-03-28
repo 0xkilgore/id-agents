@@ -158,13 +158,10 @@ For single-agent recurring work, keep scheduling close to the agent with `heartb
 
 ```yaml
 agents:
-  - name: x
+  - name: monitor
     heartbeat:
       interval: 300
-      message: "Review timeline and draft replies"
-      delivery: internal
-      maxBeats: 20
-      expiresAfter: 7200
+      message: "Check system health and report status"
 ```
 
 For wall-clock events, use top-level `calendar`:
@@ -190,19 +187,24 @@ Defaults:
 - `heartbeat` defaults to `internal`
 - `calendar` defaults to `talk`
 
+The `from` field in the delivery payload comes from the schedule's `sender` field. Defaults:
+- Heartbeats default to `from: "heartbeat"`
+- Calendar events default to `from: "schedule"`
+- You can override with `--sender` when adding a schedule via the CLI
+
 The payload sent to agents is structured like:
 
 ```json
 {
-  "from": "schedule",
+  "from": "heartbeat",
   "mode": "internal",
   "schedule": {
     "id": "sch_123",
-    "kind": "calendar",
-    "title": "Morning X engagement",
-    "scheduledKey": "calendar:2026-03-28@32400"
+    "kind": "interval",
+    "title": "monitor heartbeat",
+    "scheduledKey": "interval:sch_123@1711612800"
   },
-  "message": "Review timeline and draft replies"
+  "message": "Check system health and report status"
 }
 ```
 
@@ -279,6 +281,7 @@ This means any Claude Code instance on the same machine can coordinate with your
 - `/register <name>` - Register agent onchain
 - `/status` - Show status
 - `/schedule list` - List active schedules
+- `/schedule show <id>` - Show schedule details
 - `/schedule add interval <agent> <seconds> <message>` - Add heartbeat
 - `/schedule add calendar <agent> <time> <days|date> <message>` - Add calendar event
 - `/schedule pause <id>` - Pause schedule
