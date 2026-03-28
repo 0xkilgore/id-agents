@@ -4,7 +4,7 @@ import type { SchedulePayload, DispatchResult, DispatchTarget } from './schedule
 import type { ScheduleDefinitionRow } from '../db/types.js';
 
 /**
- * Delivers scheduled payloads to agent /talk endpoints.
+ * Delivers scheduled payloads to agent /talk or /schedule endpoints.
  */
 export class ScheduleDispatcher {
   /**
@@ -35,6 +35,7 @@ export class ScheduleDispatcher {
 
     const payload: SchedulePayload = {
       from: 'schedule',
+      mode: def.delivery_mode,
       schedule: {
         id: def.id,
         kind: def.kind,
@@ -44,8 +45,14 @@ export class ScheduleDispatcher {
       message: def.message,
     };
 
+    const path = def.delivery_mode === 'internal' ? target.schedulePath : target.talkPath;
+    if (def.delivery_mode === 'internal' && !path) {
+      result.error = `Agent ${target.name} does not advertise /schedule`;
+      return result;
+    }
+
     try {
-      const response = await fetch(`${target.endpoint}/talk`, {
+      const response = await fetch(`${target.endpoint}${path}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),

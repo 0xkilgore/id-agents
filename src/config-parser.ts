@@ -11,6 +11,8 @@ import fs from 'fs';
 import path from 'path';
 import { HarnessType, isValidHarnessType, getAvailableHarnesses } from './harness/index.js';
 
+export type ScheduleDeliveryMode = 'talk' | 'internal';
+
 export interface PluginConfig {
   name: string;
   path: string;
@@ -53,6 +55,19 @@ export interface AgentSpec {
   address?: string;                   // Ethereum address (links to .env.<name>.<address> file)
 }
 
+export interface CalendarSpec {
+  title: string;
+  time: string;                    // HH:MM or HH:MM:SS
+  timezone?: string;               // IANA timezone, defaults to host timezone
+  date?: string;                   // YYYY-MM-DD for one-off
+  days?: string[];                 // ['mon','wed','fri'] for recurring
+  agents: string[];                // target agent names/refs
+  description?: string;
+  message?: string;
+  catchUpPolicy?: 'skip' | 'fire_once';
+  delivery?: ScheduleDeliveryMode;
+}
+
 export interface OnchainConfig {
   registryAddress?: string;           // ERC-6551 registry address
   registrarAddress?: string;          // Registrar contract for minting
@@ -89,6 +104,7 @@ export interface DeployConfig {
   parameters?: ConfigParameter[];
   onchain?: OnchainConfig;              // Onchain registration settings
   org?: OrgConfig;                      // Organization chart
+  calendar?: CalendarSpec[];            // Team calendar schedules
   defaults?: {
     runtime?: HarnessType;              // Default harness for all agents
     model?: string;
@@ -247,6 +263,7 @@ export function getConfigParameters(filePath: string): ConfigParameter[] {
  * Validate a deploy config
  */
 export function validateConfig(config: DeployConfig): ValidationResult {
+  const validDays = new Set(['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun']);
   const errors: ValidationError[] = [];
 
   // Check version
@@ -262,6 +279,32 @@ export function validateConfig(config: DeployConfig): ValidationResult {
 
   if (config.agents.length === 0) {
     errors.push({ path: 'agents', message: 'agents array must have at least one agent' });
+  }
+
+  if (config.calendar) {
+    config.calendar.forEach((event, index) => {
+      const eventPath = `calendar[${index}]`;
+      if (!event.title) errors.push({ path: `${eventPath}.title`, message: 'calendar title is required' });
+      if (!event.time || !/^\d{2}:\d{2}(:\d{2})?$/.test(event.time)) {
+        errors.push({ path: `${eventPath}.time`, message: 'calendar time must be HH:MM or HH:MM:SS' });
+      }
+      if (!event.agents || !Array.isArray(event.agents) || event.agents.length === 0) {
+        errors.push({ path: `${eventPath}.agents`, message: 'calendar agents must be a non-empty array' });
+      }
+      if (event.delivery && !['talk', 'internal'].includes(event.delivery)) {
+        errors.push({ path: `${eventPath}.delivery`, message: 'calendar delivery must be \"talk\" or \"internal\"' });
+      }
+      if (!!event.date === !!(event.days && event.days.length > 0)) {
+        errors.push({ path: eventPath, message: 'calendar entry must specify either date or days' });
+      }
+      if (event.days) {
+        for (const day of event.days) {
+          if (!validDays.has(day.toLowerCase())) {
+            errors.push({ path: `${eventPath}.days`, message: `invalid day: ${day}` });
+          }
+        }
+      }
+    });
   }
 
   // Validate each agent
@@ -468,6 +511,7 @@ export interface HeartbeatConfig {
   message: string;    // message to send
   maxBeats?: number;  // max number of heartbeats before stopping (default: 20)
   expiresAfter?: number; // seconds after which heartbeat expires (default: 7200 = 2 hours)
+  delivery?: ScheduleDeliveryMode;
 }
 
 /**
@@ -485,15 +529,21 @@ export function resolveHeartbeatFile(heartbeatFile: string | undefined, basePath
   }
 
   const content = fs.readFileSync(filePath, 'utf-8');
-  const config = yaml.load(content) as { interval?: number; message?: string };
+  const config = yaml.load(content) as HeartbeatConfig | undefined;
 
   if (!config || typeof config.interval !== 'number' || typeof config.message !== 'string') {
     throw new Error(`Invalid heartbeat config: ${filePath} - must have 'interval' (number) and 'message' (string)`);
   }
+  if (config.delivery && !['talk', 'internal'].includes(config.delivery)) {
+    throw new Error(`heartbeat file has invalid delivery: ${config.delivery}`);
+  }
 
   return {
     interval: config.interval,
-    message: config.message.trim()
+    message: config.message.trim(),
+    maxBeats: config.maxBeats,
+    expiresAfter: config.expiresAfter,
+    delivery: config.delivery,
   };
 }
 
@@ -579,7 +629,7 @@ export function processConfig(
   filePath: string,
   workspacePath: string = '/workspace',
   args: string[] = []
-): { agents: AgentSpec[]; teamContext: string | null; teamName: string | null; errors: ValidationError[]; parameters?: ConfigParameter[]; onchain?: OnchainConfig; org?: OrgConfig } {
+): { agents: AgentSpec[]; calendar: CalendarSpec[]; teamContext: string | null; teamName: string | null; errors: ValidationError[]; parameters?: ConfigParameter[]; onchain?: OnchainConfig; org?: OrgConfig } {
   // Get parameters first (for error messages)
   const parameters = getConfigParameters(filePath);
 
@@ -589,13 +639,13 @@ export function processConfig(
   // Validate config structure
   const validation = validateConfig(config);
   if (!validation.valid) {
-    return { agents: [], teamContext: null, teamName: null, errors: validation.errors, parameters };
+    return { agents: [], calendar: [], teamContext: null, teamName: null, errors: validation.errors, parameters };
   }
 
   // Verify plugins exist
   const pluginValidation = verifyPlugins(config, basePath);
   if (!pluginValidation.valid) {
-    return { agents: [], teamContext: null, teamName: null, errors: pluginValidation.errors, parameters };
+    return { agents: [], calendar: [], teamContext: null, teamName: null, errors: pluginValidation.errors, parameters };
   }
 
   // Resolve plugin paths
@@ -645,5 +695,5 @@ export function processConfig(
     ? loadTeamContext(resolvedConfig.team, workspacePath)
     : null;
 
-  return { agents, teamContext, teamName: resolvedConfig.team || null, errors: [], parameters, onchain: resolvedConfig.onchain, org: resolvedConfig.org };
+  return { agents, calendar: resolvedConfig.calendar || [], teamContext, teamName: resolvedConfig.team || null, errors: [], parameters, onchain: resolvedConfig.onchain, org: resolvedConfig.org };
 }

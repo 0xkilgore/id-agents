@@ -81,7 +81,15 @@ REST-AP requires only four endpoints:
 * **GET /news** - Updates (poll for asynchronous responses)
 * **POST /news** - Receive messages/replies (passive storage, no processing)
 
-These four endpoints are sufficient for full agent communication. However, hosts may add additional endpoints as needed for specialized use cases (e.g., file serving, streaming, webhooks). Additional endpoints should be documented in the catalog.
+These four endpoints are sufficient for full agent communication. However, hosts may add additional endpoints as needed for specialized use cases (e.g., file serving, streaming, webhooks, or manager-owned internal scheduling). Additional endpoints should be documented in the catalog.
+
+### Optional Extensions
+
+REST-AP allows hosts to advertise extra endpoints in the catalog beyond the required four. In ID Agents, one important optional extension is:
+
+* **POST /schedule** - Accept manager-owned scheduled work and enqueue it internally without treating it like a normal external `/talk` request
+
+This is not part of the minimum REST-AP contract. It is a host-specific extension that should be explicitly advertised in `/.well-known/restap.json`.
 
 ## **The Catalog Document**
 

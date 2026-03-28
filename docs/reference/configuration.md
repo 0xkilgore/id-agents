@@ -25,9 +25,22 @@ defaults:
     - name: id-rest-ap
       path: plugins/id-rest-ap
 
+calendar:
+  - title: Daily standup prep
+    time: "09:00"
+    timezone: America/New_York
+    days: [mon, tue, wed, thu, fri]
+    agents: [coder, researcher]
+    message: Prepare daily updates and blockers
+    delivery: talk
+
 agents:
   - name: coder
     model: claude-sonnet-4-20250514
+    heartbeat:
+      interval: 300
+      message: Review open PRs and summarize risks
+      delivery: internal
     register: true
   - name: researcher
     systemPrompt: "You are a research specialist."
@@ -138,6 +151,41 @@ defaults:
 | `skills` | Array | Default skills for OpenCode/Codex agents |
 | `allowedTools` | Array | Default tool restrictions for all agents |
 
+### calendar
+
+**Required:** No
+**Type:** Array of Calendar objects
+
+Top-level wall-clock schedules. Use this for one-off dated events or recurring local-time events that target one or more agents.
+
+```yaml
+calendar:
+  - title: Daily standup prep
+    time: "09:00"
+    timezone: America/New_York
+    days: [mon, tue, wed, thu, fri]
+    agents: [coder, researcher]
+    message: Prepare daily updates and blockers
+    delivery: talk
+```
+
+#### Calendar Object
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `title` | Yes | Human-readable schedule title |
+| `time` | Yes | Local wall-clock time in `HH:MM` or `HH:MM:SS` |
+| `timezone` | No | IANA timezone; defaults to the host timezone |
+| `date` | Conditionally | One-off local date in `YYYY-MM-DD` |
+| `days` | Conditionally | Recurring weekdays such as `[mon, wed, fri]` |
+| `agents` | Yes | Target agent names/refs |
+| `message` | No | Message delivered to the target agents |
+| `description` | No | Human-readable description |
+| `catchUpPolicy` | No | `skip` or `fire_once` |
+| `delivery` | No | `talk` or `internal` |
+
+Exactly one of `date` or `days` must be provided.
+
 ### agents
 
 **Required:** Yes
@@ -171,6 +219,7 @@ Each agent can have the following fields:
 | `allowedTools` | No | From defaults | Restrict agent to specific tools |
 | `env` | No | `{}` | Environment variables for the agent process |
 | `register` | No | From onchain | Whether to register onchain |
+| `heartbeat` | No | - | Single-agent recurring schedule shorthand |
 
 ### Agent Example
 
@@ -187,8 +236,41 @@ agents:
         path: plugins/id-rest-ap
       - name: git-tools
         path: plugins/git-tools
+    heartbeat:
+      interval: 300
+      message: Review open PRs and summarize risks.
+      delivery: internal
     register: true
 ```
+
+### heartbeat
+
+Agent-level recurring scheduling shorthand. This compiles into an internal `interval` schedule targeting that one agent.
+
+```yaml
+agents:
+  - name: coder
+    heartbeat:
+      interval: 300
+      message: Review open PRs and summarize risks
+      delivery: internal
+      maxBeats: 20
+      expiresAfter: 7200
+```
+
+#### Heartbeat Object
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `interval` | Yes | Recurrence interval in seconds |
+| `message` | Yes | Message delivered on each run |
+| `maxBeats` | No | Maximum successful runs before the schedule stops |
+| `expiresAfter` | No | Number of seconds after activation before the schedule expires |
+| `delivery` | No | `talk` or `internal` |
+
+Defaults:
+- `heartbeat.delivery` defaults to `internal`
+- `calendar.delivery` defaults to `talk`
 
 ---
 
@@ -361,6 +443,15 @@ defaults:
     - name: id-rest-ap
       path: plugins/id-rest-ap
 
+calendar:
+  - title: Daily standup prep
+    time: "09:00"
+    timezone: America/New_York
+    days: [mon, tue, wed, thu, fri]
+    agents: [lead, dev-frontend, dev-backend]
+    message: Prepare daily updates and blockers
+    delivery: talk
+
 agents:
   # Lead developer
   - name: lead
@@ -368,6 +459,10 @@ agents:
     systemPrompt: |
       You are the lead developer.
       Coordinate work and review code from other agents.
+    heartbeat:
+      interval: 300
+      message: Review recent changes and coordinate the team.
+      delivery: internal
     register: true
 
   # Standard developer
@@ -419,5 +514,7 @@ Configuration files are validated on load. Common errors:
 - Missing required `version` field
 - Invalid `runtime` value
 - Missing `name` in agents array
+- Invalid `calendar.time`, `calendar.days`, or `calendar.delivery`
+- Missing required `heartbeat.interval` or `heartbeat.message`
 - Invalid resource limit format
 - Undefined parameter reference

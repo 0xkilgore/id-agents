@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: MIT
 
+import type { ScheduleDeliveryMode } from '../config-parser.js';
+
 /**
  * A logical run produced by the schedule evaluator.
  * Represents one due execution of a schedule for one or more agents.
@@ -27,6 +29,7 @@ export interface DispatchResult {
  */
 export interface SchedulePayload {
   from: 'schedule';
+  mode: ScheduleDeliveryMode;
   schedule: {
     id: string;
     kind: 'interval' | 'calendar';
@@ -43,5 +46,7 @@ export interface DispatchTarget {
   id: string;
   name: string;
   endpoint: string;
+  talkPath: string;
+  schedulePath?: string | null;
   status: string;
 }

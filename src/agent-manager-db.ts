@@ -26,12 +26,12 @@ import { registerOnIdChain, createSubnameOnIdChain, setMultiChainAddresses } fro
 import { type Db } from './db/db-service.js';
 import type { AgentRow } from './db/types.js';
 import fetch from 'node-fetch';
-import type { PluginConfig, DeployConfig, HeartbeatConfig } from './config-parser.js';
+import type { PluginConfig, DeployConfig, HeartbeatConfig, CalendarSpec } from './config-parser.js';
 import { processConfig } from './config-parser.js';
 import { parseAgentRef, normalizeAlias, buildAmbiguityWarning, type AgentMatch } from './core/agent-identifier.js';
 import type { HarnessType } from './harness/types.js';
 import { SchedulerService } from './scheduling/scheduler-service.js';
-import { heartbeatToSchedule } from './scheduling/schedule-config.js';
+import { heartbeatToSchedule, calendarToSchedule } from './scheduling/schedule-config.js';
 
 // ES module equivalent of __dirname
 const __filename = fileURLToPath(import.meta.url);
@@ -59,12 +59,29 @@ interface RestAPCatalog {
     talk?: string;
     news?: string;
     news_post?: string;
-  };
+    schedule?: string;
+  } | Array<{
+    path?: string;
+    method?: string;
+  }>;
   capabilities?: Array<{
     id: string;
     method: string;
     endpoint: string;
   }>;
+}
+
+
+function getCatalogEndpoint(catalog: RestAPCatalog, key: 'talk' | 'news' | 'schedule'): string | null {
+  if (catalog.endpoints && !Array.isArray(catalog.endpoints)) {
+    return catalog.endpoints[key] || null;
+  }
+  if (Array.isArray(catalog.endpoints)) {
+    const path = `/${key}`;
+    const match = catalog.endpoints.find((entry) => entry.path === path);
+    return match?.path || null;
+  }
+  return null;
 }
 
 // Cache for REST-AP catalogs (endpoint -> catalog)
@@ -76,15 +93,16 @@ const CATALOG_CACHE_TTL = 60000; // 1 minute cache
  * @param baseEndpoint The agent's base endpoint (e.g., http://localhost:4101)
  * @returns The discovered endpoints or defaults if catalog unavailable
  */
-async function discoverRestAPEndpoints(baseEndpoint: string): Promise<{ talk: string; news: string }> {
+async function discoverRestAPEndpoints(baseEndpoint: string): Promise<{ talk: string; news: string; schedule?: string | null }> {
   const now = Date.now();
   const cached = restapCatalogCache.get(baseEndpoint);
 
   // Return cached catalog if still valid
   if (cached && (now - cached.fetchedAt) < CATALOG_CACHE_TTL) {
     return {
-      talk: cached.catalog.endpoints?.talk || '/talk',
-      news: cached.catalog.endpoints?.news || '/news'
+      talk: getCatalogEndpoint(cached.catalog, 'talk') || '/talk',
+      news: getCatalogEndpoint(cached.catalog, 'news') || '/news',
+      schedule: getCatalogEndpoint(cached.catalog, 'schedule') || null
     };
   }
 
@@ -104,8 +122,9 @@ async function discoverRestAPEndpoints(baseEndpoint: string): Promise<{ talk: st
       restapCatalogCache.set(baseEndpoint, { catalog, fetchedAt: now });
 
       return {
-        talk: catalog.endpoints?.talk || '/talk',
-        news: catalog.endpoints?.news || '/news'
+        talk: getCatalogEndpoint(catalog, 'talk') || '/talk',
+        news: getCatalogEndpoint(catalog, 'news') || '/news',
+        schedule: getCatalogEndpoint(catalog, 'schedule') || null
       };
     }
   } catch (err) {
@@ -114,7 +133,7 @@ async function discoverRestAPEndpoints(baseEndpoint: string): Promise<{ talk: st
   }
 
   // Default REST-AP endpoints
-  return { talk: '/talk', news: '/news' };
+  return { talk: '/talk', news: '/news', schedule: null };
 }
 
 type AgentRegistryId = {
@@ -2890,7 +2909,7 @@ export class AgentManagerDb {
             return { ok: false, error: `Config file not found: ${filePath}` };
           }
         }
-        const { agents, errors, onchain, teamName: configTeam, org } = processConfig(absolutePath, this.baseWorkDir, deployArgs);
+        const { agents, calendar, errors, onchain, teamName: configTeam, org } = processConfig(absolutePath, this.baseWorkDir, deployArgs);
 
         // If config specifies a team, use that instead of the request's team
         let effectiveTeamId = teamId;
@@ -2954,6 +2973,11 @@ export class AgentManagerDb {
 
         // Deploy each agent
         const results: { name: string; id?: string; port?: number; success: boolean; error?: string; tokenId?: string }[] = [];
+
+        // Re-seed calendar schedules idempotently for this config source.
+        if (this.schedulerService) {
+          await this.db.schedules.deleteBySource('yaml', `calendar:${absolutePath}:`);
+        }
 
         for (const agentConfig of agents) {
           // Generate unique agent ID outside try so it's available for cleanup
@@ -3169,6 +3193,34 @@ export class AgentManagerDb {
               }
             }
             results.push({ name: agentConfig.name, success: false, error: err.message });
+          }
+        }
+
+        if (calendar.length > 0 && this.schedulerService) {
+          for (let index = 0; index < calendar.length; index++) {
+            const spec = calendar[index] as CalendarSpec;
+            const targetIds: string[] = [];
+
+            for (const ref of spec.agents) {
+              const target = await this.db.agents.getByName(effectiveTeamId, ref);
+              if (!target) {
+                console.warn(`[Scheduler] Calendar event "${spec.title}" target not found: ${ref}`);
+                continue;
+              }
+              targetIds.push(target.id);
+            }
+
+            if (targetIds.length === 0) {
+              console.warn(`[Scheduler] Skipping calendar event "${spec.title}" with no resolved targets`);
+              continue;
+            }
+
+            const { definition, agentIds } = calendarToSchedule(
+              spec,
+              `calendar:${absolutePath}:${index}`,
+              targetIds,
+            );
+            await this.schedulerService.seedSchedule(definition, agentIds);
           }
         }
 
@@ -3720,9 +3772,16 @@ export class AgentManagerDb {
         this.schedulerService = new SchedulerService(this.db, async (agentId: string) => {
           const agent = await this.db.agents.getById(agentId);
           if (!agent || !agent.endpoint) return null;
-          return { id: agent.id, name: agent.name, endpoint: agent.endpoint, status: agent.status };
+          const endpoints = await discoverRestAPEndpoints(agent.endpoint);
+          return {
+            id: agent.id,
+            name: agent.name,
+            endpoint: agent.endpoint.replace(/\/+$/, ''),
+            talkPath: endpoints.talk || '/talk',
+            schedulePath: endpoints.schedule || null,
+            status: agent.status,
+          };
         });
-        await this.initSchedules();
         this.schedulerService.start();
 
         // Start periodic health monitoring (every 30s)
@@ -3734,22 +3793,8 @@ export class AgentManagerDb {
   }
 
   private async initSchedules(): Promise<void> {
-    if (!this.schedulerService) return;
-    try {
-      const teams = await this.db.teams.listTeams();
-      for (const team of teams) {
-        const agents = await this.db.agents.findHeartbeat(team.id);
-        for (const agent of agents) {
-          if (agent.status !== 'running' || !agent.working_directory) continue;
-          const config = this.readHeartbeatConfig(agent.working_directory);
-          if (!config) continue;
-          const { definition, agentIds } = heartbeatToSchedule(agent.id, agent.name, config);
-          await this.schedulerService.seedSchedule(definition, agentIds);
-        }
-      }
-    } catch (error: any) {
-      console.log(`[Scheduler] Error initializing schedules: ${error.message}`);
-    }
+    // Intentionally left unused. Schedules persist in the DB and should not be reseeded on boot,
+    // because reseeding interval schedules would reset their anchor and expiry.
   }
 
   /**

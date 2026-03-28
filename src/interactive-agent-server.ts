@@ -147,6 +147,11 @@ export class InteractiveAgentServer extends EventEmitter {
             description: `Send a message or question to agent ${this.name} (triggers processing)`
           },
           {
+            path: '/schedule',
+            method: 'POST',
+            description: `Enqueue internal scheduled work for agent ${this.name}`
+          },
+          {
             path: '/news',
             method: 'GET',
             description: `Poll for responses from agent ${this.name}`
@@ -292,6 +297,68 @@ export class InteractiveAgentServer extends EventEmitter {
       }
     });
     
+    // Schedule endpoint - enqueue manager-owned internal scheduled work
+    this.app.post('/schedule', (req, res) => {
+      try {
+        const { message, schedule, mode } = req.body || {};
+
+        if (!message) {
+          return res.status(400).json({ error: 'Message is required' });
+        }
+        if (!schedule || typeof schedule !== 'object') {
+          return res.status(400).json({ error: 'Schedule metadata is required' });
+        }
+        if (mode && mode !== 'internal') {
+          return res.status(400).json({ error: 'Invalid schedule mode' });
+        }
+
+        const messageStr = typeof message === 'string' ? message : String(message);
+        const query_id = `query_${Date.now()}_${Math.random().toString(36).substring(7)}`;
+        const ts = Date.now();
+
+        this.pendingQueries.set(query_id, {
+          query_id,
+          message: messageStr,
+          timestamp: ts,
+          responded: false,
+        });
+
+        res.status(202).json({
+          status: 'pending',
+          query_id,
+          message: `Scheduled work has been queued for agent ${this.name}.`
+        });
+
+        this.dbUpsertQuery({
+          queryId: query_id,
+          status: 'pending',
+          created: ts,
+          prompt: messageStr,
+          result: { schedule, message: messageStr, mode: 'internal' }
+        }).catch(() => {});
+
+        const newsItem: NewsItem = {
+          timestamp: ts,
+          type: 'schedule.received',
+          message: `Scheduled query ${query_id} received`,
+          data: {
+            query_id,
+            message: messageStr,
+            schedule,
+            status: 'awaiting_response'
+          }
+        };
+        this.newsItems.push(newsItem);
+        this.dbAddNews(newsItem).catch(() => {});
+      } catch (error) {
+        console.error(`[${this.name}] Error processing /schedule request:`, error);
+        return res.status(500).json({
+          error: 'Internal server error',
+          details: error instanceof Error ? error.message : String(error)
+        });
+      }
+    });
+
     // News endpoint - poll for updates
     this.app.get('/news', (req, res) => {
       const since = parseInt(req.query.since as string) || 0;

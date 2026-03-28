@@ -133,6 +133,7 @@ When you run `npm run id-agents`, you're just running a normal Claude Code CLI s
 |----------|--------|---------|
 | `/.well-known/restap.json` | GET | Discovery catalog |
 | `/talk` | POST | Send message (triggers LLM processing, async) |
+| `/schedule` | POST | Enqueue manager-owned internal scheduled work (optional) |
 | `/news` | GET | Poll for updates (free, no LLM cost) |
 | `/news` | POST | Receive replies without processing |
 
@@ -142,6 +143,70 @@ When you run `npm run id-agents`, you're just running a normal Claude Code CLI s
 | `/agents` | GET | List all agents |
 | `/message` | POST | Agent-to-agent messaging (fire-and-forget or wait) |
 | `/remote` | POST | Execute CLI commands programmatically |
+
+## Scheduling
+
+ID Agents has one manager-owned scheduling system with two schedule kinds:
+- `interval` schedules for recurring work every N seconds
+- `calendar` schedules for one-off or recurring wall-clock events
+
+The manager is the only component that decides when a run is due. Agents do not run independent schedulers. Every due run is logged in the database before dispatch, which makes scheduling restart-safe and prevents double-fires.
+
+### Authoring model
+
+For single-agent recurring work, keep scheduling close to the agent with `heartbeat`:
+
+```yaml
+agents:
+  - name: x
+    heartbeat:
+      interval: 300
+      message: "Review timeline and draft replies"
+      delivery: internal
+      maxBeats: 20
+      expiresAfter: 7200
+```
+
+For wall-clock events, use top-level `calendar`:
+
+```yaml
+calendar:
+  - title: "Morning X engagement"
+    time: "09:00"
+    timezone: "America/New_York"
+    days: [mon, tue, wed, thu, fri]
+    agents: [x]
+    message: "Review timeline and draft replies"
+    delivery: internal
+```
+
+### Delivery modes
+
+Schedules support two delivery modes:
+- `talk` - manager posts the scheduled payload to the agent's `/talk` endpoint
+- `internal` - manager posts the scheduled payload to the agent's `/schedule` endpoint so the agent can treat it as internal self-directed work
+
+Defaults:
+- `heartbeat` defaults to `internal`
+- `calendar` defaults to `talk`
+
+The payload sent to agents is structured like:
+
+```json
+{
+  "from": "schedule",
+  "mode": "internal",
+  "schedule": {
+    "id": "sch_123",
+    "kind": "calendar",
+    "title": "Morning X engagement",
+    "scheduledKey": "calendar:2026-03-28@32400"
+  },
+  "message": "Review timeline and draft replies"
+}
+```
+
+See [Scheduling Plan](./docs/SCHEDULING_PLAN.md) for the full design.
 
 ## CLI Commands
 
@@ -310,12 +375,25 @@ agents:
   - name: coder
     description: "Writes and reviews code"
     workingDirectory: /path/to/project
+    heartbeat:
+      interval: 300
+      message: "Review open PRs and summarize risks"
+      delivery: internal
     domain: coder.agent-1.sep.xid.eth  # Preserved across redeploys
     tokenId: "0xabcd..."               # Namehash of the ENS domain
   - name: researcher
     description: "Research and analysis"
     workingDirectory: /path/to/research
     skills: [custom-research-skill]    # Added to defaults
+
+calendar:
+  - title: "Daily standup prep"
+    time: "09:00"
+    timezone: "America/New_York"
+    days: [mon, tue, wed, thu, fri]
+    agents: [coder, researcher]
+    message: "Prepare daily updates and blockers"
+    delivery: talk
 ```
 
 See [Configuration Reference](./docs/reference/configuration.md) for full options.

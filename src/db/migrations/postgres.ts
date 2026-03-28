@@ -380,6 +380,7 @@ export async function migratePostgres(adapter: DbAdapter): Promise<void> {
       description text,
       active boolean NOT NULL DEFAULT true,
       message text NOT NULL,
+      delivery_mode text NOT NULL DEFAULT 'talk',
       timezone text,
       catch_up_policy text NOT NULL DEFAULT 'skip',
       dedupe_window_seconds integer NOT NULL DEFAULT 90,
@@ -417,6 +418,8 @@ export async function migratePostgres(adapter: DbAdapter): Promise<void> {
       PRIMARY KEY (schedule_id, agent_id, scheduled_key)
     );
   `);
+
+  await adapter.query(`ALTER TABLE schedule_definitions ADD COLUMN IF NOT EXISTS delivery_mode text NOT NULL DEFAULT 'talk';`);
 
   await adapter.query(`CREATE INDEX IF NOT EXISTS schedule_runs_schedule_idx ON schedule_runs(schedule_id, fired_at);`);
   await adapter.query(`CREATE INDEX IF NOT EXISTS schedule_runs_agent_idx ON schedule_runs(agent_id, fired_at);`);

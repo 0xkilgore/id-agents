@@ -455,6 +455,7 @@ export class ClaudeAgentServer {
         },
         endpoints: {
           talk: '/talk',
+          schedule: '/schedule',
           news: '/news',
           news_post: '/news',
           catalog: '/catalog'
@@ -469,6 +470,18 @@ export class ClaudeAgentServer {
             input_schema: {
               message: 'string (required)',
               session_id: 'string (optional) - session ID from previous query to maintain context'
+            }
+          },
+          {
+            id: 'schedule',
+            title: 'Enqueue internal scheduled work',
+            method: 'POST',
+            endpoint: '/schedule',
+            description: 'Accept a manager-owned scheduled event and enqueue it as internal work without auto-reply behavior.',
+            input_schema: {
+              message: 'string (required)',
+              schedule: 'object (required) - schedule metadata including id, kind, title, scheduledKey',
+              mode: 'string (required) - must be "internal"'
             }
           },
           {
@@ -610,7 +623,7 @@ export class ClaudeAgentServer {
     // Talk endpoint - universal string -> string (with optional session support)
     this.app.post('/talk', async (req, res) => {
       try {
-        const { message, session_id, from } = req.body;
+        const { message, session_id, from, schedule } = req.body;
 
         if (!message) {
           return res.status(400).json({ error: 'Missing message' });
@@ -632,7 +645,7 @@ export class ClaudeAgentServer {
         }
 
         // Start query in background (with optional session for context continuity)
-        this.startQuery(queryId, message, session_id, from);
+        this.startQuery(queryId, message, session_id, from, schedule ? { noAutoReply: true } : undefined);
 
         // Return 202 Accepted with job ID
         res.status(202).json({
@@ -642,6 +655,47 @@ export class ClaudeAgentServer {
         });
       } catch (err: any) {
         console.error(`${logTime()} [Agent] Error in /talk:`, err);
+        res.status(500).json({ error: err?.message || 'Internal server error' });
+      }
+    });
+
+    // Schedule endpoint - enqueue internal scheduled work without auto-reply
+    this.app.post('/schedule', async (req, res) => {
+      try {
+        const { message, schedule, mode } = req.body || {};
+
+        if (!message) {
+          return res.status(400).json({ error: 'Missing message' });
+        }
+        if (!schedule || typeof schedule !== 'object') {
+          return res.status(400).json({ error: 'Missing schedule metadata' });
+        }
+        if (mode && mode !== 'internal') {
+          return res.status(400).json({ error: 'Invalid schedule mode' });
+        }
+
+        const queryId = `query_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
+
+        try {
+          await this.addNews('schedule.received', `Scheduled work ${queryId} received`, {
+            query_id: queryId,
+            message,
+            schedule,
+            status: 'processing'
+          });
+        } catch (newsErr: any) {
+          console.error(`[Agent] Warning: Failed to persist scheduled news item for query ${queryId}:`, newsErr?.message || newsErr);
+        }
+
+        this.startQuery(queryId, message, undefined, undefined, { noAutoReply: true });
+
+        res.status(202).json({
+          query_id: queryId,
+          status: 'processing',
+          message: 'Scheduled work accepted.'
+        });
+      } catch (err: any) {
+        console.error(`${logTime()} [Agent] Error in /schedule:`, err);
         res.status(500).json({ error: err?.message || 'Internal server error' });
       }
     });

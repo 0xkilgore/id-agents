@@ -1,18 +1,22 @@
 // SPDX-License-Identifier: MIT
 
 /**
- * Normalize heartbeat configs into schedule definitions.
- *
- * Bridges the existing HeartbeatConfig format (used by deployment YAML)
- * to the new scheduling system's ScheduleDefinitionRow.
+ * Normalize deploy config schedule inputs into ScheduleDefinitionRow objects.
  */
 
-import type { HeartbeatConfig } from '../config-parser.js';
+import { createHash } from 'node:crypto';
+import type { HeartbeatConfig, CalendarSpec } from '../config-parser.js';
 import type { ScheduleDefinitionRow } from '../db/types.js';
+
+const DEFAULT_TIMEZONE = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
+
+function stableId(prefix: string, sourceKey: string): string {
+  const hash = createHash('sha1').update(sourceKey).digest('hex').slice(0, 16);
+  return `${prefix}_${hash}`;
+}
 
 /**
  * Validate that an interval value is within the allowed range.
- * Throws a descriptive error if seconds < 60 or > 86400.
  */
 export function validateIntervalSeconds(seconds: number): void {
   if (seconds < 60) {
@@ -27,18 +31,43 @@ export function validateIntervalSeconds(seconds: number): void {
   }
 }
 
-/**
- * Convert a HeartbeatConfig into an interval schedule definition.
- *
- * Produces a deterministic schedule ID based on the agent ID so that
- * redeploying the same agent yields the same schedule row (upsert-friendly).
- *
- * @param agentId   - Unique agent identifier (used to build schedule ID)
- * @param agentName - Human-readable agent name (used in title)
- * @param config    - Heartbeat configuration from deployment YAML
- * @param nowSec    - Optional unix-seconds override (defaults to Date.now()/1000)
- * @returns The schedule definition row and list of target agent IDs
- */
+export function parseTimeString(value: string): number {
+  const match = value.match(/^(\d{2}):(\d{2})(?::(\d{2}))?$/);
+  if (!match) {
+    throw new Error(`Invalid time format: ${value}. Expected HH:MM or HH:MM:SS.`);
+  }
+
+  const hour = Number(match[1]);
+  const minute = Number(match[2]);
+  const second = Number(match[3] || '0');
+
+  if (hour > 23 || minute > 59 || second > 59) {
+    throw new Error(`Invalid time value: ${value}.`);
+  }
+
+  return hour * 3600 + minute * 60 + second;
+}
+
+function normalizeDays(days: string[]): string {
+  const allowed = new Set(['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun']);
+  const normalized = Array.from(new Set(days.map((d) => d.trim().toLowerCase())));
+  for (const day of normalized) {
+    if (!allowed.has(day)) {
+      throw new Error(`Invalid day of week: ${day}`);
+    }
+  }
+  return normalized.join(',');
+}
+
+function calendarMessage(spec: CalendarSpec): string {
+  if (spec.message && spec.message.trim()) return spec.message.trim();
+  if (spec.description && spec.description.trim()) {
+    return `[Calendar Event: "${spec.title}"]
+${spec.description.trim()}`;
+  }
+  return `[Calendar Event: "${spec.title}"]`;
+}
+
 export function heartbeatToSchedule(
   agentId: string,
   agentName: string,
@@ -56,6 +85,7 @@ export function heartbeatToSchedule(
     description: null,
     active: true,
     message: config.message,
+    delivery_mode: config.delivery ?? 'internal',
     timezone: null,
     catch_up_policy: 'fire_once',
     dedupe_window_seconds: 90,
@@ -73,4 +103,45 @@ export function heartbeatToSchedule(
   };
 
   return { definition, agentIds: [agentId] };
+}
+
+export function calendarToSchedule(
+  spec: CalendarSpec,
+  sourceKey: string,
+  agentIds: string[],
+  nowSec?: number,
+): { definition: ScheduleDefinitionRow; agentIds: string[] } {
+  if (!spec.date && (!spec.days || spec.days.length === 0)) {
+    throw new Error(`Calendar schedule "${spec.title}" must specify either date or days`);
+  }
+  if (spec.date && spec.days && spec.days.length > 0) {
+    throw new Error(`Calendar schedule "${spec.title}" cannot specify both date and days`);
+  }
+
+  const now = nowSec ?? Math.floor(Date.now() / 1000);
+  const definition: ScheduleDefinitionRow = {
+    id: stableId('cal', sourceKey),
+    kind: 'calendar',
+    title: spec.title,
+    description: spec.description ?? null,
+    active: true,
+    message: calendarMessage(spec),
+    delivery_mode: spec.delivery ?? 'talk',
+    timezone: spec.timezone || DEFAULT_TIMEZONE,
+    catch_up_policy: spec.catchUpPolicy ?? 'skip',
+    dedupe_window_seconds: 90,
+    interval_seconds: null,
+    anchor_at: null,
+    max_runs: null,
+    expires_at: null,
+    local_time_seconds: parseTimeString(spec.time),
+    local_date: spec.date ?? null,
+    days_of_week: spec.days ? normalizeDays(spec.days) : null,
+    source_type: 'yaml',
+    source_key: sourceKey,
+    created_at: now,
+    updated_at: now,
+  };
+
+  return { definition, agentIds };
 }

@@ -14,13 +14,13 @@ export class PgSchedulesRepo implements SchedulesRepository {
   async upsertDefinition(def: ScheduleDefinitionRow): Promise<void> {
     await this.db.query(
       `INSERT INTO schedule_definitions (
-         id, kind, title, description, active, message, timezone,
+         id, kind, title, description, active, message, delivery_mode, timezone,
          catch_up_policy, dedupe_window_seconds, interval_seconds,
          anchor_at, max_runs, expires_at, local_time_seconds,
          local_date, days_of_week, source_type, source_key,
          created_at, updated_at
        ) VALUES (
-         $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20
+         $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21
        )
        ON CONFLICT (id) DO UPDATE SET
          kind = EXCLUDED.kind,
@@ -28,6 +28,7 @@ export class PgSchedulesRepo implements SchedulesRepository {
          description = EXCLUDED.description,
          active = EXCLUDED.active,
          message = EXCLUDED.message,
+         delivery_mode = EXCLUDED.delivery_mode,
          timezone = EXCLUDED.timezone,
          catch_up_policy = EXCLUDED.catch_up_policy,
          dedupe_window_seconds = EXCLUDED.dedupe_window_seconds,
@@ -48,6 +49,7 @@ export class PgSchedulesRepo implements SchedulesRepository {
         def.description,
         def.active,
         def.message,
+        def.delivery_mode,
         def.timezone,
         def.catch_up_policy,
         def.dedupe_window_seconds,
@@ -191,7 +193,7 @@ export class PgSchedulesRepo implements SchedulesRepository {
     scheduleId: string,
     agentId: string,
     scheduledKey: string,
-    status: 'sent' | 'failed' | 'skipped',
+    status: 'pending' | 'sent' | 'failed' | 'skipped',
     error?: string | null,
   ): Promise<void> {
     await this.db.query(
@@ -216,7 +218,7 @@ export class PgSchedulesRepo implements SchedulesRepository {
   async countRuns(scheduleId: string, agentId: string): Promise<number> {
     const r = await this.db.query<{ count: string }>(
       `SELECT COUNT(*)::text AS count FROM schedule_runs
-       WHERE schedule_id = $1 AND agent_id = $2`,
+       WHERE schedule_id = $1 AND agent_id = $2 AND status = 'sent'`,
       [scheduleId, agentId],
     );
     return parseInt(r.rows[0]?.count || '0', 10);

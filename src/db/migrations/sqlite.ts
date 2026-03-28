@@ -79,6 +79,7 @@ export function migrateSqlite(adapter: SqliteAdapter): void {
       description TEXT,
       active INTEGER NOT NULL DEFAULT 1,
       message TEXT NOT NULL,
+      delivery_mode TEXT NOT NULL DEFAULT 'talk',
       timezone TEXT,
       catch_up_policy TEXT NOT NULL DEFAULT 'skip',
       dedupe_window_seconds INTEGER NOT NULL DEFAULT 90,
@@ -115,4 +116,10 @@ export function migrateSqlite(adapter: SqliteAdapter): void {
     CREATE INDEX IF NOT EXISTS schedule_runs_schedule_idx ON schedule_runs(schedule_id, fired_at);
     CREATE INDEX IF NOT EXISTS schedule_runs_agent_idx ON schedule_runs(agent_id, fired_at);
   `);
+
+  try {
+    adapter.exec(`ALTER TABLE schedule_definitions ADD COLUMN delivery_mode TEXT NOT NULL DEFAULT 'talk'`);
+  } catch {
+    // Column already exists in upgraded databases.
+  }
 }

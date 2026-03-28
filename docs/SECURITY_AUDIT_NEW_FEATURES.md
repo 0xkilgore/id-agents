@@ -253,7 +253,7 @@ Contrast: `/delete` (line 2688), `/agent stop` (line 3218), and `DELETE /agents/
 
 **File:** `src/agent-manager-db.ts` (multiple locations)
 
-| Path | Stops process | Cancels queries | Stops heartbeat | DB action |
+| Path | Stops process | Cancels queries | Removes scheduled work | DB action |
 |------|:---:|:---:|:---:|-----------|
 | CLI `/delete` (line 2662) | Yes | Yes | Yes | Soft delete |
 | HTTP `DELETE /agents/:id` (line 1881) | Yes | No | No | Hard delete |

@@ -74,6 +74,7 @@ export interface ScheduleDefinitionRow {
   description: string | null;
   active: boolean;
   message: string;
+  delivery_mode: 'talk' | 'internal';
   timezone: string | null;
   catch_up_policy: 'skip' | 'fire_once';
   dedupe_window_seconds: number;
@@ -97,6 +98,6 @@ export interface ScheduleRunRow {
   scheduled_key: string;
   scheduled_at: number;
   fired_at: number;
-  status: 'sent' | 'failed' | 'skipped';
+  status: 'pending' | 'sent' | 'failed' | 'skipped';
   error: string | null;
 }

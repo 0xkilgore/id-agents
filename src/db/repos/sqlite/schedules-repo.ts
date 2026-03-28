@@ -30,17 +30,18 @@ export class SqliteSchedulesRepo implements SchedulesRepository {
   async upsertDefinition(def: ScheduleDefinitionRow): Promise<void> {
     await this.db.query(
       `INSERT INTO schedule_definitions
-         (id, kind, title, description, active, message, timezone,
+         (id, kind, title, description, active, message, delivery_mode, timezone,
           catch_up_policy, dedupe_window_seconds, interval_seconds, anchor_at,
           max_runs, expires_at, local_time_seconds, local_date, days_of_week,
           source_type, source_key, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT (id) DO UPDATE SET
          kind                 = excluded.kind,
          title                = excluded.title,
          description          = excluded.description,
          active               = excluded.active,
          message              = excluded.message,
+         delivery_mode        = excluded.delivery_mode,
          timezone             = excluded.timezone,
          catch_up_policy      = excluded.catch_up_policy,
          dedupe_window_seconds = excluded.dedupe_window_seconds,
@@ -61,6 +62,7 @@ export class SqliteSchedulesRepo implements SchedulesRepository {
         def.description,
         def.active ? 1 : 0,
         def.message,
+        def.delivery_mode,
         def.timezone,
         def.catch_up_policy,
         def.dedupe_window_seconds,
@@ -107,7 +109,7 @@ export class SqliteSchedulesRepo implements SchedulesRepository {
   async setActive(scheduleId: string, active: boolean): Promise<void> {
     await this.db.query(
       `UPDATE schedule_definitions SET active = ?, updated_at = ? WHERE id = ?`,
-      [active ? 1 : 0, Date.now(), scheduleId],
+      [active ? 1 : 0, Math.floor(Date.now() / 1000), scheduleId],
     );
   }
 
@@ -197,7 +199,7 @@ export class SqliteSchedulesRepo implements SchedulesRepository {
     scheduleId: string,
     agentId: string,
     scheduledKey: string,
-    status: 'sent' | 'failed' | 'skipped',
+    status: 'pending' | 'sent' | 'failed' | 'skipped',
     error?: string | null,
   ): Promise<void> {
     await this.db.query(
@@ -225,7 +227,7 @@ export class SqliteSchedulesRepo implements SchedulesRepository {
   async countRuns(scheduleId: string, agentId: string): Promise<number> {
     const { rows } = await this.db.query<{ cnt: number }>(
       `SELECT COUNT(*) as cnt FROM schedule_runs
-       WHERE schedule_id = ? AND agent_id = ?`,
+       WHERE schedule_id = ? AND agent_id = ? AND status = 'sent'`,
       [scheduleId, agentId],
     );
     return Number(rows[0]?.cnt ?? 0);

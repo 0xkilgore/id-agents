@@ -308,7 +308,7 @@ export interface SchedulesRepository {
     scheduleId: string,
     agentId: string,
     scheduledKey: string,
-    status: 'sent' | 'failed' | 'skipped',
+    status: 'pending' | 'sent' | 'failed' | 'skipped',
     error?: string | null,
   ): Promise<void>;
 
