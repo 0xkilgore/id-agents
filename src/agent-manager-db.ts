@@ -24,14 +24,14 @@ import yaml from 'js-yaml';
 import { ClaudeAgentServer } from './claude-agent-server.js';
 import { registerOnIdChain, createSubnameOnIdChain, setMultiChainAddresses } from './onchain/idchain-register.js';
 import { type Db } from './db/db-service.js';
-import type { AgentRow } from './db/types.js';
+import type { AgentRow, ScheduleDefinitionRow } from './db/types.js';
 import fetch from 'node-fetch';
-import type { PluginConfig, DeployConfig, HeartbeatConfig, CalendarSpec } from './config-parser.js';
+import type { PluginConfig, DeployConfig, HeartbeatConfig, CalendarSpec, ScheduleDeliveryMode } from './config-parser.js';
 import { processConfig } from './config-parser.js';
 import { parseAgentRef, normalizeAlias, buildAmbiguityWarning, type AgentMatch } from './core/agent-identifier.js';
 import type { HarnessType } from './harness/types.js';
 import { SchedulerService } from './scheduling/scheduler-service.js';
-import { heartbeatToSchedule, calendarToSchedule } from './scheduling/schedule-config.js';
+import { heartbeatToSchedule, calendarToSchedule, validateIntervalSeconds } from './scheduling/schedule-config.js';
 
 // ES module equivalent of __dirname
 const __filename = fileURLToPath(import.meta.url);
@@ -46,6 +46,17 @@ const MODEL_ALIASES: Record<string, string> = {
 
 function resolveModelAlias(model: string): string {
   return MODEL_ALIASES[model.toLowerCase()] || model;
+}
+
+function tokenizeCommand(command: string): string[] {
+  const tokens: string[] = [];
+  const re = /"((?:\\.|[^"\\])*)"|'((?:\\.|[^'\\])*)'|(\S+)/g;
+  let match: RegExpExecArray | null;
+  while ((match = re.exec(command)) !== null) {
+    const value = match[1] ?? match[2] ?? match[3] ?? '';
+    tokens.push(value.replace(/\\(["'])/g, '$1'));
+  }
+  return tokens;
 }
 
 // REST-AP catalog types
@@ -2474,6 +2485,51 @@ export class AgentManagerDb {
 
   }
 
+  private async resolveSingleAgentForCommand(teamId: string, agentName: string): Promise<{ agent?: AgentRow; error?: string }> {
+    const matches = await this.dbResolveAgents(teamId, agentName);
+    if (matches.length === 0) {
+      return { error: `Agent "${agentName}" not found` };
+    }
+    if (matches.length > 1) {
+      return { error: `Multiple agents match "${agentName}". Be more specific.` };
+    }
+    return { agent: matches[0] };
+  }
+
+  private async listTeamSchedules(teamId: string): Promise<Array<{ definition: ScheduleDefinitionRow; targets: AgentRow[] }>> {
+    const teamAgents = await this.dbListAgents(teamId, true);
+    const agentsById = new Map(teamAgents.map((agent) => [agent.id, agent]));
+    const definitions = await this.db.schedules.listAllDefinitions();
+    const schedules: Array<{ definition: ScheduleDefinitionRow; targets: AgentRow[] }> = [];
+
+    for (const definition of definitions) {
+      const targetIds = await this.db.schedules.listTargets(definition.id);
+      const targets = targetIds
+        .map((targetId) => agentsById.get(targetId))
+        .filter((target): target is AgentRow => Boolean(target));
+
+      if (targets.length > 0) {
+        schedules.push({ definition, targets });
+      }
+    }
+
+    return schedules;
+  }
+
+  private async getTeamScheduleById(teamId: string, scheduleId: string): Promise<{ definition: ScheduleDefinitionRow; targets: AgentRow[] } | null> {
+    const definition = await this.db.schedules.getDefinition(scheduleId);
+    if (!definition) return null;
+
+    const teamAgents = await this.dbListAgents(teamId, true);
+    const agentsById = new Map(teamAgents.map((agent) => [agent.id, agent]));
+    const targets = (await this.db.schedules.listTargets(scheduleId))
+      .map((targetId) => agentsById.get(targetId))
+      .filter((target): target is AgentRow => Boolean(target));
+
+    if (targets.length === 0) return null;
+    return { definition, targets };
+  }
+
   /**
    * Execute a CLI-style command and return the result
    */
@@ -2484,7 +2540,7 @@ export class AgentManagerDb {
   ): Promise<{ ok: boolean; result?: any; error?: string }> {
     // Remove leading slash if present
     const cmd = command.startsWith('/') ? command.slice(1) : command;
-    const parts = cmd.split(/\s+/);
+    const parts = tokenizeCommand(cmd);
     const action = parts[0]?.toLowerCase();
     const args = parts.slice(1);
 
@@ -2526,6 +2582,246 @@ export class AgentManagerDb {
             agents: agentHealth,
             status: 'ok'
           }
+        };
+      }
+
+      case 'schedule': {
+        if (!this.schedulerService) {
+          return { ok: false, error: 'Scheduler service is not running' };
+        }
+
+        const subCmd = args[0]?.toLowerCase();
+        if (!subCmd) {
+          return {
+            ok: false,
+            error: 'Usage: /schedule <list|show|add|pause|resume|remove> ...'
+          };
+        }
+
+        if (subCmd === 'list') {
+          const schedules = await this.listTeamSchedules(teamId);
+          return {
+            ok: true,
+            result: {
+              schedules: schedules.map(({ definition, targets }) => ({
+                id: definition.id,
+                title: definition.title,
+                kind: definition.kind,
+                active: definition.active,
+                deliveryMode: definition.delivery_mode,
+                sourceType: definition.source_type,
+                targets: targets.map((target) => target.name),
+                intervalSeconds: definition.interval_seconds,
+                timezone: definition.timezone,
+                localTimeSeconds: definition.local_time_seconds,
+                localDate: definition.local_date,
+                daysOfWeek: definition.days_of_week,
+                createdAt: definition.created_at,
+              })),
+            },
+          };
+        }
+
+        if (subCmd === 'show') {
+          const scheduleId = args[1];
+          if (!scheduleId) {
+            return { ok: false, error: 'Usage: /schedule show <id>' };
+          }
+
+          const schedule = await this.getTeamScheduleById(teamId, scheduleId);
+          if (!schedule) {
+            return { ok: false, error: `Schedule "${scheduleId}" not found` };
+          }
+
+          const runs = await this.db.schedules.listRuns(scheduleId, 10);
+          return {
+            ok: true,
+            result: {
+              schedule: {
+                ...schedule.definition,
+                targets: schedule.targets.map((target) => ({
+                  id: target.id,
+                  name: target.name,
+                  status: target.status,
+                })),
+                recentRuns: runs,
+              },
+            },
+          };
+        }
+
+        if (subCmd === 'pause' || subCmd === 'resume' || subCmd === 'remove') {
+          const scheduleId = args[1];
+          if (!scheduleId) {
+            return { ok: false, error: `Usage: /schedule ${subCmd} <id>` };
+          }
+
+          const schedule = await this.getTeamScheduleById(teamId, scheduleId);
+          if (!schedule) {
+            return { ok: false, error: `Schedule "${scheduleId}" not found` };
+          }
+
+          if (subCmd === 'remove') {
+            await this.db.schedules.deleteDefinition(scheduleId);
+            return { ok: true, result: { removed: scheduleId } };
+          }
+
+          const active = subCmd === 'resume';
+          await this.db.schedules.setActive(scheduleId, active);
+          return { ok: true, result: { id: scheduleId, active } };
+        }
+
+        if (subCmd === 'add') {
+          const kind = args[1]?.toLowerCase();
+          if (kind !== 'interval' && kind !== 'calendar') {
+            return { ok: false, error: 'Usage: /schedule add <interval|calendar> ...' };
+          }
+
+          const rawArgs = args.slice(2);
+          let delivery: ScheduleDeliveryMode = kind === 'interval' ? 'internal' : 'talk';
+          let timezone: string | undefined;
+          const positionals: string[] = [];
+
+          for (let i = 0; i < rawArgs.length; i++) {
+            const token = rawArgs[i];
+            if (token === '--delivery') {
+              const value = rawArgs[i + 1];
+              if (value !== 'talk' && value !== 'internal') {
+                return { ok: false, error: 'Invalid --delivery value. Use talk or internal.' };
+              }
+              delivery = value;
+              i++;
+              continue;
+            }
+            if (token === '--timezone') {
+              timezone = rawArgs[i + 1];
+              if (!timezone) {
+                return { ok: false, error: 'Missing value for --timezone' };
+              }
+              i++;
+              continue;
+            }
+            positionals.push(token);
+          }
+
+          if (kind === 'interval') {
+            const [agentName, secondsRaw, ...messageParts] = positionals;
+            const message = messageParts.join(' ').trim();
+
+            if (!agentName || !secondsRaw || !message) {
+              return {
+                ok: false,
+                error: 'Usage: /schedule add interval <agent> <seconds> <message> [--delivery internal|talk]',
+              };
+            }
+
+            const { agent, error } = await this.resolveSingleAgentForCommand(teamId, agentName);
+            if (!agent) return { ok: false, error };
+
+            const seconds = Number(secondsRaw);
+            if (!Number.isFinite(seconds) || !Number.isInteger(seconds)) {
+              return { ok: false, error: `Invalid interval: ${secondsRaw}` };
+            }
+            try {
+              validateIntervalSeconds(seconds);
+            } catch (err: any) {
+              return { ok: false, error: err.message };
+            }
+
+            const nowSec = Math.floor(Date.now() / 1000);
+            const scheduleId = `sch_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
+            const definition: ScheduleDefinitionRow = {
+              id: scheduleId,
+              kind: 'interval',
+              title: `Interval: ${agent.name}`,
+              description: null,
+              active: true,
+              message,
+              delivery_mode: delivery,
+              timezone: null,
+              catch_up_policy: 'fire_once',
+              dedupe_window_seconds: 90,
+              interval_seconds: seconds,
+              anchor_at: nowSec,
+              max_runs: null,
+              expires_at: null,
+              local_time_seconds: null,
+              local_date: null,
+              days_of_week: null,
+              source_type: 'cli',
+              source_key: `cli:${teamId}:${scheduleId}`,
+              created_at: nowSec,
+              updated_at: nowSec,
+            };
+
+            await this.schedulerService.seedSchedule(definition, [agent.id]);
+            return {
+              ok: true,
+              result: {
+                schedule: {
+                  id: definition.id,
+                  kind: definition.kind,
+                  target: agent.name,
+                  intervalSeconds: seconds,
+                  deliveryMode: delivery,
+                },
+              },
+            };
+          }
+
+          const [agentName, time, recurrence, ...messageParts] = positionals;
+          const message = messageParts.join(' ').trim();
+          if (!agentName || !time || !recurrence || !message) {
+            return {
+              ok: false,
+              error: 'Usage: /schedule add calendar <agent> <time> <days|date> <message> [--timezone TZ] [--delivery internal|talk]',
+            };
+          }
+
+          const { agent, error } = await this.resolveSingleAgentForCommand(teamId, agentName);
+          if (!agent) return { ok: false, error };
+
+          const scheduleKey = `cli:${teamId}:${Date.now()}:${Math.random().toString(36).substring(2, 9)}`;
+          const isDate = /^\d{4}-\d{2}-\d{2}$/.test(recurrence);
+          const spec: CalendarSpec = {
+            title: `Calendar: ${agent.name}`,
+            time,
+            timezone,
+            agents: [agent.name],
+            message,
+            delivery,
+            ...(isDate ? { date: recurrence } : { days: recurrence.split(',').map((day) => day.trim()).filter(Boolean) }),
+          };
+
+          let definition: ScheduleDefinitionRow;
+          try {
+            ({ definition } = calendarToSchedule(spec, scheduleKey, [agent.id]));
+          } catch (err: any) {
+            return { ok: false, error: err.message };
+          }
+          definition.source_type = 'cli';
+          definition.source_key = scheduleKey;
+          await this.schedulerService.seedSchedule(definition, [agent.id]);
+
+          return {
+            ok: true,
+            result: {
+              schedule: {
+                id: definition.id,
+                kind: definition.kind,
+                target: agent.name,
+                time,
+                recurrence,
+                timezone: definition.timezone,
+                deliveryMode: delivery,
+              },
+            },
+          };
+        }
+
+        return {
+          ok: false,
+          error: 'Usage: /schedule <list|show|add|pause|resume|remove> ...'
         };
       }
 
@@ -3683,7 +3979,7 @@ export class AgentManagerDb {
       }
 
       default:
-        return { ok: false, error: `Unknown command: ${action}. Available: agents, status, delete, ask, hey, news, register, deploy, agent, model, tasks, task, configs, registry, teams, team, keys, meta, pay, heartbeat, heartbeats, cancel, clear, list, update, sync-wallets` };
+        return { ok: false, error: `Unknown command: ${action}. Available: agents, status, schedule, delete, ask, hey, news, register, deploy, agent, model, tasks, task, configs, registry, teams, team, keys, meta, pay, heartbeat, heartbeats, cancel, clear, list, update, sync-wallets` };
     }
   }
 
@@ -4187,4 +4483,3 @@ export class AgentManagerDb {
   }
 
 }
-

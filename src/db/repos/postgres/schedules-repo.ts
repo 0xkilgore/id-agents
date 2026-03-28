@@ -83,6 +83,13 @@ export class PgSchedulesRepo implements SchedulesRepository {
     return r.rows;
   }
 
+  async listAllDefinitions(): Promise<ScheduleDefinitionRow[]> {
+    const r = await this.db.query<ScheduleDefinitionRow>(
+      `SELECT * FROM schedule_definitions ORDER BY created_at ASC`,
+    );
+    return r.rows;
+  }
+
   async listSchedulesForAgent(agentId: string): Promise<ScheduleDefinitionRow[]> {
     const r = await this.db.query<ScheduleDefinitionRow>(
       `SELECT d.*

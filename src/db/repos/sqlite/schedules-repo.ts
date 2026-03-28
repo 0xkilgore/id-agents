@@ -96,6 +96,13 @@ export class SqliteSchedulesRepo implements SchedulesRepository {
     return this.parseRows(rows);
   }
 
+  async listAllDefinitions(): Promise<ScheduleDefinitionRow[]> {
+    const { rows } = await this.db.query(
+      `SELECT * FROM schedule_definitions ORDER BY created_at ASC`,
+    );
+    return this.parseRows(rows);
+  }
+
   async listSchedulesForAgent(agentId: string): Promise<ScheduleDefinitionRow[]> {
     const { rows } = await this.db.query(
       `SELECT d.* FROM schedule_definitions d

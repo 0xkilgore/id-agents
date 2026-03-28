@@ -293,6 +293,9 @@ export interface SchedulesRepository {
   /** List all active schedule definitions. */
   listActiveDefinitions(): Promise<ScheduleDefinitionRow[]>;
 
+  /** List all schedule definitions, active and inactive. */
+  listAllDefinitions(): Promise<ScheduleDefinitionRow[]>;
+
   /** List target agent IDs for a schedule. */
   listTargets(scheduleId: string): Promise<string[]>;
 
