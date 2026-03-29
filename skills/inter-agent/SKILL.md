@@ -78,3 +78,37 @@ curl -s "$MANAGER_URL/news?since=0" -H "X-Id-Team: $ID_TEAM" | jq
 ```
 
 Check your news feed before starting new tasks to maintain context.
+
+## Task Management
+
+The manager has a task system for coordinating work. Use it via `/remote`:
+
+**Create a task** (when you discover work that needs doing):
+```bash
+curl -s -X POST $MANAGER_URL/remote \
+  -H "Content-Type: application/json" \
+  -d '{"command":"/task create \"Fix the overflow bug\" --name fix-overflow"}'
+```
+
+**Claim an unassigned task** (take responsibility for it):
+```bash
+curl -s -X POST $MANAGER_URL/remote \
+  -H "Content-Type: application/json" \
+  -d '{"command":"/task claim fix-overflow"}'
+```
+
+**Mark your task done** (when you finish):
+```bash
+curl -s -X POST $MANAGER_URL/remote \
+  -H "Content-Type: application/json" \
+  -d '{"command":"/task done fix-overflow"}'
+```
+
+**List tasks** (see what needs doing):
+```bash
+curl -s -X POST $MANAGER_URL/remote \
+  -H "Content-Type: application/json" \
+  -d '{"command":"/task list"}'
+```
+
+Tasks have three statuses: `todo` (unclaimed), `doing` (someone is working on it), `done` (completed). When you find work during a review or heartbeat, create a task so it gets tracked.
