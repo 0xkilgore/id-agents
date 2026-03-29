@@ -1408,6 +1408,10 @@ export class AgentManagerDb {
         return res.status(400).json({ error: 'Missing team name' });
       }
 
+      if (name === 'default') {
+        return res.status(400).json({ error: 'Cannot delete the "default" team — it is the fallback for all unscoped requests' });
+      }
+
       try {
         // Find the team
         const team = await this.db.teams.getTeamByName(name);
