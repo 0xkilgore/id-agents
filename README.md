@@ -11,9 +11,7 @@
 
 **Version 0.1.30-beta**
 
-A multi-agent orchestration platform built on the Claude Agent SDK.
-
-ID Agents enables autonomous AI agents to run as local processes, communicate via the REST-AP protocol, and optionally register onchain for verifiable identity.
+CLI-first multi-agent orchestration — no UI required. Your Claude Code session is the control plane: you talk to it, it coordinates a team of agents that are real coding processes with full tool access, not sandboxed chat. The manager runs headless, so it works over SSH, Telegram, or mobile, and supports mixed runtimes (Claude Code and OpenAI Codex agents) in the same team.
 
 ## Key Features
 
