@@ -2,7 +2,7 @@
 
 import type { Db } from '../db/db-service.js';
 import type { ScheduleDefinitionRow, ScheduleRunRow } from '../db/types.js';
-import type { DueRun, DispatchTarget } from './schedule-types.js';
+import type { DueRun, DispatchTarget, LinkedTaskSummary } from './schedule-types.js';
 import { evaluateIntervalSchedule, evaluateCalendarSchedule } from './schedule-evaluator.js';
 import { ScheduleDispatcher } from './schedule-dispatcher.js';
 
@@ -85,7 +85,33 @@ export class SchedulerService {
             continue;
           }
 
-          const result = await this.dispatcher.dispatch(def, target, run.scheduledKey);
+          // Load linked tasks for calendar schedules
+          let linkedTasks: LinkedTaskSummary[] | undefined;
+          if (def.kind === 'calendar') {
+            try {
+              const taskRows = await this.db.tasks.listTasksForSchedule(def.id);
+              if (taskRows.length > 0) {
+                linkedTasks = [];
+                for (const t of taskRows) {
+                  let ownerName: string | null = null;
+                  if (t.owner) {
+                    const ownerAgent = await this.db.agents.getById(t.owner);
+                    if (ownerAgent) ownerName = (ownerAgent.metadata as any)?.alias || ownerAgent.name;
+                  }
+                  let teamName: string | null = null;
+                  if (t.team_id) {
+                    const teamRow = await this.db.teams.getTeam(t.team_id);
+                    if (teamRow) teamName = teamRow.name;
+                  }
+                  linkedTasks.push({ name: t.name, title: t.title, status: t.status, owner: ownerName, team: teamName });
+                }
+              }
+            } catch {
+              // best-effort: don't block dispatch if task lookup fails
+            }
+          }
+
+          const result = await this.dispatcher.dispatch(def, target, run.scheduledKey, linkedTasks);
           if (result.success) {
             await this.db.schedules.updateRunStatus(run.scheduleId, agentId, run.scheduledKey, 'sent');
             console.log(`[Scheduler] ${def.title} -> ${target.name} (${run.scheduledKey})`);

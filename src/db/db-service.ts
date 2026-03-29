@@ -12,7 +12,7 @@
  */
 
 import type { DbAdapter } from './db-adapter.js';
-import type { AgentRow, TeamRow, QueryRow, NewsItemRow, ScheduleDefinitionRow, ScheduleRunRow } from './types.js';
+import type { AgentRow, TeamRow, QueryRow, NewsItemRow, ScheduleDefinitionRow, ScheduleRunRow, TaskRow, TaskEventLinkRow } from './types.js';
 
 // ---------------------------------------------------------------------------
 // TeamsRepository
@@ -338,6 +338,58 @@ export interface SchedulesRepository {
 }
 
 // ---------------------------------------------------------------------------
+// TasksRepository
+// ---------------------------------------------------------------------------
+
+export interface TasksRepository {
+  /** Insert a new task, optionally linking it to calendar schedule ids. */
+  create(task: TaskRow, eventScheduleIds?: string[]): Promise<void>;
+
+  /** Look up a task by its unique name slug. */
+  getByName(name: string): Promise<TaskRow | null>;
+
+  /** List tasks with optional filters on status, owner, and team. */
+  list(filters?: {
+    status?: 'todo' | 'doing' | 'done';
+    owner?: string;
+    teamId?: string | null;
+  }): Promise<TaskRow[]>;
+
+  /** Update one or more mutable fields on a task. */
+  updateFields(
+    taskId: string,
+    fields: {
+      team_id?: string | null;
+      owner?: string | null;
+      status?: 'todo' | 'doing' | 'done';
+      title?: string;
+      description?: string | null;
+      completed_at?: number | null;
+      updated_at: number;
+    },
+  ): Promise<void>;
+
+  /**
+   * Atomically claim an unowned todo task.
+   * Sets owner, status='doing', and updated_at.
+   * Returns true if the claim succeeded, false if already owned or not todo.
+   */
+  claim(taskId: string, ownerId: string, updatedAt: number): Promise<boolean>;
+
+  /** Delete a task by id (task_event_links cascade). */
+  delete(taskId: string): Promise<void>;
+
+  /** Replace all event links for a task (delete existing, insert new). */
+  replaceEventLinks(taskId: string, scheduleIds: string[]): Promise<void>;
+
+  /** List event link schedule_ids for a task. */
+  listEventLinksForTask(taskId: string): Promise<Array<{ schedule_id: string }>>;
+
+  /** List all tasks linked to a given schedule definition. */
+  listTasksForSchedule(scheduleId: string): Promise<TaskRow[]>;
+}
+
+// ---------------------------------------------------------------------------
 // Db — composite service
 // ---------------------------------------------------------------------------
 
@@ -359,6 +411,7 @@ export interface Db {
   queries: QueriesRepository;
   news: NewsRepository;
   schedules: SchedulesRepository;
+  tasks: TasksRepository;
 
   /** Close the database connection / file handle. */
   close(): Promise<void>;

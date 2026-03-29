@@ -102,3 +102,25 @@ export interface ScheduleRunRow {
   status: 'pending' | 'sent' | 'failed' | 'skipped';
   error: string | null;
 }
+
+/** tasks table row */
+export interface TaskRow {
+  id: string;
+  name: string;
+  team_id: string | null;
+  title: string;
+  description: string | null;
+  status: 'todo' | 'doing' | 'done';
+  created_by: string | null;
+  owner: string | null;
+  created_at: number;
+  updated_at: number;
+  completed_at: number | null;
+}
+
+/** task_event_links table row */
+export interface TaskEventLinkRow {
+  task_id: string;
+  schedule_id: string;
+  created_at: number;
+}

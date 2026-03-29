@@ -25,6 +25,17 @@ export interface DispatchResult {
 }
 
 /**
+ * Linked task summary included in calendar schedule payloads.
+ */
+export interface LinkedTaskSummary {
+  name: string;
+  title: string;
+  status: 'todo' | 'doing' | 'done';
+  owner: string | null;
+  team: string | null;
+}
+
+/**
  * Schedule payload sent to agents via /talk endpoint.
  */
 export interface SchedulePayload {
@@ -37,6 +48,7 @@ export interface SchedulePayload {
     scheduledKey: string;
   };
   message: string;
+  linkedTasks?: LinkedTaskSummary[];
 }
 
 /**

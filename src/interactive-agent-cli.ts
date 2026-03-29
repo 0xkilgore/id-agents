@@ -71,6 +71,11 @@ const HELP_ITEMS: Array<{ cmd: string; desc: string; indent?: boolean }> = [
   { cmd: '/calendar', desc: 'List calendar events' },
   { cmd: '/calendar add <agent> <time> <days|date> <message>', desc: 'Add calendar event' },
   { cmd: '/calendar pause|resume|remove <id>', desc: 'Manage calendar event' },
+  { cmd: '/task create "<title>" [--owner <agent>] [--team <team>] [--event <id>]', desc: 'Create a task' },
+  { cmd: '/task list [--status <status>] [--owner <agent>] [--team <team>]', desc: 'List tasks' },
+  { cmd: '/task assign <task-name> <agent>', desc: 'Assign task to agent' },
+  { cmd: '/task done <task-name>', desc: 'Mark task done' },
+  { cmd: '/task remove <task-name>', desc: 'Remove a task' },
   { cmd: '/status', desc: 'Check agent status' },
   { cmd: '/update <agent> [--wallet <addr>] [--name <name>]', desc: 'Update agent properties' },
   { cmd: '/wallet <agent> [chain]', desc: 'Show agent wallet address (chain: eip155:1, solana, etc.)' },
@@ -2918,6 +2923,54 @@ async function handleLine(line: string) {
       console.log(`\n${colors.red}❌ Error: ${error.message}${colors.reset}\n`);
     }
 
+    rl.prompt();
+    return;
+  }
+
+  // /task — forward to manager /remote and format results
+  if (input.startsWith('/task')) {
+    try {
+      const response = await managerFetch('/remote', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ command: input })
+      });
+      const data = await response.json() as any;
+      if (data.ok) {
+        const result = data.result;
+        if (result.tasks) {
+          if (result.tasks.length === 0) {
+            console.log(`\n${colors.gray}No tasks found.${colors.reset}\n`);
+          } else {
+            console.log(`\n${colors.bold}Tasks (${result.tasks.length})${colors.reset}\n`);
+            for (const t of result.tasks) {
+              const statusIcon = t.status === 'done' ? '✅' : t.status === 'doing' ? '🔵' : '⚪';
+              const owner = t.ownerName ? ` ${colors.cyan}${t.ownerName}${colors.reset}` : '';
+              const team = t.teamName ? ` ${colors.gray}[${t.teamName}]${colors.reset}` : '';
+              const events = t.linkedEvents?.length ? ` ${colors.gray}events:${t.linkedEvents.join(',')}${colors.reset}` : '';
+              console.log(`${statusIcon} ${colors.bold}${t.name}${colors.reset} — ${t.title}${owner}${team}${events}`);
+            }
+            console.log('');
+          }
+        } else if (result.task) {
+          const t = result.task;
+          const statusIcon = t.status === 'done' ? '✅' : t.status === 'doing' ? '🔵' : '⚪';
+          console.log(`\n${statusIcon} ${colors.bold}${t.name}${colors.reset} — ${t.title}`);
+          if (t.ownerName) console.log(`   Owner: ${colors.cyan}${t.ownerName}${colors.reset}`);
+          if (t.teamName) console.log(`   Team: ${t.teamName}`);
+          if (t.linkedEvents?.length) console.log(`   Events: ${t.linkedEvents.join(', ')}`);
+          console.log(`   Status: ${t.status}\n`);
+        } else if (result.removed) {
+          console.log(`\n${colors.green}✅ Removed task: ${result.removed}${colors.reset}\n`);
+        } else {
+          console.log(`\n${colors.green}✅${colors.reset}`, JSON.stringify(result, null, 2), '\n');
+        }
+      } else {
+        console.log(`\n${colors.red}❌ ${data.error}${colors.reset}\n`);
+      }
+    } catch (error: any) {
+      console.log(`\n${colors.red}❌ Error: ${error.message}${colors.reset}\n`);
+    }
     rl.prompt();
     return;
   }

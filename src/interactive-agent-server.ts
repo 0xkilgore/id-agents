@@ -300,7 +300,7 @@ export class InteractiveAgentServer extends EventEmitter {
     // Schedule endpoint - enqueue manager-owned internal scheduled work
     this.app.post('/schedule', (req, res) => {
       try {
-        const { message, schedule, mode } = req.body || {};
+        const { message, schedule, mode, linkedTasks } = req.body || {};
 
         if (!message) {
           return res.status(400).json({ error: 'Message is required' });
@@ -329,24 +329,33 @@ export class InteractiveAgentServer extends EventEmitter {
           message: `Scheduled work has been queued for agent ${this.name}.`
         });
 
+        const queryResult: Record<string, unknown> = { schedule, message: messageStr, mode: 'internal' };
+        if (Array.isArray(linkedTasks) && linkedTasks.length > 0) {
+          queryResult.linkedTasks = linkedTasks;
+        }
+
         this.dbUpsertQuery({
           queryId: query_id,
           status: 'pending',
           created: ts,
           prompt: messageStr,
-          result: { schedule, message: messageStr, mode: 'internal' }
+          result: queryResult
         }).catch(() => {});
 
+        const newsData: Record<string, unknown> = {
+          query_id,
+          message: messageStr,
+          schedule,
+          status: 'awaiting_response'
+        };
+        if (Array.isArray(linkedTasks) && linkedTasks.length > 0) {
+          newsData.linkedTasks = linkedTasks;
+        }
         const newsItem: NewsItem = {
           timestamp: ts,
           type: 'schedule.received',
           message: `Scheduled query ${query_id} received`,
-          data: {
-            query_id,
-            message: messageStr,
-            schedule,
-            status: 'awaiting_response'
-          }
+          data: newsData
         };
         this.newsItems.push(newsItem);
         this.dbAddNews(newsItem).catch(() => {});

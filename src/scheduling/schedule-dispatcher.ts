@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 
-import type { SchedulePayload, DispatchResult, DispatchTarget } from './schedule-types.js';
+import type { SchedulePayload, DispatchResult, DispatchTarget, LinkedTaskSummary } from './schedule-types.js';
 import type { ScheduleDefinitionRow } from '../db/types.js';
 
 /**
@@ -15,6 +15,7 @@ export class ScheduleDispatcher {
     def: ScheduleDefinitionRow,
     target: DispatchTarget,
     scheduledKey: string,
+    linkedTasks?: LinkedTaskSummary[],
   ): Promise<DispatchResult> {
     const result: DispatchResult = {
       scheduleId: def.id,
@@ -44,6 +45,10 @@ export class ScheduleDispatcher {
       },
       message: def.message,
     };
+
+    if (linkedTasks && linkedTasks.length > 0) {
+      payload.linkedTasks = linkedTasks;
+    }
 
     const path = def.delivery_mode === 'internal' ? target.schedulePath : target.talkPath;
     if (def.delivery_mode === 'internal' && !path) {

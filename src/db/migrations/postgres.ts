@@ -424,4 +424,35 @@ export async function migratePostgres(adapter: DbAdapter): Promise<void> {
 
   await adapter.query(`CREATE INDEX IF NOT EXISTS schedule_runs_schedule_idx ON schedule_runs(schedule_id, fired_at);`);
   await adapter.query(`CREATE INDEX IF NOT EXISTS schedule_runs_agent_idx ON schedule_runs(agent_id, fired_at);`);
+
+  // 15) Task management tables
+  await adapter.query(`
+    CREATE TABLE IF NOT EXISTS tasks (
+      id text PRIMARY KEY,
+      name text NOT NULL UNIQUE,
+      team_id uuid REFERENCES teams(id) ON DELETE SET NULL,
+      title text NOT NULL,
+      description text,
+      status text NOT NULL,
+      created_by text REFERENCES agents(id) ON DELETE SET NULL,
+      owner text REFERENCES agents(id) ON DELETE SET NULL,
+      created_at bigint NOT NULL,
+      updated_at bigint NOT NULL,
+      completed_at bigint
+    );
+  `);
+
+  await adapter.query(`
+    CREATE TABLE IF NOT EXISTS task_event_links (
+      task_id text NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+      schedule_id text NOT NULL REFERENCES schedule_definitions(id) ON DELETE CASCADE,
+      created_at bigint NOT NULL,
+      PRIMARY KEY (task_id, schedule_id)
+    );
+  `);
+
+  await adapter.query(`CREATE INDEX IF NOT EXISTS tasks_status_idx ON tasks(status, updated_at);`);
+  await adapter.query(`CREATE INDEX IF NOT EXISTS tasks_owner_idx ON tasks(owner, status, updated_at);`);
+  await adapter.query(`CREATE INDEX IF NOT EXISTS tasks_team_idx ON tasks(team_id, status, updated_at);`);
+  await adapter.query(`CREATE INDEX IF NOT EXISTS task_event_links_schedule_idx ON task_event_links(schedule_id, task_id);`);
 }

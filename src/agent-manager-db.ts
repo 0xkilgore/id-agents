@@ -24,7 +24,7 @@ import yaml from 'js-yaml';
 import { ClaudeAgentServer } from './claude-agent-server.js';
 import { registerOnIdChain, createSubnameOnIdChain, setMultiChainAddresses } from './onchain/idchain-register.js';
 import { type Db } from './db/db-service.js';
-import type { AgentRow, ScheduleDefinitionRow } from './db/types.js';
+import type { AgentRow, ScheduleDefinitionRow, TaskRow } from './db/types.js';
 import fetch from 'node-fetch';
 import type { PluginConfig, DeployConfig, HeartbeatConfig, CalendarSpec, ScheduleDeliveryMode } from './config-parser.js';
 import { processConfig } from './config-parser.js';
@@ -2387,7 +2387,7 @@ export class AgentManagerDb {
 
     this.managementApp.post('/remote', async (req, res) => {
 
-      const { command } = req.body;
+      const { command, from } = req.body;
       if (!command || typeof command !== 'string') {
         return res.status(400).json({ error: 'Missing command in request body' });
       }
@@ -2395,7 +2395,7 @@ export class AgentManagerDb {
       const { id: teamId, name: teamName } = await this.getTeam(req);
 
       try {
-        const result = await this.executeRemoteCommand(command.trim(), teamId, teamName);
+        const result = await this.executeRemoteCommand(command.trim(), teamId, teamName, typeof from === 'string' ? from : undefined);
         res.json(result);
       } catch (error: any) {
         res.status(500).json({ error: error.message || 'Command execution failed' });
@@ -2500,6 +2500,37 @@ export class AgentManagerDb {
     return { agent: matches[0] };
   }
 
+  private async buildTaskResult(task: TaskRow, teamId: string): Promise<Record<string, unknown>> {
+    let ownerName: string | null = null;
+    if (task.owner) {
+      const ownerAgent = await this.db.agents.getById(task.owner);
+      if (ownerAgent) {
+        ownerName = (ownerAgent.metadata as any)?.alias || ownerAgent.name;
+      }
+    }
+
+    let teamName: string | null = null;
+    if (task.team_id) {
+      const teamRow = await this.db.teams.getTeam(task.team_id);
+      if (teamRow) teamName = teamRow.name;
+    }
+
+    const links = await this.db.tasks.listEventLinksForTask(task.id);
+
+    return {
+      name: task.name,
+      title: task.title,
+      description: task.description,
+      status: task.status,
+      ownerName,
+      teamName,
+      linkedEvents: links.map(l => l.schedule_id),
+      createdAt: task.created_at,
+      updatedAt: task.updated_at,
+      completedAt: task.completed_at,
+    };
+  }
+
   private async listTeamSchedules(teamId: string): Promise<Array<{ definition: ScheduleDefinitionRow; targets: AgentRow[] }>> {
     const teamAgents = await this.dbListAgents(teamId, true);
     const agentsById = new Map(teamAgents.map((agent) => [agent.id, agent]));
@@ -2540,7 +2571,8 @@ export class AgentManagerDb {
   private async executeRemoteCommand(
     command: string,
     teamId: string,
-    teamName: string
+    teamName: string,
+    callerFrom?: string,
   ): Promise<{ ok: boolean; result?: any; error?: string }> {
     // Remove leading slash if present
     const cmd = command.startsWith('/') ? command.slice(1) : command;
@@ -3985,6 +4017,267 @@ export class AgentManagerDb {
         await this.db.agents.updateMetadata(agent.id, newMetadata);
 
         return { ok: true, result: { message: `Updated ${agent.name}: ${updates.join(', ')}` } };
+      }
+
+      case 'task': {
+        const subCmd = args[0]?.toLowerCase() || 'list';
+
+        if (subCmd === 'create') {
+          // /task create "<title>" [--name <slug>] [--description "..."] [--team <team>] [--owner <agent>] [--event <schedule-id>]...
+          const rawArgs = args.slice(1);
+          let title: string | undefined;
+          let name: string | undefined;
+          let description: string | undefined;
+          let teamRef: string | undefined;
+          let ownerRef: string | undefined;
+          const eventIds: string[] = [];
+
+          for (let i = 0; i < rawArgs.length; i++) {
+            const token = rawArgs[i];
+            if (token === '--name') { name = rawArgs[++i]; continue; }
+            if (token === '--description') { description = rawArgs[++i]; continue; }
+            if (token === '--team') { teamRef = rawArgs[++i]; continue; }
+            if (token === '--owner') { ownerRef = rawArgs[++i]; continue; }
+            if (token === '--event') { eventIds.push(rawArgs[++i]); continue; }
+            if (!title) { title = token; continue; }
+          }
+
+          if (!title) {
+            return { ok: false, error: 'Usage: /task create "<title>" [--name <slug>] [--description "..."] [--team <team>] [--owner <agent>] [--event <schedule-id>]...' };
+          }
+
+          // Generate name from title if not provided
+          if (!name) {
+            name = normalizeAlias(title);
+            // Ensure uniqueness by appending numeric suffix on conflict
+            let candidate = name;
+            let suffix = 1;
+            while (await this.db.tasks.getByName(candidate)) {
+              candidate = `${name}-${suffix++}`;
+            }
+            name = candidate;
+          } else {
+            name = normalizeAlias(name);
+            if (await this.db.tasks.getByName(name)) {
+              return { ok: false, error: `Task name "${name}" already exists` };
+            }
+          }
+
+          // Resolve optional team
+          let taskTeamId: string | null = null;
+          if (teamRef) {
+            const teamRow = await this.db.teams.getTeamByName(teamRef);
+            if (!teamRow) return { ok: false, error: `Team "${teamRef}" not found` };
+            taskTeamId = teamRow.id;
+          } else {
+            taskTeamId = teamId;
+          }
+
+          // Resolve optional owner
+          let ownerId: string | null = null;
+          if (ownerRef) {
+            const resolveTeam = taskTeamId || teamId;
+            const { agent, error } = await this.resolveSingleAgentForCommand(resolveTeam, ownerRef);
+            if (!agent) return { ok: false, error: error || `Agent "${ownerRef}" not found` };
+            ownerId = agent.id;
+          }
+
+          // Validate event links
+          for (const eid of eventIds) {
+            const sDef = await this.db.schedules.getDefinition(eid);
+            if (!sDef) return { ok: false, error: `Schedule "${eid}" not found` };
+            if (sDef.kind !== 'calendar') return { ok: false, error: `Schedule "${eid}" is not a calendar event (kind: ${sDef.kind})` };
+          }
+
+          const now = Math.floor(Date.now() / 1000);
+          const status = ownerId ? 'doing' : 'todo';
+          // Resolve created_by from callerFrom if present
+          let createdBy: string | null = null;
+          if (callerFrom) {
+            const { agent: callerAgent } = await this.resolveSingleAgentForCommand(teamId, callerFrom);
+            if (callerAgent) createdBy = callerAgent.id;
+          }
+
+          const taskRow: TaskRow = {
+            id: `task_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`,
+            name,
+            team_id: taskTeamId,
+            title,
+            description: description || null,
+            status,
+            created_by: createdBy,
+            owner: ownerId,
+            created_at: now,
+            updated_at: now,
+            completed_at: null,
+          };
+
+          await this.db.tasks.create(taskRow, eventIds.length > 0 ? eventIds : undefined);
+
+          return {
+            ok: true,
+            result: {
+              task: await this.buildTaskResult(taskRow, teamId),
+            },
+          };
+        }
+
+        if (subCmd === 'list') {
+          // /task list [--status todo|doing|done] [--owner <agent>] [--team <team>]
+          const rawArgs = args.slice(1);
+          let statusFilter: 'todo' | 'doing' | 'done' | undefined;
+          let ownerFilter: string | undefined;
+          let teamFilter: string | undefined;
+
+          for (let i = 0; i < rawArgs.length; i++) {
+            const token = rawArgs[i];
+            if (token === '--status') { statusFilter = rawArgs[++i] as any; continue; }
+            if (token === '--owner') { ownerFilter = rawArgs[++i]; continue; }
+            if (token === '--team') { teamFilter = rawArgs[++i]; continue; }
+          }
+
+          // Resolve owner id
+          let ownerIdFilter: string | undefined;
+          if (ownerFilter) {
+            const { agent, error } = await this.resolveSingleAgentForCommand(teamId, ownerFilter);
+            if (!agent) return { ok: false, error: error || `Agent "${ownerFilter}" not found` };
+            ownerIdFilter = agent.id;
+          }
+
+          // Resolve team id
+          let teamIdFilter: string | undefined;
+          if (teamFilter) {
+            const teamRow = await this.db.teams.getTeamByName(teamFilter);
+            if (!teamRow) return { ok: false, error: `Team "${teamFilter}" not found` };
+            teamIdFilter = teamRow.id;
+          }
+
+          const tasks = await this.db.tasks.list({
+            status: statusFilter,
+            owner: ownerIdFilter,
+            teamId: teamIdFilter,
+          });
+
+          const results = [];
+          for (const t of tasks) {
+            results.push(await this.buildTaskResult(t, teamId));
+          }
+
+          return { ok: true, result: { tasks: results } };
+        }
+
+        if (subCmd === 'assign') {
+          // /task assign <task-name> <agent> [--team <team>]
+          const taskName = args[1];
+          const agentRef = args[2];
+          if (!taskName || !agentRef) {
+            return { ok: false, error: 'Usage: /task assign <task-name> <agent> [--team <team>]' };
+          }
+
+          const task = await this.db.tasks.getByName(taskName);
+          if (!task) return { ok: false, error: `Task "${taskName}" not found` };
+
+          // Check for --team flag
+          let resolveTeam = teamId;
+          for (let i = 3; i < args.length; i++) {
+            if (args[i] === '--team' && args[i + 1]) {
+              const teamRow = await this.db.teams.getTeamByName(args[i + 1]);
+              if (!teamRow) return { ok: false, error: `Team "${args[i + 1]}" not found` };
+              resolveTeam = teamRow.id;
+              break;
+            }
+          }
+
+          const { agent, error } = await this.resolveSingleAgentForCommand(resolveTeam, agentRef);
+          if (!agent) return { ok: false, error: error || `Agent "${agentRef}" not found` };
+
+          const now = Math.floor(Date.now() / 1000);
+          await this.db.tasks.updateFields(task.id, {
+            owner: agent.id,
+            status: 'doing',
+            updated_at: now,
+          });
+
+          const updated = await this.db.tasks.getByName(taskName);
+          return { ok: true, result: { task: await this.buildTaskResult(updated!, teamId) } };
+        }
+
+        if (subCmd === 'claim') {
+          // /task claim <task-name> (agent API via /remote with from field)
+          const taskName = args[1];
+          if (!taskName) {
+            return { ok: false, error: 'Usage: /task claim <task-name>' };
+          }
+
+          if (!callerFrom) {
+            return { ok: false, error: 'Claim requires agent identity. Use /remote with a "from" field.' };
+          }
+
+          const task = await this.db.tasks.getByName(taskName);
+          if (!task) return { ok: false, error: `Task "${taskName}" not found` };
+
+          // Resolve caller agent
+          const { agent: callerAgent, error: callerError } = await this.resolveSingleAgentForCommand(teamId, callerFrom);
+          if (!callerAgent) return { ok: false, error: callerError || `Caller agent "${callerFrom}" not found` };
+
+          const now = Math.floor(Date.now() / 1000);
+          const claimed = await this.db.tasks.claim(task.id, callerAgent.id, now);
+          if (!claimed) {
+            return { ok: false, error: `Cannot claim "${taskName}" — task is already owned or not in todo status` };
+          }
+
+          const updated = await this.db.tasks.getByName(taskName);
+          return { ok: true, result: { task: await this.buildTaskResult(updated!, teamId) } };
+        }
+
+        if (subCmd === 'done') {
+          // /task done <task-name>
+          // Manager can mark any task done; agent can only mark its own task done
+          const taskName = args[1];
+          if (!taskName) {
+            return { ok: false, error: 'Usage: /task done <task-name>' };
+          }
+
+          const task = await this.db.tasks.getByName(taskName);
+          if (!task) return { ok: false, error: `Task "${taskName}" not found` };
+
+          // If called by an agent (callerFrom set), enforce ownership
+          if (callerFrom) {
+            const { agent: callerAgent } = await this.resolveSingleAgentForCommand(teamId, callerFrom);
+            if (callerAgent && task.owner !== callerAgent.id) {
+              return { ok: false, error: `Agent "${callerFrom}" is not the owner of task "${taskName}"` };
+            }
+          }
+
+          const now = Math.floor(Date.now() / 1000);
+          await this.db.tasks.updateFields(task.id, {
+            status: 'done',
+            completed_at: now,
+            updated_at: now,
+          });
+
+          const updated = await this.db.tasks.getByName(taskName);
+          return { ok: true, result: { task: await this.buildTaskResult(updated!, teamId) } };
+        }
+
+        if (subCmd === 'remove') {
+          // /task remove <task-name>
+          const taskName = args[1];
+          if (!taskName) {
+            return { ok: false, error: 'Usage: /task remove <task-name>' };
+          }
+
+          const task = await this.db.tasks.getByName(taskName);
+          if (!task) return { ok: false, error: `Task "${taskName}" not found` };
+
+          await this.db.tasks.delete(task.id);
+          return { ok: true, result: { removed: taskName } };
+        }
+
+        return {
+          ok: false,
+          error: 'Usage: /task <create|list|assign|claim|done|remove> ...',
+        };
       }
 
       default:

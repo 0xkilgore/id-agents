@@ -116,6 +116,32 @@ export function migrateSqlite(adapter: SqliteAdapter): void {
 
     CREATE INDEX IF NOT EXISTS schedule_runs_schedule_idx ON schedule_runs(schedule_id, fired_at);
     CREATE INDEX IF NOT EXISTS schedule_runs_agent_idx ON schedule_runs(agent_id, fired_at);
+
+    CREATE TABLE IF NOT EXISTS tasks (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL UNIQUE,
+      team_id TEXT REFERENCES teams(id) ON DELETE SET NULL,
+      title TEXT NOT NULL,
+      description TEXT,
+      status TEXT NOT NULL,
+      created_by TEXT REFERENCES agents(id) ON DELETE SET NULL,
+      owner TEXT REFERENCES agents(id) ON DELETE SET NULL,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      completed_at INTEGER
+    );
+
+    CREATE TABLE IF NOT EXISTS task_event_links (
+      task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+      schedule_id TEXT NOT NULL REFERENCES schedule_definitions(id) ON DELETE CASCADE,
+      created_at INTEGER NOT NULL,
+      PRIMARY KEY (task_id, schedule_id)
+    );
+
+    CREATE INDEX IF NOT EXISTS tasks_status_idx ON tasks(status, updated_at);
+    CREATE INDEX IF NOT EXISTS tasks_owner_idx ON tasks(owner, status, updated_at);
+    CREATE INDEX IF NOT EXISTS tasks_team_idx ON tasks(team_id, status, updated_at);
+    CREATE INDEX IF NOT EXISTS task_event_links_schedule_idx ON task_event_links(schedule_id, task_id);
   `);
 
   try {
