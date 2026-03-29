@@ -11,7 +11,7 @@
 
 **Version 0.1.30-beta**
 
-CLI-first multi-agent orchestration — no UI required. Your Claude Code session is the control plane: you talk to it, it coordinates a team of agents that are real coding processes with full tool access, not sandboxed chat. The manager runs headless, so it works over SSH, Telegram, or mobile, and supports mixed runtimes (Claude Code and OpenAI Codex agents) in the same team.
+Multi-agent orchestration optimized for a single chat interface. Your Claude Code session is the control plane — you talk to it, it coordinates a team of agents that are real coding processes with full tool access. No UI, no dashboard. The manager runs headless over SSH, Telegram, or mobile, and supports mixed runtimes (Claude Code and OpenAI Codex) in the same team.
 
 ## Key Features
 
