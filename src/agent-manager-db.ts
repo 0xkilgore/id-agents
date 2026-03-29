@@ -2487,6 +2487,196 @@ export class AgentManagerDb {
       }
     });
 
+    // ==================== TASK REST ENDPOINTS ====================
+    // Dedicated task API so agents don't need /remote for task ops
+
+    this.managementApp.post('/tasks', async (req, res) => {
+      try {
+        const { id: teamId } = await this.getTeam(req);
+        const { title, name: rawName, description, team: teamRef, from } = req.body || {};
+
+        if (!title || typeof title !== 'string') {
+          return res.status(400).json({ error: 'Missing required field: title' });
+        }
+
+        // Generate or validate name slug
+        let name = rawName ? normalizeAlias(rawName) : normalizeAlias(title);
+        if (rawName) {
+          if (await this.db.tasks.getByName(name)) {
+            return res.status(409).json({ error: `Task name "${name}" already exists` });
+          }
+        } else {
+          let candidate = name;
+          let suffix = 1;
+          while (await this.db.tasks.getByName(candidate)) {
+            candidate = `${name}-${suffix++}`;
+          }
+          name = candidate;
+        }
+
+        // Resolve team
+        let taskTeamId: string | null = teamId;
+        if (teamRef) {
+          const teamRow = await this.db.teams.getTeamByName(teamRef);
+          if (!teamRow) return res.status(404).json({ error: `Team "${teamRef}" not found` });
+          taskTeamId = teamRow.id;
+        }
+
+        // Resolve created_by from `from` field
+        let createdBy: string | null = null;
+        if (from && typeof from === 'string') {
+          const { agent } = await this.resolveSingleAgentForCommand(teamId, from);
+          if (agent) createdBy = agent.id;
+        }
+
+        const now = Math.floor(Date.now() / 1000);
+        const taskRow: TaskRow = {
+          id: `task_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`,
+          name,
+          team_id: taskTeamId,
+          title,
+          description: description || null,
+          status: 'todo',
+          created_by: createdBy,
+          owner: null,
+          created_at: now,
+          updated_at: now,
+          completed_at: null,
+        };
+
+        await this.db.tasks.create(taskRow);
+        res.status(201).json({ ok: true, task: await this.buildTaskResult(taskRow, teamId) });
+      } catch (err: any) {
+        console.error('[Manager] Error in POST /tasks:', err);
+        res.status(500).json({ error: err?.message || 'Internal server error' });
+      }
+    });
+
+    this.managementApp.get('/tasks', async (req, res) => {
+      try {
+        const { id: teamId } = await this.getTeam(req);
+        const { status, owner, team: teamRef } = req.query as Record<string, string>;
+
+        // Resolve owner
+        let ownerIdFilter: string | undefined;
+        if (owner) {
+          const { agent, error } = await this.resolveSingleAgentForCommand(teamId, owner);
+          if (!agent) return res.status(404).json({ error: error || `Agent "${owner}" not found` });
+          ownerIdFilter = agent.id;
+        }
+
+        // Resolve team
+        let teamIdFilter: string | undefined;
+        if (teamRef) {
+          const teamRow = await this.db.teams.getTeamByName(teamRef);
+          if (!teamRow) return res.status(404).json({ error: `Team "${teamRef}" not found` });
+          teamIdFilter = teamRow.id;
+        }
+
+        const validStatuses = ['todo', 'doing', 'done'];
+        const tasks = await this.db.tasks.list({
+          status: status && validStatuses.includes(status) ? status as 'todo' | 'doing' | 'done' : undefined,
+          owner: ownerIdFilter,
+          teamId: teamIdFilter,
+        });
+
+        const results = [];
+        for (const t of tasks) {
+          results.push(await this.buildTaskResult(t, teamId));
+        }
+        res.json({ ok: true, tasks: results });
+      } catch (err: any) {
+        console.error('[Manager] Error in GET /tasks:', err);
+        res.status(500).json({ error: err?.message || 'Internal server error' });
+      }
+    });
+
+    this.managementApp.get('/tasks/:name', async (req, res) => {
+      try {
+        const { id: teamId } = await this.getTeam(req);
+        const task = await this.db.tasks.getByName(req.params.name);
+        if (!task) return res.status(404).json({ error: `Task "${req.params.name}" not found` });
+        res.json({ ok: true, task: await this.buildTaskResult(task, teamId) });
+      } catch (err: any) {
+        console.error('[Manager] Error in GET /tasks/:name:', err);
+        res.status(500).json({ error: err?.message || 'Internal server error' });
+      }
+    });
+
+    this.managementApp.post('/tasks/:name/claim', async (req, res) => {
+      try {
+        const { id: teamId } = await this.getTeam(req);
+        const { agent_id, from } = req.body || {};
+        const callerRef = agent_id || from;
+
+        if (!callerRef || typeof callerRef !== 'string') {
+          return res.status(400).json({ error: 'Missing required field: agent_id (or from)' });
+        }
+
+        const task = await this.db.tasks.getByName(req.params.name);
+        if (!task) return res.status(404).json({ error: `Task "${req.params.name}" not found` });
+
+        const { agent, error } = await this.resolveSingleAgentForCommand(teamId, callerRef);
+        if (!agent) return res.status(404).json({ error: error || `Agent "${callerRef}" not found` });
+
+        const now = Math.floor(Date.now() / 1000);
+        const claimed = await this.db.tasks.claim(task.id, agent.id, now);
+        if (!claimed) {
+          return res.status(409).json({ error: `Cannot claim "${req.params.name}" — already owned or not in todo status` });
+        }
+
+        const updated = await this.db.tasks.getByName(req.params.name);
+        res.json({ ok: true, task: await this.buildTaskResult(updated!, teamId) });
+      } catch (err: any) {
+        console.error('[Manager] Error in POST /tasks/:name/claim:', err);
+        res.status(500).json({ error: err?.message || 'Internal server error' });
+      }
+    });
+
+    this.managementApp.post('/tasks/:name/done', async (req, res) => {
+      try {
+        const { id: teamId } = await this.getTeam(req);
+        const { agent_id, from } = req.body || {};
+        const callerRef = agent_id || from;
+
+        const task = await this.db.tasks.getByName(req.params.name);
+        if (!task) return res.status(404).json({ error: `Task "${req.params.name}" not found` });
+
+        // If caller identifies themselves, enforce ownership
+        if (callerRef && typeof callerRef === 'string') {
+          const { agent } = await this.resolveSingleAgentForCommand(teamId, callerRef);
+          if (agent && task.owner !== agent.id) {
+            return res.status(403).json({ error: `Agent "${callerRef}" is not the owner of task "${req.params.name}"` });
+          }
+        }
+
+        const now = Math.floor(Date.now() / 1000);
+        await this.db.tasks.updateFields(task.id, {
+          status: 'done',
+          completed_at: now,
+          updated_at: now,
+        });
+
+        const updated = await this.db.tasks.getByName(req.params.name);
+        res.json({ ok: true, task: await this.buildTaskResult(updated!, teamId) });
+      } catch (err: any) {
+        console.error('[Manager] Error in POST /tasks/:name/done:', err);
+        res.status(500).json({ error: err?.message || 'Internal server error' });
+      }
+    });
+
+    this.managementApp.delete('/tasks/:name', async (req, res) => {
+      try {
+        const task = await this.db.tasks.getByName(req.params.name);
+        if (!task) return res.status(404).json({ error: `Task "${req.params.name}" not found` });
+        await this.db.tasks.delete(task.id);
+        res.json({ ok: true, removed: req.params.name });
+      } catch (err: any) {
+        console.error('[Manager] Error in DELETE /tasks/:name:', err);
+        res.status(500).json({ error: err?.message || 'Internal server error' });
+      }
+    });
+
   }
 
   private async resolveSingleAgentForCommand(teamId: string, agentName: string): Promise<{ agent?: AgentRow; error?: string }> {

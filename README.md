@@ -284,6 +284,43 @@ This means any Claude Code instance on the same machine can coordinate with your
 - `/calendar add <agent> <time> <days|date> <message>` - Add calendar event
 - `/calendar pause|resume|remove <id>` - Manage calendar event
 
+## Task API
+
+The Manager exposes dedicated `/tasks` REST endpoints for agent task coordination. Agents should use these instead of `/remote` for task operations — it's simpler, safer, and doesn't expose arbitrary CLI access.
+
+| Route | Method | Description |
+|-------|--------|-------------|
+| `/tasks` | POST | Create a task (`{ title, name?, description?, team?, from? }`) |
+| `/tasks` | GET | List tasks (query params: `status`, `owner`, `team`) |
+| `/tasks/:name` | GET | Get a single task by name |
+| `/tasks/:name/claim` | POST | Claim a task (`{ agent_id }`) |
+| `/tasks/:name/done` | POST | Mark task complete (`{ agent_id }`) |
+| `/tasks/:name` | DELETE | Remove a task |
+
+**Create and claim a task:**
+
+```bash
+# Create
+curl -s -X POST http://localhost:4100/tasks \
+  -H "Content-Type: application/json" \
+  -d '{"title": "Fix the overflow bug", "name": "fix-overflow"}'
+
+# Claim
+curl -s -X POST http://localhost:4100/tasks/fix-overflow/claim \
+  -H "Content-Type: application/json" \
+  -d '{"agent_id": "my-agent"}'
+
+# Mark done
+curl -s -X POST http://localhost:4100/tasks/fix-overflow/done \
+  -H "Content-Type: application/json" \
+  -d '{"agent_id": "my-agent"}'
+
+# List open tasks
+curl -s "http://localhost:4100/tasks?status=todo"
+```
+
+Task statuses: `todo` (unclaimed), `doing` (in progress), `done` (completed). The `agent_id` field accepts agent names or aliases, resolved against the current team.
+
 ## Skills & Plugins
 
 Skills and plugins extend agent capabilities. Both are declared in the YAML config and automatically deployed to each agent's working directory at deploy time.
