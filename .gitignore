@@ -34,3 +34,7 @@ configs/apps.yaml
 # Coverage and test artifacts
 coverage/
 .nyc_output/
+
+# Security files (local only)
+SECURITY.md
+REVIEW_LOG.md
