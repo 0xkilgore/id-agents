@@ -9,20 +9,20 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-**Version 0.1.30-beta**
+**Version 0.1.33-beta**
 
 Multi-agent orchestration optimized for a single chat interface. Your Claude Code session is the control plane — you talk to it, it coordinates a team of agents that are real coding processes with full tool access. No UI, no dashboard. The manager runs headless over SSH, Telegram, or mobile, and supports mixed runtimes (Claude Code and OpenAI Codex) in the same team.
 
 ## Key Features
 
-- **Local agent processes** - Each agent runs as a local Node.js process managed by the manager
-- **REST-AP protocol** - Standard protocol for agent discovery and communication
-- **Multi-tenant teams** - Isolated teams with separate port ranges and workspaces
-- **Multiple runtimes** - Support for Claude Agent SDK and Claude Code CLI harnesses
-- **Onchain identity** - ENS-based agent identity via ID Chain (agents get names like `x.agent-15.sep.xid.eth`)
-- **Remote API** - Programmatic management via `/remote` endpoint
+- **Multiple runtimes** - Claude Code CLI and OpenAI Codex — mix and match in the same team
+- **Task system** - Create, assign, claim, and track tasks across agents (`/task` commands + `/tasks` REST API)
+- **Scheduling** - Heartbeat intervals and calendar events for automated recurring work
+- **Org chart** - Define team structure with groups and tags so agents know their peers and leads
 - **Skills & plugins** - Standard Claude Code skills and plugins, declared in config and deployed to each agent
-- **Agent wallets** - Automatic multi-chain wallets via [OWS](https://github.com/open-wallet-standard/core) (Open Wallet Standard)
+- **Agent wallets** - Automatic multi-chain wallets via [OWS](https://github.com/open-wallet-standard/core)
+- **Onchain identity** - ENS-based agent identity via ID Chain (e.g., `x.agent-15.sep.xid.eth`)
+- **Remote API** - Programmatic management via `/remote` endpoint and `/tasks` REST API
 
 ## Architecture
 
@@ -76,10 +76,11 @@ Multi-agent orchestration optimized for a single chat interface. Your Claude Cod
 ### Prerequisites
 
 - **Node.js** 20+
-- **Claude Code CLI** — install from [claude.ai/code](https://claude.ai/code) and run `claude login` in your terminal
+- **Claude Code CLI** — install from [claude.ai/code](https://claude.ai/code) and run `claude login`
 - **Claude Pro or Max plan** (agents use your Claude Code subscription — no API key needed)
-- **[id-cli](https://github.com/idchain-world/id-cli)** (optional, for onchain agent registration via `/register`)
-- **[OWS CLI](https://github.com/open-wallet-standard/core)** (optional, for automatic agent wallet creation via Open Wallet Standard)
+- **OpenAI Codex CLI** (optional) — install from [github.com/openai/codex](https://github.com/openai/codex) and run `codex login`
+- **[id-cli](https://github.com/idchain-world/id-cli)** (optional, for onchain agent registration)
+- **[OWS CLI](https://github.com/open-wallet-standard/core)** (optional, for agent wallets)
 
 > **Important:** You must be logged into Claude Code CLI before starting ID Agents. Run `claude login` in your terminal and complete the authentication. If you use Claude Code in VS Code, you still need to log in via the terminal — open VS Code's integrated terminal and run `claude login` there.
 
@@ -113,8 +114,8 @@ MANAGER_PORT=5000 npm run id-agents  # Same, via env var
 ### 3) Deploy and talk to agents
 
 ```
-/deploy <config>
-/ask coder1 Write a hello world function
+/deploy claude-code    # or /deploy codex
+/ask coder Write a hello world function
 ```
 
 ### Mobile Access
@@ -230,6 +231,11 @@ See [Scheduling Plan](./docs/SCHEDULING_PLAN.md) for the full design.
 /calendar                    # List calendar events
 /calendar add <agent> <time> <days|date> <message>  # Add calendar event
 /calendar pause|resume|remove <id>          # Manage calendar event
+/task create "<title>" [--name <slug>] [--owner <agent>]  # Create task
+/task list [--status todo|doing|done]                    # List tasks
+/task assign <name> <agent>  # Assign task
+/task done <name>            # Complete task
+/task remove <name>          # Delete task
 /update <agent> [--wallet|--name]  # Update agent properties
 /wallet <agent> [chain]     # Show agent wallet addresses
 /quit                       # Exit
@@ -283,6 +289,11 @@ This means any Claude Code instance on the same machine can coordinate with your
 - `/calendar` - List calendar events
 - `/calendar add <agent> <time> <days|date> <message>` - Add calendar event
 - `/calendar pause|resume|remove <id>` - Manage calendar event
+- `/task create "<title>"` - Create task
+- `/task list` - List tasks
+- `/task assign <name> <agent>` - Assign task
+- `/task done <name>` - Complete task
+- `/task remove <name>` - Delete task
 
 ## Task API
 
@@ -517,15 +528,15 @@ Teams can define an organizational structure in their YAML config under the `org
 ```yaml
 org:
   groups:
-    - name: engineering
+    engineering:
       lead: alice
-      description: Core product development
+      description: "Core product development"
       members: [bob, carol]
       groups:
-        - name: infra
+        infra:
           lead: carol
           members: [dave]
-    - name: security
+    security:
       lead: eve
       members: [frank]
 
