@@ -662,7 +662,7 @@ export class ClaudeAgentServer {
     // Schedule endpoint - enqueue internal scheduled work without auto-reply
     this.app.post('/schedule', async (req, res) => {
       try {
-        const { message, schedule, mode } = req.body || {};
+        const { message, schedule, mode, linkedTasks } = req.body || {};
 
         if (!message) {
           return res.status(400).json({ error: 'Missing message' });
@@ -676,13 +676,18 @@ export class ClaudeAgentServer {
 
         const queryId = `query_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
 
+        const newsData: Record<string, unknown> = {
+          query_id: queryId,
+          message,
+          schedule,
+          status: 'processing'
+        };
+        if (Array.isArray(linkedTasks) && linkedTasks.length > 0) {
+          newsData.linkedTasks = linkedTasks;
+        }
+
         try {
-          await this.addNews('schedule.received', `Scheduled work ${queryId} received`, {
-            query_id: queryId,
-            message,
-            schedule,
-            status: 'processing'
-          });
+          await this.addNews('schedule.received', `Scheduled work ${queryId} received`, newsData);
         } catch (newsErr: any) {
           console.error(`[Agent] Warning: Failed to persist scheduled news item for query ${queryId}:`, newsErr?.message || newsErr);
         }
