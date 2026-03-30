@@ -107,8 +107,7 @@ npm run id-agents
 Custom port (default: 4100):
 
 ```bash
-npm run id-agents -- --port 5000   # Manager on 5000, agents on 5001+
-MANAGER_PORT=5000 npm run id-agents  # Same, via env var
+MANAGER_PORT=5000 npm run id-agents
 ```
 
 ### 3) Deploy and talk to agents
