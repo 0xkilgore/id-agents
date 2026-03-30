@@ -11,7 +11,7 @@
 
 **Version 0.1.33-beta**
 
-Multi-agent orchestration optimized for a single chat interface. Your Claude Code session is the control plane — you talk to it, it coordinates a team of agents that are real coding processes with full tool access. No UI, no dashboard. The manager runs headless over SSH, Telegram, or mobile, and supports mixed runtimes (Claude Code and OpenAI Codex) in the same team.
+Run a team of AI coding agents from a single chat. Each agent is a real process with full tool access — Claude Code, OpenAI Codex, or both. No UI needed. Connect from any terminal, Telegram, or SSH session.
 
 ## Key Features
 
