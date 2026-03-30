@@ -1,32 +1,18 @@
-# Example: Single Agent Configuration
+# Example: Single Agent (Claude Code)
 # Deploy with: /deploy configs/example-single.yaml
 
 version: "1"
 
-# Onchain registration settings (Sepolia testnet)
-# When enabled, agents get a unique tokenId on deploy (e.g., coder.42)
-onchain:
-  register: true  # Auto-register all agents (can override per-agent)
-
 defaults:
-  requireAuth: true
-  apiKey: ${env:ID_AGENT_API_KEY}
+  local: true
+  runtime: claude-code-cli
+  skills:
+    - identity
+    - inter-agent
+    - catalog
 
 agents:
   - name: coder
     description: "A coding assistant agent"
-    model: claude-sonnet-4-20250514
-    register: true  # Per-agent override (optional, inherits from onchain.register)
-    plugins:
-      - name: id-rest-ap
-        path: ../plugins/claude-code/id-rest-ap
-    allowedTools:
-      - Read
-      - Write
-      - Edit
-      - Bash
-      - Glob
-      - Grep
-    container:
-      memory: 2g
-      cpus: 1.0
+    model: claude-opus-4-6
+    workingDirectory: /path/to/project
