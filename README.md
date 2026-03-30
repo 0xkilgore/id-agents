@@ -117,11 +117,18 @@ MANAGER_PORT=5000 npm run id-agents
 /ask coder Write a hello world function
 ```
 
-### Mobile Access
+### Connecting a Manager
 
-When you run `npm run id-agents`, you're just running a normal Claude Code CLI session. You can connect it to your phone the same way you'd connect any Claude Code session — via Telegram, the Claude Code app, or any other channel. There's nothing special about the manager; it's just a Claude Code session with your agent team available via `/remote`.
+ID Agents runs the servers and agent processes. You connect to it through a "manager" — any AI coding agent that can reach the `/remote` API. This can be Claude Code CLI, Codex, OpenClaw, or any other agent that can make HTTP requests.
 
-> **Tip:** Connect your mobile device to this session (the one running the manager), not to individual agent sessions. From here you can `/ask` any agent, `/deploy` teams, check `/status`, and manage everything through one connection. See the [Claude Code docs](https://docs.anthropic.com/en/docs/claude-code) for mobile setup options.
+```bash
+# The manager is whatever you're chatting in — it controls the team via /remote
+curl -s -X POST http://localhost:4100/remote \
+  -H "Content-Type: application/json" \
+  -d '{"command":"/status"}'
+```
+
+Connect from anywhere — terminal, mobile (via Telegram), SSH, or any tool that can POST to `/remote`.
 
 ## REST-AP Protocol
 
