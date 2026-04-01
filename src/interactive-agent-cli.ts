@@ -2390,7 +2390,7 @@ async function handleLine(line: string) {
 
     if (!agentName) {
       console.log(`\n${colors.red}❌ Usage: /wallet <agent> [chain]${colors.reset}`);
-      console.log(`${colors.gray}  Examples: /wallet contracts eip155:11155111${colors.reset}`);
+      console.log(`${colors.gray}  Examples: /wallet contracts eip155:8453${colors.reset}`);
       console.log(`${colors.gray}           /wallet contracts solana${colors.reset}`);
       console.log(`${colors.gray}           /wallet contracts all${colors.reset}\n`);
       rl.prompt();

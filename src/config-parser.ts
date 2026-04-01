@@ -71,7 +71,7 @@ export interface CalendarSpec {
 export interface OnchainConfig {
   registryAddress?: string;           // ERC-6551 registry address
   registrarAddress?: string;          // Registrar contract for minting
-  chainId?: number;                   // Chain ID (default: 11155111 for Sepolia)
+  chainId?: number;                   // Chain ID (default: 8453 for Base)
   register?: boolean;                 // Auto-register all agents by default
 }
 

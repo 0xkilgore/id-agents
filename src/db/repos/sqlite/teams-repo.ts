@@ -64,7 +64,7 @@ export class SqliteTeamsRepo implements TeamsRepository {
   async setRegistrarAddress(teamId: string, address: string): Promise<void> {
     // Read-merge-write: no jsonb_set in SQLite
     const config = await this.getConfig(teamId);
-    config.sepolia_registrar_address = address;
+    config.registrar_address = address;
     await this.db.query(
       `UPDATE teams SET config = ? WHERE id = ?`,
       [stringifyJson(config), teamId],

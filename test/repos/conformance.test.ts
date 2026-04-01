@@ -92,18 +92,18 @@ describe('TeamsRepository', () => {
     assert.deepStrictEqual(config, {});
   });
 
-  it('setRegistrarAddress updates config.sepolia_registrar_address correctly', async () => {
+  it('setRegistrarAddress updates config.registrar_address correctly', async () => {
     const teamId = await db.teams.getOrCreateTeamId('reg-team');
     await db.teams.setRegistrarAddress(teamId, '0xABC123');
     const config = await db.teams.getConfig(teamId);
-    assert.equal(config.sepolia_registrar_address, '0xABC123');
+    assert.equal(config.registrar_address, '0xABC123');
   });
 
   it('setDefaultRegistry updates config.default_chain_id and default_registry_address', async () => {
     const teamId = await db.teams.getOrCreateTeamId('reg-team2');
-    await db.teams.setDefaultRegistry(teamId, '11155111', '0xDEF456');
+    await db.teams.setDefaultRegistry(teamId, '8453', '0xDEF456');
     const config = await db.teams.getConfig(teamId);
-    assert.equal(config.default_chain_id, '11155111');
+    assert.equal(config.default_chain_id, '8453');
     assert.equal(config.default_registry_address, '0xDEF456');
   });
 

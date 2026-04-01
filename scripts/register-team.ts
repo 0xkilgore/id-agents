@@ -9,13 +9,13 @@ import 'dotenv/config';
 const TEAM_MEMBERS = ['project-manager', 'backend-dev', 'frontend-dev', 'copywriter'];
 
 async function main() {
-  const rpcUrl = process.env.SEPOLIA_RPC_URL;
+  const rpcUrl = process.env.BASE_RPC_URL || process.env.RPC_URL;
   const registrarKey = process.env.ID_REGISTRAR_PRIVATE_KEY as Hex;
   const registrarAddress = process.env.AGENT_REGISTRAR_ADDRESS as Address;
-  const chainId = parseInt(process.env.REGISTRY_CHAIN_ID || '11155111');
+  const chainId = parseInt(process.env.REGISTRY_CHAIN_ID || '8453');
 
   if (!rpcUrl || !registrarKey || !registrarAddress) {
-    console.error('Missing env vars: SEPOLIA_RPC_URL, ID_REGISTRAR_PRIVATE_KEY, AGENT_REGISTRAR_ADDRESS');
+    console.error('Missing env vars: BASE_RPC_URL, ID_REGISTRAR_PRIVATE_KEY, AGENT_REGISTRAR_ADDRESS');
     process.exit(1);
   }
 

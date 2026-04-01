@@ -59,7 +59,7 @@ export class PgTeamsRepo implements TeamsRepository {
   async setRegistrarAddress(teamId: string, address: string): Promise<void> {
     await this.db.query(
       `UPDATE teams
-       SET config = jsonb_set(config, '{sepolia_registrar_address}', to_jsonb($2::text), true)
+       SET config = jsonb_set(config, '{registrar_address}', to_jsonb($2::text), true)
        WHERE id = $1`,
       [teamId, String(address)],
     );

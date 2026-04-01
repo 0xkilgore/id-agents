@@ -499,7 +499,7 @@ export class AgentManagerDb {
 
   private async getDefaultRegistry(teamId: string): Promise<AgentRegistryId> {
     const cfg = await this.db.teams.getConfig(teamId);
-    const chainId = parseInt(String(cfg.default_chain_id || process.env.ID_DEFAULT_CHAIN_ID || '11155111'));
+    const chainId = parseInt(String(cfg.default_chain_id || process.env.ID_DEFAULT_CHAIN_ID || '8453'));
     const registryAddress =
       (cfg.default_registry_address ||
         process.env.AGENT_REGISTRY_ADDRESS ||
@@ -510,9 +510,9 @@ export class AgentManagerDb {
 
   private async getRegistrarAddress(teamId: string): Promise<Address> {
     const cfg = await this.db.teams.getConfig(teamId);
-    const registrarAddressEnv = process.env.AGENT_REGISTRAR_ADDRESS || process.env.SEPOLIA_REGISTRAR_ADDRESS || process.env.ID_REGISTRAR_ADDRESS;
-    const addr = (cfg.sepolia_registrar_address || registrarAddressEnv) as string | undefined;
-    if (!addr) throw new Error('Missing registrar address (set config.sepolia_registrar_address or env AGENT_REGISTRAR_ADDRESS)');
+    const registrarAddressEnv = process.env.AGENT_REGISTRAR_ADDRESS || process.env.ID_REGISTRAR_ADDRESS;
+    const addr = (cfg.registrar_address || cfg.sepolia_registrar_address || registrarAddressEnv) as string | undefined;
+    if (!addr) throw new Error('Missing registrar address (set config.registrar_address or env AGENT_REGISTRAR_ADDRESS)');
     return addr as Address;
   }
 
@@ -1456,7 +1456,7 @@ export class AgentManagerDb {
           const registryInfo = {
             chainId: (config as any).default_chain_id,
             registryAddress: (config as any).default_registry_address,
-            registrarAddress: (config as any).sepolia_registrar_address
+            registrarAddress: (config as any).registrar_address || (config as any).sepolia_registrar_address
           };
 
           return {
@@ -3587,7 +3587,7 @@ export class AgentManagerDb {
               DISPLAY_NAME: configDomain || agentConfig.name,
               TEAM: effectiveTeamName,
               ONCHAIN_IDENTITY: configDomain
-                ? `Your onchain identity is your ENS domain: **${configDomain}**\nThe chain is encoded in the domain name (e.g., sep.xid.eth = Sepolia, base.xid.eth = Base).`
+                ? `Your onchain identity is your ENS domain: **${configDomain}**`
                 : '',
               ORG_CONTEXT: orgContext
                 ? `\n## Your Role\n\n${orgContext}\n\nSee the full org chart at the shared team folder for details on all groups.`
@@ -3912,7 +3912,7 @@ export class AgentManagerDb {
 
         if (!subCmd) {
           // Show default registry
-          const chainId = process.env.REGISTRY_CHAIN_ID || '11155111';
+          const chainId = process.env.REGISTRY_CHAIN_ID || '8453';
           const registryAddress = process.env.REGISTRY_ADDRESS || '';
           const registrarAddress = process.env.REGISTRAR_ADDRESS || '';
           return {

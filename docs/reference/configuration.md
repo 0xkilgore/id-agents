@@ -13,7 +13,7 @@ parameters:
     default: development
 
 onchain:
-  chainId: 11155111
+  chainId: 8453
   registryAddress: "0x..."
   registrarAddress: "0x..."
   register: true
@@ -110,7 +110,7 @@ Configuration for onchain agent registration.
 
 ```yaml
 onchain:
-  chainId: 11155111
+  chainId: 8453
   registryAddress: "0xABC..."
   registrarAddress: "0xDEF..."
   register: true
@@ -120,7 +120,7 @@ onchain:
 
 | Field | Required | Description |
 |-------|----------|-------------|
-| `chainId` | Yes | EVM chain ID (e.g., 11155111 for Sepolia) |
+| `chainId` | Yes | EVM chain ID (e.g., 8453 for Base) |
 | `registryAddress` | Yes | Agent registry contract address |
 | `registrarAddress` | No | Registrar contract address for registration |
 | `register` | No | Default registration setting for all agents |
@@ -431,7 +431,7 @@ parameters:
     default: sonnet
 
 onchain:
-  chainId: 11155111
+  chainId: 8453
   registryAddress: "0x1234567890abcdef1234567890abcdef12345678"
   registrarAddress: "0xabcdef1234567890abcdef1234567890abcdef12"
   register: false

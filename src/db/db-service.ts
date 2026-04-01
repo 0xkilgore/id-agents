@@ -40,7 +40,7 @@ export interface TeamsRepository {
   /** List all teams with their full config (for /projects compat). */
   listTeamsWithConfig(): Promise<TeamRow[]>;
 
-  /** Set the sepolia_registrar_address in the team config. */
+  /** Set the registrar_address in the team config. */
   setRegistrarAddress(teamId: string, address: string): Promise<void>;
 
   /** Set both default_chain_id and default_registry_address in the team config. */
