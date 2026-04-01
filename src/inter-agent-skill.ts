@@ -97,13 +97,13 @@ Returns:
 \`\`\`json
 {
   "agents": [
-    {"name": "agent-1.sep.xid.eth", "alias": "coder", "tokenId": "agent-1", "status": "running"},
-    {"name": "agent-2.sep.xid.eth", "alias": "researcher", "tokenId": "agent-2", "status": "running"}
+    {"name": "agent-1.xid.eth", "alias": "coder", "tokenId": "agent-1", "status": "running"},
+    {"name": "agent-2.xid.eth", "alias": "researcher", "tokenId": "agent-2", "status": "running"}
   ]
 }
 \`\`\`
 
-**IMPORTANT:** The \`name\` field is the agent's full identifier (ENS domain after registration, e.g., "agent-1.sep.xid.eth", or local name before registration). Always use this name when sending messages to agents. The \`alias\` field is the original local name.
+**IMPORTANT:** The \`name\` field is the agent's full identifier (ENS domain after registration, e.g., "agent-1.xid.eth", or local name before registration). Always use this name when sending messages to agents. The \`alias\` field is the original local name.
 
 ## Examples
 

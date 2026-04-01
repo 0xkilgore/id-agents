@@ -1129,7 +1129,7 @@ export class ClaudeAgentServer {
 
   /**
    * Get the formatted display identifier for this agent
-   * Returns ENS domain (e.g., "agent-5.sep.xid.eth") if registered,
+   * Returns ENS domain (e.g., "agent-5.xid.eth") if registered,
    * falls back to the local alias if not.
    */
   public getDisplayId(): string {

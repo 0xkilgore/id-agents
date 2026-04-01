@@ -21,7 +21,7 @@ Run a team of AI coding agents from a single chat. Each agent is a real process 
 - **Org chart** - Define team structure with groups and tags so agents know their peers and leads
 - **Skills & plugins** - Standard Claude Code skills and plugins, declared in config and deployed to each agent
 - **Agent wallets** - Automatic multi-chain wallets via [OWS](https://github.com/open-wallet-standard/core)
-- **Onchain identity** - ENS-based agent identity via ID Chain (e.g., `x.agent-15.sep.xid.eth`)
+- **Onchain identity** - ENS-based agent identity via ID Chain (e.g., `x.agent-15.xid.eth`)
 - **Remote API** - Programmatic management via `/remote` endpoint and `/tasks` REST API
 
 ## Architecture
@@ -421,8 +421,7 @@ version: "1"
 team: my-team
 
 onchain:
-  chainId: 11155111
-  registryAddress: "0xceb79FcAfe0E9F3513fb70fB8A3841302dB4f477"
+  chainId: 8453
 
 defaults:
   local: true
@@ -445,7 +444,7 @@ agents:
       interval: 300
       message: "Review open PRs and summarize risks"
       delivery: internal
-    domain: coder.agent-1.sep.xid.eth  # Preserved across redeploys
+    domain: coder.agent-1.xid.eth  # Preserved across redeploys
     tokenId: "0xabcd..."               # Namehash of the ENS domain
   - name: researcher
     description: "Research and analysis"
@@ -473,13 +472,13 @@ Agents register on [ID Chain](https://github.com/idchain-world) for verifiable E
 ```
 
 This does two things:
-1. Registers a sequential agent name (e.g., `agent-15.sep.xid.eth`)
-2. Creates a subname with the agent's local alias (e.g., `x.agent-15.sep.xid.eth`)
+1. Registers a sequential agent name (e.g., `agent-15.xid.eth`)
+2. Creates a subname with the agent's local alias (e.g., `x.agent-15.xid.eth`)
 
 The subname is the agent's primary identity. The `tokenId` is the bytes32 namehash of the full ENS name — the true onchain identifier.
 
 **Identity format:**
-- `x.agent-15.sep.xid.eth` (default: alias.sequential-name.chain.xid.eth)
+- `x.agent-15.xid.eth` (default: alias.sequential-name.xid.eth)
 - `myagent.eth` (custom ENS name, linked via ENS)
 
 Once registered, the `domain` and `tokenId` can be saved in the YAML config to persist the identity across redeploys.

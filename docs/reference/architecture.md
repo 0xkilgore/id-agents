@@ -99,8 +99,8 @@ User types: /ask coder hello
 
 Each agent can register on ID Chain for a verifiable ENS name:
 
-1. `/register <agent>` calls `id-cli register` → gets `agent-N.sep.xid.eth`
-2. Automatically creates a subname: `<alias>.agent-N.sep.xid.eth`
+1. `/register <agent>` calls `id-cli register` → gets `agent-N.xid.eth`
+2. Automatically creates a subname: `<alias>.agent-N.xid.eth`
 3. The `tokenId` is the bytes32 namehash of the full ENS name
 4. Identity persisted in YAML config (`domain`, `tokenId`, `address` fields)
 

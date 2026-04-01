@@ -1,6 +1,6 @@
 # Security Audit: ID Agents (2026-03-27)
 
-**Audited by:** agents.agent-16.sep.xid.eth
+**Audited by:** agents.agent-16.xid.eth
 **Scope:** Full codebase — input validation, injection, secrets, path traversal, deploy-upsert, changes since last review
 **Method:** Parallel sub-agent audits (4 agents) with manual consolidation
 **Architecture note:** API key auth intentionally removed (trusted local setup). All servers bind to `127.0.0.1`.

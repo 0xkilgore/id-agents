@@ -50,7 +50,7 @@ export interface AgentSpec {
   talkTimeout?: number;               // Default timeout for /talk-to in ms (default: 120000, max: 600000)
   heartbeatFile?: string;             // Path to heartbeat yaml config (relative to config file)
   heartbeat?: HeartbeatConfig;        // Resolved heartbeat config (set by processConfig)
-  domain?: string;                    // ENS domain name (e.g., "x.agent-15.sep.xid.eth")
+  domain?: string;                    // ENS domain name (e.g., "x.agent-15.xid.eth")
   tokenId?: string;                   // Namehash of the ENS domain (bytes32)
   address?: string;                   // Ethereum address (links to .env.<name>.<address> file)
 }

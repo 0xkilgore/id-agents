@@ -72,7 +72,7 @@ export interface AgentInfo {
   metadata?: AgentMetadata;
   // Identity fields
   tokenId?: string;           // Token ID / label (e.g., "agent-5")
-  domain?: string;            // ENS domain name (e.g., "agent-5.base.xid.eth") — the identity
+  domain?: string;            // ENS domain name (e.g., "agent-5.xid.eth") — the identity
   displayId?: string;         // Formatted display identifier
 }
 

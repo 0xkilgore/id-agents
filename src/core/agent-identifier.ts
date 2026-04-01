@@ -2,14 +2,14 @@
 /**
  * Agent Identifier utilities
  *
- * Agent identities are ENS domain names such as "agent-5.sep.xid.eth" or
+ * Agent identities are ENS domain names such as "agent-5.xid.eth" or
  * "myagent.eth".  The ENS domain is the primary and only identity format.
  *
  * Before registration: agent name is the local config name (e.g., "x", "gateway").
- * After registration: agent name becomes the full ENS domain (e.g., "agent-5.sep.xid.eth").
+ * After registration: agent name becomes the full ENS domain (e.g., "agent-5.xid.eth").
  *
  * Examples:
- *   - agent-5.sep.xid.eth
+ *   - agent-5.xid.eth
  *   - myagent.eth
  *   - gateway (unregistered, local name only)
  */
@@ -17,7 +17,7 @@
 export interface AgentIdentifier {
   alias?: string;       // Human readable local name (e.g., "gateway")
   tokenId?: string;     // Token ID / label (e.g., "agent-5")
-  domain?: string;      // ENS domain name (e.g., "agent-5.sep.xid.eth") - primary identity
+  domain?: string;      // ENS domain name (e.g., "agent-5.xid.eth") - primary identity
 }
 
 export interface ParsedAgentRef {
@@ -31,7 +31,7 @@ export interface ParsedAgentRef {
  * Parse an agent reference string into components
  *
  * Supported formats:
- *   - agent-5.sep.xid.eth (ENS domain – primary)
+ *   - agent-5.xid.eth (ENS domain – primary)
  *   - myagent.eth (ENS domain – primary)
  *   - alias (lookup by local name)
  */
