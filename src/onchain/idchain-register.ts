@@ -3,10 +3,7 @@
  * ID Chain Registration via id-cli
  *
  * Shells out to the `id-cli` CLI to register agents on ID Chain
- * (IDAgentRegistrar on Base/Ethereum/Optimism/Arbitrum).
- *
- * Replaces the old ERC-6909 agent-registry.ts which called a
- * different NFT contract directly via viem.
+ * (IDAgentRegistrar on Base).
  */
 
 import { execFile, execFileSync } from 'child_process';
@@ -26,7 +23,7 @@ function buildIdCliEnv(opts: { privateKey?: string; wallet?: string }): Record<s
 }
 
 export interface IdChainRegisterResult {
-  domain: string;       // e.g. "agent-10.base.xid.eth"
+  domain: string;       // e.g. "agent-10.xid.eth"
   label: string;        // e.g. "agent-10"
   txHash: string;
   chainId: number;
@@ -44,13 +41,11 @@ export interface IdChainEndpointsResult {
  * Returns the domain name and label assigned by the sequential registrar.
  */
 export async function registerOnIdChain(opts: {
-  chain?: string;
   textRecords?: Record<string, string>;
   privateKey?: string;
   wallet?: string;
 }): Promise<IdChainRegisterResult> {
-  const chain = opts.chain || 'base';
-  const args = ['register', '--chain', chain, '--output', 'json'];
+  const args = ['register', '--output', 'json'];
 
   if (opts.textRecords) {
     for (const [key, value] of Object.entries(opts.textRecords)) {
@@ -60,7 +55,7 @@ export async function registerOnIdChain(opts: {
 
   const env = buildIdCliEnv(opts);
 
-  console.log(`[ID Chain] Registering agent on ${chain} via id-cli...`);
+  console.log(`[ID Chain] Registering agent on Base via id-cli...`);
 
   const { stdout } = await execFileAsync('id-cli', args, {
     encoding: 'utf8',
@@ -89,7 +84,6 @@ export async function registerOnIdChain(opts: {
  */
 export async function setAgentEndpoints(opts: {
   name: string;
-  chain?: string;
   privateKey?: string;
   wallet?: string;
   mcp?: string;
@@ -97,8 +91,7 @@ export async function setAgentEndpoints(opts: {
   web?: string;
   context?: string;
 }): Promise<IdChainEndpointsResult> {
-  const chain = opts.chain || 'base';
-  const args = ['set-agent-endpoints', opts.name, '--chain', chain, '--output', 'json'];
+  const args = ['set-agent-endpoints', opts.name, '--output', 'json'];
 
   if (opts.mcp) args.push('--mcp', opts.mcp);
   if (opts.a2a) args.push('--a2a', opts.a2a);
@@ -128,20 +121,18 @@ export async function setAgentEndpoints(opts: {
 
 /**
  * Create a subname under an existing agent name via `id-cli create-subname`.
- * e.g. createSubnameOnIdChain({ parent: 'agent-10', sublabel: 'x', chain: 'sepolia' })
- *   → id-cli create-subname agent-10 x --chain sepolia --output json
- *   → x.agent-10.sep.xid.eth
+ * e.g. createSubnameOnIdChain({ parent: 'agent-10', sublabel: 'x' })
+ *   → id-cli create-subname agent-10 x --output json
+ *   → x.agent-10.xid.eth
  */
 export async function createSubnameOnIdChain(opts: {
   sublabel: string;
   parent: string;
-  chain?: string;
   privateKey?: string;
   wallet?: string;
   owner?: string;
 }): Promise<{ domain: string; txHash: string }> {
-  const chain = opts.chain || 'base';
-  const args = ['create-subname', opts.sublabel, '--parent', opts.parent, '--chain', chain, '--output', 'json'];
+  const args = ['create-subname', opts.sublabel, '--parent', opts.parent, '--output', 'json'];
 
   if (opts.owner) args.push('--owner', opts.owner);
 
@@ -165,10 +156,8 @@ export async function createSubnameOnIdChain(opts: {
  */
 export async function getAgentInfo(opts: {
   name: string;
-  chain?: string;
 }): Promise<any> {
-  const chain = opts.chain || 'base';
-  const args = ['info', opts.name, '--chain', chain, '--output', 'json'];
+  const args = ['info', opts.name, '--output', 'json'];
 
   const { stdout } = await execFileAsync('id-cli', args, {
     encoding: 'utf8',
@@ -238,7 +227,6 @@ function parseOwsWalletAddresses(walletName: string): Map<string, string> {
 export async function setMultiChainAddresses(opts: {
   name: string;
   walletName: string;
-  chain?: string;
   privateKey?: string;
   wallet?: string;
 }): Promise<{ set: string[]; skipped: string[] }> {
@@ -250,7 +238,6 @@ export async function setMultiChainAddresses(opts: {
     return { set, skipped: ['no-addresses'] };
   }
 
-  const idCliChain = opts.chain || 'base';
   const env = buildIdCliEnv(opts);
 
   // Build batch of coin types and addresses for a single set-record call
@@ -284,7 +271,6 @@ export async function setMultiChainAddresses(opts: {
   try {
     const args = [
       'set-record', opts.name,
-      '--chain', idCliChain,
       '--output', 'json',
     ];
 

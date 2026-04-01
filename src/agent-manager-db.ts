@@ -423,7 +423,7 @@ export class AgentManagerDb {
 
     return {
       id: a.id,
-      // name is the displayId (e.g., "agent-5.base.xid.eth") for inter-agent communication
+      // name is the displayId (e.g., "agent-5.xid.eth") for inter-agent communication
       // alias is the base name (e.g., "agent") for backwards compatibility
       name: displayId,
       alias,
@@ -535,10 +535,6 @@ export class AgentManagerDb {
     const chainId = defaultReg.chainId;
     const registryAddress = defaultReg.registryAddress as Address;
 
-    // Map chainId to id-cli chain name
-    const chainNames: Record<number, string> = { 8453: 'base', 1: 'eth', 10: 'op', 42161: 'arb', 11155111: 'sepolia' };
-    const chain = chainNames[chainId] || 'base';
-
     // Build text records for registration
     const textRecords: Record<string, string> = {};
     textRecords['description'] = `${agent.name} agent`;
@@ -551,17 +547,16 @@ export class AgentManagerDb {
           ? (agent.endpoint as string)
           : ((agent.metadata as any)?.service || `http://localhost:${agent.port}`));
 
-    console.log(`[Register] Registering "${agent.name}" on ID Chain (${chain})...`);
+    console.log(`[Register] Registering "${agent.name}" on ID Chain (Base)...`);
 
-    // Register via id-cli
+    // Register via id-cli (Base only)
     const result = await registerOnIdChain({
-      chain,
       textRecords,
       ...signerOpts,
     });
 
     // ENSIP-26 agent endpoints can be set later via:
-    //   id-cli set-agent-endpoints <domain> --a2a <url> --chain <chain>
+    //   id-cli set-agent-endpoints <domain> --a2a <url>
     // Skipped by default for private/local systems.
 
     // Use the label as tokenId for backward compat; domain is the primary identifier
@@ -584,7 +579,7 @@ export class AgentManagerDb {
     const dbEndpoint = isLocalAgent ? (agent.endpoint || `http://localhost:${agent.port}`) : agentEndpoint;
 
     // Create a subname using the agent's local alias under the registered domain
-    // e.g. register gets agent-10.sep.xid.eth, then create x.agent-10.sep.xid.eth
+    // e.g. register gets agent-10.xid.eth, then create x.agent-10.xid.eth
     let newName = result.domain;
     try {
       const sublabel = originalAlias;
@@ -592,7 +587,6 @@ export class AgentManagerDb {
       const subResult = await createSubnameOnIdChain({
         sublabel,
         parent: result.label,
-        chain,
         ...signerOpts,
       });
       newName = subResult.domain;
@@ -609,7 +603,6 @@ export class AgentManagerDb {
         const addrResult = await setMultiChainAddresses({
           name: newName,
           walletName: owsWalletName,
-          chain,
           ...signerOpts,
         });
         if (addrResult.set.length > 0) {
@@ -3352,10 +3345,6 @@ export class AgentManagerDb {
         }
         const syncSignerOpts = owsRegWallet ? { wallet: owsRegWallet } : { privateKey: syncPk! };
 
-        const defaultReg = await this.getDefaultRegistry(teamId);
-        const chainNames: Record<number, string> = { 8453: 'base', 1: 'eth', 10: 'op', 42161: 'arb', 11155111: 'sepolia' };
-        const chain = chainNames[defaultReg.chainId] || 'base';
-
         const agents = await this.dbListAgents(teamId);
         const results: any[] = [];
         let synced = 0;
@@ -3381,7 +3370,6 @@ export class AgentManagerDb {
             const addrResult = await setMultiChainAddresses({
               name: domain,
               walletName: owsWallet,
-              chain,
               ...syncSignerOpts,
             });
             synced++;
