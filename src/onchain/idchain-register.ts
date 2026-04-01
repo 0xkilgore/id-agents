@@ -41,11 +41,16 @@ export interface IdChainEndpointsResult {
  * Returns the domain name and label assigned by the sequential registrar.
  */
 export async function registerOnIdChain(opts: {
+  sublabel?: string;
   textRecords?: Record<string, string>;
   privateKey?: string;
   wallet?: string;
 }): Promise<IdChainRegisterResult> {
   const args = ['register', '--output', 'json'];
+
+  if (opts.sublabel) {
+    args.push('--sublabel', opts.sublabel);
+  }
 
   if (opts.textRecords) {
     for (const [key, value] of Object.entries(opts.textRecords)) {

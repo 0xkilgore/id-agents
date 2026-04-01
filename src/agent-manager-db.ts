@@ -549,8 +549,11 @@ export class AgentManagerDb {
 
     console.log(`[Register] Registering "${agent.name}" on ID Chain (Base)...`);
 
-    // Register via id-cli (Base only)
+    // Register via id-cli with sublabel (Base only)
+    // e.g., --sublabel x → x.agent-8.xid.eth in one transaction
+    const originalAlias = ((agent.metadata as any)?.alias || agent.name);
     const result = await registerOnIdChain({
+      sublabel: originalAlias,
       textRecords,
       ...signerOpts,
     });
@@ -566,10 +569,10 @@ export class AgentManagerDb {
     // can still be found by its pre-registration name after `name` is
     // changed to the full ENS domain.
     let metadata = (agent.metadata || {}) as AgentMetadata;
-    const originalAlias = (metadata as any).alias || agent.name;
+    const newName = result.domain; // Already includes sublabel (e.g., x.agent-8.xid.eth)
     metadata = {
       ...metadata,
-      idchain_domain: result.domain,
+      idchain_domain: newName,
       service_type: 'REST-AP',
       alias: originalAlias,
     };
@@ -577,24 +580,6 @@ export class AgentManagerDb {
     // Keep the agent's internal endpoint for manager-to-agent communication
     const isLocalAgent = (metadata as any).local === true;
     const dbEndpoint = isLocalAgent ? (agent.endpoint || `http://localhost:${agent.port}`) : agentEndpoint;
-
-    // Create a subname using the agent's local alias under the registered domain
-    // e.g. register gets agent-10.xid.eth, then create x.agent-10.xid.eth
-    let newName = result.domain;
-    try {
-      const sublabel = originalAlias;
-      console.log(`[Register] Creating subname ${sublabel}.${result.domain}...`);
-      const subResult = await createSubnameOnIdChain({
-        sublabel,
-        parent: result.label,
-        ...signerOpts,
-      });
-      newName = subResult.domain;
-      metadata.idchain_domain = newName;
-      console.log(`[Register] Subname created: ${newName} (tx: ${subResult.txHash})`);
-    } catch (subErr: any) {
-      console.warn(`[Register] Subname creation failed: ${subErr.message}. Using base domain: ${result.domain}`);
-    }
 
     // Set multi-chain address records if agent has an OWS wallet
     const owsWalletName = (metadata as any).ows_wallet;
