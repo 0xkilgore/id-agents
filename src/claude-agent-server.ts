@@ -1635,8 +1635,9 @@ ${prompt}`
         console.log(`  All agents in your team can read/write here directly.`);
         console.log(`\n`);
 
-        // Start XMTP if wallet key is available
-        if (process.env.XMTP_WALLET_KEY && process.env.XMTP_DB_ENCRYPTION_KEY) {
+        // Start XMTP if wallet is available (OWS wallet or raw key)
+        const hasXmtpWallet = process.env.OWS_WALLET || process.env.XMTP_WALLET_KEY;
+        if (hasXmtpWallet && process.env.XMTP_DB_ENCRYPTION_KEY) {
           this.startXmtp(port).catch(err => {
             console.warn(`[XMTP] Failed to start: ${err.message}`);
           });
@@ -1665,7 +1666,9 @@ ${prompt}`
       fs.mkdirSync(xmtpDir, { recursive: true });
     }
 
-    this.xmtp = new XmtpMessaging({ env, dbPath });
+    // Prefer OWS wallet for signing (key stays in vault), fall back to raw key
+    const owsWallet = process.env.OWS_WALLET;
+    this.xmtp = new XmtpMessaging({ env, dbPath, owsWallet });
 
     // Inbound handler: route XMTP messages through the agent's /talk pipeline
     this.xmtp.setMessageHandler(async (inbound: InboundMessage) => {

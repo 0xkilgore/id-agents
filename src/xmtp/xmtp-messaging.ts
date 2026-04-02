@@ -20,6 +20,8 @@ import { EventEmitter } from 'events';
 export interface XmtpConfig {
   /** Wallet private key (hex). Falls back to XMTP_WALLET_KEY env var. */
   walletKey?: string;
+  /** OWS wallet name. If set, uses OWS for signing instead of raw key. */
+  owsWallet?: string;
   /** DB encryption key (64 hex chars). Falls back to XMTP_DB_ENCRYPTION_KEY env var. */
   dbEncryptionKey?: string;
   /** XMTP network: 'local' | 'dev' | 'production'. Falls back to XMTP_ENV. */
@@ -151,10 +153,24 @@ export class XmtpMessaging extends EventEmitter {
     // Set up name resolver for ENS lookups
     this.resolveAddress = createNameResolver(process.env.WEB3_BIO_API_KEY || '');
 
-    this.agent = await Agent.createFromEnv({
-      ...(this.config.env && { env: this.config.env }),
-      ...(this.config.dbPath && { dbPath: () => this.config.dbPath! }),
-    });
+    // Determine signer: OWS wallet (preferred) or raw key (fallback)
+    const owsWallet = this.config.owsWallet || process.env.OWS_WALLET;
+    if (owsWallet) {
+      // Use OWS for signing — private key never leaves the vault
+      const { createOwsSigner } = await import('./ows-signer.js');
+      const { signer, address } = createOwsSigner(owsWallet);
+      console.log(`[XMTP] Using OWS wallet "${owsWallet}" (${address})`);
+      this.agent = await Agent.create(signer, {
+        ...(this.config.env && { env: this.config.env }),
+        ...(this.config.dbPath && { dbPath: () => this.config.dbPath! }),
+      });
+    } else {
+      // Fallback: raw key from env
+      this.agent = await Agent.createFromEnv({
+        ...(this.config.env && { env: this.config.env }),
+        ...(this.config.dbPath && { dbPath: () => this.config.dbPath! }),
+      });
+    }
 
     // Handle incoming text messages
     this.agent.on('text', async (ctx: MessageContext) => {
