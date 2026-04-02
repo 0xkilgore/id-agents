@@ -1668,7 +1668,7 @@ ${prompt}`
 
     // Prefer OWS wallet for signing (key stays in vault), fall back to raw key
     const owsWallet = process.env.OWS_WALLET;
-    this.xmtp = new XmtpMessaging({ env, dbPath, owsWallet });
+    this.xmtp = new XmtpMessaging({ env, dbPath, owsWallet, workingDirectory: this.workingDirectory });
 
     // Inbound handler: route XMTP messages through the agent's /talk pipeline
     this.xmtp.setMessageHandler(async (inbound: InboundMessage) => {

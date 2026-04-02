@@ -15,6 +15,8 @@
 import { Agent, createNameResolver, type MessageContext } from '@xmtp/agent-sdk';
 import { EventEmitter } from 'events';
 import { execFileSync } from 'child_process';
+import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'fs';
+import path from 'path';
 
 // ---------- Types ----------
 
@@ -29,6 +31,8 @@ export interface XmtpConfig {
   env?: 'local' | 'dev' | 'production';
   /** Optional DB path override. */
   dbPath?: string;
+  /** Working directory for persisting .xmtp/ data (allowlist, DB). */
+  workingDirectory?: string;
 }
 
 export interface InboundMessage {
@@ -108,6 +112,7 @@ export class XmtpMessaging extends EventEmitter {
     // Already a wallet address
     if (addressOrName.match(/^0x[a-fA-F0-9]{40}$/)) {
       this.allowedSenders.add(addressOrName.toLowerCase());
+      this.saveAllowlist();
       console.log(`[XMTP] Allowed sender: ${addressOrName}`);
       return addressOrName;
     }
@@ -119,6 +124,7 @@ export class XmtpMessaging extends EventEmitter {
     const resolved = await this.resolveAddress(addressOrName);
     if (resolved) {
       this.allowedSenders.add(resolved.toLowerCase());
+      this.saveAllowlist();
       console.log(`[XMTP] Allowed sender: ${addressOrName} → ${resolved}`);
       return resolved;
     }
@@ -129,6 +135,7 @@ export class XmtpMessaging extends EventEmitter {
   /** Remove a sender from the allowlist. */
   removeSender(address: string): void {
     this.allowedSenders.delete(address.toLowerCase());
+    this.saveAllowlist();
   }
 
   /** Check if a sender address is allowed (or if allowlist is empty = open mode). */
@@ -142,6 +149,45 @@ export class XmtpMessaging extends EventEmitter {
     return this.allowedSenders.has(address.toLowerCase());
   }
 
+  /** Get the path to .xmtp/allowlist.json */
+  private getAllowlistPath(): string | null {
+    const dir = this.config.workingDirectory;
+    if (!dir) return null;
+    return path.join(dir, '.xmtp', 'allowlist.json');
+  }
+
+  /** Load allowlist from .xmtp/allowlist.json */
+  private loadAllowlist(): void {
+    const filePath = this.getAllowlistPath();
+    if (!filePath || !existsSync(filePath)) return;
+    try {
+      const data = JSON.parse(readFileSync(filePath, 'utf8'));
+      if (Array.isArray(data)) {
+        for (const addr of data) {
+          if (typeof addr === 'string') {
+            this.allowedSenders.add(addr.toLowerCase());
+          }
+        }
+        console.log(`[XMTP] Loaded ${data.length} allowed senders from ${filePath}`);
+      }
+    } catch (err: any) {
+      console.warn(`[XMTP] Failed to load allowlist: ${err.message}`);
+    }
+  }
+
+  /** Save allowlist to .xmtp/allowlist.json */
+  private saveAllowlist(): void {
+    const filePath = this.getAllowlistPath();
+    if (!filePath) return;
+    try {
+      const dir = path.dirname(filePath);
+      if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+      writeFileSync(filePath, JSON.stringify([...this.allowedSenders], null, 2) + '\n');
+    } catch (err: any) {
+      console.warn(`[XMTP] Failed to save allowlist: ${err.message}`);
+    }
+  }
+
   /** Get the agent's wallet address (available after start). */
   get address(): string | null {
     return this.agent?.address ?? null;
@@ -150,6 +196,9 @@ export class XmtpMessaging extends EventEmitter {
   /** Start the XMTP agent and begin listening for messages. */
   async start(): Promise<void> {
     if (this.started) return;
+
+    // Load persisted allowlist
+    this.loadAllowlist();
 
     // Set up name resolver for ENS lookups
     this.resolveAddress = createNameResolver(process.env.WEB3_BIO_API_KEY || '');
