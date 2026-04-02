@@ -6,6 +6,7 @@ defaults:
   skills:
     - identity
     - inter-agent
+    - catalog
 
 agents:
   - name: coder
