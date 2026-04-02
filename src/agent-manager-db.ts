@@ -12,6 +12,7 @@
 
 import express from 'express';
 import crypto from 'crypto';
+import { EventEmitter } from 'events';
 import path from 'path';
 import { createServer as createHttpServer, type Server as HttpServer } from 'http';
 import { existsSync, mkdirSync, rmSync, readFileSync, writeFileSync, readdirSync, copyFileSync, statSync, openSync, closeSync } from 'fs';
@@ -24,6 +25,7 @@ import yaml from 'js-yaml';
 import { ClaudeAgentServer } from './claude-agent-server.js';
 import { registerOnIdChain, createSubnameOnIdChain, setMultiChainAddresses } from './onchain/idchain-register.js';
 import { type Db } from './db/db-service.js';
+import { XmtpMessaging, type InboundMessage, type OutboundMessage } from './xmtp/xmtp-messaging.js';
 import type { AgentRow, ScheduleDefinitionRow, TaskRow } from './db/types.js';
 import fetch from 'node-fetch';
 import type { PluginConfig, DeployConfig, HeartbeatConfig, CalendarSpec, ScheduleDeliveryMode } from './config-parser.js';
@@ -174,7 +176,7 @@ interface QueryWaiter {
   timeout: NodeJS.Timeout | null;
 }
 
-export class AgentManagerDb {
+export class AgentManagerDb extends EventEmitter {
   private managementApp: express.Application;
   private httpServer: HttpServer | null = null;
   private wss: WebSocketServer | null = null;
@@ -190,6 +192,7 @@ export class AgentManagerDb {
   private healthCheckInterval: NodeJS.Timeout | null = null;
   private logBuffer: Array<{ ts: number; msg: string }> = [];
   private readonly LOG_BUFFER_SIZE = 500;
+  private xmtp: XmtpMessaging | null = null;
 
   /** Log a manager activity message to the ring buffer (not stdout) */
   private managerLog(msg: string) {
@@ -200,6 +203,7 @@ export class AgentManagerDb {
   }
 
   constructor(baseWorkDir: string = '/workspace', db: Db) {
+    super();
     this.baseWorkDir = baseWorkDir;
     this.db = db;
     this.agentRole = (process.env.AGENT_ROLE as 'manager' | 'worker') || 'manager';
@@ -2380,6 +2384,38 @@ export class AgentManagerDb {
 
 
 
+
+    // ==================== XMTP MESSAGING ====================
+
+    // POST /xmtp/send — send an encrypted XMTP message to any wallet address or ENS name
+    this.managementApp.post('/xmtp/send', async (req, res) => {
+      try {
+        if (!this.xmtp) {
+          return res.status(503).json({ error: 'XMTP not enabled. Set XMTP_WALLET_KEY and XMTP_DB_ENCRYPTION_KEY env vars.' });
+        }
+        const { to, message } = req.body || {};
+        if (!to || !message) {
+          return res.status(400).json({ error: 'Missing "to" (ENS name or wallet address) or "message"' });
+        }
+        const result = await this.xmtp.sendMessage(to, message);
+        if (result.success) {
+          res.json({ success: true, conversationId: result.conversationId });
+        } else {
+          res.status(400).json({ success: false, error: result.error });
+        }
+      } catch (err: any) {
+        res.status(500).json({ error: err?.message || 'Internal error' });
+      }
+    });
+
+    // GET /xmtp/status — check if XMTP is enabled and get the manager's XMTP address
+    this.managementApp.get('/xmtp/status', (_req, res) => {
+      if (this.xmtp) {
+        res.json({ enabled: true, address: this.xmtp.address });
+      } else {
+        res.json({ enabled: false, address: null });
+      }
+    });
 
     // ==================== REMOTE CLI ENDPOINT ====================
     // Allows external tools to execute CLI-style commands
@@ -4569,6 +4605,13 @@ export class AgentManagerDb {
         // Start periodic health monitoring (every 30s)
         this.startHealthMonitor();
 
+        // Start XMTP messaging if configured
+        if (process.env.XMTP_WALLET_KEY && process.env.XMTP_DB_ENCRYPTION_KEY) {
+          this.startXmtp().catch(err => {
+            console.warn(`[XMTP] Failed to start: ${err.message}`);
+          });
+        }
+
         resolve();
       });
     });
@@ -4577,6 +4620,61 @@ export class AgentManagerDb {
   private async initSchedules(): Promise<void> {
     // Intentionally left unused. Schedules persist in the DB and should not be reseeded on boot,
     // because reseeding interval schedules would reset their anchor and expiry.
+  }
+
+  /**
+   * Start XMTP messaging gateway.
+   * Inbound messages are emitted as 'xmtp:inbound' events for CLI approval.
+   * After approval, they're routed to an agent via /talk.
+   */
+  private async startXmtp(): Promise<void> {
+    const env = (process.env.XMTP_ENV || 'production') as 'local' | 'dev' | 'production';
+    this.xmtp = new XmtpMessaging({ env });
+
+    // Approval callback — emit event for CLI to handle (human-in-the-loop)
+    this.xmtp.setApprovalCallback(async (msg, direction) => {
+      return new Promise<boolean>((resolve) => {
+        this.emit('xmtp:approval', { msg, direction, resolve });
+        // If no listener handles it within 5 minutes, auto-reject
+        setTimeout(() => resolve(false), 300000);
+      });
+    });
+
+    // Inbound message handler — route approved messages to the appropriate agent
+    this.xmtp.setMessageHandler(async (inbound: InboundMessage) => {
+      this.emit('xmtp:message', inbound);
+      // Return undefined — replies are handled by the agent via the approval flow
+      return undefined;
+    });
+
+    this.xmtp.on('ready', (address: string) => {
+      this.managerLog(`XMTP gateway ready: ${address}`);
+      this.emit('xmtp:ready', address);
+    });
+
+    this.xmtp.on('error', (err: Error) => {
+      this.managerLog(`XMTP error: ${err.message}`);
+    });
+
+    await this.xmtp.start();
+  }
+
+  /** Send a message via XMTP (used by agents or the CLI). */
+  async xmtpSend(to: string, message: string): Promise<{ success: boolean; error?: string }> {
+    if (!this.xmtp) {
+      return { success: false, error: 'XMTP not enabled' };
+    }
+    return this.xmtp.sendMessage(to, message);
+  }
+
+  /** Check if XMTP is enabled. */
+  get xmtpEnabled(): boolean {
+    return this.xmtp !== null;
+  }
+
+  /** Get the XMTP address. */
+  get xmtpAddress(): string | null {
+    return this.xmtp?.address ?? null;
   }
 
   /**
