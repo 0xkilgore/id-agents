@@ -16,7 +16,8 @@ import { fileURLToPath } from 'url';
 import fs from 'fs';
 import type http from 'http';
 import type { Db } from './db/db-service.js';
-import { XmtpMessaging, type InboundMessage } from './xmtp/xmtp-messaging.js';
+// XMTP is dynamically imported only when needed (native bindings may not be available)
+type XmtpMessagingType = import('./xmtp/xmtp-messaging.js').XmtpMessaging;
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
@@ -175,7 +176,7 @@ export class ClaudeAgentServer {
   private dbAgentId: string | undefined;
   private harness: AgentHarness;
   private harnessType: HarnessType;
-  private xmtp: XmtpMessaging | null = null;
+  private xmtp: XmtpMessagingType | null = null;
 
   constructor(options: {
     model?: string;
@@ -1652,6 +1653,9 @@ ${prompt}`
    * The agent's LLM processes them and replies are sent back via XMTP.
    */
   private async startXmtp(port: number): Promise<void> {
+    const { XmtpMessaging } = await import('./xmtp/xmtp-messaging.js');
+    type InboundMessage = import('./xmtp/xmtp-messaging.js').InboundMessage;
+
     const env = (process.env.XMTP_ENV || 'production') as 'local' | 'dev' | 'production';
     const dbPath = path.join(this.workingDirectory, '.xmtp', `${env}-${port}.db3`);
 
@@ -1680,7 +1684,11 @@ ${prompt}`
           const query = this.activeQueries.get(queryId);
           if (query && query.status === 'completed') {
             clearInterval(checkReply);
-            resolve(query.result || undefined);
+            // Extract text from result (may be string or object with .result property)
+            const result = query.result;
+            const text = typeof result === 'string' ? result
+              : (result as any)?.result || (result as any)?.message || String(result || '');
+            resolve(text || undefined);
           } else if (query && query.status === 'failed') {
             clearInterval(checkReply);
             resolve(undefined);
