@@ -3,7 +3,7 @@
 > Audit inventory of the id-agents codebase. One line per item, numbered sequentially, grouped by category.
 
 Generated: 2026-03-24
-Updated: 2026-03-29
+Updated: 2026-04-02
 
 ---
 
@@ -60,6 +60,8 @@ Updated: 2026-03-29
 38l. `src/db/repos/postgres/queries-repo.ts` — PostgreSQL queries repository (create, complete, upsert)
 38m. `src/db/repos/postgres/teams-repo.ts` — PostgreSQL teams repository (getOrCreate, config, registry)
 38n. `src/db/repos/postgres/schedules-repo.ts` — PostgreSQL schedules repository
+38o. `src/xmtp/xmtp-messaging.ts` — XMTP messaging service: XmtpMessaging class (extends EventEmitter), inbound/outbound message handling, sender allowlist persisted to `.xmtp/allowlist.yaml`, ENS resolution via id-cli for xid.eth names with web3.bio fallback, approval callbacks for human-in-the-loop gating, OWS wallet or raw key signing
+38p. `src/xmtp/ows-signer.ts` — OWS-backed XMTP signer: creates XMTP Signer interface that delegates all signing to OWS CLI (`ows sign message`), private key never leaves OWS vault, resolves wallet address via `ows wallet list`
 
 ---
 
@@ -171,6 +173,8 @@ Updated: 2026-03-29
 126. `USE /files/teams` — Static file serving (team shared directory) [STATUS: PASS] Manager-assigned path, express.static traversal protection, index disabled
 127. `USE /files/shared` — Static file serving (global shared directory) [STATUS: PASS] Backwards-compat alias for /files/teams
 127a. `POST /schedule` — Receive scheduled work (worker agent) — Validates message and schedule object, mode must be 'internal', noAutoReply to prevent loops
+127b. `POST /xmtp/send` — Send an encrypted XMTP message to any ENS name or wallet address; requires `to` and `message` body fields; returns 503 if XMTP not enabled for this agent; resolves ENS names via id-cli (xid.eth) and web3.bio (other names)
+127c. `GET /xmtp/status` — Check if XMTP is enabled for this agent; returns `{ enabled, address }`
 
 ---
 
@@ -192,3 +196,30 @@ Updated: 2026-03-29
 135. Table `wallets` — Agent Ethereum wallets [deprecated] (team_id, agent_id, address, private_key)
 136. Table `news_items` — Async message feed (team_id, agent_id, timestamp, type, message, data jsonb, query_id) [STATUS: FIXED] Bug resolved — deleted the broken transfer function (item 85) that referenced non-existent columns
 137. Table `queries` — Work/request tracking (team_id, agent_id, query_id, status, prompt, result jsonb, session_id) [STATUS: PASS] Composite PK, parameterized ops, team-scoped via FK cascade
+
+---
+
+## G. XMTP Messaging Subsystem
+
+### Integration (claude-agent-server.ts)
+
+138. XMTP client lifecycle (lines 1638–1716) — Per-agent XMTP client started automatically when `OWS_WALLET` or `XMTP_WALLET_KEY` + `XMTP_DB_ENCRYPTION_KEY` env vars are present; dynamic `import()` to avoid loading native bindings when XMTP is not configured; DB stored at `.xmtp/<env>-<port>.db3` in agent's working directory; inbound messages routed through `startQuery()` with `noAutoReply: true` to prevent auto-reply loops; query results polled at 1s interval with 5min timeout and sent back as XMTP reply
+
+### Skill
+
+139. `skills/xmtp/SKILL.md` — Agent skill for XMTP messaging; instructs agents to use `curl` against `/xmtp/send` and `/xmtp/status` endpoints; documents ENS name and wallet address resolution, inbound message flow, and security properties
+
+### Config
+
+140. `configs/xmtp-test.yaml` — Test team config with two agents (alice, bob) for XMTP encrypted messaging tests; uses claude-code-cli runtime, claude-sonnet-4-6 model, includes identity/inter-agent/catalog/xmtp skills
+
+### Scripts
+
+141. `scripts/check-ens-resolution.mjs` — ENS resolution test script; resolves xid.eth names via CCIP-Read using viem; defaults to checking alice/bob agent-23/24 subnames; configurable via `MAINNET_RPC_URL` env var
+
+### Security Model
+
+142. XMTP sender allowlist — Three-tier trust model: **trusted** (on allowlist → auto-accepted, bypasses approval callback), **unknown** (not on allowlist but allowlist is empty → goes through approval callback), **blocked** (not on allowlist when allowlist is non-empty → silently dropped before content reaches agent LLM). Allowlist persisted to `.xmtp/allowlist.yaml` with ENS names for readability. Resolved addresses stored lowercase.
+143. OWS signing — Private key never leaves OWS vault; all XMTP signing delegated to `ows sign message` CLI; agent address resolved from `ows wallet list` output; Signer interface uses dummy key for identifier (signing is real via OWS)
+144. MLS encryption — All XMTP messages are end-to-end encrypted via MLS (Messaging Layer Security) protocol; sender identity cryptographically verified before message content is exposed to approval callback or agent LLM
+145. Inbound message isolation — `noAutoReply: true` flag on inbound XMTP queries prevents the agent from triggering auto-reply chains; query ID prefixed with `xmtp_` for traceability; sender address included in prompt for LLM context
