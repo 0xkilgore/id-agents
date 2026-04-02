@@ -36,6 +36,12 @@ Lets agents update their own catalog entry (role, expertise, status) visible to 
 
 - `SKILL.md` - Frontmatter skill
 
+### xmtp
+
+Send and receive encrypted messages to external agents and users via the XMTP protocol. Lets agents communicate outside their team by ENS name or wallet address.
+
+- `SKILL.md` - Frontmatter skill
+
 ### admin-control
 
 Enables Claude Code to act as an admin agent for remote management of the team. Includes patterns for sending commands, chatting with the manager, and polling for multi-agent replies.

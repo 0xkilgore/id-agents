@@ -134,6 +134,11 @@ export class XmtpMessaging extends EventEmitter {
     return this.allowedSenders.has(address.toLowerCase());
   }
 
+  /** Check if a sender is explicitly on the allowlist (not just open mode). */
+  isSenderTrusted(address: string): boolean {
+    return this.allowedSenders.has(address.toLowerCase());
+  }
+
   /** Get the agent's wallet address (available after start). */
   get address(): string | null {
     return this.agent?.address ?? null;
@@ -263,10 +268,11 @@ export class XmtpMessaging extends EventEmitter {
         timestamp: Date.now(),
       };
 
-      console.log(`[XMTP] Inbound from ${senderAddress}${isDm ? ' (DM)' : ' (group)'}: ${content.substring(0, 80)}...`);
+      const trusted = this.isSenderTrusted(senderAddress || '');
+      console.log(`[XMTP] Inbound from ${senderAddress}${isDm ? ' (DM)' : ' (group)'}${trusted ? ' (trusted)' : ''}: ${content.substring(0, 80)}...`);
 
-      // Step 3: Approval check — human can see sender and content before it's processed
-      if (this.approvalCallback) {
+      // Step 3: Approval check — skip for trusted (allowlisted) senders
+      if (!trusted && this.approvalCallback) {
         const approved = await this.approvalCallback(inbound, 'inbound');
         if (!approved) {
           console.log(`[XMTP] Inbound message from ${senderAddress} rejected by approval`);
