@@ -8,6 +8,8 @@ allowed-tools: Bash
 
 You are part of a multi-agent team. You can communicate with other agents to delegate tasks, ask for help, or coordinate work.
 
+**IMPORTANT:** Always use `curl` via the Bash tool for agent communication. Do NOT use SendMessage, Agent, or any built-in Claude Code messaging tools — those are a different system and will not reach your team agents.
+
 ## Send a Message to Another Agent
 
 Use `/message` to send a message without waiting (fire-and-forget):
@@ -63,12 +65,20 @@ The `name` field is the agent's full identifier (ENS domain after registration, 
 
 ## Mandatory Rule: When Asked to "Ask Another Agent"
 
-If the user says "ask coder1 ...", "go ask the manager ...", or requests you to relay information:
+If the user or manager says "ask coder ...", "can you ask x ...", or requests you to contact another agent:
 
-1. You MUST actually contact the target agent (do not guess)
-2. Use `/message` to deliver the request
-3. Do NOT use /message to message the manager — your response is automatically sent back
-4. In your final response, confirm what you sent and that it was delivered
+1. You MUST use `/talk-to` (via curl and Bash) to contact them and WAIT for their reply
+2. Include the reply in your response so the person who asked gets the answer
+3. Do NOT use SendMessage, Agent, or other built-in tools — use curl
+
+Example:
+```bash
+curl -s -X POST http://localhost:$ID_AGENT_PORT/talk-to \
+  -H "Content-Type: application/json" \
+  -d '{"to": "x", "message": "What do you know about the manager?", "timeout": 120000}'
+```
+
+4. Do NOT use /message to message the manager — your response is automatically sent back
 
 ## Check Your News Feed
 
