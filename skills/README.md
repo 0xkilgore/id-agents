@@ -1,8 +1,10 @@
 # Agent Skills
 
-This directory contains the 6 built-in skills that agents can use. Skills are deployed to each agent's `.claude/skills/` directory at deploy time via `deploySkillsToAgent`.
+This directory contains skills for agents and external tools.
 
-All YAML configs should include `skills: [identity, inter-agent, catalog]` at minimum.
+**Agent skills** (deployed to each agent's `.claude/skills/` at deploy time): `identity`, `inter-agent`, `catalog`, `wallet`. All YAML configs should include `skills: [identity, inter-agent, catalog]` at minimum.
+
+**External skills** (used by external Claude Code sessions, not deployed to agents): `admin-control`.
 
 ## What are Skills?
 
@@ -43,13 +45,6 @@ Enables Claude Code to act as an admin agent for remote management of the team. 
 - `remote-command.sh` - Execute CLI commands on the manager
 - `start-listener.js` - Start temporary HTTP listener for replies
 - `admin-session.js` - Interactive admin session
-
-### local-agent
-
-Spawn Claude Code agents locally (no Docker) using your existing Claude Code authentication.
-
-- `SKILL.md` - Instructions and examples
-- `spawn-local.sh` - Spawn a local agent from the command line
 
 ## Using Skills
 
