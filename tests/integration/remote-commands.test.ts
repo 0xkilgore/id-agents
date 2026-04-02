@@ -6,7 +6,7 @@
  * Each test uses the /remote endpoint directly.
  *
  * Prerequisites:
- * - Cluster must be running (`/cluster start` in CLI)
+ * - Manager must be running (`npm start` in CLI)
  * - ANTHROPIC_API_KEY must be set
  *
  * Run with: npm test
@@ -39,7 +39,7 @@ describe('Remote Commands (/remote endpoint)', () => {
     const isHealthy = await waitForManager(30000);
     if (!isHealthy) {
       throw new Error(
-        'Manager not healthy. Make sure to run `/cluster start` before running tests.'
+        'Manager not healthy. Make sure to start the manager with `npm start` before running tests.'
       );
     }
   });
@@ -57,7 +57,7 @@ describe('Remote Commands (/remote endpoint)', () => {
 
   // ==================== /status ====================
   describe('/status command', () => {
-    it('should return cluster status', async () => {
+    it('should return team status', async () => {
       const result = await remoteStatus();
 
       expect(result.ok).toBe(true);

@@ -8,7 +8,7 @@
  * 3. Invalid/revoked keys are rejected
  *
  * Prerequisites:
- * - Cluster must be running (`/cluster start` in CLI)
+ * - Manager must be running (`npm start` in CLI)
  *
  * Run with: npm test -- tests/integration/api-key-auth.test.ts
  */
@@ -64,7 +64,7 @@ describe('API Key Authentication', () => {
     // Wait for manager
     const isHealthy = await waitForManager(30000);
     if (!isHealthy) {
-      throw new Error('Manager not healthy. Run `/cluster start` first.');
+      throw new Error('Manager not healthy. Start the manager with `npm start` first.');
     }
 
     // Deploy test agent

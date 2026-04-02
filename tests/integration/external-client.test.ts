@@ -6,7 +6,7 @@
  * that don't use the CLI or manager. This proves REST-AP interoperability.
  *
  * Prerequisites:
- * - Cluster must be running (`/cluster start` in CLI)
+ * - Manager must be running (`npm start` in CLI)
  * - At least one agent must be deployed
  *
  * Run with: npm test -- tests/integration/external-client.test.ts
@@ -133,7 +133,7 @@ describe('External Client Communication', () => {
     const isHealthy = await waitForManager(30000);
     if (!isHealthy) {
       throw new Error(
-        'Manager not healthy. Run `/cluster start` before tests.'
+        'Manager not healthy. Start the manager with `npm start` before tests.'
       );
     }
 

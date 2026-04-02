@@ -8,7 +8,7 @@
  * 3. Ask Agent B what Agent A's favorite is
  *
  * Prerequisites:
- * - Cluster must be running (`/cluster start` in CLI)
+ * - Manager must be running (`npm start` in CLI)
  *
  * Run with: npm test -- tests/integration/agent-relay.test.ts
  */
@@ -108,7 +108,7 @@ describe('Agent Relay Tests', () => {
     // Wait for manager
     const isHealthy = await waitForManager(30000);
     if (!isHealthy) {
-      throw new Error('Manager not healthy. Run `/cluster start` first.');
+      throw new Error('Manager not healthy. Start the manager with `npm start` first.');
     }
 
     // Deploy two agents

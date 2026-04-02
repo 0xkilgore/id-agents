@@ -28,13 +28,13 @@ OWS wallet operations — view addresses, sign messages/transactions, check bala
 
 ### catalog
 
-Lets agents update their own catalog entry (role, expertise, status) visible to the cluster.
+Lets agents update their own catalog entry (role, expertise, status) visible to the team.
 
 - `SKILL.md` - Frontmatter skill
 
 ### admin-control
 
-Enables Claude Code to act as an admin agent for remote management of the cluster. Includes patterns for sending commands, chatting with the manager, and polling for multi-agent replies.
+Enables Claude Code to act as an admin agent for remote management of the team. Includes patterns for sending commands, chatting with the manager, and polling for multi-agent replies.
 
 - `SKILL.md` - Instructions and polling patterns
 - `talk-to-manager.sh` - Send message to manager with reply endpoint

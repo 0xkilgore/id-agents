@@ -418,11 +418,11 @@ const remoteCommandHandler: CommandHandler = async (command: string, from?: stri
       return { success: true, result: result || 'No agents found' };
     }
 
-    // /status - show cluster status
+    // /status - show team status
     if (trimmed === '/status') {
       const response = await managerFetch('/health');
       if (!response.ok) {
-        return { success: false, error: 'Cluster not running' };
+        return { success: false, error: 'Team not running' };
       }
       const data: any = await response.json();
       return { success: true, result: JSON.stringify(data, null, 2) };

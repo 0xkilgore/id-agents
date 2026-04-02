@@ -163,7 +163,7 @@ curl -X POST http://localhost:4100/talk-to \
 ### Agent not discoverable by other agents
 
 Make sure:
-1. The manager is running (`/cluster start`)
+1. The manager is running (`/team start`)
 2. The agent successfully registered (check startup logs)
 3. Both agents are in the same team
 

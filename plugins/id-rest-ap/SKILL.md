@@ -1,10 +1,10 @@
 # Inter-Agent Communication Skill
 
-This skill enables you to discover and communicate with other agents in the ID agent cluster.
+This skill enables you to discover and communicate with other agents in the ID agent team.
 
 ## Your Identity
 
-You are an agent in the ID agent cluster. Your identity is stored in environment variables:
+You are an agent in the ID agent team. Your identity is stored in environment variables:
 
 - `ID_AGENT_NAME` - Your full name including token ID (e.g., "max.71")
 - `ID_AGENT_ALIAS` - Your base name (e.g., "max")

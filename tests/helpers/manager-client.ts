@@ -292,7 +292,7 @@ export async function askAndWait(
 }
 
 /**
- * Wait for cluster/manager to be healthy
+ * Wait for team manager to be healthy
  */
 export async function waitForManager(timeoutMs = 30000, pollIntervalMs = 1000): Promise<boolean> {
   const startTime = Date.now();

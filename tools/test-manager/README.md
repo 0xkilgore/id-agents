@@ -141,7 +141,7 @@ Clear all agents and news.
 2. Deploy agents using the CLI:
    ```bash
    npm run id-agents
-   /cluster start
+   /team start
    /deploy default agent1
    /deploy default agent2
    ```

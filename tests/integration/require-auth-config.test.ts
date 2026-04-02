@@ -8,7 +8,7 @@
  * 3. External clients can use API keys to ask questions
  *
  * Prerequisites:
- * - Cluster must be running (`/cluster start` in CLI)
+ * - Manager must be running (`npm start` in CLI)
  *
  * Run with: npm test -- tests/integration/require-auth-config.test.ts
  */
@@ -63,7 +63,7 @@ describe('RequireAuth Config', () => {
     // Wait for manager
     const isHealthy = await waitForManager(30000);
     if (!isHealthy) {
-      throw new Error('Manager not healthy. Run `/cluster start` first.');
+      throw new Error('Manager not healthy. Start the manager with `npm start` first.');
     }
 
     // Deploy agent using config with requireAuth: true

@@ -7,7 +7,7 @@
  * 2. Write and execute scripts to compute results that can't be guessed
  *
  * Prerequisites:
- * - Cluster must be running (`/cluster start` in CLI)
+ * - Manager must be running (`npm start` in CLI)
  *
  * Run with: npm test -- tests/integration/agent-capabilities.test.ts
  */
@@ -138,7 +138,7 @@ describe('Agent Capabilities Tests', () => {
     // Wait for manager
     const isHealthy = await waitForManager(30000);
     if (!isHealthy) {
-      throw new Error('Manager not healthy. Run `/cluster start` first.');
+      throw new Error('Manager not healthy. Start the manager with `npm start` first.');
     }
 
     // Create shared directory and org chart

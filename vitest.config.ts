@@ -7,7 +7,7 @@ export default defineConfig({
     include: ['tests/**/*.test.ts'],
     testTimeout: 300000, // 5 min timeout for integration tests (Claude API can be slow)
     hookTimeout: 120000, // 2 min for setup/teardown
-    // Run tests sequentially since they share cluster state
+    // Run tests sequentially since they share team state
     sequence: {
       concurrent: false,
     },

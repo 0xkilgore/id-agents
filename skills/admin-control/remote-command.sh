@@ -19,7 +19,7 @@ if [ -z "$COMMAND" ]; then
   echo ""
   echo "Available commands:"
   echo "  /agents                    - List all agents"
-  echo "  /status                    - Show cluster health"
+  echo "  /status                    - Show team health"
   echo "  /spawn <name>              - Create new agent"
   echo "  /delete <name>             - Delete agent"
   echo "  /ask <agent> <msg>         - Send message to agent"

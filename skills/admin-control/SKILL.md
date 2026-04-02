@@ -74,7 +74,7 @@ Execute a CLI command:
 | Command | Description |
 |---------|-------------|
 | `/agents` | List all agents |
-| `/status` | Show cluster health |
+| `/status` | Show team health |
 | `/deploy <config> [params]` | Deploy agent using config |
 | `/delete <name>` | Delete agent |
 | `/ask <agent> <msg>` | Send message to agent |

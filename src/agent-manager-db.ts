@@ -867,17 +867,25 @@ export class AgentManagerDb {
             } catch { /* news fetch failed */ }
           }
 
+          // Check for active heartbeat schedules
+          let hasActiveHeartbeat = false;
+          if (this.schedulerService) {
+            const schedules = await this.db.schedules.listSchedulesForAgent(agent.id);
+            hasActiveHeartbeat = schedules.some(s => s.kind === 'heartbeat' && s.active);
+          }
+
           return {
             ...this.agentToResponse(agent),
             isResponding,
-            newsItems
+            newsItems,
+            hasActiveHeartbeat
           };
         })
       );
 
       const agentStatuses = results.map((r, i) => {
         if (r.status === 'fulfilled') return r.value;
-        return { ...this.agentToResponse(agents[i]), isResponding: false, newsItems: [] };
+        return { ...this.agentToResponse(agents[i]), isResponding: false, newsItems: [], hasActiveHeartbeat: false };
       });
 
       res.json({ agents: agentStatuses });

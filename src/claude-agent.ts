@@ -84,7 +84,7 @@ export async function* runClaudeAgent(
   sdkOptions.env = {
     // Essential for Claude operation
     ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY,
-    // Agent/cluster context (non-sensitive)
+    // Agent/team context (non-sensitive)
     MANAGER_URL: process.env.MANAGER_URL,
     ID_CONTAINER: process.env.ID_CONTAINER,
     ID_PROJECT: process.env.ID_PROJECT,
