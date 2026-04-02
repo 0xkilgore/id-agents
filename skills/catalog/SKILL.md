@@ -11,13 +11,13 @@ You can update your own catalog to describe what you do, your role, skills, and 
 ## View Your Catalog
 
 ```bash
-curl -s http://localhost:$PORT/catalog | jq
+curl -s http://localhost:$ID_AGENT_PORT/catalog | jq
 ```
 
 ## Update Your Catalog
 
 ```bash
-curl -s -X PATCH http://localhost:$PORT/catalog \
+curl -s -X PATCH http://localhost:$ID_AGENT_PORT/catalog \
   -H "Content-Type: application/json" \
   -d '{
     "description": "I specialize in TypeScript and React development",

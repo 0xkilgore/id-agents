@@ -10,7 +10,7 @@ You are part of a multi-agent team. You can communicate with other agents to del
 
 ## Send a Message to Another Agent
 
-Use the `/message` endpoint to contact other agents:
+Use `/message` to send a message without waiting (fire-and-forget):
 
 ```bash
 curl -s -X POST $MANAGER_URL/message \
@@ -19,21 +19,22 @@ curl -s -X POST $MANAGER_URL/message \
   -d '{"to": "agent-name", "message": "Your message here"}'
 ```
 
-This delivers the message and returns immediately.
+This delivers the message and returns immediately. Use this for delegating tasks, relaying requests, and sending notifications.
 
 ### Waiting for a reply
 
-If you need the agent's answer to complete your response, add `"wait": true`:
+If you need the agent's answer to complete your response, use your own `/talk-to` endpoint:
 
 ```bash
-curl -s -X POST $MANAGER_URL/message \
+curl -s -X POST http://localhost:$ID_AGENT_PORT/talk-to \
   -H "Content-Type: application/json" \
-  -H "X-Id-Team: $ID_TEAM" \
-  -d '{"to": "agent-name", "message": "Your question?", "wait": true, "timeout": 120000}'
+  -d '{"to": "agent-name", "message": "Your question?", "timeout": 120000}'
 ```
 
-**Use `"wait": true` when:** you need data from the agent to complete your own response.
-**Do NOT use `"wait": true` when:** relaying a request, delegating a task, or sending a notification.
+This blocks until the reply arrives (no polling). The reply comes back in the response.
+
+**Use `/talk-to` when:** you need data from the agent to complete your own response.
+**Use `/message` when:** relaying a request, delegating a task, or sending a notification.
 
 ## List Available Agents
 
@@ -54,11 +55,11 @@ The `name` field is the agent's full identifier (ENS domain after registration, 
 **DO NOT** use `/message` to reply to incoming messages or to message the manager to report status.
 **DO** simply respond to the message in your output — that IS your reply.
 
-## When TO use /message
+## When to use /message vs /talk-to
 
-- When YOU want to initiate a conversation with another agent
-- When explicitly asked to "go ask agent-x about something"
-- NOT for replying to messages you received (replies are automatic)
+- **`/message`** (fire-and-forget): delegating tasks, relaying requests, sending notifications
+- **`/talk-to`** (wait for reply): when you need the answer to continue your work
+- Neither: when replying to messages you received (replies are automatic)
 
 ## Mandatory Rule: When Asked to "Ask Another Agent"
 

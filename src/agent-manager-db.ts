@@ -279,6 +279,7 @@ export class AgentManagerDb {
       ID_AGENT_NAME: fullName,
       ID_AGENT_ALIAS: agentAlias,
       ID_AGENT_TOKEN_ID: agent.token_id || '',
+      ID_AGENT_PORT: String(agent.port || ''),
       ID_TEAM: teamName,
       ID_PROJECT: teamName, // deprecated, use ID_TEAM
       ID_SHARED_DIR: `${this.baseWorkDir}/teams/${teamName}`,

@@ -15,14 +15,21 @@ export const INTER_AGENT_SKILL_LIGHT = `
 
 You are agent "{{AGENT_NAME}}" in team "{{TEAM_NAME}}".
 
-## Send a Message to Another Agent
+## Send a Message (fire-and-forget)
 \`\`\`bash
 curl -s -X POST http://localhost:4100/message \\
   -H "Content-Type: application/json" \\
   -H "X-Id-Team: $ID_TEAM" \\
   -d '{"to": "agent-name", "message": "your message"}'
 \`\`\`
-Add \`"wait": true\` only if you need the reply to continue your work.
+
+## Send and Wait for Reply
+\`\`\`bash
+curl -s -X POST http://localhost:$ID_AGENT_PORT/talk-to \\
+  -H "Content-Type: application/json" \\
+  -d '{"to": "agent-name", "message": "your question?"}'
+\`\`\`
+Use /talk-to only if you need the reply to continue your work.
 
 ## List Agents
 \`\`\`bash
@@ -69,16 +76,17 @@ This delivers the message and **returns immediately** — you do not wait for th
 
 ### Waiting for a reply
 
-If you need the agent's answer to complete your response, add \`"wait": true\`:
+If you need the agent's answer to complete your response, use your own \`/talk-to\` endpoint:
 
 \`\`\`bash
-curl -s -X POST http://localhost:4100/message \\
+curl -s -X POST http://localhost:$ID_AGENT_PORT/talk-to \\
   -H "Content-Type: application/json" \\
-  -H "X-Id-Team: $ID_TEAM" \\
-  -d '{"to": "agent-name", "message": "Did you send a message to manager?", "wait": true, "timeout": 120000}'
+  -d '{"to": "agent-name", "message": "Did you send a message to manager?", "timeout": 120000}'
 \`\`\`
 
-**Use \`"wait": true\` when:**
+This blocks until the reply arrives (no polling). The reply comes back in the response.
+
+**Use \`/talk-to\` when:**
 - You are asked to ask a question AND report back the answer
 - You need data from the agent to complete your own response
 
@@ -303,13 +311,13 @@ You can update your own catalog to describe what you do, your role, skills, and 
 ## View Your Catalog
 
 \`\`\`bash
-curl -s http://localhost:$PORT/catalog | jq
+curl -s http://localhost:$ID_AGENT_PORT/catalog | jq
 \`\`\`
 
 ## Update Your Catalog
 
 \`\`\`bash
-curl -s -X PATCH http://localhost:$PORT/catalog \\
+curl -s -X PATCH http://localhost:$ID_AGENT_PORT/catalog \\
   -H "Content-Type: application/json" \\
   -d '{
     "description": "I specialize in TypeScript and React development",
@@ -340,7 +348,7 @@ curl -s -X PATCH http://localhost:$PORT/catalog \\
 ## Example: Starting a Task
 
 \`\`\`bash
-curl -s -X PATCH http://localhost:$PORT/catalog \\
+curl -s -X PATCH http://localhost:$ID_AGENT_PORT/catalog \\
   -H "Content-Type: application/json" \\
   -d '{"status": "busy", "currentTask": "Implementing user login"}'
 \`\`\`
@@ -348,7 +356,7 @@ curl -s -X PATCH http://localhost:$PORT/catalog \\
 ## Example: Completing a Task
 
 \`\`\`bash
-curl -s -X PATCH http://localhost:$PORT/catalog \\
+curl -s -X PATCH http://localhost:$ID_AGENT_PORT/catalog \\
   -H "Content-Type: application/json" \\
   -d '{"status": "available", "currentTask": null}'
 \`\`\`
