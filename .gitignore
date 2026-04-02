@@ -38,3 +38,4 @@ coverage/
 # Security files (local only)
 SECURITY.md
 REVIEW_LOG.md
+.xmtp/

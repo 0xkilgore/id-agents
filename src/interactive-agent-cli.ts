@@ -580,8 +580,26 @@ const remoteCommandHandler: CommandHandler = async (command: string, from?: stri
       }
     }
 
+    // /register <agent> - register agent onchain
+    const registerMatch = trimmed.match(/^\/register\s+(\S+)$/);
+    if (registerMatch) {
+      const [, agentName] = registerMatch;
+      try {
+        const agent = await resolveAgent(agentName);
+        if (!agent?.id) {
+          return { success: false, error: `Agent "${agentName}" not found` };
+        }
+        // Run registerAgentOnchain in non-interactive mode
+        // (skip confirmation prompt for remote usage)
+        const result = await registerAgentOnchainRemote(agent);
+        return result;
+      } catch (err: any) {
+        return { success: false, error: `Registration failed: ${err.message}` };
+      }
+    }
+
     // Unknown command
-    return { success: false, error: `Unknown command: ${trimmed.split(/\s/)[0]}. Supported: /agents, /status, /ask, /hey, /delete, /agent, /team, /deploy` };
+    return { success: false, error: `Unknown command: ${trimmed.split(/\s/)[0]}. Supported: /agents, /status, /ask, /hey, /delete, /agent, /team, /deploy, /register` };
 
   } catch (err: any) {
     return { success: false, error: err.message || String(err) };
@@ -3666,6 +3684,38 @@ async function registryPull(opts: { agentIds?: string[] } = {}) {
 
 // ==================== API KEY MANAGEMENT ====================
 
+
+/** Non-interactive registration for /remote usage */
+async function registerAgentOnchainRemote(agent: any): Promise<{ success: boolean; result?: string; error?: string }> {
+  try {
+    const response = await managerFetch(`/agents/${encodeURIComponent(agent.id)}/onchain/register`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' }
+    });
+    if (!response.ok) {
+      const text = await response.text();
+      return { success: false, error: `Registration failed: ${text}` };
+    }
+    const data: any = await response.json();
+    const fullDomain = data.domain || data.agent?.domain || data.tokenId;
+
+    // Push identity to running agent
+    const agentUrl = agent.internal_url || agent.url;
+    if (agentUrl && data.agent) {
+      try {
+        await fetch(`${agentUrl}/identity`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ tokenId: data.tokenId, domain: fullDomain })
+        });
+      } catch { /* non-critical */ }
+    }
+
+    return { success: true, result: `Registered "${agent.name}" as ${fullDomain} (tx: ${data.txHash})` };
+  } catch (err: any) {
+    return { success: false, error: err.message };
+  }
+}
 
 async function registerAgentOnchain(agentName: string) {
   try {
