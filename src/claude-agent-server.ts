@@ -16,6 +16,7 @@ import { fileURLToPath } from 'url';
 import fs from 'fs';
 import type http from 'http';
 import type { Db } from './db/db-service.js';
+import { XmtpMessaging, type InboundMessage } from './xmtp/xmtp-messaging.js';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
@@ -174,6 +175,7 @@ export class ClaudeAgentServer {
   private dbAgentId: string | undefined;
   private harness: AgentHarness;
   private harnessType: HarnessType;
+  private xmtp: XmtpMessaging | null = null;
 
   constructor(options: {
     model?: string;
@@ -1054,6 +1056,33 @@ export class ClaudeAgentServer {
       }
     });
 
+    // ==================== XMTP ENDPOINTS ====================
+
+    // POST /xmtp/send — send an encrypted XMTP message to any ENS name or wallet address
+    this.app.post('/xmtp/send', async (req, res) => {
+      try {
+        if (!this.xmtp) {
+          return res.status(503).json({ error: 'XMTP not enabled for this agent' });
+        }
+        const { to, message } = req.body || {};
+        if (!to || !message) {
+          return res.status(400).json({ error: 'Missing "to" or "message"' });
+        }
+        const result = await this.xmtp.sendMessage(to, message);
+        res.json(result);
+      } catch (err: any) {
+        res.status(500).json({ error: err?.message || 'Internal error' });
+      }
+    });
+
+    // GET /xmtp/status — check if XMTP is enabled
+    this.app.get('/xmtp/status', (_req, res) => {
+      res.json({
+        enabled: this.xmtp !== null,
+        address: this.xmtp?.address || null,
+      });
+    });
+
     // Identity update endpoint - called by manager after onchain registration
     this.app.patch('/identity', express.json({ limit: '10kb' }), (req, res) => {
       try {
@@ -1604,9 +1633,76 @@ ${prompt}`
         console.log(`  Shared files: ${this.sharedDirectory || '/workspace/teams/<team>/'}`);
         console.log(`  All agents in your team can read/write here directly.`);
         console.log(`\n`);
+
+        // Start XMTP if wallet key is available
+        if (process.env.XMTP_WALLET_KEY && process.env.XMTP_DB_ENCRYPTION_KEY) {
+          this.startXmtp(port).catch(err => {
+            console.warn(`[XMTP] Failed to start: ${err.message}`);
+          });
+        }
+
         resolve();
       });
     });
+  }
+
+  /**
+   * Start XMTP client for this agent.
+   * Inbound XMTP messages are delivered via /talk (same as inter-agent messages).
+   * The agent's LLM processes them and replies are sent back via XMTP.
+   */
+  private async startXmtp(port: number): Promise<void> {
+    const env = (process.env.XMTP_ENV || 'production') as 'local' | 'dev' | 'production';
+    const dbPath = path.join(this.workingDirectory, '.xmtp', `${env}-${port}.db3`);
+
+    // Ensure .xmtp directory exists
+    const xmtpDir = path.dirname(dbPath);
+    if (!fs.existsSync(xmtpDir)) {
+      fs.mkdirSync(xmtpDir, { recursive: true });
+    }
+
+    this.xmtp = new XmtpMessaging({ env, dbPath });
+
+    // Inbound handler: route XMTP messages through the agent's /talk pipeline
+    this.xmtp.setMessageHandler(async (inbound: InboundMessage) => {
+      const displayName = this.getDisplayId();
+      console.log(`${logTime()} [XMTP] Message from ${inbound.senderAddress}: ${inbound.content.substring(0, 80)}`);
+
+      // Queue the message as a /talk query so the LLM processes it
+      const queryId = `xmtp_${Date.now()}_${Math.random().toString(36).substring(7)}`;
+      const prompt = `[XMTP message from ${inbound.senderAddress}]\n\n${inbound.content}`;
+
+      // Process and collect the reply
+      return new Promise<string | void>((resolve) => {
+        // Use a one-time listener on the news feed to capture the reply
+        const checkReply = setInterval(async () => {
+          // Check if query completed
+          const query = this.activeQueries.get(queryId);
+          if (query && query.status === 'completed') {
+            clearInterval(checkReply);
+            resolve(query.result || undefined);
+          } else if (query && query.status === 'failed') {
+            clearInterval(checkReply);
+            resolve(undefined);
+          }
+        }, 1000);
+
+        // Timeout after 5 minutes
+        setTimeout(() => {
+          clearInterval(checkReply);
+          resolve(undefined);
+        }, 300000);
+
+        // Start the query
+        this.startQuery(queryId, prompt, undefined, `xmtp:${inbound.senderAddress}`, { noAutoReply: true });
+      });
+    });
+
+    this.xmtp.on('ready', (address: string) => {
+      console.log(`${logTime()} [XMTP] Ready — address: ${address}`);
+    });
+
+    await this.xmtp.start();
   }
 
   async stop(): Promise<void> {

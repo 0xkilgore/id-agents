@@ -13,9 +13,8 @@ You can send encrypted messages to anyone with a wallet address or ENS name via 
 ## Send a Message
 
 ```bash
-curl -s -X POST $MANAGER_URL/xmtp/send \
+curl -s -X POST http://localhost:$ID_AGENT_PORT/xmtp/send \
   -H "Content-Type: application/json" \
-  -H "X-Id-Team: $ID_TEAM" \
   -d '{"to": "agent-15.xid.eth", "message": "Hello from the idchain team"}'
 ```
 
@@ -28,14 +27,14 @@ The manager resolves ENS names automatically and handles encryption.
 ## Check if XMTP is Enabled
 
 ```bash
-curl -s $MANAGER_URL/xmtp/status -H "X-Id-Team: $ID_TEAM"
+curl -s http://localhost:$ID_AGENT_PORT/xmtp/status
 ```
 
-Returns `{"enabled": true, "address": "0x..."}` if XMTP is active.
+Returns `{"enabled": true, "address": "0x..."}` if XMTP is active on your agent.
 
 ## Receiving Messages
 
-Inbound XMTP messages are routed to you via the normal `/talk` endpoint. The message will include the sender's wallet address. You respond normally and your reply is sent back via XMTP.
+Inbound XMTP messages are delivered to your LLM as queries, just like `/talk` messages. The message will include the sender's wallet address. You respond normally and your reply is sent back to the sender via XMTP automatically.
 
 You do NOT need to do anything special to receive or reply. Just respond to the message as usual.
 
@@ -43,9 +42,9 @@ You do NOT need to do anything special to receive or reply. Just respond to the 
 
 - All messages are end-to-end encrypted (MLS protocol)
 - Sender identity is cryptographically verified before you see the message
-- The manager maintains an allowlist of trusted senders
-- Outbound messages go through human approval before being sent
-- You cannot be prompt-injected via XMTP because untrusted senders are dropped
+- Each agent has its own XMTP identity (derived from its OWS wallet)
+- An allowlist controls which senders can reach you
+- Untrusted senders are dropped before content reaches your LLM
 
 ## When to Use
 
