@@ -19,15 +19,15 @@ You are running in a multi-agent environment where multiple Claude agents can wo
 
 ## Talk to Another Agent (Recommended)
 
-**Use the `/talk-to` endpoint on your own server** - it sends a message and waits for the reply automatically:
+**Use the `/message` endpoint on your own server** - it sends a message and waits for the reply automatically:
 
 ```bash
-curl -X POST "http://localhost:4100/talk-to" \
+curl -X POST "http://localhost:4100/message" \
   -H "Content-Type: application/json" \
   -d '{"to": "agent-name", "message": "Your question or task here"}'
 ```
 
-**Important:** Always use `localhost:4100` - this is YOUR agent's server. The `/talk-to` endpoint handles routing to other agents automatically.
+**Important:** Always use `localhost:4100` - this is YOUR agent's server. The `/message` endpoint handles routing to other agents automatically.
 
 This will:
 1. Look up the target agent via the manager
@@ -51,7 +51,7 @@ For longer tasks, specify a longer timeout (max 10 minutes):
 
 ```bash
 # 5 minute timeout for complex tasks
-curl -X POST "http://localhost:4100/talk-to" \
+curl -X POST "http://localhost:4100/message" \
   -H "Content-Type: application/json" \
   -d '{"to": "agent-name", "message": "Analyze this codebase", "timeout": 300000}'
 ```
@@ -89,7 +89,7 @@ Response:
 
 ```bash
 # Simple question - uses default 2 min timeout
-curl -X POST "http://localhost:4100/talk-to" \
+curl -X POST "http://localhost:4100/message" \
   -H "Content-Type: application/json" \
   -d '{"to": "researcher", "message": "What are React best practices?"}'
 ```
@@ -98,7 +98,7 @@ curl -X POST "http://localhost:4100/talk-to" \
 
 ```bash
 # Complex task - use 5 min timeout (set Bash tool timeout to 300000)
-curl -X POST "http://localhost:4100/talk-to" \
+curl -X POST "http://localhost:4100/message" \
   -H "Content-Type: application/json" \
   -d '{"to": "coder", "message": "Create a login form component", "timeout": 300000}'
 ```
@@ -107,13 +107,13 @@ curl -X POST "http://localhost:4100/talk-to" \
 
 ```bash
 # Ask researcher first
-RESEARCH=$(curl -s -X POST "http://localhost:4100/talk-to" \
+RESEARCH=$(curl -s -X POST "http://localhost:4100/message" \
   -H "Content-Type: application/json" \
   -d '{"to": "researcher", "message": "What are the best button design patterns?"}')
 
 # Use research to inform the coder
 PATTERNS=$(echo $RESEARCH | jq -r '.reply')
-curl -X POST "http://localhost:4100/talk-to" \
+curl -X POST "http://localhost:4100/message" \
   -H "Content-Type: application/json" \
   -d "{\"to\": \"coder\", \"message\": \"Create a button using these patterns: $PATTERNS\"}"
 ```
@@ -130,12 +130,12 @@ Use this skill when you need to:
 
 ## How It Works
 
-The `/talk-to` endpoint uses event-driven waiting (no polling):
+The `/message` endpoint uses event-driven waiting (no polling):
 
 ```
 Your Agent                    Manager                   Target Agent
     │                            │                           │
-    ├─ POST /talk-to ──────────► │                           │
+    ├─ POST /message ──────────► │                           │
     │  (localhost:4100)          │                           │
     │                            ├── Lookup target agent ──► │
     │                            │                           │
@@ -181,16 +181,16 @@ curl -X POST "http://localhost:4100/news" \
 
 ## Best Practices
 
-1. **Use `/talk-to` for most cases** - It handles waiting and replies automatically
+1. **Use `/message` for most cases** - It handles waiting and replies automatically
 2. **Set appropriate timeouts** - Match task complexity to timeout duration
 3. **Be specific in messages** - Clearly state what you need from the other agent
 4. **Check agent list first** - Verify the target agent exists before sending
-5. **Use `localhost:4100` for your own endpoints** - Never use other ports for `/talk-to`
+5. **Use `localhost:4100` for your own endpoints** - Never use other ports for `/message`
 6. **Use `$MANAGER_URL` for manager endpoints** - Like `/agents` listing
 
 ## Port Reference
 
-- `localhost:4100` - YOUR agent's server (use for `/talk-to`, `/talk`, `/news`)
+- `localhost:4100` - YOUR agent's server (use for `/message`, `/talk`, `/news`)
 - `$MANAGER_URL` - The manager server (use for `/agents` listing)
 
 ## Important Notes
@@ -198,5 +198,5 @@ curl -X POST "http://localhost:4100/news" \
 - Each agent has its own workspace and cannot directly access your files
 - Use your team's shared directory (`/workspace/teams/<team-name>/`) to exchange files between agents
 - Agents can see each other's names but not internal state
-- The `/talk-to` endpoint automatically handles reply routing - no manual polling needed
+- The `/message` endpoint automatically handles reply routing - no manual polling needed
 - The `MANAGER_URL` environment variable is set automatically when agents are deployed

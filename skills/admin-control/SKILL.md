@@ -74,26 +74,27 @@ Execute a CLI command:
 | Command | Description |
 |---------|-------------|
 | `/agents` | List all agents |
+| `/agents rebuild` | Rebuild all agents |
 | `/status` | Show team health |
-| `/deploy <config> [params]` | Deploy agent using config |
+| `/deploy <config> [params]` | Deploy agents from config |
 | `/delete <name>` | Delete agent |
-| `/ask <agent> <msg>` | Send message to agent |
-| `/hey <agent> <msg>` | Continue session with agent |
-| `/cancel <agent>` | Cancel running query |
-| `/clear <agent>` | Clear agent session |
-| `/list` | Show pending queries |
+| `/ask <agent> <msg>` | Send message to agent (continues session) |
+| `/ask * <msg>` | Broadcast to all agents |
+| `/hey <agent> <msg>` | Alias for /ask |
+| `/clear [agent]` | Clear agent session |
 | `/agent <name> start\|stop\|rebuild` | Agent lifecycle |
 | `/model <agent> <model>` | Change agent's model |
-| `/news <agent>` | Get agent's news feed |
+| `/news [-l] <agent>` | Get agent's news feed (-l for full content) |
+| `/register <agent>` | Register agent onchain |
 | `/team` | Show current team |
 | `/teams` | List all teams |
+| `/team <name>` | Switch to or create team |
+| `/team delete <name>` | Delete a team |
 | `/tasks` | List tasks |
-| `/task add <title> [--phase X]` | Create task |
+| `/task add <title>` | Create task |
 | `/task <id> assign\|start\|complete` | Update task |
-| `/keys` | List API keys |
-| `/keys issue <name>` | Issue new API key |
-| `/registry` | Show registry info |
 | `/heartbeat <agent> enable\|disable` | Control heartbeats |
+| `/help` | Show help |
 
 ## Workflow Example
 
