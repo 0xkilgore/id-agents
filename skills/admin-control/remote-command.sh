@@ -9,12 +9,10 @@
 #
 # Environment:
 #   MANAGER_URL   - Manager endpoint (default: http://localhost:4000)
-#   ADMIN_API_KEY - API key (default: read from ~/.id-agents/admin.key)
 #
 
 COMMAND="$1"
 MANAGER_URL="${MANAGER_URL:-http://localhost:4000}"
-ADMIN_API_KEY="${ADMIN_API_KEY:-$(cat ~/.id-agents/admin.key 2>/dev/null)}"
 
 if [ -z "$COMMAND" ]; then
   echo "Usage: $0 \"/command args\""
@@ -32,12 +30,6 @@ if [ -z "$COMMAND" ]; then
   exit 1
 fi
 
-if [ -z "$ADMIN_API_KEY" ]; then
-  echo "Error: No API key found"
-  echo "Set ADMIN_API_KEY or ensure ~/.id-agents/admin.key exists"
-  exit 1
-fi
-
 # Create temp file for JSON payload
 PAYLOAD_FILE=$(mktemp)
 cat > "$PAYLOAD_FILE" << EOF
@@ -52,7 +44,6 @@ echo ""
 
 RESPONSE=$(curl -s -X POST "$MANAGER_URL/remote" \
   -H "Content-Type: application/json" \
-  -H "X-API-Key: $ADMIN_API_KEY" \
   -d @"$PAYLOAD_FILE")
 
 rm -f "$PAYLOAD_FILE"

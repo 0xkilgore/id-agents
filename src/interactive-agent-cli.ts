@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: MIT
 import 'dotenv/config';
 import readline from 'readline';
-import crypto from 'crypto';
 import { InteractiveAgentServer, IncomingReply, CommandHandler } from './interactive-agent-server.js';
 import fetch from 'node-fetch';
 import fs from 'fs';
@@ -335,71 +334,6 @@ function getAgentDisplayName(agent: any): string {
   return agent.name || 'unknown';
 }
 
-// ==================== Admin API Key Management ====================
-
-let adminApiKey: string = '';
-
-/**
- * Generate a secure random API key
- */
-function generateApiKey(): string {
-  return `sk-admin-${crypto.randomBytes(24).toString('hex')}`;
-}
-
-/**
- * Get the path to the admin API key file
- */
-function getAdminKeyPath(): string {
-  const configDir = path.join(process.env.HOME || '/tmp', '.id-agents');
-  if (!fs.existsSync(configDir)) {
-    fs.mkdirSync(configDir, { recursive: true, mode: 0o700 });
-  }
-  return path.join(configDir, 'admin.key');
-}
-
-/**
- * Load or generate the admin API key
- * Priority: 1) ADMIN_API_KEY env var, 2) ~/.id-agents/admin.key file, 3) generate new
- */
-function loadOrGenerateAdminKey(): string {
-  // Check environment variable first
-  if (process.env.ADMIN_API_KEY) {
-    return process.env.ADMIN_API_KEY;
-  }
-
-  // Check for existing key file
-  const keyPath = getAdminKeyPath();
-  if (fs.existsSync(keyPath)) {
-    try {
-      const key = fs.readFileSync(keyPath, 'utf8').trim();
-      if (key) return key;
-    } catch {
-      // Fall through to generate new key
-    }
-  }
-
-  // Generate new key and save it
-  const newKey = generateApiKey();
-  try {
-    fs.writeFileSync(keyPath, newKey, { mode: 0o600 });
-  } catch (err) {
-    console.warn(`${colors.yellow}⚠️  Could not save admin key to ${keyPath}${colors.reset}`);
-  }
-  return newKey;
-}
-
-/**
- * Validate an admin API key
- */
-function validateAdminKey(providedKey: string | undefined): boolean {
-  if (!adminApiKey) return false;
-  if (!providedKey) return false;
-  // Constant-time comparison to prevent timing attacks
-  return crypto.timingSafeEqual(
-    Buffer.from(adminApiKey),
-    Buffer.from(providedKey.padEnd(adminApiKey.length).slice(0, adminApiKey.length))
-  );
-}
 
 // Use core findProjectRoot with current file's directory as starting point
 const PROJECT_ROOT = coreFindProjectRoot(path.dirname(fileURLToPath(import.meta.url)));
@@ -2070,7 +2004,7 @@ async function handleLine(line: string) {
         if (!resp.ok || !data.ok) {
           throw new Error(data.error || 'Failed to send heartbeat');
         }
-        console.log(`\n${colors.green}💓 Heartbeat sent to ${target}${colors.reset}`);
+        console.log(`\n${colors.green}♥ Heartbeat sent to ${target}${colors.reset}`);
         if (data.result?.intervalSeconds) {
           console.log(`${colors.gray}   Timer reset: next heartbeat in ${data.result.intervalSeconds}s${colors.reset}\n`);
         }
@@ -2308,21 +2242,21 @@ async function handleLine(line: string) {
           // Single agent response from /heartbeat <agent>
           const a = data.agent;
           const statusIcon = a.status === 'running' ? '🟢' : '⚪';
-          const heartbeatIcon = a.heartbeatActive ? '💓' : '💤';
+          const heartbeatIcon = a.heartbeatActive ? '♥' : '💤';
           const intervalInfo = `interval: ${a.intervalSeconds}s`;
           const nextInfo = a.nextIn ? ` | next: ${a.nextIn}` : '';
-          console.log(`\n${colors.cyan}💓 Heartbeat: ${a.name}${colors.reset}`);
+          console.log(`\n${colors.cyan}♥ Heartbeat: ${a.name}${colors.reset}`);
           console.log(`${colors.gray}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${colors.reset}`);
           console.log(`   ${statusIcon} ${a.name} (${a.status}) ${heartbeatIcon} ${intervalInfo}${nextInfo}\n`);
         } else if (data.agents) {
           // Multiple agents from /heartbeats
-          console.log(`\n${colors.cyan}💓 Heartbeat System${colors.reset}`);
+          console.log(`\n${colors.cyan}♥ Heartbeat System${colors.reset}`);
           console.log(`${colors.gray}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${colors.reset}`);
           console.log(`\n${colors.cyan}   Agents with heartbeat:${colors.reset}`);
           if (data.agents.length > 0) {
             for (const a of data.agents) {
               const statusIcon = a.status === 'running' ? '🟢' : '⚪';
-              const heartbeatIcon = a.heartbeatActive ? '💓' : '💤';
+              const heartbeatIcon = a.heartbeatActive ? '♥' : '💤';
               const intervalInfo = `interval: ${a.intervalSeconds}s`;
               const nextInfo = a.nextIn ? ` | next: ${a.nextIn}` : '';
               console.log(`   ${statusIcon} ${a.name} (${a.status}) ${heartbeatIcon} ${intervalInfo}${nextInfo}`);
@@ -3117,11 +3051,6 @@ ${colors.bold}  ╚═╝╚═════╝      ╚═╝  ╚═╝ ╚═�
 `);
 
 server.start().then(async () => {
-  // Initialize admin API key (silent)
-  adminApiKey = loadOrGenerateAdminKey();
-
-  // Set up API key validator and command handler for remote access
-  server.setApiKeyValidator(validateAdminKey);
   server.setCommandHandler(remoteCommandHandler);
 
   await registerWithManager();
@@ -3414,12 +3343,12 @@ async function checkAgentStatus(longFormat: boolean = false) {
         const portMatch = agent.url?.match(/:(\d+)$/);
         const port = portMatch ? `:${portMatch[1]}` : '';
 
-        const hasHeartbeat = agent.metadata?.heartbeat === true;
+        const hasHeartbeat = agent.hasActiveHeartbeat === true;
 
         if (longFormat) {
           // === LONG FORMAT ===
           const automatorTag = isAutomator ? ` ${colors.cyan}[automator]${colors.reset}` : '';
-          const heartbeatTag = hasHeartbeat ? ' ❤️' : '';
+          const heartbeatTag = hasHeartbeat ? ' ♥' : '';
           const statusText = isResponding ? 'online' : 'offline';
           console.log(`${typeEmoji} ${colors.bold}${agent.name}${colors.reset}${automatorTag} ${statusEmoji} ${statusText}${heartbeatTag}`);
 
@@ -3476,7 +3405,7 @@ async function checkAgentStatus(longFormat: boolean = false) {
           const automatorTag = isAutomator ? `${colors.cyan}[auto]${colors.reset} ` : '';
 
           // Line 1: Name, status, activity bar, time, model, uptime, heartbeat
-          const heartbeatIcon = hasHeartbeat ? '❤️' : '';
+          const heartbeatIcon = hasHeartbeat ? '♥' : '';
           const line1Parts = [
             `${typeEmoji} ${colors.bold}${namePadded}${colors.reset}`,
             automatorTag,

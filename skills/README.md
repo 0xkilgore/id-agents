@@ -8,70 +8,46 @@ Skills are packages of instructions and executable scripts that agents can refer
 
 ## Available Skills
 
-### inter-agent-communication
+### identity
 
-Enables agents to discover and communicate with other agents in the cluster.
+Injected automatically — tells each agent its name, team, and onchain identity.
 
-**Use cases:**
-- Delegate tasks to specialized agents
-- Coordinate multi-agent workflows
-- Get second opinions or validation
-- Scale work across multiple agents
+- `SKILL.md` - Frontmatter skill (auto-loaded)
 
-**Files:**
-- `SKILL.md` - Instructions and examples
-- `list-agents.sh` - List all available agents
-- `talk-to-agent.sh` - Send message to an agent
-- `wait-for-response.sh` - Wait for agent's response
-- `broadcast-to-agents.sh` - Send message to multiple agents
-- `pay-agent.sh` - Payment system integration
+### inter-agent
+
+Enables agents to send messages and delegate tasks to other agents via the manager API.
+
+- `SKILL.md` - Frontmatter skill with usage examples
+
+### wallet
+
+OWS wallet operations — view addresses, sign messages/transactions, check balances.
+
+- `SKILL.md` - Frontmatter skill with command examples
+
+### catalog
+
+Lets agents update their own catalog entry (role, expertise, status) visible to the cluster.
+
+- `SKILL.md` - Frontmatter skill
 
 ### admin-control
 
-Enables Claude Code to act as an admin agent for remote management of the ID Agents manager.
+Enables Claude Code to act as an admin agent for remote management of the cluster. Includes patterns for sending commands, chatting with the manager, and polling for multi-agent replies.
 
-**Use cases:**
-- Remote control of agent cluster from Claude Code
-- Execute CLI commands via API
-- Monitor and manage agents programmatically
-- Build automation and orchestration workflows
-
-**Files:**
-- `SKILL.md` - Instructions and examples
+- `SKILL.md` - Instructions and polling patterns
 - `talk-to-manager.sh` - Send message to manager with reply endpoint
-- `remote-command.sh` - Execute CLI commands with API key
+- `remote-command.sh` - Execute CLI commands on the manager
 - `start-listener.js` - Start temporary HTTP listener for replies
+- `admin-session.js` - Interactive admin session
 
 ### local-agent
 
-Spawn and manage local Claude Code agents using your existing authentication.
+Spawn Claude Code agents locally (no Docker) using your existing Claude Code authentication.
 
-**Use cases:**
-- Use your Claude Code login instead of API keys
-- Debug and develop without container isolation
-- Run agents with full filesystem access
-- Participate in team workflows alongside containerized agents
-
-**Files:**
 - `SKILL.md` - Instructions and examples
-- `spawn-local.sh` - Spawn a local agent from command line
-
-### restap-client
-
-A generic REST-AP client for testing and interacting with agents via the REST-AP protocol.
-
-**Use cases:**
-- Test REST-AP endpoints from the command line
-- Debug agent communication issues
-- Quick integration testing
-- External client simulation
-
-**Files:**
-- `SKILL.md` - Instructions and examples
-- `talk.sh` - Send a message to an agent
-- `news.sh` - Get news/replies from an agent
-- `discover.sh` - Get agent discovery document
-- `listen.sh` - Start a temporary listener for replies
+- `spawn-local.sh` - Spawn a local agent from the command line
 
 ## Using Skills
 
@@ -81,17 +57,16 @@ Claude agents running in this environment can access skills by:
 
 1. **Reading the skill documentation:**
    ```bash
-   cat ./skills/inter-agent-communication/SKILL.md
+   cat ./skills/inter-agent/SKILL.md
    ```
 
 2. **Using the executable scripts:**
    ```bash
-   cd ./skills/inter-agent-communication
-   ./list-agents.sh
-   ./talk-to-agent.sh "coding-agent" "Create a button"
+   cd ./skills/admin-control
+   ./remote-command.sh "/agents"
    ```
 
-3. **Following the instructions** to make direct REST-AP calls
+3. **Following the instructions** to make direct API calls
 
 ### As a Developer
 
@@ -113,7 +88,6 @@ skills/
 ├── your-skill-name/
 │   ├── SKILL.md                 # Main instructions (required)
 │   ├── script.sh                # Executable scripts (optional)
-│   ├── template.txt             # Templates (optional)
 │   └── data.json                # Data files (optional)
 ```
 
@@ -129,28 +103,7 @@ Each `SKILL.md` should include:
 6. **## Best Practices** - Tips for effective use
 7. **## Important Notes** - Warnings, limitations, considerations
 
-## Future Skills
-
-Ideas for additional skills:
-
-- **file-sharing** - Share files between agents via workspace
-- **task-coordination** - Coordinate complex multi-agent tasks
-- **result-aggregation** - Combine results from multiple agents
-- **agent-monitoring** - Monitor health and progress of agents
-- **resource-management** - Manage CPU/memory/cost across agents
-
-## Contributing
-
-To contribute a skill:
-
-1. Follow the standard skill format
-2. Test the skill with real agents
-3. Document all edge cases
-4. Include clear examples
-5. Submit via pull request
-
 ## Resources
 
 - [Agent Skills Specification](https://agentskills.io)
 - [Claude Skills Documentation](https://support.claude.com/en/articles/12512176-what-are-skills)
-- [REST-AP Protocol](../docs/protocol/rest-ap.md)

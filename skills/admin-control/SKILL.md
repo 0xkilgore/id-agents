@@ -6,7 +6,7 @@ This skill enables Claude Code to act as an **admin agent** for the ID Agents ma
 
 1. **Temporary listener** - Receives replies from the manager (like a regular agent)
 2. **Chat with manager** - Send messages via `/talk` and receive responses
-3. **Remote commands** - Execute CLI commands via `/remote` with API key
+3. **Remote commands** - Execute CLI commands via `/remote`
 
 ## Architecture
 
@@ -22,18 +22,12 @@ Claude Code (Admin)                    Manager CLI
       │◀──────────────── POST /news ────────│
       │  3. Receive reply at temp listener  │
       │                                     │
-      │  4. Execute /remote (with API key)  │
-      │     if approved                     │
+      │  4. Execute /remote if approved     │
 ```
 
 ## Setup
 
-1. Get the admin API key:
-   ```bash
-   cat ~/.id-agents/admin.key
-   ```
-
-2. Know the manager endpoint (default: `http://localhost:4000`)
+Know the manager endpoint (default: `http://localhost:4000`)
 
 ## Usage
 
@@ -67,7 +61,7 @@ Send a message and specify your reply endpoint:
 
 ### 3. Execute Remote Command
 
-Execute a CLI command with the API key:
+Execute a CLI command:
 
 ```bash
 ./skills/admin-control/remote-command.sh "/agents"
@@ -123,20 +117,76 @@ Execute a CLI command with the API key:
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `MANAGER_URL` | `http://localhost:4000` | Manager endpoint |
-| `ADMIN_API_KEY` | from `~/.id-agents/admin.key` | API key for /remote |
 | `ADMIN_LISTENER_PORT` | `4100` | Port for temp listener |
 
-## Persistent State (Memory Skill)
+## Polling for Agent Replies
 
-For persistent state management across sessions, use the **memory skill**:
+After dispatching work to agents via `/remote`, poll for replies using timestamp filtering.
 
+### Single Agent
+
+```bash
+BEFORE=$(date +%s)000
+
+curl -s -X POST http://localhost:4000/remote \
+  -H "Content-Type: application/json" \
+  -d '{"command":"/ask <agent> <task>"}'
+
+# Poll every 10s for up to 2 minutes
+for i in $(seq 1 12); do
+  reply=$(curl -s -X POST http://localhost:4000/remote \
+    -H "Content-Type: application/json" \
+    -d '{"command":"/news <agent>"}' | python3 -c "
+import sys, json
+data = json.load(sys.stdin)
+items = data.get('result',{}).get('items',[])
+for item in reversed(items):
+    if item.get('type')=='outbound.reply' and item.get('timestamp',0) > $BEFORE:
+        print(item['data']['message'][:2000])
+        break
+" 2>/dev/null)
+  if [ -n "$reply" ]; then echo "REPLY: $reply"; break; fi
+  sleep 10
+done
 ```
-skills/memory/SKILL.md   # Documentation
-skills/memory/MEMORY.md  # State file (TODOs, history)
-skills/memory/loop.sh    # Continuous operation loop
+
+### Multiple Agents (threshold-based)
+
+```bash
+BEFORE=$(date +%s)000
+
+for agent in agent-a agent-b agent-c; do
+  curl -s -X POST http://localhost:4000/remote \
+    -H "Content-Type: application/json" \
+    -d "{\"command\":\"/ask ${agent} <task>\"}"
+done
+
+# Wait for 2 of 3, check every 10s, max 3 minutes
+for i in $(seq 1 18); do
+  results=""
+  for agent in agent-a agent-b agent-c; do
+    reply=$(curl -s -X POST http://localhost:4000/remote \
+      -H "Content-Type: application/json" \
+      -d "{\"command\":\"/news ${agent}\"}" 2>/dev/null | python3 -c "
+import sys, json
+try:
+    data = json.load(sys.stdin)
+    items = data.get('result',{}).get('items',[])
+    for item in reversed(items):
+        if item.get('type')=='outbound.reply' and item.get('timestamp',0) > $BEFORE:
+            print(item['data']['message'][:200].replace(chr(10), ' '))
+            break
+except: pass
+" 2>/dev/null)
+    if [ -n "$reply" ]; then results="${results}${agent}: ${reply}\n"; fi
+  done
+  count=$(echo -e "$results" | grep -c ":" 2>/dev/null || echo 0)
+  if [ "$count" -ge 2 ]; then echo -e "$results"; break; fi
+  sleep 10
+done
 ```
 
-See `skills/memory/SKILL.md` for details on managing TODO lists and session state.
+**Tips:** Record the timestamp BEFORE dispatching to filter stale replies. Use a threshold rather than waiting for all agents. If an agent keeps returning stale replies, use `/clear <agent>`.
 
 ## Best Practices
 
@@ -144,13 +194,6 @@ See `skills/memory/SKILL.md` for details on managing TODO lists and session stat
 2. **Keep sessions short** - Start listener, do work, stop listener
 3. **Handle timeouts** - Replies may take time if user is away
 4. **Check results** - Verify command execution succeeded
-
-## Security
-
-- The API key is stored in `~/.id-agents/admin.key` with mode 0600
-- `/remote` endpoint requires the API key
-- Admin agent is hidden from regular `/agents` listing
-- Only the manager CLI can see admin agents
 
 ## Important Notes
 

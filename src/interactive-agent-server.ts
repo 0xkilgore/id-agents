@@ -26,9 +26,6 @@ interface PendingQuery {
 // Command handler function type - receives command and returns response
 export type CommandHandler = (command: string, from?: string) => Promise<{ success: boolean; result?: string; error?: string }>;
 
-// API key validator function type
-export type ApiKeyValidator = (key: string | undefined) => boolean;
-
 export class InteractiveAgentServer extends EventEmitter {
   private app: express.Application;
   private newsItems: NewsItem[] = [];
@@ -39,7 +36,6 @@ export class InteractiveAgentServer extends EventEmitter {
   private dbTeamId: string | undefined;
   private dbAgentId: string | undefined;
   private commandHandler: CommandHandler | undefined;
-  private apiKeyValidator: ApiKeyValidator | undefined;
 
   constructor(private name: string, private port: number = 4000) {
     super();
@@ -85,14 +81,6 @@ export class InteractiveAgentServer extends EventEmitter {
    */
   setCommandHandler(handler: CommandHandler) {
     this.commandHandler = handler;
-  }
-
-  /**
-   * Set an API key validator for admin authentication
-   * Required for command execution
-   */
-  setApiKeyValidator(validator: ApiKeyValidator) {
-    this.apiKeyValidator = validator;
   }
 
   private async dbAddNews(item: NewsItem) {
@@ -164,14 +152,13 @@ export class InteractiveAgentServer extends EventEmitter {
           {
             path: '/remote',
             method: 'POST',
-            description: `Execute CLI commands remotely (requires API key authentication)`,
-            auth: 'api_key'
+            description: `Execute CLI commands remotely`
           }
         ]
       });
     });
 
-    // Remote command endpoint - admin only, requires API key
+    // Remote command endpoint
     this.app.post('/remote', async (req, res) => {
       try {
         const { command, from } = req.body || {};
