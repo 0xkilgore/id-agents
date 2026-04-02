@@ -12,6 +12,7 @@ Documentation for the ID Agents multi-agent orchestration platform.
 ## Guides
 
 - [Interactive Agent Guide](./guides/interactive-agent.md) - Run the interactive CLI
+- [Admin Control Guide](./guides/admin-control.md) - Programmatic team management via `/remote`, talk-to-manager, and agent reply polling
 
 ## Protocols
 
