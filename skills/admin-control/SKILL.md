@@ -47,8 +47,8 @@ Start a temporary HTTP server to receive replies:
 
 ```bash
 node skills/admin-control/start-listener.js [port]
-# Default port: 4100
-# Outputs: Listening on http://localhost:4100
+# Default port: 4050
+# Outputs: Listening on http://localhost:4050
 ```
 
 ### 2. Send Message to Manager
@@ -56,7 +56,7 @@ node skills/admin-control/start-listener.js [port]
 Send a message and specify your reply endpoint:
 
 ```bash
-./skills/admin-control/talk-to-manager.sh "What agents are running?" http://localhost:4100
+./skills/admin-control/talk-to-manager.sh "What agents are running?" http://localhost:4050
 ```
 
 ### 3. Execute Remote Command
@@ -118,7 +118,7 @@ Execute a CLI command:
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `MANAGER_URL` | `http://localhost:4000` | Manager endpoint |
-| `ADMIN_LISTENER_PORT` | `4100` | Port for temp listener |
+| `ADMIN_LISTENER_PORT` | `4050` | Port for temp listener |
 
 ## Polling for Agent Replies
 

@@ -99,7 +99,7 @@ npx tsx src/local-agent-server.ts <agent-name> [options]
 
 1. **Startup**: Local agent starts an Express server with REST-AP endpoints
 2. **Registration**: Agent registers with the manager so other agents can discover it
-3. **Communication**: Other agents talk to it via `/talk` and `/talk-to` endpoints
+3. **Communication**: Other agents reach it via the manager's `/talk-to` endpoint, or directly via the agent's `/talk` endpoint
 4. **LLM Execution**: Uses your local Claude Code session (no API key needed)
 5. **Shutdown**: Agent unregisters from manager when stopped
 

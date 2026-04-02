@@ -3,14 +3,14 @@
  * Admin Listener - Temporary HTTP server to receive replies from the manager
  *
  * Usage: node start-listener.js [port]
- * Default port: 4100
+ * Default port: 4050
  *
  * Receives POST /news with replies and prints them to stdout.
  * Exits when it receives a message with type "admin.done" or after timeout.
  */
 
 import http from 'http';
-const port = parseInt(process.argv[2]) || process.env.ADMIN_LISTENER_PORT || 4100;
+const port = parseInt(process.argv[2]) || process.env.ADMIN_LISTENER_PORT || 4050;
 const timeout = parseInt(process.env.ADMIN_LISTENER_TIMEOUT) || 600000; // 10 min default
 
 // Store received messages

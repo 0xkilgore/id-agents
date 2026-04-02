@@ -44,8 +44,6 @@ export {
   INTER_AGENT_SKILL,
   INTER_AGENT_SKILL_LIGHT,
   withInterAgentSkill,
-  AGENT_COMM_SCRIPTS,
-  generateAgentHelperScript,
 } from './inter-agent-skill.js';
 
 // Config parser for YAML configurations
