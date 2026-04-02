@@ -17,6 +17,7 @@ import { EventEmitter } from 'events';
 import { execFileSync } from 'child_process';
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'fs';
 import path from 'path';
+import yaml from 'js-yaml';
 
 // ---------- Types ----------
 
@@ -149,19 +150,19 @@ export class XmtpMessaging extends EventEmitter {
     return this.allowedSenders.has(address.toLowerCase());
   }
 
-  /** Get the path to .xmtp/allowlist.json */
+  /** Get the path to .xmtp/allowlist.yaml */
   private getAllowlistPath(): string | null {
     const dir = this.config.workingDirectory;
     if (!dir) return null;
-    return path.join(dir, '.xmtp', 'allowlist.json');
+    return path.join(dir, '.xmtp', 'allowlist.yaml');
   }
 
-  /** Load allowlist from .xmtp/allowlist.json */
+  /** Load allowlist from .xmtp/allowlist.yaml */
   private loadAllowlist(): void {
     const filePath = this.getAllowlistPath();
     if (!filePath || !existsSync(filePath)) return;
     try {
-      const data = JSON.parse(readFileSync(filePath, 'utf8'));
+      const data = yaml.load(readFileSync(filePath, 'utf8')) as string[] | null;
       if (Array.isArray(data)) {
         for (const addr of data) {
           if (typeof addr === 'string') {
@@ -175,14 +176,14 @@ export class XmtpMessaging extends EventEmitter {
     }
   }
 
-  /** Save allowlist to .xmtp/allowlist.json */
+  /** Save allowlist to .xmtp/allowlist.yaml */
   private saveAllowlist(): void {
     const filePath = this.getAllowlistPath();
     if (!filePath) return;
     try {
       const dir = path.dirname(filePath);
       if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-      writeFileSync(filePath, JSON.stringify([...this.allowedSenders], null, 2) + '\n');
+      writeFileSync(filePath, '# XMTP allowed senders\n' + yaml.dump([...this.allowedSenders]));
     } catch (err: any) {
       console.warn(`[XMTP] Failed to save allowlist: ${err.message}`);
     }
