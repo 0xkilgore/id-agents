@@ -85,12 +85,10 @@ The Claude Agent SDK harness supports plugins:
 agents:
   - name: my-agent
     runtime: claude-agent-sdk
-    plugins:
-      - name: id-rest-ap
-        path: plugins/id-rest-ap
+    skills: [identity, inter-agent, catalog]
 ```
 
-Plugins are passed to the SDK as local plugins and provide additional tools and instructions.
+Skills are deployed to the agent's `.claude/skills/` directory at deploy time.
 
 ---
 

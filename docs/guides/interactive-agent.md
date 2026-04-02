@@ -16,6 +16,7 @@ npm run id-agents
 ```
 
 By default, this starts your interactive agent with:
+- **Interactive CLI server**: `4000`
 - **Manager port**: `4100`
 - **Agent ports**: `4101+` (dynamically assigned)
 

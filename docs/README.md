@@ -1,6 +1,6 @@
 # ID Agents Documentation
 
-**Version 0.1.7-beta**
+**Version 0.1.36-beta**
 
 Documentation for the ID Agents multi-agent orchestration platform.
 
@@ -36,12 +36,15 @@ Documentation for the ID Agents multi-agent orchestration platform.
 
 ## Skills
 
-Skills extend agent capabilities:
+Skills are deployed to each agent's `.claude/skills/` directory at deploy time. All configs should include `skills: [identity, inter-agent, catalog]` at minimum.
 
 - [Skills Overview](../skills/README.md) - Available skills and usage guide
-- [Inter-Agent Communication](../skills/inter-agent-communication/SKILL.md) - Agent-to-agent messaging
+- [Identity](../skills/identity/SKILL.md) - Agent name, team, onchain domain
+- [Inter-Agent](../skills/inter-agent/SKILL.md) - Agent-to-agent messaging via `/talk-to`
+- [Catalog](../skills/catalog/SKILL.md) - REST-AP self-description
+- [Wallet](../skills/wallet/SKILL.md) - OWS wallet operations
 - [Admin Control](../skills/admin-control/SKILL.md) - Remote CLI management
-- [Polling](../skills/polling/SKILL.md) - Async reply monitoring patterns
+- [Local Agent](../skills/local-agent/SKILL.md) - Spawn Claude Code agents locally
 
 ## Plugins
 

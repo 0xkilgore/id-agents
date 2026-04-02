@@ -2,8 +2,6 @@
 
 This folder contains optional plugins that can be attached to agents to extend their capabilities.
 
-Inter-agent communication is now handled by **skills** (deployed to `.claude/skills/`), not plugins. See `skills/README.md`.
-
 ## Plugin Structure
 
 Each plugin is a folder containing:
@@ -29,6 +27,8 @@ JavaScript static analysis skills for memory optimization, performance profiling
 **Path:** `plugins/claude-code/frontend-design`
 
 Frontend design skills for creating UI components, layouts, and visual designs.
+
+**Note:** Inter-agent communication is handled by **skills** (deployed to `.claude/skills/`), not plugins. The old `id-rest-ap` plugin is no longer used. See `skills/README.md`.
 
 ## Using Plugins
 

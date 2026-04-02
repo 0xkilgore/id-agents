@@ -9,7 +9,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-**Version 0.1.33-beta**
+**Version 0.1.36-beta**
 
 Run a team of AI coding agents from a single chat. Each agent is a real process with full tool access — Claude Code, OpenAI Codex, or both. No UI needed. Connect from any terminal, Telegram, or SSH session.
 
@@ -142,12 +142,17 @@ Connect from anywhere — terminal, mobile (via Telegram), SSH, or any tool that
 | `/news` | GET | Poll for updates (free, no LLM cost) |
 | `/news` | POST | Receive replies without processing |
 
+**Agent-internal endpoint:**
+| Endpoint | Method | Purpose |
+|----------|--------|---------|
+| `/talk-to` | POST | Synchronous agent-to-agent communication (blocks until reply) |
+
 **Manager-specific endpoints:**
 | Endpoint | Method | Purpose |
 |----------|--------|---------|
 | `/agents` | GET | List all agents |
-| `/message` | POST | Agent-to-agent messaging (fire-and-forget or wait) |
-| `/remote` | POST | Execute CLI commands programmatically |
+| `/message` | POST | Fire-and-forget agent-to-agent messaging (no reply) |
+| `/remote` | POST | Execute CLI commands programmatically (no auth required) |
 
 ## Scheduling
 
@@ -249,7 +254,7 @@ See [Scheduling Plan](./docs/SCHEDULING_PLAN.md) for the full design.
 
 ## Remote API
 
-The Manager exposes a `/remote` endpoint that lets any external tool — including another Claude Code session — interact with your agent team programmatically. This is how you manage agents from outside the interactive CLI.
+The Manager exposes a `/remote` endpoint (no authentication required — localhost only) that lets any external tool — including another Claude Code session — interact with your agent team programmatically. This is how you manage agents from outside the interactive CLI. Deploy commands (`/deploy`) also work via `/remote`.
 
 **From a terminal or script:**
 
@@ -354,6 +359,8 @@ Skills use the standard [Claude Code skill format](https://docs.anthropic.com/en
 | `inter-agent` | Messaging, delegation, news feed for multi-agent coordination |
 | `catalog` | REST-AP self-description visible to other agents |
 | `wallet` | OWS multi-chain wallet addresses (skipped if no wallet) |
+| `admin-control` | Remote CLI management — chat with manager, execute commands |
+| `local-agent` | Spawn Claude Code agents locally using existing authentication |
 
 **Adding a skill:**
 
@@ -384,7 +391,9 @@ defaults:
   skills: [identity, inter-agent, catalog, wallet, my-skill]
 ```
 
-Skills from defaults and per-agent lists are merged (deduped). You can also download skills from Anthropic or the community and drop them in.
+All configs should include `skills: [identity, inter-agent, catalog]` at minimum. Skills from defaults and per-agent lists are merged (deduped). You can also download skills from Anthropic or the community and drop them in.
+
+Skills are deployed to each agent's `.claude/skills/` directory at deploy time via `deploySkillsToAgent`.
 
 ### Plugins
 
@@ -393,8 +402,8 @@ Plugins are [Claude Code plugins](https://docs.anthropic.com/en/docs/claude-code
 ```yaml
 defaults:
   plugins:
-    - name: id-rest-ap
-      path: ../plugins/claude-code/id-rest-ap
+    - name: frontend-design
+      path: ../plugins/claude-code/frontend-design
 ```
 
 See [Skills README](./skills/README.md) for the full skill directory listing.
@@ -411,6 +420,16 @@ See [Skills README](./skills/README.md) for the full skill directory listing.
 | `OWS_REGISTRAR_WALLET` | No | OWS wallet name for onchain signing (recommended over raw key) |
 | `ID_REGISTRAR_PRIVATE_KEY` | No | Wallet private key for onchain registration (fallback if OWS not used) |
 | `PUBLIC_BASE_URL` | No | Public URL base for agents (e.g., `https://idbot.live`) |
+
+**Per-agent environment (set automatically by the manager):**
+
+| Variable | Description |
+|----------|-------------|
+| `ID_AGENT_PORT` | The agent's own REST-AP port (e.g., `4101`) |
+| `ID_AGENT_NAME` | Agent name |
+| `ID_AGENT_ALIAS` | Agent alias (same as name) |
+| `ID_TEAM` | Team name |
+| `MANAGER_URL` | Manager base URL (e.g., `http://localhost:4100`) |
 
 ### YAML Configuration
 
@@ -432,9 +451,6 @@ defaults:
     - inter-agent
     - catalog
     - wallet
-  plugins:
-    - name: id-rest-ap
-      path: ../plugins/claude-code/id-rest-ap
 
 agents:
   - name: coder
@@ -575,12 +591,38 @@ Core product development
 
 When `alice` is deployed, her identity skill knows she leads `engineering`, is tagged as a `reviewer`, and can see the full org chart for context on who to delegate to or consult.
 
+## Inter-Agent Communication
+
+Agents communicate using two methods — both via `curl` from the Bash tool (not SendMessage or built-in Claude Code tools):
+
+**`/talk-to` (primary, synchronous):** Send a message to another agent and block until reply. Called on the agent's own port:
+
+```bash
+curl -s -X POST http://localhost:$ID_AGENT_PORT/talk-to \
+  -H "Content-Type: application/json" \
+  -d '{"to": "agent-name", "message": "your question?", "timeout": 120000}'
+```
+
+**`/message` (fire-and-forget):** One-way notification via the manager. No reply expected:
+
+```bash
+curl -s -X POST $MANAGER_URL/message \
+  -H "Content-Type: application/json" \
+  -H "X-Id-Team: $ID_TEAM" \
+  -d '{"to": "agent-name", "message": "FYI: deployment is done"}'
+```
+
+### Loop Prevention
+
+Triggered messages (from schedules and heartbeats) include a `noAutoReply` flag that prevents the agent from automatically replying back to the sender. The response is stored in the agent's own news feed instead, preventing infinite ping-pong loops between agents.
+
 ## Ports and Networking
 
 | Component | Port | Description |
 |-----------|------|-------------|
-| Manager | 4100 | Main API + `/remote` endpoint |
-| Workers | 4101+ | Dynamic per-team range (25 ports per team) |
+| Interactive CLI | 4000 | CLI server for local interactive sessions |
+| Manager | 4100 | Main API, `/remote` endpoint, agent registry |
+| Agents | 4101+ | Dynamic per-team range (25 ports per team) |
 
 ## Documentation
 

@@ -142,7 +142,7 @@ Updated: 2026-03-29
 104. `GET /projects` — List projects (alias for teams)
 105. `POST /projects` — Create project (alias for teams)
 106. `GET /logs` — Get manager activity log
-107. `POST /remote` — Execute CLI commands via API (requires admin key) [STATUS: REVIEW] Zero authentication on manager endpoint
+107. `POST /remote` — Execute CLI commands via API (no auth, localhost only) [STATUS: PASS] Auth intentionally removed; servers bind 127.0.0.1
 108. `GET /:tokenId` — Reverse-proxy to agent by tokenId [STATUS: REVIEW] SSRF via virtual agent endpoints, leaks API key to user-controllable URL
 109. `POST /agents/:name/cancel` — Cancel agent query [STATUS: PASS] Team-scoped, bounded timeout
 

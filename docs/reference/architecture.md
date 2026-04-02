@@ -13,32 +13,35 @@ Interactive CLI → Manager → Agent Processes
 The central process running on port 4100 (configurable via `--port` or `MANAGER_PORT`).
 
 **Responsibilities:**
-- Stores agent state in PostgreSQL
-- Handles the `/remote` API for programmatic access (supports `/deploy`, `/agents`, `/ask`, etc.)
-- Proxies messages between agents via `/message`
+- Stores agent state in the database (SQLite or PostgreSQL)
+- Handles the `/remote` API for programmatic access — no auth required (supports `/deploy`, `/agents`, `/ask`, etc.)
+- Routes fire-and-forget messages between agents via `/message`
 - Spawns and stops agent processes
 - Manages onchain ENS registration via id-cli
 - Runs health checks every 30 seconds (marks agents online/offline)
 - Serves the `/agents` list with health status
+- Owns the scheduling system (heartbeat + calendar)
 
 **Key endpoints:**
 - `GET /health` — Manager health check
 - `GET /agents` — List all agents with health status
-- `POST /remote` — Execute CLI commands programmatically
-- `POST /message` — Agent-to-agent messaging
+- `POST /remote` — Execute CLI commands programmatically (no auth)
+- `POST /message` — Fire-and-forget agent-to-agent messaging (no reply)
 
 ### 2. Agent Processes (`src/local-agent-server.ts` + `src/claude-agent-server.ts`)
 
 Each agent runs as a separate Node.js process with its own Express server on a dynamically assigned port (4101+, sequential).
 
 **Responsibilities:**
-- Hosts REST-AP endpoints (`/talk`, `/news`, `/health`)
+- Hosts REST-AP endpoints (`/talk`, `/talk-to`, `/news`, `/health`)
 - When a message arrives on `/talk`, spawns an LLM session to process it
-- Stores replies in an in-memory news feed (backed by PostgreSQL)
+- Stores replies in an in-memory news feed (backed by database)
 - Serves `/.well-known/restap.json` for discovery
 
 **REST-AP endpoints per agent:**
 - `POST /talk` — Send a message (triggers LLM processing)
+- `POST /talk-to` — Synchronous agent-to-agent communication (blocks until reply, localhost only)
+- `POST /schedule` — Receive manager-owned scheduled work (internal, with `noAutoReply`)
 - `GET /news` — Poll for replies (free, no LLM cost)
 - `GET /health` — Agent health check
 - `GET /.well-known/restap.json` — Service discovery catalog
@@ -113,6 +116,34 @@ The manager pings each agent's `/health` endpoint every 30 seconds:
 
 Health status is visible in `/agents` response and `/status` CLI command.
 
+## Inter-Agent Communication
+
+**`/talk-to` (primary, synchronous):** Agents call `/talk-to` on their own port (`localhost:$ID_AGENT_PORT/talk-to`) to send a message and block until a reply arrives. This is the primary inter-agent endpoint. Agents must use `curl` via the Bash tool — not SendMessage or built-in Claude Code tools.
+
+**`/message` (fire-and-forget):** One-way notification routed through the manager. No reply is returned. Use for FYI messages only.
+
+### Loop Prevention
+
+Triggered messages (from schedules, heartbeats) include a `noAutoReply` flag. When set, the agent's response is stored in its own news feed rather than auto-replying to the sender. This prevents infinite loops.
+
 ## Per-Agent Environment
 
-Each agent can have its own `.env.<name>.<address>` file in the repo root containing a `PRIVATE_KEY` for onchain operations. The manager loads this file when spawning the agent and merges it into the process environment.
+The manager sets these environment variables for every spawned agent:
+
+| Variable | Description |
+|----------|-------------|
+| `ID_AGENT_PORT` | Agent's own REST-AP port |
+| `ID_AGENT_NAME` | Agent name |
+| `ID_AGENT_ALIAS` | Agent alias (same as name) |
+| `ID_TEAM` | Team name |
+| `MANAGER_URL` | Manager base URL |
+
+Each agent can also have its own `.env.<name>.<address>` file in the repo root containing a `PRIVATE_KEY` for onchain operations. The manager loads this file when spawning the agent and merges it into the process environment.
+
+## Port Map
+
+| Component | Port | Description |
+|-----------|------|-------------|
+| Interactive CLI | 4000 | CLI server for local interactive sessions |
+| Manager | 4100 | Main API, `/remote` endpoint, agent registry |
+| Agents | 4101+ | Dynamic per-team range (25 ports per team) |

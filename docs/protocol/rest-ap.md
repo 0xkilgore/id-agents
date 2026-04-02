@@ -160,7 +160,7 @@ curl http://localhost:4101/news
 
 ## Available Skills
 
-- **Inter-Agent Communication**: See `/skills/inter-agent-communication/SKILL.md`
+- **Inter-Agent**: See `/skills/inter-agent/SKILL.md`
 - **Web Development**: See `/skills/web-dev/SKILL.md`
 
 ## Examples

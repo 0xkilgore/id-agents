@@ -21,9 +21,10 @@ onchain:
 defaults:
   runtime: claude-code
   model: claude-haiku-4-5-20251001
-  plugins:
-    - name: id-rest-ap
-      path: plugins/id-rest-ap
+  skills:
+    - identity
+    - inter-agent
+    - catalog
 
 calendar:
   - title: Daily standup prep
@@ -136,10 +137,13 @@ Default settings applied to all agents unless overridden.
 defaults:
   runtime: claude-code
   model: claude-haiku-4-5-20251001
-  plugins:
-    - name: id-rest-ap
-      path: plugins/id-rest-ap
+  skills:
+    - identity
+    - inter-agent
+    - catalog
 ```
+
+All configs should include `skills: [identity, inter-agent, catalog]` at minimum.
 
 #### Defaults Object
 
@@ -147,8 +151,8 @@ defaults:
 |-------|------|-------------|
 | `runtime` | String | Default agent runtime (`claude-code`, `open-code`, `codex`) |
 | `model` | String | Default LLM model |
-| `plugins` | Array | Default plugins for Claude Code agents |
-| `skills` | Array | Default skills for OpenCode/Codex agents |
+| `skills` | Array | Skills deployed to each agent (minimum: `[identity, inter-agent, catalog]`) |
+| `plugins` | Array | Optional plugins for Claude Code agents |
 | `allowedTools` | Array | Default tool restrictions for all agents |
 
 ### calendar
@@ -214,8 +218,8 @@ Each agent can have the following fields:
 | `model` | No | From defaults | LLM model to use |
 | `runtime` | No | From defaults | Agent runtime/harness |
 | `systemPrompt` | No | - | Custom system prompt |
-| `plugins` | No | From defaults | Plugins for Claude Code agents |
-| `skills` | No | From defaults | Skills for OpenCode/Codex agents (.md files) |
+| `skills` | No | From defaults | Skills deployed to agent's `.claude/skills/` directory |
+| `plugins` | No | From defaults | Optional plugins for Claude Code agents |
 | `allowedTools` | No | From defaults | Restrict agent to specific tools |
 | `env` | No | `{}` | Environment variables for the agent process |
 | `register` | No | From onchain | Whether to register onchain |
@@ -231,11 +235,7 @@ agents:
     systemPrompt: |
       You are a senior software developer.
       Focus on code quality and best practices.
-    plugins:
-      - name: id-rest-ap
-        path: plugins/id-rest-ap
-      - name: git-tools
-        path: plugins/git-tools
+    skills: [identity, inter-agent, catalog, wallet]
     heartbeat:
       interval: 300
       message: Review open PRs and summarize risks.
@@ -274,6 +274,25 @@ Defaults:
 
 ---
 
+## Skills Configuration
+
+Skills are instruction packages deployed to each agent's `.claude/skills/` directory at deploy time via `deploySkillsToAgent`. Each skill is a directory containing a `SKILL.md` file with YAML frontmatter.
+
+All configs should include `skills: [identity, inter-agent, catalog]` at minimum. The 6 built-in skills are: `identity`, `inter-agent`, `catalog`, `wallet`, `admin-control`, `local-agent`.
+
+```yaml
+defaults:
+  skills: [identity, inter-agent, catalog, wallet]
+
+agents:
+  - name: my-agent
+    skills: [custom-skill]  # merged with defaults
+```
+
+Skills from defaults and per-agent lists are merged (deduped).
+
+---
+
 ## Plugin Configuration
 
 Plugins extend agent capabilities with additional tools and instructions.
@@ -287,38 +306,11 @@ Plugins extend agent capabilities with additional tools and instructions.
 
 ```yaml
 plugins:
-  - name: id-rest-ap
-    path: plugins/id-rest-ap
-  - name: custom-tools
-    path: plugins/custom-tools
+  - name: frontend-design
+    path: plugins/claude-code/frontend-design
 ```
 
 Plugins are copied to the agent's working directory at spawn time. Each agent owns its copy and can modify it.
-
----
-
-## Skills Configuration (OpenCode/Codex)
-
-Skills are `.md` files that get concatenated into `AGENTS.md` for OpenCode and Codex agents.
-
-### Skill Object
-
-| Field | Required | Description |
-|-------|----------|-------------|
-| `name` | Yes | Skill name (e.g., "inter-agent" loads `inter-agent.md`) |
-| `path` | No | Custom path to skill file (defaults to `plugins/opencode/<name>.md`) |
-
-```yaml
-agents:
-  - name: my-agent
-    runtime: open-code
-    skills:
-      - name: inter-agent
-      - name: custom-skill
-        path: /path/to/custom.md
-```
-
-Skills provide instructions and context to agents using runtimes that read `AGENTS.md` for project configuration.
 
 ---
 
@@ -439,9 +431,10 @@ onchain:
 defaults:
   runtime: claude-code
   model: claude-haiku-4-5-20251001
-  plugins:
-    - name: id-rest-ap
-      path: plugins/id-rest-ap
+  skills:
+    - identity
+    - inter-agent
+    - catalog
 
 calendar:
   - title: Daily standup prep
@@ -494,6 +487,16 @@ Configuration can also be provided via environment variables:
 | `PUBLIC_BASE_URL` | Public URL base for agents (e.g., `https://idbot.live`) |
 
 Environment variables take precedence over config file values for most settings.
+
+**Per-agent environment (set automatically by the manager):**
+
+| Variable | Description |
+|----------|-------------|
+| `ID_AGENT_PORT` | Agent's own REST-AP port (e.g., `4101`) |
+| `ID_AGENT_NAME` | Agent name |
+| `ID_AGENT_ALIAS` | Agent alias (same as name) |
+| `ID_TEAM` | Team name |
+| `MANAGER_URL` | Manager base URL (e.g., `http://localhost:4100`) |
 
 ---
 

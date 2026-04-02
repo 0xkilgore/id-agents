@@ -1,6 +1,8 @@
 # Agent Skills
 
-This directory contains skills that agents can use to enhance their capabilities.
+This directory contains the 6 built-in skills that agents can use. Skills are deployed to each agent's `.claude/skills/` directory at deploy time via `deploySkillsToAgent`.
+
+All YAML configs should include `skills: [identity, inter-agent, catalog]` at minimum.
 
 ## What are Skills?
 
