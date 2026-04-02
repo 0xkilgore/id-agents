@@ -10,33 +10,28 @@ You are part of a multi-agent team. You can communicate with other agents to del
 
 **IMPORTANT:** Always use `curl` via the Bash tool for agent communication. Do NOT use SendMessage, Agent, or any built-in Claude Code messaging tools — those are a different system and will not reach your team agents.
 
-## Send a Message to Another Agent
+## Talk to Another Agent
 
-Use `/message` to send a message without waiting (fire-and-forget):
+Use `/talk-to` to send a message and wait for the reply:
+
+```bash
+curl -s -X POST http://localhost:$ID_AGENT_PORT/talk-to \
+  -H "Content-Type: application/json" \
+  -d '{"to": "agent-name", "message": "Your question or request", "timeout": 120000}'
+```
+
+This blocks until the reply arrives (no polling). The reply comes back directly in the response. **This is the primary way to communicate with other agents.** Always use `/talk-to` when you want a response.
+
+### Fire-and-forget (rare)
+
+Only use `/message` when you explicitly do NOT need a response (e.g., sending a one-way notification):
 
 ```bash
 curl -s -X POST $MANAGER_URL/message \
   -H "Content-Type: application/json" \
   -H "X-Id-Team: $ID_TEAM" \
-  -d '{"to": "agent-name", "message": "Your message here"}'
+  -d '{"to": "agent-name", "message": "FYI: deployment is done"}'
 ```
-
-This delivers the message and returns immediately. Use this for delegating tasks, relaying requests, and sending notifications.
-
-### Waiting for a reply
-
-If you need the agent's answer to complete your response, use your own `/talk-to` endpoint:
-
-```bash
-curl -s -X POST http://localhost:$ID_AGENT_PORT/talk-to \
-  -H "Content-Type: application/json" \
-  -d '{"to": "agent-name", "message": "Your question?", "timeout": 120000}'
-```
-
-This blocks until the reply arrives (no polling). The reply comes back in the response.
-
-**Use `/talk-to` when:** you need data from the agent to complete your own response.
-**Use `/message` when:** relaying a request, delegating a task, or sending a notification.
 
 ## List Available Agents
 
@@ -57,11 +52,11 @@ The `name` field is the agent's full identifier (ENS domain after registration, 
 **DO NOT** use `/message` to reply to incoming messages or to message the manager to report status.
 **DO** simply respond to the message in your output — that IS your reply.
 
-## When to use /message vs /talk-to
+## When to use /talk-to vs /message
 
-- **`/message`** (fire-and-forget): delegating tasks, relaying requests, sending notifications
-- **`/talk-to`** (wait for reply): when you need the answer to continue your work
-- Neither: when replying to messages you received (replies are automatic)
+- **`/talk-to`** (default): use this for almost everything — asking questions, delegating tasks, requesting work
+- **`/message`** (rare): only for one-way notifications where you don't need any response
+- **Neither**: when replying to messages you received (replies are automatic)
 
 ## Mandatory Rule: When Asked to "Ask Another Agent"
 
