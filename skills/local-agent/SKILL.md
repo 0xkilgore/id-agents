@@ -71,7 +71,8 @@ npx tsx src/local-agent-server.ts <agent-name> [options]
 | `ID_TEAM` | Team name | `default` |
 | `MANAGER_URL` | Manager URL | `http://localhost:4100` |
 | `DATABASE_URL` | PostgreSQL connection (optional) | - |
-| `CLAUDE_MODEL` | Default model | `claude-sonnet-4-20250514` |
+| `ID_AGENT_PORT` | Agent's own REST-AP port | (auto-assigned) |
+| `CLAUDE_MODEL` | Default model | `claude-sonnet-4-6` |
 
 ## How It Works
 
@@ -123,12 +124,12 @@ curl http://localhost:24001/news?since=0
 
 ### From Another Agent
 
-Other agents in the same team can use `/talk-to`:
+Other agents in the same team use their own `/talk-to` endpoint:
 
 ```bash
-curl -X POST http://localhost:4100/talk-to \
+curl -X POST http://localhost:$ID_AGENT_PORT/talk-to \
   -H "Content-Type: application/json" \
-  -d '{"to": "my-local-agent", "message": "Help me with this task"}'
+  -d '{"to": "my-local-agent", "message": "Help me with this task", "timeout": 120000}'
 ```
 
 ## When to Use Local Agents
