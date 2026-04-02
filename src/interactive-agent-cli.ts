@@ -4159,6 +4159,7 @@ async function deployFromConfig(filePath: string, args: string[] = []) {
           const localEnv = {
             ...process.env,
             ID_TEAM: activeTeam,
+            ID_AGENT_PORT: String(result.port),
             MANAGER_URL: MANAGER_URL,
             ID_DB_TEAM_ID: result.teamId,
             ID_DB_AGENT_ID: result.id,
