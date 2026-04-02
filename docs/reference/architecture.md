@@ -14,7 +14,7 @@ The central process running on port 4100 (configurable via `--port` or `MANAGER_
 
 **Responsibilities:**
 - Stores agent state in PostgreSQL
-- Handles the `/remote` API for programmatic access (no auth required)
+- Handles the `/remote` API for programmatic access (supports `/deploy`, `/agents`, `/ask`, etc.)
 - Proxies messages between agents via `/message`
 - Spawns and stops agent processes
 - Manages onchain ENS registration via id-cli

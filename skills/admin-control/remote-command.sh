@@ -18,15 +18,16 @@ if [ -z "$COMMAND" ]; then
   echo "Usage: $0 \"/command args\""
   echo ""
   echo "Available commands:"
+  echo "  /deploy <config>           - Deploy agents from config"
   echo "  /agents                    - List all agents"
   echo "  /status                    - Show team health"
-  echo "  /spawn <name>              - Create new agent"
   echo "  /delete <name>             - Delete agent"
   echo "  /ask <agent> <msg>         - Send message to agent"
   echo "  /hey <agent> <msg>         - Continue session with agent"
   echo "  /agent <name> start|stop   - Agent lifecycle"
+  echo "  /team                      - Show current team"
   echo ""
-  echo "Example: $0 \"/agents\""
+  echo "Example: $0 \"/deploy idchain\""
   exit 1
 fi
 

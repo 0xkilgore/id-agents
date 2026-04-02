@@ -539,8 +539,49 @@ const remoteCommandHandler: CommandHandler = async (command: string, from?: stri
       return { success: true, result: `Team switch to "${teamName}" requires CLI restart. Current team: ${activeTeam}` };
     }
 
+    // /deploy <config> [params] - deploy agents from config
+    const deployMatch = trimmed.match(/^\/deploy\s+(.+)$/);
+    if (deployMatch) {
+      const parts = deployMatch[1].trim().split(/\s+/);
+      let filePath = parts[0];
+      const deployArgs = parts.slice(1);
+
+      // Resolve shorthand: "idchain" -> "configs/idchain.yaml"
+      const originalArg = filePath;
+      if (!filePath.includes('/') && !filePath.includes('\\')) {
+        if (!filePath.endsWith('.yaml') && !filePath.endsWith('.yml')) {
+          filePath = `configs/${filePath}.yaml`;
+        } else {
+          filePath = `configs/${filePath}`;
+        }
+      } else if (!filePath.endsWith('.yaml') && !filePath.endsWith('.yml')) {
+        filePath = `${filePath}.yaml`;
+      }
+
+      // Fall back to default.yaml if config doesn't exist
+      const fs = await import('fs');
+      if (!fs.existsSync(filePath)) {
+        const defaultPath = 'configs/default.yaml';
+        if (fs.existsSync(defaultPath)) {
+          filePath = defaultPath;
+          if (!deployArgs.some(a => a.startsWith('name='))) {
+            deployArgs.unshift(originalArg);
+          }
+        } else {
+          return { success: false, error: `Config not found: ${filePath}` };
+        }
+      }
+
+      try {
+        await deployFromConfig(filePath, deployArgs);
+        return { success: true, result: `Deployed from ${filePath}` };
+      } catch (err: any) {
+        return { success: false, error: `Deploy failed: ${err.message || String(err)}` };
+      }
+    }
+
     // Unknown command
-    return { success: false, error: `Unknown command: ${trimmed.split(/\s/)[0]}. Supported: /agents, /status, /ask, /hey, /delete, /agent, /team` };
+    return { success: false, error: `Unknown command: ${trimmed.split(/\s/)[0]}. Supported: /agents, /status, /ask, /hey, /delete, /agent, /team, /deploy` };
 
   } catch (err: any) {
     return { success: false, error: err.message || String(err) };

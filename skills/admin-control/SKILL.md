@@ -76,7 +76,7 @@ Execute a CLI command:
 | `/agents` | List all agents |
 | `/agents rebuild` | Rebuild all agents |
 | `/status` | Show team health |
-| `/deploy <config> [params]` | Deploy agents from config |
+| `/deploy <config> [params]` | Deploy agents from config (e.g. `/deploy idchain`) |
 | `/delete <name>` | Delete agent |
 | `/ask <agent> <msg>` | Send message to agent (continues session) |
 | `/ask * <msg>` | Broadcast to all agents |
