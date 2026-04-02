@@ -73,6 +73,13 @@ export class XmtpMessaging extends EventEmitter {
   private resolveAddress: ((name: string) => Promise<string | null>) | null = null;
   private started = false;
 
+  /**
+   * Allowlist of trusted sender addresses (lowercase).
+   * If non-empty, only messages from these addresses are processed.
+   * Messages from unknown senders are silently dropped before reaching the approval callback.
+   */
+  private allowedSenders: Set<string> = new Set();
+
   constructor(config: XmtpConfig = {}) {
     super();
     this.config = config;
@@ -86,6 +93,45 @@ export class XmtpMessaging extends EventEmitter {
   /** Set the handler for approved inbound messages. */
   setMessageHandler(handler: MessageHandler) {
     this.messageHandler = handler;
+  }
+
+  /**
+   * Add a trusted sender by wallet address or ENS name.
+   * ENS names are resolved to addresses on add.
+   * Only messages from allowed senders reach the approval callback.
+   * If no senders are added, all messages reach the approval callback (open mode).
+   */
+  async allowSender(addressOrName: string): Promise<string | null> {
+    // Already a wallet address
+    if (addressOrName.match(/^0x[a-fA-F0-9]{40}$/)) {
+      this.allowedSenders.add(addressOrName.toLowerCase());
+      console.log(`[XMTP] Allowed sender: ${addressOrName}`);
+      return addressOrName;
+    }
+    // Resolve ENS name
+    if (!this.resolveAddress) {
+      console.warn(`[XMTP] Cannot resolve ${addressOrName} — name resolver not initialized (call after start)`);
+      return null;
+    }
+    const resolved = await this.resolveAddress(addressOrName);
+    if (resolved) {
+      this.allowedSenders.add(resolved.toLowerCase());
+      console.log(`[XMTP] Allowed sender: ${addressOrName} → ${resolved}`);
+      return resolved;
+    }
+    console.warn(`[XMTP] Could not resolve ${addressOrName}`);
+    return null;
+  }
+
+  /** Remove a sender from the allowlist. */
+  removeSender(address: string): void {
+    this.allowedSenders.delete(address.toLowerCase());
+  }
+
+  /** Check if a sender address is allowed (or if allowlist is empty = open mode). */
+  isSenderAllowed(address: string): boolean {
+    if (this.allowedSenders.size === 0) return true; // open mode
+    return this.allowedSenders.has(address.toLowerCase());
   }
 
   /** Get the agent's wallet address (available after start). */
@@ -198,6 +244,13 @@ export class XmtpMessaging extends EventEmitter {
         return;
       }
 
+      // Step 2: Check allowlist BEFORE exposing content to any callback
+      if (!this.isSenderAllowed(senderAddress || '')) {
+        console.log(`[XMTP] Dropped message from untrusted sender: ${senderAddress}`);
+        this.emit('dropped', { senderAddress, reason: 'not in allowlist' });
+        return;
+      }
+
       const isDm = ctx.isDm();
       const content = ctx.message.content as string;
       const conversationId = ctx.conversation.id;
@@ -212,7 +265,7 @@ export class XmtpMessaging extends EventEmitter {
 
       console.log(`[XMTP] Inbound from ${senderAddress}${isDm ? ' (DM)' : ' (group)'}: ${content.substring(0, 80)}...`);
 
-      // Step 2: Approval check — human can see sender and content before it's processed
+      // Step 3: Approval check — human can see sender and content before it's processed
       if (this.approvalCallback) {
         const approved = await this.approvalCallback(inbound, 'inbound');
         if (!approved) {
