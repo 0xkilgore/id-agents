@@ -88,6 +88,9 @@ export class XmtpMessaging extends EventEmitter {
    */
   private allowedSenders: Set<string> = new Set();
 
+  /** Maps addresses to the name they were added with (for readable YAML output). */
+  private allowedSenderNames: Map<string, string> = new Map();
+
   constructor(config: XmtpConfig = {}) {
     super();
     this.config = config;
@@ -125,6 +128,7 @@ export class XmtpMessaging extends EventEmitter {
     const resolved = await this.resolveAddress(addressOrName);
     if (resolved) {
       this.allowedSenders.add(resolved.toLowerCase());
+      this.allowedSenderNames.set(resolved.toLowerCase(), addressOrName);
       this.saveAllowlist();
       console.log(`[XMTP] Allowed sender: ${addressOrName} → ${resolved}`);
       return resolved;
@@ -162,15 +166,20 @@ export class XmtpMessaging extends EventEmitter {
     const filePath = this.getAllowlistPath();
     if (!filePath || !existsSync(filePath)) return;
     try {
-      const data = yaml.load(readFileSync(filePath, 'utf8')) as string[] | null;
-      if (Array.isArray(data)) {
-        for (const addr of data) {
-          if (typeof addr === 'string') {
-            this.allowedSenders.add(addr.toLowerCase());
+      // Parse YAML entries (list of {address, name} objects or plain strings)
+      const data = yaml.load(readFileSync(filePath, 'utf8'));
+      if (!Array.isArray(data)) return;
+      for (const entry of data) {
+        if (typeof entry === 'string') {
+          this.allowedSenders.add(entry.toLowerCase());
+        } else if (entry && typeof entry === 'object' && entry.address) {
+          this.allowedSenders.add(entry.address.toLowerCase());
+          if (entry.name) {
+            this.allowedSenderNames.set(entry.address.toLowerCase(), entry.name);
           }
         }
-        console.log(`[XMTP] Loaded ${data.length} allowed senders from ${filePath}`);
       }
+      console.log(`[XMTP] Loaded ${this.allowedSenders.size} allowed senders from ${filePath}`);
     } catch (err: any) {
       console.warn(`[XMTP] Failed to load allowlist: ${err.message}`);
     }
@@ -183,7 +192,11 @@ export class XmtpMessaging extends EventEmitter {
     try {
       const dir = path.dirname(filePath);
       if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-      writeFileSync(filePath, '# XMTP allowed senders\n' + yaml.dump([...this.allowedSenders]));
+      const entries = [...this.allowedSenders].map(addr => {
+        const name = this.allowedSenderNames.get(addr);
+        return name ? { address: addr, name } : { address: addr };
+      });
+      writeFileSync(filePath, '# XMTP allowed senders\n' + yaml.dump(entries));
     } catch (err: any) {
       console.warn(`[XMTP] Failed to save allowlist: ${err.message}`);
     }
