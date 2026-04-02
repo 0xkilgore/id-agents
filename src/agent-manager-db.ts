@@ -1555,6 +1555,18 @@ export class AgentManagerDb {
           console.log(`[Spawn] Wrote heartbeat config to ${heartbeatPath}`);
         }
 
+        // Deploy skills to agent's .claude/skills/ folder
+        if (skills && Array.isArray(skills) && skills.length > 0) {
+          this.deploySkillsToAgent(workingDirectory, skills, {
+            DISPLAY_NAME: domain || name,
+            TEAM: teamName,
+            ONCHAIN_IDENTITY: domain
+              ? `Your onchain identity is your ENS domain: **${domain}**`
+              : '',
+            ORG_CONTEXT: '',
+          }, { hasWallet: false });
+        }
+
         // Copy plugins to agent's working directory (agent owns its plugins)
         const localPlugins = this.copyPluginsToAgent(mergedPlugins, workingDirectory);
 
