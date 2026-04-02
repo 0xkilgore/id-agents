@@ -14,6 +14,7 @@
 
 import { Agent, createNameResolver, type MessageContext } from '@xmtp/agent-sdk';
 import { EventEmitter } from 'events';
+import { execFileSync } from 'child_process';
 
 // ---------- Types ----------
 
@@ -192,6 +193,25 @@ export class XmtpMessaging extends EventEmitter {
     await this.agent.start();
   }
 
+  /** Resolve xid.eth names via id-cli (CCIP-Read gateway workaround). */
+  private resolveViaIdCli(name: string): string | null {
+    try {
+      const output = execFileSync('id-cli', ['info', name], {
+        encoding: 'utf8',
+        timeout: 15000,
+        stdio: ['pipe', 'pipe', 'pipe'],
+      });
+      const data = JSON.parse(output);
+      const addr = data?.data?.ethAddress;
+      if (addr && addr.match(/^0x[a-fA-F0-9]{40}$/)) {
+        return addr;
+      }
+      return null;
+    } catch {
+      return null;
+    }
+  }
+
   /** Stop the XMTP agent. */
   async stop(): Promise<void> {
     // Agent SDK doesn't expose a stop method in the current API
@@ -213,10 +233,14 @@ export class XmtpMessaging extends EventEmitter {
       // Resolve ENS name to address if needed
       let toAddress = to;
       if (!to.match(/^0x[a-fA-F0-9]{40}$/)) {
-        if (!this.resolveAddress) {
-          return { success: false, error: 'Name resolver not initialized' };
+        // Try id-cli first for xid.eth names, then fall back to web3.bio
+        let resolved: string | null = null;
+        if (to.endsWith('.xid.eth')) {
+          resolved = this.resolveViaIdCli(to);
         }
-        const resolved = await this.resolveAddress(to);
+        if (!resolved && this.resolveAddress) {
+          resolved = await this.resolveAddress(to);
+        }
         if (!resolved) {
           return { success: false, error: `Could not resolve "${to}" to a wallet address` };
         }
