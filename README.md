@@ -68,7 +68,7 @@ Run a team of AI coding agents from a single chat. Each agent is a real process 
 
 **Components:**
 - **Manager** (`src/agent-manager-db.ts`) - DB-backed API, agent registry, orchestration logic, `/remote` endpoint for programmatic access
-- **Worker** (`src/claude-agent-server.ts`) - REST-AP server running Claude in each local agent process
+- **Worker** (`src/agent-rest-server.ts`) - REST-AP server running each local agent process
 - **Local Agent Server** (`src/local-agent-server.ts`) - Spawns and manages local agent processes
 
 ## Quick Start

@@ -90,7 +90,8 @@ User types: /ask coder hello
 |------|---------|
 | `src/agent-manager-db.ts` | Manager — routes, DB, spawning, registration, health checks |
 | `src/agent-rest-server.ts` | Preferred runtime-neutral entry point for the per-agent REST server |
-| `src/claude-agent-server.ts` | Current implementation file behind `AgentRestServer` (kept for compatibility) |
+| `src/agent-rest-server.ts` | Runtime-neutral per-agent REST server export used by manager and local workers |
+| `src/claude-agent-server.ts` | Compatibility export layer for older imports of the agent REST server |
 | `src/local-agent-server.ts` | Agent process bootstrap and CLI arg parsing |
 | `src/interactive-agent-cli.ts` | User-facing CLI |
 | `src/config-parser.ts` | YAML config parsing and parameter substitution |

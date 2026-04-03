@@ -1,12 +1,9 @@
 // SPDX-License-Identifier: MIT
 /**
- * Agent REST-AP Server
+ * Compatibility wrapper for the runtime-neutral agent REST server.
  *
- * Runs a runtime-backed agent as a REST-AP provider that other agents can call.
- * The agent has full machine access and exposes /talk, /news, and /.well-known/restap.json
- *
- * Note: the file name remains for compatibility. New code should prefer the
- * `AgentRestServer` alias from `agent-rest-server.ts`.
+ * The implementation now uses the `AgentRestServer` class name, but this file
+ * continues to export `ClaudeAgentServer` for backward compatibility.
  */
 
 import express from 'express';
@@ -147,7 +144,7 @@ interface ReplyWaiter {
   timeout: NodeJS.Timeout | null;
 }
 
-export class ClaudeAgentServer {
+export class AgentRestServer {
   private app: express.Application;
   private newsItems: NewsItem[] = [];
   private activeQueries: Map<string, ActiveQuery> = new Map();
@@ -1754,3 +1751,5 @@ ${inbound.content}`;
     this.httpServer = undefined;
   }
 }
+
+export { AgentRestServer as ClaudeAgentServer };

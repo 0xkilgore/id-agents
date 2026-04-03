@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MIT
 /**
- * Interactive CLI for Claude Agent REST-AP Server
- * 
- * Chat with Claude Agent via REST-AP protocol
+ * Interactive CLI for the agent REST-AP server.
+ *
+ * Chat with a local agent via REST-AP protocol.
  */
 
 import 'dotenv/config';
@@ -38,7 +38,7 @@ async function main() {
       listAgents = true;
     } else if (args[i] === '--help' || args[i] === '-h') {
       console.log(`
-Usage: npm run claude:talk [options]
+Usage: npm run agent:talk [options]
 
 Options:
   --list, -l            List all available agents
@@ -47,10 +47,10 @@ Options:
   --help, -h            Show this help
 
 Examples:
-  npm run claude:talk --list           # List all agents
-  npm run claude:talk --port 4101     # Connect by port
-  npm run claude:talk --name helper    # Connect by name
-  npm run claude:talk                  # Connect to default agent on port 4101
+  npm run agent:talk -- --list        # List all agents
+  npm run agent:talk -- --port 4101   # Connect by port
+  npm run agent:talk -- --name helper # Connect by name
+  npm run agent:talk                  # Connect to default agent on port 4101
 
 Environment Variables:
   CLAUDE_AGENT_URL     Full URL to agent (default: http://localhost:4101)
@@ -81,8 +81,8 @@ Environment Variables:
         console.log(`  Port:   ${agent.port}`);
         console.log(`  Status: ${agent.status === 'running' ? colors.green + '●' + colors.reset : '○'} ${agent.status}`);
         console.log(`  URL:    ${agent.url}`);
-        console.log(`\n  Connect: ${colors.cyan}npm run claude:talk -- --name ${agent.name}${colors.reset}`);
-        console.log(`       or: ${colors.cyan}npm run claude:talk -- --port ${agent.port}${colors.reset}`);
+        console.log(`\n  Connect: ${colors.cyan}npm run agent:talk -- --name ${agent.name}${colors.reset}`);
+        console.log(`       or: ${colors.cyan}npm run agent:talk -- --port ${agent.port}${colors.reset}`);
       }
       
       console.log('\n' + '─'.repeat(80));
@@ -94,8 +94,8 @@ Environment Variables:
     }
   }
 
-  console.log('🤖 Claude Agent REST-AP Client');
-  console.log('===============================\n');
+  console.log('🤖 Agent REST-AP Client');
+  console.log('========================\n');
   
   let serverUrl: string;
   
@@ -134,10 +134,10 @@ Environment Variables:
       throw new Error('Server not responding');
     }
     const catalog: any = await catalogResponse.json();
-    console.log(`Connected to: ${catalog.provider?.name || catalog.agent?.name || 'Claude Agent'}`);
+    console.log(`Connected to: ${catalog.provider?.name || catalog.agent?.name || 'Agent'}`);
     console.log(`Server: ${serverUrl}\n`);
   } catch (error) {
-    console.error('❌ Cannot connect to Claude Agent server');
+    console.error('❌ Cannot connect to agent server');
     console.error(`   Make sure it's running on: ${serverUrl}`);
     console.error(`   Or start the manager: npm run claude:manager\n`);
     process.exit(1);
@@ -177,7 +177,7 @@ Environment Variables:
     }
 
     isProcessing = true;
-    console.log(`\n${colors.bold}${colors.cyan}🤖 Claude:${colors.reset}\n`);
+    console.log(`\n${colors.bold}${colors.cyan}🤖 Agent:${colors.reset}\n`);
 
     try {
       // Send message to Claude via REST-AP (with session_id if available)
@@ -333,7 +333,7 @@ Available commands:
   /exit      - Exit the CLI
   /quit      - Exit the CLI
 
-Claude has access to these tools:
+The connected agent has access to these tools:
   Read       - Read files in the working directory
   Write      - Create new files
   Edit       - Make precise edits to existing files

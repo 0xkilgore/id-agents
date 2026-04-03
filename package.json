@@ -23,6 +23,8 @@
     "build": "tsc",
     "prepublishOnly": "npm run build",
     "dev": "tsc --watch",
+    "agent:server": "npm run build && node dist/start-agent-rest-server.js",
+    "agent:talk": "npm run build && node dist/agent-restap-cli.js",
     "claude": "npm run build && node dist/claude-agent-cli.js",
     "claude:server": "npm run build && node dist/start-claude-server.js",
     "claude:manager": "npm run build && node dist/start-agent-manager.js",
