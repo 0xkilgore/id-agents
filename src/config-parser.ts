@@ -34,6 +34,7 @@ export interface AgentSpec {
   name: string;
   type?: 'claude' | 'automator';      // Agent type: 'claude' (default) or 'automator' (manager's brain, hidden)
   runtime?: HarnessType;              // Runtime harness id, defaults to 'claude-agent-sdk'
+  openMode?: boolean;                 // Allow XMTP messages from any sender when no allowlist is configured
   description?: string;
   model?: string;
   systemPrompt?: string;              // Custom system prompt for the agent

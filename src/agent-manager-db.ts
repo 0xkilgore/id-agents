@@ -33,8 +33,10 @@ import type { HarnessType } from './harness/types.js';
 import { SchedulerService } from './scheduling/scheduler-service.js';
 import { heartbeatToSchedule, calendarToSchedule, validateIntervalSeconds } from './scheduling/schedule-config.js';
 import {
+  getAvailableRuntimes,
   getDefaultModelForRuntime,
   getDefaultRuntime,
+  isRuntimeId,
   resolveRuntime,
   validateRuntimePreflight,
 } from './runtime/registry.js';
@@ -1578,7 +1580,7 @@ export class AgentManagerDb {
         teamId = team.id;
         teamName = team.name;
 
-        const { name, type: agentType, model, runtime, allowedTools, pluginPath, plugins, skills, metadata: reqMetadata, local, claudeMd, heartbeat, workingDirectory: configWorkDir, verbose, domain, tokenId, address } = req.body || {};
+        const { name, type: agentType, model, runtime, allowedTools, pluginPath, plugins, skills, metadata: reqMetadata, local, claudeMd, heartbeat, openMode, workingDirectory: configWorkDir, verbose, domain, tokenId, address } = req.body || {};
         if (!name) return res.status(400).json({ error: 'Missing name' });
 
         // Local agent: runs locally using the selected runtime's auth flow
@@ -1590,6 +1592,11 @@ export class AgentManagerDb {
         // Note: Duplicate names are allowed - agents are uniquely identified by their token ID (e.g., agent.42)
 
         // Runtime defaults to the shared runtime registry default
+        if (runtime !== undefined && !isRuntimeId(runtime)) {
+          return res.status(400).json({
+            error: `Unknown runtime "${runtime}". Expected one of: ${getAvailableRuntimes().join(', ')}`
+          });
+        }
         const effectiveRuntime = resolveRuntime(runtime);
 
         id = `agent_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
@@ -1662,7 +1669,8 @@ export class AgentManagerDb {
           ...(allowedTools && { allowed_tools: allowedTools }),
           ...(isAutomator && { isAutomator: true }),
           // Flag that heartbeat is enabled (actual config read from HEARTBEAT.yaml)
-          ...(heartbeat && { heartbeat: true })
+          ...(heartbeat && { heartbeat: true }),
+          ...(openMode !== undefined && { openMode: openMode === true || openMode === 'true' })
         };
 
         await this.db.agents.create({
@@ -3664,7 +3672,8 @@ export class AgentManagerDb {
               description: agentConfig.description,
               ...(isAutomator && { isAutomator: true }),
               // Flag that heartbeat is enabled (actual config read from HEARTBEAT.yaml in working dir)
-              ...(heartbeatConfig && { heartbeat: true })
+              ...(heartbeatConfig && { heartbeat: true }),
+              ...(agentConfig.openMode !== undefined && { openMode: agentConfig.openMode })
             };
 
             // Use ENS domain from config if available (preserves registration across redeploys)
@@ -5024,6 +5033,7 @@ export class AgentManagerDb {
         ...(tokenId && { ID_AGENT_TOKEN_ID: tokenId }),
         ...(owsWallet && { OWS_WALLET: owsWallet }),
         ...(process.env.ANTHROPIC_API_KEY && { ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY }),
+        ...(process.env.OPENAI_API_KEY && { OPENAI_API_KEY: process.env.OPENAI_API_KEY }),
       };
 
       // Create log file

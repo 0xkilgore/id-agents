@@ -215,10 +215,10 @@ export async function startLocalAgent(config: LocalAgentConfig): Promise<{
     }
   }
 
-  // For CLI-auth runtimes, prefer the local CLI session over ambient API keys.
-  if (usesCliLogin(runtime)) {
+  // For Claude CLI runtimes, prefer the local Claude session over ambient API keys.
+  // Codex still supports OPENAI_API_KEY and should inherit it when present.
+  if (usesCliLogin(runtime) && runtime !== 'codex') {
     delete process.env.ANTHROPIC_API_KEY;
-    delete process.env.OPENAI_API_KEY;
   }
 
   // Set manager URL for AgentRestServer to use

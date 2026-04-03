@@ -187,6 +187,18 @@ export class AgentRestServer {
   private harnessType: HarnessType;
   private xmtp: XmtpMessagingType | null = null;
 
+  private getXmtpOpenMode(): boolean | undefined {
+    const metadataValue = this.agentIdentity?.metadata?.openMode;
+    if (typeof metadataValue === 'boolean') return metadataValue;
+    if (typeof metadataValue === 'string') {
+      return metadataValue.toLowerCase() === 'true';
+    }
+
+    const envValue = process.env.XMTP_OPEN_MODE;
+    if (envValue === undefined) return undefined;
+    return envValue.toLowerCase() === 'true';
+  }
+
   constructor(options: {
     model?: string;
     workingDirectory?: string;
@@ -448,6 +460,17 @@ export class AgentRestServer {
     
     // REST-AP discovery
     this.app.get('/.well-known/restap.json', (req, res) => {
+      const allowSessionResume = supportsSessionResume(this.harnessType);
+      const talkDescription = allowSessionResume
+        ? `Ask ${getRuntimeDisplayName(this.harnessType)} to perform tasks with full tool access (Read, Write, Edit, Bash, Glob, Grep, WebSearch, WebFetch). Supports optional session_id for context continuity.`
+        : `Ask ${getRuntimeDisplayName(this.harnessType)} to perform tasks with full tool access (Read, Write, Edit, Bash, Glob, Grep, WebSearch, WebFetch).`;
+      const talkInputSchema: Record<string, string> = {
+        message: 'string (required)',
+      };
+      if (allowSessionResume) {
+        talkInputSchema.session_id = 'string (optional) - session ID from previous query to maintain context';
+      }
+
       // Build agent identity from catalog and identity info
       const agentInfo: Record<string, any> = {
         name: this.agentIdentity?.name || this.agentName || `${getRuntimeDisplayName(this.harnessType)} Agent`,
@@ -479,11 +502,8 @@ export class AgentRestServer {
             title: `Talk to ${getRuntimeDisplayName(this.harnessType)}`,
             method: 'POST',
             endpoint: '/talk',
-            description: `Ask ${getRuntimeDisplayName(this.harnessType)} to perform tasks with full tool access (Read, Write, Edit, Bash, Glob, Grep, WebSearch, WebFetch). Supports optional session_id for context continuity.`,
-            input_schema: {
-              message: 'string (required)',
-              session_id: 'string (optional) - session ID from previous query to maintain context'
-            }
+            description: talkDescription,
+            input_schema: talkInputSchema
           },
           {
             id: 'schedule',
@@ -1681,7 +1701,13 @@ ${prompt}`
 
     // Prefer OWS wallet for signing (key stays in vault), fall back to raw key
     const owsWallet = process.env.OWS_WALLET;
-    this.xmtp = new XmtpMessaging({ env, dbPath, owsWallet, workingDirectory: this.workingDirectory });
+    this.xmtp = new XmtpMessaging({
+      env,
+      dbPath,
+      owsWallet,
+      workingDirectory: this.workingDirectory,
+      openMode: this.getXmtpOpenMode(),
+    });
 
     // Inbound handler: route XMTP messages through the agent's /talk pipeline
     this.xmtp.setMessageHandler(async (inbound: InboundMessage) => {

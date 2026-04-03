@@ -5,9 +5,13 @@
 
 import 'dotenv/config';
 import { AgentRestServer } from './agent-rest-server.js';
+import { resolveRuntime } from './runtime/registry.js';
 
 async function main() {
-  if (!process.env.ANTHROPIC_API_KEY) {
+  const harness = resolveRuntime(process.env.ID_HARNESS || process.env.HARNESS || 'claude-agent-sdk');
+  const needsAnthropicKey = harness === 'claude-agent-sdk';
+
+  if (!process.env.ANTHROPIC_API_KEY && needsAnthropicKey) {
     console.error('❌ ANTHROPIC_API_KEY not set');
     console.error('Add it to your .env file');
     process.exit(1);
