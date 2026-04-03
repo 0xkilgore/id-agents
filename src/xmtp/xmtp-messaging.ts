@@ -227,7 +227,7 @@ export class XmtpMessaging extends EventEmitter {
       this.agent = await Agent.create(signer, {
         ...(this.config.env && { env: this.config.env }),
         ...(this.config.dbPath && { dbPath: () => this.config.dbPath! }),
-        ...(process.env.XMTP_DB_ENCRYPTION_KEY && { dbEncryptionKey: process.env.XMTP_DB_ENCRYPTION_KEY }),
+        ...(process.env.XMTP_DB_ENCRYPTION_KEY && { dbEncryptionKey: `0x${process.env.XMTP_DB_ENCRYPTION_KEY.replace(/^0x/, '')}` as `0x${string}` }),
       });
     } else {
       // Fallback: raw key from env
