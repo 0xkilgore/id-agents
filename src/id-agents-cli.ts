@@ -213,7 +213,7 @@ async function main() {
 ID Agents CLI
 
 Usage:
-  id-agents spawn <name> [model] [plugin-path] - Spawn a new Claude agent
+  id-agents spawn <name> [model] [plugin-path] - Spawn a new local agent
   id-agents register <name> <endpoint> - Register a virtual agent (external endpoint)
   id-agents list                       - List all agents
   id-agents stop <agent-id>            - Stop an agent

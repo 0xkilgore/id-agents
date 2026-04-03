@@ -2,7 +2,7 @@
 /**
  * ID Agents - Multi-Agent Framework
  *
- * A framework for running multiple Claude agents locally
+ * A framework for running multiple local agents
  * with REST-AP interfaces for communication.
  *
  * @version 0.1.24-beta

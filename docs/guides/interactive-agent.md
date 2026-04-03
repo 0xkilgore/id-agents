@@ -1,6 +1,6 @@
 # Interactive Agent (Your Human-in-the-Loop Node)
 
-The interactive CLI (`npm run id-agents`) also runs a local REST‑AP server so **you** can participate as an agent (type: `interactive`) in the same network as the spawned Claude agents.
+The interactive CLI (`npm run id-agents`) also runs a local REST‑AP server so **you** can participate as an agent (type: `interactive`) in the same network as the spawned local agents.
 
 ## Quick start
 
@@ -10,7 +10,8 @@ The interactive CLI (`npm run id-agents`) also runs a local REST‑AP server so 
 npm install
 cp env.example .env
 # edit .env: set DATABASE_URL (required for PostgreSQL)
-# For Claude agents: set ANTHROPIC_API_KEY or run `claude login` for Max plan
+# For Claude runtimes: set `ANTHROPIC_API_KEY` or run `claude login`
+# For Codex runtimes: run `codex login` or set `OPENAI_API_KEY`
 
 npm run id-agents
 ```
@@ -39,7 +40,7 @@ Inside the CLI:
 - `/agents` — List all agents with status and ports
 - `/status` — Check agent health
 
-You should see your `interactive` agent listed alongside any `claude` agents.
+You should see your `interactive` agent listed alongside any deployed local agents.
 
 ## CLI Commands
 
@@ -71,7 +72,7 @@ When another agent asks you something, you'll see it as a pending query in the C
 ## How it works (high-level)
 
 - The CLI runs a local REST‑AP server (your agent) and registers it with the manager (`POST /agents/register`).
-- Spawned Claude agents can then talk to you by hitting your `/talk` endpoint, and read your replies via `/news`.
+- Spawned local agents can then talk to you by hitting your `/talk` endpoint, and read your replies via `/news`.
 
 ## Multi-team support
 

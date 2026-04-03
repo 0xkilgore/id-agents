@@ -3,7 +3,7 @@
 **Author:** Prem Makeig @nxt3d
 **Date:** 11/8/2025 (Updated 1/5/2026 - Added bidirectional POST /news)
 
-**Note:** This document describes the REST-AP protocol specification. For a reference implementation using Claude agents, see the [ID Agents framework](../../README.md).
+**Note:** This document describes the REST-AP protocol specification. For a reference implementation using local runtime-backed agents, see the [ID Agents framework](../../README.md).
 
 ## **Abstract**
 
@@ -33,7 +33,7 @@ REST-AP is a protocol for building AI agents that can discover and communicate w
 
 ## **Key Concepts and Terms**
 
-**Host.** The service that runs agents and exposes them via HTTP. In ID Agents, this is the Agent Manager and individual Claude agent processes.
+**Host.** The service that runs agents and exposes them via HTTP. In ID Agents, this is the Agent Manager and individual local agent processes.
 
 **Client.** An agent, application, or user that interacts with hosted agents. Clients can be other agents (agent-to-agent communication) or external applications.
 
@@ -496,7 +496,7 @@ An optional pattern is to ship supplemental endpoints, schemas, or documentation
 
 ## **Reference Implementation: ID Agents**
 
-[ID Agents](../../README.md) is a complete REST-AP implementation that demonstrates multi-agent coordination using Claude agents.
+[ID Agents](../../README.md) is a complete REST-AP implementation that demonstrates multi-agent coordination using local runtime-backed agents.
 
 ### **Key Features**
 

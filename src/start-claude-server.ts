@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: MIT
 /**
- * Start Claude Agent as a REST-AP server
+ * Start a local runtime-backed agent as a REST-AP server
  */
 
 import 'dotenv/config';
-import { ClaudeAgentServer } from './claude-agent-server.js';
+import { AgentRestServer } from './agent-rest-server.js';
 
 async function main() {
   if (!process.env.ANTHROPIC_API_KEY) {
@@ -16,7 +16,7 @@ async function main() {
   const port = parseInt(process.env.CLAUDE_AGENT_PORT || '4101');
   const workingDir = process.env.CLAUDE_AGENT_WORKDIR || process.cwd();
 
-  const server = new ClaudeAgentServer({
+  const server = new AgentRestServer({
     workingDirectory: workingDir,
     port
   });

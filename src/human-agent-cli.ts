@@ -119,7 +119,7 @@ server.start().then(async () => {
   console.log(`  ${colors.cyan}<number>${colors.reset}        - Respond to question #1, #2, etc.`);
   console.log(`  ${colors.cyan}/chat <agent> [msg]${colors.reset} - Chat with an agent (changes prompt)`);
   console.log(`  ${colors.cyan}/ask <agent> <msg>${colors.reset} - Ask another agent a question`);
-  console.log(`  ${colors.cyan}/spawn <name>${colors.reset}   - Spawn a new Claude agent`);
+  console.log(`  ${colors.cyan}/spawn <name>${colors.reset}   - Spawn a new local agent`);
   console.log(`  ${colors.cyan}/agents${colors.reset}        - List all agents in the network`);
   console.log(`  ${colors.cyan}/list${colors.reset}          - Show all pending questions`);
   console.log(`  ${colors.cyan}/respond <num|id> [msg]${colors.reset} - Respond to a query`);
@@ -180,7 +180,7 @@ rl.on('line', async (line) => {
     console.log(`  ${colors.cyan}<number>${colors.reset}        - Respond to question by number (1, 2, 3...)`);
     console.log(`  ${colors.cyan}/chat <agent> [message]${colors.reset} - Chat with an agent (changes prompt to > [agent])`);
     console.log(`  ${colors.cyan}/ask <agent> <message>${colors.reset} - Ask another agent a question`);
-    console.log(`  ${colors.cyan}/spawn <name> [model]${colors.reset} - Spawn a new Claude agent`);
+    console.log(`  ${colors.cyan}/spawn <name> [model]${colors.reset} - Spawn a new local agent`);
     console.log(`  ${colors.cyan}/agents${colors.reset}        - List all agents in the network`);
     console.log(`  ${colors.cyan}/list${colors.reset}          - Show all pending questions`);
     console.log(`  ${colors.cyan}/respond <number|query_id> [response]${colors.reset} - Respond to a query`);

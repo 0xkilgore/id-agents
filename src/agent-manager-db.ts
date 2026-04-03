@@ -1945,7 +1945,7 @@ export class AgentManagerDb {
       if (!agent) return res.status(404).json({ error: 'Agent not found' });
 
       if (agent.type !== 'claude') {
-        return res.status(400).json({ error: 'Only Claude agents have models' });
+        return res.status(400).json({ error: 'Only local runtime-backed agents have models' });
       }
 
       try {
@@ -2099,7 +2099,7 @@ export class AgentManagerDb {
         });
       }
 
-      // Optional: also spawn local Claude agents (with HTTP servers) for onchain agents we discover.
+      // Optional: also spawn local runtime-backed agents (with HTTP servers) for onchain agents we discover.
       // This "materializes" the registry into a runnable local network.
       const spawnServers = req.body?.spawn === undefined ? false : Boolean(req.body?.spawn);
 
@@ -2261,7 +2261,7 @@ export class AgentManagerDb {
         discovery.errors.push(`discovery: ${e?.message || String(e)}`);
       }
 
-      // Optional: spawn local Claude agents for the onchain entries (so they have HTTP servers).
+      // Optional: spawn local runtime-backed agents for the onchain entries (so they have HTTP servers).
       // NOTE: This does NOT try to contact the remote endpoint; it creates local agents that represent the onchain identities.
       if (spawnServers && discoveredOnchain.length > 0) {
         try {
@@ -2269,18 +2269,18 @@ export class AgentManagerDb {
           const sharedDirectory = `${this.baseWorkDir}/teams/${teamName}`;
           let spawned = 0;
 
-          // Spawn Claude agents for the agents we just pulled
+          // Spawn local runtime-backed agents for the agents we just pulled
 
           for (const agent of discoveredOnchain) {
             const tokenId = agent.tokenId;
 
-            // Never spawn a Claude copy for an interactive agent already linked to this token.
+            // Never spawn a local runtime-backed copy for an interactive agent already linked to this token.
             const interactiveAgent = await this.db.agents.findByRegistry(
               teamId, String(agent.chainId), String(agent.registryAddress), tokenId
             );
             if (interactiveAgent && interactiveAgent.type === 'interactive') continue;
 
-            // If a Claude agent already exists for this token, ensure server is running.
+            // If a local runtime-backed agent already exists for this token, ensure its server is running.
             const existingClaudeAgent = await this.db.agents.findByRegistry(
               teamId, String(agent.chainId), String(agent.registryAddress), tokenId
             );
@@ -2308,7 +2308,7 @@ export class AgentManagerDb {
               continue;
             }
 
-            // Create and start a new local Claude agent representing this onchain identity.
+            // Create and start a new local runtime-backed agent representing this onchain identity.
             const claudeId = `agent_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
             const port = await this.dbNextPort(teamId);
             const workingDirectory = `${this.baseWorkDir}/agents/${claudeId}`;
