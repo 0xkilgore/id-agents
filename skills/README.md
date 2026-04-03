@@ -2,7 +2,7 @@
 
 This directory contains skills for agents and external tools.
 
-**Agent skills** (deployed to each agent's `.claude/skills/` at deploy time): `identity`, `inter-agent`, `catalog`, `wallet`. All YAML configs should include `skills: [identity, inter-agent, catalog]` at minimum.
+**Agent skills** (deployed to each agent's `.claude/skills/` at deploy time): `identity`, `inter-agent`, `catalog`, `wallet`, `xmtp`. All YAML configs should include `skills: [identity, inter-agent, catalog]` at minimum.
 
 **External skills** (used by external Claude Code sessions, not deployed to agents): `admin-control`.
 
@@ -38,9 +38,12 @@ Lets agents update their own catalog entry (role, expertise, status) visible to 
 
 ### xmtp
 
-Send and receive encrypted messages to external agents and users via the XMTP protocol. Lets agents communicate outside their team by ENS name or wallet address.
+Send and receive end-to-end encrypted messages to external agents and users via the XMTP protocol. Lets agents communicate outside their team by ENS name or wallet address.
 
-- `SKILL.md` - Frontmatter skill
+- `SKILL.md` - Frontmatter skill with `/xmtp/send` and `/xmtp/status` endpoint usage
+- Requires OWS wallet (auto-assigned at deploy)
+- Data stored at `~/.xmtp/{address}/` (DB, encryption key, allowlist)
+- Security: closed by default (3-tier allowlist), OWS signing (key in vault), MLS encryption
 
 ### admin-control
 

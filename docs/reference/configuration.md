@@ -224,6 +224,7 @@ Each agent can have the following fields:
 | `env` | No | `{}` | Environment variables for the agent process |
 | `register` | No | From onchain | Whether to register onchain |
 | `heartbeat` | No | - | Single-agent recurring schedule shorthand |
+| `openMode` | No | `false` | Accept XMTP messages from any sender (not recommended for production) |
 
 ### Agent Example
 
@@ -278,11 +279,11 @@ Defaults:
 
 Skills are instruction packages deployed to each agent's `.claude/skills/` directory at deploy time via `deploySkillsToAgent`. Each skill is a directory containing a `SKILL.md` file with YAML frontmatter.
 
-All configs should include `skills: [identity, inter-agent, catalog]` at minimum. The 6 built-in skills are: `identity`, `inter-agent`, `catalog`, `wallet`, `admin-control`, `local-agent`.
+All configs should include `skills: [identity, inter-agent, catalog]` at minimum. The 7 built-in skills are: `identity`, `inter-agent`, `catalog`, `wallet`, `xmtp`, `admin-control`, `local-agent`.
 
 ```yaml
 defaults:
-  skills: [identity, inter-agent, catalog, wallet]
+  skills: [identity, inter-agent, catalog, wallet, xmtp]
 
 agents:
   - name: my-agent
@@ -290,6 +291,21 @@ agents:
 ```
 
 Skills from defaults and per-agent lists are merged (deduped).
+
+### XMTP Skill
+
+The `xmtp` skill enables agents to send encrypted messages via the XMTP protocol. When included, agents can use `curl` to call `/xmtp/send` and `/xmtp/status` on their own port.
+
+XMTP requires an OWS wallet (set via `OWS_WALLET` env var, auto-assigned at deploy). Data is stored at `~/.xmtp/{address}/` outside the project repo.
+
+```yaml
+defaults:
+  skills: [identity, inter-agent, catalog, xmtp]
+
+agents:
+  - name: alice
+    openMode: false  # default: reject messages from unknown senders
+```
 
 ---
 
@@ -485,6 +501,16 @@ Configuration can also be provided via environment variables:
 | `DATABASE_URL` | PostgreSQL connection string |
 | `ORCHESTRATOR_TYPE` | Agent runtime type |
 | `PUBLIC_BASE_URL` | Public URL base for agents (e.g., `https://idbot.live`) |
+
+**XMTP messaging:**
+
+| Variable | Description |
+|----------|-------------|
+| `OWS_WALLET` | OWS wallet name for XMTP signing (per-agent, set automatically at deploy) |
+| `XMTP_ENV` | XMTP network: `local`, `dev`, or `production` (default: `production`) |
+| `WEB3_BIO_API_KEY` | API key for web3.bio ENS resolution (optional, used as fallback) |
+
+XMTP starts automatically on agents that have an `OWS_WALLET` set. The DB encryption key is auto-generated per agent at `~/.xmtp/{address}/db.key`.
 
 Environment variables take precedence over config file values for most settings.
 

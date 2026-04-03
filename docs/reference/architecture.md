@@ -96,6 +96,8 @@ User types: /ask coder hello
 | `src/core/agent-identifier.ts` | ENS name parsing and display |
 | `src/db.ts` | PostgreSQL schema, migrations, connection pool |
 | `src/inter-agent-skill.ts` | Inter-agent communication skill injection |
+| `src/xmtp/xmtp-messaging.ts` | XMTP encrypted messaging — allowlist, ENS resolution, approval callbacks |
+| `src/xmtp/ows-signer.ts` | OWS-backed XMTP signer — key never leaves vault |
 | `src/harness/claude-code-cli.ts` | Claude Code CLI harness for spawning LLM sessions |
 
 ## Onchain Identity
@@ -125,6 +127,90 @@ Health status is visible in `/agents` response and `/status` CLI command.
 ### Loop Prevention
 
 Triggered messages (from schedules, heartbeats) include a `noAutoReply` flag. When set, the agent's response is stored in its own news feed rather than auto-replying to the sender. This prevents infinite loops.
+
+## XMTP Messaging Subsystem
+
+Each agent can optionally run an XMTP client for end-to-end encrypted messaging with external agents and users.
+
+### Components
+
+| File | Purpose |
+|------|---------|
+| `src/xmtp/xmtp-messaging.ts` | Core messaging class — inbound/outbound handling, sender allowlist, ENS resolution, approval callbacks |
+| `src/xmtp/ows-signer.ts` | OWS-backed XMTP signer — delegates all signing to `ows sign message`, private key never leaves vault |
+| `src/claude-agent-server.ts` | Per-agent XMTP client lifecycle, `/xmtp/send` and `/xmtp/status` endpoints |
+| `skills/xmtp/SKILL.md` | Agent skill for sending XMTP messages via curl |
+
+### Architecture
+
+```
+┌─────────────────────────────────────────┐
+│             Agent Process               │
+│                                         │
+│  ┌──────────────┐   ┌───────────────┐   │
+│  │  Express API  │   │ XmtpMessaging │   │
+│  │              │   │               │   │
+│  │ /xmtp/send ──┼──▶│ sendMessage() │   │
+│  │ /xmtp/status │   │               │   │
+│  │              │   │ handleInbound()│──▶│──▶ startQuery() ──▶ LLM
+│  └──────────────┘   │               │   │
+│                     │  OWS Signer   │   │
+│                     │  Allowlist    │   │
+│                     └───────┬───────┘   │
+│                             │           │
+└─────────────────────────────┼───────────┘
+                              │
+                    ┌─────────▼─────────┐
+                    │   XMTP Network    │
+                    │  (MLS encrypted)  │
+                    └───────────────────┘
+```
+
+### Endpoints
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/xmtp/send` | POST | Send encrypted message to ENS name or wallet address |
+| `/xmtp/status` | GET | Check if XMTP is enabled, get agent's wallet address |
+
+### Startup
+
+XMTP starts automatically during agent boot when an OWS wallet is available (`OWS_WALLET` env var). The startup sequence:
+
+1. Dynamic `import()` of `xmtp-messaging.ts` (avoids loading native bindings when XMTP not configured)
+2. Create `XmtpMessaging` instance with OWS wallet signer
+3. Set up data directory at `~/.xmtp/{address}/`
+4. Load persisted allowlist from `allowlist.yaml`
+5. Load or auto-generate DB encryption key (`db.key`)
+6. Set message handler that routes inbound messages through `startQuery()` with `noAutoReply: true`
+7. Start XMTP agent and begin listening
+
+### Data Storage
+
+XMTP data is stored at `~/.xmtp/{address}/` (outside project repos):
+
+| File | Purpose |
+|------|---------|
+| `{env}.db3` | Encrypted MLS database (message history, conversation keys, identity) |
+| `db.key` | Auto-generated DB encryption key (mode 0600), persists across restarts |
+| `allowlist.yaml` | Sender allowlist with addresses and optional ENS names |
+
+### Security Model
+
+**Sender allowlist (3-tier):**
+- **Trusted** — on the allowlist, auto-accepted, bypasses approval callback
+- **Unknown** — not on the allowlist; goes through approval callback (or dropped if closed mode)
+- **Blocked** — not on allowlist when in closed mode; silently dropped before content reaches agent LLM
+
+**Closed by default:** agents reject messages from unknown senders unless `openMode: true` is set in config.
+
+**Inbound message isolation:** XMTP messages are formatted with a clear boundary marker before reaching the LLM, and `noAutoReply: true` prevents reply loops.
+
+### ENS Resolution
+
+Outbound messages resolve ENS names in two steps:
+1. `id-cli info` for `.xid.eth` names (CCIP-Read gateway)
+2. `web3.bio` fallback for all other ENS names
 
 ## Per-Agent Environment
 

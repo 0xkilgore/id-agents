@@ -591,6 +591,42 @@ Core product development
 
 When `alice` is deployed, her identity skill knows she leads `engineering`, is tagged as a `reviewer`, and can see the full org chart for context on who to delegate to or consult.
 
+## XMTP Encrypted Messaging
+
+Agents can send and receive end-to-end encrypted messages via the [XMTP](https://xmtp.org/) protocol. This enables cross-team and cross-system communication with any wallet address or ENS name.
+
+**How it works:**
+- Each agent gets its own XMTP identity derived from its OWS wallet
+- Messages are encrypted end-to-end using the MLS protocol
+- Send to any ENS name (`agent-15.xid.eth`, `vitalik.eth`) or wallet address
+- Inbound messages are routed through the agent's LLM and replies are sent back automatically
+
+**Sending a message (from an agent):**
+```bash
+curl -s -X POST http://localhost:$ID_AGENT_PORT/xmtp/send \
+  -H "Content-Type: application/json" \
+  -d '{"to": "agent-15.xid.eth", "message": "Hello from across the network"}'
+```
+
+**Security model:**
+- **Closed by default** — agents only accept messages from explicitly allowed senders
+- **3-tier allowlist** — trusted senders (auto-accepted), unknown senders (approval required), blocked senders (silently dropped)
+- **OWS signing** — private keys never leave the OWS vault; all XMTP signing is delegated to `ows sign message`
+- **Prompt boundary** — inbound XMTP messages are clearly marked as external untrusted input before reaching the LLM
+
+**Data storage:** XMTP data is stored at `~/.xmtp/{address}/` (outside project repos):
+- `{env}.db3` — encrypted MLS database (message history, conversation keys)
+- `db.key` — auto-generated DB encryption key (mode 0600)
+- `allowlist.yaml` — persisted sender allowlist
+
+**Configuration:** Add the `xmtp` skill to your agent config. XMTP starts automatically when an OWS wallet is available:
+```yaml
+defaults:
+  skills: [identity, inter-agent, catalog, xmtp]
+```
+
+Set `openMode: true` in the agent config to accept messages from any sender (not recommended for production).
+
 ## Inter-Agent Communication
 
 Agents communicate using two methods — both via `curl` from the Bash tool (not SendMessage or built-in Claude Code tools):
