@@ -215,6 +215,40 @@ export class XmtpMessaging extends EventEmitter {
     return this.agent?.address ?? null;
   }
 
+  /**
+   * Get or generate the DB encryption key.
+   * Persisted at .xmtp/db.key so it survives restarts.
+   */
+  private async getDbEncryptionKey(): Promise<`0x${string}`> {
+    // Explicit env var takes priority
+    if (process.env.XMTP_DB_ENCRYPTION_KEY) {
+      const key = process.env.XMTP_DB_ENCRYPTION_KEY.replace(/^0x/, '');
+      return `0x${key}` as `0x${string}`;
+    }
+
+    // Load or generate from .xmtp/db.key
+    const dir = this.config.workingDirectory;
+    if (dir) {
+      const keyPath = path.join(dir, '.xmtp', 'db.key');
+      if (existsSync(keyPath)) {
+        const key = readFileSync(keyPath, 'utf8').trim().replace(/^0x/, '');
+        return `0x${key}` as `0x${string}`;
+      }
+      // Generate new key
+      const { randomBytes } = await import('crypto');
+      const key = randomBytes(32).toString('hex');
+      const xmtpDir = path.join(dir, '.xmtp');
+      if (!existsSync(xmtpDir)) mkdirSync(xmtpDir, { recursive: true });
+      writeFileSync(keyPath, key, { mode: 0o600 });
+      console.log(`[XMTP] Generated new DB encryption key at ${keyPath}`);
+      return `0x${key}` as `0x${string}`;
+    }
+
+    // No working directory — generate ephemeral key
+    const { randomBytes } = await import('crypto');
+    return `0x${randomBytes(32).toString('hex')}` as `0x${string}`;
+  }
+
   /** Start the XMTP agent and begin listening for messages. */
   async start(): Promise<void> {
     if (this.started) return;
@@ -224,6 +258,9 @@ export class XmtpMessaging extends EventEmitter {
 
     // Set up name resolver for ENS lookups
     this.resolveAddress = createNameResolver(process.env.WEB3_BIO_API_KEY || '');
+
+    // Get or generate DB encryption key
+    const dbEncryptionKey = await this.getDbEncryptionKey();
 
     // Determine signer: OWS wallet (preferred) or raw key (fallback)
     const owsWallet = this.config.owsWallet || process.env.OWS_WALLET;
@@ -235,7 +272,7 @@ export class XmtpMessaging extends EventEmitter {
       this.agent = await Agent.create(signer, {
         ...(this.config.env && { env: this.config.env }),
         ...(this.config.dbPath && { dbPath: () => this.config.dbPath! }),
-        ...(process.env.XMTP_DB_ENCRYPTION_KEY && { dbEncryptionKey: `0x${process.env.XMTP_DB_ENCRYPTION_KEY.replace(/^0x/, '')}` as `0x${string}` }),
+        dbEncryptionKey,
       });
     } else {
       // Fallback: raw key from env
