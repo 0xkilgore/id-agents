@@ -178,6 +178,32 @@ export class ClaudeAgentServer {
   private harnessType: HarnessType;
   private xmtp: XmtpMessagingType | null = null;
 
+  private getRuntimeDisplayName(): string {
+    switch (this.harnessType) {
+      case 'codex':
+        return 'Codex';
+      case 'claude-code-cli':
+      case 'claude-code-local':
+        return 'Claude Code';
+      case 'claude-agent-sdk':
+      default:
+        return 'Claude';
+    }
+  }
+
+  private getProviderDisplayName(): string {
+    switch (this.harnessType) {
+      case 'codex':
+        return 'Codex CLI';
+      case 'claude-code-cli':
+      case 'claude-code-local':
+        return 'Claude Code CLI';
+      case 'claude-agent-sdk':
+      default:
+        return 'Claude Agent SDK';
+    }
+  }
+
   constructor(options: {
     model?: string;
     workingDirectory?: string;
@@ -440,7 +466,7 @@ export class ClaudeAgentServer {
     this.app.get('/.well-known/restap.json', (req, res) => {
       // Build agent identity from catalog and identity info
       const agentInfo: Record<string, any> = {
-        name: this.agentIdentity?.name || this.agentName || 'Claude Agent',
+        name: this.agentIdentity?.name || this.agentName || `${this.getRuntimeDisplayName()} Agent`,
         ...this.catalog  // Include all catalog fields (description, role, expertise, etc.)
       };
 
@@ -453,7 +479,7 @@ export class ClaudeAgentServer {
         restap_version: '1.0',
         agent: agentInfo,
         provider: {
-          name: 'Claude Agent SDK',
+          name: this.getProviderDisplayName(),
           version: '1.0'
         },
         endpoints: {
@@ -466,10 +492,10 @@ export class ClaudeAgentServer {
         capabilities: [
           {
             id: 'talk',
-            title: 'Talk to Claude',
+            title: `Talk to ${this.getRuntimeDisplayName()}`,
             method: 'POST',
             endpoint: '/talk',
-            description: 'Ask Claude to perform tasks with full tool access (Read, Write, Edit, Bash, Glob, Grep, WebSearch, WebFetch). Supports optional session_id for context continuity.',
+            description: `Ask ${this.getRuntimeDisplayName()} to perform tasks with full tool access (Read, Write, Edit, Bash, Glob, Grep, WebSearch, WebFetch). Supports optional session_id for context continuity.`,
             input_schema: {
               message: 'string (required)',
               session_id: 'string (optional) - session ID from previous query to maintain context'
@@ -654,7 +680,7 @@ export class ClaudeAgentServer {
         res.status(202).json({
           query_id: queryId,
           status: 'processing',
-          message: 'Claude is working on your request. Poll /news for completion.'
+          message: `${this.getRuntimeDisplayName()} is working on your request. Poll /news for completion.`
         });
       } catch (err: any) {
         console.error(`${logTime()} [Agent] Error in /talk:`, err);
@@ -1340,7 +1366,8 @@ What would you like to do with this information?`;
 
     // Track session ID for continuity (declared outside try for catch block access)
     // Use provided resume ID, or fall back to the agent's last session for continuity
-    let sessionId = resume || this.lastSessionId;
+    const allowSessionResume = this.harnessType !== 'codex';
+    let sessionId = allowSessionResume ? (resume || this.lastSessionId) : undefined;
     if (sessionId && !resume) {
       console.log(`${logTime()} [Claude Agent] 🔄 Resuming previous session: ${sessionId.slice(0, 20)}...`);
     }
@@ -1381,13 +1408,15 @@ ${prompt}`
         model: this.model,
         allowedTools: this.allowedTools,
         workingDirectory: this.workingDirectory,
-        resume: sessionId,
+        resume: allowSessionResume ? sessionId : undefined,
         plugins: plugins
       })) {
         // Capture session ID from system init or result message
         if (message.session_id) {
           sessionId = message.session_id;
-          this.lastSessionId = sessionId;  // Persist for future queries
+          if (allowSessionResume) {
+            this.lastSessionId = sessionId;  // Persist for future queries
+          }
         }
 
         // Log and broadcast thinking
@@ -1626,7 +1655,7 @@ ${prompt}`
         console.log(`\nListening on http://localhost:${port}`);
         console.log(`\nREST-AP Endpoints:`);
         console.log(`  GET  /.well-known/restap.json - Discover capabilities`);
-        console.log(`  POST /talk                     - Talk to Claude (triggers processing)`);
+        console.log(`  POST /talk                     - Talk to ${this.getRuntimeDisplayName()} (triggers processing)`);
         console.log(`  GET  /news                     - Poll for updates`);
         console.log(`  POST /news                     - Receive replies (no processing)`);
         console.log(`  GET  /files/{filename}         - Serve files`);

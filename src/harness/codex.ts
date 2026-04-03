@@ -9,7 +9,9 @@
  * Parses JSONL output and yields HarnessMessage objects.
  *
  * Session support:
- * - Uses `codex exec resume <session_id>` to continue existing sessions
+ * - Runs each request as a fresh `codex exec` invocation
+ * - Ignores resume IDs because the installed Codex CLI does not support
+ *   combining `resume` with the non-interactive flags used here
  */
 
 import { spawn, ChildProcess } from 'child_process';
@@ -31,14 +33,9 @@ export class CodexHarness implements AgentHarness {
     console.log(`[Codex] Working directory: ${workingDir}`);
     if (options.model) console.log(`[Codex] Model: ${options.model}`);
 
-    // Build arguments for codex exec
+    // Build arguments for codex exec. For this Codex CLI version, flags must
+    // come before the `resume` subcommand.
     const args: string[] = ['exec'];
-
-    // Issue 1: Session resume support
-    if (options.resume) {
-      args.push('resume', options.resume);
-      console.log(`[Codex] Resuming session: ${options.resume}`);
-    }
 
     // Working directory
     args.push('--cd', workingDir);
@@ -61,6 +58,12 @@ export class CodexHarness implements AgentHarness {
     const promptFile = path.join(os.tmpdir(), `codex-prompt-${Date.now()}.txt`);
     fs.writeFileSync(promptFile, prompt);
     console.log(`[Codex] Prompt written to temp file: ${promptFile} (${prompt.length} chars)`);
+
+    // The installed Codex CLI does not support `resume` combined with the
+    // non-interactive flags we need here. Run each query as a fresh exec.
+    if (options.resume) {
+      console.log(`[Codex] Ignoring resume session for compatibility: ${options.resume}`);
+    }
 
     // Read prompt from stdin
     args.push('-');

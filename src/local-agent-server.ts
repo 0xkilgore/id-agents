@@ -68,6 +68,19 @@ async function getPortSearchRange(): Promise<{ portStart: number; portEnd: numbe
   return { portStart: 4101, portEnd: 65535 };
 }
 
+function getHarnessDisplayName(harness: string): string {
+  switch (harness) {
+    case 'codex':
+      return 'Codex';
+    case 'claude-code-cli':
+    case 'claude-code-local':
+      return 'Claude Code';
+    case 'claude-agent-sdk':
+    default:
+      return 'Claude';
+  }
+}
+
 /**
  * Register the local agent with the manager
  */
@@ -321,7 +334,7 @@ async function main() {
       verbose = true;
     } else if (args[i] === '--help' || args[i] === '-h') {
       console.log(`
-Local Agent Server - Run Claude Code agents using your local authentication
+Local Agent Server - Run local agents using your existing CLI authentication
 
 Usage:
   node dist/local-agent-server.js <name> [options]
@@ -356,11 +369,16 @@ Examples:
     process.exit(1);
   }
 
+  const bannerHarness = process.env.ID_HARNESS || 'claude-code-cli';
+  const bannerName = getHarnessDisplayName(bannerHarness);
+  const bannerTitle = `🏠 Local ${bannerName} Agent Server`;
+  const bannerSubtitle = `Running ${bannerName} with your local authentication`;
+
   console.log(`
 ╔═══════════════════════════════════════════════════════════════╗
-║           🏠 Local Claude Code Agent Server                   ║
+║ ${bannerTitle.padEnd(61)}║
 ╠═══════════════════════════════════════════════════════════════╣
-║  Running Claude Code with your local authentication           ║
+║ ${bannerSubtitle.padEnd(61)}║
 ║  Other agents can communicate via REST-AP protocol            ║
 ╚═══════════════════════════════════════════════════════════════╝
 `);

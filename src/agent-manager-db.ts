@@ -1532,7 +1532,7 @@ export class AgentManagerDb {
         ];
 
         // Use default model from config if not specified
-        const effectiveModel = model || this.getDefaultModel();
+        const effectiveModel = model || (effectiveRuntime === 'codex' ? 'gpt-5.4' : this.getDefaultModel());
 
         // Create workspace directory first (needed for plugin copy)
         mkdirSync(workingDirectory, { recursive: true });
