@@ -1,0 +1,25 @@
+# Demo Team (Mixed runtimes)
+# Deploy with: /deploy demo-mixed
+#
+# A team mixing Claude Code and Codex agents. Uses the default team
+# so no team switching is needed.
+# Requires: claude login AND (codex login or OPENAI_API_KEY).
+
+version: "1"
+team: default
+
+defaults:
+  local: true
+  skills:
+    - identity
+    - inter-agent
+    - catalog
+
+agents:
+  - name: coder
+    description: "Writes and reviews code"
+    runtime: claude-code-cli
+
+  - name: researcher
+    description: "Research, analysis, and documentation"
+    runtime: codex
