@@ -2,6 +2,14 @@
 
 Follow these steps to set up and deploy your first agent team.
 
+## Runtime Selection
+
+The user has selected a runtime below. Look for `[x]` to determine which to use. If no selection is marked, default to Claude Code CLI.
+
+- `[x] Claude Code CLI` → use `runtime: claude-code-cli` and deploy with `/deploy demo`
+- `[x] Codex CLI` → use `runtime: codex` and deploy with `/deploy demo-codex`
+- `[x] Claude Code and Codex CLI` → mixed runtimes, deploy with `/deploy demo-mixed`
+
 ## 1. Install
 
 ```bash
