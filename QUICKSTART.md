@@ -42,6 +42,7 @@ Use the admin-control skill's `remote-command.sh` to deploy:
 - **Claude Code agents:** `/deploy demo`
 - **Codex agents:** `/deploy demo-codex`
 - **Mixed (both):** `/deploy demo-mixed`
+- **Preflight only:** add `--dry-run` to any deploy command
 
 Example using the remote endpoint:
 
@@ -49,6 +50,14 @@ Example using the remote endpoint:
 curl -s -X POST http://localhost:4000/remote \
   -H "Content-Type: application/json" \
   -d '{"command":"/deploy demo"}'
+```
+
+Dry run example:
+
+```bash
+curl -s -X POST http://localhost:4000/remote \
+  -H "Content-Type: application/json" \
+  -d '{"command":"/deploy demo-mixed --dry-run"}'
 ```
 
 ## 5. Talk to Your Agents

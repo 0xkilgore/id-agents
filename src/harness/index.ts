@@ -11,6 +11,7 @@ import { HarnessType, AgentHarness } from './types.js';
 import { ClaudeAgentSdkHarness } from './claude-agent-sdk.js';
 import { ClaudeCodeCliHarness } from './claude-code-cli.js';
 import { CodexHarness } from './codex.js';
+import { getAvailableRuntimes, isRuntimeId } from '../runtime/registry.js';
 
 // Export all types
 export * from './types.js';
@@ -43,12 +44,12 @@ export function createHarness(type: HarnessType = 'claude-agent-sdk'): AgentHarn
  * Get all available harness types.
  */
 export function getAvailableHarnesses(): HarnessType[] {
-  return ['claude-agent-sdk', 'claude-code-cli', 'claude-code-local', 'codex'];
+  return getAvailableRuntimes();
 }
 
 /**
  * Check if a harness type is valid.
  */
 export function isValidHarnessType(type: string): type is HarnessType {
-  return getAvailableHarnesses().includes(type as HarnessType);
+  return isRuntimeId(type);
 }

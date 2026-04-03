@@ -13,6 +13,9 @@
  */
 
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import {
   waitForManager,
   waitForAgent,
@@ -29,6 +32,10 @@ import {
 
 // Unique prefix for test agents to avoid conflicts
 const TEST_PREFIX = `test-${Date.now()}`;
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const REPO_ROOT = path.resolve(__dirname, '../..');
+const TEST_TMP_DIR = path.resolve(__dirname, '../tmp');
 
 // Track agents created during tests for cleanup
 const createdAgents: string[] = [];
@@ -161,10 +168,48 @@ describe('Remote Commands (/remote endpoint)', () => {
   // ==================== /deploy ====================
   describe('/deploy command', () => {
     const deployAgentName = `${TEST_PREFIX}-deploy`;
+    const dryRunAgentName = `${TEST_PREFIX}-dry-run`;
+    const dryRunConfigPath = path.join(TEST_TMP_DIR, `id-agents-dry-run-${TEST_PREFIX}.yaml`);
+    const badDryRunConfigPath = path.join(TEST_TMP_DIR, `id-agents-bad-dry-run-${TEST_PREFIX}.yaml`);
+    const dryRunConfigRef = path.relative(REPO_ROOT, dryRunConfigPath);
+    const badDryRunConfigRef = path.relative(REPO_ROOT, badDryRunConfigPath);
+
+    beforeAll(() => {
+      fs.mkdirSync(TEST_TMP_DIR, { recursive: true });
+      fs.writeFileSync(dryRunConfigPath, `version: "1"
+parameters:
+  - name: name
+defaults:
+  local: true
+  runtime: claude-agent-sdk
+  model: claude-haiku-4-5-20251001
+agents:
+  - name: \${name}
+`);
+
+      fs.writeFileSync(badDryRunConfigPath, `version: "1"
+defaults:
+  local: true
+  runtime: claude-agent-sdk
+agents:
+  - name: invalid-runtime-model
+    model: gpt-5.4
+`);
+    });
 
     afterAll(async () => {
       try {
         await remoteDelete(deployAgentName);
+      } catch {
+        // Ignore
+      }
+      try {
+        fs.unlinkSync(dryRunConfigPath);
+      } catch {
+        // Ignore
+      }
+      try {
+        fs.unlinkSync(badDryRunConfigPath);
       } catch {
         // Ignore
       }
@@ -195,6 +240,50 @@ describe('Remote Commands (/remote endpoint)', () => {
       expect(result.ok).toBe(true);
       expect(result.data.ok).toBe(false);
       expect(result.data.error).toContain('not found');
+    });
+
+    it('should support /deploy --dry-run without creating agents', async () => {
+      const beforeAgents = await remoteAgents();
+      expect(beforeAgents.ok).toBe(true);
+      expect(beforeAgents.data.ok).toBe(true);
+
+      const result = await remote(`/deploy ${dryRunConfigRef} name=${dryRunAgentName} --dry-run`);
+
+      expect(result.ok).toBe(true);
+      expect(result.data.ok).toBe(true);
+
+      const dryRunResult = result.data.result as {
+        dryRun: boolean;
+        agents: Array<{ name: string; runtime: string; model: string; local: boolean }>;
+      };
+      expect(dryRunResult.dryRun).toBe(true);
+      expect(dryRunResult.agents).toHaveLength(1);
+      expect(dryRunResult.agents[0].name).toBe(dryRunAgentName);
+      expect(dryRunResult.agents[0].runtime).toBe('claude-agent-sdk');
+      expect(dryRunResult.agents[0].model).toBe('claude-haiku-4-5-20251001');
+      expect(dryRunResult.agents[0].local).toBe(true);
+
+      const afterAgents = await remoteAgents();
+      expect(afterAgents.ok).toBe(true);
+      expect(afterAgents.data.ok).toBe(true);
+
+      const beforeList = (beforeAgents.data.result as { agents: Array<{ name: string }> }).agents;
+      const afterList = (afterAgents.data.result as { agents: Array<{ name: string }> }).agents;
+
+      expect(afterList.map(a => a.name)).not.toContain(dryRunAgentName);
+      expect(afterList.length).toBe(beforeList.length);
+    });
+
+    it('should fail /deploy --dry-run for invalid runtime/model combinations', async () => {
+      const result = await remote(`/deploy ${badDryRunConfigRef} --dry-run`);
+      const errorText = result.ok
+        ? (result.data as { error?: string; ok?: boolean }).error || ''
+        : (result.data as { error?: string }).error || '';
+
+      if (result.ok) {
+        expect((result.data as { ok: boolean }).ok).toBe(false);
+      }
+      expect(errorText).toContain('incompatible with OpenAI model');
     });
   });
 

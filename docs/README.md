@@ -8,6 +8,7 @@ Documentation for the ID Agents multi-agent orchestration platform.
 
 - [Architecture Overview](./reference/architecture.md) - How the manager, agents, and CLI work together. Start here.
 - [Scheduling Plan](./SCHEDULING_PLAN.md) - Unified interval/calendar scheduling, delivery modes, and `/schedule` endpoint design
+- [Modular Runtime Plan](./MODULAR_RUNTIME_PLAN.md) - Runtime registry, validation, and mixed-team launch design for Claude and Codex runtimes
 
 ## Guides
 

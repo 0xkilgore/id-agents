@@ -12,6 +12,7 @@
 // Main classes for programmatic use
 export { IdAgentsCLI } from './id-agents-cli.js';
 export { ClaudeAgentServer } from './claude-agent-server.js';
+export { AgentRestServer } from './agent-rest-server.js';
 export { runClaudeAgent, CLAUDE_MODELS } from './claude-agent.js';
 
 // Core types and interfaces

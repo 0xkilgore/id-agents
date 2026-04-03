@@ -135,7 +135,7 @@ Default settings applied to all agents unless overridden.
 
 ```yaml
 defaults:
-  runtime: claude-code
+  runtime: claude-code-cli
   model: claude-haiku-4-5-20251001
   skills:
     - identity
@@ -149,10 +149,10 @@ All configs should include `skills: [identity, inter-agent, catalog]` at minimum
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `runtime` | String | Default agent runtime (`claude-code`, `open-code`, `codex`) |
+| `runtime` | String | Default agent runtime (`claude-agent-sdk`, `claude-code-cli`, `codex`) |
 | `model` | String | Default LLM model |
 | `skills` | Array | Skills deployed to each agent (minimum: `[identity, inter-agent, catalog]`) |
-| `plugins` | Array | Optional plugins for Claude Code agents |
+| `plugins` | Array | Optional plugins for agent runtimes that support them |
 | `allowedTools` | Array | Default tool restrictions for all agents |
 
 ### calendar
@@ -202,7 +202,7 @@ agents:
   - name: coder
     model: claude-sonnet-4-20250514
   - name: researcher
-    runtime: open-code
+    runtime: codex
 ```
 
 ---
@@ -219,7 +219,7 @@ Each agent can have the following fields:
 | `runtime` | No | From defaults | Agent runtime/harness |
 | `systemPrompt` | No | - | Custom system prompt |
 | `skills` | No | From defaults | Skills deployed to agent's `.claude/skills/` directory |
-| `plugins` | No | From defaults | Optional plugins for Claude Code agents |
+| `plugins` | No | From defaults | Optional plugins for runtimes that support them |
 | `allowedTools` | No | From defaults | Restrict agent to specific tools |
 | `env` | No | `{}` | Environment variables for the agent process |
 | `register` | No | From onchain | Whether to register onchain |
@@ -232,7 +232,7 @@ Each agent can have the following fields:
 agents:
   - name: lead-developer
     model: claude-sonnet-4-20250514
-    runtime: claude-code
+    runtime: claude-code-cli
     systemPrompt: |
       You are a senior software developer.
       Focus on code quality and best practices.
@@ -352,20 +352,23 @@ ID Agents supports multiple LLM runtimes (harnesses):
 
 | Runtime | Description | Features |
 |---------|-------------|----------|
-| `claude-code` | Claude Agent SDK | Full tool access, session support |
-| `open-code` | OpenCode CLI | Multi-provider support |
+| `claude-agent-sdk` | Claude Agent SDK | API-key runtime with session support |
+| `claude-code-cli` | Claude Code CLI | CLI-auth runtime with session support |
+| `claude-code-local` | Claude Code CLI local alias | Internal/local alias of `claude-code-cli` |
 | `codex` | Codex CLI | OpenAI's coding agent |
 
 ```yaml
 defaults:
-  runtime: claude-code
+  runtime: claude-code-cli
 
 agents:
   - name: agent-a
-    runtime: claude-code
+    runtime: claude-code-cli
   - name: agent-b
-    runtime: open-code
+    runtime: codex
 ```
+
+Use `/deploy <config> --dry-run` to validate runtime/model/auth compatibility before any agents are created.
 
 ---
 
@@ -484,8 +487,8 @@ agents:
 
   # Researcher with different runtime
   - name: researcher
-    runtime: open-code
-    model: gpt-4-turbo
+    runtime: codex
+    model: gpt-5.4
 ```
 
 ---
@@ -498,6 +501,7 @@ Configuration can also be provided via environment variables:
 |----------|-------------|
 | `ANTHROPIC_API_KEY` | Anthropic API key (not needed with Claude Max plan) |
 | `CLAUDE_MODEL` | Default model override |
+| `OPENAI_API_KEY` | Optional API key for Codex when not using `codex login` |
 | `DATABASE_URL` | PostgreSQL connection string |
 | `ORCHESTRATOR_TYPE` | Agent runtime type |
 | `PUBLIC_BASE_URL` | Public URL base for agents (e.g., `https://idbot.live`) |

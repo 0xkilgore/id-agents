@@ -21,7 +21,7 @@ import { WebSocketServer, WebSocket } from 'ws';
 import { type Address, type Hex } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
 import yaml from 'js-yaml';
-import { ClaudeAgentServer } from './claude-agent-server.js';
+import { AgentRestServer } from './agent-rest-server.js';
 import { registerOnIdChain, createSubnameOnIdChain, setMultiChainAddresses } from './onchain/idchain-register.js';
 import { type Db } from './db/db-service.js';
 import type { AgentRow, ScheduleDefinitionRow, TaskRow } from './db/types.js';
@@ -32,6 +32,12 @@ import { parseAgentRef, normalizeAlias, buildAmbiguityWarning, type AgentMatch }
 import type { HarnessType } from './harness/types.js';
 import { SchedulerService } from './scheduling/scheduler-service.js';
 import { heartbeatToSchedule, calendarToSchedule, validateIntervalSeconds } from './scheduling/schedule-config.js';
+import {
+  getDefaultModelForRuntime,
+  getDefaultRuntime,
+  resolveRuntime,
+  validateRuntimePreflight,
+} from './runtime/registry.js';
 
 // ES module equivalent of __dirname
 const __filename = fileURLToPath(import.meta.url);
@@ -181,7 +187,7 @@ export class AgentManagerDb {
   private wsClients: Set<WSClient> = new Set();
   private baseWorkDir: string;
   private db: Db;
-  private runningServers: Map<string, ClaudeAgentServer> = new Map(); // key: `${teamId}:${agentId}`
+  private runningServers: Map<string, AgentRestServer> = new Map(); // key: `${teamId}:${agentId}`
   private agentRole: 'manager' | 'worker' = 'manager';
   private defaultConfig: DeployConfig['defaults'] | null = null;
   private schedulerService: SchedulerService | null = null;
@@ -260,7 +266,77 @@ export class AgentManagerDb {
    * Get default model from config (or fallback)
    */
   private getDefaultModel(): string {
-    return this.defaultConfig?.model || 'claude-haiku-4-5-20251001';
+    return getDefaultModelForRuntime(getDefaultRuntime(), this.defaultConfig?.model);
+  }
+
+  private ensureRuntimeReady(runtime: HarnessType | string | undefined, model?: string): void {
+    const issues = validateRuntimePreflight(runtime, model);
+    if (issues.length > 0) {
+      throw new Error(issues.map(issue => issue.message).join('; '));
+    }
+  }
+
+  private async buildDeployPreflightSummary(
+    teamId: string,
+    teamName: string,
+    absolutePath: string,
+    deployArgs: string[]
+  ): Promise<{
+    agents: Array<{
+      name: string;
+      type: string;
+      runtime: string;
+      model: string;
+      local: boolean;
+      workingDirectory: string;
+    }>;
+    configPath: string;
+    teamName: string;
+    calendarCount: number;
+  }> {
+    const { agents, calendar, errors, teamName: configTeam } = processConfig(absolutePath, this.baseWorkDir, deployArgs);
+
+    let effectiveTeamId = teamId;
+    let effectiveTeamName = teamName;
+    if (configTeam && configTeam !== teamName) {
+      effectiveTeamId = await this.db.teams.getOrCreateTeamId(configTeam);
+      effectiveTeamName = configTeam;
+    }
+
+    if (errors.length > 0) {
+      throw new Error(`Config errors: ${errors.map(e => `${e.path}: ${e.message}`).join('; ')}`);
+    }
+
+    if (agents.length === 0) {
+      throw new Error('No agents defined in config');
+    }
+
+    const summarizedAgents = agents.map((agentConfig, index) => {
+      const effectiveRuntime = resolveRuntime(agentConfig.runtime) as HarnessType;
+      const effectiveModel = agentConfig.model || getDefaultModelForRuntime(effectiveRuntime, this.defaultConfig?.model);
+      this.ensureRuntimeReady(effectiveRuntime, effectiveModel);
+
+      const previewId = `preview_${Date.now()}_${index}`;
+      const workingDirectory = agentConfig.workingDirectory && path.isAbsolute(agentConfig.workingDirectory)
+        ? agentConfig.workingDirectory
+        : `${this.baseWorkDir}/agents/${previewId}`;
+
+      return {
+        name: agentConfig.name,
+        type: agentConfig.type || 'claude',
+        runtime: effectiveRuntime,
+        model: effectiveModel,
+        local: agentConfig.local === true,
+        workingDirectory,
+      };
+    });
+
+    return {
+      agents: summarizedAgents,
+      configPath: absolutePath,
+      teamName: effectiveTeamName,
+      calendarCount: calendar.length,
+    };
   }
 
   /**
@@ -285,7 +361,7 @@ export class AgentManagerDb {
       ID_SHARED_DIR: `${this.baseWorkDir}/teams/${teamName}`,
       ID_DB_TEAM_ID: teamId,
       ID_DB_AGENT_ID: agent.id,
-      ID_HARNESS: (agent.metadata?.runtime as string) || 'claude-agent-sdk',
+      ID_HARNESS: resolveRuntime((agent.runtime || agent.metadata?.runtime) as string | undefined),
       ID_PLUGINS: JSON.stringify(plugins)
     };
 
@@ -1505,7 +1581,7 @@ export class AgentManagerDb {
         const { name, type: agentType, model, runtime, allowedTools, pluginPath, plugins, skills, metadata: reqMetadata, local, claudeMd, heartbeat, workingDirectory: configWorkDir, verbose, domain, tokenId, address } = req.body || {};
         if (!name) return res.status(400).json({ error: 'Missing name' });
 
-        // Local agent: runs locally, uses user's Claude Code auth
+        // Local agent: runs locally using the selected runtime's auth flow
         const isLocalAgent = local === true || local === 'true';
         if (local !== undefined) {
           console.log(`[AgentManager] Spawn request: name=${name}, local=${local} (type: ${typeof local}), isLocalAgent=${isLocalAgent}`);
@@ -1513,8 +1589,8 @@ export class AgentManagerDb {
 
         // Note: Duplicate names are allowed - agents are uniquely identified by their token ID (e.g., agent.42)
 
-        // Runtime defaults to 'claude-agent-sdk'
-        const effectiveRuntime = runtime || 'claude-agent-sdk';
+        // Runtime defaults to the shared runtime registry default
+        const effectiveRuntime = resolveRuntime(runtime);
 
         id = `agent_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
         // Use config-specified working directory if provided, otherwise use workspace
@@ -1532,7 +1608,8 @@ export class AgentManagerDb {
         ];
 
         // Use default model from config if not specified
-        const effectiveModel = model || (effectiveRuntime === 'codex' ? 'gpt-5.4' : this.getDefaultModel());
+        const effectiveModel = model || getDefaultModelForRuntime(effectiveRuntime, this.defaultConfig?.model);
+        this.ensureRuntimeReady(effectiveRuntime, effectiveModel);
 
         // Create workspace directory first (needed for plugin copy)
         mkdirSync(workingDirectory, { recursive: true });
@@ -2214,7 +2291,7 @@ export class AgentManagerDb {
                 try {
                   const workingDirectory = a.working_directory || `${this.baseWorkDir}/agents/${a.id}`;
                   if (!existsSync(workingDirectory)) mkdirSync(workingDirectory, { recursive: true });
-                  const server = new ClaudeAgentServer({
+                  const server = new AgentRestServer({
                     model: a.model || defaultModel,
                     workingDirectory,
                     sharedDirectory,
@@ -2271,7 +2348,7 @@ export class AgentManagerDb {
             const updatedMeta = { ...metadata, agent_account: deployerAddress };
             await this.db.agents.updateMetadata(claudeId, updatedMeta);
 
-            const server = new ClaudeAgentServer({
+            const server = new AgentRestServer({
               model: defaultModel,
               workingDirectory,
               sharedDirectory,
@@ -3393,9 +3470,11 @@ export class AgentManagerDb {
       case 'deploy': {
         // Deploy agents from a config file
         // Usage: /deploy <config> [param1=value1] [param2=value2] ...
-        const configPath = args[0];
+        const dryRun = args.includes('--dry-run');
+        const filteredArgs = args.filter(arg => arg !== '--dry-run');
+        const configPath = filteredArgs[0];
         if (!configPath) {
-          return { ok: false, error: 'Usage: /deploy <config> [param=value ...]' };
+          return { ok: false, error: 'Usage: /deploy <config> [param=value ...] [--dry-run]' };
         }
 
         // Resolve config path (support shorthand like "designer" -> "configs/designer.yaml")
@@ -3415,7 +3494,7 @@ export class AgentManagerDb {
         let absolutePath = path.resolve(process.cwd(), filePath);
 
         // Parse config with provided parameters
-        let deployArgs = args.slice(1);
+        let deployArgs = filteredArgs.slice(1);
 
         // If config doesn't exist, fall back to default.yaml with the arg as the name
         if (!existsSync(absolutePath)) {
@@ -3431,6 +3510,21 @@ export class AgentManagerDb {
             return { ok: false, error: `Config file not found: ${filePath}` };
           }
         }
+        const preflight = await this.buildDeployPreflightSummary(teamId, teamName, absolutePath, deployArgs);
+
+        if (dryRun) {
+          return {
+            ok: true,
+            result: {
+              dryRun: true,
+              configPath: preflight.configPath,
+              teamName: preflight.teamName,
+              calendarCount: preflight.calendarCount,
+              agents: preflight.agents,
+            }
+          };
+        }
+
         const { agents, calendar, errors, onchain, teamName: configTeam, org } = processConfig(absolutePath, this.baseWorkDir, deployArgs);
 
         // If config specifies a team, use that instead of the request's team
@@ -3454,6 +3548,12 @@ export class AgentManagerDb {
 
         if (agents.length === 0) {
           return { ok: false, error: 'No agents defined in config' };
+        }
+
+        for (const agentConfig of agents) {
+          const effectiveRuntime = resolveRuntime(agentConfig.runtime) as HarnessType;
+          const effectiveModel = agentConfig.model || getDefaultModelForRuntime(effectiveRuntime, this.defaultConfig?.model);
+          this.ensureRuntimeReady(effectiveRuntime, effectiveModel);
         }
 
         // Generate org chart if defined in config
@@ -3530,7 +3630,9 @@ export class AgentManagerDb {
             }
 
             // Merge plugins from config
-            const effectiveRuntime = (agentConfig.runtime || 'claude-agent-sdk') as HarnessType;
+            const effectiveRuntime = resolveRuntime(agentConfig.runtime) as HarnessType;
+            const effectiveModel = agentConfig.model || getDefaultModelForRuntime(effectiveRuntime, this.defaultConfig?.model);
+            this.ensureRuntimeReady(effectiveRuntime, effectiveModel);
             const mergedPlugins = agentConfig.plugins || [];
 
             // Copy plugins to agent's working directory
@@ -3614,7 +3716,7 @@ export class AgentManagerDb {
               id: agentId,
               name: agentName,
               type: agentType,
-              model: agentConfig.model || 'haiku',
+              model: effectiveModel,
               port,
               endpoint: null,
               working_directory: workingDirectory,
@@ -3640,7 +3742,7 @@ export class AgentManagerDb {
               name: agentConfig.name,
               id: agentId,
               port,
-              model: agentConfig.model || this.defaultConfig?.model,
+              model: effectiveModel,
               workingDirectory,
               tokenId: configTokenId || undefined,
               address: (agentConfig as any).address || undefined
@@ -4914,7 +5016,7 @@ export class AgentManagerDb {
             .map(([k, v]) => [k, v || ''])
         ),
         // Runtime harness (codex, claude-code-cli, etc.)
-        ...(agentRow?.runtime && { ID_HARNESS: agentRow.runtime }),
+        ...(agentRow?.runtime && { ID_HARNESS: resolveRuntime(agentRow.runtime) }),
         // Pass OPENAI_API_KEY for codex agents
         ...(agentRow?.runtime === 'codex' && process.env.OPENAI_API_KEY && { OPENAI_API_KEY: process.env.OPENAI_API_KEY }),
         ID_TEAM: teamName,

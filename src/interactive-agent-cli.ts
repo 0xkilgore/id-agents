@@ -15,6 +15,7 @@ import {
   findProjectRoot as coreFindProjectRoot,
   readDotEnvFile as coreReadDotEnvFile,
 } from './core/index.js';
+import { getRuntimeDisplayName, resolveRuntime } from './runtime/registry.js';
 
 const colors = {
   reset: '\x1b[0m',
@@ -1992,8 +1993,7 @@ async function handleLine(line: string) {
         const agentResp = await managerFetch(`/agents/by-name/${encodeURIComponent(target)}`);
         if (agentResp.ok) {
           const agentData = await agentResp.json() as any;
-          const isLocal = agentData.metadata?.local === true ||
-                          agentData.metadata?.runtime === 'claude-code-local';
+          const isLocal = agentData.metadata?.local === true;
 
           if (isLocal) {
             // Local agent - find and display log file
@@ -2176,6 +2176,8 @@ async function handleLine(line: string) {
     const parts = input.substring('/deploy '.length).trim().split(/\s+/);
     let filePath = parts[0];
     const deployArgs = parts.slice(1); // Remaining args are parameters
+    const dryRun = deployArgs.includes('--dry-run');
+    const filteredDeployArgs = deployArgs.filter(arg => arg !== '--dry-run');
 
     if (!filePath) {
       console.log(`\n${colors.red}❌ Usage: /deploy <config> [param1] [param2] or [name=value]${colors.reset}`);
@@ -2219,13 +2221,17 @@ async function handleLine(line: string) {
         console.log(`${colors.gray}Config not found: ${filePath}, using default.yaml with name=${originalArg}${colors.reset}`);
         filePath = defaultPath;
         // Prepend name=<arg> to deployArgs if it doesn't already have a name= param
-        if (!deployArgs.some(a => a.startsWith('name='))) {
-          deployArgs.unshift(originalArg);
+        if (!filteredDeployArgs.some(a => a.startsWith('name='))) {
+          filteredDeployArgs.unshift(originalArg);
         }
       }
     }
 
-    await deployFromConfig(filePath, deployArgs);
+    if (dryRun) {
+      await dryRunDeploy(filePath, filteredDeployArgs);
+    } else {
+      await deployFromConfig(filePath, filteredDeployArgs);
+    }
     rl.prompt();
     return;
   }
@@ -4134,7 +4140,8 @@ async function deployFromConfig(filePath: string, args: string[] = []) {
       // Check if this is a local agent
       if (agent.local) {
         console.log(`\n${colors.cyan}🏠 Deploying local agent "${agent.name}"...${colors.reset}`);
-        console.log(`${colors.gray}   Using your local Claude Code authentication${colors.reset}`);
+        const runtimeName = getRuntimeDisplayName(agent.runtime || 'claude-code-cli');
+        console.log(`${colors.gray}   Using your local ${runtimeName} authentication${colors.reset}`);
 
         try {
           // First, register the agent with the manager to get a port allocation and DB entry
@@ -4142,7 +4149,7 @@ async function deployFromConfig(filePath: string, args: string[] = []) {
             name: agent.name,
             model: agent.model,
             local: true,  // Local agent
-            runtime: agent.runtime || 'claude-code-cli',
+            runtime: resolveRuntime(agent.runtime || 'claude-code-cli'),
             plugins: agent.plugins,
             verbose: agent.verbose,
             workingDirectory: agent.workingDirectory,
@@ -4152,7 +4159,7 @@ async function deployFromConfig(filePath: string, args: string[] = []) {
             address: agent.address,
             metadata: {
               description: agent.description,
-              runtime: agent.runtime || 'claude-code-cli'
+              runtime: resolveRuntime(agent.runtime || 'claude-code-cli')
             }
           };
 
@@ -4397,6 +4404,49 @@ async function deployFromConfig(filePath: string, args: string[] = []) {
     activeTeam = savedTeam;  // Restore on error
     console.log(`\n${colors.red}❌ Error: ${error.message}${colors.reset}\n`);
   }
+}
+
+async function dryRunDeploy(filePath: string, args: string[] = []) {
+  console.log(`\n${colors.gray}📄 Dry run config: ${filePath}${colors.reset}`);
+  if (args.length > 0) {
+    console.log(`${colors.gray}   Parameters: ${args.join(' ')}${colors.reset}`);
+  }
+
+  const command = `/deploy ${filePath} ${args.join(' ')} --dry-run`.replace(/\s+/g, ' ').trim();
+  const response = await managerFetch('/remote', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ command })
+  });
+
+  const data: any = await response.json().catch(() => ({}));
+  if (!response.ok || data.ok === false) {
+    const error = data.error || `Dry run failed: ${response.statusText}`;
+    console.log(`\n${colors.red}❌ ${error}${colors.reset}\n`);
+    return;
+  }
+
+  const result = data.result || {};
+  const agents: any[] = result.agents || [];
+
+  console.log(`${colors.green}✅ Dry run passed${colors.reset}`);
+  console.log(`${colors.gray}   Team: ${result.teamName || activeTeam}${colors.reset}`);
+  console.log(`${colors.gray}   Config: ${result.configPath || filePath}${colors.reset}`);
+  console.log(`${colors.gray}   Agents: ${agents.length}${colors.reset}`);
+  if (typeof result.calendarCount === 'number') {
+    console.log(`${colors.gray}   Calendar events: ${result.calendarCount}${colors.reset}`);
+  }
+
+  for (const agent of agents) {
+    console.log(`\n${colors.cyan}${agent.name}${colors.reset}`);
+    console.log(`   ${colors.gray}Type:${colors.reset} ${agent.type}`);
+    console.log(`   ${colors.gray}Runtime:${colors.reset} ${agent.runtime}`);
+    console.log(`   ${colors.gray}Model:${colors.reset} ${agent.model}`);
+    console.log(`   ${colors.gray}Local:${colors.reset} ${agent.local ? 'yes' : 'no'}`);
+    console.log(`   ${colors.gray}Workdir:${colors.reset} ${agent.workingDirectory}`);
+  }
+
+  console.log('');
 }
 
 async function resolveAgent(agentNameOrId: string): Promise<any | null> {

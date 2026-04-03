@@ -10,6 +10,7 @@ import type {
   AgentInfo,
   SpawnAgentOptions
 } from './types.js';
+import { getDefaultModelForRuntime, getDefaultRuntime, resolveRuntime } from '../runtime/registry.js';
 
 // ==================== Helper Functions ====================
 
@@ -104,8 +105,8 @@ export async function spawnAgent(
 
     const payload: any = {
       name: options.name,
-      model: options.model || 'claude-haiku-4-5-20251001',
-      runtime: options.runtime || 'claude-agent-sdk'
+      model: options.model || getDefaultModelForRuntime(options.runtime || getDefaultRuntime()),
+      runtime: resolveRuntime(options.runtime || getDefaultRuntime())
     };
 
     if (options.systemPrompt) {

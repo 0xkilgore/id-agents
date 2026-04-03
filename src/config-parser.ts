@@ -10,6 +10,7 @@ import yaml from 'js-yaml';
 import fs from 'fs';
 import path from 'path';
 import { HarnessType, isValidHarnessType, getAvailableHarnesses } from './harness/index.js';
+import { getDefaultRuntime, resolveRuntime, validateRuntimeModelCompatibility } from './runtime/registry.js';
 
 export type ScheduleDeliveryMode = 'talk' | 'internal';
 
@@ -32,7 +33,7 @@ export interface ResourceConfig {
 export interface AgentSpec {
   name: string;
   type?: 'claude' | 'automator';      // Agent type: 'claude' (default) or 'automator' (manager's brain, hidden)
-  runtime?: HarnessType;              // 'claude-agent-sdk' or 'claude-code-cli', defaults to 'claude-agent-sdk'
+  runtime?: HarnessType;              // Runtime harness id, defaults to 'claude-agent-sdk'
   description?: string;
   model?: string;
   systemPrompt?: string;              // Custom system prompt for the agent
@@ -43,7 +44,7 @@ export interface AgentSpec {
   allowedTools?: string[];
   resources?: ResourceConfig;
   register?: boolean;                 // Auto-register onchain after deploy
-  local?: boolean;                    // Run locally using user's Claude Code auth
+  local?: boolean;                    // Run locally using the selected runtime's local auth flow
   port?: number;                      // Port for local agents (auto-allocated if not specified)
   workingDirectory?: string;          // Working directory for local agents
   verbose?: boolean | string;         // Enable detailed logging (show tool calls, progress)
@@ -265,6 +266,7 @@ export function getConfigParameters(filePath: string): ConfigParameter[] {
 export function validateConfig(config: DeployConfig): ValidationResult {
   const validDays = new Set(['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun']);
   const errors: ValidationError[] = [];
+  const defaultRuntime = resolveRuntime(config.defaults?.runtime || getDefaultRuntime());
 
   // Check version
   if (!config.version) {
@@ -330,6 +332,15 @@ export function validateConfig(config: DeployConfig): ValidationResult {
       });
     }
 
+    const effectiveRuntime = resolveRuntime(agent.runtime || defaultRuntime);
+    const effectiveModel = agent.model || config.defaults?.model;
+    for (const issue of validateRuntimeModelCompatibility(effectiveRuntime, effectiveModel)) {
+      errors.push({
+        path: agent.model ? `${agentPath}.model` : `${agentPath}.runtime`,
+        message: issue.message
+      });
+    }
+
     // Validate plugins
     if (agent.plugins) {
       agent.plugins.forEach((plugin, pIndex) => {
@@ -367,6 +378,13 @@ export function validateConfig(config: DeployConfig): ValidationResult {
       errors.push({
         path: 'defaults.runtime',
         message: `runtime must be one of: ${getAvailableHarnesses().join(', ')}`
+      });
+    }
+
+    for (const issue of validateRuntimeModelCompatibility(defaultRuntime, config.defaults.model)) {
+      errors.push({
+        path: config.defaults.model ? 'defaults.model' : 'defaults.runtime',
+        message: issue.message
       });
     }
 

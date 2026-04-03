@@ -125,12 +125,14 @@ export async function spawnAgent(
   options?: {
     model?: string;
     systemPrompt?: string;
+    runtime?: string;
   }
 ) {
   return request<AgentInfo>('POST', '/agents/spawn', {
     name,
     model: options?.model || 'haiku',
     systemPrompt: options?.systemPrompt,
+    runtime: options?.runtime,
   });
 }
 

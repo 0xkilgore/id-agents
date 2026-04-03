@@ -2,25 +2,31 @@
 /**
  * Local Agent Server
  *
- * Runs a Claude Code agent locally using the user's
- * existing Claude Code authentication. This allows agents to use your logged-in
- * Claude Code session instead of requiring an API key.
+ * Runs a local runtime-backed agent using the user's existing CLI
+ * authentication when applicable. This allows agents to use a logged-in CLI
+ * session instead of requiring an API key for CLI-based runtimes.
  *
  * The local agent:
  * - Registers with the manager as a team member
  * - Exposes REST-AP endpoints for inter-agent communication
- * - Uses your local Claude Code session for LLM calls
+ * - Uses your configured local runtime for LLM calls
  * - Can participate in multi-agent workflows alongside other local agents
  */
 
 import 'dotenv/config';
-import { ClaudeAgentServer } from './claude-agent-server.js';
+import { AgentRestServer } from './agent-rest-server.js';
 import { createDb } from './db/index.js';
 import type { Db } from './db/db-service.js';
 import fetch from 'node-fetch';
 import { mkdirSync, existsSync } from 'fs';
 import path from 'path';
 import net from 'net';
+import {
+  getDefaultModelForRuntime,
+  getRuntimeDisplayName,
+  resolveRuntime,
+  usesCliLogin,
+} from './runtime/registry.js';
 
 interface LocalAgentConfig {
   name: string;
@@ -68,19 +74,6 @@ async function getPortSearchRange(): Promise<{ portStart: number; portEnd: numbe
   return { portStart: 4101, portEnd: 65535 };
 }
 
-function getHarnessDisplayName(harness: string): string {
-  switch (harness) {
-    case 'codex':
-      return 'Codex';
-    case 'claude-code-cli':
-    case 'claude-code-local':
-      return 'Claude Code';
-    case 'claude-agent-sdk':
-    default:
-      return 'Claude';
-  }
-}
-
 /**
  * Register the local agent with the manager
  */
@@ -89,7 +82,8 @@ async function registerWithManager(
   agentId: string,
   name: string,
   team: string,
-  port: number
+  port: number,
+  runtime: string
 ): Promise<void> {
   const endpoint = `http://localhost:${port}`;
 
@@ -110,7 +104,7 @@ async function registerWithManager(
         name,
         service_type: 'REST-AP',
         service: endpoint,
-        runtime: 'claude-code-local',
+        runtime,
         local: true,  // Flag to indicate this is a local agent
         host_pid: process.pid
       }
@@ -130,20 +124,23 @@ async function registerWithManager(
 // Agents persist in the database and can be restarted.
 
 /**
- * Start a local Claude Code agent server
+ * Start a local runtime-backed agent server
  */
 export async function startLocalAgent(config: LocalAgentConfig): Promise<{
-  server: ClaudeAgentServer;
+  server: AgentRestServer;
   port: number;
   agentId: string;
   stop: () => Promise<void>;
 }> {
+  const runtime = resolveRuntime(process.env.ID_HARNESS || 'claude-code-cli');
+  process.env.ID_HARNESS = runtime;
+
   const {
     name,
     team = process.env.ID_TEAM || 'default',
     port: requestedPort,
     workingDirectory: configWorkDir,
-    model = process.env.CLAUDE_MODEL || 'claude-opus-4-20250514',
+    model = process.env.CLAUDE_MODEL || getDefaultModelForRuntime(runtime),
     managerUrl = process.env.MANAGER_URL || 'http://localhost:4100',
     agentId: preRegisteredId
   } = config;
@@ -208,7 +205,7 @@ export async function startLocalAgent(config: LocalAgentConfig): Promise<{
           working_directory: workingDirectory,
           status: 'running',
           created_at: Date.now(),
-          metadata: { name, service_type: 'REST-AP', service: `http://localhost:${port}`, runtime: 'claude-code-local', local: true },
+          metadata: { name, service_type: 'REST-AP', service: `http://localhost:${port}`, runtime, local: true },
         });
         console.log(`📦 Registered in database (team: ${team})`);
       }
@@ -218,16 +215,12 @@ export async function startLocalAgent(config: LocalAgentConfig): Promise<{
     }
   }
 
-  // Determine harness: respect ID_HARNESS env var, default to CLI for local dev
-  const harness = process.env.ID_HARNESS || 'claude-code-cli';
-  process.env.ID_HARNESS = harness;
-
-  // Only remove API key when using CLI harness (to force OAuth credentials)
-  if (harness === 'claude-code-cli') {
+  // Only remove API key when using a CLI-auth runtime (to force local credentials)
+  if (usesCliLogin(runtime) && runtime !== 'codex') {
     delete process.env.ANTHROPIC_API_KEY;
   }
 
-  // Set manager URL for ClaudeAgentServer to use
+  // Set manager URL for AgentRestServer to use
   process.env.MANAGER_URL = managerUrl;
 
   // Enable verbose logging if configured
@@ -237,7 +230,7 @@ export async function startLocalAgent(config: LocalAgentConfig): Promise<{
   }
 
   // Create the server
-  const server = new ClaudeAgentServer({
+  const server = new AgentRestServer({
     model,
     workingDirectory,
     sharedDirectory,
@@ -252,7 +245,7 @@ export async function startLocalAgent(config: LocalAgentConfig): Promise<{
   // Register with manager (only if not pre-registered)
   if (!isPreRegistered) {
     try {
-      await registerWithManager(managerUrl, agentId, name, team, port);
+      await registerWithManager(managerUrl, agentId, name, team, port, runtime);
     } catch (err) {
       console.warn(`⚠️  Could not register with manager: ${err}`);
       console.log(`   Agent is running but may not be discoverable by other agents.`);
@@ -369,8 +362,7 @@ Examples:
     process.exit(1);
   }
 
-  const bannerHarness = process.env.ID_HARNESS || 'claude-code-cli';
-  const bannerName = getHarnessDisplayName(bannerHarness);
+  const bannerName = getRuntimeDisplayName(process.env.ID_HARNESS || 'claude-code-cli');
   const bannerTitle = `🏠 Local ${bannerName} Agent Server`;
   const bannerSubtitle = `Running ${bannerName} with your local authentication`;
 

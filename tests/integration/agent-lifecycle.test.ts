@@ -98,6 +98,18 @@ describe('Agent Lifecycle', () => {
       expect(agent?.port).toBeGreaterThan(0);
       expect(agent?.model).toBe('haiku');
     });
+
+    it('should reject invalid runtime/model combinations at spawn time', async () => {
+      const invalidAgentName = `${TEST_AGENT}-invalid`;
+      const result = await spawnAgent(invalidAgentName, {
+        runtime: 'claude-agent-sdk',
+        model: 'gpt-5.4',
+        systemPrompt: 'This should be rejected by runtime validation.',
+      });
+
+      expect(result.ok).toBe(false);
+      expect((result.data as any).error).toContain('incompatible with OpenAI model');
+    });
   });
 
   describe('Agent Messaging', () => {

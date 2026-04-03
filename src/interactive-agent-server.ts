@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 import express from 'express';
 import { EventEmitter } from 'events';
-import { NewsItem } from './claude-agent-server.js';
+import { NewsItem } from './agent-rest-server.js';
 import type { Db } from './db/db-service.js';
 
 export interface IncomingReply {

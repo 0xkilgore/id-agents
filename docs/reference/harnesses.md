@@ -6,8 +6,8 @@ Harnesses are pluggable LLM execution backends that allow ID Agents to use diffe
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                    Agent Server                              │
-│                  (claude-agent-server.ts)                   │
+│                  Agent REST Server                           │
+│               (src/agent-rest-server.ts)                    │
 └─────────────────────────┬───────────────────────────────────┘
                           │
                           ▼
@@ -19,16 +19,10 @@ Harnesses are pluggable LLM execution backends that allow ID Agents to use diffe
               ┌───────────┴───────────┐
               │                       │
               ▼                       ▼
-      ┌───────────────┐       ┌───────────────┐
-      │ Claude Agent  │       │  Claude Code  │
-      │  SDK Harness  │       │  CLI Harness  │
-      └───────────────┘       └───────────────┘
-              │                       │
-              ▼                       ▼
-      ┌───────────────┐       ┌───────────────┐
-      │ Claude Agent  │       │  Claude Code  │
-      │     SDK       │       │     CLI       │
-      └───────────────┘       └───────────────┘
+      ┌───────────────┐   ┌───────────────┐   ┌───────────────┐
+      │ Claude Agent  │   │  Claude Code  │   │     Codex     │
+      │  SDK Harness  │   │  CLI Harness  │   │    Harness    │
+      └───────────────┘   └───────────────┘   └───────────────┘
 ```
 
 All harnesses produce `HarnessMessage` objects that map to REST-AP responses.
@@ -39,6 +33,8 @@ All harnesses produce `HarnessMessage` objects that map to REST-AP responses.
 |---------|---------|----------|----------|
 | `claude-agent-sdk` | Claude Agent SDK | Anthropic | Primary runtime, full tool access (uses ANTHROPIC_API_KEY) |
 | `claude-code-cli` | Claude Code CLI | Anthropic | Uses Max plan subscription |
+| `claude-code-local` | Claude Code CLI | Anthropic | Local alias of `claude-code-cli` used by some bootstrap paths |
+| `codex` | Codex CLI | OpenAI | CLI-auth runtime for Codex-based agent execution |
 
 ## Claude Agent SDK Harness
 
@@ -112,6 +108,38 @@ agents:
 
 ---
 
+## Codex CLI Harness
+
+Uses the OpenAI Codex CLI as a harness. This runtime uses your local Codex login or `OPENAI_API_KEY`.
+
+### Features
+
+- Uses Codex CLI authentication
+- Full tool access
+- Fresh query execution per request
+
+### Configuration
+
+```yaml
+agents:
+  - name: my-agent
+    runtime: codex
+    model: gpt-5.4
+```
+
+### Environment / Auth
+
+`codex` requires either:
+
+- a successful `codex login`
+- or `OPENAI_API_KEY`
+
+### Session Behavior
+
+Codex currently runs each request as a fresh `codex exec` invocation. It does not reuse the REST server's session resume path.
+
+---
+
 ## Harness Interface
 
 All harnesses implement the `AgentHarness` interface:
@@ -126,7 +154,7 @@ interface AgentHarness {
   ): AsyncGenerator<HarnessMessage>;
 }
 
-type HarnessType = 'claude-agent-sdk' | 'claude-code-cli';
+type HarnessType = 'claude-agent-sdk' | 'claude-code-cli' | 'claude-code-local' | 'codex';
 
 interface HarnessOptions {
   model?: string;
@@ -186,6 +214,13 @@ agents:
     runtime: claude-agent-sdk
   - name: agent-b
     runtime: claude-code-cli
+  - name: agent-c
+    runtime: codex
+```
+
+**Dry run before deploy:**
+```bash
+/deploy demo-mixed --dry-run
 ```
 
 **Via Remote API:**
@@ -201,7 +236,7 @@ curl -X POST http://localhost:4100/remote \
 import { getAvailableHarnesses, isValidHarnessType } from './harness';
 
 const harnesses = getAvailableHarnesses();
-// ['claude-agent-sdk', 'claude-code-cli']
+// ['claude-agent-sdk', 'claude-code-cli', 'claude-code-local', 'codex']
 
 isValidHarnessType('claude-agent-sdk'); // true
 isValidHarnessType('invalid');          // false
@@ -259,6 +294,8 @@ export function createHarness(type: HarnessType): AgentHarness {
 
 1. **Choose the right harness:**
    - `claude-agent-sdk` - When you need full Anthropic integration and plugin support (uses API key)
+   - `claude-code-cli` - When you want Claude Code CLI auth and session continuity
+   - `codex` - When you want OpenAI Codex CLI auth and fresh-per-query execution
    - `claude-code-cli` - When you want to use your Max plan subscription
 
 2. **Model selection:**

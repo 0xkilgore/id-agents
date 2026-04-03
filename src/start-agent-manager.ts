@@ -2,13 +2,14 @@
 /**
  * Start Agent Manager
  * 
- * Runs the multi-agent manager that can spawn Claude agents on demand
+ * Runs the multi-agent manager that can spawn runtime-configured agents on demand
  */
 
 import 'dotenv/config';
 import { AgentManagerDb } from './agent-manager-db.js';
 import { createDb, migrateDb } from './db.js';
-import { ClaudeAgentServer } from './claude-agent-server.js';
+import { AgentRestServer } from './agent-rest-server.js';
+import { resolveRuntime } from './runtime/registry.js';
 
 async function main() {
   const agentRole = process.env.AGENT_ROLE || 'manager'; // 'manager' or 'worker'
@@ -18,7 +19,7 @@ async function main() {
 
   // Managers can boot without an API key (so the API can come up and you can debug/inspect state).
   // Worker agents require it to actually run Claude (unless using a different harness).
-  const harness = process.env.ID_HARNESS || process.env.HARNESS || 'claude-agent-sdk';
+  const harness = resolveRuntime(process.env.ID_HARNESS || process.env.HARNESS || 'claude-agent-sdk');
   const useMaxPlan = process.env.ID_USE_MAX_PLAN === 'true';
 
   // claude-code-cli and codex use their own auth (CLI login), not ANTHROPIC_API_KEY
@@ -35,7 +36,7 @@ async function main() {
   }
 
   if (agentRole === 'worker') {
-    // Worker agent: Run a single Claude agent
+    // Worker agent: Run a single runtime-configured agent
     await startWorkerAgent(agentId);
   } else {
     // Manager agent: Run the manager
@@ -81,7 +82,7 @@ async function startWorkerAgent(agentId?: string) {
     process.exit(1);
   }
 
-  // Worker agents run a single REST-AP ClaudeAgentServer (not the manager API).
+  // Worker agents run a single REST-AP AgentRestServer (not the manager API).
   const port = parseInt(process.env.CLAUDE_AGENT_PORT || process.env.AGENT_PORT || '4100');
   const workingDir = process.env.CLAUDE_AGENT_WORKDIR || process.env.AGENT_MANAGER_WORKDIR || `/workspace/agents/${agentId}`;
   // Team name determines the shared directory scope - all agents in a team share files
@@ -154,7 +155,7 @@ async function startWorkerAgent(agentId?: string) {
     }
   }
 
-  const server = new ClaudeAgentServer({
+  const server = new AgentRestServer({
     model: process.env.CLAUDE_MODEL,
     workingDirectory: workingDir,
     sharedDirectory: sharedDir,

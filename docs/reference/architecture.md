@@ -28,7 +28,7 @@ The central process running on port 4100 (configurable via `--port` or `MANAGER_
 - `POST /remote` — Execute CLI commands programmatically (no auth)
 - `POST /message` — Fire-and-forget agent-to-agent messaging (no reply)
 
-### 2. Agent Processes (`src/local-agent-server.ts` + `src/claude-agent-server.ts`)
+### 2. Agent Processes (`src/local-agent-server.ts` + `src/agent-rest-server.ts`)
 
 Each agent runs as a separate Node.js process with its own Express server on a dynamically assigned port (4101+, sequential).
 
@@ -57,6 +57,7 @@ The user-facing terminal interface.
 - Provides commands: `/ask`, `/deploy`, `/agents`, `/status`, `/register`, etc.
 - Polls agent news feeds for replies
 - Manages agent lifecycle (deploy, rebuild, delete)
+- Supports `/deploy --dry-run` for runtime/config preflight without creating agents
 
 ## Message Flow
 
@@ -66,7 +67,7 @@ User types: /ask coder hello
 1. CLI resolves "coder" → finds agent on port 4101
 2. CLI → POST http://localhost:4101/talk {"message": "hello"}
 3. Agent queues the request and returns 202 with query_id
-4. Agent spawns LLM session (Claude Agent SDK or Claude Code CLI)
+4. Agent spawns an LLM session through the configured runtime harness (`claude-agent-sdk`, `claude-code-cli`, or `codex`)
 5. LLM processes the message, generates a reply
 6. Reply stored in agent's news feed
 7. Agent auto-sends reply to the CLI's /news endpoint
@@ -88,10 +89,12 @@ User types: /ask coder hello
 | File | Purpose |
 |------|---------|
 | `src/agent-manager-db.ts` | Manager — routes, DB, spawning, registration, health checks |
-| `src/claude-agent-server.ts` | Agent REST-AP server (per-agent Express app) |
+| `src/agent-rest-server.ts` | Preferred runtime-neutral entry point for the per-agent REST server |
+| `src/claude-agent-server.ts` | Current implementation file behind `AgentRestServer` (kept for compatibility) |
 | `src/local-agent-server.ts` | Agent process bootstrap and CLI arg parsing |
 | `src/interactive-agent-cli.ts` | User-facing CLI |
 | `src/config-parser.ts` | YAML config parsing and parameter substitution |
+| `src/runtime/registry.ts` | Runtime registry: defaults, labels, auth/preflight, session policy |
 | `src/onchain/idchain-register.ts` | ENS registration via id-cli |
 | `src/core/agent-identifier.ts` | ENS name parsing and display |
 | `src/db.ts` | PostgreSQL schema, migrations, connection pool |
@@ -99,6 +102,7 @@ User types: /ask coder hello
 | `src/xmtp/xmtp-messaging.ts` | XMTP encrypted messaging — allowlist, ENS resolution, approval callbacks |
 | `src/xmtp/ows-signer.ts` | OWS-backed XMTP signer — key never leaves vault |
 | `src/harness/claude-code-cli.ts` | Claude Code CLI harness for spawning LLM sessions |
+| `src/harness/codex.ts` | Codex CLI harness for spawning Codex sessions |
 
 ## Onchain Identity
 
@@ -138,7 +142,7 @@ Each agent can optionally run an XMTP client for end-to-end encrypted messaging 
 |------|---------|
 | `src/xmtp/xmtp-messaging.ts` | Core messaging class — inbound/outbound handling, sender allowlist, ENS resolution, approval callbacks |
 | `src/xmtp/ows-signer.ts` | OWS-backed XMTP signer — delegates all signing to `ows sign message`, private key never leaves vault |
-| `src/claude-agent-server.ts` | Per-agent XMTP client lifecycle, `/xmtp/send` and `/xmtp/status` endpoints |
+| `src/agent-rest-server.ts` | Per-agent XMTP lifecycle entry point, `/xmtp/send` and `/xmtp/status` endpoints |
 | `skills/xmtp/SKILL.md` | Agent skill for sending XMTP messages via curl |
 
 ### Architecture

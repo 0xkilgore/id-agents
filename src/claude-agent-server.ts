@@ -1,21 +1,31 @@
 // SPDX-License-Identifier: MIT
 /**
- * Claude Agent REST-AP Server
- * 
- * Runs a Claude Agent as a REST-AP provider that other agents can call.
- * The Claude agent has full machine access and exposes /talk, /news, and /.well-known/restap.json
+ * Agent REST-AP Server
+ *
+ * Runs a runtime-backed agent as a REST-AP provider that other agents can call.
+ * The agent has full machine access and exposes /talk, /news, and /.well-known/restap.json
+ *
+ * Note: the file name remains for compatibility. New code should prefer the
+ * `AgentRestServer` alias from `agent-rest-server.ts`.
  */
 
 import express from 'express';
 import fetch from 'node-fetch';
 import { createHarness, HarnessType, AgentHarness } from './harness/index.js';
-import { CLAUDE_MODELS } from './harness/claude-agent-sdk.js';
 import { withInterAgentSkill } from './inter-agent-skill.js';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import fs from 'fs';
 import type http from 'http';
 import type { Db } from './db/db-service.js';
+import {
+  getRuntimeAuthProvider,
+  getDefaultModelForRuntime,
+  getRuntimeDisplayName,
+  getRuntimeProviderName,
+  resolveRuntime,
+  supportsSessionResume,
+} from './runtime/registry.js';
 // XMTP is dynamically imported only when needed (native bindings may not be available)
 type XmtpMessagingType = import('./xmtp/xmtp-messaging.js').XmtpMessaging;
 const __filename = fileURLToPath(import.meta.url);
@@ -34,13 +44,15 @@ function logTime(): string {
  */
 function getApiErrorHelp(errorMessage: string, harnessType: HarnessType = 'claude-agent-sdk'): { isApiError: boolean; helpMessage: string } {
   const msg = errorMessage.toLowerCase();
+  const runtimeName = getRuntimeDisplayName(harnessType);
+  const authProvider = getRuntimeAuthProvider(harnessType);
 
   // Credit/billing issues
   if (msg.includes('credit balance') || msg.includes('insufficient') || msg.includes('billing')) {
     return {
       isApiError: true,
-      helpMessage: '💳 API Credit Issue: Your Anthropic API credit balance is too low.\n' +
-        '   → Visit https://console.anthropic.com to add credits.\n' +
+      helpMessage: `💳 API Credit Issue: Your ${authProvider} credit balance appears too low for ${runtimeName}.\n` +
+        `   → Check your ${authProvider} billing or subscription status.\n` +
         '   → Agents will resume working once credits are added.'
     };
   }
@@ -49,9 +61,9 @@ function getApiErrorHelp(errorMessage: string, harnessType: HarnessType = 'claud
   if (msg.includes('invalid api key') || msg.includes('authentication') || msg.includes('unauthorized') || msg.includes('401')) {
     return {
       isApiError: true,
-      helpMessage: '🔑 API Key Issue: Your Anthropic API key is invalid or expired.\n' +
-        '   → Check your ANTHROPIC_API_KEY environment variable.\n' +
-        '   → Generate a new key at https://console.anthropic.com/settings/keys'
+      helpMessage: `🔑 Authentication Issue: ${runtimeName} could not authenticate with ${authProvider}.\n` +
+        '   → Check the runtime-specific login or API key configuration.\n' +
+        '   → Retry after refreshing credentials.'
     };
   }
 
@@ -69,9 +81,9 @@ function getApiErrorHelp(errorMessage: string, harnessType: HarnessType = 'claud
   if (msg.includes('overloaded') || msg.includes('503') || msg.includes('service unavailable')) {
     return {
       isApiError: true,
-      helpMessage: '🔄 API Overloaded: The Anthropic API is temporarily overloaded.\n' +
+      helpMessage: `🔄 API Overloaded: ${authProvider} is temporarily overloaded for ${runtimeName}.\n` +
         '   → Wait a few moments and try again.\n' +
-        '   → Check https://status.anthropic.com for service status.'
+        '   → Check the provider status page if the issue persists.'
     };
   }
 
@@ -79,9 +91,9 @@ function getApiErrorHelp(errorMessage: string, harnessType: HarnessType = 'claud
   if (msg.includes('exited with code 1') || msg.includes('process exited')) {
     return {
       isApiError: true,
-      helpMessage: `⚠️  Claude Code Error: The agent process exited unexpectedly.\n` +
-        '   → This often indicates an API issue (credits, key, or rate limits).\n' +
-        '   → Check your API status at https://console.anthropic.com'
+      helpMessage: `⚠️  ${runtimeName} Error: The agent process exited unexpectedly.\n` +
+        '   → This often indicates an auth, quota, or CLI/runtime issue.\n' +
+        '   → Check the runtime configuration and provider status.'
     };
   }
 
@@ -178,32 +190,6 @@ export class ClaudeAgentServer {
   private harnessType: HarnessType;
   private xmtp: XmtpMessagingType | null = null;
 
-  private getRuntimeDisplayName(): string {
-    switch (this.harnessType) {
-      case 'codex':
-        return 'Codex';
-      case 'claude-code-cli':
-      case 'claude-code-local':
-        return 'Claude Code';
-      case 'claude-agent-sdk':
-      default:
-        return 'Claude';
-    }
-  }
-
-  private getProviderDisplayName(): string {
-    switch (this.harnessType) {
-      case 'codex':
-        return 'Codex CLI';
-      case 'claude-code-cli':
-      case 'claude-code-local':
-        return 'Claude Code CLI';
-      case 'claude-agent-sdk':
-      default:
-        return 'Claude Agent SDK';
-    }
-  }
-
   constructor(options: {
     model?: string;
     workingDirectory?: string;
@@ -214,7 +200,8 @@ export class ClaudeAgentServer {
     agentIdentity?: { name?: string; team?: string; network?: string; metadata?: any; tokenId?: string; domain?: string };
     db?: { db: Db; teamId: string; agentId: string };
   } = {}) {
-    this.model = options.model || process.env.CLAUDE_MODEL || CLAUDE_MODELS.HAIKU;
+    const resolvedRuntime = resolveRuntime(process.env.ID_HARNESS || 'claude-agent-sdk');
+    this.model = options.model || process.env.CLAUDE_MODEL || getDefaultModelForRuntime(resolvedRuntime);
     this.workingDirectory = options.workingDirectory || process.cwd();
     // Shared dir is team-scoped by the manager (e.g. /workspace/teams/<team>).
     // All agents in the same team share this directory.
@@ -232,7 +219,7 @@ export class ClaudeAgentServer {
     }
 
     // Initialize harness based on ID_HARNESS env var (defaults to 'claude-agent-sdk')
-    this.harnessType = (process.env.ID_HARNESS || 'claude-agent-sdk') as HarnessType;
+    this.harnessType = resolvedRuntime as HarnessType;
     this.harness = createHarness(this.harnessType);
 
     // Note: do NOT set process.env.AGENT_NAME here (shared process; multiple agents).
@@ -466,7 +453,7 @@ export class ClaudeAgentServer {
     this.app.get('/.well-known/restap.json', (req, res) => {
       // Build agent identity from catalog and identity info
       const agentInfo: Record<string, any> = {
-        name: this.agentIdentity?.name || this.agentName || `${this.getRuntimeDisplayName()} Agent`,
+        name: this.agentIdentity?.name || this.agentName || `${getRuntimeDisplayName(this.harnessType)} Agent`,
         ...this.catalog  // Include all catalog fields (description, role, expertise, etc.)
       };
 
@@ -479,7 +466,7 @@ export class ClaudeAgentServer {
         restap_version: '1.0',
         agent: agentInfo,
         provider: {
-          name: this.getProviderDisplayName(),
+          name: getRuntimeProviderName(this.harnessType),
           version: '1.0'
         },
         endpoints: {
@@ -492,10 +479,10 @@ export class ClaudeAgentServer {
         capabilities: [
           {
             id: 'talk',
-            title: `Talk to ${this.getRuntimeDisplayName()}`,
+            title: `Talk to ${getRuntimeDisplayName(this.harnessType)}`,
             method: 'POST',
             endpoint: '/talk',
-            description: `Ask ${this.getRuntimeDisplayName()} to perform tasks with full tool access (Read, Write, Edit, Bash, Glob, Grep, WebSearch, WebFetch). Supports optional session_id for context continuity.`,
+            description: `Ask ${getRuntimeDisplayName(this.harnessType)} to perform tasks with full tool access (Read, Write, Edit, Bash, Glob, Grep, WebSearch, WebFetch). Supports optional session_id for context continuity.`,
             input_schema: {
               message: 'string (required)',
               session_id: 'string (optional) - session ID from previous query to maintain context'
@@ -680,7 +667,7 @@ export class ClaudeAgentServer {
         res.status(202).json({
           query_id: queryId,
           status: 'processing',
-          message: `${this.getRuntimeDisplayName()} is working on your request. Poll /news for completion.`
+          message: `${getRuntimeDisplayName(this.harnessType)} is working on your request. Poll /news for completion.`
         });
       } catch (err: any) {
         console.error(`${logTime()} [Agent] Error in /talk:`, err);
@@ -1366,17 +1353,17 @@ What would you like to do with this information?`;
 
     // Track session ID for continuity (declared outside try for catch block access)
     // Use provided resume ID, or fall back to the agent's last session for continuity
-    const allowSessionResume = this.harnessType !== 'codex';
+    const allowSessionResume = supportsSessionResume(this.harnessType);
     let sessionId = allowSessionResume ? (resume || this.lastSessionId) : undefined;
     if (sessionId && !resume) {
-      console.log(`${logTime()} [Claude Agent] 🔄 Resuming previous session: ${sessionId.slice(0, 20)}...`);
+      console.log(`${logTime()} [Agent] 🔄 Resuming previous session: ${sessionId.slice(0, 20)}...`);
     }
 
     try {
       let result = '';
       const messages: string[] = [];
 
-      console.log(`${logTime()} [Claude Agent] Processing query ${queryId}${from ? ` from ${from}` : ''}${options?.noAutoReply ? ' (no auto-reply)' : ''}: ${prompt.substring(0, 60)}...`);
+      console.log(`${logTime()} [Agent] Processing query ${queryId}${from ? ` from ${from}` : ''}${options?.noAutoReply ? ' (no auto-reply)' : ''}: ${prompt.substring(0, 60)}...`);
 
       // Prepend sender info if present so Claude knows who sent the message
       const isManager = from === 'manager' || from === 'remote';
@@ -1464,7 +1451,7 @@ ${prompt}`
           if (apiHelp.isApiError) {
             console.error(`\n${apiHelp.helpMessage}\n`);
           } else {
-            console.error(`  ❌ Claude Code error: ${errorContent}`);
+            console.error(`  ❌ ${getRuntimeDisplayName(this.harnessType)} error: ${errorContent}`);
           }
 
           messages.push(`[Error] ${errorContent}`);
@@ -1481,17 +1468,17 @@ ${prompt}`
       }
 
       // Never treat "empty result" as success; bubble it up as a failure so it's debuggable.
-      if (!result || !result.trim() || result.trim() === 'No response from Claude Code') {
-        throw new Error('Claude Code produced an empty result');
+      if (!result || !result.trim() || result.trim() === `No response from ${getRuntimeDisplayName(this.harnessType)}`) {
+        throw new Error(`${getRuntimeDisplayName(this.harnessType)} produced an empty result`);
       }
 
-      // If the result is actually a raw Claude Code JSON payload (often on errors), extract/throw cleanly.
+      // If the result is actually a raw runtime JSON payload (often on errors), extract/throw cleanly.
       const trimmed = (result || '').trim();
       if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
         try {
           const parsed = JSON.parse(trimmed);
           if (parsed?.is_error) {
-            const msg = parsed.result || parsed.error || 'Unknown error from Claude Code';
+            const msg = parsed.result || parsed.error || `Unknown error from ${getRuntimeDisplayName(this.harnessType)}`;
             throw new Error(msg);
           }
           if (typeof parsed?.result === 'string' && parsed.result.trim()) {
@@ -1521,7 +1508,7 @@ ${prompt}`
         result: query.result
       });
 
-      console.log(`${logTime()} [Claude Agent] ✅ Query ${queryId} completed`);
+      console.log(`${logTime()} [Agent] ✅ Query ${queryId} completed`);
 
       // Send reply back to sender if auto-reply is enabled
       if (shouldAutoReply) {
@@ -1550,7 +1537,7 @@ ${prompt}`
       // Clear session on content filter errors to allow recovery
       // The corrupted context is likely causing the filter to trigger
       if (isContentFilterError(query.error)) {
-        console.log(`${logTime()} [Claude Agent] 🔄 Content filter error detected - clearing session to allow recovery`);
+        console.log(`${logTime()} [Agent] 🔄 Content filter error detected - clearing session to allow recovery`);
         this.lastSessionId = undefined;
       }
 
@@ -1568,10 +1555,10 @@ ${prompt}`
       });
 
       if (apiHelp.isApiError) {
-        console.error(`[Claude Agent] ❌ Query ${queryId} failed (API issue)`);
+        console.error(`[Agent] ❌ Query ${queryId} failed (API issue)`);
         console.error(`\n${apiHelp.helpMessage}\n`);
       } else {
-        console.error(`[Claude Agent] ❌ Query ${queryId} failed:`, error);
+        console.error(`[Agent] ❌ Query ${queryId} failed:`, error);
       }
 
       // Send error reply back to sender if auto-reply is enabled
@@ -1655,7 +1642,7 @@ ${prompt}`
         console.log(`\nListening on http://localhost:${port}`);
         console.log(`\nREST-AP Endpoints:`);
         console.log(`  GET  /.well-known/restap.json - Discover capabilities`);
-        console.log(`  POST /talk                     - Talk to ${this.getRuntimeDisplayName()} (triggers processing)`);
+        console.log(`  POST /talk                     - Talk to ${getRuntimeDisplayName(this.harnessType)} (triggers processing)`);
         console.log(`  GET  /news                     - Poll for updates`);
         console.log(`  POST /news                     - Receive replies (no processing)`);
         console.log(`  GET  /files/{filename}         - Serve files`);
