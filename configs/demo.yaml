@@ -10,7 +10,6 @@ team: default
 defaults:
   local: true
   runtime: claude-code-cli
-  model: claude-sonnet-4-6
   skills:
     - identity
     - inter-agent
