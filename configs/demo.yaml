@@ -1,0 +1,24 @@
+# Demo Team
+# Deploy with: /deploy demo
+#
+# A simple team for trying out ID Agents. Uses the default team
+# so no team switching is needed.
+
+version: "1"
+team: default
+
+defaults:
+  local: true
+  runtime: claude-code-cli
+  model: claude-sonnet-4-6
+  skills:
+    - identity
+    - inter-agent
+    - catalog
+
+agents:
+  - name: coder
+    description: "Writes and reviews code"
+
+  - name: researcher
+    description: "Research, analysis, and documentation"
