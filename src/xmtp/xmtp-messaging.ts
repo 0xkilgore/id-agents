@@ -162,11 +162,21 @@ export class XmtpMessaging extends EventEmitter {
     return this.allowedSenders.has(address.toLowerCase());
   }
 
-  /** Get the path to .xmtp/allowlist.yaml */
+  /** Per-agent data directory: ~/.xmtp/{address}/ */
+  private dataDir: string | null = null;
+
+  /** Get the per-agent data directory. Available after signer is resolved. */
+  private getDataDir(address: string): string {
+    const home = process.env.HOME || '/tmp';
+    const dir = path.join(home, '.xmtp', address.toLowerCase());
+    if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+    return dir;
+  }
+
+  /** Get the path to allowlist.yaml */
   private getAllowlistPath(): string | null {
-    const dir = this.config.workingDirectory;
-    if (!dir) return null;
-    return path.join(dir, '.xmtp', 'allowlist.yaml');
+    if (!this.dataDir) return null;
+    return path.join(this.dataDir, 'allowlist.yaml');
   }
 
   /** Load allowlist from .xmtp/allowlist.yaml */
@@ -226,10 +236,9 @@ export class XmtpMessaging extends EventEmitter {
       return `0x${key}` as `0x${string}`;
     }
 
-    // Load or generate from .xmtp/db.key
-    const dir = this.config.workingDirectory;
-    if (dir) {
-      const keyPath = path.join(dir, '.xmtp', 'db.key');
+    // Load or generate from ~/.xmtp/{address}/db.key
+    if (this.dataDir) {
+      const keyPath = path.join(this.dataDir, 'db.key');
       if (existsSync(keyPath)) {
         const key = readFileSync(keyPath, 'utf8').trim().replace(/^0x/, '');
         return `0x${key}` as `0x${string}`;
@@ -237,14 +246,12 @@ export class XmtpMessaging extends EventEmitter {
       // Generate new key
       const { randomBytes } = await import('crypto');
       const key = randomBytes(32).toString('hex');
-      const xmtpDir = path.join(dir, '.xmtp');
-      if (!existsSync(xmtpDir)) mkdirSync(xmtpDir, { recursive: true });
       writeFileSync(keyPath, key, { mode: 0o600 });
-      console.log(`[XMTP] Generated new DB encryption key at ${keyPath}`);
+      console.log(`[XMTP] Generated DB encryption key at ${keyPath}`);
       return `0x${key}` as `0x${string}`;
     }
 
-    // No working directory — generate ephemeral key
+    // No data dir — generate ephemeral key
     const { randomBytes } = await import('crypto');
     return `0x${randomBytes(32).toString('hex')}` as `0x${string}`;
   }
@@ -253,33 +260,43 @@ export class XmtpMessaging extends EventEmitter {
   async start(): Promise<void> {
     if (this.started) return;
 
-    // Load persisted allowlist
-    this.loadAllowlist();
-
     // Set up name resolver for ENS lookups
     this.resolveAddress = createNameResolver(process.env.WEB3_BIO_API_KEY || '');
 
-    // Get or generate DB encryption key
-    const dbEncryptionKey = await this.getDbEncryptionKey();
+    const env = this.config.env || (process.env.XMTP_ENV as any) || 'production';
 
-    // Determine signer: OWS wallet (preferred) or raw key (fallback)
+    // Determine signer and resolve address to set up data directory
     const owsWallet = this.config.owsWallet || process.env.OWS_WALLET;
+    let signerAddress: string;
+
     if (owsWallet) {
-      // Use OWS for signing — private key never leaves the vault
       const { createOwsSigner } = await import('./ows-signer.js');
       const { signer, address } = createOwsSigner(owsWallet);
+      signerAddress = address;
       console.log(`[XMTP] Using OWS wallet "${owsWallet}" (${address})`);
+
+      // Set up data dir at ~/.xmtp/{address}/
+      this.dataDir = this.getDataDir(address);
+      this.loadAllowlist();
+
+      const dbEncryptionKey = await this.getDbEncryptionKey();
+      const dbPath = path.join(this.dataDir, `${env}.db3`);
+
       this.agent = await Agent.create(signer, {
-        ...(this.config.env && { env: this.config.env }),
-        ...(this.config.dbPath && { dbPath: () => this.config.dbPath! }),
+        env,
+        dbPath: () => dbPath,
         dbEncryptionKey,
       });
     } else {
-      // Fallback: raw key from env
+      // Fallback: raw key from env — address resolved after agent creation
       this.agent = await Agent.createFromEnv({
         ...(this.config.env && { env: this.config.env }),
-        ...(this.config.dbPath && { dbPath: () => this.config.dbPath! }),
       });
+      signerAddress = this.agent.address || '';
+      if (signerAddress) {
+        this.dataDir = this.getDataDir(signerAddress);
+        this.loadAllowlist();
+      }
     }
 
     // Handle incoming text messages
