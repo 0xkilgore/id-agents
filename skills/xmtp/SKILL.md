@@ -43,8 +43,10 @@ You do NOT need to do anything special to receive or reply. Just respond to the 
 - All messages are end-to-end encrypted (MLS protocol)
 - Sender identity is cryptographically verified before you see the message
 - Each agent has its own XMTP identity (derived from its OWS wallet)
-- An allowlist controls which senders can reach you
-- Untrusted senders are dropped before content reaches your LLM
+- **Closed by default** — only allowlisted senders can reach you
+- Open mode must be explicitly set in the YAML config (`openMode: true`)
+- Allowlist persisted at `.xmtp/allowlist.yaml` in your working directory
+- Untrusted senders are silently dropped before content reaches your LLM
 
 ## When to Use
 

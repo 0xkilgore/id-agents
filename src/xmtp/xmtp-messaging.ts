@@ -34,6 +34,12 @@ export interface XmtpConfig {
   dbPath?: string;
   /** Working directory for persisting .xmtp/ data (allowlist, DB). */
   workingDirectory?: string;
+  /**
+   * If true, accept messages from any sender (even if allowlist is empty).
+   * Must be explicitly set — defaults to false (closed mode).
+   * In closed mode, only allowlisted senders can reach the agent.
+   */
+  openMode?: boolean;
 }
 
 export interface InboundMessage {
@@ -143,10 +149,12 @@ export class XmtpMessaging extends EventEmitter {
     this.saveAllowlist();
   }
 
-  /** Check if a sender address is allowed (or if allowlist is empty = open mode). */
+  /** Check if a sender address is allowed. Closed by default — only allowlisted senders pass. */
   isSenderAllowed(address: string): boolean {
-    if (this.allowedSenders.size === 0) return true; // open mode
-    return this.allowedSenders.has(address.toLowerCase());
+    if (this.allowedSenders.has(address.toLowerCase())) return true;
+    // Open mode must be explicitly configured
+    if (this.config.openMode && this.allowedSenders.size === 0) return true;
+    return false;
   }
 
   /** Check if a sender is explicitly on the allowlist (not just open mode). */
