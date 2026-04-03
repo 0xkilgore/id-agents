@@ -8,8 +8,7 @@
  */
 
 import { execFileSync } from 'child_process';
-import { createIdentifier } from '@xmtp/agent-sdk';
-import type { Signer } from '@xmtp/node-sdk';
+import type { Signer, Identifier } from '@xmtp/node-sdk';
 
 /**
  * Create an XMTP Signer backed by an OWS wallet.
@@ -27,10 +26,9 @@ export function createOwsSigner(walletName: string): { signer: Signer; address: 
   const signer: Signer = {
     type: 'EOA',
 
-    getIdentifier: () => createIdentifier({
-      key: `0x${'00'.repeat(32)}` as `0x${string}`, // dummy key — not used, OWS signs
-      account: { address: address.toLowerCase() as `0x${string}` } as any,
-      wallet: {} as any,
+    getIdentifier: (): Identifier => ({
+      identifier: address.toLowerCase(),
+      identifierKind: 0 as any, // IdentifierKind.Ethereum
     }),
 
     signMessage: async (message: string): Promise<Uint8Array> => {
