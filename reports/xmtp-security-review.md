@@ -3,13 +3,13 @@
 **Date:** 2026-04-02
 **Branch:** `feature/xmtp-messaging`
 **Reviewers:** crypto-security, infra-security, api-security (specialized security agents)
-**Team agents consulted:** contracts, gateway, web, cli, indexer (could not access branch -- working in separate repos)
+**Team agents consulted:** contracts, gateway, web, cli, indexer (separate repos; gateway provided ENS resolution findings)
 
 ---
 
 ## Executive Summary
 
-The XMTP messaging subsystem was reviewed across three security domains: cryptographic/key management, infrastructure/file I/O, and API/input validation. The review identified **1 critical**, **5 high**, **7 medium**, and **7 low** severity findings, plus 2 informational notes.
+The XMTP messaging subsystem was reviewed across three security domains: cryptographic/key management, infrastructure/file I/O, and API/input validation. The review identified **1 critical**, **5 high**, **9 medium**, and **7 low** severity findings, plus 2 informational notes.
 
 The most urgent issue is a **critical bug**: the OWS signer path does not pass the DB encryption key to the XMTP SDK, leaving message history and MLS keys stored in plaintext SQLite databases on disk.
 
@@ -180,6 +180,26 @@ The `XmtpConfig` interface declares `walletKey?: string` but it is never read. A
 
 **Fix:** Either implement `walletKey` support or remove the field from the interface.
 
+#### M8: `allowSender()` missing id-cli resolution for xid.eth names
+
+**File:** `src/xmtp/xmtp-messaging.ts` lines 114-138
+**Domain:** Gateway (ENS resolution)
+**Source:** gateway agent review
+
+`allowSender()` resolves ENS names only via `this.resolveAddress` (web3.bio), but `sendMessage()` (lines 298-309) tries `resolveViaIdCli()` first for `.xid.eth` names before falling back to web3.bio. This inconsistency means that adding a `.xid.eth` name to the allowlist may fail to resolve (if web3.bio can't resolve CCIP-Read names) while sending to the same name would succeed.
+
+**Fix:** Apply the same resolution order in `allowSender()`: try `resolveViaIdCli()` first for `.xid.eth` names, then fall back to `this.resolveAddress`.
+
+#### M9: id-cli resolution bypasses on-chain signature verification
+
+**File:** `src/xmtp/xmtp-messaging.ts` lines 259-276
+**Domain:** Gateway (ENS resolution)
+**Source:** gateway agent review
+
+`resolveViaIdCli()` trusts the `id-cli info` output (a JSON object with `data.ethAddress`) without verifying that the response was signed or came through the CCIP-Read gateway's verification chain. If `id-cli` itself is compromised or returns stale data, the resolved address could be wrong. By contrast, direct ENS resolution via CCIP-Read verifies the gateway's signature on-chain.
+
+**Fix:** Document this trust assumption. For high-security deployments, consider verifying the id-cli result against a direct CCIP-Read lookup, or adding a `--verify` flag to id-cli.
+
 ---
 
 ### Low
@@ -314,6 +334,8 @@ Unauthenticated /xmtp/send (H1)
 | M5 | MEDIUM | Content logged to world-readable files | claude-agent-server.ts:1676 |
 | M6 | MEDIUM | execFileSync args not validated | ows-signer.ts:38, xmtp-messaging.ts:262 |
 | M7 | MEDIUM | Dead walletKey config field | xmtp-messaging.ts:25 |
+| M8 | MEDIUM | allowSender() missing id-cli resolution for xid.eth | xmtp-messaging.ts:114 |
+| M9 | MEDIUM | id-cli bypasses on-chain signature verification | xmtp-messaging.ts:259 |
 | L1 | LOW | Interval timer leak | claude-agent-server.ts:1685 |
 | L2 | LOW | Error messages leak details | claude-agent-server.ts:1075 |
 | L3 | LOW | No security headers | claude-agent-server.ts (global) |
