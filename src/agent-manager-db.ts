@@ -5017,11 +5017,9 @@ export class AgentManagerDb {
         ),
         // Runtime harness (codex, claude-code-cli, etc.)
         ...(agentRow?.runtime && { ID_HARNESS: resolveRuntime(agentRow.runtime) }),
-        // Pass OPENAI_API_KEY for codex agents
-        ...(agentRow?.runtime === 'codex' && process.env.OPENAI_API_KEY && { OPENAI_API_KEY: process.env.OPENAI_API_KEY }),
         ID_TEAM: teamName,
         ID_AGENT_PORT: String(port),
-        MANAGER_URL: `http://localhost:4100`,
+        MANAGER_URL: `http://127.0.0.1:4100`,
         ...(model && { CLAUDE_MODEL: model }),
         ...(tokenId && { ID_AGENT_TOKEN_ID: tokenId }),
         ...(owsWallet && { OWS_WALLET: owsWallet }),

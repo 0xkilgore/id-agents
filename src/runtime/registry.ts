@@ -9,7 +9,7 @@
 
 import type { HarnessType } from '../harness/types.js';
 import type { RuntimeProfile, RuntimeId, RuntimeValidationIssue } from './types.js';
-import { execFileSync } from 'child_process';
+import { execFileSync, spawnSync } from 'child_process';
 
 const DEFAULT_RUNTIME: RuntimeId = 'claude-agent-sdk';
 
@@ -223,12 +223,13 @@ export function validateRuntimePreflight(
     issues.push(...checkCommandAvailable('codex'));
     if (!process.env.OPENAI_API_KEY) {
       try {
-        const output = execFileSync('codex', ['login', 'status'], {
+        const result = spawnSync('codex', ['login', 'status'], {
           encoding: 'utf8',
           stdio: ['pipe', 'pipe', 'pipe'],
           timeout: 10000,
-        }).trim();
-        if (!/logged in/i.test(output)) {
+        });
+        const combinedOutput = `${result.stdout || ''}\n${result.stderr || ''}`.trim();
+        if (result.status !== 0 && !/logged in/i.test(combinedOutput)) {
           issues.push({
             code: 'codex_auth_missing',
             message: 'runtime "codex" requires OPENAI_API_KEY or an active `codex login` session',

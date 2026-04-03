@@ -141,7 +141,7 @@ export async function startLocalAgent(config: LocalAgentConfig): Promise<{
     port: requestedPort,
     workingDirectory: configWorkDir,
     model = process.env.CLAUDE_MODEL || getDefaultModelForRuntime(runtime),
-    managerUrl = process.env.MANAGER_URL || 'http://localhost:4100',
+    managerUrl = process.env.MANAGER_URL || 'http://127.0.0.1:4100',
     agentId: preRegisteredId
   } = config;
 
@@ -215,9 +215,10 @@ export async function startLocalAgent(config: LocalAgentConfig): Promise<{
     }
   }
 
-  // Only remove API key when using a CLI-auth runtime (to force local credentials)
-  if (usesCliLogin(runtime) && runtime !== 'codex') {
+  // For CLI-auth runtimes, prefer the local CLI session over ambient API keys.
+  if (usesCliLogin(runtime)) {
     delete process.env.ANTHROPIC_API_KEY;
+    delete process.env.OPENAI_API_KEY;
   }
 
   // Set manager URL for AgentRestServer to use
