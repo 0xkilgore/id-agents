@@ -1603,6 +1603,7 @@ export class AgentManagerDb {
           api_key: null,
           token_id: tokenId || null,
           domain: domain || null,
+          runtime: effectiveRuntime,
         });
 
         // Derive agent_account from request address, or fall back to shared deployer key

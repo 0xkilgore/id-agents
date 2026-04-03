@@ -21,8 +21,8 @@ async function main() {
   const harness = process.env.ID_HARNESS || process.env.HARNESS || 'claude-agent-sdk';
   const useMaxPlan = process.env.ID_USE_MAX_PLAN === 'true';
 
-  // claude-code-cli can use Max plan credentials (OAuth) instead of API key
-  const needsAnthropicKey = harness.startsWith('claude') && !(harness === 'claude-code-cli' && useMaxPlan);
+  // claude-code-cli and codex use their own auth (CLI login), not ANTHROPIC_API_KEY
+  const needsAnthropicKey = harness === 'claude-agent-sdk';
 
   if (!process.env.ANTHROPIC_API_KEY && needsAnthropicKey) {
     if (agentRole === 'worker') {
@@ -30,12 +30,8 @@ async function main() {
       console.error('Add it to your .env file');
       process.exit(1);
     } else {
-      console.warn('⚠️  ANTHROPIC_API_KEY not set (manager will start, but workers may fail to run Claude)');
+      console.warn('⚠️  ANTHROPIC_API_KEY not set (manager will start, but claude-agent-sdk workers may fail)');
     }
-  }
-
-  if (harness === 'claude-code-cli' && useMaxPlan) {
-    console.log('🔑 Using Max plan credentials (OAuth) for Claude Code CLI');
   }
 
   if (agentRole === 'worker') {

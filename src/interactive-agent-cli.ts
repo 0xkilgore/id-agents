@@ -4211,6 +4211,7 @@ async function deployFromConfig(filePath: string, args: string[] = []) {
             ID_TEAM: activeTeam,
             ID_AGENT_PORT: String(result.port),
             MANAGER_URL: MANAGER_URL,
+            ...(agent.runtime && { ID_HARNESS: agent.runtime }),
             ID_DB_TEAM_ID: result.teamId,
             ID_DB_AGENT_ID: result.id,
             ID_SHARED_DIR: result.sharedDirectory,
