@@ -359,8 +359,8 @@ Skills use the standard [Claude Code skill format](https://docs.anthropic.com/en
 | `inter-agent` | Messaging, delegation, news feed for multi-agent coordination |
 | `catalog` | REST-AP self-description visible to other agents |
 | `wallet` | OWS multi-chain wallet addresses (skipped if no wallet) |
-| `admin-control` | Remote CLI management — chat with manager, execute commands |
-| `local-agent` | Spawn Claude Code agents locally using existing authentication |
+| `xmtp` | Encrypted messaging via ENS names using the [XMTP](https://xmtp.org/) protocol |
+| `admin-control` | Remote CLI management — chat with manager, execute commands (external skill) |
 
 **Adding a skill:**
 
