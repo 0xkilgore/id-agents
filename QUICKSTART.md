@@ -13,8 +13,18 @@ The user has selected a runtime below. Look for `[x]` to determine which to use.
 ## 1. Install
 
 ```bash
+source ~/.nvm/nvm.sh
+nvm use 22
 npm install
 ```
+
+This repo currently needs a modern Node runtime for local setup. Node 22 is recommended.
+
+Before continuing:
+
+- Run `claude login` for Claude Code runtimes
+- Run `codex login` or export `OPENAI_API_KEY` for Codex runtimes
+- Export a signer for local deploy metadata: `export PRIVATE_KEY=<your-dev-key>` or set `OWS_REGISTRAR_WALLET`
 
 ## 2. Add the Admin Control Skill
 
@@ -30,10 +40,18 @@ Replace `<path-to-this-repo>` with the absolute path to this cloned repo, and `<
 
 ```bash
 cd <path-to-this-repo>
+mkdir -p ./workspace/{teams,manager,agents,logs}
+export AGENT_MANAGER_WORKDIR="$(pwd)/workspace"
+export ID_WORKSPACE_DIR="$(pwd)/workspace"
 npm run id-agents
 ```
 
 This starts the interactive CLI on port 4000 and the manager daemon on port 4100. Wait until you see the prompt before continuing.
+
+Why the workspace exports matter:
+
+- Some environments do not allow writing to `/workspace`
+- Setting both vars ensures team files, agent workdirs, and logs stay inside the repo-local `./workspace/`
 
 ## 4. Deploy a Demo Team
 
@@ -81,10 +99,11 @@ curl -s -X POST http://localhost:4000/remote \
 Poll for the reply:
 
 ```bash
-curl -s -X POST http://localhost:4000/remote \
-  -H "Content-Type: application/json" \
-  -d '{"command":"/news coder"}'
+curl -s http://localhost:4100/agents | jq '.agents[] | select(.name=="coder")'
+curl -s http://localhost:4131/news | jq .
 ```
+
+Note: the interactive CLI supports `/news coder`, but the `/remote` HTTP endpoint does not currently expose `/news`. For remote polling, fetch the agent's `/news` endpoint directly using the port shown in `/agents` or `GET /agents`.
 
 ## 6. Use the CLI Directly
 
