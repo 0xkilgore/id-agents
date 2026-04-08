@@ -1669,8 +1669,9 @@ ${prompt}`
         console.log(`\n`);
 
         // Start XMTP if wallet is available (OWS wallet or raw key)
+        // DB encryption key is auto-generated if not set
         const hasXmtpWallet = process.env.OWS_WALLET || process.env.XMTP_WALLET_KEY;
-        if (hasXmtpWallet && process.env.XMTP_DB_ENCRYPTION_KEY) {
+        if (hasXmtpWallet) {
           this.startXmtp(port).catch(err => {
             console.warn(`[XMTP] Failed to start: ${err.message}`);
           });
