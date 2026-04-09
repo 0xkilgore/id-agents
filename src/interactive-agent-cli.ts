@@ -511,7 +511,32 @@ const remoteCommandHandler: CommandHandler = async (command: string, from?: stri
       return { success: true, result: `Deleted agent "${agentName}"` };
     }
 
-    // /agent <name> start|stop|rebuild - agent lifecycle commands
+    // /agents start|stop|rebuild - all agents lifecycle
+    const agentsActionMatch = trimmed.match(/^\/agents\s+(start|stop|rebuild)$/);
+    if (agentsActionMatch) {
+      const [, action] = agentsActionMatch;
+      const listResp = await managerFetch('/agents');
+      if (!listResp.ok) {
+        return { success: false, error: 'Failed to list agents' };
+      }
+      const listData: any = await listResp.json();
+      const agentList = (listData.agents || []).filter((a: any) => a.type !== 'interactive' && a.port > 0);
+      if (agentList.length === 0) {
+        return { success: true, result: 'No agents to ' + action };
+      }
+      const results: string[] = [];
+      for (const a of agentList) {
+        try {
+          const resp = await managerFetch(`/agents/by-name/${encodeURIComponent(a.name)}/project/${action}`, { method: 'POST' });
+          results.push(`${a.name}: ${resp.ok ? 'ok' : 'failed'}`);
+        } catch {
+          results.push(`${a.name}: error`);
+        }
+      }
+      return { success: true, result: `${action} ${agentList.length} agents:\n${results.join('\n')}` };
+    }
+
+    // /agent <name> start|stop|rebuild - single agent lifecycle
     const agentMatch = trimmed.match(/^\/agent\s+(\S+)\s+(start|stop|rebuild)$/);
     if (agentMatch) {
       const [, agentName, action] = agentMatch;
