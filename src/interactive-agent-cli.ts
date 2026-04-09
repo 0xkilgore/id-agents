@@ -1102,8 +1102,12 @@ async function registerWithManager() {
   } catch (error: any) {
     const isConnErr = error?.cause?.code === 'ECONNREFUSED' || error?.message?.includes('fetch failed');
     if (isConnErr) {
-      console.log(`${colors.yellow}⚠️  Could not connect to manager at ${MANAGER_URL}${colors.reset}`);
-      console.log(`${colors.gray}   Start it with: ${colors.cyan}node dist/start-agent-manager.js${colors.reset}\n`);
+      // Manager may still be starting — retry silently after a delay
+      setTimeout(async () => {
+        try {
+          await registerWithManager();
+        } catch { /* silent retry */ }
+      }, 5000);
     } else {
       console.log(`${colors.yellow}⚠️  Could not register with manager${colors.reset}`);
       console.log(`${colors.gray}   Error: ${error?.message || error}${colors.reset}\n`);
@@ -3118,9 +3122,7 @@ ${colors.bold}  ╚═╝╚═════╝      ╚═╝  ╚═╝ ╚═�
 server.start().then(async () => {
   server.setCommandHandler(remoteCommandHandler);
 
-  await registerWithManager();
-  
-  // Check if manager is running, auto-start if not
+  // Check if manager is running, auto-start if not (before registering)
   let managerRunning = await checkManager();
   if (!managerRunning) {
     console.log(`${colors.yellow}Starting manager on port ${MANAGER_PORT}...${colors.reset}`);
@@ -3145,13 +3147,15 @@ server.start().then(async () => {
     displayPendingQuestions().catch(() => {});
   }, 2000);
 
+  // Register with manager now that it's running
+  await registerWithManager();
+
   // Start WebSocket connection to manager (works for both local and remote)
   startManagerConnection();
-  
+
+  console.log(`${colors.gray}Type /help for commands, /deploy <config> to create agents${colors.reset}\n`);
   updatePrompt();
   rl.prompt();
-  // Pre-fill /help so user sees it ready to press enter
-  rl.write('/help');
 });
 
 rl.on('line', handleLine);

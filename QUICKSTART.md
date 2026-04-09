@@ -105,23 +105,48 @@ curl -s http://localhost:4131/news | jq .
 
 Note: the interactive CLI supports `/news coder`, but the `/remote` HTTP endpoint does not currently expose `/news`. For remote polling, fetch the agent's `/news` endpoint directly using the port shown in `/agents` or `GET /agents`.
 
-## 6. Use the CLI Directly
+## 6. Tell the User How to Launch the CLI
 
-For a richer experience, use the interactive CLI directly in your terminal:
+After setup is complete, tell the user:
 
-```bash
-cd <path-to-this-repo>
-npm run id-agents
-```
+> To launch the interactive CLI yourself, open a terminal and run:
+>
+> ```bash
+> cd <path-to-this-repo>
+> npm run id-agents
+> ```
+>
+> Type `/help` to see all available commands.
 
-Then type commands like:
+## 7. Suggest Next Steps
 
-```
-/agents
-/ask coder What can you help me with?
-/ask researcher Find best practices for TypeScript project structure
-/news coder
-```
+After the demo team is running, suggest the user create their own team. A good starting point:
+
+> You can create a custom team by making a YAML config in `configs/`. Specify agent names and their working directories (the project folders they should work in):
+>
+> ```yaml
+> version: "1"
+> team: default
+>
+> defaults:
+>   local: true
+>   runtime: claude-code-cli
+>   skills:
+>     - identity
+>     - inter-agent
+>     - catalog
+>
+> agents:
+>   - name: frontend
+>     description: "Frontend developer"
+>     workingDirectory: /path/to/frontend-project
+>
+>   - name: backend
+>     description: "Backend developer"
+>     workingDirectory: /path/to/backend-project
+> ```
+>
+> Then deploy with `/deploy my-config` in the CLI.
 
 ## Next Steps
 
