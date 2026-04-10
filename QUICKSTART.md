@@ -25,11 +25,46 @@ Follow these steps to set up and deploy your first agent team.
 
 ## Runtime Selection
 
-The user has selected a runtime below. Look for `[x]` to determine which to use. If no selection is marked, default to Claude Code CLI.
+Detect which agent CLIs are ready to use on this machine, then pick the deploy command automatically. **Prefer a mixed team** (`/deploy demo-mixed`) whenever both Claude Code and Codex are installed and authenticated — it's the most compelling first demo. Fall back to a single-runtime team only if one is unavailable.
 
-- `[x] Claude Code CLI` → use `runtime: claude-code-cli` and deploy with `/deploy demo`
-- `[x] Codex CLI` → use `runtime: codex` and deploy with `/deploy demo-codex`
-- `[x] Claude Code and Codex CLI` → mixed runtimes, deploy with `/deploy demo-mixed`
+For each runtime, check **both** (1) the binary is on `PATH` *and* (2) credentials exist. Binary-on-`PATH` alone is not sufficient — stale installs and un-authenticated states are common and cause deploys to fail halfway through.
+
+### Claude Code is ready if
+
+```bash
+command -v claude >/dev/null 2>&1
+```
+
+...succeeds **and** any one of:
+
+- `$ANTHROPIC_API_KEY` is set in the environment
+- macOS: the Keychain entry `"Claude Code-credentials"` exists
+  ```bash
+  security find-generic-password -s "Claude Code-credentials" >/dev/null 2>&1
+  ```
+- Linux: `~/.claude/.credentials.json` exists
+
+### Codex is ready if
+
+```bash
+command -v codex >/dev/null 2>&1
+```
+
+...succeeds **and** any one of:
+
+- `$OPENAI_API_KEY` is set in the environment
+- `~/.codex/auth.json` exists
+
+### Deploy command
+
+| Claude ready | Codex ready | Command | Team |
+|---|---|---|---|
+| ✓ | ✓ | `/deploy demo-mixed` | Mixed: `coder` (claude) + `researcher` (codex) |
+| ✓ | ✗ | `/deploy demo` | Claude Code only |
+| ✗ | ✓ | `/deploy demo-codex` | Codex only |
+| ✗ | ✗ | — | Stop. Ask the user to install and log in to at least one CLI (see Prerequisites above) |
+
+If only the binary is present but auth is missing, tell the user the specific command to run (`claude login` or `codex login`) before retrying.
 
 ## 1. Install
 
