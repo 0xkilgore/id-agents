@@ -2,6 +2,27 @@
 
 Follow these steps to set up and deploy your first agent team.
 
+## Prerequisites
+
+- **macOS or Linux**
+- **Node.js 22+** — if you don't have it, install via nvm:
+  ```bash
+  curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.1/install.sh | bash
+  source ~/.nvm/nvm.sh
+  nvm install 22
+  ```
+  Homebrew (`brew install node`), fnm, or volta also work — just get Node 22+.
+- **Claude Code CLI** — install and log in:
+  ```bash
+  npm install -g @anthropic-ai/claude-code
+  claude login
+  ```
+- **Codex CLI** (optional) — only if you want Codex agents:
+  ```bash
+  npm install -g @openai/codex
+  codex login
+  ```
+
 ## Runtime Selection
 
 The user has selected a runtime below. Look for `[x]` to determine which to use. If no selection is marked, default to Claude Code CLI.
@@ -13,45 +34,35 @@ The user has selected a runtime below. Look for `[x]` to determine which to use.
 ## 1. Install
 
 ```bash
-source ~/.nvm/nvm.sh
-nvm use 22
 npm install
 ```
 
-This repo currently needs a modern Node runtime for local setup. Node 22 is recommended.
-
-Before continuing:
-
-- Run `claude login` for Claude Code runtimes
-- Run `codex login` or export `OPENAI_API_KEY` for Codex runtimes
-- Export a signer for local deploy metadata: `export PRIVATE_KEY=<your-dev-key>` or set `OWS_REGISTRAR_WALLET`
-
 ## 2. Add the Admin Control Skill
 
-Copy the admin-control skill to your Claude Code project so you can manage agents programmatically:
+Copy the admin-control skill into the project where you are running Claude Code (this is your project directory, not the id-agents repo):
 
 ```bash
-cp -r <path-to-this-repo>/skills/admin-control <your-project>/.claude/skills/
+cp -r <path-to-id-agents>/skills/admin-control <your-claude-code-project>/.claude/skills/
 ```
 
-Replace `<path-to-this-repo>` with the absolute path to this cloned repo, and `<your-project>` with the path to the project where you are running Claude Code.
+For example, if you cloned id-agents to `~/projects/id-agents` and you're running Claude Code in `~/projects/my-app`:
+
+```bash
+cp -r ~/projects/id-agents/skills/admin-control ~/projects/my-app/.claude/skills/
+```
 
 ## 3. Start the Manager
 
+The interactive CLI needs a real terminal (TTY). Start it in a terminal window:
+
 ```bash
-cd <path-to-this-repo>
-mkdir -p ./workspace/{teams,manager,agents,logs}
-export AGENT_MANAGER_WORKDIR="$(pwd)/workspace"
-export ID_WORKSPACE_DIR="$(pwd)/workspace"
+cd <path-to-id-agents>
 npm run id-agents
 ```
 
 This starts the interactive CLI on port 4000 and the manager daemon on port 4100. Wait until you see the prompt before continuing.
 
-Why the workspace exports matter:
-
-- Some environments do not allow writing to `/workspace`
-- Setting both vars ensures team files, agent workdirs, and logs stay inside the repo-local `./workspace/`
+> **For programmatic use without a terminal:** Start the manager daemon directly with `node dist/start-agent-manager.js` and use the HTTP API at `http://localhost:4100`. The `/remote` endpoint on port 4000 is only available when the interactive CLI is running.
 
 ## 4. Deploy a Demo Team
 
@@ -60,7 +71,6 @@ Use the admin-control skill's `remote-command.sh` to deploy:
 - **Claude Code agents:** `/deploy demo`
 - **Codex agents:** `/deploy demo-codex`
 - **Mixed (both):** `/deploy demo-mixed`
-- **Preflight only:** add `--dry-run` to any deploy command
 
 Example using the remote endpoint:
 
@@ -70,13 +80,7 @@ curl -s -X POST http://localhost:4000/remote \
   -d '{"command":"/deploy demo"}'
 ```
 
-Dry run example:
-
-```bash
-curl -s -X POST http://localhost:4000/remote \
-  -H "Content-Type: application/json" \
-  -d '{"command":"/deploy demo-mixed --dry-run"}'
-```
+> **Troubleshooting:** If agents show `status: error` after deploy, check the manager's terminal output for the actual error message. Agent log files are at `workspace/logs/local-<name>-*.log`.
 
 ## 5. Talk to Your Agents
 
@@ -99,11 +103,10 @@ curl -s -X POST http://localhost:4000/remote \
 Poll for the reply:
 
 ```bash
-curl -s http://localhost:4100/agents | jq '.agents[] | select(.name=="coder")'
-curl -s http://localhost:4131/news | jq .
+curl -s -X POST http://localhost:4000/remote \
+  -H "Content-Type: application/json" \
+  -d '{"command":"/news coder"}'
 ```
-
-Note: the interactive CLI supports `/news coder`, but the `/remote` HTTP endpoint does not currently expose `/news`. For remote polling, fetch the agent's `/news` endpoint directly using the port shown in `/agents` or `GET /agents`.
 
 ## 6. Tell the User How to Launch the CLI
 
@@ -112,7 +115,7 @@ After setup is complete, tell the user:
 > To launch the interactive CLI yourself, open a terminal and run:
 >
 > ```bash
-> cd <path-to-this-repo>
+> cd <path-to-id-agents>
 > npm run id-agents
 > ```
 >

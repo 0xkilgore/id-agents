@@ -571,7 +571,7 @@ export class AgentManagerDb {
       }
     }
     const pk = process.env.AGENT_PRIVATE_KEY || process.env.PRIVATE_KEY;
-    if (!pk) throw new Error('Missing signer. Set OWS_REGISTRAR_WALLET or PRIVATE_KEY.');
+    if (!pk) return '0x0000000000000000000000000000000000000000'; // No signer — local-only mode
     const account = privateKeyToAccount(pk as Hex);
     return account.address;
   }
