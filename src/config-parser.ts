@@ -116,6 +116,7 @@ export interface DeployConfig {
     skills?: string[];                  // Default skills for all agents
     allowedTools?: string[];
     resources?: ResourceConfig;
+    register?: boolean;                 // Auto-register all agents onchain (default: undefined, use onchain.register)
     local?: boolean;                    // Run all agents locally by default
     talkTimeout?: number;               // Default /talk-to timeout in ms
     heartbeatFile?: string;             // Default heartbeat config file for all agents
@@ -628,6 +629,11 @@ export function mergeDefaults(agent: AgentSpec, defaults: DeployConfig['defaults
   // heartbeatFile: agent overrides defaults
   if (merged.heartbeatFile === undefined && defaults.heartbeatFile !== undefined) {
     merged.heartbeatFile = defaults.heartbeatFile;
+  }
+
+  // register: agent overrides defaults
+  if (merged.register === undefined && defaults.register !== undefined) {
+    merged.register = defaults.register;
   }
 
   // claudeMd: concatenate defaults + agent (both are appended to base CLAUDE.md)
