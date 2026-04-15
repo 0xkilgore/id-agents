@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.1.47-beta
+
+### Features
+
+- **`task-discipline` skill**: New skill that enforces the task lifecycle (create/claim/done) for any multi-step work or work producing artifacts. Agents with this skill automatically use the `/tasks` system and include task names in replies.
+- **idchain defaults**: Added `task-discipline` to the default skills list in `configs/idchain.yaml`, so all agents in the idchain team inherit it.
+
+### Documentation
+
+- Updated `docs/guides/tasks.md` with a "Making it required" section explaining how to enable/disable the skill per agent via config.
+
 ## 0.1.46-beta
 
 ### Safety

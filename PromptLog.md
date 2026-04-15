@@ -8,6 +8,14 @@ Entries are synthesized prompts, not verbatim chat messages. They can describe c
 
 ---
 
+## 2026-04-15: task-discipline skill and idchain defaults, 0.1.47-beta
+
+**Status:** done
+
+New `task-discipline` skill (`skills/task-discipline/SKILL.md`) that makes the task lifecycle mandatory for multi-step work. Agents with this skill create a task before starting, claim it, write artifacts to `./output/`, mark done, and include the task name in the reply. Added to `configs/idchain.yaml` defaults so all idchain agents inherit it. Docs updated with a "Making it required" section explaining opt-in/opt-out via config. Agents that need to skip it can override their skills list without `task-discipline`.
+
+---
+
 ## 2026-04-15: Name validation and empty-team requirement for destructive commands, 0.1.46-beta
 
 **Status:** done
