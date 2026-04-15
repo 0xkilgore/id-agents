@@ -670,6 +670,9 @@ Triggered messages (from schedules and heartbeats) include a `noAutoReply` flag 
 - [docs/guides/interactive-agent.md](./docs/guides/interactive-agent.md) - Interactive CLI guide
 - [docs/reference/configuration.md](./docs/reference/configuration.md) - Configuration reference
 - [docs/reference/database.md](./docs/reference/database.md) - Database schema
+- [docs/guides/tasks.md](./docs/guides/tasks.md) - Task tracking with `/task`
+- [docs/guides/news-feed.md](./docs/guides/news-feed.md) - News feed and message channels
+- [docs/guides/agent-outputs.md](./docs/guides/agent-outputs.md) - Agent output convention and `/artifact`
 
 ## Development
 
