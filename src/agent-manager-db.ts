@@ -552,7 +552,7 @@ export class AgentManagerDb {
    * Get the shared deployer address.
    * Uses OWS wallet if OWS_REGISTRAR_WALLET is set, otherwise derives from PRIVATE_KEY.
    */
-  private getDeployerAddress(): string {
+  private getDeployerAddress(): string | null {
     const owsWallet = process.env.OWS_REGISTRAR_WALLET;
     if (owsWallet) {
       try {
@@ -566,13 +566,13 @@ export class AgentManagerDb {
             if (match) return match[1];
           }
         }
-        throw new Error(`OWS wallet "${owsWallet}" not found or has no EVM address`);
-      } catch (err: any) {
-        throw new Error(`Failed to get deployer address from OWS: ${err.message}`);
+        return null;
+      } catch {
+        return null;
       }
     }
     const pk = process.env.AGENT_PRIVATE_KEY || process.env.PRIVATE_KEY;
-    if (!pk) return '0x0000000000000000000000000000000000000000'; // No signer — local-only mode
+    if (!pk) return null;
     const account = privateKeyToAccount(pk as Hex);
     return account.address;
   }
@@ -1694,7 +1694,8 @@ export class AgentManagerDb {
 
         // Derive agent_account from request address, or fall back to shared deployer key
         const deployerAddress = this.getDeployerAddress();
-        const updatedMeta = { ...metadata, agent_account: address || deployerAddress };
+        const agentAccount = address || deployerAddress;
+        const updatedMeta = { ...metadata, ...(agentAccount && { agent_account: agentAccount }) };
         await this.db.agents.updateMetadata(id, updatedMeta);
 
         // All agents run locally
@@ -1821,8 +1822,10 @@ export class AgentManagerDb {
       let nextMeta = meta;
       if (!nextMeta.agent_account) {
         const deployerAddress = this.getDeployerAddress();
-        nextMeta = { ...nextMeta, agent_account: deployerAddress };
-        await this.db.agents.updateMetadata(id, nextMeta);
+        if (deployerAddress) {
+          nextMeta = { ...nextMeta, agent_account: deployerAddress };
+          await this.db.agents.updateMetadata(id, nextMeta);
+        }
       }
 
       res.status(201).json({
@@ -2354,15 +2357,18 @@ export class AgentManagerDb {
             });
 
             const deployerAddress = this.getDeployerAddress();
-            const updatedMeta = { ...metadata, agent_account: deployerAddress };
-            await this.db.agents.updateMetadata(claudeId, updatedMeta);
+            let finalMeta = metadata;
+            if (deployerAddress) {
+              finalMeta = { ...metadata, agent_account: deployerAddress };
+              await this.db.agents.updateMetadata(claudeId, finalMeta);
+            }
 
             const server = new AgentRestServer({
               model: defaultModel,
               workingDirectory,
               sharedDirectory,
               agentName: handle,
-              agentIdentity: { name: handle, network: teamName, tokenId, metadata: updatedMeta },
+              agentIdentity: { name: handle, network: teamName, tokenId, metadata: finalMeta },
               db: { db: this.db, teamId: teamId, agentId: claudeId }
             });
             await server.start(port);
