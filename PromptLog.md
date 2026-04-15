@@ -8,9 +8,9 @@ Entries are synthesized prompts, not verbatim chat messages. They can describe c
 
 ---
 
-## 2026-04-15: Name validation and empty-team requirement for destructive commands
+## 2026-04-15: Name validation and empty-team requirement for destructive commands, 0.1.46-beta
 
-**Status:** in progress
+**Status:** done
 
 Add two safety speed bumps to the delete chain so nobody wipes a team with a single command. First, `/team delete <name>` refuses when the team still has agents, pointing the operator at `/delete --team <name>` as a prerequisite. Three explicit actions required to fully wipe a team including its record. Second, validate team and agent names at creation time against reserved command verbs, shell wildcards, flag-like prefixes, whitespace and control characters, and length over 64. Existing teams and agents are grandfathered, validation is creation-time only.
 
