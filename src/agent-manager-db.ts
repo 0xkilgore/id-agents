@@ -3715,6 +3715,11 @@ export class AgentManagerDb {
             // Remove any existing agent with this name to avoid duplicates on redeploy
             const existing = await this.db.agents.getByName(effectiveTeamId, agentName);
             if (existing) {
+              // Kill the old process before deleting the DB row to prevent orphans
+              if (existing.port) {
+                await this.killAgentProcess(existing.port);
+                await new Promise(r => setTimeout(r, 500));
+              }
               await this.db.agents.deleteAgent(existing.id);
             }
 
