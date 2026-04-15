@@ -61,8 +61,12 @@ const HELP_ITEMS: Array<{ cmd: string; desc: string; indent?: boolean }> = [
   { cmd: '/ask * <msg>', desc: 'Broadcast to all agents' },
   { cmd: '/clear [agent]', desc: 'Clear session (start fresh)' },
   { cmd: '/delete <agent>', desc: 'Delete agent by name or id' },
+  { cmd: '/delete *', desc: 'Delete all agents in current team' },
+  { cmd: '/delete --team <name>', desc: 'Delete all agents in a specific team' },
   { cmd: '/deploy <config> [params]', desc: 'Deploy agents from config' },
   { cmd: '/help', desc: 'Show this help' },
+  { cmd: '/output <agent>', desc: 'List files in agent output directory' },
+  { cmd: '/artifact <agent> <path>', desc: 'Read file from agent output directory' },
   { cmd: '/news [-l] <agent>', desc: 'Check recent messages (-l for full content)' },
   { cmd: '/register <agent>', desc: 'Register agent onchain' },
   { cmd: '/heartbeat', desc: 'List heartbeats' },
@@ -2436,11 +2440,81 @@ async function handleLine(line: string) {
     }
     const target = input.substring(8).trim();
     if (!target) {
-      console.log(`\n${colors.red}❌ Usage: /delete <agent-name|agent-id>${colors.reset}\n`);
+      console.log(`\n${colors.red}❌ Usage: /delete <agent-name|agent-id> | /delete * | /delete --team <name>${colors.reset}\n`);
       rl.prompt();
       return;
     }
 
+    // Bulk delete: /delete * or /delete --team <name>
+    if (target === '*' || target.startsWith('--team')) {
+      const isBulk = target === '*';
+      const teamTarget = isBulk ? undefined : target.replace('--team', '').trim();
+      if (!isBulk && !teamTarget) {
+        console.log(`\n${colors.red}❌ Usage: /delete --team <team-name>${colors.reset}\n`);
+        rl.prompt();
+        return;
+      }
+
+      // Preview: ask the manager how many agents exist
+      try {
+        const previewResp = await managerFetch('/agents?all=true');
+        if (previewResp.ok) {
+          const previewData: any = await previewResp.json();
+          const count = previewData.agents?.length || 0;
+          const label = isBulk ? 'current team' : `team "${teamTarget}"`;
+          if (count === 0) {
+            console.log(`\n${colors.yellow}No agents to delete in ${label}${colors.reset}\n`);
+            rl.prompt();
+            return;
+          }
+          const names = (previewData.agents || []).map((a: any) => a.name).join(', ');
+          const confirmed = await confirmAction(
+            rl,
+            `⚠️  This will delete all ${count} agents in ${label}: ${names}\n   Working directories will NOT be deleted.`,
+            'yes',
+            { cancelMessage: 'Delete cancelled.' }
+          );
+          if (!confirmed) {
+            rl.prompt();
+            return;
+          }
+        }
+      } catch {
+        // If preview fails, still proceed with confirmation
+        const confirmed = await confirmAction(
+          rl,
+          `⚠️  This will delete all agents in ${isBulk ? 'the current team' : `team "${teamTarget}"`}.`,
+          'yes',
+          { cancelMessage: 'Delete cancelled.' }
+        );
+        if (!confirmed) {
+          rl.prompt();
+          return;
+        }
+      }
+
+      // Execute bulk delete via remote command
+      const cmd = isBulk ? '/delete *' : `/delete --team ${teamTarget}`;
+      try {
+        const resp = await managerFetch('/remote', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-API-Key': process.env.ID_REMOTE_API_KEY || '' },
+          body: JSON.stringify({ command: cmd })
+        });
+        const data: any = await resp.json();
+        if (data.ok) {
+          console.log(`\n${colors.green}✅ ${data.result?.message || 'Deleted'}${colors.reset}\n`);
+        } else {
+          console.log(`\n${colors.red}❌ ${data.error || 'Failed'}${colors.reset}\n`);
+        }
+      } catch (error: any) {
+        console.log(`\n${colors.red}❌ Error: ${error.message}${colors.reset}\n`);
+      }
+      rl.prompt();
+      return;
+    }
+
+    // Single agent delete
     console.log(`\n${colors.yellow}⚠️  WARNING:${colors.reset} This will permanently delete agent ${colors.bold}${target}${colors.reset}`);
     console.log(`   - Agent process will be stopped`);
     console.log(`   - Agent record will be removed from database`);
@@ -2526,6 +2600,86 @@ async function handleLine(line: string) {
       } else {
         console.log(`\n${colors.red}❌ Error: ${err.message}${colors.reset}\n`);
       }
+    }
+    rl.prompt();
+    return;
+  }
+
+  // /output <agent> — list files in agent's output directory
+  if (input.startsWith('/output ')) {
+    if (!(await checkManager())) {
+      showManagerNotRunningError();
+      rl.prompt();
+      return;
+    }
+    const agentName = input.substring(8).trim();
+    if (!agentName) {
+      console.log(`\n${colors.red}❌ Usage: /output <agent-name>${colors.reset}\n`);
+      rl.prompt();
+      return;
+    }
+    try {
+      const resp = await managerFetch('/remote', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-API-Key': process.env.ID_REMOTE_API_KEY || '' },
+        body: JSON.stringify({ command: `/output ${agentName}` })
+      });
+      const data = await resp.json() as any;
+      if (!data.ok) {
+        console.log(`\n${colors.red}❌ ${data.error || 'Failed'}${colors.reset}\n`);
+      } else {
+        const files = data.result?.files || [];
+        if (files.length === 0) {
+          console.log(`\n${colors.yellow}No output files for ${agentName}${colors.reset}\n`);
+        } else {
+          console.log(`\n${colors.bold}📁 Output files for ${agentName}:${colors.reset}`);
+          for (const f of files) {
+            const size = f.size < 1024 ? `${f.size}B` : `${(f.size / 1024).toFixed(1)}KB`;
+            const date = new Date(f.mtime).toLocaleString();
+            console.log(`  ${colors.cyan}${f.name}${colors.reset}  ${colors.gray}${size}  ${date}${colors.reset}`);
+          }
+          console.log('');
+        }
+      }
+    } catch (error: any) {
+      console.log(`\n${colors.red}❌ Error: ${error.message}${colors.reset}\n`);
+    }
+    rl.prompt();
+    return;
+  }
+
+  // /artifact <agent> <path> — read a file from agent's output directory
+  if (input.startsWith('/artifact ')) {
+    if (!(await checkManager())) {
+      showManagerNotRunningError();
+      rl.prompt();
+      return;
+    }
+    const parts = input.substring(10).trim().split(/\s+/);
+    const agentName = parts[0];
+    const filePath = parts.slice(1).join(' ');
+    if (!agentName || !filePath) {
+      console.log(`\n${colors.red}❌ Usage: /artifact <agent-name> <path>${colors.reset}\n`);
+      rl.prompt();
+      return;
+    }
+    try {
+      const resp = await managerFetch('/remote', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-API-Key': process.env.ID_REMOTE_API_KEY || '' },
+        body: JSON.stringify({ command: `/artifact ${agentName} ${filePath}` })
+      });
+      const data = await resp.json() as any;
+      if (!data.ok) {
+        console.log(`\n${colors.red}❌ ${data.error || 'Failed'}${colors.reset}\n`);
+      } else {
+        const size = data.result?.size < 1024 ? `${data.result.size}B` : `${(data.result.size / 1024).toFixed(1)}KB`;
+        console.log(`\n${colors.bold}📄 ${data.result?.path}${colors.reset} ${colors.gray}(${size})${colors.reset}\n`);
+        console.log(data.result?.content || '');
+        console.log('');
+      }
+    } catch (error: any) {
+      console.log(`\n${colors.red}❌ Error: ${error.message}${colors.reset}\n`);
     }
     rl.prompt();
     return;

@@ -216,6 +216,22 @@ export async function remoteModel(agentName: string, model: string) {
   return remote(`/model ${agentName} ${model}`);
 }
 
+export async function remoteDeleteAll() {
+  return remote('/delete *');
+}
+
+export async function remoteDeleteTeam(teamName: string) {
+  return remote(`/delete --team ${teamName}`);
+}
+
+export async function remoteOutput(agentName: string) {
+  return remote(`/output ${agentName}`);
+}
+
+export async function remoteArtifact(agentName: string, filePath: string) {
+  return remote(`/artifact ${agentName} ${filePath}`);
+}
+
 // ==================== Messaging ====================
 
 export interface SendMessageResult {

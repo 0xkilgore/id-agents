@@ -1622,14 +1622,16 @@ export class AgentManagerDb {
         // Create workspace directory first (needed for plugin copy)
         mkdirSync(workingDirectory, { recursive: true });
 
-        // Write CLAUDE.md if specified
-        if (claudeMd && typeof claudeMd === 'string') {
+        // Write CLAUDE.md with output convention preamble
+        const outputPreamble = '\n\n## Output Convention\n\nWrite any generated files (reports, analysis, code artifacts) to `./output/` in your working directory. Other agents can read these artifacts via `/artifact`.\n';
+        const finalClaudeMd = claudeMd ? claudeMd + outputPreamble : outputPreamble;
+        {
           const claudeDir = path.join(workingDirectory, '.claude');
           if (!existsSync(claudeDir)) {
             mkdirSync(claudeDir, { recursive: true });
           }
           const claudeMdPath = path.join(claudeDir, 'CLAUDE.md');
-          writeFileSync(claudeMdPath, claudeMd);
+          writeFileSync(claudeMdPath, finalClaudeMd);
         }
 
         // Write HEARTBEAT.yaml if specified
@@ -3269,10 +3271,64 @@ export class AgentManagerDb {
       case 'delete': {
         const agentName = args[0];
         if (!agentName) {
-          return { ok: false, error: 'Usage: /delete <agent-name|agent-id>' };
+          return { ok: false, error: 'Usage: /delete <agent-name|agent-id> | /delete * | /delete --team <name>' };
         }
 
-        // Try to resolve by various identifiers
+        // Bulk delete: /delete * (current team) or /delete --team <name>
+        if (agentName === '*' || agentName === '--team') {
+          let bulkTeamId = teamId;
+          let bulkTeamName = 'current';
+          if (agentName === '--team') {
+            const targetTeam = args[1];
+            if (!targetTeam) {
+              return { ok: false, error: 'Usage: /delete --team <team-name>' };
+            }
+            if (!/^[a-zA-Z0-9_.-]+$/.test(targetTeam)) {
+              return { ok: false, error: `Invalid team name: "${targetTeam}"` };
+            }
+            bulkTeamId = await this.db.teams.getOrCreateTeamId(targetTeam);
+            bulkTeamName = targetTeam;
+          }
+
+          const agents = await this.dbListAgents(bulkTeamId, true);
+          if (agents.length === 0) {
+            return { ok: true, result: { deleted: [], count: 0, team: bulkTeamName, message: 'No agents to delete' } };
+          }
+
+          const deletedNames: string[] = [];
+          for (const agent of agents) {
+            const serverKey = this.key(bulkTeamId, agent.id);
+            const server = this.runningServers.get(serverKey);
+            if (server) {
+              await server.stop();
+              this.runningServers.delete(serverKey);
+            }
+            if (agent.port) {
+              await this.killAgentProcess(agent.port);
+            }
+            if (this.schedulerService) {
+              await this.schedulerService.removeAgentSchedules(agent.id);
+            }
+            await this.cancelPendingQueriesForAgent(bulkTeamId, agent.id);
+            await this.db.adapter.query(
+              `UPDATE agents SET deleted_at = $3, status = 'stopped' WHERE team_id = $1 AND id = $2`,
+              [bulkTeamId, agent.id, Date.now()]
+            );
+            deletedNames.push(agent.name || agent.id);
+          }
+
+          return {
+            ok: true,
+            result: {
+              deleted: deletedNames,
+              count: deletedNames.length,
+              team: bulkTeamName,
+              message: `Deleted ${deletedNames.length} agents: ${deletedNames.join(', ')}`
+            }
+          };
+        }
+
+        // Single agent delete
         const matches = await this.dbResolveAgents(teamId, agentName);
 
         if (matches.length === 0) {
@@ -3300,6 +3356,10 @@ export class AgentManagerDb {
           this.runningServers.delete(serverKey);
         }
 
+        if (a.port) {
+          await this.killAgentProcess(a.port);
+        }
+
         // Remove any schedules for this agent
         if (this.schedulerService) {
           await this.schedulerService.removeAgentSchedules(a.id);
@@ -3309,13 +3369,70 @@ export class AgentManagerDb {
         await this.cancelPendingQueriesForAgent(teamId, a.id);
 
         // Soft-delete by setting deleted_at and status
-        // TODO: move to repository — soft-delete by id
         await this.db.adapter.query(
           `UPDATE agents SET deleted_at = $3, status = 'stopped' WHERE team_id = $1 AND id = $2`,
           [teamId, a.id, Date.now()]
         );
 
         return { ok: true, result: { deleted: agentName } };
+      }
+
+      case 'output': {
+        const agentName = args[0];
+        if (!agentName) {
+          return { ok: false, error: 'Usage: /output <agent-name>' };
+        }
+        const matches = await this.dbResolveAgents(teamId, agentName);
+        if (matches.length === 0) {
+          return { ok: false, error: `Agent "${agentName}" not found` };
+        }
+        const agent = matches[0];
+        const outputDir = path.join(agent.working_directory || '', 'output');
+        if (!existsSync(outputDir)) {
+          return { ok: true, result: { agent: agent.name, files: [] } };
+        }
+        try {
+          const entries = readdirSync(outputDir, { withFileTypes: true });
+          const files = entries
+            .filter(e => e.isFile())
+            .map(e => {
+              const st = statSync(path.join(outputDir, e.name));
+              return { name: e.name, size: st.size, mtime: st.mtime.toISOString() };
+            });
+          return { ok: true, result: { agent: agent.name, files } };
+        } catch {
+          return { ok: true, result: { agent: agent.name, files: [] } };
+        }
+      }
+
+      case 'artifact': {
+        const agentName = args[0];
+        const filePath = args.slice(1).join(' ');
+        if (!agentName || !filePath) {
+          return { ok: false, error: 'Usage: /artifact <agent-name> <path>' };
+        }
+        if (filePath.includes('..') || filePath.startsWith('/')) {
+          return { ok: false, error: 'Invalid path: directory traversal not allowed' };
+        }
+        const matches = await this.dbResolveAgents(teamId, agentName);
+        if (matches.length === 0) {
+          return { ok: false, error: `Agent "${agentName}" not found` };
+        }
+        const agent = matches[0];
+        const fullPath = path.join(agent.working_directory || '', 'output', filePath);
+        if (!existsSync(fullPath)) {
+          return { ok: false, error: `File not found: ${filePath}` };
+        }
+        try {
+          const st = statSync(fullPath);
+          if (st.size > 1_048_576) {
+            return { ok: false, error: `File too large (${(st.size / 1024 / 1024).toFixed(1)}MB). Max: 1MB` };
+          }
+          const content = readFileSync(fullPath, 'utf-8');
+          return { ok: true, result: { agent: agent.name, path: filePath, content, size: st.size } };
+        } catch (err: any) {
+          return { ok: false, error: `Failed to read file: ${err.message}` };
+        }
       }
 
       case 'ask':
@@ -3603,11 +3720,13 @@ export class AgentManagerDb {
           const workingDirectory = row.working_directory || `${this.baseWorkDir}/agents/${row.id}`;
           if (!existsSync(workingDirectory)) mkdirSync(workingDirectory, { recursive: true });
 
-          if (spec.claudeMd) {
+          {
+            const syncOutputPreamble = '\n\n## Output Convention\n\nWrite any generated files (reports, analysis, code artifacts) to `./output/` in your working directory. Other agents can read these artifacts via `/artifact`.\n';
+            const syncClaudeMd = spec.claudeMd ? spec.claudeMd + syncOutputPreamble : syncOutputPreamble;
             const claudeDir = path.join(workingDirectory, '.claude');
             if (!existsSync(claudeDir)) mkdirSync(claudeDir, { recursive: true });
             const claudeMdPath = path.join(claudeDir, 'CLAUDE.md');
-            writeFileSync(claudeMdPath, spec.claudeMd);
+            writeFileSync(claudeMdPath, syncClaudeMd);
           }
 
           const effectiveRuntime = resolveRuntime(spec.runtime) as HarnessType;
@@ -3997,19 +4116,20 @@ export class AgentManagerDb {
               mkdirSync(workingDirectory, { recursive: true });
             }
 
-            // Write CLAUDE.md if specified in config (prepend to any existing content)
-            if (agentConfig.claudeMd) {
+            // Write CLAUDE.md with output convention preamble
+            {
+              const deployOutputPreamble = '\n\n## Output Convention\n\nWrite any generated files (reports, analysis, code artifacts) to `./output/` in your working directory. Other agents can read these artifacts via `/artifact`.\n';
               const claudeDir = path.join(workingDirectory, '.claude');
               if (!existsSync(claudeDir)) {
                 mkdirSync(claudeDir, { recursive: true });
               }
               const claudeMdPath = path.join(claudeDir, 'CLAUDE.md');
-              // Prepend config claudeMd to existing content (config takes priority)
               const existingContent = existsSync(claudeMdPath) ? readFileSync(claudeMdPath, 'utf-8') : '';
+              const configContent = agentConfig.claudeMd || '';
               const newContent = existingContent
-                ? `${agentConfig.claudeMd}\n\n${existingContent}`
-                : agentConfig.claudeMd;
-              writeFileSync(claudeMdPath, newContent);
+                ? `${configContent}\n\n${existingContent}`
+                : configContent;
+              writeFileSync(claudeMdPath, (newContent || '') + deployOutputPreamble);
             }
 
             // Merge plugins from config
