@@ -87,7 +87,7 @@ const HELP_ITEMS: Array<{ cmd: string; desc: string; indent?: boolean }> = [
   { cmd: '/team', desc: 'Show current team' },
   { cmd: '/team <name>', desc: 'Switch to or create team' },
   { cmd: '/teams', desc: 'List all teams' },
-  { cmd: '/team delete <name>', desc: 'Delete a team' },
+  { cmd: '/team delete <name>', desc: 'Delete a team (must be empty — run /delete --team first)' },
   { cmd: '/quit', desc: 'Exit' },
 ];
 

@@ -1488,16 +1488,15 @@ export class AgentManagerDb {
 
         const teamId = team.id;
 
-        // TODO: move to repository — unfiltered agent count (including soft-deleted)
         const countResult = await this.db.adapter.query<{ count: string }>(
-          'SELECT COUNT(*)::text as count FROM agents WHERE team_id = $1',
+          'SELECT COUNT(*)::text as count FROM agents WHERE team_id = $1 AND deleted_at IS NULL',
           [teamId]
         );
         const agentCount = parseInt(countResult.rows[0]?.count || '0');
 
         if (agentCount > 0) {
           return res.status(400).json({
-            error: `Team "${name}" has ${agentCount} agent(s) (including archived). Delete all agents first.`
+            error: `Team "${name}" still has ${agentCount} agent(s). Run /delete --team ${name} first to remove agents, then /team delete ${name} to remove the team.`
           });
         }
 
