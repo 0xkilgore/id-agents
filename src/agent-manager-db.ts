@@ -28,6 +28,7 @@ import type { AgentRow, ScheduleDefinitionRow, TaskRow } from './db/types.js';
 import fetch from 'node-fetch';
 import type { PluginConfig, DeployConfig, HeartbeatConfig, CalendarSpec, ScheduleDeliveryMode } from './config-parser.js';
 import { processConfig } from './config-parser.js';
+import { computeSyncPlan, formatSyncSummary, formatSyncVerbose } from './sync.js';
 import { parseAgentRef, normalizeAlias, buildAmbiguityWarning, type AgentMatch } from './core/agent-identifier.js';
 import type { HarnessType } from './harness/types.js';
 import { SchedulerService } from './scheduling/scheduler-service.js';
@@ -3473,6 +3474,374 @@ export class AgentManagerDb {
         }
 
         return { ok: true, result: { synced, skipped, failed, results } };
+      }
+
+      case 'sync': {
+        // Sync running team with a config file — reconcile the diff
+        // Usage: /sync <config> [param=value ...] [--dry-run] [--verbose]
+        const syncDryRun = args.includes('--dry-run');
+        const syncVerbose = args.includes('--verbose');
+        const syncFilteredArgs = args.filter(arg => arg !== '--dry-run' && arg !== '--verbose');
+        const syncConfigPath = syncFilteredArgs[0];
+        if (!syncConfigPath) {
+          return { ok: false, error: 'Usage: /sync <config> [param=value ...] [--dry-run] [--verbose]' };
+        }
+
+        // Resolve config path (same shorthand as /deploy)
+        let syncFilePath = syncConfigPath;
+        if (!syncFilePath.includes('/') && !syncFilePath.includes('\\')) {
+          if (!syncFilePath.endsWith('.yaml') && !syncFilePath.endsWith('.yml')) {
+            syncFilePath = `configs/${syncFilePath}.yaml`;
+          } else {
+            syncFilePath = `configs/${syncFilePath}`;
+          }
+        } else if (!syncFilePath.endsWith('.yaml') && !syncFilePath.endsWith('.yml')) {
+          syncFilePath = `${syncFilePath}.yaml`;
+        }
+
+        const syncAbsolutePath = path.resolve(process.cwd(), syncFilePath);
+        if (!existsSync(syncAbsolutePath)) {
+          return { ok: false, error: `Config file not found: ${syncFilePath}` };
+        }
+
+        const syncDeployArgs = syncFilteredArgs.slice(1);
+        const { agents: syncAgents, errors: syncErrors, teamName: syncConfigTeam, org: syncOrg, calendar: syncCalendar } =
+          processConfig(syncAbsolutePath, this.baseWorkDir, syncDeployArgs);
+
+        let syncTeamId = teamId;
+        let syncTeamName = teamName;
+        if (syncConfigTeam && syncConfigTeam !== teamName) {
+          syncTeamId = await this.db.teams.getOrCreateTeamId(syncConfigTeam);
+          syncTeamName = syncConfigTeam;
+          const syncTeamDir = `${this.baseWorkDir}/teams/${syncConfigTeam}`;
+          if (!existsSync(syncTeamDir)) mkdirSync(syncTeamDir, { recursive: true });
+        }
+
+        if (syncErrors.length > 0) {
+          return { ok: false, error: `Config errors: ${syncErrors.map(e => `${e.path}: ${e.message}`).join('; ')}` };
+        }
+        if (syncAgents.length === 0) {
+          return { ok: false, error: 'No agents defined in config' };
+        }
+
+        // Get running agents for this team (include automators)
+        const runningAgents = await this.db.agents.list(syncTeamId, true);
+        // Filter to claude/automator types only — skip interactive agents
+        const syncableRunning = runningAgents.filter(a => a.type === 'claude' || a.type === 'automator');
+
+        const plan = computeSyncPlan(syncAgents, syncableRunning, this.defaultConfig?.model);
+
+        if (syncDryRun) {
+          return {
+            ok: true,
+            result: {
+              dryRun: true,
+              summary: formatSyncSummary(plan),
+              verbose: formatSyncVerbose(plan),
+              plan: {
+                added: plan.added.map(i => i.name),
+                updated: plan.changed.map(i => ({ name: i.name, changes: i.changes })),
+                removed: plan.removed.map(i => i.name),
+                unchanged: plan.unchanged.map(i => i.name),
+              }
+            }
+          };
+        }
+
+        const syncResult = { added: [] as string[], updated: [] as string[], removed: [] as string[], unchanged: [] as string[] };
+
+        // --- REMOVED agents: kill process, hard-delete DB row ---
+        for (const item of plan.removed) {
+          const row = syncableRunning.find(r => r.name === item.name);
+          if (row) {
+            if (row.port) {
+              await this.killAgentProcess(row.port);
+              await new Promise(r => setTimeout(r, 500));
+            }
+            await this.db.agents.deleteAgent(row.id);
+            console.log(`[Sync] Removed agent: ${item.name}`);
+          }
+          syncResult.removed.push(item.name);
+        }
+
+        // --- UNCHANGED agents: skip ---
+        for (const item of plan.unchanged) {
+          syncResult.unchanged.push(item.name);
+        }
+
+        // --- CHANGED agents: in-place rebuild with same ID/port ---
+        for (const item of plan.changed) {
+          const row = syncableRunning.find(r => r.name === item.name)!;
+          const spec = syncAgents.find(a => (a.domain || a.name) === item.name)!;
+
+          // If workingDirectory changed, treat as destroy + recreate
+          const wdChanged = item.changes?.includes('workingDirectory');
+          if (wdChanged) {
+            if (row.port) {
+              await this.killAgentProcess(row.port);
+              await new Promise(r => setTimeout(r, 500));
+            }
+            await this.db.agents.deleteAgent(row.id);
+            plan.added.push({ name: item.name, category: 'new' });
+            syncResult.updated.push(item.name);
+            continue;
+          }
+
+          // Kill old process on existing port
+          if (row.port) {
+            await this.killAgentProcess(row.port);
+            await new Promise(r => setTimeout(r, 500));
+          }
+
+          // Update config on disk (skills, plugins, claudeMd, heartbeat)
+          const workingDirectory = row.working_directory || `${this.baseWorkDir}/agents/${row.id}`;
+          if (!existsSync(workingDirectory)) mkdirSync(workingDirectory, { recursive: true });
+
+          if (spec.claudeMd) {
+            const claudeDir = path.join(workingDirectory, '.claude');
+            if (!existsSync(claudeDir)) mkdirSync(claudeDir, { recursive: true });
+            const claudeMdPath = path.join(claudeDir, 'CLAUDE.md');
+            writeFileSync(claudeMdPath, spec.claudeMd);
+          }
+
+          const effectiveRuntime = resolveRuntime(spec.runtime) as HarnessType;
+          const effectiveModel = spec.model || getDefaultModelForRuntime(effectiveRuntime, this.defaultConfig?.model);
+          this.ensureRuntimeReady(effectiveRuntime, effectiveModel);
+
+          const mergedPlugins = spec.plugins || [];
+          const localPlugins = this.copyPluginsToAgent(mergedPlugins, workingDirectory);
+
+          const agentSkills: string[] = spec.skills || [];
+          let orgContext = '';
+          if (syncOrg?.groups) {
+            try {
+              const { generateAgentOrgContext } = await import('./org-chart.js');
+              orgContext = generateAgentOrgContext(spec.name, syncOrg);
+            } catch { /* ignore */ }
+          }
+
+          const configDomain = spec.domain;
+          const owsWallet = this.getOrCreateAgentWallet(syncTeamName, spec.name);
+
+          this.deploySkillsToAgent(workingDirectory, agentSkills, {
+            DISPLAY_NAME: configDomain || spec.name,
+            TEAM: syncTeamName,
+            ONCHAIN_IDENTITY: configDomain ? `Your onchain identity is your ENS domain: **${configDomain}**` : '',
+            ORG_CONTEXT: orgContext
+              ? `\n## Your Role\n\n${orgContext}\n\nSee the full org chart at the shared team folder for details on all groups.`
+              : '',
+          }, { hasWallet: !!owsWallet });
+
+          if (spec.heartbeat) {
+            const heartbeatPath = path.join(workingDirectory, 'HEARTBEAT.yaml');
+            const heartbeatContent = `# Heartbeat config for ${spec.name}\ninterval: ${spec.heartbeat.interval}\n\nmessage: |\n${spec.heartbeat.message.split('\n').map(line => '  ' + line).join('\n')}\n`;
+            writeFileSync(heartbeatPath, heartbeatContent);
+          }
+
+          // Update DB row in place — preserve the agent ID
+          const isAutomator = spec.type === 'automator';
+          const updatedMeta: AgentMetadata = {
+            ...(row.metadata as AgentMetadata || {}),
+            name: spec.name,
+            service_type: isAutomator ? undefined : 'REST-AP',
+            endpoint: isAutomator ? undefined : `http://localhost:${row.port}`,
+            runtime: effectiveRuntime,
+            plugins: localPlugins,
+            allowed_tools: spec.allowedTools,
+            description: spec.description,
+            ...(isAutomator && { isAutomator: true }),
+            ...(spec.heartbeat && { heartbeat: true }),
+            ...(owsWallet && { ows_wallet: owsWallet.walletName, ows_address: owsWallet.address }),
+          };
+
+          await this.db.agents.updateStatus(row.id, 'starting', {
+            model: effectiveModel,
+            metadata: updatedMeta,
+          });
+
+          // Respawn on same port
+          const spawnResult = await this.spawnLocalAgentProcess(syncTeamId, syncTeamName, {
+            name: spec.name,
+            id: row.id,
+            port: row.port,
+            model: effectiveModel,
+            workingDirectory,
+            tokenId: spec.tokenId || row.token_id || undefined,
+          });
+
+          if (spawnResult.success) {
+            await this.db.agents.updateStatus(row.id, 'running');
+            console.log(`[Sync] Updated agent: ${item.name} (changes: ${item.changes?.join(', ')})`);
+          } else {
+            await this.db.agents.updateStatus(row.id, 'error');
+            console.error(`[Sync] Failed to restart ${item.name}: ${spawnResult.error}`);
+          }
+
+          // Re-seed heartbeat if needed
+          if (spec.heartbeat && this.schedulerService) {
+            const { definition, agentIds } = heartbeatToSchedule(row.id, spec.name, spec.heartbeat);
+            await this.schedulerService.seedSchedule(definition, agentIds);
+          }
+
+          syncResult.updated.push(item.name);
+        }
+
+        // --- NEW agents: spawn fresh (reuse deploy logic) ---
+        for (const item of plan.added) {
+          const spec = syncAgents.find(a => (a.domain || a.name) === item.name)!;
+          const agentId = `agent_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
+          try {
+            const port = await this.dbNextPort(syncTeamId);
+            const workingDirectory = spec.workingDirectory && path.isAbsolute(spec.workingDirectory)
+              ? spec.workingDirectory
+              : `${this.baseWorkDir}/agents/${agentId}`;
+            if (!existsSync(workingDirectory)) mkdirSync(workingDirectory, { recursive: true });
+
+            if (spec.claudeMd) {
+              const claudeDir = path.join(workingDirectory, '.claude');
+              if (!existsSync(claudeDir)) mkdirSync(claudeDir, { recursive: true });
+              writeFileSync(path.join(claudeDir, 'CLAUDE.md'), spec.claudeMd);
+            }
+
+            const effectiveRuntime = resolveRuntime(spec.runtime) as HarnessType;
+            const effectiveModel = spec.model || getDefaultModelForRuntime(effectiveRuntime, this.defaultConfig?.model);
+            this.ensureRuntimeReady(effectiveRuntime, effectiveModel);
+
+            const localPlugins = this.copyPluginsToAgent(spec.plugins || [], workingDirectory);
+            const isAutomator = spec.type === 'automator';
+            const agentType = spec.type || 'claude';
+            const configDomain = spec.domain;
+            const configTokenId = spec.tokenId;
+            const agentName = configDomain || spec.name;
+            const owsWallet = this.getOrCreateAgentWallet(syncTeamName, spec.name);
+
+            const agentSkills: string[] = spec.skills || [];
+            let orgContext = '';
+            if (syncOrg?.groups) {
+              try {
+                const { generateAgentOrgContext } = await import('./org-chart.js');
+                orgContext = generateAgentOrgContext(spec.name, syncOrg);
+              } catch { /* ignore */ }
+            }
+
+            this.deploySkillsToAgent(workingDirectory, agentSkills, {
+              DISPLAY_NAME: configDomain || spec.name,
+              TEAM: syncTeamName,
+              ONCHAIN_IDENTITY: configDomain ? `Your onchain identity is your ENS domain: **${configDomain}**` : '',
+              ORG_CONTEXT: orgContext
+                ? `\n## Your Role\n\n${orgContext}\n\nSee the full org chart at the shared team folder for details on all groups.`
+                : '',
+            }, { hasWallet: !!owsWallet });
+
+            const metadata: AgentMetadata = {
+              name: spec.name,
+              service_type: isAutomator ? undefined : 'REST-AP',
+              endpoint: isAutomator ? undefined : `http://localhost:${port}`,
+              runtime: effectiveRuntime,
+              plugins: localPlugins,
+              allowed_tools: spec.allowedTools,
+              description: spec.description,
+              ...(isAutomator && { isAutomator: true }),
+              ...(spec.heartbeat && { heartbeat: true }),
+              ...(spec.openMode !== undefined && { openMode: spec.openMode }),
+              ...(owsWallet && { ows_wallet: owsWallet.walletName, ows_address: owsWallet.address }),
+            };
+
+            if (configDomain) {
+              metadata.idchain_domain = configDomain;
+              metadata.alias = spec.name;
+            }
+
+            await this.db.agents.create({
+              team_id: syncTeamId,
+              id: agentId,
+              name: agentName,
+              type: agentType,
+              model: effectiveModel,
+              port,
+              endpoint: null,
+              working_directory: workingDirectory,
+              status: 'starting',
+              created_at: Date.now(),
+              metadata,
+              runtime: effectiveRuntime,
+              token_id: configTokenId || null,
+              domain: configDomain || null,
+            });
+
+            const url = `http://localhost:${port}`;
+            await this.db.agents.updateStatus(agentId, 'pending', {
+              port, endpoint: url, metadata: { ...metadata, endpoint: url, local: true },
+            });
+
+            if (spec.heartbeat) {
+              const heartbeatPath = path.join(workingDirectory, 'HEARTBEAT.yaml');
+              const heartbeatContent = `# Heartbeat config for ${spec.name}\ninterval: ${spec.heartbeat.interval}\n\nmessage: |\n${spec.heartbeat.message.split('\n').map(line => '  ' + line).join('\n')}\n`;
+              writeFileSync(heartbeatPath, heartbeatContent);
+            }
+
+            const spawnResult = await this.spawnLocalAgentProcess(syncTeamId, syncTeamName, {
+              name: spec.name, id: agentId, port, model: effectiveModel,
+              workingDirectory, tokenId: configTokenId || undefined,
+            });
+
+            if (spawnResult.success) {
+              await this.db.agents.updateStatus(agentId, 'running');
+              console.log(`[Sync] Added agent: ${item.name} (port ${port})`);
+            } else {
+              await this.db.agents.updateStatus(agentId, 'error');
+              console.error(`[Sync] Failed to spawn ${item.name}: ${spawnResult.error}`);
+            }
+
+            if (spec.heartbeat && this.schedulerService) {
+              const { definition, agentIds } = heartbeatToSchedule(agentId, spec.name, spec.heartbeat);
+              await this.schedulerService.seedSchedule(definition, agentIds);
+            }
+
+            syncResult.added.push(item.name);
+          } catch (err: any) {
+            console.error(`[Sync] Error adding ${item.name}: ${err.message}`);
+          }
+        }
+
+        // Re-seed calendar schedules
+        if (syncCalendar && syncCalendar.length > 0 && this.schedulerService) {
+          await this.db.schedules.deleteBySource('yaml', `calendar:${syncAbsolutePath}:`);
+          for (let index = 0; index < syncCalendar.length; index++) {
+            const spec = syncCalendar[index] as CalendarSpec;
+            const targetIds: string[] = [];
+            for (const ref of spec.agents) {
+              const target = await this.db.agents.getByName(syncTeamId, ref);
+              if (target) targetIds.push(target.id);
+            }
+            if (targetIds.length > 0) {
+              const { definition, agentIds } = calendarToSchedule(spec, `calendar:${syncAbsolutePath}:${index}`, targetIds);
+              await this.schedulerService.seedSchedule(definition, agentIds);
+            }
+          }
+        }
+
+        // Generate org chart if defined
+        if (syncOrg?.groups) {
+          try {
+            const { generateOrgChart } = await import('./org-chart.js');
+            const orgMd = generateOrgChart(syncTeamName, syncOrg, syncAgents.map(a => ({
+              name: a.name, description: a.description, domain: a.domain,
+            })));
+            const teamDir = `${this.baseWorkDir}/teams/${syncTeamName}`;
+            if (!existsSync(teamDir)) mkdirSync(teamDir, { recursive: true });
+            writeFileSync(`${teamDir}/ORG_CHART.md`, orgMd);
+          } catch { /* ignore */ }
+        }
+
+        return {
+          ok: true,
+          result: {
+            summary: formatSyncSummary(plan),
+            verbose: formatSyncVerbose(plan),
+            ...syncResult,
+          }
+        };
       }
 
       case 'deploy': {
