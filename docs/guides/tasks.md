@@ -46,10 +46,10 @@ The `/task` system provides a shared todo/doing/done board that agents and opera
 
 ## The Handoff Pattern
 
-A research agent creates tasks with specs; a coder agent claims and completes them.
+One agent creates tasks with specs; another claims and completes them.
 
 ```
-researcher → /task create "Implement retry logic for API client"
+analyst    → /task create "Implement retry logic for API client"
               (includes spec in description)
 
 coder      → /task list --status todo
@@ -59,6 +59,34 @@ coder      → /task list --status todo
            → (does the work)
            → /task done implement-retry-logic
 ```
+
+A verifier agent can walk stale tasks periodically to catch work that stalled in `doing` or was never claimed.
+
+## Making It Required
+
+The `task-discipline` skill enforces the task lifecycle as mandatory for any multi-step work. When an agent has this skill, it will automatically create, claim, and complete tasks for non-trivial requests.
+
+**Add to all agents via config defaults:**
+
+```yaml
+defaults:
+  skills:
+    - identity
+    - inter-agent
+    - catalog
+    - wallet
+    - task-discipline
+```
+
+**Opt an individual agent out** by overriding its skills list without `task-discipline`:
+
+```yaml
+agents:
+  - name: simple-bot
+    skills: [identity, inter-agent, catalog]
+```
+
+See `skills/task-discipline/SKILL.md` for the exact contract agents follow: when tasks are required, the create/claim/done lifecycle, naming conventions, and failure handling.
 
 ## Stale Task Verifier
 
