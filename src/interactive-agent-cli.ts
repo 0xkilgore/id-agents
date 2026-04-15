@@ -76,6 +76,7 @@ const HELP_ITEMS: Array<{ cmd: string; desc: string; indent?: boolean }> = [
   { cmd: '/task assign <task-name> <agent>', desc: 'Assign task to agent' },
   { cmd: '/task done <task-name>', desc: 'Mark task done' },
   { cmd: '/task remove <task-name>', desc: 'Remove a task' },
+  { cmd: '/sync <config> [params]', desc: 'Reconcile running team with config (add/update/remove)' },
   { cmd: '/status', desc: 'Check agent status' },
   { cmd: '/update <agent> [--wallet <addr>] [--name <name>]', desc: 'Update agent properties' },
   { cmd: '/wallet <agent> [chain]', desc: 'Show agent wallet address (chain: eip155:1, solana, etc.)' },
@@ -2260,6 +2261,64 @@ async function handleLine(line: string) {
       await dryRunDeploy(filePath, filteredDeployArgs);
     } else {
       await deployFromConfig(filePath, filteredDeployArgs);
+    }
+    rl.prompt();
+    return;
+  }
+
+  if (input.startsWith('/sync ')) {
+    if (!(await checkManager())) {
+      showManagerNotRunningError();
+      rl.prompt();
+      return;
+    }
+    const parts = input.substring('/sync '.length).trim().split(/\s+/);
+    const filePath = parts[0];
+    const syncArgs = parts.slice(1);
+
+    if (!filePath) {
+      console.log(`\n${colors.red}Usage: /sync <config> [param=value ...] [--dry-run] [--verbose]${colors.reset}`);
+      console.log(`${colors.gray}Reconcile running team with config. Adds new, removes deleted, updates changed, leaves unchanged.${colors.reset}\n`);
+      rl.prompt();
+      return;
+    }
+
+    try {
+      const response = await managerFetch('/remote', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ command: `/sync ${parts.join(' ')}` })
+      });
+
+      const result: any = await response.json();
+
+      if (!result.ok) {
+        console.log(`\n${colors.red}Sync failed: ${result.error}${colors.reset}\n`);
+      } else {
+        const data = result.result;
+        if (data.dryRun) {
+          console.log(`\n${colors.bold}Sync dry run:${colors.reset} ${data.summary}`);
+          console.log(data.verbose);
+          console.log('');
+        } else {
+          console.log(`\n${colors.green}${data.summary}${colors.reset}`);
+          if (syncArgs.includes('--verbose') && data.verbose) {
+            console.log(data.verbose);
+          }
+          if (data.added?.length > 0) {
+            console.log(`${colors.green}  Added: ${data.added.join(', ')}${colors.reset}`);
+          }
+          if (data.updated?.length > 0) {
+            console.log(`${colors.cyan}  Updated: ${data.updated.join(', ')}${colors.reset}`);
+          }
+          if (data.removed?.length > 0) {
+            console.log(`${colors.yellow}  Removed: ${data.removed.join(', ')}${colors.reset}`);
+          }
+          console.log('');
+        }
+      }
+    } catch (err: any) {
+      console.log(`${colors.red}Sync error: ${err.message}${colors.reset}`);
     }
     rl.prompt();
     return;

@@ -188,6 +188,19 @@ export async function remoteDeploy(configName: string, params?: Record<string, s
   return remote(command);
 }
 
+export async function remoteSync(configName: string, params?: Record<string, string>, flags?: string[]) {
+  let command = `/sync ${configName}`;
+  if (params) {
+    for (const [key, value] of Object.entries(params)) {
+      command += ` ${key}=${value}`;
+    }
+  }
+  if (flags) {
+    command += ' ' + flags.join(' ');
+  }
+  return remote(command);
+}
+
 export async function remoteRegister(agentName: string) {
   return remote(`/register ${agentName}`);
 }
