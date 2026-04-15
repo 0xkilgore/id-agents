@@ -11,6 +11,7 @@ import fs from 'fs';
 import path from 'path';
 import { HarnessType, isValidHarnessType, getAvailableHarnesses } from './harness/index.js';
 import { getDefaultRuntime, resolveRuntime, validateRuntimeModelCompatibility } from './runtime/registry.js';
+import { validateName } from './name-validation.js';
 
 export type ScheduleDeliveryMode = 'talk' | 'internal';
 
@@ -275,6 +276,14 @@ export function validateConfig(config: DeployConfig): ValidationResult {
     errors.push({ path: 'version', message: 'version is required' });
   }
 
+  // Check team name if specified
+  if (config.team) {
+    const teamResult = validateName(config.team, 'team');
+    if (!teamResult.valid) {
+      errors.push({ path: 'team', message: teamResult.error! });
+    }
+  }
+
   // Check agents array
   if (!config.agents || !Array.isArray(config.agents)) {
     errors.push({ path: 'agents', message: 'agents array is required' });
@@ -319,11 +328,16 @@ export function validateConfig(config: DeployConfig): ValidationResult {
       errors.push({ path: `${agentPath}.name`, message: 'agent name is required' });
     }
 
-    if (agent.name && !/^[a-zA-Z0-9_-]+$/.test(agent.name)) {
-      errors.push({
-        path: `${agentPath}.name`,
-        message: 'agent name must contain only alphanumeric characters, hyphens, and underscores'
-      });
+    if (agent.name) {
+      const nameResult = validateName(agent.name, 'agent');
+      if (!nameResult.valid) {
+        errors.push({ path: `${agentPath}.name`, message: nameResult.error! });
+      } else if (!/^[a-zA-Z0-9_-]+$/.test(agent.name)) {
+        errors.push({
+          path: `${agentPath}.name`,
+          message: 'agent name must contain only alphanumeric characters, hyphens, and underscores'
+        });
+      }
     }
 
     // Validate runtime

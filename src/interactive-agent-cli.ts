@@ -11,6 +11,7 @@ import WebSocket from 'ws';
 import { fileURLToPath } from 'url';
 import { createDb, getOrCreateTeamId, migrateDb, type Db } from './db.js';
 import { processConfig, getConfigParameters } from './config-parser.js';
+import { validateName } from './name-validation.js';
 import {
   findProjectRoot as coreFindProjectRoot,
   readDotEnvFile as coreReadDotEnvFile,
@@ -1534,6 +1535,14 @@ async function handleLine(line: string) {
         const existingTeam = listData.teams.find(t => t.name === teamName);
 
         if (!existingTeam) {
+          // Validate name before creating
+          const teamNameCheck = validateName(teamName, 'team');
+          if (!teamNameCheck.valid) {
+            console.log(`\n${colors.red}❌ ${teamNameCheck.error}${colors.reset}\n`);
+            rl.prompt();
+            return;
+          }
+
           // New team - ask for confirmation
           const confirmed = await confirmAction(
             rl,

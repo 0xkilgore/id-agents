@@ -29,6 +29,7 @@ import fetch from 'node-fetch';
 import type { PluginConfig, DeployConfig, HeartbeatConfig, CalendarSpec, ScheduleDeliveryMode } from './config-parser.js';
 import { processConfig } from './config-parser.js';
 import { computeSyncPlan, formatSyncSummary, formatSyncVerbose } from './sync.js';
+import { validateName } from './name-validation.js';
 import { parseAgentRef, normalizeAlias, buildAmbiguityWarning, type AgentMatch } from './core/agent-identifier.js';
 import type { HarnessType } from './harness/types.js';
 import { SchedulerService } from './scheduling/scheduler-service.js';
@@ -1427,6 +1428,8 @@ export class AgentManagerDb {
     this.managementApp.post('/teams', async (req, res) => {
       const { name } = req.body || {};
       if (!name) return res.status(400).json({ error: 'Missing team name' });
+      const nameCheck = validateName(name, 'team');
+      if (!nameCheck.valid) return res.status(400).json({ error: nameCheck.error });
       try {
         const teamId = await this.db.teams.getOrCreateTeamId(name);
 
@@ -1548,6 +1551,8 @@ export class AgentManagerDb {
     this.managementApp.post('/projects', async (req, res) => {
       const { name } = req.body || {};
       if (!name) return res.status(400).json({ error: 'Missing project name' });
+      const projNameCheck = validateName(name, 'team');
+      if (!projNameCheck.valid) return res.status(400).json({ error: projNameCheck.error });
 
       try {
         // Create team in database (will auto-assign port range)
@@ -1582,6 +1587,8 @@ export class AgentManagerDb {
 
         const { name, type: agentType, model, runtime, allowedTools, pluginPath, plugins, skills, metadata: reqMetadata, local, claudeMd, heartbeat, openMode, workingDirectory: configWorkDir, verbose, domain, tokenId, address } = req.body || {};
         if (!name) return res.status(400).json({ error: 'Missing name' });
+        const agentNameCheck = validateName(name, 'agent');
+        if (!agentNameCheck.valid) return res.status(400).json({ error: agentNameCheck.error });
 
         // Local agent: runs locally using the selected runtime's auth flow
         const isLocalAgent = local === true || local === 'true';
@@ -1763,6 +1770,8 @@ export class AgentManagerDb {
       const { id: teamId } = await this.getTeam(req);
       const { id: requestedIdRaw, name, endpoint, metadata, type: requestedTypeRaw } = req.body || {};
       if (!name || !endpoint) return res.status(400).json({ error: 'Missing name or endpoint' });
+      const regNameCheck = validateName(name, 'agent');
+      if (!regNameCheck.valid) return res.status(400).json({ error: regNameCheck.error });
 
       const requestedId = typeof requestedIdRaw === 'string' ? requestedIdRaw.trim() : undefined;
       if (requestedId && !/^[a-zA-Z0-9_:-]{1,200}$/.test(requestedId)) {
