@@ -368,7 +368,7 @@ agents:
     runtime: codex
 ```
 
-Use `/deploy <config> --dry-run` to validate runtime/model/auth compatibility before any agents are created.
+Use `/deploy <config> --dry-run` or `/sync <config> --dry-run` to validate runtime/model/auth compatibility before any agents are created. To update a running team without losing sessions, use [`/sync`](../guides/sync-command.md) instead of `/deploy`.
 
 ---
 
@@ -534,7 +534,7 @@ Environment variables take precedence over config file values for most settings.
 
 ID Agents looks for configuration files in:
 
-1. Path specified via CLI: `/deploy path/to/config.yaml`
+1. Path specified via CLI: `/deploy path/to/config.yaml` or `/sync path/to/config.yaml`
 2. Team config: `configs/<team-name>.yaml`
 3. Default config: `configs/default.yaml`
 

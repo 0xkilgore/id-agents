@@ -31,7 +31,8 @@ MANAGER_PORT=5000 npm run id-agents
 ### 2) Deploy agents
 
 Inside the CLI:
-- `/deploy <config>` — Deploy agents from a YAML config
+- `/deploy <config>` — Deploy agents from a YAML config (clean/first-time)
+- `/sync <config>` — [Update a running team](./sync-command.md) (reconciles diff, preserves sessions)
 - `/deploy local-agent <name>` — Deploy a single local agent
 
 ### 3) Verify agents are running
@@ -54,7 +55,8 @@ You should see your `interactive` agent listed alongside any deployed local agen
 | `/ask * <msg>` | Broadcast to all agents |
 | `/clear [agent]` | Clear session (start fresh) |
 | `/delete <agent>` | Delete agent |
-| `/deploy <config>` | Deploy agents from config |
+| `/deploy <config>` | Deploy agents from config (clean/first-time) |
+| `/sync <config>` | [Reconcile running team with config](./sync-command.md) |
 | `/help` | Show help |
 | `/news [-l] <agent>` | Check recent messages (-l for full content) |
 | `/register <agent>` | Register agent onchain |

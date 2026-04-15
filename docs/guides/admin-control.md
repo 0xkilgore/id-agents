@@ -40,7 +40,8 @@ Response:
 | `/agents` | List all agents |
 | `/agents rebuild` | Rebuild all agents |
 | `/status` | Show team health |
-| `/deploy <config>` | Deploy agents from YAML config |
+| `/deploy <config>` | Deploy agents from YAML config (clean/first-time) |
+| `/sync <config>` | [Reconcile running team with config](./sync-command.md) (preserves sessions) |
 | `/deploy local-agent <name>` | Deploy a single local agent |
 | `/delete <name>` | Delete agent |
 | `/ask <agent> <msg>` | Send message to agent (continues session) |

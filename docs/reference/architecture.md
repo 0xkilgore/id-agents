@@ -14,7 +14,7 @@ The central process running on port 4100 (configurable via `--port` or `MANAGER_
 
 **Responsibilities:**
 - Stores agent state in the database (SQLite or PostgreSQL)
-- Handles the `/remote` API for programmatic access — no auth required (supports `/deploy`, `/agents`, `/ask`, etc.)
+- Handles the `/remote` API for programmatic access — no auth required (supports `/deploy`, `/sync`, `/agents`, `/ask`, etc.)
 - Routes fire-and-forget messages between agents via `/message`
 - Spawns and stops agent processes
 - Manages onchain ENS registration via id-cli
@@ -54,10 +54,11 @@ The user-facing terminal interface.
 
 **Responsibilities:**
 - Connects to the manager on startup (auto-starts it if not running)
-- Provides commands: `/ask`, `/deploy`, `/agents`, `/status`, `/register`, etc.
+- Provides commands: `/ask`, `/deploy`, `/sync`, `/agents`, `/status`, `/register`, etc.
 - Polls agent news feeds for replies
-- Manages agent lifecycle (deploy, rebuild, delete)
-- Supports `/deploy --dry-run` for runtime/config preflight without creating agents
+- Manages agent lifecycle (deploy, sync, rebuild, delete)
+- `/deploy` for clean/first-time deploys; [`/sync`](../guides/sync-command.md) for updating running teams (preserves sessions)
+- Supports `--dry-run` on both `/deploy` and `/sync` for preflight without creating agents
 
 ## Message Flow
 

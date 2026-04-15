@@ -121,7 +121,8 @@ curl http://localhost:4100/health
 ```bash
 # Deploy first agent via CLI
 npm run id-agents
-# Then use: /deploy local-agent test-agent
+# First time: /deploy local-agent test-agent
+# To update later: /sync <config>  (preserves sessions)
 ```
 
 ## Configuration
@@ -227,8 +228,9 @@ createdb id_agents
 npm run build
 npm run id-agents
 
-# 3. Deploy agents via CLI
+# 3. Deploy agents via CLI (first time)
 /deploy local-agent my-agent
+# To update a running team later: /sync <config>
 ```
 
 ### Testing the Setup

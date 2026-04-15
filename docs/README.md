@@ -1,6 +1,6 @@
 # ID Agents Documentation
 
-**Version 0.1.36-beta**
+**Version 0.1.43-beta**
 
 Documentation for the ID Agents multi-agent orchestration platform.
 
@@ -13,6 +13,7 @@ Documentation for the ID Agents multi-agent orchestration platform.
 ## Guides
 
 - [Interactive Agent Guide](./guides/interactive-agent.md) - Run the interactive CLI
+- [Sync Command Guide](./guides/sync-command.md) - Update a running team without losing sessions (`/sync` vs `/deploy`)
 - [Admin Control Guide](./guides/admin-control.md) - Programmatic team management via `/remote`, talk-to-manager, and agent reply polling
 
 ## Protocols

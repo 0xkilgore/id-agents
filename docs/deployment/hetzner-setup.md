@@ -205,6 +205,7 @@ Or use the interactive CLI:
 ```bash
 MANAGER_URL=http://YOUR_SERVER_IP:4100 npm run id-agents
 # Then: /deploy local-agent dev
+# To update later: /sync <config>
 ```
 
 ## Troubleshooting

@@ -113,9 +113,11 @@ MANAGER_PORT=5000 npm run id-agents
 ### 3) Deploy and talk to agents
 
 ```
-/deploy claude-code    # or /deploy codex
+/deploy claude-code    # First-time deploy (or /deploy codex)
 /ask coder Write a hello world function
 ```
+
+To update a running team later (add/remove/change agents without losing sessions), use [`/sync`](docs/guides/sync-command.md) instead of `/deploy`.
 
 ### Connecting a Manager
 
@@ -231,7 +233,8 @@ See [Scheduling Plan](./docs/SCHEDULING_PLAN.md) for the full design.
 /ask * <message>            # Broadcast to all agents
 /clear [agent]              # Clear session (start fresh)
 /delete <agent>             # Delete agent
-/deploy <config>            # Deploy agents from config
+/deploy <config>            # Deploy agents from config (clean/first-time)
+/sync <config>              # Reconcile running team with config (preserves sessions)
 /help                       # Show help
 /news [-l] <agent>          # Check recent messages (-l for full content)
 /register <agent>           # Register agent onchain
@@ -254,7 +257,7 @@ See [Scheduling Plan](./docs/SCHEDULING_PLAN.md) for the full design.
 
 ## Remote API
 
-The Manager exposes a `/remote` endpoint (no authentication required — localhost only) that lets any external tool — including another Claude Code session — interact with your agent team programmatically. This is how you manage agents from outside the interactive CLI. Deploy commands (`/deploy`) also work via `/remote`.
+The Manager exposes a `/remote` endpoint (no authentication required — localhost only) that lets any external tool — including another Claude Code session — interact with your agent team programmatically. This is how you manage agents from outside the interactive CLI. Deploy and sync commands (`/deploy`, `/sync`) also work via `/remote`.
 
 **From a terminal or script:**
 
@@ -289,8 +292,8 @@ This means any Claude Code instance on the same machine can coordinate with your
 - `/ask <name> <message>` - Send message to agent
 - `/clear [agent]` - Clear session
 - `/delete <name>` - Delete agent
-- `/deploy` - List available configs
-- `/deploy <config>` - Deploy agents from YAML config
+- `/deploy <config>` - Deploy agents from YAML config (clean/first-time)
+- `/sync <config>` - [Reconcile running team with config](docs/guides/sync-command.md) (preserves sessions)
 - `/news [-l] <name>` - Check recent messages
 - `/register <name>` - Register agent onchain
 - `/status` - Show status
