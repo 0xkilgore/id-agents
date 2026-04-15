@@ -1,0 +1,128 @@
+# ID Chain System Team
+# Deploy with: /deploy idchain
+#
+# Agents for each component of the ID Chain ecosystem.
+# Each agent runs locally using your Max plan subscription
+# with its working directory set to the respective project repo.
+
+version: "1"
+
+team: idchain
+
+onchain:
+  register: false  # Register manually with /register when ready
+  chainId: 8453
+  registryAddress: "0x92DF3A4CB6827Bf199FdAd429B36622f0C8167F0"
+
+defaults:
+  local: true
+  runtime: claude-code-cli
+  model: claude-opus-4-6
+  dangerouslySkipPermissions: true
+  verbose: "true"
+  claudeMd: |
+    ## Scheduling
+
+    This system has a manager-owned scheduler.
+
+    Scheduled work may arrive as:
+    - `from: "schedule"` on `/talk`
+    - `from: "schedule"` with `mode: "internal"` on `/schedule`
+
+    Treat `/schedule` as an internal wake-up / self-directed task trigger, not as a normal external conversation.
+
+    When scheduled work arrives:
+    - inspect the `schedule` object for `id`, `kind`, `title`, and `scheduledKey`
+    - treat `mode: "internal"` as autonomous work you should begin without framing it as a user request
+    - do not assume a reply is expected just because scheduled work was triggered
+    - use the schedule metadata in your reasoning and logs when it is relevant
+  skills:
+    - identity
+    - inter-agent
+    - catalog
+    - wallet
+    - task-discipline
+
+org:
+  groups:
+    technical:
+      lead: cto
+      description: "Engineering — builds and maintains the system"
+      members: [cto, contracts, web, gateway, indexer, cli, agents, id-agents-app, stars-app, stars-indexer, ecs]
+    marketing:
+      description: "Growth — social media, community, content"
+      members: [x]
+
+  tags:
+    id-chain: [contracts, web, gateway, indexer, cli, x]
+    id-agents: [agents, id-agents-app, x]
+    ethstars: [stars-app, stars-indexer, ecs]
+
+agents:
+  - name: cto
+    description: "CTO — technical leadership, architecture decisions, code review, coordinates the engineering team"
+    runtime: codex
+    model: gpt-5.4
+    workingDirectory: /Users/nxt3d/projects/id2/id-agents
+
+  - name: contracts
+    description: "Smart contracts (IDRegistry, IDAgentRegistrar, resolvers) — Foundry/Solidity"
+    workingDirectory: /Users/nxt3d/projects/idx
+    heartbeat:
+      interval: 86400
+      message: "Pick one random item from SYSTEM_ITEMS.md or REVIEW_LOG.md. Review its current security status. Report: item name, status (pass/fail/needs-attention), and one-line finding. Keep it brief."
+
+  - name: web
+    description: "id-app Next.js frontend — registration UI, wallet integration, CCIP-Read"
+    workingDirectory: /Users/nxt3d/projects/id2/id-app
+    heartbeat:
+      interval: 86400
+      message: "Pick one random item from SYSTEM_ITEMS.md or REVIEW_LOG.md. Review its current security status. Report: item name, status (pass/fail/needs-attention), and one-line finding. Keep it brief."
+
+  - name: gateway
+    description: "idx-gateway CCIP-Read server — ECDSA signing, cross-chain resolution"
+    workingDirectory: /Users/nxt3d/projects/idx-gateway
+    heartbeat:
+      interval: 86400
+      message: "Pick one random item from SYSTEM_ITEMS.md or REVIEW_LOG.md. Review its current security status. Report: item name, status (pass/fail/needs-attention), and one-line finding. Keep it brief."
+
+  - name: indexer
+    description: "idx-indexer Ponder.js service — event processing, REST API, multi-chain"
+    workingDirectory: /Users/nxt3d/projects/idx-indexer
+    heartbeat:
+      interval: 86400
+      message: "Pick one random item from SYSTEM_ITEMS.md or REVIEW_LOG.md. Review its current security status. Report: item name, status (pass/fail/needs-attention), and one-line finding. Keep it brief."
+
+  - name: cli
+    description: "id-cli — agent registration, ENS linking, record management"
+    workingDirectory: /Users/nxt3d/projects/id-cli
+    heartbeat:
+      interval: 86400
+      message: "Pick one random item from SYSTEM_ITEMS.md or REVIEW_LOG.md. Review its current security status. Report: item name, status (pass/fail/needs-attention), and one-line finding. Keep it brief."
+
+  - name: x
+    description: "ID Chain X/Twitter — social media monitoring, trend analysis, community engagement, content drafting"
+    workingDirectory: /Users/nxt3d/projects/id-chain-x
+
+  - name: id-agents-app
+    description: "id-agents website — marketing, docs, landing page"
+    workingDirectory: /Users/nxt3d/projects/id-agents-app
+
+  - name: agents
+    description: "id-agents orchestration platform — multi-agent system, REST-AP protocol"
+    workingDirectory: /Users/nxt3d/projects/id2/id-agents
+    heartbeat:
+      interval: 86400
+      message: "Pick one random item from SYSTEM_ITEMS.md or REVIEW_LOG.md. Review its current security status. Report: item name, status (pass/fail/needs-attention), and one-line finding. Keep it brief."
+
+  - name: stars-app
+    description: "EthStars dapp — Next.js frontend for star credentials, name resolution, claim flows"
+    workingDirectory: /Users/nxt3d/projects/ethstars/ethstars-dapp
+
+  - name: stars-indexer
+    description: "EthStars indexer — Ponder.js service tracking StarResolver and StarNameResolver events on Base"
+    workingDirectory: /Users/nxt3d/projects/ethstars/ethstars-indexer
+
+  - name: ecs
+    description: "ECS contracts (Ethereum Credential Service) — Foundry/Solidity. Includes EthStars StarResolver/StarNameResolver. Base for the upcoming EEP protocol."
+    workingDirectory: /Users/nxt3d/projects/ecs-dev
