@@ -8,6 +8,9 @@ temp/
 workspaces/**
 workspace/**
 
+# Agent runtime checklist (loaded by the CLI agent, not source-controlled)
+HEARTBEAT.md
+
 # Personal configs (contain local paths and keys)
 configs/idchain.yaml
 configs/personal.yaml
