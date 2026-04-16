@@ -241,7 +241,7 @@ export function App({ staticMode = false }: AppProps = {}): React.ReactElement {
       }
 
       if (view === 'agents') {
-        if (input === 'n') return openNews();
+        if (key.rightArrow) return openNews();
         if (key.tab) return cycleTeam(key.shift ? -1 : 1);
         if (key.upArrow) return moveAgentsSel(-1);
         if (key.downArrow) return moveAgentsSel(1);
@@ -253,7 +253,7 @@ export function App({ staticMode = false }: AppProps = {}): React.ReactElement {
       }
 
       // news view
-      if (key.escape || input === 'b') return backToAgents();
+      if (key.leftArrow || key.escape) return backToAgents();
       if (key.upArrow) return moveNewsSel(-1);
       if (key.downArrow) return moveNewsSel(1);
       if (key.pageUp) return moveNewsSel(-newsWindowSize);

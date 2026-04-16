@@ -9,8 +9,8 @@ interface FooterProps {
 }
 
 const HINTS: Record<FooterView, string> = {
-  agents: '↑↓ nav · Tab team · n news · p pause · q quit',
-  news: '↑↓ scroll · Esc back · p pause · q quit',
+  agents: '↑↓ nav · → news · Tab team · p pause · q quit',
+  news: '↑↓ scroll · ← back · p pause · q quit',
 };
 
 export function Footer({ view, paused }: FooterProps): React.ReactElement {
