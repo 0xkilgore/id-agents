@@ -2949,6 +2949,12 @@ async function handleLine(line: string) {
       return;
     }
 
+    if (agentName.toLowerCase() === 'manager') {
+      console.log(`\n${colors.red}❌ manager is not an agent. Use /talk to message the interactive CLI user.${colors.reset}\n`);
+      rl.prompt();
+      return;
+    }
+
     lastAskedAgent = agentName;
     updatePrompt();
     askAgent(agentName, message, true); // Continue session (use /clear to start fresh)
@@ -2982,6 +2988,12 @@ async function handleLine(line: string) {
       console.log(`${colors.gray}Like /ask but continues the session (agent remembers context).${colors.reset}`);
       console.log(`${colors.gray}Example: /hey coder1 now integrate that image${colors.reset}`);
       console.log(`${colors.gray}Example: /hey * Hello everyone!${colors.reset}\n`);
+      rl.prompt();
+      return;
+    }
+
+    if (agentName.toLowerCase() === 'manager') {
+      console.log(`\n${colors.red}❌ manager is not an agent. Use /talk to message the interactive CLI user.${colors.reset}\n`);
       rl.prompt();
       return;
     }

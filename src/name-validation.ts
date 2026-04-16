@@ -6,6 +6,7 @@ const RESERVED_WORDS = new Set([
   'teams', 'ask', 'hey', 'news', 'register', 'configs', 'registry',
   'keys', 'meta', 'pay', 'heartbeat', 'heartbeats', 'cancel', 'clear',
   'update', 'help', 'sync-wallets', 'artifact', 'output', 'verify',
+  'manager',
 ]);
 
 const SHELL_META = /[*?[\]{}]/;
