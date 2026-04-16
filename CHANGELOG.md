@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.1.48-beta
+
+### Features
+
+- **Always-on task discipline**: Embedded the full task lifecycle rules directly into `defaults.claudeMd` in `configs/idchain.yaml`. Claude Code skills are lazy-loaded (body only enters context on invocation), so the skill file alone was dormant. The rules are now always in context for every idchain agent, matching how the output convention and scheduling sections already work.
+
+### Documentation
+
+- Added a note to `skills/task-discipline/SKILL.md` clarifying that idchain agents get the rules via `defaults.claudeMd` and the skill file is kept as reference.
+
 ## 0.1.47-beta
 
 ### Features

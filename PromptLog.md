@@ -8,6 +8,14 @@ Entries are synthesized prompts, not verbatim chat messages. They can describe c
 
 ---
 
+## 2026-04-15: Always-on task-discipline via defaults.claudeMd, 0.1.48-beta
+
+**Status:** done
+
+Claude Code skills are lazy-loaded — the skill name appears in the skills list but the SKILL.md body only enters context when an agent actively invokes it. That meant task-discipline was dormant even though every idchain agent had it in their skills list. Fix: embed the full task lifecycle rules (create, claim, work, done, reply with task name) directly into `defaults.claudeMd` in `configs/idchain.yaml`, alongside the existing Scheduling block. The skill file is kept as documentation and for non-idchain agents. Now every idchain agent has the rules in context from the moment it starts, no invocation required.
+
+---
+
 ## 2026-04-15: task-discipline skill and idchain defaults, 0.1.47-beta
 
 **Status:** done

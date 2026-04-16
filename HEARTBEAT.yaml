@@ -1,7 +1,5 @@
 # Heartbeat config for agents
-# Edit this file to customize heartbeat behavior
-
-interval: 600  # seconds
+interval: 86400
 
 message: |
   Pick one random item from SYSTEM_ITEMS.md or REVIEW_LOG.md. Review its current security status. Report: item name, status (pass/fail/needs-attention), and one-line finding. Keep it brief.
