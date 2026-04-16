@@ -14,10 +14,14 @@ const COLS = {
   marker: 2,
   status: 7,
   name: 25,
-  title: 26,
-  owner: 10,
+  title: 22,
+  owner: 11,
   age: 6,
 } as const;
+
+// Extra visual gap between TITLE and OWNER so a truncated title's "…"
+// doesn't run straight into the owner text.
+const TITLE_OWNER_GAP = '  ';
 
 function TaskRowInner({ task, selected, age }: TaskRowProps): React.ReactElement {
   const marker = selected ? '▶ ' : '  ';
@@ -34,6 +38,7 @@ function TaskRowInner({ task, selected, age }: TaskRowProps): React.ReactElement
       <Text color={sColor}>{status}</Text>
       {name}
       {title}
+      {TITLE_OWNER_GAP}
       {owner}
       {ageCell}
     </Text>
@@ -62,6 +67,7 @@ export function TaskRowHeader(): React.ReactElement {
       {padRight('STATUS', COLS.status)}
       {padRight('NAME', COLS.name)}
       {padRight('TITLE', COLS.title)}
+      {TITLE_OWNER_GAP}
       {padRight('OWNER', COLS.owner)}
       {padRight('AGE', COLS.age)}
     </Text>
