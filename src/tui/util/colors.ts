@@ -26,6 +26,26 @@ export function healthDot(health: string): string {
  * from a free-running Date.now() inside render. Bands are discrete so output
  * is byte-stable within each band.
  */
+export function taskStatusColor(status: string): string {
+  switch (status) {
+    case 'todo':
+      return 'gray';
+    case 'doing':
+      return 'yellow';
+    case 'done':
+      return 'green';
+    default:
+      return 'gray';
+  }
+}
+
+export function taskStatusGlyph(status: string): string {
+  if (status === 'done') return '●';
+  if (status === 'doing') return '●';
+  if (status === 'todo') return '○';
+  return '·';
+}
+
 export function newsAgeColor(timestampMs: number, cooldownEpochMs: number): string {
   const ageSec = Math.max(0, Math.floor((cooldownEpochMs - timestampMs) / 1000));
   if (ageSec < 60) return 'greenBright';

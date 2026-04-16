@@ -6,25 +6,30 @@ import { AgentsTable } from './components/AgentsTable.js';
 import { NewsView } from './components/NewsView.js';
 import { NewsDetail } from './components/NewsDetail.js';
 import { StatusStrip } from './components/StatusStrip.js';
-import type { Agent, NewsItem, Team } from './api/types.js';
+import { TasksTable } from './components/TasksTable.js';
+import { TasksStatusStrip } from './components/TasksStatusStrip.js';
+import type { Agent, NewsItem, Task, Team } from './api/types.js';
 import {
   fetchAgentNews,
   fetchAgentsAllTeams,
+  fetchTasks,
   fetchTeams,
   getManagerUrl,
 } from './api/manager.js';
 import { usePolling } from './hooks/usePolling.js';
 import { humanizeUptime } from './util/format.js';
 
-type View = 'agents' | 'news' | 'news-detail';
+type View = 'agents' | 'news' | 'news-detail' | 'tasks';
 
 const AGENTS_POLL_MS = 2000;
 const TEAMS_POLL_MS = 15000;
 const NEWS_POLL_MS = 3000;
+const TASKS_POLL_MS = 5000;
 const NEWS_COOLDOWN_TICK_MS = 10_000;
 const AGENTS_CHROME_ROWS = 11;
 const NEWS_CHROME_ROWS = 6;
 const DETAIL_CHROME_ROWS = 6;
+const TASKS_CHROME_ROWS = 11;
 const DETAIL_CONTENT_WIDTH = 76;
 const MIN_VISIBLE = 3;
 const SELF_AGENT = 'tui';
@@ -67,6 +72,8 @@ export function App({ staticMode = false }: AppProps = {}): React.ReactElement {
   const [windowStart, setWindowStart] = useState(0);
   const [newsSelectedIndex, setNewsSelectedIndex] = useState(0);
   const [newsWindowStart, setNewsWindowStart] = useState(0);
+  const [taskSelectedIndex, setTaskSelectedIndex] = useState(0);
+  const [taskWindowStart, setTaskWindowStart] = useState(0);
   const [paused, setPaused] = useState(false);
   const [cooldownEpoch, setCooldownEpoch] = useState<number>(() => Date.now());
 
@@ -137,7 +144,68 @@ export function App({ staticMode = false }: AppProps = {}): React.ReactElement {
   const agentsWindowSize = Math.max(MIN_VISIBLE, rows - AGENTS_CHROME_ROWS);
   const newsWindowSize = Math.max(MIN_VISIBLE, rows - NEWS_CHROME_ROWS);
   const detailWindowSize = Math.max(MIN_VISIBLE, rows - DETAIL_CHROME_ROWS);
+  const tasksWindowSize = Math.max(MIN_VISIBLE, rows - TASKS_CHROME_ROWS);
   const total = visibleAgents.length;
+
+  // Tasks polling
+  const tasksFetcher = useCallback(
+    (signal: AbortSignal): Promise<Task[]> => fetchTasks(manager, SELF_AGENT, signal),
+    [manager],
+  );
+  const tasksPoll = usePolling<Task[]>(
+    tasksFetcher,
+    TASKS_POLL_MS,
+    paused || staticMode || view !== 'tasks',
+    [manager, view],
+  );
+  const allTasks = tasksPoll.data ?? [];
+  const visibleTasks = useMemo(
+    () =>
+      selectedTeam === null
+        ? allTasks
+        : allTasks.filter((t) => t.teamName === selectedTeam),
+    [allTasks, selectedTeam],
+  );
+  const tasksTotal = visibleTasks.length;
+  const ageByTaskName = useMemo(() => {
+    const map = new Map<string, string>();
+    const tsPoll = tasksPoll.lastUpdated;
+    if (tsPoll === 0) return map;
+    for (const t of allTasks) {
+      // task.createdAt is unix seconds; convert to ms for humanizeUptime
+      map.set(t.name, humanizeUptime(t.createdAt * 1000, tsPoll));
+    }
+    return map;
+  }, [allTasks, tasksPoll.lastUpdated]);
+
+  useEffect(() => {
+    if (tasksTotal === 0) {
+      if (taskSelectedIndex !== 0) setTaskSelectedIndex(0);
+      if (taskWindowStart !== 0) setTaskWindowStart(0);
+      return;
+    }
+    const clampedSel = Math.min(taskSelectedIndex, tasksTotal - 1);
+    if (clampedSel !== taskSelectedIndex) setTaskSelectedIndex(clampedSel);
+    const maxStart = Math.max(0, tasksTotal - tasksWindowSize);
+    let nextStart = taskWindowStart;
+    if (clampedSel < nextStart) nextStart = clampedSel;
+    if (clampedSel >= nextStart + tasksWindowSize)
+      nextStart = clampedSel - tasksWindowSize + 1;
+    if (nextStart > maxStart) nextStart = maxStart;
+    if (nextStart < 0) nextStart = 0;
+    if (nextStart !== taskWindowStart) setTaskWindowStart(nextStart);
+  }, [tasksTotal, taskSelectedIndex, taskWindowStart, tasksWindowSize]);
+
+  const selectedTaskName = visibleTasks[taskSelectedIndex]?.name ?? null;
+
+  const tasksTeamCounts = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const t of allTasks) {
+      if (!t.teamName) continue;
+      counts.set(t.teamName, (counts.get(t.teamName) ?? 0) + 1);
+    }
+    return counts;
+  }, [allTasks]);
 
   useEffect(() => {
     if (total === 0) {
@@ -237,6 +305,18 @@ export function App({ staticMode = false }: AppProps = {}): React.ReactElement {
     [newsTotal],
   );
 
+  const moveTaskSel = useCallback(
+    (delta: number) => {
+      if (tasksTotal === 0) return;
+      setTaskSelectedIndex((idx) => clamp(idx + delta, 0, tasksTotal - 1));
+    },
+    [tasksTotal],
+  );
+
+  const toggleTasksView = useCallback(() => {
+    setView((v) => (v === 'tasks' ? 'agents' : v === 'agents' ? 'tasks' : v));
+  }, []);
+
   const openNews = useCallback(() => {
     if (!selectedAgentName) return;
     setNewsSelectedIndex(0);
@@ -278,6 +358,7 @@ export function App({ staticMode = false }: AppProps = {}): React.ReactElement {
       }
 
       if (view === 'agents') {
+        if (input === 't') return toggleTasksView();
         if (key.rightArrow) return openNews();
         if (key.tab) return cycleTeam(key.shift ? -1 : 1);
         if (key.upArrow) return moveAgentsSel(-1);
@@ -286,6 +367,18 @@ export function App({ staticMode = false }: AppProps = {}): React.ReactElement {
         if (key.pageDown) return moveAgentsSel(agentsWindowSize);
         if (isHomeKey(input)) return setSelectedIndex(0);
         if (isEndKey(input)) return setSelectedIndex(Math.max(0, total - 1));
+        return;
+      }
+
+      if (view === 'tasks') {
+        if (input === 't') return toggleTasksView();
+        if (key.tab) return cycleTeam(key.shift ? -1 : 1);
+        if (key.upArrow) return moveTaskSel(-1);
+        if (key.downArrow) return moveTaskSel(1);
+        if (key.pageUp) return moveTaskSel(-tasksWindowSize);
+        if (key.pageDown) return moveTaskSel(tasksWindowSize);
+        if (isHomeKey(input)) return setTaskSelectedIndex(0);
+        if (isEndKey(input)) return setTaskSelectedIndex(Math.max(0, tasksTotal - 1));
         return;
       }
 
@@ -338,6 +431,25 @@ export function App({ staticMode = false }: AppProps = {}): React.ReactElement {
               <Text color="red">teams error: {teamsPoll.error.message}</Text>
             </Box>
           ) : null}
+        </>
+      ) : view === 'tasks' ? (
+        <>
+          <TeamsPanel
+            teams={teams}
+            selectedTeam={selectedTeam}
+            allCount={allTasks.length}
+            teamCounts={tasksTeamCounts}
+          />
+          <TasksStatusStrip tasks={allTasks} selectedTaskName={selectedTaskName} />
+          <TasksTable
+            tasks={visibleTasks}
+            ageByName={ageByTaskName}
+            selectedIndex={taskSelectedIndex}
+            windowStart={taskWindowStart}
+            windowSize={tasksWindowSize}
+            loading={tasksPoll.lastUpdated === 0 && !tasksPoll.error && !staticMode}
+            error={tasksPoll.error}
+          />
         </>
       ) : view === 'news' ? (
         <NewsView

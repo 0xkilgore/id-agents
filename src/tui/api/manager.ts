@@ -3,6 +3,8 @@ import type {
   AgentsResponse,
   NewsItem,
   RemoteNewsResponse,
+  RemoteTasksResponse,
+  Task,
   Team,
   TeamsResponse,
 } from './types.js';
@@ -38,6 +40,27 @@ export async function fetchAgentsByTeam(
   return (data.agents ?? [])
     .filter(isRealAgent)
     .map((a) => ({ ...a, teamName: team }));
+}
+
+export async function fetchTasks(
+  manager: string,
+  executor: string,
+  signal: AbortSignal,
+): Promise<Task[]> {
+  const res = await fetch(`${manager}/remote`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ agent: executor, command: '/task' }),
+    signal,
+  });
+  if (!res.ok) {
+    throw new Error(`POST /remote → ${res.status} ${res.statusText}`);
+  }
+  const data = (await res.json()) as RemoteTasksResponse;
+  if (!data.ok) {
+    throw new Error(data.error ?? 'unknown manager error');
+  }
+  return data.result?.tasks ?? [];
 }
 
 export async function fetchAgentNews(

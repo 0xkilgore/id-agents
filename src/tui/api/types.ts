@@ -48,3 +48,21 @@ export interface RemoteNewsResponse {
   result?: { items?: NewsItem[] };
   error?: string;
 }
+
+export interface Task {
+  name: string;
+  title: string;
+  description?: string | null;
+  status: string;
+  ownerName?: string | null;
+  teamName?: string;
+  createdAt: number;
+  updatedAt?: number;
+  completedAt?: number | null;
+}
+
+export interface RemoteTasksResponse {
+  ok: boolean;
+  result?: { tasks?: Task[] };
+  error?: string;
+}
