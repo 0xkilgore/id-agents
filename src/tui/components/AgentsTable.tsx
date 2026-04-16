@@ -1,0 +1,50 @@
+import React from 'react';
+import { Box, Text } from 'ink';
+import type { Agent } from '../api/types.js';
+import { AgentRow, AgentRowHeader } from './AgentRow.js';
+
+interface AgentsTableProps {
+  agents: Agent[];
+  selectedIndex: number;
+  windowStart: number;
+  windowSize: number;
+  now: number;
+  loading: boolean;
+  error: Error | null;
+}
+
+export function AgentsTable(props: AgentsTableProps): React.ReactElement {
+  const { agents, selectedIndex, windowStart, windowSize, now, loading, error } = props;
+  const total = agents.length;
+  const windowEnd = Math.min(total, windowStart + windowSize);
+  const visible = agents.slice(windowStart, windowEnd);
+  const hiddenAbove = windowStart;
+  const hiddenBelow = total - windowEnd;
+
+  return (
+    <Box flexDirection="column" borderStyle="round" paddingX={1}>
+      <Box justifyContent="space-between">
+        <Text bold>Agents ({total})</Text>
+        <Text dimColor>
+          {loading && total === 0 ? 'loading…' : null}
+          {error ? `error: ${error.message}` : null}
+        </Text>
+      </Box>
+      <AgentRowHeader />
+      <Text dimColor>{hiddenAbove > 0 ? `↑ ${hiddenAbove} more above` : ' '}</Text>
+      {visible.length === 0 && !loading ? (
+        <Text dimColor>no agents in this view</Text>
+      ) : (
+        visible.map((agent, i) => (
+          <AgentRow
+            key={agent.id}
+            agent={agent}
+            selected={windowStart + i === selectedIndex}
+            now={now}
+          />
+        ))
+      )}
+      <Text dimColor>{hiddenBelow > 0 ? `↓ ${hiddenBelow} more below` : ' '}</Text>
+    </Box>
+  );
+}
