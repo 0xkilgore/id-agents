@@ -44,6 +44,12 @@ export function AgentsTable(props: AgentsTableProps): React.ReactElement {
           />
         ))
       )}
+      {Array.from(
+        { length: Math.max(0, windowSize - Math.max(visible.length, visible.length === 0 && !loading ? 1 : 0)) },
+        (_, i) => (
+          <Text key={`pad-${i}`}> </Text>
+        ),
+      )}
       <Text dimColor>{hiddenBelow > 0 ? `↓ ${hiddenBelow} more below` : ' '}</Text>
     </Box>
   );
