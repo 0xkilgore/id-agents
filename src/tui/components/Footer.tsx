@@ -19,7 +19,7 @@ export function Footer({ view, paused }: FooterProps): React.ReactElement {
       <Text dimColor>{HINTS[view]}</Text>
       <Box>
         {paused ? <Text color="yellow">⏸ paused  </Text> : null}
-        <Text dimColor>id-agents · dashboard</Text>
+        <Text dimColor>ID Agents Dashboard</Text>
       </Box>
     </Box>
   );
