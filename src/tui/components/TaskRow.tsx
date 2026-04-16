@@ -13,14 +13,15 @@ interface TaskRowProps {
 const COLS = {
   marker: 2,
   status: 7,
-  name: 25,
+  name: 23,
   title: 22,
   owner: 11,
   age: 6,
 } as const;
 
-// Extra visual gap between TITLE and OWNER so a truncated title's "…"
-// doesn't run straight into the owner text.
+// Explicit 2-space gaps between adjacent columns that could contain
+// truncated content, so a trailing "…" never abuts the next cell.
+const NAME_TITLE_GAP = '  ';
 const TITLE_OWNER_GAP = '  ';
 
 function TaskRowInner({ task, selected, age }: TaskRowProps): React.ReactElement {
@@ -37,6 +38,7 @@ function TaskRowInner({ task, selected, age }: TaskRowProps): React.ReactElement
       {marker}
       <Text color={sColor}>{status}</Text>
       {name}
+      {NAME_TITLE_GAP}
       {title}
       {TITLE_OWNER_GAP}
       {owner}
@@ -66,6 +68,7 @@ export function TaskRowHeader(): React.ReactElement {
       {padRight('', COLS.marker)}
       {padRight('STATUS', COLS.status)}
       {padRight('NAME', COLS.name)}
+      {NAME_TITLE_GAP}
       {padRight('TITLE', COLS.title)}
       {TITLE_OWNER_GAP}
       {padRight('OWNER', COLS.owner)}
