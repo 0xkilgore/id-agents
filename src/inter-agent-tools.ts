@@ -79,10 +79,6 @@ export async function listAgents(params: ListAgentsParams): Promise<string> {
  */
 export async function talkToAgent(params: TalkToAgentParams): Promise<string> {
   try {
-    if (typeof params.agent_name_or_id === 'string' && params.agent_name_or_id.toLowerCase() === 'manager') {
-      return 'Error: manager is not an agent. Use /talk to message the interactive CLI user.';
-    }
-
     // First, find the agent
     const listResponse = await fetch(`${getManagerBaseUrl()}/agents`);
     if (!listResponse.ok) {
