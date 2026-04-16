@@ -122,9 +122,11 @@ Execute a CLI command:
 
 ## Polling for Agent Replies
 
-After dispatching work to agents via `/remote`, poll for replies using timestamp filtering.
+After dispatching work to agents via `/remote`, poll for replies using timestamp filtering. Always run dispatch and poll as separate steps. Run the poll in the background.
 
 ### Single Agent
+
+**Dispatch (foreground, one-shot).** Returns the queryId immediately.
 
 ```bash
 BEFORE=$(date +%s)000
@@ -132,9 +134,15 @@ BEFORE=$(date +%s)000
 curl -s -X POST http://localhost:4000/remote \
   -H "Content-Type: application/json" \
   -d '{"command":"/ask <agent> <task>"}'
+```
 
-# Poll every 10s for up to 2 minutes
-for i in $(seq 1 12); do
+Capture the timestamp BEFORE dispatching so the poll can filter out stale replies.
+
+**Poll (background, non-blocking).** Run with `run_in_background: true` (Claude Code Bash tool) so the conversation continues while the reply arrives.
+
+```bash
+# Poll every 10s for up to 10 minutes (long tasks routinely take 5-15 min)
+for i in $(seq 1 60); do
   reply=$(curl -s -X POST http://localhost:4000/remote \
     -H "Content-Type: application/json" \
     -d '{"command":"/news <agent>"}' | python3 -c "
@@ -151,7 +159,11 @@ for item in reversed(items):
 done
 ```
 
+Adjust the max wait to fit the task. Implementation work, multi-file edits, and code review routinely take 5-15 minutes, so the 2-minute defaults of older patterns will time out before the agent finishes.
+
 ### Multiple Agents (threshold-based)
+
+**Dispatch (foreground, one-shot).** Fan out to all agents.
 
 ```bash
 BEFORE=$(date +%s)000
@@ -161,9 +173,13 @@ for agent in agent-a agent-b agent-c; do
     -H "Content-Type: application/json" \
     -d "{\"command\":\"/ask ${agent} <task>\"}"
 done
+```
 
-# Wait for 2 of 3, check every 10s, max 3 minutes
-for i in $(seq 1 18); do
+**Poll (background, non-blocking).** Run with `run_in_background: true`. Wait for a threshold (e.g. 2 of 3 replies) instead of all agents.
+
+```bash
+# Wait for 2 of 3, check every 10s, max 10 minutes
+for i in $(seq 1 60); do
   results=""
   for agent in agent-a agent-b agent-c; do
     reply=$(curl -s -X POST http://localhost:4000/remote \
@@ -187,7 +203,13 @@ except: pass
 done
 ```
 
-**Tips:** Record the timestamp BEFORE dispatching to filter stale replies. Use a threshold rather than waiting for all agents. If an agent keeps returning stale replies, use `/clear <agent>`.
+**Tips:** Record the timestamp BEFORE dispatching. Use a threshold rather than waiting for all agents. If an agent keeps returning stale replies, use `/clear <agent>`.
+
+### Anti-patterns
+
+**Do not combine dispatch and poll into one synchronous block.** It blocks the conversation until the agent replies or the loop times out, makes a tool-rejection ambiguous (nothing runs, the user has no idea what was supposed to happen), and hides the queryId behind a wall of "no reply yet" lines.
+
+**Do not run the poll in the foreground.** Even split into two steps, a foreground poll still blocks. Use `run_in_background: true` so the caller can keep working while the reply arrives.
 
 ## Best Practices
 
