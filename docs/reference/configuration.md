@@ -151,6 +151,8 @@ All configs should include `skills: [identity, inter-agent, catalog]` at minimum
 | `skills` | Array | Skills deployed to each agent (minimum: `[identity, inter-agent, catalog]`) |
 | `plugins` | Array | Optional plugins for agent runtimes that support them |
 | `allowedTools` | Array | Default tool restrictions for all agents |
+| `heartbeat` | Number or Object | Default heartbeat interval in seconds (or legacy `{interval, message}` object) |
+| `register` | Boolean | Default onchain registration setting (overrides `onchain.register` per agent) |
 
 ### calendar
 
@@ -220,7 +222,9 @@ Each agent can have the following fields:
 | `allowedTools` | No | From defaults | Restrict agent to specific tools |
 | `env` | No | `{}` | Environment variables for the agent process |
 | `register` | No | From onchain | Whether to register onchain |
-| `heartbeat` | No | - | Single-agent recurring schedule shorthand |
+| `workingDirectory` | No | - | Working directory for the agent process |
+| `agent` | No | - | Load role file from a different template name (e.g., `agent: security-audit` loads `security-audit.md`) |
+| `heartbeat` | No | - | Heartbeat interval in seconds, or legacy `{interval, message}` object |
 | `openMode` | No | `false` | Accept XMTP messages from any sender (not recommended for production) |
 
 ### Agent Example
@@ -281,7 +285,7 @@ Defaults:
 
 ## Skills Configuration
 
-Skills are instruction packages deployed to each agent's `.claude/skills/` directory at deploy time via `deploySkillsToAgent`. Each skill is a directory containing a `SKILL.md` file with YAML frontmatter.
+Skills are instruction packages deployed at deploy time via `deploySkillsToAgent`. The target directory is runtime-aware: `.claude/skills/` for Claude agents, `.agents/skills/` for Codex agents. Each skill is a directory containing a `SKILL.md` file with YAML frontmatter.
 
 All configs should include `skills: [identity, inter-agent, catalog]` at minimum. The 7 built-in skills are: `identity`, `inter-agent`, `catalog`, `wallet`, `xmtp`, `admin-control`, `local-agent`.
 
@@ -552,3 +556,22 @@ Configuration files are validated on load. Common errors:
 - Missing required `heartbeat.interval` or `heartbeat.message` (legacy object format)
 - Invalid resource limit format
 - Undefined parameter reference
+
+### Name Validation
+
+Team and agent names are validated at creation time. Names are rejected if they:
+
+- Match reserved command verbs (`delete`, `deploy`, `sync`, etc.)
+- Contain shell wildcards (`*`, `?`, `[`, `]`)
+- Start with `-` or `--`
+- Contain whitespace or control characters
+- Are empty or exceed 64 characters
+
+Existing teams and agents are grandfathered — validation is creation-time only.
+
+### Team Deletion Safety
+
+Deleting a team requires it to be empty first. Three explicit actions are required to fully wipe a team:
+
+1. `/delete --team <name>` — delete all agents in the team
+2. `/team delete <name>` — delete the team record

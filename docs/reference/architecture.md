@@ -95,8 +95,9 @@ User types: /ask coder hello
 | `src/claude-agent-server.ts` | Compatibility export layer for older imports of the agent REST server |
 | `src/local-agent-server.ts` | Agent process bootstrap and CLI arg parsing |
 | `src/interactive-agent-cli.ts` | User-facing CLI |
-| `src/config-parser.ts` | YAML config parsing and parameter substitution |
-| `src/runtime/registry.ts` | Runtime registry: defaults, labels, auth/preflight, session policy |
+| `src/config-parser.ts` | YAML config parsing, parameter substitution, runtime-aware template loading |
+| `src/runtime/registry.ts` | Runtime registry: defaults, labels, auth/preflight, session policy, `getRuntimePaths()` |
+| `src/protocol-defaults.ts` | Framework protocol defaults prepended to every agent's personality file |
 | `src/onchain/idchain-register.ts` | ENS registration via id-cli |
 | `src/core/agent-identifier.ts` | ENS name parsing and display |
 | `src/db.ts` | PostgreSQL schema, migrations, connection pool |
@@ -105,6 +106,35 @@ User types: /ask coder hello
 | `src/xmtp/ows-signer.ts` | OWS-backed XMTP signer — key never leaves vault |
 | `src/harness/claude-code-cli.ts` | Claude Code CLI harness for spawning LLM sessions |
 | `src/harness/codex.ts` | Codex CLI harness for spawning Codex sessions |
+
+## Agent Instructions: Two Sources
+
+Every agent's personality file is composed from exactly two sources:
+
+1. **Protocol defaults** (`src/protocol-defaults.ts`) — framework-managed rules injected into every agent automatically: scheduling awareness, task-discipline lifecycle, output convention.
+2. **Agent role file** — role-specific personality editable by the user. Located in the runtime-appropriate template directory.
+
+The YAML config provides infrastructure only: name, workingDirectory, model, runtime, heartbeat, skills. No `claudeMd` field.
+
+### Runtime-Aware Paths
+
+All template and skill operations use `getRuntimePaths(runtime)` from `src/runtime/registry.ts`:
+
+| Runtime | Template Directory | Personality File | Skills Directory |
+|---------|-------------------|-----------------|-----------------|
+| `claude-code-cli` | `.claude/agents/` | `.claude/CLAUDE.md` | `.claude/skills/` |
+| `claude-agent-sdk` | `.claude/agents/` | `.claude/CLAUDE.md` | `.claude/skills/` |
+| `codex` | `.agents/` | `AGENTS.md` (project root) | `.agents/skills/` |
+
+### Spawn Order
+
+All four spawn paths (deploy, sync-changed, sync-added, remote-deploy) follow the same order:
+
+1. Deploy team-level skills to the runtime-aware skills directory
+2. Overlay agent directory template (if it exists) to the runtime-aware config directory
+3. Write personality file with protocol defaults + role body to the runtime-aware path
+
+This ensures agent-specific files overlay team skills, and the personality file is always written last.
 
 ## Onchain Identity
 

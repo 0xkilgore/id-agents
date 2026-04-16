@@ -1,6 +1,6 @@
 # ID Agents Documentation
 
-**Version 0.1.43-beta**
+**Version 0.1.53-beta**
 
 Documentation for the ID Agents multi-agent orchestration platform.
 
@@ -15,6 +15,10 @@ Documentation for the ID Agents multi-agent orchestration platform.
 - [Interactive Agent Guide](./guides/interactive-agent.md) - Run the interactive CLI
 - [Sync Command Guide](./guides/sync-command.md) - Update a running team without losing sessions (`/sync` vs `/deploy`)
 - [Admin Control Guide](./guides/admin-control.md) - Programmatic team management via `/remote`, talk-to-manager, and agent reply polling
+- [Task Tracking Guide](./guides/tasks.md) - Task lifecycle, handoff pattern, and stale task verification
+- [News Feed Guide](./guides/news-feed.md) - Loop-safe message channel and multi-reply catch-all
+- [Agent Outputs Guide](./guides/agent-outputs.md) - Output convention, `/output`, and `/artifact`
+- [Heartbeats Guide](./guides/heartbeats.md) - Agent-driven heartbeat system via HEARTBEAT.md
 
 ## Protocols
 
@@ -39,7 +43,7 @@ Documentation for the ID Agents multi-agent orchestration platform.
 
 ## Skills
 
-Skills are deployed to each agent's `.claude/skills/` directory at deploy time. All configs should include `skills: [identity, inter-agent, catalog]` at minimum.
+Skills are deployed at deploy time to the runtime-appropriate directory: `.claude/skills/` for Claude agents, `.agents/skills/` for Codex agents. All configs should include `skills: [identity, inter-agent, catalog]` at minimum.
 
 - [Skills Overview](../skills/README.md) - Available skills and usage guide
 - [Identity](../skills/identity/SKILL.md) - Agent name, team, onchain domain

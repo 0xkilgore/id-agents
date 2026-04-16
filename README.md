@@ -9,7 +9,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-**Version 0.1.36-beta**
+**Version 0.1.53-beta**
 
 Run a team of AI coding agents from a single chat. Each agent is a real process with full tool access — Claude Code, OpenAI Codex, or both. No UI needed. Connect from any terminal, Telegram, or SSH session.
 
@@ -233,8 +233,12 @@ See [Scheduling Plan](./docs/SCHEDULING_PLAN.md) for the full design.
 /ask * <message>            # Broadcast to all agents
 /clear [agent]              # Clear session (start fresh)
 /delete <agent>             # Delete agent
+/delete *                   # Delete all agents in current team
+/delete --team <name>       # Delete all agents in specified team
 /deploy <config>            # Deploy agents from config (clean/first-time)
 /sync <config>              # Reconcile running team with config (preserves sessions)
+/output <agent>             # List files in agent's output directory
+/artifact <agent> <path>    # Read a file from agent's output directory
 /help                       # Show help
 /news [-l] <agent>          # Check recent messages (-l for full content)
 /register <agent>           # Register agent onchain
@@ -292,9 +296,13 @@ This means any Claude Code instance on the same machine can coordinate with your
 - `/ask <name> <message>` - Send message to agent
 - `/clear [agent]` - Clear session
 - `/delete <name>` - Delete agent
+- `/delete *` - Delete all agents in current team
+- `/delete --team <name>` - Delete all agents in specified team
 - `/deploy <config>` - Deploy agents from YAML config (clean/first-time)
 - `/sync <config>` - [Reconcile running team with config](docs/guides/sync-command.md) (preserves sessions)
 - `/news [-l] <name>` - Check recent messages
+- `/output <name>` - List files in agent's output directory
+- `/artifact <name> <path>` - Read a file from agent's output directory
 - `/register <name>` - Register agent onchain
 - `/status` - Show status
 - `/heartbeat` - List heartbeats
@@ -396,7 +404,7 @@ defaults:
 
 All configs should include `skills: [identity, inter-agent, catalog]` at minimum. Skills from defaults and per-agent lists are merged (deduped). You can also download skills from Anthropic or the community and drop them in.
 
-Skills are deployed to each agent's `.claude/skills/` directory at deploy time via `deploySkillsToAgent`.
+Skills are deployed at deploy time via `deploySkillsToAgent`. The target directory is runtime-aware: `.claude/skills/` for Claude agents, `.agents/skills/` for Codex agents.
 
 ### Plugins
 
@@ -731,6 +739,7 @@ Triggered messages (from schedules and heartbeats) include a `noAutoReply` flag 
 - [docs/guides/tasks.md](./docs/guides/tasks.md) - Task tracking with `/task`
 - [docs/guides/news-feed.md](./docs/guides/news-feed.md) - News feed and message channels
 - [docs/guides/agent-outputs.md](./docs/guides/agent-outputs.md) - Agent output convention and `/artifact`
+- [docs/guides/heartbeats.md](./docs/guides/heartbeats.md) - Agent-driven heartbeat system
 
 ## Development
 
