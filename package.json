@@ -36,7 +36,10 @@
     "test:claude-client": "npm run build && node dist/examples/test-claude-client.js",
     "demo": "npm run build && node dist/examples/multi-agent-demo.js",
     "demo:inter-agent": "npm run build && node dist/examples/inter-agent-demo.js",
-    "local-agent": "npm run build && node dist/local-agent-server.js"
+    "local-agent": "npm run build && node dist/local-agent-server.js",
+    "tui:dev": "tsx src/tui/index.tsx",
+    "tui:build": "tsc -p src/tui/tsconfig.json",
+    "tui": "npm run tui:build && node dist/tui/index.js"
   },
   "files": [
     "dist/**/*",
@@ -78,7 +81,10 @@
     "@types/node": "^22.10.2",
     "@types/node-fetch": "^2.6.13",
     "@types/pg": "^8.16.0",
+    "@types/react": "^18.3.28",
     "@types/ws": "^8.18.1",
+    "ink": "^5.2.1",
+    "react": "^18.3.1",
     "tsx": "^4.21.0",
     "typescript": "^5.7.2",
     "vitest": "^4.0.17"
