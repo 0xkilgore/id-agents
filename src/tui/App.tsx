@@ -7,7 +7,6 @@ import { NewsView } from './components/NewsView.js';
 import { NewsDetail } from './components/NewsDetail.js';
 import { StatusStrip } from './components/StatusStrip.js';
 import { TasksTable } from './components/TasksTable.js';
-import { TasksStatusStrip } from './components/TasksStatusStrip.js';
 import type { Agent, NewsItem, Task, Team } from './api/types.js';
 import {
   fetchAgentNews,
@@ -29,7 +28,7 @@ const NEWS_COOLDOWN_TICK_MS = 10_000;
 const AGENTS_CHROME_ROWS = 11;
 const NEWS_CHROME_ROWS = 6;
 const DETAIL_CHROME_ROWS = 6;
-const TASKS_CHROME_ROWS = 11;
+const TASKS_CHROME_ROWS = 10;
 const DETAIL_CONTENT_WIDTH = 76;
 const MIN_VISIBLE = 3;
 const SELF_AGENT = 'tui';
@@ -440,7 +439,6 @@ export function App({ staticMode = false }: AppProps = {}): React.ReactElement {
             allCount={allTasks.length}
             teamCounts={tasksTeamCounts}
           />
-          <TasksStatusStrip tasks={allTasks} selectedTaskName={selectedTaskName} />
           <TasksTable
             tasks={visibleTasks}
             ageByName={ageByTaskName}
