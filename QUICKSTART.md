@@ -23,6 +23,12 @@ Follow these steps to set up and deploy your first agent team.
   codex login
   ```
 
+## ⚠️ Permissions Notice — Read Before Deploying
+
+ID Agents runs each agent as a background Claude Code process. Because there is no interactive shell to approve tool use, the agent processes MUST launch with `--dangerously-skip-permissions`. This is the default and is forced for the `claude-code-cli` runtime — there is no YAML knob to disable it.
+
+If you are not comfortable giving background agents this level of autonomy, ID Agents is not the right tool for you. Do not try to run with a stricter permission mode. The agents will hang silently on the first tool-use prompt with no way to approve them.
+
 ## Runtime Selection
 
 Detect which agent CLIs are ready to use on this machine, then pick the deploy command automatically. **Prefer a mixed team** (`/deploy demo-mixed`) whenever both Claude Code and Codex are installed and authenticated — it's the most compelling first demo. Fall back to a single-runtime team only if one is unavailable.

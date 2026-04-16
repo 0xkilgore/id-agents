@@ -85,6 +85,8 @@ Run a team of AI coding agents from a single chat. Each agent is a real process 
 
 > **Important:** You must be logged into Claude Code CLI before starting ID Agents. Run `claude login` in your terminal and complete the authentication. If you use Claude Code in VS Code, you still need to log in via the terminal — open VS Code's integrated terminal and run `claude login` there.
 
+> **⚠️ Permissions:** ID Agents runs each agent as a background Claude Code process and forces `--dangerously-skip-permissions` on every spawn. Background processes have no shell to approve tool prompts, so a stricter mode would hang the agents silently. If you are not comfortable giving background agents this level of autonomy, ID Agents is not the right tool for you. See [QUICKSTART.md](./QUICKSTART.md#-permissions-notice--read-before-deploying) for the full notice.
+
 ### Recommended: Let Claude set it up
 
 The fastest way to start is to let a Claude Code session run the quickstart for you, via the `idagents-admin-control` skill. Claude clones the repo, installs dependencies, starts the manager, deploys a demo team, then offers to act as your team manager.
