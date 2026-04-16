@@ -4549,7 +4549,7 @@ async function deployFromConfig(filePath: string, args: string[] = []) {
         allowedTools: agent.allowedTools,
         agentTemplate: agent.agent,  // Template name override (loads <agent>/CLAUDE.md or <agent>.md)
         roleBody: agent.roleBody,  // Agent role from .claude/agents/<name>.md (resolved by processConfig)
-        heartbeat: agent.heartbeat,  // Heartbeat config {interval, message} (resolved by processConfig)
+        heartbeat: agent.heartbeat,  // Number (seconds) or {interval, message} for legacy
         domain: agent.domain,
         tokenId: agent.tokenId,
         address: agent.address,

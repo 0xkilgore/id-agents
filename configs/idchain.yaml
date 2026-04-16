@@ -52,37 +52,27 @@ agents:
   - name: contracts
     description: "Smart contracts (IDRegistry, IDAgentRegistrar, resolvers) — Foundry/Solidity"
     workingDirectory: /Users/nxt3d/projects/idx
-    heartbeat:
-      interval: 86400
-      message: "Pick one random item from SYSTEM_ITEMS.md or REVIEW_LOG.md. Review its current security status. Report: item name, status (pass/fail/needs-attention), and one-line finding. Keep it brief."
+    heartbeat: 86400
 
   - name: web
     description: "id-app Next.js frontend — registration UI, wallet integration, CCIP-Read"
     workingDirectory: /Users/nxt3d/projects/id2/id-app
-    heartbeat:
-      interval: 86400
-      message: "Pick one random item from SYSTEM_ITEMS.md or REVIEW_LOG.md. Review its current security status. Report: item name, status (pass/fail/needs-attention), and one-line finding. Keep it brief."
+    heartbeat: 86400
 
   - name: gateway
     description: "idx-gateway CCIP-Read server — ECDSA signing, cross-chain resolution"
     workingDirectory: /Users/nxt3d/projects/idx-gateway
-    heartbeat:
-      interval: 86400
-      message: "Pick one random item from SYSTEM_ITEMS.md or REVIEW_LOG.md. Review its current security status. Report: item name, status (pass/fail/needs-attention), and one-line finding. Keep it brief."
+    heartbeat: 86400
 
   - name: indexer
     description: "idx-indexer Ponder.js service — event processing, REST API, multi-chain"
     workingDirectory: /Users/nxt3d/projects/idx-indexer
-    heartbeat:
-      interval: 86400
-      message: "Pick one random item from SYSTEM_ITEMS.md or REVIEW_LOG.md. Review its current security status. Report: item name, status (pass/fail/needs-attention), and one-line finding. Keep it brief."
+    heartbeat: 86400
 
   - name: cli
     description: "id-cli — agent registration, ENS linking, record management"
     workingDirectory: /Users/nxt3d/projects/id-cli
-    heartbeat:
-      interval: 86400
-      message: "Pick one random item from SYSTEM_ITEMS.md or REVIEW_LOG.md. Review its current security status. Report: item name, status (pass/fail/needs-attention), and one-line finding. Keep it brief."
+    heartbeat: 86400
 
   - name: x
     description: "ID Chain X/Twitter — social media monitoring, trend analysis, community engagement, content drafting"
@@ -95,9 +85,7 @@ agents:
   - name: agents
     description: "id-agents orchestration platform — multi-agent system, REST-AP protocol"
     workingDirectory: /Users/nxt3d/projects/id2/id-agents
-    heartbeat:
-      interval: 86400
-      message: "Pick one random item from SYSTEM_ITEMS.md or REVIEW_LOG.md. Review its current security status. Report: item name, status (pass/fail/needs-attention), and one-line finding. Keep it brief."
+    heartbeat: 86400
 
   - name: stars-app
     description: "EthStars dapp — Next.js frontend for star credentials, name resolution, claim flows"

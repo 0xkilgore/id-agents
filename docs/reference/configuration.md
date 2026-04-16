@@ -38,10 +38,7 @@ calendar:
 agents:
   - name: coder
     model: claude-sonnet-4-20250514
-    heartbeat:
-      interval: 300
-      message: Review open PRs and summarize risks
-      delivery: internal
+    heartbeat: 300  # seconds — agent reads HEARTBEAT.md checklist
     register: true
   - name: researcher
     systemPrompt: "You are a research specialist."
@@ -237,16 +234,25 @@ agents:
       You are a senior software developer.
       Focus on code quality and best practices.
     skills: [identity, inter-agent, catalog, wallet]
-    heartbeat:
-      interval: 300
-      message: Review open PRs and summarize risks.
-      delivery: internal
+    heartbeat: 300
     register: true
 ```
 
 ### heartbeat
 
 Agent-level recurring scheduling shorthand. This compiles into an internal `interval` schedule targeting that one agent.
+
+**New model (recommended):** Set `heartbeat` to a plain number (seconds). The scheduler sends a generic wake-up message and the agent reads its own `HEARTBEAT.md` checklist from the working directory root. If nothing needs attention, the agent responds with `HEARTBEAT_OK` and the response is silently suppressed from the news feed.
+
+```yaml
+agents:
+  - name: coder
+    heartbeat: 86400  # daily, in seconds
+```
+
+Create a `HEARTBEAT.md` in the agent's template directory (`.claude/agents/{name}/HEARTBEAT.md`). It is copied to the working directory root at spawn time.
+
+**Legacy model:** An object with `interval` and `message` still works. The scheduler sends the configured message directly.
 
 ```yaml
 agents:
@@ -255,11 +261,9 @@ agents:
       interval: 300
       message: Review open PRs and summarize risks
       delivery: internal
-      maxBeats: 20
-      expiresAfter: 7200
 ```
 
-#### Heartbeat Object
+#### Heartbeat Object (legacy)
 
 | Field | Required | Description |
 |-------|----------|-------------|
@@ -471,10 +475,7 @@ agents:
     systemPrompt: |
       You are the lead developer.
       Coordinate work and review code from other agents.
-    heartbeat:
-      interval: 300
-      message: Review recent changes and coordinate the team.
-      delivery: internal
+    heartbeat: 300
     register: true
 
   # Standard developer
@@ -548,6 +549,6 @@ Configuration files are validated on load. Common errors:
 - Invalid `runtime` value
 - Missing `name` in agents array
 - Invalid `calendar.time`, `calendar.days`, or `calendar.delivery`
-- Missing required `heartbeat.interval` or `heartbeat.message`
+- Missing required `heartbeat.interval` or `heartbeat.message` (legacy object format)
 - Invalid resource limit format
 - Undefined parameter reference

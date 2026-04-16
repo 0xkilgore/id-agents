@@ -27,14 +27,14 @@ import { type Db } from './db/db-service.js';
 import type { AgentRow, ScheduleDefinitionRow, TaskRow } from './db/types.js';
 import fetch from 'node-fetch';
 import type { PluginConfig, DeployConfig, HeartbeatConfig, CalendarSpec, ScheduleDeliveryMode } from './config-parser.js';
-import { processConfig, copyAgentDirOverlay } from './config-parser.js';
+import { processConfig, copyAgentDirOverlay, copyHeartbeatMd } from './config-parser.js';
 import { PROTOCOL_DEFAULTS } from './protocol-defaults.js';
 import { computeSyncPlan, formatSyncSummary, formatSyncVerbose } from './sync.js';
 import { validateName } from './name-validation.js';
 import { parseAgentRef, normalizeAlias, buildAmbiguityWarning, type AgentMatch } from './core/agent-identifier.js';
 import type { HarnessType } from './harness/types.js';
 import { SchedulerService } from './scheduling/scheduler-service.js';
-import { heartbeatToSchedule, calendarToSchedule, validateIntervalSeconds } from './scheduling/schedule-config.js';
+import { heartbeatToSchedule, calendarToSchedule, validateIntervalSeconds, HEARTBEAT_GENERIC_MESSAGE } from './scheduling/schedule-config.js';
 import {
   getAvailableRuntimes,
   getDefaultModelForRuntime,
@@ -1629,14 +1629,6 @@ export class AgentManagerDb {
         // Create workspace directory first (needed for plugin copy)
         mkdirSync(workingDirectory, { recursive: true });
 
-        // Write HEARTBEAT.yaml if specified
-        if (heartbeat && typeof heartbeat === 'object' && heartbeat.interval && heartbeat.message) {
-          const heartbeatPath = path.join(workingDirectory, 'HEARTBEAT.yaml');
-          const heartbeatContent = `# Heartbeat config for ${name}\n# Edit this file to customize heartbeat behavior\n\ninterval: ${heartbeat.interval}  # seconds\n\nmessage: |\n${heartbeat.message.split('\n').map((line: string) => '  ' + line).join('\n')}\n`;
-          writeFileSync(heartbeatPath, heartbeatContent);
-          console.log(`[Spawn] Wrote heartbeat config to ${heartbeatPath}`);
-        }
-
         // 1. Deploy team-level skills to agent's .claude/skills/ folder
         if (skills && Array.isArray(skills) && skills.length > 0) {
           this.deploySkillsToAgent(workingDirectory, skills, {
@@ -1651,6 +1643,8 @@ export class AgentManagerDb {
 
         // 2. Overlay agent directory template (skills, hooks, settings, etc.)
         copyAgentDirOverlay(workingDirectory, agentTemplate || name);
+        // Copy HEARTBEAT.md from template to working directory root
+        copyHeartbeatMd(workingDirectory, agentTemplate || name);
 
         // 3. Write CLAUDE.md: protocol defaults + agent role body (overwrites any CLAUDE.md from overlay)
         {
@@ -1732,8 +1726,8 @@ export class AgentManagerDb {
         const hostSharedDirectory = `${hostWorkspaceDir}/teams/${teamName}`;
 
         // Seed heartbeat schedule if enabled
-        if (heartbeat && heartbeat.interval && this.schedulerService) {
-          const { definition, agentIds } = heartbeatToSchedule(id, name, heartbeat as HeartbeatConfig);
+        if (heartbeat && this.schedulerService) {
+          const { definition, agentIds } = heartbeatToSchedule(id, name, heartbeat);
           await this.schedulerService.seedSchedule(definition, agentIds);
         }
 
@@ -3188,7 +3182,7 @@ export class AgentManagerDb {
             }
             const config = this.readHeartbeatConfig(agent.working_directory);
             if (!config) {
-              return { ok: false, error: `Agent "${agent.name}" has no HEARTBEAT.yaml in working directory` };
+              return { ok: false, error: `Agent "${agent.name}" has no HEARTBEAT.yaml or HEARTBEAT.md in working directory` };
             }
             const newMetadata = { ...agent.metadata, heartbeat: true };
             await this.db.agents.updateMetadata(agent.id, newMetadata);
@@ -3762,6 +3756,7 @@ export class AgentManagerDb {
 
           // 2. Overlay agent directory template
           copyAgentDirOverlay(workingDirectory, spec.agent || spec.name);
+          copyHeartbeatMd(workingDirectory, spec.agent || spec.name);
 
           // 3. Write CLAUDE.md: protocol defaults + agent role body
           {
@@ -3770,12 +3765,6 @@ export class AgentManagerDb {
             const claudeDir = path.join(workingDirectory, '.claude');
             if (!existsSync(claudeDir)) mkdirSync(claudeDir, { recursive: true });
             writeFileSync(path.join(claudeDir, 'CLAUDE.md'), parts.join('\n\n'));
-          }
-
-          if (spec.heartbeat) {
-            const heartbeatPath = path.join(workingDirectory, 'HEARTBEAT.yaml');
-            const heartbeatContent = `# Heartbeat config for ${spec.name}\ninterval: ${spec.heartbeat.interval}\n\nmessage: |\n${spec.heartbeat.message.split('\n').map(line => '  ' + line).join('\n')}\n`;
-            writeFileSync(heartbeatPath, heartbeatContent);
           }
 
           // Update DB row in place — preserve the agent ID
@@ -3870,6 +3859,7 @@ export class AgentManagerDb {
 
             // 2. Overlay agent directory template
             copyAgentDirOverlay(workingDirectory, spec.agent || spec.name);
+            copyHeartbeatMd(workingDirectory, spec.agent || spec.name);
 
             // 3. Write CLAUDE.md: protocol defaults + agent role body
             {
@@ -3920,12 +3910,6 @@ export class AgentManagerDb {
             await this.db.agents.updateStatus(agentId, 'pending', {
               port, endpoint: url, metadata: { ...metadata, endpoint: url, local: true },
             });
-
-            if (spec.heartbeat) {
-              const heartbeatPath = path.join(workingDirectory, 'HEARTBEAT.yaml');
-              const heartbeatContent = `# Heartbeat config for ${spec.name}\ninterval: ${spec.heartbeat.interval}\n\nmessage: |\n${spec.heartbeat.message.split('\n').map(line => '  ' + line).join('\n')}\n`;
-              writeFileSync(heartbeatPath, heartbeatContent);
-            }
 
             const spawnResult = await this.spawnLocalAgentProcess(syncTeamId, syncTeamName, {
               name: spec.name, id: agentId, port, model: effectiveModel,
@@ -4152,16 +4136,8 @@ export class AgentManagerDb {
             const isAutomator = agentConfig.type === 'automator';
             const agentType = agentConfig.type || 'claude';
 
-            // Get heartbeat config (already resolved by processConfig from heartbeatFile)
-            const heartbeatConfig = agentConfig.heartbeat as HeartbeatConfig | undefined;
-
-            // Copy heartbeat config to agent's working directory if specified
-            if (heartbeatConfig) {
-              const heartbeatPath = path.join(workingDirectory, 'HEARTBEAT.yaml');
-              const heartbeatContent = `# Heartbeat config for ${agentConfig.name}\n# Edit this file to customize heartbeat behavior\n\ninterval: ${heartbeatConfig.interval}  # seconds\n\nmessage: |\n${heartbeatConfig.message.split('\n').map(line => '  ' + line).join('\n')}\n`;
-              writeFileSync(heartbeatPath, heartbeatContent);
-              console.log(`[Deploy] Wrote heartbeat config to ${heartbeatPath}`);
-            }
+            // Get heartbeat config
+            const heartbeatConfig = agentConfig.heartbeat;
 
             const metadata: AgentMetadata = {
               name: agentConfig.name,
@@ -4172,7 +4148,7 @@ export class AgentManagerDb {
               allowed_tools: agentConfig.allowedTools,
               description: agentConfig.description,
               ...(isAutomator && { isAutomator: true }),
-              // Flag that heartbeat is enabled (actual config read from HEARTBEAT.yaml in working dir)
+              // Flag that heartbeat is enabled
               ...(heartbeatConfig && { heartbeat: true }),
               ...(agentConfig.openMode !== undefined && { openMode: agentConfig.openMode })
             };
@@ -4215,6 +4191,7 @@ export class AgentManagerDb {
 
             // 2. Overlay agent directory template
             copyAgentDirOverlay(workingDirectory, agentConfig.agent || agentConfig.name);
+            copyHeartbeatMd(workingDirectory, agentConfig.agent || agentConfig.name);
 
             // 3. Write CLAUDE.md: protocol defaults + agent role body
             {
@@ -4445,7 +4422,7 @@ export class AgentManagerDb {
               return { ok: false, error: 'Logs not available for local agents' };
             }
             case 'heartbeat': {
-              // Send heartbeat and reset timer (reads from agent's HEARTBEAT.yaml)
+              // Send heartbeat and reset timer
               if (agent.metadata?.heartbeat !== true) {
                 return { ok: false, error: `Agent "${agent.name}" does not have heartbeat enabled` };
               }
@@ -4458,7 +4435,7 @@ export class AgentManagerDb {
               // Read config from file
               const config = this.readHeartbeatConfig(agent.working_directory);
               if (!config) {
-                return { ok: false, error: `Agent "${agent.name}" has no HEARTBEAT.yaml file` };
+                return { ok: false, error: `Agent "${agent.name}" has no HEARTBEAT.yaml or HEARTBEAT.md file` };
               }
               // Send one immediate message and reseed the schedule
               if (agent.endpoint) {
@@ -5312,29 +5289,39 @@ export class AgentManagerDb {
   // ==================== Heartbeat System ====================
 
   /**
-   * Read heartbeat config from agent's working directory HEARTBEAT.yaml file
+   * Read heartbeat config from agent's working directory.
+   * Checks HEARTBEAT.yaml (legacy) first, then HEARTBEAT.md (new model).
    */
   private readHeartbeatConfig(workingDirectory: string): HeartbeatConfig | null {
-    const heartbeatPath = path.join(workingDirectory, 'HEARTBEAT.yaml');
-    if (!existsSync(heartbeatPath)) {
-      return null;
-    }
-    try {
-      const content = readFileSync(heartbeatPath, 'utf-8');
-      const config = yaml.load(content) as { interval?: number; message?: string; maxBeats?: number; expiresAfter?: number };
-      if (typeof config?.interval === 'number' && typeof config?.message === 'string') {
-        return {
-          interval: config.interval,
-          message: config.message.trim(),
-          ...(typeof config.maxBeats === 'number' && { maxBeats: config.maxBeats }),
-          ...(typeof config.expiresAfter === 'number' && { expiresAfter: config.expiresAfter })
-        };
+    // Legacy: HEARTBEAT.yaml with interval + message
+    const yamlPath = path.join(workingDirectory, 'HEARTBEAT.yaml');
+    if (existsSync(yamlPath)) {
+      try {
+        const content = readFileSync(yamlPath, 'utf-8');
+        const config = yaml.load(content) as { interval?: number; message?: string; maxBeats?: number; expiresAfter?: number };
+        if (typeof config?.interval === 'number' && typeof config?.message === 'string') {
+          return {
+            interval: config.interval,
+            message: config.message.trim(),
+            ...(typeof config.maxBeats === 'number' && { maxBeats: config.maxBeats }),
+            ...(typeof config.expiresAfter === 'number' && { expiresAfter: config.expiresAfter })
+          };
+        }
+      } catch (error: any) {
+        console.log(`[Heartbeat] Error reading ${yamlPath}: ${error.message}`);
       }
-      return null;
-    } catch (error: any) {
-      console.log(`[Heartbeat] Error reading ${heartbeatPath}: ${error.message}`);
-      return null;
     }
+
+    // New model: HEARTBEAT.md exists → agent-driven, use generic message
+    const mdPath = path.join(workingDirectory, 'HEARTBEAT.md');
+    if (existsSync(mdPath)) {
+      return {
+        interval: 86400,  // default interval for manual enable; overridden by config
+        message: HEARTBEAT_GENERIC_MESSAGE,
+      };
+    }
+
+    return null;
   }
 
 

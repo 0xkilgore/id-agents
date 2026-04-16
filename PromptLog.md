@@ -8,6 +8,24 @@ Entries are synthesized prompts, not verbatim chat messages. They can describe c
 
 ---
 
+## 2026-04-15: Agent-driven heartbeats via HEARTBEAT.md, 0.1.52-beta
+
+**Status:** done
+
+Redesign the heartbeat system from manager-driven to agent-driven. The heartbeat message moves out of the YAML config (`heartbeat: {interval, message}`) and into a `HEARTBEAT.md` checklist file in the agent template directory (`.claude/agents/{name}/HEARTBEAT.md`). The scheduler becomes a dumb wake-up timer — it sends a generic message telling the agent to read its own checklist. The agent decides what to do by reading HEARTBEAT.md from its working directory root.
+
+YAML config simplifies from `heartbeat: {interval: 86400, message: "..."}` to just `heartbeat: 86400`. Legacy object format still works for backward compatibility. `heartbeatToSchedule()` accepts `number | HeartbeatConfig` and sends the generic wake-up for the new model, preserving the custom message for legacy.
+
+At spawn time, `copyHeartbeatMd()` copies HEARTBEAT.md from the agent template directory to the working directory root. All four spawn paths include this step. HEARTBEAT.yaml is no longer written at spawn time (removed from all 4 sites + remote-deploy).
+
+Silent no-ops: when an agent responds with exactly `HEARTBEAT_OK`, the `query.completed` and `response.saved` news items are suppressed. Logged at debug level with a green heart icon instead.
+
+HEARTBEAT.md files created for all 6 idchain agents with heartbeat enabled: contracts, web, gateway, indexer, cli, agents. Each contains the same security review checklist that was previously inline in the YAML message.
+
+12 new unit tests covering config parsing (number vs legacy object, defaults inheritance), schedule creation (generic vs custom message, maxBeats/expiresAfter preservation), and copyHeartbeatMd (missing dir, no file, copy, overwrite).
+
+---
+
 ## 2026-04-15: Recursive directory overlay on spawn, 0.1.51-beta
 
 **Status:** done

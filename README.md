@@ -166,15 +166,15 @@ The manager is the only component that decides when a run is due. Agents do not 
 
 ### Authoring model
 
-For single-agent recurring work, keep scheduling close to the agent with `heartbeat`:
+For single-agent recurring work, keep scheduling close to the agent with `heartbeat`. The agent reads its own `HEARTBEAT.md` checklist when woken up:
 
 ```yaml
 agents:
   - name: monitor
-    heartbeat:
-      interval: 300
-      message: "Check system health and report status"
+    heartbeat: 300  # seconds — agent reads HEARTBEAT.md
 ```
+
+Place the checklist at `.claude/agents/{name}/HEARTBEAT.md` in the agent's working directory. It is copied to the root at spawn time. If nothing needs attention, the agent responds with `HEARTBEAT_OK` and the response is silently suppressed from the news feed.
 
 For wall-clock events, use top-level `calendar`:
 
@@ -459,10 +459,7 @@ agents:
   - name: coder
     description: "Writes and reviews code"
     workingDirectory: /path/to/project
-    heartbeat:
-      interval: 300
-      message: "Review open PRs and summarize risks"
-      delivery: internal
+    heartbeat: 300  # seconds — agent reads HEARTBEAT.md
     domain: coder.agent-1.xid.eth  # Preserved across redeploys
     tokenId: "0xabcd..."               # Namehash of the ENS domain
   - name: researcher
@@ -702,7 +699,7 @@ curl -s -X POST $MANAGER_URL/message \
 
 ### Loop Prevention
 
-Triggered messages (from schedules and heartbeats) include a `noAutoReply` flag that prevents the agent from automatically replying back to the sender. The response is stored in the agent's own news feed instead, preventing infinite ping-pong loops between agents.
+Triggered messages (from schedules and heartbeats) include a `noAutoReply` flag that prevents the agent from automatically replying back to the sender. The response is stored in the agent's own news feed instead, preventing infinite ping-pong loops between agents. If the agent responds with exactly `HEARTBEAT_OK`, the response is silently suppressed from the news feed and only logged at debug level.
 
 ## Ports and Networking
 

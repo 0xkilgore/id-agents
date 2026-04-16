@@ -52,7 +52,7 @@ export interface AgentSpec {
   verbose?: boolean | string;         // Enable detailed logging (show tool calls, progress)
   talkTimeout?: number;               // Default timeout for /talk-to in ms (default: 120000, max: 600000)
   heartbeatFile?: string;             // Path to heartbeat yaml config (relative to config file)
-  heartbeat?: HeartbeatConfig;        // Resolved heartbeat config (set by processConfig)
+  heartbeat?: number | HeartbeatConfig;  // Number = new model (seconds, reads HEARTBEAT.md), object = legacy (interval+message)
   domain?: string;                    // ENS domain name (e.g., "x.agent-15.xid.eth")
   tokenId?: string;                   // Namehash of the ENS domain (bytes32)
   address?: string;                   // Ethereum address (links to .env.<name>.<address> file)
@@ -119,6 +119,7 @@ export interface DeployConfig {
     local?: boolean;                    // Run all agents locally by default
     talkTimeout?: number;               // Default /talk-to timeout in ms
     heartbeatFile?: string;             // Default heartbeat config file for all agents
+    heartbeat?: number | HeartbeatConfig;  // Default heartbeat for all agents
   };
   agents: AgentSpec[];
 }
@@ -570,6 +571,20 @@ export function copyAgentDirOverlay(workingDir: string, templateName: string): b
 }
 
 /**
+ * Copy HEARTBEAT.md from agent template directory to working directory root.
+ * Source: {workingDir}/.claude/agents/{templateName}/HEARTBEAT.md
+ * Destination: {workingDir}/HEARTBEAT.md
+ */
+export function copyHeartbeatMd(workingDir: string, templateName: string): boolean {
+  const src = path.join(workingDir, '.claude', 'agents', templateName, 'HEARTBEAT.md');
+  if (!fs.existsSync(src)) {
+    return false;
+  }
+  fs.copyFileSync(src, path.join(workingDir, 'HEARTBEAT.md'));
+  return true;
+}
+
+/**
  * Parse a sub-agent template string into frontmatter and body.
  * Exported for testing.
  */
@@ -696,9 +711,13 @@ export function mergeDefaults(agent: AgentSpec, defaults: DeployConfig['defaults
     merged.talkTimeout = defaults.talkTimeout;
   }
 
-  // heartbeatFile: agent overrides defaults
-  if (merged.heartbeatFile === undefined && defaults.heartbeatFile !== undefined) {
-    merged.heartbeatFile = defaults.heartbeatFile;
+  // heartbeat: agent overrides defaults (number or object)
+  if (merged.heartbeat === undefined && merged.heartbeatFile === undefined) {
+    if (defaults.heartbeat !== undefined) {
+      merged.heartbeat = defaults.heartbeat;
+    } else if (defaults.heartbeatFile !== undefined) {
+      merged.heartbeatFile = defaults.heartbeatFile;
+    }
   }
 
   // register: agent overrides defaults

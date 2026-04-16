@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.1.52-beta
+
+### Features
+
+- **Agent-driven heartbeats via HEARTBEAT.md**: Heartbeat messages move out of YAML config and into a `HEARTBEAT.md` checklist file in the agent's template directory. The scheduler sends a generic wake-up; the agent reads its own checklist and decides what to do.
+- **Simplified heartbeat config**: `heartbeat:` in YAML now accepts a plain number (seconds) for the new model. Legacy `heartbeat: {interval, message}` objects still work for backward compatibility.
+- **HEARTBEAT.md copy at spawn**: At spawn time, if the agent template directory contains a `HEARTBEAT.md`, it is copied to `{workingDirectory}/HEARTBEAT.md` for the agent to read at runtime.
+- **Silent HEARTBEAT_OK**: When an agent responds with exactly `HEARTBEAT_OK`, the response is suppressed from the news feed and logged at debug level only. Keeps the news feed clean when nothing needs attention.
+
+### Removed
+
+- **HEARTBEAT.yaml write at spawn**: The manager no longer writes `HEARTBEAT.yaml` files to agent working directories at spawn time. The new model uses `HEARTBEAT.md` from the agent template directory instead.
+
+### Changed
+
+- `heartbeatToSchedule()` now accepts `number | HeartbeatConfig` — sends the generic wake-up message for number config, custom message for legacy objects.
+- `readHeartbeatConfig()` checks both `HEARTBEAT.yaml` (legacy) and `HEARTBEAT.md` (new model).
+- `idchain.yaml` heartbeat entries simplified from `{interval, message}` objects to plain numbers.
+
 ## 0.1.51-beta
 
 ### Features

@@ -77,7 +77,7 @@ function configFields(spec: AgentSpec, defaultModel?: string): Record<string, st
     runtime,
     plugins: normalizePlugins(spec.plugins),
     skills: normalizeSkills(spec.skills),
-    heartbeat: spec.heartbeat ? JSON.stringify({ interval: spec.heartbeat.interval, message: spec.heartbeat.message }) : '',
+    heartbeat: spec.heartbeat ? (typeof spec.heartbeat === 'number' ? String(spec.heartbeat) : JSON.stringify({ interval: spec.heartbeat.interval, message: spec.heartbeat.message })) : '',
     allowedTools: normalizeAllowedTools(spec.allowedTools),
     description: spec.description || '',
     domain: spec.domain || '',

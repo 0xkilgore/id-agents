@@ -68,13 +68,18 @@ ${spec.description.trim()}`;
   return `[Calendar Event: "${spec.title}"]`;
 }
 
+/** Generic message sent for new-model heartbeats (agent reads its own HEARTBEAT.md) */
+export const HEARTBEAT_GENERIC_MESSAGE = 'Heartbeat: read your HEARTBEAT.md checklist and act on anything that needs attention. If nothing needs action, respond with HEARTBEAT_OK.';
+
 export function heartbeatToSchedule(
   agentId: string,
   agentName: string,
-  config: HeartbeatConfig,
+  config: number | HeartbeatConfig,
   nowSec?: number,
 ): { definition: ScheduleDefinitionRow; agentIds: string[] } {
-  validateIntervalSeconds(config.interval);
+  const isLegacy = typeof config === 'object';
+  const interval = isLegacy ? config.interval : config;
+  validateIntervalSeconds(interval);
 
   const now = nowSec ?? Math.floor(Date.now() / 1000);
 
@@ -84,16 +89,16 @@ export function heartbeatToSchedule(
     title: `Heartbeat: ${agentName}`,
     description: null,
     active: true,
-    message: config.message,
+    message: isLegacy ? config.message : HEARTBEAT_GENERIC_MESSAGE,
     sender: 'heartbeat',
-    delivery_mode: config.delivery ?? 'internal',
+    delivery_mode: isLegacy ? (config.delivery ?? 'internal') : 'internal',
     timezone: null,
     catch_up_policy: 'fire_once',
     dedupe_window_seconds: 90,
-    interval_seconds: config.interval,
+    interval_seconds: interval,
     anchor_at: now,
-    max_runs: config.maxBeats ?? null,
-    expires_at: config.expiresAfter ? now + config.expiresAfter : null,
+    max_runs: isLegacy ? (config.maxBeats ?? null) : null,
+    expires_at: isLegacy && config.expiresAfter ? now + config.expiresAfter : null,
     local_time_seconds: null,
     local_date: null,
     days_of_week: null,

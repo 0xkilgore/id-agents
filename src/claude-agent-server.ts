@@ -1519,20 +1519,26 @@ ${prompt}`
       };
       await this.dbUpsertQuery({ ...query, sessionId });
 
-      // Post to news
-      await this.addNews('query.completed', `Query ${queryId} completed`, {
-        query_id: queryId,
-        result: query.result
-      });
-
-      console.log(`${logTime()} [Agent] ✅ Query ${queryId} completed`);
+      // Suppress HEARTBEAT_OK from news feed — log at debug level only
+      const isHeartbeatOk = options?.noAutoReply && result.trim() === 'HEARTBEAT_OK';
+      if (isHeartbeatOk) {
+        console.log(`${logTime()} [Agent] 💚 Heartbeat OK (query ${queryId}) — nothing to report`);
+      } else {
+        // Post to news
+        await this.addNews('query.completed', `Query ${queryId} completed`, {
+          query_id: queryId,
+          result: query.result
+        });
+        console.log(`${logTime()} [Agent] ✅ Query ${queryId} completed`);
+      }
 
       // Send reply back to sender if auto-reply is enabled
       if (shouldAutoReply) {
         await this.sendReplyToSender(from!, queryId, result, true, sessionId);
-      } else if (from && options?.noAutoReply) {
+      } else if (from && options?.noAutoReply && !isHeartbeatOk) {
         // For triggered messages (noAutoReply), save response to our own news feed
         // This preserves the response without creating an infinite loop
+        // HEARTBEAT_OK responses are suppressed — nothing to report
         await this.addNews('response.saved', `Response to ${from} (not sent - triggered message)`, {
           to: from,
           in_reply_to: queryId,
