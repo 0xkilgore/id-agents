@@ -32,14 +32,14 @@ org:
     technical:
       lead: cto
       description: "Engineering — builds and maintains the system"
-      members: [cto, contracts, web, gateway, indexer, cli, agents, id-agents-app, stars-app, stars-indexer, ecs]
+      members: [cto, contracts, web, gateway, indexer, cli, agents, id-agents-app, stars-app, stars-indexer, ecs, tui]
     marketing:
       description: "Growth — social media, community, content"
       members: [x]
 
   tags:
     id-chain: [contracts, web, gateway, indexer, cli, x]
-    id-agents: [agents, id-agents-app, x]
+    id-agents: [agents, id-agents-app, x, tui]
     ethstars: [stars-app, stars-indexer, ecs]
 
 agents:
@@ -98,3 +98,8 @@ agents:
   - name: ecs
     description: "ECS contracts (Ethereum Credential Service) — Foundry/Solidity. Includes EthStars StarResolver/StarNameResolver. Base for the upcoming EEP protocol."
     workingDirectory: /Users/nxt3d/projects/ecs-dev
+
+  - name: tui
+    description: "TUI monitoring dashboard for id-agents — real-time agent and team status. Builds on branch feature/tui-dashboard in a worktree."
+    workingDirectory: /Users/nxt3d/projects/id2/id-agents-tui
+    heartbeat: 86400
