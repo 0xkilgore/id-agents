@@ -21,7 +21,12 @@ if (process.stdout.isTTY) {
     if (typeof chunk === 'string') s = chunk;
     else if (Buffer.isBuffer(chunk)) s = chunk.toString('utf8');
     else s = String(chunk);
-    const out = s.replace(ERASE_TO_HOME, '\x1b[H');
+    const transformed = s.replace(ERASE_TO_HOME, '\x1b[H');
+    // Defensive: append ESC[J on transformed writes so any edge case that
+    // escapes the fixed-height padding in AgentsTable / NewsView (e.g. an
+    // off-by-one after a terminal resize, or content that briefly overflows
+    // during transition) can't leave residual rows below the new content.
+    const out = transformed !== s ? transformed + '\x1b[J' : transformed;
     return (originalWrite as (...a: unknown[]) => boolean)(out, ...rest);
   }) as typeof process.stdout.write;
   process.stdout.write = patchedWrite;
