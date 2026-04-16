@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.1.54-beta
+
+### Features
+
+- **TUI monitoring dashboard**: New real-time terminal dashboard at `src/tui/`, invoked with `npm run tui:dev` (source) or `npm run tui` (built). Three-page stack (agents list → news list → news detail) navigated via `←`/`→`; `↑`/`↓` for row selection and scrolling; `Tab`/`Shift+Tab` to cycle team filter. Includes a compact status strip showing one glyph per agent across the full fleet, per-type news item colors, and an age-colored cooldown indicator fading bright green → green → yellow → gray at 15 minutes. Built on `ink` + React. Flicker-free on iTerm2 via a stdout transform that rewrites ink's erase-and-redraw escape sequences to cursor-home overwrites, combined with fixed-height padded layouts on both pages.
+- **`tui` agent in `idchain` config**: New team member with `workingDirectory` set to a git worktree (`feature/tui-dashboard`) so dashboard development does not block work on `main`. Demonstrates the worktree-based agent pattern.
+
+### Changed
+
+- **Skill rename**: `admin-control` → `idagents-admin-control` across the skills directory, docs, and references. Disambiguates the skill when loaded alongside other admin tools.
+- **QUICKSTART.md Step 6**: Now instructs Claude to offer to continue as the team manager via `/remote` after deploy completes, instead of handing the user off to a separate interactive CLI terminal.
+- **README.md Quick Start**: Leads with the agent-driven quickstart (paste the skill, ask Claude to run QUICKSTART.md). Manual install demoted to a secondary subsection.
+- **Polling guidance in `idagents-admin-control`**: Dispatch and poll are now documented as two distinct steps. Poll is marked background-only with `run_in_background: true` and max wait bumped from 2 minutes to 10 minutes. A new Anti-patterns subsection warns against combined dispatch+poll blocks and foreground polling.
+
+### Fixed
+
+- **`/ask manager` self-trap at the CLI**: The interactive CLI now rejects `/ask manager` with a friendly hint pointing to `/talk`. `manager` is reserved in `name-validation.ts`. Agent-to-manager escalation via `inter-agent-tools` is preserved because that path is legitimate.
+- **Missing API key produces a hint, not a stack trace**: Spawning a claude-runtime agent without `ANTHROPIC_API_KEY`, or a codex agent without `OPENAI_API_KEY`, now prints a single-line setup hint at spawn time. Manager startup is unaffected.
+- **`/team` and `/teams` empty states**: When no teams exist, the commands print a friendly message pointing to `/team <name>` or `/deploy <config>` instead of showing a stale `default` header.
+- **Hide `manager` row from `/agents` CLI listing**: The interactive CLI filters out `type === 'interactive'` rows when printing the agents table. `GET /agents` still returns the row for admin tooling and `/remote` dispatchers.
+
+### Removed
+
+- **Root `HEARTBEAT.yaml`**: Retired in favor of per-agent `HEARTBEAT.md` (introduced in 0.1.52). The untracked `HEARTBEAT.md` at the repo root is now gitignored.
+
 ## 0.1.53-beta
 
 ### Features
