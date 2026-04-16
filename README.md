@@ -85,7 +85,7 @@ Run a team of AI coding agents from a single chat. Each agent is a real process 
 
 > **Important:** You must be logged into Claude Code CLI before starting ID Agents. Run `claude login` in your terminal and complete the authentication. If you use Claude Code in VS Code, you still need to log in via the terminal — open VS Code's integrated terminal and run `claude login` there.
 
-> **⚠️ Permissions:** ID Agents runs each agent as a background Claude Code process and forces `--dangerously-skip-permissions` on every spawn. Background processes have no shell to approve tool prompts, so a stricter mode would hang the agents silently. If you are not comfortable giving background agents this level of autonomy, ID Agents is not the right tool for you. See [QUICKSTART.md](./QUICKSTART.md#-permissions-notice--read-before-deploying) for the full notice.
+> **⚠️ Permissions:** ID Agents runs each agent as a background process. By default, `claude-code-cli` agents spawn with `--dangerously-skip-permissions` and `codex` agents spawn with `--dangerously-bypass-approvals-and-sandbox`, because background processes have no shell to approve tool prompts. You can opt out per agent (or under `defaults`) with `dangerouslySkipPermissions: false`, but the agents will then hang silently on the first tool-use prompt. If you are not comfortable giving background agents this level of autonomy, ID Agents is not the right tool for you. See [QUICKSTART.md](./QUICKSTART.md#-permissions-notice--read-before-deploying) for the full notice.
 
 ### Recommended: Let Claude set it up
 

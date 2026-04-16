@@ -25,9 +25,12 @@ Follow these steps to set up and deploy your first agent team.
 
 ## ⚠️ Permissions Notice — Read Before Deploying
 
-ID Agents runs each agent as a background Claude Code process. Because there is no interactive shell to approve tool use, the agent processes MUST launch with `--dangerously-skip-permissions`. This is the default and is forced for the `claude-code-cli` runtime — there is no YAML knob to disable it.
+ID Agents runs each agent as a background process with no interactive shell to approve tool use. The default for both runtimes is to bypass approval prompts:
 
-If you are not comfortable giving background agents this level of autonomy, ID Agents is not the right tool for you. Do not try to run with a stricter permission mode. The agents will hang silently on the first tool-use prompt with no way to approve them.
+- `claude-code-cli` agents launch with `--dangerously-skip-permissions`
+- `codex` agents launch with `--dangerously-bypass-approvals-and-sandbox`
+
+You can opt out by setting `dangerouslySkipPermissions: false` in the YAML config (per agent or under `defaults`), but be warned: any tool-use prompt then has no way to be approved, and the agent will hang silently on the first one. If you're not comfortable giving background agents this level of autonomy, ID Agents is not the right tool for you.
 
 ## Runtime Selection
 
