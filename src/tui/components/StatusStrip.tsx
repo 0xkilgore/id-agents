@@ -59,6 +59,9 @@ function symbolFor(agent: Agent): { glyph: string; color: string } {
   return { glyph: '○', color: 'gray' };
 }
 
+// Preserve the source array's order so the strip matches the agents table
+// underneath. Teams appear in first-seen order; agents within a team keep
+// their position from the incoming array.
 function groupByTeam(agents: Agent[]): TeamGroup[] {
   const map = new Map<string, Agent[]>();
   for (const a of agents) {
@@ -69,11 +72,7 @@ function groupByTeam(agents: Agent[]): TeamGroup[] {
   }
   const groups: TeamGroup[] = [];
   for (const [team, list] of map) {
-    groups.push({
-      team,
-      list: [...list].sort((a, b) => a.name.localeCompare(b.name)),
-    });
+    groups.push({ team, list });
   }
-  groups.sort((a, b) => a.team.localeCompare(b.team));
   return groups;
 }
