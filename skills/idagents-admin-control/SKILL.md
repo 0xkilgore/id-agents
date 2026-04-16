@@ -1,4 +1,4 @@
-# Admin Control Skill
+# ID Agents Admin Control Skill
 
 ## Overview
 
@@ -36,7 +36,7 @@ Know the manager endpoint (default: `http://localhost:4000`)
 Run the admin session script which starts a listener and provides an interactive interface:
 
 ```bash
-node skills/admin-control/admin-session.js
+node skills/idagents-admin-control/admin-session.js
 ```
 
 Or use individual scripts:
@@ -46,7 +46,7 @@ Or use individual scripts:
 Start a temporary HTTP server to receive replies:
 
 ```bash
-node skills/admin-control/start-listener.js [port]
+node skills/idagents-admin-control/start-listener.js [port]
 # Default port: 4050
 # Outputs: Listening on http://localhost:4050
 ```
@@ -56,7 +56,7 @@ node skills/admin-control/start-listener.js [port]
 Send a message and specify your reply endpoint:
 
 ```bash
-./skills/admin-control/talk-to-manager.sh "What agents are running?" http://localhost:4050
+./skills/idagents-admin-control/talk-to-manager.sh "What agents are running?" http://localhost:4050
 ```
 
 ### 3. Execute Remote Command
@@ -64,9 +64,9 @@ Send a message and specify your reply endpoint:
 Execute a CLI command:
 
 ```bash
-./skills/admin-control/remote-command.sh "/agents"
-./skills/admin-control/remote-command.sh "/spawn new-agent"
-./skills/admin-control/remote-command.sh "/ask coder-b Build a REST API"
+./skills/idagents-admin-control/remote-command.sh "/agents"
+./skills/idagents-admin-control/remote-command.sh "/spawn new-agent"
+./skills/idagents-admin-control/remote-command.sh "/ask coder-b Build a REST API"
 ```
 
 ## Available Remote Commands

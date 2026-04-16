@@ -287,7 +287,7 @@ Defaults:
 
 Skills are instruction packages deployed at deploy time via `deploySkillsToAgent`. The target directory is runtime-aware: `.claude/skills/` for Claude agents, `.agents/skills/` for Codex agents. Each skill is a directory containing a `SKILL.md` file with YAML frontmatter.
 
-All configs should include `skills: [identity, inter-agent, catalog]` at minimum. The 7 built-in skills are: `identity`, `inter-agent`, `catalog`, `wallet`, `xmtp`, `admin-control`, `local-agent`.
+All configs should include `skills: [identity, inter-agent, catalog]` at minimum. The 7 built-in skills are: `identity`, `inter-agent`, `catalog`, `wallet`, `xmtp`, `idagents-admin-control`, `local-agent`.
 
 ```yaml
 defaults:

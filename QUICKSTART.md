@@ -74,16 +74,16 @@ npm install
 
 ## 2. Add the Admin Control Skill
 
-Copy the admin-control skill into the project where you are running Claude Code (this is your project directory, not the id-agents repo):
+Copy the idagents-admin-control skill into the project where you are running Claude Code (this is your project directory, not the id-agents repo):
 
 ```bash
-cp -r <path-to-id-agents>/skills/admin-control <your-claude-code-project>/.claude/skills/
+cp -r <path-to-id-agents>/skills/idagents-admin-control <your-claude-code-project>/.claude/skills/
 ```
 
 For example, if you cloned id-agents to `~/projects/id-agents` and you're running Claude Code in `~/projects/my-app`:
 
 ```bash
-cp -r ~/projects/id-agents/skills/admin-control ~/projects/my-app/.claude/skills/
+cp -r ~/projects/id-agents/skills/idagents-admin-control ~/projects/my-app/.claude/skills/
 ```
 
 ## 3. Start the Manager
@@ -101,7 +101,7 @@ This starts the interactive CLI on port 4000 and the manager daemon on port 4100
 
 ## 4. Deploy a Demo Team
 
-Use the admin-control skill's `remote-command.sh` to deploy:
+Use the idagents-admin-control skill's `remote-command.sh` to deploy:
 
 - **Claude Code agents:** `/deploy demo`
 - **Codex agents:** `/deploy demo-codex`

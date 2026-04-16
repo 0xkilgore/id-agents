@@ -1,10 +1,10 @@
 # Admin Control Guide
 
-The `admin-control` skill lets any Claude Code session programmatically manage an ID Agents team. It provides scripts for sending CLI commands via HTTP, chatting with the manager, and polling for multi-agent replies — all without opening the interactive CLI.
+The `idagents-admin-control` skill lets any Claude Code session programmatically manage an ID Agents team. It provides scripts for sending CLI commands via HTTP, chatting with the manager, and polling for multi-agent replies — all without opening the interactive CLI.
 
 ## When to Use
 
-Use admin-control when you want a Claude Code agent (or any script) to:
+Use idagents-admin-control when you want a Claude Code agent (or any script) to:
 - Deploy or delete agents remotely
 - Dispatch tasks to agents and collect replies
 - Chat with the manager (human-in-the-loop approval flow)
@@ -66,7 +66,7 @@ Response:
 
 ## Scripts
 
-The skill includes shell scripts and Node.js helpers in `skills/admin-control/`:
+The skill includes shell scripts and Node.js helpers in `skills/idagents-admin-control/`:
 
 | Script | Purpose |
 |--------|---------|
@@ -81,9 +81,9 @@ The skill includes shell scripts and Node.js helpers in `skills/admin-control/`:
 Execute a CLI command and print the result:
 
 ```bash
-./skills/admin-control/remote-command.sh "/agents"
-./skills/admin-control/remote-command.sh "/deploy idchain"
-./skills/admin-control/remote-command.sh "/ask coder Build a REST API"
+./skills/idagents-admin-control/remote-command.sh "/agents"
+./skills/idagents-admin-control/remote-command.sh "/deploy idchain"
+./skills/idagents-admin-control/remote-command.sh "/ask coder Build a REST API"
 ```
 
 ### talk-to-manager.sh
@@ -91,7 +91,7 @@ Execute a CLI command and print the result:
 Send a message to the manager (human in the CLI) and specify where to receive the reply:
 
 ```bash
-./skills/admin-control/talk-to-manager.sh "Can I spawn 3 agents?" http://localhost:4050
+./skills/idagents-admin-control/talk-to-manager.sh "Can I spawn 3 agents?" http://localhost:4050
 ```
 
 This POSTs to the manager's `/talk` endpoint. The reply arrives at the specified endpoint when the human responds in the CLI.
@@ -101,7 +101,7 @@ This POSTs to the manager's `/talk` endpoint. The reply arrives at the specified
 Start a temporary HTTP server that receives replies on `POST /news`:
 
 ```bash
-node skills/admin-control/start-listener.js 4050
+node skills/idagents-admin-control/start-listener.js 4050
 ```
 
 The listener prints received messages to stdout and stores them in memory. It shuts down on `SIGINT`, timeout (10 minutes default), or when it receives a message with `type: "admin.done"`.
@@ -112,13 +112,13 @@ All-in-one script with three modes:
 
 ```bash
 # Talk to manager and wait for reply
-node skills/admin-control/admin-session.js talk "Can I spawn a new agent?"
+node skills/idagents-admin-control/admin-session.js talk "Can I spawn a new agent?"
 
 # Execute a remote command
-node skills/admin-control/admin-session.js remote "/agents"
+node skills/idagents-admin-control/admin-session.js remote "/agents"
 
 # Start listener only
-node skills/admin-control/admin-session.js listen
+node skills/idagents-admin-control/admin-session.js listen
 ```
 
 The `talk` mode automatically starts a temporary listener, sends the message, waits for the reply, then shuts down.
@@ -128,7 +128,7 @@ The `talk` mode automatically starts a temporary listener, sends the message, wa
 Continuously dispatch a task to an agent, poll for completion, wait, repeat:
 
 ```bash
-./skills/admin-control/management-loop.sh coder "Review open PRs" 60
+./skills/idagents-admin-control/management-loop.sh coder "Review open PRs" 60
 ```
 
 Arguments: `<agent-name> <task> [interval_seconds]` (default interval: 60s).
@@ -140,13 +140,13 @@ This is a two-step human-in-the-loop approval flow:
 1. **Start a temporary listener** to receive the reply:
 
 ```bash
-node skills/admin-control/start-listener.js 4050
+node skills/idagents-admin-control/start-listener.js 4050
 ```
 
 2. **Send a message** to the manager with your reply endpoint:
 
 ```bash
-./skills/admin-control/talk-to-manager.sh "I want to refactor the auth module. OK?" http://localhost:4050
+./skills/idagents-admin-control/talk-to-manager.sh "I want to refactor the auth module. OK?" http://localhost:4050
 ```
 
 3. The human sees the message in the interactive CLI and replies.
@@ -156,7 +156,7 @@ node skills/admin-control/start-listener.js 4050
 5. Based on the reply, proceed with remote commands:
 
 ```bash
-./skills/admin-control/remote-command.sh "/ask coder Refactor the auth module"
+./skills/idagents-admin-control/remote-command.sh "/ask coder Refactor the auth module"
 ```
 
 ## Polling for Agent Replies
@@ -249,19 +249,19 @@ done
 
 ```bash
 # 1. Check what's running
-./skills/admin-control/remote-command.sh "/agents"
+./skills/idagents-admin-control/remote-command.sh "/agents"
 
 # 2. Deploy a team
-./skills/admin-control/remote-command.sh "/deploy idchain"
+./skills/idagents-admin-control/remote-command.sh "/deploy idchain"
 
 # 3. Ask the manager for approval (human-in-the-loop)
-node skills/admin-control/admin-session.js talk "Team deployed. Should I start the sprint?"
+node skills/idagents-admin-control/admin-session.js talk "Team deployed. Should I start the sprint?"
 
 # 4. Dispatch tasks to agents
-./skills/admin-control/remote-command.sh "/ask contracts Write tests for IDRegistry"
-./skills/admin-control/remote-command.sh "/ask web Build the dashboard page"
+./skills/idagents-admin-control/remote-command.sh "/ask contracts Write tests for IDRegistry"
+./skills/idagents-admin-control/remote-command.sh "/ask web Build the dashboard page"
 
 # 5. Check progress
-./skills/admin-control/remote-command.sh "/news contracts"
-./skills/admin-control/remote-command.sh "/news web"
+./skills/idagents-admin-control/remote-command.sh "/news contracts"
+./skills/idagents-admin-control/remote-command.sh "/news web"
 ```

@@ -371,7 +371,7 @@ Skills use the standard [Claude Code skill format](https://docs.anthropic.com/en
 | `catalog` | REST-AP self-description visible to other agents |
 | `wallet` | OWS multi-chain wallet addresses (skipped if no wallet) |
 | `xmtp` | Encrypted messaging via ENS names using the [XMTP](https://xmtp.org/) protocol |
-| `admin-control` | Remote CLI management — chat with manager, execute commands (external skill) |
+| `idagents-admin-control` | Remote CLI management — chat with manager, execute commands (external skill) |
 
 **Adding a skill:**
 

@@ -4,7 +4,7 @@ This directory contains skills for agents and external tools.
 
 **Agent skills** (deployed to each agent's `.claude/skills/` at deploy time): `identity`, `inter-agent`, `catalog`, `wallet`, `xmtp`. All YAML configs should include `skills: [identity, inter-agent, catalog]` at minimum.
 
-**External skills** (used by external Claude Code sessions, not deployed to agents): `admin-control`.
+**External skills** (used by external Claude Code sessions, not deployed to agents): `idagents-admin-control`.
 
 ## What are Skills?
 
@@ -45,7 +45,7 @@ Send and receive end-to-end encrypted messages to external agents and users via 
 - Data stored at `~/.xmtp/{address}/` (DB, encryption key, allowlist)
 - Security: closed by default (3-tier allowlist), OWS signing (key in vault), MLS encryption
 
-### admin-control
+### idagents-admin-control
 
 Enables Claude Code to act as an admin agent for remote management of the team. Includes patterns for sending commands, chatting with the manager, and polling for multi-agent replies.
 
@@ -68,7 +68,7 @@ Claude agents running in this environment can access skills by:
 
 2. **Using the executable scripts:**
    ```bash
-   cd ./skills/admin-control
+   cd ./skills/idagents-admin-control
    ./remote-command.sh "/agents"
    ```
 

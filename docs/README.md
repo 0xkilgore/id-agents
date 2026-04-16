@@ -14,7 +14,7 @@ Documentation for the ID Agents multi-agent orchestration platform.
 
 - [Interactive Agent Guide](./guides/interactive-agent.md) - Run the interactive CLI
 - [Sync Command Guide](./guides/sync-command.md) - Update a running team without losing sessions (`/sync` vs `/deploy`)
-- [Admin Control Guide](./guides/admin-control.md) - Programmatic team management via `/remote`, talk-to-manager, and agent reply polling
+- [Admin Control Guide](./guides/idagents-admin-control.md) - Programmatic team management via `/remote`, talk-to-manager, and agent reply polling
 - [Task Tracking Guide](./guides/tasks.md) - Task lifecycle, handoff pattern, and stale task verification
 - [News Feed Guide](./guides/news-feed.md) - Loop-safe message channel and multi-reply catch-all
 - [Agent Outputs Guide](./guides/agent-outputs.md) - Output convention, `/output`, and `/artifact`
@@ -50,7 +50,7 @@ Skills are deployed at deploy time to the runtime-appropriate directory: `.claud
 - [Inter-Agent](../skills/inter-agent/SKILL.md) - Agent-to-agent messaging via `/talk-to`
 - [Catalog](../skills/catalog/SKILL.md) - REST-AP self-description
 - [Wallet](../skills/wallet/SKILL.md) - OWS wallet operations
-- [Admin Control](../skills/admin-control/SKILL.md) - Remote CLI management
+- [Admin Control](../skills/idagents-admin-control/SKILL.md) - Remote CLI management
 - [Local Agent](../skills/local-agent/SKILL.md) - Spawn Claude Code agents locally
 
 ## Plugins
