@@ -40,8 +40,7 @@ export interface AgentSpec {
   description?: string;
   model?: string;
   systemPrompt?: string;              // Custom system prompt for the agent
-  claudeMd?: string;                  // Content to prepend to agent's .claude/CLAUDE.md file
-  claudeMdFile?: string;              // Path to file containing claudeMd content (relative to config)
+  roleBody?: string;                  // Agent role content from .claude/agents/<name>.md (set by processConfig)
   plugins?: PluginConfig[];           // Skill plugins
   skills?: string[];                  // Skills to deploy (names match skills/<name>/SKILL.md)
   allowedTools?: string[];
@@ -112,8 +111,6 @@ export interface DeployConfig {
   defaults?: {
     runtime?: HarnessType;              // Default harness for all agents
     model?: string;
-    claudeMd?: string;                  // Default CLAUDE.md content for all agents
-    claudeMdFile?: string;              // Path to default claudeMd file (relative to config)
     plugins?: PluginConfig[];           // Skill plugins
     skills?: string[];                  // Default skills for all agents
     allowedTools?: string[];
@@ -514,31 +511,6 @@ export function verifyPlugins(config: DeployConfig, basePath: string): Validatio
 }
 
 /**
- * Resolve claudeMdFile to claudeMd content
- * If both claudeMdFile and claudeMd are set, file content comes first
- */
-export function resolveClaudeMdFile(spec: { claudeMd?: string; claudeMdFile?: string }, basePath: string): string | undefined {
-  const parts: string[] = [];
-
-  // Load file content first
-  if (spec.claudeMdFile) {
-    const filePath = path.resolve(basePath, spec.claudeMdFile);
-    if (fs.existsSync(filePath)) {
-      parts.push(fs.readFileSync(filePath, 'utf-8'));
-    } else {
-      throw new Error(`claudeMdFile not found: ${filePath}`);
-    }
-  }
-
-  // Then inline content
-  if (spec.claudeMd) {
-    parts.push(spec.claudeMd);
-  }
-
-  return parts.length > 0 ? parts.join('\n\n') : undefined;
-}
-
-/**
  * Result of loading a sub-agent template from .claude/agents/<name>.md
  */
 export interface SubAgentTemplate {
@@ -701,14 +673,6 @@ export function mergeDefaults(agent: AgentSpec, defaults: DeployConfig['defaults
     merged.register = defaults.register;
   }
 
-  // claudeMd: concatenate defaults + agent (both are appended to base CLAUDE.md)
-  if (defaults.claudeMd || merged.claudeMd) {
-    const parts: string[] = [];
-    if (defaults.claudeMd) parts.push(defaults.claudeMd);
-    if (merged.claudeMd) parts.push(merged.claudeMd);
-    merged.claudeMd = parts.join('\n\n');
-  }
-
   return merged;
 }
 
@@ -741,27 +705,6 @@ export function processConfig(
   // Resolve plugin paths
   const resolvedConfig = resolvePluginPaths(config, basePath);
 
-  // Resolve claudeMdFile for defaults
-  if (resolvedConfig.defaults?.claudeMdFile || resolvedConfig.defaults?.claudeMd) {
-    resolvedConfig.defaults = {
-      ...resolvedConfig.defaults,
-      claudeMd: resolveClaudeMdFile(resolvedConfig.defaults, basePath),
-      claudeMdFile: undefined  // Clear after resolving
-    };
-  }
-
-  // Resolve claudeMdFile for each agent
-  resolvedConfig.agents = resolvedConfig.agents.map(agent => {
-    if (agent.claudeMdFile || agent.claudeMd) {
-      return {
-        ...agent,
-        claudeMd: resolveClaudeMdFile(agent, basePath),
-        claudeMdFile: undefined  // Clear after resolving
-      };
-    }
-    return agent;
-  });
-
   // Resolve heartbeatFile for each agent
   resolvedConfig.agents = resolvedConfig.agents.map(agent => {
     if (agent.heartbeatFile) {
@@ -787,18 +730,19 @@ export function processConfig(
     const template = loadSubAgentTemplate(agent.workingDirectory, templateName);
     if (!template) return agent;
 
-    // Prepend template body to claudeMd
-    const parts: string[] = [];
-    if (template.body) parts.push(template.body);
-    if (agent.claudeMd) parts.push(agent.claudeMd);
-    const merged = { ...agent, claudeMd: parts.join('\n\n') || undefined };
+    const updated = { ...agent };
 
-    // Use template description as default if agent config lacks one
-    if (!merged.description && template.description) {
-      merged.description = template.description;
+    // Template body becomes the agent's role content
+    if (template.body) {
+      updated.roleBody = template.body;
     }
 
-    return merged;
+    // Use template description as default if agent config lacks one
+    if (!updated.description && template.description) {
+      updated.description = template.description;
+    }
+
+    return updated;
   });
 
   // Load team context if specified

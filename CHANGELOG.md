@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.1.50-beta
+
+### Breaking Changes
+
+- **Removed `claudeMd` and `claudeMdFile`** from YAML config (`AgentSpec` and `DeployConfig.defaults`). Agent instructions now come from exactly two sources: framework protocol defaults (injected automatically) and agent role files (`.claude/agents/<name>.md`). YAML config is infrastructure only.
+
+### Features
+
+- **Protocol defaults** (`src/protocol-defaults.ts`): Scheduling, task-discipline, and output convention rules are now a framework-managed constant, prepended to every agent's `CLAUDE.md` at spawn time. Previously these lived as inline YAML in `defaults.claudeMd`.
+- **Agent role files**: The `.claude/agents/<name>.md` template body (from 0.1.49) is now the sole source of user-controlled agent instructions. Exposed as `roleBody` on `AgentSpec`.
+
+### Removed
+
+- `defaults.claudeMd` / `defaults.claudeMdFile` config fields
+- `agents[].claudeMd` / `agents[].claudeMdFile` config fields
+- `resolveClaudeMdFile()` function from config-parser
+- `claudeMd` merge logic from `mergeDefaults()`
+- `claudeMd` from sync diff fields (protocol defaults are always written)
+
 ## 0.1.49-beta
 
 ### Features

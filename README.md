@@ -482,9 +482,14 @@ calendar:
 
 See [Configuration Reference](./docs/reference/configuration.md) for full options.
 
-### Sub-Agent Templates
+### Agent Instructions: Two Sources
 
-Give agents personality and context by placing a markdown file in your project's `.claude/agents/` directory. When an agent's `workingDirectory` points at a project that contains `.claude/agents/<agent-name>.md`, the file's body is automatically prepended to the agent's `claudeMd` at deploy/sync time.
+Every agent's `CLAUDE.md` is composed from exactly two sources:
+
+1. **Protocol defaults** (`src/protocol-defaults.ts`) — framework-managed rules injected into every agent automatically: scheduling awareness, task-discipline lifecycle, output convention. Users never edit these in YAML.
+2. **Agent role file** (`{workingDirectory}/.claude/agents/{name}.md`) — role-specific personality and context, editable by the user, versionable in git. If the file does not exist, the agent runs with protocol defaults only.
+
+The YAML config provides **infrastructure only**: name, workingDirectory, model, runtime, heartbeat, skills. No `claudeMd` field.
 
 ```
 myproject/
@@ -496,7 +501,7 @@ myproject/
   ...
 ```
 
-A template file uses optional YAML frontmatter for metadata:
+A role file uses optional YAML frontmatter for metadata:
 
 ```markdown
 ---
@@ -507,11 +512,10 @@ You are a security auditor. Focus on OWASP Top 10 vulnerabilities.
 Always check for injection, XSS, and authentication issues.
 ```
 
-- **Body** is prepended to the agent's `claudeMd` (before defaults and agent-level config).
+- **Body** becomes the agent's role content, appended after protocol defaults in `CLAUDE.md`.
 - **`description`** from frontmatter is used as the agent's description if the config doesn't set one.
-- If the file does not exist, behavior is unchanged.
 
-Use the `agent` field in config to load a template with a different filename than the agent's name:
+Use the `agent` field in config to load a role file with a different filename than the agent's name:
 
 ```yaml
 agents:
@@ -520,7 +524,7 @@ agents:
     workingDirectory: /path/to/project
 ```
 
-This lets you promote Claude Code sub-agents (`.claude/agents/*.md`) into full id-agents workers with identity, while keeping the personality file in the project repo where it belongs.
+This lets you promote Claude Code sub-agents (`.claude/agents/*.md`) into full id-agents workers with identity, while keeping the role file in the project repo where it belongs.
 
 ## Onchain Identity
 

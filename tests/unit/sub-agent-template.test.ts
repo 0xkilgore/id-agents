@@ -156,7 +156,7 @@ You audit code for security issues.`);
 });
 
 /* ------------------------------------------------------------------ */
-/*  processConfig integration — template merging during spawn          */
+/*  processConfig integration — template loading sets roleBody         */
 /* ------------------------------------------------------------------ */
 
 describe('processConfig sub-agent template integration', () => {
@@ -185,7 +185,7 @@ describe('processConfig sub-agent template integration', () => {
     fs.writeFileSync(path.join(agentsDir, `${agentName}.md`), content);
   }
 
-  it('prepends template body to agent claudeMd', () => {
+  it('sets roleBody from template file', () => {
     const workDir = path.join(tmpDir, 'workspace', 'myproject');
     fs.mkdirSync(workDir, { recursive: true });
 
@@ -200,7 +200,6 @@ version: "1.0"
 agents:
   - name: coder
     workingDirectory: "${workDir}"
-    claudeMd: "Follow the team style guide."
 `);
 
     const result = processConfig(configPath, '/workspace');
@@ -208,12 +207,8 @@ agents:
     expect(result.agents.length).toBe(1);
 
     const agent = result.agents[0];
-    expect(agent.claudeMd).toContain('You write clean TypeScript code.');
-    expect(agent.claudeMd).toContain('Follow the team style guide.');
-    // Template body should come before agent's own claudeMd
-    const templateIdx = agent.claudeMd!.indexOf('You write clean TypeScript code.');
-    const agentIdx = agent.claudeMd!.indexOf('Follow the team style guide.');
-    expect(templateIdx).toBeLessThan(agentIdx);
+    expect(agent.roleBody).toBe('You write clean TypeScript code.');
+    expect(agent.description).toBe('A coding agent');
   });
 
   it('uses template description when agent has none', () => {
@@ -236,6 +231,7 @@ agents:
     const result = processConfig(configPath, '/workspace');
     expect(result.errors).toEqual([]);
     expect(result.agents[0].description).toBe('Code review specialist');
+    expect(result.agents[0].roleBody).toBe('Review PRs carefully.');
   });
 
   it('does not override agent description with template description', () => {
@@ -270,12 +266,11 @@ version: "1.0"
 agents:
   - name: coder
     workingDirectory: "${workDir}"
-    claudeMd: "Original instructions."
 `);
 
     const result = processConfig(configPath, '/workspace');
     expect(result.errors).toEqual([]);
-    expect(result.agents[0].claudeMd).toContain('Original instructions.');
+    expect(result.agents[0].roleBody).toBeUndefined();
   });
 
   it('uses agent field to load a different template filename', () => {
@@ -298,7 +293,7 @@ agents:
 
     const result = processConfig(configPath, '/workspace');
     expect(result.errors).toEqual([]);
-    expect(result.agents[0].claudeMd).toContain('You perform thorough security audits.');
+    expect(result.agents[0].roleBody).toBe('You perform thorough security audits.');
     expect(result.agents[0].description).toBe('Security audit specialist');
   });
 
@@ -307,38 +302,10 @@ agents:
 version: "1.0"
 agents:
   - name: cloud-agent
-    claudeMd: "Cloud instructions."
 `);
 
     const result = processConfig(configPath, '/workspace');
     expect(result.errors).toEqual([]);
-    expect(result.agents[0].claudeMd).toContain('Cloud instructions.');
-  });
-
-  it('template body is prepended before defaults.claudeMd content', () => {
-    const workDir = path.join(tmpDir, 'workspace', 'project7');
-    fs.mkdirSync(workDir, { recursive: true });
-
-    setupAgentTemplate(workDir, 'agent1', 'Template personality.');
-
-    const configPath = writeConfig('test7.yaml', `
-version: "1.0"
-defaults:
-  claudeMd: "Default team rules."
-agents:
-  - name: agent1
-    workingDirectory: "${workDir}"
-`);
-
-    const result = processConfig(configPath, '/workspace');
-    expect(result.errors).toEqual([]);
-
-    const claudeMd = result.agents[0].claudeMd!;
-    expect(claudeMd).toContain('Template personality.');
-    expect(claudeMd).toContain('Default team rules.');
-    // Template body should come before defaults
-    const templateIdx = claudeMd.indexOf('Template personality.');
-    const defaultsIdx = claudeMd.indexOf('Default team rules.');
-    expect(templateIdx).toBeLessThan(defaultsIdx);
+    expect(result.agents[0].roleBody).toBeUndefined();
   });
 });

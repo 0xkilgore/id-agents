@@ -32,7 +32,6 @@ const DIFF_FIELDS = [
   'runtime',
   'plugins',
   'skills',
-  'claudeMd',
   'heartbeat',
   'allowedTools',
   'description',
@@ -78,7 +77,6 @@ function configFields(spec: AgentSpec, defaultModel?: string): Record<string, st
     runtime,
     plugins: normalizePlugins(spec.plugins),
     skills: normalizeSkills(spec.skills),
-    claudeMd: spec.claudeMd || '',
     heartbeat: spec.heartbeat ? JSON.stringify({ interval: spec.heartbeat.interval, message: spec.heartbeat.message }) : '',
     allowedTools: normalizeAllowedTools(spec.allowedTools),
     description: spec.description || '',
@@ -98,7 +96,6 @@ function runningFields(row: AgentRow): Record<string, string> {
     runtime: normalizeRuntime(row.runtime),
     plugins: normalizePlugins(meta.plugins),
     skills: normalizeSkills(meta.skills),
-    claudeMd: '',  // not stored in DB; changes always detected via config hash below
     heartbeat: meta.heartbeat === true ? 'enabled' : '',
     allowedTools: normalizeAllowedTools(meta.allowed_tools),
     description: meta.description || '',
@@ -118,11 +115,6 @@ export function diffAgent(spec: AgentSpec, row: AgentRow, defaultModel?: string)
   const changes: string[] = [];
 
   for (const field of DIFF_FIELDS) {
-    // claudeMd is not persisted in DB metadata — we can't compare it reliably.
-    // Treat claudeMd changes as always needing a rebuild if the config specifies it
-    // and the agent's working directory would change (new ID = new dir).
-    if (field === 'claudeMd') continue;
-
     // heartbeat: config has structured data, DB just stores a boolean flag.
     // Compare presence only: if config has heartbeat and DB doesn't (or vice versa).
     if (field === 'heartbeat') {

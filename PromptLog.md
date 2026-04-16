@@ -8,6 +8,14 @@ Entries are synthesized prompts, not verbatim chat messages. They can describe c
 
 ---
 
+## 2026-04-15: Two-source claudeMd simplification, 0.1.50-beta
+
+**Status:** done
+
+Collapse the agent instruction system from N sources (defaults.claudeMd, per-agent claudeMd, claudeMdFile, sub-agent template body, output convention preamble) down to exactly two: framework protocol defaults and agent role files. Protocol defaults (scheduling, task-discipline, output convention) move from an inline YAML string in `configs/idchain.yaml` into a framework constant in `src/protocol-defaults.ts`, prepended to every agent's `CLAUDE.md` unconditionally at spawn time. Agent personality lives in `.claude/agents/<name>.md` files in the project repo (0.1.49's sub-agent template), exposed as `roleBody` on `AgentSpec`. The `claudeMd`, `claudeMdFile`, and `resolveClaudeMdFile()` are all removed from the config schema and processing pipeline. `mergeDefaults()` no longer concatenates claudeMd. The YAML config becomes infrastructure-only: name, workingDirectory, model, runtime, heartbeat, skills. The idchain.yaml config shrinks significantly. All four CLAUDE.md write sites (spawn, sync-changed, sync-added, remote-deploy) now use the same composition: `PROTOCOL_DEFAULTS + roleBody`.
+
+---
+
 ## 2026-04-15: Sub-agent templates from .claude/agents/, 0.1.49-beta
 
 **Status:** done

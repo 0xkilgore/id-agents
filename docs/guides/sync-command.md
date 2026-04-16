@@ -47,7 +47,7 @@ These fields are compared to determine if an agent has changed:
 - `heartbeat` — Heartbeat enabled/disabled
 - `workingDirectory` — Only compared when explicitly set in config
 
-`claudeMd` is not compared (not stored in DB) — to force a claudeMd update, change another field or use `/agent <name> rebuild`.
+Protocol defaults and agent role files (`.claude/agents/<name>.md`) are always written at sync time regardless of diff results.
 
 ## Key Properties
 

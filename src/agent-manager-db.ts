@@ -28,6 +28,7 @@ import type { AgentRow, ScheduleDefinitionRow, TaskRow } from './db/types.js';
 import fetch from 'node-fetch';
 import type { PluginConfig, DeployConfig, HeartbeatConfig, CalendarSpec, ScheduleDeliveryMode } from './config-parser.js';
 import { processConfig } from './config-parser.js';
+import { PROTOCOL_DEFAULTS } from './protocol-defaults.js';
 import { computeSyncPlan, formatSyncSummary, formatSyncVerbose } from './sync.js';
 import { validateName } from './name-validation.js';
 import { parseAgentRef, normalizeAlias, buildAmbiguityWarning, type AgentMatch } from './core/agent-identifier.js';
@@ -1585,7 +1586,7 @@ export class AgentManagerDb {
         teamId = team.id;
         teamName = team.name;
 
-        const { name, type: agentType, model, runtime, allowedTools, pluginPath, plugins, skills, metadata: reqMetadata, local, claudeMd, heartbeat, openMode, workingDirectory: configWorkDir, verbose, domain, tokenId, address } = req.body || {};
+        const { name, type: agentType, model, runtime, allowedTools, pluginPath, plugins, skills, metadata: reqMetadata, local, roleBody, heartbeat, openMode, workingDirectory: configWorkDir, verbose, domain, tokenId, address } = req.body || {};
         if (!name) return res.status(400).json({ error: 'Missing name' });
         const agentNameCheck = validateName(name, 'agent');
         if (!agentNameCheck.valid) return res.status(400).json({ error: agentNameCheck.error });
@@ -1628,16 +1629,15 @@ export class AgentManagerDb {
         // Create workspace directory first (needed for plugin copy)
         mkdirSync(workingDirectory, { recursive: true });
 
-        // Write CLAUDE.md with output convention preamble
-        const outputPreamble = '\n\n## Output Convention\n\nWrite any generated files (reports, analysis, code artifacts) to `./output/` in your working directory. Other agents can read these artifacts via `/artifact`.\n';
-        const finalClaudeMd = claudeMd ? claudeMd + outputPreamble : outputPreamble;
+        // Write CLAUDE.md: protocol defaults + agent role body
         {
+          const parts = [PROTOCOL_DEFAULTS];
+          if (roleBody) parts.push(roleBody);
           const claudeDir = path.join(workingDirectory, '.claude');
           if (!existsSync(claudeDir)) {
             mkdirSync(claudeDir, { recursive: true });
           }
-          const claudeMdPath = path.join(claudeDir, 'CLAUDE.md');
-          writeFileSync(claudeMdPath, finalClaudeMd);
+          writeFileSync(path.join(claudeDir, 'CLAUDE.md'), parts.join('\n\n'));
         }
 
         // Write HEARTBEAT.yaml if specified
@@ -3724,17 +3724,17 @@ export class AgentManagerDb {
             await new Promise(r => setTimeout(r, 500));
           }
 
-          // Update config on disk (skills, plugins, claudeMd, heartbeat)
+          // Update config on disk (skills, plugins, heartbeat)
           const workingDirectory = row.working_directory || `${this.baseWorkDir}/agents/${row.id}`;
           if (!existsSync(workingDirectory)) mkdirSync(workingDirectory, { recursive: true });
 
+          // Write CLAUDE.md: protocol defaults + agent role body
           {
-            const syncOutputPreamble = '\n\n## Output Convention\n\nWrite any generated files (reports, analysis, code artifacts) to `./output/` in your working directory. Other agents can read these artifacts via `/artifact`.\n';
-            const syncClaudeMd = spec.claudeMd ? spec.claudeMd + syncOutputPreamble : syncOutputPreamble;
+            const parts = [PROTOCOL_DEFAULTS];
+            if (spec.roleBody) parts.push(spec.roleBody);
             const claudeDir = path.join(workingDirectory, '.claude');
             if (!existsSync(claudeDir)) mkdirSync(claudeDir, { recursive: true });
-            const claudeMdPath = path.join(claudeDir, 'CLAUDE.md');
-            writeFileSync(claudeMdPath, syncClaudeMd);
+            writeFileSync(path.join(claudeDir, 'CLAUDE.md'), parts.join('\n\n'));
           }
 
           const effectiveRuntime = resolveRuntime(spec.runtime) as HarnessType;
@@ -3830,10 +3830,13 @@ export class AgentManagerDb {
               : `${this.baseWorkDir}/agents/${agentId}`;
             if (!existsSync(workingDirectory)) mkdirSync(workingDirectory, { recursive: true });
 
-            if (spec.claudeMd) {
+            // Write CLAUDE.md: protocol defaults + agent role body
+            {
+              const parts = [PROTOCOL_DEFAULTS];
+              if (spec.roleBody) parts.push(spec.roleBody);
               const claudeDir = path.join(workingDirectory, '.claude');
               if (!existsSync(claudeDir)) mkdirSync(claudeDir, { recursive: true });
-              writeFileSync(path.join(claudeDir, 'CLAUDE.md'), spec.claudeMd);
+              writeFileSync(path.join(claudeDir, 'CLAUDE.md'), parts.join('\n\n'));
             }
 
             const effectiveRuntime = resolveRuntime(spec.runtime) as HarnessType;
@@ -4124,20 +4127,15 @@ export class AgentManagerDb {
               mkdirSync(workingDirectory, { recursive: true });
             }
 
-            // Write CLAUDE.md with output convention preamble
+            // Write CLAUDE.md: protocol defaults + agent role body
             {
-              const deployOutputPreamble = '\n\n## Output Convention\n\nWrite any generated files (reports, analysis, code artifacts) to `./output/` in your working directory. Other agents can read these artifacts via `/artifact`.\n';
+              const parts = [PROTOCOL_DEFAULTS];
+              if (agentConfig.roleBody) parts.push(agentConfig.roleBody);
               const claudeDir = path.join(workingDirectory, '.claude');
               if (!existsSync(claudeDir)) {
                 mkdirSync(claudeDir, { recursive: true });
               }
-              const claudeMdPath = path.join(claudeDir, 'CLAUDE.md');
-              const existingContent = existsSync(claudeMdPath) ? readFileSync(claudeMdPath, 'utf-8') : '';
-              const configContent = agentConfig.claudeMd || '';
-              const newContent = existingContent
-                ? `${configContent}\n\n${existingContent}`
-                : configContent;
-              writeFileSync(claudeMdPath, (newContent || '') + deployOutputPreamble);
+              writeFileSync(path.join(claudeDir, 'CLAUDE.md'), parts.join('\n\n'));
             }
 
             // Merge plugins from config
