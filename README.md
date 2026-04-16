@@ -482,6 +482,46 @@ calendar:
 
 See [Configuration Reference](./docs/reference/configuration.md) for full options.
 
+### Sub-Agent Templates
+
+Give agents personality and context by placing a markdown file in your project's `.claude/agents/` directory. When an agent's `workingDirectory` points at a project that contains `.claude/agents/<agent-name>.md`, the file's body is automatically prepended to the agent's `claudeMd` at deploy/sync time.
+
+```
+myproject/
+  .claude/
+    agents/
+      coder.md          # loaded for agent named "coder"
+      security-audit.md # loaded when agent: security-audit
+  src/
+  ...
+```
+
+A template file uses optional YAML frontmatter for metadata:
+
+```markdown
+---
+description: Security audit specialist
+---
+
+You are a security auditor. Focus on OWASP Top 10 vulnerabilities.
+Always check for injection, XSS, and authentication issues.
+```
+
+- **Body** is prepended to the agent's `claudeMd` (before defaults and agent-level config).
+- **`description`** from frontmatter is used as the agent's description if the config doesn't set one.
+- If the file does not exist, behavior is unchanged.
+
+Use the `agent` field in config to load a template with a different filename than the agent's name:
+
+```yaml
+agents:
+  - name: auditor
+    agent: security-audit          # loads .claude/agents/security-audit.md
+    workingDirectory: /path/to/project
+```
+
+This lets you promote Claude Code sub-agents (`.claude/agents/*.md`) into full id-agents workers with identity, while keeping the personality file in the project repo where it belongs.
+
 ## Onchain Identity
 
 Agents register on [ID Chain](https://github.com/idchain-world) for verifiable ENS-based identity:

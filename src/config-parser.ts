@@ -33,6 +33,7 @@ export interface ResourceConfig {
 
 export interface AgentSpec {
   name: string;
+  agent?: string;                     // Sub-agent template filename (loads .claude/agents/<agent>.md from workingDirectory)
   type?: 'claude' | 'automator';      // Agent type: 'claude' (default) or 'automator' (manager's brain, hidden)
   runtime?: HarnessType;              // Runtime harness id, defaults to 'claude-agent-sdk'
   openMode?: boolean;                 // Allow XMTP messages from any sender when no allowlist is configured
@@ -538,6 +539,56 @@ export function resolveClaudeMdFile(spec: { claudeMd?: string; claudeMdFile?: st
 }
 
 /**
+ * Result of loading a sub-agent template from .claude/agents/<name>.md
+ */
+export interface SubAgentTemplate {
+  body: string;                       // Markdown body (after frontmatter)
+  description?: string;               // Description from frontmatter
+  frontmatter: Record<string, any>;   // All frontmatter fields
+}
+
+/**
+ * Load a sub-agent template from {workingDirectory}/.claude/agents/{filename}.md
+ *
+ * If the file does not exist, returns undefined (no-op).
+ * Parses YAML frontmatter (--- delimited) and returns body + metadata.
+ */
+export function loadSubAgentTemplate(workingDir: string, filename: string): SubAgentTemplate | undefined {
+  const filePath = path.join(workingDir, '.claude', 'agents', `${filename}.md`);
+
+  if (!fs.existsSync(filePath)) {
+    return undefined;
+  }
+
+  const raw = fs.readFileSync(filePath, 'utf-8');
+  return parseSubAgentTemplate(raw);
+}
+
+/**
+ * Parse a sub-agent template string into frontmatter and body.
+ * Exported for testing.
+ */
+export function parseSubAgentTemplate(raw: string): SubAgentTemplate {
+  const frontmatterMatch = raw.match(/^---\r?\n([\s\S]*?)(?:\r?\n)?---\r?\n([\s\S]*)$/);
+
+  if (frontmatterMatch) {
+    const frontmatter = (yaml.load(frontmatterMatch[1]) as Record<string, any>) || {};
+    const body = frontmatterMatch[2].trim();
+    return {
+      body,
+      description: typeof frontmatter.description === 'string' ? frontmatter.description : undefined,
+      frontmatter,
+    };
+  }
+
+  // No frontmatter — entire content is the body
+  return {
+    body: raw.trim(),
+    frontmatter: {},
+  };
+}
+
+/**
  * Heartbeat configuration loaded from yaml file
  */
 export interface HeartbeatConfig {
@@ -725,9 +776,30 @@ export function processConfig(
   });
 
   // Merge defaults into each agent
-  const agents = resolvedConfig.agents.map(agent =>
+  let agents = resolvedConfig.agents.map(agent =>
     mergeDefaults(agent, resolvedConfig.defaults)
   );
+
+  // Load sub-agent templates from {workingDirectory}/.claude/agents/<name>.md
+  agents = agents.map(agent => {
+    if (!agent.workingDirectory) return agent;
+    const templateName = agent.agent || agent.name;
+    const template = loadSubAgentTemplate(agent.workingDirectory, templateName);
+    if (!template) return agent;
+
+    // Prepend template body to claudeMd
+    const parts: string[] = [];
+    if (template.body) parts.push(template.body);
+    if (agent.claudeMd) parts.push(agent.claudeMd);
+    const merged = { ...agent, claudeMd: parts.join('\n\n') || undefined };
+
+    // Use template description as default if agent config lacks one
+    if (!merged.description && template.description) {
+      merged.description = template.description;
+    }
+
+    return merged;
+  });
 
   // Load team context if specified
   const teamContext = resolvedConfig.team

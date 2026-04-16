@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.1.49-beta
+
+### Features
+
+- **Sub-agent templates**: Agents can now load personality and context from `.claude/agents/<name>.md` files in their `workingDirectory`. The markdown body is prepended to the agent's `claudeMd` at deploy/sync time. Frontmatter `description` is used as a fallback when the config doesn't set one. Use the `agent` field in config to load a template with a different filename (e.g., `agent: security-audit` loads `security-audit.md` instead of the agent's own name).
+
+### New config field
+
+- `agents[].agent` — optional string, loads `.claude/agents/<agent>.md` instead of `.claude/agents/<name>.md`.
+
 ## 0.1.48-beta
 
 ### Features

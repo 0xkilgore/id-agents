@@ -8,6 +8,14 @@ Entries are synthesized prompts, not verbatim chat messages. They can describe c
 
 ---
 
+## 2026-04-15: Sub-agent templates from .claude/agents/, 0.1.49-beta
+
+**Status:** done
+
+Add support for loading agent personality from `.claude/agents/<name>.md` files in the agent's working directory. During deploy and sync, after determining workingDirectory and name, check if the template file exists. If it does, parse YAML frontmatter and markdown body. Prepend the body to the agent's claudeMd (before defaults and agent-level config) and use the frontmatter `description` as a fallback when the config doesn't specify one. Also add an `agent` field to AgentSpec so config can point at a different template filename — e.g., `agents: [{name: auditor, agent: security-audit}]` loads `security-audit.md` instead of `auditor.md`. This bridges the gap between Claude Code sub-agents (which already use `.claude/agents/`) and id-agents workers, letting users promote a sub-agent into a full worker with identity while keeping the personality file in the project repo. New `loadSubAgentTemplate()` and `parseSubAgentTemplate()` functions in config-parser, called from processConfig. 17 unit tests covering frontmatter parsing, file-exists/missing, and processConfig integration.
+
+---
+
 ## 2026-04-15: Always-on task-discipline via defaults.claudeMd, 0.1.48-beta
 
 **Status:** done
