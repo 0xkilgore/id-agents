@@ -143,18 +143,22 @@ curl -s -X POST http://localhost:4000/remote \
   -d '{"command":"/news coder"}'
 ```
 
-## 6. Tell the User How to Launch the CLI
+## 6. Offer to Act as the Team Manager
 
-After setup is complete, tell the user:
+After deploy completes, you (Claude) are already connected to the team via `/remote` on `http://localhost:4000`. Don't hand the user off to a separate terminal — offer to continue as their team manager:
 
-> To launch the interactive CLI yourself, open a terminal and run:
+> I can act as your team manager and communicate directly to your team via /remote. Shall I ask them to say who they are?
+
+If they accept, keep using the `/remote` endpoint to relay between the user and the team — `/agents` for a roster, `/ask <agent> <message>` to send, `/news <agent>` to poll for replies.
+
+> **Optional — manual chat without Claude in the loop:** If the user prefers to talk to agents directly, they can open a separate terminal and run:
 >
 > ```bash
 > cd <path-to-id-agents>
 > npm run id-agents
 > ```
 >
-> Type `/help` to see all available commands.
+> Then type `/help` to see all available commands. This is a secondary option, not the default next step.
 
 ## 7. Suggest Next Steps
 
@@ -184,7 +188,7 @@ After the demo team is running, suggest the user create their own team. A good s
 >     workingDirectory: /path/to/backend-project
 > ```
 >
-> Then deploy with `/deploy my-config` in the CLI.
+> Then deploy with `/deploy my-config` — either via `/remote` (with you, Claude, as the team manager) or in the interactive CLI.
 
 ## Next Steps
 
