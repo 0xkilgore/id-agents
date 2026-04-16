@@ -84,7 +84,28 @@ Run a team of AI coding agents from a single chat. Each agent is a real process 
 
 > **Important:** You must be logged into Claude Code CLI before starting ID Agents. Run `claude login` in your terminal and complete the authentication. If you use Claude Code in VS Code, you still need to log in via the terminal — open VS Code's integrated terminal and run `claude login` there.
 
-### 1) Setup
+### Recommended: Let Claude set it up
+
+The fastest way to start is to let a Claude Code session run the quickstart for you, via the `idagents-admin-control` skill. Claude clones the repo, installs dependencies, starts the manager, deploys a demo team, then offers to act as your team manager.
+
+Clone this repo and copy the skill into your Claude Code project's `.claude/skills/`:
+
+```bash
+git clone https://github.com/idchain-world/id-agents.git
+cp -r id-agents/skills/idagents-admin-control <your-claude-code-project>/.claude/skills/
+```
+
+Then open Claude Code in your project and paste:
+
+> Please run the QUICKSTART.md in the id-agents repo to set up my team.
+
+See [QUICKSTART.md](./QUICKSTART.md) for the full step-by-step.
+
+### Manual install
+
+Prefer to run the steps yourself? Skip the skill and use the interactive CLI directly.
+
+#### 1) Setup
 
 ```bash
 # First, make sure Claude Code CLI is installed and logged in
@@ -98,7 +119,7 @@ npm install
 
 That's it — no database setup needed. ID Agents uses SQLite by default (stored at `~/.id-agents/id-agents.db`). For PostgreSQL, set `DATABASE_URL` in a `.env` file.
 
-### 2) Run the interactive CLI
+#### 2) Run the interactive CLI
 
 ```bash
 npm run id-agents
@@ -110,7 +131,7 @@ Custom port (default: 4100):
 MANAGER_PORT=5000 npm run id-agents
 ```
 
-### 3) Deploy and talk to agents
+#### 3) Deploy and talk to agents
 
 ```
 /deploy claude-code    # First-time deploy (or /deploy codex)
