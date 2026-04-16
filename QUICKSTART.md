@@ -190,6 +190,17 @@ After the demo team is running, suggest the user create their own team. A good s
 >
 > Then deploy with `/deploy my-config` — either via `/remote` (with you, Claude, as the team manager) or in the interactive CLI.
 
+## 8. Watch the Team in the TUI
+
+Open a separate terminal and launch the live dashboard to watch agents and the news feed in real time:
+
+```bash
+cd <path-to-id-agents>
+npm run tui:dev
+```
+
+Navigate with the arrow keys. `Tab` cycles teams, `→` opens an agent's news feed, `←` goes back, `p` pauses polling, `q` quits. Full reference at [docs/guides/tui.md](./docs/guides/tui.md).
+
 ## Next Steps
 
 - [Documentation](https://www.idagents.ai/docs) -- Full docs

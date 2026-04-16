@@ -19,6 +19,7 @@ Documentation for the ID Agents multi-agent orchestration platform.
 - [News Feed Guide](./guides/news-feed.md) - Loop-safe message channel and multi-reply catch-all
 - [Agent Outputs Guide](./guides/agent-outputs.md) - Output convention, `/output`, and `/artifact`
 - [Heartbeats Guide](./guides/heartbeats.md) - Agent-driven heartbeat system via HEARTBEAT.md
+- [TUI Dashboard Guide](./guides/tui.md) - Live terminal dashboard for the running team
 
 ## Protocols
 

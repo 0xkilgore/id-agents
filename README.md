@@ -23,6 +23,7 @@ Run a team of AI coding agents from a single chat. Each agent is a real process 
 - **Agent wallets** - Automatic multi-chain wallets via [OWS](https://github.com/open-wallet-standard/core)
 - **Onchain identity** - ENS-based agent identity via ID Chain (e.g., `x.agent-15.xid.eth`)
 - **Remote API** - Programmatic management via `/remote` endpoint and `/tasks` REST API
+- **TUI Dashboard** - Live terminal dashboard for the running team — agents list, news feed, message detail (`npm run tui:dev`)
 
 ## Architecture
 
@@ -152,6 +153,23 @@ curl -s -X POST http://localhost:4100/remote \
 ```
 
 Connect from anywhere — terminal, mobile (via Telegram), SSH, or any tool that can POST to `/remote`.
+
+### TUI Dashboard
+
+Launch the live terminal dashboard to watch the running team without polling by hand:
+
+```bash
+npm run tui:dev          # source mode (tsx)
+npm run tui              # build + run from dist/
+```
+
+The TUI talks to the manager at `MANAGER_URL` (default `http://localhost:4100`) and has three pages: the agents table, the per-agent news feed, and a news-item detail view. Navigate with the arrow keys. `Tab` cycles teams, `p` pauses polling, `q` quits.
+
+```
+↑↓ nav · → news · Tab team · p pause · q quit
+```
+
+iTerm2 is the recommended terminal — it renders the alt-screen content flicker-free. See [docs/guides/tui.md](./docs/guides/tui.md) for the full keybindings reference and terminal compatibility notes.
 
 ## REST-AP Protocol
 
