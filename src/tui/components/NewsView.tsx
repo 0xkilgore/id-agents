@@ -121,10 +121,12 @@ function Body(props: BodyProps): React.ReactElement {
       const item = items[i];
       if (!item) continue;
       const selected = windowStart + i === selectedIndex;
-      const color = newsAgeColor(item.timestamp, cooldownEpoch);
+      const dotColor = newsAgeColor(item.timestamp, cooldownEpoch);
       lines.push(
-        <Text key={`${item.timestamp}-${i}`} inverse={selected} color={color}>
+        <Text key={`${item.timestamp}-${i}`} inverse={selected}>
           {selected ? '▶ ' : '  '}
+          <Text color={dotColor}>●</Text>
+          {' '}
           {padRight(formatTime(item.timestamp), TIME_COL)}{' '}
           {padRight(item.type, TYPE_COL)}
           {truncate(oneLine(item.message ?? ''), messageWidth)}

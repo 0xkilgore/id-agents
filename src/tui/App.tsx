@@ -26,7 +26,7 @@ const NEWS_CHROME_ROWS = 6;
 const MIN_VISIBLE = 3;
 const SELF_AGENT = 'tui';
 const TERMINAL_CONTENT_WIDTH = 76;
-const NEWS_MESSAGE_WIDTH = TERMINAL_CONTENT_WIDTH - 8 - 1 - 17 - 2;
+const NEWS_MESSAGE_WIDTH = TERMINAL_CONTENT_WIDTH - 8 - 1 - 17 - 4;
 
 interface AppProps {
   staticMode?: boolean;
