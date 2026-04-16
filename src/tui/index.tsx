@@ -14,7 +14,15 @@ const staticMode = args.includes('--static') || args.includes('--no-poll');
 // overwritten in place with no intermediate blank frame. Safe because the
 // TUI is in alt-screen and content dimensions are fixed-width.
 if (process.stdout.isTTY) {
-  const ERASE_TO_HOME = /(?:\x1b\[2K\x1b\[1A)*\x1b\[2K\x1b\[G/g;
+  // Two ink render paths both need rewriting to cursor-home:
+  //   1. log-update's line-by-line erase: (ESC[2K ESC[1A){N-1} ESC[2K ESC[G
+  //   2. ink's clearTerminal fallback when outputHeight >= terminal rows:
+  //      ESC[2J ESC[3J ESC[H  (see ink.js:122)
+  // We want content to fill the full terminal, which means outputHeight == rows
+  // triggers path 2. Replace both with a bare cursor-home so content is
+  // overwritten in place, then append ESC[J to clear any residual rows.
+  const ERASE_TO_HOME =
+    /(?:\x1b\[2K\x1b\[1A)*\x1b\[2K\x1b\[G|\x1b\[2J\x1b\[3J\x1b\[H/g;
   const originalWrite = process.stdout.write.bind(process.stdout);
   const patchedWrite = ((chunk: unknown, ...rest: unknown[]): boolean => {
     let s: string;

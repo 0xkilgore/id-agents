@@ -131,8 +131,8 @@ export function App({ staticMode = false }: AppProps = {}): React.ReactElement {
   }, [allAgents, pollTs]);
 
   const rows = stdout?.rows ?? 30;
-  const agentsWindowSize = Math.max(MIN_VISIBLE, rows - AGENTS_CHROME_ROWS - 1);
-  const newsWindowSize = Math.max(MIN_VISIBLE, rows - NEWS_CHROME_ROWS - 1);
+  const agentsWindowSize = Math.max(MIN_VISIBLE, rows - AGENTS_CHROME_ROWS);
+  const newsWindowSize = Math.max(MIN_VISIBLE, rows - NEWS_CHROME_ROWS);
   const total = visibleAgents.length;
 
   useEffect(() => {
