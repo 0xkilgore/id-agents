@@ -21,8 +21,8 @@ type View = 'agents' | 'news';
 const AGENTS_POLL_MS = 2000;
 const TEAMS_POLL_MS = 15000;
 const NEWS_POLL_MS = 3000;
-const AGENTS_CHROME_ROWS = 17;
-const NEWS_CHROME_ROWS = 10;
+const AGENTS_CHROME_ROWS = 18;
+const NEWS_CHROME_ROWS = 11;
 const MIN_VISIBLE = 3;
 const SELF_AGENT = 'tui';
 const TERMINAL_CONTENT_WIDTH = 76;
@@ -123,8 +123,8 @@ export function App({ staticMode = false }: AppProps = {}): React.ReactElement {
   }, [allAgents, pollTs]);
 
   const rows = stdout?.rows ?? 30;
-  const agentsWindowSize = Math.max(MIN_VISIBLE, rows - AGENTS_CHROME_ROWS);
-  const newsWindowSize = Math.max(MIN_VISIBLE, rows - NEWS_CHROME_ROWS);
+  const agentsWindowSize = Math.max(MIN_VISIBLE, rows - AGENTS_CHROME_ROWS - 1);
+  const newsWindowSize = Math.max(MIN_VISIBLE, rows - NEWS_CHROME_ROWS - 1);
   const total = visibleAgents.length;
 
   useEffect(() => {

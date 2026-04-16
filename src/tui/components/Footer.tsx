@@ -9,8 +9,8 @@ interface FooterProps {
 }
 
 const HINTS: Record<FooterView, string> = {
-  agents: '[↑↓] select [PgUp/PgDn] page [Home/End] jump [Tab/⇧Tab] team [n] news [p] pause [q] quit',
-  news: '[↑↓] scroll [PgUp/PgDn] page [Home/End] jump [Esc/b] back [p] pause [q] quit',
+  agents: '↑↓ nav · Tab team · n news · p pause · q quit',
+  news: '↑↓ scroll · Esc back · p pause · q quit',
 };
 
 export function Footer({ view, paused }: FooterProps): React.ReactElement {

@@ -14,8 +14,8 @@ export function TeamsPanel(props: TeamsPanelProps): React.ReactElement {
   const allSelected = selectedTeam === null;
 
   return (
-    <Box borderStyle="round" paddingX={1}>
-      <Text bold>Teams: </Text>
+    <Box borderStyle="round">
+      <Text bold> Teams: </Text>
       <Chip label={`All (${allCount})`} active={allSelected} />
       {teams.map((t) => {
         const count = teamCounts.get(t.name) ?? 0;
