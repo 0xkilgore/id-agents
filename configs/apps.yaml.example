@@ -13,9 +13,14 @@ defaults:
   runtime: claude-code-cli
   model: claude-opus-4-6
   verbose: "true"
-  # Note: --dangerously-skip-permissions is always passed to claude-code-cli
-  # subprocesses. There is no YAML knob to disable it (background agents
-  # have no shell to approve prompts). See QUICKSTART.md.
+  # Permission bypass for background agents.
+  # Default (and recommended) is true: claude-code-cli runs with
+  # --dangerously-skip-permissions, codex runs with
+  # --dangerously-bypass-approvals-and-sandbox. Background agents have no
+  # interactive shell to approve tool-use prompts, so any prompt hangs the
+  # process. Set to false only if you understand that your agents will hang
+  # the moment a tool-use approval is requested.
+  dangerouslySkipPermissions: true
 
 agents:
   - name: architect

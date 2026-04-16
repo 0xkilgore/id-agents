@@ -55,6 +55,10 @@ export interface AgentMetadata {
   external_url?: string;
   internal_url?: string;
   requireAuth?: boolean;
+  // Honored explicitly true/false; defaults to true when undefined.
+  // Maps to --dangerously-skip-permissions for claude-code-cli and to
+  // --dangerously-bypass-approvals-and-sandbox for codex.
+  dangerouslySkipPermissions?: boolean;
   [key: string]: any;
 }
 

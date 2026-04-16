@@ -50,6 +50,7 @@ export interface AgentSpec {
   port?: number;                      // Port for local agents (auto-allocated if not specified)
   workingDirectory?: string;          // Working directory for local agents
   verbose?: boolean | string;         // Enable detailed logging (show tool calls, progress)
+  dangerouslySkipPermissions?: boolean; // Skip CLI permission prompts (default: true; agents have no shell to approve)
   talkTimeout?: number;               // Default timeout for /talk-to in ms (default: 120000, max: 600000)
   heartbeatFile?: string;             // Path to heartbeat yaml config (relative to config file)
   heartbeat?: number | HeartbeatConfig;  // Number = new model (seconds, reads HEARTBEAT.md), object = legacy (interval+message)
@@ -117,6 +118,7 @@ export interface DeployConfig {
     resources?: ResourceConfig;
     register?: boolean;                 // Auto-register all agents onchain (default: undefined, use onchain.register)
     local?: boolean;                    // Run all agents locally by default
+    dangerouslySkipPermissions?: boolean; // Default skip-permissions for all agents
     talkTimeout?: number;               // Default /talk-to timeout in ms
     heartbeatFile?: string;             // Default heartbeat config file for all agents
     heartbeat?: number | HeartbeatConfig;  // Default heartbeat for all agents
@@ -706,6 +708,12 @@ export function mergeDefaults(agent: AgentSpec, defaults: DeployConfig['defaults
   // Local: agent overrides defaults
   if (merged.local === undefined && defaults.local !== undefined) {
     merged.local = defaults.local;
+  }
+
+  // dangerouslySkipPermissions: agent overrides defaults; consumer (spawn site)
+  // defaults to true when both are undefined.
+  if (merged.dangerouslySkipPermissions === undefined && defaults.dangerouslySkipPermissions !== undefined) {
+    merged.dangerouslySkipPermissions = defaults.dangerouslySkipPermissions;
   }
 
   // talkTimeout: agent overrides defaults

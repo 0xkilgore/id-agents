@@ -48,8 +48,17 @@ export class CodexHarness implements AgentHarness {
       args.push('--model', options.model);
     }
 
-    // Full auto mode — no interactive approvals
-    args.push('--full-auto');
+    // Default to --dangerously-bypass-approvals-and-sandbox so background
+    // agents can act without an interactive shell. The agent's
+    // `dangerouslySkipPermissions: false` config opts back into --full-auto
+    // (which keeps the workspace-write sandbox and on-request approval policy).
+    const skipPermissions = process.env.ID_AGENT_SKIP_PERMISSIONS !== 'false';
+    if (skipPermissions) {
+      args.push('--dangerously-bypass-approvals-and-sandbox');
+    } else {
+      args.push('--full-auto');
+    }
+    console.log(`[Codex] Permission mode: ${skipPermissions ? '--dangerously-bypass-approvals-and-sandbox (default)' : '--full-auto (config opt-out)'}`);
 
     // Skip git repo check in case working dir isn't a git repo
     args.push('--skip-git-repo-check');

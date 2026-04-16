@@ -38,17 +38,18 @@ export class ClaudeCodeCliHarness implements AgentHarness {
     // Build arguments for claude CLI
     // Use stream-json for real-time visibility into what the agent is doing
     const verbose = process.env.ID_AGENT_VERBOSE === 'true';
-    // --dangerously-skip-permissions is non-negotiable for this runtime.
-    // Agents run as background processes with no interactive shell; any
-    // permission prompt would hang the process silently. The YAML field
-    // `dangerouslySkipPermissions` is ignored — the flag is always passed.
+    // Default to --dangerously-skip-permissions because background agents have
+    // no interactive shell to approve prompts. The agent's
+    // `dangerouslySkipPermissions: false` config can opt out; the spawn site
+    // sets ID_AGENT_SKIP_PERMISSIONS=false in that case.
+    const skipPermissions = process.env.ID_AGENT_SKIP_PERMISSIONS !== 'false';
     const args: string[] = [
       '-p', prompt,
-      '--dangerously-skip-permissions',
+      ...(skipPermissions ? ['--dangerously-skip-permissions'] : []),
       '--output-format', verbose ? 'stream-json' : 'json',
       ...(verbose ? ['--verbose'] : [])
     ];
-    console.log(`[Claude CLI] Permission mode: --dangerously-skip-permissions (forced for background agents)`);
+    console.log(`[Claude CLI] Permission mode: ${skipPermissions ? '--dangerously-skip-permissions (default)' : 'interactive (config opt-out)'}`);
 
     // Don't pass --model flag for CLI harness - let Claude Code use its default settings
     // This ensures Max subscription users don't get charged API credits

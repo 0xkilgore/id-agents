@@ -4502,7 +4502,9 @@ async function deployFromConfig(filePath: string, args: string[] = []) {
             ID_DB_AGENT_ID: result.id,
             ID_SHARED_DIR: result.sharedDirectory,
             ...(agent.model && { CLAUDE_MODEL: agent.model }),
-            ...((agent.verbose === true || agent.verbose === 'true') && { ID_AGENT_VERBOSE: 'true' })
+            ...((agent.verbose === true || agent.verbose === 'true') && { ID_AGENT_VERBOSE: 'true' }),
+            // Default to skip-permissions; honor explicit false from config
+            ID_AGENT_SKIP_PERMISSIONS: agent.dangerouslySkipPermissions === false ? 'false' : 'true'
           };
 
           // Create log file for the local agent

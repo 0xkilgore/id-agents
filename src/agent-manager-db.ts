@@ -1588,7 +1588,7 @@ export class AgentManagerDb {
         teamId = team.id;
         teamName = team.name;
 
-        const { name, type: agentType, model, runtime, allowedTools, pluginPath, plugins, skills, metadata: reqMetadata, local, agentTemplate, roleBody, heartbeat, openMode, workingDirectory: configWorkDir, verbose, domain, tokenId, address } = req.body || {};
+        const { name, type: agentType, model, runtime, allowedTools, pluginPath, plugins, skills, metadata: reqMetadata, local, agentTemplate, roleBody, heartbeat, openMode, workingDirectory: configWorkDir, verbose, dangerouslySkipPermissions, domain, tokenId, address } = req.body || {};
         if (!name) return res.status(400).json({ error: 'Missing name' });
         const agentNameCheck = validateName(name, 'agent');
         if (!agentNameCheck.valid) return res.status(400).json({ error: agentNameCheck.error });
@@ -1680,7 +1680,8 @@ export class AgentManagerDb {
           ...(isAutomator && { isAutomator: true }),
           // Flag that heartbeat is enabled (actual config read from HEARTBEAT.yaml)
           ...(heartbeat && { heartbeat: true }),
-          ...(openMode !== undefined && { openMode: openMode === true || openMode === 'true' })
+          ...(openMode !== undefined && { openMode: openMode === true || openMode === 'true' }),
+          ...(dangerouslySkipPermissions !== undefined && { dangerouslySkipPermissions: dangerouslySkipPermissions === true || dangerouslySkipPermissions === 'true' })
         };
 
         await this.db.agents.create({
@@ -3786,6 +3787,7 @@ export class AgentManagerDb {
             description: spec.description,
             ...(isAutomator && { isAutomator: true }),
             ...(spec.heartbeat && { heartbeat: true }),
+            ...(spec.dangerouslySkipPermissions !== undefined && { dangerouslySkipPermissions: spec.dangerouslySkipPermissions }),
             ...(owsWallet && { ows_wallet: owsWallet.walletName, ows_address: owsWallet.address }),
           };
 
@@ -3889,6 +3891,7 @@ export class AgentManagerDb {
               ...(isAutomator && { isAutomator: true }),
               ...(spec.heartbeat && { heartbeat: true }),
               ...(spec.openMode !== undefined && { openMode: spec.openMode }),
+              ...(spec.dangerouslySkipPermissions !== undefined && { dangerouslySkipPermissions: spec.dangerouslySkipPermissions }),
               ...(owsWallet && { ows_wallet: owsWallet.walletName, ows_address: owsWallet.address }),
             };
 
@@ -4158,7 +4161,8 @@ export class AgentManagerDb {
               ...(isAutomator && { isAutomator: true }),
               // Flag that heartbeat is enabled
               ...(heartbeatConfig && { heartbeat: true }),
-              ...(agentConfig.openMode !== undefined && { openMode: agentConfig.openMode })
+              ...(agentConfig.openMode !== undefined && { openMode: agentConfig.openMode }),
+              ...(agentConfig.dangerouslySkipPermissions !== undefined && { dangerouslySkipPermissions: agentConfig.dangerouslySkipPermissions })
             };
 
             // Use ENS domain from config if available (preserves registration across redeploys)
@@ -5520,9 +5524,12 @@ export class AgentManagerDb {
       }
 
       // Set environment
-      // Look up OWS wallet name from agent metadata
+      // Look up OWS wallet name and permissions flag from agent metadata
       const agentRow = await this.dbQueryAgentById(teamId, id);
       const owsWallet = (agentRow?.metadata as any)?.ows_wallet || null;
+      // Honor explicit override; default true when undefined.
+      const skipPermsRaw = (agentRow?.metadata as any)?.dangerouslySkipPermissions;
+      const skipPermissions = skipPermsRaw === false ? false : true;
 
       // Allowlist: only pass env vars that agents need
       // Excludes secrets like PRIVATE_KEY, registrar keys, RPC keys, DATABASE_URL
@@ -5547,6 +5554,7 @@ export class AgentManagerDb {
         ID_TEAM: teamName,
         ID_AGENT_PORT: String(port),
         MANAGER_URL: `http://127.0.0.1:4100`,
+        ID_AGENT_SKIP_PERMISSIONS: skipPermissions ? 'true' : 'false',
         ...(model && { CLAUDE_MODEL: model }),
         ...(tokenId && { ID_AGENT_TOKEN_ID: tokenId }),
         ...(owsWallet && { OWS_WALLET: owsWallet }),
