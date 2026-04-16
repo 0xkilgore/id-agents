@@ -4,6 +4,7 @@ import { Footer } from './components/Footer.js';
 import { TeamsPanel } from './components/TeamsPanel.js';
 import { AgentsTable } from './components/AgentsTable.js';
 import { NewsView } from './components/NewsView.js';
+import { NewsDetail } from './components/NewsDetail.js';
 import { StatusStrip } from './components/StatusStrip.js';
 import type { Agent, NewsItem, Team } from './api/types.js';
 import {
@@ -15,7 +16,7 @@ import {
 import { usePolling } from './hooks/usePolling.js';
 import { humanizeUptime } from './util/format.js';
 
-type View = 'agents' | 'news';
+type View = 'agents' | 'news' | 'news-detail';
 
 const AGENTS_POLL_MS = 2000;
 const TEAMS_POLL_MS = 15000;
@@ -23,6 +24,8 @@ const NEWS_POLL_MS = 3000;
 const NEWS_COOLDOWN_TICK_MS = 10_000;
 const AGENTS_CHROME_ROWS = 11;
 const NEWS_CHROME_ROWS = 6;
+const DETAIL_CHROME_ROWS = 6;
+const DETAIL_CONTENT_WIDTH = 76;
 const MIN_VISIBLE = 3;
 const SELF_AGENT = 'tui';
 const TERMINAL_CONTENT_WIDTH = 76;
@@ -133,6 +136,7 @@ export function App({ staticMode = false }: AppProps = {}): React.ReactElement {
   const rows = stdout?.rows ?? 30;
   const agentsWindowSize = Math.max(MIN_VISIBLE, rows - AGENTS_CHROME_ROWS);
   const newsWindowSize = Math.max(MIN_VISIBLE, rows - NEWS_CHROME_ROWS);
+  const detailWindowSize = Math.max(MIN_VISIBLE, rows - DETAIL_CHROME_ROWS);
   const total = visibleAgents.length;
 
   useEffect(() => {
@@ -168,11 +172,18 @@ export function App({ staticMode = false }: AppProps = {}): React.ReactElement {
   const newsPoll = usePolling<NewsItem[]>(
     newsFetcher,
     NEWS_POLL_MS,
-    paused || staticMode || view !== 'news',
+    paused || staticMode || (view !== 'news' && view !== 'news-detail'),
     [manager, selectedAgentName ?? '', view],
   );
   const newsItems = newsPoll.data ?? [];
-  const newsTotal = newsItems.length;
+  const sortedNewsItems = useMemo(
+    () => [...newsItems].sort((a, b) => b.timestamp - a.timestamp),
+    [newsItems],
+  );
+  const newsTotal = sortedNewsItems.length;
+  const selectedNewsItem: NewsItem | null = sortedNewsItems[newsSelectedIndex] ?? null;
+
+  const [detailScroll, setDetailScroll] = useState(0);
 
   useEffect(() => {
     if (newsTotal === 0) {
@@ -233,9 +244,26 @@ export function App({ staticMode = false }: AppProps = {}): React.ReactElement {
     setView('news');
   }, [selectedAgentName]);
 
+  const openNewsDetail = useCallback(() => {
+    if (!selectedNewsItem) return;
+    setDetailScroll(0);
+    setView('news-detail');
+  }, [selectedNewsItem]);
+
   const backToAgents = useCallback(() => {
     setView('agents');
   }, []);
+
+  const backToNews = useCallback(() => {
+    setView('news');
+  }, []);
+
+  const moveDetailScroll = useCallback(
+    (delta: number) => {
+      setDetailScroll((off) => Math.max(0, off + delta));
+    },
+    [],
+  );
 
   useInput(
     (input, key) => {
@@ -261,14 +289,26 @@ export function App({ staticMode = false }: AppProps = {}): React.ReactElement {
         return;
       }
 
-      // news view
-      if (key.leftArrow || key.escape) return backToAgents();
-      if (key.upArrow) return moveNewsSel(-1);
-      if (key.downArrow) return moveNewsSel(1);
-      if (key.pageUp) return moveNewsSel(-newsWindowSize);
-      if (key.pageDown) return moveNewsSel(newsWindowSize);
-      if (isHomeKey(input)) return setNewsSelectedIndex(0);
-      if (isEndKey(input)) return setNewsSelectedIndex(Math.max(0, newsTotal - 1));
+      if (view === 'news') {
+        if (key.rightArrow) return openNewsDetail();
+        if (key.leftArrow || key.escape) return backToAgents();
+        if (key.upArrow) return moveNewsSel(-1);
+        if (key.downArrow) return moveNewsSel(1);
+        if (key.pageUp) return moveNewsSel(-newsWindowSize);
+        if (key.pageDown) return moveNewsSel(newsWindowSize);
+        if (isHomeKey(input)) return setNewsSelectedIndex(0);
+        if (isEndKey(input)) return setNewsSelectedIndex(Math.max(0, newsTotal - 1));
+        return;
+      }
+
+      // news-detail view
+      if (key.leftArrow || key.escape) return backToNews();
+      if (key.upArrow) return moveDetailScroll(-1);
+      if (key.downArrow) return moveDetailScroll(1);
+      if (key.pageUp) return moveDetailScroll(-detailWindowSize);
+      if (key.pageDown) return moveDetailScroll(detailWindowSize);
+      if (isHomeKey(input)) return setDetailScroll(0);
+      if (isEndKey(input)) return setDetailScroll(Number.MAX_SAFE_INTEGER);
     },
     { isActive: process.stdin.isTTY === true },
   );
@@ -299,10 +339,10 @@ export function App({ staticMode = false }: AppProps = {}): React.ReactElement {
             </Box>
           ) : null}
         </>
-      ) : (
+      ) : view === 'news' ? (
         <NewsView
           agentName={selectedAgentName}
-          items={newsItems}
+          items={sortedNewsItems}
           loading={newsPoll.lastUpdated === 0 && !newsPoll.error}
           error={newsPoll.error}
           windowStart={newsWindowStart}
@@ -310,6 +350,19 @@ export function App({ staticMode = false }: AppProps = {}): React.ReactElement {
           selectedIndex={newsSelectedIndex}
           messageWidth={NEWS_MESSAGE_WIDTH}
           cooldownEpoch={cooldownEpoch}
+        />
+      ) : (
+        <NewsDetail
+          agentName={selectedAgentName}
+          item={selectedNewsItem}
+          positionLabel={
+            selectedNewsItem && newsTotal > 0
+              ? `item ${newsSelectedIndex + 1} of ${newsTotal}`
+              : ''
+          }
+          windowSize={detailWindowSize}
+          scrollOffset={detailScroll}
+          contentWidth={DETAIL_CONTENT_WIDTH}
         />
       )}
       <Footer view={view} paused={paused} />

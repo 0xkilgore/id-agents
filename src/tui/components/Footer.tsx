@@ -1,7 +1,7 @@
 import React from 'react';
 import { Box, Text } from 'ink';
 
-export type FooterView = 'agents' | 'news';
+export type FooterView = 'agents' | 'news' | 'news-detail';
 
 interface FooterProps {
   view: FooterView;
@@ -10,7 +10,8 @@ interface FooterProps {
 
 const HINTS: Record<FooterView, string> = {
   agents: '↑↓ nav · → news · Tab team · p pause · q quit',
-  news: '↑↓ scroll · ← back · p pause · q quit',
+  news: '↑↓ scroll · → open · ← back · p pause · q quit',
+  'news-detail': '↑↓ scroll · ← back · p pause · q quit',
 };
 
 export function Footer({ view, paused }: FooterProps): React.ReactElement {

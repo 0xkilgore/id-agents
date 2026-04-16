@@ -32,10 +32,9 @@ export function NewsView(props: NewsViewProps): React.ReactElement {
     cooldownEpoch,
   } = props;
 
-  const sorted = [...items].sort((a, b) => b.timestamp - a.timestamp);
-  const total = sorted.length;
+  const total = items.length;
   const windowEnd = Math.min(total, windowStart + windowSize);
-  const visible = sorted.slice(windowStart, windowEnd);
+  const visible = items.slice(windowStart, windowEnd);
 
   return (
     <Box flexDirection="column" borderStyle="round" paddingX={1}>
@@ -124,15 +123,20 @@ function Body(props: BodyProps): React.ReactElement {
       const ageColor = newsAgeColor(item.timestamp, cooldownEpoch);
       const tColor = typeColor(item.type);
       const message = rewriteMessage(item.message ?? '', messageWidth);
+      // Selection inverse wraps the marker and the right-hand content, but
+      // NOT the age square — the square stays on a default background so
+      // its color reads cleanly against the selection bar.
       lines.push(
-        <Text key={`${item.timestamp}-${i}`} inverse={selected}>
-          {selected ? '▶ ' : '  '}
+        <Text key={`${item.timestamp}-${i}`}>
+          <Text inverse={selected}>{selected ? '▶ ' : '  '}</Text>
           <Text color={ageColor}>■</Text>
-          {' '}
-          <Text dimColor>{padRight(formatTime(item.timestamp), TIME_COL)}</Text>
-          {' '}
-          <Text color={tColor}>{padRight(item.type, TYPE_COL)}</Text>
-          {message}
+          <Text inverse={selected}>
+            {' '}
+            <Text dimColor>{padRight(formatTime(item.timestamp), TIME_COL)}</Text>
+            {' '}
+            <Text color={tColor}>{padRight(item.type, TYPE_COL)}</Text>
+            {message}
+          </Text>
         </Text>,
       );
     }
