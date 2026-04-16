@@ -21,7 +21,11 @@ if (process.stdout.isTTY) {
     if (typeof chunk === 'string') s = chunk;
     else if (Buffer.isBuffer(chunk)) s = chunk.toString('utf8');
     else s = String(chunk);
-    const out = s.replace(ERASE_TO_HOME, '\x1b[H');
+    const transformed = s.replace(ERASE_TO_HOME, '\x1b[H');
+    // When we replaced an erase-to-home with a bare cursor-home, new content
+    // may be shorter than the prior frame — leaving residual rows below.
+    // Append ESC[J (erase from cursor to end of screen) to wipe them.
+    const out = transformed !== s ? transformed + '\x1b[J' : transformed;
     return (originalWrite as (...a: unknown[]) => boolean)(out, ...rest);
   }) as typeof process.stdout.write;
   process.stdout.write = patchedWrite;
