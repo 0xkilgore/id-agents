@@ -3,4 +3,7 @@ import React from 'react';
 import { render } from 'ink';
 import { App } from './App.js';
 
-render(<App />);
+const args = process.argv.slice(2);
+const staticMode = args.includes('--static') || args.includes('--no-poll');
+
+render(<App staticMode={staticMode} />);

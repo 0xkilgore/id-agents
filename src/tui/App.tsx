@@ -14,6 +14,7 @@ import {
   getManagerUrl,
 } from './api/manager.js';
 import { usePolling } from './hooks/usePolling.js';
+import { humanizeUptime } from './util/format.js';
 
 type View = 'agents' | 'news';
 
@@ -27,10 +28,35 @@ const SELF_AGENT = 'tui';
 const TERMINAL_CONTENT_WIDTH = 76;
 const NEWS_MESSAGE_WIDTH = TERMINAL_CONTENT_WIDTH - 8 - 1 - 17 - 2;
 
-export function App(): React.ReactElement {
+interface AppProps {
+  staticMode?: boolean;
+}
+
+export function App({ staticMode = false }: AppProps = {}): React.ReactElement {
   const manager = useMemo(getManagerUrl, []);
   const { exit } = useApp();
   const { stdout } = useStdout();
+
+  const [staticTeams, setStaticTeams] = useState<Team[] | null>(null);
+  const [staticAllAgents, setStaticAllAgents] = useState<Agent[] | null>(null);
+
+  useEffect(() => {
+    if (!staticMode) return;
+    const ac = new AbortController();
+    void (async () => {
+      try {
+        const ts = await fetchTeams(manager, ac.signal);
+        const ags = await fetchAgentsAllTeams(manager, ts, ac.signal);
+        if (!ac.signal.aborted) {
+          setStaticTeams(ts);
+          setStaticAllAgents(ags);
+        }
+      } catch {
+        /* swallow — diagnostic */
+      }
+    })();
+    return () => ac.abort();
+  }, [staticMode, manager]);
 
   const [view, setView] = useState<View>('agents');
   const [selectedTeam, setSelectedTeam] = useState<string | null>(null);
@@ -43,10 +69,10 @@ export function App(): React.ReactElement {
   const teamsPoll = usePolling<Team[]>(
     (signal) => fetchTeams(manager, signal),
     TEAMS_POLL_MS,
-    paused,
+    paused || staticMode,
     [manager],
   );
-  const teams = teamsPoll.data ?? [];
+  const teams = staticMode ? staticTeams ?? [] : teamsPoll.data ?? [];
 
   const agentsFetcher = useCallback(
     (signal: AbortSignal): Promise<Agent[]> => {
@@ -56,11 +82,13 @@ export function App(): React.ReactElement {
     [manager, teams],
   );
 
-  const agentsPoll = usePolling<Agent[]>(agentsFetcher, AGENTS_POLL_MS, paused, [
-    manager,
-    teams.length,
-  ]);
-  const allAgents = agentsPoll.data ?? [];
+  const agentsPoll = usePolling<Agent[]>(
+    agentsFetcher,
+    AGENTS_POLL_MS,
+    paused || staticMode,
+    [manager, teams.length],
+  );
+  const allAgents = staticMode ? staticAllAgents ?? [] : agentsPoll.data ?? [];
 
   const visibleAgents = useMemo(
     () =>
@@ -78,6 +106,21 @@ export function App(): React.ReactElement {
     }
     return counts;
   }, [allAgents]);
+
+  const pollTs = staticMode
+    ? staticAllAgents !== null
+      ? Date.now()
+      : 0
+    : agentsPoll.lastUpdated;
+
+  const uptimeById = useMemo(() => {
+    const map = new Map<string, string>();
+    if (pollTs === 0) return map;
+    for (const a of allAgents) {
+      map.set(a.id, humanizeUptime(a.createdAt, pollTs));
+    }
+    return map;
+  }, [allAgents, pollTs]);
 
   const rows = stdout?.rows ?? 30;
   const agentsWindowSize = Math.max(MIN_VISIBLE, rows - AGENTS_CHROME_ROWS);
@@ -117,7 +160,7 @@ export function App(): React.ReactElement {
   const newsPoll = usePolling<NewsItem[]>(
     newsFetcher,
     NEWS_POLL_MS,
-    paused || view !== 'news',
+    paused || staticMode || view !== 'news',
     [manager, selectedAgentName ?? '', view],
   );
   const newsItems = newsPoll.data ?? [];
@@ -236,10 +279,11 @@ export function App(): React.ReactElement {
           <StatusStrip agents={allAgents} selectedAgentId={selectedAgentId} />
           <AgentsTable
             agents={visibleAgents}
+            uptimeById={uptimeById}
             selectedIndex={selectedIndex}
             windowStart={windowStart}
             windowSize={agentsWindowSize}
-            loading={agentsPoll.lastUpdated === 0 && !agentsPoll.error}
+            loading={agentsPoll.lastUpdated === 0 && !agentsPoll.error && !staticMode}
             error={agentsPoll.error}
           />
           {teamsPoll.error ? (

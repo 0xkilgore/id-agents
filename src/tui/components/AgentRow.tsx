@@ -1,24 +1,24 @@
 import React from 'react';
-import { Box, Text } from 'ink';
+import { Text } from 'ink';
 import type { Agent } from '../api/types.js';
-import { humanizeUptime, humanizeAge, padRight } from '../util/format.js';
+import { padRight } from '../util/format.js';
 import { statusColor, healthColor, healthDot } from '../util/colors.js';
 
 interface AgentRowProps {
   agent: Agent;
   selected: boolean;
+  uptime: string;
 }
 
 const COLS = {
   marker: 2,
-  name: 15,
-  port: 5,
-  runtime: 11,
-  status: 8,
-  health: 10,
+  name: 17,
+  port: 6,
+  runtime: 12,
+  status: 9,
+  health: 11,
   hb: 3,
-  uptime: 10,
-  lastSeen: 6,
+  uptime: 6,
 } as const;
 
 function abbrevRuntime(rt?: string): string {
@@ -32,7 +32,7 @@ function renderHealth(health: string): string {
   return `${healthDot(health)} ${health}`;
 }
 
-function AgentRowInner({ agent, selected }: AgentRowProps): React.ReactElement {
+function AgentRowInner({ agent, selected, uptime }: AgentRowProps): React.ReactElement {
   const marker = selected ? '▶ ' : '  ';
   const name = padRight(agent.alias ?? agent.name, COLS.name);
   const port = padRight(agent.port ? String(agent.port) : '—', COLS.port);
@@ -40,8 +40,7 @@ function AgentRowInner({ agent, selected }: AgentRowProps): React.ReactElement {
   const status = padRight(agent.status, COLS.status);
   const health = padRight(renderHealth(agent.health), COLS.health);
   const hb = padRight(agent.metadata?.heartbeat ? '♥' : '-', COLS.hb);
-  const uptime = padRight(humanizeUptime(agent.createdAt), COLS.uptime);
-  const lastSeen = padRight(humanizeAge(agent.lastHealthCheck), COLS.lastSeen);
+  const uptimeCell = padRight(uptime, COLS.uptime);
 
   return (
     <Text inverse={selected}>
@@ -52,14 +51,14 @@ function AgentRowInner({ agent, selected }: AgentRowProps): React.ReactElement {
       <Text color={statusColor(agent.status)}>{status}</Text>
       <Text color={healthColor(agent.health)}>{health}</Text>
       {hb}
-      {uptime}
-      <Text dimColor>{lastSeen}</Text>
+      {uptimeCell}
     </Text>
   );
 }
 
 export const AgentRow = React.memo(AgentRowInner, (prev, next) => {
   if (prev.selected !== next.selected) return false;
+  if (prev.uptime !== next.uptime) return false;
   const a = prev.agent;
   const b = next.agent;
   return (
@@ -68,8 +67,6 @@ export const AgentRow = React.memo(AgentRowInner, (prev, next) => {
     a.port === b.port &&
     a.status === b.status &&
     a.health === b.health &&
-    a.createdAt === b.createdAt &&
-    a.lastHealthCheck === b.lastHealthCheck &&
     a.metadata?.runtime === b.metadata?.runtime &&
     a.metadata?.heartbeat === b.metadata?.heartbeat
   );
@@ -86,7 +83,6 @@ export function AgentRowHeader(): React.ReactElement {
       {padRight('HEALTH', COLS.health)}
       {padRight('HB', COLS.hb)}
       {padRight('UPTIME', COLS.uptime)}
-      {padRight('SEEN', COLS.lastSeen)}
     </Text>
   );
 }

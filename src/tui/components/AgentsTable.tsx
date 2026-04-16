@@ -5,6 +5,7 @@ import { AgentRow, AgentRowHeader } from './AgentRow.js';
 
 interface AgentsTableProps {
   agents: Agent[];
+  uptimeById: ReadonlyMap<string, string>;
   selectedIndex: number;
   windowStart: number;
   windowSize: number;
@@ -13,7 +14,7 @@ interface AgentsTableProps {
 }
 
 export function AgentsTable(props: AgentsTableProps): React.ReactElement {
-  const { agents, selectedIndex, windowStart, windowSize, loading, error } = props;
+  const { agents, uptimeById, selectedIndex, windowStart, windowSize, loading, error } = props;
   const total = agents.length;
   const windowEnd = Math.min(total, windowStart + windowSize);
   const visible = agents.slice(windowStart, windowEnd);
@@ -38,6 +39,7 @@ export function AgentsTable(props: AgentsTableProps): React.ReactElement {
           <AgentRow
             key={agent.id}
             agent={agent}
+            uptime={uptimeById.get(agent.id) ?? '—'}
             selected={windowStart + i === selectedIndex}
           />
         ))
