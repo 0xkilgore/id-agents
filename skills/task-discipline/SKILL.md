@@ -3,6 +3,10 @@ name: task-discipline
 description: Required lifecycle for non-trivial work. Create a task, claim it, do the work, mark done. Include the task name in your reply.
 ---
 
+> **Note:** For idchain agents, these rules are also injected via `defaults.claudeMd` in
+> `configs/idchain.yaml`, so the lifecycle is always in context without invoking this skill.
+> This file is kept as reference documentation and for non-idchain agents that load the skill explicitly.
+
 # Task Discipline
 
 You treat every non-trivial request as a first-class task in the manager's /tasks system.
