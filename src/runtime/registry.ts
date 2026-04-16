@@ -125,6 +125,46 @@ export function supportsSessionResume(runtime: HarnessType | string | undefined)
   return getRuntimeProfile(runtime).capabilities.supportsResume;
 }
 
+/**
+ * Runtime-specific filesystem paths for agent templates, skills, and personality files.
+ *
+ * Claude runtimes use .claude/ conventions (CLAUDE.md, .claude/skills/, .claude/agents/).
+ * Codex uses .agents/ conventions (AGENTS.md at project root, .agents/skills/, .agents/{name}/).
+ */
+export interface RuntimePaths {
+  /** Directory containing agent templates, relative to workingDir (e.g. '.claude/agents' or '.agents') */
+  templateDir: string;
+  /** Where overlay contents are copied to, relative to workingDir (e.g. '.claude' or '.agents') */
+  overlayTarget: string;
+  /** Directory for deployed skills, relative to workingDir (e.g. '.claude/skills' or '.agents/skills') */
+  skillsDir: string;
+  /** Personality/instructions file path, relative to workingDir (e.g. '.claude/CLAUDE.md' or 'AGENTS.md') */
+  personalityFile: string;
+  /** Filename for the personality file inside a template directory (e.g. 'CLAUDE.md' or 'AGENTS.md') */
+  personalityFilename: string;
+}
+
+export function getRuntimePaths(runtime: HarnessType | string | undefined): RuntimePaths {
+  const resolved = resolveRuntime(runtime);
+  if (resolved === 'codex') {
+    return {
+      templateDir: '.agents',
+      overlayTarget: '.agents',
+      skillsDir: '.agents/skills',
+      personalityFile: 'AGENTS.md',
+      personalityFilename: 'AGENTS.md',
+    };
+  }
+  // All Claude runtimes: claude-agent-sdk, claude-code-cli, claude-code-local
+  return {
+    templateDir: '.claude/agents',
+    overlayTarget: '.claude',
+    skillsDir: '.claude/skills',
+    personalityFile: '.claude/CLAUDE.md',
+    personalityFilename: 'CLAUDE.md',
+  };
+}
+
 export function getAvailableRuntimes(): RuntimeId[] {
   return Object.keys(PROFILES) as RuntimeId[];
 }

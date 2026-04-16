@@ -488,20 +488,32 @@ Every agent's `CLAUDE.md` is composed from exactly two sources:
 
 The YAML config provides **infrastructure only**: name, workingDirectory, model, runtime, heartbeat, skills. No `claudeMd` field.
 
-Two file patterns are supported (checked in this order):
+Two file patterns are supported (checked in this order), and paths are **runtime-aware**:
+
+| Runtime | Template Directory | Personality File | Skills Directory |
+|---------|-------------------|-----------------|-----------------|
+| `claude-code-cli` | `.claude/agents/` | `.claude/CLAUDE.md` | `.claude/skills/` |
+| `claude-agent-sdk` | `.claude/agents/` | `.claude/CLAUDE.md` | `.claude/skills/` |
+| `codex` | `.agents/` | `AGENTS.md` (project root) | `.agents/skills/` |
 
 ```
+# Claude agent layout
 myproject/
   .claude/
     agents/
       coder/
         CLAUDE.md           # directory pattern (priority)
       security-audit.md     # single-file pattern (fallback)
-  src/
-  ...
+
+# Codex agent layout
+myproject/
+  .agents/
+    cto/
+      AGENTS.md             # directory pattern (priority)
+    researcher.md           # single-file pattern (fallback)
 ```
 
-The directory pattern (`{name}/CLAUDE.md`) takes priority over the single-file pattern (`{name}.md`). Use the directory pattern when the agent needs additional supporting files alongside its role definition.
+The directory pattern takes priority over the single-file pattern. Use the directory pattern when the agent needs additional supporting files alongside its role definition.
 
 A role file uses optional YAML frontmatter for metadata:
 

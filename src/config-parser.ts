@@ -10,7 +10,7 @@ import yaml from 'js-yaml';
 import fs from 'fs';
 import path from 'path';
 import { HarnessType, isValidHarnessType, getAvailableHarnesses } from './harness/index.js';
-import { getDefaultRuntime, resolveRuntime, validateRuntimeModelCompatibility } from './runtime/registry.js';
+import { getDefaultRuntime, resolveRuntime, validateRuntimeModelCompatibility, getRuntimePaths } from './runtime/registry.js';
 import { validateName } from './name-validation.js';
 
 export type ScheduleDeliveryMode = 'talk' | 'internal';
@@ -523,18 +523,21 @@ export interface SubAgentTemplate {
 /**
  * Load a sub-agent template from the working directory.
  *
- * Lookup order:
- *   1. {workingDir}/.claude/agents/{filename}/CLAUDE.md  (directory pattern)
- *   2. {workingDir}/.claude/agents/{filename}.md         (single-file pattern)
+ * Lookup order (runtime-aware):
+ *   Claude:  1. {workingDir}/.claude/agents/{name}/CLAUDE.md
+ *            2. {workingDir}/.claude/agents/{name}.md
+ *   Codex:   1. {workingDir}/.agents/{name}/AGENTS.md
+ *            2. {workingDir}/.agents/{name}.md
  *   3. Neither exists → returns undefined (no-op)
  *
  * Parses YAML frontmatter (--- delimited) and returns body + metadata.
  */
-export function loadSubAgentTemplate(workingDir: string, filename: string): SubAgentTemplate | undefined {
-  const agentsDir = path.join(workingDir, '.claude', 'agents');
+export function loadSubAgentTemplate(workingDir: string, filename: string, runtime?: HarnessType | string): SubAgentTemplate | undefined {
+  const rp = getRuntimePaths(runtime);
+  const agentsDir = path.join(workingDir, rp.templateDir);
 
-  // 1. Directory pattern: {name}/CLAUDE.md
-  const dirPath = path.join(agentsDir, filename, 'CLAUDE.md');
+  // 1. Directory pattern: {name}/CLAUDE.md or {name}/AGENTS.md
+  const dirPath = path.join(agentsDir, filename, rp.personalityFilename);
   if (fs.existsSync(dirPath)) {
     return parseSubAgentTemplate(fs.readFileSync(dirPath, 'utf-8'));
   }
@@ -549,34 +552,33 @@ export function loadSubAgentTemplate(workingDir: string, filename: string): SubA
 }
 
 /**
- * Copy the contents of a directory-based agent template into the agent's .claude/ directory.
+ * Copy the contents of a directory-based agent template into the agent's config directory.
  *
- * If {workingDir}/.claude/agents/{templateName}/ exists as a directory, recursively
- * copies its contents into {workingDir}/.claude/ with overwrite semantics.
- * This overlays agent-specific files (skills/, hooks/, settings.json, etc.) on top of
- * whatever is already in .claude/.
+ * Runtime-aware: Claude overlays to .claude/, Codex overlays to .agents/.
  *
  * Returns true if a copy was performed, false if no directory exists.
  */
-export function copyAgentDirOverlay(workingDir: string, templateName: string): boolean {
-  const srcDir = path.join(workingDir, '.claude', 'agents', templateName);
+export function copyAgentDirOverlay(workingDir: string, templateName: string, runtime?: HarnessType | string): boolean {
+  const rp = getRuntimePaths(runtime);
+  const srcDir = path.join(workingDir, rp.templateDir, templateName);
 
   if (!fs.existsSync(srcDir) || !fs.statSync(srcDir).isDirectory()) {
     return false;
   }
 
-  const destDir = path.join(workingDir, '.claude');
+  const destDir = path.join(workingDir, rp.overlayTarget);
   fs.cpSync(srcDir, destDir, { recursive: true, force: true });
   return true;
 }
 
 /**
  * Copy HEARTBEAT.md from agent template directory to working directory root.
- * Source: {workingDir}/.claude/agents/{templateName}/HEARTBEAT.md
- * Destination: {workingDir}/HEARTBEAT.md
+ * Runtime-aware: checks the runtime-specific template directory.
+ * Destination is always {workingDir}/HEARTBEAT.md regardless of runtime.
  */
-export function copyHeartbeatMd(workingDir: string, templateName: string): boolean {
-  const src = path.join(workingDir, '.claude', 'agents', templateName, 'HEARTBEAT.md');
+export function copyHeartbeatMd(workingDir: string, templateName: string, runtime?: HarnessType | string): boolean {
+  const rp = getRuntimePaths(runtime);
+  const src = path.join(workingDir, rp.templateDir, templateName, 'HEARTBEAT.md');
   if (!fs.existsSync(src)) {
     return false;
   }
@@ -775,11 +777,11 @@ export function processConfig(
     mergeDefaults(agent, resolvedConfig.defaults)
   );
 
-  // Load sub-agent templates from {workingDirectory}/.claude/agents/<name>.md
+  // Load sub-agent templates (runtime-aware: .claude/agents/ for Claude, .agents/ for Codex)
   agents = agents.map(agent => {
     if (!agent.workingDirectory) return agent;
     const templateName = agent.agent || agent.name;
-    const template = loadSubAgentTemplate(agent.workingDirectory, templateName);
+    const template = loadSubAgentTemplate(agent.workingDirectory, templateName, agent.runtime);
     if (!template) return agent;
 
     const updated = { ...agent };

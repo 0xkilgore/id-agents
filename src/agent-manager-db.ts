@@ -39,6 +39,7 @@ import {
   getAvailableRuntimes,
   getDefaultModelForRuntime,
   getDefaultRuntime,
+  getRuntimePaths,
   isRuntimeId,
   resolveRuntime,
   validateRuntimePreflight,
@@ -1629,7 +1630,7 @@ export class AgentManagerDb {
         // Create workspace directory first (needed for plugin copy)
         mkdirSync(workingDirectory, { recursive: true });
 
-        // 1. Deploy team-level skills to agent's .claude/skills/ folder
+        // 1. Deploy team-level skills (runtime-aware: .claude/skills/ or .agents/skills/)
         if (skills && Array.isArray(skills) && skills.length > 0) {
           this.deploySkillsToAgent(workingDirectory, skills, {
             DISPLAY_NAME: domain || name,
@@ -1638,23 +1639,25 @@ export class AgentManagerDb {
               ? `Your onchain identity is your ENS domain: **${domain}**`
               : '',
             ORG_CONTEXT: '',
-          }, { hasWallet: false });
+          }, { hasWallet: false, runtime: effectiveRuntime });
         }
 
-        // 2. Overlay agent directory template (skills, hooks, settings, etc.)
-        copyAgentDirOverlay(workingDirectory, agentTemplate || name);
+        // 2. Overlay agent directory template (runtime-aware)
+        copyAgentDirOverlay(workingDirectory, agentTemplate || name, effectiveRuntime);
         // Copy HEARTBEAT.md from template to working directory root
-        copyHeartbeatMd(workingDirectory, agentTemplate || name);
+        copyHeartbeatMd(workingDirectory, agentTemplate || name, effectiveRuntime);
 
-        // 3. Write CLAUDE.md: protocol defaults + agent role body (overwrites any CLAUDE.md from overlay)
+        // 3. Write personality file: protocol defaults + agent role body
         {
+          const rp = getRuntimePaths(effectiveRuntime);
           const parts = [PROTOCOL_DEFAULTS];
           if (roleBody) parts.push(roleBody);
-          const claudeDir = path.join(workingDirectory, '.claude');
-          if (!existsSync(claudeDir)) {
-            mkdirSync(claudeDir, { recursive: true });
+          const personalityPath = path.join(workingDirectory, rp.personalityFile);
+          const personalityDir = path.dirname(personalityPath);
+          if (!existsSync(personalityDir)) {
+            mkdirSync(personalityDir, { recursive: true });
           }
-          writeFileSync(path.join(claudeDir, 'CLAUDE.md'), parts.join('\n\n'));
+          writeFileSync(personalityPath, parts.join('\n\n'));
         }
 
         // Copy plugins to agent's working directory (agent owns its plugins)
@@ -3744,7 +3747,7 @@ export class AgentManagerDb {
           const configDomain = spec.domain;
           const owsWallet = this.getOrCreateAgentWallet(syncTeamName, spec.name);
 
-          // 1. Deploy team-level skills
+          // 1. Deploy team-level skills (runtime-aware)
           this.deploySkillsToAgent(workingDirectory, agentSkills, {
             DISPLAY_NAME: configDomain || spec.name,
             TEAM: syncTeamName,
@@ -3752,19 +3755,21 @@ export class AgentManagerDb {
             ORG_CONTEXT: orgContext
               ? `\n## Your Role\n\n${orgContext}\n\nSee the full org chart at the shared team folder for details on all groups.`
               : '',
-          }, { hasWallet: !!owsWallet });
+          }, { hasWallet: !!owsWallet, runtime: effectiveRuntime });
 
-          // 2. Overlay agent directory template
-          copyAgentDirOverlay(workingDirectory, spec.agent || spec.name);
-          copyHeartbeatMd(workingDirectory, spec.agent || spec.name);
+          // 2. Overlay agent directory template (runtime-aware)
+          copyAgentDirOverlay(workingDirectory, spec.agent || spec.name, effectiveRuntime);
+          copyHeartbeatMd(workingDirectory, spec.agent || spec.name, effectiveRuntime);
 
-          // 3. Write CLAUDE.md: protocol defaults + agent role body
+          // 3. Write personality file: protocol defaults + agent role body (runtime-aware)
           {
+            const rp = getRuntimePaths(effectiveRuntime);
             const parts = [PROTOCOL_DEFAULTS];
             if (spec.roleBody) parts.push(spec.roleBody);
-            const claudeDir = path.join(workingDirectory, '.claude');
-            if (!existsSync(claudeDir)) mkdirSync(claudeDir, { recursive: true });
-            writeFileSync(path.join(claudeDir, 'CLAUDE.md'), parts.join('\n\n'));
+            const personalityPath = path.join(workingDirectory, rp.personalityFile);
+            const personalityDir = path.dirname(personalityPath);
+            if (!existsSync(personalityDir)) mkdirSync(personalityDir, { recursive: true });
+            writeFileSync(personalityPath, parts.join('\n\n'));
           }
 
           // Update DB row in place — preserve the agent ID
@@ -3847,7 +3852,7 @@ export class AgentManagerDb {
               } catch { /* ignore */ }
             }
 
-            // 1. Deploy team-level skills
+            // 1. Deploy team-level skills (runtime-aware)
             this.deploySkillsToAgent(workingDirectory, agentSkills, {
               DISPLAY_NAME: configDomain || spec.name,
               TEAM: syncTeamName,
@@ -3855,19 +3860,21 @@ export class AgentManagerDb {
               ORG_CONTEXT: orgContext
                 ? `\n## Your Role\n\n${orgContext}\n\nSee the full org chart at the shared team folder for details on all groups.`
                 : '',
-            }, { hasWallet: !!owsWallet });
+            }, { hasWallet: !!owsWallet, runtime: effectiveRuntime });
 
-            // 2. Overlay agent directory template
-            copyAgentDirOverlay(workingDirectory, spec.agent || spec.name);
-            copyHeartbeatMd(workingDirectory, spec.agent || spec.name);
+            // 2. Overlay agent directory template (runtime-aware)
+            copyAgentDirOverlay(workingDirectory, spec.agent || spec.name, effectiveRuntime);
+            copyHeartbeatMd(workingDirectory, spec.agent || spec.name, effectiveRuntime);
 
-            // 3. Write CLAUDE.md: protocol defaults + agent role body
+            // 3. Write personality file: protocol defaults + agent role body (runtime-aware)
             {
+              const rp = getRuntimePaths(effectiveRuntime);
               const parts = [PROTOCOL_DEFAULTS];
               if (spec.roleBody) parts.push(spec.roleBody);
-              const claudeDir = path.join(workingDirectory, '.claude');
-              if (!existsSync(claudeDir)) mkdirSync(claudeDir, { recursive: true });
-              writeFileSync(path.join(claudeDir, 'CLAUDE.md'), parts.join('\n\n'));
+              const personalityPath = path.join(workingDirectory, rp.personalityFile);
+              const personalityDir = path.dirname(personalityPath);
+              if (!existsSync(personalityDir)) mkdirSync(personalityDir, { recursive: true });
+              writeFileSync(personalityPath, parts.join('\n\n'));
             }
 
             const metadata: AgentMetadata = {
@@ -4169,7 +4176,7 @@ export class AgentManagerDb {
               metadata.ows_address = owsWallet.address;
             }
 
-            // Deploy skills to agent's .claude/skills/ folder
+            // Deploy skills (runtime-aware)
             const agentSkills: string[] = agentConfig.skills || [];
             let orgContext = '';
             if (org?.groups) {
@@ -4187,21 +4194,23 @@ export class AgentManagerDb {
               ORG_CONTEXT: orgContext
                 ? `\n## Your Role\n\n${orgContext}\n\nSee the full org chart at the shared team folder for details on all groups.`
                 : '',
-            }, { hasWallet: !!owsWallet });
+            }, { hasWallet: !!owsWallet, runtime: effectiveRuntime });
 
-            // 2. Overlay agent directory template
-            copyAgentDirOverlay(workingDirectory, agentConfig.agent || agentConfig.name);
-            copyHeartbeatMd(workingDirectory, agentConfig.agent || agentConfig.name);
+            // 2. Overlay agent directory template (runtime-aware)
+            copyAgentDirOverlay(workingDirectory, agentConfig.agent || agentConfig.name, effectiveRuntime);
+            copyHeartbeatMd(workingDirectory, agentConfig.agent || agentConfig.name, effectiveRuntime);
 
-            // 3. Write CLAUDE.md: protocol defaults + agent role body
+            // 3. Write personality file: protocol defaults + agent role body (runtime-aware)
             {
+              const rp = getRuntimePaths(effectiveRuntime);
               const parts = [PROTOCOL_DEFAULTS];
               if (agentConfig.roleBody) parts.push(agentConfig.roleBody);
-              const claudeDir = path.join(workingDirectory, '.claude');
-              if (!existsSync(claudeDir)) {
-                mkdirSync(claudeDir, { recursive: true });
+              const personalityPath = path.join(workingDirectory, rp.personalityFile);
+              const personalityDir = path.dirname(personalityPath);
+              if (!existsSync(personalityDir)) {
+                mkdirSync(personalityDir, { recursive: true });
               }
-              writeFileSync(path.join(claudeDir, 'CLAUDE.md'), parts.join('\n\n'));
+              writeFileSync(personalityPath, parts.join('\n\n'));
             }
 
             // Remove any existing agent with this name to avoid duplicates on redeploy
@@ -5438,13 +5447,14 @@ export class AgentManagerDb {
     workDir: string,
     skillNames: string[],
     vars: Record<string, string>,
-    opts: { hasWallet?: boolean } = {}
+    opts: { hasWallet?: boolean; runtime?: HarnessType | string } = {}
   ): void {
     if (skillNames.length === 0) return;
     try {
       const skillsSource = path.resolve(__dirname, '..', 'skills');
       if (!existsSync(skillsSource)) return;
 
+      const rp = getRuntimePaths(opts.runtime);
       let deployed = 0;
 
       for (const skillName of skillNames) {
@@ -5464,15 +5474,15 @@ export class AgentManagerDb {
           content = content.replace(new RegExp(`\\{\\{${key}\\}\\}`, 'g'), value);
         }
 
-        // Write to .claude/skills/<name>/SKILL.md (standard Claude Code format)
-        const targetSkillDir = path.join(workDir, '.claude', 'skills', skillName);
+        // Write to runtime-aware skills directory
+        const targetSkillDir = path.join(workDir, rp.skillsDir, skillName);
         if (!existsSync(targetSkillDir)) mkdirSync(targetSkillDir, { recursive: true });
         writeFileSync(path.join(targetSkillDir, 'SKILL.md'), content);
         deployed++;
       }
 
       if (deployed > 0) {
-        console.log(`[Deploy] Copied ${deployed} skills to ${path.basename(workDir)}/.claude/skills/`);
+        console.log(`[Deploy] Copied ${deployed} skills to ${path.basename(workDir)}/${rp.skillsDir}/`);
       }
     } catch (err: any) {
       console.warn(`[Deploy] Could not deploy skills: ${err.message}`);

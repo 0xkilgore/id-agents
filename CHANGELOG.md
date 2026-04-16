@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.1.53-beta
+
+### Features
+
+- **Runtime-aware agent paths**: Template loader, skill deployer, directory overlay, and personality file write are now all runtime-aware. Claude agents use `.claude/agents/`, `.claude/skills/`, and `.claude/CLAUDE.md`. Codex agents use `.agents/`, `.agents/skills/`, and `AGENTS.md` (at project root).
+- **`getRuntimePaths(runtime)`**: New function in `runtime/registry.ts` returns `{ templateDir, overlayTarget, skillsDir, personalityFile, personalityFilename }` for any runtime. Adding a third runtime later requires one new case in this function.
+- **Codex template support**: `loadSubAgentTemplate()` checks `.agents/{name}/AGENTS.md` (directory) or `.agents/{name}.md` (file) for Codex agents. `processConfig()` passes `agent.runtime` through for correct lookup.
+
+### Changed
+
+- `loadSubAgentTemplate()`, `copyAgentDirOverlay()`, `copyHeartbeatMd()` all accept an optional `runtime` parameter.
+- `deploySkillsToAgent()` accepts `runtime` in its options and writes to the runtime-appropriate skills directory.
+- All 4 spawn sites (spawn endpoint, sync-changed, sync-added, remote-deploy) use `getRuntimePaths(effectiveRuntime)` for personality file path.
+
 ## 0.1.52-beta
 
 ### Features

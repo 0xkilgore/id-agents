@@ -8,6 +8,22 @@ Entries are synthesized prompts, not verbatim chat messages. They can describe c
 
 ---
 
+## 2026-04-15: Runtime-aware template loader and skill deployer, 0.1.53-beta
+
+**Status:** done
+
+Make the agent template loader and skill deployer runtime-aware so Codex agents use native Codex conventions instead of Claude conventions. Claude runtimes use `.claude/agents/` for templates, `.claude/skills/` for skills, and `.claude/CLAUDE.md` for personality. Codex uses `.agents/` for templates, `.agents/skills/` for skills, and `AGENTS.md` at the project root.
+
+New `getRuntimePaths(runtime)` function in `runtime/registry.ts` centralizes path resolution. Returns `{ templateDir, overlayTarget, skillsDir, personalityFile, personalityFilename }`. Today handles `claude-*` and `codex`; adding a third runtime is one new case.
+
+Updated `loadSubAgentTemplate()`, `copyAgentDirOverlay()`, `copyHeartbeatMd()` in config-parser.ts to accept optional `runtime` parameter. Updated `deploySkillsToAgent()` in agent-manager-db.ts to accept `runtime` in opts and write to runtime-aware skills directory. All 4 spawn sites pass `effectiveRuntime` through and write the personality file to the runtime-appropriate path.
+
+`processConfig()` now passes `agent.runtime` to `loadSubAgentTemplate()` so Codex agents have their templates loaded from `.agents/` after mergeDefaults resolves the runtime.
+
+17 new unit tests: `getRuntimePaths` for all runtime variants, `loadSubAgentTemplate` with Claude and Codex (including isolation — Claude template not visible to Codex), `copyAgentDirOverlay` with both runtimes, `copyHeartbeatMd` with both runtimes, `processConfig` integration with Codex loading from `.agents/`.
+
+---
+
 ## 2026-04-15: Agent-driven heartbeats via HEARTBEAT.md, 0.1.52-beta
 
 **Status:** done
