@@ -121,15 +121,18 @@ function Body(props: BodyProps): React.ReactElement {
       const item = items[i];
       if (!item) continue;
       const selected = windowStart + i === selectedIndex;
-      const dotColor = newsAgeColor(item.timestamp, cooldownEpoch);
+      const ageColor = newsAgeColor(item.timestamp, cooldownEpoch);
+      const tColor = typeColor(item.type);
+      const message = rewriteMessage(item.message ?? '', messageWidth);
       lines.push(
         <Text key={`${item.timestamp}-${i}`} inverse={selected}>
           {selected ? '▶ ' : '  '}
-          <Text color={dotColor}>●</Text>
+          <Text color={ageColor}>■</Text>
           {' '}
-          {padRight(formatTime(item.timestamp), TIME_COL)}{' '}
-          {padRight(item.type, TYPE_COL)}
-          {truncate(oneLine(item.message ?? ''), messageWidth)}
+          <Text dimColor>{padRight(formatTime(item.timestamp), TIME_COL)}</Text>
+          {' '}
+          <Text color={tColor}>{padRight(item.type, TYPE_COL)}</Text>
+          {message}
         </Text>,
       );
     }
@@ -146,6 +149,22 @@ function Body(props: BodyProps): React.ReactElement {
 
 function oneLine(s: string): string {
   return s.replace(/\s+/g, ' ').trim();
+}
+
+// The agent news log uses "remote" as the protocol-level name for the
+// admin channel (the manager agent driving this TUI). Rewrite to "manager"
+// client-side so the UI reads clearly; underlying data stays unchanged.
+function rewriteMessage(msg: string, width: number): string {
+  return truncate(oneLine(msg).replace(/\bremote\b/g, 'manager'), width);
+}
+
+function typeColor(type: string): string {
+  if (type.startsWith('query.received')) return 'cyan';
+  if (type.startsWith('query.completed')) return 'green';
+  if (type.startsWith('query.failed')) return 'red';
+  if (type.startsWith('outbound')) return 'yellow';
+  if (type.startsWith('error')) return 'red';
+  return 'white';
 }
 
 function formatTime(ms: number): string {
