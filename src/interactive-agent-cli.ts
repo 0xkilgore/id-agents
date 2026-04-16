@@ -1360,11 +1360,26 @@ async function handleLine(line: string) {
   }
 
   if (input === '/team') {
-    console.log(`\n${colors.bold}📁 Active team:${colors.reset} ${colors.cyan}${activeServerName}${colors.reset}`);
-    console.log(`${colors.gray}   Server: ${MANAGER_URL}${colors.reset}`);
-    console.log(`${colors.gray}   Team files: ./workspace/teams/${activeTeam}/${colors.reset}`);
-    console.log('');
-    rl.prompt();
+    (async () => {
+      try {
+        const resp = await managerFetch('/teams');
+        if (resp.ok) {
+          const data = await resp.json() as { teams: Array<{ name: string }> };
+          if (data.teams.length === 0) {
+            console.log(`\n${colors.gray}No teams yet. Run /team <name> to create one, or /deploy <config> from configs/ to bootstrap.${colors.reset}\n`);
+            rl.prompt();
+            return;
+          }
+        }
+      } catch {
+        // Manager unreachable — fall through to active-team header so the user still gets feedback
+      }
+      console.log(`\n${colors.bold}📁 Active team:${colors.reset} ${colors.cyan}${activeServerName}${colors.reset}`);
+      console.log(`${colors.gray}   Server: ${MANAGER_URL}${colors.reset}`);
+      console.log(`${colors.gray}   Team files: ./workspace/teams/${activeTeam}/${colors.reset}`);
+      console.log('');
+      rl.prompt();
+    })();
     return;
   }
 
@@ -1596,7 +1611,7 @@ async function handleLine(line: string) {
         if (resp.ok) {
           const data = await resp.json() as { teams: Array<{ name: string; agentCount: number }> };
           if (data.teams.length === 0) {
-            console.log(`${colors.gray}  No teams yet. Use /team <name> to create one.${colors.reset}`);
+            console.log(`${colors.gray}  No teams yet. Run /team <name> to create one, or /deploy <config> from configs/ to bootstrap.${colors.reset}`);
           } else {
             for (const team of data.teams) {
               const isCurrent = team.name === activeTeam;
