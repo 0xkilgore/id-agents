@@ -2,6 +2,7 @@ import React from 'react';
 import { Box, Text } from 'ink';
 import type { NewsItem } from '../api/types.js';
 import { padRight, truncate } from '../util/format.js';
+import { newsAgeColor } from '../util/colors.js';
 
 interface NewsViewProps {
   agentName: string | null;
@@ -12,6 +13,7 @@ interface NewsViewProps {
   windowSize: number;
   selectedIndex: number;
   messageWidth: number;
+  cooldownEpoch: number;
 }
 
 const TIME_COL = 8;
@@ -27,6 +29,7 @@ export function NewsView(props: NewsViewProps): React.ReactElement {
     windowSize,
     selectedIndex,
     messageWidth,
+    cooldownEpoch,
   } = props;
 
   const sorted = [...items].sort((a, b) => b.timestamp - a.timestamp);
@@ -51,6 +54,7 @@ export function NewsView(props: NewsViewProps): React.ReactElement {
         selectedIndex={selectedIndex}
         messageWidth={messageWidth}
         windowSize={windowSize}
+        cooldownEpoch={cooldownEpoch}
       />
       <Text dimColor>
         {total - windowEnd > 0 ? `↓ ${total - windowEnd} more below` : ' '}
@@ -69,6 +73,7 @@ interface BodyProps {
   selectedIndex: number;
   messageWidth: number;
   windowSize: number;
+  cooldownEpoch: number;
 }
 
 function Body(props: BodyProps): React.ReactElement {
@@ -82,6 +87,7 @@ function Body(props: BodyProps): React.ReactElement {
     selectedIndex,
     messageWidth,
     windowSize,
+    cooldownEpoch,
   } = props;
 
   const lines: React.ReactElement[] = [];
@@ -115,13 +121,13 @@ function Body(props: BodyProps): React.ReactElement {
       const item = items[i];
       if (!item) continue;
       const selected = windowStart + i === selectedIndex;
+      const color = newsAgeColor(item.timestamp, cooldownEpoch);
       lines.push(
-        <Text key={`${item.timestamp}-${i}`} inverse={selected}>
+        <Text key={`${item.timestamp}-${i}`} inverse={selected} color={color}>
           {selected ? '▶ ' : '  '}
-          <Text dimColor>{padRight(formatTime(item.timestamp), TIME_COL)}</Text>
-          <Text> </Text>
-          <Text color={typeColor(item.type)}>{padRight(item.type, TYPE_COL)}</Text>
-          <Text>{truncate(oneLine(item.message ?? ''), messageWidth)}</Text>
+          {padRight(formatTime(item.timestamp), TIME_COL)}{' '}
+          {padRight(item.type, TYPE_COL)}
+          {truncate(oneLine(item.message ?? ''), messageWidth)}
         </Text>,
       );
     }
@@ -149,11 +155,3 @@ function pad2(n: number): string {
   return n.toString().padStart(2, '0');
 }
 
-function typeColor(type: string): string {
-  if (type.startsWith('query.received')) return 'cyan';
-  if (type.startsWith('query.completed')) return 'green';
-  if (type.startsWith('query.failed')) return 'red';
-  if (type.startsWith('outbound')) return 'yellow';
-  if (type.startsWith('error')) return 'red';
-  return 'white';
-}

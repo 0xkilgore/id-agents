@@ -20,6 +20,7 @@ type View = 'agents' | 'news';
 const AGENTS_POLL_MS = 2000;
 const TEAMS_POLL_MS = 15000;
 const NEWS_POLL_MS = 3000;
+const NEWS_COOLDOWN_TICK_MS = 10_000;
 const AGENTS_CHROME_ROWS = 11;
 const NEWS_CHROME_ROWS = 6;
 const MIN_VISIBLE = 3;
@@ -64,6 +65,14 @@ export function App({ staticMode = false }: AppProps = {}): React.ReactElement {
   const [newsSelectedIndex, setNewsSelectedIndex] = useState(0);
   const [newsWindowStart, setNewsWindowStart] = useState(0);
   const [paused, setPaused] = useState(false);
+  const [cooldownEpoch, setCooldownEpoch] = useState<number>(() => Date.now());
+
+  useEffect(() => {
+    if (view !== 'news' || paused || staticMode) return;
+    setCooldownEpoch(Date.now());
+    const id = setInterval(() => setCooldownEpoch(Date.now()), NEWS_COOLDOWN_TICK_MS);
+    return () => clearInterval(id);
+  }, [view, paused, staticMode]);
 
   const teamsPoll = usePolling<Team[]>(
     (signal) => fetchTeams(manager, signal),
@@ -300,6 +309,7 @@ export function App({ staticMode = false }: AppProps = {}): React.ReactElement {
           windowSize={newsWindowSize}
           selectedIndex={newsSelectedIndex}
           messageWidth={NEWS_MESSAGE_WIDTH}
+          cooldownEpoch={cooldownEpoch}
         />
       )}
       <Footer view={view} paused={paused} />
