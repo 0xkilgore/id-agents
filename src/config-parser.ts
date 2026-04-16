@@ -520,20 +520,31 @@ export interface SubAgentTemplate {
 }
 
 /**
- * Load a sub-agent template from {workingDirectory}/.claude/agents/{filename}.md
+ * Load a sub-agent template from the working directory.
  *
- * If the file does not exist, returns undefined (no-op).
+ * Lookup order:
+ *   1. {workingDir}/.claude/agents/{filename}/CLAUDE.md  (directory pattern)
+ *   2. {workingDir}/.claude/agents/{filename}.md         (single-file pattern)
+ *   3. Neither exists → returns undefined (no-op)
+ *
  * Parses YAML frontmatter (--- delimited) and returns body + metadata.
  */
 export function loadSubAgentTemplate(workingDir: string, filename: string): SubAgentTemplate | undefined {
-  const filePath = path.join(workingDir, '.claude', 'agents', `${filename}.md`);
+  const agentsDir = path.join(workingDir, '.claude', 'agents');
 
-  if (!fs.existsSync(filePath)) {
-    return undefined;
+  // 1. Directory pattern: {name}/CLAUDE.md
+  const dirPath = path.join(agentsDir, filename, 'CLAUDE.md');
+  if (fs.existsSync(dirPath)) {
+    return parseSubAgentTemplate(fs.readFileSync(dirPath, 'utf-8'));
   }
 
-  const raw = fs.readFileSync(filePath, 'utf-8');
-  return parseSubAgentTemplate(raw);
+  // 2. Single-file pattern: {name}.md
+  const filePath = path.join(agentsDir, `${filename}.md`);
+  if (fs.existsSync(filePath)) {
+    return parseSubAgentTemplate(fs.readFileSync(filePath, 'utf-8'));
+  }
+
+  return undefined;
 }
 
 /**

@@ -491,15 +491,20 @@ Every agent's `CLAUDE.md` is composed from exactly two sources:
 
 The YAML config provides **infrastructure only**: name, workingDirectory, model, runtime, heartbeat, skills. No `claudeMd` field.
 
+Two file patterns are supported (checked in this order):
+
 ```
 myproject/
   .claude/
     agents/
-      coder.md          # loaded for agent named "coder"
-      security-audit.md # loaded when agent: security-audit
+      coder/
+        CLAUDE.md           # directory pattern (priority)
+      security-audit.md     # single-file pattern (fallback)
   src/
   ...
 ```
+
+The directory pattern (`{name}/CLAUDE.md`) takes priority over the single-file pattern (`{name}.md`). Use the directory pattern when the agent needs additional supporting files alongside its role definition.
 
 A role file uses optional YAML frontmatter for metadata:
 
@@ -520,7 +525,7 @@ Use the `agent` field in config to load a role file with a different filename th
 ```yaml
 agents:
   - name: auditor
-    agent: security-audit          # loads .claude/agents/security-audit.md
+    agent: security-audit          # loads security-audit/CLAUDE.md or security-audit.md
     workingDirectory: /path/to/project
 ```
 

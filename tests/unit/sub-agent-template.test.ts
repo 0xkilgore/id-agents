@@ -153,6 +153,65 @@ You audit code for security issues.`);
     const result = loadSubAgentTemplate(tmpDir, 'missing');
     expect(result).toBeUndefined();
   });
+
+  it('loads template from directory pattern .claude/agents/<name>/CLAUDE.md', () => {
+    const agentDir = path.join(tmpDir, '.claude', 'agents', 'reviewer');
+    fs.mkdirSync(agentDir, { recursive: true });
+    fs.writeFileSync(path.join(agentDir, 'CLAUDE.md'), `---
+description: Code reviewer
+---
+
+You review pull requests carefully.`);
+
+    const result = loadSubAgentTemplate(tmpDir, 'reviewer');
+
+    expect(result).toBeDefined();
+    expect(result!.description).toBe('Code reviewer');
+    expect(result!.body).toBe('You review pull requests carefully.');
+  });
+
+  it('directory pattern takes priority over single-file pattern', () => {
+    const agentsDir = path.join(tmpDir, '.claude', 'agents');
+    // Create both patterns
+    const agentDir = path.join(agentsDir, 'coder');
+    fs.mkdirSync(agentDir, { recursive: true });
+    fs.writeFileSync(path.join(agentDir, 'CLAUDE.md'), `---
+description: Directory version
+---
+
+I am from the directory.`);
+    fs.writeFileSync(path.join(agentsDir, 'coder.md'), `---
+description: File version
+---
+
+I am from the file.`);
+
+    const result = loadSubAgentTemplate(tmpDir, 'coder');
+
+    expect(result).toBeDefined();
+    expect(result!.description).toBe('Directory version');
+    expect(result!.body).toBe('I am from the directory.');
+  });
+
+  it('falls back to single-file when directory pattern does not exist', () => {
+    const agentsDir = path.join(tmpDir, '.claude', 'agents');
+    fs.mkdirSync(agentsDir, { recursive: true });
+    // Only create the .md file, no directory
+    fs.writeFileSync(path.join(agentsDir, 'writer.md'), 'Write things.');
+
+    const result = loadSubAgentTemplate(tmpDir, 'writer');
+
+    expect(result).toBeDefined();
+    expect(result!.body).toBe('Write things.');
+  });
+
+  it('returns undefined when neither pattern exists', () => {
+    const agentsDir = path.join(tmpDir, '.claude', 'agents');
+    fs.mkdirSync(agentsDir, { recursive: true });
+
+    const result = loadSubAgentTemplate(tmpDir, 'ghost');
+    expect(result).toBeUndefined();
+  });
 });
 
 /* ------------------------------------------------------------------ */
