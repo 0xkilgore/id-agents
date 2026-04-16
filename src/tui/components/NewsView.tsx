@@ -50,6 +50,7 @@ export function NewsView(props: NewsViewProps): React.ReactElement {
         windowStart={windowStart}
         selectedIndex={selectedIndex}
         messageWidth={messageWidth}
+        windowSize={windowSize}
       />
       <Text dimColor>
         {total - windowEnd > 0 ? `↓ ${total - windowEnd} more below` : ' '}
@@ -67,33 +68,72 @@ interface BodyProps {
   windowStart: number;
   selectedIndex: number;
   messageWidth: number;
+  windowSize: number;
 }
 
 function Body(props: BodyProps): React.ReactElement {
-  const { agentName, items, total, loading, error, windowStart, selectedIndex, messageWidth } =
-    props;
+  const {
+    agentName,
+    items,
+    total,
+    loading,
+    error,
+    windowStart,
+    selectedIndex,
+    messageWidth,
+    windowSize,
+  } = props;
 
-  if (!agentName) return <Text dimColor>No agent selected</Text>;
-  if (error) return <Text color="red">Failed to load news: {error.message}</Text>;
-  if (total === 0 && loading) return <Text dimColor>loading…</Text>;
-  if (total === 0) return <Text dimColor>No activity</Text>;
+  const lines: React.ReactElement[] = [];
 
-  return (
-    <>
-      {items.map((item, i) => {
-        const selected = windowStart + i === selectedIndex;
-        return (
-          <Text key={`${item.timestamp}-${i}`} inverse={selected}>
-            {selected ? '▶ ' : '  '}
-            <Text dimColor>{padRight(formatTime(item.timestamp), TIME_COL)}</Text>
-            <Text> </Text>
-            <Text color={typeColor(item.type)}>{padRight(item.type, TYPE_COL)}</Text>
-            <Text>{truncate(oneLine(item.message ?? ''), messageWidth)}</Text>
-          </Text>
-        );
-      })}
-    </>
-  );
+  if (!agentName) {
+    lines.push(
+      <Text key="msg" dimColor>
+        No agent selected
+      </Text>,
+    );
+  } else if (error) {
+    lines.push(
+      <Text key="msg" color="red">
+        Failed to load news: {error.message}
+      </Text>,
+    );
+  } else if (total === 0 && loading) {
+    lines.push(
+      <Text key="msg" dimColor>
+        loading…
+      </Text>,
+    );
+  } else if (total === 0) {
+    lines.push(
+      <Text key="msg" dimColor>
+        No activity
+      </Text>,
+    );
+  } else {
+    for (let i = 0; i < items.length; i++) {
+      const item = items[i];
+      if (!item) continue;
+      const selected = windowStart + i === selectedIndex;
+      lines.push(
+        <Text key={`${item.timestamp}-${i}`} inverse={selected}>
+          {selected ? '▶ ' : '  '}
+          <Text dimColor>{padRight(formatTime(item.timestamp), TIME_COL)}</Text>
+          <Text> </Text>
+          <Text color={typeColor(item.type)}>{padRight(item.type, TYPE_COL)}</Text>
+          <Text>{truncate(oneLine(item.message ?? ''), messageWidth)}</Text>
+        </Text>,
+      );
+    }
+  }
+
+  while (lines.length < windowSize) {
+    lines.push(
+      <Text key={`pad-${lines.length}`}> </Text>,
+    );
+  }
+
+  return <>{lines}</>;
 }
 
 function oneLine(s: string): string {
