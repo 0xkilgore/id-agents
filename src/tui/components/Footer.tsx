@@ -15,7 +15,7 @@ const HINTS: Record<FooterView, string> = {
 
 export function Footer({ view, paused }: FooterProps): React.ReactElement {
   return (
-    <Box borderStyle="round" paddingX={1} justifyContent="space-between">
+    <Box paddingX={1} justifyContent="space-between">
       <Text dimColor>{HINTS[view]}</Text>
       <Box>
         {paused ? <Text color="yellow">⏸ paused  </Text> : null}
