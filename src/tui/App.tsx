@@ -5,6 +5,7 @@ import { Footer } from './components/Footer.js';
 import { TeamsPanel } from './components/TeamsPanel.js';
 import { AgentsTable } from './components/AgentsTable.js';
 import { NewsView } from './components/NewsView.js';
+import { StatusStrip } from './components/StatusStrip.js';
 import type { Agent, NewsItem, Team } from './api/types.js';
 import {
   fetchAgentNews,
@@ -19,7 +20,7 @@ type View = 'agents' | 'news';
 const AGENTS_POLL_MS = 2000;
 const TEAMS_POLL_MS = 15000;
 const NEWS_POLL_MS = 3000;
-const AGENTS_CHROME_ROWS = 14;
+const AGENTS_CHROME_ROWS = 17;
 const NEWS_CHROME_ROWS = 10;
 const MIN_VISIBLE = 3;
 const SELF_AGENT = 'tui';
@@ -101,7 +102,9 @@ export function App(): React.ReactElement {
     if (nextStart !== windowStart) setWindowStart(nextStart);
   }, [total, selectedIndex, windowStart, agentsWindowSize]);
 
-  const selectedAgentName: string | null = visibleAgents[selectedIndex]?.name ?? null;
+  const selectedAgent = visibleAgents[selectedIndex] ?? null;
+  const selectedAgentName: string | null = selectedAgent?.name ?? null;
+  const selectedAgentId: string | null = selectedAgent?.id ?? null;
 
   const newsFetcher = useCallback(
     (signal: AbortSignal): Promise<NewsItem[]> => {
@@ -230,6 +233,7 @@ export function App(): React.ReactElement {
             allCount={allAgents.length}
             teamCounts={teamCounts}
           />
+          <StatusStrip agents={allAgents} selectedAgentId={selectedAgentId} />
           <AgentsTable
             agents={visibleAgents}
             selectedIndex={selectedIndex}
