@@ -8,11 +8,13 @@ Entries are synthesized prompts, not verbatim chat messages. They can describe c
 
 ---
 
-## 2026-04-15: Two-source claudeMd simplification, 0.1.50-beta
+## 2026-04-15: Two-source claudeMd simplification and directory-based agents, 0.1.50-beta
 
 **Status:** done
 
-Collapse the agent instruction system from N sources (defaults.claudeMd, per-agent claudeMd, claudeMdFile, sub-agent template body, output convention preamble) down to exactly two: framework protocol defaults and agent role files. Protocol defaults (scheduling, task-discipline, output convention) move from an inline YAML string in `configs/idchain.yaml` into a framework constant in `src/protocol-defaults.ts`, prepended to every agent's `CLAUDE.md` unconditionally at spawn time. Agent personality lives in `.claude/agents/<name>.md` files in the project repo (0.1.49's sub-agent template), exposed as `roleBody` on `AgentSpec`. The `claudeMd`, `claudeMdFile`, and `resolveClaudeMdFile()` are all removed from the config schema and processing pipeline. `mergeDefaults()` no longer concatenates claudeMd. The YAML config becomes infrastructure-only: name, workingDirectory, model, runtime, heartbeat, skills. The idchain.yaml config shrinks significantly. All four CLAUDE.md write sites (spawn, sync-changed, sync-added, remote-deploy) now use the same composition: `PROTOCOL_DEFAULTS + roleBody`.
+Collapse the agent instruction system from N sources down to exactly two: framework protocol defaults and agent role files. Protocol defaults (scheduling, task-discipline, output convention) move from an inline YAML string in `configs/idchain.yaml` into a framework constant in `src/protocol-defaults.ts`, prepended to every agent's `CLAUDE.md` unconditionally at spawn time. Agent personality lives in `.claude/agents/` in the project repo, exposed as `roleBody` on `AgentSpec`. The `claudeMd`, `claudeMdFile`, and `resolveClaudeMdFile()` are all removed from the config schema and processing pipeline. The YAML config becomes infrastructure-only: name, workingDirectory, model, runtime, heartbeat, skills.
+
+Support both Claude Code sub-agent patterns for role files. Directory pattern takes priority: `{workingDirectory}/.claude/agents/{name}/CLAUDE.md` (checked first, supports MEMORY.md and agent-specific skills alongside the definition). Single-file fallback: `{workingDirectory}/.claude/agents/{name}.md`. If neither exists, agent gets protocol defaults only. This makes it trivial to promote any Claude Code sub-agent into a persistent id-agents worker with identity by just adding a line to the team config.
 
 ---
 
@@ -52,7 +54,7 @@ Add two safety speed bumps to the delete chain so nobody wipes a team with a sin
 
 **Status:** done
 
-Ship three features plus three docs pages. `/delete *` deletes every agent in the current team with a confirmation prompt. `/delete --team <name>` does the same for a specified team. No `/delete --all` across teams, deliberately omitted to prevent one-command system-wide wipes. Working directories are never touched by any delete variant. Formalize `{workingDirectory}/output/` as the convention for agent artifacts, inject a preamble into each agent's CLAUDE.md telling them to write there, expose `/output <agent>` to list files and `/artifact <agent> <path>` to read one with path-traversal and size caps. New docs pages clarify that `/news` is for loop-safe messages and multi-reply catching (not the audit trail people keep trying to build on top of it) and that `/tasks` is the first-class work coordinator for the Roger-style research-then-code pattern.
+Ship three features plus three docs pages. `/delete *` deletes every agent in the current team with a confirmation prompt. `/delete --team <name>` does the same for a specified team. No `/delete --all` across teams, deliberately omitted to prevent one-command system-wide wipes. Working directories are never touched by any delete variant. Formalize `{workingDirectory}/output/` as the convention for agent artifacts, inject a preamble into each agent's CLAUDE.md telling them to write there, expose `/output <agent>` to list files and `/artifact <agent> <path>` to read one with path-traversal and size caps. New docs pages clarify that `/news` is for loop-safe messages and multi-reply catching (not the audit trail people keep trying to build on top of it) and that `/tasks` is the first-class work coordinator for research-then-code workflows.
 
 ---
 
