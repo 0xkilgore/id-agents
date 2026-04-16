@@ -17,7 +17,7 @@ export function StatusStrip(props: StatusStripProps): React.ReactElement {
   const groups = groupByTeam(agents);
 
   return (
-    <Box borderStyle="round" paddingX={1}>
+    <Box paddingX={1}>
       {groups.length === 0 ? (
         <Text dimColor>no agents</Text>
       ) : (
