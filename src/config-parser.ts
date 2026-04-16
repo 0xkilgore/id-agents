@@ -548,6 +548,28 @@ export function loadSubAgentTemplate(workingDir: string, filename: string): SubA
 }
 
 /**
+ * Copy the contents of a directory-based agent template into the agent's .claude/ directory.
+ *
+ * If {workingDir}/.claude/agents/{templateName}/ exists as a directory, recursively
+ * copies its contents into {workingDir}/.claude/ with overwrite semantics.
+ * This overlays agent-specific files (skills/, hooks/, settings.json, etc.) on top of
+ * whatever is already in .claude/.
+ *
+ * Returns true if a copy was performed, false if no directory exists.
+ */
+export function copyAgentDirOverlay(workingDir: string, templateName: string): boolean {
+  const srcDir = path.join(workingDir, '.claude', 'agents', templateName);
+
+  if (!fs.existsSync(srcDir) || !fs.statSync(srcDir).isDirectory()) {
+    return false;
+  }
+
+  const destDir = path.join(workingDir, '.claude');
+  fs.cpSync(srcDir, destDir, { recursive: true, force: true });
+  return true;
+}
+
+/**
  * Parse a sub-agent template string into frontmatter and body.
  * Exported for testing.
  */

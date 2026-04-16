@@ -8,6 +8,14 @@ Entries are synthesized prompts, not verbatim chat messages. They can describe c
 
 ---
 
+## 2026-04-15: Recursive directory overlay on spawn, 0.1.51-beta
+
+**Status:** done
+
+When an agent has a directory-based template at `.claude/agents/<name>/`, copy the entire directory into `{workingDir}/.claude/` as an overlay at spawn time — not just CLAUDE.md, but skills, hooks, settings.json, MEMORY.md, everything. Uses `fs.cpSync(src, dest, { recursive: true, force: true })` via `copyAgentDirOverlay()` in config-parser. All four spawn paths (main spawn endpoint, sync-changed, sync-added, remote-deploy) now follow a consistent three-step order: (1) deploy team-level skills, (2) overlay agent directory template, (3) write CLAUDE.md with protocol defaults + role body. This means agent-specific files win over team skills when names collide, and CLAUDE.md is always written last with the canonical protocol defaults regardless of what was in the overlay. The `agent` config field passes through as `agentTemplate` in spawn payloads. 9 new unit tests covering the overlay function: missing dir, non-directory, single file copy, nested skills, hooks, MEMORY.md, full tree, force overwrite, additive behavior.
+
+---
+
 ## 2026-04-15: Two-source claudeMd simplification and directory-based agents, 0.1.50-beta
 
 **Status:** done

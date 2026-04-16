@@ -27,7 +27,7 @@ import { type Db } from './db/db-service.js';
 import type { AgentRow, ScheduleDefinitionRow, TaskRow } from './db/types.js';
 import fetch from 'node-fetch';
 import type { PluginConfig, DeployConfig, HeartbeatConfig, CalendarSpec, ScheduleDeliveryMode } from './config-parser.js';
-import { processConfig } from './config-parser.js';
+import { processConfig, copyAgentDirOverlay } from './config-parser.js';
 import { PROTOCOL_DEFAULTS } from './protocol-defaults.js';
 import { computeSyncPlan, formatSyncSummary, formatSyncVerbose } from './sync.js';
 import { validateName } from './name-validation.js';
@@ -1586,7 +1586,7 @@ export class AgentManagerDb {
         teamId = team.id;
         teamName = team.name;
 
-        const { name, type: agentType, model, runtime, allowedTools, pluginPath, plugins, skills, metadata: reqMetadata, local, roleBody, heartbeat, openMode, workingDirectory: configWorkDir, verbose, domain, tokenId, address } = req.body || {};
+        const { name, type: agentType, model, runtime, allowedTools, pluginPath, plugins, skills, metadata: reqMetadata, local, agentTemplate, roleBody, heartbeat, openMode, workingDirectory: configWorkDir, verbose, domain, tokenId, address } = req.body || {};
         if (!name) return res.status(400).json({ error: 'Missing name' });
         const agentNameCheck = validateName(name, 'agent');
         if (!agentNameCheck.valid) return res.status(400).json({ error: agentNameCheck.error });
@@ -1629,17 +1629,6 @@ export class AgentManagerDb {
         // Create workspace directory first (needed for plugin copy)
         mkdirSync(workingDirectory, { recursive: true });
 
-        // Write CLAUDE.md: protocol defaults + agent role body
-        {
-          const parts = [PROTOCOL_DEFAULTS];
-          if (roleBody) parts.push(roleBody);
-          const claudeDir = path.join(workingDirectory, '.claude');
-          if (!existsSync(claudeDir)) {
-            mkdirSync(claudeDir, { recursive: true });
-          }
-          writeFileSync(path.join(claudeDir, 'CLAUDE.md'), parts.join('\n\n'));
-        }
-
         // Write HEARTBEAT.yaml if specified
         if (heartbeat && typeof heartbeat === 'object' && heartbeat.interval && heartbeat.message) {
           const heartbeatPath = path.join(workingDirectory, 'HEARTBEAT.yaml');
@@ -1648,7 +1637,7 @@ export class AgentManagerDb {
           console.log(`[Spawn] Wrote heartbeat config to ${heartbeatPath}`);
         }
 
-        // Deploy skills to agent's .claude/skills/ folder
+        // 1. Deploy team-level skills to agent's .claude/skills/ folder
         if (skills && Array.isArray(skills) && skills.length > 0) {
           this.deploySkillsToAgent(workingDirectory, skills, {
             DISPLAY_NAME: domain || name,
@@ -1658,6 +1647,20 @@ export class AgentManagerDb {
               : '',
             ORG_CONTEXT: '',
           }, { hasWallet: false });
+        }
+
+        // 2. Overlay agent directory template (skills, hooks, settings, etc.)
+        copyAgentDirOverlay(workingDirectory, agentTemplate || name);
+
+        // 3. Write CLAUDE.md: protocol defaults + agent role body (overwrites any CLAUDE.md from overlay)
+        {
+          const parts = [PROTOCOL_DEFAULTS];
+          if (roleBody) parts.push(roleBody);
+          const claudeDir = path.join(workingDirectory, '.claude');
+          if (!existsSync(claudeDir)) {
+            mkdirSync(claudeDir, { recursive: true });
+          }
+          writeFileSync(path.join(claudeDir, 'CLAUDE.md'), parts.join('\n\n'));
         }
 
         // Copy plugins to agent's working directory (agent owns its plugins)
@@ -3728,15 +3731,6 @@ export class AgentManagerDb {
           const workingDirectory = row.working_directory || `${this.baseWorkDir}/agents/${row.id}`;
           if (!existsSync(workingDirectory)) mkdirSync(workingDirectory, { recursive: true });
 
-          // Write CLAUDE.md: protocol defaults + agent role body
-          {
-            const parts = [PROTOCOL_DEFAULTS];
-            if (spec.roleBody) parts.push(spec.roleBody);
-            const claudeDir = path.join(workingDirectory, '.claude');
-            if (!existsSync(claudeDir)) mkdirSync(claudeDir, { recursive: true });
-            writeFileSync(path.join(claudeDir, 'CLAUDE.md'), parts.join('\n\n'));
-          }
-
           const effectiveRuntime = resolveRuntime(spec.runtime) as HarnessType;
           const effectiveModel = spec.model || getDefaultModelForRuntime(effectiveRuntime, this.defaultConfig?.model);
           this.ensureRuntimeReady(effectiveRuntime, effectiveModel);
@@ -3756,6 +3750,7 @@ export class AgentManagerDb {
           const configDomain = spec.domain;
           const owsWallet = this.getOrCreateAgentWallet(syncTeamName, spec.name);
 
+          // 1. Deploy team-level skills
           this.deploySkillsToAgent(workingDirectory, agentSkills, {
             DISPLAY_NAME: configDomain || spec.name,
             TEAM: syncTeamName,
@@ -3764,6 +3759,18 @@ export class AgentManagerDb {
               ? `\n## Your Role\n\n${orgContext}\n\nSee the full org chart at the shared team folder for details on all groups.`
               : '',
           }, { hasWallet: !!owsWallet });
+
+          // 2. Overlay agent directory template
+          copyAgentDirOverlay(workingDirectory, spec.agent || spec.name);
+
+          // 3. Write CLAUDE.md: protocol defaults + agent role body
+          {
+            const parts = [PROTOCOL_DEFAULTS];
+            if (spec.roleBody) parts.push(spec.roleBody);
+            const claudeDir = path.join(workingDirectory, '.claude');
+            if (!existsSync(claudeDir)) mkdirSync(claudeDir, { recursive: true });
+            writeFileSync(path.join(claudeDir, 'CLAUDE.md'), parts.join('\n\n'));
+          }
 
           if (spec.heartbeat) {
             const heartbeatPath = path.join(workingDirectory, 'HEARTBEAT.yaml');
@@ -3830,15 +3837,6 @@ export class AgentManagerDb {
               : `${this.baseWorkDir}/agents/${agentId}`;
             if (!existsSync(workingDirectory)) mkdirSync(workingDirectory, { recursive: true });
 
-            // Write CLAUDE.md: protocol defaults + agent role body
-            {
-              const parts = [PROTOCOL_DEFAULTS];
-              if (spec.roleBody) parts.push(spec.roleBody);
-              const claudeDir = path.join(workingDirectory, '.claude');
-              if (!existsSync(claudeDir)) mkdirSync(claudeDir, { recursive: true });
-              writeFileSync(path.join(claudeDir, 'CLAUDE.md'), parts.join('\n\n'));
-            }
-
             const effectiveRuntime = resolveRuntime(spec.runtime) as HarnessType;
             const effectiveModel = spec.model || getDefaultModelForRuntime(effectiveRuntime, this.defaultConfig?.model);
             this.ensureRuntimeReady(effectiveRuntime, effectiveModel);
@@ -3860,6 +3858,7 @@ export class AgentManagerDb {
               } catch { /* ignore */ }
             }
 
+            // 1. Deploy team-level skills
             this.deploySkillsToAgent(workingDirectory, agentSkills, {
               DISPLAY_NAME: configDomain || spec.name,
               TEAM: syncTeamName,
@@ -3868,6 +3867,18 @@ export class AgentManagerDb {
                 ? `\n## Your Role\n\n${orgContext}\n\nSee the full org chart at the shared team folder for details on all groups.`
                 : '',
             }, { hasWallet: !!owsWallet });
+
+            // 2. Overlay agent directory template
+            copyAgentDirOverlay(workingDirectory, spec.agent || spec.name);
+
+            // 3. Write CLAUDE.md: protocol defaults + agent role body
+            {
+              const parts = [PROTOCOL_DEFAULTS];
+              if (spec.roleBody) parts.push(spec.roleBody);
+              const claudeDir = path.join(workingDirectory, '.claude');
+              if (!existsSync(claudeDir)) mkdirSync(claudeDir, { recursive: true });
+              writeFileSync(path.join(claudeDir, 'CLAUDE.md'), parts.join('\n\n'));
+            }
 
             const metadata: AgentMetadata = {
               name: spec.name,
@@ -4127,17 +4138,6 @@ export class AgentManagerDb {
               mkdirSync(workingDirectory, { recursive: true });
             }
 
-            // Write CLAUDE.md: protocol defaults + agent role body
-            {
-              const parts = [PROTOCOL_DEFAULTS];
-              if (agentConfig.roleBody) parts.push(agentConfig.roleBody);
-              const claudeDir = path.join(workingDirectory, '.claude');
-              if (!existsSync(claudeDir)) {
-                mkdirSync(claudeDir, { recursive: true });
-              }
-              writeFileSync(path.join(claudeDir, 'CLAUDE.md'), parts.join('\n\n'));
-            }
-
             // Merge plugins from config
             const effectiveRuntime = resolveRuntime(agentConfig.runtime) as HarnessType;
             const effectiveModel = agentConfig.model || getDefaultModelForRuntime(effectiveRuntime, this.defaultConfig?.model);
@@ -4212,6 +4212,20 @@ export class AgentManagerDb {
                 ? `\n## Your Role\n\n${orgContext}\n\nSee the full org chart at the shared team folder for details on all groups.`
                 : '',
             }, { hasWallet: !!owsWallet });
+
+            // 2. Overlay agent directory template
+            copyAgentDirOverlay(workingDirectory, agentConfig.agent || agentConfig.name);
+
+            // 3. Write CLAUDE.md: protocol defaults + agent role body
+            {
+              const parts = [PROTOCOL_DEFAULTS];
+              if (agentConfig.roleBody) parts.push(agentConfig.roleBody);
+              const claudeDir = path.join(workingDirectory, '.claude');
+              if (!existsSync(claudeDir)) {
+                mkdirSync(claudeDir, { recursive: true });
+              }
+              writeFileSync(path.join(claudeDir, 'CLAUDE.md'), parts.join('\n\n'));
+            }
 
             // Remove any existing agent with this name to avoid duplicates on redeploy
             const existing = await this.db.agents.getByName(effectiveTeamId, agentName);

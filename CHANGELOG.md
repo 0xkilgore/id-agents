@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.51-beta
+
+### Features
+
+- **Directory overlay on spawn**: When an agent has a directory-based template at `.claude/agents/<name>/`, the entire directory is recursively copied into `{workingDir}/.claude/` as an overlay at spawn time. This copies skills, hooks, settings, MEMORY.md, and any other agent-specific files alongside the CLAUDE.md instructions. Uses `fs.cpSync` with `{ recursive: true, force: true }`.
+- **Spawn order guarantee**: All four spawn paths (deploy, sync-changed, sync-added, remote-deploy) now follow the same order: (1) deploy team skills, (2) overlay agent directory template, (3) write CLAUDE.md with protocol defaults + role body. This ensures agent-specific files overlay team skills, and CLAUDE.md is always written last.
+- **`agentTemplate` field**: The `agent` config field is now passed through as `agentTemplate` in spawn payloads, allowing the overlay to use a different template directory than the agent's own name.
+
 ## 0.1.50-beta
 
 ### Breaking Changes

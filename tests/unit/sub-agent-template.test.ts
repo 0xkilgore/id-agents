@@ -9,6 +9,7 @@ import {
   loadSubAgentTemplate,
   parseSubAgentTemplate,
   processConfig,
+  copyAgentDirOverlay,
 } from '../../src/config-parser.js';
 
 /* ------------------------------------------------------------------ */
@@ -366,5 +367,148 @@ agents:
     const result = processConfig(configPath, '/workspace');
     expect(result.errors).toEqual([]);
     expect(result.agents[0].roleBody).toBeUndefined();
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/*  copyAgentDirOverlay — recursive directory copy                     */
+/* ------------------------------------------------------------------ */
+
+describe('copyAgentDirOverlay', () => {
+  let tmpDir: string;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'id-agents-overlay-'));
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it('returns false when agent directory does not exist', () => {
+    const result = copyAgentDirOverlay(tmpDir, 'nonexistent');
+    expect(result).toBe(false);
+  });
+
+  it('returns false when template name points to a file, not a directory', () => {
+    const agentsDir = path.join(tmpDir, '.claude', 'agents');
+    fs.mkdirSync(agentsDir, { recursive: true });
+    fs.writeFileSync(path.join(agentsDir, 'myagent'), 'not a directory');
+
+    const result = copyAgentDirOverlay(tmpDir, 'myagent');
+    expect(result).toBe(false);
+  });
+
+  it('copies CLAUDE.md from agent dir into .claude/', () => {
+    const agentDir = path.join(tmpDir, '.claude', 'agents', 'reviewer');
+    fs.mkdirSync(agentDir, { recursive: true });
+    fs.writeFileSync(path.join(agentDir, 'CLAUDE.md'), 'Agent instructions');
+
+    const result = copyAgentDirOverlay(tmpDir, 'reviewer');
+    expect(result).toBe(true);
+
+    // CLAUDE.md should now exist at .claude/CLAUDE.md (overlay destination)
+    const dest = path.join(tmpDir, '.claude', 'CLAUDE.md');
+    expect(fs.existsSync(dest)).toBe(true);
+    expect(fs.readFileSync(dest, 'utf-8')).toBe('Agent instructions');
+  });
+
+  it('copies nested skills into .claude/skills/', () => {
+    const agentDir = path.join(tmpDir, '.claude', 'agents', 'auditor');
+    const skillDir = path.join(agentDir, 'skills', 'test-skill');
+    fs.mkdirSync(skillDir, { recursive: true });
+    fs.writeFileSync(path.join(skillDir, 'SKILL.md'), 'Skill content');
+
+    const result = copyAgentDirOverlay(tmpDir, 'auditor');
+    expect(result).toBe(true);
+
+    const destSkill = path.join(tmpDir, '.claude', 'skills', 'test-skill', 'SKILL.md');
+    expect(fs.existsSync(destSkill)).toBe(true);
+    expect(fs.readFileSync(destSkill, 'utf-8')).toBe('Skill content');
+  });
+
+  it('copies hooks into .claude/hooks/', () => {
+    const agentDir = path.join(tmpDir, '.claude', 'agents', 'builder');
+    const hooksDir = path.join(agentDir, 'hooks');
+    fs.mkdirSync(hooksDir, { recursive: true });
+    fs.writeFileSync(path.join(hooksDir, 'pre-commit.sh'), '#!/bin/bash\necho test');
+
+    const result = copyAgentDirOverlay(tmpDir, 'builder');
+    expect(result).toBe(true);
+
+    const destHook = path.join(tmpDir, '.claude', 'hooks', 'pre-commit.sh');
+    expect(fs.existsSync(destHook)).toBe(true);
+    expect(fs.readFileSync(destHook, 'utf-8')).toBe('#!/bin/bash\necho test');
+  });
+
+  it('copies MEMORY.md into .claude/', () => {
+    const agentDir = path.join(tmpDir, '.claude', 'agents', 'researcher');
+    fs.mkdirSync(agentDir, { recursive: true });
+    fs.writeFileSync(path.join(agentDir, 'MEMORY.md'), '# Agent Memory\n- fact 1');
+
+    const result = copyAgentDirOverlay(tmpDir, 'researcher');
+    expect(result).toBe(true);
+
+    const destMemory = path.join(tmpDir, '.claude', 'MEMORY.md');
+    expect(fs.existsSync(destMemory)).toBe(true);
+    expect(fs.readFileSync(destMemory, 'utf-8')).toBe('# Agent Memory\n- fact 1');
+  });
+
+  it('copies full directory tree with multiple file types', () => {
+    const agentDir = path.join(tmpDir, '.claude', 'agents', 'fullstack');
+    // Create a realistic agent directory
+    fs.mkdirSync(path.join(agentDir, 'skills', 'deploy-skill'), { recursive: true });
+    fs.mkdirSync(path.join(agentDir, 'hooks'), { recursive: true });
+    fs.writeFileSync(path.join(agentDir, 'CLAUDE.md'), 'Main instructions');
+    fs.writeFileSync(path.join(agentDir, 'MEMORY.md'), 'Memory content');
+    fs.writeFileSync(path.join(agentDir, 'settings.json'), '{"key": "value"}');
+    fs.writeFileSync(path.join(agentDir, 'skills', 'deploy-skill', 'SKILL.md'), 'Deploy skill');
+    fs.writeFileSync(path.join(agentDir, 'hooks', 'test-hook.sh'), 'hook script');
+
+    const result = copyAgentDirOverlay(tmpDir, 'fullstack');
+    expect(result).toBe(true);
+
+    // Verify all files landed in .claude/
+    const claude = path.join(tmpDir, '.claude');
+    expect(fs.readFileSync(path.join(claude, 'CLAUDE.md'), 'utf-8')).toBe('Main instructions');
+    expect(fs.readFileSync(path.join(claude, 'MEMORY.md'), 'utf-8')).toBe('Memory content');
+    expect(fs.readFileSync(path.join(claude, 'settings.json'), 'utf-8')).toBe('{"key": "value"}');
+    expect(fs.readFileSync(path.join(claude, 'skills', 'deploy-skill', 'SKILL.md'), 'utf-8')).toBe('Deploy skill');
+    expect(fs.readFileSync(path.join(claude, 'hooks', 'test-hook.sh'), 'utf-8')).toBe('hook script');
+  });
+
+  it('overwrites existing files in .claude/ (force: true)', () => {
+    // Pre-existing file in .claude/
+    const claudeDir = path.join(tmpDir, '.claude');
+    fs.mkdirSync(claudeDir, { recursive: true });
+    fs.writeFileSync(path.join(claudeDir, 'settings.json'), '{"old": true}');
+
+    // Agent dir with same file
+    const agentDir = path.join(claudeDir, 'agents', 'overwriter');
+    fs.mkdirSync(agentDir, { recursive: true });
+    fs.writeFileSync(path.join(agentDir, 'settings.json'), '{"new": true}');
+
+    const result = copyAgentDirOverlay(tmpDir, 'overwriter');
+    expect(result).toBe(true);
+
+    expect(fs.readFileSync(path.join(claudeDir, 'settings.json'), 'utf-8')).toBe('{"new": true}');
+  });
+
+  it('does not remove pre-existing files not in the overlay', () => {
+    // Pre-existing file in .claude/
+    const claudeDir = path.join(tmpDir, '.claude');
+    fs.mkdirSync(claudeDir, { recursive: true });
+    fs.writeFileSync(path.join(claudeDir, 'existing.md'), 'keep me');
+
+    // Agent dir with different file
+    const agentDir = path.join(claudeDir, 'agents', 'additive');
+    fs.mkdirSync(agentDir, { recursive: true });
+    fs.writeFileSync(path.join(agentDir, 'CLAUDE.md'), 'new content');
+
+    copyAgentDirOverlay(tmpDir, 'additive');
+
+    // Both files should exist
+    expect(fs.readFileSync(path.join(claudeDir, 'existing.md'), 'utf-8')).toBe('keep me');
+    expect(fs.readFileSync(path.join(claudeDir, 'CLAUDE.md'), 'utf-8')).toBe('new content');
   });
 });
