@@ -12,8 +12,10 @@ defaults:
   local: true
   runtime: claude-code-cli
   model: claude-opus-4-6
-  dangerouslySkipPermissions: true
   verbose: "true"
+  # Note: --dangerously-skip-permissions is always passed to claude-code-cli
+  # subprocesses. There is no YAML knob to disable it (background agents
+  # have no shell to approve prompts). See QUICKSTART.md.
 
 agents:
   - name: architect
