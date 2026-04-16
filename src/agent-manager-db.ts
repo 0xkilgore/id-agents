@@ -2637,6 +2637,7 @@ export class AgentManagerDb {
         const taskRow: TaskRow = {
           id: `task_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`,
           name,
+          uuid: crypto.randomUUID(),
           team_id: taskTeamId,
           title,
           description: description || null,
@@ -2695,19 +2696,19 @@ export class AgentManagerDb {
       }
     });
 
-    this.managementApp.get('/tasks/:name', async (req, res) => {
+    this.managementApp.get('/tasks/:ref', async (req, res) => {
       try {
         const { id: teamId } = await this.getTeam(req);
-        const task = await this.db.tasks.getByName(req.params.name);
-        if (!task) return res.status(404).json({ error: `Task "${req.params.name}" not found` });
+        const { task, error } = await this.resolveTaskRef(req.params.ref);
+        if (!task) return res.status(404).json({ error: error || `Task "${req.params.ref}" not found` });
         res.json({ ok: true, task: await this.buildTaskResult(task, teamId) });
       } catch (err: any) {
-        console.error('[Manager] Error in GET /tasks/:name:', err);
+        console.error('[Manager] Error in GET /tasks/:ref:', err);
         res.status(500).json({ error: err?.message || 'Internal server error' });
       }
     });
 
-    this.managementApp.post('/tasks/:name/claim', async (req, res) => {
+    this.managementApp.post('/tasks/:ref/claim', async (req, res) => {
       try {
         const { id: teamId } = await this.getTeam(req);
         const { agent_id, from } = req.body || {};
@@ -2717,8 +2718,8 @@ export class AgentManagerDb {
           return res.status(400).json({ error: 'Missing required field: agent_id (or from)' });
         }
 
-        const task = await this.db.tasks.getByName(req.params.name);
-        if (!task) return res.status(404).json({ error: `Task "${req.params.name}" not found` });
+        const { task, error: taskError } = await this.resolveTaskRef(req.params.ref);
+        if (!task) return res.status(404).json({ error: taskError || `Task "${req.params.ref}" not found` });
 
         const { agent, error } = await this.resolveSingleAgentForCommand(teamId, callerRef);
         if (!agent) return res.status(404).json({ error: error || `Agent "${callerRef}" not found` });
@@ -2726,31 +2727,31 @@ export class AgentManagerDb {
         const now = Math.floor(Date.now() / 1000);
         const claimed = await this.db.tasks.claim(task.id, agent.id, now);
         if (!claimed) {
-          return res.status(409).json({ error: `Cannot claim "${req.params.name}" — already owned or not in todo status` });
+          return res.status(409).json({ error: `Cannot claim "${task.name}" — already owned or not in todo status` });
         }
 
-        const updated = await this.db.tasks.getByName(req.params.name);
+        const updated = await this.db.tasks.getByName(task.name);
         res.json({ ok: true, task: await this.buildTaskResult(updated!, teamId) });
       } catch (err: any) {
-        console.error('[Manager] Error in POST /tasks/:name/claim:', err);
+        console.error('[Manager] Error in POST /tasks/:ref/claim:', err);
         res.status(500).json({ error: err?.message || 'Internal server error' });
       }
     });
 
-    this.managementApp.post('/tasks/:name/done', async (req, res) => {
+    this.managementApp.post('/tasks/:ref/done', async (req, res) => {
       try {
         const { id: teamId } = await this.getTeam(req);
         const { agent_id, from } = req.body || {};
         const callerRef = agent_id || from;
 
-        const task = await this.db.tasks.getByName(req.params.name);
-        if (!task) return res.status(404).json({ error: `Task "${req.params.name}" not found` });
+        const { task, error: taskError } = await this.resolveTaskRef(req.params.ref);
+        if (!task) return res.status(404).json({ error: taskError || `Task "${req.params.ref}" not found` });
 
         // If caller identifies themselves, enforce ownership
         if (callerRef && typeof callerRef === 'string') {
           const { agent } = await this.resolveSingleAgentForCommand(teamId, callerRef);
           if (agent && task.owner !== agent.id) {
-            return res.status(403).json({ error: `Agent "${callerRef}" is not the owner of task "${req.params.name}"` });
+            return res.status(403).json({ error: `Agent "${callerRef}" is not the owner of task "${task.name}"` });
           }
         }
 
@@ -2761,22 +2762,22 @@ export class AgentManagerDb {
           updated_at: now,
         });
 
-        const updated = await this.db.tasks.getByName(req.params.name);
+        const updated = await this.db.tasks.getByName(task.name);
         res.json({ ok: true, task: await this.buildTaskResult(updated!, teamId) });
       } catch (err: any) {
-        console.error('[Manager] Error in POST /tasks/:name/done:', err);
+        console.error('[Manager] Error in POST /tasks/:ref/done:', err);
         res.status(500).json({ error: err?.message || 'Internal server error' });
       }
     });
 
-    this.managementApp.delete('/tasks/:name', async (req, res) => {
+    this.managementApp.delete('/tasks/:ref', async (req, res) => {
       try {
-        const task = await this.db.tasks.getByName(req.params.name);
-        if (!task) return res.status(404).json({ error: `Task "${req.params.name}" not found` });
+        const { task, error } = await this.resolveTaskRef(req.params.ref);
+        if (!task) return res.status(404).json({ error: error || `Task "${req.params.ref}" not found` });
         await this.db.tasks.delete(task.id);
-        res.json({ ok: true, removed: req.params.name });
+        res.json({ ok: true, removed: task.name });
       } catch (err: any) {
-        console.error('[Manager] Error in DELETE /tasks/:name:', err);
+        console.error('[Manager] Error in DELETE /tasks/:ref:', err);
         res.status(500).json({ error: err?.message || 'Internal server error' });
       }
     });
@@ -2810,9 +2811,12 @@ export class AgentManagerDb {
     }
 
     const links = await this.db.tasks.listEventLinksForTask(task.id);
+    const shortId = task.uuid ? `#${task.uuid.replace(/-/g, '').slice(0, 8)}` : null;
 
     return {
       name: task.name,
+      uuid: task.uuid,
+      shortId,
       title: task.title,
       description: task.description,
       status: task.status,
@@ -2823,6 +2827,42 @@ export class AgentManagerDb {
       updatedAt: task.updated_at,
       completedAt: task.completed_at,
     };
+  }
+
+  /**
+   * Resolve a task reference. Accepts either:
+   *   - the kebab-case `name` slug (existing behavior), or
+   *   - a short-uuid handle `#xxxxxxxx` (8+ hex chars after the `#`).
+   *
+   * Short refs match on the dash-stripped uuid prefix. If multiple rows
+   * share the prefix, returns an `error` asking the caller to widen it.
+   */
+  private async resolveTaskRef(ref: string): Promise<{ task?: TaskRow; error?: string }> {
+    if (!ref || typeof ref !== 'string') {
+      return { error: 'Task reference is required' };
+    }
+    if (ref.startsWith('#')) {
+      const raw = ref.slice(1).toLowerCase();
+      if (!/^[0-9a-f]+$/.test(raw) || raw.length < 4) {
+        return { error: `Invalid short id "${ref}". Expected #<hex prefix>` };
+      }
+      // uuids are stored with dashes; the short form strips dashes for
+      // display, so match on either form by trying the first 8 hex chars
+      // against the leading hex chunk (uuid v4: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx).
+      const matches = await this.db.tasks.getByUuidPrefix(raw.slice(0, 8));
+      const filtered = matches.filter(t => (t.uuid || '').replace(/-/g, '').toLowerCase().startsWith(raw));
+      if (filtered.length === 0) return { error: `Task ${ref} not found` };
+      if (filtered.length > 1) {
+        const widened = filtered
+          .map(t => `#${(t.uuid || '').replace(/-/g, '').slice(0, raw.length + 2)} (${t.name})`)
+          .join(', ');
+        return { error: `Short id ${ref} is ambiguous (matches ${filtered.length}): ${widened}. Widen the prefix.` };
+      }
+      return { task: filtered[0] };
+    }
+    const task = await this.db.tasks.getByName(ref);
+    if (!task) return { error: `Task "${ref}" not found` };
+    return { task };
   }
 
   private async listTeamSchedules(teamId: string): Promise<Array<{ definition: ScheduleDefinitionRow; targets: AgentRow[] }>> {
@@ -4908,6 +4948,7 @@ export class AgentManagerDb {
           const taskRow: TaskRow = {
             id: `task_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`,
             name,
+            uuid: crypto.randomUUID(),
             team_id: taskTeamId,
             title,
             description: description || null,
@@ -4978,11 +5019,11 @@ export class AgentManagerDb {
           const taskName = args[1];
           const agentRef = args[2];
           if (!taskName || !agentRef) {
-            return { ok: false, error: 'Usage: /task assign <task-name> <agent> [--team <team>]' };
+            return { ok: false, error: 'Usage: /task assign <task-name|#shortid> <agent> [--team <team>]' };
           }
 
-          const task = await this.db.tasks.getByName(taskName);
-          if (!task) return { ok: false, error: `Task "${taskName}" not found` };
+          const { task, error: taskErr } = await this.resolveTaskRef(taskName);
+          if (!task) return { ok: false, error: taskErr || `Task "${taskName}" not found` };
 
           // Check for --team flag
           let resolveTeam = teamId;
@@ -5005,23 +5046,23 @@ export class AgentManagerDb {
             updated_at: now,
           });
 
-          const updated = await this.db.tasks.getByName(taskName);
+          const updated = await this.db.tasks.getByName(task.name);
           return { ok: true, result: { task: await this.buildTaskResult(updated!, teamId) } };
         }
 
         if (subCmd === 'claim') {
-          // /task claim <task-name> (agent API via /remote with from field)
-          const taskName = args[1];
-          if (!taskName) {
-            return { ok: false, error: 'Usage: /task claim <task-name>' };
+          // /task claim <task-name|#shortid> (agent API via /remote with from field)
+          const taskRef = args[1];
+          if (!taskRef) {
+            return { ok: false, error: 'Usage: /task claim <task-name|#shortid>' };
           }
 
           if (!callerFrom) {
             return { ok: false, error: 'Claim requires agent identity. Use /remote with a "from" field.' };
           }
 
-          const task = await this.db.tasks.getByName(taskName);
-          if (!task) return { ok: false, error: `Task "${taskName}" not found` };
+          const { task, error: taskErr } = await this.resolveTaskRef(taskRef);
+          if (!task) return { ok: false, error: taskErr || `Task "${taskRef}" not found` };
 
           // Resolve caller agent
           const { agent: callerAgent, error: callerError } = await this.resolveSingleAgentForCommand(teamId, callerFrom);
@@ -5030,29 +5071,29 @@ export class AgentManagerDb {
           const now = Math.floor(Date.now() / 1000);
           const claimed = await this.db.tasks.claim(task.id, callerAgent.id, now);
           if (!claimed) {
-            return { ok: false, error: `Cannot claim "${taskName}" — task is already owned or not in todo status` };
+            return { ok: false, error: `Cannot claim "${task.name}" — task is already owned or not in todo status` };
           }
 
-          const updated = await this.db.tasks.getByName(taskName);
+          const updated = await this.db.tasks.getByName(task.name);
           return { ok: true, result: { task: await this.buildTaskResult(updated!, teamId) } };
         }
 
         if (subCmd === 'done') {
-          // /task done <task-name>
+          // /task done <task-name|#shortid>
           // Manager can mark any task done; agent can only mark its own task done
-          const taskName = args[1];
-          if (!taskName) {
-            return { ok: false, error: 'Usage: /task done <task-name>' };
+          const taskRef = args[1];
+          if (!taskRef) {
+            return { ok: false, error: 'Usage: /task done <task-name|#shortid>' };
           }
 
-          const task = await this.db.tasks.getByName(taskName);
-          if (!task) return { ok: false, error: `Task "${taskName}" not found` };
+          const { task, error: taskErr } = await this.resolveTaskRef(taskRef);
+          if (!task) return { ok: false, error: taskErr || `Task "${taskRef}" not found` };
 
           // If called by an agent (callerFrom set), enforce ownership
           if (callerFrom) {
             const { agent: callerAgent } = await this.resolveSingleAgentForCommand(teamId, callerFrom);
             if (callerAgent && task.owner !== callerAgent.id) {
-              return { ok: false, error: `Agent "${callerFrom}" is not the owner of task "${taskName}"` };
+              return { ok: false, error: `Agent "${callerFrom}" is not the owner of task "${task.name}"` };
             }
           }
 
@@ -5063,22 +5104,22 @@ export class AgentManagerDb {
             updated_at: now,
           });
 
-          const updated = await this.db.tasks.getByName(taskName);
+          const updated = await this.db.tasks.getByName(task.name);
           return { ok: true, result: { task: await this.buildTaskResult(updated!, teamId) } };
         }
 
         if (subCmd === 'remove') {
-          // /task remove <task-name>
-          const taskName = args[1];
-          if (!taskName) {
-            return { ok: false, error: 'Usage: /task remove <task-name>' };
+          // /task remove <task-name|#shortid>
+          const taskRef = args[1];
+          if (!taskRef) {
+            return { ok: false, error: 'Usage: /task remove <task-name|#shortid>' };
           }
 
-          const task = await this.db.tasks.getByName(taskName);
-          if (!task) return { ok: false, error: `Task "${taskName}" not found` };
+          const { task, error: taskErr } = await this.resolveTaskRef(taskRef);
+          if (!task) return { ok: false, error: taskErr || `Task "${taskRef}" not found` };
 
           await this.db.tasks.delete(task.id);
-          return { ok: true, result: { removed: taskName } };
+          return { ok: true, result: { removed: task.name } };
         }
 
         return {

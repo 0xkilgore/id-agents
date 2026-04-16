@@ -71,7 +71,7 @@ export async function migrateDb(db: Db): Promise<void> {
     await migratePostgres(db.adapter);
   } else {
     const { migrateSqlite } = await import('./migrations/sqlite.js');
-    migrateSqlite(db.adapter as SqliteAdapter);
+    await migrateSqlite(db.adapter as SqliteAdapter);
   }
 }
 

@@ -10,11 +10,12 @@ export class PgTasksRepo implements TasksRepository {
   async create(task: TaskRow, eventScheduleIds?: string[]): Promise<void> {
     await this.db.query(
       `INSERT INTO tasks
-         (id, name, team_id, title, description, status, created_by, owner, created_at, updated_at, completed_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+         (id, name, uuid, team_id, title, description, status, created_by, owner, created_at, updated_at, completed_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
       [
         task.id,
         task.name,
+        task.uuid,
         task.team_id,
         task.title,
         task.description,
@@ -44,6 +45,14 @@ export class PgTasksRepo implements TasksRepository {
       [name],
     );
     return r.rows[0] || null;
+  }
+
+  async getByUuidPrefix(prefix: string): Promise<TaskRow[]> {
+    const r = await this.db.query<TaskRow>(
+      `SELECT * FROM tasks WHERE uuid LIKE $1 ORDER BY updated_at DESC`,
+      [`${prefix}%`],
+    );
+    return r.rows;
   }
 
   async list(filters?: {

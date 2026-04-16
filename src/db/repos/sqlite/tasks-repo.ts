@@ -10,11 +10,12 @@ export class SqliteTasksRepo implements TasksRepository {
   async create(task: TaskRow, eventScheduleIds?: string[]): Promise<void> {
     await this.db.query(
       `INSERT INTO tasks
-         (id, name, team_id, title, description, status, created_by, owner, created_at, updated_at, completed_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         (id, name, uuid, team_id, title, description, status, created_by, owner, created_at, updated_at, completed_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         task.id,
         task.name,
+        task.uuid,
         task.team_id,
         task.title,
         task.description,
@@ -44,6 +45,14 @@ export class SqliteTasksRepo implements TasksRepository {
       [name],
     );
     return rows[0] || null;
+  }
+
+  async getByUuidPrefix(prefix: string): Promise<TaskRow[]> {
+    const { rows } = await this.db.query<TaskRow>(
+      `SELECT * FROM tasks WHERE uuid LIKE ? ORDER BY updated_at DESC`,
+      [`${prefix}%`],
+    );
+    return rows;
   }
 
   async list(filters?: {

@@ -107,6 +107,7 @@ export interface ScheduleRunRow {
 export interface TaskRow {
   id: string;
   name: string;
+  uuid: string;
   team_id: string | null;
   title: string;
   description: string | null;

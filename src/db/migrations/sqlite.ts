@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: MIT
 
+import crypto from 'crypto';
 import type { SqliteAdapter } from '../sqlite-adapter.js';
 
-export function migrateSqlite(adapter: SqliteAdapter): void {
+export async function migrateSqlite(adapter: SqliteAdapter): Promise<void> {
   adapter.exec(`
     CREATE TABLE IF NOT EXISTS teams (
       id TEXT PRIMARY KEY,
@@ -120,6 +121,7 @@ export function migrateSqlite(adapter: SqliteAdapter): void {
     CREATE TABLE IF NOT EXISTS tasks (
       id TEXT PRIMARY KEY,
       name TEXT NOT NULL UNIQUE,
+      uuid TEXT,
       team_id TEXT REFERENCES teams(id) ON DELETE SET NULL,
       title TEXT NOT NULL,
       description TEXT,
@@ -149,4 +151,19 @@ export function migrateSqlite(adapter: SqliteAdapter): void {
   } catch {
     // Column already exists in upgraded databases.
   }
+
+  // Tasks: add uuid column for short-id lookups (#xxxxxxxx)
+  try {
+    adapter.exec(`ALTER TABLE tasks ADD COLUMN uuid TEXT`);
+  } catch {
+    // Column already exists in upgraded databases.
+  }
+
+  // Backfill uuid for any existing rows that lack one
+  const missing = await adapter.query<{ id: string }>(`SELECT id FROM tasks WHERE uuid IS NULL OR uuid = ''`);
+  for (const row of missing.rows) {
+    await adapter.query(`UPDATE tasks SET uuid = ? WHERE id = ?`, [crypto.randomUUID(), row.id]);
+  }
+
+  adapter.exec(`CREATE UNIQUE INDEX IF NOT EXISTS tasks_uuid_idx ON tasks(uuid)`);
 }

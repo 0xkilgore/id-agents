@@ -348,6 +348,14 @@ export interface TasksRepository {
   /** Look up a task by its unique name slug. */
   getByName(name: string): Promise<TaskRow | null>;
 
+  /**
+   * Look up tasks whose `uuid` starts with the given prefix.
+   * Used for short-id resolution (`#xxxxxxxx`). Caller decides
+   * how to handle ambiguity (no match → not found; multiple →
+   * ask the user to widen the prefix).
+   */
+  getByUuidPrefix(prefix: string): Promise<TaskRow[]>;
+
   /** List tasks with optional filters on status, owner, and team. */
   list(filters?: {
     status?: 'todo' | 'doing' | 'done';
