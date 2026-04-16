@@ -236,6 +236,21 @@ function checkCommandAvailable(command: string): RuntimeValidationIssue[] {
   }
 }
 
+/**
+ * Map a preflight issue code to a one-line setup hint shown at spawn time.
+ * Returns null for codes without a curated hint; callers should fall back to issue.message.
+ */
+export function runtimeIssueHint(code: string): string | null {
+  switch (code) {
+    case 'anthropic_api_key_missing':
+      return 'Missing ANTHROPIC_API_KEY. Add `export ANTHROPIC_API_KEY=sk-...` to ~/.zshrc (or ~/.bashrc) or to a project .env. Get a key: https://console.anthropic.com/settings/keys';
+    case 'codex_auth_missing':
+      return 'Missing OPENAI_API_KEY. Add `export OPENAI_API_KEY=sk-...` to ~/.zshrc (or ~/.bashrc) or to a project .env, or run `codex login`. Docs: https://github.com/openai/codex';
+    default:
+      return null;
+  }
+}
+
 export function validateRuntimePreflight(
   runtime: HarnessType | string | undefined,
   model?: string

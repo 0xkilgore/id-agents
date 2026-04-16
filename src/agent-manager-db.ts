@@ -42,6 +42,7 @@ import {
   getRuntimePaths,
   isRuntimeId,
   resolveRuntime,
+  runtimeIssueHint,
   validateRuntimePreflight,
 } from './runtime/registry.js';
 
@@ -278,7 +279,7 @@ export class AgentManagerDb {
   private ensureRuntimeReady(runtime: HarnessType | string | undefined, model?: string): void {
     const issues = validateRuntimePreflight(runtime, model);
     if (issues.length > 0) {
-      throw new Error(issues.map(issue => issue.message).join('; '));
+      throw new Error(issues.map(issue => runtimeIssueHint(issue.code) || issue.message).join('; '));
     }
   }
 
