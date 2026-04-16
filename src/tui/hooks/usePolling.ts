@@ -1,9 +1,16 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 
 export interface PollingState<T> {
   data: T | null;
   error: Error | null;
   lastUpdated: number;
+}
+
+interface InternalState<T> {
+  data: T | null;
+  error: Error | null;
+  lastUpdated: number;
+  signature: string;
 }
 
 export function usePolling<T>(
@@ -12,9 +19,14 @@ export function usePolling<T>(
   paused: boolean,
   deps: ReadonlyArray<unknown> = [],
 ): PollingState<T> {
-  const [data, setData] = useState<T | null>(null);
-  const [error, setError] = useState<Error | null>(null);
-  const [lastUpdated, setLastUpdated] = useState<number>(0);
+  const [state, setState] = useState<InternalState<T>>({
+    data: null,
+    error: null,
+    lastUpdated: 0,
+    signature: '',
+  });
+  const stateRef = useRef(state);
+  stateRef.current = state;
 
   useEffect(() => {
     if (paused) return;
@@ -25,13 +37,17 @@ export function usePolling<T>(
       try {
         const d = await fetcher(ac.signal);
         if (cancelled) return;
-        setData(d);
-        setError(null);
-        setLastUpdated(Date.now());
+        const sig = signatureOf(d);
+        const prev = stateRef.current;
+        if (sig === prev.signature && prev.error === null) return;
+        setState({ data: d, error: null, lastUpdated: Date.now(), signature: sig });
       } catch (err: unknown) {
         if (cancelled) return;
         if (err instanceof Error && (err.name === 'AbortError' || ac.signal.aborted)) return;
-        setError(err instanceof Error ? err : new Error(String(err)));
+        const e = err instanceof Error ? err : new Error(String(err));
+        const prev = stateRef.current;
+        if (prev.error && prev.error.message === e.message) return;
+        setState({ ...prev, error: e });
       }
     };
 
@@ -48,5 +64,23 @@ export function usePolling<T>(
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [paused, intervalMs, ...deps]);
 
-  return { data, error, lastUpdated };
+  return { data: state.data, error: state.error, lastUpdated: state.lastUpdated };
+}
+
+function signatureOf(value: unknown): string {
+  try {
+    return JSON.stringify(value, stableReplacer);
+  } catch {
+    return String(value);
+  }
+}
+
+function stableReplacer(_key: string, value: unknown): unknown {
+  if (value && typeof value === 'object' && !Array.isArray(value)) {
+    const obj = value as Record<string, unknown>;
+    const sorted: Record<string, unknown> = {};
+    for (const k of Object.keys(obj).sort()) sorted[k] = obj[k];
+    return sorted;
+  }
+  return value;
 }
