@@ -1,32 +1,23 @@
 import React from 'react';
 import { Box, Text } from 'ink';
 
+export type FooterView = 'agents' | 'news';
+
 interface FooterProps {
+  view: FooterView;
   paused?: boolean;
-  lastUpdated?: number;
 }
 
-export function Footer({ paused, lastUpdated }: FooterProps): React.ReactElement {
+const HINTS: Record<FooterView, string> = {
+  agents: '[↑↓] select [PgUp/PgDn] page [Home/End] jump [Tab/⇧Tab] team [n] news [p] pause [q] quit',
+  news: '[↑↓] scroll [PgUp/PgDn] page [Home/End] jump [Esc/b] back [p] pause [q] quit',
+};
+
+export function Footer({ view, paused }: FooterProps): React.ReactElement {
   return (
     <Box borderStyle="round" paddingX={1} justifyContent="space-between">
-      <Text dimColor>
-        [↑↓] select [PgUp/PgDn] page [Home/End] jump [Tab/⇧Tab] team [p] pause [q] quit
-      </Text>
-      <Box>
-        {paused ? <Text color="yellow">⏸ paused </Text> : null}
-        {lastUpdated ? (
-          <Text dimColor>updated {formatAbsolute(lastUpdated)}</Text>
-        ) : null}
-      </Box>
+      <Text dimColor>{HINTS[view]}</Text>
+      {paused ? <Text color="yellow">⏸ paused</Text> : null}
     </Box>
   );
-}
-
-function formatAbsolute(ms: number): string {
-  const d = new Date(ms);
-  return `${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}`;
-}
-
-function pad2(n: number): string {
-  return n.toString().padStart(2, '0');
 }

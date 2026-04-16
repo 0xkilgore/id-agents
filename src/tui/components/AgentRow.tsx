@@ -7,7 +7,6 @@ import { statusColor, healthColor, healthDot } from '../util/colors.js';
 interface AgentRowProps {
   agent: Agent;
   selected: boolean;
-  now: number;
 }
 
 const COLS = {
@@ -19,7 +18,7 @@ const COLS = {
   health: 10,
   hb: 3,
   uptime: 10,
-  lastSeen: 9,
+  lastSeen: 6,
 } as const;
 
 function abbrevRuntime(rt?: string): string {
@@ -33,7 +32,7 @@ function renderHealth(health: string): string {
   return `${healthDot(health)} ${health}`;
 }
 
-function AgentRowInner({ agent, selected, now }: AgentRowProps): React.ReactElement {
+function AgentRowInner({ agent, selected }: AgentRowProps): React.ReactElement {
   const marker = selected ? '▶ ' : '  ';
   const name = padRight(agent.alias ?? agent.name, COLS.name);
   const port = padRight(agent.port ? String(agent.port) : '—', COLS.port);
@@ -41,8 +40,8 @@ function AgentRowInner({ agent, selected, now }: AgentRowProps): React.ReactElem
   const status = padRight(agent.status, COLS.status);
   const health = padRight(renderHealth(agent.health), COLS.health);
   const hb = padRight(agent.metadata?.heartbeat ? '♥' : '-', COLS.hb);
-  const uptime = padRight(humanizeUptime(agent.createdAt, now), COLS.uptime);
-  const lastSeen = padRight(humanizeAge(agent.lastHealthCheck, now), COLS.lastSeen);
+  const uptime = padRight(humanizeUptime(agent.createdAt), COLS.uptime);
+  const lastSeen = padRight(humanizeAge(agent.lastHealthCheck), COLS.lastSeen);
 
   return (
     <Text inverse={selected}>
@@ -61,7 +60,6 @@ function AgentRowInner({ agent, selected, now }: AgentRowProps): React.ReactElem
 
 export const AgentRow = React.memo(AgentRowInner, (prev, next) => {
   if (prev.selected !== next.selected) return false;
-  if (prev.now !== next.now) return false;
   const a = prev.agent;
   const b = next.agent;
   return (
@@ -88,7 +86,7 @@ export function AgentRowHeader(): React.ReactElement {
       {padRight('HEALTH', COLS.health)}
       {padRight('HB', COLS.hb)}
       {padRight('UPTIME', COLS.uptime)}
-      {padRight('LAST SEEN', COLS.lastSeen)}
+      {padRight('SEEN', COLS.lastSeen)}
     </Text>
   );
 }

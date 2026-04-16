@@ -4,7 +4,7 @@ import { Header } from './components/Header.js';
 import { Footer } from './components/Footer.js';
 import { TeamsPanel } from './components/TeamsPanel.js';
 import { AgentsTable } from './components/AgentsTable.js';
-import { NewsPanel } from './components/NewsPanel.js';
+import { NewsView } from './components/NewsView.js';
 import type { Agent, NewsItem, Team } from './api/types.js';
 import {
   fetchAgentNews,
@@ -14,25 +14,29 @@ import {
 } from './api/manager.js';
 import { usePolling } from './hooks/usePolling.js';
 
+type View = 'agents' | 'news';
+
 const AGENTS_POLL_MS = 2000;
 const TEAMS_POLL_MS = 15000;
 const NEWS_POLL_MS = 3000;
-const NEWS_MAX_ITEMS = 5;
-const NEWS_CHROME_ROWS = 3 + NEWS_MAX_ITEMS;
-const CHROME_ROWS = 14 + NEWS_CHROME_ROWS;
+const AGENTS_CHROME_ROWS = 14;
+const NEWS_CHROME_ROWS = 10;
 const MIN_VISIBLE = 3;
 const SELF_AGENT = 'tui';
 const TERMINAL_CONTENT_WIDTH = 76;
-const NEWS_MESSAGE_WIDTH = TERMINAL_CONTENT_WIDTH - 8 - 1 - 17;
+const NEWS_MESSAGE_WIDTH = TERMINAL_CONTENT_WIDTH - 8 - 1 - 17 - 2;
 
 export function App(): React.ReactElement {
   const manager = useMemo(getManagerUrl, []);
   const { exit } = useApp();
   const { stdout } = useStdout();
 
+  const [view, setView] = useState<View>('agents');
   const [selectedTeam, setSelectedTeam] = useState<string | null>(null);
   const [selectedIndex, setSelectedIndex] = useState(0);
   const [windowStart, setWindowStart] = useState(0);
+  const [newsSelectedIndex, setNewsSelectedIndex] = useState(0);
+  const [newsWindowStart, setNewsWindowStart] = useState(0);
   const [paused, setPaused] = useState(false);
 
   const teamsPoll = usePolling<Team[]>(
@@ -75,7 +79,8 @@ export function App(): React.ReactElement {
   }, [allAgents]);
 
   const rows = stdout?.rows ?? 30;
-  const windowSize = Math.max(MIN_VISIBLE, rows - CHROME_ROWS);
+  const agentsWindowSize = Math.max(MIN_VISIBLE, rows - AGENTS_CHROME_ROWS);
+  const newsWindowSize = Math.max(MIN_VISIBLE, rows - NEWS_CHROME_ROWS);
   const total = visibleAgents.length;
 
   useEffect(() => {
@@ -86,14 +91,52 @@ export function App(): React.ReactElement {
     }
     const clampedSel = Math.min(selectedIndex, total - 1);
     if (clampedSel !== selectedIndex) setSelectedIndex(clampedSel);
-    const maxStart = Math.max(0, total - windowSize);
+    const maxStart = Math.max(0, total - agentsWindowSize);
     let nextStart = windowStart;
     if (clampedSel < nextStart) nextStart = clampedSel;
-    if (clampedSel >= nextStart + windowSize) nextStart = clampedSel - windowSize + 1;
+    if (clampedSel >= nextStart + agentsWindowSize)
+      nextStart = clampedSel - agentsWindowSize + 1;
     if (nextStart > maxStart) nextStart = maxStart;
     if (nextStart < 0) nextStart = 0;
     if (nextStart !== windowStart) setWindowStart(nextStart);
-  }, [total, selectedIndex, windowStart, windowSize]);
+  }, [total, selectedIndex, windowStart, agentsWindowSize]);
+
+  const selectedAgentName: string | null = visibleAgents[selectedIndex]?.name ?? null;
+
+  const newsFetcher = useCallback(
+    (signal: AbortSignal): Promise<NewsItem[]> => {
+      if (!selectedAgentName) return Promise.resolve([]);
+      return fetchAgentNews(manager, SELF_AGENT, selectedAgentName, signal);
+    },
+    [manager, selectedAgentName],
+  );
+
+  const newsPoll = usePolling<NewsItem[]>(
+    newsFetcher,
+    NEWS_POLL_MS,
+    paused || view !== 'news',
+    [manager, selectedAgentName ?? '', view],
+  );
+  const newsItems = newsPoll.data ?? [];
+  const newsTotal = newsItems.length;
+
+  useEffect(() => {
+    if (newsTotal === 0) {
+      if (newsSelectedIndex !== 0) setNewsSelectedIndex(0);
+      if (newsWindowStart !== 0) setNewsWindowStart(0);
+      return;
+    }
+    const clampedSel = Math.min(newsSelectedIndex, newsTotal - 1);
+    if (clampedSel !== newsSelectedIndex) setNewsSelectedIndex(clampedSel);
+    const maxStart = Math.max(0, newsTotal - newsWindowSize);
+    let nextStart = newsWindowStart;
+    if (clampedSel < nextStart) nextStart = clampedSel;
+    if (clampedSel >= nextStart + newsWindowSize)
+      nextStart = clampedSel - newsWindowSize + 1;
+    if (nextStart > maxStart) nextStart = maxStart;
+    if (nextStart < 0) nextStart = 0;
+    if (nextStart !== newsWindowStart) setNewsWindowStart(nextStart);
+  }, [newsTotal, newsSelectedIndex, newsWindowStart, newsWindowSize]);
 
   const teamOptions: Array<string | null> = useMemo(
     () => [null, ...teams.map((t) => t.name)],
@@ -113,29 +156,36 @@ export function App(): React.ReactElement {
     [teamOptions, selectedTeam],
   );
 
-  const moveSelection = useCallback(
+  const moveAgentsSel = useCallback(
     (delta: number) => {
       if (total === 0) return;
-      setSelectedIndex((idx) => {
-        const next = idx + delta;
-        if (next < 0) return 0;
-        if (next > total - 1) return total - 1;
-        return next;
-      });
+      setSelectedIndex((idx) => clamp(idx + delta, 0, total - 1));
     },
     [total],
   );
 
-  const jumpTo = useCallback(
-    (idx: number) => {
-      if (total === 0) return;
-      setSelectedIndex(Math.max(0, Math.min(total - 1, idx)));
+  const moveNewsSel = useCallback(
+    (delta: number) => {
+      if (newsTotal === 0) return;
+      setNewsSelectedIndex((idx) => clamp(idx + delta, 0, newsTotal - 1));
     },
-    [total],
+    [newsTotal],
   );
+
+  const openNews = useCallback(() => {
+    if (!selectedAgentName) return;
+    setNewsSelectedIndex(0);
+    setNewsWindowStart(0);
+    setView('news');
+  }, [selectedAgentName]);
+
+  const backToAgents = useCallback(() => {
+    setView('agents');
+  }, []);
 
   useInput(
     (input, key) => {
+      // global
       if (input === 'q' || (key.ctrl && input === 'c')) {
         exit();
         return;
@@ -144,72 +194,77 @@ export function App(): React.ReactElement {
         setPaused((p) => !p);
         return;
       }
-      if (key.tab) {
-        cycleTeam(key.shift ? -1 : 1);
+
+      if (view === 'agents') {
+        if (input === 'n') return openNews();
+        if (key.tab) return cycleTeam(key.shift ? -1 : 1);
+        if (key.upArrow) return moveAgentsSel(-1);
+        if (key.downArrow) return moveAgentsSel(1);
+        if (key.pageUp) return moveAgentsSel(-agentsWindowSize);
+        if (key.pageDown) return moveAgentsSel(agentsWindowSize);
+        if (isHomeKey(input)) return setSelectedIndex(0);
+        if (isEndKey(input)) return setSelectedIndex(Math.max(0, total - 1));
         return;
       }
-      if (key.upArrow) return moveSelection(-1);
-      if (key.downArrow) return moveSelection(1);
-      if (key.pageUp) return moveSelection(-windowSize);
-      if (key.pageDown) return moveSelection(windowSize);
-      if (isHomeKey(input)) return jumpTo(0);
-      if (isEndKey(input)) return jumpTo(total - 1);
+
+      // news view
+      if (key.escape || input === 'b') return backToAgents();
+      if (key.upArrow) return moveNewsSel(-1);
+      if (key.downArrow) return moveNewsSel(1);
+      if (key.pageUp) return moveNewsSel(-newsWindowSize);
+      if (key.pageDown) return moveNewsSel(newsWindowSize);
+      if (isHomeKey(input)) return setNewsSelectedIndex(0);
+      if (isEndKey(input)) return setNewsSelectedIndex(Math.max(0, newsTotal - 1));
     },
     { isActive: process.stdin.isTTY === true },
   );
 
-  const rowNow = agentsPoll.lastUpdated > 0 ? agentsPoll.lastUpdated : Date.now();
-
-  const selectedAgentName: string | null =
-    visibleAgents[selectedIndex]?.name ?? null;
-
-  const newsFetcher = useCallback(
-    (signal: AbortSignal): Promise<NewsItem[]> => {
-      if (!selectedAgentName) return Promise.resolve([]);
-      return fetchAgentNews(manager, SELF_AGENT, selectedAgentName, signal);
-    },
-    [manager, selectedAgentName],
-  );
-
-  const newsPoll = usePolling<NewsItem[]>(newsFetcher, NEWS_POLL_MS, paused, [
-    manager,
-    selectedAgentName ?? '',
-  ]);
-
   return (
     <Box flexDirection="column">
       <Header managerUrl={manager} />
-      <TeamsPanel
-        teams={teams}
-        selectedTeam={selectedTeam}
-        allCount={allAgents.length}
-        teamCounts={teamCounts}
-      />
-      <AgentsTable
-        agents={visibleAgents}
-        selectedIndex={selectedIndex}
-        windowStart={windowStart}
-        windowSize={windowSize}
-        now={rowNow}
-        loading={agentsPoll.lastUpdated === 0 && !agentsPoll.error}
-        error={agentsPoll.error}
-      />
-      <NewsPanel
-        agentName={selectedAgentName}
-        items={selectedAgentName ? newsPoll.data : null}
-        loading={newsPoll.lastUpdated === 0 && !newsPoll.error}
-        error={newsPoll.error}
-        maxItems={NEWS_MAX_ITEMS}
-        messageWidth={NEWS_MESSAGE_WIDTH}
-      />
-      {teamsPoll.error ? (
-        <Box paddingX={1}>
-          <Text color="red">teams error: {teamsPoll.error.message}</Text>
-        </Box>
-      ) : null}
-      <Footer paused={paused} lastUpdated={agentsPoll.lastUpdated} />
+      {view === 'agents' ? (
+        <>
+          <TeamsPanel
+            teams={teams}
+            selectedTeam={selectedTeam}
+            allCount={allAgents.length}
+            teamCounts={teamCounts}
+          />
+          <AgentsTable
+            agents={visibleAgents}
+            selectedIndex={selectedIndex}
+            windowStart={windowStart}
+            windowSize={agentsWindowSize}
+            loading={agentsPoll.lastUpdated === 0 && !agentsPoll.error}
+            error={agentsPoll.error}
+          />
+          {teamsPoll.error ? (
+            <Box paddingX={1}>
+              <Text color="red">teams error: {teamsPoll.error.message}</Text>
+            </Box>
+          ) : null}
+        </>
+      ) : (
+        <NewsView
+          agentName={selectedAgentName}
+          items={newsItems}
+          loading={newsPoll.lastUpdated === 0 && !newsPoll.error}
+          error={newsPoll.error}
+          windowStart={newsWindowStart}
+          windowSize={newsWindowSize}
+          selectedIndex={newsSelectedIndex}
+          messageWidth={NEWS_MESSAGE_WIDTH}
+        />
+      )}
+      <Footer view={view} paused={paused} />
     </Box>
   );
+}
+
+function clamp(n: number, lo: number, hi: number): number {
+  if (n < lo) return lo;
+  if (n > hi) return hi;
+  return n;
 }
 
 function isHomeKey(input: string): boolean {

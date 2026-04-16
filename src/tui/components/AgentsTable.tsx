@@ -8,13 +8,12 @@ interface AgentsTableProps {
   selectedIndex: number;
   windowStart: number;
   windowSize: number;
-  now: number;
   loading: boolean;
   error: Error | null;
 }
 
 export function AgentsTable(props: AgentsTableProps): React.ReactElement {
-  const { agents, selectedIndex, windowStart, windowSize, now, loading, error } = props;
+  const { agents, selectedIndex, windowStart, windowSize, loading, error } = props;
   const total = agents.length;
   const windowEnd = Math.min(total, windowStart + windowSize);
   const visible = agents.slice(windowStart, windowEnd);
@@ -40,7 +39,6 @@ export function AgentsTable(props: AgentsTableProps): React.ReactElement {
             key={agent.id}
             agent={agent}
             selected={windowStart + i === selectedIndex}
-            now={now}
           />
         ))
       )}
