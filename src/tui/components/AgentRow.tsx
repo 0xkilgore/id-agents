@@ -33,7 +33,7 @@ function renderHealth(health: string): string {
   return `${healthDot(health)} ${health}`;
 }
 
-export function AgentRow({ agent, selected, now }: AgentRowProps): React.ReactElement {
+function AgentRowInner({ agent, selected, now }: AgentRowProps): React.ReactElement {
   const marker = selected ? '▶ ' : '  ';
   const name = padRight(agent.alias ?? agent.name, COLS.name);
   const port = padRight(agent.port ? String(agent.port) : '—', COLS.port);
@@ -58,6 +58,24 @@ export function AgentRow({ agent, selected, now }: AgentRowProps): React.ReactEl
     </Text>
   );
 }
+
+export const AgentRow = React.memo(AgentRowInner, (prev, next) => {
+  if (prev.selected !== next.selected) return false;
+  if (prev.now !== next.now) return false;
+  const a = prev.agent;
+  const b = next.agent;
+  return (
+    a.id === b.id &&
+    a.name === b.name &&
+    a.port === b.port &&
+    a.status === b.status &&
+    a.health === b.health &&
+    a.createdAt === b.createdAt &&
+    a.lastHealthCheck === b.lastHealthCheck &&
+    a.metadata?.runtime === b.metadata?.runtime &&
+    a.metadata?.heartbeat === b.metadata?.heartbeat
+  );
+});
 
 export function AgentRowHeader(): React.ReactElement {
   return (

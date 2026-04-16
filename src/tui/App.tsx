@@ -5,18 +5,11 @@ import { Footer } from './components/Footer.js';
 import { TeamsPanel } from './components/TeamsPanel.js';
 import { AgentsTable } from './components/AgentsTable.js';
 import type { Agent, Team } from './api/types.js';
-import {
-  fetchAgentsAllTeams,
-  fetchAgentsByTeam,
-  fetchTeams,
-  getManagerUrl,
-} from './api/manager.js';
+import { fetchAgentsAllTeams, fetchTeams, getManagerUrl } from './api/manager.js';
 import { usePolling } from './hooks/usePolling.js';
-import { humanizeAge } from './util/format.js';
 
 const AGENTS_POLL_MS = 2000;
 const TEAMS_POLL_MS = 15000;
-const CLOCK_TICK_MS = 1000;
 const CHROME_ROWS = 14;
 const MIN_VISIBLE = 5;
 
@@ -29,12 +22,6 @@ export function App(): React.ReactElement {
   const [selectedIndex, setSelectedIndex] = useState(0);
   const [windowStart, setWindowStart] = useState(0);
   const [paused, setPaused] = useState(false);
-  const [now, setNow] = useState(Date.now());
-
-  useEffect(() => {
-    const id = setInterval(() => setNow(Date.now()), CLOCK_TICK_MS);
-    return () => clearInterval(id);
-  }, []);
 
   const teamsPoll = usePolling<Team[]>(
     (signal) => fetchTeams(manager, signal),
@@ -46,26 +33,38 @@ export function App(): React.ReactElement {
 
   const agentsFetcher = useCallback(
     (signal: AbortSignal): Promise<Agent[]> => {
-      if (selectedTeam === null) {
-        if (teams.length === 0) return Promise.resolve([]);
-        return fetchAgentsAllTeams(manager, teams, signal);
-      }
-      return fetchAgentsByTeam(manager, selectedTeam, signal);
+      if (teams.length === 0) return Promise.resolve([]);
+      return fetchAgentsAllTeams(manager, teams, signal);
     },
-    [manager, selectedTeam, teams],
+    [manager, teams],
   );
 
-  const agentsPoll = usePolling<Agent[]>(
-    agentsFetcher,
-    AGENTS_POLL_MS,
-    paused,
-    [manager, selectedTeam, teams.length],
+  const agentsPoll = usePolling<Agent[]>(agentsFetcher, AGENTS_POLL_MS, paused, [
+    manager,
+    teams.length,
+  ]);
+  const allAgents = agentsPoll.data ?? [];
+
+  const visibleAgents = useMemo(
+    () =>
+      selectedTeam === null
+        ? allAgents
+        : allAgents.filter((a) => a.teamName === selectedTeam),
+    [allAgents, selectedTeam],
   );
-  const agents = agentsPoll.data ?? [];
+
+  const teamCounts = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const a of allAgents) {
+      if (!a.teamName) continue;
+      counts.set(a.teamName, (counts.get(a.teamName) ?? 0) + 1);
+    }
+    return counts;
+  }, [allAgents]);
 
   const rows = stdout?.rows ?? 30;
   const windowSize = Math.max(MIN_VISIBLE, rows - CHROME_ROWS);
-  const total = agents.length;
+  const total = visibleAgents.length;
 
   useEffect(() => {
     if (total === 0) {
@@ -147,19 +146,23 @@ export function App(): React.ReactElement {
     { isActive: process.stdin.isTTY === true },
   );
 
-  const lastUpdatedAgo =
-    agentsPoll.lastUpdated > 0 ? humanizeAge(agentsPoll.lastUpdated, now) : undefined;
+  const rowNow = agentsPoll.lastUpdated > 0 ? agentsPoll.lastUpdated : Date.now();
 
   return (
     <Box flexDirection="column">
       <Header managerUrl={manager} />
-      <TeamsPanel teams={teams} selectedTeam={selectedTeam} totalVisibleAgents={total} />
+      <TeamsPanel
+        teams={teams}
+        selectedTeam={selectedTeam}
+        allCount={allAgents.length}
+        teamCounts={teamCounts}
+      />
       <AgentsTable
-        agents={agents}
+        agents={visibleAgents}
         selectedIndex={selectedIndex}
         windowStart={windowStart}
         windowSize={windowSize}
-        now={now}
+        now={rowNow}
         loading={agentsPoll.lastUpdated === 0 && !agentsPoll.error}
         error={agentsPoll.error}
       />
@@ -168,7 +171,7 @@ export function App(): React.ReactElement {
           <Text color="red">teams error: {teamsPoll.error.message}</Text>
         </Box>
       ) : null}
-      <Footer paused={paused} lastUpdatedAgo={lastUpdatedAgo} />
+      <Footer paused={paused} lastUpdated={agentsPoll.lastUpdated} />
     </Box>
   );
 }

@@ -5,23 +5,27 @@ import type { Team } from '../api/types.js';
 interface TeamsPanelProps {
   teams: Team[];
   selectedTeam: string | null;
-  totalVisibleAgents: number;
+  allCount: number;
+  teamCounts: Map<string, number>;
 }
 
 export function TeamsPanel(props: TeamsPanelProps): React.ReactElement {
-  const { teams, selectedTeam, totalVisibleAgents } = props;
+  const { teams, selectedTeam, allCount, teamCounts } = props;
   const allSelected = selectedTeam === null;
 
   return (
     <Box borderStyle="round" paddingX={1}>
       <Text bold>Teams: </Text>
-      <Chip label={`All (${totalVisibleAgents})`} active={allSelected} />
-      {teams.map((t) => (
-        <React.Fragment key={t.id}>
-          <Text> </Text>
-          <Chip label={`${t.name} (${t.agentCount})`} active={t.name === selectedTeam} />
-        </React.Fragment>
-      ))}
+      <Chip label={`All (${allCount})`} active={allSelected} />
+      {teams.map((t) => {
+        const count = teamCounts.get(t.name) ?? 0;
+        return (
+          <React.Fragment key={t.id}>
+            <Text> </Text>
+            <Chip label={`${t.name} (${count})`} active={t.name === selectedTeam} />
+          </React.Fragment>
+        );
+      })}
     </Box>
   );
 }
