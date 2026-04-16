@@ -1,4 +1,11 @@
-import type { Agent, AgentsResponse, Team, TeamsResponse } from './types.js';
+import type {
+  Agent,
+  AgentsResponse,
+  NewsItem,
+  RemoteNewsResponse,
+  Team,
+  TeamsResponse,
+} from './types.js';
 
 export function getManagerUrl(): string {
   return process.env.MANAGER_URL ?? 'http://localhost:4100';
@@ -31,6 +38,28 @@ export async function fetchAgentsByTeam(
   return (data.agents ?? [])
     .filter(isRealAgent)
     .map((a) => ({ ...a, teamName: team }));
+}
+
+export async function fetchAgentNews(
+  manager: string,
+  executor: string,
+  target: string,
+  signal: AbortSignal,
+): Promise<NewsItem[]> {
+  const res = await fetch(`${manager}/remote`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ agent: executor, command: `/news ${target}` }),
+    signal,
+  });
+  if (!res.ok) {
+    throw new Error(`POST /remote → ${res.status} ${res.statusText}`);
+  }
+  const data = (await res.json()) as RemoteNewsResponse;
+  if (!data.ok) {
+    throw new Error(data.error ?? 'unknown manager error');
+  }
+  return data.result?.items ?? [];
 }
 
 export async function fetchAgentsAllTeams(

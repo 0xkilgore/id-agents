@@ -35,3 +35,16 @@ export interface AgentsResponse {
 export interface TeamsResponse {
   teams: Team[];
 }
+
+export interface NewsItem {
+  type: string;
+  timestamp: number;
+  message?: string;
+  data?: unknown;
+}
+
+export interface RemoteNewsResponse {
+  ok: boolean;
+  result?: { items?: NewsItem[] };
+  error?: string;
+}

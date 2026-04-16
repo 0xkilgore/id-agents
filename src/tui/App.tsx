@@ -4,14 +4,26 @@ import { Header } from './components/Header.js';
 import { Footer } from './components/Footer.js';
 import { TeamsPanel } from './components/TeamsPanel.js';
 import { AgentsTable } from './components/AgentsTable.js';
-import type { Agent, Team } from './api/types.js';
-import { fetchAgentsAllTeams, fetchTeams, getManagerUrl } from './api/manager.js';
+import { NewsPanel } from './components/NewsPanel.js';
+import type { Agent, NewsItem, Team } from './api/types.js';
+import {
+  fetchAgentNews,
+  fetchAgentsAllTeams,
+  fetchTeams,
+  getManagerUrl,
+} from './api/manager.js';
 import { usePolling } from './hooks/usePolling.js';
 
 const AGENTS_POLL_MS = 2000;
 const TEAMS_POLL_MS = 15000;
-const CHROME_ROWS = 14;
-const MIN_VISIBLE = 5;
+const NEWS_POLL_MS = 3000;
+const NEWS_MAX_ITEMS = 5;
+const NEWS_CHROME_ROWS = 3 + NEWS_MAX_ITEMS;
+const CHROME_ROWS = 14 + NEWS_CHROME_ROWS;
+const MIN_VISIBLE = 3;
+const SELF_AGENT = 'tui';
+const TERMINAL_CONTENT_WIDTH = 76;
+const NEWS_MESSAGE_WIDTH = TERMINAL_CONTENT_WIDTH - 8 - 1 - 17;
 
 export function App(): React.ReactElement {
   const manager = useMemo(getManagerUrl, []);
@@ -148,6 +160,22 @@ export function App(): React.ReactElement {
 
   const rowNow = agentsPoll.lastUpdated > 0 ? agentsPoll.lastUpdated : Date.now();
 
+  const selectedAgentName: string | null =
+    visibleAgents[selectedIndex]?.name ?? null;
+
+  const newsFetcher = useCallback(
+    (signal: AbortSignal): Promise<NewsItem[]> => {
+      if (!selectedAgentName) return Promise.resolve([]);
+      return fetchAgentNews(manager, SELF_AGENT, selectedAgentName, signal);
+    },
+    [manager, selectedAgentName],
+  );
+
+  const newsPoll = usePolling<NewsItem[]>(newsFetcher, NEWS_POLL_MS, paused, [
+    manager,
+    selectedAgentName ?? '',
+  ]);
+
   return (
     <Box flexDirection="column">
       <Header managerUrl={manager} />
@@ -165,6 +193,14 @@ export function App(): React.ReactElement {
         now={rowNow}
         loading={agentsPoll.lastUpdated === 0 && !agentsPoll.error}
         error={agentsPoll.error}
+      />
+      <NewsPanel
+        agentName={selectedAgentName}
+        items={selectedAgentName ? newsPoll.data : null}
+        loading={newsPoll.lastUpdated === 0 && !newsPoll.error}
+        error={newsPoll.error}
+        maxItems={NEWS_MAX_ITEMS}
+        messageWidth={NEWS_MESSAGE_WIDTH}
       />
       {teamsPoll.error ? (
         <Box paddingX={1}>
