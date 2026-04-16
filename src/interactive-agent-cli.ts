@@ -4097,8 +4097,8 @@ async function listAgents(_showAll: boolean = false) {
         agentMap.set(agent.name, agent);
       }
     });
-    const agents = Array.from(agentMap.values());
-    
+    const agents = Array.from(agentMap.values()).filter((agent: any) => agent.type !== 'interactive');
+
     if (agents.length === 0) {
       console.log(`\n${colors.yellow}📭 There are no agents on this team yet${colors.reset}`);
       console.log(`${colors.gray}   Deploy an agent with: ${colors.cyan}/deploy <config>${colors.reset}`);
