@@ -67,17 +67,49 @@ This starts the interactive CLI on port 4000 and the manager daemon on port 4100
 
 ## 4. Deploy the Default Team
 
-`configs/default.yaml` ships as a minimal Claude Code team — one agent named `coder`. That's enough for a first demo. Whatever is in the file is what gets deployed, so to change the team, edit the file.
+`configs/default.yaml` ships as a minimal Claude Code team — one agent named `coder`. The file is the source of truth: whatever is in it is what gets deployed. Before deploying, edit `configs/default.yaml` to match the runtimes available on this host.
 
-**Optional: add a Codex `researcher` before deploying.** If Codex is installed and authenticated — i.e. `command -v codex` succeeds *and* either `$OPENAI_API_KEY` is set or `~/.codex/auth.json` exists — append this block to the `agents:` list in `configs/default.yaml`:
+### Detect available runtimes
+
+**Shortcut:** run the helper and it will tell you which of the four cases below applies:
+
+```bash
+./scripts/detect-runtimes.sh
+```
+
+First line of the output is one of `append-researcher`, `as-is`, `switch-to-codex`, `abort` — matching the rows below. For `append-researcher` it also prints the yaml block to append.
+
+Or check by hand:
+
+```bash
+# Claude Code: binary on PATH, and one of api key / ~/.claude/.credentials.json / macOS keychain
+command -v claude >/dev/null 2>&1 && \
+  { [ -n "$ANTHROPIC_API_KEY" ] || [ -f "$HOME/.claude/.credentials.json" ] || \
+    security find-generic-password -s "Claude Code-credentials" >/dev/null 2>&1; } \
+  && echo "claude: ready" || echo "claude: not ready"
+
+# Codex: binary on PATH, and one of $OPENAI_API_KEY / ~/.codex/auth.json
+command -v codex >/dev/null 2>&1 && \
+  { [ -n "$OPENAI_API_KEY" ] || [ -f "$HOME/.codex/auth.json" ]; } \
+  && echo "codex: ready" || echo "codex: not ready"
+```
+
+### Apply the matching edit, then deploy
+
+| Claude ready | Codex ready | Action | Final team |
+|---|---|---|---|
+| ✓ | ✓ | Append the researcher block below to the `agents:` list in `configs/default.yaml`. | `coder` (Claude) + `researcher` (Codex) |
+| ✓ | ✗ | No edit. Deploy `configs/default.yaml` as-is. | `coder` (Claude) |
+| ✗ | ✓ | Change `runtime: claude-code-cli` to `runtime: codex` under `defaults:` in `configs/default.yaml`. | `coder` (Codex) |
+| ✗ | ✗ | **Stop.** Run `claude login` or `codex login` (see Prerequisites), then retry. | — |
+
+Codex researcher block (for the Claude + Codex case):
 
 ```yaml
   - name: researcher
     description: "Research, analysis, and documentation"
     runtime: codex
 ```
-
-If Codex isn't ready, leave the file alone and deploy the Claude-only team. You can always add the researcher later and re-deploy.
 
 Then deploy:
 

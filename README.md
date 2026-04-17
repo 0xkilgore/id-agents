@@ -141,12 +141,18 @@ MANAGER_PORT=5000 npm run id-agents
 
 #### 3) Deploy and talk to agents
 
-```
-/deploy default        # Claude Code team with one agent (coder)
-/ask coder Write a hello world function
+`configs/default.yaml` is the source of truth — whatever is in the file is what gets deployed. Before deploying, edit it to match the runtimes on this host:
+
+```bash
+./scripts/detect-runtimes.sh   # tells you which of the 4 cases below applies
 ```
 
-`configs/default.yaml` ships minimal. If Codex is installed and authenticated, append a Codex agent to the `agents:` list before deploying:
+| Claude ready | Codex ready | Edit `configs/default.yaml` |
+|---|---|---|
+| ✓ | ✓ | Append a Codex `researcher` entry (snippet below). Team: `coder` + `researcher`. |
+| ✓ | ✗ | No edit. Team: `coder` (Claude). |
+| ✗ | ✓ | Change `defaults.runtime` from `claude-code-cli` to `codex`. Team: `coder` (Codex). |
+| ✗ | ✗ | Stop. Run `claude login` or `codex login` first. |
 
 ```yaml
   - name: researcher
@@ -154,7 +160,14 @@ MANAGER_PORT=5000 npm run id-agents
     runtime: codex
 ```
 
-See [QUICKSTART Step 4](./QUICKSTART.md) for the full detection check.
+Then deploy and talk to the team:
+
+```
+/deploy default
+/ask coder Write a hello world function
+```
+
+See [QUICKSTART Step 4](./QUICKSTART.md) for the full detection commands.
 
 To update a running team later (add/remove/change agents without losing sessions), use [`/sync`](docs/guides/sync-command.md) instead of `/deploy`.
 
