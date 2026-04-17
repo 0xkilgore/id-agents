@@ -241,8 +241,16 @@ export function App({ staticMode = false }: AppProps = {}): React.ReactElement {
     [manager, teams.length, view],
   );
   const allSchedules = schedulesPoll.data ?? [];
-  // Calendar is a time-ordered, cross-team view — no team filter here.
-  const schedTotal = allSchedules.length;
+  // Calendar excludes heartbeat-kind schedules — those already appear on
+  // the Heartbeats page, so duplicating them here just adds noise.
+  const calendarSchedules = useMemo(
+    () =>
+      allSchedules.filter(
+        (s) => s.kind !== 'heartbeat' && !/^Heartbeat:\s/i.test(s.title),
+      ),
+    [allSchedules],
+  );
+  const schedTotal = calendarSchedules.length;
 
   const heartbeatRows = useMemo<HeartbeatRow[]>(() => {
     const pollMs = schedulesPoll.lastUpdated || Date.now();
@@ -681,7 +689,7 @@ export function App({ staticMode = false }: AppProps = {}): React.ReactElement {
         </>
       ) : view === 'calendar' ? (
         <CalendarView
-          schedules={allSchedules}
+          schedules={calendarSchedules}
           nowSec={Math.floor((schedulesPoll.lastUpdated || Date.now()) / 1000)}
           selectedIndex={schedSelectedIndex}
           windowStart={schedWindowStart}
