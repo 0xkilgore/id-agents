@@ -1,3 +1,8 @@
+---
+name: idagents-admin-control
+description: Programmatically manage an ID Agents team from a Claude Code session. Dispatch work to agents via /remote, poll replies by queryId, send messages to the manager's inbox, and coordinate multi-agent tasks. Use when asked to manage or dispatch work to id-agents, talk to specific agents, or act as the team manager.
+---
+
 # ID Agents Admin Control Skill
 
 ## Overview
