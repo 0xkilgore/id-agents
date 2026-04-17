@@ -3670,6 +3670,29 @@ export class AgentManagerDb {
         if (!a) {
           return { ok: false, error: `Agent "${agentName}" not found` };
         }
+
+        // Interactive (manager-inbox) agents have no /news HTTP server of
+        // their own — the daemon owns the inbox. Read directly from
+        // news_items using the same id resolution as GET /news (prefer the
+        // interactive CLI row, fall back to the named "manager" row).
+        if (a.type === 'interactive') {
+          const cliAgentRow = await this.db.agents.findInteractive(teamId);
+          const namedManagerRow = cliAgentRow ? null : await this.db.agents.getByName(teamId, 'manager');
+          const inboxId = cliAgentRow?.id || namedManagerRow?.id;
+          if (!inboxId) {
+            return { ok: true, result: { items: [], total: 0, timestamp: Date.now() } };
+          }
+          const rows = await this.db.news.poll(inboxId, 0, { limit: 100 });
+          const items = rows.map((r: any) => ({
+            id: Number(r.id),
+            type: r.type,
+            timestamp: Number(r.timestamp),
+            message: r.message || undefined,
+            data: r.data || undefined,
+          }));
+          return { ok: true, result: { items, total: items.length, timestamp: Date.now() } };
+        }
+
         // Use endpoint if set, otherwise construct from port using localhost
         const baseEndpoint = a.endpoint || `http://localhost:${a.port}`;
 
