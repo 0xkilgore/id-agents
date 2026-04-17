@@ -29,11 +29,11 @@ export function healthDot(health: string): string {
 export function taskStatusColor(status: string): string {
   switch (status) {
     case 'todo':
-      return 'gray';
-    case 'doing':
       return 'yellow';
-    case 'done':
+    case 'doing':
       return 'green';
+    case 'done':
+      return 'gray';
     default:
       return 'gray';
   }
