@@ -201,6 +201,16 @@ export class AgentManagerDb {
   private queryWaiters: Map<string, QueryWaiter> = new Map(); // key: query_id
   private healthStatus: Map<string, { status: 'online' | 'offline' | 'unknown'; lastCheck: number }> = new Map(); // key: `${teamId}:${agentId}`
   private healthCheckInterval: NodeJS.Timeout | null = null;
+  private querySweeperInterval: NodeJS.Timeout | null = null;
+  /**
+   * Stuck-query sweeper timeout, in minutes. Queries whose status is still
+   * pending/processing this long after their `created` timestamp are assumed
+   * to belong to a crashed agent and are marked 'expired'.
+   * Starting conservatively at 15 minutes — if an agent is legitimately
+   * working on something longer than this, the polling caller should be
+   * treating it as abandoned anyway.
+   */
+  private readonly QUERY_EXPIRY_MINUTES = 15;
   private logBuffer: Array<{ ts: number; msg: string }> = [];
   private readonly LOG_BUFFER_SIZE = 500;
 
@@ -5206,6 +5216,41 @@ export class AgentManagerDb {
     this.healthCheckInterval = setInterval(() => this.runHealthChecks(), 30_000);
   }
 
+  /**
+   * Start the stuck-query sweeper.
+   *
+   * Agents that crash mid-query never transition their queries out of
+   * 'pending'/'processing' (the agent process is the thing that would have
+   * written 'completed' or 'failed'). Without this sweeper the queries table
+   * accumulates ghosts and callers polling /query/:id see 'pending' forever.
+   *
+   * We run every 5 minutes and mark any pending/processing query older than
+   * QUERY_EXPIRY_MINUTES as 'expired'. See expireStale() for the actual SQL.
+   */
+  private startQuerySweeper(): void {
+    const intervalMs = 5 * 60 * 1000;
+    const runSweep = () => {
+      this.sweepStaleQueries().catch((err) => {
+        console.error('[Manager] Query sweeper failed:', err);
+      });
+    };
+    runSweep();
+    this.querySweeperInterval = setInterval(runSweep, intervalMs);
+  }
+
+  private async sweepStaleQueries(): Promise<void> {
+    const cutoff = Date.now() - this.QUERY_EXPIRY_MINUTES * 60 * 1000;
+    const count = await this.db.queries.expireStale(cutoff, ['pending', 'processing']);
+    if (count > 0) {
+      this.managerLog(
+        `Expired ${count} stale queries older than ${this.QUERY_EXPIRY_MINUTES} minutes`,
+      );
+      console.log(
+        `[Manager] Query sweeper expired ${count} stale queries (>${this.QUERY_EXPIRY_MINUTES} min old)`,
+      );
+    }
+  }
+
   private async runHealthChecks(): Promise<void> {
     try {
       const teams = await this.db.teams.listTeams();
@@ -5286,6 +5331,9 @@ export class AgentManagerDb {
 
         // Start periodic health monitoring (every 30s)
         this.startHealthMonitor();
+
+        // Start stuck-query sweeper (every 5 min, expires >15 min old)
+        this.startQuerySweeper();
 
         resolve();
       });
