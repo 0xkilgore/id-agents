@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.1.56-beta
+
+### Features
+
+- **`/news-to` trigger passthrough**: the agent-local `/news-to` helper now accepts an optional `trigger: true` field and passes it through to the target's `/news` endpoint. Enables async delegation (recipient processes the message, no sync reply) as a third pattern alongside `/talk-to` (sync delegation) and plain `/news-to` (passive notification).
+
+### Fixed
+
+- **Manager inbox write-path routing**: the `/agents` catalog was returning the interactive CLI's port (4000) as the URL for the manager identity, so `/news-to manager` calls from agent wrappers died at a dead port. Fixed by storing the daemon's `managementPort` on the manager instance and returning `http://localhost:<managementPort>` for interactive-type agents in `agentToResponse`. Wrappers re-fetch `/agents` on every `/news-to` call, so no fleet rebuild is required.
+- **Manager inbox read-path routing**: the `/remote /news <agent>` command computed `baseEndpoint` directly from the DB row, bypassing `agentToResponse` entirely. For interactive agents this still resolved to port 4000. Fixed by short-circuiting the read path for `type === 'interactive'` to read directly from `news_items` via the DB, using the same `findInteractive` lookup that `POST /news` uses for writes.
+
+### Changed
+
+- **`inter-agent` skill promotes trigger examples to the top**: the three canonical usage patterns (`/talk-to`, `/news-to` plain, `/news-to` + `trigger:true`) are now the first thing agents see in the skill, each as a fully-formed copy-pasteable curl block. Added a prominent warning that `trigger:true` must be a literal boolean in the JSON body — omitting it is a silent delivery failure. Added a decision helper: when in doubt between `/news-to` + `trigger:true` and `/talk-to`, use `/talk-to`. Changes lifted to the top of the skill so they're the nearest reference material when an LLM is constructing a curl call.
+
 ## 0.1.55-beta
 
 ### Features
