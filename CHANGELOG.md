@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.57-beta
+
+### Changed
+
+- **QUICKSTART.md consolidated Launch section**: a single `## 8. Launch a User Surface (Optional)` block now documents the three ways to interact with a running team (Claude Code as manager via the `idagents-admin-control` skill, the TUI dashboard via `npm run tui:dev` / `npm run tui`, and the interactive CLI via `npm run id-agents`) with copy-pasteable start commands. Removes the older piecemeal mentions that were scattered across Step 6 and a separate TUI step.
+
 ## 0.1.56-beta
 
 ### Features
