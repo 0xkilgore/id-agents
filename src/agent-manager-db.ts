@@ -1064,7 +1064,13 @@ export class AgentManagerDb {
 
         const ts = Date.now();
         const queryId = `query_${ts}_${Math.random().toString(36).slice(2, 9)}`;
-        const managerId = `manager-${teamName}`;
+        // Resolve the persistent manager-inbox identity. Prefer the interactive
+        // CLI agent (so GET /news — which reads from that id — surfaces the
+        // query.received event). Fall back to the named "manager" agent row,
+        // then to a synthetic per-team id if nothing else is registered.
+        const cliAgent = await this.db.agents.findInteractive(teamId);
+        const namedManager = cliAgent ? null : await this.db.agents.getByName(teamId, 'manager');
+        const managerId = cliAgent?.id || namedManager?.id || `manager-${teamName}`;
         const senderName = from || 'external';
 
         // Store the query in the queries table
@@ -1134,15 +1140,18 @@ export class AgentManagerDb {
         const newsMessage = message || data?.message || `${newsType} from ${from || 'unknown'}`;
         const ts = Date.now();
 
-        // Store in news_items table for the CLI (interactive agent)
-        // Look up the actual interactive agent for this team
+        // Store in news_items table under the persistent manager-inbox identity.
+        // Prefer the interactive CLI agent (GET /news reads from this id).
+        // Fall back to the named "manager" agent so events are still durable
+        // when the CLI is offline or not yet registered.
         const cliAgent = await this.db.agents.findInteractive(teamId);
+        const namedManager = cliAgent ? null : await this.db.agents.getByName(teamId, 'manager');
+        const inboxId = cliAgent?.id || namedManager?.id;
 
-        if (cliAgent) {
-          const cliId = cliAgent.id;
+        if (inboxId) {
           // Replies carry notify semantics (no further reply expected);
           // unsolicited inbound messages default to notify too.
-          await this.db.news.add(teamId, cliId, {
+          await this.db.news.add(teamId, inboxId, {
             timestamp: ts,
             type: newsType,
             message: newsMessage,
@@ -1152,7 +1161,7 @@ export class AgentManagerDb {
             reply_expected: false,
           });
         } else {
-          this.managerLog(`Warning: No interactive agent found for team ${teamId}, cannot store news`);
+          this.managerLog(`Warning: No manager-inbox agent found for team ${teamId}, cannot store news`);
         }
 
         // If this is a reply to a query, update the query status and resolve any waiting /talk-to
@@ -1248,14 +1257,15 @@ export class AgentManagerDb {
           );
         }
 
-        // Look up the actual interactive agent (CLI) for this team
+        // Resolve manager-inbox identity: prefer interactive CLI, fall back
+        // to named "manager" agent so events remain readable when CLI is offline.
         const cliAgentRow = await this.db.agents.findInteractive(teamId);
+        const namedManagerRow = cliAgentRow ? null : await this.db.agents.getByName(teamId, 'manager');
+        const cliId = cliAgentRow?.id || namedManagerRow?.id;
 
-        if (!cliAgentRow) {
+        if (!cliId) {
           return res.json({ items: [] });
         }
-
-        const cliId = cliAgentRow.id;
 
         const newsRows = hasSinceId
           ? await this.db.news.pollSinceId(cliId, sinceId, { limit, queryId: query_id })
