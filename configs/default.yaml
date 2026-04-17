@@ -1,10 +1,13 @@
 # Default Team
 # Deploy with: /deploy default
 #
-# Ships as a minimal Claude Code team (just `coder`). Add more agents
-# by editing this file — for example, append a Codex `researcher` if
-# you have the Codex CLI installed and authenticated. See QUICKSTART
-# step 4 for the snippet.
+# Ships as a 2-agent Claude Code team (coder + researcher).
+# The runtime mix is decided at setup time by scripts/detect-runtimes.sh:
+#   - claude + codex  → researcher flipped to codex (mixed team)
+#   - claude only     → file used as-is (both claude-code-cli)
+#   - codex only      → both agents flipped to codex
+#   - neither         → abort; install one
+# See QUICKSTART step 4.
 
 version: "1"
 team: default
@@ -20,3 +23,6 @@ defaults:
 agents:
   - name: coder
     description: "Writes and reviews code"
+
+  - name: researcher
+    description: "Research, analysis, and documentation"

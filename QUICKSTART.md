@@ -67,7 +67,7 @@ This starts the interactive CLI on port 4000 and the manager daemon on port 4100
 
 ## 4. Deploy the Default Team
 
-`configs/default.yaml` ships as a minimal Claude Code team — one agent named `coder`. The file is the source of truth: whatever is in it is what gets deployed. Before deploying, edit `configs/default.yaml` to match the runtimes available on this host.
+`configs/default.yaml` ships with two agents — `coder` and `researcher`, both on `claude-code-cli`. The file is the source of truth: whatever is in it is what gets deployed. Before deploying, edit `configs/default.yaml` so the runtime mix matches what is available on this host.
 
 ### Detect available runtimes
 
@@ -77,7 +77,7 @@ This starts the interactive CLI on port 4000 and the manager daemon on port 4100
 ./scripts/detect-runtimes.sh
 ```
 
-First line of the output is one of `append-researcher`, `as-is`, `switch-to-codex`, `abort` — matching the rows below. For `append-researcher` it also prints the yaml block to append.
+First line of the output is one of `mixed`, `as-is`, `all-codex`, `abort` — matching the rows below. For `mixed` and `all-codex` the script also prints the exact edit commands you can copy/paste.
 
 Or check by hand:
 
@@ -98,17 +98,27 @@ command -v codex >/dev/null 2>&1 && \
 
 | Claude ready | Codex ready | Action | Final team |
 |---|---|---|---|
-| ✓ | ✓ | Append the researcher block below to the `agents:` list in `configs/default.yaml`. | `coder` (Claude) + `researcher` (Codex) |
-| ✓ | ✗ | No edit. Deploy `configs/default.yaml` as-is. | `coder` (Claude) |
-| ✗ | ✓ | Change `runtime: claude-code-cli` to `runtime: codex` under `defaults:` in `configs/default.yaml`. | `coder` (Codex) |
+| ✓ | ✓ | Flip ONLY `researcher`'s runtime to `codex`; leave `coder` on `claude-code-cli`. | `coder` (Claude) + `researcher` (Codex) |
+| ✓ | ✗ | No edit. Deploy `configs/default.yaml` as-is. | `coder` + `researcher` (both Claude) |
+| ✗ | ✓ | Flip the `defaults.runtime` in `configs/default.yaml` from `claude-code-cli` to `codex`. | `coder` + `researcher` (both Codex) |
 | ✗ | ✗ | **Stop.** Run `claude login` or `codex login` (see Prerequisites), then retry. | — |
 
-Codex researcher block (for the Claude + Codex case):
+**Mixed (Claude + Codex)** — flip only `researcher`:
 
-```yaml
-  - name: researcher
-    description: "Research, analysis, and documentation"
-    runtime: codex
+```bash
+awk '
+  /^  - name: researcher$/ { print; in_researcher=1; next }
+  in_researcher && /^    description:/ { print; print "    runtime: codex"; in_researcher=0; next }
+  { print }
+' configs/default.yaml > configs/default.yaml.new && \
+  mv configs/default.yaml.new configs/default.yaml
+```
+
+**All Codex** — flip the defaults block:
+
+```bash
+sed -i.bak 's/^  runtime: claude-code-cli$/  runtime: codex/' configs/default.yaml && \
+  rm configs/default.yaml.bak
 ```
 
 Then deploy:

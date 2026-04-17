@@ -147,18 +147,16 @@ MANAGER_PORT=5000 npm run id-agents
 ./scripts/detect-runtimes.sh   # tells you which of the 4 cases below applies
 ```
 
-| Claude ready | Codex ready | Edit `configs/default.yaml` |
-|---|---|---|
-| ✓ | ✓ | Append a Codex `researcher` entry (snippet below). Team: `coder` + `researcher`. |
-| ✓ | ✗ | No edit. Team: `coder` (Claude). |
-| ✗ | ✓ | Change `defaults.runtime` from `claude-code-cli` to `codex`. Team: `coder` (Codex). |
-| ✗ | ✗ | Stop. Run `claude login` or `codex login` first. |
+The default team always has 2 agents (`coder` + `researcher`). Only the runtime mix changes per host:
 
-```yaml
-  - name: researcher
-    description: "Research, analysis, and documentation"
-    runtime: codex
-```
+| Claude ready | Codex ready | Edit `configs/default.yaml` | Final team |
+|---|---|---|---|
+| ✓ | ✓ | Flip ONLY `researcher`'s runtime to `codex`. | `coder` (Claude) + `researcher` (Codex) |
+| ✓ | ✗ | No edit. | `coder` + `researcher` (both Claude) |
+| ✗ | ✓ | Flip `defaults.runtime` from `claude-code-cli` to `codex`. | `coder` + `researcher` (both Codex) |
+| ✗ | ✗ | Stop. Run `claude login` or `codex login` first. | — |
+
+`detect-runtimes.sh` prints the exact commands for the `mixed` and `all-codex` rows — see [QUICKSTART Step 4](./QUICKSTART.md) for the full snippets.
 
 Then deploy and talk to the team:
 

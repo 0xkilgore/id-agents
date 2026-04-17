@@ -2,18 +2,22 @@
 # Detect which AI coding CLIs are installed and authenticated on this host
 # and tell the caller what to do with configs/default.yaml before deploying.
 #
+# The default team always has 2 agents (coder + researcher). Only the
+# runtime mix changes per host.
+#
 # Output: one action word on the first line of stdout, then optional details.
 #
-#   append-researcher   claude + codex both ready.
-#                       Append the yaml block that follows to the agents: list
-#                       in configs/default.yaml. Final team: coder + researcher.
-#   as-is               claude ready, codex not ready.
-#                       No file edit. Deploy configs/default.yaml unchanged.
-#   switch-to-codex     codex ready, claude not ready.
-#                       Change `runtime: claude-code-cli` to `runtime: codex`
-#                       under `defaults:` in configs/default.yaml.
-#   abort               neither ready.
-#                       Install + login to at least one CLI before deploying.
+#   mixed       claude + codex both ready.
+#               Flip ONLY researcher's runtime to codex; leave coder on
+#               claude-code-cli. Final team: 1 claude-code-cli + 1 codex.
+#   as-is       claude ready, codex not ready.
+#               No file edit. Deploy configs/default.yaml unchanged.
+#               Final team: 2 claude-code-cli.
+#   all-codex   codex ready, claude not ready.
+#               Flip the defaults runtime to codex so both agents run on codex.
+#               Final team: 2 codex.
+#   abort       neither ready.
+#               Install + login to at least one CLI before deploying.
 #
 # Exit code: 0 when ready to deploy after applying the action, 1 for abort.
 
@@ -43,10 +47,16 @@ check_codex && codex_ready=true
 
 if $claude_ready && $codex_ready; then
   cat <<'EOF'
-append-researcher
-  - name: researcher
-    description: "Research, analysis, and documentation"
-    runtime: codex
+mixed
+# Flip ONLY the researcher agent to runtime: codex. Leave coder on
+# claude-code-cli. One way to apply the edit in place:
+#
+#   awk '
+#     /^  - name: researcher$/ { print; in_researcher=1; next }
+#     in_researcher && /^    description:/ { print; print "    runtime: codex"; in_researcher=0; next }
+#     { print }
+#   ' configs/default.yaml > configs/default.yaml.new && \
+#   mv configs/default.yaml.new configs/default.yaml
 EOF
   exit 0
 fi
@@ -57,7 +67,14 @@ if $claude_ready; then
 fi
 
 if $codex_ready; then
-  echo "switch-to-codex"
+  cat <<'EOF'
+all-codex
+# Flip the defaults runtime to codex so both agents inherit codex.
+# One way to apply the edit in place (macOS and GNU sed compatible):
+#
+#   sed -i.bak 's/^  runtime: claude-code-cli$/  runtime: codex/' configs/default.yaml && \
+#   rm configs/default.yaml.bak
+EOF
   exit 0
 fi
 
