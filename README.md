@@ -89,18 +89,23 @@ Run a team of AI coding agents from a single chat. Each agent is a real process 
 
 ### Recommended: Let Claude set it up
 
-The fastest way to start is to let a Claude Code session run the quickstart for you, via the `idagents-admin-control` skill. Claude clones the repo, installs dependencies, starts the manager, deploys a demo team, then offers to act as your team manager.
+The fastest way to start is to let a Claude Code session do it. Claude clones the repo, installs the `idagents-admin-control` skill, starts the manager, deploys a demo team, then offers to act as your team manager.
 
-Clone this repo and copy the skill into your Claude Code project's `.claude/skills/`:
+Paste this into any Claude Code session:
+
+> Set up id-agents by following the QUICKSTART at https://github.com/idchain-world/id-agents/blob/main/QUICKSTART.md
+
+<details>
+<summary>Prefer to install the skill yourself first?</summary>
 
 ```bash
 git clone https://github.com/idchain-world/id-agents.git
 cp -r id-agents/skills/idagents-admin-control <your-claude-code-project>/.claude/skills/
 ```
 
-Then open Claude Code in your project and paste:
+Then paste the prompt above into Claude Code.
 
-> Please run the QUICKSTART.md in the id-agents repo to set up my team.
+</details>
 
 See [QUICKSTART.md](./QUICKSTART.md) for the full step-by-step.
 

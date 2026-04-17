@@ -97,16 +97,16 @@ cp -r ~/projects/id-agents/skills/idagents-admin-control ~/projects/my-app/.clau
 
 ## 3. Start the Manager
 
-The interactive CLI needs a real terminal (TTY). Start it in a terminal window:
-
 ```bash
 cd <path-to-id-agents>
 npm run id-agents
 ```
 
-This starts the interactive CLI on port 4000 and the manager daemon on port 4100. Wait until you see the prompt before continuing.
+This starts the interactive CLI on port 4000 and the manager daemon on port 4100.
 
-> **For programmatic use without a terminal:** Start the manager daemon directly with `node dist/start-agent-manager.js` and use the HTTP API at `http://localhost:4100`. The `/remote` endpoint on port 4000 is only available when the interactive CLI is running.
+> **Running this from a Claude Code session?** Spawn the command in the background (Bash tool with `run_in_background: true`). The readline prompt sits idle with no stdin — that's fine. Ports 4000 and 4100 come up normally and every step below works unchanged. If you also want an interactive TTY, open a separate terminal window and run the command there.
+>
+> **Headless-only alternative:** If you don't need the CLI at all, run `node dist/start-agent-manager.js` and use port 4100. Note: `/deploy` in Step 4 goes through the CLI's `/remote` endpoint on port 4000, so you still need `npm run id-agents` running to deploy a demo team.
 
 ## 4. Deploy a Demo Team
 
