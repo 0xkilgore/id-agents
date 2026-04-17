@@ -1,0 +1,8 @@
+node_modules/
+dist/
+.env
+*.log
+
+# Mounted volume contents — keep the directory, skip the runtime state.
+data/*
+!data/.gitkeep

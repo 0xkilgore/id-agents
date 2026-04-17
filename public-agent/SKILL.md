@@ -1,0 +1,128 @@
+---
+name: public-agent
+description: Lightweight public-facing REST-AP agent. External users POST /talk to ask questions (synchronous reply via OpenRouter). Trusted local agents POST /news to push notifications. Every external message is logged to an inbox for human review. Unidirectional trust — this agent never pushes back.
+---
+
+# public-agent
+
+A self-contained HTTP agent in a single container. One process, one port, one OpenRouter model. No internal state beyond the inbox, a news log, and a daily-token counter.
+
+## What it does
+
+- Answers external questions synchronously via OpenRouter.
+- Accepts fire-and-forget notifications from trusted callers (your own team) and appends them to a news log anyone can tail.
+- Persists every external `/talk` call to `data/inbox/` for a human to review later.
+- Enforces a daily token budget and per-IP rate limit on `/talk` to keep costs bounded.
+
+## Endpoints
+
+| Method | Path | Purpose |
+|---|---|---|
+| `GET` | `/healthz` | Liveness probe. Returns `{ ok, agent }`. |
+| `GET` | `/.well-known/skill.md` | This document, served verbatim. |
+| `GET` | `/.well-known/restap.json` | REST-AP catalog. |
+| `POST` | `/talk` | External Q&A. Synchronous reply + inbox append. |
+| `POST` | `/news` | Trusted push. No reply. |
+| `GET` | `/news?since_id=N&limit=M` | Tail news log. |
+| `GET` | `/inbox?status=unread` | List inbox entries (`unread`, `archived`, `all`). |
+| `POST` | `/inbox/:id/archive` | Mark an entry reviewed. |
+
+## Auth
+
+One shared bearer key set via `PUBLIC_AGENT_AUTH_KEY`. If the env var is unset, every endpoint is open.
+
+When the key is set, requests must include:
+
+```
+Authorization: Bearer <PUBLIC_AGENT_AUTH_KEY>
+```
+
+This is a deliberately simple v1 model. One key, not per-caller. Do not expose the inbox on an untrusted network with `PUBLIC_AGENT_AUTH_KEY` unset.
+
+## Trust model
+
+Unidirectional. External → public is allowed. Public → external is not — this container never initiates outbound HTTP except the OpenRouter chat completion call. Notifications from the outside world land in the inbox and wait for a human.
+
+## Example curls
+
+Replace `$PORT` with whatever you set for `PUBLIC_AGENT_PORT` (default `4200`).
+
+**Read the catalog:**
+
+```bash
+curl -s http://127.0.0.1:$PORT/.well-known/restap.json | jq .
+```
+
+**Ask a question (open mode, no auth):**
+
+```bash
+curl -s -X POST http://127.0.0.1:$PORT/talk \
+  -H 'Content-Type: application/json' \
+  -d '{"message":"Who are you and what can you do?","from":"curl"}'
+```
+
+Response shape:
+
+```json
+{
+  "reply": "…model output…",
+  "model": "openai/gpt-4o-mini",
+  "inbox_id": "2026-04-17T12-34-56-7b3fa2",
+  "tokens_used": { "prompt": 23, "completion": 140, "total": 163 }
+}
+```
+
+**Push a notification (keyed mode):**
+
+```bash
+curl -s -X POST http://127.0.0.1:$PORT/news \
+  -H 'Content-Type: application/json' \
+  -H "Authorization: Bearer $PUBLIC_AGENT_AUTH_KEY" \
+  -d '{"from":"coder","type":"notify","message":"deploy finished"}'
+```
+
+**Tail the news log:**
+
+```bash
+curl -s "http://127.0.0.1:$PORT/news?since_id=0&limit=50"
+```
+
+**Review unread inbox:**
+
+```bash
+curl -s "http://127.0.0.1:$PORT/inbox?status=unread" \
+  -H "Authorization: Bearer $PUBLIC_AGENT_AUTH_KEY"
+```
+
+**Archive an entry:**
+
+```bash
+curl -s -X POST http://127.0.0.1:$PORT/inbox/2026-04-17T12-34-56-7b3fa2/archive \
+  -H "Authorization: Bearer $PUBLIC_AGENT_AUTH_KEY"
+```
+
+## Rate limits and cost ceiling
+
+- Per-IP token bucket on `POST /talk`, configured by `TALK_RATE_LIMIT_PER_MIN`. Exceeding the bucket returns HTTP `429`.
+- Daily LLM-token ceiling (`MAX_TOKENS_PER_DAY`) persisted on disk. When the ceiling is hit, `POST /talk` returns HTTP `503` with `{ "error": "budget_exceeded", "resets_at": "<UTC midnight>" }`. Rolls over at UTC midnight.
+- Both limits can be disabled by setting them to `0`.
+
+## Persistence
+
+Everything that must survive a restart lives in `/app/data` (mounted from `./data` on the host via docker-compose):
+
+```
+data/
+├── inbox/          # one JSON file per external /talk call
+├── news.log        # newline-delimited JSON; each line is one news item
+└── budget.json     # daily token counter + UTC date
+```
+
+Rebuilding the image does not wipe any of this as long as the volume mount is intact.
+
+## Not in v1
+
+- Multi-agent on the public side. One container = one agent.
+- SQLite / any database.
+- Deploy to a real VPS. Local Docker (Colima or Docker Desktop) only.
+- Integration with the id-agents manager DB. This agent is standalone; it is discovered only via its URL + `SKILL.md` + the REST-AP catalog.

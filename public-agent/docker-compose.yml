@@ -1,0 +1,21 @@
+services:
+  public-agent:
+    build: .
+    image: public-agent:local
+    container_name: public-agent
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      # Always bind inside the container to the configured port.
+      PUBLIC_AGENT_PORT: ${PUBLIC_AGENT_PORT:-4200}
+    ports:
+      - "${PUBLIC_AGENT_PORT:-4200}:${PUBLIC_AGENT_PORT:-4200}"
+    volumes:
+      # Inbox + news log + budget counter persist here across restarts.
+      - ./data:/app/data
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:${PUBLIC_AGENT_PORT:-4200}/healthz"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
