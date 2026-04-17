@@ -9,6 +9,7 @@ import { StatusStrip } from './components/StatusStrip.js';
 import { TasksTable } from './components/TasksTable.js';
 import { TaskDetail } from './components/TaskDetail.js';
 import { CalendarView } from './components/CalendarView.js';
+import { HeartbeatsView, type HeartbeatRow } from './components/HeartbeatsView.js';
 import type { Agent, NewsItem, Schedule, Task, Team } from './api/types.js';
 import {
   fetchAgentNews,
@@ -21,7 +22,14 @@ import {
 import { usePolling } from './hooks/usePolling.js';
 import { humanizeUptime } from './util/format.js';
 
-type View = 'agents' | 'news' | 'news-detail' | 'tasks' | 'task-detail' | 'calendar';
+type View =
+  | 'agents'
+  | 'news'
+  | 'news-detail'
+  | 'tasks'
+  | 'task-detail'
+  | 'calendar'
+  | 'heartbeats';
 
 const AGENTS_POLL_MS = 2000;
 const TEAMS_POLL_MS = 15000;
@@ -34,6 +42,7 @@ const NEWS_CHROME_ROWS = 6;
 const DETAIL_CHROME_ROWS = 6;
 const TASKS_CHROME_ROWS = 10;
 const CALENDAR_CHROME_ROWS = 8;
+const HEARTBEATS_CHROME_ROWS = 7;
 const DETAIL_CONTENT_WIDTH = 76;
 const MIN_VISIBLE = 3;
 const SELF_AGENT = 'tui';
@@ -80,6 +89,8 @@ export function App({ staticMode = false }: AppProps = {}): React.ReactElement {
   const [taskWindowStart, setTaskWindowStart] = useState(0);
   const [schedSelectedIndex, setSchedSelectedIndex] = useState(0);
   const [schedWindowStart, setSchedWindowStart] = useState(0);
+  const [hbSelectedIndex, setHbSelectedIndex] = useState(0);
+  const [hbWindowStart, setHbWindowStart] = useState(0);
   const [paused, setPaused] = useState(false);
   const [cooldownEpoch, setCooldownEpoch] = useState<number>(() => Date.now());
 
@@ -152,6 +163,7 @@ export function App({ staticMode = false }: AppProps = {}): React.ReactElement {
   const detailWindowSize = Math.max(MIN_VISIBLE, rows - DETAIL_CHROME_ROWS);
   const tasksWindowSize = Math.max(MIN_VISIBLE, rows - TASKS_CHROME_ROWS);
   const calendarWindowSize = Math.max(MIN_VISIBLE, rows - CALENDAR_CHROME_ROWS);
+  const heartbeatsWindowSize = Math.max(MIN_VISIBLE, rows - HEARTBEATS_CHROME_ROWS);
   const total = visibleAgents.length;
 
   // Tasks polling
@@ -216,7 +228,7 @@ export function App({ staticMode = false }: AppProps = {}): React.ReactElement {
   const schedulesPoll = usePolling<Schedule[]>(
     schedulesFetcher,
     SCHEDULES_POLL_MS,
-    paused || staticMode || view !== 'calendar',
+    paused || staticMode || (view !== 'calendar' && view !== 'heartbeats'),
     [manager, teams.length, view],
   );
   const allSchedules = schedulesPoll.data ?? [];
@@ -236,6 +248,65 @@ export function App({ staticMode = false }: AppProps = {}): React.ReactElement {
     }
     return counts;
   }, [allSchedules]);
+
+  const heartbeatRows = useMemo<HeartbeatRow[]>(() => {
+    const pollMs = schedulesPoll.lastUpdated || Date.now();
+    const nowSec = Math.floor(pollMs / 1000);
+    const out: HeartbeatRow[] = [];
+    for (const s of allSchedules) {
+      if (s.kind !== 'heartbeat') continue;
+      if (!s.intervalSeconds || s.intervalSeconds <= 0) continue;
+      const anchor = s.createdAt;
+      const interval = s.intervalSeconds;
+      const elapsed = nowSec - anchor;
+      const nLast = Math.floor(elapsed / interval);
+      const lastFireSec = nLast >= 0 ? anchor + nLast * interval : null;
+      const nextFireSec = anchor + (nLast + 1) * interval;
+      for (const agent of s.targets) {
+        out.push({ agent, schedule: s, intervalSec: interval, lastFireSec, nextFireSec });
+      }
+    }
+    out.sort((a, b) => {
+      if (a.nextFireSec !== b.nextFireSec) return a.nextFireSec - b.nextFireSec;
+      return a.agent.localeCompare(b.agent);
+    });
+    return out;
+  }, [allSchedules, schedulesPoll.lastUpdated]);
+
+  const visibleHeartbeats = useMemo(
+    () =>
+      selectedTeam === null
+        ? heartbeatRows
+        : heartbeatRows.filter((r) => r.schedule.teamName === selectedTeam),
+    [heartbeatRows, selectedTeam],
+  );
+  const hbTotal = visibleHeartbeats.length;
+  const heartbeatsTeamCounts = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const r of heartbeatRows) {
+      if (!r.schedule.teamName) continue;
+      counts.set(r.schedule.teamName, (counts.get(r.schedule.teamName) ?? 0) + 1);
+    }
+    return counts;
+  }, [heartbeatRows]);
+
+  useEffect(() => {
+    if (hbTotal === 0) {
+      if (hbSelectedIndex !== 0) setHbSelectedIndex(0);
+      if (hbWindowStart !== 0) setHbWindowStart(0);
+      return;
+    }
+    const clampedSel = Math.min(hbSelectedIndex, hbTotal - 1);
+    if (clampedSel !== hbSelectedIndex) setHbSelectedIndex(clampedSel);
+    const maxStart = Math.max(0, hbTotal - heartbeatsWindowSize);
+    let nextStart = hbWindowStart;
+    if (clampedSel < nextStart) nextStart = clampedSel;
+    if (clampedSel >= nextStart + heartbeatsWindowSize)
+      nextStart = clampedSel - heartbeatsWindowSize + 1;
+    if (nextStart > maxStart) nextStart = maxStart;
+    if (nextStart < 0) nextStart = 0;
+    if (nextStart !== hbWindowStart) setHbWindowStart(nextStart);
+  }, [hbTotal, hbSelectedIndex, hbWindowStart, heartbeatsWindowSize]);
 
   useEffect(() => {
     if (schedTotal === 0) {
@@ -389,6 +460,20 @@ export function App({ staticMode = false }: AppProps = {}): React.ReactElement {
     setView('calendar');
   }, []);
 
+  const openHeartbeats = useCallback(() => {
+    setHbSelectedIndex(0);
+    setHbWindowStart(0);
+    setView('heartbeats');
+  }, []);
+
+  const moveHbSel = useCallback(
+    (delta: number) => {
+      if (hbTotal === 0) return;
+      setHbSelectedIndex((idx) => clamp(idx + delta, 0, hbTotal - 1));
+    },
+    [hbTotal],
+  );
+
   const openNews = useCallback(() => {
     if (!selectedAgentName) return;
     setNewsSelectedIndex(0);
@@ -449,6 +534,7 @@ export function App({ staticMode = false }: AppProps = {}): React.ReactElement {
       if (view === 'agents') {
         if (input === 't') return toggleTasksView();
         if (input === 'c') return openCalendar();
+        if (input === 'h') return openHeartbeats();
         if (key.rightArrow) return openNews();
         if (key.tab) return cycleTeam(key.shift ? -1 : 1);
         if (key.upArrow) return moveAgentsSel(-1);
@@ -463,6 +549,7 @@ export function App({ staticMode = false }: AppProps = {}): React.ReactElement {
       if (view === 'tasks') {
         if (input === 't') return toggleTasksView();
         if (input === 'c') return openCalendar();
+        if (input === 'h') return openHeartbeats();
         if (key.rightArrow) return openTaskDetail();
         if (key.tab) return cycleTeam(key.shift ? -1 : 1);
         if (key.upArrow) return moveTaskSel(-1);
@@ -488,6 +575,7 @@ export function App({ staticMode = false }: AppProps = {}): React.ReactElement {
       if (view === 'calendar') {
         if (input === 'a') return setView('agents');
         if (input === 't') return setView('tasks');
+        if (input === 'h') return openHeartbeats();
         if (key.leftArrow || key.escape) return setView('agents');
         if (key.tab) return cycleTeam(key.shift ? -1 : 1);
         if (key.upArrow) return moveSchedSel(-1);
@@ -496,6 +584,21 @@ export function App({ staticMode = false }: AppProps = {}): React.ReactElement {
         if (key.pageDown) return moveSchedSel(calendarWindowSize);
         if (isHomeKey(input)) return setSchedSelectedIndex(0);
         if (isEndKey(input)) return setSchedSelectedIndex(Math.max(0, schedTotal - 1));
+        return;
+      }
+
+      if (view === 'heartbeats') {
+        if (input === 'a') return setView('agents');
+        if (input === 't') return setView('tasks');
+        if (input === 'c') return openCalendar();
+        if (key.leftArrow || key.escape) return setView('agents');
+        if (key.tab) return cycleTeam(key.shift ? -1 : 1);
+        if (key.upArrow) return moveHbSel(-1);
+        if (key.downArrow) return moveHbSel(1);
+        if (key.pageUp) return moveHbSel(-heartbeatsWindowSize);
+        if (key.pageDown) return moveHbSel(heartbeatsWindowSize);
+        if (isHomeKey(input)) return setHbSelectedIndex(0);
+        if (isEndKey(input)) return setHbSelectedIndex(Math.max(0, hbTotal - 1));
         return;
       }
 
@@ -581,6 +684,24 @@ export function App({ staticMode = false }: AppProps = {}): React.ReactElement {
             selectedIndex={schedSelectedIndex}
             windowStart={schedWindowStart}
             windowSize={calendarWindowSize}
+            loading={schedulesPoll.lastUpdated === 0 && !schedulesPoll.error && !staticMode}
+            error={schedulesPoll.error}
+          />
+        </>
+      ) : view === 'heartbeats' ? (
+        <>
+          <TeamsPanel
+            teams={teams}
+            selectedTeam={selectedTeam}
+            allCount={heartbeatRows.length}
+            teamCounts={heartbeatsTeamCounts}
+          />
+          <HeartbeatsView
+            rows={visibleHeartbeats}
+            nowSec={Math.floor((schedulesPoll.lastUpdated || Date.now()) / 1000)}
+            selectedIndex={hbSelectedIndex}
+            windowStart={hbWindowStart}
+            windowSize={heartbeatsWindowSize}
             loading={schedulesPoll.lastUpdated === 0 && !schedulesPoll.error && !staticMode}
             error={schedulesPoll.error}
           />
