@@ -100,6 +100,6 @@ agents:
     workingDirectory: /Users/nxt3d/projects/ecs-dev
 
   - name: tui
-    description: "TUI monitoring dashboard for id-agents — real-time agent and team status. Builds on branch feature/tui-dashboard in a worktree."
-    workingDirectory: /Users/nxt3d/projects/id2/id-agents-tui
+    description: "TUI monitoring dashboard for id-agents — real-time agent and team status. Works on main."
+    workingDirectory: /Users/nxt3d/projects/id2/id-agents
     heartbeat: 86400
