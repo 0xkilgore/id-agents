@@ -90,6 +90,7 @@ const HELP_ITEMS: Array<{ cmd: string; desc: string; indent?: boolean }> = [
   { cmd: '/team <name>', desc: 'Switch to or create team' },
   { cmd: '/teams', desc: 'List all teams' },
   { cmd: '/team delete <name>', desc: 'Delete a team (must be empty — run /delete --team first)' },
+  { cmd: '/public <domain>', desc: 'Open a chat session with a remote public-agent (isolated from agents DB)' },
   { cmd: '/quit', desc: 'Exit' },
 ];
 
@@ -1380,6 +1381,101 @@ async function saveAgentNewsFeed(targetName: string) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// /public — interactive chat with a remote public-agent.
+// Deliberately kept isolated from the manager: no DB registration, no entry
+// in /agents, /talk-to, or /news-to. Only lives in-memory while the session
+// is open. Shares nothing with the rest of the CLI's agent machinery.
+// ---------------------------------------------------------------------------
+
+let publicSession: { url: string; authKey: string | null; host: string } | null = null;
+let publicSessionSavedPrompt: string | null = null;
+
+function normalizePublicUrl(raw: string): string {
+  const s = raw.trim();
+  if (/^https?:\/\//i.test(s)) return s.replace(/\/+$/, '');
+  return `https://${s.replace(/\/+$/, '')}`;
+}
+
+async function enterPublicSession(rawUrl: string): Promise<void> {
+  const url = normalizePublicUrl(rawUrl);
+  let host = rawUrl;
+  try { host = new URL(url).host || rawUrl; } catch { /* keep raw */ }
+  const authKey = process.env.PUBLIC_AGENT_AUTH_KEY?.trim() || null;
+
+  // Probe /healthz so the user gets immediate feedback if the URL is wrong.
+  try {
+    const probe = await fetch(`${url}/healthz`, { signal: AbortSignal.timeout(5000) });
+    if (!probe.ok) {
+      console.log(`\n${colors.yellow}⚠️  ${url}/healthz returned ${probe.status}. Continuing anyway.${colors.reset}\n`);
+    }
+  } catch (err: any) {
+    console.log(`\n${colors.red}❌ Could not reach ${url}:${colors.reset} ${err.message ?? err}\n`);
+    console.log(`${colors.gray}Aborting session. Check the URL and try again.${colors.reset}\n`);
+    rl.prompt();
+    return;
+  }
+
+  publicSession = { url, authKey, host };
+  publicSessionSavedPrompt = (rl as any)._prompt ?? null;
+  console.log(`\n${colors.cyan}🔗 Connected to public-agent at ${url}${colors.reset}`);
+  if (authKey) {
+    console.log(`${colors.gray}   Bearer auth on (PUBLIC_AGENT_AUTH_KEY set).${colors.reset}`);
+  }
+  console.log(`${colors.gray}   Type ${colors.yellow}/exit${colors.gray} to return.${colors.reset}\n`);
+  rl.setPrompt(`${colors.cyan}public:${host}>${colors.reset} `);
+  rl.prompt();
+}
+
+function exitPublicSession(): void {
+  if (!publicSession) return;
+  const host = publicSession.host;
+  publicSession = null;
+  console.log(`\n${colors.gray}🔙 Left public session (${host}).${colors.reset}\n`);
+  if (publicSessionSavedPrompt) {
+    rl.setPrompt(publicSessionSavedPrompt);
+    publicSessionSavedPrompt = null;
+  } else {
+    updatePrompt();
+  }
+  rl.prompt();
+}
+
+async function sendPublicMessage(message: string): Promise<void> {
+  if (!publicSession) return;
+  const { url, authKey } = publicSession;
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  if (authKey) headers.Authorization = `Bearer ${authKey}`;
+  try {
+    const resp = await fetch(`${url}/talk`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ message, from: `cli:${name}` }),
+      signal: AbortSignal.timeout(60_000),
+    });
+    const text = await resp.text();
+    let data: any;
+    try { data = JSON.parse(text); } catch { data = null; }
+    if (!resp.ok) {
+      const detail = data?.error ? `${data.error}${data.detail ? `: ${data.detail}` : ''}` : text.slice(0, 500);
+      console.log(`\n${colors.red}❌ ${resp.status} ${resp.statusText}${colors.reset} ${detail}\n`);
+      return;
+    }
+    if (data && typeof data.reply === 'string') {
+      console.log(`\n${data.reply}\n`);
+      const meta: string[] = [];
+      if (data.model) meta.push(`model=${data.model}`);
+      if (data.tokens_used?.total) meta.push(`tokens=${data.tokens_used.total}`);
+      if (data.inbox_id) meta.push(`inbox=${data.inbox_id}`);
+      if (meta.length) console.log(`${colors.gray}${meta.join('  ')}${colors.reset}\n`);
+    } else {
+      console.log(`\n${colors.gray}${text.slice(0, 1000)}${colors.reset}\n`);
+    }
+  } catch (err: any) {
+    console.log(`\n${colors.red}❌ request failed:${colors.reset} ${err.message ?? err}\n`);
+  }
+}
+
 async function handleLine(line: string) {
   // Skip processing if we're waiting for confirmation input
   if (isInConfirmationMode()) {
@@ -1395,6 +1491,23 @@ async function handleLine(line: string) {
 
   let input = line.trim();
 
+  // Public-agent chat session. While active, every non-/exit line is a
+  // message to the remote /talk. Hard-isolated: no DB writes, no /agents
+  // entry, no /talk-to / /news-to integration. Session state is in-memory.
+  if (publicSession) {
+    if (input === '/exit' || input === '/quit') {
+      exitPublicSession();
+      return;
+    }
+    if (!input) {
+      rl.prompt();
+      return;
+    }
+    await sendPublicMessage(input);
+    rl.prompt();
+    return;
+  }
+
   if (!input) {
     rl.prompt();
     return;
@@ -1404,11 +1517,30 @@ async function handleLine(line: string) {
   if (input.includes(':::')) {
     input = expandMacros(input);
   }
-  
+
   // Handle commands
   if (input === '/quit' || input === '/exit') {
     console.log(`\n${colors.green}👋 Goodbye!${colors.reset}\n`);
     process.exit(0);
+  }
+
+  if (input === '/public' || input.startsWith('/public ')) {
+    const arg = input === '/public' ? '' : input.substring('/public '.length).trim();
+    if (!arg) {
+      console.log(`\n${colors.bold}Usage:${colors.reset} /public <domain-or-url>\n`);
+      console.log(`Opens an interactive chat session with a remote public-agent.`);
+      console.log(`Accepts a bare hostname (defaults to https) or a full URL.`);
+      console.log(`While in the session, every line is sent as a /talk message.`);
+      console.log(`Type ${colors.yellow}/exit${colors.reset} to return to the main CLI.\n`);
+      console.log(`Env vars:`);
+      console.log(`  ${colors.cyan}PUBLIC_AGENT_URL${colors.reset}      auto-opens a session at startup`);
+      console.log(`  ${colors.cyan}PUBLIC_AGENT_AUTH_KEY${colors.reset} bearer token (if the remote agent is keyed)\n`);
+      console.log(`${colors.gray}This agent is deliberately NOT added to the manager DB, /agents, /talk-to, or /news-to.${colors.reset}\n`);
+      rl.prompt();
+      return;
+    }
+    await enterPublicSession(arg);
+    return;
   }
   
   // Backwards compatibility aliases
@@ -3498,7 +3630,16 @@ server.start().then(async () => {
 
   console.log(`${colors.gray}Type /help for commands, /deploy <config> to create agents${colors.reset}\n`);
   updatePrompt();
-  rl.prompt();
+
+  // Auto-open a public-agent session if PUBLIC_AGENT_URL is set. This is the
+  // only place the CLI touches the public-agent — it never writes to the
+  // manager DB and never shows up in /agents, /talk-to, or /news-to.
+  const autoPublicUrl = process.env.PUBLIC_AGENT_URL?.trim();
+  if (autoPublicUrl) {
+    await enterPublicSession(autoPublicUrl);
+  } else {
+    rl.prompt();
+  }
 });
 
 rl.on('line', handleLine);
