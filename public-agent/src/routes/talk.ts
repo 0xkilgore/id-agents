@@ -1,11 +1,39 @@
 import { Hono, type Context } from 'hono';
 import { getConnInfo } from '@hono/node-server/conninfo';
 import type { Env } from '../env.js';
-import { openRouterChat } from '../lib/openrouter.js';
+import { openRouterChatMessages, type ChatMessage } from '../lib/openrouter.js';
 import { writeInboxEntry, makeInboxId, type InboxEntry } from '../lib/inbox.js';
 import { requireAuth } from '../lib/auth.js';
 import { clientIp, tokenBucket } from '../lib/rate-limit.js';
 import { isOverBudget, reserveTokens, reconcileTokens } from '../lib/budget.js';
+
+// Roles we accept from the client. The server always prepends its own
+// system prompt inside openRouterChatMessages, so `system` turns supplied
+// here are additive, not a replacement.
+const ALLOWED_ROLES = new Set(['system', 'user', 'assistant']);
+
+function coerceMessages(raw: unknown): { ok: true; messages: ChatMessage[] } | { ok: false; error: string } {
+  if (!Array.isArray(raw)) return { ok: false, error: 'messages must be an array' };
+  if (raw.length === 0) return { ok: false, error: 'messages must be non-empty' };
+  const out: ChatMessage[] = [];
+  for (let i = 0; i < raw.length; i++) {
+    const m = raw[i] as { role?: unknown; content?: unknown } | null;
+    if (!m || typeof m !== 'object') return { ok: false, error: `messages[${i}] must be an object` };
+    const role = typeof m.role === 'string' ? m.role : '';
+    const content = typeof m.content === 'string' ? m.content : '';
+    if (!ALLOWED_ROLES.has(role)) return { ok: false, error: `messages[${i}].role must be one of system|user|assistant` };
+    if (!content.trim()) return { ok: false, error: `messages[${i}].content must be a non-empty string` };
+    out.push({ role: role as ChatMessage['role'], content });
+  }
+  return { ok: true, messages: out };
+}
+
+function lastUserTurn(messages: ChatMessage[]): string {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i]!.role === 'user') return messages[i]!.content;
+  }
+  return '';
+}
 
 export function talkRoutes(env: Env): Hono {
   const app = new Hono();
@@ -48,18 +76,46 @@ export function talkRoutes(env: Env): Hono {
       );
     }
 
-    let body: { message?: string; from?: string };
+    let body: { message?: unknown; from?: unknown; messages?: unknown; session_id?: unknown };
     try {
       body = (await c.req.json()) as typeof body;
     } catch {
       return c.json({ error: 'invalid_json' }, 400);
     }
 
-    const message = typeof body.message === 'string' ? body.message.trim() : '';
-    if (!message) {
-      return c.json({ error: 'missing_message', detail: 'body.message is required and must be non-empty' }, 400);
+    const hasMessage = typeof body.message === 'string' && body.message.trim().length > 0;
+    const hasMessages = body.messages !== undefined && body.messages !== null;
+
+    if (hasMessage && hasMessages) {
+      return c.json(
+        { error: 'conflicting_body', detail: 'Pass either `message` (string) or `messages` (array), not both.' },
+        400,
+      );
     }
+
+    let messages: ChatMessage[];
+    if (hasMessages) {
+      const parsed = coerceMessages(body.messages);
+      if (!parsed.ok) {
+        return c.json({ error: 'invalid_messages', detail: parsed.error }, 400);
+      }
+      messages = parsed.messages;
+    } else if (hasMessage) {
+      messages = [{ role: 'user', content: (body.message as string).trim() }];
+    } else {
+      return c.json(
+        { error: 'missing_message', detail: 'body.message (string) or body.messages (array) is required' },
+        400,
+      );
+    }
+
+    const latestUserTurn = lastUserTurn(messages);
+    if (!latestUserTurn) {
+      return c.json({ error: 'no_user_turn', detail: 'messages must contain at least one user turn' }, 400);
+    }
+
     const from = typeof body.from === 'string' && body.from.trim() ? body.from.trim() : null;
+    const session_id = typeof body.session_id === 'string' && body.session_id.trim() ? body.session_id.trim() : null;
 
     const id = makeInboxId();
 
@@ -88,7 +144,7 @@ export function talkRoutes(env: Env): Hono {
     let model: string;
     let usage: { prompt: number; completion: number; total: number };
     try {
-      const result = await openRouterChat(env, message, { maxTokens: cap > 0 ? cap : undefined });
+      const result = await openRouterChatMessages(env, messages, { maxTokens: cap > 0 ? cap : undefined });
       reply = result.reply;
       model = result.model;
       usage = result.usage;
@@ -117,11 +173,17 @@ export function talkRoutes(env: Env): Hono {
       received_at: new Date().toISOString(),
       from,
       ip,
-      message,
+      // `message` stays the latest user turn for preview/backwards-compat;
+      // full conversation goes under `messages` when history was supplied.
+      message: latestUserTurn,
       reply,
       model,
       tokens_used: usage,
       status: 'unread',
+      session_id,
+      // Store the full array regardless — one-shot calls just have a single
+      // user turn. Keeps review simpler than branching on presence.
+      messages,
     };
     try {
       writeInboxEntry(env, entry);
@@ -129,7 +191,13 @@ export function talkRoutes(env: Env): Hono {
       console.error('[public-agent] /talk inbox write failed:', err);
     }
 
-    return c.json({ reply, model, inbox_id: id, tokens_used: usage });
+    return c.json({
+      reply,
+      model,
+      inbox_id: id,
+      tokens_used: usage,
+      session_id: session_id ?? undefined,
+    });
   });
 
   return app;

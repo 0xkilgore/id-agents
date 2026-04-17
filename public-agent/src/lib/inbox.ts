@@ -18,12 +18,14 @@ export interface InboxEntry {
   received_at: string;     // ISO-8601
   from: string | null;     // client-declared sender; not verified
   ip: string | null;
-  message: string;
+  message: string;         // the latest user turn only — handy for preview
   reply: string;
   model: string;
   tokens_used: { prompt: number; completion: number; total: number };
   status: 'unread' | 'archived';
   archived_at?: string;
+  session_id?: string | null;                                 // client-supplied group key
+  messages?: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>;
 }
 
 function inboxDir(env: Env): string {

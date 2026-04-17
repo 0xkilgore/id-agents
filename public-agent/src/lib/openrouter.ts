@@ -6,28 +6,36 @@ export interface OpenRouterResult {
   model: string;
 }
 
+export interface ChatMessage {
+  role: 'system' | 'user' | 'assistant';
+  content: string;
+}
+
 const ENDPOINT = 'https://openrouter.ai/api/v1/chat/completions';
 
-export async function openRouterChat(
-  env: Env,
-  userMessage: string,
-  opts: { maxTokens?: number } = {},
-): Promise<OpenRouterResult> {
+function systemPrompt(env: Env): ChatMessage {
+  return {
+    role: 'system',
+    content:
+      `You are ${env.agentName}, a lightweight public-facing assistant. ` +
+      'Respond concisely. You cannot take actions outside of replying to this message. ' +
+      'Do not claim access to the user\'s files, network, or other agents.',
+  };
+}
+
+// Always prepend our own system prompt. If the caller supplied messages
+// that also start with a `system` turn, the caller's system is appended
+// after ours — two system messages are accepted by OpenRouter and keeps
+// the public-agent guardrails non-bypassable from the client.
+function assembleMessages(env: Env, userMessages: ChatMessage[]): ChatMessage[] {
+  return [systemPrompt(env), ...userMessages];
+}
+
+async function call(env: Env, messages: ChatMessage[], opts: { maxTokens?: number }): Promise<OpenRouterResult> {
   const body: Record<string, unknown> = {
     model: env.openRouterModel,
-    messages: [
-      {
-        role: 'system',
-        content:
-          `You are ${env.agentName}, a lightweight public-facing assistant. ` +
-          'Respond concisely. You cannot take actions outside of replying to this message. ' +
-          'Do not claim access to the user\'s files, network, or other agents.',
-      },
-      { role: 'user', content: userMessage },
-    ],
+    messages,
   };
-  // Cap OpenRouter's completion so it can't overshoot the remaining daily
-  // budget. Passing max_tokens <= 0 would be rejected by the API, so skip.
   if (opts.maxTokens && opts.maxTokens > 0) {
     body.max_tokens = opts.maxTokens;
   }
@@ -37,7 +45,6 @@ export async function openRouterChat(
     headers: {
       'Content-Type': 'application/json',
       Authorization: `Bearer ${env.openRouterApiKey}`,
-      // Optional per OpenRouter docs; helps with their attribution dashboard.
       'HTTP-Referer': 'https://github.com/idchain-world/id-agents',
       'X-Title': env.agentName,
     },
@@ -69,4 +76,12 @@ export async function openRouterChat(
       total: data.usage?.total_tokens ?? 0,
     },
   };
+}
+
+export async function openRouterChatMessages(
+  env: Env,
+  messages: ChatMessage[],
+  opts: { maxTokens?: number } = {},
+): Promise<OpenRouterResult> {
+  return call(env, assembleMessages(env, messages), opts);
 }
