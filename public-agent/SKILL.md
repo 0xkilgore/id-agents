@@ -26,6 +26,7 @@ A self-contained HTTP agent in a single container. One process, one port, one Op
 | `GET` | `/news?since_id=N&limit=M` | Tail news log. |
 | `GET` | `/inbox?status=unread` | List inbox entries (`unread`, `archived`, `all`). |
 | `POST` | `/inbox/:id/archive` | Mark an entry reviewed. |
+| `POST` | `/mcp` | HTTP MCP shim (JSON-RPC 2.0). Two tools: `talk`, `news`. |
 
 ## Auth
 
@@ -99,6 +100,43 @@ curl -s "http://127.0.0.1:$PORT/inbox?status=unread" \
 ```bash
 curl -s -X POST http://127.0.0.1:$PORT/inbox/2026-04-17T12-34-56-7b3fa2/archive \
   -H "Authorization: Bearer $PUBLIC_AGENT_AUTH_KEY"
+```
+
+## MCP (Model Context Protocol)
+
+`POST /mcp` exposes the same public-facing behavior via JSON-RPC 2.0 for MCP clients. The shim is a thin relay — every tool call routes through the REST endpoints above, so auth, rate limits, body-size caps, the budget, and the inbox all apply identically.
+
+Supported JSON-RPC methods:
+
+| Method | Purpose |
+|---|---|
+| `initialize` | Handshake. Returns protocol version + server info. |
+| `tools/list` | Returns the two tools with input schemas. |
+| `tools/call` | Invokes a tool by name. |
+
+Exposed tools:
+
+- **`talk`** — inputs `{ message: string, from?: string }`. Returns the model reply wrapped in MCP content.
+- **`news`** — inputs `{ from: string, message: string, type?: string, data?: object }`. Appends to the news log.
+
+Authorization bearer (if configured) must be sent on the `/mcp` request and is forwarded to the internal relay call.
+
+Example — list tools:
+
+```bash
+curl -s -X POST http://127.0.0.1:$PORT/mcp \
+  -H 'Content-Type: application/json' \
+  -H "Authorization: Bearer $PUBLIC_AGENT_AUTH_KEY" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
+```
+
+Example — call `talk`:
+
+```bash
+curl -s -X POST http://127.0.0.1:$PORT/mcp \
+  -H 'Content-Type: application/json' \
+  -H "Authorization: Bearer $PUBLIC_AGENT_AUTH_KEY" \
+  -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"talk","arguments":{"message":"What can you do?","from":"mcp-client"}}}'
 ```
 
 ## Rate limits and cost ceiling

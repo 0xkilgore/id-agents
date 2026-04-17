@@ -55,6 +55,8 @@ Env vars (see `.env.example` for the canonical list):
 | `PUBLIC_AGENT_AUTH_KEY` | no | unset | Shared bearer; if unset every endpoint is open |
 | `MAX_TOKENS_PER_DAY` | no | `100000` | Daily LLM-token ceiling; `0` disables |
 | `TALK_RATE_LIMIT_PER_MIN` | no | `10` | Per-IP cap on `POST /talk`; `0` disables |
+| `TRUSTED_PROXY` | no | `false` | Set to `true` only behind a reverse proxy you control — honors first-hop `X-Forwarded-For` |
+| `MAX_REPLY_TOKENS` | no | `1024` | Per-request `max_tokens` cap sent to OpenRouter |
 
 ## Run
 
@@ -68,6 +70,54 @@ Smoke test (replace `$PORT` with your `PUBLIC_AGENT_PORT`):
 curl -s http://127.0.0.1:$PORT/healthz
 curl -s http://127.0.0.1:$PORT/.well-known/skill.md | head -20
 curl -s http://127.0.0.1:$PORT/.well-known/restap.json | jq .
+```
+
+## MCP client example
+
+`public-agent` speaks JSON-RPC 2.0 over HTTP at `POST /mcp`. Two tools are registered: `talk` and `news`. Both relay to the REST endpoints, so auth + rate limits + inbox writes all apply.
+
+Minimal client in bash:
+
+```bash
+# List tools
+curl -s -X POST http://127.0.0.1:$PORT/mcp \
+  -H 'Content-Type: application/json' \
+  -H "Authorization: Bearer $PUBLIC_AGENT_AUTH_KEY" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | jq .
+
+# Call the talk tool
+curl -s -X POST http://127.0.0.1:$PORT/mcp \
+  -H 'Content-Type: application/json' \
+  -H "Authorization: Bearer $PUBLIC_AGENT_AUTH_KEY" \
+  -d '{
+    "jsonrpc":"2.0","id":2,"method":"tools/call",
+    "params":{"name":"talk","arguments":{"message":"What can you do?","from":"mcp-demo"}}
+  }' | jq .
+```
+
+Minimal Node client:
+
+```js
+const url = `http://127.0.0.1:${process.env.PORT}/mcp`;
+const headers = {
+  'Content-Type': 'application/json',
+  Authorization: `Bearer ${process.env.PUBLIC_AGENT_AUTH_KEY}`,
+};
+
+const rpc = async (method, params) => {
+  const r = await fetch(url, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ jsonrpc: '2.0', id: Date.now(), method, params }),
+  });
+  return r.json();
+};
+
+console.log(await rpc('tools/list'));
+console.log(await rpc('tools/call', {
+  name: 'talk',
+  arguments: { message: 'Hello from an MCP client', from: 'node-demo' },
+}));
 ```
 
 ## Development without Docker

@@ -23,7 +23,9 @@ export function buildCatalog(env: Env) {
       catalog: '/.well-known/restap.json',
       skill: '/.well-known/skill.md',
       inbox: '/inbox',
+      mcp: '/mcp',
     },
+    mcp_endpoint: '/mcp',
     capabilities: [
       {
         id: 'talk',
@@ -62,6 +64,14 @@ export function buildCatalog(env: Env) {
         method: 'POST',
         endpoint: '/inbox/:id/archive',
         input_schema: { id: 'string (path)' },
+      },
+      {
+        id: 'mcp',
+        title: 'HTTP MCP shim (JSON-RPC 2.0)',
+        method: 'POST',
+        endpoint: '/mcp',
+        description: 'MCP transport. Exposes two tools (talk, news) that relay to the REST endpoints.',
+        input_schema: { jsonrpc: '"2.0"', id: 'number|string', method: 'initialize|tools/list|tools/call', params: 'object' },
       },
     ],
     mode: 'synchronous',
