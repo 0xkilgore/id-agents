@@ -3,7 +3,9 @@ import type {
   AgentsResponse,
   NewsItem,
   RemoteNewsResponse,
+  RemoteSchedulesResponse,
   RemoteTasksResponse,
+  Schedule,
   Task,
   Team,
   TeamsResponse,
@@ -83,6 +85,51 @@ export async function fetchAgentNews(
     throw new Error(data.error ?? 'unknown manager error');
   }
   return data.result?.items ?? [];
+}
+
+export async function fetchSchedulesForTeam(
+  manager: string,
+  executor: string,
+  teamName: string,
+  signal: AbortSignal,
+): Promise<Schedule[]> {
+  const res = await fetch(`${manager}/remote`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'x-id-team': teamName,
+    },
+    body: JSON.stringify({ agent: executor, command: '/schedule list' }),
+    signal,
+  });
+  if (!res.ok) {
+    throw new Error(`POST /remote → ${res.status} ${res.statusText}`);
+  }
+  const data = (await res.json()) as RemoteSchedulesResponse;
+  if (!data.ok) {
+    throw new Error(data.error ?? 'unknown manager error');
+  }
+  const list = data.result?.schedules ?? [];
+  return list.map((s) => ({ ...s, teamName }));
+}
+
+export async function fetchSchedulesAllTeams(
+  manager: string,
+  executor: string,
+  teams: Team[],
+  signal: AbortSignal,
+): Promise<Schedule[]> {
+  if (teams.length === 0) return [];
+  const results = await Promise.all(
+    teams.map((t) => fetchSchedulesForTeam(manager, executor, t.name, signal)),
+  );
+  const merged = new Map<string, Schedule>();
+  for (const list of results) {
+    for (const s of list) {
+      if (!merged.has(s.id)) merged.set(s.id, s);
+    }
+  }
+  return [...merged.values()];
 }
 
 export async function fetchAgentsAllTeams(

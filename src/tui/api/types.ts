@@ -69,3 +69,26 @@ export interface RemoteTasksResponse {
   result?: { tasks?: Task[] };
   error?: string;
 }
+
+export interface Schedule {
+  id: string;
+  title: string;
+  kind: 'heartbeat' | 'calendar' | string;
+  active: boolean;
+  deliveryMode?: string;
+  sourceType?: string;
+  targets: string[];
+  intervalSeconds: number | null;
+  timezone: string | null;
+  localTimeSeconds: number | null;
+  localDate: string | null;
+  daysOfWeek: string | null;
+  createdAt: number;
+  teamName?: string;
+}
+
+export interface RemoteSchedulesResponse {
+  ok: boolean;
+  result?: { schedules?: Schedule[] };
+  error?: string;
+}

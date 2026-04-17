@@ -8,10 +8,12 @@ import { NewsDetail } from './components/NewsDetail.js';
 import { StatusStrip } from './components/StatusStrip.js';
 import { TasksTable } from './components/TasksTable.js';
 import { TaskDetail } from './components/TaskDetail.js';
-import type { Agent, NewsItem, Task, Team } from './api/types.js';
+import { CalendarView } from './components/CalendarView.js';
+import type { Agent, NewsItem, Schedule, Task, Team } from './api/types.js';
 import {
   fetchAgentNews,
   fetchAgentsAllTeams,
+  fetchSchedulesAllTeams,
   fetchTasks,
   fetchTeams,
   getManagerUrl,
@@ -19,17 +21,19 @@ import {
 import { usePolling } from './hooks/usePolling.js';
 import { humanizeUptime } from './util/format.js';
 
-type View = 'agents' | 'news' | 'news-detail' | 'tasks' | 'task-detail';
+type View = 'agents' | 'news' | 'news-detail' | 'tasks' | 'task-detail' | 'calendar';
 
 const AGENTS_POLL_MS = 2000;
 const TEAMS_POLL_MS = 15000;
 const NEWS_POLL_MS = 3000;
 const TASKS_POLL_MS = 5000;
+const SCHEDULES_POLL_MS = 5000;
 const NEWS_COOLDOWN_TICK_MS = 10_000;
 const AGENTS_CHROME_ROWS = 11;
 const NEWS_CHROME_ROWS = 6;
 const DETAIL_CHROME_ROWS = 6;
 const TASKS_CHROME_ROWS = 10;
+const CALENDAR_CHROME_ROWS = 8;
 const DETAIL_CONTENT_WIDTH = 76;
 const MIN_VISIBLE = 3;
 const SELF_AGENT = 'tui';
@@ -74,6 +78,8 @@ export function App({ staticMode = false }: AppProps = {}): React.ReactElement {
   const [newsWindowStart, setNewsWindowStart] = useState(0);
   const [taskSelectedIndex, setTaskSelectedIndex] = useState(0);
   const [taskWindowStart, setTaskWindowStart] = useState(0);
+  const [schedSelectedIndex, setSchedSelectedIndex] = useState(0);
+  const [schedWindowStart, setSchedWindowStart] = useState(0);
   const [paused, setPaused] = useState(false);
   const [cooldownEpoch, setCooldownEpoch] = useState<number>(() => Date.now());
 
@@ -145,6 +151,7 @@ export function App({ staticMode = false }: AppProps = {}): React.ReactElement {
   const newsWindowSize = Math.max(MIN_VISIBLE, rows - NEWS_CHROME_ROWS);
   const detailWindowSize = Math.max(MIN_VISIBLE, rows - DETAIL_CHROME_ROWS);
   const tasksWindowSize = Math.max(MIN_VISIBLE, rows - TASKS_CHROME_ROWS);
+  const calendarWindowSize = Math.max(MIN_VISIBLE, rows - CALENDAR_CHROME_ROWS);
   const total = visibleAgents.length;
 
   // Tasks polling
@@ -197,6 +204,56 @@ export function App({ staticMode = false }: AppProps = {}): React.ReactElement {
   }, [tasksTotal, taskSelectedIndex, taskWindowStart, tasksWindowSize]);
 
   const selectedTaskName = visibleTasks[taskSelectedIndex]?.name ?? null;
+
+  // Schedules polling — drives Calendar view.
+  const schedulesFetcher = useCallback(
+    (signal: AbortSignal): Promise<Schedule[]> => {
+      if (teams.length === 0) return Promise.resolve([]);
+      return fetchSchedulesAllTeams(manager, SELF_AGENT, teams, signal);
+    },
+    [manager, teams],
+  );
+  const schedulesPoll = usePolling<Schedule[]>(
+    schedulesFetcher,
+    SCHEDULES_POLL_MS,
+    paused || staticMode || view !== 'calendar',
+    [manager, teams.length, view],
+  );
+  const allSchedules = schedulesPoll.data ?? [];
+  const visibleSchedules = useMemo(
+    () =>
+      selectedTeam === null
+        ? allSchedules
+        : allSchedules.filter((s) => s.teamName === selectedTeam),
+    [allSchedules, selectedTeam],
+  );
+  const schedTotal = visibleSchedules.length;
+  const schedulesTeamCounts = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const s of allSchedules) {
+      if (!s.teamName) continue;
+      counts.set(s.teamName, (counts.get(s.teamName) ?? 0) + 1);
+    }
+    return counts;
+  }, [allSchedules]);
+
+  useEffect(() => {
+    if (schedTotal === 0) {
+      if (schedSelectedIndex !== 0) setSchedSelectedIndex(0);
+      if (schedWindowStart !== 0) setSchedWindowStart(0);
+      return;
+    }
+    const clampedSel = Math.min(schedSelectedIndex, schedTotal - 1);
+    if (clampedSel !== schedSelectedIndex) setSchedSelectedIndex(clampedSel);
+    const maxStart = Math.max(0, schedTotal - calendarWindowSize);
+    let nextStart = schedWindowStart;
+    if (clampedSel < nextStart) nextStart = clampedSel;
+    if (clampedSel >= nextStart + calendarWindowSize)
+      nextStart = clampedSel - calendarWindowSize + 1;
+    if (nextStart > maxStart) nextStart = maxStart;
+    if (nextStart < 0) nextStart = 0;
+    if (nextStart !== schedWindowStart) setSchedWindowStart(nextStart);
+  }, [schedTotal, schedSelectedIndex, schedWindowStart, calendarWindowSize]);
 
   const tasksTeamCounts = useMemo(() => {
     const counts = new Map<string, number>();
@@ -318,6 +375,20 @@ export function App({ staticMode = false }: AppProps = {}): React.ReactElement {
     setView((v) => (v === 'tasks' ? 'agents' : v === 'agents' ? 'tasks' : v));
   }, []);
 
+  const moveSchedSel = useCallback(
+    (delta: number) => {
+      if (schedTotal === 0) return;
+      setSchedSelectedIndex((idx) => clamp(idx + delta, 0, schedTotal - 1));
+    },
+    [schedTotal],
+  );
+
+  const openCalendar = useCallback(() => {
+    setSchedSelectedIndex(0);
+    setSchedWindowStart(0);
+    setView('calendar');
+  }, []);
+
   const openNews = useCallback(() => {
     if (!selectedAgentName) return;
     setNewsSelectedIndex(0);
@@ -377,6 +448,7 @@ export function App({ staticMode = false }: AppProps = {}): React.ReactElement {
 
       if (view === 'agents') {
         if (input === 't') return toggleTasksView();
+        if (input === 'c') return openCalendar();
         if (key.rightArrow) return openNews();
         if (key.tab) return cycleTeam(key.shift ? -1 : 1);
         if (key.upArrow) return moveAgentsSel(-1);
@@ -390,6 +462,7 @@ export function App({ staticMode = false }: AppProps = {}): React.ReactElement {
 
       if (view === 'tasks') {
         if (input === 't') return toggleTasksView();
+        if (input === 'c') return openCalendar();
         if (key.rightArrow) return openTaskDetail();
         if (key.tab) return cycleTeam(key.shift ? -1 : 1);
         if (key.upArrow) return moveTaskSel(-1);
@@ -409,6 +482,20 @@ export function App({ staticMode = false }: AppProps = {}): React.ReactElement {
         if (key.pageDown) return moveTaskDetailScroll(detailWindowSize);
         if (isHomeKey(input)) return setTaskDetailScroll(0);
         if (isEndKey(input)) return setTaskDetailScroll(Number.MAX_SAFE_INTEGER);
+        return;
+      }
+
+      if (view === 'calendar') {
+        if (input === 'a') return setView('agents');
+        if (input === 't') return setView('tasks');
+        if (key.leftArrow || key.escape) return setView('agents');
+        if (key.tab) return cycleTeam(key.shift ? -1 : 1);
+        if (key.upArrow) return moveSchedSel(-1);
+        if (key.downArrow) return moveSchedSel(1);
+        if (key.pageUp) return moveSchedSel(-calendarWindowSize);
+        if (key.pageDown) return moveSchedSel(calendarWindowSize);
+        if (isHomeKey(input)) return setSchedSelectedIndex(0);
+        if (isEndKey(input)) return setSchedSelectedIndex(Math.max(0, schedTotal - 1));
         return;
       }
 
@@ -478,6 +565,24 @@ export function App({ staticMode = false }: AppProps = {}): React.ReactElement {
             windowSize={tasksWindowSize}
             loading={tasksPoll.lastUpdated === 0 && !tasksPoll.error && !staticMode}
             error={tasksPoll.error}
+          />
+        </>
+      ) : view === 'calendar' ? (
+        <>
+          <TeamsPanel
+            teams={teams}
+            selectedTeam={selectedTeam}
+            allCount={allSchedules.length}
+            teamCounts={schedulesTeamCounts}
+          />
+          <CalendarView
+            schedules={visibleSchedules}
+            nowSec={Math.floor((schedulesPoll.lastUpdated || Date.now()) / 1000)}
+            selectedIndex={schedSelectedIndex}
+            windowStart={schedWindowStart}
+            windowSize={calendarWindowSize}
+            loading={schedulesPoll.lastUpdated === 0 && !schedulesPoll.error && !staticMode}
+            error={schedulesPoll.error}
           />
         </>
       ) : view === 'task-detail' ? (
