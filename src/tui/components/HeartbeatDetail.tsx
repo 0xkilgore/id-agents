@@ -55,9 +55,9 @@ export function HeartbeatDetail(props: HeartbeatDetailProps): React.ReactElement
   );
 
   const body: string[] = file.missing
-    ? ['(no HEARTBEAT.md configured for this agent)']
+    ? ['No HEARTBEAT.md configured for this agent.']
     : file.error
-      ? [`(failed to read HEARTBEAT.md: ${file.error})`]
+      ? [`Failed to read HEARTBEAT.md: ${file.error}`]
       : file.lines;
 
   const lines = [...header, '', '── HEARTBEAT.md ──', ...body];
