@@ -47,6 +47,8 @@ const TASKS_CHROME_ROWS = 10;
 // causes the list to overflow the terminal height and the terminal to
 // scroll up on every redraw, leaking the previous frame's chrome.
 const CALENDAR_CHROME_ROWS = 7;
+// Heartbeats: no TeamsPanel, no StatusStrip — bordered list box
+// (windowSize + 6) + footer (1) = 7. Matches Calendar.
 const HEARTBEATS_CHROME_ROWS = 7;
 const DETAIL_CONTENT_WIDTH = 76;
 const MIN_VISIBLE = 3;
@@ -264,22 +266,9 @@ export function App({ staticMode = false }: AppProps = {}): React.ReactElement {
     return out;
   }, [allSchedules, schedulesPoll.lastUpdated]);
 
-  const visibleHeartbeats = useMemo(
-    () =>
-      selectedTeam === null
-        ? heartbeatRows
-        : heartbeatRows.filter((r) => r.schedule.teamName === selectedTeam),
-    [heartbeatRows, selectedTeam],
-  );
-  const hbTotal = visibleHeartbeats.length;
-  const heartbeatsTeamCounts = useMemo(() => {
-    const counts = new Map<string, number>();
-    for (const r of heartbeatRows) {
-      if (!r.schedule.teamName) continue;
-      counts.set(r.schedule.teamName, (counts.get(r.schedule.teamName) ?? 0) + 1);
-    }
-    return counts;
-  }, [heartbeatRows]);
+  // Heartbeats is a cross-team view, same shape as Calendar — no team
+  // filter or TeamsPanel chrome. See Calendar: drop top teams-chips bar.
+  const hbTotal = heartbeatRows.length;
 
   useEffect(() => {
     if (hbTotal === 0) {
@@ -582,7 +571,6 @@ export function App({ staticMode = false }: AppProps = {}): React.ReactElement {
         if (input === 't') return setView('tasks');
         if (input === 'c') return openCalendar();
         if (key.leftArrow || key.escape) return setView('agents');
-        if (key.tab) return cycleTeam(key.shift ? -1 : 1);
         if (key.upArrow) return moveHbSel(-1);
         if (key.downArrow) return moveHbSel(1);
         if (key.pageUp) return moveHbSel(-heartbeatsWindowSize);
@@ -671,23 +659,15 @@ export function App({ staticMode = false }: AppProps = {}): React.ReactElement {
           error={schedulesPoll.error}
         />
       ) : view === 'heartbeats' ? (
-        <>
-          <TeamsPanel
-            teams={teams}
-            selectedTeam={selectedTeam}
-            allCount={heartbeatRows.length}
-            teamCounts={heartbeatsTeamCounts}
-          />
-          <HeartbeatsView
-            rows={visibleHeartbeats}
-            nowSec={Math.floor((schedulesPoll.lastUpdated || Date.now()) / 1000)}
-            selectedIndex={hbSelectedIndex}
-            windowStart={hbWindowStart}
-            windowSize={heartbeatsWindowSize}
-            loading={schedulesPoll.lastUpdated === 0 && !schedulesPoll.error && !staticMode}
-            error={schedulesPoll.error}
-          />
-        </>
+        <HeartbeatsView
+          rows={heartbeatRows}
+          nowSec={Math.floor((schedulesPoll.lastUpdated || Date.now()) / 1000)}
+          selectedIndex={hbSelectedIndex}
+          windowStart={hbWindowStart}
+          windowSize={heartbeatsWindowSize}
+          loading={schedulesPoll.lastUpdated === 0 && !schedulesPoll.error && !staticMode}
+          error={schedulesPoll.error}
+        />
       ) : view === 'task-detail' ? (
         <TaskDetail
           task={visibleTasks[taskSelectedIndex] ?? null}
