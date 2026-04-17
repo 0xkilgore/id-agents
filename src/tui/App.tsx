@@ -41,7 +41,12 @@ const AGENTS_CHROME_ROWS = 11;
 const NEWS_CHROME_ROWS = 6;
 const DETAIL_CHROME_ROWS = 6;
 const TASKS_CHROME_ROWS = 10;
-const CALENDAR_CHROME_ROWS = 8;
+// Calendar: no TeamsPanel, no StatusStrip — only the bordered list box
+// (border 2 + title 1 + header 1 + above-arrow 1 + body windowSize +
+// below-arrow 1 = windowSize + 6) and the footer (1). Off-by-one here
+// causes the list to overflow the terminal height and the terminal to
+// scroll up on every redraw, leaking the previous frame's chrome.
+const CALENDAR_CHROME_ROWS = 7;
 const HEARTBEATS_CHROME_ROWS = 7;
 const DETAIL_CONTENT_WIDTH = 76;
 const MIN_VISIBLE = 3;

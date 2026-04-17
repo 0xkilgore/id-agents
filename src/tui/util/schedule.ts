@@ -81,18 +81,21 @@ export function formatLocalTime(sec: number): string {
   return `${pad2(h)}:${pad2(m)}`;
 }
 
+// Strictly fixed-width: exactly 11 visible columns, always. Layout is
+// `<countdown padded to 5><space><HH:MM>`. Previously this function
+// silently dropped the last digit via a bad padEnd/slice combo.
 export function formatNextFire(fireSec: number, nowSec: number): string {
-  const delta = fireSec - nowSec;
   const d = new Date(fireSec * 1000);
   const time = `${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
-  if (delta < 60) return `<1m   ${time}`;
-  if (delta < 3600) return `${Math.floor(delta / 60)}m    ${time}`.padEnd(10, ' ').slice(0, 10);
-  if (delta < 86400) {
-    const h = Math.floor(delta / 3600);
-    return `${h}h    ${time}`.padEnd(10, ' ').slice(0, 10);
-  }
-  const days = Math.floor(delta / 86400);
-  return `${days}d ${time}`;
+  const delta = fireSec - nowSec;
+  let countdown: string;
+  if (delta < 0) countdown = 'now';
+  else if (delta < 60) countdown = '<1m';
+  else if (delta < 3600) countdown = `${Math.floor(delta / 60)}m`;
+  else if (delta < 86400) countdown = `${Math.floor(delta / 3600)}h`;
+  else countdown = `${Math.floor(delta / 86400)}d`;
+  // 5-char left-padded countdown + space + HH:MM = 11 chars total.
+  return `${countdown.padStart(5)} ${time}`;
 }
 
 function pad2(n: number): string {
