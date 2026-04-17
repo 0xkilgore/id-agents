@@ -209,10 +209,6 @@ Updated: 2026-04-02
 
 139. `skills/xmtp/SKILL.md` — Agent skill for XMTP messaging; instructs agents to use `curl` against `/xmtp/send` and `/xmtp/status` endpoints; documents ENS name and wallet address resolution, inbound message flow, and security properties
 
-### Config
-
-140. `configs/xmtp-test.yaml` — Test team config with two agents (alice, bob) for XMTP encrypted messaging tests; uses claude-code-cli runtime, claude-sonnet-4-6 model, includes identity/inter-agent/catalog/xmtp skills
-
 ### Scripts
 
 141. `scripts/check-ens-resolution.mjs` — ENS resolution test script; resolves xid.eth names via CCIP-Read using viem; defaults to checking alice/bob agent-23/24 subnames; configurable via `MAINNET_RPC_URL` env var

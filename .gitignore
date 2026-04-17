@@ -11,10 +11,10 @@ workspace/**
 # Agent runtime checklist (loaded by the CLI agent, not source-controlled)
 HEARTBEAT.md
 
-# Personal configs (contain local paths and keys)
-configs/idchain.yaml
-configs/personal.yaml
-configs/apps.yaml
+# Personal configs — only default.yaml is tracked; anything else a user
+# drops into configs/ stays local.
+configs/*.yaml
+!configs/default.yaml
 
 # Environment and secrets
 .env
