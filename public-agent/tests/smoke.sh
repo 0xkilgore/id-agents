@@ -54,7 +54,12 @@ check "POST /news (missing from -> 400)" 400 "curl -s -o /dev/null -w '%{http_co
 check "GET /news"      200 "curl -s -o /dev/null -w '%{http_code}' '${BASE}/news?since_id=0&limit=5' ${AUTH_HEADER}"
 check "GET /inbox"     200 "curl -s -o /dev/null -w '%{http_code}' '${BASE}/inbox?status=all' ${AUTH_HEADER}"
 check "GET /inbox bad status -> 400" 400 "curl -s -o /dev/null -w '%{http_code}' '${BASE}/inbox?status=bogus' ${AUTH_HEADER}"
-check "POST /inbox/nope/archive -> 404" 404 "curl -s -o /dev/null -w '%{http_code}' -X POST '${BASE}/inbox/nope/archive' ${AUTH_HEADER}"
+check "POST /inbox/nope/archive -> 400 (bad id shape)" 400 "curl -s -o /dev/null -w '%{http_code}' -X POST '${BASE}/inbox/nope/archive' ${AUTH_HEADER}"
+check "POST /inbox/<valid-but-missing>/archive -> 404" 404 "curl -s -o /dev/null -w '%{http_code}' -X POST '${BASE}/inbox/2026-01-01T00-00-00-000-deadbe/archive' ${AUTH_HEADER}"
+
+check "POST /mcp tools/list" 200 "curl -s -o /dev/null -w '%{http_code}' -X POST ${BASE}/mcp \
+  -H 'Content-Type: application/json' ${AUTH_HEADER} \
+  -d '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}'"
 
 if [ "$SKIP_TALK" = "1" ]; then
   echo "  SKIP  POST /talk  (SKIP_TALK=1)"
