@@ -6,12 +6,14 @@ import { wellknownRoutes } from './routes/wellknown.js';
 import { talkRoutes } from './routes/talk.js';
 import { newsRoutes } from './routes/news.js';
 import { inboxRoutes } from './routes/inbox.js';
+import { mcpRoutes } from './routes/mcp.js';
 
 const env = loadEnv();
 const app = new Hono();
 
 const TALK_BODY_LIMIT = 64 * 1024;
 const NEWS_BODY_LIMIT = 16 * 1024;
+const MCP_BODY_LIMIT = 64 * 1024;
 
 const oversize = (maxSize: number) =>
   bodyLimit({
@@ -27,11 +29,13 @@ app.get('/healthz', (c) => c.json({ ok: true, agent: env.agentName }));
 // front and short-circuits the request before the handler runs.
 app.on('POST', '/talk', oversize(TALK_BODY_LIMIT));
 app.on('POST', '/news', oversize(NEWS_BODY_LIMIT));
+app.on('POST', '/mcp', oversize(MCP_BODY_LIMIT));
 
 app.route('/', wellknownRoutes(env));
 app.route('/', talkRoutes(env));
 app.route('/', newsRoutes(env));
 app.route('/', inboxRoutes(env));
+app.route('/', mcpRoutes(env));
 
 app.all('*', (c) => c.json({ error: 'not_found', path: c.req.path }, 404));
 
