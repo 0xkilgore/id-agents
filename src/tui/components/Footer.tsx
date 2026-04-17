@@ -22,13 +22,13 @@ interface FooterProps {
 // back hint because they have a real parent to return to.
 const HINTS: Record<FooterView, string> = {
   agents: '↑↓ nav · → news · Tab team · t tasks · c calendar · h heartbeats · p pause · q quit',
-  tasks: '↑↓ nav · → detail · Tab team · ← back · c calendar · h heartbeats · p pause · q quit',
+  tasks: '↑↓ nav · → detail · Tab team · c calendar · h heartbeats · p pause · q quit · ← back',
   calendar: '↑↓ nav · a agents · t tasks · h heartbeats · p pause · q quit',
   heartbeats: '↑↓ nav · → detail · a agents · t tasks · c calendar · p pause · q quit',
-  'task-detail': '↑↓ scroll · ← back · p pause · q quit',
-  'heartbeat-detail': '↑↓ scroll · ← back · p pause · q quit',
-  news: '↑↓ scroll · → open · ← back · p pause · q quit',
-  'news-detail': '↑↓ scroll · ← back · p pause · q quit',
+  'task-detail': '↑↓ scroll · p pause · q quit · ← back',
+  'heartbeat-detail': '↑↓ scroll · p pause · q quit · ← back',
+  news: '↑↓ scroll · → open · p pause · q quit · ← back',
+  'news-detail': '↑↓ scroll · p pause · q quit · ← back',
 };
 
 export function Footer({ view, paused }: FooterProps): React.ReactElement {
