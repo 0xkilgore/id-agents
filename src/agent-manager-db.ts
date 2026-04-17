@@ -1077,6 +1077,8 @@ export class AgentManagerDb {
           message: `Query from ${senderName}: ${message.slice(0, 100)}${message.length > 100 ? '...' : ''}`,
           data: { from: senderName, message, session_id, query_id: queryId },
           query_id: queryId,
+          kind: 'talk',
+          reply_expected: true,
         });
 
         this.managerLog(`Received query ${queryId} from ${senderName}: ${message.slice(0, 50)}...`);
@@ -1138,12 +1140,16 @@ export class AgentManagerDb {
 
         if (cliAgent) {
           const cliId = cliAgent.id;
+          // Replies carry notify semantics (no further reply expected);
+          // unsolicited inbound messages default to notify too.
           await this.db.news.add(teamId, cliId, {
             timestamp: ts,
             type: newsType,
             message: newsMessage,
             data: { from, in_reply_to, message, ...data },
             query_id: in_reply_to || undefined,
+            kind: 'notify',
+            reply_expected: false,
           });
         } else {
           this.managerLog(`Warning: No interactive agent found for team ${teamId}, cannot store news`);

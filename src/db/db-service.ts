@@ -264,6 +264,10 @@ export interface NewsRepository {
       message?: string;
       data?: Record<string, unknown>;
       query_id?: string;
+      /** Structured classifier layered on top of `type`: 'talk' | 'notify'. */
+      kind?: 'talk' | 'notify';
+      /** Explicit reply-expected flag (defaults to kind === 'talk' when omitted). */
+      reply_expected?: boolean;
     },
   ): Promise<void>;
 

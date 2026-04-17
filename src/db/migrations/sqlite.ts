@@ -51,7 +51,9 @@ export async function migrateSqlite(adapter: SqliteAdapter): Promise<void> {
       type TEXT NOT NULL,
       message TEXT,
       data TEXT,
-      query_id TEXT
+      query_id TEXT,
+      kind TEXT,
+      reply_expected INTEGER
     );
 
     CREATE TABLE IF NOT EXISTS queries (
@@ -155,6 +157,19 @@ export async function migrateSqlite(adapter: SqliteAdapter): Promise<void> {
   // Tasks: add uuid column for short-id lookups (#xxxxxxxx)
   try {
     adapter.exec(`ALTER TABLE tasks ADD COLUMN uuid TEXT`);
+  } catch {
+    // Column already exists in upgraded databases.
+  }
+
+  // news_items: layered metadata (talk|notify plus reply_expected) on top of
+  // the existing event `type`. Populated on new writes; old rows stay null.
+  try {
+    adapter.exec(`ALTER TABLE news_items ADD COLUMN kind TEXT`);
+  } catch {
+    // Column already exists in upgraded databases.
+  }
+  try {
+    adapter.exec(`ALTER TABLE news_items ADD COLUMN reply_expected INTEGER`);
   } catch {
     // Column already exists in upgraded databases.
   }

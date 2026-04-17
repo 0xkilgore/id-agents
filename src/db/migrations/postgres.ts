@@ -243,9 +243,16 @@ export async function migratePostgres(adapter: DbAdapter): Promise<void> {
       type text NOT NULL,
       message text,
       data jsonb,
-      query_id text
+      query_id text,
+      kind text,
+      reply_expected boolean
     );
   `);
+
+  // news_items: layered metadata columns for upgraded databases.
+  // Populated on new writes; old rows stay null.
+  await adapter.query(`ALTER TABLE news_items ADD COLUMN IF NOT EXISTS kind text;`);
+  await adapter.query(`ALTER TABLE news_items ADD COLUMN IF NOT EXISTS reply_expected boolean;`);
 
   await adapter.query(`
     CREATE TABLE IF NOT EXISTS queries (

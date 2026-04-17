@@ -64,6 +64,10 @@ export interface NewsItemRow {
   message: string | null;
   data: Record<string, unknown> | null;
   query_id: string | null;
+  /** Structured classifier: 'talk' (reply expected) or 'notify' (fire-and-forget). */
+  kind: 'talk' | 'notify' | null;
+  /** Does the sender expect a reply? Mirrors kind but kept explicit for clarity. */
+  reply_expected: boolean | null;
 }
 
 /** schedule_definitions table row */

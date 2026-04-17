@@ -22,11 +22,21 @@ export class SqliteNewsRepo implements NewsRepository {
       message?: string;
       data?: Record<string, unknown>;
       query_id?: string;
+      kind?: 'talk' | 'notify';
+      reply_expected?: boolean;
     },
   ): Promise<void> {
+    const replyExpected =
+      item.reply_expected !== undefined
+        ? item.reply_expected
+        : item.kind === 'talk'
+          ? true
+          : item.kind === 'notify'
+            ? false
+            : null;
     await this.db.query(
-      `INSERT INTO news_items (team_id, agent_id, timestamp, type, message, data, query_id)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO news_items (team_id, agent_id, timestamp, type, message, data, query_id, kind, reply_expected)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         teamId,
         agentId,
@@ -35,6 +45,8 @@ export class SqliteNewsRepo implements NewsRepository {
         item.message ?? null,
         item.data ? stringifyJson(item.data) : null,
         item.query_id ?? null,
+        item.kind ?? null,
+        replyExpected === null ? null : replyExpected ? 1 : 0,
       ],
     );
   }

@@ -269,12 +269,35 @@ export class AgentRestServer {
   private async dbAddNews(type: string, message: string, data?: any) {
     if (!this.db || !this.dbTeamId || !this.dbAgentId) return;
     const queryId = data?.query_id;
+    // Derive kind/reply_expected from the event type where obvious.
+    // Inbound: query.received is the start of a talk; schedule.received is a
+    // one-way wake-up (notify). Outbound.reply closes a talk, so notify.
+    // Everything else we leave as null (unknown) rather than guess.
+    let kind: 'talk' | 'notify' | undefined;
+    let replyExpected: boolean | undefined;
+    switch (type) {
+      case 'query.received':
+        kind = 'talk';
+        replyExpected = true;
+        break;
+      case 'schedule.received':
+      case 'outbound.reply':
+      case 'response.saved':
+      case 'query.cancelled':
+      case 'query.completed':
+      case 'query.failed':
+        kind = 'notify';
+        replyExpected = false;
+        break;
+    }
     await this.db.news.add(this.dbTeamId, this.dbAgentId, {
       timestamp: Date.now(),
       type,
       message: message || undefined,
       data: data ?? undefined,
       query_id: queryId ?? undefined,
+      ...(kind ? { kind } : {}),
+      ...(replyExpected !== undefined ? { reply_expected: replyExpected } : {}),
     });
   }
 

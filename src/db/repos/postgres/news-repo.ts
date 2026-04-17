@@ -16,11 +16,21 @@ export class PgNewsRepo implements NewsRepository {
       message?: string;
       data?: Record<string, unknown>;
       query_id?: string;
+      kind?: 'talk' | 'notify';
+      reply_expected?: boolean;
     },
   ): Promise<void> {
+    const replyExpected =
+      item.reply_expected !== undefined
+        ? item.reply_expected
+        : item.kind === 'talk'
+          ? true
+          : item.kind === 'notify'
+            ? false
+            : null;
     await this.db.query(
-      `INSERT INTO news_items (team_id, agent_id, timestamp, type, message, data, query_id)
-       VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+      `INSERT INTO news_items (team_id, agent_id, timestamp, type, message, data, query_id, kind, reply_expected)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
       [
         teamId,
         agentId,
@@ -29,6 +39,8 @@ export class PgNewsRepo implements NewsRepository {
         item.message || null,
         item.data || null,
         item.query_id || null,
+        item.kind || null,
+        replyExpected,
       ],
     );
   }
