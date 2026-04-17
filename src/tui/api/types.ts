@@ -51,11 +51,14 @@ export interface RemoteNewsResponse {
 
 export interface Task {
   name: string;
+  uuid?: string;
+  shortId?: string;
   title: string;
   description?: string | null;
   status: string;
   ownerName?: string | null;
   teamName?: string;
+  linkedEvents?: string[];
   createdAt: number;
   updatedAt?: number;
   completedAt?: number | null;

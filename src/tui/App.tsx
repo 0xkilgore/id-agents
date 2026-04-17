@@ -7,6 +7,7 @@ import { NewsView } from './components/NewsView.js';
 import { NewsDetail } from './components/NewsDetail.js';
 import { StatusStrip } from './components/StatusStrip.js';
 import { TasksTable } from './components/TasksTable.js';
+import { TaskDetail } from './components/TaskDetail.js';
 import type { Agent, NewsItem, Task, Team } from './api/types.js';
 import {
   fetchAgentNews,
@@ -18,7 +19,7 @@ import {
 import { usePolling } from './hooks/usePolling.js';
 import { humanizeUptime } from './util/format.js';
 
-type View = 'agents' | 'news' | 'news-detail' | 'tasks';
+type View = 'agents' | 'news' | 'news-detail' | 'tasks' | 'task-detail';
 
 const AGENTS_POLL_MS = 2000;
 const TEAMS_POLL_MS = 15000;
@@ -154,7 +155,7 @@ export function App({ staticMode = false }: AppProps = {}): React.ReactElement {
   const tasksPoll = usePolling<Task[]>(
     tasksFetcher,
     TASKS_POLL_MS,
-    paused || staticMode || view !== 'tasks',
+    paused || staticMode || (view !== 'tasks' && view !== 'task-detail'),
     [manager, view],
   );
   const allTasks = tasksPoll.data ?? [];
@@ -251,6 +252,7 @@ export function App({ staticMode = false }: AppProps = {}): React.ReactElement {
   const selectedNewsItem: NewsItem | null = sortedNewsItems[newsSelectedIndex] ?? null;
 
   const [detailScroll, setDetailScroll] = useState(0);
+  const [taskDetailScroll, setTaskDetailScroll] = useState(0);
 
   useEffect(() => {
     if (newsTotal === 0) {
@@ -329,6 +331,23 @@ export function App({ staticMode = false }: AppProps = {}): React.ReactElement {
     setView('news-detail');
   }, [selectedNewsItem]);
 
+  const openTaskDetail = useCallback(() => {
+    if (tasksTotal === 0) return;
+    setTaskDetailScroll(0);
+    setView('task-detail');
+  }, [tasksTotal]);
+
+  const backToTasks = useCallback(() => {
+    setView('tasks');
+  }, []);
+
+  const moveTaskDetailScroll = useCallback(
+    (delta: number) => {
+      setTaskDetailScroll((off) => Math.max(0, off + delta));
+    },
+    [],
+  );
+
   const backToAgents = useCallback(() => {
     setView('agents');
   }, []);
@@ -371,6 +390,7 @@ export function App({ staticMode = false }: AppProps = {}): React.ReactElement {
 
       if (view === 'tasks') {
         if (input === 't') return toggleTasksView();
+        if (key.rightArrow) return openTaskDetail();
         if (key.tab) return cycleTeam(key.shift ? -1 : 1);
         if (key.upArrow) return moveTaskSel(-1);
         if (key.downArrow) return moveTaskSel(1);
@@ -378,6 +398,17 @@ export function App({ staticMode = false }: AppProps = {}): React.ReactElement {
         if (key.pageDown) return moveTaskSel(tasksWindowSize);
         if (isHomeKey(input)) return setTaskSelectedIndex(0);
         if (isEndKey(input)) return setTaskSelectedIndex(Math.max(0, tasksTotal - 1));
+        return;
+      }
+
+      if (view === 'task-detail') {
+        if (key.leftArrow || key.escape) return backToTasks();
+        if (key.upArrow) return moveTaskDetailScroll(-1);
+        if (key.downArrow) return moveTaskDetailScroll(1);
+        if (key.pageUp) return moveTaskDetailScroll(-detailWindowSize);
+        if (key.pageDown) return moveTaskDetailScroll(detailWindowSize);
+        if (isHomeKey(input)) return setTaskDetailScroll(0);
+        if (isEndKey(input)) return setTaskDetailScroll(Number.MAX_SAFE_INTEGER);
         return;
       }
 
@@ -449,6 +480,16 @@ export function App({ staticMode = false }: AppProps = {}): React.ReactElement {
             error={tasksPoll.error}
           />
         </>
+      ) : view === 'task-detail' ? (
+        <TaskDetail
+          task={visibleTasks[taskSelectedIndex] ?? null}
+          positionLabel={
+            tasksTotal > 0 ? `task ${taskSelectedIndex + 1} of ${tasksTotal}` : ''
+          }
+          windowSize={detailWindowSize}
+          scrollOffset={taskDetailScroll}
+          contentWidth={DETAIL_CONTENT_WIDTH}
+        />
       ) : view === 'news' ? (
         <NewsView
           agentName={selectedAgentName}
