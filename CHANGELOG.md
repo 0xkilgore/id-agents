@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.1.55-beta
+
+### Features
+
+- **`GET /query/<id>` on the manager daemon**: new queryId-based polling primitive. Returns `{ query_id, status, result?, error?, agent, created_at, completed_at? }` with lifecycle `pending | processing | delivered | failed | expired`. Replaces the fragile timestamp-filter polling pattern used by the admin-control skill. Composes cleanly with the inbox redesign: `POST /talk manager` creates a query record; `GET /query/<id>` is the deterministic wait mechanism.
+- **`/news-to` on agent's local wrapper**: mirror of `/talk-to` for fire-and-forget notifications. Payload `{ to, message, data? }`. Looks up target via the manager catalog, POSTs directly to target's `/news`, returns 202 immediately. Two-verb model: `/talk-to` when you want a reply, `/news-to` when you don't.
+- **Manager daemon serves `/talk` and `/news` for the `manager` identity**: the manager inbox no longer depends on the interactive CLI being online. Agent-to-manager escalations land in a durable DB-backed inbox regardless of whether any human surface is connected.
+- **`/news ?since_id=<n>&limit=N` cursor**: server-side monotonic cursor on `/news` on both agent and manager endpoints. Replaces the timestamp-filter race-prone pattern. Timestamp `?since=<ms>` still accepted for one release with a deprecation header.
+- **Stuck-query sweeper**: background task marks queries older than a timeout as `failed` or `expired`, so crashed agents no longer leave queries stuck in `pending` forever.
+- **`kind` and `reply_expected` metadata on news items**: structured fields layered on top of existing typed events (`query.received`, `outbound.reply`, etc.) so downstream UIs can filter by semantic intent rather than guessing from event type.
+- **Task short UUIDs**: every task record now carries a random short UUID. Manager commands accept either `name` or `#shortid` (first 8 chars) as a reference. Unambiguous even when names collide across teams or contexts.
+
+### Changed
+
+- **`inter-agent` skill rewritten for two-verb model**: `/talk-to` (reply expected) and `/news-to` (fire-and-forget). Drops `/message` from agent-facing examples. Zero flags. Teaches the long-running-work pattern (quick `/talk-to` ACK followed by delayed `/news-to` from the worker when results are ready).
+- **`idagents-admin-control` skill rewritten for queryId polling**: primary wait pattern is now `GET /query/<id>` until status is terminal. Timestamp-filter polling moved to a legacy footnote. Polls documented as background-only (`run_in_background: true`) with sensible defaults.
+
+### Deprecated
+
+- **`POST /message` on the manager daemon**: returns a deprecation warning in the response header and logs. Functional for one release, will be removed in a subsequent version. Callers should switch to `/news-to` (fire-and-forget) or `/talk-to` (sync) on the agent's local wrapper.
+
+### Fixed
+
+- **`--dangerously-skip-permissions` default behavior**: agent spawn now defaults to skip-permissions for both claude-code-cli and codex runtimes when the YAML `dangerouslySkipPermissions` field is unset. Explicit `false` is honored. The codex equivalent (`--dangerously-bypass-approvals-and-sandbox`) is wired for codex-runtime agents.
+- **Permissions documentation**: QUICKSTART and README softened from "forced" to "default-with-override," clarifying that agents run with bypass by default but the user can set explicit `false` in config.
+- **TUI documentation shipped across the repo**: new `docs/guides/tui.md`, Quick Start subsection in README, new step in QUICKSTART, link in `docs/README.md`.
+
 ## 0.1.54-beta
 
 ### Features
