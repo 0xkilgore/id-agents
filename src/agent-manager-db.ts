@@ -1100,10 +1100,17 @@ export class AgentManagerDb {
       }
     });
 
-    // POST /message - unified endpoint for sending messages to agents
-    // Default: fire-and-forget (returns immediately after delivery)
-    // With wait:true or timeout: waits for the agent's reply (like old /talk-to)
+    // POST /message - DEPRECATED unified endpoint for sending messages to agents.
+    // Prefer POST /talk-to (synchronous reply) or POST /news-to (fire-and-forget).
+    // Emits an X-Deprecated response header and a manager log line; still
+    // functionally equivalent to /talk-to with fire-and-forget defaults.
     this.managementApp.post('/message', (req, res, next) => {
+      res.setHeader(
+        'X-Deprecated',
+        '/message is deprecated; use /talk-to for synchronous replies or /news-to for fire-and-forget notifications',
+      );
+      const fromHint = (req.body && typeof req.body.from === 'string') ? req.body.from : 'unknown';
+      this.managerLog(`[DEPRECATED] /message called (from=${fromHint}); prefer /talk-to or /news-to`);
       this.handleMessage(req, res).catch(next);
     });
 
