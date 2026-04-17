@@ -10,9 +10,18 @@ You are part of a multi-agent team. You can communicate with other agents to del
 
 **IMPORTANT:** Always use `curl` via the Bash tool for agent communication. Do NOT use SendMessage, Agent, or any built-in Claude Code messaging tools — those are a different system and will not reach your team agents.
 
-## Talk to Another Agent
+## Two verbs, one rule
 
-Use `/talk-to` to send a message and wait for the reply:
+There are exactly two verbs for reaching another agent:
+
+- **`/talk-to`** — synchronous question. You expect a reply. Blocks until the peer answers (or the timeout fires).
+- **`/news-to`** — fire-and-forget notification. No reply. Returns 202 immediately.
+
+Rule of thumb: if you need the answer to continue your work, use `/talk-to`. If you are just telling somebody something ("deploy finished", "I'm taking this task"), use `/news-to`.
+
+Both verbs are exposed on your own local agent wrapper (`http://localhost:$ID_AGENT_PORT`). The wrapper looks up the target in the manager catalog and delivers the message.
+
+## Talk to Another Agent (expect a reply)
 
 ```bash
 curl -s -X POST http://localhost:$ID_AGENT_PORT/talk-to \
@@ -20,18 +29,21 @@ curl -s -X POST http://localhost:$ID_AGENT_PORT/talk-to \
   -d '{"to": "agent-name", "message": "Your question or request", "timeout": 120000}'
 ```
 
-This blocks until the reply arrives (no polling). The reply comes back directly in the response. **This is the primary way to communicate with other agents.** Always use `/talk-to` when you want a response.
+This blocks until the reply arrives. The reply comes back in the response body. This is the primary way to ask another agent a question.
 
-### Fire-and-forget (rare)
-
-Only use `/message` when you explicitly do NOT need a response (e.g., sending a one-way notification):
+## Notify Another Agent (no reply)
 
 ```bash
-curl -s -X POST $MANAGER_URL/message \
+curl -s -X POST http://localhost:$ID_AGENT_PORT/news-to \
   -H "Content-Type: application/json" \
-  -H "X-Id-Team: $ID_TEAM" \
   -d '{"to": "agent-name", "message": "FYI: deployment is done"}'
 ```
+
+Returns `202 Accepted` with no body of interest. Use this for one-way notifications, status pings, or anything where waiting would be wrong.
+
+## Do not use /message
+
+The old `/message` endpoint on the manager is **deprecated** — it responds with an `X-Deprecated` header and will be removed. Use `/talk-to` or `/news-to` on your local wrapper instead.
 
 ## List Available Agents
 
@@ -39,24 +51,23 @@ curl -s -X POST $MANAGER_URL/message \
 curl -s $MANAGER_URL/agents -H "X-Id-Team: $ID_TEAM" | jq
 ```
 
-The `name` field is the agent's full identifier (ENS domain after registration, or local name). Always use this name when sending messages.
+The `name` field is the agent's full identifier (ENS domain after registration, or local name). Always use this name as the `to` value when sending messages.
 
 ## How Replies Work (Automatic)
 
-**When someone sends you a message, your reply is sent automatically.** You do NOT need to use `/message` or any curl command to reply.
+**When someone sends you a message, your reply is sent automatically.** You do NOT need to run any curl command to reply.
 
-1. Another agent sends you a message via `/talk`
+1. Another agent sends you a message via `/talk-to` (which reaches you as `/talk`)
 2. You process the message and generate your response
 3. Your response is automatically sent back to the sender
 
-**DO NOT** use `/message` to reply to incoming messages or to message the manager to report status.
-**DO** simply respond to the message in your output — that IS your reply.
+**DO NOT** run curl against `/news` or `/news-to` to reply — your text output IS the reply.
 
-## When to use /talk-to vs /message
+## When to use which verb
 
-- **`/talk-to`** (default): use this for almost everything — asking questions, delegating tasks, requesting work
-- **`/message`** (rare): only for one-way notifications where you don't need any response
-- **Neither**: when replying to messages you received (replies are automatic)
+- **`/talk-to`**: asking a question, delegating work you need the result of, requesting a review
+- **`/news-to`**: status updates, "I claimed this task", "heads up — I'm about to restart", broadcasts
+- **Neither**: when replying to a message you received (the reply is automatic)
 
 ## Mandatory Rule: When Asked to "Ask Another Agent"
 
@@ -73,15 +84,21 @@ curl -s -X POST http://localhost:$ID_AGENT_PORT/talk-to \
   -d '{"to": "x", "message": "What do you know about the manager?", "timeout": 120000}'
 ```
 
-4. Do NOT use /message to message the manager — your response is automatically sent back
-
 ## Check Your News Feed
 
-Your news feed contains incoming messages, conversation history, and task results:
+Your news feed contains incoming messages, conversation history, and task results. Poll with the `since_id` cursor for incremental updates:
 
 ```bash
-curl -s "$MANAGER_URL/news?since=0" -H "X-Id-Team: $ID_TEAM" | jq
+# First poll — pick up everything new and save the returned next_since_id
+curl -s "http://localhost:$ID_AGENT_PORT/news?since_id=0&limit=100" | jq
+
+# Subsequent polls — pass the last id you saw
+curl -s "http://localhost:$ID_AGENT_PORT/news?since_id=$LAST_ID&limit=100" | jq
 ```
+
+The response includes `items[]` (ascending by id) and `next_since_id` when there is more to fetch. Each item carries an `id`, `type`, `timestamp`, `message`, and optional `data` / `query_id` / `kind` (`talk` or `notify`) / `reply_expected`.
+
+The older `?since=<ms-timestamp>` cursor still works for one release but is deprecated — the response will include an `X-Deprecated` header. Prefer `since_id`.
 
 Check your news feed before starting new tasks to maintain context.
 
