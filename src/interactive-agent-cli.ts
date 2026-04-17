@@ -1388,13 +1388,29 @@ async function saveAgentNewsFeed(targetName: string) {
 // is open. Shares nothing with the rest of the CLI's agent machinery.
 // ---------------------------------------------------------------------------
 
-let publicSession: { url: string; authKey: string | null; host: string } | null = null;
+type PublicChatMessage = { role: 'user' | 'assistant'; content: string };
+type PublicSession = {
+  url: string;
+  authKey: string | null;
+  host: string;
+  sessionId: string;
+  history: PublicChatMessage[];
+};
+let publicSession: PublicSession | null = null;
 let publicSessionSavedPrompt: string | null = null;
 
 function normalizePublicUrl(raw: string): string {
   const s = raw.trim();
   if (/^https?:\/\//i.test(s)) return s.replace(/\/+$/, '');
   return `https://${s.replace(/\/+$/, '')}`;
+}
+
+function newPublicSessionId(): string {
+  // No ulid dep in this tree — a short time-ordered token is enough for the
+  // server to group entries in the inbox and for humans to eyeball in logs.
+  const stamp = Date.now().toString(36);
+  const rand = Math.random().toString(36).slice(2, 10);
+  return `pub-${stamp}-${rand}`;
 }
 
 async function enterPublicSession(rawUrl: string): Promise<void> {
@@ -1416,22 +1432,31 @@ async function enterPublicSession(rawUrl: string): Promise<void> {
     return;
   }
 
-  publicSession = { url, authKey, host };
+  publicSession = {
+    url,
+    authKey,
+    host,
+    sessionId: newPublicSessionId(),
+    history: [],
+  };
   publicSessionSavedPrompt = (rl as any)._prompt ?? null;
   console.log(`\n${colors.cyan}🔗 Connected to public-agent at ${url}${colors.reset}`);
+  console.log(`${colors.gray}   session_id: ${publicSession.sessionId}${colors.reset}`);
   if (authKey) {
     console.log(`${colors.gray}   Bearer auth on (PUBLIC_AGENT_AUTH_KEY set).${colors.reset}`);
   }
-  console.log(`${colors.gray}   Type ${colors.yellow}/exit${colors.gray} to return.${colors.reset}\n`);
+  console.log(`${colors.gray}   History is kept in-memory for this session. Type ${colors.yellow}/exit${colors.gray} to clear and return.${colors.reset}\n`);
   rl.setPrompt(`${colors.cyan}public:${host}>${colors.reset} `);
   rl.prompt();
 }
 
 function exitPublicSession(): void {
   if (!publicSession) return;
-  const host = publicSession.host;
+  const { host, history } = publicSession;
+  // Null-out the session so history goes out of scope and eventually GCs.
+  // A fresh /public starts with an empty history and a new session_id.
   publicSession = null;
-  console.log(`\n${colors.gray}🔙 Left public session (${host}).${colors.reset}\n`);
+  console.log(`\n${colors.gray}🔙 Left public session (${host}, ${history.length} turns cleared).${colors.reset}\n`);
   if (publicSessionSavedPrompt) {
     rl.setPrompt(publicSessionSavedPrompt);
     publicSessionSavedPrompt = null;
@@ -1443,35 +1468,50 @@ function exitPublicSession(): void {
 
 async function sendPublicMessage(message: string): Promise<void> {
   if (!publicSession) return;
-  const { url, authKey } = publicSession;
+  const { url, authKey, sessionId, history } = publicSession;
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
   if (authKey) headers.Authorization = `Bearer ${authKey}`;
+
+  // Append the user turn before the request so the server receives the
+  // full history including this turn. We only commit the assistant turn on
+  // a successful reply — on error we roll the user turn back so a retry
+  // isn't double-counted.
+  history.push({ role: 'user', content: message });
+
   try {
     const resp = await fetch(`${url}/talk`, {
       method: 'POST',
       headers,
-      body: JSON.stringify({ message, from: `cli:${name}` }),
+      body: JSON.stringify({
+        messages: history,
+        session_id: sessionId,
+        from: `cli:${name}`,
+      }),
       signal: AbortSignal.timeout(60_000),
     });
     const text = await resp.text();
     let data: any;
     try { data = JSON.parse(text); } catch { data = null; }
     if (!resp.ok) {
+      history.pop();  // roll back the user turn so the user can /retry or edit
       const detail = data?.error ? `${data.error}${data.detail ? `: ${data.detail}` : ''}` : text.slice(0, 500);
       console.log(`\n${colors.red}❌ ${resp.status} ${resp.statusText}${colors.reset} ${detail}\n`);
       return;
     }
     if (data && typeof data.reply === 'string') {
+      history.push({ role: 'assistant', content: data.reply });
       console.log(`\n${data.reply}\n`);
-      const meta: string[] = [];
+      const meta: string[] = [`turns=${history.length}`];
       if (data.model) meta.push(`model=${data.model}`);
       if (data.tokens_used?.total) meta.push(`tokens=${data.tokens_used.total}`);
       if (data.inbox_id) meta.push(`inbox=${data.inbox_id}`);
-      if (meta.length) console.log(`${colors.gray}${meta.join('  ')}${colors.reset}\n`);
+      console.log(`${colors.gray}${meta.join('  ')}${colors.reset}\n`);
     } else {
+      history.pop();
       console.log(`\n${colors.gray}${text.slice(0, 1000)}${colors.reset}\n`);
     }
   } catch (err: any) {
+    history.pop();
     console.log(`\n${colors.red}❌ request failed:${colors.reset} ${err.message ?? err}\n`);
   }
 }
