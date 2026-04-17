@@ -8,6 +8,7 @@ import fs from 'fs';
 import path from 'path';
 import { execFileSync, spawn } from 'child_process';
 import WebSocket from 'ws';
+import yaml from 'js-yaml';
 import { fileURLToPath } from 'url';
 import { createDb, getOrCreateTeamId, migrateDb, type Db } from './db.js';
 import { processConfig, getConfigParameters } from './config-parser.js';
@@ -1060,6 +1061,65 @@ function getAgentType(agentData: any): 'local' | 'virtual' | 'interactive' {
   return 'local';
 }
 
+/**
+ * If configs/<teamName>.yaml is missing, serialize the team's live DB state
+ * into a YAML config so a future /deploy has something to read.
+ * When force=true, overwrite even if the file exists.
+ */
+async function regenerateTeamConfigIfMissing(teamName: string, force: boolean = false): Promise<void> {
+  const configPath = `configs/${teamName}.yaml`;
+  const exists = fs.existsSync(configPath);
+
+  if (exists && !force) {
+    console.log(`${colors.gray}   ${configPath} exists, using as-is${colors.reset}`);
+    return;
+  }
+
+  try {
+    const resp = await managerFetch('/agents');
+    if (!resp.ok) {
+      console.log(`${colors.yellow}   ⚠️  Could not fetch agents to regenerate ${configPath}: ${resp.statusText}${colors.reset}`);
+      return;
+    }
+    const data: any = await resp.json();
+    const agents: any[] = (data.agents || []).filter((a: any) => a.type === 'claude');
+
+    if (agents.length === 0) {
+      console.log(`${colors.gray}   No agents in team — skipping config regen${colors.reset}`);
+      return;
+    }
+
+    const serialized: Record<string, any> = {
+      version: '1',
+      team: teamName,
+      agents: agents.map((a: any) => {
+        const md = a.metadata || {};
+        const entry: Record<string, any> = {
+          name: a.alias || a.name,
+        };
+        if (md.description) entry.description = md.description;
+        const runtime = md.runtime || (a as any).runtime;
+        if (runtime) entry.runtime = runtime;
+        if (a.model) entry.model = a.model;
+        if (a.workingDirectory) entry.workingDirectory = a.workingDirectory;
+        if (md.local === true) entry.local = true;
+        return entry;
+      }),
+    };
+
+    const dir = path.dirname(configPath);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+
+    const header = exists
+      ? `# Regenerated from live team state by /agents rebuild --regenerate-config\n`
+      : `# Regenerated from live team state by /agents rebuild (file was missing)\n`;
+    fs.writeFileSync(configPath, header + yaml.dump(serialized, { noRefs: true, lineWidth: 120 }));
+    console.log(`${colors.green}   ✏️  regenerated ${configPath} from live team state${colors.reset}`);
+  } catch (e: any) {
+    console.log(`${colors.yellow}   ⚠️  Failed to regenerate ${configPath}: ${e?.message || e}${colors.reset}`);
+  }
+}
+
 async function registerWithManager() {
   // Always register - you are an agent in the network
   try {
@@ -1655,6 +1715,7 @@ async function handleLine(line: string) {
 
     if (!['start', 'stop', 'rebuild', 'save', 'reset'].includes(action)) {
       console.log(`\n${colors.red}❌ Usage: /agents <start|stop|rebuild|reset|save>${colors.reset}`);
+      console.log(`${colors.gray}  /agents rebuild [--regenerate-config]  - Rebuild all agents; optionally rewrite configs/<team>.yaml from DB${colors.reset}`);
       console.log(`${colors.gray}  /agents reset [config-file]  - Reset agents with plugins from config${colors.reset}\n`);
       rl.prompt();
       return;
@@ -1775,7 +1836,10 @@ async function handleLine(line: string) {
 
     // Rebuild: restart all local agent processes with latest code
     if (action === 'rebuild') {
+      const forceRegen = parts.slice(1).includes('--regenerate-config');
       console.log(`\n${colors.yellow}🔨 Rebuilding ${agents.length} agent(s)...${colors.reset}\n`);
+
+      await regenerateTeamConfigIfMissing(activeTeam, forceRegen);
 
       let success = 0;
       let failed = 0;
@@ -1935,7 +1999,7 @@ async function handleLine(line: string) {
     const arg = parts.slice(2).join(' ');
 
     if (!target || !action) {
-      console.log(`\n${colors.red}❌ Usage: /agent <name> <start|stop|rebuild|logs [-f]|save>${colors.reset}`);
+      console.log(`\n${colors.red}❌ Usage: /agent <name> <start|stop|rebuild [--regenerate-config]|logs [-f]|save>${colors.reset}`);
       console.log(`${colors.gray}   logs: show recent logs (default 200 lines)${colors.reset}`);
       console.log(`${colors.gray}   logs -f: follow logs in real-time (Ctrl+C to stop)${colors.reset}`);
       console.log(`${colors.gray}   logs 50: show last 50 lines${colors.reset}\n`);
@@ -2006,6 +2070,7 @@ async function handleLine(line: string) {
           console.log(`\n${colors.yellow}⚠️  "${target}" has unknown type (${agentType})${colors.reset}\n`);
         }
       } else if (action === 'rebuild') {
+        const forceRegen = parts.slice(2).includes('--regenerate-config');
         // Check if this is a local agent
         const agentResp = await managerFetch(`/agents/by-name/${encodeURIComponent(target)}`);
         if (!agentResp.ok) throw new Error(`Agent "${target}" not found`);
@@ -2016,6 +2081,8 @@ async function handleLine(line: string) {
           // Local agent rebuild - just restart the process with correct ID
           console.log(`\n${colors.yellow}🔨 Rebuild local agent: ${target}${colors.reset}\n`);
           console.log(`${colors.gray}This will restart the local agent process with the latest code.${colors.reset}\n`);
+
+          await regenerateTeamConfigIfMissing(activeTeam, forceRegen);
 
           const result = await startLocalAgentProcess(agentData);
           if (result.success) {
@@ -2032,6 +2099,8 @@ async function handleLine(line: string) {
         // Non-local agent rebuild - restart via local agent process
         console.log(`\n${colors.yellow}🔨 Rebuild agent: ${target}${colors.reset}\n`);
         console.log(`${colors.gray}This will restart the agent process with the latest code.${colors.reset}\n`);
+
+        await regenerateTeamConfigIfMissing(activeTeam, forceRegen);
 
         const result = await startLocalAgentProcess(agentData);
         if (result.success) {
