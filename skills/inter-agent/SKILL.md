@@ -37,7 +37,7 @@ Returns 202 immediately. The message lands in the recipient's news feed but thei
 ```bash
 curl -s -X POST http://localhost:$ID_AGENT_PORT/news-to \
   -H "Content-Type: application/json" \
-  -d '{"to":"agent-name","message":"I got a message, can you pass this to the manager","trigger":true}'
+  -d '{"to":"agent-name","message":"I have a message, please pass it to the manager","trigger":true}'
 ```
 
 Returns 202 immediately. The recipient's LLM **is** woken and processes the message as a new task. You do not get a reply on this HTTP call — the recipient can `/news-to` you back later with results. Use for telephone chains, long-running pipelines, and any handoff where holding a sync HTTP connection open would be wrong.
