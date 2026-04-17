@@ -32,7 +32,29 @@ Claude Code (Admin)                    Manager CLI
 
 ## Setup
 
-Know the manager endpoint (default: `http://localhost:4000`)
+Two ports, two jobs — keep them straight:
+
+| Port | What lives there | Use for |
+|------|------------------|---------|
+| `4000` | Interactive CLI (only runs when `npm run id-agents` is active) | **Dispatch:** `POST /remote` with `/ask`, `/agents`, `/deploy`, etc. |
+| `4100` | Manager daemon (always running) | **Polling and admin queries:** `GET /query/:id`, `GET /agents`, `POST /talk-to`. |
+
+`GET /query/:id` **does not exist** on port 4000. Polling there returns a 404 or the wrong JSON shape. Always poll against `127.0.0.1:4100`.
+
+### IPv6 vs IPv4 gotcha (macOS especially)
+
+On macOS, `localhost` frequently resolves to `::1` (IPv6) first. Our servers bind to `0.0.0.0` / `127.0.0.1` (IPv4), so a `curl localhost:4000` can **silently hit a different process** if some other dev tool (Vite, Next.js, etc.) happens to be listening on `[::1]:4000` in IPv6. Symptom: the JSON you get back has nothing to do with id-agents.
+
+Always use `127.0.0.1` (not `localhost`) in every curl example, or pass `-4` to force IPv4. The snippets below follow this rule.
+
+### Environment variables
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `MANAGER_URL` | `http://127.0.0.1:4000` | Dispatch via the interactive CLI's `/remote`. |
+| `MANAGER_DAEMON_URL` | `http://127.0.0.1:4100` | Polling via the manager daemon's `/query/:id`, `/agents`, etc. |
+| `ID_TEAM` | *(unset)* | Optional team header for daemon requests. Default team is used if unset. |
+| `ADMIN_LISTENER_PORT` | `4050` | Local listener port when using the reply-listener scripts. |
 
 ## Usage
 
@@ -53,7 +75,7 @@ Start a temporary HTTP server to receive replies:
 ```bash
 node skills/idagents-admin-control/start-listener.js [port]
 # Default port: 4050
-# Outputs: Listening on http://localhost:4050
+# Outputs: Listening on http://127.0.0.1:4050
 ```
 
 ### 2. Send Message to Manager
@@ -61,7 +83,7 @@ node skills/idagents-admin-control/start-listener.js [port]
 Send a message and specify your reply endpoint:
 
 ```bash
-./skills/idagents-admin-control/talk-to-manager.sh "What agents are running?" http://localhost:4050
+./skills/idagents-admin-control/talk-to-manager.sh "What agents are running?" http://127.0.0.1:4050
 ```
 
 ### 3. Execute Remote Command
@@ -118,16 +140,11 @@ Execute a CLI command:
 ./talk-to-manager.sh "Done! Spawned designer, frontend, and backend agents."
 ```
 
-## Environment Variables
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `MANAGER_URL` | `http://localhost:4000` | Manager endpoint |
-| `ADMIN_LISTENER_PORT` | `4050` | Port for temp listener |
-
 ## Polling for Agent Replies
 
-After dispatching work to an agent via `/remote`, poll **`GET /query/<id>`** for the reply. The queryId comes back from the dispatch call, and the query endpoint tells you the lifecycle state without requiring a timestamp filter. Always run dispatch and poll as separate steps, and run the poll in the background.
+After dispatching work to an agent via `/remote` on port 4000, poll **`GET /query/<id>` on port 4100** for the reply. The queryId comes back from the dispatch call; the query endpoint tells you the lifecycle state without any timestamp filter. Always run dispatch and poll as separate steps, and run the poll in the background.
+
+> Different ports on purpose: dispatch goes through the interactive CLI (`4000`), polling goes through the manager daemon (`4100`). The daemon is the source of truth for query state — the CLI just forwards dispatches.
 
 A query moves through one of these statuses:
 
@@ -141,24 +158,39 @@ A query moves through one of these statuses:
 
 Only `delivered`, `failed`, and `expired` are terminal.
 
+### Response shape from `POST /remote` with `/ask`
+
+The interactive CLI wraps every command result as `{ success, result, timestamp }`. For `/ask`, `result` is a **human-readable string**, not a structured object:
+
+```json
+{
+  "success": true,
+  "result": "Message sent to coder. Query ID: query_1776400000000_ab1cd. Poll /news?query_id=query_1776400000000_ab1cd for response.",
+  "timestamp": 1776400000000
+}
+```
+
+There is no top-level `queryId` field. Extract it with the regex `query_[0-9a-z_]+` against `result`. The snippets below do exactly that.
+
 ### Single Agent
 
 **Dispatch (foreground, one-shot).** Capture the queryId.
 
 ```bash
-QID=$(curl -s -X POST http://localhost:4000/remote \
+QID=$(curl -s -X POST http://127.0.0.1:4000/remote \
   -H "Content-Type: application/json" \
   -d '{"command":"/ask <agent> <task>"}' \
-  | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('queryId') or d.get('result',{}).get('queryId') or '')")
+  | python3 -c "import sys,json,re; d=json.load(sys.stdin); s=d.get('result') if isinstance(d.get('result'),str) else ''; m=re.search(r'query_[0-9a-z_]+', s or ''); print(m.group(0) if m else (d.get('query_id') or ''))")
 echo "queryId=$QID"
 ```
 
-**Poll (background, non-blocking).** Run with `run_in_background: true` (Claude Code Bash tool) so the conversation continues while the reply arrives.
+**Poll (background, non-blocking).** Run with `run_in_background: true` (Claude Code Bash tool) so the conversation continues while the reply arrives. Poll the **daemon** on port 4100.
 
 ```bash
 # Poll every 10s for up to 15 minutes — long tasks routinely take 5-15 min.
+DAEMON="${MANAGER_DAEMON_URL:-http://127.0.0.1:4100}"
 for i in $(seq 1 90); do
-  body=$(curl -s "$MANAGER_URL/query/$QID" -H "X-Id-Team: $ID_TEAM")
+  body=$(curl -s "$DAEMON/query/$QID" ${ID_TEAM:+-H "X-Id-Team: $ID_TEAM"})
   status=$(echo "$body" | python3 -c "import sys,json; print(json.load(sys.stdin).get('status',''))")
   case "$status" in
     delivered)
@@ -182,10 +214,10 @@ No `BEFORE` timestamp, no `outbound.reply` filter, no news-feed scraping. The qu
 ```bash
 declare -A QIDS
 for agent in agent-a agent-b agent-c; do
-  qid=$(curl -s -X POST http://localhost:4000/remote \
+  qid=$(curl -s -X POST http://127.0.0.1:4000/remote \
     -H "Content-Type: application/json" \
     -d "{\"command\":\"/ask ${agent} <task>\"}" \
-    | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('queryId') or d.get('result',{}).get('queryId') or '')")
+    | python3 -c "import sys,json,re; d=json.load(sys.stdin); s=d.get('result') if isinstance(d.get('result'),str) else ''; m=re.search(r'query_[0-9a-z_]+', s or ''); print(m.group(0) if m else (d.get('query_id') or ''))")
   QIDS[$agent]=$qid
 done
 ```
@@ -194,11 +226,12 @@ done
 
 ```bash
 # Wait for 2 of 3 delivered, check every 10s, max 15 minutes.
+DAEMON="${MANAGER_DAEMON_URL:-http://127.0.0.1:4100}"
 for i in $(seq 1 90); do
   done_count=0
   results=""
   for agent in "${!QIDS[@]}"; do
-    body=$(curl -s "$MANAGER_URL/query/${QIDS[$agent]}" -H "X-Id-Team: $ID_TEAM")
+    body=$(curl -s "$DAEMON/query/${QIDS[$agent]}" ${ID_TEAM:+-H "X-Id-Team: $ID_TEAM"})
     status=$(echo "$body" | python3 -c "import sys,json; print(json.load(sys.stdin).get('status',''))")
     if [ "$status" = "delivered" ] || [ "$status" = "failed" ] || [ "$status" = "expired" ]; then
       done_count=$((done_count+1))

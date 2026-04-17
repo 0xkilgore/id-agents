@@ -6,20 +6,20 @@
 #
 # Arguments:
 #   message        - The message to send
-#   reply_endpoint - Where to receive the reply (default: http://localhost:4100/news)
+#   reply_endpoint - Where to receive the reply (default: http://127.0.0.1:4100/news)
 #
 # Environment:
-#   MANAGER_URL - Manager endpoint (default: http://localhost:4000)
+#   MANAGER_URL - Manager endpoint (default: http://127.0.0.1:4000)
 #
 
 MESSAGE="$1"
-REPLY_ENDPOINT="${2:-http://localhost:4100/news}"
-MANAGER_URL="${MANAGER_URL:-http://localhost:4000}"
+REPLY_ENDPOINT="${2:-http://127.0.0.1:4100/news}"
+MANAGER_URL="${MANAGER_URL:-http://127.0.0.1:4000}"
 
 if [ -z "$MESSAGE" ]; then
   echo "Usage: $0 \"message\" [reply_endpoint]"
   echo ""
-  echo "Example: $0 \"Can I spawn a new agent?\" http://localhost:4100/news"
+  echo "Example: $0 \"Can I spawn a new agent?\" http://127.0.0.1:4100/news"
   exit 1
 fi
 

@@ -95,7 +95,7 @@ const server = http.createServer((req, res) => {
 });
 
 server.listen(port, '0.0.0.0', () => {
-  console.log(`Admin listener started on http://localhost:${port}`);
+  console.log(`Admin listener started on http://127.0.0.1:${port}`);
   console.log(`Waiting for replies... (timeout: ${timeout/1000}s)`);
   console.log('Press Ctrl+C to stop\n');
 });

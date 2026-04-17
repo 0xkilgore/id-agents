@@ -80,7 +80,7 @@ while true; do
       sleep "$POLL_INTERVAL"
       POLLS=$((POLLS + 1))
 
-      NEWS=$(curl -s "http://localhost:$AGENT_PORT/news?query_id=$QUERY_ID" 2>/dev/null || echo "{}")
+      NEWS=$(curl -s "http://127.0.0.1:$AGENT_PORT/news?query_id=$QUERY_ID" 2>/dev/null || echo "{}")
 
       if echo "$NEWS" | grep -q "query.completed"; then
         COMPLETED=true

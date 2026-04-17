@@ -15,7 +15,7 @@
  *   listen              - Start listener only (for manual use)
  *
  * Environment:
- *   MANAGER_URL        - Manager endpoint (default: http://localhost:4000)
+ *   MANAGER_URL        - Manager endpoint (default: http://127.0.0.1:4000)
  *   ADMIN_API_KEY      - API key (default: from ~/.id-agents/admin.key)
  *   ADMIN_LISTENER_PORT - Listener port (default: 4100)
  */
@@ -31,7 +31,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 // Configuration
-const MANAGER_URL = process.env.MANAGER_URL || 'http://localhost:4000';
+const MANAGER_URL = process.env.MANAGER_URL || 'http://127.0.0.1:4000';
 const REPLY_TIMEOUT = parseInt(process.env.ADMIN_REPLY_TIMEOUT) || 300000; // 5 min
 
 // Find an available port dynamically
@@ -175,7 +175,7 @@ async function talkToManager(message) {
     body: JSON.stringify({
       message,
       from: 'admin',
-      reply_endpoint: `http://localhost:${port}/news`
+      reply_endpoint: `http://127.0.0.1:${port}/news`
     })
   });
 

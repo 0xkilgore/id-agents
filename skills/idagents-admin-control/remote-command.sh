@@ -8,11 +8,11 @@
 #   command - The CLI command to execute (e.g., "/agents", "/spawn myagent")
 #
 # Environment:
-#   MANAGER_URL   - Manager endpoint (default: http://localhost:4000)
+#   MANAGER_URL   - Manager endpoint (default: http://127.0.0.1:4000)
 #
 
 COMMAND="$1"
-MANAGER_URL="${MANAGER_URL:-http://localhost:4000}"
+MANAGER_URL="${MANAGER_URL:-http://127.0.0.1:4000}"
 
 if [ -z "$COMMAND" ]; then
   echo "Usage: $0 \"/command args\""
