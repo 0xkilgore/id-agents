@@ -32,8 +32,17 @@ export function buildCatalog(env: Env) {
         title: 'Ask a question',
         method: 'POST',
         endpoint: '/talk',
-        description: 'Synchronous Q&A. Returns the LLM reply in the response body. Every call is appended to the inbox for human review.',
-        input_schema: { message: 'string (required)', from: 'string (optional)' },
+        description:
+          'Synchronous Q&A. Returns { reply, session_id, model, inbox_id, tokens_used }. ' +
+          'Omit session_id to start a new conversation — the server mints one and returns it. ' +
+          'Pass the returned session_id back on follow-up turns to thread them. ' +
+          'Sessions are in-memory only (lost on restart), expire after SESSION_IDLE_MINUTES (default 60), ' +
+          'and cap at MAX_TURNS_PER_SESSION (default 50) after which /talk returns 409 with new_session_required:true.',
+        input_schema: {
+          message: 'string (required)',
+          from: 'string (optional)',
+          session_id: 'string (optional; UUID from a prior reply)',
+        },
       },
       {
         id: 'news-get',

@@ -69,9 +69,28 @@ Response shape:
   "reply": "…model output…",
   "model": "openai/gpt-4o-mini",
   "inbox_id": "2026-04-17T12-34-56-7b3fa2",
-  "tokens_used": { "prompt": 23, "completion": 140, "total": 163 }
+  "tokens_used": { "prompt": 23, "completion": 140, "total": 163 },
+  "session_id": "6f1e9a4a-9a7d-4fa4-9c11-1b7f6b3c9fa8"
 }
 ```
+
+### Threading follow-up turns
+
+The server owns the conversation history — public clients cannot be trusted to maintain it themselves. To continue a conversation, pass the `session_id` returned from a previous call:
+
+```bash
+curl -s -X POST http://127.0.0.1:$PORT/talk \
+  -H 'Content-Type: application/json' \
+  -d '{"message":"And what was my first question?","session_id":"6f1e9a4a-9a7d-4fa4-9c11-1b7f6b3c9fa8","from":"curl"}'
+```
+
+Session retention and limits (all configurable):
+
+- **`MAX_SESSIONS`** (default `100`) — when full, the oldest session by last-access time is evicted.
+- **`SESSION_IDLE_MINUTES`** (default `60`) — sessions idle longer than this are purged lazily on the next `/talk` hit.
+- **`MAX_TURNS_PER_SESSION`** (default `50`) — after this many user turns, `/talk` responds `409` with `{ "error": "session_turn_limit", "new_session_required": true }`. Drop the old `session_id` and call again without one to start fresh.
+
+Sessions live in process memory only. A container restart drops every session; clients must be prepared to receive `session_id` afresh after an outage. Persistence is a future concern.
 
 **Push a notification (keyed mode):**
 
@@ -116,7 +135,7 @@ Supported JSON-RPC methods:
 
 Exposed tools:
 
-- **`talk`** — inputs `{ message: string, from?: string }`. Returns the model reply wrapped in MCP content.
+- **`talk`** — inputs `{ message: string, from?: string, session_id?: string }`. Returns the model reply wrapped in MCP content; the reply payload includes the server-minted `session_id` which the MCP client echoes back on the next call to thread the conversation.
 - **`news`** — inputs `{ from: string, message: string, type?: string, data?: object }`. Appends to the news log.
 
 Authorization bearer (if configured) must be sent on the `/mcp` request and is forwarded to the internal relay call.

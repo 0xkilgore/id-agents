@@ -24,8 +24,7 @@ export interface InboxEntry {
   tokens_used: { prompt: number; completion: number; total: number };
   status: 'unread' | 'archived';
   archived_at?: string;
-  session_id?: string | null;                                 // client-supplied group key
-  messages?: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>;
+  session_id?: string | null;  // server-minted; groups turns of one conversation
 }
 
 function inboxDir(env: Env): string {

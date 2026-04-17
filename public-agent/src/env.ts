@@ -9,6 +9,9 @@ export interface Env {
   dataDir: string;
   trustedProxy: boolean;
   maxReplyTokens: number;
+  maxSessions: number;
+  sessionIdleMinutes: number;
+  maxTurnsPerSession: number;
 }
 
 function required(name: string, value: string | undefined): string {
@@ -39,5 +42,8 @@ export function loadEnv(): Env {
     dataDir: process.env.PUBLIC_AGENT_DATA_DIR?.trim() || '/app/data',
     trustedProxy: (process.env.TRUSTED_PROXY ?? '').trim().toLowerCase() === 'true',
     maxReplyTokens: intOr('MAX_REPLY_TOKENS', process.env.MAX_REPLY_TOKENS, 1024),
+    maxSessions: intOr('MAX_SESSIONS', process.env.MAX_SESSIONS, 100),
+    sessionIdleMinutes: intOr('SESSION_IDLE_MINUTES', process.env.SESSION_IDLE_MINUTES, 60),
+    maxTurnsPerSession: intOr('MAX_TURNS_PER_SESSION', process.env.MAX_TURNS_PER_SESSION, 50),
   };
 }

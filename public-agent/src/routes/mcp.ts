@@ -35,12 +35,18 @@ function toolsList(env: Env) {
         name: 'talk',
         description:
           `Send a question to ${env.agentName}. Synchronous — returns the model reply in the same call. ` +
+          'Pass session_id from a previous reply to continue a conversation; omit to start a new one. ' +
           'Every call is appended to the inbox for human review.',
         inputSchema: {
           type: 'object',
           properties: {
             message: { type: 'string', description: 'Your question or message. Required.' },
             from: { type: 'string', description: 'Client-declared sender. Optional, not verified.' },
+            session_id: {
+              type: 'string',
+              description:
+                'Optional. Server-minted UUID returned from a prior call. Include on follow-up turns to thread them; omit to start a fresh session.',
+            },
           },
           required: ['message'],
         },
@@ -132,10 +138,13 @@ export function mcpRoutes(env: Env): Hono {
         if (name === 'talk') {
           const message = typeof args.message === 'string' ? args.message : '';
           const from = typeof args.from === 'string' ? args.from : undefined;
+          const session_id = typeof args.session_id === 'string' && args.session_id.trim()
+            ? args.session_id.trim()
+            : undefined;
           if (!message.trim()) {
             return c.json(rpcResult(req.id, toolResult({ error: 'missing_message' }, true)));
           }
-          const relayed = await relay(env, incomingAuth, '/talk', { message, from });
+          const relayed = await relay(env, incomingAuth, '/talk', { message, from, session_id });
           return c.json(rpcResult(req.id, toolResult(relayed.body, !relayed.ok)));
         }
 
