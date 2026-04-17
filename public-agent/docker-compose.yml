@@ -13,6 +13,11 @@ services:
     volumes:
       # Inbox + news log + budget counter persist here across restarts.
       - ./data:/app/data
+    # Egress lockdown runs in entrypoint.sh and needs to manage iptables.
+    cap_add:
+      - NET_ADMIN
+    security_opt:
+      - no-new-privileges:true
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1:${PUBLIC_AGENT_PORT:-4200}/healthz"]
       interval: 30s
