@@ -3,6 +3,8 @@ import type { Env } from '../env.js';
 import { openRouterChat } from '../lib/openrouter.js';
 import { writeInboxEntry, makeInboxId, type InboxEntry } from '../lib/inbox.js';
 import { requireAuth } from '../lib/auth.js';
+import { ipOf, tokenBucket } from '../lib/rate-limit.js';
+import { isOverBudget, recordTokens } from '../lib/budget.js';
 
 function clientIp(c: { req: { header: (n: string) => string | undefined } }): string | null {
   // Behind a reverse proxy we'd trust X-Forwarded-For; on Colima/Docker the
@@ -16,8 +18,17 @@ function clientIp(c: { req: { header: (n: string) => string | undefined } }): st
 
 export function talkRoutes(env: Env): Hono {
   const app = new Hono();
+  const limiter = tokenBucket(env.talkRateLimitPerMin, ipOf);
 
-  app.post('/talk', requireAuth(env), async (c) => {
+  app.post('/talk', requireAuth(env), limiter, async (c) => {
+    const budget = isOverBudget(env);
+    if (budget.over) {
+      return c.json(
+        { error: 'budget_exceeded', used: budget.used, limit: env.maxTokensPerDay, resets_at: budget.resets_at },
+        503,
+      );
+    }
+
     let body: { message?: string; from?: string };
     try {
       body = (await c.req.json()) as typeof body;
@@ -44,6 +55,12 @@ export function talkRoutes(env: Env): Hono {
     } catch (err) {
       console.error('[public-agent] /talk openrouter error:', err);
       return c.json({ error: 'upstream_error', detail: (err as Error).message }, 502);
+    }
+
+    try {
+      recordTokens(env, usage.total);
+    } catch (err) {
+      console.error('[public-agent] /talk budget write failed:', err);
     }
 
     const entry: InboxEntry = {
