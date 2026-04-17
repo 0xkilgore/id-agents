@@ -10,6 +10,7 @@ import { TasksTable } from './components/TasksTable.js';
 import { TaskDetail } from './components/TaskDetail.js';
 import { CalendarView } from './components/CalendarView.js';
 import { HeartbeatsView, type HeartbeatRow } from './components/HeartbeatsView.js';
+import { HeartbeatDetail } from './components/HeartbeatDetail.js';
 import type { Agent, NewsItem, Schedule, Task, Team } from './api/types.js';
 import {
   fetchAgentNews,
@@ -29,7 +30,8 @@ type View =
   | 'tasks'
   | 'task-detail'
   | 'calendar'
-  | 'heartbeats';
+  | 'heartbeats'
+  | 'heartbeat-detail';
 
 const AGENTS_POLL_MS = 2000;
 const TEAMS_POLL_MS = 15000;
@@ -361,6 +363,7 @@ export function App({ staticMode = false }: AppProps = {}): React.ReactElement {
 
   const [detailScroll, setDetailScroll] = useState(0);
   const [taskDetailScroll, setTaskDetailScroll] = useState(0);
+  const [hbDetailScroll, setHbDetailScroll] = useState(0);
 
   useEffect(() => {
     if (newsTotal === 0) {
@@ -445,6 +448,22 @@ export function App({ staticMode = false }: AppProps = {}): React.ReactElement {
     setHbWindowStart(0);
     setView('heartbeats');
   }, []);
+
+  const openHeartbeatDetail = useCallback(() => {
+    setHbDetailScroll(0);
+    setView('heartbeat-detail');
+  }, []);
+
+  const backToHeartbeats = useCallback(() => {
+    setView('heartbeats');
+  }, []);
+
+  const moveHbDetailScroll = useCallback(
+    (delta: number) => {
+      setHbDetailScroll((off) => Math.max(0, off + delta));
+    },
+    [],
+  );
 
   const moveHbSel = useCallback(
     (delta: number) => {
@@ -570,6 +589,7 @@ export function App({ staticMode = false }: AppProps = {}): React.ReactElement {
         if (input === 'a') return setView('agents');
         if (input === 't') return setView('tasks');
         if (input === 'c') return openCalendar();
+        if (key.rightArrow) return openHeartbeatDetail();
         if (key.leftArrow || key.escape) return setView('agents');
         if (key.upArrow) return moveHbSel(-1);
         if (key.downArrow) return moveHbSel(1);
@@ -577,6 +597,17 @@ export function App({ staticMode = false }: AppProps = {}): React.ReactElement {
         if (key.pageDown) return moveHbSel(heartbeatsWindowSize);
         if (isHomeKey(input)) return setHbSelectedIndex(0);
         if (isEndKey(input)) return setHbSelectedIndex(Math.max(0, hbTotal - 1));
+        return;
+      }
+
+      if (view === 'heartbeat-detail') {
+        if (key.leftArrow || key.escape) return backToHeartbeats();
+        if (key.upArrow) return moveHbDetailScroll(-1);
+        if (key.downArrow) return moveHbDetailScroll(1);
+        if (key.pageUp) return moveHbDetailScroll(-detailWindowSize);
+        if (key.pageDown) return moveHbDetailScroll(detailWindowSize);
+        if (isHomeKey(input)) return setHbDetailScroll(0);
+        if (isEndKey(input)) return setHbDetailScroll(Number.MAX_SAFE_INTEGER);
         return;
       }
 
@@ -668,6 +699,36 @@ export function App({ staticMode = false }: AppProps = {}): React.ReactElement {
           loading={schedulesPoll.lastUpdated === 0 && !schedulesPoll.error && !staticMode}
           error={schedulesPoll.error}
         />
+      ) : view === 'heartbeat-detail' ? (
+        (() => {
+          const sel = heartbeatRows[hbSelectedIndex];
+          if (!sel) {
+            return (
+              <Box flexDirection="column" borderStyle="round" paddingX={1}>
+                <Text bold>heartbeat · (none selected)</Text>
+                <Text dimColor> </Text>
+                <Text dimColor>(no row selected — press ← to return)</Text>
+                {Array.from({ length: Math.max(0, detailWindowSize - 1) }, (_, i) => (
+                  <Text key={`pad-${i}`}> </Text>
+                ))}
+              </Box>
+            );
+          }
+          const agent = allAgents.find((a) => a.name === sel.agent);
+          return (
+            <HeartbeatDetail
+              agentName={sel.agent}
+              workingDirectory={agent?.workingDirectory ?? null}
+              intervalSec={sel.intervalSec}
+              lastFireSec={sel.lastFireSec}
+              nextFireSec={sel.nextFireSec}
+              positionLabel={`agent ${hbSelectedIndex + 1} of ${hbTotal}`}
+              windowSize={detailWindowSize}
+              scrollOffset={hbDetailScroll}
+              contentWidth={DETAIL_CONTENT_WIDTH}
+            />
+          );
+        })()
       ) : view === 'task-detail' ? (
         <TaskDetail
           task={visibleTasks[taskSelectedIndex] ?? null}

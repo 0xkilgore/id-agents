@@ -8,7 +8,8 @@ export type FooterView =
   | 'tasks'
   | 'task-detail'
   | 'calendar'
-  | 'heartbeats';
+  | 'heartbeats'
+  | 'heartbeat-detail';
 
 interface FooterProps {
   view: FooterView;
@@ -20,7 +21,8 @@ const HINTS: Record<FooterView, string> = {
   tasks: '↑↓ nav · → detail · Tab team · t agents · c calendar · h heartbeats · p pause · q quit',
   'task-detail': '↑↓ scroll · ← back · p pause · q quit',
   calendar: '↑↓ nav · a agents · t tasks · h heartbeats · ← back · p pause · q quit',
-  heartbeats: '↑↓ nav · a agents · t tasks · c calendar · ← back · p pause · q quit',
+  heartbeats: '↑↓ nav · → detail · a agents · t tasks · c calendar · ← back · p pause · q quit',
+  'heartbeat-detail': '↑↓ scroll · ← back · p pause · q quit',
   news: '↑↓ scroll · → open · ← back · p pause · q quit',
   'news-detail': '↑↓ scroll · ← back · p pause · q quit',
 };

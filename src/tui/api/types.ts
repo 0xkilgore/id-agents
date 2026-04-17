@@ -15,6 +15,7 @@ export interface Agent {
   model?: string;
   type?: string;
   url?: string;
+  workingDirectory?: string;
   createdAt: number;
   lastHealthCheck?: number;
   metadata?: AgentMetadata;
