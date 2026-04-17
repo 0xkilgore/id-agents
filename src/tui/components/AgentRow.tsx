@@ -8,6 +8,7 @@ interface AgentRowProps {
   agent: Agent;
   selected: boolean;
   uptime: string;
+  newsColor: string;
 }
 
 const COLS = {
@@ -17,9 +18,12 @@ const COLS = {
   runtime: 12,
   status: 9,
   health: 11,
+  news: 2,
   hb: 3,
   uptime: 6,
 } as const;
+
+const NEWS_GLYPH = '●';
 
 function abbrevRuntime(rt?: string): string {
   if (!rt) return '—';
@@ -32,7 +36,7 @@ function renderHealth(health: string): string {
   return `${healthDot(health)} ${health}`;
 }
 
-function AgentRowInner({ agent, selected, uptime }: AgentRowProps): React.ReactElement {
+function AgentRowInner({ agent, selected, uptime, newsColor }: AgentRowProps): React.ReactElement {
   const marker = selected ? '▶ ' : '  ';
   const name = padRight(agent.alias ?? agent.name, COLS.name);
   const port = padRight(agent.port ? String(agent.port) : '—', COLS.port);
@@ -50,6 +54,8 @@ function AgentRowInner({ agent, selected, uptime }: AgentRowProps): React.ReactE
       <Text dimColor>{runtime}</Text>
       <Text color={statusColor(agent.status)}>{status}</Text>
       <Text color={healthColor(agent.health)}>{health}</Text>
+      <Text color={newsColor}>{NEWS_GLYPH}</Text>
+      {' '}
       {hb}
       {uptimeCell}
     </Text>
@@ -59,6 +65,7 @@ function AgentRowInner({ agent, selected, uptime }: AgentRowProps): React.ReactE
 export const AgentRow = React.memo(AgentRowInner, (prev, next) => {
   if (prev.selected !== next.selected) return false;
   if (prev.uptime !== next.uptime) return false;
+  if (prev.newsColor !== next.newsColor) return false;
   const a = prev.agent;
   const b = next.agent;
   return (
@@ -81,6 +88,7 @@ export function AgentRowHeader(): React.ReactElement {
       {padRight('RUNTIME', COLS.runtime)}
       {padRight('STATUS', COLS.status)}
       {padRight('HEALTH', COLS.health)}
+      {padRight('N', COLS.news)}
       {padRight('HB', COLS.hb)}
       {padRight('UPTIME', COLS.uptime)}
     </Text>

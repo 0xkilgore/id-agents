@@ -15,6 +15,7 @@ import type { Agent, NewsItem, Schedule, Task, Team } from './api/types.js';
 import {
   fetchAgentNews,
   fetchAgentsAllTeams,
+  fetchAgentsLatestNewsTs,
   fetchSchedulesAllTeams,
   fetchTasks,
   fetchTeams,
@@ -22,6 +23,7 @@ import {
 } from './api/manager.js';
 import { usePolling } from './hooks/usePolling.js';
 import { humanizeUptime } from './util/format.js';
+import { newsAgeColor } from './util/colors.js';
 
 type View =
   | 'agents'
@@ -103,8 +105,13 @@ export function App({ staticMode = false }: AppProps = {}): React.ReactElement {
   const [paused, setPaused] = useState(false);
   const [cooldownEpoch, setCooldownEpoch] = useState<number>(() => Date.now());
 
+  // Cooldown tick runs on news AND agents so the news-freshness dot in
+  // the agents table colours against the same 10s epoch rather than a
+  // free-running clock. Bucketed colour thresholds mean re-renders only
+  // fire when an item crosses a 60/300/900s band.
   useEffect(() => {
-    if (view !== 'news' || paused || staticMode) return;
+    const needsTick = view === 'news' || view === 'agents';
+    if (!needsTick || paused || staticMode) return;
     setCooldownEpoch(Date.now());
     const id = setInterval(() => setCooldownEpoch(Date.now()), NEWS_COOLDOWN_TICK_MS);
     return () => clearInterval(id);
@@ -133,6 +140,37 @@ export function App({ staticMode = false }: AppProps = {}): React.ReactElement {
     [manager, teams.length],
   );
   const allAgents = staticMode ? staticAllAgents ?? [] : agentsPoll.data ?? [];
+
+  // Per-agent news freshness — one batched fan-out per agents-poll cycle,
+  // gated to the agents view so other views don't pay the cost.
+  const newsFreshnessFetcher = useCallback(
+    (signal: AbortSignal): Promise<Array<[string, number | null]>> => {
+      if (allAgents.length === 0) return Promise.resolve([]);
+      return fetchAgentsLatestNewsTs(manager, SELF_AGENT, allAgents, signal).then((m) => [
+        ...m.entries(),
+      ]);
+    },
+    [manager, allAgents],
+  );
+  const newsFreshnessPoll = usePolling<Array<[string, number | null]>>(
+    newsFreshnessFetcher,
+    AGENTS_POLL_MS,
+    paused || staticMode || view !== 'agents',
+    [manager, allAgents.length, view],
+  );
+  const latestNewsTsById = useMemo(() => {
+    const m = new Map<string, number | null>();
+    for (const [id, ts] of newsFreshnessPoll.data ?? []) m.set(id, ts);
+    return m;
+  }, [newsFreshnessPoll.data]);
+  const newsColorById = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const a of allAgents) {
+      const ts = latestNewsTsById.get(a.id) ?? null;
+      m.set(a.id, ts == null ? 'gray' : newsAgeColor(ts, cooldownEpoch));
+    }
+    return m;
+  }, [allAgents, latestNewsTsById, cooldownEpoch]);
 
   const visibleAgents = useMemo(
     () =>
@@ -656,6 +694,7 @@ export function App({ staticMode = false }: AppProps = {}): React.ReactElement {
           <AgentsTable
             agents={visibleAgents}
             uptimeById={uptimeById}
+            newsColorById={newsColorById}
             selectedIndex={selectedIndex}
             windowStart={windowStart}
             windowSize={agentsWindowSize}

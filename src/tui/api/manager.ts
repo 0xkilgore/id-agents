@@ -87,6 +87,39 @@ export async function fetchAgentNews(
   return data.result?.items ?? [];
 }
 
+export async function fetchLatestNewsTs(
+  manager: string,
+  executor: string,
+  targetName: string,
+  signal: AbortSignal,
+): Promise<number | null> {
+  const items = await fetchAgentNews(manager, executor, targetName, signal);
+  if (items.length === 0) return null;
+  let max = 0;
+  for (const it of items) if (it.timestamp > max) max = it.timestamp;
+  return max > 0 ? max : null;
+}
+
+export async function fetchAgentsLatestNewsTs(
+  manager: string,
+  executor: string,
+  agents: Agent[],
+  signal: AbortSignal,
+): Promise<Map<string, number | null>> {
+  if (agents.length === 0) return new Map();
+  const results = await Promise.all(
+    agents.map(async (a) => {
+      try {
+        const ts = await fetchLatestNewsTs(manager, executor, a.name, signal);
+        return [a.id, ts] as const;
+      } catch {
+        return [a.id, null] as const;
+      }
+    }),
+  );
+  return new Map(results);
+}
+
 export async function fetchSchedulesForTeam(
   manager: string,
   executor: string,
