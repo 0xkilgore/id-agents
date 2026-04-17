@@ -232,22 +232,8 @@ export function App({ staticMode = false }: AppProps = {}): React.ReactElement {
     [manager, teams.length, view],
   );
   const allSchedules = schedulesPoll.data ?? [];
-  const visibleSchedules = useMemo(
-    () =>
-      selectedTeam === null
-        ? allSchedules
-        : allSchedules.filter((s) => s.teamName === selectedTeam),
-    [allSchedules, selectedTeam],
-  );
-  const schedTotal = visibleSchedules.length;
-  const schedulesTeamCounts = useMemo(() => {
-    const counts = new Map<string, number>();
-    for (const s of allSchedules) {
-      if (!s.teamName) continue;
-      counts.set(s.teamName, (counts.get(s.teamName) ?? 0) + 1);
-    }
-    return counts;
-  }, [allSchedules]);
+  // Calendar is a time-ordered, cross-team view — no team filter here.
+  const schedTotal = allSchedules.length;
 
   const heartbeatRows = useMemo<HeartbeatRow[]>(() => {
     const pollMs = schedulesPoll.lastUpdated || Date.now();
@@ -577,7 +563,6 @@ export function App({ staticMode = false }: AppProps = {}): React.ReactElement {
         if (input === 't') return setView('tasks');
         if (input === 'h') return openHeartbeats();
         if (key.leftArrow || key.escape) return setView('agents');
-        if (key.tab) return cycleTeam(key.shift ? -1 : 1);
         if (key.upArrow) return moveSchedSel(-1);
         if (key.downArrow) return moveSchedSel(1);
         if (key.pageUp) return moveSchedSel(-calendarWindowSize);
@@ -671,23 +656,15 @@ export function App({ staticMode = false }: AppProps = {}): React.ReactElement {
           />
         </>
       ) : view === 'calendar' ? (
-        <>
-          <TeamsPanel
-            teams={teams}
-            selectedTeam={selectedTeam}
-            allCount={allSchedules.length}
-            teamCounts={schedulesTeamCounts}
-          />
-          <CalendarView
-            schedules={visibleSchedules}
-            nowSec={Math.floor((schedulesPoll.lastUpdated || Date.now()) / 1000)}
-            selectedIndex={schedSelectedIndex}
-            windowStart={schedWindowStart}
-            windowSize={calendarWindowSize}
-            loading={schedulesPoll.lastUpdated === 0 && !schedulesPoll.error && !staticMode}
-            error={schedulesPoll.error}
-          />
-        </>
+        <CalendarView
+          schedules={allSchedules}
+          nowSec={Math.floor((schedulesPoll.lastUpdated || Date.now()) / 1000)}
+          selectedIndex={schedSelectedIndex}
+          windowStart={schedWindowStart}
+          windowSize={calendarWindowSize}
+          loading={schedulesPoll.lastUpdated === 0 && !schedulesPoll.error && !staticMode}
+          error={schedulesPoll.error}
+        />
       ) : view === 'heartbeats' ? (
         <>
           <TeamsPanel

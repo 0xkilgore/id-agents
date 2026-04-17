@@ -19,7 +19,7 @@ const HINTS: Record<FooterView, string> = {
   agents: '↑↓ nav · → news · Tab team · t tasks · c calendar · h heartbeats · p pause · q quit',
   tasks: '↑↓ nav · → detail · Tab team · t agents · c calendar · h heartbeats · p pause · q quit',
   'task-detail': '↑↓ scroll · ← back · p pause · q quit',
-  calendar: '↑↓ nav · Tab team · a agents · t tasks · h heartbeats · ← back · p pause · q quit',
+  calendar: '↑↓ nav · a agents · t tasks · h heartbeats · ← back · p pause · q quit',
   heartbeats: '↑↓ nav · Tab team · a agents · t tasks · c calendar · ← back · p pause · q quit',
   news: '↑↓ scroll · → open · ← back · p pause · q quit',
   'news-detail': '↑↓ scroll · ← back · p pause · q quit',
