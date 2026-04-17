@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.1.58-beta
+
+### Features
+
+- **TUI Tasks view**: new top-level page listing `/task` records, grouped by team with status color coding (done gray, todo yellow, doing green), per-row drill-in via `→` opening a full-page Task Detail view with title, description, owner, timestamps, and linked events.
+- **TUI Calendar view**: new top-level page showing upcoming scheduled items sorted by next occurrence. Heartbeat-kind items are filtered out so they don't duplicate the Heartbeats view.
+- **TUI Heartbeats view**: new top-level page listing agents with active heartbeats, showing interval, last fire, next fire, with per-row drill-in via `→` loading the agent's full `HEARTBEAT.md` in a scrollable body.
+- **Per-agent news freshness indicator**: new `N` column on the Agents table showing a colored dot whose color reflects the age of the agent's most recent news item (greenBright < 1m → green < 5m → yellow < 15m → gray). Batched fetch per 2s poll cycle, bucketed against the 10s cooldown epoch so the dot only re-renders on band crossings.
+
+### Changed
+
+- **TUI navigation refactor**: Tasks is now a drill-down from Agents (press `t` to open, `←` to return) rather than a peer top-level view. Calendar and Heartbeats are peer top-level views reached via `c` / `h`. The `← back` hint is moved to the end of every footer so it reads as an exit action, and removed from top-level views where `←` has nowhere to go back to.
+
+### Fixed
+
+- **`idagents-admin-control` skill not loading**: added the missing YAML frontmatter (`name` + `description`) to `SKILL.md`. Without it Claude Code's skill loader silently skipped the skill, so new admin sessions couldn't pick it up.
+- **Three polling onboarding gotchas in the admin-control skill**:
+  - Wrong endpoint: introduced `MANAGER_DAEMON_URL` (default `http://127.0.0.1:4100`) for polling and reserves `MANAGER_URL` (port 4000) for dispatch. The old skill example pointed polling at port 4000 which has no `/query/:id` route.
+  - IPv6 vs IPv4 collision: all examples and shell scripts now use `127.0.0.1` instead of `localhost` so polling doesn't silently hit a different dev server listening on `[::1]:4000`.
+  - QueryId extraction: the `/remote /ask` response returns `result` as a human-readable string (not a structured `queryId` field). Documented the `query_[0-9a-z_]+` regex extraction explicitly with a structured-field fallback.
+- **Calendar + Heartbeats scroll-drawing artifacts**: the `TeamsPanel` chips bar has variable height that made fixed `*_CHROME_ROWS` constants unreliable, causing the list to overflow the terminal by 2-3 rows on narrow widths and scroll the previous frame up on every redraw (leaking chrome fragments). Calendar drops the chips bar entirely; Heartbeats stabilizes the chrome calculation so it no longer overflows.
+
+### Removed
+
+- **`feature/tui-dashboard` worktree and branch**: the worktree was useful during initial TUI development but all TUI work has been merged back to main. The tui agent now works on the main checkout directly alongside `agents` and `cto`. Local worktree removed, local + origin branches deleted.
+
 ## 0.1.57-beta
 
 ### Changed
