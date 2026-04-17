@@ -60,6 +60,33 @@ export class PgNewsRepo implements NewsRepository {
     return rows;
   }
 
+  async pollSinceId(
+    agentId: string,
+    sinceId: number,
+    opts?: { limit?: number; queryId?: string },
+  ): Promise<NewsItemRow[]> {
+    const params: unknown[] = [agentId, sinceId];
+    let where = `agent_id = $1 AND id > $2`;
+
+    if (opts?.queryId) {
+      params.push(opts.queryId);
+      where += ` AND query_id = $${params.length}`;
+    }
+
+    const limit = opts?.limit ?? 1000;
+    params.push(limit);
+
+    const { rows } = await this.db.query<NewsItemRow>(
+      `SELECT id, team_id, agent_id, query_id, type, timestamp, message, data
+       FROM news_items
+       WHERE ${where}
+       ORDER BY id ASC
+       LIMIT $${params.length}`,
+      params,
+    );
+    return rows;
+  }
+
   async getRecent(teamId: string, types: string[], limit: number): Promise<NewsItemRow[]> {
     // Build dynamic IN clause: $2, $3, ... for each type
     const placeholders = types.map((_, i) => `$${i + 2}`).join(', ');

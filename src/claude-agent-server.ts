@@ -119,6 +119,8 @@ function isContentFilterError(errorMessage: string): boolean {
 }
 
 export interface NewsItem {
+  /** Monotonic server-side id from news_items.id. Used as the since_id cursor. */
+  id?: number;
   type: string;
   timestamp: number;
   message?: string;
@@ -783,33 +785,61 @@ export class AgentRestServer {
     });
 
     // News endpoint - poll for updates
+    // Preferred cursor: since_id=<monotonic id>&limit=N (server-side, ascending id).
+    // Deprecated cursor: since=<ms-timestamp> — still accepted for one release,
+    // with an X-Deprecated response header to warn callers.
     this.app.get('/news', (req, res) => {
+      const hasSinceId = typeof req.query.since_id === 'string' && req.query.since_id !== '';
+      const sinceId = hasSinceId ? parseInt(req.query.since_id as string) || 0 : 0;
       const since = parseInt(req.query.since as string) || 0;
       const limit = parseInt(req.query.limit as string) || undefined;
       const chars_start = parseInt(req.query.chars_start as string);
       const chars_end = parseInt(req.query.chars_end as string);
       const query_id = req.query.query_id as string | undefined;
 
+      if (!hasSinceId && typeof req.query.since === 'string') {
+        res.setHeader(
+          'X-Deprecated',
+          'since=<ms> is deprecated; use since_id=<int> with the id field on each news item',
+        );
+      }
+
       const run = async () => {
         let recentNews: NewsItem[] = [];
 
         if (this.db && this.dbTeamId && this.dbAgentId) {
-          const rows = await this.db.news.poll(this.dbAgentId, since, {
-            limit: 1000,
-            queryId: query_id,
-          });
+          const rows = hasSinceId
+            ? await this.db.news.pollSinceId(this.dbAgentId, sinceId, {
+                limit: limit && limit > 0 ? limit : 1000,
+                queryId: query_id,
+              })
+            : await this.db.news.poll(this.dbAgentId, since, {
+                limit: 1000,
+                queryId: query_id,
+              });
           recentNews = rows.map((r) => ({
+            id: Number(r.id),
             type: r.type,
             timestamp: Number(r.timestamp),
             message: r.message || undefined,
             data: r.data || undefined,
           }));
         } else {
-          recentNews = this.newsItems.filter(item => item.timestamp > since);
-          if (query_id) {
-            recentNews = recentNews.filter(item => item.data?.query_id === query_id);
+          if (hasSinceId) {
+            recentNews = this.newsItems.filter((item) =>
+              typeof item.id === 'number' ? item.id > sinceId : false,
+            );
+            if (query_id) {
+              recentNews = recentNews.filter((item) => item.data?.query_id === query_id);
+            }
+            recentNews.sort((a, b) => (a.id || 0) - (b.id || 0));
+          } else {
+            recentNews = this.newsItems.filter(item => item.timestamp > since);
+            if (query_id) {
+              recentNews = recentNews.filter(item => item.data?.query_id === query_id);
+            }
+            recentNews.sort((a, b) => b.timestamp - a.timestamp);
           }
-          recentNews.sort((a, b) => b.timestamp - a.timestamp);
         }
 
         // Limit by character range if specified (backwards-looking: 0 = newest)
@@ -835,7 +865,16 @@ export class AgentRestServer {
           recentNews = recentNews.slice(0, limit);
         }
 
-        res.json({ items: recentNews, timestamp: Date.now(), total: recentNews.length });
+        const nextSinceId = hasSinceId && recentNews.length > 0
+          ? recentNews[recentNews.length - 1].id
+          : undefined;
+
+        res.json({
+          items: recentNews,
+          timestamp: Date.now(),
+          total: recentNews.length,
+          ...(nextSinceId !== undefined ? { next_since_id: nextSinceId } : {}),
+        });
       };
 
       run().catch((e) => res.status(500).json({ error: e?.message || String(e) }));

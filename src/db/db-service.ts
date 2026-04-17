@@ -278,6 +278,18 @@ export interface NewsRepository {
   ): Promise<NewsItemRow[]>;
 
   /**
+   * Poll news items for an agent strictly after a given monotonic id.
+   * Ordered by id ascending so the caller can walk the cursor forward by
+   * using `items[items.length - 1].id` as the next since_id.
+   * Supports optional limit and query_id filter.
+   */
+  pollSinceId(
+    agentId: string,
+    sinceId: number,
+    opts?: { limit?: number; queryId?: string },
+  ): Promise<NewsItemRow[]>;
+
+  /**
    * Get recent news items across a team, filtered by type(s).
    * Ordered by timestamp descending, limited to `limit` rows.
    */

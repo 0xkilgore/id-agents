@@ -45,7 +45,7 @@ export class SqliteNewsRepo implements NewsRepository {
     opts?: { limit?: number; queryId?: string },
   ): Promise<NewsItemRow[]> {
     let sql =
-      'SELECT type, timestamp, message, data FROM news_items WHERE agent_id = ? AND timestamp > ?';
+      'SELECT id, type, timestamp, message, data, query_id FROM news_items WHERE agent_id = ? AND timestamp > ?';
     const params: unknown[] = [agentId, since];
 
     if (opts?.queryId) {
@@ -54,6 +54,30 @@ export class SqliteNewsRepo implements NewsRepository {
     }
 
     sql += ' ORDER BY timestamp DESC';
+
+    const limit = opts?.limit ?? 1000;
+    sql += ' LIMIT ?';
+    params.push(limit);
+
+    const r = await this.db.query<NewsItemRow>(sql, params);
+    return r.rows.map((row) => this.parseNewsRow(row)!);
+  }
+
+  async pollSinceId(
+    agentId: string,
+    sinceId: number,
+    opts?: { limit?: number; queryId?: string },
+  ): Promise<NewsItemRow[]> {
+    let sql =
+      'SELECT id, type, timestamp, message, data, query_id FROM news_items WHERE agent_id = ? AND id > ?';
+    const params: unknown[] = [agentId, sinceId];
+
+    if (opts?.queryId) {
+      sql += ' AND query_id = ?';
+      params.push(opts.queryId);
+    }
+
+    sql += ' ORDER BY id ASC';
 
     const limit = opts?.limit ?? 1000;
     sql += ' LIMIT ?';

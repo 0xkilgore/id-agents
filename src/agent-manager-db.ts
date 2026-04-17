@@ -1223,12 +1223,24 @@ export class AgentManagerDb {
     });
 
     // REST-AP /news endpoint - poll for updates
+    // Preferred cursor: since_id=<monotonic id>&limit=N (server-side, ascending id).
+    // Deprecated cursor: since=<ms-timestamp> — still accepted for one release,
+    // with an X-Deprecated response header.
     this.managementApp.get('/news', async (req, res) => {
       try {
         const { id: teamId, name: teamName } = await this.getTeam(req);
+        const hasSinceId = typeof req.query.since_id === 'string' && req.query.since_id !== '';
+        const sinceId = hasSinceId ? parseInt(req.query.since_id as string) || 0 : 0;
         const since = parseInt(req.query.since as string) || 0;
         const limit = parseInt(req.query.limit as string) || 100;
         const query_id = req.query.query_id as string | undefined;
+
+        if (!hasSinceId && typeof req.query.since === 'string') {
+          res.setHeader(
+            'X-Deprecated',
+            'since=<ms> is deprecated; use since_id=<int> with the id field on each news item',
+          );
+        }
 
         // Look up the actual interactive agent (CLI) for this team
         const cliAgentRow = await this.db.agents.findInteractive(teamId);
@@ -1239,22 +1251,27 @@ export class AgentManagerDb {
 
         const cliId = cliAgentRow.id;
 
-        const newsRows = await this.db.news.poll(cliId, since, {
-          limit,
-          queryId: query_id,
-        });
+        const newsRows = hasSinceId
+          ? await this.db.news.pollSinceId(cliId, sinceId, { limit, queryId: query_id })
+          : await this.db.news.poll(cliId, since, { limit, queryId: query_id });
 
         const items = newsRows.map((r: any) => ({
+          id: Number(r.id),
           type: r.type,
           timestamp: Number(r.timestamp),
           message: r.message || undefined,
           data: r.data || undefined
         }));
 
+        const nextSinceId = hasSinceId && items.length > 0
+          ? items[items.length - 1].id
+          : undefined;
+
         res.json({
           items,
           timestamp: Date.now(),
-          total: items.length
+          total: items.length,
+          ...(nextSinceId !== undefined ? { next_since_id: nextSinceId } : {}),
         });
       } catch (err: any) {
         console.error('[Manager] Error in GET /news:', err);
