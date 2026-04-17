@@ -17,6 +17,29 @@ export class PgQueriesRepo implements QueriesRepository {
     return rows[0] ?? null;
   }
 
+  async getByQueryIdForTeam(teamId: string, queryId: string): Promise<QueryRow | null> {
+    const { rows } = await this.db.query<QueryRow>(
+      `SELECT team_id, agent_id, query_id, status, prompt, created, completed, result, error, session_id
+       FROM queries
+       WHERE team_id = $1 AND query_id = $2
+       LIMIT 1`,
+      [teamId, queryId],
+    );
+    return rows[0] ?? null;
+  }
+
+  async expireStale(cutoffCreated: number, statuses: string[]): Promise<number> {
+    if (statuses.length === 0) return 0;
+    const placeholders = statuses.map((_, i) => `$${i + 3}`).join(', ');
+    const result = await this.db.query(
+      `UPDATE queries
+       SET status = 'expired', completed = $1
+       WHERE status IN (${placeholders}) AND created < $2`,
+      [Date.now(), cutoffCreated, ...statuses],
+    );
+    return result.rowCount ?? 0;
+  }
+
   async create(
     teamId: string,
     queryId: string,

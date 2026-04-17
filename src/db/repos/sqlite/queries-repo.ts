@@ -23,6 +23,29 @@ export class SqliteQueriesRepo implements QueriesRepository {
     return r.rows[0] ? this.parseQueryRow(r.rows[0]) : null;
   }
 
+  async getByQueryIdForTeam(teamId: string, queryId: string): Promise<QueryRow | null> {
+    const r = await this.db.query<QueryRow>(
+      `SELECT team_id, agent_id, query_id, status, prompt, created, completed, result, error, session_id
+       FROM queries
+       WHERE team_id = ? AND query_id = ?
+       LIMIT 1`,
+      [teamId, queryId],
+    );
+    return r.rows[0] ? this.parseQueryRow(r.rows[0]) : null;
+  }
+
+  async expireStale(cutoffCreated: number, statuses: string[]): Promise<number> {
+    if (statuses.length === 0) return 0;
+    const placeholders = statuses.map(() => '?').join(', ');
+    const r = await this.db.query(
+      `UPDATE queries
+       SET status = 'expired', completed = ?
+       WHERE status IN (${placeholders}) AND created < ?`,
+      [Date.now(), ...statuses, cutoffCreated],
+    );
+    return r.rowCount ?? 0;
+  }
+
   async create(
     teamId: string,
     queryId: string,

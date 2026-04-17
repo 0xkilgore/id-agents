@@ -1305,6 +1305,60 @@ export class AgentManagerDb {
       }
     });
 
+    // GET /query/:id - one-row lookup for a query's status/result
+    // Team-scoped via the team header. Status is mapped to the external
+    // vocabulary: { pending, processing, delivered, failed, expired }.
+    this.managementApp.get('/query/:id', async (req, res) => {
+      try {
+        const { id: teamId } = await this.getTeam(req);
+        const queryId = req.params.id;
+        const row = await this.db.queries.getByQueryIdForTeam(teamId, queryId);
+        if (!row) return res.status(404).json({ error: `Query "${queryId}" not found` });
+
+        // Map internal status → external vocabulary.
+        // Internal values seen today: pending, processing, completed, cancelled, failed, expired.
+        const statusMap: Record<string, string> = {
+          pending: 'pending',
+          processing: 'processing',
+          completed: 'delivered',
+          cancelled: 'failed',
+          failed: 'failed',
+          expired: 'expired',
+        };
+        const status = statusMap[row.status] || row.status;
+
+        // Resolve the target agent's friendly name if we can.
+        let agentName: string = row.agent_id;
+        try {
+          const agent = await this.db.agents.getById(row.agent_id);
+          if (agent) {
+            agentName = (agent.metadata as any)?.alias || agent.name || row.agent_id;
+          }
+        } catch { /* best-effort */ }
+
+        const response: Record<string, unknown> = {
+          query_id: row.query_id,
+          status,
+          agent: agentName,
+          created_at: Number(row.created),
+        };
+        if (row.completed !== null && row.completed !== undefined) {
+          response.completed_at = Number(row.completed);
+        }
+        if (row.result !== null && row.result !== undefined) {
+          response.result = row.result;
+        }
+        if (row.error) {
+          response.error = row.error;
+        }
+
+        res.json(response);
+      } catch (err: any) {
+        console.error('[Manager] Error in GET /query/:id:', err);
+        res.status(500).json({ error: err?.message || 'Internal server error' });
+      }
+    });
+
     this.managementApp.get('/registry/default', async (req, res) => {
       const { id: teamId } = await this.getTeam(req);
       res.json({ registry: await this.getDefaultRegistry(teamId) });

@@ -196,6 +196,20 @@ export interface QueriesRepository {
   getById(agentId: string, queryId: string): Promise<QueryRow | null>;
 
   /**
+   * Look up a single query by team_id and query_id.
+   * Team-scoped one-row lookup (query_ids are globally unique in practice but
+   * enforcing the team scope prevents cross-team leakage over the HTTP API).
+   */
+  getByQueryIdForTeam(teamId: string, queryId: string): Promise<QueryRow | null>;
+
+  /**
+   * Mark queries older than `cutoffMs` and still in the given terminal-or-open
+   * statuses as `expired`. Returns the number of rows updated.
+   * Used by the crash sweeper to clear stuck queries whose agent process died.
+   */
+  expireStale(cutoffCreated: number, statuses: string[]): Promise<number>;
+
+  /**
    * Insert-or-update a query row (ON CONFLICT by agent_id, query_id).
    * On conflict, updates status, completed, result, error, and session_id.
    */
