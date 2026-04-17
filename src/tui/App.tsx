@@ -557,6 +557,7 @@ export function App({ staticMode = false }: AppProps = {}): React.ReactElement {
         if (input === 't') return toggleTasksView();
         if (input === 'c') return openCalendar();
         if (input === 'h') return openHeartbeats();
+        if (key.leftArrow || key.escape) return setView('agents');
         if (key.rightArrow) return openTaskDetail();
         if (key.tab) return cycleTeam(key.shift ? -1 : 1);
         if (key.upArrow) return moveTaskSel(-1);

@@ -22,7 +22,7 @@ interface FooterProps {
 // back hint because they have a real parent to return to.
 const HINTS: Record<FooterView, string> = {
   agents: '↑↓ nav · → news · Tab team · t tasks · c calendar · h heartbeats · p pause · q quit',
-  tasks: '↑↓ nav · → detail · Tab team · t agents · c calendar · h heartbeats · p pause · q quit',
+  tasks: '↑↓ nav · → detail · Tab team · ← back · c calendar · h heartbeats · p pause · q quit',
   calendar: '↑↓ nav · a agents · t tasks · h heartbeats · p pause · q quit',
   heartbeats: '↑↓ nav · → detail · a agents · t tasks · c calendar · p pause · q quit',
   'task-detail': '↑↓ scroll · ← back · p pause · q quit',
