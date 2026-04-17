@@ -2,6 +2,16 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import type { Env } from '../env.js';
+import { atomicWriteJson } from './atomic.js';
+
+// Matches the shape produced by makeInboxId: a filename-safe ISO-8601
+// timestamp followed by a 6-hex-char tag, e.g. 2026-04-17T14-32-11-021-a1b2c3.
+// Used to gate path params before they're joined into a filesystem path.
+const INBOX_ID_RE = /^[0-9T-]+-[a-f0-9]{6}$/;
+
+export function isValidInboxId(id: string): boolean {
+  return INBOX_ID_RE.test(id);
+}
 
 export interface InboxEntry {
   id: string;
@@ -35,8 +45,7 @@ export function makeInboxId(timestamp: Date = new Date()): string {
 export function writeInboxEntry(env: Env, entry: InboxEntry): void {
   const dir = inboxDir(env);
   ensureDir(dir);
-  const file = path.join(dir, `${entry.id}.json`);
-  fs.writeFileSync(file, JSON.stringify(entry, null, 2));
+  atomicWriteJson(path.join(dir, `${entry.id}.json`), entry);
 }
 
 function readEntry(file: string): InboxEntry | null {
@@ -63,6 +72,7 @@ export function listInbox(env: Env, status: 'unread' | 'archived' | 'all'): Inbo
 }
 
 export function archiveEntry(env: Env, id: string): InboxEntry | null {
+  if (!isValidInboxId(id)) return null;
   const dir = inboxDir(env);
   const file = path.join(dir, `${id}.json`);
   if (!fs.existsSync(file)) return null;
@@ -71,6 +81,6 @@ export function archiveEntry(env: Env, id: string): InboxEntry | null {
   if (entry.status === 'archived') return entry;
   entry.status = 'archived';
   entry.archived_at = new Date().toISOString();
-  fs.writeFileSync(file, JSON.stringify(entry, null, 2));
+  atomicWriteJson(file, entry);
   return entry;
 }

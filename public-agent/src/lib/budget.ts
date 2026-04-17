@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import type { Env } from '../env.js';
+import { atomicWriteJson } from './atomic.js';
 
 interface BudgetState {
   utc_date: string;        // YYYY-MM-DD
@@ -32,8 +33,7 @@ function read(env: Env): BudgetState {
 }
 
 function write(env: Env, state: BudgetState): void {
-  fs.mkdirSync(env.dataDir, { recursive: true });
-  fs.writeFileSync(budgetFile(env), JSON.stringify(state, null, 2));
+  atomicWriteJson(budgetFile(env), state);
 }
 
 function rollover(state: BudgetState, today: string): BudgetState {
@@ -43,22 +43,50 @@ function rollover(state: BudgetState, today: string): BudgetState {
   return state;
 }
 
-export function isOverBudget(env: Env): { over: boolean; used: number; resets_at: string } {
-  const today = todayUtc();
-  const state = rollover(read(env), today);
-  const resets_at = new Date(Date.UTC(
+function resetsAt(today: string): string {
+  return new Date(Date.UTC(
     Number(today.slice(0, 4)),
     Number(today.slice(5, 7)) - 1,
     Number(today.slice(8, 10)) + 1,
   )).toISOString();
-  if (env.maxTokensPerDay <= 0) return { over: false, used: state.tokens_used, resets_at };
-  return { over: state.tokens_used >= env.maxTokensPerDay, used: state.tokens_used, resets_at };
 }
 
-export function recordTokens(env: Env, tokens: number): void {
+export function isOverBudget(env: Env): { over: boolean; used: number; remaining: number; resets_at: string } {
+  const today = todayUtc();
+  const state = rollover(read(env), today);
+  const resets_at = resetsAt(today);
+  if (env.maxTokensPerDay <= 0) {
+    return { over: false, used: state.tokens_used, remaining: Number.POSITIVE_INFINITY, resets_at };
+  }
+  const remaining = Math.max(0, env.maxTokensPerDay - state.tokens_used);
+  return { over: state.tokens_used >= env.maxTokensPerDay, used: state.tokens_used, remaining, resets_at };
+}
+
+// Pessimistic pre-reservation. Add `tokens` to tokens_used *before* the
+// OpenRouter call so two concurrent requests can't both slip past the budget
+// check. Reconcile after the call returns with the true usage.
+export function reserveTokens(env: Env, tokens: number): void {
   if (tokens <= 0) return;
   const today = todayUtc();
   const state = rollover(read(env), today);
   state.tokens_used += tokens;
   write(env, state);
+}
+
+// Replace a prior reservation with the real usage. `reserved` is what was
+// added in reserveTokens; `actual` is the OpenRouter-reported total.
+// Net change on disk: (actual - reserved) — can be negative.
+export function reconcileTokens(env: Env, reserved: number, actual: number): void {
+  const delta = actual - reserved;
+  if (delta === 0) return;
+  const today = todayUtc();
+  const state = rollover(read(env), today);
+  state.tokens_used = Math.max(0, state.tokens_used + delta);
+  write(env, state);
+}
+
+// Kept for backwards-compat and the non-reserved path (e.g. failed reservations).
+export function recordTokens(env: Env, tokens: number): void {
+  if (tokens <= 0) return;
+  reserveTokens(env, tokens);
 }

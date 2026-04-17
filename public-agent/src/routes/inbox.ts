@@ -1,6 +1,6 @@
 import { Hono } from 'hono';
 import type { Env } from '../env.js';
-import { archiveEntry, listInbox } from '../lib/inbox.js';
+import { archiveEntry, isValidInboxId, listInbox } from '../lib/inbox.js';
 import { requireAuth } from '../lib/auth.js';
 
 export function inboxRoutes(env: Env): Hono {
@@ -29,6 +29,11 @@ export function inboxRoutes(env: Env): Hono {
   app.post('/inbox/:id/archive', requireAuth(env), (c) => {
     const id = c.req.param('id');
     if (!id) return c.json({ error: 'missing_id' }, 400);
+    if (!isValidInboxId(id)) {
+      // Reject anything that isn't a well-formed inbox id before it can reach
+      // the filesystem. Stops `..` / `/` / NUL-byte path-traversal attempts.
+      return c.json({ error: 'invalid_id', detail: 'id must match ^[0-9T-]+-[a-f0-9]{6}$' }, 400);
+    }
     const entry = archiveEntry(env, id);
     if (!entry) return c.json({ error: 'not_found', id }, 404);
     return c.json({ ok: true, id: entry.id, status: entry.status, archived_at: entry.archived_at });

@@ -8,8 +8,12 @@ export interface OpenRouterResult {
 
 const ENDPOINT = 'https://openrouter.ai/api/v1/chat/completions';
 
-export async function openRouterChat(env: Env, userMessage: string): Promise<OpenRouterResult> {
-  const body = {
+export async function openRouterChat(
+  env: Env,
+  userMessage: string,
+  opts: { maxTokens?: number } = {},
+): Promise<OpenRouterResult> {
+  const body: Record<string, unknown> = {
     model: env.openRouterModel,
     messages: [
       {
@@ -22,6 +26,11 @@ export async function openRouterChat(env: Env, userMessage: string): Promise<Ope
       { role: 'user', content: userMessage },
     ],
   };
+  // Cap OpenRouter's completion so it can't overshoot the remaining daily
+  // budget. Passing max_tokens <= 0 would be rejected by the API, so skip.
+  if (opts.maxTokens && opts.maxTokens > 0) {
+    body.max_tokens = opts.maxTokens;
+  }
 
   const resp = await fetch(ENDPOINT, {
     method: 'POST',

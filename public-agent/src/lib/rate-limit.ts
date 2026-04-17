@@ -1,4 +1,4 @@
-import type { MiddlewareHandler } from 'hono';
+import type { Context, MiddlewareHandler } from 'hono';
 
 /**
  * Token bucket per client key. Resets to full capacity every window.
@@ -7,7 +7,7 @@ import type { MiddlewareHandler } from 'hono';
  */
 export function tokenBucket(
   perMinute: number,
-  keyFn: (c: { req: { header: (n: string) => string | undefined } }) => string,
+  keyFn: (c: Context) => string,
 ): MiddlewareHandler {
   if (perMinute <= 0) {
     return async (_c, next) => {
@@ -44,8 +44,33 @@ export function tokenBucket(
   };
 }
 
-export function ipOf(c: { req: { header: (n: string) => string | undefined } }): string {
-  const xff = c.req.header('x-forwarded-for');
-  if (xff) return xff.split(',')[0]!.trim();
-  return c.req.header('x-real-ip') ?? 'unknown';
+type ConnInfoFn = (c: Context) => { remote: { address?: string | undefined } };
+
+/**
+ * Best-effort client IP.
+ *   - If trustedProxy=true, the first hop in X-Forwarded-For is honored.
+ *     Chain this only behind a reverse proxy you control.
+ *   - Otherwise, the socket's remoteAddress (via @hono/node-server) is used.
+ * Returns null if no source provides an IP — callers should 400 rather than
+ * fall back to an "unknown" bucket, which would collide every anonymous
+ * client into a single shared rate-limit slot.
+ */
+export function clientIp(c: Context, connInfo: ConnInfoFn, trustedProxy: boolean): string | null {
+  if (trustedProxy) {
+    const xff = c.req.header('x-forwarded-for');
+    if (xff) {
+      const first = xff.split(',')[0]?.trim();
+      if (first) return first;
+    }
+    const real = c.req.header('x-real-ip');
+    if (real && real.trim()) return real.trim();
+  }
+  try {
+    const info = connInfo(c);
+    const addr = info?.remote?.address;
+    if (addr && addr.trim()) return addr.trim();
+  } catch {
+    // conninfo is only available under @hono/node-server; fall through.
+  }
+  return null;
 }

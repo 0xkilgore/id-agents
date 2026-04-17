@@ -1,26 +1,45 @@
-import { Hono } from 'hono';
+import { Hono, type Context } from 'hono';
+import { getConnInfo } from '@hono/node-server/conninfo';
 import type { Env } from '../env.js';
 import { openRouterChat } from '../lib/openrouter.js';
 import { writeInboxEntry, makeInboxId, type InboxEntry } from '../lib/inbox.js';
 import { requireAuth } from '../lib/auth.js';
-import { ipOf, tokenBucket } from '../lib/rate-limit.js';
-import { isOverBudget, recordTokens } from '../lib/budget.js';
-
-function clientIp(c: { req: { header: (n: string) => string | undefined } }): string | null {
-  // Behind a reverse proxy we'd trust X-Forwarded-For; on Colima/Docker the
-  // client IP comes through as the socket's remoteAddress, which Hono exposes
-  // via the underlying request headers only when a proxy sets them. Keep this
-  // best-effort for v1 — rate-limiter can still tell containers apart.
-  const xff = c.req.header('x-forwarded-for');
-  if (xff) return xff.split(',')[0]!.trim();
-  return c.req.header('x-real-ip') ?? null;
-}
+import { clientIp, tokenBucket } from '../lib/rate-limit.js';
+import { isOverBudget, reserveTokens, reconcileTokens } from '../lib/budget.js';
 
 export function talkRoutes(env: Env): Hono {
   const app = new Hono();
-  const limiter = tokenBucket(env.talkRateLimitPerMin, ipOf);
+  // One IP resolver for the whole route — the rate-limiter and the inbox
+  // writer must agree on who "this client" is. If trustedProxy=false and no
+  // socket IP is available, the resolver returns null and we bail 400.
+  const resolve = (c: Context) => clientIp(c, getConnInfo, env.trustedProxy);
+  const limiter = tokenBucket(env.talkRateLimitPerMin, (c) => {
+    const ip = resolve(c);
+    // tokenBucket expects a non-null key; '' collides across clients, but
+    // we block requests without an IP before this runs via the handler
+    // below. Returning a constant here is only hit on paths where the
+    // handler has already 400'd, so it's harmless.
+    return ip ?? '__no_ip__';
+  });
 
-  app.post('/talk', requireAuth(env), limiter, async (c) => {
+  app.post('/talk', requireAuth(env), async (c, next) => {
+    const ip = resolve(c);
+    if (!ip) {
+      return c.json(
+        {
+          error: 'unknown_client',
+          detail:
+            'Could not determine client IP. Set TRUSTED_PROXY=true only if a known reverse proxy sets X-Forwarded-For.',
+        },
+        400,
+      );
+    }
+    await next();
+  }, limiter, async (c) => {
+    // resolve() is idempotent — re-run here so we don't need to thread the
+    // value through Hono's Variables type. The null-case is already gated
+    // out by the preceding middleware.
+    const ip = resolve(c) ?? '';
     const budget = isOverBudget(env);
     if (budget.over) {
       return c.json(
@@ -44,30 +63,60 @@ export function talkRoutes(env: Env): Hono {
 
     const id = makeInboxId();
 
+    // Cap the completion at what's left in today's budget so a runaway model
+    // can't push tokens_used past maxTokensPerDay. If the budget is disabled
+    // (maxTokensPerDay <= 0), remaining is +Infinity and we fall back to the
+    // configured reply ceiling.
+    const cap = Number.isFinite(budget.remaining)
+      ? Math.min(env.maxReplyTokens, budget.remaining)
+      : env.maxReplyTokens;
+
+    // Pre-reserve the cap before the upstream call. Two concurrent /talk
+    // requests must not both slip past the isOverBudget check and each
+    // consume their full cap. We reconcile down to actual usage when the
+    // call returns (success OR failure).
+    const reserved = Math.max(0, cap);
+    if (reserved > 0) {
+      try {
+        reserveTokens(env, reserved);
+      } catch (err) {
+        console.error('[public-agent] /talk budget reserve failed:', err);
+      }
+    }
+
     let reply: string;
     let model: string;
     let usage: { prompt: number; completion: number; total: number };
     try {
-      const result = await openRouterChat(env, message);
+      const result = await openRouterChat(env, message, { maxTokens: cap > 0 ? cap : undefined });
       reply = result.reply;
       model = result.model;
       usage = result.usage;
     } catch (err) {
+      // Upstream failed — release the reservation so it doesn't permanently
+      // eat the daily budget for a call that produced nothing.
+      if (reserved > 0) {
+        try {
+          reconcileTokens(env, reserved, 0);
+        } catch (reconcileErr) {
+          console.error('[public-agent] /talk budget reconcile (on error) failed:', reconcileErr);
+        }
+      }
       console.error('[public-agent] /talk openrouter error:', err);
       return c.json({ error: 'upstream_error', detail: (err as Error).message }, 502);
     }
 
     try {
-      recordTokens(env, usage.total);
+      reconcileTokens(env, reserved, usage.total);
     } catch (err) {
-      console.error('[public-agent] /talk budget write failed:', err);
+      console.error('[public-agent] /talk budget reconcile failed:', err);
     }
 
     const entry: InboxEntry = {
       id,
       received_at: new Date().toISOString(),
       from,
-      ip: clientIp(c),
+      ip,
       message,
       reply,
       model,

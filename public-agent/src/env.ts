@@ -7,6 +7,8 @@ export interface Env {
   maxTokensPerDay: number;
   talkRateLimitPerMin: number;
   dataDir: string;
+  trustedProxy: boolean;
+  maxReplyTokens: number;
 }
 
 function required(name: string, value: string | undefined): string {
@@ -35,5 +37,7 @@ export function loadEnv(): Env {
     maxTokensPerDay: intOr('MAX_TOKENS_PER_DAY', process.env.MAX_TOKENS_PER_DAY, 0),
     talkRateLimitPerMin: intOr('TALK_RATE_LIMIT_PER_MIN', process.env.TALK_RATE_LIMIT_PER_MIN, 10),
     dataDir: process.env.PUBLIC_AGENT_DATA_DIR?.trim() || '/app/data',
+    trustedProxy: (process.env.TRUSTED_PROXY ?? '').trim().toLowerCase() === 'true',
+    maxReplyTokens: intOr('MAX_REPLY_TOKENS', process.env.MAX_REPLY_TOKENS, 1024),
   };
 }
