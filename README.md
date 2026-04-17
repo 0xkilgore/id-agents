@@ -141,8 +141,12 @@ MANAGER_PORT=5000 npm run id-agents
 
 #### 3) Deploy and talk to agents
 
+Pick the demo team that matches what you have installed and authenticated:
+
 ```
-/deploy claude-code    # First-time deploy (or /deploy codex)
+/deploy demo-mixed     # Preferred: Claude Code + Codex (coder + researcher)
+/deploy demo           # Claude Code only
+/deploy demo-codex     # Codex only
 /ask coder Write a hello world function
 ```
 
