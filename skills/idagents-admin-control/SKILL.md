@@ -122,94 +122,99 @@ Execute a CLI command:
 
 ## Polling for Agent Replies
 
-After dispatching work to agents via `/remote`, poll for replies using timestamp filtering. Always run dispatch and poll as separate steps. Run the poll in the background.
+After dispatching work to an agent via `/remote`, poll **`GET /query/<id>`** for the reply. The queryId comes back from the dispatch call, and the query endpoint tells you the lifecycle state without requiring a timestamp filter. Always run dispatch and poll as separate steps, and run the poll in the background.
+
+A query moves through one of these statuses:
+
+| Status | Meaning |
+|--------|---------|
+| `pending` | Accepted, not yet picked up by the agent |
+| `processing` | Agent is working on it |
+| `delivered` | Agent replied — `result` contains the message |
+| `failed` | Agent errored — `error` contains the message |
+| `expired` | Stuck in pending/processing past the sweeper cutoff (15 min) |
+
+Only `delivered`, `failed`, and `expired` are terminal.
 
 ### Single Agent
 
-**Dispatch (foreground, one-shot).** Returns the queryId immediately.
+**Dispatch (foreground, one-shot).** Capture the queryId.
 
 ```bash
-BEFORE=$(date +%s)000
-
-curl -s -X POST http://localhost:4000/remote \
+QID=$(curl -s -X POST http://localhost:4000/remote \
   -H "Content-Type: application/json" \
-  -d '{"command":"/ask <agent> <task>"}'
+  -d '{"command":"/ask <agent> <task>"}' \
+  | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('queryId') or d.get('result',{}).get('queryId') or '')")
+echo "queryId=$QID"
 ```
-
-Capture the timestamp BEFORE dispatching so the poll can filter out stale replies.
 
 **Poll (background, non-blocking).** Run with `run_in_background: true` (Claude Code Bash tool) so the conversation continues while the reply arrives.
 
 ```bash
-# Poll every 10s for up to 10 minutes (long tasks routinely take 5-15 min)
-for i in $(seq 1 60); do
-  reply=$(curl -s -X POST http://localhost:4000/remote \
-    -H "Content-Type: application/json" \
-    -d '{"command":"/news <agent>"}' | python3 -c "
-import sys, json
-data = json.load(sys.stdin)
-items = data.get('result',{}).get('items',[])
-for item in reversed(items):
-    if item.get('type')=='outbound.reply' and item.get('timestamp',0) > $BEFORE:
-        print(item['data']['message'][:2000])
-        break
-" 2>/dev/null)
-  if [ -n "$reply" ]; then echo "REPLY: $reply"; break; fi
+# Poll every 10s for up to 15 minutes — long tasks routinely take 5-15 min.
+for i in $(seq 1 90); do
+  body=$(curl -s "$MANAGER_URL/query/$QID" -H "X-Id-Team: $ID_TEAM")
+  status=$(echo "$body" | python3 -c "import sys,json; print(json.load(sys.stdin).get('status',''))")
+  case "$status" in
+    delivered)
+      echo "$body" | python3 -c "import sys,json; d=json.load(sys.stdin); r=d.get('result') or {}; print(r.get('message') or r)"
+      break ;;
+    failed|expired)
+      echo "TERMINAL=$status"
+      echo "$body" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('error') or d)"
+      break ;;
+  esac
   sleep 10
 done
 ```
 
-Adjust the max wait to fit the task. Implementation work, multi-file edits, and code review routinely take 5-15 minutes, so the 2-minute defaults of older patterns will time out before the agent finishes.
+No `BEFORE` timestamp, no `outbound.reply` filter, no news-feed scraping. The queryId is the only state you need.
 
 ### Multiple Agents (threshold-based)
 
-**Dispatch (foreground, one-shot).** Fan out to all agents.
+**Dispatch (foreground, one-shot).** Fan out and collect queryIds.
 
 ```bash
-BEFORE=$(date +%s)000
-
+declare -A QIDS
 for agent in agent-a agent-b agent-c; do
-  curl -s -X POST http://localhost:4000/remote \
+  qid=$(curl -s -X POST http://localhost:4000/remote \
     -H "Content-Type: application/json" \
-    -d "{\"command\":\"/ask ${agent} <task>\"}"
+    -d "{\"command\":\"/ask ${agent} <task>\"}" \
+    | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('queryId') or d.get('result',{}).get('queryId') or '')")
+  QIDS[$agent]=$qid
 done
 ```
 
-**Poll (background, non-blocking).** Run with `run_in_background: true`. Wait for a threshold (e.g. 2 of 3 replies) instead of all agents.
+**Poll (background, non-blocking).** Run with `run_in_background: true`. Wait for a threshold (e.g. 2 of 3 delivered) instead of all agents.
 
 ```bash
-# Wait for 2 of 3, check every 10s, max 10 minutes
-for i in $(seq 1 60); do
+# Wait for 2 of 3 delivered, check every 10s, max 15 minutes.
+for i in $(seq 1 90); do
+  done_count=0
   results=""
-  for agent in agent-a agent-b agent-c; do
-    reply=$(curl -s -X POST http://localhost:4000/remote \
-      -H "Content-Type: application/json" \
-      -d "{\"command\":\"/news ${agent}\"}" 2>/dev/null | python3 -c "
-import sys, json
-try:
-    data = json.load(sys.stdin)
-    items = data.get('result',{}).get('items',[])
-    for item in reversed(items):
-        if item.get('type')=='outbound.reply' and item.get('timestamp',0) > $BEFORE:
-            print(item['data']['message'][:200].replace(chr(10), ' '))
-            break
-except: pass
-" 2>/dev/null)
-    if [ -n "$reply" ]; then results="${results}${agent}: ${reply}\n"; fi
+  for agent in "${!QIDS[@]}"; do
+    body=$(curl -s "$MANAGER_URL/query/${QIDS[$agent]}" -H "X-Id-Team: $ID_TEAM")
+    status=$(echo "$body" | python3 -c "import sys,json; print(json.load(sys.stdin).get('status',''))")
+    if [ "$status" = "delivered" ] || [ "$status" = "failed" ] || [ "$status" = "expired" ]; then
+      done_count=$((done_count+1))
+      msg=$(echo "$body" | python3 -c "import sys,json; d=json.load(sys.stdin); r=d.get('result') or {}; print((r.get('message') or d.get('error') or '')[:200].replace(chr(10),' '))")
+      results="${results}${agent} [${status}]: ${msg}\n"
+    fi
   done
-  count=$(echo -e "$results" | grep -c ":" 2>/dev/null || echo 0)
-  if [ "$count" -ge 2 ]; then echo -e "$results"; break; fi
+  if [ "$done_count" -ge 2 ]; then echo -e "$results"; break; fi
   sleep 10
 done
 ```
 
-**Tips:** Record the timestamp BEFORE dispatching. Use a threshold rather than waiting for all agents. If an agent keeps returning stale replies, use `/clear <agent>`.
+**Tips:** Use the returned queryId — do not scrape the news feed for replies. Use a threshold rather than waiting for every agent. If an agent is stuck, the sweeper will flip its query to `expired` after 15 minutes so your loop is guaranteed to terminate.
 
 ### Anti-patterns
 
 **Do not combine dispatch and poll into one synchronous block.** It blocks the conversation until the agent replies or the loop times out, makes a tool-rejection ambiguous (nothing runs, the user has no idea what was supposed to happen), and hides the queryId behind a wall of "no reply yet" lines.
 
 **Do not run the poll in the foreground.** Even split into two steps, a foreground poll still blocks. Use `run_in_background: true` so the caller can keep working while the reply arrives.
+
+**Do not poll the news feed to find replies.** `/news` is for the agent's own inbox stream; reply discovery belongs to `GET /query/<id>`. The news feed does not give you a clear "not yet" vs "expired" vs "failed" distinction, and timestamp filtering is easy to get wrong across clock skew or restarts.
 
 ## Best Practices
 
