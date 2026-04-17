@@ -582,6 +582,18 @@ export class AgentRestServer {
             }
           },
           {
+            id: 'news_to',
+            title: 'Notify another agent (fire-and-forget)',
+            method: 'POST',
+            endpoint: '/news-to',
+            description: 'Send a fire-and-forget notification to another agent. Mirror of /talk-to but posts to the target\'s /news and does not wait for a reply. Returns 202 Accepted immediately.',
+            input_schema: {
+              to: 'string (required) - target agent name or id',
+              message: 'string (required unless data) - the message to send',
+              data: 'object (optional) - structured payload attached to the notification'
+            }
+          },
+          {
             id: 'files',
             title: 'List and serve files',
             method: 'GET',
@@ -1146,6 +1158,108 @@ export class AgentRestServer {
         res.status(500).json({
           error: err?.message || 'Internal server error'
         });
+      }
+    });
+
+    // /news-to — fire-and-forget notification to another agent's /news.
+    // Symmetry matters: /talk-to → target's /talk (reply expected),
+    // /news-to → target's /news (no reply). The client never has to guess
+    // which verb was routed where, so there is no "did this go through the
+    // manager or not?" confusion.
+    // INTERNAL ONLY — only accessible from localhost (agent's own LLM).
+    this.app.post('/news-to', async (req, res) => {
+      try {
+        const remoteAddr = req.ip || req.socket.remoteAddress || '';
+        const isLocalhost =
+          remoteAddr === '127.0.0.1' ||
+          remoteAddr === '::1' ||
+          remoteAddr === '::ffff:127.0.0.1' ||
+          remoteAddr === 'localhost';
+
+        if (!isLocalhost) {
+          console.log(`${logTime()} [Agent] Rejected /news-to from external address: ${remoteAddr}`);
+          return res.status(403).json({
+            error: 'Forbidden - /news-to is internal only. Use /news for external requests.',
+          });
+        }
+
+        const { to, message, data } = req.body || {};
+        if (!to || (!message && !data)) {
+          return res.status(400).json({ error: 'Missing "to" or "message"/"data"' });
+        }
+
+        const myDisplayId = this.getDisplayId();
+        const managerUrl = process.env.MANAGER_URL || 'http://id-agent-manager:4100';
+        const team = this.agentIdentity?.team || process.env.ID_TEAM || process.env.ID_PROJECT || '';
+        const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+        if (team) {
+          headers['X-Id-Team'] = team;
+          headers['X-Id-Project'] = team; // backwards compatibility
+        }
+
+        // Same lookup path /talk-to uses — manager catalog.
+        const agentsRes = await fetch(`${managerUrl}/agents`, { headers });
+        if (!agentsRes.ok) {
+          return res.status(502).json({ error: `Failed to fetch agents list: ${agentsRes.status}` });
+        }
+        const agentsData = (await agentsRes.json()) as {
+          agents: Array<{
+            name: string;
+            id: string;
+            alias?: string;
+            displayId?: string;
+            internal_url?: string;
+            url?: string;
+          }>;
+        };
+        const targetAgent = agentsData.agents?.find(
+          (a) => a.name === to || a.alias === to || a.id === to || a.displayId === to,
+        );
+        if (!targetAgent) {
+          return res.status(404).json({ error: `Agent "${to}" not found` });
+        }
+
+        const targetUrl = targetAgent.internal_url || targetAgent.url;
+        if (!targetUrl) {
+          return res.status(404).json({ error: `No URL for agent "${to}"` });
+        }
+
+        // Fire-and-forget POST to target's /news. Do NOT route through the
+        // manager — symmetry with /talk-to matters, asymmetric routing
+        // reintroduces the "where did this go?" confusion we are fixing.
+        const payload: Record<string, unknown> = {
+          type: 'notify',
+          from: myDisplayId,
+          message: message ?? undefined,
+          data: data ?? undefined,
+          reply_expected: false,
+        };
+        fetch(`${targetUrl}/news`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+          signal: AbortSignal.timeout(5000),
+        }).catch((err) => {
+          console.error(`${logTime()} [Agent] /news-to delivery to ${to} failed:`, err?.message || err);
+        });
+
+        // Record outbound notify in our own news feed for auditability.
+        await this.addNews('outbound.notify', `Sent notify to ${to}`, {
+          to,
+          message,
+          ...(data && typeof data === 'object' ? data : {}),
+        });
+
+        return res.status(202).json({
+          success: true,
+          to,
+          status: 'accepted',
+          kind: 'notify',
+          reply_expected: false,
+        });
+      } catch (err: any) {
+        console.error(`${logTime()} [Agent] Error in /news-to:`, err?.message || err);
+        res.status(500).json({ error: err?.message || 'Internal server error' });
       }
     });
 
