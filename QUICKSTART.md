@@ -32,48 +32,6 @@ ID Agents runs each agent as a background process with no interactive shell to a
 
 You can opt out by setting `dangerouslySkipPermissions: false` in the YAML config (per agent or under `defaults`), but be warned: any tool-use prompt then has no way to be approved, and the agent will hang silently on the first one. If you're not comfortable giving background agents this level of autonomy, ID Agents is not the right tool for you.
 
-## Runtime Selection
-
-Detect which agent CLIs are ready to use on this machine, then pick the deploy command automatically. **Prefer the mixed team** (`/deploy default-mixed`) whenever both Claude Code and Codex are installed and authenticated — it's the most compelling first demo. Fall back to the Claude-only team if Codex is unavailable.
-
-For each runtime, check **both** (1) the binary is on `PATH` *and* (2) credentials exist. Binary-on-`PATH` alone is not sufficient — stale installs and un-authenticated states are common and cause deploys to fail halfway through.
-
-### Claude Code is ready if
-
-```bash
-command -v claude >/dev/null 2>&1
-```
-
-...succeeds **and** any one of:
-
-- `$ANTHROPIC_API_KEY` is set in the environment
-- macOS: the Keychain entry `"Claude Code-credentials"` exists
-  ```bash
-  security find-generic-password -s "Claude Code-credentials" >/dev/null 2>&1
-  ```
-- Linux: `~/.claude/.credentials.json` exists
-
-### Codex is ready if
-
-```bash
-command -v codex >/dev/null 2>&1
-```
-
-...succeeds **and** any one of:
-
-- `$OPENAI_API_KEY` is set in the environment
-- `~/.codex/auth.json` exists
-
-### Deploy command
-
-| Claude ready | Codex ready | Command | Team |
-|---|---|---|---|
-| ✓ | ✓ | `/deploy default-mixed` | Mixed: `coder` (claude) + `researcher` (codex) |
-| ✓ | ✗ | `/deploy default` | Claude Code only |
-| ✗ | * | — | Stop. Ask the user to install and log in to Claude Code (see Prerequisites above) |
-
-If only the binary is present but auth is missing, tell the user the specific command to run (`claude login` or `codex login`) before retrying.
-
 ## 1. Install
 
 ```bash
@@ -109,18 +67,19 @@ This starts the interactive CLI on port 4000 and the manager daemon on port 4100
 
 ## 4. Deploy the Default Team
 
-Use the idagents-admin-control skill's `remote-command.sh` to deploy:
-
-- **Claude Code only:** `/deploy default`
-- **Mixed (Claude + Codex):** `/deploy default-mixed`
-
-Example using the remote endpoint:
-
 ```bash
 curl -s -X POST http://localhost:4000/remote \
   -H "Content-Type: application/json" \
   -d '{"command":"/deploy default"}'
 ```
+
+`/deploy default` inspects what's installed and adapts:
+
+- **Claude Code + Codex both ready:** deploys the full team — `coder` (Claude) and `researcher` (Codex).
+- **Only Claude Code ready:** deploys `coder` only. The `researcher` entry is skipped with a console note so you know why.
+- **Neither Claude Code nor Codex ready:** nothing to deploy — install and log in to at least Claude Code (see Prerequisites), then retry.
+
+No second config name to remember. If you want to re-enable a dropped agent later, install/authenticate its runtime and run `/deploy default` again.
 
 > **Troubleshooting:** If agents show `status: error` after deploy, check the manager's terminal output for the actual error message. Agent log files are at `workspace/logs/local-<name>-*.log`.
 

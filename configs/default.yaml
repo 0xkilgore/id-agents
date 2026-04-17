@@ -1,15 +1,20 @@
 # Default Team
 # Deploy with: /deploy default
 #
-# A simple team for trying out ID Agents. Uses the default team
+# A demo team for trying out ID Agents. Uses the default team
 # so no team switching is needed.
+#
+# Runtime handling at deploy time:
+#   - If Codex is not installed/authenticated, `researcher` is dropped
+#     with a console note and you get a Claude-only team.
+#   - If both Claude Code and Codex are ready, you get the full mixed
+#     team (coder + researcher).
 
 version: "1"
 team: default
 
 defaults:
   local: true
-  runtime: claude-code-cli
   skills:
     - identity
     - inter-agent
@@ -18,6 +23,8 @@ defaults:
 agents:
   - name: coder
     description: "Writes and reviews code"
+    runtime: claude-code-cli
 
   - name: researcher
     description: "Research, analysis, and documentation"
+    runtime: codex

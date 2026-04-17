@@ -10,6 +10,8 @@
 import type { HarnessType } from '../harness/types.js';
 import type { RuntimeProfile, RuntimeId, RuntimeValidationIssue } from './types.js';
 import { execFileSync, spawnSync } from 'child_process';
+import fs from 'fs';
+import path from 'path';
 
 const DEFAULT_RUNTIME: RuntimeId = 'claude-agent-sdk';
 
@@ -171,6 +173,59 @@ export function getAvailableRuntimes(): RuntimeId[] {
 
 export function isRuntimeId(runtime: string | undefined): runtime is RuntimeId {
   return !!runtime && runtime in PROFILES;
+}
+
+function commandOnPath(bin: string): boolean {
+  try {
+    const r = spawnSync('command', ['-v', bin], { shell: '/bin/sh', stdio: 'ignore' });
+    return r.status === 0;
+  } catch {
+    return false;
+  }
+}
+
+function claudeCodeAuthExists(): boolean {
+  if (process.env.ANTHROPIC_API_KEY) return true;
+  if (process.platform === 'darwin') {
+    try {
+      const r = spawnSync('security', ['find-generic-password', '-s', 'Claude Code-credentials'], { stdio: 'ignore' });
+      if (r.status === 0) return true;
+    } catch {}
+  }
+  const home = process.env.HOME;
+  if (home && fs.existsSync(path.join(home, '.claude', '.credentials.json'))) return true;
+  return false;
+}
+
+function codexAuthExists(): boolean {
+  if (process.env.OPENAI_API_KEY) return true;
+  const home = process.env.HOME;
+  if (home && fs.existsSync(path.join(home, '.codex', 'auth.json'))) return true;
+  return false;
+}
+
+/**
+ * Returns true when the runtime's CLI is on PATH AND credentials are present.
+ *
+ * Used by the deploy path to strip agents whose runtime the current machine
+ * can't spawn. Runtimes without a PATH+auth contract (e.g. the SDK, which
+ * uses an env var only) fall back to checking the env var alone.
+ *
+ * Undeclared runtimes default to ready so we don't silently drop agents.
+ */
+export function isRuntimeReady(runtime: HarnessType | string | undefined): boolean {
+  const id = resolveRuntime(runtime);
+  switch (id) {
+    case 'claude-code-cli':
+    case 'claude-code-local':
+      return commandOnPath('claude') && claudeCodeAuthExists();
+    case 'codex':
+      return commandOnPath('codex') && codexAuthExists();
+    case 'claude-agent-sdk':
+      return !!process.env.ANTHROPIC_API_KEY;
+    default:
+      return true;
+  }
 }
 
 function classifyModelFamily(model: string | undefined): 'claude' | 'openai' | 'unknown' {

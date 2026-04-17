@@ -141,11 +141,8 @@ MANAGER_PORT=5000 npm run id-agents
 
 #### 3) Deploy and talk to agents
 
-Pick the team that matches what you have installed and authenticated:
-
 ```
-/deploy default-mixed  # Preferred: Claude Code + Codex (coder + researcher)
-/deploy default        # Claude Code only
+/deploy default        # Auto-detects runtimes: Claude + Codex if both ready, Claude only otherwise
 /ask coder Write a hello world function
 ```
 

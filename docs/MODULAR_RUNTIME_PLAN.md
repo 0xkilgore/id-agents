@@ -325,7 +325,7 @@ Add a dedicated mixed-runtime launch command with preflight and smoke tests.
 Suggested CLI shape:
 
 ```bash
-/launch configs/default-mixed.yaml
+/launch configs/default.yaml
 ```
 
 ## Testing Plan

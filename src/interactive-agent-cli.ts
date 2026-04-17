@@ -16,7 +16,7 @@ import {
   findProjectRoot as coreFindProjectRoot,
   readDotEnvFile as coreReadDotEnvFile,
 } from './core/index.js';
-import { getRuntimeDisplayName, resolveRuntime } from './runtime/registry.js';
+import { getRuntimeDisplayName, resolveRuntime, isRuntimeReady } from './runtime/registry.js';
 
 const colors = {
   reset: '\x1b[0m',
@@ -4377,7 +4377,7 @@ async function deployFromConfig(filePath: string, args: string[] = []) {
     }
 
     // Process config file with parameters
-    const { agents, teamContext, teamName: configTeam, errors, parameters, onchain } = processConfig(absolutePath, '/workspace', args);
+    let { agents, teamContext, teamName: configTeam, errors, parameters, onchain } = processConfig(absolutePath, '/workspace', args);
 
     if (errors.length > 0) {
       console.log(`\n${colors.red}❌ Config validation errors:${colors.reset}`);
@@ -4397,6 +4397,31 @@ async function deployFromConfig(filePath: string, args: string[] = []) {
 
     if (agents.length === 0) {
       console.log(`\n${colors.yellow}⚠️  No agents defined in config${colors.reset}\n`);
+      return;
+    }
+
+    // Runtime-readiness filter: strip agents whose runtime's CLI is missing
+    // or unauthenticated on this machine, so /deploy default degrades
+    // gracefully instead of spawning agents that would immediately fail.
+    const dropped: { name: string; runtime: string }[] = [];
+    agents = agents.filter(agent => {
+      const rt = agent.runtime || 'claude-code-cli';
+      if (isRuntimeReady(rt)) return true;
+      dropped.push({ name: agent.name, runtime: resolveRuntime(rt) });
+      return false;
+    });
+
+    if (dropped.length > 0) {
+      for (const d of dropped) {
+        const rtName = getRuntimeDisplayName(d.runtime);
+        console.log(`${colors.yellow}   ⚠️  Skipping "${d.name}" — ${rtName} is not installed or not authenticated${colors.reset}`);
+      }
+      console.log(`${colors.gray}   (install and log in to re-enable these agents — see QUICKSTART Prerequisites)${colors.reset}`);
+    }
+
+    if (agents.length === 0) {
+      console.log(`\n${colors.yellow}⚠️  No agents left to deploy after runtime check.${colors.reset}`);
+      console.log(`${colors.gray}   Install and authenticate at least one supported runtime, then retry.${colors.reset}\n`);
       return;
     }
 
