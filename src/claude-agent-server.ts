@@ -586,11 +586,12 @@ export class AgentRestServer {
             title: 'Notify another agent (fire-and-forget)',
             method: 'POST',
             endpoint: '/news-to',
-            description: 'Send a fire-and-forget notification to another agent. Mirror of /talk-to but posts to the target\'s /news and does not wait for a reply. Returns 202 Accepted immediately.',
+            description: 'Send a fire-and-forget notification to another agent. Mirror of /talk-to but posts to the target\'s /news and does not wait for a reply. Returns 202 Accepted immediately. Set trigger:true for async delegation — the recipient\'s LLM processes the message without a blocking HTTP connection.',
             input_schema: {
               to: 'string (required) - target agent name or id',
               message: 'string (required unless data) - the message to send',
-              data: 'object (optional) - structured payload attached to the notification'
+              data: 'object (optional) - structured payload attached to the notification',
+              trigger: 'boolean (optional, default false) - when true, wakes the recipient\'s LLM to process the message (async delegation); when false/omitted, delivers a passive notification only'
             }
           },
           {
@@ -1166,6 +1167,9 @@ export class AgentRestServer {
     // /news-to → target's /news (no reply). The client never has to guess
     // which verb was routed where, so there is no "did this go through the
     // manager or not?" confusion.
+    // Optional trigger:true is passed through to the target's /news so the
+    // recipient's LLM processes the message (async delegation) without the
+    // caller holding an HTTP connection open.
     // INTERNAL ONLY — only accessible from localhost (agent's own LLM).
     this.app.post('/news-to', async (req, res) => {
       try {
@@ -1183,7 +1187,7 @@ export class AgentRestServer {
           });
         }
 
-        const { to, message, data } = req.body || {};
+        const { to, message, data, trigger } = req.body || {};
         if (!to || (!message && !data)) {
           return res.status(400).json({ error: 'Missing "to" or "message"/"data"' });
         }
@@ -1233,6 +1237,7 @@ export class AgentRestServer {
           message: message ?? undefined,
           data: data ?? undefined,
           reply_expected: false,
+          ...(trigger === true ? { trigger: true } : {}),
         };
         fetch(`${targetUrl}/news`, {
           method: 'POST',
