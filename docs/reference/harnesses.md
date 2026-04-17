@@ -220,8 +220,8 @@ agents:
 
 **Dry run before deploy:**
 ```bash
-/deploy demo-mixed --dry-run
-/sync demo-mixed --dry-run    # same validation, for updating running teams
+/deploy default-mixed --dry-run
+/sync default-mixed --dry-run    # same validation, for updating running teams
 ```
 
 **Via Remote API:**

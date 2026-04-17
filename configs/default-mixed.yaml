@@ -1,5 +1,5 @@
-# Demo Team (Mixed runtimes)
-# Deploy with: /deploy demo-mixed
+# Default Team (Mixed runtimes)
+# Deploy with: /deploy default-mixed
 #
 # A team mixing Claude Code and Codex agents. Uses the default team
 # so no team switching is needed.

@@ -34,7 +34,7 @@ You can opt out by setting `dangerouslySkipPermissions: false` in the YAML confi
 
 ## Runtime Selection
 
-Detect which agent CLIs are ready to use on this machine, then pick the deploy command automatically. **Prefer a mixed team** (`/deploy demo-mixed`) whenever both Claude Code and Codex are installed and authenticated — it's the most compelling first demo. Fall back to a single-runtime team only if one is unavailable.
+Detect which agent CLIs are ready to use on this machine, then pick the deploy command automatically. **Prefer the mixed team** (`/deploy default-mixed`) whenever both Claude Code and Codex are installed and authenticated — it's the most compelling first demo. Fall back to the Claude-only team if Codex is unavailable.
 
 For each runtime, check **both** (1) the binary is on `PATH` *and* (2) credentials exist. Binary-on-`PATH` alone is not sufficient — stale installs and un-authenticated states are common and cause deploys to fail halfway through.
 
@@ -68,10 +68,9 @@ command -v codex >/dev/null 2>&1
 
 | Claude ready | Codex ready | Command | Team |
 |---|---|---|---|
-| ✓ | ✓ | `/deploy demo-mixed` | Mixed: `coder` (claude) + `researcher` (codex) |
-| ✓ | ✗ | `/deploy demo` | Claude Code only |
-| ✗ | ✓ | `/deploy demo-codex` | Codex only |
-| ✗ | ✗ | — | Stop. Ask the user to install and log in to at least one CLI (see Prerequisites above) |
+| ✓ | ✓ | `/deploy default-mixed` | Mixed: `coder` (claude) + `researcher` (codex) |
+| ✓ | ✗ | `/deploy default` | Claude Code only |
+| ✗ | * | — | Stop. Ask the user to install and log in to Claude Code (see Prerequisites above) |
 
 If only the binary is present but auth is missing, tell the user the specific command to run (`claude login` or `codex login`) before retrying.
 
@@ -106,22 +105,21 @@ This starts the interactive CLI on port 4000 and the manager daemon on port 4100
 
 > **Running this from a Claude Code session?** Spawn the command in the background (Bash tool with `run_in_background: true`). The readline prompt sits idle with no stdin — that's fine. Ports 4000 and 4100 come up normally and every step below works unchanged. If you also want an interactive TTY, open a separate terminal window and run the command there.
 >
-> **Headless-only alternative:** If you don't need the CLI at all, run `node dist/start-agent-manager.js` and use port 4100. Note: `/deploy` in Step 4 goes through the CLI's `/remote` endpoint on port 4000, so you still need `npm run id-agents` running to deploy a demo team.
+> **Headless-only alternative:** If you don't need the CLI at all, run `node dist/start-agent-manager.js` and use port 4100. Note: `/deploy` in Step 4 goes through the CLI's `/remote` endpoint on port 4000, so you still need `npm run id-agents` running to deploy a team.
 
-## 4. Deploy a Demo Team
+## 4. Deploy the Default Team
 
 Use the idagents-admin-control skill's `remote-command.sh` to deploy:
 
-- **Claude Code agents:** `/deploy demo`
-- **Codex agents:** `/deploy demo-codex`
-- **Mixed (both):** `/deploy demo-mixed`
+- **Claude Code only:** `/deploy default`
+- **Mixed (Claude + Codex):** `/deploy default-mixed`
 
 Example using the remote endpoint:
 
 ```bash
 curl -s -X POST http://localhost:4000/remote \
   -H "Content-Type: application/json" \
-  -d '{"command":"/deploy demo"}'
+  -d '{"command":"/deploy default"}'
 ```
 
 > **Troubleshooting:** If agents show `status: error` after deploy, check the manager's terminal output for the actual error message. Agent log files are at `workspace/logs/local-<name>-*.log`.
@@ -162,7 +160,7 @@ If they accept, keep using the `/remote` endpoint to relay between the user and 
 
 ## 7. Suggest Next Steps
 
-After the demo team is running, suggest the user create their own team. A good starting point:
+After the default team is running, suggest the user create their own team. A good starting point:
 
 > You can create a custom team by making a YAML config in `configs/`. Specify agent names and their working directories (the project folders they should work in):
 >

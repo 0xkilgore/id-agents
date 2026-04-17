@@ -1,16 +1,15 @@
-# Demo Team (Codex only)
-# Deploy with: /deploy demo-codex
+# Default Team
+# Deploy with: /deploy default
 #
-# A simple team using OpenAI Codex CLI. Uses the default team
+# A simple team for trying out ID Agents. Uses the default team
 # so no team switching is needed.
-# Requires: codex login (OAuth) or OPENAI_API_KEY env var.
 
 version: "1"
 team: default
 
 defaults:
   local: true
-  runtime: codex
+  runtime: claude-code-cli
   skills:
     - identity
     - inter-agent

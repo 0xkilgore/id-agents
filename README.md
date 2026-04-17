@@ -89,7 +89,7 @@ Run a team of AI coding agents from a single chat. Each agent is a real process 
 
 ### Recommended: Let Claude set it up
 
-The fastest way to start is to let a Claude Code session do it. Claude clones the repo, installs the `idagents-admin-control` skill, starts the manager, deploys a demo team, then offers to act as your team manager.
+The fastest way to start is to let a Claude Code session do it. Claude clones the repo, installs the `idagents-admin-control` skill, starts the manager, deploys the default team, then offers to act as your team manager.
 
 Paste this into any Claude Code session:
 
@@ -141,12 +141,11 @@ MANAGER_PORT=5000 npm run id-agents
 
 #### 3) Deploy and talk to agents
 
-Pick the demo team that matches what you have installed and authenticated:
+Pick the team that matches what you have installed and authenticated:
 
 ```
-/deploy demo-mixed     # Preferred: Claude Code + Codex (coder + researcher)
-/deploy demo           # Claude Code only
-/deploy demo-codex     # Codex only
+/deploy default-mixed  # Preferred: Claude Code + Codex (coder + researcher)
+/deploy default        # Claude Code only
 /ask coder Write a hello world function
 ```
 
