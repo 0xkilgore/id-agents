@@ -213,6 +213,7 @@ export class AgentManagerDb {
   private readonly QUERY_EXPIRY_MINUTES = 15;
   private logBuffer: Array<{ ts: number; msg: string }> = [];
   private readonly LOG_BUFFER_SIZE = 500;
+  private managementPort: number = 4100;
 
   /** Log a manager activity message to the ring buffer (not stdout) */
   private managerLog(msg: string) {
@@ -506,8 +507,17 @@ export class AgentManagerDb {
    * Convert an AgentRow to an API response object with identifier fields
    */
   private agentToResponse(a: AgentRow) {
-    const isExternal = a.type === 'virtual' || a.type === 'interactive';
-    const url = isExternal ? a.endpoint : `http://localhost:${a.port}`;
+    // Interactive CLI agents are reachable via the daemon's management port —
+    // the daemon owns /talk and /news for them (see e3b30b9). The CLI's own
+    // port (stored in a.endpoint) may not be listening, so wrapper lookups
+    // that hit a.endpoint would silently fail. The daemon URL always works:
+    // POST /news lands under the manager-inbox agent_id and GET /news reads
+    // from the same row. Virtual agents keep their declared endpoint.
+    const url = a.type === 'interactive'
+      ? `http://localhost:${this.managementPort}`
+      : a.type === 'virtual'
+        ? a.endpoint
+        : `http://localhost:${a.port}`;
 
     // After registration, a.name IS the ENS domain and the original local alias
     // is preserved in metadata.alias.
@@ -5335,6 +5345,7 @@ export class AgentManagerDb {
   }
 
   async start(port: number = 4100): Promise<void> {
+    this.managementPort = port;
     return new Promise((resolve) => {
       // Create HTTP server from Express app
       this.httpServer = createHttpServer(this.managementApp);
