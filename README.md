@@ -142,9 +142,19 @@ MANAGER_PORT=5000 npm run id-agents
 #### 3) Deploy and talk to agents
 
 ```
-/deploy default        # Auto-detects runtimes: Claude + Codex if both ready, Claude only otherwise
+/deploy default        # Claude Code team with one agent (coder)
 /ask coder Write a hello world function
 ```
+
+`configs/default.yaml` ships minimal. If Codex is installed and authenticated, append a Codex agent to the `agents:` list before deploying:
+
+```yaml
+  - name: researcher
+    description: "Research, analysis, and documentation"
+    runtime: codex
+```
+
+See [QUICKSTART Step 4](./QUICKSTART.md) for the full detection check.
 
 To update a running team later (add/remove/change agents without losing sessions), use [`/sync`](docs/guides/sync-command.md) instead of `/deploy`.
 

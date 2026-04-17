@@ -67,19 +67,25 @@ This starts the interactive CLI on port 4000 and the manager daemon on port 4100
 
 ## 4. Deploy the Default Team
 
+`configs/default.yaml` ships as a minimal Claude Code team — one agent named `coder`. That's enough for a first demo. Whatever is in the file is what gets deployed, so to change the team, edit the file.
+
+**Optional: add a Codex `researcher` before deploying.** If Codex is installed and authenticated — i.e. `command -v codex` succeeds *and* either `$OPENAI_API_KEY` is set or `~/.codex/auth.json` exists — append this block to the `agents:` list in `configs/default.yaml`:
+
+```yaml
+  - name: researcher
+    description: "Research, analysis, and documentation"
+    runtime: codex
+```
+
+If Codex isn't ready, leave the file alone and deploy the Claude-only team. You can always add the researcher later and re-deploy.
+
+Then deploy:
+
 ```bash
 curl -s -X POST http://localhost:4000/remote \
   -H "Content-Type: application/json" \
   -d '{"command":"/deploy default"}'
 ```
-
-`/deploy default` inspects what's installed and adapts:
-
-- **Claude Code + Codex both ready:** deploys the full team — `coder` (Claude) and `researcher` (Codex).
-- **Only Claude Code ready:** deploys `coder` only. The `researcher` entry is skipped with a console note so you know why.
-- **Neither Claude Code nor Codex ready:** nothing to deploy — install and log in to at least Claude Code (see Prerequisites), then retry.
-
-No second config name to remember. If you want to re-enable a dropped agent later, install/authenticate its runtime and run `/deploy default` again.
 
 > **Troubleshooting:** If agents show `status: error` after deploy, check the manager's terminal output for the actual error message. Agent log files are at `workspace/logs/local-<name>-*.log`.
 
