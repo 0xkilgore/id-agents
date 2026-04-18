@@ -375,8 +375,14 @@ export interface TasksRepository {
   /** Insert a new task, optionally linking it to calendar schedule ids. */
   create(task: TaskRow, eventScheduleIds?: string[]): Promise<void>;
 
-  /** Look up a task by its unique name slug. */
+  /** Look up a task by its unique name slug (global, ignores team). */
   getByName(name: string): Promise<TaskRow | null>;
+
+  /**
+   * Look up a task by (team_id, name) — the new (team_id, name) unique key.
+   * This is the preferred method for all team-scoped lookups.
+   */
+  getByNameForTeam(name: string, teamId: string): Promise<TaskRow | null>;
 
   /**
    * Look up tasks whose `uuid` starts with the given prefix.

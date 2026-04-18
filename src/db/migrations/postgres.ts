@@ -436,7 +436,7 @@ export async function migratePostgres(adapter: DbAdapter): Promise<void> {
   await adapter.query(`
     CREATE TABLE IF NOT EXISTS tasks (
       id text PRIMARY KEY,
-      name text NOT NULL UNIQUE,
+      name text NOT NULL,
       uuid text,
       team_id uuid REFERENCES teams(id) ON DELETE SET NULL,
       title text NOT NULL,
@@ -446,8 +446,54 @@ export async function migratePostgres(adapter: DbAdapter): Promise<void> {
       owner text REFERENCES agents(id) ON DELETE SET NULL,
       created_at bigint NOT NULL,
       updated_at bigint NOT NULL,
-      completed_at bigint
+      completed_at bigint,
+      UNIQUE(team_id, name)
     );
+  `);
+
+  // Migrate tasks from global name UNIQUE to (team_id, name) UNIQUE.
+  // On fresh installs the table above already has the correct constraint.
+  // On upgraded installs, drop the old global unique constraint (if any) and
+  // add the composite one.
+  await adapter.query(`
+    DO $$
+    DECLARE
+      old_constraint text;
+    BEGIN
+      -- Find a UNIQUE constraint on the name column alone (not composite)
+      SELECT tc.constraint_name INTO old_constraint
+      FROM information_schema.table_constraints tc
+      JOIN information_schema.key_column_usage kcu
+        ON tc.constraint_name = kcu.constraint_name
+        AND tc.table_schema = kcu.table_schema
+      WHERE tc.table_schema = 'public'
+        AND tc.table_name = 'tasks'
+        AND tc.constraint_type = 'UNIQUE'
+        AND kcu.column_name = 'name'
+      -- Only if it's a single-column constraint (not the composite we want)
+      GROUP BY tc.constraint_name
+      HAVING COUNT(*) = 1
+      LIMIT 1;
+
+      IF old_constraint IS NOT NULL THEN
+        EXECUTE format('ALTER TABLE tasks DROP CONSTRAINT %I', old_constraint);
+        ALTER TABLE tasks ADD CONSTRAINT tasks_team_name_unique UNIQUE (team_id, name);
+      END IF;
+
+      -- Add composite unique if it doesn't already exist
+      IF NOT EXISTS (
+        SELECT 1 FROM information_schema.table_constraints tc
+        JOIN information_schema.key_column_usage kcu
+          ON tc.constraint_name = kcu.constraint_name
+          AND tc.table_schema = kcu.table_schema
+        WHERE tc.table_schema = 'public'
+          AND tc.table_name = 'tasks'
+          AND tc.constraint_type = 'UNIQUE'
+          AND kcu.column_name = 'team_id'
+      ) THEN
+        ALTER TABLE tasks ADD CONSTRAINT tasks_team_name_unique UNIQUE (team_id, name);
+      END IF;
+    END $$;
   `);
 
   // Tasks: ensure uuid column exists for upgraded databases, then backfill

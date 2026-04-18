@@ -47,6 +47,14 @@ export class PgTasksRepo implements TasksRepository {
     return r.rows[0] || null;
   }
 
+  async getByNameForTeam(name: string, teamId: string): Promise<TaskRow | null> {
+    const r = await this.db.query<TaskRow>(
+      `SELECT * FROM tasks WHERE name = $1 AND team_id = $2`,
+      [name, teamId],
+    );
+    return r.rows[0] || null;
+  }
+
   async getByUuidPrefix(prefix: string): Promise<TaskRow[]> {
     const r = await this.db.query<TaskRow>(
       `SELECT * FROM tasks WHERE uuid LIKE $1 ORDER BY updated_at DESC`,

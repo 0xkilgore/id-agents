@@ -122,7 +122,7 @@ export async function migrateSqlite(adapter: SqliteAdapter): Promise<void> {
 
     CREATE TABLE IF NOT EXISTS tasks (
       id TEXT PRIMARY KEY,
-      name TEXT NOT NULL UNIQUE,
+      name TEXT NOT NULL,
       uuid TEXT,
       team_id TEXT REFERENCES teams(id) ON DELETE SET NULL,
       title TEXT NOT NULL,
@@ -132,7 +132,8 @@ export async function migrateSqlite(adapter: SqliteAdapter): Promise<void> {
       owner TEXT REFERENCES agents(id) ON DELETE SET NULL,
       created_at INTEGER NOT NULL,
       updated_at INTEGER NOT NULL,
-      completed_at INTEGER
+      completed_at INTEGER,
+      UNIQUE(team_id, name)
     );
 
     CREATE TABLE IF NOT EXISTS task_event_links (
@@ -181,4 +182,66 @@ export async function migrateSqlite(adapter: SqliteAdapter): Promise<void> {
   }
 
   adapter.exec(`CREATE UNIQUE INDEX IF NOT EXISTS tasks_uuid_idx ON tasks(uuid)`);
+
+  // Tasks: migrate from global name UNIQUE to (team_id, name) UNIQUE.
+  // SQLite does not support DROP CONSTRAINT, so we use the rename-copy-swap pattern
+  // guarded by a PRAGMA check to detect whether the old global uniqueness is still present.
+  await migrateTasks_TeamNameUnique(adapter);
+}
+
+/**
+ * Idempotent migration: change tasks uniqueness from `name UNIQUE` to
+ * `UNIQUE(team_id, name)`.
+ *
+ * Approach: check if the tasks table has a column-level UNIQUE on `name`
+ * (present when `name TEXT NOT NULL UNIQUE` was used). If it does, rebuild
+ * the table with the new composite constraint.
+ *
+ * This runs on every start but is a no-op if the constraint is already correct.
+ */
+async function migrateTasks_TeamNameUnique(adapter: SqliteAdapter): Promise<void> {
+  // Inspect the existing CREATE TABLE SQL for the tasks table
+  const { rows } = await adapter.query<{ sql: string }>(
+    `SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'tasks'`,
+  );
+  if (!rows[0]) return; // table doesn't exist yet (first run handled by CREATE TABLE above)
+
+  const ddl = rows[0].sql || '';
+
+  // If the DDL already has UNIQUE(team_id, name), migration is done
+  if (ddl.includes('UNIQUE(team_id, name)') || ddl.includes('UNIQUE (team_id, name)')) return;
+
+  // Check whether the old global name UNIQUE is present (column-level UNIQUE on name)
+  // Look for 'name TEXT NOT NULL UNIQUE' pattern
+  if (!ddl.toLowerCase().includes('name text not null unique')) return;
+
+  // Rename-copy-swap migration
+  adapter.exec(`
+    ALTER TABLE tasks RENAME TO tasks_old;
+
+    CREATE TABLE tasks (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      uuid TEXT,
+      team_id TEXT REFERENCES teams(id) ON DELETE SET NULL,
+      title TEXT NOT NULL,
+      description TEXT,
+      status TEXT NOT NULL,
+      created_by TEXT REFERENCES agents(id) ON DELETE SET NULL,
+      owner TEXT REFERENCES agents(id) ON DELETE SET NULL,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      completed_at INTEGER,
+      UNIQUE(team_id, name)
+    );
+
+    INSERT INTO tasks SELECT * FROM tasks_old;
+
+    DROP TABLE tasks_old;
+
+    CREATE INDEX IF NOT EXISTS tasks_status_idx ON tasks(status, updated_at);
+    CREATE INDEX IF NOT EXISTS tasks_owner_idx ON tasks(owner, status, updated_at);
+    CREATE INDEX IF NOT EXISTS tasks_team_idx ON tasks(team_id, status, updated_at);
+    CREATE UNIQUE INDEX IF NOT EXISTS tasks_uuid_idx ON tasks(uuid);
+  `);
 }
