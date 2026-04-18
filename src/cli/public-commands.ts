@@ -21,6 +21,15 @@ export interface PublicCommandDeps {
 export interface AddPublicAgentOpts {
   sshTarget?: string | null;
   internalPort?: number | null;
+  /** If true, trigger on-chain registration after the agent is persisted. */
+  onchain?: boolean;
+  /** Registrar name override (forwarded to the manager for future use). */
+  registrar?: string;
+}
+
+export interface RegisterPublicOnchainOpts {
+  /** Re-push identity.json even if already registered (skips re-registration). */
+  force?: boolean;
 }
 
 export interface PublicCommandResult {
@@ -181,6 +190,47 @@ export async function addPublicAgent(
   }
 
   const regData: any = await regResp.json();
+  const agentId: string = regData.id;
+
+  // Step 7: optionally trigger on-chain registration
+  if (opts.onchain && agentId) {
+    try {
+      const onchainResp = await deps.fetch(
+        `${deps.managerBaseUrl}/agents/${agentId}/onchain/register`,
+        {
+          method: 'POST',
+          headers: publicHeaders(),
+          body: JSON.stringify({}),
+        },
+      ) as any;
+      if (!onchainResp.ok) {
+        let onchainErr = `On-chain registration failed: HTTP ${onchainResp.status}`;
+        try {
+          const ob: any = await onchainResp.json();
+          onchainErr = ob.error || ob.message || onchainErr;
+        } catch { /* keep default */ }
+        // On-chain failure is non-fatal: agent is persisted, print warning.
+        return {
+          ok: true,
+          message: `Registered ${domain} as public-agent/${agentName} (on-chain warning: ${onchainErr})`,
+          data: regData,
+        };
+      }
+      const onchainData: any = await onchainResp.json();
+      return {
+        ok: true,
+        message: `Registered ${domain} as public-agent/${agentName} (on-chain: ${onchainData.domain || 'ok'})`,
+        data: { ...regData, onchain: onchainData },
+      };
+    } catch (onchainErr: any) {
+      return {
+        ok: true,
+        message: `Registered ${domain} as public-agent/${agentName} (on-chain error: ${onchainErr?.message ?? String(onchainErr)})`,
+        data: regData,
+      };
+    }
+  }
+
   return {
     ok: true,
     message: `Registered ${domain} as public-agent/${agentName}`,
@@ -265,4 +315,134 @@ export async function removePublicAgent(
   }
 
   return { ok: true, message: `Removed public agent "${found.name}" (${found.customer_domain ?? found.id})` };
+}
+
+// ─── registerPublicOnchain ───────────────────────────────────────────────────
+
+export interface RegisterPublicOnchainResult {
+  ok: true;
+  message: string;
+  alreadyRegistered?: boolean;
+  idchain_domain?: string;
+  data?: any;
+}
+
+/**
+ * Register (or re-deliver identity for) a public-team agent on ID Chain.
+ *
+ * @param ref - Agent name or customer_domain.
+ * @param opts - Force re-delivery even if already registered.
+ * @param deps - Manager URL and fetch.
+ */
+export async function registerPublicOnchain(
+  ref: string,
+  opts: RegisterPublicOnchainOpts,
+  deps: PublicCommandDeps,
+): Promise<RegisterPublicOnchainResult | PublicCommandError> {
+  // Resolve agent from the public team list
+  const listResult = await listPublicAgents(deps);
+  if (!listResult.ok) return listResult;
+
+  const needle = ref.toLowerCase();
+  const found = listResult.agents.find(
+    (a) =>
+      a.name.toLowerCase() === needle ||
+      (a.customer_domain ?? '').toLowerCase() === needle,
+  );
+  if (!found) {
+    return {
+      ok: false,
+      error: `No public agent found matching "${ref}". Run /public list to see registered agents.`,
+    };
+  }
+
+  // Fetch full agent details to check idchain_domain
+  let agentDetail: any = null;
+  try {
+    const detailResp = await deps.fetch(`${deps.managerBaseUrl}/agents/${found.id}`, {
+      headers: {
+        'X-Id-Team': 'public',
+        'X-Id-Admin': '1',
+      },
+    }) as any;
+    if (detailResp.ok) {
+      agentDetail = await detailResp.json();
+    }
+  } catch { /* ignore, proceed without detail */ }
+
+  const idchainDomain =
+    agentDetail?.idchain_domain ||
+    agentDetail?.domain ||
+    (agentDetail?.metadata as any)?.idchain_domain ||
+    null;
+
+  // Idempotency check — skip re-registration if already registered and !force
+  if (idchainDomain && !opts.force) {
+    return {
+      ok: true,
+      alreadyRegistered: true,
+      idchain_domain: idchainDomain,
+      message: `agent already on-chain at ${idchainDomain}`,
+    };
+  }
+
+  // If already registered and force=true, use redeliver-identity endpoint
+  if (idchainDomain && opts.force) {
+    try {
+      const redeliverResp = await deps.fetch(
+        `${deps.managerBaseUrl}/agents/${found.id}/onchain/redeliver-identity`,
+        {
+          method: 'POST',
+          headers: publicHeaders(),
+          body: JSON.stringify({}),
+        },
+      ) as any;
+      if (!redeliverResp.ok) {
+        let errMsg = `Redeliver failed: HTTP ${redeliverResp.status}`;
+        try {
+          const eb: any = await redeliverResp.json();
+          errMsg = eb.error || eb.message || errMsg;
+        } catch { /* keep default */ }
+        return { ok: false, error: errMsg };
+      }
+      const data: any = await redeliverResp.json();
+      return {
+        ok: true,
+        message: `Identity file redelivered for ${found.name} (${idchainDomain})`,
+        idchain_domain: idchainDomain,
+        data,
+      };
+    } catch (err: any) {
+      return { ok: false, error: `Redeliver error: ${err?.message ?? String(err)}` };
+    }
+  }
+
+  // Not yet registered — run full on-chain registration
+  try {
+    const onchainResp = await deps.fetch(
+      `${deps.managerBaseUrl}/agents/${found.id}/onchain/register`,
+      {
+        method: 'POST',
+        headers: publicHeaders(),
+        body: JSON.stringify({}),
+      },
+    ) as any;
+    if (!onchainResp.ok) {
+      let errMsg = `On-chain registration failed: HTTP ${onchainResp.status}`;
+      try {
+        const eb: any = await onchainResp.json();
+        errMsg = eb.error || eb.message || errMsg;
+      } catch { /* keep default */ }
+      return { ok: false, error: errMsg };
+    }
+    const data: any = await onchainResp.json();
+    return {
+      ok: true,
+      message: `Registered ${found.name} on-chain (${data.domain || 'ok'})`,
+      idchain_domain: data.domain,
+      data,
+    };
+  } catch (err: any) {
+    return { ok: false, error: `On-chain registration error: ${err?.message ?? String(err)}` };
+  }
 }

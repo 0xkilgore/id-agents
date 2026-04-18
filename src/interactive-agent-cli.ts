@@ -22,6 +22,7 @@ import {
   addPublicAgent,
   listPublicAgents,
   removePublicAgent,
+  registerPublicOnchain,
 } from './cli/public-commands.js';
 
 const colors = {
@@ -76,7 +77,8 @@ const HELP_ITEMS: Array<{ cmd: string; desc: string; indent?: boolean }> = [
   { cmd: '/artifact <agent> <path>', desc: 'Read file from agent output directory' },
   { cmd: '/news [-l] <agent>', desc: 'Check recent messages (-l for full content)' },
   { cmd: '/public', desc: 'List registered public-team agents' },
-  { cmd: '/public add <domain> [--ssh-target=user@host] [--internal-port=N]', desc: 'Register a remote public-agent' },
+  { cmd: '/public add <domain> [--ssh-target=user@host] [--internal-port=N] [--onchain] [--registrar=<name>]', desc: 'Register a remote public-agent' },
+  { cmd: '/public register-onchain <name|domain> [--force]', desc: 'Register public agent on ID Chain (--force re-delivers identity.json)' },
   { cmd: '/public remove <name|domain>', desc: 'Deregister a public-team agent' },
   { cmd: '/public <n|domain> <msg>', desc: 'Chat with a public agent by index or domain' },
   { cmd: '/public clear', desc: 'Remove all public-team agents (with confirmation)' },
@@ -3423,25 +3425,58 @@ async function handleLine(line: string) {
 
     const rest = input === '/public' ? '' : input.slice('/public '.length).trim();
 
-    // /public add <domain> [--ssh-target=...] [--internal-port=N]
+    // /public add <domain> [--ssh-target=...] [--internal-port=N] [--onchain] [--registrar=<name>]
     if (rest.startsWith('add ')) {
       const addArgs = parseArgs(rest.slice('add '.length));
       const domain = addArgs.find((a) => !a.startsWith('--'));
       if (!domain) {
-        console.log(`\n${colors.red}❌ Usage: /public add <domain> [--ssh-target=user@host] [--internal-port=N]${colors.reset}\n`);
+        console.log(`\n${colors.red}❌ Usage: /public add <domain> [--ssh-target=user@host] [--internal-port=N] [--onchain] [--registrar=<name>]${colors.reset}\n`);
         rl.prompt();
         return;
       }
       const sshFlag = addArgs.find((a) => a.startsWith('--ssh-target='));
       const portFlag = addArgs.find((a) => a.startsWith('--internal-port='));
+      const registrarFlag = addArgs.find((a) => a.startsWith('--registrar='));
       const sshTarget = sshFlag ? sshFlag.slice('--ssh-target='.length) : null;
       const internalPort = portFlag ? parseInt(portFlag.slice('--internal-port='.length), 10) : null;
+      const onchain = addArgs.includes('--onchain');
+      const registrar = registrarFlag ? registrarFlag.slice('--registrar='.length) : undefined;
 
       (async () => {
         try {
-          const result = await addPublicAgent(domain, { sshTarget, internalPort }, publicDeps);
+          const result = await addPublicAgent(domain, { sshTarget, internalPort, onchain, registrar }, publicDeps);
           if (result.ok) {
             console.log(`\n${colors.green}✅ ${result.message}${colors.reset}\n`);
+          } else {
+            console.log(`\n${colors.red}❌ ${result.error}${colors.reset}\n`);
+          }
+        } catch (err: any) {
+          console.log(`\n${colors.red}❌ Error: ${err?.message ?? String(err)}${colors.reset}\n`);
+        }
+        rl.prompt();
+      })();
+      return;
+    }
+
+    // /public register-onchain <name|domain> [--force]
+    if (rest.startsWith('register-onchain ') || rest === 'register-onchain') {
+      const roArgs = rest === 'register-onchain' ? [] : parseArgs(rest.slice('register-onchain '.length));
+      const ref = roArgs.find((a) => !a.startsWith('--'));
+      if (!ref) {
+        console.log(`\n${colors.red}❌ Usage: /public register-onchain <name|domain> [--force]${colors.reset}\n`);
+        rl.prompt();
+        return;
+      }
+      const force = roArgs.includes('--force');
+      (async () => {
+        try {
+          const result = await registerPublicOnchain(ref, { force }, publicDeps);
+          if (result.ok) {
+            if ((result as any).alreadyRegistered) {
+              console.log(`\n${colors.yellow}agent already on-chain at ${(result as any).idchain_domain}${colors.reset}\n`);
+            } else {
+              console.log(`\n${colors.green}✅ ${result.message}${colors.reset}\n`);
+            }
           } else {
             console.log(`\n${colors.red}❌ ${result.error}${colors.reset}\n`);
           }
