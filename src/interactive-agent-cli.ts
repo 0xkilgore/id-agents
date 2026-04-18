@@ -92,6 +92,7 @@ const HELP_ITEMS: Array<{ cmd: string; desc: string; indent?: boolean }> = [
   { cmd: '/teams', desc: 'List all teams' },
   { cmd: '/team delete <name>', desc: 'Delete a team (must be empty — run /delete --team first)' },
   { cmd: '/public', desc: 'List public agents' },
+  { cmd: '/public <n>', desc: 'Chat with agent #n in the list' },
   { cmd: '/public <domain>', desc: 'Chat with a public agent' },
   { cmd: '/public add <domain>', desc: 'Add to list' },
   { cmd: '/public remove <domain>', desc: 'Remove from list' },
@@ -1639,7 +1640,7 @@ async function handleLine(line: string) {
         list.forEach((a, i) => {
           console.log(`  ${i + 1}. ${a.domain}`);
         });
-        console.log(`\n${colors.gray}Chat with one: ${colors.cyan}/public <domain>${colors.reset}\n`);
+        console.log(`\n${colors.gray}Chat with one: ${colors.cyan}/public <n>${colors.gray} or ${colors.cyan}/public <domain>${colors.reset}\n`);
       }
       rl.prompt();
       return;
@@ -1710,6 +1711,7 @@ async function handleLine(line: string) {
     if (head === 'help' || head === '-h' || head === '--help') {
       console.log(`\n${colors.bold}Usage:${colors.reset}`);
       console.log(`  ${colors.cyan}/public${colors.reset}                   List known public agents`);
+      console.log(`  ${colors.cyan}/public <n>${colors.reset}               Chat with agent #n in the list (1-99)`);
       console.log(`  ${colors.cyan}/public <domain>${colors.reset}          Open a chat session (auto-adds to the list)`);
       console.log(`  ${colors.cyan}/public add <domain>${colors.reset}      Add a public agent to the list`);
       console.log(`  ${colors.cyan}/public remove <domain>${colors.reset}   Remove a public agent from the list`);
@@ -1720,6 +1722,21 @@ async function handleLine(line: string) {
       console.log(`${colors.gray}Public agents live in ${publicAgentsFile()}.${colors.reset}`);
       console.log(`${colors.gray}They are NEVER added to the manager DB, /agents, /talk-to, or /news-to.${colors.reset}\n`);
       rl.prompt();
+      return;
+    }
+
+    // Numeric index shortcut: `/public <n>` where n is 1-99 resolves to the
+    // nth entry in the persistent list. `/public add 5` never reaches here
+    // because `add` is dispatched above, so bare numeric args are unambiguous.
+    if (spaceIdx === -1 && /^[1-9][0-9]?$/.test(arg)) {
+      const idx = parseInt(arg, 10);
+      const list = loadPublicAgents();
+      if (idx > list.length) {
+        console.log(`\n${colors.yellow}no public agent at index ${idx}${colors.reset}\n`);
+        rl.prompt();
+        return;
+      }
+      await enterPublicSession(list[idx - 1]!.domain);
       return;
     }
 
