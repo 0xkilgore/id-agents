@@ -330,6 +330,12 @@ export async function migratePostgres(adapter: DbAdapter): Promise<void> {
   await adapter.query(`ALTER TABLE agents ADD COLUMN IF NOT EXISTS internal_endpoint_url text;`);
   await adapter.query(`ALTER TABLE agents ADD COLUMN IF NOT EXISTS ssh_target text;`);
 
+  // 12c) Phase 5: remote heartbeat probe columns.
+  await adapter.query(`ALTER TABLE agents ADD COLUMN IF NOT EXISTS last_seen bigint;`);
+  await adapter.query(`ALTER TABLE agents ADD COLUMN IF NOT EXISTS last_probed_at bigint;`);
+  await adapter.query(`ALTER TABLE agents ADD COLUMN IF NOT EXISTS last_error text;`);
+  await adapter.query(`ALTER TABLE agents ADD COLUMN IF NOT EXISTS consecutive_failures integer NOT NULL DEFAULT 0;`);
+
   // 13) Migrate agents PK from (team_id, id) to (id).
   //     Child table FKs change from (team_id, agent_id) -> agents(team_id, id)
   //     to (agent_id) -> agents(id).

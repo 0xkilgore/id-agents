@@ -203,6 +203,28 @@ export async function migrateSqlite(adapter: SqliteAdapter): Promise<void> {
     // Column already exists in upgraded databases.
   }
 
+  // Phase 5: remote heartbeat probe columns.
+  try {
+    adapter.exec(`ALTER TABLE agents ADD COLUMN last_seen INTEGER`);
+  } catch {
+    // Column already exists in upgraded databases.
+  }
+  try {
+    adapter.exec(`ALTER TABLE agents ADD COLUMN last_probed_at INTEGER`);
+  } catch {
+    // Column already exists in upgraded databases.
+  }
+  try {
+    adapter.exec(`ALTER TABLE agents ADD COLUMN last_error TEXT`);
+  } catch {
+    // Column already exists in upgraded databases.
+  }
+  try {
+    adapter.exec(`ALTER TABLE agents ADD COLUMN consecutive_failures INTEGER NOT NULL DEFAULT 0`);
+  } catch {
+    // Column already exists in upgraded databases.
+  }
+
   // Backfill uuid for any existing rows that lack one
   const missing = await adapter.query<{ id: string }>(`SELECT id FROM tasks WHERE uuid IS NULL OR uuid = ''`);
   for (const row of missing.rows) {

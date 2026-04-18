@@ -437,4 +437,32 @@ export class SqliteAgentsRepo implements AgentsRepository {
       [agentId],
     );
   }
+
+  async updateProbeResult(
+    agentId: string,
+    fields: {
+      last_seen?: number | null;
+      last_probed_at: number;
+      last_error?: string | null;
+      consecutive_failures: number;
+    },
+  ): Promise<void> {
+    const sets: string[] = ['last_probed_at = ?', 'consecutive_failures = ?'];
+    const params: unknown[] = [fields.last_probed_at, fields.consecutive_failures];
+
+    if ('last_seen' in fields) {
+      sets.push('last_seen = ?');
+      params.push(fields.last_seen ?? null);
+    }
+    if ('last_error' in fields) {
+      sets.push('last_error = ?');
+      params.push(fields.last_error ?? null);
+    }
+
+    params.push(agentId);
+    await this.db.query(
+      `UPDATE agents SET ${sets.join(', ')} WHERE id = ?`,
+      params,
+    );
+  }
 }

@@ -175,6 +175,20 @@ export interface AgentsRepository {
 
   /** Permanently delete an agent row (cascades to wallets, news, queries). */
   deleteAgent(agentId: string): Promise<void>;
+
+  /**
+   * Update remote probe result columns after a heartbeat probe.
+   * last_seen is only updated when the probe succeeded (ok=true).
+   */
+  updateProbeResult(
+    agentId: string,
+    fields: {
+      last_seen?: number | null;
+      last_probed_at: number;
+      last_error?: string | null;
+      consecutive_failures: number;
+    },
+  ): Promise<void>;
 }
 
 // ---------------------------------------------------------------------------

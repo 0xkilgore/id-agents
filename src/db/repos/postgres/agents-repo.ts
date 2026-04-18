@@ -388,4 +388,32 @@ export class PgAgentsRepo implements AgentsRepository {
       [agentId],
     );
   }
+
+  async updateProbeResult(
+    agentId: string,
+    fields: {
+      last_seen?: number | null;
+      last_probed_at: number;
+      last_error?: string | null;
+      consecutive_failures: number;
+    },
+  ): Promise<void> {
+    const setClauses: string[] = ['last_probed_at = $2', 'consecutive_failures = $3'];
+    const params: unknown[] = [agentId, fields.last_probed_at, fields.consecutive_failures];
+    let idx = 4;
+
+    if ('last_seen' in fields) {
+      setClauses.push(`last_seen = $${idx++}`);
+      params.push(fields.last_seen ?? null);
+    }
+    if ('last_error' in fields) {
+      setClauses.push(`last_error = $${idx++}`);
+      params.push(fields.last_error ?? null);
+    }
+
+    await this.db.query(
+      `UPDATE agents SET ${setClauses.join(', ')} WHERE id = $1`,
+      params,
+    );
+  }
 }
