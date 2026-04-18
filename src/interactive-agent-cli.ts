@@ -70,7 +70,7 @@ const HELP_ITEMS: Array<{ cmd: string; desc: string; indent?: boolean }> = [
   { cmd: '/help', desc: 'Show this help' },
   { cmd: '/output <agent>', desc: 'List files in agent output directory' },
   { cmd: '/artifact <agent> <path>', desc: 'Read file from agent output directory' },
-  { cmd: '/news [-l] <agent>', desc: 'Check recent messages (-l for full content)' },
+  { cmd: '/news [-l] <agent>', desc: 'Pull recent messages on demand, e.g. /news manager (-l for full content)' },
   { cmd: '/register <agent>', desc: 'Register agent onchain' },
   { cmd: '/heartbeat', desc: 'List heartbeats' },
   { cmd: '/heartbeat add <agent> <seconds> <message>', desc: 'Add heartbeat' },
@@ -3746,7 +3746,6 @@ async function handleLine(line: string) {
   rl.prompt();
 }
 
-let lastPendingCount = 0;
 const activeSpinners: Set<NodeJS.Timeout> = new Set();
 
 // Store session IDs per agent for context continuity
@@ -3756,33 +3755,6 @@ function updatePrompt() {
   const displayTeam = activeServerName || activeTeam;
   const agentSuffix = lastAskedAgent ? `:${lastAskedAgent}` : '';
   rl.setPrompt(`${colors.green}> [${name}@${displayTeam}${agentSuffix}]${colors.reset} `);
-}
-
-async function displayPendingQuestions(force: boolean = false) {
-  const pending = await server.getPendingQueries();
-  
-  if (pending.length === 0) {
-    if (force || lastPendingCount > 0) {
-      console.log(`\n${colors.green}✅ All questions answered!${colors.reset}\n`);
-    }
-    lastPendingCount = 0;
-    return;
-  }
-
-  if (force || pending.length !== lastPendingCount) {
-    console.log(`\n${colors.bold}${colors.yellow}🔔 ${pending.length} PENDING QUESTION${pending.length > 1 ? 'S' : ''}${colors.reset}\n`);
-
-    pending.forEach((q, i) => {
-      const time = new Date(q.timestamp).toLocaleTimeString();
-      console.log(`${colors.bold}${colors.yellow}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${colors.reset}`);
-      console.log(`${colors.bold}${colors.yellow}${i + 1}.${colors.reset} ${q.from ? `${colors.cyan}${q.from}${colors.reset} ` : ''}${colors.gray}${time}${colors.reset}`);
-      console.log(`${q.message}`);
-    });
-
-    console.log(`${colors.bold}${colors.yellow}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${colors.reset}\n`);
-
-    lastPendingCount = pending.length;
-  }
 }
 
 // Display startup banner
@@ -3821,11 +3793,6 @@ server.start().then(async () => {
     }
   }
   
-  // Poll for new queries every 2 seconds
-  setInterval(() => {
-    displayPendingQuestions().catch(() => {});
-  }, 2000);
-
   // Register with manager now that it's running
   await registerWithManager();
 
