@@ -705,6 +705,8 @@ server.on('reply', (reply: IncomingReply) => {
 
 // Handle incoming messages (not replies)
 server.on('message', (msg: { type: string; from: string; message: string; timestamp: number }) => {
+  // TODO: cleanup — popup disabled per user request 2026-04-18, pull via /news manager
+  return;
   console.log(`\n${colors.cyan}📨 New message from ${msg.from}:${colors.reset}`);
   console.log(`\n${msg.message}\n`);
   updatePrompt();
@@ -713,6 +715,8 @@ server.on('message', (msg: { type: string; from: string; message: string; timest
 
 // Handle pending questions (from POST /news - allows manager to reply)
 server.on('pending_question', (q: { query_id: string; from: string; message: string; timestamp: number; is_reply: boolean; in_reply_to?: string }) => {
+  // TODO: cleanup — popup disabled per user request 2026-04-18, pull via /news manager
+  return;
   const time = new Date(q.timestamp).toLocaleTimeString();
 
   console.log(`\n${colors.bold}${colors.yellow}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${colors.reset}`);
