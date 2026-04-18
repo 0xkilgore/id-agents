@@ -19,9 +19,11 @@ Most coding agents today live and die inside one terminal session. ID Agents giv
 - Task discipline — every non-trivial unit of work is a tracked task with a terminal state.
 - Multi-runtime support: Claude Code CLI and OpenAI Codex agents on the same team.
 
+The manager daemon and internal agents are Node.js/TypeScript HTTP services built on Express 5; the public-agent DMZ is built on Hono 4 — both serve the same REST-AP protocol.
+
 ## Elevator pitch
 
 One command, one config file, a persistent team of AI agents that talk to each other, remember what they were doing, and keep working while you sleep.
 
 ---
-Keywords: overview, about, what is, introduction, summary, elevator pitch, id agents, framework, intro
+Keywords: overview, about, what is, introduction, summary, elevator pitch, id agents, framework, intro, express, hono, web server, http, node, typescript, dependencies, stack

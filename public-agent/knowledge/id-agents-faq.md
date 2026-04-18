@@ -44,6 +44,10 @@ Both route through the same `/schedule` endpoint on the target agent, and schedu
 
 Non-trivial work must be a task. Single-line answers, greetings, simple look-ups, and work that is already part of an existing claimed task do not need a new task record. The discipline exists so that auditors and other agents can reconstruct what the team did and why — it is not a universal "every HTTP call is a task" rule.
 
+## What web framework do the servers use?
+
+The manager daemon and internal agents use **Express 5**. The **public-agent** DMZ uses **Hono 4**. Both are Node.js/TypeScript and speak REST-AP over HTTP JSON — the framework difference is an internal implementation detail, not a protocol difference. The manager also owns a SQLite database for history, tasks, news, and scheduled events; the public-agent stores its inbox as flat JSON files on disk and has no database.
+
 ## Which agent runtimes/harnesses are supported?
 
 ID Agents currently supports two agent runtimes:
@@ -54,4 +58,4 @@ ID Agents currently supports two agent runtimes:
 The following alternatives are **not supported**: OpenCode, OpenClaw, Cursor, Aider, Cody, Continue.dev, Roo Code, Cline, Warp AI, Windsurf, Zed AI, Goose, and any other CLI or IDE agent not listed as supported above. Adding support for another runtime requires implementing a new harness in `src/harness/` that matches the contract of the existing ones.
 
 ---
-Keywords: faq, common questions, troubleshooting, problems, issues, help, questions, q&a, headless, port, tasks, team, heartbeat, calendar, difference, compare, opencode, open code, openclaw, open claw, cursor, aider, cody, continue.dev, continue, roo code, roocode, cline, warp, warp ai, windsurf, zed, zed ai, goose, harnesses, runtimes, supported, unsupported, compatibility, alternatives
+Keywords: faq, common questions, troubleshooting, problems, issues, help, questions, q&a, headless, port, tasks, team, heartbeat, calendar, difference, compare, opencode, open code, openclaw, open claw, cursor, aider, cody, continue.dev, continue, roo code, roocode, cline, warp, warp ai, windsurf, zed, zed ai, goose, harnesses, runtimes, supported, unsupported, compatibility, alternatives, express, hono, framework, web server, http, node, typescript, dependencies, stack
