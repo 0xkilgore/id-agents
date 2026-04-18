@@ -7,6 +7,9 @@ interface AgentsTableProps {
   agents: Agent[];
   uptimeById: ReadonlyMap<string, string>;
   newsColorById: ReadonlyMap<string, string>;
+  memBytesById: ReadonlyMap<string, number | null>;
+  totalMemoryLabel: string;
+  totalMemoryColor: string;
   selectedIndex: number;
   windowStart: number;
   windowSize: number;
@@ -19,6 +22,9 @@ export function AgentsTable(props: AgentsTableProps): React.ReactElement {
     agents,
     uptimeById,
     newsColorById,
+    memBytesById,
+    totalMemoryLabel,
+    totalMemoryColor,
     selectedIndex,
     windowStart,
     windowSize,
@@ -34,7 +40,11 @@ export function AgentsTable(props: AgentsTableProps): React.ReactElement {
   return (
     <Box flexDirection="column" borderStyle="round" paddingX={1}>
       <Box justifyContent="space-between">
-        <Text bold>Agents ({total})</Text>
+        <Box>
+          <Text bold>Agents ({total})</Text>
+          <Text dimColor>{'  Total memory: '}</Text>
+          <Text color={totalMemoryColor}>{totalMemoryLabel}</Text>
+        </Box>
         <Text dimColor>
           {loading && total === 0 ? 'loading…' : null}
           {error ? `error: ${error.message}` : null}
@@ -51,6 +61,7 @@ export function AgentsTable(props: AgentsTableProps): React.ReactElement {
             agent={agent}
             uptime={uptimeById.get(agent.id) ?? '—'}
             newsColor={newsColorById.get(agent.id) ?? 'gray'}
+            memBytes={memBytesById.get(agent.id) ?? null}
             selected={windowStart + i === selectedIndex}
           />
         ))

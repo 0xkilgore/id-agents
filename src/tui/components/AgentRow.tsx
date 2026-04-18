@@ -3,12 +3,14 @@ import { Text } from 'ink';
 import type { Agent } from '../api/types.js';
 import { padRight } from '../util/format.js';
 import { statusColor, healthColor, healthDot } from '../util/colors.js';
+import { formatMemory, memoryColor } from '../util/memory.js';
 
 interface AgentRowProps {
   agent: Agent;
   selected: boolean;
   uptime: string;
   newsColor: string;
+  memBytes: number | null;
 }
 
 const COLS = {
@@ -20,6 +22,7 @@ const COLS = {
   health: 11,
   news: 2,
   hb: 3,
+  mem: 8,
   uptime: 6,
 } as const;
 
@@ -36,7 +39,7 @@ function renderHealth(health: string): string {
   return `${healthDot(health)} ${health}`;
 }
 
-function AgentRowInner({ agent, selected, uptime, newsColor }: AgentRowProps): React.ReactElement {
+function AgentRowInner({ agent, selected, uptime, newsColor, memBytes }: AgentRowProps): React.ReactElement {
   const marker = selected ? '▶ ' : '  ';
   const name = padRight(agent.alias ?? agent.name, COLS.name);
   const port = padRight(agent.port ? String(agent.port) : '—', COLS.port);
@@ -44,6 +47,7 @@ function AgentRowInner({ agent, selected, uptime, newsColor }: AgentRowProps): R
   const status = padRight(agent.status, COLS.status);
   const health = padRight(renderHealth(agent.health), COLS.health);
   const hb = padRight(agent.metadata?.heartbeat ? '♥' : '-', COLS.hb);
+  const memCell = padRight(formatMemory(memBytes), COLS.mem);
   const uptimeCell = padRight(uptime, COLS.uptime);
 
   return (
@@ -57,6 +61,7 @@ function AgentRowInner({ agent, selected, uptime, newsColor }: AgentRowProps): R
       <Text color={newsColor}>{NEWS_GLYPH}</Text>
       {' '}
       {hb}
+      <Text color={memoryColor(memBytes)}>{memCell}</Text>
       {uptimeCell}
     </Text>
   );
@@ -66,6 +71,7 @@ export const AgentRow = React.memo(AgentRowInner, (prev, next) => {
   if (prev.selected !== next.selected) return false;
   if (prev.uptime !== next.uptime) return false;
   if (prev.newsColor !== next.newsColor) return false;
+  if (prev.memBytes !== next.memBytes) return false;
   const a = prev.agent;
   const b = next.agent;
   return (
@@ -90,6 +96,7 @@ export function AgentRowHeader(): React.ReactElement {
       {padRight('HEALTH', COLS.health)}
       {padRight('N', COLS.news)}
       {padRight('HB', COLS.hb)}
+      {padRight('MEM', COLS.mem)}
       {padRight('UPTIME', COLS.uptime)}
     </Text>
   );

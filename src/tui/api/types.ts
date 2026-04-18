@@ -2,6 +2,7 @@ export interface AgentMetadata {
   runtime?: string;
   description?: string;
   heartbeat?: boolean;
+  pid?: number;
   [key: string]: unknown;
 }
 
