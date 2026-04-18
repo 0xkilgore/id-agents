@@ -59,11 +59,11 @@ The following alternatives are **not supported**: OpenCode, OpenClaw, Cursor, Ai
 
 ## How many agents can I run at once?
 
-There is no hard maximum. The manager allocates ports starting at 4146 and walks upward, so the port space is effectively unreachable — the real limiter is **host memory**. Each Claude Code or Codex agent runs as its own OS process and typically consumes anywhere from a few hundred MB to 1+ GB of RSS depending on runtime, loaded context, and the size of the task it is working on.
+There is no hard limit. Agents are relatively light — idle each consumes roughly **50–80 MB of RAM** because inference runs remotely (e.g. through OpenRouter or the Claude API), so the local process is really just a REST-AP wrapper around the CLI harness. On a typical 16 GB developer machine you can comfortably run **20–40 idle agents** with headroom for the OS and your editor.
 
-As a rough rule of thumb, a 16 GB machine comfortably runs **8–12 mixed agents** at once, including the manager and CLI. Push past that and the host starts swapping, the harnesses get slower, and scheduled work starts backing up. If you bump into the ceiling, the two easy moves are to stop idle agents with `/agent <name> stop` (freeing the process while keeping the config and history) or to split the fleet across multiple machines and point both managers at the same remote hosts.
+Practical limits usually appear first in other places: API rate limits, CPU contention when many agents are actively running tool-use sessions simultaneously, and file-descriptor / process limits on the host. Under heavy load (long context, active tool calls) a single agent's RSS can temporarily grow into the hundreds of MB — that's the burst case, not the steady state.
 
-The TUI (`tui` agent) surfaces per-agent RSS in the MEM column and a `Total memory: X.XGB` line in the header, so you can eyeball how much headroom you actually have before adding another agent.
+The TUI (`tui` agent) surfaces per-agent RSS in the MEM column and a `Total memory: X.XGB` line in the header, so you can watch actual usage rather than guess.
 
 ---
 Keywords: faq, common questions, troubleshooting, problems, issues, help, questions, q&a, headless, port, tasks, team, heartbeat, calendar, difference, compare, opencode, open code, openclaw, open claw, cursor, aider, cody, continue.dev, continue, roo code, roocode, cline, warp, warp ai, windsurf, zed, zed ai, goose, harnesses, runtimes, supported, unsupported, compatibility, alternatives, express, hono, framework, web server, http, node, typescript, dependencies, stack, memory, ram, limit, max agents, how many, scale, sizing, capacity, rss
