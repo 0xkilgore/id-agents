@@ -135,4 +135,4 @@ Phase 6 DMZ hardening landed on `feature/public-agent`. CTO findings status:
 - **F-07 (LOW)** — FIXED. Upstream error bodies are server-logged only; `/talk` response is a stable `{error: 'upstream_error', detail: 'upstream request failed', request_id}` shape.
 - **F-08 (INFO)** — NO ACTION. Well-known advertisement of operator endpoints is by design (SSH-gated); trade-off accepted.
 
-Commits: `98f0629`, `eb0b8ce`, `d42af09` (Phase 6A — manager), plus Phase 6B commits `c5f3f91`, `08a989b`, `2f5b59b`, `a4afe1d`, `e90dee9`, `47d170b`, and the docs commit (see `git log --oneline origin/main..HEAD`).
+Commits: `98f0629`, `eb0b8ce`, `d42af09` (Phase 6A — manager), plus Phase 6B commits `c5f3f91`, `08a989b`, `2f5b59b`, `a4afe1d`, `e90dee9`, `47d170b`, `67acce5`.
