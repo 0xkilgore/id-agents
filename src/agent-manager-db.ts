@@ -40,6 +40,7 @@ import {
   getDefaultModelForRuntime,
   getDefaultRuntime,
   getRuntimePaths,
+  isRemoteEndpointRuntime,
   isRuntimeId,
   resolveRuntime,
   runtimeIssueHint,
@@ -1825,6 +1826,15 @@ export class AgentManagerDb {
             error: `Unknown runtime "${runtime}". Expected one of: ${getAvailableRuntimes().join(', ')}`
           });
         }
+
+        // Remote-endpoint runtimes are registry-only — they are never spawned locally.
+        if (runtime !== undefined && isRemoteEndpointRuntime(runtime)) {
+          return res.status(400).json({
+            error: 'runtime_not_spawnable',
+            message: 'public-agent-remote is a remote endpoint runtime. Use POST /agents/register with customer_domain to register an externally-deployed agent.',
+          });
+        }
+
         const effectiveRuntime = resolveRuntime(runtime);
 
         id = `agent_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
@@ -4702,6 +4712,11 @@ export class AgentManagerDb {
         const agent = await this.dbQueryAgentByNameMostRecent(teamId, agentName);
         if (!agent) {
           return { ok: false, error: `Agent "${agentName}" not found` };
+        }
+
+        // Remote-endpoint runtimes are lifecycled by the operator, not the manager.
+        if (isRemoteEndpointRuntime(agent.runtime)) {
+          return { ok: false, error: 'lifecycle_not_supported_for_remote', message: 'This agent is a remote endpoint. Lifecycle is owned by the operator on the VPS.' };
         }
 
         if (agent.type !== 'claude') {
