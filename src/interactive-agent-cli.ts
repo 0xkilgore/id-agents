@@ -1504,24 +1504,44 @@ async function enterPublicSession(rawUrl: string): Promise<void> {
   if (authKey) {
     console.log(`${colors.gray}   Bearer auth on (PUBLIC_AGENT_AUTH_KEY set).${colors.reset}`);
   }
-  console.log(`${colors.gray}   Server mints session_id on first reply. Type ${colors.yellow}/exit${colors.gray} to drop it and return.${colors.reset}\n`);
+  console.log(`${colors.gray}   Server mints session_id on first reply. Type any ${colors.yellow}/command${colors.gray} to exit this chat and run it at the main CLI.${colors.reset}\n`);
   rl.setPrompt(`${colors.cyan}public:${host}>${colors.reset} `);
   rl.prompt();
 }
 
-function exitPublicSession(): void {
+function exitPublicSession(opts: { silent?: boolean } = {}): void {
   if (!publicSession) return;
   const { host } = publicSession;
   publicSession = null;
   publicTurnCount = 0;
-  console.log(`\n${colors.gray}🔙 Left public session (${host}). session_id discarded.${colors.reset}\n`);
+  if (!opts.silent) {
+    console.log(`\n${colors.gray}🔙 Left public session (${host}). session_id discarded.${colors.reset}\n`);
+  }
   if (publicSessionSavedPrompt) {
     rl.setPrompt(publicSessionSavedPrompt);
     publicSessionSavedPrompt = null;
   } else {
     updatePrompt();
   }
-  rl.prompt();
+  if (!opts.silent) {
+    rl.prompt();
+  }
+}
+
+// Shared helper for any interactive chat session: if the user typed a
+// slash command, exit the session so the command runs at the main CLI
+// level instead of being forwarded as a chat message. Returns true if
+// a session was exited.
+function exitChatSessionForSlashCommand(line: string): boolean {
+  if (!line.startsWith('/')) return false;
+  if (publicSession) {
+    const { host } = publicSession;
+    const cmd = line.split(/\s+/)[0];
+    exitPublicSession({ silent: true });
+    console.log(`\n${colors.gray}🔙 Left public session (${host}) to run ${colors.cyan}${cmd}${colors.gray}.${colors.reset}\n`);
+    return true;
+  }
+  return false;
 }
 
 async function sendPublicMessage(message: string): Promise<void> {
@@ -1594,21 +1614,21 @@ async function handleLine(line: string) {
 
   let input = line.trim();
 
-  // Public-agent chat session. While active, every non-/exit line is a
-  // message to the remote /talk. Hard-isolated: no DB writes, no /agents
-  // entry, no /talk-to / /news-to integration. Session state is in-memory.
+  // Public-agent chat session. While active, non-slash lines are forwarded
+  // to the remote /talk. A line starting with `/` exits the session and
+  // falls through to the normal command dispatcher below. Hard-isolated:
+  // no DB writes, no /agents entry, no /talk-to / /news-to integration.
   if (publicSession) {
-    if (input === '/exit' || input === '/quit') {
-      exitPublicSession();
-      return;
-    }
     if (!input) {
       rl.prompt();
       return;
     }
-    await sendPublicMessage(input);
-    rl.prompt();
-    return;
+    if (!exitChatSessionForSlashCommand(input)) {
+      await sendPublicMessage(input);
+      rl.prompt();
+      return;
+    }
+    // Session exited; fall through to normal command dispatch below.
   }
 
   if (!input) {
