@@ -254,8 +254,9 @@ export class SqliteAgentsRepo implements AgentsRepository {
     await this.db.query(
       `INSERT INTO agents
          (team_id, id, name, type, model, port, endpoint, working_directory,
-          status, created_at, metadata, registry, runtime, token_id, domain, api_key)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          status, created_at, metadata, registry, runtime, token_id, domain, api_key,
+          customer_domain, public_endpoint_url, internal_endpoint_url, ssh_target)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         agent.team_id,
         agent.id,
@@ -273,6 +274,10 @@ export class SqliteAgentsRepo implements AgentsRepository {
         agent.token_id ?? null,
         agent.domain ?? null,
         agent.api_key ?? null,
+        agent.customer_domain ?? null,
+        agent.public_endpoint_url ?? null,
+        agent.internal_endpoint_url ?? null,
+        agent.ssh_target ?? null,
       ],
     );
   }
@@ -283,17 +288,18 @@ export class SqliteAgentsRepo implements AgentsRepository {
     await this.db.query(
       `INSERT INTO agents
          (team_id, id, name, type, model, port, endpoint, working_directory,
-          status, created_at, metadata, registry, runtime, token_id, domain, api_key)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          status, created_at, metadata, registry, runtime, token_id, domain, api_key,
+          customer_domain, public_endpoint_url, internal_endpoint_url, ssh_target)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT (id) DO UPDATE SET
-         name       = excluded.name,
-         type       = COALESCE(excluded.type, agents.type),
-         endpoint   = COALESCE(excluded.endpoint, agents.endpoint),
-         status     = COALESCE(excluded.status, agents.status),
-         metadata   = excluded.metadata,
-         token_id   = COALESCE(excluded.token_id, agents.token_id),
-         domain     = COALESCE(excluded.domain, agents.domain),
-         deleted_at = NULL`,
+         name                 = excluded.name,
+         type                 = COALESCE(excluded.type, agents.type),
+         endpoint             = COALESCE(excluded.endpoint, agents.endpoint),
+         status               = COALESCE(excluded.status, agents.status),
+         metadata             = excluded.metadata,
+         token_id             = COALESCE(excluded.token_id, agents.token_id),
+         domain               = COALESCE(excluded.domain, agents.domain),
+         deleted_at           = NULL`,
       [
         agent.team_id,
         agent.id,
@@ -311,6 +317,10 @@ export class SqliteAgentsRepo implements AgentsRepository {
         agent.token_id ?? null,
         agent.domain ?? null,
         agent.api_key ?? null,
+        agent.customer_domain ?? null,
+        agent.public_endpoint_url ?? null,
+        agent.internal_endpoint_url ?? null,
+        agent.ssh_target ?? null,
       ],
     );
   }

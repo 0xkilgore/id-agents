@@ -322,6 +322,14 @@ export async function migratePostgres(adapter: DbAdapter): Promise<void> {
   // 12) Add runtime column for harness type
   await adapter.query(`ALTER TABLE agents ADD COLUMN IF NOT EXISTS runtime text DEFAULT 'claude-agent-sdk';`);
 
+  // 12b) Remote endpoint columns for public-agent-remote registry entries (Phase 2).
+  // All four columns are nullable so existing rows stay intact (backfill-safe).
+  // ADD COLUMN IF NOT EXISTS is idempotent: repeated runs are no-ops.
+  await adapter.query(`ALTER TABLE agents ADD COLUMN IF NOT EXISTS customer_domain text;`);
+  await adapter.query(`ALTER TABLE agents ADD COLUMN IF NOT EXISTS public_endpoint_url text;`);
+  await adapter.query(`ALTER TABLE agents ADD COLUMN IF NOT EXISTS internal_endpoint_url text;`);
+  await adapter.query(`ALTER TABLE agents ADD COLUMN IF NOT EXISTS ssh_target text;`);
+
   // 13) Migrate agents PK from (team_id, id) to (id).
   //     Child table FKs change from (team_id, agent_id) -> agents(team_id, id)
   //     to (agent_id) -> agents(id).

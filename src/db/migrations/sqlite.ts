@@ -31,7 +31,11 @@ export async function migrateSqlite(adapter: SqliteAdapter): Promise<void> {
       runtime TEXT DEFAULT 'claude-agent-sdk',
       token_id TEXT,
       domain TEXT,
-      api_key TEXT
+      api_key TEXT,
+      customer_domain TEXT,
+      public_endpoint_url TEXT,
+      internal_endpoint_url TEXT,
+      ssh_target TEXT
     );
 
     CREATE TABLE IF NOT EXISTS wallets (
@@ -171,6 +175,30 @@ export async function migrateSqlite(adapter: SqliteAdapter): Promise<void> {
   }
   try {
     adapter.exec(`ALTER TABLE news_items ADD COLUMN reply_expected INTEGER`);
+  } catch {
+    // Column already exists in upgraded databases.
+  }
+
+  // Remote endpoint columns for public-agent-remote registry entries (Phase 2).
+  // All four columns are nullable so existing rows stay intact (backfill-safe).
+  // Each ALTER is wrapped in try/catch so a repeated migration call is a no-op.
+  try {
+    adapter.exec(`ALTER TABLE agents ADD COLUMN customer_domain TEXT`);
+  } catch {
+    // Column already exists in upgraded databases.
+  }
+  try {
+    adapter.exec(`ALTER TABLE agents ADD COLUMN public_endpoint_url TEXT`);
+  } catch {
+    // Column already exists in upgraded databases.
+  }
+  try {
+    adapter.exec(`ALTER TABLE agents ADD COLUMN internal_endpoint_url TEXT`);
+  } catch {
+    // Column already exists in upgraded databases.
+  }
+  try {
+    adapter.exec(`ALTER TABLE agents ADD COLUMN ssh_target TEXT`);
   } catch {
     // Column already exists in upgraded databases.
   }

@@ -221,8 +221,9 @@ export class PgAgentsRepo implements AgentsRepository {
     },
   ): Promise<void> {
     await this.db.query(
-      `INSERT INTO agents (team_id, id, name, type, model, port, endpoint, working_directory, status, created_at, metadata, api_key, token_id, domain, runtime)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)`,
+      `INSERT INTO agents (team_id, id, name, type, model, port, endpoint, working_directory, status, created_at, metadata, api_key, token_id, domain, runtime,
+          customer_domain, public_endpoint_url, internal_endpoint_url, ssh_target)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)`,
       [
         agent.team_id,
         agent.id,
@@ -239,6 +240,10 @@ export class PgAgentsRepo implements AgentsRepository {
         agent.token_id ?? null,
         agent.domain ?? null,
         agent.runtime ?? 'claude-agent-sdk',
+        agent.customer_domain ?? null,
+        agent.public_endpoint_url ?? null,
+        agent.internal_endpoint_url ?? null,
+        agent.ssh_target ?? null,
       ],
     );
   }
@@ -247,17 +252,18 @@ export class PgAgentsRepo implements AgentsRepository {
     agent: Partial<AgentRow> & { team_id: string; id: string; name: string },
   ): Promise<void> {
     await this.db.query(
-      `INSERT INTO agents (team_id, id, name, type, model, port, endpoint, working_directory, status, created_at, metadata, token_id, domain)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+      `INSERT INTO agents (team_id, id, name, type, model, port, endpoint, working_directory, status, created_at, metadata, token_id, domain,
+          customer_domain, public_endpoint_url, internal_endpoint_url, ssh_target)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
        ON CONFLICT (id)
-       DO UPDATE SET name = EXCLUDED.name,
-                     type = EXCLUDED.type,
-                     endpoint = EXCLUDED.endpoint,
-                     status = EXCLUDED.status,
-                     metadata = EXCLUDED.metadata,
-                     created_at = EXCLUDED.created_at,
-                     domain = COALESCE(EXCLUDED.domain, agents.domain),
-                     deleted_at = NULL`,
+       DO UPDATE SET name                 = EXCLUDED.name,
+                     type                 = EXCLUDED.type,
+                     endpoint             = EXCLUDED.endpoint,
+                     status               = EXCLUDED.status,
+                     metadata             = EXCLUDED.metadata,
+                     created_at           = EXCLUDED.created_at,
+                     domain               = COALESCE(EXCLUDED.domain, agents.domain),
+                     deleted_at           = NULL`,
       [
         agent.team_id,
         agent.id,
@@ -272,6 +278,10 @@ export class PgAgentsRepo implements AgentsRepository {
         agent.metadata ?? null,
         agent.token_id ?? null,
         agent.domain ?? null,
+        agent.customer_domain ?? null,
+        agent.public_endpoint_url ?? null,
+        agent.internal_endpoint_url ?? null,
+        agent.ssh_target ?? null,
       ],
     );
   }
