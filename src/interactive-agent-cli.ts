@@ -5,6 +5,7 @@ import readline from 'readline';
 import { InteractiveAgentServer, IncomingReply, CommandHandler } from './interactive-agent-server.js';
 import fetch from 'node-fetch';
 import fs from 'fs';
+import os from 'os';
 import path from 'path';
 import { execFileSync, spawn } from 'child_process';
 import WebSocket from 'ws';
@@ -90,7 +91,9 @@ const HELP_ITEMS: Array<{ cmd: string; desc: string; indent?: boolean }> = [
   { cmd: '/team <name>', desc: 'Switch to or create team' },
   { cmd: '/teams', desc: 'List all teams' },
   { cmd: '/team delete <name>', desc: 'Delete a team (must be empty — run /delete --team first)' },
-  { cmd: '/public <domain>', desc: 'Open a chat session with a remote public-agent (isolated from agents DB)' },
+  { cmd: '/public', desc: 'List known public agents (kept separate from the manager DB)' },
+  { cmd: '/public <domain>', desc: 'Open a chat session with a public agent (auto-adds to the list)' },
+  { cmd: '/public add|remove|clear ...', desc: 'Manage the persistent public-agents list (~/.id-agents/public-agents.json)' },
   { cmd: '/quit', desc: 'Exit' },
 ];
 
@@ -1404,6 +1407,69 @@ function normalizePublicUrl(raw: string): string {
   return `https://${s.replace(/\/+$/, '')}`;
 }
 
+// Persistent list of known public agents. Lives at
+// ~/.id-agents/public-agents.json and is deliberately walled off from the
+// manager DB: no row in `agents`, no appearance in /agents, /talk-to, or
+// /news-to. Only the /public family of commands reads/writes it.
+type PublicAgentEntry = { domain: string; added_at: number };
+
+function publicAgentsFile(): string {
+  return path.join(os.homedir(), '.id-agents', 'public-agents.json');
+}
+
+function loadPublicAgents(): PublicAgentEntry[] {
+  const file = publicAgentsFile();
+  if (!fs.existsSync(file)) return [];
+  try {
+    const raw = fs.readFileSync(file, 'utf8');
+    const parsed = JSON.parse(raw) as { agents?: PublicAgentEntry[] };
+    if (!parsed || !Array.isArray(parsed.agents)) return [];
+    return parsed.agents
+      .filter((a): a is PublicAgentEntry => !!a && typeof a.domain === 'string')
+      .map((a) => ({ domain: a.domain, added_at: typeof a.added_at === 'number' ? a.added_at : Date.now() }));
+  } catch (err: any) {
+    console.log(`${colors.yellow}⚠️  Could not read ${file}: ${err.message ?? err}${colors.reset}`);
+    return [];
+  }
+}
+
+function savePublicAgents(agents: PublicAgentEntry[]): void {
+  const file = publicAgentsFile();
+  const dir = path.dirname(file);
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(file, JSON.stringify({ agents }, null, 2) + '\n', 'utf8');
+  } catch (err: any) {
+    console.log(`${colors.red}❌ Failed to persist ${file}:${colors.reset} ${err.message ?? err}`);
+  }
+}
+
+// Returns true if `domain` was newly added. Matches are on normalized URL
+// so "example.com", "https://example.com", and "https://example.com/" all
+// collapse to the same entry.
+function addPublicAgent(rawDomain: string): boolean {
+  const domain = normalizePublicUrl(rawDomain);
+  const list = loadPublicAgents();
+  if (list.some((a) => a.domain === domain)) return false;
+  list.push({ domain, added_at: Date.now() });
+  savePublicAgents(list);
+  return true;
+}
+
+function removePublicAgent(rawDomain: string): boolean {
+  const domain = normalizePublicUrl(rawDomain);
+  const list = loadPublicAgents();
+  const before = list.length;
+  const next = list.filter((a) => a.domain !== domain);
+  if (next.length === before) return false;
+  savePublicAgents(next);
+  return true;
+}
+
+function clearPublicAgents(): void {
+  savePublicAgents([]);
+}
+
 async function enterPublicSession(rawUrl: string): Promise<void> {
   const url = normalizePublicUrl(rawUrl);
   let host = rawUrl;
@@ -1560,19 +1626,104 @@ async function handleLine(line: string) {
 
   if (input === '/public' || input.startsWith('/public ')) {
     const arg = input === '/public' ? '' : input.substring('/public '.length).trim();
+
+    // Bare /public — list the persistent known-agents file.
     if (!arg) {
-      console.log(`\n${colors.bold}Usage:${colors.reset} /public <domain-or-url>\n`);
-      console.log(`Opens an interactive chat session with a remote public-agent.`);
-      console.log(`Accepts a bare hostname (defaults to https) or a full URL.`);
-      console.log(`While in the session, every line is sent as a /talk message.`);
-      console.log(`Type ${colors.yellow}/exit${colors.reset} to return to the main CLI.\n`);
-      console.log(`Env vars:`);
-      console.log(`  ${colors.cyan}PUBLIC_AGENT_URL${colors.reset}      auto-opens a session at startup`);
-      console.log(`  ${colors.cyan}PUBLIC_AGENT_AUTH_KEY${colors.reset} bearer token (if the remote agent is keyed)\n`);
-      console.log(`${colors.gray}This agent is deliberately NOT added to the manager DB, /agents, /talk-to, or /news-to.${colors.reset}\n`);
+      const list = loadPublicAgents();
+      if (list.length === 0) {
+        console.log(`\n${colors.gray}No public agents yet. Add one with ${colors.cyan}/public add <domain>${colors.reset}\n`);
+      } else {
+        console.log(`\n${colors.bold}Public agents (${list.length}):${colors.reset}`);
+        list.forEach((a, i) => {
+          console.log(`  ${i + 1}. ${a.domain}`);
+        });
+        console.log(`\n${colors.gray}Chat with one: ${colors.cyan}/public <domain>${colors.reset}\n`);
+      }
       rl.prompt();
       return;
     }
+
+    // Subcommand dispatch. We only recognize add / remove / clear as
+    // keywords; anything else is treated as a domain.
+    const spaceIdx = arg.indexOf(' ');
+    const head = (spaceIdx === -1 ? arg : arg.slice(0, spaceIdx)).toLowerCase();
+    const rest = spaceIdx === -1 ? '' : arg.slice(spaceIdx + 1).trim();
+
+    if (head === 'add') {
+      if (!rest) {
+        console.log(`\n${colors.yellow}Usage:${colors.reset} /public add <domain>\n`);
+        rl.prompt();
+        return;
+      }
+      const normalized = normalizePublicUrl(rest);
+      const added = addPublicAgent(rest);
+      if (added) {
+        console.log(`\n${colors.green}✅ Added${colors.reset} ${normalized}\n`);
+      } else {
+        console.log(`\n${colors.gray}Already present:${colors.reset} ${normalized}\n`);
+      }
+      rl.prompt();
+      return;
+    }
+
+    if (head === 'remove' || head === 'rm') {
+      if (!rest) {
+        console.log(`\n${colors.yellow}Usage:${colors.reset} /public remove <domain>\n`);
+        rl.prompt();
+        return;
+      }
+      const normalized = normalizePublicUrl(rest);
+      const removed = removePublicAgent(rest);
+      if (removed) {
+        console.log(`\n${colors.green}✅ Removed${colors.reset} ${normalized}\n`);
+      } else {
+        console.log(`\n${colors.gray}not found:${colors.reset} ${normalized}\n`);
+      }
+      rl.prompt();
+      return;
+    }
+
+    if (head === 'clear') {
+      const count = loadPublicAgents().length;
+      if (count === 0) {
+        console.log(`\n${colors.gray}No public agents to clear.${colors.reset}\n`);
+        rl.prompt();
+        return;
+      }
+      const ok = await confirmAction(
+        rl,
+        `Remove all ${count} public agent(s) from the list?`,
+        'yes',
+      );
+      if (!ok) {
+        rl.prompt();
+        return;
+      }
+      clearPublicAgents();
+      console.log(`\n${colors.green}✅ Cleared ${count} public agent(s).${colors.reset}\n`);
+      rl.prompt();
+      return;
+    }
+
+    if (head === 'help' || head === '-h' || head === '--help') {
+      console.log(`\n${colors.bold}Usage:${colors.reset}`);
+      console.log(`  ${colors.cyan}/public${colors.reset}                   List known public agents`);
+      console.log(`  ${colors.cyan}/public <domain>${colors.reset}          Open a chat session (auto-adds to the list)`);
+      console.log(`  ${colors.cyan}/public add <domain>${colors.reset}      Add a public agent to the list`);
+      console.log(`  ${colors.cyan}/public remove <domain>${colors.reset}   Remove a public agent from the list`);
+      console.log(`  ${colors.cyan}/public clear${colors.reset}             Remove all entries (with confirmation)\n`);
+      console.log(`Env vars:`);
+      console.log(`  ${colors.cyan}PUBLIC_AGENT_URL${colors.reset}      auto-adds and auto-opens a session at startup`);
+      console.log(`  ${colors.cyan}PUBLIC_AGENT_AUTH_KEY${colors.reset} bearer token (if the remote agent is keyed)\n`);
+      console.log(`${colors.gray}Public agents live in ${publicAgentsFile()}.${colors.reset}`);
+      console.log(`${colors.gray}They are NEVER added to the manager DB, /agents, /talk-to, or /news-to.${colors.reset}\n`);
+      rl.prompt();
+      return;
+    }
+
+    // Treat `arg` as a domain: auto-add to the list (so users don't need
+    // to add-then-chat in two steps) and open the chat session.
+    addPublicAgent(arg);
     await enterPublicSession(arg);
     return;
   }
@@ -3665,11 +3816,13 @@ server.start().then(async () => {
   console.log(`${colors.gray}Type /help for commands, /deploy <config> to create agents${colors.reset}\n`);
   updatePrompt();
 
-  // Auto-open a public-agent session if PUBLIC_AGENT_URL is set. This is the
-  // only place the CLI touches the public-agent — it never writes to the
-  // manager DB and never shows up in /agents, /talk-to, or /news-to.
+  // Auto-open a public-agent session if PUBLIC_AGENT_URL is set. The URL
+  // is also auto-added to the persistent public-agents list so it survives
+  // subsequent runs without the env var. Public agents never touch the
+  // manager DB, /agents, /talk-to, or /news-to.
   const autoPublicUrl = process.env.PUBLIC_AGENT_URL?.trim();
   if (autoPublicUrl) {
+    addPublicAgent(autoPublicUrl);
     await enterPublicSession(autoPublicUrl);
   } else {
     rl.prompt();
