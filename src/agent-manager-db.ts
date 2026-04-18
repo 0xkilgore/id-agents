@@ -520,17 +520,35 @@ export class AgentManagerDb {
     // that hit a.endpoint would silently fail. The daemon URL always works:
     // POST /news lands under the manager-inbox agent_id and GET /news reads
     // from the same row. Virtual agents keep their declared endpoint.
-    const url = a.type === 'interactive'
-      ? `http://localhost:${this.managementPort}`
-      : a.type === 'virtual'
-        ? a.endpoint
-        : `http://localhost:${a.port}`;
+    const isRemote = isRemoteEndpointRuntime(a.runtime);
+    const url = isRemote
+      ? null
+      : a.type === 'interactive'
+        ? `http://localhost:${this.managementPort}`
+        : a.type === 'virtual'
+          ? a.endpoint
+          : `http://localhost:${a.port}`;
 
     // After registration, a.name IS the ENS domain and the original local alias
     // is preserved in metadata.alias.
     const alias = (a.metadata as any)?.alias || normalizeAlias(a.name);
     const domain = a.domain || (a.metadata as any)?.idchain_domain;
     const displayId = domain || alias;
+
+    // Remote-endpoint agents have no local port or pid, and health is unknown
+    // until Phase 5 heartbeat probing is added.
+    const remoteFields = isRemote ? {
+      port: null,
+      pid: null,
+      deploymentShape: 'remote-endpoint' as const,
+      health: 'unknown',
+      customer_domain: a.customer_domain,
+      public_endpoint_url: a.public_endpoint_url,
+      internal_endpoint_url: a.internal_endpoint_url,
+      ssh_target: a.ssh_target,
+    } : {
+      deploymentShape: 'local-process' as const,
+    };
 
     return {
       id: a.id,
@@ -550,8 +568,10 @@ export class AgentManagerDb {
       tokenId: a.token_id,
       domain,
       displayId,
-      // Health monitoring
-      ...this.getHealthForAgent(a)
+      // Health monitoring (overridden for remote agents above)
+      ...this.getHealthForAgent(a),
+      // Runtime shape — remote-endpoint agents override port/pid/health
+      ...remoteFields,
     };
   }
 
@@ -1998,6 +2018,82 @@ export class AgentManagerDb {
 
     this.managementApp.post('/agents/register', async (req, res) => {
       const { id: teamId } = await this.getTeam(req);
+
+      // Branch: public-agent-remote registration (Phase 2)
+      // A request with runtime==='public-agent-remote' registers an externally-deployed
+      // agent as a registry entry. No port allocation, no process spawn, no well-known
+      // fetch, no on-chain registration (those are Phase 3–5).
+      if ((req.body as any)?.runtime === 'public-agent-remote') {
+        const {
+          name: remoteName,
+          customer_domain,
+          public_endpoint_url,
+          internal_endpoint_url,
+          ssh_target,
+        } = req.body as any;
+
+        // Required fields
+        if (!remoteName) return res.status(400).json({ error: 'missing_field', message: 'name is required' });
+        if (!customer_domain) return res.status(400).json({ error: 'missing_field', message: 'customer_domain is required' });
+        if (!public_endpoint_url) return res.status(400).json({ error: 'missing_field', message: 'public_endpoint_url is required' });
+
+        // Name validation
+        const remoteNameCheck = validateName(remoteName, 'agent');
+        if (!remoteNameCheck.valid) return res.status(400).json({ error: 'invalid_name', message: remoteNameCheck.error });
+
+        // URL validation
+        try { new URL(public_endpoint_url); } catch {
+          return res.status(400).json({ error: 'invalid_url', message: 'public_endpoint_url must be a valid URL' });
+        }
+        if (internal_endpoint_url) {
+          try { new URL(internal_endpoint_url); } catch {
+            return res.status(400).json({ error: 'invalid_url', message: 'internal_endpoint_url must be a valid URL' });
+          }
+        }
+
+        // Reject if name already exists in team
+        const existing = await this.dbQueryAgentByNameMostRecent(teamId, remoteName);
+        if (existing) {
+          return res.status(409).json({ error: 'name_conflict', message: `Agent "${remoteName}" already exists in this team` });
+        }
+
+        const remoteId = `remote_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
+        const now = Date.now();
+
+        await this.db.agents.create({
+          team_id: teamId,
+          id: remoteId,
+          name: remoteName,
+          type: 'virtual',
+          model: 'unknown',
+          port: 0,
+          endpoint: null,
+          working_directory: null,
+          status: 'registered',
+          created_at: now,
+          runtime: 'public-agent-remote',
+          customer_domain: customer_domain,
+          public_endpoint_url: public_endpoint_url,
+          internal_endpoint_url: internal_endpoint_url ?? null,
+          ssh_target: ssh_target ?? null,
+        });
+
+        return res.status(201).json({
+          id: remoteId,
+          name: remoteName,
+          runtime: 'public-agent-remote',
+          deploymentShape: 'remote-endpoint',
+          status: 'registered',
+          port: null,
+          url: null,
+          customer_domain,
+          public_endpoint_url,
+          internal_endpoint_url: internal_endpoint_url ?? null,
+          ssh_target: ssh_target ?? null,
+          health: 'unknown',
+        });
+      }
+
       const { id: requestedIdRaw, name, endpoint, metadata, type: requestedTypeRaw } = req.body || {};
       if (!name || !endpoint) return res.status(400).json({ error: 'Missing name or endpoint' });
       const regNameCheck = validateName(name, 'agent');
