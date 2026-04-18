@@ -43,3 +43,6 @@ Both route through the same `/schedule` endpoint on the target agent, and schedu
 ## Does every agent need a task before it can act?
 
 Non-trivial work must be a task. Single-line answers, greetings, simple look-ups, and work that is already part of an existing claimed task do not need a new task record. The discipline exists so that auditors and other agents can reconstruct what the team did and why — it is not a universal "every HTTP call is a task" rule.
+
+---
+Keywords: faq, common questions, troubleshooting, problems, issues, help, questions, q&a, headless, port, tasks, team, heartbeat, calendar, difference, compare

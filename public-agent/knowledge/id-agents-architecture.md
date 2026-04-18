@@ -29,3 +29,6 @@ A typical conversation looks like this: you type a command in the CLI on port 40
 ## REST-AP protocol
 
 REST-AP is a lightweight convention rather than a heavyweight framework: agents advertise their capabilities at `/.well-known/restap.json`, messages ride over HTTP JSON, and `/talk-to`, `/news-to`, and `/schedule` all share the same shape across manager and agents. The uniformity is what lets a new agent — or an external service like this public agent — join the conversation without custom integration code.
+
+---
+Keywords: architecture, design, components, structure, ports, manager, daemon, sqlite, rest-ap, protocol, workspace, process, how it works

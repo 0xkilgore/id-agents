@@ -49,3 +49,6 @@ The older `/message` endpoint on the manager still works for backwards compatibi
 ## Replies arrive out of band
 
 When an agent is dispatched work via `/ask` and is expected to reply, the reply comes back as a `/news` event carrying the original `query_id`. The caller polls `GET /query/<id>` on the manager daemon (port 4100) until the query status is `delivered`, `failed`, or `expired`. The news feed itself can also be tailed with `?since_id=N` for cursor-based polling, but queryId polling is the recommended pattern for structured work.
+
+---
+Keywords: messaging, communication, communicate, talk, news, messages, talk-to, news-to, trigger, delegation, inter-agent, send, reply, sync, async, between agents, agent to agent

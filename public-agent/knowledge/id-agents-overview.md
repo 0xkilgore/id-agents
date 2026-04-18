@@ -22,3 +22,6 @@ Most coding agents today live and die inside one terminal session. ID Agents giv
 ## Elevator pitch
 
 One command, one config file, a persistent team of AI agents that talk to each other, remember what they were doing, and keep working while you sleep.
+
+---
+Keywords: overview, about, what is, introduction, summary, elevator pitch, id agents, framework, intro

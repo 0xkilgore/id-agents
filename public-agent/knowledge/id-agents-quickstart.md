@@ -71,3 +71,6 @@ If you prefer to delegate the team management to Claude Code itself, start a Cla
 ## Headless use
 
 You do not have to run the CLI at all. The manager daemon on port 4100 is self-sufficient and will continue to serve REST-AP traffic as long as it is running. The CLI is a convenience for humans, not a dependency of the fleet.
+
+---
+Keywords: setup, set up, install, installation, get started, getting started, quickstart, deploy, first time, new user, how to, how do I, onboard, bootstrap, run, start, launch
