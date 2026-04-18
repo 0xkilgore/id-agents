@@ -57,5 +57,13 @@ ID Agents currently supports two agent runtimes:
 
 The following alternatives are **not supported**: OpenCode, OpenClaw, Cursor, Aider, Cody, Continue.dev, Roo Code, Cline, Warp AI, Windsurf, Zed AI, Goose, and any other CLI or IDE agent not listed as supported above. Adding support for another runtime requires implementing a new harness in `src/harness/` that matches the contract of the existing ones.
 
+## How many agents can I run at once?
+
+There is no hard maximum. The manager allocates ports starting at 4146 and walks upward, so the port space is effectively unreachable — the real limiter is **host memory**. Each Claude Code or Codex agent runs as its own OS process and typically consumes anywhere from a few hundred MB to 1+ GB of RSS depending on runtime, loaded context, and the size of the task it is working on.
+
+As a rough rule of thumb, a 16 GB machine comfortably runs **8–12 mixed agents** at once, including the manager and CLI. Push past that and the host starts swapping, the harnesses get slower, and scheduled work starts backing up. If you bump into the ceiling, the two easy moves are to stop idle agents with `/agent <name> stop` (freeing the process while keeping the config and history) or to split the fleet across multiple machines and point both managers at the same remote hosts.
+
+The TUI (`tui` agent) surfaces per-agent RSS in the MEM column and a `Total memory: X.XGB` line in the header, so you can eyeball how much headroom you actually have before adding another agent.
+
 ---
-Keywords: faq, common questions, troubleshooting, problems, issues, help, questions, q&a, headless, port, tasks, team, heartbeat, calendar, difference, compare, opencode, open code, openclaw, open claw, cursor, aider, cody, continue.dev, continue, roo code, roocode, cline, warp, warp ai, windsurf, zed, zed ai, goose, harnesses, runtimes, supported, unsupported, compatibility, alternatives, express, hono, framework, web server, http, node, typescript, dependencies, stack
+Keywords: faq, common questions, troubleshooting, problems, issues, help, questions, q&a, headless, port, tasks, team, heartbeat, calendar, difference, compare, opencode, open code, openclaw, open claw, cursor, aider, cody, continue.dev, continue, roo code, roocode, cline, warp, warp ai, windsurf, zed, zed ai, goose, harnesses, runtimes, supported, unsupported, compatibility, alternatives, express, hono, framework, web server, http, node, typescript, dependencies, stack, memory, ram, limit, max agents, how many, scale, sizing, capacity, rss
