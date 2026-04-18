@@ -88,6 +88,10 @@ Switch between teams to manage different groups of agents:
 
 Each team gets its own set of agents, port allocations, and workspace directory.
 
+## Public Agents
+
+To register and chat with remote public-agents hosted on a VPS, see the [Public Team Bootstrap guide](./public-team-bootstrap.md).
+
 ## Troubleshooting
 
 - **Agents can't reach you**: agents run as local processes and communicate via `localhost`.
