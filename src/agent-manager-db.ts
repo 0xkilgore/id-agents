@@ -491,6 +491,12 @@ export class AgentManagerDb {
   }
 
   private async getTeam(req: express.Request): Promise<{ name: string; id: string }> {
+    // If the middleware has already resolved the context, use it directly
+    const ctx = (req as any).ctx;
+    if (ctx?.teamId && ctx?.teamName) {
+      return { name: ctx.teamName, id: ctx.teamId };
+    }
+    // Fallback: resolve inline (used for paths that bypass middleware)
     const name = this.getTeamName(req);
     const id = await this.db.teams.getOrCreateTeamId(name);
     // Ensure per-team directory exists (no cross-team shared files).
@@ -549,7 +555,10 @@ export class AgentManagerDb {
   }
 
   private async dbQueryAgentById(teamId: string, id: string): Promise<AgentRow | null> {
-    return this.db.agents.getById(id);
+    const a = await this.db.agents.getById(id);
+    if (!a) return null;
+    if (a.team_id !== teamId) return null; // cross-team lookups invisible
+    return a;
   }
 
   private async dbQueryAgentByNameMostRecent(teamId: string, name: string): Promise<AgentRow | null> {
@@ -928,7 +937,86 @@ export class AgentManagerDb {
     }
   }
 
+  /**
+   * Resolve whether a request is from an admin principal.
+   * Admin = loopback IP + X-Id-Admin: 1 header.
+   */
+  private isAdminRequest(req: express.Request): boolean {
+    const ip = req.ip || '';
+    const isLoopback =
+      ip === '127.0.0.1' || ip === '::1' || ip === '::ffff:127.0.0.1';
+    const hasAdminHeader = req.headers['x-id-admin'] === '1';
+    return isLoopback && hasAdminHeader;
+  }
+
+  /**
+   * Team/principal context middleware.
+   * Resolves once per request and attaches:
+   *   (req as any).ctx = { principal, teamName, teamId }
+   *
+   * principal:
+   *   'admin'  — loopback IP + X-Id-Admin: 1
+   *   'agent'  — X-Id-Agent: <id> present and the agent belongs to the resolved team
+   *   'anon'   — all other callers
+   *
+   * teamId resolution:
+   *   - admin principals: getOrCreate (same as legacy behaviour)
+   *   - non-admin: getTeamByName only; 404 if team does not exist
+   */
+  private teamContextMiddleware(): express.RequestHandler {
+    return async (req: express.Request, res: express.Response, next: express.NextFunction) => {
+      try {
+        const teamName = this.getTeamName(req);
+        const principal = this.isAdminRequest(req) ? 'admin' : 'anon';
+
+        let teamId: string;
+        if (principal === 'admin') {
+          // Admin principals may create teams on the fly (legacy behaviour)
+          teamId = await this.db.teams.getOrCreateTeamId(teamName);
+          // Ensure per-team directory exists
+          const teamDir = `${this.baseWorkDir}/teams/${teamName}`;
+          if (!existsSync(teamDir)) mkdirSync(teamDir, { recursive: true });
+        } else {
+          // Non-admin: team must already exist
+          const teamRow = await this.db.teams.getTeamByName(teamName);
+          if (!teamRow) {
+            res.status(404).json({ error: 'team_not_found' });
+            return;
+          }
+          teamId = teamRow.id;
+          // Ensure per-team directory exists
+          const teamDir = `${this.baseWorkDir}/teams/${teamName}`;
+          if (!existsSync(teamDir)) mkdirSync(teamDir, { recursive: true });
+        }
+
+        // Check agent principal claim
+        let resolvedPrincipal: 'admin' | 'agent' | 'anon' = principal === 'admin' ? 'admin' : 'anon';
+        const agentHeader = req.headers['x-id-agent'];
+        if (agentHeader && typeof agentHeader === 'string' && resolvedPrincipal !== 'admin') {
+          const agentRow = await this.db.agents.getById(agentHeader);
+          if (agentRow && agentRow.team_id === teamId) {
+            resolvedPrincipal = 'agent';
+          } else if (agentRow && agentRow.team_id !== teamId) {
+            // Agent exists but belongs to a different team — reject
+            res.status(403).json({ error: 'agent_team_mismatch' });
+            return;
+          }
+          // If agent doesn't exist at all, fall through as 'anon'
+        }
+
+        (req as any).ctx = { principal: resolvedPrincipal, teamName, teamId };
+        next();
+      } catch (err: any) {
+        // Invalid team name or other error
+        res.status(400).json({ error: err?.message || 'Invalid request context' });
+      }
+    };
+  }
+
   private setupRoutes() {
+    // Install team/principal context middleware for all routes
+    this.managementApp.use(this.teamContextMiddleware());
+
     this.managementApp.get('/health', async (req, res) => {
       const { id: teamId, name: teamName } = await this.getTeam(req);
       const count = await this.db.agents.count(teamId);
@@ -1143,12 +1231,28 @@ export class AgentManagerDb {
           return res.status(400).json({ error: 'Missing message or data' });
         }
 
-        // If this is a reply to a query, look up the original query's team
-        // This ensures replies go to the correct team even if sender doesn't specify
+        // If this is a reply to a query, look up the original query's team.
+        // Design-doc delta (Phase 1): the queries table does not track which agent
+        // endpoint received the original query, so we cannot verify the reply path
+        // fully. Instead we apply a lighter constraint: only admin principals are
+        // allowed to swing teams via in_reply_to. Non-admin callers (agents, anon)
+        // may reply to queries within their own team only. If the query belongs to
+        // a different team and the caller is not admin, we still deliver the news
+        // to the caller's own team (the reply will be visible there) but we do NOT
+        // follow the query across the team boundary.
         if (in_reply_to) {
           const queryTeamId = await this.db.queries.findTeam(in_reply_to);
-          if (queryTeamId) {
-            teamId = queryTeamId;
+          const principal = (req as any).ctx?.principal || 'anon';
+          if (queryTeamId && queryTeamId !== teamId) {
+            if (principal === 'admin') {
+              // Admin may cross teams
+              teamId = queryTeamId;
+              this.managerLog(`Reply to ${in_reply_to} - admin team override to ${teamId}`);
+            } else {
+              // Non-admin: stay in own team; log that we skipped the cross-team swing
+              this.managerLog(`Reply to ${in_reply_to} - non-admin caller; keeping team ${teamId} (query team ${queryTeamId})`);
+            }
+          } else if (queryTeamId && queryTeamId === teamId) {
             this.managerLog(`Reply to ${in_reply_to} - using query's team ${teamId}`);
           }
         }
@@ -2621,13 +2725,14 @@ export class AgentManagerDb {
     });
 
     // Handle /:tokenId without trailing path - returns agent info
-    // NOTE: Must be defined BEFORE the wildcard route to take precedence
-    this.managementApp.get('/:tokenId', async (req, res) => {
+    // NOTE: Must be defined BEFORE the wildcard route to take precedence.
+    // Non-numeric paths pass through to allow downstream routes (tasks, etc.) to match.
+    this.managementApp.get('/:tokenId', async (req, res, next) => {
       const tokenIdParam = req.params.tokenId;
 
-      // Only handle numeric tokenIds
+      // Only handle numeric tokenIds; pass all others to downstream routes
       if (!/^\d+$/.test(tokenIdParam)) {
-        return res.status(404).json({ error: 'Not found' });
+        return next();
       }
 
       const { id: teamId } = await this.getTeam(req);
@@ -2711,33 +2816,37 @@ export class AgentManagerDb {
     this.managementApp.post('/tasks', async (req, res) => {
       try {
         const { id: teamId } = await this.getTeam(req);
+        const principal = (req as any).ctx?.principal || 'anon';
         const { title, name: rawName, description, team: teamRef, from } = req.body || {};
 
         if (!title || typeof title !== 'string') {
           return res.status(400).json({ error: 'Missing required field: title' });
         }
 
-        // Generate or validate name slug
+        // Resolve team — non-admin principals cannot create tasks in another team
+        let taskTeamId: string = teamId;
+        if (teamRef) {
+          const teamRow = await this.db.teams.getTeamByName(teamRef);
+          if (!teamRow) return res.status(404).json({ error: `Team "${teamRef}" not found` });
+          if (teamRow.id !== teamId && principal !== 'admin') {
+            return res.status(403).json({ error: 'Cannot create task in another team without admin principal' });
+          }
+          taskTeamId = teamRow.id;
+        }
+
+        // Generate or validate name slug, scoped to (team_id, name) uniqueness
         let name = rawName ? normalizeAlias(rawName) : normalizeAlias(title);
         if (rawName) {
-          if (await this.db.tasks.getByName(name)) {
-            return res.status(409).json({ error: `Task name "${name}" already exists` });
+          if (await this.db.tasks.getByNameForTeam(name, taskTeamId)) {
+            return res.status(409).json({ error: `Task name "${name}" already exists in this team` });
           }
         } else {
           let candidate = name;
           let suffix = 1;
-          while (await this.db.tasks.getByName(candidate)) {
+          while (await this.db.tasks.getByNameForTeam(candidate, taskTeamId)) {
             candidate = `${name}-${suffix++}`;
           }
           name = candidate;
-        }
-
-        // Resolve team
-        let taskTeamId: string | null = teamId;
-        if (teamRef) {
-          const teamRow = await this.db.teams.getTeamByName(teamRef);
-          if (!teamRow) return res.status(404).json({ error: `Team "${teamRef}" not found` });
-          taskTeamId = teamRow.id;
         }
 
         // Resolve created_by from `from` field
@@ -2784,8 +2893,8 @@ export class AgentManagerDb {
           ownerIdFilter = agent.id;
         }
 
-        // Resolve team
-        let teamIdFilter: string | undefined;
+        // Resolve team — default to current team for scoped resolution
+        let teamIdFilter: string = teamId;
         if (teamRef) {
           const teamRow = await this.db.teams.getTeamByName(teamRef);
           if (!teamRow) return res.status(404).json({ error: `Team "${teamRef}" not found` });
@@ -2813,7 +2922,7 @@ export class AgentManagerDb {
     this.managementApp.get('/tasks/:ref', async (req, res) => {
       try {
         const { id: teamId } = await this.getTeam(req);
-        const { task, error } = await this.resolveTaskRef(req.params.ref);
+        const { task, error } = await this.resolveTaskRef(req.params.ref, teamId);
         if (!task) return res.status(404).json({ error: error || `Task "${req.params.ref}" not found` });
         res.json({ ok: true, task: await this.buildTaskResult(task, teamId) });
       } catch (err: any) {
@@ -2832,8 +2941,13 @@ export class AgentManagerDb {
           return res.status(400).json({ error: 'Missing required field: agent_id (or from)' });
         }
 
-        const { task, error: taskError } = await this.resolveTaskRef(req.params.ref);
+        const { task, error: taskError } = await this.resolveTaskRef(req.params.ref, teamId);
         if (!task) return res.status(404).json({ error: taskError || `Task "${req.params.ref}" not found` });
+
+        // Guard against cross-team claim
+        if (task.team_id && task.team_id !== teamId) {
+          return res.status(404).json({ error: `Task "${req.params.ref}" not found` });
+        }
 
         const { agent, error } = await this.resolveSingleAgentForCommand(teamId, callerRef);
         if (!agent) return res.status(404).json({ error: error || `Agent "${callerRef}" not found` });
@@ -2844,7 +2958,7 @@ export class AgentManagerDb {
           return res.status(409).json({ error: `Cannot claim "${task.name}" — already owned or not in todo status` });
         }
 
-        const updated = await this.db.tasks.getByName(task.name);
+        const updated = await this.db.tasks.getByNameForTeam(task.name, teamId);
         res.json({ ok: true, task: await this.buildTaskResult(updated!, teamId) });
       } catch (err: any) {
         console.error('[Manager] Error in POST /tasks/:ref/claim:', err);
@@ -2858,8 +2972,13 @@ export class AgentManagerDb {
         const { agent_id, from } = req.body || {};
         const callerRef = agent_id || from;
 
-        const { task, error: taskError } = await this.resolveTaskRef(req.params.ref);
+        const { task, error: taskError } = await this.resolveTaskRef(req.params.ref, teamId);
         if (!task) return res.status(404).json({ error: taskError || `Task "${req.params.ref}" not found` });
+
+        // Guard against cross-team done
+        if (task.team_id && task.team_id !== teamId) {
+          return res.status(404).json({ error: `Task "${req.params.ref}" not found` });
+        }
 
         // If caller identifies themselves, enforce ownership
         if (callerRef && typeof callerRef === 'string') {
@@ -2876,7 +2995,7 @@ export class AgentManagerDb {
           updated_at: now,
         });
 
-        const updated = await this.db.tasks.getByName(task.name);
+        const updated = await this.db.tasks.getByNameForTeam(task.name, teamId);
         res.json({ ok: true, task: await this.buildTaskResult(updated!, teamId) });
       } catch (err: any) {
         console.error('[Manager] Error in POST /tasks/:ref/done:', err);
@@ -2886,7 +3005,8 @@ export class AgentManagerDb {
 
     this.managementApp.delete('/tasks/:ref', async (req, res) => {
       try {
-        const { task, error } = await this.resolveTaskRef(req.params.ref);
+        const { id: teamId } = await this.getTeam(req);
+        const { task, error } = await this.resolveTaskRef(req.params.ref, teamId);
         if (!task) return res.status(404).json({ error: error || `Task "${req.params.ref}" not found` });
         await this.db.tasks.delete(task.id);
         res.json({ ok: true, removed: task.name });
@@ -2944,14 +3064,18 @@ export class AgentManagerDb {
   }
 
   /**
-   * Resolve a task reference. Accepts either:
+   * Resolve a task reference scoped to a team. Accepts either:
    *   - the kebab-case `name` slug (existing behavior), or
    *   - a short-uuid handle `#xxxxxxxx` (8+ hex chars after the `#`).
    *
    * Short refs match on the dash-stripped uuid prefix. If multiple rows
-   * share the prefix, returns an `error` asking the caller to widen it.
+   * share the prefix (within the team), returns an `error` asking the caller
+   * to widen it.
+   *
+   * @param ref   The task reference string.
+   * @param teamId  The team scope. Required for name-based resolution.
    */
-  private async resolveTaskRef(ref: string): Promise<{ task?: TaskRow; error?: string }> {
+  private async resolveTaskRef(ref: string, teamId?: string): Promise<{ task?: TaskRow; error?: string }> {
     if (!ref || typeof ref !== 'string') {
       return { error: 'Task reference is required' };
     }
@@ -2964,7 +3088,12 @@ export class AgentManagerDb {
       // display, so match on either form by trying the first 8 hex chars
       // against the leading hex chunk (uuid v4: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx).
       const matches = await this.db.tasks.getByUuidPrefix(raw.slice(0, 8));
-      const filtered = matches.filter(t => (t.uuid || '').replace(/-/g, '').toLowerCase().startsWith(raw));
+      const filtered = matches.filter(t => {
+        if (!(t.uuid || '').replace(/-/g, '').toLowerCase().startsWith(raw)) return false;
+        // When teamId is provided, scope to that team
+        if (teamId && t.team_id !== teamId) return false;
+        return true;
+      });
       if (filtered.length === 0) return { error: `Task ${ref} not found` };
       if (filtered.length > 1) {
         const widened = filtered
@@ -2973,6 +3102,12 @@ export class AgentManagerDb {
         return { error: `Short id ${ref} is ambiguous (matches ${filtered.length}): ${widened}. Widen the prefix.` };
       }
       return { task: filtered[0] };
+    }
+    // Name-based resolution: scope to the team when teamId is provided
+    if (teamId) {
+      const task = await this.db.tasks.getByNameForTeam(ref, teamId);
+      if (!task) return { error: `Task "${ref}" not found` };
+      return { task };
     }
     const task = await this.db.tasks.getByName(ref);
     if (!task) return { error: `Task "${ref}" not found` };
@@ -5030,31 +5165,29 @@ export class AgentManagerDb {
             return { ok: false, error: 'Usage: /task create "<title>" [--name <slug>] [--description "..."] [--team <team>] [--owner <agent>] [--event <schedule-id>]...' };
           }
 
+          // Resolve optional team first (needed for name uniqueness check)
+          let taskTeamId: string = teamId;
+          if (teamRef) {
+            const teamRow = await this.db.teams.getTeamByName(teamRef);
+            if (!teamRow) return { ok: false, error: `Team "${teamRef}" not found` };
+            taskTeamId = teamRow.id;
+          }
+
           // Generate name from title if not provided
           if (!name) {
             name = normalizeAlias(title);
-            // Ensure uniqueness by appending numeric suffix on conflict
+            // Ensure uniqueness by appending numeric suffix on conflict (scoped to team)
             let candidate = name;
             let suffix = 1;
-            while (await this.db.tasks.getByName(candidate)) {
+            while (await this.db.tasks.getByNameForTeam(candidate, taskTeamId)) {
               candidate = `${name}-${suffix++}`;
             }
             name = candidate;
           } else {
             name = normalizeAlias(name);
-            if (await this.db.tasks.getByName(name)) {
-              return { ok: false, error: `Task name "${name}" already exists` };
+            if (await this.db.tasks.getByNameForTeam(name, taskTeamId)) {
+              return { ok: false, error: `Task name "${name}" already exists in this team` };
             }
-          }
-
-          // Resolve optional team
-          let taskTeamId: string | null = null;
-          if (teamRef) {
-            const teamRow = await this.db.teams.getTeamByName(teamRef);
-            if (!teamRow) return { ok: false, error: `Team "${teamRef}" not found` };
-            taskTeamId = teamRow.id;
-          } else {
-            taskTeamId = teamId;
           }
 
           // Resolve optional owner
@@ -5129,8 +5262,8 @@ export class AgentManagerDb {
             ownerIdFilter = agent.id;
           }
 
-          // Resolve team id
-          let teamIdFilter: string | undefined;
+          // Resolve team id — default to current team for scoped resolution
+          let teamIdFilter: string = teamId;
           if (teamFilter) {
             const teamRow = await this.db.teams.getTeamByName(teamFilter);
             if (!teamRow) return { ok: false, error: `Team "${teamFilter}" not found` };
@@ -5159,7 +5292,7 @@ export class AgentManagerDb {
             return { ok: false, error: 'Usage: /task assign <task-name|#shortid> <agent> [--team <team>]' };
           }
 
-          const { task, error: taskErr } = await this.resolveTaskRef(taskName);
+          const { task, error: taskErr } = await this.resolveTaskRef(taskName, teamId);
           if (!task) return { ok: false, error: taskErr || `Task "${taskName}" not found` };
 
           // Check for --team flag
@@ -5183,7 +5316,7 @@ export class AgentManagerDb {
             updated_at: now,
           });
 
-          const updated = await this.db.tasks.getByName(task.name);
+          const updated = await this.db.tasks.getByNameForTeam(task.name, teamId);
           return { ok: true, result: { task: await this.buildTaskResult(updated!, teamId) } };
         }
 
@@ -5198,8 +5331,13 @@ export class AgentManagerDb {
             return { ok: false, error: 'Claim requires agent identity. Use /remote with a "from" field.' };
           }
 
-          const { task, error: taskErr } = await this.resolveTaskRef(taskRef);
+          const { task, error: taskErr } = await this.resolveTaskRef(taskRef, teamId);
           if (!task) return { ok: false, error: taskErr || `Task "${taskRef}" not found` };
+
+          // Cross-team claim guard
+          if (task.team_id && task.team_id !== teamId) {
+            return { ok: false, error: `Task "${taskRef}" not found` };
+          }
 
           // Resolve caller agent
           const { agent: callerAgent, error: callerError } = await this.resolveSingleAgentForCommand(teamId, callerFrom);
@@ -5211,7 +5349,7 @@ export class AgentManagerDb {
             return { ok: false, error: `Cannot claim "${task.name}" — task is already owned or not in todo status` };
           }
 
-          const updated = await this.db.tasks.getByName(task.name);
+          const updated = await this.db.tasks.getByNameForTeam(task.name, teamId);
           return { ok: true, result: { task: await this.buildTaskResult(updated!, teamId) } };
         }
 
@@ -5223,8 +5361,13 @@ export class AgentManagerDb {
             return { ok: false, error: 'Usage: /task done <task-name|#shortid>' };
           }
 
-          const { task, error: taskErr } = await this.resolveTaskRef(taskRef);
+          const { task, error: taskErr } = await this.resolveTaskRef(taskRef, teamId);
           if (!task) return { ok: false, error: taskErr || `Task "${taskRef}" not found` };
+
+          // Cross-team done guard
+          if (task.team_id && task.team_id !== teamId) {
+            return { ok: false, error: `Task "${taskRef}" not found` };
+          }
 
           // If called by an agent (callerFrom set), enforce ownership
           if (callerFrom) {
@@ -5241,7 +5384,7 @@ export class AgentManagerDb {
             updated_at: now,
           });
 
-          const updated = await this.db.tasks.getByName(task.name);
+          const updated = await this.db.tasks.getByNameForTeam(task.name, teamId);
           return { ok: true, result: { task: await this.buildTaskResult(updated!, teamId) } };
         }
 
@@ -5252,7 +5395,7 @@ export class AgentManagerDb {
             return { ok: false, error: 'Usage: /task remove <task-name|#shortid>' };
           }
 
-          const { task, error: taskErr } = await this.resolveTaskRef(taskRef);
+          const { task, error: taskErr } = await this.resolveTaskRef(taskRef, teamId);
           if (!task) return { ok: false, error: taskErr || `Task "${taskRef}" not found` };
 
           await this.db.tasks.delete(task.id);
@@ -5403,6 +5546,9 @@ export class AgentManagerDb {
         });
         this.schedulerService.start();
 
+        // Seed well-known teams (idempotent — getOrCreateTeamId is safe to call repeatedly)
+        await this.seedWellKnownTeams();
+
         // Start periodic health monitoring (every 30s)
         this.startHealthMonitor();
 
@@ -5417,6 +5563,25 @@ export class AgentManagerDb {
   private async initSchedules(): Promise<void> {
     // Intentionally left unused. Schedules persist in the DB and should not be reseeded on boot,
     // because reseeding interval schedules would reset their anchor and expiry.
+  }
+
+  /**
+   * Ensure well-known teams exist: default, idchain, public.
+   * These are created idempotently on every manager start so that subsequent
+   * phases can register agents into them without needing to create them on the fly.
+   */
+  private async seedWellKnownTeams(): Promise<void> {
+    try {
+      for (const name of ['default', 'idchain', 'public']) {
+        await this.db.teams.getOrCreateTeamId(name);
+        const teamDir = `${this.baseWorkDir}/teams/${name}`;
+        if (!existsSync(teamDir)) mkdirSync(teamDir, { recursive: true });
+      }
+      console.log('[Manager] Well-known teams seeded: default, idchain, public');
+    } catch (err: any) {
+      // Non-fatal: log and continue
+      console.warn('[Manager] Failed to seed well-known teams:', err?.message);
+    }
   }
 
 
