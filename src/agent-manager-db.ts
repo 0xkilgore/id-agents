@@ -534,9 +534,50 @@ export class AgentManagerDb {
   }
 
   /**
-   * Convert an AgentRow to an API response object with identifier fields
+   * Redact sensitive fields from an agentToResponse result for non-admin callers.
+   *
+   * Top-level fields removed: ssh_target, internal_endpoint_url.
+   * metadata keys removed: any key in SENSITIVE_META_KEYS list, plus any key
+   * matching /private_?key/i or /secret/i as a safety net.
    */
-  private agentToResponse(a: AgentRow) {
+  private static readonly SENSITIVE_META_KEYS = new Set([
+    'auth_key_ref',
+    'ows_wallet_seed',
+    'ssh_private_key',
+    'ssh_target',
+    'internal_endpoint_url',
+  ]);
+
+  private static readonly SENSITIVE_META_REGEX = /private_?key|secret/i;
+
+  private redactForNonAdmin<T extends Record<string, any>>(resp: T): T {
+    // Remove top-level sensitive fields
+    const out: any = { ...resp };
+    delete out.ssh_target;
+    delete out.internal_endpoint_url;
+
+    // Deep-copy and strip sensitive metadata keys
+    if (out.metadata && typeof out.metadata === 'object') {
+      const meta: any = { ...out.metadata };
+      for (const key of Object.keys(meta)) {
+        if (
+          AgentManagerDb.SENSITIVE_META_KEYS.has(key) ||
+          AgentManagerDb.SENSITIVE_META_REGEX.test(key)
+        ) {
+          delete meta[key];
+        }
+      }
+      out.metadata = meta;
+    }
+
+    return out as T;
+  }
+
+  /**
+   * Convert an AgentRow to an API response object with identifier fields.
+   * Pass opts.isAdmin = true for admin callers to receive the full unredacted record.
+   */
+  private agentToResponse(a: AgentRow, opts?: { isAdmin?: boolean }) {
     // Interactive CLI agents are reachable via the daemon's management port —
     // the daemon owns /talk and /news for them (see e3b30b9). The CLI's own
     // port (stored in a.endpoint) may not be listening, so wrapper lookups
@@ -576,7 +617,7 @@ export class AgentManagerDb {
       deploymentShape: 'local-process' as const,
     };
 
-    return {
+    const full = {
       id: a.id,
       // name is the displayId (e.g., "agent-5.xid.eth") for inter-agent communication
       // alias is the base name (e.g., "agent") for backwards compatibility
@@ -600,6 +641,8 @@ export class AgentManagerDb {
       // Runtime shape — remote-endpoint agents override port/pid/health
       ...remoteFields,
     };
+
+    return opts?.isAdmin === true ? full : this.redactForNonAdmin(full);
   }
 
   private async dbQueryAgentById(teamId: string, id: string): Promise<AgentRow | null> {
@@ -1000,6 +1043,19 @@ export class AgentManagerDb {
         return res.status(resolved.status).json({ error: resolved.error });
       }
       const { targetAgent, targetUrl, targetDisplayId } = resolved;
+
+      // Mesh-membership gate: only mesh members can receive inter-agent messages.
+      // mesh_member defaults to true for backward compat (pre-Phase-4 agents have no flag).
+      // Admin callers may bypass via ?admin=true for diagnostic purposes.
+      const meshMember = (targetAgent.metadata as any)?.mesh_member !== false;
+      const adminBypass = this.isAdminRequest(req) && req.query.admin === 'true';
+      if (!meshMember && !adminBypass) {
+        return res.status(403).json({
+          error: 'not_mesh_reachable',
+          message: 'Target agent is not part of the inter-agent mesh.'
+        });
+      }
+
       this.managerLog(`${shouldWait ? 'Forwarding' : 'Sending async'} message to ${targetDisplayId} at ${targetUrl}`);
 
       // Forward the message to the agent's /talk endpoint
@@ -1173,6 +1229,7 @@ export class AgentManagerDb {
       const { id: teamId } = await this.getTeam(req);
       const includeAll = req.query.all === 'true' || req.query.all === '1';
       const agents = await this.dbListAgents(teamId, includeAll);
+      const isAdmin = this.isAdminRequest(req);
 
       const results = await Promise.allSettled(
         agents.map(async (agent) => {
@@ -1212,7 +1269,7 @@ export class AgentManagerDb {
           }
 
           return {
-            ...this.agentToResponse(agent),
+            ...this.agentToResponse(agent, { isAdmin }),
             isResponding,
             newsItems,
             hasActiveHeartbeat
@@ -1222,7 +1279,7 @@ export class AgentManagerDb {
 
       const agentStatuses = results.map((r, i) => {
         if (r.status === 'fulfilled') return r.value;
-        return { ...this.agentToResponse(agents[i]), isResponding: false, newsItems: [], hasActiveHeartbeat: false };
+        return { ...this.agentToResponse(agents[i], { isAdmin }), isResponding: false, newsItems: [], hasActiveHeartbeat: false };
       });
 
       res.json({ agents: agentStatuses });
@@ -1362,6 +1419,16 @@ export class AgentManagerDb {
       // Inject wait:true if not explicitly set
       if (req.body && req.body.wait === undefined && req.body.timeout === undefined) {
         req.body.wait = true;
+      }
+      this.handleMessage(req, res).catch(next);
+    });
+
+    // /news-to - fire-and-forget notification to another agent (no reply wait).
+    // Mesh-membership gate applies identically to /talk-to (handled inside handleMessage).
+    this.managementApp.post('/news-to', (req, res, next) => {
+      // Ensure wait is explicitly false (fire-and-forget)
+      if (req.body) {
+        req.body.wait = false;
       }
       this.handleMessage(req, res).catch(next);
     });
@@ -1707,8 +1774,9 @@ export class AgentManagerDb {
       // ?all=true includes automator agents (normally hidden)
       const includeAll = req.query.all === 'true' || req.query.all === '1';
       const agents = await this.dbListAgents(teamId, includeAll);
+      const isAdmin = this.isAdminRequest(req);
       res.json({
-        agents: agents.map(a => this.agentToResponse(a))
+        agents: agents.map(a => this.agentToResponse(a, { isAdmin }))
       });
     });
 
@@ -1718,6 +1786,7 @@ export class AgentManagerDb {
     this.managementApp.get('/agents/resolve/:ref', async (req, res) => {
       const { id: teamId } = await this.getTeam(req);
       const ref = decodeURIComponent(req.params.ref);
+      const isAdmin = this.isAdminRequest(req);
 
       try {
         const matches = await this.dbResolveAgents(teamId, ref);
@@ -1728,7 +1797,7 @@ export class AgentManagerDb {
 
         if (matches.length === 1) {
           return res.json({
-            agent: this.agentToResponse(matches[0]),
+            agent: this.agentToResponse(matches[0], { isAdmin }),
             ambiguous: false
           });
         }
@@ -1746,7 +1815,7 @@ export class AgentManagerDb {
         const warning = buildAmbiguityWarning(ref, agentMatches);
 
         return res.json({
-          agents: matches.map(a => this.agentToResponse(a)),
+          agents: matches.map(a => this.agentToResponse(a, { isAdmin })),
           ambiguous: true,
           warning
         });
@@ -1761,14 +1830,14 @@ export class AgentManagerDb {
       const { id: teamId } = await this.getTeam(req);
       const agent = await this.dbQueryAgentByNameMostRecent(teamId, req.params.name);
       if (!agent) return res.status(404).json({ error: 'Agent not found' });
-      res.json(this.agentToResponse(agent));
+      res.json(this.agentToResponse(agent, { isAdmin: this.isAdminRequest(req) }));
     });
 
     this.managementApp.get('/agents/:id', async (req, res) => {
       const { id: teamId } = await this.getTeam(req);
       const agent = await this.dbQueryAgentById(teamId, req.params.id);
       if (!agent) return res.status(404).json({ error: 'Agent not found' });
-      res.json(this.agentToResponse(agent));
+      res.json(this.agentToResponse(agent, { isAdmin: this.isAdminRequest(req) }));
     });
 
     // List all teams from database
@@ -2727,11 +2796,22 @@ export class AgentManagerDb {
               nameHint
             });
 
+            const isPublicAgentType = (ra.endpointType || '').toLowerCase() === 'public-agent';
+
             const metadata: any = {
               name: nameHint,
               service_type: ra.endpointType || 'REST-AP',
               endpoint: ra.endpoint,
-              agent_account: ra.agentAccount
+              agent_account: ra.agentAccount,
+              // Discovery-only semantics (Option A): public-agent identities are imported
+              // as discovery records — visible in /agents but not routable via inter-agent
+              // mesh. mesh_member:false + discovery_only:true signal this to operators.
+              // The mesh-membership gate in handleMessage blocks routing without needing
+              // a separate DB column (metadata flags are sufficient for Phase 6A).
+              // TODO (Phase 6B): add --promote flag to the /registry/pull CLI command
+              // so operators can opt a discovered public-agent into the mesh explicitly.
+              // See design doc §6A.3 for discovery-only vs full-member semantics.
+              ...(isPublicAgentType ? { mesh_member: false, discovery_only: true } : {}),
             };
 
             // If we already have this onchain agent locally (e.g., a spawned claude agent with the same tokenId),
@@ -2754,7 +2834,12 @@ export class AgentManagerDb {
               // Merge metadata; don't stomp local endpoint/port for claude agents.
               const currentAgent = await this.db.agents.getById(existingId);
               const currentMeta = (currentAgent?.metadata || {}) as any;
+              // When merging a public-agent type, preserve discovery-only flags.
               const mergedMeta = { ...currentMeta, ...metadata, name: currentMeta.name || metadata.name };
+              if (isPublicAgentType) {
+                mergedMeta.mesh_member = false;
+                mergedMeta.discovery_only = true;
+              }
 
               // TODO: move to repository — conditional endpoint update
               await this.db.adapter.query(
@@ -3048,7 +3133,7 @@ export class AgentManagerDb {
       // Return agent info with links
       const baseUrl = `${req.protocol}://${req.get('host')}/${tokenIdParam}`;
       res.json({
-        agent: this.agentToResponse(agent),
+        agent: this.agentToResponse(agent, { isAdmin: this.isAdminRequest(req) }),
         links: {
           catalog: `${baseUrl}/.well-known/restap.json`,
           talk: `${baseUrl}/talk`,
