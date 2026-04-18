@@ -246,6 +246,11 @@ export interface PublicAgentEntry {
   customer_domain: string | null;
   status: string;
   public_endpoint_url: string | null;
+  /** Phase 5 heartbeat fields — null if not yet probed. */
+  health: string | null;
+  last_seen: number | null;
+  last_error: string | null;
+  consecutive_failures: number;
 }
 
 export async function listPublicAgents(
@@ -269,6 +274,10 @@ export async function listPublicAgents(
     customer_domain: a.customer_domain ?? null,
     status: a.status ?? 'unknown',
     public_endpoint_url: a.public_endpoint_url ?? null,
+    health: a.health ?? null,
+    last_seen: a.last_seen ?? null,
+    last_error: a.last_error ?? null,
+    consecutive_failures: a.consecutive_failures ?? 0,
   }));
   return { ok: true, agents };
 }

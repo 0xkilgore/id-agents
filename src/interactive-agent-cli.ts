@@ -3673,16 +3673,41 @@ async function handleLine(line: string) {
         if (result.agents.length === 0) {
           console.log(`\n${colors.gray}No public agents registered. Use /public add <domain> to add one.${colors.reset}\n`);
         } else {
+          // Helper: relative time
+          const relTime = (unixSec: number | null): string => {
+            if (unixSec == null) return 'never';
+            const diff = Math.floor(Date.now() / 1000) - unixSec;
+            if (diff < 60) return `${diff}s ago`;
+            if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
+            if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
+            return `${Math.floor(diff / 86400)}d ago`;
+          };
+          // Helper: truncate with ellipsis
+          const trunc = (s: string, w: number): string =>
+            s.length > w ? s.slice(0, w - 1) + '\u2026' : s;
+          // Health color
+          const healthColor = (h: string | null): string => {
+            if (h === 'online') return colors.green;
+            if (h === 'unstable') return colors.yellow;
+            if (h === 'offline') return colors.red;
+            return colors.gray;
+          };
+
           console.log(`\n${colors.bold}Public agents (${result.agents.length}):${colors.reset}\n`);
-          const header = `  ${'#'.padEnd(4)}${'name'.padEnd(28)}${'domain'.padEnd(30)}${'status'.padEnd(14)}public_url`;
+          const header = `  ${'#'.padStart(3)}  ${'name'.padEnd(18)}${'domain'.padEnd(20)}${'health'.padEnd(9)}${'last_seen'.padEnd(13)}errors`;
           console.log(`${colors.gray}${header}${colors.reset}`);
           result.agents.forEach((a, i) => {
-            const num = String(i + 1).padEnd(4);
-            const n = (a.name || '').padEnd(28);
-            const d = (a.customer_domain || '').padEnd(30);
-            const s = (a.status || '').padEnd(14);
-            const u = a.public_endpoint_url || '';
-            console.log(`  ${colors.cyan}${num}${colors.reset}${n}${colors.gray}${d}${colors.reset}${s}${colors.gray}${u}${colors.reset}`);
+            const num = String(i + 1).padStart(3);
+            const n = trunc(a.name || '', 18).padEnd(18);
+            const d = trunc(a.customer_domain || '', 20).padEnd(20);
+            const h = a.health || 'unknown';
+            const hPad = h.padEnd(9);
+            const ls = relTime(a.last_seen).padEnd(13);
+            const errStr = a.consecutive_failures > 0
+              ? `${a.last_error ?? ''} (${a.consecutive_failures})`
+              : '-';
+            const hc = healthColor(a.health);
+            console.log(`  ${colors.cyan}${num}${colors.reset}  ${n}${colors.gray}${d}${colors.reset}${hc}${hPad}${colors.reset}${colors.gray}${ls}${colors.reset}${errStr}`);
           });
           console.log('');
         }
