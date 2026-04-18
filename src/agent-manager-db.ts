@@ -24,6 +24,7 @@ import yaml from 'js-yaml';
 import { AgentRestServer } from './agent-rest-server.js';
 import { registerOnIdChain, createSubnameOnIdChain, setMultiChainAddresses } from './onchain/idchain-register.js';
 import { defaultDeliverFn, type DeliverFn } from './lib/ssh-deliver.js';
+import { probeRemoteAgent, defaultHealthProbeFn, type HealthProbeFn } from './lib/remote-heartbeat.js';
 import { type Db } from './db/db-service.js';
 import type { AgentRow, ScheduleDefinitionRow, TaskRow } from './db/types.js';
 import fetch from 'node-fetch';
@@ -203,6 +204,7 @@ export class AgentManagerDb {
   private queryWaiters: Map<string, QueryWaiter> = new Map(); // key: query_id
   private healthStatus: Map<string, { status: 'online' | 'offline' | 'unknown'; lastCheck: number }> = new Map(); // key: `${teamId}:${agentId}`
   private healthCheckInterval: NodeJS.Timeout | null = null;
+  private remoteProbeInterval: NodeJS.Timeout | null = null;
   private querySweeperInterval: NodeJS.Timeout | null = null;
   /**
    * Stuck-query sweeper timeout, in minutes. Queries whose status is still
@@ -220,6 +222,8 @@ export class AgentManagerDb {
   private deliverFn: DeliverFn = defaultDeliverFn;
   /** Injectable onchain registration function — override in tests. */
   private registerOnIdChainFn: typeof registerOnIdChain = registerOnIdChain;
+  /** Injectable HTTP probe function — override in tests to mock remote health checks. */
+  private healthProbeFn: HealthProbeFn = defaultHealthProbeFn;
 
   /** Log a manager activity message to the ring buffer (not stdout) */
   private managerLog(msg: string) {
@@ -237,12 +241,15 @@ export class AgentManagerDb {
       deliverFn?: DeliverFn;
       /** Override onchain registration function (for tests). */
       registerOnIdChainFn?: typeof registerOnIdChain;
+      /** Override remote health probe function (for tests). */
+      healthProbeFn?: HealthProbeFn;
     },
   ) {
     this.baseWorkDir = baseWorkDir;
     this.db = db;
     if (opts?.deliverFn) this.deliverFn = opts.deliverFn;
     if (opts?.registerOnIdChainFn) this.registerOnIdChainFn = opts.registerOnIdChainFn;
+    if (opts?.healthProbeFn) this.healthProbeFn = opts.healthProbeFn;
     this.agentRole = (process.env.AGENT_ROLE as 'manager' | 'worker') || 'manager';
 
     // Load default deployment config
@@ -551,17 +558,20 @@ export class AgentManagerDb {
     const domain = a.domain || (a.metadata as any)?.idchain_domain;
     const displayId = domain || alias;
 
-    // Remote-endpoint agents have no local port or pid, and health is unknown
-    // until Phase 5 heartbeat probing is added.
+    // Remote-endpoint agents have no local port or pid; health is derived from probe columns.
     const remoteFields = isRemote ? {
       port: null,
       pid: null,
       deploymentShape: 'remote-endpoint' as const,
-      health: 'unknown',
+      health: this.deriveRemoteHealth(a),
       customer_domain: a.customer_domain,
       public_endpoint_url: a.public_endpoint_url,
       internal_endpoint_url: a.internal_endpoint_url,
       ssh_target: a.ssh_target,
+      last_seen: a.last_seen ?? null,
+      last_probed_at: a.last_probed_at ?? null,
+      last_error: a.last_error ?? null,
+      consecutive_failures: a.consecutive_failures ?? 0,
     } : {
       deploymentShape: 'local-process' as const,
     };
@@ -2463,6 +2473,38 @@ export class AgentManagerDb {
         });
       } catch (e: any) {
         res.status(500).json({ error: e?.message || String(e) });
+      }
+    });
+
+    // POST /agents/:id/probe — ad-hoc heartbeat probe for remote-endpoint agents
+    this.managementApp.post('/agents/:id/probe', async (req, res) => {
+      try {
+        const { id: teamId } = await this.getTeam(req);
+        const agent = await this.dbQueryAgentById(teamId, req.params.id);
+        if (!agent) return res.status(404).json({ error: 'Agent not found' });
+
+        if (!isRemoteEndpointRuntime(agent.runtime)) {
+          return res.status(400).json({ error: 'probe_only_supported_for_remote' });
+        }
+
+        await this.probeOneRemoteAgent(teamId, agent);
+        // Re-fetch to get the updated values
+        const updated = await this.dbQueryAgentById(teamId, agent.id);
+        if (!updated) return res.status(404).json({ error: 'Agent not found after probe' });
+
+        const health = this.deriveRemoteHealth(updated);
+        res.json({
+          ok: updated.consecutive_failures === 0,
+          source: updated.last_error === 'health probe failed, well-known succeeded'
+            ? 'well-known'
+            : updated.consecutive_failures === 0 ? 'health' : 'none',
+          last_seen: updated.last_seen ?? null,
+          last_error: updated.last_error ?? null,
+          consecutive_failures: updated.consecutive_failures ?? 0,
+          health,
+        });
+      } catch (err: any) {
+        res.status(500).json({ error: err?.message ?? String(err) });
       }
     });
 
@@ -5677,6 +5719,16 @@ export class AgentManagerDb {
   }
 
   /**
+   * Derive a health status string for a remote-endpoint agent from its DB probe columns.
+   */
+  private deriveRemoteHealth(a: AgentRow): 'online' | 'unstable' | 'offline' | 'unknown' {
+    if (a.last_probed_at == null) return 'unknown';
+    if (a.consecutive_failures === 0) return 'online';
+    if (a.consecutive_failures <= 2) return 'unstable';
+    return 'offline';
+  }
+
+  /**
    * Get health info for an agent to include in API responses.
    */
   private getHealthForAgent(a: AgentRow): { health: string; lastHealthCheck: number | null } {
@@ -5688,11 +5740,16 @@ export class AgentManagerDb {
 
   /**
    * Start periodic health monitoring of all running agents (every 30s).
+   * Also starts the remote heartbeat loop in parallel.
    */
   private startHealthMonitor(): void {
     // Run immediately, then every 30 seconds
     this.runHealthChecks();
     this.healthCheckInterval = setInterval(() => this.runHealthChecks(), 30_000);
+
+    // Remote probe loop — same cadence, parallel to local loop
+    this.runRemoteHeartbeat();
+    this.remoteProbeInterval = setInterval(() => this.runRemoteHeartbeat(), 30_000);
   }
 
   /**
@@ -5738,6 +5795,8 @@ export class AgentManagerDb {
         for (const agent of agents) {
           // Skip virtual agents — they don't have a local /health endpoint
           if (agent.type === 'virtual') continue;
+          // Skip remote-endpoint agents — handled by runRemoteHeartbeat()
+          if (isRemoteEndpointRuntime(agent.runtime)) continue;
 
           const key = this.key(team.id, agent.id);
           const agentUrl = agent.type === 'interactive' ? agent.endpoint : `http://localhost:${agent.port}`;
@@ -5770,6 +5829,68 @@ export class AgentManagerDb {
       }
     } catch (err: any) {
       // Don't crash the interval on transient DB errors
+    }
+  }
+
+  /**
+   * Run a single heartbeat probe tick for all remote-endpoint agents.
+   * Probes are bounded to 8 concurrent in-flight requests.
+   */
+  private async runRemoteHeartbeat(): Promise<void> {
+    try {
+      const teams = await this.db.teams.listTeams();
+      const remoteAgents: Array<{ team: { id: string }; agent: AgentRow }> = [];
+      for (const team of teams) {
+        const agents = await this.dbListAgents(team.id, true);
+        for (const agent of agents) {
+          if (isRemoteEndpointRuntime(agent.runtime)) {
+            remoteAgents.push({ team, agent });
+          }
+        }
+      }
+
+      // Bounded concurrency: chunks of 8
+      const CONCURRENCY = 8;
+      for (let i = 0; i < remoteAgents.length; i += CONCURRENCY) {
+        const chunk = remoteAgents.slice(i, i + CONCURRENCY);
+        await Promise.all(chunk.map(({ team, agent }) =>
+          this.probeOneRemoteAgent(team.id, agent).catch(() => {
+            // Swallow errors — don't let one failure kill the loop
+          }),
+        ));
+      }
+    } catch {
+      // Don't crash the interval on transient DB errors
+    }
+  }
+
+  /**
+   * Probe a single remote agent, persist the result, and update healthStatus.
+   */
+  private async probeOneRemoteAgent(teamId: string, agent: AgentRow): Promise<void> {
+    const now = Math.floor(Date.now() / 1000);
+    const result = await probeRemoteAgent(agent, { fetch: this.healthProbeFn });
+
+    if (result.ok) {
+      await this.db.agents.updateProbeResult(agent.id, {
+        last_seen: result.last_seen,
+        last_probed_at: now,
+        last_error: result.last_error,
+        consecutive_failures: 0,
+      });
+      const updated = { ...agent, last_seen: result.last_seen, last_probed_at: now, last_error: result.last_error, consecutive_failures: 0 };
+      const health = this.deriveRemoteHealth(updated);
+      this.healthStatus.set(this.key(teamId, agent.id), { status: health as any, lastCheck: Date.now() });
+    } else {
+      const newFailures = (agent.consecutive_failures ?? 0) + 1;
+      await this.db.agents.updateProbeResult(agent.id, {
+        last_probed_at: now,
+        last_error: result.last_error,
+        consecutive_failures: newFailures,
+      });
+      const updated = { ...agent, last_probed_at: now, consecutive_failures: newFailures };
+      const health = this.deriveRemoteHealth(updated);
+      this.healthStatus.set(this.key(teamId, agent.id), { status: health as any, lastCheck: Date.now() });
     }
   }
 
