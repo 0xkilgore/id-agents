@@ -20,6 +20,17 @@ import {
   type KnowledgeManifest,
   type ToolCallLog,
 } from '../lib/knowledge.js';
+import {
+  MAX_RETRIEVAL_CYCLES,
+  assessThresholds,
+  buildNudgeMessage,
+  detectIdkReply,
+  ingestToolLogs,
+  isLegitGiveUp,
+  makeRetrievalState,
+  snapshotState,
+  type RetrievalCycleTrace,
+} from '../lib/retrieval-loop.js';
 
 // The server-minted session_id is a UUID v4. Clients echo it back verbatim.
 // Reject anything that isn't shaped like one so a garbage id can't cause
@@ -87,6 +98,7 @@ function writeGuardedInbox(
     guardModel: string;
     priority: 'normal' | 'review';
     toolLogs?: ToolCallLog[];
+    retrievalTrace?: RetrievalCycleTrace[];
   },
 ): void {
   const entry: InboxEntry = {
@@ -118,6 +130,9 @@ function writeGuardedInbox(
       ...(l.truncated ? { truncated: true } : {}),
       ...(l.artifact ? { artifact: l.artifact } : {}),
     })),
+    ...(params.retrievalTrace && params.retrievalTrace.length > 0
+      ? { retrieval_trace: params.retrievalTrace }
+      : {}),
   };
   try {
     writeInboxEntry(env, entry);
@@ -139,6 +154,7 @@ async function runToolLoop(
   model: string;
   usage: { prompt: number; completion: number; total: number };
   toolLogs: ToolCallLog[];
+  finalMessages: ChatMessage[];
 }> {
   const messages: ChatMessage[] = baseMessages.slice();
   const toolLogs: ToolCallLog[] = [];
@@ -164,7 +180,7 @@ async function runToolLoop(
 
     const toolCalls = raw.tool_calls ?? [];
     if (toolCalls.length === 0) {
-      return { reply: raw.content, model, usage: combinedUsage, toolLogs };
+      return { reply: raw.content, model, usage: combinedUsage, toolLogs, finalMessages: messages };
     }
 
     // Add the assistant's tool-call turn to the conversation before
@@ -218,6 +234,78 @@ async function runToolLoop(
       toolLogs.push(execResult.log);
     }
   }
+}
+
+// Wraps runToolLoop with a deterministic persistence check: after the model
+// produces a reply, if it looks like an "I don't have information"-style
+// giveup AND retrieval thresholds haven't been met, inject a nudge message
+// and run the model again. Capped at MAX_RETRIEVAL_CYCLES total passes.
+async function runPersistenceLoop(
+  env: Env,
+  knowledge: KnowledgeManifest,
+  baseMessages: ChatMessage[],
+  replyCap: number,
+  userMessage: string,
+): Promise<{
+  reply: string;
+  model: string;
+  usage: { prompt: number; completion: number; total: number };
+  toolLogs: ToolCallLog[];
+  trace: RetrievalCycleTrace[];
+}> {
+  let messages: ChatMessage[] = baseMessages.slice();
+  const state = makeRetrievalState();
+  const allToolLogs: ToolCallLog[] = [];
+  const trace: RetrievalCycleTrace[] = [];
+  let combinedUsage = { prompt: 0, completion: 0, total: 0 };
+  let model = env.openRouterModel;
+  let reply = '';
+
+  for (let cycle = 1; cycle <= MAX_RETRIEVAL_CYCLES; cycle++) {
+    state.cycles = cycle;
+    const result = await runToolLoop(env, knowledge, messages, replyCap);
+    reply = result.reply;
+    model = result.model;
+    combinedUsage = {
+      prompt: combinedUsage.prompt + result.usage.prompt,
+      completion: combinedUsage.completion + result.usage.completion,
+      total: combinedUsage.total + result.usage.total,
+    };
+    allToolLogs.push(...result.toolLogs);
+    ingestToolLogs(state, result.toolLogs);
+
+    const idk = detectIdkReply(reply);
+    const assessment = assessThresholds(state);
+    const legit = isLegitGiveUp(state);
+    const nudgeThisCycle = idk && !assessment.met && !legit && cycle < MAX_RETRIEVAL_CYCLES;
+
+    trace.push({
+      cycle,
+      query_count: state.queries.length,
+      unique_roots: state.uniqueRoots.size,
+      docs_inspected: state.docsInspected,
+      searches_with_hits: state.searchesWithHits,
+      nudged: nudgeThisCycle,
+      reply_preview: reply.slice(0, 160),
+    });
+
+    if (!idk) break;
+    if (assessment.met || legit) break;
+    if (cycle >= MAX_RETRIEVAL_CYCLES) break;
+
+    // Prepare the next cycle: append the assistant's IDK reply and a nudge
+    // user turn. Re-run the tool loop with the extended history so the model
+    // can see its own prior answer and the server's correction.
+    const nudge = buildNudgeMessage(state, assessment, userMessage);
+    messages = [...result.finalMessages, { role: 'assistant', content: reply }, { role: 'user', content: nudge }];
+    console.log(
+      `[public-agent] /talk persistence-loop nudge cycle=${cycle} ` +
+        `queries=${state.queries.length} unique_roots=${state.uniqueRoots.size} ` +
+        `docs_inspected=${state.docsInspected} reasons="${assessment.reasons.join('; ')}"`,
+    );
+  }
+
+  return { reply, model, usage: combinedUsage, toolLogs: allToolLogs, trace };
 }
 
 function withTimeout<T>(fn: () => Promise<T>, ms: number): Promise<T> {
@@ -398,12 +486,14 @@ export function talkRoutes(env: Env, knowledge: KnowledgeManifest): Hono {
     let model: string;
     let usage: { prompt: number; completion: number; total: number };
     let toolLogs: ToolCallLog[] = [];
+    let retrievalTrace: RetrievalCycleTrace[] = [];
     try {
-      const result = await runToolLoop(env, knowledge, outgoingMessages, cap);
+      const result = await runPersistenceLoop(env, knowledge, outgoingMessages, cap, message);
       reply = result.reply;
       model = result.model;
       usage = result.usage;
       toolLogs = result.toolLogs;
+      retrievalTrace = result.trace;
     } catch (err) {
       if (reserved > 0) {
         try { reconcileTokens(env, reserved, 0); } catch (e) { console.error('[public-agent] reply budget reconcile (err) failed:', e); }
@@ -419,7 +509,15 @@ export function talkRoutes(env: Env, knowledge: KnowledgeManifest): Hono {
       console.log(
         `[public-agent] /talk tool_call session=${session.id} name=${log.name} ok=${log.ok} ` +
           `result_count=${log.result_count} bytes=${log.bytes} duration_ms=${log.duration_ms}` +
+          (log.truncated ? ` truncated=true artifact=${log.artifact ?? 'unavailable'}` : '') +
           (log.error ? ` error="${log.error}"` : ''),
+      );
+    }
+    for (const row of retrievalTrace) {
+      console.log(
+        `[public-agent] /talk retrieval_cycle session=${session.id} cycle=${row.cycle} ` +
+          `query_count=${row.query_count} unique_roots=${row.unique_roots} ` +
+          `docs_inspected=${row.docs_inspected} hits=${row.searches_with_hits} nudged=${row.nudged}`,
       );
     }
 
@@ -442,6 +540,7 @@ export function talkRoutes(env: Env, knowledge: KnowledgeManifest): Hono {
       guardModel,
       priority: 'normal',
       toolLogs,
+      retrievalTrace,
     });
 
     return c.json({

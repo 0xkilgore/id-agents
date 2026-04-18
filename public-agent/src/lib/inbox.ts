@@ -43,6 +43,15 @@ export interface InboxEntry {
     truncated?: boolean;
     artifact?: string;
   }>;
+  retrieval_trace?: Array<{
+    cycle: number;
+    query_count: number;
+    unique_roots: number;
+    docs_inspected: number;
+    searches_with_hits: number;
+    nudged: boolean;
+    reply_preview: string;
+  }>;
 }
 
 function inboxDir(env: Env): string {
