@@ -54,4 +54,4 @@ ID Agents currently supports two agent runtimes:
 The following alternatives are **not supported**: OpenCode, OpenClaw, Cursor, Aider, Cody, Continue.dev, Roo Code, Cline, Warp AI, Windsurf, Zed AI, Goose, and any other CLI or IDE agent not listed as supported above. Adding support for another runtime requires implementing a new harness in `src/harness/` that matches the contract of the existing ones.
 
 ---
-Keywords: faq, common questions, troubleshooting, problems, issues, help, questions, q&a, headless, port, tasks, team, heartbeat, calendar, difference, compare, opencode, openclaw, cursor, aider, cody, continue.dev, roo code, cline, warp, windsurf, zed ai, goose, harnesses, runtimes, supported, unsupported, compatibility, alternatives
+Keywords: faq, common questions, troubleshooting, problems, issues, help, questions, q&a, headless, port, tasks, team, heartbeat, calendar, difference, compare, opencode, open code, openclaw, open claw, cursor, aider, cody, continue.dev, continue, roo code, roocode, cline, warp, warp ai, windsurf, zed, zed ai, goose, harnesses, runtimes, supported, unsupported, compatibility, alternatives
