@@ -525,6 +525,11 @@ export class AgentManagerDb {
     const domain = a.domain || (a.metadata as any)?.idchain_domain;
     const displayId = domain || alias;
 
+    // Lift metadata.pid to the top level so clients (TUI, health probes)
+    // don't have to reach into metadata to batch per-agent RSS lookups.
+    const metaPid = (a.metadata as { pid?: unknown } | undefined)?.pid;
+    const pid = typeof metaPid === 'number' && Number.isFinite(metaPid) && metaPid > 0 ? metaPid : null;
+
     return {
       id: a.id,
       // name is the displayId (e.g., "agent-5.xid.eth") for inter-agent communication
@@ -533,6 +538,7 @@ export class AgentManagerDb {
       alias,
       model: a.model,
       port: a.port,
+      pid,
       status: a.status,
       workingDirectory: a.working_directory,
       createdAt: a.created_at,
@@ -1919,11 +1925,20 @@ export class AgentManagerDb {
         await this.db.agents.softDelete(teamId, name, id, Date.now());
       }
 
+      // Self-registration lands after spawnLocalAgentProcess already persisted
+      // `pid` onto the row's metadata. Merge over the existing row so the pid
+      // (and anything else a spawn-time path set) survives registration.
+      const priorRow = await this.db.agents.getById(id).catch(() => null);
+      const priorMeta = (priorRow?.metadata as Record<string, unknown>) || {};
       const meta: AgentMetadata = {
+        ...priorMeta,
         name,
         service_type: (metadata && metadata.service_type) || 'REST-AP',
         endpoint,
-        ...(metadata || {})
+        ...(metadata || {}),
+        ...(typeof (priorMeta as { pid?: unknown }).pid === 'number'
+          ? { pid: (priorMeta as { pid: number }).pid }
+          : {}),
       };
 
       // Extract domain from request body if provided
