@@ -5795,6 +5795,18 @@ export class AgentManagerDb {
       closeSync(logFd);
 
       console.log(`[Manager] Agent ${name} spawned with PID ${proc.pid}`);
+
+      // Persist pid into agent metadata so /agents responses can carry it.
+      // The TUI uses this to resolve per-agent RSS via a batched `ps` call.
+      if (proc.pid) {
+        try {
+          const cur = (agentRow?.metadata as Record<string, unknown>) || {};
+          await this.db.agents.updateMetadata(id, { ...cur, pid: proc.pid });
+        } catch (metaErr: any) {
+          console.warn(`[Manager] Failed to persist pid for ${name}: ${metaErr?.message || metaErr}`);
+        }
+      }
+
       return { success: true, pid: proc.pid, logFile };
     } catch (err: any) {
       console.error(`[Manager] Failed to spawn agent ${agentData.name}: ${err.message}`);

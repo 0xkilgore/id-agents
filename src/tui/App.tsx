@@ -24,6 +24,11 @@ import {
 import { usePolling } from './hooks/usePolling.js';
 import { humanizeUptime } from './util/format.js';
 import { newsAgeColor } from './util/colors.js';
+import {
+  fetchRssForPids,
+  formatTotalMemory,
+  totalMemoryColor as totalMemColor,
+} from './util/memory.js';
 
 type View =
   | 'agents'
@@ -203,6 +208,57 @@ export function App({ staticMode = false }: AppProps = {}): React.ReactElement {
     }
     return map;
   }, [allAgents, pollTs]);
+
+  // Per-agent memory — one batched `ps` call per poll tick. Pids come from
+  // agent metadata persisted by the manager at spawn time; agents without a
+  // pid (or whose pid is gone) render `—`. Gated to the agents view so we
+  // don't fork ps when nothing is looking.
+  const pidByAgentId = useMemo(() => {
+    const map = new Map<string, number>();
+    for (const a of allAgents) {
+      const pid = (a.metadata as { pid?: unknown } | undefined)?.pid;
+      if (typeof pid === 'number' && Number.isFinite(pid) && pid > 0) {
+        map.set(a.id, pid);
+      }
+    }
+    return map;
+  }, [allAgents]);
+
+  const memoryFetcher = useCallback(
+    (signal: AbortSignal): Promise<Array<[string, number | null]>> => {
+      const pids = [...pidByAgentId.values()];
+      if (pids.length === 0) return Promise.resolve([]);
+      return fetchRssForPids(pids, signal).then((rssByPid) => {
+        const out: Array<[string, number | null]> = [];
+        for (const [agentId, pid] of pidByAgentId) {
+          const bytes = rssByPid.get(pid);
+          out.push([agentId, bytes ?? null]);
+        }
+        return out;
+      });
+    },
+    [pidByAgentId],
+  );
+  const memoryPoll = usePolling<Array<[string, number | null]>>(
+    memoryFetcher,
+    AGENTS_POLL_MS,
+    paused || staticMode || view !== 'agents',
+    [pidByAgentId, view],
+  );
+  const memBytesById = useMemo(() => {
+    const m = new Map<string, number | null>();
+    for (const [id, bytes] of memoryPoll.data ?? []) m.set(id, bytes);
+    return m;
+  }, [memoryPoll.data]);
+  const totalMemoryBytes = useMemo(() => {
+    let sum = 0;
+    for (const [, bytes] of memBytesById) {
+      if (typeof bytes === 'number' && Number.isFinite(bytes) && bytes > 0) sum += bytes;
+    }
+    return sum;
+  }, [memBytesById]);
+  const totalMemoryLabel = useMemo(() => formatTotalMemory(totalMemoryBytes), [totalMemoryBytes]);
+  const totalMemoryColor = useMemo(() => totalMemColor(totalMemoryBytes), [totalMemoryBytes]);
 
   const rows = stdout?.rows ?? 30;
   const agentsWindowSize = Math.max(MIN_VISIBLE, rows - AGENTS_CHROME_ROWS);
@@ -695,6 +751,9 @@ export function App({ staticMode = false }: AppProps = {}): React.ReactElement {
             agents={visibleAgents}
             uptimeById={uptimeById}
             newsColorById={newsColorById}
+            memBytesById={memBytesById}
+            totalMemoryLabel={totalMemoryLabel}
+            totalMemoryColor={totalMemoryColor}
             selectedIndex={selectedIndex}
             windowStart={windowStart}
             windowSize={agentsWindowSize}
