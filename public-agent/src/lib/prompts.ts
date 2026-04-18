@@ -127,7 +127,7 @@ Rules:
 export function guardUserMessage(text: string): ChatMessage {
   return {
     role: 'user',
-    content: `Classify the following user input for safety.\n\n<input>\n${text}\n</input>`,
+    content: `Classify the JSON \`input\` field for safety.\n\n${JSON.stringify({ input: text })}`,
   };
 }
 
