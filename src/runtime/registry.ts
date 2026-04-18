@@ -128,7 +128,7 @@ export function getRuntimeProviderName(runtime: HarnessType | string | undefined
 }
 
 export function getRuntimeAuthProvider(runtime: HarnessType | string | undefined): string {
-  return getRuntimeProfile(runtime).auth.provider;
+  return getRuntimeProfile(runtime).auth.provider ?? '';
 }
 
 export function getDefaultModelForRuntime(

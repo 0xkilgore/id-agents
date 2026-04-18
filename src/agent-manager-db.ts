@@ -23,6 +23,7 @@ import { privateKeyToAccount } from 'viem/accounts';
 import yaml from 'js-yaml';
 import { AgentRestServer } from './agent-rest-server.js';
 import { registerOnIdChain, createSubnameOnIdChain, setMultiChainAddresses } from './onchain/idchain-register.js';
+import { defaultDeliverFn, type DeliverFn } from './lib/ssh-deliver.js';
 import { type Db } from './db/db-service.js';
 import type { AgentRow, ScheduleDefinitionRow, TaskRow } from './db/types.js';
 import fetch from 'node-fetch';
@@ -215,6 +216,10 @@ export class AgentManagerDb {
   private logBuffer: Array<{ ts: number; msg: string }> = [];
   private readonly LOG_BUFFER_SIZE = 500;
   private managementPort: number = 4100;
+  /** Injectable SSH delivery function — override in tests. */
+  private deliverFn: DeliverFn = defaultDeliverFn;
+  /** Injectable onchain registration function — override in tests. */
+  private registerOnIdChainFn: typeof registerOnIdChain = registerOnIdChain;
 
   /** Log a manager activity message to the ring buffer (not stdout) */
   private managerLog(msg: string) {
@@ -224,9 +229,20 @@ export class AgentManagerDb {
     }
   }
 
-  constructor(baseWorkDir: string = '/workspace', db: Db) {
+  constructor(
+    baseWorkDir: string = '/workspace',
+    db: Db,
+    opts?: {
+      /** Override SSH delivery function (for tests). */
+      deliverFn?: DeliverFn;
+      /** Override onchain registration function (for tests). */
+      registerOnIdChainFn?: typeof registerOnIdChain;
+    },
+  ) {
     this.baseWorkDir = baseWorkDir;
     this.db = db;
+    if (opts?.deliverFn) this.deliverFn = opts.deliverFn;
+    if (opts?.registerOnIdChainFn) this.registerOnIdChainFn = opts.registerOnIdChainFn;
     this.agentRole = (process.env.AGENT_ROLE as 'manager' | 'worker') || 'manager';
 
     // Load default deployment config
@@ -562,6 +578,7 @@ export class AgentManagerDb {
       workingDirectory: a.working_directory,
       createdAt: a.created_at,
       type: a.type,
+      runtime: a.runtime,
       url,
       metadata: a.metadata,
       // Identity fields
@@ -659,6 +676,31 @@ export class AgentManagerDb {
   }
 
   private async registerOnchainAndUpdateAgent(teamId: string, agent: AgentRow): Promise<{ txHash: string; tokenId: string; domain: string }> {
+    const isRemote = isRemoteEndpointRuntime(agent.runtime);
+
+    // ── Phase 4: wallet provisioning for remote agents ──────────────────────
+    // For public-agent-remote, provision an OWS wallet before registration so
+    // multi-chain address records can be set.  For local agents the wallet is
+    // already attached via the normal deploy path.
+    if (isRemote && !(agent.metadata as any)?.ows_wallet) {
+      const agentAlias = (agent.metadata as any)?.alias || agent.name;
+      const walletResult = this.getOrCreateAgentWallet('public', agentAlias);
+      if (walletResult) {
+        // Merge wallet fields into metadata now; updateIdentity below will persist them.
+        const mergedMeta: AgentMetadata = {
+          ...((agent.metadata || {}) as AgentMetadata),
+          ows_wallet: walletResult.walletName,
+          ows_address: walletResult.address,
+        };
+        await this.db.agents.updateIdentity(agent.id, { metadata: mergedMeta });
+        // Refresh the agent row so subsequent steps see the updated metadata.
+        const refreshed = await this.db.agents.getById(agent.id);
+        if (refreshed) agent = refreshed;
+      } else {
+        console.warn(`[Register] OWS not installed or wallet creation failed for remote agent "${agent.name}". Proceeding without wallet.`);
+      }
+    }
+
     // Support OWS wallet or raw private key for signing
     const owsRegistrarWallet = process.env.OWS_REGISTRAR_WALLET;
     const pk = !owsRegistrarWallet ? (process.env.ID_REGISTRAR_PRIVATE_KEY || process.env.PRIVATE_KEY) : undefined;
@@ -673,20 +715,24 @@ export class AgentManagerDb {
     const textRecords: Record<string, string> = {};
     textRecords['description'] = `${agent.name} agent`;
 
-    // Determine the agent's endpoint for the ENSIP-26 records
+    // Determine the agent's endpoint for the ENSIP-26 records.
+    // Remote agents advertise their public HTTPS endpoint; local agents use the
+    // manager-local URL or the PUBLIC_BASE_URL override.
     const publicBaseUrl = process.env.PUBLIC_BASE_URL;
-    const agentEndpoint = publicBaseUrl
-      ? `${publicBaseUrl.replace(/\/+$/, '')}`
-      : (agent.type === 'virtual'
-          ? (agent.endpoint as string)
-          : ((agent.metadata as any)?.service || `http://localhost:${agent.port}`));
+    const agentEndpoint = isRemote
+      ? (agent.public_endpoint_url || `https://${agent.customer_domain}`)
+      : (publicBaseUrl
+          ? `${publicBaseUrl.replace(/\/+$/, '')}`
+          : (agent.type === 'virtual'
+              ? (agent.endpoint as string)
+              : ((agent.metadata as any)?.service || `http://localhost:${agent.port}`)));
 
     console.log(`[Register] Registering "${agent.name}" on ID Chain (Base)...`);
 
     // Register via id-cli with sublabel (Base only)
     // e.g., --sublabel x → x.agent-8.xid.eth in one transaction
     const originalAlias = ((agent.metadata as any)?.alias || agent.name);
-    const result = await registerOnIdChain({
+    const result = await this.registerOnIdChainFn({
       sublabel: originalAlias,
       textRecords,
       ...signerOpts,
@@ -711,9 +757,24 @@ export class AgentManagerDb {
       alias: originalAlias,
     };
 
+    // ── Phase 4: security metadata flags for remote agents ───────────────────
+    if (isRemote) {
+      metadata = {
+        ...metadata,
+        mesh_member: false,
+        mesh_reachable: false,
+        public_endpoint: true,
+        dmz: true,
+        allowed_inbound: ['public_http'],
+        allowed_outbound: ['openrouter'],
+      };
+    }
+
     // Keep the agent's internal endpoint for manager-to-agent communication
     const isLocalAgent = (metadata as any).local === true;
-    const dbEndpoint = isLocalAgent ? (agent.endpoint || `http://localhost:${agent.port}`) : agentEndpoint;
+    const dbEndpoint = isRemote
+      ? (agent.endpoint || agentEndpoint)
+      : (isLocalAgent ? (agent.endpoint || `http://localhost:${agent.port}`) : agentEndpoint);
 
     // Set multi-chain address records if agent has an OWS wallet
     const owsWalletName = (metadata as any).ows_wallet;
@@ -740,36 +801,89 @@ export class AgentManagerDb {
       metadata,
     });
 
-    // Update running server identity
-    const server = this.runningServers.get(this.key(teamId, agent.id));
-    if (server) {
-      server.setIdentity({ name: newName, metadata, tokenId, domain: newName });
-    }
+    if (isRemote) {
+      // ── Phase 4: push identity.json to the remote VPS ─────────────────────
+      // Write to staging dir first, then attempt SCP delivery.
+      await this.stageAndDeliverRemoteIdentity(agent, newName, tokenId, metadata);
+    } else {
+      // ── Local agent identity push ──────────────────────────────────────────
+      // Update running server identity
+      const server = this.runningServers.get(this.key(teamId, agent.id));
+      if (server) {
+        server.setIdentity({ name: newName, metadata, tokenId, domain: newName });
+      }
 
-    // Push identity to running agent process
-    if (agent.type === 'claude' && agent.port && !server) {
-      try {
-        const agentUrl = isLocalAgent
-          ? (agent.endpoint || `http://localhost:${agent.port}`)
-          : `http://id-agent-${agent.id}:4100`;
-        const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-        const identityRes = await fetch(`${agentUrl}/identity`, {
-          method: 'PATCH',
-          headers,
-          body: JSON.stringify({ tokenId, domain: newName })
-        });
-        if (identityRes.ok) {
-          console.log(`✅ Updated identity for ${originalAlias}: ${newName}`);
-        } else {
-          console.warn(`⚠️ Failed to update identity for ${originalAlias}: ${identityRes.status}`);
+      // Push identity to running agent process
+      if (agent.type === 'claude' && agent.port && !server) {
+        try {
+          const agentUrl = isLocalAgent
+            ? (agent.endpoint || `http://localhost:${agent.port}`)
+            : `http://id-agent-${agent.id}:4100`;
+          const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+          const identityRes = await fetch(`${agentUrl}/identity`, {
+            method: 'PATCH',
+            headers,
+            body: JSON.stringify({ tokenId, domain: newName })
+          });
+          if (identityRes.ok) {
+            console.log(`✅ Updated identity for ${originalAlias}: ${newName}`);
+          } else {
+            console.warn(`⚠️ Failed to update identity for ${originalAlias}: ${identityRes.status}`);
+          }
+        } catch (err: any) {
+          console.warn(`⚠️ Could not update identity for ${originalAlias}: ${err.message}`);
         }
-      } catch (err: any) {
-        console.warn(`⚠️ Could not update identity for ${originalAlias}: ${err.message}`);
       }
     }
 
     console.log(`✅ Registered ${originalAlias} as ${newName} (tx: ${result.txHash})`);
     return { txHash: result.txHash, tokenId, domain: newName };
+  }
+
+  /**
+   * Write identity.json to the local staging directory and (if ssh_target is
+   * set) deliver it to the remote VPS over SCP.
+   *
+   * On SSH delivery failure the on-chain state is still authoritative; the
+   * manager logs a warning and returns successfully.
+   */
+  private async stageAndDeliverRemoteIdentity(
+    agent: AgentRow,
+    idchainDomain: string,
+    tokenId: string,
+    metadata: AgentMetadata,
+  ): Promise<void> {
+    // Build the identity object per § 8 schema
+    const identity = {
+      name: idchainDomain,
+      ows_address: (metadata as any).ows_address || '',
+      idchain_domain: idchainDomain,
+      token_id: tokenId,
+      service_endpoint: agent.public_endpoint_url || `https://${agent.customer_domain}` || '',
+      registered_at: new Date().toISOString(),
+    };
+
+    // Staging path: <baseWorkDir>/public-agents/<agent.id>/staging/identity.json
+    const stagingDir = path.join(this.baseWorkDir, 'public-agents', agent.id, 'staging');
+    mkdirSync(stagingDir, { recursive: true });
+    const localPath = path.join(stagingDir, 'identity.json');
+    writeFileSync(localPath, JSON.stringify(identity, null, 2), 'utf8');
+    console.log(`[Register] Staged identity file at ${localPath}`);
+
+    // Deliver over SSH if ssh_target is configured
+    if (agent.ssh_target) {
+      const remotePath = (agent.metadata as any)?.identity_remote_path || '/opt/public-agent/identity.json';
+      const deliverResult = await this.deliverFn(agent.ssh_target, localPath, remotePath);
+      if (deliverResult.ok) {
+        console.log(`[Register] Delivered identity.json to ${agent.ssh_target}:${remotePath}`);
+      } else {
+        console.warn(
+          `[Register] SSH delivery failed for agent ${agent.id} (${agent.ssh_target}): ` +
+          `error=${deliverResult.error} stderr=${deliverResult.stderr ?? ''}`,
+        );
+        // Do NOT throw — on-chain state is authoritative regardless.
+      }
+    }
   }
 
   /**
@@ -2229,11 +2343,29 @@ export class AgentManagerDb {
       const { id: teamId } = await this.getTeam(req);
       const agent = await this.dbQueryAgentById(teamId, req.params.id);
       if (!agent) return res.status(404).json({ error: 'Agent not found' });
+
+      // ?redeliver=1 — re-push identity.json to remote VPS without re-running
+      // the on-chain registration step (only meaningful for remote agents that
+      // are already registered).
+      const redeliver = req.query.redeliver === '1' || req.body?.redeliver === true;
+      if (redeliver && isRemoteEndpointRuntime(agent.runtime)) {
+        const idchainDomain = (agent.metadata as any)?.idchain_domain || agent.domain;
+        if (!idchainDomain) {
+          return res.status(400).json({ error: 'Agent is not yet registered on-chain. Cannot redeliver.' });
+        }
+        try {
+          await this.stageAndDeliverRemoteIdentity(agent, idchainDomain, agent.token_id || '', agent.metadata as AgentMetadata || {});
+          return res.json({ ok: true, redelivered: true, domain: idchainDomain, agent: { id: agent.id } });
+        } catch (e: any) {
+          return res.status(500).json({ error: e?.message || String(e) });
+        }
+      }
+
       try {
         const result = await this.registerOnchainAndUpdateAgent(teamId, agent);
 
-        // Update CLAUDE.md with agent's full identity
-        if (result.tokenId && agent.working_directory) {
+        // Update CLAUDE.md with agent's full identity (local agents only)
+        if (result.tokenId && agent.working_directory && !isRemoteEndpointRuntime(agent.runtime)) {
           try {
             const claudeDir = path.join(agent.working_directory, '.claude');
             if (!existsSync(claudeDir)) {
@@ -2253,6 +2385,26 @@ export class AgentManagerDb {
       }
     });
 
+    // Redeliver identity file to remote VPS without re-running on-chain registration.
+    this.managementApp.post('/agents/:id/onchain/redeliver-identity', async (req, res) => {
+      const { id: teamId } = await this.getTeam(req);
+      const agent = await this.dbQueryAgentById(teamId, req.params.id);
+      if (!agent) return res.status(404).json({ error: 'Agent not found' });
+      if (!isRemoteEndpointRuntime(agent.runtime)) {
+        return res.status(400).json({ error: 'redeliver_not_supported', message: 'Only public-agent-remote agents support identity redelivery.' });
+      }
+      const idchainDomain = (agent.metadata as any)?.idchain_domain || agent.domain;
+      if (!idchainDomain) {
+        return res.status(400).json({ error: 'Agent is not yet registered on-chain. Cannot redeliver.' });
+      }
+      try {
+        await this.stageAndDeliverRemoteIdentity(agent, idchainDomain, agent.token_id || '', agent.metadata as AgentMetadata || {});
+        return res.json({ ok: true, redelivered: true, domain: idchainDomain, agent: { id: agent.id } });
+      } catch (e: any) {
+        return res.status(500).json({ error: e?.message || String(e) });
+      }
+    });
+
     this.managementApp.post('/agents/by-name/:name/onchain/register', async (req, res) => {
       const { id: teamId } = await this.getTeam(req);
       const agent = await this.dbQueryAgentByNameMostRecent(teamId, req.params.name);
@@ -2260,8 +2412,8 @@ export class AgentManagerDb {
       try {
         const result = await this.registerOnchainAndUpdateAgent(teamId, agent);
 
-        // Update CLAUDE.md with agent's full identity
-        if (result.tokenId && agent.working_directory) {
+        // Update CLAUDE.md with agent's full identity (local agents only)
+        if (result.tokenId && agent.working_directory && !isRemoteEndpointRuntime(agent.runtime)) {
           try {
             const claudeDir = path.join(agent.working_directory, '.claude');
             if (!existsSync(claudeDir)) {
@@ -4812,7 +4964,7 @@ export class AgentManagerDb {
 
         // Remote-endpoint runtimes are lifecycled by the operator, not the manager.
         if (isRemoteEndpointRuntime(agent.runtime)) {
-          return { ok: false, error: 'lifecycle_not_supported_for_remote', message: 'This agent is a remote endpoint. Lifecycle is owned by the operator on the VPS.' };
+          return { ok: false, error: 'lifecycle_not_supported_for_remote' };
         }
 
         if (agent.type !== 'claude') {
