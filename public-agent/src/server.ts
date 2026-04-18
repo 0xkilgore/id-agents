@@ -8,6 +8,7 @@ import { newsRoutes } from './routes/news.js';
 import { inboxRoutes } from './routes/inbox.js';
 import { mcpRoutes } from './routes/mcp.js';
 import { loadManifest } from './lib/knowledge.js';
+import { purgeOldArtifacts } from './lib/tool-truncate.js';
 
 const env = loadEnv();
 
@@ -21,6 +22,15 @@ try {
 } catch (err) {
   console.error(`[public-agent] knowledge load failed: ${(err as Error).message}`);
   process.exit(1);
+}
+
+try {
+  const swept = purgeOldArtifacts(env.dataDir);
+  if (swept.removed > 0 || swept.kept > 0) {
+    console.log(`[public-agent] tool-artifacts purge: removed=${swept.removed} kept=${swept.kept}`);
+  }
+} catch (err) {
+  console.error('[public-agent] tool-artifacts purge failed:', err);
 }
 
 const app = new Hono();

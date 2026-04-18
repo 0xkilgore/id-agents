@@ -40,6 +40,8 @@ export interface InboxEntry {
     result_count: number;
     duration_ms: number;
     error?: string;
+    truncated?: boolean;
+    artifact?: string;
   }>;
 }
 

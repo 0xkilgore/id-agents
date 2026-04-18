@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { truncateToolContent } from './tool-truncate.js';
 
 // Strict file-id shape: lowercase letters, digits, dashes, ending in `.md`.
 // Everything else is rejected both at startup scan time and when the model
@@ -242,6 +243,8 @@ export interface ToolCallLog {
   result_count: number;
   error?: string;
   duration_ms: number;
+  artifact?: string;
+  truncated?: boolean;
 }
 
 // Executes one tool call synchronously under a bounded time budget. All
@@ -252,6 +255,7 @@ export function executeKnowledgeTool(
   manifest: KnowledgeManifest,
   name: string,
   rawArgs: string,
+  opts: { dataDir: string },
 ): { content: string; log: ToolCallLog } {
   const started = Date.now();
   const base: ToolCallLog = {
@@ -309,10 +313,22 @@ export function executeKnowledgeTool(
         log: { ...base, error: err, bytes: err.length, duration_ms: Date.now() - started },
       };
     }
-    const payload = JSON.stringify({ file_id: result.file_id, title: result.title, content: result.content });
+    // Apply the per-tool-call output cap (2000 lines / 50KB). Full content
+    // is persisted to the tool-artifacts dir on truncation so the model gets
+    // a preview plus a <truncated ...> marker it can reason about.
+    const trimmed = truncateToolContent(opts.dataDir, result.file_id, result.content);
+    const payload = JSON.stringify({ file_id: result.file_id, title: result.title, content: trimmed.content });
     return {
       content: payload,
-      log: { ...base, ok: true, result_count: 1, bytes: payload.length, duration_ms: Date.now() - started },
+      log: {
+        ...base,
+        ok: true,
+        result_count: 1,
+        bytes: payload.length,
+        duration_ms: Date.now() - started,
+        ...(trimmed.truncated ? { truncated: true } : {}),
+        ...(trimmed.artifact ? { artifact: trimmed.artifact } : {}),
+      },
     };
   }
 

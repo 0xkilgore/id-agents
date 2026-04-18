@@ -115,6 +115,8 @@ function writeGuardedInbox(
       result_count: l.result_count,
       duration_ms: l.duration_ms,
       ...(l.error ? { error: l.error } : {}),
+      ...(l.truncated ? { truncated: true } : {}),
+      ...(l.artifact ? { artifact: l.artifact } : {}),
     })),
   };
   try {
@@ -185,7 +187,10 @@ async function runToolLoop(
       let execResult: { content: string; log: ToolCallLog };
       try {
         execResult = await withTimeout(
-          () => Promise.resolve(executeKnowledgeTool(knowledge, tc.function.name, tc.function.arguments)),
+          () =>
+            Promise.resolve(
+              executeKnowledgeTool(knowledge, tc.function.name, tc.function.arguments, { dataDir: env.dataDir }),
+            ),
           KNOWLEDGE_TOOL_TIMEOUT_MS,
         );
       } catch (err) {
