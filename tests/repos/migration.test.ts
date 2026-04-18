@@ -141,3 +141,71 @@ describe('SQLite migration — tasks uniqueness upgrade', () => {
     expect(id1).toEqual(id2);
   });
 });
+
+// =====================================================================
+// Phase 2: remote endpoint column idempotency
+// =====================================================================
+
+describe('SQLite migration — remote endpoint columns (Phase 2 idempotency)', () => {
+  it('fresh DB has all four remote endpoint columns on agents', async () => {
+    const adapter = freshDb();
+    // Use pragma_table_info() table-valued function so it returns rows via SELECT
+    const { rows } = await adapter.query<{ name: string }>(
+      `SELECT name FROM pragma_table_info('agents')`,
+    );
+    const colNames = rows.map(r => r.name);
+    expect(colNames).toContain('customer_domain');
+    expect(colNames).toContain('public_endpoint_url');
+    expect(colNames).toContain('internal_endpoint_url');
+    expect(colNames).toContain('ssh_target');
+  });
+
+  it('running migration twice is idempotent — no error, schema unchanged', async () => {
+    const adapter = new SqliteAdapter(':memory:');
+
+    // First run — normal
+    await expect(migrateSqlite(adapter)).resolves.toBeUndefined();
+
+    // Second run — must not throw even though the ALTER TABLE columns already exist
+    await expect(migrateSqlite(adapter)).resolves.toBeUndefined();
+
+    // Schema should still have all four columns
+    const { rows } = await adapter.query<{ name: string }>(
+      `SELECT name FROM pragma_table_info('agents')`,
+    );
+    const colNames = rows.map(r => r.name);
+    expect(colNames).toContain('customer_domain');
+    expect(colNames).toContain('public_endpoint_url');
+    expect(colNames).toContain('internal_endpoint_url');
+    expect(colNames).toContain('ssh_target');
+
+    await adapter.close();
+  });
+
+  it('existing rows have NULL for all four new columns (backfill-safe)', async () => {
+    const adapter = new SqliteAdapter(':memory:');
+    await migrateSqlite(adapter);
+
+    const teamsRepo = new SqliteTeamsRepo(adapter);
+    const teamId = await teamsRepo.getOrCreateTeamId('test-team');
+
+    // Insert a row without any remote columns (as a pre-Phase-2 agent would)
+    await adapter.query(
+      `INSERT INTO agents
+         (id, team_id, name, type, model, port, status, created_at, runtime)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ['old-agent-1', teamId, 'legacy-agent', 'virtual', 'sonnet', 0, 'running', Date.now(), 'claude-agent-sdk'],
+    );
+
+    const { rows } = await adapter.query<any>(
+      `SELECT customer_domain, public_endpoint_url, internal_endpoint_url, ssh_target FROM agents WHERE id = 'old-agent-1'`,
+    );
+    expect(rows[0]).toBeDefined();
+    expect(rows[0].customer_domain).toBeNull();
+    expect(rows[0].public_endpoint_url).toBeNull();
+    expect(rows[0].internal_endpoint_url).toBeNull();
+    expect(rows[0].ssh_target).toBeNull();
+
+    await adapter.close();
+  });
+});
