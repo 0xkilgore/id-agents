@@ -20,8 +20,9 @@ COPY package.json package-lock.json* ./
 RUN npm install --omit=dev --no-audit --no-fund && npm cache clean --force
 COPY --from=build /app/dist ./dist
 COPY SKILL.md ./SKILL.md
+COPY knowledge ./knowledge
 COPY scripts/entrypoint.sh /usr/local/bin/entrypoint.sh
-RUN chmod +x /usr/local/bin/entrypoint.sh && mkdir -p /app/data && chown -R node:node /app/data
+RUN chmod +x /usr/local/bin/entrypoint.sh && mkdir -p /app/data && chown -R node:node /app/data /app/knowledge
 
 # Start as root so entrypoint.sh can install iptables rules. It drops to
 # node via su-exec before exec'ing node.

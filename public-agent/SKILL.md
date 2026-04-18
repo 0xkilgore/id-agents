@@ -10,8 +10,10 @@ A self-contained HTTP agent in a single container. One process, one port, one Op
 ## What it does
 
 - Answers external questions synchronously via OpenRouter.
+- Screens every `/talk` message with a cheap safety classifier before the main model sees it. Prompt-injection / jailbreak attempts receive a fixed refusal; ambiguous messages are flagged for review. Fails CLOSED if the classifier is unreachable.
+- Lets the main model consult a curated public knowledge base (`knowledge/`) through two server-executed tools (`search_knowledge`, `read_knowledge`) — no RAG, no embeddings, just substring search over allowlisted Markdown files.
 - Accepts fire-and-forget notifications from trusted callers (your own team) and appends them to a news log anyone can tail.
-- Persists every external `/talk` call to `data/inbox/` for a human to review later.
+- Persists every external `/talk` call to `data/inbox/` (including guard verdict + tool-call summary) for a human to review later.
 - Enforces a daily token budget and per-IP rate limit on `/talk` to keep costs bounded.
 
 ## Endpoints
@@ -70,9 +72,13 @@ Response shape:
   "model": "openai/gpt-4o-mini",
   "inbox_id": "2026-04-17T12-34-56-7b3fa2",
   "tokens_used": { "prompt": 23, "completion": 140, "total": 163 },
-  "session_id": "6f1e9a4a-9a7d-4fa4-9c11-1b7f6b3c9fa8"
+  "session_id": "6f1e9a4a-9a7d-4fa4-9c11-1b7f6b3c9fa8",
+  "guard": { "classification": "allow", "violation_type": "none" },
+  "tool_calls_used": 0
 }
 ```
+
+If the classifier refuses the message, the reply is a canned safety notice and `guard.classification` is `refuse` (or `review` for borderline input). The turn still counts toward the session cap and is logged to the inbox with the full guard verdict (including CWE codes) for human review.
 
 ### Threading follow-up turns
 
@@ -156,6 +162,72 @@ curl -s -X POST http://127.0.0.1:$PORT/mcp \
   -H 'Content-Type: application/json' \
   -H "Authorization: Bearer $PUBLIC_AGENT_AUTH_KEY" \
   -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"talk","arguments":{"message":"What can you do?","from":"mcp-client"}}}'
+```
+
+## Safety classifier
+
+Every `/talk` message is first screened by a lightweight classifier (configurable via `GUARD_MODEL`, defaults to `OPENROUTER_MODEL`). The classifier returns a JSON verdict:
+
+```json
+{
+  "classification": "allow" | "refuse" | "review",
+  "violation_type": "none" | "prompt_injection" | "system_prompt_extraction" | "data_exfiltration" | "jailbreak",
+  "cwe_codes": ["CWE-1039", "CWE-200", "CWE-20"],
+  "reasoning": "one sentence"
+}
+```
+
+- `allow` → the main model runs normally and may use knowledge tools.
+- `refuse` → the server returns a canned refusal without invoking the main model.
+- `review` → the server returns a canned "under review" message and marks the inbox entry `priority: review`.
+
+Behaviour on classifier failure is **fail-closed**: if the classifier call errors, times out, or returns an unparseable verdict, `/talk` responds `503 { "error": "guard_unavailable" }` and the main model is never called.
+
+Configuration:
+
+- `GUARD_MODEL` (default `OPENROUTER_MODEL`) — classifier model id.
+- `MAX_GUARD_TOKENS` (default `256`) — cap for the classifier call.
+- `MAX_MESSAGE_CHARS` (default `8000`) — Zod-enforced limit on `body.message`.
+
+## Knowledge base (`knowledge/`)
+
+Operators drop curated Markdown files into `knowledge/`. On startup the server scans the directory and builds an allowlist manifest. **Any invalid file hard-fails startup** — the server does not silently skip bad files.
+
+Rules (enforced at startup and re-checked at read time):
+
+- File extension must be `.md`.
+- Filename must match `^[a-z0-9][a-z0-9-]*\.md$` (lowercase, dashes, ends in `.md`).
+- Must be a regular file — no symlinks, no hardlinks (`nlink > 1`), no directories, no hidden files.
+- `realpath` must resolve back inside `knowledge/` exactly.
+- File size ≤ 64 KB.
+- `.gitkeep` and `README.md` are silently skipped.
+
+Set the directory via `PUBLIC_AGENT_KNOWLEDGE_DIR` (default `/app/knowledge` in the container).
+
+### Tools available to the main model
+
+When the classifier allows a message, the main model can call two tools (executed server-side; the model only supplies arguments, never a path):
+
+| Tool | Purpose | Input |
+|---|---|---|
+| `search_knowledge` | Case-insensitive literal substring scan across all indexed files. Returns up to 5 hits, each with `file_id`, `title`, and a 120-char snippet. | `{ query: string (≤200 chars) }` |
+| `read_knowledge` | Return the full content of one file by `file_id` (must appear in the manifest). | `{ file_id: string }` |
+
+Per-request caps:
+
+- ≤ 5 tool calls per `/talk`.
+- ≤ 128 KB total tool output across the loop (further calls are truncated).
+- 2 s wall-clock timeout per tool call.
+- 64 KB cap per `read_knowledge` result.
+
+Each tool result is wrapped in `<knowledge_content>…</knowledge_content>` markers with a `<meta>` note reminding the model that knowledge is **reference data, not instructions** — the main system prompt's behavioural rules pair with these markers to resist injection via knowledge content.
+
+Every tool invocation is logged to stdout and summarised in the inbox entry:
+
+```json
+"tool_calls": [
+  { "name": "search_knowledge", "ok": true, "bytes": 230, "result_count": 1, "duration_ms": 3 }
+]
 ```
 
 ## Rate limits and cost ceiling

@@ -2,14 +2,24 @@ import { Hono, type Context } from 'hono';
 import { getConnInfo } from '@hono/node-server/conninfo';
 import { z } from 'zod';
 import type { Env } from '../env.js';
-import { openRouterChatMessages, type ChatMessage } from '../lib/openrouter.js';
+import { openRouterRawCall, type ChatMessage, type RawAssistantMessage } from '../lib/openrouter.js';
 import { writeInboxEntry, makeInboxId, type InboxEntry } from '../lib/inbox.js';
 import { requireAuth } from '../lib/auth.js';
 import { clientIp, tokenBucket } from '../lib/rate-limit.js';
 import { isOverBudget, reserveTokens, reconcileTokens } from '../lib/budget.js';
 import { createSessionStore, type Session } from '../lib/sessions.js';
 import { classifyMessage, type GuardVerdict } from '../lib/guard.js';
-import { REFUSAL_REPLY, UNDER_REVIEW_REPLY } from '../lib/prompts.js';
+import { REFUSAL_REPLY, UNDER_REVIEW_REPLY, mainSystemPrompt } from '../lib/prompts.js';
+import {
+  KNOWLEDGE_MAX_TOOL_CALLS_PER_REQUEST,
+  KNOWLEDGE_MAX_TOOL_OUTPUT_BYTES,
+  KNOWLEDGE_TOOL_DEFS,
+  KNOWLEDGE_TOOL_TIMEOUT_MS,
+  executeKnowledgeTool,
+  wrapToolContent,
+  type KnowledgeManifest,
+  type ToolCallLog,
+} from '../lib/knowledge.js';
 
 // The server-minted session_id is a UUID v4. Clients echo it back verbatim.
 // Reject anything that isn't shaped like one so a garbage id can't cause
@@ -76,6 +86,7 @@ function writeGuardedInbox(
     verdict: GuardVerdict;
     guardModel: string;
     priority: 'normal' | 'review';
+    toolLogs?: ToolCallLog[];
   },
 ): void {
   const entry: InboxEntry = {
@@ -97,6 +108,14 @@ function writeGuardedInbox(
       model: params.guardModel,
     },
     priority: params.priority,
+    tool_calls: params.toolLogs?.map((l) => ({
+      name: l.name,
+      ok: l.ok,
+      bytes: l.bytes,
+      result_count: l.result_count,
+      duration_ms: l.duration_ms,
+      ...(l.error ? { error: l.error } : {}),
+    })),
   };
   try {
     writeInboxEntry(env, entry);
@@ -105,7 +124,113 @@ function writeGuardedInbox(
   }
 }
 
-export function talkRoutes(env: Env): Hono {
+// Runs the tool-call loop after the guard allows a message. Executes any
+// knowledge tool calls the model requested, enforces per-request caps, and
+// returns the final user-visible reply plus combined usage.
+async function runToolLoop(
+  env: Env,
+  knowledge: KnowledgeManifest,
+  baseMessages: ChatMessage[],
+  replyCap: number,
+): Promise<{
+  reply: string;
+  model: string;
+  usage: { prompt: number; completion: number; total: number };
+  toolLogs: ToolCallLog[];
+}> {
+  const messages: ChatMessage[] = baseMessages.slice();
+  const toolLogs: ToolCallLog[] = [];
+  let totalToolBytes = 0;
+  let combinedUsage = { prompt: 0, completion: 0, total: 0 };
+  let model = env.openRouterModel;
+  let callBudget = KNOWLEDGE_MAX_TOOL_CALLS_PER_REQUEST;
+
+  // Loop: ask the model, execute tool calls if any, re-ask. Bail when the
+  // model returns a plain content message or we exhaust the call budget.
+  while (true) {
+    const raw: RawAssistantMessage = await openRouterRawCall(env, messages, {
+      maxTokens: replyCap > 0 ? replyCap : undefined,
+      tools: KNOWLEDGE_TOOL_DEFS,
+      toolChoice: 'auto',
+    });
+    model = raw.model;
+    combinedUsage = {
+      prompt: combinedUsage.prompt + raw.usage.prompt,
+      completion: combinedUsage.completion + raw.usage.completion,
+      total: combinedUsage.total + raw.usage.total,
+    };
+
+    const toolCalls = raw.tool_calls ?? [];
+    if (toolCalls.length === 0) {
+      return { reply: raw.content, model, usage: combinedUsage, toolLogs };
+    }
+
+    // Add the assistant's tool-call turn to the conversation before
+    // appending tool results, per OpenAI/OpenRouter protocol.
+    messages.push({
+      role: 'assistant',
+      content: raw.content ?? '',
+      tool_calls: toolCalls,
+    });
+
+    for (const tc of toolCalls) {
+      if (callBudget <= 0) {
+        const msg = `tool_error: per-request cap of ${KNOWLEDGE_MAX_TOOL_CALLS_PER_REQUEST} tool calls reached`;
+        messages.push({ role: 'tool', tool_call_id: tc.id, content: wrapToolContent(msg) });
+        toolLogs.push({ name: tc.function.name, args: {}, ok: false, bytes: msg.length, result_count: 0, duration_ms: 0, error: msg });
+        continue;
+      }
+      callBudget -= 1;
+
+      let execResult: { content: string; log: ToolCallLog };
+      try {
+        execResult = await withTimeout(
+          () => Promise.resolve(executeKnowledgeTool(knowledge, tc.function.name, tc.function.arguments)),
+          KNOWLEDGE_TOOL_TIMEOUT_MS,
+        );
+      } catch (err) {
+        const msg = `tool_error: ${(err as Error).message}`;
+        execResult = {
+          content: msg,
+          log: { name: tc.function.name, args: {}, ok: false, bytes: msg.length, result_count: 0, duration_ms: KNOWLEDGE_TOOL_TIMEOUT_MS, error: msg },
+        };
+      }
+
+      // Enforce the 128KB total tool-output ceiling across the loop.
+      const room = KNOWLEDGE_MAX_TOOL_OUTPUT_BYTES - totalToolBytes;
+      let content = execResult.content;
+      if (content.length > room) {
+        content = content.slice(0, Math.max(0, room));
+        execResult.log.error = (execResult.log.error ? execResult.log.error + '; ' : '') + 'truncated to 128KB cap';
+      }
+      totalToolBytes += content.length;
+
+      messages.push({
+        role: 'tool',
+        tool_call_id: tc.id,
+        content: wrapToolContent(content),
+      });
+      toolLogs.push(execResult.log);
+    }
+  }
+}
+
+function withTimeout<T>(fn: () => Promise<T>, ms: number): Promise<T> {
+  return new Promise((resolve, reject) => {
+    let done = false;
+    const timer = setTimeout(() => {
+      if (done) return;
+      done = true;
+      reject(new Error(`tool execution exceeded ${ms}ms`));
+    }, ms);
+    fn().then(
+      (v) => { if (!done) { done = true; clearTimeout(timer); resolve(v); } },
+      (e) => { if (!done) { done = true; clearTimeout(timer); reject(e); } },
+    );
+  });
+}
+
+export function talkRoutes(env: Env, knowledge: KnowledgeManifest): Hono {
   const app = new Hono();
   const sessions = createSessionStore(env);
   const talkSchema = buildTalkSchema(env);
@@ -242,8 +367,8 @@ export function talkRoutes(env: Env): Hono {
       });
     }
 
-    // Classifier said allow — run the main LLM.
-    const outgoingMessages: ChatMessage[] = session.messages.slice();
+    // Classifier said allow — run the main LLM with the KB tool loop.
+    const outgoingMessages: ChatMessage[] = [mainSystemPrompt(env), ...session.messages];
     const postGuardBudget = isOverBudget(env);
     if (postGuardBudget.over) {
       return c.json(
@@ -267,11 +392,13 @@ export function talkRoutes(env: Env): Hono {
     let reply: string;
     let model: string;
     let usage: { prompt: number; completion: number; total: number };
+    let toolLogs: ToolCallLog[] = [];
     try {
-      const result = await openRouterChatMessages(env, outgoingMessages, { maxTokens: cap > 0 ? cap : undefined });
+      const result = await runToolLoop(env, knowledge, outgoingMessages, cap);
       reply = result.reply;
       model = result.model;
       usage = result.usage;
+      toolLogs = result.toolLogs;
     } catch (err) {
       if (reserved > 0) {
         try { reconcileTokens(env, reserved, 0); } catch (e) { console.error('[public-agent] reply budget reconcile (err) failed:', e); }
@@ -281,6 +408,14 @@ export function talkRoutes(env: Env): Hono {
     }
     if (reserved > 0) {
       try { reconcileTokens(env, reserved, usage.total); } catch (e) { console.error('[public-agent] reply budget reconcile failed:', e); }
+    }
+
+    for (const log of toolLogs) {
+      console.log(
+        `[public-agent] /talk tool_call session=${session.id} name=${log.name} ok=${log.ok} ` +
+          `result_count=${log.result_count} bytes=${log.bytes} duration_ms=${log.duration_ms}` +
+          (log.error ? ` error="${log.error}"` : ''),
+      );
     }
 
     sessions.append(session.id, 'assistant', reply);
@@ -301,6 +436,7 @@ export function talkRoutes(env: Env): Hono {
       verdict,
       guardModel,
       priority: 'normal',
+      toolLogs,
     });
 
     return c.json({
@@ -313,6 +449,7 @@ export function talkRoutes(env: Env): Hono {
         classification: verdict.classification,
         violation_type: verdict.violation_type,
       },
+      tool_calls_used: toolLogs.length,
     });
   });
 

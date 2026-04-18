@@ -33,7 +33,11 @@ export function buildCatalog(env: Env) {
         method: 'POST',
         endpoint: '/talk',
         description:
-          'Synchronous Q&A. Returns { reply, session_id, model, inbox_id, tokens_used }. ' +
+          'Synchronous Q&A. Every message is first screened by a safety classifier; ' +
+          'responses include a `guard` field with classification (allow/refuse/review) and violation_type. ' +
+          'Allowed messages can consult a curated public knowledge base through two internal tools — ' +
+          '`search_knowledge(query)` and `read_knowledge(file_id)` — which the model invokes if needed. ' +
+          'Returns { reply, session_id, model, inbox_id, tokens_used, guard, tool_calls_used }. ' +
           'Omit session_id to start a new conversation — the server mints one and returns it. ' +
           'Pass the returned session_id back on follow-up turns to thread them. ' +
           'Sessions are in-memory only (lost on restart), expire after SESSION_IDLE_MINUTES (default 60), ' +

@@ -7,8 +7,22 @@ import { talkRoutes } from './routes/talk.js';
 import { newsRoutes } from './routes/news.js';
 import { inboxRoutes } from './routes/inbox.js';
 import { mcpRoutes } from './routes/mcp.js';
+import { loadManifest } from './lib/knowledge.js';
 
 const env = loadEnv();
+
+// Hard-fail at startup if the knowledge dir has any rejectable file. We'd
+// rather crash on boot than serve partially-indexed or attacker-controlled
+// knowledge to callers.
+let knowledge;
+try {
+  knowledge = loadManifest(env.knowledgeDir);
+  console.log(`[public-agent] knowledge manifest: ${knowledge.entries.size} file(s) from ${knowledge.root}`);
+} catch (err) {
+  console.error(`[public-agent] knowledge load failed: ${(err as Error).message}`);
+  process.exit(1);
+}
+
 const app = new Hono();
 
 const TALK_BODY_LIMIT = 64 * 1024;
@@ -32,7 +46,7 @@ app.on('POST', '/news', oversize(NEWS_BODY_LIMIT));
 app.on('POST', '/mcp', oversize(MCP_BODY_LIMIT));
 
 app.route('/', wellknownRoutes(env));
-app.route('/', talkRoutes(env));
+app.route('/', talkRoutes(env, knowledge));
 app.route('/', newsRoutes(env));
 app.route('/', inboxRoutes(env));
 app.route('/', mcpRoutes(env));

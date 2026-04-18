@@ -15,6 +15,7 @@ export interface Env {
   guardModel: string;
   maxGuardTokens: number;
   maxMessageChars: number;
+  knowledgeDir: string;
 }
 
 function required(name: string, value: string | undefined): string {
@@ -51,5 +52,6 @@ export function loadEnv(): Env {
     guardModel: process.env.GUARD_MODEL?.trim() || process.env.OPENROUTER_MODEL || required('OPENROUTER_MODEL', process.env.OPENROUTER_MODEL),
     maxGuardTokens: intOr('MAX_GUARD_TOKENS', process.env.MAX_GUARD_TOKENS, 256),
     maxMessageChars: intOr('MAX_MESSAGE_CHARS', process.env.MAX_MESSAGE_CHARS, 8000),
+    knowledgeDir: process.env.PUBLIC_AGENT_KNOWLEDGE_DIR?.trim() || '/app/knowledge',
   };
 }

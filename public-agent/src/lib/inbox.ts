@@ -33,6 +33,14 @@ export interface InboxEntry {
     model: string;
   };
   priority?: 'normal' | 'review';
+  tool_calls?: Array<{
+    name: string;
+    ok: boolean;
+    bytes: number;
+    result_count: number;
+    duration_ms: number;
+    error?: string;
+  }>;
 }
 
 function inboxDir(env: Env): string {
