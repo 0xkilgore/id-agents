@@ -18,6 +18,11 @@ import {
   readDotEnvFile as coreReadDotEnvFile,
 } from './core/index.js';
 import { getRuntimeDisplayName, resolveRuntime } from './runtime/registry.js';
+import {
+  addPublicAgent,
+  listPublicAgents,
+  removePublicAgent,
+} from './cli/public-commands.js';
 
 const colors = {
   reset: '\x1b[0m',
@@ -70,6 +75,11 @@ const HELP_ITEMS: Array<{ cmd: string; desc: string; indent?: boolean }> = [
   { cmd: '/output <agent>', desc: 'List files in agent output directory' },
   { cmd: '/artifact <agent> <path>', desc: 'Read file from agent output directory' },
   { cmd: '/news [-l] <agent>', desc: 'Check recent messages (-l for full content)' },
+  { cmd: '/public', desc: 'List registered public-team agents' },
+  { cmd: '/public add <domain> [--ssh-target=user@host] [--internal-port=N]', desc: 'Register a remote public-agent' },
+  { cmd: '/public remove <name|domain>', desc: 'Deregister a public-team agent' },
+  { cmd: '/public <n|domain> <msg>', desc: 'Chat with a public agent by index or domain' },
+  { cmd: '/public clear', desc: 'Remove all public-team agents (with confirmation)' },
   { cmd: '/register <agent>', desc: 'Register agent onchain' },
   { cmd: '/heartbeat', desc: 'List heartbeats' },
   { cmd: '/heartbeat add <agent> <seconds> <message>', desc: 'Add heartbeat' },
@@ -3395,6 +3405,257 @@ async function handleLine(line: string) {
       console.log(`\n${colors.red}❌ Error: ${error.message}${colors.reset}\n`);
     }
     rl.prompt();
+    return;
+  }
+
+  // /public — public-team agent management
+  if (input === '/public' || input.startsWith('/public ')) {
+    if (!(await checkManager())) {
+      showManagerNotRunningError();
+      rl.prompt();
+      return;
+    }
+
+    const publicDeps = {
+      managerBaseUrl: MANAGER_URL,
+      fetch: fetch as unknown as typeof globalThis.fetch,
+    };
+
+    const rest = input === '/public' ? '' : input.slice('/public '.length).trim();
+
+    // /public add <domain> [--ssh-target=...] [--internal-port=N]
+    if (rest.startsWith('add ')) {
+      const addArgs = parseArgs(rest.slice('add '.length));
+      const domain = addArgs.find((a) => !a.startsWith('--'));
+      if (!domain) {
+        console.log(`\n${colors.red}❌ Usage: /public add <domain> [--ssh-target=user@host] [--internal-port=N]${colors.reset}\n`);
+        rl.prompt();
+        return;
+      }
+      const sshFlag = addArgs.find((a) => a.startsWith('--ssh-target='));
+      const portFlag = addArgs.find((a) => a.startsWith('--internal-port='));
+      const sshTarget = sshFlag ? sshFlag.slice('--ssh-target='.length) : null;
+      const internalPort = portFlag ? parseInt(portFlag.slice('--internal-port='.length), 10) : null;
+
+      (async () => {
+        try {
+          const result = await addPublicAgent(domain, { sshTarget, internalPort }, publicDeps);
+          if (result.ok) {
+            console.log(`\n${colors.green}✅ ${result.message}${colors.reset}\n`);
+          } else {
+            console.log(`\n${colors.red}❌ ${result.error}${colors.reset}\n`);
+          }
+        } catch (err: any) {
+          console.log(`\n${colors.red}❌ Error: ${err?.message ?? String(err)}${colors.reset}\n`);
+        }
+        rl.prompt();
+      })();
+      return;
+    }
+
+    // /public remove <name-or-domain>
+    if (rest.startsWith('remove ')) {
+      const ref = rest.slice('remove '.length).trim();
+      if (!ref) {
+        console.log(`\n${colors.red}❌ Usage: /public remove <name|domain>${colors.reset}\n`);
+        rl.prompt();
+        return;
+      }
+      (async () => {
+        try {
+          // Fetch list to preview
+          const listResult = await listPublicAgents(publicDeps);
+          if (!listResult.ok) {
+            console.log(`\n${colors.red}❌ ${listResult.error}${colors.reset}\n`);
+            rl.prompt();
+            return;
+          }
+          const needle = ref.toLowerCase();
+          const found = listResult.agents.find(
+            (a) =>
+              a.name.toLowerCase() === needle ||
+              (a.customer_domain ?? '').toLowerCase() === needle,
+          );
+          if (!found) {
+            console.log(`\n${colors.red}❌ No public agent found matching "${ref}"${colors.reset}\n`);
+            rl.prompt();
+            return;
+          }
+          const confirmed = await confirmAction(
+            rl,
+            `⚠️  Remove public agent "${found.name}" (${found.customer_domain ?? found.id})?`,
+            'yes',
+            { cancelMessage: 'Remove cancelled.' },
+          );
+          if (!confirmed) {
+            rl.prompt();
+            return;
+          }
+          const result = await removePublicAgent(ref, publicDeps);
+          if (result.ok) {
+            console.log(`\n${colors.green}✅ ${result.message}${colors.reset}\n`);
+          } else {
+            console.log(`\n${colors.red}❌ ${result.error}${colors.reset}\n`);
+          }
+        } catch (err: any) {
+          console.log(`\n${colors.red}❌ Error: ${err?.message ?? String(err)}${colors.reset}\n`);
+        }
+        rl.prompt();
+      })();
+      return;
+    }
+
+    // /public clear
+    if (rest === 'clear') {
+      (async () => {
+        try {
+          const listResult = await listPublicAgents(publicDeps);
+          if (!listResult.ok) {
+            console.log(`\n${colors.red}❌ ${listResult.error}${colors.reset}\n`);
+            rl.prompt();
+            return;
+          }
+          if (listResult.agents.length === 0) {
+            console.log(`\n${colors.yellow}No public agents to remove.${colors.reset}\n`);
+            rl.prompt();
+            return;
+          }
+          const names = listResult.agents.map((a) => a.name).join(', ');
+          const confirmed = await confirmAction(
+            rl,
+            `⚠️  Remove all ${listResult.agents.length} public agents: ${names}`,
+            'yes',
+            { cancelMessage: 'Clear cancelled.' },
+          );
+          if (!confirmed) {
+            rl.prompt();
+            return;
+          }
+          const errors: string[] = [];
+          for (const agent of listResult.agents) {
+            const r = await removePublicAgent(agent.name, publicDeps);
+            if (!r.ok) errors.push(`${agent.name}: ${r.error}`);
+          }
+          if (errors.length) {
+            console.log(`\n${colors.yellow}⚠️  Some removals failed:\n${errors.join('\n')}${colors.reset}\n`);
+          } else {
+            console.log(`\n${colors.green}✅ Removed ${listResult.agents.length} public agent(s)${colors.reset}\n`);
+          }
+        } catch (err: any) {
+          console.log(`\n${colors.red}❌ Error: ${err?.message ?? String(err)}${colors.reset}\n`);
+        }
+        rl.prompt();
+      })();
+      return;
+    }
+
+    // /public <n> <msg> — chat with agent by index (1-based)
+    // /public <domain> <msg> — chat with agent by domain
+    // /public (bare) or /public list — list public agents
+    const chatMatch = rest.match(/^(\d+|[\w.-]+\.\w+)\s+(.+)$/s);
+    if (chatMatch && rest !== '' && rest !== 'list') {
+      const [, ref, msg] = chatMatch;
+      (async () => {
+        try {
+          const listResult = await listPublicAgents(publicDeps);
+          if (!listResult.ok) {
+            console.log(`\n${colors.red}❌ ${listResult.error}${colors.reset}\n`);
+            rl.prompt();
+            return;
+          }
+          let target = null;
+          if (/^\d+$/.test(ref)) {
+            const idx = parseInt(ref, 10) - 1;
+            target = listResult.agents[idx] ?? null;
+          } else {
+            const needle = ref.toLowerCase();
+            target = listResult.agents.find(
+              (a) =>
+                a.name.toLowerCase() === needle ||
+                (a.customer_domain ?? '').toLowerCase() === needle,
+            ) ?? null;
+          }
+          if (!target) {
+            console.log(`\n${colors.red}❌ No public agent found for "${ref}". Run /public to list agents.${colors.reset}\n`);
+            rl.prompt();
+            return;
+          }
+          // Fetch well-known to get talk endpoint
+          const wellKnownUrl = `${target.public_endpoint_url ?? `https://${target.customer_domain}`}/.well-known/restap.json`;
+          let talkEndpoint: string | null = null;
+          try {
+            const controller = new AbortController();
+            const timeout = setTimeout(() => controller.abort(), 5000);
+            let wkResp: any;
+            try {
+              wkResp = await (fetch as any)(wellKnownUrl, { signal: controller.signal });
+            } finally {
+              clearTimeout(timeout);
+            }
+            if (wkResp.ok) {
+              const wk: any = await wkResp.json();
+              talkEndpoint = wk.endpoints?.talk ?? null;
+            }
+          } catch { /* fall through */ }
+          if (!talkEndpoint) {
+            talkEndpoint = `${target.public_endpoint_url ?? `https://${target.customer_domain}`}/talk`;
+          }
+          console.log(`\n${colors.cyan}→ ${target.name} (${target.customer_domain ?? ''})${colors.reset}`);
+          console.log(`${colors.gray}  talk: ${talkEndpoint}${colors.reset}\n`);
+          try {
+            const talkResp = await (fetch as any)(talkEndpoint, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ message: msg }),
+            });
+            if (!talkResp.ok) {
+              console.log(`${colors.red}❌ Talk failed: HTTP ${talkResp.status}${colors.reset}\n`);
+            } else {
+              const talkData: any = await talkResp.json();
+              const reply = talkData.reply ?? talkData.message ?? talkData.result ?? JSON.stringify(talkData);
+              console.log(`${colors.bold}${target.name}:${colors.reset} ${reply}\n`);
+            }
+          } catch (talkErr: any) {
+            console.log(`${colors.red}❌ Talk error: ${talkErr?.message ?? String(talkErr)}${colors.reset}\n`);
+          }
+        } catch (err: any) {
+          console.log(`\n${colors.red}❌ Error: ${err?.message ?? String(err)}${colors.reset}\n`);
+        }
+        rl.prompt();
+      })();
+      return;
+    }
+
+    // /public, /public list, or unrecognized sub-command → show list
+    (async () => {
+      try {
+        const result = await listPublicAgents(publicDeps);
+        if (!result.ok) {
+          console.log(`\n${colors.red}❌ ${result.error}${colors.reset}\n`);
+          rl.prompt();
+          return;
+        }
+        if (result.agents.length === 0) {
+          console.log(`\n${colors.gray}No public agents registered. Use /public add <domain> to add one.${colors.reset}\n`);
+        } else {
+          console.log(`\n${colors.bold}Public agents (${result.agents.length}):${colors.reset}\n`);
+          const header = `  ${'#'.padEnd(4)}${'name'.padEnd(28)}${'domain'.padEnd(30)}${'status'.padEnd(14)}public_url`;
+          console.log(`${colors.gray}${header}${colors.reset}`);
+          result.agents.forEach((a, i) => {
+            const num = String(i + 1).padEnd(4);
+            const n = (a.name || '').padEnd(28);
+            const d = (a.customer_domain || '').padEnd(30);
+            const s = (a.status || '').padEnd(14);
+            const u = a.public_endpoint_url || '';
+            console.log(`  ${colors.cyan}${num}${colors.reset}${n}${colors.gray}${d}${colors.reset}${s}${colors.gray}${u}${colors.reset}`);
+          });
+          console.log('');
+        }
+      } catch (err: any) {
+        console.log(`\n${colors.red}❌ Error: ${err?.message ?? String(err)}${colors.reset}\n`);
+      }
+      rl.prompt();
+    })();
     return;
   }
 
