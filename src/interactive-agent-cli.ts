@@ -91,9 +91,11 @@ const HELP_ITEMS: Array<{ cmd: string; desc: string; indent?: boolean }> = [
   { cmd: '/team <name>', desc: 'Switch to or create team' },
   { cmd: '/teams', desc: 'List all teams' },
   { cmd: '/team delete <name>', desc: 'Delete a team (must be empty — run /delete --team first)' },
-  { cmd: '/public', desc: 'List known public agents (kept separate from the manager DB)' },
-  { cmd: '/public <domain>', desc: 'Open a chat session with a public agent (auto-adds to the list)' },
-  { cmd: '/public add|remove|clear ...', desc: 'Manage the persistent public-agents list (~/.id-agents/public-agents.json)' },
+  { cmd: '/public', desc: 'List public agents' },
+  { cmd: '/public <domain>', desc: 'Chat with a public agent' },
+  { cmd: '/public add <domain>', desc: 'Add to list' },
+  { cmd: '/public remove <domain>', desc: 'Remove from list' },
+  { cmd: '/public clear', desc: 'Remove all' },
   { cmd: '/quit', desc: 'Exit' },
 ];
 
