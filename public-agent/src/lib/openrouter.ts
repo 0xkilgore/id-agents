@@ -50,6 +50,18 @@ export interface RawAssistantMessage {
   finishReason: string | null;
 }
 
+// Sentinel error for sanitized upstream failures. The status is preserved for
+// callers that need to distinguish context-overflow (413) from other errors.
+export class UpstreamError extends Error {
+  constructor(
+    readonly status: number,
+    readonly sanitizedReason: string,
+  ) {
+    super(`openrouter_upstream_error status=${status}`);
+    this.name = 'UpstreamError';
+  }
+}
+
 const ENDPOINT = 'https://openrouter.ai/api/v1/chat/completions';
 
 async function call(
@@ -66,8 +78,10 @@ async function call(
   if (typeof opts.temperature === 'number') body.temperature = opts.temperature;
 
   const resp = await retryFetch(
-    () =>
-      fetch(ENDPOINT, {
+    () => {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), env.upstreamDeadlineMs);
+      return fetch(ENDPOINT, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -76,11 +90,20 @@ async function call(
           'X-Title': env.agentName,
         },
         body: JSON.stringify(body),
-      }),
-    { label: `openrouter model=${model}` },
+        signal: controller.signal,
+      }).finally(() => clearTimeout(timer));
+    },
+    {
+      label: `openrouter model=${model}`,
+      maxRetryAfterMs: env.maxRetryAfterMs,
+    },
   ).catch((err: unknown) => {
     if (err instanceof HttpRetryError) {
-      throw new Error(`openrouter http ${err.status}: ${err.body.slice(0, 500)}`);
+      // F-07: log full body server-side; do NOT include in thrown error.
+      console.error(
+        `[public-agent] openrouter upstream error status=${err.status} body=${err.body}`,
+      );
+      throw new UpstreamError(err.status, `http_${err.status}`);
     }
     throw err;
   });

@@ -27,6 +27,8 @@ export interface RetryFetchOptions {
   maxAttempts?: number;
   logger?: (rec: RetryLogRecord) => void;
   label?: string;
+  /** Maximum ms to honor from a Retry-After header. Default: uncapped. */
+  maxRetryAfterMs?: number;
 }
 
 function jitter(ms: number): number {
@@ -42,15 +44,25 @@ export function backoffDelay(attempt: number): number {
 
 // Parses a Retry-After value. Returns ms to wait, or null if absent/unparseable.
 // Accepts: "<seconds>" (integer or decimal) or HTTP-date.
-export function parseRetryAfter(value: string | null, nowMs: number = Date.now()): number | null {
+// Optional capMs clamps the result to a maximum wait.
+export function parseRetryAfter(
+  value: string | null,
+  nowMs: number = Date.now(),
+  capMs?: number,
+): number | null {
   if (!value) return null;
   const trimmed = value.trim();
   if (!trimmed) return null;
   const n = Number(trimmed);
-  if (Number.isFinite(n) && n >= 0) return Math.round(n * 1000);
-  const t = Date.parse(trimmed);
-  if (Number.isFinite(t)) return Math.max(0, t - nowMs);
-  return null;
+  let ms: number | null = null;
+  if (Number.isFinite(n) && n >= 0) {
+    ms = Math.round(n * 1000);
+  } else {
+    const t = Date.parse(trimmed);
+    if (Number.isFinite(t)) ms = Math.max(0, t - nowMs);
+  }
+  if (ms === null) return null;
+  return capMs !== undefined ? Math.min(ms, capMs) : ms;
 }
 
 function isNetworkError(err: unknown): boolean {
@@ -121,6 +133,7 @@ export async function retryFetch(
 ): Promise<Response> {
   const maxAttempts = opts.maxAttempts ?? MAX_ATTEMPTS;
   const label = opts.label ?? 'openrouter';
+  const maxRetryAfterMs = opts.maxRetryAfterMs;
   const log = opts.logger ?? ((rec) => {
     console.log(
       `[public-agent] ${label} retry attempt=${rec.attempt}/${maxAttempts} reason=${rec.reason}` +
@@ -150,7 +163,7 @@ export async function retryFetch(
           body,
         );
       }
-      const retryAfter = parseRetryAfter(clone.headers.get('retry-after'));
+      const retryAfter = parseRetryAfter(clone.headers.get('retry-after'), Date.now(), maxRetryAfterMs);
       const waitMs = retryAfter !== null ? retryAfter : backoffDelay(attempt);
       log({ attempt, reason: verdict.reason, statusCode: res.status, waitMs });
       await sleep(waitMs);
@@ -168,6 +181,6 @@ export async function retryFetch(
   throw lastErr instanceof Error ? lastErr : new Error(`retry exhausted: ${String(lastErr)}`);
 }
 
-function sleep(ms: number): Promise<void> {
+export function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
