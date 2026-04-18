@@ -15,10 +15,20 @@ export class SqliteAdapter implements DbAdapter {
     this.db.pragma('synchronous = NORMAL');
   }
 
-  async query<T = unknown>(sql: string, params: unknown[] = []): Promise<QueryResult<T>> {
-    const stmt = this.db.prepare(sql);
+  /**
+   * Normalise Postgres-style positional params ($1, $2, …) to SQLite-style (?)
+   * so that the same SQL can be used across both adapters.
+   * Named params that are NOT numeric (e.g. $name) are left untouched.
+   */
+  private normaliseSql(sql: string): string {
+    return sql.replace(/\$(\d+)/g, '?');
+  }
 
-    if (/^\s*(SELECT|WITH)\b/i.test(sql) || /\bRETURNING\b/i.test(sql)) {
+  async query<T = unknown>(sql: string, params: unknown[] = []): Promise<QueryResult<T>> {
+    const normSql = this.normaliseSql(sql);
+    const stmt = this.db.prepare(normSql);
+
+    if (/^\s*(SELECT|WITH)\b/i.test(normSql) || /\bRETURNING\b/i.test(normSql)) {
       const rows = stmt.all(...params) as T[];
       return { rows, rowCount: rows.length };
     }
