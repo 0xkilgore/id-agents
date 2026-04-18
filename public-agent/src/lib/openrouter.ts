@@ -1,5 +1,6 @@
 import type { Env } from '../env.js';
 import { mainSystemPrompt } from './prompts.js';
+import { retryFetch, HttpRetryError } from './retry.js';
 
 export interface OpenRouterResult {
   reply: string;
@@ -64,21 +65,25 @@ async function call(
   if (opts.toolChoice !== undefined) body.tool_choice = opts.toolChoice;
   if (typeof opts.temperature === 'number') body.temperature = opts.temperature;
 
-  const resp = await fetch(ENDPOINT, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${env.openRouterApiKey}`,
-      'HTTP-Referer': 'https://github.com/idchain-world/id-agents',
-      'X-Title': env.agentName,
-    },
-    body: JSON.stringify(body),
+  const resp = await retryFetch(
+    () =>
+      fetch(ENDPOINT, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${env.openRouterApiKey}`,
+          'HTTP-Referer': 'https://github.com/idchain-world/id-agents',
+          'X-Title': env.agentName,
+        },
+        body: JSON.stringify(body),
+      }),
+    { label: `openrouter model=${model}` },
+  ).catch((err: unknown) => {
+    if (err instanceof HttpRetryError) {
+      throw new Error(`openrouter http ${err.status}: ${err.body.slice(0, 500)}`);
+    }
+    throw err;
   });
-
-  if (!resp.ok) {
-    const text = await resp.text().catch(() => '');
-    throw new Error(`openrouter http ${resp.status}: ${text.slice(0, 500)}`);
-  }
 
   const data = (await resp.json()) as {
     choices?: Array<{
