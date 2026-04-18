@@ -1,4 +1,5 @@
 import type { Env } from '../env.js';
+import { mainSystemPrompt } from './prompts.js';
 
 export interface OpenRouterResult {
   reply: string;
@@ -7,38 +8,61 @@ export interface OpenRouterResult {
 }
 
 export interface ChatMessage {
-  role: 'system' | 'user' | 'assistant';
+  role: 'system' | 'user' | 'assistant' | 'tool';
   content: string;
+  name?: string;
+  tool_call_id?: string;
+  tool_calls?: Array<{
+    id: string;
+    type: 'function';
+    function: { name: string; arguments: string };
+  }>;
+}
+
+export interface ToolDefinition {
+  type: 'function';
+  function: {
+    name: string;
+    description: string;
+    parameters: Record<string, unknown>;
+  };
+}
+
+export interface CallOptions {
+  model?: string;
+  maxTokens?: number;
+  responseFormat?: Record<string, unknown>;
+  tools?: ToolDefinition[];
+  toolChoice?: 'auto' | 'none' | { type: 'function'; function: { name: string } };
+  temperature?: number;
+}
+
+export interface RawAssistantMessage {
+  content: string;
+  tool_calls?: Array<{
+    id: string;
+    type: 'function';
+    function: { name: string; arguments: string };
+  }>;
+  model: string;
+  usage: { prompt: number; completion: number; total: number };
+  finishReason: string | null;
 }
 
 const ENDPOINT = 'https://openrouter.ai/api/v1/chat/completions';
 
-function systemPrompt(env: Env): ChatMessage {
-  return {
-    role: 'system',
-    content:
-      `You are ${env.agentName}, a lightweight public-facing assistant. ` +
-      'Respond concisely. You cannot take actions outside of replying to this message. ' +
-      'Do not claim access to the user\'s files, network, or other agents.',
-  };
-}
-
-// Always prepend our own system prompt. If the caller supplied messages
-// that also start with a `system` turn, the caller's system is appended
-// after ours — two system messages are accepted by OpenRouter and keeps
-// the public-agent guardrails non-bypassable from the client.
-function assembleMessages(env: Env, userMessages: ChatMessage[]): ChatMessage[] {
-  return [systemPrompt(env), ...userMessages];
-}
-
-async function call(env: Env, messages: ChatMessage[], opts: { maxTokens?: number }): Promise<OpenRouterResult> {
-  const body: Record<string, unknown> = {
-    model: env.openRouterModel,
-    messages,
-  };
-  if (opts.maxTokens && opts.maxTokens > 0) {
-    body.max_tokens = opts.maxTokens;
-  }
+async function call(
+  env: Env,
+  messages: ChatMessage[],
+  opts: CallOptions,
+): Promise<RawAssistantMessage> {
+  const model = opts.model ?? env.openRouterModel;
+  const body: Record<string, unknown> = { model, messages };
+  if (opts.maxTokens && opts.maxTokens > 0) body.max_tokens = opts.maxTokens;
+  if (opts.responseFormat) body.response_format = opts.responseFormat;
+  if (opts.tools && opts.tools.length > 0) body.tools = opts.tools;
+  if (opts.toolChoice !== undefined) body.tool_choice = opts.toolChoice;
+  if (typeof opts.temperature === 'number') body.temperature = opts.temperature;
 
   const resp = await fetch(ENDPOINT, {
     method: 'POST',
@@ -57,31 +81,62 @@ async function call(env: Env, messages: ChatMessage[], opts: { maxTokens?: numbe
   }
 
   const data = (await resp.json()) as {
-    choices?: Array<{ message?: { content?: string } }>;
+    choices?: Array<{
+      message?: {
+        content?: string | null;
+        tool_calls?: Array<{
+          id: string;
+          type: 'function';
+          function: { name: string; arguments: string };
+        }>;
+      };
+      finish_reason?: string | null;
+    }>;
     usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number };
     model?: string;
   };
 
-  const reply = data.choices?.[0]?.message?.content ?? '';
-  if (!reply) {
+  const choice = data.choices?.[0];
+  const message = choice?.message ?? {};
+  const content = typeof message.content === 'string' ? message.content : '';
+  const tool_calls = Array.isArray(message.tool_calls) ? message.tool_calls : undefined;
+
+  if (!content && (!tool_calls || tool_calls.length === 0)) {
     throw new Error('openrouter returned empty completion');
   }
 
   return {
-    reply,
-    model: data.model ?? env.openRouterModel,
+    content,
+    tool_calls,
+    model: data.model ?? model,
     usage: {
       prompt: data.usage?.prompt_tokens ?? 0,
       completion: data.usage?.completion_tokens ?? 0,
       total: data.usage?.total_tokens ?? 0,
     },
+    finishReason: choice?.finish_reason ?? null,
   };
 }
 
+// Public chat: always prepends the main-LLM XML-sectioned system prompt.
+// Supplied messages are appended after ours. Two system turns in the array
+// stack (ours first), keeping the public-agent guardrails non-bypassable.
 export async function openRouterChatMessages(
   env: Env,
   messages: ChatMessage[],
-  opts: { maxTokens?: number } = {},
+  opts: CallOptions = {},
 ): Promise<OpenRouterResult> {
-  return call(env, assembleMessages(env, messages), opts);
+  const raw = await call(env, [mainSystemPrompt(env), ...messages], opts);
+  return { reply: raw.content, model: raw.model, usage: raw.usage };
+}
+
+// Raw call for the tool-call loop + classifier: caller owns the full message
+// list (system turn, tool turns, etc.) and gets the raw assistant message
+// including tool_calls. No implicit system prompt is prepended.
+export async function openRouterRawCall(
+  env: Env,
+  messages: ChatMessage[],
+  opts: CallOptions = {},
+): Promise<RawAssistantMessage> {
+  return call(env, messages, opts);
 }

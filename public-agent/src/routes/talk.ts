@@ -1,20 +1,115 @@
 import { Hono, type Context } from 'hono';
 import { getConnInfo } from '@hono/node-server/conninfo';
+import { z } from 'zod';
 import type { Env } from '../env.js';
-import { openRouterChatMessages } from '../lib/openrouter.js';
+import { openRouterChatMessages, type ChatMessage } from '../lib/openrouter.js';
 import { writeInboxEntry, makeInboxId, type InboxEntry } from '../lib/inbox.js';
 import { requireAuth } from '../lib/auth.js';
 import { clientIp, tokenBucket } from '../lib/rate-limit.js';
 import { isOverBudget, reserveTokens, reconcileTokens } from '../lib/budget.js';
-import { createSessionStore } from '../lib/sessions.js';
+import { createSessionStore, type Session } from '../lib/sessions.js';
+import { classifyMessage, type GuardVerdict } from '../lib/guard.js';
+import { REFUSAL_REPLY, UNDER_REVIEW_REPLY } from '../lib/prompts.js';
+
+// The server-minted session_id is a UUID v4. Clients echo it back verbatim.
+// Reject anything that isn't shaped like one so a garbage id can't cause
+// weird lookups downstream.
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+function buildTalkSchema(env: Env) {
+  return z
+    .object({
+      message: z.string().min(1).max(env.maxMessageChars),
+      from: z.string().max(120).optional(),
+      session_id: z
+        .string()
+        .regex(UUID_RE, 'session_id must be a UUID v4')
+        .optional(),
+    })
+    .strict();
+}
+
+type TalkInput = z.infer<ReturnType<typeof buildTalkSchema>>;
+
+function sanitizeFrom(from: string | undefined): string | null {
+  if (typeof from !== 'string') return null;
+  const trimmed = from.trim();
+  return trimmed ? trimmed.slice(0, 120) : null;
+}
+
+async function runGuardOrFail(
+  env: Env,
+  message: string,
+): Promise<
+  | { ok: true; verdict: GuardVerdict; usage: { prompt: number; completion: number; total: number }; model: string }
+  | { ok: false; response: { status: number; body: Record<string, unknown> } }
+> {
+  try {
+    const result = await classifyMessage(env, message);
+    return { ok: true, verdict: result.verdict, usage: result.usage, model: result.model };
+  } catch (err) {
+    console.error('[public-agent] /talk guard failed (fail-closed):', err);
+    return {
+      ok: false,
+      response: {
+        status: 503,
+        body: {
+          error: 'guard_unavailable',
+          detail: 'Safety classifier unavailable; request refused.',
+        },
+      },
+    };
+  }
+}
+
+function writeGuardedInbox(
+  env: Env,
+  params: {
+    id: string;
+    ip: string;
+    from: string | null;
+    message: string;
+    reply: string;
+    model: string;
+    usage: { prompt: number; completion: number; total: number };
+    session: Session;
+    verdict: GuardVerdict;
+    guardModel: string;
+    priority: 'normal' | 'review';
+  },
+): void {
+  const entry: InboxEntry = {
+    id: params.id,
+    received_at: new Date().toISOString(),
+    from: params.from,
+    ip: params.ip,
+    message: params.message,
+    reply: params.reply,
+    model: params.model,
+    tokens_used: params.usage,
+    status: 'unread',
+    session_id: params.session.id,
+    guard: {
+      classification: params.verdict.classification,
+      violation_type: params.verdict.violation_type,
+      cwe_codes: params.verdict.cwe_codes,
+      reasoning: params.verdict.reasoning,
+      model: params.guardModel,
+    },
+    priority: params.priority,
+  };
+  try {
+    writeInboxEntry(env, entry);
+  } catch (err) {
+    console.error('[public-agent] /talk inbox write failed:', err);
+  }
+}
 
 export function talkRoutes(env: Env): Hono {
   const app = new Hono();
   const sessions = createSessionStore(env);
+  const talkSchema = buildTalkSchema(env);
 
-  // One IP resolver for the whole route — the rate-limiter and the inbox
-  // writer must agree on who "this client" is. If trustedProxy=false and no
-  // socket IP is available, the resolver returns null and we bail 400.
   const resolve = (c: Context) => clientIp(c, getConnInfo, env.trustedProxy);
   const limiter = tokenBucket(env.talkRateLimitPerMin, (c) => {
     const ip = resolve(c);
@@ -44,31 +139,36 @@ export function talkRoutes(env: Env): Hono {
       );
     }
 
-    let body: { message?: unknown; from?: unknown; session_id?: unknown };
+    let rawBody: unknown;
     try {
-      body = (await c.req.json()) as typeof body;
+      rawBody = await c.req.json();
     } catch {
       return c.json({ error: 'invalid_json' }, 400);
     }
 
-    const message = typeof body.message === 'string' ? body.message.trim() : '';
-    if (!message) {
+    const parsed = talkSchema.safeParse(rawBody);
+    if (!parsed.success) {
+      const issue = parsed.error.issues[0];
       return c.json(
-        { error: 'missing_message', detail: 'body.message (string) is required' },
+        {
+          error: 'invalid_body',
+          detail: issue ? `${issue.path.join('.') || '(root)'}: ${issue.message}` : 'body failed validation',
+        },
         400,
       );
     }
+    const body: TalkInput = parsed.data;
 
-    const from = typeof body.from === 'string' && body.from.trim() ? body.from.trim() : null;
-    const requestedSessionId =
-      typeof body.session_id === 'string' && body.session_id.trim() ? body.session_id.trim() : null;
+    const message = body.message.trim();
+    if (!message) {
+      return c.json({ error: 'missing_message', detail: 'body.message must be non-empty' }, 400);
+    }
+
+    const from = sanitizeFrom(body.from);
+    const requestedSessionId = body.session_id ?? null;
 
     const { session } = sessions.getOrCreate(requestedSessionId);
 
-    // Enforce the per-session turn cap BEFORE appending the user turn so the
-    // client can rotate to a new session cleanly. The check happens after
-    // getOrCreate so a stale session_id that evicted doesn't count against
-    // the caller's fresh session.
     if (session.turnCount >= env.maxTurnsPerSession) {
       return c.json(
         {
@@ -81,21 +181,86 @@ export function talkRoutes(env: Env): Hono {
       );
     }
 
+    // Reserve tokens for the classifier call first. Fail closed if the
+    // reservation bookkeeping itself fails (disk error etc.).
+    const guardCap = Math.max(0, env.maxGuardTokens);
+    if (guardCap > 0) {
+      try {
+        reserveTokens(env, guardCap);
+      } catch (err) {
+        console.error('[public-agent] /talk guard reserve failed:', err);
+        return c.json({ error: 'budget_error', detail: 'Budget bookkeeping failed.' }, 503);
+      }
+    }
+
+    const guardOutcome = await runGuardOrFail(env, message);
+    if (!guardOutcome.ok) {
+      if (guardCap > 0) {
+        try { reconcileTokens(env, guardCap, 0); } catch (e) { console.error('[public-agent] guard budget reconcile failed:', e); }
+      }
+      return c.json(guardOutcome.response.body, guardOutcome.response.status as 503);
+    }
+    const verdict = guardOutcome.verdict;
+    const guardUsage = guardOutcome.usage;
+    const guardModel = guardOutcome.model;
+    if (guardCap > 0) {
+      try { reconcileTokens(env, guardCap, guardUsage.total); } catch (e) { console.error('[public-agent] guard budget reconcile failed:', e); }
+    }
+
     sessions.append(session.id, 'user', message);
-    const outgoingMessages = session.messages.slice();
+    const inboxId = makeInboxId();
 
-    const id = makeInboxId();
+    // Short-circuit on refuse/review: return a canned reply without running
+    // the main LLM. The user turn is still counted toward the session cap
+    // and the interaction is logged for review.
+    if (verdict.classification === 'refuse' || verdict.classification === 'review') {
+      const reply = verdict.classification === 'refuse' ? REFUSAL_REPLY : UNDER_REVIEW_REPLY;
+      sessions.append(session.id, 'assistant', reply);
+      writeGuardedInbox(env, {
+        id: inboxId,
+        ip,
+        from,
+        message,
+        reply,
+        model: guardModel,
+        usage: guardUsage,
+        session,
+        verdict,
+        guardModel,
+        priority: verdict.classification === 'review' ? 'review' : 'normal',
+      });
+      return c.json({
+        reply,
+        model: guardModel,
+        inbox_id: inboxId,
+        tokens_used: guardUsage,
+        session_id: session.id,
+        guard: {
+          classification: verdict.classification,
+          violation_type: verdict.violation_type,
+        },
+      });
+    }
 
-    const cap = Number.isFinite(budget.remaining)
-      ? Math.min(env.maxReplyTokens, budget.remaining)
+    // Classifier said allow — run the main LLM.
+    const outgoingMessages: ChatMessage[] = session.messages.slice();
+    const postGuardBudget = isOverBudget(env);
+    if (postGuardBudget.over) {
+      return c.json(
+        { error: 'budget_exceeded', used: postGuardBudget.used, limit: env.maxTokensPerDay, resets_at: postGuardBudget.resets_at },
+        503,
+      );
+    }
+
+    const cap = Number.isFinite(postGuardBudget.remaining)
+      ? Math.min(env.maxReplyTokens, postGuardBudget.remaining)
       : env.maxReplyTokens;
-
     const reserved = Math.max(0, cap);
     if (reserved > 0) {
       try {
         reserveTokens(env, reserved);
       } catch (err) {
-        console.error('[public-agent] /talk budget reserve failed:', err);
+        console.error('[public-agent] /talk reply reserve failed:', err);
       }
     }
 
@@ -109,48 +274,45 @@ export function talkRoutes(env: Env): Hono {
       usage = result.usage;
     } catch (err) {
       if (reserved > 0) {
-        try {
-          reconcileTokens(env, reserved, 0);
-        } catch (reconcileErr) {
-          console.error('[public-agent] /talk budget reconcile (on error) failed:', reconcileErr);
-        }
+        try { reconcileTokens(env, reserved, 0); } catch (e) { console.error('[public-agent] reply budget reconcile (err) failed:', e); }
       }
       console.error('[public-agent] /talk openrouter error:', err);
       return c.json({ error: 'upstream_error', detail: (err as Error).message }, 502);
     }
-
-    try {
-      reconcileTokens(env, reserved, usage.total);
-    } catch (err) {
-      console.error('[public-agent] /talk budget reconcile failed:', err);
+    if (reserved > 0) {
+      try { reconcileTokens(env, reserved, usage.total); } catch (e) { console.error('[public-agent] reply budget reconcile failed:', e); }
     }
 
     sessions.append(session.id, 'assistant', reply);
-
-    const entry: InboxEntry = {
-      id,
-      received_at: new Date().toISOString(),
-      from,
+    const combinedUsage = {
+      prompt: guardUsage.prompt + usage.prompt,
+      completion: guardUsage.completion + usage.completion,
+      total: guardUsage.total + usage.total,
+    };
+    writeGuardedInbox(env, {
+      id: inboxId,
       ip,
+      from,
       message,
       reply,
       model,
-      tokens_used: usage,
-      status: 'unread',
-      session_id: session.id,
-    };
-    try {
-      writeInboxEntry(env, entry);
-    } catch (err) {
-      console.error('[public-agent] /talk inbox write failed:', err);
-    }
+      usage: combinedUsage,
+      session,
+      verdict,
+      guardModel,
+      priority: 'normal',
+    });
 
     return c.json({
       reply,
       model,
-      inbox_id: id,
-      tokens_used: usage,
+      inbox_id: inboxId,
+      tokens_used: combinedUsage,
       session_id: session.id,
+      guard: {
+        classification: verdict.classification,
+        violation_type: verdict.violation_type,
+      },
     });
   });
 

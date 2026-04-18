@@ -25,6 +25,14 @@ export interface InboxEntry {
   status: 'unread' | 'archived';
   archived_at?: string;
   session_id?: string | null;  // server-minted; groups turns of one conversation
+  guard?: {
+    classification: 'allow' | 'refuse' | 'review';
+    violation_type: string;
+    cwe_codes: string[];
+    reasoning: string;
+    model: string;
+  };
+  priority?: 'normal' | 'review';
 }
 
 function inboxDir(env: Env): string {
