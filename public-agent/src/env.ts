@@ -4,6 +4,7 @@ export interface Env {
   port: number;
   agentName: string;
   authKey: string | null;
+  allowPublicUnauthenticated: boolean;
   maxTokensPerDay: number;
   talkRateLimitPerMin: number;
   dataDir: string;
@@ -16,6 +17,9 @@ export interface Env {
   maxGuardTokens: number;
   maxMessageChars: number;
   knowledgeDir: string;
+  upstreamDeadlineMs: number;
+  maxRetryAfterMs: number;
+  requestDeadlineMs: number;
 }
 
 function required(name: string, value: string | undefined): string {
@@ -41,6 +45,7 @@ export function loadEnv(): Env {
     port: intOr('PUBLIC_AGENT_PORT', process.env.PUBLIC_AGENT_PORT, 4200),
     agentName: process.env.PUBLIC_AGENT_NAME?.trim() || 'public-agent',
     authKey: process.env.PUBLIC_AGENT_AUTH_KEY?.trim() || null,
+    allowPublicUnauthenticated: process.env.ALLOW_PUBLIC_UNAUTHENTICATED === 'true',
     maxTokensPerDay: intOr('MAX_TOKENS_PER_DAY', process.env.MAX_TOKENS_PER_DAY, 0),
     talkRateLimitPerMin: intOr('TALK_RATE_LIMIT_PER_MIN', process.env.TALK_RATE_LIMIT_PER_MIN, 10),
     dataDir: process.env.PUBLIC_AGENT_DATA_DIR?.trim() || '/app/data',
@@ -53,5 +58,8 @@ export function loadEnv(): Env {
     maxGuardTokens: intOr('MAX_GUARD_TOKENS', process.env.MAX_GUARD_TOKENS, 256),
     maxMessageChars: intOr('MAX_MESSAGE_CHARS', process.env.MAX_MESSAGE_CHARS, 8000),
     knowledgeDir: process.env.PUBLIC_AGENT_KNOWLEDGE_DIR?.trim() || '/app/knowledge',
+    upstreamDeadlineMs: intOr('UPSTREAM_DEADLINE_MS', process.env.UPSTREAM_DEADLINE_MS, 45000),
+    maxRetryAfterMs: intOr('MAX_RETRY_AFTER_MS', process.env.MAX_RETRY_AFTER_MS, 10000),
+    requestDeadlineMs: intOr('REQUEST_DEADLINE_MS', process.env.REQUEST_DEADLINE_MS, 60000),
   };
 }

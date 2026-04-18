@@ -63,6 +63,18 @@ app.route('/', mcpRoutes(env));
 
 app.all('*', (c) => c.json({ error: 'not_found', path: c.req.path }, 404));
 
+// Emit the dev-mode warning early if auth key is absent and the escape hatch is on.
+if (!env.authKey && env.allowPublicUnauthenticated) {
+  process.stderr.write(
+    '[public-agent] WARNING: ALLOW_PUBLIC_UNAUTHENTICATED=true — operator endpoints are open. Do not use in production.\n',
+  );
+}
+
 serve({ fetch: app.fetch, port: env.port, hostname: '0.0.0.0' }, (info) => {
-  console.log(`[public-agent] ${env.agentName} listening on :${info.port} (model=${env.openRouterModel}, auth=${env.authKey ? 'keyed' : 'open'})`);
+  const authStatus = env.authKey
+    ? 'keyed'
+    : env.allowPublicUnauthenticated
+      ? 'open-dev'
+      : 'closed';
+  console.log(`[public-agent] ${env.agentName} listening on :${info.port} (model=${env.openRouterModel}, auth=${authStatus})`);
 });

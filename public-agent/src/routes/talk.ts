@@ -2,9 +2,9 @@ import { Hono, type Context } from 'hono';
 import { getConnInfo } from '@hono/node-server/conninfo';
 import { z } from 'zod';
 import type { Env } from '../env.js';
-import { openRouterRawCall, type ChatMessage, type RawAssistantMessage } from '../lib/openrouter.js';
+import { openRouterRawCall, UpstreamError, type ChatMessage, type RawAssistantMessage } from '../lib/openrouter.js';
 import { writeInboxEntry, makeInboxId, type InboxEntry } from '../lib/inbox.js';
-import { requireAuth } from '../lib/auth.js';
+import { requireAuthOrPublicTalk } from '../lib/auth.js';
 import { clientIp, tokenBucket } from '../lib/rate-limit.js';
 import { isOverBudget, reserveTokens, reconcileTokens } from '../lib/budget.js';
 import { createSessionStore, type Session } from '../lib/sessions.js';
@@ -240,18 +240,23 @@ async function runToolLoop(
 // produces a reply, if it looks like an "I don't have information"-style
 // giveup AND retrieval thresholds haven't been met, inject a nudge message
 // and run the model again. Capped at MAX_RETRIEVAL_CYCLES total passes.
+//
+// F-03: requestStart enables per-request deadline checks before each cycle.
+// F-04: budget is re-checked before each retrieval cycle.
 async function runPersistenceLoop(
   env: Env,
   knowledge: KnowledgeManifest,
   baseMessages: ChatMessage[],
   replyCap: number,
   userMessage: string,
+  requestStart: number = 0,
 ): Promise<{
   reply: string;
   model: string;
   usage: { prompt: number; completion: number; total: number };
   toolLogs: ToolCallLog[];
   trace: RetrievalCycleTrace[];
+  stoppedAt?: 'budget_exhausted' | 'deadline_exceeded';
 }> {
   let messages: ChatMessage[] = baseMessages.slice();
   const state = makeRetrievalState();
@@ -260,8 +265,31 @@ async function runPersistenceLoop(
   let combinedUsage = { prompt: 0, completion: 0, total: 0 };
   let model = env.openRouterModel;
   let reply = '';
+  let stoppedAt: 'budget_exhausted' | 'deadline_exceeded' | undefined;
 
   for (let cycle = 1; cycle <= MAX_RETRIEVAL_CYCLES; cycle++) {
+    // F-03: check per-request deadline before each cycle.
+    if (requestStart > 0 && Date.now() - requestStart > env.requestDeadlineMs) {
+      stoppedAt = 'deadline_exceeded';
+      console.log(`[public-agent] /talk persistence-loop deadline exceeded at cycle=${cycle}`);
+      break;
+    }
+
+    // F-04: re-check budget before each retrieval cycle (cycle > 1).
+    if (cycle > 1) {
+      const midBudget = isOverBudget(env);
+      const midPromptEstimate = estimatePromptTokens(messages);
+      if (
+        midBudget.over ||
+        (Number.isFinite(midBudget.remaining) &&
+          midPromptEstimate + replyCap > midBudget.remaining)
+      ) {
+        stoppedAt = 'budget_exhausted';
+        console.log(`[public-agent] /talk persistence-loop budget exhausted at cycle=${cycle}`);
+        break;
+      }
+    }
+
     state.cycles = cycle;
     const result = await runToolLoop(env, knowledge, messages, replyCap);
     reply = result.reply;
@@ -305,7 +333,7 @@ async function runPersistenceLoop(
     );
   }
 
-  return { reply, model, usage: combinedUsage, toolLogs: allToolLogs, trace };
+  return { reply, model, usage: combinedUsage, toolLogs: allToolLogs, trace, stoppedAt };
 }
 
 function withTimeout<T>(fn: () => Promise<T>, ms: number): Promise<T> {
@@ -323,6 +351,13 @@ function withTimeout<T>(fn: () => Promise<T>, ms: number): Promise<T> {
   });
 }
 
+/** Rough prompt-token estimator: ~4 chars per token, applied to message content. */
+function estimatePromptTokens(messages: ChatMessage[]): number {
+  let chars = 0;
+  for (const m of messages) chars += m.content.length;
+  return Math.ceil(chars / 4);
+}
+
 export function talkRoutes(env: Env, knowledge: KnowledgeManifest): Hono {
   const app = new Hono();
   const sessions = createSessionStore(env);
@@ -334,7 +369,7 @@ export function talkRoutes(env: Env, knowledge: KnowledgeManifest): Hono {
     return ip ?? '__no_ip__';
   });
 
-  app.post('/talk', requireAuth(env), async (c, next) => {
+  app.post('/talk', requireAuthOrPublicTalk(env), async (c, next) => {
     const ip = resolve(c);
     if (!ip) {
       return c.json(
@@ -348,6 +383,9 @@ export function talkRoutes(env: Env, knowledge: KnowledgeManifest): Hono {
     }
     await next();
   }, limiter, async (c) => {
+    // F-03: capture wall-clock start for per-request deadline.
+    const requestStart = Date.now();
+
     const ip = resolve(c) ?? '';
     const budget = isOverBudget(env);
     if (budget.over) {
@@ -397,6 +435,11 @@ export function talkRoutes(env: Env, knowledge: KnowledgeManifest): Hono {
         },
         409,
       );
+    }
+
+    // F-03: check deadline before guard call.
+    if (Date.now() - requestStart > env.requestDeadlineMs) {
+      return c.json({ error: 'request_deadline_exceeded' }, 503, { 'Retry-After': '5' });
     }
 
     // Reserve tokens for the classifier call first. Fail closed if the
@@ -460,6 +503,11 @@ export function talkRoutes(env: Env, knowledge: KnowledgeManifest): Hono {
       });
     }
 
+    // F-03: check deadline before main LLM call.
+    if (Date.now() - requestStart > env.requestDeadlineMs) {
+      return c.json({ error: 'request_deadline_exceeded' }, 503, { 'Retry-After': '5' });
+    }
+
     // Classifier said allow — run the main LLM with the KB tool loop.
     const outgoingMessages: ChatMessage[] = [mainSystemPrompt(env), ...session.messages];
     const postGuardBudget = isOverBudget(env);
@@ -470,10 +518,26 @@ export function talkRoutes(env: Env, knowledge: KnowledgeManifest): Hono {
       );
     }
 
-    const cap = Number.isFinite(postGuardBudget.remaining)
+    // F-04: estimate prompt tokens and reserve prompt + completion budget.
+    const estimatedPromptTokens = estimatePromptTokens(outgoingMessages);
+    const completionCap = Number.isFinite(postGuardBudget.remaining)
       ? Math.min(env.maxReplyTokens, postGuardBudget.remaining)
       : env.maxReplyTokens;
-    const reserved = Math.max(0, cap);
+
+    // Check estimated prompt alone doesn't blow the budget.
+    if (
+      Number.isFinite(postGuardBudget.remaining) &&
+      estimatedPromptTokens + completionCap > postGuardBudget.remaining
+    ) {
+      return c.json(
+        { error: 'budget_exceeded', used: postGuardBudget.used, limit: env.maxTokensPerDay, resets_at: postGuardBudget.resets_at },
+        503,
+      );
+    }
+
+    const cap = completionCap;
+    // Reserve estimated prompt + completion tokens pessimistically.
+    const reserved = Math.max(0, estimatedPromptTokens + cap);
     if (reserved > 0) {
       try {
         reserveTokens(env, reserved);
@@ -488,7 +552,7 @@ export function talkRoutes(env: Env, knowledge: KnowledgeManifest): Hono {
     let toolLogs: ToolCallLog[] = [];
     let retrievalTrace: RetrievalCycleTrace[] = [];
     try {
-      const result = await runPersistenceLoop(env, knowledge, outgoingMessages, cap, message);
+      const result = await runPersistenceLoop(env, knowledge, outgoingMessages, cap, message, requestStart);
       reply = result.reply;
       model = result.model;
       usage = result.usage;
@@ -499,7 +563,17 @@ export function talkRoutes(env: Env, knowledge: KnowledgeManifest): Hono {
         try { reconcileTokens(env, reserved, 0); } catch (e) { console.error('[public-agent] reply budget reconcile (err) failed:', e); }
       }
       console.error('[public-agent] /talk openrouter error:', err);
-      return c.json({ error: 'upstream_error', detail: (err as Error).message }, 502);
+      // F-07: sanitize upstream errors — never include provider body in response.
+      if (err instanceof UpstreamError) {
+        return c.json(
+          { error: 'upstream_error', detail: 'upstream request failed', request_id: inboxId },
+          502,
+        );
+      }
+      return c.json(
+        { error: 'upstream_error', detail: 'upstream request failed', request_id: inboxId },
+        502,
+      );
     }
     if (reserved > 0) {
       try { reconcileTokens(env, reserved, usage.total); } catch (e) { console.error('[public-agent] reply budget reconcile failed:', e); }
