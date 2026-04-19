@@ -40,7 +40,8 @@ const TEST_TMP_DIR = path.resolve(__dirname, '../tmp');
 // Track agents created during tests for cleanup
 const createdAgents: string[] = [];
 
-describe('Remote Commands (/remote endpoint)', () => {
+// Opt-in: requires a running external manager + ID_CONTROL_API_KEY. Run via `npm run test:e2e`.
+describe.skipIf(!process.env.ID_CONTROL_API_KEY)('Remote Commands (/remote endpoint)', () => {
   beforeAll(async () => {
     // Wait for Manager to be healthy
     const isHealthy = await waitForManager(30000);

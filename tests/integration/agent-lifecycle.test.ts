@@ -25,7 +25,8 @@ import {
 
 const TEST_AGENT = `test-agent-${Date.now()}`;
 
-describe('Agent Lifecycle', () => {
+// Opt-in: requires a running external manager + ID_CONTROL_API_KEY. Run via `npm run test:e2e`.
+describe.skipIf(!process.env.ID_CONTROL_API_KEY)('Agent Lifecycle', () => {
   beforeAll(async () => {
     // Wait for Manager to be healthy
     const isHealthy = await waitForManager(30000);

@@ -133,7 +133,8 @@ function extractNumber(text: string): number | null {
   return null;
 }
 
-describe('Agent Capabilities Tests', () => {
+// Opt-in: requires a running external manager + ID_CONTROL_API_KEY. Run via `npm run test:e2e`.
+describe.skipIf(!process.env.ID_CONTROL_API_KEY)('Agent Capabilities Tests', () => {
   beforeAll(async () => {
     // Wait for manager
     const isHealthy = await waitForManager(30000);
