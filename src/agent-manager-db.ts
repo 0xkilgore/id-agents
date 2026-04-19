@@ -5887,6 +5887,18 @@ export class AgentManagerDb {
     }
   }
 
+  /**
+   * Local-agent health check loop.
+   *
+   * IMPORTANT: NEVER probe remote-endpoint agents here.  Remote agents
+   * (public-agent-remote runtime) are handled exclusively by runRemoteHeartbeat().
+   * Attempting to probe them from this path would hit their public internet
+   * endpoint from the wrong loop, double-count failures, and bypass the
+   * concurrency cap enforced by runRemoteHeartbeat.
+   *
+   * The isRemoteEndpointRuntime() guard below is the canonical firewall.
+   * It MUST remain the first runtime check inside the per-agent loop body.
+   */
   private async runHealthChecks(): Promise<void> {
     try {
       const teams = await this.db.teams.listTeams();
@@ -5895,7 +5907,9 @@ export class AgentManagerDb {
         for (const agent of agents) {
           // Skip virtual agents — they don't have a local /health endpoint
           if (agent.type === 'virtual') continue;
-          // Skip remote-endpoint agents — handled by runRemoteHeartbeat()
+          // GUARD: Skip remote-endpoint agents — handled exclusively by runRemoteHeartbeat().
+          // This check must come before any network I/O so remote agents can never
+          // be reached from this local-heartbeat path.
           if (isRemoteEndpointRuntime(agent.runtime)) continue;
 
           const key = this.key(team.id, agent.id);
