@@ -3,6 +3,7 @@ import { Box, Text } from 'ink';
 
 export type FooterView =
   | 'agents'
+  | 'agent-detail'
   | 'news'
   | 'news-detail'
   | 'tasks'
@@ -21,7 +22,8 @@ interface FooterProps {
 // downs (task-detail, heartbeat-detail, news, news-detail) keep the
 // back hint because they have a real parent to return to.
 const HINTS: Record<FooterView, string> = {
-  agents: '↑↓ nav · → news · Tab team · t tasks · c calendar · h heartbeats · p pause · q quit',
+  agents: '↑↓ nav · → detail/news · Tab team · t tasks · c calendar · h heartbeats · p pause · q quit',
+  'agent-detail': '↑↓ scroll · p pause · q quit · ← back',
   tasks: '↑↓ nav · → detail · Tab team · c calendar · h heartbeats · p pause · q quit · ← back',
   calendar: '↑↓ nav · a agents · t tasks · h heartbeats · p pause · q quit',
   heartbeats: '↑↓ nav · → detail · a agents · t tasks · c calendar · p pause · q quit',

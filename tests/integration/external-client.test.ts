@@ -127,7 +127,8 @@ async function directAgentRequest<T = unknown>(
   }
 }
 
-describe('External Client Communication', () => {
+// Opt-in: requires a running external manager + ID_CONTROL_API_KEY. Run via `npm run test:e2e`.
+describe.skipIf(!process.env.ID_CONTROL_API_KEY)('External Client Communication', () => {
   beforeAll(async () => {
     // 1. Ensure real manager is running
     const isHealthy = await waitForManager(30000);

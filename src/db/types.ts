@@ -28,6 +28,16 @@ export interface AgentRow {
   token_id: string | null;
   domain: string | null;
   api_key: string | null;
+  /** Remote endpoint columns — populated only for public-agent-remote runtime. */
+  customer_domain: string | null;
+  public_endpoint_url: string | null;
+  internal_endpoint_url: string | null;
+  ssh_target: string | null;
+  /** Phase 5 heartbeat probe columns. */
+  last_seen: number | null;
+  last_probed_at: number | null;
+  last_error: string | null;
+  consecutive_failures: number;
 }
 
 /** teams table row */

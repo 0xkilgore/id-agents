@@ -55,7 +55,8 @@ let agentPort: number | null = null;
 let issuedKeyId: string | null = null;
 let issuedKey: string | null = null;
 
-describe('API Key Authentication', () => {
+// Opt-in: requires a running external manager + ID_CONTROL_API_KEY. Run via `npm run test:e2e`.
+describe.skipIf(!process.env.ID_CONTROL_API_KEY)('API Key Authentication', () => {
   beforeAll(async () => {
     if (!CONTROL_API_KEY) {
       throw new Error('ID_CONTROL_API_KEY not set in environment or .env file');

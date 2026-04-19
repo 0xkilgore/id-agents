@@ -11,11 +11,13 @@ import type { HarnessType } from '../harness/types.js';
 
 export type RuntimeId = HarnessType;
 
-export type RuntimeSessionPolicy = 'persistent' | 'fresh-per-query';
+export type RuntimeSessionPolicy = 'persistent' | 'fresh-per-query' | 'remote-owned';
+
+export type DeploymentShape = 'local-process' | 'remote-endpoint';
 
 export interface RuntimeAuthConfig {
-  mode: 'api-key' | 'cli-login';
-  provider: string;
+  mode: 'api-key' | 'cli-login' | 'ssh-tunnel';
+  provider?: string;
   requiredEnv?: string[];
 }
 
@@ -32,6 +34,7 @@ export interface RuntimeProfile {
   providerName: string;
   defaultModel: string;
   sessionPolicy: RuntimeSessionPolicy;
+  deploymentShape: DeploymentShape;
   auth: RuntimeAuthConfig;
   capabilities: RuntimeCapabilities;
 }

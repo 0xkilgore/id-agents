@@ -47,6 +47,14 @@ export class SqliteTasksRepo implements TasksRepository {
     return rows[0] || null;
   }
 
+  async getByNameForTeam(name: string, teamId: string): Promise<TaskRow | null> {
+    const { rows } = await this.db.query<TaskRow>(
+      `SELECT * FROM tasks WHERE name = ? AND team_id = ?`,
+      [name, teamId],
+    );
+    return rows[0] || null;
+  }
+
   async getByUuidPrefix(prefix: string): Promise<TaskRow[]> {
     const { rows } = await this.db.query<TaskRow>(
       `SELECT * FROM tasks WHERE uuid LIKE ? ORDER BY updated_at DESC`,

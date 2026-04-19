@@ -254,8 +254,9 @@ export class SqliteAgentsRepo implements AgentsRepository {
     await this.db.query(
       `INSERT INTO agents
          (team_id, id, name, type, model, port, endpoint, working_directory,
-          status, created_at, metadata, registry, runtime, token_id, domain, api_key)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          status, created_at, metadata, registry, runtime, token_id, domain, api_key,
+          customer_domain, public_endpoint_url, internal_endpoint_url, ssh_target)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         agent.team_id,
         agent.id,
@@ -273,6 +274,10 @@ export class SqliteAgentsRepo implements AgentsRepository {
         agent.token_id ?? null,
         agent.domain ?? null,
         agent.api_key ?? null,
+        agent.customer_domain ?? null,
+        agent.public_endpoint_url ?? null,
+        agent.internal_endpoint_url ?? null,
+        agent.ssh_target ?? null,
       ],
     );
   }
@@ -283,17 +288,18 @@ export class SqliteAgentsRepo implements AgentsRepository {
     await this.db.query(
       `INSERT INTO agents
          (team_id, id, name, type, model, port, endpoint, working_directory,
-          status, created_at, metadata, registry, runtime, token_id, domain, api_key)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          status, created_at, metadata, registry, runtime, token_id, domain, api_key,
+          customer_domain, public_endpoint_url, internal_endpoint_url, ssh_target)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT (id) DO UPDATE SET
-         name       = excluded.name,
-         type       = COALESCE(excluded.type, agents.type),
-         endpoint   = COALESCE(excluded.endpoint, agents.endpoint),
-         status     = COALESCE(excluded.status, agents.status),
-         metadata   = excluded.metadata,
-         token_id   = COALESCE(excluded.token_id, agents.token_id),
-         domain     = COALESCE(excluded.domain, agents.domain),
-         deleted_at = NULL`,
+         name                 = excluded.name,
+         type                 = COALESCE(excluded.type, agents.type),
+         endpoint             = COALESCE(excluded.endpoint, agents.endpoint),
+         status               = COALESCE(excluded.status, agents.status),
+         metadata             = excluded.metadata,
+         token_id             = COALESCE(excluded.token_id, agents.token_id),
+         domain               = COALESCE(excluded.domain, agents.domain),
+         deleted_at           = NULL`,
       [
         agent.team_id,
         agent.id,
@@ -311,6 +317,10 @@ export class SqliteAgentsRepo implements AgentsRepository {
         agent.token_id ?? null,
         agent.domain ?? null,
         agent.api_key ?? null,
+        agent.customer_domain ?? null,
+        agent.public_endpoint_url ?? null,
+        agent.internal_endpoint_url ?? null,
+        agent.ssh_target ?? null,
       ],
     );
   }
@@ -425,6 +435,34 @@ export class SqliteAgentsRepo implements AgentsRepository {
     await this.db.query(
       `DELETE FROM agents WHERE id = ?`,
       [agentId],
+    );
+  }
+
+  async updateProbeResult(
+    agentId: string,
+    fields: {
+      last_seen?: number | null;
+      last_probed_at: number;
+      last_error?: string | null;
+      consecutive_failures: number;
+    },
+  ): Promise<void> {
+    const sets: string[] = ['last_probed_at = ?', 'consecutive_failures = ?'];
+    const params: unknown[] = [fields.last_probed_at, fields.consecutive_failures];
+
+    if ('last_seen' in fields) {
+      sets.push('last_seen = ?');
+      params.push(fields.last_seen ?? null);
+    }
+    if ('last_error' in fields) {
+      sets.push('last_error = ?');
+      params.push(fields.last_error ?? null);
+    }
+
+    params.push(agentId);
+    await this.db.query(
+      `UPDATE agents SET ${sets.join(', ')} WHERE id = ?`,
+      params,
     );
   }
 }

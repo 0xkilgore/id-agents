@@ -21,6 +21,7 @@ const PROFILES: Record<RuntimeId, RuntimeProfile> = {
     providerName: 'Claude Agent SDK',
     defaultModel: 'claude-haiku-4-5-20251001',
     sessionPolicy: 'persistent',
+    deploymentShape: 'local-process',
     auth: {
       mode: 'api-key',
       provider: 'Anthropic',
@@ -39,6 +40,7 @@ const PROFILES: Record<RuntimeId, RuntimeProfile> = {
     providerName: 'Claude Code CLI',
     defaultModel: 'claude-opus-4-20250514',
     sessionPolicy: 'persistent',
+    deploymentShape: 'local-process',
     auth: {
       mode: 'cli-login',
       provider: 'Anthropic',
@@ -56,6 +58,7 @@ const PROFILES: Record<RuntimeId, RuntimeProfile> = {
     providerName: 'Claude Code CLI',
     defaultModel: 'claude-opus-4-20250514',
     sessionPolicy: 'persistent',
+    deploymentShape: 'local-process',
     auth: {
       mode: 'cli-login',
       provider: 'Anthropic',
@@ -73,6 +76,7 @@ const PROFILES: Record<RuntimeId, RuntimeProfile> = {
     providerName: 'Codex CLI',
     defaultModel: 'gpt-5.4',
     sessionPolicy: 'fresh-per-query',
+    deploymentShape: 'local-process',
     auth: {
       mode: 'cli-login',
       provider: 'OpenAI',
@@ -81,6 +85,23 @@ const PROFILES: Record<RuntimeId, RuntimeProfile> = {
       supportsResume: false,
       supportsPlugins: true,
       supportsAllowedTools: true,
+    },
+  },
+  'public-agent-remote': {
+    id: 'public-agent-remote',
+    canonicalId: 'public-agent-remote',
+    displayName: 'Public Agent (Remote)',
+    providerName: 'Public Agent (Remote)',
+    defaultModel: 'unknown',
+    sessionPolicy: 'remote-owned',
+    deploymentShape: 'remote-endpoint',
+    auth: {
+      mode: 'ssh-tunnel',
+    },
+    capabilities: {
+      supportsResume: false,
+      supportsPlugins: false,
+      supportsAllowedTools: false,
     },
   },
 };
@@ -107,7 +128,7 @@ export function getRuntimeProviderName(runtime: HarnessType | string | undefined
 }
 
 export function getRuntimeAuthProvider(runtime: HarnessType | string | undefined): string {
-  return getRuntimeProfile(runtime).auth.provider;
+  return getRuntimeProfile(runtime).auth.provider ?? '';
 }
 
 export function getDefaultModelForRuntime(
@@ -171,6 +192,21 @@ export function getAvailableRuntimes(): RuntimeId[] {
 
 export function isRuntimeId(runtime: string | undefined): runtime is RuntimeId {
   return !!runtime && runtime in PROFILES;
+}
+
+/**
+ * Returns true only for runtimes whose deployment shape is 'remote-endpoint'.
+ *
+ * Use this single gate in spawners, launchers, lifecycle endpoints, and log-tailers
+ * to short-circuit all local-process logic for remote-endpoint runtimes.
+ *
+ * Currently the only remote-endpoint runtime is 'public-agent-remote'. Additional
+ * remote-endpoint runtimes added in the future will be detected automatically via
+ * the profile's deploymentShape field.
+ */
+export function isRemoteEndpointRuntime(runtime: string | undefined): boolean {
+  if (!runtime || !(runtime in PROFILES)) return false;
+  return PROFILES[runtime as RuntimeId].deploymentShape === 'remote-endpoint';
 }
 
 function classifyModelFamily(model: string | undefined): 'claude' | 'openai' | 'unknown' {

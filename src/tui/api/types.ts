@@ -21,6 +21,18 @@ export interface Agent {
   lastHealthCheck?: number;
   metadata?: AgentMetadata;
   teamName?: string;
+  // Remote-endpoint fields (public-agent-remote runtime)
+  deploymentShape?: 'local-process' | 'remote-endpoint';
+  pid?: number | null;
+  customer_domain?: string | null;
+  public_endpoint_url?: string | null;
+  ows_wallet?: string | null;
+  idchain_domain?: string | null;
+  ssh_target?: string | null;
+  last_seen?: number | null;
+  last_probed_at?: number | null;
+  last_error?: string | null;
+  consecutive_failures?: number;
 }
 
 export interface Team {

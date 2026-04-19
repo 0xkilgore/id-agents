@@ -23,6 +23,8 @@ import { privateKeyToAccount } from 'viem/accounts';
 import yaml from 'js-yaml';
 import { AgentRestServer } from './agent-rest-server.js';
 import { registerOnIdChain, createSubnameOnIdChain, setMultiChainAddresses } from './onchain/idchain-register.js';
+import { defaultDeliverFn, redactSshTarget, type DeliverFn } from './lib/ssh-deliver.js';
+import { probeRemoteAgent, defaultHealthProbeFn, type HealthProbeFn } from './lib/remote-heartbeat.js';
 import { type Db } from './db/db-service.js';
 import type { AgentRow, ScheduleDefinitionRow, TaskRow } from './db/types.js';
 import fetch from 'node-fetch';
@@ -40,6 +42,7 @@ import {
   getDefaultModelForRuntime,
   getDefaultRuntime,
   getRuntimePaths,
+  isRemoteEndpointRuntime,
   isRuntimeId,
   resolveRuntime,
   runtimeIssueHint,
@@ -201,6 +204,7 @@ export class AgentManagerDb {
   private queryWaiters: Map<string, QueryWaiter> = new Map(); // key: query_id
   private healthStatus: Map<string, { status: 'online' | 'offline' | 'unknown'; lastCheck: number }> = new Map(); // key: `${teamId}:${agentId}`
   private healthCheckInterval: NodeJS.Timeout | null = null;
+  private remoteProbeInterval: NodeJS.Timeout | null = null;
   private querySweeperInterval: NodeJS.Timeout | null = null;
   /**
    * Stuck-query sweeper timeout, in minutes. Queries whose status is still
@@ -214,6 +218,12 @@ export class AgentManagerDb {
   private logBuffer: Array<{ ts: number; msg: string }> = [];
   private readonly LOG_BUFFER_SIZE = 500;
   private managementPort: number = 4100;
+  /** Injectable SSH delivery function — override in tests. */
+  private deliverFn: DeliverFn = defaultDeliverFn;
+  /** Injectable onchain registration function — override in tests. */
+  private registerOnIdChainFn: typeof registerOnIdChain = registerOnIdChain;
+  /** Injectable HTTP probe function — override in tests to mock remote health checks. */
+  private healthProbeFn: HealthProbeFn = defaultHealthProbeFn;
 
   /** Log a manager activity message to the ring buffer (not stdout) */
   private managerLog(msg: string) {
@@ -223,9 +233,23 @@ export class AgentManagerDb {
     }
   }
 
-  constructor(baseWorkDir: string = '/workspace', db: Db) {
+  constructor(
+    baseWorkDir: string = '/workspace',
+    db: Db,
+    opts?: {
+      /** Override SSH delivery function (for tests). */
+      deliverFn?: DeliverFn;
+      /** Override onchain registration function (for tests). */
+      registerOnIdChainFn?: typeof registerOnIdChain;
+      /** Override remote health probe function (for tests). */
+      healthProbeFn?: HealthProbeFn;
+    },
+  ) {
     this.baseWorkDir = baseWorkDir;
     this.db = db;
+    if (opts?.deliverFn) this.deliverFn = opts.deliverFn;
+    if (opts?.registerOnIdChainFn) this.registerOnIdChainFn = opts.registerOnIdChainFn;
+    if (opts?.healthProbeFn) this.healthProbeFn = opts.healthProbeFn;
     this.agentRole = (process.env.AGENT_ROLE as 'manager' | 'worker') || 'manager';
 
     // Load default deployment config
@@ -491,6 +515,12 @@ export class AgentManagerDb {
   }
 
   private async getTeam(req: express.Request): Promise<{ name: string; id: string }> {
+    // If the middleware has already resolved the context, use it directly
+    const ctx = (req as any).ctx;
+    if (ctx?.teamId && ctx?.teamName) {
+      return { name: ctx.teamName, id: ctx.teamId };
+    }
+    // Fallback: resolve inline (used for paths that bypass middleware)
     const name = this.getTeamName(req);
     const id = await this.db.teams.getOrCreateTeamId(name);
     // Ensure per-team directory exists (no cross-team shared files).
@@ -504,20 +534,64 @@ export class AgentManagerDb {
   }
 
   /**
-   * Convert an AgentRow to an API response object with identifier fields
+   * Redact sensitive fields from an agentToResponse result for non-admin callers.
+   *
+   * Top-level fields removed: ssh_target, internal_endpoint_url.
+   * metadata keys removed: any key in SENSITIVE_META_KEYS list, plus any key
+   * matching /private_?key/i or /secret/i as a safety net.
    */
-  private agentToResponse(a: AgentRow) {
+  private static readonly SENSITIVE_META_KEYS = new Set([
+    'auth_key_ref',
+    'ows_wallet_seed',
+    'ssh_private_key',
+    'ssh_target',
+    'internal_endpoint_url',
+  ]);
+
+  private static readonly SENSITIVE_META_REGEX = /private_?key|secret/i;
+
+  private redactForNonAdmin<T extends Record<string, any>>(resp: T): T {
+    // Remove top-level sensitive fields
+    const out: any = { ...resp };
+    delete out.ssh_target;
+    delete out.internal_endpoint_url;
+
+    // Deep-copy and strip sensitive metadata keys
+    if (out.metadata && typeof out.metadata === 'object') {
+      const meta: any = { ...out.metadata };
+      for (const key of Object.keys(meta)) {
+        if (
+          AgentManagerDb.SENSITIVE_META_KEYS.has(key) ||
+          AgentManagerDb.SENSITIVE_META_REGEX.test(key)
+        ) {
+          delete meta[key];
+        }
+      }
+      out.metadata = meta;
+    }
+
+    return out as T;
+  }
+
+  /**
+   * Convert an AgentRow to an API response object with identifier fields.
+   * Pass opts.isAdmin = true for admin callers to receive the full unredacted record.
+   */
+  private agentToResponse(a: AgentRow, opts?: { isAdmin?: boolean }) {
     // Interactive CLI agents are reachable via the daemon's management port —
     // the daemon owns /talk and /news for them (see e3b30b9). The CLI's own
     // port (stored in a.endpoint) may not be listening, so wrapper lookups
     // that hit a.endpoint would silently fail. The daemon URL always works:
     // POST /news lands under the manager-inbox agent_id and GET /news reads
     // from the same row. Virtual agents keep their declared endpoint.
-    const url = a.type === 'interactive'
-      ? `http://localhost:${this.managementPort}`
-      : a.type === 'virtual'
-        ? a.endpoint
-        : `http://localhost:${a.port}`;
+    const isRemote = isRemoteEndpointRuntime(a.runtime);
+    const url = isRemote
+      ? null
+      : a.type === 'interactive'
+        ? `http://localhost:${this.managementPort}`
+        : a.type === 'virtual'
+          ? a.endpoint
+          : `http://localhost:${a.port}`;
 
     // After registration, a.name IS the ENS domain and the original local alias
     // is preserved in metadata.alias.
@@ -530,7 +604,25 @@ export class AgentManagerDb {
     const metaPid = (a.metadata as { pid?: unknown } | undefined)?.pid;
     const pid = typeof metaPid === 'number' && Number.isFinite(metaPid) && metaPid > 0 ? metaPid : null;
 
-    return {
+    // Remote-endpoint agents have no local port or pid; health is derived from probe columns.
+    const remoteFields = isRemote ? {
+      port: null,
+      pid: null,
+      deploymentShape: 'remote-endpoint' as const,
+      health: this.deriveRemoteHealth(a),
+      customer_domain: a.customer_domain,
+      public_endpoint_url: a.public_endpoint_url,
+      internal_endpoint_url: a.internal_endpoint_url,
+      ssh_target: a.ssh_target,
+      last_seen: a.last_seen ?? null,
+      last_probed_at: a.last_probed_at ?? null,
+      last_error: a.last_error ?? null,
+      consecutive_failures: a.consecutive_failures ?? 0,
+    } : {
+      deploymentShape: 'local-process' as const,
+    };
+
+    const full = {
       id: a.id,
       // name is the displayId (e.g., "agent-5.xid.eth") for inter-agent communication
       // alias is the base name (e.g., "agent") for backwards compatibility
@@ -543,19 +635,27 @@ export class AgentManagerDb {
       workingDirectory: a.working_directory,
       createdAt: a.created_at,
       type: a.type,
+      runtime: a.runtime,
       url,
       metadata: a.metadata,
       // Identity fields
       tokenId: a.token_id,
       domain,
       displayId,
-      // Health monitoring
-      ...this.getHealthForAgent(a)
+      // Health monitoring (overridden for remote agents above)
+      ...this.getHealthForAgent(a),
+      // Runtime shape — remote-endpoint agents override port/pid/health
+      ...remoteFields,
     };
+
+    return opts?.isAdmin === true ? full : this.redactForNonAdmin(full);
   }
 
   private async dbQueryAgentById(teamId: string, id: string): Promise<AgentRow | null> {
-    return this.db.agents.getById(id);
+    const a = await this.db.agents.getById(id);
+    if (!a) return null;
+    if (a.team_id !== teamId) return null; // cross-team lookups invisible
+    return a;
   }
 
   private async dbQueryAgentByNameMostRecent(teamId: string, name: string): Promise<AgentRow | null> {
@@ -635,6 +735,31 @@ export class AgentManagerDb {
   }
 
   private async registerOnchainAndUpdateAgent(teamId: string, agent: AgentRow): Promise<{ txHash: string; tokenId: string; domain: string }> {
+    const isRemote = isRemoteEndpointRuntime(agent.runtime);
+
+    // ── Phase 4: wallet provisioning for remote agents ──────────────────────
+    // For public-agent-remote, provision an OWS wallet before registration so
+    // multi-chain address records can be set.  For local agents the wallet is
+    // already attached via the normal deploy path.
+    if (isRemote && !(agent.metadata as any)?.ows_wallet) {
+      const agentAlias = (agent.metadata as any)?.alias || agent.name;
+      const walletResult = this.getOrCreateAgentWallet('public', agentAlias);
+      if (walletResult) {
+        // Merge wallet fields into metadata now; updateIdentity below will persist them.
+        const mergedMeta: AgentMetadata = {
+          ...((agent.metadata || {}) as AgentMetadata),
+          ows_wallet: walletResult.walletName,
+          ows_address: walletResult.address,
+        };
+        await this.db.agents.updateIdentity(agent.id, { metadata: mergedMeta });
+        // Refresh the agent row so subsequent steps see the updated metadata.
+        const refreshed = await this.db.agents.getById(agent.id);
+        if (refreshed) agent = refreshed;
+      } else {
+        console.warn(`[Register] OWS not installed or wallet creation failed for remote agent "${agent.name}". Proceeding without wallet.`);
+      }
+    }
+
     // Support OWS wallet or raw private key for signing
     const owsRegistrarWallet = process.env.OWS_REGISTRAR_WALLET;
     const pk = !owsRegistrarWallet ? (process.env.ID_REGISTRAR_PRIVATE_KEY || process.env.PRIVATE_KEY) : undefined;
@@ -649,20 +774,24 @@ export class AgentManagerDb {
     const textRecords: Record<string, string> = {};
     textRecords['description'] = `${agent.name} agent`;
 
-    // Determine the agent's endpoint for the ENSIP-26 records
+    // Determine the agent's endpoint for the ENSIP-26 records.
+    // Remote agents advertise their public HTTPS endpoint; local agents use the
+    // manager-local URL or the PUBLIC_BASE_URL override.
     const publicBaseUrl = process.env.PUBLIC_BASE_URL;
-    const agentEndpoint = publicBaseUrl
-      ? `${publicBaseUrl.replace(/\/+$/, '')}`
-      : (agent.type === 'virtual'
-          ? (agent.endpoint as string)
-          : ((agent.metadata as any)?.service || `http://localhost:${agent.port}`));
+    const agentEndpoint = isRemote
+      ? (agent.public_endpoint_url || `https://${agent.customer_domain}`)
+      : (publicBaseUrl
+          ? `${publicBaseUrl.replace(/\/+$/, '')}`
+          : (agent.type === 'virtual'
+              ? (agent.endpoint as string)
+              : ((agent.metadata as any)?.service || `http://localhost:${agent.port}`)));
 
     console.log(`[Register] Registering "${agent.name}" on ID Chain (Base)...`);
 
     // Register via id-cli with sublabel (Base only)
     // e.g., --sublabel x → x.agent-8.xid.eth in one transaction
     const originalAlias = ((agent.metadata as any)?.alias || agent.name);
-    const result = await registerOnIdChain({
+    const result = await this.registerOnIdChainFn({
       sublabel: originalAlias,
       textRecords,
       ...signerOpts,
@@ -687,9 +816,24 @@ export class AgentManagerDb {
       alias: originalAlias,
     };
 
+    // ── Phase 4: security metadata flags for remote agents ───────────────────
+    if (isRemote) {
+      metadata = {
+        ...metadata,
+        mesh_member: false,
+        mesh_reachable: false,
+        public_endpoint: true,
+        dmz: true,
+        allowed_inbound: ['public_http'],
+        allowed_outbound: ['openrouter'],
+      };
+    }
+
     // Keep the agent's internal endpoint for manager-to-agent communication
     const isLocalAgent = (metadata as any).local === true;
-    const dbEndpoint = isLocalAgent ? (agent.endpoint || `http://localhost:${agent.port}`) : agentEndpoint;
+    const dbEndpoint = isRemote
+      ? (agent.endpoint || agentEndpoint)
+      : (isLocalAgent ? (agent.endpoint || `http://localhost:${agent.port}`) : agentEndpoint);
 
     // Set multi-chain address records if agent has an OWS wallet
     const owsWalletName = (metadata as any).ows_wallet;
@@ -716,36 +860,92 @@ export class AgentManagerDb {
       metadata,
     });
 
-    // Update running server identity
-    const server = this.runningServers.get(this.key(teamId, agent.id));
-    if (server) {
-      server.setIdentity({ name: newName, metadata, tokenId, domain: newName });
-    }
+    if (isRemote) {
+      // ── Phase 4: push identity.json to the remote VPS ─────────────────────
+      // Write to staging dir first, then attempt SCP delivery.
+      await this.stageAndDeliverRemoteIdentity(agent, newName, tokenId, metadata);
+    } else {
+      // ── Local agent identity push ──────────────────────────────────────────
+      // Update running server identity
+      const server = this.runningServers.get(this.key(teamId, agent.id));
+      if (server) {
+        server.setIdentity({ name: newName, metadata, tokenId, domain: newName });
+      }
 
-    // Push identity to running agent process
-    if (agent.type === 'claude' && agent.port && !server) {
-      try {
-        const agentUrl = isLocalAgent
-          ? (agent.endpoint || `http://localhost:${agent.port}`)
-          : `http://id-agent-${agent.id}:4100`;
-        const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-        const identityRes = await fetch(`${agentUrl}/identity`, {
-          method: 'PATCH',
-          headers,
-          body: JSON.stringify({ tokenId, domain: newName })
-        });
-        if (identityRes.ok) {
-          console.log(`✅ Updated identity for ${originalAlias}: ${newName}`);
-        } else {
-          console.warn(`⚠️ Failed to update identity for ${originalAlias}: ${identityRes.status}`);
+      // Push identity to running agent process
+      if (agent.type === 'claude' && agent.port && !server) {
+        try {
+          const agentUrl = isLocalAgent
+            ? (agent.endpoint || `http://localhost:${agent.port}`)
+            : `http://id-agent-${agent.id}:4100`;
+          const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+          const identityRes = await fetch(`${agentUrl}/identity`, {
+            method: 'PATCH',
+            headers,
+            body: JSON.stringify({ tokenId, domain: newName })
+          });
+          if (identityRes.ok) {
+            console.log(`✅ Updated identity for ${originalAlias}: ${newName}`);
+          } else {
+            console.warn(`⚠️ Failed to update identity for ${originalAlias}: ${identityRes.status}`);
+          }
+        } catch (err: any) {
+          console.warn(`⚠️ Could not update identity for ${originalAlias}: ${err.message}`);
         }
-      } catch (err: any) {
-        console.warn(`⚠️ Could not update identity for ${originalAlias}: ${err.message}`);
       }
     }
 
     console.log(`✅ Registered ${originalAlias} as ${newName} (tx: ${result.txHash})`);
     return { txHash: result.txHash, tokenId, domain: newName };
+  }
+
+  /**
+   * Write identity.json to the local staging directory and (if ssh_target is
+   * set) deliver it to the remote VPS over SCP.
+   *
+   * On SSH delivery failure the on-chain state is still authoritative; the
+   * manager logs a warning and returns successfully.
+   */
+  private async stageAndDeliverRemoteIdentity(
+    agent: AgentRow,
+    idchainDomain: string,
+    tokenId: string,
+    metadata: AgentMetadata,
+  ): Promise<void> {
+    // Build the identity object per § 8 schema
+    const identity = {
+      name: idchainDomain,
+      ows_address: (metadata as any).ows_address || '',
+      idchain_domain: idchainDomain,
+      token_id: tokenId,
+      service_endpoint: agent.public_endpoint_url || `https://${agent.customer_domain}` || '',
+      registered_at: new Date().toISOString(),
+    };
+
+    // Staging path: <baseWorkDir>/public-agents/<agent.id>/staging/identity.json
+    const stagingDir = path.join(this.baseWorkDir, 'public-agents', agent.id, 'staging');
+    mkdirSync(stagingDir, { recursive: true });
+    const localPath = path.join(stagingDir, 'identity.json');
+    writeFileSync(localPath, JSON.stringify(identity, null, 2), 'utf8');
+    console.log(`[Register] Staged identity file at ${localPath}`);
+
+    // Deliver over SSH if ssh_target is configured
+    if (agent.ssh_target) {
+      const remotePath = (agent.metadata as any)?.identity_remote_path || '/opt/public-agent/identity.json';
+      const deliverResult = await this.deliverFn(agent.ssh_target, localPath, remotePath);
+      // Never log the full ssh_target (raw `user@host`); the user portion is
+      // operator PII. Full target is still available via admin API responses.
+      const redactedTarget = redactSshTarget(agent.ssh_target);
+      if (deliverResult.ok) {
+        console.log(`[Register] Delivered identity.json to ${redactedTarget}:${remotePath}`);
+      } else {
+        console.warn(
+          `[Register] SSH delivery failed for agent ${agent.id} (${redactedTarget}): ` +
+          `error=${deliverResult.error} stderr=${deliverResult.stderr ?? ''}`,
+        );
+        // Do NOT throw — on-chain state is authoritative regardless.
+      }
+    }
   }
 
   /**
@@ -852,6 +1052,27 @@ export class AgentManagerDb {
         return res.status(resolved.status).json({ error: resolved.error });
       }
       const { targetAgent, targetUrl, targetDisplayId } = resolved;
+
+      // Mesh-membership gate: only mesh members can receive inter-agent messages.
+      // mesh_member defaults to true for backward compat (pre-Phase-4 agents have no flag).
+      // Admin callers may bypass via ?admin=true for diagnostic purposes — EXCEPT
+      // when the target is a public-agent-remote runtime. Public remote agents
+      // live in the DMZ; routing manager-proxied traffic to them through an admin
+      // escape hatch would rebuild the proxy path the DMZ design explicitly
+      // forbids. Public conversations must use direct HTTPS; operator plane must
+      // use SSH. No admin override here.
+      const meshMember = (targetAgent.metadata as any)?.mesh_member !== false;
+      const isPublicRemote = targetAgent.runtime === 'public-agent-remote';
+      const adminBypass = this.isAdminRequest(req) && req.query.admin === 'true' && !isPublicRemote;
+      if (!meshMember && !adminBypass) {
+        return res.status(403).json({
+          error: 'not_mesh_reachable',
+          message: isPublicRemote
+            ? 'Target is a public-agent-remote runtime. Reach it via direct HTTPS (/talk) or SSH (operator plane); no manager-proxied admin bypass.'
+            : 'Target agent is not part of the inter-agent mesh.'
+        });
+      }
+
       this.managerLog(`${shouldWait ? 'Forwarding' : 'Sending async'} message to ${targetDisplayId} at ${targetUrl}`);
 
       // Forward the message to the agent's /talk endpoint
@@ -934,7 +1155,86 @@ export class AgentManagerDb {
     }
   }
 
+  /**
+   * Resolve whether a request is from an admin principal.
+   * Admin = loopback IP + X-Id-Admin: 1 header.
+   */
+  private isAdminRequest(req: express.Request): boolean {
+    const ip = req.ip || '';
+    const isLoopback =
+      ip === '127.0.0.1' || ip === '::1' || ip === '::ffff:127.0.0.1';
+    const hasAdminHeader = req.headers['x-id-admin'] === '1';
+    return isLoopback && hasAdminHeader;
+  }
+
+  /**
+   * Team/principal context middleware.
+   * Resolves once per request and attaches:
+   *   (req as any).ctx = { principal, teamName, teamId }
+   *
+   * principal:
+   *   'admin'  — loopback IP + X-Id-Admin: 1
+   *   'agent'  — X-Id-Agent: <id> present and the agent belongs to the resolved team
+   *   'anon'   — all other callers
+   *
+   * teamId resolution:
+   *   - admin principals: getOrCreate (same as legacy behaviour)
+   *   - non-admin: getTeamByName only; 404 if team does not exist
+   */
+  private teamContextMiddleware(): express.RequestHandler {
+    return async (req: express.Request, res: express.Response, next: express.NextFunction) => {
+      try {
+        const teamName = this.getTeamName(req);
+        const principal = this.isAdminRequest(req) ? 'admin' : 'anon';
+
+        let teamId: string;
+        if (principal === 'admin') {
+          // Admin principals may create teams on the fly (legacy behaviour)
+          teamId = await this.db.teams.getOrCreateTeamId(teamName);
+          // Ensure per-team directory exists
+          const teamDir = `${this.baseWorkDir}/teams/${teamName}`;
+          if (!existsSync(teamDir)) mkdirSync(teamDir, { recursive: true });
+        } else {
+          // Non-admin: team must already exist
+          const teamRow = await this.db.teams.getTeamByName(teamName);
+          if (!teamRow) {
+            res.status(404).json({ error: 'team_not_found' });
+            return;
+          }
+          teamId = teamRow.id;
+          // Ensure per-team directory exists
+          const teamDir = `${this.baseWorkDir}/teams/${teamName}`;
+          if (!existsSync(teamDir)) mkdirSync(teamDir, { recursive: true });
+        }
+
+        // Check agent principal claim
+        let resolvedPrincipal: 'admin' | 'agent' | 'anon' = principal === 'admin' ? 'admin' : 'anon';
+        const agentHeader = req.headers['x-id-agent'];
+        if (agentHeader && typeof agentHeader === 'string' && resolvedPrincipal !== 'admin') {
+          const agentRow = await this.db.agents.getById(agentHeader);
+          if (agentRow && agentRow.team_id === teamId) {
+            resolvedPrincipal = 'agent';
+          } else if (agentRow && agentRow.team_id !== teamId) {
+            // Agent exists but belongs to a different team — reject
+            res.status(403).json({ error: 'agent_team_mismatch' });
+            return;
+          }
+          // If agent doesn't exist at all, fall through as 'anon'
+        }
+
+        (req as any).ctx = { principal: resolvedPrincipal, teamName, teamId };
+        next();
+      } catch (err: any) {
+        // Invalid team name or other error
+        res.status(400).json({ error: err?.message || 'Invalid request context' });
+      }
+    };
+  }
+
   private setupRoutes() {
+    // Install team/principal context middleware for all routes
+    this.managementApp.use(this.teamContextMiddleware());
+
     this.managementApp.get('/health', async (req, res) => {
       const { id: teamId, name: teamName } = await this.getTeam(req);
       const count = await this.db.agents.count(teamId);
@@ -946,6 +1246,7 @@ export class AgentManagerDb {
       const { id: teamId } = await this.getTeam(req);
       const includeAll = req.query.all === 'true' || req.query.all === '1';
       const agents = await this.dbListAgents(teamId, includeAll);
+      const isAdmin = this.isAdminRequest(req);
 
       const results = await Promise.allSettled(
         agents.map(async (agent) => {
@@ -985,7 +1286,7 @@ export class AgentManagerDb {
           }
 
           return {
-            ...this.agentToResponse(agent),
+            ...this.agentToResponse(agent, { isAdmin }),
             isResponding,
             newsItems,
             hasActiveHeartbeat
@@ -995,7 +1296,7 @@ export class AgentManagerDb {
 
       const agentStatuses = results.map((r, i) => {
         if (r.status === 'fulfilled') return r.value;
-        return { ...this.agentToResponse(agents[i]), isResponding: false, newsItems: [], hasActiveHeartbeat: false };
+        return { ...this.agentToResponse(agents[i], { isAdmin }), isResponding: false, newsItems: [], hasActiveHeartbeat: false };
       });
 
       res.json({ agents: agentStatuses });
@@ -1139,6 +1440,16 @@ export class AgentManagerDb {
       this.handleMessage(req, res).catch(next);
     });
 
+    // /news-to - fire-and-forget notification to another agent (no reply wait).
+    // Mesh-membership gate applies identically to /talk-to (handled inside handleMessage).
+    this.managementApp.post('/news-to', (req, res, next) => {
+      // Ensure wait is explicitly false (fire-and-forget)
+      if (req.body) {
+        req.body.wait = false;
+      }
+      this.handleMessage(req, res).catch(next);
+    });
+
     // REST-AP /news endpoint - receive replies from agents
     this.managementApp.post('/news', async (req, res) => {
       try {
@@ -1149,12 +1460,28 @@ export class AgentManagerDb {
           return res.status(400).json({ error: 'Missing message or data' });
         }
 
-        // If this is a reply to a query, look up the original query's team
-        // This ensures replies go to the correct team even if sender doesn't specify
+        // If this is a reply to a query, look up the original query's team.
+        // Design-doc delta (Phase 1): the queries table does not track which agent
+        // endpoint received the original query, so we cannot verify the reply path
+        // fully. Instead we apply a lighter constraint: only admin principals are
+        // allowed to swing teams via in_reply_to. Non-admin callers (agents, anon)
+        // may reply to queries within their own team only. If the query belongs to
+        // a different team and the caller is not admin, we still deliver the news
+        // to the caller's own team (the reply will be visible there) but we do NOT
+        // follow the query across the team boundary.
         if (in_reply_to) {
           const queryTeamId = await this.db.queries.findTeam(in_reply_to);
-          if (queryTeamId) {
-            teamId = queryTeamId;
+          const principal = (req as any).ctx?.principal || 'anon';
+          if (queryTeamId && queryTeamId !== teamId) {
+            if (principal === 'admin') {
+              // Admin may cross teams
+              teamId = queryTeamId;
+              this.managerLog(`Reply to ${in_reply_to} - admin team override to ${teamId}`);
+            } else {
+              // Non-admin: stay in own team; log that we skipped the cross-team swing
+              this.managerLog(`Reply to ${in_reply_to} - non-admin caller; keeping team ${teamId} (query team ${queryTeamId})`);
+            }
+          } else if (queryTeamId && queryTeamId === teamId) {
             this.managerLog(`Reply to ${in_reply_to} - using query's team ${teamId}`);
           }
         }
@@ -1464,8 +1791,9 @@ export class AgentManagerDb {
       // ?all=true includes automator agents (normally hidden)
       const includeAll = req.query.all === 'true' || req.query.all === '1';
       const agents = await this.dbListAgents(teamId, includeAll);
+      const isAdmin = this.isAdminRequest(req);
       res.json({
-        agents: agents.map(a => this.agentToResponse(a))
+        agents: agents.map(a => this.agentToResponse(a, { isAdmin }))
       });
     });
 
@@ -1475,6 +1803,7 @@ export class AgentManagerDb {
     this.managementApp.get('/agents/resolve/:ref', async (req, res) => {
       const { id: teamId } = await this.getTeam(req);
       const ref = decodeURIComponent(req.params.ref);
+      const isAdmin = this.isAdminRequest(req);
 
       try {
         const matches = await this.dbResolveAgents(teamId, ref);
@@ -1485,7 +1814,7 @@ export class AgentManagerDb {
 
         if (matches.length === 1) {
           return res.json({
-            agent: this.agentToResponse(matches[0]),
+            agent: this.agentToResponse(matches[0], { isAdmin }),
             ambiguous: false
           });
         }
@@ -1503,7 +1832,7 @@ export class AgentManagerDb {
         const warning = buildAmbiguityWarning(ref, agentMatches);
 
         return res.json({
-          agents: matches.map(a => this.agentToResponse(a)),
+          agents: matches.map(a => this.agentToResponse(a, { isAdmin })),
           ambiguous: true,
           warning
         });
@@ -1518,14 +1847,14 @@ export class AgentManagerDb {
       const { id: teamId } = await this.getTeam(req);
       const agent = await this.dbQueryAgentByNameMostRecent(teamId, req.params.name);
       if (!agent) return res.status(404).json({ error: 'Agent not found' });
-      res.json(this.agentToResponse(agent));
+      res.json(this.agentToResponse(agent, { isAdmin: this.isAdminRequest(req) }));
     });
 
     this.managementApp.get('/agents/:id', async (req, res) => {
       const { id: teamId } = await this.getTeam(req);
       const agent = await this.dbQueryAgentById(teamId, req.params.id);
       if (!agent) return res.status(404).json({ error: 'Agent not found' });
-      res.json(this.agentToResponse(agent));
+      res.json(this.agentToResponse(agent, { isAdmin: this.isAdminRequest(req) }));
     });
 
     // List all teams from database
@@ -1727,6 +2056,15 @@ export class AgentManagerDb {
             error: `Unknown runtime "${runtime}". Expected one of: ${getAvailableRuntimes().join(', ')}`
           });
         }
+
+        // Remote-endpoint runtimes are registry-only — they are never spawned locally.
+        if (runtime !== undefined && isRemoteEndpointRuntime(runtime)) {
+          return res.status(400).json({
+            error: 'runtime_not_spawnable',
+            message: 'public-agent-remote is a remote endpoint runtime. Use POST /agents/register with customer_domain to register an externally-deployed agent.',
+          });
+        }
+
         const effectiveRuntime = resolveRuntime(runtime);
 
         id = `agent_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
@@ -1890,6 +2228,82 @@ export class AgentManagerDb {
 
     this.managementApp.post('/agents/register', async (req, res) => {
       const { id: teamId } = await this.getTeam(req);
+
+      // Branch: public-agent-remote registration (Phase 2)
+      // A request with runtime==='public-agent-remote' registers an externally-deployed
+      // agent as a registry entry. No port allocation, no process spawn, no well-known
+      // fetch, no on-chain registration (those are Phase 3–5).
+      if ((req.body as any)?.runtime === 'public-agent-remote') {
+        const {
+          name: remoteName,
+          customer_domain,
+          public_endpoint_url,
+          internal_endpoint_url,
+          ssh_target,
+        } = req.body as any;
+
+        // Required fields
+        if (!remoteName) return res.status(400).json({ error: 'missing_field', message: 'name is required' });
+        if (!customer_domain) return res.status(400).json({ error: 'missing_field', message: 'customer_domain is required' });
+        if (!public_endpoint_url) return res.status(400).json({ error: 'missing_field', message: 'public_endpoint_url is required' });
+
+        // Name validation
+        const remoteNameCheck = validateName(remoteName, 'agent');
+        if (!remoteNameCheck.valid) return res.status(400).json({ error: 'invalid_name', message: remoteNameCheck.error });
+
+        // URL validation
+        try { new URL(public_endpoint_url); } catch {
+          return res.status(400).json({ error: 'invalid_url', message: 'public_endpoint_url must be a valid URL' });
+        }
+        if (internal_endpoint_url) {
+          try { new URL(internal_endpoint_url); } catch {
+            return res.status(400).json({ error: 'invalid_url', message: 'internal_endpoint_url must be a valid URL' });
+          }
+        }
+
+        // Reject if name already exists in team
+        const existing = await this.dbQueryAgentByNameMostRecent(teamId, remoteName);
+        if (existing) {
+          return res.status(409).json({ error: 'name_conflict', message: `Agent "${remoteName}" already exists in this team` });
+        }
+
+        const remoteId = `remote_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
+        const now = Date.now();
+
+        await this.db.agents.create({
+          team_id: teamId,
+          id: remoteId,
+          name: remoteName,
+          type: 'virtual',
+          model: 'unknown',
+          port: 0,
+          endpoint: null,
+          working_directory: null,
+          status: 'registered',
+          created_at: now,
+          runtime: 'public-agent-remote',
+          customer_domain: customer_domain,
+          public_endpoint_url: public_endpoint_url,
+          internal_endpoint_url: internal_endpoint_url ?? null,
+          ssh_target: ssh_target ?? null,
+        });
+
+        return res.status(201).json({
+          id: remoteId,
+          name: remoteName,
+          runtime: 'public-agent-remote',
+          deploymentShape: 'remote-endpoint',
+          status: 'registered',
+          port: null,
+          url: null,
+          customer_domain,
+          public_endpoint_url,
+          internal_endpoint_url: internal_endpoint_url ?? null,
+          ssh_target: ssh_target ?? null,
+          health: 'unknown',
+        });
+      }
+
       const { id: requestedIdRaw, name, endpoint, metadata, type: requestedTypeRaw } = req.body || {};
       if (!name || !endpoint) return res.status(400).json({ error: 'Missing name or endpoint' });
       const regNameCheck = validateName(name, 'agent');
@@ -2034,11 +2448,29 @@ export class AgentManagerDb {
       const { id: teamId } = await this.getTeam(req);
       const agent = await this.dbQueryAgentById(teamId, req.params.id);
       if (!agent) return res.status(404).json({ error: 'Agent not found' });
+
+      // ?redeliver=1 — re-push identity.json to remote VPS without re-running
+      // the on-chain registration step (only meaningful for remote agents that
+      // are already registered).
+      const redeliver = req.query.redeliver === '1' || req.body?.redeliver === true;
+      if (redeliver && isRemoteEndpointRuntime(agent.runtime)) {
+        const idchainDomain = (agent.metadata as any)?.idchain_domain || agent.domain;
+        if (!idchainDomain) {
+          return res.status(400).json({ error: 'Agent is not yet registered on-chain. Cannot redeliver.' });
+        }
+        try {
+          await this.stageAndDeliverRemoteIdentity(agent, idchainDomain, agent.token_id || '', agent.metadata as AgentMetadata || {});
+          return res.json({ ok: true, redelivered: true, domain: idchainDomain, agent: { id: agent.id } });
+        } catch (e: any) {
+          return res.status(500).json({ error: e?.message || String(e) });
+        }
+      }
+
       try {
         const result = await this.registerOnchainAndUpdateAgent(teamId, agent);
 
-        // Update CLAUDE.md with agent's full identity
-        if (result.tokenId && agent.working_directory) {
+        // Update CLAUDE.md with agent's full identity (local agents only)
+        if (result.tokenId && agent.working_directory && !isRemoteEndpointRuntime(agent.runtime)) {
           try {
             const claudeDir = path.join(agent.working_directory, '.claude');
             if (!existsSync(claudeDir)) {
@@ -2058,6 +2490,26 @@ export class AgentManagerDb {
       }
     });
 
+    // Redeliver identity file to remote VPS without re-running on-chain registration.
+    this.managementApp.post('/agents/:id/onchain/redeliver-identity', async (req, res) => {
+      const { id: teamId } = await this.getTeam(req);
+      const agent = await this.dbQueryAgentById(teamId, req.params.id);
+      if (!agent) return res.status(404).json({ error: 'Agent not found' });
+      if (!isRemoteEndpointRuntime(agent.runtime)) {
+        return res.status(400).json({ error: 'redeliver_not_supported', message: 'Only public-agent-remote agents support identity redelivery.' });
+      }
+      const idchainDomain = (agent.metadata as any)?.idchain_domain || agent.domain;
+      if (!idchainDomain) {
+        return res.status(400).json({ error: 'Agent is not yet registered on-chain. Cannot redeliver.' });
+      }
+      try {
+        await this.stageAndDeliverRemoteIdentity(agent, idchainDomain, agent.token_id || '', agent.metadata as AgentMetadata || {});
+        return res.json({ ok: true, redelivered: true, domain: idchainDomain, agent: { id: agent.id } });
+      } catch (e: any) {
+        return res.status(500).json({ error: e?.message || String(e) });
+      }
+    });
+
     this.managementApp.post('/agents/by-name/:name/onchain/register', async (req, res) => {
       const { id: teamId } = await this.getTeam(req);
       const agent = await this.dbQueryAgentByNameMostRecent(teamId, req.params.name);
@@ -2065,8 +2517,8 @@ export class AgentManagerDb {
       try {
         const result = await this.registerOnchainAndUpdateAgent(teamId, agent);
 
-        // Update CLAUDE.md with agent's full identity
-        if (result.tokenId && agent.working_directory) {
+        // Update CLAUDE.md with agent's full identity (local agents only)
+        if (result.tokenId && agent.working_directory && !isRemoteEndpointRuntime(agent.runtime)) {
           try {
             const claudeDir = path.join(agent.working_directory, '.claude');
             if (!existsSync(claudeDir)) {
@@ -2116,6 +2568,38 @@ export class AgentManagerDb {
         });
       } catch (e: any) {
         res.status(500).json({ error: e?.message || String(e) });
+      }
+    });
+
+    // POST /agents/:id/probe — ad-hoc heartbeat probe for remote-endpoint agents
+    this.managementApp.post('/agents/:id/probe', async (req, res) => {
+      try {
+        const { id: teamId } = await this.getTeam(req);
+        const agent = await this.dbQueryAgentById(teamId, req.params.id);
+        if (!agent) return res.status(404).json({ error: 'Agent not found' });
+
+        if (!isRemoteEndpointRuntime(agent.runtime)) {
+          return res.status(400).json({ error: 'probe_only_supported_for_remote' });
+        }
+
+        await this.probeOneRemoteAgent(teamId, agent);
+        // Re-fetch to get the updated values
+        const updated = await this.dbQueryAgentById(teamId, agent.id);
+        if (!updated) return res.status(404).json({ error: 'Agent not found after probe' });
+
+        const health = this.deriveRemoteHealth(updated);
+        res.json({
+          ok: updated.consecutive_failures === 0,
+          source: updated.last_error === 'health probe failed, well-known succeeded'
+            ? 'well-known'
+            : updated.consecutive_failures === 0 ? 'health' : 'none',
+          last_seen: updated.last_seen ?? null,
+          last_error: updated.last_error ?? null,
+          consecutive_failures: updated.consecutive_failures ?? 0,
+          health,
+        });
+      } catch (err: any) {
+        res.status(500).json({ error: err?.message ?? String(err) });
       }
     });
 
@@ -2338,11 +2822,22 @@ export class AgentManagerDb {
               nameHint
             });
 
+            const isPublicAgentType = (ra.endpointType || '').toLowerCase() === 'public-agent';
+
             const metadata: any = {
               name: nameHint,
               service_type: ra.endpointType || 'REST-AP',
               endpoint: ra.endpoint,
-              agent_account: ra.agentAccount
+              agent_account: ra.agentAccount,
+              // Discovery-only semantics (Option A): public-agent identities are imported
+              // as discovery records — visible in /agents but not routable via inter-agent
+              // mesh. mesh_member:false + discovery_only:true signal this to operators.
+              // The mesh-membership gate in handleMessage blocks routing without needing
+              // a separate DB column (metadata flags are sufficient for Phase 6A).
+              // TODO (Phase 6B): add --promote flag to the /registry/pull CLI command
+              // so operators can opt a discovered public-agent into the mesh explicitly.
+              // See design doc §6A.3 for discovery-only vs full-member semantics.
+              ...(isPublicAgentType ? { mesh_member: false, discovery_only: true } : {}),
             };
 
             // If we already have this onchain agent locally (e.g., a spawned claude agent with the same tokenId),
@@ -2365,7 +2860,12 @@ export class AgentManagerDb {
               // Merge metadata; don't stomp local endpoint/port for claude agents.
               const currentAgent = await this.db.agents.getById(existingId);
               const currentMeta = (currentAgent?.metadata || {}) as any;
+              // When merging a public-agent type, preserve discovery-only flags.
               const mergedMeta = { ...currentMeta, ...metadata, name: currentMeta.name || metadata.name };
+              if (isPublicAgentType) {
+                mergedMeta.mesh_member = false;
+                mergedMeta.discovery_only = true;
+              }
 
               // TODO: move to repository — conditional endpoint update
               await this.db.adapter.query(
@@ -2636,13 +3136,14 @@ export class AgentManagerDb {
     });
 
     // Handle /:tokenId without trailing path - returns agent info
-    // NOTE: Must be defined BEFORE the wildcard route to take precedence
-    this.managementApp.get('/:tokenId', async (req, res) => {
+    // NOTE: Must be defined BEFORE the wildcard route to take precedence.
+    // Non-numeric paths pass through to allow downstream routes (tasks, etc.) to match.
+    this.managementApp.get('/:tokenId', async (req, res, next) => {
       const tokenIdParam = req.params.tokenId;
 
-      // Only handle numeric tokenIds
+      // Only handle numeric tokenIds; pass all others to downstream routes
       if (!/^\d+$/.test(tokenIdParam)) {
-        return res.status(404).json({ error: 'Not found' });
+        return next();
       }
 
       const { id: teamId } = await this.getTeam(req);
@@ -2658,7 +3159,7 @@ export class AgentManagerDb {
       // Return agent info with links
       const baseUrl = `${req.protocol}://${req.get('host')}/${tokenIdParam}`;
       res.json({
-        agent: this.agentToResponse(agent),
+        agent: this.agentToResponse(agent, { isAdmin: this.isAdminRequest(req) }),
         links: {
           catalog: `${baseUrl}/.well-known/restap.json`,
           talk: `${baseUrl}/talk`,
@@ -2726,33 +3227,37 @@ export class AgentManagerDb {
     this.managementApp.post('/tasks', async (req, res) => {
       try {
         const { id: teamId } = await this.getTeam(req);
+        const principal = (req as any).ctx?.principal || 'anon';
         const { title, name: rawName, description, team: teamRef, from } = req.body || {};
 
         if (!title || typeof title !== 'string') {
           return res.status(400).json({ error: 'Missing required field: title' });
         }
 
-        // Generate or validate name slug
+        // Resolve team — non-admin principals cannot create tasks in another team
+        let taskTeamId: string = teamId;
+        if (teamRef) {
+          const teamRow = await this.db.teams.getTeamByName(teamRef);
+          if (!teamRow) return res.status(404).json({ error: `Team "${teamRef}" not found` });
+          if (teamRow.id !== teamId && principal !== 'admin') {
+            return res.status(403).json({ error: 'Cannot create task in another team without admin principal' });
+          }
+          taskTeamId = teamRow.id;
+        }
+
+        // Generate or validate name slug, scoped to (team_id, name) uniqueness
         let name = rawName ? normalizeAlias(rawName) : normalizeAlias(title);
         if (rawName) {
-          if (await this.db.tasks.getByName(name)) {
-            return res.status(409).json({ error: `Task name "${name}" already exists` });
+          if (await this.db.tasks.getByNameForTeam(name, taskTeamId)) {
+            return res.status(409).json({ error: `Task name "${name}" already exists in this team` });
           }
         } else {
           let candidate = name;
           let suffix = 1;
-          while (await this.db.tasks.getByName(candidate)) {
+          while (await this.db.tasks.getByNameForTeam(candidate, taskTeamId)) {
             candidate = `${name}-${suffix++}`;
           }
           name = candidate;
-        }
-
-        // Resolve team
-        let taskTeamId: string | null = teamId;
-        if (teamRef) {
-          const teamRow = await this.db.teams.getTeamByName(teamRef);
-          if (!teamRow) return res.status(404).json({ error: `Team "${teamRef}" not found` });
-          taskTeamId = teamRow.id;
         }
 
         // Resolve created_by from `from` field
@@ -2799,8 +3304,8 @@ export class AgentManagerDb {
           ownerIdFilter = agent.id;
         }
 
-        // Resolve team
-        let teamIdFilter: string | undefined;
+        // Resolve team — default to current team for scoped resolution
+        let teamIdFilter: string = teamId;
         if (teamRef) {
           const teamRow = await this.db.teams.getTeamByName(teamRef);
           if (!teamRow) return res.status(404).json({ error: `Team "${teamRef}" not found` });
@@ -2828,7 +3333,7 @@ export class AgentManagerDb {
     this.managementApp.get('/tasks/:ref', async (req, res) => {
       try {
         const { id: teamId } = await this.getTeam(req);
-        const { task, error } = await this.resolveTaskRef(req.params.ref);
+        const { task, error } = await this.resolveTaskRef(req.params.ref, teamId);
         if (!task) return res.status(404).json({ error: error || `Task "${req.params.ref}" not found` });
         res.json({ ok: true, task: await this.buildTaskResult(task, teamId) });
       } catch (err: any) {
@@ -2847,8 +3352,13 @@ export class AgentManagerDb {
           return res.status(400).json({ error: 'Missing required field: agent_id (or from)' });
         }
 
-        const { task, error: taskError } = await this.resolveTaskRef(req.params.ref);
+        const { task, error: taskError } = await this.resolveTaskRef(req.params.ref, teamId);
         if (!task) return res.status(404).json({ error: taskError || `Task "${req.params.ref}" not found` });
+
+        // Guard against cross-team claim
+        if (task.team_id && task.team_id !== teamId) {
+          return res.status(404).json({ error: `Task "${req.params.ref}" not found` });
+        }
 
         const { agent, error } = await this.resolveSingleAgentForCommand(teamId, callerRef);
         if (!agent) return res.status(404).json({ error: error || `Agent "${callerRef}" not found` });
@@ -2859,7 +3369,7 @@ export class AgentManagerDb {
           return res.status(409).json({ error: `Cannot claim "${task.name}" — already owned or not in todo status` });
         }
 
-        const updated = await this.db.tasks.getByName(task.name);
+        const updated = await this.db.tasks.getByNameForTeam(task.name, teamId);
         res.json({ ok: true, task: await this.buildTaskResult(updated!, teamId) });
       } catch (err: any) {
         console.error('[Manager] Error in POST /tasks/:ref/claim:', err);
@@ -2873,8 +3383,13 @@ export class AgentManagerDb {
         const { agent_id, from } = req.body || {};
         const callerRef = agent_id || from;
 
-        const { task, error: taskError } = await this.resolveTaskRef(req.params.ref);
+        const { task, error: taskError } = await this.resolveTaskRef(req.params.ref, teamId);
         if (!task) return res.status(404).json({ error: taskError || `Task "${req.params.ref}" not found` });
+
+        // Guard against cross-team done
+        if (task.team_id && task.team_id !== teamId) {
+          return res.status(404).json({ error: `Task "${req.params.ref}" not found` });
+        }
 
         // If caller identifies themselves, enforce ownership
         if (callerRef && typeof callerRef === 'string') {
@@ -2891,7 +3406,7 @@ export class AgentManagerDb {
           updated_at: now,
         });
 
-        const updated = await this.db.tasks.getByName(task.name);
+        const updated = await this.db.tasks.getByNameForTeam(task.name, teamId);
         res.json({ ok: true, task: await this.buildTaskResult(updated!, teamId) });
       } catch (err: any) {
         console.error('[Manager] Error in POST /tasks/:ref/done:', err);
@@ -2901,7 +3416,8 @@ export class AgentManagerDb {
 
     this.managementApp.delete('/tasks/:ref', async (req, res) => {
       try {
-        const { task, error } = await this.resolveTaskRef(req.params.ref);
+        const { id: teamId } = await this.getTeam(req);
+        const { task, error } = await this.resolveTaskRef(req.params.ref, teamId);
         if (!task) return res.status(404).json({ error: error || `Task "${req.params.ref}" not found` });
         await this.db.tasks.delete(task.id);
         res.json({ ok: true, removed: task.name });
@@ -2959,14 +3475,18 @@ export class AgentManagerDb {
   }
 
   /**
-   * Resolve a task reference. Accepts either:
+   * Resolve a task reference scoped to a team. Accepts either:
    *   - the kebab-case `name` slug (existing behavior), or
    *   - a short-uuid handle `#xxxxxxxx` (8+ hex chars after the `#`).
    *
    * Short refs match on the dash-stripped uuid prefix. If multiple rows
-   * share the prefix, returns an `error` asking the caller to widen it.
+   * share the prefix (within the team), returns an `error` asking the caller
+   * to widen it.
+   *
+   * @param ref   The task reference string.
+   * @param teamId  The team scope. Required for name-based resolution.
    */
-  private async resolveTaskRef(ref: string): Promise<{ task?: TaskRow; error?: string }> {
+  private async resolveTaskRef(ref: string, teamId?: string): Promise<{ task?: TaskRow; error?: string }> {
     if (!ref || typeof ref !== 'string') {
       return { error: 'Task reference is required' };
     }
@@ -2979,7 +3499,12 @@ export class AgentManagerDb {
       // display, so match on either form by trying the first 8 hex chars
       // against the leading hex chunk (uuid v4: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx).
       const matches = await this.db.tasks.getByUuidPrefix(raw.slice(0, 8));
-      const filtered = matches.filter(t => (t.uuid || '').replace(/-/g, '').toLowerCase().startsWith(raw));
+      const filtered = matches.filter(t => {
+        if (!(t.uuid || '').replace(/-/g, '').toLowerCase().startsWith(raw)) return false;
+        // When teamId is provided, scope to that team
+        if (teamId && t.team_id !== teamId) return false;
+        return true;
+      });
       if (filtered.length === 0) return { error: `Task ${ref} not found` };
       if (filtered.length > 1) {
         const widened = filtered
@@ -2988,6 +3513,12 @@ export class AgentManagerDb {
         return { error: `Short id ${ref} is ambiguous (matches ${filtered.length}): ${widened}. Widen the prefix.` };
       }
       return { task: filtered[0] };
+    }
+    // Name-based resolution: scope to the team when teamId is provided
+    if (teamId) {
+      const task = await this.db.tasks.getByNameForTeam(ref, teamId);
+      if (!task) return { error: `Task "${ref}" not found` };
+      return { task };
     }
     const task = await this.db.tasks.getByName(ref);
     if (!task) return { error: `Task "${ref}" not found` };
@@ -4584,6 +5115,11 @@ export class AgentManagerDb {
           return { ok: false, error: `Agent "${agentName}" not found` };
         }
 
+        // Remote-endpoint runtimes are lifecycled by the operator, not the manager.
+        if (isRemoteEndpointRuntime(agent.runtime)) {
+          return { ok: false, error: 'lifecycle_not_supported_for_remote' };
+        }
+
         if (agent.type !== 'claude') {
           return { ok: false, error: 'Only claude agents can be controlled' };
         }
@@ -5045,31 +5581,29 @@ export class AgentManagerDb {
             return { ok: false, error: 'Usage: /task create "<title>" [--name <slug>] [--description "..."] [--team <team>] [--owner <agent>] [--event <schedule-id>]...' };
           }
 
+          // Resolve optional team first (needed for name uniqueness check)
+          let taskTeamId: string = teamId;
+          if (teamRef) {
+            const teamRow = await this.db.teams.getTeamByName(teamRef);
+            if (!teamRow) return { ok: false, error: `Team "${teamRef}" not found` };
+            taskTeamId = teamRow.id;
+          }
+
           // Generate name from title if not provided
           if (!name) {
             name = normalizeAlias(title);
-            // Ensure uniqueness by appending numeric suffix on conflict
+            // Ensure uniqueness by appending numeric suffix on conflict (scoped to team)
             let candidate = name;
             let suffix = 1;
-            while (await this.db.tasks.getByName(candidate)) {
+            while (await this.db.tasks.getByNameForTeam(candidate, taskTeamId)) {
               candidate = `${name}-${suffix++}`;
             }
             name = candidate;
           } else {
             name = normalizeAlias(name);
-            if (await this.db.tasks.getByName(name)) {
-              return { ok: false, error: `Task name "${name}" already exists` };
+            if (await this.db.tasks.getByNameForTeam(name, taskTeamId)) {
+              return { ok: false, error: `Task name "${name}" already exists in this team` };
             }
-          }
-
-          // Resolve optional team
-          let taskTeamId: string | null = null;
-          if (teamRef) {
-            const teamRow = await this.db.teams.getTeamByName(teamRef);
-            if (!teamRow) return { ok: false, error: `Team "${teamRef}" not found` };
-            taskTeamId = teamRow.id;
-          } else {
-            taskTeamId = teamId;
           }
 
           // Resolve optional owner
@@ -5144,8 +5678,8 @@ export class AgentManagerDb {
             ownerIdFilter = agent.id;
           }
 
-          // Resolve team id
-          let teamIdFilter: string | undefined;
+          // Resolve team id — default to current team for scoped resolution
+          let teamIdFilter: string = teamId;
           if (teamFilter) {
             const teamRow = await this.db.teams.getTeamByName(teamFilter);
             if (!teamRow) return { ok: false, error: `Team "${teamFilter}" not found` };
@@ -5174,7 +5708,7 @@ export class AgentManagerDb {
             return { ok: false, error: 'Usage: /task assign <task-name|#shortid> <agent> [--team <team>]' };
           }
 
-          const { task, error: taskErr } = await this.resolveTaskRef(taskName);
+          const { task, error: taskErr } = await this.resolveTaskRef(taskName, teamId);
           if (!task) return { ok: false, error: taskErr || `Task "${taskName}" not found` };
 
           // Check for --team flag
@@ -5198,7 +5732,7 @@ export class AgentManagerDb {
             updated_at: now,
           });
 
-          const updated = await this.db.tasks.getByName(task.name);
+          const updated = await this.db.tasks.getByNameForTeam(task.name, teamId);
           return { ok: true, result: { task: await this.buildTaskResult(updated!, teamId) } };
         }
 
@@ -5213,8 +5747,13 @@ export class AgentManagerDb {
             return { ok: false, error: 'Claim requires agent identity. Use /remote with a "from" field.' };
           }
 
-          const { task, error: taskErr } = await this.resolveTaskRef(taskRef);
+          const { task, error: taskErr } = await this.resolveTaskRef(taskRef, teamId);
           if (!task) return { ok: false, error: taskErr || `Task "${taskRef}" not found` };
+
+          // Cross-team claim guard
+          if (task.team_id && task.team_id !== teamId) {
+            return { ok: false, error: `Task "${taskRef}" not found` };
+          }
 
           // Resolve caller agent
           const { agent: callerAgent, error: callerError } = await this.resolveSingleAgentForCommand(teamId, callerFrom);
@@ -5226,7 +5765,7 @@ export class AgentManagerDb {
             return { ok: false, error: `Cannot claim "${task.name}" — task is already owned or not in todo status` };
           }
 
-          const updated = await this.db.tasks.getByName(task.name);
+          const updated = await this.db.tasks.getByNameForTeam(task.name, teamId);
           return { ok: true, result: { task: await this.buildTaskResult(updated!, teamId) } };
         }
 
@@ -5238,8 +5777,13 @@ export class AgentManagerDb {
             return { ok: false, error: 'Usage: /task done <task-name|#shortid>' };
           }
 
-          const { task, error: taskErr } = await this.resolveTaskRef(taskRef);
+          const { task, error: taskErr } = await this.resolveTaskRef(taskRef, teamId);
           if (!task) return { ok: false, error: taskErr || `Task "${taskRef}" not found` };
+
+          // Cross-team done guard
+          if (task.team_id && task.team_id !== teamId) {
+            return { ok: false, error: `Task "${taskRef}" not found` };
+          }
 
           // If called by an agent (callerFrom set), enforce ownership
           if (callerFrom) {
@@ -5256,7 +5800,7 @@ export class AgentManagerDb {
             updated_at: now,
           });
 
-          const updated = await this.db.tasks.getByName(task.name);
+          const updated = await this.db.tasks.getByNameForTeam(task.name, teamId);
           return { ok: true, result: { task: await this.buildTaskResult(updated!, teamId) } };
         }
 
@@ -5267,7 +5811,7 @@ export class AgentManagerDb {
             return { ok: false, error: 'Usage: /task remove <task-name|#shortid>' };
           }
 
-          const { task, error: taskErr } = await this.resolveTaskRef(taskRef);
+          const { task, error: taskErr } = await this.resolveTaskRef(taskRef, teamId);
           if (!task) return { ok: false, error: taskErr || `Task "${taskRef}" not found` };
 
           await this.db.tasks.delete(task.id);
@@ -5286,6 +5830,16 @@ export class AgentManagerDb {
   }
 
   /**
+   * Derive a health status string for a remote-endpoint agent from its DB probe columns.
+   */
+  private deriveRemoteHealth(a: AgentRow): 'online' | 'unstable' | 'offline' | 'unknown' {
+    if (a.last_probed_at == null) return 'unknown';
+    if (a.consecutive_failures === 0) return 'online';
+    if (a.consecutive_failures <= 2) return 'unstable';
+    return 'offline';
+  }
+
+  /**
    * Get health info for an agent to include in API responses.
    */
   private getHealthForAgent(a: AgentRow): { health: string; lastHealthCheck: number | null } {
@@ -5297,11 +5851,16 @@ export class AgentManagerDb {
 
   /**
    * Start periodic health monitoring of all running agents (every 30s).
+   * Also starts the remote heartbeat loop in parallel.
    */
   private startHealthMonitor(): void {
     // Run immediately, then every 30 seconds
     this.runHealthChecks();
     this.healthCheckInterval = setInterval(() => this.runHealthChecks(), 30_000);
+
+    // Remote probe loop — same cadence, parallel to local loop
+    this.runRemoteHeartbeat();
+    this.remoteProbeInterval = setInterval(() => this.runRemoteHeartbeat(), 30_000);
   }
 
   /**
@@ -5339,6 +5898,18 @@ export class AgentManagerDb {
     }
   }
 
+  /**
+   * Local-agent health check loop.
+   *
+   * IMPORTANT: NEVER probe remote-endpoint agents here.  Remote agents
+   * (public-agent-remote runtime) are handled exclusively by runRemoteHeartbeat().
+   * Attempting to probe them from this path would hit their public internet
+   * endpoint from the wrong loop, double-count failures, and bypass the
+   * concurrency cap enforced by runRemoteHeartbeat.
+   *
+   * The isRemoteEndpointRuntime() guard below is the canonical firewall.
+   * It MUST remain the first runtime check inside the per-agent loop body.
+   */
   private async runHealthChecks(): Promise<void> {
     try {
       const teams = await this.db.teams.listTeams();
@@ -5347,6 +5918,10 @@ export class AgentManagerDb {
         for (const agent of agents) {
           // Skip virtual agents — they don't have a local /health endpoint
           if (agent.type === 'virtual') continue;
+          // GUARD: Skip remote-endpoint agents — handled exclusively by runRemoteHeartbeat().
+          // This check must come before any network I/O so remote agents can never
+          // be reached from this local-heartbeat path.
+          if (isRemoteEndpointRuntime(agent.runtime)) continue;
 
           const key = this.key(team.id, agent.id);
           const agentUrl = agent.type === 'interactive' ? agent.endpoint : `http://localhost:${agent.port}`;
@@ -5379,6 +5954,68 @@ export class AgentManagerDb {
       }
     } catch (err: any) {
       // Don't crash the interval on transient DB errors
+    }
+  }
+
+  /**
+   * Run a single heartbeat probe tick for all remote-endpoint agents.
+   * Probes are bounded to 8 concurrent in-flight requests.
+   */
+  private async runRemoteHeartbeat(): Promise<void> {
+    try {
+      const teams = await this.db.teams.listTeams();
+      const remoteAgents: Array<{ team: { id: string }; agent: AgentRow }> = [];
+      for (const team of teams) {
+        const agents = await this.dbListAgents(team.id, true);
+        for (const agent of agents) {
+          if (isRemoteEndpointRuntime(agent.runtime)) {
+            remoteAgents.push({ team, agent });
+          }
+        }
+      }
+
+      // Bounded concurrency: chunks of 8
+      const CONCURRENCY = 8;
+      for (let i = 0; i < remoteAgents.length; i += CONCURRENCY) {
+        const chunk = remoteAgents.slice(i, i + CONCURRENCY);
+        await Promise.all(chunk.map(({ team, agent }) =>
+          this.probeOneRemoteAgent(team.id, agent).catch(() => {
+            // Swallow errors — don't let one failure kill the loop
+          }),
+        ));
+      }
+    } catch {
+      // Don't crash the interval on transient DB errors
+    }
+  }
+
+  /**
+   * Probe a single remote agent, persist the result, and update healthStatus.
+   */
+  private async probeOneRemoteAgent(teamId: string, agent: AgentRow): Promise<void> {
+    const now = Math.floor(Date.now() / 1000);
+    const result = await probeRemoteAgent(agent, { fetch: this.healthProbeFn });
+
+    if (result.ok) {
+      await this.db.agents.updateProbeResult(agent.id, {
+        last_seen: result.last_seen,
+        last_probed_at: now,
+        last_error: result.last_error,
+        consecutive_failures: 0,
+      });
+      const updated = { ...agent, last_seen: result.last_seen, last_probed_at: now, last_error: result.last_error, consecutive_failures: 0 };
+      const health = this.deriveRemoteHealth(updated);
+      this.healthStatus.set(this.key(teamId, agent.id), { status: health as any, lastCheck: Date.now() });
+    } else {
+      const newFailures = (agent.consecutive_failures ?? 0) + 1;
+      await this.db.agents.updateProbeResult(agent.id, {
+        last_probed_at: now,
+        last_error: result.last_error,
+        consecutive_failures: newFailures,
+      });
+      const updated = { ...agent, last_probed_at: now, consecutive_failures: newFailures };
+      const health = this.deriveRemoteHealth(updated);
+      this.healthStatus.set(this.key(teamId, agent.id), { status: health as any, lastCheck: Date.now() });
     }
   }
 
@@ -5418,6 +6055,9 @@ export class AgentManagerDb {
         });
         this.schedulerService.start();
 
+        // Seed well-known teams (idempotent — getOrCreateTeamId is safe to call repeatedly)
+        await this.seedWellKnownTeams();
+
         // Start periodic health monitoring (every 30s)
         this.startHealthMonitor();
 
@@ -5432,6 +6072,25 @@ export class AgentManagerDb {
   private async initSchedules(): Promise<void> {
     // Intentionally left unused. Schedules persist in the DB and should not be reseeded on boot,
     // because reseeding interval schedules would reset their anchor and expiry.
+  }
+
+  /**
+   * Ensure well-known teams exist: default, idchain, public.
+   * These are created idempotently on every manager start so that subsequent
+   * phases can register agents into them without needing to create them on the fly.
+   */
+  private async seedWellKnownTeams(): Promise<void> {
+    try {
+      for (const name of ['default', 'idchain', 'public']) {
+        await this.db.teams.getOrCreateTeamId(name);
+        const teamDir = `${this.baseWorkDir}/teams/${name}`;
+        if (!existsSync(teamDir)) mkdirSync(teamDir, { recursive: true });
+      }
+      console.log('[Manager] Well-known teams seeded: default, idchain, public');
+    } catch (err: any) {
+      // Non-fatal: log and continue
+      console.warn('[Manager] Failed to seed well-known teams:', err?.message);
+    }
   }
 
 
