@@ -87,3 +87,18 @@ export async function deliverIdentityFile(
  *   sshDeliver.defaultDeliverFn = myStub;
  */
 export let defaultDeliverFn: DeliverFn = deliverIdentityFile;
+
+/**
+ * Redact the user portion of an ssh target for log output.
+ *   "alice@vps.example.com:22" → "<redacted>@vps.example.com:22"
+ *
+ * The hostname and port stay in the log so an operator can still correlate a
+ * failure with the destination host. Keep the full target only in admin API
+ * responses, never in stdout/stderr.
+ */
+export function redactSshTarget(sshTarget: string | null | undefined): string {
+  if (!sshTarget) return '<unset>';
+  const at = sshTarget.indexOf('@');
+  if (at < 0) return '<redacted>';
+  return `<redacted>@${sshTarget.slice(at + 1)}`;
+}

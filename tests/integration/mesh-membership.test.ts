@@ -72,8 +72,9 @@ let db: ReturnType<typeof createInMemoryDb>;
 
 // Agent IDs seeded for tests
 let meshAgentName: string;   // mesh_member: true (or absent) — should route
-let nonMeshAgentName: string; // mesh_member: false — should be blocked
+let nonMeshAgentName: string; // mesh_member: false, runtime:'default' — admin ?admin=true can still bypass
 let prePh4AgentName: string;  // no mesh_member key at all — should default to true
+let publicRemoteAgentName: string; // runtime:'public-agent-remote' — admin bypass must NOT work
 
 // A dummy endpoint so resolveTargetAgent returns a non-null URL.
 // It won't be reachable (connection refused) but the mesh gate fires before forwardToAgent.
@@ -112,7 +113,7 @@ beforeAll(async () => {
     runtime: 'default',
   });
 
-  // Agent B: mesh_member:false (public-agent-remote style)
+  // Agent B: mesh_member:false with default runtime — admin bypass stays legal here.
   nonMeshAgentName = 'non-mesh-agent-b';
   await db.agents.create({
     team_id: teamId,
@@ -128,6 +129,27 @@ beforeAll(async () => {
     metadata: {
       mesh_member: false,
       internal_url: DUMMY_INTERNAL_URL,
+    },
+    runtime: 'default',
+  });
+
+  // Agent D: runtime:'public-agent-remote' — admin bypass must be blocked per F2.
+  publicRemoteAgentName = 'public-remote-agent-d';
+  await db.agents.create({
+    team_id: teamId,
+    id: `agent_public_remote_d`,
+    name: publicRemoteAgentName,
+    type: 'virtual',
+    model: 'external',
+    port: 0,
+    endpoint: DUMMY_INTERNAL_URL,
+    working_directory: null,
+    status: 'running',
+    created_at: now,
+    metadata: {
+      mesh_member: false,
+      internal_url: DUMMY_INTERNAL_URL,
+      deployment_shape: 'remote-endpoint',
     },
     runtime: 'public-agent-remote',
   });
@@ -266,6 +288,43 @@ describe('Admin bypass via ?admin=true', () => {
     expect(resp.status).toBe(403);
     const body = await resp.json() as any;
     expect(body.error).toBe('not_mesh_reachable');
+  });
+});
+
+describe('F2: admin ?admin=true cannot bridge to public-agent-remote', () => {
+  it('admin ?admin=true → 403 not_mesh_reachable when target runtime is public-agent-remote', async () => {
+    const resp = await fetch(`${baseUrl}/talk-to?admin=true`, {
+      method: 'POST',
+      headers: adminHeaders('idchain'),
+      body: JSON.stringify({
+        to: publicRemoteAgentName,
+        message: 'diagnostic ping',
+        from: 'admin',
+        wait: false,
+      }),
+    });
+    expect(resp.status).toBe(403);
+    const body = await resp.json() as any;
+    expect(body.error).toBe('not_mesh_reachable');
+    // Public-remote-specific message; confirms the block reason
+    expect(typeof body.message).toBe('string');
+    expect(body.message).toMatch(/public-agent-remote/i);
+  });
+
+  it('admin ?admin=true on non-remote mesh-less target still bypasses (escape hatch preserved)', async () => {
+    const resp = await fetch(`${baseUrl}/talk-to?admin=true`, {
+      method: 'POST',
+      headers: adminHeaders('idchain'),
+      body: JSON.stringify({
+        to: nonMeshAgentName,
+        message: 'diagnostic ping',
+        from: 'admin',
+        wait: false,
+      }),
+    });
+    expect(resp.status).not.toBe(403);
+    const body = await resp.json() as any;
+    expect(body.error).not.toBe('not_mesh_reachable');
   });
 });
 

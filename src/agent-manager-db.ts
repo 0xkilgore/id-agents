@@ -23,7 +23,7 @@ import { privateKeyToAccount } from 'viem/accounts';
 import yaml from 'js-yaml';
 import { AgentRestServer } from './agent-rest-server.js';
 import { registerOnIdChain, createSubnameOnIdChain, setMultiChainAddresses } from './onchain/idchain-register.js';
-import { defaultDeliverFn, type DeliverFn } from './lib/ssh-deliver.js';
+import { defaultDeliverFn, redactSshTarget, type DeliverFn } from './lib/ssh-deliver.js';
 import { probeRemoteAgent, defaultHealthProbeFn, type HealthProbeFn } from './lib/remote-heartbeat.js';
 import { type Db } from './db/db-service.js';
 import type { AgentRow, ScheduleDefinitionRow, TaskRow } from './db/types.js';
@@ -933,11 +933,14 @@ export class AgentManagerDb {
     if (agent.ssh_target) {
       const remotePath = (agent.metadata as any)?.identity_remote_path || '/opt/public-agent/identity.json';
       const deliverResult = await this.deliverFn(agent.ssh_target, localPath, remotePath);
+      // Never log the full ssh_target (raw `user@host`); the user portion is
+      // operator PII. Full target is still available via admin API responses.
+      const redactedTarget = redactSshTarget(agent.ssh_target);
       if (deliverResult.ok) {
-        console.log(`[Register] Delivered identity.json to ${agent.ssh_target}:${remotePath}`);
+        console.log(`[Register] Delivered identity.json to ${redactedTarget}:${remotePath}`);
       } else {
         console.warn(
-          `[Register] SSH delivery failed for agent ${agent.id} (${agent.ssh_target}): ` +
+          `[Register] SSH delivery failed for agent ${agent.id} (${redactedTarget}): ` +
           `error=${deliverResult.error} stderr=${deliverResult.stderr ?? ''}`,
         );
         // Do NOT throw — on-chain state is authoritative regardless.
@@ -1052,13 +1055,21 @@ export class AgentManagerDb {
 
       // Mesh-membership gate: only mesh members can receive inter-agent messages.
       // mesh_member defaults to true for backward compat (pre-Phase-4 agents have no flag).
-      // Admin callers may bypass via ?admin=true for diagnostic purposes.
+      // Admin callers may bypass via ?admin=true for diagnostic purposes — EXCEPT
+      // when the target is a public-agent-remote runtime. Public remote agents
+      // live in the DMZ; routing manager-proxied traffic to them through an admin
+      // escape hatch would rebuild the proxy path the DMZ design explicitly
+      // forbids. Public conversations must use direct HTTPS; operator plane must
+      // use SSH. No admin override here.
       const meshMember = (targetAgent.metadata as any)?.mesh_member !== false;
-      const adminBypass = this.isAdminRequest(req) && req.query.admin === 'true';
+      const isPublicRemote = targetAgent.runtime === 'public-agent-remote';
+      const adminBypass = this.isAdminRequest(req) && req.query.admin === 'true' && !isPublicRemote;
       if (!meshMember && !adminBypass) {
         return res.status(403).json({
           error: 'not_mesh_reachable',
-          message: 'Target agent is not part of the inter-agent mesh.'
+          message: isPublicRemote
+            ? 'Target is a public-agent-remote runtime. Reach it via direct HTTPS (/talk) or SSH (operator plane); no manager-proxied admin bypass.'
+            : 'Target agent is not part of the inter-agent mesh.'
         });
       }
 
