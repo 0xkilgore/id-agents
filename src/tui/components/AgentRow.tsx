@@ -41,8 +41,8 @@ const REMOTE_COLS = {
   hb: 3,
   mem: 8,     // renders '—' but keeps same width
   uptime: 14, // wider to show "Xm ago"
-  domain: 26, // customer_domain truncated to 25 chars + overflow '…'
-  dmz: 4,     // DMZ badge or empty
+  domain: 18, // customer_domain truncated to 17 chars + overflow '…'
+  dmz: 3,     // DMZ badge (3 chars) or empty
 } as const;
 
 const NEWS_GLYPH = '●';
@@ -51,7 +51,7 @@ function abbrevRuntime(rt?: string): string {
   if (!rt) return '—';
   if (rt === 'claude-code-cli') return 'claude-cli';
   if (rt === 'claude-agent-sdk') return 'claude-sdk';
-  if (rt === 'public-agent-remote') return 'pa-remote';
+  if (rt === 'public-agent-remote') return 'juno';
   return rt;
 }
 
@@ -79,7 +79,7 @@ function AgentRowInner({ agent, selected, uptime, newsColor, memBytes, nowMs }: 
     const lastSeenStr = humanizeLastSeen(agent.last_seen, nowMs);
     const uptimeCell = padRight(lastSeenStr, REMOTE_COLS.uptime);
     const domainVal = agent.customer_domain ?? '';
-    const domainCell = padRight(truncate(domainVal, 25), REMOTE_COLS.domain);
+    const domainCell = padRight(truncate(domainVal, 17), REMOTE_COLS.domain);
     const dmzVal = (agent.metadata as Record<string, unknown> | undefined)?.dmz === true ? 'DMZ' : '';
     const dmzCell = padRight(dmzVal, REMOTE_COLS.dmz);
 

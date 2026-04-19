@@ -110,6 +110,7 @@ export function App({ staticMode = false }: AppProps = {}): React.ReactElement {
   const [hbSelectedIndex, setHbSelectedIndex] = useState(0);
   const [hbWindowStart, setHbWindowStart] = useState(0);
   const [paused, setPaused] = useState(false);
+  const [showQuitConfirm, setShowQuitConfirm] = useState(false);
   const [cooldownEpoch, setCooldownEpoch] = useState<number>(() => Date.now());
 
   // Cooldown tick runs on news AND agents so the news-freshness dot in
@@ -658,9 +659,27 @@ export function App({ staticMode = false }: AppProps = {}): React.ReactElement {
 
   useInput(
     (input, key) => {
+      // Quit confirmation — intercepts q when not yet confirmed. Ctrl-C still
+      // exits immediately (users who want a hard quit have it). Inside the
+      // confirmation, Enter / y commits, Esc / n cancels.
+      if (showQuitConfirm) {
+        if (key.return || input === 'y' || input === 'Y') {
+          exit();
+          return;
+        }
+        if (key.escape || input === 'n' || input === 'N' || (key.ctrl && input === 'c')) {
+          setShowQuitConfirm(false);
+          return;
+        }
+        return; // swallow everything else while the dialog is open
+      }
       // global
-      if (input === 'q' || (key.ctrl && input === 'c')) {
+      if (key.ctrl && input === 'c') {
         exit();
+        return;
+      }
+      if (input === 'q') {
+        setShowQuitConfirm(true);
         return;
       }
       if (input === 'p') {
@@ -790,6 +809,12 @@ export function App({ staticMode = false }: AppProps = {}): React.ReactElement {
 
   return (
     <Box flexDirection="column">
+      {showQuitConfirm ? (
+        <Box borderStyle="round" borderColor="yellow" paddingX={1}>
+          <Text bold color="yellow">Quit? </Text>
+          <Text dimColor>Enter / y = yes   ·   Esc / n = no</Text>
+        </Box>
+      ) : null}
       {view === 'agents' ? (
         <>
           <TeamsPanel
