@@ -15,6 +15,12 @@ interface AgentsTableProps {
   windowSize: number;
   loading: boolean;
   error: Error | null;
+  nowMs: number;
+}
+
+function isRemoteAgent(a: Agent): boolean {
+  return a.deploymentShape === 'remote-endpoint' ||
+    a.metadata?.runtime === 'public-agent-remote';
 }
 
 export function AgentsTable(props: AgentsTableProps): React.ReactElement {
@@ -30,12 +36,16 @@ export function AgentsTable(props: AgentsTableProps): React.ReactElement {
     windowSize,
     loading,
     error,
+    nowMs,
   } = props;
   const total = agents.length;
   const windowEnd = Math.min(total, windowStart + windowSize);
   const visible = agents.slice(windowStart, windowEnd);
   const hiddenAbove = windowStart;
   const hiddenBelow = total - windowEnd;
+
+  // Show remote-header columns if any visible agent is remote
+  const hasRemote = visible.some(isRemoteAgent);
 
   return (
     <Box flexDirection="column" borderStyle="round" paddingX={1}>
@@ -50,7 +60,7 @@ export function AgentsTable(props: AgentsTableProps): React.ReactElement {
           {error ? `error: ${error.message}` : null}
         </Text>
       </Box>
-      <AgentRowHeader />
+      <AgentRowHeader hasRemote={hasRemote} />
       <Text dimColor>{hiddenAbove > 0 ? `↑ ${hiddenAbove} more above` : ' '}</Text>
       {visible.length === 0 && !loading ? (
         <Text dimColor>no agents in this view</Text>
@@ -63,6 +73,7 @@ export function AgentsTable(props: AgentsTableProps): React.ReactElement {
             newsColor={newsColorById.get(agent.id) ?? 'gray'}
             memBytes={memBytesById.get(agent.id) ?? null}
             selected={windowStart + i === selectedIndex}
+            nowMs={nowMs}
           />
         ))
       )}

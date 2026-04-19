@@ -13,11 +13,17 @@ export function statusColor(status: string): string {
 }
 
 export function healthColor(health: string): string {
-  return health === 'online' ? 'green' : health === 'offline' ? 'red' : 'gray';
+  if (health === 'online') return 'green';
+  if (health === 'unstable') return 'yellow';
+  if (health === 'offline') return 'red';
+  return 'gray';
 }
 
 export function healthDot(health: string): string {
-  return health === 'online' ? '●' : '○';
+  if (health === 'online') return '●';
+  if (health === 'unstable') return '●';
+  if (health === 'offline') return '○';
+  return '○'; // registered / unknown — never probed
 }
 
 /**

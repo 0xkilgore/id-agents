@@ -11,6 +11,7 @@ import { TaskDetail } from './components/TaskDetail.js';
 import { CalendarView } from './components/CalendarView.js';
 import { HeartbeatsView, type HeartbeatRow } from './components/HeartbeatsView.js';
 import { HeartbeatDetail } from './components/HeartbeatDetail.js';
+import { AgentDetail } from './components/AgentDetail.js';
 import type { Agent, NewsItem, Schedule, Task, Team } from './api/types.js';
 import {
   fetchAgentNews,
@@ -32,6 +33,7 @@ import {
 
 type View =
   | 'agents'
+  | 'agent-detail'
   | 'news'
   | 'news-detail'
   | 'tasks'
@@ -250,13 +252,26 @@ export function App({ staticMode = false }: AppProps = {}): React.ReactElement {
     for (const [id, bytes] of memoryPoll.data ?? []) m.set(id, bytes);
     return m;
   }, [memoryPoll.data]);
+  // Only local agents contribute to total memory — remote agents have no
+  // RSS. Build a set of local agent IDs so the sum excludes remote rows.
+  const localAgentIds = useMemo(() => {
+    const s = new Set<string>();
+    for (const a of allAgents) {
+      const isRemote = a.deploymentShape === 'remote-endpoint' ||
+        a.metadata?.runtime === 'public-agent-remote';
+      if (!isRemote) s.add(a.id);
+    }
+    return s;
+  }, [allAgents]);
+
   const totalMemoryBytes = useMemo(() => {
     let sum = 0;
-    for (const [, bytes] of memBytesById) {
+    for (const [id, bytes] of memBytesById) {
+      if (!localAgentIds.has(id)) continue;
       if (typeof bytes === 'number' && Number.isFinite(bytes) && bytes > 0) sum += bytes;
     }
     return sum;
-  }, [memBytesById]);
+  }, [memBytesById, localAgentIds]);
   const totalMemoryLabel = useMemo(() => formatTotalMemory(totalMemoryBytes), [totalMemoryBytes]);
   const totalMemoryColor = useMemo(() => totalMemColor(totalMemoryBytes), [totalMemoryBytes]);
 
@@ -466,6 +481,7 @@ export function App({ staticMode = false }: AppProps = {}): React.ReactElement {
   const [detailScroll, setDetailScroll] = useState(0);
   const [taskDetailScroll, setTaskDetailScroll] = useState(0);
   const [hbDetailScroll, setHbDetailScroll] = useState(0);
+  const [agentDetailScroll, setAgentDetailScroll] = useState(0);
 
   useEffect(() => {
     if (newsTotal === 0) {
@@ -575,6 +591,26 @@ export function App({ staticMode = false }: AppProps = {}): React.ReactElement {
     [hbTotal],
   );
 
+  const openAgentDetail = useCallback(() => {
+    if (!selectedAgent) return;
+    const isRemote = selectedAgent.deploymentShape === 'remote-endpoint' ||
+      selectedAgent.metadata?.runtime === 'public-agent-remote';
+    if (!isRemote) return; // local agents drill into news instead
+    setAgentDetailScroll(0);
+    setView('agent-detail');
+  }, [selectedAgent]);
+
+  const backFromAgentDetail = useCallback(() => {
+    setView('agents');
+  }, []);
+
+  const moveAgentDetailScroll = useCallback(
+    (delta: number) => {
+      setAgentDetailScroll((off) => Math.max(0, off + delta));
+    },
+    [],
+  );
+
   const openNews = useCallback(() => {
     if (!selectedAgentName) return;
     setNewsSelectedIndex(0);
@@ -636,7 +672,12 @@ export function App({ staticMode = false }: AppProps = {}): React.ReactElement {
         if (input === 't') return toggleTasksView();
         if (input === 'c') return openCalendar();
         if (input === 'h') return openHeartbeats();
-        if (key.rightArrow) return openNews();
+        if (key.rightArrow) {
+          // Remote agents get the detail panel; local agents get news
+          const isRemote = selectedAgent?.deploymentShape === 'remote-endpoint' ||
+            selectedAgent?.metadata?.runtime === 'public-agent-remote';
+          return isRemote ? openAgentDetail() : openNews();
+        }
         if (key.tab) return cycleTeam(key.shift ? -1 : 1);
         if (key.upArrow) return moveAgentsSel(-1);
         if (key.downArrow) return moveAgentsSel(1);
@@ -684,6 +725,17 @@ export function App({ staticMode = false }: AppProps = {}): React.ReactElement {
         if (key.pageDown) return moveSchedSel(calendarWindowSize);
         if (isHomeKey(input)) return setSchedSelectedIndex(0);
         if (isEndKey(input)) return setSchedSelectedIndex(Math.max(0, schedTotal - 1));
+        return;
+      }
+
+      if (view === 'agent-detail') {
+        if (key.leftArrow || key.escape) return backFromAgentDetail();
+        if (key.upArrow) return moveAgentDetailScroll(-1);
+        if (key.downArrow) return moveAgentDetailScroll(1);
+        if (key.pageUp) return moveAgentDetailScroll(-detailWindowSize);
+        if (key.pageDown) return moveAgentDetailScroll(detailWindowSize);
+        if (isHomeKey(input)) return setAgentDetailScroll(0);
+        if (isEndKey(input)) return setAgentDetailScroll(Number.MAX_SAFE_INTEGER);
         return;
       }
 
@@ -759,6 +811,7 @@ export function App({ staticMode = false }: AppProps = {}): React.ReactElement {
             windowSize={agentsWindowSize}
             loading={agentsPoll.lastUpdated === 0 && !agentsPoll.error && !staticMode}
             error={agentsPoll.error}
+            nowMs={pollTs || Date.now()}
           />
           {teamsPoll.error ? (
             <Box paddingX={1}>
@@ -766,6 +819,17 @@ export function App({ staticMode = false }: AppProps = {}): React.ReactElement {
             </Box>
           ) : null}
         </>
+      ) : view === 'agent-detail' ? (
+        <AgentDetail
+          agent={selectedAgent}
+          positionLabel={
+            total > 0 ? `agent ${selectedIndex + 1} of ${total}` : ''
+          }
+          windowSize={detailWindowSize}
+          scrollOffset={agentDetailScroll}
+          contentWidth={DETAIL_CONTENT_WIDTH}
+          nowMs={pollTs || Date.now()}
+        />
       ) : view === 'tasks' ? (
         <>
           <TeamsPanel
