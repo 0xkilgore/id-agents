@@ -95,7 +95,7 @@ describe('Phase 7: maintenance mode', () => {
       const res = await req(app, 'GET', '/.well-known/restap.json');
       expect(res.status).toBe(200);
       const body = res.body as Record<string, unknown>;
-      expect(body.restap_version).toBeDefined();
+      expect(body.service_type).toBe('public-agent');
     });
   });
 

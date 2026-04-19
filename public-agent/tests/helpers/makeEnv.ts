@@ -8,6 +8,11 @@ export function makeEnv(overrides: Partial<Env> = {}): Env {
     openRouterApiKey: 'test-key',
     openRouterModel: 'test-model',
     port: 4200,
+    operatorPort: 4201,
+    publicHost: '0.0.0.0',
+    operatorHost: '127.0.0.1',
+    publicUrl: 'https://test-agent.example.com',
+    version: '0.0.0-test',
     agentName: 'test-agent',
     authKey: null,
     allowPublicUnauthenticated: false,
@@ -27,6 +32,8 @@ export function makeEnv(overrides: Partial<Env> = {}): Env {
     maxRetryAfterMs: 10000,
     requestDeadlineMs: 60000,
     maintenance: false,
+    identityPath: '/tmp/test-identity.json',
+    bootTimeMs: 1700000000000,
     ...overrides,
   };
 }

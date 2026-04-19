@@ -1,7 +1,22 @@
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
 export interface Env {
   openRouterApiKey: string;
   openRouterModel: string;
+  /** Public listener port — serves /talk, /health, /identity, /.well-known/* */
   port: number;
+  /** Operator listener port — serves /inbox, /news, /mcp */
+  operatorPort: number;
+  /** Public listener bind host. Defaults to 0.0.0.0 (internet-reachable). */
+  publicHost: string;
+  /** Operator listener bind host. Defaults to 127.0.0.1 (loopback-only). */
+  operatorHost: string;
+  /** Absolute public URL advertised in /.well-known (must be an HTTPS URL). */
+  publicUrl: string;
+  /** Service version — read from package.json at startup. */
+  version: string;
   agentName: string;
   authKey: string | null;
   allowPublicUnauthenticated: boolean;
@@ -22,6 +37,10 @@ export interface Env {
   requestDeadlineMs: number;
   /** When true, /talk returns 503. /health and /.well-known stay up. */
   maintenance: boolean;
+  /** Path to identity.json on disk (delivered by manager via SSH). */
+  identityPath: string;
+  /** When true, startup boot timestamp for /health uptime calculations. */
+  bootTimeMs: number;
 }
 
 function required(name: string, value: string | undefined): string {
@@ -40,12 +59,51 @@ function intOr(name: string, value: string | undefined, fallback: number): numbe
   return n;
 }
 
+function readPackageVersion(): string {
+  try {
+    const here = path.dirname(fileURLToPath(import.meta.url));
+    // src/env.ts → ../package.json when running via tsx; dist/env.js → ../package.json when compiled.
+    const candidates = [
+      path.resolve(here, '../package.json'),
+      path.resolve(here, '../../package.json'),
+    ];
+    for (const p of candidates) {
+      try {
+        const pkg = JSON.parse(fs.readFileSync(p, 'utf8'));
+        if (pkg && typeof pkg.version === 'string') return pkg.version;
+      } catch {
+        // try next
+      }
+    }
+  } catch {
+    // fall through
+  }
+  return '0.0.0';
+}
+
+function derivePublicUrl(name: string, host: string | undefined): string {
+  const explicit = process.env.PUBLIC_URL?.trim();
+  if (explicit) return explicit.replace(/\/+$/, '');
+  const publicHost = process.env.PUBLIC_HOST?.trim();
+  if (publicHost) return `https://${publicHost}`;
+  throw new Error(
+    `Missing required env var PUBLIC_URL (or PUBLIC_HOST fallback). Set PUBLIC_URL=https://<your-domain> so /.well-known/restap.json can advertise an absolute public URL.`,
+  );
+}
+
 export function loadEnv(): Env {
+  const agentName = process.env.PUBLIC_AGENT_NAME?.trim() || 'public-agent';
+  const publicUrl = derivePublicUrl(agentName, process.env.PUBLIC_HOST);
   return {
     openRouterApiKey: required('OPENROUTER_API_KEY', process.env.OPENROUTER_API_KEY),
     openRouterModel: required('OPENROUTER_MODEL', process.env.OPENROUTER_MODEL),
     port: intOr('PUBLIC_AGENT_PORT', process.env.PUBLIC_AGENT_PORT, 4200),
-    agentName: process.env.PUBLIC_AGENT_NAME?.trim() || 'public-agent',
+    operatorPort: intOr('OPERATOR_PORT', process.env.OPERATOR_PORT, 4201),
+    publicHost: process.env.PUBLIC_AGENT_HOST?.trim() || '0.0.0.0',
+    operatorHost: process.env.OPERATOR_HOST?.trim() || '127.0.0.1',
+    publicUrl,
+    version: readPackageVersion(),
+    agentName,
     authKey: process.env.PUBLIC_AGENT_AUTH_KEY?.trim() || null,
     allowPublicUnauthenticated: process.env.ALLOW_PUBLIC_UNAUTHENTICATED === 'true',
     maxTokensPerDay: intOr('MAX_TOKENS_PER_DAY', process.env.MAX_TOKENS_PER_DAY, 0),
@@ -64,5 +122,7 @@ export function loadEnv(): Env {
     maxRetryAfterMs: intOr('MAX_RETRY_AFTER_MS', process.env.MAX_RETRY_AFTER_MS, 10000),
     requestDeadlineMs: intOr('REQUEST_DEADLINE_MS', process.env.REQUEST_DEADLINE_MS, 60000),
     maintenance: process.env.MAINTENANCE === 'true',
+    identityPath: process.env.IDENTITY_PATH?.trim() || '/opt/public-agent/identity.json',
+    bootTimeMs: Date.now(),
   };
 }
