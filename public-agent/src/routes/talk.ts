@@ -370,6 +370,19 @@ export function talkRoutes(env: Env, knowledge: KnowledgeManifest): Hono {
   });
 
   app.post('/talk', requireAuthOrPublicTalk(env), async (c, next) => {
+    // Maintenance mode: return 503 before any auth/rate-limit/upstream work.
+    // /health and /.well-known are mounted on separate routers and do NOT
+    // check this flag — they must stay up during maintenance windows.
+    if (env.maintenance) {
+      return c.json(
+        {
+          error: 'maintenance',
+          message: 'This agent is temporarily offline for maintenance.',
+        },
+        503,
+      );
+    }
+
     const ip = resolve(c);
     if (!ip) {
       return c.json(

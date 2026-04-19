@@ -26,6 +26,7 @@ export function makeEnv(overrides: Partial<Env> = {}): Env {
     upstreamDeadlineMs: 45000,
     maxRetryAfterMs: 10000,
     requestDeadlineMs: 60000,
+    maintenance: false,
     ...overrides,
   };
 }

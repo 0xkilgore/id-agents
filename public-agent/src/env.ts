@@ -20,6 +20,8 @@ export interface Env {
   upstreamDeadlineMs: number;
   maxRetryAfterMs: number;
   requestDeadlineMs: number;
+  /** When true, /talk returns 503. /health and /.well-known stay up. */
+  maintenance: boolean;
 }
 
 function required(name: string, value: string | undefined): string {
@@ -61,5 +63,6 @@ export function loadEnv(): Env {
     upstreamDeadlineMs: intOr('UPSTREAM_DEADLINE_MS', process.env.UPSTREAM_DEADLINE_MS, 45000),
     maxRetryAfterMs: intOr('MAX_RETRY_AFTER_MS', process.env.MAX_RETRY_AFTER_MS, 10000),
     requestDeadlineMs: intOr('REQUEST_DEADLINE_MS', process.env.REQUEST_DEADLINE_MS, 60000),
+    maintenance: process.env.MAINTENANCE === 'true',
   };
 }
