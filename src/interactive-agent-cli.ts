@@ -657,8 +657,56 @@ const remoteCommandHandler: CommandHandler = async (command: string, from?: stri
       }
     }
 
+    // /public — public-team agent admin (list/add/remove)
+    //
+    // Dispatch surface mirrors the interactive handler above but skips the
+    // chat-loop variants (remote callers can POST to /talk directly).
+    if (trimmed === '/public' || trimmed.startsWith('/public ')) {
+      const publicDeps = {
+        managerBaseUrl: MANAGER_URL,
+        fetch: fetch as unknown as typeof globalThis.fetch,
+      };
+      const rest = trimmed === '/public' ? '' : trimmed.slice('/public '.length).trim();
+
+      if (rest === '' || rest === 'list') {
+        const r = await listPublicAgents(publicDeps);
+        if (!r.ok) return { success: false, error: r.error };
+        const lines = r.agents.map((a: any) =>
+          `${a.name}\t${a.customer_domain ?? '-'}\t${a.status ?? '-'}\t${a.public_endpoint_url ?? '-'}`);
+        return { success: true, result: lines.join('\n') || 'No public agents registered' };
+      }
+
+      if (rest.startsWith('add ')) {
+        const addArgs = parseArgs(rest.slice('add '.length));
+        const domain = addArgs.find((a) => !a.startsWith('--'));
+        if (!domain) {
+          return { success: false, error: 'Usage: /public add <domain> [--ssh-target=user@host] [--internal-port=N] [--onchain] [--registrar=<name>]' };
+        }
+        const sshFlag = addArgs.find((a) => a.startsWith('--ssh-target='));
+        const portFlag = addArgs.find((a) => a.startsWith('--internal-port='));
+        const registrarFlag = addArgs.find((a) => a.startsWith('--registrar='));
+        const sshTarget = sshFlag ? sshFlag.slice('--ssh-target='.length) : null;
+        const internalPort = portFlag ? parseInt(portFlag.slice('--internal-port='.length), 10) : null;
+        const onchain = addArgs.includes('--onchain');
+        const registrar = registrarFlag ? registrarFlag.slice('--registrar='.length) : undefined;
+        const r = await addPublicAgent(domain, { sshTarget, internalPort, onchain, registrar }, publicDeps);
+        if (!r.ok) return { success: false, error: r.error };
+        return { success: true, result: r.message };
+      }
+
+      if (rest.startsWith('remove ')) {
+        const ref = rest.slice('remove '.length).trim();
+        if (!ref) return { success: false, error: 'Usage: /public remove <name|domain>' };
+        const r = await removePublicAgent(ref, publicDeps);
+        if (!r.ok) return { success: false, error: r.error };
+        return { success: true, result: r.message };
+      }
+
+      return { success: false, error: `Unknown /public subcommand: ${rest.split(/\s/)[0] || '(none)'}. Supported via /remote: list, add, remove` };
+    }
+
     // Unknown command
-    return { success: false, error: `Unknown command: ${trimmed.split(/\s/)[0]}. Supported: /agents, /status, /ask, /hey, /delete, /agent, /team, /deploy, /register` };
+    return { success: false, error: `Unknown command: ${trimmed.split(/\s/)[0]}. Supported: /agents, /status, /ask, /hey, /delete, /agent, /team, /deploy, /register, /public` };
 
   } catch (err: any) {
     return { success: false, error: err.message || String(err) };
@@ -3686,7 +3734,10 @@ async function handleLine(line: string) {
             sessionId: null,
             priorPrompt: (rl as any).getPrompt?.() ?? `${colors.green}> ${colors.reset}`,
           };
-          rl.setPrompt(`${colors.cyan}public:${target.customer_domain ?? target.name}> ${colors.reset}`);
+          // End the prompt with a visible space AFTER the ANSI reset so
+          // readline can anchor the cursor correctly. Putting the reset
+          // after the space loses the cursor on some terminals.
+          rl.setPrompt(`${colors.cyan}public:${target.customer_domain ?? target.name}>${colors.reset} `);
           console.log(`\n${colors.cyan}→ chatting with ${target.name} (${target.customer_domain ?? baseUrl})${colors.reset}`);
           console.log(`${colors.gray}   ${talkEndpoint}   ·   /exit or any /command to leave${colors.reset}\n`);
           rl.prompt();
@@ -3893,6 +3944,14 @@ ${colors.bold}  ╚═╝╚═════╝      ╚═╝  ╚═╝ ╚═�
   ${colors.gray}v${PKG_INFO.version}  •  Multi-agent orchestration  •  ${PKG_INFO.license}${colors.reset}
   ${colors.gray}github.com/idchain-world/id-agents${colors.reset}
 `);
+
+// Defensively re-enable the terminal cursor. If the TUI (or any alt-screen
+// program) exited without running its cleanup — SIGKILL, crash, power-off —
+// the cursor-hide escape `\x1b[?25l` stays applied to the terminal, and
+// subsequent shell programs look cursor-less. `\x1b[?25h` restores it.
+if (process.stdout.isTTY) {
+  process.stdout.write('\x1b[?25h');
+}
 
 server.start().then(async () => {
   server.setCommandHandler(remoteCommandHandler);
