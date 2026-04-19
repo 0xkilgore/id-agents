@@ -16,7 +16,7 @@ Run a team of AI coding agents from a single chat. Each agent is a real process 
 ## Key Features
 
 - **Multiple runtimes** - Claude Code CLI and OpenAI Codex — mix and match in the same team
-- **Juno runtime** - id-agents' public-facing, capability-limited runtime for DMZ agents; guard classifier, KB-only tools, per-IP rate limit, daily token budget (the only runtime safe to point at the public internet — internal agents keep using their CLI harness directly)
+- **Public-agent support** - register any REST-AP service that publishes `/.well-known/restap.json` with `service_type: "public-agent"` into the `public` team via `/public add <domain>`. The id-agents manager handles wallet provisioning, ID Chain registration, SSH-delivered identity files, heartbeat probes, and DMZ metadata. **[Juno](https://github.com/idchain-world/juno)** is the reference public-agent implementation we ship — capability-limited by design, safe to point at the internet — but any service that speaks the same protocol works
 - **Task system** - Create, assign, claim, and track tasks across agents (`/task` commands + `/tasks` REST API)
 - **Scheduling** - Heartbeat intervals and calendar events for automated recurring work
 - **Org chart** - Define team structure with groups and tags so agents know their peers and leads

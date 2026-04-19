@@ -2,7 +2,9 @@
 
 ## Status: All Phases Complete
 
-Phases 1–7 have landed on branch `feature/public-agent`. See `/public-agent/docs/runbook.md` for day-to-day ops and `/public-agent/docs/security-review-2026-04-18.md` for the hardening status map.
+Phases 1–7 have landed on `main`. The reference public-agent implementation lives at **[github.com/idchain-world/juno](https://github.com/idchain-world/juno)** — see its `docs/runbook.md` and `docs/deployment.md`.
+
+**Protocol, not a specific service.** id-agents's `public` team mechanics — wallet provisioning, on-chain registration, `/public add <domain>` well-known fetch, SSH identity delivery, heartbeat probes, mesh isolation — all depend only on the REST-AP contract documented below. Juno is one implementation. Any service that publishes a compatible `/.well-known/restap.json` (`service_type: "public-agent"`, correct `endpoints`, `public_url`) with a working `/health` and `/talk` can be registered as a public-agent-remote. Operators are expected to build their own where Juno's capability surface is too narrow or too broad for a specific use case.
 
 Task: `cto-public-team-design`
 
