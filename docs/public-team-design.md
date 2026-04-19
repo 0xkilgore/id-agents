@@ -1,5 +1,9 @@
 # Public Team Design
 
+## Status: All Phases Complete
+
+Phases 1–7 have landed on branch `feature/public-agent`. See `/public-agent/docs/runbook.md` for day-to-day ops and `/public-agent/docs/security-review-2026-04-18.md` for the hardening status map.
+
 Task: `cto-public-team-design`
 
 ## 1. Team Isolation Model
