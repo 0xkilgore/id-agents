@@ -48,6 +48,21 @@ Non-trivial work must be a task. Single-line answers, greetings, simple look-ups
 
 The manager daemon and internal agents use **Express 5**. The **public-agent** DMZ uses **Hono 4**. Both are Node.js/TypeScript and speak REST-AP over HTTP JSON — the framework difference is an internal implementation detail, not a protocol difference. The manager also owns a SQLite database for history, tasks, news, and scheduled events; the public-agent stores its inbox as flat JSON files on disk and has no database.
 
+## Why use Juno instead of Codex or Claude Code for a public agent?
+
+Because Claude Code CLI and OpenAI Codex are not safe to expose to the public internet. Both have broad capabilities by design — shell access, arbitrary file read/write, outbound HTTP, mesh messaging — and no built-in rate limiting, token budget, or guard classifier. Pointing either of them at a public `/talk` endpoint would let any caller hand the agent a prompt that reads your filesystem, shells out, or pivots through your mesh.
+
+**Juno** is the runtime that fills that gap. It is the only runtime id-agents ships that is safe to put on the public internet, and it is used exclusively for DMZ / public agents:
+
+- **Limited capability surface.** Only `search_knowledge` and `read_knowledge` are exposed to the model. No shell, no arbitrary file read, no outbound HTTP except the OpenRouter inference call.
+- **Guard classifier.** A separate LLM call runs before the main turn and enforces a refusal schema with violation codes; off-policy prompts never reach the assistant.
+- **Rate limit + daily budget.** Per-IP talk rate limit, daily token ceiling, and a prompt+completion budget reserve so a single abusive caller cannot drain the whole day.
+- **Fail-closed auth.** Operator endpoints (`/inbox`, `/news`, `/mcp`) require `PUBLIC_AGENT_AUTH_KEY` or return 401 / refuse the connection; they are only reachable via SSH tunnel by default.
+- **Bounded KB retrieval.** A server-side retrieval loop forces deterministic query persistence before the model can answer "I don't know," so answers stay grounded in the KB rather than hallucinating.
+- **DMZ-ready deployment.** Hetzner VPS, systemd unit, Caddy reverse proxy for TLS; no Docker required.
+
+For internal agents on the trusted local mesh, keep using `claude-code-cli`, `codex`, or `claude-agent-sdk` directly — the broad capabilities are fine there because those agents never receive traffic from arbitrary internet callers. Juno is specifically the runtime for the public / DMZ boundary.
+
 ## Which agent runtimes/harnesses are supported?
 
 ID Agents currently supports two agent runtimes:
@@ -66,4 +81,4 @@ Practical limits usually appear first in other places: API rate limits, CPU cont
 The TUI (`tui` agent) surfaces per-agent RSS in the MEM column and a `Total memory: X.XGB` line in the header, so you can watch actual usage rather than guess.
 
 ---
-Keywords: faq, common questions, troubleshooting, problems, issues, help, questions, q&a, headless, port, tasks, team, heartbeat, calendar, difference, compare, opencode, open code, openclaw, open claw, cursor, aider, cody, continue.dev, continue, roo code, roocode, cline, warp, warp ai, windsurf, zed, zed ai, goose, harnesses, runtimes, supported, unsupported, compatibility, alternatives, express, hono, framework, web server, http, node, typescript, dependencies, stack, memory, ram, limit, max agents, how many, scale, sizing, capacity, rss
+Keywords: faq, common questions, troubleshooting, problems, issues, help, questions, q&a, headless, port, tasks, team, heartbeat, calendar, difference, compare, opencode, open code, openclaw, open claw, cursor, aider, cody, continue.dev, continue, roo code, roocode, cline, warp, warp ai, windsurf, zed, zed ai, goose, harnesses, runtimes, supported, unsupported, compatibility, alternatives, express, hono, framework, web server, http, node, typescript, dependencies, stack, memory, ram, limit, max agents, how many, scale, sizing, capacity, rss, juno, public runtime, dmz runtime, public-facing, capability-limited, guard, guard classifier, budget, token budget, rate limit, why juno, juno vs codex, juno vs claude code, public agent runtime

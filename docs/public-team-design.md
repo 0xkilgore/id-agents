@@ -55,7 +55,7 @@ Recommended policy:
 
 ## 2. Runtime Abstraction
 
-Terminology: the id-agents agent runtime — the Node.js REST-AP wrapper hosting one AI coding assistant — is called **Juno**. `public-agent-remote` is a Juno variant distinguished by `deploymentShape: remote-endpoint`, rather than a separate runtime concept.
+Terminology: the public-facing agent runtime in id-agents is called **Juno**. It is a Hono-based Node process with a capability-limited tool set (guard classifier, KB-only tools, per-IP rate limit, daily token budget) and is the only runtime id-agents ships that is safe to expose to the public internet. Internal agents do not run Juno — they use `claude-code-cli`, `codex`, or `claude-agent-sdk` directly. The `public-agent-remote` runtime ID in the registry corresponds to Juno deployed in `deploymentShape: remote-endpoint`.
 
 VPS mode changes the runtime boundary: `public-agent` is not a manager-spawned local process. The manager does not allocate a port, inject process env, capture stdout/stderr, or own start/stop/rebuild. Public agents run on remote VPSes as plain Node processes (Juno instances in `remote-endpoint` shape), deployed and lifecycled by the operator through a systemd unit plus `node` bin. Operators can use `nohup` or `pm2` if they prefer, but the default deployment shape is systemd.
 

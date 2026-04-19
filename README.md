@@ -15,8 +15,8 @@ Run a team of AI coding agents from a single chat. Each agent is a real process 
 
 ## Key Features
 
-- **Juno runtime** - the agent-side runtime in id-agents; one Node process per agent, swap the AI harness underneath (Claude Code CLI, Codex, Claude Agent SDK, or `public-agent-remote`)
 - **Multiple runtimes** - Claude Code CLI and OpenAI Codex — mix and match in the same team
+- **Juno runtime** - id-agents' public-facing, capability-limited runtime for DMZ agents; guard classifier, KB-only tools, per-IP rate limit, daily token budget (the only runtime safe to point at the public internet — internal agents keep using their CLI harness directly)
 - **Task system** - Create, assign, claim, and track tasks across agents (`/task` commands + `/tasks` REST API)
 - **Scheduling** - Heartbeat intervals and calendar events for automated recurring work
 - **Org chart** - Define team structure with groups and tags so agents know their peers and leads
