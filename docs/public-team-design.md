@@ -55,7 +55,9 @@ Recommended policy:
 
 ## 2. Runtime Abstraction
 
-VPS mode changes the runtime boundary: `public-agent` is not a manager-spawned local process. The manager does not allocate a port, inject process env, capture stdout/stderr, or own start/stop/rebuild. Public agents run on remote VPSes as plain Node processes, deployed and lifecycled by the operator through a systemd unit plus `node` bin. Operators can use `nohup` or `pm2` if they prefer, but the default deployment shape is systemd.
+Terminology: the id-agents agent runtime — the Node.js REST-AP wrapper hosting one AI coding assistant — is called **Juno**. `public-agent-remote` is a Juno variant distinguished by `deploymentShape: remote-endpoint`, rather than a separate runtime concept.
+
+VPS mode changes the runtime boundary: `public-agent` is not a manager-spawned local process. The manager does not allocate a port, inject process env, capture stdout/stderr, or own start/stop/rebuild. Public agents run on remote VPSes as plain Node processes (Juno instances in `remote-endpoint` shape), deployed and lifecycled by the operator through a systemd unit plus `node` bin. Operators can use `nohup` or `pm2` if they prefer, but the default deployment shape is systemd.
 
 ### Current State
 

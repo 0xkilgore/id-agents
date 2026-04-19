@@ -4,7 +4,13 @@ title: ID Agents Architecture
 
 # ID Agents Architecture
 
-ID Agents is organised around a single manager daemon and a small fleet of agent processes. Every component speaks the same HTTP protocol, REST-AP, so the manager, the agents, and external admin tools interact through the same endpoints rather than through in-memory function calls.
+ID Agents is organised around a single manager daemon and a small fleet of agent processes running **Juno**, the id-agents agent runtime. Every component speaks the same HTTP protocol, REST-AP, so the manager, the Juno agents, and external admin tools interact through the same endpoints rather than through in-memory function calls.
+
+## Juno — the agent runtime
+
+Every agent in id-agents is a **Juno** process. Juno is the Node.js REST-AP wrapper that hosts one AI coding assistant and exposes it on the network as a REST-AP agent. Each Juno agent is one OS process with a name, a workspace, a system prompt, a persistent mailbox, and a CLI harness underneath. Juno is distinct from the manager daemon below — the manager coordinates the team, Juno is what each individual agent actually *is*.
+
+Juno supports four harnesses today: `claude-code-cli` (the default Claude Code CLI), `codex` (OpenAI Codex CLI), `claude-agent-sdk` (programmatic Claude harness without the CLI UI), and `public-agent-remote` (a Juno variant distinguished by `deploymentShape: remote-endpoint`, used for DMZ-facing public agents on remote VPSes). Swapping the harness does not change the agent's name, port, mailbox, or onchain identity — those belong to the Juno process.
 
 ## The manager daemon
 
@@ -16,7 +22,7 @@ A separate interactive CLI listens on port **4000**. It is the human surface —
 
 ## Agent processes
 
-Each agent runs as its own operating-system process starting at port **4101** and counting up (4102, 4103, …). Under the hood each process wraps a Claude Code CLI or an OpenAI Codex session. The agent exposes the same REST-AP endpoints as the manager: `/.well-known/restap.json` for its catalogue, `/talk` for synchronous questions, `/news` for the passive feed, `/schedule` for scheduled wake-ups. Its working directory, system prompt, model, and permission settings come from the team's YAML config.
+Each Juno agent runs as its own operating-system process starting at port **4101** and counting up (4102, 4103, …). Under the hood the Juno process wraps a Claude Code CLI, an OpenAI Codex session, a Claude Agent SDK runtime, or a remote public-agent endpoint. The agent exposes the same REST-AP endpoints as the manager: `/.well-known/restap.json` for its catalogue, `/talk` for synchronous questions, `/news` for the passive feed, `/schedule` for scheduled wake-ups. Its working directory, system prompt, model, and permission settings come from the team's YAML config.
 
 ## Workspaces and persistence
 
@@ -39,4 +45,4 @@ The **public-agent** — the DMZ-facing service that answers outside callers —
 Storage: SQLite for the manager (history, tasks, news, scheduled events); per-agent workspaces for files; no database inside the public-agent itself — it is a read-through proxy with its own knowledge base and inbox stored as flat JSON files on disk.
 
 ---
-Keywords: architecture, design, components, structure, ports, manager, daemon, sqlite, rest-ap, protocol, workspace, process, how it works, express, hono, framework, web server, http, node, typescript, dependencies, stack
+Keywords: architecture, design, components, structure, ports, manager, daemon, sqlite, rest-ap, protocol, workspace, process, how it works, express, hono, framework, web server, http, node, typescript, dependencies, stack, juno, juno runtime, agent runtime, harness, claude-code-cli, codex, claude-agent-sdk, public-agent-remote
