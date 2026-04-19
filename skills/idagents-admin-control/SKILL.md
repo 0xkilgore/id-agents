@@ -30,6 +30,39 @@ Claude Code (Admin)                    Manager CLI
       │  4. Execute /remote if approved     │
 ```
 
+## Restarting the manager
+
+If `curl http://127.0.0.1:4100/agents` refuses the connection, the manager daemon is down. Known cause: occasional self-kill during `/agent rebuild` (port-kill logic catches the manager's own PID).
+
+Restart command (works headless — no interactive terminal needed):
+
+```bash
+cd /Users/nxt3d/projects/id2/id-agents && nohup bash -c 'tail -f /dev/null | npm run id-agents' > /tmp/id-agents.log 2>&1 &
+```
+
+The `tail -f /dev/null` keeps stdin open so the interactive CLI doesn't exit on EOF when detached from a terminal. State is SQLite-backed so the full team rehydrates automatically — do NOT run `npm run claude:manager` directly, it assumes a fresh init and spawns a deploy flow that can clobber your registry.
+
+**If the combined launcher above fails** with `Manager did not start in time` in `/tmp/id-agents.log`, there's a race condition inside the CLI's child-process boot. Fall back to launching the daemon standalone:
+
+```bash
+# Force-kill any stale CLI / daemon processes first
+ps -ef | grep -E "interactive-agent|start-agent-manager" | grep -v grep | awk '{print $2}' | xargs -r kill -9
+sleep 2
+# Start daemon alone
+cd /Users/nxt3d/projects/id2/id-agents && nohup node dist/start-agent-manager.js > /tmp/id-agents-daemon.log 2>&1 &
+```
+
+The standalone daemon reads the same SQLite state, rehydrates the team, and does not need the interactive CLI to be present. The CLI on :4000 isn't required for dispatch/polling when you're calling REST endpoints directly from a Claude Code session.
+
+Verify the daemon is up and the team is back:
+
+```bash
+until curl -sS --max-time 2 http://127.0.0.1:4100/agents >/dev/null 2>&1; do sleep 2; done; echo "UP"
+curl -sS http://127.0.0.1:4100/agents | python3 -c "import json,sys; d=json.load(sys.stdin); print(len(d['agents']),'agents')"
+```
+
+Agents listen on their own ports and survive manager crashes, so replies they generate while the manager is down will be queued and delivered once it's back. In-flight dispatches that were posted directly to an agent's `/news` endpoint (not manager-proxied) are unaffected.
+
 ## Setup
 
 Two ports, two jobs — keep them straight:
