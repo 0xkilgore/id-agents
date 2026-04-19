@@ -106,7 +106,7 @@ async function registerWithManager(
         service: endpoint,
         runtime,
         local: true,  // Flag to indicate this is a local agent
-        host_pid: process.pid
+        pid: process.pid
       }
     })
   });
@@ -205,7 +205,7 @@ export async function startLocalAgent(config: LocalAgentConfig): Promise<{
           working_directory: workingDirectory,
           status: 'running',
           created_at: Date.now(),
-          metadata: { name, service_type: 'REST-AP', service: `http://localhost:${port}`, runtime, local: true },
+          metadata: { name, service_type: 'REST-AP', service: `http://localhost:${port}`, runtime, local: true, pid: process.pid },
         });
         console.log(`📦 Registered in database (team: ${team})`);
       }
@@ -254,6 +254,22 @@ export async function startLocalAgent(config: LocalAgentConfig): Promise<{
     }
   } else {
     console.log(`✅ Agent pre-registered with manager (ID: ${agentId})`);
+  }
+
+  // Always publish our process pid to the manager so the TUI / health probes
+  // can do per-agent RSS lookups. Pre-registered and self-registered flows
+  // both hit this path since the manager-side metadata was written before we
+  // existed; without this the pid field stays null forever and memory shows
+  // as "—" in the TUI.
+  try {
+    const metaRes = await fetch(`${managerUrl}/agents/${agentId}/metadata`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Id-Team': team },
+      body: JSON.stringify({ metadata: { pid: process.pid } }),
+    });
+    if (metaRes.ok) console.log(`📝 Published pid ${process.pid} to manager`);
+  } catch {
+    // Non-fatal: memory column will just show "—" until next restart.
   }
 
   // Create stop function for graceful shutdown

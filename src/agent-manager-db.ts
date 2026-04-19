@@ -2306,8 +2306,17 @@ export class AgentManagerDb {
 
       const { id: requestedIdRaw, name, endpoint, metadata, type: requestedTypeRaw } = req.body || {};
       if (!name || !endpoint) return res.status(400).json({ error: 'Missing name or endpoint' });
-      const regNameCheck = validateName(name, 'agent');
-      if (!regNameCheck.valid) return res.status(400).json({ error: regNameCheck.error });
+      // Interactive CLI consoles register themselves as "manager" by convention.
+      // The reserved-word check is meant to stop worker agents from colliding with
+      // CLI command verbs, not to block the CLI from registering its own presence.
+      const isInteractiveManagerSelfRegister =
+        typeof requestedTypeRaw === 'string' &&
+        requestedTypeRaw.trim().toLowerCase() === 'interactive' &&
+        name === 'manager';
+      if (!isInteractiveManagerSelfRegister) {
+        const regNameCheck = validateName(name, 'agent');
+        if (!regNameCheck.valid) return res.status(400).json({ error: regNameCheck.error });
+      }
 
       const requestedId = typeof requestedIdRaw === 'string' ? requestedIdRaw.trim() : undefined;
       if (requestedId && !/^[a-zA-Z0-9_:-]{1,200}$/.test(requestedId)) {
@@ -2404,6 +2413,14 @@ export class AgentManagerDb {
       const nextMetadata = metadata ? { ...(agent.metadata || {}), ...(metadata || {}) } : agent.metadata;
 
       await this.db.agents.updateMetadata(agent.id, nextMetadata);
+
+      // Agent self-publishing a pid is proof of life — flip status to running.
+      // Without this, SQLite-mode deploys leave agents stuck on 'pending'
+      // (the db-direct updateStatus path only runs when DATABASE_URL is set).
+      const incomingPid = (metadata as { pid?: unknown } | undefined)?.pid;
+      if (typeof incomingPid === 'number' && agent.status !== 'running') {
+        await this.db.agents.updateStatus(agent.id, 'running');
+      }
 
       const server = this.runningServers.get(this.key(teamId, agent.id));
       if (server && agent.type === 'claude') {

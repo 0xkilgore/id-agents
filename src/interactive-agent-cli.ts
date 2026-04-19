@@ -413,6 +413,20 @@ let localDb: Db | undefined;
 let localDbTeamId: string | undefined;
 let localAgentId: string | undefined;
 
+// ─── Public agent interactive chat session ──────────────────────────────────
+// When the user types `/public <n|name|domain>` with no message, we enter
+// a chat loop where every subsequent line goes to that agent's /talk endpoint
+// (session_id threaded across turns for continuity). `/exit`, `/quit`, or a
+// slash-command resumes the main CLI prompt.
+interface PublicSession {
+  name: string;
+  customerDomain: string;
+  talkEndpoint: string;
+  sessionId: string | null;
+  priorPrompt: string;
+}
+let publicSession: PublicSession | null = null;
+
 // ==================== Remote Command Handler ====================
 
 /**
@@ -1410,6 +1424,49 @@ async function handleLine(line: string) {
   if (!input) {
     rl.prompt();
     return;
+  }
+
+  // Public-agent chat session mode: every non-slash line goes to /talk.
+  // Any slash command (starting with /) exits the session and runs normally.
+  if (publicSession) {
+    if (input === '/exit' || input === '/quit' || input === '/q') {
+      const name = publicSession.name;
+      rl.setPrompt(publicSession.priorPrompt);
+      publicSession = null;
+      console.log(`${colors.gray}← left public chat with ${name}${colors.reset}\n`);
+      rl.prompt();
+      return;
+    }
+    if (input.startsWith('/')) {
+      const name = publicSession.name;
+      rl.setPrompt(publicSession.priorPrompt);
+      publicSession = null;
+      console.log(`${colors.gray}← left public chat with ${name} (running slash command)${colors.reset}\n`);
+      // fall through to normal handling below
+    } else {
+      try {
+        const body: Record<string, unknown> = { message: input };
+        if (publicSession.sessionId) body.session_id = publicSession.sessionId;
+        const resp = await (fetch as any)(publicSession.talkEndpoint, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+          signal: AbortSignal.timeout(60000),
+        });
+        if (!resp.ok) {
+          console.log(`${colors.red}❌ Talk failed: HTTP ${resp.status}${colors.reset}`);
+        } else {
+          const data: any = await resp.json();
+          if (typeof data.session_id === 'string') publicSession.sessionId = data.session_id;
+          const reply = data.reply ?? data.message ?? data.result ?? JSON.stringify(data);
+          console.log(`${colors.bold}${publicSession.name}:${colors.reset} ${reply}\n`);
+        }
+      } catch (err: any) {
+        console.log(`${colors.red}❌ Talk error: ${err?.message ?? err}${colors.reset}`);
+      }
+      rl.prompt();
+      return;
+    }
   }
 
   // Expand macros (:::macroname args:::) before processing
@@ -3584,10 +3641,64 @@ async function handleLine(line: string) {
       return;
     }
 
-    // /public <n> <msg> — chat with agent by index (1-based)
-    // /public <domain> <msg> — chat with agent by domain
+    // /public <n|name|domain> — enter interactive chat session
+    // /public <n|name|domain> <msg> — one-shot chat
     // /public (bare) or /public list — list public agents
-    const chatMatch = rest.match(/^(\d+|[\w.-]+\.\w+)\s+(.+)$/s);
+    const sessionMatch = rest.match(/^([\w][\w.-]*)$/);
+    if (sessionMatch && rest !== 'list') {
+      const ref = sessionMatch[1];
+      (async () => {
+        try {
+          const listResult = await listPublicAgents(publicDeps);
+          if (!listResult.ok) {
+            console.log(`\n${colors.red}❌ ${listResult.error}${colors.reset}\n`);
+            rl.prompt();
+            return;
+          }
+          let target = null as any;
+          if (/^\d+$/.test(ref)) {
+            target = listResult.agents[parseInt(ref, 10) - 1] ?? null;
+          } else {
+            const needle = ref.toLowerCase();
+            target = listResult.agents.find(
+              (a) => a.name.toLowerCase() === needle || (a.customer_domain ?? '').toLowerCase() === needle,
+            ) ?? null;
+          }
+          if (!target) {
+            console.log(`\n${colors.red}❌ No public agent found for "${ref}". Run /public to list agents.${colors.reset}\n`);
+            rl.prompt();
+            return;
+          }
+          const baseUrl = target.public_endpoint_url ?? `https://${target.customer_domain}`;
+          let talkEndpoint = `${baseUrl}/talk`;
+          try {
+            const wkResp: any = await (fetch as any)(`${baseUrl}/.well-known/restap.json`, { signal: AbortSignal.timeout(5000) });
+            if (wkResp.ok) {
+              const wk: any = await wkResp.json();
+              const t = wk?.endpoints?.talk;
+              if (typeof t === 'string') talkEndpoint = t.startsWith('http') ? t : `${baseUrl}${t}`;
+            }
+          } catch { /* fall back to default /talk */ }
+          publicSession = {
+            name: target.name,
+            customerDomain: target.customer_domain ?? '',
+            talkEndpoint,
+            sessionId: null,
+            priorPrompt: (rl as any).getPrompt?.() ?? `${colors.green}> ${colors.reset}`,
+          };
+          rl.setPrompt(`${colors.cyan}public:${target.customer_domain ?? target.name}> ${colors.reset}`);
+          console.log(`\n${colors.cyan}→ chatting with ${target.name} (${target.customer_domain ?? baseUrl})${colors.reset}`);
+          console.log(`${colors.gray}   ${talkEndpoint}   ·   /exit or any /command to leave${colors.reset}\n`);
+          rl.prompt();
+        } catch (err: any) {
+          console.log(`\n${colors.red}❌ ${err?.message ?? err}${colors.reset}\n`);
+          rl.prompt();
+        }
+      })();
+      return;
+    }
+
+    const chatMatch = rest.match(/^([\w][\w.-]*)\s+(.+)$/s);
     if (chatMatch && rest !== '' && rest !== 'list') {
       const [, ref, msg] = chatMatch;
       (async () => {
@@ -4826,6 +4937,7 @@ async function deployFromConfig(filePath: string, args: string[] = []) {
             domain: agent.domain,
             tokenId: agent.tokenId,
             address: agent.address,
+            heartbeat: agent.heartbeat,
             metadata: {
               description: agent.description,
               runtime: resolveRuntime(agent.runtime || 'claude-code-cli')
