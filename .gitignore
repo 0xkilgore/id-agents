@@ -42,3 +42,8 @@ coverage/
 SECURITY.md
 REVIEW_LOG.md
 .xmtp/
+
+# Session-level scratch (agent-created, not source)
+AGENTS.md
+.agents/
+output/
