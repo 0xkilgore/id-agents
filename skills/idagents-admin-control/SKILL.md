@@ -90,9 +90,9 @@ node skills/idagents-admin-control/start-listener.js [port]
 # Default port: 4050
 ```
 
-### 2. Talk to the Human Manager (REPL operator)
+### 2. Talk to the Manager (daemon-owned inbox)
 
-`/talk` is only meaningful when a human is running the REPL on `:4000`. It posts a message into their inbox and returns when they reply (via the listener you started above).
+`POST :4100/talk` writes to the manager inbox, which is persisted in the shared DB. The message lands regardless of whether a human is at the REPL. Any reader — the CLI REPL, this skill, a future dashboard — sees the same inbox via `GET :4100/news`. If a human is at the REPL, they can respond; replies come back to your listener at `ADMIN_LISTENER_PORT`.
 
 ```bash
 ./skills/idagents-admin-control/talk-to-manager.sh "What agents are running?" http://127.0.0.1:4050

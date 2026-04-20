@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.64-beta
+
+### Docs
+
+- admin-control skill: reword "Talk to the Human Manager" section to reflect the daemon-owned inbox — `/talk` persists regardless of whether a human is at the REPL.
+
 ## 0.1.63-beta
 
 ### Features
