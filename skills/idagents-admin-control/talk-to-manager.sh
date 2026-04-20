@@ -9,12 +9,12 @@
 #   reply_endpoint - Where to receive the reply (default: http://127.0.0.1:4100/news)
 #
 # Environment:
-#   MANAGER_URL - Manager endpoint (default: http://127.0.0.1:4000)
+#   MANAGER_URL - Manager daemon endpoint (default: http://127.0.0.1:4100)
 #
 
 MESSAGE="$1"
 REPLY_ENDPOINT="${2:-http://127.0.0.1:4100/news}"
-MANAGER_URL="${MANAGER_URL:-http://127.0.0.1:4000}"
+MANAGER_URL="${MANAGER_URL:-http://127.0.0.1:4100}"
 
 if [ -z "$MESSAGE" ]; then
   echo "Usage: $0 \"message\" [reply_endpoint]"

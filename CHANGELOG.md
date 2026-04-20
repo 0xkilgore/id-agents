@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.1.63-beta
+
+### Features
+
+- **Long-poll on `GET /query/:id`**: optional `?wait=<0-30>` blocks until state change or timeout via an in-process waiter map keyed by `teamId:queryId`. Wakes fire from `POST /news` terminal transitions and `cancelPendingQueriesForAgent`. Default `wait=0` preserves existing behavior. Typical latency improvement: short-poll 5.8s → long-poll 4.1s for an `echo` dispatch.
+- **Daemon `POST /schedule`**: scheduling endpoint mirrors the CLI surface so clients can schedule directly against `:4100` without depending on the REPL being up.
+
+### Changed
+
+- **Shared-DB query writes across all runtimes**: dropped the `DATABASE_URL` gate in `src/local-agent-server.ts` so SQLite agents now open and migrate the shared DB by default. Same fix extended to `src/start-agent-manager.ts` (worker role). Agents persist `pending`/`processing`/terminal rows so `:4100/query/<id>` is authoritative for both claude and codex runtimes. Memory-only fallback preserved with a warning.
+- **`/talk` pre-writes `pending`**: agent `/talk` handler writes the query row before returning the `queryId`, eliminating the race where concurrent pollers saw 404 for a freshly-dispatched query.
+- **Manager inbox moved to daemon**: `POST :4100/talk`, `POST :4100/schedule`, `GET :4100/news` are now authoritative for the `interactive_manager` inbox. The CLI REPL reads the same DB-backed view; inbox survives CLI outages.
+
+### Removed
+
+- **CLI `/remote` endpoint**: `POST http://127.0.0.1:4000/remote` removed. Dispatch lives exclusively on `POST http://127.0.0.1:4100/remote` with response shape `{ok, result:{queryId,status,agent}, error?}`. `MANAGER_URL` default in the admin-control skill flips from `:4000` to `:4100`.
+- **Deprecated CLI write endpoints**: `POST :4000/talk`, `POST :4000/schedule`, `POST :4000/news` return `410 Gone` with `Location: http://127.0.0.1:4100/...`. `:4000/talk` for `server.respond()` remains.
+
+### Tests
+
+- `scripts/test-longpoll.sh`: new durable regression matrix (10 cases) covering single-agent claude and codex, backward-compat, concurrent parallel dispatch, kill-mid-flight, planted-stale-row, already-terminal, nonexistent-id, cancel-via-stop, and manager-restart mid-flight.
+
 ## 0.1.58-beta
 
 ### Features

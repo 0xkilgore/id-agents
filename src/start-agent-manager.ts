@@ -95,19 +95,19 @@ async function startWorkerAgent(agentId?: string) {
 
   console.log(`🤖 Starting worker agent: ${agentId} on port ${port}`);
 
-  // Optional: persist news/queries to the shared DB if the manager provides identifiers.
-  // If not provided, the agent still works (in-memory news, filesystem workspace).
+  // Always open the shared DB so queries and news land where the manager daemon
+  // at :4100 can serve /query/<id> and /news polling. Memory-only fallback stays
+  // for resilience, but manager polling will not find queries in that mode.
   let dbCtx: { db: any; teamId: string; agentId: string } | undefined;
   try {
-    const dbTeamId = process.env.ID_DB_TEAM_ID;
+    const db = await createDb();
+    await migrateDb(db);
     const dbAgentId = process.env.ID_DB_AGENT_ID || agentId;
-    if (dbTeamId) {
-      const db = await createDb();
-      await migrateDb(db);
-      dbCtx = { db, teamId: dbTeamId, agentId: dbAgentId };
-    }
+    const dbTeamId = process.env.ID_DB_TEAM_ID || await db.teams.getOrCreateTeamId(teamName);
+    dbCtx = { db, teamId: dbTeamId, agentId: dbAgentId };
   } catch (e: any) {
-    console.warn(`⚠️ Worker agent DB disabled: ${e?.message || String(e)}`);
+    console.warn(`⚠️ Worker agent DB disabled, running memory-only: ${e?.message || String(e)}`);
+    console.warn(`⚠️ Manager daemon polling (GET :4100/query/<id>, /news) will NOT find this agent's queries while memory-only.`);
   }
 
   // Fetch full identity (including tokenId) from manager

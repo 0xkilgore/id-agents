@@ -15,8 +15,9 @@
  *   listen              - Start listener only (for manual use)
  *
  * Environment:
- *   MANAGER_URL        - Manager endpoint (default: http://127.0.0.1:4000)
- *   ADMIN_API_KEY      - API key (default: from ~/.id-agents/admin.key)
+ *   MANAGER_URL         - Manager daemon endpoint for /remote dispatch (default: http://127.0.0.1:4100)
+ *   REPL_URL            - Interactive CLI endpoint for /talk to the human operator (default: http://127.0.0.1:4000)
+ *   ADMIN_API_KEY       - API key (default: from ~/.id-agents/admin.key)
  *   ADMIN_LISTENER_PORT - Listener port (default: 4100)
  */
 
@@ -31,7 +32,8 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 // Configuration
-const MANAGER_URL = process.env.MANAGER_URL || 'http://127.0.0.1:4000';
+const MANAGER_URL = process.env.MANAGER_URL || 'http://127.0.0.1:4100';
+const REPL_URL = process.env.REPL_URL || 'http://127.0.0.1:4000';
 const REPLY_TIMEOUT = parseInt(process.env.ADMIN_REPLY_TIMEOUT) || 300000; // 5 min
 
 // Find an available port dynamically
@@ -168,8 +170,8 @@ async function talkToManager(message) {
   // Give listener a moment to start
   await new Promise(r => setTimeout(r, 100));
 
-  // Send message
-  const response = await httpRequest(`${MANAGER_URL}/talk`, {
+  // Send message to the interactive REPL (/talk only lives there)
+  const response = await httpRequest(`${REPL_URL}/talk`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -209,7 +211,7 @@ async function remoteCommand(command) {
     body: JSON.stringify({ command, from: 'admin' })
   });
 
-  if (response.data.success) {
+  if (response.data.ok) {
     console.log('\nSuccess!');
     console.log(response.data.result);
     return response.data;

@@ -130,7 +130,7 @@ export interface NewsItem {
 interface ActiveQuery {
   id: string;
   prompt: string;
-  status: 'processing' | 'completed' | 'failed';
+  status: 'pending' | 'processing' | 'completed' | 'failed';
   result?: any;
   error?: string;
   created: number;
@@ -701,6 +701,21 @@ export class AgentRestServer {
         }
 
         const queryId = `query_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
+
+        // Pre-write a pending row so concurrent GET /query/:id pollers don't see 404
+        // between /talk returning queryId and executeQuery pulling the item off the
+        // serialized queue. Best-effort — memory-only mode stays a no-op.
+        try {
+          await this.dbUpsertQuery({
+            id: queryId,
+            prompt: message,
+            status: 'pending',
+            created: Date.now(),
+            sessionId: session_id,
+          });
+        } catch (dbErr: any) {
+          console.error(`[Agent] Warning: Failed to pre-write pending row for query ${queryId}:`, dbErr?.message || dbErr);
+        }
 
         // Add incoming message to news feed for complete history (best effort - don't fail if DB is down)
         try {

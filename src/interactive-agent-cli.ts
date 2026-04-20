@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT
 import 'dotenv/config';
 import readline from 'readline';
-import { InteractiveAgentServer, IncomingReply, CommandHandler } from './interactive-agent-server.js';
+import { InteractiveAgentServer, IncomingReply } from './interactive-agent-server.js';
 import fetch from 'node-fetch';
 import fs from 'fs';
 import path from 'path';
@@ -427,291 +427,6 @@ interface PublicSession {
 }
 let publicSession: PublicSession | null = null;
 
-// ==================== Remote Command Handler ====================
-
-/**
- * Handle remote commands from the admin agent via /remote endpoint
- * Supports a subset of CLI commands that can be executed programmatically
- */
-const remoteCommandHandler: CommandHandler = async (command: string, from?: string): Promise<{ success: boolean; result?: string; error?: string }> => {
-  const trimmed = command.trim();
-
-  try {
-    // /agents - list all agents
-    if (trimmed === '/agents') {
-      const response = await managerFetch('/agents');
-      if (!response.ok) {
-        return { success: false, error: `Failed to list agents: ${response.statusText}` };
-      }
-      const data: any = await response.json();
-      const agents = data.agents || [];
-      // Show identifier (name is the displayId)
-      const result = agents.map((a: any) => {
-        return `${a.name} (${a.type}) - ${a.status}`;
-      }).join('\n');
-      return { success: true, result: result || 'No agents found' };
-    }
-
-    // /status - show team status
-    if (trimmed === '/status') {
-      const response = await managerFetch('/health');
-      if (!response.ok) {
-        return { success: false, error: 'Team not running' };
-      }
-      const data: any = await response.json();
-      return { success: true, result: JSON.stringify(data, null, 2) };
-    }
-
-    // /ask <agent> <message> - send message to agent
-    const askMatch = trimmed.match(/^\/ask\s+(\S+)\s+(.+)$/s);
-    if (askMatch) {
-      const [, agentName, message] = askMatch;
-
-      // Get agent info
-      const agentResponse = await managerFetch(`/agents/by-name/${encodeURIComponent(agentName)}`);
-      if (!agentResponse.ok) {
-        return { success: false, error: `Agent "${agentName}" not found` };
-      }
-      const agent: any = await agentResponse.json();
-      const agentUrl = agent.url || `http://localhost:${agent.port}`;
-
-      // Send message via /talk
-      const talkResponse = await fetch(`${agentUrl}/talk`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message, from: from || name })
-      });
-
-      if (!talkResponse.ok) {
-        return { success: false, error: `Failed to send message: ${talkResponse.statusText}` };
-      }
-
-      const talkData: any = await talkResponse.json();
-      return {
-        success: true,
-        result: `Message sent to ${agentName}. Query ID: ${talkData.query_id}. Poll /news?query_id=${talkData.query_id} for response.`
-      };
-    }
-
-    // /hey <agent> <message> - send message (continues session)
-    const heyMatch = trimmed.match(/^\/hey\s+(\S+)\s+(.+)$/s);
-    if (heyMatch) {
-      const [, agentName, message] = heyMatch;
-
-      // Get agent info
-      const agentResponse = await managerFetch(`/agents/by-name/${encodeURIComponent(agentName)}`);
-      if (!agentResponse.ok) {
-        return { success: false, error: `Agent "${agentName}" not found` };
-      }
-      const agent: any = await agentResponse.json();
-      const agentUrl = agent.url || `http://localhost:${agent.port}`;
-
-      // Get existing session if any
-      const sessionId = agentSessions.get(agentName);
-
-      // Send message via /talk
-      const talkResponse = await fetch(`${agentUrl}/talk`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message, from: from || name, session_id: sessionId })
-      });
-
-      if (!talkResponse.ok) {
-        return { success: false, error: `Failed to send message: ${talkResponse.statusText}` };
-      }
-
-      const talkData: any = await talkResponse.json();
-      return {
-        success: true,
-        result: `Message sent to ${agentName}${sessionId ? ' (continuing session)' : ''}. Query ID: ${talkData.query_id}`
-      };
-    }
-
-    // /delete <agent> - delete an agent
-    const deleteMatch = trimmed.match(/^\/delete\s+(\S+)$/);
-    if (deleteMatch) {
-      const [, agentName] = deleteMatch;
-
-      const response = await managerFetch(`/agents/by-name/${encodeURIComponent(agentName)}`, {
-        method: 'DELETE'
-      });
-
-      if (!response.ok) {
-        const error = await response.text();
-        return { success: false, error: `Failed to delete agent: ${error}` };
-      }
-
-      return { success: true, result: `Deleted agent "${agentName}"` };
-    }
-
-    // /agents start|stop|rebuild - all agents lifecycle
-    const agentsActionMatch = trimmed.match(/^\/agents\s+(start|stop|rebuild)$/);
-    if (agentsActionMatch) {
-      const [, action] = agentsActionMatch;
-      const listResp = await managerFetch('/agents');
-      if (!listResp.ok) {
-        return { success: false, error: 'Failed to list agents' };
-      }
-      const listData: any = await listResp.json();
-      const agentList = (listData.agents || []).filter((a: any) => a.type !== 'interactive' && a.port > 0);
-      if (agentList.length === 0) {
-        return { success: true, result: 'No agents to ' + action };
-      }
-      const results: string[] = [];
-      for (const a of agentList) {
-        try {
-          const resp = await managerFetch(`/agents/by-name/${encodeURIComponent(a.name)}/project/${action}`, { method: 'POST' });
-          results.push(`${a.name}: ${resp.ok ? 'ok' : 'failed'}`);
-        } catch {
-          results.push(`${a.name}: error`);
-        }
-      }
-      return { success: true, result: `${action} ${agentList.length} agents:\n${results.join('\n')}` };
-    }
-
-    // /agent <name> start|stop|rebuild - single agent lifecycle
-    const agentMatch = trimmed.match(/^\/agent\s+(\S+)\s+(start|stop|rebuild)$/);
-    if (agentMatch) {
-      const [, agentName, action] = agentMatch;
-
-      const response = await managerFetch(`/agents/by-name/${encodeURIComponent(agentName)}/project/${action}`, {
-        method: 'POST'
-      });
-
-      if (!response.ok) {
-        const error = await response.text();
-        return { success: false, error: `Failed to ${action} agent: ${error}` };
-      }
-
-      const data: any = await response.json();
-      return { success: true, result: `${action} completed for "${agentName}": ${JSON.stringify(data)}` };
-    }
-
-    // /team or /team <name> - switch/show team
-    const teamMatch = trimmed.match(/^\/team(?:\s+(\S+))?$/);
-    if (teamMatch) {
-      const [, teamName] = teamMatch;
-      if (!teamName) {
-        return { success: true, result: `Current team: ${activeTeam}` };
-      }
-      // For remote, just return info - actual team switch requires CLI restart
-      return { success: true, result: `Team switch to "${teamName}" requires CLI restart. Current team: ${activeTeam}` };
-    }
-
-    // /deploy <config> [params] - deploy agents from config
-    const deployMatch = trimmed.match(/^\/deploy\s+(.+)$/);
-    if (deployMatch) {
-      const parts = deployMatch[1].trim().split(/\s+/);
-      let filePath = parts[0];
-      const deployArgs = parts.slice(1);
-
-      // Resolve shorthand: "idchain" -> "configs/idchain.yaml"
-      const originalArg = filePath;
-      if (!filePath.includes('/') && !filePath.includes('\\')) {
-        if (!filePath.endsWith('.yaml') && !filePath.endsWith('.yml')) {
-          filePath = `configs/${filePath}.yaml`;
-        } else {
-          filePath = `configs/${filePath}`;
-        }
-      } else if (!filePath.endsWith('.yaml') && !filePath.endsWith('.yml')) {
-        filePath = `${filePath}.yaml`;
-      }
-
-      // Fall back to default.yaml if config doesn't exist
-      const fs = await import('fs');
-      if (!fs.existsSync(filePath)) {
-        const defaultPath = 'configs/default.yaml';
-        if (fs.existsSync(defaultPath)) {
-          filePath = defaultPath;
-          if (!deployArgs.some(a => a.startsWith('name='))) {
-            deployArgs.unshift(originalArg);
-          }
-        } else {
-          return { success: false, error: `Config not found: ${filePath}` };
-        }
-      }
-
-      try {
-        await deployFromConfig(filePath, deployArgs);
-        return { success: true, result: `Deployed from ${filePath}` };
-      } catch (err: any) {
-        return { success: false, error: `Deploy failed: ${err.message || String(err)}` };
-      }
-    }
-
-    // /register <agent> - register agent onchain
-    const registerMatch = trimmed.match(/^\/register\s+(\S+)$/);
-    if (registerMatch) {
-      const [, agentName] = registerMatch;
-      try {
-        const agent = await resolveAgent(agentName);
-        if (!agent?.id) {
-          return { success: false, error: `Agent "${agentName}" not found` };
-        }
-        // Run registerAgentOnchain in non-interactive mode
-        // (skip confirmation prompt for remote usage)
-        const result = await registerAgentOnchainRemote(agent);
-        return result;
-      } catch (err: any) {
-        return { success: false, error: `Registration failed: ${err.message}` };
-      }
-    }
-
-    // /public — public-team agent admin (list/add/remove)
-    //
-    // Dispatch surface mirrors the interactive handler above but skips the
-    // chat-loop variants (remote callers can POST to /talk directly).
-    if (trimmed === '/public' || trimmed.startsWith('/public ')) {
-      const publicDeps = {
-        managerBaseUrl: MANAGER_URL,
-        fetch: fetch as unknown as typeof globalThis.fetch,
-      };
-      const rest = trimmed === '/public' ? '' : trimmed.slice('/public '.length).trim();
-
-      if (rest === '' || rest === 'list') {
-        const r = await listPublicAgents(publicDeps);
-        if (!r.ok) return { success: false, error: r.error };
-        const lines = r.agents.map((a: any) =>
-          `${a.name}\t${a.customer_domain ?? '-'}\t${a.status ?? '-'}\t${a.public_endpoint_url ?? '-'}`);
-        return { success: true, result: lines.join('\n') || 'No public agents registered' };
-      }
-
-      if (rest.startsWith('add ')) {
-        const addArgs = parseArgs(rest.slice('add '.length));
-        const domain = addArgs.find((a) => !a.startsWith('--'));
-        if (!domain) {
-          return { success: false, error: 'Usage: /public add <domain> [--ssh-target=user@host] [--internal-port=N] [--onchain] [--registrar=<name>]' };
-        }
-        const sshFlag = addArgs.find((a) => a.startsWith('--ssh-target='));
-        const portFlag = addArgs.find((a) => a.startsWith('--internal-port='));
-        const registrarFlag = addArgs.find((a) => a.startsWith('--registrar='));
-        const sshTarget = sshFlag ? sshFlag.slice('--ssh-target='.length) : null;
-        const internalPort = portFlag ? parseInt(portFlag.slice('--internal-port='.length), 10) : null;
-        const onchain = addArgs.includes('--onchain');
-        const registrar = registrarFlag ? registrarFlag.slice('--registrar='.length) : undefined;
-        const r = await addPublicAgent(domain, { sshTarget, internalPort, onchain, registrar }, publicDeps);
-        if (!r.ok) return { success: false, error: r.error };
-        return { success: true, result: r.message };
-      }
-
-      if (rest.startsWith('remove ')) {
-        const ref = rest.slice('remove '.length).trim();
-        if (!ref) return { success: false, error: 'Usage: /public remove <name|domain>' };
-        const r = await removePublicAgent(ref, publicDeps);
-        if (!r.ok) return { success: false, error: r.error };
-        return { success: true, result: r.message };
-      }
-
-      return { success: false, error: `Unknown /public subcommand: ${rest.split(/\s/)[0] || '(none)'}. Supported via /remote: list, add, remove` };
-    }
-
-    // Unknown command
-    return { success: false, error: `Unknown command: ${trimmed.split(/\s/)[0]}. Supported: /agents, /status, /ask, /hey, /delete, /agent, /team, /deploy, /register, /public` };
-
-  } catch (err: any) {
-    return { success: false, error: err.message || String(err) };
-  }
-};
 
 // Track outgoing queries so we can match incoming replies
 interface PendingOutgoingQuery {
@@ -1207,7 +922,11 @@ async function registerWithManager() {
         .replace(/[^a-z0-9_-]+/g, '_')
         .replace(/^_+|_+$/g, '')
         .slice(0, 60);
-    const canReceiveDirectMessages = true;
+    // CLI no longer accepts POST /news — the daemon owns the manager
+    // inbox and writes directly to the shared DB. Advertising `false`
+    // tells the daemon to skip its CLI-forward path and avoid noisy
+    // 410 responses when replies/messages arrive.
+    const canReceiveDirectMessages = false;
 
     const response = await managerFetch('/agents/register', {
       method: 'POST',
@@ -3954,8 +3673,6 @@ if (process.stdout.isTTY) {
 }
 
 server.start().then(async () => {
-  server.setCommandHandler(remoteCommandHandler);
-
   // Check if manager is running, auto-start if not (before registering)
   let managerRunning = await checkManager();
   if (!managerRunning) {
@@ -5491,7 +5208,7 @@ async function showMyNews() {
     console.log(`\n${colors.cyan}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${colors.reset}`);
     console.log(`${colors.bold}📰 Your News Feed (${name})${colors.reset}\n`);
 
-    const items = server.getNewsItems(15);
+    const items = await server.getNewsItems(15);
 
     if (items.length === 0) {
       console.log(`${colors.yellow}📭 No news items yet${colors.reset}`);

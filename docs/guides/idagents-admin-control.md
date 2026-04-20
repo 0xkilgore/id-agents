@@ -10,16 +10,16 @@ Use idagents-admin-control when you want a Claude Code agent (or any script) to:
 - Chat with the manager (human-in-the-loop approval flow)
 - Run management loops that send recurring work to agents
 
-The interactive CLI (`npm run id-agents`) must be running for any of this to work.
+The manager daemon (`npm run id-agents` or `node dist/start-agent-manager.js`) must be running for any of this to work.
 
 ## The `/remote` Endpoint
 
-The manager exposes `POST /remote` on the interactive CLI server (port 4000 by default). No authentication required — it binds to localhost only.
+The manager exposes `POST /remote` on the manager daemon (port 4100 by default). No authentication required — it binds to localhost only.
 
 Send any CLI command as an HTTP request:
 
 ```bash
-curl -s -X POST http://localhost:4000/remote \
+curl -s -X POST http://localhost:4100/remote \
   -H "Content-Type: application/json" \
   -d '{"command": "/agents"}'
 ```
@@ -28,7 +28,7 @@ Response:
 
 ```json
 {
-  "success": true,
+  "ok": true,
   "result": "..."
 }
 ```
@@ -170,13 +170,13 @@ After dispatching work via `/ask`, you need to poll the agent's news feed to get
 BEFORE=$(date +%s)000
 
 # Dispatch task
-curl -s -X POST http://localhost:4000/remote \
+curl -s -X POST http://localhost:4100/remote \
   -H "Content-Type: application/json" \
   -d '{"command": "/ask coder Build the login page"}'
 
 # Poll every 10s for up to 2 minutes
 for i in $(seq 1 12); do
-  reply=$(curl -s -X POST http://localhost:4000/remote \
+  reply=$(curl -s -X POST http://localhost:4100/remote \
     -H "Content-Type: application/json" \
     -d '{"command": "/news coder"}' | python3 -c "
 import sys, json
@@ -201,7 +201,7 @@ BEFORE=$(date +%s)000
 
 # Dispatch to all agents
 for agent in designer frontend backend; do
-  curl -s -X POST http://localhost:4000/remote \
+  curl -s -X POST http://localhost:4100/remote \
     -H "Content-Type: application/json" \
     -d "{\"command\":\"/ask ${agent} Review the spec and give feedback\"}"
 done
@@ -210,7 +210,7 @@ done
 for i in $(seq 1 18); do
   results=""
   for agent in designer frontend backend; do
-    reply=$(curl -s -X POST http://localhost:4000/remote \
+    reply=$(curl -s -X POST http://localhost:4100/remote \
       -H "Content-Type: application/json" \
       -d "{\"command\":\"/news ${agent}\"}" 2>/dev/null | python3 -c "
 import sys, json
@@ -240,7 +240,7 @@ done
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `MANAGER_URL` | `http://localhost:4000` | Manager endpoint (interactive CLI server) |
+| `MANAGER_URL` | `http://127.0.0.1:4100` | Manager daemon endpoint (dispatch + polling) |
 | `ADMIN_LISTENER_PORT` | `4050` | Port for the temporary reply listener |
 | `ADMIN_LISTENER_TIMEOUT` | `600000` | Listener auto-shutdown timeout in ms (10 min) |
 | `ADMIN_REPLY_TIMEOUT` | `300000` | Timeout waiting for a single reply in ms (5 min) |

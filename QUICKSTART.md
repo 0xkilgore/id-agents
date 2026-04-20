@@ -63,7 +63,7 @@ This starts the interactive CLI on port 4000 and the manager daemon on port 4100
 
 > **Running this from a Claude Code session?** Spawn the command in the background (Bash tool with `run_in_background: true`). The readline prompt sits idle with no stdin — that's fine. Ports 4000 and 4100 come up normally and every step below works unchanged. If you also want an interactive TTY, open a separate terminal window and run the command there.
 >
-> **Headless-only alternative:** If you don't need the CLI at all, run `node dist/start-agent-manager.js` and use port 4100. Note: `/deploy` in Step 4 goes through the CLI's `/remote` endpoint on port 4000, so you still need `npm run id-agents` running to deploy a team.
+> **Headless-only alternative:** If you don't need the CLI at all, run `node dist/start-agent-manager.js` and use port 4100. `/deploy` in Step 4 goes through the manager daemon's `/remote` endpoint on port 4100, so the interactive CLI is optional.
 
 ## 4. Deploy the Default Team
 
@@ -124,7 +124,7 @@ sed -i.bak 's/^  runtime: claude-code-cli$/  runtime: codex/' configs/default.ya
 Then deploy:
 
 ```bash
-curl -s -X POST http://localhost:4000/remote \
+curl -s -X POST http://localhost:4100/remote \
   -H "Content-Type: application/json" \
   -d '{"command":"/deploy default"}'
 ```
@@ -136,7 +136,7 @@ curl -s -X POST http://localhost:4000/remote \
 List agents:
 
 ```bash
-curl -s -X POST http://localhost:4000/remote \
+curl -s -X POST http://localhost:4100/remote \
   -H "Content-Type: application/json" \
   -d '{"command":"/agents"}'
 ```
@@ -144,7 +144,7 @@ curl -s -X POST http://localhost:4000/remote \
 Ask an agent a question:
 
 ```bash
-curl -s -X POST http://localhost:4000/remote \
+curl -s -X POST http://localhost:4100/remote \
   -H "Content-Type: application/json" \
   -d '{"command":"/ask coder Introduce yourself and tell me what you can do."}'
 ```
@@ -152,14 +152,14 @@ curl -s -X POST http://localhost:4000/remote \
 Poll for the reply:
 
 ```bash
-curl -s -X POST http://localhost:4000/remote \
+curl -s -X POST http://localhost:4100/remote \
   -H "Content-Type: application/json" \
   -d '{"command":"/news coder"}'
 ```
 
 ## 6. Offer to Act as the Team Manager
 
-After deploy completes, you (Claude) are already connected to the team via `/remote` on `http://localhost:4000`. Don't hand the user off to a separate terminal — offer to continue as their team manager:
+After deploy completes, you (Claude) are already connected to the team via `/remote` on `http://localhost:4100`. Don't hand the user off to a separate terminal — offer to continue as their team manager:
 
 > I can act as your team manager and communicate directly to your team via /remote. Shall I ask them to say who they are?
 
@@ -201,7 +201,7 @@ The daemon on port 4100 runs continuously once Step 3 is up. You can drive the t
 
 ### Claude Code as manager (default)
 
-Nothing to launch. This Claude session is already connected via `/remote` on `http://localhost:4000` using the `idagents-admin-control` skill. Claude relays `/agents`, `/ask`, `/news`, `/deploy` — your whole manager experience happens in the conversation you're in right now.
+Nothing to launch. This Claude session is already connected via `/remote` on `http://localhost:4100` using the `idagents-admin-control` skill. Claude relays `/agents`, `/ask`, `/news`, `/deploy` — your whole manager experience happens in the conversation you're in right now.
 
 ### TUI dashboard
 

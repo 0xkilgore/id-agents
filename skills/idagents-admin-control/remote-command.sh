@@ -1,18 +1,19 @@
 #!/bin/bash
 #
-# Remote Command - Execute CLI commands on the manager
+# Remote Command - Execute CLI commands on the manager daemon
 #
 # Usage: ./remote-command.sh "/command args"
 #
 # Arguments:
-#   command - The CLI command to execute (e.g., "/agents", "/spawn myagent")
+#   command - The CLI command to execute (e.g., "/agents", "/ask ecs hi")
 #
 # Environment:
-#   MANAGER_URL   - Manager endpoint (default: http://127.0.0.1:4000)
+#   MANAGER_URL - Manager daemon endpoint (default: http://127.0.0.1:4100)
+#   ID_TEAM     - Optional team name, sent as X-Id-Team header
 #
 
 COMMAND="$1"
-MANAGER_URL="${MANAGER_URL:-http://127.0.0.1:4000}"
+MANAGER_URL="${MANAGER_URL:-http://127.0.0.1:4100}"
 
 if [ -z "$COMMAND" ]; then
   echo "Usage: $0 \"/command args\""
@@ -31,7 +32,6 @@ if [ -z "$COMMAND" ]; then
   exit 1
 fi
 
-# Create temp file for JSON payload
 PAYLOAD_FILE=$(mktemp)
 cat > "$PAYLOAD_FILE" << EOF
 {
@@ -41,26 +41,29 @@ cat > "$PAYLOAD_FILE" << EOF
 EOF
 
 echo "Executing command: $COMMAND"
+echo "Target: $MANAGER_URL/remote"
 echo ""
 
-RESPONSE=$(curl -s -X POST "$MANAGER_URL/remote" \
-  -H "Content-Type: application/json" \
-  -d @"$PAYLOAD_FILE")
+HEADERS=(-H "Content-Type: application/json")
+if [ -n "$ID_TEAM" ]; then
+  HEADERS+=(-H "X-Id-Team: $ID_TEAM")
+fi
+
+RESPONSE=$(curl -s -X POST "$MANAGER_URL/remote" "${HEADERS[@]}" -d @"$PAYLOAD_FILE")
+CURL_STATUS=$?
 
 rm -f "$PAYLOAD_FILE"
 
-# Check if curl succeeded
-if [ $? -ne 0 ]; then
+if [ $CURL_STATUS -ne 0 ]; then
   echo "Error: Failed to connect to manager at $MANAGER_URL"
   exit 1
 fi
 
-# Parse response
-SUCCESS=$(echo "$RESPONSE" | jq -r '.success // false')
+OK=$(echo "$RESPONSE" | jq -r '.ok // false')
 RESULT=$(echo "$RESPONSE" | jq -r '.result // empty')
 ERROR=$(echo "$RESPONSE" | jq -r '.error // empty')
 
-if [ "$SUCCESS" = "true" ]; then
+if [ "$OK" = "true" ]; then
   echo "Success!"
   echo ""
   echo "$RESULT"

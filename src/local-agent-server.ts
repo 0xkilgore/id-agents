@@ -15,7 +15,7 @@
 
 import 'dotenv/config';
 import { AgentRestServer } from './agent-rest-server.js';
-import { createDb } from './db/index.js';
+import { createDb, migrateDb } from './db/index.js';
 import type { Db } from './db/db-service.js';
 import fetch from 'node-fetch';
 import { mkdirSync, existsSync } from 'fs';
@@ -178,41 +178,45 @@ export async function startLocalAgent(config: LocalAgentConfig): Promise<{
     port = await findAvailablePort(portRange.portStart, portRange.portEnd - portRange.portStart);
   }
 
-  // Try to connect to database (optional - for persistent news/queries)
+  // Open the shared DB (SQLite default or Postgres via DATABASE_URL). Query and
+  // news rows must land in this shared store so the manager daemon at :4100
+  // can serve /query/<id> and /news polling. Memory-only fallback remains for
+  // resilience, but daemon polling will 404 in that mode.
   let db: Db | undefined;
   let dbTeamId: string | undefined;
 
-  if (process.env.DATABASE_URL) {
-    try {
-      db = await createDb();
-      // Use pre-configured team ID if available
-      dbTeamId = process.env.ID_DB_TEAM_ID || await db.teams.getOrCreateTeamId(team);
+  try {
+    db = await createDb();
+    await migrateDb(db);
+    // Use pre-configured team ID if available
+    dbTeamId = process.env.ID_DB_TEAM_ID || await db.teams.getOrCreateTeamId(team);
 
-      if (isPreRegistered) {
-        // Just update status to 'running' - agent was already registered by manager
-        await db.agents.updateStatus(agentId, 'running');
-        console.log(`📦 Updated status to running in database`);
-      } else {
-        // Register agent in database (standalone mode)
-        await db.agents.upsert({
-          team_id: dbTeamId,
-          id: agentId,
-          name,
-          type: 'claude',
-          model,
-          port,
-          endpoint: `http://localhost:${port}`,
-          working_directory: workingDirectory,
-          status: 'running',
-          created_at: Date.now(),
-          metadata: { name, service_type: 'REST-AP', service: `http://localhost:${port}`, runtime, local: true, pid: process.pid },
-        });
-        console.log(`📦 Registered in database (team: ${team})`);
-      }
-    } catch (err) {
-      console.warn(`⚠️  Database connection failed, running in memory-only mode: ${err}`);
-      db = undefined;
+    if (isPreRegistered) {
+      // Just update status to 'running' - agent was already registered by manager
+      await db.agents.updateStatus(agentId, 'running');
+      console.log(`📦 Updated status to running in database`);
+    } else {
+      // Register agent in database (standalone mode)
+      await db.agents.upsert({
+        team_id: dbTeamId,
+        id: agentId,
+        name,
+        type: 'claude',
+        model,
+        port,
+        endpoint: `http://localhost:${port}`,
+        working_directory: workingDirectory,
+        status: 'running',
+        created_at: Date.now(),
+        metadata: { name, service_type: 'REST-AP', service: `http://localhost:${port}`, runtime, local: true, pid: process.pid },
+      });
+      console.log(`📦 Registered in database (team: ${team})`);
     }
+  } catch (err) {
+    console.warn(`⚠️  Database connection failed, running in memory-only mode: ${err}`);
+    console.warn(`⚠️  Manager daemon polling (GET :4100/query/<id>, /news) will NOT find this agent's queries while memory-only.`);
+    db = undefined;
+    dbTeamId = undefined;
   }
 
   // For Claude CLI runtimes, prefer the local Claude session over ambient API keys.

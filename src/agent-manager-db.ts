@@ -202,6 +202,10 @@ export class AgentManagerDb {
   private defaultConfig: DeployConfig['defaults'] | null = null;
   private schedulerService: SchedulerService | null = null;
   private queryWaiters: Map<string, QueryWaiter> = new Map(); // key: query_id
+  // Long-poll waiters for GET /query/:id?wait=<seconds>. Wakes when a daemon-side
+  // query write (news.in_reply_to completion, agent-stop cancel) transitions
+  // the row. Sweeper-expired rows rely on the request's wait-timeout re-read.
+  private queryStatusWaiters: Map<string, Set<() => void>> = new Map(); // key: `${teamId}:${queryId}`
   private healthStatus: Map<string, { status: 'online' | 'offline' | 'unknown'; lastCheck: number }> = new Map(); // key: `${teamId}:${agentId}`
   private healthCheckInterval: NodeJS.Timeout | null = null;
   private remoteProbeInterval: NodeJS.Timeout | null = null;
@@ -1417,6 +1421,78 @@ export class AgentManagerDb {
       }
     });
 
+    // POST /schedule - enqueue manager-owned internal scheduled work
+    this.managementApp.post('/schedule', async (req, res) => {
+      try {
+        const { id: teamId, name: teamName } = await this.getTeam(req);
+        const { message, schedule, mode, linkedTasks } = req.body || {};
+
+        if (!message) {
+          return res.status(400).json({ error: 'Missing message' });
+        }
+        if (!schedule || typeof schedule !== 'object') {
+          return res.status(400).json({ error: 'Schedule metadata is required' });
+        }
+        if (mode && mode !== 'internal') {
+          return res.status(400).json({ error: 'Invalid schedule mode' });
+        }
+
+        const messageStr = typeof message === 'string' ? message : String(message);
+        const ts = Date.now();
+        const queryId = `query_${ts}_${Math.random().toString(36).slice(2, 9)}`;
+
+        const cliAgent = await this.db.agents.findInteractive(teamId);
+        const namedManager = cliAgent ? null : await this.db.agents.getByName(teamId, 'manager');
+        const managerId = cliAgent?.id || namedManager?.id || `manager-${teamName}`;
+
+        const queryResult: Record<string, unknown> = { schedule, message: messageStr, mode: 'internal' };
+        if (Array.isArray(linkedTasks) && linkedTasks.length > 0) {
+          queryResult.linkedTasks = linkedTasks;
+        }
+
+        await this.db.queries.upsert(teamId, managerId, {
+          query_id: queryId,
+          status: 'pending',
+          prompt: messageStr,
+          created: ts,
+          completed: null,
+          result: queryResult,
+          error: null,
+          session_id: null,
+        });
+
+        const newsData: Record<string, unknown> = {
+          query_id: queryId,
+          message: messageStr,
+          schedule,
+          status: 'awaiting_response',
+        };
+        if (Array.isArray(linkedTasks) && linkedTasks.length > 0) {
+          newsData.linkedTasks = linkedTasks;
+        }
+
+        await this.db.news.add(teamId, managerId, {
+          timestamp: ts,
+          type: 'schedule.received',
+          message: `Scheduled query ${queryId} received`,
+          data: newsData,
+          query_id: queryId,
+          reply_expected: false,
+        });
+
+        this.managerLog(`Received scheduled query ${queryId}: ${messageStr.slice(0, 50)}...`);
+
+        res.status(202).json({
+          query_id: queryId,
+          status: 'pending',
+          message: `Scheduled work has been queued for the manager inbox.`,
+        });
+      } catch (err: any) {
+        console.error('[Manager] Error in POST /schedule:', err);
+        res.status(500).json({ error: err?.message || 'Internal server error' });
+      }
+    });
+
     // POST /message - DEPRECATED unified endpoint for sending messages to agents.
     // Prefer POST /talk-to (synchronous reply) or POST /news-to (fire-and-forget).
     // Emits an X-Deprecated response header and a manager log line; still
@@ -1517,6 +1593,9 @@ export class AgentManagerDb {
         // If this is a reply to a query, update the query status and resolve any waiting /talk-to
         if (in_reply_to) {
           await this.db.queries.complete(teamId, in_reply_to, ts, { from, message, ...data });
+
+          // Wake any long-poll GET /query/:id?wait= waiters for this row.
+          this.notifyQueryStatusWaiters(teamId, in_reply_to);
 
           // Resolve any waiting /talk-to request (waiter may still exist even if HTTP timed out)
           const waiter = this.queryWaiters.get(in_reply_to);
@@ -1701,15 +1780,25 @@ export class AgentManagerDb {
     // GET /query/:id - one-row lookup for a query's status/result
     // Team-scoped via the team header. Status is mapped to the external
     // vocabulary: { pending, processing, delivered, failed, expired }.
+    //
+    // Optional `?wait=<seconds>` (0–30, default 0) enables long-poll: if the
+    // row is still pending/processing, the handler blocks until a waiter is
+    // fired (daemon-side terminal transition) or the wait timeout elapses,
+    // then re-reads and returns whatever the DB says.
     this.managementApp.get('/query/:id', async (req, res) => {
       try {
         const { id: teamId } = await this.getTeam(req);
         const queryId = req.params.id;
-        const row = await this.db.queries.getByQueryIdForTeam(teamId, queryId);
-        if (!row) return res.status(404).json({ error: `Query "${queryId}" not found` });
 
-        // Map internal status → external vocabulary.
-        // Internal values seen today: pending, processing, completed, cancelled, failed, expired.
+        const waitRaw = req.query.wait;
+        let waitSec = 0;
+        if (typeof waitRaw === 'string' && waitRaw.length > 0) {
+          const parsed = Number.parseInt(waitRaw, 10);
+          if (Number.isFinite(parsed) && parsed > 0) {
+            waitSec = Math.min(parsed, 30);
+          }
+        }
+
         const statusMap: Record<string, string> = {
           pending: 'pending',
           processing: 'processing',
@@ -1718,6 +1807,37 @@ export class AgentManagerDb {
           failed: 'failed',
           expired: 'expired',
         };
+        const isTerminal = (s: string) =>
+          s === 'completed' || s === 'delivered' || s === 'failed' || s === 'cancelled' || s === 'expired';
+
+        let row = await this.db.queries.getByQueryIdForTeam(teamId, queryId);
+        if (!row) return res.status(404).json({ error: `Query "${queryId}" not found` });
+
+        if (waitSec > 0 && !isTerminal(row.status)) {
+          const deadline = Date.now() + waitSec * 1000;
+          // Register a single-shot waker and race it against the wait-deadline.
+          let wake: () => void = () => {};
+          const woke: Promise<void> = new Promise((resolve) => {
+            wake = () => resolve();
+            this.addQueryStatusWaiter(teamId, queryId, wake);
+          });
+          try {
+            const remaining = deadline - Date.now();
+            if (remaining > 0) {
+              let timer: NodeJS.Timeout | null = null;
+              const timeoutPromise = new Promise<void>((resolve) => {
+                timer = setTimeout(resolve, remaining);
+              });
+              await Promise.race([woke, timeoutPromise]);
+              if (timer) clearTimeout(timer);
+            }
+          } finally {
+            this.removeQueryStatusWaiter(teamId, queryId, wake);
+          }
+          row = await this.db.queries.getByQueryIdForTeam(teamId, queryId);
+          if (!row) return res.status(404).json({ error: `Query "${queryId}" not found` });
+        }
+
         const status = statusMap[row.status] || row.status;
 
         // Resolve the target agent's friendly name if we can.
@@ -6270,7 +6390,7 @@ export class AgentManagerDb {
         return 0;
       }
 
-      // Add query.cancelled news items for each
+      // Add query.cancelled news items for each, and wake any long-poll waiters.
       for (const queryId of queryIds) {
         await this.db.news.add(teamId, agentId, {
           timestamp: ts,
@@ -6279,6 +6399,7 @@ export class AgentManagerDb {
           data: { reason: 'agent_stopped', query_id: queryId },
           query_id: queryId,
         });
+        this.notifyQueryStatusWaiters(teamId, queryId);
       }
 
       console.log(`[Manager] Cancelled ${queryIds.length} pending queries for agent ${agentId}`);
@@ -6286,6 +6407,37 @@ export class AgentManagerDb {
     } catch (err) {
       console.error(`[Manager] Error cancelling queries for agent ${agentId}:`, err);
       return 0;
+    }
+  }
+
+  // -- long-poll helpers for GET /query/:id?wait= ---------------------------
+
+  private addQueryStatusWaiter(teamId: string, queryId: string, fn: () => void): void {
+    const key = `${teamId}:${queryId}`;
+    let set = this.queryStatusWaiters.get(key);
+    if (!set) {
+      set = new Set();
+      this.queryStatusWaiters.set(key, set);
+    }
+    set.add(fn);
+  }
+
+  private removeQueryStatusWaiter(teamId: string, queryId: string, fn: () => void): void {
+    const key = `${teamId}:${queryId}`;
+    const set = this.queryStatusWaiters.get(key);
+    if (!set) return;
+    set.delete(fn);
+    if (set.size === 0) this.queryStatusWaiters.delete(key);
+  }
+
+  private notifyQueryStatusWaiters(teamId: string, queryId: string): void {
+    const key = `${teamId}:${queryId}`;
+    const set = this.queryStatusWaiters.get(key);
+    if (!set) return;
+    const waiters = Array.from(set);
+    this.queryStatusWaiters.delete(key);
+    for (const fn of waiters) {
+      try { fn(); } catch { /* non-fatal */ }
     }
   }
 
