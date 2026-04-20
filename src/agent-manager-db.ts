@@ -1943,11 +1943,13 @@ export class AgentManagerDb {
 
         const teamId = team.id;
 
-        const countResult = await this.db.adapter.query<{ count: string }>(
-          'SELECT COUNT(*)::text as count FROM agents WHERE team_id = $1 AND deleted_at IS NULL',
+        // NB: no `::text` cast — that's Postgres-only and breaks on SQLite.
+        // COUNT(*) returns a number on both backends; parseInt tolerates both.
+        const countResult = await this.db.adapter.query<{ count: string | number }>(
+          'SELECT COUNT(*) as count FROM agents WHERE team_id = $1 AND deleted_at IS NULL',
           [teamId]
         );
-        const agentCount = parseInt(countResult.rows[0]?.count || '0');
+        const agentCount = parseInt(String(countResult.rows[0]?.count ?? '0'));
 
         if (agentCount > 0) {
           return res.status(400).json({
