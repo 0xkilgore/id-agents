@@ -6123,16 +6123,19 @@ export class AgentManagerDb {
     const url = new URL(req.url || '', `http://${req.headers.host}`);
     const teamHeader = req.headers['x-id-team'] || req.headers['x-id-project'] || url.searchParams.get('team');
 
-    // Resolve team
-    let teamId: string;
-    let teamName: string;
-    if (teamHeader) {
-      teamName = String(teamHeader);
-      teamId = await this.db.teams.getOrCreateTeamId(teamName);
-    } else {
-      teamName = process.env.ID_TEAM || 'default';
-      teamId = await this.db.teams.getOrCreateTeamId(teamName);
+    // Resolve team — look up only; do NOT auto-create. A stale client
+    // reconnecting with a team name that was deleted must not resurrect it.
+    const teamName = teamHeader ? String(teamHeader) : (process.env.ID_TEAM || 'default');
+    const teamRow = await this.db.teams.getTeamByName(teamName);
+    if (!teamRow) {
+      console.log(`[WS] Rejecting connection for unknown team "${teamName}"`);
+      try {
+        ws.send(JSON.stringify({ type: 'error', error: 'team_not_found', team: teamName }));
+      } catch { /* swallow */ }
+      ws.close(1008, 'team_not_found');
+      return;
     }
+    const teamId = teamRow.id;
 
     const client: WSClient = { ws, teamId, teamName, authenticated: true };
     this.wsClients.add(client);
