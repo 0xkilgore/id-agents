@@ -6094,18 +6094,21 @@ export class AgentManagerDb {
   }
 
   /**
-   * Ensure well-known teams exist: default, idchain, public.
-   * These are created idempotently on every manager start so that subsequent
-   * phases can register agents into them without needing to create them on the fly.
+   * Ensure well-known teams exist: `default` (fallback for unscoped requests)
+   * and `public` (public-agent registrations). Created idempotently on every
+   * manager start. User-specific project teams are NOT seeded here — deploy
+   * them with `/deploy <config>` instead.
    */
   private async seedWellKnownTeams(): Promise<void> {
     try {
-      for (const name of ['default', 'idchain', 'public']) {
+      const seeded: string[] = [];
+      for (const name of ['default', 'public']) {
         await this.db.teams.getOrCreateTeamId(name);
         const teamDir = `${this.baseWorkDir}/teams/${name}`;
         if (!existsSync(teamDir)) mkdirSync(teamDir, { recursive: true });
+        seeded.push(name);
       }
-      console.log('[Manager] Well-known teams seeded: default, idchain, public');
+      console.log(`[Manager] Well-known teams seeded: ${seeded.join(', ')}`);
     } catch (err: any) {
       // Non-fatal: log and continue
       console.warn('[Manager] Failed to seed well-known teams:', err?.message);
