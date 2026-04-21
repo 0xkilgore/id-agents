@@ -149,16 +149,7 @@ MANAGER_PORT=5000 npm run id-agents
 ./scripts/detect-runtimes.sh   # first line: one of mixed | as-is | all-codex | abort (see QUICKSTART); Cursor readiness may print as an extra comment line
 ```
 
-The default team always has 2 agents (`coder` + `researcher`). Only the runtime mix changes per host:
-
-| Claude ready | Codex ready | Edit `configs/default.yaml` | Final team |
-|---|---|---|---|
-| ✓ | ✓ | Flip ONLY `researcher`'s runtime to `codex`. | `coder` (Claude) + `researcher` (Codex) |
-| ✓ | ✗ | No edit. | `coder` + `researcher` (both Claude) |
-| ✗ | ✓ | Flip `defaults.runtime` from `claude-code-cli` to `codex`. | `coder` + `researcher` (both Codex) |
-| ✗ | ✗ | Stop. Run `claude login`, `codex login`, or `cursor-agent login` (see Prerequisites) so at least one runtime is ready, then retry. | — |
-
-`detect-runtimes.sh` prints the exact commands for the `mixed` and `all-codex` rows — see [QUICKSTART Step 4](./QUICKSTART.md) for the full snippets.
+The default team always has 2 agents (`coder` + `researcher`). `detect-runtimes.sh` prints the exact edits for your host — see [QUICKSTART Step 4](./QUICKSTART.md) for the full snippets.
 
 Then deploy and talk to the team:
 
