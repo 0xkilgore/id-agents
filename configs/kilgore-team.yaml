@@ -1,0 +1,187 @@
+# Kilgore's Agent Team
+# Manager dispatches to project-based agents
+# One agent per project folder — per Prem's recommendation
+#
+# Deploy: /deploy configs/kilgore-team.yaml
+# Or: curl -X POST http://localhost:4100/remote -H "Content-Type: application/json" \
+#       -d '{"command":"/deploy configs/kilgore-team.yaml"}'
+
+version: "1"
+
+defaults:
+  local: true
+  runtime: claude-code-cli
+  register: false
+  skills:
+    - identity
+    - inter-agent
+    - catalog
+  heartbeat: 3600            # 60-minute deep-health smoke test (spec 030)
+
+agents:
+  # CANE — Central nervous system, agent infrastructure
+  # Owns: taskview, id-agents, inbox, Cane poller, morning digest, voice sweep
+  # This is the agent that builds and maintains the system itself
+  - name: cane
+    description: >
+      Agent infrastructure and task management. Owns taskview (to-do system),
+      Cane email/Telegram poller, calendar invites, voice transcription, morning digest,
+      ID Agents orchestration config. The system builder — when something needs to be
+      built or fixed in the agent infrastructure, this is the agent.
+    model: claude-sonnet-4-6
+    workingDirectory: /Users/kilgore/Dropbox/Code/cane
+    capabilities: |
+      - Maintain taskview (CLI + API) that aggregates to-do.md across project folders
+      - Manage the Cane email/Telegram poller on M1 — IMAP, Haiku classification, Whisper voice notes
+      - Send calendar invites, morning digests, and outbound email via cane.py
+      - Own the ID Agents team config (kilgore-team.yaml) and manager wiring
+      - Write specs for Roger when new features need to be built into the system
+
+  # FINANCES — Expenses, net worth, budgeting, banking
+  # Owns: expenses dashboard (finances.caneyfork.dev), transaction processing, budget analysis
+  - name: finances
+    description: >
+      Finance specialist. Monthly expense processing (Chase, SoFi, Apple Card, Southwest),
+      net worth tracking, budget analysis with Liz, farm expenses, trip budgeting.
+      Manages finances.caneyfork.dev dashboard. Knows all account structures and categories.
+      Amazon transaction categorization via Cane email forwards.
+    model: claude-sonnet-4-6
+    workingDirectory: /Users/kilgore/Dropbox/Code/finances
+    capabilities: |
+      - Process monthly Chase, SoFi, Apple Card, and Southwest statements into Supabase
+      - Categorize Amazon orders from Cane email forwards against the 25-category budget
+      - Maintain the expenses dashboard (React + Supabase, finances.caneyfork.dev)
+      - Run budget analysis and net-worth reports for Chris + Liz reviews
+      - Track farm, trip, and Powerhouse/Rembrand/Caney Fork expense splits
+
+  # PERSONAL — Health, running, blowout, farm, politics
+  # Owns: health dashboard (health.caneyfork.dev), running data, Oura ring, weight tracking
+  - name: personal
+    description: >
+      Personal life agent. Health dashboard (health.caneyfork.dev), marathon training
+      (April 25 2026), Oura ring data, weight tracking (eufy), running stats.
+      House expansion project (the blowout — 1500sqft addition, architect search, financing).
+      Farm (Smith County TN, 114 acres, cattle). Nashville/TN/national politics tracking
+      (Vanderbilt polls, state legislature, policy research).
+    model: claude-sonnet-4-6
+    workingDirectory: /Users/kilgore/Dropbox/Code/personal
+    capabilities: |
+      - Run the health/running dashboard (health.caneyfork.dev) and marathon training data
+      - Produce weekly fantasy baseball/basketball streaming picks via Yahoo bot + RotoWire/Fangraphs
+      - Track the blowout house expansion — architects, budget, financing, solar/generator
+      - Maintain farm records (Smith County, cattle) and Oura/weight/Apple Watch data
+      - Research Nashville, TN, and national politics (Vanderbilt polls, legislature, policy)
+
+  # PIPELINE — Ideas, people, companies, job search, networking
+  # Owns: contacts, networking list, job applications, Powerhouse archive
+  - name: pipeline
+    description: >
+      Ideas, people, and opportunities pipeline. Networking contacts and outreach,
+      NYC trip planning (Lucas, Matt/Gauntlet, Raph/Tally, Ross+Ryan/Vault),
+      job search (M0 VP Marketing, other applications), LinkedIn data.
+      Powerhouse archive. Manages the flow of opportunities and relationships.
+    model: claude-sonnet-4-6
+    workingDirectory: /Users/kilgore/Dropbox/Code/pipeline
+    capabilities: |
+      - Track networking contacts and flag overdue follow-ups (people falling through cracks)
+      - Coordinate trip meeting stacks (NYC, Chicago) — who's around, time blocks, intros to send
+      - Manage active job applications, LinkedIn scrapes, and resume revisions
+      - Triage ideas/opportunities from Telegram + email forwards into pipeline entries
+      - Own the Powerhouse archive and partnership/customer-validation outreach
+
+  # CLEVELAND PARK — Community, CPNA, park advocacy
+  - name: cleveland-park
+    description: >
+      Cleveland Park neighborhood association agent. Newsletter drafts, Metro Parks
+      advocacy (pool resources, softball field, pavilion reservations), park cleanup
+      events, Buzzi Unicem noise pollution tracking, community engagement.
+    model: claude-sonnet-4-6
+    workingDirectory: /Users/kilgore/Dropbox/Code/cleveland-park
+    capabilities: |
+      - Draft CPNA newsletters and route them through MailerLite (~100 subscribers)
+      - Maintain the Cleveland Park website (Next.js, events.json, meeting notes JSON)
+      - Track Metro Parks advocacy (pool, softball field, pavilion reservations)
+      - Monitor Buzzi Unicem noise-pollution complaints and document outreach
+      - Prep monthly meeting agendas (2nd Thursday) and coordinate flyers/event logistics
+
+  # TRINITY — Church board, community
+  - name: trinity
+    description: >
+      Trinity community agent. Board offboarding (Emily Siner interview),
+      donations, community involvement.
+    model: claude-sonnet-4-6
+    workingDirectory: /Users/kilgore/Dropbox/Code/trinity
+    capabilities: |
+      - Process governance committee notes and rolling meeting summaries
+      - Coordinate board offboarding (e.g. Emily Siner interview) and transitions
+      - Track donations, fundraising committee material, and sponsor outreach
+      - Maintain by-laws, flyers, and TCC board visuals
+      - Surface action items from meeting transcripts into to-dos
+
+  # DEFI — DeFi research, vaults, oracles, products
+  - name: defi
+    description: >
+      DeFi research and product agent. Tracks vault/curator landscape (Morpho, Yearn,
+      Veda, Gauntlet, Lagoon), oracles, World Markets/MegaETH, ERC-4626/ERC-7540
+      standards, institutional players, product opportunities.
+      Developing "Vaults as a Service" concept. Vault Summit NYC June 5.
+      Research doc at research-vault-landscape.md.
+    model: claude-sonnet-4-6
+    workingDirectory: /Users/kilgore/Dropbox/Code/defi
+    capabilities: |
+      - Track the vault/curator landscape (Morpho, Yearn, Veda, Gauntlet, Lagoon) and keep research-vault-landscape.md current
+      - Research ERC-4626 / ERC-7540 standards, oracles, and World Markets/MegaETH launches
+      - Develop the "Vaults as a Service" product thesis and identify institutional customer candidates
+      - Prep for Vault Summit NYC (June 5) and podcast appearances (DefiLlama, Dose of DeFi)
+      - Surface DeFi product ideas from podcasts/meetings into opportunities/ and drafts/
+
+  # AGENT-PLATFORM — Product idea: building an agent product/platform
+  - name: agent-platform
+    description: >
+      Product research agent for personal agent platform opportunity. Exploring
+      what a consumer/prosumer agent product looks like — combining Cane-style
+      inbound processing, ID Agents orchestration, ENS identity, crypto rails.
+      Competitor research: Paperclip, OpenClaw, other personal agent products.
+    model: claude-sonnet-4-6
+    workingDirectory: /Users/kilgore/Dropbox/Code/agent-platform
+    capabilities: |
+      - Research consumer/prosumer personal-agent products (Paperclip, OpenClaw, etc.)
+      - Evaluate agent-first protocols and MCP surfaces (CDP CLI, Morpho Agents beta)
+      - Distill patterns from the live Cane + ID Agents system into potential product shapes
+      - Track ENS identity + crypto-rail integration angles for agent-native UX
+      - Draft positioning and pitch material as the thesis sharpens
+
+  # ROGER — Dedicated coding agent
+  # Other agents do research and planning. Roger writes the code.
+  # Flow: Agent writes spec → Manager reviews → Roger implements
+  - name: roger
+    description: >
+      Dedicated coding agent. Writes, edits, and ships code. Other agents send
+      specs when they need code implemented. Roger reads the spec, reads the
+      existing codebase, makes the smallest change that works, tests it, and
+      reports back. Does NOT do research, planning, or reports. Code only.
+    model: claude-sonnet-4-6
+    workingDirectory: /Users/kilgore/Dropbox/Code/roger
+    capabilities: |
+      - Implement specs from other agents — read spec, read code, ship the smallest change that works
+      - Match existing project conventions (no refactors, no scope creep, no unrequested features)
+      - Run tests or minimal compile/syntax checks before marking work done
+      - Use git worktrees when touching active projects to avoid disturbing in-flight work
+      - Log a completion note to ~/Dropbox/Code/roger/completed/ for every shipped task
+
+  # SENTINEL — Verification & testing agent
+  # Runs on schedule to catch dropped items, verify agent outputs, check system health
+  - name: sentinel
+    description: >
+      Verification and testing agent. Runs after sessions and on 2-hour schedule.
+      Checks that conversations become to-dos, emails get properly processed,
+      data pipelines are running, agent outputs are verified, and networking
+      contacts don't fall through cracks. Produces reports in Obsidian.
+    model: claude-sonnet-4-6
+    workingDirectory: /Users/kilgore/Dropbox/Code/sentinel
+    capabilities: |
+      - Run verification reports on taskview, inbox, agent health, and data pipelines every 2 hours
+      - Detect dropped/stuck work — overdue to-dos, unprocessed inbox items, stale projection files
+      - Verify agent outputs match claims (e.g. Roger's reported file changes, digest sends, dashboard refreshes)
+      - Cross-check networking notes against pipeline to-dos so contacts don't slip
+      - Produce markdown reports with ✓ / ⚠ / ❌ sections and auto-update the Obsidian Dashboard link list
