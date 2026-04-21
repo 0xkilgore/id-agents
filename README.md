@@ -11,11 +11,11 @@
 
 **Version 0.1.53-beta**
 
-Run a team of AI coding agents from a single chat. Each agent is a real process with full tool access — Claude Code, OpenAI Codex, or both. No UI needed. Connect from any terminal, Telegram, or SSH session.
+Run a team of AI coding agents from a single chat. Each agent is a real process with full tool access — **Claude Code CLI**, **OpenAI Codex**, **Cursor CLI**, or a mix. No UI needed. Connect from any terminal, Telegram, or SSH session.
 
 ## Key Features
 
-- **Multiple runtimes** - Claude Code CLI and OpenAI Codex — mix and match in the same team
+- **Multiple runtimes** - Claude Code CLI, OpenAI Codex, and Cursor CLI — mix and match in the same team
 - **Public-agent support** - register any REST-AP service that publishes `/.well-known/restap.json` with `service_type: "public-agent"` into the `public` team via `/public add <domain>`. The id-agents manager handles wallet provisioning, ID Chain registration, SSH-delivered identity files, heartbeat probes, and DMZ metadata. **[Juno](https://github.com/idchain-world/juno)** is the reference public-agent implementation we ship — capability-limited by design, safe to point at the internet — but any service that speaks the same protocol works
 - **Task system** - Create, assign, claim, and track tasks across agents (`/task` commands + `/tasks` REST API)
 - **Scheduling** - Heartbeat intervals and calendar events for automated recurring work
@@ -54,7 +54,7 @@ Run a team of AI coding agents from a single chat. Each agent is a real process 
 │               │   │               │   │               │
 │   Agent A     │   │   Agent B     │   │   Agent C     │
 │    :4101      │   │    :4102      │   │    :4103      │
-│ (local proc)  │   │ (local proc)  │   │ (local proc)  │
+│  Claude Code  │   │     Codex     │   │  Cursor CLI   │
 │               │   │               │   │               │
 └───────────────┘   └───────────────┘   └───────────────┘
                               │
@@ -81,12 +81,13 @@ Run a team of AI coding agents from a single chat. Each agent is a real process 
 - **Claude Code CLI** — install from [claude.ai/code](https://claude.ai/code) and run `claude login`
 - **Claude Pro or Max plan** (agents use your Claude Code subscription — no API key needed)
 - **OpenAI Codex CLI** (optional) — install from [github.com/openai/codex](https://github.com/openai/codex) and run `codex login`
+- **Cursor CLI** (optional) — install from [cursor.com](https://cursor.com) with `curl https://cursor.com/install -fsS | bash` and run `cursor-agent login` (or set `CURSOR_API_KEY`)
 - **[id-cli](https://github.com/idchain-world/id-cli)** (optional, for onchain agent registration)
 - **[OWS CLI](https://github.com/open-wallet-standard/core)** (optional, for agent wallets)
 
 > **Important:** You must be logged into Claude Code CLI before starting ID Agents. Run `claude login` in your terminal and complete the authentication. If you use Claude Code in VS Code, you still need to log in via the terminal — open VS Code's integrated terminal and run `claude login` there.
 
-> **⚠️ Permissions:** ID Agents runs each agent as a background process. By default, `claude-code-cli` agents spawn with `--dangerously-skip-permissions` and `codex` agents spawn with `--dangerously-bypass-approvals-and-sandbox`, because background processes have no shell to approve tool prompts. You can opt out per agent (or under `defaults`) with `dangerouslySkipPermissions: false`, but the agents will then hang silently on the first tool-use prompt. If you are not comfortable giving background agents this level of autonomy, ID Agents is not the right tool for you. See [QUICKSTART.md](./QUICKSTART.md#-permissions-notice--read-before-deploying) for the full notice.
+> **⚠️ Permissions:** ID Agents runs each agent as a background process. By default, `claude-code-cli` agents spawn with `--dangerously-skip-permissions`, `codex` agents spawn with `--dangerously-bypass-approvals-and-sandbox`, and `cursor-cli` agents spawn with `-f` (force-allow commands), because background processes have no shell to approve tool prompts. You can opt out per agent (or under `defaults`) with `dangerouslySkipPermissions: false`, but the agents will then hang silently on the first tool-use prompt. If you are not comfortable giving background agents this level of autonomy, ID Agents is not the right tool for you. See [QUICKSTART.md](./QUICKSTART.md#-permissions-notice--read-before-deploying) for the full notice.
 
 ### Recommended: Let Claude set it up
 
@@ -145,7 +146,7 @@ MANAGER_PORT=5000 npm run id-agents
 `configs/default.yaml` is the source of truth — whatever is in the file is what gets deployed. Before deploying, edit it to match the runtimes on this host:
 
 ```bash
-./scripts/detect-runtimes.sh   # tells you which of the 4 cases below applies
+./scripts/detect-runtimes.sh   # first line: one of mixed | as-is | all-codex | abort (see QUICKSTART); Cursor readiness may print as an extra comment line
 ```
 
 The default team always has 2 agents (`coder` + `researcher`). Only the runtime mix changes per host:
@@ -155,7 +156,7 @@ The default team always has 2 agents (`coder` + `researcher`). Only the runtime 
 | ✓ | ✓ | Flip ONLY `researcher`'s runtime to `codex`. | `coder` (Claude) + `researcher` (Codex) |
 | ✓ | ✗ | No edit. | `coder` + `researcher` (both Claude) |
 | ✗ | ✓ | Flip `defaults.runtime` from `claude-code-cli` to `codex`. | `coder` + `researcher` (both Codex) |
-| ✗ | ✗ | Stop. Run `claude login` or `codex login` first. | — |
+| ✗ | ✗ | Stop. Run `claude login`, `codex login`, or `cursor-agent login` (see Prerequisites) so at least one runtime is ready, then retry. | — |
 
 `detect-runtimes.sh` prints the exact commands for the `mixed` and `all-codex` rows — see [QUICKSTART Step 4](./QUICKSTART.md) for the full snippets.
 
@@ -172,7 +173,7 @@ To update a running team later (add/remove/change agents without losing sessions
 
 ### Connecting a Manager
 
-ID Agents runs the servers and agent processes. You connect to it through a "manager" — any AI coding agent that can reach the `/remote` API. This can be Claude Code CLI, Codex, OpenClaw, or any other agent that can make HTTP requests.
+ID Agents runs the servers and agent processes. You connect to it through a "manager" — any AI coding agent that can reach the `/remote` API. This can be Claude Code CLI, OpenAI Codex, Cursor CLI, OpenClaw, or any other agent that can make HTTP requests.
 
 ```bash
 # The manager is whatever you're chatting in — it controls the team via /remote
@@ -571,6 +572,7 @@ Two file patterns are supported (checked in this order), and paths are **runtime
 | `claude-code-cli` | `.claude/agents/` | `.claude/CLAUDE.md` | `.claude/skills/` |
 | `claude-agent-sdk` | `.claude/agents/` | `.claude/CLAUDE.md` | `.claude/skills/` |
 | `codex` | `.agents/` | `AGENTS.md` (project root) | `.agents/skills/` |
+| `cursor-cli` | `.cursor/agents/` | `AGENTS.md` (project root) | `.cursor/skills/` |
 
 ```
 # Claude agent layout
@@ -587,6 +589,14 @@ myproject/
     cto/
       AGENTS.md             # directory pattern (priority)
     researcher.md           # single-file pattern (fallback)
+
+# Cursor agent layout
+myproject/
+  .cursor/
+    agents/
+      coder/
+        AGENTS.md           # directory pattern (priority)
+      researcher.md         # single-file pattern (fallback)
 ```
 
 The directory pattern takes priority over the single-file pattern. Use the directory pattern when the agent needs additional supporting files alongside its role definition.

@@ -12,6 +12,7 @@ cp env.example .env
 # edit .env: set DATABASE_URL (required for PostgreSQL)
 # For Claude runtimes: set `ANTHROPIC_API_KEY` or run `claude login`
 # For Codex runtimes: run `codex login` or set `OPENAI_API_KEY`
+# For Cursor runtimes: install from https://cursor.com with `curl https://cursor.com/install -fsS | bash`, then `cursor-agent login` or set `CURSOR_API_KEY`
 
 npm run id-agents
 ```

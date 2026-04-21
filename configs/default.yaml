@@ -6,7 +6,7 @@
 #   - claude + codex  → researcher flipped to codex (mixed team)
 #   - claude only     → file used as-is (both claude-code-cli)
 #   - codex only      → both agents flipped to codex
-#   - neither         → abort; install one
+#   - neither         → abort; install Claude or Codex (Cursor is opt-in: per-agent runtime: cursor-cli)
 # See QUICKSTART step 4.
 
 version: "1"

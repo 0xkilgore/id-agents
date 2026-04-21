@@ -68,7 +68,7 @@ User types: /ask coder hello
 1. CLI resolves "coder" → finds agent on port 4101
 2. CLI → POST http://localhost:4101/talk {"message": "hello"}
 3. Agent queues the request and returns 202 with query_id
-4. Agent spawns an LLM session through the configured runtime harness (`claude-agent-sdk`, `claude-code-cli`, or `codex`)
+4. Agent spawns an LLM session through the configured runtime harness (`claude-agent-sdk`, `claude-code-cli`, `claude-code-local`, `codex`, or `cursor-cli`)
 5. LLM processes the message, generates a reply
 6. Reply stored in agent's news feed
 7. Agent auto-sends reply to the CLI's /news endpoint
@@ -106,6 +106,7 @@ User types: /ask coder hello
 | `src/xmtp/ows-signer.ts` | OWS-backed XMTP signer — key never leaves vault |
 | `src/harness/claude-code-cli.ts` | Claude Code CLI harness for spawning LLM sessions |
 | `src/harness/codex.ts` | Codex CLI harness for spawning Codex sessions |
+| `src/harness/cursor-cli.ts` | Cursor Agent CLI harness for spawning Cursor sessions |
 
 ## Agent Instructions: Two Sources
 
@@ -125,6 +126,7 @@ All template and skill operations use `getRuntimePaths(runtime)` from `src/runti
 | `claude-code-cli` | `.claude/agents/` | `.claude/CLAUDE.md` | `.claude/skills/` |
 | `claude-agent-sdk` | `.claude/agents/` | `.claude/CLAUDE.md` | `.claude/skills/` |
 | `codex` | `.agents/` | `AGENTS.md` (project root) | `.agents/skills/` |
+| `cursor-cli` | `.cursor/agents/` | `AGENTS.md` (project root) | `.cursor/skills/` |
 
 ### Spawn Order
 

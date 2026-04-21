@@ -35,6 +35,7 @@ All harnesses produce `HarnessMessage` objects that map to REST-AP responses.
 | `claude-code-cli` | Claude Code CLI | Anthropic | Uses Max plan subscription |
 | `claude-code-local` | Claude Code CLI | Anthropic | Local alias of `claude-code-cli` used by some bootstrap paths |
 | `codex` | Codex CLI | OpenAI | CLI-auth runtime for Codex-based agent execution |
+| `cursor-cli` | Cursor Agent CLI (`cursor-agent`) | Cursor | CLI-auth runtime; stream-json harness, session resume supported |
 
 ## Claude Agent SDK Harness
 
@@ -140,6 +141,41 @@ Codex currently runs each request as a fresh `codex exec` invocation. It does no
 
 ---
 
+## Cursor CLI Harness
+
+Uses the **Cursor Agent CLI** (`cursor-agent`) as a harness. Install from [cursor.com](https://cursor.com):
+
+```bash
+curl https://cursor.com/install -fsS | bash
+cursor-agent login   # or: export CURSOR_API_KEY=...
+```
+
+### Features
+
+- Cursor CLI authentication (`cursor-agent login` or `CURSOR_API_KEY`)
+- Stream-json structured output
+- Session resume supported (`--resume` when configured)
+
+### Configuration
+
+```yaml
+agents:
+  - name: my-agent
+    runtime: cursor-cli
+    model: composer-2   # also common: composer-2-fast, auto
+```
+
+Typical model identifiers include `composer-2`, `composer-2-fast`, and `auto` (pass through to Cursor Agent as configured).
+
+### Environment / Auth
+
+`cursor-cli` requires either:
+
+- a successful `cursor-agent login` session on the host, or
+- `CURSOR_API_KEY`
+
+---
+
 ## Harness Interface
 
 All harnesses implement the `AgentHarness` interface:
@@ -154,7 +190,7 @@ interface AgentHarness {
   ): AsyncGenerator<HarnessMessage>;
 }
 
-type HarnessType = 'claude-agent-sdk' | 'claude-code-cli' | 'claude-code-local' | 'codex';
+type HarnessType = 'claude-agent-sdk' | 'claude-code-cli' | 'claude-code-local' | 'codex' | 'cursor-cli';
 
 interface HarnessOptions {
   model?: string;
@@ -216,6 +252,9 @@ agents:
     runtime: claude-code-cli
   - name: agent-c
     runtime: codex
+  - name: agent-d
+    runtime: cursor-cli
+    model: composer-2
 ```
 
 **Dry run before deploy:**
@@ -237,7 +276,7 @@ curl -X POST http://localhost:4100/remote \
 import { getAvailableHarnesses, isValidHarnessType } from './harness';
 
 const harnesses = getAvailableHarnesses();
-// ['claude-agent-sdk', 'claude-code-cli', 'claude-code-local', 'codex']
+// ['claude-agent-sdk', 'claude-code-cli', 'claude-code-local', 'codex', 'cursor-cli']
 
 isValidHarnessType('claude-agent-sdk'); // true
 isValidHarnessType('invalid');          // false
@@ -297,6 +336,7 @@ export function createHarness(type: HarnessType): AgentHarness {
    - `claude-agent-sdk` - When you need full Anthropic integration and plugin support (uses API key)
    - `claude-code-cli` - When you want Claude Code CLI auth and session continuity
    - `codex` - When you want OpenAI Codex CLI auth and fresh-per-query execution
+   - `cursor-cli` - When you want Cursor Agent CLI auth (`cursor-agent login` or `CURSOR_API_KEY`) and stream-json execution
    - `claude-code-cli` - When you want to use your Max plan subscription
 
 2. **Model selection:**

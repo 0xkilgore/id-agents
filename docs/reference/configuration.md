@@ -146,7 +146,7 @@ All configs should include `skills: [identity, inter-agent, catalog]` at minimum
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `runtime` | String | Default agent runtime (`claude-agent-sdk`, `claude-code-cli`, `codex`) |
+| `runtime` | String | Default agent runtime (`claude-agent-sdk`, `claude-code-cli`, `claude-code-local`, `codex`, `cursor-cli`) |
 | `model` | String | Default LLM model |
 | `skills` | Array | Skills deployed to each agent (minimum: `[identity, inter-agent, catalog]`) |
 | `plugins` | Array | Optional plugins for agent runtimes that support them |
@@ -285,7 +285,7 @@ Defaults:
 
 ## Skills Configuration
 
-Skills are instruction packages deployed at deploy time via `deploySkillsToAgent`. The target directory is runtime-aware: `.claude/skills/` for Claude agents, `.agents/skills/` for Codex agents. Each skill is a directory containing a `SKILL.md` file with YAML frontmatter.
+Skills are instruction packages deployed at deploy time via `deploySkillsToAgent`. The target directory is runtime-aware: `.claude/skills/` for Claude agents, `.agents/skills/` for Codex agents, `.cursor/skills/` for Cursor (`cursor-cli`) agents. Each skill is a directory containing a `SKILL.md` file with YAML frontmatter.
 
 All configs should include `skills: [identity, inter-agent, catalog]` at minimum. The 7 built-in skills are: `identity`, `inter-agent`, `catalog`, `wallet`, `xmtp`, `idagents-admin-control`, `local-agent`.
 
@@ -364,6 +364,7 @@ ID Agents supports multiple LLM runtimes (harnesses):
 | `claude-code-cli` | Claude Code CLI | CLI-auth runtime with session support |
 | `claude-code-local` | Claude Code CLI local alias | Internal/local alias of `claude-code-cli` |
 | `codex` | Codex CLI | OpenAI's coding agent |
+| `cursor-cli` | Cursor Agent CLI | Non-interactive `cursor-agent` harness; install and auth per [Harnesses](./harnesses.md#cursor-cli-harness) (`curl https://cursor.com/install -fsS` then pipe to `bash`, `cursor-agent login`, or `CURSOR_API_KEY`) |
 
 ```yaml
 defaults:
@@ -374,6 +375,9 @@ agents:
     runtime: claude-code-cli
   - name: agent-b
     runtime: codex
+  - name: agent-c
+    runtime: cursor-cli
+    model: composer-2
 ```
 
 Use `/deploy <config> --dry-run` or `/sync <config> --dry-run` to validate runtime/model/auth compatibility before any agents are created. To update a running team without losing sessions, use [`/sync`](../guides/sync-command.md) instead of `/deploy`.
@@ -507,6 +511,7 @@ Configuration can also be provided via environment variables:
 | `ANTHROPIC_API_KEY` | Anthropic API key (not needed with Claude Max plan) |
 | `CLAUDE_MODEL` | Default model override |
 | `OPENAI_API_KEY` | Optional API key for Codex when not using `codex login` |
+| `CURSOR_API_KEY` | Optional API key for Cursor when not using `cursor-agent login` |
 | `DATABASE_URL` | PostgreSQL connection string |
 | `ORCHESTRATOR_TYPE` | Agent runtime type |
 | `PUBLIC_BASE_URL` | Public URL base for agents (e.g., `https://idbot.live`) |

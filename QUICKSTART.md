@@ -83,7 +83,7 @@ This starts the interactive CLI on port 4000 and the manager daemon on port 4100
 ./scripts/detect-runtimes.sh
 ```
 
-First line of the output is one of `mixed`, `as-is`, `all-codex`, `abort` — matching the rows below. For `mixed` and `all-codex` the script also prints the exact edit commands you can copy/paste.
+First line of the output is one of `mixed`, `as-is`, `all-codex`, `abort` — matching the rows below. For `mixed` and `all-codex` the script also prints the exact edit commands you can copy/paste. When **Cursor Agent CLI** is installed and authenticated, the script may print an extra comment line suggesting per-agent `runtime: cursor-cli` for your own configs (the default two-agent flip table below is still Claude ↔ Codex only).
 
 Or check by hand:
 
@@ -98,6 +98,11 @@ command -v claude >/dev/null 2>&1 && \
 command -v codex >/dev/null 2>&1 && \
   { [ -n "$OPENAI_API_KEY" ] || [ -f "$HOME/.codex/auth.json" ]; } \
   && echo "codex: ready" || echo "codex: not ready"
+
+# Cursor: cursor-agent on PATH, and CURSOR_API_KEY or logged-in session (see cursor-agent status)
+command -v cursor-agent >/dev/null 2>&1 && \
+  { [ -n "$CURSOR_API_KEY" ] || cursor-agent status 2>/dev/null | grep -qi 'logged in'; } \
+  && echo "cursor: ready" || echo "cursor: not ready"
 ```
 
 ### Apply the matching edit, then deploy
@@ -107,7 +112,7 @@ command -v codex >/dev/null 2>&1 && \
 | ✓ | ✓ | Flip ONLY `researcher`'s runtime to `codex`; leave `coder` on `claude-code-cli`. | `coder` (Claude) + `researcher` (Codex) |
 | ✓ | ✗ | No edit. Deploy `configs/default.yaml` as-is. | `coder` + `researcher` (both Claude) |
 | ✗ | ✓ | Flip the `defaults.runtime` in `configs/default.yaml` from `claude-code-cli` to `codex`. | `coder` + `researcher` (both Codex) |
-| ✗ | ✗ | **Stop.** Run `claude login` or `codex login` (see Prerequisites), then retry. | — |
+| ✗ | ✗ | **Stop.** Run `claude login`, `codex login`, or `cursor-agent login` (see Prerequisites) so at least one of Claude or Codex is ready for the default team flip; use `runtime: cursor-cli` in custom configs when only Cursor is available. | — |
 
 **Mixed (Claude + Codex)** — flip only `researcher`:
 

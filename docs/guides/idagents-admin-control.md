@@ -1,10 +1,10 @@
 # Admin Control Guide
 
-The `idagents-admin-control` skill lets any Claude Code session programmatically manage an ID Agents team. It provides scripts for sending CLI commands via HTTP, chatting with the manager, and polling for multi-agent replies — all without opening the interactive CLI.
+The `idagents-admin-control` skill lets any **Claude Code** session programmatically manage an ID Agents team (the same `/remote` flows work from **OpenAI Codex** or **Cursor CLI** if you adapt skill paths to `.agents/skills/` or `.cursor/skills/`). It provides scripts for sending CLI commands via HTTP, chatting with the manager, and polling for multi-agent replies — all without opening the interactive CLI.
 
 ## When to Use
 
-Use idagents-admin-control when you want a Claude Code agent (or any script) to:
+Use idagents-admin-control when you want a Claude Code, Codex, or Cursor coding agent (or any script) to:
 - Deploy or delete agents remotely
 - Dispatch tasks to agents and collect replies
 - Chat with the manager (human-in-the-loop approval flow)

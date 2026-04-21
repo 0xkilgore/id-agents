@@ -27,7 +27,7 @@ agents:
 
 ## HEARTBEAT.md Checklist
 
-Create a `HEARTBEAT.md` file in the agent's template directory. For Claude agents, this is `.claude/agents/{name}/HEARTBEAT.md`. For Codex agents, `.agents/{name}/HEARTBEAT.md`.
+Create a `HEARTBEAT.md` file in the agent's template directory. For Claude agents, this is `.claude/agents/{name}/HEARTBEAT.md`. For Codex agents, `.agents/{name}/HEARTBEAT.md`. For Cursor (`cursor-cli`) agents, `.cursor/agents/{name}/HEARTBEAT.md`.
 
 The file is copied to the agent's working directory root at spawn time. When the heartbeat fires, the scheduler sends a generic wake-up message and the agent reads `HEARTBEAT.md` from its working directory.
 

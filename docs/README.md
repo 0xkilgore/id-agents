@@ -8,7 +8,7 @@ Documentation for the ID Agents multi-agent orchestration platform.
 
 - [Architecture Overview](./reference/architecture.md) - How the manager, agents, and CLI work together. Start here.
 - [Scheduling Plan](./SCHEDULING_PLAN.md) - Unified interval/calendar scheduling, delivery modes, and `/schedule` endpoint design
-- [Modular Runtime Plan](./MODULAR_RUNTIME_PLAN.md) - Runtime registry, validation, and mixed-team launch design for Claude and Codex runtimes
+- [Modular Runtime Plan](./MODULAR_RUNTIME_PLAN.md) - Runtime registry, validation, and mixed-team launch design for Claude, Codex, and Cursor runtimes
 
 ## Guides
 
@@ -30,7 +30,7 @@ Documentation for the ID Agents multi-agent orchestration platform.
 - [Architecture](./reference/architecture.md) - System architecture, message flow, database schema, key files
 - [Configuration](./reference/configuration.md) - YAML configuration file reference
 - [Database Schema](./reference/database.md) - PostgreSQL database tables and schema
-- [Harnesses](./reference/harnesses.md) - LLM runtime backends (Claude Agent SDK, Claude Code CLI)
+- [Harnesses](./reference/harnesses.md) - LLM runtime backends (Claude Agent SDK, Claude Code CLI, Codex, Cursor)
 - [ID Indexer API](./reference/id-indexer-api.md) - Onchain agent registry indexer API
 
 ## Deployment
@@ -44,7 +44,7 @@ Documentation for the ID Agents multi-agent orchestration platform.
 
 ## Skills
 
-Skills are deployed at deploy time to the runtime-appropriate directory: `.claude/skills/` for Claude agents, `.agents/skills/` for Codex agents. All configs should include `skills: [identity, inter-agent, catalog]` at minimum.
+Skills are deployed at deploy time to the runtime-appropriate directory: `.claude/skills/` for Claude agents, `.agents/skills/` for Codex agents, `.cursor/skills/` for Cursor (`cursor-cli`) agents. All configs should include `skills: [identity, inter-agent, catalog]` at minimum.
 
 - [Skills Overview](../skills/README.md) - Available skills and usage guide
 - [Identity](../skills/identity/SKILL.md) - Agent name, team, onchain domain

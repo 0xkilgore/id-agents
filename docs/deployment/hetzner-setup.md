@@ -157,6 +157,7 @@ The agent will automatically use OAuth credentials instead of API key.
 |---------|-------------|----------|
 | `claude-code` | API Key (ANTHROPIC_API_KEY) | Default, requires API credits |
 | `claude-code-cli` | OAuth (Max plan) or API Key | Recommended for Max subscribers |
+| `cursor-cli` | `cursor-agent login` or `CURSOR_API_KEY` | Cursor Agent CLI on the VPS — install and auth per [Harnesses](../reference/harnesses.md#cursor-cli-harness); typical models `composer-2`, `composer-2-fast`, `auto` |
 
 ## API Endpoints
 

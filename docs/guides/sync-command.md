@@ -37,7 +37,7 @@ The `/sync` command updates a running team to match a YAML config file without d
 These fields are compared to determine if an agent has changed:
 
 - `model` — LLM model name
-- `runtime` — Harness type (claude-agent-sdk, claude-code-cli, codex)
+- `runtime` — Harness type (claude-agent-sdk, claude-code-cli, claude-code-local, codex, cursor-cli)
 - `plugins` — Plugin list (compared by name, order-independent)
 - `skills` — Skill list (order-independent)
 - `allowedTools` — Tool whitelist (order-independent)
@@ -47,7 +47,7 @@ These fields are compared to determine if an agent has changed:
 - `heartbeat` — Heartbeat enabled/disabled
 - `workingDirectory` — Only compared when explicitly set in config
 
-Protocol defaults and agent role files (`.claude/agents/<name>.md`) are always written at sync time regardless of diff results.
+Protocol defaults and agent role files (under the runtime-specific template directory, e.g. `.claude/agents/`, `.agents/`, or `.cursor/agents/`) are always written at sync time regardless of diff results.
 
 ## Key Properties
 

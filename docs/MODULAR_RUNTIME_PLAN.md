@@ -2,7 +2,7 @@
 
 ## Goal
 
-Make Claude SDK, Claude Code CLI, Codex CLI, and mixed-runtime teams predictable to deploy, validate, run, and debug.
+Make Claude SDK, Claude Code CLI, Codex CLI, Cursor CLI (`cursor-cli`), and mixed-runtime teams predictable to deploy, validate, run, and debug.
 
 The current system works, but runtime selection is still spread across manager logic, local process startup, agent server behavior, harness implementations, and UI text. That makes mixed teams fragile and causes runtime-specific bugs to leak into unrelated layers.
 
@@ -13,8 +13,8 @@ The current system works, but runtime selection is still spread across manager l
 Today the codebase still mixes:
 
 - agent `type` (`claude`, `interactive`, `virtual`)
-- runtime (`claude-agent-sdk`, `claude-code-cli`, `codex`)
-- provider-specific naming (`Claude Agent`, `Claude Code`, `Codex`)
+- runtime (`claude-agent-sdk`, `claude-code-cli`, `codex`, `cursor-cli`, …)
+- provider-specific naming (`Claude Agent`, `Claude Code`, `Codex`, `Cursor`)
 
 That creates confusion about which field controls execution and which field is just describing topology.
 
@@ -73,6 +73,7 @@ Describes how an agent executes LLM work:
 - `claude-agent-sdk`
 - `claude-code-cli`
 - `codex`
+- `cursor-cli`
 
 Each runtime profile should define:
 
@@ -112,6 +113,7 @@ src/runtime/
     claude-agent-sdk.ts
     claude-code-cli.ts
     codex.ts
+    cursor-cli.ts
 ```
 
 ### `src/runtime/types.ts`
@@ -120,7 +122,7 @@ Core types:
 
 ```ts
 export type AgentTopology = 'interactive' | 'local' | 'remote' | 'virtual';
-export type RuntimeId = 'claude-agent-sdk' | 'claude-code-cli' | 'codex';
+export type RuntimeId = 'claude-agent-sdk' | 'claude-code-cli' | 'codex' | 'cursor-cli';
 
 export interface RuntimeProfile {
   id: RuntimeId;
@@ -282,7 +284,7 @@ Tasks:
 
 - add `src/runtime/types.ts`
 - add `src/runtime/registry.ts`
-- define profiles for Claude SDK, Claude Code CLI, and Codex
+- define profiles for Claude SDK, Claude Code CLI, Codex, and Cursor
 - move display-name logic out of server/bootstrap files
 - move default-model logic out of manager inline branches
 
@@ -335,7 +337,9 @@ Add integration coverage for:
 - Claude SDK only team
 - Claude Code CLI only team
 - Codex only team
+- Cursor CLI (`cursor-cli`) only team
 - mixed Claude Code + Codex team
+- mixed teams including `cursor-cli`
 - invalid runtime/model combinations
 - runtime-specific auth failures
 
