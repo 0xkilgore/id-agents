@@ -25,6 +25,7 @@ import { AgentRestServer } from './agent-rest-server.js';
 import { registerOnIdChain, createSubnameOnIdChain, setMultiChainAddresses } from './onchain/idchain-register.js';
 import { defaultDeliverFn, redactSshTarget, type DeliverFn } from './lib/ssh-deliver.js';
 import { probeRemoteAgent, defaultHealthProbeFn, type HealthProbeFn } from './lib/remote-heartbeat.js';
+import { filterClaudeEnvVars } from './lib/env-hygiene.js';
 import { type Db } from './db/db-service.js';
 import type { AgentRow, ScheduleDefinitionRow, TaskRow } from './db/types.js';
 import fetch from 'node-fetch';
@@ -6678,12 +6679,11 @@ export class AgentManagerDb {
         TERM: process.env.TERM || 'xterm-256color',
         ...(process.env.NVM_DIR && { NVM_DIR: process.env.NVM_DIR }),
         ...(process.env.XDG_CONFIG_HOME && { XDG_CONFIG_HOME: process.env.XDG_CONFIG_HOME }),
-        // Pass all CLAUDE_* vars for CLI auth/session
-        ...Object.fromEntries(
-          Object.entries(process.env)
-            .filter(([k]) => k.startsWith('CLAUDE'))
-            .map(([k, v]) => [k, v || ''])
-        ),
+        // Pass CLAUDE_* vars for CLI auth/session, minus the parent session
+        // handoff vars (see lib/env-hygiene.ts). Leaking those into a child
+        // `claude` CLI causes it to honor the parent's host-managed OAuth
+        // token ahead of its own keychain login, producing 401 errors.
+        ...filterClaudeEnvVars(process.env),
         // Runtime harness (codex, claude-code-cli, etc.)
         ...(agentRow?.runtime && { ID_HARNESS: resolveRuntime(agentRow.runtime) }),
         ID_TEAM: teamName,

@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.1.66-beta
+
+### Fixes
+
+- **Parent Claude Code session env leak** (P0): when the manager was launched from a shell that was itself a child of a Claude Code session (`!<cmd>` inside claude, IDE integrated terminal, tmux pane from inside claude), the blanket `startsWith('CLAUDE')` filter in `spawnLocalAgentProcess` forwarded session-handoff vars (`CLAUDE_CODE_OAUTH_TOKEN`, `CLAUDE_CODE_ENTRYPOINT`, `CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST`, `CLAUDE_AGENT_SDK_VERSION`) into child agents. Child `claude` CLIs honored the leaked OAuth token ahead of their own keychain/login, leading to 401 on every dispatch while `/health` stayed green. Replaced with an explicit deny-list (`SESSION_HANDOFF_VARS`) in new `src/lib/env-hygiene.ts`; non-session `CLAUDE_*` config vars still forward. Boot now warns if the manager itself is running under a parent Claude session.
+- **Silent-stop forensic trail** (P0, partial): added top-level `unhandledRejection` + `uncaughtException` handlers in `src/lib/fatal-handlers.ts`. Log with `[FATAL]` prefix and `process.exit(1)` so supervisors (systemd, launchd, nohup wrappers) can restart cleanly instead of the process limping along with a dead tick loop.
+- **XMTP dependency declared** (P1): `@xmtp/node-sdk` is now an explicit `dependencies` entry (was resolving through `@xmtp/agent-sdk` hoisting only). Fresh installs no longer fail with `Cannot find module '@xmtp/node-sdk'`.
+
+### Tests
+
+- 299 passing / 82 skipped: 7 new env-hygiene cases, fatal-handlers coverage, +existing.
+
 ## 0.1.65-beta
 
 ### Features

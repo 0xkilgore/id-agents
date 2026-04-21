@@ -10,12 +10,29 @@ import { AgentManagerDb } from './agent-manager-db.js';
 import { createDb, migrateDb } from './db.js';
 import { AgentRestServer } from './agent-rest-server.js';
 import { resolveRuntime } from './runtime/registry.js';
+import { detectSessionHandoffVars } from './lib/env-hygiene.js';
+import { installFatalHandlers } from './lib/fatal-handlers.js';
+
+// Silent-stop incidents had the scheduler die behind a swallowed rejection —
+// the process stayed up but the tick loop was dead. Fail loud and exit so the
+// supervisor restarts instead of limping. Installed before main() so any
+// later async work is covered. See src/lib/fatal-handlers.ts.
+installFatalHandlers();
 
 async function main() {
   const agentRole = process.env.AGENT_ROLE || 'manager'; // 'manager' or 'worker'
   const agentId = process.env.AGENT_ID; // For worker agents
 
   console.log(`🚀 Starting ID Agent (${agentRole})`);
+
+  const handoffVars = detectSessionHandoffVars(process.env);
+  if (handoffVars.length > 0) {
+    console.warn(
+      `⚠️  WARNING: running under a parent Claude Code session — detected ${handoffVars.join(', ')}. ` +
+      `Stripping these from child agents to avoid 401 auth failures. ` +
+      `If you see weird auth failures, this is why.`
+    );
+  }
 
   // Managers can boot without an API key (so the API can come up and you can debug/inspect state).
   // Worker agents require it to actually run Claude (unless using a different harness).
