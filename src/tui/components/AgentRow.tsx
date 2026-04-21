@@ -51,6 +51,7 @@ function abbrevRuntime(rt?: string): string {
   if (!rt) return '—';
   if (rt === 'claude-code-cli') return 'claude-cli';
   if (rt === 'claude-agent-sdk') return 'claude-sdk';
+  if (rt === 'cursor-cli') return 'cursor-cli';
   if (rt === 'public-agent-remote') return 'juno';
   return rt;
 }

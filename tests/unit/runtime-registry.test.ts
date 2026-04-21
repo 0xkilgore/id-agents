@@ -76,4 +76,20 @@ describe('runtime registry', () => {
     expect(validateRuntimeModelCompatibility('claude-code-cli', 'claude-sonnet-4-20250514')).toEqual([]);
     expect(validateRuntimeModelCompatibility('claude-agent-sdk', 'haiku')).toEqual([]);
   });
+
+  it('exposes the cursor-cli runtime profile', () => {
+    const profile = getRuntimeProfile('cursor-cli');
+    expect(profile.id).toBe('cursor-cli');
+    expect(profile.canonicalId).toBe('cursor-cli');
+    expect(profile.displayName).toBe('Cursor');
+    expect(profile.auth.mode).toBe('cli-login');
+    expect(profile.capabilities.supportsResume).toBe(true);
+    expect(getDefaultModelForRuntime('cursor-cli')).toBe('sonnet-4');
+  });
+
+  it('accepts both OpenAI and Claude model families for cursor-cli', () => {
+    expect(validateRuntimeModelCompatibility('cursor-cli', 'gpt-5')).toEqual([]);
+    expect(validateRuntimeModelCompatibility('cursor-cli', 'sonnet-4')).toEqual([]);
+    expect(validateRuntimeModelCompatibility('cursor-cli', 'claude-opus-4-20250514')).toEqual([]);
+  });
 });

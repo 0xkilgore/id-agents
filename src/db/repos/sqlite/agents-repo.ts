@@ -114,6 +114,35 @@ export class SqliteAgentsRepo implements AgentsRepository {
     }
   }
 
+  async resolveAcrossTeams(ref: string): Promise<AgentRow[]> {
+    try {
+      const parsed = parseAgentRef(ref);
+
+      let sql: string;
+      let params: unknown[];
+
+      if (parsed.isFullySpecified && parsed.domain) {
+        sql = `SELECT * FROM agents
+               WHERE (LOWER(name) = ? OR LOWER(domain) = ? OR json_extract(metadata, '$.idchain_domain') = ?)
+                 AND deleted_at IS NULL`;
+        params = [parsed.domain, parsed.domain, parsed.domain];
+      } else if (parsed.alias) {
+        sql = `SELECT * FROM agents
+               WHERE (LOWER(name) = ? OR LOWER(json_extract(metadata, '$.alias')) = ?)
+                 AND deleted_at IS NULL
+               ORDER BY created_at DESC`;
+        params = [parsed.alias, parsed.alias];
+      } else {
+        return [];
+      }
+
+      const { rows } = await this.db.query(sql, params);
+      return this.parseRows(rows);
+    } catch {
+      return [];
+    }
+  }
+
   async getForRouting(teamId: string, ref: string, tokenId?: string): Promise<AgentRow | null> {
     try {
       const parsed = parseAgentRef(ref);

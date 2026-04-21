@@ -73,6 +73,15 @@ export interface AgentsRepository {
   resolve(teamId: string, ref: string, tokenId?: string): Promise<AgentRow[]>;
 
   /**
+   * Resolve all non-deleted agents matching a reference string across
+   * every team. Used as a fallback when a caller omits the team header
+   * (e.g. a deployed agent doing `POST $MANAGER_URL/tasks/<name>/claim`
+   * with just `{ agent_id }`). Returns all matches so the caller can
+   * reject ambiguity.
+   */
+  resolveAcrossTeams(ref: string): Promise<AgentRow[]>;
+
+  /**
    * Resolve a single agent for message routing.
    * Supports name, id, alias, displayId (alias.tokenId), and ENS domain.
    * Returns null if not found, most-recent if ambiguous.

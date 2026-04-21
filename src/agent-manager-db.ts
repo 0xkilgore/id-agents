@@ -518,6 +518,32 @@ export class AgentManagerDb {
     return resolved;
   }
 
+  /**
+   * Whether the request explicitly specified a team via header or query.
+   * Used by task endpoints to decide if it's safe to fall back to the
+   * caller's own team when the caller isn't found in the default team —
+   * a team header always wins, so cross-team guards still hold.
+   */
+  private isTeamExplicit(req: express.Request): boolean {
+    return !!(
+      req.headers['x-id-team'] ||
+      req.headers['x-id-project'] ||
+      (typeof req.query.team === 'string' && req.query.team) ||
+      (typeof req.query.project === 'string' && req.query.project)
+    );
+  }
+
+  /**
+   * Resolve a caller agent globally when the request omitted the team
+   * header. Returns the matching agent row and its team only when the
+   * lookup is unambiguous across teams.
+   */
+  private async resolveCallerAcrossTeams(ref: string): Promise<{ agent: AgentRow; teamId: string } | undefined> {
+    const matches = await this.db.agents.resolveAcrossTeams(ref);
+    if (matches.length !== 1) return undefined;
+    return { agent: matches[0], teamId: matches[0].team_id };
+  }
+
   private async getTeam(req: express.Request): Promise<{ name: string; id: string }> {
     // If the middleware has already resolved the context, use it directly
     const ctx = (req as any).ctx;
@@ -3365,12 +3391,31 @@ export class AgentManagerDb {
 
     this.managementApp.post('/tasks', async (req, res) => {
       try {
-        const { id: teamId } = await this.getTeam(req);
+        let { id: teamId } = await this.getTeam(req);
         const principal = (req as any).ctx?.principal || 'anon';
         const { title, name: rawName, description, team: teamRef, from } = req.body || {};
 
         if (!title || typeof title !== 'string') {
           return res.status(400).json({ error: 'Missing required field: title' });
+        }
+
+        // Resolve created_by from `from` field first so we can recover the
+        // caller's team when no explicit team header was supplied. This lets
+        // a deployed agent in a non-default team create a task under its own
+        // name using the documented protocol (no team header, just `from`).
+        let createdBy: string | null = null;
+        let callerAgent: AgentRow | undefined;
+        if (from && typeof from === 'string') {
+          const first = await this.resolveSingleAgentForCommand(teamId, from);
+          callerAgent = first.agent;
+          if (!callerAgent && !this.isTeamExplicit(req) && !teamRef) {
+            const fallback = await this.resolveCallerAcrossTeams(from);
+            if (fallback) {
+              callerAgent = fallback.agent;
+              teamId = fallback.teamId;
+            }
+          }
+          if (callerAgent) createdBy = callerAgent.id;
         }
 
         // Resolve team — non-admin principals cannot create tasks in another team
@@ -3397,13 +3442,6 @@ export class AgentManagerDb {
             candidate = `${name}-${suffix++}`;
           }
           name = candidate;
-        }
-
-        // Resolve created_by from `from` field
-        let createdBy: string | null = null;
-        if (from && typeof from === 'string') {
-          const { agent } = await this.resolveSingleAgentForCommand(teamId, from);
-          if (agent) createdBy = agent.id;
         }
 
         const now = Math.floor(Date.now() / 1000);
@@ -3483,13 +3521,31 @@ export class AgentManagerDb {
 
     this.managementApp.post('/tasks/:ref/claim', async (req, res) => {
       try {
-        const { id: teamId } = await this.getTeam(req);
+        let { id: teamId } = await this.getTeam(req);
         const { agent_id, from } = req.body || {};
         const callerRef = agent_id || from;
 
         if (!callerRef || typeof callerRef !== 'string') {
           return res.status(400).json({ error: 'Missing required field: agent_id (or from)' });
         }
+
+        // Resolve the caller first so we can recover the caller's team when
+        // the request omitted the X-Id-Team header. A deployed agent whose
+        // CLAUDE.md follows `POST $MANAGER_URL/tasks/<name>/claim` with just
+        // `{ agent_id }` would otherwise hit the manager's default team and
+        // get "agent not found" even though the agent is registered in its
+        // own team. The fallback only runs when the caller didn't specify a
+        // team explicitly, so cross-team guards still hold for explicit
+        // requests.
+        let { agent, error } = await this.resolveSingleAgentForCommand(teamId, callerRef);
+        if (!agent && !this.isTeamExplicit(req)) {
+          const fallback = await this.resolveCallerAcrossTeams(callerRef);
+          if (fallback) {
+            agent = fallback.agent;
+            teamId = fallback.teamId;
+          }
+        }
+        if (!agent) return res.status(404).json({ error: error || `Agent "${callerRef}" not found` });
 
         const { task, error: taskError } = await this.resolveTaskRef(req.params.ref, teamId);
         if (!task) return res.status(404).json({ error: taskError || `Task "${req.params.ref}" not found` });
@@ -3498,9 +3554,6 @@ export class AgentManagerDb {
         if (task.team_id && task.team_id !== teamId) {
           return res.status(404).json({ error: `Task "${req.params.ref}" not found` });
         }
-
-        const { agent, error } = await this.resolveSingleAgentForCommand(teamId, callerRef);
-        if (!agent) return res.status(404).json({ error: error || `Agent "${callerRef}" not found` });
 
         const now = Math.floor(Date.now() / 1000);
         const claimed = await this.db.tasks.claim(task.id, agent.id, now);
@@ -3518,9 +3571,26 @@ export class AgentManagerDb {
 
     this.managementApp.post('/tasks/:ref/done', async (req, res) => {
       try {
-        const { id: teamId } = await this.getTeam(req);
+        let { id: teamId } = await this.getTeam(req);
         const { agent_id, from } = req.body || {};
         const callerRef = agent_id || from;
+
+        // Mirror the claim endpoint: when a caller is supplied without an
+        // explicit team header, recover the caller's team so agents in
+        // non-default teams can mark their own tasks done via the default
+        // protocol (`POST $MANAGER_URL/tasks/<name>/done { agent_id }`).
+        let callerAgent: AgentRow | undefined;
+        if (callerRef && typeof callerRef === 'string') {
+          const first = await this.resolveSingleAgentForCommand(teamId, callerRef);
+          callerAgent = first.agent;
+          if (!callerAgent && !this.isTeamExplicit(req)) {
+            const fallback = await this.resolveCallerAcrossTeams(callerRef);
+            if (fallback) {
+              callerAgent = fallback.agent;
+              teamId = fallback.teamId;
+            }
+          }
+        }
 
         const { task, error: taskError } = await this.resolveTaskRef(req.params.ref, teamId);
         if (!task) return res.status(404).json({ error: taskError || `Task "${req.params.ref}" not found` });
@@ -3531,11 +3601,8 @@ export class AgentManagerDb {
         }
 
         // If caller identifies themselves, enforce ownership
-        if (callerRef && typeof callerRef === 'string') {
-          const { agent } = await this.resolveSingleAgentForCommand(teamId, callerRef);
-          if (agent && task.owner !== agent.id) {
-            return res.status(403).json({ error: `Agent "${callerRef}" is not the owner of task "${task.name}"` });
-          }
+        if (callerAgent && task.owner !== callerAgent.id) {
+          return res.status(403).json({ error: `Agent "${callerRef}" is not the owner of task "${task.name}"` });
         }
 
         const now = Math.floor(Date.now() / 1000);

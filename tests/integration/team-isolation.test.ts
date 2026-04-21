@@ -305,6 +305,41 @@ describe('POST /tasks/:name/claim — cross-team guard', () => {
     // Should be 404 (task not found in idchain team)
     expect(res.status).toBe(404);
   });
+
+  it('explicit team header still bounds a cross-team claim attempt', async () => {
+    // Even if the caller names a public-team agent, the explicit
+    // idchain header pins the lookup — no cross-team escalation.
+    const res = await fetch(`${baseUrl}/tasks/${publicOnlyTask}/claim`, {
+      method: 'POST',
+      headers: makeHeaders('idchain'),
+      body: JSON.stringify({ agent_id: publicAgentName }),
+    });
+    expect(res.status).toBe(404);
+  });
+
+  it('caller without team header claims a task in its own team', async () => {
+    // Mirrors the deployed-agent case: agent in a non-default team issues
+    // `POST $MANAGER_URL/tasks/<name>/claim { agent_id }` without a team
+    // header. The manager should resolve the caller globally and use its
+    // team for the task lookup.
+    const ownTeamTask = `public-own-team-${Date.now()}`;
+    const createRes = await fetch(`${baseUrl}/tasks`, {
+      method: 'POST',
+      headers: adminHeaders('public'),
+      body: JSON.stringify({ title: 'Own Team Task', name: ownTeamTask }),
+    });
+    expect(createRes.ok).toBe(true);
+
+    const res = await fetch(`${baseUrl}/tasks/${ownTeamTask}/claim`, {
+      method: 'POST',
+      // No X-Id-Team header
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ agent_id: publicAgentName }),
+    });
+    expect(res.ok, `claim failed: ${await res.clone().text()}`).toBe(true);
+    const body = await res.json() as any;
+    expect(body.task.status).toBe('doing');
+  });
 });
 
 // =====================================================================

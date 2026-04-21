@@ -22,13 +22,19 @@ Follow these steps to set up and deploy your first agent team.
   npm install -g @openai/codex
   codex login
   ```
+- **Cursor Agent CLI** (optional) — only if you want Cursor agents:
+  ```bash
+  curl https://cursor.com/install -fsS | bash
+  cursor-agent login   # or: export CURSOR_API_KEY=...
+  ```
 
 ## ⚠️ Permissions Notice — Read Before Deploying
 
-ID Agents runs each agent as a background process with no interactive shell to approve tool use. The default for both runtimes is to bypass approval prompts:
+ID Agents runs each agent as a background process with no interactive shell to approve tool use. The default across runtimes is to bypass approval prompts:
 
 - `claude-code-cli` agents launch with `--dangerously-skip-permissions`
 - `codex` agents launch with `--dangerously-bypass-approvals-and-sandbox`
+- `cursor-cli` agents launch with `-f` (force-allow commands)
 
 You can opt out by setting `dangerouslySkipPermissions: false` in the YAML config (per agent or under `defaults`), but be warned: any tool-use prompt then has no way to be approved, and the agent will hang silently on the first one. If you're not comfortable giving background agents this level of autonomy, ID Agents is not the right tool for you.
 

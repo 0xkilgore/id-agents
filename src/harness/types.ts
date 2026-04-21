@@ -6,7 +6,7 @@
  * All harnesses produce the same message format for REST-AP compatibility.
  */
 
-export type HarnessType = 'claude-agent-sdk' | 'claude-code-cli' | 'claude-code-local' | 'codex' | 'public-agent-remote';
+export type HarnessType = 'claude-agent-sdk' | 'claude-code-cli' | 'claude-code-local' | 'codex' | 'cursor-cli' | 'public-agent-remote';
 
 export interface PluginConfig {
   name: string;

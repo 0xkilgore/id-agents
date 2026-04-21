@@ -91,6 +91,30 @@ export class PgAgentsRepo implements AgentsRepository {
     }
   }
 
+  async resolveAcrossTeams(ref: string): Promise<AgentRow[]> {
+    try {
+      const parsed = parseAgentRef(ref);
+
+      let query: string;
+      let params: unknown[];
+
+      if (parsed.isFullySpecified && parsed.domain) {
+        query = `SELECT * FROM agents WHERE (LOWER(name) = $1 OR LOWER(domain) = $1 OR metadata->>'idchain_domain' = $1) AND deleted_at IS NULL`;
+        params = [parsed.domain];
+      } else if (parsed.alias) {
+        query = `SELECT * FROM agents WHERE (LOWER(name) = $1 OR LOWER(metadata->>'alias') = $1) AND deleted_at IS NULL ORDER BY created_at DESC`;
+        params = [parsed.alias];
+      } else {
+        return [];
+      }
+
+      const r = await this.db.query<AgentRow>(query, params);
+      return r.rows;
+    } catch {
+      return [];
+    }
+  }
+
   // ---------------------------------------------------------------------------
   // Routing lookup (single agent for message delivery)
   // ---------------------------------------------------------------------------

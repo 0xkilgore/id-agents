@@ -87,6 +87,24 @@ const PROFILES: Record<RuntimeId, RuntimeProfile> = {
       supportsAllowedTools: true,
     },
   },
+  'cursor-cli': {
+    id: 'cursor-cli',
+    canonicalId: 'cursor-cli',
+    displayName: 'Cursor',
+    providerName: 'Cursor Agent CLI',
+    defaultModel: 'sonnet-4',
+    sessionPolicy: 'persistent',
+    deploymentShape: 'local-process',
+    auth: {
+      mode: 'cli-login',
+      provider: 'Cursor',
+    },
+    capabilities: {
+      supportsResume: true,
+      supportsPlugins: false,
+      supportsAllowedTools: false,
+    },
+  },
   'public-agent-remote': {
     id: 'public-agent-remote',
     canonicalId: 'public-agent-remote',
@@ -176,6 +194,15 @@ export function getRuntimePaths(runtime: HarnessType | string | undefined): Runt
       personalityFilename: 'AGENTS.md',
     };
   }
+  if (resolved === 'cursor-cli') {
+    return {
+      templateDir: '.cursor/agents',
+      overlayTarget: '.cursor',
+      skillsDir: '.cursor/skills',
+      personalityFile: 'AGENTS.md',
+      personalityFilename: 'AGENTS.md',
+    };
+  }
   // All Claude runtimes: claude-agent-sdk, claude-code-cli, claude-code-local
   return {
     templateDir: '.claude/agents',
@@ -239,6 +266,10 @@ export function validateRuntimeModelCompatibility(
   const family = classifyModelFamily(model);
   const issues: RuntimeValidationIssue[] = [];
 
+  // Cursor Agent CLI supports both Claude-family (sonnet-4, sonnet-4-thinking)
+  // and OpenAI-family (gpt-5, ...) models, so skip cross-family checks for it.
+  if (resolvedRuntime === 'cursor-cli') return issues;
+
   if (resolvedRuntime === 'codex' && family === 'claude') {
     issues.push({
       code: 'runtime_model_mismatch',
@@ -282,6 +313,8 @@ export function runtimeIssueHint(code: string): string | null {
       return 'Missing ANTHROPIC_API_KEY. Add `export ANTHROPIC_API_KEY=sk-...` to ~/.zshrc (or ~/.bashrc) or to a project .env. Get a key: https://console.anthropic.com/settings/keys';
     case 'codex_auth_missing':
       return 'Missing OPENAI_API_KEY. Add `export OPENAI_API_KEY=sk-...` to ~/.zshrc (or ~/.bashrc) or to a project .env, or run `codex login`. Docs: https://github.com/openai/codex';
+    case 'cursor_auth_missing':
+      return 'Cursor Agent CLI is not authenticated. Set `CURSOR_API_KEY` or run `cursor-agent login` on this host. Install: curl https://cursor.com/install -fsS | bash';
     default:
       return null;
   }
@@ -308,6 +341,32 @@ export function validateRuntimePreflight(
 
   if (resolvedRuntime === 'claude-code-cli' || resolvedRuntime === 'claude-code-local') {
     return [...issues, ...checkCommandAvailable('claude')];
+  }
+
+  if (resolvedRuntime === 'cursor-cli') {
+    issues.push(...checkCommandAvailable('cursor-agent'));
+    if (!process.env.CURSOR_API_KEY) {
+      try {
+        const result = spawnSync('cursor-agent', ['status'], {
+          encoding: 'utf8',
+          stdio: ['pipe', 'pipe', 'pipe'],
+          timeout: 10000,
+        });
+        const combinedOutput = `${result.stdout || ''}\n${result.stderr || ''}`;
+        if (/not logged in/i.test(combinedOutput)) {
+          issues.push({
+            code: 'cursor_auth_missing',
+            message: 'runtime "cursor-cli" requires CURSOR_API_KEY or an active `cursor-agent login` session',
+          });
+        }
+      } catch {
+        issues.push({
+          code: 'cursor_auth_missing',
+          message: 'runtime "cursor-cli" requires CURSOR_API_KEY or an active `cursor-agent login` session',
+        });
+      }
+    }
+    return issues;
   }
 
   if (resolvedRuntime === 'codex') {

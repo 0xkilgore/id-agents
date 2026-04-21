@@ -40,10 +40,35 @@ check_codex() {
   return 1
 }
 
+# Optional third runtime. Cursor is never used for the default team auto-deploy;
+# we only report availability so operators know they can opt in with
+# `runtime: cursor-cli` in their own configs.
+check_cursor() {
+  command -v cursor-agent >/dev/null 2>&1 || return 1
+  [ -n "${CURSOR_API_KEY:-}" ] && return 0
+  local status_output
+  status_output=$(cursor-agent status 2>/dev/null || true)
+  if echo "$status_output" | grep -qi 'not logged in'; then
+    return 1
+  fi
+  if echo "$status_output" | grep -qi 'logged in'; then
+    return 0
+  fi
+  return 1
+}
+
 claude_ready=false
 codex_ready=false
+cursor_ready=false
 check_claude && claude_ready=true
 check_codex && codex_ready=true
+check_cursor && cursor_ready=true
+
+note_cursor() {
+  if $cursor_ready; then
+    echo "# Cursor Agent CLI is also available. Opt in per-agent with \`runtime: cursor-cli\`."
+  fi
+}
 
 if $claude_ready && $codex_ready; then
   cat <<'EOF'
@@ -58,11 +83,13 @@ mixed
 #   ' configs/default.yaml > configs/default.yaml.new && \
 #   mv configs/default.yaml.new configs/default.yaml
 EOF
+  note_cursor
   exit 0
 fi
 
 if $claude_ready; then
   echo "as-is"
+  note_cursor
   exit 0
 fi
 
@@ -75,9 +102,11 @@ all-codex
 #   sed -i.bak 's/^  runtime: claude-code-cli$/  runtime: codex/' configs/default.yaml && \
 #   rm configs/default.yaml.bak
 EOF
+  note_cursor
   exit 0
 fi
 
 echo "abort"
 echo "Install and log in to at least one of Claude Code (claude login) or Codex (codex login) before deploying."
+note_cursor
 exit 1

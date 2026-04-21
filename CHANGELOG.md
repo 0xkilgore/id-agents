@@ -1,6 +1,19 @@
 # Changelog
 
-## 0.1.64-beta
+## 0.1.65-beta
+
+### Features
+
+- **Cursor CLI runtime**: new `runtime: cursor-cli` alongside `claude-code-cli` and `codex`. Ships `CursorCliHarness` (stdin prompt, stream-json parsing, `-f` force-trust, `--resume` + `--model`), profile in `src/runtime/registry.ts` with preflight auth check, `scripts/detect-runtimes.sh` advisory update, `configs/cursor-smoke.yaml`. CTO-approved with dedicated `.cursor/` paths and auth-missing-as-warning constraints.
+- **Cursor stream-json parser** (bugfix): `CursorCliHarness` now recognizes cursor-agent's real event schema (`system/init`, `user`, `thinking/delta`, `thinking/completed`, `assistant`, `result{success|error}`), extracts the assistant reply, and synthesizes a result if the process exits cleanly without a terminal event. Fixes hang-forever behavior on every `/ask` to a cursor agent. 6 new parser unit tests.
+
+### Changed
+
+- **Task-endpoint team resolution**: `/tasks`, `/tasks/:ref/claim`, `/tasks/:ref/done` now resolve the caller's team from body `agent_id`/`from` when no `X-Id-Team` header is supplied (via new `resolveAcrossTeams(ref)` in the agents repo). Fixes `id-agents-app` (team `idchain`) being rejected as 404 because the default CLAUDE.md boilerplate omits the team header. **Note:** CTO flagged that this weakens cross-team isolation since body identity isn't authenticated — accepted as designed for this single-tenant local system where any caller already has full shell access. Explicit `X-Id-Team` headers still short-circuit the fallback and enforce the team they specify.
+
+### Tests
+
+- 286 pass, 82 skip: 6 new cursor parser tests + 2 new team-isolation integration tests.
 
 ### Docs
 

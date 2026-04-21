@@ -47,6 +47,15 @@ describe('getRuntimePaths', () => {
     expect(rp.personalityFile).toBe('AGENTS.md');
     expect(rp.personalityFilename).toBe('AGENTS.md');
   });
+
+  it('returns dedicated .cursor/ paths for cursor-cli runtime', () => {
+    const rp = getRuntimePaths('cursor-cli');
+    expect(rp.templateDir).toBe('.cursor/agents');
+    expect(rp.overlayTarget).toBe('.cursor');
+    expect(rp.skillsDir).toBe('.cursor/skills');
+    expect(rp.personalityFile).toBe('AGENTS.md');
+    expect(rp.personalityFilename).toBe('AGENTS.md');
+  });
 });
 
 /* ------------------------------------------------------------------ */
