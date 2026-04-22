@@ -151,14 +151,6 @@ X-Id-Admin: 1
 
 Same authorization rules as `/remote`: **ask before acting** on any write (register/delete).
 
-### Helper scripts
-
-```bash
-./skills/idagents-admin-control/public-list.sh
-./skills/idagents-admin-control/public-add.sh <name> <domain> [ssh_target] [internal_port]
-./skills/idagents-admin-control/public-remove.sh <name_or_domain>
-```
-
 ### Direct endpoints
 
 | Method | Path | Purpose |
