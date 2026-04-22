@@ -18,6 +18,7 @@ interface NewsViewProps {
 
 const TIME_COL = 8;
 const TYPE_COL = 17;
+const PARTY_COL = 18;
 
 export function NewsView(props: NewsViewProps): React.ReactElement {
   const {
@@ -122,6 +123,7 @@ function Body(props: BodyProps): React.ReactElement {
       const selected = windowStart + i === selectedIndex;
       const ageColor = newsAgeColor(item.timestamp, cooldownEpoch);
       const tColor = typeColor(item.type);
+      const party = extractParty(item);
       const message = rewriteMessage(item.message ?? '', messageWidth);
       // Selection inverse wraps the marker and the right-hand content, but
       // NOT the age square — the square stays on a default background so
@@ -135,6 +137,8 @@ function Body(props: BodyProps): React.ReactElement {
             <Text dimColor>{padRight(formatTime(item.timestamp), TIME_COL)}</Text>
             {' '}
             <Text color={tColor}>{padRight(item.type, TYPE_COL)}</Text>
+            <Text dimColor>{padRight(party, PARTY_COL)}</Text>
+            {' '}
             {message}
           </Text>
         </Text>,
@@ -153,6 +157,34 @@ function Body(props: BodyProps): React.ReactElement {
 
 function oneLine(s: string): string {
   return s.replace(/\s+/g, ' ').trim();
+}
+
+// Derive explicit From / To labels for each news item. The currently-viewed
+// agent fills the implicit side: inbound items are TO the current agent,
+// outbound items are FROM the current agent. Protocol-level 'remote' is
+// rewritten to 'manager' to match the message body.
+// Single-column party label: "from: <sender>" for inbound, "to: <recipient>"
+// for outbound, blank for self-status events. 'remote' is rewritten to
+// 'manager' for UI clarity; underlying data is unchanged.
+function extractParty(item: NewsItem): string {
+  const d = (item.data ?? {}) as Record<string, unknown>;
+  const normalize = (v: unknown): string => {
+    const raw = typeof v === 'string' ? v : '';
+    return raw === 'remote' ? 'manager' : raw;
+  };
+  const from = normalize(d.from);
+  const to = normalize(d.to);
+  const type = item.type;
+  if (type.startsWith('outbound')) {
+    return to ? `  to: ${to}` : '';
+  }
+  if (type === 'query.received') {
+    return `from: ${from || 'manager'}`;
+  }
+  if (type === 'reply' || type === 'news.received' || type === 'inbound.reply') {
+    return from ? `from: ${from}` : '';
+  }
+  return '';
 }
 
 // The agent news log uses "remote" as the protocol-level name for the

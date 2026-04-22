@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.67-beta
+
+### TUI
+
+- News view now shows a sender/recipient column between Type and Message: `from: <sender>` for inbound items, `to: <recipient>` for outbound items, blank for self-status events. `to:` is indented two spaces so the colons align with `from:`. Protocol-level `remote` is rewritten to `manager` to match message bodies.
+
 ## 0.1.66-beta
 
 ### Fixes
