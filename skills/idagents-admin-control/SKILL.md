@@ -140,7 +140,7 @@ node skills/idagents-admin-control/start-listener.js [port]
 
 `/remote` is the primary dispatch surface, but public-team registration can also be driven through dedicated daemon endpoints when you want to skip command-string parsing.
 
-**Onchain registration (ID Chain + ERC-8004) is a separate skill.** Once a public-agent is registered with the manager here, invoke the `register-public-agents` skill to assign its xid.eth name and mint the ERC-8004 record whose `agentURI` advertises the MCP endpoint. That skill covers Base mainnet only and deliberately does NOT apply to local agents (use `/register <agent>` instead).
+**Onchain registration (ID Chain + ERC-8004) is a separate skill.** Once a public-agent is registered with the manager here, invoke the `idagents-register-public-agents` skill to assign its xid.eth name and mint the ERC-8004 record whose `agentURI` advertises the MCP endpoint. That skill covers Base mainnet only and deliberately does NOT apply to local agents (use `/register <agent>` instead).
 
 All public-team requests require two headers:
 
