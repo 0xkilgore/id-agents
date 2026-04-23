@@ -15,6 +15,7 @@ import { fileURLToPath } from 'url';
 import fs from 'fs';
 import type http from 'http';
 import type { Db } from './db/db-service.js';
+import { resolveNewsTrigger } from './core/messaging-service.js';
 import {
   getRuntimeAuthProvider,
   getDefaultModelForRuntime,
@@ -935,7 +936,11 @@ export class AgentRestServer {
     // Can optionally trigger LLM processing with trigger=true
     this.app.post('/news', async (req, res) => {
       try {
-        const { type, from, message, in_reply_to, data, trigger } = req.body;
+        const { type, from, message, in_reply_to, data } = req.body;
+        // Replies (in_reply_to present) default to trigger=true so the
+        // receiver wakes up when its /talk-to wait has already timed out.
+        // Caller can opt out by sending trigger:false explicitly.
+        const trigger = resolveNewsTrigger({ in_reply_to, trigger: req.body?.trigger });
 
         if (!message && !data) {
           return res.status(400).json({ error: 'Missing message or data' });

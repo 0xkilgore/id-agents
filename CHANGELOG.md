@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.1.68-beta
+
+### Features
+
+- **Default `trigger: true` on replies with `in_reply_to`**: when an agent posts a reply to `/news` with `in_reply_to` set, the receiver is now auto-woken by default instead of the reply sitting passively in the inbox. Closes the gap where a long-running pair-program loop (lead dispatches to worker, worker exceeds lead's poll window) required an external kick to resume. New helper `resolveNewsTrigger({in_reply_to, trigger})` in `src/core/messaging-service.ts`; applied in both `src/claude-agent-server.ts` (worker `POST /news`) and `src/agent-manager-db.ts` (manager `POST /news`). Callers can still opt out with `trigger: false`.
+- Loop safety double-gated: the existing triggered-branch passes `noAutoReply: true` to `startQuery`, and `craftNewsTriggerPrompt` instructs the LLM not to reply to the sender.
+
+### Fixes
+
+- **TUI multi-team blindness**: `fetchAgentNews` and `fetchAgentsLatestNewsTs` in `src/tui/api/manager.ts` now accept an optional `teamName` and pass it as `x-id-team` header. `src/tui/App.tsx` threads the selected agent's `teamName` through. Previously, news and news-timestamp requests were header-less and resolved against the daemon default team, which made the News view empty and the freshness dot gray for any agent not in the default team.
+
+### Tests
+
+- 311 passing / 82 skipped: 5 new `news-trigger-default` unit cases + 3 new `news-reply-triggers-receiver` integration cases.
+
 ## 0.1.67-beta
 
 ### TUI

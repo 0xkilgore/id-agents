@@ -35,6 +35,7 @@ import { PROTOCOL_DEFAULTS } from './protocol-defaults.js';
 import { computeSyncPlan, formatSyncSummary, formatSyncVerbose } from './sync.js';
 import { validateName } from './name-validation.js';
 import { parseAgentRef, normalizeAlias, buildAmbiguityWarning, type AgentMatch } from './core/agent-identifier.js';
+import { resolveNewsTrigger } from './core/messaging-service.js';
 import type { HarnessType } from './harness/types.js';
 import { SchedulerService } from './scheduling/scheduler-service.js';
 import { heartbeatToSchedule, calendarToSchedule, validateIntervalSeconds, HEARTBEAT_GENERIC_MESSAGE } from './scheduling/schedule-config.js';
@@ -1558,6 +1559,10 @@ export class AgentManagerDb {
       try {
         let { id: teamId, name: teamName } = await this.getTeam(req);
         const { type, from, message, in_reply_to, data } = req.body || {};
+        // Replies (in_reply_to present) default to trigger=true so the
+        // forwarded receiver wakes up when its /talk-to wait has already
+        // timed out. Caller can opt out with trigger:false explicitly.
+        const trigger = resolveNewsTrigger({ in_reply_to, trigger: req.body?.trigger });
 
         if (!message && !data) {
           return res.status(400).json({ error: 'Missing message or data' });
@@ -1666,6 +1671,7 @@ export class AgentManagerDb {
                   from,
                   message,
                   in_reply_to,
+                  trigger,
                   session_id: data?.sessionId,
                   ...data
                 }),

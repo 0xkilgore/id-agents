@@ -15,6 +15,24 @@ import type {
   PollNewsOptions
 } from './types.js';
 
+// ==================== News Trigger Default ====================
+
+/**
+ * Decide whether an inbound /news item should wake the receiver's LLM.
+ *
+ * Replies (those carrying `in_reply_to`) default to trigger=true so the
+ * receiver auto-wakes when its /talk-to wait has already timed out and it
+ * is no longer actively polling. Callers can opt out by passing
+ * `trigger: false` explicitly.
+ */
+export function resolveNewsTrigger(input: {
+  in_reply_to?: string | null;
+  trigger?: boolean | null;
+}): boolean {
+  if (typeof input.trigger === 'boolean') return input.trigger;
+  return !!input.in_reply_to;
+}
+
 // ==================== Send Message ====================
 
 /**

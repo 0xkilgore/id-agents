@@ -70,10 +70,13 @@ export async function fetchAgentNews(
   executor: string,
   target: string,
   signal: AbortSignal,
+  teamName?: string,
 ): Promise<NewsItem[]> {
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  if (teamName) headers['x-id-team'] = teamName;
   const res = await fetch(`${manager}/remote`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers,
     body: JSON.stringify({ agent: executor, command: `/news ${target}` }),
     signal,
   });
@@ -92,8 +95,9 @@ export async function fetchLatestNewsTs(
   executor: string,
   targetName: string,
   signal: AbortSignal,
+  teamName?: string,
 ): Promise<number | null> {
-  const items = await fetchAgentNews(manager, executor, targetName, signal);
+  const items = await fetchAgentNews(manager, executor, targetName, signal, teamName);
   if (items.length === 0) return null;
   let max = 0;
   for (const it of items) if (it.timestamp > max) max = it.timestamp;
@@ -110,7 +114,7 @@ export async function fetchAgentsLatestNewsTs(
   const results = await Promise.all(
     agents.map(async (a) => {
       try {
-        const ts = await fetchLatestNewsTs(manager, executor, a.name, signal);
+        const ts = await fetchLatestNewsTs(manager, executor, a.name, signal, a.teamName);
         return [a.id, ts] as const;
       } catch {
         return [a.id, null] as const;

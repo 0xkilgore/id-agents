@@ -456,20 +456,21 @@ export function App({ staticMode = false }: AppProps = {}): React.ReactElement {
   const selectedAgent = visibleAgents[selectedIndex] ?? null;
   const selectedAgentName: string | null = selectedAgent?.name ?? null;
   const selectedAgentId: string | null = selectedAgent?.id ?? null;
+  const selectedAgentTeam: string | null = selectedAgent?.teamName ?? null;
 
   const newsFetcher = useCallback(
     (signal: AbortSignal): Promise<NewsItem[]> => {
       if (!selectedAgentName) return Promise.resolve([]);
-      return fetchAgentNews(manager, SELF_AGENT, selectedAgentName, signal);
+      return fetchAgentNews(manager, SELF_AGENT, selectedAgentName, signal, selectedAgentTeam ?? undefined);
     },
-    [manager, selectedAgentName],
+    [manager, selectedAgentName, selectedAgentTeam],
   );
 
   const newsPoll = usePolling<NewsItem[]>(
     newsFetcher,
     NEWS_POLL_MS,
     paused || staticMode || (view !== 'news' && view !== 'news-detail'),
-    [manager, selectedAgentName ?? '', view],
+    [manager, selectedAgentName ?? '', selectedAgentTeam ?? '', view],
   );
   const newsItems = newsPoll.data ?? [];
   const sortedNewsItems = useMemo(
