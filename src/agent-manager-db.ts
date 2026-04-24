@@ -31,6 +31,13 @@ import type { AgentRow, ScheduleDefinitionRow, TaskRow } from './db/types.js';
 import fetch from 'node-fetch';
 import type { PluginConfig, DeployConfig, HeartbeatConfig, CalendarSpec, ScheduleDeliveryMode } from './config-parser.js';
 import { processConfig, copyAgentDirOverlay, copyHeartbeatMd, copyLibraryAgentOverlay } from './config-parser.js';
+import {
+  getLibraryAgent,
+  getLibrarySkill,
+  listLibraryAgents,
+  listLibrarySkills,
+  resolveDefaultLibraryRoot,
+} from './lib/library-inventory.js';
 import { PROTOCOL_DEFAULTS } from './protocol-defaults.js';
 import { computeSyncPlan, formatSyncSummary, formatSyncVerbose } from './sync.js';
 import { validateName } from './name-validation.js';
@@ -1271,6 +1278,37 @@ export class AgentManagerDb {
       const { id: teamId, name: teamName } = await this.getTeam(req);
       const count = await this.db.agents.count(teamId);
       res.json({ status: 'ok', team: teamName, agents: parseInt(count || '0'), timestamp: Date.now() });
+    });
+
+    // Slice 7: read-only library inventory. Library root resolution is the
+    // same default used by the slice-2 spawn flow (ID_LIBRARY_ROOT env,
+    // else <cwd>/configs, else null). When null, endpoints return an empty
+    // listing rather than an error so callers can treat "no library yet"
+    // as a first-class state.
+    this.managementApp.get('/library/agents', (_req, res) => {
+      res.json(listLibraryAgents(resolveDefaultLibraryRoot()));
+    });
+
+    this.managementApp.get('/library/agents/:name', (req, res) => {
+      const detail = getLibraryAgent(resolveDefaultLibraryRoot(), req.params.name);
+      if (!detail) {
+        res.status(404).json({ error: 'not_found', resource: 'library-agent', name: req.params.name });
+        return;
+      }
+      res.json(detail);
+    });
+
+    this.managementApp.get('/library/skills', (_req, res) => {
+      res.json(listLibrarySkills(resolveDefaultLibraryRoot()));
+    });
+
+    this.managementApp.get('/library/skills/:name', (req, res) => {
+      const detail = getLibrarySkill(resolveDefaultLibraryRoot(), req.params.name);
+      if (!detail) {
+        res.status(404).json({ error: 'not_found', resource: 'library-skill', name: req.params.name });
+        return;
+      }
+      res.json(detail);
     });
 
     // GET /agents/status - check health of all agents (server-side ping)
