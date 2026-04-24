@@ -2,7 +2,8 @@
 /**
  * Agent-config v3 — library enumerators.
  *
- * Discovers installable library entries under a fixed root:
+ * Discovers installable library entries under a fixed root
+ * (in-repo this is expected to be `<repoRoot>/configs`):
  *   - Agents at  <libRoot>/agents/
  *   - Skills at  <libRoot>/skills/<name>/SKILL.md
  *
@@ -62,7 +63,8 @@ export interface LibraryPaths {
 }
 
 /**
- * Build the fixed library subpaths under a given library root.
+ * Build the fixed library subpaths under a given library root
+ * (for example, `<repoRoot>/configs`).
  *
  *   <libRoot>/agents
  *   <libRoot>/skills

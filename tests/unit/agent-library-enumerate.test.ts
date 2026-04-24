@@ -33,10 +33,10 @@ function mkdir(p: string): void {
 /* ------------------------------------------------------------------ */
 
 describe('getLibraryPaths', () => {
-  it('returns agents and skills subpaths joined to libRoot', () => {
-    const paths = getLibraryPaths('/tmp/lib');
-    expect(paths.agents).toBe(path.join('/tmp/lib', 'agents'));
-    expect(paths.skills).toBe(path.join('/tmp/lib', 'skills'));
+  it('returns agents and skills subpaths joined to the plural configs root', () => {
+    const paths = getLibraryPaths('/repo/configs');
+    expect(paths.agents).toBe(path.join('/repo/configs', 'agents'));
+    expect(paths.skills).toBe(path.join('/repo/configs', 'skills'));
   });
 });
 
