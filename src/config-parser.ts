@@ -11,7 +11,13 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { HarnessType, isValidHarnessType, getAvailableHarnesses } from './harness/index.js';
-import { getDefaultRuntime, resolveRuntime, validateRuntimeModelCompatibility, getRuntimePaths } from './runtime/registry.js';
+import {
+  getDefaultRuntime,
+  resolveRuntime,
+  validateRuntimeModelCompatibility,
+  getRuntimePaths,
+  isSupportedRuntimeSpecifier,
+} from './runtime/registry.js';
 import { validateName } from './name-validation.js';
 import { enumerateLibraryAgents } from './lib/agent-library.js';
 
@@ -40,7 +46,7 @@ export interface AgentSpec {
   name: string;
   agent?: string;                     // Library agent overlay name (resolves to <library-root>/agents/<agent>/)
   type?: 'claude' | 'automator';      // Agent type: 'claude' (default) or 'automator' (manager's brain, hidden)
-  runtime?: HarnessType;              // Runtime harness id, defaults to 'claude-agent-sdk'
+  runtime?: HarnessType | 'codex-cli'; // Runtime harness id, defaults to 'claude-agent-sdk'
   openMode?: boolean;                 // Allow XMTP messages from any sender when no allowlist is configured
   description?: string;
   model?: string;
@@ -424,10 +430,10 @@ export function validateConfig(config: DeployConfig): ValidationResult {
     }
 
     // Validate runtime
-    if (agent.runtime && !isValidHarnessType(agent.runtime)) {
+    if (agent.runtime && !isSupportedRuntimeSpecifier(agent.runtime) && !isValidHarnessType(agent.runtime)) {
       errors.push({
         path: `${agentPath}.runtime`,
-        message: `runtime must be one of: ${getAvailableHarnesses().join(', ')}`
+        message: `runtime must be one of: ${getAvailableHarnesses().join(', ')}, codex-cli`
       });
     }
 

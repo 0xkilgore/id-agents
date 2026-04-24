@@ -6,7 +6,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 
-import { syncWorkspaceFromConfig } from '../../src/cli/workspace-sync.js';
+import { maybeRunWorkspaceSyncCli, syncWorkspaceFromConfig } from '../../src/cli/workspace-sync.js';
 
 const FIXTURE_CONFIG = '/Users/nxt3d/projects/id2/public-agents/configs/foundry-demo.yaml';
 const FIXTURE_LIBRARY_ROOT = '/Users/nxt3d/projects/id2/public-agents/configs';
@@ -14,6 +14,37 @@ const FIXTURE_AGENT_ROOT = '/Users/nxt3d/projects/id2/public-agents/configs/agen
 
 function mkTmp(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'id-agents-workspace-sync-'));
+}
+
+function writeFile(filePath: string, content: string): void {
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  fs.writeFileSync(filePath, content);
+}
+
+function writeConfig(configPath: string, runtime: string, workspacePath: string, agentName = 'foundry-dev'): void {
+  writeFile(
+    configPath,
+    [
+      'name: test-sync',
+      'agents:',
+      '  - name: test-agent',
+      `    runtime: ${runtime}`,
+      `    workingDirectory: ${workspacePath}`,
+      `    agent: ${agentName}`,
+      '',
+    ].join('\n'),
+  );
+}
+
+function seedFoundryLibrary(rootDir: string): void {
+  const targetDir = path.join(rootDir, 'agents', 'foundry-dev');
+  fs.mkdirSync(path.dirname(targetDir), { recursive: true });
+  fs.cpSync(FIXTURE_AGENT_ROOT, targetDir, { recursive: true });
+}
+
+function seedAgentsMdLibrary(rootDir: string): void {
+  writeFile(path.join(rootDir, 'agents', 'builder.md'), '# Builder Persona\n');
+  writeFile(path.join(rootDir, 'agents', 'builder', 'skills', 'forge', 'SKILL.md'), '# Forge Skill\n');
 }
 
 function walkFiles(rootDir: string): string[] {
@@ -43,11 +74,16 @@ function sha256File(p: string): string {
 
 describe('workspace sync integration', () => {
   let workspacePath = '';
+  const tempPaths: string[] = [];
 
   afterEach(() => {
     if (workspacePath) {
       fs.rmSync(workspacePath, { recursive: true, force: true });
       workspacePath = '';
+    }
+    while (tempPaths.length > 0) {
+      const tempPath = tempPaths.pop()!;
+      fs.rmSync(tempPath, { recursive: true, force: true });
     }
   });
 
@@ -343,6 +379,130 @@ describe('workspace sync integration', () => {
     expect(receipt.files['.claude/CLAUDE.md'].source).toBe('agent:foundry-dev');
 
     void first; // reference so the linter sees it used even if no other assertions follow
+  });
+
+  it('maps a claude-native library entry into the Codex target shape', () => {
+    workspacePath = mkTmp();
+    const configDir = mkTmp();
+    tempPaths.push(configDir);
+    const configPath = path.join(configDir, 'codex.yaml');
+    writeConfig(configPath, 'codex-cli', workspacePath);
+
+    const first = syncWorkspaceFromConfig({
+      configPath,
+      libraryRoot: FIXTURE_LIBRARY_ROOT,
+      workspacePath,
+    });
+
+    expect(first.counts).toEqual({
+      wroteMissing: 6,
+      matchedSource: 0,
+      overwroteManaged: 0,
+      drifted: 0,
+    });
+    expect(first.warnings).toEqual([]);
+    expect(walkFiles(workspacePath)).toEqual([
+      '.agents/skills/foundry-scripting-and-deploy/SKILL.md',
+      '.agents/skills/gas-optimization-foundry/SKILL.md',
+      '.agents/skills/solidity-style-modern/SKILL.md',
+      '.agents/skills/using-foundry/SKILL.md',
+      '.agents/skills/writing-foundry-tests/SKILL.md',
+      '.id-agents/receipt.json',
+      'AGENTS.md',
+    ]);
+    expect(fs.existsSync(path.join(workspacePath, '.claude'))).toBe(false);
+    expect(fs.readFileSync(path.join(workspacePath, 'AGENTS.md'), 'utf-8')).toBe(
+      fs.readFileSync(path.join(FIXTURE_AGENT_ROOT, 'CLAUDE.md'), 'utf-8'),
+    );
+  });
+
+  it('maps a claude-native library entry into the Cursor target shape with .mdc rules', () => {
+    workspacePath = mkTmp();
+    const libraryRoot = mkTmp();
+    const configDir = mkTmp();
+    tempPaths.push(libraryRoot, configDir);
+    seedFoundryLibrary(libraryRoot);
+    writeFile(
+      path.join(libraryRoot, 'agents', 'foundry-dev', 'rules', 'code-style.md'),
+      '# Cursor Rule\n',
+    );
+    const configPath = path.join(configDir, 'cursor.yaml');
+    writeConfig(configPath, 'cursor-cli', workspacePath);
+
+    const first = syncWorkspaceFromConfig({
+      configPath,
+      libraryRoot,
+      workspacePath,
+    });
+
+    expect(first.counts).toEqual({
+      wroteMissing: 2,
+      matchedSource: 0,
+      overwroteManaged: 0,
+      drifted: 0,
+    });
+    expect(first.warnings).toEqual([]);
+    expect(walkFiles(workspacePath)).toEqual([
+      '.cursor/rules/code-style.mdc',
+      '.id-agents/receipt.json',
+      'AGENTS.md',
+    ]);
+    expect(fs.existsSync(path.join(workspacePath, '.claude'))).toBe(false);
+    expect(fs.existsSync(path.join(workspacePath, '.agents'))).toBe(false);
+    expect(fs.readFileSync(path.join(workspacePath, '.cursor', 'rules', 'code-style.mdc'), 'utf-8')).toBe('# Cursor Rule\n');
+  });
+
+  it('maps an AGENTS.md-native library entry into the Claude target shape', () => {
+    workspacePath = mkTmp();
+    const libraryRoot = mkTmp();
+    const configDir = mkTmp();
+    tempPaths.push(libraryRoot, configDir);
+    seedAgentsMdLibrary(libraryRoot);
+    const configPath = path.join(configDir, 'claude.yaml');
+    writeConfig(configPath, 'claude-code-cli', workspacePath, 'builder');
+
+    const first = syncWorkspaceFromConfig({
+      configPath,
+      libraryRoot,
+      workspacePath,
+    });
+
+    expect(first.counts).toEqual({
+      wroteMissing: 2,
+      matchedSource: 0,
+      overwroteManaged: 0,
+      drifted: 0,
+    });
+    expect(first.warnings).toEqual([]);
+    expect(walkFiles(workspacePath)).toEqual([
+      '.claude/CLAUDE.md',
+      '.claude/skills/forge/SKILL.md',
+      '.id-agents/receipt.json',
+    ]);
+    expect(fs.readFileSync(path.join(workspacePath, '.claude', 'CLAUDE.md'), 'utf-8')).toBe('# Builder Persona\n');
+  });
+
+  it('refuses Codex sync when AGENTS.md already exists outside the receipt', async () => {
+    workspacePath = mkTmp();
+    const configDir = mkTmp();
+    tempPaths.push(configDir);
+    const configPath = path.join(configDir, 'codex.yaml');
+    writeConfig(configPath, 'codex', workspacePath);
+    writeFile(path.join(workspacePath, 'AGENTS.md'), '# user-owned AGENTS.md\n');
+
+    const exitCode = await maybeRunWorkspaceSyncCli([
+      'sync',
+      configPath,
+      '--library-root',
+      FIXTURE_LIBRARY_ROOT,
+      '--workspace',
+      workspacePath,
+    ]);
+
+    expect(exitCode).toBe(1);
+    expect(fs.readFileSync(path.join(workspacePath, 'AGENTS.md'), 'utf-8')).toBe('# user-owned AGENTS.md\n');
+    expect(fs.existsSync(path.join(workspacePath, '.id-agents', 'receipt.json'))).toBe(false);
+    expect(fs.existsSync(path.join(workspacePath, '.agents'))).toBe(false);
   });
 
   /* ------------------------------------------------------------------ */

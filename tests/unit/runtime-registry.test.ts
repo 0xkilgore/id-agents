@@ -24,6 +24,12 @@ describe('runtime registry', () => {
     expect(resolveRuntime('not-a-runtime')).toBe('claude-agent-sdk');
   });
 
+  it('maps codex-cli to the codex runtime profile', () => {
+    expect(resolveRuntime('codex-cli')).toBe('codex');
+    expect(getRuntimeProfile('codex-cli').canonicalId).toBe('codex');
+    expect(getRuntimeDisplayName('codex-cli')).toBe('Codex');
+  });
+
   it('maps claude-code-local to the Claude Code profile while preserving id', () => {
     const profile = getRuntimeProfile('claude-code-local');
     expect(profile.id).toBe('claude-code-local');

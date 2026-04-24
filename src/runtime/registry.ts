@@ -12,6 +12,9 @@ import type { RuntimeProfile, RuntimeId, RuntimeValidationIssue } from './types.
 import { execFileSync, spawnSync } from 'child_process';
 
 const DEFAULT_RUNTIME: RuntimeId = 'claude-agent-sdk';
+const RUNTIME_ALIASES: Record<string, RuntimeId> = {
+  'codex-cli': 'codex',
+};
 
 const PROFILES: Record<RuntimeId, RuntimeProfile> = {
   'claude-agent-sdk': {
@@ -129,7 +132,8 @@ export function getDefaultRuntime(): RuntimeId {
 }
 
 export function getRuntimeProfile(runtime: HarnessType | string | undefined): RuntimeProfile {
-  const id = isRuntimeId(runtime) ? runtime : DEFAULT_RUNTIME;
+  const alias = runtime ? RUNTIME_ALIASES[runtime] : undefined;
+  const id = isRuntimeId(runtime) ? runtime : alias || DEFAULT_RUNTIME;
   return PROFILES[id];
 }
 
@@ -219,6 +223,10 @@ export function getAvailableRuntimes(): RuntimeId[] {
 
 export function isRuntimeId(runtime: string | undefined): runtime is RuntimeId {
   return !!runtime && runtime in PROFILES;
+}
+
+export function isSupportedRuntimeSpecifier(runtime: string | undefined): boolean {
+  return !!runtime && (runtime in PROFILES || runtime in RUNTIME_ALIASES);
 }
 
 /**
