@@ -183,11 +183,39 @@ export function syncWorkspaceFromConfig(options: SyncWorkspaceOptions): SyncWork
     drifted: 0,
   };
 
+  // Pre-pass: decide how to route the library entry's top-level CLAUDE.md.
+  // If the workspace already has .claude/CLAUDE.md that we do not own (no
+  // receipt entry, or receipt SHA no longer matches disk), preserve it and
+  // route our persona into the Claude rules sidecar instead.
+  const claudePrimaryKey = toPortableRelativePath(path.join('.claude', 'CLAUDE.md'));
+  const claudePrimaryPath = path.join(workspacePath, '.claude', 'CLAUDE.md');
+  const claudeSidecarKey = toPortableRelativePath(path.join('.claude', 'rules', `agent-${agent.agent}.md`));
+  const claudeSidecarPath = path.join(workspacePath, '.claude', 'rules', `agent-${agent.agent}.md`);
+
+  let useClaudeSidecar = false;
+  if (fs.existsSync(claudePrimaryPath)) {
+    const diskSha = sha256Hex(fs.readFileSync(claudePrimaryPath));
+    const prior = previousReceipt.files[claudePrimaryKey];
+    useClaudeSidecar = !prior || prior.sha256 !== diskSha;
+  }
+
+  // Switching to sidecar means we no longer own the primary file; drop any
+  // stale receipt entry so the ownership ledger stays honest.
+  if (useClaudeSidecar && nextReceipt.files[claudePrimaryKey]) {
+    delete nextReceipt.files[claudePrimaryKey];
+  }
+
   for (const sourceFile of listSourceFiles(sourceEntry.dirPath)) {
     const sourceBytes = fs.readFileSync(sourceFile.absolutePath);
     const sourceSha = sha256Hex(sourceBytes);
-    const targetPath = path.join(workspacePath, runtimePaths.overlayTarget, sourceFile.relativePath);
-    const relativeTargetPath = toPortableRelativePath(path.relative(workspacePath, targetPath));
+    const isRootClaudeMd = sourceFile.relativePath === 'CLAUDE.md';
+    const routedToSidecar = isRootClaudeMd && useClaudeSidecar;
+    const targetPath: string = routedToSidecar
+      ? claudeSidecarPath
+      : path.join(workspacePath, runtimePaths.overlayTarget, sourceFile.relativePath);
+    const relativeTargetPath: string = routedToSidecar
+      ? claudeSidecarKey
+      : toPortableRelativePath(path.relative(workspacePath, targetPath));
     const receiptEntry = previousReceipt.files[relativeTargetPath];
 
     if (!fs.existsSync(targetPath)) {
