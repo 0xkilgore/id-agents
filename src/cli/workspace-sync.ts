@@ -184,26 +184,17 @@ export function syncWorkspaceFromConfig(options: SyncWorkspaceOptions): SyncWork
   };
 
   // Pre-pass: decide how to route the library entry's top-level CLAUDE.md.
-  // If the workspace already has .claude/CLAUDE.md that we do not own (no
-  // receipt entry, or receipt SHA no longer matches disk), preserve it and
-  // route our persona into the Claude rules sidecar instead.
+  // Sidecar fires only when the workspace already has a CLAUDE.md we have
+  // never written (no receipt entry at the primary key). A drifted managed
+  // CLAUDE.md stays on the primary path and falls through to the main-loop
+  // 4-case engine, so slice-3 drift-skip semantics are preserved.
   const claudePrimaryKey = toPortableRelativePath(path.join('.claude', 'CLAUDE.md'));
   const claudePrimaryPath = path.join(workspacePath, '.claude', 'CLAUDE.md');
   const claudeSidecarKey = toPortableRelativePath(path.join('.claude', 'rules', `agent-${agent.agent}.md`));
   const claudeSidecarPath = path.join(workspacePath, '.claude', 'rules', `agent-${agent.agent}.md`);
 
-  let useClaudeSidecar = false;
-  if (fs.existsSync(claudePrimaryPath)) {
-    const diskSha = sha256Hex(fs.readFileSync(claudePrimaryPath));
-    const prior = previousReceipt.files[claudePrimaryKey];
-    useClaudeSidecar = !prior || prior.sha256 !== diskSha;
-  }
-
-  // Switching to sidecar means we no longer own the primary file; drop any
-  // stale receipt entry so the ownership ledger stays honest.
-  if (useClaudeSidecar && nextReceipt.files[claudePrimaryKey]) {
-    delete nextReceipt.files[claudePrimaryKey];
-  }
+  const useClaudeSidecar =
+    fs.existsSync(claudePrimaryPath) && !previousReceipt.files[claudePrimaryKey];
 
   for (const sourceFile of listSourceFiles(sourceEntry.dirPath)) {
     const sourceBytes = fs.readFileSync(sourceFile.absolutePath);

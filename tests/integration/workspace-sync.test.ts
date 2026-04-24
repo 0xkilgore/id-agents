@@ -119,10 +119,7 @@ describe('workspace sync integration', () => {
     expect(second.files.every(file => file.case === 2)).toBe(true);
     expect(second.warnings).toEqual([]);
 
-    // Drift a managed skill file. CLAUDE.md drift has dedicated slice-4
-    // routing coverage below, so this test targets a generic skill file to
-    // keep exercising the slice-3 case-4 skip-and-warn path.
-    const driftPath = path.join(workspacePath, '.claude', 'skills', 'using-foundry', 'SKILL.md');
+    const driftPath = path.join(workspacePath, '.claude', 'CLAUDE.md');
     fs.writeFileSync(driftPath, `${fs.readFileSync(driftPath, 'utf-8')}\nlocal change\n`);
 
     const third = syncWorkspaceFromConfig({
@@ -137,7 +134,7 @@ describe('workspace sync integration', () => {
       overwroteManaged: 0,
       drifted: 1,
     });
-    expect(third.warnings).toEqual(['Skipped drifted file: .claude/skills/using-foundry/SKILL.md']);
+    expect(third.warnings).toEqual(['Skipped drifted file: .claude/CLAUDE.md']);
     expect(fs.readFileSync(driftPath, 'utf-8')).toMatch(/local change/);
   });
 
@@ -233,6 +230,49 @@ describe('workspace sync integration', () => {
     });
     expect(second.files.every(file => file.case === 2)).toBe(true);
     expect(second.warnings).toEqual([]);
+  });
+
+  it('keeps root path and warns on drift of a previously-managed CLAUDE.md (no sidecar flip)', () => {
+    workspacePath = mkTmp();
+
+    // First sync establishes ownership of .claude/CLAUDE.md via the root path.
+    syncWorkspaceFromConfig({
+      configPath: FIXTURE_CONFIG,
+      libraryRoot: FIXTURE_LIBRARY_ROOT,
+      workspacePath,
+    });
+
+    // User edits the managed CLAUDE.md in place.
+    const primaryPath = path.join(workspacePath, '.claude', 'CLAUDE.md');
+    fs.writeFileSync(primaryPath, `${fs.readFileSync(primaryPath, 'utf-8')}\nuser edit\n`);
+
+    const second = syncWorkspaceFromConfig({
+      configPath: FIXTURE_CONFIG,
+      libraryRoot: FIXTURE_LIBRARY_ROOT,
+      workspacePath,
+    });
+
+    // Drift stays on the root path — case 4 skip-and-warn — and no sidecar
+    // is created, matching slice-3 semantics.
+    expect(second.counts).toEqual({
+      wroteMissing: 0,
+      matchedSource: 5,
+      overwroteManaged: 0,
+      drifted: 1,
+    });
+    expect(second.warnings).toEqual(['Skipped drifted file: .claude/CLAUDE.md']);
+    expect(fs.readFileSync(primaryPath, 'utf-8')).toMatch(/user edit/);
+    expect(
+      fs.existsSync(path.join(workspacePath, '.claude', 'rules', 'agent-foundry-dev.md')),
+    ).toBe(false);
+
+    // Receipt still tracks the primary key with its prior SHA (we didn't
+    // overwrite, so receipt ownership for that file is preserved).
+    const receipt = JSON.parse(
+      fs.readFileSync(path.join(workspacePath, '.id-agents', 'receipt.json'), 'utf-8'),
+    ) as { files: Record<string, { sha256: string; source: string }> };
+    expect(receipt.files['.claude/CLAUDE.md']).toBeDefined();
+    expect(receipt.files['.claude/rules/agent-foundry-dev.md']).toBeUndefined();
   });
 
   it('uses the primary .claude/CLAUDE.md path when no pre-existing CLAUDE.md is on disk', () => {
