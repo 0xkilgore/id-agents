@@ -237,6 +237,12 @@ export class AgentManagerDb {
   private registerOnIdChainFn: typeof registerOnIdChain = registerOnIdChain;
   /** Injectable HTTP probe function — override in tests to mock remote health checks. */
   private healthProbeFn: HealthProbeFn = defaultHealthProbeFn;
+  /**
+   * Library root used by the read-only `/library/*` endpoints. Captured at
+   * construction so tests can override without touching process.env. Null
+   * means "no library configured" — listings return empty, detail returns 404.
+   */
+  private libraryRoot: string | null;
 
   /** Log a manager activity message to the ring buffer (not stdout) */
   private managerLog(msg: string) {
@@ -256,6 +262,13 @@ export class AgentManagerDb {
       registerOnIdChainFn?: typeof registerOnIdChain;
       /** Override remote health probe function (for tests). */
       healthProbeFn?: HealthProbeFn;
+      /**
+       * Override library root for the `/library/*` endpoints. Pass an
+       * absolute path to serve a specific library, or `null` to force
+       * empty-library behavior. When undefined, resolution falls back to
+       * the default (`ID_LIBRARY_ROOT` env, else `<cwd>/configs`, else null).
+       */
+      libraryRoot?: string | null;
     },
   ) {
     this.baseWorkDir = baseWorkDir;
@@ -263,6 +276,10 @@ export class AgentManagerDb {
     if (opts?.deliverFn) this.deliverFn = opts.deliverFn;
     if (opts?.registerOnIdChainFn) this.registerOnIdChainFn = opts.registerOnIdChainFn;
     if (opts?.healthProbeFn) this.healthProbeFn = opts.healthProbeFn;
+    this.libraryRoot =
+      opts && Object.prototype.hasOwnProperty.call(opts, 'libraryRoot')
+        ? (opts.libraryRoot ?? null)
+        : resolveDefaultLibraryRoot();
     this.agentRole = (process.env.AGENT_ROLE as 'manager' | 'worker') || 'manager';
 
     // Load default deployment config
@@ -1280,17 +1297,18 @@ export class AgentManagerDb {
       res.json({ status: 'ok', team: teamName, agents: parseInt(count || '0'), timestamp: Date.now() });
     });
 
-    // Slice 7: read-only library inventory. Library root resolution is the
-    // same default used by the slice-2 spawn flow (ID_LIBRARY_ROOT env,
-    // else <cwd>/configs, else null). When null, endpoints return an empty
-    // listing rather than an error so callers can treat "no library yet"
-    // as a first-class state.
+    // Slice 7: read-only library inventory. Library root is captured at
+    // manager construction from `opts.libraryRoot` (tests) or from
+    // resolveDefaultLibraryRoot() (prod: ID_LIBRARY_ROOT env, else
+    // <cwd>/configs, else null). When null, listings return an empty
+    // collection and detail routes return 404 — "no library configured"
+    // is a first-class state, not an error.
     this.managementApp.get('/library/agents', (_req, res) => {
-      res.json(listLibraryAgents(resolveDefaultLibraryRoot()));
+      res.json(listLibraryAgents(this.libraryRoot));
     });
 
     this.managementApp.get('/library/agents/:name', (req, res) => {
-      const detail = getLibraryAgent(resolveDefaultLibraryRoot(), req.params.name);
+      const detail = getLibraryAgent(this.libraryRoot, req.params.name);
       if (!detail) {
         res.status(404).json({ error: 'not_found', resource: 'library-agent', name: req.params.name });
         return;
@@ -1299,11 +1317,11 @@ export class AgentManagerDb {
     });
 
     this.managementApp.get('/library/skills', (_req, res) => {
-      res.json(listLibrarySkills(resolveDefaultLibraryRoot()));
+      res.json(listLibrarySkills(this.libraryRoot));
     });
 
     this.managementApp.get('/library/skills/:name', (req, res) => {
-      const detail = getLibrarySkill(resolveDefaultLibraryRoot(), req.params.name);
+      const detail = getLibrarySkill(this.libraryRoot, req.params.name);
       if (!detail) {
         res.status(404).json({ error: 'not_found', resource: 'library-skill', name: req.params.name });
         return;

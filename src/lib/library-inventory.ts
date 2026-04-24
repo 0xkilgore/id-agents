@@ -4,12 +4,16 @@
  *
  * Thin wrappers around the slice-1 enumerators in `./agent-library.ts`
  * that produce JSON-friendly response shapes for manager HTTP routes.
- * No shape detection is duplicated here; all filesystem classification
- * stays in the enumerator.
+ * No shape detection is duplicated here; filesystem classification
+ * stays in the enumerator. Everything beyond "is this a library entry"
+ * — README / LICENSE presence, subfolder listings, SKILL.md frontmatter
+ * — is metadata enrichment and lives here.
  */
 
 import fs from 'fs';
 import path from 'path';
+import yaml from 'js-yaml';
+
 import {
   enumerateLibraryAgents,
   enumerateLibrarySkills,
@@ -21,24 +25,47 @@ import {
 export interface AgentListEntry {
   name: string;
   shape: AgentLibraryShape;
+  hasReadme: boolean;
+  hasLicense: boolean;
+  /** Immediate subdirectory names (non-dot) under the entry's directory. */
+  subfolders: string[];
+  /** Absolute filesystem path to the entry's directory. */
+  source_path: string;
 }
 
 export interface AgentDetail extends AgentListEntry {
-  /** Absolute path to the library entry directory. */
-  dirPath: string;
   /** Absolute path to the persona / memory markdown file. */
   memoryFile: string;
+  /** README body, or null when no README.md is present. */
+  readme: string | null;
+  /** Raw CLAUDE.md body (claude-native) or sibling `<name>.md` body (agents-md-native). */
+  memory: string;
+  /** Names of bundled skills discovered under the entry's `skills/` subdir. */
+  bundledSkills: string[];
 }
 
 export interface SkillListEntry {
   name: string;
+  /**
+   * Whether a SKILL.md file is present under the skill directory. Always
+   * true for enumerated entries (the enumerator requires it) but included
+   * in the contract so the TUI can render the check uniformly and so a
+   * future caller that loosens the enumerator sees the flag.
+   */
+  hasSkillMd: boolean;
+  /** Absolute filesystem path to the skill directory. */
+  source_path: string;
 }
 
 export interface SkillDetail extends SkillListEntry {
-  /** Absolute path to the skill directory. */
-  dirPath: string;
   /** Absolute path to the SKILL.md file. */
   skillFile: string;
+  /** Frontmatter name field, or null if missing / unparsable. */
+  skillName: string | null;
+  /** Frontmatter description field, or null if missing / unparsable. */
+  description: string | null;
+  /** Character length of the SKILL.md body (post-frontmatter). */
+  bodyLength: number;
 }
 
 export interface AgentListResult {
@@ -82,6 +109,71 @@ export function resolveDefaultLibraryRoot(): string | null {
   return null;
 }
 
+function fileExists(p: string): boolean {
+  try { return fs.statSync(p).isFile(); } catch { return false; }
+}
+
+function dirExists(p: string): boolean {
+  try { return fs.statSync(p).isDirectory(); } catch { return false; }
+}
+
+function listSubfolders(dirPath: string): string[] {
+  if (!dirExists(dirPath)) return [];
+  return fs.readdirSync(dirPath, { withFileTypes: true })
+    .filter(d => d.isDirectory() && !d.name.startsWith('.'))
+    .map(d => d.name)
+    .sort((a, b) => a.localeCompare(b));
+}
+
+function readFileIfExists(p: string): string | null {
+  try { return fs.readFileSync(p, 'utf-8'); } catch { return null; }
+}
+
+function bundledSkillNames(agentDir: string): string[] {
+  const skillsDir = path.join(agentDir, 'skills');
+  return enumerateLibrarySkills(skillsDir).map(e => e.name);
+}
+
+function decorateAgentEntry(
+  name: string,
+  shape: AgentLibraryShape,
+  dirPath: string,
+): AgentListEntry {
+  return {
+    name,
+    shape,
+    hasReadme: fileExists(path.join(dirPath, 'README.md')),
+    hasLicense: fileExists(path.join(dirPath, 'LICENSE')),
+    subfolders: listSubfolders(dirPath),
+    source_path: dirPath,
+  };
+}
+
+function decorateSkillEntry(name: string, dirPath: string): SkillListEntry {
+  return {
+    name,
+    hasSkillMd: fileExists(path.join(dirPath, 'SKILL.md')),
+    source_path: dirPath,
+  };
+}
+
+function parseSkillMd(raw: string): { frontmatter: Record<string, unknown>; body: string } {
+  const match = raw.match(/^---\r?\n([\s\S]*?)(?:\r?\n)?---\r?\n([\s\S]*)$/);
+  if (!match) return { frontmatter: {}, body: raw };
+  let frontmatter: Record<string, unknown> = {};
+  try {
+    frontmatter = (yaml.load(match[1]) as Record<string, unknown>) || {};
+  } catch {
+    frontmatter = {};
+  }
+  return { frontmatter, body: match[2] };
+}
+
+function stringFieldOrNull(frontmatter: Record<string, unknown>, key: string): string | null {
+  const v = frontmatter[key];
+  return typeof v === 'string' ? v : null;
+}
+
 export function listLibraryAgents(libraryRoot: string | null): AgentListResult {
   if (!libraryRoot) {
     return { libraryRoot: null, entries: [], errors: [] };
@@ -90,7 +182,9 @@ export function listLibraryAgents(libraryRoot: string | null): AgentListResult {
   const scan = enumerateLibraryAgents(agents);
   return {
     libraryRoot,
-    entries: scan.entries.map(entry => ({ name: entry.name, shape: entry.shape })),
+    entries: scan.entries.map(entry =>
+      decorateAgentEntry(entry.name, entry.shape, entry.dirPath),
+    ),
     errors: scan.errors,
   };
 }
@@ -104,11 +198,17 @@ export function getLibraryAgent(
   const scan = enumerateLibraryAgents(agents);
   const entry = scan.entries.find(e => e.name === name);
   if (!entry) return null;
+
+  const base = decorateAgentEntry(entry.name, entry.shape, entry.dirPath);
+  const readmePath = path.join(entry.dirPath, 'README.md');
+  const memoryBody = readFileIfExists(entry.memoryFile) ?? '';
+
   return {
-    name: entry.name,
-    shape: entry.shape,
-    dirPath: entry.dirPath,
+    ...base,
     memoryFile: entry.memoryFile,
+    readme: readFileIfExists(readmePath),
+    memory: memoryBody,
+    bundledSkills: bundledSkillNames(entry.dirPath),
   };
 }
 
@@ -120,7 +220,7 @@ export function listLibrarySkills(libraryRoot: string | null): SkillListResult {
   const entries = enumerateLibrarySkills(skills);
   return {
     libraryRoot,
-    entries: entries.map(entry => ({ name: entry.name })),
+    entries: entries.map(entry => decorateSkillEntry(entry.name, entry.dirPath)),
   };
 }
 
@@ -133,9 +233,16 @@ export function getLibrarySkill(
   const entries = enumerateLibrarySkills(skills);
   const entry = entries.find(e => e.name === name);
   if (!entry) return null;
+
+  const base = decorateSkillEntry(entry.name, entry.dirPath);
+  const raw = readFileIfExists(entry.skillFile) ?? '';
+  const { frontmatter, body } = parseSkillMd(raw);
+
   return {
-    name: entry.name,
-    dirPath: entry.dirPath,
+    ...base,
     skillFile: entry.skillFile,
+    skillName: stringFieldOrNull(frontmatter, 'name'),
+    description: stringFieldOrNull(frontmatter, 'description'),
+    bodyLength: body.length,
   };
 }
