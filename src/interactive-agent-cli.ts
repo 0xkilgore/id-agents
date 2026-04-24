@@ -24,6 +24,12 @@ import {
   removePublicAgent,
   registerPublicOnchain,
 } from './cli/public-commands.js';
+import { maybeRunWorkspaceSyncCli } from './cli/workspace-sync.js';
+
+const oneShotExitCode = await maybeRunWorkspaceSyncCli(process.argv.slice(2));
+if (oneShotExitCode !== null) {
+  process.exit(oneShotExitCode);
+}
 
 const colors = {
   reset: '\x1b[0m',
