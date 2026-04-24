@@ -6,7 +6,12 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 
-import { maybeRunWorkspaceSyncCli, syncWorkspaceFromConfig } from '../../src/cli/workspace-sync.js';
+import {
+  maybeRunWorkspaceSyncCli,
+  maybeRunWorkspaceUnsyncCli,
+  syncWorkspaceFromConfig,
+  unsyncWorkspaceFromConfig,
+} from '../../src/cli/workspace-sync.js';
 
 const FIXTURE_CONFIG = '/Users/nxt3d/projects/id2/public-agents/configs/foundry-demo.yaml';
 const FIXTURE_LIBRARY_ROOT = '/Users/nxt3d/projects/id2/public-agents/configs';
@@ -761,6 +766,39 @@ describe('workspace sync integration', () => {
     }
   });
 
+  it('exits with code 1 when the real CLI binary refuses a Codex sync over an unmanaged AGENTS.md', () => {
+    // End-to-end coverage for the actual entry path:
+    //   id-agents sync <config>  (process exit code)
+    // The helper-level Codex-refusal test covers maybeRunWorkspaceSyncCli in
+    // isolation; this test spawns the CLI via tsx to verify that the
+    // top-level await + process.exit wiring propagates non-zero status.
+    workspacePath = mkTmp();
+    const configDir = mkTmp();
+    const configPath = writeYaml(configDir, 'codex', workspacePath, 'foundry-dev');
+    fs.writeFileSync(path.join(workspacePath, 'AGENTS.md'), '# user-owned AGENTS.md\n');
+
+    try {
+      const { spawnSync } = require('child_process') as typeof import('child_process');
+      const tsxBin = path.resolve(__dirname, '..', '..', 'node_modules', '.bin', 'tsx');
+      const cliEntry = path.resolve(__dirname, '..', '..', 'src', 'interactive-agent-cli.ts');
+      const result = spawnSync(
+        tsxBin,
+        [cliEntry, 'sync', configPath, '--library-root', FIXTURE_LIBRARY_ROOT],
+        { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'pipe'] },
+      );
+
+      expect(result.status).toBe(1);
+      expect(result.stderr || '').toMatch(/Refusing to sync/);
+      // User's AGENTS.md is untouched, no partial writes.
+      expect(fs.readFileSync(path.join(workspacePath, 'AGENTS.md'), 'utf-8'))
+        .toBe('# user-owned AGENTS.md\n');
+      expect(fs.existsSync(path.join(workspacePath, '.id-agents'))).toBe(false);
+      expect(fs.existsSync(path.join(workspacePath, '.agents'))).toBe(false);
+    } finally {
+      fs.rmSync(configDir, { recursive: true, force: true });
+    }
+  });
+
   it('refuses codex sync when workspace already has an unmanaged AGENTS.md', () => {
     workspacePath = mkTmp();
     const configDir = mkTmp();
@@ -786,6 +824,141 @@ describe('workspace sync integration', () => {
       expect(fs.existsSync(path.join(workspacePath, '.agents'))).toBe(false);
       expect(fs.existsSync(path.join(workspacePath, '.claude'))).toBe(false);
       expect(fs.existsSync(path.join(workspacePath, '.id-agents'))).toBe(false);
+    } finally {
+      fs.rmSync(configDir, { recursive: true, force: true });
+    }
+  });
+
+  /* ------------------------------------------------------------------ */
+  /*  Slice 6: undeploy (`id-agents unsync <config>`)                    */
+  /* ------------------------------------------------------------------ */
+
+  it('fresh sync followed by unsync leaves a pristine tree (no receipt, no .id-agents)', () => {
+    workspacePath = mkTmp();
+
+    syncWorkspaceFromConfig({
+      configPath: FIXTURE_CONFIG,
+      libraryRoot: FIXTURE_LIBRARY_ROOT,
+      workspacePath,
+    });
+    // Sanity: receipt and managed files landed.
+    expect(fs.existsSync(path.join(workspacePath, '.id-agents', 'receipt.json'))).toBe(true);
+    expect(fs.existsSync(path.join(workspacePath, '.claude', 'CLAUDE.md'))).toBe(true);
+
+    const result = unsyncWorkspaceFromConfig({
+      configPath: FIXTURE_CONFIG,
+      workspacePath,
+    });
+
+    expect(result.counts).toEqual({ deleted: 6, preserved: 0, missing: 0 });
+    expect(result.warnings).toEqual([]);
+    // Workspace is empty — every managed file and directory is gone.
+    expect(walkFiles(workspacePath)).toEqual([]);
+    expect(fs.existsSync(path.join(workspacePath, '.id-agents'))).toBe(false);
+    expect(fs.existsSync(path.join(workspacePath, '.claude'))).toBe(false);
+  });
+
+  it('unsync preserves user-edited files and removes the rest with cleaned receipt', () => {
+    workspacePath = mkTmp();
+
+    syncWorkspaceFromConfig({
+      configPath: FIXTURE_CONFIG,
+      libraryRoot: FIXTURE_LIBRARY_ROOT,
+      workspacePath,
+    });
+
+    // User edits one of the managed skills in place.
+    const editedPath = path.join(workspacePath, '.claude', 'skills', 'using-foundry', 'SKILL.md');
+    const originalBytes = fs.readFileSync(editedPath, 'utf-8');
+    const editedBytes = `${originalBytes}\nuser edit\n`;
+    fs.writeFileSync(editedPath, editedBytes);
+
+    const result = unsyncWorkspaceFromConfig({
+      configPath: FIXTURE_CONFIG,
+      workspacePath,
+    });
+
+    expect(result.counts).toEqual({ deleted: 5, preserved: 1, missing: 0 });
+    expect(result.warnings).toEqual([
+      'Preserved user-edited file (ownership released): .claude/skills/using-foundry/SKILL.md',
+    ]);
+
+    // Edited file stays byte-for-byte.
+    expect(fs.readFileSync(editedPath, 'utf-8')).toBe(editedBytes);
+    // Ancestor directories are preserved because the edited file still lives there.
+    expect(fs.existsSync(path.join(workspacePath, '.claude', 'skills', 'using-foundry'))).toBe(true);
+    // Other skill directories are gone.
+    expect(fs.existsSync(path.join(workspacePath, '.claude', 'skills', 'gas-optimization-foundry')))
+      .toBe(false);
+    // CLAUDE.md was deleted.
+    expect(fs.existsSync(path.join(workspacePath, '.claude', 'CLAUDE.md'))).toBe(false);
+    // Receipt is always removed at end of unsync; ownership was released.
+    expect(fs.existsSync(path.join(workspacePath, '.id-agents'))).toBe(false);
+  });
+
+  it('unsync with no receipt is a no-op and exits with code 0', async () => {
+    workspacePath = mkTmp();
+    const configDir = mkTmp();
+    const configPath = writeYaml(configDir, 'claude-code-cli', workspacePath, 'foundry-dev');
+
+    try {
+      const programmatic = unsyncWorkspaceFromConfig({ configPath, workspacePath });
+      expect(programmatic.counts).toEqual({ deleted: 0, preserved: 0, missing: 0 });
+      expect(programmatic.files).toEqual([]);
+      expect(programmatic.warnings).toEqual([]);
+
+      // Workspace is untouched (beyond the empty dir we handed in).
+      expect(walkFiles(workspacePath)).toEqual([]);
+      expect(fs.existsSync(path.join(workspacePath, '.id-agents'))).toBe(false);
+
+      // CLI hook returns 0 for this case.
+      const exitCode = await maybeRunWorkspaceUnsyncCli([
+        'unsync',
+        configPath,
+        '--workspace',
+        workspacePath,
+      ]);
+      expect(exitCode).toBe(0);
+    } finally {
+      fs.rmSync(configDir, { recursive: true, force: true });
+    }
+  });
+
+  it('unsync on a codex workspace removes AGENTS.md and .agents/skills while preserving user-authored files', () => {
+    workspacePath = mkTmp();
+    const configDir = mkTmp();
+    const configPath = writeYaml(configDir, 'codex', workspacePath, 'foundry-dev');
+
+    try {
+      // Drop a user-authored file that was never in the receipt.
+      const userFilePath = path.join(workspacePath, '.env');
+      fs.writeFileSync(userFilePath, 'USER_SECRET=abc\n');
+
+      // Sync to the Codex target.
+      syncWorkspaceFromConfig({
+        configPath,
+        libraryRoot: FIXTURE_LIBRARY_ROOT,
+        workspacePath,
+      });
+      expect(fs.existsSync(path.join(workspacePath, 'AGENTS.md'))).toBe(true);
+      expect(fs.existsSync(path.join(workspacePath, '.agents', 'skills'))).toBe(true);
+
+      const result = unsyncWorkspaceFromConfig({
+        configPath,
+        workspacePath,
+      });
+
+      expect(result.counts).toEqual({ deleted: 6, preserved: 0, missing: 0 });
+      expect(result.warnings).toEqual([]);
+
+      // Our managed artifacts are gone.
+      expect(fs.existsSync(path.join(workspacePath, 'AGENTS.md'))).toBe(false);
+      expect(fs.existsSync(path.join(workspacePath, '.agents'))).toBe(false);
+      expect(fs.existsSync(path.join(workspacePath, '.id-agents'))).toBe(false);
+
+      // User-authored file is preserved verbatim.
+      expect(fs.existsSync(userFilePath)).toBe(true);
+      expect(fs.readFileSync(userFilePath, 'utf-8')).toBe('USER_SECRET=abc\n');
     } finally {
       fs.rmSync(configDir, { recursive: true, force: true });
     }

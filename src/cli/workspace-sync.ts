@@ -448,3 +448,203 @@ export async function maybeRunWorkspaceSyncCli(argv: string[]): Promise<number |
     return 1;
   }
 }
+
+/* -------------------------------------------------------------------------- */
+/*  Slice 6: undeploy (`id-agents unsync <config>`)                            */
+/* -------------------------------------------------------------------------- */
+
+export interface UnsyncWorkspaceOptions {
+  configPath: string;
+  workspacePath?: string;
+}
+
+export type UnsyncOutcome = 'deleted' | 'preserved' | 'missing';
+
+export interface UnsyncFileResult {
+  path: string;
+  outcome: UnsyncOutcome;
+}
+
+export interface UnsyncWorkspaceResult {
+  workspacePath: string;
+  receiptPath: string;
+  files: UnsyncFileResult[];
+  warnings: string[];
+  counts: {
+    deleted: number;
+    preserved: number;
+    missing: number;
+  };
+}
+
+/**
+ * Resolve the workspace path from a config file, allowing an explicit
+ * override. Only the first agent's workingDirectory is consulted.
+ *
+ * Unlike sync, undeploy does not require a valid runtime or library entry
+ * because the operation is driven entirely by the receipt on disk.
+ */
+function resolveUnsyncWorkspacePath(configPath: string, override?: string): string {
+  if (override) return path.resolve(expandHomeDir(override));
+
+  const config = parseTeamConfig(configPath);
+  if (!Array.isArray(config.agents) || config.agents.length === 0) {
+    throw new Error(`No agents defined in config: ${configPath}`);
+  }
+  const agent = config.agents[0];
+  if (!agent.workingDirectory) {
+    throw new Error(`Agent "${agent.name}" is missing required workingDirectory`);
+  }
+  return path.resolve(expandHomeDir(agent.workingDirectory));
+}
+
+/**
+ * Walk each parent directory from the given set upward toward the workspace
+ * root, calling `rmdirSync` at each level. Stops at the workspace root or the
+ * first non-empty directory. Directories are processed deepest-first so that
+ * nested cleanup is possible in a single pass.
+ */
+function cleanupEmptyParents(workspaceRoot: string, touchedDirs: Set<string>): void {
+  const sorted = [...touchedDirs].sort((a, b) => b.length - a.length);
+  const rootPrefix = workspaceRoot + path.sep;
+  for (const dir of sorted) {
+    let current = dir;
+    while (current !== workspaceRoot && current.startsWith(rootPrefix)) {
+      try {
+        fs.rmdirSync(current);
+      } catch {
+        break; // not empty or inaccessible — stop climbing this branch
+      }
+      current = path.dirname(current);
+    }
+  }
+}
+
+/**
+ * Undeploy an agent library overlay from a workspace using the sync receipt
+ * as the sole source of ownership truth.
+ *
+ * For each receipt entry:
+ *   - file missing from disk        → drop the claim (no-op, `missing`)
+ *   - disk SHA matches receipt SHA  → delete the file (`deleted`)
+ *   - disk SHA differs              → preserve the file, drop the claim,
+ *                                     warn (`preserved`)
+ *
+ * After the file loop, empty parent directories that contained deleted
+ * files are removed (rmdir-only, never recursive force), walking upward
+ * until we hit the workspace root or a non-empty directory.
+ *
+ * The receipt file is always removed at the end. If `.id-agents/` becomes
+ * empty after that it is removed too; otherwise it is preserved.
+ *
+ * No receipt at `<workspace>/.id-agents/receipt.json` is a clean no-op.
+ */
+export function unsyncWorkspaceFromConfig(options: UnsyncWorkspaceOptions): UnsyncWorkspaceResult {
+  const configPath = path.resolve(options.configPath);
+  const workspacePath = resolveUnsyncWorkspacePath(configPath, options.workspacePath);
+  const receiptPath = path.join(workspacePath, '.id-agents', 'receipt.json');
+
+  if (!fs.existsSync(receiptPath)) {
+    return {
+      workspacePath,
+      receiptPath,
+      files: [],
+      warnings: [],
+      counts: { deleted: 0, preserved: 0, missing: 0 },
+    };
+  }
+
+  const receipt = loadReceipt(receiptPath);
+  const results: UnsyncFileResult[] = [];
+  const warnings: string[] = [];
+  const counts = { deleted: 0, preserved: 0, missing: 0 };
+  const touchedDirs = new Set<string>();
+
+  // Process receipt entries in sorted order for deterministic output.
+  const entries = Object.entries(receipt.files).sort(([a], [b]) => a.localeCompare(b));
+  for (const [relativePath, entry] of entries) {
+    const absolutePath = path.join(workspacePath, relativePath);
+
+    if (!fs.existsSync(absolutePath)) {
+      results.push({ path: relativePath, outcome: 'missing' });
+      counts.missing += 1;
+      continue;
+    }
+
+    const diskSha = sha256Hex(fs.readFileSync(absolutePath));
+    if (diskSha === entry.sha256) {
+      fs.unlinkSync(absolutePath);
+      touchedDirs.add(path.dirname(absolutePath));
+      results.push({ path: relativePath, outcome: 'deleted' });
+      counts.deleted += 1;
+    } else {
+      warnings.push(`Preserved user-edited file (ownership released): ${relativePath}`);
+      results.push({ path: relativePath, outcome: 'preserved' });
+      counts.preserved += 1;
+    }
+  }
+
+  // Always remove the receipt at the end — we've released every claim.
+  try {
+    fs.unlinkSync(receiptPath);
+    touchedDirs.add(path.dirname(receiptPath));
+  } catch {
+    // Ignore: receipt existed at loadReceipt time; if it's gone now, fine.
+  }
+
+  cleanupEmptyParents(workspacePath, touchedDirs);
+
+  return {
+    workspacePath,
+    receiptPath,
+    files: results,
+    warnings,
+    counts,
+  };
+}
+
+function parseUnsyncArgs(args: string[]): UnsyncWorkspaceOptions {
+  if (args.length === 0) {
+    throw new Error('Usage: id-agents unsync <config> [--workspace <path>]');
+  }
+
+  const options: UnsyncWorkspaceOptions = { configPath: args[0] };
+
+  for (let i = 1; i < args.length; i += 1) {
+    const arg = args[i];
+    if (arg === '--workspace') {
+      const value = args[i + 1];
+      if (!value) throw new Error('Missing value for --workspace');
+      options.workspacePath = value;
+      i += 1;
+      continue;
+    }
+    throw new Error(`Unknown argument: ${arg}`);
+  }
+
+  return options;
+}
+
+export async function maybeRunWorkspaceUnsyncCli(argv: string[]): Promise<number | null> {
+  if (argv[0] !== 'unsync') {
+    return null;
+  }
+
+  try {
+    const result = unsyncWorkspaceFromConfig(parseUnsyncArgs(argv.slice(1)));
+    console.log(`Unsynced from ${result.workspacePath}`);
+    console.log(
+      `Deleted=${result.counts.deleted} ` +
+      `Preserved=${result.counts.preserved} ` +
+      `Missing=${result.counts.missing}`
+    );
+    for (const warning of result.warnings) {
+      console.warn(`WARN ${warning}`);
+    }
+    return 0;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error(message);
+    return 1;
+  }
+}

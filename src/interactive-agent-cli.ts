@@ -24,11 +24,18 @@ import {
   removePublicAgent,
   registerPublicOnchain,
 } from './cli/public-commands.js';
-import { maybeRunWorkspaceSyncCli } from './cli/workspace-sync.js';
+import {
+  maybeRunWorkspaceSyncCli,
+  maybeRunWorkspaceUnsyncCli,
+} from './cli/workspace-sync.js';
 
-const oneShotExitCode = await maybeRunWorkspaceSyncCli(process.argv.slice(2));
-if (oneShotExitCode !== null) {
-  process.exit(oneShotExitCode);
+const oneShotSyncExit = await maybeRunWorkspaceSyncCli(process.argv.slice(2));
+if (oneShotSyncExit !== null) {
+  process.exit(oneShotSyncExit);
+}
+const oneShotUnsyncExit = await maybeRunWorkspaceUnsyncCli(process.argv.slice(2));
+if (oneShotUnsyncExit !== null) {
+  process.exit(oneShotUnsyncExit);
 }
 
 const colors = {
