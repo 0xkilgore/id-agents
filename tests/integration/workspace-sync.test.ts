@@ -232,6 +232,47 @@ describe('workspace sync integration', () => {
     expect(second.warnings).toEqual([]);
   });
 
+  it('claims ownership of root CLAUDE.md when disk bytes already match source (Case 2, no sidecar)', () => {
+    workspacePath = mkTmp();
+
+    // Pre-seed a root CLAUDE.md whose bytes exactly match the library
+    // source. No receipt exists yet.
+    const sourceClaudeMdBytes = fs.readFileSync(path.join(FIXTURE_AGENT_ROOT, 'CLAUDE.md'));
+    const primaryPath = path.join(workspacePath, '.claude', 'CLAUDE.md');
+    fs.mkdirSync(path.dirname(primaryPath), { recursive: true });
+    fs.writeFileSync(primaryPath, sourceClaudeMdBytes);
+
+    const first = syncWorkspaceFromConfig({
+      configPath: FIXTURE_CONFIG,
+      libraryRoot: FIXTURE_LIBRARY_ROOT,
+      workspacePath,
+    });
+
+    // Root file is Case 2 matched-source (no write); skills are Case 1 writes.
+    expect(first.counts).toEqual({
+      wroteMissing: 5,
+      matchedSource: 1,
+      overwroteManaged: 0,
+      drifted: 0,
+    });
+    expect(first.warnings).toEqual([]);
+
+    // No sidecar was created.
+    expect(
+      fs.existsSync(path.join(workspacePath, '.claude', 'rules', 'agent-foundry-dev.md')),
+    ).toBe(false);
+
+    // Root bytes stayed identical; receipt now tracks the primary key.
+    expect(fs.readFileSync(primaryPath)).toEqual(sourceClaudeMdBytes);
+
+    const receipt = JSON.parse(
+      fs.readFileSync(path.join(workspacePath, '.id-agents', 'receipt.json'), 'utf-8'),
+    ) as { files: Record<string, { sha256: string; source: string }> };
+    expect(receipt.files['.claude/CLAUDE.md']).toBeDefined();
+    expect(receipt.files['.claude/CLAUDE.md'].source).toBe('agent:foundry-dev');
+    expect(receipt.files['.claude/rules/agent-foundry-dev.md']).toBeUndefined();
+  });
+
   it('keeps root path and warns on drift of a previously-managed CLAUDE.md (no sidecar flip)', () => {
     workspacePath = mkTmp();
 

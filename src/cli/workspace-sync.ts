@@ -184,17 +184,29 @@ export function syncWorkspaceFromConfig(options: SyncWorkspaceOptions): SyncWork
   };
 
   // Pre-pass: decide how to route the library entry's top-level CLAUDE.md.
-  // Sidecar fires only when the workspace already has a CLAUDE.md we have
-  // never written (no receipt entry at the primary key). A drifted managed
-  // CLAUDE.md stays on the primary path and falls through to the main-loop
-  // 4-case engine, so slice-3 drift-skip semantics are preserved.
+  // Sidecar fires only when a user-authored root CLAUDE.md is in the way
+  // (i.e. the primary file exists on disk, we have no receipt entry for it,
+  // AND its bytes do not already match the source). Every other state —
+  // managed-and-unchanged, managed-and-drifted, disk-coincidentally-matches-
+  // source — stays on the primary path so the main-loop 4-case engine keeps
+  // slice-3 semantics (Case 2 match, Case 3 overwrite, Case 4 drift-skip).
   const claudePrimaryKey = toPortableRelativePath(path.join('.claude', 'CLAUDE.md'));
   const claudePrimaryPath = path.join(workspacePath, '.claude', 'CLAUDE.md');
   const claudeSidecarKey = toPortableRelativePath(path.join('.claude', 'rules', `agent-${agent.agent}.md`));
   const claudeSidecarPath = path.join(workspacePath, '.claude', 'rules', `agent-${agent.agent}.md`);
 
-  const useClaudeSidecar =
-    fs.existsSync(claudePrimaryPath) && !previousReceipt.files[claudePrimaryKey];
+  let useClaudeSidecar = false;
+  if (
+    fs.existsSync(claudePrimaryPath) &&
+    !previousReceipt.files[claudePrimaryKey]
+  ) {
+    // No record of us ever writing root CLAUDE.md. Compare disk to source to
+    // decide whether to claim ownership (Case 2) or route to the sidecar.
+    const sourceClaudeMdPath = path.join(sourceEntry.dirPath, 'CLAUDE.md');
+    const sourceClaudeMdSha = sha256Hex(fs.readFileSync(sourceClaudeMdPath));
+    const diskSha = sha256Hex(fs.readFileSync(claudePrimaryPath));
+    useClaudeSidecar = diskSha !== sourceClaudeMdSha;
+  }
 
   for (const sourceFile of listSourceFiles(sourceEntry.dirPath)) {
     const sourceBytes = fs.readFileSync(sourceFile.absolutePath);
