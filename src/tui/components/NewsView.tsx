@@ -181,7 +181,13 @@ function extractParty(item: NewsItem): string {
   if (type === 'query.received') {
     return `from: ${from || 'manager'}`;
   }
-  if (type === 'reply' || type === 'news.received' || type === 'inbound.reply') {
+  if (
+    type === 'reply' ||
+    type === 'notify' ||
+    type === 'message' ||
+    type === 'news.received' ||
+    type === 'inbound.reply'
+  ) {
     return from ? `from: ${from}` : '';
   }
   return '';
@@ -211,4 +217,3 @@ function formatTime(ms: number): string {
 function pad2(n: number): string {
   return n.toString().padStart(2, '0');
 }
-
