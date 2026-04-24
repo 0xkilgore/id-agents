@@ -10,8 +10,8 @@ import {
   parseTeamConfig,
   resolveConfigLibraryRoot,
 } from '../config-parser.js';
-import { enumerateLibraryAgents } from '../lib/agent-library.js';
-import { getRuntimePaths, resolveRuntime } from '../runtime/registry.js';
+import { enumerateLibraryAgents, type LibraryAgentEntry } from '../lib/agent-library.js';
+import { resolveRuntime } from '../runtime/registry.js';
 
 const RECEIPT_VERSION = 1;
 const SKIPPED_SOURCE_BASENAMES = new Set(['README.md', 'LICENSE']);
@@ -51,6 +51,8 @@ export interface SyncWorkspaceOptions {
   workspacePath?: string;
 }
 
+type RuntimeClass = 'claude' | 'codex' | 'cursor';
+
 function sha256Hex(input: Buffer | string): string {
   return crypto.createHash('sha256').update(input).digest('hex');
 }
@@ -65,9 +67,18 @@ function expandHomeDir(p: string): string {
   return p;
 }
 
-function isClaudeRuntime(runtime: AgentSpec['runtime']): boolean {
+/**
+ * Classify an AgentSpec runtime into the coarse target-mapping families used
+ * by slice-5 remap rules. Unknown or remote-endpoint runtimes return null.
+ */
+function classifyRuntime(runtime: AgentSpec['runtime']): RuntimeClass | null {
   const resolved = resolveRuntime(runtime);
-  return resolved === 'claude-agent-sdk' || resolved === 'claude-code-cli' || resolved === 'claude-code-local';
+  if (resolved === 'claude-agent-sdk' || resolved === 'claude-code-cli' || resolved === 'claude-code-local') {
+    return 'claude';
+  }
+  if (resolved === 'codex') return 'codex';
+  if (resolved === 'cursor-cli') return 'cursor';
+  return null;
 }
 
 function loadReceipt(receiptPath: string): SyncReceipt {
@@ -90,8 +101,21 @@ function writeReceiptAtomic(receiptPath: string, receipt: SyncReceipt): void {
   fs.renameSync(tempPath, receiptPath);
 }
 
-function listSourceFiles(rootDir: string): Array<{ absolutePath: string; relativePath: string }> {
-  const files: Array<{ absolutePath: string; relativePath: string }> = [];
+interface SourceFile {
+  absolutePath: string;
+  /**
+   * Canonical relative path as if the library entry were always claude-native.
+   *
+   * - claude-native:    walked directly from dirPath; CLAUDE.md appears at 'CLAUDE.md'.
+   * - agents-md-native: walked from dirPath (which does not contain CLAUDE.md) AND the
+   *                     sibling `<name>.md` is injected with a virtual relativePath of
+   *                     'CLAUDE.md' so the rest of the pipeline is shape-agnostic.
+   */
+  relativePath: string;
+}
+
+function walkDirectory(rootDir: string): SourceFile[] {
+  const files: SourceFile[] = [];
 
   const walk = (currentDir: string, prefix: string): void => {
     const entries = fs.readdirSync(currentDir, { withFileTypes: true })
@@ -109,12 +133,90 @@ function listSourceFiles(rootDir: string): Array<{ absolutePath: string; relativ
       if (!entry.isFile()) continue;
       if (SKIPPED_SOURCE_BASENAMES.has(entry.name)) continue;
 
-      files.push({ absolutePath, relativePath });
+      files.push({ absolutePath, relativePath: toPortableRelativePath(relativePath) });
     }
   };
 
   walk(rootDir, '');
   return files;
+}
+
+/**
+ * Produce the canonical source-file list for a library entry. For both
+ * native shapes the caller gets a list rooted at a claude-native layout:
+ * `CLAUDE.md` at the top, plus optional `skills/`, `agents/`, `commands/`,
+ * `rules/`, `hooks/`, `settings.json`, and arbitrary nested files.
+ */
+function listSourceFilesForEntry(entry: LibraryAgentEntry): SourceFile[] {
+  const files = walkDirectory(entry.dirPath);
+  if (entry.shape === 'agents-md-native') {
+    // Inject the sibling persona file as the canonical CLAUDE.md.
+    files.push({ absolutePath: entry.memoryFile, relativePath: 'CLAUDE.md' });
+  }
+  // Stable ordering for determinism.
+  files.sort((a, b) => a.relativePath.localeCompare(b.relativePath));
+  return files;
+}
+
+/**
+ * Remap a canonical source-file relative path into the workspace-relative
+ * target path for a given runtime. Returns null when the source should be
+ * skipped for that runtime (e.g. Cursor dropping `skills/`).
+ *
+ * Mapping table (slice 5):
+ *
+ *   source               claude              codex                cursor
+ *   -------------------- ------------------- -------------------- -------------------
+ *   CLAUDE.md (root)     .claude/CLAUDE.md   AGENTS.md            AGENTS.md
+ *   skills/<x>/...       .claude/skills/...  .agents/skills/...   (skip)
+ *   agents/...           .claude/agents/...  (skip)               (skip)
+ *   commands/...         .claude/commands/...(skip)               (skip)
+ *   rules/<x>.md         .claude/rules/...   (skip)               .cursor/rules/<x>.mdc
+ *   rules/... (non-.md)  .claude/rules/...   (skip)               (skip)
+ *   hooks/...            .claude/hooks/...   (skip)               (skip)
+ *   settings.json (root) .claude/settings.j  (skip)               (skip)
+ *   anything else        .claude/<src>       (skip)               (skip)
+ *
+ * Claude-runtime sidecar rewrite for CLAUDE.md is applied later by the
+ * caller, not here; this function only computes the primary target.
+ */
+function remapTarget(sourceRelativePath: string, runtime: RuntimeClass): string | null {
+  const parts = sourceRelativePath.split('/');
+  const first = parts[0];
+
+  // Root persona file.
+  if (parts.length === 1 && first === 'CLAUDE.md') {
+    return runtime === 'claude' ? '.claude/CLAUDE.md' : 'AGENTS.md';
+  }
+
+  if (first === 'skills') {
+    if (runtime === 'claude') return `.claude/${sourceRelativePath}`;
+    if (runtime === 'codex') return `.agents/${sourceRelativePath}`;
+    return null; // cursor skips skills
+  }
+
+  if (first === 'rules') {
+    if (runtime === 'claude') return `.claude/${sourceRelativePath}`;
+    if (runtime === 'cursor') {
+      // Extension rename only, structure preserved. Non-.md files are skipped.
+      if (!parts[parts.length - 1].endsWith('.md')) return null;
+      const withoutMd = sourceRelativePath.slice(0, -'.md'.length);
+      return `.cursor/${withoutMd}.mdc`;
+    }
+    return null; // codex skips rules
+  }
+
+  if (first === 'agents' || first === 'commands' || first === 'hooks') {
+    if (runtime === 'claude') return `.claude/${sourceRelativePath}`;
+    return null;
+  }
+
+  if (parts.length === 1 && first === 'settings.json') {
+    return runtime === 'claude' ? '.claude/settings.json' : null;
+  }
+
+  // Passthrough for any other file: claude keeps it, codex/cursor drop it.
+  return runtime === 'claude' ? `.claude/${sourceRelativePath}` : null;
 }
 
 function resolveSingleAgent(configPath: string): AgentSpec {
@@ -133,8 +235,10 @@ function resolveSingleAgent(configPath: string): AgentSpec {
   if (!agent.workingDirectory) {
     throw new Error(`Agent "${agent.name}" is missing required workingDirectory`);
   }
-  if (!isClaudeRuntime(agent.runtime)) {
-    throw new Error(`Agent "${agent.name}" uses unsupported runtime for slice 3: ${agent.runtime || 'default'}`);
+  if (classifyRuntime(agent.runtime) === null) {
+    throw new Error(
+      `Agent "${agent.name}" uses unsupported runtime for workspace sync: ${agent.runtime || 'default'}`,
+    );
   }
 
   return agent;
@@ -143,13 +247,12 @@ function resolveSingleAgent(configPath: string): AgentSpec {
 export function syncWorkspaceFromConfig(options: SyncWorkspaceOptions): SyncWorkspaceResult {
   const configPath = path.resolve(options.configPath);
   const agent = resolveSingleAgent(configPath);
+  const runtime = classifyRuntime(agent.runtime);
+  if (runtime === null) {
+    throw new Error(`Unsupported runtime for workspace sync: ${agent.runtime || 'default'}`);
+  }
   const libraryRoot = path.resolve(options.libraryRoot || resolveConfigLibraryRoot(configPath));
   const workspacePath = path.resolve(expandHomeDir(options.workspacePath || agent.workingDirectory!));
-  const runtimePaths = getRuntimePaths(agent.runtime);
-
-  if (runtimePaths.overlayTarget !== '.claude') {
-    throw new Error(`Slice 3 only supports Claude target mapping; got ${runtimePaths.overlayTarget}`);
-  }
 
   const scan = enumerateLibraryAgents(path.join(libraryRoot, 'agents'));
   if (scan.errors.length > 0) {
@@ -160,14 +263,26 @@ export function syncWorkspaceFromConfig(options: SyncWorkspaceOptions): SyncWork
   if (!sourceEntry) {
     throw new Error(`Agent library entry not found: ${agent.agent}`);
   }
-  if (sourceEntry.shape !== 'claude-native') {
-    throw new Error(`Slice 3 only supports claude-native library entries; got ${sourceEntry.shape}`);
-  }
 
   fs.mkdirSync(workspacePath, { recursive: true });
 
   const receiptPath = path.join(workspacePath, '.id-agents', 'receipt.json');
   const previousReceipt = loadReceipt(receiptPath);
+
+  // Refusal rule for Codex/Cursor: if the workspace already has an AGENTS.md
+  // we never wrote, we must not silently sidecar or overwrite. Fail the sync
+  // with zero writes and a clear recovery path.
+  if (runtime === 'codex' || runtime === 'cursor') {
+    const agentsMdPath = path.join(workspacePath, 'AGENTS.md');
+    if (fs.existsSync(agentsMdPath) && !previousReceipt.files['AGENTS.md']) {
+      throw new Error(
+        `Refusing to sync: workspace already has an AGENTS.md that is not tracked in the id-agents receipt. ` +
+        `Remove ${agentsMdPath} and re-run sync, or manually merge the library persona into it and re-run ` +
+        `once the workspace is quiescent.`,
+      );
+    }
+  }
+
   const nextReceipt: SyncReceipt = {
     version: RECEIPT_VERSION,
     lastDeployedAt: new Date().toISOString(),
@@ -183,42 +298,42 @@ export function syncWorkspaceFromConfig(options: SyncWorkspaceOptions): SyncWork
     drifted: 0,
   };
 
-  // Pre-pass: decide how to route the library entry's top-level CLAUDE.md.
+  // Pre-pass (Claude runtime only): decide whether to route the library's
+  // root CLAUDE.md into the persona sidecar at .claude/rules/agent-<name>.md.
   // Sidecar fires only when a user-authored root CLAUDE.md is in the way
-  // (i.e. the primary file exists on disk, we have no receipt entry for it,
-  // AND its bytes do not already match the source). Every other state —
-  // managed-and-unchanged, managed-and-drifted, disk-coincidentally-matches-
-  // source — stays on the primary path so the main-loop 4-case engine keeps
-  // slice-3 semantics (Case 2 match, Case 3 overwrite, Case 4 drift-skip).
+  // (file exists, no receipt entry for it, AND bytes differ from the source).
+  // Every other state stays on the primary path so the main-loop 4-case
+  // engine keeps slice-3/4 semantics.
   const claudePrimaryKey = toPortableRelativePath(path.join('.claude', 'CLAUDE.md'));
   const claudePrimaryPath = path.join(workspacePath, '.claude', 'CLAUDE.md');
   const claudeSidecarKey = toPortableRelativePath(path.join('.claude', 'rules', `agent-${agent.agent}.md`));
-  const claudeSidecarPath = path.join(workspacePath, '.claude', 'rules', `agent-${agent.agent}.md`);
 
   let useClaudeSidecar = false;
   if (
+    runtime === 'claude' &&
     fs.existsSync(claudePrimaryPath) &&
     !previousReceipt.files[claudePrimaryKey]
   ) {
-    // No record of us ever writing root CLAUDE.md. Compare disk to source to
-    // decide whether to claim ownership (Case 2) or route to the sidecar.
-    const sourceClaudeMdPath = path.join(sourceEntry.dirPath, 'CLAUDE.md');
-    const sourceClaudeMdSha = sha256Hex(fs.readFileSync(sourceClaudeMdPath));
+    const personaSourcePath =
+      sourceEntry.shape === 'claude-native'
+        ? path.join(sourceEntry.dirPath, 'CLAUDE.md')
+        : sourceEntry.memoryFile;
+    const sourceSha = sha256Hex(fs.readFileSync(personaSourcePath));
     const diskSha = sha256Hex(fs.readFileSync(claudePrimaryPath));
-    useClaudeSidecar = diskSha !== sourceClaudeMdSha;
+    useClaudeSidecar = diskSha !== sourceSha;
   }
 
-  for (const sourceFile of listSourceFiles(sourceEntry.dirPath)) {
+  for (const sourceFile of listSourceFilesForEntry(sourceEntry)) {
+    const primaryTargetRel = remapTarget(sourceFile.relativePath, runtime);
+    if (primaryTargetRel === null) continue; // silently skipped per runtime
+
+    const isRootPersona = sourceFile.relativePath === 'CLAUDE.md';
+    const routedToSidecar = runtime === 'claude' && isRootPersona && useClaudeSidecar;
+    const relativeTargetPath = routedToSidecar ? claudeSidecarKey : primaryTargetRel;
+    const targetPath = path.join(workspacePath, relativeTargetPath);
+
     const sourceBytes = fs.readFileSync(sourceFile.absolutePath);
     const sourceSha = sha256Hex(sourceBytes);
-    const isRootClaudeMd = sourceFile.relativePath === 'CLAUDE.md';
-    const routedToSidecar = isRootClaudeMd && useClaudeSidecar;
-    const targetPath: string = routedToSidecar
-      ? claudeSidecarPath
-      : path.join(workspacePath, runtimePaths.overlayTarget, sourceFile.relativePath);
-    const relativeTargetPath: string = routedToSidecar
-      ? claudeSidecarKey
-      : toPortableRelativePath(path.relative(workspacePath, targetPath));
     const receiptEntry = previousReceipt.files[relativeTargetPath];
 
     if (!fs.existsSync(targetPath)) {

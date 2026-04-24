@@ -401,4 +401,233 @@ describe('workspace sync integration', () => {
     expect(receipt.files['.claude/CLAUDE.md']).toBeDefined();
     expect(receipt.files['.claude/rules/agent-foundry-dev.md']).toBeUndefined();
   });
+
+  /* ------------------------------------------------------------------ */
+  /*  Slice 5: runtime-aware remap (Codex / Cursor / agents-md-native)   */
+  /* ------------------------------------------------------------------ */
+
+  const writeYaml = (dir: string, runtime: string, workspace: string, agentName: string): string => {
+    const configPath = path.join(dir, `team.yaml`);
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(
+      configPath,
+      [
+        `name: slice-5-demo`,
+        `agents:`,
+        `  - name: dev-agent`,
+        `    runtime: ${runtime}`,
+        `    workingDirectory: ${workspace}`,
+        `    agent: ${agentName}`,
+        ``,
+      ].join('\n'),
+    );
+    return configPath;
+  };
+
+  it('maps a claude-native library onto the codex target (AGENTS.md + .agents/skills)', () => {
+    workspacePath = mkTmp();
+    const configDir = mkTmp();
+    const configPath = writeYaml(configDir, 'codex', workspacePath, 'foundry-dev');
+
+    try {
+      const result = syncWorkspaceFromConfig({
+        configPath,
+        libraryRoot: FIXTURE_LIBRARY_ROOT,
+        workspacePath,
+      });
+
+      expect(result.counts).toEqual({
+        wroteMissing: 6,
+        matchedSource: 0,
+        overwroteManaged: 0,
+        drifted: 0,
+      });
+      expect(result.warnings).toEqual([]);
+
+      expect(walkFiles(workspacePath)).toEqual([
+        '.agents/skills/foundry-scripting-and-deploy/SKILL.md',
+        '.agents/skills/gas-optimization-foundry/SKILL.md',
+        '.agents/skills/solidity-style-modern/SKILL.md',
+        '.agents/skills/using-foundry/SKILL.md',
+        '.agents/skills/writing-foundry-tests/SKILL.md',
+        '.id-agents/receipt.json',
+        'AGENTS.md',
+      ]);
+
+      expect(sha256File(path.join(workspacePath, 'AGENTS.md'))).toBe(
+        sha256File(path.join(FIXTURE_AGENT_ROOT, 'CLAUDE.md')),
+      );
+
+      const receipt = JSON.parse(
+        fs.readFileSync(path.join(workspacePath, '.id-agents', 'receipt.json'), 'utf-8'),
+      ) as { files: Record<string, { sha256: string; source: string }> };
+      expect(Object.keys(receipt.files).sort()).toEqual([
+        '.agents/skills/foundry-scripting-and-deploy/SKILL.md',
+        '.agents/skills/gas-optimization-foundry/SKILL.md',
+        '.agents/skills/solidity-style-modern/SKILL.md',
+        '.agents/skills/using-foundry/SKILL.md',
+        '.agents/skills/writing-foundry-tests/SKILL.md',
+        'AGENTS.md',
+      ]);
+
+      // No Claude surfaces were created.
+      expect(fs.existsSync(path.join(workspacePath, '.claude'))).toBe(false);
+    } finally {
+      fs.rmSync(configDir, { recursive: true, force: true });
+    }
+  });
+
+  it('maps a claude-native library onto the cursor target (AGENTS.md only; skills + rules subset)', () => {
+    workspacePath = mkTmp();
+    const configDir = mkTmp();
+    const libraryRoot = mkTmp();
+
+    // Build a richer tmp library so the Cursor remap rules/*.md rename and
+    // the skills skip can both be exercised in one test.
+    const agentDir = path.join(libraryRoot, 'agents', 'cursor-agent');
+    fs.mkdirSync(path.join(agentDir, 'skills', 'dropped-skill'), { recursive: true });
+    fs.mkdirSync(path.join(agentDir, 'rules'), { recursive: true });
+    fs.mkdirSync(path.join(agentDir, 'rules', 'nested'), { recursive: true });
+    fs.mkdirSync(path.join(agentDir, 'agents'), { recursive: true });
+    fs.writeFileSync(path.join(agentDir, 'CLAUDE.md'), '# cursor persona\n');
+    fs.writeFileSync(path.join(agentDir, 'skills', 'dropped-skill', 'SKILL.md'), 'skill body');
+    fs.writeFileSync(path.join(agentDir, 'rules', 'style.md'), 'rule body');
+    fs.writeFileSync(path.join(agentDir, 'rules', 'nested', 'deep.md'), 'nested rule');
+    fs.writeFileSync(path.join(agentDir, 'rules', 'notes.txt'), 'non-md rule file');
+    fs.writeFileSync(path.join(agentDir, 'agents', 'sub.md'), 'sub-agent def');
+
+    const configPath = writeYaml(configDir, 'cursor-cli', workspacePath, 'cursor-agent');
+
+    try {
+      const result = syncWorkspaceFromConfig({
+        configPath,
+        libraryRoot,
+        workspacePath,
+      });
+
+      // 3 writes: AGENTS.md + 2 .mdc rules (top-level + nested). Skills,
+      // rules/*.txt, and agents/ are all dropped by the cursor remap.
+      expect(result.counts).toEqual({
+        wroteMissing: 3,
+        matchedSource: 0,
+        overwroteManaged: 0,
+        drifted: 0,
+      });
+      expect(result.warnings).toEqual([]);
+
+      expect(walkFiles(workspacePath)).toEqual([
+        '.cursor/rules/nested/deep.mdc',
+        '.cursor/rules/style.mdc',
+        '.id-agents/receipt.json',
+        'AGENTS.md',
+      ]);
+
+      expect(fs.readFileSync(path.join(workspacePath, 'AGENTS.md'), 'utf-8'))
+        .toBe('# cursor persona\n');
+      expect(fs.readFileSync(path.join(workspacePath, '.cursor', 'rules', 'style.mdc'), 'utf-8'))
+        .toBe('rule body');
+      expect(
+        fs.readFileSync(path.join(workspacePath, '.cursor', 'rules', 'nested', 'deep.mdc'), 'utf-8'),
+      ).toBe('nested rule');
+
+      // Dropped surfaces: no .agents/, no .claude/, no agents/ or
+      // commands/ rewrites, no rules/notes.txt copy.
+      expect(fs.existsSync(path.join(workspacePath, '.agents'))).toBe(false);
+      expect(fs.existsSync(path.join(workspacePath, '.claude'))).toBe(false);
+      expect(fs.existsSync(path.join(workspacePath, '.cursor', 'rules', 'notes.txt'))).toBe(false);
+      expect(fs.existsSync(path.join(workspacePath, '.cursor', 'skills'))).toBe(false);
+    } finally {
+      fs.rmSync(configDir, { recursive: true, force: true });
+      fs.rmSync(libraryRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('maps an agents-md-native library onto the claude target (persona + bundled skills)', () => {
+    workspacePath = mkTmp();
+    const configDir = mkTmp();
+    const libraryRoot = mkTmp();
+
+    // agents-md-native library entry: sibling .md + <name>/ directory with
+    // bundled skills. No CLAUDE.md inside the directory.
+    const agentsDir = path.join(libraryRoot, 'agents');
+    fs.mkdirSync(path.join(agentsDir, 'persona-dev', 'skills', 'demo-skill'), { recursive: true });
+    fs.writeFileSync(path.join(agentsDir, 'persona-dev.md'), '# agents-md persona\n');
+    fs.writeFileSync(
+      path.join(agentsDir, 'persona-dev', 'skills', 'demo-skill', 'SKILL.md'),
+      'demo skill body',
+    );
+
+    const configPath = writeYaml(configDir, 'claude-code-cli', workspacePath, 'persona-dev');
+
+    try {
+      const result = syncWorkspaceFromConfig({
+        configPath,
+        libraryRoot,
+        workspacePath,
+      });
+
+      // The sibling .md is treated as the canonical CLAUDE.md; bundled skill
+      // lands at .claude/skills/. 2 writes total.
+      expect(result.counts).toEqual({
+        wroteMissing: 2,
+        matchedSource: 0,
+        overwroteManaged: 0,
+        drifted: 0,
+      });
+      expect(result.warnings).toEqual([]);
+
+      expect(walkFiles(workspacePath)).toEqual([
+        '.claude/CLAUDE.md',
+        '.claude/skills/demo-skill/SKILL.md',
+        '.id-agents/receipt.json',
+      ]);
+
+      expect(fs.readFileSync(path.join(workspacePath, '.claude', 'CLAUDE.md'), 'utf-8'))
+        .toBe('# agents-md persona\n');
+      expect(fs.readFileSync(path.join(workspacePath, '.claude', 'skills', 'demo-skill', 'SKILL.md'), 'utf-8'))
+        .toBe('demo skill body');
+
+      const receipt = JSON.parse(
+        fs.readFileSync(path.join(workspacePath, '.id-agents', 'receipt.json'), 'utf-8'),
+      ) as { files: Record<string, { sha256: string; source: string }> };
+      expect(Object.keys(receipt.files).sort()).toEqual([
+        '.claude/CLAUDE.md',
+        '.claude/skills/demo-skill/SKILL.md',
+      ]);
+      expect(receipt.files['.claude/CLAUDE.md'].source).toBe('agent:persona-dev');
+    } finally {
+      fs.rmSync(configDir, { recursive: true, force: true });
+      fs.rmSync(libraryRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses codex sync when workspace already has an unmanaged AGENTS.md', () => {
+    workspacePath = mkTmp();
+    const configDir = mkTmp();
+    const configPath = writeYaml(configDir, 'codex', workspacePath, 'foundry-dev');
+
+    // Seed an existing user-owned AGENTS.md before any sync runs.
+    const userAgentsMd = '# user AGENTS.md\n\nhand-written instructions\n';
+    fs.writeFileSync(path.join(workspacePath, 'AGENTS.md'), userAgentsMd);
+
+    try {
+      expect(() =>
+        syncWorkspaceFromConfig({
+          configPath,
+          libraryRoot: FIXTURE_LIBRARY_ROOT,
+          workspacePath,
+        }),
+      ).toThrow(/Refusing to sync/);
+
+      // User's AGENTS.md is untouched, byte for byte.
+      expect(fs.readFileSync(path.join(workspacePath, 'AGENTS.md'), 'utf-8')).toBe(userAgentsMd);
+
+      // No partial writes: no skills dir, no receipt, no .agents or .claude.
+      expect(fs.existsSync(path.join(workspacePath, '.agents'))).toBe(false);
+      expect(fs.existsSync(path.join(workspacePath, '.claude'))).toBe(false);
+      expect(fs.existsSync(path.join(workspacePath, '.id-agents'))).toBe(false);
+    } finally {
+      fs.rmSync(configDir, { recursive: true, force: true });
+    }
+  });
 });
