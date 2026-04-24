@@ -4708,7 +4708,7 @@ async function deployFromConfig(filePath: string, args: string[] = []) {
             plugins: agent.plugins,
             verbose: agent.verbose,
             workingDirectory: agent.workingDirectory,
-            agentTemplate: agent.agent,
+            agent: agent.agent,
             roleBody: agent.roleBody,
             domain: agent.domain,
             tokenId: agent.tokenId,
@@ -4854,7 +4854,7 @@ async function deployFromConfig(filePath: string, args: string[] = []) {
         runtime: agent.runtime,
         plugins: agent.plugins,
         allowedTools: agent.allowedTools,
-        agentTemplate: agent.agent,  // Template name override (loads <agent>/CLAUDE.md or <agent>.md)
+        agent: agent.agent,  // Library overlay name (resolves configs/agents/<agent>/ into the runtime overlay target)
         roleBody: agent.roleBody,  // Agent role from .claude/agents/<name>.md (resolved by processConfig)
         heartbeat: agent.heartbeat,  // Number (seconds) or {interval, message} for legacy
         domain: agent.domain,

@@ -10,6 +10,7 @@ import {
   parseSubAgentTemplate,
   processConfig,
   copyAgentDirOverlay,
+  copyLibraryAgentOverlay,
 } from '../../src/config-parser.js';
 
 /* ------------------------------------------------------------------ */
@@ -333,10 +334,15 @@ agents:
     expect(result.agents[0].roleBody).toBeUndefined();
   });
 
-  it('uses agent field to load a different template filename', () => {
+  it('does not use agent field to override role-file lookup', () => {
     const workDir = path.join(tmpDir, 'workspace', 'project5');
     fs.mkdirSync(workDir, { recursive: true });
 
+    setupAgentTemplate(workDir, 'auditor', `---
+description: Auditor template
+---
+
+Review PRs carefully.`);
     setupAgentTemplate(workDir, 'security-audit', `---
 description: Security audit specialist
 ---
@@ -353,8 +359,8 @@ agents:
 
     const result = processConfig(configPath, '/workspace');
     expect(result.errors).toEqual([]);
-    expect(result.agents[0].roleBody).toBe('You perform thorough security audits.');
-    expect(result.agents[0].description).toBe('Security audit specialist');
+    expect(result.agents[0].roleBody).toBe('Review PRs carefully.');
+    expect(result.agents[0].description).toBe('Auditor template');
   });
 
   it('skips template loading when agent has no workingDirectory', () => {
@@ -510,5 +516,118 @@ describe('copyAgentDirOverlay', () => {
     // Both files should exist
     expect(fs.readFileSync(path.join(claudeDir, 'existing.md'), 'utf-8')).toBe('keep me');
     expect(fs.readFileSync(path.join(claudeDir, 'CLAUDE.md'), 'utf-8')).toBe('new content');
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/*  copyLibraryAgentOverlay — configs/agents → runtime overlay target */
+/* ------------------------------------------------------------------ */
+
+describe('copyLibraryAgentOverlay', () => {
+  let libraryRoot: string;
+  let agentsDir: string;
+  let workDir: string;
+
+  beforeEach(() => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'id-agents-liboverlay-'));
+    libraryRoot = path.join(tmp, 'configs');
+    agentsDir = path.join(libraryRoot, 'agents');
+    workDir = path.join(tmp, 'workspace');
+    fs.mkdirSync(agentsDir, { recursive: true });
+    fs.mkdirSync(workDir, { recursive: true });
+  });
+
+  afterEach(() => {
+    fs.rmSync(path.dirname(libraryRoot), { recursive: true, force: true });
+  });
+
+  it('returns false when the library root does not exist', () => {
+    fs.rmSync(agentsDir, { recursive: true, force: true });
+    expect(copyLibraryAgentOverlay(workDir, 'missing', 'claude-agent-sdk', libraryRoot)).toBe(false);
+  });
+
+  it('returns false when the named entry is not present', () => {
+    expect(copyLibraryAgentOverlay(workDir, 'absent', 'claude-agent-sdk', libraryRoot)).toBe(false);
+  });
+
+  it('copies a claude-native entry into .claude/ for a Claude runtime', () => {
+    fs.mkdirSync(path.join(agentsDir, 'frontend', 'rules'), { recursive: true });
+    fs.writeFileSync(path.join(agentsDir, 'frontend', 'CLAUDE.md'), 'frontend persona');
+    fs.writeFileSync(path.join(agentsDir, 'frontend', 'rules', 'style.md'), 'rule body');
+
+    const copied = copyLibraryAgentOverlay(workDir, 'frontend', 'claude-agent-sdk', libraryRoot);
+
+    expect(copied).toBe(true);
+    expect(fs.readFileSync(path.join(workDir, '.claude', 'CLAUDE.md'), 'utf-8')).toBe('frontend persona');
+    expect(fs.readFileSync(path.join(workDir, '.claude', 'rules', 'style.md'), 'utf-8')).toBe('rule body');
+  });
+
+  it('routes the overlay to .agents/ for the Codex runtime', () => {
+    fs.mkdirSync(path.join(agentsDir, 'frontend'), { recursive: true });
+    fs.writeFileSync(path.join(agentsDir, 'frontend', 'CLAUDE.md'), 'persona');
+
+    const copied = copyLibraryAgentOverlay(workDir, 'frontend', 'codex', libraryRoot);
+
+    expect(copied).toBe(true);
+    expect(fs.existsSync(path.join(workDir, '.claude'))).toBe(false);
+    expect(fs.readFileSync(path.join(workDir, '.agents', 'CLAUDE.md'), 'utf-8')).toBe('persona');
+  });
+
+  it('routes the overlay to .cursor/ for the Cursor CLI runtime', () => {
+    fs.mkdirSync(path.join(agentsDir, 'frontend'), { recursive: true });
+    fs.writeFileSync(path.join(agentsDir, 'frontend', 'CLAUDE.md'), 'persona');
+
+    const copied = copyLibraryAgentOverlay(workDir, 'frontend', 'cursor-cli', libraryRoot);
+
+    expect(copied).toBe(true);
+    expect(fs.readFileSync(path.join(workDir, '.cursor', 'CLAUDE.md'), 'utf-8')).toBe('persona');
+  });
+
+  it('copies only the sibling directory for an agents-md-native entry', () => {
+    fs.mkdirSync(path.join(agentsDir, 'backend', 'skills', 'using-foundry'), { recursive: true });
+    fs.writeFileSync(path.join(agentsDir, 'backend.md'), 'backend persona');
+    fs.writeFileSync(
+      path.join(agentsDir, 'backend', 'skills', 'using-foundry', 'SKILL.md'),
+      'skill body',
+    );
+
+    const copied = copyLibraryAgentOverlay(workDir, 'backend', 'claude-agent-sdk', libraryRoot);
+
+    expect(copied).toBe(true);
+    // Sibling directory contents land in the overlay target.
+    expect(
+      fs.readFileSync(
+        path.join(workDir, '.claude', 'skills', 'using-foundry', 'SKILL.md'),
+        'utf-8',
+      ),
+    ).toBe('skill body');
+    // Slice 2 deliberately does not place the sibling <name>.md file.
+    expect(fs.existsSync(path.join(workDir, '.claude', 'CLAUDE.md'))).toBe(false);
+    expect(fs.existsSync(path.join(workDir, '.claude', 'backend.md'))).toBe(false);
+  });
+
+  it('returns false when the enumerator reports a mixed-shape conflict', () => {
+    fs.mkdirSync(path.join(agentsDir, 'mixed'), { recursive: true });
+    fs.writeFileSync(path.join(agentsDir, 'mixed', 'CLAUDE.md'), 'claude side');
+    fs.writeFileSync(path.join(agentsDir, 'mixed.md'), 'agents side');
+
+    expect(copyLibraryAgentOverlay(workDir, 'mixed', 'claude-agent-sdk', libraryRoot)).toBe(false);
+    expect(fs.existsSync(path.join(workDir, '.claude'))).toBe(false);
+  });
+
+  it('returns false for an incomplete agents-md-native pair (no sibling dir)', () => {
+    fs.writeFileSync(path.join(agentsDir, 'orphan.md'), 'orphan');
+
+    expect(copyLibraryAgentOverlay(workDir, 'orphan', 'claude-agent-sdk', libraryRoot)).toBe(false);
+  });
+
+  it('defaults to the Claude overlay target when no runtime is given', () => {
+    fs.mkdirSync(path.join(agentsDir, 'frontend'), { recursive: true });
+    fs.writeFileSync(path.join(agentsDir, 'frontend', 'CLAUDE.md'), 'persona');
+
+    const copied = copyLibraryAgentOverlay(workDir, 'frontend', undefined, libraryRoot);
+
+    expect(copied).toBe(true);
+    expect(fs.readFileSync(path.join(workDir, '.claude', 'CLAUDE.md'), 'utf-8')).toBe('persona');
   });
 });

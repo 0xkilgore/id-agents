@@ -30,7 +30,7 @@ import { type Db } from './db/db-service.js';
 import type { AgentRow, ScheduleDefinitionRow, TaskRow } from './db/types.js';
 import fetch from 'node-fetch';
 import type { PluginConfig, DeployConfig, HeartbeatConfig, CalendarSpec, ScheduleDeliveryMode } from './config-parser.js';
-import { processConfig, copyAgentDirOverlay, copyHeartbeatMd } from './config-parser.js';
+import { processConfig, copyAgentDirOverlay, copyHeartbeatMd, copyLibraryAgentOverlay } from './config-parser.js';
 import { PROTOCOL_DEFAULTS } from './protocol-defaults.js';
 import { computeSyncPlan, formatSyncSummary, formatSyncVerbose } from './sync.js';
 import { validateName } from './name-validation.js';
@@ -2192,7 +2192,8 @@ export class AgentManagerDb {
         teamId = team.id;
         teamName = team.name;
 
-        const { name, type: agentType, model, runtime, allowedTools, pluginPath, plugins, skills, metadata: reqMetadata, local, agentTemplate, roleBody, heartbeat, openMode, workingDirectory: configWorkDir, verbose, dangerouslySkipPermissions, domain, tokenId, address } = req.body || {};
+        const { name, type: agentType, model, runtime, allowedTools, pluginPath, plugins, skills, metadata: reqMetadata, local, agent, roleBody, heartbeat, openMode, workingDirectory: configWorkDir, verbose, dangerouslySkipPermissions, domain, tokenId, address } = req.body || {};
+        const agentOverlay = agent;
         if (!name) return res.status(400).json({ error: 'Missing name' });
         const agentNameCheck = validateName(name, 'agent');
         if (!agentNameCheck.valid) return res.status(400).json({ error: agentNameCheck.error });
@@ -2244,7 +2245,12 @@ export class AgentManagerDb {
         // Create workspace directory first (needed for plugin copy)
         mkdirSync(workingDirectory, { recursive: true });
 
-        // 1. Deploy team-level skills (runtime-aware: .claude/skills/ or .agents/skills/)
+        // 1. Deploy library-backed agent overlay into the runtime overlay target, if configured
+        if (agentOverlay) {
+          copyLibraryAgentOverlay(workingDirectory, agentOverlay, effectiveRuntime);
+        }
+
+        // 2. Deploy team-level skills (runtime-aware: .claude/skills/ or .agents/skills/)
         if (skills && Array.isArray(skills) && skills.length > 0) {
           this.deploySkillsToAgent(workingDirectory, skills, {
             DISPLAY_NAME: domain || name,
@@ -2256,12 +2262,12 @@ export class AgentManagerDb {
           }, { hasWallet: false, runtime: effectiveRuntime });
         }
 
-        // 2. Overlay agent directory template (runtime-aware)
-        copyAgentDirOverlay(workingDirectory, agentTemplate || name, effectiveRuntime);
+        // 3. Overlay working-directory template files (runtime-aware)
+        copyAgentDirOverlay(workingDirectory, name, effectiveRuntime);
         // Copy HEARTBEAT.md from template to working directory root
-        copyHeartbeatMd(workingDirectory, agentTemplate || name, effectiveRuntime);
+        copyHeartbeatMd(workingDirectory, name, effectiveRuntime);
 
-        // 3. Write personality file: protocol defaults + agent role body
+        // 4. Write personality file: protocol defaults + agent role body
         {
           const rp = getRuntimePaths(effectiveRuntime);
           const parts = [PROTOCOL_DEFAULTS];
@@ -2289,6 +2295,7 @@ export class AgentManagerDb {
           // Store config in metadata for later reference
           ...(reqMetadata?.description && { description: reqMetadata.description }),
           plugins: localPlugins, // Use local paths (agent owns its plugins)
+          ...(agentOverlay && { agent: agentOverlay }),
           ...(allowedTools && { allowed_tools: allowedTools }),
           ...(isAutomator && { isAutomator: true }),
           // Flag that heartbeat is enabled (actual config read from HEARTBEAT.yaml)
@@ -4685,7 +4692,12 @@ export class AgentManagerDb {
           const configDomain = spec.domain;
           const owsWallet = this.getOrCreateAgentWallet(syncTeamName, spec.name);
 
-          // 1. Deploy team-level skills (runtime-aware)
+          // 1. Deploy library-backed agent overlay into the runtime overlay target, if configured
+          if (spec.agent) {
+            copyLibraryAgentOverlay(workingDirectory, spec.agent, effectiveRuntime);
+          }
+
+          // 2. Deploy team-level skills (runtime-aware)
           this.deploySkillsToAgent(workingDirectory, agentSkills, {
             DISPLAY_NAME: configDomain || spec.name,
             TEAM: syncTeamName,
@@ -4695,11 +4707,11 @@ export class AgentManagerDb {
               : '',
           }, { hasWallet: !!owsWallet, runtime: effectiveRuntime });
 
-          // 2. Overlay agent directory template (runtime-aware)
-          copyAgentDirOverlay(workingDirectory, spec.agent || spec.name, effectiveRuntime);
-          copyHeartbeatMd(workingDirectory, spec.agent || spec.name, effectiveRuntime);
+          // 3. Overlay working-directory template files (runtime-aware)
+          copyAgentDirOverlay(workingDirectory, spec.name, effectiveRuntime);
+          copyHeartbeatMd(workingDirectory, spec.name, effectiveRuntime);
 
-          // 3. Write personality file: protocol defaults + agent role body (runtime-aware)
+          // 4. Write personality file: protocol defaults + agent role body (runtime-aware)
           {
             const rp = getRuntimePaths(effectiveRuntime);
             const parts = [PROTOCOL_DEFAULTS];
@@ -4719,6 +4731,7 @@ export class AgentManagerDb {
             endpoint: isAutomator ? undefined : `http://localhost:${row.port}`,
             runtime: effectiveRuntime,
             plugins: localPlugins,
+            agent: spec.agent,
             allowed_tools: spec.allowedTools,
             description: spec.description,
             ...(isAutomator && { isAutomator: true }),
@@ -4791,7 +4804,12 @@ export class AgentManagerDb {
               } catch { /* ignore */ }
             }
 
-            // 1. Deploy team-level skills (runtime-aware)
+            // 1. Deploy library-backed agent overlay into the runtime overlay target, if configured
+            if (spec.agent) {
+              copyLibraryAgentOverlay(workingDirectory, spec.agent, effectiveRuntime);
+            }
+
+            // 2. Deploy team-level skills (runtime-aware)
             this.deploySkillsToAgent(workingDirectory, agentSkills, {
               DISPLAY_NAME: configDomain || spec.name,
               TEAM: syncTeamName,
@@ -4801,11 +4819,11 @@ export class AgentManagerDb {
                 : '',
             }, { hasWallet: !!owsWallet, runtime: effectiveRuntime });
 
-            // 2. Overlay agent directory template (runtime-aware)
-            copyAgentDirOverlay(workingDirectory, spec.agent || spec.name, effectiveRuntime);
-            copyHeartbeatMd(workingDirectory, spec.agent || spec.name, effectiveRuntime);
+            // 3. Overlay working-directory template files (runtime-aware)
+            copyAgentDirOverlay(workingDirectory, spec.name, effectiveRuntime);
+            copyHeartbeatMd(workingDirectory, spec.name, effectiveRuntime);
 
-            // 3. Write personality file: protocol defaults + agent role body (runtime-aware)
+            // 4. Write personality file: protocol defaults + agent role body (runtime-aware)
             {
               const rp = getRuntimePaths(effectiveRuntime);
               const parts = [PROTOCOL_DEFAULTS];
@@ -4822,6 +4840,7 @@ export class AgentManagerDb {
               endpoint: isAutomator ? undefined : `http://localhost:${port}`,
               runtime: effectiveRuntime,
               plugins: localPlugins,
+              ...(spec.agent && { agent: spec.agent }),
               allowed_tools: spec.allowedTools,
               description: spec.description,
               ...(isAutomator && { isAutomator: true }),
@@ -5092,6 +5111,7 @@ export class AgentManagerDb {
               endpoint: isAutomator ? undefined : `http://localhost:${port}`,
               runtime: effectiveRuntime,
               plugins: localPlugins,
+              ...(agentConfig.agent && { agent: agentConfig.agent }),
               allowed_tools: agentConfig.allowedTools,
               description: agentConfig.description,
               ...(isAutomator && { isAutomator: true }),
@@ -5117,7 +5137,12 @@ export class AgentManagerDb {
               metadata.ows_address = owsWallet.address;
             }
 
-            // Deploy skills (runtime-aware)
+            // 1. Deploy library-backed agent overlay into the runtime overlay target, if configured
+            if (agentConfig.agent) {
+              copyLibraryAgentOverlay(workingDirectory, agentConfig.agent, effectiveRuntime);
+            }
+
+            // 2. Deploy skills (runtime-aware)
             const agentSkills: string[] = agentConfig.skills || [];
             let orgContext = '';
             if (org?.groups) {
@@ -5137,11 +5162,11 @@ export class AgentManagerDb {
                 : '',
             }, { hasWallet: !!owsWallet, runtime: effectiveRuntime });
 
-            // 2. Overlay agent directory template (runtime-aware)
-            copyAgentDirOverlay(workingDirectory, agentConfig.agent || agentConfig.name, effectiveRuntime);
-            copyHeartbeatMd(workingDirectory, agentConfig.agent || agentConfig.name, effectiveRuntime);
+            // 3. Overlay working-directory template files (runtime-aware)
+            copyAgentDirOverlay(workingDirectory, agentConfig.name, effectiveRuntime);
+            copyHeartbeatMd(workingDirectory, agentConfig.name, effectiveRuntime);
 
-            // 3. Write personality file: protocol defaults + agent role body (runtime-aware)
+            // 4. Write personality file: protocol defaults + agent role body (runtime-aware)
             {
               const rp = getRuntimePaths(effectiveRuntime);
               const parts = [PROTOCOL_DEFAULTS];

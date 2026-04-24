@@ -103,6 +103,18 @@ describe('diffAgent', () => {
     expect(changes).toContain('skills');
   });
 
+  it('detects agent overlay change', () => {
+    const spec = makeAgentSpec({ agent: 'frontend-lead' });
+    const row = makeAgentRow({
+      metadata: {
+        ...makeAgentRow().metadata,
+        agent: 'backend-lead',
+      },
+    });
+    const changes = diffAgent(spec, row);
+    expect(changes).toContain('agent');
+  });
+
   it('detects plugins change', () => {
     const spec = makeAgentSpec({ plugins: [{ name: 'my-plugin', path: '/plugins/my-plugin' }] });
     const row = makeAgentRow();

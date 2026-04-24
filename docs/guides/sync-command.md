@@ -39,6 +39,7 @@ These fields are compared to determine if an agent has changed:
 - `model` — LLM model name
 - `runtime` — Harness type (claude-agent-sdk, claude-code-cli, claude-code-local, codex, cursor-cli)
 - `plugins` — Plugin list (compared by name, order-independent)
+- `agent` — Library overlay name from `configs/agents/<name>/`
 - `skills` — Skill list (order-independent)
 - `allowedTools` — Tool whitelist (order-independent)
 - `description` — Agent description
@@ -47,7 +48,7 @@ These fields are compared to determine if an agent has changed:
 - `heartbeat` — Heartbeat enabled/disabled
 - `workingDirectory` — Only compared when explicitly set in config
 
-Protocol defaults and agent role files (under the runtime-specific template directory, e.g. `.claude/agents/`, `.agents/`, or `.cursor/agents/`) are always written at sync time regardless of diff results.
+Protocol defaults and agent role files (under the runtime-specific template directory, e.g. `.claude/agents/`, `.agents/`, or `.cursor/agents/`) are always written at sync time regardless of diff results. When `agent:` is set, the manager first copies `configs/agents/<name>/` into the target workspace's runtime overlay directory (`.claude/`, `.agents/`, or `.cursor/`), then runs the existing `skills:` resolution unchanged on top.
 
 ## Key Properties
 

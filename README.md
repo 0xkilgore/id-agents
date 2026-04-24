@@ -606,16 +606,22 @@ Always check for injection, XSS, and authentication issues.
 - **Body** becomes the agent's role content, appended after protocol defaults in `CLAUDE.md`.
 - **`description`** from frontmatter is used as the agent's description if the config doesn't set one.
 
-Use the `agent` field in config to load a role file with a different filename than the agent's name:
+Use the `agent` field in config to deploy a library-owned overlay before skills run:
 
 ```yaml
 agents:
   - name: auditor
-    agent: security-audit          # loads security-audit/CLAUDE.md or security-audit.md
+    agent: security-audit          # copies configs/agents/security-audit/ into the runtime overlay target
     workingDirectory: /path/to/project
 ```
 
-This lets you promote Claude Code sub-agents (`.claude/agents/*.md`) into full id-agents workers with identity, while keeping the role file in the project repo where it belongs.
+The destination is runtime-aware: `.claude/` for Claude runtimes, `.agents/` for Codex, `.cursor/` for Cursor CLI.
+
+Deploy order is:
+1. agent overlay
+2. existing `skills:` resolution
+
+`skills:` is unchanged and continues to work as-is.
 
 ## Onchain Identity
 

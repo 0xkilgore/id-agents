@@ -9,9 +9,14 @@
 import yaml from 'js-yaml';
 import fs from 'fs';
 import path from 'path';
+import { fileURLToPath } from 'url';
 import { HarnessType, isValidHarnessType, getAvailableHarnesses } from './harness/index.js';
 import { getDefaultRuntime, resolveRuntime, validateRuntimeModelCompatibility, getRuntimePaths } from './runtime/registry.js';
 import { validateName } from './name-validation.js';
+import { enumerateLibraryAgents } from './lib/agent-library.js';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 export type ScheduleDeliveryMode = 'talk' | 'internal';
 
@@ -33,7 +38,7 @@ export interface ResourceConfig {
 
 export interface AgentSpec {
   name: string;
-  agent?: string;                     // Sub-agent template filename (loads .claude/agents/<agent>.md from workingDirectory)
+  agent?: string;                     // Library agent overlay name (resolves to <library-root>/agents/<agent>/)
   type?: 'claude' | 'automator';      // Agent type: 'claude' (default) or 'automator' (manager's brain, hidden)
   runtime?: HarnessType;              // Runtime harness id, defaults to 'claude-agent-sdk'
   openMode?: boolean;                 // Allow XMTP messages from any sender when no allowlist is configured
@@ -123,6 +128,19 @@ export interface DeployConfig {
     heartbeatFile?: string;             // Default heartbeat config file for all agents
     heartbeat?: number | HeartbeatConfig;  // Default heartbeat for all agents
   };
+  agents: AgentSpec[];
+}
+
+/**
+ * Team-config shape used by local workspace sync.
+ *
+ * Unlike deploy configs, sync fixtures may omit `version` and use `name`
+ * instead of `team`.
+ */
+export interface TeamConfig {
+  name?: string;
+  team?: string;
+  parameters?: ConfigParameter[];
   agents: AgentSpec[];
 }
 
@@ -265,6 +283,63 @@ export function getConfigParameters(filePath: string): ConfigParameter[] {
 }
 
 /**
+ * Parse a lightweight team config for local workspace sync.
+ *
+ * Accepts the same parameter substitution syntax as deploy configs, but does
+ * not require deploy-only fields such as `version`.
+ */
+export function parseTeamConfig(filePath: string, args: string[] = []): TeamConfig {
+  const absolutePath = path.resolve(filePath);
+
+  if (!fs.existsSync(absolutePath)) {
+    throw new Error(`Config file not found: ${absolutePath}`);
+  }
+
+  let content = fs.readFileSync(absolutePath, 'utf-8');
+  const initialConfig = yaml.load(content) as TeamConfig | undefined;
+  if (!initialConfig) {
+    throw new Error(`Failed to parse config file: ${absolutePath}`);
+  }
+
+  if (initialConfig.parameters && initialConfig.parameters.length > 0) {
+    const paramValues = parseDeployArgs(args, initialConfig.parameters);
+    content = substituteParams(content, paramValues);
+
+    const unresolved = findUnresolvedParams(content);
+    if (unresolved.length > 0) {
+      throw new Error(`Unresolved parameters: ${unresolved.join(', ')}`);
+    }
+  }
+
+  const config = yaml.load(content) as TeamConfig | undefined;
+  if (!config) {
+    throw new Error(`Failed to parse config file after substitution: ${absolutePath}`);
+  }
+
+  return config;
+}
+
+/**
+ * Local workspace sync resolves its library root to the team config's parent
+ * directory. Example:
+ *   /repo/configs/foundry-demo.yaml -> /repo/configs
+ */
+export function resolveConfigLibraryRoot(filePath: string): string {
+  return path.dirname(path.resolve(filePath));
+}
+
+/**
+ * Resolve an `agent:` reference to the library entry folder.
+ *
+ * This is a direct lookup under `<library-root>/agents/<agent>/` with no
+ * fallback or alternate search path.
+ */
+export function resolveLibraryAgentPath(filePath: string, agentName: string, libraryRoot?: string): string {
+  const root = libraryRoot ? path.resolve(libraryRoot) : resolveConfigLibraryRoot(filePath);
+  return path.join(root, 'agents', agentName);
+}
+
+/**
  * Validate a deploy config
  */
 export function validateConfig(config: DeployConfig): ValidationResult {
@@ -339,6 +414,13 @@ export function validateConfig(config: DeployConfig): ValidationResult {
           message: 'agent name must contain only alphanumeric characters, hyphens, and underscores'
         });
       }
+    }
+
+    if (agent.agent !== undefined && typeof agent.agent !== 'string') {
+      errors.push({
+        path: `${agentPath}.agent`,
+        message: 'agent must be a string'
+      });
     }
 
     // Validate runtime
@@ -574,6 +656,60 @@ export function copyAgentDirOverlay(workingDir: string, templateName: string, ru
 }
 
 /**
+ * Overlay a library-backed agent entry into the working directory using a
+ * runtime-aware destination.
+ *
+ * Source directory: `<libraryRoot>/agents/<name>/`, resolved through the v3
+ * library enumerator. Both native shapes are supported:
+ *   - 'claude-native'     `<name>/CLAUDE.md` inside the directory
+ *   - 'agents-md-native'  sibling pair (`<name>.md` file + `<name>/` directory)
+ *
+ * Destination is the runtime's overlay target under the working directory:
+ *   - Claude runtimes  → `<workingDir>/.claude/`
+ *   - Codex            → `<workingDir>/.agents/`
+ *   - Cursor CLI       → `<workingDir>/.cursor/`
+ *
+ * Only the library entry's directory contents are copied. For
+ * `agents-md-native`, the sibling `<name>.md` personality file is not placed
+ * here — that handling belongs to the memory-file mapping in a later slice.
+ *
+ * Returns `false` (no-op) when:
+ *   - the library directory does not exist
+ *   - no entry with that name is found
+ *   - the enumerator reports a discovery error for that name
+ *     (mixed-shape or incomplete pair)
+ *
+ * @param workingDir   Absolute path to the agent workspace.
+ * @param name         Library entry name to resolve.
+ * @param runtime      Runtime id; selects the overlay destination.
+ *                     Defaults to the Claude overlay target.
+ * @param libraryRoot  Optional library root. Defaults to `<repoRoot>/configs`,
+ *                     derived from this module's compiled location.
+ */
+export function copyLibraryAgentOverlay(
+  workingDir: string,
+  name: string,
+  runtime?: HarnessType | string,
+  libraryRoot?: string,
+): boolean {
+  const root = libraryRoot
+    ? path.resolve(libraryRoot)
+    : path.resolve(__dirname, '..', 'configs');
+
+  const scan = enumerateLibraryAgents(path.join(root, 'agents'));
+  if (scan.errors.some(err => err.name === name)) return false;
+
+  const entry = scan.entries.find(e => e.name === name);
+  if (!entry) return false;
+
+  const rp = getRuntimePaths(runtime);
+  const destDir = path.join(workingDir, rp.overlayTarget);
+  fs.mkdirSync(destDir, { recursive: true });
+  fs.cpSync(entry.dirPath, destDir, { recursive: true, force: true });
+  return true;
+}
+
+/**
  * Copy HEARTBEAT.md from agent template directory to working directory root.
  * Runtime-aware: checks the runtime-specific template directory.
  * Destination is always {workingDir}/HEARTBEAT.md regardless of runtime.
@@ -788,8 +924,7 @@ export function processConfig(
   // Load sub-agent templates (runtime-aware: .claude/agents/ for Claude, .agents/ for Codex)
   agents = agents.map(agent => {
     if (!agent.workingDirectory) return agent;
-    const templateName = agent.agent || agent.name;
-    const template = loadSubAgentTemplate(agent.workingDirectory, templateName, agent.runtime);
+    const template = loadSubAgentTemplate(agent.workingDirectory, agent.name, agent.runtime);
     if (!template) return agent;
 
     const updated = { ...agent };

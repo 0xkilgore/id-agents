@@ -217,13 +217,13 @@ Each agent can have the following fields:
 | `model` | No | From defaults | LLM model to use |
 | `runtime` | No | From defaults | Agent runtime/harness |
 | `systemPrompt` | No | - | Custom system prompt |
-| `skills` | No | From defaults | Skills deployed to agent's `.claude/skills/` directory |
+| `skills` | No | From defaults | Skills deployed by the existing resolver. Unchanged — continues to work as-is. |
 | `plugins` | No | From defaults | Optional plugins for runtimes that support them |
 | `allowedTools` | No | From defaults | Restrict agent to specific tools |
 | `env` | No | `{}` | Environment variables for the agent process |
 | `register` | No | From onchain | Whether to register onchain |
 | `workingDirectory` | No | - | Working directory for the agent process |
-| `agent` | No | - | Load role file from a different template name (e.g., `agent: security-audit` loads `security-audit.md`) |
+| `agent` | No | - | Deploy library agent overlay from `/config/agents/<name>/` into the target workspace's `.claude/` directory before skills are resolved |
 | `heartbeat` | No | - | Heartbeat interval in seconds, or legacy `{interval, message}` object |
 | `openMode` | No | `false` | Accept XMTP messages from any sender (not recommended for production) |
 
@@ -283,9 +283,31 @@ Defaults:
 
 ---
 
+## Agent Overlay
+
+`agent` is a peer to `skills`.
+
+```yaml
+agents:
+  - name: auditor
+    workingDirectory: /path/to/project
+    agent: security-audit
+```
+
+This resolves to the library folder `/config/agents/security-audit/` and rsyncs that folder into `/path/to/project/.claude/`.
+
+Deploy order:
+
+1. rsync the agent folder into `.claude/`
+2. run the existing `skills:` resolution exactly as it works today
+
+If both layers write the same file, skills apply last.
+
 ## Skills Configuration
 
 Skills are instruction packages deployed at deploy time via `deploySkillsToAgent`. The target directory is runtime-aware: `.claude/skills/` for Claude agents, `.agents/skills/` for Codex agents, `.cursor/skills/` for Cursor (`cursor-cli`) agents. Each skill is a directory containing a `SKILL.md` file with YAML frontmatter.
+
+Unchanged — continues to work as-is.
 
 All configs should include `skills: [identity, inter-agent, catalog]` at minimum. The 7 built-in skills are: `identity`, `inter-agent`, `catalog`, `wallet`, `xmtp`, `idagents-admin-control`, `local-agent`.
 

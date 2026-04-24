@@ -8,6 +8,16 @@ Entries are synthesized prompts, not verbatim chat messages. They can describe c
 
 ---
 
+## 2026-04-24: Agent-config v3 slice 2 simplification, direct library resolve
+
+**Status:** in progress
+
+Reality check is complete: the skills system is real and must stay behaviorally unchanged, but the old agent-role override path is not in use and does not need compatibility handling. Simplify slice 2 accordingly. The `agent` field now means exactly one thing in config parsing and deploy/sync flow: resolve directly to the library folder `config/agents/<agent>/` and overlay that into the target workspace's `.claude/` before skills run. There is no two-stage lookup, no role-template fallback, and no warning path for "both resolutions match".
+
+Clean up dead legacy code instead of preserving it. Remove any request or config plumbing that still treats `agent` as a role-template alias, keep role-body loading pinned to the real agent name from the runtime-native template directory, and continue leaving `skills:` untouched. Slice 3 should build on this simplified contract rather than carrying migration scaffolding forward.
+
+---
+
 ## 2026-04-15: Runtime-aware template loader and skill deployer, 0.1.53-beta
 
 **Status:** done
