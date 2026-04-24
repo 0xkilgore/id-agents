@@ -344,4 +344,61 @@ describe('workspace sync integration', () => {
 
     void first; // reference so the linter sees it used even if no other assertions follow
   });
+
+  /* ------------------------------------------------------------------ */
+  /*  Regression guard: managed root CLAUDE.md drift must NOT sidecar    */
+  /*  (task: fix-slice-4-claude-fallback-drift)                          */
+  /* ------------------------------------------------------------------ */
+
+  it('regression: full replacement of managed CLAUDE.md stays on root with Case 4 warn', () => {
+    workspacePath = mkTmp();
+
+    // Initial deploy establishes managed ownership of .claude/CLAUDE.md.
+    const first = syncWorkspaceFromConfig({
+      configPath: FIXTURE_CONFIG,
+      libraryRoot: FIXTURE_LIBRARY_ROOT,
+      workspacePath,
+    });
+    expect(first.counts.wroteMissing).toBe(6);
+
+    // User replaces .claude/CLAUDE.md wholesale with unrelated content.
+    // Neither the append-drift test nor the user-authored-first-deploy test
+    // cover this exact transition; pinning it here locks in that a
+    // post-ownership replacement never flips to the sidecar.
+    const primaryPath = path.join(workspacePath, '.claude', 'CLAUDE.md');
+    fs.writeFileSync(primaryPath, '# completely different content\n\nhand-written by the user\n');
+
+    const second = syncWorkspaceFromConfig({
+      configPath: FIXTURE_CONFIG,
+      libraryRoot: FIXTURE_LIBRARY_ROOT,
+      workspacePath,
+    });
+
+    expect(second.counts).toEqual({
+      wroteMissing: 0,
+      matchedSource: 5,
+      overwroteManaged: 0,
+      drifted: 1,
+    });
+    expect(second.warnings).toEqual(['Skipped drifted file: .claude/CLAUDE.md']);
+
+    // Sacredness: user's replacement is preserved verbatim.
+    expect(fs.readFileSync(primaryPath, 'utf-8')).toBe(
+      '# completely different content\n\nhand-written by the user\n',
+    );
+
+    // No sidecar file was created.
+    expect(
+      fs.existsSync(path.join(workspacePath, '.claude', 'rules', 'agent-foundry-dev.md')),
+    ).toBe(false);
+    expect(fs.existsSync(path.join(workspacePath, '.claude', 'rules'))).toBe(false);
+
+    // Receipt still carries the primary key (prior SHA from the initial
+    // deploy); no sidecar entry was added.
+    const receipt = JSON.parse(
+      fs.readFileSync(path.join(workspacePath, '.id-agents', 'receipt.json'), 'utf-8'),
+    ) as { files: Record<string, { sha256: string; source: string }> };
+    expect(receipt.files['.claude/CLAUDE.md']).toBeDefined();
+    expect(receipt.files['.claude/rules/agent-foundry-dev.md']).toBeUndefined();
+  });
 });
