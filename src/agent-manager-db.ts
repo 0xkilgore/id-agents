@@ -597,6 +597,51 @@ export class AgentManagerDb {
   }
 
   /**
+   * Resolve the persistent manager-inbox identity for a team.
+   *
+   * Order of preference:
+   *   1. Newest interactive CLI agent row (`findInteractive`, ORDER BY created_at DESC)
+   *   2. Named "manager" agent row
+   *   3. Auto-provisioned stub interactive row `manager-${teamName}` so
+   *      replies and news never blackhole when no CLI is registered yet.
+   *
+   * Used by POST /talk, POST /schedule, POST /news, GET /news, and the
+   * /remote `news` handler so all manager-inbox reads/writes converge on
+   * the same id resolution. Returning a stable id (rather than null) is
+   * what guarantees inbound replies persist even before the operator's
+   * CLI has registered against a freshly-synced team.
+   */
+  private async resolveManagerInboxId(teamId: string, teamName: string): Promise<string> {
+    const cliAgent = await this.db.agents.findInteractive(teamId);
+    if (cliAgent) return cliAgent.id;
+
+    const namedManager = await this.db.agents.getByName(teamId, 'manager');
+    if (namedManager) return namedManager.id;
+
+    const stubId = `manager-${teamName}`;
+    const existingStub = await this.db.agents.getById(stubId);
+    if (existingStub && existingStub.team_id === teamId) return stubId;
+
+    try {
+      await this.db.agents.upsert({
+        team_id: teamId,
+        id: stubId,
+        name: 'manager',
+        type: 'interactive',
+        model: '',
+        status: 'stub',
+        created_at: Date.now(),
+        endpoint: '',
+        metadata: { canReceiveDirectMessages: false, autoCreated: true } as Record<string, unknown>,
+      });
+      this.managerLog(`Provisioned manager-inbox stub for team ${teamName}: ${stubId}`);
+    } catch (err: any) {
+      this.managerLog(`Failed to provision manager-inbox stub for team ${teamName}: ${err?.message || err}`);
+    }
+    return stubId;
+  }
+
+  /**
    * Redact sensitive fields from an agentToResponse result for non-admin callers.
    *
    * Top-level fields removed: ssh_target, internal_endpoint_url.
@@ -1476,13 +1521,10 @@ export class AgentManagerDb {
 
         const ts = Date.now();
         const queryId = `query_${ts}_${Math.random().toString(36).slice(2, 9)}`;
-        // Resolve the persistent manager-inbox identity. Prefer the interactive
-        // CLI agent (so GET /news — which reads from that id — surfaces the
-        // query.received event). Fall back to the named "manager" agent row,
-        // then to a synthetic per-team id if nothing else is registered.
-        const cliAgent = await this.db.agents.findInteractive(teamId);
-        const namedManager = cliAgent ? null : await this.db.agents.getByName(teamId, 'manager');
-        const managerId = cliAgent?.id || namedManager?.id || `manager-${teamName}`;
+        // Resolve the persistent manager-inbox identity (auto-provisions a
+        // stub if needed) so the query.received event always lands on a
+        // real DB row, even before any CLI has registered.
+        const managerId = await this.resolveManagerInboxId(teamId, teamName);
         const senderName = from || 'external';
 
         // Store the query in the queries table
@@ -1532,9 +1574,7 @@ export class AgentManagerDb {
         const ts = Date.now();
         const queryId = `query_${ts}_${Math.random().toString(36).slice(2, 9)}`;
 
-        const cliAgent = await this.db.agents.findInteractive(teamId);
-        const namedManager = cliAgent ? null : await this.db.agents.getByName(teamId, 'manager');
-        const managerId = cliAgent?.id || namedManager?.id || `manager-${teamName}`;
+        const managerId = await this.resolveManagerInboxId(teamId, teamName);
 
         const queryResult: Record<string, unknown> = { schedule, message: messageStr, mode: 'internal' };
         if (Array.isArray(linkedTasks) && linkedTasks.length > 0) {
@@ -1662,28 +1702,28 @@ export class AgentManagerDb {
         const ts = Date.now();
 
         // Store in news_items table under the persistent manager-inbox identity.
-        // Prefer the interactive CLI agent (GET /news reads from this id).
-        // Fall back to the named "manager" agent so events are still durable
-        // when the CLI is offline or not yet registered.
-        const cliAgent = await this.db.agents.findInteractive(teamId);
-        const namedManager = cliAgent ? null : await this.db.agents.getByName(teamId, 'manager');
-        const inboxId = cliAgent?.id || namedManager?.id;
+        // resolveManagerInboxId auto-provisions a stub when neither CLI nor
+        // named "manager" exists, so replies never silently blackhole on a
+        // freshly-synced team that hasn't seen its CLI register yet.
+        // teamName may have shifted on cross-team in_reply_to admin overrides;
+        // re-fetch to keep the stub id correct.
+        const teamRow = teamId
+          ? await this.db.teams.getTeam(teamId).catch(() => null)
+          : null;
+        const resolvedTeamName = teamRow?.name ?? teamName ?? 'unknown';
+        const inboxId = await this.resolveManagerInboxId(teamId, resolvedTeamName);
 
-        if (inboxId) {
-          // Replies carry notify semantics (no further reply expected);
-          // unsolicited inbound messages default to notify too.
-          await this.db.news.add(teamId, inboxId, {
-            timestamp: ts,
-            type: newsType,
-            message: newsMessage,
-            data: { from, in_reply_to, message, ...data },
-            query_id: in_reply_to || undefined,
-            kind: 'notify',
-            reply_expected: false,
-          });
-        } else {
-          this.managerLog(`Warning: No manager-inbox agent found for team ${teamId}, cannot store news`);
-        }
+        // Replies carry notify semantics (no further reply expected);
+        // unsolicited inbound messages default to notify too.
+        await this.db.news.add(teamId, inboxId, {
+          timestamp: ts,
+          type: newsType,
+          message: newsMessage,
+          data: { from, in_reply_to, message, ...data },
+          query_id: in_reply_to || undefined,
+          kind: 'notify',
+          reply_expected: false,
+        });
 
         // If this is a reply to a query, update the query status and resolve any waiting /talk-to
         if (in_reply_to) {
@@ -1782,15 +1822,11 @@ export class AgentManagerDb {
           );
         }
 
-        // Resolve manager-inbox identity: prefer interactive CLI, fall back
-        // to named "manager" agent so events remain readable when CLI is offline.
-        const cliAgentRow = await this.db.agents.findInteractive(teamId);
-        const namedManagerRow = cliAgentRow ? null : await this.db.agents.getByName(teamId, 'manager');
-        const cliId = cliAgentRow?.id || namedManagerRow?.id;
-
-        if (!cliId) {
-          return res.json({ items: [] });
-        }
+        // Resolve manager-inbox identity. resolveManagerInboxId auto-creates
+        // a stub interactive row if neither CLI nor named "manager" exists,
+        // so the same id is used for read and write paths and replies stored
+        // via POST /news are immediately visible here.
+        const cliId = await this.resolveManagerInboxId(teamId, teamName);
 
         const newsRows = hasSinceId
           ? await this.db.news.pollSinceId(cliId, sinceId, { limit, queryId: query_id })
@@ -2442,6 +2478,7 @@ export class AgentManagerDb {
           workingDirectory: hostWorkingDirectory,
           sharedDirectory: hostSharedDirectory
         });
+        this.broadcastAgentsChanged(teamId, { reason: 'spawn', added: [name] });
       } catch (error: any) {
         // Ensure we never return Express's default HTML error page (CLI expects JSON).
         try {
@@ -2908,6 +2945,7 @@ export class AgentManagerDb {
       // Delete record (cascades wallets/news/queries)
       await this.db.agents.deleteAgent(agent.id);
       res.json({ message: 'Agent deleted', id: agent.id, name: agent.name });
+      this.broadcastAgentsChanged(teamId, { reason: 'remove', removed: [agent.name] });
     });
 
     this.managementApp.delete('/agents/by-name/:name', async (req, res) => {
@@ -2930,6 +2968,7 @@ export class AgentManagerDb {
       }
       await this.db.agents.deleteAgent(agent.id);
       res.json({ message: 'Agent deleted', id: agent.id, name: agent.name });
+      this.broadcastAgentsChanged(teamId, { reason: 'remove', removed: [agent.name] });
     });
 
     this.managementApp.post('/registry/push', async (req, res) => {
@@ -4315,6 +4354,10 @@ export class AgentManagerDb {
             deletedNames.push(agent.name || agent.id);
           }
 
+          if (deletedNames.length) {
+            this.broadcastAgentsChanged(bulkTeamId, { reason: 'remove', removed: deletedNames });
+          }
+
           return {
             ok: true,
             result: {
@@ -4371,6 +4414,8 @@ export class AgentManagerDb {
           `UPDATE agents SET deleted_at = $3, status = 'stopped' WHERE team_id = $1 AND id = $2`,
           [teamId, a.id, Date.now()]
         );
+
+        this.broadcastAgentsChanged(teamId, { reason: 'remove', removed: [a.name || a.id] });
 
         return { ok: true, result: { deleted: agentName } };
       }
@@ -4507,15 +4552,12 @@ export class AgentManagerDb {
 
         // Interactive (manager-inbox) agents have no /news HTTP server of
         // their own — the daemon owns the inbox. Read directly from
-        // news_items using the same id resolution as GET /news (prefer the
-        // interactive CLI row, fall back to the named "manager" row).
+        // news_items using the same id resolution as GET /news so reads
+        // and writes converge on the same row.
         if (a.type === 'interactive') {
-          const cliAgentRow = await this.db.agents.findInteractive(teamId);
-          const namedManagerRow = cliAgentRow ? null : await this.db.agents.getByName(teamId, 'manager');
-          const inboxId = cliAgentRow?.id || namedManagerRow?.id;
-          if (!inboxId) {
-            return { ok: true, result: { items: [], total: 0, timestamp: Date.now() } };
-          }
+          const teamRow = await this.db.teams.getTeam(teamId).catch(() => null);
+          const teamName = teamRow?.name ?? 'unknown';
+          const inboxId = await this.resolveManagerInboxId(teamId, teamName);
           const rows = await this.db.news.poll(inboxId, 0, { limit: 100 });
           const items = rows.map((r: any) => ({
             id: Number(r.id),
@@ -5006,9 +5048,23 @@ export class AgentManagerDb {
           } catch { /* ignore */ }
         }
 
+        if (syncResult.added.length || syncResult.updated.length || syncResult.removed.length) {
+          this.broadcastAgentsChanged(syncTeamId, {
+            reason: 'sync',
+            added: syncResult.added,
+            updated: syncResult.updated,
+            removed: syncResult.removed,
+          });
+        }
+
         return {
           ok: true,
           result: {
+            // Echo the effective team back so the CLI can re-register its
+            // interactive manager-inbox row when /sync re-targets a team
+            // different from activeTeam.
+            team: syncTeamName,
+            teamId: syncTeamId,
             summary: formatSyncSummary(plan),
             verbose: formatSyncVerbose(plan),
             ...syncResult,
@@ -5404,9 +5460,19 @@ export class AgentManagerDb {
           }
         }
 
+        const deployedNames = results.filter(r => r.success).map(r => r.name);
+        if (deployedNames.length) {
+          this.broadcastAgentsChanged(effectiveTeamId, { reason: 'deploy', added: deployedNames });
+        }
+
         return {
           ok: true,
           result: {
+            // Echo the effective team back so the CLI can re-register its
+            // interactive manager-inbox row when /deploy targets a team
+            // different from activeTeam.
+            team: effectiveTeamName,
+            teamId: effectiveTeamId,
             deployed: results.filter(r => r.success).length,
             failed: results.filter(r => !r.success).length,
             agents: results
@@ -6506,6 +6572,42 @@ export class AgentManagerDb {
           data: newsItem.data,
           timestamp: newsItem.timestamp
         }));
+      }
+    }
+  }
+
+  /**
+   * Notify connected CLIs that the agent registry for a team changed.
+   * Lets the CLI clear stale per-name session state and surface a one-line
+   * "registry updated" hint without forcing the operator to restart.
+   */
+  broadcastAgentsChanged(
+    teamId: string,
+    change: {
+      reason: 'sync' | 'deploy' | 'spawn' | 'remove' | 'update';
+      added?: string[];
+      updated?: string[];
+      removed?: string[];
+    }
+  ) {
+    const payload = JSON.stringify({
+      type: 'agents_changed',
+      teamId,
+      change: {
+        reason: change.reason,
+        added: change.added || [],
+        updated: change.updated || [],
+        removed: change.removed || [],
+      },
+      timestamp: Date.now(),
+    });
+    for (const client of this.wsClients) {
+      if (client.teamId === teamId && client.ws.readyState === WebSocket.OPEN) {
+        try {
+          client.ws.send(payload);
+        } catch {
+          /* drop send errors — closing handler will clean up */
+        }
       }
     }
   }

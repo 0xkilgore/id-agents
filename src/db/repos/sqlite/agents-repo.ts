@@ -226,9 +226,13 @@ export class SqliteAgentsRepo implements AgentsRepository {
   }
 
   async findInteractive(teamId: string): Promise<AgentRow | null> {
+    // Newest-first deterministic selection — when a team has multiple
+    // interactive rows (e.g. CLI re-registered after a v3 sync), reply
+    // routing must pick the most recently created one consistently.
     const { rows } = await this.db.query(
       `SELECT * FROM agents
        WHERE team_id = ? AND type = 'interactive' AND deleted_at IS NULL
+       ORDER BY created_at DESC
        LIMIT 1`,
       [teamId],
     );

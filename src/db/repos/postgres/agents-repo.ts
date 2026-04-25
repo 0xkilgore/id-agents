@@ -195,8 +195,11 @@ export class PgAgentsRepo implements AgentsRepository {
   // ---------------------------------------------------------------------------
 
   async findInteractive(teamId: string): Promise<AgentRow | null> {
+    // Newest-first deterministic selection — when a team has multiple
+    // interactive rows (e.g. CLI re-registered after a v3 sync), reply
+    // routing must pick the most recently created one consistently.
     const r = await this.db.query<AgentRow>(
-      `SELECT * FROM agents WHERE team_id = $1 AND type = 'interactive' AND deleted_at IS NULL LIMIT 1`,
+      `SELECT * FROM agents WHERE team_id = $1 AND type = 'interactive' AND deleted_at IS NULL ORDER BY created_at DESC LIMIT 1`,
       [teamId],
     );
     return r.rows[0] || null;

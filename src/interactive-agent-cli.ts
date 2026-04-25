@@ -28,6 +28,7 @@ import {
   maybeRunWorkspaceSyncCli,
   maybeRunWorkspaceUnsyncCli,
 } from './cli/workspace-sync.js';
+import { waitForAgentReady } from './cli/agent-readiness.js';
 
 const oneShotSyncExit = await maybeRunWorkspaceSyncCli(process.argv.slice(2));
 if (oneShotSyncExit !== null) {
@@ -581,6 +582,29 @@ function handleWebSocketMessage(data: WebSocket.Data) {
         // Command result - could be used for async commands
         break;
 
+      case 'agents_changed': {
+        const change = message.change || {};
+        const added: string[] = Array.isArray(change.added) ? change.added : [];
+        const updated: string[] = Array.isArray(change.updated) ? change.updated : [];
+        const removed: string[] = Array.isArray(change.removed) ? change.removed : [];
+        const reason = typeof change.reason === 'string' ? change.reason : 'change';
+
+        // Drop session continuity for any agent that disappeared or was rebuilt;
+        // the next /ask starts a fresh session against whatever now answers.
+        for (const name of removed) agentSessions.delete(name);
+        for (const name of updated) agentSessions.delete(name);
+
+        if (added.length || updated.length || removed.length) {
+          const parts: string[] = [];
+          if (added.length) parts.push(added.map(n => `+${n}`).join(' '));
+          if (updated.length) parts.push(updated.map(n => `~${n}`).join(' '));
+          if (removed.length) parts.push(removed.map(n => `-${n}`).join(' '));
+          console.log(`\n${colors.gray}🔄 registry: ${parts.join(' ')} (${reason})${colors.reset}`);
+          rl.prompt();
+        }
+        break;
+      }
+
       case 'error':
         console.log(`${colors.red}WebSocket error: ${message.error}${colors.reset}`);
         break;
@@ -1010,6 +1034,23 @@ async function registerWithManager() {
       console.log(`${colors.gray}   Error: ${error?.message || error}${colors.reset}\n`);
     }
   }
+}
+
+/**
+ * Ensure the CLI's interactive manager-inbox row is registered for the
+ * effective team after a /sync or /deploy that may have re-targeted a
+ * different team than activeTeam. Switches activeTeam if needed and
+ * awaits registerWithManager so reply routing converges before we return.
+ *
+ * Returns true if a re-registration occurred (caller may want to refresh
+ * prompt / log a hint), false otherwise.
+ */
+async function ensureCliRegisteredForEffectiveTeam(effectiveTeam: string | undefined | null): Promise<boolean> {
+  if (!effectiveTeam || effectiveTeam === activeTeam) return false;
+  activeTeam = effectiveTeam;
+  updatePrompt();
+  await registerWithManager();
+  return true;
 }
 
 
@@ -2260,6 +2301,23 @@ async function handleLine(line: string) {
           if (data.removed?.length > 0) {
             console.log(`${colors.yellow}  Removed: ${data.removed.join(', ')}${colors.reset}`);
           }
+
+          const newOrUpdated = [
+            ...(Array.isArray(data.added) ? data.added : []),
+            ...(Array.isArray(data.updated) ? data.updated : []),
+          ];
+          if (newOrUpdated.length > 0) {
+            await probeNewAgentsReady(newOrUpdated);
+          }
+
+          // If sync targeted a different team, switch activeTeam and
+          // re-register so reply routing (POST /talk, GET /news) lands
+          // on this CLI's interactive row in the new team.
+          const switched = await ensureCliRegisteredForEffectiveTeam(data.team);
+          if (switched) {
+            console.log(`${colors.green}   Active team switched to "${data.team}"${colors.reset}`);
+          }
+
           console.log('');
         }
       }
@@ -4645,6 +4703,24 @@ async function broadcastToAllAgents(message: string) {
   }
 }
 
+async function probeNewAgentsReady(names: string[]): Promise<void> {
+  for (const name of names) {
+    try {
+      const resp = await managerFetch(`/agents/by-name/${encodeURIComponent(name)}`);
+      if (!resp.ok) continue;
+      const row: any = await resp.json();
+      const agentUrl = row?.url || row?.endpoint || (row?.port ? `http://localhost:${row.port}` : null);
+      if (!agentUrl) continue;
+      const ready = await waitForAgentReady(agentUrl);
+      if (!ready) {
+        console.log(`   ${colors.yellow}⚠️  ${name} did not become ready within 8s — first /ask may fail. Retry once it appears in /agents status.${colors.reset}`);
+      }
+    } catch {
+      /* best-effort — don't block the sync output on readiness probing */
+    }
+  }
+}
+
 async function deployFromConfig(filePath: string, args: string[] = []) {
   const savedTeam = activeTeam;
   try {
@@ -4822,6 +4898,13 @@ async function deployFromConfig(filePath: string, args: string[] = []) {
           console.log(`   ${colors.gray}   PID: ${localAgent.pid}${colors.reset}`);
           console.log(`   ${colors.gray}   Log: ${logFile}${colors.reset}`);
 
+          if (result.port) {
+            const ready = await waitForAgentReady(`http://localhost:${result.port}`);
+            if (!ready) {
+              console.log(`   ${colors.yellow}⚠️  ${agent.name} did not become ready within 8s — first /ask may fail. Retry once it appears in /agents status.${colors.reset}`);
+            }
+          }
+
           // Auto-register local agent onchain if enabled
           const shouldRegister = agent.register !== undefined ? agent.register : onchain?.register;
           if (shouldRegister && result.id) {
@@ -4897,6 +4980,13 @@ async function deployFromConfig(filePath: string, args: string[] = []) {
           results.push({ name: agent.name, success: true });
           console.log(`   ${colors.green}✅ Deployed: ${result.name} on port ${result.port}${colors.reset}`);
 
+          if (result.port) {
+            const ready = await waitForAgentReady(`http://localhost:${result.port}`);
+            if (!ready) {
+              console.log(`   ${colors.yellow}⚠️  ${agent.name} did not become ready within 8s — first /ask may fail. Retry once it appears in /agents status.${colors.reset}`);
+            }
+          }
+
           // Auto-register onchain if enabled (per-agent or global default)
           const shouldRegister = agent.register !== undefined ? agent.register : onchain?.register;
           if (shouldRegister && result.id) {
@@ -4961,12 +5051,18 @@ async function deployFromConfig(filePath: string, args: string[] = []) {
     }
     console.log(`${colors.bold}${colors.cyan}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${colors.reset}\n`);
 
-    // Keep the config team active after successful deploy so /ask, /agents etc. work against it
+    // Keep the config team active after successful deploy so /ask, /agents etc. work against it.
+    // Await re-registration so reply routing converges before we return —
+    // fire-and-forget races subsequent /ask/talk requests against an old
+    // interactive row in the previous team.
     if (configTeam && activeTeam !== savedTeam && successful > 0) {
       console.log(`${colors.green}   Active team switched to "${configTeam}"${colors.reset}\n`);
       updatePrompt();
-      // Re-register CLI with the new team
-      registerWithManager().catch(() => {});
+      try {
+        await registerWithManager();
+      } catch {
+        /* registerWithManager logs its own errors */
+      }
     } else if (activeTeam !== savedTeam && successful === 0) {
       // Restore if nothing deployed successfully
       activeTeam = savedTeam;

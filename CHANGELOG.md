@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.1.75-beta
+
+### Fixes
+
+- After `/sync` or `/deploy` adds a new agent, the running interactive CLI now reacts immediately. The daemon emits a new WebSocket message type `agents_changed` after every registry mutation (`/sync`, `/deploy`, `/agents/spawn`, `/delete`, `DELETE /agents/:id`, `DELETE /agents/by-name/:name`), and the CLI clears stale per-agent session state for any name that was removed or rebuilt and prints a one-line `🔄 registry: …` hint.
+- `/deploy` and `/sync` in the CLI now wait up to 8s for each newly spawned agent's `/.well-known/restap.json` to return 200 before returning to the prompt. This closes a window where an immediate `/ask <new-agent>` would post into a port that was not yet listening and hang forever waiting for a reply that never came.
+- Manager-inbox resolution is now hardened end-to-end. `findInteractive` selects the newest interactive row deterministically (`ORDER BY created_at DESC`) in both the SQLite and Postgres repos, eliminating cases where reply routing landed on a stale CLI row after `/sync` re-targeted a team. POST `/talk`, POST `/news`, POST `/schedule`, GET `/news`, and the `/remote news` handler all now go through a shared `resolveManagerInboxId` helper that auto-provisions a stub interactive row (`manager-<team>`) when neither a CLI nor a named "manager" agent is registered. Replies to a freshly-synced team that hasn't yet seen its CLI register no longer silently blackhole.
+- The CLI now treats `/sync` and `/deploy` as identity-affecting events. The `/remote` `sync` and `deploy` responses echo the effective `team`/`teamId`, and the CLI re-registers its interactive row against that team (awaiting registration on `/deploy`, switching `activeTeam` and re-registering after `/sync`) before returning to the prompt. Previously `/deploy` fire-and-forgot the re-register, racing subsequent `/ask` calls against an interactive row in the old team.
+
 ## 0.1.74-beta
 
 ### Demos

@@ -1,0 +1,220 @@
+// SPDX-License-Identifier: MIT
+/**
+ * Manager-inbox resolution regression tests (cli-registry-refresh).
+ *
+ * Background: prior to this fix, POST /talk, POST /news, and POST /schedule
+ * resolved the "manager inbox" identity by chaining
+ *   findInteractive → getByName('manager') → synthetic id `manager-<team>`
+ * with no DB row backing the synthetic id. GET /news read from the same
+ * resolution but bailed early (returning empty) when neither the
+ * interactive nor named-manager row existed. As a result, replies sent to
+ * a freshly-synced team that hadn't yet seen its CLI register would land
+ * on a phantom id and the corresponding GET /news call would silently
+ * blackhole them.
+ *
+ * The fix routes all four entry points through `resolveManagerInboxId`,
+ * which auto-provisions a stub interactive row (id = `manager-<team>`)
+ * when nothing else is registered. This guarantees writes and reads
+ * converge on the same DB row.
+ */
+
+import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import * as os from 'os';
+import * as path from 'path';
+import * as fs from 'fs';
+import { AgentManagerDb } from '../../src/agent-manager-db.js';
+import { SqliteAdapter } from '../../src/db/sqlite-adapter.js';
+import { migrateSqlite } from '../../src/db/migrations/sqlite.js';
+import { SqliteTeamsRepo } from '../../src/db/repos/sqlite/teams-repo.js';
+import { SqliteAgentsRepo } from '../../src/db/repos/sqlite/agents-repo.js';
+import { SqliteQueriesRepo } from '../../src/db/repos/sqlite/queries-repo.js';
+import { SqliteNewsRepo } from '../../src/db/repos/sqlite/news-repo.js';
+import { SqliteSchedulesRepo } from '../../src/db/repos/sqlite/schedules-repo.js';
+import { SqliteTasksRepo } from '../../src/db/repos/sqlite/tasks-repo.js';
+
+function createInMemoryDb() {
+  const adapter = new SqliteAdapter(':memory:');
+  migrateSqlite(adapter);
+  return {
+    adapter,
+    teams: new SqliteTeamsRepo(adapter),
+    agents: new SqliteAgentsRepo(adapter),
+    queries: new SqliteQueriesRepo(adapter),
+    news: new SqliteNewsRepo(adapter),
+    schedules: new SqliteSchedulesRepo(adapter),
+    tasks: new SqliteTasksRepo(adapter),
+    async close() { await adapter.close(); },
+  };
+}
+
+async function findFreePort(): Promise<number> {
+  const { createServer } = await import('net');
+  return new Promise((resolve, reject) => {
+    const server = createServer();
+    server.listen(0, '127.0.0.1', () => {
+      const addr = server.address() as { port: number };
+      server.close(() => resolve(addr.port));
+    });
+    server.on('error', reject);
+  });
+}
+
+let port: number;
+let baseUrl: string;
+let workDir: string;
+let manager: AgentManagerDb;
+let db: ReturnType<typeof createInMemoryDb>;
+
+beforeAll(async () => {
+  port = await findFreePort();
+  workDir = fs.mkdtempSync(path.join(os.tmpdir(), 'inbox-resolution-test-'));
+  baseUrl = `http://127.0.0.1:${port}`;
+  db = createInMemoryDb();
+  manager = new AgentManagerDb(workDir, db as any);
+  await manager.start(port);
+}, 30000);
+
+afterAll(async () => {
+  if (manager) {
+    await new Promise<void>((resolve) => {
+      (manager as any).httpServer?.close(() => resolve());
+      setTimeout(resolve, 500);
+    });
+  }
+  try { fs.rmSync(workDir, { recursive: true, force: true }); } catch { /* ignore */ }
+});
+
+function teamHeaders(team: string): Record<string, string> {
+  // Loopback IP + X-Id-Admin lets the test create teams on the fly.
+  // This is the same path /sync uses when it provisions a new team.
+  return { 'Content-Type': 'application/json', 'X-Id-Team': team, 'X-Id-Admin': '1' };
+}
+
+describe('manager-inbox resolution — fresh team with no CLI registered', () => {
+  const TEAM = 'inbox-fresh';
+
+  it('POST /talk auto-provisions the manager-inbox stub and persists the query', async () => {
+    // Pre-create the team to simulate the "freshly synced, no CLI yet"
+    // state. The team exists in the DB but no interactive row references
+    // it — the situation that previously silently blackholed replies.
+    await db.teams.getOrCreateTeamId(TEAM);
+
+    const res = await fetch(`${baseUrl}/talk`, {
+      method: 'POST',
+      headers: teamHeaders(TEAM),
+      body: JSON.stringify({ message: 'hello fresh team', from: 'tester' }),
+    });
+    expect(res.status).toBe(202);
+    const body = await res.json() as { query_id: string };
+    expect(body.query_id).toMatch(/^query_/);
+
+    const teamId = await db.teams.getOrCreateTeamId(TEAM);
+    const stub = await db.agents.getById(`manager-${TEAM}`);
+    expect(stub).not.toBeNull();
+    expect(stub?.team_id).toBe(teamId);
+    expect(stub?.type).toBe('interactive');
+
+    // GET /news reads from the same id, so the query.received event must surface here.
+    const newsRes = await fetch(`${baseUrl}/news?limit=10`, { headers: teamHeaders(TEAM) });
+    expect(newsRes.ok).toBe(true);
+    const newsBody = await newsRes.json() as { items: Array<{ type: string; data: any }> };
+    const types = newsBody.items.map(i => i.type);
+    expect(types).toContain('query.received');
+  });
+
+  it('POST /news with in_reply_to does not blackhole when no inbox row exists', async () => {
+    const TEAM2 = 'inbox-fresh-reply';
+
+    // Send the reply first (no prior CLI/manager row in this team).
+    const res = await fetch(`${baseUrl}/news`, {
+      method: 'POST',
+      headers: teamHeaders(TEAM2),
+      body: JSON.stringify({
+        from: 'agent-x',
+        in_reply_to: 'qid-no-such-query',
+        message: 'reply to query that never registered an inbox',
+      }),
+    });
+    expect(res.status).toBe(201);
+
+    // The stub interactive row should have been auto-provisioned and the
+    // news item must be readable through GET /news.
+    const teamId = await db.teams.getOrCreateTeamId(TEAM2);
+    const stub = await db.agents.getById(`manager-${TEAM2}`);
+    expect(stub).not.toBeNull();
+    expect(stub?.team_id).toBe(teamId);
+
+    const newsRes = await fetch(`${baseUrl}/news?limit=10`, { headers: teamHeaders(TEAM2) });
+    expect(newsRes.ok).toBe(true);
+    const body = await newsRes.json() as { items: Array<{ message: string; data: any }> };
+    expect(body.items.length).toBeGreaterThan(0);
+    const messages = body.items.map(i => i.message);
+    expect(messages.some(m => m && m.includes('reply to query that never registered'))).toBe(true);
+  });
+
+  it('POST /schedule lands on the auto-provisioned inbox stub', async () => {
+    const TEAM3 = 'inbox-fresh-schedule';
+
+    const res = await fetch(`${baseUrl}/schedule`, {
+      method: 'POST',
+      headers: teamHeaders(TEAM3),
+      body: JSON.stringify({
+        message: 'scheduled wake-up',
+        schedule: { id: 'sched-1', kind: 'cron', cadence: 'daily' },
+        mode: 'internal',
+      }),
+    });
+    expect(res.status).toBe(202);
+
+    const stub = await db.agents.getById(`manager-${TEAM3}`);
+    expect(stub).not.toBeNull();
+    expect(stub?.type).toBe('interactive');
+
+    const newsRes = await fetch(`${baseUrl}/news?limit=10`, { headers: teamHeaders(TEAM3) });
+    const body = await newsRes.json() as { items: Array<{ type: string }> };
+    expect(body.items.map(i => i.type)).toContain('schedule.received');
+  });
+});
+
+describe('manager-inbox resolution — newest interactive row wins (deterministic)', () => {
+  const TEAM = 'inbox-multi';
+
+  it('GET /news reads from the newest interactive row when multiple exist', async () => {
+    const teamId = await db.teams.getOrCreateTeamId(TEAM);
+
+    // Older CLI registration (perhaps a stale screen session).
+    await db.agents.create({
+      team_id: teamId,
+      id: 'interactive_stale',
+      name: 'stale-cli',
+      type: 'interactive',
+      model: '',
+      status: 'running',
+      created_at: 1000,
+    });
+    // Newer CLI registration after a /sync re-targeted this team.
+    await db.agents.create({
+      team_id: teamId,
+      id: 'interactive_fresh',
+      name: 'fresh-cli',
+      type: 'interactive',
+      model: '',
+      status: 'running',
+      created_at: 9999,
+    });
+
+    // Reply gets stored under whichever id resolveManagerInboxId picks.
+    const postRes = await fetch(`${baseUrl}/news`, {
+      method: 'POST',
+      headers: teamHeaders(TEAM),
+      body: JSON.stringify({ from: 'agent-y', message: 'multi-row probe' }),
+    });
+    expect(postRes.status).toBe(201);
+
+    // Read directly from the news repo for both candidate ids.
+    const fresh = await db.news.poll('interactive_fresh', 0, { limit: 10 });
+    const stale = await db.news.poll('interactive_stale', 0, { limit: 10 });
+    expect(fresh.length).toBeGreaterThan(0);
+    expect(stale.length).toBe(0);
+  });
+});
