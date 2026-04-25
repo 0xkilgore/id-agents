@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.1.69-beta
+
+### Features
+
+- **Agent config v3 system** — full implementation across 8 slices (`0d86099` through `60338b6`):
+  - Library at `configs/agents/<name>/` accepts two native shapes (Claude `<name>/CLAUDE.md` and AGENTS.md `<name>.md` + `<name>/`)
+  - Standalone skill library at `configs/skills/<name>/`
+  - New peer fields on team-config agent entries: `agent: <string>` and `skills: [<string>...]`
+  - Sync engine (`src/cli/workspace-sync.ts`): SHA-256 + 4-case ownership logic + atomic receipt at `<workspace>/.id-agents/receipt.json`
+  - Per-runtime mapping for Claude / Codex / Cursor (CLAUDE.md → AGENTS.md, skills → `.agents/skills/` or `.cursor/skills/`)
+  - Memory-file fallback: existing `CLAUDE.md` → sidecar at `.claude/rules/agent-<name>.md`; existing `AGENTS.md` for Codex/Cursor → marker-fenced append (preserves user edits)
+  - `id-agents sync <config>` and `id-agents unsync <config>` one-shot CLIs
+  - Manager `/library/agents` and `/library/skills` read-only inventory endpoints
+  - TUI library browsers: `l` for agents, `s` for skills, `→` for detail, with README preview cap
+- **Library content imported** (`564b8b1`): 9 agent entries (`copywriter`, `devops`, `editor`, `foundry-dev`, `frontend`, `frontend-react`, `fullstack-nextjs`, `security` — CC-BY-SA-4.0, `solidity-security`) and 8 demo team configs at `configs/demos/`. `NOTICE` at the repo root credits all upstream skill authors.
+- **`s` library-skills hotkey** now reachable from agents/tasks/calendar/heartbeats views, not just from library-agents.
+
+### Fixes
+
+- **v3 deploy persona overwrite** (`7e7a314`, `658efcc`, `7b962b9`): library entry's `CLAUDE.md` no longer clobbered by the framework personality writer. Sidecar approach for Claude (lands at `.claude/rules/agent-<name>.md`); marker-fenced append into root `AGENTS.md` for Codex/Cursor preserves user edits.
+- **Library root resolution unified** (`7e7a314`): `copyLibraryAgentOverlay` now honors `ID_LIBRARY_ROOT` env var the same way the slice-7 manager endpoints do, so library entries can live in any clone of the public-agents content.
+- **Symlinked library entries** (`7e7a314`): `cpSync` now uses `dereference: true` so symlinked entries copy their target's contents.
+- **TUI `from:` label missing on inbound notify** (`d359733`): `extractParty` in `NewsView.tsx` now matches `notify` and `message` types in the inbound branch.
+- **Refuse-with-error exit code** (`3e8858f`): `id-agents sync` exits non-zero (was 0) when refusing to deploy onto a workspace with a pre-existing `AGENTS.md` not in our receipt.
+
+### Tests
+
+- 377 passing / 82 skipped: per-slice integration coverage for sync (4-case ownership), unsync, library enumeration (both shapes), per-runtime mapping, memory-file fallback (Claude sidecar + Codex/Cursor append), drift detection, idempotency.
+
 ## 0.1.68-beta
 
 ### Features
