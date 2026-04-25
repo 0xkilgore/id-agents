@@ -870,6 +870,7 @@ export function App({ staticMode = false }: AppProps = {}): React.ReactElement {
         if (input === 'c') return openCalendar();
         if (input === 'h') return openHeartbeats();
         if (input === 'l') return openLibraryAgents();
+        if (input === 's') return openLibrarySkills();
         if (key.rightArrow) {
           // Remote agents get the detail panel; local agents get news
           const isRemote = selectedAgent?.deploymentShape === 'remote-endpoint' ||
@@ -891,6 +892,7 @@ export function App({ staticMode = false }: AppProps = {}): React.ReactElement {
         if (input === 'c') return openCalendar();
         if (input === 'h') return openHeartbeats();
         if (input === 'l') return openLibraryAgents();
+        if (input === 's') return openLibrarySkills();
         if (key.leftArrow || key.escape) return setView('agents');
         if (key.rightArrow) return openTaskDetail();
         if (key.tab) return cycleTeam(key.shift ? -1 : 1);
@@ -919,6 +921,7 @@ export function App({ staticMode = false }: AppProps = {}): React.ReactElement {
         if (input === 't') return setView('tasks');
         if (input === 'h') return openHeartbeats();
         if (input === 'l') return openLibraryAgents();
+        if (input === 's') return openLibrarySkills();
         if (key.upArrow) return moveSchedSel(-1);
         if (key.downArrow) return moveSchedSel(1);
         if (key.pageUp) return moveSchedSel(-calendarWindowSize);
@@ -944,6 +947,7 @@ export function App({ staticMode = false }: AppProps = {}): React.ReactElement {
         if (input === 't') return setView('tasks');
         if (input === 'c') return openCalendar();
         if (input === 'l') return openLibraryAgents();
+        if (input === 's') return openLibrarySkills();
         if (key.rightArrow) return openHeartbeatDetail();
         if (key.upArrow) return moveHbSel(-1);
         if (key.downArrow) return moveHbSel(1);

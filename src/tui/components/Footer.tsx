@@ -26,18 +26,18 @@ interface FooterProps {
 // downs (task-detail, heartbeat-detail, news, news-detail) keep the
 // back hint because they have a real parent to return to.
 const HINTS: Record<FooterView, string> = {
-  agents: '↑↓ nav · → detail/news · Tab team · t tasks · c calendar · h heartbeats · l library · p pause · q quit',
+  agents: '↑↓ nav · → detail/news · Tab team · t tasks · l library · s skills · c calendar · h heartbeats · p pause · q quit',
   'agent-detail': '↑↓ scroll · p pause · q quit · ← back',
-  tasks: '↑↓ nav · → detail · Tab team · c calendar · h heartbeats · l library · p pause · q quit · ← back',
-  calendar: '↑↓ nav · a agents · t tasks · h heartbeats · l library · p pause · q quit',
-  heartbeats: '↑↓ nav · → detail · a agents · t tasks · c calendar · l library · p pause · q quit',
+  tasks: '↑↓ nav · → detail · Tab team · l library · s skills · c calendar · h heartbeats · p pause · q quit · ← back',
+  calendar: '↑↓ nav · a agents · t tasks · l library · s skills · h heartbeats · p pause · q quit',
+  heartbeats: '↑↓ nav · → detail · a agents · t tasks · l library · s skills · c calendar · p pause · q quit',
   'task-detail': '↑↓ scroll · p pause · q quit · ← back',
   'heartbeat-detail': '↑↓ scroll · p pause · q quit · ← back',
   news: '↑↓ scroll · → open · p pause · q quit · ← back',
   'news-detail': '↑↓ scroll · p pause · q quit · ← back',
   'library-agents': '↑↓ nav · → detail · s skills · a agents · t tasks · c calendar · h heartbeats · p pause · q quit · ← back',
   'library-agent-detail': '↑↓ scroll · p pause · q quit · ← back',
-  'library-skills': '↑↓ nav · → detail · l agents · a agents view · t tasks · c calendar · h heartbeats · p pause · q quit · ← back',
+  'library-skills': '↑↓ nav · → detail · l library · a agents · t tasks · c calendar · h heartbeats · p pause · q quit · ← back',
   'library-skill-detail': '↑↓ scroll · p pause · q quit · ← back',
 };
 

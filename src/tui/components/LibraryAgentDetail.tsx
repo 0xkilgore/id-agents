@@ -13,6 +13,8 @@ interface LibraryAgentDetailProps {
   contentWidth: number;
 }
 
+const README_PREVIEW_LINES = 18;
+
 export function LibraryAgentDetail(props: LibraryAgentDetailProps): React.ReactElement {
   const { agent, agentName, loading, error, positionLabel, windowSize, scrollOffset, contentWidth } = props;
 
@@ -90,13 +92,17 @@ function buildBodyLines(
   if (!agent.readme || agent.readme.trim() === '') {
     out.push('(no README.md)');
   } else {
-    for (const raw of agent.readme.split(/\r?\n/)) {
+    const readmeLines = agent.readme.split(/\r?\n/);
+    for (const raw of readmeLines.slice(0, README_PREVIEW_LINES)) {
       const line = raw.trimEnd();
       if (line === '') {
         out.push('');
         continue;
       }
       out.push(...wrap(line, width));
+    }
+    if (readmeLines.length > README_PREVIEW_LINES) {
+      out.push(`… (${readmeLines.length - README_PREVIEW_LINES} more lines)`);
     }
   }
   return out;
