@@ -1,10 +1,9 @@
 # Demo team — quickstart
 # Deploy with: /deploy demo
 #
-# Three-agent demo for showcasing the manager:
-#   cto         — persona-only technical lead, drives design and review
-#   developer   — Next.js fullstack dev backed by /configs/agents/fullstack-nextjs/
-#   copywriter  — marketing/landing copy backed by /configs/agents/copywriter/
+# Two-agent demo for showcasing the manager:
+#   cto       — persona-only technical lead, drives design and review
+#   developer — Next.js fullstack dev backed by /configs/agents/fullstack-nextjs/
 #
 # Inherits the default Claude Code runtime; flip per-agent runtime: codex
 # or cursor-cli if you want to demo the mixed-runtime path.
@@ -28,7 +27,3 @@ agents:
   - name: developer
     description: "Full-stack Next.js engineer. Implements features end-to-end against the CTO's plan."
     agent: fullstack-nextjs
-
-  - name: copywriter
-    description: "Marketing copy, landing-page polish, headlines, and microcopy."
-    agent: copywriter
