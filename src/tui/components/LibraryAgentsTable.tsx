@@ -18,13 +18,9 @@ const COLS = {
   marker: 2,
   name: 24,
   shape: 18,
-  readme: 5,
-  license: 5,
-  subfolders: 22,
 } as const;
 
 const NAME_SHAPE_GAP = '  ';
-const SHAPE_README_GAP = '  ';
 
 export function LibraryAgentsTable(props: LibraryAgentsTableProps): React.ReactElement {
   const {
@@ -90,10 +86,6 @@ function Header(): React.ReactElement {
       {padRight('NAME', COLS.name)}
       {NAME_SHAPE_GAP}
       {padRight('SHAPE', COLS.shape)}
-      {SHAPE_README_GAP}
-      {padRight('RDME', COLS.readme)}
-      {padRight('LIC', COLS.license)}
-      {padRight('SUBFOLDERS', COLS.subfolders)}
     </Text>
   );
 }
@@ -101,17 +93,12 @@ function Header(): React.ReactElement {
 function Row(props: { row: LibraryAgentRow; selected: boolean }): React.ReactElement {
   const { row, selected } = props;
   const marker = selected ? '▶ ' : '  ';
-  const subfolderLabel = row.subfolders.length > 0 ? row.subfolders.join(',') : '—';
   return (
     <Text inverse={selected}>
       {marker}
       {padRight(row.name, COLS.name)}
       {NAME_SHAPE_GAP}
       {padRight(row.shape, COLS.shape)}
-      {SHAPE_README_GAP}
-      {padRight(row.hasReadme ? 'yes' : 'no', COLS.readme)}
-      {padRight(row.hasLicense ? 'yes' : 'no', COLS.license)}
-      {padRight(subfolderLabel, COLS.subfolders)}
     </Text>
   );
 }

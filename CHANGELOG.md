@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.70-beta
+
+### TUI
+
+- Library · Agents table trimmed: removed `RDME`, `LIC`, and `SUBFOLDERS` columns. The list view now shows only `NAME` and `SHAPE`. The dropped columns were noisy in a list and frequently misleading (e.g. `LIC: no` for entries that have per-skill `LICENSE` files but no top-level one). Detail view (`→`) still shows all of that information.
+
 ## 0.1.69-beta
 
 ### Features
