@@ -54,6 +54,22 @@ function normalizeSkills(skills?: string[] | null): string {
   return [...skills].sort().join(',');
 }
 
+function normalizeMetadataSkills(skills: unknown): string {
+  if (!skills) return '';
+  if (Array.isArray(skills)) {
+    return normalizeSkills(skills.filter((skill): skill is string => typeof skill === 'string'));
+  }
+  if (typeof skills === 'string') {
+    return normalizeSkills(
+      skills
+        .split(',')
+        .map(skill => skill.trim())
+        .filter(Boolean),
+    );
+  }
+  return '';
+}
+
 function normalizeAllowedTools(tools?: string[] | null): string {
   if (!tools || tools.length === 0) return '';
   return [...tools].sort().join(',');
@@ -98,7 +114,7 @@ function runningFields(row: AgentRow): Record<string, string> {
     runtime: normalizeRuntime(row.runtime),
     plugins: normalizePlugins(meta.plugins),
     agent: meta.agent || '',
-    skills: normalizeSkills(meta.skills),
+    skills: normalizeMetadataSkills(meta.skills),
     heartbeat: meta.heartbeat === true ? 'enabled' : '',
     allowedTools: normalizeAllowedTools(meta.allowed_tools),
     description: meta.description || '',

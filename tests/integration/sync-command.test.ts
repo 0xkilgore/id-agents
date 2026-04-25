@@ -21,6 +21,7 @@ import {
   deleteAgentByName,
   remote,
   remoteSync,
+  remoteDeleteTeam,
 } from '../helpers/manager-client.js';
 
 const TEST_SUFFIX = Date.now().toString(36);
@@ -29,6 +30,11 @@ const TEST_CONFIG_PATH = `/tmp/sync-test-${TEST_SUFFIX}.yaml`;
 const AGENT_A = `sync-a-${TEST_SUFFIX}`;
 const AGENT_B = `sync-b-${TEST_SUFFIX}`;
 const AGENT_C = `sync-c-${TEST_SUFFIX}`;
+const SKILL_TEST_TEAM = `sync-skills-${TEST_SUFFIX}`;
+const SKILL_TEST_CONFIG_PATH = `/tmp/sync-skills-${TEST_SUFFIX}.yaml`;
+const SKILL_AGENT_A = `skills-a-${TEST_SUFFIX}`;
+const SKILL_AGENT_B = `skills-b-${TEST_SUFFIX}`;
+const SKILL_AGENT_C = `skills-c-${TEST_SUFFIX}`;
 
 let yamlDump: (obj: any) => string;
 
@@ -52,8 +58,13 @@ describe.skipIf(!process.env.ID_CONTROL_API_KEY)('Sync Command', () => {
     for (const name of [AGENT_A, AGENT_B, AGENT_C]) {
       try { await deleteAgentByName(name); } catch { /* ignore */ }
     }
+    try { await remoteDeleteTeam(SKILL_TEST_TEAM); } catch { /* ignore */ }
+    for (const name of [SKILL_AGENT_A, SKILL_AGENT_B, SKILL_AGENT_C]) {
+      try { await deleteAgentByName(name); } catch { /* ignore */ }
+    }
     // Clean up test config
     try { fs.unlinkSync(TEST_CONFIG_PATH); } catch { /* ignore */ }
+    try { fs.unlinkSync(SKILL_TEST_CONFIG_PATH); } catch { /* ignore */ }
   });
 
   function writeConfig(agents: Array<{ name: string; description?: string; model?: string }>) {
@@ -185,6 +196,75 @@ describe.skipIf(!process.env.ID_CONTROL_API_KEY)('Sync Command', () => {
       expect(data.updated.length).toBe(0);
       expect(data.unchanged.length).toBe(2);
     }, 60000);
+
+    it('treats repeated syncs of unchanged skills as a no-op and isolates a one-agent skill edit', async () => {
+      const writeSkillFixtureConfig = (agentASkills: string[]) => {
+        const config = {
+          version: '1',
+          team: SKILL_TEST_TEAM,
+          defaults: {
+            local: true,
+            runtime: 'claude-code-cli',
+            model: 'claude-haiku-4-5-20251001',
+          },
+          agents: [
+            {
+              name: SKILL_AGENT_A,
+              description: 'Skill determinism fixture A',
+              skills: agentASkills,
+            },
+            {
+              name: SKILL_AGENT_B,
+              description: 'Skill determinism fixture B',
+              skills: ['identity'],
+            },
+            {
+              name: SKILL_AGENT_C,
+              description: 'Skill determinism fixture C',
+              skills: ['task-discipline'],
+            },
+          ],
+        };
+        fs.writeFileSync(SKILL_TEST_CONFIG_PATH, yamlDump(config));
+      };
+
+      writeSkillFixtureConfig(['identity', 'inter-agent']);
+
+      const first = await remoteSync(SKILL_TEST_CONFIG_PATH);
+      expect(first.ok).toBe(true);
+
+      const firstData = (first.data as any).result;
+      expect(firstData.added.sort()).toEqual([SKILL_AGENT_A, SKILL_AGENT_B, SKILL_AGENT_C].sort());
+      expect(firstData.updated).toEqual([]);
+      expect(firstData.removed).toEqual([]);
+      expect(firstData.unchanged).toEqual([]);
+
+      await new Promise(r => setTimeout(r, 3000));
+
+      const second = await remoteSync(SKILL_TEST_CONFIG_PATH);
+      expect(second.ok).toBe(true);
+
+      const secondData = (second.data as any).result;
+      expect(secondData.summary).toBe('Added 0, updated 0, removed 0, unchanged 3');
+      expect(secondData.added).toEqual([]);
+      expect(secondData.updated).toEqual([]);
+      expect(secondData.removed).toEqual([]);
+      expect(secondData.unchanged.sort()).toEqual([SKILL_AGENT_A, SKILL_AGENT_B, SKILL_AGENT_C].sort());
+
+      writeSkillFixtureConfig(['identity', 'inter-agent', 'catalog']);
+
+      const dryRun = await remoteSync(SKILL_TEST_CONFIG_PATH, {}, ['--dry-run']);
+      expect(dryRun.ok).toBe(true);
+
+      const dryRunData = (dryRun.data as any).result;
+      expect(dryRunData.summary).toBe('Added 0, updated 1, removed 0, unchanged 2');
+      expect(dryRunData.plan.added).toEqual([]);
+      expect(dryRunData.plan.removed).toEqual([]);
+      expect(dryRunData.plan.unchanged.sort()).toEqual([SKILL_AGENT_B, SKILL_AGENT_C].sort());
+      expect(dryRunData.plan.updated).toEqual([
+        { name: SKILL_AGENT_A, changes: ['skills'] },
+      ]);
+    }, 120000);
   });
 });
 

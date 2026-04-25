@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.78-beta
+
+### Fixes
+
+- Make `/sync` deterministic for library-backed `skills:` diffs so repeated syncs against an unchanged team config no longer report every agent as `changed: skills` or trigger unnecessary respawns. Regression coverage now includes a live `/sync` fixture that asserts the second run is a no-op plus a targeted diff test proving that adding one skill updates only the affected agent.
+
 ## 0.1.77-beta
 
 ### Fixes

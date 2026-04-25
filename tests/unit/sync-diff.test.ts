@@ -285,6 +285,48 @@ describe('computeSyncPlan', () => {
     expect(plan.unchanged.map(i => i.name)).toEqual(['alice']);
   });
 
+  it('marks only the agent with a real skills delta when others are semantically unchanged', () => {
+    const configAgents = [
+      makeAgentSpec({ name: 'alice', skills: ['inter-agent', 'identity'] }),
+      makeAgentSpec({ name: 'bob', skills: ['identity', 'catalog'] }),
+      makeAgentSpec({ name: 'charlie', skills: ['task-discipline'] }),
+    ];
+    const runningAgents = [
+      makeAgentRow({
+        name: 'alice',
+        metadata: {
+          ...makeAgentRow().metadata,
+          skills: ['identity', 'inter-agent'],
+        },
+      }),
+      makeAgentRow({
+        id: 'agent_bob',
+        name: 'bob',
+        port: 4102,
+        metadata: {
+          ...makeAgentRow().metadata,
+          skills: ['identity'],
+        },
+      }),
+      makeAgentRow({
+        id: 'agent_charlie',
+        name: 'charlie',
+        port: 4103,
+        metadata: {
+          ...makeAgentRow().metadata,
+          skills: ['task-discipline'],
+        },
+      }),
+    ];
+
+    const plan = computeSyncPlan(configAgents, runningAgents);
+
+    expect(plan.added).toEqual([]);
+    expect(plan.removed).toEqual([]);
+    expect(plan.changed).toEqual([{ name: 'bob', category: 'changed', changes: ['skills'] }]);
+    expect(plan.unchanged.map(item => item.name)).toEqual(['alice', 'charlie']);
+  });
+
   it('matches agents by domain name', () => {
     const configAgents = [makeAgentSpec({ name: 'alice', domain: 'alice.xid.eth' })];
     const runningAgents = [makeAgentRow({

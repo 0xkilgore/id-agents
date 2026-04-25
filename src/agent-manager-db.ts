@@ -91,6 +91,22 @@ function tokenizeCommand(command: string): string[] {
   return tokens;
 }
 
+function normalizeConfigSkills(skills: unknown): string[] | undefined {
+  if (!Array.isArray(skills)) return undefined;
+
+  const normalized = Array.from(
+    new Set(
+      skills
+        .filter((skill): skill is string => typeof skill === 'string')
+        .map(skill => skill.trim())
+        .filter(Boolean)
+        .sort((a, b) => a.localeCompare(b)),
+    ),
+  );
+
+  return normalized.length > 0 ? normalized : undefined;
+}
+
 // REST-AP catalog types
 interface RestAPCatalog {
   restap_version?: string;
@@ -2388,6 +2404,7 @@ export class AgentManagerDb {
         // Determine effective agent type (default to 'claude')
         const effectiveAgentType = agentType || 'claude';
         const isAutomator = effectiveAgentType === 'automator';
+        const normalizedSkills = normalizeConfigSkills(skills);
 
         const metadata: AgentMetadata = {
           name,
@@ -2398,6 +2415,7 @@ export class AgentManagerDb {
           ...(reqMetadata?.description && { description: reqMetadata.description }),
           plugins: localPlugins, // Use local paths (agent owns its plugins)
           ...(agentOverlay && { agent: agentOverlay }),
+          ...(normalizedSkills && { skills: normalizedSkills }),
           ...(allowedTools && { allowed_tools: allowedTools }),
           ...(isAutomator && { isAutomator: true }),
           // Flag that heartbeat is enabled (actual config read from HEARTBEAT.yaml)
@@ -4803,6 +4821,7 @@ export class AgentManagerDb {
           }
 
           const configDomain = spec.domain;
+          const normalizedSkills = normalizeConfigSkills(agentSkills);
 
           // 1. Deploy library-backed agent overlay into the runtime overlay target, if configured
           if (spec.agent) {
@@ -4819,6 +4838,7 @@ export class AgentManagerDb {
             runtime: effectiveRuntime,
             plugins: localPlugins,
             agent: spec.agent,
+            skills: normalizedSkills,
             allowed_tools: spec.allowedTools,
             description: spec.description,
             ...(isAutomator && { isAutomator: true }),
@@ -4911,6 +4931,7 @@ export class AgentManagerDb {
             const agentName = configDomain || spec.name;
 
             const agentSkills: string[] = spec.skills || [];
+            const normalizedSkills = normalizeConfigSkills(agentSkills);
             let orgContext = '';
             if (syncOrg?.groups) {
               try {
@@ -4925,6 +4946,7 @@ export class AgentManagerDb {
               runtime: effectiveRuntime,
               plugins: localPlugins,
               ...(spec.agent && { agent: spec.agent }),
+              skills: normalizedSkills,
               allowed_tools: spec.allowedTools,
               description: spec.description,
               ...(isAutomator && { isAutomator: true }),
@@ -5233,6 +5255,7 @@ export class AgentManagerDb {
             console.log(`[Deploy] Agent ${agentConfig.name}: type=${agentConfig.type}, isAutomator=${agentConfig.type === 'automator'}`);
             const isAutomator = agentConfig.type === 'automator';
             const agentType = agentConfig.type || 'claude';
+            const normalizedSkills = normalizeConfigSkills(agentConfig.skills);
 
             // Get heartbeat config
             const heartbeatConfig = agentConfig.heartbeat;
@@ -5244,6 +5267,7 @@ export class AgentManagerDb {
               runtime: effectiveRuntime,
               plugins: localPlugins,
               ...(agentConfig.agent && { agent: agentConfig.agent }),
+              ...(normalizedSkills && { skills: normalizedSkills }),
               allowed_tools: agentConfig.allowedTools,
               description: agentConfig.description,
               ...(isAutomator && { isAutomator: true }),

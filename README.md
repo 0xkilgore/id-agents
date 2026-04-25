@@ -9,7 +9,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-**Version 0.1.77-beta**
+**Version 0.1.78-beta**
 
 Run a team of AI coding agents from a single chat. Each agent is a real process with full tool access — **Claude Code CLI**, **OpenAI Codex**, **Cursor CLI**, or a mix. No UI needed. Connect from any terminal, Telegram, or SSH session.
 
@@ -623,7 +623,7 @@ agents:
 
 Standalone skills live at `configs/skills/<name>/SKILL.md`. Library root is `<cwd>/configs` by default; override with `ID_LIBRARY_ROOT` to point at any clone of [public-agents](https://github.com/idchain-world/public-agents).
 
-Deploy is **additive-only and receipt-driven**: Step A copies the agent entry, Step B overlays `skills:` on top, and any file whose on-disk SHA does not match what we last wrote is treated as user-owned and skipped. A workspace receipt at `.id-agents/receipt.json` is the ownership ledger for `/sync`, re-sync, and `unsync` (undeploy). See the [/sync guide](docs/guides/sync-command.md) for the full 4-case ownership rule, per-harness mapping, and memory-file fallback.
+Deploy is **additive-only and receipt-driven**: Step A copies the agent entry, Step B overlays `skills:` on top, and any file whose on-disk SHA does not match what we last wrote is treated as user-owned and skipped. A workspace receipt at `.id-agents/receipt.json` is the ownership ledger for `/sync`, re-sync, and `unsync` (undeploy). Re-running `/sync` against an unchanged team YAML and unchanged library is intended to be a true no-op: unchanged agents stay in the `unchanged` bucket and do not rebuild just because `skills:` was re-evaluated. See the [/sync guide](docs/guides/sync-command.md) for the full 4-case ownership rule, per-harness mapping, and memory-file fallback.
 
 The TUI ships a read-only library browser for `configs/agents/` and `configs/skills/` (`npm run tui:dev`).
 
