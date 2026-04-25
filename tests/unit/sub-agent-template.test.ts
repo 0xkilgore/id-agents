@@ -11,6 +11,8 @@ import {
   processConfig,
   copyAgentDirOverlay,
   copyLibraryAgentOverlay,
+  appendLibraryPersonaToAgentsMd,
+  upsertMarkedBlock,
 } from '../../src/config-parser.js';
 
 /* ------------------------------------------------------------------ */
@@ -570,25 +572,39 @@ describe('copyLibraryAgentOverlay', () => {
     expect(fs.readFileSync(path.join(workDir, '.claude', 'rules', 'style.md'), 'utf-8')).toBe('rule body');
   });
 
-  it('routes the overlay to .agents/ for the Codex runtime', () => {
-    fs.mkdirSync(path.join(agentsDir, 'frontend'), { recursive: true });
+  it('routes the overlay to .agents/ for the Codex runtime (drops inert CLAUDE.md)', () => {
+    // Codex personas live in workspace-root AGENTS.md (appended via
+    // appendLibraryPersonaToAgentsMd in the spawn flow). The recursive
+    // copy still drops other library files into .agents/, but the inert
+    // CLAUDE.md artifact is removed so it doesn't sit unused.
+    fs.mkdirSync(path.join(agentsDir, 'frontend', 'skills', 'demo'), { recursive: true });
     fs.writeFileSync(path.join(agentsDir, 'frontend', 'CLAUDE.md'), 'persona');
+    fs.writeFileSync(
+      path.join(agentsDir, 'frontend', 'skills', 'demo', 'SKILL.md'),
+      'skill body',
+    );
 
     const copied = copyLibraryAgentOverlay(workDir, 'frontend', 'codex', libraryRoot);
 
     expect(copied).toBe(true);
     expect(fs.existsSync(path.join(workDir, '.claude'))).toBe(false);
-    expect(fs.readFileSync(path.join(workDir, '.agents', 'CLAUDE.md'), 'utf-8')).toBe('persona');
+    expect(fs.existsSync(path.join(workDir, '.agents', 'CLAUDE.md'))).toBe(false);
+    expect(
+      fs.readFileSync(
+        path.join(workDir, '.agents', 'skills', 'demo', 'SKILL.md'),
+        'utf-8',
+      ),
+    ).toBe('skill body');
   });
 
-  it('routes the overlay to .cursor/ for the Cursor CLI runtime', () => {
+  it('routes the overlay to .cursor/ for the Cursor CLI runtime (drops inert CLAUDE.md)', () => {
     fs.mkdirSync(path.join(agentsDir, 'frontend'), { recursive: true });
     fs.writeFileSync(path.join(agentsDir, 'frontend', 'CLAUDE.md'), 'persona');
 
     const copied = copyLibraryAgentOverlay(workDir, 'frontend', 'cursor-cli', libraryRoot);
 
     expect(copied).toBe(true);
-    expect(fs.readFileSync(path.join(workDir, '.cursor', 'CLAUDE.md'), 'utf-8')).toBe('persona');
+    expect(fs.existsSync(path.join(workDir, '.cursor', 'CLAUDE.md'))).toBe(false);
   });
 
   it('routes the sibling persona to the rules sidecar for an agents-md-native entry on Claude', () => {
@@ -668,5 +684,235 @@ describe('copyLibraryAgentOverlay', () => {
     } finally {
       fs.rmSync(externalAgentDir, { recursive: true, force: true });
     }
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/*  upsertMarkedBlock                                                  */
+/* ------------------------------------------------------------------ */
+
+describe('upsertMarkedBlock', () => {
+  let tmpDir: string;
+  let target: string;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'id-agents-marker-'));
+    target = path.join(tmpDir, 'AGENTS.md');
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it('creates the file with a marker block when target is missing', () => {
+    upsertMarkedBlock(target, 'agent:foo', '# Foo persona\nbody line');
+
+    const out = fs.readFileSync(target, 'utf-8');
+    expect(out).toBe(
+      '<!-- BEGIN id-agents agent:foo -->\n# Foo persona\nbody line\n<!-- END id-agents agent:foo -->\n',
+    );
+  });
+
+  it('appends the block below existing content when no markers are present', () => {
+    fs.writeFileSync(target, '# Framework section\nuser line\n');
+    upsertMarkedBlock(target, 'agent:foo', 'persona body');
+
+    const out = fs.readFileSync(target, 'utf-8');
+    expect(out).toBe(
+      '# Framework section\nuser line\n\n' +
+        '<!-- BEGIN id-agents agent:foo -->\npersona body\n<!-- END id-agents agent:foo -->\n',
+    );
+  });
+
+  it('replaces only the marked block on re-upsert, preserving content outside', () => {
+    fs.writeFileSync(
+      target,
+      '# Framework section\nuser line\n\n' +
+        '<!-- BEGIN id-agents agent:foo -->\nold persona\n<!-- END id-agents agent:foo -->\n' +
+        'after-marker user note\n',
+    );
+
+    upsertMarkedBlock(target, 'agent:foo', 'new persona');
+
+    const out = fs.readFileSync(target, 'utf-8');
+    expect(out).toBe(
+      '# Framework section\nuser line\n\n' +
+        '<!-- BEGIN id-agents agent:foo -->\nnew persona\n<!-- END id-agents agent:foo -->\n' +
+        'after-marker user note\n',
+    );
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/*  appendLibraryPersonaToAgentsMd — Codex/Cursor persona append      */
+/* ------------------------------------------------------------------ */
+
+describe('appendLibraryPersonaToAgentsMd', () => {
+  let libraryRoot: string;
+  let agentsDir: string;
+  let workDir: string;
+
+  beforeEach(() => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'id-agents-codex-persona-'));
+    libraryRoot = path.join(tmp, 'configs');
+    agentsDir = path.join(libraryRoot, 'agents');
+    workDir = path.join(tmp, 'workspace');
+    fs.mkdirSync(agentsDir, { recursive: true });
+    fs.mkdirSync(workDir, { recursive: true });
+  });
+
+  afterEach(() => {
+    fs.rmSync(path.dirname(libraryRoot), { recursive: true, force: true });
+  });
+
+  function seedClaudeNativeEntry(name: string, persona: string): void {
+    fs.mkdirSync(path.join(agentsDir, name), { recursive: true });
+    fs.writeFileSync(path.join(agentsDir, name, 'CLAUDE.md'), persona);
+  }
+
+  function readAgentsMd(): string {
+    return fs.readFileSync(path.join(workDir, 'AGENTS.md'), 'utf-8');
+  }
+
+  const begin = (name: string): string => `<!-- BEGIN id-agents agent:${name} -->`;
+  const end = (name: string): string => `<!-- END id-agents agent:${name} -->`;
+
+  it('fresh deploy: appends a marker block below the framework section on Codex', () => {
+    seedClaudeNativeEntry('foundry-dev', '# Foundry persona\nuse forge.\n');
+    // Simulate the framework personality file write that happens just
+    // before this helper runs in the spawn flow.
+    fs.writeFileSync(path.join(workDir, 'AGENTS.md'), '# Protocol defaults\nframework body\n');
+
+    const ok = appendLibraryPersonaToAgentsMd(workDir, 'foundry-dev', 'codex', libraryRoot);
+    expect(ok).toBe(true);
+
+    const out = readAgentsMd();
+    expect(out.startsWith('# Protocol defaults\nframework body\n')).toBe(true);
+    expect(out).toContain(`${begin('foundry-dev')}\n# Foundry persona\nuse forge.\n${end('foundry-dev')}\n`);
+  });
+
+  it('re-deploy: replaces only the marked block, framework section untouched', () => {
+    seedClaudeNativeEntry('foundry-dev', '# Foundry persona v1\n');
+    fs.writeFileSync(path.join(workDir, 'AGENTS.md'), '# Protocol defaults\nframework body\n');
+
+    appendLibraryPersonaToAgentsMd(workDir, 'foundry-dev', 'codex', libraryRoot);
+
+    // Library content changes, framework rewrites AGENTS.md identically.
+    fs.writeFileSync(path.join(agentsDir, 'foundry-dev', 'CLAUDE.md'), '# Foundry persona v2\nupdated\n');
+    fs.writeFileSync(path.join(workDir, 'AGENTS.md'),
+      '# Protocol defaults\nframework body\n\n' +
+      `${begin('foundry-dev')}\n# Foundry persona v1\n${end('foundry-dev')}\n`,
+    );
+
+    appendLibraryPersonaToAgentsMd(workDir, 'foundry-dev', 'codex', libraryRoot);
+
+    const out = readAgentsMd();
+    expect(out).toBe(
+      '# Protocol defaults\nframework body\n\n' +
+      `${begin('foundry-dev')}\n# Foundry persona v2\nupdated\n${end('foundry-dev')}\n`,
+    );
+  });
+
+  it('preserves user edits ABOVE the marker block on re-deploy', () => {
+    seedClaudeNativeEntry('foundry-dev', '# Foundry persona v1\n');
+    fs.writeFileSync(path.join(workDir, 'AGENTS.md'),
+      '# Protocol defaults\nframework body\n\n## User notes\nimportant local context\n',
+    );
+
+    appendLibraryPersonaToAgentsMd(workDir, 'foundry-dev', 'codex', libraryRoot);
+
+    // Update library and re-run.
+    fs.writeFileSync(path.join(agentsDir, 'foundry-dev', 'CLAUDE.md'), '# Foundry persona v2\n');
+    appendLibraryPersonaToAgentsMd(workDir, 'foundry-dev', 'codex', libraryRoot);
+
+    const out = readAgentsMd();
+    // User notes block above the marker is preserved verbatim.
+    expect(out).toContain('## User notes\nimportant local context\n');
+    // Persona is the latest v2 inside markers.
+    expect(out).toContain(`${begin('foundry-dev')}\n# Foundry persona v2\n${end('foundry-dev')}\n`);
+    // The v1 persona is no longer present anywhere in the file.
+    expect(out).not.toContain('# Foundry persona v1');
+  });
+
+  it('Cursor runtime: same behavior — appends to root AGENTS.md', () => {
+    seedClaudeNativeEntry('foundry-dev', '# Cursor persona\n');
+    fs.writeFileSync(path.join(workDir, 'AGENTS.md'), '# Cursor framework\n');
+
+    const ok = appendLibraryPersonaToAgentsMd(workDir, 'foundry-dev', 'cursor-cli', libraryRoot);
+    expect(ok).toBe(true);
+
+    const out = readAgentsMd();
+    expect(out).toContain('# Cursor framework\n');
+    expect(out).toContain(`${begin('foundry-dev')}\n# Cursor persona\n${end('foundry-dev')}\n`);
+  });
+
+  it('agents-md-native source: persona body comes from the sibling .md', () => {
+    fs.mkdirSync(path.join(agentsDir, 'backend'), { recursive: true });
+    fs.writeFileSync(path.join(agentsDir, 'backend.md'), '# Backend persona\n');
+    fs.writeFileSync(path.join(workDir, 'AGENTS.md'), '# framework\n');
+
+    const ok = appendLibraryPersonaToAgentsMd(workDir, 'backend', 'codex', libraryRoot);
+    expect(ok).toBe(true);
+    expect(readAgentsMd()).toContain(`${begin('backend')}\n# Backend persona\n${end('backend')}\n`);
+  });
+
+  it('Claude runtime: helper is a no-op (sidecar handles persona)', () => {
+    seedClaudeNativeEntry('foundry-dev', '# persona\n');
+
+    const ok = appendLibraryPersonaToAgentsMd(workDir, 'foundry-dev', 'claude-code-cli', libraryRoot);
+    expect(ok).toBe(false);
+    expect(fs.existsSync(path.join(workDir, 'AGENTS.md'))).toBe(false);
+  });
+
+  it('returns false when the named library entry is missing', () => {
+    const ok = appendLibraryPersonaToAgentsMd(workDir, 'unknown', 'codex', libraryRoot);
+    expect(ok).toBe(false);
+    expect(fs.existsSync(path.join(workDir, 'AGENTS.md'))).toBe(false);
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/*  copyLibraryAgentOverlay — orphan CLAUDE.md cleanup (Codex/Cursor)  */
+/* ------------------------------------------------------------------ */
+
+describe('copyLibraryAgentOverlay orphan cleanup', () => {
+  let libraryRoot: string;
+  let agentsDir: string;
+  let workDir: string;
+
+  beforeEach(() => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'id-agents-orphan-'));
+    libraryRoot = path.join(tmp, 'configs');
+    agentsDir = path.join(libraryRoot, 'agents');
+    workDir = path.join(tmp, 'workspace');
+    fs.mkdirSync(agentsDir, { recursive: true });
+    fs.mkdirSync(workDir, { recursive: true });
+  });
+
+  afterEach(() => {
+    fs.rmSync(path.dirname(libraryRoot), { recursive: true, force: true });
+  });
+
+  it('Codex: removes inert .agents/CLAUDE.md after recursive copy', () => {
+    fs.mkdirSync(path.join(agentsDir, 'foundry-dev', 'skills', 'forge'), { recursive: true });
+    fs.writeFileSync(path.join(agentsDir, 'foundry-dev', 'CLAUDE.md'), 'persona');
+    fs.writeFileSync(
+      path.join(agentsDir, 'foundry-dev', 'skills', 'forge', 'SKILL.md'),
+      'skill body',
+    );
+
+    copyLibraryAgentOverlay(workDir, 'foundry-dev', 'codex', libraryRoot);
+
+    expect(fs.existsSync(path.join(workDir, '.agents', 'CLAUDE.md'))).toBe(false);
+    expect(fs.existsSync(path.join(workDir, '.agents', 'skills', 'forge', 'SKILL.md'))).toBe(true);
+  });
+
+  it('Cursor: removes inert .cursor/CLAUDE.md after recursive copy', () => {
+    fs.mkdirSync(path.join(agentsDir, 'foundry-dev'), { recursive: true });
+    fs.writeFileSync(path.join(agentsDir, 'foundry-dev', 'CLAUDE.md'), 'persona');
+
+    copyLibraryAgentOverlay(workDir, 'foundry-dev', 'cursor-cli', libraryRoot);
+
+    expect(fs.existsSync(path.join(workDir, '.cursor', 'CLAUDE.md'))).toBe(false);
   });
 });

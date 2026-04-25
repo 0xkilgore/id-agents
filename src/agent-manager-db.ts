@@ -30,7 +30,13 @@ import { type Db } from './db/db-service.js';
 import type { AgentRow, ScheduleDefinitionRow, TaskRow } from './db/types.js';
 import fetch from 'node-fetch';
 import type { PluginConfig, DeployConfig, HeartbeatConfig, CalendarSpec, ScheduleDeliveryMode } from './config-parser.js';
-import { processConfig, copyAgentDirOverlay, copyHeartbeatMd, copyLibraryAgentOverlay } from './config-parser.js';
+import {
+  processConfig,
+  copyAgentDirOverlay,
+  copyHeartbeatMd,
+  copyLibraryAgentOverlay,
+  appendLibraryPersonaToAgentsMd,
+} from './config-parser.js';
 import {
   getLibraryAgent,
   getLibrarySkill,
@@ -2334,6 +2340,14 @@ export class AgentManagerDb {
             mkdirSync(personalityDir, { recursive: true });
           }
           writeFileSync(personalityPath, parts.join('\n\n'));
+        }
+
+        // 5. For Codex/Cursor, append the library persona to AGENTS.md
+        // between marker fences (no-op for Claude; persona lives in
+        // .claude/rules/ sidecar). Runs AFTER the framework write so the
+        // marker block sits below the framework section.
+        if (agentOverlay) {
+          appendLibraryPersonaToAgentsMd(workingDirectory, agentOverlay, effectiveRuntime);
         }
 
         // Copy plugins to agent's working directory (agent owns its plugins)
@@ -4778,6 +4792,12 @@ export class AgentManagerDb {
             writeFileSync(personalityPath, parts.join('\n\n'));
           }
 
+          // 5. Codex/Cursor: append library persona to AGENTS.md inside
+          // marker fences (no-op for Claude).
+          if (spec.agent) {
+            appendLibraryPersonaToAgentsMd(workingDirectory, spec.agent, effectiveRuntime);
+          }
+
           // Update DB row in place — preserve the agent ID
           const isAutomator = spec.type === 'automator';
           const updatedMeta: AgentMetadata = {
@@ -4888,6 +4908,12 @@ export class AgentManagerDb {
               const personalityDir = path.dirname(personalityPath);
               if (!existsSync(personalityDir)) mkdirSync(personalityDir, { recursive: true });
               writeFileSync(personalityPath, parts.join('\n\n'));
+            }
+
+            // 5. Codex/Cursor: append library persona to AGENTS.md inside
+            // marker fences (no-op for Claude).
+            if (spec.agent) {
+              appendLibraryPersonaToAgentsMd(workingDirectory, spec.agent, effectiveRuntime);
             }
 
             const metadata: AgentMetadata = {
@@ -5233,6 +5259,12 @@ export class AgentManagerDb {
                 mkdirSync(personalityDir, { recursive: true });
               }
               writeFileSync(personalityPath, parts.join('\n\n'));
+            }
+
+            // 5. Codex/Cursor: append library persona to AGENTS.md inside
+            // marker fences (no-op for Claude).
+            if (agentConfig.agent) {
+              appendLibraryPersonaToAgentsMd(workingDirectory, agentConfig.agent, effectiveRuntime);
             }
 
             // Remove any existing agent with this name to avoid duplicates on redeploy

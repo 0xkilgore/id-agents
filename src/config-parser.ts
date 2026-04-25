@@ -748,8 +748,120 @@ export function copyLibraryAgentOverlay(
       fs.mkdirSync(path.dirname(sidecarPath), { recursive: true });
       fs.copyFileSync(entry.memoryFile, sidecarPath);
     }
+  } else {
+    // Codex/Cursor: persona is appended to <workspaceRoot>/AGENTS.md by
+    // appendLibraryPersonaToAgentsMd (called by the spawn flow after the
+    // framework writes its own AGENTS.md). The recursive copy may have
+    // dropped the library's CLAUDE.md into the overlay target as an inert
+    // artifact — neither runtime reads it from there, and leaving it on
+    // disk just confuses operators inspecting the workspace. Drop it.
+    const orphan = path.join(destDir, 'CLAUDE.md');
+    if (fs.existsSync(orphan)) fs.unlinkSync(orphan);
   }
 
+  return true;
+}
+
+/**
+ * Marker fences used to delineate id-agents-managed blocks inside a host
+ * markdown file. Re-deploy replaces only the content between the begin/end
+ * markers, leaving everything outside untouched.
+ */
+function makeMarker(slug: string): { begin: string; end: string } {
+  return {
+    begin: `<!-- BEGIN id-agents ${slug} -->`,
+    end: `<!-- END id-agents ${slug} -->`,
+  };
+}
+
+/**
+ * Idempotently insert (or replace) a marker-fenced block inside `filePath`.
+ *
+ * - First-time call: creates the file (or appends to an existing one) with a
+ *   `BEGIN ... body ... END` block at the bottom, separated from any prior
+ *   content by a blank line.
+ * - Subsequent calls with the same `slug`: locate the existing fences and
+ *   replace only the bytes between them. Content before BEGIN and after END
+ *   is preserved exactly.
+ *
+ * The function is a low-level utility shared by Codex/Cursor persona append
+ * and any future caller that needs marker-driven file segments.
+ */
+export function upsertMarkedBlock(filePath: string, slug: string, body: string): void {
+  const { begin, end } = makeMarker(slug);
+  const trimmedBody = body.replace(/\n+$/, '');
+  const block = `${begin}\n${trimmedBody}\n${end}\n`;
+
+  let existing = '';
+  try { existing = fs.readFileSync(filePath, 'utf-8'); } catch { /* missing file */ }
+
+  const beginIdx = existing.indexOf(begin);
+  const endIdx = existing.indexOf(end);
+  if (beginIdx !== -1 && endIdx !== -1 && endIdx > beginIdx) {
+    const before = existing.slice(0, beginIdx);
+    const afterRaw = existing.slice(endIdx + end.length);
+    // Drop a single trailing newline immediately after the closing marker
+    // so successive upserts don't accumulate blank lines.
+    const after = afterRaw.startsWith('\n') ? afterRaw.slice(1) : afterRaw;
+    fs.mkdirSync(path.dirname(filePath), { recursive: true });
+    fs.writeFileSync(filePath, `${before}${block}${after}`);
+    return;
+  }
+
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  if (existing.length === 0) {
+    fs.writeFileSync(filePath, block);
+    return;
+  }
+  // Separate the existing content from the new block with exactly one blank
+  // line so the host file's last paragraph isn't glued to BEGIN.
+  const sep = existing.endsWith('\n\n') ? '' : existing.endsWith('\n') ? '\n' : '\n\n';
+  fs.writeFileSync(filePath, `${existing}${sep}${block}`);
+}
+
+/**
+ * For Codex/Cursor runtimes only: append (or replace) the library agent
+ * persona inside marker fences in `<workingDir>/AGENTS.md`.
+ *
+ * The framework write step in agent-manager-db.ts is responsible for
+ * authoring AGENTS.md with PROTOCOL_DEFAULTS + roleBody (the "framework
+ * section above"). This function runs AFTER that write and upserts a
+ * `<!-- BEGIN id-agents agent:<name> -->` ... `END` block at the bottom,
+ * preserving everything above the markers and replacing only the marked
+ * block on re-deploy.
+ *
+ * No-op for Claude runtimes — Claude personas live in the
+ * `.claude/rules/agent-<name>.md` sidecar instead.
+ *
+ * Returns true when AGENTS.md was created or modified, false otherwise.
+ */
+export function appendLibraryPersonaToAgentsMd(
+  workingDir: string,
+  name: string,
+  runtime?: HarnessType | string,
+  libraryRoot?: string,
+): boolean {
+  const rp = getRuntimePaths(runtime);
+  if (rp.overlayTarget === '.claude') return false;
+
+  const root = libraryRoot
+    ? path.resolve(libraryRoot)
+    : resolveDefaultLibraryRoot();
+  if (!root) return false;
+
+  const scan = enumerateLibraryAgents(path.join(root, 'agents'));
+  if (scan.errors.some(err => err.name === name)) return false;
+  const entry = scan.entries.find(e => e.name === name);
+  if (!entry) return false;
+
+  const personaSource = entry.shape === 'claude-native'
+    ? path.join(entry.dirPath, 'CLAUDE.md')
+    : entry.memoryFile;
+  if (!fs.existsSync(personaSource)) return false;
+
+  const personaBody = fs.readFileSync(personaSource, 'utf-8');
+  const agentsMdPath = path.join(workingDir, 'AGENTS.md');
+  upsertMarkedBlock(agentsMdPath, `agent:${name}`, personaBody);
   return true;
 }
 
