@@ -135,7 +135,6 @@ export function App({ staticMode = false }: AppProps = {}): React.ReactElement {
   const [libSkillWindowStart, setLibSkillWindowStart] = useState(0);
   const [libAgentDetailScroll, setLibAgentDetailScroll] = useState(0);
   const [libSkillDetailScroll, setLibSkillDetailScroll] = useState(0);
-  const [paused, setPaused] = useState(false);
   const [showQuitConfirm, setShowQuitConfirm] = useState(false);
   const [cooldownEpoch, setCooldownEpoch] = useState<number>(() => Date.now());
 
@@ -145,16 +144,16 @@ export function App({ staticMode = false }: AppProps = {}): React.ReactElement {
   // fire when an item crosses a 60/300/900s band.
   useEffect(() => {
     const needsTick = view === 'news' || view === 'agents';
-    if (!needsTick || paused || staticMode) return;
+    if (!needsTick || staticMode) return;
     setCooldownEpoch(Date.now());
     const id = setInterval(() => setCooldownEpoch(Date.now()), NEWS_COOLDOWN_TICK_MS);
     return () => clearInterval(id);
-  }, [view, paused, staticMode]);
+  }, [view, staticMode]);
 
   const teamsPoll = usePolling<Team[]>(
     (signal) => fetchTeams(manager, signal),
     TEAMS_POLL_MS,
-    paused || staticMode,
+    staticMode,
     [manager],
   );
   const teams = staticMode ? staticTeams ?? [] : teamsPoll.data ?? [];
@@ -170,7 +169,7 @@ export function App({ staticMode = false }: AppProps = {}): React.ReactElement {
   const agentsPoll = usePolling<Agent[]>(
     agentsFetcher,
     AGENTS_POLL_MS,
-    paused || staticMode,
+    staticMode,
     [manager, teams.length],
   );
   const allAgents = staticMode ? staticAllAgents ?? [] : agentsPoll.data ?? [];
@@ -189,7 +188,7 @@ export function App({ staticMode = false }: AppProps = {}): React.ReactElement {
   const newsFreshnessPoll = usePolling<Array<[string, number | null]>>(
     newsFreshnessFetcher,
     AGENTS_POLL_MS,
-    paused || staticMode || view !== 'agents',
+    staticMode || view !== 'agents',
     [manager, allAgents.length, view],
   );
   const latestNewsTsById = useMemo(() => {
@@ -271,7 +270,7 @@ export function App({ staticMode = false }: AppProps = {}): React.ReactElement {
   const memoryPoll = usePolling<Array<[string, number | null]>>(
     memoryFetcher,
     AGENTS_POLL_MS,
-    paused || staticMode || view !== 'agents',
+    staticMode || view !== 'agents',
     [pidByAgentId, view],
   );
   const memBytesById = useMemo(() => {
@@ -320,7 +319,7 @@ export function App({ staticMode = false }: AppProps = {}): React.ReactElement {
   const tasksPoll = usePolling<Task[]>(
     tasksFetcher,
     TASKS_POLL_MS,
-    paused || staticMode || (view !== 'tasks' && view !== 'task-detail'),
+    staticMode || (view !== 'tasks' && view !== 'task-detail'),
     [manager, view],
   );
   const allTasks = tasksPoll.data ?? [];
@@ -374,7 +373,7 @@ export function App({ staticMode = false }: AppProps = {}): React.ReactElement {
   const schedulesPoll = usePolling<Schedule[]>(
     schedulesFetcher,
     SCHEDULES_POLL_MS,
-    paused || staticMode || (view !== 'calendar' && view !== 'heartbeats'),
+    staticMode || (view !== 'calendar' && view !== 'heartbeats'),
     [manager, teams.length, view],
   );
   const allSchedules = schedulesPoll.data ?? [];
@@ -496,7 +495,7 @@ export function App({ staticMode = false }: AppProps = {}): React.ReactElement {
   const newsPoll = usePolling<NewsItem[]>(
     newsFetcher,
     NEWS_POLL_MS,
-    paused || staticMode || (view !== 'news' && view !== 'news-detail'),
+    staticMode || (view !== 'news' && view !== 'news-detail'),
     [manager, selectedAgentName ?? '', selectedAgentTeam ?? '', view],
   );
   const newsItems = newsPoll.data ?? [];
@@ -696,7 +695,7 @@ export function App({ staticMode = false }: AppProps = {}): React.ReactElement {
   const libraryAgentsPoll = usePolling<LibraryAgentListResponse>(
     libraryAgentsFetcher,
     LIBRARY_POLL_MS,
-    paused || staticMode || (view !== 'library-agents' && view !== 'library-agent-detail'),
+    staticMode || (view !== 'library-agents' && view !== 'library-agent-detail'),
     [manager, view],
   );
   const libraryAgentRows = libraryAgentsPoll.data?.entries ?? [];
@@ -713,7 +712,7 @@ export function App({ staticMode = false }: AppProps = {}): React.ReactElement {
   const librarySkillsPoll = usePolling<LibrarySkillListResponse>(
     librarySkillsFetcher,
     LIBRARY_POLL_MS,
-    paused || staticMode || (view !== 'library-skills' && view !== 'library-skill-detail'),
+    staticMode || (view !== 'library-skills' && view !== 'library-skill-detail'),
     [manager, view],
   );
   const librarySkillRows = librarySkillsPoll.data?.entries ?? [];
@@ -731,7 +730,7 @@ export function App({ staticMode = false }: AppProps = {}): React.ReactElement {
   const libraryAgentDetailPoll = usePolling<LibraryAgentDetailResponse | null>(
     libraryAgentDetailFetcher,
     LIBRARY_POLL_MS,
-    paused || staticMode || view !== 'library-agent-detail' || !selectedLibraryAgentName,
+    staticMode || view !== 'library-agent-detail' || !selectedLibraryAgentName,
     [manager, selectedLibraryAgentName ?? '', view],
   );
 
@@ -745,7 +744,7 @@ export function App({ staticMode = false }: AppProps = {}): React.ReactElement {
   const librarySkillDetailPoll = usePolling<LibrarySkillDetailResponse | null>(
     librarySkillDetailFetcher,
     LIBRARY_POLL_MS,
-    paused || staticMode || view !== 'library-skill-detail' || !selectedLibrarySkillName,
+    staticMode || view !== 'library-skill-detail' || !selectedLibrarySkillName,
     [manager, selectedLibrarySkillName ?? '', view],
   );
 
@@ -860,11 +859,6 @@ export function App({ staticMode = false }: AppProps = {}): React.ReactElement {
         setShowQuitConfirm(true);
         return;
       }
-      if (input === 'p') {
-        setPaused((p) => !p);
-        return;
-      }
-
       if (view === 'agents') {
         if (input === 't') return toggleTasksView();
         if (input === 'c') return openCalendar();
@@ -1256,7 +1250,7 @@ export function App({ staticMode = false }: AppProps = {}): React.ReactElement {
           contentWidth={DETAIL_CONTENT_WIDTH}
         />
       )}
-      <Footer view={view} paused={paused} />
+      <Footer view={view} />
     </Box>
   );
 }

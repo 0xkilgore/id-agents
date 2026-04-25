@@ -18,7 +18,6 @@ export type FooterView =
 
 interface FooterProps {
   view: FooterView;
-  paused?: boolean;
 }
 
 // Top-level views (agents, tasks, calendar, heartbeats) are reached via
@@ -26,29 +25,26 @@ interface FooterProps {
 // downs (task-detail, heartbeat-detail, news, news-detail) keep the
 // back hint because they have a real parent to return to.
 const HINTS: Record<FooterView, string> = {
-  agents: '↑↓ nav · → detail/news · Tab team · t tasks · l library · s skills · c calendar · h heartbeats · p pause · q quit',
-  'agent-detail': '↑↓ scroll · p pause · q quit · ← back',
-  tasks: '↑↓ nav · → detail · Tab team · l library · s skills · c calendar · h heartbeats · p pause · q quit · ← back',
-  calendar: '↑↓ nav · a agents · t tasks · l library · s skills · h heartbeats · p pause · q quit',
-  heartbeats: '↑↓ nav · → detail · a agents · t tasks · l library · s skills · c calendar · p pause · q quit',
-  'task-detail': '↑↓ scroll · p pause · q quit · ← back',
-  'heartbeat-detail': '↑↓ scroll · p pause · q quit · ← back',
-  news: '↑↓ scroll · → open · p pause · q quit · ← back',
-  'news-detail': '↑↓ scroll · p pause · q quit · ← back',
-  'library-agents': '↑↓ nav · → detail · s skills · a agents · t tasks · c calendar · h heartbeats · p pause · q quit · ← back',
-  'library-agent-detail': '↑↓ scroll · p pause · q quit · ← back',
-  'library-skills': '↑↓ nav · → detail · l library · a agents · t tasks · c calendar · h heartbeats · p pause · q quit · ← back',
-  'library-skill-detail': '↑↓ scroll · p pause · q quit · ← back',
+  agents: '↑↓ nav · → detail/news · Tab team · t tasks · l library · s skills · c calendar · h heartbeats · q quit',
+  'agent-detail': '↑↓ scroll · q quit · ← back',
+  tasks: '↑↓ nav · → detail · Tab team · l library · s skills · c calendar · h heartbeats · q quit · ← back',
+  calendar: '↑↓ nav · a agents · t tasks · l library · s skills · h heartbeats · q quit',
+  heartbeats: '↑↓ nav · → detail · a agents · t tasks · l library · s skills · c calendar · q quit',
+  'task-detail': '↑↓ scroll · q quit · ← back',
+  'heartbeat-detail': '↑↓ scroll · q quit · ← back',
+  news: '↑↓ scroll · → open · q quit · ← back',
+  'news-detail': '↑↓ scroll · q quit · ← back',
+  'library-agents': '↑↓ nav · → detail · s skills · a agents · t tasks · c calendar · h heartbeats · q quit · ← back',
+  'library-agent-detail': '↑↓ scroll · q quit · ← back',
+  'library-skills': '↑↓ nav · → detail · l library · a agents · t tasks · c calendar · h heartbeats · q quit · ← back',
+  'library-skill-detail': '↑↓ scroll · q quit · ← back',
 };
 
-export function Footer({ view, paused }: FooterProps): React.ReactElement {
+export function Footer({ view }: FooterProps): React.ReactElement {
   return (
     <Box paddingX={1} justifyContent="space-between">
       <Text dimColor>{HINTS[view]}</Text>
-      <Box>
-        {paused ? <Text color="yellow">⏸ paused  </Text> : null}
-        <Text dimColor>ID Agents Dashboard</Text>
-      </Box>
+      <Text dimColor>ID Agents Dashboard</Text>
     </Box>
   );
 }

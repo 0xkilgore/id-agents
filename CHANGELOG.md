@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.71-beta
+
+### TUI
+
+- Drop the `p` pause hotkey and the paused indicator. The feature toggled all polling intervals at once (an internal-debug-style escape hatch). It cluttered every footer hint string and rarely got used in practice. Agents view, tasks, calendar, heartbeats, news, library views all updated to drop `· p pause` from their hint lines, and the `paused` state machinery is removed from `App.tsx`. If you genuinely need to freeze polling, kill the TUI process — it'll come back where you left off.
+
 ## 0.1.70-beta
 
 ### TUI
