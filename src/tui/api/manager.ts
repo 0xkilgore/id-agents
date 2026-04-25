@@ -186,3 +186,89 @@ export async function fetchAgentsAllTeams(
   }
   return [...merged.values()];
 }
+
+/* ------------------------------------------------------------------ */
+/*  Slice 8: library inventory (manager /library/* endpoints)          */
+/* ------------------------------------------------------------------ */
+
+export type LibraryAgentShape = 'claude-native' | 'agents-md-native';
+
+export interface LibraryAgentRow {
+  name: string;
+  shape: LibraryAgentShape;
+  hasReadme: boolean;
+  hasLicense: boolean;
+  subfolders: string[];
+  source_path: string;
+}
+
+export interface LibraryAgentListResponse {
+  libraryRoot: string | null;
+  entries: LibraryAgentRow[];
+  errors: Array<{ name: string; code: string; message: string }>;
+}
+
+export interface LibraryAgentDetailResponse extends LibraryAgentRow {
+  memoryFile: string;
+  readme: string | null;
+  memory: string;
+  bundledSkills: string[];
+}
+
+export interface LibrarySkillRow {
+  name: string;
+  hasSkillMd: boolean;
+  source_path: string;
+}
+
+export interface LibrarySkillListResponse {
+  libraryRoot: string | null;
+  entries: LibrarySkillRow[];
+}
+
+export interface LibrarySkillDetailResponse extends LibrarySkillRow {
+  skillFile: string;
+  skillName: string | null;
+  description: string | null;
+  bodyLength: number;
+}
+
+export async function fetchLibraryAgents(
+  manager: string,
+  signal: AbortSignal,
+): Promise<LibraryAgentListResponse> {
+  return getJson<LibraryAgentListResponse>(`${manager}/library/agents`, signal);
+}
+
+export async function fetchLibraryAgent(
+  manager: string,
+  name: string,
+  signal: AbortSignal,
+): Promise<LibraryAgentDetailResponse | null> {
+  const res = await fetch(`${manager}/library/agents/${encodeURIComponent(name)}`, { signal });
+  if (res.status === 404) return null;
+  if (!res.ok) {
+    throw new Error(`GET /library/agents/${name} → ${res.status} ${res.statusText}`);
+  }
+  return (await res.json()) as LibraryAgentDetailResponse;
+}
+
+export async function fetchLibrarySkills(
+  manager: string,
+  signal: AbortSignal,
+): Promise<LibrarySkillListResponse> {
+  return getJson<LibrarySkillListResponse>(`${manager}/library/skills`, signal);
+}
+
+export async function fetchLibrarySkill(
+  manager: string,
+  name: string,
+  signal: AbortSignal,
+): Promise<LibrarySkillDetailResponse | null> {
+  const res = await fetch(`${manager}/library/skills/${encodeURIComponent(name)}`, { signal });
+  if (res.status === 404) return null;
+  if (!res.ok) {
+    throw new Error(`GET /library/skills/${name} → ${res.status} ${res.statusText}`);
+  }
+  return (await res.json()) as LibrarySkillDetailResponse;
+}

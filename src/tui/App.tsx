@@ -12,15 +12,27 @@ import { CalendarView } from './components/CalendarView.js';
 import { HeartbeatsView, type HeartbeatRow } from './components/HeartbeatsView.js';
 import { HeartbeatDetail } from './components/HeartbeatDetail.js';
 import { AgentDetail } from './components/AgentDetail.js';
+import { LibraryAgentsTable } from './components/LibraryAgentsTable.js';
+import { LibraryAgentDetail } from './components/LibraryAgentDetail.js';
+import { LibrarySkillsTable } from './components/LibrarySkillsTable.js';
+import { LibrarySkillDetail } from './components/LibrarySkillDetail.js';
 import type { Agent, NewsItem, Schedule, Task, Team } from './api/types.js';
 import {
   fetchAgentNews,
   fetchAgentsAllTeams,
   fetchAgentsLatestNewsTs,
+  fetchLibraryAgent,
+  fetchLibraryAgents,
+  fetchLibrarySkill,
+  fetchLibrarySkills,
   fetchSchedulesAllTeams,
   fetchTasks,
   fetchTeams,
   getManagerUrl,
+  type LibraryAgentDetailResponse,
+  type LibraryAgentListResponse,
+  type LibrarySkillDetailResponse,
+  type LibrarySkillListResponse,
 } from './api/manager.js';
 import { usePolling } from './hooks/usePolling.js';
 import { humanizeUptime } from './util/format.js';
@@ -40,13 +52,18 @@ type View =
   | 'task-detail'
   | 'calendar'
   | 'heartbeats'
-  | 'heartbeat-detail';
+  | 'heartbeat-detail'
+  | 'library-agents'
+  | 'library-agent-detail'
+  | 'library-skills'
+  | 'library-skill-detail';
 
 const AGENTS_POLL_MS = 2000;
 const TEAMS_POLL_MS = 15000;
 const NEWS_POLL_MS = 3000;
 const TASKS_POLL_MS = 5000;
 const SCHEDULES_POLL_MS = 5000;
+const LIBRARY_POLL_MS = 5000;
 const NEWS_COOLDOWN_TICK_MS = 10_000;
 const AGENTS_CHROME_ROWS = 11;
 const NEWS_CHROME_ROWS = 6;
@@ -61,6 +78,9 @@ const CALENDAR_CHROME_ROWS = 7;
 // Heartbeats: no TeamsPanel, no StatusStrip — bordered list box
 // (windowSize + 6) + footer (1) = 7. Matches Calendar.
 const HEARTBEATS_CHROME_ROWS = 7;
+// Library tables include a one-line subtitle (the libraryRoot path) on top
+// of the standard list-box chrome, so they need 1 extra row vs Heartbeats.
+const LIBRARY_CHROME_ROWS = 8;
 const DETAIL_CONTENT_WIDTH = 76;
 const MIN_VISIBLE = 3;
 const SELF_AGENT = 'tui';
@@ -109,6 +129,12 @@ export function App({ staticMode = false }: AppProps = {}): React.ReactElement {
   const [schedWindowStart, setSchedWindowStart] = useState(0);
   const [hbSelectedIndex, setHbSelectedIndex] = useState(0);
   const [hbWindowStart, setHbWindowStart] = useState(0);
+  const [libAgentSelectedIndex, setLibAgentSelectedIndex] = useState(0);
+  const [libAgentWindowStart, setLibAgentWindowStart] = useState(0);
+  const [libSkillSelectedIndex, setLibSkillSelectedIndex] = useState(0);
+  const [libSkillWindowStart, setLibSkillWindowStart] = useState(0);
+  const [libAgentDetailScroll, setLibAgentDetailScroll] = useState(0);
+  const [libSkillDetailScroll, setLibSkillDetailScroll] = useState(0);
   const [paused, setPaused] = useState(false);
   const [showQuitConfirm, setShowQuitConfirm] = useState(false);
   const [cooldownEpoch, setCooldownEpoch] = useState<number>(() => Date.now());
@@ -283,6 +309,7 @@ export function App({ staticMode = false }: AppProps = {}): React.ReactElement {
   const tasksWindowSize = Math.max(MIN_VISIBLE, rows - TASKS_CHROME_ROWS);
   const calendarWindowSize = Math.max(MIN_VISIBLE, rows - CALENDAR_CHROME_ROWS);
   const heartbeatsWindowSize = Math.max(MIN_VISIBLE, rows - HEARTBEATS_CHROME_ROWS);
+  const libraryWindowSize = Math.max(MIN_VISIBLE, rows - LIBRARY_CHROME_ROWS);
   const total = visibleAgents.length;
 
   // Tasks polling
@@ -658,6 +685,156 @@ export function App({ staticMode = false }: AppProps = {}): React.ReactElement {
     [],
   );
 
+  // ---------------------------------------------------------------- Library
+  // Read-only browser fed by slice-7 manager /library/* endpoints. No
+  // filesystem access from the TUI; cadence matches TasksTable.
+  const libraryAgentsFetcher = useCallback(
+    (signal: AbortSignal): Promise<LibraryAgentListResponse> =>
+      fetchLibraryAgents(manager, signal),
+    [manager],
+  );
+  const libraryAgentsPoll = usePolling<LibraryAgentListResponse>(
+    libraryAgentsFetcher,
+    LIBRARY_POLL_MS,
+    paused || staticMode || (view !== 'library-agents' && view !== 'library-agent-detail'),
+    [manager, view],
+  );
+  const libraryAgentRows = libraryAgentsPoll.data?.entries ?? [];
+  const libraryAgentRoot = libraryAgentsPoll.data?.libraryRoot ?? null;
+  const libraryAgentErrors = libraryAgentsPoll.data?.errors ?? [];
+  const libraryAgentTotal = libraryAgentRows.length;
+  const selectedLibraryAgentName = libraryAgentRows[libAgentSelectedIndex]?.name ?? null;
+
+  const librarySkillsFetcher = useCallback(
+    (signal: AbortSignal): Promise<LibrarySkillListResponse> =>
+      fetchLibrarySkills(manager, signal),
+    [manager],
+  );
+  const librarySkillsPoll = usePolling<LibrarySkillListResponse>(
+    librarySkillsFetcher,
+    LIBRARY_POLL_MS,
+    paused || staticMode || (view !== 'library-skills' && view !== 'library-skill-detail'),
+    [manager, view],
+  );
+  const librarySkillRows = librarySkillsPoll.data?.entries ?? [];
+  const librarySkillRoot = librarySkillsPoll.data?.libraryRoot ?? null;
+  const librarySkillTotal = librarySkillRows.length;
+  const selectedLibrarySkillName = librarySkillRows[libSkillSelectedIndex]?.name ?? null;
+
+  const libraryAgentDetailFetcher = useCallback(
+    (signal: AbortSignal): Promise<LibraryAgentDetailResponse | null> => {
+      if (!selectedLibraryAgentName) return Promise.resolve(null);
+      return fetchLibraryAgent(manager, selectedLibraryAgentName, signal);
+    },
+    [manager, selectedLibraryAgentName],
+  );
+  const libraryAgentDetailPoll = usePolling<LibraryAgentDetailResponse | null>(
+    libraryAgentDetailFetcher,
+    LIBRARY_POLL_MS,
+    paused || staticMode || view !== 'library-agent-detail' || !selectedLibraryAgentName,
+    [manager, selectedLibraryAgentName ?? '', view],
+  );
+
+  const librarySkillDetailFetcher = useCallback(
+    (signal: AbortSignal): Promise<LibrarySkillDetailResponse | null> => {
+      if (!selectedLibrarySkillName) return Promise.resolve(null);
+      return fetchLibrarySkill(manager, selectedLibrarySkillName, signal);
+    },
+    [manager, selectedLibrarySkillName],
+  );
+  const librarySkillDetailPoll = usePolling<LibrarySkillDetailResponse | null>(
+    librarySkillDetailFetcher,
+    LIBRARY_POLL_MS,
+    paused || staticMode || view !== 'library-skill-detail' || !selectedLibrarySkillName,
+    [manager, selectedLibrarySkillName ?? '', view],
+  );
+
+  // Window/selection clamping for the two library list views, matching the
+  // pattern used by tasks/heartbeats above.
+  useEffect(() => {
+    if (libraryAgentTotal === 0) {
+      if (libAgentSelectedIndex !== 0) setLibAgentSelectedIndex(0);
+      if (libAgentWindowStart !== 0) setLibAgentWindowStart(0);
+      return;
+    }
+    const clampedSel = Math.min(libAgentSelectedIndex, libraryAgentTotal - 1);
+    if (clampedSel !== libAgentSelectedIndex) setLibAgentSelectedIndex(clampedSel);
+    const maxStart = Math.max(0, libraryAgentTotal - libraryWindowSize);
+    let nextStart = libAgentWindowStart;
+    if (clampedSel < nextStart) nextStart = clampedSel;
+    if (clampedSel >= nextStart + libraryWindowSize)
+      nextStart = clampedSel - libraryWindowSize + 1;
+    if (nextStart > maxStart) nextStart = maxStart;
+    if (nextStart < 0) nextStart = 0;
+    if (nextStart !== libAgentWindowStart) setLibAgentWindowStart(nextStart);
+  }, [libraryAgentTotal, libAgentSelectedIndex, libAgentWindowStart, libraryWindowSize]);
+
+  useEffect(() => {
+    if (librarySkillTotal === 0) {
+      if (libSkillSelectedIndex !== 0) setLibSkillSelectedIndex(0);
+      if (libSkillWindowStart !== 0) setLibSkillWindowStart(0);
+      return;
+    }
+    const clampedSel = Math.min(libSkillSelectedIndex, librarySkillTotal - 1);
+    if (clampedSel !== libSkillSelectedIndex) setLibSkillSelectedIndex(clampedSel);
+    const maxStart = Math.max(0, librarySkillTotal - libraryWindowSize);
+    let nextStart = libSkillWindowStart;
+    if (clampedSel < nextStart) nextStart = clampedSel;
+    if (clampedSel >= nextStart + libraryWindowSize)
+      nextStart = clampedSel - libraryWindowSize + 1;
+    if (nextStart > maxStart) nextStart = maxStart;
+    if (nextStart < 0) nextStart = 0;
+    if (nextStart !== libSkillWindowStart) setLibSkillWindowStart(nextStart);
+  }, [librarySkillTotal, libSkillSelectedIndex, libSkillWindowStart, libraryWindowSize]);
+
+  const moveLibraryAgentSel = useCallback(
+    (delta: number) => {
+      if (libraryAgentTotal === 0) return;
+      setLibAgentSelectedIndex((idx) => clamp(idx + delta, 0, libraryAgentTotal - 1));
+    },
+    [libraryAgentTotal],
+  );
+
+  const moveLibrarySkillSel = useCallback(
+    (delta: number) => {
+      if (librarySkillTotal === 0) return;
+      setLibSkillSelectedIndex((idx) => clamp(idx + delta, 0, librarySkillTotal - 1));
+    },
+    [librarySkillTotal],
+  );
+
+  const openLibraryAgents = useCallback(() => {
+    setLibAgentSelectedIndex(0);
+    setLibAgentWindowStart(0);
+    setView('library-agents');
+  }, []);
+
+  const openLibrarySkills = useCallback(() => {
+    setLibSkillSelectedIndex(0);
+    setLibSkillWindowStart(0);
+    setView('library-skills');
+  }, []);
+
+  const openLibraryAgentDetail = useCallback(() => {
+    if (!selectedLibraryAgentName) return;
+    setLibAgentDetailScroll(0);
+    setView('library-agent-detail');
+  }, [selectedLibraryAgentName]);
+
+  const openLibrarySkillDetail = useCallback(() => {
+    if (!selectedLibrarySkillName) return;
+    setLibSkillDetailScroll(0);
+    setView('library-skill-detail');
+  }, [selectedLibrarySkillName]);
+
+  const moveLibraryAgentDetailScroll = useCallback((delta: number) => {
+    setLibAgentDetailScroll((off) => Math.max(0, off + delta));
+  }, []);
+
+  const moveLibrarySkillDetailScroll = useCallback((delta: number) => {
+    setLibSkillDetailScroll((off) => Math.max(0, off + delta));
+  }, []);
+
   useInput(
     (input, key) => {
       // Quit confirmation — intercepts q when not yet confirmed. Ctrl-C still
@@ -692,6 +869,7 @@ export function App({ staticMode = false }: AppProps = {}): React.ReactElement {
         if (input === 't') return toggleTasksView();
         if (input === 'c') return openCalendar();
         if (input === 'h') return openHeartbeats();
+        if (input === 'l') return openLibraryAgents();
         if (key.rightArrow) {
           // Remote agents get the detail panel; local agents get news
           const isRemote = selectedAgent?.deploymentShape === 'remote-endpoint' ||
@@ -712,6 +890,7 @@ export function App({ staticMode = false }: AppProps = {}): React.ReactElement {
         if (input === 't') return toggleTasksView();
         if (input === 'c') return openCalendar();
         if (input === 'h') return openHeartbeats();
+        if (input === 'l') return openLibraryAgents();
         if (key.leftArrow || key.escape) return setView('agents');
         if (key.rightArrow) return openTaskDetail();
         if (key.tab) return cycleTeam(key.shift ? -1 : 1);
@@ -739,6 +918,7 @@ export function App({ staticMode = false }: AppProps = {}): React.ReactElement {
         if (input === 'a') return setView('agents');
         if (input === 't') return setView('tasks');
         if (input === 'h') return openHeartbeats();
+        if (input === 'l') return openLibraryAgents();
         if (key.upArrow) return moveSchedSel(-1);
         if (key.downArrow) return moveSchedSel(1);
         if (key.pageUp) return moveSchedSel(-calendarWindowSize);
@@ -763,6 +943,7 @@ export function App({ staticMode = false }: AppProps = {}): React.ReactElement {
         if (input === 'a') return setView('agents');
         if (input === 't') return setView('tasks');
         if (input === 'c') return openCalendar();
+        if (input === 'l') return openLibraryAgents();
         if (key.rightArrow) return openHeartbeatDetail();
         if (key.upArrow) return moveHbSel(-1);
         if (key.downArrow) return moveHbSel(1);
@@ -781,6 +962,62 @@ export function App({ staticMode = false }: AppProps = {}): React.ReactElement {
         if (key.pageDown) return moveHbDetailScroll(detailWindowSize);
         if (isHomeKey(input)) return setHbDetailScroll(0);
         if (isEndKey(input)) return setHbDetailScroll(Number.MAX_SAFE_INTEGER);
+        return;
+      }
+
+      if (view === 'library-agents') {
+        if (input === 'a') return setView('agents');
+        if (input === 't') return setView('tasks');
+        if (input === 'c') return openCalendar();
+        if (input === 'h') return openHeartbeats();
+        if (input === 's') return openLibrarySkills();
+        if (key.leftArrow || key.escape) return setView('agents');
+        if (key.rightArrow) return openLibraryAgentDetail();
+        if (key.upArrow) return moveLibraryAgentSel(-1);
+        if (key.downArrow) return moveLibraryAgentSel(1);
+        if (key.pageUp) return moveLibraryAgentSel(-libraryWindowSize);
+        if (key.pageDown) return moveLibraryAgentSel(libraryWindowSize);
+        if (isHomeKey(input)) return setLibAgentSelectedIndex(0);
+        if (isEndKey(input)) return setLibAgentSelectedIndex(Math.max(0, libraryAgentTotal - 1));
+        return;
+      }
+
+      if (view === 'library-agent-detail') {
+        if (key.leftArrow || key.escape) return setView('library-agents');
+        if (key.upArrow) return moveLibraryAgentDetailScroll(-1);
+        if (key.downArrow) return moveLibraryAgentDetailScroll(1);
+        if (key.pageUp) return moveLibraryAgentDetailScroll(-detailWindowSize);
+        if (key.pageDown) return moveLibraryAgentDetailScroll(detailWindowSize);
+        if (isHomeKey(input)) return setLibAgentDetailScroll(0);
+        if (isEndKey(input)) return setLibAgentDetailScroll(Number.MAX_SAFE_INTEGER);
+        return;
+      }
+
+      if (view === 'library-skills') {
+        if (input === 'a') return setView('agents');
+        if (input === 't') return setView('tasks');
+        if (input === 'c') return openCalendar();
+        if (input === 'h') return openHeartbeats();
+        if (input === 'l') return openLibraryAgents();
+        if (key.leftArrow || key.escape) return openLibraryAgents();
+        if (key.rightArrow) return openLibrarySkillDetail();
+        if (key.upArrow) return moveLibrarySkillSel(-1);
+        if (key.downArrow) return moveLibrarySkillSel(1);
+        if (key.pageUp) return moveLibrarySkillSel(-libraryWindowSize);
+        if (key.pageDown) return moveLibrarySkillSel(libraryWindowSize);
+        if (isHomeKey(input)) return setLibSkillSelectedIndex(0);
+        if (isEndKey(input)) return setLibSkillSelectedIndex(Math.max(0, librarySkillTotal - 1));
+        return;
+      }
+
+      if (view === 'library-skill-detail') {
+        if (key.leftArrow || key.escape) return setView('library-skills');
+        if (key.upArrow) return moveLibrarySkillDetailScroll(-1);
+        if (key.downArrow) return moveLibrarySkillDetailScroll(1);
+        if (key.pageUp) return moveLibrarySkillDetailScroll(-detailWindowSize);
+        if (key.pageDown) return moveLibrarySkillDetailScroll(detailWindowSize);
+        if (isHomeKey(input)) return setLibSkillDetailScroll(0);
+        if (isEndKey(input)) return setLibSkillDetailScroll(Number.MAX_SAFE_INTEGER);
         return;
       }
 
@@ -932,6 +1169,61 @@ export function App({ staticMode = false }: AppProps = {}): React.ReactElement {
           }
           windowSize={detailWindowSize}
           scrollOffset={taskDetailScroll}
+          contentWidth={DETAIL_CONTENT_WIDTH}
+        />
+      ) : view === 'library-agents' ? (
+        <LibraryAgentsTable
+          entries={libraryAgentRows}
+          libraryRoot={libraryAgentRoot}
+          errorCount={libraryAgentErrors.length}
+          selectedIndex={libAgentSelectedIndex}
+          windowStart={libAgentWindowStart}
+          windowSize={libraryWindowSize}
+          loading={libraryAgentsPoll.lastUpdated === 0 && !libraryAgentsPoll.error && !staticMode}
+          error={libraryAgentsPoll.error}
+        />
+      ) : view === 'library-agent-detail' ? (
+        <LibraryAgentDetail
+          agent={libraryAgentDetailPoll.data ?? null}
+          agentName={selectedLibraryAgentName}
+          loading={
+            libraryAgentDetailPoll.lastUpdated === 0 && !libraryAgentDetailPoll.error
+          }
+          error={libraryAgentDetailPoll.error}
+          positionLabel={
+            libraryAgentTotal > 0
+              ? `agent ${libAgentSelectedIndex + 1} of ${libraryAgentTotal}`
+              : ''
+          }
+          windowSize={detailWindowSize}
+          scrollOffset={libAgentDetailScroll}
+          contentWidth={DETAIL_CONTENT_WIDTH}
+        />
+      ) : view === 'library-skills' ? (
+        <LibrarySkillsTable
+          entries={librarySkillRows}
+          libraryRoot={librarySkillRoot}
+          selectedIndex={libSkillSelectedIndex}
+          windowStart={libSkillWindowStart}
+          windowSize={libraryWindowSize}
+          loading={librarySkillsPoll.lastUpdated === 0 && !librarySkillsPoll.error && !staticMode}
+          error={librarySkillsPoll.error}
+        />
+      ) : view === 'library-skill-detail' ? (
+        <LibrarySkillDetail
+          skill={librarySkillDetailPoll.data ?? null}
+          skillName={selectedLibrarySkillName}
+          loading={
+            librarySkillDetailPoll.lastUpdated === 0 && !librarySkillDetailPoll.error
+          }
+          error={librarySkillDetailPoll.error}
+          positionLabel={
+            librarySkillTotal > 0
+              ? `skill ${libSkillSelectedIndex + 1} of ${librarySkillTotal}`
+              : ''
+          }
+          windowSize={detailWindowSize}
+          scrollOffset={libSkillDetailScroll}
           contentWidth={DETAIL_CONTENT_WIDTH}
         />
       ) : view === 'news' ? (
