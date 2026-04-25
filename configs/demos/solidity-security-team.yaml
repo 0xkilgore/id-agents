@@ -1,0 +1,41 @@
+# Solidity security team — multi-agent audit setup.
+#
+# Three-agent team for serious audit work:
+#   lead-auditor    — primary reviewer, owns final findings
+#   second-pair     — independent second reviewer for cross-check
+#   foundry-helper  — runs Foundry tests + repros for any vuln the auditors flag
+#
+# All three agents work the same workspace. lead and second see the code
+# and write findings; foundry-helper turns suspected vulns into failing
+# tests. lead consolidates the final report.
+#
+# Library entries used:
+#   /configs/agents/solidity-security/   — both auditors share this persona
+#   /configs/agents/foundry-dev/         — the test-writing helper
+
+version: "1"
+team: solidity-security
+
+defaults:
+  local: true
+  runtime: claude-code-cli
+  skills:
+    - identity
+    - inter-agent
+    - catalog
+
+agents:
+  - name: lead-auditor
+    description: "Primary security reviewer, owns the audit report"
+    workingDirectory: /Users/nxt3d/projects/solidity-audit-sandbox
+    agent: solidity-security
+
+  - name: second-pair
+    description: "Independent second reviewer for cross-check before sign-off"
+    workingDirectory: /Users/nxt3d/projects/solidity-audit-sandbox
+    agent: solidity-security
+
+  - name: foundry-helper
+    description: "Writes Foundry PoCs/tests for vulns the auditors flag"
+    workingDirectory: /Users/nxt3d/projects/solidity-audit-sandbox
+    agent: foundry-dev

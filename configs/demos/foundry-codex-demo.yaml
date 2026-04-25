@@ -1,0 +1,6 @@
+name: foundry-codex-demo
+agents:
+  - name: solidity-dev
+    runtime: codex
+    workingDirectory: ~/projects/demo-codex
+    agent: foundry-dev

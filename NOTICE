@@ -1,0 +1,88 @@
+# NOTICE — Bundled third-party content
+
+This repository bundles agent skills and content authored by others. Each upstream author retains their copyright; their LICENSE file is preserved next to the bundled SKILL.md so the original notice travels with any redistribution.
+
+The MIT License at the repo root applies only to operator-authored content. See `LICENSE` for the per-directory license posture.
+
+## MIT-licensed third-party skills
+
+### blader/humanizer
+- Skill: `humanizer`
+- Author: Siqi Chen
+- Source: https://github.com/blader/humanizer
+- License: MIT (preserved at `configs/agents/editor/skills/humanizer/LICENSE`)
+- Wikipedia source for the underlying patterns: https://en.wikipedia.org/wiki/Wikipedia:Signs_of_AI_writing
+
+### coreyhaines31/marketingskills
+- Skills: `copy-editing`, `copywriting`
+- Author: Corey Haines
+- Source: https://github.com/coreyhaines31/marketingskills
+- License: MIT (preserved at `configs/agents/editor/skills/copy-editing/LICENSE` and `configs/agents/copywriter/skills/copywriting/LICENSE`)
+
+### vercel-labs/agent-skills
+- Skills: `react-best-practices`, `deploy-to-vercel`, plus dependencies
+- Author: Vercel Labs
+- Source: https://github.com/vercel-labs/agent-skills
+- License: MIT (declared in upstream README)
+- Bundled into: `configs/agents/frontend-react/`, `configs/agents/fullstack-nextjs/`
+
+### obra/superpowers
+- Skills: `test-driven-development`, `systematic-debugging`
+- Author: Jesse Vincent (`obra` on GitHub)
+- Source: https://github.com/obra/superpowers
+- License: MIT
+- Bundled into: `configs/agents/frontend-react/`, `configs/agents/fullstack-nextjs/`, `configs/agents/devops/`
+
+### ahmedasmar/devops-claude-skills
+- Skills: `iac-terraform`, `k8s-troubleshooter`, `ci-cd`
+- Author: Ahmed Asmar
+- Source: https://github.com/ahmedasmar/devops-claude-skills
+- License: MIT (declared in upstream README)
+- Bundled into: `configs/agents/devops/`
+
+## Source-available content (Anthropic)
+
+### anthropics/skills
+- Skills: `frontend-design`, `webapp-testing`
+- Author: Anthropic
+- Source: https://github.com/anthropics/skills
+- License: source-available (each skill ships with its own LICENSE.txt; not open source)
+- Bundled into: `configs/agents/frontend/`, `configs/agents/frontend-react/`, `configs/agents/fullstack-nextjs/`
+- Notice: Internal / personal use is fine. Public redistribution requires reviewing the upstream LICENSE.txt and likely Anthropic's terms.
+
+## CC-BY-SA-4.0 share-alike content (Trail of Bits)
+
+### trailofbits/skills
+- Skills: `static-analysis` (with `codeql`, `semgrep`, `sarif-parsing` sub-skills), `insecure-defaults`, `differential-review`, `supply-chain-risk-auditor`
+- Author: Trail of Bits
+- Source: https://github.com/trailofbits/skills
+- License: **CC-BY-SA-4.0** (preserved verbatim at `configs/agents/security/skills/<name>/LICENSE`)
+- Bundled into: `configs/agents/security/`
+- Notice: **CC-BY-SA-4.0 is a share-alike license.** Any work that bundles these skills must itself be distributed under CC-BY-SA-4.0 with attribution to Trail of Bits. The `configs/agents/security/` directory is CC-BY-SA-4.0 in full, including the operator-authored persona, by virtue of bundling. Do not mix into MIT-only templates.
+
+## Operator-authored content (MIT)
+
+The following are authored in this repository:
+
+- `configs/agents/foundry-dev/` — five Foundry/Solidity skills (using-foundry, writing-foundry-tests, solidity-style-modern, foundry-scripting-and-deploy, gas-optimization-foundry)
+- `configs/agents/<name>/CLAUDE.md` (every agent's persona file)
+- `configs/agents/<name>/README.md` (every agent's README)
+- `configs/<team>.yaml` (every team configuration)
+- `docs-idagents/`, `help-idagents/` (knowledge content for the public Juno instances)
+- The repo-level `README.md`, `LICENSE`, this `NOTICE`
+
+These fall under the repo's MIT License.
+
+## Redistribution checklist
+
+When redistributing this repository or any subset:
+
+1. Preserve the MIT License notice at the repo root.
+2. Preserve the LICENSE file inside each bundled skill folder.
+3. If `configs/agents/security/` is included, the entire derivative must be CC-BY-SA-4.0. If you want MIT-clean, exclude that directory.
+4. If `anthropics/skills` content is included in a public/commercial redistribution, review Anthropic's LICENSE.txt and consider legal review.
+5. Preserve this `NOTICE` file.
+
+## Reporting attribution issues
+
+If you authored bundled content and the attribution above is wrong or missing your name, open an issue or PR. We will fix it promptly.

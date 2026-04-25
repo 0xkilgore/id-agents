@@ -1,0 +1,17 @@
+# Demo team exercising the v3 agent-config shape.
+#
+# Resolves against:
+#   /configs/agents/foundry-dev/         <-- Claude-native agent entry,
+#                                            bundles its own skills/ folder
+#
+# The foundry-dev agent folder includes the five Foundry skills inline,
+# so the team config only needs the `agent:` field. No `skills:` overlay
+# is required for this demo.
+
+name: foundry-demo
+
+agents:
+  - name: solidity-dev
+    runtime: claude-code-cli
+    workingDirectory: ~/projects/demo-solidity
+    agent: foundry-dev

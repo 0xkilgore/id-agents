@@ -1,0 +1,41 @@
+# Editorial team v2 — copywriter + editor pair.
+#
+# The two-agent loop for marketing copy:
+#   copywriter — writes the first draft from scratch
+#   editor     — runs seven-sweep + humanizer passes for polish
+#
+# Workflow:
+#   1. Operator asks for new page copy
+#   2. copywriter drafts above-the-fold + core sections (with headline variants)
+#   3. copywriter hands off to editor
+#   4. editor runs copy-editing seven sweeps and humanizer pass
+#   5. Final copy delivered
+#
+# Both agents share the same workspace so artifacts flow through ./output/
+# without round-tripping through the manager.
+#
+# Library entries used:
+#   /configs/agents/copywriter/  — copywriting skill, drafts new copy
+#   /configs/agents/editor/      — copy-editing + humanizer skills, polishes
+
+version: "1"
+team: editorial-v2
+
+defaults:
+  local: true
+  runtime: claude-code-cli
+  skills:
+    - identity
+    - inter-agent
+    - catalog
+
+agents:
+  - name: copywriter
+    description: "Conversion copywriter, drafts new marketing copy"
+    workingDirectory: /Users/nxt3d/projects/editorial-v2-sandbox
+    agent: copywriter
+
+  - name: editor
+    description: "Copy editor + anti-AI-pattern editor, polishes drafts"
+    workingDirectory: /Users/nxt3d/projects/editorial-v2-sandbox
+    agent: editor

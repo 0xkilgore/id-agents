@@ -1,0 +1,6 @@
+name: foundry-cursor-demo
+agents:
+  - name: solidity-dev
+    runtime: cursor-cli
+    workingDirectory: ~/projects/demo-cursor
+    agent: foundry-dev

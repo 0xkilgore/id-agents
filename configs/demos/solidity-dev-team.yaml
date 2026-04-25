@@ -1,0 +1,31 @@
+# Solidity development team — builder + auditor.
+#
+# Two-agent team that builds smart contracts AND keeps an adversarial
+# reviewer in the loop. The builder ships features, the auditor finds
+# the bugs before they ship. Same workspace; coordinate via /ask.
+#
+# Library entries used:
+#   /configs/agents/foundry-dev/         — day-to-day Foundry/Solidity dev
+#   /configs/agents/solidity-security/   — adversarial reviewer + audit skills
+
+version: "1"
+team: solidity-dev
+
+defaults:
+  local: true
+  runtime: claude-code-cli
+  skills:
+    - identity
+    - inter-agent
+    - catalog
+
+agents:
+  - name: builder
+    description: "Day-to-day Foundry/Solidity developer"
+    workingDirectory: /Users/nxt3d/projects/solidity-dev-sandbox
+    agent: foundry-dev
+
+  - name: auditor
+    description: "Adversarial security reviewer paired with the builder"
+    workingDirectory: /Users/nxt3d/projects/solidity-dev-sandbox
+    agent: solidity-security
