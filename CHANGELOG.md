@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.77-beta
+
+### Fixes
+
+- Harden manager-side agent port cleanup so `/deploy` and `/sync` no longer risk killing the daemon itself when an existing listener resolves to the manager PID, one of its descendants, or a command matching the manager entrypoint (`start-agent-manager.js`). `killAgentProcess` now inspects candidate processes before sending `SIGTERM`, and a regression unit test covers the self-PID skip path.
+
 ## 0.1.76-beta
 
 ### Features

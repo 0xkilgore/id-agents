@@ -206,6 +206,13 @@ interface QueryWaiter {
   timeout: NodeJS.Timeout | null;
 }
 
+interface ProcessInspection {
+  pid: number;
+  ppid: number | null;
+  argv0: string;
+  commandLine: string;
+}
+
 export class AgentManagerDb {
   private managementApp: express.Application;
   private httpServer: HttpServer | null = null;
@@ -7083,29 +7090,113 @@ export class AgentManagerDb {
     writeFileSync(claudeMdPath, identitySection + (existingContent ? '\n' + existingContent : ''));
   }
 
+  private listPidsListeningOnPort(port: number): number[] {
+    try {
+      const lsofOutput = execFileSync('lsof', ['-ti', `:${port}`], { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
+      if (!lsofOutput) return [];
+      return lsofOutput
+        .split('\n')
+        .filter(Boolean)
+        .map(value => parseInt(value, 10))
+        .filter(pid => Number.isInteger(pid) && pid > 0);
+    } catch {
+      return [];
+    }
+  }
+
+  private inspectProcess(pid: number): ProcessInspection | null {
+    try {
+      const output = execFileSync('ps', ['-o', 'ppid=,command=', '-p', String(pid)], {
+        encoding: 'utf8',
+        stdio: ['pipe', 'pipe', 'pipe'],
+      }).trim();
+      if (!output) return null;
+
+      const match = output.match(/^\s*(\d+)\s+(.*)$/s);
+      if (!match) return null;
+
+      const ppid = parseInt(match[1], 10);
+      const commandLine = match[2].trim();
+      const argv0 = tokenizeCommand(commandLine)[0] || '';
+      return {
+        pid,
+        ppid: Number.isInteger(ppid) ? ppid : null,
+        argv0,
+        commandLine,
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  private getManagerProcessSignatures(): string[] {
+    const signatures = new Set<string>(['start-agent-manager.js', 'start-agent-manager.ts']);
+    const currentEntry = process.argv[1] ? path.basename(process.argv[1]).toLowerCase() : '';
+    if (currentEntry && currentEntry !== 'node' && currentEntry !== 'tsx') {
+      signatures.add(currentEntry);
+    }
+    return [...signatures];
+  }
+
+  private matchesManagerProcessSignature(info: ProcessInspection | null): boolean {
+    if (!info) return false;
+    const argv0 = path.basename(info.argv0 || '').toLowerCase();
+    const commandLine = info.commandLine.toLowerCase();
+    return this.getManagerProcessSignatures().some(signature =>
+      argv0 === signature || commandLine.includes(signature)
+    );
+  }
+
+  private isManagerProcessOrDescendant(pid: number): boolean {
+    if (pid === process.pid) return true;
+
+    const visited = new Set<number>();
+    let currentPid: number | null = pid;
+
+    while (currentPid && currentPid > 0 && !visited.has(currentPid)) {
+      visited.add(currentPid);
+      if (currentPid === process.pid) return true;
+
+      const info = this.inspectProcess(currentPid);
+      if (!info) return false;
+      if (this.matchesManagerProcessSignature(info)) return true;
+      if (info.ppid === process.pid) return true;
+      currentPid = info.ppid;
+    }
+
+    return false;
+  }
+
   /**
    * Kill the agent process running on a given port.
    */
   private async killAgentProcess(port: number): Promise<{ killed: boolean; pids: number[] }> {
     if (!port) return { killed: false, pids: [] };
-    try {
-      const lsofOutput = execFileSync('lsof', ['-ti', `:${port}`], { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
-      if (lsofOutput) {
-        const pids = lsofOutput.split('\n').filter(Boolean).map(p => parseInt(p));
-        for (const pid of pids) {
-          try {
-            process.kill(pid, 'SIGTERM');
-            console.log(`[Manager] Killed process PID ${pid} on port ${port}`);
-          } catch {
-            // Process may have already exited
-          }
-        }
-        return { killed: true, pids };
+    const candidatePids = this.listPidsListeningOnPort(port);
+    if (candidatePids.length === 0) return { killed: false, pids: [] };
+
+    const killedPids: number[] = [];
+    for (const pid of candidatePids) {
+      if (this.isManagerProcessOrDescendant(pid)) {
+        console.warn(`[Manager] Skipping protected PID ${pid} on port ${port}`);
+        continue;
       }
-    } catch {
-      // No process on port
+
+      const info = this.inspectProcess(pid);
+      if (this.matchesManagerProcessSignature(info)) {
+        console.warn(`[Manager] Skipping manager-signature PID ${pid} on port ${port}`);
+        continue;
+      }
+
+      try {
+        process.kill(pid, 'SIGTERM');
+        killedPids.push(pid);
+        console.log(`[Manager] Killed process PID ${pid} on port ${port}`);
+      } catch {
+        // Process may have already exited
+      }
     }
-    return { killed: false, pids: [] };
+    return { killed: killedPids.length > 0, pids: killedPids };
   }
 
 }
