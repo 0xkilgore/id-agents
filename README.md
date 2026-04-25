@@ -9,7 +9,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-**Version 0.1.53-beta**
+**Version 0.1.72-beta**
 
 Run a team of AI coding agents from a single chat. Each agent is a real process with full tool access — **Claude Code CLI**, **OpenAI Codex**, **Cursor CLI**, or a mix. No UI needed. Connect from any terminal, Telegram, or SSH session.
 
@@ -184,10 +184,10 @@ npm run tui:dev          # source mode (tsx)
 npm run tui              # build + run from dist/
 ```
 
-The TUI talks to the manager at `MANAGER_URL` (default `http://localhost:4100`) and has three pages: the agents table, the per-agent news feed, and a news-item detail view. Navigate with the arrow keys. `Tab` cycles teams, `p` pauses polling, `q` quits.
+The TUI talks to the manager at `MANAGER_URL` (default `http://localhost:4100`) and has multiple pages: the agents table, the per-agent news feed, news-item detail, tasks/calendar/heartbeats, plus read-only library browsers for `configs/agents/` and `configs/skills/` (`l` and `s`). Navigate with the arrow keys. `Tab` cycles teams, `q` quits.
 
 ```
-↑↓ nav · → news · Tab team · p pause · q quit
+↑↓ nav · → news · Tab team · l library/agents · s library/skills · q quit
 ```
 
 iTerm2 is the recommended terminal — it renders the alt-screen content flicker-free. See [docs/guides/tui.md](./docs/guides/tui.md) for the full keybindings reference and terminal compatibility notes.
@@ -626,6 +626,50 @@ Standalone skills live at `configs/skills/<name>/SKILL.md`. Library root is `<cw
 Deploy is **additive-only and receipt-driven**: Step A copies the agent entry, Step B overlays `skills:` on top, and any file whose on-disk SHA does not match what we last wrote is treated as user-owned and skipped. A workspace receipt at `.id-agents/receipt.json` is the ownership ledger for `/sync`, re-sync, and `unsync` (undeploy). See the [/sync guide](docs/guides/sync-command.md) for the full 4-case ownership rule, per-harness mapping, and memory-file fallback.
 
 The TUI ships a read-only library browser for `configs/agents/` and `configs/skills/` (`npm run tui:dev`).
+
+## Agent Library and Demos
+
+The repo ships an agent library and a set of example team configs. Each library entry is a self-contained agent persona plus optional skills, deployable into any workspace via `agent: <name>` in a team YAML.
+
+```
+configs/
+  agents/                    # 9 library entries
+    copywriter/
+    devops/
+    editor/
+    foundry-dev/             # MIT, operator-authored
+    frontend/
+    frontend-react/
+    fullstack-nextjs/
+    security/                # CC-BY-SA-4.0 (Trail of Bits skills bundled)
+    solidity-security/
+  demos/                     # 8 example team YAMLs
+    editorial-team.yaml
+    editorial-team-v2.yaml
+    foundry-codex-demo.yaml
+    foundry-cursor-demo.yaml
+    foundry-demo.yaml
+    solidity-dev-team.yaml
+    solidity-security-demo.yaml
+    solidity-security-team.yaml
+```
+
+See [`NOTICE`](./NOTICE) for upstream attributions and per-skill license posture (most skills are MIT, the `security/` bundle is CC-BY-SA-4.0, a couple of Anthropic-authored skills are source-available). Each bundled skill keeps its upstream `LICENSE` next to its `SKILL.md` so the original notice travels with any redistribution.
+
+### Standalone CLI
+
+In addition to the `/sync` and `/deploy` commands inside the interactive CLI, the library deploy pipeline is exposed as a one-shot CLI for non-interactive use:
+
+```bash
+id-agents sync <config> [--workspace <path>]      # deploy agent + skills into a workspace
+id-agents unsync <config> [--workspace <path>]    # remove managed files using the receipt
+```
+
+`sync` is additive and receipt-driven: any file the user owns or has edited is left untouched. `unsync` reverses only the files we wrote. See [/sync guide](./docs/guides/sync-command.md) for the 4-case ownership rule, the per-runtime mapping, and the memory-file fallback.
+
+### TUI library browsers
+
+Press `l` for the agents library and `s` for the skills library from any TUI top-level view. Both are read-only list/detail views fed by the manager's `/library/agents` and `/library/skills` endpoints. Set `ID_LIBRARY_ROOT` on the manager to point them at any clone of [public-agents](https://github.com/idchain-world/public-agents).
 
 ## Onchain Identity
 
