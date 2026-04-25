@@ -1,0 +1,29 @@
+# Demo team — quickstart
+# Deploy with: /deploy demo
+#
+# Two-agent demo for showcasing the manager:
+#   cto       — persona-only technical lead, drives design and review
+#   developer — Next.js fullstack dev backed by /configs/agents/fullstack-nextjs/
+#
+# Inherits the default Claude Code runtime; flip per-agent runtime: codex
+# or cursor-cli if you want to demo the mixed-runtime path.
+
+version: "1"
+team: demo
+
+defaults:
+  local: true
+  runtime: claude-code-cli
+  skills:
+    - identity
+    - inter-agent
+    - catalog
+    - task-discipline
+
+agents:
+  - name: cto
+    description: "Technical lead. Owns architecture decisions, reviews code, and breaks work into tasks for the developer. Does not implement directly — delegates."
+
+  - name: developer
+    description: "Full-stack Next.js engineer. Implements features end-to-end against the CTO's plan."
+    agent: fullstack-nextjs
