@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.74-beta
+
+### Demos
+
+- Replace the four editorial + solidity-security demo configs with a single `demo` team (`/deploy demo`): `cto` persona-only plus `developer` backed by the `fullstack-nextjs` library entry. Reverts an accidental copywriter add to the default team.
+
 ## 0.1.73-beta
 
 ### Documentation
