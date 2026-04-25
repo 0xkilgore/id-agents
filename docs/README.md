@@ -1,6 +1,6 @@
 # ID Agents Documentation
 
-**Version 0.1.53-beta**
+**Version 0.1.72-beta**
 
 Documentation for the ID Agents multi-agent orchestration platform.
 
@@ -50,9 +50,11 @@ Skills are deployed at deploy time to the runtime-appropriate directory: `.claud
 - [Identity](../skills/identity/SKILL.md) - Agent name, team, onchain domain
 - [Inter-Agent](../skills/inter-agent/SKILL.md) - Agent-to-agent messaging via `/talk-to`
 - [Catalog](../skills/catalog/SKILL.md) - REST-AP self-description
+- [Task Discipline](../skills/task-discipline/SKILL.md) - Required task lifecycle for non-trivial work
 - [Wallet](../skills/wallet/SKILL.md) - OWS wallet operations
+- [XMTP](../skills/xmtp/SKILL.md) - Encrypted agent messaging
 - [Admin Control](../skills/idagents-admin-control/SKILL.md) - Remote CLI management
-- [Local Agent](../skills/local-agent/SKILL.md) - Spawn Claude Code agents locally
+- [Register Public Agents](../skills/idagents-register-public-agents/SKILL.md) - Register and manage public-agent metadata
 
 ## Plugins
 

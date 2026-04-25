@@ -15,6 +15,7 @@ The central process running on port 4100 (configurable via `--port` or `MANAGER_
 **Responsibilities:**
 - Stores agent state in the database (SQLite or PostgreSQL)
 - Handles the `/remote` API for programmatic access — no auth required (supports `/deploy`, `/sync`, `/agents`, `/ask`, etc.)
+- Serves read-only library inventory via `/library/agents` and `/library/skills`
 - Routes fire-and-forget messages between agents via `/message`
 - Spawns and stops agent processes
 - Manages onchain ENS registration via id-cli
@@ -25,6 +26,8 @@ The central process running on port 4100 (configurable via `--port` or `MANAGER_
 **Key endpoints:**
 - `GET /health` — Manager health check
 - `GET /agents` — List all agents with health status
+- `GET /library/agents` — List library agent entries from `configs/agents/`
+- `GET /library/skills` — List standalone skill entries from `configs/skills/`
 - `POST /remote` — Execute CLI commands programmatically (no auth)
 - `POST /message` — Fire-and-forget agent-to-agent messaging (no reply)
 

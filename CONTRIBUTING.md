@@ -39,10 +39,21 @@ src/
 └── harness/                # LLM runtime backends
 
 docs/                       # Documentation
-configs/                    # Example configuration files
-skills/                     # Agent skill definitions
+configs/                    # Team configs, demos, agent library, standalone skills
 plugins/                    # Claude Code plugins
 tests/                      # Test files
+```
+
+The v3 library layout lives under `configs/`:
+
+```text
+configs/
+  agents/
+    <name>/                 # Claude-native entry with CLAUDE.md + optional extras
+    <name>.md + <name>/     # AGENTS.md-native sibling pair
+  skills/
+    <name>/SKILL.md         # Standalone skill entry
+  demos/                    # Example team YAMLs
 ```
 
 ## Making Changes
@@ -82,6 +93,20 @@ tests/                      # Test files
 - **Tests**: Increase test coverage
 - **Harnesses**: Add support for new LLM runtimes
 - **Skills**: Create new agent skills
+
+## Contributing Agent Library Entries
+
+When adding or updating reusable library content:
+
+- Put agent entries under `configs/agents/<name>/` using one of the two supported shapes:
+  - Claude-native: `<name>/CLAUDE.md` plus optional `skills/`, `agents/`, `commands/`, `rules/`, `settings.json`, `hooks/`, `files/`
+  - AGENTS.md-native: sibling `<name>.md` plus `<name>/` for extras
+- Put standalone skills under `configs/skills/<name>/SKILL.md`
+- Keep `agent:` and `skills:` examples as peer fields in docs and sample configs
+- Preserve upstream `LICENSE` files verbatim next to imported third-party skill content
+- Update `NOTICE` when importing or redistributing third-party library content so attribution and license posture stay intact
+
+If you are unsure whether imported content can be redistributed, do not rewrite or normalize it casually. Preserve the upstream files and document the license posture explicitly.
 
 ## Reporting Issues
 

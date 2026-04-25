@@ -10,6 +10,13 @@ Unlike `/deploy`, which tears down and recreates every agent, `/sync` only touch
 /sync <config> [param=value ...] [--dry-run] [--verbose]
 ```
 
+The same workspace engine is also exposed as standalone one-shot CLIs for non-interactive use:
+
+```bash
+id-agents sync <config> [--workspace <path>]
+id-agents unsync <config> [--workspace <path>]
+```
+
 **Examples:**
 
 ```
@@ -66,7 +73,7 @@ These fields are compared to determine if an agent has changed:
 
 Protocol defaults and agent role files (under the runtime-specific template directory, e.g. `.claude/agents/`, `.agents/`, or `.cursor/agents/`) are always written at sync time regardless of diff results.
 
-## Library deployment
+## Workspace deploy (v3)
 
 `agent:` and `skills:` are peer fields on each agent entry. Each refers to a library entry by name:
 
@@ -88,7 +95,7 @@ The library root is resolved in this order:
 
 Discovery deduplicates by logical name; a mixed-shape collision is a validation error.
 
-### Two-step deploy
+### Two-step additive deploy
 
 1. **Step A** — copy the resolved agent entry into the workspace, mapping each source file through the runtime translation table.
 2. **Step B** — for each name in `skills:`, copy `configs/skills/<skill>/` into the workspace. Standalone skills override same-named skills bundled inside the agent entry (last writer wins, deterministically).
@@ -103,7 +110,7 @@ Discovery deduplicates by logical name; a mixed-shape collision is a validation 
 
 Cursor remains the least native target: skill content flattens into a supported surface or is skipped with a warning rather than inventing a silent merge.
 
-## Memory-file handling
+## Memory-file fallback
 
 The runtime's root memory file (`.claude/CLAUDE.md` for Claude, workspace-root `AGENTS.md` for Codex/Cursor) is the most user-touched surface. `/sync` never silently rewrites a user's edits.
 

@@ -217,7 +217,7 @@ Each agent can have the following fields:
 | `model` | No | From defaults | LLM model to use |
 | `runtime` | No | From defaults | Agent runtime/harness |
 | `systemPrompt` | No | - | Custom system prompt |
-| `skills` | No | From defaults | Skills deployed by the existing resolver. Unchanged — continues to work as-is. |
+| `skills` | No | From defaults | Standalone skill library entries. Peer to `agent:`; merged with defaults and overlaid after the agent entry |
 | `plugins` | No | From defaults | Optional plugins for runtimes that support them |
 | `allowedTools` | No | From defaults | Restrict agent to specific tools |
 | `env` | No | `{}` | Environment variables for the agent process |
@@ -240,6 +240,22 @@ agents:
     skills: [identity, inter-agent, catalog, wallet]
     heartbeat: 300
     register: true
+```
+
+### Agent Library Example
+
+`agent:` and `skills:` are peer fields on the agent entry. `agent:` selects one library agent entry. `skills:` selects zero or more standalone skill entries that overlay on top after the agent entry deploys.
+
+```yaml
+defaults:
+  skills: [identity, inter-agent, catalog]
+
+agents:
+  - name: auditor
+    runtime: codex
+    workingDirectory: /path/to/project
+    agent: solidity-security
+    skills: [using-foundry, task-discipline]
 ```
 
 ### heartbeat
@@ -322,15 +338,15 @@ At sync time, deploy is two-stage and **additive-only**:
 1. **Step A** — copy the agent library entry into the workspace, mapping each source file through the runtime translation table (see [/sync guide](../guides/sync-command.md))
 2. **Step B** — overlay each `skills:` entry on top, with last-writer-wins for same-named skills also bundled by the agent
 
-A receipt at `<workspace>/.id-agents/receipt.json` tracks ownership per managed file. **No file the user owns is ever modified or deleted** — files whose on-disk SHA does not match the receipt are skipped with a warning. See the [/sync guide](../guides/sync-command.md) for the full 4-case ownership rule, memory-file fallback, and `unsync` undeploy behavior.
+A receipt at `<workspace>/.id-agents/receipt.json` tracks ownership per managed file. **No file the user owns is ever modified or deleted** — files whose on-disk SHA does not match the receipt are skipped with a warning. See the [/sync guide](../guides/sync-command.md) for the full 4-case ownership rule, per-runtime mapping, memory-file fallback, and `unsync` undeploy behavior.
 
 ## Skills Configuration
 
 Skills are instruction packages deployed at deploy time via `deploySkillsToAgent`. The target directory is runtime-aware: `.claude/skills/` for Claude agents, `.agents/skills/` for Codex agents, `.cursor/skills/` for Cursor (`cursor-cli`) agents. Each skill is a directory containing a `SKILL.md` file with YAML frontmatter.
 
-Unchanged — continues to work as-is.
+When both `defaults.skills` and agent-level `skills:` are present, the lists are merged and deduped. Agent-level `skills:` does not nest under `agent:` and does not replace the selected library entry.
 
-All configs should include `skills: [identity, inter-agent, catalog]` at minimum. The 7 built-in skills are: `identity`, `inter-agent`, `catalog`, `wallet`, `xmtp`, `idagents-admin-control`, `local-agent`.
+All configs should include `skills: [identity, inter-agent, catalog]` at minimum. The built-in skills are: `identity`, `inter-agent`, `catalog`, `task-discipline`, `wallet`, `xmtp`, `idagents-admin-control`, `idagents-register-public-agents`.
 
 ```yaml
 defaults:

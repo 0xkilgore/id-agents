@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.72-beta
+
+### Documentation
+
+- Sweep docs for the v0.1.69 through v0.1.71 library and sync surfaces: clarify that `agent:` selects a library entry under `configs/agents/<name>/`, `skills:` remains a peer field, and `configs/` is the canonical root.
+- Rewrite the `/sync` guide as the canonical operator doc for the v3 engine, including two-step additive deploy, per-runtime mapping, the 4-case ownership rule, receipt location at `<workspace>/.id-agents/receipt.json`, memory-file fallback, `id-agents unsync`, `/library/agents`, `/library/skills`, and the TUI library browsers (`l`, `s`).
+- Update root operator docs (`AGENTS.md`, `CONTRIBUTING.md`, architecture reference) to reflect the v3 library layout, receipt-driven sync model, library inventory endpoints, and NOTICE-based license preservation rules for imported content.
+
 ## 0.1.71-beta
 
 ### TUI
