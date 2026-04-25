@@ -48,7 +48,97 @@ These fields are compared to determine if an agent has changed:
 - `heartbeat` — Heartbeat enabled/disabled
 - `workingDirectory` — Only compared when explicitly set in config
 
-Protocol defaults and agent role files (under the runtime-specific template directory, e.g. `.claude/agents/`, `.agents/`, or `.cursor/agents/`) are always written at sync time regardless of diff results. When `agent:` is set, the manager first copies `configs/agents/<name>/` into the target workspace's runtime overlay directory (`.claude/`, `.agents/`, or `.cursor/`), then runs the existing `skills:` resolution unchanged on top.
+Protocol defaults and agent role files (under the runtime-specific template directory, e.g. `.claude/agents/`, `.agents/`, or `.cursor/agents/`) are always written at sync time regardless of diff results.
+
+When `agent:` is set, sync deploys the named library entry into the workspace using the v3 two-step additive flow described below.
+
+## Library Deployment (v3)
+
+`agent:` and `skills:` are peer fields. Each refers to a library entry by name:
+
+- `agent: <name>` — one entry from `configs/agents/<name>/`
+- `skills: [<name>, ...]` — zero or more entries from `configs/skills/<name>/`
+
+The library root is resolved from `ID_LIBRARY_ROOT` (env), else `<cwd>/configs`, else "no library configured" (in which case `agent:` and `skills:` resolve to empty).
+
+### Two native agent shapes
+
+`configs/agents/<name>/` accepts both shapes natively:
+
+- **Claude-native** — folder with `CLAUDE.md` (plus optional `skills/`, `agents/`, `commands/`, `rules/`, `settings.json`, `hooks/`, `files/`). Discovered iff `<name>/CLAUDE.md` exists.
+- **AGENTS.md-native** — sibling pair `<name>.md` + `<name>/`. The `.md` file is the persona; the directory carries extras (primarily `skills/`). Discovered iff both exist.
+
+Discovery deduplicates by logical name; a mixed-shape collision is a validation error.
+
+### Two-step deploy
+
+1. **Step A** — copy the resolved agent entry into the workspace, mapping each source file through the runtime translation table.
+2. **Step B** — for each name in `skills:`, copy `configs/skills/<skill>/` into the workspace. Standalone skills override same-named skills bundled inside the agent entry (last writer wins, deterministically).
+
+### Per-harness mapping
+
+| Library source | Claude target | Codex target | Cursor target |
+|---|---|---|---|
+| `CLAUDE.md` (Claude-native) or `<name>.md` (AGENTS.md-native) | `CLAUDE.md`, with fallback to `.claude/rules/agent-<name>.md` | `AGENTS.md` (refused if pre-existing) | `AGENTS.md` (refused if pre-existing) |
+| `skills/<skill>/` (agent-bundled or standalone) | `.claude/skills/<skill>/` | `.agents/skills/<skill>/` | flatten into supported surface or skip with warning |
+| `agents/`, `commands/`, `rules/`, `settings.json`, `hooks/`, `files/` | native Claude surfaces | runtime remap or skip per supported Codex surface | runtime remap or skip per supported Cursor surface |
+
+Cursor remains the least native target: skill content flattens into a supported surface or is skipped with a warning rather than inventing a silent merge.
+
+### Memory-file fallback
+
+If the workspace already has the runtime's root memory file:
+
+- **Claude target with existing `CLAUDE.md`** — write the persona to `.claude/rules/agent-<name>.md` instead. Claude auto-loads `.claude/rules/*.md`.
+- **Codex or Cursor target with existing `AGENTS.md`** — refuse the deploy with a clear error. Operator can delete or rename `AGENTS.md`, or append the persona manually and re-run with `--skip-memory`.
+
+This keeps sync additive: an existing root memory file is treated as user-owned and never silently rewritten.
+
+### 4-case ownership
+
+For each destination file in Step A or Step B:
+
+| Target state | Action |
+|---|---|
+| Does not exist | Write, add to receipt |
+| Exists, disk SHA == source SHA | No-op, ensure receipt entry present |
+| Exists, disk SHA == receipt SHA | Still ours, overwrite with new content, update receipt |
+| Exists, disk SHA is something else | User-owned or user-edited. Skip and warn. Do not write. |
+
+**No file the user owns is ever modified or deleted.** Ownership is established by the receipt: a file is ours iff its current SHA matches what we last wrote. Everything else is sacred.
+
+### Receipt
+
+One receipt per workspace at `<workspace>/.id-agents/receipt.json`. Each managed destination file gets one entry with:
+
+- `sha256` — latest content hash
+- `source` — `agent:<name>` or `skill:<name>`
+
+The receipt is rewritten atomically (temp file + rename) on every successful sync. It is the ownership ledger for sync, re-sync, and undeploy.
+
+## Undeploy: `unsync`
+
+The standalone CLI exposes an undeploy command that removes managed files using the receipt:
+
+```
+id-agents unsync <config> [--workspace <path>]
+```
+
+For each receipt entry:
+
+- if disk SHA == receipt SHA, the file is still ours → delete it
+- if disk SHA has drifted, leave the file on disk and only remove the receipt entry
+
+User-edited files always survive `unsync`. Receipt cleanup is safe even when ownership has been lost due to edits.
+
+## TUI library browsers
+
+The TUI ships read-only browsers for the two library roots (`npm run tui:dev`):
+
+- agents browser — list/detail for `configs/agents/` (handles both native shapes)
+- skills browser — list/detail for `configs/skills/`
+
+Both views fetch through the manager (`/library/agents`, `/library/skills`) rather than reading the filesystem directly. Set `ID_LIBRARY_ROOT` on the manager process to point them at any library clone.
 
 ## Key Properties
 

@@ -606,22 +606,26 @@ Always check for injection, XSS, and authentication issues.
 - **Body** becomes the agent's role content, appended after protocol defaults in `CLAUDE.md`.
 - **`description`** from frontmatter is used as the agent's description if the config doesn't set one.
 
-Use the `agent` field in config to deploy a library-owned overlay before skills run:
+Use the `agent` field in config to deploy a library-owned agent entry before skills run. `agent:` and `skills:` are peers on each agent entry:
 
 ```yaml
 agents:
   - name: auditor
-    agent: security-audit          # copies configs/agents/security-audit/ into the runtime overlay target
+    agent: security-audit          # one entry from configs/agents/
+    skills: [using-foundry]        # zero or more entries from configs/skills/
     workingDirectory: /path/to/project
 ```
 
-The destination is runtime-aware: `.claude/` for Claude runtimes, `.agents/` for Codex, `.cursor/` for Cursor CLI.
+`configs/agents/<name>/` supports two native shapes:
 
-Deploy order is:
-1. agent overlay
-2. existing `skills:` resolution
+- **Claude-native** — directory with `CLAUDE.md` (plus optional `skills/`, `agents/`, `commands/`, `rules/`, `settings.json`, `hooks/`, `files/`)
+- **AGENTS.md-native** — sibling pair `<name>.md` + `<name>/`, where the `.md` file is the persona and the directory holds extras
 
-`skills:` is unchanged and continues to work as-is.
+Standalone skills live at `configs/skills/<name>/SKILL.md`. Library root is `<cwd>/configs` by default; override with `ID_LIBRARY_ROOT` to point at any clone of [public-agents](https://github.com/idchain-world/public-agents).
+
+Deploy is **additive-only and receipt-driven**: Step A copies the agent entry, Step B overlays `skills:` on top, and any file whose on-disk SHA does not match what we last wrote is treated as user-owned and skipped. A workspace receipt at `.id-agents/receipt.json` is the ownership ledger for `/sync`, re-sync, and `unsync` (undeploy). See the [/sync guide](docs/guides/sync-command.md) for the full 4-case ownership rule, per-harness mapping, and memory-file fallback.
+
+The TUI ships a read-only library browser for `configs/agents/` and `configs/skills/` (`npm run tui:dev`).
 
 ## Onchain Identity
 

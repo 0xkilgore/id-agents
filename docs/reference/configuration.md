@@ -223,7 +223,7 @@ Each agent can have the following fields:
 | `env` | No | `{}` | Environment variables for the agent process |
 | `register` | No | From onchain | Whether to register onchain |
 | `workingDirectory` | No | - | Working directory for the agent process |
-| `agent` | No | - | Deploy library agent overlay from `/config/agents/<name>/` into the target workspace's `.claude/` directory before skills are resolved |
+| `agent` | No | - | Library agent entry name. Resolves to `configs/agents/<name>/` (Claude-native) or the `configs/agents/<name>.md` + `configs/agents/<name>/` sibling pair (AGENTS.md-native), and deploys to the runtime-aware overlay target before `skills` are applied |
 | `heartbeat` | No | - | Heartbeat interval in seconds, or legacy `{interval, message}` object |
 | `openMode` | No | `false` | Accept XMTP messages from any sender (not recommended for production) |
 
@@ -283,25 +283,46 @@ Defaults:
 
 ---
 
-## Agent Overlay
+## Agent Library Entry
 
-`agent` is a peer to `skills`.
+`agent` and `skills` are peers on each agent entry. `agent:` selects one library entry by name; `skills:` selects zero or more standalone skills.
 
 ```yaml
 agents:
   - name: auditor
     workingDirectory: /path/to/project
     agent: security-audit
+    skills: [using-foundry]
 ```
 
-This resolves to the library folder `/config/agents/security-audit/` and rsyncs that folder into `/path/to/project/.claude/`.
+### Library root
 
-Deploy order:
+The library root is resolved in this order:
 
-1. rsync the agent folder into `.claude/`
-2. run the existing `skills:` resolution exactly as it works today
+1. `ID_LIBRARY_ROOT` env var when set and present on disk
+2. `<cwd>/configs` when present
+3. otherwise no library configured (entries resolve to empty)
 
-If both layers write the same file, skills apply last.
+Operators typically clone the [public-agents](https://github.com/idchain-world/public-agents) repo and point `ID_LIBRARY_ROOT` at its `configs/` directory.
+
+### Native source shapes
+
+`configs/agents/<name>/` accepts two first-class shapes. Discovery deduplicates by name; an accidental mixed-shape collision is a validation error.
+
+**Claude-native** — folder containing `CLAUDE.md` plus optional `skills/`, `agents/`, `commands/`, `rules/`, `settings.json`, `hooks/`, `files/`. Discovered iff `<name>/CLAUDE.md` exists.
+
+**AGENTS.md-native** — sibling pair `<name>.md` + `<name>/`, where `<name>.md` is the persona file and the directory holds extras (primarily `skills/`). Discovered iff both exist.
+
+Standalone skills are always `configs/skills/<name>/SKILL.md`.
+
+### Deploy semantics
+
+At sync time, deploy is two-stage and **additive-only**:
+
+1. **Step A** — copy the agent library entry into the workspace, mapping each source file through the runtime translation table (see [/sync guide](../guides/sync-command.md))
+2. **Step B** — overlay each `skills:` entry on top, with last-writer-wins for same-named skills also bundled by the agent
+
+A receipt at `<workspace>/.id-agents/receipt.json` tracks ownership per managed file. **No file the user owns is ever modified or deleted** — files whose on-disk SHA does not match the receipt are skipped with a warning. See the [/sync guide](../guides/sync-command.md) for the full 4-case ownership rule, memory-file fallback, and `unsync` undeploy behavior.
 
 ## Skills Configuration
 
