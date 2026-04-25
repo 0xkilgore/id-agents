@@ -26,7 +26,3 @@ agents:
 
   - name: researcher
     description: "Research, analysis, and documentation"
-
-  - name: copywriter
-    description: "Marketing copy, landing-page polish, headlines, and microcopy"
-    agent: copywriter
