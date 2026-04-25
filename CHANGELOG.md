@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.76-beta
+
+### Features
+
+- Wallet opt-in for team configs. Add `wallet: true|false` to an agent entry (or `defaults.wallet` to apply across the team) to control whether `/deploy` and `/sync` provision an OWS wallet for that agent. Default is **off**: deploy/sync no longer call `ows wallet create`, do not write `metadata.ows_wallet` / `metadata.ows_address`, and the spawned child env never receives `OWS_WALLET`. Existing teams that depend on a wallet keep working by setting `wallet: true` in `defaults` or per-agent. Onchain registration still auto-provisions a wallet for remote agents only when `metadata.wallet === true` (or unset for legacy compatibility); explicit `wallet: false` is honored end-to-end.
+- On-demand wallet provisioning. New CLI command `/agent <name> wallet provision` (also exposed via the `/remote` `/agent <name> wallet provision` command) calls the OWS provisioner once for a single agent, persists `metadata.ows_wallet` / `metadata.ows_address`, flips `metadata.wallet` to `true`, and is idempotent on re-run.
+
 ## 0.1.75-beta
 
 ### Fixes

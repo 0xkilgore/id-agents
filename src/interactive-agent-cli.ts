@@ -77,6 +77,7 @@ function playAlertSound() {
 // Help menu items - single source of truth (alphabetically organized)
 const HELP_ITEMS: Array<{ cmd: string; desc: string; indent?: boolean }> = [
   { cmd: '/agent <name> rebuild', desc: 'Rebuild a single agent' },
+  { cmd: '/agent <name> wallet provision', desc: 'Provision an OWS wallet for one agent' },
   { cmd: '/agents', desc: 'List all agents' },
   { cmd: '/agents rebuild', desc: 'Rebuild all agents' },
   { cmd: '/ask [/hey] <agent> <msg>', desc: 'Talk to agent (continues session)' },
@@ -1889,10 +1890,11 @@ async function handleLine(line: string) {
     const arg = parts.slice(2).join(' ');
 
     if (!target || !action) {
-      console.log(`\n${colors.red}❌ Usage: /agent <name> <start|stop|rebuild [--regenerate-config]|logs [-f]|save>${colors.reset}`);
+      console.log(`\n${colors.red}❌ Usage: /agent <name> <start|stop|rebuild [--regenerate-config]|logs [-f]|save|heartbeat|wallet provision>${colors.reset}`);
       console.log(`${colors.gray}   logs: show recent logs (default 200 lines)${colors.reset}`);
       console.log(`${colors.gray}   logs -f: follow logs in real-time (Ctrl+C to stop)${colors.reset}`);
-      console.log(`${colors.gray}   logs 50: show last 50 lines${colors.reset}\n`);
+      console.log(`${colors.gray}   logs 50: show last 50 lines${colors.reset}`);
+      console.log(`${colors.gray}   wallet provision: create an OWS wallet for this agent (opt-in, requires the ows CLI)${colors.reset}\n`);
       rl.prompt();
       return;
     }
@@ -2083,6 +2085,31 @@ async function handleLine(line: string) {
         console.log(`\n${colors.green}♥ Heartbeat sent to ${target}${colors.reset}`);
         if (data.result?.intervalSeconds) {
           console.log(`${colors.gray}   Timer reset: next heartbeat in ${data.result.intervalSeconds}s${colors.reset}\n`);
+        }
+      } else if (action === 'wallet') {
+        // /agent <name> wallet provision — on-demand OWS wallet provisioning.
+        const subArg = (parts[2] || '').toLowerCase();
+        if (subArg !== 'provision') {
+          console.log(`\n${colors.red}❌ Usage: /agent ${target} wallet provision${colors.reset}\n`);
+        } else {
+          const resp = await managerFetch(`/remote`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ command: `/agent ${target} wallet provision` })
+          });
+          const data = await resp.json() as any;
+          if (!resp.ok || !data.ok) {
+            throw new Error(data.error || 'Failed to provision wallet');
+          }
+          const r = data.result || {};
+          if (r.status === 'already-provisioned') {
+            console.log(`\n${colors.yellow}ℹ️  ${target} already has wallet ${r.ows_wallet}${colors.reset}\n`);
+          } else {
+            console.log(`\n${colors.green}✅ Provisioned wallet for ${target}${colors.reset}`);
+            console.log(`${colors.gray}   Name: ${r.ows_wallet}${colors.reset}`);
+            if (r.ows_address) console.log(`${colors.gray}   Address: ${r.ows_address}${colors.reset}`);
+            console.log('');
+          }
         }
       } else {
         console.log(`\n${colors.red}❌ Unknown action: ${action}${colors.reset}\n`);
@@ -2565,7 +2592,7 @@ async function handleLine(line: string) {
       const walletName = (agent as any).metadata?.ows_wallet;
       if (!walletName) {
         console.log(`\n${colors.yellow}⚠️  Agent "${agentName}" has no OWS wallet.${colors.reset}`);
-        console.log(`${colors.gray}  Create one with: ows wallet create --name ${activeTeam}-${agentName}${colors.reset}\n`);
+        console.log(`${colors.gray}  Provision one with: /agent ${agentName} wallet provision${colors.reset}\n`);
         rl.prompt();
         return;
       }

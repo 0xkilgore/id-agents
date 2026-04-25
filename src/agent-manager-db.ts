@@ -849,20 +849,11 @@ export class AgentManagerDb {
     // For public-agent-remote, provision an OWS wallet before registration so
     // multi-chain address records can be set.  For local agents the wallet is
     // already attached via the normal deploy path.
-    if (isRemote && !(agent.metadata as any)?.ows_wallet) {
-      const agentAlias = (agent.metadata as any)?.alias || agent.name;
-      const walletResult = this.getOrCreateAgentWallet('public', agentAlias);
-      if (walletResult) {
-        // Merge wallet fields into metadata now; updateIdentity below will persist them.
-        const mergedMeta: AgentMetadata = {
-          ...((agent.metadata || {}) as AgentMetadata),
-          ows_wallet: walletResult.walletName,
-          ows_address: walletResult.address,
-        };
-        await this.db.agents.updateIdentity(agent.id, { metadata: mergedMeta });
-        // Refresh the agent row so subsequent steps see the updated metadata.
-        const refreshed = await this.db.agents.getById(agent.id);
-        if (refreshed) agent = refreshed;
+    //
+    if (isRemote && !(agent.metadata as any)?.ows_wallet && this.isWalletProvisioningEnabled(agent.metadata)) {
+      const refreshed = await this.provisionAgentWalletForRow(teamId, 'public', agent);
+      if (refreshed) {
+        agent = refreshed;
       } else {
         console.warn(`[Register] OWS not installed or wallet creation failed for remote agent "${agent.name}". Proceeding without wallet.`);
       }
@@ -2507,6 +2498,7 @@ export class AgentManagerDb {
           public_endpoint_url,
           internal_endpoint_url,
           ssh_target,
+          wallet,
         } = req.body as any;
 
         // Required fields
@@ -2537,6 +2529,8 @@ export class AgentManagerDb {
         const remoteId = `remote_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
         const now = Date.now();
 
+        const remoteWalletOptIn = wallet === true;
+
         await this.db.agents.create({
           team_id: teamId,
           id: remoteId,
@@ -2553,6 +2547,7 @@ export class AgentManagerDb {
           public_endpoint_url: public_endpoint_url,
           internal_endpoint_url: internal_endpoint_url ?? null,
           ssh_target: ssh_target ?? null,
+          metadata: { wallet: remoteWalletOptIn },
         });
 
         return res.status(201).json({
@@ -2567,6 +2562,7 @@ export class AgentManagerDb {
           public_endpoint_url,
           internal_endpoint_url: internal_endpoint_url ?? null,
           ssh_target: ssh_target ?? null,
+          metadata: { wallet: remoteWalletOptIn },
           health: 'unknown',
         });
       }
@@ -3262,7 +3258,7 @@ export class AgentManagerDb {
               handle = `${nameHint}_${tokenId}`;
             }
 
-            const metadata: AgentMetadata = {
+            let metadata: AgentMetadata = {
               name: handle,
               service_type: 'REST-AP',
               endpoint: `http://localhost:${port}`
@@ -4800,7 +4796,6 @@ export class AgentManagerDb {
           }
 
           const configDomain = spec.domain;
-          const owsWallet = this.getOrCreateAgentWallet(syncTeamName, spec.name);
 
           // 1. Deploy library-backed agent overlay into the runtime overlay target, if configured
           if (spec.agent) {
@@ -4808,6 +4803,22 @@ export class AgentManagerDb {
           }
 
           // 2. Deploy team-level skills (runtime-aware)
+          const isAutomator = spec.type === 'automator';
+          const walletMeta = this.resolveWalletMetadata(syncTeamName, spec.name, {
+            ...(row.metadata as AgentMetadata || {}),
+            name: spec.name,
+            service_type: isAutomator ? undefined : 'REST-AP',
+            endpoint: isAutomator ? undefined : `http://localhost:${row.port}`,
+            runtime: effectiveRuntime,
+            plugins: localPlugins,
+            agent: spec.agent,
+            allowed_tools: spec.allowedTools,
+            description: spec.description,
+            ...(isAutomator && { isAutomator: true }),
+            ...(spec.heartbeat && { heartbeat: true }),
+            ...(spec.dangerouslySkipPermissions !== undefined && { dangerouslySkipPermissions: spec.dangerouslySkipPermissions }),
+          }, spec.wallet);
+
           this.deploySkillsToAgent(workingDirectory, agentSkills, {
             DISPLAY_NAME: configDomain || spec.name,
             TEAM: syncTeamName,
@@ -4815,7 +4826,7 @@ export class AgentManagerDb {
             ORG_CONTEXT: orgContext
               ? `\n## Your Role\n\n${orgContext}\n\nSee the full org chart at the shared team folder for details on all groups.`
               : '',
-          }, { hasWallet: !!owsWallet, runtime: effectiveRuntime });
+          }, { hasWallet: !!walletMeta.wallet, runtime: effectiveRuntime });
 
           // 3. Overlay working-directory template files (runtime-aware)
           copyAgentDirOverlay(workingDirectory, spec.name, effectiveRuntime);
@@ -4836,23 +4847,7 @@ export class AgentManagerDb {
             appendLibraryPersonaToAgentsMd(workingDirectory, spec.agent, effectiveRuntime);
           }
 
-          // Update DB row in place — preserve the agent ID
-          const isAutomator = spec.type === 'automator';
-          const updatedMeta: AgentMetadata = {
-            ...(row.metadata as AgentMetadata || {}),
-            name: spec.name,
-            service_type: isAutomator ? undefined : 'REST-AP',
-            endpoint: isAutomator ? undefined : `http://localhost:${row.port}`,
-            runtime: effectiveRuntime,
-            plugins: localPlugins,
-            agent: spec.agent,
-            allowed_tools: spec.allowedTools,
-            description: spec.description,
-            ...(isAutomator && { isAutomator: true }),
-            ...(spec.heartbeat && { heartbeat: true }),
-            ...(spec.dangerouslySkipPermissions !== undefined && { dangerouslySkipPermissions: spec.dangerouslySkipPermissions }),
-            ...(owsWallet && { ows_wallet: owsWallet.walletName, ows_address: owsWallet.address }),
-          };
+          const updatedMeta: AgentMetadata = walletMeta.metadata;
 
           await this.db.agents.updateStatus(row.id, 'starting', {
             model: effectiveModel,
@@ -4907,7 +4902,6 @@ export class AgentManagerDb {
             const configDomain = spec.domain;
             const configTokenId = spec.tokenId;
             const agentName = configDomain || spec.name;
-            const owsWallet = this.getOrCreateAgentWallet(syncTeamName, spec.name);
 
             const agentSkills: string[] = spec.skills || [];
             let orgContext = '';
@@ -4917,6 +4911,20 @@ export class AgentManagerDb {
                 orgContext = generateAgentOrgContext(spec.name, syncOrg);
               } catch { /* ignore */ }
             }
+            const walletMeta = this.resolveWalletMetadata(syncTeamName, spec.name, {
+              name: spec.name,
+              service_type: isAutomator ? undefined : 'REST-AP',
+              endpoint: isAutomator ? undefined : `http://localhost:${port}`,
+              runtime: effectiveRuntime,
+              plugins: localPlugins,
+              ...(spec.agent && { agent: spec.agent }),
+              allowed_tools: spec.allowedTools,
+              description: spec.description,
+              ...(isAutomator && { isAutomator: true }),
+              ...(spec.heartbeat && { heartbeat: true }),
+              ...(spec.openMode !== undefined && { openMode: spec.openMode }),
+              ...(spec.dangerouslySkipPermissions !== undefined && { dangerouslySkipPermissions: spec.dangerouslySkipPermissions }),
+            }, spec.wallet);
 
             // 1. Deploy library-backed agent overlay into the runtime overlay target, if configured
             if (spec.agent) {
@@ -4931,7 +4939,7 @@ export class AgentManagerDb {
               ORG_CONTEXT: orgContext
                 ? `\n## Your Role\n\n${orgContext}\n\nSee the full org chart at the shared team folder for details on all groups.`
                 : '',
-            }, { hasWallet: !!owsWallet, runtime: effectiveRuntime });
+            }, { hasWallet: !!walletMeta.wallet, runtime: effectiveRuntime });
 
             // 3. Overlay working-directory template files (runtime-aware)
             copyAgentDirOverlay(workingDirectory, spec.name, effectiveRuntime);
@@ -4951,21 +4959,7 @@ export class AgentManagerDb {
               appendLibraryPersonaToAgentsMd(workingDirectory, spec.agent, effectiveRuntime);
             }
 
-            const metadata: AgentMetadata = {
-              name: spec.name,
-              service_type: isAutomator ? undefined : 'REST-AP',
-              endpoint: isAutomator ? undefined : `http://localhost:${port}`,
-              runtime: effectiveRuntime,
-              plugins: localPlugins,
-              ...(spec.agent && { agent: spec.agent }),
-              allowed_tools: spec.allowedTools,
-              description: spec.description,
-              ...(isAutomator && { isAutomator: true }),
-              ...(spec.heartbeat && { heartbeat: true }),
-              ...(spec.openMode !== undefined && { openMode: spec.openMode }),
-              ...(spec.dangerouslySkipPermissions !== undefined && { dangerouslySkipPermissions: spec.dangerouslySkipPermissions }),
-              ...(owsWallet && { ows_wallet: owsWallet.walletName, ows_address: owsWallet.address }),
-            };
+            const metadata: AgentMetadata = walletMeta.metadata;
 
             if (configDomain) {
               metadata.idchain_domain = configDomain;
@@ -5261,8 +5255,16 @@ export class AgentManagerDb {
               metadata.alias = agentConfig.name;
             }
 
-            // Auto-create OWS wallet if ows CLI is available
-            const owsWallet = this.getOrCreateAgentWallet(effectiveTeamName, agentConfig.name);
+            // Wallet opt-in (default off). Record the explicit choice in
+            // metadata so the on-demand provisioning command and the
+            // onchain auto-provision gate can read it. Only call the `ows`
+            // CLI when `wallet: true`.
+            if (agentConfig.wallet !== undefined) {
+              metadata.wallet = agentConfig.wallet;
+            }
+            const owsWallet = agentConfig.wallet === true
+              ? this.getOrCreateAgentWallet(effectiveTeamName, agentConfig.name)
+              : null;
             if (owsWallet) {
               metadata.ows_wallet = owsWallet.walletName;
               metadata.ows_address = owsWallet.address;
@@ -5481,17 +5483,55 @@ export class AgentManagerDb {
       }
 
       case 'agent': {
-        // Control individual agent: /agent <name> <start|stop|rebuild|logs>
+        // Control individual agent: /agent <name> <start|stop|rebuild|logs|heartbeat|wallet provision>
         const agentName = args[0];
         const subAction = args[1]?.toLowerCase();
 
         if (!agentName || !subAction) {
-          return { ok: false, error: 'Usage: /agent <name> <start|stop|rebuild|logs|heartbeat>' };
+          return { ok: false, error: 'Usage: /agent <name> <start|stop|rebuild|logs|heartbeat|wallet provision>' };
         }
 
         const agent = await this.dbQueryAgentByNameMostRecent(teamId, agentName);
         if (!agent) {
           return { ok: false, error: `Agent "${agentName}" not found` };
+        }
+
+        if (subAction === 'wallet') {
+          const walletAction = args[2]?.toLowerCase();
+          if (walletAction !== 'provision') {
+            return { ok: false, error: 'Usage: /agent <name> wallet provision' };
+          }
+          const meta = (agent.metadata || {}) as Record<string, any>;
+          if (meta.ows_wallet) {
+            return {
+              ok: true,
+              result: {
+                action: 'wallet-provision',
+                name: agent.name,
+                status: 'already-provisioned',
+                ows_wallet: meta.ows_wallet,
+                ows_address: meta.ows_address || null,
+              },
+            };
+          }
+          if (!this.checkOwsInstalled()) {
+            return { ok: false, error: 'OWS CLI not installed; cannot provision wallet on demand' };
+          }
+          const refreshed = await this.provisionAgentWalletForRow(teamId, teamName, agent);
+          if (!refreshed) {
+            return { ok: false, error: `Failed to provision OWS wallet for ${agent.name}` };
+          }
+          const provisionedMeta = (refreshed.metadata || {}) as Record<string, any>;
+          return {
+            ok: true,
+            result: {
+              action: 'wallet-provision',
+              name: refreshed.name,
+              status: 'provisioned',
+              ows_wallet: provisionedMeta.ows_wallet,
+              ows_address: provisionedMeta.ows_address || null,
+            },
+          };
         }
 
         // Remote-endpoint runtimes are lifecycled by the operator, not the manager.
@@ -5575,7 +5615,7 @@ export class AgentManagerDb {
               return { ok: true, result: { action: 'heartbeat', name: agent.name, intervalSeconds: config.interval, message: 'Heartbeat sent and schedule reseeded' } };
             }
             default:
-              return { ok: false, error: `Unknown agent action: ${subAction}. Available: start, stop, rebuild, logs, heartbeat` };
+              return { ok: false, error: `Unknown agent action: ${subAction}. Available: start, stop, rebuild, logs, heartbeat, wallet provision` };
           }
         } catch (err: any) {
           return { ok: false, error: `Agent ${subAction} failed: ${err.message}` };
@@ -6718,6 +6758,95 @@ export class AgentManagerDb {
   }
 
   /**
+   * Wallet opt-in: produce the metadata that should be persisted for an
+   * agent based on its config. Honors `walletOptIn === true` by calling
+   * `getOrCreateAgentWallet` once and merging the resulting wallet name
+   * and address into the metadata. Honors `walletOptIn === false` by
+   * recording the explicit opt-out flag without calling the OWS CLI.
+   * `walletOptIn === undefined` leaves the metadata untouched, preserving
+   * legacy behaviour for configs that pre-date the flag.
+   *
+   * Returns the (possibly updated) metadata and the provisioned wallet
+   * descriptor (or null) so callers that need to know about the wallet
+   * (e.g. `deploySkillsToAgent`'s `hasWallet` flag) can branch on it.
+   */
+  private resolveWalletMetadata(
+    teamName: string,
+    agentName: string,
+    metadata: AgentMetadata,
+    walletOptIn: boolean | undefined,
+  ): { metadata: AgentMetadata; wallet: { walletName: string; address: string } | null } {
+    const nextMetadata = this.withWalletConfigMetadata(metadata, walletOptIn);
+    if (walletOptIn !== true) {
+      return { metadata: nextMetadata, wallet: null };
+    }
+
+    const wallet = this.getOrCreateAgentWallet(teamName, agentName);
+    if (!wallet) {
+      return { metadata: nextMetadata, wallet: null };
+    }
+
+    return {
+      metadata: {
+        ...nextMetadata,
+        ows_wallet: wallet.walletName,
+        ows_address: wallet.address,
+      },
+      wallet,
+    };
+  }
+
+  private isWalletProvisioningEnabled(metadata: unknown): boolean {
+    return (metadata as Record<string, unknown> | null | undefined)?.wallet === true;
+  }
+
+  private withoutProvisionedWalletMetadata(metadata: AgentMetadata): AgentMetadata {
+    const next = { ...metadata };
+    delete next.ows_wallet;
+    delete next.ows_address;
+    return next;
+  }
+
+  private withWalletConfigMetadata(metadata: AgentMetadata, walletOptIn: boolean | undefined): AgentMetadata {
+    const next = this.withoutProvisionedWalletMetadata(metadata);
+    if (walletOptIn !== undefined) {
+      next.wallet = walletOptIn;
+    } else {
+      delete next.wallet;
+    }
+    return next;
+  }
+
+  /**
+   * Wallet opt-in: provision (or reuse) an OWS wallet for an existing
+   * agent row, persist `wallet: true` plus the wallet identifiers on the
+   * row's metadata, and return the refreshed row. Returns `null` if OWS
+   * is not installed or wallet creation fails. Used by both the on-demand
+   * `/agent <name> wallet provision` command and the onchain registration
+   * auto-provision path.
+   */
+  private async provisionAgentWalletForRow(
+    teamId: string,
+    walletTeam: string,
+    agent: AgentRow,
+  ): Promise<AgentRow | null> {
+    const meta = (agent.metadata || {}) as Record<string, any>;
+    if (meta.ows_wallet) return agent;
+    const walletAlias = meta.alias || agent.name;
+    const provisioned = this.getOrCreateAgentWallet(walletTeam, walletAlias);
+    if (!provisioned) return null;
+
+    const mergedMeta: AgentMetadata = {
+      ...((agent.metadata || {}) as AgentMetadata),
+      wallet: true,
+      ows_wallet: provisioned.walletName,
+      ows_address: provisioned.address,
+    };
+    await this.db.agents.updateMetadata(agent.id, mergedMeta);
+    return this.dbQueryAgentById(teamId, agent.id);
+  }
+
+  /**
    * Check if the OWS (Open Wallet Standard) CLI is installed and on PATH.
    */
   private checkOwsInstalled(): boolean {
@@ -6777,6 +6906,41 @@ export class AgentManagerDb {
       console.warn(`[OWS] Failed to create wallet "${walletName}": ${err.message}`);
       return null;
     }
+  }
+
+  private buildLocalAgentEnv(
+    teamName: string,
+    port: number,
+    agentRow: AgentRow | null,
+    model?: string,
+    tokenId?: string,
+  ): Record<string, string> {
+    const owsWallet = (agentRow?.metadata as any)?.ows_wallet || null;
+    const skipPermsRaw = (agentRow?.metadata as any)?.dangerouslySkipPermissions;
+    const skipPermissions = skipPermsRaw === false ? false : true;
+
+    return {
+      PATH: process.env.PATH || '',
+      HOME: process.env.HOME || '',
+      SHELL: process.env.SHELL || '',
+      TMPDIR: process.env.TMPDIR || '',
+      USER: process.env.USER || '',
+      LANG: process.env.LANG || '',
+      TERM: process.env.TERM || 'xterm-256color',
+      ...(process.env.NVM_DIR && { NVM_DIR: process.env.NVM_DIR }),
+      ...(process.env.XDG_CONFIG_HOME && { XDG_CONFIG_HOME: process.env.XDG_CONFIG_HOME }),
+      ...filterClaudeEnvVars(process.env),
+      ...(agentRow?.runtime && { ID_HARNESS: resolveRuntime(agentRow.runtime) }),
+      ID_TEAM: teamName,
+      ID_AGENT_PORT: String(port),
+      MANAGER_URL: `http://127.0.0.1:4100`,
+      ID_AGENT_SKIP_PERMISSIONS: skipPermissions ? 'true' : 'false',
+      ...(model && { CLAUDE_MODEL: model }),
+      ...(tokenId && { ID_AGENT_TOKEN_ID: tokenId }),
+      ...(owsWallet && { OWS_WALLET: owsWallet }),
+      ...(process.env.ANTHROPIC_API_KEY && { ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY }),
+      ...(process.env.OPENAI_API_KEY && { OPENAI_API_KEY: process.env.OPENAI_API_KEY }),
+    };
   }
 
   /**
@@ -6870,40 +7034,7 @@ export class AgentManagerDb {
       // Set environment
       // Look up OWS wallet name and permissions flag from agent metadata
       const agentRow = await this.dbQueryAgentById(teamId, id);
-      const owsWallet = (agentRow?.metadata as any)?.ows_wallet || null;
-      // Honor explicit override; default true when undefined.
-      const skipPermsRaw = (agentRow?.metadata as any)?.dangerouslySkipPermissions;
-      const skipPermissions = skipPermsRaw === false ? false : true;
-
-      // Allowlist: only pass env vars that agents need
-      // Excludes secrets like PRIVATE_KEY, registrar keys, RPC keys, DATABASE_URL
-      const localEnv: Record<string, string> = {
-        PATH: process.env.PATH || '',
-        HOME: process.env.HOME || '',
-        SHELL: process.env.SHELL || '',
-        TMPDIR: process.env.TMPDIR || '',
-        USER: process.env.USER || '',
-        LANG: process.env.LANG || '',
-        TERM: process.env.TERM || 'xterm-256color',
-        ...(process.env.NVM_DIR && { NVM_DIR: process.env.NVM_DIR }),
-        ...(process.env.XDG_CONFIG_HOME && { XDG_CONFIG_HOME: process.env.XDG_CONFIG_HOME }),
-        // Pass CLAUDE_* vars for CLI auth/session, minus the parent session
-        // handoff vars (see lib/env-hygiene.ts). Leaking those into a child
-        // `claude` CLI causes it to honor the parent's host-managed OAuth
-        // token ahead of its own keychain login, producing 401 errors.
-        ...filterClaudeEnvVars(process.env),
-        // Runtime harness (codex, claude-code-cli, etc.)
-        ...(agentRow?.runtime && { ID_HARNESS: resolveRuntime(agentRow.runtime) }),
-        ID_TEAM: teamName,
-        ID_AGENT_PORT: String(port),
-        MANAGER_URL: `http://127.0.0.1:4100`,
-        ID_AGENT_SKIP_PERMISSIONS: skipPermissions ? 'true' : 'false',
-        ...(model && { CLAUDE_MODEL: model }),
-        ...(tokenId && { ID_AGENT_TOKEN_ID: tokenId }),
-        ...(owsWallet && { OWS_WALLET: owsWallet }),
-        ...(process.env.ANTHROPIC_API_KEY && { ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY }),
-        ...(process.env.OPENAI_API_KEY && { OPENAI_API_KEY: process.env.OPENAI_API_KEY }),
-      };
+      const localEnv = this.buildLocalAgentEnv(teamName, port, agentRow, model, tokenId);
 
       // Create log file
       const logFile = `/tmp/${name}.log`;

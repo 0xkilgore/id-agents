@@ -69,6 +69,14 @@ export interface AgentSpec {
   domain?: string;                    // ENS domain name (e.g., "x.agent-15.xid.eth")
   tokenId?: string;                   // Namehash of the ENS domain (bytes32)
   address?: string;                   // Ethereum address (links to .env.<name>.<address> file)
+  wallet?: boolean;                   // Opt-in to OWS wallet provisioning at deploy/sync.
+                                      // Default: false. When true the deploy/sync path
+                                      // calls `ows wallet create` and writes
+                                      // metadata.ows_wallet/ows_address; when false (or
+                                      // unset) the agent runs without a wallet and the
+                                      // child env never receives OWS_WALLET. On-demand
+                                      // provisioning is still available via
+                                      // `/agent <name> wallet provision`.
 }
 
 export interface CalendarSpec {
@@ -134,6 +142,7 @@ export interface DeployConfig {
     talkTimeout?: number;               // Default /talk-to timeout in ms
     heartbeatFile?: string;             // Default heartbeat config file for all agents
     heartbeat?: number | HeartbeatConfig;  // Default heartbeat for all agents
+    wallet?: boolean;                   // Default OWS wallet opt-in for all agents (see AgentSpec.wallet)
   };
   agents: AgentSpec[];
 }
@@ -1059,6 +1068,13 @@ export function mergeDefaults(agent: AgentSpec, defaults: DeployConfig['defaults
   // register: agent overrides defaults
   if (merged.register === undefined && defaults.register !== undefined) {
     merged.register = defaults.register;
+  }
+
+  // wallet: agent overrides defaults. Leaving both unset means wallet is
+  // opt-in off — the deploy/sync code treats only an explicit `true` as
+  // "provision an OWS wallet now".
+  if (merged.wallet === undefined && defaults.wallet !== undefined) {
+    merged.wallet = defaults.wallet;
   }
 
   return merged;
