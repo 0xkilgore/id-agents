@@ -36,6 +36,7 @@ import {
   copyHeartbeatMd,
   copyLibraryAgentOverlay,
   appendLibraryPersonaToAgentsMd,
+  writePersonalityFile,
 } from './config-parser.js';
 import {
   getLibraryAgent,
@@ -2329,17 +2330,14 @@ export class AgentManagerDb {
         // Copy HEARTBEAT.md from template to working directory root
         copyHeartbeatMd(workingDirectory, name, effectiveRuntime);
 
-        // 4. Write personality file: protocol defaults + agent role body
+        // 4. Write personality file: protocol defaults + agent role body.
+        // For Codex/Cursor this is a marker-fenced framework block inside
+        // workspace-root AGENTS.md so user edits and the agent persona block
+        // (step 5) survive deploy/sync/rebuild refreshes.
         {
-          const rp = getRuntimePaths(effectiveRuntime);
           const parts = [PROTOCOL_DEFAULTS];
           if (roleBody) parts.push(roleBody);
-          const personalityPath = path.join(workingDirectory, rp.personalityFile);
-          const personalityDir = path.dirname(personalityPath);
-          if (!existsSync(personalityDir)) {
-            mkdirSync(personalityDir, { recursive: true });
-          }
-          writeFileSync(personalityPath, parts.join('\n\n'));
+          writePersonalityFile(workingDirectory, effectiveRuntime, parts.join('\n\n'));
         }
 
         // 5. For Codex/Cursor, append the library persona to AGENTS.md
@@ -4781,15 +4779,13 @@ export class AgentManagerDb {
           copyAgentDirOverlay(workingDirectory, spec.name, effectiveRuntime);
           copyHeartbeatMd(workingDirectory, spec.name, effectiveRuntime);
 
-          // 4. Write personality file: protocol defaults + agent role body (runtime-aware)
+          // 4. Write personality file: framework block (marker-fenced for
+          // Codex/Cursor; full overwrite for Claude). Preserves user edits
+          // outside the markers on Codex/Cursor refresh paths.
           {
-            const rp = getRuntimePaths(effectiveRuntime);
             const parts = [PROTOCOL_DEFAULTS];
             if (spec.roleBody) parts.push(spec.roleBody);
-            const personalityPath = path.join(workingDirectory, rp.personalityFile);
-            const personalityDir = path.dirname(personalityPath);
-            if (!existsSync(personalityDir)) mkdirSync(personalityDir, { recursive: true });
-            writeFileSync(personalityPath, parts.join('\n\n'));
+            writePersonalityFile(workingDirectory, effectiveRuntime, parts.join('\n\n'));
           }
 
           // 5. Codex/Cursor: append library persona to AGENTS.md inside
@@ -4899,15 +4895,12 @@ export class AgentManagerDb {
             copyAgentDirOverlay(workingDirectory, spec.name, effectiveRuntime);
             copyHeartbeatMd(workingDirectory, spec.name, effectiveRuntime);
 
-            // 4. Write personality file: protocol defaults + agent role body (runtime-aware)
+            // 4. Write personality file: framework block (marker-fenced for
+            // Codex/Cursor; full overwrite for Claude).
             {
-              const rp = getRuntimePaths(effectiveRuntime);
               const parts = [PROTOCOL_DEFAULTS];
               if (spec.roleBody) parts.push(spec.roleBody);
-              const personalityPath = path.join(workingDirectory, rp.personalityFile);
-              const personalityDir = path.dirname(personalityPath);
-              if (!existsSync(personalityDir)) mkdirSync(personalityDir, { recursive: true });
-              writeFileSync(personalityPath, parts.join('\n\n'));
+              writePersonalityFile(workingDirectory, effectiveRuntime, parts.join('\n\n'));
             }
 
             // 5. Codex/Cursor: append library persona to AGENTS.md inside
@@ -5250,15 +5243,9 @@ export class AgentManagerDb {
 
             // 4. Write personality file: protocol defaults + agent role body (runtime-aware)
             {
-              const rp = getRuntimePaths(effectiveRuntime);
               const parts = [PROTOCOL_DEFAULTS];
               if (agentConfig.roleBody) parts.push(agentConfig.roleBody);
-              const personalityPath = path.join(workingDirectory, rp.personalityFile);
-              const personalityDir = path.dirname(personalityPath);
-              if (!existsSync(personalityDir)) {
-                mkdirSync(personalityDir, { recursive: true });
-              }
-              writeFileSync(personalityPath, parts.join('\n\n'));
+              writePersonalityFile(workingDirectory, effectiveRuntime, parts.join('\n\n'));
             }
 
             // 5. Codex/Cursor: append library persona to AGENTS.md inside

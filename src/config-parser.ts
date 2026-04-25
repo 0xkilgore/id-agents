@@ -820,6 +820,40 @@ export function upsertMarkedBlock(filePath: string, slug: string, body: string):
 }
 
 /**
+ * Write the framework personality file (PROTOCOL_DEFAULTS + roleBody) into
+ * the agent's working directory in a runtime-aware way:
+ *
+ * - Claude runtimes: full overwrite of `<workingDir>/.claude/CLAUDE.md`. The
+ *   file is id-agents-managed end-to-end; users don't hand-edit it between
+ *   deploys, so the existing wholesale rewrite is preserved.
+ *
+ * - Codex/Cursor runtimes: upsert a `<!-- BEGIN id-agents framework --> ...
+ *   END` block inside `<workingDir>/AGENTS.md` (the same file the library
+ *   persona block lives in). Content outside the framework markers is
+ *   preserved across deploy / sync / rebuild — user edits between or
+ *   outside the managed blocks survive a refresh, only the framework block
+ *   is rewritten.
+ *
+ * Mirrors `appendLibraryPersonaToAgentsMd`'s contract on the persona side:
+ * both helpers are idempotent and leave non-managed content untouched.
+ */
+export function writePersonalityFile(
+  workingDir: string,
+  runtime: HarnessType | string | undefined,
+  body: string,
+): void {
+  const rp = getRuntimePaths(runtime);
+  const personalityPath = path.join(workingDir, rp.personalityFile);
+  if (rp.overlayTarget === '.claude') {
+    fs.mkdirSync(path.dirname(personalityPath), { recursive: true });
+    fs.writeFileSync(personalityPath, body);
+    return;
+  }
+  // Codex/Cursor: workspace-root AGENTS.md, marker-fenced framework block.
+  upsertMarkedBlock(personalityPath, 'framework', body);
+}
+
+/**
  * For Codex/Cursor runtimes only: append (or replace) the library agent
  * persona inside marker fences in `<workingDir>/AGENTS.md`.
  *

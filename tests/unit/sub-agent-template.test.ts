@@ -13,6 +13,7 @@ import {
   copyLibraryAgentOverlay,
   appendLibraryPersonaToAgentsMd,
   upsertMarkedBlock,
+  writePersonalityFile,
 } from '../../src/config-parser.js';
 
 /* ------------------------------------------------------------------ */
@@ -914,5 +915,119 @@ describe('copyLibraryAgentOverlay orphan cleanup', () => {
     copyLibraryAgentOverlay(workDir, 'foundry-dev', 'cursor-cli', libraryRoot);
 
     expect(fs.existsSync(path.join(workDir, '.cursor', 'CLAUDE.md'))).toBe(false);
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/*  writePersonalityFile + spawn-flow refresh                          */
+/* ------------------------------------------------------------------ */
+
+describe('writePersonalityFile', () => {
+  let libraryRoot: string;
+  let agentsDir: string;
+  let workDir: string;
+
+  beforeEach(() => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'id-agents-personality-'));
+    libraryRoot = path.join(tmp, 'configs');
+    agentsDir = path.join(libraryRoot, 'agents');
+    workDir = path.join(tmp, 'workspace');
+    fs.mkdirSync(agentsDir, { recursive: true });
+    fs.mkdirSync(workDir, { recursive: true });
+  });
+
+  afterEach(() => {
+    fs.rmSync(path.dirname(libraryRoot), { recursive: true, force: true });
+  });
+
+  function readAgentsMd(): string {
+    return fs.readFileSync(path.join(workDir, 'AGENTS.md'), 'utf-8');
+  }
+
+  it('Claude runtime: full overwrite of .claude/CLAUDE.md (legacy behavior)', () => {
+    writePersonalityFile(workDir, 'claude-code-cli', '# Protocol defaults\nbody');
+    expect(fs.readFileSync(path.join(workDir, '.claude', 'CLAUDE.md'), 'utf-8'))
+      .toBe('# Protocol defaults\nbody');
+
+    // Re-write with new content fully replaces the file.
+    writePersonalityFile(workDir, 'claude-code-cli', '# Updated\nv2');
+    expect(fs.readFileSync(path.join(workDir, '.claude', 'CLAUDE.md'), 'utf-8'))
+      .toBe('# Updated\nv2');
+  });
+
+  it('Codex runtime: framework body wrapped in framework markers', () => {
+    writePersonalityFile(workDir, 'codex', '# Protocol defaults\nbody');
+    const out = readAgentsMd();
+    expect(out).toBe(
+      '<!-- BEGIN id-agents framework -->\n# Protocol defaults\nbody\n<!-- END id-agents framework -->\n',
+    );
+  });
+
+  it('Codex re-deploy: framework block refreshes in place; user content above and below survives', () => {
+    // Initial deploy.
+    writePersonalityFile(workDir, 'codex', '# Protocol defaults\nv1 body');
+
+    // User edits AGENTS.md outside the framework block — both above and below.
+    const initial = readAgentsMd();
+    fs.writeFileSync(
+      path.join(workDir, 'AGENTS.md'),
+      `# Local preface\nuser preface line\n\n${initial}\n## User notes below\nlocal context\n`,
+    );
+
+    // Re-deploy with updated framework body.
+    writePersonalityFile(workDir, 'codex', '# Protocol defaults\nv2 body');
+
+    const out = readAgentsMd();
+    expect(out).toContain('# Local preface\nuser preface line\n');
+    expect(out).toContain(
+      '<!-- BEGIN id-agents framework -->\n# Protocol defaults\nv2 body\n<!-- END id-agents framework -->\n',
+    );
+    expect(out).toContain('## User notes below\nlocal context\n');
+    // v1 framework body is gone — only the marked block was replaced.
+    expect(out).not.toContain('v1 body');
+  });
+
+  it('spawn-flow refresh on Codex preserves user edits above markers across both managed blocks', () => {
+    // Stage a library entry so the agent persona append step has something to read.
+    fs.mkdirSync(path.join(agentsDir, 'foundry-dev'), { recursive: true });
+    fs.writeFileSync(path.join(agentsDir, 'foundry-dev', 'CLAUDE.md'), '# persona v1');
+
+    // Step 4: framework write.
+    writePersonalityFile(workDir, 'codex', '# Protocol defaults\nbody');
+    // Step 5: agent persona append.
+    appendLibraryPersonaToAgentsMd(workDir, 'foundry-dev', 'codex', libraryRoot);
+
+    // User now hand-edits AGENTS.md: adds notes above the framework block,
+    // between the two managed blocks, and below the agent block.
+    const afterFirstDeploy = readAgentsMd();
+    fs.writeFileSync(
+      path.join(workDir, 'AGENTS.md'),
+      `# user preface\nlocal preface line\n\n${afterFirstDeploy.replace(
+        '<!-- END id-agents framework -->\n\n<!-- BEGIN id-agents agent:foundry-dev -->',
+        '<!-- END id-agents framework -->\n\n## interstitial\nuser-only middle\n\n<!-- BEGIN id-agents agent:foundry-dev -->',
+      )}## tail notes\nlocal tail line\n`,
+    );
+
+    // Library content rotates and a redeploy happens (sync/rebuild path):
+    // step 4 + step 5 run again with fresh inputs.
+    fs.writeFileSync(path.join(agentsDir, 'foundry-dev', 'CLAUDE.md'), '# persona v2');
+    writePersonalityFile(workDir, 'codex', '# Protocol defaults\nbody');
+    appendLibraryPersonaToAgentsMd(workDir, 'foundry-dev', 'codex', libraryRoot);
+
+    const out = readAgentsMd();
+    // All three pockets of user content survive intact.
+    expect(out).toContain('# user preface\nlocal preface line\n');
+    expect(out).toContain('## interstitial\nuser-only middle\n');
+    expect(out).toContain('## tail notes\nlocal tail line\n');
+    // Framework block stays in place (idempotent re-write of identical body).
+    expect(out).toContain(
+      '<!-- BEGIN id-agents framework -->\n# Protocol defaults\nbody\n<!-- END id-agents framework -->\n',
+    );
+    // Persona block reflects v2.
+    expect(out).toContain(
+      '<!-- BEGIN id-agents agent:foundry-dev -->\n# persona v2\n<!-- END id-agents agent:foundry-dev -->\n',
+    );
+    // Old persona body is gone.
+    expect(out).not.toContain('# persona v1');
   });
 });
