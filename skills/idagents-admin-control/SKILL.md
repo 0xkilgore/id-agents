@@ -163,6 +163,74 @@ Same authorization rules as `/remote`: **ask before acting** on any write (regis
 
 Certain agent names collide with CLI commands and are rejected by the register endpoint (`{"error":"invalid_name", ...}`). Known reserved: `help`, `agents`, `status`, `team`, `deploy`, `ask`, `hey`, `delete`, `register`, `public`. If you need one of these as a logical identifier, suffix it (`help-idagents`, `status-probe`, etc).
 
+## Agent Library & Team Configuration
+
+The v3 agent-config system separates **persona templates** (the library) from **team membership** (team YAMLs). To add an agent to a team, reference a library entry from the team's YAML and run `/sync`.
+
+### Listing library entries
+
+The library lives at the path the manager exposes as `libraryRoot` (typically `id2/public-agents/configs/agents/` or `id2/id-agents/configs/agents/`). Each subdirectory is one persona template.
+
+```bash
+MGR="${MANAGER_URL:-http://127.0.0.1:4100}"
+curl -sS "$MGR/library/agents" | jq '.entries[].name'
+# → "copywriter", "devops", "editor", "foundry-dev", "frontend",
+#    "frontend-react", "fullstack-nextjs", "security", "solidity-security"
+```
+
+The response also includes `libraryRoot`, each entry's `shape` (`claude-native` or `agents-md-native`), and `source_path`. Filesystem fallback when the daemon is down:
+
+```bash
+ls "$(jq -r '.libraryRoot' <<<"$(curl -sS $MGR/library/agents)")/agents"
+```
+
+### Adding an agent to a team
+
+1. **Edit the team YAML** under `id-agents/configs/<team>.yaml`. Add an entry under `agents:`:
+
+   ```yaml
+   agents:
+     - name: copy
+       description: "Marketing copy for landing pages"
+       workingDirectory: /Users/nxt3d/projects/id-agents-app
+       agent: copywriter        # ← library entry name (optional)
+       # runtime: claude-code-cli  # inherits from defaults if omitted
+       # model: claude-opus-4-6
+       # skills: [identity, inter-agent, catalog]  # extra skills on top of the library entry
+   ```
+
+   The `agent:` field pulls the persona (CLAUDE.md / AGENTS.md + bundled skills) from `configs/agents/<name>/` at sync time. Omit `agent:` for a bare persona where you write the prompt inline via `description:` only.
+
+2. **Sync the team.** This rebuilds working-directory artifacts (CLAUDE.md sidecar for Claude, marker-fenced AGENTS.md append for Codex/Cursor) for every agent whose template-derived hash changed:
+
+   ```bash
+   MGR="${MANAGER_URL:-http://127.0.0.1:4100}"
+   curl -sS -X POST "$MGR/remote" \
+     -H "Content-Type: application/json" \
+     ${ID_TEAM:+-H "X-Id-Team: $ID_TEAM"} \
+     -d '{"command":"/sync"}' | jq '.result.queryId'
+   # then poll `/query/$QID?wait=30` per the standard pattern below
+   ```
+
+3. **Verify** the new agent is in the team and picked up the persona:
+
+   ```bash
+   curl -sS "$MGR/agents" ${ID_TEAM:+-H "X-Id-Team: $ID_TEAM"} \
+     | jq '.agents[] | select(.name=="copy") | {name,runtime,workingDirectory,agent}'
+   ```
+
+   The agent's working directory should now contain the synced persona file. For Claude runtimes, look for `<wd>/.claude/rules/<agent-name>.md`; for Codex/Cursor, look for the marker-fenced block in `<wd>/AGENTS.md`.
+
+### Removing or changing the library reference
+
+Editing or removing the `agent:` field, then running `/sync`, will update the synced artifacts. The 4-case SHA ownership rule prevents `/sync` from clobbering local edits — if the receipt's hash doesn't match, the user is prompted to rebase or keep local. To force an overwrite, delete the existing artifact first.
+
+### Anti-patterns
+
+**Do not edit `configs/agents/<name>/CLAUDE.md` to customize one team's agent.** That file is the shared library entry — changes there propagate to every team using it. Override per-team via the YAML's `description:` and `skills:` fields, or fork the library entry under a new name.
+
+**Do not skip `/sync` after editing a team YAML.** The manager only rehydrates from disk on `/sync` (or restart). The agent will keep running with stale config until you sync.
+
 ## Polling for Agent Replies
 
 After dispatching work via `POST /remote`, poll `GET /query/<id>?wait=<seconds>` for the reply. Long-poll (`?wait=30`) is supported and strongly preferred — the daemon holds the connection open and returns as soon as the status transitions, or at the timeout, whichever comes first.

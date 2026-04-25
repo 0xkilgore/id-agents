@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.73-beta
+
+### Documentation
+
+- Add an "Agent Library & Team Configuration" section to the `idagents-admin-control` skill: how to list `/library/agents`, add an agent to a team YAML by referencing a library entry via the `agent:` field, run `/sync`, verify, and the anti-patterns around editing shared library entries or skipping `/sync`.
+
 ## 0.1.72-beta
 
 ### Documentation
