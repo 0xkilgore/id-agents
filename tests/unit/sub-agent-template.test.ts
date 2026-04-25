@@ -550,7 +550,11 @@ describe('copyLibraryAgentOverlay', () => {
     expect(copyLibraryAgentOverlay(workDir, 'absent', 'claude-agent-sdk', libraryRoot)).toBe(false);
   });
 
-  it('copies a claude-native entry into .claude/ for a Claude runtime', () => {
+  it('routes a claude-native persona into .claude/rules/agent-<name>.md for a Claude runtime', () => {
+    // Library CLAUDE.md must NOT land at .claude/CLAUDE.md — the framework
+    // overwrites that path with PROTOCOL_DEFAULTS + roleBody right after
+    // overlay. Routing the persona to .claude/rules/agent-<name>.md keeps
+    // both visible to Claude (auto-loaded as a rule).
     fs.mkdirSync(path.join(agentsDir, 'frontend', 'rules'), { recursive: true });
     fs.writeFileSync(path.join(agentsDir, 'frontend', 'CLAUDE.md'), 'frontend persona');
     fs.writeFileSync(path.join(agentsDir, 'frontend', 'rules', 'style.md'), 'rule body');
@@ -558,7 +562,11 @@ describe('copyLibraryAgentOverlay', () => {
     const copied = copyLibraryAgentOverlay(workDir, 'frontend', 'claude-agent-sdk', libraryRoot);
 
     expect(copied).toBe(true);
-    expect(fs.readFileSync(path.join(workDir, '.claude', 'CLAUDE.md'), 'utf-8')).toBe('frontend persona');
+    expect(fs.existsSync(path.join(workDir, '.claude', 'CLAUDE.md'))).toBe(false);
+    expect(
+      fs.readFileSync(path.join(workDir, '.claude', 'rules', 'agent-frontend.md'), 'utf-8'),
+    ).toBe('frontend persona');
+    // Other rule files copied as-is.
     expect(fs.readFileSync(path.join(workDir, '.claude', 'rules', 'style.md'), 'utf-8')).toBe('rule body');
   });
 
@@ -583,7 +591,7 @@ describe('copyLibraryAgentOverlay', () => {
     expect(fs.readFileSync(path.join(workDir, '.cursor', 'CLAUDE.md'), 'utf-8')).toBe('persona');
   });
 
-  it('copies only the sibling directory for an agents-md-native entry', () => {
+  it('routes the sibling persona to the rules sidecar for an agents-md-native entry on Claude', () => {
     fs.mkdirSync(path.join(agentsDir, 'backend', 'skills', 'using-foundry'), { recursive: true });
     fs.writeFileSync(path.join(agentsDir, 'backend.md'), 'backend persona');
     fs.writeFileSync(
@@ -601,9 +609,14 @@ describe('copyLibraryAgentOverlay', () => {
         'utf-8',
       ),
     ).toBe('skill body');
-    // Slice 2 deliberately does not place the sibling <name>.md file.
+    // Persona is preserved in the Claude rules sidecar so the framework's
+    // CLAUDE.md write does not erase it. .claude/CLAUDE.md must NOT exist
+    // and the sibling .md file is not placed at the overlay root either.
     expect(fs.existsSync(path.join(workDir, '.claude', 'CLAUDE.md'))).toBe(false);
     expect(fs.existsSync(path.join(workDir, '.claude', 'backend.md'))).toBe(false);
+    expect(
+      fs.readFileSync(path.join(workDir, '.claude', 'rules', 'agent-backend.md'), 'utf-8'),
+    ).toBe('backend persona');
   });
 
   it('returns false when the enumerator reports a mixed-shape conflict', () => {
@@ -621,13 +634,39 @@ describe('copyLibraryAgentOverlay', () => {
     expect(copyLibraryAgentOverlay(workDir, 'orphan', 'claude-agent-sdk', libraryRoot)).toBe(false);
   });
 
-  it('defaults to the Claude overlay target when no runtime is given', () => {
+  it('defaults to the Claude overlay target (with sidecar persona) when no runtime is given', () => {
     fs.mkdirSync(path.join(agentsDir, 'frontend'), { recursive: true });
     fs.writeFileSync(path.join(agentsDir, 'frontend', 'CLAUDE.md'), 'persona');
 
     const copied = copyLibraryAgentOverlay(workDir, 'frontend', undefined, libraryRoot);
 
     expect(copied).toBe(true);
-    expect(fs.readFileSync(path.join(workDir, '.claude', 'CLAUDE.md'), 'utf-8')).toBe('persona');
+    expect(fs.existsSync(path.join(workDir, '.claude', 'CLAUDE.md'))).toBe(false);
+    expect(
+      fs.readFileSync(path.join(workDir, '.claude', 'rules', 'agent-frontend.md'), 'utf-8'),
+    ).toBe('persona');
+  });
+
+  it('preserves persona through symlinked library entries', () => {
+    // Library author may symlink an external agent dir into configs/agents.
+    // Without symlink-aware enumeration the entry was silently dropped.
+    // Anchor the external dir outside libraryRoot so the recursive copy
+    // can't follow the symlink back through the source tree.
+    const externalAgentDir = fs.mkdtempSync(
+      path.join(os.tmpdir(), 'id-agents-symlink-target-'),
+    );
+    try {
+      fs.writeFileSync(path.join(externalAgentDir, 'CLAUDE.md'), 'symlinked persona');
+      fs.symlinkSync(externalAgentDir, path.join(agentsDir, 'linked'));
+
+      const copied = copyLibraryAgentOverlay(workDir, 'linked', 'claude-agent-sdk', libraryRoot);
+
+      expect(copied).toBe(true);
+      expect(
+        fs.readFileSync(path.join(workDir, '.claude', 'rules', 'agent-linked.md'), 'utf-8'),
+      ).toBe('symlinked persona');
+    } finally {
+      fs.rmSync(externalAgentDir, { recursive: true, force: true });
+    }
   });
 });

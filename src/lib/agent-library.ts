@@ -84,6 +84,25 @@ function isFile(p: string): boolean {
   try { return fs.statSync(p).isFile(); } catch { return false; }
 }
 
+/**
+ * Classify a `readdirSync(..., { withFileTypes: true })` entry while
+ * following symlinks. `dirent.isDirectory()` and `dirent.isFile()` return
+ * false for symlinks even when the target is a regular dir/file; without
+ * this helper, library entries reachable only through a symlink would be
+ * silently skipped by the enumerator.
+ */
+function direntIsDirectory(dirent: fs.Dirent, parentDir: string): boolean {
+  if (dirent.isDirectory()) return true;
+  if (dirent.isSymbolicLink()) return isDirectory(path.join(parentDir, dirent.name));
+  return false;
+}
+
+function direntIsFile(dirent: fs.Dirent, parentDir: string): boolean {
+  if (dirent.isFile()) return true;
+  if (dirent.isSymbolicLink()) return isFile(path.join(parentDir, dirent.name));
+  return false;
+}
+
 function isValidEntryName(name: string): boolean {
   return ENTRY_NAME_RE.test(name);
 }
@@ -122,13 +141,13 @@ export function enumerateLibraryAgents(agentsDir: string): LibraryAgentScan {
 
   const children = fs.readdirSync(agentsDir, { withFileTypes: true });
   for (const child of children) {
-    if (child.isDirectory()) {
+    if (direntIsDirectory(child, agentsDir)) {
       const name = child.name;
       if (!isValidEntryName(name)) continue;
       const c = touch(name);
       c.hasDir = true;
       c.hasClaudeMd = isFile(path.join(agentsDir, name, 'CLAUDE.md'));
-    } else if (child.isFile()) {
+    } else if (direntIsFile(child, agentsDir)) {
       const fname = child.name;
       if (!fname.endsWith('.md')) continue;
       const name = fname.slice(0, -'.md'.length);
@@ -211,7 +230,7 @@ export function enumerateLibrarySkills(skillsDir: string): LibrarySkillEntry[] {
   const children = fs.readdirSync(skillsDir, { withFileTypes: true });
 
   for (const child of children) {
-    if (!child.isDirectory()) continue;
+    if (!direntIsDirectory(child, skillsDir)) continue;
     const name = child.name;
     if (!isValidEntryName(name)) continue;
 

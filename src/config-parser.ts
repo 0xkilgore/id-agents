@@ -20,6 +20,7 @@ import {
 } from './runtime/registry.js';
 import { validateName } from './name-validation.js';
 import { enumerateLibraryAgents } from './lib/agent-library.js';
+import { resolveDefaultLibraryRoot } from './lib/library-inventory.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -675,9 +676,24 @@ export function copyAgentDirOverlay(workingDir: string, templateName: string, ru
  *   - Codex            → `<workingDir>/.agents/`
  *   - Cursor CLI       → `<workingDir>/.cursor/`
  *
- * Only the library entry's directory contents are copied. For
- * `agents-md-native`, the sibling `<name>.md` personality file is not placed
- * here — that handling belongs to the memory-file mapping in a later slice.
+ * Persona collision (Claude runtimes):
+ *   The framework writes its own `.claude/CLAUDE.md` (PROTOCOL_DEFAULTS +
+ *   roleBody) immediately after the library overlay. To avoid clobbering
+ *   the library persona, the library's CLAUDE.md is routed to
+ *   `.claude/rules/agent-<name>.md` instead — Claude auto-loads
+ *   `.claude/rules/*.md` at session start, so both the framework defaults
+ *   and the library persona are visible to the agent.
+ *
+ *   For `agents-md-native` entries the sibling `<name>.md` is similarly
+ *   placed at `.claude/rules/agent-<name>.md` so the persona is preserved.
+ *
+ *   For non-Claude runtimes the framework's personality file is `AGENTS.md`
+ *   at the workspace root, which doesn't collide with anything under the
+ *   `.agents/` or `.cursor/` overlay target, so no rewrite is applied.
+ *
+ * Library-root resolution defaults to `resolveDefaultLibraryRoot()` —
+ * `process.env.ID_LIBRARY_ROOT` if set, else `<cwd>/configs`, else null —
+ * matching the slice-7 manager `/library/*` endpoints.
  *
  * Returns `false` (no-op) when:
  *   - the library directory does not exist
@@ -689,8 +705,8 @@ export function copyAgentDirOverlay(workingDir: string, templateName: string, ru
  * @param name         Library entry name to resolve.
  * @param runtime      Runtime id; selects the overlay destination.
  *                     Defaults to the Claude overlay target.
- * @param libraryRoot  Optional library root. Defaults to `<repoRoot>/configs`,
- *                     derived from this module's compiled location.
+ * @param libraryRoot  Optional library root. Defaults to
+ *                     `resolveDefaultLibraryRoot()`.
  */
 export function copyLibraryAgentOverlay(
   workingDir: string,
@@ -700,7 +716,8 @@ export function copyLibraryAgentOverlay(
 ): boolean {
   const root = libraryRoot
     ? path.resolve(libraryRoot)
-    : path.resolve(__dirname, '..', 'configs');
+    : resolveDefaultLibraryRoot();
+  if (!root) return false;
 
   const scan = enumerateLibraryAgents(path.join(root, 'agents'));
   if (scan.errors.some(err => err.name === name)) return false;
@@ -711,7 +728,28 @@ export function copyLibraryAgentOverlay(
   const rp = getRuntimePaths(runtime);
   const destDir = path.join(workingDir, rp.overlayTarget);
   fs.mkdirSync(destDir, { recursive: true });
-  fs.cpSync(entry.dirPath, destDir, { recursive: true, force: true });
+  // dereference:true so a symlinked library entry copies its target's
+  // contents — keeps symlink-anchored entries first-class with the
+  // matching enumerator change.
+  fs.cpSync(entry.dirPath, destDir, { recursive: true, force: true, dereference: true });
+
+  // Sidecar rewrite — only matters for Claude runtimes whose framework
+  // personality file lives at .claude/CLAUDE.md (see jsdoc).
+  const isClaudeOverlay = rp.overlayTarget === '.claude';
+  if (isClaudeOverlay) {
+    const sidecarPath = path.join(destDir, 'rules', `agent-${name}.md`);
+    const claudeMdAtDest = path.join(destDir, 'CLAUDE.md');
+    if (entry.shape === 'claude-native' && fs.existsSync(claudeMdAtDest)) {
+      fs.mkdirSync(path.dirname(sidecarPath), { recursive: true });
+      fs.renameSync(claudeMdAtDest, sidecarPath);
+    } else if (entry.shape === 'agents-md-native') {
+      // The recursive copy did not include the sibling <name>.md; place
+      // it directly at the sidecar path so the persona is still applied.
+      fs.mkdirSync(path.dirname(sidecarPath), { recursive: true });
+      fs.copyFileSync(entry.memoryFile, sidecarPath);
+    }
+  }
+
   return true;
 }
 
