@@ -24,6 +24,8 @@ import { SqliteQueriesRepo } from '../../src/db/repos/sqlite/queries-repo.js';
 import { SqliteNewsRepo } from '../../src/db/repos/sqlite/news-repo.js';
 import { SqliteSchedulesRepo } from '../../src/db/repos/sqlite/schedules-repo.js';
 import { SqliteTasksRepo } from '../../src/db/repos/sqlite/tasks-repo.js';
+import { SqliteEventsRepo } from '../../src/db/repos/sqlite/events-repo.js';
+import { SqliteSubscriptionsRepo } from '../../src/db/repos/sqlite/subscriptions-repo.js';
 import type { AgentRow, TaskRow } from '../../src/db/types.js';
 
 // --- DB factory helper (in-memory) ---
@@ -38,6 +40,8 @@ function createInMemoryDb() {
     news: new SqliteNewsRepo(adapter),
     schedules: new SqliteSchedulesRepo(adapter),
     tasks: new SqliteTasksRepo(adapter),
+    events: new SqliteEventsRepo(adapter),
+    subscriptions: new SqliteSubscriptionsRepo(adapter),
     async close() { await adapter.close(); },
   };
 }
