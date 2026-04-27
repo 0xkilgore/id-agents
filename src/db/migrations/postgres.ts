@@ -578,4 +578,56 @@ export async function migratePostgres(adapter: DbAdapter): Promise<void> {
     );
   `);
   await adapter.query(`CREATE UNIQUE INDEX IF NOT EXISTS webhook_delivery_once_idx ON webhook_delivery_attempts(subscription_id, event_seq);`);
+
+  // 17) Checkin primitive (output/checkin-primitive-design.md). Lives in its
+  //     own table; references event_log(seq) via last_event_seq for the most
+  //     recent emitted lifecycle event.
+  await adapter.query(`
+    CREATE TABLE IF NOT EXISTS checkins (
+      id text PRIMARY KEY,
+      team_id uuid NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+      owner_agent_id text REFERENCES agents(id) ON DELETE SET NULL,
+      created_by_agent_id text REFERENCES agents(id) ON DELETE SET NULL,
+      linked_task_id text REFERENCES tasks(id) ON DELETE CASCADE,
+      interval_seconds integer NOT NULL,
+      priority text NOT NULL DEFAULT 'normal',
+      status text NOT NULL,
+      close_when jsonb NOT NULL,
+      max_iterations integer,
+      iteration_count integer NOT NULL DEFAULT 0,
+      next_fire_at bigint,
+      snooze_until bigint,
+      ttl_expires_at bigint,
+      last_fire_at bigint,
+      last_event_seq bigint REFERENCES event_log(seq) ON DELETE SET NULL,
+      note text,
+      created_at bigint NOT NULL,
+      updated_at bigint NOT NULL,
+      closed_at bigint,
+      closed_reason text,
+      CONSTRAINT checkins_priority_chk CHECK (priority IN ('low', 'normal', 'high')),
+      CONSTRAINT checkins_status_chk CHECK (status IN ('active', 'snoozed', 'closed', 'expired')),
+      CONSTRAINT checkins_interval_chk CHECK (interval_seconds > 0),
+      CONSTRAINT checkins_max_iterations_chk CHECK (max_iterations IS NULL OR max_iterations > 0),
+      CONSTRAINT checkins_iteration_count_chk CHECK (iteration_count >= 0)
+    );
+  `);
+  await adapter.query(`
+    CREATE INDEX IF NOT EXISTS checkins_due_idx
+      ON checkins(team_id, status, next_fire_at)
+      WHERE next_fire_at IS NOT NULL;
+  `);
+  await adapter.query(`
+    CREATE INDEX IF NOT EXISTS checkins_owner_idx
+      ON checkins(team_id, owner_agent_id, status, updated_at);
+  `);
+  await adapter.query(`
+    CREATE INDEX IF NOT EXISTS checkins_task_idx
+      ON checkins(team_id, linked_task_id, status);
+  `);
+  await adapter.query(`
+    CREATE INDEX IF NOT EXISTS checkins_ttl_idx
+      ON checkins(team_id, ttl_expires_at)
+      WHERE ttl_expires_at IS NOT NULL AND status IN ('active', 'snoozed');
+  `);
 }

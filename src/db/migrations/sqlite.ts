@@ -198,6 +198,44 @@ export async function migrateSqlite(adapter: SqliteAdapter): Promise<void> {
 
     CREATE UNIQUE INDEX IF NOT EXISTS webhook_delivery_once_idx
       ON webhook_delivery_attempts(subscription_id, event_seq);
+
+    CREATE TABLE IF NOT EXISTS checkins (
+      id TEXT PRIMARY KEY,
+      team_id TEXT NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+      owner_agent_id TEXT REFERENCES agents(id) ON DELETE SET NULL,
+      created_by_agent_id TEXT REFERENCES agents(id) ON DELETE SET NULL,
+      linked_task_id TEXT REFERENCES tasks(id) ON DELETE CASCADE,
+      interval_seconds INTEGER NOT NULL,
+      priority TEXT NOT NULL DEFAULT 'normal',
+      status TEXT NOT NULL,
+      close_when TEXT NOT NULL,
+      max_iterations INTEGER,
+      iteration_count INTEGER NOT NULL DEFAULT 0,
+      next_fire_at INTEGER,
+      snooze_until INTEGER,
+      ttl_expires_at INTEGER,
+      last_fire_at INTEGER,
+      last_event_seq INTEGER REFERENCES event_log(seq) ON DELETE SET NULL,
+      note TEXT,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      closed_at INTEGER,
+      closed_reason TEXT
+    );
+
+    CREATE INDEX IF NOT EXISTS checkins_due_idx
+      ON checkins(team_id, status, next_fire_at)
+      WHERE next_fire_at IS NOT NULL;
+
+    CREATE INDEX IF NOT EXISTS checkins_owner_idx
+      ON checkins(team_id, owner_agent_id, status, updated_at);
+
+    CREATE INDEX IF NOT EXISTS checkins_task_idx
+      ON checkins(team_id, linked_task_id, status);
+
+    CREATE INDEX IF NOT EXISTS checkins_ttl_idx
+      ON checkins(team_id, ttl_expires_at)
+      WHERE ttl_expires_at IS NOT NULL AND status IN ('active', 'snoozed');
   `);
 
   try {

@@ -36,6 +36,7 @@ async function createPostgresDb(adapter: DbAdapter): Promise<Db> {
   const { PgTasksRepo } = await import('./repos/postgres/tasks-repo.js');
   const { PgEventsRepo } = await import('./repos/postgres/events-repo.js');
   const { PgSubscriptionsRepo } = await import('./repos/postgres/subscriptions-repo.js');
+  const { PgCheckinsRepo } = await import('./repos/postgres/checkins-repo.js');
   return {
     adapter,
     teams: new PgTeamsRepo(adapter),
@@ -46,6 +47,7 @@ async function createPostgresDb(adapter: DbAdapter): Promise<Db> {
     tasks: new PgTasksRepo(adapter),
     events: new PgEventsRepo(adapter),
     subscriptions: new PgSubscriptionsRepo(adapter),
+    checkins: new PgCheckinsRepo(adapter),
     async close() { await adapter.close(); },
   };
 }
@@ -59,6 +61,7 @@ async function createSqliteDb(adapter: SqliteAdapter): Promise<Db> {
   const { SqliteTasksRepo } = await import('./repos/sqlite/tasks-repo.js');
   const { SqliteEventsRepo } = await import('./repos/sqlite/events-repo.js');
   const { SqliteSubscriptionsRepo } = await import('./repos/sqlite/subscriptions-repo.js');
+  const { SqliteCheckinsRepo } = await import('./repos/sqlite/checkins-repo.js');
   return {
     adapter,
     teams: new SqliteTeamsRepo(adapter),
@@ -69,6 +72,7 @@ async function createSqliteDb(adapter: SqliteAdapter): Promise<Db> {
     tasks: new SqliteTasksRepo(adapter),
     events: new SqliteEventsRepo(adapter),
     subscriptions: new SqliteSubscriptionsRepo(adapter),
+    checkins: new SqliteCheckinsRepo(adapter),
     async close() { await adapter.close(); },
   };
 }
@@ -98,4 +102,8 @@ export type {
   EventLogRow,
   SubscriptionRow,
   WebhookDeliveryAttemptRow,
+  CheckinRow,
+  CheckinStatus,
+  CheckinPriority,
+  MutableCheckinFields,
 } from './types.js';

@@ -183,3 +183,60 @@ export interface WebhookDeliveryAttemptRow {
   http_status: number | null;
   error: string | null;
 }
+
+// ---------------------------------------------------------------------------
+// Checkin primitive (output/checkin-primitive-design.md)
+// ---------------------------------------------------------------------------
+
+export type CheckinStatus = 'active' | 'snoozed' | 'closed' | 'expired';
+export type CheckinPriority = 'low' | 'normal' | 'high';
+
+/** checkins table row — task watch with periodic due fires. */
+export interface CheckinRow {
+  id: string;
+  team_id: string;
+  owner_agent_id: string | null;
+  created_by_agent_id: string | null;
+  linked_task_id: string | null;
+  interval_seconds: number;
+  priority: CheckinPriority;
+  status: CheckinStatus;
+  close_when: Record<string, unknown>;
+  max_iterations: number | null;
+  iteration_count: number;
+  next_fire_at: number | null;
+  snooze_until: number | null;
+  ttl_expires_at: number | null;
+  last_fire_at: number | null;
+  last_event_seq: number | null;
+  note: string | null;
+  created_at: number;
+  updated_at: number;
+  closed_at: number | null;
+  closed_reason: string | null;
+}
+
+/**
+ * Fields a caller is allowed to mutate on an existing checkin row via
+ * `CheckinsRepository.updateFields`. `id`, `team_id`, and `created_at` are
+ * immutable; `iteration_count` only goes up; `closed_at`/`closed_reason`
+ * are set together by `close` / `closeForTerminalTask`.
+ */
+export type MutableCheckinFields = Partial<{
+  owner_agent_id: string | null;
+  linked_task_id: string | null;
+  interval_seconds: number;
+  priority: CheckinPriority;
+  status: CheckinStatus;
+  close_when: Record<string, unknown>;
+  max_iterations: number | null;
+  iteration_count: number;
+  next_fire_at: number | null;
+  snooze_until: number | null;
+  ttl_expires_at: number | null;
+  last_fire_at: number | null;
+  last_event_seq: number | null;
+  note: string | null;
+  closed_at: number | null;
+  closed_reason: string | null;
+}> & { updated_at: number };

@@ -23,6 +23,9 @@ import type {
   TaskEventLinkRow,
   EventLogRow,
   SubscriptionRow,
+  CheckinRow,
+  CheckinStatus,
+  MutableCheckinFields,
 } from './types.js';
 
 // ---------------------------------------------------------------------------
@@ -524,6 +527,77 @@ export interface SubscriptionsRepository {
 }
 
 // ---------------------------------------------------------------------------
+// CheckinsRepository (checkin primitive)
+// ---------------------------------------------------------------------------
+
+export interface CheckinsRepository {
+  /**
+   * Insert a new checkin row. The caller supplies the full row (id, status,
+   * timestamps, etc.) so behavior such as default cadence / TTL stays at the
+   * service layer, not the repository.
+   *
+   * Same-team enforcement: when `linked_task_id` is non-null, the linked
+   * task must belong to `team_id`. The repo verifies this and throws on
+   * mismatch (SQLite cannot encode the constraint at the schema level).
+   */
+  create(row: CheckinRow): Promise<void>;
+
+  /** Fetch a single checkin scoped to a team. Returns null if not found. */
+  get(id: string, teamId: string): Promise<CheckinRow | null>;
+
+  /**
+   * List checkins for a team with optional filters. Ordered by
+   * `next_fire_at ASC` when `dueBefore` is set (so the dispatcher reads
+   * earliest-due first), otherwise by `updated_at DESC`.
+   *
+   * `limit` defaults to 100 and is hard-capped at 1000.
+   */
+  list(filters: {
+    teamId: string;
+    owner?: string;
+    linkedTaskId?: string;
+    status?: CheckinStatus | CheckinStatus[];
+    dueBefore?: number;
+    limit?: number;
+  }): Promise<CheckinRow[]>;
+
+  /**
+   * Patch mutable fields on a checkin row. `updated_at` is required so all
+   * mutations carry a fresh timestamp. Same-team enforcement applies again
+   * when `linked_task_id` is updated to a non-null value.
+   */
+  updateFields(id: string, teamId: string, fields: MutableCheckinFields): Promise<void>;
+
+  /**
+   * Manually close a checkin. Sets `status='closed'`, `closed_at`,
+   * `closed_reason`, clears `next_fire_at` and `snooze_until`. Returns true
+   * iff the row transitioned to closed (idempotent: a no-op on rows that
+   * are already in a terminal state returns false).
+   */
+  close(id: string, teamId: string, closedAt: number, reason: string): Promise<boolean>;
+
+  /**
+   * Bulk-close every active or snoozed checkin linked to a now-terminal
+   * task. Used by the consumer hook that listens for `task:completed` and
+   * other terminal task events. Returns the count of rows that transitioned
+   * (already-closed rows are not counted).
+   */
+  closeForTerminalTask(taskId: string, teamId: string, closedAt: number, reason: string): Promise<number>;
+
+  /**
+   * Atomically claim due checkins for dispatch. Returns rows where:
+   *   - status IN ('active', 'snoozed')
+   *   - next_fire_at IS NOT NULL AND next_fire_at <= now
+   *
+   * The implementation must avoid handing the same row to two concurrent
+   * dispatchers (the dispatch loop is the only writer that increments
+   * `iteration_count` after the row is acted on, so this method only needs
+   * to scope the read; the v1 dispatcher is single-tick on the manager).
+   */
+  claimDue(teamId: string, now: number, limit: number): Promise<CheckinRow[]>;
+}
+
+// ---------------------------------------------------------------------------
 // Db — composite service
 // ---------------------------------------------------------------------------
 
@@ -548,6 +622,7 @@ export interface Db {
   tasks: TasksRepository;
   events: EventsRepository;
   subscriptions: SubscriptionsRepository;
+  checkins: CheckinsRepository;
 
   /** Close the database connection / file handle. */
   close(): Promise<void>;
