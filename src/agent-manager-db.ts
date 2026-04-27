@@ -65,6 +65,7 @@ import {
   parseDurationSeconds,
   parseStatusFilter,
 } from './checkins/checkin-api-helpers.js';
+import { closeLinkedCheckinsForTerminalTask } from './checkins/checkin-autoclose.js';
 import type { CheckinRow } from './db/types.js';
 import { parseAgentRef, normalizeAlias, buildAmbiguityWarning, type AgentMatch } from './core/agent-identifier.js';
 import { resolveNewsTrigger } from './core/messaging-service.js';
@@ -4022,6 +4023,7 @@ export class AgentManagerDb {
         });
 
         const updated = await this.db.tasks.getByNameForTeam(task.name, teamId);
+        const completedAt = Date.now();
         await emitTaskCompleted(this.db.events, {
           teamId,
           taskUuid: updated!.uuid,
@@ -4029,7 +4031,17 @@ export class AgentManagerDb {
           title: updated!.title,
           ownerAgentId: updated!.owner ?? null,
           actorAgentId: callerAgent?.id ?? updated!.owner ?? null,
-          occurredAt: Date.now(),
+          occurredAt: completedAt,
+        });
+        // Auto-close any active/snoozed checkins linked to this task and
+        // emit one checkin:closed event per row. Pure consumer of the
+        // task:completed signal we just emitted above.
+        await closeLinkedCheckinsForTerminalTask(this.db, {
+          teamId,
+          taskId: updated!.id,
+          taskStatus: updated!.status,
+          actorAgentId: callerAgent?.id ?? updated!.owner ?? null,
+          occurredAt: completedAt,
         });
         res.json({ ok: true, task: await this.buildTaskResult(updated!, teamId) });
       } catch (err: any) {
