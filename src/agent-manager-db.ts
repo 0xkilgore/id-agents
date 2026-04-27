@@ -7171,24 +7171,9 @@ export class AgentManagerDb {
     );
   }
 
-  private isManagerProcessOrDescendant(pid: number): boolean {
+  private isManagerProcess(pid: number): boolean {
     if (pid === process.pid) return true;
-
-    const visited = new Set<number>();
-    let currentPid: number | null = pid;
-
-    while (currentPid && currentPid > 0 && !visited.has(currentPid)) {
-      visited.add(currentPid);
-      if (currentPid === process.pid) return true;
-
-      const info = this.inspectProcess(currentPid);
-      if (!info) return false;
-      if (this.matchesManagerProcessSignature(info)) return true;
-      if (info.ppid === process.pid) return true;
-      currentPid = info.ppid;
-    }
-
-    return false;
+    return this.matchesManagerProcessSignature(this.inspectProcess(pid));
   }
 
   /**
@@ -7201,14 +7186,8 @@ export class AgentManagerDb {
 
     const killedPids: number[] = [];
     for (const pid of candidatePids) {
-      if (this.isManagerProcessOrDescendant(pid)) {
-        console.warn(`[Manager] Skipping protected PID ${pid} on port ${port}`);
-        continue;
-      }
-
-      const info = this.inspectProcess(pid);
-      if (this.matchesManagerProcessSignature(info)) {
-        console.warn(`[Manager] Skipping manager-signature PID ${pid} on port ${port}`);
+      if (this.isManagerProcess(pid)) {
+        console.warn(`[Manager] Skipping manager PID ${pid} on port ${port}`);
         continue;
       }
 

@@ -100,4 +100,27 @@ describe('AgentManagerDb killAgentProcess guards', () => {
     expect(killSpy).not.toHaveBeenCalled();
     expect(result).toEqual({ killed: false, pids: [] });
   });
+
+  it('kills daemon-spawned local agent servers even when the manager is their parent', async () => {
+    const { manager, db, workDir } = makeManager();
+    dbs.push(db);
+    workDirs.push(workDir);
+
+    const agentPid = process.pid + 3000;
+    (manager as any).listPidsListeningOnPort = vi.fn(() => [agentPid]);
+    (manager as any).inspectProcess = vi.fn(() => ({
+      pid: agentPid,
+      ppid: process.pid,
+      argv0: 'node',
+      commandLine: 'node dist/local-agent-server.js cto --port 4106',
+    }));
+
+    const killSpy = vi.spyOn(process, 'kill').mockImplementation(() => true);
+
+    const result = await (manager as any).killAgentProcess(4106);
+
+    expect(killSpy).toHaveBeenCalledTimes(1);
+    expect(killSpy).toHaveBeenCalledWith(agentPid, 'SIGTERM');
+    expect(result).toEqual({ killed: true, pids: [agentPid] });
+  });
 });

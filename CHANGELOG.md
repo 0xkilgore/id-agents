@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.79-beta
+
+### Fixes
+
+- Fix `/agent rebuild` stale-process cleanup for daemon-spawned local agents. The manager process guard now protects only the manager PID or manager entrypoint signatures, so rebuild can terminate an old `local-agent-server.js` child before spawning the replacement on the same port.
+
 ## 0.1.78-beta
 
 ### Fixes
