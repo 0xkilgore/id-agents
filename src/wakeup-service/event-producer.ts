@@ -23,6 +23,8 @@ export const QUERY_EXPIRED = 'query:expired';
 export const CHECKIN_CREATED = 'checkin:created';
 export const CHECKIN_CLOSED = 'checkin:closed';
 export const CHECKIN_SNOOZED = 'checkin:snoozed';
+export const CHECKIN_DUE = 'checkin:due';
+export const CHECKIN_EXPIRED = 'checkin:expired';
 
 const PREVIEW_MAX = 280;
 
@@ -350,6 +352,104 @@ export async function recordCheckinSnoozed(
     updated_at: input.occurredAt,
   });
   return result;
+}
+
+// ---------------------------------------------------------------------------
+// Dispatcher producers (fire / expire) — used by the checkin due-service tick.
+// `record*` companions are intentionally omitted; the dispatcher batches the
+// `last_event_seq` update with the rest of the row mutation in a single
+// `updateFields` call.
+// ---------------------------------------------------------------------------
+
+export interface CheckinDueInput {
+  teamId: string;
+  checkinId: string;
+  ownerAgentId: string | null;
+  linkedTaskId: string | null;
+  priority: CheckinPriority;
+  intervalSeconds: number;
+  iterationCount: number;
+  maxIterations: number | null;
+  nextFireAt: number | null;
+  snoozeUntil: number | null;
+  ttlExpiresAt: number | null;
+  lastFireAt: number | null;
+  occurredAt: number;
+  /** Compact snapshot of the linked task at fire time, if available. */
+  linkedTask?: {
+    id: string;
+    name: string;
+    title: string;
+    status: string;
+    assignee?: string | null;
+  } | null;
+  /** Action URLs the consumer can call back into. */
+  actions?: Record<string, string>;
+}
+
+export interface CheckinExpiredInput {
+  teamId: string;
+  checkinId: string;
+  ownerAgentId: string | null;
+  linkedTaskId: string | null;
+  reason: 'max_iterations' | 'ttl' | string;
+  iterationCount: number;
+  maxIterations: number | null;
+  ttlExpiresAt: number | null;
+  occurredAt: number;
+}
+
+export async function emitCheckinDue(
+  events: EventsRepository,
+  input: CheckinDueInput,
+): Promise<{ seq: number }> {
+  return events.insert({
+    team_id: input.teamId,
+    topic: CHECKIN_DUE,
+    actor_agent_id: 'schedule',
+    subject_kind: 'checkin',
+    subject_id: input.checkinId,
+    occurred_at: input.occurredAt,
+    data: {
+      checkin_id: input.checkinId,
+      owner: input.ownerAgentId,
+      linked_task: input.linkedTask ?? (input.linkedTaskId ? { id: input.linkedTaskId } : null),
+      priority: input.priority,
+      iteration_count: input.iterationCount,
+      max_iterations: input.maxIterations,
+      interval_seconds: input.intervalSeconds,
+      last_fire_at: input.lastFireAt,
+      next_fire_at: input.nextFireAt,
+      snooze_until: input.snoozeUntil,
+      ttl_expires_at: input.ttlExpiresAt,
+      ...(input.actions ? { actions: input.actions } : {}),
+    },
+  });
+}
+
+export async function emitCheckinExpired(
+  events: EventsRepository,
+  input: CheckinExpiredInput,
+): Promise<{ seq: number }> {
+  return events.insert({
+    team_id: input.teamId,
+    topic: CHECKIN_EXPIRED,
+    actor_agent_id: 'schedule',
+    subject_kind: 'checkin',
+    subject_id: input.checkinId,
+    occurred_at: input.occurredAt,
+    data: {
+      checkin_id: input.checkinId,
+      status: 'expired',
+      owner: input.ownerAgentId,
+      linked_task_id: input.linkedTaskId,
+      reason: input.reason,
+      iteration_count: input.iterationCount,
+      max_iterations: input.maxIterations,
+      ttl_expires_at: input.ttlExpiresAt,
+      closed_at: input.occurredAt,
+    },
+  });
 }
 
 function truncate(text: string): string {
