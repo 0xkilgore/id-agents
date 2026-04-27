@@ -146,6 +146,31 @@ export async function migrateSqlite(adapter: SqliteAdapter): Promise<void> {
     CREATE INDEX IF NOT EXISTS tasks_owner_idx ON tasks(owner, status, updated_at);
     CREATE INDEX IF NOT EXISTS tasks_team_idx ON tasks(team_id, status, updated_at);
     CREATE INDEX IF NOT EXISTS task_event_links_schedule_idx ON task_event_links(schedule_id, task_id);
+
+    CREATE TABLE IF NOT EXISTS dispatches (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      team_id TEXT REFERENCES teams(id) ON DELETE SET NULL,
+      dispatched_at INTEGER NOT NULL,
+      from_actor TEXT NOT NULL,
+      to_agent TEXT NOT NULL,
+      channel TEXT NOT NULL,
+      message TEXT NOT NULL,
+      query_id TEXT,
+      status TEXT NOT NULL,
+      responded_at INTEGER,
+      response TEXT,
+      artifact_path TEXT,
+      verify_signal_json TEXT,
+      verify_status TEXT,
+      verify_last_checked INTEGER,
+      verify_failures_json TEXT,
+      parent_dispatch_id INTEGER REFERENCES dispatches(id) ON DELETE SET NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS dispatches_status_idx ON dispatches(status, dispatched_at);
+    CREATE INDEX IF NOT EXISTS dispatches_to_agent_idx ON dispatches(to_agent, status);
+    CREATE INDEX IF NOT EXISTS dispatches_query_id_idx ON dispatches(query_id) WHERE query_id IS NOT NULL;
+    CREATE INDEX IF NOT EXISTS dispatches_verify_idx ON dispatches(verify_status, verify_last_checked) WHERE verify_status IS NOT NULL;
   `);
 
   try {
