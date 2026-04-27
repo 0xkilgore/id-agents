@@ -12,7 +12,19 @@
  */
 
 import type { DbAdapter } from './db-adapter.js';
-import type { AgentRow, TeamRow, QueryRow, NewsItemRow, ScheduleDefinitionRow, ScheduleRunRow, TaskRow, TaskEventLinkRow } from './types.js';
+import type {
+  AgentRow,
+  TeamRow,
+  QueryRow,
+  NewsItemRow,
+  ScheduleDefinitionRow,
+  ScheduleRunRow,
+  TaskRow,
+  TaskEventLinkRow,
+  DispatchRow,
+  DispatchStatus,
+  VerifyStatus,
+} from './types.js';
 
 // ---------------------------------------------------------------------------
 // TeamsRepository
@@ -440,6 +452,57 @@ export interface TasksRepository {
  *   const teamId = await db.teams.getOrCreateTeamId('default');
  *   const agents = await db.agents.list(teamId);
  */
+// ---------------------------------------------------------------------------
+// DispatchesRepository (Spec 053 — DoD & dispatch observability)
+// ---------------------------------------------------------------------------
+
+export interface CreateDispatchInput {
+  team_id: string | null;
+  dispatched_at: number;
+  from_actor: string;
+  to_agent: string;
+  channel: string;
+  message: string;
+  query_id: string | null;
+  verify_signal_json: string | null;
+  parent_dispatch_id: number | null;
+}
+
+export interface DispatchListFilters {
+  status?: DispatchStatus | DispatchStatus[];
+  to_agent?: string;
+  from_actor?: string;
+  verify_status?: VerifyStatus;
+  /** Earliest dispatched_at, unix epoch ms. */
+  since?: number;
+  limit?: number;
+}
+
+export interface DispatchesRepository {
+  create(input: CreateDispatchInput): Promise<number>;
+  getById(id: number): Promise<DispatchRow | null>;
+  list(filters?: DispatchListFilters): Promise<DispatchRow[]>;
+  setStatus(id: number, status: DispatchStatus): Promise<void>;
+  recordDone(id: number, fields: {
+    responded_at: number;
+    response: string | null;
+    artifact_path: string | null;
+    verify_signal_json: string | null;
+    verify_status: VerifyStatus;
+    verify_last_checked: number;
+    verify_failures_json: string | null;
+  }): Promise<void>;
+  updateVerify(id: number, fields: {
+    verify_status: VerifyStatus;
+    verify_last_checked: number;
+    verify_failures_json: string | null;
+  }): Promise<void>;
+  /** Rows with status='in_flight' and dispatched_at < cutoff. */
+  findStale(cutoff: number, perAgentThresholds?: Record<string, number>): Promise<DispatchRow[]>;
+  /** Rows needing re-verify: pending OR pass-stale (last checked older than now-staleAfterMs). */
+  findReverifyCandidates(now: number, staleAfterMs: number): Promise<DispatchRow[]>;
+}
+
 export interface Db {
   /** The underlying adapter (for escape-hatch raw queries during migration). */
   adapter: DbAdapter;
@@ -450,6 +513,7 @@ export interface Db {
   news: NewsRepository;
   schedules: SchedulesRepository;
   tasks: TasksRepository;
+  dispatches: DispatchesRepository;
 
   /** Close the database connection / file handle. */
   close(): Promise<void>;
