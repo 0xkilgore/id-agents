@@ -794,7 +794,13 @@ export class AgentManagerDb {
    * Forward a message to an agent's /talk endpoint.
    * Returns the parsed response or an error.
    */
-  private async forwardToAgent(targetUrl: string, message: string, from: string, session_id?: string): Promise<{
+  private async forwardToAgent(
+    targetUrl: string,
+    message: string,
+    from: string,
+    session_id?: string,
+    dispatch_id?: number | null,
+  ): Promise<{
     ok: true;
     data: any;
   } | { ok: false; status: number; error: string }> {
@@ -803,7 +809,7 @@ export class AgentManagerDb {
     const talkRes = await fetch(`${targetUrl}/talk`, {
       method: 'POST',
       headers,
-      body: JSON.stringify({ message, from, session_id }),
+      body: JSON.stringify({ message, from, session_id, dispatch_id }),
       signal: AbortSignal.timeout(30000)
     });
 
@@ -814,6 +820,39 @@ export class AgentManagerDb {
 
     const data: any = await talkRes.json();
     return { ok: true, data };
+  }
+
+  /**
+   * Shared helper: insert a dispatches row with default DoD if no
+   * verify_signal is provided. Used by POST /dispatches and by the
+   * agent→agent forwarder in handleMessage (Spec 053).
+   */
+  private async createDispatchRow(input: {
+    teamId: string | null;
+    from_actor: string;
+    to_agent: string;
+    channel: string;
+    message: string;
+    query_id?: string | null;
+    verify_signal?: unknown;
+    parent_dispatch_id?: number | null;
+  }): Promise<number> {
+    const signal = input.verify_signal ?? {
+      type: 'desk_tag',
+      artifact_path: '<TBD by agent>',
+      within_hours: 24,
+    };
+    return this.db.dispatches.create({
+      team_id: input.teamId,
+      dispatched_at: Date.now(),
+      from_actor: input.from_actor,
+      to_agent: input.to_agent,
+      channel: input.channel,
+      message: input.message,
+      query_id: input.query_id ?? null,
+      verify_signal_json: JSON.stringify(signal),
+      parent_dispatch_id: input.parent_dispatch_id ?? null,
+    });
   }
 
   /**
@@ -848,8 +887,27 @@ export class AgentManagerDb {
       const { targetAgent, targetUrl, targetDisplayId } = resolved;
       this.managerLog(`${shouldWait ? 'Forwarding' : 'Sending async'} message to ${targetDisplayId} at ${targetUrl}`);
 
+      // Register a dispatch row so the agent→agent call shows up in
+      // /dispatches alongside cane- and scheduler-originated work (Spec 053).
+      let dispatchId: number | null = null;
+      try {
+        dispatchId = await this.createDispatchRow({
+          teamId: teamId ?? null,
+          from_actor: from || 'manager',
+          to_agent: targetAgent.name,
+          channel: 'talk',
+          message,
+          query_id: null,
+          verify_signal: undefined,
+          parent_dispatch_id: null,
+        });
+      } catch (regErr: any) {
+        // Non-fatal: forwarding still proceeds even if registration fails.
+        console.error('[Manager] dispatch register failed (non-fatal):', regErr?.message || regErr);
+      }
+
       // Forward the message to the agent's /talk endpoint
-      const result = await this.forwardToAgent(targetUrl, message, from || 'manager', session_id);
+      const result = await this.forwardToAgent(targetUrl, message, from || 'manager', session_id, dispatchId);
       if (!result.ok) {
         console.error(`[Manager] Failed to deliver message to ${targetDisplayId}: ${result.status}`);
         return res.status(result.status).json({ error: result.error });
@@ -860,6 +918,15 @@ export class AgentManagerDb {
       // Store the query so replies can be routed correctly
       if (queryId) {
         await this.db.queries.create(teamId, queryId, targetAgent.id, message, Date.now());
+      }
+
+      // Flip dispatch status to in_flight now that /talk has succeeded.
+      if (dispatchId !== null) {
+        try {
+          await this.db.dispatches.setStatus(dispatchId, 'in_flight');
+        } catch (statusErr: any) {
+          console.error('[Manager] dispatch status flip failed (non-fatal):', statusErr?.message || statusErr);
+        }
       }
 
       // Fire-and-forget: return immediately
@@ -2728,21 +2795,14 @@ export class AgentManagerDb {
             error: 'from_actor, to_agent, channel, message required',
           });
         }
-        // Default DoD = desk_tag within 24h, artifact_path filled in at /agent-done.
-        const signal = body.verify_signal ?? {
-          type: 'desk_tag',
-          artifact_path: '<TBD by agent>',
-          within_hours: 24,
-        };
-        const id = await this.db.dispatches.create({
-          team_id: teamId ?? null,
-          dispatched_at: Date.now(),
+        const id = await this.createDispatchRow({
+          teamId: teamId ?? null,
           from_actor: body.from_actor,
           to_agent: body.to_agent,
           channel: body.channel,
           message: body.message,
           query_id: body.query_id ?? null,
-          verify_signal_json: JSON.stringify(signal),
+          verify_signal: body.verify_signal,
           parent_dispatch_id: body.parent_dispatch_id ?? null,
         });
         res.json({ dispatch_id: id, status: 'queued' });
