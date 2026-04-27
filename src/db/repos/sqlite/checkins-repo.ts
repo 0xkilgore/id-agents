@@ -196,6 +196,14 @@ export class SqliteCheckinsRepo implements CheckinsRepository {
     return rows.map(parseRow);
   }
 
+  async delete(id: string, teamId: string): Promise<boolean> {
+    const { rowCount } = await this.db.query(
+      `DELETE FROM checkins WHERE id = ? AND team_id = ?`,
+      [id, teamId],
+    );
+    return (rowCount ?? 0) > 0;
+  }
+
   private async assertSameTeamTask(taskId: string, teamId: string): Promise<void> {
     const { rows } = await this.db.query<{ team_id: string | null }>(
       `SELECT team_id FROM tasks WHERE id = ?`,

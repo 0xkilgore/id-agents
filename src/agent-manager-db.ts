@@ -54,6 +54,17 @@ import {
   emitTaskClaimed,
   emitTaskCompleted,
 } from './wakeup-service/event-producer.js';
+import {
+  DEFAULT_CLOSE_WHEN,
+  DEFAULT_INTERVAL_SECONDS,
+  buildCheckinResponse,
+  clampNote,
+  generateCheckinId,
+  isValidPriority,
+  parseDurationSeconds,
+  parseStatusFilter,
+} from './checkins/checkin-api-helpers.js';
+import type { CheckinRow } from './db/types.js';
 import { parseAgentRef, normalizeAlias, buildAmbiguityWarning, type AgentMatch } from './core/agent-identifier.js';
 import { resolveNewsTrigger } from './core/messaging-service.js';
 import type { HarnessType } from './harness/types.js';
@@ -3930,6 +3941,289 @@ export class AgentManagerDb {
         });
       } catch (err: any) {
         console.error('[Manager] Error in GET /events:', err);
+        res.status(500).json({ error: err?.message || 'Internal server error' });
+      }
+    });
+
+    // ==================== CHECKINS API ====================
+    // Wire-format and semantics: output/checkin-primitive-design.md.
+    // Auth/team gating matches /remote and /events: teamContextMiddleware
+    // resolves the team from X-Id-Team and the principal (admin/agent/anon).
+    // Event emission (checkin:created/closed/snoozed) is owned by the
+    // separate `checkin-events` slice and is not wired here.
+
+    this.managementApp.post('/checkins', async (req, res) => {
+      try {
+        const { id: teamId } = await this.getTeam(req);
+        const body = req.body || {};
+
+        // owner: optional. When provided, must resolve to an agent in this team.
+        let ownerAgentId: string | null = null;
+        let ownerName: string | null = null;
+        if (body.owner !== undefined && body.owner !== null) {
+          if (typeof body.owner !== 'string') {
+            return res.status(400).json({ error: 'invalid_owner' });
+          }
+          const { agent, error } = await this.resolveSingleAgentForCommand(teamId, body.owner);
+          if (!agent) return res.status(404).json({ error: error || `Agent "${body.owner}" not found` });
+          ownerAgentId = agent.id;
+          ownerName = (agent.metadata as any)?.alias || agent.name;
+        }
+
+        // linked_task: optional but enforces same-team via resolveTaskRef.
+        let linkedTaskId: string | null = null;
+        let linkedTaskRow: TaskRow | undefined;
+        if (body.linked_task !== undefined && body.linked_task !== null) {
+          if (typeof body.linked_task !== 'string') {
+            return res.status(400).json({ error: 'invalid_linked_task' });
+          }
+          const { task, error } = await this.resolveTaskRef(body.linked_task, teamId);
+          if (!task) return res.status(404).json({ error: error || `Task "${body.linked_task}" not found` });
+          linkedTaskId = task.id;
+          linkedTaskRow = task;
+        }
+
+        // interval: default 15m
+        let intervalSeconds = DEFAULT_INTERVAL_SECONDS;
+        if (body.interval !== undefined) {
+          const parsed = parseDurationSeconds(body.interval);
+          if (parsed === null) {
+            return res.status(400).json({ error: 'invalid_interval' });
+          }
+          intervalSeconds = parsed;
+        }
+
+        // priority: default normal
+        let priority: 'low' | 'normal' | 'high' = 'normal';
+        if (body.priority !== undefined) {
+          if (!isValidPriority(body.priority)) {
+            return res.status(400).json({ error: 'invalid_priority' });
+          }
+          priority = body.priority;
+        }
+
+        // close_when: default { task_status: ['done'] }
+        let closeWhen = DEFAULT_CLOSE_WHEN;
+        if (body.close_when !== undefined) {
+          if (!body.close_when || typeof body.close_when !== 'object' || Array.isArray(body.close_when)) {
+            return res.status(400).json({ error: 'invalid_close_when' });
+          }
+          closeWhen = body.close_when as Record<string, unknown>;
+        }
+
+        // max_iterations: optional positive int
+        let maxIterations: number | null = null;
+        if (body.max_iterations !== undefined && body.max_iterations !== null) {
+          const n = Number(body.max_iterations);
+          if (!Number.isFinite(n) || !Number.isInteger(n) || n <= 0) {
+            return res.status(400).json({ error: 'invalid_max_iterations' });
+          }
+          maxIterations = n;
+        }
+
+        // ttl: optional duration → ttl_expires_at = now + ttl
+        let ttlExpiresAt: number | null = null;
+        const nowMs = Date.now();
+        if (body.ttl !== undefined && body.ttl !== null) {
+          const ttl = parseDurationSeconds(body.ttl);
+          if (ttl === null) {
+            return res.status(400).json({ error: 'invalid_ttl' });
+          }
+          ttlExpiresAt = nowMs + ttl * 1000;
+        }
+
+        // snooze_until: explicit unix-ms cursor. Mutually exclusive with the
+        // computed initial next_fire_at.
+        let snoozeUntil: number | null = null;
+        let initialStatus: 'active' | 'snoozed' = 'active';
+        let nextFireAt: number | null = nowMs + intervalSeconds * 1000;
+        if (body.snooze_until !== undefined && body.snooze_until !== null) {
+          const n = Number(body.snooze_until);
+          if (!Number.isFinite(n) || n <= 0) {
+            return res.status(400).json({ error: 'invalid_snooze_until' });
+          }
+          snoozeUntil = n;
+          nextFireAt = n;
+          initialStatus = 'snoozed';
+        }
+
+        const note = clampNote(body.note);
+
+        const row: CheckinRow = {
+          id: generateCheckinId(nowMs),
+          team_id: teamId,
+          owner_agent_id: ownerAgentId,
+          created_by_agent_id: ownerAgentId,
+          linked_task_id: linkedTaskId,
+          interval_seconds: intervalSeconds,
+          priority,
+          status: initialStatus,
+          close_when: closeWhen,
+          max_iterations: maxIterations,
+          iteration_count: 0,
+          next_fire_at: nextFireAt,
+          snooze_until: snoozeUntil,
+          ttl_expires_at: ttlExpiresAt,
+          last_fire_at: null,
+          last_event_seq: null,
+          note,
+          created_at: nowMs,
+          updated_at: nowMs,
+          closed_at: null,
+          closed_reason: null,
+        };
+
+        try {
+          await this.db.checkins.create(row);
+        } catch (err: any) {
+          if (typeof err?.message === 'string' && err.message.includes('different team')) {
+            return res.status(409).json({ error: 'cross_team_linked_task' });
+          }
+          throw err;
+        }
+
+        const linkedTask = linkedTaskRow
+          ? await this.buildTaskResult(linkedTaskRow, teamId)
+          : null;
+        res.status(201).json({
+          ok: true,
+          checkin: buildCheckinResponse(row, { ownerName, linkedTask }),
+        });
+      } catch (err: any) {
+        console.error('[Manager] Error in POST /checkins:', err);
+        res.status(500).json({ error: err?.message || 'Internal server error' });
+      }
+    });
+
+    this.managementApp.get('/checkins', async (req, res) => {
+      try {
+        const { id: teamId } = await this.getTeam(req);
+        const q = req.query as Record<string, string | undefined>;
+
+        let ownerAgentId: string | undefined;
+        if (q.owner) {
+          const { agent, error } = await this.resolveSingleAgentForCommand(teamId, q.owner);
+          if (!agent) return res.status(404).json({ error: error || `Agent "${q.owner}" not found` });
+          ownerAgentId = agent.id;
+        }
+
+        let linkedTaskId: string | undefined;
+        if (q.linked_task) {
+          const { task, error } = await this.resolveTaskRef(q.linked_task, teamId);
+          if (!task) return res.status(404).json({ error: error || `Task "${q.linked_task}" not found` });
+          linkedTaskId = task.id;
+        }
+
+        const statusFilter = parseStatusFilter(q.status);
+        if (statusFilter === null) {
+          return res.status(400).json({ error: 'invalid_status' });
+        }
+
+        let dueBefore: number | undefined;
+        if (q.due_before !== undefined) {
+          const n = Number(q.due_before);
+          if (!Number.isFinite(n) || n < 0) {
+            return res.status(400).json({ error: 'invalid_due_before' });
+          }
+          dueBefore = n;
+        }
+
+        let limit: number | undefined;
+        if (q.limit !== undefined) {
+          const n = Number(q.limit);
+          if (!Number.isFinite(n) || !Number.isInteger(n) || n <= 0) {
+            return res.status(400).json({ error: 'invalid_limit' });
+          }
+          limit = n;
+        }
+
+        const rows = await this.db.checkins.list({
+          teamId,
+          owner: ownerAgentId,
+          linkedTaskId,
+          status: statusFilter.length > 0 ? statusFilter : undefined,
+          dueBefore,
+          limit,
+        });
+
+        const checkins = rows.map((row) => buildCheckinResponse(row));
+        res.json({ ok: true, checkins });
+      } catch (err: any) {
+        console.error('[Manager] Error in GET /checkins:', err);
+        res.status(500).json({ error: err?.message || 'Internal server error' });
+      }
+    });
+
+    this.managementApp.delete('/checkins/:id', async (req, res) => {
+      try {
+        const { id: teamId } = await this.getTeam(req);
+        const principal = (req as any).ctx?.principal || 'anon';
+        if (principal !== 'admin') {
+          return res.status(403).json({ error: 'admin_required' });
+        }
+        const removed = await this.db.checkins.delete(req.params.id, teamId);
+        if (!removed) return res.status(404).json({ error: 'checkin_not_found' });
+        res.json({ ok: true, removed: req.params.id });
+      } catch (err: any) {
+        console.error('[Manager] Error in DELETE /checkins/:id:', err);
+        res.status(500).json({ error: err?.message || 'Internal server error' });
+      }
+    });
+
+    this.managementApp.post('/checkins/:id/close', async (req, res) => {
+      try {
+        const { id: teamId } = await this.getTeam(req);
+        const reason =
+          typeof req.body?.reason === 'string' && req.body.reason.length > 0
+            ? req.body.reason
+            : 'manual';
+        const closedAt = Date.now();
+
+        const transitioned = await this.db.checkins.close(req.params.id, teamId, closedAt, reason);
+        const row = await this.db.checkins.get(req.params.id, teamId);
+        if (!row) return res.status(404).json({ error: 'checkin_not_found' });
+
+        res.json({
+          ok: true,
+          alreadyClosed: !transitioned,
+          checkin: buildCheckinResponse(row),
+        });
+      } catch (err: any) {
+        console.error('[Manager] Error in POST /checkins/:id/close:', err);
+        res.status(500).json({ error: err?.message || 'Internal server error' });
+      }
+    });
+
+    this.managementApp.post('/checkins/:id/snooze', async (req, res) => {
+      try {
+        const { id: teamId } = await this.getTeam(req);
+        const body = req.body || {};
+        if (body.duration === undefined || body.duration === null) {
+          return res.status(400).json({ error: 'missing_duration' });
+        }
+        const seconds = parseDurationSeconds(body.duration);
+        if (seconds === null) {
+          return res.status(400).json({ error: 'invalid_duration' });
+        }
+
+        const existing = await this.db.checkins.get(req.params.id, teamId);
+        if (!existing) return res.status(404).json({ error: 'checkin_not_found' });
+        if (existing.status === 'closed' || existing.status === 'expired') {
+          return res.status(409).json({ error: 'checkin_terminal' });
+        }
+
+        const nowMs = Date.now();
+        const snoozeUntil = nowMs + seconds * 1000;
+        await this.db.checkins.updateFields(req.params.id, teamId, {
+          status: 'snoozed',
+          snooze_until: snoozeUntil,
+          next_fire_at: snoozeUntil,
+          updated_at: nowMs,
+        });
+        const row = await this.db.checkins.get(req.params.id, teamId);
+        res.json({ ok: true, checkin: buildCheckinResponse(row!) });
+      } catch (err: any) {
+        console.error('[Manager] Error in POST /checkins/:id/snooze:', err);
         res.status(500).json({ error: err?.message || 'Internal server error' });
       }
     });

@@ -595,6 +595,13 @@ export interface CheckinsRepository {
    * to scope the read; the v1 dispatcher is single-tick on the manager).
    */
   claimDue(teamId: string, now: number, limit: number): Promise<CheckinRow[]>;
+
+  /**
+   * Hard-delete a checkin row. This is the admin/debug `DELETE /checkins/:id`
+   * escape hatch — normal callers should `close` instead. Returns true iff a
+   * row was removed.
+   */
+  delete(id: string, teamId: string): Promise<boolean>;
 }
 
 // ---------------------------------------------------------------------------

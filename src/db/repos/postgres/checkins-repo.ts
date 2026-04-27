@@ -200,6 +200,14 @@ export class PgCheckinsRepo implements CheckinsRepository {
     return rows.map(parseRow);
   }
 
+  async delete(id: string, teamId: string): Promise<boolean> {
+    const { rowCount } = await this.db.query(
+      `DELETE FROM checkins WHERE id = $1 AND team_id = $2`,
+      [id, teamId],
+    );
+    return (rowCount ?? 0) > 0;
+  }
+
   private async assertSameTeamTask(taskId: string, teamId: string): Promise<void> {
     const { rows } = await this.db.query<{ team_id: string | null }>(
       `SELECT team_id FROM tasks WHERE id = $1`,
