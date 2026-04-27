@@ -53,6 +53,7 @@ import {
   emitQueryExpired,
   emitTaskClaimed,
   emitTaskCompleted,
+  recordCheckinCreated,
 } from './wakeup-service/event-producer.js';
 import {
   DEFAULT_CLOSE_WHEN,
@@ -171,6 +172,65 @@ function expandTopicAliases(topics: readonly string[]): string[] {
     }
   }
   return Array.from(out);
+}
+
+/**
+ * /talk-to auto-attach default cadence: 10 minutes. Tighter than the
+ * generic checkin default (15m) because delegated work justifies more
+ * frequent inspection on the dispatcher's side.
+ */
+const AUTO_ATTACH_DEFAULT_INTERVAL_SECONDS = 600;
+
+interface AutoAttachFlagsResult {
+  disabled: boolean;
+  intervalSeconds: number | null;
+  maxIterations: number | null;
+  error?: string;
+}
+
+/**
+ * Parse the three /talk-to auto-attach flags from the request body:
+ *   - `no_checkin: true`           (--no-checkin)
+ *   - `checkin: <duration|seconds>` (--checkin 30m / --checkin 1800)
+ *   - `checkin_iters: <N>`          (--checkin-iters 5)
+ *
+ * Returns either a fully-resolved spec or an `error` code the route handler
+ * can return as a 400 body. The returned `intervalSeconds` is null when
+ * the caller did not override the default.
+ */
+function parseAutoAttachFlags(body: Record<string, unknown>): AutoAttachFlagsResult {
+  const result: AutoAttachFlagsResult = {
+    disabled: body.no_checkin === true,
+    intervalSeconds: null,
+    maxIterations: null,
+  };
+
+  if (body.checkin !== undefined && body.checkin !== null) {
+    const parsed = parseDurationSeconds(body.checkin as unknown);
+    if (parsed === null) {
+      result.error = 'invalid_checkin_duration';
+      return result;
+    }
+    result.intervalSeconds = parsed;
+  }
+
+  if (body.checkin_iters !== undefined && body.checkin_iters !== null) {
+    const n = Number(body.checkin_iters);
+    if (!Number.isFinite(n) || !Number.isInteger(n) || n <= 0) {
+      result.error = 'invalid_checkin_iters';
+      return result;
+    }
+    result.maxIterations = n;
+  }
+
+  return result;
+}
+
+function makeAutoAttachError(status: number, code: string): Error & { status: number; code: string } {
+  const err = new Error(code) as Error & { status: number; code: string };
+  err.status = status;
+  err.code = code;
+  return err;
 }
 
 function getCatalogEndpoint(catalog: RestAPCatalog, key: 'talk' | 'news' | 'schedule'): string | null {
@@ -1320,6 +1380,136 @@ export class AgentManagerDb {
   }
 
   /**
+   * /talk-to auto-attach hook. Inspects the request body and, if a task
+   * delegation is requested, creates the task + (unless opted out) an
+   * active checkin watched by the dispatcher. Throws an Error with
+   * `status` and `code` properties on validation failures so the caller
+   * can return a 4xx response with a stable error code.
+   *
+   * Returns null when the body has no `task` field (legacy /talk-to path).
+   */
+  private async maybeAutoAttachForTalkTo(
+    req: express.Request,
+  ): Promise<{ task: TaskRow; checkin: CheckinRow | null } | null> {
+    const body = req.body || {};
+    if (!body.task || typeof body.task !== 'object') return null;
+
+    const { id: teamId } = await this.getTeam(req);
+    const taskSpec = body.task as { title?: unknown; name?: unknown; description?: unknown };
+    if (!taskSpec.title || typeof taskSpec.title !== 'string') {
+      throw makeAutoAttachError(400, 'invalid_task_title');
+    }
+
+    const targetRef = body.to ?? body.agent;
+    if (!targetRef || typeof targetRef !== 'string') {
+      throw makeAutoAttachError(400, 'invalid_target_agent');
+    }
+    const targetResolved = await this.resolveSingleAgentForCommand(teamId, targetRef);
+    if (!targetResolved.agent) {
+      throw makeAutoAttachError(404, 'target_agent_not_found');
+    }
+    const targetAgent = targetResolved.agent;
+
+    const fromRef = body.from;
+    let fromAgent: AgentRow | undefined;
+    if (fromRef && typeof fromRef === 'string') {
+      const r = await this.resolveSingleAgentForCommand(teamId, fromRef);
+      fromAgent = r.agent;
+    }
+
+    const flagsResult = parseAutoAttachFlags(body);
+    if (flagsResult.error) {
+      throw makeAutoAttachError(400, flagsResult.error);
+    }
+
+    const requestedName = typeof taskSpec.name === 'string' && taskSpec.name.length > 0
+      ? normalizeAlias(taskSpec.name)
+      : null;
+    const baseName = requestedName || normalizeAlias(taskSpec.title);
+    let name = baseName;
+    if (requestedName) {
+      if (await this.db.tasks.getByNameForTeam(name, teamId)) {
+        throw makeAutoAttachError(409, 'task_name_conflict');
+      }
+    } else {
+      let suffix = 1;
+      while (await this.db.tasks.getByNameForTeam(name, teamId)) {
+        name = `${baseName}-${suffix++}`;
+      }
+    }
+
+    const nowSec = Math.floor(Date.now() / 1000);
+    const taskRow: TaskRow = {
+      id: `task_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`,
+      name,
+      uuid: crypto.randomUUID(),
+      team_id: teamId,
+      title: taskSpec.title,
+      description: typeof taskSpec.description === 'string' ? taskSpec.description : null,
+      status: 'doing',
+      created_by: fromAgent?.id ?? null,
+      owner: targetAgent.id,
+      created_at: nowSec,
+      updated_at: nowSec,
+      completed_at: null,
+    };
+    await this.db.tasks.create(taskRow);
+
+    if (flagsResult.disabled) {
+      return { task: taskRow, checkin: null };
+    }
+
+    const nowMs = Date.now();
+    const intervalSeconds = flagsResult.intervalSeconds ?? AUTO_ATTACH_DEFAULT_INTERVAL_SECONDS;
+    const maxIterations = flagsResult.maxIterations ?? null;
+
+    const checkinRow: CheckinRow = {
+      id: generateCheckinId(nowMs),
+      team_id: teamId,
+      owner_agent_id: fromAgent?.id ?? null,
+      created_by_agent_id: fromAgent?.id ?? null,
+      linked_task_id: taskRow.id,
+      interval_seconds: intervalSeconds,
+      priority: 'normal',
+      status: 'active',
+      close_when: DEFAULT_CLOSE_WHEN,
+      max_iterations: maxIterations,
+      iteration_count: 0,
+      next_fire_at: nowMs + intervalSeconds * 1000,
+      snooze_until: null,
+      ttl_expires_at: null,
+      last_fire_at: null,
+      last_event_seq: null,
+      note: null,
+      created_at: nowMs,
+      updated_at: nowMs,
+      closed_at: null,
+      closed_reason: null,
+    };
+    await this.db.checkins.create(checkinRow);
+
+    try {
+      await recordCheckinCreated(this.db.events, this.db.checkins, {
+        teamId,
+        checkinId: checkinRow.id,
+        ownerAgentId: checkinRow.owner_agent_id,
+        createdByAgentId: checkinRow.created_by_agent_id,
+        linkedTaskId: checkinRow.linked_task_id,
+        priority: checkinRow.priority,
+        intervalSeconds: checkinRow.interval_seconds,
+        maxIterations: checkinRow.max_iterations,
+        nextFireAt: checkinRow.next_fire_at,
+        ttlExpiresAt: checkinRow.ttl_expires_at,
+        occurredAt: nowMs,
+      });
+    } catch (err) {
+      console.error('[Manager] Failed to emit checkin:created on auto-attach:', err);
+    }
+
+    return { task: taskRow, checkin: checkinRow };
+  }
+
+  /**
    * Resolve whether a request is from an admin principal.
    * Admin = loopback IP + X-Id-Admin: 1 header.
    */
@@ -1694,11 +1884,25 @@ export class AgentManagerDb {
       this.handleMessage(req, res).catch(next);
     });
 
-    // /talk-to - backwards-compatible alias for /message with wait:true
-    this.managementApp.post('/talk-to', (req, res, next) => {
+    // /talk-to - backwards-compatible alias for /message with wait:true.
+    // When the body carries a `task` object the dispatch is treated as a
+    // task delegation: the manager creates the task (owner = target agent,
+    // status = 'doing') and auto-attaches an active checkin owned by the
+    // dispatcher. The auto-attach is governed by these flags on the body:
+    //   - no_checkin: true            disables auto-attach for this dispatch
+    //   - checkin: <duration|seconds> overrides interval (default 10m)
+    //   - checkin_iters: <N>          sets max_iterations (default null)
+    // If no `task` object is supplied, /talk-to behaves exactly as before.
+    this.managementApp.post('/talk-to', async (req, res, next) => {
       // Inject wait:true if not explicitly set
       if (req.body && req.body.wait === undefined && req.body.timeout === undefined) {
         req.body.wait = true;
+      }
+      try {
+        const result = await this.maybeAutoAttachForTalkTo(req);
+        if (result) (req as any)._autoAttach = result;
+      } catch (err: any) {
+        return res.status(err?.status || 400).json({ error: err?.code || err?.message || 'auto_attach_failed' });
       }
       this.handleMessage(req, res).catch(next);
     });
