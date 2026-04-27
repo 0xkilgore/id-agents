@@ -14,6 +14,8 @@ import type {
   VerifyFailure,
   VerifyContext,
   DeskTagCheck,
+  HttpGetCheck,
+  FileMtimeCheck,
 } from './types.js';
 
 const DEFAULT_DESK_PATH = join(homedir(), 'Dropbox/Obsidian/Desk.md');
@@ -37,14 +39,64 @@ export async function runVerifySignal(
       }
       break;
     }
-    case 'http_get':
-    case 'file_mtime':
+    case 'http_get': {
+      const failure = await checkHttpGet(signal, ctx);
+      if (failure) failures.push(failure);
+      break;
+    }
+    case 'file_mtime': {
+      const failure = await checkFileMtime(signal, ctx);
+      if (failure) failures.push(failure);
+      break;
+    }
     case 'api_call':
       failures.push({ check: signal, reason: `${signal.type} not yet implemented` });
       break;
   }
 
   return { status: failures.length ? 'fail' : 'pass', failures };
+}
+
+async function checkHttpGet(check: HttpGetCheck, ctx: VerifyContext): Promise<VerifyFailure | null> {
+  const fetcher = ctx.fetch ?? fetch;
+  let response: Response;
+  try {
+    response = await fetcher(check.url);
+  } catch (err) {
+    return { check, reason: `fetch failed: ${(err as Error).message}` };
+  }
+  const expected = check.status ?? 200;
+  if (response.status !== expected) {
+    return { check, reason: `status ${response.status} != expected ${expected}` };
+  }
+  if (check.must_contain) {
+    const text = await response.text();
+    if (!text.includes(check.must_contain)) {
+      return { check, reason: `body missing "${check.must_contain}"` };
+    }
+  }
+  return null;
+}
+
+async function checkFileMtime(check: FileMtimeCheck, ctx: VerifyContext): Promise<VerifyFailure | null> {
+  const stat = ctx.statFile ?? (async (p: string) => {
+    const s = await fs.stat(p);
+    return { mtimeMs: s.mtimeMs };
+  });
+  let mtimeMs: number;
+  try {
+    mtimeMs = (await stat(check.path)).mtimeMs;
+  } catch (err) {
+    return { check, reason: `stat failed: ${(err as Error).message}` };
+  }
+  // `after` is unix epoch seconds per the spec.
+  if (mtimeMs / 1000 < check.after) {
+    return {
+      check,
+      reason: `mtime ${new Date(mtimeMs).toISOString()} is before ${new Date(check.after * 1000).toISOString()}`,
+    };
+  }
+  return null;
 }
 
 async function checkDeskTag(check: DeskTagCheck, ctx: VerifyContext): Promise<VerifyFailure | null> {
