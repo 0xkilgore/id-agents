@@ -97,4 +97,40 @@ describe('runVerifySignal', () => {
     );
     assert.equal(result.status, 'fail');
   });
+
+  it('passes api_call vercel_deploy when state is READY', async () => {
+    const ctx: VerifyContext = {
+      dispatched_at: Date.now(),
+      fetch: (async () =>
+        new Response(JSON.stringify({ readyState: 'READY' }), { status: 200 })) as typeof fetch,
+    };
+    const result = await runVerifySignal(
+      { type: 'api_call', service: 'vercel_deploy', check: 'deployment_ready', id: 'dpl_xyz' },
+      ctx,
+    );
+    assert.equal(result.status, 'pass');
+  });
+
+  it('fails api_call vercel_deploy when state is ERROR', async () => {
+    const ctx: VerifyContext = {
+      dispatched_at: Date.now(),
+      fetch: (async () =>
+        new Response(JSON.stringify({ readyState: 'ERROR' }), { status: 200 })) as typeof fetch,
+    };
+    const result = await runVerifySignal(
+      { type: 'api_call', service: 'vercel_deploy', check: 'deployment_ready', id: 'dpl_xyz' },
+      ctx,
+    );
+    assert.equal(result.status, 'fail');
+  });
+
+  it('fails unimplemented api_call services with a clear reason', async () => {
+    const ctx: VerifyContext = { dispatched_at: Date.now() };
+    const result = await runVerifySignal(
+      { type: 'api_call', service: 'gmail', check: 'sent', id: 'm-1' },
+      ctx,
+    );
+    assert.equal(result.status, 'fail');
+    expect(result.failures[0].reason).toMatch(/not yet implemented/);
+  });
 });
