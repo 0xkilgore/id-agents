@@ -151,6 +151,53 @@ export async function migrateSqlite(adapter: SqliteAdapter): Promise<void> {
     CREATE INDEX IF NOT EXISTS tasks_owner_idx ON tasks(owner, status, updated_at);
     CREATE INDEX IF NOT EXISTS tasks_team_idx ON tasks(team_id, status, updated_at);
     CREATE INDEX IF NOT EXISTS task_event_links_schedule_idx ON task_event_links(schedule_id, task_id);
+
+    CREATE TABLE IF NOT EXISTS event_log (
+      seq INTEGER PRIMARY KEY AUTOINCREMENT,
+      team_id TEXT NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+      topic TEXT NOT NULL,
+      actor_agent_id TEXT,
+      subject_kind TEXT,
+      subject_id TEXT,
+      occurred_at INTEGER NOT NULL,
+      data TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS event_log_team_seq_idx ON event_log(team_id, seq);
+    CREATE INDEX IF NOT EXISTS event_log_team_topic_seq_idx ON event_log(team_id, topic, seq);
+    CREATE INDEX IF NOT EXISTS event_log_team_subject_idx ON event_log(team_id, subject_kind, subject_id, seq);
+
+    CREATE TABLE IF NOT EXISTS subscriptions (
+      id TEXT PRIMARY KEY,
+      team_id TEXT NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+      owner_agent_id TEXT NOT NULL,
+      mode TEXT NOT NULL,
+      status TEXT NOT NULL,
+      filter_json TEXT NOT NULL,
+      target_json TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      last_acked_seq INTEGER,
+      last_error TEXT,
+      consecutive_failures INTEGER NOT NULL DEFAULT 0
+    );
+
+    CREATE INDEX IF NOT EXISTS subscriptions_team_owner_idx
+      ON subscriptions(team_id, owner_agent_id, status);
+
+    CREATE TABLE IF NOT EXISTS webhook_delivery_attempts (
+      id TEXT PRIMARY KEY,
+      subscription_id TEXT NOT NULL REFERENCES subscriptions(id) ON DELETE CASCADE,
+      event_seq INTEGER NOT NULL,
+      scheduled_at INTEGER NOT NULL,
+      attempted_at INTEGER,
+      status TEXT NOT NULL,
+      http_status INTEGER,
+      error TEXT
+    );
+
+    CREATE UNIQUE INDEX IF NOT EXISTS webhook_delivery_once_idx
+      ON webhook_delivery_attempts(subscription_id, event_seq);
   `);
 
   try {

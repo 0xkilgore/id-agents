@@ -34,6 +34,8 @@ async function createPostgresDb(adapter: DbAdapter): Promise<Db> {
   const { PgNewsRepo } = await import('./repos/postgres/news-repo.js');
   const { PgSchedulesRepo } = await import('./repos/postgres/schedules-repo.js');
   const { PgTasksRepo } = await import('./repos/postgres/tasks-repo.js');
+  const { PgEventsRepo } = await import('./repos/postgres/events-repo.js');
+  const { PgSubscriptionsRepo } = await import('./repos/postgres/subscriptions-repo.js');
   return {
     adapter,
     teams: new PgTeamsRepo(adapter),
@@ -42,6 +44,8 @@ async function createPostgresDb(adapter: DbAdapter): Promise<Db> {
     news: new PgNewsRepo(adapter),
     schedules: new PgSchedulesRepo(adapter),
     tasks: new PgTasksRepo(adapter),
+    events: new PgEventsRepo(adapter),
+    subscriptions: new PgSubscriptionsRepo(adapter),
     async close() { await adapter.close(); },
   };
 }
@@ -53,6 +57,8 @@ async function createSqliteDb(adapter: SqliteAdapter): Promise<Db> {
   const { SqliteNewsRepo } = await import('./repos/sqlite/news-repo.js');
   const { SqliteSchedulesRepo } = await import('./repos/sqlite/schedules-repo.js');
   const { SqliteTasksRepo } = await import('./repos/sqlite/tasks-repo.js');
+  const { SqliteEventsRepo } = await import('./repos/sqlite/events-repo.js');
+  const { SqliteSubscriptionsRepo } = await import('./repos/sqlite/subscriptions-repo.js');
   return {
     adapter,
     teams: new SqliteTeamsRepo(adapter),
@@ -61,6 +67,8 @@ async function createSqliteDb(adapter: SqliteAdapter): Promise<Db> {
     news: new SqliteNewsRepo(adapter),
     schedules: new SqliteSchedulesRepo(adapter),
     tasks: new SqliteTasksRepo(adapter),
+    events: new SqliteEventsRepo(adapter),
+    subscriptions: new SqliteSubscriptionsRepo(adapter),
     async close() { await adapter.close(); },
   };
 }
@@ -78,4 +86,16 @@ export async function migrateDb(db: Db): Promise<void> {
 // Re-export types for convenience
 export type { Db } from './db-service.js';
 export type { DbAdapter, QueryResult } from './db-adapter.js';
-export type { AgentRow, TeamRow, QueryRow, NewsItemRow, ScheduleDefinitionRow, ScheduleRunRow, TaskRow, TaskEventLinkRow } from './types.js';
+export type {
+  AgentRow,
+  TeamRow,
+  QueryRow,
+  NewsItemRow,
+  ScheduleDefinitionRow,
+  ScheduleRunRow,
+  TaskRow,
+  TaskEventLinkRow,
+  EventLogRow,
+  SubscriptionRow,
+  WebhookDeliveryAttemptRow,
+} from './types.js';

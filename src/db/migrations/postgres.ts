@@ -529,4 +529,53 @@ export async function migratePostgres(adapter: DbAdapter): Promise<void> {
   await adapter.query(`CREATE INDEX IF NOT EXISTS tasks_owner_idx ON tasks(owner, status, updated_at);`);
   await adapter.query(`CREATE INDEX IF NOT EXISTS tasks_team_idx ON tasks(team_id, status, updated_at);`);
   await adapter.query(`CREATE INDEX IF NOT EXISTS task_event_links_schedule_idx ON task_event_links(schedule_id, task_id);`);
+
+  // 16) Wakeup service tables: durable event bus, durable subscriptions, webhook delivery bookkeeping.
+  await adapter.query(`
+    CREATE TABLE IF NOT EXISTS event_log (
+      seq bigserial PRIMARY KEY,
+      team_id uuid NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+      topic text NOT NULL,
+      actor_agent_id text,
+      subject_kind text,
+      subject_id text,
+      occurred_at bigint NOT NULL,
+      data jsonb NOT NULL
+    );
+  `);
+  await adapter.query(`CREATE INDEX IF NOT EXISTS event_log_team_seq_idx ON event_log(team_id, seq);`);
+  await adapter.query(`CREATE INDEX IF NOT EXISTS event_log_team_topic_seq_idx ON event_log(team_id, topic, seq);`);
+  await adapter.query(`CREATE INDEX IF NOT EXISTS event_log_team_subject_idx ON event_log(team_id, subject_kind, subject_id, seq);`);
+
+  await adapter.query(`
+    CREATE TABLE IF NOT EXISTS subscriptions (
+      id text PRIMARY KEY,
+      team_id uuid NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+      owner_agent_id text NOT NULL,
+      mode text NOT NULL,
+      status text NOT NULL,
+      filter_json jsonb NOT NULL,
+      target_json jsonb NOT NULL,
+      created_at bigint NOT NULL,
+      updated_at bigint NOT NULL,
+      last_acked_seq bigint,
+      last_error text,
+      consecutive_failures integer NOT NULL DEFAULT 0
+    );
+  `);
+  await adapter.query(`CREATE INDEX IF NOT EXISTS subscriptions_team_owner_idx ON subscriptions(team_id, owner_agent_id, status);`);
+
+  await adapter.query(`
+    CREATE TABLE IF NOT EXISTS webhook_delivery_attempts (
+      id text PRIMARY KEY,
+      subscription_id text NOT NULL REFERENCES subscriptions(id) ON DELETE CASCADE,
+      event_seq bigint NOT NULL,
+      scheduled_at bigint NOT NULL,
+      attempted_at bigint,
+      status text NOT NULL,
+      http_status integer,
+      error text
+    );
+  `);
+  await adapter.query(`CREATE UNIQUE INDEX IF NOT EXISTS webhook_delivery_once_idx ON webhook_delivery_attempts(subscription_id, event_seq);`);
 }

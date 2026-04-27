@@ -12,7 +12,18 @@
  */
 
 import type { DbAdapter } from './db-adapter.js';
-import type { AgentRow, TeamRow, QueryRow, NewsItemRow, ScheduleDefinitionRow, ScheduleRunRow, TaskRow, TaskEventLinkRow } from './types.js';
+import type {
+  AgentRow,
+  TeamRow,
+  QueryRow,
+  NewsItemRow,
+  ScheduleDefinitionRow,
+  ScheduleRunRow,
+  TaskRow,
+  TaskEventLinkRow,
+  EventLogRow,
+  SubscriptionRow,
+} from './types.js';
 
 // ---------------------------------------------------------------------------
 // TeamsRepository
@@ -457,6 +468,61 @@ export interface TasksRepository {
 }
 
 // ---------------------------------------------------------------------------
+// EventsRepository (wakeup service)
+// ---------------------------------------------------------------------------
+
+export interface EventsRepository {
+  /**
+   * Append a single event to the team-scoped event log.
+   * Returns the assigned monotonic sequence number.
+   */
+  insert(event: {
+    team_id: string;
+    topic: string;
+    actor_agent_id?: string | null;
+    subject_kind?: string | null;
+    subject_id?: string | null;
+    occurred_at: number;
+    data: Record<string, unknown>;
+  }): Promise<{ seq: number }>;
+
+  /**
+   * Catch-up read over the team-scoped event log.
+   *
+   * Filters:
+   *   - sinceSeq  : exclusive cursor; returns events with seq > sinceSeq
+   *   - topics    : optional list of exact topic strings to include
+   *   - limit     : max rows to return (default 100, hard cap 1000)
+   *
+   * Returns rows ordered by ascending seq.
+   */
+  query(opts: {
+    teamId: string;
+    sinceSeq?: number;
+    topics?: string[];
+    limit?: number;
+  }): Promise<EventLogRow[]>;
+
+  /**
+   * Lowest seq currently retained for a team — used by `GET /events`
+   * to populate `earliest_available_seq`. Returns null if no events exist.
+   */
+  earliestSeq(teamId: string): Promise<number | null>;
+}
+
+// ---------------------------------------------------------------------------
+// SubscriptionsRepository (wakeup service)
+// ---------------------------------------------------------------------------
+
+export interface SubscriptionsRepository {
+  /**
+   * List subscriptions for a team owned by a specific agent.
+   * Excludes rows with status='deleted'. Ordered by created_at descending.
+   */
+  listByOwner(teamId: string, ownerAgentId: string): Promise<SubscriptionRow[]>;
+}
+
+// ---------------------------------------------------------------------------
 // Db — composite service
 // ---------------------------------------------------------------------------
 
@@ -479,6 +545,8 @@ export interface Db {
   news: NewsRepository;
   schedules: SchedulesRepository;
   tasks: TasksRepository;
+  events: EventsRepository;
+  subscriptions: SubscriptionsRepository;
 
   /** Close the database connection / file handle. */
   close(): Promise<void>;

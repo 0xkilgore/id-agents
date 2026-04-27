@@ -139,3 +139,47 @@ export interface TaskEventLinkRow {
   schedule_id: string;
   created_at: number;
 }
+
+// ---------------------------------------------------------------------------
+// Wakeup service rows (event_log, subscriptions, webhook_delivery_attempts)
+// ---------------------------------------------------------------------------
+
+/** event_log table row — append-only durable event bus entry. */
+export interface EventLogRow {
+  seq: number;
+  team_id: string;
+  topic: string;
+  actor_agent_id: string | null;
+  subject_kind: string | null;
+  subject_id: string | null;
+  occurred_at: number;
+  data: Record<string, unknown>;
+}
+
+/** subscriptions table row — durable consumer registration. */
+export interface SubscriptionRow {
+  id: string;
+  team_id: string;
+  owner_agent_id: string;
+  mode: 'sse' | 'webhook';
+  status: 'active' | 'paused' | 'unhealthy' | 'deleted';
+  filter: Record<string, unknown>;
+  target: Record<string, unknown>;
+  created_at: number;
+  updated_at: number;
+  last_acked_seq: number | null;
+  last_error: string | null;
+  consecutive_failures: number;
+}
+
+/** webhook_delivery_attempts table row — per-event delivery bookkeeping. */
+export interface WebhookDeliveryAttemptRow {
+  id: string;
+  subscription_id: string;
+  event_seq: number;
+  scheduled_at: number;
+  attempted_at: number | null;
+  status: 'pending' | 'delivered' | 'failed' | 'dead';
+  http_status: number | null;
+  error: string | null;
+}
