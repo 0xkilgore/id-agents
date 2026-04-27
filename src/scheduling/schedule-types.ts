@@ -49,6 +49,7 @@ export interface SchedulePayload {
   };
   message: string;
   linkedTasks?: LinkedTaskSummary[];
+  dispatch_id?: number | null;
 }
 
 /**
