@@ -512,6 +512,23 @@ export interface EventsRepository {
    * to populate `earliest_available_seq`. Returns null if no events exist.
    */
   earliestSeq(teamId: string): Promise<number | null>;
+
+  /**
+   * Delete rows for a team whose `occurred_at` is strictly less than the
+   * cutoff. Used by the retention sweep to enforce the 7-day age cap.
+   * Returns the number of rows deleted.
+   */
+  pruneByAge(teamId: string, beforeOccurredAt: number): Promise<number>;
+
+  /**
+   * If the team has more than `keepCount` rows, delete the oldest ones so
+   * that exactly `keepCount` remain. No-op when count <= keepCount. Returns
+   * the number of rows deleted.
+   */
+  pruneByCount(teamId: string, keepCount: number): Promise<number>;
+
+  /** Count rows for a team. Used by the retention sweep's count-cap check. */
+  countForTeam(teamId: string): Promise<number>;
 }
 
 // ---------------------------------------------------------------------------

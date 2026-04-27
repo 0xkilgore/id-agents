@@ -76,6 +76,41 @@ export class PgEventsRepo implements EventsRepository {
     const seq = rows[0]?.seq;
     return seq === null || seq === undefined ? null : Number(seq);
   }
+
+  async pruneByAge(teamId: string, beforeOccurredAt: number): Promise<number> {
+    const { rowCount } = await this.db.query(
+      `DELETE FROM event_log WHERE team_id = $1 AND occurred_at < $2`,
+      [teamId, beforeOccurredAt],
+    );
+    return rowCount ?? 0;
+  }
+
+  async pruneByCount(teamId: string, keepCount: number): Promise<number> {
+    if (keepCount < 0) keepCount = 0;
+    const total = await this.countForTeam(teamId);
+    const excess = total - keepCount;
+    if (excess <= 0) return 0;
+    const { rowCount } = await this.db.query(
+      `DELETE FROM event_log
+       WHERE team_id = $1
+         AND seq IN (
+           SELECT seq FROM event_log
+           WHERE team_id = $1
+           ORDER BY seq ASC
+           LIMIT $2
+         )`,
+      [teamId, excess],
+    );
+    return rowCount ?? 0;
+  }
+
+  async countForTeam(teamId: string): Promise<number> {
+    const { rows } = await this.db.query<{ c: string | number }>(
+      `SELECT COUNT(*) AS c FROM event_log WHERE team_id = $1`,
+      [teamId],
+    );
+    return Number(rows[0]?.c ?? 0);
+  }
 }
 
 function clampLimit(limit?: number): number {

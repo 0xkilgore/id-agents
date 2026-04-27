@@ -51,10 +51,12 @@ import { validateName } from './name-validation.js';
 import {
   emitQueryDelivered,
   emitQueryExpired,
+  emitQueryFailed,
   emitTaskClaimed,
   emitTaskCompleted,
   recordCheckinCreated,
 } from './wakeup-service/event-producer.js';
+import { RetentionService } from './wakeup-service/retention.js';
 import {
   DEFAULT_CLOSE_WHEN,
   DEFAULT_INTERVAL_SECONDS,
@@ -352,6 +354,7 @@ export class AgentManagerDb {
   private healthCheckInterval: NodeJS.Timeout | null = null;
   private remoteProbeInterval: NodeJS.Timeout | null = null;
   private querySweeperInterval: NodeJS.Timeout | null = null;
+  private retentionService: RetentionService | null = null;
   /**
    * Stuck-query sweeper timeout, in minutes. Queries whose status is still
    * pending/processing this long after their `created` timestamp are assumed
@@ -7004,6 +7007,19 @@ export class AgentManagerDb {
     this.querySweeperInterval = setInterval(runSweep, intervalMs);
   }
 
+  /**
+   * Start the event_log retention sweep.
+   *
+   * Audit #6 (output/security-review-wakeup-service.md): the design promises
+   * a 7-day age cap and 100k-events-per-team count cap on `event_log`.
+   * This loop enforces both, default every 5 minutes. Constants and env
+   * overrides live in src/wakeup-service/retention.ts.
+   */
+  private startEventLogRetentionSweep(): void {
+    this.retentionService = new RetentionService({ events: this.db.events, teams: this.db.teams });
+    this.retentionService.start();
+  }
+
   private async sweepStaleQueries(): Promise<void> {
     const cutoff = Date.now() - this.QUERY_EXPIRY_MINUTES * 60 * 1000;
     const expired = await this.db.queries.expireStale(cutoff, ['pending', 'processing']);
@@ -7194,6 +7210,9 @@ export class AgentManagerDb {
 
         // Start stuck-query sweeper (every 5 min, expires >15 min old)
         this.startQuerySweeper();
+
+        // Start event_log retention sweep (every 5 min, 7d / 100k-per-team caps)
+        this.startEventLogRetentionSweep();
 
         resolve();
       });
