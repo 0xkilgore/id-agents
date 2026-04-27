@@ -7,6 +7,7 @@ nohup.out
 temp/
 workspaces/**
 workspace/**
+.worktrees/
 
 # Agent runtime checklist (loaded by the CLI agent, not source-controlled)
 HEARTBEAT.md
