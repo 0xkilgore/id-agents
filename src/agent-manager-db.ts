@@ -137,6 +137,31 @@ interface RestAPCatalog {
 }
 
 
+/**
+ * Wakeup-service topic aliases. The `GET /events` route accepts both
+ * concrete topics (e.g. `query:delivered`) and the aliases below, which
+ * expand server-side into their concrete topic set. Source of truth:
+ * output/wakeup-service-design.md → "Topic set for v1" / "Alias expansions".
+ */
+const TOPIC_ALIASES: Record<string, readonly string[]> = {
+  'query:terminal': ['query:delivered', 'query:failed', 'query:expired'],
+  'task:status': ['task:created', 'task:claimed', 'task:completed'],
+  'agent:lifecycle': ['agent:started', 'agent:stopped', 'agent:rebuild'],
+};
+
+function expandTopicAliases(topics: readonly string[]): string[] {
+  const out = new Set<string>();
+  for (const t of topics) {
+    const expansion = TOPIC_ALIASES[t];
+    if (expansion) {
+      for (const concrete of expansion) out.add(concrete);
+    } else {
+      out.add(t);
+    }
+  }
+  return Array.from(out);
+}
+
 function getCatalogEndpoint(catalog: RestAPCatalog, key: 'talk' | 'news' | 'schedule'): string | null {
   if (catalog.endpoints && !Array.isArray(catalog.endpoints)) {
     return catalog.endpoints[key] || null;
@@ -3807,6 +3832,104 @@ export class AgentManagerDb {
         res.json({ ok: true, removed: task.name });
       } catch (err: any) {
         console.error('[Manager] Error in DELETE /tasks/:ref:', err);
+        res.status(500).json({ error: err?.message || 'Internal server error' });
+      }
+    });
+
+    // ==================== WAKEUP SERVICE: GET /events ====================
+    // Catch-up read over the team-scoped event log. Wire-format and
+    // semantics are defined in output/wakeup-service-design.md
+    // ("`GET /events`" section). Auth/team gating is the same as /remote
+    // (handled by teamContextMiddleware → getTeam(req)). Producers and
+    // SSE/webhook delivery land in separate slices.
+    this.managementApp.get('/events', async (req, res) => {
+      try {
+        const { id: teamId, name: teamName } = await this.getTeam(req);
+
+        // since: default 0, must be a non-negative integer.
+        const sinceRaw = req.query.since;
+        let since = 0;
+        if (sinceRaw !== undefined) {
+          const parsed = Number(sinceRaw);
+          if (!Number.isFinite(parsed) || parsed < 0 || !Number.isInteger(parsed)) {
+            return res.status(400).json({
+              error: 'invalid_since',
+              message: '`since` must be a non-negative integer',
+            });
+          }
+          since = parsed;
+        }
+
+        // limit: default 100, hard cap 1000, must be a positive integer.
+        const limitRaw = req.query.limit;
+        let limit = 100;
+        if (limitRaw !== undefined) {
+          const parsed = Number(limitRaw);
+          if (!Number.isFinite(parsed) || parsed <= 0 || !Number.isInteger(parsed)) {
+            return res.status(400).json({
+              error: 'invalid_limit',
+              message: '`limit` must be a positive integer',
+            });
+          }
+          limit = Math.min(parsed, 1000);
+        }
+
+        // topics: optional CSV; alias expansion happens server-side so
+        // callers can request `query:terminal` instead of the three
+        // concrete topics it covers.
+        let topics: string[] | undefined;
+        const topicsRaw = req.query.topics;
+        if (typeof topicsRaw === 'string' && topicsRaw.length > 0) {
+          const requested = topicsRaw
+            .split(',')
+            .map((s) => s.trim())
+            .filter((s) => s.length > 0);
+          if (requested.length > 0) {
+            topics = expandTopicAliases(requested);
+          }
+        }
+
+        const rows = await this.db.events.query({
+          teamId,
+          sinceSeq: since,
+          topics,
+          limit,
+        });
+        const earliestAvailableSeq = await this.db.events.earliestSeq(teamId);
+
+        const events = rows.map((row) => ({
+          seq: row.seq,
+          team: teamName,
+          topic: row.topic,
+          occurred_at: row.occurred_at,
+          actor: row.actor_agent_id,
+          subject:
+            row.subject_kind === null && row.subject_id === null
+              ? null
+              : { kind: row.subject_kind, id: row.subject_id },
+          data: row.data,
+        }));
+
+        const nextSeq = events.length > 0
+          ? events[events.length - 1].seq
+          : since;
+
+        // replay_truncated: the consumer's cursor predates retained
+        // history. `since` is an exclusive cursor, so the consumer next
+        // expects `since + 1`; truncation is true only when that next
+        // expected seq is strictly less than the earliest retained seq.
+        // An empty log (earliestAvailableSeq === null) is never truncated.
+        const replayTruncated =
+          earliestAvailableSeq !== null && since + 1 < earliestAvailableSeq;
+
+        res.json({
+          events,
+          next_seq: nextSeq,
+          replay_truncated: replayTruncated,
+          earliest_available_seq: earliestAvailableSeq,
+        });
+      } catch (err: any) {
+        console.error('[Manager] Error in GET /events:', err);
         res.status(500).json({ error: err?.message || 'Internal server error' });
       }
     });
