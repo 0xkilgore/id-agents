@@ -34,16 +34,17 @@ export class SqliteQueriesRepo implements QueriesRepository {
     return r.rows[0] ? this.parseQueryRow(r.rows[0]) : null;
   }
 
-  async expireStale(cutoffCreated: number, statuses: string[]): Promise<number> {
-    if (statuses.length === 0) return 0;
+  async expireStale(cutoffCreated: number, statuses: string[]): Promise<QueryRow[]> {
+    if (statuses.length === 0) return [];
     const placeholders = statuses.map(() => '?').join(', ');
-    const r = await this.db.query(
+    const r = await this.db.query<QueryRow>(
       `UPDATE queries
        SET status = 'expired', completed = ?
-       WHERE status IN (${placeholders}) AND created < ?`,
+       WHERE status IN (${placeholders}) AND created < ?
+       RETURNING team_id, agent_id, query_id, status, prompt, created, completed, result, error, session_id`,
       [Date.now(), ...statuses, cutoffCreated],
     );
-    return r.rowCount ?? 0;
+    return r.rows.map((row) => this.parseQueryRow(row)!);
   }
 
   async create(

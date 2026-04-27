@@ -238,10 +238,11 @@ export interface QueriesRepository {
 
   /**
    * Mark queries older than `cutoffMs` and still in the given terminal-or-open
-   * statuses as `expired`. Returns the number of rows updated.
-   * Used by the crash sweeper to clear stuck queries whose agent process died.
+   * statuses as `expired`. Returns the rows that were actually transitioned
+   * (so callers can emit per-row wakeup events). The crash sweeper relies on
+   * this to fan out `query:expired` events.
    */
-  expireStale(cutoffCreated: number, statuses: string[]): Promise<number>;
+  expireStale(cutoffCreated: number, statuses: string[]): Promise<QueryRow[]>;
 
   /**
    * Insert-or-update a query row (ON CONFLICT by agent_id, query_id).

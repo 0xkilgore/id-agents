@@ -28,16 +28,17 @@ export class PgQueriesRepo implements QueriesRepository {
     return rows[0] ?? null;
   }
 
-  async expireStale(cutoffCreated: number, statuses: string[]): Promise<number> {
-    if (statuses.length === 0) return 0;
+  async expireStale(cutoffCreated: number, statuses: string[]): Promise<QueryRow[]> {
+    if (statuses.length === 0) return [];
     const placeholders = statuses.map((_, i) => `$${i + 3}`).join(', ');
-    const result = await this.db.query(
+    const { rows } = await this.db.query<QueryRow>(
       `UPDATE queries
        SET status = 'expired', completed = $1
-       WHERE status IN (${placeholders}) AND created < $2`,
+       WHERE status IN (${placeholders}) AND created < $2
+       RETURNING team_id, agent_id, query_id, status, prompt, created, completed, result, error, session_id`,
       [Date.now(), cutoffCreated, ...statuses],
     );
-    return result.rowCount ?? 0;
+    return rows;
   }
 
   async create(

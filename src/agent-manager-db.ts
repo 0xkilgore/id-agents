@@ -48,6 +48,12 @@ import {
 import { PROTOCOL_DEFAULTS } from './protocol-defaults.js';
 import { computeSyncPlan, formatSyncSummary, formatSyncVerbose } from './sync.js';
 import { validateName } from './name-validation.js';
+import {
+  emitQueryDelivered,
+  emitQueryExpired,
+  emitTaskClaimed,
+  emitTaskCompleted,
+} from './wakeup-service/event-producer.js';
 import { parseAgentRef, normalizeAlias, buildAmbiguityWarning, type AgentMatch } from './core/agent-identifier.js';
 import { resolveNewsTrigger } from './core/messaging-service.js';
 import type { HarnessType } from './harness/types.js';
@@ -1742,6 +1748,19 @@ export class AgentManagerDb {
         // If this is a reply to a query, update the query status and resolve any waiting /talk-to
         if (in_reply_to) {
           await this.db.queries.complete(teamId, in_reply_to, ts, { from, message, ...data });
+
+          // Emit query:delivered for the wakeup-service event log. Look up the
+          // row to recover its agent_id (the in_reply_to id alone is not enough).
+          const completedRow = await this.db.queries.getByQueryIdForTeam(teamId, in_reply_to).catch(() => null);
+          if (completedRow && completedRow.status === 'completed') {
+            await emitQueryDelivered(this.db.events, {
+              teamId,
+              queryId: in_reply_to,
+              agentId: completedRow.agent_id,
+              occurredAt: ts,
+              messagePreview: typeof message === 'string' ? message : null,
+            });
+          }
 
           // Wake any long-poll GET /query/:id?wait= waiters for this row.
           this.notifyQueryStatusWaiters(teamId, in_reply_to);
@@ -3704,6 +3723,14 @@ export class AgentManagerDb {
         }
 
         const updated = await this.db.tasks.getByNameForTeam(task.name, teamId);
+        await emitTaskClaimed(this.db.events, {
+          teamId,
+          taskUuid: updated!.uuid,
+          taskName: updated!.name,
+          title: updated!.title,
+          ownerAgentId: agent.id,
+          occurredAt: Date.now(),
+        });
         res.json({ ok: true, task: await this.buildTaskResult(updated!, teamId) });
       } catch (err: any) {
         console.error('[Manager] Error in POST /tasks/:ref/claim:', err);
@@ -3755,6 +3782,15 @@ export class AgentManagerDb {
         });
 
         const updated = await this.db.tasks.getByNameForTeam(task.name, teamId);
+        await emitTaskCompleted(this.db.events, {
+          teamId,
+          taskUuid: updated!.uuid,
+          taskName: updated!.name,
+          title: updated!.title,
+          ownerAgentId: updated!.owner ?? null,
+          actorAgentId: callerAgent?.id ?? updated!.owner ?? null,
+          occurredAt: Date.now(),
+        });
         res.json({ ok: true, task: await this.buildTaskResult(updated!, teamId) });
       } catch (err: any) {
         console.error('[Manager] Error in POST /tasks/:ref/done:', err);
@@ -6337,8 +6373,20 @@ export class AgentManagerDb {
 
   private async sweepStaleQueries(): Promise<void> {
     const cutoff = Date.now() - this.QUERY_EXPIRY_MINUTES * 60 * 1000;
-    const count = await this.db.queries.expireStale(cutoff, ['pending', 'processing']);
+    const expired = await this.db.queries.expireStale(cutoff, ['pending', 'processing']);
+    const count = expired.length;
     if (count > 0) {
+      const occurredAt = Date.now();
+      for (const row of expired) {
+        await emitQueryExpired(this.db.events, {
+          teamId: row.team_id,
+          queryId: row.query_id,
+          agentId: row.agent_id,
+          occurredAt,
+        }).catch((err) => {
+          console.error('[Manager] Failed to emit query:expired event:', err);
+        });
+      }
       this.managerLog(
         `Expired ${count} stale queries older than ${this.QUERY_EXPIRY_MINUTES} minutes`,
       );
