@@ -42,6 +42,7 @@ curl -s http://localhost:4100/agents -H "X-Id-Team: $ID_TEAM" | jq '.agents[].na
 3. Do NOT add \`"wait": true\` unless you literally cannot continue without the answer
 4. Use the full agent name (e.g., "agent.20") when addressing other agents
 5. Team files: /workspace/teams/{{TEAM_NAME}}/
+6. Dispatches are auto-registered when you call /message. If your /talk payload includes \`dispatch_id\`, thread it (and a \`verify_signal\`) into your /agent-done call. See docs/agent-instructions/dispatch-protocol-v1.md.
 `;
 
 export const INTER_AGENT_SKILL = `
@@ -75,6 +76,10 @@ This delivers the message and **returns immediately** — you do not wait for th
   "status": "delivered"
 }
 \`\`\`
+
+### Dispatch tracking (Spec 053)
+
+Calls to \`/message\` automatically register a row in the manager's \`dispatches\` table. The receiving agent's \`/talk\` payload will include a \`dispatch_id\`. If you are on the receiving end, you MUST thread that \`dispatch_id\` (and a \`verify_signal\` describing your definition of done) into your \`/agent-done\` call so the dispatch row closes correctly. See \`docs/agent-instructions/dispatch-protocol-v1.md\` for verify_signal shapes.
 
 ### Waiting for a reply
 
