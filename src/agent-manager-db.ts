@@ -4741,6 +4741,7 @@ export class AgentManagerDb {
                 localTimeSeconds: definition.local_time_seconds,
                 localDate: definition.local_date,
                 daysOfWeek: definition.days_of_week,
+                message: definition.message,
                 createdAt: definition.created_at,
               })),
             },

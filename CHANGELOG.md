@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.81-beta
+
+### Fixes
+
+- Surface schedule message text in `/schedule list`. The list projection previously omitted `message`, so operators auditing scheduled work had to drill into each row with `/schedule show <id>` to see what each schedule was actually saying to the agent. Now `message` is included alongside `title`, `kind`, `targets`, and the timing fields, making schedule-message drift visible at a glance.
+
 ## 0.1.80-beta
 
 ### Features
