@@ -18,6 +18,7 @@ Run a team of AI coding agents from a single chat. Each agent is a real process 
 - **Multiple runtimes** - Claude Code CLI, OpenAI Codex, and Cursor CLI — mix and match in the same team
 - **Public-agent support** - register any REST-AP service that publishes `/.well-known/restap.json` with `service_type: "public-agent"` into the `public` team via `/public add <domain>`. The id-agents manager handles wallet provisioning, ID Chain registration, SSH-delivered identity files, heartbeat probes, and DMZ metadata. **[Juno](https://github.com/idchain-world/juno)** is the reference public-agent implementation we ship — capability-limited by design, safe to point at the internet — but any service that speaks the same protocol works
 - **Task system** - Create, assign, claim, and track tasks across agents (`/task` commands + `/tasks` REST API)
+- **Check-ins** - Auto-attached supervision watches on delegated tasks. Wakes the dispatcher on a configurable interval if the delegate may be stalled; auto-closes when the linked task hits `done`
 - **Scheduling** - Heartbeat intervals and calendar events for automated recurring work
 - **Org chart** - Define team structure with groups and tags so agents know their peers and leads
 - **Skills & plugins** - Standard Claude Code skills and plugins, declared in config and deployed to each agent
@@ -413,6 +414,46 @@ curl -s "http://localhost:4100/tasks?status=todo"
 ```
 
 Task statuses: `todo` (unclaimed), `doing` (in progress), `done` (completed). The `agent_id` field accepts agent names or aliases, resolved against the current team.
+
+## Check-ins
+
+A **check-in** is a supervision watch the dispatcher attaches to a delegated task. While the delegate is working, the manager fires the check-in on a configurable interval, wakes the dispatcher, and lets it observe whether the work is actually progressing. When the linked task hits a terminal status (`done`), the check-in auto-closes silently — no overhead in the happy path.
+
+The cleanest way to attach one is through the manager's `/talk-to` endpoint with a `task` field. The manager creates the task and the watching check-in atomically:
+
+```bash
+curl -s -X POST http://localhost:4100/talk-to \
+  -H "Content-Type: application/json" \
+  -d '{
+    "to": "coder",
+    "from": "me",
+    "message": "Implement the X feature and reply when done.",
+    "task":  { "title": "Implement X", "name": "implement-x" },
+    "checkin": "10m",
+    "checkin_iters": 4
+  }'
+```
+
+The dispatcher (`from`) gets pinged every 10 minutes with the linked task's status, last activity, and an actions map. Defaults: 10-minute interval, `close_when: {task_status: ['done']}`. Pass `"no_checkin": true` to skip attachment.
+
+| Route | Method | Description |
+|-------|--------|-------------|
+| `/checkins` | POST | Create a check-in (`{ owner, linked_task?, interval?, priority?, max_iterations?, ttl?, close_when? }`) |
+| `/checkins` | GET | List check-ins (query params: `owner`, `linked_task`, `status`, `due_before`) |
+| `/checkins/:id/snooze` | POST | Push the next fire out (`{ duration }`) |
+| `/checkins/:id/close` | POST | Close manually (`{ reason? }`) |
+
+When a check-in fires it lands in the dispatcher's news feed as a `checkin_due` item (the dispatcher's LLM is woken). The recommended response, before doing anything expensive, is the **probe ladder** documented in `skills/inter-agent/SKILL.md`:
+
+1. Re-read the linked task — has `updated_at` advanced?
+2. Walk the delegate's working directory for recently modified files (`find -mmin`, `git diff`).
+3. Read the delegate's own `/news` for recent activity types.
+4. Health-probe the delegate's `/.well-known/restap.json`.
+5. Last resort — `/talk-to` the delegate for a one-line status.
+
+Most fires resolve at step 1 or 2. Cheap probes first, expensive ones only when nothing else gave signal.
+
+**Pick the interval thoughtfully.** The first fire should land *after* the work plausibly should have been done. A 5-minute task wants a 6-minute check-in, not 60 seconds. Aggressive intervals generate noise the dispatcher learns to ignore; conservative intervals make every fire actionable.
 
 ## Skills & Plugins
 
