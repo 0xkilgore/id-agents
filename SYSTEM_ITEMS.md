@@ -7,19 +7,20 @@ Updated: 2026-04-28 — thorough audit: §G fixed misplaced wakeup plan ref, §I
 Updated: 2026-04-28 — deep audit pass: §A reconciled 1:1 with `find src -name '*.ts' -o -name '*.tsx'` (122 files = 122 entries, no stale refs, no missing additions). All src/ files added in the last 14 days are present. Tightened descriptions for items 5 (checkin-autoclose), 6 (checkin-service), 11 (cli/agent-readiness), 119 (event-producer), 120 (retention) to match current code (topics list, 280-byte preview cap, 5-min sweep cadence, env-override names, atomic bulk-close semantics, owner-inbox news_item write, 8s/250ms/750ms readiness probe budget)
 Updated: 2026-04-28 — deep audit take 4: §A re-verified 1:1 (still 122/122). Spot-verified magic numbers in code: `DEFAULT_TICK_INTERVAL_MS=30_000` (checkin-service), `DEFAULT_RETENTION_DAYS=7` / `DEFAULT_RETENTION_COUNT=100_000` / `DEFAULT_RETENTION_INTERVAL_MS=5*60*1000` (retention), `PREVIEW_MAX=280` (event-producer), `timeoutMs=8000` / `intervalMs=250` / `perRequestTimeoutMs=750` (agent-readiness). §C cross-checked against current `agent-manager-db.ts` route registrations. §H added missing `frontend` bundle. §N integration test count 37 → 39 (added `talk-to-reply-qid.test.ts`; `query-failed-event`, `checkin-priority-wake`, `checkin-service-boot` already listed). §O corrected `bin/id-agents` (symlink/npm-bin → `dist/interactive-agent-cli.js`, not `src/id-agents-cli.ts`); added `id-agents-dashboard` per `package.json` bin map. §P clarified `tools/test-manager/index.js` is a standalone in-memory REST-AP test manager (no DB) plus its README.
 Updated: 2026-04-28 — exhaustive 14-day audit: walked **290 commits** since 2026-04-14, **615 unique paths touched** (532 still extant, 83 deleted — 62 of those `public-agent/` from Juno extraction). §A still 1:1 (122/122). §J item 5 dropped deleted `docs/guides/admin-control.md`. §J item 7 added missing `docs/reference/database.md` and `docs/reference/id-indexer-api.md`. §K item 3 expanded to enumerate `admin-session.js` + `start-listener.js` helpers under `idagents-admin-control`. §N restructured: section now covers all of `tests/` (integration 39 + unit 24 + repos 6 + helpers + pty-flicker.py) with new items 12 (unit suites) and 13 (repo/schema suites). See "Progress Log" appendix at end of file.
+Updated: 2026-04-29 — jrdev rolling 14-day reconcile (commits since 2026-04-15: **269**; **608** unique paths): **v0.1.80-beta** check-in/production hardening landed (`dd5bb23`). §A tightened for `agent-manager-db`, checkin helpers/service, worker `claude-agent-server`, `db-service`/`queries-repo` (**`markFailed`** + **`query:failed`**), **`start-agent-manager`** graceful shutdown hook; §J bumped `CHANGELOG.md` headline to **0.1.80-beta**, split **`Logs.md`** into its own numbered entry (tracked ops runbook, not ephemera); §K noted operator skill refresh for check-in ladders + task-discipline cross-links; appendix Progress Log updated (remove `Logs.md` from “intentionally not added”; note `.gitignore` adds for `.cursor/`, root `/bin/`, demo `.mp4`).
 
 ---
 
 ## A. Source Files
 
-1. `src/agent-manager-db.ts` — Manager daemon: WebSocket, team-scoped REST (agents, talk, message, news, query status, tasks, checkins, events, registry, v3 library inventory, scheduler, remote control); optional wallet provisioning per team config; killAgentProcess guard for rebuild/spawn vs manager PID; wakeup `event_log` retention sweep wiring; checkin auto-attach on `/talk-to` and task-terminal auto-close hooks
+1. `src/agent-manager-db.ts` — Manager daemon: WebSocket, team-scoped REST (agents, talk, message, news, query status, tasks, checkins, events, registry, v3 library inventory, scheduler, remote control); optional wallet provisioning per team config; killAgentProcess guard for rebuild/spawn vs manager PID; wakeup `event_log` retention sweep wiring; boots and stops per-team **`CheckinService`** with daemon lifecycle; checkin auto-attach on `/talk-to` and task-terminal auto-close hooks; `/news` honors `skip_persist` + `in_reply_to` for wake/reply correlation without duplicate inbox writes; caller error replies routed through **`QueriesRepository.markFailed`** with **`query:failed`** wakeup events; rejects `POST /checkins` against already-terminal linked tasks (`409 linked_task_terminal`)
 2. `src/agent-rest-server.ts` — Re-exports `AgentRestServer` and news types from `claude-agent-server` (runtime-neutral)
 3. `src/agent-restap-cli.ts` — Re-exports `claude-restap-cli` (runtime-neutral REST-AP CLI entry)
-4. `src/checkins/checkin-api-helpers.ts` — Shared HTTP helpers for manager `/checkins` routes (parse duration, payload validation, response shapes)
+4. `src/checkins/checkin-api-helpers.ts` — Shared HTTP helpers for manager `/checkins` routes (parse duration, payload validation, response shapes); normalizes `owner` / `ownerId` across create/list/snooze/close handlers; rejects creates that would attach to terminal tasks (`409 linked_task_terminal`)
 5. `src/checkins/checkin-autoclose.ts` — Auto-close hook: when a task hits a terminal status, atomically bulk-closes every active/snoozed checkin linked to that task (`closed_reason='linked_task_terminal'`, clears `next_fire_at`/`snooze_until`) and emits one `checkin:closed` event per pre-close snapshot row. Currently bound by direct call from the task-done route
-6. `src/checkins/checkin-service.ts` — Per-team checkin due-service on a 30s tick: hard-expire TTL rows first (`checkin:expired`), re-activate snoozed rows when `snooze_until <= now`, fire due rows (write `news_item` to owner inbox + emit `checkin:due` + advance `next_fire_at`), and call optional `dispatchWake` hook so the manager can wake the owner
+6. `src/checkins/checkin-service.ts` — Per-team checkin due-service on a 30s tick: hard-expire TTL rows first (`checkin:expired`), re-activate snoozed rows when `snooze_until <= now`, fire due rows (write `news_item` to owner inbox + emit `checkin:due` + advance `next_fire_at`), and call optional `dispatchWake` hook so the manager wakes the owner on **every** due fire (**`priority`** is payload metadata for downstream pacing, not a suppress gate that skips wakes)
 7. `src/claude-agent-cli.ts` — Claude agent CLI entrypoint
-8. `src/claude-agent-server.ts` — Per-agent REST-AP Express app (`/talk`, `/news`, `/query`, files, schedule, optional XMTP)
+8. `src/claude-agent-server.ts` — Per-agent REST-AP Express app (`/talk`, `/news`, `/query`, files, schedule, optional XMTP); reply/agent broadcasts hoist `in_reply_to` and seed downstream `query_id` so `/talk-to` waiter routing and `/news?query_id=` lookups align with originating queries
 9. `src/claude-agent.ts` — Claude agent wrapper and entrypoint [STATUS: PASS] Curated env whitelist, bypassPermissions intentional, no shell execution
 10. `src/claude-restap-cli.ts` — Worker REST-AP CLI entrypoint
 11. `src/cli/agent-readiness.ts` — `waitForAgentReady`: polls a worker's `/.well-known/restap.json` with a deadline (default 8s timeout, 250ms interval, 750ms per-request) so an `/ask` immediately after `/sync` or `/deploy` does not race the listening port
@@ -39,7 +40,7 @@ Updated: 2026-04-28 — exhaustive 14-day audit: walked **290 commits** since 20
 25. `src/db.ts` — Backward-compatible re-exports to `db/` (`createDb`, `migrateDb`, `getOrCreateTeamId` legacy helper) [STATUS: PASS] Thin facade over modular DB layer; same migration safety as before
 26. `src/db/db-adapter.ts` — Abstract DB adapter and connection surface
 27. `src/db/db-json.ts` — JSON serialization utilities for round-tripping row blobs
-28. `src/db/db-service.ts` — Repository interfaces and composite `Db` type: teams, agents, queries, news, schedules, tasks, events, subscriptions, checkins [STATUS: PASS] Dialect-agnostic app-facing API; implementations in `db/repos/`
+28. `src/db/db-service.ts` — Repository interfaces and composite `Db` type: teams, agents, queries, news, schedules, tasks, events, subscriptions, checkins [STATUS: PASS] Dialect-agnostic app-facing API; implementations in `db/repos/`; `QueriesRepository` adds **`markFailed`** for pending queries that terminate in an error **`reply`** (paired with wakeup `query:failed` emits)
 29. `src/db/index.ts` — `createDb` / `migrateDb` / factory wiring (Postgres or SQLite, env-driven)
 30. `src/db/migrations/postgres.ts` — PostgreSQL DDL, indexes, and additive migrations
 31. `src/db/migrations/sqlite.ts` — SQLite schema migrations
@@ -50,7 +51,7 @@ Updated: 2026-04-28 — exhaustive 14-day audit: walked **290 commits** since 20
 36. `src/db/repos/postgres/checkins-repo.ts` — PostgreSQL checkins table access
 37. `src/db/repos/postgres/events-repo.ts` — PostgreSQL `event_log` / events repository
 38. `src/db/repos/postgres/news-repo.ts` — PostgreSQL news feed repository
-39. `src/db/repos/postgres/queries-repo.ts` — PostgreSQL query/work item repository
+39. `src/db/repos/postgres/queries-repo.ts` — PostgreSQL query/work item repository (includes `markFailed` flipping `queries.status` → `failed` with error payload while row is still `pending`)
 40. `src/db/repos/postgres/schedules-repo.ts` — PostgreSQL schedule definition/run tables
 41. `src/db/repos/postgres/subscriptions-repo.ts` — PostgreSQL event subscription delivery rows
 42. `src/db/repos/postgres/tasks-repo.ts` — PostgreSQL manager tasks (`/tasks` lifecycle)
@@ -59,7 +60,7 @@ Updated: 2026-04-28 — exhaustive 14-day audit: walked **290 commits** since 20
 45. `src/db/repos/sqlite/checkins-repo.ts` — SQLite checkins repository
 46. `src/db/repos/sqlite/events-repo.ts` — SQLite events / `event_log` repository
 47. `src/db/repos/sqlite/news-repo.ts` — SQLite news repository
-48. `src/db/repos/sqlite/queries-repo.ts` — SQLite query repository
+48. `src/db/repos/sqlite/queries-repo.ts` — SQLite query repository (includes `markFailed` mirroring Postgres semantics)
 49. `src/db/repos/sqlite/schedules-repo.ts` — SQLite schedule tables
 50. `src/db/repos/sqlite/subscriptions-repo.ts` — SQLite subscriptions
 51. `src/db/repos/sqlite/tasks-repo.ts` — SQLite tasks
@@ -98,7 +99,7 @@ Updated: 2026-04-28 — exhaustive 14-day audit: walked **290 commits** since 20
 84. `src/scheduling/schedule-evaluator.ts` — Interval and calendar schedule evaluation
 85. `src/scheduling/schedule-types.ts` — Schedule/dispatch DTOs shared by scheduler
 86. `src/scheduling/scheduler-service.ts` — Manager 30s scheduler service (tied to `Db` and agent resolution)
-87. `src/start-agent-manager.ts` — One-shot start script for the manager
+87. `src/start-agent-manager.ts` — One-shot start script for the manager; traps SIGINT/SIGTERM → `await manager.shutdown()` before exit so **`CheckinService`** ticks and other manager subsystems stop cleanly
 88. `src/start-agent-rest-server.ts` — One-shot start for `AgentRestServer` (runtime from `ID_HARNESS` / `HARNESS`, port from `CLAUDE_AGENT_PORT`)
 89. `src/start-claude-server.ts` — Legacy name: starts worker (delegates to runtime-agnostic path)
 90. `src/sync.ts` — v3 `sync` plan: diff spec vs live agents (deterministic skills/plugin ordering for stable “changed” detection), categories new/changed/removed, deploy reconciliation fields
@@ -324,18 +325,19 @@ Updated: 2026-04-28 — exhaustive 14-day audit: walked **290 commits** since 20
 14. `docs/protocol/*` — Protocol-level specs (REST-AP, message envelope details) referenced from harnesses and skills
 15. `CONTRIBUTING.md` — Contributor workflow; references sync/library docs touched in recent releases
 16. `README.md`, `QUICKSTART.md` — Repo entrypoints; version/changelog pointers track npm package (`package.json`)
-17. `CHANGELOG.md` — Beta release notes (current line: v0.1.79-beta — killAgentProcess narrow guard)
-18. `PromptLog.md`, `Logs.md`, `REVIEW_LOG.md`, `SECURITY.md`, `NOTICE`, `LICENSE` — Repo-root governance, release log, prompt log, license/notices
+17. `CHANGELOG.md` — Beta release notes (headline **v0.1.80-beta** — CheckinService boot/shutdown + owner wake-on-due, `/news` `skip_persist` / `in_reply_to`, `query:failed` + `markFailed`, `linked_task_terminal` guard, operator doc refresh including `Logs.md`; prior **v0.1.79-beta** — killAgentProcess narrow guard)
+18. `REVIEW_LOG.md`, `SECURITY.md`, `NOTICE`, `LICENSE` — Repo-root governance and license notices (`REVIEW_LOG.md` / `SECURITY.md` remain gitignored via `.gitignore`)
+19. `Logs.md` — Tracked operator runbook for filesystem agent/manager logs (`/tmp/*.log`), SQLite forensics (`event_log`, `tasks`, `queries`, `checkins`, …), and practical tail/query recipes (expanded v0.1.80-beta)
 
 ---
 
 ## K. Repo-root agent skills (`skills/`)
 
 1. `skills/README.md` — Index: deployed skills (`identity`, `inter-agent`, `catalog`, `wallet`, `xmtp`) vs external (`idagents-admin-control`)
-2. `skills/inter-agent/SKILL.md` — Inter-agent messaging + recent checkin attachment/lifecycle documentation [STATUS: docs refreshed in-period]
-3. `skills/idagents-admin-control/SKILL.md` + helpers (`admin-session.js` entrypoint, `start-listener.js` reply listener, `management-loop.sh`, `talk-to-manager.sh`, `remote-command.sh`) — Operator bridge for `/remote` workflows
+2. `skills/inter-agent/SKILL.md` — Inter-agent messaging + operator ladder for supervising delegated tasks/check-ins (recent refresh for auto-attach, terminal rules, wakeup priorities, and **`task-discipline`** cross-links in v0.1.80-beta docs pass)
+3. `skills/idagents-admin-control/SKILL.md` + helpers (`admin-session.js` entrypoint, `start-listener.js` reply listener, `management-loop.sh`, `talk-to-manager.sh`, `remote-command.sh`) — Operator bridge for `/remote` workflows; v0.1.80-beta pass expanded environment tables (`MANAGER_URL`, dispatch/polling ergonomics, check-in operator guidance aligned with wakeup + news fan-out semantics)
 4. `skills/idagents-register-public-agents/SKILL.md` — Register ENS-backed public agents from CI/tools (renamed from `register-public-agents` Apr-22)
-5. `skills/task-discipline/SKILL.md` — Mirror of manager task lifecycle expectations for agents (also embedded in `protocol-defaults.ts` for always-on enforcement since v0.1.48-beta)
+5. `skills/task-discipline/SKILL.md` — Mirror of manager task lifecycle expectations for agents (also embedded in `protocol-defaults.ts` for always-on enforcement since v0.1.48-beta); now carries an explicit pointer back to **`inter-agent`** check-in supervision (v0.1.80-beta docs sync)
 6. `skills/xmtp/SKILL.md` — XMTP operational guidance for agents (`curl` worker endpoints); complements §G
 7. `skills/identity/SKILL.md` — Always-loaded agent identity (name, team, ENS) skill — referenced by `inter-agent` resolution and TUI display
 8. `skills/wallet/SKILL.md` — OWS wallet operations (addresses, signing, balances, agent access) — paired with optional `wallet:` block in team YAML
@@ -385,7 +387,7 @@ Layout: `tests/integration/` (39 files), `tests/unit/` (24 files), `tests/repos/
 8. `tests/integration/workspace-sync.test.ts` — Workspace / deploy sync paths (`cli/workspace-sync`)
 9. `tests/integration/codex-spawn-personality-refresh.test.ts` — Codex harness spawn + metadata refresh
 10. `tests/integration/news-reply-triggers-receiver.test.ts` — News fan-out / receiver triggers
-11. **Further integration suites** — Auth/config/redaction (`api-key-auth`, `require-auth-config`, `secret-hygiene`, `response-redaction`, `ssh-target-log-redaction`); remote/mesh (`remote-runtime`, `remote-heartbeat`, `remote-commands`, `mesh-membership`, `external-client`, `admin-mesh-bypass-remote-blocked`); registry/public (`registry-pull-discovery`, `public-onchain`, `cli-public-register`); agents (`agent-lifecycle`, `agent-capabilities`, `agent-relay`, …); heartbeat (`heartbeat-separation`); A2A reply correlation (`talk-to-reply-qid`). The integration directory currently holds **39** files — treat this list as sampling, not exhaustive.
+11. **Further integration suites** — Auth/config/redaction (`api-key-auth`, `require-auth-config`, `secret-hygiene`, `response-redaction`, `ssh-target-log-redaction`); remote/mesh (`remote-runtime`, `remote-heartbeat`, `remote-commands`, `mesh-membership`, `external-client`, `admin-mesh-bypass-remote-blocked`); registry/public (`registry-pull-discovery`, `public-onchain`, `cli-public-register`); agents (`agent-lifecycle`, `agent-capabilities`, `agent-relay`, …); heartbeat (`heartbeat-separation`); A2A + wakeup edges (`talk-to-reply-qid`, `query-failed-event`, `checkin-priority-wake`, `checkin-service-boot`). The integration directory currently holds **39** files — treat this list as sampling, not exhaustive.
 12. **Unit tests (`tests/unit/`, 24 files)** — Pure-function and small-surface checks: `agent-manager-process-guard`, `agent-manager-wallet`, `agent-readiness`, `artifact-traversal`, `bulk-delete`, `cursor-cli-parser`, `deployer-address-null`, `env-hygiene`, `event-log-retention`, `fatal-handlers`, `heartbeat`, `merge-defaults-register`, `name-validation`, `news-trigger-default`, `protocol-defaults`, `runtime-paths`, `runtime-registry`, `sub-agent-template`, `sync-diff`, `team-config-parser`, `team-delete-safety`, `wallet-opt-in`
 13. **Repo / schema tests (`tests/repos/`, 6 files)** — Direct repo + migration coverage: `migration.test.ts`, `checkins-schema.test.ts`, `find-interactive-determinism.test.ts`, `wakeup-service-schema.test.ts`, `wakeup-service-producers.test.ts`, `wakeup-service-checkin-events.test.ts`
 
@@ -428,5 +430,15 @@ Layout: `tests/integration/` (39 files), `tests/unit/` (24 files), `tests/repos/
   8. **Cursor CLI runtime (commits `1c3dd10` `7a6a737e` `a8eed57f`, ~5 commits):** new harness alongside Codex/Claude SDK. §A item 58 + §A item 60 + §A item 80 (runtime registry).
   9. **Inter-agent / news (commits `93f03a5` `8436a2b` `1abedb9` and surrounding):** /news-to endpoint, GET /query/:id polling, two-verb skill rewrite, daemon-only dispatch, news kind/reply_expected metadata, since_id cursor. Landing src files in §A items 1, 8, 20, 64, 65 + §C items 21, 24.
   10. **Task lifecycle (commits `8a105f4` `3d30d64` `9624b23`):** GET /query/:id, manager task subset, short UUID handle, task-discipline skill + always-on protocol injection. §A items 33 (route §C) + §K item 5 + §A item 79.
-- **Files with no SYSTEM_ITEMS entry — judged as ephemera and intentionally NOT added:** `package-lock.json`, `tsconfig.json`, `vitest.config.ts`, `.gitignore`, `tests/helpers/manager-client.ts` (test-only helper), `tests/pty-flicker.py` (one-off PTY check), `src/tui/tsconfig.json` (build config), `Logs.md` (gitignored runtime log), `configs/personal.yaml` / `configs/apps.yaml` (already noted as gitignored in §I item 4).
+- **Files with no SYSTEM_ITEMS entry — judged as ephemera and intentionally NOT added:** `package-lock.json`, `tsconfig.json`, `vitest.config.ts`, `.gitignore` (patterns listed here when they affect collaborators: Cursor workdirs, stray `/bin/`, demo `.mp4` now ignored per `.gitignore` v0.1.80-beta bump), `tests/helpers/manager-client.ts` (test-only helper), `tests/pty-flicker.py` (one-off PTY check), `src/tui/tsconfig.json` (build config), `configs/personal.yaml` / `configs/apps.yaml` (already noted as gitignored in §I item 4).
+
+---
+
+## Progress Log — 2026-04-29 `jrdev-systemitems-recent`
+
+**Rolling 14-day window (measured at task time):** `git log --since="2026-04-15"` → **269** commits; **608** deduped paths vs prior exhaustive pass (different cut dates explain 269 vs ~290 headline in the Apr-28 block above).
+
+**Incremental cluster after Apr-28 inventory:** `dd5bb23` *release: cut 0.1.80-beta check-in patch* touches `README.md`, `.gitignore`, `package.json`, `CHANGELOG.md`, adds tracked `Logs.md`, refreshes **`skills/inter-agent`**, **`skills/idagents-admin-control`**, **`skills/task-discipline`**, materially extends **`src/agent-manager-db.ts`**, **`checkin-*`**, **`claude-agent-server.ts`**, **`db-service.ts`**, **`queries-repo` (Pg/SQLite)**, **`start-agent-manager.ts`**, and adds **`tests/integration/`** `{`checkin-priority-wake,checkin-service-boot,query-failed-event,talk-to-reply-qid`}` (integration directory stays at **39** files — sampling expanded in §N item 11).
+
+**Corrections applied:** **`Logs.md`** removed from ephemeral appendix list and promoted to §J item **19**; §J changelog pointer advanced to headline **v0.1.80-beta**; §A tightened for the manager/worker/repo/shutdown deltas above.
 
