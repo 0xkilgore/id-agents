@@ -1063,9 +1063,15 @@ export function App({ staticMode = false }: AppProps = {}): React.ReactElement {
   );
 
   if (showHelp) {
+    // Fill the terminal height so the modal overwrites any residual lines
+    // from the previous view (otherwise the bottom of the agents table can
+    // peek out below the modal). The flexGrow spacer pins the footer to the
+    // last row even when the terminal is resized.
+    const rows = stdout?.rows ?? 24;
     return (
-      <Box flexDirection="column">
+      <Box flexDirection="column" height={rows}>
         <HelpModal />
+        <Box flexGrow={1} />
         <Footer view={view} />
       </Box>
     );
