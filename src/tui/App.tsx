@@ -853,9 +853,18 @@ export function App({ staticMode = false }: AppProps = {}): React.ReactElement {
         return; // swallow everything else while the dialog is open
       }
       // Help modal — intercepts all keys so navigation while help is open
-      // can't accidentally drive the underlying view. ? toggles, Esc closes.
+      // can't accidentally drive the underlying view. ? toggles, Esc closes,
+      // and any arrow key also closes (so the user can return to navigating
+      // their previous view without thinking).
       if (showHelp) {
-        if (input === '?' || key.escape) {
+        if (
+          input === '?' ||
+          key.escape ||
+          key.upArrow ||
+          key.downArrow ||
+          key.leftArrow ||
+          key.rightArrow
+        ) {
           setShowHelp(false);
           return;
         }

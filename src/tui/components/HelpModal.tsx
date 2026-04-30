@@ -60,7 +60,7 @@ export function HelpModal(): React.ReactElement {
     <Box flexDirection="column" borderStyle="round" borderColor="cyan" paddingX={1}>
       <Box justifyContent="space-between">
         <Text bold color="cyan">Help</Text>
-        <Text dimColor>? · Esc to close</Text>
+        <Text dimColor>? · Esc · arrows to close</Text>
       </Box>
       <Box flexDirection="row" marginTop={1}>
         <Column group={VIEWS} keyWidth={3} />
