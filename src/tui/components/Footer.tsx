@@ -20,30 +20,35 @@ interface FooterProps {
   view: FooterView;
 }
 
-// Top-level views (agents, tasks, calendar, heartbeats) are reached via
-// hotkey; they have nothing to go back TO, so no `← back` hint. Drill-
-// downs (task-detail, heartbeat-detail, news, news-detail) keep the
-// back hint because they have a real parent to return to.
-const HINTS: Record<FooterView, string> = {
-  agents: '↑↓ nav · → detail/news · Tab team · t tasks · l library · s skills · c calendar · h heartbeats · q quit',
-  'agent-detail': '↑↓ scroll · q quit · ← back',
-  tasks: '↑↓ nav · → detail · Tab team · l library · s skills · c calendar · h heartbeats · q quit · ← back',
-  calendar: '↑↓ nav · a agents · t tasks · l library · s skills · h heartbeats · q quit',
-  heartbeats: '↑↓ nav · → detail · a agents · t tasks · l library · s skills · c calendar · q quit',
-  'task-detail': '↑↓ scroll · q quit · ← back',
-  'heartbeat-detail': '↑↓ scroll · q quit · ← back',
-  news: '↑↓ scroll · → open · q quit · ← back',
-  'news-detail': '↑↓ scroll · q quit · ← back',
-  'library-agents': '↑↓ nav · → detail · s skills · a agents · t tasks · c calendar · h heartbeats · q quit · ← back',
-  'library-agent-detail': '↑↓ scroll · q quit · ← back',
-  'library-skills': '↑↓ nav · → detail · l library · a agents · t tasks · c calendar · h heartbeats · q quit · ← back',
-  'library-skill-detail': '↑↓ scroll · q quit · ← back',
+// Footer is a one-liner. Press `?` to open the full help modal which
+// lists every keybinding. Drill-downs keep a `← back` hint since that
+// is the most-used affordance from those views; everything else is in
+// the modal.
+const HAS_BACK: Record<FooterView, boolean> = {
+  agents: false,
+  'agent-detail': true,
+  tasks: true,
+  calendar: false,
+  heartbeats: false,
+  'task-detail': true,
+  'heartbeat-detail': true,
+  news: true,
+  'news-detail': true,
+  'library-agents': true,
+  'library-agent-detail': true,
+  'library-skills': true,
+  'library-skill-detail': true,
 };
+
+function hintFor(view: FooterView): string {
+  const back = HAS_BACK[view] ? ' · ← back' : '';
+  return `↑↓ nav${back} · ? help · q quit`;
+}
 
 export function Footer({ view }: FooterProps): React.ReactElement {
   return (
     <Box paddingX={1} justifyContent="space-between">
-      <Text dimColor>{HINTS[view]}</Text>
+      <Text dimColor>{hintFor(view)}</Text>
       <Text dimColor>ID Agents Dashboard</Text>
     </Box>
   );

@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { Box, Text, useApp, useInput, useStdout } from 'ink';
 import { Footer } from './components/Footer.js';
+import { HelpModal } from './components/HelpModal.js';
 import { TeamsPanel } from './components/TeamsPanel.js';
 import { AgentsTable } from './components/AgentsTable.js';
 import { NewsView } from './components/NewsView.js';
@@ -136,6 +137,7 @@ export function App({ staticMode = false }: AppProps = {}): React.ReactElement {
   const [libAgentDetailScroll, setLibAgentDetailScroll] = useState(0);
   const [libSkillDetailScroll, setLibSkillDetailScroll] = useState(0);
   const [showQuitConfirm, setShowQuitConfirm] = useState(false);
+  const [showHelp, setShowHelp] = useState(false);
   const [cooldownEpoch, setCooldownEpoch] = useState<number>(() => Date.now());
 
   // Cooldown tick runs on news AND agents so the news-freshness dot in
@@ -850,6 +852,19 @@ export function App({ staticMode = false }: AppProps = {}): React.ReactElement {
         }
         return; // swallow everything else while the dialog is open
       }
+      // Help modal — intercepts all keys so navigation while help is open
+      // can't accidentally drive the underlying view. ? toggles, Esc closes.
+      if (showHelp) {
+        if (input === '?' || key.escape) {
+          setShowHelp(false);
+          return;
+        }
+        if (key.ctrl && input === 'c') {
+          exit();
+          return;
+        }
+        return; // swallow everything else
+      }
       // global
       if (key.ctrl && input === 'c') {
         exit();
@@ -857,6 +872,10 @@ export function App({ staticMode = false }: AppProps = {}): React.ReactElement {
       }
       if (input === 'q') {
         setShowQuitConfirm(true);
+        return;
+      }
+      if (input === '?') {
+        setShowHelp(true);
         return;
       }
       if (view === 'agents') {
@@ -1042,6 +1061,15 @@ export function App({ staticMode = false }: AppProps = {}): React.ReactElement {
     },
     { isActive: process.stdin.isTTY === true },
   );
+
+  if (showHelp) {
+    return (
+      <Box flexDirection="column">
+        <HelpModal />
+        <Footer view={view} />
+      </Box>
+    );
+  }
 
   return (
     <Box flexDirection="column">

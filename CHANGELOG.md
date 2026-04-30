@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.84-beta
+
+### Features
+
+- Add a TUI help modal. Press `?` from any view to open a popup listing every keybinding grouped by Views / Navigate / Global. `?` or `Esc` closes it. The footer is trimmed to a one-liner (`↑↓ nav · ← back · ? help · q quit`) so per-view hint strings no longer push the dashboard chrome out of frame.
+
 ## 0.1.83-beta
 
 ### Fixes
