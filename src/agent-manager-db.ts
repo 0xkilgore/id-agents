@@ -57,6 +57,7 @@ import {
   recordCheckinCreated,
 } from './wakeup-service/event-producer.js';
 import { RetentionService } from './wakeup-service/retention.js';
+import { CheckinService } from './checkins/checkin-service.js';
 import {
   DEFAULT_CLOSE_WHEN,
   DEFAULT_INTERVAL_SECONDS,
@@ -355,6 +356,7 @@ export class AgentManagerDb {
   private remoteProbeInterval: NodeJS.Timeout | null = null;
   private querySweeperInterval: NodeJS.Timeout | null = null;
   private retentionService: RetentionService | null = null;
+  private checkinService: CheckinService | null = null;
   /**
    * Stuck-query sweeper timeout, in minutes. Queries whose status is still
    * pending/processing this long after their `created` timestamp are assumed
@@ -1925,11 +1927,23 @@ export class AgentManagerDb {
     this.managementApp.post('/news', async (req, res) => {
       try {
         let { id: teamId, name: teamName } = await this.getTeam(req);
-        const { type, from, message, in_reply_to, data } = req.body || {};
+        const { type, from, message, data } = req.body || {};
+        // `in_reply_to` is the query_id this row is replying to. Some clients
+        // put it at the top level; agent-server `broadcastToManager` started
+        // doing so deliberately, but older paths (and the original message
+        // shape) only carried it inside `data`. Fall back so either works.
+        const in_reply_to: string | undefined = req.body?.in_reply_to ?? data?.in_reply_to ?? undefined;
         // Replies (in_reply_to present) default to trigger=true so the
         // forwarded receiver wakes up when its /talk-to wait has already
         // timed out. Caller can opt out with trigger:false explicitly.
         const trigger = resolveNewsTrigger({ in_reply_to, trigger: req.body?.trigger });
+        // skip_persist:true: caller already persisted the canonical row
+        // under the actual receiver's inbox (e.g. `broadcastToManager` from
+        // the originating agent's /news handler). Skip the manager-inbox
+        // insert to avoid duplicate visible rows; still run waiter
+        // resolution + queries.complete + emitQueryDelivered below so the
+        // synchronous /talk-to caller actually unblocks.
+        const skipPersist = req.body?.skip_persist === true;
 
         if (!message && !data) {
           return res.status(400).json({ error: 'Missing message or data' });
@@ -1979,31 +1993,61 @@ export class AgentManagerDb {
 
         // Replies carry notify semantics (no further reply expected);
         // unsolicited inbound messages default to notify too.
-        await this.db.news.add(teamId, inboxId, {
-          timestamp: ts,
-          type: newsType,
-          message: newsMessage,
-          data: { from, in_reply_to, message, ...data },
-          query_id: in_reply_to || undefined,
-          kind: 'notify',
-          reply_expected: false,
-        });
+        if (!skipPersist) {
+          await this.db.news.add(teamId, inboxId, {
+            timestamp: ts,
+            type: newsType,
+            message: newsMessage,
+            data: { from, in_reply_to, message, ...data },
+            query_id: in_reply_to || undefined,
+            kind: 'notify',
+            reply_expected: false,
+          });
+        }
 
-        // If this is a reply to a query, update the query status and resolve any waiting /talk-to
+        // If this is a reply to a query, update the query status and resolve any waiting /talk-to.
+        // Distinguish success ('reply') from agent-side failure ('reply.error') —
+        // the latter is what claude-agent-server.ts sends from its /talk catch
+        // block (see src/claude-agent-server.ts → sendReplyToSender, success=false).
+        // We mark the row 'failed' instead of 'completed' and emit `query:failed`
+        // instead of `query:delivered` so the wakeup-service event log carries
+        // the real lifecycle transition. Audit finding #9
+        // (output/security-review-wakeup-service.md).
+        const isQueryFailure = newsType === 'reply.error' || type === 'reply.error';
         if (in_reply_to) {
-          await this.db.queries.complete(teamId, in_reply_to, ts, { from, message, ...data });
+          if (isQueryFailure) {
+            const errorText =
+              typeof message === 'string' && message.length > 0
+                ? message
+                : typeof data?.error === 'string'
+                  ? data.error
+                  : null;
+            const transitioned = await this.db.queries.markFailed(teamId, in_reply_to, ts, errorText);
+            if (transitioned) {
+              const failedRow = await this.db.queries.getByQueryIdForTeam(teamId, in_reply_to).catch(() => null);
+              await emitQueryFailed(this.db.events, {
+                teamId,
+                queryId: in_reply_to,
+                agentId: failedRow?.agent_id ?? null,
+                occurredAt: ts,
+                reason: errorText,
+              });
+            }
+          } else {
+            await this.db.queries.complete(teamId, in_reply_to, ts, { from, message, ...data });
 
-          // Emit query:delivered for the wakeup-service event log. Look up the
-          // row to recover its agent_id (the in_reply_to id alone is not enough).
-          const completedRow = await this.db.queries.getByQueryIdForTeam(teamId, in_reply_to).catch(() => null);
-          if (completedRow && completedRow.status === 'completed') {
-            await emitQueryDelivered(this.db.events, {
-              teamId,
-              queryId: in_reply_to,
-              agentId: completedRow.agent_id,
-              occurredAt: ts,
-              messagePreview: typeof message === 'string' ? message : null,
-            });
+            // Emit query:delivered for the wakeup-service event log. Look up the
+            // row to recover its agent_id (the in_reply_to id alone is not enough).
+            const completedRow = await this.db.queries.getByQueryIdForTeam(teamId, in_reply_to).catch(() => null);
+            if (completedRow && completedRow.status === 'completed') {
+              await emitQueryDelivered(this.db.events, {
+                teamId,
+                queryId: in_reply_to,
+                agentId: completedRow.agent_id,
+                occurredAt: ts,
+                messagePreview: typeof message === 'string' ? message : null,
+              });
+            }
           }
 
           // Wake any long-poll GET /query/:id?wait= waiters for this row.
@@ -4190,6 +4234,11 @@ export class AgentManagerDb {
         }
 
         // linked_task: optional but enforces same-team via resolveTaskRef.
+        // Reject creation when the linked task is already in a terminal status
+        // ('done' is the only terminal status today). Without this guard the
+        // row would be created with a future next_fire_at and then immediately
+        // auto-closed by closeLinkedCheckinsForTerminalTask on the next task
+        // event, leaving a confusing closed-with-no-fires audit trail.
         let linkedTaskId: string | null = null;
         let linkedTaskRow: TaskRow | undefined;
         if (body.linked_task !== undefined && body.linked_task !== null) {
@@ -4198,6 +4247,9 @@ export class AgentManagerDb {
           }
           const { task, error } = await this.resolveTaskRef(body.linked_task, teamId);
           if (!task) return res.status(404).json({ error: error || `Task "${body.linked_task}" not found` });
+          if (task.status === 'done') {
+            return res.status(409).json({ error: 'linked_task_terminal', task_status: task.status });
+          }
           linkedTaskId = task.id;
           linkedTaskRow = task;
         }
@@ -4365,7 +4417,22 @@ export class AgentManagerDb {
           limit,
         });
 
-        const checkins = rows.map((row) => buildCheckinResponse(row));
+        // Resolve owner names so GET returns the same `owner` shape as POST.
+        // Cache lookups across rows since the same owner often recurs.
+        const ownerNameCache = new Map<string, string | null>();
+        const resolveOwnerName = async (agentId: string | null): Promise<string | null> => {
+          if (!agentId) return null;
+          if (ownerNameCache.has(agentId)) return ownerNameCache.get(agentId)!;
+          const agent = await this.db.agents.getById(agentId).catch(() => null);
+          const name = agent ? ((agent.metadata as any)?.alias || agent.name) : null;
+          ownerNameCache.set(agentId, name);
+          return name;
+        };
+        const checkins = await Promise.all(
+          rows.map(async (row) => buildCheckinResponse(row, {
+            ownerName: await resolveOwnerName(row.owner_agent_id),
+          })),
+        );
         res.json({ ok: true, checkins });
       } catch (err: any) {
         console.error('[Manager] Error in GET /checkins:', err);
@@ -4402,10 +4469,11 @@ export class AgentManagerDb {
         const row = await this.db.checkins.get(req.params.id, teamId);
         if (!row) return res.status(404).json({ error: 'checkin_not_found' });
 
+        const ownerName = await this.resolveAgentNameById(row.owner_agent_id);
         res.json({
           ok: true,
           alreadyClosed: !transitioned,
-          checkin: buildCheckinResponse(row),
+          checkin: buildCheckinResponse(row, { ownerName }),
         });
       } catch (err: any) {
         console.error('[Manager] Error in POST /checkins/:id/close:', err);
@@ -4440,13 +4508,26 @@ export class AgentManagerDb {
           updated_at: nowMs,
         });
         const row = await this.db.checkins.get(req.params.id, teamId);
-        res.json({ ok: true, checkin: buildCheckinResponse(row!) });
+        const ownerName = await this.resolveAgentNameById(row!.owner_agent_id);
+        res.json({ ok: true, checkin: buildCheckinResponse(row!, { ownerName }) });
       } catch (err: any) {
         console.error('[Manager] Error in POST /checkins/:id/snooze:', err);
         res.status(500).json({ error: err?.message || 'Internal server error' });
       }
     });
 
+  }
+
+  /**
+   * Resolve an agent's display name (alias or `agents.name`) from its id, or
+   * `null` if the row is missing. Swallows errors so a transient lookup
+   * failure does not break the response envelope.
+   */
+  private async resolveAgentNameById(agentId: string | null): Promise<string | null> {
+    if (!agentId) return null;
+    const agent = await this.db.agents.getById(agentId).catch(() => null);
+    if (!agent) return null;
+    return (agent.metadata as any)?.alias || agent.name;
   }
 
   private async resolveSingleAgentForCommand(teamId: string, agentName: string): Promise<{ agent?: AgentRow; error?: string }> {
@@ -7214,9 +7295,93 @@ export class AgentManagerDb {
         // Start event_log retention sweep (every 5 min, 7d / 100k-per-team caps)
         this.startEventLogRetentionSweep();
 
+        // Start checkin due-service tick (default 30s) so active checkins
+        // actually fire instead of accumulating with `next_fire_at <= now`.
+        // Wake on every fire: every priority POSTs to the owner's /news
+        // with trigger:true so the dispatcher's LLM is actually woken.
+        // Priority is preserved on the payload as metadata (the LLM reads
+        // it to decide urgency); it does NOT gate whether the wake fires —
+        // an un-woken check-in is operationally identical to no check-in.
+        // Loop safety lives in the receiver's /news handler (noAutoReply on
+        // triggered queries).
+        this.checkinService = new CheckinService(this.db, {
+          dispatchWake: async (input) => {
+            const owner = await this.db.agents.getById(input.ownerAgentId).catch(() => null);
+            if (!owner || !owner.endpoint) return;
+            const url = `${owner.endpoint.replace(/\/+$/, '')}/news`;
+            // skip_persist:true: CheckinService.writeOwnerNews already wrote
+            // the canonical inbox row before this dispatch ran. The wake POST
+            // must trigger startQuery on the receiver but must NOT persist a
+            // second news_item — otherwise high-priority fires would create
+            // duplicate visible inbox entries.
+            //
+            // Bounded timeout: fireRow awaits dispatchWake and CheckinService
+            // serializes ticks, so a hung owner endpoint would stall the
+            // entire due-service loop. 5s matches the /news-to forward path.
+            const res = await fetch(url, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                from: 'checkin-service',
+                trigger: true,
+                skip_persist: true,
+                type: 'checkin_due',
+                message: input.message,
+                data: input.data,
+              }),
+              signal: AbortSignal.timeout(5000),
+            });
+            if (!res.ok) {
+              throw new Error(`wake POST ${url} returned ${res.status}`);
+            }
+          },
+        });
+        this.checkinService.start();
+        console.log('[Manager] CheckinService started (wake on every fire)');
+
         resolve();
       });
     });
+  }
+
+  /**
+   * Stop background services and close the HTTP/WS server. Safe to call
+   * multiple times. Wired into SIGTERM/SIGINT in start-agent-manager.ts so
+   * the manager shuts down cleanly without leaking timers or sockets.
+   */
+  async shutdown(): Promise<void> {
+    if (this.checkinService) {
+      this.checkinService.stop();
+      this.checkinService = null;
+    }
+    if (this.schedulerService) {
+      this.schedulerService.stop();
+      this.schedulerService = null;
+    }
+    if (this.retentionService) {
+      this.retentionService.stop();
+      this.retentionService = null;
+    }
+    if (this.querySweeperInterval) {
+      clearInterval(this.querySweeperInterval);
+      this.querySweeperInterval = null;
+    }
+    if (this.healthCheckInterval) {
+      clearInterval(this.healthCheckInterval);
+      this.healthCheckInterval = null;
+    }
+    if (this.remoteProbeInterval) {
+      clearInterval(this.remoteProbeInterval);
+      this.remoteProbeInterval = null;
+    }
+    if (this.wss) {
+      try { this.wss.close(); } catch { /* swallow */ }
+      this.wss = null;
+    }
+    if (this.httpServer) {
+      await new Promise<void>((res) => this.httpServer!.close(() => res()));
+      this.httpServer = null;
+    }
   }
 
   private async initSchedules(): Promise<void> {

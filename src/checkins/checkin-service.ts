@@ -29,6 +29,24 @@ import {
 export const DEFAULT_TICK_INTERVAL_MS = 30_000;
 const DUE_BATCH_LIMIT = 200;
 
+/**
+ * Input passed to the wake dispatch callback. Emitted on every fire when
+ * a `dispatchWake` hook is configured — priority is preserved on the
+ * payload as metadata for the receiving dispatcher's LLM, not as a gate
+ * on whether the wake happens.
+ */
+export interface CheckinWakeDispatchInput {
+  teamId: string;
+  checkinId: string;
+  ownerAgentId: string;
+  priority: CheckinPriority;
+  iterationCount: number;
+  nextFireAt: number;
+  message: string;
+  /** The `data` payload that was just written to the owner's news inbox. */
+  data: Record<string, unknown>;
+}
+
 export interface CheckinServiceOptions {
   /** Tick cadence in ms; defaults to 30s. */
   intervalMs?: number;
@@ -36,6 +54,19 @@ export interface CheckinServiceOptions {
   batchLimit?: number;
   /** Logger hook. Defaults to console.error for failures only. */
   log?: (msg: string, err?: unknown) => void;
+  /**
+   * Wake dispatch hook. Invoked AFTER the news_item is written, on every
+   * fire (regardless of priority). The default behaviour (no hook
+   * configured) is silent inbox delivery — only the news_item lands. The
+   * manager provides an HTTP-POST dispatcher so the owner agent's LLM is
+   * actually woken instead of accumulating unread rows. Priority is
+   * preserved on the payload as metadata for the receiver, not as a gate.
+   *
+   * Failures are logged and swallowed: the row state has already been
+   * persisted by the time dispatch runs, and we never want an HTTP error to
+   * stall the tick or roll the fire back.
+   */
+  dispatchWake?: (input: CheckinWakeDispatchInput) => Promise<void>;
 }
 
 export interface TickResult {
@@ -50,12 +81,14 @@ export class CheckinService {
   private readonly intervalMs: number;
   private readonly batchLimit: number;
   private readonly log: (msg: string, err?: unknown) => void;
+  private readonly dispatchWake: ((input: CheckinWakeDispatchInput) => Promise<void>) | null;
   private running = false;
 
   constructor(private readonly db: Db, opts: CheckinServiceOptions = {}) {
     this.intervalMs = opts.intervalMs ?? DEFAULT_TICK_INTERVAL_MS;
     this.batchLimit = Math.min(opts.batchLimit ?? DUE_BATCH_LIMIT, 1000);
     this.log = opts.log ?? ((msg, err) => err ? console.error(`[CheckinService] ${msg}`, err) : undefined);
+    this.dispatchWake = opts.dispatchWake ?? null;
   }
 
   /** Start the tick loop. Idempotent. */
@@ -191,13 +224,36 @@ export class CheckinService {
     await this.db.checkins.updateFields(row.id, row.team_id, fields);
 
     if (row.owner_agent_id) {
-      await this.writeOwnerNews(row, {
+      const newsPayload = await this.writeOwnerNews(row, {
         now,
         nextFireAt,
         iterationCount: newIterationCount,
         linkedTask,
         taskOwnerName,
       });
+
+      // Wake on every fire: the entire purpose of a check-in is to wake the
+      // dispatcher when the delegate may have stalled. A check-in that
+      // didn't wake would be operationally identical to no check-in at all
+      // — just an unread row. Priority is preserved on the news/event
+      // payload so the dispatcher's LLM can decide how urgently to react,
+      // but it does NOT gate whether the wake happens.
+      if (this.dispatchWake) {
+        try {
+          await this.dispatchWake({
+            teamId: row.team_id,
+            checkinId: row.id,
+            ownerAgentId: row.owner_agent_id,
+            priority: row.priority as CheckinPriority,
+            iterationCount: newIterationCount,
+            nextFireAt,
+            message: newsPayload.message,
+            data: newsPayload.data,
+          });
+        } catch (err) {
+          this.log(`wake dispatch failed for checkin ${row.id}`, err);
+        }
+      }
     }
   }
 
@@ -238,7 +294,7 @@ export class CheckinService {
       linkedTask: TaskRow | null;
       taskOwnerName: string | null;
     },
-  ): Promise<void> {
+  ): Promise<{ message: string; data: Record<string, unknown> }> {
     const idleMs = ctx.linkedTask
       ? Math.max(0, ctx.now - ctx.linkedTask.updated_at * 1000)
       : null;
@@ -279,6 +335,7 @@ export class CheckinService {
       kind: 'notify',
       reply_expected: false,
     });
+    return { message, data };
   }
 
   private buildActions(checkinId: string): Record<string, string> {

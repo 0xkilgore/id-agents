@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.1.80-beta
+
+### Features
+
+- Bring the check-in primitive fully online. The manager now boots `CheckinService`, wakes the owner on every due fire, auto-attaches live check-ins from `POST /talk-to` task handoffs, deduplicates wake-path inbox writes with `skip_persist: true`, and shuts the service down cleanly on `SIGTERM` / `SIGINT`.
+
+### Fixes
+
+- Wake every due fire regardless of priority. Priority is now metadata on the wake payload, not a gate that can suppress the owner's LLM wake-up.
+- Reject `POST /checkins` for terminal linked tasks with `409 linked_task_terminal` instead of creating rows that immediately auto-close without ever firing.
+- Normalize check-in owner shape across `POST /checkins`, `GET /checkins`, and snooze/close responses so callers get the same `owner`/`ownerId` envelope everywhere.
+- Honor `skip_persist: true` and fall back to top-level `in_reply_to` in the manager `/news` handler, so wake/reply fanout resolves waiters without writing duplicate inbox rows.
+- Hoist `in_reply_to` on agent reply broadcasts and seed receiver-side `query_id` from replies so `/talk-to` waiter routing and `/news?query_id=` lookups stay aligned.
+- Mark `reply.error` replies as failed instead of delivered. The manager now routes failures through `QueriesRepository.markFailed(...)` and emits `query:failed`, while leaving successful replies on the existing `query:delivered` path.
+- Stop `CheckinService` during manager shutdown so the daemon exits without leaving the due-service tick behind.
+
+### Tooling
+
+- Add the `id-agents-dashboard` package bin for the TUI entrypoint.
+
+### Documentation
+
+- Expand the `inter-agent` skill with the operator-facing check-in probe ladder and related supervision guidance, and add the `task-discipline` see-also pointer to that section.
+- Refresh `idagents-admin-control`, `SYSTEM_ITEMS.md`, and `Logs.md` for the current check-in, tooling, and inventory surfaces.
+
 ## 0.1.79-beta
 
 ### Fixes

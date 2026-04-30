@@ -80,17 +80,18 @@ async function startManagerAgent() {
   const heartbeat = setInterval(() => {}, 1000 * 60 * 60);
 
   // Handle shutdown gracefully
-  process.on('SIGINT', () => {
-    console.log('\n\nShutting down manager agent...');
+  const shutdown = async (signal: string) => {
+    console.log(`\n\nShutting down manager agent (${signal})...`);
     clearInterval(heartbeat);
+    try {
+      await manager.shutdown();
+    } catch (err) {
+      console.error('Manager shutdown error:', err);
+    }
     process.exit(0);
-  });
-
-  process.on('SIGTERM', () => {
-    console.log('\n\nShutting down manager agent...');
-    clearInterval(heartbeat);
-    process.exit(0);
-  });
+  };
+  process.on('SIGINT', () => { void shutdown('SIGINT'); });
+  process.on('SIGTERM', () => { void shutdown('SIGTERM'); });
 }
 
 async function startWorkerAgent(agentId?: string) {

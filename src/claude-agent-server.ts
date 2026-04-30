@@ -941,6 +941,11 @@ export class AgentRestServer {
         // receiver wakes up when its /talk-to wait has already timed out.
         // Caller can opt out by sending trigger:false explicitly.
         const trigger = resolveNewsTrigger({ in_reply_to, trigger: req.body?.trigger });
+        // Wake-only signals (e.g. CheckinService dispatching a high-priority
+        // due fire) set `skip_persist: true` so the inbox row written by the
+        // upstream producer isn't duplicated by the receiver. The trigger
+        // logic still runs — only the addNews() call is skipped.
+        const skipPersist = req.body?.skip_persist === true;
 
         if (!message && !data) {
           return res.status(400).json({ error: 'Missing message or data' });
@@ -950,13 +955,24 @@ export class AgentRestServer {
         const newsMessage = message || (data?.message) || `${newsType} from ${from || 'unknown'}`;
         const ts = Date.now();
 
-        // Add to news feed
-        await this.addNews(newsType, newsMessage, {
-          from: from || undefined,
-          in_reply_to: in_reply_to || undefined,
-          message: message || undefined,
-          ...data
-        });
+        if (!skipPersist) {
+          // Add to news feed. When this is a reply (in_reply_to present), seed
+          // `query_id` from in_reply_to so the news_items row's `query_id`
+          // column is populated — needed by /news?query_id= filters and by any
+          // out-of-band reply lookup that keys on the column rather than the
+          // jsonb data field. The data spread comes last so a caller that
+          // explicitly sets query_id on the body still wins.
+          const newsData: Record<string, unknown> = {
+            from: from || undefined,
+            in_reply_to: in_reply_to || undefined,
+            message: message || undefined,
+            ...data,
+          };
+          if (in_reply_to && newsData.query_id === undefined) {
+            newsData.query_id = in_reply_to;
+          }
+          await this.addNews(newsType, newsMessage, newsData);
+        }
 
         // Check if there's a pending waiter for this reply (from /talk-to)
         // If so, resolve the waiter immediately - no need to trigger LLM
@@ -1826,13 +1842,36 @@ ${prompt}`
   }
 
   /**
-   * Post news to manager for WebSocket broadcast to CLI watchers
+   * Post news to manager for WebSocket broadcast to CLI watchers.
+   *
+   * `in_reply_to` is hoisted to the top level (out of `data`) so the
+   * manager's /news handler can run its reply-routing branch:
+   * mark the query complete, emit `query:delivered`, and resolve any
+   * waiting /talk-to caller. Without this hoist the manager kept the
+   * `pendingReplyWaiter` keyed on query_id but never matched, so a
+   * synchronous /talk-to caller blocked until full timeout even though
+   * the reply had already landed at the originating agent's inbox.
+   *
+   * `skip_persist: true` tells the manager's /news handler to skip the
+   * news_items insert under its manager-inbox identity. The originating
+   * agent's /news handler already persisted the canonical reply row; a
+   * second write under `manager-<team>` is a duplicate.
    */
   private async broadcastToManager(type: string, message: string, data: any, timestamp: number) {
     const managerUrl = process.env.MANAGER_URL;
     const teamId = process.env.ID_TEAM;
 
     if (!managerUrl) return;
+
+    const inReplyTo = data?.in_reply_to ?? undefined;
+    // For broadcasted replies, the upstream /news payload's `from` is the
+    // original sender. Hoist it so the manager's waiter resolution
+    // (`waiter.resolve({ from, message })`) returns the actual replier
+    // rather than the broadcasting agent's displayId. For non-replies the
+    // broadcaster's identity is the right top-level `from`.
+    const fromForBroadcast = (inReplyTo && typeof data?.from === 'string' && data.from.length > 0)
+      ? (data.from as string)
+      : this.getDisplayId();
 
     try {
       await fetch(`${managerUrl}/news`, {
@@ -1843,10 +1882,12 @@ ${prompt}`
         },
         body: JSON.stringify({
           type,
-          from: this.getDisplayId(),
+          from: fromForBroadcast,
           message,
+          in_reply_to: inReplyTo,
           data,
-          timestamp
+          timestamp,
+          skip_persist: true,
         })
       });
     } catch {

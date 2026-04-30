@@ -47,3 +47,8 @@ REVIEW_LOG.md
 AGENTS.md
 .agents/
 output/
+
+# Local-only worktree artifacts (not part of the release patch)
+.cursor/
+/bin/
+id-agents-demo-1.mp4

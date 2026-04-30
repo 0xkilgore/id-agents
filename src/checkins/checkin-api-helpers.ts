@@ -81,15 +81,21 @@ export function clampNote(note: unknown): string | null {
  * Build the documented response envelope for a CheckinRow. The shape mirrors
  * the design doc's "POST /checkins" response and the `/checkins/:id` lookups
  * — callers can layer extra context (e.g. linkedTask details) on top.
+ *
+ * `owner` is the resolved human-readable name (alias or `agents.name`) when
+ * available, or `null`. `ownerId` is the agent id. POST and GET callers must
+ * pass the same `ownerName` extras so the shape is identical across both.
  */
 export function buildCheckinResponse(
   row: CheckinRow,
   extras: { ownerName?: string | null; linkedTask?: Record<string, unknown> | null } = {},
 ): Record<string, unknown> {
+  const ownerName = extras.ownerName ?? null;
   return {
     id: row.id,
     teamId: row.team_id,
-    owner: extras.ownerName ?? row.owner_agent_id,
+    owner: ownerName,
+    ownerId: row.owner_agent_id,
     ownerAgentId: row.owner_agent_id,
     createdByAgentId: row.created_by_agent_id,
     linkedTaskId: row.linked_task_id,

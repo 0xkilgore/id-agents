@@ -1,6 +1,6 @@
 ---
 name: idagents-admin-control
-description: Programmatically manage an ID Agents team from a Claude Code session. Dispatch work to agents via /remote on the manager daemon, poll replies by queryId with long-poll support, send messages to the manager's inbox, and coordinate multi-agent tasks. Use when asked to manage or dispatch work to id-agents, talk to specific agents, or act as the team manager.
+description: Programmatically manage an ID Agents team — add/remove agents, sync configs, rebuild and restart the manager, dispatch work to agents and poll replies. Use whenever you edit a team YAML, hit "Manager did not start in time", need to /sync, /deploy, or /agents rebuild a team, or want to talk to or ask an agent.
 ---
 
 # ID Agents Admin Control Skill
@@ -12,6 +12,19 @@ This skill enables Claude Code to act as an **admin agent** for the ID Agents ma
 1. **Temporary listener** — Receives replies from the manager (like a regular agent)
 2. **Chat with manager** — Send messages via `/talk` to the human operator's REPL
 3. **Remote commands** — Execute CLI commands via `POST /remote` on the manager **daemon** (`:4100`)
+
+## When you want to ...
+
+| Goal | Command | Notes |
+|---|---|---|
+| Add a new agent | edit `configs/<team>.yaml`, then `/sync <team>` | `/agents rebuild` will NOT pick it up |
+| Change a model, runtime, skills, or working dir | edit YAML, then `/sync <team>` | same — `/sync` reconciles YAML against running team |
+| Restart agents (no config change) | `/agents rebuild` | restarts existing agents from DB |
+| Start clean from YAML | `/deploy <team>` | nuke and recreate |
+| Wipe working dirs too | `/agents reset` | destructive — confirms before running |
+| Manager not responding on `:4100`, or CLI says "Manager did not start in time" | see "Restarting the manager" below | self-kill + auto-spawn-race are known modes |
+
+Every `/remote` call should carry `X-Id-Team: <team>` (or set `ID_TEAM` env var). Without it, the manager uses its current default team, which is rarely what scripted callers want.
 
 ## Architecture
 
@@ -33,7 +46,11 @@ Claude Code (Admin)                  Manager Daemon (:4100)       Interactive RE
 
 ## Restarting the manager
 
-If `curl http://127.0.0.1:4100/agents` refuses the connection, the manager daemon is down. Known cause: occasional self-kill during `/agent rebuild` (port-kill logic catches the manager's own PID).
+The manager daemon is down whenever any of these happen:
+
+- `curl http://127.0.0.1:4100/agents` refuses the connection.
+- `id-agents` (the interactive CLI) prints `⚠️ Manager did not start in time` or `request to http://localhost:4100/agents/register failed`. The CLI tries to auto-spawn the daemon and the race silently loses; start it yourself and rerun the CLI.
+- A previous `/agent rebuild` killed it. The port-kill logic occasionally catches the manager's own PID.
 
 ```bash
 # Force-kill any stale CLI / daemon processes first
@@ -111,7 +128,7 @@ node skills/idagents-admin-control/start-listener.js [port]
 | Command | Description |
 |---------|-------------|
 | `/agents` | List all agents |
-| `/agents rebuild` | Rebuild all agents |
+| `/agents rebuild` | Restart existing agents from DB. Does NOT pick up new YAML entries — use `/sync` for that (see "Adding an agent to a team"). |
 | `/status` | Show team health |
 | `/deploy <config> [params]` | Deploy agents from config (e.g. `/deploy idchain`) |
 | `/delete <name>` | Delete agent |
@@ -186,20 +203,29 @@ ls "$(jq -r '.libraryRoot' <<<"$(curl -sS $MGR/library/agents)")/agents"
 
 ### Adding an agent to a team
 
-1. **Edit the team YAML** under `id-agents/configs/<team>.yaml`. Add an entry under `agents:`:
+1. **Edit the team YAML** under `id-agents/configs/<team>.yaml`. Add an entry under `agents:`.
+
+   **Default case — inherit `runtime` and `model` from the team `defaults:` block.** Most agents look like this:
 
    ```yaml
    agents:
      - name: copy
        description: "Marketing copy for landing pages"
        workingDirectory: /Users/nxt3d/projects/id-agents-app
-       agent: copywriter        # ← library entry name (optional)
-       # runtime: claude-code-cli  # inherits from defaults if omitted
-       # model: claude-opus-4-6
-       # skills: [identity, inter-agent, catalog]  # extra skills on top of the library entry
+       agent: copywriter        # library entry name (optional)
    ```
 
-   The `agent:` field pulls the persona (CLAUDE.md / AGENTS.md + bundled skills) from `configs/agents/<name>/` at sync time. Omit `agent:` for a bare persona where you write the prompt inline via `description:` only.
+   **Override case — only when this agent genuinely needs a different runtime or model than the rest of the team.** Don't invent model strings; copy `runtime` and `model` from another agent already in the team, or from `defaults:`. Source of truth is `configs/<team>.yaml` and `GET /agents`, not this doc.
+
+   ```yaml
+   - name: jrdev
+     description: "Cheaper general-purpose helper"
+     runtime: cursor-cli
+     model: composer-2
+     workingDirectory: /Users/nxt3d/projects/id2/id-agents
+   ```
+
+   The `agent:` field pulls the persona (CLAUDE.md / AGENTS.md + bundled skills) from `configs/agents/<name>/` at sync time. Omit `agent:` for a bare persona where you write the prompt inline via `description:` only. `skills:` on an agent entry is additive on top of the library entry's skills.
 
 2. **Sync the team.** This rebuilds working-directory artifacts (CLAUDE.md sidecar for Claude, marker-fenced AGENTS.md append for Codex/Cursor) for every agent whose template-derived hash changed:
 
@@ -217,6 +243,13 @@ ls "$(jq -r '.libraryRoot' <<<"$(curl -sS $MGR/library/agents)")/agents"
    ```bash
    curl -sS "$MGR/agents" ${ID_TEAM:+-H "X-Id-Team: $ID_TEAM"} \
      | jq '.agents[] | select(.name=="copy") | {name,runtime,workingDirectory,agent}'
+   ```
+
+   And eyeball the whole team in one pass — useful after every `/sync`, `/deploy`, or `/agents rebuild`:
+
+   ```bash
+   curl -sS "$MGR/agents" ${ID_TEAM:+-H "X-Id-Team: $ID_TEAM"} \
+     | python3 -c "import json,sys; d=json.load(sys.stdin); [print(f'{a[\"name\"]:18s} :{a[\"port\"]:<5} {a[\"status\"]:10s} {a[\"runtime\"]:18s} {a[\"model\"]}') for a in d['agents']]"
    ```
 
    The agent's working directory should now contain the synced persona file. For Claude runtimes, look for `<wd>/.claude/rules/<agent-name>.md`; for Codex/Cursor, look for the marker-fenced block in `<wd>/AGENTS.md`.
@@ -286,17 +319,20 @@ curl -s "$MGR/query/$QID?wait=30" ${ID_TEAM:+-H "X-Id-Team: $ID_TEAM"}
 ```bash
 MGR="${MANAGER_URL:-http://127.0.0.1:4100}"
 # Up to 15 min total — each call holds the socket for up to 30s.
-# NB: `qstatus` not `status` — zsh makes `$status` read-only (mirrors $?).
+# NB1: `qstatus` not `status` — zsh makes `$status` read-only (mirrors $?).
+# NB2: pipe with `printf '%s' "$body"`, never `echo "$body"`. zsh and BSD echo
+#      interpret backslash escapes, so `\n` inside JSON string values gets
+#      converted to literal newlines and jq rejects the body as invalid JSON.
 for i in $(seq 1 30); do
   body=$(curl -s "$MGR/query/$QID?wait=30" ${ID_TEAM:+-H "X-Id-Team: $ID_TEAM"})
-  qstatus=$(echo "$body" | jq -r '.status // empty')
+  qstatus=$(printf '%s' "$body" | jq -r '.status // empty')
   case "$qstatus" in
     delivered)
-      echo "$body" | jq -r '.result.message // .result'
+      printf '%s' "$body" | jq -r '.result.result // .result.message // .result'
       break ;;
     failed|expired)
       echo "TERMINAL=$qstatus"
-      echo "$body" | jq -r '.error // .'
+      printf '%s' "$body" | jq -r '.error // .'
       break ;;
   esac
 done
@@ -328,10 +364,10 @@ for i in $(seq 1 30); do
   results=""
   for agent in "${!QIDS[@]}"; do
     body=$(curl -s "$MGR/query/${QIDS[$agent]}?wait=30" ${ID_TEAM:+-H "X-Id-Team: $ID_TEAM"})
-    qstatus=$(echo "$body" | jq -r '.status // empty')
+    qstatus=$(printf '%s' "$body" | jq -r '.status // empty')
     if [ "$qstatus" = "delivered" ] || [ "$qstatus" = "failed" ] || [ "$qstatus" = "expired" ]; then
       done_count=$((done_count+1))
-      msg=$(echo "$body" | jq -r '(.result.message // .error // "")' | head -c 200 | tr '\n' ' ')
+      msg=$(printf '%s' "$body" | jq -r '(.result.result // .result.message // .error // "")' | head -c 200 | tr '\n' ' ')
       results="${results}${agent} [${qstatus}]: ${msg}\n"
     fi
   done

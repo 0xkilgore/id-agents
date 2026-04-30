@@ -99,6 +99,20 @@ export class PgQueriesRepo implements QueriesRepository {
     );
   }
 
+  async markFailed(
+    teamId: string,
+    queryId: string,
+    completed: number,
+    error: string | null,
+  ): Promise<boolean> {
+    const r = await this.db.query(
+      `UPDATE queries SET status = 'failed', completed = $3, error = $4
+       WHERE team_id = $1 AND query_id = $2 AND status = 'pending'`,
+      [teamId, queryId, completed, error ?? null],
+    );
+    return (r.rowCount ?? 0) > 0;
+  }
+
   async findTeam(queryId: string): Promise<string | null> {
     const { rows } = await this.db.query<{ team_id: string }>(
       `SELECT team_id FROM queries WHERE query_id = $1 LIMIT 1`,

@@ -44,3 +44,7 @@ Avoid reserved command verbs (delete, deploy, sync, etc.) which will be rejected
 ## Why this matters
 
 A verifier agent walking the task stream can see every unit of work, every artifact, every completion or failure, but only if every agent uses the system. Your discipline is what makes the team auditable.
+
+## See also
+
+The `inter-agent` skill describes **checkins**, a complementary primitive for supervising delegated tasks. When you delegate work to another agent via `/talk-to` with a `task: {title, name}` field, the manager creates the task and an active checkin watching it; the checkin auto-closes when the task hits a terminal state. If you load `task-discipline` without `inter-agent`, you have your own task lifecycle but no built-in supervision for work you delegate. See `skills/inter-agent/SKILL.md`, section "Checkins (work supervision)".

@@ -105,6 +105,20 @@ export class SqliteQueriesRepo implements QueriesRepository {
     );
   }
 
+  async markFailed(
+    teamId: string,
+    queryId: string,
+    completed: number,
+    error: string | null,
+  ): Promise<boolean> {
+    const r = await this.db.query(
+      `UPDATE queries SET status = 'failed', completed = ?, error = ?
+       WHERE team_id = ? AND query_id = ? AND status = 'pending'`,
+      [completed, error ?? null, teamId, queryId],
+    );
+    return (r.rowCount ?? 0) > 0;
+  }
+
   async findTeam(queryId: string): Promise<string | null> {
     const r = await this.db.query<{ team_id: string }>(
       'SELECT team_id FROM queries WHERE query_id = ? LIMIT 1',

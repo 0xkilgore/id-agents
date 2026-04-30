@@ -159,6 +159,8 @@ Use a checkin for any **delegation that creates a manager task**, i.e. a `/talk-
 - one-off chats / synchronous Q&A (`/talk-to` without a `task` field)
 - fire-and-forget pings (`/news-to`)
 
+> A direct `POST /checkins` whose `linked_task` is already in `done` (or any terminal status) will be rejected with `409 linked_task_terminal`. If you missed the window, just read the task result instead of opening a check-in on it.
+
 ### How to attach a checkin (auto-attach)
 
 Auto-attach is the default: include a `task: {title, name}` field in the body of `POST $MANAGER_URL/talk-to` and the manager creates the task **and** an active checkin watching it. The checkin is owned by the caller (`from`), interval defaults to **600s / 10m**, `close_when` defaults to `{task_status: ['done']}`.
@@ -265,7 +267,82 @@ The fired-checkin news item carries:
 - iteration count vs `maxIterations`
 - action affordances — typically: **nudge** the delegate, **snooze** the checkin, **close** the checkin, or **inspect** the linked task
 
-Decide what to do: ping the delegate (`/talk-to` or `/news-to` with `trigger:true`), snooze the checkin if they're making visible progress, or close it if the work is no longer needed.
+When a fire wakes you, follow the probe ladder in the next section before deciding to nudge, snooze, or close. Pinging the delegate via `/talk-to` is the LAST resort: it costs the delegate's tokens and blocks both sides while the delegate composes a status reply.
+
+### Picking the right interval
+
+The interval should be **slightly longer than the expected task duration**, not aggressively short. The first fire is meant to land *after* the work should plausibly be done, so its arrival is a real signal that something is off rather than routine noise.
+
+Rules of thumb:
+- Task you expect to take 5 min → set `checkin: "6m"` (or `7m`). First fire = "should be done by now, why isn't it?"
+- Task you expect to take 30 min → set `checkin: "35m"`, `checkin_iters: 3`. Each fire is a meaningful checkpoint, not a buzz.
+- Task with unknown duration (audit, exploration, research) → set the interval to your patience threshold, not your hope. If you'd want to know after 10 min, that's the interval.
+
+Aggressive intervals (every 90s on a 5-min task) generate noise the dispatcher learns to ignore. Conservative intervals (longer than expected) make every fire actionable.
+
+### How to react to a fire — the probe ladder
+
+When a `checkin_due` lands in your inbox, walk this ladder from cheapest to most expensive. Stop at the first signal that tells you what's happening. Most fires resolve at step 1 or 2 — you rarely need to escalate to `/talk-to`.
+
+**1. Re-read the linked task — has it advanced since last fire?**
+
+```bash
+curl -s "$MANAGER_URL/tasks/$LINKED_TASK_NAME" -H "X-Id-Team: $ID_TEAM" | jq '{status, updated_at, owner: .ownerName}'
+```
+
+If `updated_at` is recent (within the last fire interval), the task is moving. Decision: do nothing, the next fire will tell you more.
+
+**2. Look at the workdir — were files actually edited?**
+
+```bash
+# Find files modified in the last N minutes inside the delegate's working directory
+find <delegate-workdir> -type f -mmin -<interval-min> -not -path '*/node_modules/*' -not -path '*/.git/*' 2>/dev/null | head -20
+
+# Or check git activity if it's a code repo
+( cd <delegate-workdir> && git status --short && git diff --stat )
+```
+
+If files are changing, the delegate is working. Decision: do nothing.
+
+**3. Read the delegate's own news feed — what was its last activity?**
+
+```bash
+curl -s "http://localhost:<delegate-port>/news?since_id=0&limit=10" | jq '.items | reverse | .[:5] | .[] | {type, timestamp, message: (.message // "")[0:80]}'
+```
+
+`query.tool_use`, `query.progress`, `outbound.reply` types within the last interval = alive and active. Long silence (no entries) = something may be wrong; advance to step 4.
+
+**4. Health-probe the delegate's REST-AP endpoint.**
+
+```bash
+curl -sf -m 5 "http://localhost:<delegate-port>/.well-known/restap.json" >/dev/null && echo alive || echo unresponsive
+```
+
+Unresponsive = the agent process itself is down or its server is hung. Decision: close the checkin with `reason="delegate_unresponsive"` and either restart the delegate (admin action) or escalate to the user. Do not bother sending `/talk-to`; it will hang too.
+
+**5. Last resort — `/talk-to` the delegate to ask for a status line.**
+
+Only after steps 1-4 give ambiguous signals (delegate is responsive, task hasn't moved, news shows nothing recent). The status query itself costs the delegate one LLM turn:
+
+```bash
+curl -s -X POST "$MANAGER_URL/talk-to" \
+  -H "Content-Type: application/json" -H "X-Id-Team: $ID_TEAM" \
+  -d '{"to":"<delegate>","from":"'$ID_AGENT_ALIAS'","message":"Status check on '$LINKED_TASK_NAME'. Reply with one sentence: what step are you on, and is anything blocked?","timeout":60000}'
+```
+
+Use a short timeout (60s). If the delegate is genuinely stuck inside its current LLM turn, the `/talk-to` will time out and you'll know.
+
+### Decision after the probe
+
+| Probe result | Action |
+|---|---|
+| Task `updated_at` recent OR files changing | Do nothing — let the next fire confirm continued progress. |
+| Task idle but delegate news shows recent activity | Snooze the checkin one interval (`POST /checkins/:id/snooze {"duration":"<interval>"}`). The delegate is alive but on something else. |
+| Task idle AND delegate news silent BUT delegate responsive | `/talk-to` for a status line (step 5). |
+| Delegate unresponsive (step 4) | Close the checkin (`POST /checkins/:id/close {"reason":"delegate_unresponsive"}`). Escalate to user; this is operator-level. |
+| Task transitioned to a terminal status while you were probing | The checkin will auto-close on its own. Do nothing. |
+
+The big idea: **a checkin's job is to wake you. The probe ladder's job is to tell you, cheaply, whether the wake was a false alarm or a real one.** Most wakes are false alarms (work is progressing fine, the interval was just too aggressive); a few are real (delegate stuck, dead, or genuinely needs help). The ladder distinguishes them without spending the delegate's tokens.
 
 ### Lifecycle
 

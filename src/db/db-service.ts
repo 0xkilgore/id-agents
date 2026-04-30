@@ -269,6 +269,22 @@ export interface QueriesRepository {
   ): Promise<void>;
 
   /**
+   * Mark a query as failed: set status='failed', completed timestamp, and
+   * an optional error string. Only transitions rows currently in 'pending'
+   * (mirrors `complete`) so a late `reply.error` after a successful reply
+   * does not flip the row backwards.
+   *
+   * Returns true if the row was actually transitioned (caller can branch
+   * on whether to emit `query:failed`).
+   */
+  markFailed(
+    teamId: string,
+    queryId: string,
+    completed: number,
+    error: string | null,
+  ): Promise<boolean>;
+
+  /**
    * Look up the team_id that owns a query (by query_id alone, across all teams).
    * Used to route replies to the correct team.
    */
