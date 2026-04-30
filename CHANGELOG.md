@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.82-beta
+
+### Features
+
+- **Operator-driven dispatch probe**. `/remote /agents probe` and `/remote /agent <name> probe` now verify dispatch end-to-end instead of only checking that an agent is HTTP-listening. Each probe POSTs a minimal `reply with OK` message to the agent's local `/talk` endpoint, captures the returned `query_id`, then waits up to 10 seconds for `/query/:id` to reach `completed` or `failed`. Results are reported in the exact `{ team, probed, passed, failed, results:[{ name, status, duration_ms, error? }] }` shape, with concurrency capped at 8. This surfaces auth-class harness failures and other spawn-succeeds-but-LLM-fails cases immediately after `/sync` or manager restarts, without wiring the check into `/sync` itself.
+
 ## 0.1.81-beta
 
 ### Fixes

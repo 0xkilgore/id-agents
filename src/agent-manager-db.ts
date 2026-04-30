@@ -4530,6 +4530,173 @@ export class AgentManagerDb {
     return (agent.metadata as any)?.alias || agent.name;
   }
 
+  /**
+   * Probe a list of agents by enqueueing a tiny `/talk` query and then
+   * waiting for that query to reach a terminal state on `/query/:id`.
+   * This is intentionally end-to-end: a 202 Accepted from `/talk` alone
+   * is not enough because the harness can still fail later (for example,
+   * when the underlying CLI returns an auth error on every dispatch).
+   */
+  private async probeAgentsViaTalk(
+    teamName: string,
+    agents: AgentRow[],
+  ): Promise<{
+    ok: true;
+    result: {
+      team: string;
+      probed: number;
+      passed: number;
+      failed: number;
+      results: Array<
+        { name: string; status: 'ok'; duration_ms: number }
+        | { name: string; status: 'failed'; error: string; duration_ms: number }
+      >;
+    };
+  }> {
+    const PER_AGENT_TIMEOUT_MS = 10_000;
+    const CONCURRENCY = 8;
+    const POLL_INTERVAL_MS = 200;
+
+    type ProbeResult =
+      | { name: string; status: 'ok'; duration_ms: number }
+      | { name: string; status: 'failed'; error: string; duration_ms: number };
+
+    const toErrorString = (status: number, bodyText: string): string => (
+      bodyText ? `${status}: ${bodyText}` : `${status}`
+    );
+    const parseJson = (raw: string): any | null => {
+      if (!raw) return null;
+      try {
+        return JSON.parse(raw);
+      } catch {
+        return null;
+      }
+    };
+
+    const probeOne = async (agent: AgentRow): Promise<ProbeResult> => {
+      const start = Date.now();
+      const base = (agent.endpoint || (agent.port ? `http://localhost:${agent.port}` : '')).replace(/\/+$/, '');
+      const displayName = (agent.metadata as any)?.alias || agent.name;
+      if (!base) {
+        return { name: displayName, status: 'failed', error: 'no_endpoint', duration_ms: Date.now() - start };
+      }
+
+      const deadline = start + PER_AGENT_TIMEOUT_MS;
+      const remainingMs = () => Math.max(0, deadline - Date.now());
+      const talkUrl = `${base}/talk`;
+
+      try {
+        const talkResp = await fetch(talkUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ message: 'reply with OK', from: 'probe' }),
+          signal: AbortSignal.timeout(Math.max(1, remainingMs())),
+        });
+
+        const talkText = (await talkResp.text().catch(() => '')).slice(0, 200);
+        const talkBody = parseJson(talkText);
+
+        if (!talkResp.ok) {
+          let bodyText = '';
+          if (talkBody && typeof talkBody === 'object' && typeof talkBody.error === 'string') {
+            bodyText = talkBody.error;
+          } else {
+            bodyText = talkText;
+          }
+          return {
+            name: displayName,
+            status: 'failed',
+            error: toErrorString(talkResp.status, bodyText),
+            duration_ms: Date.now() - start,
+          };
+        }
+
+        const queryId = talkBody?.query_id || talkBody?.queryId;
+        if (!queryId) {
+          const bodyText = typeof talkBody?.message === 'string'
+            ? talkBody.message
+            : talkText;
+          if (bodyText) {
+            return { name: displayName, status: 'ok', duration_ms: Date.now() - start };
+          }
+          return {
+            name: displayName,
+            status: 'failed',
+            error: 'missing query_id from /talk response',
+            duration_ms: Date.now() - start,
+          };
+        }
+
+        const queryUrl = `${base}/query/${encodeURIComponent(String(queryId))}`;
+        while (remainingMs() > 0) {
+          const queryResp = await fetch(queryUrl, {
+            method: 'GET',
+            signal: AbortSignal.timeout(Math.max(1, Math.min(remainingMs(), 1_000))),
+          });
+
+          const queryText = (await queryResp.text().catch(() => '')).slice(0, 200);
+          const queryBody = parseJson(queryText);
+
+          if (!queryResp.ok) {
+            const bodyText = typeof queryBody?.error === 'string'
+              ? queryBody.error
+              : queryText;
+            return {
+              name: displayName,
+              status: 'failed',
+              error: toErrorString(queryResp.status, bodyText),
+              duration_ms: Date.now() - start,
+            };
+          }
+
+          const queryStatus = queryBody?.status;
+          if (queryStatus === 'completed') {
+            return { name: displayName, status: 'ok', duration_ms: Date.now() - start };
+          }
+          if (queryStatus === 'failed') {
+            const error = typeof queryBody?.error === 'string' && queryBody.error.trim()
+              ? queryBody.error
+              : 'query failed';
+            return { name: displayName, status: 'failed', error, duration_ms: Date.now() - start };
+          }
+
+          await new Promise((resolve) => setTimeout(resolve, Math.min(POLL_INTERVAL_MS, remainingMs())));
+        }
+
+        return { name: displayName, status: 'failed', error: 'timeout', duration_ms: Date.now() - start };
+      } catch (err: any) {
+        const duration_ms = Date.now() - start;
+        const isTimeout = err?.name === 'AbortError' || err?.name === 'TimeoutError';
+        const error = isTimeout ? 'timeout' : (err?.message ? String(err.message) : String(err));
+        return { name: displayName, status: 'failed', error, duration_ms };
+      }
+    };
+
+    const results: ProbeResult[] = new Array(agents.length);
+    let next = 0;
+    const workerCount = Math.min(CONCURRENCY, agents.length);
+    const workers = Array.from({ length: workerCount }, async () => {
+      while (true) {
+        const idx = next++;
+        if (idx >= agents.length) return;
+        results[idx] = await probeOne(agents[idx]);
+      }
+    });
+    await Promise.all(workers);
+
+    const passed = results.filter((r) => r.status === 'ok').length;
+    return {
+      ok: true,
+      result: {
+        team: teamName,
+        probed: results.length,
+        passed,
+        failed: results.length - passed,
+        results,
+      },
+    };
+  }
+
   private async resolveSingleAgentForCommand(teamId: string, agentName: string): Promise<{ agent?: AgentRow; error?: string }> {
     const matches = await this.dbResolveAgents(teamId, agentName);
     if (matches.length === 0) {
@@ -4677,6 +4844,18 @@ export class AgentManagerDb {
 
     switch (action) {
       case 'agents': {
+        const sub = args[0]?.toLowerCase();
+        if (sub === 'probe') {
+          // Probe every running agent's /talk dispatch path. Non-running
+          // rows are skipped (an offline/stopped agent is expected to
+          // fail; including it would skew passed/failed counts toward
+          // noise the operator already knows about). For a deliberately
+          // selected single agent, see `/agent <name> probe` which does
+          // not skip.
+          const all = await this.dbListAgents(teamId);
+          const running = all.filter((a) => a.status === 'running');
+          return this.probeAgentsViaTalk(teamName, running);
+        }
         const agents = await this.dbListAgents(teamId);
         return {
           ok: true,
@@ -6273,12 +6452,20 @@ export class AgentManagerDb {
         const subAction = args[1]?.toLowerCase();
 
         if (!agentName || !subAction) {
-          return { ok: false, error: 'Usage: /agent <name> <start|stop|rebuild|logs|heartbeat|wallet provision>' };
+          return { ok: false, error: 'Usage: /agent <name> <start|stop|rebuild|logs|heartbeat|probe|wallet provision>' };
         }
 
         const agent = await this.dbQueryAgentByNameMostRecent(teamId, agentName);
         if (!agent) {
           return { ok: false, error: `Agent "${agentName}" not found` };
+        }
+
+        if (subAction === 'probe') {
+          // Single named agent — do NOT filter on status. The operator
+          // explicitly asked to probe this agent; a downed agent should
+          // surface as `failed` (with the timeout/network error string),
+          // not be silently skipped.
+          return this.probeAgentsViaTalk(teamName, [agent]);
         }
 
         if (subAction === 'wallet') {
@@ -6400,7 +6587,7 @@ export class AgentManagerDb {
               return { ok: true, result: { action: 'heartbeat', name: agent.name, intervalSeconds: config.interval, message: 'Heartbeat sent and schedule reseeded' } };
             }
             default:
-              return { ok: false, error: `Unknown agent action: ${subAction}. Available: start, stop, rebuild, logs, heartbeat, wallet provision` };
+              return { ok: false, error: `Unknown agent action: ${subAction}. Available: start, stop, rebuild, logs, heartbeat, probe, wallet provision` };
           }
         } catch (err: any) {
           return { ok: false, error: `Agent ${subAction} failed: ${err.message}` };

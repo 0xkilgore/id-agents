@@ -129,6 +129,7 @@ node skills/idagents-admin-control/start-listener.js [port]
 |---------|-------------|
 | `/agents` | List all agents |
 | `/agents rebuild` | Restart existing agents from DB. Does NOT pick up new YAML entries — use `/sync` for that (see "Adding an agent to a team"). |
+| `/agents probe` | Dispatch-path health probe across every running agent in the team. See "Probe — verify agents respond on `/talk`" below. |
 | `/status` | Show team health |
 | `/deploy <config> [params]` | Deploy agents from config (e.g. `/deploy idchain`) |
 | `/delete <name>` | Delete agent |
@@ -137,6 +138,7 @@ node skills/idagents-admin-control/start-listener.js [port]
 | `/hey <agent> <msg>` | Alias for `/ask` |
 | `/clear [agent]` | Clear agent session |
 | `/agent <name> start\|stop\|rebuild` | Agent lifecycle |
+| `/agent <name> probe` | Probe a single named agent's `/talk` dispatch path. See "Probe — verify agents respond on `/talk`" below. |
 | `/model <agent> <model>` | Change agent's model |
 | `/news [-l] <agent>` | Get agent's news feed (-l for full content) |
 | `/register <agent>` | Register agent onchain |
@@ -152,6 +154,49 @@ node skills/idagents-admin-control/start-listener.js [port]
 | `/public add <domain> [--ssh-target=...] [--internal-port=N]` | Register a public-agent |
 | `/public remove <name\|domain>` | Deregister a public-agent |
 | `/help` | Show help |
+
+### Probe — verify agents respond on `/talk`
+
+`/agents probe` and `/agent <name> probe` both POST a minimal `reply with OK` message to each target agent's local `/talk` endpoint, capture the returned `query_id`, then wait for that query to reach `completed` or `failed` on `/query/:id`. They traverse the same dispatch hop real `/ask` and `/talk-to` traffic uses, so a green probe is direct evidence the agent's HTTP listener is up and the harness can actually complete a dispatch; a red probe pinpoints whether the failure is transport-level (timeout / connection refused) or the deeper spawn-succeeds-but-LLM-fails class (`401: Invalid authentication credentials`, empty result, etc.).
+
+**When to run it.** After every `/sync` or `/deploy` — especially when the manager was started inside another Claude Code session, where the spawn races are easier to hit. Also when an `/ask <agent>` hangs and you want to disambiguate "agent is busy" from "agent's process is wedged" before paging anyone.
+
+**Not wired into `/sync`.** This is operator-driven. `/sync`'s job is reconciliation, not health verification.
+
+**Pass / fail meaning.** A probe passes only when the `/talk` request succeeds and the resulting query reaches `completed` within 10s. A probe fails when `/talk` returns a non-2xx status, when the query reaches `failed` (for example `401: Invalid authentication credentials`), or when the whole end-to-end check times out or hits a network error.
+
+**Fan-out.** Probes run in parallel with concurrency 8 and a 10s per-agent timeout, so probing a 20-agent team finishes in well under a minute regardless of whether a few agents are wedged.
+
+**`/agents probe` skips non-running agents.** `/agent <name> probe` does not skip — if you named the agent explicitly, an offline status surfaces as a `failed` entry rather than being silently dropped.
+
+**Response shape (both commands):**
+
+```json
+{
+  "ok": true,
+  "result": {
+    "team": "idchain",
+    "probed": 3,
+    "passed": 2,
+    "failed": 1,
+    "results": [
+      { "name": "cto", "status": "ok", "duration_ms": 41 },
+      { "name": "agents", "status": "ok", "duration_ms": 38 },
+      { "name": "jrdev", "status": "failed", "error": "401: Invalid authentication credentials", "duration_ms": 134 }
+    ]
+  }
+}
+```
+
+`probed` / `passed` / `failed` are exact counts; `results[]` is one entry per probed agent in dispatch order. Each `failed` entry carries a non-empty `error` string suitable for printing directly to the operator.
+
+```bash
+# Probe every running agent in the current team
+./skills/idagents-admin-control/remote-command.sh "/agents probe"
+
+# Probe a single named agent
+./skills/idagents-admin-control/remote-command.sh "/agent jrdev probe"
+```
 
 ## Public-Team Admin (direct daemon endpoints)
 
