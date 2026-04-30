@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.83-beta
+
+### Fixes
+
+- **Stop probe from truncating /query/:id responses to 200 chars before parsing.** The original probe sliced the agent's `/query/:id` response body to the first 200 characters before `JSON.parse`, which silently corrupted any response carrying `result.messages[]`, `sessionId`, or full timestamps. `parseJson` returned `null`, the probe never saw `status: 'completed'` or `'failed'`, and every probe timed out even on healthy agents. The probe now parses the full body and only truncates when surfacing it in an error string.
+- Surface the new probe commands in the interactive CLI. `/help` now lists `/agents probe` and `/agent <name> probe`, the usage strings for `/agents` and `/agent <name>` include `probe`, and each command forwards the request to `/remote` and prints a structured pass/fail summary.
+- Bump `PER_AGENT_TIMEOUT_MS` for the probe from 10s to 30s. Real claude-code-cli dispatch round-trips for a one-token reply land around 12-15s; 10s caused premature timeouts even when the underlying query completed successfully.
+
 ## 0.1.82-beta
 
 ### Features

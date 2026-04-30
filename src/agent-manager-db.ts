@@ -4553,7 +4553,7 @@ export class AgentManagerDb {
       >;
     };
   }> {
-    const PER_AGENT_TIMEOUT_MS = 10_000;
+    const PER_AGENT_TIMEOUT_MS = 30_000;
     const CONCURRENCY = 8;
     const POLL_INTERVAL_MS = 200;
 
@@ -4593,7 +4593,11 @@ export class AgentManagerDb {
           signal: AbortSignal.timeout(Math.max(1, remainingMs())),
         });
 
-        const talkText = (await talkResp.text().catch(() => '')).slice(0, 200);
+        // Parse the full body so /query/:id responses (which can exceed 200
+        // chars once result.messages[] / sessionId / timestamps are included)
+        // round-trip cleanly. Only truncate when surfacing the body in an
+        // error string.
+        const talkText = await talkResp.text().catch(() => '');
         const talkBody = parseJson(talkText);
 
         if (!talkResp.ok) {
@@ -4601,7 +4605,7 @@ export class AgentManagerDb {
           if (talkBody && typeof talkBody === 'object' && typeof talkBody.error === 'string') {
             bodyText = talkBody.error;
           } else {
-            bodyText = talkText;
+            bodyText = talkText.slice(0, 200);
           }
           return {
             name: displayName,
@@ -4615,7 +4619,7 @@ export class AgentManagerDb {
         if (!queryId) {
           const bodyText = typeof talkBody?.message === 'string'
             ? talkBody.message
-            : talkText;
+            : talkText.slice(0, 200);
           if (bodyText) {
             return { name: displayName, status: 'ok', duration_ms: Date.now() - start };
           }
@@ -4634,13 +4638,13 @@ export class AgentManagerDb {
             signal: AbortSignal.timeout(Math.max(1, Math.min(remainingMs(), 1_000))),
           });
 
-          const queryText = (await queryResp.text().catch(() => '')).slice(0, 200);
+          const queryText = await queryResp.text().catch(() => '');
           const queryBody = parseJson(queryText);
 
           if (!queryResp.ok) {
             const bodyText = typeof queryBody?.error === 'string'
               ? queryBody.error
-              : queryText;
+              : queryText.slice(0, 200);
             return {
               name: displayName,
               status: 'failed',

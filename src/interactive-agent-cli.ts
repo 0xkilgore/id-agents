@@ -77,8 +77,10 @@ function playAlertSound() {
 // Help menu items - single source of truth (alphabetically organized)
 const HELP_ITEMS: Array<{ cmd: string; desc: string; indent?: boolean }> = [
   { cmd: '/agent <name> rebuild', desc: 'Rebuild a single agent' },
+  { cmd: '/agent <name> probe', desc: 'End-to-end dispatch probe of a single agent' },
   { cmd: '/agent <name> wallet provision', desc: 'Provision an OWS wallet for one agent' },
   { cmd: '/agents', desc: 'List all agents' },
+  { cmd: '/agents probe', desc: 'End-to-end dispatch probe of every running agent' },
   { cmd: '/agents rebuild', desc: 'Rebuild all agents' },
   { cmd: '/ask [/hey] <agent> <msg>', desc: 'Talk to agent (continues session)' },
   { cmd: '/ask * <msg>', desc: 'Broadcast to all agents' },
@@ -1604,10 +1606,11 @@ async function handleLine(line: string) {
     const action = parts[0].toLowerCase();
     const actionArg = parts.slice(1).join(' '); // For reset, this is the optional config path
 
-    if (!['start', 'stop', 'rebuild', 'save', 'reset'].includes(action)) {
-      console.log(`\n${colors.red}❌ Usage: /agents <start|stop|rebuild|reset|save>${colors.reset}`);
+    if (!['start', 'stop', 'rebuild', 'save', 'reset', 'probe'].includes(action)) {
+      console.log(`\n${colors.red}❌ Usage: /agents <start|stop|rebuild|reset|save|probe>${colors.reset}`);
       console.log(`${colors.gray}  /agents rebuild [--regenerate-config]  - Rebuild all agents; optionally rewrite configs/<team>.yaml from DB${colors.reset}`);
-      console.log(`${colors.gray}  /agents reset [config-file]  - Reset agents with plugins from config${colors.reset}\n`);
+      console.log(`${colors.gray}  /agents reset [config-file]  - Reset agents with plugins from config${colors.reset}`);
+      console.log(`${colors.gray}  /agents probe  - End-to-end dispatch probe of every running agent${colors.reset}\n`);
       rl.prompt();
       return;
     }
@@ -1721,6 +1724,34 @@ async function handleLine(line: string) {
 
     if (agents.length === 0) {
       console.log(`\n${colors.yellow}⚠️  No agents to ${action}${colors.reset}\n`);
+      rl.prompt();
+      return;
+    }
+
+    // Probe: forward to /remote so the manager runs the end-to-end dispatch check
+    if (action === 'probe') {
+      try {
+        const resp = await managerFetch('/remote', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ command: '/agents probe' })
+        });
+        const data = await resp.json() as any;
+        if (!resp.ok || !data.ok) {
+          console.log(`\n${colors.red}❌ Probe failed: ${data.error || resp.statusText}${colors.reset}\n`);
+        } else {
+          const r = data.result || {};
+          console.log(`\n${colors.cyan}🔍 Probed ${r.probed} agent(s): ${colors.green}${r.passed} passed${colors.reset}, ${colors.red}${r.failed} failed${colors.reset}`);
+          for (const row of r.results || []) {
+            const mark = row.status === 'ok' ? `${colors.green}✓${colors.reset}` : `${colors.red}✗${colors.reset}`;
+            const detail = row.status === 'ok' ? `${row.duration_ms}ms` : `${row.error} (${row.duration_ms}ms)`;
+            console.log(`  ${mark} ${row.name}: ${detail}`);
+          }
+          console.log('');
+        }
+      } catch (err: any) {
+        console.log(`\n${colors.red}❌ Probe error: ${err.message}${colors.reset}\n`);
+      }
       rl.prompt();
       return;
     }
@@ -1890,11 +1921,12 @@ async function handleLine(line: string) {
     const arg = parts.slice(2).join(' ');
 
     if (!target || !action) {
-      console.log(`\n${colors.red}❌ Usage: /agent <name> <start|stop|rebuild [--regenerate-config]|logs [-f]|save|heartbeat|wallet provision>${colors.reset}`);
+      console.log(`\n${colors.red}❌ Usage: /agent <name> <start|stop|rebuild [--regenerate-config]|logs [-f]|save|heartbeat|wallet provision|probe>${colors.reset}`);
       console.log(`${colors.gray}   logs: show recent logs (default 200 lines)${colors.reset}`);
       console.log(`${colors.gray}   logs -f: follow logs in real-time (Ctrl+C to stop)${colors.reset}`);
       console.log(`${colors.gray}   logs 50: show last 50 lines${colors.reset}`);
-      console.log(`${colors.gray}   wallet provision: create an OWS wallet for this agent (opt-in, requires the ows CLI)${colors.reset}\n`);
+      console.log(`${colors.gray}   wallet provision: create an OWS wallet for this agent (opt-in, requires the ows CLI)${colors.reset}`);
+      console.log(`${colors.gray}   probe: send a one-shot dispatch ("reply with OK") and report pass/fail${colors.reset}\n`);
       rl.prompt();
       return;
     }
@@ -2085,6 +2117,25 @@ async function handleLine(line: string) {
         console.log(`\n${colors.green}♥ Heartbeat sent to ${target}${colors.reset}`);
         if (data.result?.intervalSeconds) {
           console.log(`${colors.gray}   Timer reset: next heartbeat in ${data.result.intervalSeconds}s${colors.reset}\n`);
+        }
+      } else if (action === 'probe') {
+        // /agent <name> probe — single-agent end-to-end dispatch probe.
+        const resp = await managerFetch(`/remote`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ command: `/agent ${target} probe` })
+        });
+        const data = await resp.json() as any;
+        if (!resp.ok || !data.ok) {
+          throw new Error(data.error || 'Probe failed');
+        }
+        const row = (data.result?.results || [])[0];
+        if (!row) {
+          console.log(`\n${colors.yellow}⚠️  Probe returned no result${colors.reset}\n`);
+        } else if (row.status === 'ok') {
+          console.log(`\n${colors.green}✓ ${row.name}: passed (${row.duration_ms}ms)${colors.reset}\n`);
+        } else {
+          console.log(`\n${colors.red}✗ ${row.name}: ${row.error} (${row.duration_ms}ms)${colors.reset}\n`);
         }
       } else if (action === 'wallet') {
         // /agent <name> wallet provision — on-demand OWS wallet provisioning.
