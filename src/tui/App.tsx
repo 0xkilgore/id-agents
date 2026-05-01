@@ -158,7 +158,15 @@ export function App({ staticMode = false }: AppProps = {}): React.ReactElement {
     staticMode,
     [manager],
   );
-  const teams = staticMode ? staticTeams ?? [] : teamsPoll.data ?? [];
+  const teamsRaw = staticMode ? staticTeams ?? [] : teamsPoll.data ?? [];
+  // Always render `public` immediately after the `All` chip, then the rest in
+  // the order the manager returned them. Keeps the public team a stable
+  // anchor as new teams are added.
+  const teams = useMemo(() => {
+    const pub = teamsRaw.filter((t) => t.name === 'public');
+    const rest = teamsRaw.filter((t) => t.name !== 'public');
+    return [...pub, ...rest];
+  }, [teamsRaw]);
 
   const agentsFetcher = useCallback(
     (signal: AbortSignal): Promise<Agent[]> => {

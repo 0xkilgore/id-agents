@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.91-beta
+
+### Features
+
+- TUI: pin the `public` team chip immediately after `All` in the `TeamsPanel`, regardless of the order the manager returns teams. Tab/Shift+Tab cycling matches the visual order, so moving off `All` always lands on `public` first. Other teams keep their original order.
+
 ## 0.1.90-beta
 
 ### Features
