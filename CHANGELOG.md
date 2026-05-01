@@ -1,6 +1,12 @@
 # Changelog
 
-## 0.1.89-beta
+## 0.1.90-beta
+
+### Features
+
+- TUI `TeamsPanel` now windows the team chips when the team list grows beyond 5. The window centers on the selected team (Tab / Shift+Tab still cycle selection and wrap at the ends), and `←N` / `N→` indicators show how many teams are hidden on either side. The `All` chip is always visible at the start.
+
+
 
 ### Fixes
 
