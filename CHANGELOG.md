@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.88-beta
+
+### Features
+
+- Compact `MODEL` column in the TUI agents table. Model strings are now abbreviated via `src/tui/util/models.ts`: explicit entries (`claude-opus-4-7` → `opus-4-7`, `claude-sonnet-4-6` → `sonn-4-6`, `composer-2` → `comp-2`, etc.) plus a heuristic fallback for unknown `claude-*` names (strip prefix, drop trailing date stamps, truncate the first word to 4 chars). Column width shrinks from 18 to 10. Add new explicit entries to the table as new models appear; the fallback handles the gap until you do.
+
 ## 0.1.87-beta
 
 ### Features

@@ -4,6 +4,7 @@ import type { Agent } from '../api/types.js';
 import { padRight, truncate, humanizeLastSeen } from '../util/format.js';
 import { statusColor, healthColor, healthDot } from '../util/colors.js';
 import { formatMemory, memoryColor } from '../util/memory.js';
+import { abbrevModel } from '../util/models.js';
 
 interface AgentRowProps {
   agent: Agent;
@@ -20,7 +21,7 @@ const COLS = {
   name: 17,
   port: 6,
   runtime: 12,
-  model: 18, // fits 'claude-sonnet-4-6' (17) plus padding
+  model: 10, // abbreviated via util/models.ts (e.g. 'opus-4-7', 'sonn-4-6', 'comp-2')
   status: 9,
   health: 11,
   news: 2,
@@ -36,7 +37,7 @@ const REMOTE_COLS = {
   name: 17,
   port: 6,    // renders '—' but keeps same width
   runtime: 12,
-  model: 18,
+  model: 10,
   status: 9,
   health: 11,
   news: 2,
@@ -71,7 +72,7 @@ function AgentRowInner({ agent, selected, uptime, newsColor, memBytes, nowMs }: 
   const marker = selected ? '▶ ' : '  ';
   const name = padRight(agent.alias ?? agent.name, COLS.name);
   const runtime = padRight(abbrevRuntime(agent.metadata?.runtime), COLS.runtime);
-  const model = padRight(truncate(agent.model ?? '—', COLS.model - 1), COLS.model);
+  const model = padRight(truncate(abbrevModel(agent.model), COLS.model - 1), COLS.model);
   const health = padRight(renderHealth(agent.health), COLS.health);
   const hb = padRight(agent.metadata?.heartbeat ? '♥' : '-', COLS.hb);
   const newsGlyph = NEWS_GLYPH;
