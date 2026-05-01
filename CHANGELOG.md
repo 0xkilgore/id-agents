@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.87-beta
+
+### Features
+
+- TUI agents table now shows a `MODEL` column between `RUNTIME` and `STATUS`. Width 18 (fits `claude-sonnet-4-6` plus padding); longer model strings are truncated with the standard overflow glyph. Header and remote-agent rows updated to match. No other columns changed.
+
 ## 0.1.86-beta
 
 ### Documentation

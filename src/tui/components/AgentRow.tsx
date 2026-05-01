@@ -20,6 +20,7 @@ const COLS = {
   name: 17,
   port: 6,
   runtime: 12,
+  model: 18, // fits 'claude-sonnet-4-6' (17) plus padding
   status: 9,
   health: 11,
   news: 2,
@@ -35,6 +36,7 @@ const REMOTE_COLS = {
   name: 17,
   port: 6,    // renders '—' but keeps same width
   runtime: 12,
+  model: 18,
   status: 9,
   health: 11,
   news: 2,
@@ -69,6 +71,7 @@ function AgentRowInner({ agent, selected, uptime, newsColor, memBytes, nowMs }: 
   const marker = selected ? '▶ ' : '  ';
   const name = padRight(agent.alias ?? agent.name, COLS.name);
   const runtime = padRight(abbrevRuntime(agent.metadata?.runtime), COLS.runtime);
+  const model = padRight(truncate(agent.model ?? '—', COLS.model - 1), COLS.model);
   const health = padRight(renderHealth(agent.health), COLS.health);
   const hb = padRight(agent.metadata?.heartbeat ? '♥' : '-', COLS.hb);
   const newsGlyph = NEWS_GLYPH;
@@ -94,6 +97,7 @@ function AgentRowInner({ agent, selected, uptime, newsColor, memBytes, nowMs }: 
         <Text bold={selected}>{name}</Text>
         <Text dimColor>{portCell}</Text>
         <Text dimColor>{runtime}</Text>
+        <Text dimColor>{model}</Text>
         <Text color={healthColor(agent.health)}>{remoteStatus}</Text>
         <Text color={healthColor(agent.health)}>{health}</Text>
         <Text color={newsColor}>{newsGlyph}</Text>
@@ -119,6 +123,7 @@ function AgentRowInner({ agent, selected, uptime, newsColor, memBytes, nowMs }: 
       <Text bold={selected}>{name}</Text>
       {port}
       <Text dimColor>{runtime}</Text>
+      <Text dimColor>{model}</Text>
       <Text color={statusColor(agent.status)}>{status}</Text>
       <Text color={healthColor(agent.health)}>{health}</Text>
       <Text color={newsColor}>{newsGlyph}</Text>
@@ -144,6 +149,7 @@ export const AgentRow = React.memo(AgentRowInner, (prev, next) => {
     a.port === b.port &&
     a.status === b.status &&
     a.health === b.health &&
+    a.model === b.model &&
     a.metadata?.runtime === b.metadata?.runtime &&
     a.metadata?.heartbeat === b.metadata?.heartbeat &&
     (a.metadata as Record<string, unknown> | undefined)?.dmz ===
@@ -161,6 +167,7 @@ export function AgentRowHeader(props: { hasRemote?: boolean }): React.ReactEleme
         {padRight('NAME', REMOTE_COLS.name)}
         {padRight('PORT', REMOTE_COLS.port)}
         {padRight('RUNTIME', REMOTE_COLS.runtime)}
+        {padRight('MODEL', REMOTE_COLS.model)}
         {padRight('STATUS', COLS.status)}
         {padRight('HEALTH', COLS.health)}
         {padRight('N', COLS.news)}
@@ -178,6 +185,7 @@ export function AgentRowHeader(props: { hasRemote?: boolean }): React.ReactEleme
       {padRight('NAME', COLS.name)}
       {padRight('PORT', COLS.port)}
       {padRight('RUNTIME', COLS.runtime)}
+      {padRight('MODEL', COLS.model)}
       {padRight('STATUS', COLS.status)}
       {padRight('HEALTH', COLS.health)}
       {padRight('N', COLS.news)}
