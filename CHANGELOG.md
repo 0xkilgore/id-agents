@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.89-beta
+
+### Fixes
+
+- Drop the heuristic fallback in `src/tui/util/models.ts`. Model abbreviation is now table-only: an explicit `MODEL_ABBREVIATIONS` map decides every short name, and any model not in the map renders as its raw string (overflowing the 10-char column, which makes missing entries obvious). Added `claude-haiku-4-5-20251001` → `haiku-4-5` to the table while we were in there.
+
 ## 0.1.88-beta
 
 ### Features

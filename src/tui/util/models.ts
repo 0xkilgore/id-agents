@@ -1,16 +1,18 @@
 // Short names for model strings shown in the TUI agents table.
-// Add new entries here as model names appear — the heuristic fallback
-// below handles unknown claude-* names automatically, but explicit
-// entries always win and let us pick nicer abbreviations than the
-// algorithm would produce.
+//
+// Maintain this table by hand. When a new model appears, add an entry.
+// Until then the row will display the full model string and visibly
+// overflow the column — that's a feature, not a bug, because it makes
+// missing entries obvious.
 
 export const MODEL_ABBREVIATIONS: Record<string, string> = {
   // Anthropic Claude
   'claude-opus-4-6': 'opus-4-6',
   'claude-opus-4-7': 'opus-4-7',
   'claude-sonnet-4-6': 'sonn-4-6',
+  'claude-haiku-4-5-20251001': 'haiku-4-5',
 
-  // OpenAI Codex (already short, but pinned for stability)
+  // OpenAI Codex
   'gpt-5.4': 'gpt-5.4',
   'gpt-5.5': 'gpt-5.5',
 
@@ -19,32 +21,14 @@ export const MODEL_ABBREVIATIONS: Record<string, string> = {
 };
 
 /**
- * Abbreviate a model name for compact display.
+ * Look up the short display name for a model.
  *
- * Lookup order:
- *   1. Explicit entry in MODEL_ABBREVIATIONS — wins.
- *   2. Heuristic for `claude-<word>-<rest>`: strip the `claude-` prefix,
- *      strip trailing `-YYYYMMDD` date stamps, truncate the first word
- *      to 4 chars, keep the rest. So `claude-haiku-4-5-20251001` → `haik-4-5`.
- *   3. Otherwise the input unchanged.
- *
- * Returns `—` for missing/empty input.
+ *   - In the table → returns the abbreviation.
+ *   - Not in the table → returns the input unchanged (will overflow the
+ *     column, which signals "add me to the table").
+ *   - Missing/empty → returns `—`.
  */
 export function abbrevModel(model: string | undefined): string {
   if (!model) return '—';
-  if (model in MODEL_ABBREVIATIONS) return MODEL_ABBREVIATIONS[model];
-
-  // Strip a trailing -YYYYMMDD date stamp.
-  const cleaned = model.replace(/-\d{8}$/, '');
-
-  if (cleaned.startsWith('claude-')) {
-    const rest = cleaned.slice('claude-'.length);
-    const m = rest.match(/^([a-z]+)(.*)$/);
-    if (m) {
-      const word = m[1].slice(0, 4);
-      return `${word}${m[2]}`;
-    }
-  }
-
-  return cleaned;
+  return MODEL_ABBREVIATIONS[model] ?? model;
 }
