@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.1.85-beta
+
+### Fixes
+
+- Make `npm run build` rebuild both the core TypeScript output and the TUI bundle so a normal pull-then-build leaves `dist/` fully consistent.
+
+### Documentation
+
+- Rewrite `QUICKSTART.md` as an idempotent flow: add a find-or-refresh Step 0, make the install step explicitly safe to rerun after `git pull`, and replace the one-shot skill copy with an in-place `rsync` refresh for `idagents-admin-control`.
+- Change the canonical bootstrap prompt to `Find https://github.com/idchain-world/id-agents.git then read and follow the QUICKSTART.md file in the repo.` across the README and linked app/docs surfaces so the prompt no longer pre-decides clone vs update.
+
 ## 0.1.84-beta
 
 ### Features

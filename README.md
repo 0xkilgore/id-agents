@@ -9,7 +9,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-**Version 0.1.84-beta**
+**Version 0.1.85-beta**
 
 Run a team of AI coding agents from a single chat. Each agent is a real process with full tool access — **Claude Code CLI**, **OpenAI Codex**, **Cursor CLI**, or a mix. No UI needed. Connect from any terminal, Telegram, or SSH session.
 
@@ -92,18 +92,24 @@ Run a team of AI coding agents from a single chat. Each agent is a real process 
 
 ### Recommended: Let Claude set it up
 
-The fastest way to start is to let a Claude Code session do it. Claude clones the repo, installs the `idagents-admin-control` skill, starts the manager, deploys the default team, then offers to act as your team manager.
+The fastest way to start is to let a Claude Code session do it. Claude finds the repo, pulls the latest changes if it already exists (or clones it if it does not), installs the `idagents-admin-control` skill, rebuilds, starts the manager, deploys the default team, then offers to act as your team manager.
 
 Paste this into any Claude Code session:
 
-> Set up id-agents by following the QUICKSTART at https://github.com/idchain-world/id-agents/blob/main/QUICKSTART.md
+> Find https://github.com/idchain-world/id-agents.git then read and follow the QUICKSTART.md file in the repo.
 
 <details>
-<summary>Prefer to install the skill yourself first?</summary>
+<summary>Prefer to refresh the skill yourself first?</summary>
 
 ```bash
-git clone https://github.com/idchain-world/id-agents.git
-cp -r id-agents/skills/idagents-admin-control <your-claude-code-project>/.claude/skills/
+if [ -d id-agents/.git ]; then
+  cd id-agents && git pull --ff-only
+else
+  git clone https://github.com/idchain-world/id-agents.git
+  cd id-agents
+fi
+mkdir -p <your-claude-code-project>/.claude/skills/idagents-admin-control
+rsync -a --delete skills/idagents-admin-control/ <your-claude-code-project>/.claude/skills/idagents-admin-control/
 ```
 
 Then paste the prompt above into Claude Code.
