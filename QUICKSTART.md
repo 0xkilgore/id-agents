@@ -40,25 +40,47 @@ You can opt out by setting `dangerouslySkipPermissions: false` in the YAML confi
 
 ## 0. Find or Refresh the Repo
 
-If you already have an `id-agents` clone locally, use that checkout and update it before continuing:
-
-```bash
-cd <path-to-id-agents>
-git pull --ff-only
-```
-
-If you do not have the repo yet, clone it first:
+If you do not have the repo yet, clone it and skip to Step 1:
 
 ```bash
 git clone https://github.com/idchain-world/id-agents.git
 cd id-agents
 ```
 
+If you DO have an `id-agents` clone locally, **do not pull silently**. First inspect state and ask the user before changing anything.
+
+```bash
+cd <path-to-id-agents>
+echo "branch=$(git branch --show-current)"
+echo "dirty=$([ -z "$(git status --porcelain)" ] && echo clean || echo DIRTY)"
+git fetch origin main >/dev/null 2>&1 || echo "(could not reach origin)"
+local_ver=$(node -p "require('./package.json').version")
+remote_ver=$(git show origin/main:package.json | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>console.log(JSON.parse(s).version))')
+echo "local=$local_ver  origin/main=$remote_ver"
+```
+
+Then **ask the user explicitly** before doing anything else, choosing the message that fits the state:
+
+- **Already on the latest version** (`local == remote`, branch `main`, clean tree): "Your `id-agents` checkout is already at version `<X>`. Continue with this version?" Default: yes, proceed to Step 1 with no install/build needed.
+- **Newer version available** (`local != remote`, branch `main`, clean tree): "Your `id-agents` checkout is on `<local>`. The latest on `origin/main` is `<remote>`. Update? This will run `git pull --ff-only && npm install && npm run build`." Wait for an explicit yes before running the upgrade. If the user declines, continue with the current version.
+- **Working tree is dirty**: "Your `id-agents` checkout has uncommitted changes. I won't pull on top of those. Continue with your current state, or stop so you can commit/stash first?" Do not auto-pull.
+- **Branch is not `main`**: "Your `id-agents` checkout is on branch `<branch>`, not `main`. I won't pull or check the version. Continue with this branch, or switch to `main` first?" Do not auto-pull.
+
+Only run the upgrade command if the user explicitly approves it:
+
+```bash
+git pull --ff-only origin main
+npm install
+npm run build
+```
+
 From this point on, `<path-to-id-agents>` means that working tree.
 
 ## 1. Install Dependencies and Rebuild
 
-Re-run this after every pull. It is safe if dependencies are already installed.
+Skip this step if Step 0 already ran the upgrade (which includes `npm install && npm run build`), or if the repo is already at the current version with `node_modules/` and `dist/` populated.
+
+Run only on a fresh clone, or if you suspect `node_modules/` or `dist/` is missing or stale:
 
 ```bash
 npm install

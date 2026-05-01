@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.86-beta
+
+### Documentation
+
+- `QUICKSTART.md` Step 0 now requires Claude to ask the user before running `git pull` on an existing checkout. Previously it instructed an unconditional `git pull --ff-only`, which violated the design intent of "do not pull silently". The step now inspects branch, dirty tree, and local-vs-`origin/main` version, then presents the relevant prompt for the user to approve, decline, or address (uncommitted changes / non-main branch). The upgrade command runs only on explicit approval. Step 1 (Install / Rebuild) is now explicitly skippable when Step 0 already covered it.
+
 ## 0.1.85-beta
 
 ### Fixes
