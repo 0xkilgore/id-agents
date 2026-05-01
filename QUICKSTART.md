@@ -1,6 +1,6 @@
 # ID Agents Quickstart
 
-Follow these steps to set up and deploy your first agent team.
+Follow these steps to find or refresh your local `id-agents` checkout, then deploy your first agent team.
 
 ## Prerequisites
 
@@ -38,24 +38,47 @@ ID Agents runs each agent as a background process with no interactive shell to a
 
 You can opt out by setting `dangerouslySkipPermissions: false` in the YAML config (per agent or under `defaults`), but be warned: any tool-use prompt then has no way to be approved, and the agent will hang silently on the first one. If you're not comfortable giving background agents this level of autonomy, ID Agents is not the right tool for you.
 
-## 1. Install
+## 0. Find or Refresh the Repo
+
+If you already have an `id-agents` clone locally, use that checkout and update it before continuing:
+
+```bash
+cd <path-to-id-agents>
+git pull --ff-only
+```
+
+If you do not have the repo yet, clone it first:
+
+```bash
+git clone https://github.com/idchain-world/id-agents.git
+cd id-agents
+```
+
+From this point on, `<path-to-id-agents>` means that working tree.
+
+## 1. Install Dependencies and Rebuild
+
+Re-run this after every pull. It is safe if dependencies are already installed.
 
 ```bash
 npm install
+npm run build
 ```
 
 ## 2. Add the Admin Control Skill
 
-Copy the idagents-admin-control skill into the project where you are running Claude Code (this is your project directory, not the id-agents repo):
+Copy the `idagents-admin-control` skill into the project where you are running Claude Code (this is your project directory, not the `id-agents` repo). The command below is idempotent: it creates the target folder if needed and refreshes the skill in place on re-run.
 
 ```bash
-cp -r <path-to-id-agents>/skills/idagents-admin-control <your-claude-code-project>/.claude/skills/
+mkdir -p <your-claude-code-project>/.claude/skills/idagents-admin-control
+rsync -a --delete <path-to-id-agents>/skills/idagents-admin-control/ <your-claude-code-project>/.claude/skills/idagents-admin-control/
 ```
 
-For example, if you cloned id-agents to `~/projects/id-agents` and you're running Claude Code in `~/projects/my-app`:
+For example, if `id-agents` is at `~/projects/id-agents` and you're running Claude Code in `~/projects/my-app`:
 
 ```bash
-cp -r ~/projects/id-agents/skills/idagents-admin-control ~/projects/my-app/.claude/skills/
+mkdir -p ~/projects/my-app/.claude/skills/idagents-admin-control
+rsync -a --delete ~/projects/id-agents/skills/idagents-admin-control/ ~/projects/my-app/.claude/skills/idagents-admin-control/
 ```
 
 ## 3. Start the Manager
