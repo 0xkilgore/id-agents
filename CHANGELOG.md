@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.92-beta
+
+### Fixes
+
+- TUI: keep the `TeamsPanel` visible on `All` and `public` selections. Remote agents render with extra `DOMAIN`/`DMZ` columns; on terminals narrower than the full row width, the row and header used to wrap onto a second line, which scrolled the top menu off-screen. Added `wrap="truncate-end"` to `AgentRow` (local + remote branches), `AgentRowHeader`, and the `StatusStrip` content so the rendered height of the agents block always equals `windowSize + chrome`. The rightmost columns clip on narrow terminals, but the menu stays put.
+
 ## 0.1.91-beta
 
 ### Features

@@ -18,23 +18,25 @@ export function StatusStrip(props: StatusStripProps): React.ReactElement {
 
   return (
     <Box paddingX={1}>
-      {groups.length === 0 ? (
-        <Text dimColor>no agents</Text>
-      ) : (
-        groups.map((g, ti) => (
-          <React.Fragment key={g.team}>
-            {ti > 0 ? <Text dimColor> │ </Text> : null}
-            <Text dimColor>{g.team} </Text>
-            {g.list.map((agent) => (
-              <Symbol
-                key={agent.id}
-                agent={agent}
-                selected={agent.id === selectedAgentId}
-              />
-            ))}
-          </React.Fragment>
-        ))
-      )}
+      <Text wrap="truncate-end">
+        {groups.length === 0 ? (
+          <Text dimColor>no agents</Text>
+        ) : (
+          groups.map((g, ti) => (
+            <React.Fragment key={g.team}>
+              {ti > 0 ? <Text dimColor> │ </Text> : null}
+              <Text dimColor>{g.team} </Text>
+              {g.list.map((agent) => (
+                <Symbol
+                  key={agent.id}
+                  agent={agent}
+                  selected={agent.id === selectedAgentId}
+                />
+              ))}
+            </React.Fragment>
+          ))
+        )}
+      </Text>
     </Box>
   );
 }

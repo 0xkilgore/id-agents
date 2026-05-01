@@ -93,7 +93,7 @@ function AgentRowInner({ agent, selected, uptime, newsColor, memBytes, nowMs }: 
     const remoteStatus = padRight(remoteStatusLabel, COLS.status);
 
     return (
-      <Text inverse={selected}>
+      <Text inverse={selected} wrap="truncate-end">
         {marker}
         <Text bold={selected}>{name}</Text>
         <Text dimColor>{portCell}</Text>
@@ -119,7 +119,7 @@ function AgentRowInner({ agent, selected, uptime, newsColor, memBytes, nowMs }: 
   const uptimeCell = padRight(uptime, COLS.uptime);
 
   return (
-    <Text inverse={selected}>
+    <Text inverse={selected} wrap="truncate-end">
       {marker}
       <Text bold={selected}>{name}</Text>
       {port}
@@ -163,7 +163,7 @@ export const AgentRow = React.memo(AgentRowInner, (prev, next) => {
 export function AgentRowHeader(props: { hasRemote?: boolean }): React.ReactElement {
   if (props.hasRemote) {
     return (
-      <Text bold dimColor>
+      <Text bold dimColor wrap="truncate-end">
         {padRight('', REMOTE_COLS.marker)}
         {padRight('NAME', REMOTE_COLS.name)}
         {padRight('PORT', REMOTE_COLS.port)}
@@ -181,7 +181,7 @@ export function AgentRowHeader(props: { hasRemote?: boolean }): React.ReactEleme
     );
   }
   return (
-    <Text bold dimColor>
+    <Text bold dimColor wrap="truncate-end">
       {padRight('', COLS.marker)}
       {padRight('NAME', COLS.name)}
       {padRight('PORT', COLS.port)}
