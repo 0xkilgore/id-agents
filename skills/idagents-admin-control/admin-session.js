@@ -15,29 +15,22 @@
  *   listen              - Start listener only (for manual use)
  *
  * Environment:
- *   MANAGER_URL         - Manager daemon endpoint for /remote dispatch (default: http://127.0.0.1:4100)
- *   REPL_URL            - Interactive CLI endpoint for /talk to the human operator (default: http://127.0.0.1:4000)
+ *   MANAGER_URL         - Manager daemon endpoint for /talk and /remote (default: http://127.0.0.1:4100)
  *   ADMIN_API_KEY       - API key (default: from ~/.id-agents/admin.key)
- *   ADMIN_LISTENER_PORT - Listener port (default: 4100)
+ *   ADMIN_LISTENER_PORT - Listener port (default: 4050)
  */
 
 import http from 'http';
 import fs from 'fs';
 import path from 'path';
-import { fileURLToPath } from 'url';
-
 import net from 'net';
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
 
 // Configuration
 const MANAGER_URL = process.env.MANAGER_URL || 'http://127.0.0.1:4100';
-const REPL_URL = process.env.REPL_URL || 'http://127.0.0.1:4000';
 const REPLY_TIMEOUT = parseInt(process.env.ADMIN_REPLY_TIMEOUT) || 300000; // 5 min
 
 // Find an available port dynamically
-async function findAvailablePort(startPort = 4100, endPort = 4199) {
+async function findAvailablePort(startPort = 4050, endPort = 4149) {
   for (let port = startPort; port <= endPort; port++) {
     const isAvailable = await new Promise((resolve) => {
       const server = net.createServer();
@@ -170,8 +163,8 @@ async function talkToManager(message) {
   // Give listener a moment to start
   await new Promise(r => setTimeout(r, 100));
 
-  // Send message to the interactive REPL (/talk only lives there)
-  const response = await httpRequest(`${REPL_URL}/talk`, {
+  // Send message to the daemon-owned manager inbox.
+  const response = await httpRequest(`${MANAGER_URL}/talk`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({

@@ -10,8 +10,8 @@ description: Programmatically manage an ID Agents team — add/remove agents, sy
 This skill enables Claude Code to act as an **admin agent** for the ID Agents manager. It provides:
 
 1. **Temporary listener** — Receives replies from the manager (like a regular agent)
-2. **Chat with manager** — Send messages via `/talk` to the human operator's REPL
-3. **Remote commands** — Execute CLI commands via `POST /remote` on the manager **daemon** (`:4100`)
+2. **Chat with manager** — Send messages via daemon `/talk` into the manager inbox
+3. **Remote commands** — Execute CLI commands via `POST /remote` on the manager daemon (`:4100`)
 
 ## When you want to ...
 
@@ -29,7 +29,7 @@ Every `/remote` call should carry `X-Id-Team: <team>` (or set `ID_TEAM` env var)
 ## Architecture
 
 ```
-Claude Code (Admin)                  Manager Daemon (:4100)       Interactive REPL (:4000, optional)
+Claude Code (Admin)                  Manager Daemon (:4100)       Human at CLI (optional)
       │                                      │                            │
       │  1. POST /remote ───────────────────▶│                            │
       │     {command:"/ask ecs ..."}          │                            │
@@ -38,18 +38,19 @@ Claude Code (Admin)                  Manager Daemon (:4100)       Interactive RE
       │  2. GET /query/:id?wait=30 ─────────▶│                            │
       │◀──── 200 {status:delivered,result} ──│                            │
       │                                      │                            │
-      │  3. POST /talk (optional, human) ────┼───────────────────────────▶│
-      │◀──── POST /news (human reply) ───────┼────────────────────────────│
+      │  3. POST /talk (optional, human) ───▶│                            │
+      │                                      │◀──── reads/replies in CLI ─│
+      │◀──── POST /news (reply endpoint) ────│                            │
 ```
 
-**One dispatch surface.** As of 2026-04-20, `/remote` lives on the manager daemon only (`:4100`). The interactive REPL on `:4000` is for human operators — it does not expose `/remote`. Dispatches from scripts or Claude Code sessions always hit `:4100`.
+**One manager surface.** `/remote`, `/talk`, `/query/:id`, and `/news` all live on the manager daemon (`:4100`). The interactive CLI is a client of that daemon; it does not expose a manager HTTP surface of its own.
 
 ## Restarting the manager
 
 The manager daemon is down whenever any of these happen:
 
 - `curl http://127.0.0.1:4100/agents` refuses the connection.
-- `id-agents` (the interactive CLI) prints `⚠️ Manager did not start in time` or `request to http://localhost:4100/agents/register failed`. The CLI tries to auto-spawn the daemon and the race silently loses; start it yourself and rerun the CLI.
+- `id-agents` (the interactive CLI) prints `Manager did not start in time`. The CLI tries to auto-spawn the daemon, waits for `:4100`, and exits on failure; start it yourself and rerun the CLI.
 - A previous `/agent rebuild` killed it. The port-kill logic occasionally catches the manager's own PID.
 
 ```bash
@@ -67,14 +68,14 @@ until curl -sS --max-time 2 http://127.0.0.1:4100/agents >/dev/null 2>&1; do sle
 curl -sS http://127.0.0.1:4100/agents | python3 -c "import json,sys; d=json.load(sys.stdin); print(len(d['agents']),'agents')"
 ```
 
-The full launcher (`npm run id-agents`) starts both the daemon and the interactive REPL — use it when a human is going to type at the prompt. For scripted or Claude-session work you only need the daemon.
+The full launcher (`npm run id-agents`) starts the daemon and opens the interactive CLI prompt — use it when a human is going to type at the prompt. For scripted or Claude-session work you only need the daemon.
 
 ## Ports
 
 | Port | What lives there | Use for |
 |------|------------------|---------|
-| `4000` | Interactive CLI REPL (only runs when `npm run id-agents` is active) | **Human operator only.** `/talk` to chat with the person running the REPL. No `/remote` surface — returns 404. |
-| `4100` | Manager daemon (always running) | **Dispatch and polling.** `POST /remote`, `GET /query/:id` (supports `?wait=<sec>` long-poll), `GET /agents`, `POST /talk-to`, public-team admin. |
+| `4050` | Admin reply listener (optional) | **Callback target.** `start-listener.js` or `admin-session.js` can bind here to receive `/news` replies from the manager. |
+| `4100` | Manager daemon | **Dispatch and polling.** `POST /remote`, `POST /talk`, `GET /query/:id` (supports `?wait=<sec>` long-poll), `GET /agents`, `POST /talk-to`, public-team admin. |
 
 ### IPv6 vs IPv4 gotcha (macOS especially)
 
@@ -223,7 +224,7 @@ Same authorization rules as `/remote`: **ask before acting** on any write (regis
 
 ### Reserved names
 
-Certain agent names collide with CLI commands and are rejected by the register endpoint (`{"error":"invalid_name", ...}`). Known reserved: `help`, `agents`, `status`, `team`, `deploy`, `ask`, `hey`, `delete`, `register`, `public`. If you need one of these as a logical identifier, suffix it (`help-idagents`, `status-probe`, etc).
+Certain agent names collide with CLI commands or daemon-owned identities and are rejected by the register endpoint (`{"error":"invalid_name", ...}`). Known reserved: `help`, `agents`, `status`, `team`, `deploy`, `ask`, `hey`, `delete`, `register`, `public`, `manager`. If you need one of these as a logical identifier, suffix it (`help-idagents`, `status-probe`, etc).
 
 ## Agent Library & Team Configuration
 
@@ -424,7 +425,7 @@ done
 
 ### Anti-patterns
 
-**Do not POST to `:4000/remote`.** That endpoint no longer exists (removed 2026-04-20). Requests return 404. Use `:4100/remote`.
+**Do not target a manager HTTP surface on the interactive CLI.** The manager lives on `:4100` only. Use `:4100/remote` for dispatch and `:4100/talk` for the human inbox.
 
 **Do not combine dispatch and poll into one synchronous foreground block.** It blocks the conversation until the agent replies or the loop times out, makes a tool-rejection ambiguous, and hides the queryId behind a wall of "no reply yet" lines. Dispatch in the foreground, poll in the background.
 
@@ -439,6 +440,6 @@ done
 
 ## Important Notes
 
-- The listener is only needed when you expect the human to reply via `/talk` → `/news`.
-- Dispatch + poll work without the interactive REPL running at all. The daemon on `:4100` is sufficient.
+- The listener is only needed when you expect a reply to your `/talk` message.
+- Dispatch + poll work without the interactive CLI running at all. The daemon on `:4100` is sufficient.
 - Unlike persistent agents, the listener stops when the Claude Code session ends.

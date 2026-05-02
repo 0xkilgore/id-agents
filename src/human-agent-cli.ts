@@ -21,8 +21,14 @@ const name = process.argv[2];
 if (!name) {
   console.error(`\n${colors.red}❌ Error: Agent name is required${colors.reset}`);
   console.log(`\n${colors.gray}Usage: npm run agent <agent-name> [port]${colors.reset}`);
-  console.log(`${colors.gray}Example: npm run agent manager${colors.reset}`);
+  console.log(`${colors.gray}Example: npm run agent operator${colors.reset}`);
   console.log(`${colors.gray}Example: npm run agent alice 4000${colors.reset}\n`);
+  process.exit(1);
+}
+
+if (name.toLowerCase() === 'manager') {
+  console.error(`\n${colors.red}❌ Error: "manager" is reserved for the daemon-owned manager identity${colors.reset}`);
+  console.log(`${colors.gray}Choose another interactive agent name, e.g. "operator" or "alice".${colors.reset}\n`);
   process.exit(1);
 }
 

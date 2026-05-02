@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: MIT
+import type { Server } from 'http';
 import express from 'express';
 import { EventEmitter } from 'events';
 import { NewsItem } from './agent-rest-server.js';
@@ -25,6 +26,7 @@ interface PendingQuery {
 
 export class InteractiveAgentServer extends EventEmitter {
   private app: express.Application;
+  private httpServer: Server | undefined;
   private newsItems: NewsItem[] = [];
   private pendingQueries: Map<string, PendingQuery> = new Map();
   private maxNewsItems: number = 100;
@@ -141,24 +143,123 @@ export class InteractiveAgentServer extends EventEmitter {
       });
     });
 
-    // Talk endpoint - moved to daemon (:4100/talk). The CLI is a read-only
-    // view of the manager inbox; callers must post to the daemon so messages
-    // persist even when the CLI REPL isn't running.
-    this.app.post('/talk', (req, res) => {
-      res.setHeader('Location', 'http://127.0.0.1:4100/talk');
-      res.status(410).json({
-        error: 'gone',
-        message: 'POST /talk moved to the manager daemon. Use http://127.0.0.1:4100/talk instead.',
-      });
+    // Talk endpoint - queue a question for the human operator.
+    this.app.post('/talk', async (req, res) => {
+      try {
+        const { message, session_id, from, reply_endpoint } = req.body || {};
+        if (!message) {
+          return res.status(400).json({ error: 'Missing message' });
+        }
+
+        const ts = Date.now();
+        const queryId = `query_${ts}_${Math.random().toString(36).substring(2, 9)}`;
+        const pendingQuery: PendingQuery = {
+          query_id: queryId,
+          message,
+          timestamp: ts,
+          responded: false,
+          from: from || undefined,
+          reply_endpoint: reply_endpoint || undefined,
+        };
+        this.pendingQueries.set(queryId, pendingQuery);
+
+        const item: NewsItem = {
+          timestamp: ts,
+          type: 'query.received',
+          message: from ? `Query ${queryId} received from ${from}` : `Query ${queryId} received`,
+          data: {
+            query_id: queryId,
+            message,
+            session_id: session_id || undefined,
+            from: from || undefined,
+            reply_endpoint: reply_endpoint || undefined,
+            status: 'pending',
+          }
+        };
+        this.newsItems.push(item);
+        await this.dbAddNews(item);
+        await this.dbUpsertQuery({
+          queryId,
+          status: 'pending',
+          created: ts,
+          prompt: message,
+          result: {
+            message,
+            from: from || undefined,
+            reply_endpoint: reply_endpoint || undefined,
+          },
+          sessionId: session_id || undefined,
+        });
+
+        res.status(202).json({
+          query_id: queryId,
+          status: 'pending',
+          message: `${this.name} received your question. Poll /news for completion.`,
+        });
+      } catch (err: any) {
+        res.status(500).json({ error: err?.message || 'Internal server error' });
+      }
     });
 
-    // Schedule endpoint - moved to daemon (:4100/schedule).
-    this.app.post('/schedule', (req, res) => {
-      res.setHeader('Location', 'http://127.0.0.1:4100/schedule');
-      res.status(410).json({
-        error: 'gone',
-        message: 'POST /schedule moved to the manager daemon. Use http://127.0.0.1:4100/schedule instead.',
-      });
+    // Schedule endpoint - queue internal wake-up work for the human operator.
+    this.app.post('/schedule', async (req, res) => {
+      try {
+        const { message, schedule, mode, linkedTasks } = req.body || {};
+        if (!message) {
+          return res.status(400).json({ error: 'Missing message' });
+        }
+        if (!schedule || typeof schedule !== 'object') {
+          return res.status(400).json({ error: 'Missing schedule metadata' });
+        }
+        if (mode && mode !== 'internal') {
+          return res.status(400).json({ error: 'Invalid schedule mode' });
+        }
+
+        const ts = Date.now();
+        const queryId = `query_${ts}_${Math.random().toString(36).substring(2, 9)}`;
+        const pendingQuery: PendingQuery = {
+          query_id: queryId,
+          message,
+          timestamp: ts,
+          responded: false,
+          from: 'schedule',
+        };
+        this.pendingQueries.set(queryId, pendingQuery);
+
+        const data: Record<string, unknown> = {
+          query_id: queryId,
+          message,
+          schedule,
+          mode: mode || undefined,
+          status: 'pending',
+        };
+        if (Array.isArray(linkedTasks) && linkedTasks.length > 0) {
+          data.linkedTasks = linkedTasks;
+        }
+        const item: NewsItem = {
+          timestamp: ts,
+          type: 'schedule.received',
+          message: `Scheduled work ${queryId} received`,
+          data,
+        };
+        this.newsItems.push(item);
+        await this.dbAddNews(item);
+        await this.dbUpsertQuery({
+          queryId,
+          status: 'pending',
+          created: ts,
+          prompt: message,
+          result: data,
+        });
+
+        res.status(202).json({
+          query_id: queryId,
+          status: 'pending',
+          message: 'Scheduled work queued.',
+        });
+      } catch (err: any) {
+        res.status(500).json({ error: err?.message || 'Internal server error' });
+      }
     });
 
     // News endpoint - poll for updates
@@ -231,16 +332,36 @@ export class InteractiveAgentServer extends EventEmitter {
       run().catch((e) => res.status(500).json({ error: e?.message || String(e) }));
     });
 
-    // POST /news - moved to daemon. Agents post replies/messages to
-    // :4100/news which writes to the shared DB under the manager's
-    // interactive-agent id; the REPL surfaces them via the existing
-    // daemon-backed /news poll and the DB-backed pending-question poll.
-    this.app.post('/news', (req, res) => {
-      res.setHeader('Location', 'http://127.0.0.1:4100/news');
-      res.status(410).json({
-        error: 'gone',
-        message: 'POST /news moved to the manager daemon. Use http://127.0.0.1:4100/news instead.',
-      });
+    // POST /news - receive messages/replies from other agents.
+    this.app.post('/news', async (req, res) => {
+      try {
+        const { type, from, message, in_reply_to, data } = req.body || {};
+        if (!message && !data) {
+          return res.status(400).json({ error: 'Missing message or data' });
+        }
+
+        const newsType = type || (in_reply_to ? 'reply' : 'message');
+        const newsData: Record<string, unknown> = {
+          from: from || undefined,
+          in_reply_to: in_reply_to || undefined,
+          message: message || undefined,
+          ...(data || {}),
+        };
+        if (in_reply_to && newsData.query_id === undefined) {
+          newsData.query_id = in_reply_to;
+        }
+        const item: NewsItem = {
+          timestamp: Date.now(),
+          type: newsType,
+          message: message || (data?.message) || `${newsType} from ${from || 'unknown'}`,
+          data: newsData,
+        };
+        this.newsItems.push(item);
+        await this.dbAddNews(item);
+        res.status(201).json({ success: true, type: newsType, timestamp: item.timestamp });
+      } catch (err: any) {
+        res.status(500).json({ error: err?.message || 'Internal server error' });
+      }
     });
   }
   
@@ -321,15 +442,23 @@ export class InteractiveAgentServer extends EventEmitter {
 
   start() {
     return new Promise<void>((resolve) => {
-      this.app.listen(this.port, '127.0.0.1', () => {
+      this.httpServer = this.app.listen(this.port, '127.0.0.1', () => {
         resolve();
       });
     });
   }
 
-  // Get recent news items (for CLI display). Reads from the daemon-owned
-  // DB when configured so the REPL surfaces messages even if the CLI
-  // wasn't running when they arrived; falls back to in-memory otherwise.
+  async close() {
+    clearInterval(this.newsCleanupInterval);
+    if (!this.httpServer) return;
+    await new Promise<void>((resolve) => {
+      this.httpServer?.close(() => resolve());
+    });
+    this.httpServer = undefined;
+  }
+
+  // Get recent news items (for CLI display). Reads from the configured DB
+  // when available and falls back to the in-memory buffer otherwise.
   async getNewsItems(limit: number = 20): Promise<NewsItem[]> {
     if (this.db && this.dbTeamId && this.dbAgentId) {
       const rows = await this.db.news.poll(this.dbAgentId, 0, { limit: Math.max(limit * 4, 100) });

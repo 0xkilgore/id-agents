@@ -1651,10 +1651,9 @@ export class AgentManagerDb {
 
   private setupRoutes() {
     // REST-AP discovery — daemon root advertises itself as the manager so
-    // peers can locate the team orchestration and inbox surface without
-    // depending on the legacy interactive-CLI catalog on :4000. Shape mirrors
-    // the per-agent catalogs published by claude-agent-server / interactive-
-    // agent-server (restap_version + agent + endpoints + capabilities).
+    // peers can locate the team orchestration and inbox surface directly.
+    // Shape mirrors the per-agent catalogs published by claude-agent-server /
+    // interactive-agent-server (restap_version + agent + endpoints + capabilities).
     // This route must stay outside team scoping: discovery at the daemon root
     // should not depend on a team already existing or a caller sending a team header.
     this.managementApp.get('/.well-known/restap.json', (_req, res) => {
@@ -1913,7 +1912,7 @@ export class AgentManagerDb {
       res.json({ logs, total: this.logBuffer.length });
     });
 
-    // REST-AP /talk endpoint - receive queries for the manager (interactive agent)
+    // REST-AP /talk endpoint - receive queries for the manager inbox
     this.managementApp.post('/talk', async (req, res) => {
       try {
         const { id: teamId, name: teamName } = await this.getTeam(req);
@@ -3200,17 +3199,8 @@ export class AgentManagerDb {
 
       const { id: requestedIdRaw, name, endpoint, metadata, type: requestedTypeRaw } = req.body || {};
       if (!name || !endpoint) return res.status(400).json({ error: 'Missing name or endpoint' });
-      // Interactive CLI consoles register themselves as "manager" by convention.
-      // The reserved-word check is meant to stop worker agents from colliding with
-      // CLI command verbs, not to block the CLI from registering its own presence.
-      const isInteractiveManagerSelfRegister =
-        typeof requestedTypeRaw === 'string' &&
-        requestedTypeRaw.trim().toLowerCase() === 'interactive' &&
-        name === 'manager';
-      if (!isInteractiveManagerSelfRegister) {
-        const regNameCheck = validateName(name, 'agent');
-        if (!regNameCheck.valid) return res.status(400).json({ error: regNameCheck.error });
-      }
+      const regNameCheck = validateName(name, 'agent');
+      if (!regNameCheck.valid) return res.status(400).json({ error: regNameCheck.error });
 
       const requestedId = typeof requestedIdRaw === 'string' ? requestedIdRaw.trim() : undefined;
       if (requestedId && !/^[a-zA-Z0-9_:-]{1,200}$/.test(requestedId)) {
