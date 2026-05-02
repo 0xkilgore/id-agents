@@ -1595,6 +1595,98 @@ export class AgentManagerDb {
     // Install team/principal context middleware for all routes
     this.managementApp.use(this.teamContextMiddleware());
 
+    // REST-AP discovery — daemon root advertises itself as the manager so
+    // peers can locate the team orchestration and inbox surface without
+    // depending on the legacy interactive-CLI catalog on :4000. Shape mirrors
+    // the per-agent catalogs published by claude-agent-server / interactive-
+    // agent-server (restap_version + agent + endpoints + capabilities).
+    this.managementApp.get('/.well-known/restap.json', (_req, res) => {
+      res.json({
+        restap_version: '1.0',
+        agent: {
+          name: 'manager',
+          description:
+            'Manager daemon — team orchestration, inbox, scheduling, registry, and event fan-out for the id-agents control plane.',
+        },
+        provider: {
+          name: 'id-agents',
+          version: '1.0',
+        },
+        endpoints: {
+          talk: '/talk',
+          schedule: '/schedule',
+          news: '/news',
+          news_post: '/news',
+        },
+        capabilities: [
+          {
+            id: 'talk',
+            title: 'Send a message or question to the manager',
+            method: 'POST',
+            endpoint: '/talk',
+            description:
+              'Post a message or question to the manager inbox. Persists to the manager DB; replies arrive via /news.',
+            input_schema: {
+              message: 'string (required)',
+              from: 'string (optional) - sender agent name or id',
+              session_id: 'string (optional) - prior session id for context continuity',
+            },
+          },
+          {
+            id: 'schedule',
+            title: 'Enqueue scheduled work for the manager',
+            method: 'POST',
+            endpoint: '/schedule',
+            description:
+              'Submit a manager-owned scheduled event. Internal mode enqueues work without auto-reply.',
+            input_schema: {
+              message: 'string (required)',
+              schedule:
+                'object (required) - schedule metadata including id, kind, title, scheduledKey',
+              mode: 'string (optional) - "internal" for autonomous wake-ups',
+            },
+          },
+          {
+            id: 'news',
+            title: 'Poll manager news feed',
+            method: 'GET',
+            endpoint: '/news',
+            description:
+              'Poll for manager inbox updates and replies. Supports since (timestamp), limit, query_id, chars_start/chars_end.',
+            input_schema: {
+              since: 'number (optional) - timestamp to filter items after',
+              limit: 'number (optional) - maximum number of items to return',
+              query_id: 'string (optional) - filter items by specific query_id',
+              chars_start: 'number (optional) - start position in character range (0 = newest)',
+              chars_end: 'number (optional) - end position in character range (must be > chars_start)',
+            },
+          },
+          {
+            id: 'news_receive',
+            title: 'Deliver a message or reply to the manager',
+            method: 'POST',
+            endpoint: '/news',
+            description:
+              'Receive messages or replies addressed to the manager inbox. Does not trigger LLM processing.',
+            input_schema: {
+              type: 'string (optional) - message type, e.g. "reply" or "message"',
+              from: 'string (optional) - sender agent name',
+              message: 'string (required) - the message content',
+              in_reply_to: 'string (optional) - query_id this is replying to',
+            },
+          },
+        ],
+        extensions: {
+          remote: '/remote',
+          query: '/query/:id',
+          tasks: '/tasks',
+          agents: '/agents',
+          events: '/events',
+          ws: '/ws',
+        },
+      });
+    });
+
     this.managementApp.get('/health', async (req, res) => {
       const { id: teamId, name: teamName } = await this.getTeam(req);
       const count = await this.db.agents.count(teamId);
