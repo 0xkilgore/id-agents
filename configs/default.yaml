@@ -15,6 +15,7 @@ team: default
 defaults:
   local: true
   runtime: claude-code-cli
+  model: claude-opus-4-7
   skills:
     - identity
     - inter-agent
@@ -26,3 +27,4 @@ agents:
 
   - name: researcher
     description: "Research, analysis, and documentation"
+    model: claude-sonnet-4-6

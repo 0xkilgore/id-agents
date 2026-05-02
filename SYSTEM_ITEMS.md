@@ -8,18 +8,22 @@ Updated: 2026-04-28 — deep audit pass: §A reconciled 1:1 with `find src -name
 Updated: 2026-04-28 — deep audit take 4: §A re-verified 1:1 (still 122/122). Spot-verified magic numbers in code: `DEFAULT_TICK_INTERVAL_MS=30_000` (checkin-service), `DEFAULT_RETENTION_DAYS=7` / `DEFAULT_RETENTION_COUNT=100_000` / `DEFAULT_RETENTION_INTERVAL_MS=5*60*1000` (retention), `PREVIEW_MAX=280` (event-producer), `timeoutMs=8000` / `intervalMs=250` / `perRequestTimeoutMs=750` (agent-readiness). §C cross-checked against current `agent-manager-db.ts` route registrations. §H added missing `frontend` bundle. §N integration test count 37 → 39 (added `talk-to-reply-qid.test.ts`; `query-failed-event`, `checkin-priority-wake`, `checkin-service-boot` already listed). §O corrected `bin/id-agents` (symlink/npm-bin → `dist/interactive-agent-cli.js`, not `src/id-agents-cli.ts`); added `id-agents-dashboard` per `package.json` bin map. §P clarified `tools/test-manager/index.js` is a standalone in-memory REST-AP test manager (no DB) plus its README.
 Updated: 2026-04-28 — exhaustive 14-day audit: walked **290 commits** since 2026-04-14, **615 unique paths touched** (532 still extant, 83 deleted — 62 of those `public-agent/` from Juno extraction). §A still 1:1 (122/122). §J item 5 dropped deleted `docs/guides/admin-control.md`. §J item 7 added missing `docs/reference/database.md` and `docs/reference/id-indexer-api.md`. §K item 3 expanded to enumerate `admin-session.js` + `start-listener.js` helpers under `idagents-admin-control`. §N restructured: section now covers all of `tests/` (integration 39 + unit 24 + repos 6 + helpers + pty-flicker.py) with new items 12 (unit suites) and 13 (repo/schema suites). See "Progress Log" appendix at end of file.
 Updated: 2026-04-29 — jrdev rolling 14-day reconcile (commits since 2026-04-15: **269**; **608** unique paths): **v0.1.80-beta** check-in/production hardening landed (`dd5bb23`). §A tightened for `agent-manager-db`, checkin helpers/service, worker `claude-agent-server`, `db-service`/`queries-repo` (**`markFailed`** + **`query:failed`**), **`start-agent-manager`** graceful shutdown hook; §J bumped `CHANGELOG.md` headline to **0.1.80-beta**, split **`Logs.md`** into its own numbered entry (tracked ops runbook, not ephemera); §K noted operator skill refresh for check-in ladders + task-discipline cross-links; appendix Progress Log updated (remove `Logs.md` from “intentionally not added”; note `.gitignore` adds for `.cursor/`, root `/bin/`, demo `.mp4`).
+Updated: 2026-05-01 — systemreview heartbeat (follow-up 3): walked single new commit `fc8f18e` *fix(tui): keep TeamsPanel visible on All and public selections* (v0.1.92-beta). §A items **96** (`AgentRow.tsx`) and **109** (`StatusStrip.tsx`) extended to describe `wrap="truncate-end"` clipping on narrow terminals; §J 17 headline → **v0.1.92-beta**. No new files.
+Updated: 2026-05-01 — systemreview heartbeat (follow-up 2): walked single new commit `71276b8` *feat(tui): pin public team chip after All* (v0.1.91-beta). §A item 92 (`App.tsx`) extended to mention the team-order sort (`public` after `All`); §J item 17 headline advanced from v0.1.90-beta → **v0.1.91-beta**. No new files.
+Updated: 2026-05-01 — systemreview heartbeat (follow-up): walked single new commit `ddfc86d` *feat(tui): window TeamsPanel when team list overflows* (v0.1.90-beta). §A item 113 (`TeamsPanel.tsx`) extended to describe the 5-chip sliding window and `←N` / `N→` overflow indicators. No new files. See Progress Log entry at bottom.
+Updated: 2026-05-01 — systemreview heartbeat audit (commits since 2026-04-29: **12**, releases v0.1.84-beta → v0.1.90-beta): TUI help-modal landing (commits `d87271c` `2ee9668` `4625dcd` `401723e`) + TUI MODEL column with abbreviation table (`47d0326` `03079bc` `7a17ecd`) + per-agent heartbeat sections in `HEARTBEAT.md` (`bc55d3b`). §A grew 122 → 124: added `src/tui/components/HelpModal.tsx` (item 102) and `src/tui/util/models.ts` (item 119), with downstream items renumbered. §A item 92 (`App.tsx`) now mentions help-modal popup + key intercept; §A item 96 (`AgentRow.tsx`) now mentions MODEL column (width 10, `abbrevModel`); §A item 99 (`Footer.tsx`) now described as one-liner with `?` help hint. §J added item 20 `HEARTBEAT.md` (root agent-driven heartbeat checklist with per-agent sections). See Progress Log entry at bottom.
 
 ---
 
 ## A. Source Files
 
-1. `src/agent-manager-db.ts` — Manager daemon: WebSocket, team-scoped REST (agents, talk, message, news, query status, tasks, checkins, events, registry, v3 library inventory, scheduler, remote control); optional wallet provisioning per team config; killAgentProcess guard for rebuild/spawn vs manager PID; wakeup `event_log` retention sweep wiring; boots and stops per-team **`CheckinService`** with daemon lifecycle; checkin auto-attach on `/talk-to` and task-terminal auto-close hooks; `/news` honors `skip_persist` + `in_reply_to` for wake/reply correlation without duplicate inbox writes; caller error replies routed through **`QueriesRepository.markFailed`** with **`query:failed`** wakeup events; rejects `POST /checkins` against already-terminal linked tasks (`409 linked_task_terminal`)
-2. `src/agent-rest-server.ts` — Re-exports `AgentRestServer` and news types from `claude-agent-server` (runtime-neutral)
-3. `src/agent-restap-cli.ts` — Re-exports `claude-restap-cli` (runtime-neutral REST-AP CLI entry)
-4. `src/checkins/checkin-api-helpers.ts` — Shared HTTP helpers for manager `/checkins` routes (parse duration, payload validation, response shapes); normalizes `owner` / `ownerId` across create/list/snooze/close handlers; rejects creates that would attach to terminal tasks (`409 linked_task_terminal`)
-5. `src/checkins/checkin-autoclose.ts` — Auto-close hook: when a task hits a terminal status, atomically bulk-closes every active/snoozed checkin linked to that task (`closed_reason='linked_task_terminal'`, clears `next_fire_at`/`snooze_until`) and emits one `checkin:closed` event per pre-close snapshot row. Currently bound by direct call from the task-done route
-6. `src/checkins/checkin-service.ts` — Per-team checkin due-service on a 30s tick: hard-expire TTL rows first (`checkin:expired`), re-activate snoozed rows when `snooze_until <= now`, fire due rows (write `news_item` to owner inbox + emit `checkin:due` + advance `next_fire_at`), and call optional `dispatchWake` hook so the manager wakes the owner on **every** due fire (**`priority`** is payload metadata for downstream pacing, not a suppress gate that skips wakes)
-7. `src/claude-agent-cli.ts` — Claude agent CLI entrypoint
+1. `src/agent-manager-db.ts` — Manager daemon: WebSocket, team-scoped REST (agents, talk, message, news, query status, tasks, checkins, events, registry, v3 library inventory, scheduler, remote control); optional wallet provisioning per team config; killAgentProcess guard for rebuild/spawn vs manager PID; wakeup `event_log` retention sweep wiring; boots and stops per-team **`CheckinService`** with daemon lifecycle; checkin auto-attach on `/talk-to` and task-terminal auto-close hooks; `/news` honors `skip_persist` + `in_reply_to` for wake/reply correlation without duplicate inbox writes; caller error replies routed through **`QueriesRepository.markFailed`** with **`query:failed`** wakeup events; rejects `POST /checkins` against already-terminal linked tasks (`409 linked_task_terminal`) [SEC: pass — local-daemon trust model is by design (see HEARTBEAT.md scope guardrail); unauthenticated `X-Id-Agent` and caller-supplied `from`/`in_reply_to` are accepted on the manager daemon. Different rule applies to public-agent-remote workers, which this file does not own.]
+2. `src/agent-rest-server.ts` — Re-exports `AgentRestServer` and news types from `claude-agent-server` (runtime-neutral) [SEC: pass — pure re-export shim with no logic, no I/O, and no trust boundary; security posture is fully delegated to `claude-agent-server.ts`.]
+3. `src/agent-restap-cli.ts` — Re-exports `claude-restap-cli` (runtime-neutral REST-AP CLI entry) [SEC: pass — single side-effect import shim, no logic/I/O/trust boundary; security posture is fully delegated to `claude-restap-cli.ts`.]
+4. `src/checkins/checkin-api-helpers.ts` — Shared HTTP helpers for manager `/checkins` routes (parse duration, payload validation, response shapes); normalizes `owner` / `ownerId` across create/list/snooze/close handlers; rejects creates that would attach to terminal tasks (`409 linked_task_terminal`) [SEC: pass — pure validators (anchored duration regex, allowlisted priority/status, 1024-char note clamp) and a row→envelope shaper; `generateCheckinId` uses `Math.random` but the id is a db key under the local-daemon trust model, not a security token.]
+5. `src/checkins/checkin-autoclose.ts` — Auto-close hook: when a task hits a terminal status, atomically bulk-closes every active/snoozed checkin linked to that task (`closed_reason='linked_task_terminal'`, clears `next_fire_at`/`snooze_until`) and emits one `checkin:closed` event per pre-close snapshot row. Currently bound by direct call from the task-done route [SEC: pass — typed orchestration over team-scoped repo calls; bulk close is atomic at the repo, no injection/path/shell surfaces, and trust of caller-supplied `teamId`/`taskId` is the accepted local-daemon model.]
+6. `src/checkins/checkin-service.ts` — Per-team checkin due-service on a 30s tick: hard-expire TTL rows first (`checkin:expired`), re-activate snoozed rows when `snooze_until <= now`, fire due rows (write `news_item` to owner inbox + emit `checkin:due` + advance `next_fire_at`), and call optional `dispatchWake` hook so the manager wakes the owner on **every** due fire (**`priority`** is payload metadata for downstream pacing, not a suppress gate that skips wakes) [SEC: pass — server-driven tick over team-scoped repo calls; `fetchTaskById` uses parameterized queries (dialect-aware placeholders), all DB writes carry `team_id` from the row, dispatchWake errors are swallowed by design, and `checkin_id` interpolated into action paths is server-generated (`chk_<unix>_<rand>`).]
+7. `src/claude-agent-cli.ts` — Claude agent CLI entrypoint [SEC: pass — local interactive readline CLI run by the user; no network listener, no untrusted input source. Granting Bash/Write/Edit to the SDK is the documented purpose of the tool, not a privilege escalation vector.]
 8. `src/claude-agent-server.ts` — Per-agent REST-AP Express app (`/talk`, `/news`, `/query`, files, schedule, optional XMTP); reply/agent broadcasts hoist `in_reply_to` and seed downstream `query_id` so `/talk-to` waiter routing and `/news?query_id=` lookups align with originating queries
 9. `src/claude-agent.ts` — Claude agent wrapper and entrypoint [STATUS: PASS] Curated env whitelist, bypassPermissions intentional, no shell execution
 10. `src/claude-restap-cli.ts` — Worker REST-AP CLI entrypoint
@@ -104,37 +108,39 @@ Updated: 2026-04-29 — jrdev rolling 14-day reconcile (commits since 2026-04-15
 89. `src/start-claude-server.ts` — Legacy name: starts worker (delegates to runtime-agnostic path)
 90. `src/sync.ts` — v3 `sync` plan: diff spec vs live agents (deterministic skills/plugin ordering for stable “changed” detection), categories new/changed/removed, deploy reconciliation fields
 91. `src/test-claude-agent.ts` — Claude agent smoke test [STATUS: PASS] Clean smoke, minor `as any` in places, not a prod entry
-92. `src/tui/App.tsx` — Ink TUI root: navigable views — agents, agent detail, news (+detail), tasks (+detail), calendar, heartbeats (+detail), library agents/skills (+detail); polls manager + library endpoints; global hotkeys per `Footer` (`l`/`s` library slice, no pause hotkey since v0.1.71-beta)
+92. `src/tui/App.tsx` — Ink TUI root: navigable views — agents, agent detail, news (+detail), tasks (+detail), calendar, heartbeats (+detail), library agents/skills (+detail); polls manager + library endpoints; renders `HelpModal` popup when `?` is pressed and intercepts all keys (including arrows / Esc) to close it before they fall through to the underlying view; **sorts teams so the `public` chip pins immediately after the `All` chip** (regardless of manager response order — applied at App level so `teamCounts`, `teamOptions`, and `TeamsPanel` share the same order, and Tab/Shift+Tab cycling matches the visual order — added v0.1.91-beta, commit `71276b8`); global hotkeys per `Footer` (`l`/`s` library slice, no pause hotkey since v0.1.71-beta)
 93. `src/tui/api/manager.ts` — TUI `fetch` helpers against manager (agents, news, tasks, events, health)
 94. `src/tui/api/types.ts` — DTOs for TUI API responses
 95. `src/tui/components/AgentDetail.tsx` — TUI: single agent detail pane
-96. `src/tui/components/AgentRow.tsx` — TUI: one row in the agents list
+96. `src/tui/components/AgentRow.tsx` — TUI: one row in the agents list; renders the `MODEL` column (width 10) by piping `agent.model` through `abbrevModel` from `src/tui/util/models.ts` so unknown models render raw and visibly overflow (signal to extend the abbreviation table). All row-level `Text` (header + local-branch + remote-branch with `public-agent-remote` DOMAIN/DMZ columns) sets `wrap="truncate-end"` so on narrow terminals the rightmost columns clip rather than wrapping to a second line and scrolling the top menu off-screen (v0.1.92-beta, commit `fc8f18e`)
 97. `src/tui/components/AgentsTable.tsx` — TUI: main agents table
 98. `src/tui/components/CalendarView.tsx` — TUI: schedule/calendar slice
-99. `src/tui/components/Footer.tsx` — TUI: per-view footer hints (↑↓ navigation, `t` tasks, `l` agents library table, `s` skills library, `c` calendar, `h` heartbeats, Tab team, `q` quit)
+99. `src/tui/components/Footer.tsx` — TUI: per-view footer is now a single one-liner (`↑↓ nav · ← back · ? help · q quit`) since v0.1.84-beta — the verbose per-view hint strings were collapsed into the `HelpModal` popup so the dashboard chrome fits narrow terminals
 100. `src/tui/components/HeartbeatDetail.tsx` — TUI: heartbeat event detail
 101. `src/tui/components/HeartbeatsView.tsx` — TUI: heartbeats list
-102. `src/tui/components/LibraryAgentDetail.tsx` — TUI: v3 library agent card
-103. `src/tui/components/LibraryAgentsTable.tsx` — TUI: library agents list (NAME + SHAPE columns; trimmed layout vs older wider tables)
-104. `src/tui/components/LibrarySkillDetail.tsx` — TUI: skill detail
-105. `src/tui/components/LibrarySkillsTable.tsx` — TUI: skills table
-106. `src/tui/components/NewsDetail.tsx` — TUI: one news item body
-107. `src/tui/components/NewsView.tsx` — TUI: news feed
-108. `src/tui/components/StatusStrip.tsx` — TUI: connection / team status strip
-109. `src/tui/components/TaskDetail.tsx` — TUI: task detail
-110. `src/tui/components/TaskRow.tsx` — TUI: one task row
-111. `src/tui/components/TasksTable.tsx` — TUI: tasks table
-112. `src/tui/components/TeamsPanel.tsx` — TUI: team list / switch
-113. `src/tui/hooks/usePolling.ts` — TUI: polling interval hook
-114. `src/tui/index.tsx` — TUI `main` — Ink `render` + iTerm2 flash fix for `log-update`
-115. `src/tui/util/colors.ts` — TUI: ANSI color helpers
-116. `src/tui/util/format.ts` — TUI: text trunc/format
-117. `src/tui/util/memory.ts` — TUI: heap / RSS display for status
-118. `src/tui/util/schedule.ts` — TUI: next-run and schedule string helpers
-119. `src/wakeup-service/event-producer.ts` — Topic emitters for `event_log`: tasks (`task:claimed`, `task:completed`), queries (`query:delivered`, `query:failed`, `query:expired`), checkins (`checkin:created`, `closed`, `snoozed`, `due`, `expired`). Includes a 280-byte message preview cap; producers do not swallow errors so an event-log failure surfaces alongside the lifecycle write
-120. `src/wakeup-service/retention.ts` — `event_log` per-team age/count retention sweep (default 7d / 100k rows, env overrides via `EVENT_LOG_RETENTION_DAYS` / `EVENT_LOG_RETENTION_COUNT`); 5-minute default cadence, wired at boot in `agent-manager-db.ts` (`startEventLogRetentionSweep`)
-121. `src/xmtp/ows-signer.ts` — OWS-backed XMTP signer: delegates signing to OWS CLI
-122. `src/xmtp/xmtp-messaging.ts` — `XmtpMessaging` (EventEmitter), allowlist, inbound `startQuery`, ENS resolution
+102. `src/tui/components/HelpModal.tsx` — TUI help popup: three side-by-side columns (Views / Navigate / Global) listing every keybinding with a short description; rendered by `App.tsx` and dismissed with `?`, Esc, or any arrow key (added v0.1.84-beta as a replacement for the long footer hint strings)
+103. `src/tui/components/LibraryAgentDetail.tsx` — TUI: v3 library agent card
+104. `src/tui/components/LibraryAgentsTable.tsx` — TUI: library agents list (NAME + SHAPE columns; trimmed layout vs older wider tables)
+105. `src/tui/components/LibrarySkillDetail.tsx` — TUI: skill detail
+106. `src/tui/components/LibrarySkillsTable.tsx` — TUI: skills table
+107. `src/tui/components/NewsDetail.tsx` — TUI: one news item body
+108. `src/tui/components/NewsView.tsx` — TUI: news feed
+109. `src/tui/components/StatusStrip.tsx` — TUI: connection / team status strip; outer `Text` uses `wrap="truncate-end"` so the strip clips rather than wraps on narrow terminals — paired with `AgentRow` truncation in v0.1.92-beta to keep the top menu pinned
+110. `src/tui/components/TaskDetail.tsx` — TUI: task detail
+111. `src/tui/components/TaskRow.tsx` — TUI: one task row
+112. `src/tui/components/TasksTable.tsx` — TUI: tasks table
+113. `src/tui/components/TeamsPanel.tsx` — TUI: team list / switch; renders an `All` chip + per-team chips. When `teams.length > 5`, the panel shows a **sliding 5-chip window** centered on the selected team with `←N` / `N→` indicators for hidden teams on either side (Tab cycling already wraps; the window now follows selection — added in v0.1.90-beta, commit `ddfc86d`)
+114. `src/tui/hooks/usePolling.ts` — TUI: polling interval hook
+115. `src/tui/index.tsx` — TUI `main` — Ink `render` + iTerm2 flash fix for `log-update`
+116. `src/tui/util/colors.ts` — TUI: ANSI color helpers
+117. `src/tui/util/format.ts` — TUI: text trunc/format
+118. `src/tui/util/memory.ts` — TUI: heap / RSS display for status
+119. `src/tui/util/models.ts` — TUI model-name abbreviation: hand-edited `MODEL_ABBREVIATIONS` table (`claude-opus-4-6` → `opus-4-6`, `claude-sonnet-4-6` → `sonn-4-6`, `claude-haiku-4-5-20251001` → `haiku-4-5`, `composer-2` → `comp-2`, gpt entries pass-through, …) plus `abbrevModel(model)` lookup. Unknown models return the raw string and visibly overflow the 10-char `MODEL` column — that overflow is the prompt to add a new entry (heuristic fallback removed in v0.1.89-beta per `7a17ecd`)
+120. `src/tui/util/schedule.ts` — TUI: next-run and schedule string helpers
+121. `src/wakeup-service/event-producer.ts` — Topic emitters for `event_log`: tasks (`task:claimed`, `task:completed`), queries (`query:delivered`, `query:failed`, `query:expired`), checkins (`checkin:created`, `closed`, `snoozed`, `due`, `expired`). Includes a 280-byte message preview cap; producers do not swallow errors so an event-log failure surfaces alongside the lifecycle write
+122. `src/wakeup-service/retention.ts` — `event_log` per-team age/count retention sweep (default 7d / 100k rows, env overrides via `EVENT_LOG_RETENTION_DAYS` / `EVENT_LOG_RETENTION_COUNT`); 5-minute default cadence, wired at boot in `agent-manager-db.ts` (`startEventLogRetentionSweep`)
+123. `src/xmtp/ows-signer.ts` — OWS-backed XMTP signer: delegates signing to OWS CLI
+124. `src/xmtp/xmtp-messaging.ts` — `XmtpMessaging` (EventEmitter), allowlist, inbound `startQuery`, ENS resolution
 
 ---
 
@@ -300,7 +306,7 @@ Updated: 2026-04-29 — jrdev rolling 14-day reconcile (commits since 2026-04-15
 
 1. `configs/default.yaml` — Default team recipe (agents + optional wallet blocks); sole tracked default after Apr-17 collapse of legacy presets
 2. `configs/demo.yaml` — Compact demo team (`/deploy demo`) at repo root `configs/`; resolves the copywriter library entry
-3. `configs/idchain.yaml` — idchain deployment preset for agents sync/library injection defaults
+3. `configs/idchain.yaml` — idchain deployment preset for agents sync/library injection defaults; carries per-agent `heartbeat:` interval seconds (e.g. `heartbeat: 1800` on `systemreview` for the 30-min reconcile cadence introduced in v0.1.90-beta)
 4. `configs/apps.yaml`, `configs/personal.yaml` — Local customization configs (gitignored; the `.example` starters were retired)
 5. `configs/coder-demo.yaml`, `configs/composer.yaml`, `configs/cto.yaml`, `configs/cursor-smoke.yaml`, `configs/review.yaml` — Personal/dev-only team presets (composer, CTO seat, cursor smoke harness, review crew, coder demo)
 6. `configs/demos/foundry-demo.yaml`, `configs/demos/foundry-codex-demo.yaml`, `configs/demos/foundry-cursor-demo.yaml`, `configs/demos/solidity-dev-team.yaml` — Archived demo team configs (editorial/solidity-security demos consolidated into root `demo.yaml` Apr-25)
@@ -324,10 +330,11 @@ Updated: 2026-04-29 — jrdev rolling 14-day reconcile (commits since 2026-04-15
 13. `docs/erc-draft-agent-identifiers.md` — ERC draft for agent identifier resolution (companion to ERC-7930/onchain registry work)
 14. `docs/protocol/*` — Protocol-level specs (REST-AP, message envelope details) referenced from harnesses and skills
 15. `CONTRIBUTING.md` — Contributor workflow; references sync/library docs touched in recent releases
-16. `README.md`, `QUICKSTART.md` — Repo entrypoints; version/changelog pointers track npm package (`package.json`)
-17. `CHANGELOG.md` — Beta release notes (headline **v0.1.80-beta** — CheckinService boot/shutdown + owner wake-on-due, `/news` `skip_persist` / `in_reply_to`, `query:failed` + `markFailed`, `linked_task_terminal` guard, operator doc refresh including `Logs.md`; prior **v0.1.79-beta** — killAgentProcess narrow guard)
+16. `README.md`, `QUICKSTART.md` — Repo entrypoints; version/changelog pointers track npm package (`package.json`); `QUICKSTART.md` Step 0 prompts before pulling an existing checkout (no silent `git pull --ff-only` since v0.1.86-beta)
+17. `CHANGELOG.md` — Beta release notes (current headline **v0.1.92-beta** — `wrap="truncate-end"` on TUI agent rows + StatusStrip so narrow terminals clip the rightmost columns instead of wrapping the top menu off-screen; recent: **v0.1.91-beta** pin `public` team chip after `All`, **v0.1.90-beta** TeamsPanel sliding window for >5 teams, **v0.1.89-beta** table-only model abbreviation, **v0.1.88-beta** MODEL column abbreviation table + heuristic, **v0.1.87-beta** TUI MODEL column, **v0.1.86-beta** quickstart prompt-before-pull, **v0.1.84-beta** TUI help modal popup, **v0.1.80-beta** check-in/production hardening)
 18. `REVIEW_LOG.md`, `SECURITY.md`, `NOTICE`, `LICENSE` — Repo-root governance and license notices (`REVIEW_LOG.md` / `SECURITY.md` remain gitignored via `.gitignore`)
 19. `Logs.md` — Tracked operator runbook for filesystem agent/manager logs (`/tmp/*.log`), SQLite forensics (`event_log`, `tasks`, `queries`, `checkins`, …), and practical tail/query recipes (expanded v0.1.80-beta)
+20. `HEARTBEAT.md` — Repo-root agent-driven heartbeat checklist with **per-agent sections**: heartbeats are routed by the agent's `identity` skill name (e.g. `systemreview` reconciles SYSTEM_ITEMS.md on a 30-min cadence; everything else falls through to the **Default** section that picks one item to audit, checks the working tree, runs tests). Restructured in v0.1.90-beta (commit `bc55d3b`) so multiple agents sharing a workdir can have distinct heartbeat behavior — replaces the older root `HEARTBEAT.yaml` retired in the Apr-26 cleanup
 
 ---
 
@@ -339,7 +346,7 @@ Updated: 2026-04-29 — jrdev rolling 14-day reconcile (commits since 2026-04-15
 4. `skills/idagents-register-public-agents/SKILL.md` — Register ENS-backed public agents from CI/tools (renamed from `register-public-agents` Apr-22)
 5. `skills/task-discipline/SKILL.md` — Mirror of manager task lifecycle expectations for agents (also embedded in `protocol-defaults.ts` for always-on enforcement since v0.1.48-beta); now carries an explicit pointer back to **`inter-agent`** check-in supervision (v0.1.80-beta docs sync)
 6. `skills/xmtp/SKILL.md` — XMTP operational guidance for agents (`curl` worker endpoints); complements §G
-7. `skills/identity/SKILL.md` — Always-loaded agent identity (name, team, ENS) skill — referenced by `inter-agent` resolution and TUI display
+7. `skills/identity/SKILL.md` — Always-loaded agent identity (name, team, ENS) skill — referenced by `inter-agent` resolution, TUI display, and the per-agent `HEARTBEAT.md` routing introduced in v0.1.90-beta
 8. `skills/wallet/SKILL.md` — OWS wallet operations (addresses, signing, balances, agent access) — paired with optional `wallet:` block in team YAML
 9. `skills/catalog/SKILL.md` — REST-AP catalog updater so agents publish role/expertise/status to manager + peers
 
@@ -442,3 +449,65 @@ Layout: `tests/integration/` (39 files), `tests/unit/` (24 files), `tests/repos/
 
 **Corrections applied:** **`Logs.md`** removed from ephemeral appendix list and promoted to §J item **19**; §J changelog pointer advanced to headline **v0.1.80-beta**; §A tightened for the manager/worker/repo/shutdown deltas above.
 
+---
+
+## Progress Log — 2026-05-01 `heartbeat-systemitems-2026-05-01` (systemreview)
+
+**Window walked:** `git log --since="24 hours ago"` from heartbeat fire-time on 2026-05-01 → **12 commits**, all 2026-04-30 or 2026-05-01, covering v0.1.84-beta through v0.1.90-beta. Last logged audit was the 2026-04-29 `jrdev-systemitems-recent` block above; no overlap.
+
+**Material changes (file → action):**
+
+- `src/tui/components/HelpModal.tsx` *(new file, commit `d87271c` v0.1.84-beta)* → **added** as §A item **102**. Three-column popup (Views / Navigate / Global) with short keybind descriptions, dismissed by `?`, Esc, or arrow keys. Subsequent commits `2ee9668` (compact to 3 columns), `4625dcd` (full-height wrapper + footer pin), `401723e` (arrow-key dismiss) refine the same file — folded into the single description.
+- `src/tui/util/models.ts` *(new file, commit `03079bc` v0.1.88-beta)* → **added** as §A item **119**. Hand-edited `MODEL_ABBREVIATIONS` table + `abbrevModel` lookup. Commit `7a17ecd` v0.1.89-beta dropped the heuristic-fallback path so unknown models now visibly overflow — captured in the description.
+- `src/tui/components/AgentRow.tsx` *(existing, commits `47d0326` `03079bc` `7a17ecd`)* → §A item **96** description rewritten to mention the MODEL column (width 10) and `abbrevModel` import.
+- `src/tui/components/Footer.tsx` *(existing, commit `d87271c`)* → §A item **99** description rewritten as the v0.1.84-beta one-liner (`↑↓ nav · ← back · ? help · q quit`); the prior verbose per-view hint strings now live in `HelpModal`.
+- `src/tui/App.tsx` *(existing, commits `d87271c` `4625dcd` `401723e`)* → §A item **92** description extended to mention the `HelpModal` popup, key intercept (arrows/Esc close before falling through), and the full-height + footer-pin fix.
+- `HEARTBEAT.md` *(existing, commit `bc55d3b` v0.1.90-beta — restructured)* → **added** as §J item **20**. Per-agent sections: `systemreview` reconciles SYSTEM_ITEMS.md every 30 min; everything else falls through to the `Default` section. Replaces the older root `HEARTBEAT.yaml` already noted as retired in the Apr-28 progress log.
+- `configs/idchain.yaml` *(existing, commit `bc55d3b`)* → §I item **3** description extended to mention `heartbeat: 1800` per-agent interval seconds (the source of this heartbeat trigger).
+- `skills/identity/SKILL.md` *(no source change in window — referenced as the routing key for HEARTBEAT.md)* → §K item **7** description extended to mention the per-agent heartbeat routing.
+- `CHANGELOG.md` *(existing, recurring touches — multiple commits)* → §J item **17** headline advanced from v0.1.80-beta to **v0.1.90-beta** with intermediate releases summarized.
+- `QUICKSTART.md` *(existing, commits `7bf8c7e` `8c4a21e` v0.1.86-beta)* → §J item **16** description extended to note the prompt-before-pull behavior in Step 0.
+
+**Renumbering performed:** §A grew from 122 → **124** entries. After inserting `HelpModal.tsx` at item 102, items 100→101 stayed, items 102–118 shifted by +1; after inserting `models.ts` at item 119, items 119–122 (the wakeup/xmtp tail) shifted by +1 again, landing at 121–124. All cross-references inside `Updated:` lines / earlier Progress Log entries / `[STATUS:...]` annotations were left untouched — they still point at the original numbering of their own audit window, which is the correct historical reference.
+
+**Files in window judged as ephemera (no SYSTEM_ITEMS entry needed):** `package.json` (version-bump churn — semver tracker, not a runtime item), `package-lock.json` (build artifact), `README.md` (already §J 16), `CHANGELOG.md` (already §J 17), `QUICKSTART.md` (already §J 16). The build commit `be6e04d` *include tui in root build* is a one-line `package.json` script tweak and does not introduce a new tracked surface.
+
+**Verifications performed:** `find src -name '*.ts' -o -name '*.tsx' | wc -l` confirms 124 files matching §A's new count. `ls src/tui/util/` confirms `colors.ts format.ts memory.ts models.ts schedule.ts` (5 files, alphabetic). `ls src/tui/components/` confirms `HelpModal.tsx` sits between `HeartbeatsView.tsx` and `LibraryAgentDetail.tsx` alphabetically. `MODEL_ABBREVIATIONS` table read-verified to include the `claude-haiku-4-5-20251001` entry from `7a17ecd`. `HEARTBEAT.md` read-verified for the per-agent section structure (`## systemreview` + `## Default`).
+
+**Reply token:** 12 commits walked, 2 entries added (§A 102, §A 119), 6 entries materially updated (§A 92, 96, 99; §I 3; §J 16, 17, 20; §K 7). Progress Log entry: this block.
+
+---
+
+## Progress Log — 2026-05-01 `heartbeat-systemitems-2026-05-01-b` (systemreview, follow-up)
+
+**Window walked:** `git log --since="24 hours ago"` since the prior heartbeat block above. Cutoff was top-of-tree at `7a17ecd`; one new commit since then.
+
+**Single commit:** `ddfc86d` *feat(tui): window TeamsPanel when team list overflows* — bumps to **v0.1.90-beta**. Touches `src/tui/components/TeamsPanel.tsx` (§A item 113), `CHANGELOG.md`, `README.md`, `package.json`. Adds a sliding 5-chip window when `teams.length > 5`, with `←N` / `N→` chips for hidden teams on either side; `All` chip pins to the start; Tab cycling unchanged.
+
+**Edits:** §A item **113** description extended to describe the windowing + overflow indicators (was a one-liner). No new files, no renumbering. §J item 17 (CHANGELOG headline `v0.1.90-beta`) already accurate from prior block — no edit needed.
+
+**Reply token:** 1 commit walked, 0 entries added, 1 entry updated (§A 113). Progress Log entry: this block.
+
+---
+
+## Progress Log — 2026-05-01 `heartbeat-systemitems-2026-05-01-c` (systemreview, follow-up 2)
+
+**Window walked:** since prior heartbeat block (cutoff `ddfc86d`). One new commit.
+
+**Single commit:** `71276b8` *feat(tui): pin public team chip after All* — bumps to **v0.1.91-beta**. Touches `src/tui/App.tsx` (§A item 92), `CHANGELOG.md`, `README.md`, `package.json`. Sorts the teams array so `public` always renders immediately after the `All` chip regardless of manager response order; the sort happens at App level so `teamCounts`, `teamOptions`, and `TeamsPanel` all see the same order — Tab/Shift+Tab cycling matches the visual order.
+
+**Edits:** §A item **92** (`App.tsx`) description extended to describe the public-chip pin behavior. §J item **17** CHANGELOG headline advanced v0.1.90-beta → v0.1.91-beta. No new files, no renumbering.
+
+**Reply token:** 1 commit walked, 0 entries added, 2 entries updated (§A 92, §J 17). Progress Log entry: this block.
+
+---
+
+## Progress Log — 2026-05-01 `heartbeat-systemitems-2026-05-01-d` (systemreview, follow-up 3)
+
+**Window walked:** since prior heartbeat block (cutoff `71276b8`). One new commit.
+
+**Single commit:** `fc8f18e` *fix(tui): keep TeamsPanel visible on All and public selections* — bumps to **v0.1.92-beta**. Touches `src/tui/components/AgentRow.tsx` (§A 96), `src/tui/components/StatusStrip.tsx` (§A 109), `CHANGELOG.md`, `README.md`, `package.json`. Adds `wrap="truncate-end"` to `AgentRow` (local + remote `public-agent-remote` branch with the extra DOMAIN/DMZ columns), `AgentRowHeader`, and the outer `StatusStrip` `Text` so on terminals narrower than the full row width, the rightmost columns clip rather than wrapping to a second line — which previously scrolled the top menu off screen.
+
+**Edits:** §A item **96** (`AgentRow.tsx`) description extended to describe the truncate-end clipping. §A item **109** (`StatusStrip.tsx`) one-liner extended likewise. §J item **17** CHANGELOG headline advanced v0.1.91-beta → v0.1.92-beta. No new files, no renumbering.
+
+**Reply token:** 1 commit walked, 0 entries added, 3 entries updated (§A 96, §A 109, §J 17). Progress Log entry: this block.

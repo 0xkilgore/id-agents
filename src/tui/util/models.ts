@@ -7,8 +7,11 @@
 
 export const MODEL_ABBREVIATIONS: Record<string, string> = {
   // Anthropic Claude
+  'claude-opus-4-20250514': 'opus-4-0',
+  'claude-opus-4-5-20250514': 'opus-4-5',
   'claude-opus-4-6': 'opus-4-6',
   'claude-opus-4-7': 'opus-4-7',
+  'claude-sonnet-4-5-20250514': 'sonn-4-5',
   'claude-sonnet-4-6': 'sonn-4-6',
   'claude-haiku-4-5-20251001': 'haiku-4-5',
 
