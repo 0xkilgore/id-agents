@@ -110,9 +110,9 @@ cd <path-to-id-agents>
 npm run id-agents
 ```
 
-This starts the interactive CLI on port 4000 and the manager daemon on port 4100.
+This starts the interactive CLI and ensures the manager daemon is available on port 4100. The CLI does not open its own local HTTP port.
 
-> **Running this from a Claude Code session?** Spawn the command in the background (Bash tool with `run_in_background: true`). The readline prompt sits idle with no stdin — that's fine. Ports 4000 and 4100 come up normally and every step below works unchanged. If you also want an interactive TTY, open a separate terminal window and run the command there.
+> **Running this from a Claude Code session?** Spawn the command in the background (Bash tool with `run_in_background: true`). The readline prompt sits idle with no stdin — that's fine. The daemon on port 4100 comes up normally and every step below works unchanged. If you also want an interactive TTY, open a separate terminal window and run the command there.
 >
 > **Headless-only alternative:** If you don't need the CLI at all, run `node dist/start-agent-manager.js` and use port 4100. `/deploy` in Step 4 goes through the manager daemon's `/remote` endpoint on port 4100, so the interactive CLI is optional.
 

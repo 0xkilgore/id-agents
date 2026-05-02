@@ -177,7 +177,7 @@ async function main() {
         const endpoint = args[2];
         if (!regName || !endpoint) {
           console.error('Usage: id-agents register <name> <endpoint>');
-          console.error('Example: id-agents register "manager" http://localhost:4000');
+          console.error('Example: id-agents register "helper" https://helper.example.com');
           process.exit(1);
         }
         const virtualAgent = await cli.register({ name: regName, endpoint });
@@ -222,7 +222,7 @@ Examples:
   id-agents spawn "coding-agent" claude-haiku-4-5-20251001
   id-agents spawn "research-agent" claude-sonnet-4-20250514
   id-agents spawn "coding-agent" claude-haiku-4-5-20251001 /path/to/plugin
-  id-agents register "manager" http://localhost:4000
+  id-agents register "helper" https://helper.example.com
   id-agents list
   id-agents stop agent_123
 `);

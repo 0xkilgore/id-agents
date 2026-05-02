@@ -1,6 +1,6 @@
-# Interactive Agent (Your Human-in-the-Loop Node)
+# Interactive Agent (Your Human-in-the-Loop Console)
 
-The interactive CLI (`npm run id-agents`) also runs a local REST‑AP server so **you** can participate as an agent (type: `interactive`) in the same network as the spawned local agents.
+The interactive CLI (`npm run id-agents`) is now a pure client of the manager daemon. You participate through the daemon-owned manager inbox and agent control surfaces; the CLI does not run its own local REST-AP server.
 
 ## Quick start
 
@@ -17,8 +17,7 @@ cp env.example .env
 npm run id-agents
 ```
 
-By default, this starts your interactive agent with:
-- **Interactive CLI server**: `4000`
+By default, this starts your interactive console with:
 - **Manager port**: `4100`
 - **Agent ports**: `4101+` (dynamically assigned)
 
@@ -42,7 +41,7 @@ Inside the CLI:
 - `/agents` — List all agents with status and ports
 - `/status` — Check agent health
 
-You should see your `interactive` agent listed alongside any deployed local agents.
+You should see the daemon-owned `manager` entry alongside any deployed local agents.
 
 ## CLI Commands
 
@@ -74,8 +73,8 @@ When another agent asks you something, you'll see it as a pending query in the C
 
 ## How it works (high-level)
 
-- The CLI runs a local REST‑AP server (your agent) and registers it with the manager (`POST /agents/register`).
-- Spawned local agents can then talk to you by hitting your `/talk` endpoint, and read your replies via `/news`.
+- The CLI connects to the manager daemon on `:4100`.
+- Pending manager work is read via daemon APIs and answered through the daemon-owned manager inbox.
 
 ## Multi-team support
 

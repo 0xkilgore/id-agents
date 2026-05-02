@@ -818,6 +818,15 @@ function startManagerConnection() {
   connectManagerWebSocket();
 }
 
+async function waitForManagerReady(timeoutMs: number = 10000): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (await checkManager()) return true;
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
+  return false;
+}
+
 /**
  * Start or restart a local agent process
  * Returns { success, pid?, logFile?, error? }
@@ -3015,7 +3024,7 @@ async function handleLine(line: string) {
     }
 
     if (agentName.toLowerCase() === 'manager') {
-      console.log(`\n${colors.red}❌ manager is not an agent. Use /talk to message the interactive CLI user.${colors.reset}\n`);
+      console.log(`\n${colors.red}❌ manager is not a peer agent. Use this CLI directly, or POST to ${MANAGER_URL}/talk from another client.${colors.reset}\n`);
       rl.prompt();
       return;
     }
@@ -3058,7 +3067,7 @@ async function handleLine(line: string) {
     }
 
     if (agentName.toLowerCase() === 'manager') {
-      console.log(`\n${colors.red}❌ manager is not an agent. Use /talk to message the interactive CLI user.${colors.reset}\n`);
+      console.log(`\n${colors.red}❌ manager is not a peer agent. Use this CLI directly, or POST to ${MANAGER_URL}/talk from another client.${colors.reset}\n`);
       rl.prompt();
       return;
     }
@@ -3875,14 +3884,14 @@ async function initializeCli() {
       stdio: 'ignore',
       env: { ...process.env, AGENT_MANAGER_PORT: String(MANAGER_PORT) }
     }).unref();
-    await new Promise(resolve => setTimeout(resolve, 3000));
-    managerRunning = await checkManager();
+    managerRunning = await waitForManagerReady();
     if (!managerRunning) {
-      console.log(`${colors.yellow}⚠️  Manager did not start in time${colors.reset}`);
+      console.log(`${colors.red}❌ Manager did not start in time${colors.reset}`);
       console.log(`${colors.gray}   Try manually: ${colors.cyan}node dist/start-agent-manager.js${colors.reset}\n`);
-    } else {
-      console.log(`${colors.green}✓ Manager started${colors.reset}\n`);
+      process.exit(1);
+      return;
     }
+    console.log(`${colors.green}✓ Manager started${colors.reset}\n`);
   }
   
   // Poll for new queries every 2 seconds
@@ -3900,6 +3909,7 @@ async function initializeCli() {
 
 void initializeCli().catch((error: any) => {
   console.log(`\n${colors.red}❌ CLI startup failed: ${error?.message || error}${colors.reset}\n`);
+  process.exit(1);
 });
 
 rl.on('line', handleLine);

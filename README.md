@@ -895,7 +895,7 @@ Triggered messages (from schedules and heartbeats) include a `noAutoReply` flag 
 
 | Component | Port | Description |
 |-----------|------|-------------|
-| Interactive CLI | 4000 | CLI server for local interactive sessions |
+| Interactive CLI | none | Pure client terminal UI; does not bind a local HTTP port |
 | Manager | 4100 | Main API, `/remote` endpoint, agent registry |
 | Agents | 4101+ | Dynamic per-team range (25 ports per team) |
 

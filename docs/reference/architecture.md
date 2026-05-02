@@ -271,6 +271,6 @@ Each agent can also have its own `.env.<name>.<address>` file in the repo root c
 
 | Component | Port | Description |
 |-----------|------|-------------|
-| Interactive CLI | 4000 | CLI server for local interactive sessions |
+| Interactive CLI | none | Pure client terminal UI; no local HTTP listener |
 | Manager | 4100 | Main API, `/remote` endpoint, agent registry |
 | Agents | 4101+ | Dynamic per-team range (25 ports per team) |
