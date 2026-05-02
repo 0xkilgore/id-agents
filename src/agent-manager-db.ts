@@ -258,7 +258,15 @@ const CATALOG_CACHE_TTL = 60000; // 1 minute cache
  * @param baseEndpoint The agent's base endpoint (e.g., http://localhost:4101)
  * @returns The discovered endpoints or defaults if catalog unavailable
  */
-async function discoverRestAPEndpoints(baseEndpoint: string): Promise<{ talk: string; news: string; schedule?: string | null }> {
+export async function discoverRestAPEndpoints(baseEndpoint: string): Promise<{ talk: string; news: string; schedule?: string | null }> {
+  // After the manager-collapse refactor, "interactive" agents (e.g. manager-<team> rows)
+  // have endpoint='' and port=0. A few caller paths fall back to `http://localhost:${port}`
+  // which produces `http://localhost:0`, then catalog discovery fails noisily. Those rows
+  // never had a per-agent HTTP server, so silently return defaults instead of fetching.
+  if (!baseEndpoint || /:0(\/|$)/.test(baseEndpoint)) {
+    return { talk: '/talk', news: '/news', schedule: null };
+  }
+
   const now = Date.now();
   const cached = restapCatalogCache.get(baseEndpoint);
 
@@ -5816,8 +5824,15 @@ export class AgentManagerDb {
           return { ok: true, result: { items, total: items.length, timestamp: Date.now() } };
         }
 
-        // Use endpoint if set, otherwise construct from port using localhost
-        const baseEndpoint = a.endpoint || `http://localhost:${a.port}`;
+        // Agents without a usable local network endpoint (virtual stubs,
+        // remote-only rows that have no `port`/`endpoint` filled in) cannot
+        // serve `/news` directly; skipping here avoids a catalog fetch
+        // against `http://localhost:0` from the CLI's per-agent news poll.
+        if (!a.port || !a.endpoint) {
+          return { ok: true, result: { items: [], total: 0, timestamp: Date.now() } };
+        }
+
+        const baseEndpoint = a.endpoint;
 
         // Discover REST-AP endpoints from the agent's catalog
         const endpoints = await discoverRestAPEndpoints(baseEndpoint);
