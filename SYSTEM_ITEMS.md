@@ -83,7 +83,7 @@ Updated: 2026-05-01 — systemreview heartbeat audit (commits since 2026-04-29: 
 64. `src/inter-agent-skill.ts` — Agent-facing skill documentation generator
 65. `src/inter-agent-tools.ts` — Tool definitions for inter-agent comms
 66. `src/interactive-agent-cli.ts` — Full-screen interactive CLI: `/ask`, manager bridge, deploy, `/sync`, registry, wallet provisioning commands, manager inbox resolution + readiness waits (`agent-readiness`), public agents, TUI launch, tasks (`HELP_ITEMS` + extended handlers)
-67. `src/interactive-agent-server.ts` — CLI’s companion HTTP server (REST-AP and `/remote` for manager delegation)
+67. `src/interactive-agent-server.ts` — REST-AP HTTP server used only by `src/human-agent-cli.ts` (human-as-agent mode, e.g. `alice` on `:4000`). The interactive manager CLI no longer uses it; the daemon on `:4100` owns the manager identity and inbox.
 68. `src/lib/agent-library.ts` — v3 library discovery under `configs/agents` / `configs/skills` (listing only, no deploy)
 69. `src/lib/env-hygiene.ts` — Sanitize or validate env for subprocess harnesses
 70. `src/lib/fatal-handlers.ts` — Process-level fatal error hooks for long-running services

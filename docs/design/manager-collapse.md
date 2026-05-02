@@ -6,16 +6,27 @@ Base commit: `57da440`
 Author: `cto`
 Date: 2026-05-02
 
+## Status: Implemented
+
+This design has shipped on `refactor/manager-collapse-cli` (final commit `b1b5882`). The end state is now live:
+
+- The daemon on `:4100` owns the manager identity, the manager inbox, and the REST-AP catalog at `/.well-known/restap.json`.
+- The interactive CLI no longer binds `:4000`. It is purely a thin client over the daemon's `/manager/inbox/*` APIs.
+- `workspace/manager/interactive-agent-identity.json` is no longer created or read.
+- `InteractiveAgentServer` remains in the codebase only for the human-as-agent path (`src/human-agent-cli.ts`), where a human can be `alice` on `:4000`. It is no longer used by the manager CLI.
+
+The rest of this document is preserved as historical design context. Tense and references to the "current" two-process state describe the pre-refactor world.
+
 ## Summary
 
-Today the system still has two different things that both look like "the manager":
+Before this refactor, the system had two different things that both looked like "the manager":
 
-- The daemon on `:4100` is the real control plane. It owns orchestration, `/remote`, task APIs, scheduler, checkins, health, and the actual write path for most manager inbox traffic.
-- The interactive CLI on `:4000` still boots an `InteractiveAgentServer`, registers itself as an interactive `manager` agent, publishes a manager REST-AP catalog, keeps a local identity file, and is still the only place with a direct "respond to pending manager query" implementation.
+- The daemon on `:4100` was the real control plane. It owned orchestration, `/remote`, task APIs, scheduler, checkins, health, and the actual write path for most manager inbox traffic.
+- The interactive CLI on `:4000` also booted an `InteractiveAgentServer`, registered itself as an interactive `manager` agent, published a manager REST-AP catalog, kept a local identity file, and was the only place with a direct "respond to pending manager query" implementation.
 
-That split is conceptually wrong. The system mostly already behaves as if the daemon is the manager, but it still carries a second process that impersonates the manager for discovery and human interaction. The proposed collapse is worth doing. Complexity drops if and only if the CLI stops binding any network port and becomes a pure HTTP/WebSocket client of the daemon.
+That split was conceptually wrong. The system mostly already behaved as if the daemon was the manager, but it still carried a second process that impersonated the manager for discovery and human interaction. Collapsing it dropped complexity by making the CLI a pure HTTP/WebSocket client of the daemon.
 
-My verdict: proceed with the refactor.
+Verdict (at the time): proceed with the refactor. Outcome: shipped.
 
 ## Current Inventory
 
