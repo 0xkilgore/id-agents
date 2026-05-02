@@ -773,6 +773,75 @@ export class AgentManagerDb {
   }
 
   /**
+   * Canonical "deliver this query" lifecycle. Single source of truth for the
+   * success path of a manager-side query completion: writes the completed
+   * status to the queries table, emits `query:delivered` to the wakeup-service
+   * event log, wakes any long-poll `GET /query/:id?wait=` blockers, and
+   * resolves any in-memory `/talk-to` waiter still parked on the query id.
+   *
+   * Both POST /news (in_reply_to success branch) and POST /manager/inbox/respond
+   * route through this helper so the lifecycle has exactly one implementation
+   * — adding a second path would let the two drift on event emission, waiter
+   * wakeup, or status semantics. Failure (`reply.error`) uses
+   * `queries.markFailed` + `emitQueryFailed` and shares only the waiter
+   * wakeup primitives below (which apply to any terminal transition).
+   *
+   * Idempotent at the DB level: `queries.complete` is gated on `status =
+   * 'pending'`, so repeated calls for the same query are no-ops on the row.
+   * The event/waiter side effects still fire, mirroring the existing POST
+   * /news behavior (see audit finding context above).
+   */
+  private async completeQueryDelivery(params: {
+    teamId: string;
+    queryId: string;
+    occurredAt: number;
+    resultPayload: Record<string, unknown>;
+    waiterReply: { from: string; message: string };
+    messagePreview: string | null;
+  }): Promise<void> {
+    const { teamId, queryId, occurredAt, resultPayload, waiterReply, messagePreview } = params;
+
+    await this.db.queries.complete(teamId, queryId, occurredAt, resultPayload);
+
+    const completedRow = await this.db.queries
+      .getByQueryIdForTeam(teamId, queryId)
+      .catch(() => null);
+    if (completedRow && completedRow.status === 'completed') {
+      await emitQueryDelivered(this.db.events, {
+        teamId,
+        queryId,
+        agentId: completedRow.agent_id,
+        occurredAt,
+        messagePreview,
+      });
+    }
+
+    this.wakeQueryWaiters(teamId, queryId, waiterReply);
+  }
+
+  /**
+   * Wake the long-poll `GET /query/:id?wait=` blockers and resolve any
+   * `/talk-to` waiter parked on this query id. Shared between
+   * `completeQueryDelivery` (success) and the failure branch in POST /news so
+   * neither path duplicates waiter logic.
+   */
+  private wakeQueryWaiters(
+    teamId: string,
+    queryId: string,
+    waiterReply: { from: string; message: string },
+  ): void {
+    this.notifyQueryStatusWaiters(teamId, queryId);
+
+    const waiter = this.queryWaiters.get(queryId);
+    if (waiter) {
+      if (waiter.timeout) clearTimeout(waiter.timeout);
+      this.queryWaiters.delete(queryId);
+      waiter.resolve(waiterReply);
+      this.managerLog(`Resolved waiter for query ${queryId}`);
+    }
+  }
+
+  /**
    * Redact sensitive fields from an agentToResponse result for non-admin callers.
    *
    * Top-level fields removed: ssh_target, internal_endpoint_url.
@@ -2127,35 +2196,26 @@ export class AgentManagerDb {
                 reason: errorText,
               });
             }
+            // Failure path still needs to wake long-poll and /talk-to waiters
+            // so blocked callers don't hang waiting for a transition that
+            // already happened.
+            this.wakeQueryWaiters(teamId, in_reply_to, {
+              from: from || 'unknown',
+              message: message || '',
+            });
           } else {
-            await this.db.queries.complete(teamId, in_reply_to, ts, { from, message, ...data });
-
-            // Emit query:delivered for the wakeup-service event log. Look up the
-            // row to recover its agent_id (the in_reply_to id alone is not enough).
-            const completedRow = await this.db.queries.getByQueryIdForTeam(teamId, in_reply_to).catch(() => null);
-            if (completedRow && completedRow.status === 'completed') {
-              await emitQueryDelivered(this.db.events, {
-                teamId,
-                queryId: in_reply_to,
-                agentId: completedRow.agent_id,
-                occurredAt: ts,
-                messagePreview: typeof message === 'string' ? message : null,
-              });
-            }
+            // Single canonical completion lifecycle (queries.complete +
+            // delivered event + waiter wakeups). Shared with POST
+            // /manager/inbox/respond so both paths cannot drift.
+            await this.completeQueryDelivery({
+              teamId,
+              queryId: in_reply_to,
+              occurredAt: ts,
+              resultPayload: { from, message, ...data },
+              waiterReply: { from: from || 'unknown', message: message || '' },
+              messagePreview: typeof message === 'string' ? message : null,
+            });
           }
-
-          // Wake any long-poll GET /query/:id?wait= waiters for this row.
-          this.notifyQueryStatusWaiters(teamId, in_reply_to);
-
-          // Resolve any waiting /talk-to request (waiter may still exist even if HTTP timed out)
-          const waiter = this.queryWaiters.get(in_reply_to);
-          if (waiter) {
-            if (waiter.timeout) clearTimeout(waiter.timeout);
-            this.queryWaiters.delete(in_reply_to);
-            waiter.resolve({ from: from || 'unknown', message: message || '' });
-            this.managerLog(`Resolved waiter for query ${in_reply_to}`);
-          }
-
         }
 
         this.managerLog(`Received ${newsType}${from ? ` from ${from}` : ''}${in_reply_to ? ` (reply to ${in_reply_to})` : ''}`);
@@ -2320,6 +2380,164 @@ export class AgentManagerDb {
         });
       } catch (err: any) {
         console.error('[Manager] Error in POST /news/archive:', err);
+        res.status(500).json({ error: err?.message || 'Internal server error' });
+      }
+    });
+
+    // Step 2 of the manager-collapse migration (docs/design/manager-collapse.md):
+    // daemon-owned manager inbox APIs. Lets a CLI (or any team-scoped client)
+    // read pending manager queries and post the manager's reply without
+    // running its own InteractiveAgentServer process. Reuses the existing
+    // queries.complete + emitQueryDelivered + waiter wakeup pipeline used
+    // by POST /news so completion semantics stay identical.
+
+    // GET /manager/inbox/pending — returns pending manager queries and
+    // scheduled work for the active team. Source of truth is the daemon DB
+    // (queries table under the resolved manager-inbox identity), not CLI
+    // memory.
+    this.managementApp.get('/manager/inbox/pending', async (req, res) => {
+      try {
+        const { id: teamId, name: teamName } = await this.getTeam(req);
+        const inboxId = await this.resolveManagerInboxId(teamId, teamName);
+        const rows = await this.db.queries.getPending(inboxId);
+        const pending = rows
+          .map((row: any) => {
+            const result = (row.result || {}) as Record<string, unknown>;
+            return {
+              query_id: row.query_id,
+              prompt: row.prompt ?? null,
+              message: row.prompt || (result.message as string | undefined) || '',
+              timestamp: Number(row.created),
+              status: row.status,
+              session_id: row.session_id ?? null,
+              from: (result.from as string | undefined) ?? null,
+              reply_endpoint: (result.reply_endpoint as string | undefined) ?? null,
+              schedule: (result.schedule as Record<string, unknown> | undefined) ?? null,
+              mode: (result.mode as string | undefined) ?? null,
+            };
+          })
+          .sort((a, b) => a.timestamp - b.timestamp);
+
+        res.json({
+          ok: true,
+          team: teamName,
+          inbox_id: inboxId,
+          count: pending.length,
+          pending,
+        });
+      } catch (err: any) {
+        console.error('[Manager] Error in GET /manager/inbox/pending:', err);
+        res.status(500).json({ error: err?.message || 'Internal server error' });
+      }
+    });
+
+    // POST /manager/inbox/respond — body: { query_id, message, session_id? }.
+    // Preserves the visible response semantics that InteractiveAgentServer.respond
+    // emits today: a news row of type `query.completed` with
+    // `data: { query_id, result: { result: message } }`, and a queries-table
+    // result of `{ result: message }`. The actual completion lifecycle
+    // (queries.complete + query:delivered + waiter wakeups) routes through
+    // `completeQueryDelivery` so it is the single shared implementation with
+    // the POST /news in-reply-to path.
+    this.managementApp.post('/manager/inbox/respond', async (req, res) => {
+      try {
+        const { id: teamId, name: teamName } = await this.getTeam(req);
+        const body = (req.body || {}) as {
+          query_id?: unknown;
+          message?: unknown;
+          session_id?: unknown;
+        };
+
+        const queryId = typeof body.query_id === 'string' ? body.query_id : '';
+        const message = typeof body.message === 'string' ? body.message : '';
+        const sessionId =
+          typeof body.session_id === 'string' && body.session_id.length > 0
+            ? body.session_id
+            : null;
+
+        if (!queryId) {
+          return res.status(400).json({ error: 'Missing query_id' });
+        }
+        if (!message) {
+          return res.status(400).json({ error: 'Missing message' });
+        }
+
+        const row = await this.db.queries.getByQueryIdForTeam(teamId, queryId);
+        if (!row) {
+          return res.status(404).json({ error: 'query_not_found', query_id: queryId });
+        }
+        if (row.status !== 'pending' && row.status !== 'processing') {
+          return res.status(409).json({
+            error: 'query_not_pending',
+            query_id: queryId,
+            status: row.status,
+          });
+        }
+
+        const inboxId = await this.resolveManagerInboxId(teamId, teamName);
+        if (row.agent_id !== inboxId) {
+          // Pending row exists but isn't owned by the manager inbox — refuse
+          // rather than silently completing some other agent's query.
+          return res.status(403).json({
+            error: 'not_manager_inbox_query',
+            query_id: queryId,
+          });
+        }
+
+        const ts = Date.now();
+        // Same shape InteractiveAgentServer.respond writes: queries row stores
+        // `{ result: <response text> }`, news row carries
+        // `data: { query_id, result: { result: <response text> } }`, type
+        // `query.completed`. session_id is folded into both when supplied so
+        // resumed CLI sessions continue to work.
+        const innerResult: Record<string, unknown> = { result: message };
+        if (sessionId) innerResult.session_id = sessionId;
+        const newsData: Record<string, unknown> = {
+          query_id: queryId,
+          result: { result: message },
+        };
+        if (sessionId) newsData.session_id = sessionId;
+
+        await this.db.news.add(teamId, inboxId, {
+          timestamp: ts,
+          type: 'query.completed',
+          data: newsData,
+          query_id: queryId,
+        });
+
+        // Canonical completion lifecycle. Drives queries.complete +
+        // query:delivered emission + long-poll/talk-to waiter wakeups so the
+        // wakeup-service event log and any blocked callers see the same
+        // transition the POST /news reply path produces.
+        await this.completeQueryDelivery({
+          teamId,
+          queryId,
+          occurredAt: ts,
+          resultPayload: innerResult,
+          waiterReply: { from: 'manager', message },
+          messagePreview: message,
+        });
+
+        // Fan out to WebSocket subscribers using the same `query.completed`
+        // shape the persisted news row carries.
+        this.broadcastNews(teamId, {
+          type: 'query.completed',
+          message,
+          in_reply_to: queryId,
+          data: newsData,
+          timestamp: ts,
+        });
+
+        this.managerLog(`/manager/inbox/respond completed query ${queryId}`);
+
+        res.status(200).json({
+          ok: true,
+          query_id: queryId,
+          status: 'completed',
+          timestamp: ts,
+        });
+      } catch (err: any) {
+        console.error('[Manager] Error in POST /manager/inbox/respond:', err);
         res.status(500).json({ error: err?.message || 'Internal server error' });
       }
     });
