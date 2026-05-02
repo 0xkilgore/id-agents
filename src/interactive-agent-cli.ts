@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: MIT
 import 'dotenv/config';
 import readline from 'readline';
-import { InteractiveAgentServer, IncomingReply } from './interactive-agent-server.js';
 import fetch from 'node-fetch';
 import fs from 'fs';
 import path from 'path';
@@ -10,7 +9,6 @@ import { execFileSync, spawn } from 'child_process';
 import WebSocket from 'ws';
 import yaml from 'js-yaml';
 import { fileURLToPath } from 'url';
-import { createDb, getOrCreateTeamId, migrateDb, type Db } from './db.js';
 import { processConfig, getConfigParameters } from './config-parser.js';
 import { validateName } from './name-validation.js';
 import {
@@ -100,6 +98,7 @@ const HELP_ITEMS: Array<{ cmd: string; desc: string; indent?: boolean }> = [
   { cmd: '/public <n|domain> <msg>', desc: 'Chat with a public agent by index or domain' },
   { cmd: '/public clear', desc: 'Remove all public-team agents (with confirmation)' },
   { cmd: '/register <agent>', desc: 'Register agent onchain' },
+  { cmd: '/respond <num|query_id> [msg]', desc: 'Respond to pending manager inbox work' },
   { cmd: '/heartbeat', desc: 'List heartbeats' },
   { cmd: '/heartbeat add <agent> <seconds> <message>', desc: 'Add heartbeat' },
   { cmd: '/heartbeat pause|resume|remove <id>', desc: 'Manage heartbeat' },
@@ -349,7 +348,6 @@ function parseManagerPort(): number {
 }
 
 const MANAGER_PORT = parseManagerPort();
-const port = MANAGER_PORT - 100; // CLI runs 100 below manager (e.g. 4000 for manager 4100)
 
 // Simplified configuration - all local teams share one manager
 let activeTeam = process.env.ID_TEAM || process.env.ID_PROJECT || 'default';
@@ -425,10 +423,40 @@ async function managerFetch(pathname: string, init: any = {}) {
   return await fetch(`${MANAGER_URL}${pathname}`, { ...init, headers });
 }
 
-const server = new InteractiveAgentServer(name, port);
-let localDb: Db | undefined;
-let localDbTeamId: string | undefined;
-let localAgentId: string | undefined;
+interface IncomingReply {
+  from: string;
+  in_reply_to: string;
+  message: string;
+  sessionId?: string;
+  to?: string;
+}
+
+interface IncomingMessage {
+  type: string;
+  from: string;
+  message: string;
+  timestamp: number;
+}
+
+interface ManagerInboxItem {
+  query_id: string;
+  prompt?: string | null;
+  message: string;
+  timestamp: number;
+  status?: string;
+  session_id?: string | null;
+  from?: string | null;
+  reply_endpoint?: string | null;
+  schedule?: Record<string, unknown> | null;
+  mode?: string | null;
+}
+
+interface CliNewsItem {
+  type: string;
+  timestamp: number;
+  message?: string;
+  data?: Record<string, unknown>;
+}
 
 // ─── Public agent interactive chat session ──────────────────────────────────
 // When the user types `/public <n|name|domain>` with no message, we enter
@@ -455,9 +483,16 @@ interface PendingOutgoingQuery {
 const pendingOutgoingQueries = new Map<string, PendingOutgoingQuery>();
 // Track displayed replies to prevent duplicates (replies can arrive via multiple channels)
 const displayedReplies = new Set<string>();
+const localNewsItems: CliNewsItem[] = [];
 
-// Handle incoming replies from agents
-server.on('reply', (reply: IncomingReply) => {
+function recordLocalNewsItem(item: CliNewsItem) {
+  localNewsItems.push(item);
+  if (localNewsItems.length > 200) {
+    localNewsItems.splice(0, localNewsItems.length - 200);
+  }
+}
+
+function handleIncomingReply(reply: IncomingReply) {
   const pending = pendingOutgoingQueries.get(reply.in_reply_to);
 
   // Only display replies to queries WE sent
@@ -500,28 +535,73 @@ server.on('reply', (reply: IncomingReply) => {
   console.log(`\n${reply.message}\n`);
   updatePrompt();
   rl.prompt();
-});
+}
 
-// Handle incoming messages (not replies)
-server.on('message', (msg: { type: string; from: string; message: string; timestamp: number }) => {
+function handleIncomingMessage(msg: IncomingMessage) {
   console.log(`\n${colors.cyan}📨 New message from ${msg.from}:${colors.reset}`);
   console.log(`\n${msg.message}\n`);
   updatePrompt();
   rl.prompt();
-});
+}
 
-// Handle pending questions (from POST /news - allows manager to reply)
-server.on('pending_question', (q: { query_id: string; from: string; message: string; timestamp: number; is_reply: boolean; in_reply_to?: string }) => {
-  const time = new Date(q.timestamp).toLocaleTimeString();
+async function fetchPendingManagerInbox(): Promise<ManagerInboxItem[]> {
+  const response = await managerFetch('/manager/inbox/pending');
+  if (!response.ok) {
+    const errorText = await response.text().catch(() => response.statusText);
+    throw new Error(`Failed to fetch pending manager inbox items: ${response.status} ${errorText}`);
+  }
+  const data = await response.json() as { pending?: ManagerInboxItem[] };
+  return Array.isArray(data.pending) ? data.pending : [];
+}
 
-  console.log(`\n${colors.bold}${colors.yellow}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${colors.reset}`);
-  console.log(`${colors.bold}${colors.yellow}📥${colors.reset} ${colors.cyan}${q.from}${colors.reset} ${colors.gray}${time}${colors.reset}`);
-  const preview = q.message.length > 200 ? q.message.substring(0, 200) + '...' : q.message;
-  console.log(preview);
-  console.log(`${colors.bold}${colors.yellow}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${colors.reset}\n`);
-  updatePrompt();
-  rl.prompt();
-});
+async function respondToManagerInboxQuery(queryId: string, message: string, sessionId?: string | null): Promise<void> {
+  const body: Record<string, unknown> = { query_id: queryId, message };
+  if (sessionId) body.session_id = sessionId;
+
+  const response = await managerFetch('/manager/inbox/respond', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text().catch(() => response.statusText);
+    throw new Error(`Failed to respond to ${queryId}: ${response.status} ${errorText}`);
+  }
+}
+
+async function getManagerNewsItems(limit: number = 20): Promise<CliNewsItem[]> {
+  const response = await managerFetch(`/news?since=0&limit=${Math.max(limit * 4, 100)}`);
+  if (!response.ok) {
+    const errorText = await response.text().catch(() => response.statusText);
+    throw new Error(`Failed to fetch manager news: ${response.status} ${errorText}`);
+  }
+
+  const data = await response.json() as { items?: CliNewsItem[] };
+  const remoteItems = Array.isArray(data.items) ? data.items : [];
+  const combined = [...remoteItems, ...localNewsItems];
+  combined.sort((a, b) => b.timestamp - a.timestamp);
+  return combined.slice(0, limit);
+}
+
+async function recordOutboundMessage(params: {
+  to: string;
+  message: string;
+  queryId?: string;
+  type?: 'message' | 'broadcast';
+}) {
+  const newsType = params.type === 'broadcast' ? 'outbound.broadcast' : 'outbound.message';
+  recordLocalNewsItem({
+    timestamp: Date.now(),
+    type: newsType,
+    message: `Sent ${params.type || 'message'} to ${params.to}`,
+    data: {
+      to: params.to,
+      message: params.message,
+      query_id: params.queryId,
+    },
+  });
+}
 
 // ==================== WebSocket Connection to Manager ====================
 // Use WebSocket for real-time updates from manager (works for both local and remote)
@@ -562,7 +642,7 @@ function handleWebSocketMessage(data: WebSocket.Data) {
         // Check if this is a reply to one of our pending queries
         // Only emit for actual 'reply' type, not status updates like outbound.reply, query.completed
         if (inReplyTo && newsType === 'reply' && pendingOutgoingQueries.has(inReplyTo)) {
-          server.emit('reply', {
+          handleIncomingReply({
             from,
             message: newsMessage,
             in_reply_to: inReplyTo,
@@ -571,7 +651,7 @@ function handleWebSocketMessage(data: WebSocket.Data) {
           });
         } else if (newsType === 'message') {
           // General message (including replies to unknown queries)
-          server.emit('message', {
+          handleIncomingMessage({
             type: newsType,
             from,
             message: newsMessage,
@@ -699,7 +779,7 @@ async function pollNews() {
       // Check if this is a reply to one of our pending queries
       // Only emit for actual 'reply' type, not status updates like outbound.reply, query.completed
       if (inReplyTo && item.type === 'reply' && pendingOutgoingQueries.has(inReplyTo)) {
-        server.emit('reply', {
+        handleIncomingReply({
           from,
           message,
           in_reply_to: inReplyTo,
@@ -714,7 +794,7 @@ async function pollNews() {
         continue;
       } else if (item.type === 'message') {
         // General message
-        server.emit('message', {
+        handleIncomingMessage({
           type: item.type,
           from,
           message,
@@ -760,29 +840,11 @@ function startManagerConnection() {
   connectManagerWebSocket();
 }
 
-// ==================== Database Setup ====================
-// Optional: if DATABASE_URL is set (and Postgres is reachable), persist this interactive agent's news feed and queries.
-if (process.env.DATABASE_URL) {
-  createDb()
-    .then((db) => {
-      localDb = db;
-      // Best-effort; manager also runs migrations.
-      migrateDb(db).catch(() => {});
-      getOrCreateTeamId(db, activeTeam)
-        .then((id) => {
-          localDbTeamId = id;
-        })
-        .catch(() => {});
-    })
-    .catch(() => {
-      // ignore DB init errors; CLI still works in-memory
-    });
-}
 
 // Determine endpoint URL for registration
 // Use localhost by default for local agent communication
 function getEndpointUrl(): string {
-  return `http://localhost:${port}`;
+  return MANAGER_URL;
 }
 
 /**
@@ -993,26 +1055,12 @@ async function registerWithManager() {
     if (response.ok) {
       const data: any = await response.json().catch(() => ({}));
       if (data?.id) {
-        localAgentId = String(data.id);
+        const localAgentId = String(data.id);
         // Persist the id so future runs always upsert the same agent, even if name/metadata changes.
         const next = readLocalIdentity();
         next[activeTeam] = next[activeTeam] || {};
         next[activeTeam][name] = { id: localAgentId };
         writeLocalIdentity(next);
-
-        // Ensure DB team id is ready; then bind server to DB.
-        if (localDb) {
-          if (!localDbTeamId) {
-            try {
-              localDbTeamId = await getOrCreateTeamId(localDb, activeTeam);
-            } catch {
-              // ignore
-            }
-          }
-          if (localDbTeamId) {
-            server.setDbConfig({ db: localDb, teamId: localDbTeamId, agentId: localAgentId });
-          }
-        }
       }
       console.log(`${colors.green}✅ Registered as agent "${name}"${colors.reset}`);
       console.log(`${colors.gray}   Endpoint: ${endpoint}${colors.reset}\n`);
@@ -1118,10 +1166,10 @@ async function saveNewsFeeds() {
     const listData: any = await listResp.json();
     const agents: any[] = listData.agents || [];
 
-    // Include this interactive agent too (manager CLI server)
-    const selfUrl = `http://localhost:${port}`;
+    // Include the manager daemon itself for the CLI's own inbox view.
+    const selfUrl = MANAGER_URL;
     const allTargets: Array<{ name: string; url: string; type: string }> = [
-      { name, url: selfUrl, type: 'interactive' },
+      { name, url: selfUrl, type: 'manager' },
       ...agents.map(a => ({ name: a.name, url: a.url, type: a.type || 'claude' }))
     ];
 
@@ -1146,10 +1194,11 @@ async function saveNewsFeeds() {
 
     for (const t of targets) {
       try {
-        const newsUrl = `${t.url}/news?since=0`;
-        const resp = await fetch(newsUrl, {
-          signal: AbortSignal.timeout(5000)
-        });
+        const resp = t.name.toLowerCase() === name.toLowerCase()
+          ? await managerFetch('/news?since=0')
+          : await fetch(`${t.url}/news?since=0`, {
+              signal: AbortSignal.timeout(5000)
+            });
         if (!resp.ok) {
           const text = await resp.text().catch(() => resp.statusText);
           failed++;
@@ -1296,6 +1345,24 @@ async function handleLine(line: string) {
   // Expand macros (:::macroname args:::) before processing
   if (input.includes(':::')) {
     input = expandMacros(input);
+  }
+
+  // Handle number input as a quick reply to pending manager inbox work.
+  const numericReply = /^\d+$/.test(input) ? parseInt(input, 10) : NaN;
+  if (!Number.isNaN(numericReply) && numericReply > 0) {
+    try {
+      const pending = await fetchPendingManagerInbox();
+      if (numericReply <= pending.length) {
+        const query = pending[numericReply - 1];
+        await promptForManagerInboxResponse(query);
+        rl.prompt();
+        return;
+      }
+    } catch (error: any) {
+      console.log(`\n${colors.red}❌ ${error?.message || error}${colors.reset}\n`);
+      rl.prompt();
+      return;
+    }
   }
   
   // Handle commands
@@ -1901,6 +1968,52 @@ async function handleLine(line: string) {
   
   if (input === '/help' || input === '/h') {
     printHelp('Available Commands:');
+    rl.prompt();
+    return;
+  }
+
+  if (input.startsWith('/respond ')) {
+    const rest = input.substring('/respond '.length).trim();
+    if (!rest) {
+      console.log(`\n${colors.red}❌ Usage: /respond <number|query_id> [response]${colors.reset}`);
+      console.log(`${colors.gray}Example: /respond 1${colors.reset}`);
+      console.log(`${colors.gray}Example: /respond 1 Yes, I handled it${colors.reset}`);
+      console.log(`${colors.gray}Example: /respond query_123 Yes, I handled it${colors.reset}\n`);
+      rl.prompt();
+      return;
+    }
+
+    try {
+      const pending = await fetchPendingManagerInbox();
+      const parts = rest.split(' ');
+      const identifier = parts[0];
+      const responseText = parts.slice(1).join(' ').trim();
+
+      let query: ManagerInboxItem | undefined;
+      const numericIdentifier = parseInt(identifier, 10);
+      if (!Number.isNaN(numericIdentifier) && numericIdentifier > 0 && numericIdentifier <= pending.length) {
+        query = pending[numericIdentifier - 1];
+      } else {
+        query = pending.find((item) => item.query_id === identifier);
+      }
+
+      if (!query) {
+        console.log(`\n${colors.red}❌ Query "${identifier}" not found in the pending manager inbox${colors.reset}\n`);
+        rl.prompt();
+        return;
+      }
+
+      if (responseText) {
+        await respondToManagerInboxQuery(query.query_id, responseText, query.session_id);
+        console.log(`\n${colors.green}✅ Response sent!${colors.reset}\n`);
+        lastPendingCount = 0;
+      } else {
+        await promptForManagerInboxResponse(query);
+      }
+    } catch (error: any) {
+      console.log(`\n${colors.red}❌ ${error?.message || error}${colors.reset}\n`);
+    }
+
     rl.prompt();
     return;
   }
@@ -3773,8 +3886,55 @@ function updatePrompt() {
   rl.setPrompt(`${colors.green}> [${name}@${displayTeam}${agentSuffix}]${colors.reset} `);
 }
 
+async function promptForManagerInboxResponse(query: ManagerInboxItem): Promise<void> {
+  console.log(`\n${colors.bold}${colors.yellow}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${colors.reset}`);
+  console.log(`${colors.bold}📝 Pending:${colors.reset} ${query.message}`);
+  console.log(`${colors.gray}Query:${colors.reset} ${query.query_id}`);
+  console.log(`${colors.bold}${colors.yellow}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${colors.reset}\n`);
+  console.log(`${colors.gray}💬 Enter your response (or /cancel to abort):${colors.reset}\n`);
+
+  const responseRl = readline.createInterface({
+    input: process.stdin,
+    output: process.stdout,
+    prompt: `${colors.cyan}>>${colors.reset} `
+  });
+
+  return await new Promise((resolve) => {
+    responseRl.prompt();
+
+    responseRl.once('line', async (responseLine) => {
+      const response = responseLine.trim();
+
+      if (response === '/cancel' || response === '/c') {
+        console.log(`\n${colors.yellow}❌ Response cancelled${colors.reset}\n`);
+        responseRl.close();
+        resolve();
+        return;
+      }
+
+      if (!response) {
+        console.log(`\n${colors.red}❌ Response cannot be empty${colors.reset}\n`);
+        responseRl.close();
+        resolve();
+        return;
+      }
+
+      try {
+        await respondToManagerInboxQuery(query.query_id, response, query.session_id);
+        console.log(`\n${colors.green}✅ Response sent!${colors.reset}\n`);
+        lastPendingCount = 0;
+      } catch (error: any) {
+        console.log(`\n${colors.red}❌ ${error?.message || error}${colors.reset}\n`);
+      }
+
+      responseRl.close();
+      resolve();
+    });
+  });
+}
+
 async function displayPendingQuestions(force: boolean = false) {
-  const pending = await server.getPendingQueries();
+  const pending = await fetchPendingManagerInbox();
   
   if (pending.length === 0) {
     if (force || lastPendingCount > 0) {
@@ -3821,7 +3981,7 @@ if (process.stdout.isTTY) {
   process.stdout.write('\x1b[?25h');
 }
 
-server.start().then(async () => {
+async function initializeCli() {
   // Check if manager is running, auto-start if not (before registering)
   let managerRunning = await checkManager();
   if (!managerRunning) {
@@ -3856,6 +4016,10 @@ server.start().then(async () => {
   console.log(`${colors.gray}Type /help for commands, /deploy <config> to create agents${colors.reset}\n`);
   updatePrompt();
   rl.prompt();
+}
+
+void initializeCli().catch((error: any) => {
+  console.log(`\n${colors.red}❌ CLI startup failed: ${error?.message || error}${colors.reset}\n`);
 });
 
 rl.on('line', handleLine);
@@ -4651,7 +4815,7 @@ async function askAgent(agentName: string, message: string, useSession: boolean 
       });
 
       // Record outbound message in our own news feed
-      server.recordOutboundMessage({
+      recordOutboundMessage({
         to: agent.name,
         message,
         queryId,
@@ -4753,7 +4917,7 @@ async function broadcastToAllAgents(message: string) {
             });
           }
           // Record outbound broadcast in our own news feed
-          server.recordOutboundMessage({
+          recordOutboundMessage({
             to: agent.name,
             message,
             queryId,
@@ -5395,7 +5559,7 @@ async function showMyNews() {
     console.log(`\n${colors.cyan}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${colors.reset}`);
     console.log(`${colors.bold}📰 Your News Feed (${name})${colors.reset}\n`);
 
-    const items = await server.getNewsItems(15);
+    const items = await getManagerNewsItems(15);
 
     if (items.length === 0) {
       console.log(`${colors.yellow}📭 No news items yet${colors.reset}`);
