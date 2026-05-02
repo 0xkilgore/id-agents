@@ -372,7 +372,6 @@ function getAgentDisplayName(agent: any): string {
 
 // Use core findProjectRoot with current file's directory as starting point
 const PROJECT_ROOT = coreFindProjectRoot(path.dirname(fileURLToPath(import.meta.url)));
-const LOCAL_IDENTITY_PATH = path.join(PROJECT_ROOT, 'workspace', 'manager', 'interactive-agent-identity.json');
 
 function getPackageInfo(): { version: string; license: string } {
   try {
@@ -385,27 +384,6 @@ function getPackageInfo(): { version: string; license: string } {
 }
 
 const PKG_INFO = getPackageInfo();
-
-function readLocalIdentity(): { [team: string]: { [agentName: string]: { id: string } } } {
-  try {
-    if (!fs.existsSync(LOCAL_IDENTITY_PATH)) return {};
-    const raw = fs.readFileSync(LOCAL_IDENTITY_PATH, 'utf8');
-    const parsed = JSON.parse(raw);
-    return parsed && typeof parsed === 'object' ? parsed : {};
-  } catch {
-    return {};
-  }
-}
-
-function writeLocalIdentity(next: any) {
-  try {
-    const dir = path.dirname(LOCAL_IDENTITY_PATH);
-    fs.mkdirSync(dir, { recursive: true });
-    fs.writeFileSync(LOCAL_IDENTITY_PATH, JSON.stringify(next, null, 2), 'utf8');
-  } catch {
-    // ignore
-  }
-}
 
 // Wrapper for core readDotEnvFile
 function readDotEnvFile(envPath: string): Record<string, string> {
@@ -840,13 +818,6 @@ function startManagerConnection() {
   connectManagerWebSocket();
 }
 
-
-// Determine endpoint URL for registration
-// Use localhost by default for local agent communication
-function getEndpointUrl(): string {
-  return MANAGER_URL;
-}
-
 /**
  * Start or restart a local agent process
  * Returns { success, pid?, logFile?, error? }
@@ -1011,96 +982,22 @@ async function regenerateTeamConfigIfMissing(teamName: string, force: boolean = 
   }
 }
 
-async function registerWithManager() {
-  // Always register - you are an agent in the network
-  try {
-    const endpoint = getEndpointUrl();
-    const localIdentity = readLocalIdentity();
-    const existingId = localIdentity?.[activeTeam]?.[name]?.id;
-    const stableInteractiveId =
-      'interactive_' +
-      name
-        .toLowerCase()
-        .replace(/[^a-z0-9_-]+/g, '_')
-        .replace(/^_+|_+$/g, '')
-        .slice(0, 60);
-    // CLI no longer accepts POST /news — the daemon owns the manager
-    // inbox and writes directly to the shared DB. Advertising `false`
-    // tells the daemon to skip its CLI-forward path and avoid noisy
-    // 410 responses when replies/messages arrive.
-    const canReceiveDirectMessages = false;
-
-    const response = await managerFetch('/agents/register', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        // ID-first: if we've ever been assigned an id for this team, keep using it forever.
-        // Also ensure the interactive agent has a stable canonical id even on first run (so DB lookup is deterministic).
-        id: existingId || stableInteractiveId,
-        // You are an agent, but not a worker agent. Treat this as an interactive agent (not "virtual").
-        type: 'interactive',
-        name,
-        endpoint,
-        // Tell manager whether we can receive direct messages (for reply routing)
-        canReceiveDirectMessages,
-        metadata: {
-          name,
-          service_type: 'REST-AP',
-          service: endpoint,
-          canReceiveDirectMessages
-        }
-      })
-    });
-    
-    if (response.ok) {
-      const data: any = await response.json().catch(() => ({}));
-      if (data?.id) {
-        const localAgentId = String(data.id);
-        // Persist the id so future runs always upsert the same agent, even if name/metadata changes.
-        const next = readLocalIdentity();
-        next[activeTeam] = next[activeTeam] || {};
-        next[activeTeam][name] = { id: localAgentId };
-        writeLocalIdentity(next);
-      }
-      console.log(`${colors.green}✅ Registered as agent "${name}"${colors.reset}`);
-      console.log(`${colors.gray}   Endpoint: ${endpoint}${colors.reset}\n`);
-    } else {
-      const errText = await response.text().catch(() => '');
-      console.log(`${colors.yellow}⚠️  Could not register with manager${colors.reset}`);
-      console.log(`${colors.gray}   URL: ${MANAGER_URL}/agents/register${colors.reset}`);
-      if (errText) console.log(`${colors.gray}   Error: ${errText.slice(0, 100)}${colors.reset}`);
-      console.log(`${colors.gray}   You can still use the CLI, but other agents won't discover you${colors.reset}\n`);
-    }
-  } catch (error: any) {
-    const isConnErr = error?.cause?.code === 'ECONNREFUSED' || error?.message?.includes('fetch failed');
-    if (isConnErr) {
-      // Manager may still be starting — retry silently after a delay
-      setTimeout(async () => {
-        try {
-          await registerWithManager();
-        } catch { /* silent retry */ }
-      }, 5000);
-    } else {
-      console.log(`${colors.yellow}⚠️  Could not register with manager${colors.reset}`);
-      console.log(`${colors.gray}   Error: ${error?.message || error}${colors.reset}\n`);
-    }
-  }
-}
-
 /**
- * Ensure the CLI's interactive manager-inbox row is registered for the
- * effective team after a /sync or /deploy that may have re-targeted a
- * different team than activeTeam. Switches activeTeam if needed and
- * awaits registerWithManager so reply routing converges before we return.
+ * Keep the CLI aligned with the effective team after a /sync or /deploy
+ * retarget. The daemon owns the manager inbox identity, so the CLI only
+ * needs to switch teams and reconnect its manager transport.
  *
- * Returns true if a re-registration occurred (caller may want to refresh
+ * Returns true if a re-target occurred (caller may want to refresh
  * prompt / log a hint), false otherwise.
  */
-async function ensureCliRegisteredForEffectiveTeam(effectiveTeam: string | undefined | null): Promise<boolean> {
+async function ensureCliTracksEffectiveTeam(effectiveTeam: string | undefined | null): Promise<boolean> {
   if (!effectiveTeam || effectiveTeam === activeTeam) return false;
   activeTeam = effectiveTeam;
+  activeServerName = effectiveTeam;
   updatePrompt();
-  await registerWithManager();
+  stopManagerConnection();
+  useWebSocket = true;
+  startManagerConnection();
   return true;
 }
 
@@ -1484,9 +1381,6 @@ async function handleLine(line: string) {
             // Reconnect WebSocket
             stopManagerConnection();
             useWebSocket = true;
-
-            // Re-register with manager
-            await registerWithManager();
             startManagerConnection();
 
             console.log(`\n${colors.green}✅ Rebuild complete${colors.reset}`);
@@ -1610,8 +1504,9 @@ async function handleLine(line: string) {
         updatePrompt();
         console.log(`\n${colors.green}✅ Switched to ${colors.cyan}${teamName}${colors.reset}`);
         console.log(`${colors.gray}   Server: ${MANAGER_URL}${colors.reset}\n`);
-        await registerWithManager();
         stopManagerConnection();
+        useWebSocket = true;
+        startManagerConnection();
       } catch (err: any) {
         console.log(`\n${colors.yellow}⚠️  Could not connect to manager at ${MANAGER_URL}${colors.reset}`);
         console.log(`${colors.gray}   Start manager: node dist/start-agent-manager.js${colors.reset}\n`);
@@ -1955,17 +1850,6 @@ async function handleLine(line: string) {
     return;
   }
 
-  if (input === '/register-me' || input === '/register-self') {
-    if (!(await checkManager())) {
-      showManagerNotRunningError();
-      rl.prompt();
-      return;
-    }
-    await registerWithManager();
-    rl.prompt();
-    return;
-  }
-  
   if (input === '/help' || input === '/h') {
     printHelp('Available Commands:');
     rl.prompt();
@@ -2501,10 +2385,9 @@ async function handleLine(line: string) {
             await probeNewAgentsReady(newOrUpdated);
           }
 
-          // If sync targeted a different team, switch activeTeam and
-          // re-register so reply routing (POST /talk, GET /news) lands
-          // on this CLI's interactive row in the new team.
-          const switched = await ensureCliRegisteredForEffectiveTeam(data.team);
+          // If sync targeted a different team, retarget the CLI and its
+          // manager connection to that team.
+          const switched = await ensureCliTracksEffectiveTeam(data.team);
           if (switched) {
             console.log(`${colors.green}   Active team switched to "${data.team}"${colors.reset}`);
           }
@@ -3982,7 +3865,7 @@ if (process.stdout.isTTY) {
 }
 
 async function initializeCli() {
-  // Check if manager is running, auto-start if not (before registering)
+  // Check if manager is running, auto-start if not.
   let managerRunning = await checkManager();
   if (!managerRunning) {
     console.log(`${colors.yellow}Starting manager on port ${MANAGER_PORT}...${colors.reset}`);
@@ -4006,9 +3889,6 @@ async function initializeCli() {
   setInterval(() => {
     displayPendingQuestions().catch(() => {});
   }, 2000);
-
-  // Register with manager now that it's running
-  await registerWithManager();
 
   // Start WebSocket connection to manager (works for both local and remote)
   startManagerConnection();
@@ -4061,7 +3941,7 @@ async function checkAgentStatus(longFormat: boolean = false) {
         const isExternal = agent.type === 'virtual' || agent.type === 'interactive';
         const agentUrl = agent.url || (isExternal ? agent.endpoint : `http://localhost:${agent.port}`);
 
-        // Special handling for interactive manager agent (this CLI itself)
+        // Special handling for the daemon-owned manager agent surfaced in the CLI.
         const isManagerAgent = agent.type === 'interactive' && agent.name === name;
 
         // Try to reach the agent's catalog endpoint
@@ -4073,7 +3953,7 @@ async function checkAgentStatus(longFormat: boolean = false) {
         let repliesSent = 0;
         let totalNewsItems = 0;
 
-        // Manager agent is always "responding" since it's this CLI
+        // Manager agent is always "responding" since the daemon owns it.
         if (isManagerAgent) {
           isResponding = true;
           // Try to get activity from manager's own news feed
@@ -5013,6 +4893,7 @@ async function deployFromConfig(filePath: string, args: string[] = []) {
     // Switch to config's team if specified
     if (configTeam && configTeam !== activeTeam) {
       activeTeam = configTeam;
+      activeServerName = configTeam;
       console.log(`${colors.gray}   Using team from config: ${configTeam}${colors.reset}`);
     }
     if (teamContext) {
@@ -5294,25 +5175,19 @@ async function deployFromConfig(filePath: string, args: string[] = []) {
     console.log(`${colors.bold}${colors.cyan}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${colors.reset}\n`);
 
     // Keep the config team active after successful deploy so /ask, /agents etc. work against it.
-    // Await re-registration so reply routing converges before we return —
-    // fire-and-forget races subsequent /ask/talk requests against an old
-    // interactive row in the previous team.
     if (configTeam && activeTeam !== savedTeam && successful > 0) {
       console.log(`${colors.green}   Active team switched to "${configTeam}"${colors.reset}\n`);
-      updatePrompt();
-      try {
-        await registerWithManager();
-      } catch {
-        /* registerWithManager logs its own errors */
-      }
+      await ensureCliTracksEffectiveTeam(configTeam);
     } else if (activeTeam !== savedTeam && successful === 0) {
       // Restore if nothing deployed successfully
       activeTeam = savedTeam;
+      activeServerName = savedTeam;
       console.log(`${colors.gray}   Restored active team: ${savedTeam} (no agents deployed)${colors.reset}\n`);
     }
 
   } catch (error: any) {
     activeTeam = savedTeam;  // Restore on error
+    activeServerName = savedTeam;
     console.log(`\n${colors.red}❌ Error: ${error.message}${colors.reset}\n`);
   }
 }

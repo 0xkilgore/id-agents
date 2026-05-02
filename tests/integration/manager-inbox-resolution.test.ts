@@ -2,20 +2,15 @@
 /**
  * Manager-inbox resolution regression tests (cli-registry-refresh).
  *
- * Background: prior to this fix, POST /talk, POST /news, and POST /schedule
- * resolved the "manager inbox" identity by chaining
- *   findInteractive → getByName('manager') → synthetic id `manager-<team>`
- * with no DB row backing the synthetic id. GET /news read from the same
- * resolution but bailed early (returning empty) when neither the
- * interactive nor named-manager row existed. As a result, replies sent to
- * a freshly-synced team that hadn't yet seen its CLI register would land
- * on a phantom id and the corresponding GET /news call would silently
- * blackhole them.
+ * Background: the manager inbox must remain daemon-owned even when teams
+ * are fresh or stale interactive rows still exist. Reads and writes must
+ * converge on the stable `manager-<team>` row instead of depending on CLI
+ * registration or newest-interactive lookup.
  *
  * The fix routes all four entry points through `resolveManagerInboxId`,
- * which auto-provisions a stub interactive row (id = `manager-<team>`)
- * when nothing else is registered. This guarantees writes and reads
- * converge on the same DB row.
+ * which now uses the stable daemon-owned row id `manager-<team>` and
+ * auto-provisions it when missing. This guarantees writes and reads
+ * converge on the same DB row and ignore stale interactive manager rows.
  */
 
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
@@ -176,13 +171,14 @@ describe('manager-inbox resolution — fresh team with no CLI registered', () =>
   });
 });
 
-describe('manager-inbox resolution — newest interactive row wins (deterministic)', () => {
+describe('manager-inbox resolution — daemon-owned manager row wins', () => {
   const TEAM = 'inbox-multi';
 
-  it('GET /news reads from the newest interactive row when multiple exist', async () => {
+  it('GET /news ignores interactive rows and uses the daemon-owned manager row', async () => {
     const teamId = await db.teams.getOrCreateTeamId(TEAM);
 
-    // Older CLI registration (perhaps a stale screen session).
+    // Stale interactive rows should no longer participate in manager-id
+    // resolution once the daemon-owned manager row becomes authoritative.
     await db.agents.create({
       team_id: teamId,
       id: 'interactive_stale',
@@ -203,7 +199,6 @@ describe('manager-inbox resolution — newest interactive row wins (deterministi
       created_at: 9999,
     });
 
-    // Reply gets stored under whichever id resolveManagerInboxId picks.
     const postRes = await fetch(`${baseUrl}/news`, {
       method: 'POST',
       headers: teamHeaders(TEAM),
@@ -211,10 +206,15 @@ describe('manager-inbox resolution — newest interactive row wins (deterministi
     });
     expect(postRes.status).toBe(201);
 
-    // Read directly from the news repo for both candidate ids.
+    const managerRow = await db.agents.getById(`manager-${TEAM}`);
+    expect(managerRow).not.toBeNull();
+    expect(managerRow?.name).toBe('manager');
+
+    const managerNews = await db.news.poll(`manager-${TEAM}`, 0, { limit: 10 });
     const fresh = await db.news.poll('interactive_fresh', 0, { limit: 10 });
     const stale = await db.news.poll('interactive_stale', 0, { limit: 10 });
-    expect(fresh.length).toBeGreaterThan(0);
+    expect(managerNews.length).toBeGreaterThan(0);
     expect(stale.length).toBe(0);
+    expect(fresh.length).toBe(0);
   });
 });

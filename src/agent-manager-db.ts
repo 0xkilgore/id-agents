@@ -730,25 +730,14 @@ export class AgentManagerDb {
   /**
    * Resolve the persistent manager-inbox identity for a team.
    *
-   * Order of preference:
-   *   1. Newest interactive CLI agent row (`findInteractive`, ORDER BY created_at DESC)
-   *   2. Named "manager" agent row
-   *   3. Auto-provisioned stub interactive row `manager-${teamName}` so
-   *      replies and news never blackhole when no CLI is registered yet.
+   * Source of truth:
+   *   - stable daemon-owned row `manager-${teamName}`
    *
    * Used by POST /talk, POST /schedule, POST /news, GET /news, and the
    * /remote `news` handler so all manager-inbox reads/writes converge on
-   * the same id resolution. Returning a stable id (rather than null) is
-   * what guarantees inbound replies persist even before the operator's
-   * CLI has registered against a freshly-synced team.
+   * the same stable id. The CLI is no longer part of manager-id discovery.
    */
   private async resolveManagerInboxId(teamId: string, teamName: string): Promise<string> {
-    const cliAgent = await this.db.agents.findInteractive(teamId);
-    if (cliAgent) return cliAgent.id;
-
-    const namedManager = await this.db.agents.getByName(teamId, 'manager');
-    if (namedManager) return namedManager.id;
-
     const stubId = `manager-${teamName}`;
     const existingStub = await this.db.agents.getById(stubId);
     if (existingStub && existingStub.team_id === teamId) return stubId;
@@ -1936,9 +1925,8 @@ export class AgentManagerDb {
 
         const ts = Date.now();
         const queryId = `query_${ts}_${Math.random().toString(36).slice(2, 9)}`;
-        // Resolve the persistent manager-inbox identity (auto-provisions a
-        // stub if needed) so the query.received event always lands on a
-        // real DB row, even before any CLI has registered.
+        // Resolve the persistent daemon-owned manager-inbox identity so
+        // the query.received event always lands on a real DB row.
         const managerId = await this.resolveManagerInboxId(teamId, teamName);
         const senderName = from || 'external';
 
@@ -2297,10 +2285,9 @@ export class AgentManagerDb {
           );
         }
 
-        // Resolve manager-inbox identity. resolveManagerInboxId auto-creates
-        // a stub interactive row if neither CLI nor named "manager" exists,
-        // so the same id is used for read and write paths and replies stored
-        // via POST /news are immediately visible here.
+        // Resolve the daemon-owned manager-inbox identity so the same id is
+        // used for read and write paths and replies stored via POST /news
+        // are immediately visible here.
         const cliId = await this.resolveManagerInboxId(teamId, teamName);
 
         const newsRows = hasSinceId
@@ -6332,9 +6319,9 @@ export class AgentManagerDb {
         return {
           ok: true,
           result: {
-            // Echo the effective team back so the CLI can re-register its
-            // interactive manager-inbox row when /sync re-targets a team
-            // different from activeTeam.
+            // Echo the effective team back so the CLI can retarget its
+            // daemon connection when /sync re-targets a team different
+            // from activeTeam.
             team: syncTeamName,
             teamId: syncTeamId,
             summary: formatSyncSummary(plan),
@@ -6750,9 +6737,9 @@ export class AgentManagerDb {
         return {
           ok: true,
           result: {
-            // Echo the effective team back so the CLI can re-register its
-            // interactive manager-inbox row when /deploy targets a team
-            // different from activeTeam.
+            // Echo the effective team back so the CLI can retarget its
+            // daemon connection when /deploy targets a team different
+            // from activeTeam.
             team: effectiveTeamName,
             teamId: effectiveTeamId,
             deployed: results.filter(r => r.success).length,
