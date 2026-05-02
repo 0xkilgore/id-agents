@@ -1592,14 +1592,13 @@ export class AgentManagerDb {
   }
 
   private setupRoutes() {
-    // Install team/principal context middleware for all routes
-    this.managementApp.use(this.teamContextMiddleware());
-
     // REST-AP discovery — daemon root advertises itself as the manager so
     // peers can locate the team orchestration and inbox surface without
     // depending on the legacy interactive-CLI catalog on :4000. Shape mirrors
     // the per-agent catalogs published by claude-agent-server / interactive-
     // agent-server (restap_version + agent + endpoints + capabilities).
+    // This route must stay outside team scoping: discovery at the daemon root
+    // should not depend on a team already existing or a caller sending a team header.
     this.managementApp.get('/.well-known/restap.json', (_req, res) => {
       res.json({
         restap_version: '1.0',
@@ -1686,6 +1685,9 @@ export class AgentManagerDb {
         },
       });
     });
+
+    // Install team/principal context middleware for all remaining routes
+    this.managementApp.use(this.teamContextMiddleware());
 
     this.managementApp.get('/health', async (req, res) => {
       const { id: teamId, name: teamName } = await this.getTeam(req);
