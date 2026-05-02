@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.1.93-beta
+
+### Refactors
+
+- Manager collapse. The daemon at `:4100` now owns the manager identity and inbox. The interactive CLI no longer binds `:4000`, no longer registers as a peer agent, and no longer persists `workspace/manager/interactive-agent-identity.json`. Single process, single port, single mental model. New daemon endpoints: `GET /.well-known/restap.json` (manager catalog at the daemon root) and `GET /manager/inbox/pending` + `POST /manager/inbox/respond` (CLI client APIs). Full design at `docs/design/manager-collapse.md`. Verified end-to-end: `:4000` empty during a CLI session, peer agents reach `manager` via the daemon inbox, no local identity file is regenerated, full test suite (557 tests) green.
+
+### Fixes
+
+- Silence `[REST-AP] Could not fetch catalog from http://localhost:0` warning that appeared after the manager-collapse refactor. Interactive agent rows (`manager-<team>`) have `port=0` and `endpoint=''`, and a few caller paths fell back to `http://localhost:${port}`. `discoverRestAPEndpoints` now short-circuits on empty or `:0`-port URLs and returns REST-AP defaults silently. New unit and integration regression tests cover both the function-level guard and the `/news` handler against virtual or no-port agent rows.
+
 ## 0.1.92-beta
 
 ### Fixes
