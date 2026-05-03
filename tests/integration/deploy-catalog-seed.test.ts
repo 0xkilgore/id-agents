@@ -235,6 +235,85 @@ describe('catalog seed deploy integration', () => {
     expect(auditorCat?.notSuitableFor).toBeUndefined();
   });
 
+  it('seeds metadata.catalog from a catalogFile (markdown) alongside inline catalog', async () => {
+    // Mixed config: jrdev uses catalogFile (markdown w/ frontmatter), auditor stays inline.
+    const mdPath = path.join(configDir, 'catalogs', 'jrdev.md');
+    fs.mkdirSync(path.dirname(mdPath), { recursive: true });
+    fs.writeFileSync(mdPath, `---
+role: junior-developer
+expertise: [typescript, simple-refactors]
+costTier: low
+notSuitableFor: [security-key-handling]
+status: available
+---
+
+Junior dev for low-stakes work via catalogFile.
+`);
+
+    const jrDir = path.join(configDir, 'jr-workdir');
+    const auditorDir = path.join(configDir, 'auditor-workdir');
+    const mixedYaml = `version: "1"
+team: ${TEST_TEAM}
+
+defaults:
+  local: true
+  runtime: claude-code-cli
+  model: claude-haiku-4-5-20251001
+
+agents:
+  - name: ${AGENT_JR}
+    description: "Junior dev test seed"
+    workingDirectory: ${jrDir}
+    catalogFile: catalogs/jrdev.md
+
+  - name: ${AGENT_AUDITOR}
+    description: "Auditor test seed"
+    workingDirectory: ${auditorDir}
+    catalog:
+      role: auditor
+      description: "Reviews code and configs."
+      expertise: [audit, review]
+      costTier: medium
+      status: available
+`;
+    const mixedPath = path.join(configDir, 'mixed.yaml');
+    fs.writeFileSync(mixedPath, mixedYaml);
+
+    await deploy(mixedPath);
+
+    // catalogFile-driven agent
+    const jr = await readAgentRowByName(AGENT_JR);
+    const jrCat = (jr.metadata as any)?.catalog;
+    expect(jrCat).toBeDefined();
+    expect(jrCat.role).toBe('junior-developer');
+    expect(jrCat.expertise).toEqual(['typescript', 'simple-refactors']);
+    expect(jrCat.costTier).toBe('low');
+    expect(jrCat.notSuitableFor).toEqual(['security-key-handling']);
+    expect(jrCat.status).toBe('available');
+    // body became the description
+    expect(jrCat.description).toBe(`Junior dev for low-stakes work via catalogFile.
+`);
+
+    // inline catalog still works
+    const auditor = await readAgentRowByName(AGENT_AUDITOR);
+    const auditorCat = (auditor.metadata as any)?.catalog;
+    expect(auditorCat?.role).toBe('auditor');
+    expect(auditorCat?.costTier).toBe('medium');
+
+    // GET /catalog round-trip via the manager's per-agent /catalog proxy.
+    // Manager exposes the catalog at GET /agents/by-name/:name (metadata.catalog
+    // is the single source of truth) — verify via that path so we don't need a
+    // running agent server (spawnLocalAgentProcess is stubbed).
+    const resp = await fetch(`${baseUrl}/agents/by-name/${AGENT_JR}`, {
+      headers: adminHeaders(TEST_TEAM),
+    });
+    expect(resp.ok).toBe(true);
+    const body = await resp.json() as any;
+    const apiCat = body?.metadata?.catalog ?? body?.agent?.metadata?.catalog;
+    expect(apiCat?.role).toBe('junior-developer');
+    expect(apiCat?.costTier).toBe('low');
+  });
+
   it('redeploy re-applies the YAML floor over a runtime PATCH', async () => {
     // First deploy seeds the original catalog.
     await deploy(firstYamlPath);

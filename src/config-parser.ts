@@ -102,6 +102,10 @@ export interface AgentSpec {
                                       // Visible to peers via the agent's /catalog endpoint.
                                       // Runtime PATCH /catalog still works; redeploy/sync
                                       // re-applies the YAML floor, overwriting any drift.
+  catalogFile?: string;               // Path to a markdown file with optional YAML frontmatter,
+                                      // resolved relative to the config file (like heartbeatFile).
+                                      // Mutually exclusive with `catalog:`. Resolved at
+                                      // processConfig time into `catalog` and cleared.
 }
 
 export interface CalendarSpec {
@@ -468,6 +472,20 @@ export function validateConfig(config: DeployConfig): ValidationResult {
       errors.push({
         path: `${agentPath}.agent`,
         message: 'agent must be a string'
+      });
+    }
+
+    if (agent.catalogFile !== undefined && typeof agent.catalogFile !== 'string') {
+      errors.push({
+        path: `${agentPath}.catalogFile`,
+        message: 'catalogFile must be a string',
+      });
+    }
+
+    if (agent.catalog !== undefined && agent.catalogFile !== undefined) {
+      errors.push({
+        path: agentPath,
+        message: `Agent ${agent.name || `[${index}]`}: cannot use both catalog and catalogFile — pick one`,
       });
     }
 
@@ -1009,6 +1027,64 @@ export function parseSubAgentTemplate(raw: string): SubAgentTemplate {
 }
 
 /**
+ * Parse a catalog markdown file into an AgentCatalog object.
+ *
+ * Format: optional YAML frontmatter (--- delimited) followed by markdown body.
+ * The body becomes `description` unless frontmatter explicitly sets `description`
+ * (frontmatter wins). Frontmatter fields recognized:
+ *   - role         (string, required at semantic level — checked elsewhere)
+ *   - expertise    (string[])
+ *   - costTier     ('low' | 'medium' | 'high')
+ *   - notSuitableFor (string[])
+ *   - status       (string, defaults to 'available')
+ *   - description  (string, overrides body when present)
+ * Unknown frontmatter fields pass through onto the catalog object.
+ */
+export function parseCatalogMarkdown(raw: string): AgentCatalog {
+  const fmMatch = raw.match(/^---\r?\n([\s\S]*?)(?:\r?\n)?---\r?\n([\s\S]*)$/);
+
+  let frontmatter: Record<string, any> = {};
+  let body: string;
+  if (fmMatch) {
+    frontmatter = (yaml.load(fmMatch[1]) as Record<string, any>) || {};
+    body = fmMatch[2].replace(/^\r?\n/, '');
+  } else {
+    body = raw;
+  }
+
+  const catalog: AgentCatalog = { ...frontmatter };
+
+  if (typeof frontmatter.description === 'string') {
+    catalog.description = frontmatter.description;
+  } else if (body) {
+    catalog.description = body;
+  }
+
+  if (catalog.status === undefined) {
+    catalog.status = 'available';
+  }
+
+  return catalog;
+}
+
+/**
+ * Resolve a `catalogFile` reference to an AgentCatalog object.
+ * Path is resolved relative to the supplied basePath (typically the config dir).
+ */
+export function resolveCatalogFile(catalogFile: string, basePath: string): AgentCatalog {
+  const filePath = path.resolve(basePath, catalogFile);
+  if (!fs.existsSync(filePath)) {
+    throw new Error(`catalogFile not found: ${filePath}`);
+  }
+  const content = fs.readFileSync(filePath, 'utf-8');
+  const catalog = parseCatalogMarkdown(content);
+  if (typeof catalog.role !== 'string' || catalog.role.trim() === '') {
+    throw new Error(`Invalid catalogFile: ${filePath} - catalog.role is required`);
+  }
+  return catalog;
+}
+
+/**
  * Heartbeat configuration loaded from yaml file
  */
 export interface HeartbeatConfig {
@@ -1178,6 +1254,19 @@ export function processConfig(
         ...agent,
         heartbeat,  // HeartbeatConfig {interval, message}
         heartbeatFile: undefined  // Clear after resolving
+      };
+    }
+    return agent;
+  });
+
+  // Resolve catalogFile for each agent (markdown w/ optional YAML frontmatter)
+  resolvedConfig.agents = resolvedConfig.agents.map(agent => {
+    if (agent.catalogFile) {
+      const catalog = resolveCatalogFile(agent.catalogFile, basePath);
+      return {
+        ...agent,
+        catalog,
+        catalogFile: undefined,
       };
     }
     return agent;

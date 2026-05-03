@@ -6,7 +6,10 @@ import os from 'os';
 import path from 'path';
 
 import {
+  parseCatalogMarkdown,
   parseTeamConfig,
+  processConfig,
+  resolveCatalogFile,
   resolveConfigLibraryRoot,
   resolveLibraryAgentPath,
   validateConfig,
@@ -189,6 +192,141 @@ agents:
       expect(stringResult.errors).toContainEqual({
         path: 'agents[0].catalog',
         message: 'catalog must be an object',
+      });
+    });
+
+    describe('catalogFile (markdown)', () => {
+      it('parses body-only markdown as the catalog description (no frontmatter)', () => {
+        const cat = parseCatalogMarkdown(`## Junior Developer
+
+Markdown body stays intact.
+`);
+        expect(cat.description).toBe(`## Junior Developer
+
+Markdown body stays intact.
+`);
+        expect(cat.role).toBeUndefined();
+        expect(cat.status).toBe('available'); // default
+      });
+
+      it('parses frontmatter-only with empty body', () => {
+        const cat = parseCatalogMarkdown(`---
+role: junior-developer
+expertise: [typescript, simple-refactors]
+costTier: low
+notSuitableFor: [security-key-handling]
+status: busy
+---
+`);
+        expect(cat.role).toBe('junior-developer');
+        expect(cat.expertise).toEqual(['typescript', 'simple-refactors']);
+        expect(cat.costTier).toBe('low');
+        expect(cat.notSuitableFor).toEqual(['security-key-handling']);
+        expect(cat.status).toBe('busy');
+        // No body and no description in frontmatter -> description undefined
+        expect(cat.description).toBeUndefined();
+      });
+
+      it('frontmatter description wins over body when both set', () => {
+        const cat = parseCatalogMarkdown(`---
+role: junior-developer
+description: "FM wins"
+---
+
+Body description that should be ignored.
+`);
+        expect(cat.description).toBe('FM wins');
+        expect(cat.role).toBe('junior-developer');
+      });
+
+      it('uses body as description when frontmatter omits description', () => {
+        const cat = parseCatalogMarkdown(`---
+role: junior-developer
+costTier: low
+---
+
+Junior dev for low-stakes work.
+`);
+        expect(cat.description).toBe(`Junior dev for low-stakes work.
+`);
+        expect(cat.role).toBe('junior-developer');
+      });
+
+      it('resolveCatalogFile reads relative to basePath', () => {
+        tmpDir = mkTmp();
+        const mdPath = path.join(tmpDir, 'catalogs', 'jrdev.md');
+        fs.mkdirSync(path.dirname(mdPath), { recursive: true });
+        fs.writeFileSync(mdPath, `---
+role: junior-developer
+costTier: low
+---
+
+Body desc.
+`);
+        const cat = resolveCatalogFile('catalogs/jrdev.md', tmpDir);
+        expect(cat.role).toBe('junior-developer');
+        expect(cat.description).toBe(`Body desc.
+`);
+      });
+
+      it('resolveCatalogFile rejects markdown without a role in frontmatter', () => {
+        tmpDir = mkTmp();
+        const mdPath = path.join(tmpDir, 'catalogs', 'jrdev.md');
+        fs.mkdirSync(path.dirname(mdPath), { recursive: true });
+        fs.writeFileSync(mdPath, `---
+costTier: low
+---
+
+Body desc.
+`);
+        expect(() => resolveCatalogFile('catalogs/jrdev.md', tmpDir))
+          .toThrowError(new RegExp(`Invalid catalogFile: .*catalog.role is required`));
+      });
+
+      it('processConfig resolves catalogFile into catalog and clears catalogFile', () => {
+        tmpDir = mkTmp();
+        const mdPath = path.join(tmpDir, 'catalogs', 'jrdev.md');
+        fs.mkdirSync(path.dirname(mdPath), { recursive: true });
+        fs.writeFileSync(mdPath, `---
+role: junior-developer
+expertise: [typescript]
+costTier: low
+---
+
+Body description.
+`);
+        const yamlPath = path.join(tmpDir, 'team.yaml');
+        fs.writeFileSync(yamlPath, `version: "1"
+team: t1
+
+agents:
+  - name: jrdev
+    catalogFile: catalogs/jrdev.md
+`);
+        const out = processConfig(yamlPath);
+        expect(out.errors).toEqual([]);
+        const a = out.agents[0];
+        expect(a.catalog?.role).toBe('junior-developer');
+        expect(a.catalog?.expertise).toEqual(['typescript']);
+        expect(a.catalog?.description).toBe(`Body description.
+`);
+        expect(a.catalogFile).toBeUndefined();
+      });
+
+      it('validateConfig rejects an agent that sets both catalog and catalogFile', () => {
+        const result = validateConfig({
+          version: '1',
+          agents: [{
+            name: 'jrdev',
+            catalogFile: 'catalogs/jrdev.md',
+            catalog: { role: 'junior-developer' },
+          }],
+        });
+        expect(result.valid).toBe(false);
+        expect(result.errors).toContainEqual({
+          path: 'agents[0]',
+          message: 'Agent jrdev: cannot use both catalog and catalogFile — pick one',
+        });
       });
     });
 
