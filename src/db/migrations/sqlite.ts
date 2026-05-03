@@ -57,7 +57,9 @@ export async function migrateSqlite(adapter: SqliteAdapter): Promise<void> {
       data TEXT,
       query_id TEXT,
       kind TEXT,
-      reply_expected INTEGER
+      reply_expected INTEGER,
+      owner_kind TEXT NOT NULL DEFAULT 'agent',
+      owner_id TEXT NOT NULL DEFAULT ''
     );
 
     CREATE TABLE IF NOT EXISTS queries (
@@ -71,12 +73,17 @@ export async function migrateSqlite(adapter: SqliteAdapter): Promise<void> {
       result TEXT,
       error TEXT,
       session_id TEXT,
+      owner_kind TEXT NOT NULL DEFAULT 'agent',
+      owner_id TEXT NOT NULL DEFAULT '',
       PRIMARY KEY (agent_id, query_id)
     );
 
     CREATE INDEX IF NOT EXISTS agents_team_name_idx ON agents(team_id, name);
     CREATE INDEX IF NOT EXISTS news_items_agent_time_idx ON news_items(team_id, agent_id, timestamp);
     CREATE INDEX IF NOT EXISTS news_items_query_idx ON news_items(team_id, agent_id, query_id);
+    CREATE INDEX IF NOT EXISTS queries_team_owner_idx ON queries(team_id, owner_kind, owner_id);
+    CREATE INDEX IF NOT EXISTS news_items_team_owner_time_idx ON news_items(team_id, owner_kind, owner_id, timestamp);
+    CREATE INDEX IF NOT EXISTS news_items_owner_query_idx ON news_items(team_id, owner_kind, owner_id, query_id);
     CREATE INDEX IF NOT EXISTS agents_token_idx ON agents(token_id) WHERE token_id IS NOT NULL;
 
     CREATE TABLE IF NOT EXISTS schedule_definitions (
@@ -264,6 +271,45 @@ export async function migrateSqlite(adapter: SqliteAdapter): Promise<void> {
     // Column already exists in upgraded databases.
   }
 
+  // queries / news_items: inbox ownership (owner_kind + owner_id), legacy agent_id retained.
+  try {
+    adapter.exec(`ALTER TABLE queries ADD COLUMN owner_kind TEXT NOT NULL DEFAULT 'agent'`);
+  } catch {
+    // Column already exists in upgraded databases.
+  }
+  try {
+    adapter.exec(`ALTER TABLE queries ADD COLUMN owner_id TEXT NOT NULL DEFAULT ''`);
+  } catch {
+    // Column already exists in upgraded databases.
+  }
+  try {
+    adapter.exec(`ALTER TABLE news_items ADD COLUMN owner_kind TEXT NOT NULL DEFAULT 'agent'`);
+  } catch {
+    // Column already exists in upgraded databases.
+  }
+  try {
+    adapter.exec(`ALTER TABLE news_items ADD COLUMN owner_id TEXT NOT NULL DEFAULT ''`);
+  } catch {
+    // Column already exists in upgraded databases.
+  }
+  await adapter.query(`
+    UPDATE queries SET
+      owner_kind = CASE WHEN agent_id GLOB 'manager-*' THEN 'manager' ELSE 'agent' END,
+      owner_id = CASE WHEN agent_id GLOB 'manager-*' THEN team_id ELSE agent_id END
+    WHERE owner_id = ''
+  `);
+  await adapter.query(`
+    UPDATE news_items SET
+      owner_kind = CASE WHEN agent_id GLOB 'manager-*' THEN 'manager' ELSE 'agent' END,
+      owner_id = CASE WHEN agent_id GLOB 'manager-*' THEN team_id ELSE agent_id END
+    WHERE owner_id = ''
+  `);
+  adapter.exec(`
+    CREATE INDEX IF NOT EXISTS queries_team_owner_idx ON queries(team_id, owner_kind, owner_id);
+    CREATE INDEX IF NOT EXISTS news_items_team_owner_time_idx ON news_items(team_id, owner_kind, owner_id, timestamp);
+    CREATE INDEX IF NOT EXISTS news_items_owner_query_idx ON news_items(team_id, owner_kind, owner_id, query_id);
+  `);
+
   // Remote endpoint columns for public-agent-remote registry entries (Phase 2).
   // All four columns are nullable so existing rows stay intact (backfill-safe).
   // Each ALTER is wrapped in try/catch so a repeated migration call is a no-op.
@@ -378,5 +424,23 @@ async function migrateTasks_TeamNameUnique(adapter: SqliteAdapter): Promise<void
     CREATE INDEX IF NOT EXISTS tasks_owner_idx ON tasks(owner, status, updated_at);
     CREATE INDEX IF NOT EXISTS tasks_team_idx ON tasks(team_id, status, updated_at);
     CREATE UNIQUE INDEX IF NOT EXISTS tasks_uuid_idx ON tasks(uuid);
+  `);
+}
+
+/**
+ * Reverse inbox ownership projection for legacy readers: for rows with
+ * `owner_kind = 'manager'`, set `agent_id = manager-<team name>` from `teams`.
+ * Not run on startup — tests call this explicitly.
+ */
+export async function downMigrateInboxOwnershipSqlite(adapter: SqliteAdapter): Promise<void> {
+  await adapter.query(`
+    UPDATE queries
+    SET agent_id = 'manager-' || (SELECT name FROM teams WHERE teams.id = queries.team_id)
+    WHERE owner_kind = 'manager'
+  `);
+  await adapter.query(`
+    UPDATE news_items
+    SET agent_id = 'manager-' || (SELECT name FROM teams WHERE teams.id = news_items.team_id)
+    WHERE owner_kind = 'manager'
   `);
 }

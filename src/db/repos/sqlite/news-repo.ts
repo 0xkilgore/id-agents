@@ -1,16 +1,51 @@
 // SPDX-License-Identifier: MIT
 
 import type { NewsRepository } from '../../db-service.js';
-import type { NewsItemRow } from '../../types.js';
+import type { InboxOwnerKind, NewsItemRow } from '../../types.js';
 import type { DbAdapter } from '../../db-adapter.js';
 import { parseJsonObject, stringifyJson } from '../../db-json.js';
+
+function resolveNewsOwnership(
+  teamId: string,
+  agentId: string,
+  item: { owner_kind?: InboxOwnerKind; owner_id?: string },
+): { owner_kind: InboxOwnerKind; owner_id: string } {
+  if (item.owner_kind != null && item.owner_id != null) {
+    return { owner_kind: item.owner_kind, owner_id: item.owner_id };
+  }
+  if (agentId.startsWith('manager-')) {
+    return { owner_kind: 'manager', owner_id: teamId };
+  }
+  return { owner_kind: 'agent', owner_id: agentId };
+}
 
 export class SqliteNewsRepo implements NewsRepository {
   constructor(private readonly db: DbAdapter) {}
 
   private parseNewsRow(row: any): NewsItemRow | null {
     if (!row) return null;
-    return { ...row, data: parseJsonObject(row.data) };
+    const agent_id = String(row.agent_id ?? '');
+    const team_id = String(row.team_id ?? '');
+    const owner_kind: InboxOwnerKind =
+      row.owner_kind === 'manager' || row.owner_kind === 'agent'
+        ? row.owner_kind
+        : agent_id.startsWith('manager-')
+          ? 'manager'
+          : 'agent';
+    const owner_id =
+      row.owner_id != null && String(row.owner_id) !== ''
+        ? String(row.owner_id)
+        : owner_kind === 'manager'
+          ? team_id
+          : agent_id;
+    return {
+      ...row,
+      team_id,
+      agent_id,
+      owner_kind,
+      owner_id,
+      data: parseJsonObject(row.data),
+    };
   }
 
   async add(
@@ -24,6 +59,8 @@ export class SqliteNewsRepo implements NewsRepository {
       query_id?: string;
       kind?: 'talk' | 'notify';
       reply_expected?: boolean;
+      owner_kind?: InboxOwnerKind;
+      owner_id?: string;
     },
   ): Promise<void> {
     const replyExpected =
@@ -34,9 +71,10 @@ export class SqliteNewsRepo implements NewsRepository {
           : item.kind === 'notify'
             ? false
             : null;
+    const own = resolveNewsOwnership(teamId, agentId, item);
     await this.db.query(
-      `INSERT INTO news_items (team_id, agent_id, timestamp, type, message, data, query_id, kind, reply_expected)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO news_items (team_id, agent_id, timestamp, type, message, data, query_id, kind, reply_expected, owner_kind, owner_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         teamId,
         agentId,
@@ -47,6 +85,8 @@ export class SqliteNewsRepo implements NewsRepository {
         item.query_id ?? null,
         item.kind ?? null,
         replyExpected === null ? null : replyExpected ? 1 : 0,
+        own.owner_kind,
+        own.owner_id,
       ],
     );
   }
@@ -57,7 +97,7 @@ export class SqliteNewsRepo implements NewsRepository {
     opts?: { limit?: number; queryId?: string },
   ): Promise<NewsItemRow[]> {
     let sql =
-      'SELECT id, type, timestamp, message, data, query_id FROM news_items WHERE agent_id = ? AND timestamp > ?';
+      'SELECT id, team_id, agent_id, type, timestamp, message, data, query_id, kind, reply_expected, owner_kind, owner_id FROM news_items WHERE agent_id = ? AND timestamp > ?';
     const params: unknown[] = [agentId, since];
 
     if (opts?.queryId) {
@@ -81,7 +121,7 @@ export class SqliteNewsRepo implements NewsRepository {
     opts?: { limit?: number; queryId?: string },
   ): Promise<NewsItemRow[]> {
     let sql =
-      'SELECT id, type, timestamp, message, data, query_id FROM news_items WHERE agent_id = ? AND id > ?';
+      'SELECT id, team_id, agent_id, type, timestamp, message, data, query_id, kind, reply_expected, owner_kind, owner_id FROM news_items WHERE agent_id = ? AND id > ?';
     const params: unknown[] = [agentId, sinceId];
 
     if (opts?.queryId) {
@@ -102,7 +142,7 @@ export class SqliteNewsRepo implements NewsRepository {
   async getRecent(teamId: string, types: string[], limit: number): Promise<NewsItemRow[]> {
     const placeholders = types.map(() => '?').join(', ');
     const r = await this.db.query<NewsItemRow>(
-      `SELECT id, query_id, type, message, timestamp, data
+      `SELECT id, team_id, agent_id, query_id, type, message, timestamp, data, kind, reply_expected, owner_kind, owner_id
        FROM news_items
        WHERE team_id = ? AND type IN (${placeholders})
        ORDER BY timestamp DESC
@@ -114,7 +154,7 @@ export class SqliteNewsRepo implements NewsRepository {
 
   async fetchForArchive(teamId: string, before: number): Promise<NewsItemRow[]> {
     const r = await this.db.query<NewsItemRow>(
-      `SELECT type, timestamp, message, data, agent_id, query_id
+      `SELECT id, type, timestamp, message, data, team_id, agent_id, query_id, kind, reply_expected, owner_kind, owner_id
        FROM news_items
        WHERE team_id = ? AND timestamp < ?
        ORDER BY timestamp ASC`,

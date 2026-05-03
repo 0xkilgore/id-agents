@@ -245,7 +245,9 @@ export async function migratePostgres(adapter: DbAdapter): Promise<void> {
       data jsonb,
       query_id text,
       kind text,
-      reply_expected boolean
+      reply_expected boolean,
+      owner_kind text NOT NULL DEFAULT 'agent',
+      owner_id text NOT NULL DEFAULT ''
     );
   `);
 
@@ -266,9 +268,37 @@ export async function migratePostgres(adapter: DbAdapter): Promise<void> {
       result jsonb,
       error text,
       session_id text,
+      owner_kind text NOT NULL DEFAULT 'agent',
+      owner_id text NOT NULL DEFAULT '',
       PRIMARY KEY (agent_id, query_id)
     );
   `);
+
+  await adapter.query(`ALTER TABLE queries ADD COLUMN IF NOT EXISTS owner_kind text NOT NULL DEFAULT 'agent';`);
+  await adapter.query(`ALTER TABLE queries ADD COLUMN IF NOT EXISTS owner_id text NOT NULL DEFAULT '';`);
+  await adapter.query(`ALTER TABLE news_items ADD COLUMN IF NOT EXISTS owner_kind text NOT NULL DEFAULT 'agent';`);
+  await adapter.query(`ALTER TABLE news_items ADD COLUMN IF NOT EXISTS owner_id text NOT NULL DEFAULT '';`);
+
+  await adapter.query(`
+    UPDATE queries SET
+      owner_kind = CASE WHEN agent_id LIKE 'manager-%' THEN 'manager' ELSE 'agent' END,
+      owner_id = CASE WHEN agent_id LIKE 'manager-%' THEN team_id::text ELSE agent_id END
+    WHERE owner_id = ''
+  `);
+  await adapter.query(`
+    UPDATE news_items SET
+      owner_kind = CASE WHEN agent_id LIKE 'manager-%' THEN 'manager' ELSE 'agent' END,
+      owner_id = CASE WHEN agent_id LIKE 'manager-%' THEN team_id::text ELSE agent_id END
+    WHERE owner_id = ''
+  `);
+
+  await adapter.query(`CREATE INDEX IF NOT EXISTS queries_team_owner_idx ON queries(team_id, owner_kind, owner_id);`);
+  await adapter.query(
+    `CREATE INDEX IF NOT EXISTS news_items_team_owner_time_idx ON news_items(team_id, owner_kind, owner_id, timestamp);`,
+  );
+  await adapter.query(
+    `CREATE INDEX IF NOT EXISTS news_items_owner_query_idx ON news_items(team_id, owner_kind, owner_id, query_id);`,
+  );
 
   // 7) Indexes (only if the expected columns exist)
   await adapter.query(`
@@ -629,5 +659,25 @@ export async function migratePostgres(adapter: DbAdapter): Promise<void> {
     CREATE INDEX IF NOT EXISTS checkins_ttl_idx
       ON checkins(team_id, ttl_expires_at)
       WHERE ttl_expires_at IS NOT NULL AND status IN ('active', 'snoozed');
+  `);
+}
+
+/**
+ * Reverse inbox ownership projection for legacy readers: for rows with
+ * `owner_kind = 'manager'`, set `agent_id = manager-<team name>` from `teams`.
+ * Not run on startup — tests call this explicitly.
+ */
+export async function downMigrateInboxOwnershipPostgres(adapter: DbAdapter): Promise<void> {
+  await adapter.query(`
+    UPDATE queries q
+    SET agent_id = 'manager-' || t.name
+    FROM teams t
+    WHERE q.team_id = t.id AND q.owner_kind = 'manager'
+  `);
+  await adapter.query(`
+    UPDATE news_items n
+    SET agent_id = 'manager-' || t.name
+    FROM teams t
+    WHERE n.team_id = t.id AND n.owner_kind = 'manager'
   `);
 }

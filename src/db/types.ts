@@ -50,6 +50,9 @@ export interface TeamRow {
   created_at: string;
 }
 
+/** Inbox ownership — complements legacy `agent_id` during the transition. */
+export type InboxOwnerKind = 'agent' | 'manager';
+
 /** queries table row */
 export interface QueryRow {
   team_id: string;
@@ -62,6 +65,8 @@ export interface QueryRow {
   result: Record<string, unknown> | null;
   error: string | null;
   session_id: string | null;
+  owner_kind: InboxOwnerKind;
+  owner_id: string;
 }
 
 /** news_items table row */
@@ -78,6 +83,8 @@ export interface NewsItemRow {
   kind: 'talk' | 'notify' | null;
   /** Does the sender expect a reply? Mirrors kind but kept explicit for clarity. */
   reply_expected: boolean | null;
+  owner_kind: InboxOwnerKind;
+  owner_id: string;
 }
 
 /** schedule_definitions table row */

@@ -8,7 +8,7 @@
 
 import { describe, it, expect, beforeEach } from 'vitest';
 import { SqliteAdapter } from '../../src/db/sqlite-adapter.js';
-import { migrateSqlite } from '../../src/db/migrations/sqlite.js';
+import { migrateSqlite, downMigrateInboxOwnershipSqlite } from '../../src/db/migrations/sqlite.js';
 import { SqliteTasksRepo } from '../../src/db/repos/sqlite/tasks-repo.js';
 import { SqliteTeamsRepo } from '../../src/db/repos/sqlite/teams-repo.js';
 import type { TaskRow } from '../../src/db/types.js';
@@ -205,6 +205,89 @@ describe('SQLite migration — remote endpoint columns (Phase 2 idempotency)', (
     expect(rows[0].public_endpoint_url).toBeNull();
     expect(rows[0].internal_endpoint_url).toBeNull();
     expect(rows[0].ssh_target).toBeNull();
+
+    await adapter.close();
+  });
+});
+
+// =====================================================================
+// Inbox ownership (owner_kind / owner_id) + reversible down helper
+// =====================================================================
+
+describe('SQLite migration — inbox ownership (manager foundation)', () => {
+  it('fresh DB has ownership columns and indexes on queries and news_items', async () => {
+    const adapter = freshDb();
+    for (const table of ['queries', 'news_items'] as const) {
+      const { rows } = await adapter.query<{ name: string }>(
+        `SELECT name FROM pragma_table_info('${table}')`,
+      );
+      const names = rows.map(r => r.name);
+      expect(names).toContain('owner_kind');
+      expect(names).toContain('owner_id');
+    }
+    const { rows: idxRows } = await adapter.query<{ name: string }>(
+      `SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name IN ('queries','news_items')`,
+    );
+    const idxNames = idxRows.map(r => r.name);
+    expect(idxNames).toContain('queries_team_owner_idx');
+    expect(idxNames).toContain('news_items_team_owner_time_idx');
+    expect(idxNames).toContain('news_items_owner_query_idx');
+    await adapter.close();
+  });
+
+  it('double migrate leaves ownership schema intact (idempotent)', async () => {
+    const adapter = new SqliteAdapter(':memory:');
+    await migrateSqlite(adapter);
+    await migrateSqlite(adapter);
+    const { rows } = await adapter.query<{ name: string }>(
+      `SELECT name FROM pragma_table_info('queries')`,
+    );
+    expect(rows.map(r => r.name)).toContain('owner_kind');
+    expect(rows.map(r => r.name)).toContain('owner_id');
+    await adapter.close();
+  });
+
+  it('downMigrateInboxOwnershipSqlite restores manager-<team> agent_id for manager-owned rows', async () => {
+    const adapter = freshDb();
+    const teamsRepo = new SqliteTeamsRepo(adapter);
+    const teamId = await teamsRepo.getOrCreateTeamId('roundtrip-team');
+    const now = Date.now();
+
+    await adapter.query(
+      `INSERT INTO agents (id, team_id, name, type, model, port, status, created_at, runtime)
+       VALUES ('worker-rt', ?, 'worker', 'virtual', 'sonnet', 0, 'running', ?, 'claude-agent-sdk')`,
+      [teamId, now],
+    );
+    await adapter.query(
+      `INSERT INTO agents (id, team_id, name, type, model, port, status, created_at, runtime)
+       VALUES ('manager-roundtrip-team', ?, 'interactive', 'interactive', 'sonnet', 0, 'running', ?, 'claude-agent-sdk')`,
+      [teamId, now + 1],
+    );
+
+    await adapter.query(
+      `INSERT INTO queries (team_id, agent_id, query_id, status, created, owner_kind, owner_id, prompt)
+       VALUES (?, 'worker-rt', 'q_rt_1', 'pending', ?, 'manager', ?, NULL)`,
+      [teamId, now + 2, teamId],
+    );
+    await adapter.query(
+      `INSERT INTO news_items (team_id, agent_id, timestamp, type, owner_kind, owner_id)
+       VALUES (?, 'worker-rt', ?, 'test', 'manager', ?)`,
+      [teamId, now + 3, teamId],
+    );
+
+    await downMigrateInboxOwnershipSqlite(adapter);
+
+    const q = await adapter.query<{ agent_id: string; owner_kind: string }>(
+      `SELECT agent_id, owner_kind FROM queries WHERE query_id = 'q_rt_1'`,
+    );
+    expect(q.rows[0]?.agent_id).toBe('manager-roundtrip-team');
+    expect(q.rows[0]?.owner_kind).toBe('manager');
+
+    const n = await adapter.query<{ agent_id: string }>(
+      `SELECT agent_id FROM news_items WHERE team_id = ? AND type = 'test'`,
+      [teamId],
+    );
+    expect(n.rows[0]?.agent_id).toBe('manager-roundtrip-team');
 
     await adapter.close();
   });

@@ -2,7 +2,21 @@
 
 import type { DbAdapter } from '../../db-adapter.js';
 import type { NewsRepository } from '../../db-service.js';
-import type { NewsItemRow } from '../../types.js';
+import type { InboxOwnerKind, NewsItemRow } from '../../types.js';
+
+function resolveNewsOwnership(
+  teamId: string,
+  agentId: string,
+  item: { owner_kind?: InboxOwnerKind; owner_id?: string },
+): { owner_kind: InboxOwnerKind; owner_id: string } {
+  if (item.owner_kind != null && item.owner_id != null) {
+    return { owner_kind: item.owner_kind, owner_id: item.owner_id };
+  }
+  if (agentId.startsWith('manager-')) {
+    return { owner_kind: 'manager', owner_id: teamId };
+  }
+  return { owner_kind: 'agent', owner_id: agentId };
+}
 
 export class PgNewsRepo implements NewsRepository {
   constructor(private db: DbAdapter) {}
@@ -18,6 +32,8 @@ export class PgNewsRepo implements NewsRepository {
       query_id?: string;
       kind?: 'talk' | 'notify';
       reply_expected?: boolean;
+      owner_kind?: InboxOwnerKind;
+      owner_id?: string;
     },
   ): Promise<void> {
     const replyExpected =
@@ -28,9 +44,10 @@ export class PgNewsRepo implements NewsRepository {
           : item.kind === 'notify'
             ? false
             : null;
+    const own = resolveNewsOwnership(teamId, agentId, item);
     await this.db.query(
-      `INSERT INTO news_items (team_id, agent_id, timestamp, type, message, data, query_id, kind, reply_expected)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+      `INSERT INTO news_items (team_id, agent_id, timestamp, type, message, data, query_id, kind, reply_expected, owner_kind, owner_id)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
       [
         teamId,
         agentId,
@@ -41,6 +58,8 @@ export class PgNewsRepo implements NewsRepository {
         item.query_id || null,
         item.kind || null,
         replyExpected,
+        own.owner_kind,
+        own.owner_id,
       ],
     );
   }
@@ -62,7 +81,7 @@ export class PgNewsRepo implements NewsRepository {
     params.push(limit);
 
     const { rows } = await this.db.query<NewsItemRow>(
-      `SELECT id, team_id, agent_id, query_id, type, timestamp, message, data
+      `SELECT id, team_id, agent_id, query_id, type, timestamp, message, data, kind, reply_expected, owner_kind, owner_id
        FROM news_items
        WHERE ${where}
        ORDER BY timestamp DESC
@@ -89,7 +108,7 @@ export class PgNewsRepo implements NewsRepository {
     params.push(limit);
 
     const { rows } = await this.db.query<NewsItemRow>(
-      `SELECT id, team_id, agent_id, query_id, type, timestamp, message, data
+      `SELECT id, team_id, agent_id, query_id, type, timestamp, message, data, kind, reply_expected, owner_kind, owner_id
        FROM news_items
        WHERE ${where}
        ORDER BY id ASC
@@ -106,7 +125,7 @@ export class PgNewsRepo implements NewsRepository {
     const limitIdx = params.length;
 
     const { rows } = await this.db.query<NewsItemRow>(
-      `SELECT id, query_id, type, message, timestamp, data
+      `SELECT id, team_id, agent_id, query_id, type, message, timestamp, data, kind, reply_expected, owner_kind, owner_id
        FROM news_items
        WHERE team_id = $1 AND type IN (${placeholders})
        ORDER BY timestamp DESC
@@ -118,7 +137,7 @@ export class PgNewsRepo implements NewsRepository {
 
   async fetchForArchive(teamId: string, before: number): Promise<NewsItemRow[]> {
     const { rows } = await this.db.query<NewsItemRow>(
-      `SELECT type, timestamp, message, data, agent_id, query_id
+      `SELECT id, type, timestamp, message, data, team_id, agent_id, query_id, kind, reply_expected, owner_kind, owner_id
        FROM news_items
        WHERE team_id = $1 AND timestamp < $2
        ORDER BY timestamp ASC`,

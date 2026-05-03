@@ -17,6 +17,7 @@ import type {
   TeamRow,
   QueryRow,
   NewsItemRow,
+  InboxOwnerKind,
   ScheduleDefinitionRow,
   ScheduleRunRow,
   TaskRow,
@@ -227,6 +228,8 @@ export interface QueriesRepository {
     prompt: string,
     created: number,
     sessionId?: string,
+    /** When omitted, derived from `agent_id` (manager inbox → manager ownership). */
+    ownership?: { owner_kind: InboxOwnerKind; owner_id: string },
   ): Promise<void>;
 
   /** Look up a single query by agent_id and query_id. */
@@ -322,6 +325,9 @@ export interface NewsRepository {
       kind?: 'talk' | 'notify';
       /** Explicit reply-expected flag (defaults to kind === 'talk' when omitted). */
       reply_expected?: boolean;
+      /** When omitted, derived from `agent_id` (manager inbox → manager ownership). */
+      owner_kind?: InboxOwnerKind;
+      owner_id?: string;
     },
   ): Promise<void>;
 

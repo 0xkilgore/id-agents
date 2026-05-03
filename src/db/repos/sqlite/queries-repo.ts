@@ -1,21 +1,54 @@
 // SPDX-License-Identifier: MIT
 
 import type { QueriesRepository } from '../../db-service.js';
-import type { QueryRow } from '../../types.js';
+import type { InboxOwnerKind, QueryRow } from '../../types.js';
 import type { DbAdapter } from '../../db-adapter.js';
 import { parseJsonObject, stringifyJson } from '../../db-json.js';
+
+function resolveQueryOwnership(
+  teamId: string,
+  agentId: string,
+  override?: { owner_kind: InboxOwnerKind; owner_id: string },
+): { owner_kind: InboxOwnerKind; owner_id: string } {
+  if (override) return override;
+  if (agentId.startsWith('manager-')) {
+    return { owner_kind: 'manager', owner_id: teamId };
+  }
+  return { owner_kind: 'agent', owner_id: agentId };
+}
 
 export class SqliteQueriesRepo implements QueriesRepository {
   constructor(private readonly db: DbAdapter) {}
 
   private parseQueryRow(row: any): QueryRow | null {
     if (!row) return null;
-    return { ...row, result: parseJsonObject(row.result) };
+    const agent_id = String(row.agent_id ?? '');
+    const team_id = String(row.team_id ?? '');
+    const owner_kind: InboxOwnerKind =
+      row.owner_kind === 'manager' || row.owner_kind === 'agent'
+        ? row.owner_kind
+        : agent_id.startsWith('manager-')
+          ? 'manager'
+          : 'agent';
+    const owner_id =
+      row.owner_id != null && String(row.owner_id) !== ''
+        ? String(row.owner_id)
+        : owner_kind === 'manager'
+          ? team_id
+          : agent_id;
+    return {
+      ...row,
+      team_id,
+      agent_id,
+      owner_kind,
+      owner_id,
+      result: parseJsonObject(row.result),
+    };
   }
 
   async getById(agentId: string, queryId: string): Promise<QueryRow | null> {
     const r = await this.db.query<QueryRow>(
-      `SELECT team_id, agent_id, query_id, status, prompt, created, completed, result, error, session_id
+      `SELECT team_id, agent_id, query_id, status, prompt, created, completed, result, error, session_id, owner_kind, owner_id
        FROM queries
        WHERE agent_id = ? AND query_id = ?`,
       [agentId, queryId],
@@ -25,7 +58,7 @@ export class SqliteQueriesRepo implements QueriesRepository {
 
   async getByQueryIdForTeam(teamId: string, queryId: string): Promise<QueryRow | null> {
     const r = await this.db.query<QueryRow>(
-      `SELECT team_id, agent_id, query_id, status, prompt, created, completed, result, error, session_id
+      `SELECT team_id, agent_id, query_id, status, prompt, created, completed, result, error, session_id, owner_kind, owner_id
        FROM queries
        WHERE team_id = ? AND query_id = ?
        LIMIT 1`,
@@ -41,7 +74,7 @@ export class SqliteQueriesRepo implements QueriesRepository {
       `UPDATE queries
        SET status = 'expired', completed = ?
        WHERE status IN (${placeholders}) AND created < ?
-       RETURNING team_id, agent_id, query_id, status, prompt, created, completed, result, error, session_id`,
+       RETURNING team_id, agent_id, query_id, status, prompt, created, completed, result, error, session_id, owner_kind, owner_id`,
       [Date.now(), ...statuses, cutoffCreated],
     );
     return r.rows.map((row) => this.parseQueryRow(row)!);
@@ -54,12 +87,14 @@ export class SqliteQueriesRepo implements QueriesRepository {
     prompt: string,
     created: number,
     sessionId?: string,
+    ownership?: { owner_kind: InboxOwnerKind; owner_id: string },
   ): Promise<void> {
+    const own = resolveQueryOwnership(teamId, agentId, ownership);
     await this.db.query(
-      `INSERT INTO queries (team_id, query_id, agent_id, prompt, status, created, session_id)
-       VALUES (?, ?, ?, ?, 'pending', ?, ?)
+      `INSERT INTO queries (team_id, query_id, agent_id, prompt, status, created, session_id, owner_kind, owner_id)
+       VALUES (?, ?, ?, ?, 'pending', ?, ?, ?, ?)
        ON CONFLICT (agent_id, query_id) DO NOTHING`,
-      [teamId, queryId, agentId, prompt, created, sessionId ?? null],
+      [teamId, queryId, agentId, prompt, created, sessionId ?? null, own.owner_kind, own.owner_id],
     );
   }
 
@@ -68,15 +103,21 @@ export class SqliteQueriesRepo implements QueriesRepository {
     agentId: string,
     query: Partial<QueryRow> & { query_id: string },
   ): Promise<void> {
+    const own =
+      query.owner_kind != null && query.owner_id != null
+        ? { owner_kind: query.owner_kind, owner_id: query.owner_id }
+        : resolveQueryOwnership(teamId, agentId);
     await this.db.query(
-      `INSERT INTO queries (team_id, agent_id, query_id, status, prompt, created, completed, result, error, session_id)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `INSERT INTO queries (team_id, agent_id, query_id, status, prompt, created, completed, result, error, session_id, owner_kind, owner_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT (agent_id, query_id) DO UPDATE SET
          status = excluded.status,
          completed = excluded.completed,
          result = excluded.result,
          error = excluded.error,
-         session_id = excluded.session_id`,
+         session_id = excluded.session_id,
+         owner_kind = excluded.owner_kind,
+         owner_id = excluded.owner_id`,
       [
         teamId,
         agentId,
@@ -88,6 +129,8 @@ export class SqliteQueriesRepo implements QueriesRepository {
         query.result ? stringifyJson(query.result) : null,
         query.error ?? null,
         query.session_id ?? null,
+        own.owner_kind,
+        own.owner_id,
       ],
     );
   }
@@ -129,7 +172,7 @@ export class SqliteQueriesRepo implements QueriesRepository {
 
   async getPending(agentId: string): Promise<QueryRow[]> {
     const r = await this.db.query<QueryRow>(
-      `SELECT query_id, status, prompt, created, completed, result, error, session_id
+      `SELECT team_id, agent_id, query_id, status, prompt, created, completed, result, error, session_id, owner_kind, owner_id
        FROM queries
        WHERE agent_id = ? AND status IN ('pending', 'processing')`,
       [agentId],

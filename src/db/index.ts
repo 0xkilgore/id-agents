@@ -95,6 +95,7 @@ export type {
   TeamRow,
   QueryRow,
   NewsItemRow,
+  InboxOwnerKind,
   ScheduleDefinitionRow,
   ScheduleRunRow,
   TaskRow,
