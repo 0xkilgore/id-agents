@@ -103,28 +103,15 @@ export async function migrateDeleteManagerShadowAgentsSqlite(adapter: SqliteAdap
     }
   };
 
-  const orphans: Array<{ label: string; sql: string }> = [
+  const hardOrphans: Array<{ label: string; sql: string }> = [
     { label: 'wallets', sql: `SELECT COUNT(*) as c FROM wallets WHERE agent_id GLOB 'manager-*'` },
     {
       label: 'schedule_targets',
       sql: `SELECT COUNT(*) as c FROM schedule_targets WHERE agent_id GLOB 'manager-*'`,
     },
     { label: 'schedule_runs', sql: `SELECT COUNT(*) as c FROM schedule_runs WHERE agent_id GLOB 'manager-*'` },
-    { label: 'tasks.owner', sql: `SELECT COUNT(*) as c FROM tasks WHERE owner GLOB 'manager-*'` },
-    {
-      label: 'tasks.created_by',
-      sql: `SELECT COUNT(*) as c FROM tasks WHERE created_by GLOB 'manager-*'`,
-    },
-    {
-      label: 'checkins.owner_agent_id',
-      sql: `SELECT COUNT(*) as c FROM checkins WHERE owner_agent_id GLOB 'manager-*'`,
-    },
-    {
-      label: 'checkins.created_by_agent_id',
-      sql: `SELECT COUNT(*) as c FROM checkins WHERE created_by_agent_id GLOB 'manager-*'`,
-    },
   ];
-  for (const { label, sql } of orphans) {
+  for (const { label, sql } of hardOrphans) {
     const c = await probe(sql);
     if (c > 0) {
       throw new Error(
@@ -132,6 +119,13 @@ export async function migrateDeleteManagerShadowAgentsSqlite(adapter: SqliteAdap
       );
     }
   }
+
+  // Historical manager-created tasks/checkins can safely lose the shadow FK:
+  // these columns are nullable metadata, unlike wallets/schedule tables above.
+  await adapter.query(`UPDATE tasks SET owner = NULL WHERE owner GLOB 'manager-*'`);
+  await adapter.query(`UPDATE tasks SET created_by = NULL WHERE created_by GLOB 'manager-*'`);
+  await adapter.query(`UPDATE checkins SET owner_agent_id = NULL WHERE owner_agent_id GLOB 'manager-*'`);
+  await adapter.query(`UPDATE checkins SET created_by_agent_id = NULL WHERE created_by_agent_id GLOB 'manager-*'`);
 
   const badQ = await adapter.query<{ c: number }>(`
     SELECT COUNT(*) as c FROM queries
@@ -257,9 +251,6 @@ export async function migrateSqlite(adapter: SqliteAdapter): Promise<void> {
     CREATE INDEX IF NOT EXISTS agents_team_name_idx ON agents(team_id, name);
     CREATE INDEX IF NOT EXISTS news_items_agent_time_idx ON news_items(team_id, agent_id, timestamp);
     CREATE INDEX IF NOT EXISTS news_items_query_idx ON news_items(team_id, agent_id, query_id);
-    CREATE INDEX IF NOT EXISTS queries_team_owner_idx ON queries(team_id, owner_kind, owner_id);
-    CREATE INDEX IF NOT EXISTS news_items_team_owner_time_idx ON news_items(team_id, owner_kind, owner_id, timestamp);
-    CREATE INDEX IF NOT EXISTS news_items_owner_query_idx ON news_items(team_id, owner_kind, owner_id, query_id);
     CREATE INDEX IF NOT EXISTS agents_token_idx ON agents(token_id) WHERE token_id IS NOT NULL;
 
     CREATE TABLE IF NOT EXISTS schedule_definitions (

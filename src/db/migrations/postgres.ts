@@ -713,16 +713,12 @@ export async function migrateDeleteManagerShadowAgentsPostgres(adapter: DbAdapte
     }
   };
 
-  const pairs: Array<[string, string]> = [
+  const hardPairs: Array<[string, string]> = [
     ['wallets', `SELECT COUNT(*)::text AS c FROM wallets WHERE agent_id LIKE 'manager-%'`],
     ['schedule_targets', `SELECT COUNT(*)::text AS c FROM schedule_targets WHERE agent_id LIKE 'manager-%'`],
     ['schedule_runs', `SELECT COUNT(*)::text AS c FROM schedule_runs WHERE agent_id LIKE 'manager-%'`],
-    ['tasks.owner', `SELECT COUNT(*)::text AS c FROM tasks WHERE owner LIKE 'manager-%'`],
-    ['tasks.created_by', `SELECT COUNT(*)::text AS c FROM tasks WHERE created_by LIKE 'manager-%'`],
-    ['checkins.owner_agent_id', `SELECT COUNT(*)::text AS c FROM checkins WHERE owner_agent_id LIKE 'manager-%'`],
-    ['checkins.created_by_agent_id', `SELECT COUNT(*)::text AS c FROM checkins WHERE created_by_agent_id LIKE 'manager-%'`],
   ];
-  for (const [label, sql] of pairs) {
+  for (const [label, sql] of hardPairs) {
     const c = await count(sql);
     if (c > 0) {
       throw new Error(
@@ -730,6 +726,11 @@ export async function migrateDeleteManagerShadowAgentsPostgres(adapter: DbAdapte
       );
     }
   }
+
+  await adapter.query(`UPDATE tasks SET owner = NULL WHERE owner LIKE 'manager-%'`);
+  await adapter.query(`UPDATE tasks SET created_by = NULL WHERE created_by LIKE 'manager-%'`);
+  await adapter.query(`UPDATE checkins SET owner_agent_id = NULL WHERE owner_agent_id LIKE 'manager-%'`);
+  await adapter.query(`UPDATE checkins SET created_by_agent_id = NULL WHERE created_by_agent_id LIKE 'manager-%'`);
 
   const badQ = await adapter.query<{ c: string }>(`
     SELECT COUNT(*)::text AS c FROM queries

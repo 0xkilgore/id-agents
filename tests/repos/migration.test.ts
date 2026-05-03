@@ -273,6 +273,50 @@ describe('SQLite migration — manager shadow FK cleanup', () => {
 
     await adapter.close();
   });
+
+  it('migrateDelete clears nullable task/checkin shadow refs before deleting manager rows', async () => {
+    const adapter = await freshDb();
+    const teamsRepo = new SqliteTeamsRepo(adapter);
+    const teamId = await teamsRepo.getOrCreateTeamId('shadow-task-team');
+    const now = Date.now();
+
+    await adapter.query(
+      `INSERT INTO agents (id, team_id, name, type, model, port, status, created_at, runtime)
+       VALUES ('manager-shadow-task-team', ?, 'manager', 'interactive', '', 0, 'stub', ?, 'claude-agent-sdk')`,
+      [teamId, now],
+    );
+    await adapter.query(
+      `INSERT INTO tasks (id, name, uuid, team_id, title, status, created_by, owner, created_at, updated_at)
+       VALUES ('task_shadow_1', 'shadow-task', 'uuid-shadow-task', ?, 'Shadow task', 'todo', 'manager-shadow-task-team', 'manager-shadow-task-team', ?, ?)`,
+      [teamId, now + 1, now + 1],
+    );
+    await adapter.query(
+      `INSERT INTO checkins (id, team_id, owner_agent_id, created_by_agent_id, linked_task_id, interval_seconds, priority, status, close_when, iteration_count, created_at, updated_at)
+       VALUES ('chk_shadow_1', ?, 'manager-shadow-task-team', 'manager-shadow-task-team', 'task_shadow_1', 60, 'normal', 'active', '{}', 0, ?, ?)`,
+      [teamId, now + 2, now + 2],
+    );
+
+    await migrateDeleteManagerShadowAgentsSqlite(adapter);
+
+    const taskRows = await adapter.query<{ created_by: string | null; owner: string | null }>(
+      `SELECT created_by, owner FROM tasks WHERE id = 'task_shadow_1'`,
+    );
+    expect(taskRows.rows[0]?.created_by).toBeNull();
+    expect(taskRows.rows[0]?.owner).toBeNull();
+
+    const checkinRows = await adapter.query<{ owner_agent_id: string | null; created_by_agent_id: string | null }>(
+      `SELECT owner_agent_id, created_by_agent_id FROM checkins WHERE id = 'chk_shadow_1'`,
+    );
+    expect(checkinRows.rows[0]?.owner_agent_id).toBeNull();
+    expect(checkinRows.rows[0]?.created_by_agent_id).toBeNull();
+
+    const shadowRows = await adapter.query<{ c: number }>(
+      `SELECT COUNT(*) as c FROM agents WHERE id = 'manager-shadow-task-team'`,
+    );
+    expect(Number(shadowRows.rows[0]?.c)).toBe(0);
+
+    await adapter.close();
+  });
 });
 
 // =====================================================================
