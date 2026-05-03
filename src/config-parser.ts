@@ -46,7 +46,7 @@ export interface ResourceConfig {
 export interface AgentSpec {
   name: string;
   agent?: string;                     // Library agent overlay name (resolves to <library-root>/agents/<agent>/)
-  type?: 'claude' | 'automator';      // Agent type: 'claude' (default) or 'automator' (manager's brain, hidden)
+  type?: 'claude' | 'automator';      // Agent type: 'claude' (default) or 'automator' (team-local planning worker, hidden)
   runtime?: HarnessType | 'codex-cli'; // Runtime harness id, defaults to 'claude-agent-sdk'
   openMode?: boolean;                 // Allow XMTP messages from any sender when no allowlist is configured
   description?: string;
@@ -159,6 +159,9 @@ export interface TeamConfig {
   parameters?: ConfigParameter[];
   agents: AgentSpec[];
 }
+
+const RESERVED_MANAGER_CONFIG_ERROR =
+  'Agent manager with type automator is no longer valid. The name manager is reserved for the control plane. Rename this agent to lead-automator (or any non-reserved name) and re-deploy.';
 
 /**
  * Parse command line args into parameter values.
@@ -421,14 +424,18 @@ export function validateConfig(config: DeployConfig): ValidationResult {
     }
 
     if (agent.name) {
-      const nameResult = validateName(agent.name, 'agent');
-      if (!nameResult.valid) {
-        errors.push({ path: `${agentPath}.name`, message: nameResult.error! });
+      if (agent.name === 'manager') {
+        errors.push({ path: `${agentPath}.name`, message: RESERVED_MANAGER_CONFIG_ERROR });
       } else if (!/^[a-zA-Z0-9_-]+$/.test(agent.name)) {
         errors.push({
           path: `${agentPath}.name`,
           message: 'agent name must contain only alphanumeric characters, hyphens, and underscores'
         });
+      } else {
+        const nameResult = validateName(agent.name, 'agent');
+        if (!nameResult.valid) {
+          errors.push({ path: `${agentPath}.name`, message: nameResult.error! });
+        }
       }
     }
 

@@ -69,4 +69,39 @@ agents:
       message: 'agent must be a string',
     });
   });
+
+  it('rejects reserved manager name for automators with the hard-error message', () => {
+    const result = validateConfig({
+      version: '1',
+      agents: [{ name: 'manager', type: 'automator' }],
+    } as any);
+
+    expect(result.valid).toBe(false);
+    expect(result.errors).toContainEqual({
+      path: 'agents[0].name',
+      message: 'Agent manager with type automator is no longer valid. The name manager is reserved for the control plane. Rename this agent to lead-automator (or any non-reserved name) and re-deploy.',
+    });
+  });
+
+  it('accepts lead-automator as the first automator name in config validation', () => {
+    const result = validateConfig({
+      version: '1',
+      agents: [{ name: 'lead-automator', type: 'automator' }],
+    } as any);
+
+    expect(result.valid).toBe(true);
+  });
+
+  it('rejects reserved manager name for non-automators with the same hard-error message', () => {
+    const result = validateConfig({
+      version: '1',
+      agents: [{ name: 'manager', type: 'claude' }],
+    } as any);
+
+    expect(result.valid).toBe(false);
+    expect(result.errors).toContainEqual({
+      path: 'agents[0].name',
+      message: 'Agent manager with type automator is no longer valid. The name manager is reserved for the control plane. Rename this agent to lead-automator (or any non-reserved name) and re-deploy.',
+    });
+  });
 });
