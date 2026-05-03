@@ -317,6 +317,52 @@ describe('SQLite migration — manager shadow FK cleanup', () => {
 
     await adapter.close();
   });
+
+  it('migrateDelete promotes virtual_manager rows to manager ownership and deletes the legacy row', async () => {
+    const adapter = await freshDb();
+    const teamsRepo = new SqliteTeamsRepo(adapter);
+    const teamId = await teamsRepo.getOrCreateTeamId('default');
+    const now = Date.now();
+
+    await adapter.query(
+      `INSERT INTO agents (id, team_id, name, type, model, port, status, created_at, runtime)
+       VALUES ('virtual_manager', ?, 'manager', 'interactive', '', 0, 'offline', ?, 'claude-agent-sdk')`,
+      [teamId, now],
+    );
+    await adapter.query(
+      `INSERT INTO queries (team_id, agent_id, query_id, status, created, owner_kind, owner_id, prompt)
+       VALUES (?, 'virtual_manager', 'q_vm_1', 'pending', ?, 'agent', 'virtual_manager', NULL)`,
+      [teamId, now + 1],
+    );
+    await adapter.query(
+      `INSERT INTO news_items (team_id, agent_id, timestamp, type, owner_kind, owner_id)
+       VALUES (?, 'virtual_manager', ?, 'message', 'agent', 'virtual_manager')`,
+      [teamId, now + 2],
+    );
+
+    await migrateDeleteManagerShadowAgentsSqlite(adapter);
+
+    const qRows = await adapter.query<{ agent_id: string | null; owner_kind: string; owner_id: string }>(
+      `SELECT agent_id, owner_kind, owner_id FROM queries WHERE query_id = 'q_vm_1'`,
+    );
+    expect(qRows.rows[0]?.agent_id).toBeNull();
+    expect(qRows.rows[0]?.owner_kind).toBe('manager');
+    expect(qRows.rows[0]?.owner_id).toBe(teamId);
+
+    const nRows = await adapter.query<{ agent_id: string | null; owner_kind: string; owner_id: string }>(
+      `SELECT agent_id, owner_kind, owner_id FROM news_items WHERE type = 'message' ORDER BY id DESC LIMIT 1`,
+    );
+    expect(nRows.rows[0]?.agent_id).toBeNull();
+    expect(nRows.rows[0]?.owner_kind).toBe('manager');
+    expect(nRows.rows[0]?.owner_id).toBe(teamId);
+
+    const shadowRows = await adapter.query<{ c: number }>(
+      `SELECT COUNT(*) as c FROM agents WHERE id = 'virtual_manager'`,
+    );
+    expect(Number(shadowRows.rows[0]?.c)).toBe(0);
+
+    await adapter.close();
+  });
 });
 
 // =====================================================================

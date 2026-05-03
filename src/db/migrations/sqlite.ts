@@ -122,14 +122,34 @@ export async function migrateDeleteManagerShadowAgentsSqlite(adapter: SqliteAdap
 
   // Historical manager-created tasks/checkins can safely lose the shadow FK:
   // these columns are nullable metadata, unlike wallets/schedule tables above.
-  await adapter.query(`UPDATE tasks SET owner = NULL WHERE owner GLOB 'manager-*'`);
-  await adapter.query(`UPDATE tasks SET created_by = NULL WHERE created_by GLOB 'manager-*'`);
-  await adapter.query(`UPDATE checkins SET owner_agent_id = NULL WHERE owner_agent_id GLOB 'manager-*'`);
-  await adapter.query(`UPDATE checkins SET created_by_agent_id = NULL WHERE created_by_agent_id GLOB 'manager-*'`);
+  await adapter.query(`UPDATE tasks SET owner = NULL WHERE owner GLOB 'manager-*' OR owner = 'virtual_manager'`);
+  await adapter.query(`UPDATE tasks SET created_by = NULL WHERE created_by GLOB 'manager-*' OR created_by = 'virtual_manager'`);
+  await adapter.query(`UPDATE checkins SET owner_agent_id = NULL WHERE owner_agent_id GLOB 'manager-*' OR owner_agent_id = 'virtual_manager'`);
+  await adapter.query(`UPDATE checkins SET created_by_agent_id = NULL WHERE created_by_agent_id GLOB 'manager-*' OR created_by_agent_id = 'virtual_manager'`);
+
+  // Legacy default-team manager rows used `virtual_manager` as the agent FK
+  // before owner_kind/owner_id existed. Promote them to manager ownership so
+  // the rest of the cleanup can treat them exactly like manager-<team> rows.
+  await adapter.query(`
+    UPDATE queries
+    SET owner_kind = 'manager',
+        owner_id = team_id
+    WHERE agent_id = 'virtual_manager'
+      AND owner_kind = 'agent'
+      AND owner_id = 'virtual_manager'
+  `);
+  await adapter.query(`
+    UPDATE news_items
+    SET owner_kind = 'manager',
+        owner_id = team_id
+    WHERE agent_id = 'virtual_manager'
+      AND owner_kind = 'agent'
+      AND owner_id = 'virtual_manager'
+  `);
 
   const badQ = await adapter.query<{ c: number }>(`
     SELECT COUNT(*) as c FROM queries
-    WHERE agent_id IS NOT NULL AND agent_id GLOB 'manager-*'
+    WHERE agent_id IS NOT NULL AND (agent_id GLOB 'manager-*' OR agent_id = 'virtual_manager')
       AND (owner_kind != 'manager' OR owner_id != team_id)
   `);
   if (Number(badQ.rows[0]?.c) > 0) {
@@ -140,7 +160,7 @@ export async function migrateDeleteManagerShadowAgentsSqlite(adapter: SqliteAdap
 
   const badN = await adapter.query<{ c: number }>(`
     SELECT COUNT(*) as c FROM news_items
-    WHERE agent_id IS NOT NULL AND agent_id GLOB 'manager-*'
+    WHERE agent_id IS NOT NULL AND (agent_id GLOB 'manager-*' OR agent_id = 'virtual_manager')
       AND (owner_kind != 'manager' OR owner_id != team_id)
   `);
   if (Number(badN.rows[0]?.c) > 0) {
@@ -153,7 +173,7 @@ export async function migrateDeleteManagerShadowAgentsSqlite(adapter: SqliteAdap
   await adapter.query(`UPDATE news_items SET agent_id = NULL WHERE owner_kind = 'manager'`);
 
   const leftQ = await adapter.query<{ c: number }>(
-    `SELECT COUNT(*) as c FROM queries WHERE agent_id IS NOT NULL AND agent_id GLOB 'manager-*'`,
+    `SELECT COUNT(*) as c FROM queries WHERE agent_id IS NOT NULL AND (agent_id GLOB 'manager-*' OR agent_id = 'virtual_manager')`,
   );
   if (Number(leftQ.rows[0]?.c) > 0) {
     throw new Error(
@@ -162,7 +182,7 @@ export async function migrateDeleteManagerShadowAgentsSqlite(adapter: SqliteAdap
   }
 
   const leftN = await adapter.query<{ c: number }>(
-    `SELECT COUNT(*) as c FROM news_items WHERE agent_id IS NOT NULL AND agent_id GLOB 'manager-*'`,
+    `SELECT COUNT(*) as c FROM news_items WHERE agent_id IS NOT NULL AND (agent_id GLOB 'manager-*' OR agent_id = 'virtual_manager')`,
   );
   if (Number(leftN.rows[0]?.c) > 0) {
     throw new Error(
@@ -170,7 +190,7 @@ export async function migrateDeleteManagerShadowAgentsSqlite(adapter: SqliteAdap
     );
   }
 
-  await adapter.query(`DELETE FROM agents WHERE id GLOB 'manager-*'`);
+  await adapter.query(`DELETE FROM agents WHERE id GLOB 'manager-*' OR id = 'virtual_manager'`);
 }
 
 export async function migrateSqlite(adapter: SqliteAdapter): Promise<void> {

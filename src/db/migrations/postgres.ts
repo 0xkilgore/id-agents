@@ -727,14 +727,31 @@ export async function migrateDeleteManagerShadowAgentsPostgres(adapter: DbAdapte
     }
   }
 
-  await adapter.query(`UPDATE tasks SET owner = NULL WHERE owner LIKE 'manager-%'`);
-  await adapter.query(`UPDATE tasks SET created_by = NULL WHERE created_by LIKE 'manager-%'`);
-  await adapter.query(`UPDATE checkins SET owner_agent_id = NULL WHERE owner_agent_id LIKE 'manager-%'`);
-  await adapter.query(`UPDATE checkins SET created_by_agent_id = NULL WHERE created_by_agent_id LIKE 'manager-%'`);
+  await adapter.query(`UPDATE tasks SET owner = NULL WHERE owner LIKE 'manager-%' OR owner = 'virtual_manager'`);
+  await adapter.query(`UPDATE tasks SET created_by = NULL WHERE created_by LIKE 'manager-%' OR created_by = 'virtual_manager'`);
+  await adapter.query(`UPDATE checkins SET owner_agent_id = NULL WHERE owner_agent_id LIKE 'manager-%' OR owner_agent_id = 'virtual_manager'`);
+  await adapter.query(`UPDATE checkins SET created_by_agent_id = NULL WHERE created_by_agent_id LIKE 'manager-%' OR created_by_agent_id = 'virtual_manager'`);
+
+  await adapter.query(`
+    UPDATE queries
+    SET owner_kind = 'manager',
+        owner_id = team_id::text
+    WHERE agent_id = 'virtual_manager'
+      AND owner_kind = 'agent'
+      AND owner_id = 'virtual_manager'
+  `);
+  await adapter.query(`
+    UPDATE news_items
+    SET owner_kind = 'manager',
+        owner_id = team_id::text
+    WHERE agent_id = 'virtual_manager'
+      AND owner_kind = 'agent'
+      AND owner_id = 'virtual_manager'
+  `);
 
   const badQ = await adapter.query<{ c: string }>(`
     SELECT COUNT(*)::text AS c FROM queries
-    WHERE agent_id IS NOT NULL AND agent_id LIKE 'manager-%'
+    WHERE agent_id IS NOT NULL AND (agent_id LIKE 'manager-%' OR agent_id = 'virtual_manager')
       AND (owner_kind != 'manager' OR owner_id != team_id::text)
   `);
   if (Number(badQ.rows[0]?.c) > 0) {
@@ -745,7 +762,7 @@ export async function migrateDeleteManagerShadowAgentsPostgres(adapter: DbAdapte
 
   const badN = await adapter.query<{ c: string }>(`
     SELECT COUNT(*)::text AS c FROM news_items
-    WHERE agent_id IS NOT NULL AND agent_id LIKE 'manager-%'
+    WHERE agent_id IS NOT NULL AND (agent_id LIKE 'manager-%' OR agent_id = 'virtual_manager')
       AND (owner_kind != 'manager' OR owner_id != team_id::text)
   `);
   if (Number(badN.rows[0]?.c) > 0) {
@@ -758,7 +775,7 @@ export async function migrateDeleteManagerShadowAgentsPostgres(adapter: DbAdapte
   await adapter.query(`UPDATE news_items SET agent_id = NULL WHERE owner_kind = 'manager'`);
 
   const leftQ = await count(
-    `SELECT COUNT(*)::text AS c FROM queries WHERE agent_id IS NOT NULL AND agent_id LIKE 'manager-%'`,
+    `SELECT COUNT(*)::text AS c FROM queries WHERE agent_id IS NOT NULL AND (agent_id LIKE 'manager-%' OR agent_id = 'virtual_manager')`,
   );
   if (leftQ > 0) {
     throw new Error(
@@ -767,13 +784,13 @@ export async function migrateDeleteManagerShadowAgentsPostgres(adapter: DbAdapte
   }
 
   const leftN = await count(
-    `SELECT COUNT(*)::text AS c FROM news_items WHERE agent_id IS NOT NULL AND agent_id LIKE 'manager-%'`,
+    `SELECT COUNT(*)::text AS c FROM news_items WHERE agent_id IS NOT NULL AND (agent_id LIKE 'manager-%' OR agent_id = 'virtual_manager')`,
   );
   if (leftN > 0) {
     throw new Error('migrateDeleteManagerShadowAgentsPostgres: news_items still reference manager-* after nulling');
   }
 
-  await adapter.query(`DELETE FROM agents WHERE id LIKE 'manager-%'`);
+  await adapter.query(`DELETE FROM agents WHERE id LIKE 'manager-%' OR id = 'virtual_manager'`);
 }
 
 /**
