@@ -41,7 +41,7 @@ Inside the CLI:
 - `/agents` — List all agents with status and ports
 - `/status` — Check agent health
 
-You should see the daemon-owned `manager` entry alongside any deployed local agents.
+You should see only the team’s actual agents. The control-plane `manager` is contacted through the reserved manager channel, not listed as a peer agent.
 
 ## CLI Commands
 

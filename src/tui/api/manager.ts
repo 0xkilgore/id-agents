@@ -28,10 +28,6 @@ export async function fetchTeams(manager: string, signal: AbortSignal): Promise<
   return (data.teams ?? []).filter((t) => t.name.toLowerCase() !== 'all');
 }
 
-function isRealAgent(a: Agent): boolean {
-  return a.type !== 'interactive';
-}
-
 export async function fetchAgentsByTeam(
   manager: string,
   team: string,
@@ -39,9 +35,7 @@ export async function fetchAgentsByTeam(
 ): Promise<Agent[]> {
   const url = `${manager}/agents?team=${encodeURIComponent(team)}`;
   const data = await getJson<AgentsResponse>(url, signal);
-  return (data.agents ?? [])
-    .filter(isRealAgent)
-    .map((a) => ({ ...a, teamName: team }));
+  return (data.agents ?? []).map((a) => ({ ...a, teamName: team }));
 }
 
 export async function fetchTasks(

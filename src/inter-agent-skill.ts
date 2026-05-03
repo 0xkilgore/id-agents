@@ -17,7 +17,7 @@ You are agent "{{AGENT_NAME}}" in team "{{TEAM_NAME}}".
 
 ## Send a Message (fire-and-forget)
 \`\`\`bash
-curl -s -X POST http://localhost:4100/message \\
+curl -s -X POST {{MANAGER_URL}}/message \\
   -H "Content-Type: application/json" \\
   -H "X-Id-Team: $ID_TEAM" \\
   -d '{"to": "agent-name", "message": "your message"}'
@@ -33,7 +33,7 @@ Use /talk-to only if you need the reply to continue your work.
 
 ## List Agents
 \`\`\`bash
-curl -s http://localhost:4100/agents -H "X-Id-Team: $ID_TEAM" | jq '.agents[].name'
+curl -s {{MANAGER_URL}}/agents -H "X-Id-Team: $ID_TEAM" | jq '.agents[].name'
 \`\`\`
 
 ## Key Rules
@@ -42,6 +42,7 @@ curl -s http://localhost:4100/agents -H "X-Id-Team: $ID_TEAM" | jq '.agents[].na
 3. Do NOT add \`"wait": true\` unless you literally cannot continue without the answer
 4. Use the full agent name (e.g., "agent.20") when addressing other agents
 5. Team files: /workspace/teams/{{TEAM_NAME}}/
+6. Use the reserved manager channel directly; \`manager\` is not discovered from \`/agents\`
 `;
 
 export const INTER_AGENT_SKILL = `
@@ -58,7 +59,7 @@ You are part of a multi-agent team. You can communicate with other agents to del
 Use the \`/message\` endpoint to contact other agents:
 
 \`\`\`bash
-curl -s -X POST http://localhost:4100/message \\
+curl -s -X POST {{MANAGER_URL}}/message \\
   -H "Content-Type: application/json" \\
   -H "X-Id-Team: $ID_TEAM" \\
   -d '{"to": "agent-name", "message": "Your message here"}'
@@ -100,7 +101,7 @@ This blocks until the reply arrives (no polling). The reply comes back in the re
 ## List Available Agents
 
 \`\`\`bash
-curl -s http://localhost:4100/agents -H "X-Id-Team: $ID_TEAM" | jq
+curl -s {{MANAGER_URL}}/agents -H "X-Id-Team: $ID_TEAM" | jq
 \`\`\`
 
 Returns:
@@ -115,12 +116,33 @@ Returns:
 
 **IMPORTANT:** The \`name\` field is the agent's full identifier (ENS domain after registration, e.g., "agent-1.xid.eth", or local name before registration). Always use this name when sending messages to agents. The \`alias\` field is the original local name.
 
+## Contact The Manager
+
+The manager is a reserved control-plane destination, not a peer discovered from \`/agents\`.
+
+Ask the manager and wait for a reply:
+
+\`\`\`bash
+curl -s -X POST http://localhost:$ID_AGENT_PORT/talk-to \\
+  -H "Content-Type: application/json" \\
+  -d '{"to": "manager", "message": "your question for the manager", "timeout": 120000}'
+\`\`\`
+
+Send a fire-and-forget note to the manager:
+
+\`\`\`bash
+curl -s -X POST {{MANAGER_URL}}/news \\
+  -H "Content-Type: application/json" \\
+  -H "X-Id-Team: $ID_TEAM" \\
+  -d '{"from": "{{AGENT_NAME}}", "type": "message", "message": "your update for the manager"}'
+\`\`\`
+
 ## Examples
 
 ### Relay a request (no wait needed):
 \`\`\`bash
 # "Tell dev to contact the manager" — just deliver and move on
-curl -s -X POST http://localhost:4100/message \\
+curl -s -X POST {{MANAGER_URL}}/message \\
   -H "Content-Type: application/json" \\
   -H "X-Id-Team: $ID_TEAM" \\
   -d '{"to": "dev", "message": "Please contact the manager about the deployment."}'
@@ -129,7 +151,7 @@ curl -s -X POST http://localhost:4100/message \\
 ### Ask a question and report back (wait needed):
 \`\`\`bash
 # "Ask dev if he finished and report back" — need the answer
-curl -s -X POST http://localhost:4100/message \\
+curl -s -X POST {{MANAGER_URL}}/message \\
   -H "Content-Type: application/json" \\
   -H "X-Id-Team: $ID_TEAM" \\
   -d '{"to": "dev", "message": "Did you finish the deployment?", "wait": true, "timeout": 120000}'
@@ -138,7 +160,7 @@ curl -s -X POST http://localhost:4100/message \\
 ### Delegate a task (no wait needed):
 \`\`\`bash
 # "Tell coder to fix the bug" — fire and forget
-curl -s -X POST http://localhost:4100/message \\
+curl -s -X POST {{MANAGER_URL}}/message \\
   -H "Content-Type: application/json" \\
   -H "X-Id-Team: $ID_TEAM" \\
   -d '{"to": "coder", "message": "Please fix the login validation bug in auth.ts"}'
@@ -235,7 +257,7 @@ When you receive a **triggered message** (a late reply or notification), the sys
 **Checking another agent's saved responses:**
 \`\`\`bash
 # Check an agent's news feed for saved responses
-curl -s "http://localhost:4100/agents" -H "X-Id-Team: $ID_TEAM" | jq  # Get agent URLs first
+curl -s "{{MANAGER_URL}}/agents" -H "X-Id-Team: $ID_TEAM" | jq  # Get agent URLs first
 curl -s "http://<agent-url>/news?since=0" | jq '.items[] | select(.type == "response.saved")'
 \`\`\`
 
@@ -277,13 +299,13 @@ If the user says anything like **"ask coder1 ..."**, **"go ask the manager ..."*
 2. **Use \`/message\`** to deliver the request:
 
 \`\`\`bash
-curl -s -X POST http://localhost:4100/message \\
+curl -s -X POST {{MANAGER_URL}}/message \\
   -H "Content-Type: application/json" \\
   -H "X-Id-Team: $ID_TEAM" \\
   -d '{"to": "<agent-name>", "message": "<request>"}'
 \`\`\`
 
-3. **IMPORTANT**: Do NOT use /message to message the manager. Your response is automatically sent back.
+3. If the target is the manager, use the reserved manager channel (\`/talk\` or \`/news\`) instead of peer messaging.
 
 4. In your final response text, confirm:
    - What you sent (verbatim)
@@ -301,7 +323,7 @@ Your news feed at \`/news\` contains:
 - Completed task results
 
 \`\`\`bash
-curl -s "http://localhost:4100/news?since=0" -H "X-Id-Team: $ID_TEAM" | jq
+curl -s "{{MANAGER_URL}}/news?since=0" -H "X-Id-Team: $ID_TEAM" | jq
 \`\`\`
 `;
 
