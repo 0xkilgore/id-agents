@@ -115,6 +115,22 @@ describe('manager-inbox resolution — fresh team with no CLI registered', () =>
     const newsBody = await newsRes.json() as { items: Array<{ type: string; data: any }> };
     const types = newsBody.items.map(i => i.type);
     expect(types).toContain('query.received');
+
+    // Dual-write window: the same row must carry the new ownership columns
+    // alongside the legacy agent_id. Read directly from the DB so we see
+    // both columns and confirm /talk did not regress to single-write.
+    const queryRow = await db.queries.getByQueryIdForTeam(teamId, body.query_id);
+    expect(queryRow).not.toBeNull();
+    expect(queryRow!.agent_id).toBe(`manager-${TEAM}`);
+    expect(queryRow!.owner_kind).toBe('manager');
+    expect(queryRow!.owner_id).toBe(teamId);
+
+    const newsRows = await db.news.poll(`manager-${TEAM}`, 0, { limit: 10 });
+    const received = newsRows.find((r) => r.type === 'query.received');
+    expect(received).toBeTruthy();
+    expect(received!.agent_id).toBe(`manager-${TEAM}`);
+    expect(received!.owner_kind).toBe('manager');
+    expect(received!.owner_id).toBe(teamId);
   });
 
   it('POST /news with in_reply_to does not blackhole when no inbox row exists', async () => {
@@ -145,6 +161,16 @@ describe('manager-inbox resolution — fresh team with no CLI registered', () =>
     expect(body.items.length).toBeGreaterThan(0);
     const messages = body.items.map(i => i.message);
     expect(messages.some(m => m && m.includes('reply to query that never registered'))).toBe(true);
+
+    // Dual-write window: the persisted reply row must carry both the
+    // legacy agent_id (manager-<team>) and the new ownership columns.
+    const newsRows = await db.news.poll(`manager-${TEAM2}`, 0, { limit: 10 });
+    expect(newsRows.length).toBeGreaterThan(0);
+    for (const row of newsRows) {
+      expect(row.agent_id).toBe(`manager-${TEAM2}`);
+      expect(row.owner_kind).toBe('manager');
+      expect(row.owner_id).toBe(teamId);
+    }
   });
 
   it('POST /schedule lands on the auto-provisioned inbox stub', async () => {
@@ -168,6 +194,25 @@ describe('manager-inbox resolution — fresh team with no CLI registered', () =>
     const newsRes = await fetch(`${baseUrl}/news?limit=10`, { headers: teamHeaders(TEAM3) });
     const body = await newsRes.json() as { items: Array<{ type: string }> };
     expect(body.items.map(i => i.type)).toContain('schedule.received');
+
+    // Dual-write window: /schedule writes both a query row and a news row.
+    // Both must populate owner_kind='manager'/owner_id=<team_id> alongside
+    // the legacy agent_id (manager-<team>).
+    const teamId = await db.teams.getOrCreateTeamId(TEAM3);
+    const newsRows = await db.news.poll(`manager-${TEAM3}`, 0, { limit: 10 });
+    const scheduleRow = newsRows.find((r) => r.type === 'schedule.received');
+    expect(scheduleRow).toBeTruthy();
+    expect(scheduleRow!.agent_id).toBe(`manager-${TEAM3}`);
+    expect(scheduleRow!.owner_kind).toBe('manager');
+    expect(scheduleRow!.owner_id).toBe(teamId);
+
+    const queryId = (scheduleRow!.data as any)?.query_id as string;
+    expect(queryId).toBeTruthy();
+    const queryRow = await db.queries.getByQueryIdForTeam(teamId, queryId);
+    expect(queryRow).not.toBeNull();
+    expect(queryRow!.agent_id).toBe(`manager-${TEAM3}`);
+    expect(queryRow!.owner_kind).toBe('manager');
+    expect(queryRow!.owner_id).toBe(teamId);
   });
 });
 

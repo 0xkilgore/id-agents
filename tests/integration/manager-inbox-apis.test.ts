@@ -163,6 +163,30 @@ describe('GET /manager/inbox/pending', () => {
     const schedPending = body.pending.find((p) => p.query_id === schedBody.query_id)!;
     expect(schedPending.schedule).toMatchObject({ id: 'sched_1', kind: 'cron' });
     expect(schedPending.mode).toBe('internal');
+
+    // Dual-write window: every queries row from a manager-inbox call site
+    // (/talk + /schedule) must carry owner_kind='manager'/owner_id=team_id
+    // alongside the legacy agent_id = manager-<team>.
+    const teamId = await db.teams.getOrCreateTeamId(TEAM);
+    for (const qid of [talkBody.query_id, schedBody.query_id]) {
+      const row = await db.queries.getByQueryIdForTeam(teamId, qid);
+      expect(row).not.toBeNull();
+      expect(row!.agent_id).toBe(`manager-${TEAM}`);
+      expect(row!.owner_kind).toBe('manager');
+      expect(row!.owner_id).toBe(teamId);
+    }
+
+    // The companion news rows (query.received + schedule.received) must also
+    // be dual-written.
+    const newsRows = await db.news.poll(`manager-${TEAM}`, 0, { limit: 50 });
+    const types = ['query.received', 'schedule.received'];
+    for (const t of types) {
+      const row = newsRows.find((r) => r.type === t);
+      expect(row, `expected ${t} news row`).toBeTruthy();
+      expect(row!.agent_id).toBe(`manager-${TEAM}`);
+      expect(row!.owner_kind).toBe('manager');
+      expect(row!.owner_id).toBe(teamId);
+    }
   });
 
   it('returns an empty list (and provisions the stub) for a freshly-created team', async () => {
@@ -232,6 +256,18 @@ describe('POST /manager/inbox/respond', () => {
     const events = await db.events.query({ teamId, topics: ['query:delivered'] });
     const matching = events.filter((e: any) => e.subject_id === queryId);
     expect(matching.length).toBe(1);
+
+    // Dual-write window: the query.completed news row written by
+    // /manager/inbox/respond carries both legacy agent_id (manager-<team>)
+    // and the new ownership columns.
+    const newsRows = await db.news.poll(`manager-${TEAM}`, 0, { limit: 100 });
+    const completedNews = newsRows.find(
+      (r) => r.type === 'query.completed' && r.query_id === queryId,
+    );
+    expect(completedNews).toBeTruthy();
+    expect(completedNews!.agent_id).toBe(`manager-${TEAM}`);
+    expect(completedNews!.owner_kind).toBe('manager');
+    expect(completedNews!.owner_id).toBe(teamId);
   });
 
   it('threads session_id into both the queries result and the news data when provided', async () => {

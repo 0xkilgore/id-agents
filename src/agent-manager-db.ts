@@ -1937,8 +1937,20 @@ export class AgentManagerDb {
         const managerId = await this.resolveManagerInboxId(teamId, teamName);
         const senderName = from || 'external';
 
-        // Store the query in the queries table
-        await this.db.queries.create(teamId, queryId, managerId, `[From: ${senderName}] ${message}`, ts, session_id || undefined);
+        // Store the query in the queries table. Dual-write window: every
+        // manager-inbox row carries both legacy agent_id (= manager-<team>)
+        // and the new owner_kind/owner_id columns explicitly so a downstream
+        // backfill/cutover never has to infer ownership from the agent_id
+        // prefix heuristic.
+        await this.db.queries.create(
+          teamId,
+          queryId,
+          managerId,
+          `[From: ${senderName}] ${message}`,
+          ts,
+          session_id || undefined,
+          { owner_kind: 'manager', owner_id: teamId },
+        );
 
         // Also store as a news item so the CLI can see incoming queries
         await this.db.news.add(teamId, managerId, {
@@ -1949,6 +1961,8 @@ export class AgentManagerDb {
           query_id: queryId,
           kind: 'talk',
           reply_expected: true,
+          owner_kind: 'manager',
+          owner_id: teamId,
         });
 
         this.managerLog(`Received query ${queryId} from ${senderName}: ${message.slice(0, 50)}...`);
@@ -2000,6 +2014,8 @@ export class AgentManagerDb {
           result: queryResult,
           error: null,
           session_id: null,
+          owner_kind: 'manager',
+          owner_id: teamId,
         });
 
         const newsData: Record<string, unknown> = {
@@ -2019,6 +2035,8 @@ export class AgentManagerDb {
           data: newsData,
           query_id: queryId,
           reply_expected: false,
+          owner_kind: 'manager',
+          owner_id: teamId,
         });
 
         this.managerLog(`Received scheduled query ${queryId}: ${messageStr.slice(0, 50)}...`);
@@ -2150,7 +2168,11 @@ export class AgentManagerDb {
         const inboxId = await this.resolveManagerInboxId(teamId, resolvedTeamName);
 
         // Replies carry notify semantics (no further reply expected);
-        // unsolicited inbound messages default to notify too.
+        // unsolicited inbound messages default to notify too. Dual-write
+        // window: tag the row with owner_kind='manager'/owner_id=teamId so
+        // the new ownership columns stay populated alongside the legacy
+        // agent_id (= manager-<team>) without depending on the agent-id
+        // prefix heuristic in the repo helper.
         if (!skipPersist) {
           await this.db.news.add(teamId, inboxId, {
             timestamp: ts,
@@ -2160,6 +2182,8 @@ export class AgentManagerDb {
             query_id: in_reply_to || undefined,
             kind: 'notify',
             reply_expected: false,
+            owner_kind: 'manager',
+            owner_id: teamId,
           });
         }
 
@@ -2497,6 +2521,8 @@ export class AgentManagerDb {
           type: 'query.completed',
           data: newsData,
           query_id: queryId,
+          owner_kind: 'manager',
+          owner_id: teamId,
         });
 
         // Canonical completion lifecycle. Drives queries.complete +

@@ -181,7 +181,7 @@ describe('/talk-to reply: query_id populated, no duplicate, manager waiter resol
 
     // Inspect the actual news_items row written under agent_a's inbox.
     const { rows } = await db.adapter.query(
-      `SELECT id, type, query_id, data FROM news_items WHERE team_id = ? AND agent_id = ? ORDER BY id DESC LIMIT 5`,
+      `SELECT id, type, query_id, data, owner_kind, owner_id FROM news_items WHERE team_id = ? AND agent_id = ? ORDER BY id DESC LIMIT 5`,
       [teamId, agentAId],
     ) as any;
     const replies = rows.filter((r: any) => r.type === 'reply');
@@ -190,6 +190,11 @@ describe('/talk-to reply: query_id populated, no duplicate, manager waiter resol
     const data = typeof replies[0].data === 'string' ? JSON.parse(replies[0].data) : replies[0].data;
     expect(data.in_reply_to).toBe(qid);
     expect(data.from).toBe('agent_b');
+    // Dual-write window: agent-inbox rows must also populate the new
+    // ownership columns alongside the legacy agent_id. owner_kind='agent'
+    // and owner_id=<agent_a id>.
+    expect(replies[0].owner_kind).toBe('agent');
+    expect(replies[0].owner_id).toBe(agentAId);
   });
 
   it('manager /news honors skip_persist:true: no manager-inbox row but queryWaiter resolves and queries.complete runs', async () => {
@@ -278,13 +283,16 @@ describe('/talk-to reply: query_id populated, no duplicate, manager waiter resol
 
     // Exactly ONE reply row team-wide: under agent_a's inbox, with query_id
     // populated. The manager-inbox got skip_persist:true so it didn't
-    // duplicate the row.
+    // duplicate the row. Dual-write window also requires the new ownership
+    // columns alongside the legacy agent_id, so check both.
     const { rows } = await db.adapter.query(
-      `SELECT agent_id, query_id FROM news_items WHERE team_id = ? AND type = 'reply' ORDER BY id`,
+      `SELECT agent_id, query_id, owner_kind, owner_id FROM news_items WHERE team_id = ? AND type = 'reply' ORDER BY id`,
       [teamId],
     ) as any;
     expect(rows).toHaveLength(1);
     expect(rows[0].agent_id).toBe(agentAId);
     expect(rows[0].query_id).toBe(qid);
+    expect(rows[0].owner_kind).toBe('agent');
+    expect(rows[0].owner_id).toBe(agentAId);
   }, 10000);
 });
