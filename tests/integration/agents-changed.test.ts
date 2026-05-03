@@ -28,9 +28,9 @@ import { SqliteNewsRepo } from '../../src/db/repos/sqlite/news-repo.js';
 import { SqliteSchedulesRepo } from '../../src/db/repos/sqlite/schedules-repo.js';
 import { SqliteTasksRepo } from '../../src/db/repos/sqlite/tasks-repo.js';
 
-function createInMemoryDb() {
+async function createInMemoryDb() {
   const adapter = new SqliteAdapter(':memory:');
-  migrateSqlite(adapter);
+  await migrateSqlite(adapter);
   return {
     adapter,
     teams: new SqliteTeamsRepo(adapter),
@@ -97,7 +97,7 @@ beforeAll(async () => {
   workDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agents-changed-test-'));
   baseUrl = `http://127.0.0.1:${port}`;
 
-  const db = createInMemoryDb();
+  const db = await createInMemoryDb();
   manager = new AgentManagerDb(workDir, db as any);
   await manager.start(port);
 

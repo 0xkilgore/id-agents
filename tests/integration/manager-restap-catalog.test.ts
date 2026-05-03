@@ -24,9 +24,9 @@ import { SqliteEventsRepo } from '../../src/db/repos/sqlite/events-repo.js';
 import { SqliteSubscriptionsRepo } from '../../src/db/repos/sqlite/subscriptions-repo.js';
 import { SqliteCheckinsRepo } from '../../src/db/repos/sqlite/checkins-repo.js';
 
-function createInMemoryDb() {
+async function createInMemoryDb() {
   const adapter = new SqliteAdapter(':memory:');
-  migrateSqlite(adapter);
+  await migrateSqlite(adapter);
   return {
     adapter,
     teams: new SqliteTeamsRepo(adapter),
@@ -62,7 +62,7 @@ async function stopManager(manager: AgentManagerDb): Promise<void> {
 
 describe('Daemon-root REST-AP catalog (manager-collapse step 1)', () => {
   let manager: AgentManagerDb;
-  let db: ReturnType<typeof createInMemoryDb>;
+  let db: Awaited<ReturnType<typeof createInMemoryDb>>;
   let baseUrl: string;
   let workDir: string;
 
@@ -70,7 +70,7 @@ describe('Daemon-root REST-AP catalog (manager-collapse step 1)', () => {
     const port = await findFreePort();
     baseUrl = `http://127.0.0.1:${port}`;
     workDir = fs.mkdtempSync(path.join(os.tmpdir(), 'manager-restap-test-'));
-    db = createInMemoryDb();
+    db = await createInMemoryDb();
     manager = new AgentManagerDb(workDir, db as any);
     await manager.start(port);
   }, 30000);

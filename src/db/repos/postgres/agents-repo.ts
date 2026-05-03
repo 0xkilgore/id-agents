@@ -166,7 +166,13 @@ export class PgAgentsRepo implements AgentsRepository {
     const r = await this.db.query<AgentRow>(
       `SELECT *
        FROM agents
-       WHERE team_id = $1 AND deleted_at IS NULL AND type NOT IN ('interactive', 'virtual') ${typeFilter}
+       WHERE team_id = $1
+         AND deleted_at IS NULL
+         AND (
+           type NOT IN ('interactive', 'virtual')
+           OR runtime = 'public-agent-remote'
+         )
+         ${typeFilter}
        ORDER BY created_at DESC`,
       [teamId],
     );
@@ -184,7 +190,13 @@ export class PgAgentsRepo implements AgentsRepository {
 
   async count(teamId: string): Promise<string> {
     const r = await this.db.query<{ count: string }>(
-      `SELECT COUNT(*)::text as count FROM agents WHERE team_id = $1 AND deleted_at IS NULL AND type NOT IN ('interactive', 'virtual')`,
+      `SELECT COUNT(*)::text as count FROM agents
+       WHERE team_id = $1
+         AND deleted_at IS NULL
+         AND (
+           type NOT IN ('interactive', 'virtual')
+           OR runtime = 'public-agent-remote'
+         )`,
       [teamId],
     );
     return r.rows[0]?.count || '0';

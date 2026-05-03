@@ -8,14 +8,14 @@
 
 import { describe, it, expect, beforeEach } from 'vitest';
 import { SqliteAdapter } from '../../src/db/sqlite-adapter.js';
-import { migrateSqlite, downMigrateInboxOwnershipSqlite } from '../../src/db/migrations/sqlite.js';
+import { migrateSqlite, migrateDeleteManagerShadowAgentsSqlite, downMigrateRecreateManagerShadowAgentsSqlite, downMigrateInboxOwnershipSqlite } from '../../src/db/migrations/sqlite.js';
 import { SqliteTasksRepo } from '../../src/db/repos/sqlite/tasks-repo.js';
 import { SqliteTeamsRepo } from '../../src/db/repos/sqlite/teams-repo.js';
 import type { TaskRow } from '../../src/db/types.js';
 
-function freshDb(): SqliteAdapter {
+async function freshDb(): Promise<SqliteAdapter> {
   const adapter = new SqliteAdapter(':memory:');
-  migrateSqlite(adapter);
+  await migrateSqlite(adapter);
   return adapter;
 }
 
@@ -46,7 +46,7 @@ describe('Tasks (team_id, name) uniqueness', () => {
   let teamBId: string;
 
   beforeEach(async () => {
-    adapter = freshDb();
+    adapter = await freshDb();
     teamsRepo = new SqliteTeamsRepo(adapter);
     tasksRepo = new SqliteTasksRepo(adapter);
     teamAId = await teamsRepo.getOrCreateTeamId('team-a');
@@ -114,7 +114,7 @@ describe('Tasks (team_id, name) uniqueness', () => {
 
 describe('SQLite migration — tasks uniqueness upgrade', () => {
   it('fresh DB has (team_id, name) constraint not global name UNIQUE', async () => {
-    const adapter = freshDb();
+    const adapter = await freshDb();
 
     // Verify by reading DDL
     const { rows } = await adapter.query<{ sql: string }>(
@@ -131,7 +131,7 @@ describe('SQLite migration — tasks uniqueness upgrade', () => {
   });
 
   it('well-known teams seeded by getOrCreateTeamId are unique', async () => {
-    const adapter = freshDb();
+    const adapter = await freshDb();
     const teamsRepo = new SqliteTeamsRepo(adapter);
 
     const id1 = await teamsRepo.getOrCreateTeamId('idchain');
@@ -148,7 +148,7 @@ describe('SQLite migration — tasks uniqueness upgrade', () => {
 
 describe('SQLite migration — remote endpoint columns (Phase 2 idempotency)', () => {
   it('fresh DB has all four remote endpoint columns on agents', async () => {
-    const adapter = freshDb();
+    const adapter = await freshDb();
     // Use pragma_table_info() table-valued function so it returns rows via SELECT
     const { rows } = await adapter.query<{ name: string }>(
       `SELECT name FROM pragma_table_info('agents')`,
@@ -211,12 +211,77 @@ describe('SQLite migration — remote endpoint columns (Phase 2 idempotency)', (
 });
 
 // =====================================================================
+// Manager shadow rows — delete + reversible down helper
+// =====================================================================
+
+describe('SQLite migration — manager shadow FK cleanup', () => {
+  it('fresh migrated DB has no manager-* agent rows', async () => {
+    const adapter = await freshDb();
+    const { rows } = await adapter.query<{ c: number }>(
+      `SELECT COUNT(*) as c FROM agents WHERE id GLOB 'manager-*'`,
+    );
+    expect(Number(rows[0]?.c)).toBe(0);
+    await adapter.close();
+  });
+
+  it('downMigrateRecreate restores stubs + legacy agent_id; migrateDelete clears again', async () => {
+    const adapter = await freshDb();
+    const teamsRepo = new SqliteTeamsRepo(adapter);
+    const teamId = await teamsRepo.getOrCreateTeamId('roundtrip-team');
+    const now = Date.now();
+
+    await adapter.query(
+      `INSERT INTO agents (id, team_id, name, type, model, port, status, created_at, runtime)
+       VALUES ('worker-rt', ?, 'worker', 'virtual', 'sonnet', 0, 'running', ?, 'claude-agent-sdk')`,
+      [teamId, now],
+    );
+
+    await adapter.query(
+      `INSERT INTO queries (team_id, agent_id, query_id, status, created, owner_kind, owner_id, prompt)
+       VALUES (?, NULL, 'q_rt_1', 'pending', ?, 'manager', ?, NULL)`,
+      [teamId, now + 2, teamId],
+    );
+    await adapter.query(
+      `INSERT INTO news_items (team_id, agent_id, timestamp, type, owner_kind, owner_id)
+       VALUES (?, NULL, ?, 'test', 'manager', ?)`,
+      [teamId, now + 3, teamId],
+    );
+
+    await downMigrateRecreateManagerShadowAgentsSqlite(adapter);
+
+    const stub = await adapter.query<{ id: string }>(
+      `SELECT id FROM agents WHERE id = 'manager-roundtrip-team'`,
+    );
+    expect(stub.rows).toHaveLength(1);
+
+    const qAfterDown = await adapter.query<{ agent_id: string | null }>(
+      `SELECT agent_id FROM queries WHERE query_id = 'q_rt_1'`,
+    );
+    expect(qAfterDown.rows[0]?.agent_id).toBe('manager-roundtrip-team');
+
+    await migrateDeleteManagerShadowAgentsSqlite(adapter);
+
+    const noStub = await adapter.query<{ c: number }>(
+      `SELECT COUNT(*) as c FROM agents WHERE id GLOB 'manager-*'`,
+    );
+    expect(Number(noStub.rows[0]?.c)).toBe(0);
+
+    const qClean = await adapter.query<{ agent_id: string | null }>(
+      `SELECT agent_id FROM queries WHERE query_id = 'q_rt_1'`,
+    );
+    expect(qClean.rows[0]?.agent_id).toBeNull();
+
+    await adapter.close();
+  });
+});
+
+// =====================================================================
 // Inbox ownership (owner_kind / owner_id) + reversible down helper
 // =====================================================================
 
 describe('SQLite migration — inbox ownership (manager foundation)', () => {
   it('fresh DB has ownership columns and indexes on queries and news_items', async () => {
-    const adapter = freshDb();
+    const adapter = await freshDb();
     for (const table of ['queries', 'news_items'] as const) {
       const { rows } = await adapter.query<{ name: string }>(
         `SELECT name FROM pragma_table_info('${table}')`,
@@ -248,7 +313,7 @@ describe('SQLite migration — inbox ownership (manager foundation)', () => {
   });
 
   it('downMigrateInboxOwnershipSqlite restores manager-<team> agent_id for manager-owned rows', async () => {
-    const adapter = freshDb();
+    const adapter = await freshDb();
     const teamsRepo = new SqliteTeamsRepo(adapter);
     const teamId = await teamsRepo.getOrCreateTeamId('roundtrip-team');
     const now = Date.now();

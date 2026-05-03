@@ -39,9 +39,9 @@ import {
 
 // ─── DB factory (in-memory) ──────────────────────────────────────────────────
 
-function createInMemoryDb() {
+async function createInMemoryDb() {
   const adapter = new SqliteAdapter(':memory:');
-  migrateSqlite(adapter);
+  await migrateSqlite(adapter);
   return {
     adapter,
     teams: new SqliteTeamsRepo(adapter),
@@ -116,7 +116,7 @@ function validWellKnown(domain: string): string {
 let managerPort: number;
 let managerBaseUrl: string;
 let manager: AgentManagerDb;
-let db: ReturnType<typeof createInMemoryDb>;
+let db: Awaited<ReturnType<typeof createInMemoryDb>>;
 let workDir: string;
 let publicTeamId: string;
 
@@ -151,7 +151,7 @@ beforeAll(async () => {
   managerPort = await findFreePort();
   managerBaseUrl = `http://127.0.0.1:${managerPort}`;
   workDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cli-public-test-'));
-  db = createInMemoryDb();
+  db = await createInMemoryDb();
   manager = new AgentManagerDb(workDir, db as any);
   await manager.start(managerPort);
 

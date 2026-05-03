@@ -34,9 +34,9 @@ import { SqliteSchedulesRepo } from '../../src/db/repos/sqlite/schedules-repo.js
 import { SqliteTasksRepo } from '../../src/db/repos/sqlite/tasks-repo.js';
 import { SqliteEventsRepo } from '../../src/db/repos/sqlite/events-repo.js';
 
-function createInMemoryDb() {
+async function createInMemoryDb() {
   const adapter = new SqliteAdapter(':memory:');
-  migrateSqlite(adapter);
+  await migrateSqlite(adapter);
   return {
     adapter,
     teams: new SqliteTeamsRepo(adapter),
@@ -69,13 +69,13 @@ let port: number;
 let baseUrl: string;
 let workDir: string;
 let manager: AgentManagerDb;
-let db: ReturnType<typeof createInMemoryDb>;
+let db: Awaited<ReturnType<typeof createInMemoryDb>>;
 
 beforeAll(async () => {
   port = await findFreePort();
   baseUrl = `http://127.0.0.1:${port}`;
   workDir = fs.mkdtempSync(path.join(os.tmpdir(), 'manager-inbox-apis-test-'));
-  db = createInMemoryDb();
+  db = await createInMemoryDb();
   manager = new AgentManagerDb(workDir, db as any);
   await manager.start(port);
 }, 30000);
@@ -164,14 +164,12 @@ describe('GET /manager/inbox/pending', () => {
     expect(schedPending.schedule).toMatchObject({ id: 'sched_1', kind: 'cron' });
     expect(schedPending.mode).toBe('internal');
 
-    // Dual-write window: every queries row from a manager-inbox call site
-    // (/talk + /schedule) must carry owner_kind='manager'/owner_id=team_id
-    // alongside the legacy agent_id = manager-<team>.
+    // Manager inbox queries use owner_kind only; agent_id remains NULL.
     const teamId = await db.teams.getOrCreateTeamId(TEAM);
     for (const qid of [talkBody.query_id, schedBody.query_id]) {
       const row = await db.queries.getByQueryIdForTeam(teamId, qid);
       expect(row).not.toBeNull();
-      expect(row!.agent_id).toBe(`manager-${TEAM}`);
+      expect(row!.agent_id).toBeNull();
       expect(row!.owner_kind).toBe('manager');
       expect(row!.owner_id).toBe(teamId);
     }
@@ -183,7 +181,7 @@ describe('GET /manager/inbox/pending', () => {
     for (const t of types) {
       const row = newsRows.find((r) => r.type === t);
       expect(row, `expected ${t} news row`).toBeTruthy();
-      expect(row!.agent_id).toBe(`manager-${TEAM}`);
+      expect(row!.agent_id).toBeNull();
       expect(row!.owner_kind).toBe('manager');
       expect(row!.owner_id).toBe(teamId);
     }
@@ -259,14 +257,13 @@ describe('POST /manager/inbox/respond', () => {
     expect(matching.length).toBe(1);
 
     // Dual-write window: the query.completed news row written by
-    // /manager/inbox/respond carries both legacy agent_id (manager-<team>)
-    // and the new ownership columns.
+    // /manager/inbox/respond carries owner_kind + NULL legacy agent_id.
     const newsRows = await db.news.pollByOwner(teamId, 'manager', teamId, 0, { limit: 100 });
     const completedNews = newsRows.find(
       (r) => r.type === 'query.completed' && r.query_id === queryId,
     );
     expect(completedNews).toBeTruthy();
-    expect(completedNews!.agent_id).toBe(`manager-${TEAM}`);
+    expect(completedNews!.agent_id).toBeNull();
     expect(completedNews!.owner_kind).toBe('manager');
     expect(completedNews!.owner_id).toBe(teamId);
   });

@@ -7,16 +7,19 @@ import { parseJsonObject, stringifyJson } from '../../db-json.js';
 
 function resolveNewsOwnership(
   teamId: string,
-  agentId: string,
+  agentId: string | null,
   item: { owner_kind?: InboxOwnerKind; owner_id?: string },
 ): { owner_kind: InboxOwnerKind; owner_id: string } {
   if (item.owner_kind != null && item.owner_id != null) {
     return { owner_kind: item.owner_kind, owner_id: item.owner_id };
   }
-  if (agentId.startsWith('manager-')) {
-    return { owner_kind: 'manager', owner_id: teamId };
+  if (agentId != null && agentId !== '') {
+    if (agentId.startsWith('manager-')) {
+      return { owner_kind: 'manager', owner_id: teamId };
+    }
+    return { owner_kind: 'agent', owner_id: agentId };
   }
-  return { owner_kind: 'agent', owner_id: agentId };
+  throw new Error('SqliteNewsRepo: owner_kind/owner_id required when agentId is null');
 }
 
 export class SqliteNewsRepo implements NewsRepository {
@@ -24,12 +27,15 @@ export class SqliteNewsRepo implements NewsRepository {
 
   private parseNewsRow(row: any): NewsItemRow | null {
     if (!row) return null;
-    const agent_id = String(row.agent_id ?? '');
+    const agent_id =
+      row.agent_id != null && row.agent_id !== ''
+        ? String(row.agent_id)
+        : null;
     const team_id = String(row.team_id ?? '');
     const owner_kind: InboxOwnerKind =
       row.owner_kind === 'manager' || row.owner_kind === 'agent'
         ? row.owner_kind
-        : agent_id.startsWith('manager-')
+        : agent_id?.startsWith('manager-')
           ? 'manager'
           : 'agent';
     const owner_id =
@@ -37,7 +43,7 @@ export class SqliteNewsRepo implements NewsRepository {
         ? String(row.owner_id)
         : owner_kind === 'manager'
           ? team_id
-          : agent_id;
+          : agent_id ?? '';
     return {
       ...row,
       team_id,
@@ -50,7 +56,7 @@ export class SqliteNewsRepo implements NewsRepository {
 
   async add(
     teamId: string,
-    agentId: string,
+    agentId: string | null,
     item: {
       timestamp: number;
       type: string;

@@ -30,9 +30,9 @@ import {
 } from '../../src/runtime/registry.js';
 
 // --- DB factory helper (in-memory) ---
-function createInMemoryDb() {
+async function createInMemoryDb() {
   const adapter = new SqliteAdapter(':memory:');
-  migrateSqlite(adapter);
+  await migrateSqlite(adapter);
   return {
     adapter,
     teams: new SqliteTeamsRepo(adapter),
@@ -87,7 +87,7 @@ beforeAll(async () => {
   workDir = fs.mkdtempSync(path.join(os.tmpdir(), 'remote-runtime-test-'));
   baseUrl = `http://127.0.0.1:${port}`;
 
-  const db = createInMemoryDb();
+  const db = await createInMemoryDb();
   manager = new AgentManagerDb(workDir, db as any);
 
   await manager.start(port);

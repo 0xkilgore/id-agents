@@ -3,6 +3,182 @@
 import crypto from 'crypto';
 import type { SqliteAdapter } from '../sqlite-adapter.js';
 
+/** PK (team_id, query_id); nullable agent_id for manager inbox rows. */
+async function migrateQueriesTeamQueryPkSqlite(adapter: SqliteAdapter): Promise<void> {
+  const { rows } = await adapter.query<{ sql: string }>(
+    `SELECT sql FROM sqlite_master WHERE type='table' AND name='queries'`,
+  );
+  if (!rows[0]?.sql) return;
+  const norm = rows[0].sql.toLowerCase().replace(/\s+/g, ' ');
+  if (
+    norm.includes('primary key (team_id, query_id)') ||
+    norm.includes('primary key(team_id,query_id)')
+  ) {
+    return;
+  }
+
+  adapter.exec(`
+    ALTER TABLE queries RENAME TO queries_legacy_mgrfk;
+
+    CREATE TABLE queries (
+      team_id TEXT NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+      agent_id TEXT REFERENCES agents(id) ON DELETE CASCADE,
+      query_id TEXT NOT NULL,
+      status TEXT NOT NULL,
+      prompt TEXT,
+      created INTEGER NOT NULL,
+      completed INTEGER,
+      result TEXT,
+      error TEXT,
+      session_id TEXT,
+      owner_kind TEXT NOT NULL DEFAULT 'agent',
+      owner_id TEXT NOT NULL DEFAULT '',
+      PRIMARY KEY (team_id, query_id)
+    );
+
+    INSERT INTO queries SELECT * FROM queries_legacy_mgrfk;
+
+    DROP TABLE queries_legacy_mgrfk;
+  `);
+  adapter.exec(
+    `CREATE INDEX IF NOT EXISTS queries_team_owner_idx ON queries(team_id, owner_kind, owner_id)`,
+  );
+}
+
+/** Nullable agent_id for manager-owned news rows (preserve ids). */
+async function migrateNewsItemsNullableAgentSqlite(adapter: SqliteAdapter): Promise<void> {
+  const meta = await adapter.query<Record<string, unknown>>(
+    `SELECT * FROM pragma_table_info('news_items') WHERE name='agent_id'`,
+  );
+  const pinfo = meta.rows[0];
+  if (!pinfo) return;
+  const nn = Number((pinfo as { notnull?: unknown }).notnull ?? 0);
+  if (nn === 0) return;
+
+  adapter.exec(`DROP INDEX IF EXISTS news_items_agent_time_idx`);
+  adapter.exec(`DROP INDEX IF EXISTS news_items_query_idx`);
+
+  adapter.exec(`
+    ALTER TABLE news_items RENAME TO news_items_legacy_nn;
+
+    CREATE TABLE news_items (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      team_id TEXT NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+      agent_id TEXT REFERENCES agents(id) ON DELETE CASCADE,
+      timestamp INTEGER NOT NULL,
+      type TEXT NOT NULL,
+      message TEXT,
+      data TEXT,
+      query_id TEXT,
+      kind TEXT,
+      reply_expected INTEGER,
+      owner_kind TEXT NOT NULL DEFAULT 'agent',
+      owner_id TEXT NOT NULL DEFAULT ''
+    );
+
+    INSERT INTO news_items SELECT * FROM news_items_legacy_nn;
+
+    DROP TABLE news_items_legacy_nn;
+  `);
+
+  adapter.exec(`
+    CREATE INDEX IF NOT EXISTS news_items_agent_time_idx ON news_items(team_id, agent_id, timestamp);
+    CREATE INDEX IF NOT EXISTS news_items_query_idx ON news_items(team_id, agent_id, query_id);
+    CREATE INDEX IF NOT EXISTS news_items_team_owner_time_idx ON news_items(team_id, owner_kind, owner_id, timestamp);
+    CREATE INDEX IF NOT EXISTS news_items_owner_query_idx ON news_items(team_id, owner_kind, owner_id, query_id);
+  `);
+}
+
+/**
+ * Null manager-owned FK slots and delete hidden manager-<team> shadow agent rows.
+ * Hard-fails if orphan refs would violate integrity (runs after PK/nullable migrations).
+ */
+export async function migrateDeleteManagerShadowAgentsSqlite(adapter: SqliteAdapter): Promise<void> {
+  const probe = async (sql: string): Promise<number> => {
+    try {
+      const r = await adapter.query<{ c: number }>(sql);
+      return Number(r.rows[0]?.c ?? 0);
+    } catch {
+      return 0;
+    }
+  };
+
+  const orphans: Array<{ label: string; sql: string }> = [
+    { label: 'wallets', sql: `SELECT COUNT(*) as c FROM wallets WHERE agent_id GLOB 'manager-*'` },
+    {
+      label: 'schedule_targets',
+      sql: `SELECT COUNT(*) as c FROM schedule_targets WHERE agent_id GLOB 'manager-*'`,
+    },
+    { label: 'schedule_runs', sql: `SELECT COUNT(*) as c FROM schedule_runs WHERE agent_id GLOB 'manager-*'` },
+    { label: 'tasks.owner', sql: `SELECT COUNT(*) as c FROM tasks WHERE owner GLOB 'manager-*'` },
+    {
+      label: 'tasks.created_by',
+      sql: `SELECT COUNT(*) as c FROM tasks WHERE created_by GLOB 'manager-*'`,
+    },
+    {
+      label: 'checkins.owner_agent_id',
+      sql: `SELECT COUNT(*) as c FROM checkins WHERE owner_agent_id GLOB 'manager-*'`,
+    },
+    {
+      label: 'checkins.created_by_agent_id',
+      sql: `SELECT COUNT(*) as c FROM checkins WHERE created_by_agent_id GLOB 'manager-*'`,
+    },
+  ];
+  for (const { label, sql } of orphans) {
+    const c = await probe(sql);
+    if (c > 0) {
+      throw new Error(
+        `migrateDeleteManagerShadowAgentsSqlite: ${c} row(s) in ${label} still reference manager-* ids`,
+      );
+    }
+  }
+
+  const badQ = await adapter.query<{ c: number }>(`
+    SELECT COUNT(*) as c FROM queries
+    WHERE agent_id IS NOT NULL AND agent_id GLOB 'manager-*'
+      AND (owner_kind != 'manager' OR owner_id != team_id)
+  `);
+  if (Number(badQ.rows[0]?.c) > 0) {
+    throw new Error(
+      'migrateDeleteManagerShadowAgentsSqlite: queries rows carry manager-* agent_id without owner_kind=manager + owner_id=team_id',
+    );
+  }
+
+  const badN = await adapter.query<{ c: number }>(`
+    SELECT COUNT(*) as c FROM news_items
+    WHERE agent_id IS NOT NULL AND agent_id GLOB 'manager-*'
+      AND (owner_kind != 'manager' OR owner_id != team_id)
+  `);
+  if (Number(badN.rows[0]?.c) > 0) {
+    throw new Error(
+      'migrateDeleteManagerShadowAgentsSqlite: news_items carry manager-* agent_id without owner_kind=manager + owner_id=team_id',
+    );
+  }
+
+  await adapter.query(`UPDATE queries SET agent_id = NULL WHERE owner_kind = 'manager'`);
+  await adapter.query(`UPDATE news_items SET agent_id = NULL WHERE owner_kind = 'manager'`);
+
+  const leftQ = await adapter.query<{ c: number }>(
+    `SELECT COUNT(*) as c FROM queries WHERE agent_id IS NOT NULL AND agent_id GLOB 'manager-*'`,
+  );
+  if (Number(leftQ.rows[0]?.c) > 0) {
+    throw new Error(
+      'migrateDeleteManagerShadowAgentsSqlite: queries still reference manager-* after owner nulling — migrate writes before rerunning delete migration',
+    );
+  }
+
+  const leftN = await adapter.query<{ c: number }>(
+    `SELECT COUNT(*) as c FROM news_items WHERE agent_id IS NOT NULL AND agent_id GLOB 'manager-*'`,
+  );
+  if (Number(leftN.rows[0]?.c) > 0) {
+    throw new Error(
+      'migrateDeleteManagerShadowAgentsSqlite: news_items still reference manager-* after owner nulling',
+    );
+  }
+
+  await adapter.query(`DELETE FROM agents WHERE id GLOB 'manager-*'`);
+}
+
 export async function migrateSqlite(adapter: SqliteAdapter): Promise<void> {
   adapter.exec(`
     CREATE TABLE IF NOT EXISTS teams (
@@ -50,7 +226,7 @@ export async function migrateSqlite(adapter: SqliteAdapter): Promise<void> {
     CREATE TABLE IF NOT EXISTS news_items (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       team_id TEXT NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
-      agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+      agent_id TEXT REFERENCES agents(id) ON DELETE CASCADE,
       timestamp INTEGER NOT NULL,
       type TEXT NOT NULL,
       message TEXT,
@@ -64,7 +240,7 @@ export async function migrateSqlite(adapter: SqliteAdapter): Promise<void> {
 
     CREATE TABLE IF NOT EXISTS queries (
       team_id TEXT NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
-      agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+      agent_id TEXT REFERENCES agents(id) ON DELETE CASCADE,
       query_id TEXT NOT NULL,
       status TEXT NOT NULL,
       prompt TEXT,
@@ -75,7 +251,7 @@ export async function migrateSqlite(adapter: SqliteAdapter): Promise<void> {
       session_id TEXT,
       owner_kind TEXT NOT NULL DEFAULT 'agent',
       owner_id TEXT NOT NULL DEFAULT '',
-      PRIMARY KEY (agent_id, query_id)
+      PRIMARY KEY (team_id, query_id)
     );
 
     CREATE INDEX IF NOT EXISTS agents_team_name_idx ON agents(team_id, name);
@@ -364,6 +540,10 @@ export async function migrateSqlite(adapter: SqliteAdapter): Promise<void> {
 
   adapter.exec(`CREATE UNIQUE INDEX IF NOT EXISTS tasks_uuid_idx ON tasks(uuid)`);
 
+  await migrateQueriesTeamQueryPkSqlite(adapter);
+  await migrateNewsItemsNullableAgentSqlite(adapter);
+  await migrateDeleteManagerShadowAgentsSqlite(adapter);
+
   // Tasks: migrate from global name UNIQUE to (team_id, name) UNIQUE.
   // SQLite does not support DROP CONSTRAINT, so we use the rename-copy-swap pattern
   // guarded by a PRAGMA check to detect whether the old global uniqueness is still present.
@@ -443,4 +623,44 @@ export async function downMigrateInboxOwnershipSqlite(adapter: SqliteAdapter): P
     SET agent_id = 'manager-' || (SELECT name FROM teams WHERE teams.id = news_items.team_id)
     WHERE owner_kind = 'manager'
   `);
+}
+
+/**
+ * Recreate hidden manager-<team> stub rows then dual-write legacy agent_id (tests / rollback).
+ */
+export async function downMigrateRecreateManagerShadowAgentsSqlite(adapter: SqliteAdapter): Promise<void> {
+  const ts = Date.now();
+  const meta = JSON.stringify({ canReceiveDirectMessages: false, shadowOnly: true });
+  const { rows: teams } = await adapter.query<{ id: string; name: string }>(
+    `SELECT id, name FROM teams`,
+  );
+  for (const t of teams) {
+    const shadowId = `manager-${t.name}`;
+    const { rows: cntRows } = await adapter.query<{ c: number }>(
+      `SELECT (
+        (SELECT COUNT(*) FROM queries WHERE team_id = ? AND owner_kind = 'manager') +
+        (SELECT COUNT(*) FROM news_items WHERE team_id = ? AND owner_kind = 'manager')
+      ) AS c`,
+      [t.id, t.id],
+    );
+    if (Number(cntRows[0]?.c) === 0) continue;
+
+    await adapter.query(
+      `INSERT OR REPLACE INTO agents (
+        id, team_id, name, type, model, port, endpoint, working_directory,
+        status, created_at, registry, metadata, deleted_at, runtime,
+        token_id, domain, api_key,
+        customer_domain, public_endpoint_url, internal_endpoint_url, ssh_target,
+        last_seen, last_probed_at, last_error, consecutive_failures
+      ) VALUES (
+        ?, ?, 'manager', 'interactive', '', 0, '', NULL,
+        'stub', ?, NULL, ?, ?, 'claude-agent-sdk',
+        NULL, NULL, NULL,
+        NULL, NULL, NULL, NULL,
+        NULL, NULL, NULL, 0
+      )`,
+      [shadowId, t.id, ts, meta, ts],
+    );
+  }
+  await downMigrateInboxOwnershipSqlite(adapter);
 }

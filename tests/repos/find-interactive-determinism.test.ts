@@ -16,9 +16,9 @@ import { migrateSqlite } from '../../src/db/migrations/sqlite.js';
 import { SqliteAgentsRepo } from '../../src/db/repos/sqlite/agents-repo.js';
 import { SqliteTeamsRepo } from '../../src/db/repos/sqlite/teams-repo.js';
 
-function freshDb(): SqliteAdapter {
+async function freshDb(): Promise<SqliteAdapter> {
   const adapter = new SqliteAdapter(':memory:');
-  migrateSqlite(adapter);
+  await migrateSqlite(adapter);
   return adapter;
 }
 
@@ -29,7 +29,7 @@ describe('AgentsRepo.findInteractive — deterministic newest-first selection', 
   let teamId: string;
 
   beforeEach(async () => {
-    adapter = freshDb();
+    adapter = await freshDb();
     teamsRepo = new SqliteTeamsRepo(adapter);
     agentsRepo = new SqliteAgentsRepo(adapter);
     teamId = await teamsRepo.getOrCreateTeamId('test-team');

@@ -15,9 +15,9 @@ import { SqliteNewsRepo } from '../../src/db/repos/sqlite/news-repo.js';
 // Helpers — fresh in-memory database for each test suite
 // ---------------------------------------------------------------------------
 
-function createDb() {
+async function createDb() {
   const adapter = new SqliteAdapter(':memory:');
-  migrateSqlite(adapter);
+  await migrateSqlite(adapter);
   return {
     adapter,
     teams: new SqliteTeamsRepo(adapter),
@@ -34,7 +34,7 @@ async function seedTeam(teams: SqliteTeamsRepo, name = 'test-team'): Promise<str
 
 /** Convenience: create a team + agent, return { teamId, agentId } */
 async function seedAgent(
-  db: ReturnType<typeof createDb>,
+  db: Awaited<ReturnType<typeof createDb>>,
   overrides: Partial<{
     name: string;
     type: string;
@@ -65,10 +65,10 @@ async function seedAgent(
 // ===========================================================================
 
 describe('TeamsRepository', () => {
-  let db: ReturnType<typeof createDb>;
+  let db: Awaited<ReturnType<typeof createDb>>;
 
-  beforeEach(() => {
-    db = createDb();
+  beforeEach(async () => {
+    db = await createDb();
   });
 
   it('getOrCreateTeamId creates team and returns UUID string (36 chars with dashes)', async () => {
@@ -120,10 +120,10 @@ describe('TeamsRepository', () => {
 // ===========================================================================
 
 describe('AgentsRepository', () => {
-  let db: ReturnType<typeof createDb>;
+  let db: Awaited<ReturnType<typeof createDb>>;
 
-  beforeEach(() => {
-    db = createDb();
+  beforeEach(async () => {
+    db = await createDb();
   });
 
   it('create + getById roundtrip', async () => {
@@ -254,10 +254,10 @@ describe('AgentsRepository', () => {
 // ===========================================================================
 
 describe('QueriesRepository', () => {
-  let db: ReturnType<typeof createDb>;
+  let db: Awaited<ReturnType<typeof createDb>>;
 
-  beforeEach(() => {
-    db = createDb();
+  beforeEach(async () => {
+    db = await createDb();
   });
 
   it('create + getPending roundtrip', async () => {
@@ -346,10 +346,10 @@ describe('QueriesRepository', () => {
 // ===========================================================================
 
 describe('NewsRepository', () => {
-  let db: ReturnType<typeof createDb>;
+  let db: Awaited<ReturnType<typeof createDb>>;
 
-  beforeEach(() => {
-    db = createDb();
+  beforeEach(async () => {
+    db = await createDb();
   });
 
   it('add + poll roundtrip', async () => {

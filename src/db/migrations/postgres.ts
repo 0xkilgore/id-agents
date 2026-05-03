@@ -238,7 +238,7 @@ export async function migratePostgres(adapter: DbAdapter): Promise<void> {
     CREATE TABLE IF NOT EXISTS news_items (
       id bigserial PRIMARY KEY,
       team_id uuid NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
-      agent_id text NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+      agent_id text REFERENCES agents(id) ON DELETE CASCADE,
       timestamp bigint NOT NULL,
       type text NOT NULL,
       message text,
@@ -259,7 +259,7 @@ export async function migratePostgres(adapter: DbAdapter): Promise<void> {
   await adapter.query(`
     CREATE TABLE IF NOT EXISTS queries (
       team_id uuid NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
-      agent_id text NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+      agent_id text REFERENCES agents(id) ON DELETE CASCADE,
       query_id text NOT NULL,
       status text NOT NULL,
       prompt text,
@@ -270,7 +270,7 @@ export async function migratePostgres(adapter: DbAdapter): Promise<void> {
       session_id text,
       owner_kind text NOT NULL DEFAULT 'agent',
       owner_id text NOT NULL DEFAULT '',
-      PRIMARY KEY (agent_id, query_id)
+      PRIMARY KEY (team_id, query_id)
     );
   `);
 
@@ -660,6 +660,119 @@ export async function migratePostgres(adapter: DbAdapter): Promise<void> {
       ON checkins(team_id, ttl_expires_at)
       WHERE ttl_expires_at IS NOT NULL AND status IN ('active', 'snoozed');
   `);
+
+  await adapter.query(`
+    DO $$
+    BEGIN
+      IF EXISTS (
+        SELECT 1
+        FROM information_schema.table_constraints tc
+        JOIN information_schema.key_column_usage kcu
+          ON tc.constraint_name = kcu.constraint_name AND tc.table_schema = kcu.table_schema
+        WHERE tc.table_schema = 'public' AND tc.table_name = 'queries'
+          AND tc.constraint_type = 'PRIMARY KEY'
+          AND kcu.column_name = 'agent_id'
+      ) THEN
+        ALTER TABLE queries DROP CONSTRAINT IF EXISTS queries_agent_fk;
+        ALTER TABLE queries DROP CONSTRAINT queries_pkey;
+        ALTER TABLE queries ALTER COLUMN agent_id DROP NOT NULL;
+        ALTER TABLE queries ADD CONSTRAINT queries_pkey PRIMARY KEY (team_id, query_id);
+        ALTER TABLE queries ADD CONSTRAINT queries_agent_fk
+          FOREIGN KEY (agent_id) REFERENCES agents(id) ON DELETE CASCADE;
+      END IF;
+    END $$;
+  `);
+
+  await adapter.query(`
+    DO $$
+    BEGIN
+      IF EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = 'public' AND table_name = 'news_items'
+          AND column_name = 'agent_id' AND is_nullable = 'NO'
+      ) THEN
+        ALTER TABLE news_items DROP CONSTRAINT IF EXISTS news_items_agent_fk;
+        ALTER TABLE news_items ALTER COLUMN agent_id DROP NOT NULL;
+        ALTER TABLE news_items ADD CONSTRAINT news_items_agent_fk
+          FOREIGN KEY (agent_id) REFERENCES agents(id) ON DELETE CASCADE;
+      END IF;
+    END $$;
+  `);
+
+  await migrateDeleteManagerShadowAgentsPostgres(adapter);
+}
+
+/** Null manager-owned FK columns and delete manager-<team> shadow agent rows. */
+export async function migrateDeleteManagerShadowAgentsPostgres(adapter: DbAdapter): Promise<void> {
+  const count = async (sql: string): Promise<number> => {
+    try {
+      const r = await adapter.query<{ c: string }>(sql);
+      return Number(r.rows[0]?.c ?? 0);
+    } catch {
+      return 0;
+    }
+  };
+
+  const pairs: Array<[string, string]> = [
+    ['wallets', `SELECT COUNT(*)::text AS c FROM wallets WHERE agent_id LIKE 'manager-%'`],
+    ['schedule_targets', `SELECT COUNT(*)::text AS c FROM schedule_targets WHERE agent_id LIKE 'manager-%'`],
+    ['schedule_runs', `SELECT COUNT(*)::text AS c FROM schedule_runs WHERE agent_id LIKE 'manager-%'`],
+    ['tasks.owner', `SELECT COUNT(*)::text AS c FROM tasks WHERE owner LIKE 'manager-%'`],
+    ['tasks.created_by', `SELECT COUNT(*)::text AS c FROM tasks WHERE created_by LIKE 'manager-%'`],
+    ['checkins.owner_agent_id', `SELECT COUNT(*)::text AS c FROM checkins WHERE owner_agent_id LIKE 'manager-%'`],
+    ['checkins.created_by_agent_id', `SELECT COUNT(*)::text AS c FROM checkins WHERE created_by_agent_id LIKE 'manager-%'`],
+  ];
+  for (const [label, sql] of pairs) {
+    const c = await count(sql);
+    if (c > 0) {
+      throw new Error(
+        `migrateDeleteManagerShadowAgentsPostgres: ${c} row(s) in ${label} still reference manager-* ids`,
+      );
+    }
+  }
+
+  const badQ = await adapter.query<{ c: string }>(`
+    SELECT COUNT(*)::text AS c FROM queries
+    WHERE agent_id IS NOT NULL AND agent_id LIKE 'manager-%'
+      AND (owner_kind != 'manager' OR owner_id != team_id::text)
+  `);
+  if (Number(badQ.rows[0]?.c) > 0) {
+    throw new Error(
+      'migrateDeleteManagerShadowAgentsPostgres: queries rows carry manager-* agent_id without aligned ownership',
+    );
+  }
+
+  const badN = await adapter.query<{ c: string }>(`
+    SELECT COUNT(*)::text AS c FROM news_items
+    WHERE agent_id IS NOT NULL AND agent_id LIKE 'manager-%'
+      AND (owner_kind != 'manager' OR owner_id != team_id::text)
+  `);
+  if (Number(badN.rows[0]?.c) > 0) {
+    throw new Error(
+      'migrateDeleteManagerShadowAgentsPostgres: news_items carry manager-* agent_id without aligned ownership',
+    );
+  }
+
+  await adapter.query(`UPDATE queries SET agent_id = NULL WHERE owner_kind = 'manager'`);
+  await adapter.query(`UPDATE news_items SET agent_id = NULL WHERE owner_kind = 'manager'`);
+
+  const leftQ = await count(
+    `SELECT COUNT(*)::text AS c FROM queries WHERE agent_id IS NOT NULL AND agent_id LIKE 'manager-%'`,
+  );
+  if (leftQ > 0) {
+    throw new Error(
+      'migrateDeleteManagerShadowAgentsPostgres: queries still reference manager-* after nulling — fix writers before rerun',
+    );
+  }
+
+  const leftN = await count(
+    `SELECT COUNT(*)::text AS c FROM news_items WHERE agent_id IS NOT NULL AND agent_id LIKE 'manager-%'`,
+  );
+  if (leftN > 0) {
+    throw new Error('migrateDeleteManagerShadowAgentsPostgres: news_items still reference manager-* after nulling');
+  }
+
+  await adapter.query(`DELETE FROM agents WHERE id LIKE 'manager-%'`);
 }
 
 /**
@@ -680,4 +793,43 @@ export async function downMigrateInboxOwnershipPostgres(adapter: DbAdapter): Pro
     FROM teams t
     WHERE n.team_id = t.id AND n.owner_kind = 'manager'
   `);
+}
+
+/** Recreate manager-<team> stubs then legacy agent_id (tests / rollback). */
+export async function downMigrateRecreateManagerShadowAgentsPostgres(adapter: DbAdapter): Promise<void> {
+  const ts = Date.now();
+  const metaJson = JSON.stringify({ canReceiveDirectMessages: false, shadowOnly: true });
+  const { rows: teams } = await adapter.query<{ id: string; name: string }>(
+    `SELECT id, name FROM teams`,
+  );
+  for (const t of teams) {
+    const shadowId = `manager-${t.name}`;
+    const { rows: cntRows } = await adapter.query<{ c: string }>(
+      `SELECT (
+        (SELECT COUNT(*) FROM queries WHERE team_id = $1 AND owner_kind = 'manager')
+       +(SELECT COUNT(*) FROM news_items WHERE team_id = $1 AND owner_kind = 'manager')
+      )::text AS c`,
+      [t.id],
+    );
+    if (Number(cntRows[0]?.c) === 0) continue;
+
+    await adapter.query(
+      `INSERT INTO agents (
+        id, team_id, name, type, model, port, endpoint, working_directory,
+        status, created_at, registry, metadata, deleted_at, runtime,
+        token_id, domain, api_key,
+        customer_domain, public_endpoint_url, internal_endpoint_url, ssh_target,
+        last_seen, last_probed_at, last_error, consecutive_failures
+      ) VALUES (
+        $1, $2, 'manager', 'interactive', '', 0, '', NULL,
+        'stub', $3, NULL, $4::jsonb, $3, 'claude-agent-sdk',
+        NULL, NULL, NULL,
+        NULL, NULL, NULL, NULL,
+        NULL, NULL, NULL, 0
+      )
+      ON CONFLICT (id) DO UPDATE SET deleted_at = EXCLUDED.deleted_at, metadata = EXCLUDED.metadata`,
+      [shadowId, t.id, ts, metaJson],
+    );
+  }
+  await downMigrateInboxOwnershipPostgres(adapter);
 }

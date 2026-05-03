@@ -37,9 +37,9 @@ import {
 
 // ─── DB factory (in-memory) ──────────────────────────────────────────────────
 
-function createInMemoryDb() {
+async function createInMemoryDb() {
   const adapter = new SqliteAdapter(':memory:');
-  migrateSqlite(adapter);
+  await migrateSqlite(adapter);
   return {
     adapter,
     teams: new SqliteTeamsRepo(adapter),
@@ -152,7 +152,7 @@ let workDir: string;
 let manager: AgentManagerDb | null = null;
 let deliverStub: ReturnType<typeof makeDeliverStub>;
 let registerStub: ReturnType<typeof makeRegisterStub>;
-let db: ReturnType<typeof createInMemoryDb>;
+let db: Awaited<ReturnType<typeof createInMemoryDb>>;
 
 // Custom fetch that rewrites external URLs to our mock well-known server
 let customFetch: typeof globalThis.fetch;
@@ -192,7 +192,7 @@ beforeAll(async () => {
   // Create initial manager (fresh stubs per test via beforeEach)
   deliverStub = makeDeliverStub({ ok: true });
   registerStub = makeRegisterStub();
-  db = createInMemoryDb();
+  db = await createInMemoryDb();
   manager = new AgentManagerDb(workDir, db as any, {
     deliverFn: deliverStub.fn,
     registerOnIdChainFn: registerStub.fn,
@@ -418,7 +418,7 @@ describe('4. register-onchain --force — SSH delivery re-invoked', () => {
 describe('5. SSH delivery failure — non-fatal', () => {
   let failManagerPort: number;
   let failManager: AgentManagerDb;
-  let failDb: ReturnType<typeof createInMemoryDb>;
+  let failDb: Awaited<ReturnType<typeof createInMemoryDb>>;
   let failDeliverStub: ReturnType<typeof makeDeliverStub>;
   let failRegisterStub: ReturnType<typeof makeRegisterStub>;
   let failWorkDir: string;
@@ -431,7 +431,7 @@ describe('5. SSH delivery failure — non-fatal', () => {
 
     failDeliverStub = makeDeliverStub({ ok: false, error: 'mock_scp_failed', stderr: 'Connection refused' });
     failRegisterStub = makeRegisterStub();
-    failDb = createInMemoryDb();
+    failDb = await createInMemoryDb();
     failManager = new AgentManagerDb(failWorkDir, failDb as any, {
       deliverFn: failDeliverStub.fn,
       registerOnIdChainFn: failRegisterStub.fn,

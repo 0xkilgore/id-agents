@@ -34,9 +34,9 @@ import type { HealthProbeFn, ProbeFetchResult } from '../../src/lib/remote-heart
 
 // ─── DB factory ───────────────────────────────────────────────────────────────
 
-function createInMemoryDb() {
+async function createInMemoryDb() {
   const adapter = new SqliteAdapter(':memory:');
-  migrateSqlite(adapter);
+  await migrateSqlite(adapter);
   return {
     adapter,
     teams: new SqliteTeamsRepo(adapter),
@@ -94,7 +94,7 @@ async function registerRemoteAgent(baseUrl: string, name: string, domain: string
 
 /** Directly insert a local agent into the DB. */
 async function insertLocalAgent(
-  db: ReturnType<typeof createInMemoryDb>,
+  db: Awaited<ReturnType<typeof createInMemoryDb>>,
   teamName: string,
   agentId: string,
   agentName: string,
@@ -129,7 +129,7 @@ describe('Phase 7: heartbeat mode separation', () => {
   // ─── Test 1: Mixed fleet — each loop gets only its own agents ───────────────
 
   it('1. mixed fleet: local-heartbeat called once (local), remote-probe called once (remote)', async () => {
-    const db = createInMemoryDb();
+    const db = await createInMemoryDb();
     const port = await findFreePort();
     const url = `http://127.0.0.1:${port}`;
 
@@ -203,7 +203,7 @@ describe('Phase 7: heartbeat mode separation', () => {
   // ─── Test 2: runHealthChecks never invokes network for remote agents ─────────
 
   it('2. runHealthChecks does not call fetchUrl for any public-agent-remote agent', async () => {
-    const db = createInMemoryDb();
+    const db = await createInMemoryDb();
     const port = await findFreePort();
     const url = `http://127.0.0.1:${port}`;
 
@@ -261,7 +261,7 @@ describe('Phase 7: heartbeat mode separation', () => {
   // ─── Test 3: runRemoteHeartbeat only probes remote agents ───────────────────
 
   it('3. runRemoteHeartbeat probes remote agents only, skips local agents', async () => {
-    const db = createInMemoryDb();
+    const db = await createInMemoryDb();
     const port = await findFreePort();
     const url = `http://127.0.0.1:${port}`;
 

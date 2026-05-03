@@ -22,9 +22,9 @@ import { SqliteNewsRepo } from '../../src/db/repos/sqlite/news-repo.js';
 import { SqliteSchedulesRepo } from '../../src/db/repos/sqlite/schedules-repo.js';
 import { SqliteTasksRepo } from '../../src/db/repos/sqlite/tasks-repo.js';
 
-function createInMemoryDb() {
+async function createInMemoryDb() {
   const adapter = new SqliteAdapter(':memory:');
-  migrateSqlite(adapter);
+  await migrateSqlite(adapter);
   return {
     adapter,
     teams: new SqliteTeamsRepo(adapter),
@@ -53,13 +53,13 @@ let port: number;
 let baseUrl: string;
 let workDir: string;
 let manager: AgentManagerDb;
-let db: ReturnType<typeof createInMemoryDb>;
+let db: Awaited<ReturnType<typeof createInMemoryDb>>;
 
 beforeAll(async () => {
   port = await findFreePort();
   workDir = fs.mkdtempSync(path.join(os.tmpdir(), 'inbox-resolution-test-'));
   baseUrl = `http://127.0.0.1:${port}`;
-  db = createInMemoryDb();
+  db = await createInMemoryDb();
   manager = new AgentManagerDb(workDir, db as any);
   await manager.start(port);
 }, 30000);
@@ -109,19 +109,17 @@ describe('manager-inbox resolution — fresh team with no CLI registered', () =>
     const types = newsBody.items.map(i => i.type);
     expect(types).toContain('query.received');
 
-    // Dual-write window: the same row must carry the new ownership columns
-    // alongside the legacy agent_id. Read directly from the DB so we see
-    // both columns and confirm /talk did not regress to single-write.
+    // Manager inbox rows carry ownership columns only; legacy agent_id stays NULL.
     const queryRow = await db.queries.getByQueryIdForTeam(teamId, body.query_id);
     expect(queryRow).not.toBeNull();
-    expect(queryRow!.agent_id).toBe(`manager-${TEAM}`);
+    expect(queryRow!.agent_id).toBeNull();
     expect(queryRow!.owner_kind).toBe('manager');
     expect(queryRow!.owner_id).toBe(teamId);
 
     const newsRows = await db.news.pollByOwner(teamId, 'manager', teamId, 0, { limit: 10 });
     const received = newsRows.find((r) => r.type === 'query.received');
     expect(received).toBeTruthy();
-    expect(received!.agent_id).toBe(`manager-${TEAM}`);
+    expect(received!.agent_id).toBeNull();
     expect(received!.owner_kind).toBe('manager');
     expect(received!.owner_id).toBe(teamId);
   });
@@ -157,7 +155,7 @@ describe('manager-inbox resolution — fresh team with no CLI registered', () =>
     const newsRows = await db.news.pollByOwner(teamId, 'manager', teamId, 0, { limit: 10 });
     expect(newsRows.length).toBeGreaterThan(0);
     for (const row of newsRows) {
-      expect(row.agent_id).toBe(`manager-${TEAM2}`);
+      expect(row.agent_id).toBeNull();
       expect(row.owner_kind).toBe('manager');
       expect(row.owner_id).toBe(teamId);
     }
@@ -191,7 +189,7 @@ describe('manager-inbox resolution — fresh team with no CLI registered', () =>
     const newsRows = await db.news.pollByOwner(teamId, 'manager', teamId, 0, { limit: 10 });
     const scheduleRow = newsRows.find((r) => r.type === 'schedule.received');
     expect(scheduleRow).toBeTruthy();
-    expect(scheduleRow!.agent_id).toBe(`manager-${TEAM3}`);
+    expect(scheduleRow!.agent_id).toBeNull();
     expect(scheduleRow!.owner_kind).toBe('manager');
     expect(scheduleRow!.owner_id).toBe(teamId);
 
@@ -199,7 +197,7 @@ describe('manager-inbox resolution — fresh team with no CLI registered', () =>
     expect(queryId).toBeTruthy();
     const queryRow = await db.queries.getByQueryIdForTeam(teamId, queryId);
     expect(queryRow).not.toBeNull();
-    expect(queryRow!.agent_id).toBe(`manager-${TEAM3}`);
+    expect(queryRow!.agent_id).toBeNull();
     expect(queryRow!.owner_kind).toBe('manager');
     expect(queryRow!.owner_id).toBe(teamId);
   });

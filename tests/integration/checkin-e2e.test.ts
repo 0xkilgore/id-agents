@@ -45,9 +45,9 @@ import { CheckinService } from '../../src/checkins/checkin-service.js';
 const TEAM = 'checkin-e2e';
 const DEFAULT_INTERVAL_MS = 600 * 1000; // matches /talk-to auto-attach default
 
-function createInMemoryDb() {
+async function createInMemoryDb() {
   const adapter = new SqliteAdapter(':memory:');
-  migrateSqlite(adapter);
+  await migrateSqlite(adapter);
   return {
     adapter,
     teams: new SqliteTeamsRepo(adapter),
@@ -92,7 +92,7 @@ function startStubAgent(port: number): Promise<http.Server> {
 }
 
 async function insertAgent(
-  db: ReturnType<typeof createInMemoryDb>,
+  db: Awaited<ReturnType<typeof createInMemoryDb>>,
   teamId: string,
   name: string,
   endpoint: string | null,
@@ -113,7 +113,7 @@ function adminHeaders(team: string): Record<string, string> {
 
 describe('Checkin end-to-end: /talk-to → fire → auto-close', () => {
   let manager: AgentManagerDb;
-  let db: ReturnType<typeof createInMemoryDb>;
+  let db: Awaited<ReturnType<typeof createInMemoryDb>>;
   let baseUrl: string;
   let workDir: string;
   let teamId: string;
@@ -127,7 +127,7 @@ describe('Checkin end-to-end: /talk-to → fire → auto-close', () => {
     const stubPort = await findFreePort();
     baseUrl = `http://127.0.0.1:${managerPort}`;
     workDir = fs.mkdtempSync(path.join(os.tmpdir(), 'checkin-e2e-'));
-    db = createInMemoryDb();
+    db = await createInMemoryDb();
     manager = new AgentManagerDb(workDir, db as any);
     await manager.start(managerPort);
 

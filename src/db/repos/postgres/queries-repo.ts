@@ -6,14 +6,17 @@ import type { InboxOwnerKind, QueryRow } from '../../types.js';
 
 function resolveQueryOwnership(
   teamId: string,
-  agentId: string,
+  agentId: string | null,
   override?: { owner_kind: InboxOwnerKind; owner_id: string },
 ): { owner_kind: InboxOwnerKind; owner_id: string } {
   if (override) return override;
-  if (agentId.startsWith('manager-')) {
-    return { owner_kind: 'manager', owner_id: teamId };
+  if (agentId != null && agentId !== '') {
+    if (agentId.startsWith('manager-')) {
+      return { owner_kind: 'manager', owner_id: teamId };
+    }
+    return { owner_kind: 'agent', owner_id: agentId };
   }
-  return { owner_kind: 'agent', owner_id: agentId };
+  throw new Error('PgQueriesRepo: ownership override required when agentId is null');
 }
 
 export class PgQueriesRepo implements QueriesRepository {
@@ -56,7 +59,7 @@ export class PgQueriesRepo implements QueriesRepository {
   async create(
     teamId: string,
     queryId: string,
-    agentId: string,
+    agentId: string | null,
     prompt: string,
     created: number,
     sessionId?: string,
@@ -66,14 +69,14 @@ export class PgQueriesRepo implements QueriesRepository {
     await this.db.query(
       `INSERT INTO queries (team_id, query_id, agent_id, prompt, status, created, session_id, owner_kind, owner_id)
        VALUES ($1, $2, $3, $4, 'pending', $5, $6, $7, $8)
-       ON CONFLICT (agent_id, query_id) DO NOTHING`,
+       ON CONFLICT (team_id, query_id) DO NOTHING`,
       [teamId, queryId, agentId, prompt, created, sessionId || null, own.owner_kind, own.owner_id],
     );
   }
 
   async upsert(
     teamId: string,
-    agentId: string,
+    agentId: string | null,
     query: Partial<QueryRow> & { query_id: string },
   ): Promise<void> {
     const own =
@@ -83,8 +86,9 @@ export class PgQueriesRepo implements QueriesRepository {
     await this.db.query(
       `INSERT INTO queries (team_id, agent_id, query_id, status, prompt, created, completed, result, error, session_id, owner_kind, owner_id)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
-       ON CONFLICT (agent_id, query_id)
-       DO UPDATE SET status = EXCLUDED.status,
+       ON CONFLICT (team_id, query_id)
+       DO UPDATE SET agent_id = EXCLUDED.agent_id,
+                     status = EXCLUDED.status,
                      completed = EXCLUDED.completed,
                      result = EXCLUDED.result,
                      error = EXCLUDED.error,
@@ -166,7 +170,6 @@ export class PgQueriesRepo implements QueriesRepository {
   }
 
   async cancel(agentId: string, completed: number): Promise<string[]> {
-    // Find all pending/processing queries for this agent
     const { rows } = await this.db.query<{ query_id: string }>(
       `SELECT query_id FROM queries
        WHERE agent_id = $1 AND status IN ('pending', 'processing')`,
@@ -177,7 +180,6 @@ export class PgQueriesRepo implements QueriesRepository {
 
     const queryIds = rows.map(r => r.query_id);
 
-    // Update queries to cancelled status
     await this.db.query(
       `UPDATE queries SET status = 'cancelled', completed = $2
        WHERE agent_id = $1 AND status IN ('pending', 'processing')`,

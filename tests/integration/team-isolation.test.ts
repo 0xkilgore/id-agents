@@ -29,9 +29,9 @@ import { SqliteSubscriptionsRepo } from '../../src/db/repos/sqlite/subscriptions
 import type { AgentRow, TaskRow } from '../../src/db/types.js';
 
 // --- DB factory helper (in-memory) ---
-function createInMemoryDb() {
+async function createInMemoryDb() {
   const adapter = new SqliteAdapter(':memory:');
-  migrateSqlite(adapter);
+  await migrateSqlite(adapter);
   return {
     adapter,
     teams: new SqliteTeamsRepo(adapter),
@@ -91,7 +91,7 @@ beforeAll(async () => {
   workDir = fs.mkdtempSync(path.join(os.tmpdir(), 'team-isolation-test-'));
   baseUrl = `http://127.0.0.1:${port}`;
 
-  const db = createInMemoryDb();
+  const db = await createInMemoryDb();
   manager = new AgentManagerDb(workDir, db as any);
 
   // Start manager — this seeds default/idchain/public teams
@@ -114,22 +114,24 @@ beforeAll(async () => {
     team_id: idchainTeamId,
     id: idchainAgentId,
     name: idchainAgentName,
-    type: 'virtual',
+    type: 'claude',
     model: 'sonnet',
     status: 'running',
     created_at: now,
-    port: 0,
+    port: 4101,
+    runtime: 'claude-agent-sdk',
   });
 
   await db.agents.create({
     team_id: publicTeamId,
     id: publicAgentId,
     name: publicAgentName,
-    type: 'virtual',
+    type: 'claude',
     model: 'sonnet',
     status: 'running',
     created_at: now,
-    port: 0,
+    port: 4102,
+    runtime: 'claude-agent-sdk',
   });
 }, 30000);
 

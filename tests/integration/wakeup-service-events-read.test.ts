@@ -38,9 +38,9 @@ import { SqliteSubscriptionsRepo } from '../../src/db/repos/sqlite/subscriptions
 
 const TEAM = 'wakeup-events-read-test';
 
-function createInMemoryDb() {
+async function createInMemoryDb() {
   const adapter = new SqliteAdapter(':memory:');
-  migrateSqlite(adapter);
+  await migrateSqlite(adapter);
   return {
     adapter,
     teams: new SqliteTeamsRepo(adapter),
@@ -112,7 +112,7 @@ async function getEvents(
 
 describe('GET /events — wakeup-service catch-up read', () => {
   let manager: AgentManagerDb;
-  let db: ReturnType<typeof createInMemoryDb>;
+  let db: Awaited<ReturnType<typeof createInMemoryDb>>;
   let baseUrl: string;
   let workDir: string;
   let teamId: string;
@@ -121,7 +121,7 @@ describe('GET /events — wakeup-service catch-up read', () => {
     const port = await findFreePort();
     baseUrl = `http://127.0.0.1:${port}`;
     workDir = fs.mkdtempSync(path.join(os.tmpdir(), 'wakeup-events-read-test-'));
-    db = createInMemoryDb();
+    db = await createInMemoryDb();
     manager = new AgentManagerDb(workDir, db as any);
     await manager.start(port);
     teamId = await db.teams.getOrCreateTeamId(TEAM);
@@ -321,7 +321,7 @@ describe('GET /events — wakeup-service catch-up read', () => {
 
 describe('GET /events — replay_truncated semantics', () => {
   let manager: AgentManagerDb;
-  let db: ReturnType<typeof createInMemoryDb>;
+  let db: Awaited<ReturnType<typeof createInMemoryDb>>;
   let baseUrl: string;
   let workDir: string;
   let teamId: string;
@@ -331,7 +331,7 @@ describe('GET /events — replay_truncated semantics', () => {
     const port = await findFreePort();
     baseUrl = `http://127.0.0.1:${port}`;
     workDir = fs.mkdtempSync(path.join(os.tmpdir(), 'wakeup-events-trunc-'));
-    db = createInMemoryDb();
+    db = await createInMemoryDb();
     manager = new AgentManagerDb(workDir, db as any);
     await manager.start(port);
     teamId = await db.teams.getOrCreateTeamId(truncTeam);

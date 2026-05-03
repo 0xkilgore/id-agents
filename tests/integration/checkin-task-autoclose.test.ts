@@ -40,9 +40,9 @@ import type { CheckinRow } from '../../src/db/types.js';
 
 const TEAM = 'checkin-autoclose-test';
 
-function createInMemoryDb() {
+async function createInMemoryDb() {
   const adapter = new SqliteAdapter(':memory:');
-  migrateSqlite(adapter);
+  await migrateSqlite(adapter);
   return {
     adapter,
     teams: new SqliteTeamsRepo(adapter),
@@ -81,7 +81,7 @@ function adminHeaders(team: string): Record<string, string> {
 }
 
 async function insertAgentDirect(
-  db: ReturnType<typeof createInMemoryDb>,
+  db: Awaited<ReturnType<typeof createInMemoryDb>>,
   teamId: string,
   name: string,
 ): Promise<string> {
@@ -95,7 +95,7 @@ async function insertAgentDirect(
 }
 
 async function insertTaskDirect(
-  db: ReturnType<typeof createInMemoryDb>,
+  db: Awaited<ReturnType<typeof createInMemoryDb>>,
   teamId: string,
   name: string,
   ownerId: string | null = null,
@@ -141,7 +141,7 @@ function buildCheckinRow(
 
 describe('Checkin auto-close on terminal task event', () => {
   let manager: AgentManagerDb;
-  let db: ReturnType<typeof createInMemoryDb>;
+  let db: Awaited<ReturnType<typeof createInMemoryDb>>;
   let baseUrl: string;
   let workDir: string;
   let teamId: string;
@@ -153,7 +153,7 @@ describe('Checkin auto-close on terminal task event', () => {
     const port = await findFreePort();
     baseUrl = `http://127.0.0.1:${port}`;
     workDir = fs.mkdtempSync(path.join(os.tmpdir(), 'checkin-autoclose-test-'));
-    db = createInMemoryDb();
+    db = await createInMemoryDb();
     manager = new AgentManagerDb(workDir, db as any);
     await manager.start(port);
     teamId = await db.teams.getOrCreateTeamId(TEAM);

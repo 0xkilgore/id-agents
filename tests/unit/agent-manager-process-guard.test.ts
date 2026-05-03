@@ -15,9 +15,9 @@ import { SqliteNewsRepo } from '../../src/db/repos/sqlite/news-repo.js';
 import { SqliteSchedulesRepo } from '../../src/db/repos/sqlite/schedules-repo.js';
 import { SqliteTasksRepo } from '../../src/db/repos/sqlite/tasks-repo.js';
 
-function createInMemoryDb() {
+async function createInMemoryDb() {
   const adapter = new SqliteAdapter(':memory:');
-  migrateSqlite(adapter);
+  await migrateSqlite(adapter);
   return {
     adapter,
     teams: new SqliteTeamsRepo(adapter),
@@ -30,16 +30,16 @@ function createInMemoryDb() {
   };
 }
 
-function makeManager() {
+async function makeManager() {
   const workDir = fs.mkdtempSync(path.join(os.tmpdir(), 'id-agents-process-guard-unit-'));
-  const db = createInMemoryDb();
+  const db = await createInMemoryDb();
   const manager = new AgentManagerDb(workDir, db as any);
   return { manager, db, workDir };
 }
 
 describe('AgentManagerDb killAgentProcess guards', () => {
   const workDirs: string[] = [];
-  const dbs: Array<ReturnType<typeof createInMemoryDb>> = [];
+  const dbs: Array<Awaited<ReturnType<typeof createInMemoryDb>>> = [];
 
   afterEach(async () => {
     while (dbs.length > 0) {
@@ -52,7 +52,7 @@ describe('AgentManagerDb killAgentProcess guards', () => {
   });
 
   it('skips the manager PID when port discovery includes process.pid', async () => {
-    const { manager, db, workDir } = makeManager();
+    const { manager, db, workDir } = await makeManager();
     dbs.push(db);
     workDirs.push(workDir);
 
@@ -80,7 +80,7 @@ describe('AgentManagerDb killAgentProcess guards', () => {
   });
 
   it('skips PIDs whose command matches the manager signature', async () => {
-    const { manager, db, workDir } = makeManager();
+    const { manager, db, workDir } = await makeManager();
     dbs.push(db);
     workDirs.push(workDir);
 
@@ -102,7 +102,7 @@ describe('AgentManagerDb killAgentProcess guards', () => {
   });
 
   it('kills daemon-spawned local agent servers even when the manager is their parent', async () => {
-    const { manager, db, workDir } = makeManager();
+    const { manager, db, workDir } = await makeManager();
     dbs.push(db);
     workDirs.push(workDir);
 

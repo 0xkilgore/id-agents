@@ -26,9 +26,9 @@ import { SqliteNewsRepo } from '../../src/db/repos/sqlite/news-repo.js';
 import { SqliteSchedulesRepo } from '../../src/db/repos/sqlite/schedules-repo.js';
 import { SqliteTasksRepo } from '../../src/db/repos/sqlite/tasks-repo.js';
 
-function createInMemoryDb() {
+async function createInMemoryDb() {
   const adapter = new SqliteAdapter(':memory:');
-  migrateSqlite(adapter);
+  await migrateSqlite(adapter);
   return {
     adapter,
     teams: new SqliteTeamsRepo(adapter),
@@ -59,7 +59,7 @@ let workDir: string;
 let owsStubDir: string;
 let priorPath: string | undefined;
 let manager: AgentManagerDb;
-let db: ReturnType<typeof createInMemoryDb>;
+let db: Awaited<ReturnType<typeof createInMemoryDb>>;
 let canStubOws = false;
 
 beforeAll(async () => {
@@ -99,7 +99,7 @@ beforeAll(async () => {
   port = await findFreePort();
   workDir = fs.mkdtempSync(path.join(os.tmpdir(), 'wallet-opt-in-test-'));
   baseUrl = `http://127.0.0.1:${port}`;
-  db = createInMemoryDb();
+  db = await createInMemoryDb();
   manager = new AgentManagerDb(workDir, db as any);
   await manager.start(port);
 }, 30000);

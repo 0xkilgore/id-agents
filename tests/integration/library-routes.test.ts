@@ -25,9 +25,9 @@ import { SqliteTasksRepo } from '../../src/db/repos/sqlite/tasks-repo.js';
 const FIXTURE_LIBRARY_ROOT = '/Users/nxt3d/projects/id2/public-agents/configs';
 const FIXTURE_AGENT_ROOT = `${FIXTURE_LIBRARY_ROOT}/agents/foundry-dev`;
 
-function createInMemoryDb() {
+async function createInMemoryDb() {
   const adapter = new SqliteAdapter(':memory:');
-  migrateSqlite(adapter);
+  await migrateSqlite(adapter);
   return {
     adapter,
     teams: new SqliteTeamsRepo(adapter),
@@ -78,7 +78,7 @@ async function getJson(baseUrl: string, pathname: string): Promise<{ status: num
 
 describe('library inventory routes — mounted foundry-dev fixture', () => {
   let manager: AgentManagerDb;
-  let db: ReturnType<typeof createInMemoryDb>;
+  let db: Awaited<ReturnType<typeof createInMemoryDb>>;
   let baseUrl: string;
   let workDir: string;
 
@@ -86,7 +86,7 @@ describe('library inventory routes — mounted foundry-dev fixture', () => {
     const port = await findFreePort();
     baseUrl = `http://127.0.0.1:${port}`;
     workDir = fs.mkdtempSync(path.join(os.tmpdir(), 'library-routes-test-'));
-    db = createInMemoryDb();
+    db = await createInMemoryDb();
     manager = new AgentManagerDb(workDir, db as any, {
       libraryRoot: FIXTURE_LIBRARY_ROOT,
     });
@@ -181,7 +181,7 @@ describe('library inventory routes — mounted foundry-dev fixture', () => {
 
 describe('library inventory routes — standalone skills in a tmp library', () => {
   let manager: AgentManagerDb;
-  let db: ReturnType<typeof createInMemoryDb>;
+  let db: Awaited<ReturnType<typeof createInMemoryDb>>;
   let baseUrl: string;
   let workDir: string;
   let libraryRoot: string;
@@ -208,7 +208,7 @@ describe('library inventory routes — standalone skills in a tmp library', () =
       ].join('\n'),
     );
 
-    db = createInMemoryDb();
+    db = await createInMemoryDb();
     manager = new AgentManagerDb(workDir, db as any, { libraryRoot });
     await manager.start(port);
   }, 15000);
@@ -253,7 +253,7 @@ describe('library inventory routes — standalone skills in a tmp library', () =
 
 describe('library inventory routes — no library configured', () => {
   let manager: AgentManagerDb;
-  let db: ReturnType<typeof createInMemoryDb>;
+  let db: Awaited<ReturnType<typeof createInMemoryDb>>;
   let baseUrl: string;
   let workDir: string;
 
@@ -261,7 +261,7 @@ describe('library inventory routes — no library configured', () => {
     const port = await findFreePort();
     baseUrl = `http://127.0.0.1:${port}`;
     workDir = fs.mkdtempSync(path.join(os.tmpdir(), 'library-routes-empty-test-'));
-    db = createInMemoryDb();
+    db = await createInMemoryDb();
     manager = new AgentManagerDb(workDir, db as any, { libraryRoot: null });
     await manager.start(port);
   }, 15000);

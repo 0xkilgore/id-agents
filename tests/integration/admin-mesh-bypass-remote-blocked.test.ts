@@ -25,9 +25,9 @@ import { SqliteNewsRepo } from '../../src/db/repos/sqlite/news-repo.js';
 import { SqliteSchedulesRepo } from '../../src/db/repos/sqlite/schedules-repo.js';
 import { SqliteTasksRepo } from '../../src/db/repos/sqlite/tasks-repo.js';
 
-function createDb() {
+async function createDb() {
   const adapter = new SqliteAdapter(':memory:');
-  migrateSqlite(adapter);
+  await migrateSqlite(adapter);
   return {
     adapter,
     teams: new SqliteTeamsRepo(adapter),
@@ -58,7 +58,7 @@ let port: number;
 let baseUrl: string;
 let workDir: string;
 let manager: AgentManagerDb;
-let db: ReturnType<typeof createDb>;
+let db: Awaited<ReturnType<typeof createDb>>;
 const publicRemoteName = 'public-remote-blocked-target';
 
 beforeAll(async () => {
@@ -66,7 +66,7 @@ beforeAll(async () => {
   workDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mesh-remote-block-'));
   baseUrl = `http://127.0.0.1:${port}`;
 
-  db = createDb();
+  db = await createDb();
   manager = new AgentManagerDb(workDir, db as any);
   await manager.start(port);
 

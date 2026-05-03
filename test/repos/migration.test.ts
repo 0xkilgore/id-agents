@@ -6,9 +6,9 @@ import assert from 'node:assert/strict';
 import { SqliteAdapter } from '../../src/db/sqlite-adapter.js';
 import { migrateSqlite } from '../../src/db/migrations/sqlite.js';
 
-function freshDb(): SqliteAdapter {
+async function freshDb(): Promise<SqliteAdapter> {
   const adapter = new SqliteAdapter(':memory:');
-  migrateSqlite(adapter);
+  await migrateSqlite(adapter);
   return adapter;
 }
 
@@ -18,7 +18,7 @@ function freshDb(): SqliteAdapter {
 
 describe('SQLite migration', () => {
   it('creates all 5 tables', async () => {
-    const adapter = freshDb();
+    const adapter = await freshDb();
     const { rows } = await adapter.query<{ name: string }>(
       `SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name`,
     );
@@ -27,7 +27,7 @@ describe('SQLite migration', () => {
   });
 
   it('creates all 4 indexes', async () => {
-    const adapter = freshDb();
+    const adapter = await freshDb();
     const { rows } = await adapter.query<{ name: string }>(
       `SELECT name FROM sqlite_master WHERE type = 'index' AND name NOT LIKE 'sqlite_%' ORDER BY name`,
     );
@@ -39,7 +39,7 @@ describe('SQLite migration', () => {
   });
 
   it('enforces foreign keys (insert agent with fake team_id should throw)', async () => {
-    const adapter = freshDb();
+    const adapter = await freshDb();
     await assert.rejects(
       async () => {
         await adapter.query(
@@ -60,7 +60,7 @@ describe('SQLite migration', () => {
   });
 
   it('news_items.id auto-increments', async () => {
-    const adapter = freshDb();
+    const adapter = await freshDb();
 
     // Create a team first
     await adapter.query(

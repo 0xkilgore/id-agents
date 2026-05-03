@@ -737,63 +737,19 @@ export class AgentManagerDb {
 
   /**
    * Resolve the logical manager inbox owner for a team.
-   *
-   * During the transition window we still dual-write the legacy `agent_id`
-   * column as `manager-<team>` for rollback compatibility, but reads route
-   * entirely through owner_kind/owner_id and do not require an `agents` row.
+   * Writes persist only `owner_kind` / `owner_id`; `inboxApiId` is the stable
+   * external handle (`manager-<team>`) returned on HTTP surfaces.
    */
   private getManagerInboxRef(teamId: string, teamName: string): {
-    legacyAgentId: string;
+    inboxApiId: string;
     ownerKind: 'manager';
     ownerId: string;
   } {
     return {
-      legacyAgentId: `manager-${teamName}`,
+      inboxApiId: `manager-${teamName}`,
       ownerKind: 'manager',
       ownerId: teamId,
     };
-  }
-
-  /**
-   * Keep the legacy manager row only as a hidden FK shadow while reads route
-   * through owner_kind/owner_id. This preserves the reversible dual-write
-   * window until the legacy agent_id column can be removed entirely.
-   */
-  private async cleanupLegacyManagerRows(teamId: string, teamName: string): Promise<void> {
-    const ts = Date.now();
-    const shadowId = `manager-${teamName}`;
-    const existing = await this.db.agents.getById(shadowId).catch(() => null);
-    if (!existing) {
-      await this.db.agents.upsert({
-        team_id: teamId,
-        id: shadowId,
-        name: 'manager',
-        type: 'interactive',
-        model: '',
-        status: 'stub',
-        created_at: ts,
-        endpoint: '',
-        metadata: { canReceiveDirectMessages: false, shadowOnly: true } as Record<string, unknown>,
-      }).catch(() => {});
-    }
-    const sql = this.db.adapter.dialect === 'postgres'
-      ? `UPDATE agents
-         SET deleted_at = COALESCE(deleted_at, $1)
-         WHERE team_id = $2
-           AND deleted_at IS NULL
-           AND (
-             (id = $3 AND type = 'interactive')
-             OR id = 'virtual_manager'
-           )`
-      : `UPDATE agents
-         SET deleted_at = COALESCE(deleted_at, ?)
-         WHERE team_id = ?
-           AND deleted_at IS NULL
-           AND (
-             (id = ? AND type = 'interactive')
-             OR id = 'virtual_manager'
-           )`;
-    await this.db.adapter.query(sql, [ts, teamId, `manager-${teamName}`]).catch(() => {});
   }
 
   /**
@@ -834,7 +790,10 @@ export class AgentManagerDb {
       await emitQueryDelivered(this.db.events, {
         teamId,
         queryId,
-        agentId: completedRow.agent_id,
+        agentId:
+          completedRow.owner_kind === 'manager'
+            ? null
+            : completedRow.agent_id,
         occurredAt,
         messagePreview,
       });
@@ -1375,7 +1334,7 @@ export class AgentManagerDb {
         const ts = Date.now();
 
         if (!shouldWait) {
-          await this.db.news.add(teamId, managerInbox.legacyAgentId, {
+          await this.db.news.add(teamId, null, {
             timestamp: ts,
             type: 'message',
             message: message,
@@ -1385,7 +1344,6 @@ export class AgentManagerDb {
             owner_kind: managerInbox.ownerKind,
             owner_id: managerInbox.ownerId,
           });
-          await this.cleanupLegacyManagerRows(teamId, teamName);
           return res.json({
             success: true,
             delivered_to: 'manager',
@@ -1397,13 +1355,13 @@ export class AgentManagerDb {
         await this.db.queries.create(
           teamId,
           queryId,
-          managerInbox.legacyAgentId,
+          null,
           `[From: ${from || 'manager'}] ${message}`,
           ts,
           session_id || undefined,
           { owner_kind: managerInbox.ownerKind, owner_id: managerInbox.ownerId },
         );
-        await this.db.news.add(teamId, managerInbox.legacyAgentId, {
+        await this.db.news.add(teamId, null, {
           timestamp: ts,
           type: 'query.received',
           message: `Query from ${from || 'manager'}: ${String(message).slice(0, 100)}${String(message).length > 100 ? '...' : ''}`,
@@ -1414,7 +1372,6 @@ export class AgentManagerDb {
           owner_kind: managerInbox.ownerKind,
           owner_id: managerInbox.ownerId,
         });
-        await this.cleanupLegacyManagerRows(teamId, teamName);
 
         this.managerLog(`Queued reserved-route message to manager, query_id: ${queryId}`);
 
@@ -2043,7 +2000,6 @@ export class AgentManagerDb {
         const ts = Date.now();
         const queryId = `query_${ts}_${Math.random().toString(36).slice(2, 9)}`;
         const managerInbox = this.getManagerInboxRef(teamId, teamName);
-        await this.cleanupLegacyManagerRows(teamId, teamName);
         const senderName = from || 'external';
 
         // Store the query in the queries table. Dual-write window: every
@@ -2054,7 +2010,7 @@ export class AgentManagerDb {
         await this.db.queries.create(
           teamId,
           queryId,
-          managerInbox.legacyAgentId,
+          null,
           `[From: ${senderName}] ${message}`,
           ts,
           session_id || undefined,
@@ -2062,7 +2018,7 @@ export class AgentManagerDb {
         );
 
         // Also store as a news item so the CLI can see incoming queries
-        await this.db.news.add(teamId, managerInbox.legacyAgentId, {
+        await this.db.news.add(teamId, null, {
           timestamp: ts,
           type: 'query.received',
           message: `Query from ${senderName}: ${message.slice(0, 100)}${message.length > 100 ? '...' : ''}`,
@@ -2108,14 +2064,13 @@ export class AgentManagerDb {
         const queryId = `query_${ts}_${Math.random().toString(36).slice(2, 9)}`;
 
         const managerInbox = this.getManagerInboxRef(teamId, teamName);
-        await this.cleanupLegacyManagerRows(teamId, teamName);
 
         const queryResult: Record<string, unknown> = { schedule, message: messageStr, mode: 'internal' };
         if (Array.isArray(linkedTasks) && linkedTasks.length > 0) {
           queryResult.linkedTasks = linkedTasks;
         }
 
-        await this.db.queries.upsert(teamId, managerInbox.legacyAgentId, {
+        await this.db.queries.upsert(teamId, null, {
           query_id: queryId,
           status: 'pending',
           prompt: messageStr,
@@ -2138,7 +2093,7 @@ export class AgentManagerDb {
           newsData.linkedTasks = linkedTasks;
         }
 
-        await this.db.news.add(teamId, managerInbox.legacyAgentId, {
+        await this.db.news.add(teamId, null, {
           timestamp: ts,
           type: 'schedule.received',
           message: `Scheduled query ${queryId} received`,
@@ -2273,7 +2228,6 @@ export class AgentManagerDb {
           : null;
         const resolvedTeamName = teamRow?.name ?? teamName ?? 'unknown';
         const managerInbox = this.getManagerInboxRef(teamId, resolvedTeamName);
-        await this.cleanupLegacyManagerRows(teamId, resolvedTeamName);
 
         // Replies carry notify semantics (no further reply expected);
         // unsolicited inbound messages default to notify too. Dual-write
@@ -2282,7 +2236,7 @@ export class AgentManagerDb {
         // agent_id (= manager-<team>) without depending on the agent-id
         // prefix heuristic in the repo helper.
         if (!skipPersist) {
-          await this.db.news.add(teamId, managerInbox.legacyAgentId, {
+          await this.db.news.add(teamId, null, {
             timestamp: ts,
             type: newsType,
             message: newsMessage,
@@ -2318,7 +2272,10 @@ export class AgentManagerDb {
               await emitQueryFailed(this.db.events, {
                 teamId,
                 queryId: in_reply_to,
-                agentId: failedRow?.agent_id ?? null,
+                agentId:
+                  failedRow?.owner_kind === 'manager'
+                    ? null
+                    : failedRow?.agent_id ?? null,
                 occurredAt: ts,
                 reason: errorText,
               });
@@ -2425,7 +2382,6 @@ export class AgentManagerDb {
         }
 
         const managerInbox = this.getManagerInboxRef(teamId, teamName);
-        await this.cleanupLegacyManagerRows(teamId, teamName);
 
         const newsRows = hasSinceId
           ? await this.db.news.pollSinceIdByOwner(teamId, managerInbox.ownerKind, managerInbox.ownerId, sinceId, { limit, queryId: query_id })
@@ -2523,7 +2479,6 @@ export class AgentManagerDb {
       try {
         const { id: teamId, name: teamName } = await this.getTeam(req);
         const managerInbox = this.getManagerInboxRef(teamId, teamName);
-        await this.cleanupLegacyManagerRows(teamId, teamName);
         const rows = await this.db.queries.getPendingByOwner(teamId, managerInbox.ownerKind, managerInbox.ownerId);
         const pending = rows
           .map((row: any) => {
@@ -2546,7 +2501,7 @@ export class AgentManagerDb {
         res.json({
           ok: true,
           team: teamName,
-          inbox_id: managerInbox.legacyAgentId,
+          inbox_id: managerInbox.inboxApiId,
           count: pending.length,
           pending,
         });
@@ -2600,7 +2555,6 @@ export class AgentManagerDb {
         }
 
         const managerInbox = this.getManagerInboxRef(teamId, teamName);
-        await this.cleanupLegacyManagerRows(teamId, teamName);
         if (row.owner_kind !== managerInbox.ownerKind || row.owner_id !== managerInbox.ownerId) {
           // Pending row exists but isn't owned by the manager inbox — refuse
           // rather than silently completing some other agent's query.
@@ -2624,7 +2578,7 @@ export class AgentManagerDb {
         };
         if (sessionId) newsData.session_id = sessionId;
 
-        await this.db.news.add(teamId, managerInbox.legacyAgentId, {
+        await this.db.news.add(teamId, null, {
           timestamp: ts,
           type: 'query.completed',
           data: newsData,
@@ -2733,14 +2687,16 @@ export class AgentManagerDb {
 
         const status = statusMap[row.status] || row.status;
 
-        // Resolve the target agent's friendly name if we can.
-        let agentName: string = row.agent_id;
-        try {
-          const agent = await this.db.agents.getById(row.agent_id);
-          if (agent) {
-            agentName = (agent.metadata as any)?.alias || agent.name || row.agent_id;
-          }
-        } catch { /* best-effort */ }
+        let agentName = 'manager';
+        if (row.owner_kind !== 'manager' && row.agent_id) {
+          agentName = row.agent_id;
+          try {
+            const agent = await this.db.agents.getById(row.agent_id);
+            if (agent) {
+              agentName = (agent.metadata as any)?.alias || agent.name || row.agent_id;
+            }
+          } catch { /* best-effort */ }
+        }
 
         const response: Record<string, unknown> = {
           query_id: row.query_id,
@@ -3956,6 +3912,7 @@ export class AgentManagerDb {
               created_at: Date.now(),
               metadata,
               token_id: tokenId,
+              runtime: isPublicAgentType ? 'public-agent-remote' : 'claude-agent-sdk',
             });
             discovery.upserted += 1;
           } catch (e: any) {
@@ -5954,7 +5911,6 @@ export class AgentManagerDb {
           const teamRow = await this.db.teams.getTeam(teamId).catch(() => null);
           const teamName = teamRow?.name ?? 'unknown';
           const managerInbox = this.getManagerInboxRef(teamId, teamName);
-          await this.cleanupLegacyManagerRows(teamId, teamName);
           const rows = await this.db.news.pollByOwner(teamId, managerInbox.ownerKind, managerInbox.ownerId, 0, { limit: 100 });
           const items = rows.map((r: any) => ({
             id: Number(r.id),

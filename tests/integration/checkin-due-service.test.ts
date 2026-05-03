@@ -36,9 +36,9 @@ import { SqliteCheckinsRepo } from '../../src/db/repos/sqlite/checkins-repo.js';
 import { CheckinService } from '../../src/checkins/checkin-service.js';
 import type { CheckinRow } from '../../src/db/types.js';
 
-function createInMemoryDb() {
+async function createInMemoryDb() {
   const adapter = new SqliteAdapter(':memory:');
-  migrateSqlite(adapter);
+  await migrateSqlite(adapter);
   return {
     adapter,
     teams: new SqliteTeamsRepo(adapter),
@@ -107,14 +107,14 @@ function buildRow(overrides: Partial<CheckinRow> & Pick<CheckinRow, 'id' | 'team
 }
 
 describe('CheckinService.tick', () => {
-  let db: ReturnType<typeof createInMemoryDb>;
+  let db: Awaited<ReturnType<typeof createInMemoryDb>>;
   let svc: CheckinService;
   let teamId: string;
   let ownerId: string;
   let taskId: string;
 
   beforeEach(async () => {
-    db = createInMemoryDb();
+    db = await createInMemoryDb();
     svc = new CheckinService(db as any);
     teamId = await db.teams.getOrCreateTeamId('checkin-due');
     ownerId = await insertAgent(db.adapter, teamId, 'manager');

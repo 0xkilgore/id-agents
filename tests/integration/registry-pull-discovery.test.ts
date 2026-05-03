@@ -24,9 +24,9 @@ import { SqliteNewsRepo } from '../../src/db/repos/sqlite/news-repo.js';
 import { SqliteSchedulesRepo } from '../../src/db/repos/sqlite/schedules-repo.js';
 import { SqliteTasksRepo } from '../../src/db/repos/sqlite/tasks-repo.js';
 
-function createInMemoryDb() {
+async function createInMemoryDb() {
   const adapter = new SqliteAdapter(':memory:');
-  migrateSqlite(adapter);
+  await migrateSqlite(adapter);
   return {
     adapter,
     teams: new SqliteTeamsRepo(adapter),
@@ -102,7 +102,7 @@ let managerBaseUrl: string;
 let indexerBaseUrl: string;
 let workDir: string;
 let manager: AgentManagerDb;
-let db: ReturnType<typeof createInMemoryDb>;
+let db: Awaited<ReturnType<typeof createInMemoryDb>>;
 let mockIndexer: http.Server;
 
 beforeAll(async () => {
@@ -117,7 +117,7 @@ beforeAll(async () => {
   await new Promise<void>((resolve) => mockIndexer.listen(indexerPort, '127.0.0.1', resolve));
 
   // Start manager
-  db = createInMemoryDb();
+  db = await createInMemoryDb();
   manager = new AgentManagerDb(workDir, db as any);
   await manager.start(managerPort);
 

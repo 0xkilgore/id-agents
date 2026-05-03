@@ -56,7 +56,8 @@ export type InboxOwnerKind = 'agent' | 'manager';
 /** queries table row */
 export interface QueryRow {
   team_id: string;
-  agent_id: string;
+  /** Worker-agent FK when `owner_kind === 'agent'`; null for manager-owned inbox rows. */
+  agent_id: string | null;
   query_id: string;
   status: string;
   prompt: string | null;
@@ -73,7 +74,8 @@ export interface QueryRow {
 export interface NewsItemRow {
   id: number;
   team_id: string;
-  agent_id: string;
+  /** Worker-agent FK when `owner_kind === 'agent'`; null for manager-owned inbox rows. */
+  agent_id: string | null;
   timestamp: number;
   type: string;
   message: string | null;

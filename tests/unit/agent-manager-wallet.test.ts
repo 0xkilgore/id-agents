@@ -15,9 +15,9 @@ import { SqliteNewsRepo } from '../../src/db/repos/sqlite/news-repo.js';
 import { SqliteSchedulesRepo } from '../../src/db/repos/sqlite/schedules-repo.js';
 import { SqliteTasksRepo } from '../../src/db/repos/sqlite/tasks-repo.js';
 
-function createInMemoryDb() {
+async function createInMemoryDb() {
   const adapter = new SqliteAdapter(':memory:');
-  migrateSqlite(adapter);
+  await migrateSqlite(adapter);
   return {
     adapter,
     teams: new SqliteTeamsRepo(adapter),
@@ -30,16 +30,16 @@ function createInMemoryDb() {
   };
 }
 
-function makeManager() {
+async function makeManager() {
   const workDir = fs.mkdtempSync(path.join(os.tmpdir(), 'id-agents-wallet-unit-'));
-  const db = createInMemoryDb();
+  const db = await createInMemoryDb();
   const manager = new AgentManagerDb(workDir, db as any);
   return { manager, db, workDir };
 }
 
 describe('AgentManagerDb wallet helpers', () => {
   const workDirs: string[] = [];
-  const dbs: Array<ReturnType<typeof createInMemoryDb>> = [];
+  const dbs: Array<Awaited<ReturnType<typeof createInMemoryDb>>> = [];
 
   afterEach(async () => {
     while (dbs.length > 0) {
@@ -51,8 +51,8 @@ describe('AgentManagerDb wallet helpers', () => {
     vi.restoreAllMocks();
   });
 
-  it('strips provisioned wallet metadata when wallet opt-in is false', () => {
-    const { manager, db, workDir } = makeManager();
+  it('strips provisioned wallet metadata when wallet opt-in is false', async () => {
+    const { manager, db, workDir } = await makeManager();
     dbs.push(db);
     workDirs.push(workDir);
 
@@ -73,8 +73,8 @@ describe('AgentManagerDb wallet helpers', () => {
     expect(getOrCreate).not.toHaveBeenCalled();
   });
 
-  it('provisions wallet metadata only when opted in and only then injects OWS_WALLET into spawn env', () => {
-    const { manager, db, workDir } = makeManager();
+  it('provisions wallet metadata only when opted in and only then injects OWS_WALLET into spawn env', async () => {
+    const { manager, db, workDir } = await makeManager();
     dbs.push(db);
     workDirs.push(workDir);
 

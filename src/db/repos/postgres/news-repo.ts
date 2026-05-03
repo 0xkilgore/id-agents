@@ -6,16 +6,19 @@ import type { InboxOwnerKind, NewsItemRow } from '../../types.js';
 
 function resolveNewsOwnership(
   teamId: string,
-  agentId: string,
+  agentId: string | null,
   item: { owner_kind?: InboxOwnerKind; owner_id?: string },
 ): { owner_kind: InboxOwnerKind; owner_id: string } {
   if (item.owner_kind != null && item.owner_id != null) {
     return { owner_kind: item.owner_kind, owner_id: item.owner_id };
   }
-  if (agentId.startsWith('manager-')) {
-    return { owner_kind: 'manager', owner_id: teamId };
+  if (agentId != null && agentId !== '') {
+    if (agentId.startsWith('manager-')) {
+      return { owner_kind: 'manager', owner_id: teamId };
+    }
+    return { owner_kind: 'agent', owner_id: agentId };
   }
-  return { owner_kind: 'agent', owner_id: agentId };
+  throw new Error('PgNewsRepo: owner_kind/owner_id required when agentId is null');
 }
 
 export class PgNewsRepo implements NewsRepository {
@@ -23,7 +26,7 @@ export class PgNewsRepo implements NewsRepository {
 
   async add(
     teamId: string,
-    agentId: string,
+    agentId: string | null,
     item: {
       timestamp: number;
       type: string;
@@ -177,7 +180,6 @@ export class PgNewsRepo implements NewsRepository {
   }
 
   async getRecent(teamId: string, types: string[], limit: number): Promise<NewsItemRow[]> {
-    // Build dynamic IN clause: $2, $3, ... for each type
     const placeholders = types.map((_, i) => `$${i + 2}`).join(', ');
     const params: unknown[] = [teamId, ...types, limit];
     const limitIdx = params.length;

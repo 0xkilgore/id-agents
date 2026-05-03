@@ -17,9 +17,9 @@ import { SqliteTasksRepo } from '../../src/db/repos/sqlite/tasks-repo.js';
 import type { DeliverFn } from '../../src/lib/ssh-deliver.js';
 import type { IdChainRegisterResult } from '../../src/onchain/idchain-register.js';
 
-function createInMemoryDb() {
+async function createInMemoryDb() {
   const adapter = new SqliteAdapter(':memory:');
-  migrateSqlite(adapter);
+  await migrateSqlite(adapter);
   return {
     adapter,
     teams: new SqliteTeamsRepo(adapter),
@@ -53,7 +53,7 @@ function adminHeaders(team: string): Record<string, string> {
 }
 
 describe('wallet opt-in manager integration', () => {
-  let db: ReturnType<typeof createInMemoryDb>;
+  let db: Awaited<ReturnType<typeof createInMemoryDb>>;
   let manager: AgentManagerDb;
   let workDir: string;
   let baseUrl: string;
@@ -64,7 +64,7 @@ describe('wallet opt-in manager integration', () => {
     port = await findFreePort();
     baseUrl = `http://127.0.0.1:${port}`;
     workDir = fs.mkdtempSync(path.join(os.tmpdir(), 'id-agents-wallet-int-'));
-    db = createInMemoryDb();
+    db = await createInMemoryDb();
     registerCalls = [];
 
     const deliverFn: DeliverFn = async () => ({ ok: true });

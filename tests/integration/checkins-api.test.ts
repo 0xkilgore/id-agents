@@ -37,9 +37,9 @@ import { SqliteCheckinsRepo } from '../../src/db/repos/sqlite/checkins-repo.js';
 
 const TEAM = 'checkins-api-test';
 
-function createInMemoryDb() {
+async function createInMemoryDb() {
   const adapter = new SqliteAdapter(':memory:');
-  migrateSqlite(adapter);
+  await migrateSqlite(adapter);
   return {
     adapter,
     teams: new SqliteTeamsRepo(adapter),
@@ -82,7 +82,7 @@ function nonAdminHeaders(team: string): Record<string, string> {
 }
 
 async function insertAgentDirect(
-  db: ReturnType<typeof createInMemoryDb>,
+  db: Awaited<ReturnType<typeof createInMemoryDb>>,
   teamId: string,
   name: string,
 ): Promise<string> {
@@ -96,7 +96,7 @@ async function insertAgentDirect(
 }
 
 async function insertTaskDirect(
-  db: ReturnType<typeof createInMemoryDb>,
+  db: Awaited<ReturnType<typeof createInMemoryDb>>,
   teamId: string,
   name: string,
   ownerId: string | null = null,
@@ -133,7 +133,7 @@ interface CheckinEnvelope {
 
 describe('Checkins API', () => {
   let manager: AgentManagerDb;
-  let db: ReturnType<typeof createInMemoryDb>;
+  let db: Awaited<ReturnType<typeof createInMemoryDb>>;
   let baseUrl: string;
   let workDir: string;
   let teamId: string;
@@ -145,7 +145,7 @@ describe('Checkins API', () => {
     const port = await findFreePort();
     baseUrl = `http://127.0.0.1:${port}`;
     workDir = fs.mkdtempSync(path.join(os.tmpdir(), 'checkins-api-test-'));
-    db = createInMemoryDb();
+    db = await createInMemoryDb();
     manager = new AgentManagerDb(workDir, db as any);
     await manager.start(port);
     teamId = await db.teams.getOrCreateTeamId(TEAM);

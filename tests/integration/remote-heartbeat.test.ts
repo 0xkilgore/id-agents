@@ -29,9 +29,9 @@ import type { HealthProbeFn, ProbeFetchResult } from '../../src/lib/remote-heart
 
 // ─── DB factory ───────────────────────────────────────────────────────────────
 
-function createInMemoryDb() {
+async function createInMemoryDb() {
   const adapter = new SqliteAdapter(':memory:');
-  migrateSqlite(adapter);
+  await migrateSqlite(adapter);
   return {
     adapter,
     teams: new SqliteTeamsRepo(adapter),
@@ -141,7 +141,7 @@ async function triggerRemoteHeartbeat(manager: AgentManagerDb): Promise<void> {
 let managerPort: number;
 let baseUrl: string;
 let workDir: string;
-let db: ReturnType<typeof createInMemoryDb>;
+let db: Awaited<ReturnType<typeof createInMemoryDb>>;
 
 // Each test section creates its own manager instance to isolate probe stub.
 // The global manager (with a no-op probe) just hosts the base setup.
@@ -162,7 +162,7 @@ describe('Phase 5: Remote Heartbeat', () => {
   // ─── Test 1: Health 200 valid ──────────────────────────────────────────────
 
   it('1. health 200 → agent online, consecutive_failures=0, last_seen updated', async () => {
-    db = createInMemoryDb();
+    db = await createInMemoryDb();
     const probeFn = makeHealthOkStub();
     const manager = new AgentManagerDb(workDir, db as any, { healthProbeFn: probeFn });
     const port = await findFreePort();
@@ -191,7 +191,7 @@ describe('Phase 5: Remote Heartbeat', () => {
   // ─── Test 2: Health 500 + well-known 200 ──────────────────────────────────
 
   it('2. health 500, well-known 200 → online, last_error="health probe failed, well-known succeeded"', async () => {
-    db = createInMemoryDb();
+    db = await createInMemoryDb();
     const probeFn = makeHealth500WellKnownOkStub();
     const manager = new AgentManagerDb(workDir, db as any, { healthProbeFn: probeFn });
     const port = await findFreePort();
@@ -219,7 +219,7 @@ describe('Phase 5: Remote Heartbeat', () => {
   // ─── Test 3: Both fail — classify timeout ──────────────────────────────────
 
   it('3. AbortError → last_error="timeout", consecutive_failures=1, health=unstable', async () => {
-    db = createInMemoryDb();
+    db = await createInMemoryDb();
     const probeFn = makeTimeoutStub();
     const manager = new AgentManagerDb(workDir, db as any, { healthProbeFn: probeFn });
     const port = await findFreePort();
@@ -246,7 +246,7 @@ describe('Phase 5: Remote Heartbeat', () => {
   // ─── Test 4: 3+ failures → offline ────────────────────────────────────────
 
   it('4. 3 consecutive failures → consecutive_failures=3, health=offline', async () => {
-    db = createInMemoryDb();
+    db = await createInMemoryDb();
     const probeFn = makeBothFailStub();
     const manager = new AgentManagerDb(workDir, db as any, { healthProbeFn: probeFn });
     const port = await findFreePort();
@@ -274,7 +274,7 @@ describe('Phase 5: Remote Heartbeat', () => {
   // ─── Test 5: Recovery after 3 failures ────────────────────────────────────
 
   it('5. recovery after 3 failures → consecutive_failures=0, health=online, last_seen updated', async () => {
-    db = createInMemoryDb();
+    db = await createInMemoryDb();
     let failMode = true;
     const probeFn: HealthProbeFn = async (url, _timeout) => {
       if (failMode) return { status: 503, body: null };
@@ -313,7 +313,7 @@ describe('Phase 5: Remote Heartbeat', () => {
   // ─── Test 6: Concurrency cap at 8 ────────────────────────────────────────
 
   it('6. peak in-flight count never exceeds 8 with 20 remote agents', async () => {
-    db = createInMemoryDb();
+    db = await createInMemoryDb();
     let inFlight = 0;
     let peakInFlight = 0;
 
@@ -351,7 +351,7 @@ describe('Phase 5: Remote Heartbeat', () => {
   // ─── Test 7: Local agents not probed by remote loop ───────────────────────
 
   it('7. local agents (claude-agent-sdk) are not probed by runRemoteHeartbeat', async () => {
-    db = createInMemoryDb();
+    db = await createInMemoryDb();
     let probeCallCount = 0;
     const probeFn: HealthProbeFn = async () => {
       probeCallCount++;
@@ -398,7 +398,7 @@ describe('Phase 5: Remote Heartbeat', () => {
   // ─── Test 8: POST /agents/:id/probe works for remote ─────────────────────
 
   it('8. POST /agents/:id/probe returns 200 with probe result; DB updated', async () => {
-    db = createInMemoryDb();
+    db = await createInMemoryDb();
     const probeFn = makeHealthOkStub();
     const manager = new AgentManagerDb(workDir, db as any, { healthProbeFn: probeFn });
     const port = await findFreePort();
@@ -435,7 +435,7 @@ describe('Phase 5: Remote Heartbeat', () => {
   // ─── Test 9: POST /agents/:id/probe rejects local runtime ─────────────────
 
   it('9. POST /agents/:id/probe rejects non-remote agent with 400', async () => {
-    db = createInMemoryDb();
+    db = await createInMemoryDb();
     const manager = new AgentManagerDb(workDir, db as any, { healthProbeFn: makeHealthOkStub() });
     const port = await findFreePort();
     await manager.start(port);
@@ -473,7 +473,7 @@ describe('Phase 5: Remote Heartbeat', () => {
   // ─── Test 10: GET /agents?team=public exposes new columns ─────────────────
 
   it('10. GET /agents exposes last_seen, last_error, consecutive_failures, health after failures', async () => {
-    db = createInMemoryDb();
+    db = await createInMemoryDb();
     const probeFn = makeBothFailStub();
     const manager = new AgentManagerDb(workDir, db as any, { healthProbeFn: probeFn });
     const port = await findFreePort();
@@ -504,7 +504,7 @@ describe('Phase 5: Remote Heartbeat', () => {
   // ─── Test 11: Phase 1 team boundary regression ────────────────────────────
 
   it('11. idchain principal cannot see public agents or call /talk-to them', async () => {
-    db = createInMemoryDb();
+    db = await createInMemoryDb();
     const manager = new AgentManagerDb(workDir, db as any, { healthProbeFn: makeHealthOkStub() });
     const port = await findFreePort();
     await manager.start(port);
@@ -534,7 +534,7 @@ describe('Phase 5: Remote Heartbeat', () => {
   // ─── Test 12: Fault tolerance — one throw doesn't kill the loop ───────────
 
   it('12. one probe throwing synchronously does not stop other agents from being probed', async () => {
-    db = createInMemoryDb();
+    db = await createInMemoryDb();
     let probeCallCount = 0;
     let throwTarget: string | null = null;
 

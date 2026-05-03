@@ -7,14 +7,17 @@ import { parseJsonObject, stringifyJson } from '../../db-json.js';
 
 function resolveQueryOwnership(
   teamId: string,
-  agentId: string,
+  agentId: string | null,
   override?: { owner_kind: InboxOwnerKind; owner_id: string },
 ): { owner_kind: InboxOwnerKind; owner_id: string } {
   if (override) return override;
-  if (agentId.startsWith('manager-')) {
-    return { owner_kind: 'manager', owner_id: teamId };
+  if (agentId != null && agentId !== '') {
+    if (agentId.startsWith('manager-')) {
+      return { owner_kind: 'manager', owner_id: teamId };
+    }
+    return { owner_kind: 'agent', owner_id: agentId };
   }
-  return { owner_kind: 'agent', owner_id: agentId };
+  throw new Error('SqliteQueriesRepo: ownership override required when agentId is null');
 }
 
 export class SqliteQueriesRepo implements QueriesRepository {
@@ -22,12 +25,15 @@ export class SqliteQueriesRepo implements QueriesRepository {
 
   private parseQueryRow(row: any): QueryRow | null {
     if (!row) return null;
-    const agent_id = String(row.agent_id ?? '');
+    const agent_id =
+      row.agent_id != null && row.agent_id !== ''
+        ? String(row.agent_id)
+        : null;
     const team_id = String(row.team_id ?? '');
     const owner_kind: InboxOwnerKind =
       row.owner_kind === 'manager' || row.owner_kind === 'agent'
         ? row.owner_kind
-        : agent_id.startsWith('manager-')
+        : agent_id?.startsWith('manager-')
           ? 'manager'
           : 'agent';
     const owner_id =
@@ -35,7 +41,7 @@ export class SqliteQueriesRepo implements QueriesRepository {
         ? String(row.owner_id)
         : owner_kind === 'manager'
           ? team_id
-          : agent_id;
+          : agent_id ?? '';
     return {
       ...row,
       team_id,
@@ -83,7 +89,7 @@ export class SqliteQueriesRepo implements QueriesRepository {
   async create(
     teamId: string,
     queryId: string,
-    agentId: string,
+    agentId: string | null,
     prompt: string,
     created: number,
     sessionId?: string,
@@ -93,14 +99,14 @@ export class SqliteQueriesRepo implements QueriesRepository {
     await this.db.query(
       `INSERT INTO queries (team_id, query_id, agent_id, prompt, status, created, session_id, owner_kind, owner_id)
        VALUES (?, ?, ?, ?, 'pending', ?, ?, ?, ?)
-       ON CONFLICT (agent_id, query_id) DO NOTHING`,
+       ON CONFLICT (team_id, query_id) DO NOTHING`,
       [teamId, queryId, agentId, prompt, created, sessionId ?? null, own.owner_kind, own.owner_id],
     );
   }
 
   async upsert(
     teamId: string,
-    agentId: string,
+    agentId: string | null,
     query: Partial<QueryRow> & { query_id: string },
   ): Promise<void> {
     const own =
@@ -110,7 +116,8 @@ export class SqliteQueriesRepo implements QueriesRepository {
     await this.db.query(
       `INSERT INTO queries (team_id, agent_id, query_id, status, prompt, created, completed, result, error, session_id, owner_kind, owner_id)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-       ON CONFLICT (agent_id, query_id) DO UPDATE SET
+       ON CONFLICT (team_id, query_id) DO UPDATE SET
+         agent_id = excluded.agent_id,
          status = excluded.status,
          completed = excluded.completed,
          result = excluded.result,

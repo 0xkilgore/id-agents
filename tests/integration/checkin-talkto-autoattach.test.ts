@@ -38,9 +38,9 @@ import { SqliteCheckinsRepo } from '../../src/db/repos/sqlite/checkins-repo.js';
 
 const TEAM = 'checkin-autoattach-test';
 
-function createInMemoryDb() {
+async function createInMemoryDb() {
   const adapter = new SqliteAdapter(':memory:');
-  migrateSqlite(adapter);
+  await migrateSqlite(adapter);
   return {
     adapter,
     teams: new SqliteTeamsRepo(adapter),
@@ -94,7 +94,7 @@ function startStubAgent(port: number): Promise<http.Server> {
 }
 
 async function insertAgent(
-  db: ReturnType<typeof createInMemoryDb>,
+  db: Awaited<ReturnType<typeof createInMemoryDb>>,
   teamId: string,
   name: string,
   endpoint: string | null,
@@ -115,7 +115,7 @@ function adminHeaders(team: string): Record<string, string> {
 
 describe('/talk-to auto-attach', () => {
   let manager: AgentManagerDb;
-  let db: ReturnType<typeof createInMemoryDb>;
+  let db: Awaited<ReturnType<typeof createInMemoryDb>>;
   let baseUrl: string;
   let workDir: string;
   let teamId: string;
@@ -129,7 +129,7 @@ describe('/talk-to auto-attach', () => {
     baseUrl = `http://127.0.0.1:${managerPort}`;
     workDir = fs.mkdtempSync(path.join(os.tmpdir(), 'checkin-autoattach-'));
 
-    db = createInMemoryDb();
+    db = await createInMemoryDb();
     manager = new AgentManagerDb(workDir, db as any);
     await manager.start(managerPort);
 

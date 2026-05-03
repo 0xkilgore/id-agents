@@ -65,9 +65,9 @@ import { SqliteCheckinsRepo } from '../../src/db/repos/sqlite/checkins-repo.js';
 
 const TEAM = 'talkto-qid-test';
 
-function createInMemoryDb() {
+async function createInMemoryDb() {
   const adapter = new SqliteAdapter(':memory:');
-  migrateSqlite(adapter);
+  await migrateSqlite(adapter);
   return {
     adapter,
     teams: new SqliteTeamsRepo(adapter),
@@ -95,7 +95,7 @@ async function findFreePort(): Promise<number> {
 }
 
 async function insertAgentRow(
-  db: ReturnType<typeof createInMemoryDb>,
+  db: Awaited<ReturnType<typeof createInMemoryDb>>,
   teamId: string,
   name: string,
   endpoint: string | null,
@@ -110,7 +110,7 @@ async function insertAgentRow(
 }
 
 describe('/talk-to reply: query_id populated, no duplicate, manager waiter resolves', () => {
-  let db: ReturnType<typeof createInMemoryDb>;
+  let db: Awaited<ReturnType<typeof createInMemoryDb>>;
   let teamId: string;
   let agentAId: string;
   let agentAServer: AgentRestServer;
@@ -122,7 +122,7 @@ describe('/talk-to reply: query_id populated, no duplicate, manager waiter resol
   const savedTeam = process.env.ID_TEAM;
 
   beforeAll(async () => {
-    db = createInMemoryDb();
+    db = await createInMemoryDb();
     teamId = await db.teams.getOrCreateTeamId(TEAM);
     agentAId = await insertAgentRow(db, teamId, 'agent_a', null);
 

@@ -22,9 +22,9 @@ import { SqliteNewsRepo } from '../../src/db/repos/sqlite/news-repo.js';
 import { SqliteSchedulesRepo } from '../../src/db/repos/sqlite/schedules-repo.js';
 import { SqliteTasksRepo } from '../../src/db/repos/sqlite/tasks-repo.js';
 
-function createInMemoryDb() {
+async function createInMemoryDb() {
   const adapter = new SqliteAdapter(':memory:');
-  migrateSqlite(adapter);
+  await migrateSqlite(adapter);
   return {
     adapter,
     teams: new SqliteTeamsRepo(adapter),
@@ -68,7 +68,7 @@ let port: number;
 let baseUrl: string;
 let workDir: string;
 let manager: AgentManagerDb;
-let db: ReturnType<typeof createInMemoryDb>;
+let db: Awaited<ReturnType<typeof createInMemoryDb>>;
 
 // Agent IDs seeded for tests
 let meshAgentName: string;   // mesh_member: true (or absent) — should route
@@ -85,7 +85,7 @@ beforeAll(async () => {
   workDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mesh-membership-test-'));
   baseUrl = `http://127.0.0.1:${port}`;
 
-  db = createInMemoryDb();
+  db = await createInMemoryDb();
   manager = new AgentManagerDb(workDir, db as any);
   await manager.start(port);
 

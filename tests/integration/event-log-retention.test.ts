@@ -36,7 +36,7 @@ describe('event_log retention sweep', () => {
 
   beforeAll(async () => {
     adapter = new SqliteAdapter(':memory:');
-    migrateSqlite(adapter);
+    await migrateSqlite(adapter);
     teams = new SqliteTeamsRepo(adapter);
     events = new SqliteEventsRepo(adapter);
     teamId = await teams.getOrCreateTeamId('retention-team');

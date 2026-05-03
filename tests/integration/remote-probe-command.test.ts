@@ -23,9 +23,9 @@ import { SqliteNewsRepo } from '../../src/db/repos/sqlite/news-repo.js';
 import { SqliteSchedulesRepo } from '../../src/db/repos/sqlite/schedules-repo.js';
 import { SqliteTasksRepo } from '../../src/db/repos/sqlite/tasks-repo.js';
 
-function createInMemoryDb() {
+async function createInMemoryDb() {
   const adapter = new SqliteAdapter(':memory:');
-  migrateSqlite(adapter);
+  await migrateSqlite(adapter);
   return {
     adapter,
     teams: new SqliteTeamsRepo(adapter),
@@ -130,10 +130,10 @@ async function startProbeStub(mode: StubMode): Promise<{
 async function withManager(
   run: (ctx: {
     baseUrl: string;
-    db: ReturnType<typeof createInMemoryDb>;
+    db: Awaited<ReturnType<typeof createInMemoryDb>>;
   }) => Promise<void>,
 ): Promise<void> {
-  const db = createInMemoryDb();
+  const db = await createInMemoryDb();
   const managerPort = await findFreePort();
   const workDir = fs.mkdtempSync(path.join(os.tmpdir(), 'remote-probe-command-'));
   const manager = new AgentManagerDb(workDir, db as any);

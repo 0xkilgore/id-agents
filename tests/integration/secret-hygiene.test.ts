@@ -38,9 +38,9 @@ process.env.OWS_REGISTRAR_WALLET = FAKE_OWS_WALLET;
 process.env.PRIVATE_KEY = FAKE_PRIVATE_KEY;
 process.env.ID_REGISTRAR_PRIVATE_KEY = FAKE_ID_REGISTRAR_PRIVATE_KEY;
 
-function createInMemoryDb() {
+async function createInMemoryDb() {
   const adapter = new SqliteAdapter(':memory:');
-  migrateSqlite(adapter);
+  await migrateSqlite(adapter);
   return {
     adapter,
     teams: new SqliteTeamsRepo(adapter),
@@ -127,7 +127,7 @@ let port: number;
 let baseUrl: string;
 let workDir: string;
 let manager: AgentManagerDb;
-let db: ReturnType<typeof createInMemoryDb>;
+let db: Awaited<ReturnType<typeof createInMemoryDb>>;
 
 let publicTeamId: string;
 let idchainTeamId: string;
@@ -141,7 +141,7 @@ beforeAll(async () => {
   workDir = fs.mkdtempSync(path.join(os.tmpdir(), 'secret-hygiene-test-'));
   baseUrl = `http://127.0.0.1:${port}`;
 
-  db = createInMemoryDb();
+  db = await createInMemoryDb();
   manager = new AgentManagerDb(workDir, db as any);
   await manager.start(port);
 

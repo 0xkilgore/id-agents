@@ -14,6 +14,9 @@ import { SqliteQueriesRepo } from '../../src/db/repos/sqlite/queries-repo.js';
 import { SqliteNewsRepo } from '../../src/db/repos/sqlite/news-repo.js';
 import { SqliteSchedulesRepo } from '../../src/db/repos/sqlite/schedules-repo.js';
 import { SqliteTasksRepo } from '../../src/db/repos/sqlite/tasks-repo.js';
+import { SqliteEventsRepo } from '../../src/db/repos/sqlite/events-repo.js';
+import { SqliteSubscriptionsRepo } from '../../src/db/repos/sqlite/subscriptions-repo.js';
+import { SqliteCheckinsRepo } from '../../src/db/repos/sqlite/checkins-repo.js';
 
 async function findFreePort(): Promise<number> {
   return await new Promise((resolve, reject) => {
@@ -26,9 +29,9 @@ async function findFreePort(): Promise<number> {
   });
 }
 
-function createInMemoryDb() {
+async function createInMemoryDb() {
   const adapter = new SqliteAdapter(':memory:');
-  migrateSqlite(adapter);
+  await migrateSqlite(adapter);
   return {
     adapter,
     teams: new SqliteTeamsRepo(adapter),
@@ -37,6 +40,9 @@ function createInMemoryDb() {
     news: new SqliteNewsRepo(adapter),
     schedules: new SqliteSchedulesRepo(adapter),
     tasks: new SqliteTasksRepo(adapter),
+    events: new SqliteEventsRepo(adapter),
+    subscriptions: new SqliteSubscriptionsRepo(adapter),
+    checkins: new SqliteCheckinsRepo(adapter),
     async close() { await adapter.close(); },
   };
 }
@@ -114,13 +120,13 @@ describe('manager registration cleanup', () => {
   let baseUrl: string;
   let workDir: string;
   let manager: AgentManagerDb;
-  let db: ReturnType<typeof createInMemoryDb>;
+  let db: Awaited<ReturnType<typeof createInMemoryDb>>;
 
   beforeAll(async () => {
     port = await findFreePort();
     baseUrl = `http://127.0.0.1:${port}`;
     workDir = fs.mkdtempSync(path.join(os.tmpdir(), 'manager-collapse-cleanup-'));
-    db = createInMemoryDb();
+    db = await createInMemoryDb();
     manager = new AgentManagerDb(workDir, db as any);
     await manager.start(port);
   }, 30000);
@@ -193,5 +199,55 @@ describe('manager registration cleanup', () => {
       },
     });
     expect(resolveRes.status).toBe(404);
+  });
+
+  it('/teams, /agents/status, manager inbox + respond work without manager-* shadow agent rows', async () => {
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+      'X-Id-Team': 'default',
+      'X-Id-Admin': '1',
+    };
+
+    const talkRes = await fetch(`${baseUrl}/talk`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ message: 'shadow migration smoke', from: 'tester' }),
+    });
+    expect(talkRes.status).toBe(202);
+    const { query_id: queryId } = await talkRes.json() as { query_id: string };
+
+    const teamsRes = await fetch(`${baseUrl}/teams`, { headers: { 'X-Id-Admin': '1' } });
+    expect(teamsRes.ok).toBe(true);
+    const teamsBody = await teamsRes.json() as { teams: Array<{ name: string }> };
+    expect(teamsBody.teams.some((t) => t.name === 'default')).toBe(true);
+
+    const agentStatusRes = await fetch(`${baseUrl}/agents/status`, { headers });
+    expect(agentStatusRes.ok).toBe(true);
+
+    const pendingRes = await fetch(`${baseUrl}/manager/inbox/pending`, { headers });
+    expect(pendingRes.ok).toBe(true);
+    const pendingBody = await pendingRes.json() as {
+      inbox_id: string;
+      pending: Array<{ query_id: string }>;
+    };
+    expect(pendingBody.inbox_id).toBe('manager-default');
+    expect(pendingBody.pending.some((p) => p.query_id === queryId)).toBe(true);
+
+    const respondRes = await fetch(`${baseUrl}/manager/inbox/respond`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ query_id: queryId, message: 'ack', session_id: 'sess_shadow_smoke' }),
+    });
+    expect(respondRes.ok).toBe(true);
+
+    const shadowCount = await db.adapter.query<{ c: number }>(
+      `SELECT COUNT(*) as c FROM agents WHERE id GLOB 'manager-*'`,
+    );
+    expect(Number(shadowCount.rows[0]?.c)).toBe(0);
+
+    const mgrByName = await db.adapter.query<{ c: number }>(
+      `SELECT COUNT(*) as c FROM agents WHERE name = 'manager' AND deleted_at IS NULL`,
+    );
+    expect(Number(mgrByName.rows[0]?.c)).toBe(0);
   });
 });

@@ -224,11 +224,11 @@ export interface QueriesRepository {
   create(
     teamId: string,
     queryId: string,
-    agentId: string,
+    agentId: string | null,
     prompt: string,
     created: number,
     sessionId?: string,
-    /** When omitted, derived from `agent_id` (manager inbox → manager ownership). */
+    /** Required when `agentId` is null; otherwise derived from non-null `agent_id`. */
     ownership?: { owner_kind: InboxOwnerKind; owner_id: string },
   ): Promise<void>;
 
@@ -256,7 +256,7 @@ export interface QueriesRepository {
    */
   upsert(
     teamId: string,
-    agentId: string,
+    agentId: string | null,
     query: Partial<QueryRow> & { query_id: string },
   ): Promise<void>;
 
@@ -321,7 +321,7 @@ export interface NewsRepository {
   /** Insert a news item for an agent. */
   add(
     teamId: string,
-    agentId: string,
+    agentId: string | null,
     item: {
       timestamp: number;
       type: string;

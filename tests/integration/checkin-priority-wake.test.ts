@@ -68,9 +68,9 @@ import { SqliteSubscriptionsRepo } from '../../src/db/repos/sqlite/subscriptions
 import { SqliteCheckinsRepo } from '../../src/db/repos/sqlite/checkins-repo.js';
 import type { CheckinRow, CheckinPriority } from '../../src/db/types.js';
 
-function createInMemoryDb() {
+async function createInMemoryDb() {
   const adapter = new SqliteAdapter(':memory:');
-  migrateSqlite(adapter);
+  await migrateSqlite(adapter);
   return {
     adapter,
     teams: new SqliteTeamsRepo(adapter),
@@ -87,7 +87,7 @@ function createInMemoryDb() {
 }
 
 async function bootAgentServer(
-  db: ReturnType<typeof createInMemoryDb>,
+  db: Awaited<ReturnType<typeof createInMemoryDb>>,
   teamId: string,
   agentId: string,
 ): Promise<{ server: AgentRestServer; baseUrl: string }> {
@@ -108,7 +108,7 @@ async function bootAgentServer(
 }
 
 async function insertAgentRow(
-  db: ReturnType<typeof createInMemoryDb>,
+  db: Awaited<ReturnType<typeof createInMemoryDb>>,
   teamId: string,
   name: string,
   endpoint: string | null,
@@ -148,7 +148,7 @@ function buildRow(overrides: Partial<CheckinRow> & Pick<CheckinRow, 'id' | 'team
 }
 
 describe('CheckinService wake on every fire (priority is metadata, not a gate)', () => {
-  let db: ReturnType<typeof createInMemoryDb>;
+  let db: Awaited<ReturnType<typeof createInMemoryDb>>;
   let highServer: AgentRestServer;
   let normalServer: AgentRestServer;
   let lowServer: AgentRestServer;
@@ -161,7 +161,7 @@ describe('CheckinService wake on every fire (priority is metadata, not a gate)',
   let lowOwnerId: string;
 
   beforeAll(async () => {
-    db = createInMemoryDb();
+    db = await createInMemoryDb();
     teamId = await db.teams.getOrCreateTeamId('checkin-wake');
     highOwnerId = await insertAgentRow(db, teamId, 'high-owner', null);
     normalOwnerId = await insertAgentRow(db, teamId, 'normal-owner', null);
@@ -300,7 +300,7 @@ describe('CheckinService wake on every fire (priority is metadata, not a gate)',
     const workDir = fs.mkdtempSync(path.join(os.tmpdir(), 'checkin-wake-mgr-'));
 
     // Build a fresh DB so this case stays isolated from the suite-level rows.
-    const localDb = createInMemoryDb();
+    const localDb = await createInMemoryDb();
     const localTeamId = await localDb.teams.getOrCreateTeamId('checkin-wake-e2e');
     const localOwnerId = await insertAgentRow(localDb, localTeamId, 'high-owner-e2e', null);
 
