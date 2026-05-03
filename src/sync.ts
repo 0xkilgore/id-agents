@@ -39,7 +39,32 @@ const DIFF_FIELDS = [
   'domain',
   'tokenId',
   'workingDirectory',
+  'catalog',
 ] as const;
+
+/**
+ * Stable, sort-aware JSON serialization of the catalog seed for diff comparison.
+ * Without sorting, two semantically-equal catalog blocks could compare unequal
+ * just because YAML key order differed.
+ */
+function normalizeCatalog(catalog: unknown): string {
+  if (!catalog || typeof catalog !== 'object') return '';
+  const sortedKeys = Object.keys(catalog as Record<string, unknown>).sort();
+  if (sortedKeys.length === 0) return '';
+  const ordered: Record<string, unknown> = {};
+  for (const k of sortedKeys) {
+    const v = (catalog as Record<string, unknown>)[k];
+    // Sort scalar arrays (e.g. expertise, notSuitableFor) so ['a','b'] and
+    // ['b','a'] compare equal. Object/nested arrays are left as-is — the
+    // catalog schema doesn't currently use them.
+    if (Array.isArray(v) && v.every(item => typeof item === 'string')) {
+      ordered[k] = [...v].sort();
+    } else {
+      ordered[k] = v;
+    }
+  }
+  return JSON.stringify(ordered);
+}
 
 function normalizePlugins(plugins?: Array<{ name: string; path?: string }> | null): string {
   if (!plugins || plugins.length === 0) return '';
@@ -101,6 +126,7 @@ function configFields(spec: AgentSpec, defaultModel?: string): Record<string, st
     domain: spec.domain || '',
     tokenId: spec.tokenId || '',
     workingDirectory: spec.workingDirectory || '',
+    catalog: normalizeCatalog(spec.catalog),
   };
 }
 
@@ -121,6 +147,7 @@ function runningFields(row: AgentRow): Record<string, string> {
     domain: row.domain || '',
     tokenId: row.token_id || '',
     workingDirectory: row.working_directory || '',
+    catalog: normalizeCatalog(meta.catalog),
   };
 }
 

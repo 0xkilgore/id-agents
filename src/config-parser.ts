@@ -43,6 +43,27 @@ export interface ResourceConfig {
   }>;
 }
 
+/**
+ * Catalog seed for an agent. Lands in `metadata.catalog` at deploy/sync time
+ * and is exposed via the agent's `/catalog` REST-AP endpoint. Agents may
+ * still PATCH `/catalog` at runtime; the YAML catalog is the redeploy floor —
+ * any subsequent /sync or /deploy re-applies these values, overwriting
+ * runtime PATCHes.
+ *
+ * `model` and `workingDirectory` stay implicit: they're already declared at
+ * the agent's top level and do not belong inside the catalog block.
+ */
+export interface AgentCatalog {
+  role?: string;                       // e.g. developer, auditor, lead/orchestrator
+  description?: string;                // Short blurb shown to peers
+  expertise?: string[];                // Free-form skill tags
+  costTier?: 'low' | 'medium' | 'high';
+  notSuitableFor?: string[];           // Work patterns this agent should not be assigned
+  status?: string;                     // Initial status (typically "available")
+  currentTask?: string;                // Optional initial task label
+  [key: string]: unknown;              // Allow custom fields without breaking parsing
+}
+
 export interface AgentSpec {
   name: string;
   agent?: string;                     // Library agent overlay name (resolves to <library-root>/agents/<agent>/)
@@ -77,6 +98,10 @@ export interface AgentSpec {
                                       // child env never receives OWS_WALLET. On-demand
                                       // provisioning is still available via
                                       // `/agent <name> wallet provision`.
+  catalog?: AgentCatalog;             // Catalog seed — lands in metadata.catalog at deploy/sync.
+                                      // Visible to peers via the agent's /catalog endpoint.
+                                      // Runtime PATCH /catalog still works; redeploy/sync
+                                      // re-applies the YAML floor, overwriting any drift.
 }
 
 export interface CalendarSpec {
@@ -444,6 +469,35 @@ export function validateConfig(config: DeployConfig): ValidationResult {
         path: `${agentPath}.agent`,
         message: 'agent must be a string'
       });
+    }
+
+    if (agent.catalog !== undefined) {
+      if (typeof agent.catalog !== 'object' || agent.catalog === null || Array.isArray(agent.catalog)) {
+        errors.push({
+          path: `${agentPath}.catalog`,
+          message: 'catalog must be an object'
+        });
+      } else {
+        const cat = agent.catalog;
+        if (cat.role !== undefined && typeof cat.role !== 'string') {
+          errors.push({ path: `${agentPath}.catalog.role`, message: 'catalog.role must be a string' });
+        }
+        if (cat.description !== undefined && typeof cat.description !== 'string') {
+          errors.push({ path: `${agentPath}.catalog.description`, message: 'catalog.description must be a string' });
+        }
+        if (cat.expertise !== undefined && (!Array.isArray(cat.expertise) || !cat.expertise.every(e => typeof e === 'string'))) {
+          errors.push({ path: `${agentPath}.catalog.expertise`, message: 'catalog.expertise must be a string array' });
+        }
+        if (cat.notSuitableFor !== undefined && (!Array.isArray(cat.notSuitableFor) || !cat.notSuitableFor.every(e => typeof e === 'string'))) {
+          errors.push({ path: `${agentPath}.catalog.notSuitableFor`, message: 'catalog.notSuitableFor must be a string array' });
+        }
+        if (cat.costTier !== undefined && !['low', 'medium', 'high'].includes(cat.costTier as string)) {
+          errors.push({ path: `${agentPath}.catalog.costTier`, message: 'catalog.costTier must be one of: low, medium, high' });
+        }
+        if (cat.status !== undefined && typeof cat.status !== 'string') {
+          errors.push({ path: `${agentPath}.catalog.status`, message: 'catalog.status must be a string' });
+        }
+      }
     }
 
     // Validate runtime

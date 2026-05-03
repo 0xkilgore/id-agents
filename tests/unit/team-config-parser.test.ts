@@ -104,4 +104,115 @@ agents:
       message: 'Agent manager with type automator is no longer valid. The name manager is reserved for the control plane. Rename this agent to lead-automator (or any non-reserved name) and re-deploy.',
     });
   });
+
+  describe('catalog seed parsing', () => {
+    it('surfaces a full catalog block on the agent spec via parseTeamConfig', () => {
+      tmpDir = mkTmp();
+      const configPath = path.join(tmpDir, 'team-with-catalog.yaml');
+      fs.writeFileSync(configPath, `name: catalog-team
+
+agents:
+  - name: jrdev
+    runtime: cursor-cli
+    model: composer-2
+    workingDirectory: ~/projects/demo
+    catalog:
+      role: junior-developer
+      description: "Junior dev for low-stakes work."
+      expertise: [typescript, simple-refactors, doc-edits]
+      costTier: low
+      notSuitableFor: [multi-file-schema-migrations, security-key-handling]
+      status: available
+`);
+
+      const config = parseTeamConfig(configPath);
+      expect(config.agents).toHaveLength(1);
+      const cat = config.agents[0].catalog;
+      expect(cat).toBeDefined();
+      expect(cat?.role).toBe('junior-developer');
+      expect(cat?.description).toBe('Junior dev for low-stakes work.');
+      expect(cat?.expertise).toEqual(['typescript', 'simple-refactors', 'doc-edits']);
+      expect(cat?.costTier).toBe('low');
+      expect(cat?.notSuitableFor).toEqual(['multi-file-schema-migrations', 'security-key-handling']);
+      expect(cat?.status).toBe('available');
+    });
+
+    it('treats catalog as optional — agents without a catalog block parse with catalog: undefined', () => {
+      tmpDir = mkTmp();
+      const configPath = path.join(tmpDir, 'team-no-catalog.yaml');
+      fs.writeFileSync(configPath, `name: catalog-team
+
+agents:
+  - name: noseed
+    runtime: claude-code-cli
+`);
+      const config = parseTeamConfig(configPath);
+      expect(config.agents).toHaveLength(1);
+      expect(config.agents[0].catalog).toBeUndefined();
+    });
+
+    it('validateConfig accepts a well-formed catalog block', () => {
+      const result = validateConfig({
+        version: '1',
+        agents: [{
+          name: 'good',
+          catalog: {
+            role: 'developer',
+            description: 'desc',
+            expertise: ['a', 'b'],
+            costTier: 'medium',
+            notSuitableFor: ['x'],
+            status: 'available',
+          },
+        }],
+      });
+      expect(result.valid).toBe(true);
+      expect(result.errors).toEqual([]);
+    });
+
+    it('validateConfig rejects non-object catalog values', () => {
+      const arrResult = validateConfig({
+        version: '1',
+        agents: [{ name: 'bad', catalog: ['not', 'an', 'object'] as any }],
+      });
+      expect(arrResult.valid).toBe(false);
+      expect(arrResult.errors).toContainEqual({
+        path: 'agents[0].catalog',
+        message: 'catalog must be an object',
+      });
+
+      const stringResult = validateConfig({
+        version: '1',
+        agents: [{ name: 'bad', catalog: 'string' as any }],
+      });
+      expect(stringResult.valid).toBe(false);
+      expect(stringResult.errors).toContainEqual({
+        path: 'agents[0].catalog',
+        message: 'catalog must be an object',
+      });
+    });
+
+    it('validateConfig rejects bad catalog field types and unknown costTier', () => {
+      const result = validateConfig({
+        version: '1',
+        agents: [{
+          name: 'bad',
+          catalog: {
+            role: 42 as any,
+            expertise: 'not-an-array' as any,
+            notSuitableFor: [1, 2] as any,
+            costTier: 'extreme' as any,
+            status: { nested: true } as any,
+          },
+        }],
+      });
+      expect(result.valid).toBe(false);
+      const messages = result.errors.map(e => `${e.path}: ${e.message}`);
+      expect(messages).toContain('agents[0].catalog.role: catalog.role must be a string');
+      expect(messages).toContain('agents[0].catalog.expertise: catalog.expertise must be a string array');
+      expect(messages).toContain('agents[0].catalog.notSuitableFor: catalog.notSuitableFor must be a string array');
+      expect(messages).toContain('agents[0].catalog.costTier: catalog.costTier must be one of: low, medium, high');
+      expect(messages).toContain('agents[0].catalog.status: catalog.status must be a string');
+    });
+  });
 });

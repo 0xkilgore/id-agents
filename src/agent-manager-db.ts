@@ -6183,6 +6183,9 @@ export class AgentManagerDb {
             ...(isAutomator && { isAutomator: true }),
             ...(spec.heartbeat && { heartbeat: true }),
             ...(spec.dangerouslySkipPermissions !== undefined && { dangerouslySkipPermissions: spec.dangerouslySkipPermissions }),
+            // Catalog seed from YAML — overwrites any runtime PATCH on redeploy.
+            // This is intentional: YAML is the redeploy floor.
+            ...(spec.catalog && { catalog: spec.catalog }),
           }, spec.wallet);
 
           this.deploySkillsToAgent(workingDirectory, agentSkills, {
@@ -6292,6 +6295,8 @@ export class AgentManagerDb {
               ...(spec.heartbeat && { heartbeat: true }),
               ...(spec.openMode !== undefined && { openMode: spec.openMode }),
               ...(spec.dangerouslySkipPermissions !== undefined && { dangerouslySkipPermissions: spec.dangerouslySkipPermissions }),
+              // Catalog seed from YAML — see notes on the sync-update site above.
+              ...(spec.catalog && { catalog: spec.catalog }),
             }, spec.wallet);
 
             // 1. Deploy library-backed agent overlay into the runtime overlay target, if configured
@@ -6611,7 +6616,11 @@ export class AgentManagerDb {
               // Flag that heartbeat is enabled
               ...(heartbeatConfig && { heartbeat: true }),
               ...(agentConfig.openMode !== undefined && { openMode: agentConfig.openMode }),
-              ...(agentConfig.dangerouslySkipPermissions !== undefined && { dangerouslySkipPermissions: agentConfig.dangerouslySkipPermissions })
+              ...(agentConfig.dangerouslySkipPermissions !== undefined && { dangerouslySkipPermissions: agentConfig.dangerouslySkipPermissions }),
+              // Catalog seed from YAML — lands in metadata.catalog and surfaces
+              // via the agent's /catalog endpoint. Runtime PATCH /catalog still
+              // works; the next /deploy or /sync re-applies this YAML floor.
+              ...(agentConfig.catalog && { catalog: agentConfig.catalog })
             };
 
             // Use ENS domain from config if available (preserves registration across redeploys)
