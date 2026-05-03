@@ -736,37 +736,64 @@ export class AgentManagerDb {
   }
 
   /**
-   * Resolve the persistent manager-inbox identity for a team.
+   * Resolve the logical manager inbox owner for a team.
    *
-   * Source of truth:
-   *   - stable daemon-owned row `manager-${teamName}`
-   *
-   * Used by POST /talk, POST /schedule, POST /news, GET /news, and the
-   * /remote `news` handler so all manager-inbox reads/writes converge on
-   * the same stable id. The CLI is no longer part of manager-id discovery.
+   * During the transition window we still dual-write the legacy `agent_id`
+   * column as `manager-<team>` for rollback compatibility, but reads route
+   * entirely through owner_kind/owner_id and do not require an `agents` row.
    */
-  private async resolveManagerInboxId(teamId: string, teamName: string): Promise<string> {
-    const stubId = `manager-${teamName}`;
-    const existingStub = await this.db.agents.getById(stubId);
-    if (existingStub && existingStub.team_id === teamId) return stubId;
+  private getManagerInboxRef(teamId: string, teamName: string): {
+    legacyAgentId: string;
+    ownerKind: 'manager';
+    ownerId: string;
+  } {
+    return {
+      legacyAgentId: `manager-${teamName}`,
+      ownerKind: 'manager',
+      ownerId: teamId,
+    };
+  }
 
-    try {
+  /**
+   * Keep the legacy manager row only as a hidden FK shadow while reads route
+   * through owner_kind/owner_id. This preserves the reversible dual-write
+   * window until the legacy agent_id column can be removed entirely.
+   */
+  private async cleanupLegacyManagerRows(teamId: string, teamName: string): Promise<void> {
+    const ts = Date.now();
+    const shadowId = `manager-${teamName}`;
+    const existing = await this.db.agents.getById(shadowId).catch(() => null);
+    if (!existing) {
       await this.db.agents.upsert({
         team_id: teamId,
-        id: stubId,
+        id: shadowId,
         name: 'manager',
         type: 'interactive',
         model: '',
         status: 'stub',
-        created_at: Date.now(),
+        created_at: ts,
         endpoint: '',
-        metadata: { canReceiveDirectMessages: false, autoCreated: true } as Record<string, unknown>,
-      });
-      this.managerLog(`Provisioned manager-inbox stub for team ${teamName}: ${stubId}`);
-    } catch (err: any) {
-      this.managerLog(`Failed to provision manager-inbox stub for team ${teamName}: ${err?.message || err}`);
+        metadata: { canReceiveDirectMessages: false, shadowOnly: true } as Record<string, unknown>,
+      }).catch(() => {});
     }
-    return stubId;
+    const sql = this.db.adapter.dialect === 'postgres'
+      ? `UPDATE agents
+         SET deleted_at = COALESCE(deleted_at, $1)
+         WHERE team_id = $2
+           AND deleted_at IS NULL
+           AND (
+             (id = $3 AND type = 'interactive')
+             OR id = 'virtual_manager'
+           )`
+      : `UPDATE agents
+         SET deleted_at = COALESCE(deleted_at, ?)
+         WHERE team_id = ?
+           AND deleted_at IS NULL
+           AND (
+             (id = ? AND type = 'interactive')
+             OR id = 'virtual_manager'
+           )`;
+    await this.db.adapter.query(sql, [ts, teamId, `manager-${teamName}`]).catch(() => {});
   }
 
   /**
@@ -1341,6 +1368,89 @@ export class AgentManagerDb {
       const timeout = shouldWait
         ? Math.min(Math.max(parseInt(requestTimeout) || DEFAULT_TIMEOUT, 1000), MAX_TIMEOUT)
         : 0;
+
+      if (String(agent).toLowerCase() === 'manager') {
+        const { name: teamName } = await this.getTeam(req);
+        const managerInbox = this.getManagerInboxRef(teamId, teamName);
+        const ts = Date.now();
+
+        if (!shouldWait) {
+          await this.db.news.add(teamId, managerInbox.legacyAgentId, {
+            timestamp: ts,
+            type: 'message',
+            message: message,
+            data: { from: from || 'manager', message },
+            kind: 'notify',
+            reply_expected: false,
+            owner_kind: managerInbox.ownerKind,
+            owner_id: managerInbox.ownerId,
+          });
+          await this.cleanupLegacyManagerRows(teamId, teamName);
+          return res.json({
+            success: true,
+            delivered_to: 'manager',
+            status: 'delivered',
+          });
+        }
+
+        const queryId = `query_${ts}_${Math.random().toString(36).slice(2, 9)}`;
+        await this.db.queries.create(
+          teamId,
+          queryId,
+          managerInbox.legacyAgentId,
+          `[From: ${from || 'manager'}] ${message}`,
+          ts,
+          session_id || undefined,
+          { owner_kind: managerInbox.ownerKind, owner_id: managerInbox.ownerId },
+        );
+        await this.db.news.add(teamId, managerInbox.legacyAgentId, {
+          timestamp: ts,
+          type: 'query.received',
+          message: `Query from ${from || 'manager'}: ${String(message).slice(0, 100)}${String(message).length > 100 ? '...' : ''}`,
+          data: { from: from || 'manager', message, session_id, query_id: queryId },
+          query_id: queryId,
+          kind: 'talk',
+          reply_expected: true,
+          owner_kind: managerInbox.ownerKind,
+          owner_id: managerInbox.ownerId,
+        });
+        await this.cleanupLegacyManagerRows(teamId, teamName);
+
+        this.managerLog(`Queued reserved-route message to manager, query_id: ${queryId}`);
+
+        let timeoutHandle: NodeJS.Timeout | null = null;
+        let httpTimedOut = false;
+        const replyPromise = new Promise<{ from: string; message: string }>((resolve) => {
+          this.queryWaiters.set(queryId, {
+            resolve,
+            reject: () => {},
+            timeout: null as any,
+          });
+          if (timeout < 24 * 60 * 60 * 1000) {
+            timeoutHandle = setTimeout(() => {
+              httpTimedOut = true;
+              resolve({ from: '', message: '' });
+            }, timeout);
+          }
+        });
+        const replyResult = await replyPromise;
+        if (timeoutHandle) clearTimeout(timeoutHandle);
+        if (httpTimedOut) {
+          return res.json({
+            success: false,
+            from: 'manager',
+            query_id: queryId,
+            message: `Request timed out after ${timeout}ms - reply will be delivered when it arrives`,
+            status: 'pending',
+          });
+        }
+        return res.json({
+          success: true,
+          from: replyResult.from || 'manager',
+          reply: replyResult.message,
+          query_id: queryId,
+        });
+      }
 
       // Resolve the target agent
       const resolved = await this.resolveTargetAgent(teamId, agent);
@@ -1932,9 +2042,8 @@ export class AgentManagerDb {
 
         const ts = Date.now();
         const queryId = `query_${ts}_${Math.random().toString(36).slice(2, 9)}`;
-        // Resolve the persistent daemon-owned manager-inbox identity so
-        // the query.received event always lands on a real DB row.
-        const managerId = await this.resolveManagerInboxId(teamId, teamName);
+        const managerInbox = this.getManagerInboxRef(teamId, teamName);
+        await this.cleanupLegacyManagerRows(teamId, teamName);
         const senderName = from || 'external';
 
         // Store the query in the queries table. Dual-write window: every
@@ -1945,15 +2054,15 @@ export class AgentManagerDb {
         await this.db.queries.create(
           teamId,
           queryId,
-          managerId,
+          managerInbox.legacyAgentId,
           `[From: ${senderName}] ${message}`,
           ts,
           session_id || undefined,
-          { owner_kind: 'manager', owner_id: teamId },
+          { owner_kind: managerInbox.ownerKind, owner_id: managerInbox.ownerId },
         );
 
         // Also store as a news item so the CLI can see incoming queries
-        await this.db.news.add(teamId, managerId, {
+        await this.db.news.add(teamId, managerInbox.legacyAgentId, {
           timestamp: ts,
           type: 'query.received',
           message: `Query from ${senderName}: ${message.slice(0, 100)}${message.length > 100 ? '...' : ''}`,
@@ -1961,8 +2070,8 @@ export class AgentManagerDb {
           query_id: queryId,
           kind: 'talk',
           reply_expected: true,
-          owner_kind: 'manager',
-          owner_id: teamId,
+          owner_kind: managerInbox.ownerKind,
+          owner_id: managerInbox.ownerId,
         });
 
         this.managerLog(`Received query ${queryId} from ${senderName}: ${message.slice(0, 50)}...`);
@@ -1998,14 +2107,15 @@ export class AgentManagerDb {
         const ts = Date.now();
         const queryId = `query_${ts}_${Math.random().toString(36).slice(2, 9)}`;
 
-        const managerId = await this.resolveManagerInboxId(teamId, teamName);
+        const managerInbox = this.getManagerInboxRef(teamId, teamName);
+        await this.cleanupLegacyManagerRows(teamId, teamName);
 
         const queryResult: Record<string, unknown> = { schedule, message: messageStr, mode: 'internal' };
         if (Array.isArray(linkedTasks) && linkedTasks.length > 0) {
           queryResult.linkedTasks = linkedTasks;
         }
 
-        await this.db.queries.upsert(teamId, managerId, {
+        await this.db.queries.upsert(teamId, managerInbox.legacyAgentId, {
           query_id: queryId,
           status: 'pending',
           prompt: messageStr,
@@ -2014,8 +2124,8 @@ export class AgentManagerDb {
           result: queryResult,
           error: null,
           session_id: null,
-          owner_kind: 'manager',
-          owner_id: teamId,
+          owner_kind: managerInbox.ownerKind,
+          owner_id: managerInbox.ownerId,
         });
 
         const newsData: Record<string, unknown> = {
@@ -2028,15 +2138,15 @@ export class AgentManagerDb {
           newsData.linkedTasks = linkedTasks;
         }
 
-        await this.db.news.add(teamId, managerId, {
+        await this.db.news.add(teamId, managerInbox.legacyAgentId, {
           timestamp: ts,
           type: 'schedule.received',
           message: `Scheduled query ${queryId} received`,
           data: newsData,
           query_id: queryId,
           reply_expected: false,
-          owner_kind: 'manager',
-          owner_id: teamId,
+          owner_kind: managerInbox.ownerKind,
+          owner_id: managerInbox.ownerId,
         });
 
         this.managerLog(`Received scheduled query ${queryId}: ${messageStr.slice(0, 50)}...`);
@@ -2155,17 +2265,15 @@ export class AgentManagerDb {
         const newsMessage = message || data?.message || `${newsType} from ${from || 'unknown'}`;
         const ts = Date.now();
 
-        // Store in news_items table under the persistent manager-inbox identity.
-        // resolveManagerInboxId auto-provisions a stub when neither CLI nor
-        // named "manager" exists, so replies never silently blackhole on a
-        // freshly-synced team that hasn't seen its CLI register yet.
-        // teamName may have shifted on cross-team in_reply_to admin overrides;
-        // re-fetch to keep the stub id correct.
+        // Store in news_items under the logical manager owner. The legacy
+        // agent_id column is still populated for rollback compatibility, but
+        // reads no longer depend on an agents-row stub existing.
         const teamRow = teamId
           ? await this.db.teams.getTeam(teamId).catch(() => null)
           : null;
         const resolvedTeamName = teamRow?.name ?? teamName ?? 'unknown';
-        const inboxId = await this.resolveManagerInboxId(teamId, resolvedTeamName);
+        const managerInbox = this.getManagerInboxRef(teamId, resolvedTeamName);
+        await this.cleanupLegacyManagerRows(teamId, resolvedTeamName);
 
         // Replies carry notify semantics (no further reply expected);
         // unsolicited inbound messages default to notify too. Dual-write
@@ -2174,7 +2282,7 @@ export class AgentManagerDb {
         // agent_id (= manager-<team>) without depending on the agent-id
         // prefix heuristic in the repo helper.
         if (!skipPersist) {
-          await this.db.news.add(teamId, inboxId, {
+          await this.db.news.add(teamId, managerInbox.legacyAgentId, {
             timestamp: ts,
             type: newsType,
             message: newsMessage,
@@ -2182,8 +2290,8 @@ export class AgentManagerDb {
             query_id: in_reply_to || undefined,
             kind: 'notify',
             reply_expected: false,
-            owner_kind: 'manager',
-            owner_id: teamId,
+            owner_kind: managerInbox.ownerKind,
+            owner_id: managerInbox.ownerId,
           });
         }
 
@@ -2316,14 +2424,12 @@ export class AgentManagerDb {
           );
         }
 
-        // Resolve the daemon-owned manager-inbox identity so the same id is
-        // used for read and write paths and replies stored via POST /news
-        // are immediately visible here.
-        const cliId = await this.resolveManagerInboxId(teamId, teamName);
+        const managerInbox = this.getManagerInboxRef(teamId, teamName);
+        await this.cleanupLegacyManagerRows(teamId, teamName);
 
         const newsRows = hasSinceId
-          ? await this.db.news.pollSinceId(cliId, sinceId, { limit, queryId: query_id })
-          : await this.db.news.poll(cliId, since, { limit, queryId: query_id });
+          ? await this.db.news.pollSinceIdByOwner(teamId, managerInbox.ownerKind, managerInbox.ownerId, sinceId, { limit, queryId: query_id })
+          : await this.db.news.pollByOwner(teamId, managerInbox.ownerKind, managerInbox.ownerId, since, { limit, queryId: query_id });
 
         const items = newsRows.map((r: any) => ({
           id: Number(r.id),
@@ -2416,8 +2522,9 @@ export class AgentManagerDb {
     this.managementApp.get('/manager/inbox/pending', async (req, res) => {
       try {
         const { id: teamId, name: teamName } = await this.getTeam(req);
-        const inboxId = await this.resolveManagerInboxId(teamId, teamName);
-        const rows = await this.db.queries.getPending(inboxId);
+        const managerInbox = this.getManagerInboxRef(teamId, teamName);
+        await this.cleanupLegacyManagerRows(teamId, teamName);
+        const rows = await this.db.queries.getPendingByOwner(teamId, managerInbox.ownerKind, managerInbox.ownerId);
         const pending = rows
           .map((row: any) => {
             const result = (row.result || {}) as Record<string, unknown>;
@@ -2439,7 +2546,7 @@ export class AgentManagerDb {
         res.json({
           ok: true,
           team: teamName,
-          inbox_id: inboxId,
+          inbox_id: managerInbox.legacyAgentId,
           count: pending.length,
           pending,
         });
@@ -2492,8 +2599,9 @@ export class AgentManagerDb {
           });
         }
 
-        const inboxId = await this.resolveManagerInboxId(teamId, teamName);
-        if (row.agent_id !== inboxId) {
+        const managerInbox = this.getManagerInboxRef(teamId, teamName);
+        await this.cleanupLegacyManagerRows(teamId, teamName);
+        if (row.owner_kind !== managerInbox.ownerKind || row.owner_id !== managerInbox.ownerId) {
           // Pending row exists but isn't owned by the manager inbox — refuse
           // rather than silently completing some other agent's query.
           return res.status(403).json({
@@ -2516,13 +2624,13 @@ export class AgentManagerDb {
         };
         if (sessionId) newsData.session_id = sessionId;
 
-        await this.db.news.add(teamId, inboxId, {
+        await this.db.news.add(teamId, managerInbox.legacyAgentId, {
           timestamp: ts,
           type: 'query.completed',
           data: newsData,
           query_id: queryId,
-          owner_kind: 'manager',
-          owner_id: teamId,
+          owner_kind: managerInbox.ownerKind,
+          owner_id: managerInbox.ownerId,
         });
 
         // Canonical completion lifecycle. Drives queries.complete +
@@ -2710,6 +2818,10 @@ export class AgentManagerDb {
       const ref = decodeURIComponent(req.params.ref);
       const isAdmin = this.isAdminRequest(req);
 
+      if (ref.toLowerCase() === 'manager') {
+        return res.status(404).json({ error: `No agent matches "${ref}"` });
+      }
+
       try {
         const matches = await this.dbResolveAgents(teamId, ref);
 
@@ -2750,6 +2862,9 @@ export class AgentManagerDb {
     // NOTE: Must be defined BEFORE /agents/:id to avoid "by-name" matching as an id
     this.managementApp.get('/agents/by-name/:name', async (req, res) => {
       const { id: teamId } = await this.getTeam(req);
+      if (req.params.name.toLowerCase() === 'manager') {
+        return res.status(404).json({ error: 'Agent not found' });
+      }
       const agent = await this.dbQueryAgentByNameMostRecent(teamId, req.params.name);
       if (!agent) return res.status(404).json({ error: 'Agent not found' });
       res.json(this.agentToResponse(agent, { isAdmin: this.isAdminRequest(req) }));
@@ -5838,8 +5953,9 @@ export class AgentManagerDb {
         if (a.type === 'interactive') {
           const teamRow = await this.db.teams.getTeam(teamId).catch(() => null);
           const teamName = teamRow?.name ?? 'unknown';
-          const inboxId = await this.resolveManagerInboxId(teamId, teamName);
-          const rows = await this.db.news.poll(inboxId, 0, { limit: 100 });
+          const managerInbox = this.getManagerInboxRef(teamId, teamName);
+          await this.cleanupLegacyManagerRows(teamId, teamName);
+          const rows = await this.db.news.pollByOwner(teamId, managerInbox.ownerKind, managerInbox.ownerId, 0, { limit: 100 });
           const items = rows.map((r: any) => ({
             id: Number(r.id),
             type: r.type,
@@ -6469,20 +6585,18 @@ export class AgentManagerDb {
           }
         }
 
-        // Validate automator naming: first automator must be named "manager"
+        // Validate automator naming: first automator must be named "lead-automator"
         const automatorAgents = agents.filter(a => a.type === 'automator');
         if (automatorAgents.length > 0) {
-          // Check if "manager" automator already exists in database
-          const existingManager = await this.db.agents.getByName(effectiveTeamId, 'manager');
-          const hasManagerAutomator = existingManager !== null && existingManager.type === 'automator';
+          const existingLeadAutomator = await this.db.agents.getByName(effectiveTeamId, 'lead-automator');
+          const hasLeadAutomator = existingLeadAutomator !== null && existingLeadAutomator.type === 'automator';
 
-          // If no manager automator exists, the first one being deployed must be named "manager"
-          if (!hasManagerAutomator) {
-            const hasManagerInConfig = automatorAgents.some(a => a.name === 'manager');
-            if (!hasManagerInConfig) {
+          if (!hasLeadAutomator) {
+            const hasLeadAutomatorInConfig = automatorAgents.some(a => a.name === 'lead-automator');
+            if (!hasLeadAutomatorInConfig) {
               return {
                 ok: false,
-                error: 'First automator must be named "manager". Use: /deploy automator'
+                error: 'First automator must be named "lead-automator". Rename the team-local automator and re-deploy.'
               };
             }
           }
@@ -6518,7 +6632,7 @@ export class AgentManagerDb {
             // Copy plugins to agent's working directory
             const localPlugins = this.copyPluginsToAgent(mergedPlugins, workingDirectory);
 
-            // Automator agents are the manager's brain - they don't have REST-AP endpoints
+            // Automator agents are team-local planning workers; they don't have REST-AP endpoints
             console.log(`[Deploy] Agent ${agentConfig.name}: type=${agentConfig.type}, isAutomator=${agentConfig.type === 'automator'}`);
             const isAutomator = agentConfig.type === 'automator';
             const agentType = agentConfig.type || 'claude';

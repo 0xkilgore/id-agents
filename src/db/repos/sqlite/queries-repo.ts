@@ -180,6 +180,17 @@ export class SqliteQueriesRepo implements QueriesRepository {
     return r.rows.map((row) => this.parseQueryRow(row)!);
   }
 
+  async getPendingByOwner(teamId: string, ownerKind: InboxOwnerKind, ownerId: string): Promise<QueryRow[]> {
+    const r = await this.db.query<QueryRow>(
+      `SELECT team_id, agent_id, query_id, status, prompt, created, completed, result, error, session_id, owner_kind, owner_id
+       FROM queries
+       WHERE team_id = ? AND owner_kind = ? AND owner_id = ? AND status IN ('pending', 'processing')
+       ORDER BY created ASC`,
+      [teamId, ownerKind, ownerId],
+    );
+    return r.rows.map((row) => this.parseQueryRow(row)!);
+  }
+
   async cancel(agentId: string, completed: number): Promise<string[]> {
     const r = await this.db.query<{ query_id: string }>(
       `SELECT query_id FROM queries

@@ -299,6 +299,13 @@ export interface QueriesRepository {
   getPending(agentId: string): Promise<QueryRow[]>;
 
   /**
+   * Get all pending/processing queries for a logical inbox owner.
+   * Used by the manager cutover once manager inbox reads stop depending on a
+   * synthetic agents row.
+   */
+  getPendingByOwner(teamId: string, ownerKind: InboxOwnerKind, ownerId: string): Promise<QueryRow[]>;
+
+  /**
    * Cancel all pending/processing queries for an agent.
    * Sets status='cancelled' and completed timestamp.
    * Returns the list of cancelled query_ids.
@@ -342,6 +349,17 @@ export interface NewsRepository {
   ): Promise<NewsItemRow[]>;
 
   /**
+   * Poll news items for a logical inbox owner since a given timestamp.
+   */
+  pollByOwner(
+    teamId: string,
+    ownerKind: InboxOwnerKind,
+    ownerId: string,
+    since: number,
+    opts?: { limit?: number; queryId?: string },
+  ): Promise<NewsItemRow[]>;
+
+  /**
    * Poll news items for an agent strictly after a given monotonic id.
    * Ordered by id ascending so the caller can walk the cursor forward by
    * using `items[items.length - 1].id` as the next since_id.
@@ -349,6 +367,17 @@ export interface NewsRepository {
    */
   pollSinceId(
     agentId: string,
+    sinceId: number,
+    opts?: { limit?: number; queryId?: string },
+  ): Promise<NewsItemRow[]>;
+
+  /**
+   * Poll news items for a logical inbox owner strictly after a given id.
+   */
+  pollSinceIdByOwner(
+    teamId: string,
+    ownerKind: InboxOwnerKind,
+    ownerId: string,
     sinceId: number,
     opts?: { limit?: number; queryId?: string },
   ): Promise<NewsItemRow[]>;

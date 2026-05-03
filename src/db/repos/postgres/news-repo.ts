@@ -91,6 +91,35 @@ export class PgNewsRepo implements NewsRepository {
     return rows;
   }
 
+  async pollByOwner(
+    teamId: string,
+    ownerKind: InboxOwnerKind,
+    ownerId: string,
+    since: number,
+    opts?: { limit?: number; queryId?: string },
+  ): Promise<NewsItemRow[]> {
+    const params: unknown[] = [teamId, ownerKind, ownerId, since];
+    let where = `team_id = $1 AND owner_kind = $2 AND owner_id = $3 AND timestamp > $4`;
+
+    if (opts?.queryId) {
+      params.push(opts.queryId);
+      where += ` AND query_id = $${params.length}`;
+    }
+
+    const limit = opts?.limit ?? 1000;
+    params.push(limit);
+
+    const { rows } = await this.db.query<NewsItemRow>(
+      `SELECT id, team_id, agent_id, query_id, type, timestamp, message, data, kind, reply_expected, owner_kind, owner_id
+       FROM news_items
+       WHERE ${where}
+       ORDER BY timestamp DESC
+       LIMIT $${params.length}`,
+      params,
+    );
+    return rows;
+  }
+
   async pollSinceId(
     agentId: string,
     sinceId: number,
@@ -98,6 +127,35 @@ export class PgNewsRepo implements NewsRepository {
   ): Promise<NewsItemRow[]> {
     const params: unknown[] = [agentId, sinceId];
     let where = `agent_id = $1 AND id > $2`;
+
+    if (opts?.queryId) {
+      params.push(opts.queryId);
+      where += ` AND query_id = $${params.length}`;
+    }
+
+    const limit = opts?.limit ?? 1000;
+    params.push(limit);
+
+    const { rows } = await this.db.query<NewsItemRow>(
+      `SELECT id, team_id, agent_id, query_id, type, timestamp, message, data, kind, reply_expected, owner_kind, owner_id
+       FROM news_items
+       WHERE ${where}
+       ORDER BY id ASC
+       LIMIT $${params.length}`,
+      params,
+    );
+    return rows;
+  }
+
+  async pollSinceIdByOwner(
+    teamId: string,
+    ownerKind: InboxOwnerKind,
+    ownerId: string,
+    sinceId: number,
+    opts?: { limit?: number; queryId?: string },
+  ): Promise<NewsItemRow[]> {
+    const params: unknown[] = [teamId, ownerKind, ownerId, sinceId];
+    let where = `team_id = $1 AND owner_kind = $2 AND owner_id = $3 AND id > $4`;
 
     if (opts?.queryId) {
       params.push(opts.queryId);

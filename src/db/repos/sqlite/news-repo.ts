@@ -115,6 +115,32 @@ export class SqliteNewsRepo implements NewsRepository {
     return r.rows.map((row) => this.parseNewsRow(row)!);
   }
 
+  async pollByOwner(
+    teamId: string,
+    ownerKind: InboxOwnerKind,
+    ownerId: string,
+    since: number,
+    opts?: { limit?: number; queryId?: string },
+  ): Promise<NewsItemRow[]> {
+    let sql =
+      'SELECT id, team_id, agent_id, type, timestamp, message, data, query_id, kind, reply_expected, owner_kind, owner_id FROM news_items WHERE team_id = ? AND owner_kind = ? AND owner_id = ? AND timestamp > ?';
+    const params: unknown[] = [teamId, ownerKind, ownerId, since];
+
+    if (opts?.queryId) {
+      sql += ' AND query_id = ?';
+      params.push(opts.queryId);
+    }
+
+    sql += ' ORDER BY timestamp DESC';
+
+    const limit = opts?.limit ?? 1000;
+    sql += ' LIMIT ?';
+    params.push(limit);
+
+    const r = await this.db.query<NewsItemRow>(sql, params);
+    return r.rows.map((row) => this.parseNewsRow(row)!);
+  }
+
   async pollSinceId(
     agentId: string,
     sinceId: number,
@@ -123,6 +149,32 @@ export class SqliteNewsRepo implements NewsRepository {
     let sql =
       'SELECT id, team_id, agent_id, type, timestamp, message, data, query_id, kind, reply_expected, owner_kind, owner_id FROM news_items WHERE agent_id = ? AND id > ?';
     const params: unknown[] = [agentId, sinceId];
+
+    if (opts?.queryId) {
+      sql += ' AND query_id = ?';
+      params.push(opts.queryId);
+    }
+
+    sql += ' ORDER BY id ASC';
+
+    const limit = opts?.limit ?? 1000;
+    sql += ' LIMIT ?';
+    params.push(limit);
+
+    const r = await this.db.query<NewsItemRow>(sql, params);
+    return r.rows.map((row) => this.parseNewsRow(row)!);
+  }
+
+  async pollSinceIdByOwner(
+    teamId: string,
+    ownerKind: InboxOwnerKind,
+    ownerId: string,
+    sinceId: number,
+    opts?: { limit?: number; queryId?: string },
+  ): Promise<NewsItemRow[]> {
+    let sql =
+      'SELECT id, team_id, agent_id, type, timestamp, message, data, query_id, kind, reply_expected, owner_kind, owner_id FROM news_items WHERE team_id = ? AND owner_kind = ? AND owner_id = ? AND id > ?';
+    const params: unknown[] = [teamId, ownerKind, ownerId, sinceId];
 
     if (opts?.queryId) {
       sql += ' AND query_id = ?';

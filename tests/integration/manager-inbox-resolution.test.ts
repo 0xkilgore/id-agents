@@ -4,13 +4,8 @@
  *
  * Background: the manager inbox must remain daemon-owned even when teams
  * are fresh or stale interactive rows still exist. Reads and writes must
- * converge on the stable `manager-<team>` row instead of depending on CLI
- * registration or newest-interactive lookup.
- *
- * The fix routes all four entry points through `resolveManagerInboxId`,
- * which now uses the stable daemon-owned row id `manager-<team>` and
- * auto-provisions it when missing. This guarantees writes and reads
- * converge on the same DB row and ignore stale interactive manager rows.
+ * converge on the logical manager owner reference instead of depending on
+ * CLI registration or newest-interactive lookup.
  */
 
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
@@ -88,7 +83,7 @@ function teamHeaders(team: string): Record<string, string> {
 describe('manager-inbox resolution — fresh team with no CLI registered', () => {
   const TEAM = 'inbox-fresh';
 
-  it('POST /talk auto-provisions the manager-inbox stub and persists the query', async () => {
+  it('POST /talk persists without creating a manager agents-row stub', async () => {
     // Pre-create the team to simulate the "freshly synced, no CLI yet"
     // state. The team exists in the DB but no interactive row references
     // it — the situation that previously silently blackholed replies.
@@ -105,11 +100,9 @@ describe('manager-inbox resolution — fresh team with no CLI registered', () =>
 
     const teamId = await db.teams.getOrCreateTeamId(TEAM);
     const stub = await db.agents.getById(`manager-${TEAM}`);
-    expect(stub).not.toBeNull();
-    expect(stub?.team_id).toBe(teamId);
-    expect(stub?.type).toBe('interactive');
+    expect(stub).toBeNull();
 
-    // GET /news reads from the same id, so the query.received event must surface here.
+    // GET /news reads from the same logical owner, so the query.received event must surface here.
     const newsRes = await fetch(`${baseUrl}/news?limit=10`, { headers: teamHeaders(TEAM) });
     expect(newsRes.ok).toBe(true);
     const newsBody = await newsRes.json() as { items: Array<{ type: string; data: any }> };
@@ -125,7 +118,7 @@ describe('manager-inbox resolution — fresh team with no CLI registered', () =>
     expect(queryRow!.owner_kind).toBe('manager');
     expect(queryRow!.owner_id).toBe(teamId);
 
-    const newsRows = await db.news.poll(`manager-${TEAM}`, 0, { limit: 10 });
+    const newsRows = await db.news.pollByOwner(teamId, 'manager', teamId, 0, { limit: 10 });
     const received = newsRows.find((r) => r.type === 'query.received');
     expect(received).toBeTruthy();
     expect(received!.agent_id).toBe(`manager-${TEAM}`);
@@ -148,12 +141,9 @@ describe('manager-inbox resolution — fresh team with no CLI registered', () =>
     });
     expect(res.status).toBe(201);
 
-    // The stub interactive row should have been auto-provisioned and the
-    // news item must be readable through GET /news.
     const teamId = await db.teams.getOrCreateTeamId(TEAM2);
     const stub = await db.agents.getById(`manager-${TEAM2}`);
-    expect(stub).not.toBeNull();
-    expect(stub?.team_id).toBe(teamId);
+    expect(stub).toBeNull();
 
     const newsRes = await fetch(`${baseUrl}/news?limit=10`, { headers: teamHeaders(TEAM2) });
     expect(newsRes.ok).toBe(true);
@@ -164,7 +154,7 @@ describe('manager-inbox resolution — fresh team with no CLI registered', () =>
 
     // Dual-write window: the persisted reply row must carry both the
     // legacy agent_id (manager-<team>) and the new ownership columns.
-    const newsRows = await db.news.poll(`manager-${TEAM2}`, 0, { limit: 10 });
+    const newsRows = await db.news.pollByOwner(teamId, 'manager', teamId, 0, { limit: 10 });
     expect(newsRows.length).toBeGreaterThan(0);
     for (const row of newsRows) {
       expect(row.agent_id).toBe(`manager-${TEAM2}`);
@@ -173,7 +163,7 @@ describe('manager-inbox resolution — fresh team with no CLI registered', () =>
     }
   });
 
-  it('POST /schedule lands on the auto-provisioned inbox stub', async () => {
+  it('POST /schedule lands on the logical manager owner without creating a stub row', async () => {
     const TEAM3 = 'inbox-fresh-schedule';
 
     const res = await fetch(`${baseUrl}/schedule`, {
@@ -188,8 +178,7 @@ describe('manager-inbox resolution — fresh team with no CLI registered', () =>
     expect(res.status).toBe(202);
 
     const stub = await db.agents.getById(`manager-${TEAM3}`);
-    expect(stub).not.toBeNull();
-    expect(stub?.type).toBe('interactive');
+    expect(stub).toBeNull();
 
     const newsRes = await fetch(`${baseUrl}/news?limit=10`, { headers: teamHeaders(TEAM3) });
     const body = await newsRes.json() as { items: Array<{ type: string }> };
@@ -199,7 +188,7 @@ describe('manager-inbox resolution — fresh team with no CLI registered', () =>
     // Both must populate owner_kind='manager'/owner_id=<team_id> alongside
     // the legacy agent_id (manager-<team>).
     const teamId = await db.teams.getOrCreateTeamId(TEAM3);
-    const newsRows = await db.news.poll(`manager-${TEAM3}`, 0, { limit: 10 });
+    const newsRows = await db.news.pollByOwner(teamId, 'manager', teamId, 0, { limit: 10 });
     const scheduleRow = newsRows.find((r) => r.type === 'schedule.received');
     expect(scheduleRow).toBeTruthy();
     expect(scheduleRow!.agent_id).toBe(`manager-${TEAM3}`);
@@ -216,14 +205,14 @@ describe('manager-inbox resolution — fresh team with no CLI registered', () =>
   });
 });
 
-describe('manager-inbox resolution — daemon-owned manager row wins', () => {
+describe('manager-inbox resolution — logical manager owner wins', () => {
   const TEAM = 'inbox-multi';
 
-  it('GET /news ignores interactive rows and uses the daemon-owned manager row', async () => {
+  it('GET /news ignores interactive rows and uses the logical manager owner', async () => {
     const teamId = await db.teams.getOrCreateTeamId(TEAM);
 
-    // Stale interactive rows should no longer participate in manager-id
-    // resolution once the daemon-owned manager row becomes authoritative.
+    // Stale interactive rows should no longer participate in manager inbox
+    // resolution once reads switch to owner_kind/owner_id.
     await db.agents.create({
       team_id: teamId,
       id: 'interactive_stale',
@@ -252,10 +241,9 @@ describe('manager-inbox resolution — daemon-owned manager row wins', () => {
     expect(postRes.status).toBe(201);
 
     const managerRow = await db.agents.getById(`manager-${TEAM}`);
-    expect(managerRow).not.toBeNull();
-    expect(managerRow?.name).toBe('manager');
+    expect(managerRow).toBeNull();
 
-    const managerNews = await db.news.poll(`manager-${TEAM}`, 0, { limit: 10 });
+    const managerNews = await db.news.pollByOwner(teamId, 'manager', teamId, 0, { limit: 10 });
     const fresh = await db.news.poll('interactive_fresh', 0, { limit: 10 });
     const stale = await db.news.poll('interactive_stale', 0, { limit: 10 });
     expect(managerNews.length).toBeGreaterThan(0);

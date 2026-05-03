@@ -1097,6 +1097,61 @@ export class AgentRestServer {
           headers['X-Id-Project'] = team; // backwards compatibility
         }
 
+        if (String(to).toLowerCase() === 'manager') {
+          const talkRes = await fetch(`${managerUrl}/talk`, {
+            method: 'POST',
+            headers,
+            body: JSON.stringify({ message, from: myDisplayId }),
+          });
+          if (!talkRes.ok) {
+            const errText = await talkRes.text().catch(() => talkRes.statusText);
+            return res.status(502).json({ error: `Failed to send message to manager: ${errText}` });
+          }
+
+          const talkData = await talkRes.json() as { query_id: string };
+          const queryId = talkData.query_id;
+          await this.addNews('outbound.message', 'Sent message to manager', { to, message, query_id: queryId });
+
+          console.log(`${logTime()} [Agent] 📤 Sent message to manager, waiting for reply (query: ${queryId}, timeout: ${timeoutMs}ms)`);
+
+          let httpTimedOut = false;
+          let timeoutHandle: NodeJS.Timeout | null = null;
+          const replyPromise = new Promise<{ from: string; message: string; timestamp: number }>((resolve) => {
+            this.pendingReplyWaiters.set(queryId, {
+              queryId,
+              resolve,
+              reject: () => {},
+              timeout: null,
+            });
+            timeoutHandle = setTimeout(() => {
+              httpTimedOut = true;
+              resolve({ from: '', message: '', timestamp: 0 });
+            }, timeoutMs);
+          });
+
+          const reply = await replyPromise;
+          if (timeoutHandle) clearTimeout(timeoutHandle);
+
+          if (httpTimedOut) {
+            console.log(`${logTime()} [Agent] ⏱️ HTTP timeout for manager (${timeoutMs}ms) - waiter persists for query ${queryId}`);
+            return res.json({
+              success: false,
+              from: 'manager',
+              query_id: queryId,
+              message: `Request timed out after ${timeoutMs}ms - reply will be captured when it arrives`,
+              status: 'pending',
+            });
+          }
+
+          console.log(`${logTime()} [Agent] 📬 Received reply from ${reply.from || 'manager'} for query ${queryId}`);
+          return res.json({
+            success: true,
+            from: reply.from || 'manager',
+            reply: reply.message,
+            query_id: queryId,
+          });
+        }
+
         const agentsRes = await fetch(`${managerUrl}/agents`, { headers });
         if (!agentsRes.ok) {
           return res.status(502).json({ error: `Failed to fetch agents list: ${agentsRes.status}` });
@@ -1235,6 +1290,27 @@ export class AgentRestServer {
         if (team) {
           headers['X-Id-Team'] = team;
           headers['X-Id-Project'] = team; // backwards compatibility
+        }
+
+        if (String(to).toLowerCase() === 'manager') {
+          const payload: Record<string, unknown> = {
+            type: 'notify',
+            from: myDisplayId,
+            message: message ?? undefined,
+            data: data ?? undefined,
+            reply_expected: false,
+            ...(trigger === true ? { trigger: true } : {}),
+          };
+          const newsRes = await fetch(`${managerUrl}/news`, {
+            method: 'POST',
+            headers,
+            body: JSON.stringify(payload),
+          });
+          if (!newsRes.ok) {
+            const errText = await newsRes.text().catch(() => newsRes.statusText);
+            return res.status(502).json({ error: `Failed to send notification to manager: ${errText}` });
+          }
+          return res.status(202).json({ success: true, delivered_to: 'manager', status: 'delivered' });
         }
 
         // Same lookup path /talk-to uses — manager catalog.
@@ -1464,6 +1540,30 @@ What would you like to do with this information?`;
         headers['X-Id-Team'] = team;
         headers['X-Id-Project'] = team; // backwards compatibility
       }
+
+      if (senderName === 'manager') {
+        const myDisplayId = this.getDisplayId();
+        const replyPayload: Record<string, any> = {
+          type: success ? 'reply' : 'reply.error',
+          from: myDisplayId,
+          in_reply_to: queryId,
+          message,
+          trigger: true,
+          data: { sessionId, to: senderName },
+        };
+        const replyRes = await fetch(`${managerUrl}/news`, {
+          method: 'POST',
+          headers,
+          body: JSON.stringify(replyPayload),
+        });
+        if (replyRes.ok) {
+          console.log(`${logTime()} [Agent] ✉️  Sent reply to manager for query ${queryId} (via manager)`);
+        } else {
+          console.error(`[Agent] Failed to send reply to manager: ${replyRes.status}`);
+        }
+        return;
+      }
+
       const agentsRes = await fetch(`${managerUrl}/agents`, { headers });
       if (!agentsRes.ok) {
         console.error(`[Agent] Failed to fetch agents list: ${agentsRes.status}`);
@@ -1481,7 +1581,7 @@ What would you like to do with this information?`;
       // For "manager" sender or unknown senders, route through team manager (it handles internal forwarding)
       // For regular agents on same network, route directly
       const senderUrl = senderAgent?.internal_url || senderAgent?.url;
-      const isManagerSender = senderName === 'manager' || senderAgent?.id === 'interactive_manager';
+      const isManagerSender = senderAgent?.id === 'interactive_manager';
       const isUnknownSender = !senderAgent;  // Sender not in agents list (e.g., "cli")
       const isExternalSender = !senderUrl;
 

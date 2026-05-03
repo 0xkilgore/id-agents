@@ -178,7 +178,7 @@ describe('GET /manager/inbox/pending', () => {
 
     // The companion news rows (query.received + schedule.received) must also
     // be dual-written.
-    const newsRows = await db.news.poll(`manager-${TEAM}`, 0, { limit: 50 });
+    const newsRows = await db.news.pollByOwner(teamId, 'manager', teamId, 0, { limit: 50 });
     const types = ['query.received', 'schedule.received'];
     for (const t of types) {
       const row = newsRows.find((r) => r.type === t);
@@ -189,7 +189,7 @@ describe('GET /manager/inbox/pending', () => {
     }
   });
 
-  it('returns an empty list (and provisions the stub) for a freshly-created team', async () => {
+  it('returns an empty list for a freshly-created team without creating a stub', async () => {
     const FRESH = 'inbox-pending-fresh';
     const res = await fetch(`${baseUrl}/manager/inbox/pending`, { headers: teamHeaders(FRESH) });
     expect(res.status).toBe(200);
@@ -197,6 +197,7 @@ describe('GET /manager/inbox/pending', () => {
     expect(body.count).toBe(0);
     expect(body.pending).toEqual([]);
     expect(body.inbox_id).toBe(`manager-${FRESH}`);
+    expect(await db.agents.getById(`manager-${FRESH}`)).toBeNull();
   });
 });
 
@@ -260,7 +261,7 @@ describe('POST /manager/inbox/respond', () => {
     // Dual-write window: the query.completed news row written by
     // /manager/inbox/respond carries both legacy agent_id (manager-<team>)
     // and the new ownership columns.
-    const newsRows = await db.news.poll(`manager-${TEAM}`, 0, { limit: 100 });
+    const newsRows = await db.news.pollByOwner(teamId, 'manager', teamId, 0, { limit: 100 });
     const completedNews = newsRows.find(
       (r) => r.type === 'query.completed' && r.query_id === queryId,
     );

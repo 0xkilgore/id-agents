@@ -200,7 +200,7 @@ export class SqliteAgentsRepo implements AgentsRepository {
     const typeFilter = includeAutomator ? '' : `AND type != 'automator'`;
     const { rows } = await this.db.query(
       `SELECT * FROM agents
-       WHERE team_id = ? AND deleted_at IS NULL ${typeFilter}
+       WHERE team_id = ? AND deleted_at IS NULL AND type NOT IN ('interactive', 'virtual') ${typeFilter}
        ORDER BY created_at DESC`,
       [teamId],
     );
@@ -219,7 +219,7 @@ export class SqliteAgentsRepo implements AgentsRepository {
   async count(teamId: string): Promise<string> {
     const { rows } = await this.db.query<{ count: string }>(
       `SELECT CAST(COUNT(*) AS TEXT) as count FROM agents
-       WHERE team_id = ? AND deleted_at IS NULL`,
+       WHERE team_id = ? AND deleted_at IS NULL AND type NOT IN ('interactive', 'virtual')`,
       [teamId],
     );
     return rows[0]?.count ?? '0';

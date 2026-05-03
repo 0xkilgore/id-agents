@@ -154,6 +154,17 @@ export class PgQueriesRepo implements QueriesRepository {
     return rows;
   }
 
+  async getPendingByOwner(teamId: string, ownerKind: InboxOwnerKind, ownerId: string): Promise<QueryRow[]> {
+    const { rows } = await this.db.query<QueryRow>(
+      `SELECT team_id, agent_id, query_id, status, prompt, created, completed, result, error, session_id, owner_kind, owner_id
+       FROM queries
+       WHERE team_id = $1 AND owner_kind = $2 AND owner_id = $3 AND status IN ('pending', 'processing')
+       ORDER BY created ASC`,
+      [teamId, ownerKind, ownerId],
+    );
+    return rows;
+  }
+
   async cancel(agentId: string, completed: number): Promise<string[]> {
     // Find all pending/processing queries for this agent
     const { rows } = await this.db.query<{ query_id: string }>(

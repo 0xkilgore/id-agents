@@ -155,4 +155,43 @@ describe('manager registration cleanup', () => {
     const body = await res.json() as { error: string };
     expect(body.error).toContain('reserved command word');
   });
+
+  it('keeps manager out of roster read surfaces after inbox traffic', async () => {
+    const talkRes = await fetch(`${baseUrl}/talk`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Id-Team': 'default',
+        'X-Id-Admin': '1',
+      },
+      body: JSON.stringify({ message: 'hello manager', from: 'tester' }),
+    });
+    expect(talkRes.status).toBe(202);
+
+    const agentsRes = await fetch(`${baseUrl}/agents`, {
+      headers: {
+        'X-Id-Team': 'default',
+        'X-Id-Admin': '1',
+      },
+    });
+    expect(agentsRes.ok).toBe(true);
+    const agentsBody = await agentsRes.json() as { agents: Array<{ name: string }> };
+    expect(agentsBody.agents.some((a) => a.name === 'manager')).toBe(false);
+
+    const byNameRes = await fetch(`${baseUrl}/agents/by-name/manager`, {
+      headers: {
+        'X-Id-Team': 'default',
+        'X-Id-Admin': '1',
+      },
+    });
+    expect(byNameRes.status).toBe(404);
+
+    const resolveRes = await fetch(`${baseUrl}/agents/resolve/manager`, {
+      headers: {
+        'X-Id-Team': 'default',
+        'X-Id-Admin': '1',
+      },
+    });
+    expect(resolveRes.status).toBe(404);
+  });
 });
