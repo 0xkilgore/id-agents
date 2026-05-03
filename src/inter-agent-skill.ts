@@ -108,13 +108,63 @@ Returns:
 \`\`\`json
 {
   "agents": [
-    {"name": "agent-1.xid.eth", "alias": "coder", "tokenId": "agent-1", "status": "running"},
-    {"name": "agent-2.xid.eth", "alias": "researcher", "tokenId": "agent-2", "status": "running"}
+    {"name": "agent-1.xid.eth", "alias": "coder", "tokenId": "agent-1", "status": "running", "url": "http://localhost:4151"},
+    {"name": "agent-2.xid.eth", "alias": "researcher", "tokenId": "agent-2", "status": "running", "url": "http://localhost:4152"}
   ]
 }
 \`\`\`
 
-**IMPORTANT:** The \`name\` field is the agent's full identifier (ENS domain after registration, e.g., "agent-1.xid.eth", or local name before registration). Always use this name when sending messages to agents. The \`alias\` field is the original local name.
+The \`name\` field is the agent's full identifier (ENS domain after registration, e.g., "agent-1.xid.eth", or local name before registration). Use this name when sending messages. The \`alias\` field is the original local name. The \`url\` field is the peer's REST-AP base URL — used by the catalog-aware selection flow below.
+
+## Choosing the right agent to delegate to
+
+\`/agents\` only tells you **who exists**. It does not tell you who is the right peer for a given piece of work. Before \`/ask\`, \`/message\`, or \`/talk-to\`, always run the catalog-aware selection flow.
+
+### Step 1 — Enumerate peers
+
+List candidates from the manager:
+
+\`\`\`bash
+curl -s {{MANAGER_URL}}/agents -H "X-Id-Team: $ID_TEAM" | jq '.agents[] | {name, alias, status, url}'
+\`\`\`
+
+### Step 2 — BEFORE \`/ask\`, fetch each candidate's catalog
+
+For every candidate from Step 1, GET \`/catalog\` and read \`role\`, \`expertise\`, \`status\`, \`costTier\`, and \`notSuitableFor\`. Do **not** rely on names or aliases alone:
+
+\`\`\`bash
+# Single peer
+curl -s http://localhost:<peer-port>/catalog | jq
+\`\`\`
+
+\`\`\`bash
+# Manager-discovery substitution: resolve every peer's /catalog in one pass
+for url in $(curl -s {{MANAGER_URL}}/agents -H "X-Id-Team: $ID_TEAM" | jq -r '.agents[].url'); do
+  echo "== $url ==";
+  curl -s "$url/catalog" | jq '{role, expertise, status, costTier, notSuitableFor}';
+done
+\`\`\`
+
+### Step 3 — Filter
+
+Drop any candidate where:
+
+- \`status !== "available"\` (e.g., \`busy\`, \`offline\`, \`error\`) — they cannot take new work.
+- \`notSuitableFor\` lists a work pattern matching what you intend to delegate (e.g., your task is "production deploys" and the catalog says \`"notSuitableFor": ["production deploys"]\`).
+
+### Step 4 — Rank and pick
+
+Apply these rules in order:
+
+1. **Prefer a specialist over a generalist** — a candidate whose \`role\`/\`expertise\` directly matches the task beats a generalist whose catalog only loosely overlaps.
+2. **Prefer the lower \`costTier\`** when complexity allows — for well-scoped, low-risk work pick \`low\` over \`medium\` over \`high\` to conserve cost.
+3. **Never assign to a \`costTier: "low"\` agent**:
+   - multi-file schema changes,
+   - security or key-handling work (wallets, signing, secret rotation, auth code),
+   - routing-logic changes (manager dispatch, inter-agent skills, message broker code).
+   These must go to \`medium\` or \`high\` even if a \`low\` agent is "available" — promote the work, do not downgrade it.
+
+Only after a candidate survives Steps 3 and 4 do you send the actual \`/ask\`, \`/message\`, or \`/talk-to\`.
 
 ## Contact The Manager
 
@@ -287,7 +337,7 @@ curl -s "http://<agent-url>/news?since=0" | jq '.items[] | select(.type == "resp
 
 1. **Use \`/message\` for all outbound communication** — it delivers and returns immediately
 2. **Only add \`"wait": true\`** when you literally cannot continue without the answer
-3. **List agents first**: Check what agents are available before communicating
+3. **Catalog-check before delegating**: list \`/agents\`, then GET each candidate's \`/catalog\` and apply the four-step flow in *Choosing the right agent to delegate to* — never pick a peer by name alone
 4. **Use descriptive messages**: Be clear about what you need
 5. **Check your news feed**: Your \`/news\` endpoint has conversation history and context
 
