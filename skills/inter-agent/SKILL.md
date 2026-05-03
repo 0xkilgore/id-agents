@@ -85,9 +85,61 @@ The old `/message` endpoint on the manager is **deprecated** — it responds wit
 curl -s $MANAGER_URL/agents -H "X-Id-Team: $ID_TEAM" | jq
 ```
 
-The `name` field is the agent's full identifier (ENS domain after registration, or local name). Always use this name as the `to` value when sending messages.
+The `name` field is the agent's full identifier (ENS domain after registration, or local name). Use this name as the `to` value when sending messages. The `url` field is the peer's REST-AP base URL — used by the catalog-aware selection flow below.
 
 Both `/talk-to` and `/news-to` are exposed on your own local agent wrapper (`http://localhost:$ID_AGENT_PORT`). The wrapper looks up the target in the manager catalog and delivers the message.
+
+## Choosing the right agent to delegate to
+
+`/agents` only tells you **who exists**. It does not tell you who is the right peer for a given piece of work. Before `/talk-to` or `/news-to`, always run the catalog-aware selection flow.
+
+### Step 1 — Enumerate peers
+
+List candidates from the manager:
+
+```bash
+curl -s $MANAGER_URL/agents -H "X-Id-Team: $ID_TEAM" | jq '.agents[] | {name, alias, status, url}'
+```
+
+### Step 2 — BEFORE delegating, fetch each candidate's catalog
+
+For every candidate from Step 1, GET `/catalog` and read `role`, `expertise`, `status`, `costTier`, and `notSuitableFor`. Do **not** rely on names or aliases alone:
+
+```bash
+# Single peer
+curl -s http://localhost:<peer-port>/catalog | jq
+```
+
+```bash
+# Manager-discovery substitution: resolve every peer's /catalog in one pass
+for url in $(curl -s $MANAGER_URL/agents -H "X-Id-Team: $ID_TEAM" | jq -r '.agents[].url'); do
+  echo "== $url =="
+  curl -s "$url/catalog" | jq '{role, expertise, status, costTier, notSuitableFor}'
+done
+```
+
+### Step 3 — Filter
+
+Drop any candidate where:
+
+- `status !== "available"` (e.g., `busy`, `offline`, `error`) — they cannot take new work.
+- `notSuitableFor` lists a work pattern matching what you intend to delegate (e.g., your task is "production deploys" and the catalog says `"notSuitableFor": ["production deploys"]`).
+
+### Step 4 — Rank and pick
+
+Apply these rules in order:
+
+1. **Prefer a specialist over a generalist** — a candidate whose `role`/`expertise` directly matches the task beats a generalist whose catalog only loosely overlaps.
+2. **Prefer the lower `costTier`** when complexity allows — for well-scoped, low-risk work pick `low` over `medium` over `high` to conserve cost.
+3. **Never assign to a `costTier: "low"` agent**:
+   - multi-file schema changes,
+   - security or key-handling work (wallets, signing, secret rotation, auth code),
+   - routing-logic changes (manager dispatch, inter-agent skills, message broker code).
+   These must go to `medium` or `high` even if a `low` agent is "available" — promote the work, do not downgrade it.
+
+Only after a candidate survives Steps 3 and 4 do you send the actual `/talk-to` or `/news-to`.
+
+> **Catalog-check before delegating** — list `/agents`, then GET each candidate's `/catalog` and apply the four-step flow above. Never pick a peer by name alone.
 
 ## Check your news feed
 

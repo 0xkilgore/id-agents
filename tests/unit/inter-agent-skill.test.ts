@@ -1,12 +1,26 @@
 // SPDX-License-Identifier: MIT
 
+import { readFileSync } from 'fs';
+import { fileURLToPath } from 'url';
+import path from 'path';
+
 import { describe, expect, it } from 'vitest';
 
 import {
   INTER_AGENT_SKILL,
   INTER_AGENT_SKILL_LIGHT,
+  stripYamlFrontmatter,
   withInterAgentSkill,
 } from '../../src/inter-agent-skill.js';
+
+const SKILL_MD_PATH = path.resolve(
+  fileURLToPath(new URL('.', import.meta.url)),
+  '..',
+  '..',
+  'skills',
+  'inter-agent',
+  'SKILL.md'
+);
 
 describe('INTER_AGENT_SKILL — catalog-aware delegation flow', () => {
   it('contains the exact "Choosing the right agent to delegate to" section title', () => {
@@ -61,10 +75,12 @@ describe('INTER_AGENT_SKILL — catalog-aware delegation flow', () => {
     expect(INTER_AGENT_SKILL).toContain('curl -s http://localhost:<peer-port>/catalog | jq');
   });
 
-  it('includes a manager-discovery substitution recipe (placeholder + jq url extraction)', () => {
-    // Same recipe should reference the manager URL placeholder *and* fan out to each peer's /catalog.
+  it('includes a manager-discovery recipe (env var + jq url extraction)', () => {
+    // The full skill is now sourced from skills/inter-agent/SKILL.md, which uses
+    // shell env vars ($MANAGER_URL) rather than {{MANAGER_URL}} placeholders.
+    // The recipe should still reference the manager URL *and* fan out to each peer's /catalog.
     const block = INTER_AGENT_SKILL;
-    expect(block).toContain('{{MANAGER_URL}}/agents');
+    expect(block).toContain('$MANAGER_URL/agents');
     expect(block).toMatch(/jq[^\n]*\.agents\[\]\.url/);
     expect(block).toContain('"$url/catalog"');
   });
@@ -77,44 +93,37 @@ describe('INTER_AGENT_SKILL — catalog-aware delegation flow', () => {
   });
 });
 
-describe('INTER_AGENT_SKILL — deploy-time substitution still works', () => {
-  it('substitutes {{MANAGER_URL}}, {{AGENT_NAME}}, {{TEAM_NAME}} via the deploy-time replace pattern', () => {
-    // This mirrors deploySkillsToAgent in src/agent-manager-db.ts, which does:
-    //   content = content.replace(new RegExp(`\\{\\{${key}\\}\\}`, 'g'), value)
-    // for each var in { MANAGER_URL, AGENT_NAME, TEAM_NAME, ... }.
-    const vars: Record<string, string> = {
-      MANAGER_URL: 'http://manager.test:9999',
-      AGENT_NAME: 'coder.test.eth',
-      TEAM_NAME: 'unit-test-team',
-    };
-
-    let content = INTER_AGENT_SKILL;
-    for (const [k, v] of Object.entries(vars)) {
-      content = content.replace(new RegExp(`\\{\\{${k}\\}\\}`, 'g'), v);
-    }
-
-    // Substitutions actually happened
-    expect(content).toContain('http://manager.test:9999/agents');
-    expect(content).toContain('http://manager.test:9999/message');
-
-    // No unsubstituted placeholders for the keys we provided
-    expect(content).not.toContain('{{MANAGER_URL}}');
-    expect(content).not.toContain('{{TEAM_NAME}}');
-    expect(content).not.toContain('{{AGENT_NAME}}');
-
-    // The new section survived the substitution pass intact
-    expect(content).toContain('## Choosing the right agent to delegate to');
-    expect(content).toContain('curl -s http://localhost:<peer-port>/catalog | jq');
+describe('INTER_AGENT_SKILL — single source of truth (skills/inter-agent/SKILL.md)', () => {
+  it('TS export matches the MD file body (frontmatter stripped) — divergence guard', () => {
+    // skills/inter-agent/SKILL.md is the source of truth. INTER_AGENT_SKILL is
+    // loaded from it at module init. If anyone edits the TS export by hand
+    // and lets it drift from the MD, this assertion fires.
+    const raw = readFileSync(SKILL_MD_PATH, 'utf8');
+    const expectedBody = stripYamlFrontmatter(raw);
+    // The export prepends a single newline for legacy formatting parity; trim
+    // a leading newline before comparing so the assertion is content-only.
+    expect(INTER_AGENT_SKILL.replace(/^\n/, '')).toBe(expectedBody);
   });
 
-  it('lightweight skill substitution still works for non-Claude models', () => {
+  it('stripYamlFrontmatter removes a leading --- ... --- block and leaves body untouched', () => {
+    const sample = '---\nname: x\ndescription: y\n---\n# Body\nhello';
+    expect(stripYamlFrontmatter(sample)).toBe('# Body\nhello');
+    // No frontmatter → returned unchanged
+    expect(stripYamlFrontmatter('# Body\nhello')).toBe('# Body\nhello');
+  });
+
+  it('lightweight skill remains a separate, hand-maintained inline string', () => {
+    // The lightweight skill is intentionally NOT loaded from disk — it's a
+    // shorter inline variant for non-Claude / cost-sensitive models and uses
+    // the {{}} placeholder substitution pattern at runtime.
     const out = withInterAgentSkill('BASE PROMPT BODY', { name: 'lite-agent', team: 'lite-team' }, { lightweight: true });
     expect(out).toContain('BASE PROMPT BODY');
     expect(out).not.toContain('{{AGENT_NAME}}');
     expect(out).not.toContain('{{TEAM_NAME}}');
     expect(out).toContain('lite-agent');
     expect(out).toContain('lite-team');
-    // INTER_AGENT_SKILL_LIGHT still defines the basic List Agents pattern.
     expect(INTER_AGENT_SKILL_LIGHT).toContain('/agents');
+    // Sanity: lightweight is materially shorter than the full skill.
+    expect(INTER_AGENT_SKILL_LIGHT.length).toBeLessThan(INTER_AGENT_SKILL.length);
   });
 });
