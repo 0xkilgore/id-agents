@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.1.94-beta
+
+### Refactors
+
+- Decouple manager from team membership. The `manager` identity is no longer modeled as an `agents` row inside each team. The schema for `queries` and `news_items` carries `owner_kind` (`agent` or `manager`) plus `owner_id`, so the manager inbox is first-class without pretending to be a team member. Listings and counts on `/agents`, `/agents/status`, `/teams`, `/team`, and `/remote /status` exclude `interactive` and `virtual` rows, so manager rows no longer leak through the roster. `GET /agents/by-name/manager` and `/agents/resolve/manager` return plain `404`. Inter-agent routing special-cases `to:'manager'` and routes directly to the manager inbox endpoints rather than going through `/agents` lookup. Client-side filtering in CLI and TUI is removed since the server contract is honest. Reversible down-migrations exist for both SQLite and Postgres.
+
+- Rename in-team automator role from `manager` to `lead-automator`. The reserved word `manager` is now exclusively the control-plane identity. Configs that try to name an agent `manager` for any role are rejected at parse time with a hard error directing the user to a non-reserved name.
+
+- Single source of truth for the inter-agent skill. `src/inter-agent-skill.ts` and `skills/inter-agent/SKILL.md` are no longer maintained as parallel copies that drift, with a build-time check that fails if they diverge.
+
+### Features
+
+- Agent catalogs as a load-bearing routing surface. Every agent advertises `role`, `description`, `expertise`, `costTier` (`low`, `medium`, `high`), `notSuitableFor`, and `status` via its `/catalog` endpoint. Catalog seeds are read from `configs/<team>.yaml` at deploy time and passed to the spawned agent process via env, so the runtime endpoint reflects the seed without any post-deploy PATCH. Long catalog descriptions can live in a separate markdown file via `catalogFile: <path>.md`, with YAML frontmatter for the structured fields and the body becoming the description. The `inter-agent` skill teaches a four-step catalog-aware delegation flow: list peers, fetch each catalog, filter by status and `notSuitableFor`, rank by expertise overlap and `costTier`.
+
+### Fixes
+
+- Reserved-identity validation now applies on rename and update paths, not only on creation. `PATCH /agents/:id/metadata` and the remote `/update --name` handler both run names through `validateName(newName, 'agent')` before persisting, so a client cannot turn a real agent into `manager` after the fact.
+
+### Docs
+
+- New top-level `MANAGER-POLLING.md` documents how clients should wait for query completion. `GET /query/:id?wait=<seconds>` is the supported long-poll. QUICKSTART step 5 shows this pattern instead of burst-polling `/news`.
+
 ## 0.1.93-beta
 
 ### Refactors
