@@ -8415,6 +8415,10 @@ export class AgentManagerDb {
     const owsWallet = (agentRow?.metadata as any)?.ows_wallet || null;
     const skipPermsRaw = (agentRow?.metadata as any)?.dangerouslySkipPermissions;
     const skipPermissions = skipPermsRaw === false ? false : true;
+    const catalogSeed = (agentRow?.metadata as any)?.catalog;
+    const catalogEnv = catalogSeed && typeof catalogSeed === 'object'
+      ? Buffer.from(JSON.stringify(catalogSeed), 'utf8').toString('base64')
+      : undefined;
 
     return {
       PATH: process.env.PATH || '',
@@ -8435,6 +8439,7 @@ export class AgentManagerDb {
       ...(model && { CLAUDE_MODEL: model }),
       ...(tokenId && { ID_AGENT_TOKEN_ID: tokenId }),
       ...(owsWallet && { OWS_WALLET: owsWallet }),
+      ...(catalogEnv && { ID_AGENT_CATALOG: catalogEnv }),
       ...(process.env.ANTHROPIC_API_KEY && { ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY }),
       ...(process.env.OPENAI_API_KEY && { OPENAI_API_KEY: process.env.OPENAI_API_KEY }),
     };

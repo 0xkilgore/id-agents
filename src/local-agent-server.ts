@@ -234,13 +234,35 @@ export async function startLocalAgent(config: LocalAgentConfig): Promise<{
     console.log('📋 Verbose logging enabled - will show tool calls and progress');
   }
 
+  // Catalog seed handoff: the manager passes the YAML-floored catalog object
+  // via ID_AGENT_CATALOG (base64-encoded JSON) so the in-memory /catalog state
+  // is correct on the first request — no manual PATCH required.
+  let catalogSeed: Record<string, unknown> | undefined;
+  const rawCatalog = process.env.ID_AGENT_CATALOG;
+  if (rawCatalog) {
+    try {
+      const decoded = Buffer.from(rawCatalog, 'base64').toString('utf8');
+      const parsed = JSON.parse(decoded);
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        catalogSeed = parsed as Record<string, unknown>;
+      }
+    } catch (err: any) {
+      console.warn(`⚠️  Failed to decode ID_AGENT_CATALOG: ${err?.message || err}`);
+    }
+  }
+
   // Create the server
   const server = new AgentRestServer({
     model,
     workingDirectory,
     sharedDirectory,
     agentName: name,
-    agentIdentity: { name, team, ...(tokenId && { tokenId }) },
+    agentIdentity: {
+      name,
+      team,
+      ...(tokenId && { tokenId }),
+      ...(catalogSeed && { metadata: { catalog: catalogSeed } }),
+    },
     ...(db && dbTeamId && { db: { db, teamId: dbTeamId, agentId } })
   });
 

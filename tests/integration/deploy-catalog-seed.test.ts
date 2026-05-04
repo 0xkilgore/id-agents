@@ -356,4 +356,31 @@ agents:
     // status comes from the YAML.
     expect(afterCat.status).toBe('available');
   });
+
+  it('spawn env handoff carries the catalog seed as base64-encoded ID_AGENT_CATALOG', async () => {
+    await deploy(firstYamlPath);
+
+    const teamId = await db.teams.getOrCreateTeamId(TEST_TEAM);
+    const jrRow = await db.agents.getByName(teamId, AGENT_JR);
+    expect(jrRow).toBeTruthy();
+
+    // Reach into the private env-builder used by spawnLocalAgentProcess.
+    // This is the spawn-site change at src/agent-manager-db.ts buildLocalAgentEnv:
+    // metadata.catalog must be encoded into ID_AGENT_CATALOG so the spawned
+    // local-agent-server can seed in-memory /catalog state before binding.
+    const env = (manager as any).buildLocalAgentEnv(TEST_TEAM, 24999, jrRow);
+    expect(env.ID_AGENT_CATALOG).toBeTruthy();
+    const decoded = JSON.parse(Buffer.from(env.ID_AGENT_CATALOG, 'base64').toString('utf8'));
+    expect(decoded.role).toBe('junior-developer');
+    expect(decoded.expertise).toEqual(['typescript', 'simple-refactors']);
+    expect(decoded.costTier).toBe('low');
+    expect(decoded.notSuitableFor).toEqual(['security-key-handling']);
+    expect(decoded.status).toBe('available');
+
+    // No catalog on row → no ID_AGENT_CATALOG. Confirms the var is only set
+    // when there's something to seed (no empty-string footgun).
+    const bareRow = { ...jrRow, metadata: {} as any };
+    const bareEnv = (manager as any).buildLocalAgentEnv(TEST_TEAM, 24999, bareRow);
+    expect(bareEnv.ID_AGENT_CATALOG).toBeUndefined();
+  });
 });
