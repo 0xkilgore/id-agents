@@ -197,21 +197,24 @@ curl -s -X POST http://localhost:4100/remote \
   -d '{"command":"/agents"}'
 ```
 
-Ask an agent a question:
+Ask an agent a question and capture the `queryId` returned by `/ask`:
 
 ```bash
-curl -s -X POST http://localhost:4100/remote \
+QID=$(curl -s -X POST http://localhost:4100/remote \
   -H "Content-Type: application/json" \
-  -d '{"command":"/ask coder Introduce yourself and tell me what you can do."}'
+  -d '{"command":"/ask coder Introduce yourself and tell me what you can do."}' \
+  | jq -r '.result.queryId')
 ```
 
-Poll for the reply:
+Wait for the reply with a single long-poll call (blocks up to 30s until the query reaches a terminal state):
 
 ```bash
-curl -s -X POST http://localhost:4100/remote \
-  -H "Content-Type: application/json" \
-  -d '{"command":"/news coder"}'
+curl -s -H "X-Id-Team: default" \
+  "http://localhost:4100/query/$QID?wait=30" \
+  | jq -r '.result.result'
 ```
+
+For prompts that may take longer than 30s, chain the long-poll in a small loop until `status` is `delivered`, `failed`, or `expired`. See [MANAGER-POLLING.md](./MANAGER-POLLING.md) for the full polling guide — patterns, anti-patterns (don't burst-poll `/news` with grep), and the wakeup-service event stream.
 
 ## 6. Offer to Act as the Team Manager
 
@@ -288,5 +291,6 @@ Type `/help` for commands.
 - [Documentation](https://www.idagents.ai/docs) -- Full docs
 - [Configuration](https://www.idagents.ai/docs/configuration) -- YAML config and environment variables
 - [Skills](https://www.idagents.ai/docs/skills) -- Extend agent capabilities
+- [Manager Polling](./MANAGER-POLLING.md) -- How to wait for query completion (long-poll, anti-patterns)
 - [XMTP Messaging](https://www.idagents.ai/docs/xmtp) -- Encrypted messaging via ENS names
 - [Onchain Identity](https://www.idagents.ai/docs/identity) -- Register agents on ID Chain
