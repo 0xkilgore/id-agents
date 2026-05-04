@@ -216,6 +216,98 @@ describe('GET /agents/by-name/:name — team-enforced', () => {
 });
 
 // =====================================================================
+// Reserved-identity rename bypass guard
+// =====================================================================
+
+describe('Agent rename — reserved-name guard', () => {
+  it('PATCH /agents/:id/metadata rejects rename to reserved "manager"', async () => {
+    const res = await fetch(`${baseUrl}/agents/${idchainAgentId}/metadata`, {
+      method: 'PATCH',
+      headers: makeHeaders('idchain'),
+      body: JSON.stringify({ name: 'manager' }),
+    });
+    expect(res.status).toBe(400);
+    const body = await res.json() as any;
+    expect(body.error).toMatch(/manager/);
+    expect(body.error).toMatch(/reserved command/);
+  });
+
+  it('/remote /update --name rejects rename to reserved "manager"', async () => {
+    const res = await fetch(`${baseUrl}/remote`, {
+      method: 'POST',
+      headers: makeHeaders('idchain'),
+      body: JSON.stringify({ command: `/update ${idchainAgentName} --name manager` }),
+    });
+    expect(res.ok).toBe(true);
+    const body = await res.json() as any;
+    expect(body.ok).toBe(false);
+    expect(body.error).toMatch(/manager/);
+    expect(body.error).toMatch(/reserved command/);
+  });
+
+  it('PATCH /agents/:id/metadata persists a valid rename', async () => {
+    const newValidName = `idchain-renamed-${Date.now()}`;
+    const res = await fetch(`${baseUrl}/agents/${idchainAgentId}/metadata`, {
+      method: 'PATCH',
+      headers: makeHeaders('idchain'),
+      body: JSON.stringify({ name: newValidName }),
+    });
+    expect(res.ok).toBe(true);
+
+    const lookup = await fetch(`${baseUrl}/agents/by-name/${newValidName}`, {
+      headers: makeHeaders('idchain'),
+    });
+    expect(lookup.ok).toBe(true);
+    const lookupBody = await lookup.json() as any;
+    expect(lookupBody.id ?? lookupBody.agent?.id).toEqual(idchainAgentId);
+
+    // Restore original name so downstream tests using idchainAgentName still resolve
+    const restore = await fetch(`${baseUrl}/agents/${idchainAgentId}/metadata`, {
+      method: 'PATCH',
+      headers: makeHeaders('idchain'),
+      body: JSON.stringify({ name: idchainAgentName }),
+    });
+    expect(restore.ok).toBe(true);
+  });
+
+  it('/remote /update --name persists a valid rename', async () => {
+    const newValidName = `public-renamed-${Date.now()}`;
+    const res = await fetch(`${baseUrl}/remote`, {
+      method: 'POST',
+      headers: makeHeaders('public'),
+      body: JSON.stringify({ command: `/update ${publicAgentName} --name ${newValidName}` }),
+    });
+    expect(res.ok).toBe(true);
+    const body = await res.json() as any;
+    expect(body.ok).toBe(true);
+
+    const lookup = await fetch(`${baseUrl}/agents/by-name/${newValidName}`, {
+      headers: makeHeaders('public'),
+    });
+    expect(lookup.ok).toBe(true);
+
+    const restore = await fetch(`${baseUrl}/remote`, {
+      method: 'POST',
+      headers: makeHeaders('public'),
+      body: JSON.stringify({ command: `/update ${newValidName} --name ${publicAgentName}` }),
+    });
+    expect(restore.ok).toBe(true);
+  });
+
+  it('PATCH /agents/:id/metadata wallet-only update is unaffected', async () => {
+    const wallet = '0x000000000000000000000000000000000000dEaD';
+    const res = await fetch(`${baseUrl}/agents/${idchainAgentId}/metadata`, {
+      method: 'PATCH',
+      headers: makeHeaders('idchain'),
+      body: JSON.stringify({ wallet }),
+    });
+    expect(res.ok).toBe(true);
+    const body = await res.json() as any;
+    expect(body.ok).toBe(true);
+  });
+});
+
+// =====================================================================
 // POST /tasks — cross-team creation guard
 // =====================================================================
 

@@ -3626,6 +3626,8 @@ export class AgentManagerDb {
           await this.db.agents.updateMetadata(agent.id, metadata);
         }
         if (newName) {
+          const nameCheck = validateName(newName, 'agent');
+          if (!nameCheck.valid) return res.status(400).json({ error: nameCheck.error });
           await this.db.agents.updateIdentity(agent.id, { name: newName });
         }
 
@@ -7342,6 +7344,8 @@ export class AgentManagerDb {
             i++;
           } else if (args[i] === '--name' && args[i + 1]) {
             const newName = args[i + 1];
+            const nameCheck = validateName(newName, 'agent');
+            if (!nameCheck.valid) return { ok: false, error: nameCheck.error };
             await this.db.agents.updateIdentity(agent.id, { name: newName });
             newMetadata.alias = newMetadata.alias || agent.name;
             updates.push(`name → ${newName}`);
