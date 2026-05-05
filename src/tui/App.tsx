@@ -17,6 +17,9 @@ import { LibraryAgentsTable } from './components/LibraryAgentsTable.js';
 import { LibraryAgentDetail } from './components/LibraryAgentDetail.js';
 import { LibrarySkillsTable } from './components/LibrarySkillsTable.js';
 import { LibrarySkillDetail } from './components/LibrarySkillDetail.js';
+import { CommandBar } from './components/CommandBar.js';
+import { CommandResultView } from './components/CommandResultView.js';
+import { knownCommandNames, lookupCommand, parseCommandLine } from './commands/registry.js';
 import type { Agent, NewsItem, Schedule, Task, Team } from './api/types.js';
 import {
   fetchAgentNews,
@@ -139,6 +142,20 @@ export function App({ staticMode = false }: AppProps = {}): React.ReactElement {
   const [showQuitConfirm, setShowQuitConfirm] = useState(false);
   const [showHelp, setShowHelp] = useState(false);
   const [cooldownEpoch, setCooldownEpoch] = useState<number>(() => Date.now());
+
+  // ── Command bar state (Phase 1) ────────────────────────────────────
+  // commandMode: bar is visible, keystrokes go into commandBuffer.
+  // commandResult: a previous command's output is rendered in the main
+  //   slot in place of the active view; Esc clears it.
+  // commandError: inline single-line error rendered above the bar.
+  const [commandMode, setCommandMode] = useState(false);
+  const [commandBuffer, setCommandBuffer] = useState('');
+  const [commandHistory, setCommandHistory] = useState<string[]>([]);
+  const [commandHistoryIndex, setCommandHistoryIndex] = useState<number | null>(null);
+  const [commandResult, setCommandResult] = useState<{ command: string; text: string } | null>(null);
+  const [commandResultScroll, setCommandResultScroll] = useState(0);
+  const [commandError, setCommandError] = useState<string | null>(null);
+  const [commandRunning, setCommandRunning] = useState(false);
 
   // Cooldown tick runs on news AND agents so the news-freshness dot in
   // the agents table colours against the same 10s epoch rather than a
@@ -844,6 +861,45 @@ export function App({ staticMode = false }: AppProps = {}): React.ReactElement {
     setLibSkillDetailScroll((off) => Math.max(0, off + delta));
   }, []);
 
+  // Execute a command-bar entry. Validation, dispatch, and result/error
+  // capture are centralized here so the keystroke handler stays simple.
+  const runCommand = useCallback(
+    async (raw: string) => {
+      const parsed = parseCommandLine(raw);
+      if (!parsed) {
+        setCommandError('empty command');
+        return;
+      }
+      const spec = lookupCommand(parsed.name);
+      if (!spec) {
+        setCommandError(
+          `unknown command: ${parsed.name} (known: ${knownCommandNames().join(', ')})`,
+        );
+        return;
+      }
+      const ac = new AbortController();
+      setCommandRunning(true);
+      setCommandError(null);
+      try {
+        const data = await spec.run({
+          manager,
+          executor: SELF_AGENT,
+          signal: ac.signal,
+          args: parsed.args,
+        });
+        const text = JSON.stringify(data, null, 2);
+        setCommandResult({ command: raw, text });
+        setCommandResultScroll(0);
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        setCommandError(`${parsed.name}: ${msg}`);
+      } finally {
+        setCommandRunning(false);
+      }
+    },
+    [manager],
+  );
+
   useInput(
     (input, key) => {
       // Quit confirmation — intercepts q when not yet confirmed. Ctrl-C still
@@ -882,9 +938,121 @@ export function App({ staticMode = false }: AppProps = {}): React.ReactElement {
         }
         return; // swallow everything else
       }
+      // Command bar (editing) — owns every keystroke until Enter or Esc.
+      // Backspace stops at the entry sigil so the user always sees the
+      // mode indicator (`:` or `/`) until they explicitly cancel.
+      if (commandMode) {
+        if (key.escape) {
+          setCommandMode(false);
+          setCommandBuffer('');
+          setCommandHistoryIndex(null);
+          return;
+        }
+        if (key.return) {
+          const raw = commandBuffer;
+          const stripped = raw.replace(/^[:/]+/, '').trim();
+          if (stripped.length > 0) {
+            setCommandHistory((h) => (h.length > 0 && h[h.length - 1] === raw ? h : [...h, raw]));
+          }
+          setCommandHistoryIndex(null);
+          setCommandMode(false);
+          setCommandBuffer('');
+          void runCommand(raw);
+          return;
+        }
+        if (key.upArrow) {
+          if (commandHistory.length === 0) return;
+          const next =
+            commandHistoryIndex === null
+              ? commandHistory.length - 1
+              : Math.max(0, commandHistoryIndex - 1);
+          setCommandHistoryIndex(next);
+          setCommandBuffer(commandHistory[next] ?? '');
+          return;
+        }
+        if (key.downArrow) {
+          if (commandHistory.length === 0 || commandHistoryIndex === null) return;
+          const next = commandHistoryIndex + 1;
+          if (next >= commandHistory.length) {
+            setCommandHistoryIndex(null);
+            setCommandBuffer('');
+          } else {
+            setCommandHistoryIndex(next);
+            setCommandBuffer(commandHistory[next] ?? '');
+          }
+          return;
+        }
+        if (key.backspace || key.delete) {
+          setCommandBuffer((b) => (b.length > 1 ? b.slice(0, -1) : b));
+          return;
+        }
+        if (key.ctrl && input === 'c') {
+          exit();
+          return;
+        }
+        if (input && !key.ctrl && !key.meta && !key.tab) {
+          setCommandBuffer((b) => b + input);
+        }
+        return;
+      }
+
+      // Command result is showing — Esc clears, arrows scroll, `:` / `/`
+      // re-open the bar without dismissing the result so the user can
+      // chain queries while keeping the previous output visible. Global
+      // keys (q, ?, Ctrl+C) still pass through.
+      if (commandResult) {
+        if (key.escape) {
+          setCommandResult(null);
+          setCommandError(null);
+          setCommandResultScroll(0);
+          return;
+        }
+        if (input === ':' || input === '/') {
+          setCommandMode(true);
+          setCommandBuffer(input);
+          setCommandHistoryIndex(null);
+          return;
+        }
+        if (key.ctrl && input === 'c') {
+          exit();
+          return;
+        }
+        if (input === 'q') {
+          setShowQuitConfirm(true);
+          return;
+        }
+        if (input === '?') {
+          setShowHelp(true);
+          return;
+        }
+        if (key.upArrow) {
+          setCommandResultScroll((s) => Math.max(0, s - 1));
+          return;
+        }
+        if (key.downArrow) {
+          setCommandResultScroll((s) => s + 1);
+          return;
+        }
+        if (key.pageUp) {
+          setCommandResultScroll((s) => Math.max(0, s - detailWindowSize));
+          return;
+        }
+        if (key.pageDown) {
+          setCommandResultScroll((s) => s + detailWindowSize);
+          return;
+        }
+        return;
+      }
+
       // global
       if (key.ctrl && input === 'c') {
         exit();
+        return;
+      }
+      if (input === ':' || input === '/') {
+        setCommandMode(true);
+        setCommandBuffer(input);
+        setCommandHistoryIndex(null);
         return;
       }
       if (input === 'q') {
@@ -1102,7 +1270,14 @@ export function App({ staticMode = false }: AppProps = {}): React.ReactElement {
           <Text dimColor>Enter / y = yes   ·   Esc / n = no</Text>
         </Box>
       ) : null}
-      {view === 'agents' ? (
+      {commandResult ? (
+        <CommandResultView
+          command={commandResult.command}
+          text={commandResult.text}
+          windowSize={detailWindowSize}
+          scrollOffset={commandResultScroll}
+        />
+      ) : view === 'agents' ? (
         <>
           <TeamsPanel
             teams={teams}
@@ -1301,6 +1476,12 @@ export function App({ staticMode = false }: AppProps = {}): React.ReactElement {
           contentWidth={DETAIL_CONTENT_WIDTH}
         />
       )}
+      {commandError ? (
+        <Box paddingX={1}>
+          <Text color="red" wrap="truncate-end">! {commandError}</Text>
+        </Box>
+      ) : null}
+      {commandMode ? <CommandBar buffer={commandBuffer} running={commandRunning} /> : null}
       <Footer view={view} />
     </Box>
   );

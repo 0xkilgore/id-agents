@@ -42,7 +42,7 @@ const HAS_BACK: Record<FooterView, boolean> = {
 
 function hintFor(view: FooterView): string {
   const back = HAS_BACK[view] ? ' · ← back' : '';
-  return `↑↓ nav${back} · ? help · q quit`;
+  return `↑↓ nav${back} · : cmd · ? help · q quit`;
 }
 
 export function Footer({ view }: FooterProps): React.ReactElement {

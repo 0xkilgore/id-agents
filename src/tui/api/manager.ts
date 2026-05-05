@@ -23,6 +23,36 @@ async function getJson<T>(url: string, signal: AbortSignal): Promise<T> {
   return (await res.json()) as T;
 }
 
+// Generic POST to the manager's `/remote` proxy. Mirrors the call shape
+// already used by fetchTasks/fetchAgentNews/fetchSchedulesForTeam — those
+// can migrate onto this helper in Phase 2 when more commands land. For
+// Phase 1 the only call site is the command-bar `agents` handler path.
+interface RemoteEnvelope<T> { ok: boolean; result?: T; error?: string }
+export async function runRemoteCommand<T = unknown>(
+  manager: string,
+  executor: string,
+  command: string,
+  signal: AbortSignal,
+  teamName?: string,
+): Promise<T> {
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  if (teamName) headers['x-id-team'] = teamName;
+  const res = await fetch(`${manager}/remote`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ agent: executor, command }),
+    signal,
+  });
+  if (!res.ok) {
+    throw new Error(`POST /remote → ${res.status} ${res.statusText}`);
+  }
+  const data = (await res.json()) as RemoteEnvelope<T>;
+  if (!data.ok) {
+    throw new Error(data.error ?? 'unknown manager error');
+  }
+  return data.result as T;
+}
+
 export async function fetchTeams(manager: string, signal: AbortSignal): Promise<Team[]> {
   const data = await getJson<TeamsResponse>(`${manager}/teams`, signal);
   return (data.teams ?? []).filter((t) => t.name.toLowerCase() !== 'all');
