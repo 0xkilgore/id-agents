@@ -19,7 +19,7 @@ import { LibrarySkillsTable } from './components/LibrarySkillsTable.js';
 import { LibrarySkillDetail } from './components/LibrarySkillDetail.js';
 import { CommandBar } from './components/CommandBar.js';
 import { CommandResultView } from './components/CommandResultView.js';
-import { knownCommandNames, lookupCommand, parseCommandLine } from './commands/registry.js';
+import { completeCommand, knownCommandNames, lookupCommand, parseCommandLine } from './commands/registry.js';
 import type { Agent, NewsItem, Schedule, Task, Team } from './api/types.js';
 import {
   fetchAgentNews,
@@ -986,11 +986,21 @@ export function App({ staticMode = false }: AppProps = {}): React.ReactElement {
           setCommandBuffer((b) => (b.length > 1 ? b.slice(0, -1) : b));
           return;
         }
+        if (key.tab) {
+          // Top-level command-name completion. Operates on the first
+          // token only; once the user types a space, Tab does nothing.
+          const completed = completeCommand(commandBuffer);
+          if (completed !== null) {
+            setCommandBuffer(completed);
+            setCommandHistoryIndex(null);
+          }
+          return;
+        }
         if (key.ctrl && input === 'c') {
           exit();
           return;
         }
-        if (input && !key.ctrl && !key.meta && !key.tab) {
+        if (input && !key.ctrl && !key.meta) {
           setCommandBuffer((b) => b + input);
         }
         return;
