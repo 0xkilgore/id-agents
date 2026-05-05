@@ -124,6 +124,73 @@ node skills/idagents-admin-control/start-listener.js [port]
 ./skills/idagents-admin-control/remote-command.sh "/ask coder-b Build a REST API"
 ```
 
+## Waiting for results — pick the right endpoint
+
+After dispatching `/ask <agent>` (or any `/remote` command that returns a `query_id`), you need to wait for the agent's reply. **Do not loop on `/news <agent>` with `grep`.** The daemon has dedicated endpoints that block efficiently on the server and return clean JSON. All snippets below are plain `curl` + `bash` + `jq` so they run identically whether your admin session is Claude Code, Codex, or Cursor (swap `jq` for `python3 -c 'import json,sys; …'` if your shell lacks it).
+
+### One specific query — `GET /query/:id?wait=N` (long-poll)
+
+When you sent a single `/ask <agent>` and want the reply:
+
+```bash
+QID=$(./skills/idagents-admin-control/remote-command.sh \
+  "/ask coder Implement the X feature" | jq -r '.result.queryId')
+
+# Block up to 30s on the server until terminal state
+curl -s -H "X-Id-Team: $ID_TEAM" \
+  "$MANAGER_URL/query/$QID?wait=30" | jq
+```
+
+`wait` is clamped to `[0, 30]` seconds. Terminal status values: `delivered`, `failed`, `cancelled`, `expired`. The response includes `result.result` (the agent's reply text) when delivered. For queries that may exceed 30s, **chain the call** — each iteration is one TCP connection the server holds open until an event fires:
+
+```bash
+while :; do
+  resp=$(curl -s -H "X-Id-Team: $ID_TEAM" "$MANAGER_URL/query/$QID?wait=30")
+  status=$(echo "$resp" | jq -r '.status')
+  case "$status" in
+    delivered|failed|cancelled|expired) echo "$resp" | jq; break ;;
+  esac
+done
+```
+
+### Many things at once — `GET /events?since=<seq>` (event-stream cursor)
+
+When you are orchestrating multiple workers, multiple phases, or a long rollout, polling each `query_id` separately is wasteful. The events stream returns every team-scoped state change since a cursor, in one call:
+
+```bash
+LAST_SEQ=0
+while :; do
+  resp=$(curl -s -H "X-Id-Team: $ID_TEAM" \
+    "$MANAGER_URL/events?since=$LAST_SEQ&limit=100")
+  echo "$resp" | jq '.events[] | {seq, topic, subject, data}'
+  LAST_SEQ=$(echo "$resp" | jq -r '.events | last | .seq // empty')
+  [ -z "$LAST_SEQ" ] && sleep 30  # nothing new — back off
+done
+```
+
+Useful topics to filter with `?topics=`:
+
+- `query:received`, `query:delivered`, `query:failed` — agent dispatch lifecycle
+- `task:created`, `task:claimed`, `task:done`, `task:removed` — task lifecycle
+- `checkin:due` — supervision pings firing on linked tasks
+- `agent:online`, `agent:offline` — fleet health
+
+Each event has `seq` (cursor), `team`, `topic`, `actor`, `subject`, and a `data` object whose shape is topic-specific. Save the highest `seq` you handled and pass it as `since` on the next call.
+
+### Decision shortcut
+
+| Use case | Endpoint |
+|---|---|
+| Wait for ONE specific `query_id` you dispatched | `GET /query/:id?wait=30` |
+| Watch state changes across multiple workers/tasks | `GET /events?since=<seq>` |
+| Read a specific agent's news feed (debugging) | `/news <agent>` via `/remote` (not for waiting on your own query) |
+
+### Anti-patterns to avoid
+
+- **Don't grep JSON** for state. Key ordering inside JSON objects is implementation-defined; regexes like `outbound.reply.*in_reply_to` will silently miss matches when the serializer reorders fields. Always parse with `jq` or `python3 -c "import json,sys; …"`.
+- **Don't burst-poll `/news <agent>` to wait for a reply to your own `/ask`.** `/news` is the agent's inbox stream, not a wait primitive. Use `GET /query/:id?wait=` — purpose-built and simpler.
+- **Don't sleep-then-poll** when a wait endpoint exists. Tight burst loops against `localhost` can saturate the macOS ephemeral port range (~16k); the daemon looks down even when it's healthy. `?wait=` and `since=<seq>` solve this with one long-lived connection per check.
+
 ## Available Remote Commands
 
 | Command | Description |
