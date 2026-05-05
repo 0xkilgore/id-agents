@@ -19,7 +19,14 @@ import { LibrarySkillsTable } from './components/LibrarySkillsTable.js';
 import { LibrarySkillDetail } from './components/LibrarySkillDetail.js';
 import { CommandBar } from './components/CommandBar.js';
 import { CommandResultView } from './components/CommandResultView.js';
-import { completeCommand, knownCommandNames, lookupCommand, parseCommandLine } from './commands/registry.js';
+import {
+  commandConfirmPreview,
+  commandRequiresConfirmation,
+  completeCommand,
+  knownCommandNames,
+  lookupCommand,
+  parseCommandLine,
+} from './commands/registry.js';
 import type { Agent, NewsItem, Schedule, Task, Team } from './api/types.js';
 import {
   fetchAgentNews,
@@ -156,6 +163,9 @@ export function App({ staticMode = false }: AppProps = {}): React.ReactElement {
   const [commandResultScroll, setCommandResultScroll] = useState(0);
   const [commandError, setCommandError] = useState<string | null>(null);
   const [commandRunning, setCommandRunning] = useState(false);
+  // commandPending: a confirm-gated command is staged. Y dispatches it,
+  // N or Esc discards. Holds the raw line + preview line for rendering.
+  const [commandPending, setCommandPending] = useState<{ raw: string; preview: string } | null>(null);
 
   // Cooldown tick runs on news AND agents so the news-freshness dot in
   // the agents table colours against the same 10s epoch rather than a
@@ -938,6 +948,28 @@ export function App({ staticMode = false }: AppProps = {}): React.ReactElement {
         }
         return; // swallow everything else
       }
+      // Confirmation prompt (Phase 3) — owns every keystroke until the
+      // user picks Y/N or hits Esc. Y dispatches the staged command;
+      // N / Esc / Ctrl+C discard it. Ctrl+C also exits the app, matching
+      // global behavior.
+      if (commandPending) {
+        if (key.ctrl && input === 'c') {
+          exit();
+          return;
+        }
+        if (key.return || input === 'y' || input === 'Y') {
+          const { raw } = commandPending;
+          setCommandPending(null);
+          void runCommand(raw);
+          return;
+        }
+        if (key.escape || input === 'n' || input === 'N') {
+          setCommandPending(null);
+          return;
+        }
+        return; // swallow everything else while the prompt is open
+      }
+
       // Command bar (editing) — owns every keystroke until Enter or Esc.
       // Backspace stops at the entry sigil so the user always sees the
       // mode indicator (`:` or `/`) until they explicitly cancel.
@@ -957,7 +989,18 @@ export function App({ staticMode = false }: AppProps = {}): React.ReactElement {
           setCommandHistoryIndex(null);
           setCommandMode(false);
           setCommandBuffer('');
-          void runCommand(raw);
+          // Phase 3 gate: parse and check whether the resolved spec
+          // requires confirmation. Stage the raw line in commandPending
+          // when so; otherwise dispatch immediately (Phase 1/2 path).
+          const parsed = parseCommandLine(raw);
+          const spec = parsed ? lookupCommand(parsed.name) : null;
+          if (parsed && spec && commandRequiresConfirmation(spec, parsed.args)) {
+            const preview = commandConfirmPreview(spec, parsed.args) ?? raw;
+            setCommandPending({ raw, preview });
+            setCommandError(null);
+          } else {
+            void runCommand(raw);
+          }
           return;
         }
         if (key.upArrow) {
@@ -1489,6 +1532,14 @@ export function App({ staticMode = false }: AppProps = {}): React.ReactElement {
       {commandError ? (
         <Box paddingX={1}>
           <Text color="red" wrap="truncate-end">! {commandError}</Text>
+        </Box>
+      ) : null}
+      {commandPending ? (
+        <Box flexDirection="column" borderStyle="round" borderColor="yellow" paddingX={1}>
+          <Text bold color="yellow">Confirm</Text>
+          <Text wrap="truncate-end">{commandPending.preview}</Text>
+          <Text dimColor>(raw: {commandPending.raw})</Text>
+          <Text dimColor>Enter / y = run · Esc / n = cancel</Text>
         </Box>
       ) : null}
       {commandMode ? <CommandBar buffer={commandBuffer} running={commandRunning} /> : null}
