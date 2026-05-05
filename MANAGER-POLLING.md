@@ -62,11 +62,57 @@ done
 
 Each iteration is one TCP connection that hangs for up to 30s. No spam. No TIME_WAIT pressure on macOS.
 
-### `GET /events`
+### `GET /events?since=<seq>`
 
-Source: `agent-manager-db.ts:4510-4603`. Wakeup-service event stream — emits topics like `query:delivered`, `query:failed`, schedule firings, heartbeat ticks. Useful when you want to multiplex many queries / agents through one connection.
+Source: `agent-manager-db.ts:4510-4603`. Wakeup-service event stream — every team-scoped state change carries a monotonic `seq` so a client can replay from a cursor. Use this when you are watching multiple queries / tasks / agents at once and want a single call to surface everything new since the last check.
 
-Per the in-code comment: "SSE/webhook delivery land in separate slices." Today this returns a snapshot batch with a `cursor`; SSE flavor is not yet implemented. For per-query waits, prefer `GET /query/:id?wait=`.
+```bash
+LAST_SEQ=0
+while :; do
+  resp=$(curl -s -H "X-Id-Team: idchain" \
+    "http://localhost:4100/events?since=$LAST_SEQ&limit=100")
+  echo "$resp" | jq '.events[] | {seq, topic, subject, data}'
+  LAST_SEQ=$(echo "$resp" | jq -r '.events | last | .seq // empty')
+  [ -z "$LAST_SEQ" ] && sleep 30
+done
+```
+
+Response shape:
+
+```json
+{
+  "events": [
+    {
+      "seq": 322,
+      "team": "idchain",
+      "topic": "checkin:due",
+      "occurred_at": 1777414948136,
+      "actor": "schedule",
+      "subject": { "kind": "checkin", "id": "chk_…" },
+      "data": {
+        "checkin_id": "chk_…",
+        "owner": "manager-idchain",
+        "linked_task": { "id": "task_…", "name": "fix-…", "status": "doing", "assignee": "cto" },
+        "interval_seconds": 600,
+        "iteration_count": 117,
+        "next_fire_at": 1777415548136,
+        "actions": { "inspect": "…", "nudge": "…", "snooze": "…", "close": "…" }
+      }
+    }
+  ]
+}
+```
+
+Useful topics:
+
+- `query:received`, `query:delivered`, `query:failed` — agent dispatch lifecycle
+- `task:created`, `task:claimed`, `task:done`, `task:removed` — task lifecycle
+- `checkin:due` — supervision pings firing on linked tasks
+- `agent:online`, `agent:offline` — fleet health
+
+Filter with `?topics=task:done,task:claimed` to narrow.
+
+Per the in-code comment: "SSE/webhook delivery land in separate slices." The endpoint returns a batch (not text/event-stream) today. For waiting on a single query, prefer `GET /query/:id?wait=` — it's purpose-built and simpler.
 
 ## What NOT to do
 

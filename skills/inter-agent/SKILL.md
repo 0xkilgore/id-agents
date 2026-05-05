@@ -159,6 +159,74 @@ The older `?since=<ms-timestamp>` cursor still works for one release but is depr
 
 Check your news feed before starting new tasks to maintain context.
 
+## Waiting for results — pick the right endpoint
+
+When you have already kicked off work and need to wait for the answer, **do not loop on `/news` with `grep`**. The daemon has dedicated endpoints that block efficiently on the server and return clean JSON. All snippets below are pure `curl` + `bash` and run on any agent runtime (Claude Code, Codex, Cursor) — `jq` is recommended for parsing; if your shell does not have it, swap in `python3 -c 'import json,sys; …'`.
+
+### One specific query — `GET /query/:id?wait=N` (long-poll)
+
+After `/talk-to` you have a `query_id`. Wait for it to reach a terminal state in one call:
+
+```bash
+QID=$(curl -s -X POST http://localhost:$ID_AGENT_PORT/talk-to \
+  -H "Content-Type: application/json" \
+  -d '{"to":"coder","message":"please implement X"}' | jq -r '.query_id')
+
+# Block up to 30s on the server until the query reaches terminal state
+curl -s -H "X-Id-Team: $ID_TEAM" \
+  "$MANAGER_URL/query/$QID?wait=30" | jq
+```
+
+`wait` is clamped to `[0, 30]` seconds. Terminal status values: `delivered`, `failed`, `cancelled`, `expired`. The response includes `result.result` (the reply text) when delivered. For queries that may exceed 30s, **chain the call** — each iteration is one TCP connection that the server holds open until an event fires:
+
+```bash
+while :; do
+  resp=$(curl -s -H "X-Id-Team: $ID_TEAM" "$MANAGER_URL/query/$QID?wait=30")
+  status=$(echo "$resp" | jq -r '.status')
+  case "$status" in
+    delivered|failed|cancelled|expired) echo "$resp" | jq; break ;;
+  esac
+done
+```
+
+### Many things at once — `GET /events?since=<seq>` (event stream cursor)
+
+When you are watching multiple workers / tasks / queries (e.g., orchestrating a phased rollout), polling each one is wasteful. The events stream returns every state change across the team since a cursor, in one call:
+
+```bash
+LAST_SEQ=0  # or whatever the highest seq you've already seen is
+while :; do
+  resp=$(curl -s -H "X-Id-Team: $ID_TEAM" \
+    "$MANAGER_URL/events?since=$LAST_SEQ&limit=100")
+  echo "$resp" | jq '.events[] | {seq, topic, subject, data: .data | {linked_task, agent, query_id}}'
+  LAST_SEQ=$(echo "$resp" | jq -r '.events | last | .seq // empty')
+  [ -z "$LAST_SEQ" ] && sleep 30  # nothing new — back off
+done
+```
+
+Useful topics to filter on with `?topics=`:
+
+- `query:received`, `query:delivered`, `query:failed` — agent dispatches
+- `task:created`, `task:claimed`, `task:done`, `task:removed` — task lifecycle
+- `checkin:due` — supervision pings firing on linked tasks
+- `agent:online`, `agent:offline` — fleet health
+
+Each event carries `seq` (cursor), `team`, `topic`, `actor`, `subject`, and a `data` object whose shape is topic-specific. Use the `seq` of the last event you handled as `since` on the next call.
+
+### Decision shortcut
+
+| Use case | Endpoint |
+|---|---|
+| Wait for ONE specific `query_id` you sent | `GET /query/:id?wait=30` |
+| Watch state changes across multiple tasks/queries | `GET /events?since=<seq>` |
+| Read your own inbox (messages addressed to you) | `GET /news?since_id=<id>` (the section above) |
+
+### Anti-patterns to avoid
+
+- **Don't grep JSON** for state. Key ordering inside JSON objects is implementation-defined; regexes like `outbound.reply.*in_reply_to` will silently miss matches when the serializer reorders fields. Always parse with `jq` or `python -c "import json,sys; …"`.
+- **Don't burst-poll `/news` to wait for a reply to your own query.** `/news` is the inbox stream, not a wait primitive; loop on `GET /query/:id?wait=` instead. Each `?wait=30` call sleeps server-side and returns the moment the query terminates.
+- **Don't sleep-then-poll** when a wait endpoint exists. Tight burst loops against `localhost` can saturate the macOS ephemeral port range (~16k); the daemon will look down even when it's healthy. The `?wait=` and `since=<seq>` endpoints solve this — one long-lived connection per check, not many short ones.
+
 ## Task management
 
 The manager has a dedicated `/tasks` API for coordinating work.
