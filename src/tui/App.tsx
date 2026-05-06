@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { Box, Text, useApp, useInput, useStdout } from 'ink';
 import { Footer } from './components/Footer.js';
-import { HelpModal } from './components/HelpModal.js';
+import { HelpView } from './components/HelpView.js';
 import { TeamsPanel } from './components/TeamsPanel.js';
 import { AgentsTable } from './components/AgentsTable.js';
 import { NewsView } from './components/NewsView.js';
@@ -148,6 +148,7 @@ export function App({ staticMode = false }: AppProps = {}): React.ReactElement {
   const [libSkillDetailScroll, setLibSkillDetailScroll] = useState(0);
   const [showQuitConfirm, setShowQuitConfirm] = useState(false);
   const [showHelp, setShowHelp] = useState(false);
+  const [helpScroll, setHelpScroll] = useState(0);
   const [cooldownEpoch, setCooldownEpoch] = useState<number>(() => Date.now());
 
   // ── Command bar state (Phase 1) ────────────────────────────────────
@@ -935,24 +936,41 @@ export function App({ staticMode = false }: AppProps = {}): React.ReactElement {
         }
         return; // swallow everything else while the dialog is open
       }
-      // Help modal — intercepts all keys so navigation while help is open
-      // can't accidentally drive the underlying view. ? toggles, Esc closes,
-      // and any arrow key also closes (so the user can return to navigating
-      // their previous view without thinking).
+      // Help view (Phase 5) — scrollable list of every catalog entry
+      // grouped by risk tier. j/k/arrows scroll, Esc / ? / q close.
+      // Ctrl+C still exits the app. All other keys swallowed.
       if (showHelp) {
-        if (
-          input === '?' ||
-          key.escape ||
-          key.upArrow ||
-          key.downArrow ||
-          key.leftArrow ||
-          key.rightArrow
-        ) {
-          setShowHelp(false);
-          return;
-        }
         if (key.ctrl && input === 'c') {
           exit();
+          return;
+        }
+        if (key.escape || input === '?' || input === 'q') {
+          setShowHelp(false);
+          setHelpScroll(0);
+          return;
+        }
+        if (input === 'k' || key.upArrow) {
+          setHelpScroll((s) => Math.max(0, s - 1));
+          return;
+        }
+        if (input === 'j' || key.downArrow) {
+          setHelpScroll((s) => s + 1);
+          return;
+        }
+        if (key.pageUp) {
+          setHelpScroll((s) => Math.max(0, s - detailWindowSize));
+          return;
+        }
+        if (key.pageDown) {
+          setHelpScroll((s) => s + detailWindowSize);
+          return;
+        }
+        if (isHomeKey(input)) {
+          setHelpScroll(0);
+          return;
+        }
+        if (isEndKey(input)) {
+          setHelpScroll(Number.MAX_SAFE_INTEGER);
           return;
         }
         return; // swallow everything else
@@ -1035,10 +1053,20 @@ export function App({ staticMode = false }: AppProps = {}): React.ReactElement {
           setCommandHistoryIndex(null);
           setCommandMode(false);
           setCommandBuffer('');
+          // Phase 5: intercept the TUI-side `:help` action before any
+          // confirmation/dispatch path. `help` lives in the catalog
+          // (so it shows up in tab completion and the help view
+          // itself), but its `run` body is inert — the App owns it.
+          const parsed = parseCommandLine(raw);
+          if (parsed && parsed.name === 'help') {
+            setShowHelp(true);
+            setHelpScroll(0);
+            setCommandError(null);
+            return;
+          }
           // Phase 3/4 gate: parse and check the spec's confirmation
           // tier. Retype short-circuits Y/N when both predicates fire,
           // so the user only sees the higher-tier prompt.
-          const parsed = parseCommandLine(raw);
           const spec = parsed ? lookupCommand(parsed.name) : null;
           const level = parsed && spec ? confirmationLevel(spec, parsed.args) : 'none';
           if (level === 'retype' && parsed && spec) {
@@ -1357,21 +1385,6 @@ export function App({ staticMode = false }: AppProps = {}): React.ReactElement {
     { isActive: process.stdin.isTTY === true },
   );
 
-  if (showHelp) {
-    // Fill the terminal height so the modal overwrites any residual lines
-    // from the previous view (otherwise the bottom of the agents table can
-    // peek out below the modal). The flexGrow spacer pins the footer to the
-    // last row even when the terminal is resized.
-    const rows = stdout?.rows ?? 24;
-    return (
-      <Box flexDirection="column" height={rows}>
-        <HelpModal />
-        <Box flexGrow={1} />
-        <Footer view={view} />
-      </Box>
-    );
-  }
-
   return (
     <Box flexDirection="column">
       {showQuitConfirm ? (
@@ -1380,7 +1393,9 @@ export function App({ staticMode = false }: AppProps = {}): React.ReactElement {
           <Text dimColor>Enter / y = yes   ·   Esc / n = no</Text>
         </Box>
       ) : null}
-      {commandResult ? (
+      {showHelp ? (
+        <HelpView windowSize={detailWindowSize} scrollOffset={helpScroll} />
+      ) : commandResult ? (
         <CommandResultView
           command={commandResult.command}
           text={commandResult.text}

@@ -19,9 +19,18 @@ export interface CommandContext {
   args: string[];
 }
 
+export type RiskTier = 'safe' | 'powerful' | 'destructive';
+
 export interface CommandSpec {
   name: string;
   description: string;
+  // Phase 5: declarative max-tier classification used by the help view
+  // and any future surface that wants to colour commands by risk. The
+  // tier reflects the WORST thing this catalog entry can do — for
+  // hybrid entries like `schedule` (which has both `list` and `remove`
+  // subcommands), the tier is the highest reachable level. The runtime
+  // gate is still driven by `shouldConfirm`/`shouldRetype` predicates.
+  tier: RiskTier;
   run: (ctx: CommandContext) => Promise<unknown>;
   // Returns true when the args trigger a destructive/mutating handler
   // and the user should see a Y/N prompt before dispatch. Absent or
@@ -46,11 +55,13 @@ export type ConfirmationLevel = 'none' | 'yn' | 'retype';
 function remote(
   name: string,
   description: string,
+  tier: RiskTier,
   extras: Pick<CommandSpec, 'shouldConfirm' | 'shouldRetype' | 'confirmPreview'> = {},
 ): CommandSpec {
   return {
     name,
     description,
+    tier,
     run: async ({ manager, executor, signal, args }) => {
       const command = ['/' + name, ...args].join(' ');
       return runRemoteCommand(manager, executor, command, signal);
@@ -65,11 +76,24 @@ function remote(
 const agentsCommand: CommandSpec = {
   name: 'agents',
   description: 'List all agents across all teams',
+  tier: 'safe',
   run: async ({ manager, signal }) => {
     const teams = await fetchTeams(manager, signal);
     const agents = await fetchAgentsAllTeams(manager, teams, signal);
     return { count: agents.length, agents };
   },
+};
+
+// `help` is a TUI-side action — invoking it via the bar opens the
+// scrollable help view. The `run` body is intentionally inert; the
+// App-level submit handler intercepts by name before calling run().
+// Listed in the catalog so it shows up in tab completion and in the
+// help view itself.
+const helpCommand: CommandSpec = {
+  name: 'help',
+  description: 'Open the scrollable command help (also: ?)',
+  tier: 'safe',
+  run: async () => ({ tuiAction: 'help' }),
 };
 
 // ── Phase 3 predicates ─────────────────────────────────────────────
@@ -89,110 +113,148 @@ const REGISTRY: Record<string, CommandSpec> = {
   // ── Phase 1 ──────────────────────────────────────────────────────
   agents: agentsCommand,
 
-  // ── Phase 2: read-only safe defaults ─────────────────────────────
-  status: remote('status', 'Team health summary (running/offline + per-agent health)'),
-  teams: remote('teams', 'List all teams in the manager DB'),
-  team: remote('team', 'Show the active team (id, name, agent count)'),
-  configs: remote('configs', 'List configs/*.yaml deployment files'),
-  news: remote('news', 'List news items for an agent (`:news <agent>`)'),
-  heartbeats: remote('heartbeats', 'List agents with heartbeat enabled'),
-  output: remote('output', "List files in an agent's ./output dir (`:output <agent>`)"),
-  artifact: remote('artifact', 'Read one artifact (`:artifact <agent> <path>`)'),
-  meta: remote('meta', 'Show agent metadata (`:meta <agent>`)'),
-  list: remote('list', 'Show all pending queries in the active team'),
+  // ── Phase 5 TUI action ───────────────────────────────────────────
+  help: helpCommand,
 
-  // ── Phase 2/3 hybrid: read-only by default, gated on mutator subcmds
-  schedule: remote('schedule', 'Schedules: list/show (read), add/pause/resume (Y/N), remove (retype)', {
-    shouldConfirm: (args) => SCHEDULE_MUTATORS.has(args[0]?.toLowerCase() ?? ''),
-    shouldRetype: (args) => SCHEDULE_RETYPE.has(args[0]?.toLowerCase() ?? ''),
-    confirmPreview: (args) =>
-      SCHEDULE_MUTATORS.has(args[0]?.toLowerCase() ?? '')
-        ? `schedule ${args.join(' ')}`
-        : null,
-  }),
-  task: remote('task', 'Tasks: list/show (read), create/claim/done (Y/N), remove/delete (retype)', {
-    shouldConfirm: (args) => TASK_MUTATORS.has(args[0]?.toLowerCase() ?? ''),
-    shouldRetype: (args) => TASK_RETYPE.has(args[0]?.toLowerCase() ?? ''),
-    confirmPreview: (args) =>
-      TASK_MUTATORS.has(args[0]?.toLowerCase() ?? '') ? `task ${args.join(' ')}` : null,
-  }),
-  registry: remote('registry', 'Registry: bare show (read), `push` (gated bulk onchain register)', {
-    shouldConfirm: (args) => (args[0]?.toLowerCase() ?? '') === 'push',
-    confirmPreview: (args) =>
-      (args[0]?.toLowerCase() ?? '') === 'push'
-        ? 'registry push — register every unregistered agent onchain'
-        : null,
-  }),
+  // ── Phase 2: read-only safe defaults ─────────────────────────────
+  status: remote('status', 'Team health summary (running/offline + per-agent health)', 'safe'),
+  teams: remote('teams', 'List all teams in the manager DB', 'safe'),
+  team: remote('team', 'Show the active team (id, name, agent count)', 'safe'),
+  configs: remote('configs', 'List configs/*.yaml deployment files', 'safe'),
+  news: remote('news', 'List news items for an agent (`:news <agent>`)', 'safe'),
+  heartbeats: remote('heartbeats', 'List agents with heartbeat enabled', 'safe'),
+  output: remote('output', "List files in an agent's ./output dir (`:output <agent>`)", 'safe'),
+  artifact: remote('artifact', 'Read one artifact (`:artifact <agent> <path>`)', 'safe'),
+  meta: remote('meta', 'Show agent metadata (`:meta <agent>`)', 'safe'),
+  list: remote('list', 'Show all pending queries in the active team', 'safe'),
+
+  // ── Phase 2/3/4 hybrids — tier reflects worst-case subcommand ────
+  schedule: remote(
+    'schedule',
+    'Schedules: list/show (read), add/pause/resume (Y/N), remove (retype)',
+    'destructive',
+    {
+      shouldConfirm: (args) => SCHEDULE_MUTATORS.has(args[0]?.toLowerCase() ?? ''),
+      shouldRetype: (args) => SCHEDULE_RETYPE.has(args[0]?.toLowerCase() ?? ''),
+      confirmPreview: (args) =>
+        SCHEDULE_MUTATORS.has(args[0]?.toLowerCase() ?? '')
+          ? `schedule ${args.join(' ')}`
+          : null,
+    },
+  ),
+  task: remote(
+    'task',
+    'Tasks: list/show (read), create/claim/done (Y/N), remove/delete (retype)',
+    'destructive',
+    {
+      shouldConfirm: (args) => TASK_MUTATORS.has(args[0]?.toLowerCase() ?? ''),
+      shouldRetype: (args) => TASK_RETYPE.has(args[0]?.toLowerCase() ?? ''),
+      confirmPreview: (args) =>
+        TASK_MUTATORS.has(args[0]?.toLowerCase() ?? '') ? `task ${args.join(' ')}` : null,
+    },
+  ),
+  registry: remote(
+    'registry',
+    'Registry: bare show (read), `push` (gated bulk onchain register)',
+    'powerful',
+    {
+      shouldConfirm: (args) => (args[0]?.toLowerCase() ?? '') === 'push',
+      confirmPreview: (args) =>
+        (args[0]?.toLowerCase() ?? '') === 'push'
+          ? 'registry push — register every unregistered agent onchain'
+          : null,
+    },
+  ),
 
   // ── Phase 3: powerful, always-gated entries ──────────────────────
-  agent: remote('agent', 'Per-agent control: `:agent <name> <rebuild|start|stop|wallet provision|probe|logs>`', {
-    shouldConfirm: (args) => AGENT_MUTATORS.has(args[1]?.toLowerCase() ?? ''),
-    confirmPreview: (args) => {
-      const sub = args[1]?.toLowerCase();
-      const name = args[0] ?? '<agent>';
-      if (!sub) return null;
-      if (sub === 'wallet') return `provision OWS wallet for agent ${name}`;
-      if (AGENT_MUTATORS.has(sub)) return `${sub} agent ${name}`;
-      return null;
+  agent: remote(
+    'agent',
+    'Per-agent control: `:agent <name> <rebuild|start|stop|wallet provision|probe|logs>`',
+    'powerful',
+    {
+      shouldConfirm: (args) => AGENT_MUTATORS.has(args[1]?.toLowerCase() ?? ''),
+      confirmPreview: (args) => {
+        const sub = args[1]?.toLowerCase();
+        const name = args[0] ?? '<agent>';
+        if (!sub) return null;
+        if (sub === 'wallet') return `provision OWS wallet for agent ${name}`;
+        if (AGENT_MUTATORS.has(sub)) return `${sub} agent ${name}`;
+        return null;
+      },
     },
-  }),
-  model: remote('model', 'Set agent model: `:model <agent> <model>`', {
+  ),
+  model: remote('model', 'Set agent model: `:model <agent> <model>`', 'powerful', {
     shouldConfirm: (args) => args.length >= 2,
     confirmPreview: (args) =>
       args.length >= 2 ? `set model ${args[1]} on agent ${args[0]}` : null,
   }),
-  deploy: remote('deploy', 'Deploy a team config: `:deploy <config-name>`', {
+  deploy: remote('deploy', 'Deploy a team config: `:deploy <config-name>`', 'powerful', {
     shouldConfirm: () => true,
     confirmPreview: (args) =>
       args.length > 0 ? `deploy config: ${args.join(' ')}` : 'deploy (no args — will error)',
   }),
-  sync: remote('sync', 'Sync team against YAML: `:sync <team>`', {
+  sync: remote('sync', 'Sync team against YAML: `:sync <team>`', 'powerful', {
     shouldConfirm: () => true,
     confirmPreview: (args) =>
       args.length > 0 ? `sync team: ${args.join(' ')}` : 'sync (no args — will error)',
   }),
-  register: remote('register', 'Register one agent onchain: `:register <agent>`', {
+  register: remote('register', 'Register one agent onchain: `:register <agent>`', 'powerful', {
     shouldConfirm: () => true,
     confirmPreview: (args) =>
       args.length > 0 ? `register agent ${args[0]} onchain` : 'register (no args — will error)',
   }),
-  heartbeat: remote('heartbeat', 'Heartbeat: bare status (read), `enable|disable <agent>` (gated)', {
-    shouldConfirm: (args) => HEARTBEAT_MUTATORS.has(args[0]?.toLowerCase() ?? ''),
-    confirmPreview: (args) => {
-      const sub = args[0]?.toLowerCase() ?? '';
-      const name = args[1] ?? '<agent>';
-      return HEARTBEAT_MUTATORS.has(sub) ? `${sub} heartbeat for agent ${name}` : null;
+  heartbeat: remote(
+    'heartbeat',
+    'Heartbeat: bare status (read), `enable|disable <agent>` (gated)',
+    'powerful',
+    {
+      shouldConfirm: (args) => HEARTBEAT_MUTATORS.has(args[0]?.toLowerCase() ?? ''),
+      confirmPreview: (args) => {
+        const sub = args[0]?.toLowerCase() ?? '';
+        const name = args[1] ?? '<agent>';
+        return HEARTBEAT_MUTATORS.has(sub) ? `${sub} heartbeat for agent ${name}` : null;
+      },
     },
-  }),
+  ),
 
   // ── Phase 4: retype-tier (always-on exact-line confirmation) ─────
-  delete: remote('delete', 'Delete agent(s): `:delete <name>` | `:delete *` | `:delete --team <name>`', {
-    shouldRetype: () => true,
-    confirmPreview: (args) => {
-      const first = args[0];
-      if (!first) return 'delete (no args — will error)';
-      if (first === '*') return 'DELETE ALL agents in the active team';
-      if (first === '--team') {
-        const t = args[1];
-        return t ? `DELETE ALL agents in team ${t}` : 'delete --team (no team name)';
-      }
-      return `delete agent ${first}`;
+  delete: remote(
+    'delete',
+    'Delete agent(s): `:delete <name>` | `:delete *` | `:delete --team <name>`',
+    'destructive',
+    {
+      shouldRetype: () => true,
+      confirmPreview: (args) => {
+        const first = args[0];
+        if (!first) return 'delete (no args — will error)';
+        if (first === '*') return 'DELETE ALL agents in the active team';
+        if (first === '--team') {
+          const t = args[1];
+          return t ? `DELETE ALL agents in team ${t}` : 'delete --team (no team name)';
+        }
+        return `delete agent ${first}`;
+      },
     },
-  }),
-  cancel: remote('cancel', "Cancel an agent's running query: `:cancel <agent>`", {
+  ),
+  cancel: remote('cancel', "Cancel an agent's running query: `:cancel <agent>`", 'destructive', {
     shouldRetype: () => true,
     confirmPreview: (args) =>
       args[0] ? `cancel running query on agent ${args[0]}` : 'cancel (no args — will error)',
   }),
-  clear: remote('clear', "Clear an agent's session: `:clear <agent>`", {
+  clear: remote('clear', "Clear an agent's session: `:clear <agent>`", 'destructive', {
     shouldRetype: () => true,
     confirmPreview: (args) =>
       args[0] ? `clear session on agent ${args[0]}` : 'clear (no args — will error)',
   }),
-  'sync-wallets': remote('sync-wallets', 'Bulk-sync multi-chain wallet addresses for all registered agents', {
-    shouldRetype: () => true,
-    confirmPreview: () => 'sync wallet addresses for every registered agent in the team',
-  }),
+  'sync-wallets': remote(
+    'sync-wallets',
+    'Bulk-sync multi-chain wallet addresses for all registered agents',
+    'destructive',
+    {
+      shouldRetype: () => true,
+      confirmPreview: () => 'sync wallet addresses for every registered agent in the team',
+    },
+  ),
 };
 
 export function lookupCommand(name: string): CommandSpec | null {
@@ -217,6 +279,25 @@ export function confirmationLevel(spec: CommandSpec, args: string[]): Confirmati
 // the raw command line in the rendering layer.
 export function commandConfirmPreview(spec: CommandSpec, args: string[]): string | null {
   return spec.confirmPreview ? spec.confirmPreview(args) : null;
+}
+
+// Phase 5 helper: ordered iteration over all catalog entries grouped
+// by tier, used by the help view. Tiers are returned in increasing
+// risk order (safe, powerful, destructive); commands within each tier
+// are sorted alphabetically. Sourcing from the catalog (rather than a
+// hand-maintained list) is mandated by the Phase 5 brief.
+export function catalogEntriesByTier(): Record<RiskTier, CommandSpec[]> {
+  const out: Record<RiskTier, CommandSpec[]> = {
+    safe: [],
+    powerful: [],
+    destructive: [],
+  };
+  for (const name of knownCommandNames()) {
+    const spec = lookupCommand(name);
+    if (!spec) continue;
+    out[spec.tier].push(spec);
+  }
+  return out;
 }
 
 // Splits a raw input line (with or without leading `:` / `/`) into
