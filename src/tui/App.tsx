@@ -21,8 +21,8 @@ import { CommandBar } from './components/CommandBar.js';
 import { CommandResultView } from './components/CommandResultView.js';
 import {
   commandConfirmPreview,
-  commandRequiresConfirmation,
   completeCommand,
+  confirmationLevel,
   knownCommandNames,
   lookupCommand,
   parseCommandLine,
@@ -163,9 +163,18 @@ export function App({ staticMode = false }: AppProps = {}): React.ReactElement {
   const [commandResultScroll, setCommandResultScroll] = useState(0);
   const [commandError, setCommandError] = useState<string | null>(null);
   const [commandRunning, setCommandRunning] = useState(false);
-  // commandPending: a confirm-gated command is staged. Y dispatches it,
+  // commandPending: a Y/N-gated command is staged. Y dispatches it,
   // N or Esc discards. Holds the raw line + preview line for rendering.
   const [commandPending, setCommandPending] = useState<{ raw: string; preview: string } | null>(null);
+  // commandRetype (Phase 4): a retype-gated command is staged. The
+  // user must type the exact raw line back before Enter dispatches.
+  // mismatchSeen drives the inline error after the first wrong submit.
+  const [commandRetype, setCommandRetype] = useState<{
+    expected: string;
+    preview: string;
+    typed: string;
+    mismatchSeen: boolean;
+  } | null>(null);
 
   // Cooldown tick runs on news AND agents so the news-freshness dot in
   // the agents table colours against the same 10s epoch rather than a
@@ -948,6 +957,43 @@ export function App({ staticMode = false }: AppProps = {}): React.ReactElement {
         }
         return; // swallow everything else
       }
+      // Retype prompt (Phase 4) — owns every keystroke. Enter checks
+      // for an exact match against the expected line; mismatch clears
+      // the typed buffer and surfaces an inline error inside the
+      // prompt box. Esc cancels at any time. Tab is swallowed (no
+      // completion in retype mode — that would defeat the gate).
+      if (commandRetype) {
+        if (key.ctrl && input === 'c') {
+          exit();
+          return;
+        }
+        if (key.escape) {
+          setCommandRetype(null);
+          return;
+        }
+        if (key.return) {
+          if (commandRetype.typed === commandRetype.expected) {
+            const expected = commandRetype.expected;
+            setCommandRetype(null);
+            void runCommand(expected);
+          } else {
+            setCommandRetype((c) => (c ? { ...c, typed: '', mismatchSeen: true } : c));
+          }
+          return;
+        }
+        if (key.backspace || key.delete) {
+          setCommandRetype((c) => (c ? { ...c, typed: c.typed.slice(0, -1) } : c));
+          return;
+        }
+        if (key.tab) {
+          return; // explicitly no completion in retype mode
+        }
+        if (input && !key.ctrl && !key.meta) {
+          setCommandRetype((c) => (c ? { ...c, typed: c.typed + input } : c));
+        }
+        return;
+      }
+
       // Confirmation prompt (Phase 3) — owns every keystroke until the
       // user picks Y/N or hits Esc. Y dispatches the staged command;
       // N / Esc / Ctrl+C discard it. Ctrl+C also exits the app, matching
@@ -989,14 +1035,25 @@ export function App({ staticMode = false }: AppProps = {}): React.ReactElement {
           setCommandHistoryIndex(null);
           setCommandMode(false);
           setCommandBuffer('');
-          // Phase 3 gate: parse and check whether the resolved spec
-          // requires confirmation. Stage the raw line in commandPending
-          // when so; otherwise dispatch immediately (Phase 1/2 path).
+          // Phase 3/4 gate: parse and check the spec's confirmation
+          // tier. Retype short-circuits Y/N when both predicates fire,
+          // so the user only sees the higher-tier prompt.
           const parsed = parseCommandLine(raw);
           const spec = parsed ? lookupCommand(parsed.name) : null;
-          if (parsed && spec && commandRequiresConfirmation(spec, parsed.args)) {
-            const preview = commandConfirmPreview(spec, parsed.args) ?? raw;
-            setCommandPending({ raw, preview });
+          const level = parsed && spec ? confirmationLevel(spec, parsed.args) : 'none';
+          if (level === 'retype' && parsed && spec) {
+            setCommandRetype({
+              expected: raw,
+              preview: commandConfirmPreview(spec, parsed.args) ?? raw,
+              typed: '',
+              mismatchSeen: false,
+            });
+            setCommandError(null);
+          } else if (level === 'yn' && parsed && spec) {
+            setCommandPending({
+              raw,
+              preview: commandConfirmPreview(spec, parsed.args) ?? raw,
+            });
             setCommandError(null);
           } else {
             void runCommand(raw);
@@ -1532,6 +1589,26 @@ export function App({ staticMode = false }: AppProps = {}): React.ReactElement {
       {commandError ? (
         <Box paddingX={1}>
           <Text color="red" wrap="truncate-end">! {commandError}</Text>
+        </Box>
+      ) : null}
+      {commandRetype ? (
+        <Box flexDirection="column" borderStyle="round" borderColor="red" paddingX={1}>
+          <Text bold color="red">Retype to confirm</Text>
+          <Text wrap="truncate-end">{commandRetype.preview}</Text>
+          <Box>
+            <Text dimColor>type exactly: </Text>
+            <Text color="yellow">{commandRetype.expected}</Text>
+          </Box>
+          <Box>
+            <Text>› </Text>
+            <Text>{commandRetype.typed}</Text>
+            <Text inverse> </Text>
+          </Box>
+          {commandRetype.mismatchSeen ? (
+            <Text color="red">! exact match required — Esc to cancel</Text>
+          ) : (
+            <Text dimColor>Enter to confirm · Esc to cancel</Text>
+          )}
         </Box>
       ) : null}
       {commandPending ? (

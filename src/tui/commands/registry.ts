@@ -27,18 +27,26 @@ export interface CommandSpec {
   // and the user should see a Y/N prompt before dispatch. Absent or
   // returning false → run immediately (Phase 1/2 behavior).
   shouldConfirm?: (args: string[]) => boolean;
-  // One-line preview shown under the prompt to make destructive ops
-  // self-documenting (e.g., `rebuild agent foo`). Absent or returning
-  // null → renderer falls back to the raw command line.
+  // Phase 4 escalation. Returns true for high-risk commands that must
+  // require the user to retype the exact command line before dispatch.
+  // Retype takes precedence over Y/N when both predicates fire, so
+  // there is no double-prompt — the user sees the retype prompt only.
+  shouldRetype?: (args: string[]) => boolean;
+  // One-line preview shown under either prompt to make the op
+  // self-documenting (e.g., `delete agent foo`, `cancel running query
+  // on agent foo`). Absent or returning null → renderer falls back to
+  // the raw command line.
   confirmPreview?: (args: string[]) => string | null;
 }
+
+export type ConfirmationLevel = 'none' | 'yn' | 'retype';
 
 // Build a CommandSpec that forwards to the manager's `/remote` endpoint
 // using the action name plus whatever args the user typed after it.
 function remote(
   name: string,
   description: string,
-  extras: Pick<CommandSpec, 'shouldConfirm' | 'confirmPreview'> = {},
+  extras: Pick<CommandSpec, 'shouldConfirm' | 'shouldRetype' | 'confirmPreview'> = {},
 ): CommandSpec {
   return {
     name,
@@ -73,6 +81,9 @@ const SCHEDULE_MUTATORS = new Set(['add', 'pause', 'resume', 'remove']);
 const TASK_MUTATORS = new Set(['create', 'claim', 'done', 'remove', 'delete']);
 const AGENT_MUTATORS = new Set(['rebuild', 'start', 'stop', 'wallet']);
 const HEARTBEAT_MUTATORS = new Set(['enable', 'disable']);
+// Phase 4: subcommands that escalate from Y/N to retype.
+const SCHEDULE_RETYPE = new Set(['remove']);
+const TASK_RETYPE = new Set(['remove', 'delete']);
 
 const REGISTRY: Record<string, CommandSpec> = {
   // ── Phase 1 ──────────────────────────────────────────────────────
@@ -91,15 +102,17 @@ const REGISTRY: Record<string, CommandSpec> = {
   list: remote('list', 'Show all pending queries in the active team'),
 
   // ── Phase 2/3 hybrid: read-only by default, gated on mutator subcmds
-  schedule: remote('schedule', 'Schedules: list/show (read), add/pause/resume/remove (gated)', {
+  schedule: remote('schedule', 'Schedules: list/show (read), add/pause/resume (Y/N), remove (retype)', {
     shouldConfirm: (args) => SCHEDULE_MUTATORS.has(args[0]?.toLowerCase() ?? ''),
+    shouldRetype: (args) => SCHEDULE_RETYPE.has(args[0]?.toLowerCase() ?? ''),
     confirmPreview: (args) =>
       SCHEDULE_MUTATORS.has(args[0]?.toLowerCase() ?? '')
         ? `schedule ${args.join(' ')}`
         : null,
   }),
-  task: remote('task', 'Tasks: list/show (read), create/claim/done/remove (gated)', {
+  task: remote('task', 'Tasks: list/show (read), create/claim/done (Y/N), remove/delete (retype)', {
     shouldConfirm: (args) => TASK_MUTATORS.has(args[0]?.toLowerCase() ?? ''),
+    shouldRetype: (args) => TASK_RETYPE.has(args[0]?.toLowerCase() ?? ''),
     confirmPreview: (args) =>
       TASK_MUTATORS.has(args[0]?.toLowerCase() ?? '') ? `task ${args.join(' ')}` : null,
   }),
@@ -151,6 +164,35 @@ const REGISTRY: Record<string, CommandSpec> = {
       return HEARTBEAT_MUTATORS.has(sub) ? `${sub} heartbeat for agent ${name}` : null;
     },
   }),
+
+  // ── Phase 4: retype-tier (always-on exact-line confirmation) ─────
+  delete: remote('delete', 'Delete agent(s): `:delete <name>` | `:delete *` | `:delete --team <name>`', {
+    shouldRetype: () => true,
+    confirmPreview: (args) => {
+      const first = args[0];
+      if (!first) return 'delete (no args — will error)';
+      if (first === '*') return 'DELETE ALL agents in the active team';
+      if (first === '--team') {
+        const t = args[1];
+        return t ? `DELETE ALL agents in team ${t}` : 'delete --team (no team name)';
+      }
+      return `delete agent ${first}`;
+    },
+  }),
+  cancel: remote('cancel', "Cancel an agent's running query: `:cancel <agent>`", {
+    shouldRetype: () => true,
+    confirmPreview: (args) =>
+      args[0] ? `cancel running query on agent ${args[0]}` : 'cancel (no args — will error)',
+  }),
+  clear: remote('clear', "Clear an agent's session: `:clear <agent>`", {
+    shouldRetype: () => true,
+    confirmPreview: (args) =>
+      args[0] ? `clear session on agent ${args[0]}` : 'clear (no args — will error)',
+  }),
+  'sync-wallets': remote('sync-wallets', 'Bulk-sync multi-chain wallet addresses for all registered agents', {
+    shouldRetype: () => true,
+    confirmPreview: () => 'sync wallet addresses for every registered agent in the team',
+  }),
 };
 
 export function lookupCommand(name: string): CommandSpec | null {
@@ -161,11 +203,14 @@ export function knownCommandNames(): string[] {
   return Object.keys(REGISTRY).sort();
 }
 
-// Determine whether dispatch should be gated behind a Y/N prompt.
-// Centralised here so the App-side handler doesn't have to know about
-// per-spec predicates — it can call this with the parsed args.
-export function commandRequiresConfirmation(spec: CommandSpec, args: string[]): boolean {
-  return spec.shouldConfirm ? spec.shouldConfirm(args) : false;
+// Phase 4: tri-state gate. Retype takes precedence over Y/N when both
+// predicates fire so there is no double-prompt — the user only sees
+// the higher-tier prompt. Centralised here so the App-side handler
+// doesn't have to know per-spec predicates.
+export function confirmationLevel(spec: CommandSpec, args: string[]): ConfirmationLevel {
+  if (spec.shouldRetype && spec.shouldRetype(args)) return 'retype';
+  if (spec.shouldConfirm && spec.shouldConfirm(args)) return 'yn';
+  return 'none';
 }
 
 // One-line preview text under the Y/N prompt, or null to fall back to
