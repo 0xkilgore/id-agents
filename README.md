@@ -294,7 +294,7 @@ See [Scheduling Plan](./docs/SCHEDULING_PLAN.md) for the full design.
 ```
 /agent <name> rebuild       # Rebuild a single agent
 /agents                     # List all agents
-/agents rebuild             # Rebuild all agents
+/agents rebuild --confirm   # Rebuild all eligible local Claude agents
 /ask <agent> <message>      # Talk to agent (continues session)
 /hey <agent> <message>      # Alias for /ask
 /ask * <message>            # Broadcast to all agents
@@ -359,7 +359,7 @@ This means any Claude Code instance on the same machine can coordinate with your
 **Available Commands:**
 - `/agent <name> rebuild` - Rebuild a single agent
 - `/agents` - List all agents
-- `/agents rebuild` - Rebuild all agents
+- `/agents rebuild --confirm` - Rebuild all eligible local Claude agents
 - `/ask <name> <message>` - Send message to agent
 - `/clear [agent]` - Clear session
 - `/delete <name>` - Delete agent

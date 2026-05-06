@@ -79,7 +79,7 @@ const HELP_ITEMS: Array<{ cmd: string; desc: string; indent?: boolean }> = [
   { cmd: '/agent <name> wallet provision', desc: 'Provision an OWS wallet for one agent' },
   { cmd: '/agents', desc: 'List all agents' },
   { cmd: '/agents probe', desc: 'End-to-end dispatch probe of every running agent' },
-  { cmd: '/agents rebuild', desc: 'Rebuild all agents' },
+  { cmd: '/agents rebuild --confirm', desc: 'Rebuild all eligible local Claude agents' },
   { cmd: '/ask [/hey] <agent> <msg>', desc: 'Talk to agent (continues session)' },
   { cmd: '/ask * <msg>', desc: 'Broadcast to all agents' },
   { cmd: '/clear [agent]', desc: 'Clear session (start fresh)' },
@@ -1579,7 +1579,7 @@ async function handleLine(line: string) {
 
     if (!['start', 'stop', 'rebuild', 'save', 'reset', 'probe'].includes(action)) {
       console.log(`\n${colors.red}❌ Usage: /agents <start|stop|rebuild|reset|save|probe>${colors.reset}`);
-      console.log(`${colors.gray}  /agents rebuild [--regenerate-config]  - Rebuild all agents; optionally rewrite configs/<team>.yaml from DB${colors.reset}`);
+      console.log(`${colors.gray}  /agents rebuild --confirm [--regenerate-config]  - Rebuild all eligible local Claude agents; optionally rewrite configs/<team>.yaml from DB${colors.reset}`);
       console.log(`${colors.gray}  /agents reset [config-file]  - Reset agents with plugins from config${colors.reset}`);
       console.log(`${colors.gray}  /agents probe  - End-to-end dispatch probe of every running agent${colors.reset}\n`);
       rl.prompt();

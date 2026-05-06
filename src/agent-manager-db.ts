@@ -957,6 +957,24 @@ export class AgentManagerDb {
     return this.db.agents.list(teamId, includeAutomator);
   }
 
+  private async rebuildLocalClaudeAgent(
+    teamId: string,
+    teamName: string,
+    agent: AgentRow,
+  ): Promise<{ success: boolean; pid?: number; logFile?: string; error?: string }> {
+    await this.killAgentProcess(agent.port);
+    await new Promise(r => setTimeout(r, 1000));
+    const spawnResult = await this.spawnLocalAgentProcess(teamId, teamName, {
+      name: agent.name, id: agent.id, port: agent.port,
+      model: agent.model, workingDirectory: agent.working_directory ?? undefined,
+      tokenId: agent.token_id ?? undefined
+    });
+    if (spawnResult.success) {
+      await this.db.agents.updateStatus(agent.id, 'running');
+    }
+    return spawnResult;
+  }
+
   /**
    * Resolve agents matching an identifier pattern
    * Returns all matches for ambiguity detection
@@ -5257,6 +5275,47 @@ export class AgentManagerDb {
           const running = all.filter((a) => a.status === 'running');
           return this.probeAgentsViaTalk(teamName, running);
         }
+        if (sub === 'rebuild') {
+          if (!args.includes('--confirm')) {
+            return { ok: false, error: 'Usage: /agents rebuild --confirm' };
+          }
+
+          const agents = await this.dbListAgents(teamId);
+          const results: Array<{ name: string; status: 'rebuilt' | 'skipped' | 'failed'; reason: string }> = [];
+
+          for (const agent of agents) {
+            if (isRemoteEndpointRuntime(agent.runtime)) {
+              results.push({ name: agent.name, status: 'skipped', reason: 'lifecycle_not_supported_for_remote' });
+              continue;
+            }
+            if (agent.type !== 'claude') {
+              results.push({ name: agent.name, status: 'skipped', reason: 'only_claude_agents_can_be_rebuilt' });
+              continue;
+            }
+
+            try {
+              const spawnResult = await this.rebuildLocalClaudeAgent(teamId, teamName, agent);
+              if (spawnResult.success) {
+                results.push({ name: agent.name, status: 'rebuilt', reason: 'rebuilt' });
+              } else {
+                results.push({ name: agent.name, status: 'failed', reason: spawnResult.error || 'spawn_failed' });
+              }
+            } catch (err: any) {
+              results.push({ name: agent.name, status: 'failed', reason: err?.message || String(err) });
+            }
+          }
+
+          return {
+            ok: true,
+            result: {
+              action: 'agents-rebuild',
+              rebuilt: results.filter(r => r.status === 'rebuilt').length,
+              skipped: results.filter(r => r.status === 'skipped').length,
+              failed: results.filter(r => r.status === 'failed').length,
+              agents: results
+            }
+          };
+        }
         const agents = await this.dbListAgents(teamId);
         return {
           ok: true,
@@ -6952,15 +7011,8 @@ export class AgentManagerDb {
               return { ok: true, result: { action: 'stopped', name: agent.name, ...killResult, queriesCancelled: cancelled } };
             }
             case 'rebuild': {
-              await this.killAgentProcess(agent.port);
-              await new Promise(r => setTimeout(r, 1000));
-              const spawnResult = await this.spawnLocalAgentProcess(teamId, teamName, {
-                name: agent.name, id: agent.id, port: agent.port,
-                model: agent.model, workingDirectory: agent.working_directory ?? undefined,
-                tokenId: agent.token_id ?? undefined
-              });
+              const spawnResult = await this.rebuildLocalClaudeAgent(teamId, teamName, agent);
               if (spawnResult.success) {
-                await this.db.agents.updateStatus(agent.id, 'running');
                 return { ok: true, result: { action: 'rebuilt', name: agent.name, pid: spawnResult.pid, logFile: spawnResult.logFile } };
               } else {
                 return { ok: false, error: `Failed to rebuild ${agent.name}: ${spawnResult.error}` };
