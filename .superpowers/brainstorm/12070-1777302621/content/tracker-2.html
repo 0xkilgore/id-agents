@@ -1,0 +1,43 @@
+<h2>Topic A — Decision tracker</h2>
+<p class="subtitle">Locking decisions one at a time. Continuing in terminal.</p>
+
+<div class="section">
+  <div style="display:grid;grid-template-columns:auto 1fr auto;gap:12px 16px;align-items:start;">
+
+    <div style="font-size:20px;line-height:1;">✅</div>
+    <div>
+      <div class="label" style="margin-bottom:4px;">1a · Who runs verification?</div>
+      <div><strong>Hybrid A+B</strong> — agent self-verifies as last step (fail-fast), Sentinel re-verifies periodically (drift catcher).</div>
+    </div>
+    <div style="color:var(--accent);font-weight:600;">LOCKED</div>
+
+    <div style="font-size:20px;line-height:1;">✅</div>
+    <div>
+      <div class="label" style="margin-bottom:4px;">1b · Where does the verification contract live?</div>
+      <div><strong>C · Dispatch protocol</strong> — <code>verify_signal</code> field in <code>/agent-done</code> payload. Zero drift, per-task granularity, fixes manager-direct invisibility as a side effect.</div>
+    </div>
+    <div style="color:var(--accent);font-weight:600;">LOCKED</div>
+
+    <div style="font-size:20px;line-height:1;">→</div>
+    <div>
+      <div class="label" style="margin-bottom:4px;">1c · Shape of the verify_signal (URL? bash? typed schema?)</div>
+      <div style="color:var(--text-subtle);">Discussing now in terminal</div>
+    </div>
+    <div style="color:var(--text-subtle);">CURRENT</div>
+
+    <div style="font-size:20px;line-height:1;opacity:0.4;">○</div>
+    <div style="opacity:0.6;">
+      <div class="label" style="margin-bottom:4px;">2 · In-flight visibility (a/b/c)</div>
+      <div style="color:var(--text-subtle);">Pending</div>
+    </div>
+    <div style="color:var(--text-subtle);opacity:0.6;">PENDING</div>
+
+    <div style="font-size:20px;line-height:1;opacity:0.4;">○</div>
+    <div style="opacity:0.6;">
+      <div class="label" style="margin-bottom:4px;">3 · Liveness / watchdog (a/b/c)</div>
+      <div style="color:var(--text-subtle);">Pending</div>
+    </div>
+    <div style="color:var(--text-subtle);opacity:0.6;">PENDING</div>
+
+  </div>
+</div>

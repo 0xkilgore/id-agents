@@ -1,0 +1,43 @@
+<h2>Topic A — Decision tracker</h2>
+<p class="subtitle">Locking decisions one at a time. Continuing in terminal.</p>
+
+<div class="section">
+  <div style="display:grid;grid-template-columns:auto 1fr auto;gap:12px 16px;align-items:start;">
+
+    <div style="font-size:20px;line-height:1;">✅</div>
+    <div>
+      <div class="label" style="margin-bottom:4px;">1a · Who runs verification?</div>
+      <div><strong>Hybrid A+B</strong> — agent self-verifies (fail-fast), Sentinel re-verifies periodically.</div>
+    </div>
+    <div style="color:var(--accent);font-weight:600;">LOCKED</div>
+
+    <div style="font-size:20px;line-height:1;">✅</div>
+    <div>
+      <div class="label" style="margin-bottom:4px;">1b · Where does the contract live?</div>
+      <div><strong>C · Dispatch protocol</strong> — <code>verify_signal</code> field in <code>/agent-done</code> payload.</div>
+    </div>
+    <div style="color:var(--accent);font-weight:600;">LOCKED</div>
+
+    <div style="font-size:20px;line-height:1;">✅</div>
+    <div>
+      <div class="label" style="margin-bottom:4px;">1c · Shape of verify_signal</div>
+      <div><strong>B · Typed schema (5 types)</strong> + default DoD = <code>desk_tag</code>.</div>
+    </div>
+    <div style="color:var(--accent);font-weight:600;">LOCKED</div>
+
+    <div style="font-size:20px;line-height:1;">✅</div>
+    <div>
+      <div class="label" style="margin-bottom:4px;">2 · In-flight visibility</div>
+      <div>New <strong>dispatches</strong> table in id-agents.db. Primary surface: <code>dashboard.caneyfork.dev/in-flight</code> (HTML, filterable, retry/kill actions). Secondary: Desk "🚀 In flight" section.</div>
+    </div>
+    <div style="color:var(--accent);font-weight:600;">LOCKED</div>
+
+    <div style="font-size:20px;line-height:1;">→</div>
+    <div>
+      <div class="label" style="margin-bottom:4px;">3 · Liveness / watchdog</div>
+      <div style="color:var(--text-subtle);">Discussing now in terminal — how do we catch wedges?</div>
+    </div>
+    <div style="color:var(--text-subtle);">CURRENT</div>
+
+  </div>
+</div>

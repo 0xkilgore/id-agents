@@ -1,0 +1,48 @@
+<h2>Topic A — All decisions locked</h2>
+<p class="subtitle">Moving to design synthesis + approval. Continuing in terminal.</p>
+
+<div class="section">
+  <div style="display:grid;grid-template-columns:auto 1fr auto;gap:12px 16px;align-items:start;">
+
+    <div style="font-size:20px;line-height:1;">✅</div>
+    <div>
+      <div class="label" style="margin-bottom:4px;">1a · Verification owners</div>
+      <div>Hybrid A+B — agent self-verify (fail-fast) + Sentinel re-verify (drift catcher)</div>
+    </div>
+    <div style="color:var(--accent);font-weight:600;">LOCKED</div>
+
+    <div style="font-size:20px;line-height:1;">✅</div>
+    <div>
+      <div class="label" style="margin-bottom:4px;">1b · Contract location</div>
+      <div>In dispatch protocol — <code>verify_signal</code> field in <code>/agent-done</code></div>
+    </div>
+    <div style="color:var(--accent);font-weight:600;">LOCKED</div>
+
+    <div style="font-size:20px;line-height:1;">✅</div>
+    <div>
+      <div class="label" style="margin-bottom:4px;">1c · Verify_signal shape</div>
+      <div>Typed schema · 5 types · default = <code>desk_tag</code> within 24h</div>
+    </div>
+    <div style="color:var(--accent);font-weight:600;">LOCKED</div>
+
+    <div style="font-size:20px;line-height:1;">✅</div>
+    <div>
+      <div class="label" style="margin-bottom:4px;">2 · In-flight visibility</div>
+      <div>New <code>dispatches</code> table → <code>dashboard.caneyfork.dev/in-flight</code> + Desk summary</div>
+    </div>
+    <div style="color:var(--accent);font-weight:600;">LOCKED</div>
+
+    <div style="font-size:20px;line-height:1;">✅</div>
+    <div>
+      <div class="label" style="margin-bottom:4px;">3 · Liveness watchdog</div>
+      <div>Hybrid A+C — external heartbeats (process-layer) + dispatch-stale watch · plus Bash hard timeout + banner renderer fix</div>
+    </div>
+    <div style="color:var(--accent);font-weight:600;">LOCKED</div>
+
+  </div>
+
+  <div style="margin-top:24px;padding:16px;border-left:3px solid var(--accent);background:var(--bg-subtle);">
+    <p class="label" style="margin-bottom:8px;">Next</p>
+    <p style="margin:0;">Synthesize the design → push architecture diagram → get approval → write spec doc.</p>
+  </div>
+</div>

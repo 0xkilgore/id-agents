@@ -1,0 +1,104 @@
+<h2>Architecture — DoD & Dispatch Observability</h2>
+<p class="subtitle">Data flow across the components. Read top → bottom.</p>
+
+<div class="mockup">
+  <div class="mockup-header">System diagram</div>
+  <div class="mockup-body" style="padding:24px;background:#0a1620;">
+
+    <!-- Row 1: Dispatchers -->
+    <div style="text-align:center;margin-bottom:8px;">
+      <span class="label" style="color:#8aa;">Dispatchers (call POST /dispatches first, then /talk)</span>
+    </div>
+    <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:24px;">
+      <div style="padding:12px;border:1px solid #2d4a5f;border-radius:6px;background:#142838;text-align:center;color:#cde;font-size:13px;">
+        <div style="font-weight:600;">Manager-direct</div>
+        <div style="font-size:11px;color:#8aa;margin-top:2px;">Chris's IDE/app</div>
+      </div>
+      <div style="padding:12px;border:1px solid #2d4a5f;border-radius:6px;background:#142838;text-align:center;color:#cde;font-size:13px;">
+        <div style="font-weight:600;">Cane poller</div>
+        <div style="font-size:11px;color:#8aa;margin-top:2px;">Inbound email/TG</div>
+      </div>
+      <div style="padding:12px;border:1px solid #2d4a5f;border-radius:6px;background:#142838;text-align:center;color:#cde;font-size:13px;">
+        <div style="font-weight:600;">Scheduler</div>
+        <div style="font-size:11px;color:#8aa;margin-top:2px;">Calendar fires</div>
+      </div>
+      <div style="padding:12px;border:1px solid #2d4a5f;border-radius:6px;background:#142838;text-align:center;color:#cde;font-size:13px;">
+        <div style="font-weight:600;">Agent → Agent</div>
+        <div style="font-size:11px;color:#8aa;margin-top:2px;">Cross-dispatch</div>
+      </div>
+    </div>
+
+    <!-- Arrows down -->
+    <div style="text-align:center;color:#5fb3e0;font-size:20px;line-height:0.5;">↓ ↓ ↓ ↓</div>
+    <div style="text-align:center;color:#5fb3e0;font-size:11px;margin-top:4px;margin-bottom:12px;">POST /dispatches → returns dispatch_id, then /talk</div>
+
+    <!-- Row 2: dispatches table -->
+    <div style="padding:16px;border:2px solid #5fb3e0;border-radius:8px;background:#1a3a52;text-align:center;color:#fff;margin-bottom:24px;">
+      <div style="font-weight:700;font-size:15px;">📋 dispatches table (id-agents.db)</div>
+      <div style="font-size:12px;color:#cde;margin-top:6px;font-family:monospace;">id · dispatched_at · from_actor · to_agent · channel · message · query_id · status<br/>responded_at · response · artifact_path · verify_signal_json · verify_status · verify_last_checked</div>
+    </div>
+
+    <!-- Splits -->
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:24px;margin-bottom:24px;">
+
+      <!-- Left: Agent execution -->
+      <div>
+        <div style="text-align:center;color:#8bcd8b;font-size:18px;line-height:1;margin-bottom:8px;">↓</div>
+        <div style="padding:14px;border:1px solid #3a6e3a;border-radius:6px;background:#1a3019;color:#cde;">
+          <div style="font-weight:600;color:#8bcd8b;font-size:13px;margin-bottom:8px;">🤖 Target agent runs the work</div>
+          <div style="font-size:12px;line-height:1.5;">
+            1. Receives /talk with message<br/>
+            2. Does the work, writes artifact<br/>
+            3. <strong>Self-verifies</strong> (runs verify_signal locally as last step)<br/>
+            4. POSTs /agent-done with <code>dispatch_id</code> + <code>verify_signal</code> JSON
+          </div>
+        </div>
+
+        <div style="text-align:center;color:#8bcd8b;font-size:18px;line-height:1;margin-top:8px;margin-bottom:8px;">↓ POST /agent-done flips dispatches row</div>
+
+        <div style="padding:14px;border:1px solid #d4b87a;border-radius:6px;background:#3a2d10;color:#fce6b8;">
+          <div style="font-weight:600;color:#fce6b8;font-size:13px;margin-bottom:8px;">🛡️ Sentinel re-verifies (on schedule)</div>
+          <div style="font-size:12px;line-height:1.5;">
+            Walks rows where verify_status='pending' OR last_checked stale.<br/>
+            Re-runs verify_signal. Updates verify_status.<br/>
+            Catches drift (rollback, file deleted, deploy reverted).
+          </div>
+        </div>
+      </div>
+
+      <!-- Right: Liveness -->
+      <div>
+        <div style="padding:14px;border:1px solid #c89bda;border-radius:6px;background:#2d1a3a;color:#cde;margin-bottom:8px;">
+          <div style="font-weight:600;color:#d8a8e8;font-size:13px;margin-bottom:8px;">💓 Liveness watchdog (Hybrid A+C)</div>
+          <div style="font-size:12px;line-height:1.5;">
+            <strong>6a · External heartbeats:</strong> local-agent-server.js + launchd jobs touch <code>&lt;agent&gt;.heartbeat</code> every N min. Process-layer write — NOT from inside agent prompt. Catches process death.<br/><br/>
+            <strong>6b · Dispatch-stale watch:</strong> any row in_flight &gt; threshold → flagged wedged. Catches prompt pinning (today's sentinel).
+          </div>
+        </div>
+        <div style="padding:14px;border:1px solid #c89bda;border-radius:6px;background:#2d1a3a;color:#cde;margin-bottom:8px;">
+          <div style="font-weight:600;color:#d8a8e8;font-size:13px;margin-bottom:6px;">⏱️ Bash hard timeout (defense-in-depth)</div>
+          <div style="font-size:12px;">SIGTERM any spawned child &gt; 10–30 min. Prevents <code>until X; sleep</code> wedges.</div>
+        </div>
+        <div style="padding:14px;border:1px solid #c89bda;border-radius:6px;background:#2d1a3a;color:#cde;">
+          <div style="font-weight:600;color:#d8a8e8;font-size:13px;margin-bottom:6px;">🏷️ Banner renderer fix</div>
+          <div style="font-size:12px;">Compute current mtime age at render time. No more "3.0h" frozen for 28h.</div>
+        </div>
+      </div>
+
+    </div>
+
+    <!-- Bottom: surfaces -->
+    <div style="text-align:center;color:#5fb3e0;font-size:18px;line-height:1;margin-bottom:8px;">↓ surfaces read from dispatches + heartbeats</div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+      <div style="padding:14px;border:2px solid #5fb3e0;border-radius:6px;background:#1a3a52;color:#fff;">
+        <div style="font-weight:700;font-size:14px;">🌐 dashboard.caneyfork.dev/in-flight</div>
+        <div style="font-size:12px;color:#cde;margin-top:6px;">Primary surface — stats, filters, dispatch table, expand-for-detail. Auto-refresh 30s. Kill/Retry actions.</div>
+      </div>
+      <div style="padding:14px;border:2px solid #5fb3e0;border-radius:6px;background:#1a3a52;color:#fff;">
+        <div style="font-weight:700;font-size:14px;">📋 Desk "🚀 In flight" section</div>
+        <div style="font-size:12px;color:#cde;margin-top:6px;">Auto-generated on Desk refresh. Top 5 in-flight + last 3 closed. Links to dashboard page.</div>
+      </div>
+    </div>
+
+  </div>
+</div>

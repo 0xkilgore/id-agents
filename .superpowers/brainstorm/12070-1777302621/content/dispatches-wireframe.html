@@ -1,0 +1,169 @@
+<h2>dashboard.caneyfork.dev/in-flight</h2>
+<p class="subtitle">Wireframe — manager↔agent dispatch stream. React in terminal.</p>
+
+<div class="mockup">
+  <div class="mockup-header" style="display:flex;justify-content:space-between;align-items:center;">
+    <div>🚀 In Flight — Dispatches</div>
+    <div style="display:flex;gap:8px;font-size:12px;">
+      <span style="padding:2px 8px;background:#1e3a5f;border-radius:10px;color:#9cd1f5;">Live</span>
+      <span style="color:var(--text-subtle);">Auto-refresh 30s</span>
+    </div>
+  </div>
+  <div class="mockup-body" style="padding:0;">
+
+    <!-- Stats strip -->
+    <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:12px;padding:16px;border-bottom:1px solid var(--border);background:var(--bg-subtle);">
+      <div style="text-align:center;">
+        <div style="font-size:24px;font-weight:600;color:#5fb3e0;">3</div>
+        <div class="label" style="margin-top:2px;">In flight now</div>
+      </div>
+      <div style="text-align:center;">
+        <div style="font-size:24px;font-weight:600;color:#8bcd8b;">17</div>
+        <div class="label" style="margin-top:2px;">Closed today</div>
+      </div>
+      <div style="text-align:center;">
+        <div style="font-size:24px;font-weight:600;color:#d4b87a;">2</div>
+        <div class="label" style="margin-top:2px;">Verify failed (24h)</div>
+      </div>
+      <div style="text-align:center;">
+        <div style="font-size:24px;font-weight:600;color:var(--text);">4m 12s</div>
+        <div class="label" style="margin-top:2px;">Median latency</div>
+      </div>
+      <div style="text-align:center;">
+        <div style="font-size:24px;font-weight:600;color:#ff8888;">1</div>
+        <div class="label" style="margin-top:2px;">Wedged (>30m)</div>
+      </div>
+    </div>
+
+    <!-- Filter bar -->
+    <div style="display:flex;gap:8px;padding:12px 16px;border-bottom:1px solid var(--border);font-size:13px;align-items:center;flex-wrap:wrap;">
+      <span class="label">Filter:</span>
+      <button class="mock-button" style="font-size:12px;padding:4px 10px;">All agents ▾</button>
+      <button class="mock-button" style="font-size:12px;padding:4px 10px;">All statuses ▾</button>
+      <button class="mock-button" style="font-size:12px;padding:4px 10px;">Last 24h ▾</button>
+      <button class="mock-button" style="font-size:12px;padding:4px 10px;">Verify: any ▾</button>
+      <input class="mock-input" placeholder="Search message..." style="flex:1;min-width:160px;font-size:12px;padding:4px 8px;">
+    </div>
+
+    <!-- Table -->
+    <div style="padding:0;">
+
+      <!-- Header row -->
+      <div style="display:grid;grid-template-columns:90px 110px 120px 1fr 90px 90px 80px 70px;gap:12px;padding:8px 16px;font-size:11px;color:var(--text-subtle);text-transform:uppercase;letter-spacing:0.5px;border-bottom:1px solid var(--border);">
+        <div>Time</div>
+        <div>From</div>
+        <div>To agent</div>
+        <div>Message</div>
+        <div>Status</div>
+        <div>Verify</div>
+        <div>Duration</div>
+        <div></div>
+      </div>
+
+      <!-- Row 1 — wedged -->
+      <div style="display:grid;grid-template-columns:90px 110px 120px 1fr 90px 90px 80px 70px;gap:12px;padding:12px 16px;border-bottom:1px solid var(--border);font-size:13px;align-items:center;background:rgba(255,80,80,0.05);">
+        <div style="color:var(--text-subtle);">09:04</div>
+        <div>manager</div>
+        <div><strong>finances</strong></div>
+        <div>taxyield Debank reconcile + best-practice wiki — Debank shows $67K, dashboard $84K, fix the over-statement bug...</div>
+        <div><span style="background:#ff6666;color:#fff;padding:2px 8px;border-radius:10px;font-size:11px;">WEDGED</span></div>
+        <div style="color:var(--text-subtle);">—</div>
+        <div style="color:#ff8888;">42m</div>
+        <div><button class="mock-button" style="font-size:11px;padding:2px 8px;">Kill</button></div>
+      </div>
+
+      <!-- Row 2 — in flight -->
+      <div style="display:grid;grid-template-columns:90px 110px 120px 1fr 90px 90px 80px 70px;gap:12px;padding:12px 16px;border-bottom:1px solid var(--border);font-size:13px;align-items:center;background:rgba(95,179,224,0.05);">
+        <div style="color:var(--text-subtle);">09:31</div>
+        <div>manager</div>
+        <div><strong>cleveland-park</strong></div>
+        <div>Mansouri vision doc + email draft — Cleveland Park Farmers Market + Sundays by the River...</div>
+        <div><span style="background:#5fb3e0;color:#fff;padding:2px 8px;border-radius:10px;font-size:11px;">IN FLIGHT</span></div>
+        <div style="color:var(--text-subtle);">pending</div>
+        <div style="color:var(--text-subtle);">15m</div>
+        <div><button class="mock-button" style="font-size:11px;padding:2px 8px;">View</button></div>
+      </div>
+
+      <!-- Row 3 — in flight -->
+      <div style="display:grid;grid-template-columns:90px 110px 120px 1fr 90px 90px 80px 70px;gap:12px;padding:12px 16px;border-bottom:1px solid var(--border);font-size:13px;align-items:center;background:rgba(95,179,224,0.05);">
+        <div style="color:var(--text-subtle);">09:30</div>
+        <div>scheduler</div>
+        <div><strong>sentinel</strong></div>
+        <div>Calendar fire: 09:30 sentinel sweep — produce sentinel-report-2026-04-27-0930.md</div>
+        <div><span style="background:#5fb3e0;color:#fff;padding:2px 8px;border-radius:10px;font-size:11px;">IN FLIGHT</span></div>
+        <div style="color:var(--text-subtle);">pending</div>
+        <div style="color:var(--text-subtle);">16m</div>
+        <div><button class="mock-button" style="font-size:11px;padding:2px 8px;">View</button></div>
+      </div>
+
+      <!-- Row 4 — done verified -->
+      <div style="display:grid;grid-template-columns:90px 110px 120px 1fr 90px 90px 80px 70px;gap:12px;padding:12px 16px;border-bottom:1px solid var(--border);font-size:13px;align-items:center;">
+        <div style="color:var(--text-subtle);">09:04</div>
+        <div>manager</div>
+        <div><strong>personal</strong></div>
+        <div>Fantasy 3-tx plan + health import from Downloads — full marathon week...</div>
+        <div><span style="background:#3a6e3a;color:#cef0ce;padding:2px 8px;border-radius:10px;font-size:11px;">DONE</span></div>
+        <div><span style="background:#3a6e3a;color:#cef0ce;padding:2px 8px;border-radius:10px;font-size:11px;">✓ pass</span></div>
+        <div>16m</div>
+        <div><button class="mock-button" style="font-size:11px;padding:2px 8px;">View</button></div>
+      </div>
+
+      <!-- Row 5 — done verify failed -->
+      <div style="display:grid;grid-template-columns:90px 110px 120px 1fr 90px 90px 80px 70px;gap:12px;padding:12px 16px;border-bottom:1px solid var(--border);font-size:13px;align-items:center;background:rgba(212,184,122,0.06);">
+        <div style="color:var(--text-subtle);">08:42</div>
+        <div>cane</div>
+        <div><strong>cleveland-park</strong></div>
+        <div>Inbound CPNA sender@x.com — newsletter draft request from Marcus...</div>
+        <div><span style="background:#3a6e3a;color:#cef0ce;padding:2px 8px;border-radius:10px;font-size:11px;">DONE</span></div>
+        <div><span style="background:#a87a1f;color:#fce6b8;padding:2px 8px;border-radius:10px;font-size:11px;">✗ fail</span></div>
+        <div>8m</div>
+        <div><button class="mock-button" style="font-size:11px;padding:2px 8px;">Retry</button></div>
+      </div>
+
+      <!-- Row 6 — done -->
+      <div style="display:grid;grid-template-columns:90px 110px 120px 1fr 90px 90px 80px 70px;gap:12px;padding:12px 16px;border-bottom:1px solid var(--border);font-size:13px;align-items:center;">
+        <div style="color:var(--text-subtle);">08:15</div>
+        <div>scheduler</div>
+        <div><strong>sentinel</strong></div>
+        <div>Calendar fire: 08:00 morning sweep</div>
+        <div><span style="background:#3a6e3a;color:#cef0ce;padding:2px 8px;border-radius:10px;font-size:11px;">DONE</span></div>
+        <div><span style="background:#3a6e3a;color:#cef0ce;padding:2px 8px;border-radius:10px;font-size:11px;">✓ pass</span></div>
+        <div>2m 40s</div>
+        <div><button class="mock-button" style="font-size:11px;padding:2px 8px;">View</button></div>
+      </div>
+
+    </div>
+
+    <!-- Expanded row example -->
+    <div style="margin:16px;padding:16px;border:1px solid var(--accent);border-radius:6px;background:var(--bg-subtle);">
+      <div class="label" style="margin-bottom:8px;color:var(--accent);">Expanded view (clicking a row)</div>
+      <div style="font-size:12px;line-height:1.6;">
+        <div><strong>Dispatch #4173</strong> · personal · 09:04 → 09:20 (16m)</div>
+        <div style="margin-top:6px;color:var(--text-subtle);">From: manager · Channel: talk · query_id: query_1777299862188_2gijhpd</div>
+        <div style="margin-top:10px;"><strong>Message:</strong></div>
+        <pre style="margin:4px 0;padding:8px;background:#0a1620;border-radius:4px;font-size:11px;overflow:auto;">Two ASKs in one dispatch.
+
+ASK 1 — Fantasy 3-tx plan for Week 6 (Mon 4/28 - Sun 5/4)...
+ASK 2 — Health data import from ~/Downloads/HealthAll_*.zip...</pre>
+        <div style="margin-top:10px;"><strong>Response:</strong> "Both done. ASK 1 → fantasy-baseball-3tx-strategy-2026-04-27.md. ASK 2 → health-import-2026-04-27.md..."</div>
+        <div style="margin-top:10px;"><strong>Artifacts:</strong></div>
+        <ul style="margin:4px 0;padding-left:20px;">
+          <li>~/Dropbox/Obsidian/personal-meetings/fantasy-baseball-3tx-strategy-2026-04-27.md</li>
+          <li>~/Dropbox/Obsidian/personal/health-import-2026-04-27.md</li>
+        </ul>
+        <div style="margin-top:10px;"><strong>Verify signal:</strong></div>
+        <pre style="margin:4px 0;padding:8px;background:#0a1620;border-radius:4px;font-size:11px;">{
+  "type": "all",
+  "checks": [
+    {"type": "http_get", "url": "https://health.caneyfork.dev/run/2026-04-25", "must_contain": "26.76"},
+    {"type": "desk_tag", "artifact_path": "...health-import-2026-04-27.md", "within_hours": 24}
+  ]
+}</pre>
+        <div style="margin-top:10px;color:#8bcd8b;"><strong>✓ Verify pass</strong> — last checked by sentinel 09:42 (both checks passed)</div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<p class="subtitle" style="margin-top:16px;">Desk gets a compact summary section that links to this page. The page itself is the place to dig in.</p>

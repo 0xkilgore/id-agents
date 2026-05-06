@@ -2,7 +2,7 @@
 
 **Date:** 2026-04-29
 **Author:** manager (brainstorm with Chris, 2026-04-28 → 2026-04-29)
-**Status:** ready for CTO review per Spec 054 protocol
+**Status:** revised 2026-04-30 after CTO bounce — patched two blocking issues (Section 4b stale dispatch fields + search execution contract). Ready for CTO re-review per Spec 054.
 **Implementation phase:** Phase 1 (markdown stack). Vetra parallel build follows separately.
 
 ## Goal
@@ -175,21 +175,39 @@ This frame anchors every design decision. If a feature pushes the dashboard towa
 - Single search input at the top of the dashboard (header bar level, above the Today panel)
 - Placeholder text: "Search to-dos, dispatches, artifacts…"
 - Submit (Enter or click) hits a new `/api/search?q=<query>` Vercel function
-- Backend (Python or Node serverless) greps across:
-  - `~/Dropbox/Code/*/to-do.md` (open + completed tasks)
-  - SQLite `dispatches` table (Spec 053) — task_title, dispatch_id, agent, status, body
-  - `~/Dropbox/Code/cane/taskview/delivery-log.md` (artifact deliveries)
-  - Optionally: `~/Dropbox/Obsidian/sentinel/*.md` (recent sentinel reports)
+- Backend greps across three explicit sources:
+  - `~/Dropbox/Code/*/to-do.md` (open + completed tasks) — file grep
+  - SQLite `dispatches` table (Spec 053) — query against the **canonical Spec 053 columns**: `id`, `query_id`, `from_actor`, `to_agent`, `channel`, `status`, `dispatched_at`, `responded_at`, `message`, `response`, `artifact_path`, `verify_status`. The match-fields for free-text search are: `message`, `response`, `artifact_path`, `to_agent`, `from_actor`. Do NOT reference `task_title`, `agent`, `body`, `created_at`, `completed_at` — those columns do not exist in the live schema. Schema source of truth: [sqlite.ts:150-168](src/db/migrations/sqlite.ts:150).
+  - `~/Dropbox/Code/cane/taskview/delivery-log.md` (artifact deliveries) — file grep
+  - Optionally: `~/Dropbox/Obsidian/sentinel/*.md` (recent sentinel reports) — file grep
 - Returns ranked results: source (to-do / dispatch / artifact), match snippet, last-touched date, link to source
 - Results render in a panel below the search box (not a modal — keeps glance flow). Click result → opens the underlying file or jumps to the relevant Desk section.
 
+**Backend execution contract (Phase 1):**
+
+The current SSH bridge from Vercel→M4 is **hard-pinned to `mutate.py`** by design — the SSH `authorized_keys` line uses a `forced-command` directive that runs `mutate.py` regardless of what the client requested ([mutate.py:10](personal/dashboard/mutate.py:10)), and the client helper explicitly ignores argv because of this ([ssh.ts:7](personal/dashboard/app/api/_lib/ssh.ts:7)). Routing search through the same key without changes is structurally impossible.
+
+Phase 1 introduces a **dispatch router** at the SSH boundary, replacing the direct `mutate.py` forced-command:
+
+- **New M4 script:** `personal/dashboard/bridge.py` becomes the SSH forced-command target.
+- **Routing logic:** `bridge.py` reads `$SSH_ORIGINAL_COMMAND` (set by OpenSSH when the client passes a command after the key), parses the first token, and dispatches:
+  - `mutate <subcmd> <args...>` → exec `python3 mutate.py <subcmd> <args...>` (preserves legacy mutate routes: `todo`, `waiting-on`, `refresh`, `dispatch`)
+  - `search <query>` → exec `python3 search.py <query>` (new read-only path)
+  - empty `$SSH_ORIGINAL_COMMAND` (legacy clients pre-router-deploy) → exec `mutate.py` with no args, which preserves backward-compat for any client still hitting the old contract
+  - any other first-token → exit 1 with "unknown route"
+- **`authorized_keys` update:** the existing key's forced-command line on M4 changes from `command="…/mutate.py"` to `command="…/bridge.py"`. One-time deploy task. Client-side `ssh.ts` updated to PASS the command argv (no longer ignored).
+- **`personal/dashboard/search.py`** (new): runs `ripgrep` over the named markdown source files + reads the SQLite `dispatches` table via `sqlite3` (read-only, `PRAGMA query_only=1`). Returns JSON: `{results: [{source, snippet, date, link}, ...], total: N}`.
+- **Vercel side:** `GET /api/search?q=<query>` Vercel function SSHes with `bridge.py` as forced-command target, passing `search <query>` as the command. Same SSH key as today; no new credentials.
+- **Why a router script, not separate keys:** single SSH key keeps key management simple, audit trail unified. Subcommand routing in `bridge.py` makes mutate-vs-read separation explicit and easy to extend later (e.g. `read-tasks`, `metrics`, etc.).
+- **Read-only enforcement:** `search.py` opens SQLite with `mode=ro&immutable=1` URI flags and does not import any file-write modules. Audit-grep-able.
+
+**Migration impact:** small one-time M4 deploy (update `authorized_keys` + add `bridge.py`/`search.py`). `mutate.py` itself stays untouched. Existing legacy clients without the router argv still work via the empty-`$SSH_ORIGINAL_COMMAND` fallback.
+
 **Implementation notes:**
-- The grep pipeline can run on the M4 side (Vercel function SSHes via existing `mutate.py` bridge into M4, runs `grep -r` or `ripgrep`, returns JSON). Reuse Spec 034's SSH path.
 - Fuzzy match (substring + case-insensitive) is fine for v1. Don't over-engineer — no full-text indexing.
 - Cache result for ~10 seconds to debounce typing.
 - Empty query → no results displayed (don't show "everything").
 - Limit results to top 20. Add "Show more" if needed.
-- **For dispatches table search:** match against `to_agent`, `message`, `response`, `artifact_path`. Display rendered field is `to_agent` + truncated `message` + `dispatched_at` formatted as relative time. Schema reference: `~/Dropbox/Code/cane/id-agents/src/db/migrations/sqlite.ts:150-168`. Do NOT reference `task_title`, `agent`, `created_at`, `completed_at` — those don't exist.
 
 **Why this is Phase 1, not Phase 2:**
 - Search is the dashboard usability blocker users hit immediately after curation lands ("I see today's 5 items, but where's that other thing I added Monday?").

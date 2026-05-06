@@ -1,6 +1,78 @@
 # ID Agents Setup Log
 
-Last updated: 2026-04-16 by Claude Code session (app instance)
+Last updated: 2026-05-01 — durable-fact fold to memory files (per agent-restructuring session Decision 5.2)
+
+## 2026-05-01 — Memory fold
+
+Per agent-restructuring session Decision 5.2, durable operational facts were extracted from this log into the memory file system. **What got folded:**
+
+- **Manager restart auth gotcha** + correct env-stripped restart command → `~/.claude/projects/-Users-kilgore-Dropbox-Code/memory/reference_manager_restart_auth_gotcha.md`
+- **macOS TCC patterns** (Full Disk Access, Automator bypasses, `node` prompt attribution) → `~/.claude/projects/-Users-kilgore-Dropbox-Code/memory/reference_macos_tcc_patterns.md`
+
+**What stays here as historical / setup-specific context:**
+- 2026-04-17 upgrade notes (0.1.36-beta → 0.1.58-beta) — point-in-time
+- "What was built" sections (Apr 15-16) — historical
+- Cleveland Park / FlowMo / Marathon session-specific notes — historical
+- Vercel deploy specifics — niche, search this file when needed
+- Useful commands reference — already in user CLAUDE.md
+- Config paths — still authoritative source for setup
+- Two-manager architecture — already pointered in MEMORY.md
+
+**What's stale below and needs updating** (NOT done in this fold — flagging for next setup-log update):
+- Section 1 says "Agents on ports 4120-4129" — actual current ports are 4129-4139 (shifted +9 on a previous restart). Functional but documentation out of date.
+- "Half-Done / In-Flight" section is from Apr 17 — most items have been resolved or moved on. Worth a refresh pass when next major setup change happens.
+- Walker MVP shipping (2026-04-30), Vetra dispatch beachhead spec approved, Dashboard UI spec approved, Specs 053+054+056+057+058+059+060+061+062+063+064+065+066 all post-date this log. The setup log doesn't reflect this body of work.
+
+---
+
+Original log content preserved below.
+
+---
+
+Last updated: 2026-04-17 — upgrade to 0.1.58-beta, vault-institutional retired, Downloads sync + Vercel git fixes
+
+## 2026-04-17 — Evening Session Notes
+
+### Upgrade: 0.1.36-beta → 0.1.58-beta
+- Stashed local register-flag experiment + related edits via `git stash -u` — recoverable at `stash@{0}` but **use plain `git stash` in future** (the `-u` also swept SETUP_LOG.md, feedback-for-prem.md, kilgore-team.yaml into the stash; had to recover from `stash@{0}^3`).
+- Configs now split: `default.yaml` tracked, personal configs (`kilgore-team.yaml`, `m1-team.yaml`) gitignored via `configs/*.yaml !configs/default.yaml`.
+- Workaround 1: `pnpm add -D @xmtp/node-sdk` — upstream bug, `ows-signer.ts` imports `node-sdk` but package.json lists `agent-sdk`.
+- Workaround 2: `cd node_modules/.pnpm/better-sqlite3@*/node_modules/better-sqlite3 && npm run install` — needed to rebuild native binding for Node 23. `pnpm rebuild` blocked by interactive auto-approve prompt.
+- `vault-institutional` agent retired (scope folded into `defi` project). Dropped by `/sync` since not in `kilgore-team.yaml`.
+
+### Auth gotcha (important)
+Do NOT restart the manager from inside a Claude Code CLI session. Child agents inherit `CLAUDE_CODE_OAUTH_TOKEN` + `CLAUDE_CODE_ENTRYPOINT` + `CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST` and 401 on every `/talk` dispatch. Health checks still pass, `/sync` reports success — failure is silent until actual work is tried.
+
+**Correct restart command:**
+```bash
+pkill -f "local-agent-server.js"; pkill -f "start-agent-manager.js"
+sleep 3
+cd ~/Dropbox/Code/cane/id-agents
+env -u ANTHROPIC_API_KEY -u CLAUDE_CODE_OAUTH_TOKEN \
+    -u CLAUDE_CODE_ENTRYPOINT -u CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST \
+    -u CLAUDE_AGENT_SDK_VERSION \
+    nohup node dist/start-agent-manager.js > /tmp/id-agents-manager.log 2>&1 &
+sleep 4
+curl -s -X POST http://localhost:4100/remote -H "Content-Type: application/json" \
+    -d '{"command":"/sync kilgore-team"}'
+```
+
+Followed up with a `/talk` smoke test to any agent to verify non-401 before trusting the system.
+
+### Downloads folder sync
+- Confirmed working via `launchctl com.cane.downloads-sync` (WatchPaths on `~/Downloads`, rsync `--ignore-existing` → `~/Dropbox/Code/cane/downloads/`). Plist wasn't loaded at session start — `launchctl load` fixed it, 876 backfill files synced.
+
+### Vercel git integration
+- GitHub webhook had 0 entries — reconnecting the repo at `vercel.com/kilgore's-projects/cleveland-park-website/settings/git` restored auto-deploy. Test empty commit at 21:23 deployed Ready in 37s.
+- Prior to fix: `vercel deploy --prod` CLI was working fine as a fallback. Keep that as escape hatch.
+
+### Cleveland Park newsletter signup
+- MailerLite endpoint swapped for `/api/subscribe` (Next.js API route). Form on `clevelandparktn.com` now POSTs email → Resend Audiences API → lands in the 102-person audience.
+- Env `RESEND_API_KEY` + `RESEND_AUDIENCE_ID` added to Vercel production (encrypted).
+
+---
+
+Last updated (Apr 16): by Claude Code session (app instance)
 
 ---
 
@@ -84,7 +156,7 @@ Last updated: 2026-04-16 by Claude Code session (app instance)
 ### Obsidian
 - Cleaned up vault — moved sentinel reports to `sentinel/` folder, loose files into project folders
 - Removed `sentinel-reports` symlink (was pointing to empty dir), removed `Untitled` folder
-- Created `Dashboard.md` with wikilinks to all project files
+- Created `Dashboard.md` (renamed to `Desk.md` 2026-04-24) with wikilinks to all project files
 - Updated Sentinel CLAUDE.md to write to `Obsidian/sentinel/` not root
 - Created `contacts/`, `daily/` folders
 
@@ -239,7 +311,7 @@ cd /path/to/folder && python3 -m http.server 8888
 | Roger completions | `~/Code/roger/completed/` |
 | Sentinel CLAUDE.md | `~/Code/sentinel/CLAUDE.md` |
 | Obsidian vault | `~/Dropbox/Obsidian/` |
-| Obsidian Dashboard | `~/Dropbox/Obsidian/Dashboard.md` |
+| Obsidian Desk | `~/Dropbox/Obsidian/Desk.md` (renamed from `Dashboard.md` 2026-04-24) |
 | Global CLAUDE.md | `~/.claude/CLAUDE.md` |
 | Memory files | `~/.claude/projects/-Users-kilgore-Dropbox-Code/memory/` |
 | LaunchAgents (M4) | `~/Library/LaunchAgents/` |

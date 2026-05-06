@@ -1,0 +1,66 @@
+<h2>Agent platform reconstruction — where do we start?</h2>
+<p class="subtitle">Multiple subsystems came up across the morning. Not one project — at least four. Pick what we tackle first; the rest queue. Each one gets its own spec → plan → implementation cycle.</p>
+
+<div class="cards">
+
+  <div class="card" data-choice="a" onclick="toggleSelect(this)" style="border-color: var(--accent);">
+    <div class="card-image" style="padding: 24px; background: linear-gradient(135deg, #1a3a52 0%, #0f2640 100%);">
+      <div style="color: #fff;">
+        <div class="label" style="color: #5fb3e0; margin-bottom: 8px;">RECOMMENDED FIRST · ~2 specs</div>
+        <h3 style="color: #fff; margin: 0 0 12px 0;">A. Observability &amp; contracts</h3>
+        <p style="margin: 0 0 8px 0; color: #cde;">"Done = visible to me" — definition-of-done verification</p>
+        <p style="margin: 0; color: #cde;">"What is agent X doing right now?" — in-flight view</p>
+      </div>
+    </div>
+    <div class="card-body">
+      <p><strong>Why first:</strong> sets the contract every other agent will follow. Today's incidents (health-import dashboard gap, sentinel wedge invisibility, manager-direct dispatches missing inbox rows) all map here. Output becomes input for B.</p>
+      <p><strong>Scope:</strong> verification architecture (who verifies, where, how it scales) + a single "what's in flight" surface on the Desk.</p>
+    </div>
+  </div>
+
+  <div class="card" data-choice="b" onclick="toggleSelect(this)">
+    <div class="card-image" style="padding: 24px; background: linear-gradient(135deg, #2d4a2b 0%, #1a3019 100%);">
+      <div style="color: #fff;">
+        <div class="label" style="color: #8bcd8b; margin-bottom: 8px;">BLOCKER ON DESK · 1 big spec</div>
+        <h3 style="color: #fff; margin: 0 0 12px 0;">B. Testing agent + logger</h3>
+        <p style="margin: 0; color: #cde;">Concrete testing-agent spec (Desk: !high, due 4/23). Logger agent for centralized capture. Photo handling unlocks downstream.</p>
+      </div>
+    </div>
+    <div class="card-body">
+      <p><strong>Why next:</strong> photo handling on Cane is blocked on this. Testing agent is the missing piece for "did the agent do what it said it did" loops.</p>
+      <p><strong>Scope:</strong> testing-agent contract, logger placement, dispatch hooks, photo-pipeline VERIFY step.</p>
+    </div>
+  </div>
+
+  <div class="card" data-choice="c" onclick="toggleSelect(this)">
+    <div class="card-image" style="padding: 24px; background: linear-gradient(135deg, #4a2d52 0%, #2d1a3a 100%);">
+      <div style="color: #fff;">
+        <div class="label" style="color: #c89bda; margin-bottom: 8px;">BIGGEST · separate session</div>
+        <h3 style="color: #fff; margin: 0 0 12px 0;">C. Codex-as-CTO integration</h3>
+        <p style="margin: 0; color: #cde;">Architectural rework: where Codex sits, what it owns, how it relates to the manager and Roger.</p>
+      </div>
+    </div>
+    <div class="card-body">
+      <p><strong>Why later:</strong> too big for one session and benefits from A's contracts being settled. If we settle A first, Codex's place is much easier to draw.</p>
+    </div>
+  </div>
+
+  <div class="card" data-choice="d" onclick="toggleSelect(this)">
+    <div class="card-image" style="padding: 24px; background: linear-gradient(135deg, #4a3a1a 0%, #2d2410 100%);">
+      <div style="color: #fff;">
+        <div class="label" style="color: #d4b87a; margin-bottom: 8px;">DOCUMENTATION · standalone</div>
+        <h3 style="color: #fff; margin: 0 0 12px 0;">D. Operational manual</h3>
+        <p style="margin: 0; color: #cde;">System-of-systems doc for new LLM onboarding + productization. Chris-writes-with-Claude-help.</p>
+      </div>
+    </div>
+    <div class="card-body">
+      <p><strong>Why later:</strong> documents the world we already have, doesn't change behavior. Better written after A lands so it can describe the contract.</p>
+    </div>
+  </div>
+
+</div>
+
+<div class="section" style="margin-top: 24px; padding: 16px; border-left: 3px solid var(--accent); background: var(--bg-subtle);">
+  <p class="label" style="margin-bottom: 8px;">My recommendation</p>
+  <p style="margin: 0;">Start with <strong>A</strong>. It's the smallest concrete spec, it's fresh in your head from this morning's incidents, and it gives B a clearer contract to build against. C and D both get easier after A.</p>
+</div>
