@@ -23,6 +23,24 @@ async function getJson<T>(url: string, signal: AbortSignal): Promise<T> {
   return (await res.json()) as T;
 }
 
+// Phase 6: typed error classes so the TUI can render transient
+// connectivity issues differently from semantic manager rejections.
+// NetworkError = couldn't reach / server transient (fetch threw, 5xx).
+// ManagerError = server understood and explicitly rejected (4xx, or
+// `{ok:false, error}` envelope from /remote handlers).
+export class NetworkError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'NetworkError';
+  }
+}
+export class ManagerError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'ManagerError';
+  }
+}
+
 // Generic POST to the manager's `/remote` proxy. Mirrors the call shape
 // already used by fetchTasks/fetchAgentNews/fetchSchedulesForTeam — those
 // can migrate onto this helper in Phase 2 when more commands land. For
@@ -37,18 +55,29 @@ export async function runRemoteCommand<T = unknown>(
 ): Promise<T> {
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
   if (teamName) headers['x-id-team'] = teamName;
-  const res = await fetch(`${manager}/remote`, {
-    method: 'POST',
-    headers,
-    body: JSON.stringify({ agent: executor, command }),
-    signal,
-  });
+  let res: Response;
+  try {
+    res = await fetch(`${manager}/remote`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ agent: executor, command }),
+      signal,
+    });
+  } catch (err: unknown) {
+    // Connect refused, DNS, abort, etc. — transient/network class.
+    const msg = err instanceof Error ? err.message : String(err);
+    throw new NetworkError(msg);
+  }
   if (!res.ok) {
-    throw new Error(`POST /remote → ${res.status} ${res.statusText}`);
+    // 5xx → server transient; 4xx → semantic ("you sent something wrong").
+    if (res.status >= 500) {
+      throw new NetworkError(`POST /remote → ${res.status} ${res.statusText}`);
+    }
+    throw new ManagerError(`POST /remote → ${res.status} ${res.statusText}`);
   }
   const data = (await res.json()) as RemoteEnvelope<T>;
   if (!data.ok) {
-    throw new Error(data.error ?? 'unknown manager error');
+    throw new ManagerError(data.error ?? 'unknown manager error');
   }
   return data.result as T;
 }

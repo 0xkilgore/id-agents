@@ -21,12 +21,13 @@ import { CommandBar } from './components/CommandBar.js';
 import { CommandResultView } from './components/CommandResultView.js';
 import {
   commandConfirmPreview,
-  completeCommand,
+  completeBuffer,
   confirmationLevel,
   knownCommandNames,
   lookupCommand,
   parseCommandLine,
 } from './commands/registry.js';
+import { ManagerError, NetworkError } from './api/manager.js';
 import type { Agent, NewsItem, Schedule, Task, Team } from './api/types.js';
 import {
   fetchAgentNews,
@@ -162,7 +163,10 @@ export function App({ staticMode = false }: AppProps = {}): React.ReactElement {
   const [commandHistoryIndex, setCommandHistoryIndex] = useState<number | null>(null);
   const [commandResult, setCommandResult] = useState<{ command: string; text: string } | null>(null);
   const [commandResultScroll, setCommandResultScroll] = useState(0);
-  const [commandError, setCommandError] = useState<string | null>(null);
+  // Phase 6: error kind drives the visual treatment. 'network' renders
+  // yellow with a connectivity glyph (transient — try again later);
+  // 'manager' renders red (semantic — server understood and rejected).
+  const [commandError, setCommandError] = useState<{ kind: 'network' | 'manager'; message: string } | null>(null);
   const [commandRunning, setCommandRunning] = useState(false);
   // commandPending: a Y/N-gated command is staged. Y dispatches it,
   // N or Esc discards. Holds the raw line + preview line for rendering.
@@ -887,14 +891,15 @@ export function App({ staticMode = false }: AppProps = {}): React.ReactElement {
     async (raw: string) => {
       const parsed = parseCommandLine(raw);
       if (!parsed) {
-        setCommandError('empty command');
+        setCommandError({ kind: 'manager', message: 'empty command' });
         return;
       }
       const spec = lookupCommand(parsed.name);
       if (!spec) {
-        setCommandError(
-          `unknown command: ${parsed.name} (known: ${knownCommandNames().join(', ')})`,
-        );
+        setCommandError({
+          kind: 'manager',
+          message: `unknown command: ${parsed.name} (known: ${knownCommandNames().join(', ')})`,
+        });
         return;
       }
       const ac = new AbortController();
@@ -912,7 +917,16 @@ export function App({ staticMode = false }: AppProps = {}): React.ReactElement {
         setCommandResultScroll(0);
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : String(err);
-        setCommandError(`${parsed.name}: ${msg}`);
+        // Phase 6: typed errors from runRemoteCommand → split rendering.
+        // Anything else (catalog-side issues, JSON parse, etc.) is
+        // treated as 'manager' since it didn't originate from the
+        // network layer.
+        const kind: 'network' | 'manager' = err instanceof NetworkError
+          ? 'network'
+          : err instanceof ManagerError
+            ? 'manager'
+            : 'manager';
+        setCommandError({ kind, message: `${parsed.name}: ${msg}` });
       } finally {
         setCommandRunning(false);
       }
@@ -1115,9 +1129,13 @@ export function App({ staticMode = false }: AppProps = {}): React.ReactElement {
           return;
         }
         if (key.tab) {
-          // Top-level command-name completion. Operates on the first
-          // token only; once the user types a space, Tab does nothing.
-          const completed = completeCommand(commandBuffer);
+          // Phase 6: command-name completion (first token) or
+          // arg-level completion (subsequent slots) via the spec's
+          // argCompleter. Agent-name slot is the only data-driven
+          // context for now; future slots can extend ArgCompleterContext.
+          const completed = completeBuffer(commandBuffer, {
+            agentNames: allAgents.map((a) => a.name),
+          });
           if (completed !== null) {
             setCommandBuffer(completed);
             setCommandHistoryIndex(null);
@@ -1603,7 +1621,13 @@ export function App({ staticMode = false }: AppProps = {}): React.ReactElement {
       )}
       {commandError ? (
         <Box paddingX={1}>
-          <Text color="red" wrap="truncate-end">! {commandError}</Text>
+          <Text
+            color={commandError.kind === 'network' ? 'yellow' : 'red'}
+            wrap="truncate-end"
+          >
+            {commandError.kind === 'network' ? '⚠ network: ' : '! '}
+            {commandError.message}
+          </Text>
         </Box>
       ) : null}
       {commandRetype ? (

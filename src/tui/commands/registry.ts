@@ -21,6 +21,13 @@ export interface CommandContext {
 
 export type RiskTier = 'safe' | 'powerful' | 'destructive';
 
+// Phase 6: context for arg-level Tab completion. The TUI assembles
+// this once per Tab keypress from data already in scope (allAgents),
+// so completers stay synchronous and side-effect-free.
+export interface ArgCompleterContext {
+  agentNames: string[];
+}
+
 export interface CommandSpec {
   name: string;
   description: string;
@@ -46,6 +53,11 @@ export interface CommandSpec {
   // on agent foo`). Absent or returning null → renderer falls back to
   // the raw command line.
   confirmPreview?: (args: string[]) => string | null;
+  // Phase 6: candidate strings for the arg slot at `slotIndex` (0 =
+  // first arg after the command name). Returns ALL candidates for the
+  // slot — the caller filters by partial-prefix match. Absent → no
+  // arg completion (Phase 1-5 behavior preserved).
+  argCompleter?: (slotIndex: number, ctx: ArgCompleterContext) => string[];
 }
 
 export type ConfirmationLevel = 'none' | 'yn' | 'retype';
@@ -56,7 +68,7 @@ function remote(
   name: string,
   description: string,
   tier: RiskTier,
-  extras: Pick<CommandSpec, 'shouldConfirm' | 'shouldRetype' | 'confirmPreview'> = {},
+  extras: Pick<CommandSpec, 'shouldConfirm' | 'shouldRetype' | 'confirmPreview' | 'argCompleter'> = {},
 ): CommandSpec {
   return {
     name,
@@ -69,6 +81,37 @@ function remote(
     ...extras,
   };
 }
+
+// Common slot-0 agent-name completer used by every command whose first
+// positional arg is an agent name (news, output, artifact, meta,
+// cancel, clear, delete, register).
+const agentNameSlot0: NonNullable<CommandSpec['argCompleter']> = (slot, ctx) =>
+  slot === 0 ? ctx.agentNames : [];
+
+// `agent <name> <subAction>` — slot 0 is name, slot 1 is the
+// subcommand from a small fixed set.
+const AGENT_SUBACTIONS = ['rebuild', 'start', 'stop', 'probe', 'logs', 'wallet', 'heartbeat'];
+const agentTwoSlot: NonNullable<CommandSpec['argCompleter']> = (slot, ctx) => {
+  if (slot === 0) return ctx.agentNames;
+  if (slot === 1) return AGENT_SUBACTIONS;
+  return [];
+};
+
+// `:model <name> <model>` — slot 0 is name. Model strings are open-
+// ended so we don't try to enumerate slot 1.
+const modelSlots: NonNullable<CommandSpec['argCompleter']> = (slot, ctx) =>
+  slot === 0 ? ctx.agentNames : [];
+
+// `:heartbeat enable|disable <name>` — slot 0 is the subcommand,
+// slot 1 is the agent name. Bare `:heartbeat <name>` (status read)
+// also lands in slot 0; we fall back to suggesting agent names there
+// alongside enable/disable.
+const HEARTBEAT_SUBACTIONS = ['enable', 'disable'];
+const heartbeatSlots: NonNullable<CommandSpec['argCompleter']> = (slot, ctx) => {
+  if (slot === 0) return [...HEARTBEAT_SUBACTIONS, ...ctx.agentNames];
+  if (slot === 1) return ctx.agentNames;
+  return [];
+};
 
 // `agents` keeps the Phase 1 cross-team semantics — the manager's
 // `/remote` `agents` handler is single-team. Phase 1 acceptance still
@@ -121,11 +164,11 @@ const REGISTRY: Record<string, CommandSpec> = {
   teams: remote('teams', 'List all teams in the manager DB', 'safe'),
   team: remote('team', 'Show the active team (id, name, agent count)', 'safe'),
   configs: remote('configs', 'List configs/*.yaml deployment files', 'safe'),
-  news: remote('news', 'List news items for an agent (`:news <agent>`)', 'safe'),
+  news: remote('news', 'List news items for an agent (`:news <agent>`)', 'safe', { argCompleter: agentNameSlot0 }),
   heartbeats: remote('heartbeats', 'List agents with heartbeat enabled', 'safe'),
-  output: remote('output', "List files in an agent's ./output dir (`:output <agent>`)", 'safe'),
-  artifact: remote('artifact', 'Read one artifact (`:artifact <agent> <path>`)', 'safe'),
-  meta: remote('meta', 'Show agent metadata (`:meta <agent>`)', 'safe'),
+  output: remote('output', "List files in an agent's ./output dir (`:output <agent>`)", 'safe', { argCompleter: agentNameSlot0 }),
+  artifact: remote('artifact', 'Read one artifact (`:artifact <agent> <path>`)', 'safe', { argCompleter: agentNameSlot0 }),
+  meta: remote('meta', 'Show agent metadata (`:meta <agent>`)', 'safe', { argCompleter: agentNameSlot0 }),
   list: remote('list', 'Show all pending queries in the active team', 'safe'),
 
   // ── Phase 2/3/4 hybrids — tier reflects worst-case subcommand ────
@@ -181,12 +224,14 @@ const REGISTRY: Record<string, CommandSpec> = {
         if (AGENT_MUTATORS.has(sub)) return `${sub} agent ${name}`;
         return null;
       },
+      argCompleter: agentTwoSlot,
     },
   ),
   model: remote('model', 'Set agent model: `:model <agent> <model>`', 'powerful', {
     shouldConfirm: (args) => args.length >= 2,
     confirmPreview: (args) =>
       args.length >= 2 ? `set model ${args[1]} on agent ${args[0]}` : null,
+    argCompleter: modelSlots,
   }),
   deploy: remote('deploy', 'Deploy a team config: `:deploy <config-name>`', 'powerful', {
     shouldConfirm: () => true,
@@ -202,6 +247,7 @@ const REGISTRY: Record<string, CommandSpec> = {
     shouldConfirm: () => true,
     confirmPreview: (args) =>
       args.length > 0 ? `register agent ${args[0]} onchain` : 'register (no args — will error)',
+    argCompleter: agentNameSlot0,
   }),
   heartbeat: remote(
     'heartbeat',
@@ -214,6 +260,7 @@ const REGISTRY: Record<string, CommandSpec> = {
         const name = args[1] ?? '<agent>';
         return HEARTBEAT_MUTATORS.has(sub) ? `${sub} heartbeat for agent ${name}` : null;
       },
+      argCompleter: heartbeatSlots,
     },
   ),
 
@@ -234,17 +281,20 @@ const REGISTRY: Record<string, CommandSpec> = {
         }
         return `delete agent ${first}`;
       },
+      argCompleter: agentNameSlot0,
     },
   ),
   cancel: remote('cancel', "Cancel an agent's running query: `:cancel <agent>`", 'destructive', {
     shouldRetype: () => true,
     confirmPreview: (args) =>
       args[0] ? `cancel running query on agent ${args[0]}` : 'cancel (no args — will error)',
+    argCompleter: agentNameSlot0,
   }),
   clear: remote('clear', "Clear an agent's session: `:clear <agent>`", 'destructive', {
     shouldRetype: () => true,
     confirmPreview: (args) =>
       args[0] ? `clear session on agent ${args[0]}` : 'clear (no args — will error)',
+    argCompleter: agentNameSlot0,
   }),
   'sync-wallets': remote(
     'sync-wallets',
@@ -333,4 +383,65 @@ export function completeCommand(buffer: string): string | null {
   }
   if (prefix.length <= rest.length) return null;
   return sigil + prefix;
+}
+
+// Phase 6: longest-common-prefix helper shared by completeCommand and
+// completeBuffer. Returns '' for an empty input, otherwise the prefix
+// common to all entries.
+function longestCommonPrefix(strs: string[]): string {
+  if (strs.length === 0) return '';
+  let prefix = strs[0]!;
+  for (const s of strs.slice(1)) {
+    let i = 0;
+    while (i < prefix.length && i < s.length && prefix[i] === s[i]) i++;
+    prefix = prefix.slice(0, i);
+  }
+  return prefix;
+}
+
+// Phase 6: full tab completion that handles both the first-token slot
+// (existing Phase 2 behavior) and arg slots (new). The buffer-aware
+// path tokenises the input, decides whether the cursor is on the
+// command name or on an arg, and delegates to the resolved spec's
+// argCompleter for slot candidates. Returns the new buffer or null.
+export function completeBuffer(buffer: string, ctx: ArgCompleterContext): string | null {
+  if (buffer.length < 1) return null;
+  const sigil = buffer[0];
+  if (sigil !== ':' && sigil !== '/') return null;
+  const rest = buffer.slice(1);
+
+  // No spaces yet → first-token completion.
+  if (!/\s/.test(rest)) {
+    return completeCommand(buffer);
+  }
+
+  // Tokenise. The "partial" is the trailing token unless the buffer
+  // ends in whitespace, in which case the partial is empty (i.e. the
+  // user is asking what's next).
+  const endsWithSpace = /\s$/.test(rest);
+  const tokens = rest.split(/\s+/).filter((t) => t.length > 0);
+  if (tokens.length === 0) return null;
+  const name = tokens[0]!;
+  const completedArgs = endsWithSpace ? tokens.slice(1) : tokens.slice(1, -1);
+  const partial = endsWithSpace ? '' : tokens[tokens.length - 1] ?? '';
+
+  const spec = lookupCommand(name);
+  if (!spec || !spec.argCompleter) return null;
+
+  const slot = completedArgs.length;
+  const candidates = spec.argCompleter(slot, ctx);
+  if (candidates.length === 0) return null;
+  const matches = candidates.filter((c) => c.startsWith(partial));
+  if (matches.length === 0) return null;
+
+  // Replace the trailing partial in the buffer with either the unique
+  // match (+ trailing space) or the longest common prefix (no space).
+  const trim = buffer.length - partial.length;
+  if (matches.length === 1) {
+    if (matches[0] === partial) return null;
+    return buffer.slice(0, trim) + matches[0] + ' ';
+  }
+  const lcp = longestCommonPrefix(matches);
+  if (lcp.length <= partial.length) return null;
+  return buffer.slice(0, trim) + lcp;
 }
