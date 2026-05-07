@@ -34,6 +34,7 @@ async function createPostgresDb(adapter: DbAdapter): Promise<Db> {
   const { PgNewsRepo } = await import('./repos/postgres/news-repo.js');
   const { PgSchedulesRepo } = await import('./repos/postgres/schedules-repo.js');
   const { PgTasksRepo } = await import('./repos/postgres/tasks-repo.js');
+  const { PgDispatchesRepo } = await import('./repos/postgres/dispatches-repo.js');
   return {
     adapter,
     teams: new PgTeamsRepo(adapter),
@@ -42,6 +43,7 @@ async function createPostgresDb(adapter: DbAdapter): Promise<Db> {
     news: new PgNewsRepo(adapter),
     schedules: new PgSchedulesRepo(adapter),
     tasks: new PgTasksRepo(adapter),
+    dispatches: new PgDispatchesRepo(adapter),
     async close() { await adapter.close(); },
   };
 }
@@ -53,6 +55,7 @@ async function createSqliteDb(adapter: SqliteAdapter): Promise<Db> {
   const { SqliteNewsRepo } = await import('./repos/sqlite/news-repo.js');
   const { SqliteSchedulesRepo } = await import('./repos/sqlite/schedules-repo.js');
   const { SqliteTasksRepo } = await import('./repos/sqlite/tasks-repo.js');
+  const { SqliteDispatchesRepo } = await import('./repos/sqlite/dispatches-repo.js');
   return {
     adapter,
     teams: new SqliteTeamsRepo(adapter),
@@ -61,6 +64,7 @@ async function createSqliteDb(adapter: SqliteAdapter): Promise<Db> {
     news: new SqliteNewsRepo(adapter),
     schedules: new SqliteSchedulesRepo(adapter),
     tasks: new SqliteTasksRepo(adapter),
+    dispatches: new SqliteDispatchesRepo(adapter),
     async close() { await adapter.close(); },
   };
 }
