@@ -143,7 +143,7 @@ This frame anchors every design decision. If a feature pushes the dashboard towa
 
 **Phase 1 scope:**
 - Two sections in the existing Waiting On card:
-  - **🤖 Agents** — auto-populated from the `dispatches` table (Spec 053). Every dispatch with status `pending` or `in_flight` shows here with: agent name, task title, age (e.g., "12m ago"), status dot (🟡 in flight, 🟢 just completed, 🔴 stuck >2h)
+  - **🤖 Agents** — auto-populated from the `dispatches` table (Spec 053). Every dispatch with status `pending` or `in_flight` shows here with: `to_agent` (agent name), truncated `message` (task title display), age computed from `dispatched_at` (e.g., "12m ago"), status dot (🟡 in flight, 🟢 done with `responded_at` < 24h ago, 🔴 in_flight with `dispatched_at` >2h ago = stuck)
   - **👥 People** — the existing manual waiting-on list, unchanged
 - When a dispatch completes (`/agent-done` callback), the agent row stays for ~24h with 🟢 + "✓ Ready" + link to the artifact, then auto-clears
 - Stuck dispatches (>2h with no `/agent-done`) get 🔴 + "Stuck — investigate" — surfaced for Chris's attention
@@ -154,8 +154,9 @@ This frame anchors every design decision. If a feature pushes the dashboard towa
 - Makes the Waiting On card a real working surface, not just a manual reminder list
 
 **Implementation notes:**
-- Source of truth: `dispatches` table from Spec 053. Already has `status`, `agent`, `task_title`, `created_at`, `completed_at`, `artifact_path`. All rendering data is already there.
-- Render path: `build.py` reads `SELECT * FROM dispatches WHERE status IN ('pending','in_flight') OR completed_at > NOW()-24h`, merges into `data.json`.
+- Source of truth: `dispatches` table from Spec 053 (schema in `~/Dropbox/Code/cane/id-agents/src/db/migrations/sqlite.ts:150-168`). Actual columns: `id, team_id, dispatched_at, from_actor, to_agent, channel, message, query_id, status, responded_at, response, artifact_path, verify_signal_json, verify_status, verify_last_checked, verify_failures_json, parent_dispatch_id`.
+- Render fields: `to_agent` (display as agent name), `message` (truncate to ~80 chars for task title display), `dispatched_at` (use for age calc), `status` (drive state dot — pending/in_flight = 🟡, done with `responded_at` recent = 🟢, status=in_flight with `dispatched_at` >2h ago = 🔴), `artifact_path` (link target on completion).
+- Render path: `build.py` reads `SELECT id, to_agent, message, dispatched_at, status, responded_at, artifact_path FROM dispatches WHERE status IN ('pending','in_flight') OR responded_at > strftime('%s','now')-86400 ORDER BY dispatched_at DESC`, merges into `data.json`.
 - Manual `waiting-on` list continues to use the existing `mutate.py` `waiting-on` route.
 
 **Acceptance:**
