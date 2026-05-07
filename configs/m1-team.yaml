@@ -1,0 +1,23 @@
+# M1 Mac mini — always-on server agent
+# Manages launchd services, transcription, system health
+#
+# Deploy: /deploy configs/m1-team.yaml
+
+version: "1"
+
+defaults:
+  local: true
+  runtime: claude-code-cli
+  register: false
+  skills:
+    - identity
+    - inter-agent
+
+agents:
+  - name: m1
+    description: >
+      M1 Mac mini system agent. Monitors and manages all always-on services:
+      Cane email poller, morning digest, task digest, fantasy baseball scout.
+      Runs transcription jobs. Checks system health. Restarts crashed services.
+    model: claude-sonnet-4-6
+    workingDirectory: /Users/chrispowers/Dropbox/Code/cane

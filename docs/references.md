@@ -1,0 +1,1 @@
+- Paperclip docs: https://docs.paperclip.ing/start/what-is-paperclip
