@@ -39,7 +39,8 @@
     "local-agent": "npm run build && node dist/local-agent-server.js",
     "tui:dev": "tsx src/tui/index.tsx",
     "tui:build": "tsc -p src/tui/tsconfig.json",
-    "tui": "npm run tui:build && node dist/tui/index.js"
+    "tui": "npm run tui:build && node dist/tui/index.js",
+    "vetra:parity": "tsx scripts/vetra-parity-check.ts"
   },
   "files": [
     "dist/**/*",

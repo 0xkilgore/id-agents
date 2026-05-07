@@ -34,6 +34,7 @@ import { validateName } from './name-validation.js';
 import { parseAgentRef, normalizeAlias, buildAmbiguityWarning, type AgentMatch } from './core/agent-identifier.js';
 import type { HarnessType } from './harness/types.js';
 import { SchedulerService } from './scheduling/scheduler-service.js';
+import { VetraWriter } from './vetra/writer.js';
 import { heartbeatToSchedule, calendarToSchedule, validateIntervalSeconds, HEARTBEAT_GENERIC_MESSAGE } from './scheduling/schedule-config.js';
 import {
   getAvailableRuntimes,
@@ -194,6 +195,7 @@ export class AgentManagerDb {
   private wsClients: Set<WSClient> = new Set();
   private baseWorkDir: string;
   private db: Db;
+  private readonly vetraWriter: VetraWriter;
   private runningServers: Map<string, AgentRestServer> = new Map(); // key: `${teamId}:${agentId}`
   private agentRole: 'manager' | 'worker' = 'manager';
   private defaultConfig: DeployConfig['defaults'] | null = null;
@@ -226,6 +228,7 @@ export class AgentManagerDb {
   constructor(baseWorkDir: string = '/workspace', db: Db) {
     this.baseWorkDir = baseWorkDir;
     this.db = db;
+    this.vetraWriter = new VetraWriter({ db });
     this.agentRole = (process.env.AGENT_ROLE as 'manager' | 'worker') || 'manager';
 
     // Load default deployment config
@@ -2805,6 +2808,11 @@ export class AgentManagerDb {
           verify_signal: body.verify_signal,
           parent_dispatch_id: body.parent_dispatch_id ?? null,
         });
+        try {
+          await this.vetraWriter.createDispatch(id);
+        } catch (error) {
+          console.error("[Manager] non-fatal Vetra createDispatch error:", error);
+        }
         res.json({ dispatch_id: id, status: 'queued' });
       } catch (err: any) {
         console.error('[Manager] Error in POST /dispatches:', err);
@@ -2821,6 +2829,11 @@ export class AgentManagerDb {
         const row = await this.db.dispatches.getById(id);
         if (!row) return res.status(404).json({ error: `dispatch ${id} not found` });
         await this.db.dispatches.setStatus(id, 'in_flight');
+        try {
+          await this.vetraWriter.startProcessing(id);
+        } catch (error) {
+          console.error("[Manager] non-fatal Vetra startProcessing error:", error);
+        }
         res.json({ ok: true });
       } catch (err: any) {
         console.error('[Manager] Error in POST /dispatches/:id/in-flight:', err);
@@ -2889,6 +2902,7 @@ export class AgentManagerDb {
           urgency?: string;
           response?: string;
           verify_signal?: unknown;
+          outcome?: 'success' | 'failure' | 'partial';
         };
         const dispatchId = typeof body.dispatch_id === 'number' ? body.dispatch_id : null;
         if (!dispatchId) {
@@ -2923,6 +2937,29 @@ export class AgentManagerDb {
           verify_last_checked: now,
           verify_failures_json: verifyFailures.length ? JSON.stringify(verifyFailures) : null,
         });
+
+        const persisted = await this.db.dispatches.getById(dispatchId);
+        if (!persisted) throw new Error(`dispatch ${dispatchId} missing after recordDone`);
+
+        try {
+          if (body.artifact_path) {
+            await this.vetraWriter.registerArtifact(dispatchId, {
+              artifact_path: body.artifact_path,
+              tl_dr: body.tl_dr ?? null,
+              urgency: body.urgency ?? null,
+              registered_by: body.agent ?? dispatch.to_agent,
+              ts: now,
+            });
+          }
+          await this.vetraWriter.markDone(dispatchId, {
+            outcome: body.outcome ?? "success",
+            response: persisted.response,
+            ts: persisted.responded_at ?? now,
+          });
+          await this.vetraWriter.verifySignal(dispatchId);
+        } catch (error) {
+          console.error("[Manager] non-fatal Vetra /agent-done error:", error);
+        }
 
         res.json({
           ok: true,
