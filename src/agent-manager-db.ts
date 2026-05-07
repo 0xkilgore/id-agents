@@ -2705,6 +2705,114 @@ export class AgentManagerDb {
       }
     });
 
+    // ==================== DISPATCH REST ENDPOINTS (Spec 053) ====================
+    // POST /dispatches creates a `queued` row before /talk fires. Dispatchers
+    // include the resulting dispatch_id in their /talk payload so the agent
+    // closes the right row at /agent-done time. POST /dispatches/:id/in-flight
+    // flips the row once /talk returns 2xx.
+
+    this.managementApp.post('/dispatches', async (req, res) => {
+      try {
+        const { id: teamId } = await this.getTeam(req);
+        const body = (req.body || {}) as {
+          from_actor?: string;
+          to_agent?: string;
+          channel?: string;
+          message?: string;
+          query_id?: string | null;
+          verify_signal?: unknown;
+          parent_dispatch_id?: number | null;
+        };
+        if (!body.from_actor || !body.to_agent || !body.channel || !body.message) {
+          return res.status(400).json({
+            error: 'from_actor, to_agent, channel, message required',
+          });
+        }
+        // Default DoD = desk_tag within 24h, artifact_path filled in at /agent-done.
+        const signal = body.verify_signal ?? {
+          type: 'desk_tag',
+          artifact_path: '<TBD by agent>',
+          within_hours: 24,
+        };
+        const id = await this.db.dispatches.create({
+          team_id: teamId ?? null,
+          dispatched_at: Date.now(),
+          from_actor: body.from_actor,
+          to_agent: body.to_agent,
+          channel: body.channel,
+          message: body.message,
+          query_id: body.query_id ?? null,
+          verify_signal_json: JSON.stringify(signal),
+          parent_dispatch_id: body.parent_dispatch_id ?? null,
+        });
+        res.json({ dispatch_id: id, status: 'queued' });
+      } catch (err: any) {
+        console.error('[Manager] Error in POST /dispatches:', err);
+        res.status(500).json({ error: err?.message || 'Internal server error' });
+      }
+    });
+
+    this.managementApp.post('/dispatches/:id/in-flight', async (req, res) => {
+      try {
+        const id = Number(req.params.id);
+        if (!Number.isInteger(id)) {
+          return res.status(400).json({ error: 'invalid id' });
+        }
+        const row = await this.db.dispatches.getById(id);
+        if (!row) return res.status(404).json({ error: `dispatch ${id} not found` });
+        await this.db.dispatches.setStatus(id, 'in_flight');
+        res.json({ ok: true });
+      } catch (err: any) {
+        console.error('[Manager] Error in POST /dispatches/:id/in-flight:', err);
+        res.status(500).json({ error: err?.message || 'Internal server error' });
+      }
+    });
+
+    this.managementApp.get('/dispatches', async (req, res) => {
+      try {
+        const q = req.query as Record<string, string>;
+        const filters: Parameters<typeof this.db.dispatches.list>[0] = {};
+        if (q.status) {
+          const allowed = ['queued', 'in_flight', 'done', 'failed', 'timeout', 'wedged'];
+          const split = q.status.split(',').filter((s) => allowed.includes(s));
+          if (split.length) filters.status = split as any;
+        }
+        if (q.to_agent) filters.to_agent = q.to_agent;
+        if (q.from_actor) filters.from_actor = q.from_actor;
+        if (q.verify_status && ['pending', 'pass', 'fail'].includes(q.verify_status)) {
+          filters.verify_status = q.verify_status as any;
+        }
+        if (q.since) {
+          const n = Number(q.since);
+          if (Number.isFinite(n)) filters.since = n;
+        }
+        if (q.limit) {
+          const n = Number(q.limit);
+          if (Number.isFinite(n) && n > 0 && n <= 500) filters.limit = n;
+        }
+        const rows = await this.db.dispatches.list(filters);
+        res.json({ ok: true, dispatches: rows });
+      } catch (err: any) {
+        console.error('[Manager] Error in GET /dispatches:', err);
+        res.status(500).json({ error: err?.message || 'Internal server error' });
+      }
+    });
+
+    this.managementApp.get('/dispatches/:id', async (req, res) => {
+      try {
+        const id = Number(req.params.id);
+        if (!Number.isInteger(id)) {
+          return res.status(400).json({ error: 'invalid id' });
+        }
+        const row = await this.db.dispatches.getById(id);
+        if (!row) return res.status(404).json({ error: `dispatch ${id} not found` });
+        res.json({ ok: true, dispatch: row });
+      } catch (err: any) {
+        console.error('[Manager] Error in GET /dispatches/:id:', err);
+        res.status(500).json({ error: err?.message || 'Internal server error' });
+      }
+    });
+
     // ==================== TASK REST ENDPOINTS ====================
     // Dedicated task API so agents don't need /remote for task ops
 
