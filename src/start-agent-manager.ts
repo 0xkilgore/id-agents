@@ -10,6 +10,7 @@ import { AgentManagerDb } from './agent-manager-db.js';
 import { createDb, migrateDb } from './db.js';
 import { AgentRestServer } from './agent-rest-server.js';
 import { resolveRuntime } from './runtime/registry.js';
+import { startVetraRetryWorker } from "./vetra/retry-worker.js";
 
 async function main() {
   const agentRole = process.env.AGENT_ROLE || 'manager'; // 'manager' or 'worker'
@@ -56,6 +57,8 @@ async function startManagerAgent() {
 
   await manager.start(managementPort);
 
+  const stopRetryWorker = startVetraRetryWorker();
+
   console.log('🎯 Manager agent ready - can spawn and manage local worker agents');
   console.log('Press Ctrl+C to stop the manager\n');
 
@@ -65,12 +68,14 @@ async function startManagerAgent() {
   // Handle shutdown gracefully
   process.on('SIGINT', () => {
     console.log('\n\nShutting down manager agent...');
+    stopRetryWorker();
     clearInterval(heartbeat);
     process.exit(0);
   });
 
   process.on('SIGTERM', () => {
     console.log('\n\nShutting down manager agent...');
+    stopRetryWorker();
     clearInterval(heartbeat);
     process.exit(0);
   });
