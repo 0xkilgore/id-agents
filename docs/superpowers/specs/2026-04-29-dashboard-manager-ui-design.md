@@ -137,6 +137,35 @@ This frame anchors every design decision. If a feature pushes the dashboard towa
 - UI shows spinner state while manager runs; panel updates when curation.json changes
 - **No chat input.** Free-text "Ask the manager" is explicitly Phase 2. The dashboard is not a chat window.
 
+### 4c. Waiting On panel (existing card, expanded scope)
+
+**Problem this solves:** the existing "Waiting On" card in the bottom-right of the dashboard currently only tracks the manual `waiting-on` list (people Chris is waiting for). It doesn't show **in-flight agent dispatches** — so Chris has to ask "is X done?" rather than glance at the dashboard.
+
+**Phase 1 scope:**
+- Two sections in the existing Waiting On card:
+  - **🤖 Agents** — auto-populated from the `dispatches` table (Spec 053). Every dispatch with status `pending` or `in_flight` shows here with: agent name, task title, age (e.g., "12m ago"), status dot (🟡 in flight, 🟢 just completed, 🔴 stuck >2h)
+  - **👥 People** — the existing manual waiting-on list, unchanged
+- When a dispatch completes (`/agent-done` callback), the agent row stays for ~24h with 🟢 + "✓ Ready" + link to the artifact, then auto-clears
+- Stuck dispatches (>2h with no `/agent-done`) get 🔴 + "Stuck — investigate" — surfaced for Chris's attention
+
+**Why this matters:**
+- Closes the loop on "did the manager actually dispatch that?" anxiety
+- Surfaces stuck agents before Chris has to ask
+- Makes the Waiting On card a real working surface, not just a manual reminder list
+
+**Implementation notes:**
+- Source of truth: `dispatches` table from Spec 053. Already has `status`, `agent`, `task_title`, `created_at`, `completed_at`, `artifact_path`. All rendering data is already there.
+- Render path: `build.py` reads `SELECT * FROM dispatches WHERE status IN ('pending','in_flight') OR completed_at > NOW()-24h`, merges into `data.json`.
+- Manual `waiting-on` list continues to use the existing `mutate.py` `waiting-on` route.
+
+**Acceptance:**
+- [ ] Waiting On card shows two sections: 🤖 Agents and 👥 People
+- [ ] Agent section auto-populates from dispatches table
+- [ ] Each agent row shows: agent name, task, age, status dot
+- [ ] Completed dispatches stay for 24h with 🟢 + "✓ Ready" + artifact link, then auto-clear
+- [ ] Stuck dispatches (>2h no /agent-done) show 🔴 + "Stuck — investigate"
+- [ ] People section continues to work via existing mutate.py waiting-on route
+
 ### 4b. Search (top of dashboard)
 
 **Problem this solves:** today, finding any past to-do, dispatch, or artifact requires grepping across Dropbox files manually. Tasks without due dates (or with stale ones) become invisible. This is a dashboard usability blocker.
@@ -267,6 +296,7 @@ This frame anchors every design decision. If a feature pushes the dashboard towa
 5. Smart triggers: morning cron, on-demand refresh, state-change (todo done, /agent-done)
 6. Empty state with character for Triage queue
 7. **Search** — `/api/search` endpoint + UI input top of dashboard, greps across to-do.md + dispatches table + delivery-log.md
+8. **Waiting On panel — Agents section** — auto-populate from dispatches table (Spec 053), show in-flight + recently-completed (24h) + stuck (>2h)
 
 ### Phase 2 (separate spec, follows)
 - Artifact-on-task UI (depends on Vetra parallel track for full payoff; markdown index works as Phase 1.5 stopgap)
