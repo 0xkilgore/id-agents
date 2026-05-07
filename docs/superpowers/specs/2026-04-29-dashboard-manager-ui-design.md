@@ -189,6 +189,7 @@ This frame anchors every design decision. If a feature pushes the dashboard towa
 - Cache result for ~10 seconds to debounce typing.
 - Empty query → no results displayed (don't show "everything").
 - Limit results to top 20. Add "Show more" if needed.
+- **For dispatches table search:** match against `to_agent`, `message`, `response`, `artifact_path`. Display rendered field is `to_agent` + truncated `message` + `dispatched_at` formatted as relative time. Schema reference: `~/Dropbox/Code/cane/id-agents/src/db/migrations/sqlite.ts:150-168`. Do NOT reference `task_title`, `agent`, `created_at`, `completed_at` — those don't exist.
 
 **Why this is Phase 1, not Phase 2:**
 - Search is the dashboard usability blocker users hit immediately after curation lands ("I see today's 5 items, but where's that other thing I added Monday?").
