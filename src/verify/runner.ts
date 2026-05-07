@@ -16,6 +16,7 @@ import type {
   DeskTagCheck,
   HttpGetCheck,
   FileMtimeCheck,
+  ApiCallCheck,
 } from './types.js';
 
 const DEFAULT_DESK_PATH = join(homedir(), 'Dropbox/Obsidian/Desk.md');
@@ -49,12 +50,44 @@ export async function runVerifySignal(
       if (failure) failures.push(failure);
       break;
     }
-    case 'api_call':
-      failures.push({ check: signal, reason: `${signal.type} not yet implemented` });
+    case 'api_call': {
+      const failure = await checkApiCall(signal, ctx);
+      if (failure) failures.push(failure);
       break;
+    }
   }
 
   return { status: failures.length ? 'fail' : 'pass', failures };
+}
+
+async function checkApiCall(check: ApiCallCheck, ctx: VerifyContext): Promise<VerifyFailure | null> {
+  if (check.service !== 'vercel_deploy') {
+    return {
+      check,
+      reason: `api_call service "${check.service}" not yet implemented (file separate spec)`,
+    };
+  }
+  const fetcher = ctx.fetch;
+  if (!fetcher && !process.env.VERCEL_TOKEN) {
+    return { check, reason: 'VERCEL_TOKEN env var not set' };
+  }
+  const f = fetcher ?? fetch;
+  const headers: Record<string, string> = {};
+  if (process.env.VERCEL_TOKEN) headers.Authorization = `Bearer ${process.env.VERCEL_TOKEN}`;
+  let response: Response;
+  try {
+    response = await f(`https://api.vercel.com/v13/deployments/${check.id}`, { headers });
+  } catch (err) {
+    return { check, reason: `vercel api fetch failed: ${(err as Error).message}` };
+  }
+  if (response.status !== 200) {
+    return { check, reason: `vercel api returned ${response.status}` };
+  }
+  const body = (await response.json()) as { readyState?: string };
+  if (body.readyState !== 'READY') {
+    return { check, reason: `deployment readyState=${body.readyState ?? 'unknown'}` };
+  }
+  return null;
 }
 
 async function checkHttpGet(check: HttpGetCheck, ctx: VerifyContext): Promise<VerifyFailure | null> {
