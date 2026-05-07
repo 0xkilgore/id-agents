@@ -137,6 +137,43 @@ This frame anchors every design decision. If a feature pushes the dashboard towa
 - UI shows spinner state while manager runs; panel updates when curation.json changes
 - **No chat input.** Free-text "Ask the manager" is explicitly Phase 2. The dashboard is not a chat window.
 
+### 4b. Search (top of dashboard)
+
+**Problem this solves:** today, finding any past to-do, dispatch, or artifact requires grepping across Dropbox files manually. Tasks without due dates (or with stale ones) become invisible. This is a dashboard usability blocker.
+
+**Phase 1 scope (markdown-stack search):**
+- Single search input at the top of the dashboard (header bar level, above the Today panel)
+- Placeholder text: "Search to-dos, dispatches, artifacts…"
+- Submit (Enter or click) hits a new `/api/search?q=<query>` Vercel function
+- Backend (Python or Node serverless) greps across:
+  - `~/Dropbox/Code/*/to-do.md` (open + completed tasks)
+  - SQLite `dispatches` table (Spec 053) — task_title, dispatch_id, agent, status, body
+  - `~/Dropbox/Code/cane/taskview/delivery-log.md` (artifact deliveries)
+  - Optionally: `~/Dropbox/Obsidian/sentinel/*.md` (recent sentinel reports)
+- Returns ranked results: source (to-do / dispatch / artifact), match snippet, last-touched date, link to source
+- Results render in a panel below the search box (not a modal — keeps glance flow). Click result → opens the underlying file or jumps to the relevant Desk section.
+
+**Implementation notes:**
+- The grep pipeline can run on the M4 side (Vercel function SSHes via existing `mutate.py` bridge into M4, runs `grep -r` or `ripgrep`, returns JSON). Reuse Spec 034's SSH path.
+- Fuzzy match (substring + case-insensitive) is fine for v1. Don't over-engineer — no full-text indexing.
+- Cache result for ~10 seconds to debounce typing.
+- Empty query → no results displayed (don't show "everything").
+- Limit results to top 20. Add "Show more" if needed.
+
+**Why this is Phase 1, not Phase 2:**
+- Search is the dashboard usability blocker users hit immediately after curation lands ("I see today's 5 items, but where's that other thing I added Monday?").
+- Without search, even a great curation surface doesn't replace the "let me grep my files" muscle.
+- Phase 2 Vetra search is fundamentally better (cross-document operation history, schema-aware) — but Phase 1 grep is good enough for ~80% of "where is that thing?" cases.
+
+**Acceptance:**
+- [ ] Search input renders at top of dashboard
+- [ ] Typing + Enter returns results within ~2 seconds
+- [ ] Results show source label (to-do / dispatch / artifact), match snippet, date, link
+- [ ] Click on a result opens the underlying file or jumps to the relevant section
+- [ ] Empty query renders no results panel
+- [ ] Backend matches across to-do.md files, dispatches table, and delivery-log.md
+- [ ] Results limited to top 20, with "Show more" option if applicable
+
 ### 5. Existing panels — keep / shrink / remove
 
 | Panel | Status | Notes |
@@ -229,6 +266,7 @@ This frame anchors every design decision. If a feature pushes the dashboard towa
 4. Snooze backend wired to existing `mutate.py` snooze action
 5. Smart triggers: morning cron, on-demand refresh, state-change (todo done, /agent-done)
 6. Empty state with character for Triage queue
+7. **Search** — `/api/search` endpoint + UI input top of dashboard, greps across to-do.md + dispatches table + delivery-log.md
 
 ### Phase 2 (separate spec, follows)
 - Artifact-on-task UI (depends on Vetra parallel track for full payoff; markdown index works as Phase 1.5 stopgap)
