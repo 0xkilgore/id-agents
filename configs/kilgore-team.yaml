@@ -185,3 +185,22 @@ agents:
       - Verify agent outputs match claims (e.g. Roger's reported file changes, digest sends, dashboard refreshes)
       - Cross-check networking notes against pipeline to-dos so contacts don't slip
       - Produce markdown reports with ✓ / ⚠ / ❌ sections and auto-update the Obsidian Dashboard link list
+
+  # CTO — Architectural reviewer, planner, output reviewer
+  # OpenAI Codex CLI runtime — fresh-per-invocation, ChatGPT OAuth auth.
+  # First task: Dispatch 0 system orientation audit.
+  # Then: spec review → plan writing → output review for all substantive builds.
+  - name: cto
+    description: >
+      Chief Technology Officer. Architectural reviewer and planner using OpenAI
+      Codex CLI — a genuinely different model perspective. Reviews specs before
+      plans are written, writes implementation plans, and reviews Roger's shipped
+      output before it surfaces to Chris. First act: Dispatch 0 system audit.
+    runtime: codex
+    workingDirectory: /Users/kilgore/Dropbox/Code/cto
+    capabilities: |
+      - Review specs for architectural soundness (YAGNI, complexity, integration risk, types)
+      - Write implementation plans following the writing-plans skill format (TDD, exact paths, complete code)
+      - Review Roger's shipped output against the original spec
+      - Approve or bounce with specific reasons referencing file paths and line numbers
+      - Run Dispatch 0 system orientation audit on first setup
