@@ -2813,6 +2813,69 @@ export class AgentManagerDb {
       }
     });
 
+    // POST /agent-done — closes a dispatch row and runs verify_signal server-side.
+    // This sits next to the existing M4 Python /agent-done service on port 4239:
+    // the Python service still handles the inbox-flip side-effects for legacy
+    // callers; this manager handler is the dispatch-protocol path. After Phase 2
+    // rollout, the Python service can forward to this endpoint and shut down.
+    this.managementApp.post('/agent-done', async (req, res) => {
+      try {
+        const body = (req.body || {}) as {
+          query_id?: string;
+          dispatch_id?: number;
+          agent?: string;
+          artifact_path?: string;
+          tl_dr?: string;
+          urgency?: string;
+          response?: string;
+          verify_signal?: unknown;
+        };
+        const dispatchId = typeof body.dispatch_id === 'number' ? body.dispatch_id : null;
+        if (!dispatchId) {
+          return res.status(400).json({
+            error: 'dispatch_id required on the manager /agent-done path; legacy callers still POST http://localhost:4239/agent-done',
+          });
+        }
+        const dispatch = await this.db.dispatches.getById(dispatchId);
+        if (!dispatch) {
+          return res.status(404).json({ error: `dispatch ${dispatchId} not found` });
+        }
+
+        const { runVerifySignal } = await import('./verify/runner.js');
+        const signalJson = body.verify_signal ? JSON.stringify(body.verify_signal) : null;
+        let verifyStatus: 'pass' | 'fail' = 'pass';
+        let verifyFailures: unknown[] = [];
+        if (body.verify_signal) {
+          const result = await runVerifySignal(body.verify_signal as any, {
+            dispatched_at: dispatch.dispatched_at,
+          });
+          verifyStatus = result.status;
+          verifyFailures = result.failures;
+        }
+
+        const now = Date.now();
+        await this.db.dispatches.recordDone(dispatchId, {
+          responded_at: now,
+          response: body.response ?? null,
+          artifact_path: body.artifact_path ?? null,
+          verify_signal_json: signalJson,
+          verify_status: verifyStatus,
+          verify_last_checked: now,
+          verify_failures_json: verifyFailures.length ? JSON.stringify(verifyFailures) : null,
+        });
+
+        res.json({
+          ok: true,
+          dispatch_id: dispatchId,
+          verify_status: verifyStatus,
+          verify_failures: verifyFailures,
+        });
+      } catch (err: any) {
+        console.error('[Manager] Error in POST /agent-done:', err);
+        res.status(500).json({ error: err?.message || 'Internal server error' });
+      }
+    });
+
     // ==================== TASK REST ENDPOINTS ====================
     // Dedicated task API so agents don't need /remote for task ops
 
