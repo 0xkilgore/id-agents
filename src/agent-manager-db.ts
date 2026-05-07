@@ -794,7 +794,13 @@ export class AgentManagerDb {
    * Forward a message to an agent's /talk endpoint.
    * Returns the parsed response or an error.
    */
-  private async forwardToAgent(targetUrl: string, message: string, from: string, session_id?: string): Promise<{
+  private async forwardToAgent(
+    targetUrl: string,
+    message: string,
+    from: string,
+    session_id?: string,
+    dispatch_id?: number | null,
+  ): Promise<{
     ok: true;
     data: any;
   } | { ok: false; status: number; error: string }> {
@@ -803,7 +809,7 @@ export class AgentManagerDb {
     const talkRes = await fetch(`${targetUrl}/talk`, {
       method: 'POST',
       headers,
-      body: JSON.stringify({ message, from, session_id }),
+      body: JSON.stringify({ message, from, session_id, dispatch_id }),
       signal: AbortSignal.timeout(30000)
     });
 
@@ -814,6 +820,39 @@ export class AgentManagerDb {
 
     const data: any = await talkRes.json();
     return { ok: true, data };
+  }
+
+  /**
+   * Shared helper: insert a dispatches row with default DoD if no
+   * verify_signal is provided. Used by POST /dispatches and by the
+   * agent→agent forwarder in handleMessage (Spec 053).
+   */
+  private async createDispatchRow(input: {
+    teamId: string | null;
+    from_actor: string;
+    to_agent: string;
+    channel: string;
+    message: string;
+    query_id?: string | null;
+    verify_signal?: unknown;
+    parent_dispatch_id?: number | null;
+  }): Promise<number> {
+    const signal = input.verify_signal ?? {
+      type: 'desk_tag',
+      artifact_path: '<TBD by agent>',
+      within_hours: 24,
+    };
+    return this.db.dispatches.create({
+      team_id: input.teamId,
+      dispatched_at: Date.now(),
+      from_actor: input.from_actor,
+      to_agent: input.to_agent,
+      channel: input.channel,
+      message: input.message,
+      query_id: input.query_id ?? null,
+      verify_signal_json: JSON.stringify(signal),
+      parent_dispatch_id: input.parent_dispatch_id ?? null,
+    });
   }
 
   /**
@@ -848,8 +887,27 @@ export class AgentManagerDb {
       const { targetAgent, targetUrl, targetDisplayId } = resolved;
       this.managerLog(`${shouldWait ? 'Forwarding' : 'Sending async'} message to ${targetDisplayId} at ${targetUrl}`);
 
+      // Register a dispatch row so the agent→agent call shows up in
+      // /dispatches alongside cane- and scheduler-originated work (Spec 053).
+      let dispatchId: number | null = null;
+      try {
+        dispatchId = await this.createDispatchRow({
+          teamId: teamId ?? null,
+          from_actor: from || 'manager',
+          to_agent: targetAgent.name,
+          channel: 'talk',
+          message,
+          query_id: null,
+          verify_signal: undefined,
+          parent_dispatch_id: null,
+        });
+      } catch (regErr: any) {
+        // Non-fatal: forwarding still proceeds even if registration fails.
+        console.error('[Manager] dispatch register failed (non-fatal):', regErr?.message || regErr);
+      }
+
       // Forward the message to the agent's /talk endpoint
-      const result = await this.forwardToAgent(targetUrl, message, from || 'manager', session_id);
+      const result = await this.forwardToAgent(targetUrl, message, from || 'manager', session_id, dispatchId);
       if (!result.ok) {
         console.error(`[Manager] Failed to deliver message to ${targetDisplayId}: ${result.status}`);
         return res.status(result.status).json({ error: result.error });
@@ -860,6 +918,15 @@ export class AgentManagerDb {
       // Store the query so replies can be routed correctly
       if (queryId) {
         await this.db.queries.create(teamId, queryId, targetAgent.id, message, Date.now());
+      }
+
+      // Flip dispatch status to in_flight now that /talk has succeeded.
+      if (dispatchId !== null) {
+        try {
+          await this.db.dispatches.setStatus(dispatchId, 'in_flight');
+        } catch (statusErr: any) {
+          console.error('[Manager] dispatch status flip failed (non-fatal):', statusErr?.message || statusErr);
+        }
       }
 
       // Fire-and-forget: return immediately
@@ -2702,6 +2769,170 @@ export class AgentManagerDb {
         res.send(body);
       } catch (error: any) {
         res.status(502).json({ error: `Proxy error: ${error.message}` });
+      }
+    });
+
+    // ==================== DISPATCH REST ENDPOINTS (Spec 053) ====================
+    // POST /dispatches creates a `queued` row before /talk fires. Dispatchers
+    // include the resulting dispatch_id in their /talk payload so the agent
+    // closes the right row at /agent-done time. POST /dispatches/:id/in-flight
+    // flips the row once /talk returns 2xx.
+
+    this.managementApp.post('/dispatches', async (req, res) => {
+      try {
+        const { id: teamId } = await this.getTeam(req);
+        const body = (req.body || {}) as {
+          from_actor?: string;
+          to_agent?: string;
+          channel?: string;
+          message?: string;
+          query_id?: string | null;
+          verify_signal?: unknown;
+          parent_dispatch_id?: number | null;
+        };
+        if (!body.from_actor || !body.to_agent || !body.channel || !body.message) {
+          return res.status(400).json({
+            error: 'from_actor, to_agent, channel, message required',
+          });
+        }
+        const id = await this.createDispatchRow({
+          teamId: teamId ?? null,
+          from_actor: body.from_actor,
+          to_agent: body.to_agent,
+          channel: body.channel,
+          message: body.message,
+          query_id: body.query_id ?? null,
+          verify_signal: body.verify_signal,
+          parent_dispatch_id: body.parent_dispatch_id ?? null,
+        });
+        res.json({ dispatch_id: id, status: 'queued' });
+      } catch (err: any) {
+        console.error('[Manager] Error in POST /dispatches:', err);
+        res.status(500).json({ error: err?.message || 'Internal server error' });
+      }
+    });
+
+    this.managementApp.post('/dispatches/:id/in-flight', async (req, res) => {
+      try {
+        const id = Number(req.params.id);
+        if (!Number.isInteger(id)) {
+          return res.status(400).json({ error: 'invalid id' });
+        }
+        const row = await this.db.dispatches.getById(id);
+        if (!row) return res.status(404).json({ error: `dispatch ${id} not found` });
+        await this.db.dispatches.setStatus(id, 'in_flight');
+        res.json({ ok: true });
+      } catch (err: any) {
+        console.error('[Manager] Error in POST /dispatches/:id/in-flight:', err);
+        res.status(500).json({ error: err?.message || 'Internal server error' });
+      }
+    });
+
+    this.managementApp.get('/dispatches', async (req, res) => {
+      try {
+        const q = req.query as Record<string, string>;
+        const filters: Parameters<typeof this.db.dispatches.list>[0] = {};
+        if (q.status) {
+          const allowed = ['queued', 'in_flight', 'done', 'failed', 'timeout', 'wedged'];
+          const split = q.status.split(',').filter((s) => allowed.includes(s));
+          if (split.length) filters.status = split as any;
+        }
+        if (q.to_agent) filters.to_agent = q.to_agent;
+        if (q.from_actor) filters.from_actor = q.from_actor;
+        if (q.verify_status && ['pending', 'pass', 'fail'].includes(q.verify_status)) {
+          filters.verify_status = q.verify_status as any;
+        }
+        if (q.since) {
+          const n = Number(q.since);
+          if (Number.isFinite(n)) filters.since = n;
+        }
+        if (q.limit) {
+          const n = Number(q.limit);
+          if (Number.isFinite(n) && n > 0 && n <= 500) filters.limit = n;
+        }
+        const rows = await this.db.dispatches.list(filters);
+        res.json({ ok: true, dispatches: rows });
+      } catch (err: any) {
+        console.error('[Manager] Error in GET /dispatches:', err);
+        res.status(500).json({ error: err?.message || 'Internal server error' });
+      }
+    });
+
+    this.managementApp.get('/dispatches/:id', async (req, res) => {
+      try {
+        const id = Number(req.params.id);
+        if (!Number.isInteger(id)) {
+          return res.status(400).json({ error: 'invalid id' });
+        }
+        const row = await this.db.dispatches.getById(id);
+        if (!row) return res.status(404).json({ error: `dispatch ${id} not found` });
+        res.json({ ok: true, dispatch: row });
+      } catch (err: any) {
+        console.error('[Manager] Error in GET /dispatches/:id:', err);
+        res.status(500).json({ error: err?.message || 'Internal server error' });
+      }
+    });
+
+    // POST /agent-done — closes a dispatch row and runs verify_signal server-side.
+    // This sits next to the existing M4 Python /agent-done service on port 4239:
+    // the Python service still handles the inbox-flip side-effects for legacy
+    // callers; this manager handler is the dispatch-protocol path. After Phase 2
+    // rollout, the Python service can forward to this endpoint and shut down.
+    this.managementApp.post('/agent-done', async (req, res) => {
+      try {
+        const body = (req.body || {}) as {
+          query_id?: string;
+          dispatch_id?: number;
+          agent?: string;
+          artifact_path?: string;
+          tl_dr?: string;
+          urgency?: string;
+          response?: string;
+          verify_signal?: unknown;
+        };
+        const dispatchId = typeof body.dispatch_id === 'number' ? body.dispatch_id : null;
+        if (!dispatchId) {
+          return res.status(400).json({
+            error: 'dispatch_id required on the manager /agent-done path; legacy callers still POST http://localhost:4239/agent-done',
+          });
+        }
+        const dispatch = await this.db.dispatches.getById(dispatchId);
+        if (!dispatch) {
+          return res.status(404).json({ error: `dispatch ${dispatchId} not found` });
+        }
+
+        const { runVerifySignal } = await import('./verify/runner.js');
+        const signalJson = body.verify_signal ? JSON.stringify(body.verify_signal) : null;
+        let verifyStatus: 'pass' | 'fail' = 'pass';
+        let verifyFailures: unknown[] = [];
+        if (body.verify_signal) {
+          const result = await runVerifySignal(body.verify_signal as any, {
+            dispatched_at: dispatch.dispatched_at,
+          });
+          verifyStatus = result.status;
+          verifyFailures = result.failures;
+        }
+
+        const now = Date.now();
+        await this.db.dispatches.recordDone(dispatchId, {
+          responded_at: now,
+          response: body.response ?? null,
+          artifact_path: body.artifact_path ?? null,
+          verify_signal_json: signalJson,
+          verify_status: verifyStatus,
+          verify_last_checked: now,
+          verify_failures_json: verifyFailures.length ? JSON.stringify(verifyFailures) : null,
+        });
+
+        res.json({
+          ok: true,
+          dispatch_id: dispatchId,
+          verify_status: verifyStatus,
+          verify_failures: verifyFailures,
+        });
+      } catch (err: any) {
+        console.error('[Manager] Error in POST /agent-done:', err);
+        res.status(500).json({ error: err?.message || 'Internal server error' });
       }
     });
 

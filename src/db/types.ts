@@ -129,3 +129,37 @@ export interface TaskEventLinkRow {
   schedule_id: string;
   created_at: number;
 }
+
+/* --------------------------------------------------------------------- */
+/* dispatches table (Spec 053 — DoD & dispatch observability)            */
+/* --------------------------------------------------------------------- */
+
+export type DispatchStatus =
+  | 'queued'
+  | 'in_flight'
+  | 'done'
+  | 'failed'
+  | 'timeout'
+  | 'wedged';
+
+export type VerifyStatus = 'pending' | 'pass' | 'fail';
+
+export interface DispatchRow {
+  id: number;
+  team_id: string | null;
+  dispatched_at: number;
+  from_actor: string;
+  to_agent: string;
+  channel: string;
+  message: string;
+  query_id: string | null;
+  status: DispatchStatus;
+  responded_at: number | null;
+  response: string | null;
+  artifact_path: string | null;
+  verify_signal_json: string | null;
+  verify_status: VerifyStatus | null;
+  verify_last_checked: number | null;
+  verify_failures_json: string | null;
+  parent_dispatch_id: number | null;
+}
