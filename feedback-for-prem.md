@@ -12,6 +12,52 @@ Format: entries dated newest-on-top, grouped by theme when natural.
 
 ---
 
+## 2026-05-08
+
+### Manager-side observability when agents go weird — silent auth failures
+
+**Today's incident:** Spent ~4 hours yesterday and ~1 hour this morning trying to figure out why agents were returning "Query completed" in 2 seconds without doing the work. Theorized session-bloat (sessions had grown to ~10 MB), tried to rotate via filesystem hacks, eventually tracked down to `claude auth status` returning `loggedIn: false`. The OAuth token had expired.
+
+The harness saw a string response from claude (the "Not logged in · Please run /login" error message) and logged it as a successful query result. From the manager's perspective: query completed. From reality: nothing happened.
+
+**Why this matters:**
+
+Chris's framing: "ID Agents should be thinking about what happens when a manager goes weird and like maybe also even debugging that." The agent infrastructure should help operators figure out what's wrong, not silently log failures as success.
+
+**Suggestion 1 — explicit detection of common claude CLI failure strings.**
+
+The harness is already logging `Process exited with code 0` even when claude returned an error message in the body. A small filter on the response string would catch:
+
+- `"Not logged in · Please run /login"` → surface as `❌ AUTH_FAILED` and clear `lastSessionId`
+- `"No conversation found with session ID"` → surface as `⚠️ STALE_SESSION` and rotate
+- Empty or near-empty result with `<5 sec` runtime on a `>500 char` prompt → surface as `⚠️ NOOP_SUSPECT` and log diagnostics
+
+These strings are stable claude CLI outputs. Pattern-matching them is dumb but reliable.
+
+**Suggestion 2 — `/health` endpoint per agent.**
+
+```bash
+curl http://localhost:4137/health
+```
+
+Returns: `{ auth, sessionSize, recentErrors, lastQueryRuntime, suspicious }`
+
+Manager runs this on its first /talk of the day or after detecting suspect activity. Surfaces problems in <1 sec instead of hours of log forensics.
+
+**Suggestion 3 — `id-agents doctor` CLI command.**
+
+Operator command that pings every agent's `/health`, runs the auth check, summarizes session sizes, surfaces silent failures from the last N hours. The "what's wrong with my agents" first move.
+
+**Why this is Prem-relevant, not just my workflow gap:**
+
+- Auth tokens expire on every claude.ai user account eventually. Every ID Agents user will hit this.
+- Silent success on auth failure is the worst case for trust. Users stop trusting the system long before they figure out it's an auth issue.
+- A 30-line patch in the harness fixes it. Worth shipping in the next release.
+
+**Status:** logged. Worth a 5-min conversation Friday. Patch is small enough that Roger or Regina can ship it as a PR if Prem wants it.
+
+---
+
 ## 2026-05-07
 
 ### Silent no-op failures from session-bloat — high-priority bug + architectural ask
