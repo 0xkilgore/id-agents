@@ -501,6 +501,13 @@ export interface DispatchesRepository {
   findStale(cutoff: number, perAgentThresholds?: Record<string, number>): Promise<DispatchRow[]>;
   /** Rows needing re-verify: pending OR pass-stale (last checked older than now-staleAfterMs). */
   findReverifyCandidates(now: number, staleAfterMs: number): Promise<DispatchRow[]>;
+  /**
+   * Latest open dispatch (`status IN ('queued', 'in_flight')`) per agent in
+   * the supplied list. Returns at most one row per agent, newest first
+   * within each agent. Used by the dashboard fleet-card current-task
+   * surface (Phase 1 / Task 2 of vetra-readside-dashboard).
+   */
+  listLatestOpenByAgents(agentIds: string[]): Promise<DispatchRow[]>;
 }
 
 export interface Db {

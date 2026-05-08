@@ -152,4 +152,22 @@ export class PgDispatchesRepo implements DispatchesRepository {
     );
     return rows;
   }
+
+  async listLatestOpenByAgents(agentIds: string[]): Promise<DispatchRow[]> {
+    if (agentIds.length === 0) return [];
+    let p = 0;
+    const placeholders = agentIds.map(() => `$${++p}`).join(',');
+    // DISTINCT ON is the cleanest Postgres idiom for "latest row per group".
+    // ORDER BY (group, dispatched_at DESC, id DESC) ensures deterministic
+    // tie-breaking when two open dispatches share a dispatched_at.
+    const { rows } = await this.db.query<DispatchRow>(
+      `SELECT DISTINCT ON (to_agent) *
+         FROM dispatches
+        WHERE status IN ('queued', 'in_flight')
+          AND to_agent IN (${placeholders})
+        ORDER BY to_agent, dispatched_at DESC, id DESC`,
+      agentIds,
+    );
+    return rows;
+  }
 }

@@ -151,4 +151,40 @@ export class SqliteDispatchesRepo implements DispatchesRepository {
     );
     return rows;
   }
+
+  async listLatestOpenByAgents(agentIds: string[]): Promise<DispatchRow[]> {
+    if (agentIds.length === 0) return [];
+    const placeholders = agentIds.map(() => '?').join(',');
+    // Pick the newest open row per to_agent. Subquery first finds (agent, max
+    // dispatched_at) for the open statuses, then we join back to fetch the
+    // full row. Status filter is intentionally repeated on the outer join so
+    // an out-of-band status flip can't surface a closed row.
+    const { rows } = await this.db.query<DispatchRow>(
+      `SELECT d.*
+         FROM dispatches d
+         JOIN (
+           SELECT to_agent, MAX(dispatched_at) AS max_at
+             FROM dispatches
+            WHERE status IN ('queued', 'in_flight')
+              AND to_agent IN (${placeholders})
+            GROUP BY to_agent
+         ) latest
+           ON latest.to_agent = d.to_agent
+          AND latest.max_at   = d.dispatched_at
+        WHERE d.status IN ('queued', 'in_flight')
+        ORDER BY d.dispatched_at DESC`,
+      agentIds,
+    );
+    // Defense in depth: ties on max(dispatched_at) for a single agent could
+    // surface multiple rows. Keep the highest id per agent so callers get a
+    // single deterministic snapshot.
+    const seen = new Set<string>();
+    const out: DispatchRow[] = [];
+    for (const r of rows.sort((a, b) => (b.id - a.id))) {
+      if (seen.has(r.to_agent)) continue;
+      seen.add(r.to_agent);
+      out.push(r);
+    }
+    return out;
+  }
 }
