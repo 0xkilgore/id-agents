@@ -12,6 +12,81 @@ Format: entries dated newest-on-top, grouped by theme when natural.
 
 ---
 
+## 2026-05-07
+
+### Silent no-op failures from session-bloat — high-priority bug + architectural ask
+
+**The bug:** Today (2026-05-07) we hit a hard wall around 6 PM Central. After ~17 successful claude-based dispatches earlier in the day, every subsequent dispatch (Roger, Cleveland-park, Sentinel, Personal, Pipeline) returned in **2 seconds with `Process exited code 0` and `Query completed`** — the harness logged success, the manager believed the dispatches landed, but **none of them actually did the work.** No commits. No file outputs. No /agent-done callbacks. Codex-based CTO continued working normally because it uses different infra.
+
+**Root cause:** the agent's claude session jsonl files had grown past a context-window limit. At time of failure:
+
+```
+~/.claude/projects/-Users-kilgore-Dropbox-Code-roger/61323177-...jsonl       9.78 MB
+~/.claude/projects/-Users-kilgore-Dropbox-Code-cleveland-park/281edbe6-....jsonl   6.29 MB
+```
+
+`claude --resume <session>` ingests the entire jsonl history before processing the new prompt. At ~10 MB this is ~1M+ tokens just for resume, before the new prompt even gets processed. Claude returns early without doing the work; the harness logs the early return as "Query completed."
+
+**Why this is high-priority:**
+
+1. The harness reports success when work was not done. This is the same silent-failure family Spec 067 was meant to catch — agents claim done when they didn't actually do anything. A user who isn't checking `git log` and `delivery-log.md` after every dispatch has no way to know their agents are no-ops.
+2. The threshold is not exposed. Today's failure was around the 5-7 MB session-size mark for agents that had been actively dispatched all day. We discovered it by inspecting jsonl byte size manually.
+3. There's no recovery path documented. Chris doesn't know how to rotate session IDs, and even if he did, the manual workflow is ugly.
+
+**Suggestion 1 — short-term: detect + surface session bloat.**
+
+Add a session-size monitor. When the harness detects an agent's session jsonl exceeds N MB (3 MB? configurable?), surface a warning to Chris on dispatch ("⚠️ agent X session is 7.2 MB — may fail silently. Recommend rotation"). Or refuse to dispatch and force a rotation first.
+
+**Suggestion 2 — short-term: detect + surface no-op replies.**
+
+When `claude --resume` returns in <5 seconds for a non-trivial prompt (e.g., >500 char prompt), the harness should treat that as suspicious and surface it as "agent likely failed silently" instead of "Query completed."
+
+**Suggestion 3 — long-term: native session rotation.**
+
+A `id-agents reset-session <agent>` CLI command that rotates the session UUID for an agent without restarting the agent itself. Or auto-rotation on cron (weekly?) so sessions stay fresh.
+
+### The architectural ask Chris explicitly named
+
+Chris's framing: **"Agents need to be able to restart quickly and have all of their context memory stored locally in wherever they are. It should be independent of the LLM."**
+
+Today the agent's "memory" lives inside the LLM session. When the session bloats or gets corrupted, the agent loses everything. When you swap the model (Sonnet 4.6 → Opus, or Anthropic → OpenAI), the agent loses everything.
+
+The shape Chris is describing:
+
+- **Agent identity, role, history, recent decisions** live in the agent's own filesystem (e.g., `~/Dropbox/Code/<agent>/state/`)
+- **The LLM session is short-lived and disposable** — used per-task, then discarded
+- **Each new dispatch starts a fresh LLM session, primed with the agent's persistent state from disk** — not from a 9.78 MB jsonl that's been accumulating since April
+- **Model-portable** — swap Sonnet 4.6 for GPT-5 or Gemini and the agent's state survives because state ≠ conversation history
+
+This is the same idea family as Vetra (canonical state in document models, not in LLM context) but applied at the agent level. It's also a natural fit for ID Agents' multi-LLM aspiration (you mentioned in the May 6 call you'd want models to be hot-swappable).
+
+**Concrete shape suggestion:**
+
+```
+~/Dropbox/Code/<agent>/
+├── state/
+│   ├── identity.md            # role, mandate, working-style, ops-manual link
+│   ├── recent-decisions.md    # last 30 days of significant decisions, append-only
+│   ├── working-files-index.md # what files this agent owns and where they live
+│   └── last-N-conversations/  # archived per-task LLM transcripts (cold storage)
+├── ops-manual.md              # how this agent does its work
+└── ...
+```
+
+Each new `claude -p` invocation primes from `state/identity.md` + `state/recent-decisions.md` + the specific dispatch prompt. The bloated 1M-token session goes away because we are not resuming — we are freshly priming each time.
+
+**Why this matters beyond today's bug:**
+
+1. **Reliability** — agents become resilient to session corruption, model changes, infra restarts.
+2. **Cost** — fresh sessions are dramatically cheaper to invoke than 1M-token resumes.
+3. **Multi-tenant readiness** — when ID Agents goes hosted (the Walker dispatch hosted-agent product), each customer's agent state lives in their own filesystem. No shared LLM session to leak.
+4. **Audit** — agent state on disk is grep-able, diff-able, version-controllable. LLM session jsonl is not.
+5. **The Vetra parallel** — what Vetra does for dispatches (typed state, replay, audit), this would do for agents.
+
+**Status:** worth a 30-min conversation at this Friday's check-in or via async note. Chris has been bitten by this twice now (smaller bite earlier in the week, hard wall today). The short-term suggestions (1, 2) unblock daily ops; the long-term ask (3 + the architectural framing) is the real fix.
+
+---
+
 ## 2026-05-06
 
 ### (Meeting follow-ups appended after 1:1 with Prem on 2026-05-06; entries above this header are pre-meeting)
