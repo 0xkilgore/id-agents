@@ -35,6 +35,11 @@ import { parseAgentRef, normalizeAlias, buildAmbiguityWarning, type AgentMatch }
 import type { HarnessType } from './harness/types.js';
 import { SchedulerService } from './scheduling/scheduler-service.js';
 import { VetraWriter } from './vetra/writer.js';
+import {
+  buildCurrentTasksHandler,
+  createCurrentTaskReadModel,
+  type CurrentTasksHandler,
+} from './dispatches/current-task-route.js';
 import { heartbeatToSchedule, calendarToSchedule, validateIntervalSeconds, HEARTBEAT_GENERIC_MESSAGE } from './scheduling/schedule-config.js';
 import {
   getAvailableRuntimes,
@@ -200,6 +205,7 @@ export class AgentManagerDb {
   private agentRole: 'manager' | 'worker' = 'manager';
   private defaultConfig: DeployConfig['defaults'] | null = null;
   private schedulerService: SchedulerService | null = null;
+  private currentTasksHandler: CurrentTasksHandler | null = null;
   private queryWaiters: Map<string, QueryWaiter> = new Map(); // key: query_id
   private healthStatus: Map<string, { status: 'online' | 'offline' | 'unknown'; lastCheck: number }> = new Map(); // key: `${teamId}:${agentId}`
   private healthCheckInterval: NodeJS.Timeout | null = null;
@@ -2883,6 +2889,38 @@ export class AgentManagerDb {
       } catch (err: any) {
         console.error('[Manager] Error in GET /dispatches/:id:', err);
         res.status(500).json({ error: err?.message || 'Internal server error' });
+      }
+    });
+
+    // GET /dashboard/agents/current-tasks — fleet-card current-task surface.
+    // Plan: docs/superpowers/plans/2026-05-08-vetra-readside-dashboard.md
+    // Selects between SQLite (default) and Vetra/Switchboard backed projection
+    // via USE_VETRA_DISPATCHES; on Vetra failure falls back to SQLite silently
+    // and sets degraded_source=true. The dashboard renders a tiny indicator
+    // when degraded_source is true; raw GraphQL errors never reach the wire.
+    this.managementApp.get('/dashboard/agents/current-tasks', async (req, res) => {
+      try {
+        const { id: teamId } = await this.getTeam(req);
+        let agents: string[];
+        const q = (req.query.agents as string | undefined)?.trim();
+        if (q) {
+          agents = q.split(',').map((s) => s.trim()).filter((s) => s.length > 0);
+        } else {
+          const rows = await this.dbListAgents(teamId, true);
+          agents = rows.map((a) => a.name);
+        }
+        if (!this.currentTasksHandler) {
+          const deps = createCurrentTaskReadModel(process.env, this.db);
+          this.currentTasksHandler = buildCurrentTasksHandler({
+            ...deps,
+            log: (msg) => this.managerLog(msg),
+          });
+        }
+        const out = await this.currentTasksHandler({ agents });
+        res.json(out);
+      } catch (err: any) {
+        console.error('[Manager] Error in GET /dashboard/agents/current-tasks:', err);
+        res.status(500).json({ error: 'internal error' });
       }
     });
 

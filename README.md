@@ -810,6 +810,28 @@ Triggered messages (from schedules and heartbeats) include a `noAutoReply` flag 
 - [docs/guides/agent-outputs.md](./docs/guides/agent-outputs.md) - Agent output convention and `/artifact`
 - [docs/guides/heartbeats.md](./docs/guides/heartbeats.md) - Agent-driven heartbeat system
 
+## Vetra read-side dashboard surface
+
+`GET /dashboard/agents/current-tasks` returns one snapshot per agent for
+the dashboard fleet cards. The data source is selected at request time
+by the `USE_VETRA_DISPATCHES` env flag.
+
+- **Healthy behavior** (`USE_VETRA_DISPATCHES=true` + Switchboard reachable):
+  current-task state is read from Vetra/Switchboard. Each snapshot reports
+  `current_task.source = "vetra"` and `degraded_source = false`.
+- **Failure behavior**: any Vetra read failure (HTTP, GraphQL error, malformed
+  payload, conflicting open documents) silently falls back to the local SQLite
+  `dispatches` projection. The response stays 200, but `degraded_source` flips
+  to `true` so the dashboard shows a tiny neutral indicator.
+- **Rollback**: set `USE_VETRA_DISPATCHES=false` and restart the manager.
+  No code change required. SQLite-backed reads return immediately.
+
+Env vars (also documented in `.env.example` / `env.example`):
+
+- `USE_VETRA_DISPATCHES=true|false` — default `false`
+- `SWITCHBOARD_GRAPHQL_URL` — Switchboard GraphQL endpoint
+- `SWITCHBOARD_ACCESS_TOKEN` — bearer token (omitted if blank)
+
 ## Development
 
 ```bash
