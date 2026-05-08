@@ -58,6 +58,7 @@ import {
 } from './wakeup-service/event-producer.js';
 import { RetentionService } from './wakeup-service/retention.js';
 import { CheckinService } from './checkins/checkin-service.js';
+import { DispatchRetryWatcher } from './dispatch-retry-watcher.js';
 import {
   DEFAULT_CLOSE_WHEN,
   DEFAULT_INTERVAL_SECONDS,
@@ -365,6 +366,8 @@ export class AgentManagerDb {
   private querySweeperInterval: NodeJS.Timeout | null = null;
   private retentionService: RetentionService | null = null;
   private checkinService: CheckinService | null = null;
+  private dispatchRetryWatcher: DispatchRetryWatcher | null = null;
+  private dispatchRetryInterval: NodeJS.Timeout | null = null;
   /**
    * Stuck-query sweeper timeout, in minutes. Queries whose status is still
    * pending/processing this long after their `created` timestamp are assumed
@@ -822,6 +825,9 @@ export class AgentManagerDb {
       waiter.resolve(waiterReply);
       this.managerLog(`Resolved waiter for query ${queryId}`);
     }
+
+    // Reply landed (success or failure) — drop any auto-retry tracking.
+    this.dispatchRetryWatcher?.clear(queryId);
   }
 
   /**
@@ -1450,6 +1456,20 @@ export class AgentManagerDb {
       // Store the query so replies can be routed correctly
       if (queryId) {
         await this.db.queries.create(teamId, queryId, targetAgent.id, message, Date.now());
+        // Auto-retry watcher (Decision 3.2): track CTO dispatches so a stuck
+        // one gets retried once + surfaced if the retry also fails. The watcher
+        // filters by agent name internally; safe to call for every dispatch.
+        this.dispatchRetryWatcher?.register({
+          queryId,
+          teamId,
+          agentName: targetAgent.name,
+          targetAgentId: targetAgent.id,
+          targetUrl,
+          message,
+          from: from || 'manager',
+          sessionId: session_id,
+          dispatchedAt: Date.now(),
+        });
       }
 
       // Fire-and-forget: return immediately
@@ -7706,6 +7726,77 @@ export class AgentManagerDb {
     this.retentionService.start();
   }
 
+  /**
+   * Start the auto-retry watcher (Decision 3.2, 2026-05-04 session). When
+   * the manager dispatches to CTO and no /news reply lands within 5 min,
+   * we retry once. If a second 5-min window also passes without a reply,
+   * surface a `dispatch.stuck` notice into the manager inbox so Chris's
+   * dashboard sees it. Otherwise the retry is hidden.
+   *
+   * Watch list defaults to ['cto']; override with DISPATCH_RETRY_WATCH
+   * (comma-separated agent names, lowercase).
+   */
+  private startDispatchRetryWatcher(): void {
+    const watchEnv = process.env.DISPATCH_RETRY_WATCH;
+    const watchAgents = watchEnv
+      ? watchEnv.split(',').map((s) => s.trim()).filter((s) => s.length > 0)
+      : ['cto'];
+
+    this.dispatchRetryWatcher = new DispatchRetryWatcher({
+      now: () => Date.now(),
+      isPending: async (queryId) => {
+        const teamId = await this.db.queries.findTeam(queryId);
+        if (!teamId) return false;
+        const row = await this.db.queries.getByQueryIdForTeam(teamId, queryId).catch(() => null);
+        return row?.status === 'pending' || row?.status === 'processing';
+      },
+      redispatch: async (job) => {
+        const result = await this.forwardToAgent(job.targetUrl, job.message, job.from, job.sessionId);
+        if (!result.ok) {
+          throw new Error(`forward to ${job.targetUrl} returned ${result.status}: ${result.error ?? ''}`);
+        }
+        const newQueryId = result.data?.query_id;
+        if (newQueryId) {
+          await this.db.queries.create(job.teamId, newQueryId, job.targetAgentId, job.message, Date.now());
+          this.managerLog(`Auto-retry dispatch ${job.queryId} → new query ${newQueryId}`);
+        }
+      },
+      surface: async (job) => {
+        const teamRow = await this.db.teams.getTeam(job.teamId).catch(() => null);
+        const teamName = teamRow?.name ?? 'unknown';
+        const managerInbox = this.getManagerInboxRef(job.teamId, teamName);
+        await this.db.news.add(job.teamId, null, {
+          timestamp: Date.now(),
+          type: 'dispatch.stuck',
+          message: `Dispatch to ${job.agentName} stuck — retry budget exhausted (query ${job.queryId})`,
+          data: {
+            query_id: job.queryId,
+            agent: job.agentName,
+            target_agent_id: job.targetAgentId,
+            dispatched_at: job.dispatchedAt,
+            retried_at: job.retriedAt,
+            from: job.from,
+            message_preview: typeof job.message === 'string' ? job.message.slice(0, 200) : null,
+          },
+          kind: 'notify',
+          reply_expected: false,
+          owner_kind: managerInbox.ownerKind,
+          owner_id: managerInbox.ownerId,
+        });
+      },
+      log: (msg) => this.managerLog(msg),
+      watchAgents,
+    });
+
+    const tick = () => {
+      this.dispatchRetryWatcher
+        ?.tick()
+        .catch((err) => console.error('[Manager] DispatchRetryWatcher tick failed:', err));
+    };
+    this.dispatchRetryInterval = setInterval(tick, 60_000);
+    console.log(`[Manager] DispatchRetryWatcher started (watchAgents=${watchAgents.join(',')})`);
+  }
+
   private async sweepStaleQueries(): Promise<void> {
     const cutoff = Date.now() - this.QUERY_EXPIRY_MINUTES * 60 * 1000;
     const expired = await this.db.queries.expireStale(cutoff, ['pending', 'processing']);
@@ -7944,6 +8035,11 @@ export class AgentManagerDb {
         this.checkinService.start();
         console.log('[Manager] CheckinService started (wake on every fire)');
 
+        // Start the auto-retry watcher (Decision 3.2). Runs every 60s. Hidden
+        // from Chris unless retry budget exhausted (then a dispatch.stuck news
+        // item is inserted into the manager inbox).
+        this.startDispatchRetryWatcher();
+
         resolve();
       });
     });
@@ -7971,6 +8067,11 @@ export class AgentManagerDb {
       clearInterval(this.querySweeperInterval);
       this.querySweeperInterval = null;
     }
+    if (this.dispatchRetryInterval) {
+      clearInterval(this.dispatchRetryInterval);
+      this.dispatchRetryInterval = null;
+    }
+    this.dispatchRetryWatcher = null;
     if (this.healthCheckInterval) {
       clearInterval(this.healthCheckInterval);
       this.healthCheckInterval = null;
