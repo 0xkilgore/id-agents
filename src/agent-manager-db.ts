@@ -27,6 +27,7 @@ import { defaultDeliverFn, redactSshTarget, type DeliverFn } from './lib/ssh-del
 import { probeRemoteAgent, defaultHealthProbeFn, type HealthProbeFn } from './lib/remote-heartbeat.js';
 import { filterClaudeEnvVars } from './lib/env-hygiene.js';
 import { type Db } from './db/db-service.js';
+import { buildCurrentTasksSnapshot } from './dispatches/current-tasks-handler.js';
 import type { AgentRow, ScheduleDefinitionRow, TaskRow } from './db/types.js';
 import fetch from 'node-fetch';
 import type { PluginConfig, DeployConfig, HeartbeatConfig, CalendarSpec, ScheduleDeliveryMode } from './config-parser.js';
@@ -1918,6 +1919,38 @@ export class AgentManagerDb {
       });
 
       res.json({ agents: agentStatuses });
+    });
+
+    // GET /dashboard/agents/current-tasks — Spec 076.
+    //
+    // Returns the live in-flight query for each agent so the dashboard's
+    // fleet cards can stop showing "stale / No recent activity" for agents
+    // that ARE actively working. Read-side only; the writer is the existing
+    // /talk → queries.create flow already in this manager.
+    //
+    // Response shape matches what the dashboard's
+    // app/api/agents/projection.ts expects:
+    //   { ok: true, agents: [{ agent_id, current_task, degraded_source }] }
+    //
+    // Optional ?agents=<comma-separated-names> to filter to a subset.
+    this.managementApp.get('/dashboard/agents/current-tasks', async (req, res) => {
+      try {
+        const { id: teamId } = await this.getTeam(req);
+        const agentsParam = typeof req.query.agents === 'string' ? req.query.agents : '';
+        const agentNames = agentsParam
+          ? agentsParam.split(',').map((s) => s.trim()).filter(Boolean)
+          : null;
+        const agents = await this.dbListAgents(teamId);
+        const result = await buildCurrentTasksSnapshot(
+          this.db,
+          agents.map((a) => ({ id: a.id, name: a.name })),
+          agentNames,
+        );
+        res.json(result);
+      } catch (err: any) {
+        console.error('[Manager] Error in GET /dashboard/agents/current-tasks:', err);
+        res.status(500).json({ ok: false, error: err?.message || 'Internal server error' });
+      }
     });
 
     // GET /agents/:name/news - proxy news feed from a specific agent (for remote CLI)
