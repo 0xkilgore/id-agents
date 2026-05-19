@@ -140,7 +140,20 @@ export class FakeReactor {
   private async runClaim(filter: QueueEligibleFilter): Promise<ClaimResult> {
     this.guard();
     const now = filter.now ?? this.nowFn();
-    const limit = filter.limit ?? 10;
+    let limit = filter.limit ?? 10;
+    // Atomic max-in-flight check: count currently in_flight under the
+    // same filter, and shrink limit so claimed + in_flight ≤ max_in_flight.
+    if (filter.max_in_flight != null) {
+      const inFlight = [...this.docs.values()].filter(
+        (d) =>
+          d.status === "in_flight" &&
+          (filter.provider == null || d.provider === filter.provider) &&
+          (filter.runtime == null || d.runtime === filter.runtime),
+      ).length;
+      const headroom = Math.max(0, filter.max_in_flight - inFlight);
+      limit = Math.min(limit, headroom);
+    }
+    if (limit === 0) return { claimed: [] };
     const eligible = [...this.docs.values()].filter(
       (d) =>
         d.status === "queued" &&

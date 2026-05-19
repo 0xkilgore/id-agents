@@ -95,6 +95,13 @@ export interface QueueEligibleFilter {
   runtime?: Runtime;
   limit?: number;
   now?: string;
+  /**
+   * If set, the claim layer will not move more docs to in_flight than
+   * needed to reach this cap (counting docs already in_flight under the
+   * same provider/runtime filter). This is what enforces single-writer
+   * concurrency across multiple scheduler instances.
+   */
+  max_in_flight?: number;
 }
 
 export type DegradedReason =
