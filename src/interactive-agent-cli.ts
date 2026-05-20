@@ -26,6 +26,7 @@ import {
   maybeRunWorkspaceSyncCli,
   maybeRunWorkspaceUnsyncCli,
 } from './cli/workspace-sync.js';
+import { maybeRunOutputsCli } from './cli/outputs.js';
 import { waitForAgentReady } from './cli/agent-readiness.js';
 
 const oneShotSyncExit = await maybeRunWorkspaceSyncCli(process.argv.slice(2));
@@ -35,6 +36,10 @@ if (oneShotSyncExit !== null) {
 const oneShotUnsyncExit = await maybeRunWorkspaceUnsyncCli(process.argv.slice(2));
 if (oneShotUnsyncExit !== null) {
   process.exit(oneShotUnsyncExit);
+}
+const oneShotOutputsExit = await maybeRunOutputsCli(process.argv.slice(2));
+if (oneShotOutputsExit !== null) {
+  process.exit(oneShotOutputsExit);
 }
 
 const colors = {
