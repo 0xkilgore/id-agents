@@ -430,6 +430,44 @@ export async function migrateSqlite(adapter: SqliteAdapter): Promise<void> {
     CREATE INDEX IF NOT EXISTS checkins_ttl_idx
       ON checkins(team_id, ttl_expires_at)
       WHERE ttl_expires_at IS NOT NULL AND status IN ('active', 'snoozed');
+
+    CREATE TABLE IF NOT EXISTS dispatch_scheduler_queue (
+      dispatch_phid               TEXT PRIMARY KEY,
+      team_id                     TEXT NOT NULL,
+      query_id                    TEXT NOT NULL,
+      to_agent                    TEXT NOT NULL,
+      from_actor                  TEXT NOT NULL,
+      channel                     TEXT NOT NULL,
+      subject                     TEXT NOT NULL,
+      body_markdown               TEXT NOT NULL,
+      provider                    TEXT NOT NULL,
+      runtime                     TEXT NOT NULL,
+      priority                    INTEGER NOT NULL DEFAULT 5,
+      status                      TEXT NOT NULL,
+      not_before_at               TEXT NOT NULL,
+      attempt_count               INTEGER NOT NULL DEFAULT 0,
+      bounce_count                INTEGER NOT NULL DEFAULT 0,
+      last_bounce_json            TEXT,
+      bounce_history_json         TEXT NOT NULL DEFAULT '[]',
+      started_at                  TEXT,
+      completed_at                TEXT,
+      updated_at                  TEXT NOT NULL,
+      agent_query_id              TEXT,
+      usage_policy_snapshot_json  TEXT,
+      failure_kind                TEXT,
+      failure_detail              TEXT,
+      target_url                  TEXT,
+      result_json                 TEXT
+    );
+
+    CREATE INDEX IF NOT EXISTS dispatch_scheduler_eligible_idx
+      ON dispatch_scheduler_queue(status, provider, runtime, not_before_at, priority);
+    CREATE INDEX IF NOT EXISTS dispatch_scheduler_query_id_idx
+      ON dispatch_scheduler_queue(query_id);
+    CREATE INDEX IF NOT EXISTS dispatch_scheduler_agent_query_id_idx
+      ON dispatch_scheduler_queue(agent_query_id);
+    CREATE UNIQUE INDEX IF NOT EXISTS dispatch_scheduler_team_query_idx
+      ON dispatch_scheduler_queue(team_id, query_id);
   `);
 
   try {

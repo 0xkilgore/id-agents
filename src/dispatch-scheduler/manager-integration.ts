@@ -1,0 +1,335 @@
+// Phase 4 glue: how the manager process bootstraps the scheduler and
+// how manager-side enqueue + completion work without manager code
+// touching SqliteDispatchReactor directly.
+//
+// Architecture:
+//   - SchedulerHandle is created at manager startup and runs an
+//     interval tick (default 2s).
+//   - enqueueDispatch() is the manager-facing API. It validates,
+//     mints a query_id, writes to the canonical store, and returns
+//     { query_id, dispatch_phid, status }.
+//   - waitForDispatch() polls the doc until terminal or until the
+//     caller's timeout — preserves /talk-to long-poll semantics.
+//   - handleAgentDone() routes terminal updates from /agent-done back
+//     to the Dispatch doc.
+
+import { DispatchDocClient } from "./dispatch-doc-client.js";
+import { HttpAgentTransport } from "./http-agent-transport.js";
+import { SchedulerService } from "./scheduler-service.js";
+import { SqliteDispatchReactor } from "./sqlite-dispatch-reactor.js";
+import {
+  type SchedulerPolicy,
+  loadSchedulerPolicy,
+} from "./policy.js";
+import type {
+  DispatchDoc,
+  EnqueueInput,
+  Provider,
+  Runtime,
+} from "./types.js";
+import type { SqliteAdapter } from "../db/sqlite-adapter.js";
+
+export type GatewayMode = "off" | "shadow" | "enforce";
+
+export interface SchedulerEnv {
+  DISPATCH_GATEWAY_MODE?: string;
+  DISPATCH_SCHEDULER_ENABLED?: string;
+  DISPATCH_MAX_IN_FLIGHT_ANTHROPIC?: string;
+  DISPATCH_TICK_INTERVAL_MS?: string;
+}
+
+export interface SchedulerHandleOptions {
+  adapter: SqliteAdapter;
+  teamId: string;
+  resolveTargetUrl: (agent: string) => Promise<string | null> | string | null;
+  env?: SchedulerEnv;
+  /** Optional override for tests; default polls process.hrtime. */
+  now?: () => string;
+}
+
+export interface EnqueueInputV2 {
+  team_id?: string;
+  to_agent: string;
+  from_actor: string;
+  message: string;
+  subject?: string;
+  channel?: string;
+  provider?: Provider;
+  runtime?: Runtime;
+  priority?: number;
+  not_before_at?: string;
+  query_id?: string;
+}
+
+export interface EnqueueResult {
+  query_id: string;
+  dispatch_phid: string;
+  status: "queued";
+}
+
+const DEFAULT_TICK_INTERVAL_MS = 2_000;
+
+export function parseGatewayMode(raw: string | undefined): GatewayMode {
+  const v = (raw ?? "shadow").toLowerCase();
+  if (v === "off" || v === "shadow" || v === "enforce") return v;
+  return "shadow";
+}
+
+export function schedulerEnabled(env: SchedulerEnv | undefined): boolean {
+  const raw = (env?.DISPATCH_SCHEDULER_ENABLED ?? "true").toLowerCase();
+  return raw !== "false" && raw !== "0" && raw !== "no";
+}
+
+export class SchedulerHandle {
+  readonly reactor: SqliteDispatchReactor;
+  readonly client: DispatchDocClient;
+  readonly transport: HttpAgentTransport;
+  readonly scheduler: SchedulerService;
+  readonly policy: SchedulerPolicy;
+  readonly mode: GatewayMode;
+  readonly enabled: boolean;
+  private interval: NodeJS.Timeout | null = null;
+  private ticking = false;
+  private intervalMs: number;
+  private teamId: string;
+  private logger: ConsoleLogger;
+
+  constructor(opts: SchedulerHandleOptions) {
+    const env = opts.env ?? {};
+    this.teamId = opts.teamId;
+    this.mode = parseGatewayMode(env.DISPATCH_GATEWAY_MODE);
+    this.enabled = schedulerEnabled(env);
+    this.policy = loadSchedulerPolicy({}, env as Record<string, string | undefined>);
+    this.intervalMs = parsePositiveInt(env.DISPATCH_TICK_INTERVAL_MS) ?? DEFAULT_TICK_INTERVAL_MS;
+    this.logger = new ConsoleLogger("dispatch-scheduler");
+
+    const now = opts.now ?? (() => new Date().toISOString());
+    this.reactor = new SqliteDispatchReactor({
+      adapter: opts.adapter,
+      teamId: opts.teamId,
+      now,
+    });
+    this.client = new DispatchDocClient({ reactor: this.reactor, now });
+    this.transport = new HttpAgentTransport({
+      resolveTargetUrl: async (doc) => opts.resolveTargetUrl(doc.to_agent),
+    });
+    this.scheduler = new SchedulerService({
+      client: this.client,
+      transport: this.transport,
+      policy: this.policy,
+      now,
+      logger: this.logger,
+    });
+  }
+
+  /** Start the tick interval. Idempotent. */
+  start(): void {
+    if (!this.enabled) {
+      this.logger.warn("scheduler_disabled", {});
+      return;
+    }
+    if (this.interval) return;
+    this.interval = setInterval(() => {
+      void this.safeTick();
+    }, this.intervalMs);
+    if (this.interval.unref) this.interval.unref();
+    this.logger.info("scheduler_started", {
+      mode: this.mode,
+      max_in_flight: this.policy.max_in_flight_anthropic,
+      tick_interval_ms: this.intervalMs,
+    });
+  }
+
+  stop(): void {
+    if (this.interval) {
+      clearInterval(this.interval);
+      this.interval = null;
+    }
+  }
+
+  /** Force a single tick — used by tests and for the manual /system-live ping. */
+  async tick(): Promise<void> {
+    await this.safeTick();
+  }
+
+  private async safeTick(): Promise<void> {
+    if (this.ticking) return; // no overlap
+    this.ticking = true;
+    try {
+      await this.scheduler.tick();
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      this.logger.error("scheduler_tick_threw", { detail: msg });
+    } finally {
+      this.ticking = false;
+    }
+  }
+
+  /** Enqueue a Dispatch doc and return the canonical query_id. */
+  async enqueue(input: EnqueueInputV2, opts?: { target_url?: string }): Promise<EnqueueResult> {
+    const teamId = input.team_id ?? this.teamId;
+    if (teamId !== this.teamId) {
+      throw new Error(
+        `enqueue: team_id mismatch (handle is bound to ${this.teamId}, got ${teamId})`,
+      );
+    }
+    if (!input.to_agent) throw new Error("enqueue: to_agent required");
+    if (!input.message) throw new Error("enqueue: message required");
+
+    const queryId = input.query_id ?? mintQueryId();
+    const payload: EnqueueInput = {
+      query_id: queryId,
+      to_agent: input.to_agent,
+      from_actor: input.from_actor || "manager",
+      channel: input.channel ?? "dispatch",
+      subject: input.subject ?? input.message.slice(0, 80),
+      body_markdown: input.message,
+      provider: input.provider ?? "anthropic",
+      runtime: input.runtime ?? "claude-code-cli",
+      priority: input.priority ?? 5,
+      not_before_at: input.not_before_at,
+    };
+    const doc = await this.reactor.enqueue({
+      ...payload,
+      target_url: opts?.target_url,
+    });
+    this.logger.info("scheduler_enqueued", {
+      phid: doc.dispatch_phid,
+      query_id: doc.query_id,
+      to_agent: doc.to_agent,
+      priority: doc.priority,
+    });
+    return {
+      query_id: doc.query_id,
+      dispatch_phid: doc.dispatch_phid,
+      status: "queued",
+    };
+  }
+
+  /**
+   * Long-poll wait for a terminal status on this Dispatch doc.
+   * Returns the final DispatchDoc, or the doc as-is if timeout fires.
+   */
+  async waitForTerminal(
+    queryId: string,
+    opts: { timeoutMs: number; pollMs?: number },
+  ): Promise<DispatchDoc | null> {
+    const pollMs = opts.pollMs ?? 250;
+    const deadline = Date.now() + Math.max(0, opts.timeoutMs);
+    let current: DispatchDoc | null = null;
+    while (Date.now() < deadline) {
+      const r = await this.client.getByQueryId(queryId);
+      if (r.ok) {
+        current = r.value;
+        if (
+          current.status === "done" ||
+          current.status === "failed" ||
+          current.status === "cancelled"
+        ) {
+          return current;
+        }
+      }
+      await sleep(pollMs);
+    }
+    return current;
+  }
+
+  /**
+   * Phase 5.1: route /agent-done back to the Dispatch doc. Maps either
+   * the manager-side query_id (the canonical one returned at enqueue
+   * time) OR the target agent's agent_query_id.
+   */
+  async handleAgentDone(args: {
+    query_id?: string;
+    agent_query_id?: string;
+    result?: Record<string, unknown> | null;
+    success?: boolean;
+    error?: string;
+  }): Promise<DispatchDoc | null> {
+    let doc: DispatchDoc | null = null;
+    if (args.query_id) {
+      const r = await this.client.getByQueryId(args.query_id);
+      if (r.ok) doc = r.value;
+    }
+    if (!doc && args.agent_query_id) {
+      doc = await this.reactor.getByAgentQueryId(args.agent_query_id);
+    }
+    if (!doc) return null;
+    if (doc.status === "done" || doc.status === "failed" || doc.status === "cancelled") {
+      return doc; // already terminal, no-op
+    }
+    if (doc.status !== "in_flight") {
+      // The doc is queued/bounced — agent-done arriving for a non-in-flight
+      // doc is anomalous but we accept it: mark done.
+      this.logger.warn("agent_done_unexpected_status", {
+        phid: doc.dispatch_phid,
+        status: doc.status,
+      });
+    }
+    if (args.success === false) {
+      const r = await this.client.markFailed(doc.dispatch_phid, {
+        failure_kind: "agent_error",
+        detail: args.error ?? "agent reported failure",
+      });
+      return r.ok ? r.value : doc;
+    }
+    return this.reactor.markDoneWithResult(doc.dispatch_phid, args.result ?? null);
+  }
+
+  /** Live snapshot for /system-live and operator probes. */
+  async snapshot(provider: Provider = "anthropic"): Promise<{
+    in_flight: number;
+    queued: number;
+    bounced: number;
+    max_safe: number;
+    available_slots: number;
+    oldest_queued_age_ms: number;
+    last_bounce_kind: string | null;
+    mode: GatewayMode;
+    policy_version: string;
+  }> {
+    const snap = await this.reactor.snapshot({
+      max_safe: this.policy.max_in_flight_anthropic,
+      provider,
+    });
+    return {
+      in_flight: snap.in_flight,
+      queued: snap.queued,
+      bounced: snap.bounced,
+      max_safe: snap.max_safe,
+      available_slots: snap.available_slots,
+      oldest_queued_age_ms: snap.oldest_queued_age_ms,
+      last_bounce_kind: snap.last_bounce_kind,
+      mode: this.mode,
+      policy_version: this.policy.policy_version,
+    };
+  }
+}
+
+class ConsoleLogger {
+  constructor(private prefix: string) {}
+  info(event: string, payload: Record<string, unknown>): void {
+    console.log(`[${this.prefix}] ${event}`, payload);
+  }
+  warn(event: string, payload: Record<string, unknown>): void {
+    console.warn(`[${this.prefix}] ${event}`, payload);
+  }
+  error(event: string, payload: Record<string, unknown>): void {
+    console.error(`[${this.prefix}] ${event}`, payload);
+  }
+}
+
+function parsePositiveInt(raw: string | undefined): number | null {
+  if (raw == null) return null;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || !Number.isInteger(n) || n <= 0) return null;
+  return n;
+}
+
+function mintQueryId(): string {
+  return `query_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}

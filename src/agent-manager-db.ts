@@ -74,6 +74,8 @@ import { parseAgentRef, normalizeAlias, buildAmbiguityWarning, type AgentMatch }
 import { resolveNewsTrigger } from './core/messaging-service.js';
 import type { HarnessType } from './harness/types.js';
 import { SchedulerService } from './scheduling/scheduler-service.js';
+import { SchedulerHandle, parseGatewayMode } from './dispatch-scheduler/manager-integration.js';
+import type { SqliteAdapter } from './db/sqlite-adapter.js';
 import { heartbeatToSchedule, calendarToSchedule, validateIntervalSeconds, HEARTBEAT_GENERIC_MESSAGE } from './scheduling/schedule-config.js';
 import {
   getAvailableRuntimes,
@@ -354,6 +356,14 @@ export class AgentManagerDb {
   private agentRole: 'manager' | 'worker' = 'manager';
   private defaultConfig: DeployConfig['defaults'] | null = null;
   private schedulerService: SchedulerService | null = null;
+  /**
+   * Concurrency-aware Dispatch scheduler (separate from the cron/schedule
+   * SchedulerService above). Bound to the `default` team in Phase A.
+   * DISPATCH_GATEWAY_MODE=off bypasses; shadow logs but legacy path runs;
+   * enforce makes the scheduler the only /talk caller for `default` team
+   * inter-agent messages.
+   */
+  private dispatchScheduler: SchedulerHandle | null = null;
   private queryWaiters: Map<string, QueryWaiter> = new Map(); // key: query_id
   // Long-poll waiters for GET /query/:id?wait=<seconds>. Wakes when a daemon-side
   // query write (news.in_reply_to completion, agent-stop cancel) transitions
@@ -800,6 +810,26 @@ export class AgentManagerDb {
     }
 
     this.wakeQueryWaiters(teamId, queryId, waiterReply);
+
+    // Phase 5.1: also close the matching Dispatch doc if this query was
+    // enqueued through the scheduler. handleAgentDone is a no-op when no
+    // doc exists, so this is safe to call on every completion.
+    if (this.dispatchScheduler) {
+      try {
+        await this.dispatchScheduler.handleAgentDone({
+          query_id: queryId,
+          result: { reply: waiterReply.message, from: waiterReply.from },
+          success: true,
+        });
+      } catch (err) {
+        // Non-fatal: scheduler bookkeeping is shadow state in shadow mode.
+        // The query has already been marked complete in the legacy path.
+        console.warn(
+          '[Manager] dispatchScheduler.handleAgentDone failed:',
+          err instanceof Error ? err.message : String(err),
+        );
+      }
+    }
   }
 
   /**
@@ -1438,6 +1468,84 @@ export class AgentManagerDb {
 
       this.managerLog(`${shouldWait ? 'Forwarding' : 'Sending async'} message to ${targetDisplayId} at ${targetUrl}`);
 
+      // Gateway path: under DISPATCH_GATEWAY_MODE=shadow|enforce, enqueue a
+      // Dispatch doc and let the scheduler drain the queue at safe
+      // concurrency. Shadow runs both paths (legacy + enqueue) for parity
+      // observation; enforce makes the scheduler the sole /talk caller.
+      if (
+        this.dispatchScheduler &&
+        this.dispatchScheduler.enabled &&
+        this.dispatchScheduler.mode !== 'off'
+      ) {
+        try {
+          const enq = await this.dispatchScheduler.enqueue(
+            {
+              to_agent: targetAgent.name,
+              from_actor: from || 'manager',
+              message,
+              subject: typeof message === 'string' ? message.slice(0, 80) : 'manager dispatch',
+            },
+            { target_url: targetUrl },
+          );
+
+          if (this.dispatchScheduler.mode === 'enforce') {
+            // Persist a manager-side queries row so /query/:id?wait= keeps
+            // working through the scheduler-driven path. The Dispatch doc is
+            // the canonical state; this row is the legacy mirror waiters poll.
+            await this.db.queries.create(teamId, enq.query_id, targetAgent.id, message, Date.now());
+
+            if (!shouldWait) {
+              this.managerLog(`Enqueued via dispatch scheduler (enforce); query_id=${enq.query_id}`);
+              return res.json({
+                success: true,
+                query_id: enq.query_id,
+                delivered_to: targetDisplayId,
+                status: 'queued',
+              });
+            }
+
+            // /talk-to wait path under enforce: long-poll the Dispatch doc.
+            const final = await this.dispatchScheduler.waitForTerminal(enq.query_id, {
+              timeoutMs: timeout,
+              pollMs: 250,
+            });
+            if (!final) {
+              return res.json({
+                success: false,
+                query_id: enq.query_id,
+                delivered_to: targetDisplayId,
+                status: 'pending',
+                message: `Request timed out after ${timeout}ms — reply will arrive via /news when ready`,
+              });
+            }
+            if (final.status === 'done') {
+              const result = await this.dispatchScheduler.reactor.getResult(final.dispatch_phid);
+              return res.json({
+                success: true,
+                query_id: enq.query_id,
+                delivered_to: targetDisplayId,
+                status: 'completed',
+                reply: result?.reply ?? null,
+              });
+            }
+            return res.status(502).json({
+              success: false,
+              query_id: enq.query_id,
+              delivered_to: targetDisplayId,
+              status: final.status,
+              error: final.failure_detail ?? `dispatch ended in ${final.status}`,
+            });
+          }
+          // shadow mode: legacy direct call also runs, so just log + fall through.
+          this.managerLog(`Shadow enqueue created Dispatch ${enq.dispatch_phid} alongside legacy /talk`);
+        } catch (err) {
+          console.warn(
+            '[Manager] Dispatch scheduler enqueue failed; falling back to legacy /talk:',
+            err instanceof Error ? err.message : String(err),
+          );
+        }
+      }
+
       // Forward the message to the agent's /talk endpoint
       const result = await this.forwardToAgent(targetUrl, message, from || 'manager', session_id);
       if (!result.ok) {
@@ -1725,6 +1833,80 @@ export class AgentManagerDb {
   }
 
   private setupRoutes() {
+    // Phase 6.1: deterministic concurrency snapshot for /system-live and
+    // operator probes. Returns in_flight, queued, bounced, available_slots,
+    // oldest_queued_age_ms, last_bounce_kind, mode, policy_version.
+    this.managementApp.get('/system-live/dispatch', async (_req, res) => {
+      if (!this.dispatchScheduler) {
+        return res.status(503).json({
+          ok: false,
+          error: 'dispatch_scheduler_not_initialised',
+          mode: 'off',
+        });
+      }
+      try {
+        const snap = await this.dispatchScheduler.snapshot('anthropic');
+        return res.json({ ok: true, dispatch: snap });
+      } catch (err) {
+        return res.status(500).json({
+          ok: false,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    });
+
+    // Phase 4.1c: explicit operator enqueue route. The /message and /talk-to
+    // routes auto-enqueue under DISPATCH_GATEWAY_MODE; this is the named
+    // surface for callers that specifically want a queued dispatch
+    // (e.g. burst tools, schedule wake helpers).
+    this.managementApp.post('/dispatch/enqueue', async (req, res) => {
+      if (!this.dispatchScheduler) {
+        return res.status(503).json({
+          ok: false,
+          error: 'dispatch_scheduler_not_initialised',
+        });
+      }
+      try {
+        const body = (req.body || {}) as {
+          to_agent?: unknown;
+          from_actor?: unknown;
+          message?: unknown;
+          subject?: unknown;
+          priority?: unknown;
+        };
+        if (typeof body.to_agent !== 'string' || typeof body.message !== 'string') {
+          return res.status(400).json({
+            ok: false,
+            error: 'to_agent (string) and message (string) required',
+          });
+        }
+        const teamId = await this.db.teams.getOrCreateTeamId('default');
+        const agent = await this.db.agents.getByName(teamId, body.to_agent).catch(() => null);
+        if (!agent || !agent.endpoint) {
+          return res.status(404).json({
+            ok: false,
+            error: `agent "${body.to_agent}" not resolvable to an endpoint`,
+          });
+        }
+        const enq = await this.dispatchScheduler.enqueue(
+          {
+            to_agent: body.to_agent,
+            from_actor: typeof body.from_actor === 'string' ? body.from_actor : 'operator',
+            message: body.message,
+            subject: typeof body.subject === 'string' ? body.subject : undefined,
+            priority: typeof body.priority === 'number' ? body.priority : undefined,
+          },
+          { target_url: agent.endpoint },
+        );
+        return res.json({ ok: true, ...enq });
+      } catch (err) {
+        return res.status(500).json({
+          ok: false,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    });
+
     // REST-AP discovery — daemon root advertises itself as the manager so
     // peers can locate the team orchestration and inbox surface directly.
     // Shape mirrors the per-agent catalogs published by claude-agent-server /
@@ -7891,6 +8073,38 @@ export class AgentManagerDb {
         // Seed well-known teams (idempotent — getOrCreateTeamId is safe to call repeatedly)
         await this.seedWellKnownTeams();
 
+        // Bootstrap the concurrency-aware Dispatch scheduler. Bound to the
+        // `default` team in Phase A. Other teams continue on legacy direct-
+        // /talk paths until per-team handles land. Gateway flag controls
+        // whether handleMessage routes through enqueue (shadow logs but legacy
+        // runs; enforce removes legacy direct call for default-team paths).
+        if (this.db.adapter.dialect === 'sqlite') {
+          try {
+            const defaultTeamId = await this.db.teams.getOrCreateTeamId('default');
+            this.dispatchScheduler = new SchedulerHandle({
+              adapter: this.db.adapter as SqliteAdapter,
+              teamId: defaultTeamId,
+              resolveTargetUrl: async (agentName: string) => {
+                // Resolve the worker agent's REST endpoint by name (lookup is
+                // team-local; default team in Phase A).
+                const agent = await this.db.agents
+                  .getByName(defaultTeamId, agentName)
+                  .catch(() => null);
+                if (!agent || !agent.endpoint) return null;
+                return agent.endpoint;
+              },
+              env: process.env,
+            });
+            this.dispatchScheduler.start();
+          } catch (err) {
+            console.warn(
+              '[Manager] Failed to bootstrap dispatch scheduler:',
+              err instanceof Error ? err.message : String(err),
+            );
+            this.dispatchScheduler = null;
+          }
+        }
+
         // Start periodic health monitoring (every 30s)
         this.startHealthMonitor();
 
@@ -7962,6 +8176,10 @@ export class AgentManagerDb {
     if (this.schedulerService) {
       this.schedulerService.stop();
       this.schedulerService = null;
+    }
+    if (this.dispatchScheduler) {
+      this.dispatchScheduler.stop();
+      this.dispatchScheduler = null;
     }
     if (this.retentionService) {
       this.retentionService.stop();
