@@ -47,6 +47,41 @@ export interface SchedulerHandleOptions {
   now?: () => string;
 }
 
+// Spec 054 §3.1 — structured actor / causation on every dispatch.
+// The scheduler stays the substrate dispatch queue; the actor_ref +
+// causation propagate forward into any documentHistory dual-write the
+// Reactor wires up.
+export interface ActorRef {
+  kind: "agent" | "user" | "system" | "service" | "unknown";
+  id: string;
+  label?: string;
+  source?: string;
+}
+
+export interface Causation {
+  query_id?: string;
+  dispatch_id?: number | string;
+  source_event_id?: string;
+}
+
+export const MANAGER_LIFECYCLE_ACTOR: ActorRef = {
+  kind: "system",
+  id: "manager",
+  label: "Manager",
+  source: "manager",
+};
+
+export const CHRIS_DASHBOARD_ACTOR: ActorRef = {
+  kind: "user",
+  id: "chris",
+  label: "Chris",
+  source: "manager",
+};
+
+export function actorRefForAgentCompletion(agent: string): ActorRef {
+  return { kind: "agent", id: agent, label: agent, source: "manager" };
+}
+
 export interface EnqueueInputV2 {
   team_id?: string;
   to_agent: string;
@@ -59,6 +94,8 @@ export interface EnqueueInputV2 {
   priority?: number;
   not_before_at?: string;
   query_id?: string;
+  actor_ref?: ActorRef;
+  causation?: Causation;
 }
 
 export interface EnqueueResult {
@@ -177,6 +214,12 @@ export class SchedulerHandle {
     if (!input.message) throw new Error("enqueue: message required");
 
     const queryId = input.query_id ?? mintQueryId();
+    // Spec 054 §3.1 / §4.4: every enqueue carries a structured actor
+    // and causation. Manager-routed dispatches default to system:manager
+    // and {query_id}. Callers can override (e.g. dashboard human edit
+    // sets user:chris, agent-completion echo sets agent:<name>).
+    const actor_ref: ActorRef = input.actor_ref ?? MANAGER_LIFECYCLE_ACTOR;
+    const causation: Causation = input.causation ?? { query_id: queryId };
     const payload: EnqueueInput = {
       query_id: queryId,
       to_agent: input.to_agent,
@@ -198,6 +241,8 @@ export class SchedulerHandle {
       query_id: doc.query_id,
       to_agent: doc.to_agent,
       priority: doc.priority,
+      actor_ref,
+      causation,
     });
     return {
       query_id: doc.query_id,
@@ -245,6 +290,12 @@ export class SchedulerHandle {
     result?: Record<string, unknown> | null;
     success?: boolean;
     error?: string;
+    // Spec 054 §4.4: the manager attributes the completion to the
+    // target agent + carries the causation chain forward. The scheduler
+    // doesn't currently write doc-model ops, but it records the actor
+    // on the audit log so dual-writers can pick it up later.
+    actor_ref?: ActorRef;
+    causation?: Causation;
   }): Promise<DispatchDoc | null> {
     let doc: DispatchDoc | null = null;
     if (args.query_id) {
@@ -266,6 +317,21 @@ export class SchedulerHandle {
         status: doc.status,
       });
     }
+    // Derive structured actor + causation for downstream documentHistory
+    // writers. Default the actor to agent:<to_agent> when /agent-done
+    // routed back without an explicit override. Causation defaults to
+    // {query_id, dispatch_id=numeric_id_if_available}.
+    const resolvedActor: ActorRef = args.actor_ref ?? actorRefForAgentCompletion(doc.to_agent);
+    const resolvedCausation: Causation = args.causation ?? {
+      query_id: doc.query_id,
+    };
+    this.logger.info("scheduler_agent_done", {
+      phid: doc.dispatch_phid,
+      query_id: doc.query_id,
+      actor_ref: resolvedActor,
+      causation: resolvedCausation,
+      success: args.success !== false,
+    });
     if (args.success === false) {
       const r = await this.client.markFailed(doc.dispatch_phid, {
         failure_kind: "agent_error",

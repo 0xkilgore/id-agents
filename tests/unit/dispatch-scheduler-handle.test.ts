@@ -13,6 +13,9 @@ import {
   SchedulerHandle,
   parseGatewayMode,
   schedulerEnabled,
+  MANAGER_LIFECYCLE_ACTOR,
+  CHRIS_DASHBOARD_ACTOR,
+  actorRefForAgentCompletion,
 } from "../../src/dispatch-scheduler/manager-integration.js";
 
 let tmpDir: string;
@@ -246,6 +249,136 @@ describe("SchedulerHandle bootstrap + flow", () => {
     expect(final?.status).toBe("failed");
     expect(final?.failure_kind).toBe("agent_error");
     expect(final?.failure_detail).toBe("agent crashed");
+    fetchSpy.mockRestore();
+  });
+});
+
+describe("Spec 054 step 10: structured actor + causation defaults", () => {
+  it("MANAGER_LIFECYCLE_ACTOR is system:manager labeled Manager", () => {
+    expect(MANAGER_LIFECYCLE_ACTOR).toEqual({
+      kind: "system",
+      id: "manager",
+      label: "Manager",
+      source: "manager",
+    });
+  });
+
+  it("CHRIS_DASHBOARD_ACTOR is user:chris labeled Chris", () => {
+    expect(CHRIS_DASHBOARD_ACTOR).toEqual({
+      kind: "user",
+      id: "chris",
+      label: "Chris",
+      source: "manager",
+    });
+  });
+
+  it("actorRefForAgentCompletion returns agent:<name>", () => {
+    expect(actorRefForAgentCompletion("rams")).toEqual({
+      kind: "agent",
+      id: "rams",
+      label: "rams",
+      source: "manager",
+    });
+  });
+
+  it("enqueue accepts an explicit actor_ref + causation override", async () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch") as ReturnType<typeof vi.spyOn>;
+    fetchSpy.mockResolvedValueOnce(
+      new Response(JSON.stringify({ query_id: "agent-q" }), { status: 200 }) as unknown as Response,
+    );
+    const logged: Array<Record<string, unknown>> = [];
+    const handle = new SchedulerHandle({
+      adapter,
+      teamId: "team",
+      resolveTargetUrl: () => "http://localhost:9999",
+    });
+    // Capture the info log line; the scheduler_enqueued payload includes
+    // the resolved actor_ref + causation we want to assert on.
+    const origInfo = (handle as unknown as { logger: { info: typeof console.log } }).logger.info;
+    (handle as unknown as { logger: { info: typeof console.log } }).logger.info = ((
+      event: string,
+      payload: Record<string, unknown>,
+    ) => {
+      logged.push({ event, ...payload });
+      origInfo.call((handle as unknown as { logger: unknown }).logger, event, payload);
+    }) as unknown as typeof console.log;
+
+    await handle.enqueue({
+      to_agent: "rams",
+      from_actor: "chris",
+      message: "do the thing",
+      actor_ref: CHRIS_DASHBOARD_ACTOR,
+      causation: { query_id: "override", source_event_id: "evt-1" },
+    });
+
+    const enqLog = logged.find((l) => l.event === "scheduler_enqueued");
+    expect(enqLog).toBeDefined();
+    expect(enqLog?.actor_ref).toEqual(CHRIS_DASHBOARD_ACTOR);
+    expect(enqLog?.causation).toEqual({ query_id: "override", source_event_id: "evt-1" });
+    fetchSpy.mockRestore();
+  });
+
+  it("enqueue defaults actor_ref to MANAGER_LIFECYCLE_ACTOR + causation to {query_id}", async () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch") as ReturnType<typeof vi.spyOn>;
+    fetchSpy.mockResolvedValueOnce(
+      new Response(JSON.stringify({ query_id: "agent-q" }), { status: 200 }) as unknown as Response,
+    );
+    const logged: Array<Record<string, unknown>> = [];
+    const handle = new SchedulerHandle({
+      adapter,
+      teamId: "team",
+      resolveTargetUrl: () => "http://localhost:9999",
+    });
+    (handle as unknown as { logger: { info: typeof console.log } }).logger.info = ((
+      event: string,
+      payload: Record<string, unknown>,
+    ) => {
+      logged.push({ event, ...payload });
+    }) as unknown as typeof console.log;
+
+    const enq = await handle.enqueue({
+      to_agent: "rams",
+      from_actor: "manager",
+      message: "do the thing",
+    });
+    const enqLog = logged.find((l) => l.event === "scheduler_enqueued");
+    expect(enqLog?.actor_ref).toEqual(MANAGER_LIFECYCLE_ACTOR);
+    expect((enqLog?.causation as { query_id?: string })?.query_id).toBe(enq.query_id);
+    fetchSpy.mockRestore();
+  });
+
+  it("handleAgentDone defaults actor_ref to agent:<to_agent>", async () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch") as ReturnType<typeof vi.spyOn>;
+    fetchSpy.mockResolvedValueOnce(
+      new Response(JSON.stringify({ query_id: "agent-q-rams" }), { status: 200 }) as unknown as Response,
+    );
+    const logged: Array<Record<string, unknown>> = [];
+    const handle = new SchedulerHandle({
+      adapter,
+      teamId: "team",
+      resolveTargetUrl: () => "http://localhost:9999",
+    });
+    (handle as unknown as { logger: { info: typeof console.log } }).logger.info = ((
+      event: string,
+      payload: Record<string, unknown>,
+    ) => {
+      logged.push({ event, ...payload });
+    }) as unknown as typeof console.log;
+
+    const enq = await handle.enqueue({
+      to_agent: "rams",
+      from_actor: "manager",
+      message: "do the thing",
+    });
+    await handle.tick();
+    await handle.handleAgentDone({
+      query_id: enq.query_id,
+      success: true,
+      result: { reply: "ok" },
+    });
+    const doneLog = logged.find((l) => l.event === "scheduler_agent_done");
+    expect(doneLog?.actor_ref).toEqual(actorRefForAgentCompletion("rams"));
+    expect((doneLog?.causation as { query_id?: string })?.query_id).toBe(enq.query_id);
     fetchSpy.mockRestore();
   });
 });
