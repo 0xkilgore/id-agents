@@ -57,6 +57,34 @@ Every agent's CLAUDE.md includes this preamble at deploy time:
 
 Agents adopt this convention automatically. No additional configuration is needed.
 
+## Per-document feedback
+
+Chris (and other human reviewers) can leave comments directly on an
+Artifact from `/agents/<agent>/output/<artifact_phid>` in the dashboard.
+Each comment is a first-class `ADD_COMMENT` operation on the Artifact's
+document history. Agents poll their unread feedback via the CLI without
+opening the browser:
+
+```bash
+# List unread artifact comments for an agent
+id-agents comments rams
+
+# Same, as JSON for scripts/SDK callers
+id-agents comments rams --json
+
+# Acknowledge (mark read) a single comment
+id-agents comments rams --ack phid:art-1 comment_abc123
+```
+
+In code, agents can call the same surface directly:
+
+```ts
+import { pollUnreadArtifactCommentsForSelf } from "@id-agents/cli/comments";
+
+const unread = await pollUnreadArtifactCommentsForSelf();
+// agentId defaults to process.env.AGENT_NAME
+```
+
 ## Related
 
 - [Task Tracking](./tasks.md) — coordinate work between agents
