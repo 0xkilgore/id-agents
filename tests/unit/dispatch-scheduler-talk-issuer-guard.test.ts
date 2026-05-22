@@ -41,7 +41,13 @@ const ALLOWLIST: Issuer[] = [
   },
   {
     file: "src/agent-manager-db.ts",
-    line: 7173,
+    line: 2104,
+    category: "MUST_MIGRATE",
+    note: "Spec 054 v2 /agent-resume — direct /talk follow-up to deliver the resume payload to the paused agent. Migrate to session-side injection in a follow-up.",
+  },
+  {
+    file: "src/agent-manager-db.ts",
+    line: 7490,
     category: "MUST_MIGRATE",
     note: "agent heartbeat reseed — immediate /talk send",
   },
