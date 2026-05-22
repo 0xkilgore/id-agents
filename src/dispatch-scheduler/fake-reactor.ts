@@ -15,6 +15,10 @@ import {
   type SchedulerStatus,
   type BounceRecord,
   type FailureKind,
+  type ClarificationEvent,
+  type ClarificationBlocker,
+  defaultClarificationFields,
+  defaultPromotionFields,
 } from "./types.js";
 
 export interface FakeReactorOptions {
@@ -107,6 +111,8 @@ export class FakeReactor {
       usage_policy_snapshot: input.usage_policy_snapshot ?? null,
       failure_kind: null,
       failure_detail: null,
+      ...defaultClarificationFields(),
+      ...defaultPromotionFields(input),
     };
     this.docs.set(doc.dispatch_phid, doc);
     return clone(doc);

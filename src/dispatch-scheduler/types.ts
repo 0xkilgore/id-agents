@@ -13,7 +13,63 @@ export type SchedulerStatus =
   | "done"
   | "failed"
   | "bounced"
-  | "cancelled";
+  | "cancelled"
+  // Spec 054 v2: agent intentionally paused on a clarification question.
+  // Non-terminal. Releases the active scheduler slot. Resumed via
+  // POST /agent-resume which moves the dispatch back to "queued".
+  | "needs_clarification"
+  // Spec 054 v2: /agent-resume answered the question but the resume
+  // payload could not be delivered to the target agent. Non-terminal
+  // but blocked; should NOT re-enter normal queue claiming until
+  // operator intervention.
+  | "resume_delivery_failed";
+
+// Spec 054 v2 ─ clarification events appended to clarification_history.
+export type ClarificationEventType =
+  | "NEEDS_CLARIFICATION"
+  | "RESUME"
+  | "RESUME_DELIVERED"
+  | "RESUME_DELIVERY_FAILED"
+  | "CLARIFICATION_STALE";
+
+export interface ClarificationEvent {
+  type: ClarificationEventType;
+  clarification_id: string;
+  ts: string;
+  // For NEEDS_CLARIFICATION:
+  agent_id?: string;
+  query_id?: string | null;
+  question?: string;
+  context?: unknown;
+  urgency?: "normal" | "time_sensitive";
+  stale_at?: string;
+  // For RESUME:
+  actor?: string;
+  answer?: string;
+  instructions?: string[] | string | null;
+  // For RESUME_DELIVERED:
+  transport?: "session_injection" | "talk_followup" | string;
+  delivered_at?: string;
+  agent_query_id?: string | null;
+  // For RESUME_DELIVERY_FAILED:
+  failure_detail?: string;
+  // For CLARIFICATION_STALE:
+  age_seconds?: number;
+  surfaced_at?: string;
+}
+
+// Active clarification blocker (one per dispatch at a time; serialized
+// into active_clarification_json on the queue row).
+export interface ClarificationBlocker {
+  clarification_id: string;
+  agent_id: string;
+  query_id: string | null;
+  question: string;
+  context: unknown;
+  urgency: "normal" | "time_sensitive";
+  created_at: string;
+  stale_at: string;
+}
 
 export type Provider = "anthropic" | "openai" | "local" | "other";
 
@@ -64,6 +120,27 @@ export interface DispatchDoc {
   usage_policy_snapshot: UsagePolicySnapshot | null;
   failure_kind: FailureKind | null;
   failure_detail: string | null;
+  // Spec 054 v2 ─ clarification fields. All additive; absent on legacy
+  // rows. clarification_id is the currently-active blocker's id (null
+  // when no clarification is open). active_clarification carries the
+  // full blocker payload for read surfaces. clarification_history is
+  // the append-only log of every NEEDS_CLARIFICATION / RESUME / etc.
+  clarification_id: string | null;
+  active_clarification: ClarificationBlocker | null;
+  clarification_history: ClarificationEvent[];
+  resume_delivery_status: "none" | "pending" | "delivered" | "failed";
+  // Spec 054 v2 ─ promotion metadata. Build dispatches default to
+  // promote=true; non-build dispatches typically false. promotion_result
+  // captures the canonical post-promotion record from /agent-done.
+  promote: boolean;
+  promotion_strategy:
+    | "auto"
+    | "fast_forward"
+    | "merge_commit"
+    | "squash"
+    | "follow_up_dispatch";
+  promotion_required_reason: string | null;
+  promotion_result: unknown | null;
 }
 
 export interface EnqueueInput {
@@ -78,6 +155,12 @@ export interface EnqueueInput {
   priority?: number;
   not_before_at?: string;
   usage_policy_snapshot?: UsagePolicySnapshot;
+  // Spec 054 v2 ─ promotion metadata at enqueue time. promote defaults
+  // to true for build dispatches (those that include repo metadata) and
+  // false otherwise. Detection lives at the call site of enqueue().
+  promote?: boolean;
+  promotion_strategy?: DispatchDoc["promotion_strategy"];
+  promotion_required_reason?: string | null;
 }
 
 export interface ConcurrencySnapshot {
@@ -134,10 +217,59 @@ export function isTerminal(s: SchedulerStatus): boolean {
   return RESERVED_TERMINAL.has(s);
 }
 
+// Spec 054 v2: statuses that are non-terminal but should NOT be eligible
+// for normal queue claiming. Both block the dispatch until operator
+// intervention (resume or cancel).
+export const BLOCKED_NON_CLAIMABLE: ReadonlySet<SchedulerStatus> = new Set<SchedulerStatus>([
+  "needs_clarification",
+  "resume_delivery_failed",
+]);
+
+export function isBlocked(s: SchedulerStatus): boolean {
+  return BLOCKED_NON_CLAIMABLE.has(s);
+}
+
 export function ok<T>(value: T): Ok<T> {
   return { ok: true, value };
 }
 
 export function degraded(reason: DegradedReason, detail: string): Degraded {
   return { ok: false, reason, detail };
+}
+
+// Spec 054 v2 ─ default values for the additive clarification + promotion
+// fields. Used by enqueue paths so all writers produce a fully-shaped
+// DispatchDoc without sprinkling literals.
+export interface ClarificationDefaults {
+  clarification_id: null;
+  active_clarification: null;
+  clarification_history: ClarificationEvent[];
+  resume_delivery_status: "none";
+}
+export function defaultClarificationFields(): ClarificationDefaults {
+  return {
+    clarification_id: null,
+    active_clarification: null,
+    clarification_history: [],
+    resume_delivery_status: "none",
+  };
+}
+
+export interface PromotionDefaults {
+  promote: boolean;
+  promotion_strategy: DispatchDoc["promotion_strategy"];
+  promotion_required_reason: string | null;
+  promotion_result: null;
+}
+export function defaultPromotionFields(input: {
+  promote?: boolean;
+  promotion_strategy?: DispatchDoc["promotion_strategy"];
+  promotion_required_reason?: string | null;
+}): PromotionDefaults {
+  return {
+    promote: input.promote ?? true,
+    promotion_strategy: input.promotion_strategy ?? "auto",
+    promotion_required_reason: input.promotion_required_reason ?? null,
+    promotion_result: null,
+  };
 }

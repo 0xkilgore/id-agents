@@ -26,6 +26,11 @@ import {
   type ConcurrencySnapshot,
   type BounceRecord,
   type UsagePolicySnapshot,
+  type ClarificationEvent,
+  type ClarificationBlocker,
+  defaultClarificationFields,
+  defaultPromotionFields,
+  isTerminal,
 } from "./types.js";
 import { randomBytes } from "node:crypto";
 
@@ -56,6 +61,15 @@ interface Row {
   failure_detail: string | null;
   target_url: string | null;
   result_json: string | null;
+  // Spec 054 v2 additive columns
+  clarification_id: string | null;
+  active_clarification_json: string | null;
+  clarification_history_json: string;
+  resume_delivery_status: "none" | "pending" | "delivered" | "failed";
+  promote: number;
+  promotion_strategy: DispatchDoc["promotion_strategy"];
+  promotion_required_reason: string | null;
+  promotion_result_json: string | null;
 }
 
 export interface SqliteDispatchReactorOptions {
@@ -119,6 +133,8 @@ export class SqliteDispatchReactor {
       usage_policy_snapshot: input.usage_policy_snapshot ?? null,
       failure_kind: null,
       failure_detail: null,
+      ...defaultClarificationFields(),
+      ...defaultPromotionFields(input),
     };
     const targetUrl = input.target_url ?? null;
     await this.adapter.query(
@@ -128,8 +144,11 @@ export class SqliteDispatchReactor {
         not_before_at, attempt_count, bounce_count, last_bounce_json,
         bounce_history_json, started_at, completed_at, updated_at,
         agent_query_id, usage_policy_snapshot_json, failure_kind,
-        failure_detail, target_url, result_json
-      ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+        failure_detail, target_url, result_json,
+        clarification_id, active_clarification_json, clarification_history_json,
+        resume_delivery_status, promote, promotion_strategy,
+        promotion_required_reason, promotion_result_json
+      ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       [
         doc.dispatch_phid,
         this.teamId,
@@ -156,6 +175,15 @@ export class SqliteDispatchReactor {
         null,
         null,
         targetUrl,
+        null,
+        // Spec 054 v2 columns
+        doc.clarification_id,
+        doc.active_clarification ? JSON.stringify(doc.active_clarification) : null,
+        JSON.stringify(doc.clarification_history),
+        doc.resume_delivery_status,
+        doc.promote ? 1 : 0,
+        doc.promotion_strategy,
+        doc.promotion_required_reason,
         null,
       ],
     );
@@ -512,6 +540,279 @@ export class SqliteDispatchReactor {
     };
   }
 
+  // ════════════════════════════════════════════════════════════════
+  // Spec 054 v2 — clarification lifecycle
+  // ════════════════════════════════════════════════════════════════
+
+  /** Pause a dispatch on a clarification question. Idempotent for the
+   *  same agent+question within the 5-minute idempotency window. */
+  async markNeedsClarification(
+    phid: string,
+    input: {
+      agent_id: string;
+      query_id?: string | null;
+      question: string;
+      context?: unknown;
+      urgency?: "normal" | "time_sensitive";
+      stale_ms?: number; // override default 2h stale window for tests
+    },
+  ): Promise<{ doc: DispatchDoc; clarification_id: string; idempotent: boolean }> {
+    const doc = await this.getByPhid(phid);
+    if (!doc) throw conflict(`markNeedsClarification: dispatch ${phid} not found`);
+    if (isTerminal(doc.status)) {
+      throw conflict(`markNeedsClarification cannot run from terminal ${doc.status}`);
+    }
+    const now = this.nowFn();
+    const staleMs = input.stale_ms ?? 2 * 60 * 60 * 1000;
+
+    // Idempotency: same agent+question on an open clarification within 5 min.
+    if (
+      doc.status === "needs_clarification" &&
+      doc.active_clarification &&
+      doc.active_clarification.agent_id === input.agent_id &&
+      doc.active_clarification.question === input.question
+    ) {
+      const ageMs = Date.parse(now) - Date.parse(doc.active_clarification.created_at);
+      if (ageMs <= 5 * 60 * 1000) {
+        return { doc, clarification_id: doc.active_clarification.clarification_id, idempotent: true };
+      }
+    }
+
+    const clarification_id = mintClarificationId();
+    const stale_at = new Date(Date.parse(now) + staleMs).toISOString();
+    const blocker: ClarificationBlocker = {
+      clarification_id,
+      agent_id: input.agent_id,
+      query_id: input.query_id ?? null,
+      question: input.question,
+      context: input.context ?? null,
+      urgency: input.urgency ?? "normal",
+      created_at: now,
+      stale_at,
+    };
+    const event: ClarificationEvent = {
+      type: "NEEDS_CLARIFICATION",
+      clarification_id,
+      ts: now,
+      agent_id: input.agent_id,
+      query_id: input.query_id ?? null,
+      question: input.question,
+      context: input.context ?? null,
+      urgency: input.urgency ?? "normal",
+      stale_at,
+    };
+    const history = [...doc.clarification_history, event];
+    await this.adapter.query(
+      `UPDATE dispatch_scheduler_queue
+       SET status = 'needs_clarification',
+           clarification_id = ?,
+           active_clarification_json = ?,
+           clarification_history_json = ?,
+           updated_at = ?
+       WHERE dispatch_phid = ? AND team_id = ?`,
+      [
+        clarification_id,
+        JSON.stringify(blocker),
+        JSON.stringify(history),
+        now,
+        phid,
+        this.teamId,
+      ],
+    );
+    const updated = await this.getByPhid(phid);
+    if (!updated) throw conflict(`markNeedsClarification: post-update read failed`);
+    return { doc: updated, clarification_id, idempotent: false };
+  }
+
+  /** Resume a paused dispatch with the operator's answer. Closes the
+   *  active clarification, appends RESUME, and requeues for scheduler. */
+  async resumeAfterClarification(
+    phid: string,
+    input: {
+      clarification_id?: string;
+      actor?: string;
+      answer: string;
+      instructions?: string[] | string | null;
+    },
+  ): Promise<DispatchDoc> {
+    const doc = await this.getByPhid(phid);
+    if (!doc) throw conflict(`resumeAfterClarification: dispatch ${phid} not found`);
+    if (doc.status !== "needs_clarification") {
+      throw conflict(`resumeAfterClarification requires needs_clarification, was ${doc.status}`);
+    }
+    if (!doc.active_clarification) {
+      throw conflict(`resumeAfterClarification: no active clarification`);
+    }
+    const target_id = input.clarification_id ?? doc.active_clarification.clarification_id;
+    if (target_id !== doc.active_clarification.clarification_id) {
+      throw conflict(
+        `resumeAfterClarification: clarification_id mismatch (active=${doc.active_clarification.clarification_id}, requested=${target_id})`,
+      );
+    }
+    const now = this.nowFn();
+    const event: ClarificationEvent = {
+      type: "RESUME",
+      clarification_id: target_id,
+      ts: now,
+      actor: input.actor ?? "manager",
+      answer: input.answer,
+      instructions: input.instructions ?? null,
+    };
+    const history = [...doc.clarification_history, event];
+    await this.adapter.query(
+      `UPDATE dispatch_scheduler_queue
+       SET status = 'queued',
+           clarification_id = NULL,
+           active_clarification_json = NULL,
+           clarification_history_json = ?,
+           resume_delivery_status = 'pending',
+           not_before_at = ?,
+           updated_at = ?
+       WHERE dispatch_phid = ? AND team_id = ?`,
+      [JSON.stringify(history), now, now, phid, this.teamId],
+    );
+    const updated = await this.getByPhid(phid);
+    if (!updated) throw conflict(`resumeAfterClarification: post-update read failed`);
+    return updated;
+  }
+
+  /** Record that resume delivery to the agent succeeded. */
+  async markResumeDelivered(
+    phid: string,
+    input: {
+      clarification_id: string;
+      transport: "session_injection" | "talk_followup" | string;
+      agent_query_id?: string | null;
+    },
+  ): Promise<DispatchDoc> {
+    const doc = await this.getByPhid(phid);
+    if (!doc) throw conflict(`markResumeDelivered: dispatch ${phid} not found`);
+    const now = this.nowFn();
+    const event: ClarificationEvent = {
+      type: "RESUME_DELIVERED",
+      clarification_id: input.clarification_id,
+      ts: now,
+      transport: input.transport,
+      delivered_at: now,
+      agent_query_id: input.agent_query_id ?? null,
+    };
+    const history = [...doc.clarification_history, event];
+    await this.adapter.query(
+      `UPDATE dispatch_scheduler_queue
+       SET resume_delivery_status = 'delivered',
+           clarification_history_json = ?,
+           ${input.agent_query_id ? "agent_query_id = ?," : ""}
+           updated_at = ?
+       WHERE dispatch_phid = ? AND team_id = ?`,
+      input.agent_query_id
+        ? [JSON.stringify(history), input.agent_query_id, now, phid, this.teamId]
+        : [JSON.stringify(history), now, phid, this.teamId],
+    );
+    const updated = await this.getByPhid(phid);
+    if (!updated) throw conflict(`markResumeDelivered: post-update read failed`);
+    return updated;
+  }
+
+  /** Resume delivery failed - move to blocked, non-claimable state. */
+  async markResumeDeliveryFailed(
+    phid: string,
+    input: { clarification_id: string; failure_detail: string },
+  ): Promise<DispatchDoc> {
+    const doc = await this.getByPhid(phid);
+    if (!doc) throw conflict(`markResumeDeliveryFailed: dispatch ${phid} not found`);
+    const now = this.nowFn();
+    const event: ClarificationEvent = {
+      type: "RESUME_DELIVERY_FAILED",
+      clarification_id: input.clarification_id,
+      ts: now,
+      failure_detail: input.failure_detail,
+    };
+    const history = [...doc.clarification_history, event];
+    await this.adapter.query(
+      `UPDATE dispatch_scheduler_queue
+       SET status = 'resume_delivery_failed',
+           resume_delivery_status = 'failed',
+           clarification_history_json = ?,
+           failure_detail = ?,
+           updated_at = ?
+       WHERE dispatch_phid = ? AND team_id = ?`,
+      [JSON.stringify(history), input.failure_detail, now, phid, this.teamId],
+    );
+    const updated = await this.getByPhid(phid);
+    if (!updated) throw conflict(`markResumeDeliveryFailed: post-update read failed`);
+    return updated;
+  }
+
+  /** Append a CLARIFICATION_STALE event without changing the dispatch
+   *  status. Status remains needs_clarification; operator action is
+   *  still required. */
+  async markClarificationStale(
+    phid: string,
+    input: { clarification_id: string; age_seconds: number },
+  ): Promise<DispatchDoc> {
+    const doc = await this.getByPhid(phid);
+    if (!doc) throw conflict(`markClarificationStale: dispatch ${phid} not found`);
+    const now = this.nowFn();
+    const event: ClarificationEvent = {
+      type: "CLARIFICATION_STALE",
+      clarification_id: input.clarification_id,
+      ts: now,
+      age_seconds: input.age_seconds,
+      surfaced_at: now,
+    };
+    const history = [...doc.clarification_history, event];
+    await this.adapter.query(
+      `UPDATE dispatch_scheduler_queue
+       SET clarification_history_json = ?, updated_at = ?
+       WHERE dispatch_phid = ? AND team_id = ?`,
+      [JSON.stringify(history), now, phid, this.teamId],
+    );
+    const updated = await this.getByPhid(phid);
+    if (!updated) throw conflict(`markClarificationStale: post-update read failed`);
+    return updated;
+  }
+
+  /** Persist the post-promotion result on /agent-done. */
+  async recordPromotionResult(
+    phid: string,
+    input: { result: unknown },
+  ): Promise<DispatchDoc> {
+    const doc = await this.getByPhid(phid);
+    if (!doc) throw conflict(`recordPromotionResult: dispatch ${phid} not found`);
+    const now = this.nowFn();
+    await this.adapter.query(
+      `UPDATE dispatch_scheduler_queue
+       SET promotion_result_json = ?, updated_at = ?
+       WHERE dispatch_phid = ? AND team_id = ?`,
+      [JSON.stringify(input.result), now, phid, this.teamId],
+    );
+    const updated = await this.getByPhid(phid);
+    if (!updated) throw conflict(`recordPromotionResult: post-update read failed`);
+    return updated;
+  }
+
+  /** List open clarification blockers. With staleOnly=true, only those
+   *  past their stale_at timestamp at the supplied (or current) now. */
+  async listOpenClarifications(opts: {
+    staleOnly?: boolean;
+    now?: string;
+  } = {}): Promise<DispatchDoc[]> {
+    const { rows } = await this.adapter.query<Row>(
+      `SELECT * FROM dispatch_scheduler_queue
+       WHERE team_id = ? AND status = 'needs_clarification'
+       ORDER BY updated_at ASC`,
+      [this.teamId],
+    );
+    const docs = rows.map(rowToDoc);
+    if (opts.staleOnly) {
+      const now = opts.now ?? this.nowFn();
+      return docs.filter(
+        (d) => d.active_clarification != null && d.active_clarification.stale_at <= now,
+      );
+    }
+    return docs;
+  }
+
   /** Read the stashed agent reply payload (Phase 5.2 talk-to waiter). */
   async getResult(phid: string): Promise<Record<string, unknown> | null> {
     const { rows } = await this.adapter.query<{ result_json: string | null }>(
@@ -543,6 +844,10 @@ function clampPriority(p: number | undefined): number {
 
 function mintPhid(): string {
   return `phid:disp-${randomBytes(8).toString("hex")}`;
+}
+
+function mintClarificationId(): string {
+  return `clar_${Date.now()}_${randomBytes(2).toString("hex")}`;
 }
 
 function parseBounceHistory(raw: string): BounceRecord[] {
@@ -597,7 +902,44 @@ function rowToDoc(row: Row): DispatchDoc {
     usage_policy_snapshot: parsePolicy(row.usage_policy_snapshot_json),
     failure_kind: row.failure_kind,
     failure_detail: row.failure_detail,
+    // Spec 054 v2 fields - tolerate legacy rows with null columns.
+    clarification_id: row.clarification_id ?? null,
+    active_clarification: parseClarificationBlocker(row.active_clarification_json),
+    clarification_history: parseClarificationHistory(row.clarification_history_json),
+    resume_delivery_status: (row.resume_delivery_status ?? "none") as DispatchDoc["resume_delivery_status"],
+    promote: row.promote == null ? true : Number(row.promote) === 1,
+    promotion_strategy: (row.promotion_strategy ?? "auto") as DispatchDoc["promotion_strategy"],
+    promotion_required_reason: row.promotion_required_reason ?? null,
+    promotion_result: parseJsonOrNull(row.promotion_result_json),
   };
+}
+
+function parseClarificationBlocker(raw: string | null): ClarificationBlocker | null {
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw) as ClarificationBlocker;
+  } catch {
+    return null;
+  }
+}
+
+function parseClarificationHistory(raw: string | null | undefined): ClarificationEvent[] {
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? (parsed as ClarificationEvent[]) : [];
+  } catch {
+    return [];
+  }
+}
+
+function parseJsonOrNull(raw: string | null | undefined): unknown {
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
 }
 
 function conflict(msg: string): Error & { code: string } {

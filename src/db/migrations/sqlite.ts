@@ -589,6 +589,25 @@ export async function migrateSqlite(adapter: SqliteAdapter): Promise<void> {
 
   adapter.exec(`CREATE UNIQUE INDEX IF NOT EXISTS tasks_uuid_idx ON tasks(uuid)`);
 
+  // Spec 054 v2 ─ dispatch_scheduler_queue clarification + promotion columns.
+  // All additive, default-safe, idempotent (try/catch so re-running is a no-op).
+  for (const stmt of [
+    `ALTER TABLE dispatch_scheduler_queue ADD COLUMN clarification_id TEXT`,
+    `ALTER TABLE dispatch_scheduler_queue ADD COLUMN active_clarification_json TEXT`,
+    `ALTER TABLE dispatch_scheduler_queue ADD COLUMN clarification_history_json TEXT NOT NULL DEFAULT '[]'`,
+    `ALTER TABLE dispatch_scheduler_queue ADD COLUMN resume_delivery_status TEXT NOT NULL DEFAULT 'none'`,
+    `ALTER TABLE dispatch_scheduler_queue ADD COLUMN promote INTEGER NOT NULL DEFAULT 1`,
+    `ALTER TABLE dispatch_scheduler_queue ADD COLUMN promotion_strategy TEXT NOT NULL DEFAULT 'auto'`,
+    `ALTER TABLE dispatch_scheduler_queue ADD COLUMN promotion_required_reason TEXT`,
+    `ALTER TABLE dispatch_scheduler_queue ADD COLUMN promotion_result_json TEXT`,
+  ]) {
+    try {
+      adapter.exec(stmt);
+    } catch {
+      // Column already exists in upgraded databases.
+    }
+  }
+
   await migrateQueriesTeamQueryPkSqlite(adapter);
   await migrateNewsItemsNullableAgentSqlite(adapter);
   await migrateDeleteManagerShadowAgentsSqlite(adapter);
