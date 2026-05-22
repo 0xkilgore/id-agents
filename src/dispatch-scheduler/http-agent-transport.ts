@@ -20,6 +20,17 @@ export interface HttpAgentTransportOptions {
 
 const DEFAULT_TIMEOUT_MS = 30_000;
 
+// Spec 054 v2 review fix: prepend a small visible dispatch metadata
+// block to the message body so plain-text agent contexts (Claude-CLI
+// session prompts) see the canonical dispatch_id. Exported for the
+// transport guard test.
+export function buildScheduledMessage(doc: DispatchDoc): string {
+  const header =
+    `[dispatch_id: ${doc.dispatch_phid}]\n` +
+    `[query_id: ${doc.query_id}]\n\n`;
+  return header + doc.body_markdown;
+}
+
 export class HttpAgentTransport implements AgentTransport {
   private resolveTargetUrl: HttpAgentTransportOptions["resolveTargetUrl"];
   private timeoutMs: number;
@@ -44,9 +55,21 @@ export class HttpAgentTransport implements AgentTransport {
       const resp = await fetch(url, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
+        // Spec 054 v2 review fix: every scheduler-launched /talk MUST
+        // carry canonical dispatch metadata. Two delivery channels:
+        //   1. JSON body fields: dispatch_id, query_id - for agents
+        //      whose /talk handler reads the request body directly.
+        //   2. A prepended metadata block on `message` - for agents
+        //      that only see the prompt text (Claude-CLI sessions
+        //      typically only get the message string).
+        // Both must be present so PROTOCOL_DEFAULTS's instruction to
+        // "call /agent-needs-input with the manager dispatch_id from
+        // your /talk metadata" actually works end-to-end.
         body: JSON.stringify({
-          message: doc.body_markdown,
+          message: buildScheduledMessage(doc),
           from: doc.from_actor,
+          dispatch_id: doc.dispatch_phid,
+          query_id: doc.query_id,
         }),
         signal: AbortSignal.timeout(this.timeoutMs),
       });

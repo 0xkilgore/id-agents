@@ -62,8 +62,53 @@ describe("HttpAgentTransport.sendTalk", () => {
     const init = call?.[1] as RequestInit;
     expect(init.method).toBe("POST");
     const body = JSON.parse(init.body as string);
-    expect(body.message).toBe("hello there");
+    // Spec 054 v2 review fix: original body content is preserved and
+    // prepended with a visible dispatch metadata block so plain-text
+    // agent contexts can read dispatch_id from the prompt.
+    expect(body.message).toContain("hello there");
+    expect(body.message).toMatch(/\[dispatch_id: phid:abc\]/);
+    expect(body.message).toMatch(/\[query_id: q\]/);
     expect(body.from).toBe("manager");
+  });
+
+  // Spec 054 v2 review fix guard: scheduler-launched /talk MUST carry
+  // canonical dispatch metadata so the agent can call /agent-needs-input
+  // with a real dispatch_id when blocked. These tests fail the build if
+  // either field is dropped from the JSON payload or the visible header.
+  it("guard: JSON body always includes dispatch_id and query_id", async () => {
+    fetchSpy.mockResolvedValueOnce(
+      new Response(JSON.stringify({ query_id: "x" }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }) as unknown as Response,
+    );
+    const transport = new HttpAgentTransport({
+      resolveTargetUrl: () => "http://localhost:5500",
+    });
+    await transport.sendTalk(doc);
+    const init = fetchSpy.mock.calls[0]?.[1] as RequestInit;
+    const body = JSON.parse(init.body as string);
+    expect(body.dispatch_id).toBe("phid:abc");
+    expect(body.query_id).toBe("q");
+  });
+
+  it("guard: metadata block is the first thing in the message body", async () => {
+    fetchSpy.mockResolvedValueOnce(
+      new Response(JSON.stringify({ query_id: "x" }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }) as unknown as Response,
+    );
+    const transport = new HttpAgentTransport({
+      resolveTargetUrl: () => "http://localhost:5500",
+    });
+    await transport.sendTalk(doc);
+    const init = fetchSpy.mock.calls[0]?.[1] as RequestInit;
+    const body = JSON.parse(init.body as string);
+    // metadata header lines come BEFORE the original body_markdown
+    expect(body.message.startsWith("[dispatch_id: phid:abc]")).toBe(true);
+    // original body_markdown is preserved verbatim after the header
+    expect(body.message.endsWith("hello there")).toBe(true);
   });
 
   it("strips trailing slashes from target URL", async () => {

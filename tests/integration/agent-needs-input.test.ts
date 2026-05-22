@@ -126,6 +126,43 @@ describe('POST /agent-needs-input', () => {
     expect(r.status).toBe(404);
   });
 
+  // Spec 054 v2 review fix: the spec example shows `"dispatch_id": 1234`
+  // (numeric). Endpoint must NOT 400 on a numeric input - it should
+  // coerce to string and resolve through the normal phid/query_id paths.
+  // Numeric values that don't match anything resolve to 404 (correct
+  // behavior), not 400.
+  it('accepts a numeric dispatch_id (per spec example) without 400-ing', async () => {
+    const r = await fetch(`${baseUrl}/agent-needs-input`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        dispatch_id: 1234,
+        agent_id: 'roger',
+        question: 'spec-shaped numeric input',
+      }),
+    });
+    // The numeric value coerces to "1234", which doesn't match any
+    // live phid or query_id, so the endpoint correctly responds 404
+    // (NOT 400). Either response proves the numeric input was
+    // accepted past validation; the test pins the 404 path.
+    expect(r.status).toBe(404);
+  });
+
+  it('rejects malformed dispatch_id inputs (objects, booleans, null) with 400', async () => {
+    for (const bad of [null, false, true, { foo: 'bar' }, ['a']]) {
+      const r = await fetch(`${baseUrl}/agent-needs-input`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          dispatch_id: bad,
+          agent_id: 'roger',
+          question: 'q',
+        }),
+      });
+      expect(r.status).toBe(400);
+    }
+  });
+
   it('pauses an in_flight dispatch and returns clarification metadata', async () => {
     const r = await fetch(`${baseUrl}/agent-needs-input`, {
       method: 'POST',
@@ -213,6 +250,18 @@ describe('POST /agent-resume', () => {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ dispatch_id: 'phid:disp-deadbeef', answer: 'x' }),
     });
+    expect(r.status).toBe(404);
+  });
+
+  // Spec 054 v2 review fix: accept numeric dispatch_id (spec example
+  // shape) without 400-ing.
+  it('accepts a numeric dispatch_id (per spec example) without 400-ing', async () => {
+    const r = await fetch(`${baseUrl}/agent-resume`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ dispatch_id: 1234, answer: 'go' }),
+    });
+    // 1234 coerces to "1234", doesn't resolve to any dispatch, returns 404 (not 400).
     expect(r.status).toBe(404);
   });
 

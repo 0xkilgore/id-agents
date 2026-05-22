@@ -67,6 +67,22 @@ Write any generated files (reports, analysis, code artifacts) to \`./output/\` i
 
 If you cannot safely continue because the dispatch is ambiguous, blocked on a choice, or would require guessing at operator intent, call \`POST /agent-needs-input\` with the manager \`dispatch_id\`, a concise question, and the context needed to answer it. Do NOT only write the question in chat/session text — the manager cannot see it there.
 
+### Where to find your \`dispatch_id\`
+
+Every scheduler-launched \`/talk\` carries the canonical dispatch metadata in two places. Use whichever your harness exposes:
+
+1. **JSON body fields** \`dispatch_id\` and \`query_id\` on the inbound \`/talk\` request.
+2. **A visible metadata block at the top of the message body**, like:
+
+   \`\`\`text
+   [dispatch_id: phid:disp-abc123...]
+   [query_id: query_1779...]
+
+   <the actual dispatch body>
+   \`\`\`
+
+If you only see the prompt text (Claude-CLI sessions), parse the \`[dispatch_id: ...]\` line from the top of the message.
+
 After the endpoint succeeds, stop work and wait for resume. The manager will respond via \`POST /agent-resume\`, which arrives as a follow-up \`/talk\` message referencing your original \`dispatch_id\`.
 
 Minimal call:

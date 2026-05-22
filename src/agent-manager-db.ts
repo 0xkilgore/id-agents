@@ -104,6 +104,23 @@ function resolveModelAlias(model: string): string {
   return MODEL_ALIASES[model.toLowerCase()] || model;
 }
 
+/**
+ * Spec 054 v2 (review fix): normalize a `dispatch_id` JSON input to a
+ * non-empty string. The spec uses a numeric placeholder (`1234`) in its
+ * example; the live scheduler key is a `phid:disp-...` string. We
+ * accept both: finite numbers are coerced to their string form, then
+ * resolved by the same phid/query_id paths the endpoint already uses.
+ * Returns "" for everything else (booleans, objects, NaN, undefined),
+ * which the endpoint handler treats as a 400.
+ */
+export function normalizeDispatchIdInput(input: unknown): string {
+  if (typeof input === 'string') return input.trim();
+  if (typeof input === 'number' && Number.isFinite(input)) {
+    return String(input);
+  }
+  return '';
+}
+
 function tokenizeCommand(command: string): string[] {
   const tokens: string[] = [];
   const re = /"((?:\\.|[^"\\])*)"|'((?:\\.|[^'\\])*)'|(\S+)/g;
@@ -1930,7 +1947,12 @@ export class AgentManagerDb {
           query_id?: unknown;
           resume_hint?: unknown;
         };
-        const dispatchIdRaw = typeof body.dispatch_id === 'string' ? body.dispatch_id.trim() : '';
+        // Spec 054 v2 review fix: accept dispatch_id as string OR
+        // number. The spec example uses a numeric placeholder; the
+        // live scheduler key is a `phid:disp-...` string. Convert
+        // numeric input to its string form before resolution. NaN /
+        // booleans / objects → empty (caught by the 400 check below).
+        const dispatchIdRaw = normalizeDispatchIdInput(body.dispatch_id);
         const agentId = typeof body.agent_id === 'string' ? body.agent_id.trim() : '';
         const question = typeof body.question === 'string' ? body.question.trim() : '';
         if (!dispatchIdRaw || !agentId || !question) {
@@ -1944,7 +1966,9 @@ export class AgentManagerDb {
         const queryId = typeof body.query_id === 'string' ? body.query_id : null;
         const teamId = await this.db.teams.getOrCreateTeamId('default');
 
-        // Resolve dispatch_id: phid form or query_id form.
+        // Resolve dispatch_id: phid form, query_id form, or numeric
+        // form (treated as query_id since the live store has no
+        // numeric column).
         const reactor = this.dispatchScheduler.reactor;
         let dispatchDoc = null;
         if (dispatchIdRaw.startsWith('phid:')) {
@@ -2032,7 +2056,8 @@ export class AgentManagerDb {
           instructions?: unknown;
           from?: unknown;
         };
-        const dispatchIdRaw = typeof body.dispatch_id === 'string' ? body.dispatch_id.trim() : '';
+        // Spec 054 v2 review fix: accept dispatch_id as string OR number.
+        const dispatchIdRaw = normalizeDispatchIdInput(body.dispatch_id);
         const answer = typeof body.answer === 'string' ? body.answer.trim() : '';
         const actor = typeof body.from === 'string' && body.from.trim() ? body.from.trim() : 'manager';
         if (!dispatchIdRaw || !answer) {
