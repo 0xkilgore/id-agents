@@ -1907,6 +1907,323 @@ export class AgentManagerDb {
       }
     });
 
+    // ────────────────────────────────────────────────────────────────
+    // Spec 054 v2 — agent clarification protocol.
+    //   POST /agent-needs-input  : agent pauses on a question
+    //   POST /agent-resume       : manager answers, agent resumes
+    //   GET  /dispatches/clarifications : open blockers (read surface)
+    // ────────────────────────────────────────────────────────────────
+    this.managementApp.post('/agent-needs-input', async (req, res) => {
+      if (!this.dispatchScheduler) {
+        return res.status(503).json({
+          ok: false,
+          error: 'dispatch_scheduler_not_initialised',
+        });
+      }
+      try {
+        const body = (req.body || {}) as {
+          dispatch_id?: unknown;
+          agent_id?: unknown;
+          question?: unknown;
+          context?: unknown;
+          urgency?: unknown;
+          query_id?: unknown;
+          resume_hint?: unknown;
+        };
+        const dispatchIdRaw = typeof body.dispatch_id === 'string' ? body.dispatch_id.trim() : '';
+        const agentId = typeof body.agent_id === 'string' ? body.agent_id.trim() : '';
+        const question = typeof body.question === 'string' ? body.question.trim() : '';
+        if (!dispatchIdRaw || !agentId || !question) {
+          return res.status(400).json({
+            ok: false,
+            error: 'dispatch_id, agent_id, and non-empty question required',
+          });
+        }
+        const urgency =
+          body.urgency === 'time_sensitive' ? 'time_sensitive' : 'normal';
+        const queryId = typeof body.query_id === 'string' ? body.query_id : null;
+        const teamId = await this.db.teams.getOrCreateTeamId('default');
+
+        // Resolve dispatch_id: phid form or query_id form.
+        const reactor = this.dispatchScheduler.reactor;
+        let dispatchDoc = null;
+        if (dispatchIdRaw.startsWith('phid:')) {
+          dispatchDoc = await reactor.getByPhid(dispatchIdRaw);
+        }
+        if (!dispatchDoc) {
+          dispatchDoc = await reactor.getByQueryId(dispatchIdRaw);
+        }
+        if (!dispatchDoc && queryId) {
+          dispatchDoc = await reactor.getByQueryId(queryId);
+        }
+        if (!dispatchDoc) {
+          return res.status(404).json({
+            ok: false,
+            error: `dispatch not found: ${dispatchIdRaw}`,
+          });
+        }
+
+        const result = await reactor.markNeedsClarification(dispatchDoc.dispatch_phid, {
+          agent_id: agentId,
+          query_id: queryId,
+          question,
+          context: body.context ?? null,
+          urgency,
+        });
+
+        // Emit a manager-inbox news item so /news + dashboard surface the
+        // blocker alongside terminal items.
+        try {
+          const teamName = 'default';
+          const managerInbox = this.getManagerInboxRef(teamId, teamName);
+          await this.db.news.add(teamId, null, {
+            timestamp: Date.now(),
+            type: 'dispatch.needs_clarification',
+            message: `Dispatch needs clarification: ${agentId} - ${question.slice(0, 80)}${question.length > 80 ? '...' : ''}`,
+            data: {
+              dispatch_id: result.doc.dispatch_phid,
+              clarification_id: result.clarification_id,
+              agent_id: agentId,
+              subject: result.doc.subject,
+              question,
+              context: body.context ?? null,
+              urgency,
+              stale_at: result.doc.active_clarification?.stale_at ?? null,
+              query_id: queryId,
+            },
+            kind: 'notify',
+            reply_expected: false,
+            owner_kind: managerInbox.ownerKind,
+            owner_id: managerInbox.ownerId,
+          });
+        } catch (newsErr) {
+          this.managerLog(
+            `[agent-needs-input] news.add failed (continuing): ${newsErr instanceof Error ? newsErr.message : String(newsErr)}`,
+          );
+        }
+
+        return res.json({
+          ok: true,
+          dispatch_id: result.doc.dispatch_phid,
+          state: 'needs_clarification',
+          clarification_id: result.clarification_id,
+          stale_at: result.doc.active_clarification?.stale_at ?? null,
+          idempotent: result.idempotent,
+        });
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        const status = /terminal|conflict/i.test(msg) ? 409 : 500;
+        return res.status(status).json({ ok: false, error: msg });
+      }
+    });
+
+    this.managementApp.post('/agent-resume', async (req, res) => {
+      if (!this.dispatchScheduler) {
+        return res.status(503).json({
+          ok: false,
+          error: 'dispatch_scheduler_not_initialised',
+        });
+      }
+      try {
+        const body = (req.body || {}) as {
+          dispatch_id?: unknown;
+          clarification_id?: unknown;
+          answer?: unknown;
+          instructions?: unknown;
+          from?: unknown;
+        };
+        const dispatchIdRaw = typeof body.dispatch_id === 'string' ? body.dispatch_id.trim() : '';
+        const answer = typeof body.answer === 'string' ? body.answer.trim() : '';
+        const actor = typeof body.from === 'string' && body.from.trim() ? body.from.trim() : 'manager';
+        if (!dispatchIdRaw || !answer) {
+          return res.status(400).json({
+            ok: false,
+            error: 'dispatch_id and non-empty answer required',
+          });
+        }
+        const reactor = this.dispatchScheduler.reactor;
+        let dispatchDoc = null;
+        if (dispatchIdRaw.startsWith('phid:')) {
+          dispatchDoc = await reactor.getByPhid(dispatchIdRaw);
+        }
+        if (!dispatchDoc) {
+          dispatchDoc = await reactor.getByQueryId(dispatchIdRaw);
+        }
+        if (!dispatchDoc) {
+          return res.status(404).json({
+            ok: false,
+            error: `dispatch not found: ${dispatchIdRaw}`,
+          });
+        }
+        if (dispatchDoc.status !== 'needs_clarification') {
+          return res.status(409).json({
+            ok: false,
+            error: `dispatch ${dispatchDoc.dispatch_phid} is ${dispatchDoc.status}, not needs_clarification`,
+          });
+        }
+        const clarification_id =
+          typeof body.clarification_id === 'string' ? body.clarification_id : undefined;
+        const instructions =
+          Array.isArray(body.instructions)
+            ? (body.instructions as unknown[]).map((v) => String(v))
+            : typeof body.instructions === 'string'
+              ? body.instructions
+              : null;
+
+        const resumed = await reactor.resumeAfterClarification(dispatchDoc.dispatch_phid, {
+          clarification_id,
+          actor,
+          answer,
+          instructions,
+        });
+
+        // v2 transport: /talk follow-up to the same target agent with the
+        // resume payload. Best-effort; failure flips to resume_delivery_failed.
+        let delivered = false;
+        let agent_query_id: string | null = null;
+        let transport: 'session_injection' | 'talk_followup' = 'talk_followup';
+        let failureDetail: string | null = null;
+        try {
+          const teamId = await this.db.teams.getOrCreateTeamId('default');
+          const agent = await this.db.agents.getByName(teamId, resumed.to_agent).catch(() => null);
+          if (!agent || !agent.endpoint) {
+            failureDetail = `agent "${resumed.to_agent}" not resolvable to endpoint`;
+          } else {
+            const resumeMessage = [
+              `[RESUME for dispatch ${resumed.dispatch_phid}]`,
+              `Original subject: ${resumed.subject}`,
+              `Your question was answered. Continue the dispatch (do not create new work).`,
+              ``,
+              `Manager answer: ${answer}`,
+              instructions
+                ? `Follow-up instructions: ${Array.isArray(instructions) ? instructions.map((s) => `- ${s}`).join('\n') : instructions}`
+                : '',
+            ]
+              .filter(Boolean)
+              .join('\n');
+            const r = await fetch(`${agent.endpoint}/talk`, {
+              method: 'POST',
+              headers: { 'content-type': 'application/json' },
+              body: JSON.stringify({
+                message: resumeMessage,
+                from: actor,
+                dispatch_id: resumed.dispatch_phid,
+                clarification_id: clarification_id ?? null,
+              }),
+            });
+            if (!r.ok) {
+              failureDetail = `talk delivery returned HTTP ${r.status}`;
+            } else {
+              try {
+                const json = (await r.json()) as { query_id?: string };
+                agent_query_id = typeof json?.query_id === 'string' ? json.query_id : null;
+              } catch {
+                agent_query_id = null;
+              }
+              delivered = true;
+            }
+          }
+        } catch (deliveryErr) {
+          failureDetail = deliveryErr instanceof Error ? deliveryErr.message : String(deliveryErr);
+        }
+
+        if (delivered) {
+          await reactor.markResumeDelivered(resumed.dispatch_phid, {
+            clarification_id: resumed.clarification_history
+              .slice()
+              .reverse()
+              .find((e) => e.type === 'RESUME')?.clarification_id ?? clarification_id ?? '',
+            transport,
+            agent_query_id,
+          });
+          return res.json({
+            ok: true,
+            dispatch_id: resumed.dispatch_phid,
+            state: 'queued',
+            delivered_to_agent: true,
+            agent_query_id,
+          });
+        }
+
+        const failed = await reactor.markResumeDeliveryFailed(resumed.dispatch_phid, {
+          clarification_id: clarification_id ?? resumed.clarification_history
+            .slice()
+            .reverse()
+            .find((e) => e.type === 'RESUME')?.clarification_id ?? '',
+          failure_detail: failureDetail ?? 'unknown delivery failure',
+        });
+
+        // News event for delivery failure.
+        try {
+          const teamId2 = await this.db.teams.getOrCreateTeamId('default');
+          const managerInbox = this.getManagerInboxRef(teamId2, 'default');
+          await this.db.news.add(teamId2, null, {
+            timestamp: Date.now(),
+            type: 'dispatch.resume_delivery_failed',
+            message: `Resume delivery failed: ${failed.to_agent} - ${failureDetail ?? 'unknown'}`,
+            data: {
+              dispatch_id: failed.dispatch_phid,
+              agent_id: failed.to_agent,
+              failure_detail: failureDetail,
+            },
+            kind: 'notify',
+            reply_expected: false,
+            owner_kind: managerInbox.ownerKind,
+            owner_id: managerInbox.ownerId,
+          });
+        } catch {
+          // best-effort
+        }
+
+        return res.json({
+          ok: true,
+          dispatch_id: failed.dispatch_phid,
+          state: 'resume_delivery_failed',
+          delivered_to_agent: false,
+          failure_detail: failureDetail,
+        });
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return res.status(500).json({ ok: false, error: msg });
+      }
+    });
+
+    this.managementApp.get('/dispatches/clarifications', async (req, res) => {
+      if (!this.dispatchScheduler) {
+        return res.status(503).json({
+          ok: false,
+          error: 'dispatch_scheduler_not_initialised',
+        });
+      }
+      try {
+        const staleOnly = req.query.stale === 'true' || req.query.stale === '1';
+        const docs = await this.dispatchScheduler.reactor.listOpenClarifications({ staleOnly });
+        const now = Date.now();
+        const items = docs.map((d) => {
+          const blocker = d.active_clarification;
+          const createdMs = blocker ? Date.parse(blocker.created_at) : 0;
+          return {
+            dispatch_id: d.dispatch_phid,
+            clarification_id: d.clarification_id,
+            agent_id: blocker?.agent_id ?? d.to_agent,
+            subject: d.subject,
+            question: blocker?.question ?? '',
+            context: blocker?.context ?? null,
+            urgency: blocker?.urgency ?? 'normal',
+            created_at: blocker?.created_at ?? d.updated_at,
+            stale_at: blocker?.stale_at ?? null,
+            age_seconds: createdMs ? Math.max(0, Math.floor((now - createdMs) / 1000)) : 0,
+          };
+        });
+        return res.json({ ok: true, items });
+      } catch (err) {
+        return res.status(500).json({
+          ok: false,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    });
+
     // REST-AP discovery — daemon root advertises itself as the manager so
     // peers can locate the team orchestration and inbox surface directly.
     // Shape mirrors the per-agent catalogs published by claude-agent-server /
