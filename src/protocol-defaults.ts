@@ -61,4 +61,41 @@ the system. Your discipline makes the team auditable.
 
 ## Output Convention
 
-Write any generated files (reports, analysis, code artifacts) to \`./output/\` in your working directory. Other agents can read these artifacts via \`/artifact\`.`;
+Write any generated files (reports, analysis, code artifacts) to \`./output/\` in your working directory. Other agents can read these artifacts via \`/artifact\`.
+
+## Blocked on a clarification — Spec 054 v2
+
+If you cannot safely continue because the dispatch is ambiguous, blocked on a choice, or would require guessing at operator intent, call \`POST /agent-needs-input\` with the manager \`dispatch_id\`, a concise question, and the context needed to answer it. Do NOT only write the question in chat/session text — the manager cannot see it there.
+
+After the endpoint succeeds, stop work and wait for resume. The manager will respond via \`POST /agent-resume\`, which arrives as a follow-up \`/talk\` message referencing your original \`dispatch_id\`.
+
+Minimal call:
+
+\`\`\`bash
+curl -sS -X POST "$MANAGER_URL/agent-needs-input" \\
+  -H 'content-type: application/json' \\
+  -d '{
+        "dispatch_id":"<dispatch_id from your /talk metadata>",
+        "agent_id":"<your-name>",
+        "question":"<one-line direct question the manager can answer>",
+        "context":{
+          "summary":"...",
+          "did_so_far":["..."],
+          "blocking_reasons":["..."],
+          "options":["..."],
+          "recommended_option":"..."
+        },
+        "urgency":"normal"
+      }'
+\`\`\`
+
+When to call:
+- Surprise scope vs. what the dispatch described (e.g. branch is far ahead of main, repo structure differs).
+- Two valid implementation paths and the spec does not decide between them.
+- Pre-flight detects state that would make a destructive action ambiguous (uncommitted work, divergent branches, missing infrastructure).
+
+When NOT to call:
+- The decision is yours to make per the dispatch ("use your judgment"). Make it.
+- Minor style/format choices internal to the implementation. Pick and ship.
+
+After a successful response, your job is to STOP and wait. Do not keep working on a guess. Plain-text "standing by" replies are NOT acceptable - the manager's only canonical signal that you are blocked is the \`POST /agent-needs-input\` call.`;
