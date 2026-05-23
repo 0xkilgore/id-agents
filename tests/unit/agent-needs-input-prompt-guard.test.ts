@@ -36,3 +36,48 @@ describe("PROTOCOL_DEFAULTS — /agent-needs-input guard", () => {
     expect(PROTOCOL_DEFAULTS).toMatch(/When NOT to call/);
   });
 });
+
+// Spec 054 v2 Part 2 Step 10: promotion closeout guard.
+describe("PROTOCOL_DEFAULTS — promotion closeout guard", () => {
+  it("includes the canonical Part 2 promotion section header", () => {
+    expect(PROTOCOL_DEFAULTS).toMatch(/Promotion as the canonical final build step/);
+  });
+
+  it("names the promote-to-main CLI helper", () => {
+    expect(PROTOCOL_DEFAULTS).toMatch(/id-agents promote-to-main/);
+  });
+
+  it("shows the required CLI flags so a scheduler-launched agent can run it without asking for shape", () => {
+    for (const flag of ["--repo", "--branch", "--base", "--remote", "--strategy", "--dispatch-id", "--smoke", "--execute"]) {
+      expect(PROTOCOL_DEFAULTS).toContain(flag);
+    }
+  });
+
+  it("shows the /agent-done promotion payload shape (required, completed, repos)", () => {
+    expect(PROTOCOL_DEFAULTS).toMatch(/"required":\s*true/);
+    expect(PROTOCOL_DEFAULTS).toMatch(/"completed":\s*true/);
+    expect(PROTOCOL_DEFAULTS).toMatch(/"repos":/);
+    expect(PROTOCOL_DEFAULTS).toMatch(/"promoted_sha"/);
+    expect(PROTOCOL_DEFAULTS).toMatch(/"remote_main_sha"/);
+    expect(PROTOCOL_DEFAULTS).toMatch(/"pushed":\s*true/);
+    expect(PROTOCOL_DEFAULTS).toMatch(/"verified":\s*true/);
+  });
+
+  it("documents the four skip rules (explicit-false, WIP, long-lived, follow-up)", () => {
+    expect(PROTOCOL_DEFAULTS).toMatch(/promote:\s*false/);
+    expect(PROTOCOL_DEFAULTS).toMatch(/WIP/);
+    expect(PROTOCOL_DEFAULTS).toMatch(/long-lived/);
+    expect(PROTOCOL_DEFAULTS).toMatch(/follow-up dispatch/);
+  });
+
+  it("references the SPEC054_PROMOTION_ENFORCEMENT env var + warn|enforce semantics", () => {
+    expect(PROTOCOL_DEFAULTS).toContain("SPEC054_PROMOTION_ENFORCEMENT");
+    expect(PROTOCOL_DEFAULTS).toMatch(/warn/);
+    expect(PROTOCOL_DEFAULTS).toMatch(/enforce/);
+  });
+
+  it("forbids force-push and tells the agent to ask via /agent-needs-input on ambiguous ancestry", () => {
+    expect(PROTOCOL_DEFAULTS).toMatch(/force.*push/i);
+    expect(PROTOCOL_DEFAULTS).toMatch(/divergent ancestry/i);
+  });
+});

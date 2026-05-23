@@ -114,4 +114,76 @@ When NOT to call:
 - The decision is yours to make per the dispatch ("use your judgment"). Make it.
 - Minor style/format choices internal to the implementation. Pick and ship.
 
-After a successful response, your job is to STOP and wait. Do not keep working on a guess. Plain-text "standing by" replies are NOT acceptable - the manager's only canonical signal that you are blocked is the \`POST /agent-needs-input\` call.`;
+After a successful response, your job is to STOP and wait. Do not keep working on a guess. Plain-text "standing by" replies are NOT acceptable - the manager's only canonical signal that you are blocked is the \`POST /agent-needs-input\` call.
+
+## Promotion as the canonical final build step — Spec 054 v2 Part 2
+
+For build dispatches (dispatches that include \`repo\` + \`branch\` metadata), promotion to \`main\` is the canonical final step. After verification passes, the agent (or a follow-up dispatch owned by the same build lifecycle) MUST:
+
+1. Merge the verified feature branch into \`base\` (default \`main\`).
+2. Push \`base\` to the configured \`remote\` (default \`origin\`).
+3. Verify the pushed remote tip equals the promoted SHA.
+4. Include a \`promotion\` block in the \`/agent-done\` payload (see shape below).
+
+The canonical helper is the \`id-agents promote-to-main\` subcommand. It handles preflight (read-only by default), strategy selection (fast_forward / merge_commit / squash), the merge, the smoke command, the push, and the remote-tip verification. Output is JSON that drops directly into the \`/agent-done.promotion.repos[]\` array.
+
+\`\`\`bash
+id-agents promote-to-main \\
+  --repo "$REPO" \\
+  --branch "$BRANCH" \\
+  --base main \\
+  --remote origin \\
+  --strategy auto \\
+  --dispatch-id "$DISPATCH_ID" \\
+  --smoke "npm test -- tests/unit/foo.test.ts" \\
+  --json \\
+  --execute
+\`\`\`
+
+### /agent-done promotion payload
+
+\`\`\`json
+{
+  "dispatch_id": "<dispatch_phid>",
+  "success": true,
+  "promotion": {
+    "required": true,
+    "completed": true,
+    "repos": [
+      {
+        "path": "/abs/repo",
+        "base": "main",
+        "source_branch": "feat-x",
+        "strategy": "fast_forward",
+        "promoted_sha": "abc123",
+        "remote_main_sha": "abc123",
+        "pushed": true,
+        "verified": true
+      }
+    ]
+  }
+}
+\`\`\`
+
+POST this payload to the manager's \`POST /agent-done\` endpoint (NOT just the legacy cane \`:4239\` agent-done service) so promotion validation runs.
+
+### Skip rules
+
+Promotion is skipped ONLY when:
+
+- the dispatcher explicitly set \`promote: false\` at enqueue
+- the dispatch is marked WIP
+- the branch is intentionally long-lived (multi-week epic)
+- the dispatcher assigned promotion to a named follow-up dispatch
+
+If skipped, the dispatch closeout MUST say why - include branch name, ahead count, and the intended revisit trigger.
+
+### Manager enforcement mode
+
+Manager applies validation per env \`SPEC054_PROMOTION_ENFORCEMENT\`:
+- \`warn\` (default during rollout): missing/incomplete promotion logs a warning; dispatch still marks done.
+- \`enforce\`: missing/incomplete promotion is a 4xx - the agent must fix and re-call.
+
+### When promotion is ambiguous, ask via /agent-needs-input
+
+The \`promote-to-main\` helper detects divergent ancestry (branch ahead AND behind \`base\`) and exits non-zero with a ready-to-send \`/agent-needs-input\` payload. The right move is to forward that payload to the manager, NOT to guess a merge strategy. Never force-push \`main\`.`;

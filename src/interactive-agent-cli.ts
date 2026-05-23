@@ -28,6 +28,7 @@ import {
 } from './cli/workspace-sync.js';
 import { maybeRunOutputsCli } from './cli/outputs.js';
 import { maybeRunCommentsCli } from './cli/comments.js';
+import { maybeRunPromoteToMainCli } from './cli/promote-to-main.js';
 import { waitForAgentReady } from './cli/agent-readiness.js';
 
 const oneShotSyncExit = await maybeRunWorkspaceSyncCli(process.argv.slice(2));
@@ -45,6 +46,10 @@ if (oneShotOutputsExit !== null) {
 const oneShotCommentsExit = await maybeRunCommentsCli(process.argv.slice(2));
 if (oneShotCommentsExit !== null) {
   process.exit(oneShotCommentsExit);
+}
+const oneShotPromoteExit = await maybeRunPromoteToMainCli(process.argv.slice(2));
+if (oneShotPromoteExit !== null) {
+  process.exit(oneShotPromoteExit);
 }
 
 const colors = {
