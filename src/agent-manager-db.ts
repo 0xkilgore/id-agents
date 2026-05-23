@@ -75,6 +75,11 @@ import { resolveNewsTrigger } from './core/messaging-service.js';
 import type { HarnessType } from './harness/types.js';
 import { SchedulerService } from './scheduling/scheduler-service.js';
 import { SchedulerHandle, parseGatewayMode } from './dispatch-scheduler/manager-integration.js';
+import {
+  parsePromotionEnforcement,
+  validatePromotionMetadata,
+  type PromotionAgentDone,
+} from './dispatch-scheduler/types.js';
 import type { SqliteAdapter } from './db/sqlite-adapter.js';
 import { heartbeatToSchedule, calendarToSchedule, validateIntervalSeconds, HEARTBEAT_GENERIC_MESSAGE } from './scheduling/schedule-config.js';
 import {
@@ -2241,6 +2246,138 @@ export class AgentManagerDb {
           };
         });
         return res.json({ ok: true, items });
+      } catch (err) {
+        return res.status(500).json({
+          ok: false,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    });
+
+    // ────────────────────────────────────────────────────────────────
+    // Spec 054 v2 Part 2 — manager-side /agent-done with promotion
+    // enforcement.
+    //
+    // Mode is controlled by env SPEC054_PROMOTION_ENFORCEMENT:
+    //   warn    (default) — log a warning if promote=true but promotion
+    //                       metadata is missing/incomplete; still mark
+    //                       the dispatch done.
+    //   enforce          — reject (400) when promote=true but promotion
+    //                       metadata is missing/incomplete.
+    //
+    // Non-build dispatches (promote=false) pass validation regardless.
+    // ────────────────────────────────────────────────────────────────
+    this.managementApp.post('/agent-done', async (req, res) => {
+      if (!this.dispatchScheduler) {
+        return res.status(503).json({
+          ok: false,
+          error: 'dispatch_scheduler_not_initialised',
+        });
+      }
+      try {
+        const body = (req.body || {}) as {
+          dispatch_id?: unknown;
+          query_id?: unknown;
+          success?: unknown;
+          result?: unknown;
+          promotion?: unknown;
+          mode?: unknown;
+          agent?: unknown;
+        };
+
+        const dispatchIdRaw =
+          typeof body.dispatch_id === 'string'
+            ? body.dispatch_id.trim()
+            : typeof body.dispatch_id === 'number' && Number.isFinite(body.dispatch_id)
+              ? String(body.dispatch_id)
+              : '';
+        const queryId = typeof body.query_id === 'string' ? body.query_id : null;
+        if (!dispatchIdRaw && !queryId) {
+          return res.status(400).json({
+            ok: false,
+            error: 'dispatch_id or query_id required',
+          });
+        }
+
+        const reactor = this.dispatchScheduler.reactor;
+        let doc = null as Awaited<ReturnType<typeof reactor.getByPhid>> | null;
+        if (dispatchIdRaw && dispatchIdRaw.startsWith('phid:')) {
+          doc = await reactor.getByPhid(dispatchIdRaw);
+        }
+        if (!doc && dispatchIdRaw) {
+          doc = await reactor.getByQueryId(dispatchIdRaw);
+        }
+        if (!doc && queryId) {
+          doc = await reactor.getByQueryId(queryId);
+        }
+        if (!doc) {
+          return res.status(404).json({
+            ok: false,
+            error: `dispatch not found: ${dispatchIdRaw || queryId}`,
+          });
+        }
+
+        const overrideMode =
+          body.mode === 'warn' || body.mode === 'enforce' ? body.mode : null;
+        const envMode = parsePromotionEnforcement(process.env.SPEC054_PROMOTION_ENFORCEMENT);
+        const mode = overrideMode ?? envMode;
+        const promotion =
+          body.promotion && typeof body.promotion === 'object'
+            ? (body.promotion as PromotionAgentDone)
+            : null;
+
+        const validation = validatePromotionMetadata(doc, promotion, mode);
+
+        if (!validation.ok) {
+          // enforce mode rejection.
+          return res.status(400).json({
+            ok: false,
+            error: validation.error,
+            mode,
+          });
+        }
+
+        // Persist promotion result if supplied.
+        if (promotion) {
+          try {
+            await reactor.recordPromotionResult(doc.dispatch_phid, {
+              result: promotion,
+            });
+          } catch (err) {
+            this.managerLog(
+              `[agent-done] recordPromotionResult failed (continuing): ${err instanceof Error ? err.message : String(err)}`,
+            );
+          }
+        }
+
+        // Mark the dispatch done.
+        const success = body.success !== false;
+        try {
+          await this.dispatchScheduler.handleAgentDone({
+            query_id: doc.query_id,
+            result:
+              body.result && typeof body.result === 'object'
+                ? (body.result as Record<string, unknown>)
+                : null,
+            success,
+          });
+        } catch (err) {
+          this.managerLog(
+            `[agent-done] handleAgentDone failed: ${err instanceof Error ? err.message : String(err)}`,
+          );
+          return res.status(500).json({
+            ok: false,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+
+        return res.json({
+          ok: true,
+          dispatch_id: doc.dispatch_phid,
+          state: success ? 'done' : 'failed',
+          mode,
+          promotion_warning: validation.warning ?? null,
+        });
       } catch (err) {
         return res.status(500).json({
           ok: false,

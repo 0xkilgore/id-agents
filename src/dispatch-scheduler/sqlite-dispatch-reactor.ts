@@ -28,6 +28,7 @@ import {
   type UsagePolicySnapshot,
   type ClarificationEvent,
   type ClarificationBlocker,
+  type PromotionInput,
   defaultClarificationFields,
   defaultPromotionFields,
   isTerminal,
@@ -70,6 +71,8 @@ interface Row {
   promotion_strategy: DispatchDoc["promotion_strategy"];
   promotion_required_reason: string | null;
   promotion_result_json: string | null;
+  // Spec 054 v2 Part 2 — enqueue-side promotion input JSON.
+  promotion_input_json: string | null;
 }
 
 export interface SqliteDispatchReactorOptions {
@@ -147,8 +150,8 @@ export class SqliteDispatchReactor {
         failure_detail, target_url, result_json,
         clarification_id, active_clarification_json, clarification_history_json,
         resume_delivery_status, promote, promotion_strategy,
-        promotion_required_reason, promotion_result_json
-      ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+        promotion_required_reason, promotion_result_json, promotion_input_json
+      ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       [
         doc.dispatch_phid,
         this.teamId,
@@ -185,6 +188,8 @@ export class SqliteDispatchReactor {
         doc.promotion_strategy,
         doc.promotion_required_reason,
         null,
+        // Spec 054 v2 Part 2 column
+        doc.promotion_input ? JSON.stringify(doc.promotion_input) : null,
       ],
     );
     return doc;
@@ -911,6 +916,7 @@ function rowToDoc(row: Row): DispatchDoc {
     promotion_strategy: (row.promotion_strategy ?? "auto") as DispatchDoc["promotion_strategy"],
     promotion_required_reason: row.promotion_required_reason ?? null,
     promotion_result: parseJsonOrNull(row.promotion_result_json),
+    promotion_input: parsePromotionInput(row.promotion_input_json),
   };
 }
 
@@ -937,6 +943,26 @@ function parseJsonOrNull(raw: string | null | undefined): unknown {
   if (!raw) return null;
   try {
     return JSON.parse(raw);
+  } catch {
+    return null;
+  }
+}
+
+function parsePromotionInput(raw: string | null | undefined): PromotionInput | null {
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object") return null;
+    const p = parsed as Record<string, unknown>;
+    if (typeof p.repo !== "string" || typeof p.branch !== "string") return null;
+    return {
+      repo: p.repo,
+      branch: p.branch,
+      base: typeof p.base === "string" && p.base ? p.base : "main",
+      remote: typeof p.remote === "string" && p.remote ? p.remote : "origin",
+      promotion_skip_reason:
+        typeof p.promotion_skip_reason === "string" ? p.promotion_skip_reason : null,
+    };
   } catch {
     return null;
   }

@@ -96,6 +96,17 @@ export interface EnqueueInputV2 {
   query_id?: string;
   actor_ref?: ActorRef;
   causation?: Causation;
+  // Spec 054 v2 Part 2 - promotion metadata at enqueue time.
+  // Supplying any of repo/branch promotes the dispatch to "build" status
+  // (default promote=true). Use `promote: false` with a skip reason for
+  // explicitly non-promoted work (WIP, follow-up dispatch, long-lived).
+  repo?: string;
+  branch?: string;
+  base?: string;          // default "main"
+  remote?: string;        // default "origin"
+  promote?: boolean;
+  promotion_strategy?: "auto" | "fast_forward" | "merge_commit" | "squash" | "follow_up_dispatch";
+  promotion_skip_reason?: string;
 }
 
 export interface EnqueueResult {
@@ -220,6 +231,18 @@ export class SchedulerHandle {
     // sets user:chris, agent-completion echo sets agent:<name>).
     const actor_ref: ActorRef = input.actor_ref ?? MANAGER_LIFECYCLE_ACTOR;
     const causation: Causation = input.causation ?? { query_id: queryId };
+    // Spec 054 v2 Part 2 - thread promotion metadata into the enqueue
+    // payload. PromotionInput is only built when repo+branch are present
+    // (= build dispatch); otherwise null and `promote` defaults to false.
+    const promotion_input = input.repo && input.branch
+      ? {
+          repo: input.repo,
+          branch: input.branch,
+          base: input.base || "main",
+          remote: input.remote || "origin",
+          promotion_skip_reason: input.promotion_skip_reason ?? null,
+        }
+      : null;
     const payload: EnqueueInput = {
       query_id: queryId,
       to_agent: input.to_agent,
@@ -231,6 +254,10 @@ export class SchedulerHandle {
       runtime: input.runtime ?? "claude-code-cli",
       priority: input.priority ?? 5,
       not_before_at: input.not_before_at,
+      promote: input.promote,
+      promotion_strategy: input.promotion_strategy,
+      promotion_required_reason: input.promotion_skip_reason ?? null,
+      promotion_input,
     };
     const doc = await this.reactor.enqueue({
       ...payload,

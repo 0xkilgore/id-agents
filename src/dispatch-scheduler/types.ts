@@ -141,6 +141,118 @@ export interface DispatchDoc {
     | "follow_up_dispatch";
   promotion_required_reason: string | null;
   promotion_result: unknown | null;
+  // Spec 054 v2 Part 2 ─ enqueue-side promotion inputs (repo, branch,
+  // base, remote, plus an optional skip-reason). Carried verbatim from
+  // EnqueueInput so the agent receives canonical promotion context in
+  // its prompt and `/agent-done` can validate that the agent promoted
+  // exactly what was requested. Null on non-build dispatches.
+  promotion_input: PromotionInput | null;
+}
+
+export interface PromotionInput {
+  repo: string;
+  branch: string;
+  base: string;          // default "main"
+  remote: string;        // default "origin"
+  promotion_skip_reason?: string | null;
+}
+
+/** Per-repo result of a successful promotion, returned by the
+ *  promote-to-main CLI helper and included on `/agent-done.promotion.repos[]`. */
+export interface PromotionRepoResult {
+  path: string;
+  base: string;
+  source_branch: string;
+  strategy: "fast_forward" | "merge_commit" | "squash" | "follow_up_dispatch";
+  promoted_sha: string;
+  remote_main_sha: string;
+  pushed: boolean;
+  verified: boolean;
+}
+
+/** Canonical promotion-completion payload shipped on /agent-done when
+ *  the dispatch had `promote: true`. */
+export interface PromotionAgentDone {
+  required: boolean;
+  completed: boolean;
+  repos: PromotionRepoResult[];
+}
+
+/** Spec 054 v2 Part 2 — validate /agent-done.promotion against the
+ *  enqueued doc's `promote`/`promotion_input`. Pure; no side effects.
+ *
+ *  Modes:
+ *    - "warn": missing/incomplete promotion is allowed; returns
+ *      `{ ok: true, warning: "..." }` so the caller can log and continue.
+ *    - "enforce": missing/incomplete promotion is a hard error; returns
+ *      `{ ok: false, error: "..." }` so the caller can 4xx.
+ *  Non-build dispatches (`promote: false`) always pass.
+ */
+export type PromotionEnforcement = "warn" | "enforce";
+export type PromotionValidation =
+  | { ok: true; warning?: string }
+  | { ok: false; error: string };
+
+export function validatePromotionMetadata(
+  doc: Pick<DispatchDoc, "promote" | "promotion_input" | "promotion_strategy">,
+  promotion: PromotionAgentDone | null | undefined,
+  mode: PromotionEnforcement,
+): PromotionValidation {
+  // Non-build dispatch: no validation required regardless of mode.
+  if (!doc.promote) return { ok: true };
+
+  // Build dispatch with no promotion payload at all.
+  if (!promotion) {
+    const msg = "promote=true but /agent-done is missing promotion metadata";
+    return mode === "enforce" ? { ok: false, error: msg } : { ok: true, warning: msg };
+  }
+
+  // Build dispatch with promotion.completed !== true.
+  if (promotion.completed !== true) {
+    const msg = "promote=true but promotion.completed is not true";
+    return mode === "enforce" ? { ok: false, error: msg } : { ok: true, warning: msg };
+  }
+
+  // Build dispatch but no repos[] entries.
+  if (!Array.isArray(promotion.repos) || promotion.repos.length === 0) {
+    const msg = "promote=true but promotion.repos[] is empty";
+    return mode === "enforce" ? { ok: false, error: msg } : { ok: true, warning: msg };
+  }
+
+  // Per-repo shape sanity.
+  for (const [i, r] of promotion.repos.entries()) {
+    if (!r.path || !r.base || !r.source_branch || !r.promoted_sha || !r.remote_main_sha) {
+      const msg = `promotion.repos[${i}] missing required fields (path/base/source_branch/promoted_sha/remote_main_sha)`;
+      return mode === "enforce" ? { ok: false, error: msg } : { ok: true, warning: msg };
+    }
+    if (r.pushed !== true) {
+      const msg = `promotion.repos[${i}] reports pushed=false`;
+      return mode === "enforce" ? { ok: false, error: msg } : { ok: true, warning: msg };
+    }
+    if (r.verified !== true) {
+      const msg = `promotion.repos[${i}] reports verified=false`;
+      return mode === "enforce" ? { ok: false, error: msg } : { ok: true, warning: msg };
+    }
+  }
+
+  // Optionally cross-check: if doc has promotion_input.repo set, the
+  // promotion.repos[] should include that path.
+  if (doc.promotion_input?.repo) {
+    const expected = doc.promotion_input.repo;
+    const found = promotion.repos.some((r) => r.path === expected);
+    if (!found) {
+      const msg = `promotion.repos[] does not include the enqueued repo "${expected}"`;
+      return mode === "enforce" ? { ok: false, error: msg } : { ok: true, warning: msg };
+    }
+  }
+
+  return { ok: true };
+}
+
+/** Parse the SPEC054_PROMOTION_ENFORCEMENT env var. Default `warn`. */
+export function parsePromotionEnforcement(raw: string | undefined): PromotionEnforcement {
+  const v = (raw ?? "warn").trim().toLowerCase();
+  return v === "enforce" ? "enforce" : "warn";
 }
 
 export interface EnqueueInput {
@@ -156,11 +268,40 @@ export interface EnqueueInput {
   not_before_at?: string;
   usage_policy_snapshot?: UsagePolicySnapshot;
   // Spec 054 v2 ─ promotion metadata at enqueue time. promote defaults
-  // to true for build dispatches (those that include repo metadata) and
-  // false otherwise. Detection lives at the call site of enqueue().
+  // to true when promotion_input is supplied (build dispatch) and false
+  // otherwise. Detection helper: isBuildDispatch(input) below.
   promote?: boolean;
   promotion_strategy?: DispatchDoc["promotion_strategy"];
   promotion_required_reason?: string | null;
+  // Spec 054 v2 Part 2 — promotion inputs at enqueue time.
+  promotion_input?: PromotionInput | null;
+}
+
+/** A dispatch is a build dispatch when it carries repo/branch metadata.
+ *  Used to set the default promote=true and to drive the prompt's
+ *  promotion-closeout block. */
+export function isBuildDispatch(input: { promotion_input?: PromotionInput | null }): boolean {
+  return !!(input.promotion_input?.repo && input.promotion_input?.branch);
+}
+
+/** Apply Part 2 defaults to an EnqueueInput. Pure; tested directly. */
+export function applyPromotionDefaults(input: EnqueueInput): EnqueueInput {
+  const out: EnqueueInput = { ...input };
+  const buildLike = isBuildDispatch(out);
+  if (buildLike) {
+    if (out.promotion_input) {
+      out.promotion_input = {
+        ...out.promotion_input,
+        base: out.promotion_input.base || "main",
+        remote: out.promotion_input.remote || "origin",
+      };
+    }
+    if (out.promote === undefined) out.promote = true;
+  } else {
+    if (out.promote === undefined) out.promote = false;
+  }
+  if (!out.promotion_strategy) out.promotion_strategy = "auto";
+  return out;
 }
 
 export interface ConcurrencySnapshot {
@@ -260,16 +401,29 @@ export interface PromotionDefaults {
   promotion_strategy: DispatchDoc["promotion_strategy"];
   promotion_required_reason: string | null;
   promotion_result: null;
+  promotion_input: PromotionInput | null;
 }
 export function defaultPromotionFields(input: {
   promote?: boolean;
   promotion_strategy?: DispatchDoc["promotion_strategy"];
   promotion_required_reason?: string | null;
+  promotion_input?: PromotionInput | null;
 }): PromotionDefaults {
+  // Build-like inputs default promote=true; everything else false.
+  const buildLike = !!(input.promotion_input?.repo && input.promotion_input?.branch);
   return {
-    promote: input.promote ?? true,
+    promote: input.promote ?? buildLike,
     promotion_strategy: input.promotion_strategy ?? "auto",
     promotion_required_reason: input.promotion_required_reason ?? null,
     promotion_result: null,
+    promotion_input: input.promotion_input
+      ? {
+          repo: input.promotion_input.repo,
+          branch: input.promotion_input.branch,
+          base: input.promotion_input.base || "main",
+          remote: input.promotion_input.remote || "origin",
+          promotion_skip_reason: input.promotion_input.promotion_skip_reason ?? null,
+        }
+      : null,
   };
 }

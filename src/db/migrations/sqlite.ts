@@ -600,6 +600,10 @@ export async function migrateSqlite(adapter: SqliteAdapter): Promise<void> {
     `ALTER TABLE dispatch_scheduler_queue ADD COLUMN promotion_strategy TEXT NOT NULL DEFAULT 'auto'`,
     `ALTER TABLE dispatch_scheduler_queue ADD COLUMN promotion_required_reason TEXT`,
     `ALTER TABLE dispatch_scheduler_queue ADD COLUMN promotion_result_json TEXT`,
+    // Spec 054 v2 Part 2 ─ enqueue-side promotion input (repo, branch,
+    // base, remote, optional skip-reason). JSON-encoded; null on
+    // non-build dispatches.
+    `ALTER TABLE dispatch_scheduler_queue ADD COLUMN promotion_input_json TEXT`,
   ]) {
     try {
       adapter.exec(stmt);
