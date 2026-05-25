@@ -255,6 +255,41 @@ export function parsePromotionEnforcement(raw: string | undefined): PromotionEnf
   return v === "enforce" ? "enforce" : "warn";
 }
 
+/** Spec 054 v2 Part 2 (review-fix 2026-05-24): build dispatches that
+ *  explicitly opt out of promotion (`promote: false`) MUST include a
+ *  non-empty `promotion_skip_reason` so there is an auditable revisit
+ *  trigger. Without one, dispatches can silently bypass promotion.
+ *
+ *  Pure validator, called at the enqueue boundary. Returns null when
+ *  the input is acceptable; returns a human-readable error message
+ *  when the skip-reason rule is violated.
+ *
+ *  Rules:
+ *    - Non-build dispatch (no repo+branch): always ok (returns null).
+ *    - Build dispatch + promote !== false: ok.
+ *    - Build dispatch + promote === false + non-empty trimmed
+ *      promotion_skip_reason: ok.
+ *    - Build dispatch + promote === false + missing/empty/whitespace
+ *      promotion_skip_reason: ERROR.
+ */
+export function validateEnqueueSkipReason(input: {
+  repo?: string;
+  branch?: string;
+  promote?: boolean;
+  promotion_skip_reason?: string | null;
+}): string | null {
+  const isBuild = !!(input.repo && input.branch);
+  if (!isBuild) return null;
+  if (input.promote !== false) return null;
+  const reason = typeof input.promotion_skip_reason === "string"
+    ? input.promotion_skip_reason.trim()
+    : "";
+  if (reason === "") {
+    return "promote=false on a build dispatch requires a non-empty promotion_skip_reason (Spec 054 v2 Part 2: explicit opt-out from promotion must record a revisit trigger)";
+  }
+  return null;
+}
+
 export interface EnqueueInput {
   query_id: string;
   to_agent: string;

@@ -71,7 +71,12 @@ afterEach(() => {
   delete process.env.SPEC054_PROMOTION_ENFORCEMENT;
 });
 
-async function enqueue(opts: { repo?: string; branch?: string; promote?: boolean }) {
+async function enqueue(opts: {
+  repo?: string;
+  branch?: string;
+  promote?: boolean;
+  promotion_skip_reason?: string;
+}) {
   const handle = (manager as any).dispatchScheduler;
   return handle.enqueue({
     to_agent: "coder-max",
@@ -81,6 +86,7 @@ async function enqueue(opts: { repo?: string; branch?: string; promote?: boolean
     repo: opts.repo,
     branch: opts.branch,
     promote: opts.promote,
+    promotion_skip_reason: opts.promotion_skip_reason,
   });
 }
 
@@ -110,11 +116,49 @@ describe("enqueue promotion metadata propagation", () => {
     expect(doc.promotion_input).toBeNull();
   });
 
-  it("explicit promote=false on build dispatch is respected", async () => {
-    const enq = await enqueue({ repo: "/abs/repo-B", branch: "wip", promote: false });
+  // Spec 054 v2 Part 2 review-fix (2026-05-24): explicit promote=false
+  // on a build dispatch MUST carry a non-empty promotion_skip_reason.
+  // Without one, enqueue rejects so the bypass leaves an audit trigger.
+  it("explicit promote=false on a build dispatch with NO skip reason is REJECTED", async () => {
+    await expect(
+      enqueue({ repo: "/abs/repo-B", branch: "wip", promote: false }),
+    ).rejects.toThrow(/non-empty promotion_skip_reason/);
+  });
+
+  it("explicit promote=false with a whitespace-only skip reason is REJECTED", async () => {
+    await expect(
+      enqueue({
+        repo: "/abs/repo-B",
+        branch: "wip",
+        promote: false,
+        promotion_skip_reason: "   ",
+      }),
+    ).rejects.toThrow(/non-empty promotion_skip_reason/);
+  });
+
+  it("explicit promote=false WITH a non-empty skip reason is accepted and recorded", async () => {
+    const enq = await enqueue({
+      repo: "/abs/repo-B",
+      branch: "wip",
+      promote: false,
+      promotion_skip_reason: "WIP — revisit when smoke spec is final",
+    });
     const doc = await (manager as any).dispatchScheduler.reactor.getByPhid(enq.dispatch_phid);
     expect(doc.promote).toBe(false);
-    expect(doc.promotion_input).not.toBeNull();
+    expect(doc.promotion_input).toMatchObject({
+      repo: "/abs/repo-B",
+      branch: "wip",
+      promotion_skip_reason: "WIP — revisit when smoke spec is final",
+    });
+    // promotion_required_reason mirrors the skip reason for the audit trail.
+    expect(doc.promotion_required_reason).toBe("WIP — revisit when smoke spec is final");
+  });
+
+  it("non-build dispatch with promote=false (default) does NOT require a skip reason", async () => {
+    const enq = await enqueue({ promote: false });
+    const doc = await (manager as any).dispatchScheduler.reactor.getByPhid(enq.dispatch_phid);
+    expect(doc.promote).toBe(false);
+    expect(doc.promotion_input).toBeNull();
   });
 });
 

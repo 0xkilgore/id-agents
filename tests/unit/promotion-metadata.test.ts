@@ -11,6 +11,7 @@ import {
   applyPromotionDefaults,
   isBuildDispatch,
   validatePromotionMetadata,
+  validateEnqueueSkipReason,
   parsePromotionEnforcement,
   type DispatchDoc,
   type EnqueueInput,
@@ -118,6 +119,58 @@ describe("applyPromotionDefaults", () => {
       promotion_strategy: "squash",
     });
     expect(out.promotion_strategy).toBe("squash");
+  });
+});
+
+describe("validateEnqueueSkipReason — Spec 054 v2 Part 2 review-fix 2026-05-24", () => {
+  it("non-build dispatch (no repo+branch) is always ok, regardless of promote/skip", () => {
+    expect(validateEnqueueSkipReason({})).toBeNull();
+    expect(validateEnqueueSkipReason({ promote: false })).toBeNull();
+    expect(validateEnqueueSkipReason({ promote: true })).toBeNull();
+    expect(validateEnqueueSkipReason({ repo: "/r" })).toBeNull(); // missing branch
+    expect(validateEnqueueSkipReason({ branch: "b" })).toBeNull(); // missing repo
+  });
+
+  it("build dispatch with promote=true (or undefined / default) is ok regardless of skip", () => {
+    expect(validateEnqueueSkipReason({ repo: "/r", branch: "b" })).toBeNull();
+    expect(validateEnqueueSkipReason({ repo: "/r", branch: "b", promote: true })).toBeNull();
+    expect(validateEnqueueSkipReason({ repo: "/r", branch: "b", promote: true, promotion_skip_reason: "ignored" })).toBeNull();
+  });
+
+  it("build dispatch + promote=false + no skip reason is REJECTED", () => {
+    const err = validateEnqueueSkipReason({ repo: "/r", branch: "b", promote: false });
+    expect(err).not.toBeNull();
+    expect(err).toMatch(/non-empty promotion_skip_reason/);
+  });
+
+  it("build dispatch + promote=false + empty string skip reason is REJECTED", () => {
+    const err = validateEnqueueSkipReason({ repo: "/r", branch: "b", promote: false, promotion_skip_reason: "" });
+    expect(err).not.toBeNull();
+  });
+
+  it("build dispatch + promote=false + whitespace-only skip reason is REJECTED", () => {
+    const err = validateEnqueueSkipReason({ repo: "/r", branch: "b", promote: false, promotion_skip_reason: "   \t\n  " });
+    expect(err).not.toBeNull();
+  });
+
+  it("build dispatch + promote=false + null skip reason is REJECTED", () => {
+    const err = validateEnqueueSkipReason({ repo: "/r", branch: "b", promote: false, promotion_skip_reason: null });
+    expect(err).not.toBeNull();
+  });
+
+  it("build dispatch + promote=false + non-empty skip reason is ACCEPTED", () => {
+    expect(
+      validateEnqueueSkipReason({
+        repo: "/r", branch: "b", promote: false,
+        promotion_skip_reason: "WIP — revisit when smoke spec is final",
+      }),
+    ).toBeNull();
+  });
+
+  it("error message references the Spec 054 v2 Part 2 audit-trigger rule", () => {
+    const err = validateEnqueueSkipReason({ repo: "/r", branch: "b", promote: false });
+    expect(err).toMatch(/Spec 054 v2 Part 2/);
+    expect(err).toMatch(/revisit trigger/);
   });
 });
 

@@ -27,6 +27,7 @@ import type {
   Provider,
   Runtime,
 } from "./types.js";
+import { validateEnqueueSkipReason } from "./types.js";
 import type { SqliteAdapter } from "../db/sqlite-adapter.js";
 
 export type GatewayMode = "off" | "shadow" | "enforce";
@@ -223,6 +224,18 @@ export class SchedulerHandle {
     }
     if (!input.to_agent) throw new Error("enqueue: to_agent required");
     if (!input.message) throw new Error("enqueue: message required");
+    // Spec 054 v2 Part 2 (review-fix 2026-05-24): explicit promote:false
+    // on a build dispatch (repo + branch present) MUST carry a non-empty
+    // promotion_skip_reason so the bypass is auditable.
+    const skipReasonError = validateEnqueueSkipReason({
+      repo: input.repo,
+      branch: input.branch,
+      promote: input.promote,
+      promotion_skip_reason: input.promotion_skip_reason,
+    });
+    if (skipReasonError) {
+      throw new Error(`enqueue: ${skipReasonError}`);
+    }
 
     const queryId = input.query_id ?? mintQueryId();
     // Spec 054 §3.1 / §4.4: every enqueue carries a structured actor
