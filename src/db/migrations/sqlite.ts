@@ -620,6 +620,10 @@ export async function migrateSqlite(adapter: SqliteAdapter): Promise<void> {
   // SQLite does not support DROP CONSTRAINT, so we use the rename-copy-swap pattern
   // guarded by a PRAGMA check to detect whether the old global uniqueness is still present.
   await migrateTasks_TeamNameUnique(adapter);
+
+  // P6 Agent Performance Telemetry tables (idempotent — CREATE IF NOT EXISTS).
+  const { migrateTelemetryTables } = await import('../../telemetry/storage.js');
+  migrateTelemetryTables(adapter);
 }
 
 /**

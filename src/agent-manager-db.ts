@@ -8593,6 +8593,15 @@ export class AgentManagerDb {
         // Start event_log retention sweep (every 5 min, 7d / 100k-per-team caps)
         this.startEventLogRetentionSweep();
 
+        // P6 Agent Performance Telemetry — mount /metrics/* routes.
+        try {
+          const { mountMetricsRoutes } = await import('./telemetry/routes.js');
+          mountMetricsRoutes(this.managementApp, this.db.adapter);
+          console.log('[Manager] P6 telemetry /metrics/* routes mounted');
+        } catch (err) {
+          console.warn('[Manager] P6 telemetry routes failed to mount:', err instanceof Error ? err.message : String(err));
+        }
+
         // Start checkin due-service tick (default 30s) so active checkins
         // actually fire instead of accumulating with `next_fire_at <= now`.
         // Wake on every fire: every priority POSTs to the owner's /news
