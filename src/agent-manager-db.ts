@@ -8611,6 +8611,15 @@ export class AgentManagerDb {
           console.warn('[Manager] P2 inbox routes failed to mount:', err instanceof Error ? err.message : String(err));
         }
 
+        // P1 Dependency-Graph Orchestrator — mount /graphs/* routes.
+        try {
+          const { mountGraphRoutes } = await import('./graph/routes.js');
+          mountGraphRoutes(this.managementApp, this.db.adapter);
+          console.log('[Manager] P1 graph /graphs/* routes mounted');
+        } catch (err) {
+          console.warn('[Manager] P1 graph routes failed to mount:', err instanceof Error ? err.message : String(err));
+        }
+
         // Start checkin due-service tick (default 30s) so active checkins
         // actually fire instead of accumulating with `next_fire_at <= now`.
         // Wake on every fire: every priority POSTs to the owner's /news

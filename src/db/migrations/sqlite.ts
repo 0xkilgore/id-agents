@@ -628,6 +628,10 @@ export async function migrateSqlite(adapter: SqliteAdapter): Promise<void> {
   // P2 Inbox 2.0 read-model tables (idempotent — CREATE IF NOT EXISTS).
   const { migrateInboxTables } = await import('../../inbox/storage.js');
   migrateInboxTables(adapter);
+
+  // P1 Dependency-Graph Orchestrator tables (idempotent — CREATE IF NOT EXISTS).
+  const { migrateGraphTables } = await import('../../graph/storage.js');
+  migrateGraphTables(adapter);
 }
 
 /**

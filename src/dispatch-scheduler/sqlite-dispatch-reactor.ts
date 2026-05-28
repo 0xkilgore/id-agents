@@ -273,8 +273,21 @@ export class SqliteDispatchReactor {
       eligibleParams,
     );
 
-    const claimed: DispatchDoc[] = [];
+    // P1 Dependency-Graph: filter out dispatches whose graph node is pending_dependencies.
+    // This is a single readiness check — if the dispatch is linked to a graph node that
+    // hasn't been released by the evaluator, skip it. Non-graph dispatches pass through.
+    const graphFilteredRows = [];
     for (const row of eligibleRows) {
+      const { rows: graphNodes } = await this.adapter.query<{ state: string }>(
+        "SELECT state FROM dispatch_graph_node WHERE dispatch_id = ? AND state = 'pending_dependencies'",
+        [row.dispatch_phid],
+      );
+      if (graphNodes.length > 0) continue; // Skip — graph dependency not yet satisfied.
+      graphFilteredRows.push(row);
+    }
+
+    const claimed: DispatchDoc[] = [];
+    for (const row of graphFilteredRows) {
       const newAttempt = row.attempt_count + 1;
       const { rowCount } = await this.adapter.query(
         `UPDATE dispatch_scheduler_queue
