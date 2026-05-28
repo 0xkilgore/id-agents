@@ -624,6 +624,10 @@ export async function migrateSqlite(adapter: SqliteAdapter): Promise<void> {
   // P6 Agent Performance Telemetry tables (idempotent — CREATE IF NOT EXISTS).
   const { migrateTelemetryTables } = await import('../../telemetry/storage.js');
   migrateTelemetryTables(adapter);
+
+  // P2 Inbox 2.0 read-model tables (idempotent — CREATE IF NOT EXISTS).
+  const { migrateInboxTables } = await import('../../inbox/storage.js');
+  migrateInboxTables(adapter);
 }
 
 /**
