@@ -1,7 +1,7 @@
 // Inbox 2.0 — Express routes for /inbox/*.
 // Read APIs + typed action mutation endpoints.
 
-import type { Express, Request, Response } from 'express';
+import type { Application, Request, Response } from 'express';
 import type { DbAdapter } from '../db/db-adapter.js';
 import type { InboxSummaryResponse, InboxItemDetail, OperatorState, ClassifyInboxItemOp, ProposeRouteOp } from './types.js';
 import {
@@ -12,7 +12,7 @@ import {
 import { applyClassifyInboxItem, applyProposeRoute, applySnooze, applyCheckOff, applyAuditNote } from './ops.js';
 import { evaluateInboxRouting, DEFAULT_ROUTING_RULES } from './evaluator.js';
 
-export function mountInboxRoutes(app: Express, adapter: DbAdapter): void {
+export function mountInboxRoutes(app: Application, adapter: DbAdapter): void {
 
   // ── GET /inbox/summary ──
 
@@ -86,7 +86,7 @@ export function mountInboxRoutes(app: Express, adapter: DbAdapter): void {
 
   // ── GET /inbox/items/:phid ──
 
-  app.get('/inbox/items/:phid', async (req: Request, res: Response) => {
+  app.get('/inbox/items/:phid', async (req: Request<{ phid: string }>, res: Response) => {
     try {
       const item = await getInboxItem(adapter, req.params.phid);
       if (!item) {
@@ -135,7 +135,7 @@ export function mountInboxRoutes(app: Express, adapter: DbAdapter): void {
 
   // ── POST /inbox/items/:phid/classify ──
 
-  app.post('/inbox/items/:phid/classify', async (req: Request, res: Response) => {
+  app.post('/inbox/items/:phid/classify', async (req: Request<{ phid: string }>, res: Response) => {
     try {
       const op: ClassifyInboxItemOp = {
         type: 'CLASSIFY_INBOX_ITEM',
@@ -164,7 +164,7 @@ export function mountInboxRoutes(app: Express, adapter: DbAdapter): void {
 
   // ── POST /inbox/items/:phid/propose-route ──
 
-  app.post('/inbox/items/:phid/propose-route', async (req: Request, res: Response) => {
+  app.post('/inbox/items/:phid/propose-route', async (req: Request<{ phid: string }>, res: Response) => {
     try {
       const op: ProposeRouteOp = {
         type: 'PROPOSE_ROUTE',
@@ -189,7 +189,7 @@ export function mountInboxRoutes(app: Express, adapter: DbAdapter): void {
 
   // ── POST /inbox/items/:phid/snooze ──
 
-  app.post('/inbox/items/:phid/snooze', async (req: Request, res: Response) => {
+  app.post('/inbox/items/:phid/snooze', async (req: Request<{ phid: string }>, res: Response) => {
     try {
       await applySnooze(adapter, {
         type: 'SNOOZE',
@@ -207,7 +207,7 @@ export function mountInboxRoutes(app: Express, adapter: DbAdapter): void {
 
   // ── POST /inbox/items/:phid/check-off ──
 
-  app.post('/inbox/items/:phid/check-off', async (req: Request, res: Response) => {
+  app.post('/inbox/items/:phid/check-off', async (req: Request<{ phid: string }>, res: Response) => {
     try {
       await applyCheckOff(adapter, {
         type: 'CHECK_OFF',
@@ -224,7 +224,7 @@ export function mountInboxRoutes(app: Express, adapter: DbAdapter): void {
 
   // ── POST /inbox/items/:phid/audit-note ──
 
-  app.post('/inbox/items/:phid/audit-note', async (req: Request, res: Response) => {
+  app.post('/inbox/items/:phid/audit-note', async (req: Request<{ phid: string }>, res: Response) => {
     try {
       await applyAuditNote(adapter, {
         type: 'AUDIT_NOTE',
@@ -241,7 +241,7 @@ export function mountInboxRoutes(app: Express, adapter: DbAdapter): void {
 
   // ── POST /inbox/items/:phid/evaluate-routes ──
 
-  app.post('/inbox/items/:phid/evaluate-routes', async (req: Request, res: Response) => {
+  app.post('/inbox/items/:phid/evaluate-routes', async (req: Request<{ phid: string }>, res: Response) => {
     try {
       const item = await getInboxItem(adapter, req.params.phid);
       if (!item) {

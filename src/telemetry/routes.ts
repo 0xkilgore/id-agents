@@ -2,7 +2,7 @@
 // P6 Agent Performance Telemetry — Express routes for /metrics/*.
 // Mount via `mountMetricsRoutes(app, adapter)` from the manager startup.
 
-import type { Express, Request, Response } from 'express';
+import type { Application, Request, Response } from 'express';
 import type { DbAdapter } from '../db/db-adapter.js';
 import { getSnapshots, querySignals } from './storage.js';
 import { windowBoundary, computeSourceCoverage } from './rollup.js';
@@ -22,7 +22,7 @@ function parseBool(raw: unknown, def = true): boolean {
   return def;
 }
 
-export function mountMetricsRoutes(app: Express, adapter: DbAdapter): void {
+export function mountMetricsRoutes(app: Application, adapter: DbAdapter): void {
   // -------------------------------------------------------------------------
   // GET /metrics/summary
   // -------------------------------------------------------------------------
@@ -241,7 +241,7 @@ export function mountMetricsRoutes(app: Express, adapter: DbAdapter): void {
   // -------------------------------------------------------------------------
   // GET /metrics/agents/:agent_id
   // -------------------------------------------------------------------------
-  app.get('/metrics/agents/:agent_id', async (req: Request, res: Response) => {
+  app.get('/metrics/agents/:agent_id', async (req: Request<{ agent_id: string }>, res: Response) => {
     try {
       const agentId = req.params.agent_id;
       const now = new Date();
