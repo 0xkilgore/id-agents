@@ -260,9 +260,18 @@ export class ClaudeCodeCliHarness implements AgentHarness {
       console.log(`[Claude CLI] Prompt written to temp file: ${tmpFile} (${prompt.length} chars)`);
       console.log(`[Claude CLI] Full command: ${claudePath} -p "$(cat ...)" ${quotedArgs}`);
 
+      // Strip Claude Code session vars so the child `claude` process doesn't
+      // refuse to start ("cannot be launched inside another Claude Code session").
+      // Incident 2026-05-28: manager inherited CLAUDECODE from a parent Claude
+      // Code shell and poisoned every spawned agent.
+      const childEnv = { ...env };
+      delete childEnv.CLAUDECODE;
+      delete childEnv.CLAUDE_CODE_SSE_PORT;
+      delete childEnv.CLAUDE_CODE_ENTRYPOINT;
+
       const proc = spawn('/bin/bash', ['-c', fullCommand], {
         cwd,
-        env,
+        env: childEnv,
         stdio: ['pipe', 'pipe', 'pipe']
       });
 
