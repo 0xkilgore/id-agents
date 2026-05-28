@@ -1,0 +1,32 @@
+{
+  "description": "Agent with stale heartbeat and active dispatches",
+  "now_iso": "2026-05-28T12:00:00.000Z",
+  "now_ms": 1780156800000,
+  "snapshot": {
+    "collected_at": "2026-05-28T12:00:00.000Z",
+    "active_dispatches": [],
+    "terminal_dispatches": [],
+    "watched_agents": [
+      {
+        "agent_id": "roger",
+        "last_seen_at": "2026-05-28T11:50:00.000Z",
+        "active_dispatches": 2,
+        "status_state": "online"
+      },
+      {
+        "agent_id": "cto",
+        "last_seen_at": null,
+        "active_dispatches": 1,
+        "status_state": "unknown"
+      }
+    ],
+    "recent_news": [],
+    "available_sources": ["watched_agents"],
+    "missing_sources": []
+  },
+  "expected_findings": {
+    "roger_severity": "critical",
+    "cto_severity": "critical",
+    "count": 2
+  }
+}

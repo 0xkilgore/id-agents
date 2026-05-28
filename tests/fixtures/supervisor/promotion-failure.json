@@ -1,0 +1,69 @@
+{
+  "description": "Build dispatch completed with promote=true but missing promotion payload",
+  "snapshot": {
+    "collected_at": "2026-05-28T12:00:00.000Z",
+    "active_dispatches": [],
+    "terminal_dispatches": [
+      {
+        "dispatch_phid": "phid:disp-promo-001",
+        "query_id": "query_1780151000000_jkl",
+        "to_agent": "roger",
+        "status": "done",
+        "completed_at": "2026-05-28T11:50:00.000Z",
+        "subject": "Implement feature Y",
+        "failure_kind": null,
+        "failure_detail": null,
+        "promote": true,
+        "promotion_result": null,
+        "promotion_input": {
+          "repo": "/Users/chrispowers/Code/project",
+          "branch": "feat-y",
+          "base": "main",
+          "remote": "origin"
+        }
+      },
+      {
+        "dispatch_phid": "phid:disp-promo-002",
+        "query_id": "query_1780151000001_mno",
+        "to_agent": "roger",
+        "status": "done",
+        "completed_at": "2026-05-28T11:55:00.000Z",
+        "subject": "Implement feature Z",
+        "failure_kind": null,
+        "failure_detail": null,
+        "promote": true,
+        "promotion_result": {
+          "required": true,
+          "completed": true,
+          "repos": [
+            {
+              "path": "/Users/chrispowers/Code/project",
+              "base": "main",
+              "source_branch": "feat-z",
+              "strategy": "fast_forward",
+              "promoted_sha": "abc123",
+              "remote_main_sha": "def456",
+              "pushed": true,
+              "verified": true
+            }
+          ]
+        },
+        "promotion_input": {
+          "repo": "/Users/chrispowers/Code/project",
+          "branch": "feat-z",
+          "base": "main",
+          "remote": "origin"
+        }
+      }
+    ],
+    "watched_agents": [],
+    "recent_news": [],
+    "available_sources": ["terminal_dispatches"],
+    "missing_sources": []
+  },
+  "expected_findings": {
+    "count": 2,
+    "kinds": ["promotion_failure", "promotion_failure"],
+    "dispatches": ["phid:disp-promo-001", "phid:disp-promo-002"]
+  }
+}

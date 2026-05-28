@@ -1,0 +1,49 @@
+{
+  "description": "Terminal build dispatch that failed",
+  "snapshot": {
+    "collected_at": "2026-05-28T12:00:00.000Z",
+    "active_dispatches": [],
+    "terminal_dispatches": [
+      {
+        "dispatch_phid": "phid:disp-fail-001",
+        "query_id": "query_1780150000000_def",
+        "to_agent": "roger",
+        "status": "failed",
+        "completed_at": "2026-05-28T11:45:00.000Z",
+        "subject": "Build supervisor v0 feature branch",
+        "failure_kind": "agent_error",
+        "failure_detail": "tsc --noEmit exited with code 1",
+        "promote": true,
+        "promotion_result": null,
+        "promotion_input": {
+          "repo": "/Users/chrispowers/Dropbox/Code/cane/id-agents",
+          "branch": "feat-supervisor-v0",
+          "base": "main",
+          "remote": "origin"
+        }
+      },
+      {
+        "dispatch_phid": "phid:disp-ok-002",
+        "query_id": "query_1780150000001_ghi",
+        "to_agent": "cto",
+        "status": "failed",
+        "completed_at": "2026-05-28T11:30:00.000Z",
+        "subject": "Research market trends",
+        "failure_kind": "agent_error",
+        "failure_detail": "timeout after 30 min",
+        "promote": false,
+        "promotion_result": null,
+        "promotion_input": null
+      }
+    ],
+    "watched_agents": [],
+    "recent_news": [],
+    "available_sources": ["terminal_dispatches"],
+    "missing_sources": []
+  },
+  "expected_findings": {
+    "count": 1,
+    "kind": "build_failure",
+    "dispatch_phid": "phid:disp-fail-001"
+  }
+}
