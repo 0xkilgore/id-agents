@@ -14,6 +14,7 @@ import {
   appendLibraryPersonaToAgentsMd,
   upsertMarkedBlock,
   writePersonalityFile,
+  PersonalityBodyEmptyError,
 } from '../../src/config-parser.js';
 
 /* ------------------------------------------------------------------ */
@@ -1029,5 +1030,171 @@ describe('writePersonalityFile', () => {
     );
     // Old persona body is gone.
     expect(out).not.toContain('# persona v1');
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/*  Personality write guard — empty/whitespace body protection         */
+/* ------------------------------------------------------------------ */
+
+describe('personality write guard', () => {
+  let tmpDir: string;
+  let workDir: string;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'id-agents-guard-'));
+    workDir = path.join(tmpDir, 'workspace');
+    fs.mkdirSync(workDir, { recursive: true });
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  // Test 1: Claude empty body throws and existing file is untouched
+  it('Claude empty body throws PERSONALITY_BODY_EMPTY and existing file is untouched', () => {
+    const claudeDir = path.join(workDir, '.claude');
+    fs.mkdirSync(claudeDir, { recursive: true });
+    fs.writeFileSync(path.join(claudeDir, 'CLAUDE.md'), '# existing');
+
+    expect(() => writePersonalityFile(workDir, 'claude-code-cli', '')).toThrow(PersonalityBodyEmptyError);
+    try {
+      writePersonalityFile(workDir, 'claude-code-cli', '');
+    } catch (err: any) {
+      expect(err.code).toBe('PERSONALITY_BODY_EMPTY');
+    }
+    expect(fs.readFileSync(path.join(claudeDir, 'CLAUDE.md'), 'utf-8')).toBe('# existing');
+  });
+
+  // Test 2: Claude whitespace-only body throws and existing file is untouched
+  it('Claude whitespace-only body throws and existing file is untouched', () => {
+    const claudeDir = path.join(workDir, '.claude');
+    fs.mkdirSync(claudeDir, { recursive: true });
+    fs.writeFileSync(path.join(claudeDir, 'CLAUDE.md'), '# existing');
+
+    expect(() => writePersonalityFile(workDir, 'claude-code-cli', ' \n\t\n')).toThrow(PersonalityBodyEmptyError);
+    expect(fs.readFileSync(path.join(claudeDir, 'CLAUDE.md'), 'utf-8')).toBe('# existing');
+  });
+
+  // Test 3: Claude valid body writes normally, not trimmed or normalized
+  it('Claude valid body writes normally without trimming', () => {
+    const body = '# Protocol defaults\n\nbody with trailing whitespace  \n\n';
+    writePersonalityFile(workDir, 'claude-code-cli', body);
+    expect(fs.readFileSync(path.join(workDir, '.claude', 'CLAUDE.md'), 'utf-8')).toBe(body);
+  });
+
+  // Test 4: Codex framework empty body never blanks an existing marker block
+  it('Codex framework empty body throws and AGENTS.md is byte-for-byte unchanged', () => {
+    const agentsMd = path.join(workDir, 'AGENTS.md');
+    const original =
+      '# Local preface\nuser preface line\n\n' +
+      '<!-- BEGIN id-agents framework -->\n# Protocol defaults\nbody\n<!-- END id-agents framework -->\n' +
+      '## User notes\nuser tail\n';
+    fs.writeFileSync(agentsMd, original);
+
+    expect(() => writePersonalityFile(workDir, 'codex', '')).toThrow(PersonalityBodyEmptyError);
+    expect(fs.readFileSync(agentsMd, 'utf-8')).toBe(original);
+  });
+
+  // Test 5: Codex framework whitespace-only body also throws
+  it('Codex framework whitespace-only body throws and AGENTS.md unchanged', () => {
+    const agentsMd = path.join(workDir, 'AGENTS.md');
+    const original =
+      '<!-- BEGIN id-agents framework -->\n# Protocol defaults\nbody\n<!-- END id-agents framework -->\n';
+    fs.writeFileSync(agentsMd, original);
+
+    expect(() => writePersonalityFile(workDir, 'codex', '  \n\t  ')).toThrow(PersonalityBodyEmptyError);
+    expect(fs.readFileSync(agentsMd, 'utf-8')).toBe(original);
+  });
+
+  // Test 6: upsertMarkedBlock rejects empty body directly
+  it('upsertMarkedBlock rejects empty body directly and file is unchanged', () => {
+    const target = path.join(tmpDir, 'AGENTS.md');
+    const original =
+      '<!-- BEGIN id-agents framework -->\n# content\n<!-- END id-agents framework -->\n';
+    fs.writeFileSync(target, original);
+
+    expect(() => upsertMarkedBlock(target, 'framework', '')).toThrow(PersonalityBodyEmptyError);
+    expect(fs.readFileSync(target, 'utf-8')).toBe(original);
+
+    expect(() => upsertMarkedBlock(target, 'framework', '  \n')).toThrow(PersonalityBodyEmptyError);
+    expect(fs.readFileSync(target, 'utf-8')).toBe(original);
+  });
+
+  // Test 7: Library persona AGENTS.md path never blanks an existing agent block
+  it('Library persona: empty source throws and AGENTS.md is unchanged', () => {
+    const libraryRoot = path.join(tmpDir, 'configs');
+    const agentsDir = path.join(libraryRoot, 'agents');
+    fs.mkdirSync(path.join(agentsDir, 'foundry-dev'), { recursive: true });
+    fs.writeFileSync(path.join(agentsDir, 'foundry-dev', 'CLAUDE.md'), '');
+
+    const agentsMd = path.join(workDir, 'AGENTS.md');
+    const original =
+      '# framework\n\n' +
+      '<!-- BEGIN id-agents agent:foundry-dev -->\n# old persona\n<!-- END id-agents agent:foundry-dev -->\n';
+    fs.writeFileSync(agentsMd, original);
+
+    expect(() =>
+      appendLibraryPersonaToAgentsMd(workDir, 'foundry-dev', 'codex', libraryRoot),
+    ).toThrow(PersonalityBodyEmptyError);
+    expect(fs.readFileSync(agentsMd, 'utf-8')).toBe(original);
+  });
+
+  // Test 8: 0-byte source bails with specific error
+  it('loadSubAgentTemplate: 0-byte source throws with source path and agent name', () => {
+    const agentsDir = path.join(workDir, '.claude', 'agents');
+    fs.mkdirSync(agentsDir, { recursive: true });
+    fs.writeFileSync(path.join(agentsDir, 'empty-agent.md'), '');
+
+    try {
+      loadSubAgentTemplate(workDir, 'empty-agent');
+      expect.fail('should have thrown');
+    } catch (err: any) {
+      expect(err).toBeInstanceOf(PersonalityBodyEmptyError);
+      expect(err.code).toBe('PERSONALITY_BODY_EMPTY');
+      expect(err.context.sourcePath).toContain('empty-agent.md');
+      expect(err.context.agentName).toBe('empty-agent');
+    }
+  });
+
+  it('appendLibraryPersonaToAgentsMd: 0-byte persona source throws with source path and agent name', () => {
+    const libraryRoot = path.join(tmpDir, 'configs');
+    const agentsDir = path.join(libraryRoot, 'agents');
+    fs.mkdirSync(path.join(agentsDir, 'zero-byte'), { recursive: true });
+    fs.writeFileSync(path.join(agentsDir, 'zero-byte', 'CLAUDE.md'), '');
+
+    fs.writeFileSync(path.join(workDir, 'AGENTS.md'), '# framework\n');
+
+    try {
+      appendLibraryPersonaToAgentsMd(workDir, 'zero-byte', 'codex', libraryRoot);
+      expect.fail('should have thrown');
+    } catch (err: any) {
+      expect(err).toBeInstanceOf(PersonalityBodyEmptyError);
+      expect(err.context.sourcePath).toContain('zero-byte');
+      expect(err.context.agentName).toBe('zero-byte');
+    }
+  });
+
+  // Test 9: Valid Codex/Cursor marker behavior remains idempotent
+  // (existing tests cover this — this test re-verifies after guard is applied)
+  it('valid Codex marker behavior remains idempotent after guard is applied', () => {
+    const libraryRoot = path.join(tmpDir, 'configs');
+    const agentsDir = path.join(libraryRoot, 'agents');
+    fs.mkdirSync(path.join(agentsDir, 'foundry-dev'), { recursive: true });
+    fs.writeFileSync(path.join(agentsDir, 'foundry-dev', 'CLAUDE.md'), '# persona v1\n');
+
+    // Initial deploy
+    writePersonalityFile(workDir, 'codex', '# Protocol defaults\nbody');
+    appendLibraryPersonaToAgentsMd(workDir, 'foundry-dev', 'codex', libraryRoot);
+    const afterFirst = fs.readFileSync(path.join(workDir, 'AGENTS.md'), 'utf-8');
+
+    // Idempotent redeploy with same inputs
+    writePersonalityFile(workDir, 'codex', '# Protocol defaults\nbody');
+    appendLibraryPersonaToAgentsMd(workDir, 'foundry-dev', 'codex', libraryRoot);
+    const afterSecond = fs.readFileSync(path.join(workDir, 'AGENTS.md'), 'utf-8');
+
+    expect(afterSecond).toBe(afterFirst);
+    expect(afterSecond).toContain('<!-- BEGIN id-agents framework -->');
+    expect(afterSecond).toContain('<!-- BEGIN id-agents agent:foundry-dev -->');
   });
 });

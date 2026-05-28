@@ -25,6 +25,40 @@ import { resolveDefaultLibraryRoot } from './lib/library-inventory.js';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+// --- Personality write guard (Spec: personality-write-guard v0) ---
+
+export interface PersonalityBodyEmptyContext {
+  runtime?: string;
+  destinationPath?: string;
+  agentName?: string;
+  blockSlug?: string;
+  sourcePath?: string;
+}
+
+export class PersonalityBodyEmptyError extends Error {
+  readonly code = 'PERSONALITY_BODY_EMPTY' as const;
+  readonly context: PersonalityBodyEmptyContext;
+
+  constructor(reason: string, context: PersonalityBodyEmptyContext) {
+    const parts = [reason];
+    if (context.agentName) parts.push(`agent=${context.agentName}`);
+    if (context.runtime) parts.push(`runtime=${context.runtime}`);
+    if (context.destinationPath) parts.push(`dest=${context.destinationPath}`);
+    if (context.blockSlug) parts.push(`slug=${context.blockSlug}`);
+    if (context.sourcePath) parts.push(`source=${context.sourcePath}`);
+    super(parts.join('; '));
+    this.name = 'PersonalityBodyEmptyError';
+    this.context = context;
+  }
+}
+
+function assertNonEmptyPersonalityBody(body: string, context: PersonalityBodyEmptyContext): void {
+  if (body.trim().length === 0) {
+    const reason = body.length === 0 ? 'empty personality body' : 'whitespace-only personality body';
+    throw new PersonalityBodyEmptyError(reason, context);
+  }
+}
+
 export type ScheduleDeliveryMode = 'talk' | 'internal';
 
 export interface PluginConfig {
@@ -718,13 +752,27 @@ export function loadSubAgentTemplate(workingDir: string, filename: string, runti
   // 1. Directory pattern: {name}/CLAUDE.md or {name}/AGENTS.md
   const dirPath = path.join(agentsDir, filename, rp.personalityFilename);
   if (fs.existsSync(dirPath)) {
-    return parseSubAgentTemplate(fs.readFileSync(dirPath, 'utf-8'));
+    const raw = fs.readFileSync(dirPath, 'utf-8');
+    if (raw.trim().length === 0) {
+      throw new PersonalityBodyEmptyError(
+        raw.length === 0 ? 'empty source template file' : 'whitespace-only source template file',
+        { sourcePath: dirPath, agentName: filename, runtime: typeof runtime === 'string' ? runtime : undefined },
+      );
+    }
+    return parseSubAgentTemplate(raw);
   }
 
   // 2. Single-file pattern: {name}.md
   const filePath = path.join(agentsDir, `${filename}.md`);
   if (fs.existsSync(filePath)) {
-    return parseSubAgentTemplate(fs.readFileSync(filePath, 'utf-8'));
+    const raw = fs.readFileSync(filePath, 'utf-8');
+    if (raw.trim().length === 0) {
+      throw new PersonalityBodyEmptyError(
+        raw.length === 0 ? 'empty source template file' : 'whitespace-only source template file',
+        { sourcePath: filePath, agentName: filename, runtime: typeof runtime === 'string' ? runtime : undefined },
+      );
+    }
+    return parseSubAgentTemplate(raw);
   }
 
   return undefined;
@@ -876,6 +924,10 @@ function makeMarker(slug: string): { begin: string; end: string } {
  * and any future caller that needs marker-driven file segments.
  */
 export function upsertMarkedBlock(filePath: string, slug: string, body: string): void {
+  assertNonEmptyPersonalityBody(body, {
+    destinationPath: filePath,
+    blockSlug: slug,
+  });
   const { begin, end } = makeMarker(slug);
   const trimmedBody = body.replace(/\n+$/, '');
   const block = `${begin}\n${trimmedBody}\n${end}\n`;
@@ -932,6 +984,10 @@ export function writePersonalityFile(
 ): void {
   const rp = getRuntimePaths(runtime);
   const personalityPath = path.join(workingDir, rp.personalityFile);
+  assertNonEmptyPersonalityBody(body, {
+    runtime: typeof runtime === 'string' ? runtime : undefined,
+    destinationPath: personalityPath,
+  });
   if (rp.overlayTarget === '.claude') {
     fs.mkdirSync(path.dirname(personalityPath), { recursive: true });
     fs.writeFileSync(personalityPath, body);
@@ -982,6 +1038,19 @@ export function appendLibraryPersonaToAgentsMd(
   if (!fs.existsSync(personaSource)) return false;
 
   const personaBody = fs.readFileSync(personaSource, 'utf-8');
+  if (personaBody.trim().length === 0) {
+    const agentsMdPath = path.join(workingDir, 'AGENTS.md');
+    throw new PersonalityBodyEmptyError(
+      personaBody.length === 0 ? 'empty library persona source' : 'whitespace-only library persona source',
+      {
+        agentName: name,
+        sourcePath: personaSource,
+        runtime: typeof runtime === 'string' ? runtime : undefined,
+        destinationPath: agentsMdPath,
+        blockSlug: `agent:${name}`,
+      },
+    );
+  }
   const agentsMdPath = path.join(workingDir, 'AGENTS.md');
   upsertMarkedBlock(agentsMdPath, `agent:${name}`, personaBody);
   return true;

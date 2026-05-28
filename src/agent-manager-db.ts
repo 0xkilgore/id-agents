@@ -6757,7 +6757,13 @@ export class AgentManagerDb {
           };
         }
 
-        const syncResult = { added: [] as string[], updated: [] as string[], removed: [] as string[], unchanged: [] as string[] };
+        const syncResult: {
+          added: string[];
+          updated: string[];
+          removed: string[];
+          unchanged: string[];
+          personalityErrors?: { agent: string; error: string }[];
+        } = { added: [], updated: [], removed: [], unchanged: [] };
 
         // --- REMOVED agents: kill process, hard-delete DB row ---
         for (const item of plan.removed) {
@@ -6867,16 +6873,26 @@ export class AgentManagerDb {
           // 4. Write personality file: framework block (marker-fenced for
           // Codex/Cursor; full overwrite for Claude). Preserves user edits
           // outside the markers on Codex/Cursor refresh paths.
-          {
-            const parts = [PROTOCOL_DEFAULTS];
-            if (spec.roleBody) parts.push(spec.roleBody);
-            writePersonalityFile(workingDirectory, effectiveRuntime, parts.join('\n\n'));
-          }
+          try {
+            {
+              const parts = [PROTOCOL_DEFAULTS];
+              if (spec.roleBody) parts.push(spec.roleBody);
+              writePersonalityFile(workingDirectory, effectiveRuntime, parts.join('\n\n'));
+            }
 
-          // 5. Codex/Cursor: append library persona to AGENTS.md inside
-          // marker fences (no-op for Claude).
-          if (spec.agent) {
-            appendLibraryPersonaToAgentsMd(workingDirectory, spec.agent, effectiveRuntime);
+            // 5. Codex/Cursor: append library persona to AGENTS.md inside
+            // marker fences (no-op for Claude).
+            if (spec.agent) {
+              appendLibraryPersonaToAgentsMd(workingDirectory, spec.agent, effectiveRuntime);
+            }
+          } catch (writeErr: any) {
+            if (writeErr?.code === 'PERSONALITY_BODY_EMPTY') {
+              console.error(`[Sync] Personality write guard rejected ${item.name}: ${writeErr.message}`);
+              syncResult.personalityErrors = syncResult.personalityErrors || [];
+              syncResult.personalityErrors.push({ agent: item.name, error: writeErr.message });
+              continue;
+            }
+            throw writeErr;
           }
 
           const updatedMeta: AgentMetadata = walletMeta.metadata;
@@ -7087,8 +7103,12 @@ export class AgentManagerDb {
           });
         }
 
+        const syncHasPersonalityErrors = (syncResult.personalityErrors?.length ?? 0) > 0;
         return {
-          ok: true,
+          ok: !syncHasPersonalityErrors,
+          ...(syncHasPersonalityErrors && {
+            error: `Personality write guard rejected ${syncResult.personalityErrors!.length} agent(s): ${syncResult.personalityErrors!.map(e => e.agent).join(', ')}`,
+          }),
           result: {
             // Echo the effective team back so the CLI can retarget its
             // daemon connection when /sync re-targets a team different
@@ -7507,8 +7527,16 @@ export class AgentManagerDb {
           this.broadcastAgentsChanged(effectiveTeamId, { reason: 'deploy', added: deployedNames });
         }
 
+        const failedResults = results.filter(r => !r.success);
+        const personalityGuardFailures = failedResults.filter(r =>
+          r.error?.includes('PERSONALITY_BODY_EMPTY') || r.error?.includes('personality body'),
+        );
+        const deployOk = personalityGuardFailures.length === 0;
         return {
-          ok: true,
+          ok: deployOk,
+          ...((!deployOk) && {
+            error: `Personality write guard rejected ${personalityGuardFailures.length} agent(s): ${personalityGuardFailures.map(r => r.name).join(', ')}`,
+          }),
           result: {
             // Echo the effective team back so the CLI can retarget its
             // daemon connection when /deploy targets a team different
@@ -7516,7 +7544,7 @@ export class AgentManagerDb {
             team: effectiveTeamName,
             teamId: effectiveTeamId,
             deployed: results.filter(r => r.success).length,
-            failed: results.filter(r => !r.success).length,
+            failed: failedResults.length,
             agents: results
           }
         };
