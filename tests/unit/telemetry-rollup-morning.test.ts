@@ -238,8 +238,11 @@ describe('summarizeForMorning', () => {
   });
 
   it('includes top completed work', async () => {
-    const now = new Date();
-    const { start } = dayBoundary(now, 'America/Chicago');
+    // Use a single fixed date for both the snapshot and the query so
+    // dayBoundary produces identical window_start strings (avoids flake
+    // caused by wall-clock drift between the two dayBoundary calls).
+    const fixedNow = new Date('2026-05-27T15:00:00Z');
+    const { start } = dayBoundary(fixedNow, 'America/Chicago');
     await upsertSnapshot(adapter, {
       agent_id: 'roger',
       window_kind: 'day',
@@ -255,10 +258,10 @@ describe('summarizeForMorning', () => {
       cto_corrections_count: 0,
       operator_revision_requests: 0,
       source_coverage_json: '{}',
-      computed_at: now.toISOString(),
+      computed_at: fixedNow.toISOString(),
     });
 
-    const lines = await summarizeForMorning(adapter);
+    const lines = await summarizeForMorning(adapter, { date: fixedNow });
     const completedLine = lines.find(l => l.category === 'completed');
     expect(completedLine).toBeDefined();
     expect(completedLine!.line).toContain('roger');
