@@ -317,6 +317,16 @@ export async function getNodeByClientId(adapter: DbAdapter, graphId: string, cli
   return rows[0] ?? null;
 }
 
+// ── N1.3 Lifecycle-bridge lookup ──
+
+export async function getGraphIdsByDispatchId(adapter: DbAdapter, dispatchId: string): Promise<string[]> {
+  const { rows } = await adapter.query<{ graph_id: string }>(
+    'SELECT DISTINCT graph_id FROM dispatch_graph_node WHERE dispatch_id = $1',
+    [dispatchId],
+  );
+  return rows.map(r => r.graph_id);
+}
+
 // ── Scheduler readiness check ──
 
 export async function isDispatchGraphBlocked(adapter: DbAdapter, dispatchId: string): Promise<boolean> {

@@ -431,6 +431,34 @@ export class AgentManagerDb {
     }
   }
 
+  /**
+   * N1.3: best-effort, non-blocking graph re-evaluation after a dispatch
+   * lifecycle mutation. Fires and forgets — errors are logged, never thrown.
+   */
+  private evaluateGraphsForDispatchBestEffort(
+    dispatchId: string,
+    trigger: string,
+  ): void {
+    import('./graph/lifecycle-bridge.js').then(({ evaluateGraphsForDispatch }) => {
+      const logger = {
+        warn: (event: string, data: Record<string, unknown>) =>
+          this.managerLog(`[graph-bridge] WARN ${event}: ${JSON.stringify(data)}`),
+        info: (event: string, data: Record<string, unknown>) =>
+          this.managerLog(`[graph-bridge] ${event}: ${JSON.stringify(data)}`),
+      };
+      evaluateGraphsForDispatch(this.db.adapter, dispatchId, trigger as any, { logger })
+        .catch((err: unknown) => {
+          this.managerLog(
+            `[graph-bridge] unhandled error for ${dispatchId}/${trigger}: ${err instanceof Error ? err.message : String(err)}`,
+          );
+        });
+    }).catch((err: unknown) => {
+      this.managerLog(
+        `[graph-bridge] import failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    });
+  }
+
   constructor(
     baseWorkDir: string = '/workspace',
     db: Db,
@@ -2032,6 +2060,12 @@ export class AgentManagerDb {
           );
         }
 
+        // N1.3: best-effort graph re-evaluation after needs_clarification.
+        this.evaluateGraphsForDispatchBestEffort(
+          result.doc.dispatch_phid,
+          'dispatch_needs_clarification',
+        );
+
         return res.json({
           ok: true,
           dispatch_id: result.doc.dispatch_phid,
@@ -2167,6 +2201,11 @@ export class AgentManagerDb {
             transport,
             agent_query_id,
           });
+          // N1.3: best-effort graph re-evaluation after resume.
+          this.evaluateGraphsForDispatchBestEffort(
+            resumed.dispatch_phid,
+            'dispatch_resumed',
+          );
           return res.json({
             ok: true,
             dispatch_id: resumed.dispatch_phid,
@@ -2205,6 +2244,12 @@ export class AgentManagerDb {
         } catch {
           // best-effort
         }
+
+        // N1.3: best-effort graph re-evaluation after resume delivery failed.
+        this.evaluateGraphsForDispatchBestEffort(
+          failed.dispatch_phid,
+          'dispatch_resume_delivery_failed',
+        );
 
         return res.json({
           ok: true,
@@ -2371,6 +2416,12 @@ export class AgentManagerDb {
             error: err instanceof Error ? err.message : String(err),
           });
         }
+
+        // N1.3: best-effort graph re-evaluation after dispatch state change.
+        this.evaluateGraphsForDispatchBestEffort(
+          doc.dispatch_phid,
+          success ? 'dispatch_done' : 'dispatch_failed',
+        );
 
         return res.json({
           ok: true,
@@ -8602,6 +8653,18 @@ export class AgentManagerDb {
                 return agent.endpoint;
               },
               env: process.env,
+              // N1.3: scheduler-owned status mutations trigger graph re-evaluation.
+              onDispatchStatusChanged: (phid, newStatus) => {
+                const triggerMap: Record<string, string> = {
+                  done: 'dispatch_done',
+                  failed: 'dispatch_failed',
+                  cancelled: 'dispatch_cancelled',
+                };
+                const trigger = triggerMap[newStatus];
+                if (trigger) {
+                  this.evaluateGraphsForDispatchBestEffort(phid, trigger);
+                }
+              },
             });
             this.dispatchScheduler.start();
           } catch (err) {

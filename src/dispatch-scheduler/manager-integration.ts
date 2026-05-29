@@ -46,6 +46,8 @@ export interface SchedulerHandleOptions {
   env?: SchedulerEnv;
   /** Optional override for tests; default polls process.hrtime. */
   now?: () => string;
+  /** N1.3: optional hook invoked after scheduler-owned status mutations. */
+  onDispatchStatusChanged?: (phid: string, newStatus: string) => void;
 }
 
 // Spec 054 §3.1 — structured actor / causation on every dispatch.
@@ -158,7 +160,7 @@ export class SchedulerHandle {
       teamId: opts.teamId,
       now,
     });
-    this.client = new DispatchDocClient({ reactor: this.reactor, now });
+    this.client = new DispatchDocClient({ reactor: this.reactor, now, onStatusChanged: opts.onDispatchStatusChanged });
     this.transport = new HttpAgentTransport({
       resolveTargetUrl: async (doc) => opts.resolveTargetUrl(doc.to_agent),
     });

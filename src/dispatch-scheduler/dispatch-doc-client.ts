@@ -40,18 +40,24 @@ export interface DispatchReactor {
   snapshot: FakeReactor["snapshot"];
 }
 
+/** N1.3: optional hook invoked after a status-changing mutation succeeds. */
+export type OnDispatchStatusChanged = (phid: string, newStatus: string) => void;
+
 export interface DispatchDocClientOptions {
   reactor: DispatchReactor;
   now: () => string;
+  onStatusChanged?: OnDispatchStatusChanged;
 }
 
 export class DispatchDocClient {
   private reactor: DispatchReactor;
   private now: () => string;
+  private onStatusChanged?: OnDispatchStatusChanged;
 
   constructor(opts: DispatchDocClientOptions) {
     this.reactor = opts.reactor;
     this.now = opts.now;
+    this.onStatusChanged = opts.onStatusChanged;
   }
 
   async enqueueDispatch(input: EnqueueInput): Promise<Result<DispatchDoc>> {
@@ -87,16 +93,20 @@ export class DispatchDocClient {
   }
 
   async markDone(phid: string): Promise<Result<DispatchDoc>> {
-    return this.wrapNullable("markDone", () => this.reactor.markDone(phid));
+    const r = await this.wrapNullable("markDone", () => this.reactor.markDone(phid));
+    if (r.ok) this.onStatusChanged?.(phid, 'done');
+    return r;
   }
 
   async markFailed(
     phid: string,
     args: { failure_kind: FailureKind; detail: string },
   ): Promise<Result<DispatchDoc>> {
-    return this.wrapNullable("markFailed", () =>
+    const r = await this.wrapNullable("markFailed", () =>
       this.reactor.markFailed(phid, args),
     );
+    if (r.ok) this.onStatusChanged?.(phid, 'failed');
+    return r;
   }
 
   async markBounced(
@@ -115,16 +125,20 @@ export class DispatchDocClient {
   }
 
   async cancel(phid: string, detail: string): Promise<Result<DispatchDoc>> {
-    return this.wrapNullable("cancel", () => this.reactor.cancel(phid, detail));
+    const r = await this.wrapNullable("cancel", () => this.reactor.cancel(phid, detail));
+    if (r.ok) this.onStatusChanged?.(phid, 'cancelled');
+    return r;
   }
 
   async markRetryExhausted(
     phid: string,
     detail: string,
   ): Promise<Result<DispatchDoc>> {
-    return this.wrapNullable("markRetryExhausted", () =>
+    const r = await this.wrapNullable("markRetryExhausted", () =>
       this.reactor.markRetryExhausted(phid, detail),
     );
+    if (r.ok) this.onStatusChanged?.(phid, 'failed');
+    return r;
   }
 
   async dispatchesInFlight(opts: {
