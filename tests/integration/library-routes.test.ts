@@ -25,6 +25,10 @@ import { SqliteTasksRepo } from '../../src/db/repos/sqlite/tasks-repo.js';
 const FIXTURE_LIBRARY_ROOT = '/Users/nxt3d/projects/id2/public-agents/configs';
 const FIXTURE_AGENT_ROOT = `${FIXTURE_LIBRARY_ROOT}/agents/foundry-dev`;
 
+// Guard: skip fixture-dependent tests when the external foundry-dev fixture tree
+// is absent (it lives on the author's machine at /Users/nxt3d/...).
+const FIXTURES_AVAILABLE = fs.existsSync(FIXTURE_LIBRARY_ROOT) && fs.existsSync(FIXTURE_AGENT_ROOT);
+
 async function createInMemoryDb() {
   const adapter = new SqliteAdapter(':memory:');
   await migrateSqlite(adapter);
@@ -76,7 +80,7 @@ async function getJson(baseUrl: string, pathname: string): Promise<{ status: num
 /*  With the foundry-dev fixture mounted                               */
 /* ------------------------------------------------------------------ */
 
-describe('library inventory routes — mounted foundry-dev fixture', () => {
+describe.skipIf(!FIXTURES_AVAILABLE)('library inventory routes — mounted foundry-dev fixture', () => {
   let manager: AgentManagerDb;
   let db: Awaited<ReturnType<typeof createInMemoryDb>>;
   let baseUrl: string;

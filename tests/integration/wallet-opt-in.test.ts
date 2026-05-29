@@ -1,9 +1,15 @@
 // SPDX-License-Identifier: MIT
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { execFileSync } from 'child_process';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
+
+// Guard: the wallet provision test requires the OWS CLI to be installed.
+const OWS_AVAILABLE = (() => {
+  try { execFileSync('ows', ['--version'], { stdio: 'pipe' }); return true; } catch { return false; }
+})();
 
 import { AgentManagerDb } from '../../src/agent-manager-db.js';
 import { SqliteAdapter } from '../../src/db/sqlite-adapter.js';
@@ -165,7 +171,7 @@ describe('wallet opt-in manager integration', () => {
     expect(detail.metadata?.ows_address).toBe('0x2222');
   });
 
-  it('provisions wallets on demand through the /remote /agent command surface', async () => {
+  it.skipIf(!OWS_AVAILABLE)('provisions wallets on demand through the /remote /agent command surface', async () => {
     const agent = await registerRemoteAgent('wallet-command-remote');
     const getOrCreate = vi.fn(() => ({ walletName: 'public-wallet-command-remote', address: '0x3333' }));
     (manager as any).getOrCreateAgentWallet = getOrCreate;
