@@ -1,0 +1,31 @@
+{
+  "description": "Active dispatch stuck in_flight for 45 minutes with no recent news",
+  "now_iso": "2026-05-28T12:00:00.000Z",
+  "now_ms": 1780156800000,
+  "snapshot": {
+    "collected_at": "2026-05-28T12:00:00.000Z",
+    "active_dispatches": [
+      {
+        "dispatch_phid": "phid:disp-stuck-001",
+        "query_id": "query_1780154100000_abc",
+        "to_agent": "roger",
+        "status": "in_flight",
+        "started_at": "2026-05-28T11:15:00.000Z",
+        "updated_at": "2026-05-28T11:15:00.000Z",
+        "subject": "Implement feature X",
+        "promote": true,
+        "promotion_input": null
+      }
+    ],
+    "terminal_dispatches": [],
+    "watched_agents": [],
+    "recent_news": [],
+    "available_sources": ["active_dispatches"],
+    "missing_sources": []
+  },
+  "expected_findings": {
+    "count": 1,
+    "kind": "stuck_query",
+    "severity": "critical"
+  }
+}

@@ -1,0 +1,26 @@
+{
+  "description": "Agent emitting repeated error-like news entries within window",
+  "now_iso": "2026-05-28T12:00:00.000Z",
+  "now_ms": 1780156800000,
+  "snapshot": {
+    "collected_at": "2026-05-28T12:00:00.000Z",
+    "active_dispatches": [],
+    "terminal_dispatches": [],
+    "watched_agents": [],
+    "recent_news": [
+      { "id": "n1", "agent_id": "roger", "ts": "2026-05-28T11:50:00.000Z", "message": "Error: connection timeout to service" },
+      { "id": "n2", "agent_id": "roger", "ts": "2026-05-28T11:52:00.000Z", "message": "Error: connection timeout to service" },
+      { "id": "n3", "agent_id": "roger", "ts": "2026-05-28T11:54:00.000Z", "message": "Error: connection timeout to service" },
+      { "id": "n4", "agent_id": "roger", "ts": "2026-05-28T11:55:00.000Z", "message": "Task completed successfully" },
+      { "id": "n5", "agent_id": "cto", "ts": "2026-05-28T11:56:00.000Z", "message": "Error: permission denied accessing file" },
+      { "id": "n6", "agent_id": "cto", "ts": "2026-05-28T11:57:00.000Z", "message": "Error: permission denied accessing file" }
+    ],
+    "available_sources": ["recent_news"],
+    "missing_sources": []
+  },
+  "expected_findings": {
+    "count": 1,
+    "agent_id": "roger",
+    "kind": "news_repeated_error"
+  }
+}

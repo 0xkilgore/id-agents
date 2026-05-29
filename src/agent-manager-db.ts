@@ -397,6 +397,7 @@ export class AgentManagerDb {
   private querySweeperInterval: NodeJS.Timeout | null = null;
   private retentionService: RetentionService | null = null;
   private checkinService: CheckinService | null = null;
+  private supervisorWatcher: { stop(): void } | null = null;
   /**
    * Stuck-query sweeper timeout, in minutes. Queries whose status is still
    * pending/processing this long after their `created` timestamp are assumed
@@ -8657,6 +8658,28 @@ export class AgentManagerDb {
           console.warn('[Manager] P1 graph routes failed to mount:', err instanceof Error ? err.message : String(err));
         }
 
+        // Supervisor v0 — watch-and-alert loop behind SUPERVISOR_WATCH_ENABLED.
+        if (process.env.SUPERVISOR_WATCH_ENABLED === 'true') {
+          try {
+            const { SupervisorWatcher, parseSupervisorConfig, ManagerSourceReader } = await import('./supervisor/index.js');
+            const supervisorConfig = parseSupervisorConfig(process.env);
+            const defaultTeamId = await this.db.teams.getOrCreateTeamId('default');
+            const sourceReader = new ManagerSourceReader({
+              adapter: this.db.adapter,
+              teamId: defaultTeamId,
+            });
+            const watcher = new SupervisorWatcher({
+              config: supervisorConfig,
+              sourceReader,
+            });
+            watcher.start();
+            this.supervisorWatcher = watcher;
+            console.log('[Manager] Supervisor v0 watcher started');
+          } catch (err) {
+            console.warn('[Manager] Supervisor v0 watcher failed to start:', err instanceof Error ? err.message : String(err));
+          }
+        }
+
         // Start checkin due-service tick (default 30s) so active checkins
         // actually fire instead of accumulating with `next_fire_at <= now`.
         // Wake on every fire: every priority POSTs to the owner's /news
@@ -8712,6 +8735,10 @@ export class AgentManagerDb {
    * the manager shuts down cleanly without leaking timers or sockets.
    */
   async shutdown(): Promise<void> {
+    if (this.supervisorWatcher) {
+      this.supervisorWatcher.stop();
+      this.supervisorWatcher = null;
+    }
     if (this.checkinService) {
       this.checkinService.stop();
       this.checkinService = null;
