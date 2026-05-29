@@ -8631,6 +8631,15 @@ export class AgentManagerDb {
           console.warn('[Manager] P6 telemetry routes failed to mount:', err instanceof Error ? err.message : String(err));
         }
 
+        // Monitor — read-only fleet health and completions endpoints.
+        try {
+          const { mountMonitorRoutes } = await import('./monitor/routes.js');
+          mountMonitorRoutes(this.managementApp, this.db.adapter);
+          console.log('[Manager] Monitor /monitor/* routes mounted');
+        } catch (err) {
+          console.warn('[Manager] Monitor routes failed to mount:', err instanceof Error ? err.message : String(err));
+        }
+
         // P2 Inbox 2.0 — mount /inbox/* routes.
         try {
           const { mountInboxRoutes } = await import('./inbox/routes.js');
