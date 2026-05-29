@@ -2,7 +2,7 @@
 
 import type { Application, Request, Response } from 'express';
 import type { DbAdapter } from '../db/db-adapter.js';
-import type { DependencyPredicate, GraphDetail } from './types.js';
+import type { DependencyPredicate, EnqueueFn, GraphDetail } from './types.js';
 import {
   createGraph, getGraph, listGraphs,
   addNode, getNodes,
@@ -11,8 +11,13 @@ import {
   updateGraphStatus,
 } from './storage.js';
 import { evaluateGraph } from './runner.js';
+import { validateDispatchPlanRequest, executeDispatchPlan, DispatchPlanError } from './dispatch-plan.js';
 
-export function mountGraphRoutes(app: Application, adapter: DbAdapter): void {
+export interface GraphRouteOptions {
+  enqueueDispatch?: EnqueueFn;
+}
+
+export function mountGraphRoutes(app: Application, adapter: DbAdapter, options?: GraphRouteOptions): void {
 
   // ── GET /graphs ──
 
@@ -173,6 +178,38 @@ export function mountGraphRoutes(app: Application, adapter: DbAdapter): void {
       const result = await evaluateGraph(adapter, graph.graph_id);
       res.json(result);
     } catch (err) {
+      res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  // ── POST /graphs/dispatch-plan — N1.2 dispatch-plan enqueue ──
+
+  app.post('/graphs/dispatch-plan', async (req: Request, res: Response) => {
+    try {
+      const enqueue = options?.enqueueDispatch;
+      if (!enqueue) {
+        res.status(503).json({ error: 'Scheduler unavailable — dispatch-plan requires an active scheduler.' });
+        return;
+      }
+
+      const validationError = validateDispatchPlanRequest(req.body);
+      if (validationError) {
+        res.status(400).json({ error: validationError });
+        return;
+      }
+
+      const result = await executeDispatchPlan(adapter, req.body, enqueue);
+      res.status(201).json(result);
+    } catch (err) {
+      if (err instanceof DispatchPlanError) {
+        res.status(500).json({
+          error: err.message,
+          partial: true,
+          partial_nodes: err.partialNodes,
+          errors: err.errors,
+        });
+        return;
+      }
       res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
     }
   });

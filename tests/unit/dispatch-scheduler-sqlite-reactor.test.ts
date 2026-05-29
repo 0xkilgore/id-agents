@@ -276,4 +276,43 @@ describe("SqliteDispatchReactor — round-trip parity with FakeReactor", () => {
     if (!a.ok || !b.ok) throw new Error();
     expect(a.value.dispatch_phid).not.toBe(b.value.dispatch_phid);
   });
+
+  it("graph-blocked dispatch is skipped by claim selection (N1.2)", async () => {
+    const { client } = harness();
+
+    // Enqueue two dispatches.
+    const freeEnq = await client.enqueueDispatch({ ...base, query_id: "free" });
+    const blockedEnq = await client.enqueueDispatch({ ...base, query_id: "blocked" });
+    if (!freeEnq.ok || !blockedEnq.ok) throw new Error();
+
+    // Insert a graph node marking the blocked dispatch as pending_dependencies.
+    // The graph tables are created by migrateSqlite; insert directly.
+    const graphId = "graph-test-block";
+    await adapter.query(
+      `INSERT INTO dispatch_graph (graph_id, title, status, version, created_by_actor_json, created_at)
+       VALUES (?, 'block-test', 'active', 1, '{}', '2026-05-29T00:00:00Z')`,
+      [graphId],
+    );
+    await adapter.query(
+      `INSERT INTO dispatch_graph_node (node_id, graph_id, title, kind, dispatch_id, state)
+       VALUES (?, ?, 'Blocked Node', 'dispatch', ?, 'pending_dependencies')`,
+      ["node-blocked", graphId, blockedEnq.value.dispatch_phid],
+    );
+
+    // Claim: only the free dispatch should be claimed; the graph-blocked one is skipped.
+    const claim = await client.claimForStart({ limit: 10 });
+    if (!claim.ok) throw new Error();
+    expect(claim.value).toHaveLength(1);
+    expect(claim.value[0].dispatch_phid).toBe(freeEnq.value.dispatch_phid);
+
+    // After removing the graph block (transition to queued), the dispatch becomes claimable.
+    await adapter.query(
+      `UPDATE dispatch_graph_node SET state = 'queued' WHERE node_id = ?`,
+      ["node-blocked"],
+    );
+    const claim2 = await client.claimForStart({ limit: 10 });
+    if (!claim2.ok) throw new Error();
+    expect(claim2.value).toHaveLength(1);
+    expect(claim2.value[0].dispatch_phid).toBe(blockedEnq.value.dispatch_phid);
+  });
 });

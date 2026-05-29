@@ -413,4 +413,39 @@ describe('P1 Graph — Runner (evaluateGraph)', () => {
   it('non-graph dispatch is not blocked by isDispatchGraphBlocked', async () => {
     expect(await isDispatchGraphBlocked(adapter, 'disp-not-in-graph')).toBe(false);
   });
+
+  it('dispatch-plan-created dependent node stays non-claimable while upstream is not done (N1.2 regression)', async () => {
+    // Simulate a dispatch-plan graph: upstream A is queued, downstream B waits on A.
+    await seedDispatch(adapter, 'disp-plan-A', 'queued');
+    await seedDispatch(adapter, 'disp-plan-B', 'queued');
+
+    const g = await createGraph(adapter, 'Dispatch-plan regression', {});
+    const a = await addNode(adapter, g.graph_id, 'Build', 'dispatch', {
+      dispatch_id: 'disp-plan-A', state: 'queued', client_node_id: 'build',
+    });
+    const b = await addNode(adapter, g.graph_id, 'Review', 'dispatch', {
+      dispatch_id: 'disp-plan-B', state: 'pending_dependencies', client_node_id: 'review',
+    });
+    await addEdge(adapter, g.graph_id, a.node_id, b.node_id, 'waits_on',
+      { type: 'dispatch_success', upstream_node_id: a.node_id });
+    await updateGraphStatus(adapter, g.graph_id, 'active');
+
+    // B is in pending_dependencies → isDispatchGraphBlocked should return true.
+    expect(await isDispatchGraphBlocked(adapter, 'disp-plan-B')).toBe(true);
+
+    // Evaluate: B should remain pending_dependencies because A is not done.
+    const r1 = await evaluateGraph(adapter, g.graph_id);
+    const nodeB1 = await getNode(adapter, b.node_id);
+    expect(nodeB1!.state).toBe('pending_dependencies');
+
+    // Mark A done, re-evaluate: B should transition to queued.
+    await updateDispatchStatus(adapter, 'disp-plan-A', 'done');
+    const r2 = await evaluateGraph(adapter, g.graph_id);
+    const nodeB2 = await getNode(adapter, b.node_id);
+    expect(nodeB2!.state).toBe('queued');
+    expect(r2.transitioned).toBe(1);
+
+    // Now B is claimable — isDispatchGraphBlocked should return false.
+    expect(await isDispatchGraphBlocked(adapter, 'disp-plan-B')).toBe(false);
+  });
 });

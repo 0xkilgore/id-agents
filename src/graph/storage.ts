@@ -76,6 +76,21 @@ export function migrateGraphTables(adapter: DbAdapter): void {
     )
   `);
   exec(`CREATE INDEX IF NOT EXISTS idx_graph_decision_node ON dispatch_graph_decision(node_id)`);
+
+  // N1.2 Dispatch-Plan additive columns (idempotent ALTER).
+  for (const stmt of [
+    `ALTER TABLE dispatch_graph ADD COLUMN plan_idempotency_key TEXT`,
+    `ALTER TABLE dispatch_graph ADD COLUMN source_json TEXT`,
+    `ALTER TABLE dispatch_graph_node ADD COLUMN client_node_id TEXT`,
+  ]) {
+    if (adapter.dialect === 'sqlite') {
+      try { (adapter as any).exec(stmt); } catch { /* column already exists */ }
+    } else {
+      adapter.query(stmt.replace('ADD COLUMN', 'ADD COLUMN IF NOT EXISTS')).catch(() => {});
+    }
+  }
+  exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_graph_plan_idempotency ON dispatch_graph(plan_idempotency_key)`);
+  exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_graph_node_client ON dispatch_graph_node(graph_id, client_node_id)`);
 }
 
 // ── Graph CRUD ──
@@ -84,6 +99,7 @@ export async function createGraph(
   adapter: DbAdapter,
   title: string,
   createdBy: Record<string, unknown>,
+  opts?: { plan_idempotency_key?: string; source_json?: string },
 ): Promise<GraphRow> {
   const row: GraphRow = {
     graph_id: `graph-${randomUUID().slice(0, 12)}`,
@@ -94,9 +110,10 @@ export async function createGraph(
     created_at: new Date().toISOString(),
   };
   await adapter.query(
-    `INSERT INTO dispatch_graph (graph_id, title, status, version, created_by_actor_json, created_at)
-     VALUES ($1, $2, $3, $4, $5, $6)`,
-    [row.graph_id, row.title, row.status, row.version, row.created_by_actor_json, row.created_at],
+    `INSERT INTO dispatch_graph (graph_id, title, status, version, created_by_actor_json, created_at, plan_idempotency_key, source_json)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+    [row.graph_id, row.title, row.status, row.version, row.created_by_actor_json, row.created_at,
+     opts?.plan_idempotency_key ?? null, opts?.source_json ?? null],
   );
   return row;
 }
@@ -105,6 +122,14 @@ export async function getGraph(adapter: DbAdapter, graphId: string): Promise<Gra
   const { rows } = await adapter.query<GraphRow>(
     'SELECT * FROM dispatch_graph WHERE graph_id = $1',
     [graphId],
+  );
+  return rows[0] ?? null;
+}
+
+export async function getGraphByIdempotencyKey(adapter: DbAdapter, key: string): Promise<GraphRow | null> {
+  const { rows } = await adapter.query<GraphRow>(
+    'SELECT * FROM dispatch_graph WHERE plan_idempotency_key = $1',
+    [key],
   );
   return rows[0] ?? null;
 }
@@ -134,7 +159,7 @@ export async function addNode(
   graphId: string,
   title: string,
   kind: NodeRow['kind'],
-  opts: { dispatch_id?: string; task_phid?: string; state?: NodeState; node_id?: string } = {},
+  opts: { dispatch_id?: string; task_phid?: string; state?: NodeState; node_id?: string; client_node_id?: string } = {},
 ): Promise<NodeRow> {
   const row: NodeRow = {
     node_id: opts.node_id ?? `node-${randomUUID().slice(0, 12)}`,
@@ -147,9 +172,9 @@ export async function addNode(
     blocker_summary_json: null,
   };
   await adapter.query(
-    `INSERT INTO dispatch_graph_node (node_id, graph_id, title, kind, dispatch_id, task_phid, state, blocker_summary_json)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
-    [row.node_id, row.graph_id, row.title, row.kind, row.dispatch_id, row.task_phid, row.state, row.blocker_summary_json],
+    `INSERT INTO dispatch_graph_node (node_id, graph_id, title, kind, dispatch_id, task_phid, state, blocker_summary_json, client_node_id)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+    [row.node_id, row.graph_id, row.title, row.kind, row.dispatch_id, row.task_phid, row.state, row.blocker_summary_json, opts.client_node_id ?? null],
   );
   return row;
 }
@@ -280,6 +305,16 @@ export async function getRecentDecisions(adapter: DbAdapter, graphId: string, li
     [graphId, limit],
   );
   return rows;
+}
+
+// ── N1.2 Dispatch-Plan lookups ──
+
+export async function getNodeByClientId(adapter: DbAdapter, graphId: string, clientNodeId: string): Promise<NodeRow | null> {
+  const { rows } = await adapter.query<NodeRow>(
+    'SELECT * FROM dispatch_graph_node WHERE graph_id = $1 AND client_node_id = $2',
+    [graphId, clientNodeId],
+  );
+  return rows[0] ?? null;
 }
 
 // ── Scheduler readiness check ──

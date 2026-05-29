@@ -8652,7 +8652,10 @@ export class AgentManagerDb {
         // P1 Dependency-Graph Orchestrator — mount /graphs/* routes.
         try {
           const { mountGraphRoutes } = await import('./graph/routes.js');
-          mountGraphRoutes(this.managementApp, this.db.adapter);
+          const graphOpts = this.dispatchScheduler
+            ? { enqueueDispatch: this.dispatchScheduler.enqueue.bind(this.dispatchScheduler) }
+            : undefined;
+          mountGraphRoutes(this.managementApp, this.db.adapter, graphOpts);
           console.log('[Manager] P1 graph /graphs/* routes mounted');
         } catch (err) {
           console.warn('[Manager] P1 graph routes failed to mount:', err instanceof Error ? err.message : String(err));
