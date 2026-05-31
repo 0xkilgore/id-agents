@@ -136,6 +136,53 @@ export function evaluateAgentDown(
   return findings;
 }
 
+// Harness-resilience (Spec: 2026-05-29) — failure kinds that are model/API
+// or harness infrastructure rather than semantic build/test failures.
+const MODEL_API_FAILURE_KINDS: ReadonlySet<string> = new Set([
+  'model_api_error_exhausted',
+  'harness_empty_result_exhausted',
+  'harness_process_error_exhausted',
+]);
+
+export function evaluateModelApiErrors(
+  snapshot: SourceSnapshot,
+  _config: SupervisorWatchConfig,
+): RuleFinding[] {
+  const findings: RuleFinding[] = [];
+
+  for (const d of snapshot.terminal_dispatches) {
+    if (d.status !== 'failed') continue;
+    if (!d.failure_kind || !MODEL_API_FAILURE_KINDS.has(d.failure_kind)) continue;
+
+    // Severity: critical for build dispatches (these block real shipping),
+    // warning otherwise (spec/report dispatches that just need a re-poke).
+    const isBuild = d.promote || d.promotion_input != null;
+    const severity = isBuild ? 'critical' : 'warning';
+
+    findings.push({
+      dedupe_key: `model_api_error:${d.dispatch_phid}`,
+      kind: 'model_api_error',
+      severity,
+      confidence: 'high',
+      title: `Model/API failure exhausted on ${d.dispatch_phid}`,
+      summary: `Dispatch to ${d.to_agent} terminated with ${d.failure_kind} — harness retries exhausted. ${d.failure_detail ?? 'no detail'}`,
+      evidence: [
+        {
+          source: 'dispatch',
+          ref: d.dispatch_phid,
+          observed_at: snapshot.collected_at,
+          detail: `failure_kind=${d.failure_kind}, failure_detail=${d.failure_detail ?? ''}`,
+        },
+      ],
+      agent_id: d.to_agent,
+      query_id: d.query_id,
+      dispatch_id: d.dispatch_phid,
+    });
+  }
+
+  return findings;
+}
+
 export function evaluateBuildFailures(
   snapshot: SourceSnapshot,
   _config: SupervisorWatchConfig,
@@ -144,6 +191,11 @@ export function evaluateBuildFailures(
 
   for (const d of snapshot.terminal_dispatches) {
     if (d.status !== 'failed') continue;
+
+    // Harness-resilience: model/API/harness exhaustion is covered by the
+    // more specific `model_api_error` rule. Skip here to avoid duplicate
+    // alerts on the same dispatch.
+    if (d.failure_kind && MODEL_API_FAILURE_KINDS.has(d.failure_kind)) continue;
 
     // Only classify as build_failure when dispatch metadata indicates build/code work.
     const isBuild = d.promote || d.promotion_input != null ||
@@ -403,6 +455,9 @@ export function evaluateAllRules(
   return [
     ...evaluateStuckQueries(snapshot, config, now),
     ...evaluateAgentDown(snapshot, config, now),
+    // Harness-resilience: model_api_error runs before build_failure so the
+    // more specific infrastructure-failure signal wins on dedupe.
+    ...evaluateModelApiErrors(snapshot, config),
     ...evaluateBuildFailures(snapshot, config),
     ...evaluatePromotionFailures(snapshot, config),
     ...evaluateRepeatedNewsErrors(snapshot, config, now),

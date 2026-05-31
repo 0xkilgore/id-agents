@@ -80,7 +80,12 @@ export type FailureKind =
   | "provider_rate_limit_exhausted"
   | "scheduler_wedged"
   | "cancelled"
-  | "validation_failed";
+  | "validation_failed"
+  // Harness-resilience (Spec: 2026-05-29-harness-resilience-spec.md):
+  // structured terminal failures from the in-process harness retry loop.
+  | "model_api_error_exhausted"
+  | "harness_empty_result_exhausted"
+  | "harness_process_error_exhausted";
 
 export interface BounceRecord {
   ts: string;

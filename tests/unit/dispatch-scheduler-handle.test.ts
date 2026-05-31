@@ -382,3 +382,99 @@ describe("Spec 054 step 10: structured actor + causation defaults", () => {
     fetchSpy.mockRestore();
   });
 });
+
+// Harness-resilience (Spec 2026-05-29) — structured failure_kind on /agent-done.
+describe("handleAgentDone — structured failure_kind", () => {
+  it("persists a model_api_error_exhausted failure_kind when supplied", async () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch") as ReturnType<typeof vi.spyOn>;
+    fetchSpy.mockResolvedValue(
+      new Response(JSON.stringify({ query_id: "agent-q-mapi" }), { status: 200 }) as unknown as Response,
+    );
+    const handle = new SchedulerHandle({
+      adapter,
+      teamId: "team",
+      resolveTargetUrl: () => "http://localhost:9999",
+    });
+    const enq = await handle.enqueue({
+      to_agent: "worker",
+      from_actor: "manager",
+      message: "do the thing",
+    });
+    await handle.tick();
+
+    const final = await handle.handleAgentDone({
+      query_id: enq.query_id,
+      success: false,
+      failure_kind: "model_api_error_exhausted",
+      error: "transient model/API failure exhausted after 3 attempts: thinking_block_400",
+    });
+
+    expect(final?.status).toBe("failed");
+    expect(final?.failure_kind).toBe("model_api_error_exhausted");
+    expect(final?.failure_detail).toContain("thinking_block_400");
+    fetchSpy.mockRestore();
+  });
+
+  it("falls back to agent_error when no failure_kind is supplied", async () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch") as ReturnType<typeof vi.spyOn>;
+    fetchSpy.mockResolvedValue(
+      new Response(JSON.stringify({ query_id: "agent-q-no-kind" }), { status: 200 }) as unknown as Response,
+    );
+    const handle = new SchedulerHandle({
+      adapter,
+      teamId: "team",
+      resolveTargetUrl: () => "http://localhost:9999",
+    });
+    const enq = await handle.enqueue({
+      to_agent: "worker",
+      from_actor: "manager",
+      message: "do the thing",
+    });
+    await handle.tick();
+
+    const final = await handle.handleAgentDone({
+      query_id: enq.query_id,
+      success: false,
+      error: "anything",
+    });
+
+    expect(final?.status).toBe("failed");
+    expect(final?.failure_kind).toBe("agent_error");
+    fetchSpy.mockRestore();
+  });
+
+  it("repeated /agent-done on already-failed doc is a no-op", async () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch") as ReturnType<typeof vi.spyOn>;
+    fetchSpy.mockResolvedValue(
+      new Response(JSON.stringify({ query_id: "agent-q-noop" }), { status: 200 }) as unknown as Response,
+    );
+    const handle = new SchedulerHandle({
+      adapter,
+      teamId: "team",
+      resolveTargetUrl: () => "http://localhost:9999",
+    });
+    const enq = await handle.enqueue({
+      to_agent: "worker",
+      from_actor: "manager",
+      message: "do the thing",
+    });
+    await handle.tick();
+
+    await handle.handleAgentDone({
+      query_id: enq.query_id,
+      success: false,
+      failure_kind: "model_api_error_exhausted",
+      error: "first",
+    });
+    const second = await handle.handleAgentDone({
+      query_id: enq.query_id,
+      success: true,
+      result: { reply: "ignored" },
+    });
+    // Second call must not transition the terminal doc — first failure
+    // remains the persisted state.
+    expect(second?.status).toBe("failed");
+    expect(second?.failure_kind).toBe("model_api_error_exhausted");
+    fetchSpy.mockRestore();
+  });
+});

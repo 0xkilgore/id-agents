@@ -5,6 +5,7 @@ import {
   evaluateBuildFailures,
   evaluatePromotionFailures,
   evaluateRepeatedNewsErrors,
+  evaluateModelApiErrors,
   evaluateAllRules,
 } from '../../src/supervisor/rules.js';
 import { DEFAULT_CONFIG } from '../../src/supervisor/config.js';
@@ -330,6 +331,105 @@ describe('supervisor rules — repeated news errors', () => {
     const now = new Date('2026-05-28T12:00:00.000Z').getTime();
     const findings = evaluateRepeatedNewsErrors(snapshot, cfg(), now);
     expect(findings).toHaveLength(0);
+  });
+});
+
+describe('supervisor rules — model/API errors (Spec 2026-05-29)', () => {
+  function modelApiTerminal(overrides: Partial<TerminalDispatch> = {}): TerminalDispatch {
+    return {
+      dispatch_phid: 'phid:disp-mapi-1',
+      query_id: 'q-mapi-1',
+      to_agent: 'roger',
+      status: 'failed',
+      completed_at: '2026-05-29T12:00:00.000Z',
+      subject: 'spec audit',
+      failure_kind: 'model_api_error_exhausted',
+      failure_detail: 'thinking_block_400 exhausted after 3 attempts',
+      promote: false,
+      promotion_result: null,
+      promotion_input: null,
+      ...overrides,
+    };
+  }
+
+  it('emits model_api_error for model_api_error_exhausted failure', () => {
+    const snapshot = emptySnapshot({ terminal_dispatches: [modelApiTerminal()] });
+    const findings = evaluateModelApiErrors(snapshot, cfg());
+    expect(findings).toHaveLength(1);
+    expect(findings[0].kind).toBe('model_api_error');
+    expect(findings[0].dedupe_key).toBe('model_api_error:phid:disp-mapi-1');
+    expect(findings[0].severity).toBe('warning'); // non-build dispatch
+    expect(findings[0].confidence).toBe('high');
+    expect(findings[0].agent_id).toBe('roger');
+    expect(findings[0].query_id).toBe('q-mapi-1');
+  });
+
+  it('elevates severity to critical for build dispatch (promote=true)', () => {
+    const snapshot = emptySnapshot({
+      terminal_dispatches: [
+        modelApiTerminal({
+          promote: true,
+          promotion_input: { repo: '/r', branch: 'feat', base: 'main', remote: 'origin' },
+        }),
+      ],
+    });
+    const findings = evaluateModelApiErrors(snapshot, cfg());
+    expect(findings).toHaveLength(1);
+    expect(findings[0].severity).toBe('critical');
+  });
+
+  it('also matches harness_empty_result_exhausted and harness_process_error_exhausted', () => {
+    const snapshot = emptySnapshot({
+      terminal_dispatches: [
+        modelApiTerminal({ dispatch_phid: 'phid:e', failure_kind: 'harness_empty_result_exhausted' }),
+        modelApiTerminal({ dispatch_phid: 'phid:p', failure_kind: 'harness_process_error_exhausted' }),
+      ],
+    });
+    const findings = evaluateModelApiErrors(snapshot, cfg());
+    expect(findings).toHaveLength(2);
+    expect(findings.map((f) => f.dispatch_id).sort()).toEqual(['phid:e', 'phid:p']);
+  });
+
+  it('ignores semantic agent_error failures (those belong to build_failure)', () => {
+    const snapshot = emptySnapshot({
+      terminal_dispatches: [modelApiTerminal({ failure_kind: 'agent_error' })],
+    });
+    const findings = evaluateModelApiErrors(snapshot, cfg());
+    expect(findings).toHaveLength(0);
+  });
+
+  it('ignores non-failed dispatches', () => {
+    const snapshot = emptySnapshot({
+      terminal_dispatches: [modelApiTerminal({ status: 'done' })],
+    });
+    const findings = evaluateModelApiErrors(snapshot, cfg());
+    expect(findings).toHaveLength(0);
+  });
+
+  it('build_failure does NOT fire alongside model_api_error for the same dispatch', () => {
+    // A build dispatch that failed with model_api_error_exhausted: build_failure
+    // should be suppressed so we get one alert (model_api_error), not two.
+    const snapshot = emptySnapshot({
+      terminal_dispatches: [
+        modelApiTerminal({
+          subject: 'Build the API endpoint',
+          promote: true,
+          promotion_input: { repo: '/r', branch: 'feat', base: 'main', remote: 'origin' },
+        }),
+      ],
+    });
+    const buildFindings = evaluateBuildFailures(snapshot, cfg());
+    const modelFindings = evaluateModelApiErrors(snapshot, cfg());
+    expect(buildFindings).toHaveLength(0); // suppressed
+    expect(modelFindings).toHaveLength(1);
+  });
+
+  it('evidence detail includes failure_kind and failure_detail', () => {
+    const snapshot = emptySnapshot({ terminal_dispatches: [modelApiTerminal()] });
+    const findings = evaluateModelApiErrors(snapshot, cfg());
+    expect(findings[0].evidence[0].source).toBe('dispatch');
+    expect(findings[0].evidence[0].detail).toContain('model_api_error_exhausted');
+    expect(findings[0].evidence[0].detail).toContain('thinking_block_400 exhausted');
   });
 });
 

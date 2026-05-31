@@ -1,0 +1,176 @@
+// SPDX-License-Identifier: MIT
+//
+// Harness retry policy (Spec: 2026-05-29-harness-resilience-spec.md).
+//
+// Pure module: defaults + env parsing + backoff math + retry predicate.
+// The retry LOOP itself lives in src/claude-agent-server.ts. This file
+// is intentionally kept separate from `scheduler-service.ts` start-throttling
+// policy — the two layers serve different purposes:
+//   - scheduler retry: provider-throttle at /talk start time.
+//   - this policy:     in-flight harness-run failure inside the agent process.
+
+import type { HarnessFailureClassification } from './transient-errors.js';
+
+export interface HarnessRetryPolicy {
+  /** Total attempts (initial + retries). 1 disables retries. */
+  maxAttempts: number;
+  /** Initial backoff in ms; doubles each attempt. */
+  initialBackoffMs: number;
+  /** Cap on backoff in ms. */
+  maxBackoffMs: number;
+  /** ± fraction added/subtracted to the backoff (e.g. 0.2 = ±20%). */
+  jitterPct: number;
+  /** Retry harness_empty_result (capped by maxAttempts). */
+  retryEmptyResult: boolean;
+  /** Allow one-shot retry on bare non-zero CLI exit with no signal. */
+  retryUnknownProcessExitOnce: boolean;
+  /** Suppress session resume on retry (recommended; thinking-block 400 is session-corruption). */
+  clearSessionOnRetry: boolean;
+}
+
+export const HARNESS_RETRY_DEFAULTS: HarnessRetryPolicy = Object.freeze({
+  maxAttempts: 3,
+  initialBackoffMs: 5_000,
+  maxBackoffMs: 60_000,
+  jitterPct: 0.2,
+  retryEmptyResult: true,
+  retryUnknownProcessExitOnce: false,
+  clearSessionOnRetry: true,
+}) as HarnessRetryPolicy;
+
+const MAX_ATTEMPTS_CEILING = 10;
+
+export interface HarnessRetryEnv {
+  HARNESS_TRANSIENT_MAX_ATTEMPTS?: string;
+  HARNESS_TRANSIENT_BACKOFF_INITIAL_MS?: string;
+  HARNESS_TRANSIENT_BACKOFF_MAX_MS?: string;
+  HARNESS_TRANSIENT_JITTER_PCT?: string;
+  HARNESS_RETRY_EMPTY_RESULT?: string;
+  HARNESS_RETRY_UNKNOWN_PROCESS_EXIT_ONCE?: string;
+  HARNESS_CLEAR_SESSION_ON_TRANSIENT_RETRY?: string;
+}
+
+function parseInt0(raw: string | undefined, fallback: number, min: number, max: number): number {
+  if (raw === undefined || raw === '') return fallback;
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.min(Math.max(Math.floor(n), min), max);
+}
+
+function parseFloat0(raw: string | undefined, fallback: number, min: number, max: number): number {
+  if (raw === undefined || raw === '') return fallback;
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.min(Math.max(n, min), max);
+}
+
+function parseBool(raw: string | undefined, fallback: boolean): boolean {
+  if (raw === undefined) return fallback;
+  const v = raw.trim().toLowerCase();
+  if (v === 'true' || v === '1' || v === 'yes') return true;
+  if (v === 'false' || v === '0' || v === 'no') return false;
+  return fallback;
+}
+
+export function loadHarnessRetryPolicy(env: HarnessRetryEnv): HarnessRetryPolicy {
+  const maxAttempts = parseInt0(
+    env.HARNESS_TRANSIENT_MAX_ATTEMPTS,
+    HARNESS_RETRY_DEFAULTS.maxAttempts,
+    1,
+    MAX_ATTEMPTS_CEILING,
+  );
+  const maxBackoffMs = parseInt0(
+    env.HARNESS_TRANSIENT_BACKOFF_MAX_MS,
+    HARNESS_RETRY_DEFAULTS.maxBackoffMs,
+    0,
+    Number.MAX_SAFE_INTEGER,
+  );
+  let initialBackoffMs = parseInt0(
+    env.HARNESS_TRANSIENT_BACKOFF_INITIAL_MS,
+    HARNESS_RETRY_DEFAULTS.initialBackoffMs,
+    0,
+    Number.MAX_SAFE_INTEGER,
+  );
+  if (initialBackoffMs > maxBackoffMs) initialBackoffMs = maxBackoffMs;
+  const jitterPct = parseFloat0(
+    env.HARNESS_TRANSIENT_JITTER_PCT,
+    HARNESS_RETRY_DEFAULTS.jitterPct,
+    0,
+    1,
+  );
+  const retryEmptyResult = parseBool(
+    env.HARNESS_RETRY_EMPTY_RESULT,
+    HARNESS_RETRY_DEFAULTS.retryEmptyResult,
+  );
+  const retryUnknownProcessExitOnce = parseBool(
+    env.HARNESS_RETRY_UNKNOWN_PROCESS_EXIT_ONCE,
+    HARNESS_RETRY_DEFAULTS.retryUnknownProcessExitOnce,
+  );
+  const clearSessionOnRetry = parseBool(
+    env.HARNESS_CLEAR_SESSION_ON_TRANSIENT_RETRY,
+    HARNESS_RETRY_DEFAULTS.clearSessionOnRetry,
+  );
+  return {
+    maxAttempts,
+    initialBackoffMs,
+    maxBackoffMs,
+    jitterPct,
+    retryEmptyResult,
+    retryUnknownProcessExitOnce,
+    clearSessionOnRetry,
+  };
+}
+
+/**
+ * Compute next backoff in ms.
+ *  - Exponential: base * 2^(attemptNumber-1)
+ *  - Capped at maxBackoffMs
+ *  - Jittered by ±jitterPct using rng() in [0,1)
+ *
+ * attemptNumber is the *next* attempt number (1-based). The sleep happens
+ * *before* attempt N+1 with attemptNumber == N+1 conceptually, but the
+ * spec phrases it as "exponential backoff after attempt n"; either
+ * interpretation works since the test passes attemptNumber explicitly.
+ */
+export function computeBackoffMs(
+  policy: HarnessRetryPolicy,
+  attemptNumber: number,
+  rng: () => number = Math.random,
+): number {
+  if (policy.initialBackoffMs === 0) return 0;
+  const exp = Math.min(
+    policy.initialBackoffMs * Math.pow(2, Math.max(0, attemptNumber - 1)),
+    policy.maxBackoffMs,
+  );
+  if (policy.jitterPct === 0) return Math.round(exp);
+  const r = Math.min(Math.max(rng(), 0), 1);
+  // r in [0,1] → multiplier in [1 - jitter, 1 + jitter]
+  const multiplier = 1 + policy.jitterPct * (2 * r - 1);
+  return Math.round(Math.min(exp * multiplier, policy.maxBackoffMs));
+}
+
+/**
+ * Decide whether to retry given a classification result and the count of
+ * attempts already completed (1-based: a value of 1 means attempt #1 just
+ * finished and we may try attempt #2).
+ */
+export function shouldRetry(
+  classification: HarnessFailureClassification,
+  attemptsCompleted: number,
+  policy: HarnessRetryPolicy,
+): boolean {
+  if (attemptsCompleted >= policy.maxAttempts) return false;
+
+  // Empty-result: gated by retryEmptyResult toggle.
+  if (classification.kind === 'harness_empty_result') {
+    return policy.retryEmptyResult === true && classification.retryable === true;
+  }
+
+  // Bare non-zero exit: only allowed once, when explicitly enabled.
+  if (classification.kind === 'harness_process_exit') {
+    if (!policy.retryUnknownProcessExitOnce) return false;
+    return attemptsCompleted === 1;
+  }
+
+  return classification.retryable === true;
+}

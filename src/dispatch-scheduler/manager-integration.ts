@@ -24,6 +24,7 @@ import {
 import type {
   DispatchDoc,
   EnqueueInput,
+  FailureKind,
   Provider,
   Runtime,
 } from "./types.js";
@@ -332,6 +333,10 @@ export class SchedulerHandle {
     result?: Record<string, unknown> | null;
     success?: boolean;
     error?: string;
+    // Harness-resilience (Spec 2026-05-29): structured failure kind from
+    // the agent's terminal closeout. When omitted, /agent-done success:false
+    // falls back to "agent_error" for backwards compatibility.
+    failure_kind?: FailureKind;
     // Spec 054 §4.4: the manager attributes the completion to the
     // target agent + carries the causation chain forward. The scheduler
     // doesn't currently write doc-model ops, but it records the actor
@@ -376,7 +381,7 @@ export class SchedulerHandle {
     });
     if (args.success === false) {
       const r = await this.client.markFailed(doc.dispatch_phid, {
-        failure_kind: "agent_error",
+        failure_kind: args.failure_kind ?? "agent_error",
         detail: args.error ?? "agent reported failure",
       });
       return r.ok ? r.value : doc;

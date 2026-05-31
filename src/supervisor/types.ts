@@ -9,7 +9,12 @@ export type AlertKind =
   | 'build_failure'
   | 'promotion_failure'
   | 'news_repeated_error'
-  | 'protocol_gap';
+  | 'protocol_gap'
+  // Harness-resilience (Spec: 2026-05-29-harness-resilience-spec.md):
+  // raised when a dispatch fails with one of the structured model/API/harness
+  // failure kinds — distinguishes infra reliability from semantic build/test
+  // failures so it can fire on non-build dispatches too.
+  | 'model_api_error';
 
 export type AlertSeverity = 'info' | 'warning' | 'critical';
 

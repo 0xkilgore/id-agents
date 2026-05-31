@@ -10,6 +10,16 @@ import express from 'express';
 import fetch from 'node-fetch';
 import { createHarness, HarnessType, AgentHarness } from './harness/index.js';
 import { withInterAgentSkill } from './inter-agent-skill.js';
+import {
+  classifyHarnessFailure,
+  type HarnessFailureClassification,
+} from './harness/transient-errors.js';
+import {
+  loadHarnessRetryPolicy,
+  computeBackoffMs,
+  shouldRetry,
+  type HarnessRetryPolicy,
+} from './harness/retry-policy.js';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import fs from 'fs';
@@ -117,6 +127,24 @@ function isContentFilterError(errorMessage: string): boolean {
          msg.includes('blocked') ||
          msg.includes('filtering policy') ||
          msg.includes('output blocked');
+}
+
+/**
+ * Thrown by the in-process harness retry loop when transient failures are
+ * exhausted or a non-retryable failure was classified. Carries the
+ * classification so the failure handler can persist a structured
+ * failure_kind (Spec: 2026-05-29-harness-resilience-spec.md).
+ */
+export class ClassifiedHarnessError extends Error {
+  constructor(
+    message: string,
+    public readonly classification: HarnessFailureClassification,
+    public readonly attempts: number,
+    public readonly exhausted: boolean,
+  ) {
+    super(message);
+    this.name = 'ClassifiedHarnessError';
+  }
 }
 
 export interface NewsItem {
@@ -1523,6 +1551,49 @@ What would you like to do with this information?`;
   /**
    * Send a reply back to the sender agent via their /news endpoint
    */
+  /**
+   * Best-effort failure callback to the manager's /agent-done route so the
+   * dispatch closes with the structured failure_kind from the harness
+   * classifier. Returns silently on any failure — the caller catches and
+   * logs at debug level. (Spec: 2026-05-29-harness-resilience-spec.md)
+   */
+  private async postAgentDoneFailure(
+    queryId: string,
+    errorMessage: string,
+    classified: ClassifiedHarnessError,
+  ): Promise<void> {
+    const managerUrl = process.env.MANAGER_URL || 'http://id-agent-manager:4100';
+    const team = this.agentIdentity?.team || process.env.ID_TEAM || process.env.ID_PROJECT || '';
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    if (team) {
+      headers['X-Id-Team'] = team;
+      headers['X-Id-Project'] = team;
+    }
+    const body = {
+      query_id: queryId,
+      agent: this.agentName,
+      success: false,
+      failure_kind: classified.classification.terminalFailureKind,
+      error: errorMessage,
+      harness_error: {
+        runtime: this.harnessType,
+        classification: classified.classification.kind,
+        attempts: classified.attempts,
+        retryable: classified.classification.retryable,
+        exhausted: classified.exhausted,
+        last_error: classified.classification.redactedMessage,
+      },
+    };
+    const res = await fetch(`${managerUrl}/agent-done`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) {
+      throw new Error(`/agent-done returned ${res.status}`);
+    }
+  }
+
   private async sendReplyToSender(
     senderName: string,
     queryId: string,
@@ -1725,104 +1796,221 @@ ${prompt}`
       const pluginsEnv = process.env.ID_PLUGINS;
       const plugins = pluginsEnv ? JSON.parse(pluginsEnv) : undefined;
 
-      for await (const message of this.harness.run(enhancedPrompt, {
-        model: this.model,
-        allowedTools: this.allowedTools,
-        workingDirectory: this.workingDirectory,
-        resume: allowSessionResume ? sessionId : undefined,
-        plugins: plugins
-      })) {
-        // Capture session ID from system init or result message
-        if (message.session_id) {
-          sessionId = message.session_id;
-          if (allowSessionResume) {
-            this.lastSessionId = sessionId;  // Persist for future queries
-          }
+      // Harness-resilience retry loop (Spec: 2026-05-29). The loop wraps
+      // `this.harness.run(...)` with a conservative classifier + bounded
+      // backoff so transient model/API/runtime failures don't silently kill
+      // a dispatch. The harness modules stay as pure process adapters.
+      const retryPolicy: HarnessRetryPolicy = loadHarnessRetryPolicy(process.env as Record<string, string | undefined>);
+      let exhaustedFailure: { classification: HarnessFailureClassification; lastError: string; attempts: number } | null = null;
+      let attemptsCompleted = 0;
+      const runtimeDisplay = getRuntimeDisplayName(this.harnessType);
+      const emptyResultMessage = `${runtimeDisplay} produced an empty result`;
+
+      retry: for (let attempt = 1; attempt <= retryPolicy.maxAttempts; attempt++) {
+        attemptsCompleted = attempt;
+        const isRetry = attempt > 1;
+
+        // On retry attempts, optionally drop session resume to avoid reusing
+        // a corrupted latest-turn tail (the thinking-block 400 root cause).
+        const sessionForAttempt = (allowSessionResume && (!isRetry || !retryPolicy.clearSessionOnRetry))
+          ? sessionId
+          : undefined;
+
+        if (isRetry) {
+          console.log(`${logTime()} [Agent] 🔁 Retry attempt ${attempt}/${retryPolicy.maxAttempts} for query ${queryId}${sessionForAttempt ? '' : ' (fresh session)'}`);
         }
 
-        // Log and broadcast thinking
-        if (message.type === 'thinking' && message.content) {
-          console.log(`  💭 ${message.content}`);
-          messages.push(`[Thinking] ${message.content}`);
-          // Broadcast for /watch subscribers (fire and forget)
-          this.addNews('query.thinking', message.content, {
-            query_id: queryId,
-            content: message.content
-          }).catch(() => {});
-        }
+        let attemptResult = '';
+        let attemptError: string | null = null;
+        let attemptSessionId: string | undefined = undefined;
 
-        // Log and broadcast tool use
-        if (message.type === 'tool_use') {
-          const toolName = (message as any).tool_name || 'unknown';
-          const toolInput = (message as any).input;
-          console.log(`  🔧 Tool: ${toolName}`);
-          messages.push(`[Tool] ${toolName}`);
-          // Broadcast for /watch subscribers (fire and forget)
-          this.addNews('query.tool_use', `Using tool: ${toolName}`, {
-            query_id: queryId,
-            tool_name: toolName,
-            input: toolInput
-          }).catch(() => {});
-        }
-
-        // Log and broadcast progress
-        if (message.type === 'progress' && message.content) {
-          console.log(`  ⏳ ${message.content}`);
-          messages.push(`[Progress] ${message.content}`);
-          // Broadcast for /watch subscribers (fire and forget)
-          this.addNews('query.progress', message.content, {
-            query_id: queryId,
-            content: message.content
-          }).catch(() => {});
-        }
-
-        // If the agent surfaced an error message, capture it and fail the query with that exact message.
-        // This prevents "empty result" errors from losing the underlying stderr/details.
-        if (message.type === 'error' && message.content) {
-          const errorContent = message.content;
-          const apiHelp = getApiErrorHelp(errorContent, this.harnessType);
-
-          if (apiHelp.isApiError) {
-            console.error(`\n${apiHelp.helpMessage}\n`);
-          } else {
-            console.error(`  ❌ ${getRuntimeDisplayName(this.harnessType)} error: ${errorContent}`);
-          }
-
-          messages.push(`[Error] ${errorContent}`);
-          throw new Error(errorContent);
-        }
-
-        // Capture final result (do not require truthy; empty-string would otherwise get dropped).
-        // Also handle structured results (arrays/objects) by stringifying them.
-        if ('result' in message) {
-          const r = (message as any).result;
-          if (typeof r === 'string') result = r;
-          else if (r !== undefined && r !== null) result = JSON.stringify(r);
-        }
-      }
-
-      // Never treat "empty result" as success; bubble it up as a failure so it's debuggable.
-      if (!result || !result.trim() || result.trim() === `No response from ${getRuntimeDisplayName(this.harnessType)}`) {
-        throw new Error(`${getRuntimeDisplayName(this.harnessType)} produced an empty result`);
-      }
-
-      // If the result is actually a raw runtime JSON payload (often on errors), extract/throw cleanly.
-      const trimmed = (result || '').trim();
-      if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
         try {
-          const parsed = JSON.parse(trimmed);
-          if (parsed?.is_error) {
-            const msg = parsed.result || parsed.error || `Unknown error from ${getRuntimeDisplayName(this.harnessType)}`;
-            throw new Error(msg);
+          for await (const message of this.harness.run(enhancedPrompt, {
+            model: this.model,
+            allowedTools: this.allowedTools,
+            workingDirectory: this.workingDirectory,
+            resume: sessionForAttempt,
+            plugins: plugins
+          })) {
+            // Capture session ID from system init or result message.
+            // NOTE: do NOT persist to this.lastSessionId mid-attempt — we
+            // only commit a session once an attempt actually succeeds, so
+            // a failed thinking-block attempt does not poison the next
+            // query's session resume.
+            if (message.session_id) {
+              attemptSessionId = message.session_id;
+            }
+
+            // Log and broadcast thinking
+            if (message.type === 'thinking' && message.content) {
+              console.log(`  💭 ${message.content}`);
+              messages.push(`[Thinking] ${message.content}`);
+              this.addNews('query.thinking', message.content, {
+                query_id: queryId,
+                content: message.content,
+                attempt,
+              }).catch(() => {});
+            }
+
+            // Log and broadcast tool use
+            if (message.type === 'tool_use') {
+              const toolName = (message as any).tool_name || 'unknown';
+              const toolInput = (message as any).input;
+              console.log(`  🔧 Tool: ${toolName}`);
+              messages.push(`[Tool] ${toolName}`);
+              this.addNews('query.tool_use', `Using tool: ${toolName}`, {
+                query_id: queryId,
+                tool_name: toolName,
+                input: toolInput,
+                attempt,
+              }).catch(() => {});
+            }
+
+            // Log and broadcast progress
+            if (message.type === 'progress' && message.content) {
+              console.log(`  ⏳ ${message.content}`);
+              messages.push(`[Progress] ${message.content}`);
+              this.addNews('query.progress', message.content, {
+                query_id: queryId,
+                content: message.content,
+                attempt,
+              }).catch(() => {});
+            }
+
+            // If the agent surfaced an error message, capture it and break
+            // out of this attempt's stream. We classify below and decide
+            // whether to retry or surface the failure.
+            if (message.type === 'error' && message.content) {
+              const errorContent = message.content;
+              const apiHelp = getApiErrorHelp(errorContent, this.harnessType);
+              if (apiHelp.isApiError) {
+                console.error(`\n${apiHelp.helpMessage}\n`);
+              } else {
+                console.error(`  ❌ ${runtimeDisplay} error: ${errorContent}`);
+              }
+              messages.push(`[Error] ${errorContent}`);
+              attemptError = errorContent;
+              break;
+            }
+
+            // Capture final result (do not require truthy; empty-string would otherwise get dropped).
+            if ('result' in message) {
+              const r = (message as any).result;
+              if (typeof r === 'string') attemptResult = r;
+              else if (r !== undefined && r !== null) attemptResult = JSON.stringify(r);
+            }
           }
-          if (typeof parsed?.result === 'string' && parsed.result.trim()) {
-            result = parsed.result;
-          } else if (typeof parsed?.text === 'string' && parsed.text.trim()) {
-            result = parsed.text;
-          }
-        } catch (e: any) {
-          if (e?.message) throw e;
+        } catch (err: any) {
+          // Spawn / generator exception — treat as an attempt error.
+          attemptError = err?.message ?? String(err);
         }
+
+        // Unwrap raw runtime JSON result that wraps an error (is_error: true).
+        if (!attemptError && attemptResult) {
+          const trimmed = attemptResult.trim();
+          if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
+            try {
+              const parsed = JSON.parse(trimmed);
+              if (parsed?.is_error) {
+                attemptError = parsed.result || parsed.error || `Unknown error from ${runtimeDisplay}`;
+                attemptResult = '';
+              } else if (typeof parsed?.result === 'string' && parsed.result.trim()) {
+                attemptResult = parsed.result;
+              } else if (typeof parsed?.text === 'string' && parsed.text.trim()) {
+                attemptResult = parsed.text;
+              }
+            } catch {
+              // not JSON or malformed JSON — keep attemptResult as-is
+            }
+          }
+        }
+
+        // If the attempt produced an error, classify and maybe retry.
+        if (attemptError) {
+          const classification = classifyHarnessFailure({
+            message: attemptError,
+            source: 'harness_error_message',
+            runtime: this.harnessType,
+          });
+          // Existing behavior: content-filter errors clear the session.
+          if (classification.kind === 'content_filter') {
+            this.lastSessionId = undefined;
+          }
+          if (shouldRetry(classification, attempt, retryPolicy)) {
+            const backoffMs = computeBackoffMs(retryPolicy, attempt);
+            await this.addNews(
+              'query.retrying',
+              `Query ${queryId} retrying after transient ${classification.kind} (attempt ${attempt}/${retryPolicy.maxAttempts})`,
+              {
+                query_id: queryId,
+                attempt,
+                max_attempts: retryPolicy.maxAttempts,
+                kind: classification.kind,
+                backoff_ms: backoffMs,
+                redacted_error: classification.redactedMessage,
+              },
+            ).catch(() => {});
+            if (retryPolicy.clearSessionOnRetry) {
+              this.lastSessionId = undefined;
+              sessionId = undefined;
+            }
+            await new Promise((r) => setTimeout(r, backoffMs));
+            continue retry;
+          }
+          exhaustedFailure = { classification, lastError: attemptError, attempts: attempt };
+          break retry;
+        }
+
+        // If the attempt completed with no usable result, classify empty-result and maybe retry.
+        if (!attemptResult || !attemptResult.trim() || attemptResult.trim() === `No response from ${runtimeDisplay}`) {
+          const classification = classifyHarnessFailure({
+            message: emptyResultMessage,
+            source: 'empty_result',
+            runtime: this.harnessType,
+          });
+          if (shouldRetry(classification, attempt, retryPolicy)) {
+            const backoffMs = computeBackoffMs(retryPolicy, attempt);
+            await this.addNews(
+              'query.retrying',
+              `Query ${queryId} retrying after empty result (attempt ${attempt}/${retryPolicy.maxAttempts})`,
+              {
+                query_id: queryId,
+                attempt,
+                max_attempts: retryPolicy.maxAttempts,
+                kind: classification.kind,
+                backoff_ms: backoffMs,
+              },
+            ).catch(() => {});
+            if (retryPolicy.clearSessionOnRetry) {
+              this.lastSessionId = undefined;
+              sessionId = undefined;
+            }
+            await new Promise((r) => setTimeout(r, backoffMs));
+            continue retry;
+          }
+          exhaustedFailure = { classification, lastError: emptyResultMessage, attempts: attempt };
+          break retry;
+        }
+
+        // Success — commit the session and the result.
+        result = attemptResult;
+        if (attemptSessionId) {
+          sessionId = attemptSessionId;
+          if (allowSessionResume) {
+            this.lastSessionId = sessionId;
+          }
+        }
+        break retry;
+      }
+
+      // Exhausted or non-retryable failure: throw classified error.
+      if (exhaustedFailure) {
+        throw new ClassifiedHarnessError(
+          exhaustedFailure.lastError,
+          exhaustedFailure.classification,
+          exhaustedFailure.attempts,
+          exhaustedFailure.attempts >= retryPolicy.maxAttempts && exhaustedFailure.classification.retryable,
+        );
       }
 
       // Mark as completed
@@ -1881,6 +2069,21 @@ ${prompt}`
         this.lastSessionId = undefined;
       }
 
+      // Harness-resilience: if this is a ClassifiedHarnessError, surface
+      // the structured failure to news and to the manager's /agent-done
+      // route so the dispatch closes with the right failure_kind.
+      const classified = error instanceof ClassifiedHarnessError ? error : null;
+      const harnessErrorData = classified
+        ? {
+            runtime: this.harnessType,
+            classification: classified.classification.kind,
+            attempts: classified.attempts,
+            retryable: classified.classification.retryable,
+            exhausted: classified.exhausted,
+            last_error: classified.classification.redactedMessage,
+          }
+        : undefined;
+
       // Post to news with helpful message if API error
       const newsMessage = apiHelp.isApiError
         ? `Query ${queryId} failed (API issue): ${query.error}`
@@ -1891,8 +2094,21 @@ ${prompt}`
         error: query.error,
         is_api_error: apiHelp.isApiError,
         help: apiHelp.isApiError ? apiHelp.helpMessage : undefined,
-        session_cleared: isContentFilterError(query.error)
+        session_cleared: isContentFilterError(query.error),
+        harness_error: harnessErrorData,
+        failure_kind: classified?.classification.terminalFailureKind,
       });
+
+      // Best-effort: tell the manager's /agent-done that this dispatch
+      // terminated with a structured failure_kind. Routing through
+      // sendReplyToSender alone cannot preserve the typed failure_kind,
+      // so we make the close explicit here. Failures here are non-fatal —
+      // the legacy reply path still runs below.
+      if (classified) {
+        this.postAgentDoneFailure(queryId, query.error, classified).catch((err) => {
+          console.warn(`${logTime()} [Agent] /agent-done failure callback failed (non-fatal): ${err instanceof Error ? err.message : String(err)}`);
+        });
+      }
 
       if (apiHelp.isApiError) {
         console.error(`[Agent] ❌ Query ${queryId} failed (API issue)`);

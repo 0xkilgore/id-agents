@@ -79,6 +79,7 @@ import {
   parsePromotionEnforcement,
   validatePromotionMetadata,
   type PromotionAgentDone,
+  type FailureKind,
 } from './dispatch-scheduler/types.js';
 import type { SqliteAdapter } from './db/sqlite-adapter.js';
 import { heartbeatToSchedule, calendarToSchedule, validateIntervalSeconds, HEARTBEAT_GENERIC_MESSAGE } from './scheduling/schedule-config.js';
@@ -2329,6 +2330,12 @@ export class AgentManagerDb {
           promotion?: unknown;
           mode?: unknown;
           agent?: unknown;
+          // Harness-resilience (Spec 2026-05-29): structured terminal
+          // failure on success:false. failure_kind must be one of the
+          // canonical FailureKind values; error is a short prose detail.
+          failure_kind?: unknown;
+          error?: unknown;
+          harness_error?: unknown;
         };
 
         const dispatchIdRaw =
@@ -2372,7 +2379,14 @@ export class AgentManagerDb {
             ? (body.promotion as PromotionAgentDone)
             : null;
 
-        const validation = validatePromotionMetadata(doc, promotion, mode);
+        const success = body.success !== false;
+
+        // Harness-resilience (Spec 2026-05-29): failed dispatches do NOT
+        // need promotion metadata — promotion only applies to successful
+        // build completions. Validate only on success.
+        const validation = success
+          ? validatePromotionMetadata(doc, promotion, mode)
+          : ({ ok: true } as const);
 
         if (!validation.ok) {
           // enforce mode rejection.
@@ -2396,8 +2410,30 @@ export class AgentManagerDb {
           }
         }
 
+        // Map structured failure metadata when success === false. Whitelist
+        // the failure_kind so callers can't inject arbitrary strings.
+        const ALLOWED_FAILURE_KINDS = new Set([
+          'agent_error',
+          'provider_rate_limit_exhausted',
+          'scheduler_wedged',
+          'cancelled',
+          'validation_failed',
+          'model_api_error_exhausted',
+          'harness_empty_result_exhausted',
+          'harness_process_error_exhausted',
+        ] as const);
+        const failureKind = typeof body.failure_kind === 'string' && ALLOWED_FAILURE_KINDS.has(body.failure_kind as any)
+          ? (body.failure_kind as FailureKind)
+          : undefined;
+        const errorDetail = (() => {
+          if (typeof body.error === 'string' && body.error.trim()) return body.error;
+          if (body.harness_error && typeof body.harness_error === 'object') {
+            try { return JSON.stringify(body.harness_error); } catch { return undefined; }
+          }
+          return undefined;
+        })();
+
         // Mark the dispatch done.
-        const success = body.success !== false;
         try {
           await this.dispatchScheduler.handleAgentDone({
             query_id: doc.query_id,
@@ -2406,6 +2442,8 @@ export class AgentManagerDb {
                 ? (body.result as Record<string, unknown>)
                 : null,
             success,
+            failure_kind: failureKind,
+            error: errorDetail,
           });
         } catch (err) {
           this.managerLog(
@@ -2428,7 +2466,7 @@ export class AgentManagerDb {
           dispatch_id: doc.dispatch_phid,
           state: success ? 'done' : 'failed',
           mode,
-          promotion_warning: validation.warning ?? null,
+          promotion_warning: ('warning' in validation ? validation.warning : null) ?? null,
         });
       } catch (err) {
         return res.status(500).json({
