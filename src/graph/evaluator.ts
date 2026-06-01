@@ -78,9 +78,52 @@ function evaluatePredicate(
       return evaluateTaskDone(predicate.task_phid, taskStatusMap);
 
     case 'operator_approval':
-      // Placeholder — not wired to UI yet.
-      return { status: 'not_ready', reason: `Predicate operator_approval not yet implemented (approval_id: ${predicate.approval_id}).` };
+      return evaluateOperatorApproval(predicate.approval_id, upstreamMap);
   }
+}
+
+/**
+ * N1.5 — operator_approval predicate (Spec: 2026-05-31-n1-5-spec.md).
+ *
+ * Approval identity: `approval_id === approval node_id`. Approval state
+ * is the approval node's `state` column — no separate approval table.
+ *
+ *  - `ready` when the approval node exists and `state === 'done'`.
+ *  - `blocked` (blocked_on_chris) when the approval node exists and is
+ *    not done. Rejection semantics (failed/cancelled/skipped) are a
+ *    later slice; for now they read the same as "still pending" — the
+ *    downstream stays blocked with an explicit reason.
+ *  - `not_ready` when the approval node is missing from the upstream
+ *    map (reason includes the approval id so operators can diagnose).
+ */
+function evaluateOperatorApproval(
+  approvalId: string,
+  upstreamMap: Map<string, UpstreamInfo>,
+): ReadinessResult {
+  const upstream = upstreamMap.get(approvalId);
+  if (!upstream) {
+    return {
+      status: 'not_ready',
+      reason: `Approval node ${approvalId} not found in graph upstream map.`,
+    };
+  }
+  const state = upstream.node.state;
+  if (state === 'done') {
+    return {
+      status: 'ready',
+      reason: `Operator approval ${approvalId} granted (node done).`,
+    };
+  }
+  const blocker: BlockerSummary = {
+    kind: 'blocked_on_chris',
+    source_node_id: approvalId,
+    question: `Waiting for operator approval: ${upstream.node.title}`,
+  };
+  return {
+    status: 'blocked',
+    reason: `Approval ${approvalId} in state ${state}; waiting for operator approval.`,
+    blocker,
+  };
 }
 
 /**

@@ -5,7 +5,7 @@ import type { DbAdapter } from '../db/db-adapter.js';
 import type { DependencyPredicate, EnqueueFn, GraphDetail } from './types.js';
 import {
   createGraph, getGraph, listGraphs,
-  addNode, getNodes,
+  addNode, getNodes, getNode, updateNodeState,
   addEdge, getEdges, getIncomingEdges, getOutgoingEdges,
   getRecentDecisions,
   updateGraphStatus,
@@ -181,6 +181,77 @@ export function mountGraphRoutes(app: Application, adapter: DbAdapter, options?:
       res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
     }
   });
+
+  // ── POST /graphs/:graph_id/approvals/:approval_id/approve ──
+  //
+  // N1.5 operator_approval gate (Spec 2026-05-31). Marks an approval
+  // node `done` and re-evaluates the graph. Best-effort on re-eval:
+  // approval write is durable even if evaluation throws.
+  app.post(
+    '/graphs/:graph_id/approvals/:approval_id/approve',
+    async (req: Request<{ graph_id: string; approval_id: string }>, res: Response) => {
+      try {
+        const graph = await getGraph(adapter, req.params.graph_id);
+        if (!graph) {
+          res.status(404).json({ error: 'Graph not found' });
+          return;
+        }
+        const node = await getNode(adapter, req.params.approval_id);
+        // Cross-graph guard: an approval node from a different graph must NOT
+        // be approvable through this graph's route.
+        if (!node || node.graph_id !== graph.graph_id) {
+          res.status(404).json({ error: 'approval node not found in graph' });
+          return;
+        }
+        if (node.kind !== 'approval') {
+          res.status(400).json({
+            error: `node ${node.node_id} is not an approval node (kind=${node.kind})`,
+          });
+          return;
+        }
+
+        // Idempotent write: setting state=done when already done is a
+        // no-op at the readiness level; the runner skips re-transition
+        // because the input revision is unchanged.
+        const wasAlreadyDone = node.state === 'done';
+        if (!wasAlreadyDone) {
+          await updateNodeState(adapter, node.node_id, 'done');
+        }
+
+        // Best-effort re-evaluation. The spec requires that an
+        // evaluation error MUST NOT roll back the approval write.
+        let evaluation: {
+          attempted: boolean;
+          evaluated?: number;
+          transitioned?: number;
+          graph_status?: string;
+          error?: string;
+        };
+        try {
+          const r = await evaluateGraph(adapter, graph.graph_id);
+          evaluation = {
+            attempted: true,
+            evaluated: r.evaluated,
+            transitioned: r.transitioned,
+            graph_status: r.graph_status,
+          };
+        } catch (err) {
+          // Log via console.warn so the manager log surfaces it.
+          const msg = err instanceof Error ? err.message : String(err);
+          console.warn(`[graph-approval] evaluate failed after approving ${node.node_id}: ${msg}`);
+          evaluation = { attempted: true, error: msg };
+        }
+
+        res.json({
+          ok: true,
+          approval: { node_id: node.node_id, state: 'done' },
+          evaluation,
+        });
+      } catch (err) {
+        res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+      }
+    },
+  );
 
   // ── POST /graphs/dispatch-plan — N1.2 dispatch-plan enqueue ──
 
