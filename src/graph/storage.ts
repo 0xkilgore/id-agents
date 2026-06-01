@@ -346,6 +346,20 @@ export async function getGraphIdsByDispatchId(adapter: DbAdapter, dispatchId: st
   return rows.map(r => r.graph_id);
 }
 
+// ── N1.4 Task lifecycle-bridge lookup ──
+//
+// Mirror of getGraphIdsByDispatchId for the task lifecycle bridge: find
+// distinct graphs that contain a task-kind node linked to the given
+// `tasks.id`. SELECT DISTINCT guarantees a graph that references the
+// same task from multiple nodes is only re-evaluated once.
+export async function getGraphIdsByTaskId(adapter: DbAdapter, taskId: string): Promise<string[]> {
+  const { rows } = await adapter.query<{ graph_id: string }>(
+    'SELECT DISTINCT graph_id FROM dispatch_graph_node WHERE task_phid = $1',
+    [taskId],
+  );
+  return rows.map(r => r.graph_id);
+}
+
 // ── Scheduler readiness check ──
 
 export async function isDispatchGraphBlocked(adapter: DbAdapter, dispatchId: string): Promise<boolean> {

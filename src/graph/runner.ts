@@ -8,7 +8,7 @@ import {
   getGraph, getNodes, getEdges, getIncomingEdges,
   updateNodeState, updateGraphStatus, appendDecision,
 } from './storage.js';
-import { evaluateNodeReadiness } from './evaluator.js';
+import { evaluateNodeReadiness, type TaskStatusMap } from './evaluator.js';
 
 interface DispatchState {
   dispatch_phid: string;
@@ -40,6 +40,15 @@ async function getDispatchState(adapter: DbAdapter, dispatchId: string): Promise
   };
 }
 
+// N1.4 — single-task status lookup against the `tasks` table.
+async function getTaskStatus(adapter: DbAdapter, taskId: string): Promise<string | null> {
+  const { rows } = await adapter.query<{ status: string }>(
+    'SELECT status FROM tasks WHERE id = $1',
+    [taskId],
+  );
+  return rows[0]?.status ?? null;
+}
+
 function computeInputRevision(nodeId: string, upstreamStates: string[]): string {
   const input = `${nodeId}:${upstreamStates.sort().join(',')}`;
   return createHash('sha256').update(input).digest('hex').slice(0, 16);
@@ -62,6 +71,31 @@ export async function evaluateGraph(adapter: DbAdapter, graphId: string): Promis
 
   const nodes = await getNodes(adapter, graphId);
   const edges = await getEdges(adapter, graphId);
+
+  // N1.4: collect distinct task_phids referenced by either:
+  //   - a task-kind node carrying `task_phid` (for node-state projection)
+  //   - an edge with a `task_done` predicate (for evaluator readiness)
+  // We load each task's status once, build a TaskStatusMap, and pass it
+  // to the pure evaluator.
+  const taskPhids = new Set<string>();
+  for (const node of nodes) {
+    if (node.task_phid) taskPhids.add(node.task_phid);
+  }
+  for (const edge of edges) {
+    try {
+      const predicate = JSON.parse(edge.predicate_json);
+      if (predicate?.type === 'task_done' && typeof predicate.task_phid === 'string') {
+        taskPhids.add(predicate.task_phid);
+      }
+    } catch {
+      // Malformed predicate JSON — skip; evaluator will surface a not_ready.
+    }
+  }
+  const taskStatusMap: TaskStatusMap = new Map();
+  for (const phid of taskPhids) {
+    const status = await getTaskStatus(adapter, phid);
+    if (status !== null) taskStatusMap.set(phid, status);
+  }
 
   // Build upstream info map.
   const upstreamInfoMap = new Map<string, {
@@ -109,6 +143,30 @@ export async function evaluateGraph(adapter: DbAdapter, graphId: string): Promis
       }
     }
 
+    // N1.4 — sync task-kind nodes from the tasks table (conservative).
+    // Spec:
+    //   task `done`  -> node `done`
+    //   task `doing` -> node `in_flight` (only if not already terminal)
+    //   task `todo`  -> node stays/returns to `pending_dependencies`
+    //                   unless already queued/in_flight for another reason
+    if (node.kind === 'task' && node.task_phid) {
+      const taskStatus = taskStatusMap.get(node.task_phid);
+      if (taskStatus === 'done' && node.state !== 'done') {
+        await updateNodeState(adapter, node.node_id, 'done');
+        node.state = 'done';
+      } else if (
+        taskStatus === 'doing' &&
+        node.state !== 'in_flight' &&
+        node.state !== 'done' &&
+        node.state !== 'failed' &&
+        node.state !== 'cancelled' &&
+        node.state !== 'skipped'
+      ) {
+        await updateNodeState(adapter, node.node_id, 'in_flight');
+        node.state = 'in_flight';
+      }
+    }
+
     upstreamInfoMap.set(node.node_id, {
       node,
       dispatch_status: dispatchStatus,
@@ -128,12 +186,24 @@ export async function evaluateGraph(adapter: DbAdapter, graphId: string): Promis
     if (node.state !== 'pending_dependencies' && node.state !== 'ready') continue;
 
     const incoming = await getIncomingEdges(adapter, node.node_id);
-    const readiness = evaluateNodeReadiness(node, incoming, upstreamInfoMap);
+    const readiness = evaluateNodeReadiness(node, incoming, upstreamInfoMap, taskStatusMap);
 
-    // Build input revision from upstream states.
+    // Build input revision from upstream states. For task_done predicates
+    // we also fold in the live task status so `todo -> done` changes the
+    // revision and the new decision is appendable (Spec N1.4: include
+    // task status in the input revision for task_done dependencies).
     const upstreamStates = incoming.map(e => {
       const info = upstreamInfoMap.get(e.from_node_id);
-      return `${e.from_node_id}:${info?.node.state ?? 'unknown'}:${info?.dispatch_status ?? 'unknown'}`;
+      let extra = '';
+      try {
+        const predicate = JSON.parse(e.predicate_json);
+        if (predicate?.type === 'task_done' && typeof predicate.task_phid === 'string') {
+          extra = `:task=${predicate.task_phid}:${taskStatusMap.get(predicate.task_phid) ?? 'missing'}`;
+        }
+      } catch {
+        // ignore malformed predicate JSON
+      }
+      return `${e.from_node_id}:${info?.node.state ?? 'unknown'}:${info?.dispatch_status ?? 'unknown'}${extra}`;
     });
     const inputRevision = computeInputRevision(node.node_id, upstreamStates);
     const idempotencyKey = `${graphId}:${node.node_id}:${inputRevision}`;

@@ -460,6 +460,36 @@ export class AgentManagerDb {
     });
   }
 
+  /**
+   * N1.4: best-effort, non-blocking graph re-evaluation after a task
+   * lifecycle mutation (currently only `task_done`). Same safety bar as
+   * the N1.3 dispatch bridge — errors are logged, never thrown, and
+   * MUST NOT change the HTTP status of /tasks/:ref/done.
+   */
+  private evaluateGraphsForTaskBestEffort(
+    taskId: string,
+    trigger: 'task_done',
+  ): void {
+    import('./graph/lifecycle-bridge.js').then(({ evaluateGraphsForTask }) => {
+      const logger = {
+        warn: (event: string, data: Record<string, unknown>) =>
+          this.managerLog(`[graph-bridge] WARN ${event}: ${JSON.stringify(data)}`),
+        info: (event: string, data: Record<string, unknown>) =>
+          this.managerLog(`[graph-bridge] ${event}: ${JSON.stringify(data)}`),
+      };
+      evaluateGraphsForTask(this.db.adapter, taskId, trigger, { logger })
+        .catch((err: unknown) => {
+          this.managerLog(
+            `[graph-bridge] unhandled error for task ${taskId}/${trigger}: ${err instanceof Error ? err.message : String(err)}`,
+          );
+        });
+    }).catch((err: unknown) => {
+      this.managerLog(
+        `[graph-bridge] import failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    });
+  }
+
   constructor(
     baseWorkDir: string = '/workspace',
     db: Db,
@@ -5238,6 +5268,12 @@ export class AgentManagerDb {
           actorAgentId: callerAgent?.id ?? updated!.owner ?? null,
           occurredAt: completedAt,
         });
+        // N1.4: best-effort graph re-evaluation. Runs AFTER the task is
+        // marked done, the task:completed event has been emitted, and
+        // linked checkins have been auto-closed — keeps existing ordering
+        // for those consumers. Bridge errors are logged and never change
+        // the HTTP status of this endpoint.
+        this.evaluateGraphsForTaskBestEffort(updated!.id, 'task_done');
         res.json({ ok: true, task: await this.buildTaskResult(updated!, teamId) });
       } catch (err: any) {
         console.error('[Manager] Error in POST /tasks/:ref/done:', err);

@@ -19,6 +19,15 @@ interface UpstreamInfo {
 }
 
 /**
+ * N1.4: task statuses keyed by task_phid. The runner builds this from
+ * the `tasks` table for any task_phids referenced by graph nodes or
+ * task_done predicates, then passes it to the pure evaluator. Missing
+ * keys mean the task is not present; the predicate treats that as
+ * `not_ready` rather than throwing.
+ */
+export type TaskStatusMap = Map<string, string>;
+
+/**
  * Pure evaluator: given a node and its upstream dependencies,
  * determine whether the node is ready to be queued.
  */
@@ -26,6 +35,7 @@ export function evaluateNodeReadiness(
   node: NodeRow,
   incomingEdges: EdgeRow[],
   upstreamMap: Map<string, UpstreamInfo>,
+  taskStatusMap: TaskStatusMap = new Map(),
 ): ReadinessResult {
   // Nodes already past pending_dependencies don't need re-evaluation.
   const terminalForEval: NodeState[] = ['queued', 'in_flight', 'done', 'failed', 'cancelled', 'skipped'];
@@ -41,7 +51,7 @@ export function evaluateNodeReadiness(
   // Evaluate each predicate.
   for (const edge of incomingEdges) {
     const predicate: DependencyPredicate = JSON.parse(edge.predicate_json);
-    const result = evaluatePredicate(predicate, upstreamMap);
+    const result = evaluatePredicate(predicate, upstreamMap, taskStatusMap);
     if (result.status !== 'ready') return result;
   }
 
@@ -51,6 +61,7 @@ export function evaluateNodeReadiness(
 function evaluatePredicate(
   predicate: DependencyPredicate,
   upstreamMap: Map<string, UpstreamInfo>,
+  taskStatusMap: TaskStatusMap,
 ): ReadinessResult {
   switch (predicate.type) {
     case 'dispatch_success':
@@ -64,13 +75,40 @@ function evaluatePredicate(
       return { status: 'not_ready', reason: `Predicate dispatch_verification_passed not yet implemented.` };
 
     case 'task_done':
-      // Future slice — type exists, evaluation not implemented.
-      return { status: 'not_ready', reason: `Predicate task_done not yet implemented.` };
+      return evaluateTaskDone(predicate.task_phid, taskStatusMap);
 
     case 'operator_approval':
       // Placeholder — not wired to UI yet.
       return { status: 'not_ready', reason: `Predicate operator_approval not yet implemented (approval_id: ${predicate.approval_id}).` };
   }
+}
+
+/**
+ * N1.4 — task_done predicate (Spec: 2026-05-31-n1-4-task-done-bridge-spec.md).
+ * - `ready` when `tasks.status === 'done'`.
+ * - `not_ready` when the task exists and is `todo` or `doing`.
+ * - `not_ready` when the task is missing (reason includes the task id).
+ * Tasks have no failed terminal state in this slice, so there is no
+ * `blocked_on_failure` branch.
+ */
+function evaluateTaskDone(
+  taskPhid: string,
+  taskStatusMap: TaskStatusMap,
+): ReadinessResult {
+  const status = taskStatusMap.get(taskPhid);
+  if (status === undefined) {
+    return {
+      status: 'not_ready',
+      reason: `Upstream task ${taskPhid} not found in tasks table.`,
+    };
+  }
+  if (status === 'done') {
+    return { status: 'ready', reason: `Upstream task ${taskPhid} is done.` };
+  }
+  return {
+    status: 'not_ready',
+    reason: `Upstream task ${taskPhid} still in progress (status: ${status}).`,
+  };
 }
 
 function evaluateDispatchSuccess(
