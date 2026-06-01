@@ -263,6 +263,15 @@ export class SqliteDispatchReactor {
       eligibleWhere += ` AND runtime = ?`;
       eligibleParams.push(filter.runtime);
     }
+    // Usage Meter (Spec 2026-05-31): exclude budget-paused agents.
+    // The scheduler builds this list from the usage gate in ENFORCE mode
+    // only (warn mode passes an empty list). Docs for excluded agents
+    // stay `queued`; we just don't promote them to in_flight this tick.
+    if (filter.exclude_agents && filter.exclude_agents.length > 0) {
+      const placeholders = filter.exclude_agents.map(() => "?").join(", ");
+      eligibleWhere += ` AND to_agent NOT IN (${placeholders})`;
+      eligibleParams.push(...filter.exclude_agents);
+    }
     eligibleParams.push(limit);
 
     const { rows: eligibleRows } = await this.adapter.query<Row>(

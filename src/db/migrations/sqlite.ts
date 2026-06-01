@@ -468,6 +468,74 @@ export async function migrateSqlite(adapter: SqliteAdapter): Promise<void> {
       ON dispatch_scheduler_queue(agent_query_id);
     CREATE UNIQUE INDEX IF NOT EXISTS dispatch_scheduler_team_query_idx
       ON dispatch_scheduler_queue(team_id, query_id);
+
+    -- ── Usage Meter (Spec 2026-05-31) ────────────────────────────────
+    -- Per-event Anthropic token usage attributed to an agent.
+    CREATE TABLE IF NOT EXISTS agent_usage_event (
+      event_id                    TEXT PRIMARY KEY,
+      provider                    TEXT NOT NULL DEFAULT 'anthropic',
+      agent_id                    TEXT NOT NULL,
+      dispatch_id                 TEXT,
+      query_id                    TEXT,
+      session_id                  TEXT,
+      model                       TEXT,
+      ts                          INTEGER NOT NULL,
+      input_tokens                INTEGER NOT NULL DEFAULT 0,
+      output_tokens               INTEGER NOT NULL DEFAULT 0,
+      cache_creation_input_tokens INTEGER NOT NULL DEFAULT 0,
+      cache_read_input_tokens     INTEGER NOT NULL DEFAULT 0,
+      raw_tokens                  INTEGER NOT NULL,
+      weighted_tokens             INTEGER NOT NULL,
+      source                      TEXT NOT NULL,
+      confidence                  TEXT NOT NULL,
+      idempotency_key             TEXT NOT NULL UNIQUE
+    );
+    CREATE INDEX IF NOT EXISTS agent_usage_event_agent_ts_idx
+      ON agent_usage_event(agent_id, ts);
+    CREATE INDEX IF NOT EXISTS agent_usage_event_provider_ts_idx
+      ON agent_usage_event(provider, ts);
+    CREATE INDEX IF NOT EXISTS agent_usage_event_dispatch_idx
+      ON agent_usage_event(dispatch_id)
+      WHERE dispatch_id IS NOT NULL;
+    CREATE INDEX IF NOT EXISTS agent_usage_event_query_idx
+      ON agent_usage_event(query_id)
+      WHERE query_id IS NOT NULL;
+
+    -- Pre-rolled daily/weekly usage per agent (and synthetic _global).
+    CREATE TABLE IF NOT EXISTS agent_usage_rollup (
+      provider             TEXT NOT NULL,
+      agent_id             TEXT NOT NULL,
+      window_kind          TEXT NOT NULL CHECK (window_kind IN ('day', 'week')),
+      window_start         TEXT NOT NULL,
+      window_end           TEXT NOT NULL,
+      raw_tokens           INTEGER NOT NULL,
+      weighted_tokens      INTEGER NOT NULL,
+      requests             INTEGER NOT NULL,
+      models_json          TEXT NOT NULL DEFAULT '[]',
+      source_coverage_json TEXT NOT NULL DEFAULT '{}',
+      computed_at          TEXT NOT NULL,
+      PRIMARY KEY (provider, agent_id, window_kind, window_start)
+    );
+
+    -- Audit log of gate decisions (one row per global/agent decision).
+    CREATE TABLE IF NOT EXISTS usage_gate_decision (
+      id              TEXT PRIMARY KEY,
+      ts              INTEGER NOT NULL,
+      scope           TEXT NOT NULL CHECK (scope IN ('global', 'agent')),
+      agent_id        TEXT,
+      state           TEXT NOT NULL,
+      decision        TEXT NOT NULL,
+      reason          TEXT NOT NULL,
+      daily_pct       REAL,
+      weekly_pct      REAL,
+      policy_version  TEXT NOT NULL,
+      metadata_json   TEXT NOT NULL DEFAULT '{}'
+    );
+    CREATE INDEX IF NOT EXISTS usage_gate_decision_ts_idx
+      ON usage_gate_decision(ts);
+    CREATE INDEX IF NOT EXISTS usage_gate_decision_agent_idx
+      ON usage_gate_decision(agent_id, ts)
+      WHERE agent_id IS NOT NULL;
   `);
 
   try {

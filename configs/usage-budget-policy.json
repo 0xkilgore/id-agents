@@ -1,0 +1,33 @@
+{
+  "schema_version": "usage-budget-policy.v1",
+  "timezone": "America/Chicago",
+  "provider": "anthropic",
+  "global": {
+    "daily_weighted_tokens": 10000000,
+    "weekly_weighted_tokens": 50000000,
+    "soft_threshold_pct": 0.8,
+    "hard_threshold_pct": 1.0
+  },
+  "agents": {
+    "cto": {
+      "daily_weighted_tokens": 2500000,
+      "weekly_weighted_tokens": 10000000,
+      "priority": "core"
+    },
+    "roger": {
+      "daily_weighted_tokens": 3500000,
+      "weekly_weighted_tokens": 15000000,
+      "priority": "worker"
+    }
+  },
+  "exempt_agents": [
+    "manager",
+    "sentinel"
+  ],
+  "emergency_override": {
+    "enabled": false,
+    "reason": null,
+    "expires_at": null
+  },
+  "fail_closed_on_unknown": true
+}

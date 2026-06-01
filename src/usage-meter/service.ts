@@ -1,0 +1,594 @@
+// Usage Meter Service — orchestrates config + storage + gate.
+//
+// SAFETY: defaults to WARN-ONLY mode. Hard-gating is opt-in via
+// USAGE_GATE_ENFORCEMENT=enforce. Telemetry/storage failures degrade
+// to "ok with stale data" rather than wedging the fleet.
+
+import type { DbAdapter } from "../db/db-adapter.js";
+import { evaluateGate, parseEnforcement, resolveExcludedAgents, shouldPauseAgent } from "./gate.js";
+import { DEFAULT_USAGE_BUDGET_POLICY, loadUsageBudgetPolicy, type LoadPolicyResult } from "./config.js";
+import {
+  listRecentAgentUsageEvents,
+  listAgentUsageRollupsForWindow,
+  upsertAgentUsageRollup,
+} from "./storage.js";
+import { computeDayWindow, computeWeekWindow, rollupEvents } from "./rollup.js";
+import type {
+  AgentUsageEvent,
+  AgentUsageRollup,
+  Provider,
+  UsageBudgetPolicy,
+  UsageGateDecision,
+  UsageGateEnforcement,
+  UsageGateSnapshot,
+  UsageReportV2,
+} from "./types.js";
+
+export interface UsageMeterServiceOptions {
+  adapter: DbAdapter;
+  now: () => number;
+  policy: UsageBudgetPolicy;
+  policyDegraded?: boolean;
+  policyDegradedReason?: string;
+  enforcement: UsageGateEnforcement;
+  /** Optional concurrency-snapshot provider for the v2 report. */
+  concurrencyProvider?: () => Promise<UsageReportV2["concurrency"]> | UsageReportV2["concurrency"];
+  /** How fresh the rollups need to be (ms) before we re-roll. Default 30s. */
+  refreshIntervalMs?: number;
+}
+
+const DEFAULT_REFRESH_MS = 30_000;
+
+export class UsageMeterService {
+  private adapter: DbAdapter;
+  private now: () => number;
+  private policy: UsageBudgetPolicy;
+  private policyDegraded: boolean;
+  private policyDegradedReason?: string;
+  private enforcement: UsageGateEnforcement;
+  private concurrencyProvider?: UsageMeterServiceOptions["concurrencyProvider"];
+  private refreshIntervalMs: number;
+
+  // Cached snapshot for fast scheduler lookups.
+  private cachedSnapshot: UsageGateSnapshot | null = null;
+  private cachedSnapshotAtMs = 0;
+  private cachedReport: UsageReportV2 | null = null;
+  private cachedReportAtMs = 0;
+
+  constructor(opts: UsageMeterServiceOptions) {
+    this.adapter = opts.adapter;
+    this.now = opts.now;
+    this.policy = opts.policy;
+    this.policyDegraded = !!opts.policyDegraded;
+    this.policyDegradedReason = opts.policyDegradedReason;
+    this.enforcement = opts.enforcement;
+    this.concurrencyProvider = opts.concurrencyProvider;
+    this.refreshIntervalMs = opts.refreshIntervalMs ?? DEFAULT_REFRESH_MS;
+  }
+
+  get currentEnforcement(): UsageGateEnforcement {
+    return this.enforcement;
+  }
+
+  get currentPolicy(): UsageBudgetPolicy {
+    return this.policy;
+  }
+
+  /**
+   * Refresh rollups from raw events. Best-effort; never throws. Returns
+   * the recomputed rollups for callers that want them.
+   */
+  async refreshRollups(): Promise<AgentUsageRollup[]> {
+    try {
+      const nowMs = this.now();
+      // Pull events from at least the last 8 days so we have a full week.
+      const since = nowMs - 8 * 86_400_000;
+      const events = await listRecentAgentUsageEvents(this.adapter, {
+        since_ms: since,
+        limit: 100_000,
+      });
+      const rollups = rollupEvents(
+        events.map((e: AgentUsageEvent) => ({
+          agent_id: e.agent_id,
+          ts: e.ts,
+          raw_tokens: e.raw_tokens,
+          weighted_tokens: e.weighted_tokens,
+          model: e.model,
+          source: e.source,
+          confidence: e.confidence,
+        })),
+        {
+          provider: this.policy.provider,
+          timezone: this.policy.timezone,
+          now_iso: new Date(nowMs).toISOString(),
+          window_kinds: ["day", "week"],
+        },
+      );
+      for (const r of rollups) {
+        await upsertAgentUsageRollup(this.adapter, r);
+      }
+      return rollups;
+    } catch (err) {
+      // Best-effort; degraded snapshot will absorb.
+      console.warn(
+        `[usage-meter] refreshRollups failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return [];
+    }
+  }
+
+  /**
+   * Return the cached UsageGateSnapshot, refreshing if stale. Catches
+   * all errors and returns a degraded snapshot rather than throwing.
+   */
+  async snapshot(): Promise<UsageGateSnapshot> {
+    const nowMs = this.now();
+    if (
+      this.cachedSnapshot &&
+      nowMs - this.cachedSnapshotAtMs < this.refreshIntervalMs
+    ) {
+      return this.cachedSnapshot;
+    }
+    try {
+      // Lazily refresh rollups in the background — don't block.
+      void this.refreshRollups();
+
+      const { rollupsByAgent, globalRollup } = await this.loadCurrentRollups();
+      const snap = evaluateGate({
+        policy: this.policy,
+        rollupsByAgent,
+        globalRollup,
+        enforcement: this.enforcement,
+        now_iso: new Date(nowMs).toISOString(),
+        data_freshness_ms: this.computeDataFreshness(rollupsByAgent, globalRollup, nowMs),
+      });
+      // Patch in the policy-load degraded state if applicable.
+      const final: UsageGateSnapshot =
+        this.policyDegraded && snap.status === "ok"
+          ? {
+              ...snap,
+              status: "degraded",
+              degraded_reason: this.policyDegradedReason ?? "policy load failed",
+            }
+          : snap;
+      this.cachedSnapshot = final;
+      this.cachedSnapshotAtMs = nowMs;
+      return final;
+    } catch (err) {
+      // Catastrophic — return a degraded warn_allow snapshot. The
+      // scheduler's gate consumers never block in warn mode anyway.
+      const fallback: UsageGateSnapshot = {
+        status: "degraded",
+        policy_version: this.policy.schema_version,
+        global: {
+          state: "degraded",
+          decision: "warn_allow",
+          reason: `usage-meter snapshot failed: ${err instanceof Error ? err.message : String(err)}`,
+          daily_pct: null,
+          weekly_pct: null,
+        },
+        agents: {},
+        exempt_agents: [...this.policy.exempt_agents],
+        enforcement: this.enforcement,
+        override_active: false,
+        degraded_reason: "usage-meter snapshot failed",
+        generated_at: new Date(nowMs).toISOString(),
+      };
+      this.cachedSnapshot = fallback;
+      this.cachedSnapshotAtMs = nowMs;
+      return fallback;
+    }
+  }
+
+  /**
+   * UsageGateProvider interface for the scheduler. Synchronous-feeling
+   * read of the cached snapshot, with self-refresh.
+   */
+  async getSnapshotForScheduler(): Promise<UsageGateSnapshot> {
+    return this.snapshot();
+  }
+
+  /**
+   * Build the public `usage-meter-v2` report. Falls back to defaults
+   * + degraded markers on error rather than throwing.
+   */
+  async buildReport(): Promise<UsageReportV2> {
+    const nowMs = this.now();
+    const cacheAge = nowMs - this.cachedReportAtMs;
+    if (this.cachedReport && cacheAge < this.refreshIntervalMs) {
+      return this.cachedReport;
+    }
+
+    try {
+      const snap = await this.snapshot();
+      const { rollupsByAgent, globalRollup } = await this.loadCurrentRollups();
+      const dayWin = computeDayWindow(nowMs, this.policy.timezone);
+      const weekWin = computeWeekWindow(nowMs, this.policy.timezone);
+      const concurrency = await this.resolveConcurrency();
+
+      const dailyBudget = this.policy.global.daily_weighted_tokens;
+      const weeklyBudget = this.policy.global.weekly_weighted_tokens;
+      const gd = globalRollup.day;
+      const gw = globalRollup.week;
+
+      const by_agent = Object.entries(rollupsByAgent).map(([agent, rolls]) => {
+        const agentBudget = this.policy.agents[agent];
+        return {
+          agent,
+          daily: agentWindow(rolls.day, agentBudget?.daily_weighted_tokens ?? null),
+          weekly: agentWindow(rolls.week, agentBudget?.weekly_weighted_tokens ?? null),
+        };
+      });
+
+      const by_model = computeByModel(rollupsByAgent);
+
+      const report: UsageReportV2 = {
+        schema_version: "usage-meter-v2",
+        generated_at: new Date(nowMs).toISOString(),
+        windows: {
+          daily: {
+            start: dayWin.start,
+            reset_at: dayWin.end,
+            time_until_reset_seconds: Math.max(0, Math.floor((dayWin.end_ms - nowMs) / 1000)),
+          },
+          weekly: {
+            start: weekWin.start,
+            reset_at: weekWin.end,
+            time_until_reset_seconds: Math.max(0, Math.floor((weekWin.end_ms - nowMs) / 1000)),
+          },
+        },
+        usage: {
+          daily: globalWindow(gd, dailyBudget, this.policy.global.soft_threshold_pct, this.policy.global.hard_threshold_pct),
+          weekly: globalWindow(gw, weeklyBudget, this.policy.global.soft_threshold_pct, this.policy.global.hard_threshold_pct),
+        },
+        by_agent,
+        by_model,
+        concurrency,
+        gate: {
+          global_state: snap.global.state,
+          should_pause_new_dispatches:
+            snap.enforcement === "enforce" &&
+            (snap.global.decision === "pause_non_core" ||
+              snap.global.decision === "pause_unknown"),
+          reason: snap.global.reason,
+          daily_percent: snap.global.daily_pct ?? 0,
+          weekly_percent: snap.global.weekly_pct ?? 0,
+          override_active: snap.override_active,
+          enforcement: snap.enforcement,
+          agent_overrides: Object.entries(snap.agents).map(([agent, d]) => ({
+            agent,
+            state: d.state,
+            reason: d.reason,
+          })),
+        },
+        calibration: {
+          denominator_kind: "configured_policy_budget",
+          calibrated_at: null,
+          notes:
+            this.policyDegraded
+              ? `policy load degraded: ${this.policyDegradedReason ?? "?"}; using defaults`
+              : "Budgets are operator-configured weighted-token limits, not Anthropic billing API limits.",
+        },
+        source: "manager-usage-meter",
+      };
+      this.cachedReport = report;
+      this.cachedReportAtMs = nowMs;
+      return report;
+    } catch (err) {
+      const fallback = degradedReport(this.policy, this.now(), err);
+      this.cachedReport = fallback;
+      this.cachedReportAtMs = nowMs;
+      return fallback;
+    }
+  }
+
+  /**
+   * Compute exclusion list for a scheduler claim cycle. Always empty in
+   * WARN mode (Chris's overnight mandate).
+   */
+  async getExcludedAgentsForClaim(): Promise<string[]> {
+    const snap = await this.snapshot();
+    return resolveExcludedAgents(snap);
+  }
+
+  /**
+   * Helper for enqueue gating. Returns true when the new dispatch must
+   * be refused. Always false in WARN mode.
+   */
+  async isAgentPaused(agentId: string): Promise<boolean> {
+    const snap = await this.snapshot();
+    return shouldPauseAgent(snap, agentId);
+  }
+
+  // ── Internal helpers ───────────────────────────────────────────────
+
+  private async loadCurrentRollups(): Promise<{
+    rollupsByAgent: Record<string, { day: AgentUsageRollup; week: AgentUsageRollup }>;
+    globalRollup: { day: AgentUsageRollup; week: AgentUsageRollup };
+  }> {
+    const nowMs = this.now();
+    const dayWin = computeDayWindow(nowMs, this.policy.timezone);
+    const weekWin = computeWeekWindow(nowMs, this.policy.timezone);
+    const provider = this.policy.provider;
+
+    const dayRollups = await listAgentUsageRollupsForWindow(this.adapter, {
+      provider,
+      window_kind: "day",
+      window_start: dayWin.start,
+    });
+    const weekRollups = await listAgentUsageRollupsForWindow(this.adapter, {
+      provider,
+      window_kind: "week",
+      window_start: weekWin.start,
+    });
+
+    const dayByAgent = new Map<string, AgentUsageRollup>();
+    const weekByAgent = new Map<string, AgentUsageRollup>();
+    for (const r of dayRollups) dayByAgent.set(r.agent_id, r);
+    for (const r of weekRollups) weekByAgent.set(r.agent_id, r);
+
+    const allAgents = new Set<string>([
+      ...dayByAgent.keys(),
+      ...weekByAgent.keys(),
+    ]);
+    allAgents.delete("_global");
+
+    const rollupsByAgent: Record<string, { day: AgentUsageRollup; week: AgentUsageRollup }> = {};
+    for (const a of allAgents) {
+      rollupsByAgent[a] = {
+        day: dayByAgent.get(a) ?? emptyRollup(a, "day", dayWin.start, dayWin.end, provider, nowMs),
+        week: weekByAgent.get(a) ?? emptyRollup(a, "week", weekWin.start, weekWin.end, provider, nowMs),
+      };
+    }
+    return {
+      rollupsByAgent,
+      globalRollup: {
+        day: dayByAgent.get("_global") ?? emptyRollup("_global", "day", dayWin.start, dayWin.end, provider, nowMs),
+        week: weekByAgent.get("_global") ?? emptyRollup("_global", "week", weekWin.start, weekWin.end, provider, nowMs),
+      },
+    };
+  }
+
+  private computeDataFreshness(
+    rollupsByAgent: Record<string, { day: AgentUsageRollup; week: AgentUsageRollup }>,
+    globalRollup: { day: AgentUsageRollup; week: AgentUsageRollup },
+    nowMs: number,
+  ): number {
+    const all: AgentUsageRollup[] = [globalRollup.day, globalRollup.week];
+    for (const r of Object.values(rollupsByAgent)) {
+      all.push(r.day, r.week);
+    }
+    if (all.length === 0) return Number.POSITIVE_INFINITY;
+    let mostRecent = 0;
+    for (const r of all) {
+      const t = Date.parse(r.computed_at);
+      if (Number.isFinite(t) && t > mostRecent) mostRecent = t;
+    }
+    return mostRecent === 0 ? Number.POSITIVE_INFINITY : nowMs - mostRecent;
+  }
+
+  private async resolveConcurrency(): Promise<UsageReportV2["concurrency"]> {
+    if (!this.concurrencyProvider) {
+      return {
+        in_flight_claude: 0,
+        max_safe_concurrency: 0,
+        slots_available: 0,
+        queue_depth: 0,
+        rate_limit_retry: 0,
+        wedged_count: 0,
+        oldest_in_flight_age_seconds: null,
+        oldest_in_flight_agent: null,
+        source_status: "degraded",
+      };
+    }
+    try {
+      const c = await this.concurrencyProvider();
+      return c;
+    } catch {
+      return {
+        in_flight_claude: 0,
+        max_safe_concurrency: 0,
+        slots_available: 0,
+        queue_depth: 0,
+        rate_limit_retry: 0,
+        wedged_count: 0,
+        oldest_in_flight_age_seconds: null,
+        oldest_in_flight_agent: null,
+        source_status: "degraded",
+      };
+    }
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Factory: load policy + env enforcement, build service.
+// ─────────────────────────────────────────────────────────────────────
+
+export interface CreateUsageMeterServiceOptions {
+  adapter: DbAdapter;
+  env: NodeJS.ProcessEnv;
+  now?: () => number;
+  configsPath?: string;
+  concurrencyProvider?: UsageMeterServiceOptions["concurrencyProvider"];
+}
+
+export function createUsageMeterService(
+  opts: CreateUsageMeterServiceOptions,
+): { service: UsageMeterService; loaded: LoadPolicyResult; enforcement: UsageGateEnforcement } {
+  const loaded = loadUsageBudgetPolicy({
+    env: opts.env,
+    configsPath: opts.configsPath,
+  });
+  const enforcement = parseEnforcement(opts.env.USAGE_GATE_ENFORCEMENT);
+  // Optional override env vars at runtime.
+  let policy = loaded.policy;
+  const overrideUntil = opts.env.USAGE_GATE_OVERRIDE_UNTIL;
+  const overrideReason = opts.env.USAGE_GATE_OVERRIDE_REASON;
+  if (overrideUntil) {
+    policy = {
+      ...policy,
+      emergency_override: {
+        enabled: true,
+        reason: overrideReason ?? null,
+        expires_at: overrideUntil,
+      },
+    };
+  }
+  const service = new UsageMeterService({
+    adapter: opts.adapter,
+    now: opts.now ?? (() => Date.now()),
+    policy,
+    policyDegraded: loaded.degraded,
+    policyDegradedReason: loaded.degraded_reason,
+    enforcement,
+    concurrencyProvider: opts.concurrencyProvider,
+  });
+  return { service, loaded, enforcement };
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// helpers
+// ─────────────────────────────────────────────────────────────────────
+
+function emptyRollup(
+  agent_id: string,
+  window_kind: "day" | "week",
+  start: string,
+  end: string,
+  provider: Provider,
+  nowMs: number,
+): AgentUsageRollup {
+  return {
+    provider,
+    agent_id,
+    window_kind,
+    window_start: start,
+    window_end: end,
+    raw_tokens: 0,
+    weighted_tokens: 0,
+    requests: 0,
+    models: [],
+    source_coverage: {},
+    computed_at: new Date(nowMs).toISOString(),
+  };
+}
+
+function globalWindow(
+  r: AgentUsageRollup,
+  budget: number,
+  soft: number,
+  hard: number,
+): UsageReportV2["usage"]["daily"] {
+  const pct = budget > 0 ? r.weighted_tokens / budget : 0;
+  return {
+    weighted_tokens: r.weighted_tokens,
+    raw_tokens: r.raw_tokens,
+    requests: r.requests,
+    budget,
+    percent_consumed: pct,
+    soft_threshold: soft,
+    hard_threshold: hard,
+  };
+}
+
+function agentWindow(
+  r: AgentUsageRollup,
+  budget: number | null,
+): UsageReportV2["by_agent"][number]["daily"] {
+  return {
+    weighted_tokens: r.weighted_tokens,
+    raw_tokens: r.raw_tokens,
+    requests: r.requests,
+    budget,
+    percent_of_budget: budget && budget > 0 ? r.weighted_tokens / budget : null,
+  };
+}
+
+function computeByModel(
+  rollupsByAgent: Record<string, { day: AgentUsageRollup; week: AgentUsageRollup }>,
+): UsageReportV2["by_model"] {
+  // The rollup table doesn't store per-model breakdown, but each rollup
+  // lists which models contributed. We approximate by counting models
+  // and attributing the rollup's total to each listed model evenly.
+  // For v0 this is enough to surface "which models are burning tokens".
+  const acc = new Map<string, { weighted: number; raw: number; requests: number }>();
+  for (const { day } of Object.values(rollupsByAgent)) {
+    if (day.models.length === 0) continue;
+    const share = 1 / day.models.length;
+    for (const m of day.models) {
+      const prev = acc.get(m) ?? { weighted: 0, raw: 0, requests: 0 };
+      prev.weighted += Math.round(day.weighted_tokens * share);
+      prev.raw += Math.round(day.raw_tokens * share);
+      prev.requests += Math.round(day.requests * share);
+      acc.set(m, prev);
+    }
+  }
+  return [...acc.entries()]
+    .map(([model, v]) => ({
+      model,
+      daily: { weighted_tokens: v.weighted, raw_tokens: v.raw, requests: v.requests },
+    }))
+    .sort((a, b) => b.daily.weighted_tokens - a.daily.weighted_tokens);
+}
+
+function degradedReport(
+  policy: UsageBudgetPolicy,
+  nowMs: number,
+  err: unknown,
+): UsageReportV2 {
+  const dayWin = computeDayWindow(nowMs, policy.timezone);
+  const weekWin = computeWeekWindow(nowMs, policy.timezone);
+  const emptyG = (budget: number) => ({
+    weighted_tokens: 0,
+    raw_tokens: 0,
+    requests: 0,
+    budget,
+    percent_consumed: 0,
+    soft_threshold: policy.global.soft_threshold_pct,
+    hard_threshold: policy.global.hard_threshold_pct,
+  });
+  return {
+    schema_version: "usage-meter-v2",
+    generated_at: new Date(nowMs).toISOString(),
+    windows: {
+      daily: { start: dayWin.start, reset_at: dayWin.end, time_until_reset_seconds: Math.max(0, Math.floor((dayWin.end_ms - nowMs) / 1000)) },
+      weekly: { start: weekWin.start, reset_at: weekWin.end, time_until_reset_seconds: Math.max(0, Math.floor((weekWin.end_ms - nowMs) / 1000)) },
+    },
+    usage: {
+      daily: emptyG(policy.global.daily_weighted_tokens),
+      weekly: emptyG(policy.global.weekly_weighted_tokens),
+    },
+    by_agent: [],
+    by_model: [],
+    concurrency: {
+      in_flight_claude: 0,
+      max_safe_concurrency: 0,
+      slots_available: 0,
+      queue_depth: 0,
+      rate_limit_retry: 0,
+      wedged_count: 0,
+      oldest_in_flight_age_seconds: null,
+      oldest_in_flight_agent: null,
+      source_status: "degraded",
+    },
+    gate: {
+      global_state: "degraded",
+      should_pause_new_dispatches: false,
+      reason: `usage report unavailable: ${err instanceof Error ? err.message : String(err)}`,
+      daily_percent: 0,
+      weekly_percent: 0,
+      override_active: false,
+      enforcement: "warn",
+      agent_overrides: [],
+    },
+    calibration: {
+      denominator_kind: "configured_policy_budget",
+      calibrated_at: null,
+      notes: "report degraded",
+    },
+    source: "manager-usage-meter",
+  };
+}
+
+// Re-export the gate provider interface for the scheduler.
+export type UsageGateProvider = Pick<UsageMeterService, "getSnapshotForScheduler" | "getExcludedAgentsForClaim">;

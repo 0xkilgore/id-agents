@@ -160,12 +160,14 @@ export class FakeReactor {
       limit = Math.min(limit, headroom);
     }
     if (limit === 0) return { claimed: [] };
+    const excludeSet = new Set(filter.exclude_agents ?? []);
     const eligible = [...this.docs.values()].filter(
       (d) =>
         d.status === "queued" &&
         d.not_before_at <= now &&
         (filter.provider == null || d.provider === filter.provider) &&
-        (filter.runtime == null || d.runtime === filter.runtime),
+        (filter.runtime == null || d.runtime === filter.runtime) &&
+        !excludeSet.has(d.to_agent),
     );
     eligible.sort((a, b) => {
       if (b.priority !== a.priority) return b.priority - a.priority;

@@ -8777,6 +8777,42 @@ export class AgentManagerDb {
           console.warn('[Manager] Monitor routes failed to mount:', err instanceof Error ? err.message : String(err));
         }
 
+        // Usage Meter (Spec 2026-05-31) — GET /usage + /usage/gate +
+        // scheduler gate provider. WARN-ONLY by default; operators set
+        // USAGE_GATE_ENFORCEMENT=enforce to opt into hard-gating.
+        // Initialization is best-effort: failure logs but never wedges
+        // the manager startup or the dispatch lifecycle.
+        try {
+          const [{ createUsageMeterService }, { mountUsageMeterRoutes }] = await Promise.all([
+            import('./usage-meter/service.js'),
+            import('./usage-meter/routes.js'),
+          ]);
+          const cwd = process.cwd();
+          const configsPath = `${cwd}/configs/usage-budget-policy.json`;
+          const { service, loaded, enforcement } = createUsageMeterService({
+            adapter: this.db.adapter,
+            env: process.env,
+            configsPath,
+          });
+          mountUsageMeterRoutes(this.managementApp, { service });
+          if (this.dispatchScheduler) {
+            this.dispatchScheduler.scheduler.setUsageGateProvider({
+              getSnapshotForScheduler: () => service.getSnapshotForScheduler(),
+              getExcludedAgentsForClaim: () => service.getExcludedAgentsForClaim(),
+            });
+          }
+          console.log(
+            `[Manager] Usage Meter /usage mounted (policy=${loaded.source}` +
+              `${loaded.degraded ? ` DEGRADED:${loaded.degraded_reason ?? "?"}` : ""}, ` +
+              `enforcement=${enforcement})`,
+          );
+        } catch (err) {
+          console.warn(
+            '[Manager] Usage Meter routes failed to mount (continuing):',
+            err instanceof Error ? err.message : String(err),
+          );
+        }
+
         // P2 Inbox 2.0 — mount /inbox/* routes.
         try {
           const { mountInboxRoutes } = await import('./inbox/routes.js');

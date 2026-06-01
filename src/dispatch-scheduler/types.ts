@@ -366,6 +366,14 @@ export interface QueueEligibleFilter {
    * concurrency across multiple scheduler instances.
    */
   max_in_flight?: number;
+  /**
+   * Usage Meter (Spec 2026-05-31): when set, claim will SKIP queued docs
+   * whose `to_agent` is in this list. The scheduler computes this list
+   * from the usage gate, but ONLY in enforce mode — in warn mode the
+   * list is always empty. Docs for excluded agents remain `queued`;
+   * the gate does not mutate their state or `not_before_at`.
+   */
+  exclude_agents?: string[];
 }
 
 export type DegradedReason =

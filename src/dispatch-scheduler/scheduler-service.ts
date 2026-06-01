@@ -40,6 +40,21 @@ export interface AgentTransport {
   sendTalk(doc: DispatchDoc): Promise<AgentTransportResult>;
 }
 
+/**
+ * Usage Meter (Spec 2026-05-31): the scheduler reads a UsageGateSnapshot
+ * before each claim cycle. The provider is OPTIONAL — when undefined,
+ * the scheduler behaves exactly as it did pre-spec (no gating). In WARN
+ * mode (the overnight default), exclusions are empty and the gate is
+ * observed/logged only. In ENFORCE mode, paused agents are excluded
+ * from claim — their docs stay `queued`, never failed or bounced.
+ *
+ * Errors from the provider NEVER throw out of the tick.
+ */
+export interface UsageGateProvider {
+  getSnapshotForScheduler(): Promise<import("../usage-meter/types.js").UsageGateSnapshot>;
+  getExcludedAgentsForClaim(): Promise<string[]>;
+}
+
 export interface SchedulerServiceOptions {
   client: DispatchDocClient;
   transport: AgentTransport;
@@ -48,6 +63,8 @@ export interface SchedulerServiceOptions {
   rng?: () => number;
   provider?: Provider;
   logger?: SchedulerLogger;
+  /** Optional usage gate provider. When omitted, no usage gating. */
+  usageGateProvider?: UsageGateProvider;
 }
 
 export interface TickReport {
@@ -58,6 +75,12 @@ export interface TickReport {
   requeued: number;
   wedged_reaped: number;
   cap_decision: { max_safe: number; reason: string; source: string };
+  usage_gate?: {
+    enforcement: "warn" | "enforce";
+    global_state: string;
+    excluded_agents: string[];
+    error?: string;
+  };
 }
 
 export interface SchedulerLogger {
@@ -81,6 +104,7 @@ export class SchedulerService {
   private provider: Provider;
   private logger: SchedulerLogger;
   private budgetState: BudgetState = "ok";
+  private usageGateProvider?: UsageGateProvider;
 
   constructor(opts: SchedulerServiceOptions) {
     this.client = opts.client;
@@ -90,6 +114,11 @@ export class SchedulerService {
     this.rng = opts.rng ?? Math.random;
     this.provider = opts.provider ?? "anthropic";
     this.logger = opts.logger ?? NULL_LOGGER;
+    this.usageGateProvider = opts.usageGateProvider;
+  }
+
+  setUsageGateProvider(p: UsageGateProvider | undefined): void {
+    this.usageGateProvider = p;
   }
 
   setBudgetState(state: BudgetState): void {
@@ -146,11 +175,48 @@ export class SchedulerService {
       return report;
     }
 
+    // Usage Meter gate (Spec 2026-05-31): read excluded agents from the
+    // gate provider. Always [] in WARN mode and on any provider error.
+    // Wedged-reap (above) and /agent-done / /agent-needs-input / monitor
+    // routes are NEVER gated — only new claims.
+    let excludeAgents: string[] = [];
+    if (this.usageGateProvider) {
+      try {
+        const snap = await this.usageGateProvider.getSnapshotForScheduler();
+        excludeAgents = await this.usageGateProvider.getExcludedAgentsForClaim();
+        report.usage_gate = {
+          enforcement: snap.enforcement,
+          global_state: snap.global.state,
+          excluded_agents: excludeAgents,
+        };
+        if (excludeAgents.length > 0 || snap.global.state !== "normal") {
+          this.logger.info("scheduler_usage_gate", {
+            enforcement: snap.enforcement,
+            global_state: snap.global.state,
+            excluded_agents: excludeAgents,
+            decision: snap.global.decision,
+          });
+        }
+      } catch (err) {
+        // Never throw out of the tick.
+        const msg = err instanceof Error ? err.message : String(err);
+        this.logger.warn("scheduler_usage_gate_failed", { detail: msg });
+        report.usage_gate = {
+          enforcement: "warn",
+          global_state: "degraded",
+          excluded_agents: [],
+          error: msg,
+        };
+        excludeAgents = [];
+      }
+    }
+
     const claimResult = await this.client.claimForStart({
       limit: Math.min(slots, this.policy.claim_batch_limit),
       provider: this.provider,
       now: this.now(),
       max_in_flight: safe.max_safe,
+      exclude_agents: excludeAgents.length > 0 ? excludeAgents : undefined,
     });
     if (!claimResult.ok) {
       this.logger.error("scheduler_claim_failed", { detail: claimResult.detail });
