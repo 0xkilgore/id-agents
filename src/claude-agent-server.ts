@@ -17,7 +17,10 @@ import {
 import {
   loadHarnessRetryPolicy,
   computeBackoffMs,
-  shouldRetry,
+  evaluateRetry,
+  shouldClearSessionOnRetry,
+  looksLikeBuildDispatch,
+  isMutatingTool,
   type HarnessRetryPolicy,
 } from './harness/retry-policy.js';
 import path from 'path';
@@ -1800,9 +1803,17 @@ ${prompt}`
       // `this.harness.run(...)` with a conservative classifier + bounded
       // backoff so transient model/API/runtime failures don't silently kill
       // a dispatch. The harness modules stay as pure process adapters.
+      //
+      // Code-review hardening (2026-05-31): build dispatches do NOT
+      // auto-retry; any attempt that ran a mutating tool (Bash/Edit/Write/
+      // NotebookEdit) does NOT retry either. Both gates protect against
+      // double-executing irreversible agent side effects on a transient
+      // continuation error (thinking_block_400 in particular).
       const retryPolicy: HarnessRetryPolicy = loadHarnessRetryPolicy(process.env as Record<string, string | undefined>);
+      const isBuildDispatch = looksLikeBuildDispatch(enhancedPrompt);
       let exhaustedFailure: { classification: HarnessFailureClassification; lastError: string; attempts: number } | null = null;
       let attemptsCompleted = 0;
+      let prevClassification: HarnessFailureClassification | null = null;
       const runtimeDisplay = getRuntimeDisplayName(this.harnessType);
       const emptyResultMessage = `${runtimeDisplay} produced an empty result`;
 
@@ -1810,9 +1821,11 @@ ${prompt}`
         attemptsCompleted = attempt;
         const isRetry = attempt > 1;
 
-        // On retry attempts, optionally drop session resume to avoid reusing
-        // a corrupted latest-turn tail (the thinking-block 400 root cause).
-        const sessionForAttempt = (allowSessionResume && (!isRetry || !retryPolicy.clearSessionOnRetry))
+        // On retry attempts, drop session resume per policy — with the
+        // MEDIUM-2 override that thinking_block_400 ALWAYS clears, since
+        // its root cause is corrupted latest-turn session state.
+        const clearForThisRetry = isRetry && shouldClearSessionOnRetry(prevClassification, retryPolicy);
+        const sessionForAttempt = (allowSessionResume && !clearForThisRetry)
           ? sessionId
           : undefined;
 
@@ -1823,6 +1836,11 @@ ${prompt}`
         let attemptResult = '';
         let attemptError: string | null = null;
         let attemptSessionId: string | undefined = undefined;
+        // HIGH-1: track whether this attempt ran any mutating tool. If it
+        // did, we will NOT retry — the agent may have already committed,
+        // pushed, promoted, or posted /agent-done, and a fresh-session
+        // re-run would double-execute those side effects.
+        let attemptHadMutatingToolUse = false;
 
         try {
           for await (const message of this.harness.run(enhancedPrompt, {
@@ -1856,6 +1874,9 @@ ${prompt}`
             if (message.type === 'tool_use') {
               const toolName = (message as any).tool_name || 'unknown';
               const toolInput = (message as any).input;
+              if (isMutatingTool(toolName)) {
+                attemptHadMutatingToolUse = true;
+              }
               console.log(`  🔧 Tool: ${toolName}`);
               messages.push(`[Tool] ${toolName}`);
               this.addNews('query.tool_use', `Using tool: ${toolName}`, {
@@ -1936,7 +1957,11 @@ ${prompt}`
           if (classification.kind === 'content_filter') {
             this.lastSessionId = undefined;
           }
-          if (shouldRetry(classification, attempt, retryPolicy)) {
+          const decision = evaluateRetry(classification, attempt, retryPolicy, {
+            mutatingToolUseObserved: attemptHadMutatingToolUse,
+            isBuildDispatch,
+          });
+          if (decision.retry) {
             const backoffMs = computeBackoffMs(retryPolicy, attempt);
             await this.addNews(
               'query.retrying',
@@ -1950,12 +1975,34 @@ ${prompt}`
                 redacted_error: classification.redactedMessage,
               },
             ).catch(() => {});
-            if (retryPolicy.clearSessionOnRetry) {
+            // MEDIUM-2: thinking_block_400 forces session-clear regardless
+            // of policy; other transients defer to policy.clearSessionOnRetry.
+            if (shouldClearSessionOnRetry(classification, retryPolicy)) {
               this.lastSessionId = undefined;
               sessionId = undefined;
             }
+            prevClassification = classification;
             await new Promise((r) => setTimeout(r, backoffMs));
             continue retry;
+          }
+          // Not retrying — log why so operators can see the gate that fired.
+          if (decision.reason === 'build_dispatch' || decision.reason === 'mutating_tool_observed') {
+            console.warn(
+              `${logTime()} [Agent] 🛑 Suppressing retry for query ${queryId}: ${decision.reason} ` +
+              `(classification=${classification.kind}, attempt=${attempt}). ` +
+              `Side effects may have run; manual re-poke required.`,
+            );
+            await this.addNews(
+              'query.retry_suppressed',
+              `Query ${queryId} retry suppressed: ${decision.reason}`,
+              {
+                query_id: queryId,
+                attempt,
+                reason: decision.reason,
+                kind: classification.kind,
+                redacted_error: classification.redactedMessage,
+              },
+            ).catch(() => {});
           }
           exhaustedFailure = { classification, lastError: attemptError, attempts: attempt };
           break retry;
@@ -1968,7 +2015,11 @@ ${prompt}`
             source: 'empty_result',
             runtime: this.harnessType,
           });
-          if (shouldRetry(classification, attempt, retryPolicy)) {
+          const decision = evaluateRetry(classification, attempt, retryPolicy, {
+            mutatingToolUseObserved: attemptHadMutatingToolUse,
+            isBuildDispatch,
+          });
+          if (decision.retry) {
             const backoffMs = computeBackoffMs(retryPolicy, attempt);
             await this.addNews(
               'query.retrying',
@@ -1981,12 +2032,23 @@ ${prompt}`
                 backoff_ms: backoffMs,
               },
             ).catch(() => {});
-            if (retryPolicy.clearSessionOnRetry) {
+            if (shouldClearSessionOnRetry(classification, retryPolicy)) {
               this.lastSessionId = undefined;
               sessionId = undefined;
             }
+            prevClassification = classification;
             await new Promise((r) => setTimeout(r, backoffMs));
             continue retry;
+          }
+          if (decision.reason === 'build_dispatch' || decision.reason === 'mutating_tool_observed') {
+            console.warn(
+              `${logTime()} [Agent] 🛑 Suppressing empty-result retry for query ${queryId}: ${decision.reason} (attempt=${attempt})`,
+            );
+            await this.addNews(
+              'query.retry_suppressed',
+              `Query ${queryId} retry suppressed: ${decision.reason}`,
+              { query_id: queryId, attempt, reason: decision.reason, kind: classification.kind },
+            ).catch(() => {});
           }
           exhaustedFailure = { classification, lastError: emptyResultMessage, attempts: attempt };
           break retry;

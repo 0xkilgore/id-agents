@@ -71,13 +71,13 @@ const ALLOWLIST: Issuer[] = [
   },
   {
     file: "src/claude-agent-server.ts",
-    line: 1129,
+    line: 1132,
     category: "MUST_MIGRATE",
     note: "claude agent /talk fanout to manager",
   },
   {
     file: "src/claude-agent-server.ts",
-    line: 1203,
+    line: 1206,
     category: "MUST_MIGRATE",
     note: "claude agent /talk fanout to peer",
   },

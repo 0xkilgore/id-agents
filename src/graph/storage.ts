@@ -152,6 +152,25 @@ export async function updateGraphStatus(adapter: DbAdapter, graphId: string, sta
   );
 }
 
+/**
+ * Code-review HIGH-2 (2026-05-31): persist the plan_idempotency_key
+ * separately so it can be set as the FINAL commit step of executeDispatchPlan
+ * — only after the plan is fully enqueued, edges added, activated, and
+ * evaluated. A partial-failure attempt that throws before this is called
+ * leaves the graph row without the key, so the key remains free for a
+ * clean retry.
+ */
+export async function setGraphIdempotencyKey(
+  adapter: DbAdapter,
+  graphId: string,
+  key: string,
+): Promise<void> {
+  await adapter.query(
+    'UPDATE dispatch_graph SET plan_idempotency_key = $1 WHERE graph_id = $2',
+    [key, graphId],
+  );
+}
+
 // ── Node CRUD ──
 
 export async function addNode(

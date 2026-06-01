@@ -14,6 +14,7 @@ import {
   addNode, addEdge, updateGraphStatus,
   getGraphByIdempotencyKey, getNodeByClientId,
   getRecentDecisions, getIncomingEdges, getOutgoingEdges,
+  setGraphIdempotencyKey,
 } from './storage.js';
 import { evaluateGraph } from './runner.js';
 
@@ -140,14 +141,23 @@ export async function executeDispatchPlan(
   enqueue: EnqueueFn,
 ): Promise<DispatchPlanResponse> {
   // Idempotency check: return existing graph if key matches.
+  //
+  // Code-review HIGH-2 (2026-05-31): only treat an existing graph as a
+  // completed idempotent hit when its status is 'active' (or 'completed').
+  // A 'draft' graph means a prior attempt failed mid-enqueue; in that
+  // case we MUST NOT return it as success — but with the deferred-key
+  // fix below, such an orphan never claims the key in the first place,
+  // so this lookup naturally misses on draft orphans. We keep an
+  // explicit guard here as belt-and-suspenders.
   const existing = await getGraphByIdempotencyKey(adapter, req.idempotency_key);
-  if (existing) {
+  if (existing && existing.status !== 'draft') {
     return buildResponseFromExistingGraph(adapter, existing.graph_id);
   }
 
-  // 1. Create graph in draft.
+  // 1. Create graph in draft WITHOUT the idempotency key. The key is only
+  //    persisted after the full plan is enqueued, activated, and evaluated
+  //    — so a partial-failure attempt leaves no idempotency claim.
   const graph = await createGraph(adapter, req.title, req.created_by, {
-    plan_idempotency_key: req.idempotency_key,
     source_json: JSON.stringify(req),
   });
 
@@ -232,6 +242,13 @@ export async function executeDispatchPlan(
   // 5. Activate graph and evaluate.
   await updateGraphStatus(adapter, graph.graph_id, 'active');
   const evalResult = await evaluateGraph(adapter, graph.graph_id);
+
+  // 5b. Code-review HIGH-2 (2026-05-31): NOW persist the idempotency
+  //     key — only after the plan has been fully enqueued, edges added,
+  //     activated, and evaluated. A partial-failure path that threw
+  //     above leaves no idempotency claim, so a natural client retry
+  //     gets a fresh graph rather than a silent broken-partial success.
+  await setGraphIdempotencyKey(adapter, graph.graph_id, req.idempotency_key);
 
   // 6. Build response with refreshed node states.
   const refreshedNodes = await getNodes(adapter, graph.graph_id);

@@ -408,6 +408,59 @@ describe('N1.2 Dispatch-Plan — executeDispatchPlan', () => {
     await expect(executeDispatchPlan(adapter, plan, failingEnqueue)).rejects.toThrow(DispatchPlanError);
   });
 
+  // Code-review HIGH-2 (2026-05-31): a partial-failure first attempt must
+  // NOT poison the idempotency key. A natural client retry with the same
+  // key must produce a fresh, fully-formed plan — not silently return the
+  // broken partial graph as success.
+  it('partial failure does not claim the idempotency key — retry with same key creates a fresh plan', async () => {
+    // Attempt 1: 2nd enqueue throws → DispatchPlanError.
+    let callCount = 0;
+    const failingEnqueue: EnqueueFn = async () => {
+      callCount++;
+      if (callCount === 2) throw new Error('agent offline');
+      return { query_id: `q-fail-${callCount}`, dispatch_phid: `phid:disp-fail-${callCount}`, status: 'queued' };
+    };
+
+    const sharedKey = `plan:high2:${Date.now()}-${Math.random()}`;
+    const plan1 = basePlan({ idempotency_key: sharedKey });
+
+    await expect(executeDispatchPlan(adapter, plan1, failingEnqueue)).rejects.toThrow(DispatchPlanError);
+
+    // Attempt 2: same key, healthy enqueue. Must produce a brand-new graph
+    // with both nodes — the failed attempt 1 must not have captured the
+    // idempotency key.
+    const { enqueue: healthyEnqueue, calls } = makeFakeEnqueue();
+    const plan2 = basePlan({ idempotency_key: sharedKey });
+    const r2 = await executeDispatchPlan(adapter, plan2, healthyEnqueue);
+
+    expect(r2.nodes).toHaveLength(2);
+    expect(r2.status).toBe('active');
+    expect(r2.nodes.find((n) => n.client_node_id === 'build')?.state).toBe('queued');
+    expect(r2.nodes.find((n) => n.client_node_id === 'review')?.state).toBe('pending_dependencies');
+    expect(calls).toHaveLength(2); // both nodes enqueued cleanly this time
+  });
+
+  it('partial-failure draft graph is NOT returned as an idempotent success', async () => {
+    // Same scenario as above but assert the existing-graph lookup behavior:
+    // if a previous attempt left a draft graph (no idempotency key claimed),
+    // a retry must create a fresh graph rather than returning the draft as
+    // an idempotent hit.
+    const failingEnqueue: EnqueueFn = async () => {
+      throw new Error('every enqueue fails');
+    };
+    const sharedKey = `plan:high2b:${Date.now()}-${Math.random()}`;
+    const plan = basePlan({ idempotency_key: sharedKey });
+
+    await expect(executeDispatchPlan(adapter, plan, failingEnqueue)).rejects.toThrow(DispatchPlanError);
+
+    // Retry with the same key + healthy enqueue.
+    const { enqueue: healthyEnqueue } = makeFakeEnqueue();
+    const r2 = await executeDispatchPlan(adapter, plan, healthyEnqueue);
+    // We get a NEW graph id, not the orphaned draft from attempt 1.
+    expect(r2.nodes).toHaveLength(2);
+    expect(r2.status).toBe('active');
+  });
+
   it('evaluation is idempotent — re-running does not duplicate transitions', async () => {
     const { enqueue } = makeFakeEnqueue();
     const plan = basePlan({

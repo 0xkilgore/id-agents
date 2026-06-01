@@ -10,6 +10,9 @@ import {
   loadHarnessRetryPolicy,
   computeBackoffMs,
   shouldRetry,
+  shouldClearSessionOnRetry,
+  evaluateRetry,
+  looksLikeBuildDispatch,
   type HarnessRetryPolicy,
 } from '../../src/harness/retry-policy.js';
 import type { HarnessFailureClassification } from '../../src/harness/transient-errors.js';
@@ -192,5 +195,125 @@ describe('shouldRetry — combines classification + policy', () => {
     const p = { ...HARNESS_RETRY_DEFAULTS, retryUnknownProcessExitOnce: true };
     expect(shouldRetry(c, 1, p)).toBe(true);
     expect(shouldRetry(c, 2, p)).toBe(false);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Code-review hardening (2026-05-31)
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('shouldClearSessionOnRetry — thinking_block_400 footgun guard (MEDIUM-2)', () => {
+  it('returns policy.clearSessionOnRetry for normal transients', () => {
+    const overload = cls({ kind: 'provider_overloaded', terminalFailureKind: 'model_api_error_exhausted' });
+    expect(shouldClearSessionOnRetry(overload, { ...HARNESS_RETRY_DEFAULTS, clearSessionOnRetry: true })).toBe(true);
+    expect(shouldClearSessionOnRetry(overload, { ...HARNESS_RETRY_DEFAULTS, clearSessionOnRetry: false })).toBe(false);
+  });
+
+  it('FORCES session-clear for thinking_block_400 even when policy says false', () => {
+    const tb = cls({ kind: 'thinking_block_400', terminalFailureKind: 'model_api_error_exhausted' });
+    // The session itself is corrupted; reusing the resume guarantees the
+    // next attempt hits the same 400. The operator's
+    // HARNESS_CLEAR_SESSION_ON_TRANSIENT_RETRY=false override must NOT
+    // disable this safety.
+    expect(shouldClearSessionOnRetry(tb, { ...HARNESS_RETRY_DEFAULTS, clearSessionOnRetry: false })).toBe(true);
+    expect(shouldClearSessionOnRetry(tb, { ...HARNESS_RETRY_DEFAULTS, clearSessionOnRetry: true })).toBe(true);
+  });
+
+  it('null classification (no prior attempt) falls back to policy', () => {
+    expect(shouldClearSessionOnRetry(null, { ...HARNESS_RETRY_DEFAULTS, clearSessionOnRetry: false })).toBe(false);
+    expect(shouldClearSessionOnRetry(null, { ...HARNESS_RETRY_DEFAULTS, clearSessionOnRetry: true })).toBe(true);
+  });
+});
+
+describe('looksLikeBuildDispatch — HIGH-1 build-dispatch prompt heuristic', () => {
+  it('detects build-dispatch markers (REPO + BRANCH lines + promote-to-main)', () => {
+    const prompt = `BUILD DISPATCH — fix bug.
+
+REPO: /Users/x/foo
+BRANCH: feat-bar
+
+PROMOTION (Spec 054 v2, required): id-agents promote-to-main --repo ...
+`;
+    expect(looksLikeBuildDispatch(prompt)).toBe(true);
+  });
+
+  it('detects build dispatch when REPO+BRANCH appear but no promote-to-main mention', () => {
+    const prompt = `Please look at REPO: /tmp/foo and BRANCH: main and tell me about it.`;
+    // Conservative: REPO + BRANCH co-occurrence alone is enough to suppress retries.
+    expect(looksLikeBuildDispatch(prompt)).toBe(true);
+  });
+
+  it('does NOT match a generic spec-only dispatch (no REPO/BRANCH)', () => {
+    const prompt = `Read this spec and produce a markdown analysis. Save to ./output/foo.md.`;
+    expect(looksLikeBuildDispatch(prompt)).toBe(false);
+  });
+
+  it('does NOT match casual mentions of "repo" or "branch" without the metadata shape', () => {
+    const prompt = `I want to talk about your favorite git branch and your repo of choice.`;
+    expect(looksLikeBuildDispatch(prompt)).toBe(false);
+  });
+
+  it('matches a prompt that mentions promote-to-main even without explicit REPO line', () => {
+    const prompt = `Once verified, run id-agents promote-to-main with strategy auto.`;
+    expect(looksLikeBuildDispatch(prompt)).toBe(true);
+  });
+});
+
+describe('evaluateRetry — mutation-aware retry gate (HIGH-1)', () => {
+  const transient = cls({ kind: 'provider_overloaded', terminalFailureKind: 'model_api_error_exhausted' });
+
+  it('allows retry on a clean retryable transient with no mutating side effects + non-build', () => {
+    const dec = evaluateRetry(transient, 1, HARNESS_RETRY_DEFAULTS, {
+      mutatingToolUseObserved: false,
+      isBuildDispatch: false,
+    });
+    expect(dec.retry).toBe(true);
+    expect(dec.reason).toBe('allowed');
+  });
+
+  it('blocks retry when a mutating tool already ran this attempt', () => {
+    const dec = evaluateRetry(transient, 1, HARNESS_RETRY_DEFAULTS, {
+      mutatingToolUseObserved: true,
+      isBuildDispatch: false,
+    });
+    expect(dec.retry).toBe(false);
+    expect(dec.reason).toBe('mutating_tool_observed');
+  });
+
+  it('blocks retry for build dispatches even with no observed mutation', () => {
+    const dec = evaluateRetry(transient, 1, HARNESS_RETRY_DEFAULTS, {
+      mutatingToolUseObserved: false,
+      isBuildDispatch: true,
+    });
+    expect(dec.retry).toBe(false);
+    expect(dec.reason).toBe('build_dispatch');
+  });
+
+  it('reports attempts_exhausted at the maxAttempts ceiling', () => {
+    const dec = evaluateRetry(transient, HARNESS_RETRY_DEFAULTS.maxAttempts, HARNESS_RETRY_DEFAULTS, {
+      mutatingToolUseObserved: false,
+      isBuildDispatch: false,
+    });
+    expect(dec.retry).toBe(false);
+    expect(dec.reason).toBe('attempts_exhausted');
+  });
+
+  it('reports not_retryable for terminal classifications', () => {
+    const terminal = cls({ kind: 'user_code_failure', retryable: false, terminalFailureKind: 'agent_error' });
+    const dec = evaluateRetry(terminal, 1, HARNESS_RETRY_DEFAULTS, {
+      mutatingToolUseObserved: false,
+      isBuildDispatch: false,
+    });
+    expect(dec.retry).toBe(false);
+    expect(dec.reason).toBe('not_retryable');
+  });
+
+  it('build_dispatch + mutating_tool prefer build_dispatch in the reason (more specific)', () => {
+    const dec = evaluateRetry(transient, 1, HARNESS_RETRY_DEFAULTS, {
+      mutatingToolUseObserved: true,
+      isBuildDispatch: true,
+    });
+    expect(dec.retry).toBe(false);
+    expect(dec.reason).toBe('build_dispatch');
   });
 });

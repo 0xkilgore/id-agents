@@ -166,12 +166,15 @@ const RATE_LIMIT_PHRASES: ReadonlyArray<string> = [
 const RATE_LIMIT_HTTP: ReadonlyArray<RegExp> = [/\b429\b/];
 
 // Provider overload / capacity.
+//
+// Code-review hardening (2026-05-31, MEDIUM-1): only the SPECIFIC
+// provider-shaped phrases below are accepted without an HTTP code.
+// The bare words 'capacity' and 'try again later' were dropped because
+// they over-match free-form agent text (e.g. "I'll try again later").
 const OVERLOAD_PHRASES: ReadonlyArray<string> = [
   'overloaded',
   'temporarily unavailable due to capacity',
   'server is temporarily limiting requests',
-  'try again later',
-  'capacity',
 ];
 const OVERLOAD_HTTP: ReadonlyArray<RegExp> = [/\b529\b/, /\b503\b/];
 

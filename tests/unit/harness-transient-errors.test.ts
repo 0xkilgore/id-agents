@@ -89,6 +89,36 @@ describe('classifyHarnessFailure — provider overload (529/503/capacity)', () =
     expect(c.kind).toBe('provider_overloaded');
     expect(c.retryable).toBe(true);
   });
+
+  // Code-review MEDIUM-1 (2026-05-31): tighten over-broad phrases so an
+  // agent's free-form final text cannot mis-classify a TERMINAL failure as
+  // retryable.
+  it('does NOT match the bare word "capacity" without provider/HTTP context', () => {
+    const c = classifyHarnessFailure({
+      message: 'this build needs more disk capacity to compile',
+      source: 'harness_error_message',
+    });
+    expect(c.kind).not.toBe('provider_overloaded');
+    expect(c.retryable).toBe(false);
+  });
+
+  it('does NOT match the bare phrase "try again later" without provider/HTTP context', () => {
+    const c = classifyHarnessFailure({
+      message: "I couldn't finish that — will need to try again later",
+      source: 'harness_error_message',
+    });
+    expect(c.kind).not.toBe('provider_overloaded');
+    expect(c.retryable).toBe(false);
+  });
+
+  it('still matches an HTTP 5xx with provider-shaped overload language', () => {
+    const c = classifyHarnessFailure({
+      message: 'API Error: 503 server temporarily unavailable — try again later',
+      source: 'harness_error_message',
+    });
+    expect(c.kind).toBe('provider_overloaded');
+    expect(c.retryable).toBe(true);
+  });
 });
 
 describe('classifyHarnessFailure — timeouts & network transport', () => {
