@@ -380,11 +380,29 @@ export class SchedulerHandle {
       success: args.success !== false,
     });
     if (args.success === false) {
+      // markFailed already accepts queued rows; this branch is unchanged.
       const r = await this.client.markFailed(doc.dispatch_phid, {
         failure_kind: args.failure_kind ?? "agent_error",
         detail: args.error ?? "agent reported failure",
       });
       return r.ok ? r.value : doc;
+    }
+    // Queued-dispatch closeout (Spec 2026-06-01): an out-of-band success
+    // /agent-done can arrive for a doc the scheduler never claimed. Use
+    // the narrow markQueuedDoneWithResult path so we don't fabricate an
+    // in_flight transition just to satisfy markDoneWithResult's guard.
+    // Every other non-in_flight state keeps the existing guard.
+    if (doc.status === "queued") {
+      this.logger.warn("agent_done_unexpected_status", {
+        phid: doc.dispatch_phid,
+        status: doc.status,
+        accepted: true,
+        closeout_path: "queued_out_of_band",
+      });
+      return this.reactor.markQueuedDoneWithResult(
+        doc.dispatch_phid,
+        args.result ?? null,
+      );
     }
     return this.reactor.markDoneWithResult(doc.dispatch_phid, args.result ?? null);
   }

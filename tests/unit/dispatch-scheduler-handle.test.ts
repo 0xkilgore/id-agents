@@ -478,3 +478,126 @@ describe("handleAgentDone — structured failure_kind", () => {
     fetchSpy.mockRestore();
   });
 });
+
+// Queued-dispatch closeout (Spec 2026-06-01) — handle a successful
+// /agent-done that arrives BEFORE the scheduler has claimed the doc
+// (out-of-band async delivery). The doc is still `queued`; the existing
+// markDoneWithResult path rejects with "requires in_flight". The narrow
+// fix accepts queued → done for SUCCESS closeout only; failure and
+// other non-terminal states keep their existing guards.
+describe("handleAgentDone — queued-dispatch closeout (Spec 2026-06-01)", () => {
+  it("queued + success: marks done with persisted result, no fetch needed", async () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch") as ReturnType<typeof vi.spyOn>;
+    const handle = new SchedulerHandle({
+      adapter,
+      teamId: "team",
+      resolveTargetUrl: () => "http://localhost:9999",
+    });
+    const enq = await handle.enqueue({
+      to_agent: "worker",
+      from_actor: "manager",
+      message: "queued closeout",
+    });
+    // Intentionally do NOT tick — doc stays queued.
+
+    const final = await handle.handleAgentDone({
+      query_id: enq.query_id,
+      success: true,
+      result: { artifact_path: "/tmp/out.md" },
+    });
+
+    expect(final?.status).toBe("done");
+    expect(final?.completed_at).not.toBeNull();
+    // Result round-trip: getResult returns the persisted JSON.
+    const r = await handle.reactor.getResult(enq.dispatch_phid);
+    expect(r).toEqual({ artifact_path: "/tmp/out.md" });
+    // No transport call was made.
+    expect(fetchSpy).not.toHaveBeenCalled();
+    fetchSpy.mockRestore();
+  });
+
+  it("queued + failure: still routes through markFailed with structured failure_kind", async () => {
+    const handle = new SchedulerHandle({
+      adapter,
+      teamId: "team",
+      resolveTargetUrl: () => "http://localhost:9999",
+    });
+    const enq = await handle.enqueue({
+      to_agent: "worker",
+      from_actor: "manager",
+      message: "queued failure closeout",
+    });
+
+    const final = await handle.handleAgentDone({
+      query_id: enq.query_id,
+      success: false,
+      failure_kind: "agent_error",
+      error: "failed after async run",
+    });
+
+    expect(final?.status).toBe("failed");
+    expect(final?.failure_kind).toBe("agent_error");
+    expect(final?.failure_detail).toContain("failed after async run");
+  });
+
+  it("non-queued non-in_flight state (needs_clarification) remains guarded — no silent done", async () => {
+    const handle = new SchedulerHandle({
+      adapter,
+      teamId: "team",
+      resolveTargetUrl: () => "http://localhost:9999",
+    });
+    const enq = await handle.enqueue({
+      to_agent: "worker",
+      from_actor: "manager",
+      message: "clarif",
+    });
+    // Move the doc into needs_clarification through the real reactor API.
+    await handle.reactor.markNeedsClarification(enq.dispatch_phid, {
+      agent_id: "worker",
+      query_id: enq.query_id,
+      question: "what?",
+    });
+
+    // Successful /agent-done arriving on a needs_clarification doc must
+    // NOT silently mark it done. The queued-success branch is the only
+    // out-of-band acceptance; everything else keeps its existing guard.
+    await expect(
+      handle.handleAgentDone({
+        query_id: enq.query_id,
+        success: true,
+        result: { x: 1 },
+      }),
+    ).rejects.toThrow(/needs_clarification|requires in_flight/i);
+  });
+
+  it("queued + success closeout twice is idempotent (terminal no-op)", async () => {
+    const handle = new SchedulerHandle({
+      adapter,
+      teamId: "team",
+      resolveTargetUrl: () => "http://localhost:9999",
+    });
+    const enq = await handle.enqueue({
+      to_agent: "worker",
+      from_actor: "manager",
+      message: "double close",
+    });
+
+    const first = await handle.handleAgentDone({
+      query_id: enq.query_id,
+      success: true,
+      result: { artifact_path: "/tmp/first.md" },
+    });
+    expect(first?.status).toBe("done");
+
+    // Second call must be a no-op; the persisted result of the first
+    // call wins (terminal docs are not re-mutated).
+    const second = await handle.handleAgentDone({
+      query_id: enq.query_id,
+      success: true,
+      result: { artifact_path: "/tmp/second.md" },
+    });
+    expect(second?.status).toBe("done");
+    const r = await handle.reactor.getResult(enq.dispatch_phid);
+    expect(r).toEqual({ artifact_path: "/tmp/first.md" });
+  });
+});

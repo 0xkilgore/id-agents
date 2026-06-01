@@ -292,3 +292,93 @@ describe("POST /agent-done — input validation", () => {
     expect(r.status).toBe(404);
   });
 });
+
+// Queued-dispatch closeout (Spec 2026-06-01-queued-dispatch-closeout-spec.md).
+// Verifies the operator-facing /agent-done endpoint can terminally close
+// a dispatch that is still `queued` (the scheduler never claimed it).
+// Pre-fix this returned 500 with "markDoneWithResult requires in_flight".
+describe("POST /agent-done — queued-dispatch closeout (out-of-band success)", () => {
+  it("closes a still-queued non-build dispatch as done with persisted result", async () => {
+    const enq = await enqueue({ /* non-build, queued, never ticked */ });
+
+    const r = await fetch(`${baseUrl}/agent-done`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        dispatch_id: enq.dispatch_phid,
+        success: true,
+        result: { artifact_path: "/tmp/spec.md" },
+      }),
+    });
+    expect(r.status).toBe(200);
+    const body = await r.json();
+    expect(body.ok).toBe(true);
+    expect(body.dispatch_id).toBe(enq.dispatch_phid);
+    expect(body.state).toBe("done");
+
+    // Persisted state — row is `done` with the result JSON round-tripped.
+    const reactor = (manager as any).dispatchScheduler.reactor;
+    const doc = await reactor.getByPhid(enq.dispatch_phid);
+    expect(doc.status).toBe("done");
+    expect(doc.completed_at).not.toBeNull();
+    const result = await reactor.getResult(enq.dispatch_phid);
+    expect(result).toEqual({ artifact_path: "/tmp/spec.md" });
+  });
+
+  it("idempotent: a second /agent-done is a terminal no-op (no 500, state stays done)", async () => {
+    const enq = await enqueue({});
+
+    const first = await fetch(`${baseUrl}/agent-done`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        dispatch_id: enq.dispatch_phid,
+        success: true,
+        result: { artifact_path: "/tmp/first.md" },
+      }),
+    });
+    expect(first.status).toBe(200);
+
+    const second = await fetch(`${baseUrl}/agent-done`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        dispatch_id: enq.dispatch_phid,
+        success: true,
+        result: { artifact_path: "/tmp/second.md" },
+      }),
+    });
+    expect(second.status).toBe(200);
+    const body = await second.json();
+    expect(body.state).toBe("done");
+
+    // First result wins (terminal no-op semantics).
+    const reactor = (manager as any).dispatchScheduler.reactor;
+    const result = await reactor.getResult(enq.dispatch_phid);
+    expect(result).toEqual({ artifact_path: "/tmp/first.md" });
+  });
+
+  it("queued failure path still works via markFailed (existing behavior unchanged)", async () => {
+    const enq = await enqueue({});
+
+    const r = await fetch(`${baseUrl}/agent-done`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        dispatch_id: enq.dispatch_phid,
+        success: false,
+        failure_kind: "agent_error",
+        error: "failed mid-async",
+      }),
+    });
+    expect(r.status).toBe(200);
+    const body = await r.json();
+    expect(body.state).toBe("failed");
+
+    const reactor = (manager as any).dispatchScheduler.reactor;
+    const doc = await reactor.getByPhid(enq.dispatch_phid);
+    expect(doc.status).toBe("failed");
+    expect(doc.failure_kind).toBe("agent_error");
+    expect(doc.failure_detail).toContain("failed mid-async");
+  });
+});

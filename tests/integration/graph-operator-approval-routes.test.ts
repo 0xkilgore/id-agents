@@ -171,6 +171,44 @@ describe('POST /graphs/:graph_id/approvals/:approval_id/approve — happy path',
     expect(approvalAfter!.state).toBe('done');
   });
 
+  // N1.5 coverage follow-up (2026-06-01 review). The spec required:
+  //   "Approval write is durable even if post-write graph evaluation fails;
+  //    the failure is reported/logged without a 500 after approval was written."
+  // The route wraps evaluateGraph in a nested try/catch — this test pins
+  // that contract so a future refactor cannot accidentally move evaluation
+  // back into the outer try/catch and turn a successful approval into 500.
+  it('evaluation failure AFTER approval write returns 200 + evaluation.error; approval stays done', async () => {
+    const { graphId, approvalNodeId } = await buildApprovalGraph();
+
+    // Force evaluateGraph to throw AFTER the approval write by dropping
+    // the dispatch_scheduler_queue table. The runner queries it for any
+    // node with a dispatch_id (the downstream node has one) and will
+    // throw on the SELECT. This isolates the failure to evaluation,
+    // not to the approval write itself.
+    (adapter as any).exec(`DROP TABLE dispatch_scheduler_queue`);
+
+    const res = await fetch(`${baseUrl}/graphs/${graphId}/approvals/${approvalNodeId}/approve`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ actor: { kind: 'human', id: 'chris' } }),
+    });
+
+    // The spec's safety bar: HTTP 200, not 500.
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.ok).toBe(true);
+    expect(body.approval.node_id).toBe(approvalNodeId);
+    expect(body.approval.state).toBe('done');
+    expect(body.evaluation.attempted).toBe(true);
+    expect(typeof body.evaluation.error).toBe('string');
+    expect(body.evaluation.error.length).toBeGreaterThan(0);
+
+    // Approval write is durable — node is `done` in the DB even though
+    // evaluation could not complete.
+    const approvalAfter = await getNode(adapter, approvalNodeId);
+    expect(approvalAfter!.state).toBe('done');
+  });
+
   it('idempotent: re-approving an already-done node returns 200 and does NOT re-transition downstream', async () => {
     const { graphId, approvalNodeId, downstreamNodeId } = await buildApprovalGraph();
 

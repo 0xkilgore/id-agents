@@ -365,6 +365,41 @@ export class SqliteDispatchReactor {
     return this.getByPhid(phid);
   }
 
+  /**
+   * Out-of-band success closeout for a still-queued dispatch
+   * (Spec 2026-06-01-queued-dispatch-closeout-spec.md).
+   *
+   * `markDoneWithResult` is the normal lifecycle guard (in_flight only)
+   * and stays unchanged. This narrow method exists only for the
+   * `/agent-done` path when the worker delivered+completed the work
+   * through an async channel (e.g. `/news-to`) and the scheduler never
+   * had a chance to claim the doc. The dispatch row was intentionally
+   * tracked but the actual start/in_flight transition never happened,
+   * so we skip it and go directly to `done`.
+   *
+   * Guarded: requires `status = 'queued'`. Any other state throws.
+   */
+  async markQueuedDoneWithResult(
+    phid: string,
+    result: Record<string, unknown> | null,
+  ): Promise<DispatchDoc | null> {
+    const doc = await this.getByPhid(phid);
+    if (!doc) return null;
+    if (doc.status !== "queued") {
+      throw conflict(
+        `markQueuedDoneWithResult requires queued, was ${doc.status}`,
+      );
+    }
+    const now = this.nowFn();
+    await this.adapter.query(
+      `UPDATE dispatch_scheduler_queue
+       SET status = 'done', completed_at = ?, updated_at = ?, result_json = ?
+       WHERE dispatch_phid = ? AND status = 'queued'`,
+      [now, now, result ? JSON.stringify(result) : null, phid],
+    );
+    return this.getByPhid(phid);
+  }
+
   async markFailed(
     phid: string,
     args: { failure_kind: FailureKind; detail: string },
