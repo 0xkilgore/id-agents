@@ -700,6 +700,14 @@ export async function migratePostgres(adapter: DbAdapter): Promise<void> {
   `);
 
   await migrateDeleteManagerShadowAgentsPostgres(adapter);
+
+  // B1 (2026-06-08): worker-progress evidence column on queries. Stamped on
+  // every harness output (thinking / tool_use / progress) so the manager can
+  // derive silence_age_seconds and distinguish working-but-slow from
+  // silently-wedged. Idempotent via IF NOT EXISTS.
+  await adapter.query(
+    `ALTER TABLE queries ADD COLUMN IF NOT EXISTS last_output_at BIGINT`,
+  );
 }
 
 /** Null manager-owned FK columns and delete manager-<team> shadow agent rows. */

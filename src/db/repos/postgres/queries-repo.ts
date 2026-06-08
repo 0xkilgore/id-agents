@@ -24,7 +24,7 @@ export class PgQueriesRepo implements QueriesRepository {
 
   async getById(agentId: string, queryId: string): Promise<QueryRow | null> {
     const { rows } = await this.db.query<QueryRow>(
-      `SELECT team_id, agent_id, query_id, status, prompt, created, completed, result, error, session_id, owner_kind, owner_id
+      `SELECT team_id, agent_id, query_id, status, prompt, created, completed, result, error, session_id, owner_kind, owner_id, last_output_at
        FROM queries
        WHERE agent_id = $1 AND query_id = $2`,
       [agentId, queryId],
@@ -34,7 +34,7 @@ export class PgQueriesRepo implements QueriesRepository {
 
   async getByQueryIdForTeam(teamId: string, queryId: string): Promise<QueryRow | null> {
     const { rows } = await this.db.query<QueryRow>(
-      `SELECT team_id, agent_id, query_id, status, prompt, created, completed, result, error, session_id, owner_kind, owner_id
+      `SELECT team_id, agent_id, query_id, status, prompt, created, completed, result, error, session_id, owner_kind, owner_id, last_output_at
        FROM queries
        WHERE team_id = $1 AND query_id = $2
        LIMIT 1`,
@@ -149,7 +149,7 @@ export class PgQueriesRepo implements QueriesRepository {
 
   async getPending(agentId: string): Promise<QueryRow[]> {
     const { rows } = await this.db.query<QueryRow>(
-      `SELECT team_id, agent_id, query_id, status, prompt, created, completed, result, error, session_id, owner_kind, owner_id
+      `SELECT team_id, agent_id, query_id, status, prompt, created, completed, result, error, session_id, owner_kind, owner_id, last_output_at
        FROM queries
        WHERE agent_id = $1 AND status IN ('pending', 'processing')
        ORDER BY created ASC`,
@@ -160,13 +160,21 @@ export class PgQueriesRepo implements QueriesRepository {
 
   async getPendingByOwner(teamId: string, ownerKind: InboxOwnerKind, ownerId: string): Promise<QueryRow[]> {
     const { rows } = await this.db.query<QueryRow>(
-      `SELECT team_id, agent_id, query_id, status, prompt, created, completed, result, error, session_id, owner_kind, owner_id
+      `SELECT team_id, agent_id, query_id, status, prompt, created, completed, result, error, session_id, owner_kind, owner_id, last_output_at
        FROM queries
        WHERE team_id = $1 AND owner_kind = $2 AND owner_id = $3 AND status IN ('pending', 'processing')
        ORDER BY created ASC`,
       [teamId, ownerKind, ownerId],
     );
     return rows;
+  }
+
+  async recordOutput(teamId: string, queryId: string, ts: number): Promise<void> {
+    await this.db.query(
+      `UPDATE queries SET last_output_at = $3
+       WHERE team_id = $1 AND query_id = $2 AND status IN ('pending', 'processing')`,
+      [teamId, queryId, ts],
+    );
   }
 
   async cancel(agentId: string, completed: number): Promise<string[]> {

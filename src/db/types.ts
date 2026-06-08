@@ -68,6 +68,14 @@ export interface QueryRow {
   session_id: string | null;
   owner_kind: InboxOwnerKind;
   owner_id: string;
+  /**
+   * B1 — worker-progress evidence. Stamped by the agent harness on every
+   * thinking/tool_use/progress emission while the query is in-flight. Lets
+   * the manager compute `silence_age_seconds = now - last_output_at` and
+   * distinguish slow-but-working from silently-wedged. Null until the first
+   * output arrives or for queries that completed before B1 shipped.
+   */
+  last_output_at: number | null;
 }
 
 /** news_items table row */

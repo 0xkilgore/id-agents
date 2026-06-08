@@ -54,7 +54,7 @@ export class SqliteQueriesRepo implements QueriesRepository {
 
   async getById(agentId: string, queryId: string): Promise<QueryRow | null> {
     const r = await this.db.query<QueryRow>(
-      `SELECT team_id, agent_id, query_id, status, prompt, created, completed, result, error, session_id, owner_kind, owner_id
+      `SELECT team_id, agent_id, query_id, status, prompt, created, completed, result, error, session_id, owner_kind, owner_id, last_output_at
        FROM queries
        WHERE agent_id = ? AND query_id = ?`,
       [agentId, queryId],
@@ -64,7 +64,7 @@ export class SqliteQueriesRepo implements QueriesRepository {
 
   async getByQueryIdForTeam(teamId: string, queryId: string): Promise<QueryRow | null> {
     const r = await this.db.query<QueryRow>(
-      `SELECT team_id, agent_id, query_id, status, prompt, created, completed, result, error, session_id, owner_kind, owner_id
+      `SELECT team_id, agent_id, query_id, status, prompt, created, completed, result, error, session_id, owner_kind, owner_id, last_output_at
        FROM queries
        WHERE team_id = ? AND query_id = ?
        LIMIT 1`,
@@ -179,7 +179,7 @@ export class SqliteQueriesRepo implements QueriesRepository {
 
   async getPending(agentId: string): Promise<QueryRow[]> {
     const r = await this.db.query<QueryRow>(
-      `SELECT team_id, agent_id, query_id, status, prompt, created, completed, result, error, session_id, owner_kind, owner_id
+      `SELECT team_id, agent_id, query_id, status, prompt, created, completed, result, error, session_id, owner_kind, owner_id, last_output_at
        FROM queries
        WHERE agent_id = ? AND status IN ('pending', 'processing')`,
       [agentId],
@@ -189,13 +189,21 @@ export class SqliteQueriesRepo implements QueriesRepository {
 
   async getPendingByOwner(teamId: string, ownerKind: InboxOwnerKind, ownerId: string): Promise<QueryRow[]> {
     const r = await this.db.query<QueryRow>(
-      `SELECT team_id, agent_id, query_id, status, prompt, created, completed, result, error, session_id, owner_kind, owner_id
+      `SELECT team_id, agent_id, query_id, status, prompt, created, completed, result, error, session_id, owner_kind, owner_id, last_output_at
        FROM queries
        WHERE team_id = ? AND owner_kind = ? AND owner_id = ? AND status IN ('pending', 'processing')
        ORDER BY created ASC`,
       [teamId, ownerKind, ownerId],
     );
     return r.rows.map((row) => this.parseQueryRow(row)!);
+  }
+
+  async recordOutput(teamId: string, queryId: string, ts: number): Promise<void> {
+    await this.db.query(
+      `UPDATE queries SET last_output_at = ?
+       WHERE team_id = ? AND query_id = ? AND status IN ('pending', 'processing')`,
+      [ts, teamId, queryId],
+    );
   }
 
   async cancel(agentId: string, completed: number): Promise<string[]> {

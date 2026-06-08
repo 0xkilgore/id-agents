@@ -311,6 +311,16 @@ export interface QueriesRepository {
    * Returns the list of cancelled query_ids.
    */
   cancel(agentId: string, completed: number): Promise<string[]>;
+
+  /**
+   * B1 — stamp `last_output_at` for an in-flight query (status in
+   * 'pending' or 'processing'). Silently skips queries in a terminal
+   * status (completed/failed/cancelled/expired) and nonexistent rows.
+   * Callers MUST be safe to invoke repeatedly: this is fire-and-forget
+   * evidence, not a state transition. Reason: a late stdout chunk after
+   * cancel must not resurrect a closed query.
+   */
+  recordOutput(teamId: string, queryId: string, ts: number): Promise<void>;
 }
 
 // ---------------------------------------------------------------------------

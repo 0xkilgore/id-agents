@@ -684,6 +684,17 @@ export async function migrateSqlite(adapter: SqliteAdapter): Promise<void> {
   await migrateNewsItemsNullableAgentSqlite(adapter);
   await migrateDeleteManagerShadowAgentsSqlite(adapter);
 
+  // B1 (2026-06-08): worker-progress evidence column on queries. Stamped on
+  // every harness output (thinking / tool_use / progress) so the manager can
+  // derive silence_age_seconds and distinguish working-but-slow from
+  // silently-wedged. Idempotent; runs after the queries-PK rebuild so the
+  // column is added to the final shape, not the legacy one.
+  try {
+    adapter.exec(`ALTER TABLE queries ADD COLUMN last_output_at INTEGER`);
+  } catch {
+    // Column already exists in upgraded databases.
+  }
+
   // Tasks: migrate from global name UNIQUE to (team_id, name) UNIQUE.
   // SQLite does not support DROP CONSTRAINT, so we use the rename-copy-swap pattern
   // guarded by a PRAGMA check to detect whether the old global uniqueness is still present.

@@ -2209,6 +2209,19 @@ ${prompt}`
       await this.dbAddNews(type, message, data);
     }
 
+    // B1 — worker-progress evidence. Stamp `last_output_at` on the in-flight
+    // query whenever the harness emits any of the ephemeral progress signals
+    // (thinking / tool_use / progress). Manager reads it to derive
+    // `silence_age_seconds` and distinguish working-but-slow from
+    // silently-wedged. Fire-and-forget: a DB hiccup here must not affect the
+    // user-visible news feed. Terminal queries are filtered in the repo SQL.
+    if (isEphemeral && this.db && this.dbTeamId) {
+      const qid = data?.query_id;
+      if (typeof qid === 'string' && qid !== '') {
+        this.db.queries.recordOutput(this.dbTeamId, qid, timestamp).catch(() => {});
+      }
+    }
+
     // Keep only last 100 news items in memory
     if (this.newsItems.length > 100) {
       this.newsItems = this.newsItems.slice(-100);
