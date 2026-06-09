@@ -43,12 +43,37 @@ import type {
   ShipRequest,
   ViewRequest,
 } from './types.js';
+import type { TasksRepository } from '../db/db-service.js';
+import { emitApprovalTask, type ApprovalReviewer } from './approval-emit.js';
 
 function asString(v: unknown): string | undefined {
   return typeof v === 'string' && v.length > 0 ? v : undefined;
 }
 
-export function mountOutputsRoutes(app: Application, adapter: DbAdapter): void {
+/**
+ * Kapelle P3 (2026-06-09) — runtime deps for the manager-side approval
+ * emit target. `tasks` is the manager's TasksRepository; `resolveTeamId`
+ * is called per-request to map an Express Request to the team scope
+ * that the emitted approval-task should belong to.
+ *
+ * Both are optional so existing tests + boot paths that don't yet have
+ * the task seam can mount the routes unchanged. When omitted the
+ * approve endpoint still records the operation + review state (the B11
+ * canonical write); the response's `task` field is null and
+ * `task_emit_skipped` is set so kapelle-site can show the operator
+ * that the canonical emit chain didn't run.
+ */
+export interface MountOutputsRoutesOptions {
+  tasks?: TasksRepository;
+  resolveTeamId?: (req: Request) => Promise<string>;
+}
+
+export function mountOutputsRoutes(
+  app: Application,
+  adapter: DbAdapter,
+  opts: MountOutputsRoutesOptions = {},
+): void {
+  const { tasks, resolveTeamId } = opts;
 
   // ── GET /outputs/inbox ─────────────────────────────────────────────
 
@@ -218,6 +243,20 @@ export function mountOutputsRoutes(app: Application, adapter: DbAdapter): void {
   });
 
   // ── POST /artifacts/:id/approve ────────────────────────────────────
+  //
+  // Kapelle P3 (2026-06-09): the canonical manager-side emit target.
+  // Steps:
+  //   1. approveArtifact() updates artifact_review_state + appends an
+  //      artifact_operations row (existing B11 behavior).
+  //   2. If a tasks repo + team resolver were injected at mount time,
+  //      emitApprovalTask() creates the downstream manager task that
+  //      carries the structured approval payload Regina's /ops
+  //      decisions queue (OP-1) reads from.
+  //   3. The response contains BOTH the review state and the
+  //      created/idempotent task, or a structured task_emit_error if
+  //      the task creation step failed. The approval itself never
+  //      fails on task-emit failure — the operator can retry the
+  //      whole call.
 
   app.post('/artifacts/:id/approve', async (req: Request<{ id: string }>, res: Response) => {
     try {
@@ -226,8 +265,85 @@ export function mountOutputsRoutes(app: Application, adapter: DbAdapter): void {
         note: asString(req.body?.note),
         source_link: asString(req.body?.source_link),
       };
+      const sourceSurface =
+        asString(req.body?.source_surface) ?? asString(req.body?.source_link) ?? "manager:/artifacts/approve";
       const { state, op_id } = await approveArtifact(adapter, req.params.id, reqBody);
-      res.json({ ok: true, state, op_id });
+
+      // No tasks seam wired up → return the review state alone with an
+      // explicit skip marker so kapelle-site can show the operator
+      // that the emit chain wasn't run. This path is for bootstrap /
+      // legacy mounts; production mounts ALWAYS provide tasks.
+      if (!tasks || !resolveTeamId) {
+        res.json({
+          ok: true,
+          state,
+          op_id,
+          task: null,
+          task_emitted: false,
+          task_emit_skipped: "manager_emit_target_not_configured",
+        });
+        return;
+      }
+
+      let teamId: string;
+      try {
+        teamId = await resolveTeamId(req);
+      } catch (err) {
+        res.json({
+          ok: true,
+          state,
+          op_id,
+          task: null,
+          task_emitted: false,
+          task_emit_error: {
+            kind: "team_resolution",
+            message: err instanceof Error ? err.message : String(err),
+            retry_with: {
+              method: "POST",
+              url: `/artifacts/${req.params.id}/approve`,
+              body: { ...req.body },
+            },
+          },
+        });
+        return;
+      }
+
+      const reviewer: ApprovalReviewer = parseReviewer(reqBody.approver);
+      const emit = await emitApprovalTask({
+        adapter,
+        tasks,
+        input: {
+          artifact_id: req.params.id,
+          reviewer,
+          approval_state: "approved",
+          source_surface: sourceSurface,
+          approved_at: state.approved_at ?? new Date().toISOString(),
+          op_id,
+          approval_note: reqBody.note ?? null,
+          team_id: teamId,
+        },
+      });
+
+      if (!emit.ok) {
+        res.json({
+          ok: true,
+          state,
+          op_id,
+          task: null,
+          task_emitted: false,
+          task_emit_error: emit.error,
+        });
+        return;
+      }
+
+      res.json({
+        ok: true,
+        state,
+        op_id,
+        task: emit.task,
+        task_emitted: true,
+        task_idempotent: emit.idempotent,
+      });
     } catch (err) {
       res.status(400).json({ error: err instanceof Error ? err.message : String(err) });
     }
@@ -248,4 +364,29 @@ export function mountOutputsRoutes(app: Application, adapter: DbAdapter): void {
       res.status(400).json({ error: err instanceof Error ? err.message : String(err) });
     }
   });
+}
+
+/**
+ * P3: map a free-form approver string to the structured `reviewer`
+ * shape the approval payload requires. Supported inputs:
+ *
+ *   "human:chris"    -> { kind: "human", id: "chris", label: "chris" }
+ *   "agent:regina"   -> { kind: "agent", id: "regina", label: "regina" }
+ *   "system:auto"    -> { kind: "system", id: "auto", label: "auto" }
+ *   "chris"          -> { kind: "human", id: "chris", label: "chris" }
+ *   undefined        -> { kind: "system", id: "operator", label: "operator" }
+ *
+ * Unknown prefixes fall back to `human`. The label is the id verbatim.
+ */
+function parseReviewer(raw: string | undefined): ApprovalReviewer {
+  if (!raw) return { kind: "system", id: "operator", label: "operator" };
+  const m = raw.match(/^(human|agent|system):(.+)$/);
+  if (m && m[2]) {
+    return {
+      kind: m[1] as ApprovalReviewer["kind"],
+      id: m[2],
+      label: m[2],
+    };
+  }
+  return { kind: "human", id: raw, label: raw };
 }

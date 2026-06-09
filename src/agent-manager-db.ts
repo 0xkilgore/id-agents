@@ -8921,8 +8921,16 @@ export class AgentManagerDb {
             import('./outputs/storage.js'),
           ]);
           await migrateOutputsTables(this.db.adapter);
-          mountOutputsRoutes(this.managementApp, this.db.adapter);
-          console.log('[Manager] Kapelle B11 outputs routes mounted (/outputs/inbox, /artifacts/:id/*)');
+          // Kapelle P3 (2026-06-09): inject the tasks repo + team
+          // resolver so POST /artifacts/:id/approve becomes the
+          // canonical manager-side emit target for reviewed-artifact
+          // approvals. Without these, the approve endpoint still
+          // records the operation but skips the downstream task emit.
+          mountOutputsRoutes(this.managementApp, this.db.adapter, {
+            tasks: this.db.tasks,
+            resolveTeamId: async (req) => (await this.getTeam(req)).id,
+          });
+          console.log('[Manager] Kapelle B11 outputs routes mounted (/outputs/inbox, /artifacts/:id/*) with P3 emit target');
         } catch (err) {
           console.warn('[Manager] B11 outputs routes failed to mount:', err instanceof Error ? err.message : String(err));
         }
