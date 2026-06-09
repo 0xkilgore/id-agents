@@ -8935,6 +8935,23 @@ export class AgentManagerDb {
           console.warn('[Manager] B11 outputs routes failed to mount:', err instanceof Error ? err.message : String(err));
         }
 
+        // Kapelle OP-1 decisions queue (2026-06-09): structured-status
+        // backed decision store + queryable read surface. Replaces the
+        // prose-inferred decisions queue that produced the false-open
+        // calendar-incident; GET /decisions/queue?status=open filters on
+        // a CHECK-constrained `status` column, never on prose.
+        try {
+          const [{ mountDecisionsRoutes }, { migrateDecisionsTables }] = await Promise.all([
+            import('./decisions/routes.js'),
+            import('./decisions/storage.js'),
+          ]);
+          await migrateDecisionsTables(this.db.adapter);
+          mountDecisionsRoutes(this.managementApp, this.db.adapter);
+          console.log('[Manager] Kapelle decisions routes mounted (/decisions/queue, /decisions/:id/decide)');
+        } catch (err) {
+          console.warn('[Manager] Decisions routes failed to mount:', err instanceof Error ? err.message : String(err));
+        }
+
         // P1 Dependency-Graph Orchestrator — mount /graphs/* routes.
         try {
           const { mountGraphRoutes } = await import('./graph/routes.js');
