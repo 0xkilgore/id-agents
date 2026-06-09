@@ -23,6 +23,7 @@ describe("loadSchedulerPolicy (Phase 2.1)", () => {
     expect(p.jitter_pct).toBeCloseTo(0.2);
     expect(p.claim_batch_limit).toBe(10);
     expect(p.starting_timeout_ms).toBe(60_000);
+    expect(p.stale_in_flight_ttl_ms).toBe(30 * 60_000);
   });
 
   it("env override raises the cap without code changes", () => {
@@ -33,6 +34,11 @@ describe("loadSchedulerPolicy (Phase 2.1)", () => {
   it("env override lowers the cap", () => {
     const p = loadSchedulerPolicy({}, { DISPATCH_MAX_IN_FLIGHT_ANTHROPIC: "1" });
     expect(p.max_in_flight_anthropic).toBe(1);
+  });
+
+  it("env override configures stale in-flight TTL", () => {
+    const p = loadSchedulerPolicy({}, { DISPATCH_STALE_IN_FLIGHT_TTL_MS: "120000" });
+    expect(p.stale_in_flight_ttl_ms).toBe(120_000);
   });
 
   it("config object override beats defaults but loses to env", () => {

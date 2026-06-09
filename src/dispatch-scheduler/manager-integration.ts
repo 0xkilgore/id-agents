@@ -39,6 +39,7 @@ export interface SchedulerEnv {
   DISPATCH_GATEWAY_MODE?: string;
   DISPATCH_SCHEDULER_ENABLED?: string;
   DISPATCH_MAX_IN_FLIGHT_ANTHROPIC?: string;
+  DISPATCH_STALE_IN_FLIGHT_TTL_MS?: string;
   DISPATCH_TICK_INTERVAL_MS?: string;
 }
 

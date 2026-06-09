@@ -32,6 +32,13 @@ export interface SchedulerPolicy {
    * tick step then runs only the cheap terminal-closeout path.
    */
   silence_threshold_ms: number;
+  /**
+   * B11 WIP: age-based TTL (time since claim) after which an in_flight
+   * dispatch with an agent_query_id is marked failed via failStaleInFlight.
+   * Complementary to silence_threshold_ms — this catches dispatches that
+   * never produced a last_output_at stamp at all. Clamped >= starting_timeout_ms.
+   */
+  stale_in_flight_ttl_ms: number;
   policy_version: string;
 }
 
@@ -50,14 +57,16 @@ export const POLICY_DEFAULTS: SchedulerPolicy = {
   claim_batch_limit: 10,
   starting_timeout_ms: 60_000,
   silence_threshold_ms: 30 * 60_000,
+  stale_in_flight_ttl_ms: 30 * 60_000,
   policy_version: "v1",
 };
 
 const SAFETY_CEILING = 20;
 const MIN_CAP = 1;
 
-const ENV_KEY = "DISPATCH_MAX_IN_FLIGHT_ANTHROPIC";
+const MAX_IN_FLIGHT_ENV_KEY = "DISPATCH_MAX_IN_FLIGHT_ANTHROPIC";
 const SILENCE_ENV_KEY = "DISPATCH_SILENCE_THRESHOLD_MS";
+const STALE_IN_FLIGHT_TTL_ENV_KEY = "DISPATCH_STALE_IN_FLIGHT_TTL_MS";
 
 function parsePositiveInt(raw: string | undefined): number | null {
   if (raw == null) return null;
@@ -76,16 +85,19 @@ export function loadSchedulerPolicy(
   env: Record<string, string | undefined>,
 ): SchedulerPolicy {
   const merged: SchedulerPolicy = { ...POLICY_DEFAULTS, ...(overrides.dispatch ?? {}) };
-  const envAnth = parsePositiveInt(env[ENV_KEY]);
+  const envAnth = parsePositiveInt(env[MAX_IN_FLIGHT_ENV_KEY]);
   if (envAnth != null) merged.max_in_flight_anthropic = envAnth;
   const envSilence = parsePositiveInt(env[SILENCE_ENV_KEY]);
   if (envSilence != null) merged.silence_threshold_ms = envSilence;
+  const staleTtl = parsePositiveInt(env[STALE_IN_FLIGHT_TTL_ENV_KEY]);
+  if (staleTtl != null) merged.stale_in_flight_ttl_ms = staleTtl;
   merged.max_in_flight_anthropic = clampCap(merged.max_in_flight_anthropic);
   merged.max_in_flight_openai = clampCap(merged.max_in_flight_openai);
   merged.max_in_flight_other = clampCap(merged.max_in_flight_other);
   if (!Number.isFinite(merged.silence_threshold_ms) || merged.silence_threshold_ms < 0) {
     merged.silence_threshold_ms = POLICY_DEFAULTS.silence_threshold_ms;
   }
+  merged.stale_in_flight_ttl_ms = Math.max(merged.starting_timeout_ms, merged.stale_in_flight_ttl_ms);
   return merged;
 }
 

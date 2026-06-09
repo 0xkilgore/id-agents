@@ -76,6 +76,14 @@ import type { HarnessType } from './harness/types.js';
 import { SchedulerService } from './scheduling/scheduler-service.js';
 import { SchedulerHandle, parseGatewayMode } from './dispatch-scheduler/manager-integration.js';
 import {
+  parseDispatchReadStatus,
+  parseReadLimit,
+  readArtifacts,
+  readDispatchById,
+  readDispatchHealth,
+  readDispatches,
+} from './dispatch-scheduler/read-model.js';
+import {
   parsePromotionEnforcement,
   validatePromotionMetadata,
   type PromotionAgentDone,
@@ -2394,9 +2402,16 @@ export class AgentManagerDb {
           doc = await reactor.getByQueryId(queryId);
         }
         if (!doc) {
-          return res.status(404).json({
-            ok: false,
-            error: `dispatch not found: ${dispatchIdRaw || queryId}`,
+          this.managerLog(
+            `[agent-done] no scheduler dispatch found for ${dispatchIdRaw || queryId}; treating as non-scheduler closeout`,
+          );
+          return res.json({
+            ok: true,
+            dispatch_id: dispatchIdRaw || null,
+            query_id: queryId,
+            state: 'ignored_non_scheduler',
+            ignored: true,
+            reason: 'dispatch_not_found',
           });
         }
 
@@ -2606,6 +2621,78 @@ export class AgentManagerDb {
       const { id: teamId, name: teamName } = await this.getTeam(req);
       const count = await this.db.agents.count(teamId);
       res.json({ status: 'ok', team: teamName, agents: parseInt(count || '0'), timestamp: Date.now() });
+    });
+
+    this.managementApp.get('/dispatches/health', async (req, res) => {
+      try {
+        const { id: teamId, name: teamName } = await this.getTeam(req);
+        const health = await readDispatchHealth(this.db.adapter, teamId);
+        return res.json({ ok: true, team: teamName, ...health });
+      } catch (err) {
+        return res.status(500).json({
+          ok: false,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    });
+
+    this.managementApp.get('/dispatches', async (req, res) => {
+      try {
+        const status = parseDispatchReadStatus(req.query.status);
+        if (!status) {
+          return res.status(400).json({
+            ok: false,
+            error: 'status must be active, terminal, or all',
+          });
+        }
+        const limit = parseReadLimit(req.query.limit);
+        const { id: teamId, name: teamName } = await this.getTeam(req);
+        const dispatches = await readDispatches(this.db.adapter, teamId, status, limit);
+        return res.json({
+          ok: true,
+          team: teamName,
+          status,
+          limit,
+          count: dispatches.length,
+          dispatches,
+          items: dispatches,
+        });
+      } catch (err) {
+        return res.status(500).json({
+          ok: false,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    });
+
+    this.managementApp.get('/dispatches/:dispatch_id', async (req, res) => {
+      try {
+        const { id: teamId, name: teamName } = await this.getTeam(req);
+        const dispatch = await readDispatchById(this.db.adapter, teamId, req.params.dispatch_id);
+        if (!dispatch) {
+          return res.status(404).json({ ok: false, error: 'dispatch_not_found' });
+        }
+        return res.json({ ok: true, team: teamName, dispatch });
+      } catch (err) {
+        return res.status(500).json({
+          ok: false,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    });
+
+    this.managementApp.get('/artifacts', async (req, res) => {
+      try {
+        const limit = parseReadLimit(req.query.limit);
+        const { id: teamId, name: teamName } = await this.getTeam(req);
+        const artifacts = await readArtifacts(this.db.adapter, teamId, limit);
+        return res.json({ ok: true, team: teamName, limit, ...artifacts });
+      } catch (err) {
+        return res.status(500).json({
+          ok: false,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
     });
 
     // Slice 7: read-only library inventory. Library root is captured at
@@ -8824,6 +8911,20 @@ export class AgentManagerDb {
           console.log('[Manager] P2 inbox /inbox/* routes mounted');
         } catch (err) {
           console.warn('[Manager] P2 inbox routes failed to mount:', err instanceof Error ? err.message : String(err));
+        }
+
+        // Kapelle B11 — manager-owned artifact review surface
+        // (/outputs/inbox, /artifacts/:id/{review,view,operations,approve,ship}).
+        try {
+          const [{ mountOutputsRoutes }, { migrateOutputsTables }] = await Promise.all([
+            import('./outputs/routes.js'),
+            import('./outputs/storage.js'),
+          ]);
+          await migrateOutputsTables(this.db.adapter);
+          mountOutputsRoutes(this.managementApp, this.db.adapter);
+          console.log('[Manager] Kapelle B11 outputs routes mounted (/outputs/inbox, /artifacts/:id/*)');
+        } catch (err) {
+          console.warn('[Manager] B11 outputs routes failed to mount:', err instanceof Error ? err.message : String(err));
         }
 
         // P1 Dependency-Graph Orchestrator — mount /graphs/* routes.

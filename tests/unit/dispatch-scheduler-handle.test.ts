@@ -213,6 +213,45 @@ describe("SchedulerHandle bootstrap + flow", () => {
     fetchSpy.mockRestore();
   });
 
+  it("stale in_flight claim with agent_query_id is failed and frees the slot", async () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch") as ReturnType<typeof vi.spyOn>;
+    fetchSpy.mockResolvedValueOnce(
+      new Response(JSON.stringify({ query_id: "agent-q-stale" }), { status: 200 }) as unknown as Response,
+    );
+    let now = "2026-06-02T20:00:00.000Z";
+    const handle = new SchedulerHandle({
+      adapter,
+      teamId: "team",
+      resolveTargetUrl: () => "http://localhost:9999",
+      now: () => now,
+      env: {
+        DISPATCH_MAX_IN_FLIGHT_ANTHROPIC: "1",
+        DISPATCH_STALE_IN_FLIGHT_TTL_MS: "1000",
+      },
+    });
+    const enq = await handle.enqueue({
+      to_agent: "worker",
+      from_actor: "manager",
+      message: "go stale",
+    });
+    await handle.tick();
+    let snap = await handle.snapshot();
+    expect(snap.in_flight).toBe(1);
+
+    now = "2026-06-02T20:01:01.000Z";
+    await handle.tick();
+
+    const final = await handle.client.getByQueryId(enq.query_id);
+    if (!final.ok) throw new Error();
+    expect(final.value.status).toBe("failed");
+    expect(final.value.failure_kind).toBe("scheduler_wedged");
+    expect(final.value.failure_detail).toContain("stale in_flight claim");
+    snap = await handle.snapshot();
+    expect(snap.in_flight).toBe(0);
+    expect(snap.available_slots).toBe(1);
+    fetchSpy.mockRestore();
+  });
+
   it("DISPATCH_SCHEDULER_ENABLED=false does not start the interval", async () => {
     const handle = new SchedulerHandle({
       adapter,

@@ -283,13 +283,21 @@ describe("POST /agent-done — input validation", () => {
     expect(r.status).toBe(400);
   });
 
-  it("returns 404 for unknown dispatch_id", async () => {
+  it("accepts unknown dispatch_id as ignored non-scheduler closeout", async () => {
     const r = await fetch(`${baseUrl}/agent-done`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ dispatch_id: "phid:disp-deadbeef", success: true }),
     });
-    expect(r.status).toBe(404);
+    expect(r.status).toBe(200);
+    const body = await r.json();
+    expect(body).toMatchObject({
+      ok: true,
+      dispatch_id: "phid:disp-deadbeef",
+      state: "ignored_non_scheduler",
+      ignored: true,
+      reason: "dispatch_not_found",
+    });
   });
 });
 

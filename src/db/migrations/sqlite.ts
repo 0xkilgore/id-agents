@@ -708,6 +708,10 @@ export async function migrateSqlite(adapter: SqliteAdapter): Promise<void> {
   const { migrateInboxTables } = await import('../../inbox/storage.js');
   migrateInboxTables(adapter);
 
+  // Kapelle B11 — artifact review surface (idempotent — CREATE IF NOT EXISTS).
+  const { migrateOutputsTables } = await import('../../outputs/storage.js');
+  await migrateOutputsTables(adapter);
+
   // P1 Dependency-Graph Orchestrator tables (idempotent — CREATE IF NOT EXISTS).
   const { migrateGraphTables } = await import('../../graph/storage.js');
   migrateGraphTables(adapter);

@@ -116,6 +116,8 @@ export interface TickReport {
   evidence_lookup_errors: number;
   /** B0: terminal-state guard skipped a requeue path because the doc was already terminal. */
   terminal_guard_skips: number;
+  /** B11 WIP: age-based stale-in-flight detector marked the dispatch failed. */
+  stale_in_flight_failed: number;
   cap_decision: { max_safe: number; reason: string; source: string };
   usage_gate?: {
     enforcement: "warn" | "enforce";
@@ -182,6 +184,7 @@ export class SchedulerService {
       evidence_silence_bounced: 0,
       evidence_lookup_errors: 0,
       terminal_guard_skips: 0,
+      stale_in_flight_failed: 0,
       cap_decision: { max_safe: 0, reason: "", source: "" },
     };
 
@@ -193,6 +196,14 @@ export class SchedulerService {
 
     const wedged = await this.reapWedgedInFlight(report);
     report.wedged_reaped = wedged;
+
+    // B11 WIP: age-based stale-in-flight detector runs after wedged-reap
+    // and before sweepBounced. Catches dispatches that never produced a
+    // last_output_at stamp at all (so the B0 silence detector can't see
+    // them). Complementary defense-in-depth.
+    const staleFailed = await this.failStaleInFlight();
+    report.stale_in_flight_failed = staleFailed;
+    report.failed += staleFailed;
 
     const requeued = await this.sweepBounced(report);
     report.requeued = requeued;
@@ -626,6 +637,42 @@ export class SchedulerService {
         silence_ms: silence,
       });
     }
+  }
+
+  /**
+   * B11 WIP — age-based stale-in-flight detector. Distinct from B0's
+   * applyQueryEvidenceToInFlight (which is silence-aware, consuming
+   * `last_output_at`). This one catches the case where a dispatch was
+   * claimed and never produced a `last_output_at` stamp at all — e.g.,
+   * the agent process died mid-startup. Defense in depth.
+   */
+  private async failStaleInFlight(): Promise<number> {
+    const inflight = await this.client.dispatchesInFlight({
+      provider: this.provider,
+    });
+    if (!inflight.ok) return 0;
+    const nowMs = Date.parse(this.now());
+    let failed = 0;
+    for (const doc of inflight.value) {
+      if (!doc.agent_query_id) continue;
+      const startedAt = doc.started_at ?? doc.updated_at;
+      const age = nowMs - Date.parse(startedAt);
+      if (age < this.policy.stale_in_flight_ttl_ms) continue;
+      const r = await this.client.markFailed(doc.dispatch_phid, {
+        failure_kind: "scheduler_wedged",
+        detail: `stale in_flight claim with agent_query_id=${doc.agent_query_id} for ${age}ms`,
+      });
+      if (r.ok) {
+        failed += 1;
+        this.logger.warn("scheduler_stale_in_flight_failed", {
+          phid: doc.dispatch_phid,
+          agent_query_id: doc.agent_query_id,
+          age_ms: age,
+          stale_in_flight_ttl_ms: this.policy.stale_in_flight_ttl_ms,
+        });
+      }
+    }
+    return failed;
   }
 
   private async countInFlight(): Promise<number> {
