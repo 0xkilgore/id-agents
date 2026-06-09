@@ -30,6 +30,8 @@ import type {
 } from "./types.js";
 import { validateEnqueueSkipReason } from "./types.js";
 import type { SqliteAdapter } from "../db/sqlite-adapter.js";
+import type { QueriesRepository } from "../db/db-service.js";
+import { QueriesEvidenceClient } from "./queries-evidence-client.js";
 
 export type GatewayMode = "off" | "shadow" | "enforce";
 
@@ -49,6 +51,14 @@ export interface SchedulerHandleOptions {
   now?: () => string;
   /** N1.3: optional hook invoked after scheduler-owned status mutations. */
   onDispatchStatusChanged?: (phid: string, newStatus: string) => void;
+  /**
+   * B0 (2026-06-08): the manager's QueriesRepository, used to source
+   * `queries.last_output_at` + `queries.status` evidence for the
+   * scheduler's terminal-closeout + silence-detection passes. When
+   * omitted the scheduler falls back to pre-B0 behavior — recommended
+   * only for tests that don't exercise the evidence path.
+   */
+  queriesRepository?: QueriesRepository;
 }
 
 // Spec 054 §3.1 — structured actor / causation on every dispatch.
@@ -165,12 +175,19 @@ export class SchedulerHandle {
     this.transport = new HttpAgentTransport({
       resolveTargetUrl: async (doc) => opts.resolveTargetUrl(doc.to_agent),
     });
+    const queryEvidence = opts.queriesRepository
+      ? new QueriesEvidenceClient({
+          queries: opts.queriesRepository,
+          teamId: opts.teamId,
+        })
+      : undefined;
     this.scheduler = new SchedulerService({
       client: this.client,
       transport: this.transport,
       policy: this.policy,
       now,
       logger: this.logger,
+      queryEvidence,
     });
   }
 

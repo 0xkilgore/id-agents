@@ -8717,6 +8717,10 @@ export class AgentManagerDb {
             this.dispatchScheduler = new SchedulerHandle({
               adapter: this.db.adapter as SqliteAdapter,
               teamId: defaultTeamId,
+              // B0 (2026-06-08): plumb the queries repo into the scheduler so
+              // its terminal-closeout + silence-detection passes can read
+              // queries.status / last_output_at evidence from B1.
+              queriesRepository: this.db.queries,
               resolveTargetUrl: async (agentName: string) => {
                 // Resolve the worker agent's REST endpoint by name (lookup is
                 // team-local; default team in Phase A).

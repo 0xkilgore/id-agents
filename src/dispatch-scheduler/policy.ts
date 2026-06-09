@@ -25,6 +25,13 @@ export interface SchedulerPolicy {
   jitter_pct: number;
   claim_batch_limit: number;
   starting_timeout_ms: number;
+  /**
+   * B0 (2026-06-08): max time without a B1 `last_output_at` stamp before
+   * an in_flight dispatch with an agent_query_id is treated as silently
+   * wedged. Bounced + requeued. 0 disables silence-aware sweeping; the
+   * tick step then runs only the cheap terminal-closeout path.
+   */
+  silence_threshold_ms: number;
   policy_version: string;
 }
 
@@ -42,6 +49,7 @@ export const POLICY_DEFAULTS: SchedulerPolicy = {
   jitter_pct: 0.2,
   claim_batch_limit: 10,
   starting_timeout_ms: 60_000,
+  silence_threshold_ms: 30 * 60_000,
   policy_version: "v1",
 };
 
@@ -49,6 +57,7 @@ const SAFETY_CEILING = 20;
 const MIN_CAP = 1;
 
 const ENV_KEY = "DISPATCH_MAX_IN_FLIGHT_ANTHROPIC";
+const SILENCE_ENV_KEY = "DISPATCH_SILENCE_THRESHOLD_MS";
 
 function parsePositiveInt(raw: string | undefined): number | null {
   if (raw == null) return null;
@@ -69,9 +78,14 @@ export function loadSchedulerPolicy(
   const merged: SchedulerPolicy = { ...POLICY_DEFAULTS, ...(overrides.dispatch ?? {}) };
   const envAnth = parsePositiveInt(env[ENV_KEY]);
   if (envAnth != null) merged.max_in_flight_anthropic = envAnth;
+  const envSilence = parsePositiveInt(env[SILENCE_ENV_KEY]);
+  if (envSilence != null) merged.silence_threshold_ms = envSilence;
   merged.max_in_flight_anthropic = clampCap(merged.max_in_flight_anthropic);
   merged.max_in_flight_openai = clampCap(merged.max_in_flight_openai);
   merged.max_in_flight_other = clampCap(merged.max_in_flight_other);
+  if (!Number.isFinite(merged.silence_threshold_ms) || merged.silence_threshold_ms < 0) {
+    merged.silence_threshold_ms = POLICY_DEFAULTS.silence_threshold_ms;
+  }
   return merged;
 }
 

@@ -55,6 +55,36 @@ export interface UsageGateProvider {
   getExcludedAgentsForClaim(): Promise<string[]>;
 }
 
+/**
+ * B0 (2026-06-08): scheduler-side reader pass over B1's
+ * `queries.last_output_at` evidence. The scheduler consults this seam
+ * before any requeue path to (a) close out dispatches whose linked agent
+ * query is already terminal — preventing the post-outage "scheduler
+ * re-fires a done dispatch" failure mode the production replay tracks
+ * — and (b) detect silence-based wedges that the existing
+ * starting_timeout_ms / stale_in_flight_ttl_ms paths miss. Optional;
+ * when omitted, the scheduler behaves exactly as it did pre-B0.
+ */
+export interface QueryEvidence {
+  status: string;
+  last_output_at: number | null;
+}
+
+export interface QueryEvidenceClient {
+  getEvidence(agentQueryId: string): Promise<QueryEvidence | null>;
+}
+
+const TERMINAL_QUERY_STATUSES = new Set([
+  "completed",
+  "failed",
+  "cancelled",
+  "expired",
+]);
+
+function isTerminalSchedulerStatus(status: string): boolean {
+  return status === "done" || status === "failed" || status === "cancelled";
+}
+
 export interface SchedulerServiceOptions {
   client: DispatchDocClient;
   transport: AgentTransport;
@@ -65,6 +95,8 @@ export interface SchedulerServiceOptions {
   logger?: SchedulerLogger;
   /** Optional usage gate provider. When omitted, no usage gating. */
   usageGateProvider?: UsageGateProvider;
+  /** Optional B0 evidence client. When omitted, evidence sweep is skipped. */
+  queryEvidence?: QueryEvidenceClient;
 }
 
 export interface TickReport {
@@ -74,6 +106,16 @@ export interface TickReport {
   failed: number;
   requeued: number;
   wedged_reaped: number;
+  /** B0: linked agent query was already `completed`; dispatch marked done. */
+  evidence_closed_done: number;
+  /** B0: linked agent query was already `failed`/`cancelled`/`expired`; dispatch marked failed. */
+  evidence_closed_failed: number;
+  /** B0: in_flight with agent_query_id but silence > silence_threshold_ms; bounced + requeued. */
+  evidence_silence_bounced: number;
+  /** B0: evidence client raised or returned malformed data; counted, never thrown. */
+  evidence_lookup_errors: number;
+  /** B0: terminal-state guard skipped a requeue path because the doc was already terminal. */
+  terminal_guard_skips: number;
   cap_decision: { max_safe: number; reason: string; source: string };
   usage_gate?: {
     enforcement: "warn" | "enforce";
@@ -105,6 +147,7 @@ export class SchedulerService {
   private logger: SchedulerLogger;
   private budgetState: BudgetState = "ok";
   private usageGateProvider?: UsageGateProvider;
+  private queryEvidence?: QueryEvidenceClient;
 
   constructor(opts: SchedulerServiceOptions) {
     this.client = opts.client;
@@ -115,6 +158,7 @@ export class SchedulerService {
     this.provider = opts.provider ?? "anthropic";
     this.logger = opts.logger ?? NULL_LOGGER;
     this.usageGateProvider = opts.usageGateProvider;
+    this.queryEvidence = opts.queryEvidence;
   }
 
   setUsageGateProvider(p: UsageGateProvider | undefined): void {
@@ -133,13 +177,24 @@ export class SchedulerService {
       failed: 0,
       requeued: 0,
       wedged_reaped: 0,
+      evidence_closed_done: 0,
+      evidence_closed_failed: 0,
+      evidence_silence_bounced: 0,
+      evidence_lookup_errors: 0,
+      terminal_guard_skips: 0,
       cap_decision: { max_safe: 0, reason: "", source: "" },
     };
 
-    const wedged = await this.reapWedgedInFlight();
+    // B0: evidence-driven closeout runs FIRST so any in_flight dispatch
+    // whose linked agent query is already terminal gets the correct
+    // scheduler-side terminal transition before reapWedgedInFlight or
+    // sweepBounced get a chance to re-fire it.
+    await this.applyQueryEvidenceToInFlight(report);
+
+    const wedged = await this.reapWedgedInFlight(report);
     report.wedged_reaped = wedged;
 
-    const requeued = await this.sweepBounced();
+    const requeued = await this.sweepBounced(report);
     report.requeued = requeued;
 
     const safe = getSafeConcurrency(
@@ -343,7 +398,7 @@ export class SchedulerService {
     }
   }
 
-  private async sweepBounced(): Promise<number> {
+  private async sweepBounced(report: TickReport): Promise<number> {
     const bounced = await this.client.dispatchBounceRetries({
       provider: this.provider,
     });
@@ -352,6 +407,13 @@ export class SchedulerService {
     let count = 0;
     for (const doc of bounced.value) {
       if (doc.not_before_at > now) continue;
+      // B0 terminal-state defense: re-fetch right before any mutation so
+      // a doc that transitioned to a terminal state between the list and
+      // the mutation is not requeued. The production failure mode this
+      // guards against: post-outage manager restart finds a "bounced"
+      // row, agent's /agent-done already terminalised it, scheduler
+      // would otherwise re-fire it.
+      if (await this.docIsTerminal(doc.dispatch_phid, report)) continue;
       if (doc.attempt_count >= this.policy.rate_limit_max_attempts) {
         const ex = await this.client.markRetryExhausted(
           doc.dispatch_phid,
@@ -377,7 +439,7 @@ export class SchedulerService {
     return count;
   }
 
-  private async reapWedgedInFlight(): Promise<number> {
+  private async reapWedgedInFlight(report: TickReport): Promise<number> {
     const inflight = await this.client.dispatchesInFlight({
       provider: this.provider,
     });
@@ -389,6 +451,8 @@ export class SchedulerService {
       if (!doc.started_at) continue;
       const age = nowMs - Date.parse(doc.started_at);
       if (age < this.policy.starting_timeout_ms) continue;
+      // B0 terminal-state defense: same rationale as sweepBounced.
+      if (await this.docIsTerminal(doc.dispatch_phid, report)) continue;
       // Wedged start. Return to queued by marking bounced with an
       // immediate next_attempt_at (zero backoff for wedged starts —
       // they are not provider throttles), then requeueing.
@@ -409,6 +473,159 @@ export class SchedulerService {
       }
     }
     return reaped;
+  }
+
+  /**
+   * B0 — defense-in-depth re-fetch. The list APIs filter by
+   * status === in_flight / bounced, but a concurrent operator
+   * intervention or /agent-done could have flipped the row terminal
+   * between the list snapshot and the mutation. Re-read by phid right
+   * before mutation and skip when terminal. Counted in the report so
+   * the production replay can assert on the skip rate.
+   */
+  private async docIsTerminal(phid: string, report: TickReport): Promise<boolean> {
+    const got = await this.client.getByPhid(phid);
+    if (!got.ok) {
+      // Read failure is treated as "do not mutate" to err on the safe
+      // side: a transient read miss is better than a duplicate dispatch
+      // emit. Logged for visibility.
+      this.logger.warn("scheduler_terminal_guard_read_failed", {
+        phid,
+        detail: got.detail,
+      });
+      report.terminal_guard_skips += 1;
+      return true;
+    }
+    if (isTerminalSchedulerStatus(got.value.status)) {
+      report.terminal_guard_skips += 1;
+      this.logger.warn("scheduler_terminal_guard_skipped", {
+        phid,
+        status: got.value.status,
+      });
+      return true;
+    }
+    return false;
+  }
+
+  /**
+   * B0 — evidence-driven closeout. For every in_flight dispatch that
+   * carries an agent_query_id, consult the query-evidence client to
+   * learn the agent-side state. Three branches:
+   *
+   *   1. Linked query is terminal (`completed`) → markDone the dispatch.
+   *      This is the load-bearing fix for the production failure where
+   *      the agent already called /agent-done before the manager
+   *      outage, but the dispatch row stayed `in_flight`. Without this
+   *      step, reapWedgedInFlight (and any age-based detector) would
+   *      eventually re-fire the dispatch.
+   *
+   *   2. Linked query is terminal-failure (`failed`/`cancelled`/`expired`)
+   *      → markFailed the dispatch with `agent_error`. Same rationale,
+   *      different outcome.
+   *
+   *   3. Linked query is still in-flight but `last_output_at` is older
+   *      than `silence_threshold_ms` → markBounced + requeueAfterBounce.
+   *      Distinct from canes age-based `failStaleInFlight`: silence is
+   *      "no progress observed", which is a meaningful signal when the
+   *      query has been processing for a while without any output.
+   *
+   * Errors are soft: the dispatch is left in_flight and the counter
+   * increments. The tick never throws on evidence-client failures.
+   */
+  private async applyQueryEvidenceToInFlight(report: TickReport): Promise<void> {
+    if (!this.queryEvidence) return;
+    const inflight = await this.client.dispatchesInFlight({
+      provider: this.provider,
+    });
+    if (!inflight.ok) return;
+    const nowMs = Date.parse(this.now());
+    for (const doc of inflight.value) {
+      if (!doc.agent_query_id) continue;
+      let evidence: QueryEvidence | null;
+      try {
+        evidence = await this.queryEvidence.getEvidence(doc.agent_query_id);
+      } catch (err) {
+        report.evidence_lookup_errors += 1;
+        this.logger.warn("scheduler_evidence_lookup_failed", {
+          phid: doc.dispatch_phid,
+          agent_query_id: doc.agent_query_id,
+          detail: err instanceof Error ? err.message : String(err),
+        });
+        continue;
+      }
+      if (!evidence) continue;
+
+      if (evidence.status === "completed") {
+        const r = await this.client.markDone(doc.dispatch_phid);
+        if (r.ok) {
+          report.evidence_closed_done += 1;
+          this.logger.info("scheduler_evidence_closed_done", {
+            phid: doc.dispatch_phid,
+            agent_query_id: doc.agent_query_id,
+          });
+        }
+        continue;
+      }
+      if (TERMINAL_QUERY_STATUSES.has(evidence.status)) {
+        const r = await this.client.markFailed(doc.dispatch_phid, {
+          failure_kind: "agent_error",
+          detail: `linked query terminated ${evidence.status}`,
+        });
+        if (r.ok) {
+          report.evidence_closed_failed += 1;
+          this.logger.warn("scheduler_evidence_closed_failed", {
+            phid: doc.dispatch_phid,
+            agent_query_id: doc.agent_query_id,
+            query_status: evidence.status,
+          });
+        }
+        continue;
+      }
+
+      // Non-terminal: silence detector.
+      if (this.policy.silence_threshold_ms <= 0) continue;
+      if (evidence.last_output_at == null) continue;
+      const silence = nowMs - evidence.last_output_at;
+      if (silence < this.policy.silence_threshold_ms) continue;
+      if (doc.attempt_count >= this.policy.rate_limit_max_attempts) {
+        const ex = await this.client.markRetryExhausted(
+          doc.dispatch_phid,
+          `silence ${silence}ms past threshold and attempts ${doc.attempt_count} exhausted`,
+        );
+        if (ex.ok) {
+          this.logger.warn("scheduler_evidence_silence_exhausted", {
+            phid: doc.dispatch_phid,
+            silence_ms: silence,
+          });
+        }
+        continue;
+      }
+      // Use the rate_limit_backoff_initial_ms as the silence-bounce
+      // gap so sweepBounced does not requeue the dispatch in the very
+      // same tick (which would cause a tight bounce/requeue/claim
+      // loop and burn attempt budget). A 30s default gives the
+      // operator a real window to observe before the next attempt.
+      const nextAt = new Date(
+        nowMs + Math.max(1_000, this.policy.rate_limit_backoff_initial_ms),
+      ).toISOString();
+      const b = await this.client.markBounced(doc.dispatch_phid, {
+        kind: "scheduler_silence",
+        message: `silence ${silence}ms past threshold ${this.policy.silence_threshold_ms}ms`,
+        next_attempt_at: nextAt,
+      });
+      if (!b.ok) continue;
+      // Intentionally do NOT requeueAfterBounce here — leave the dispatch
+      // in bounced state with the backoff above. sweepBounced will pick
+      // it up on the first tick after `next_attempt_at`. Keeps the
+      // bounce / requeue separation clean and consistent with the
+      // existing provider-throttle path.
+      report.evidence_silence_bounced += 1;
+      this.logger.warn("scheduler_evidence_silence_bounced", {
+        phid: doc.dispatch_phid,
+        agent_query_id: doc.agent_query_id,
+        silence_ms: silence,
+      });
+    }
   }
 
   private async countInFlight(): Promise<number> {
