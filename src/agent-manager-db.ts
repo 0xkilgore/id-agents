@@ -2061,6 +2061,51 @@ export class AgentManagerDb {
       }
     });
 
+    const acceptDispatchRoute = async (req: any, res: any) => {
+      if (!this.dispatchScheduler) {
+        return res.status(503).json({
+          ok: false,
+          error: 'dispatch_scheduler_not_initialised',
+        });
+      }
+      try {
+        const dispatchIdRaw = normalizeDispatchIdInput(req.params.dispatch_id);
+        const body = (req.body || {}) as { agent_query_id?: unknown };
+        const agentQueryId =
+          typeof body.agent_query_id === 'string' ? body.agent_query_id.trim() : '';
+        if (!dispatchIdRaw || !agentQueryId) {
+          return res.status(400).json({
+            ok: false,
+            error: 'dispatch_id and non-empty agent_query_id required',
+          });
+        }
+        const doc = await this.dispatchScheduler.acceptDispatchStart({
+          dispatch_id: dispatchIdRaw,
+          agent_query_id: agentQueryId,
+        });
+        if (!doc) {
+          return res.status(404).json({
+            ok: false,
+            error: `dispatch not found: ${dispatchIdRaw}`,
+          });
+        }
+        return res.json({
+          ok: true,
+          dispatch_id: doc.dispatch_phid,
+          query_id: doc.query_id,
+          agent_query_id: doc.agent_query_id,
+          state: doc.status,
+          started_at: doc.started_at,
+        });
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        const status = /conflict|terminal|requires/i.test(msg) ? 409 : 500;
+        return res.status(status).json({ ok: false, error: msg });
+      }
+    };
+    this.managementApp.post('/dispatches/:dispatch_id/accept', acceptDispatchRoute);
+    this.managementApp.post('/dispatches/:dispatch_id/in-flight', acceptDispatchRoute);
+
     // ────────────────────────────────────────────────────────────────
     // Spec 054 v2 — agent clarification protocol.
     //   POST /agent-needs-input  : agent pauses on a question
