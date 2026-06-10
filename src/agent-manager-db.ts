@@ -1708,6 +1708,13 @@ export class AgentManagerDb {
         }
       }
 
+      // Task 10: under enforce mode, surface that this legacy path is still in use so operators can migrate the caller.
+      if (this.dispatchCanonicalMode === 'enforce') {
+        console.warn(
+          `[Manager] dispatch_canonical_skip_accept route=/talk-to to=${targetDisplayId} from=${from || 'manager'} — legacy direct /talk dispatch bypassed acceptDispatchStart under enforce mode`,
+        );
+      }
+
       // Forward the message to the agent's /talk endpoint
       const result = await this.forwardToAgent(targetUrl, message, from || 'manager', session_id);
       if (!result.ok) {
