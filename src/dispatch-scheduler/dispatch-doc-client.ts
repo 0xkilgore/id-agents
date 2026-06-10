@@ -28,6 +28,7 @@ export interface DispatchReactor {
   getByQueryId: FakeReactor["getByQueryId"];
   claim: FakeReactor["claim"];
   recordAgentStart: FakeReactor["recordAgentStart"];
+  acceptDispatchStart: FakeReactor["acceptDispatchStart"];
   markDone: FakeReactor["markDone"];
   markFailed: FakeReactor["markFailed"];
   markBounced: FakeReactor["markBounced"];
@@ -89,6 +90,15 @@ export class DispatchDocClient {
   ): Promise<Result<DispatchDoc>> {
     return this.wrapNullable("recordAgentStart", () =>
       this.reactor.recordAgentStart(phid, agent_query_id),
+    );
+  }
+
+  async acceptDispatchStart(
+    phid: string,
+    input: { agent_query_id: string },
+  ): Promise<Result<DispatchDoc>> {
+    return this.wrapNullable("acceptDispatchStart", () =>
+      this.reactor.acceptDispatchStart(phid, input),
     );
   }
 
