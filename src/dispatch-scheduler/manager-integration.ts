@@ -425,6 +425,21 @@ export class SchedulerHandle {
     return this.reactor.markDoneWithResult(doc.dispatch_phid, args.result ?? null);
   }
 
+  async acceptDispatchStart(args: {
+    dispatch_id: string;
+    agent_query_id: string;
+  }): Promise<DispatchDoc | null> {
+    const doc = args.dispatch_id.startsWith("phid:")
+      ? await this.reactor.getByPhid(args.dispatch_id)
+      : await this.reactor.getByQueryId(args.dispatch_id);
+    if (!doc) return null;
+    const r = await this.client.acceptDispatchStart(doc.dispatch_phid, {
+      agent_query_id: args.agent_query_id,
+    });
+    if (!r.ok) throw new Error(r.detail);
+    return r.value;
+  }
+
   /** Live snapshot for /system-live and operator probes. */
   async snapshot(provider: Provider = "anthropic"): Promise<{
     in_flight: number;

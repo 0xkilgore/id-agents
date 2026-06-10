@@ -640,3 +640,42 @@ describe("handleAgentDone — queued-dispatch closeout (Spec 2026-06-01)", () =>
     expect(r).toEqual({ artifact_path: "/tmp/first.md" });
   });
 });
+
+describe("SchedulerHandle.acceptDispatchStart", () => {
+  it("resolves dispatch_id with phid prefix via getByPhid", async () => {
+    const handle = new SchedulerHandle({
+      adapter,
+      teamId: "team",
+      resolveTargetUrl: () => "http://localhost:9999",
+    });
+    const enq = await handle.enqueue({
+      from_actor: "cane",
+      to_agent: "coder",
+      message: "hi",
+    });
+    const doc = await handle.acceptDispatchStart({
+      dispatch_id: enq.dispatch_phid,
+      agent_query_id: "agent-q-1",
+    });
+    expect(doc?.status).toBe("in_flight");
+    expect(doc?.agent_query_id).toBe("agent-q-1");
+  });
+
+  it("resolves dispatch_id given as a manager query_id via getByQueryId", async () => {
+    const handle = new SchedulerHandle({
+      adapter,
+      teamId: "team",
+      resolveTargetUrl: () => "http://localhost:9999",
+    });
+    const enq = await handle.enqueue({
+      from_actor: "cane",
+      to_agent: "coder",
+      message: "hi",
+    });
+    const doc = await handle.acceptDispatchStart({
+      dispatch_id: enq.query_id, // pass the manager query_id, not phid
+      agent_query_id: "agent-q-1",
+    });
+    expect(doc?.status).toBe("in_flight");
+  });
+});
