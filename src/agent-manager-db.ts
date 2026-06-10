@@ -2500,6 +2500,32 @@ export class AgentManagerDb {
         }
 
         const reactor = this.dispatchScheduler.reactor;
+
+        // Task 9: strict id match (open Q7 resolution). When BOTH
+        // dispatch_id and query_id are supplied, they must resolve to the
+        // same Dispatch doc. A mismatched pair almost always means a buggy
+        // closeout against the wrong dispatch — silently picking one side
+        // is what produced the partial-truth tracking problems the spec
+        // calls out. One-sided unresolved (e.g. stale query_id, missing
+        // dispatch_id) falls through to the standard resolution loop so
+        // the manager stays resilient to legacy/orphaned refs.
+        if (dispatchIdRaw && queryId) {
+          const docByDispatch = dispatchIdRaw.startsWith('phid:')
+            ? await reactor.getByPhid(dispatchIdRaw)
+            : await reactor.getByQueryId(dispatchIdRaw);
+          const docByQueryId = await reactor.getByQueryId(queryId);
+          if (
+            docByDispatch &&
+            docByQueryId &&
+            docByDispatch.dispatch_phid !== docByQueryId.dispatch_phid
+          ) {
+            return res.status(409).json({
+              ok: false,
+              error: `agent-done: dispatch_id and query_id mismatch (dispatch=${docByDispatch.dispatch_phid}, query=${docByQueryId.dispatch_phid})`,
+            });
+          }
+        }
+
         let doc = null as Awaited<ReturnType<typeof reactor.getByPhid>> | null;
         if (dispatchIdRaw && dispatchIdRaw.startsWith('phid:')) {
           doc = await reactor.getByPhid(dispatchIdRaw);
