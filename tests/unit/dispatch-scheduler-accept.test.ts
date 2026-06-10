@@ -1,6 +1,9 @@
 import { describe, it, expect } from "vitest";
 import { FakeReactor } from "../../src/dispatch-scheduler/fake-reactor.js";
 import type { EnqueueInput } from "../../src/dispatch-scheduler/types.js";
+import { SqliteAdapter } from "../../src/db/sqlite-adapter.js";
+import { migrateSqlite } from "../../src/db/migrations/sqlite.js";
+import { SqliteDispatchReactor } from "../../src/dispatch-scheduler/sqlite-dispatch-reactor.js";
 
 const NOW = "2026-06-10T12:00:00.000Z";
 const base: EnqueueInput = {
@@ -71,5 +74,58 @@ describe("FakeReactor.acceptDispatchStart", () => {
     await expect(
       reactor.acceptDispatchStart(doc.dispatch_phid, { agent_query_id: "" }),
     ).rejects.toThrow();
+  });
+});
+
+describe("SqliteDispatchReactor.acceptDispatchStart", () => {
+  async function setup() {
+    const adapter = new SqliteAdapter(":memory:");
+    await migrateSqlite(adapter);
+    const reactor = new SqliteDispatchReactor({
+      adapter,
+      teamId: "team_default",
+      now: () => NOW,
+    });
+    return { adapter, reactor };
+  }
+
+  it("queued -> in_flight succeeds via UPDATE WHERE status='queued'", async () => {
+    const { reactor } = await setup();
+    const doc = await reactor.enqueue(base);
+    const accepted = await reactor.acceptDispatchStart(doc.dispatch_phid, {
+      agent_query_id: "agent-q-1",
+    });
+    expect(accepted?.status).toBe("in_flight");
+    expect(accepted?.attempt_count).toBe(doc.attempt_count + 1);
+    expect(accepted?.agent_query_id).toBe("agent-q-1");
+  });
+
+  it("idempotent in_flight + same agent_query_id (no second UPDATE counted)", async () => {
+    const { reactor } = await setup();
+    const doc = await reactor.enqueue(base);
+    await reactor.acceptDispatchStart(doc.dispatch_phid, { agent_query_id: "agent-q-1" });
+    const replay = await reactor.acceptDispatchStart(doc.dispatch_phid, {
+      agent_query_id: "agent-q-1",
+    });
+    expect(replay?.attempt_count).toBe(doc.attempt_count + 1);
+  });
+
+  it("conflict on different agent_query_id in in_flight", async () => {
+    const { reactor } = await setup();
+    const doc = await reactor.enqueue(base);
+    await reactor.acceptDispatchStart(doc.dispatch_phid, { agent_query_id: "agent-q-1" });
+    await expect(
+      reactor.acceptDispatchStart(doc.dispatch_phid, { agent_query_id: "agent-q-2" }),
+    ).rejects.toThrow(/conflict/i);
+  });
+
+  it("terminal-state semantics match FakeReactor", async () => {
+    const { reactor } = await setup();
+    const doc = await reactor.enqueue(base);
+    await reactor.acceptDispatchStart(doc.dispatch_phid, { agent_query_id: "agent-q-1" });
+    await reactor.markDone(doc.dispatch_phid);
+    await expect(
+      reactor.acceptDispatchStart(doc.dispatch_phid, { agent_query_id: "agent-q-2" }),
+    ).rejects.toThrow(/terminal/i);
   });
 });

@@ -315,19 +315,55 @@ export class SqliteDispatchReactor {
     phid: string,
     agent_query_id: string,
   ): Promise<DispatchDoc | null> {
+    return this.acceptDispatchStart(phid, { agent_query_id });
+  }
+
+  async acceptDispatchStart(
+    phid: string,
+    input: { agent_query_id: string },
+  ): Promise<DispatchDoc | null> {
     const doc = await this.getByPhid(phid);
     if (!doc) return null;
-    if (doc.status !== "in_flight") {
-      throw conflict(`recordAgentStart requires in_flight, was ${doc.status}`);
+    const agentQueryId = input.agent_query_id.trim();
+    if (!agentQueryId) {
+      throw conflict("acceptDispatchStart requires non-empty agent_query_id");
     }
     const now = this.nowFn();
-    await this.adapter.query(
-      `UPDATE dispatch_scheduler_queue
-       SET agent_query_id = ?, updated_at = ?
-       WHERE dispatch_phid = ?`,
-      [agent_query_id, now, phid],
-    );
-    return this.getByPhid(phid);
+    if (doc.status === "queued") {
+      const { rowCount } = await this.adapter.query(
+        `UPDATE dispatch_scheduler_queue
+         SET status = 'in_flight',
+             attempt_count = attempt_count + 1,
+             started_at = ?,
+             updated_at = ?,
+             agent_query_id = ?
+         WHERE dispatch_phid = ? AND team_id = ? AND status = 'queued'`,
+        [now, now, agentQueryId, phid, this.teamId],
+      );
+      if (rowCount === 0) {
+        throw conflict(`acceptDispatchStart lost queued transition for ${phid}`);
+      }
+      return this.getByPhid(phid);
+    }
+    if (doc.status === "in_flight") {
+      if (doc.agent_query_id && doc.agent_query_id !== agentQueryId) {
+        throw conflict(
+          `acceptDispatchStart conflict: in_flight has agent_query_id ${doc.agent_query_id}`,
+        );
+      }
+      await this.adapter.query(
+        `UPDATE dispatch_scheduler_queue
+         SET agent_query_id = ?, updated_at = ?
+         WHERE dispatch_phid = ? AND team_id = ? AND status = 'in_flight'`,
+        [agentQueryId, now, phid, this.teamId],
+      );
+      return this.getByPhid(phid);
+    }
+    if (doc.status === "done" || doc.status === "failed" || doc.status === "cancelled") {
+      if (doc.agent_query_id === agentQueryId) return doc;
+      throw conflict(`acceptDispatchStart cannot run from terminal ${doc.status}`);
+    }
+    throw conflict(`acceptDispatchStart requires queued or in_flight, was ${doc.status}`);
   }
 
   async markDone(phid: string): Promise<DispatchDoc | null> {
