@@ -101,6 +101,22 @@ export function loadSchedulerPolicy(
   return merged;
 }
 
+// Spec 2026-06-10 (dispatch-canonical, Task 10): mode flag controlling the
+// strictness of the canonical-lifecycle invariant. `shadow` is the default
+// during rollout — direct /talk flows that bypass acceptDispatchStart are
+// silently tolerated. `enforce` (Phase C) emits structured warnings so
+// operators can spot any remaining legacy callers without refusing the work.
+// Both modes leave markQueuedDoneWithResult available as the documented
+// repair path.
+export type DispatchCanonicalMode = "shadow" | "enforce";
+
+export function parseDispatchCanonicalMode(
+  env: Record<string, string | undefined>,
+): DispatchCanonicalMode {
+  const raw = (env.DISPATCH_CANONICAL_MODE ?? "shadow").toLowerCase();
+  return raw === "enforce" ? "enforce" : "shadow";
+}
+
 export type BudgetState = "ok" | "soft_pause" | "hard_pause";
 
 export interface SafeConcurrencyInput {

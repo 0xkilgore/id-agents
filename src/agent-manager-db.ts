@@ -76,6 +76,10 @@ import type { HarnessType } from './harness/types.js';
 import { SchedulerService } from './scheduling/scheduler-service.js';
 import { SchedulerHandle, parseGatewayMode } from './dispatch-scheduler/manager-integration.js';
 import {
+  parseDispatchCanonicalMode,
+  type DispatchCanonicalMode,
+} from './dispatch-scheduler/policy.js';
+import {
   parseDispatchReadStatus,
   parseReadLimit,
   readArtifacts,
@@ -395,6 +399,10 @@ export class AgentManagerDb {
    * inter-agent messages.
    */
   private dispatchScheduler: SchedulerHandle | null = null;
+  // Task 10: cached canonical-mode flag, parsed once at startup. Exposed for
+  // gateway code paths (legacy direct /talk) that need to emit observation
+  // warnings under enforce, and for /system-live / tests to inspect.
+  dispatchCanonicalMode: DispatchCanonicalMode = parseDispatchCanonicalMode(process.env);
   private queryWaiters: Map<string, QueryWaiter> = new Map(); // key: query_id
   // Long-poll waiters for GET /query/:id?wait=<seconds>. Wakes when a daemon-side
   // query write (news.in_reply_to completion, agent-stop cancel) transitions
@@ -8968,6 +8976,14 @@ export class AgentManagerDb {
               },
             });
             this.dispatchScheduler.start();
+            // Task 10: surface the canonical-mode flag on startup so operators
+            // can confirm the rollout phase from the manager log without
+            // shelling into the process. The mode is captured once at boot
+            // (see field initializer) — re-parsing on every log line would
+            // mask process-restart drift.
+            console.log(
+              `[Manager] dispatch_canonical_mode=${this.dispatchCanonicalMode}`,
+            );
           } catch (err) {
             console.warn(
               '[Manager] Failed to bootstrap dispatch scheduler:',
