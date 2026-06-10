@@ -16,6 +16,7 @@ import {
   listDecisions,
   recordDecideTransaction,
 } from "./storage.js";
+import { ingestDecisionsFromMarkdown } from "./producer.js";
 import type {
   DecideDecisionInput,
   DecideDecisionResponse,
@@ -194,6 +195,49 @@ export function mountDecisionsRoutes(
       }
     },
   );
+
+  // POST /decisions/ingest — operator-triggered re-ingest from the
+  // Maestra source markdown. Body: { source_path: string }. The
+  // producer reads the file, runs the safe-by-construction parser, and
+  // upserts each classified row into the decisions table. Returns an
+  // IngestResult so the operator can see inserted/updated counts +
+  // any skipped rows. The endpoint is intentionally idempotent: a
+  // re-ingest with the same source produces zero new rows and updates
+  // any rows whose Maestra-side status changed since last call.
+  app.post("/decisions/ingest", async (req: Request, res: Response) => {
+    try {
+      const sourcePath = typeof req.body?.source_path === "string" ? req.body.source_path : null;
+      if (!sourcePath) {
+        res.status(400).json({
+          ok: false,
+          error: "source_path_required",
+          message: "body.source_path must be an absolute path to a decisions markdown file",
+        });
+        return;
+      }
+      // Guard against path traversal — accept absolute paths only.
+      if (!sourcePath.startsWith("/")) {
+        res.status(400).json({
+          ok: false,
+          error: "source_path_must_be_absolute",
+          message: `source_path must start with '/' (got ${sourcePath.slice(0, 64)})`,
+        });
+        return;
+      }
+      const result = await ingestDecisionsFromMarkdown(adapter, {
+        source_path: sourcePath,
+        now: now().toISOString(),
+      });
+      res.json({ ok: true, ...result });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      res.status(500).json({
+        ok: false,
+        error: "ingest_failed",
+        message,
+      });
+    }
+  });
 }
 
 function parseStatus(raw: unknown): DecisionStatus | null {

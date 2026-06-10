@@ -254,3 +254,26 @@ describe("POST /decisions/:decision_id/decide — idempotent decide", () => {
     expect(res.body.error).toBeTruthy();
   });
 });
+
+describe("POST /decisions/ingest — operator-triggered producer", () => {
+  it("returns 400 when source_path is missing or relative", async () => {
+    const { app } = await bootApp();
+    const empty = await request(app).post("/decisions/ingest", {});
+    expect(empty.status).toBe(400);
+    expect(empty.body.error).toBe("source_path_required");
+
+    const relative = await request(app).post("/decisions/ingest", { source_path: "decisions.md" });
+    expect(relative.status).toBe(400);
+    expect(relative.body.error).toBe("source_path_must_be_absolute");
+  });
+
+  it("returns 500 when the source file does not exist (operator-readable error)", async () => {
+    const { app } = await bootApp();
+    const res = await request(app).post("/decisions/ingest", {
+      source_path: "/nonexistent/path/decisions.md",
+    });
+    expect(res.status).toBe(500);
+    expect(res.body.error).toBe("ingest_failed");
+    expect(res.body.message).toMatch(/ENOENT|no such file/i);
+  });
+});

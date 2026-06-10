@@ -90,6 +90,58 @@ export async function insertDecision(adapter: DbAdapter, row: DecisionRow): Prom
   );
 }
 
+/**
+ * Idempotent upsert. Same `decision_id` re-inserted updates the row in
+ * place rather than producing a duplicate / constraint error.
+ * `created_at` is preserved on the existing row so producers don't
+ * accidentally reset it on every ingest; everything else is overwritten
+ * from the incoming row.
+ *
+ * Returns "inserted" when the row was new; "updated" otherwise.
+ */
+export type UpsertOutcome = "inserted" | "updated";
+
+export async function upsertDecision(
+  adapter: DbAdapter,
+  row: DecisionRow,
+): Promise<UpsertOutcome> {
+  const existing = await getDecisionById(adapter, row.decision_id);
+  if (!existing) {
+    await insertDecision(adapter, row);
+    return "inserted";
+  }
+  await adapter.query(
+    `UPDATE decisions
+       SET display_id          = ?,
+           title               = ?,
+           question            = ?,
+           context_excerpt     = ?,
+           recommendation_json = ?,
+           options_json        = ?,
+           status              = ?,
+           estimated_seconds   = ?,
+           priority            = ?,
+           owner               = ?,
+           requested_by        = ?,
+           updated_at          = ?,
+           resolved_at         = ?,
+           resolved_by         = ?,
+           resolution_note     = ?,
+           selected_option_id  = COALESCE(?, selected_option_id),
+           source_refs_json    = ?,
+           provenance_json     = ?
+     WHERE decision_id = ?`,
+    [
+      row.display_id, row.title, row.question, row.context_excerpt,
+      row.recommendation_json, row.options_json, row.status, row.estimated_seconds, row.priority,
+      row.owner, row.requested_by, row.updated_at, row.resolved_at, row.resolved_by,
+      row.resolution_note, row.selected_option_id, row.source_refs_json, row.provenance_json,
+      row.decision_id,
+    ],
+  );
+  return "updated";
+}
+
 export interface ListFilters {
   status: DecisionStatus;
   max_estimated_seconds?: number;
