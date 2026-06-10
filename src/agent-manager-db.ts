@@ -474,6 +474,70 @@ export class AgentManagerDb {
    * the N1.3 dispatch bridge — errors are logged, never thrown, and
    * MUST NOT change the HTTP status of /tasks/:ref/done.
    */
+  /**
+   * Closes a task into status:done and runs the full cascade required
+   * for downstream read-models to reflect the close immediately:
+   *   1. Update the row (status + completed_at + updated_at) in one
+   *      SQL UPDATE.
+   *   2. Re-read the row so callers and emitted events always see the
+   *      committed state, not the stale in-memory copy.
+   *   3. Emit `task:completed` so any subscriber (checkin auto-close,
+   *      news fan-out, downstream projections) flips at the same tick.
+   *   4. Auto-close linked checkins.
+   *   5. Best-effort graph re-evaluation (fire-and-forget; bridge
+   *      errors never change the close outcome).
+   *
+   * Used by BOTH `POST /tasks/:ref/done` and the CLI `/task done`
+   * (`POST /remote` body command) so the two close paths can never
+   * diverge — every close emits the same events, every consumer's
+   * projection sees the same terminal-state transition. Eliminates the
+   * "task closed but checkin still firing / GET /tasks lagging because
+   * /remote was used instead of /tasks/:ref/done" failure mode that
+   * confused operator handoffs.
+   *
+   * @returns the freshly-read TaskRow in `status: 'done'`.
+   */
+  private async closeTaskAndCascade(opts: {
+    task: TaskRow;
+    teamId: string;
+    actorAgentId: string | null;
+  }): Promise<TaskRow> {
+    const { task, teamId, actorAgentId } = opts;
+    const nowSec = Math.floor(Date.now() / 1000);
+    await this.db.tasks.updateFields(task.id, {
+      status: 'done',
+      completed_at: nowSec,
+      updated_at: nowSec,
+    });
+    const updated = await this.db.tasks.getByNameForTeam(task.name, teamId);
+    if (!updated) {
+      // updateFields succeeded against `task.id` but the re-read missed
+      // the row — only possible under a concurrent DELETE. Surface to
+      // the caller as the pre-update row so the response still echoes
+      // the user-supplied close.
+      return { ...task, status: 'done', completed_at: nowSec, updated_at: nowSec };
+    }
+    const occurredAtMs = Date.now();
+    await emitTaskCompleted(this.db.events, {
+      teamId,
+      taskUuid: updated.uuid,
+      taskName: updated.name,
+      title: updated.title,
+      ownerAgentId: updated.owner ?? null,
+      actorAgentId: actorAgentId ?? updated.owner ?? null,
+      occurredAt: occurredAtMs,
+    });
+    await closeLinkedCheckinsForTerminalTask(this.db, {
+      teamId,
+      taskId: updated.id,
+      taskStatus: updated.status,
+      actorAgentId: actorAgentId ?? updated.owner ?? null,
+      occurredAt: occurredAtMs,
+    });
+    this.evaluateGraphsForTaskBestEffort(updated.id, 'task_done');
+    return updated;
+  }
+
   private evaluateGraphsForTaskBestEffort(
     taskId: string,
     trigger: 'task_done',
@@ -5327,41 +5391,12 @@ export class AgentManagerDb {
           return res.status(403).json({ error: `Agent "${callerRef}" is not the owner of task "${task.name}"` });
         }
 
-        const now = Math.floor(Date.now() / 1000);
-        await this.db.tasks.updateFields(task.id, {
-          status: 'done',
-          completed_at: now,
-          updated_at: now,
-        });
-
-        const updated = await this.db.tasks.getByNameForTeam(task.name, teamId);
-        const completedAt = Date.now();
-        await emitTaskCompleted(this.db.events, {
+        const updated = await this.closeTaskAndCascade({
+          task,
           teamId,
-          taskUuid: updated!.uuid,
-          taskName: updated!.name,
-          title: updated!.title,
-          ownerAgentId: updated!.owner ?? null,
-          actorAgentId: callerAgent?.id ?? updated!.owner ?? null,
-          occurredAt: completedAt,
+          actorAgentId: callerAgent?.id ?? null,
         });
-        // Auto-close any active/snoozed checkins linked to this task and
-        // emit one checkin:closed event per row. Pure consumer of the
-        // task:completed signal we just emitted above.
-        await closeLinkedCheckinsForTerminalTask(this.db, {
-          teamId,
-          taskId: updated!.id,
-          taskStatus: updated!.status,
-          actorAgentId: callerAgent?.id ?? updated!.owner ?? null,
-          occurredAt: completedAt,
-        });
-        // N1.4: best-effort graph re-evaluation. Runs AFTER the task is
-        // marked done, the task:completed event has been emitted, and
-        // linked checkins have been auto-closed — keeps existing ordering
-        // for those consumers. Bridge errors are logged and never change
-        // the HTTP status of this endpoint.
-        this.evaluateGraphsForTaskBestEffort(updated!.id, 'task_done');
-        res.json({ ok: true, task: await this.buildTaskResult(updated!, teamId) });
+        res.json({ ok: true, task: await this.buildTaskResult(updated, teamId) });
       } catch (err: any) {
         console.error('[Manager] Error in POST /tasks/:ref/done:', err);
         res.status(500).json({ error: err?.message || 'Internal server error' });
@@ -8481,7 +8516,15 @@ export class AgentManagerDb {
 
         if (subCmd === 'done') {
           // /task done <task-name|#shortid>
-          // Manager can mark any task done; agent can only mark its own task done
+          // Manager can mark any task done; agent can only mark its own task done.
+          //
+          // This path is what the TUI and any `POST /remote {command:'/task done …'}`
+          // caller hits. It MUST run the same close cascade as the
+          // REST endpoint so checkin auto-close, task:completed events,
+          // and graph re-evaluation all fire on either close path.
+          // Before this consolidation the CLI path silently skipped the
+          // event emit + checkin close, producing the "task closed but
+          // downstream projection still says doing" failure mode.
           const taskRef = args[1];
           if (!taskRef) {
             return { ok: false, error: 'Usage: /task done <task-name|#shortid>' };
@@ -8496,22 +8539,21 @@ export class AgentManagerDb {
           }
 
           // If called by an agent (callerFrom set), enforce ownership
+          let actorAgentId: string | null = null;
           if (callerFrom) {
             const { agent: callerAgent } = await this.resolveSingleAgentForCommand(teamId, callerFrom);
             if (callerAgent && task.owner !== callerAgent.id) {
               return { ok: false, error: `Agent "${callerFrom}" is not the owner of task "${task.name}"` };
             }
+            actorAgentId = callerAgent?.id ?? null;
           }
 
-          const now = Math.floor(Date.now() / 1000);
-          await this.db.tasks.updateFields(task.id, {
-            status: 'done',
-            completed_at: now,
-            updated_at: now,
+          const updated = await this.closeTaskAndCascade({
+            task,
+            teamId,
+            actorAgentId,
           });
-
-          const updated = await this.db.tasks.getByNameForTeam(task.name, teamId);
-          return { ok: true, result: { task: await this.buildTaskResult(updated!, teamId) } };
+          return { ok: true, result: { task: await this.buildTaskResult(updated, teamId) } };
         }
 
         if (subCmd === 'remove') {
