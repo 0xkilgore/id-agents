@@ -128,4 +128,14 @@ describe("SqliteDispatchReactor.acceptDispatchStart", () => {
       reactor.acceptDispatchStart(doc.dispatch_phid, { agent_query_id: "agent-q-2" }),
     ).rejects.toThrow(/terminal/i);
   });
+
+  it("done + same agent_query_id is no-op (idempotent post-terminal replay)", async () => {
+    const { reactor } = await setup();
+    const doc = await reactor.enqueue(base);
+    await reactor.acceptDispatchStart(doc.dispatch_phid, { agent_query_id: "agent-q-1" });
+    await reactor.markDone(doc.dispatch_phid);
+    const replay = await reactor.acceptDispatchStart(doc.dispatch_phid, { agent_query_id: "agent-q-1" });
+    expect(replay?.status).toBe("done");
+    expect(replay?.agent_query_id).toBe("agent-q-1");
+  });
 });

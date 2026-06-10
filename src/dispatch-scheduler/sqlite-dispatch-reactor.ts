@@ -351,12 +351,15 @@ export class SqliteDispatchReactor {
           `acceptDispatchStart conflict: in_flight has agent_query_id ${doc.agent_query_id}`,
         );
       }
-      await this.adapter.query(
+      const { rowCount } = await this.adapter.query(
         `UPDATE dispatch_scheduler_queue
          SET agent_query_id = ?, updated_at = ?
          WHERE dispatch_phid = ? AND team_id = ? AND status = 'in_flight'`,
         [agentQueryId, now, phid, this.teamId],
       );
+      if (rowCount === 0) {
+        throw conflict(`acceptDispatchStart lost in_flight transition for ${phid}`);
+      }
       return this.getByPhid(phid);
     }
     if (doc.status === "done" || doc.status === "failed" || doc.status === "cancelled") {
