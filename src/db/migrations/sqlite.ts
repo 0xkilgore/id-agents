@@ -694,6 +694,12 @@ export async function migrateSqlite(adapter: SqliteAdapter): Promise<void> {
   } catch {
     // Column already exists in upgraded databases.
   }
+  try {
+    adapter.exec(`ALTER TABLE queries ADD COLUMN manager_dispatch_id TEXT`);
+  } catch { /* already exists */ }
+  try {
+    adapter.exec(`ALTER TABLE queries ADD COLUMN manager_query_id TEXT`);
+  } catch { /* already exists */ }
 
   // Tasks: migrate from global name UNIQUE to (team_id, name) UNIQUE.
   // SQLite does not support DROP CONSTRAINT, so we use the rename-copy-swap pattern

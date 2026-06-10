@@ -76,6 +76,10 @@ export interface QueryRow {
    * output arrives or for queries that completed before B1 shipped.
    */
   last_output_at: number | null;
+  /** Upstream manager dispatch phid for scheduler/cane-routed work. NULL for direct /talk that wasn't dispatch-routed. */
+  manager_dispatch_id: string | null;
+  /** Upstream manager query_id (the canonical one the scheduler minted at enqueue time). NULL for non-dispatch-routed queries. */
+  manager_query_id: string | null;
 }
 
 /** news_items table row */

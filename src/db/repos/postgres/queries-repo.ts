@@ -24,7 +24,7 @@ export class PgQueriesRepo implements QueriesRepository {
 
   async getById(agentId: string, queryId: string): Promise<QueryRow | null> {
     const { rows } = await this.db.query<QueryRow>(
-      `SELECT team_id, agent_id, query_id, status, prompt, created, completed, result, error, session_id, owner_kind, owner_id, last_output_at
+      `SELECT team_id, agent_id, query_id, status, prompt, created, completed, result, error, session_id, owner_kind, owner_id, last_output_at, manager_dispatch_id, manager_query_id
        FROM queries
        WHERE agent_id = $1 AND query_id = $2`,
       [agentId, queryId],
@@ -34,7 +34,7 @@ export class PgQueriesRepo implements QueriesRepository {
 
   async getByQueryIdForTeam(teamId: string, queryId: string): Promise<QueryRow | null> {
     const { rows } = await this.db.query<QueryRow>(
-      `SELECT team_id, agent_id, query_id, status, prompt, created, completed, result, error, session_id, owner_kind, owner_id, last_output_at
+      `SELECT team_id, agent_id, query_id, status, prompt, created, completed, result, error, session_id, owner_kind, owner_id, last_output_at, manager_dispatch_id, manager_query_id
        FROM queries
        WHERE team_id = $1 AND query_id = $2
        LIMIT 1`,
@@ -84,8 +84,8 @@ export class PgQueriesRepo implements QueriesRepository {
         ? { owner_kind: query.owner_kind, owner_id: query.owner_id }
         : resolveQueryOwnership(teamId, agentId);
     await this.db.query(
-      `INSERT INTO queries (team_id, agent_id, query_id, status, prompt, created, completed, result, error, session_id, owner_kind, owner_id)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+      `INSERT INTO queries (team_id, agent_id, query_id, status, prompt, created, completed, result, error, session_id, owner_kind, owner_id, manager_dispatch_id, manager_query_id)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
        ON CONFLICT (team_id, query_id)
        DO UPDATE SET agent_id = EXCLUDED.agent_id,
                      status = EXCLUDED.status,
@@ -94,7 +94,9 @@ export class PgQueriesRepo implements QueriesRepository {
                      error = EXCLUDED.error,
                      session_id = EXCLUDED.session_id,
                      owner_kind = EXCLUDED.owner_kind,
-                     owner_id = EXCLUDED.owner_id`,
+                     owner_id = EXCLUDED.owner_id,
+                     manager_dispatch_id = COALESCE(EXCLUDED.manager_dispatch_id, queries.manager_dispatch_id),
+                     manager_query_id = COALESCE(EXCLUDED.manager_query_id, queries.manager_query_id)`,
       [
         teamId,
         agentId,
@@ -108,6 +110,8 @@ export class PgQueriesRepo implements QueriesRepository {
         query.session_id || null,
         own.owner_kind,
         own.owner_id,
+        query.manager_dispatch_id ?? null,
+        query.manager_query_id ?? null,
       ],
     );
   }
@@ -149,7 +153,7 @@ export class PgQueriesRepo implements QueriesRepository {
 
   async getPending(agentId: string): Promise<QueryRow[]> {
     const { rows } = await this.db.query<QueryRow>(
-      `SELECT team_id, agent_id, query_id, status, prompt, created, completed, result, error, session_id, owner_kind, owner_id, last_output_at
+      `SELECT team_id, agent_id, query_id, status, prompt, created, completed, result, error, session_id, owner_kind, owner_id, last_output_at, manager_dispatch_id, manager_query_id
        FROM queries
        WHERE agent_id = $1 AND status IN ('pending', 'processing')
        ORDER BY created ASC`,
@@ -160,7 +164,7 @@ export class PgQueriesRepo implements QueriesRepository {
 
   async getPendingByOwner(teamId: string, ownerKind: InboxOwnerKind, ownerId: string): Promise<QueryRow[]> {
     const { rows } = await this.db.query<QueryRow>(
-      `SELECT team_id, agent_id, query_id, status, prompt, created, completed, result, error, session_id, owner_kind, owner_id, last_output_at
+      `SELECT team_id, agent_id, query_id, status, prompt, created, completed, result, error, session_id, owner_kind, owner_id, last_output_at, manager_dispatch_id, manager_query_id
        FROM queries
        WHERE team_id = $1 AND owner_kind = $2 AND owner_id = $3 AND status IN ('pending', 'processing')
        ORDER BY created ASC`,

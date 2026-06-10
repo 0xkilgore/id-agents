@@ -708,6 +708,8 @@ export async function migratePostgres(adapter: DbAdapter): Promise<void> {
   await adapter.query(
     `ALTER TABLE queries ADD COLUMN IF NOT EXISTS last_output_at BIGINT`,
   );
+  await adapter.query(`ALTER TABLE queries ADD COLUMN IF NOT EXISTS manager_dispatch_id TEXT`);
+  await adapter.query(`ALTER TABLE queries ADD COLUMN IF NOT EXISTS manager_query_id TEXT`);
 }
 
 /** Null manager-owned FK columns and delete manager-<team> shadow agent rows. */
