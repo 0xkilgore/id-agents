@@ -191,20 +191,52 @@ export class FakeReactor {
     return { claimed };
   }
 
-  async recordAgentStart(phid: string, agent_query_id: string): Promise<DispatchDoc | null> {
+  async acceptDispatchStart(
+    phid: string,
+    input: { agent_query_id: string },
+  ): Promise<DispatchDoc | null> {
     this.guard();
+    if (!input.agent_query_id || !input.agent_query_id.trim()) {
+      throw conflict("acceptDispatchStart requires a non-empty agent_query_id");
+    }
     const doc = this.docs.get(phid);
     if (!doc) return null;
-    if (doc.status !== "in_flight") {
-      throw conflict(`recordAgentStart requires in_flight, was ${doc.status}`);
+    if (doc.status === "queued") {
+      const now = this.nowFn();
+      const next: DispatchDoc = {
+        ...doc,
+        status: "in_flight",
+        attempt_count: doc.attempt_count + 1,
+        started_at: now,
+        updated_at: now,
+        agent_query_id: input.agent_query_id,
+      };
+      this.docs.set(phid, next);
+      return clone(next);
     }
-    const next: DispatchDoc = {
-      ...doc,
-      agent_query_id,
-      updated_at: this.nowFn(),
-    };
-    this.docs.set(phid, next);
-    return clone(next);
+    if (doc.status === "in_flight") {
+      if (doc.agent_query_id && doc.agent_query_id !== input.agent_query_id) {
+        throw conflict(
+          `acceptDispatchStart conflict: in_flight has agent_query_id ${doc.agent_query_id}`,
+        );
+      }
+      const next: DispatchDoc = {
+        ...doc,
+        agent_query_id: input.agent_query_id,
+        updated_at: this.nowFn(),
+      };
+      this.docs.set(phid, next);
+      return clone(next);
+    }
+    if (doc.status === "done" || doc.status === "failed" || doc.status === "cancelled") {
+      if (doc.agent_query_id === input.agent_query_id) return clone(doc);
+      throw conflict(`acceptDispatchStart cannot run from terminal ${doc.status}`);
+    }
+    throw conflict(`acceptDispatchStart requires queued or in_flight, was ${doc.status}`);
+  }
+
+  async recordAgentStart(phid: string, agent_query_id: string): Promise<DispatchDoc | null> {
+    return this.acceptDispatchStart(phid, { agent_query_id });
   }
 
   async markDone(phid: string): Promise<DispatchDoc | null> {
