@@ -86,6 +86,7 @@ import {
   readDispatchById,
   readDispatchHealth,
   readDispatches,
+  readReconciliation,
 } from './dispatch-scheduler/read-model.js';
 import {
   parsePromotionEnforcement,
@@ -2778,6 +2779,23 @@ export class AgentManagerDb {
         const { id: teamId, name: teamName } = await this.getTeam(req);
         const health = await readDispatchHealth(this.db.adapter, teamId);
         return res.json({ ok: true, team: teamName, ...health });
+      } catch (err) {
+        return res.status(500).json({
+          ok: false,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    });
+
+    // Task 11 (dispatch-canonical): diagnostic surface listing dispatches
+    // whose canonical lifecycle drifted from the agent-side queries
+    // projection. Mounted before /dispatches/:dispatch_id so Express routes
+    // the literal path correctly.
+    this.managementApp.get('/dispatches/reconcile', async (req, res) => {
+      try {
+        const { id: teamId, name: teamName } = await this.getTeam(req);
+        const reconcile = await readReconciliation(this.db.adapter, teamId);
+        return res.json({ ok: true, team: teamName, ...reconcile });
       } catch (err) {
         return res.status(500).json({
           ok: false,

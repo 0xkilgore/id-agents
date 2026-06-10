@@ -153,6 +153,42 @@ export async function readDispatchById(
   return rows[0] ? rowToDispatch(rows[0]) : null;
 }
 
+// Task 11 (dispatch-canonical): a diagnostic view of dispatches whose
+// canonical lifecycle drifted from the agent-side queries projection. Each
+// entry is an actionable misalignment an operator can act on: the dispatch
+// is still queued in the scheduler, but the agent has already started or
+// finished its half (manager_dispatch_id on a processing/completed row
+// proves the agent saw the work). Without this surface the drift is
+// invisible — neither /dispatches nor /query/:id alone exposes it.
+export interface DispatchReconcileStuckQueuedRow {
+  dispatch_id: string;
+  query_id: string;
+  agent_query_status: string;
+}
+
+export async function readReconciliation(
+  adapter: DbAdapterLike,
+  teamId: string,
+): Promise<{ stuck_queued: DispatchReconcileStuckQueuedRow[] }> {
+  const { rows } = await adapter.query<{
+    dispatch_id: string;
+    query_id: string;
+    agent_query_status: string;
+  }>(
+    `SELECT d.dispatch_phid AS dispatch_id,
+            q.query_id      AS query_id,
+            q.status        AS agent_query_status
+       FROM dispatch_scheduler_queue d
+       JOIN queries q ON q.manager_dispatch_id = d.dispatch_phid
+      WHERE d.team_id = ?
+        AND d.status = 'queued'
+        AND q.status IN ('processing', 'completed')
+      ORDER BY d.dispatch_phid`,
+    [teamId],
+  );
+  return { stuck_queued: rows };
+}
+
 export async function readDispatchHealth(adapter: DbAdapterLike, teamId: string): Promise<{
   status: 'ok';
   team_id: string;
