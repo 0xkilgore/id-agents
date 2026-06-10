@@ -2123,6 +2123,113 @@ export class AgentManagerDb {
     this.managementApp.post('/dispatches/:dispatch_id/in-flight', acceptDispatchRoute);
 
     // ────────────────────────────────────────────────────────────────
+    // Dispatch-canonical plan Task 12 — off-process delivery-failure
+    // closeout. Cane (and any other off-process /talk caller) needs an
+    // HTTP surface to flip the Dispatch doc on delivery failure so the
+    // manager queue doesn't stay queued forever.
+    //   POST /dispatches/:id/markFailed   — hard 4xx, agent rejected
+    //   POST /dispatches/:id/markBounced  — transient (ConnErr / 5xx)
+    // Both wrap SchedulerHandle.client.markFailed / markBounced and
+    // accept either a `phid:disp-...` or a `query_id` in the path.
+    // ────────────────────────────────────────────────────────────────
+    const resolveDispatchDocForMark = async (dispatchIdRaw: string) => {
+      const reactor = this.dispatchScheduler!.reactor;
+      let doc = dispatchIdRaw.startsWith('phid:')
+        ? await reactor.getByPhid(dispatchIdRaw)
+        : null;
+      if (!doc) {
+        doc = await reactor.getByQueryId(dispatchIdRaw);
+      }
+      return doc;
+    };
+
+    this.managementApp.post('/dispatches/:dispatch_id/markFailed', async (req, res) => {
+      if (!this.dispatchScheduler) {
+        return res.status(503).json({
+          ok: false,
+          error: 'dispatch_scheduler_not_initialised',
+        });
+      }
+      try {
+        const dispatchIdRaw = normalizeDispatchIdInput(req.params.dispatch_id);
+        const body = (req.body || {}) as { failure_kind?: unknown; detail?: unknown };
+        const failureKind =
+          typeof body.failure_kind === 'string' ? body.failure_kind.trim() : '';
+        const detail = typeof body.detail === 'string' ? body.detail.trim() : '';
+        if (!dispatchIdRaw || !failureKind || !detail) {
+          return res.status(400).json({
+            ok: false,
+            error: 'dispatch_id, non-empty failure_kind, and non-empty detail required',
+          });
+        }
+        const doc = await resolveDispatchDocForMark(dispatchIdRaw);
+        if (!doc) {
+          return res.status(404).json({
+            ok: false,
+            error: `dispatch not found: ${dispatchIdRaw}`,
+          });
+        }
+        const r = await this.dispatchScheduler.client.markFailed(doc.dispatch_phid, {
+          failure_kind: failureKind as FailureKind,
+          detail,
+        });
+        if (!r.ok) throw new Error(r.detail);
+        return res.json({ ok: true, dispatch: r.value });
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        const status = /conflict|terminal|requires/i.test(msg) ? 409 : 500;
+        return res.status(status).json({ ok: false, error: msg });
+      }
+    });
+
+    this.managementApp.post('/dispatches/:dispatch_id/markBounced', async (req, res) => {
+      if (!this.dispatchScheduler) {
+        return res.status(503).json({
+          ok: false,
+          error: 'dispatch_scheduler_not_initialised',
+        });
+      }
+      try {
+        const dispatchIdRaw = normalizeDispatchIdInput(req.params.dispatch_id);
+        const body = (req.body || {}) as {
+          kind?: unknown;
+          message?: unknown;
+          next_attempt_at?: unknown;
+        };
+        const kind = typeof body.kind === 'string' ? body.kind.trim() : '';
+        const message = typeof body.message === 'string' ? body.message.trim() : '';
+        if (!dispatchIdRaw || !kind || !message) {
+          return res.status(400).json({
+            ok: false,
+            error: 'dispatch_id, non-empty kind, and non-empty message required',
+          });
+        }
+        const nextAttemptMs =
+          typeof body.next_attempt_at === 'number' && Number.isFinite(body.next_attempt_at)
+            ? body.next_attempt_at
+            : Date.now() + 60_000;
+        const doc = await resolveDispatchDocForMark(dispatchIdRaw);
+        if (!doc) {
+          return res.status(404).json({
+            ok: false,
+            error: `dispatch not found: ${dispatchIdRaw}`,
+          });
+        }
+        const r = await this.dispatchScheduler.client.markBounced(doc.dispatch_phid, {
+          kind,
+          message,
+          next_attempt_at: new Date(nextAttemptMs).toISOString(),
+        });
+        if (!r.ok) throw new Error(r.detail);
+        return res.json({ ok: true, dispatch: r.value });
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        const status = /conflict|terminal|requires/i.test(msg) ? 409 : 500;
+        return res.status(status).json({ ok: false, error: msg });
+      }
+    });
+
+    // ────────────────────────────────────────────────────────────────
     // Spec 054 v2 — agent clarification protocol.
     //   POST /agent-needs-input  : agent pauses on a question
     //   POST /agent-resume       : manager answers, agent resumes
