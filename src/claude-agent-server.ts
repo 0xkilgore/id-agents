@@ -333,7 +333,11 @@ export class AgentRestServer {
     });
   }
 
-  private async dbUpsertQuery(query: ActiveQuery & { sessionId?: string }) {
+  private async dbUpsertQuery(query: ActiveQuery & {
+    sessionId?: string;
+    managerDispatchId?: string | null;
+    managerQueryId?: string | null;
+  }) {
     if (!this.db || !this.dbTeamId || !this.dbAgentId) return;
     await this.db.queries.upsert(this.dbTeamId, this.dbAgentId, {
       query_id: query.id,
@@ -344,6 +348,8 @@ export class AgentRestServer {
       result: query.result ?? null,
       error: query.error ?? null,
       session_id: query.sessionId ?? null,
+      manager_dispatch_id: query.managerDispatchId ?? null,
+      manager_query_id: query.managerQueryId ?? null,
     });
   }
 
@@ -734,6 +740,21 @@ export class AgentRestServer {
 
         const queryId = `query_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
 
+        // Extract manager dispatch metadata from JSON body fields (primary),
+        // with fallback to parsing [dispatch_id: ...] / [query_id: ...] headers
+        // from the message text (the format buildScheduledMessage produces).
+        const dispatchIdFromBody = typeof req.body?.dispatch_id === 'string' && req.body.dispatch_id
+          ? req.body.dispatch_id
+          : null;
+        const upstreamQueryIdFromBody = typeof req.body?.query_id === 'string' && req.body.query_id
+          ? req.body.query_id
+          : null;
+        const headerMatch = String(message).match(
+          /\[dispatch_id:\s*(phid:disp-[A-Za-z0-9_-]+)\][\s\S]*?\[query_id:\s*([^\]\s]+)\]/i,
+        );
+        const managerDispatchId = dispatchIdFromBody ?? headerMatch?.[1] ?? null;
+        const managerQueryId = upstreamQueryIdFromBody ?? headerMatch?.[2] ?? null;
+
         // Pre-write a pending row so concurrent GET /query/:id pollers don't see 404
         // between /talk returning queryId and executeQuery pulling the item off the
         // serialized queue. Best-effort — memory-only mode stays a no-op.
@@ -744,6 +765,8 @@ export class AgentRestServer {
             status: 'pending',
             created: Date.now(),
             sessionId: session_id,
+            managerDispatchId,
+            managerQueryId,
           });
         } catch (dbErr: any) {
           console.error(`[Agent] Warning: Failed to pre-write pending row for query ${queryId}:`, dbErr?.message || dbErr);
