@@ -8,6 +8,7 @@ import {
   loadSchedulerPolicy,
   getSafeConcurrency,
   buildTuningReport,
+  parseDispatchCanonicalMode,
   POLICY_DEFAULTS,
   type PolicyOverrides,
   type UsageObservation,
@@ -73,6 +74,28 @@ describe("loadSchedulerPolicy (Phase 2.1)", () => {
   it("exposes policy_version for snapshotting onto Dispatch docs", () => {
     const p = loadSchedulerPolicy({}, {});
     expect(p.policy_version).toMatch(/^v\d+(\.\d+)*$/);
+  });
+});
+
+describe("parseDispatchCanonicalMode (Task 10)", () => {
+  it("defaults to shadow when env unset", () => {
+    expect(parseDispatchCanonicalMode({})).toBe("shadow");
+  });
+
+  it("returns enforce when DISPATCH_CANONICAL_MODE=enforce", () => {
+    expect(parseDispatchCanonicalMode({ DISPATCH_CANONICAL_MODE: "enforce" })).toBe("enforce");
+  });
+
+  it("normalizes case (ENFORCE, Enforce)", () => {
+    expect(parseDispatchCanonicalMode({ DISPATCH_CANONICAL_MODE: "ENFORCE" })).toBe("enforce");
+    expect(parseDispatchCanonicalMode({ DISPATCH_CANONICAL_MODE: "Enforce" })).toBe("enforce");
+  });
+
+  it("falls back to shadow on any other value (unknown, empty, whitespace)", () => {
+    expect(parseDispatchCanonicalMode({ DISPATCH_CANONICAL_MODE: "" })).toBe("shadow");
+    expect(parseDispatchCanonicalMode({ DISPATCH_CANONICAL_MODE: "   " })).toBe("shadow");
+    expect(parseDispatchCanonicalMode({ DISPATCH_CANONICAL_MODE: "off" })).toBe("shadow");
+    expect(parseDispatchCanonicalMode({ DISPATCH_CANONICAL_MODE: "strict" })).toBe("shadow");
   });
 });
 
