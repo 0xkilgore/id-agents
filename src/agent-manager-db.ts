@@ -3691,6 +3691,29 @@ export class AgentManagerDb {
           response.error = row.error;
         }
 
+        // Task 8: dispatch projection. When the queries row was written via
+        // dispatch-routed /talk (carries a manager_dispatch_id from the
+        // scheduler/cane path), sidecar-look-up the live dispatch doc so the
+        // caller sees the canonical dispatch_status / agent_query_id without a
+        // second round-trip.
+        if (row.manager_dispatch_id && this.dispatchScheduler) {
+          try {
+            const doc = await this.dispatchScheduler.reactor.getByPhid(row.manager_dispatch_id);
+            if (doc) {
+              response.dispatch_id = doc.dispatch_phid;
+              response.dispatch_status = doc.status;
+              response.agent_query_id = doc.agent_query_id;
+              response.manager_query_id = row.manager_query_id;
+            }
+          } catch (lookupErr) {
+            // best-effort projection — log and fall through with the legacy shape
+            console.warn(
+              '[Manager] /query/:id dispatch projection lookup failed:',
+              lookupErr instanceof Error ? lookupErr.message : String(lookupErr),
+            );
+          }
+        }
+
         res.json(response);
       } catch (err: any) {
         console.error('[Manager] Error in GET /query/:id:', err);

@@ -16,6 +16,7 @@ import * as fs from 'fs';
 import crypto from 'node:crypto';
 
 import { AgentRestServer } from '../../src/claude-agent-server.js';
+import { AgentManagerDb } from '../../src/agent-manager-db.js';
 import { SqliteAdapter } from '../../src/db/sqlite-adapter.js';
 import { migrateSqlite } from '../../src/db/migrations/sqlite.js';
 import { SqliteTeamsRepo } from '../../src/db/repos/sqlite/teams-repo.js';
@@ -154,5 +155,169 @@ describe('Agent /talk persists manager dispatch metadata', () => {
     expect(row).toBeTruthy();
     expect(row!.manager_dispatch_id).toBe('phid:disp-abc123def45678cd');
     expect(row!.manager_query_id).toBe('query_upstream_2');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Task 8: GET /query/:id projects dispatch fields when manager_dispatch_id set.
+// The manager's /query/:id handler should sidecar-look-up the dispatch reactor
+// when the queries row carries a manager_dispatch_id, and merge the dispatch
+// status + agent_query_id + manager_query_id into the response payload.
+// ---------------------------------------------------------------------------
+
+describe('GET /query/:id projects dispatch fields', () => {
+  let db: Awaited<ReturnType<typeof createInMemoryDb>>;
+  let manager: AgentManagerDb;
+  let managerBaseUrl: string;
+  let managerWorkDir: string;
+  let defaultTeamId: string;
+  let coderAgentId: string;
+
+  async function enqueueDispatch(): Promise<{ ok: boolean; dispatch_phid: string; query_id: string }> {
+    const res = await fetch(`${managerBaseUrl}/dispatch/enqueue`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Id-Team': 'default' },
+      body: JSON.stringify({ from_actor: 'cane', to_agent: 'coder', message: 'hi' }),
+    });
+    return res.json() as Promise<{ ok: boolean; dispatch_phid: string; query_id: string }>;
+  }
+
+  beforeAll(async () => {
+    db = await createInMemoryDb();
+    defaultTeamId = await db.teams.getOrCreateTeamId('default');
+    coderAgentId = await insertAgentRow(db, defaultTeamId, 'coder');
+    // /dispatch/enqueue requires a resolvable endpoint on the target agent.
+    await db.adapter.query(
+      `UPDATE agents SET endpoint = ? WHERE id = ?`,
+      ['http://127.0.0.1:19999', coderAgentId],
+    );
+
+    managerWorkDir = fs.mkdtempSync(path.join(os.tmpdir(), 'query-dispatch-projection-mgr-'));
+    const managerPort = await findFreePort();
+    manager = new AgentManagerDb(managerWorkDir, db as any);
+    await manager.start(managerPort);
+    managerBaseUrl = `http://127.0.0.1:${managerPort}`;
+  }, 30000);
+
+  afterAll(async () => {
+    if (manager) {
+      await new Promise<void>((resolve) => {
+        (manager as any).httpServer?.close(() => resolve());
+        setTimeout(resolve, 500);
+      });
+    }
+    try { fs.rmSync(managerWorkDir, { recursive: true, force: true }); } catch { /* ignore */ }
+    await db.close();
+  });
+
+  beforeEach(async () => {
+    await db.adapter.query(`DELETE FROM queries`);
+    await db.adapter.query(`DELETE FROM dispatch_scheduler_queue`);
+  });
+
+  it('includes dispatch_id, dispatch_status, agent_query_id, manager_query_id when row has manager_dispatch_id', async () => {
+    const enq = await enqueueDispatch();
+    expect(enq.ok).toBe(true);
+    expect(enq.dispatch_phid).toMatch(/^phid:disp-/);
+
+    const agentLocalQueryId = `agent_q_${Date.now()}_test`;
+    await db.queries.upsert(defaultTeamId, coderAgentId, {
+      query_id: agentLocalQueryId,
+      status: 'pending',
+      prompt: 'hi',
+      created: Date.now(),
+      manager_dispatch_id: enq.dispatch_phid,
+      manager_query_id: enq.query_id,
+    });
+
+    const res = await fetch(`${managerBaseUrl}/query/${agentLocalQueryId}`, {
+      headers: { 'X-Id-Team': 'default' },
+    });
+    expect(res.status).toBe(200);
+    const body = await res.json() as {
+      query_id: string;
+      status: string;
+      dispatch_id?: string;
+      dispatch_status?: string;
+      agent_query_id?: string | null;
+      manager_query_id?: string | null;
+    };
+    expect(body.query_id).toBe(agentLocalQueryId);
+    expect(body.dispatch_id).toBe(enq.dispatch_phid);
+    expect(body.manager_query_id).toBe(enq.query_id);
+    // Just enqueued — not accepted yet — dispatch_status should be 'queued'.
+    expect(['queued', 'in_flight']).toContain(body.dispatch_status!);
+  });
+
+  it('omits dispatch fields when row has no manager_dispatch_id (direct /talk)', async () => {
+    const agentLocalQueryId = `agent_q_${Date.now()}_direct`;
+    await db.queries.upsert(defaultTeamId, coderAgentId, {
+      query_id: agentLocalQueryId,
+      status: 'pending',
+      prompt: 'hi',
+      created: Date.now(),
+      // no manager_dispatch_id, no manager_query_id
+    });
+
+    const res = await fetch(`${managerBaseUrl}/query/${agentLocalQueryId}`, {
+      headers: { 'X-Id-Team': 'default' },
+    });
+    expect(res.status).toBe(200);
+    const body = await res.json() as Record<string, unknown>;
+    expect(body.query_id).toBe(agentLocalQueryId);
+    expect(body.dispatch_id).toBeUndefined();
+    expect(body.dispatch_status).toBeUndefined();
+    expect(body.agent_query_id).toBeUndefined();
+  });
+
+  it('omits dispatch fields when manager_dispatch_id refers to a phid the reactor cannot find', async () => {
+    const agentLocalQueryId = `agent_q_${Date.now()}_stale`;
+    await db.queries.upsert(defaultTeamId, coderAgentId, {
+      query_id: agentLocalQueryId,
+      status: 'pending',
+      prompt: 'hi',
+      created: Date.now(),
+      manager_dispatch_id: 'phid:disp-doesnotexist0000',
+      manager_query_id: 'query_upstream_orphan',
+    });
+
+    const res = await fetch(`${managerBaseUrl}/query/${agentLocalQueryId}`, {
+      headers: { 'X-Id-Team': 'default' },
+    });
+    expect(res.status).toBe(200);
+    const body = await res.json() as Record<string, unknown>;
+    expect(body.dispatch_id).toBeUndefined();
+    expect(body.dispatch_status).toBeUndefined();
+  });
+
+  it('reflects in_flight after acceptDispatchStart flips the dispatch row', async () => {
+    const enq = await enqueueDispatch();
+    expect(enq.ok).toBe(true);
+
+    const agentLocalQueryId = `agent_q_${Date.now()}_inflight`;
+    await db.queries.upsert(defaultTeamId, coderAgentId, {
+      query_id: agentLocalQueryId,
+      status: 'pending',
+      prompt: 'hi',
+      created: Date.now(),
+      manager_dispatch_id: enq.dispatch_phid,
+      manager_query_id: enq.query_id,
+    });
+
+    // Flip dispatch to in_flight via the canonical accept route.
+    const accept = await fetch(`${managerBaseUrl}/dispatches/${enq.dispatch_phid}/accept`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Id-Team': 'default' },
+      body: JSON.stringify({ agent_query_id: agentLocalQueryId }),
+    });
+    expect(accept.status).toBe(200);
+
+    const res = await fetch(`${managerBaseUrl}/query/${agentLocalQueryId}`, {
+      headers: { 'X-Id-Team': 'default' },
+    });
+    expect(res.status).toBe(200);
+    const body = await res.json() as { dispatch_status?: string; agent_query_id?: string | null };
+    expect(body.dispatch_status).toBe('in_flight');
+    expect(body.agent_query_id).toBe(agentLocalQueryId);
   });
 });
