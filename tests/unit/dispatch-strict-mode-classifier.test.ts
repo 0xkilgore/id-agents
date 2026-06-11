@@ -150,6 +150,30 @@ describe("classifyAgentResponse — plain-text patterns (fallback)", () => {
     });
     expect(c.failure_reason).toBe("tool_error");
   });
+
+  it("CLI-runtime auth body 'Not logged in · Please run /login' on a 200 transport → failed, provider_auth_error (E2E-121237 regression)", () => {
+    // The Claude CLI runtime emits this when its session token is gone.
+    // It arrives on /agent-done with success:true + transport 200, so the
+    // strict-mode classifier is the only thing standing between it and a
+    // bogus `delivered`. Must be caught despite the 200 OK.
+    const c = classifyAgentResponse({
+      body: "Not logged in · Please run /login",
+      transport_status: 200,
+      classified_at: NOW,
+    });
+    expect(c.classification).toBe("failed");
+    expect(c.failure_reason).toBe("provider_auth_error");
+    expect(c.confidence).toBe("pattern");
+  });
+
+  it("CLI-runtime auth phrase 'not logged in' (lowercase, embedded) → provider_auth_error", () => {
+    const c = classifyAgentResponse({
+      body: "the agent is not logged in to the provider runtime",
+      transport_status: 200,
+      classified_at: NOW,
+    });
+    expect(c.failure_reason).toBe("provider_auth_error");
+  });
 });
 
 describe("classifyAgentResponse — false-positive guards (the hard part)", () => {
@@ -164,6 +188,21 @@ describe("classifyAgentResponse — false-positive guards (the hard part)", () =
         "To handle rate limits gracefully, your client should back off " +
         "with exponential jitter when it sees a 429 response. Here's a " +
         "code example you can adapt:\n\nimport time\n...",
+      transport_status: 200,
+      classified_at: NOW,
+    });
+    expect(c.classification).toBe("delivered");
+    expect(c.failure_reason).toBe(null);
+  });
+
+  it("valid agent answer that documents a '/login' route stays delivered (no broad match on the slash command)", () => {
+    // The runtime-auth matcher keys on the full phrases "not logged in"
+    // and "please run /login" — NOT a bare "/login" — so an agent
+    // answering a question about a login endpoint is not a false positive.
+    const c = classifyAgentResponse({
+      body:
+        "Your Express app should mount the auth handler at POST /login " +
+        "and redirect there when the session cookie is absent.",
       transport_status: 200,
       classified_at: NOW,
     });

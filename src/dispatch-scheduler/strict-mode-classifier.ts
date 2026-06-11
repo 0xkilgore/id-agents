@@ -304,6 +304,14 @@ function matchPlainText(text: string): {
   if (lower.includes("authentication_error") || lower.includes("invalid api key")) {
     return { reason: "provider_auth_error", matched_pattern: "text:auth-error" };
   }
+  // CLI-runtime auth failure (E2E-121237 / E2E2-123346): the Claude CLI
+  // runtime prints "Not logged in · Please run /login" when its session
+  // token is gone. These phrases are specific enough to not trip the
+  // "never broad words" guard — a bare "/login" is deliberately NOT
+  // matched so an agent documenting a /login route stays delivered.
+  if (lower.includes("not logged in") || lower.includes("please run /login")) {
+    return { reason: "provider_auth_error", matched_pattern: "text:runtime-not-logged-in" };
+  }
   if (lower.includes("maximum context") || lower.includes("context length")) {
     return { reason: "context_length_error", matched_pattern: "text:context-length" };
   }
@@ -332,7 +340,9 @@ function hasStrongInlineMarker(text: string): boolean {
     lower.includes("tool execution failed") ||
     lower.includes("rate_limit_error") ||
     lower.includes("provider_server_error") ||
-    lower.includes("authentication_error")
+    lower.includes("authentication_error") ||
+    lower.includes("not logged in") ||
+    lower.includes("please run /login")
   );
 }
 
