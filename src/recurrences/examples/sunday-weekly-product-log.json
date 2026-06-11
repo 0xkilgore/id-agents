@@ -1,0 +1,39 @@
+{
+  "_comment": "First consumer of the RecurrenceTemplate substrate. Shadow shape per CTO scope §'Migration Path For Existing Jobs' #1. To promote from shadow to live, POST this template via the manager API, run runMaterializationTickOnce, verify the next-3-fires match the bespoke Sunday weekly log schedule, then disable the bespoke trigger.",
+  "recurrence_phid": "phid:rec-sunday-weekly-product-log",
+  "display_id": "weekly-product-log",
+  "kind": "report",
+  "status": "active",
+  "title": "Sunday weekly product log",
+  "description": "Weekly product log compiled by Maestra from the roadmap + delivery-log + agent activity. Delivered Sunday morning.",
+  "timezone": "America/Chicago",
+  "rrule": "FREQ=WEEKLY;BYDAY=SU",
+  "starts_on": "2026-06-14",
+  "ends_on": null,
+  "exception_dates": [],
+  "source_ref": "agent-platform/output/2026-06-11-recurrence-template-build-dispatch-brief.md",
+  "owner_agent": "maestra",
+  "project_phid": null,
+  "template_task_phid": null,
+  "template_event_phid": null,
+  "template_schedule_prompt_phid": null,
+  "template_artifact_kind": "weekly_product_log",
+  "required_inputs": [
+    "agent-platform/output/roadmap.md",
+    "cane/taskview/delivery-log.md"
+  ],
+  "delivery_targets": [
+    "agent-platform/output/weekly-product-log"
+  ],
+  "predecessor_link": "previous_instance",
+  "materialize_policy": {
+    "horizon_days": 7,
+    "allow_early_fire": false,
+    "requires_operator_confirmation": false
+  },
+  "created_at": "2026-06-11T16:00:00Z",
+  "updated_at": "2026-06-11T16:00:00Z",
+  "created_by": "roger",
+  "updated_by": "roger",
+  "failure_reason": null
+}
