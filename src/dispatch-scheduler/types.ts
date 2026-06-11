@@ -85,7 +85,14 @@ export type FailureKind =
   // structured terminal failures from the in-process harness retry loop.
   | "model_api_error_exhausted"
   | "harness_empty_result_exhausted"
-  | "harness_process_error_exhausted";
+  | "harness_process_error_exhausted"
+  // Dispatch-canonical strict-mode (CTO-4, 2026-06-10): the closeout
+  // pipeline classified the agent response body as a known
+  // provider/runtime error pattern BEFORE marking delivered. The
+  // typed DispatchFailureReason is encoded into `detail` so existing
+  // FailureKind consumers don't have to learn 12 new variants; the
+  // strict-mode classifier owns the high-resolution reason.
+  | "strict_mode_classified";
 
 export interface BounceRecord {
   ts: string;

@@ -32,6 +32,11 @@ import { validateEnqueueSkipReason } from "./types.js";
 import type { SqliteAdapter } from "../db/sqlite-adapter.js";
 import type { QueriesRepository } from "../db/db-service.js";
 import { QueriesEvidenceClient } from "./queries-evidence-client.js";
+import {
+  classifyAgentResponse,
+  decideStrictModeOverride,
+  parseStrictModeFlag,
+} from "./strict-mode-classifier.js";
 
 export type GatewayMode = "off" | "shadow" | "enforce";
 
@@ -404,6 +409,35 @@ export class SchedulerHandle {
         detail: args.error ?? "agent reported failure",
       });
       return r.ok ? r.value : doc;
+    }
+    // Dispatch-canonical strict-mode (CTO-4): even with success=true,
+    // inspect the response body for known provider/runtime error
+    // patterns BEFORE marking delivered. The classifier is pure; the
+    // feature flag DISPATCH_CANONICAL_STRICT_MODE gates whether we
+    // override the closeout in `enforce` or just log it in `shadow`.
+    const strictModeFlag = parseStrictModeFlag(
+      process.env.DISPATCH_CANONICAL_STRICT_MODE,
+    );
+    if (strictModeFlag !== "off") {
+      const classification = classifyAgentResponse({
+        body: args.result ?? null,
+        transport_status: 200, // agent-done implies a delivered transport
+        classified_at: new Date().toISOString(),
+      });
+      const decision = decideStrictModeOverride(strictModeFlag, classification);
+      if (decision) {
+        this.logger.warn("strict_mode_classified", {
+          phid: doc.dispatch_phid,
+          ...decision.log_payload,
+        });
+        if (decision.override) {
+          const r = await this.client.markFailed(doc.dispatch_phid, {
+            failure_kind: decision.failure_kind,
+            detail: decision.detail,
+          });
+          return r.ok ? r.value : doc;
+        }
+      }
     }
     // Queued-dispatch closeout (Spec 2026-06-01): an out-of-band success
     // /agent-done can arrive for a doc the scheduler never claimed. Use
