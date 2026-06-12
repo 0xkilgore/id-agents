@@ -126,7 +126,7 @@ const HELP_ITEMS: Array<{ cmd: string; desc: string; indent?: boolean }> = [
   { cmd: '/task done <task-name>', desc: 'Mark task done' },
   { cmd: '/task remove <task-name>', desc: 'Remove a task' },
   { cmd: '/sync <config> [params]', desc: 'Reconcile running team with config (add/update/remove)' },
-  { cmd: '/status', desc: 'Check agent status' },
+  { cmd: '/status [--live]', desc: 'Check agent status; --live also smokes cursor fallback' },
   { cmd: '/update <agent> [--wallet <addr>] [--name <name>]', desc: 'Update agent properties' },
   { cmd: '/wallet <agent> [chain]', desc: 'Show agent wallet address (chain: eip155:1, solana, etc.)' },
   { cmd: '/team', desc: 'Show current team' },
@@ -2426,14 +2426,15 @@ async function handleLine(line: string) {
     return;
   }
 
-  if (input === '/status' || input === '/status -l' || input === '/status --long') {
+  if (input === '/status' || input === '/status -l' || input === '/status --long' || input === '/status --live') {
     if (!(await checkManager())) {
       showManagerNotRunningError();
       rl.prompt();
       return;
     }
     const longFormat = input === '/status -l' || input === '/status --long';
-    await checkAgentStatus(longFormat);
+    const liveCheck = input === '/status --live';
+    await checkAgentStatus(longFormat, liveCheck);
     rl.prompt();
     return;
   }
@@ -3929,11 +3930,51 @@ void initializeCli().catch((error: any) => {
 
 rl.on('line', handleLine);
 
-async function checkAgentStatus(longFormat: boolean = false) {
+async function checkAgentStatus(longFormat: boolean = false, liveCheck: boolean = false) {
   try {
     console.log(`\n${colors.bold}${colors.cyan}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${colors.reset}`);
     console.log(`${colors.bold}📊 Agent Status Check${colors.reset}${longFormat ? ` ${colors.gray}(detailed)${colors.reset}` : ''}\n`);
     
+    if (liveCheck) {
+      const statusResponse = await managerFetch('/remote', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ command: '/status --live' }),
+      });
+      if (statusResponse.ok) {
+        const statusData: any = await statusResponse.json();
+        const fallback = statusData?.result?.cursorFallback;
+        if (fallback) {
+          const color = fallback.status === 'live'
+            ? colors.green
+            : fallback.status === 'unavailable'
+              ? colors.red
+              : colors.yellow;
+          console.log(`cursor fallback: ${color}${fallback.status}${colors.reset} (${fallback.detail})`);
+          if (longFormat || fallback.status !== 'live') {
+            console.log(`${colors.gray}  binary: ${fallback.binary}${fallback.version ? ` / ${fallback.version}` : ''}${colors.reset}`);
+          }
+          console.log('');
+        }
+      } else {
+        console.log(`${colors.yellow}cursor fallback: degraded (manager status check failed: ${statusResponse.status})${colors.reset}\n`);
+      }
+    } else {
+      const statusResponse = await managerFetch('/remote', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ command: '/status' }),
+      });
+      if (statusResponse.ok) {
+        const statusData: any = await statusResponse.json();
+        const fallback = statusData?.result?.cursorFallback;
+        if (fallback) {
+          const color = fallback.status === 'unavailable' ? colors.red : colors.yellow;
+          console.log(`cursor fallback: ${color}${fallback.status}${colors.reset} (${fallback.detail})\n`);
+        }
+      }
+    }
+
     // Get list of all agents including automators
     const response = await managerFetch('/agents?all=true');
     if (!response.ok) {

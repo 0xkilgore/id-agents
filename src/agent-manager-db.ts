@@ -48,6 +48,7 @@ import {
 import { PROTOCOL_DEFAULTS } from './protocol-defaults.js';
 import { computeSyncPlan, formatSyncSummary, formatSyncVerbose } from './sync.js';
 import { validateName } from './name-validation.js';
+import { checkCursorFallbackHealth } from './harness/cursor-fallback-health.js';
 import {
   emitQueryDelivered,
   emitQueryExpired,
@@ -6418,6 +6419,7 @@ export class AgentManagerDb {
       }
 
       case 'status': {
+        const liveCursorFallback = args.includes('--live') || args.includes('--cursor-live');
         const agents = await this.dbListAgents(teamId);
         const running = agents.filter(a => a.status === 'running').length;
         const offline = agents.filter(a => a.status === 'offline').length;
@@ -6434,6 +6436,7 @@ export class AgentManagerDb {
             runningAgents: running,
             offlineAgents: offline,
             agents: agentHealth,
+            cursorFallback: await checkCursorFallbackHealth({ live: liveCursorFallback }),
             status: 'ok'
           }
         };

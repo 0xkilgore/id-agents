@@ -52,3 +52,7 @@ output/
 .cursor/
 /bin/
 id-agents-demo-1.mp4
+
+# git worktrees for agent builds
+.worktrees/
+*.bak.*
