@@ -104,12 +104,6 @@ const ALLOWLIST: Issuer[] = [
     note: "claude-restap CLI direct /talk passthrough",
   },
   {
-    file: "src/human-agent-cli.ts",
-    line: 577,
-    category: "CLI_PASSTHROUGH",
-    note: "human-agent CLI direct /talk passthrough",
-  },
-  {
     file: "src/interactive-agent-cli.ts",
     line: 3610,
     category: "CLI_PASSTHROUGH",
@@ -143,7 +137,6 @@ const SRC_FILES_TO_SCAN = [
   "src/claude-agent-server.ts",
   "src/id-agents-cli.ts",
   "src/claude-restap-cli.ts",
-  "src/human-agent-cli.ts",
   "src/interactive-agent-cli.ts",
 ];
 
