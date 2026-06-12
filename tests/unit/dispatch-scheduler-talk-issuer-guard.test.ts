@@ -35,19 +35,19 @@ const ALLOWLIST: Issuer[] = [
   // ─── Manager production code: candidates for Phase 4 migration ───
   {
     file: "src/agent-manager-db.ts",
-    line: 1484,
+    line: 1485,
     category: "MUST_MIGRATE",
     note: "forwardToAgent() — primary /talk-to dispatch path (now gateway-routed via DISPATCH_GATEWAY_MODE; legacy retained for shadow + fallback)",
   },
   {
     file: "src/agent-manager-db.ts",
-    line: 2440,
+    line: 2441,
     category: "MUST_MIGRATE",
     note: "Spec 054 v2 /agent-resume — direct /talk follow-up to deliver the resume payload to the paused agent. Migrate to session-side injection in a follow-up.",
   },
   {
     file: "src/agent-manager-db.ts",
-    line: 8162,
+    line: 8165,
     category: "MUST_MIGRATE",
     note: "agent heartbeat reseed — immediate /talk send",
   },
@@ -85,7 +85,7 @@ const ALLOWLIST: Issuer[] = [
   // ─── Probe/test helpers: intentionally outside the gateway ───
   {
     file: "src/agent-manager-db.ts",
-    line: 6126,
+    line: 6127,
     category: "PROBE_OR_TEST",
     note: "agent probe — end-to-end health probe by design",
   },
@@ -111,19 +111,19 @@ const ALLOWLIST: Issuer[] = [
   },
   {
     file: "src/interactive-agent-cli.ts",
-    line: 3609,
+    line: 3610,
     category: "CLI_PASSTHROUGH",
     note: "interactive CLI /talk endpoint computation",
   },
   {
     file: "src/interactive-agent-cli.ts",
-    line: 4691,
+    line: 4732,
     category: "CLI_PASSTHROUGH",
     note: "interactive CLI direct /talk passthrough",
   },
   {
     file: "src/interactive-agent-cli.ts",
-    line: 4797,
+    line: 4838,
     category: "CLI_PASSTHROUGH",
     note: "interactive CLI direct /talk URL composition",
   },
