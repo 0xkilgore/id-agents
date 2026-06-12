@@ -214,7 +214,7 @@ curl -s -H "X-Id-Team: default" \
   | jq -r '.result.result'
 ```
 
-For prompts that may take longer than 30s, chain the long-poll in a small loop until `status` is `delivered`, `failed`, or `expired`. See [MANAGER-POLLING.md](./MANAGER-POLLING.md) for the full polling guide — patterns, anti-patterns (don't burst-poll `/news` with grep), and the wakeup-service event stream.
+For prompts that may take longer than 30s, chain the long-poll in a small loop until `status` is `delivered`, `failed`, or `expired`. Prefer `GET /query/:id?wait=<seconds>` over burst-polling `/news`; the wakeup-service event stream is the long-term replacement for tight poll loops.
 
 ## 6. Offer to Act as the Team Manager
 
@@ -291,6 +291,6 @@ Type `/help` for commands.
 - [Documentation](https://www.idagents.ai/docs) -- Full docs
 - [Configuration](https://www.idagents.ai/docs/configuration) -- YAML config and environment variables
 - [Skills](https://www.idagents.ai/docs/skills) -- Extend agent capabilities
-- [Manager Polling](./MANAGER-POLLING.md) -- How to wait for query completion (long-poll, anti-patterns)
+- Manager polling — use `GET /query/:id?wait=<seconds>` (see step 5 above); avoid burst-polling `/news`
 - [XMTP Messaging](https://www.idagents.ai/docs/xmtp) -- Encrypted messaging via ENS names
 - [Onchain Identity](https://www.idagents.ai/docs/identity) -- Register agents on ID Chain
