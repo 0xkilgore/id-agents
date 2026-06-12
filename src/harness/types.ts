@@ -20,6 +20,13 @@ export interface HarnessOptions {
   allowedTools?: string[];
   resume?: string;
   env?: Record<string, string | undefined>;
+  /**
+   * W-004: hard wall-clock cap (ms) on the spawned agent process. After this
+   * the harness kills the process and surfaces a timeout error instead of
+   * hanging the dispatch forever. Falls back to ID_AGENT_HARNESS_TIMEOUT_MS
+   * then a generous default; 0 disables the watchdog.
+   */
+  timeoutMs?: number;
 }
 
 /**

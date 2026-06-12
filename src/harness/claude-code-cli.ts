@@ -20,6 +20,91 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 
+// W-004 subprocess-timeout reliability fix.
+//
+// The spawned `claude` process can hang indefinitely during a dispatch — a
+// child blocked on stdin (the "Not logged in · Please run /login" interactive
+// prompt) or a stalled network call never closes, so the dispatch neither
+// resolves nor fails: it just wedges silently. A watchdog kills the process
+// and rejects so the dispatch closes as a typed error instead of hanging.
+//
+// The default is a generous backstop so legitimate long agent runs are not
+// killed; operators tune it down via ID_AGENT_HARNESS_TIMEOUT_MS, and 0
+// disables the watchdog entirely.
+export const DEFAULT_HARNESS_TIMEOUT_MS = 30 * 60_000; // 30 minutes
+const KILL_GRACE_MS = 2000;
+
+/**
+ * Resolve the effective harness timeout (ms). Precedence: explicit option →
+ * ID_AGENT_HARNESS_TIMEOUT_MS env → DEFAULT_HARNESS_TIMEOUT_MS. A value of 0
+ * disables the watchdog; a garbage/negative env value is ignored. Pure.
+ */
+export function resolveHarnessTimeoutMs(
+  opts: { timeoutMs?: number },
+  env: NodeJS.ProcessEnv = process.env,
+): number {
+  if (typeof opts.timeoutMs === 'number' && Number.isFinite(opts.timeoutMs) && opts.timeoutMs >= 0) {
+    return opts.timeoutMs;
+  }
+  const raw = env.ID_AGENT_HARNESS_TIMEOUT_MS;
+  if (raw !== undefined) {
+    const n = Number(raw);
+    if (Number.isFinite(n) && n >= 0) return n;
+  }
+  return DEFAULT_HARNESS_TIMEOUT_MS;
+}
+
+/** A child process we can signal — the subset of ChildProcess the watchdog needs. */
+export interface KillableProcess {
+  killed: boolean;
+  kill(signal?: NodeJS.Signals | number): boolean;
+}
+
+/**
+ * Arm a SIGTERM→SIGKILL watchdog on a child process. After `timeoutMs` it
+ * calls `onTimeout()` and sends SIGTERM; if the process is still alive after
+ * `graceMs` it sends SIGKILL. `timeoutMs <= 0` disables the watchdog. Returns
+ * a `clear()` that cancels both timers (call it when the process exits in
+ * time). Pure aside from the timers it owns; testable with fake clocks.
+ */
+export function armProcessTimeout(
+  proc: KillableProcess,
+  timeoutMs: number,
+  options: { graceMs: number; onTimeout: () => void },
+): () => void {
+  if (!(timeoutMs > 0)) {
+    return () => {};
+  }
+  let killTimer: ReturnType<typeof setTimeout> | null = null;
+  const timer = setTimeout(() => {
+    options.onTimeout();
+    try {
+      proc.kill('SIGTERM');
+    } catch {
+      // process already gone
+    }
+    killTimer = setTimeout(() => {
+      if (!proc.killed) {
+        try {
+          proc.kill('SIGKILL');
+        } catch {
+          // already gone
+        }
+      }
+    }, options.graceMs);
+    if (typeof (killTimer as { unref?: () => void }).unref === 'function') {
+      (killTimer as { unref?: () => void }).unref!();
+    }
+  }, timeoutMs);
+  if (typeof (timer as { unref?: () => void }).unref === 'function') {
+    (timer as { unref?: () => void }).unref!();
+  }
+  return () => {
+    clearTimeout(timer);
+    if (killTimer) clearTimeout(killTimer);
+  };
+}
+
 export class ClaudeCodeCliHarness implements AgentHarness {
   readonly type: HarnessType = 'claude-code-cli' as HarnessType;
 
@@ -88,7 +173,8 @@ export class ClaudeCodeCliHarness implements AgentHarness {
       // Reset cancelled flag at start of new run
       this.cancelled = false;
 
-      const result = await this.spawnClaude(args, workingDir, env);
+      const timeoutMs = resolveHarnessTimeoutMs(options);
+      const result = await this.spawnClaude(args, workingDir, env, timeoutMs);
 
       // Check if cancelled during execution
       if (this.cancelled) {
@@ -226,11 +312,14 @@ export class ClaudeCodeCliHarness implements AgentHarness {
   private spawnClaude(
     args: string[],
     cwd: string,
-    env: Record<string, string>
+    env: Record<string, string>,
+    timeoutMs = 0
   ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
     return new Promise((resolve, reject) => {
       let stdout = '';
       let stderr = '';
+      let timedOut = false;
+      let clearTimeoutWatchdog: () => void = () => {};
 
       // Use full path to claude to avoid PATH resolution issues in detached processes
       // Can be overridden via CLAUDE_PATH env var
@@ -283,6 +372,21 @@ export class ClaudeCodeCliHarness implements AgentHarness {
 
       console.log(`[Claude CLI] Process spawned, PID: ${proc.pid}`);
 
+      // W-004: arm a watchdog so a hung child (e.g. blocked on the
+      // "Not logged in" interactive prompt, or a stalled network call) is
+      // killed and surfaced as a typed error instead of wedging the dispatch.
+      clearTimeoutWatchdog = armProcessTimeout(proc, timeoutMs, {
+        graceMs: KILL_GRACE_MS,
+        onTimeout: () => {
+          timedOut = true;
+          this.currentProcess = null;
+          console.error(`[Claude CLI] Timed out after ${timeoutMs}ms (PID: ${proc.pid}); killing.`);
+          // Best-effort temp-file cleanup (the trailing `rm` won't run on kill).
+          try { fs.unlinkSync(tmpFile); } catch { /* already gone */ }
+          reject(new Error(`Claude CLI timed out after ${timeoutMs}ms`));
+        },
+      });
+
       const verbose = process.env.ID_AGENT_VERBOSE === 'true';
 
       proc.stdout?.on('data', (data) => {
@@ -319,11 +423,16 @@ export class ClaudeCodeCliHarness implements AgentHarness {
       });
 
       proc.on('error', (err) => {
+        clearTimeoutWatchdog();
+        if (timedOut) return; // already rejected by the watchdog
         console.error(`[Claude CLI] Spawn error: ${err.message}`);
         reject(err);
       });
 
       proc.on('close', (code) => {
+        clearTimeoutWatchdog();
+        if (timedOut) return; // already rejected by the watchdog
+
         // Clear process reference
         this.currentProcess = null;
 
