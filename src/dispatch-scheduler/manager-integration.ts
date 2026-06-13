@@ -20,6 +20,7 @@ import { SqliteDispatchReactor } from "./sqlite-dispatch-reactor.js";
 import {
   type SchedulerPolicy,
   loadSchedulerPolicy,
+  maxInFlightForProvider,
 } from "./policy.js";
 import type {
   DispatchDoc,
@@ -28,7 +29,11 @@ import type {
   Provider,
   Runtime,
 } from "./types.js";
-import { validateEnqueueSkipReason } from "./types.js";
+import {
+  normalizeRuntime,
+  resolveProviderFromRuntime,
+  validateEnqueueSkipReason,
+} from "./types.js";
 import type { SqliteAdapter } from "../db/sqlite-adapter.js";
 import type { QueriesRepository } from "../db/db-service.js";
 import { QueriesEvidenceClient } from "./queries-evidence-client.js";
@@ -194,6 +199,10 @@ export class SchedulerHandle {
       now,
       logger: this.logger,
       queryEvidence,
+      // W1-1: drain every provider lane each tick, each with its own cap and
+      // its own in-flight count, so Anthropic / OpenAI(Codex) / Cursor queues
+      // never consume each other's concurrency slots.
+      providers: ["anthropic", "openai", "cursor", "other"],
     });
   }
 
@@ -210,7 +219,12 @@ export class SchedulerHandle {
     if (this.interval.unref) this.interval.unref();
     this.logger.info("scheduler_started", {
       mode: this.mode,
-      max_in_flight: this.policy.max_in_flight_anthropic,
+      max_in_flight: {
+        anthropic: this.policy.max_in_flight_anthropic,
+        openai: this.policy.max_in_flight_openai,
+        cursor: this.policy.max_in_flight_cursor,
+        other: this.policy.max_in_flight_other,
+      },
       tick_interval_ms: this.intervalMs,
     });
   }
@@ -282,6 +296,12 @@ export class SchedulerHandle {
           promotion_skip_reason: input.promotion_skip_reason ?? null,
         }
       : null;
+    // W1-1: normalize the runtime to its canonical identifier, then derive
+    // the provider lane FROM the runtime unless the caller explicitly pins a
+    // provider. This is what keeps a cursor-cli dispatch out of the Anthropic
+    // lane without every caller having to set `provider` by hand.
+    const runtime: Runtime = normalizeRuntime(input.runtime ?? "claude-code-cli");
+    const provider: Provider = input.provider ?? resolveProviderFromRuntime(runtime);
     const payload: EnqueueInput = {
       query_id: queryId,
       to_agent: input.to_agent,
@@ -289,8 +309,8 @@ export class SchedulerHandle {
       channel: input.channel ?? "dispatch",
       subject: input.subject ?? input.message.slice(0, 80),
       body_markdown: input.message,
-      provider: input.provider ?? "anthropic",
-      runtime: input.runtime ?? "claude-code-cli",
+      provider,
+      runtime,
       priority: input.priority ?? 5,
       not_before_at: input.not_before_at,
       promote: input.promote,
@@ -487,7 +507,7 @@ export class SchedulerHandle {
     policy_version: string;
   }> {
     const snap = await this.reactor.snapshot({
-      max_safe: this.policy.max_in_flight_anthropic,
+      max_safe: maxInFlightForProvider(this.policy, provider),
       provider,
     });
     return {

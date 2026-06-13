@@ -71,9 +71,75 @@ export interface ClarificationBlocker {
   stale_at: string;
 }
 
-export type Provider = "anthropic" | "openai" | "local" | "other";
+// W1-1 (runtime-provider-lanes): `cursor` is a distinct provider lane — the
+// Cursor CLI runtime is NOT Anthropic and must not share Anthropic's
+// concurrency/admission slots.
+export type Provider = "anthropic" | "openai" | "cursor" | "local" | "other";
 
-export type Runtime = "claude-code-cli" | "codex" | "cursor" | "other";
+// Runtimes are normalized to their exact harness identifiers. `cursor-cli`
+// (not the legacy `cursor`) so it lines up with the HarnessType enum.
+export type Runtime =
+  | "claude-code-cli"
+  | "claude-agent-sdk"
+  | "claude-code-local"
+  | "codex"
+  | "cursor-cli"
+  | "public-agent-remote"
+  | "other";
+
+/**
+ * W1-1 canonical runtime → provider-lane resolver. The provider lane is
+ * derived from the runtime so a dispatch lands in the right concurrency /
+ * admission lane unless an explicit provider override is supplied at enqueue.
+ *
+ *   claude-* (cli / sdk / local) → anthropic
+ *   codex                        → openai
+ *   cursor-cli                   → cursor
+ *   public-agent-remote          → other
+ *   anything else                → other
+ */
+export function resolveProviderFromRuntime(runtime: string | undefined | null): Provider {
+  const r = normalizeRuntime(runtime);
+  switch (r) {
+    case "claude-code-cli":
+    case "claude-agent-sdk":
+    case "claude-code-local":
+      return "anthropic";
+    case "codex":
+      return "openai";
+    case "cursor-cli":
+      return "cursor";
+    case "public-agent-remote":
+      return "other";
+    default:
+      return "other";
+  }
+}
+
+/**
+ * Normalize a runtime string to the canonical Runtime enum. Tolerates the
+ * legacy `cursor` alias and unknown values (→ "other"). Pure.
+ */
+export function normalizeRuntime(raw: string | undefined | null): Runtime {
+  const v = (raw ?? "").trim().toLowerCase();
+  switch (v) {
+    case "claude-code-cli":
+      return "claude-code-cli";
+    case "claude-agent-sdk":
+      return "claude-agent-sdk";
+    case "claude-code-local":
+      return "claude-code-local";
+    case "codex":
+      return "codex";
+    case "cursor":
+    case "cursor-cli":
+      return "cursor-cli";
+    case "public-agent-remote":
+      return "public-agent-remote";
+    default:
+      return "other";
+  }
+}
 
 export type FailureKind =
   | "agent_error"

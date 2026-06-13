@@ -88,9 +88,24 @@ export const DEFAULT_PROVIDER_MAX_CONCURRENT = 3;
 export const DEFAULT_MIN_SPACING_SECONDS = 30;
 export const DEFAULT_NEAR_BUDGET_PCT = 0.9;
 
-/** Per-provider concurrency cap. Anthropic defaults to 3 (spec step 7);
- *  unknown providers use the same conservative default. */
-export function defaultProviderMaxConcurrent(_provider: string | null): number {
+// W1-1: per-provider admission concurrency defaults. Each provider lane has
+// its own cap so an over-concurrency gate on one lane never reflects another
+// lane's load. Cursor is intentionally lower (2) — it is a distinct,
+// lower-throughput lane, not Anthropic.
+export const DEFAULT_PROVIDER_MAX_CONCURRENT_BY_PROVIDER: Readonly<Record<string, number>> =
+  Object.freeze({
+    anthropic: 3,
+    openai: 4,
+    cursor: 2,
+    other: 2,
+  });
+
+/** Per-provider concurrency cap (spec step 7). Falls back to the generic
+ *  default for unknown providers. */
+export function defaultProviderMaxConcurrent(provider: string | null): number {
+  if (provider && provider in DEFAULT_PROVIDER_MAX_CONCURRENT_BY_PROVIDER) {
+    return DEFAULT_PROVIDER_MAX_CONCURRENT_BY_PROVIDER[provider];
+  }
   return DEFAULT_PROVIDER_MAX_CONCURRENT;
 }
 

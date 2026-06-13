@@ -18,6 +18,8 @@ import type { Provider, Runtime, UsagePolicySnapshot } from "./types.js";
 export interface SchedulerPolicy {
   max_in_flight_anthropic: number;
   max_in_flight_openai: number;
+  // W1-1: Cursor CLI is its own provider lane with its own concurrency cap.
+  max_in_flight_cursor: number;
   max_in_flight_other: number;
   rate_limit_backoff_initial_ms: number;
   rate_limit_backoff_max_ms: number;
@@ -49,6 +51,7 @@ export interface PolicyOverrides {
 export const POLICY_DEFAULTS: SchedulerPolicy = {
   max_in_flight_anthropic: 3,
   max_in_flight_openai: 4,
+  max_in_flight_cursor: 2,
   max_in_flight_other: 2,
   rate_limit_backoff_initial_ms: 30_000,
   rate_limit_backoff_max_ms: 300_000,
@@ -65,6 +68,8 @@ const SAFETY_CEILING = 20;
 const MIN_CAP = 1;
 
 const MAX_IN_FLIGHT_ENV_KEY = "DISPATCH_MAX_IN_FLIGHT_ANTHROPIC";
+const MAX_IN_FLIGHT_OPENAI_ENV_KEY = "DISPATCH_MAX_IN_FLIGHT_OPENAI";
+const MAX_IN_FLIGHT_CURSOR_ENV_KEY = "DISPATCH_MAX_IN_FLIGHT_CURSOR";
 const SILENCE_ENV_KEY = "DISPATCH_SILENCE_THRESHOLD_MS";
 const STALE_IN_FLIGHT_TTL_ENV_KEY = "DISPATCH_STALE_IN_FLIGHT_TTL_MS";
 
@@ -87,12 +92,17 @@ export function loadSchedulerPolicy(
   const merged: SchedulerPolicy = { ...POLICY_DEFAULTS, ...(overrides.dispatch ?? {}) };
   const envAnth = parsePositiveInt(env[MAX_IN_FLIGHT_ENV_KEY]);
   if (envAnth != null) merged.max_in_flight_anthropic = envAnth;
+  const envOpenai = parsePositiveInt(env[MAX_IN_FLIGHT_OPENAI_ENV_KEY]);
+  if (envOpenai != null) merged.max_in_flight_openai = envOpenai;
+  const envCursor = parsePositiveInt(env[MAX_IN_FLIGHT_CURSOR_ENV_KEY]);
+  if (envCursor != null) merged.max_in_flight_cursor = envCursor;
   const envSilence = parsePositiveInt(env[SILENCE_ENV_KEY]);
   if (envSilence != null) merged.silence_threshold_ms = envSilence;
   const staleTtl = parsePositiveInt(env[STALE_IN_FLIGHT_TTL_ENV_KEY]);
   if (staleTtl != null) merged.stale_in_flight_ttl_ms = staleTtl;
   merged.max_in_flight_anthropic = clampCap(merged.max_in_flight_anthropic);
   merged.max_in_flight_openai = clampCap(merged.max_in_flight_openai);
+  merged.max_in_flight_cursor = clampCap(merged.max_in_flight_cursor);
   merged.max_in_flight_other = clampCap(merged.max_in_flight_other);
   if (!Number.isFinite(merged.silence_threshold_ms) || merged.silence_threshold_ms < 0) {
     merged.silence_threshold_ms = POLICY_DEFAULTS.silence_threshold_ms;
@@ -135,6 +145,24 @@ export interface SafeConcurrencyResult {
   policy_version: string;
 }
 
+/**
+ * W1-1: the configured concurrency cap for a provider lane, independent of
+ * every other lane. Used by snapshot/claim so no lane defaults to the
+ * Anthropic cap. Pure.
+ */
+export function maxInFlightForProvider(policy: SchedulerPolicy, provider: Provider): number {
+  switch (provider) {
+    case "anthropic":
+      return policy.max_in_flight_anthropic;
+    case "openai":
+      return policy.max_in_flight_openai;
+    case "cursor":
+      return policy.max_in_flight_cursor;
+    default:
+      return policy.max_in_flight_other;
+  }
+}
+
 export function getSafeConcurrency(
   input: SafeConcurrencyInput,
   policy: SchedulerPolicy,
@@ -169,6 +197,11 @@ export function getSafeConcurrency(
       base = policy.max_in_flight_openai;
       source = "default";
       reason = `openai cap = ${base}`;
+      break;
+    case "cursor":
+      base = policy.max_in_flight_cursor;
+      source = "default";
+      reason = `cursor cap = ${base}`;
       break;
     default:
       base = policy.max_in_flight_other;

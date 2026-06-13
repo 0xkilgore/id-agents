@@ -63,10 +63,12 @@ describe("seed values (CTO-3 §Data Artifacts)", () => {
     });
   });
 
-  it("default per-agent concurrency is 1; provider anthropic is 3", () => {
+  it("default per-agent concurrency is 1; per-provider admission caps are lane-specific (W1-1)", () => {
     expect(DEFAULT_AGENT_MAX_CONCURRENT).toBe(1);
     expect(defaultProviderMaxConcurrent("anthropic")).toBe(3);
-    expect(defaultProviderMaxConcurrent("openai")).toBe(3);
+    expect(defaultProviderMaxConcurrent("openai")).toBe(4);
+    expect(defaultProviderMaxConcurrent("cursor")).toBe(2);
+    expect(defaultProviderMaxConcurrent("unknown")).toBe(3); // generic fallback
     expect(DEFAULT_MIN_SPACING_SECONDS).toBe(30);
   });
 });

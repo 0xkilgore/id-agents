@@ -7,7 +7,8 @@
 // is gated behind USAGE_GATE_ENFORCEMENT=enforce. When "warn" (default),
 // the gate observes, logs, and reports — it NEVER blocks.
 
-export type Provider = "anthropic" | "openai" | "other";
+// W1-1 (runtime-provider-lanes): `cursor` is a distinct provider lane.
+export type Provider = "anthropic" | "openai" | "cursor" | "other";
 
 export type UsageGateEnforcement = "warn" | "enforce";
 

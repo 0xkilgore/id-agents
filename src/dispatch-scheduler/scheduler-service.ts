@@ -24,7 +24,7 @@ import {
 } from "./policy.js";
 import { computeNextAttemptAt } from "./backoff.js";
 import { classifyAgentStartError } from "./throttle-classifier.js";
-import type { DispatchDoc, Provider } from "./types.js";
+import type { DispatchDoc, Provider, Runtime } from "./types.js";
 
 export type AgentTransportResult =
   | { ok: true; agent_query_id: string }
@@ -92,6 +92,13 @@ export interface SchedulerServiceOptions {
   now: () => string;
   rng?: () => number;
   provider?: Provider;
+  /**
+   * W1-1: the provider lanes this scheduler drains each tick. Each lane is
+   * swept and claimed independently with its own cap and its own in-flight
+   * count, so Anthropic / OpenAI(Codex) / Cursor queues never share slots.
+   * Defaults to `[provider ?? "anthropic"]` (single-lane, unchanged behavior).
+   */
+  providers?: Provider[];
   logger?: SchedulerLogger;
   /** Optional usage gate provider. When omitted, no usage gating. */
   usageGateProvider?: UsageGateProvider;
@@ -146,6 +153,7 @@ export class SchedulerService {
   private now: () => string;
   private rng: () => number;
   private provider: Provider;
+  private providers: Provider[];
   private logger: SchedulerLogger;
   private budgetState: BudgetState = "ok";
   private usageGateProvider?: UsageGateProvider;
@@ -158,6 +166,11 @@ export class SchedulerService {
     this.now = opts.now;
     this.rng = opts.rng ?? Math.random;
     this.provider = opts.provider ?? "anthropic";
+    // De-dup while preserving order; default to the single primary lane so
+    // existing single-provider construction is behaviorally unchanged.
+    this.providers = Array.from(
+      new Set(opts.providers && opts.providers.length > 0 ? opts.providers : [this.provider]),
+    );
     this.logger = opts.logger ?? NULL_LOGGER;
     this.usageGateProvider = opts.usageGateProvider;
     this.queryEvidence = opts.queryEvidence;
@@ -188,112 +201,148 @@ export class SchedulerService {
       cap_decision: { max_safe: 0, reason: "", source: "" },
     };
 
-    // B0: evidence-driven closeout runs FIRST so any in_flight dispatch
-    // whose linked agent query is already terminal gets the correct
-    // scheduler-side terminal transition before reapWedgedInFlight or
-    // sweepBounced get a chance to re-fire it.
-    await this.applyQueryEvidenceToInFlight(report);
+    // W1-1: drain each provider lane independently. The usage gate is
+    // agent-scoped (not provider-scoped), so it is computed at most once per
+    // tick — lazily, the first time any lane actually has slots to claim.
+    let excludeCache: string[] | null = null;
+    const getExcludedAgents = async (): Promise<string[]> => {
+      if (excludeCache) return excludeCache;
+      excludeCache = await this.computeExcludedAgents(report);
+      return excludeCache;
+    };
 
-    const wedged = await this.reapWedgedInFlight(report);
-    report.wedged_reaped = wedged;
+    for (const provider of this.providers) {
+      // B0: evidence-driven closeout runs FIRST so any in_flight dispatch
+      // whose linked agent query is already terminal gets the correct
+      // scheduler-side terminal transition before reapWedgedInFlight or
+      // sweepBounced get a chance to re-fire it.
+      await this.applyQueryEvidenceToInFlight(report, provider);
 
-    // B11 WIP: age-based stale-in-flight detector runs after wedged-reap
-    // and before sweepBounced. Catches dispatches that never produced a
-    // last_output_at stamp at all (so the B0 silence detector can't see
-    // them). Complementary defense-in-depth.
-    const staleFailed = await this.failStaleInFlight();
-    report.stale_in_flight_failed = staleFailed;
-    report.failed += staleFailed;
+      report.wedged_reaped += await this.reapWedgedInFlight(report, provider);
 
-    const requeued = await this.sweepBounced(report);
-    report.requeued = requeued;
+      // B11 WIP: age-based stale-in-flight detector runs after wedged-reap
+      // and before sweepBounced. Catches dispatches that never produced a
+      // last_output_at stamp at all (so the B0 silence detector can't see
+      // them). Complementary defense-in-depth.
+      const staleFailed = await this.failStaleInFlight(provider);
+      report.stale_in_flight_failed += staleFailed;
+      report.failed += staleFailed;
 
+      report.requeued += await this.sweepBounced(report, provider);
+
+      await this.claimAndStartLane(provider, report, getExcludedAgents);
+    }
+
+    return report;
+  }
+
+  /**
+   * W1-1: compute the cap, snapshot, and claim for ONE provider lane. Each
+   * lane uses its own provider cap and counts only its own in-flight dispatches
+   * (the reactor scopes claim/snapshot by provider), so no lane consumes
+   * another lane's concurrency slots. A full / errored lane simply yields no
+   * claims and does not block the other lanes.
+   */
+  private async claimAndStartLane(
+    provider: Provider,
+    report: TickReport,
+    getExcludedAgents: () => Promise<string[]>,
+  ): Promise<void> {
     const safe = getSafeConcurrency(
       {
-        provider: this.provider,
-        runtime: "claude-code-cli",
+        provider,
+        runtime: representativeRuntimeForProvider(provider),
         budget_state: this.budgetState,
-        current_in_flight: await this.countInFlight(),
+        current_in_flight: await this.countInFlight(provider),
       },
       this.policy,
     );
-    report.cap_decision = {
-      max_safe: safe.max_safe,
-      reason: safe.reason,
-      source: safe.source,
-    };
+    // Report the primary lane's cap decision for back-compat with single-lane
+    // observers; multi-lane callers should read per-lane snapshots.
+    if (provider === this.providers[0]) {
+      report.cap_decision = {
+        max_safe: safe.max_safe,
+        reason: safe.reason,
+        source: safe.source,
+      };
+    }
 
     const snap = await this.client.concurrencySnapshot({
       max_safe: safe.max_safe,
-      provider: this.provider,
+      provider,
     });
     if (!snap.ok) {
-      this.logger.error("scheduler_snapshot_failed", { detail: snap.detail });
-      return report;
+      this.logger.error("scheduler_snapshot_failed", { detail: snap.detail, provider });
+      return;
     }
     const slots = Math.max(0, safe.max_safe - snap.value.in_flight);
     if (slots === 0) {
       this.logger.info("scheduler_no_slots", {
+        provider,
         in_flight: snap.value.in_flight,
         max_safe: safe.max_safe,
         budget: this.budgetState,
       });
-      return report;
+      return;
     }
 
-    // Usage Meter gate (Spec 2026-05-31): read excluded agents from the
-    // gate provider. Always [] in WARN mode and on any provider error.
-    // Wedged-reap (above) and /agent-done / /agent-needs-input / monitor
-    // routes are NEVER gated — only new claims.
-    let excludeAgents: string[] = [];
-    if (this.usageGateProvider) {
-      try {
-        const snap = await this.usageGateProvider.getSnapshotForScheduler();
-        excludeAgents = await this.usageGateProvider.getExcludedAgentsForClaim();
-        report.usage_gate = {
-          enforcement: snap.enforcement,
-          global_state: snap.global.state,
-          excluded_agents: excludeAgents,
-        };
-        if (excludeAgents.length > 0 || snap.global.state !== "normal") {
-          this.logger.info("scheduler_usage_gate", {
-            enforcement: snap.enforcement,
-            global_state: snap.global.state,
-            excluded_agents: excludeAgents,
-            decision: snap.global.decision,
-          });
-        }
-      } catch (err) {
-        // Never throw out of the tick.
-        const msg = err instanceof Error ? err.message : String(err);
-        this.logger.warn("scheduler_usage_gate_failed", { detail: msg });
-        report.usage_gate = {
-          enforcement: "warn",
-          global_state: "degraded",
-          excluded_agents: [],
-          error: msg,
-        };
-        excludeAgents = [];
-      }
-    }
+    const excludeAgents = await getExcludedAgents();
 
     const claimResult = await this.client.claimForStart({
       limit: Math.min(slots, this.policy.claim_batch_limit),
-      provider: this.provider,
+      provider,
       now: this.now(),
       max_in_flight: safe.max_safe,
       exclude_agents: excludeAgents.length > 0 ? excludeAgents : undefined,
     });
     if (!claimResult.ok) {
-      this.logger.error("scheduler_claim_failed", { detail: claimResult.detail });
-      return report;
+      this.logger.error("scheduler_claim_failed", { detail: claimResult.detail, provider });
+      return;
     }
-    report.claimed = claimResult.value.length;
+    report.claimed += claimResult.value.length;
 
     for (const doc of claimResult.value) {
       await this.startOne(doc, report);
     }
-    return report;
+  }
+
+  /**
+   * Usage Meter gate (Spec 2026-05-31): excluded agents for claim. Agent-
+   * scoped, provider-agnostic. Always [] in WARN mode and on any provider
+   * error. Wedged-reap and /agent-done / /agent-needs-input / monitor routes
+   * are NEVER gated — only new claims.
+   */
+  private async computeExcludedAgents(report: TickReport): Promise<string[]> {
+    if (!this.usageGateProvider) return [];
+    try {
+      const snap = await this.usageGateProvider.getSnapshotForScheduler();
+      const excludeAgents = await this.usageGateProvider.getExcludedAgentsForClaim();
+      report.usage_gate = {
+        enforcement: snap.enforcement,
+        global_state: snap.global.state,
+        excluded_agents: excludeAgents,
+      };
+      if (excludeAgents.length > 0 || snap.global.state !== "normal") {
+        this.logger.info("scheduler_usage_gate", {
+          enforcement: snap.enforcement,
+          global_state: snap.global.state,
+          excluded_agents: excludeAgents,
+          decision: snap.global.decision,
+        });
+      }
+      return excludeAgents;
+    } catch (err) {
+      // Never throw out of the tick.
+      const msg = err instanceof Error ? err.message : String(err);
+      this.logger.warn("scheduler_usage_gate_failed", { detail: msg });
+      report.usage_gate = {
+        enforcement: "warn",
+        global_state: "degraded",
+        excluded_agents: [],
+        error: msg,
+      };
+      return [];
+    }
   }
 
   private async startOne(doc: DispatchDoc, report: TickReport): Promise<void> {
@@ -409,9 +458,9 @@ export class SchedulerService {
     }
   }
 
-  private async sweepBounced(report: TickReport): Promise<number> {
+  private async sweepBounced(report: TickReport, provider: Provider = this.provider): Promise<number> {
     const bounced = await this.client.dispatchBounceRetries({
-      provider: this.provider,
+      provider,
     });
     if (!bounced.ok) return 0;
     const now = this.now();
@@ -450,9 +499,9 @@ export class SchedulerService {
     return count;
   }
 
-  private async reapWedgedInFlight(report: TickReport): Promise<number> {
+  private async reapWedgedInFlight(report: TickReport, provider: Provider = this.provider): Promise<number> {
     const inflight = await this.client.dispatchesInFlight({
-      provider: this.provider,
+      provider,
     });
     if (!inflight.ok) return 0;
     const nowMs = Date.parse(this.now());
@@ -543,10 +592,10 @@ export class SchedulerService {
    * Errors are soft: the dispatch is left in_flight and the counter
    * increments. The tick never throws on evidence-client failures.
    */
-  private async applyQueryEvidenceToInFlight(report: TickReport): Promise<void> {
+  private async applyQueryEvidenceToInFlight(report: TickReport, provider: Provider = this.provider): Promise<void> {
     if (!this.queryEvidence) return;
     const inflight = await this.client.dispatchesInFlight({
-      provider: this.provider,
+      provider,
     });
     if (!inflight.ok) return;
     const nowMs = Date.parse(this.now());
@@ -646,9 +695,9 @@ export class SchedulerService {
    * claimed and never produced a `last_output_at` stamp at all — e.g.,
    * the agent process died mid-startup. Defense in depth.
    */
-  private async failStaleInFlight(): Promise<number> {
+  private async failStaleInFlight(provider: Provider = this.provider): Promise<number> {
     const inflight = await this.client.dispatchesInFlight({
-      provider: this.provider,
+      provider,
     });
     if (!inflight.ok) return 0;
     const nowMs = Date.parse(this.now());
@@ -675,8 +724,25 @@ export class SchedulerService {
     return failed;
   }
 
-  private async countInFlight(): Promise<number> {
-    const r = await this.client.dispatchesInFlight({ provider: this.provider });
+  private async countInFlight(provider: Provider = this.provider): Promise<number> {
+    const r = await this.client.dispatchesInFlight({ provider });
     return r.ok ? r.value.length : 0;
+  }
+}
+
+/**
+ * W1-1: a representative runtime for a provider lane, used only to populate
+ * SafeConcurrencyInput.runtime (the cap is keyed off provider). Pure.
+ */
+export function representativeRuntimeForProvider(provider: Provider): Runtime {
+  switch (provider) {
+    case "anthropic":
+      return "claude-code-cli";
+    case "openai":
+      return "codex";
+    case "cursor":
+      return "cursor-cli";
+    default:
+      return "other";
   }
 }
