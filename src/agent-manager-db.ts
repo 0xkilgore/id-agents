@@ -2760,6 +2760,53 @@ export class AgentManagerDb {
           });
         }
 
+        // Read-model back-write (2026-06-13): the scheduler closes
+        // dispatch_scheduler_queue above, but historically nothing
+        // back-wrote the corresponding queries row. Result: /query/<id>
+        // stayed "pending" forever after a dispatch completed (CTO
+        // dispatch query_1781370010051_n1hjeqq + Maestra
+        // query_1781370010083_9v4sj6q on 2026-06-13 are the reference
+        // reproduction). Same manager-side query_id lives in both
+        // dispatch_scheduler_queue.query_id and queries.query_id, so the
+        // back-write is a single .complete() / .markFailed() call.
+        //
+        // Best-effort: a missing/stale queries row should not fail the
+        // dispatch closeout that the scheduler already committed.
+        // See: cane/output/2026-06-13-query-row-not-resolved-after-dispatch-done.md
+        try {
+          const resultProjection: Record<string, unknown> | null =
+            body.result && typeof body.result === 'object'
+              ? (body.result as Record<string, unknown>)
+              : null;
+          // DispatchDoc doesn't carry team_id, so look it up from the
+          // queries table directly. If no matching queries row exists
+          // (e.g. dispatch issued via a path that didn't pre-create the
+          // legacy mirror), findTeam returns null and the back-write
+          // becomes a no-op — correct best-effort behavior.
+          const backWriteTeamId = await this.db.queries.findTeam(doc.query_id);
+          if (backWriteTeamId) {
+            if (success) {
+              await this.db.queries.complete(
+                backWriteTeamId,
+                doc.query_id,
+                Date.now(),
+                resultProjection,
+              );
+            } else {
+              await this.db.queries.markFailed(
+                backWriteTeamId,
+                doc.query_id,
+                Date.now(),
+                errorDetail ?? null,
+              );
+            }
+          }
+        } catch (err) {
+          this.managerLog(
+            `[agent-done] queries back-write failed (continuing): ${err instanceof Error ? err.message : String(err)}`,
+          );
+        }
+
         // N1.3: best-effort graph re-evaluation after dispatch state change.
         this.evaluateGraphsForDispatchBestEffort(
           doc.dispatch_phid,
