@@ -244,11 +244,12 @@ export async function readArtifacts(adapter: DbAdapterLike, teamId: string, limi
   count: number;
   source_metadata: { sources: string[]; team_id: string };
 }> {
-  const [dispatchArtifacts, outputArtifacts] = await Promise.all([
+  const [dispatchArtifacts, queryArtifacts, outputArtifacts] = await Promise.all([
     readDispatchResultArtifacts(adapter, teamId, limit),
+    readQueryResultArtifacts(adapter, teamId, limit),
     readAgentOutputArtifacts(adapter, teamId, limit),
   ]);
-  const artifacts = [...dispatchArtifacts, ...outputArtifacts]
+  const artifacts = dedupeArtifactsByPath([...dispatchArtifacts, ...queryArtifacts, ...outputArtifacts])
     .sort((a, b) => String(b.modified_at ?? b.completed_at ?? '').localeCompare(String(a.modified_at ?? a.completed_at ?? '')))
     .slice(0, limit);
   return {
@@ -256,7 +257,7 @@ export async function readArtifacts(adapter: DbAdapterLike, teamId: string, limi
     items: artifacts,
     count: artifacts.length,
     source_metadata: {
-      sources: ['dispatch_scheduler_queue.result_json', 'agents.working_directory/output'],
+      sources: ['dispatch_scheduler_queue.result_json', 'queries.result', 'agents.working_directory/output'],
       team_id: teamId,
     },
   };
@@ -307,6 +308,69 @@ async function readDispatchResultArtifacts(
   return artifacts;
 }
 
+async function readQueryResultArtifacts(
+  adapter: DbAdapterLike,
+  teamId: string,
+  limit: number,
+): Promise<Array<Record<string, unknown>>> {
+  const { rows } = await adapter.query<{
+    query_id: string;
+    agent_id: string | null;
+    agent_name: string | null;
+    completed: number | null;
+    result: string | null;
+    manager_dispatch_id: string | null;
+    manager_query_id: string | null;
+  }>(
+    `SELECT q.query_id, q.agent_id, a.name AS agent_name, q.completed, q.result,
+            q.manager_dispatch_id, q.manager_query_id
+       FROM queries q
+       LEFT JOIN agents a ON a.id = q.agent_id
+      WHERE q.team_id = ?
+        AND q.status = 'completed'
+        AND q.result IS NOT NULL
+      ORDER BY q.completed DESC
+      LIMIT ?`,
+    [teamId, Math.max(limit * 4, limit)],
+  );
+
+  const artifacts: Array<Record<string, unknown>> = [];
+  for (const row of rows) {
+    if (artifacts.length >= limit) break;
+    const parsed = parseJsonObject(row.result);
+    const resultText = typeof parsed?.result === 'string'
+      ? parsed.result
+      : typeof row.result === 'string'
+        ? row.result
+        : '';
+    for (const artifactPath of extractOutputPaths(resultText)) {
+      if (artifacts.length >= limit) break;
+      const stat = safeStat(artifactPath);
+      if (!stat?.isFile()) continue;
+      artifacts.push({
+        id: `query:${row.query_id}:${path.basename(artifactPath)}`,
+        path: artifactPath,
+        basename: path.basename(artifactPath),
+        agent: row.agent_name ?? row.agent_id ?? 'unknown',
+        target_agent: row.agent_name ?? row.agent_id ?? 'unknown',
+        dispatch_id: row.manager_dispatch_id,
+        query_id: row.query_id,
+        manager_query_id: row.manager_query_id,
+        status: 'available',
+        exists: true,
+        size_bytes: stat.size,
+        modified_at: stat.mtime.toISOString(),
+        completed_at: row.completed ? new Date(Number(row.completed)).toISOString() : null,
+        source_metadata: {
+          source: 'queries.result',
+          agent_id: row.agent_id,
+        },
+      });
+    }
+  }
+  return artifacts;
+}
+
 async function readAgentOutputArtifacts(
   adapter: DbAdapterLike,
   teamId: string,
@@ -325,7 +389,6 @@ async function readAgentOutputArtifacts(
   );
   const artifacts: Array<Record<string, unknown>> = [];
   for (const agent of agents) {
-    if (artifacts.length >= limit) break;
     if (!agent.working_directory) continue;
     const outputDir = path.join(agent.working_directory, 'output');
     if (!existsSync(outputDir)) continue;
@@ -336,7 +399,6 @@ async function readAgentOutputArtifacts(
       continue;
     }
     for (const entry of entries) {
-      if (artifacts.length >= limit) break;
       if (!entry.isFile()) continue;
       const filePath = path.join(outputDir, entry.name);
       const stat = safeStat(filePath);
@@ -359,7 +421,9 @@ async function readAgentOutputArtifacts(
       });
     }
   }
-  return artifacts;
+  return artifacts
+    .sort((a, b) => String(b.modified_at ?? '').localeCompare(String(a.modified_at ?? '')))
+    .slice(0, limit);
 }
 
 function statusesForFilter(status: DispatchReadStatus): string[] {
@@ -444,5 +508,39 @@ function safeStat(filePath: string) {
     return statSync(filePath);
   } catch {
     return null;
+  }
+}
+
+function extractOutputPaths(text: string): string[] {
+  const paths = new Set<string>();
+  const absolutePathRe = /\/[^\s)\]]+\/output\/[^\s)\]]+\.(?:md|markdown|txt|csv|json|html|pdf)\b/g;
+  for (const match of text.matchAll(absolutePathRe)) {
+    paths.add(match[0]);
+  }
+  return Array.from(paths);
+}
+
+function dedupeArtifactsByPath(artifacts: Array<Record<string, unknown>>): Array<Record<string, unknown>> {
+  const byPath = new Map<string, Record<string, unknown>>();
+  for (const artifact of artifacts) {
+    const key = typeof artifact.path === 'string' ? artifact.path : String(artifact.id ?? '');
+    if (!key) continue;
+    const prior = byPath.get(key);
+    if (!prior || sourceRank(artifact) < sourceRank(prior)) {
+      byPath.set(key, artifact);
+    }
+  }
+  return Array.from(byPath.values());
+}
+
+function sourceRank(artifact: Record<string, unknown>): number {
+  const metadata = artifact.source_metadata as { source?: unknown } | undefined;
+  switch (metadata?.source) {
+    case 'dispatch_scheduler_queue.result_json':
+      return 0;
+    case 'queries.result':
+      return 1;
+    default:
+      return 2;
   }
 }

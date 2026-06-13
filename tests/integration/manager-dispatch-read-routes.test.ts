@@ -220,6 +220,18 @@ describe('manager dispatch read routes', () => {
       completed_at: '2026-06-04T13:00:00.000Z',
       result_json: JSON.stringify({ artifact_path: dispatchArtifactPath, tl_dr: 'artifact summary' }),
     });
+    await db.queries.upsert(teamId, 'artifact-agent-id', {
+      query_id: 'agent_query_artifact',
+      status: 'completed',
+      prompt: 'write report',
+      created: Date.now(),
+      completed: Date.now(),
+      result: {
+        result: `Done.\n\nOutput: [agent-report.md](${outputArtifactPath})`,
+      },
+      manager_dispatch_id: 'phid:disp-artifact',
+      manager_query_id: 'query_artifact',
+    });
 
     const res = await fetch(`${baseUrl}/artifacts?limit=10`, { headers: headers('dispatch-read-artifacts') });
     expect(res.status).toBe(200);
@@ -228,10 +240,11 @@ describe('manager dispatch read routes', () => {
     expect(body.team).toBe('dispatch-read-artifacts');
     expect(body.source_metadata.sources).toEqual([
       'dispatch_scheduler_queue.result_json',
+      'queries.result',
       'agents.working_directory/output',
     ]);
     expect(body.artifacts.map((a: any) => a.id)).toContain('dispatch:phid:disp-artifact');
-    expect(body.artifacts.map((a: any) => a.id)).toContain('output:artifact-agent-id:agent-report.md');
+    expect(body.artifacts.map((a: any) => a.id)).toContain('query:agent_query_artifact:agent-report.md');
     expect(body.artifacts.find((a: any) => a.id === 'dispatch:phid:disp-artifact')).toMatchObject({
       path: dispatchArtifactPath,
       basename: 'dispatch-report.md',
@@ -241,6 +254,16 @@ describe('manager dispatch read routes', () => {
       status: 'available',
       exists: true,
       tl_dr: 'artifact summary',
+    });
+    expect(body.artifacts.find((a: any) => a.id === 'query:agent_query_artifact:agent-report.md')).toMatchObject({
+      path: outputArtifactPath,
+      basename: 'agent-report.md',
+      target_agent: 'artifact-agent',
+      dispatch_id: 'phid:disp-artifact',
+      query_id: 'agent_query_artifact',
+      manager_query_id: 'query_artifact',
+      status: 'available',
+      exists: true,
     });
   });
 });
