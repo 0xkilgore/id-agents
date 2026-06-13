@@ -1649,7 +1649,7 @@ export class AgentManagerDb {
               message,
               subject: typeof message === 'string' ? message.slice(0, 80) : 'manager dispatch',
             },
-            { target_url: targetUrl },
+            { target_url: targetUrl, wake: true },
           );
 
           if (this.dispatchScheduler.mode === 'enforce') {
@@ -2044,6 +2044,7 @@ export class AgentManagerDb {
           message?: unknown;
           subject?: unknown;
           priority?: unknown;
+          wake?: unknown;
         };
         if (typeof body.to_agent !== 'string' || typeof body.message !== 'string') {
           return res.status(400).json({
@@ -2067,7 +2068,7 @@ export class AgentManagerDb {
             subject: typeof body.subject === 'string' ? body.subject : undefined,
             priority: typeof body.priority === 'number' ? body.priority : undefined,
           },
-          { target_url: agent.endpoint },
+          { target_url: agent.endpoint, wake: body.wake === true },
         );
         return res.json({ ok: true, ...enq });
       } catch (err) {

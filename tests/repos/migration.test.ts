@@ -140,6 +140,24 @@ describe('SQLite migration — tasks uniqueness upgrade', () => {
     // Same name should return the same id on repeated calls
     expect(id1).toEqual(id2);
   });
+
+  it('fresh DB has dispatch queue indexes for scheduler reads and projections', async () => {
+    const adapter = await freshDb();
+    const { rows } = await adapter.query<{ name: string }>(
+      `SELECT name FROM sqlite_master
+       WHERE type = 'index'
+         AND tbl_name = 'dispatch_scheduler_queue'`,
+    );
+    const names = new Set(rows.map((r) => r.name));
+
+    expect(names).toContain('dispatch_scheduler_queue_read_idx');
+    expect(names).toContain('dispatch_scheduler_in_flight_read_idx');
+    expect(names).toContain('dispatch_scheduler_bounced_read_idx');
+    expect(names).toContain('dispatch_scheduler_recent_terminal_idx');
+    expect(names).toContain('dispatch_scheduler_team_agent_query_idx');
+
+    await adapter.close();
+  });
 });
 
 // =====================================================================

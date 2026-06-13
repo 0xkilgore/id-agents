@@ -33,6 +33,19 @@ afterEach(async () => {
   rmSync(tmpDir, { recursive: true, force: true });
 });
 
+async function waitUntil(
+  predicate: () => boolean,
+  timeoutMs = 1000,
+  pollMs = 10,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (predicate()) return;
+    await new Promise((resolve) => setTimeout(resolve, pollMs));
+  }
+  throw new Error("timed out waiting for condition");
+}
+
 describe("parseGatewayMode / schedulerEnabled", () => {
   it("defaults to shadow when unset", () => {
     expect(parseGatewayMode(undefined)).toBe("shadow");
@@ -100,6 +113,42 @@ describe("SchedulerHandle bootstrap + flow", () => {
     });
     expect(final?.status).toBe("done");
     fetchSpy.mockRestore();
+  });
+
+  it("started scheduler wakes queued dispatches on enqueue without waiting for the interval", async () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch") as ReturnType<typeof vi.spyOn>;
+    fetchSpy.mockResolvedValue(
+      new Response(JSON.stringify({ query_id: "agent-q-wake" }), { status: 200 }) as unknown as Response,
+    );
+    const handle = new SchedulerHandle({
+      adapter,
+      teamId: "team",
+      resolveTargetUrl: () => "http://localhost:9999",
+      env: {
+        DISPATCH_TICK_INTERVAL_MS: "60000",
+        DISPATCH_MAX_IN_FLIGHT_ANTHROPIC: "1",
+      },
+    });
+    handle.start();
+    try {
+      const enq = await handle.enqueue({
+        to_agent: "worker",
+        from_actor: "manager",
+        message: "wake immediately",
+      }, {
+        target_url: "http://localhost:9999",
+        wake: true,
+      });
+
+      await waitUntil(() => fetchSpy.mock.calls.length === 1);
+      const doc = await handle.client.getByQueryId(enq.query_id);
+      if (!doc.ok) throw new Error();
+      expect(doc.value.status).toBe("in_flight");
+      expect(doc.value.agent_query_id).toBe("agent-q-wake");
+    } finally {
+      handle.stop();
+      fetchSpy.mockRestore();
+    }
   });
 
   it("8-burst at cap=3 starts at most 3 per tick", async () => {

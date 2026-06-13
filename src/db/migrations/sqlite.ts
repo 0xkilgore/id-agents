@@ -462,10 +462,21 @@ export async function migrateSqlite(adapter: SqliteAdapter): Promise<void> {
 
     CREATE INDEX IF NOT EXISTS dispatch_scheduler_eligible_idx
       ON dispatch_scheduler_queue(status, provider, runtime, not_before_at, priority);
+    CREATE INDEX IF NOT EXISTS dispatch_scheduler_queue_read_idx
+      ON dispatch_scheduler_queue(team_id, status, provider, runtime, priority DESC, not_before_at, dispatch_phid);
+    CREATE INDEX IF NOT EXISTS dispatch_scheduler_in_flight_read_idx
+      ON dispatch_scheduler_queue(team_id, status, provider, runtime, started_at, dispatch_phid);
+    CREATE INDEX IF NOT EXISTS dispatch_scheduler_bounced_read_idx
+      ON dispatch_scheduler_queue(team_id, status, provider, runtime, not_before_at, dispatch_phid);
+    CREATE INDEX IF NOT EXISTS dispatch_scheduler_recent_terminal_idx
+      ON dispatch_scheduler_queue(team_id, status, completed_at DESC, dispatch_phid);
     CREATE INDEX IF NOT EXISTS dispatch_scheduler_query_id_idx
       ON dispatch_scheduler_queue(query_id);
     CREATE INDEX IF NOT EXISTS dispatch_scheduler_agent_query_id_idx
       ON dispatch_scheduler_queue(agent_query_id);
+    CREATE INDEX IF NOT EXISTS dispatch_scheduler_team_agent_query_idx
+      ON dispatch_scheduler_queue(team_id, agent_query_id)
+      WHERE agent_query_id IS NOT NULL;
     CREATE UNIQUE INDEX IF NOT EXISTS dispatch_scheduler_team_query_idx
       ON dispatch_scheduler_queue(team_id, query_id);
 
@@ -679,6 +690,20 @@ export async function migrateSqlite(adapter: SqliteAdapter): Promise<void> {
       // Column already exists in upgraded databases.
     }
   }
+
+  adapter.exec(`
+    CREATE INDEX IF NOT EXISTS dispatch_scheduler_queue_read_idx
+      ON dispatch_scheduler_queue(team_id, status, provider, runtime, priority DESC, not_before_at, dispatch_phid);
+    CREATE INDEX IF NOT EXISTS dispatch_scheduler_in_flight_read_idx
+      ON dispatch_scheduler_queue(team_id, status, provider, runtime, started_at, dispatch_phid);
+    CREATE INDEX IF NOT EXISTS dispatch_scheduler_bounced_read_idx
+      ON dispatch_scheduler_queue(team_id, status, provider, runtime, not_before_at, dispatch_phid);
+    CREATE INDEX IF NOT EXISTS dispatch_scheduler_recent_terminal_idx
+      ON dispatch_scheduler_queue(team_id, status, completed_at DESC, dispatch_phid);
+    CREATE INDEX IF NOT EXISTS dispatch_scheduler_team_agent_query_idx
+      ON dispatch_scheduler_queue(team_id, agent_query_id)
+      WHERE agent_query_id IS NOT NULL;
+  `);
 
   await migrateQueriesTeamQueryPkSqlite(adapter);
   await migrateNewsItemsNullableAgentSqlite(adapter);

@@ -163,6 +163,7 @@ export class SchedulerHandle {
   readonly enabled: boolean;
   private interval: NodeJS.Timeout | null = null;
   private ticking = false;
+  private wakePending = false;
   private intervalMs: number;
   private teamId: string;
   private logger: ConsoleLogger;
@@ -242,10 +243,16 @@ export class SchedulerHandle {
   }
 
   private async safeTick(): Promise<void> {
-    if (this.ticking) return; // no overlap
+    if (this.ticking) {
+      this.wakePending = true;
+      return;
+    }
     this.ticking = true;
     try {
-      await this.scheduler.tick();
+      do {
+        this.wakePending = false;
+        await this.scheduler.tick();
+      } while (this.wakePending);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       this.logger.error("scheduler_tick_threw", { detail: msg });
@@ -255,7 +262,7 @@ export class SchedulerHandle {
   }
 
   /** Enqueue a Dispatch doc and return the canonical query_id. */
-  async enqueue(input: EnqueueInputV2, opts?: { target_url?: string }): Promise<EnqueueResult> {
+  async enqueue(input: EnqueueInputV2, opts?: { target_url?: string; wake?: boolean }): Promise<EnqueueResult> {
     const teamId = input.team_id ?? this.teamId;
     if (teamId !== this.teamId) {
       throw new Error(
@@ -330,6 +337,9 @@ export class SchedulerHandle {
       actor_ref,
       causation,
     });
+    if (this.enabled && this.interval && opts?.wake) {
+      void this.safeTick();
+    }
     return {
       query_id: doc.query_id,
       dispatch_phid: doc.dispatch_phid,
