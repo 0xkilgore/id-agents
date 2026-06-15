@@ -710,6 +710,31 @@ export async function migratePostgres(adapter: DbAdapter): Promise<void> {
   );
   await adapter.query(`ALTER TABLE queries ADD COLUMN IF NOT EXISTS manager_dispatch_id TEXT`);
   await adapter.query(`ALTER TABLE queries ADD COLUMN IF NOT EXISTS manager_query_id TEXT`);
+
+  // Spec 056 ─ first-class artifact_path on dispatch_scheduler_queue,
+  // sourced from /agent-done.result.artifact_path. Additive, idempotent.
+  // Guarded behind table existence so installs without the scheduler
+  // table are unaffected.
+  await adapter.query(`
+    DO $$
+    BEGIN
+      IF EXISTS (
+        SELECT 1 FROM information_schema.tables
+        WHERE table_schema = 'public' AND table_name = 'dispatch_scheduler_queue'
+      ) THEN
+        ALTER TABLE dispatch_scheduler_queue ADD COLUMN IF NOT EXISTS artifact_path text;
+        CREATE INDEX IF NOT EXISTS dispatch_scheduler_artifact_path_idx
+          ON dispatch_scheduler_queue(team_id, artifact_path)
+          WHERE artifact_path IS NOT NULL;
+        UPDATE dispatch_scheduler_queue
+        SET artifact_path = (result_json::jsonb ->> 'artifact_path')
+        WHERE artifact_path IS NULL
+          AND result_json IS NOT NULL
+          AND (result_json::jsonb ->> 'artifact_path') IS NOT NULL
+          AND (result_json::jsonb ->> 'artifact_path') != '';
+      END IF;
+    END $$;
+  `);
 }
 
 /** Null manager-owned FK columns and delete manager-<team> shadow agent rows. */

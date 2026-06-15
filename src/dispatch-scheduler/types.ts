@@ -219,6 +219,10 @@ export interface DispatchDoc {
     | "follow_up_dispatch";
   promotion_required_reason: string | null;
   promotion_result: unknown | null;
+  // Spec 056 ─ first-class artifact path sourced from
+  // /agent-done.result.artifact_path. Null until the agent reports an
+  // artifact at done-time. Additive; absent on legacy rows.
+  artifact_path: string | null;
   // Spec 054 v2 Part 2 ─ enqueue-side promotion inputs (repo, branch,
   // base, remote, plus an optional skip-reason). Carried verbatim from
   // EnqueueInput so the agent receives canonical promotion context in
@@ -415,6 +419,32 @@ export function applyPromotionDefaults(input: EnqueueInput): EnqueueInput {
   }
   if (!out.promotion_strategy) out.promotion_strategy = "auto";
   return out;
+}
+
+/**
+ * Task 4 (DispatchVerification job) — minimal projection of a queue row
+ * the verification job adapts into a VerifierDispatchRow. Sourced from
+ * `SELECT * FROM dispatch_scheduler_queue`; there is NO created_at column,
+ * so `not_before_at` doubles as the created timestamp.
+ */
+export interface DispatchVerificationSourceRow {
+  dispatch_phid: string;
+  query_id: string;
+  to_agent: string;
+  subject: string;
+  status: SchedulerStatus;
+  artifact_path: string | null;
+  /** Raw /agent-done result JSON, unparsed. */
+  result_json: string | null;
+  failure_kind: FailureKind | null;
+  failure_detail: string | null;
+  not_before_at: string;
+  started_at: string | null;
+  completed_at: string | null;
+  updated_at: string;
+  promote: boolean;
+  /** Parsed promotion_result_json, or null. */
+  promotion_result: unknown | null;
 }
 
 export interface ConcurrencySnapshot {

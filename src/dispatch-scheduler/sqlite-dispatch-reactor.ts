@@ -29,6 +29,7 @@ import {
   type ClarificationEvent,
   type ClarificationBlocker,
   type PromotionInput,
+  type DispatchVerificationSourceRow,
   defaultClarificationFields,
   defaultPromotionFields,
   isTerminal,
@@ -62,6 +63,7 @@ interface Row {
   failure_detail: string | null;
   target_url: string | null;
   result_json: string | null;
+  artifact_path: string | null;
   // Spec 054 v2 additive columns
   clarification_id: string | null;
   active_clarification_json: string | null;
@@ -136,6 +138,7 @@ export class SqliteDispatchReactor {
       usage_policy_snapshot: input.usage_policy_snapshot ?? null,
       failure_kind: null,
       failure_detail: null,
+      artifact_path: null,
       ...defaultClarificationFields(),
       ...defaultPromotionFields(input),
     };
@@ -147,11 +150,11 @@ export class SqliteDispatchReactor {
         not_before_at, attempt_count, bounce_count, last_bounce_json,
         bounce_history_json, started_at, completed_at, updated_at,
         agent_query_id, usage_policy_snapshot_json, failure_kind,
-        failure_detail, target_url, result_json,
+        failure_detail, target_url, result_json, artifact_path,
         clarification_id, active_clarification_json, clarification_history_json,
         resume_delivery_status, promote, promotion_strategy,
         promotion_required_reason, promotion_result_json, promotion_input_json
-      ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       [
         doc.dispatch_phid,
         this.teamId,
@@ -178,6 +181,8 @@ export class SqliteDispatchReactor {
         null,
         null,
         targetUrl,
+        null,
+        // artifact_path — set at done-time, never at enqueue.
         null,
         // Spec 054 v2 columns
         doc.clarification_id,
@@ -395,11 +400,15 @@ export class SqliteDispatchReactor {
       throw conflict(`markDoneWithResult requires in_flight, was ${doc.status}`);
     }
     const now = this.nowFn();
+    const artifactPath =
+      result && typeof result.artifact_path === "string" && result.artifact_path.length > 0
+        ? result.artifact_path
+        : null;
     await this.adapter.query(
       `UPDATE dispatch_scheduler_queue
-       SET status = 'done', completed_at = ?, updated_at = ?, result_json = ?
+       SET status = 'done', completed_at = ?, updated_at = ?, result_json = ?, artifact_path = ?
        WHERE dispatch_phid = ?`,
-      [now, now, result ? JSON.stringify(result) : null, phid],
+      [now, now, result ? JSON.stringify(result) : null, artifactPath, phid],
     );
     return this.getByPhid(phid);
   }
@@ -430,11 +439,15 @@ export class SqliteDispatchReactor {
       );
     }
     const now = this.nowFn();
+    const artifactPath =
+      result && typeof result.artifact_path === "string" && result.artifact_path.length > 0
+        ? result.artifact_path
+        : null;
     await this.adapter.query(
       `UPDATE dispatch_scheduler_queue
-       SET status = 'done', completed_at = ?, updated_at = ?, result_json = ?
+       SET status = 'done', completed_at = ?, updated_at = ?, result_json = ?, artifact_path = ?
        WHERE dispatch_phid = ? AND status = 'queued'`,
-      [now, now, result ? JSON.stringify(result) : null, phid],
+      [now, now, result ? JSON.stringify(result) : null, artifactPath, phid],
     );
     return this.getByPhid(phid);
   }
@@ -936,6 +949,44 @@ export class SqliteDispatchReactor {
     );
     return rows[0]?.target_url ?? null;
   }
+
+  /**
+   * Task 4 (DispatchVerification job) — list queue rows the verification
+   * job should (re)classify: anything updated since `sinceIso`, plus all
+   * non-terminal rows regardless of update time so stuck dispatches keep
+   * getting re-checked for the `expired` transition. Additive, read-only.
+   */
+  async listForVerification(opts: {
+    sinceIso: string;
+  }): Promise<DispatchVerificationSourceRow[]> {
+    const { rows } = await this.adapter.query<Row>(
+      `SELECT * FROM dispatch_scheduler_queue
+       WHERE team_id = ?
+         AND (updated_at >= ? OR status IN ('queued','in_flight','bounced','needs_clarification','resume_delivery_failed'))`,
+      [this.teamId, opts.sinceIso],
+    );
+    return rows.map(rowToVerificationSourceRow);
+  }
+}
+
+function rowToVerificationSourceRow(row: Row): DispatchVerificationSourceRow {
+  return {
+    dispatch_phid: row.dispatch_phid,
+    query_id: row.query_id,
+    to_agent: row.to_agent,
+    subject: row.subject,
+    status: row.status,
+    artifact_path: row.artifact_path ?? null,
+    result_json: row.result_json ?? null,
+    failure_kind: row.failure_kind ?? null,
+    failure_detail: row.failure_detail ?? null,
+    not_before_at: row.not_before_at,
+    started_at: row.started_at ?? null,
+    completed_at: row.completed_at ?? null,
+    updated_at: row.updated_at,
+    promote: row.promote == null ? true : Number(row.promote) === 1,
+    promotion_result: parseJsonOrNull(row.promotion_result_json),
+  };
 }
 
 function clampPriority(p: number | undefined): number {
@@ -1012,6 +1063,7 @@ function rowToDoc(row: Row): DispatchDoc {
     promotion_strategy: (row.promotion_strategy ?? "auto") as DispatchDoc["promotion_strategy"],
     promotion_required_reason: row.promotion_required_reason ?? null,
     promotion_result: parseJsonOrNull(row.promotion_result_json),
+    artifact_path: row.artifact_path ?? null,
     promotion_input: parsePromotionInput(row.promotion_input_json),
   };
 }

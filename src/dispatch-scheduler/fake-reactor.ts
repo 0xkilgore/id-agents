@@ -111,6 +111,7 @@ export class FakeReactor {
       usage_policy_snapshot: input.usage_policy_snapshot ?? null,
       failure_kind: null,
       failure_detail: null,
+      artifact_path: null,
       ...defaultClarificationFields(),
       ...defaultPromotionFields(input),
     };

@@ -683,6 +683,9 @@ export async function migrateSqlite(adapter: SqliteAdapter): Promise<void> {
     // base, remote, optional skip-reason). JSON-encoded; null on
     // non-build dispatches.
     `ALTER TABLE dispatch_scheduler_queue ADD COLUMN promotion_input_json TEXT`,
+    // Spec 056 ─ first-class artifact path sourced from
+    // /agent-done.result.artifact_path. Null until done-time.
+    `ALTER TABLE dispatch_scheduler_queue ADD COLUMN artifact_path TEXT`,
   ]) {
     try {
       adapter.exec(stmt);
@@ -690,6 +693,21 @@ export async function migrateSqlite(adapter: SqliteAdapter): Promise<void> {
       // Column already exists in upgraded databases.
     }
   }
+
+  // Spec 056 ─ artifact_path index + one-time backfill from result_json.
+  adapter.exec(`
+    CREATE INDEX IF NOT EXISTS dispatch_scheduler_artifact_path_idx
+      ON dispatch_scheduler_queue(team_id, artifact_path)
+      WHERE artifact_path IS NOT NULL;
+  `);
+  await adapter.query(`
+    UPDATE dispatch_scheduler_queue
+    SET artifact_path = json_extract(result_json, '$.artifact_path')
+    WHERE artifact_path IS NULL
+      AND result_json IS NOT NULL
+      AND json_extract(result_json, '$.artifact_path') IS NOT NULL
+      AND json_extract(result_json, '$.artifact_path') != ''
+  `);
 
   adapter.exec(`
     CREATE INDEX IF NOT EXISTS dispatch_scheduler_queue_read_idx
