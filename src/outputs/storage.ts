@@ -345,6 +345,32 @@ export interface BackfillResult {
   skipped: number;
 }
 
+/**
+ * Quote-aware pipe splitter — unified with kapelle-site
+ * app/ops/_lib/artifactAdapter.ts `splitPipeLine` (W1-7). A `|` inside double
+ * quotes does not split the field, and an escaped quote (\") does not toggle
+ * quote state. Each field is trimmed. Replaces the naive `line.split("|")`,
+ * which corrupted positional columns when any field contained a pipe.
+ */
+export function splitPipeLine(line: string): string[] {
+  const parts: string[] = [];
+  let current = "";
+  let inQuote = false;
+  for (let index = 0; index < line.length; index += 1) {
+    const char = line[index];
+    const prev = line[index - 1];
+    if (char === '"' && prev !== "\\") inQuote = !inQuote;
+    if (char === "|" && !inQuote) {
+      parts.push(current.trim());
+      current = "";
+    } else {
+      current += char;
+    }
+  }
+  parts.push(current.trim());
+  return parts;
+}
+
 export async function backfillCatalogFromDeliveryLog(
   adapter: DbAdapter,
   deliveryLogText: string,
@@ -358,8 +384,10 @@ export async function backfillCatalogFromDeliveryLog(
       out.skipped++;
       continue;
     }
-    // Pipe-split with embedded quotes: take the first 5 fields, leave tl_dr as remainder.
-    const parts = line.split("|").map(s => s.trim());
+    // Quote-aware pipe split (W1-7): a `|` inside a quoted field no longer
+    // misaligns the positional columns. Take the first 5 fields, tl_dr is the
+    // remainder.
+    const parts = splitPipeLine(line);
     if (parts.length < 5) {
       out.skipped++;
       continue;

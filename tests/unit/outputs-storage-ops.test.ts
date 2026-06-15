@@ -14,6 +14,7 @@ import {
   registerArtifact,
   getArtifact,
   backfillCatalogFromDeliveryLog,
+  splitPipeLine,
 } from '../../src/outputs/storage.js';
 import {
   viewArtifact,
@@ -454,5 +455,45 @@ describe('Kapelle B11 — backfillCatalogFromDeliveryLog', () => {
     const b = await backfillCatalogFromDeliveryLog(adapter, txt, '2026-06-08T12:00:00Z');
     expect(b.inserted).toBe(0);
     expect(b.updated).toBe(1);
+  });
+});
+
+describe('W1-7 — splitPipeLine (quote-aware delivery-log parsing)', () => {
+  it('does NOT split on a pipe inside double quotes', () => {
+    const parts = splitPipeLine('a | b | "c | d" | e');
+    expect(parts).toEqual(['a', 'b', '"c | d"', 'e']);
+  });
+
+  it('splits unquoted pipes and trims each field', () => {
+    expect(splitPipeLine('  a |b|  c  ')).toEqual(['a', 'b', 'c']);
+  });
+
+  it('treats an escaped quote (\\") as not toggling quote state', () => {
+    // The \" inside the quoted field does not close it, so the inner pipe
+    // stays inside the field rather than splitting.
+    expect(splitPipeLine('x | "a \\" b" | c')).toEqual(['x', '"a \\" b"', 'c']);
+  });
+});
+
+describe('W1-7 — backfill keeps fields aligned when a quoted field contains a pipe', () => {
+  let adapter: SqliteAdapter;
+  beforeEach(async () => {
+    adapter = new SqliteAdapter(':memory:');
+    await migrateOutputsTables(adapter);
+  });
+
+  it('a quoted middle field with a pipe does not misalign basename/abs_path', async () => {
+    // tag is quoted and contains a pipe; the naive line.split("|") would shift
+    // basename/abs_path by two fields and corrupt the row.
+    const txt =
+      '2026-06-08T09:00:00-05:00 | cane | "blockers: a | b" | report.md | /abs/report.md | "weekly digest"';
+    const res = await backfillCatalogFromDeliveryLog(adapter, txt, '2026-06-08T11:00:00Z');
+    expect(res.inserted).toBe(1);
+
+    const row = await getArtifact(adapter, artifactIdFromPath('/abs/report.md'));
+    expect(row).not.toBeNull();
+    expect(row!.basename).toBe('report.md');
+    expect(row!.abs_path).toBe('/abs/report.md');
+    expect(row!.agent).toBe('cane');
   });
 });
