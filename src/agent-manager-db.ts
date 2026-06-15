@@ -26,6 +26,7 @@ import { registerOnIdChain, createSubnameOnIdChain, setMultiChainAddresses } fro
 import { defaultDeliverFn, redactSshTarget, type DeliverFn } from './lib/ssh-deliver.js';
 import { probeRemoteAgent, defaultHealthProbeFn, type HealthProbeFn } from './lib/remote-heartbeat.js';
 import { filterClaudeEnvVars } from './lib/env-hygiene.js';
+import { sweepOrphanAgents, listMatchingProcesses } from './lib/orphan-sweep.js';
 import { type Db } from './db/db-service.js';
 import type { AgentRow, ScheduleDefinitionRow, TaskRow } from './db/types.js';
 import fetch from 'node-fetch';
@@ -9337,6 +9338,40 @@ export class AgentManagerDb {
               );
               this.dispatchRecoveryService = null;
             }
+            // R.1 orphan-process sweep — detached agent-server children from a
+            // previous (crashed) manager run survive as orphans (spawn is
+            // detached+unref). Detect them on startup and report typed; kill
+            // only when DISPATCH_ORPHAN_SWEEP_KILL is set (safe default: mark +
+            // log, operator opts into killing). minAgeSec protects any child
+            // started in the last 2 minutes. Never throws.
+            try {
+              const killEnabled = ['true', '1', 'yes'].includes(
+                (process.env.DISPATCH_ORPHAN_SWEEP_KILL ?? '').trim().toLowerCase(),
+              );
+              const sweep = await sweepOrphanAgents({
+                listProcesses: () => listMatchingProcesses('local-agent-server'),
+                keepPids: new Set<number>([process.pid]),
+                minAgeSec: 120,
+                signal: 'SIGTERM',
+                kill: killEnabled
+                  ? (pid, signal) => process.kill(pid, signal)
+                  : () => undefined, // detect-only by default
+              });
+              if (sweep.orphan_pids.length > 0) {
+                console.warn(
+                  `[Manager] orphan agent-server sweep: ${sweep.orphan_pids.length} orphan(s) ` +
+                    `${killEnabled ? `killed=${sweep.killed} errors=${sweep.errors}` : '(detect-only; set DISPATCH_ORPHAN_SWEEP_KILL=true to reap)'} ` +
+                    `pids=[${sweep.orphan_pids.join(',')}]`,
+                );
+              } else if (sweep.list_error) {
+                console.warn('[Manager] orphan agent-server sweep skipped:', sweep.list_error);
+              }
+            } catch (sweepErr) {
+              console.warn(
+                '[Manager] orphan agent-server sweep failed:',
+                sweepErr instanceof Error ? sweepErr.message : String(sweepErr),
+              );
+            }
             // Task 10: surface the canonical-mode flag on startup so operators
             // can confirm the rollout phase from the manager log without
             // shelling into the process. The mode is captured once at boot
@@ -9967,7 +10002,7 @@ export class AgentManagerDb {
    */
   private checkOwsInstalled(): boolean {
     try {
-      execFileSync('ows', ['--version'], { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] });
+      execFileSync('ows', ['--version'], { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'], timeout: 10000, killSignal: 'SIGKILL' });
       return true;
     } catch {
       return false;
@@ -9983,7 +10018,7 @@ export class AgentManagerDb {
     const walletName = `${team}-${agentName}`;
     try {
       // Check if wallet exists by parsing `ows wallet list` output
-      const listOutput = execFileSync('ows', ['wallet', 'list'], { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] });
+      const listOutput = execFileSync('ows', ['wallet', 'list'], { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'], timeout: 10000, killSignal: 'SIGKILL' });
       let found = false;
       let ethAddress = '';
       let inWallet = false;
@@ -10007,7 +10042,7 @@ export class AgentManagerDb {
       // ows wallet list failed, try creating
     }
     try {
-      const output = execFileSync('ows', ['wallet', 'create', '--name', walletName], { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
+      const output = execFileSync('ows', ['wallet', 'create', '--name', walletName], { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'], timeout: 10000, killSignal: 'SIGKILL' }).trim();
       // Parse EVM address from create output
       for (const line of output.split('\n')) {
         const match = line.trim().match(/eip155:1\s.*→\s*(0x[0-9a-fA-F]+)/);
@@ -10206,7 +10241,7 @@ export class AgentManagerDb {
 
   private listPidsListeningOnPort(port: number): number[] {
     try {
-      const lsofOutput = execFileSync('lsof', ['-ti', `:${port}`], { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
+      const lsofOutput = execFileSync('lsof', ['-ti', `:${port}`], { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'], timeout: 10000, killSignal: 'SIGKILL' }).trim();
       if (!lsofOutput) return [];
       return lsofOutput
         .split('\n')
@@ -10223,6 +10258,8 @@ export class AgentManagerDb {
       const output = execFileSync('ps', ['-o', 'ppid=,command=', '-p', String(pid)], {
         encoding: 'utf8',
         stdio: ['pipe', 'pipe', 'pipe'],
+        timeout: 10000,
+        killSignal: 'SIGKILL',
       }).trim();
       if (!output) return null;
 
