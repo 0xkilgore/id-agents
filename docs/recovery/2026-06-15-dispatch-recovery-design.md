@@ -3,7 +3,9 @@
 **Date:** 2026-06-15
 **Dispatch:** phid:disp-b329f522b1271e1b (P0 incident reliability patch)
 **Branch:** feat/dispatch-recovery
-**Status:** CHECKPOINT — building.
+**Status:** SHIPPED (foundation) — pure classifier + recovery service landed &
+fully tested (19 tests; both required regressions green). Reactor/manager wiring
+is the next patch (see "Next patch target").
 
 ## Incident
 
@@ -67,8 +69,45 @@ Built into the classifier (C) and the service's decision surface (D): only
 - service: a failed/expired internal dispatch is auto-requeued (re-enters the
   queue); an external-side-effect dispatch is NOT resent.
 
-## Next patch target (if runtime expires mid-build)
-If unfinished, the minimum landed slice is the pure `classifier.ts` + its tests
-(the decision logic is the load-bearing part and is reused by the service).
-Next: wire `DispatchRecoveryService.runOnce()` and a manager-side interval +
-the `recovering` /ops surface.
+## What shipped this patch
+
+- `src/dispatch-recovery/classifier.ts` — pure `classifyRecovery()` +
+  `DEFAULT_RECOVERY_CONFIG`. 11 tests.
+- `src/dispatch-recovery/service.ts` — `DispatchRecoveryService.runOnce()`
+  (env-gated, budgeted, capped-exponential backoff, never throws) +
+  `recoveryConfigFromEnv()`. 8 tests.
+- Regressions proven: a failed dispatch with
+  `failure_detail="linked query terminated expired"` becomes an automatic
+  requeue; an external-side-effect dispatch is NOT auto-resent.
+
+Safe to ship dark: `DISPATCH_RECOVERY_ENABLED` defaults **false**. Nothing runs
+until the wiring below is added AND the flag is set.
+
+## Next patch target (the wiring to make it live)
+
+1. **Reactor adapter** implementing `DispatchRecoveryReactor` over
+   `SqliteDispatchReactor`:
+   - `listFailedForRecovery()` → `SELECT * FROM dispatch_scheduler_queue WHERE
+     team_id=? AND status='failed' AND updated_at >= <lookback>`, mapped to
+     `RecoverableDispatch`. Compute `recovery_attempts` by counting
+     `bounce_history` entries with `kind='recovery'`. Source `side_effect` /
+     `allow_auto_retry` from the dispatch message metadata (add a
+     `recovery_metadata` field on enqueue, or parse from body/subject; default
+     `side_effect:"none"`, `allow_auto_retry:false`).
+   - `requeueForRecovery(phid,{reason,next_attempt_at})` → `markBounced(phid,
+     {kind:"recovery", message:reason, next_attempt_at})` then
+     `requeueAfterBounce(phid)` (reuses existing machinery; sweepBounced
+     re-dispatches after the backoff).
+   - `markRecoveryLanded(phid)` → reconcile: if `artifact_path` exists or
+     promotion completed, `markDoneWithResult` (or a new `markRecoveryLanded`
+     terminal that flips failed→done with a recovery note).
+   - `recordRecoveryOutcome(phid,{decision,reason})` → write a recovery row /
+     stamp a `recovery_status` so /ops shows `recovering` vs `needs_operator`
+     (de-panic: only `unsafe_side_effect`/`exhausted`/`needs_operator` alert).
+2. **Manager interval** in `AgentManagerDb` startup beside the scheduler:
+   `new DispatchRecoveryService({reactor: adapter, ...recoveryConfigFromEnv(env)})`
+   on a 5-min interval (`runOnce()`), `stop()` on shutdown.
+3. **/ops surface**: a `recovering` lane so the 24 stuck rows show as
+   auto-recovering, not as operator panic.
+4. Backfill the 24 existing expired rows by running `runOnce()` once with the
+   flag on.
