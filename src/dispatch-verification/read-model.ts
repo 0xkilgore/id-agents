@@ -256,7 +256,7 @@ function topFailureType(
  * Bucketed by dispatch_completed_at; only verified rows count. Independent of
  * the requested window.
  */
-function buildTrend4w(
+export function buildTrend4w(
   rows: DispatchVerification[],
   generatedAtIso: string,
 ): number[] {

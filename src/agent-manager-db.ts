@@ -96,6 +96,13 @@ import {
   type FailureKind,
 } from './dispatch-scheduler/types.js';
 import type { SqliteAdapter } from './db/sqlite-adapter.js';
+import { DispatchVerificationStorage } from './dispatch-verification/storage.js';
+import { DispatchVerificationJob, jobConfigFromEnv } from './dispatch-verification/job.js';
+import {
+  getAgentsEffectiveness,
+  getAgentDispatches,
+  type RosterEntry,
+} from './dispatch-verification/routes.js';
 import { heartbeatToSchedule, calendarToSchedule, validateIntervalSeconds, HEARTBEAT_GENERIC_MESSAGE } from './scheduling/schedule-config.js';
 import {
   getAvailableRuntimes,
@@ -401,6 +408,11 @@ export class AgentManagerDb {
    * inter-agent messages.
    */
   private dispatchScheduler: SchedulerHandle | null = null;
+  // W2-1 DispatchVerification — durable projection + periodic verification job.
+  // Both are constructed alongside the dispatch scheduler in start() (they share
+  // the scheduler's SqliteAdapter + default team) and stay null until then.
+  private dispatchVerificationStorage: DispatchVerificationStorage | null = null;
+  private dispatchVerificationJob: DispatchVerificationJob | null = null;
   // Task 10: cached canonical-mode flag, parsed once at startup. Exposed for
   // gateway code paths (legacy direct /talk) that need to emit observation
   // warnings under enforce, and for /system-live / tests to inspect.
@@ -1149,6 +1161,39 @@ export class AgentManagerDb {
 
   private async dbListAgents(teamId: string, includeAutomator: boolean = false): Promise<AgentRow[]> {
     return this.db.agents.list(teamId, includeAutomator);
+  }
+
+  /**
+   * W2-1 DispatchVerification — build the roster the effectiveness endpoint
+   * needs: each team agent's name, a cheap status, and the dispatch_phid of any
+   * dispatch currently in-flight to that agent. Defensive: any failure yields
+   * an empty roster so the read endpoints degrade gracefully rather than 500.
+   */
+  private async buildVerificationRoster(teamId: string): Promise<RosterEntry[]> {
+    try {
+      const agents = await this.dbListAgents(teamId);
+      // Map to_agent → first in-flight dispatch_phid. listInFlight is team-local
+      // (the scheduler is bound to the default team), ordered by started_at ASC,
+      // so the first match per agent is the oldest in-flight dispatch.
+      const inFlightByAgent = new Map<string, string>();
+      try {
+        const inFlight = (await this.dispatchScheduler?.reactor.listInFlight()) ?? [];
+        for (const doc of inFlight) {
+          if (!inFlightByAgent.has(doc.to_agent)) {
+            inFlightByAgent.set(doc.to_agent, doc.dispatch_phid);
+          }
+        }
+      } catch {
+        /* in-flight lookup is best-effort; roster still returns statuses */
+      }
+      return agents.map((a) => ({
+        name: a.name,
+        status: a.status || 'unknown',
+        in_flight_dispatch_id: inFlightByAgent.get(a.name) ?? null,
+      }));
+    } catch {
+      return [];
+    }
   }
 
   /**
@@ -3110,6 +3155,61 @@ export class AgentManagerDb {
       });
 
       res.json({ agents: agentStatuses });
+    });
+
+    // W2-1 DispatchVerification — Agents-tab read endpoints. These MUST be
+    // registered before the dynamic `/agents/:name/...` and `/agents/:id`
+    // routes below so `/agents/effectiveness` and `/agents/:name/dispatches`
+    // resolve to these handlers and are NOT captured by the `:name`/`:id`
+    // params. The verification storage is constructed in start() (alongside the
+    // dispatch scheduler), so at request time it may be null — guard with 503.
+    // The handlers read the durable projection only; they never stat files.
+    // Registered inline (rather than via mountDispatchVerificationRoutes) so the
+    // null-storage 503 guard can run per request — storage does not exist yet
+    // when setupRoutes runs from the constructor.
+    this.managementApp.get('/agents/effectiveness', async (req, res) => {
+      try {
+        const storage = this.dispatchVerificationStorage;
+        if (!storage) {
+          return res.status(503).json({ error: 'verification_disabled' });
+        }
+        const { id: teamId } = await this.getTeam(req);
+        const r = await getAgentsEffectiveness(
+          {
+            storage,
+            listRoster: (tid) => this.buildVerificationRoster(tid),
+            now: () => new Date().toISOString(),
+          },
+          teamId,
+          { window: req.query.window },
+        );
+        res.status(r.status).json(r.body);
+      } catch (err: any) {
+        res.status(500).json({ error: err?.message || 'effectiveness failed' });
+      }
+    });
+
+    this.managementApp.get('/agents/:name/dispatches', async (req, res) => {
+      try {
+        const storage = this.dispatchVerificationStorage;
+        if (!storage) {
+          return res.status(503).json({ error: 'verification_disabled' });
+        }
+        const { id: teamId } = await this.getTeam(req);
+        const r = await getAgentDispatches(
+          {
+            storage,
+            listRoster: (tid) => this.buildVerificationRoster(tid),
+            now: () => new Date().toISOString(),
+          },
+          teamId,
+          req.params.name,
+          { window: req.query.window, limit: req.query.limit },
+        );
+        res.status(r.status).json(r.body);
+      } catch (err: any) {
+        res.status(500).json({ error: err?.message || 'dispatches failed' });
+      }
     });
 
     // GET /agents/:name/news - proxy news feed from a specific agent (for remote CLI)
@@ -9159,6 +9259,48 @@ export class AgentManagerDb {
               },
             });
             this.dispatchScheduler.start();
+            // W2-1 DispatchVerification — stand up the durable projection on the
+            // SAME SqliteAdapter + default team the reactor uses, then start the
+            // periodic verification job. The Agents endpoints (mounted in
+            // setupRoutes) read this projection; they never stat files per
+            // request. Best-effort: any failure here logs but leaves the
+            // scheduler running and the routes returning 503.
+            try {
+              const dvCfg = jobConfigFromEnv(process.env);
+              this.dispatchVerificationStorage = new DispatchVerificationStorage(
+                this.db.adapter as SqliteAdapter,
+              );
+              await this.dispatchVerificationStorage.migrate();
+              const dvStat = (p: string) => {
+                try {
+                  const s = statSync(p);
+                  return { exists: true, is_file: s.isFile(), mtime_iso: new Date(s.mtimeMs).toISOString() };
+                } catch {
+                  return { exists: false, is_file: false, mtime_iso: null };
+                }
+              };
+              this.dispatchVerificationJob = new DispatchVerificationJob({
+                teamId: defaultTeamId,
+                reactor: this.dispatchScheduler.reactor,
+                storage: this.dispatchVerificationStorage,
+                statArtifact: dvStat,
+                now: () => new Date().toISOString(),
+                enabled: dvCfg.enabled,
+                intervalMs: dvCfg.intervalMs,
+                lookbackDays: dvCfg.lookbackDays,
+              });
+              this.dispatchVerificationJob.start();
+              console.log(
+                `[Manager] DispatchVerification job started (enabled=${dvCfg.enabled} intervalMs=${dvCfg.intervalMs} lookbackDays=${dvCfg.lookbackDays})`,
+              );
+            } catch (dvErr) {
+              console.warn(
+                '[Manager] DispatchVerification job failed to start:',
+                dvErr instanceof Error ? dvErr.message : String(dvErr),
+              );
+              this.dispatchVerificationStorage = null;
+              this.dispatchVerificationJob = null;
+            }
             // Task 10: surface the canonical-mode flag on startup so operators
             // can confirm the rollout phase from the manager log without
             // shelling into the process. The mode is captured once at boot
@@ -9387,6 +9529,10 @@ export class AgentManagerDb {
     if (this.schedulerService) {
       this.schedulerService.stop();
       this.schedulerService = null;
+    }
+    if (this.dispatchVerificationJob) {
+      this.dispatchVerificationJob.stop();
+      this.dispatchVerificationJob = null;
     }
     if (this.dispatchScheduler) {
       this.dispatchScheduler.stop();
