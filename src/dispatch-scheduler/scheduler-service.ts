@@ -704,19 +704,43 @@ export class SchedulerService {
     let failed = 0;
     for (const doc of inflight.value) {
       if (!doc.agent_query_id) continue;
-      const startedAt = doc.started_at ?? doc.updated_at;
-      const age = nowMs - Date.parse(startedAt);
-      if (age < this.policy.stale_in_flight_ttl_ms) continue;
+      const startedMs = Date.parse(doc.started_at ?? doc.updated_at);
+
+      // fix/dispatch-expiry-too-aggressive: measure INACTIVITY from the last
+      // sign of progress, not raw claim age. A dispatch that is still actively
+      // producing output (recent B1 `last_output_at`) must never be expired by
+      // this backstop, no matter how long the overall build runs. When no
+      // progress evidence is available (the agent never produced a
+      // last_output_at — e.g. process died at startup), we fall back to claim
+      // age so the backstop still catches a truly wedged dispatch.
+      let lastActivityMs = startedMs;
+      let hadProgress = false;
+      if (this.queryEvidence) {
+        try {
+          const evidence = await this.queryEvidence.getEvidence(doc.agent_query_id);
+          if (evidence && evidence.last_output_at != null) {
+            hadProgress = true;
+            lastActivityMs = Math.max(lastActivityMs, evidence.last_output_at);
+          }
+        } catch {
+          // Evidence lookup failure → conservatively fall back to claim age.
+        }
+      }
+      const inactivity = nowMs - lastActivityMs;
+      if (inactivity < this.policy.stale_in_flight_ttl_ms) continue;
       const r = await this.client.markFailed(doc.dispatch_phid, {
         failure_kind: "scheduler_wedged",
-        detail: `stale in_flight claim with agent_query_id=${doc.agent_query_id} for ${age}ms`,
+        detail: hadProgress
+          ? `stale in_flight: no progress for ${inactivity}ms (last_output_at) with agent_query_id=${doc.agent_query_id}`
+          : `stale in_flight claim with agent_query_id=${doc.agent_query_id} for ${inactivity}ms (no progress evidence)`,
       });
       if (r.ok) {
         failed += 1;
         this.logger.warn("scheduler_stale_in_flight_failed", {
           phid: doc.dispatch_phid,
           agent_query_id: doc.agent_query_id,
-          age_ms: age,
+          inactivity_ms: inactivity,
+          had_progress_evidence: hadProgress,
           stale_in_flight_ttl_ms: this.policy.stale_in_flight_ttl_ms,
         });
       }

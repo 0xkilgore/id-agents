@@ -24,7 +24,8 @@ describe("loadSchedulerPolicy (Phase 2.1)", () => {
     expect(p.jitter_pct).toBeCloseTo(0.2);
     expect(p.claim_batch_limit).toBe(10);
     expect(p.starting_timeout_ms).toBe(60_000);
-    expect(p.stale_in_flight_ttl_ms).toBe(30 * 60_000);
+    // fix/dispatch-expiry-too-aggressive: build-appropriate inactivity backstop.
+    expect(p.stale_in_flight_ttl_ms).toBe(45 * 60_000);
   });
 
   it("env override raises the cap without code changes", () => {

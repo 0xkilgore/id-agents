@@ -60,7 +60,11 @@ export const POLICY_DEFAULTS: SchedulerPolicy = {
   claim_batch_limit: 10,
   starting_timeout_ms: 60_000,
   silence_threshold_ms: 30 * 60_000,
-  stale_in_flight_ttl_ms: 30 * 60_000,
+  // fix/dispatch-expiry-too-aggressive: build-appropriate hard-fail window.
+  // This is the activity-aware INACTIVITY backstop (no progress for this long)
+  // — not a wall-clock cap on total runtime — so a long but active build is
+  // safe regardless. 45 min gives a legitimately quiet stretch room to breathe.
+  stale_in_flight_ttl_ms: 45 * 60_000,
   policy_version: "v1",
 };
 
