@@ -27,6 +27,10 @@ import { defaultDeliverFn, redactSshTarget, type DeliverFn } from './lib/ssh-del
 import { probeRemoteAgent, defaultHealthProbeFn, type HealthProbeFn } from './lib/remote-heartbeat.js';
 import { filterClaudeEnvVars } from './lib/env-hygiene.js';
 import { sweepOrphanAgents, listMatchingProcesses } from './lib/orphan-sweep.js';
+import {
+  agentDoneAuthConfigFromEnv,
+  authenticateAgentDone,
+} from './lib/agent-done-auth.js';
 import { type Db } from './db/db-service.js';
 import type { AgentRow, ScheduleDefinitionRow, TaskRow } from './db/types.js';
 import fetch from 'node-fetch';
@@ -2645,6 +2649,23 @@ export class AgentManagerDb {
           ok: false,
           error: 'dispatch_scheduler_not_initialised',
         });
+      }
+      // R.2: authenticate the closeout BEFORE any reactor read or mutation, so a
+      // spoofed/unauthorised caller can never complete a dispatch. Default config
+      // trusts loopback callers (the local fleet); setting DISPATCH_DONE_TOKEN
+      // upgrades this to mandatory shared-token auth without a framework rewrite.
+      const auth = authenticateAgentDone(
+        {
+          remoteIp: req.ip,
+          headerToken:
+            typeof req.headers['x-id-dispatch-token'] === 'string'
+              ? (req.headers['x-id-dispatch-token'] as string)
+              : null,
+        },
+        agentDoneAuthConfigFromEnv(process.env),
+      );
+      if (!auth.ok) {
+        return res.status(auth.status).json({ ok: false, error: auth.error });
       }
       try {
         const body = (req.body || {}) as {
