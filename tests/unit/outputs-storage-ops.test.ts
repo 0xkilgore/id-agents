@@ -357,6 +357,35 @@ describe('Kapelle B11 — listInboxItems join with catalog', () => {
     expect(items[0].availability).toBe('unknown');
   });
 
+  it('W1-6: catalog-only artifact (no review row) appears as never_viewed when includeNeverViewed', async () => {
+    const path = '/abs/catalog-only.md';
+    await registerArtifact(adapter, {
+      basename: 'catalog-only.md',
+      agent: 'cane',
+      tag: 'today',
+      abs_path: path,
+      title: 'Catalog only',
+      produced_at: '2026-06-08T09:00:00-05:00',
+    }, '2026-06-08T09:00:00Z');
+
+    const items = await listInboxItems(adapter, { includeNeverViewed: true }, 50, 0);
+    expect(items).toHaveLength(1);
+    expect(items[0].artifact_id).toBe(artifactIdFromPath(path));
+    expect(items[0].status).toBe('never_viewed');
+    expect(items[0].basename).toBe('catalog-only.md');
+    expect(items[0].agent).toBe('cane');
+    expect(items[0].availability).toBe('present');
+  });
+
+  it('W1-6: catalog-only artifact is EXCLUDED when includeNeverViewed is false', async () => {
+    await registerArtifact(adapter, {
+      basename: 'co.md', agent: 'cane', abs_path: '/abs/co.md',
+      produced_at: '2026-06-08T09:00:00Z',
+    }, '2026-06-08T09:00:00Z');
+    const items = await listInboxItems(adapter, { includeNeverViewed: false }, 50, 0);
+    expect(items).toHaveLength(0);
+  });
+
   it('returns availability=missing when catalog says so', async () => {
     const path = '/abs/ghost.md';
     const id = artifactIdFromPath(path);

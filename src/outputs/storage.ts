@@ -231,10 +231,12 @@ export interface InboxFilters {
 
 // Listing the operator's "inbox" — artifacts needing attention.
 //
-// Joins artifact_review_state (operator interaction state) with the
-// artifacts catalog (basename/agent/produced_at/title). LEFT JOIN so a
-// review row without a catalog entry still returns — with availability
-// set to "unknown" rather than dropping the row.
+// FULL OUTER JOIN of the artifacts catalog (basename/agent/produced_at/title)
+// and artifact_review_state (operator interaction state) so BOTH sides are
+// visible: a catalog-only artifact with no review row shows as never_viewed
+// (W1-6), and a review row with no catalog entry still returns with
+// availability "unknown". includeNeverViewed:false (non-default) drops the
+// catalog-only never_viewed rows.
 //
 // The `agent` filter, when supplied, restricts to rows whose joined
 // catalog row has that agent. Rows with no catalog row are excluded when
@@ -263,8 +265,15 @@ export async function listInboxItems(
   }
   params.push(Math.min(limit, 500), offset);
 
+  // W1-6: FULL OUTER JOIN so the inbox surfaces BOTH sides of the catalog ↔
+  // review-state relationship: an artifact with no review row yet (catalog-
+  // only → never_viewed) AND a review row with no catalog entry (availability
+  // unknown). The previous query drove off artifact_review_state, so a
+  // catalog-only artifact was invisible even with includeNeverViewed:true.
+  // artifact_id is coalesced because either side may be NULL for a given row.
   const { rows: joined } = await adapter.query<JoinRow>(
-    `SELECT rs.artifact_id, rs.source_link, rs.first_viewed_at, rs.last_viewed_at,
+    `SELECT COALESCE(rs.artifact_id, a.artifact_id) AS artifact_id,
+            rs.source_link, rs.first_viewed_at, rs.last_viewed_at,
             rs.viewed_by_last, rs.viewed_count, rs.approved_at, rs.approved_by,
             rs.approval_note, rs.shipped_at, rs.shipped_by, rs.ship_blockers_json,
             rs.created_at, rs.updated_at,
@@ -275,18 +284,23 @@ export async function listInboxItems(
             a.title        AS cat_title,
             a.produced_at  AS cat_produced_at,
             a.availability AS cat_availability
-       FROM artifact_review_state rs
-  LEFT JOIN artifacts a ON a.artifact_id = rs.artifact_id
+       FROM artifacts a
+  FULL OUTER JOIN artifact_review_state rs ON rs.artifact_id = a.artifact_id
        ${agentWhere}
-   ORDER BY rs.updated_at DESC
+   ORDER BY COALESCE(rs.updated_at, a.produced_at) DESC
       LIMIT ? OFFSET ?`,
     params,
   );
+
+  // Default includes never_viewed (catalog-only) rows; explicit false excludes
+  // them (mirrors the existing post-LIMIT status filter below).
+  const includeNeverViewed = filters.includeNeverViewed !== false;
 
   const items: OutputsInboxRow[] = [];
   for (const r of joined) {
     const status = deriveStatus(r);
     if (filters.status && status !== filters.status) continue;
+    if (!includeNeverViewed && status === "never_viewed") continue;
     const { rows: opAgg } = await adapter.query<{ cnt: number; last_ts: string | null }>(
       `SELECT COUNT(*) AS cnt, MAX(ts) AS last_ts
          FROM artifact_operations WHERE artifact_id = ?`,
