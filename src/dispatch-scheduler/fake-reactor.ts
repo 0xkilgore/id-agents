@@ -112,6 +112,11 @@ export class FakeReactor {
       failure_kind: null,
       failure_detail: null,
       artifact_path: null,
+      recovery_status: "none",
+      recovery_attempts: 0,
+      recovery_reason: null,
+      side_effect: "none",
+      allow_auto_retry: false,
       ...defaultClarificationFields(),
       ...defaultPromotionFields(input),
     };

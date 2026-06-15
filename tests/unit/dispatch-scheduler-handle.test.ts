@@ -68,6 +68,56 @@ describe("parseGatewayMode / schedulerEnabled", () => {
   });
 });
 
+describe("SchedulerHandle recovery wiring", () => {
+  async function seedExpiredFailure(handle: SchedulerHandle): Promise<string> {
+    const enq = await handle.enqueue({
+      to_agent: "coder-max",
+      from_actor: "manager",
+      message: "build something",
+    });
+    const doc = await handle.reactor.getByQueryId(enq.query_id);
+    await adapter.query(
+      `UPDATE dispatch_scheduler_queue
+         SET status = 'failed', failure_kind = 'expired',
+             failure_detail = 'linked query terminated expired',
+             completed_at = ? WHERE dispatch_phid = ?`,
+      [new Date().toISOString(), doc!.dispatch_phid],
+    );
+    return doc!.dispatch_phid;
+  }
+
+  it("is a no-op when DISPATCH_RECOVERY_ENABLED is unset (default off)", async () => {
+    const handle = new SchedulerHandle({
+      adapter,
+      teamId: "team",
+      resolveTargetUrl: () => "http://localhost:9999",
+      env: {},
+    });
+    const phid = await seedExpiredFailure(handle);
+    const report = await handle.runRecoveryOnce();
+    expect(report?.skipped).toBe(true);
+    const doc = await handle.reactor.getByPhid(phid);
+    expect(doc?.status).toBe("failed");
+  });
+
+  it("requeues a recoverable expired failure when enabled", async () => {
+    const handle = new SchedulerHandle({
+      adapter,
+      teamId: "team",
+      resolveTargetUrl: () => "http://localhost:9999",
+      env: { DISPATCH_RECOVERY_ENABLED: "true" },
+    });
+    const phid = await seedExpiredFailure(handle);
+    const report = await handle.runRecoveryOnce();
+    expect(report?.skipped).toBe(false);
+    expect(report?.retried).toBe(1);
+    const doc = await handle.reactor.getByPhid(phid);
+    expect(doc?.status).toBe("bounced");
+    expect(doc?.recovery_status).toBe("recovering");
+    expect(doc?.recovery_attempts).toBe(1);
+  });
+});
+
 describe("SchedulerHandle bootstrap + flow", () => {
   it("enqueue → tick → done with mocked transport", async () => {
     const fetchSpy = vi.spyOn(globalThis, "fetch") as ReturnType<typeof vi.spyOn>;

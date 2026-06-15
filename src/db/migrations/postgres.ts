@@ -723,6 +723,12 @@ export async function migratePostgres(adapter: DbAdapter): Promise<void> {
         WHERE table_schema = 'public' AND table_name = 'dispatch_scheduler_queue'
       ) THEN
         ALTER TABLE dispatch_scheduler_queue ADD COLUMN IF NOT EXISTS artifact_path text;
+        -- Recovery-state columns. Additive, default-safe, idempotent.
+        ALTER TABLE dispatch_scheduler_queue ADD COLUMN IF NOT EXISTS recovery_status text DEFAULT 'none';
+        ALTER TABLE dispatch_scheduler_queue ADD COLUMN IF NOT EXISTS recovery_attempts integer NOT NULL DEFAULT 0;
+        ALTER TABLE dispatch_scheduler_queue ADD COLUMN IF NOT EXISTS recovery_reason text;
+        ALTER TABLE dispatch_scheduler_queue ADD COLUMN IF NOT EXISTS side_effect text NOT NULL DEFAULT 'none';
+        ALTER TABLE dispatch_scheduler_queue ADD COLUMN IF NOT EXISTS allow_auto_retry integer NOT NULL DEFAULT 0;
         CREATE INDEX IF NOT EXISTS dispatch_scheduler_artifact_path_idx
           ON dispatch_scheduler_queue(team_id, artifact_path)
           WHERE artifact_path IS NOT NULL;

@@ -34,7 +34,15 @@ import {
   defaultPromotionFields,
   isTerminal,
 } from "./types.js";
+import type { RecoverableDispatch } from "../dispatch-recovery/service.js";
+import type {
+  DispatchRecoveryDecision,
+  RecoveryInput,
+} from "../dispatch-recovery/classifier.js";
 import { randomBytes } from "node:crypto";
+
+/** Default recovery lookback: only reconcile failures from the last 7 days. */
+export const DEFAULT_RECOVERY_LOOKBACK_MS = 7 * 24 * 60 * 60 * 1000;
 
 interface Row {
   dispatch_phid: string;
@@ -64,6 +72,12 @@ interface Row {
   target_url: string | null;
   result_json: string | null;
   artifact_path: string | null;
+  // Recovery-state additive columns.
+  recovery_status: string | null;
+  recovery_attempts: number;
+  recovery_reason: string | null;
+  side_effect: string | null;
+  allow_auto_retry: number;
   // Spec 054 v2 additive columns
   clarification_id: string | null;
   active_clarification_json: string | null;
@@ -139,6 +153,11 @@ export class SqliteDispatchReactor {
       failure_kind: null,
       failure_detail: null,
       artifact_path: null,
+      recovery_status: "none",
+      recovery_attempts: 0,
+      recovery_reason: null,
+      side_effect: "none",
+      allow_auto_retry: false,
       ...defaultClarificationFields(),
       ...defaultPromotionFields(input),
     };
@@ -151,10 +170,12 @@ export class SqliteDispatchReactor {
         bounce_history_json, started_at, completed_at, updated_at,
         agent_query_id, usage_policy_snapshot_json, failure_kind,
         failure_detail, target_url, result_json, artifact_path,
+        recovery_status, recovery_attempts, recovery_reason, side_effect,
+        allow_auto_retry,
         clarification_id, active_clarification_json, clarification_history_json,
         resume_delivery_status, promote, promotion_strategy,
         promotion_required_reason, promotion_result_json, promotion_input_json
-      ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       [
         doc.dispatch_phid,
         this.teamId,
@@ -184,6 +205,12 @@ export class SqliteDispatchReactor {
         null,
         // artifact_path — set at done-time, never at enqueue.
         null,
+        // Recovery-state columns — safe defaults at enqueue.
+        doc.recovery_status,
+        doc.recovery_attempts,
+        doc.recovery_reason,
+        doc.side_effect,
+        doc.allow_auto_retry ? 1 : 0,
         // Spec 054 v2 columns
         doc.clarification_id,
         doc.active_clarification ? JSON.stringify(doc.active_clarification) : null,
@@ -967,6 +994,174 @@ export class SqliteDispatchReactor {
     );
     return rows.map(rowToVerificationSourceRow);
   }
+
+  // ── Dispatch-recovery adapter (P0 disp-b329f522b1271e1b) ─────────────────
+  // These four methods satisfy DispatchRecoveryReactor. They reuse the
+  // bounced/requeue machinery for retries and write the additive recovery
+  // columns for the /ops surface. All are guarded on `status = 'failed'` /
+  // team_id so a concurrent terminalisation cannot be clobbered.
+
+  /**
+   * Terminal-failed dispatches within the recovery lookback window, projected
+   * into the classifier's RecoverableDispatch shape. Rows already routed to an
+   * operator (needs_operator / unsafe_side_effect / exhausted) are excluded so
+   * a recovery pass does not re-process settled rows every tick; 'none' and
+   * 'recovering' rows remain eligible. `landed_reconciled` rows are `done`, not
+   * `failed`, so they fall out naturally.
+   */
+  async listFailedForRecovery(
+    opts: { lookbackMs?: number; now?: string } = {},
+  ): Promise<RecoverableDispatch[]> {
+    const lookbackMs = opts.lookbackMs ?? DEFAULT_RECOVERY_LOOKBACK_MS;
+    const now = opts.now ?? this.nowFn();
+    const sinceIso = new Date(Date.parse(now) - lookbackMs).toISOString();
+    const { rows } = await this.adapter.query<Row>(
+      `SELECT * FROM dispatch_scheduler_queue
+       WHERE team_id = ? AND status = 'failed'
+         AND COALESCE(completed_at, updated_at) >= ?
+         AND COALESCE(recovery_status, 'none') IN ('none', 'recovering')
+       ORDER BY COALESCE(completed_at, updated_at) ASC, dispatch_phid ASC`,
+      [this.teamId, sinceIso],
+    );
+    return rows.map(rowToRecoverable);
+  }
+
+  /**
+   * Move a terminal-failed dispatch back toward execution via the existing
+   * bounce machinery: failed → bounced with a future not_before_at, a
+   * kind:"recovery" bounce record, recovery_attempts bumped, and
+   * recovery_status='recovering'. The scheduler's bounce sweep then requeues it
+   * once not_before_at passes — no separate re-dispatch path. Returns false if
+   * the row is no longer a terminal failure (lost a race) or is absent.
+   */
+  async requeueForRecovery(
+    phid: string,
+    args: { reason: string; next_attempt_at: string },
+  ): Promise<boolean> {
+    const doc = await this.getByPhid(phid);
+    if (!doc || doc.status !== "failed") return false;
+    const now = this.nowFn();
+    const record: BounceRecord = {
+      ts: now,
+      kind: "recovery",
+      message: args.reason,
+      next_attempt_at: args.next_attempt_at,
+      attempt: doc.attempt_count,
+    };
+    const history = [...doc.bounce_history, record];
+    await this.adapter.query(
+      `UPDATE dispatch_scheduler_queue
+       SET status = 'bounced', bounce_count = bounce_count + 1,
+           last_bounce_json = ?, bounce_history_json = ?,
+           not_before_at = ?, completed_at = NULL,
+           failure_kind = NULL, failure_detail = NULL,
+           recovery_status = 'recovering',
+           recovery_attempts = recovery_attempts + 1,
+           recovery_reason = ?, updated_at = ?
+       WHERE dispatch_phid = ? AND team_id = ? AND status = 'failed'`,
+      [
+        JSON.stringify(record),
+        JSON.stringify(history),
+        args.next_attempt_at,
+        args.reason,
+        now,
+        phid,
+        this.teamId,
+      ],
+    );
+    return true;
+  }
+
+  /**
+   * Reconcile a dispatch whose work actually landed (artifact / promotion
+   * evidence): flip failed → done and stamp recovery_status='landed_reconciled'.
+   * Landed beats retry — there is no re-dispatch here. Guarded on the failed
+   * status so a row already terminalised elsewhere is left untouched.
+   */
+  async markRecoveryLanded(phid: string): Promise<void> {
+    const now = this.nowFn();
+    await this.adapter.query(
+      `UPDATE dispatch_scheduler_queue
+       SET status = 'done', recovery_status = 'landed_reconciled',
+           recovery_reason = COALESCE(recovery_reason, 'reconciled: landed evidence present'),
+           completed_at = COALESCE(completed_at, ?), updated_at = ?
+       WHERE dispatch_phid = ? AND team_id = ? AND status = 'failed'`,
+      [now, now, phid, this.teamId],
+    );
+  }
+
+  /**
+   * Record a non-retry recovery outcome (unsafe side effect / exhausted /
+   * ambiguous) for the /ops recovery surface. This does NOT re-dispatch and does
+   * NOT change status — the row stays `failed` but its recovery_status tells
+   * operators it has been triaged, so it stops counting as un-looked-at.
+   */
+  async recordRecoveryOutcome(
+    phid: string,
+    args: { decision: DispatchRecoveryDecision; reason: string },
+  ): Promise<void> {
+    const status = recoveryStatusForDecision(args.decision);
+    const now = this.nowFn();
+    await this.adapter.query(
+      `UPDATE dispatch_scheduler_queue
+       SET recovery_status = ?, recovery_reason = ?, updated_at = ?
+       WHERE dispatch_phid = ? AND team_id = ?`,
+      [status, args.reason, now, phid, this.teamId],
+    );
+  }
+}
+
+/** Recovery columns of a failed row → the classifier's RecoverableDispatch. */
+function rowToRecoverable(row: Row): RecoverableDispatch {
+  const promo = parseJsonOrNull(row.promotion_result_json) as
+    | { completed?: unknown }
+    | null;
+  return {
+    dispatch_phid: row.dispatch_phid,
+    status: row.status,
+    failure_kind: row.failure_kind ?? null,
+    failure_detail: row.failure_detail ?? null,
+    attempt_count: Number(row.attempt_count ?? 0),
+    recovery_attempts: Number(row.recovery_attempts ?? 0),
+    artifact_path: row.artifact_path ?? null,
+    promotion_completed:
+      promo && typeof promo === "object" ? promo.completed === true : null,
+    channel: row.channel,
+    side_effect: normalizeSideEffect(row.side_effect),
+    allow_auto_retry:
+      row.allow_auto_retry != null && Number(row.allow_auto_retry) === 1,
+  };
+}
+
+/** Map a non-retry decision to the persisted recovery_status. */
+function recoveryStatusForDecision(
+  decision: DispatchRecoveryDecision,
+): "needs_operator" | "exhausted" | "unsafe_side_effect" {
+  switch (decision) {
+    case "unsafe_side_effect":
+      return "unsafe_side_effect";
+    case "exhausted":
+      return "exhausted";
+    default:
+      return "needs_operator";
+  }
+}
+
+const SIDE_EFFECT_VALUES: ReadonlySet<RecoveryInput["side_effect"]> = new Set([
+  "none",
+  "external",
+  "email",
+  "payment",
+  "delete",
+  "user_visible",
+]);
+
+/** Coerce a stored side_effect string to the classifier's union; default none. */
+function normalizeSideEffect(raw: string | null): RecoveryInput["side_effect"] {
+  if (raw != null && SIDE_EFFECT_VALUES.has(raw as RecoveryInput["side_effect"])) {
+    return raw as RecoveryInput["side_effect"];
+  }
+  return "none";
 }
 
 function rowToVerificationSourceRow(row: Row): DispatchVerificationSourceRow {
@@ -986,6 +1181,11 @@ function rowToVerificationSourceRow(row: Row): DispatchVerificationSourceRow {
     updated_at: row.updated_at,
     promote: row.promote == null ? true : Number(row.promote) === 1,
     promotion_result: parseJsonOrNull(row.promotion_result_json),
+    recovery_status: row.recovery_status ?? "none",
+    recovery_attempts: Number(row.recovery_attempts ?? 0),
+    recovery_reason: row.recovery_reason ?? null,
+    side_effect: row.side_effect ?? "none",
+    allow_auto_retry: row.allow_auto_retry != null && Number(row.allow_auto_retry) === 1,
   };
 }
 
@@ -1064,6 +1264,12 @@ function rowToDoc(row: Row): DispatchDoc {
     promotion_required_reason: row.promotion_required_reason ?? null,
     promotion_result: parseJsonOrNull(row.promotion_result_json),
     artifact_path: row.artifact_path ?? null,
+    // Recovery-state fields — tolerate legacy rows with null columns.
+    recovery_status: (row.recovery_status ?? "none") as DispatchDoc["recovery_status"],
+    recovery_attempts: Number(row.recovery_attempts ?? 0),
+    recovery_reason: row.recovery_reason ?? null,
+    side_effect: row.side_effect ?? "none",
+    allow_auto_retry: row.allow_auto_retry != null && Number(row.allow_auto_retry) === 1,
     promotion_input: parsePromotionInput(row.promotion_input_json),
   };
 }

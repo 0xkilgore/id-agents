@@ -223,6 +223,24 @@ export interface DispatchDoc {
   // /agent-done.result.artifact_path. Null until the agent reports an
   // artifact at done-time. Additive; absent on legacy rows.
   artifact_path: string | null;
+  // Recovery-state fields. All additive with safe defaults so legacy
+  // rows read as a clean "none" recovery posture. recovery_status tracks
+  // where a dispatch sits in the crash/landing reconciliation flow;
+  // recovery_attempts counts auto-recovery passes; recovery_reason
+  // captures the last classification note. side_effect records whether a
+  // partial side effect (e.g. a push) already landed. allow_auto_retry
+  // gates whether the recovery loop may re-dispatch without an operator.
+  recovery_status:
+    | "none"
+    | "recovering"
+    | "landed_reconciled"
+    | "needs_operator"
+    | "exhausted"
+    | "unsafe_side_effect";
+  recovery_attempts: number;
+  recovery_reason: string | null;
+  side_effect: string;
+  allow_auto_retry: boolean;
   // Spec 054 v2 Part 2 ─ enqueue-side promotion inputs (repo, branch,
   // base, remote, plus an optional skip-reason). Carried verbatim from
   // EnqueueInput so the agent receives canonical promotion context in
@@ -445,6 +463,12 @@ export interface DispatchVerificationSourceRow {
   promote: boolean;
   /** Parsed promotion_result_json, or null. */
   promotion_result: unknown | null;
+  // Recovery-state evidence — additive, safe defaults on legacy rows.
+  recovery_status: string;
+  recovery_attempts: number;
+  recovery_reason: string | null;
+  side_effect: string;
+  allow_auto_retry: boolean;
 }
 
 export interface ConcurrencySnapshot {

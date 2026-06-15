@@ -82,6 +82,7 @@ export class DispatchRecoveryService {
   private backoffMs: number;
   private maxBackoffMs: number;
   private logger: RecoveryLogger;
+  private interval: ReturnType<typeof setInterval> | null = null;
 
   constructor(opts: DispatchRecoveryServiceOptions) {
     this.reactor = opts.reactor;
@@ -92,6 +93,27 @@ export class DispatchRecoveryService {
     this.backoffMs = opts.backoffMs;
     this.maxBackoffMs = opts.maxBackoffMs ?? DEFAULT_MAX_BACKOFF_MS;
     this.logger = opts.logger ?? NULL_LOGGER;
+  }
+
+  /**
+   * Start the periodic recovery loop. Idempotent; a no-op when disabled. Runs
+   * one pass immediately (boot-time backfill of already-stuck rows) then every
+   * `intervalMs`. runOnce never throws, so the manager loop is never taken down.
+   */
+  start(intervalMs: number): void {
+    if (!this.enabled || this.interval) return;
+    void this.runOnce();
+    this.interval = setInterval(() => {
+      void this.runOnce();
+    }, intervalMs);
+    if (this.interval.unref) this.interval.unref();
+  }
+
+  stop(): void {
+    if (this.interval) {
+      clearInterval(this.interval);
+      this.interval = null;
+    }
   }
 
   /** Never throws — recovery must not take down the manager. */
@@ -199,6 +221,7 @@ export function recoveryConfigFromEnv(env: NodeJS.ProcessEnv): {
   maxAttempts: number;
   budget: number;
   backoffMs: number;
+  intervalMs: number;
 } {
   const enabledRaw = (env.DISPATCH_RECOVERY_ENABLED ?? "").trim().toLowerCase();
   const enabled = enabledRaw === "true" || enabledRaw === "1" || enabledRaw === "yes";
@@ -207,6 +230,7 @@ export function recoveryConfigFromEnv(env: NodeJS.ProcessEnv): {
     maxAttempts: posInt(env.DISPATCH_RECOVERY_MAX_ATTEMPTS) ?? 3,
     budget: posInt(env.DISPATCH_RECOVERY_BUDGET) ?? 10,
     backoffMs: posInt(env.DISPATCH_RECOVERY_BACKOFF_MS) ?? 60_000,
+    intervalMs: posInt(env.DISPATCH_RECOVERY_INTERVAL_MS) ?? 300_000,
   };
 }
 

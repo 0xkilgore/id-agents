@@ -18,6 +18,13 @@ import { HttpAgentTransport } from "./http-agent-transport.js";
 import { SchedulerService } from "./scheduler-service.js";
 import { SqliteDispatchReactor } from "./sqlite-dispatch-reactor.js";
 import {
+  DispatchRecoveryService,
+  recoveryConfigFromEnv,
+  type RecoveryRunReport,
+} from "../dispatch-recovery/service.js";
+import { DEFAULT_RECOVERY_CONFIG } from "../dispatch-recovery/classifier.js";
+import { makeRecoveryReactor } from "../dispatch-recovery/reactor-adapter.js";
+import {
   type SchedulerPolicy,
   loadSchedulerPolicy,
   maxInFlightForProvider,
@@ -51,6 +58,13 @@ export interface SchedulerEnv {
   DISPATCH_MAX_IN_FLIGHT_ANTHROPIC?: string;
   DISPATCH_STALE_IN_FLIGHT_TTL_MS?: string;
   DISPATCH_TICK_INTERVAL_MS?: string;
+  // Auto-recovery (P0 disp-b329f522…). Default OFF during rollout.
+  DISPATCH_RECOVERY_ENABLED?: string;
+  DISPATCH_RECOVERY_INTERVAL_MS?: string;
+  DISPATCH_RECOVERY_LOOKBACK_MS?: string;
+  DISPATCH_RECOVERY_MAX_ATTEMPTS?: string;
+  DISPATCH_RECOVERY_BUDGET?: string;
+  DISPATCH_RECOVERY_BACKOFF_MS?: string;
 }
 
 export interface SchedulerHandleOptions {
@@ -141,6 +155,9 @@ export interface EnqueueResult {
 }
 
 const DEFAULT_TICK_INTERVAL_MS = 2_000;
+// Recovery is a slow background reconciliation — run it far less often than the
+// 2s scheduler tick so a stuck DB never amplifies load.
+const DEFAULT_RECOVERY_INTERVAL_MS = 60_000;
 
 export function parseGatewayMode(raw: string | undefined): GatewayMode {
   const v = (raw ?? "shadow").toLowerCase();
@@ -161,12 +178,17 @@ export class SchedulerHandle {
   readonly policy: SchedulerPolicy;
   readonly mode: GatewayMode;
   readonly enabled: boolean;
+  readonly recovery: DispatchRecoveryService;
   private interval: NodeJS.Timeout | null = null;
   private ticking = false;
   private wakePending = false;
   private intervalMs: number;
   private teamId: string;
   private logger: ConsoleLogger;
+  private recoveryInterval: NodeJS.Timeout | null = null;
+  private recoveryIntervalMs: number;
+  private recoveryEnabled: boolean;
+  private recovering = false;
 
   constructor(opts: SchedulerHandleOptions) {
     const env = opts.env ?? {};
@@ -205,6 +227,35 @@ export class SchedulerHandle {
       // never consume each other's concurrency slots.
       providers: ["anthropic", "openai", "cursor", "other"],
     });
+
+    // Auto-recovery (P0 disp-b329f522…). Reconciles terminal-failed dispatches
+    // that actually landed and auto-requeues recoverable internal transients,
+    // routing unsafe/exhausted/ambiguous cases to the /ops surface instead of
+    // leaving them as dead failures. Flag-gated (default OFF); the service is
+    // always constructed so /recover-once can drive a manual pass, but the
+    // periodic job only starts when enabled.
+    const recoveryCfg = recoveryConfigFromEnv(env as NodeJS.ProcessEnv);
+    this.recoveryEnabled = recoveryCfg.enabled;
+    this.recoveryIntervalMs =
+      parsePositiveInt(env.DISPATCH_RECOVERY_INTERVAL_MS) ??
+      DEFAULT_RECOVERY_INTERVAL_MS;
+    this.recovery = new DispatchRecoveryService({
+      reactor: makeRecoveryReactor(this.reactor, {
+        lookbackMs: parsePositiveInt(env.DISPATCH_RECOVERY_LOOKBACK_MS) ?? undefined,
+      }),
+      config: {
+        max_attempts: recoveryCfg.maxAttempts,
+        retryable_detail_markers: DEFAULT_RECOVERY_CONFIG.retryable_detail_markers,
+      },
+      now,
+      enabled: recoveryCfg.enabled,
+      budget: recoveryCfg.budget,
+      backoffMs: recoveryCfg.backoffMs,
+      logger: {
+        info: (event, payload) => this.logger.info(event, payload),
+        warn: (event, payload) => this.logger.warn(event, payload),
+      },
+    });
   }
 
   /** Start the tick interval. Idempotent. */
@@ -228,12 +279,51 @@ export class SchedulerHandle {
       },
       tick_interval_ms: this.intervalMs,
     });
+    // Bounded recovery job — only when the flag is on. Reuses the scheduler's
+    // enabled gate so a disabled scheduler never silently runs recovery.
+    if (this.recoveryEnabled && !this.recoveryInterval) {
+      this.recoveryInterval = setInterval(() => {
+        void this.runRecoveryOnce();
+      }, this.recoveryIntervalMs);
+      if (this.recoveryInterval.unref) this.recoveryInterval.unref();
+      this.logger.info("dispatch_recovery_started", {
+        interval_ms: this.recoveryIntervalMs,
+      });
+    }
   }
 
   stop(): void {
     if (this.interval) {
       clearInterval(this.interval);
       this.interval = null;
+    }
+    if (this.recoveryInterval) {
+      clearInterval(this.recoveryInterval);
+      this.recoveryInterval = null;
+    }
+  }
+
+  /**
+   * Run a single recovery pass. Bounded: overlapping ticks are skipped so a
+   * slow DB never stacks passes. Never throws — the service already swallows
+   * its own errors, and this guard catches anything the scheduling layer adds.
+   * Also exposed for the manual /recover-once operator probe.
+   */
+  async runRecoveryOnce(): Promise<RecoveryRunReport | null> {
+    if (this.recovering) return null;
+    this.recovering = true;
+    try {
+      const report = await this.recovery.runOnce();
+      if (!report.skipped && report.scanned > 0) {
+        this.logger.info("dispatch_recovery_pass", { ...report });
+      }
+      return report;
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      this.logger.error("dispatch_recovery_threw", { detail });
+      return null;
+    } finally {
+      this.recovering = false;
     }
   }
 

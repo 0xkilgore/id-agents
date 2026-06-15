@@ -99,6 +99,12 @@ import type { SqliteAdapter } from './db/sqlite-adapter.js';
 import { DispatchVerificationStorage } from './dispatch-verification/storage.js';
 import { DispatchVerificationJob, jobConfigFromEnv } from './dispatch-verification/job.js';
 import {
+  DispatchRecoveryService,
+  recoveryConfigFromEnv,
+  type DispatchRecoveryReactor,
+} from './dispatch-recovery/service.js';
+import { DEFAULT_RECOVERY_CONFIG } from './dispatch-recovery/classifier.js';
+import {
   getAgentsEffectiveness,
   getAgentDispatches,
   type RosterEntry,
@@ -413,6 +419,7 @@ export class AgentManagerDb {
   // the scheduler's SqliteAdapter + default team) and stay null until then.
   private dispatchVerificationStorage: DispatchVerificationStorage | null = null;
   private dispatchVerificationJob: DispatchVerificationJob | null = null;
+  private dispatchRecoveryService: DispatchRecoveryService | null = null;
   // Task 10: cached canonical-mode flag, parsed once at startup. Exposed for
   // gateway code paths (legacy direct /talk) that need to emit observation
   // warnings under enforce, and for /system-live / tests to inspect.
@@ -9301,6 +9308,35 @@ export class AgentManagerDb {
               this.dispatchVerificationStorage = null;
               this.dispatchVerificationJob = null;
             }
+            // P0 dispatch recovery — stand up the auto-recovery loop over the
+            // scheduler reactor (which is the live DispatchRecoveryReactor
+            // adapter). It runs one backfill pass immediately (reconciles the
+            // already-stuck landed/expired rows) then on an interval. Env-gated
+            // (DISPATCH_RECOVERY_ENABLED, default off); runOnce never throws.
+            try {
+              const recCfg = recoveryConfigFromEnv(process.env);
+              this.dispatchRecoveryService = new DispatchRecoveryService({
+                reactor: this.dispatchScheduler.reactor as unknown as DispatchRecoveryReactor,
+                config: {
+                  max_attempts: recCfg.maxAttempts,
+                  retryable_detail_markers: DEFAULT_RECOVERY_CONFIG.retryable_detail_markers,
+                },
+                now: () => new Date().toISOString(),
+                enabled: recCfg.enabled,
+                budget: recCfg.budget,
+                backoffMs: recCfg.backoffMs,
+              });
+              this.dispatchRecoveryService.start(recCfg.intervalMs);
+              console.log(
+                `[Manager] DispatchRecovery service started (enabled=${recCfg.enabled} intervalMs=${recCfg.intervalMs} budget=${recCfg.budget} maxAttempts=${recCfg.maxAttempts})`,
+              );
+            } catch (recErr) {
+              console.warn(
+                '[Manager] DispatchRecovery service failed to start:',
+                recErr instanceof Error ? recErr.message : String(recErr),
+              );
+              this.dispatchRecoveryService = null;
+            }
             // Task 10: surface the canonical-mode flag on startup so operators
             // can confirm the rollout phase from the manager log without
             // shelling into the process. The mode is captured once at boot
@@ -9533,6 +9569,10 @@ export class AgentManagerDb {
     if (this.dispatchVerificationJob) {
       this.dispatchVerificationJob.stop();
       this.dispatchVerificationJob = null;
+    }
+    if (this.dispatchRecoveryService) {
+      this.dispatchRecoveryService.stop();
+      this.dispatchRecoveryService = null;
     }
     if (this.dispatchScheduler) {
       this.dispatchScheduler.stop();

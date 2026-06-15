@@ -41,6 +41,21 @@ export interface DispatchReadRow {
     input: unknown | null;
     result: unknown | null;
   };
+  // Recovery-state posture so /ops can distinguish landed/recovering from
+  // needs-attention. Additive; legacy rows read as a clean "none" posture.
+  recovery: {
+    status: string;
+    attempts: number;
+    reason: string | null;
+    side_effect: string;
+    allow_auto_retry: boolean;
+  };
+  // Landed-evidence so operators can tell a reconciled/landed dispatch from
+  // one that still needs intervention without re-parsing result_json.
+  evidence: {
+    artifact_path: string | null;
+    promotion_result: unknown | null;
+  };
   source_metadata: {
     source: 'dispatch_scheduler_queue';
     team_id: string;
@@ -87,6 +102,12 @@ interface DispatchDbRow {
   promotion_input_json: string | null;
   promotion_result_json: string | null;
   result_json: string | null;
+  artifact_path: string | null;
+  recovery_status: string | null;
+  recovery_attempts: number | null;
+  recovery_reason: string | null;
+  side_effect: string | null;
+  allow_auto_retry: number | null;
 }
 
 export function parseDispatchReadStatus(raw: unknown): DispatchReadStatus | null {
@@ -120,7 +141,9 @@ export async function readDispatches(
             active_clarification_json, clarification_history_json,
             resume_delivery_status, promote, promotion_strategy,
             promotion_required_reason, promotion_input_json,
-            promotion_result_json, result_json
+            promotion_result_json, result_json, artifact_path,
+            recovery_status, recovery_attempts, recovery_reason,
+            side_effect, allow_auto_retry
        FROM dispatch_scheduler_queue
        WHERE team_id = ? AND status IN (${placeholders})
        ORDER BY COALESCE(completed_at, started_at, updated_at, not_before_at) DESC,
@@ -144,7 +167,9 @@ export async function readDispatchById(
             active_clarification_json, clarification_history_json,
             resume_delivery_status, promote, promotion_strategy,
             promotion_required_reason, promotion_input_json,
-            promotion_result_json, result_json
+            promotion_result_json, result_json, artifact_path,
+            recovery_status, recovery_attempts, recovery_reason,
+            side_effect, allow_auto_retry
        FROM dispatch_scheduler_queue
        WHERE team_id = ? AND (dispatch_phid = ? OR query_id = ? OR agent_query_id = ?)
        LIMIT 1`,
@@ -465,6 +490,17 @@ function rowToDispatch(row: DispatchDbRow): DispatchReadRow {
       required_reason: row.promotion_required_reason,
       input: parseJsonOrNull(row.promotion_input_json),
       result: parseJsonOrNull(row.promotion_result_json),
+    },
+    recovery: {
+      status: row.recovery_status ?? 'none',
+      attempts: row.recovery_attempts == null ? 0 : Number(row.recovery_attempts),
+      reason: row.recovery_reason ?? null,
+      side_effect: row.side_effect ?? 'none',
+      allow_auto_retry: row.allow_auto_retry != null && Number(row.allow_auto_retry) === 1,
+    },
+    evidence: {
+      artifact_path: row.artifact_path ?? null,
+      promotion_result: parseJsonOrNull(row.promotion_result_json),
     },
     source_metadata: {
       source: 'dispatch_scheduler_queue',

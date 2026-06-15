@@ -457,7 +457,12 @@ export async function migrateSqlite(adapter: SqliteAdapter): Promise<void> {
       failure_kind                TEXT,
       failure_detail              TEXT,
       target_url                  TEXT,
-      result_json                 TEXT
+      result_json                 TEXT,
+      recovery_status             TEXT DEFAULT 'none',
+      recovery_attempts           INTEGER NOT NULL DEFAULT 0,
+      recovery_reason             TEXT,
+      side_effect                 TEXT NOT NULL DEFAULT 'none',
+      allow_auto_retry            INTEGER NOT NULL DEFAULT 0
     );
 
     CREATE INDEX IF NOT EXISTS dispatch_scheduler_eligible_idx
@@ -686,6 +691,13 @@ export async function migrateSqlite(adapter: SqliteAdapter): Promise<void> {
     // Spec 056 ─ first-class artifact path sourced from
     // /agent-done.result.artifact_path. Null until done-time.
     `ALTER TABLE dispatch_scheduler_queue ADD COLUMN artifact_path TEXT`,
+    // Recovery-state columns. Additive, default-safe; NOT NULL columns
+    // carry a DEFAULT so sqlite ADD COLUMN accepts them on existing rows.
+    `ALTER TABLE dispatch_scheduler_queue ADD COLUMN recovery_status TEXT DEFAULT 'none'`,
+    `ALTER TABLE dispatch_scheduler_queue ADD COLUMN recovery_attempts INTEGER NOT NULL DEFAULT 0`,
+    `ALTER TABLE dispatch_scheduler_queue ADD COLUMN recovery_reason TEXT`,
+    `ALTER TABLE dispatch_scheduler_queue ADD COLUMN side_effect TEXT NOT NULL DEFAULT 'none'`,
+    `ALTER TABLE dispatch_scheduler_queue ADD COLUMN allow_auto_retry INTEGER NOT NULL DEFAULT 0`,
   ]) {
     try {
       adapter.exec(stmt);

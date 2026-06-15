@@ -132,3 +132,24 @@ describe("DispatchRecoveryService.runOnce", () => {
     expect(report.errors).toBe(1); // counted, not thrown
   });
 });
+
+describe("DispatchRecoveryService.start/stop", () => {
+  it("runs a backfill pass immediately on start, then is stoppable", async () => {
+    const reactor = new FakeReactor([dispatch()]);
+    const s = svc(reactor);
+    s.start(300_000);
+    // start() fires runOnce() immediately (void); let the microtask drain.
+    await new Promise((r) => setTimeout(r, 0));
+    expect(reactor.requeued).toHaveLength(1); // backfill pass ran
+    s.stop(); // no throw
+  });
+
+  it("start() is a no-op when disabled", async () => {
+    const reactor = new FakeReactor([dispatch()]);
+    const s = svc(reactor, { enabled: false });
+    s.start(300_000);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(reactor.requeued).toHaveLength(0);
+    s.stop();
+  });
+});
