@@ -14,6 +14,7 @@
 // requires explicit operator approval.
 
 import type { Provider, Runtime, UsagePolicySnapshot } from "./types.js";
+import { normalizeRuntime } from "./types.js";
 
 export interface SchedulerPolicy {
   max_in_flight_anthropic: number;
@@ -41,6 +42,16 @@ export interface SchedulerPolicy {
    * never produced a last_output_at stamp at all. Clamped >= starting_timeout_ms.
    */
   stale_in_flight_ttl_ms: number;
+  /**
+   * T1.6 / R.4: per-runtime override of `stale_in_flight_ttl_ms`. The expiry
+   * backstop is an INACTIVITY window, and different harnesses go quiet for
+   * legitimately different stretches: a claude-code-cli build can think for
+   * over an hour between output flushes, while codex/cursor runs are shorter
+   * and a long silence is a better wedge signal. Keyed by canonical Runtime;
+   * a runtime absent from this map falls back to `stale_in_flight_ttl_ms`.
+   * Resolve via `staleTtlForRuntime(policy, runtime)` (never read directly).
+   */
+  stale_in_flight_ttl_by_runtime: Partial<Record<Runtime, number>>;
   policy_version: string;
 }
 
@@ -65,6 +76,18 @@ export const POLICY_DEFAULTS: SchedulerPolicy = {
   // — not a wall-clock cap on total runtime — so a long but active build is
   // safe regardless. 45 min gives a legitimately quiet stretch room to breathe.
   stale_in_flight_ttl_ms: 45 * 60_000,
+  // T1.6 / R.4: per-runtime inactivity caps. claude-* harnesses get a build-
+  // appropriate window > 60 min (long quiet "thinking" stretches are normal and
+  // must not false-expire active work); codex/cursor get shorter windows where
+  // a long silence more reliably means wedged. Runtimes not listed here (e.g.
+  // public-agent-remote, other) fall back to stale_in_flight_ttl_ms (45 min).
+  stale_in_flight_ttl_by_runtime: {
+    "claude-code-cli": 90 * 60_000,
+    "claude-agent-sdk": 90 * 60_000,
+    "claude-code-local": 90 * 60_000,
+    codex: 30 * 60_000,
+    "cursor-cli": 25 * 60_000,
+  },
   policy_version: "v1",
 };
 
@@ -76,6 +99,24 @@ const MAX_IN_FLIGHT_OPENAI_ENV_KEY = "DISPATCH_MAX_IN_FLIGHT_OPENAI";
 const MAX_IN_FLIGHT_CURSOR_ENV_KEY = "DISPATCH_MAX_IN_FLIGHT_CURSOR";
 const SILENCE_ENV_KEY = "DISPATCH_SILENCE_THRESHOLD_MS";
 const STALE_IN_FLIGHT_TTL_ENV_KEY = "DISPATCH_STALE_IN_FLIGHT_TTL_MS";
+
+// T1.6 / R.4: the canonical runtimes that accept a per-runtime TTL override.
+// The env key is the global key suffixed with the runtime, hyphens → "_" and
+// uppercased — e.g. DISPATCH_STALE_IN_FLIGHT_TTL_MS_CLAUDE_CODE_CLI,
+// DISPATCH_STALE_IN_FLIGHT_TTL_MS_CODEX, DISPATCH_STALE_IN_FLIGHT_TTL_MS_CURSOR_CLI.
+const PER_RUNTIME_TTL_RUNTIMES: Runtime[] = [
+  "claude-code-cli",
+  "claude-agent-sdk",
+  "claude-code-local",
+  "codex",
+  "cursor-cli",
+  "public-agent-remote",
+  "other",
+];
+
+function staleTtlEnvKey(runtime: Runtime): string {
+  return `${STALE_IN_FLIGHT_TTL_ENV_KEY}_${runtime.replace(/-/g, "_").toUpperCase()}`;
+}
 
 function parsePositiveInt(raw: string | undefined): number | null {
   if (raw == null) return null;
@@ -104,6 +145,18 @@ export function loadSchedulerPolicy(
   if (envSilence != null) merged.silence_threshold_ms = envSilence;
   const staleTtl = parsePositiveInt(env[STALE_IN_FLIGHT_TTL_ENV_KEY]);
   if (staleTtl != null) merged.stale_in_flight_ttl_ms = staleTtl;
+  // T1.6 / R.4: resolve the per-runtime TTL map with env > config > default
+  // precedence (matching this module's contract). An explicit GLOBAL env TTL
+  // means "use this for every runtime", so it supersedes the built-in per-runtime
+  // DEFAULTS — otherwise a default would silently mask the operator's explicit
+  // global override. A per-runtime env key is more specific still and wins.
+  const perRuntime: Partial<Record<Runtime, number>> =
+    staleTtl != null ? {} : { ...(merged.stale_in_flight_ttl_by_runtime ?? {}) };
+  for (const runtime of PER_RUNTIME_TTL_RUNTIMES) {
+    const v = parsePositiveInt(env[staleTtlEnvKey(runtime)]);
+    if (v != null) perRuntime[runtime] = v;
+  }
+  merged.stale_in_flight_ttl_by_runtime = perRuntime;
   merged.max_in_flight_anthropic = clampCap(merged.max_in_flight_anthropic);
   merged.max_in_flight_openai = clampCap(merged.max_in_flight_openai);
   merged.max_in_flight_cursor = clampCap(merged.max_in_flight_cursor);
@@ -113,6 +166,25 @@ export function loadSchedulerPolicy(
   }
   merged.stale_in_flight_ttl_ms = Math.max(merged.starting_timeout_ms, merged.stale_in_flight_ttl_ms);
   return merged;
+}
+
+/**
+ * T1.6 / R.4: resolve the in-flight inactivity TTL for a specific runtime.
+ * Returns the per-runtime override when one is configured, otherwise the global
+ * `stale_in_flight_ttl_ms`. Always clamped to >= `starting_timeout_ms` so a
+ * mis-set override can never expire a dispatch before it has even started. Pure.
+ * Unknown/blank runtimes normalize to "other" and so use the global fallback.
+ */
+export function staleTtlForRuntime(
+  policy: SchedulerPolicy,
+  runtime: string | Runtime | null | undefined,
+): number {
+  const override = policy.stale_in_flight_ttl_by_runtime?.[normalizeRuntime(runtime)];
+  const ttl =
+    override != null && Number.isFinite(override) && override > 0
+      ? override
+      : policy.stale_in_flight_ttl_ms;
+  return Math.max(policy.starting_timeout_ms, ttl);
 }
 
 // Spec 2026-06-10 (dispatch-canonical, Task 10): mode flag controlling the

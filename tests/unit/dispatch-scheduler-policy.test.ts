@@ -9,6 +9,7 @@ import {
   getSafeConcurrency,
   buildTuningReport,
   parseDispatchCanonicalMode,
+  staleTtlForRuntime,
   POLICY_DEFAULTS,
   type PolicyOverrides,
   type UsageObservation,
@@ -75,6 +76,85 @@ describe("loadSchedulerPolicy (Phase 2.1)", () => {
   it("exposes policy_version for snapshotting onto Dispatch docs", () => {
     const p = loadSchedulerPolicy({}, {});
     expect(p.policy_version).toMatch(/^v\d+(\.\d+)*$/);
+  });
+});
+
+describe("per-runtime stale-in-flight TTL (T1.6 / R.4)", () => {
+  it("defaults: claude-code-cli inactivity cap is > 60 min", () => {
+    const p = loadSchedulerPolicy({}, {});
+    expect(staleTtlForRuntime(p, "claude-code-cli")).toBeGreaterThan(60 * 60_000);
+    expect(staleTtlForRuntime(p, "claude-code-cli")).toBe(90 * 60_000);
+  });
+
+  it("defaults: codex and cursor caps are shorter than claude-code-cli", () => {
+    const p = loadSchedulerPolicy({}, {});
+    const claude = staleTtlForRuntime(p, "claude-code-cli");
+    expect(staleTtlForRuntime(p, "codex")).toBe(30 * 60_000);
+    expect(staleTtlForRuntime(p, "cursor-cli")).toBe(25 * 60_000);
+    expect(staleTtlForRuntime(p, "codex")).toBeLessThan(claude);
+    expect(staleTtlForRuntime(p, "cursor-cli")).toBeLessThan(claude);
+  });
+
+  it("falls back to the global TTL for a runtime with no override", () => {
+    const p = loadSchedulerPolicy({}, {});
+    expect(staleTtlForRuntime(p, "public-agent-remote")).toBe(p.stale_in_flight_ttl_ms);
+    expect(staleTtlForRuntime(p, "other")).toBe(45 * 60_000);
+  });
+
+  it("normalizes the legacy `cursor` alias and blank/unknown runtimes", () => {
+    const p = loadSchedulerPolicy({}, {});
+    expect(staleTtlForRuntime(p, "cursor")).toBe(25 * 60_000); // legacy alias → cursor-cli
+    expect(staleTtlForRuntime(p, "")).toBe(p.stale_in_flight_ttl_ms); // → other → global
+    expect(staleTtlForRuntime(p, null)).toBe(p.stale_in_flight_ttl_ms);
+  });
+
+  it("per-runtime env override changes the cap for just that runtime", () => {
+    const p = loadSchedulerPolicy(
+      {},
+      { DISPATCH_STALE_IN_FLIGHT_TTL_MS_CODEX: String(10 * 60_000) },
+    );
+    expect(staleTtlForRuntime(p, "codex")).toBe(10 * 60_000); // overridden
+    expect(staleTtlForRuntime(p, "claude-code-cli")).toBe(90 * 60_000); // untouched
+  });
+
+  it("env override for claude-code-cli is honored (hyphens → underscores in key)", () => {
+    const p = loadSchedulerPolicy(
+      {},
+      { DISPATCH_STALE_IN_FLIGHT_TTL_MS_CLAUDE_CODE_CLI: String(120 * 60_000) },
+    );
+    expect(staleTtlForRuntime(p, "claude-code-cli")).toBe(120 * 60_000);
+  });
+
+  it("clamps any resolved cap to at least starting_timeout_ms", () => {
+    const p = loadSchedulerPolicy(
+      {},
+      { DISPATCH_STALE_IN_FLIGHT_TTL_MS_CODEX: "1000" }, // 1s < 60s starting_timeout
+    );
+    expect(staleTtlForRuntime(p, "codex")).toBe(p.starting_timeout_ms);
+  });
+
+  it("the default policy exposes the per-runtime map", () => {
+    expect(POLICY_DEFAULTS.stale_in_flight_ttl_by_runtime["claude-code-cli"]).toBe(90 * 60_000);
+  });
+
+  it("an explicit GLOBAL env TTL supersedes the built-in per-runtime defaults", () => {
+    // Operator intent: DISPATCH_STALE_IN_FLIGHT_TTL_MS=X means X for every
+    // runtime. The built-in 90-min claude default must not mask it.
+    const p = loadSchedulerPolicy({}, { DISPATCH_STALE_IN_FLIGHT_TTL_MS: String(5 * 60_000) });
+    expect(staleTtlForRuntime(p, "claude-code-cli")).toBe(5 * 60_000);
+    expect(staleTtlForRuntime(p, "codex")).toBe(5 * 60_000);
+  });
+
+  it("a per-runtime env still wins over a global env override", () => {
+    const p = loadSchedulerPolicy(
+      {},
+      {
+        DISPATCH_STALE_IN_FLIGHT_TTL_MS: String(5 * 60_000),
+        DISPATCH_STALE_IN_FLIGHT_TTL_MS_CLAUDE_CODE_CLI: String(80 * 60_000),
+      },
+    );
+    expect(staleTtlForRuntime(p, "claude-code-cli")).toBe(80 * 60_000); // per-runtime env wins
+    expect(staleTtlForRuntime(p, "codex")).toBe(5 * 60_000); // global env applies
   });
 });
 

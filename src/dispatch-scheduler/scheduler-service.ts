@@ -21,6 +21,7 @@ import {
   type BudgetState,
   type SchedulerPolicy,
   getSafeConcurrency,
+  staleTtlForRuntime,
 } from "./policy.js";
 import { computeNextAttemptAt } from "./backoff.js";
 import { classifyAgentStartError } from "./throttle-classifier.js";
@@ -727,7 +728,12 @@ export class SchedulerService {
         }
       }
       const inactivity = nowMs - lastActivityMs;
-      if (inactivity < this.policy.stale_in_flight_ttl_ms) continue;
+      // T1.6 / R.4: the inactivity cap is per-runtime — a claude-code-cli build
+      // tolerates a much longer quiet stretch than a codex/cursor run before it
+      // counts as wedged. Resolve the doc's runtime cap (falls back to the
+      // global stale_in_flight_ttl_ms for runtimes without an override).
+      const ttl = staleTtlForRuntime(this.policy, doc.runtime);
+      if (inactivity < ttl) continue;
       const r = await this.client.markFailed(doc.dispatch_phid, {
         failure_kind: "scheduler_wedged",
         detail: hadProgress
@@ -741,7 +747,8 @@ export class SchedulerService {
           agent_query_id: doc.agent_query_id,
           inactivity_ms: inactivity,
           had_progress_evidence: hadProgress,
-          stale_in_flight_ttl_ms: this.policy.stale_in_flight_ttl_ms,
+          runtime: doc.runtime,
+          stale_in_flight_ttl_ms: ttl,
         });
       }
     }

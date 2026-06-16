@@ -111,9 +111,12 @@ describe("fix: in-flight stale expiry must not kill ACTIVE long work", () => {
     );
     const phid = await claimInFlight(reactor, client, "q-wedged", "agent-wedged");
 
-    // Claimed 50 minutes ago (past the TTL) and never produced a last_output_at — the
-    // process-died-at-startup case failStaleInFlight is the backstop for.
-    setNow("2026-06-15T20:50:00.000Z");
+    // Claimed 95 minutes ago (past the TTL) and never produced a last_output_at — the
+    // process-died-at-startup case failStaleInFlight is the backstop for. The
+    // base dispatch runtime is claude-code-cli, whose per-runtime inactivity cap
+    // is 90 min (T1.6 / R.4), so the clock must clear that window for the
+    // backstop to fire — the assertion (truly-wedged work still fails) is intact.
+    setNow("2026-06-15T21:35:00.000Z");
     queryEvidence.set("agent-wedged", {
       status: "processing",
       last_output_at: null,
