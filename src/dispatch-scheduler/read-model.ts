@@ -56,6 +56,32 @@ export interface DispatchReadRow {
     artifact_path: string | null;
     promotion_result: unknown | null;
   };
+  // Cn-EVE.1 (2026-06-16): false_expire_recovered ledger classification.
+  // A dispatch is "false_expire_recovered" when it was originally reported
+  // failed/expired (failure_kind set) but the auto-recovery wiring (see
+  // dispatch-recovery/service.ts, commit 387f03b) found on-disk evidence
+  // that the work actually shipped — commit SHA on main, an artifact at a
+  // recorded path, or a successful promotion result — and flipped the row
+  // to status='done' with recovery_status in {landed_reconciled, verified_done}.
+  // This block surfaces that classification + the preserved original failure
+  // reason + the structured evidence so /dispatches consumers (Kapelle UI,
+  // Sentinel spot-checks) can render "recovered" without re-deriving the
+  // logic. Null when the dispatch was not auto-recovered (i.e., normal done /
+  // still failed / never failed).
+  recovery_classification: {
+    false_expire_recovered: boolean;
+    original_failure_reason: {
+      kind: string | null;
+      detail: string | null;
+    } | null;
+    recovery_evidence: {
+      kind: "commit_evidence" | "artifact" | "promotion" | "unknown";
+      commit_sha: string | null;
+      artifact_path: string | null;
+      promotion_sha: string | null;
+      reason_text: string | null;
+    };
+  } | null;
   source_metadata: {
     source: 'dispatch_scheduler_queue';
     team_id: string;
@@ -502,6 +528,7 @@ function rowToDispatch(row: DispatchDbRow): DispatchReadRow {
       artifact_path: row.artifact_path ?? null,
       promotion_result: parseJsonOrNull(row.promotion_result_json),
     },
+    recovery_classification: deriveRecoveryClassification(row),
     source_metadata: {
       source: 'dispatch_scheduler_queue',
       team_id: row.team_id,
@@ -515,6 +542,116 @@ function rowToDispatch(row: DispatchDbRow): DispatchReadRow {
       not_before_at: row.not_before_at,
     },
     source: 'manager-http',
+  };
+}
+
+/**
+ * Cn-EVE.1 (2026-06-16): derive the false_expire_recovered classification
+ * from the row's auto-recovery + failure fields. Pure function — exported
+ * so tests can pin the contract without going through the DB.
+ *
+ * A row is "false_expire_recovered" when ALL of the following hold:
+ *   1. status === 'done' (terminal-positive)
+ *   2. recovery_status is one of {'landed_reconciled', 'verified_done'}
+ *      (i.e., the auto-recovery wiring touched the row)
+ *   3. failure_kind is set (the row had a real failure on the way through,
+ *      which is what makes the recovery "false expire" rather than a clean
+ *      completion)
+ *
+ * Evidence kind ranking (most specific wins):
+ *   - 'commit_evidence' when recovery_status === 'verified_done' OR
+ *     recovery_reason matches the "commit <sha> verified on <base>" pattern
+ *   - 'artifact' when artifact_path is set and no commit evidence
+ *   - 'promotion' when promotion_result.repos[0].promoted_sha is set and no
+ *     commit evidence and no artifact_path
+ *   - 'unknown' as a safe fallback
+ *
+ * Returns null for rows that were not auto-recovered (normal done / still
+ * failed / never failed).
+ */
+export type RecoveryClassificationRow = Pick<
+  DispatchDbRow,
+  | "status"
+  | "recovery_status"
+  | "recovery_reason"
+  | "failure_kind"
+  | "failure_detail"
+  | "artifact_path"
+  | "promotion_result_json"
+>;
+
+const COMMIT_EVIDENCE_REASON_RE = /\bcommit\s+([0-9a-f]{7,40})\s+verified\s+on\b/i;
+
+export function deriveRecoveryClassification(
+  row: RecoveryClassificationRow,
+): {
+  false_expire_recovered: boolean;
+  original_failure_reason: { kind: string | null; detail: string | null } | null;
+  recovery_evidence: {
+    kind: "commit_evidence" | "artifact" | "promotion" | "unknown";
+    commit_sha: string | null;
+    artifact_path: string | null;
+    promotion_sha: string | null;
+    reason_text: string | null;
+  };
+} | null {
+  const isAutoRecovered =
+    row.status === "done" &&
+    (row.recovery_status === "landed_reconciled" ||
+      row.recovery_status === "verified_done");
+  if (!isAutoRecovered) return null;
+
+  // No original failure → this wasn't a "false expire" — the row just got
+  // recovered without ever being marked failed. Surface as not-a-recovery
+  // so consumers don't render "recovered" badge on clean rows.
+  const hadFailure = !!row.failure_kind && row.failure_kind.length > 0;
+  if (!hadFailure) return null;
+
+  // Extract commit SHA from recovery_reason (the canonical
+  // "commit <sha> verified on <base>" shape from markRecoveryLanded).
+  const reasonText = row.recovery_reason ?? null;
+  const reasonMatch = reasonText ? reasonText.match(COMMIT_EVIDENCE_REASON_RE) : null;
+  const commitShaFromReason = reasonMatch ? reasonMatch[1] : null;
+
+  // Promotion SHA — first repo's promoted_sha on the promotion_result.
+  let promotionSha: string | null = null;
+  const promo = parseJsonOrNull(row.promotion_result_json);
+  if (promo && typeof promo === "object" && !Array.isArray(promo)) {
+    const repos = (promo as { repos?: unknown[] }).repos;
+    if (Array.isArray(repos) && repos.length > 0) {
+      const first = repos[0];
+      if (first && typeof first === "object") {
+        const sha = (first as { promoted_sha?: unknown }).promoted_sha;
+        if (typeof sha === "string" && sha.length > 0) {
+          promotionSha = sha;
+        }
+      }
+    }
+  }
+
+  // Classify the evidence kind (most-specific wins).
+  let kind: "commit_evidence" | "artifact" | "promotion" | "unknown" = "unknown";
+  if (row.recovery_status === "verified_done" || commitShaFromReason) {
+    kind = "commit_evidence";
+  } else if (row.artifact_path) {
+    kind = "artifact";
+  } else if (promotionSha) {
+    kind = "promotion";
+  }
+
+  return {
+    false_expire_recovered: true,
+    original_failure_reason: {
+      kind: row.failure_kind ?? null,
+      detail: row.failure_detail ?? null,
+    },
+    recovery_evidence: {
+      kind,
+      commit_sha: commitShaFromReason,
+      artifact_path: row.artifact_path ?? null,
+      promotion_sha: promotionSha,
+      reason_text: reasonText,
+    },
   };
 }
 
