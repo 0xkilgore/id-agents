@@ -23,8 +23,11 @@ import {
   getSafeConcurrency,
   staleTtlForRuntime,
 } from "./policy.js";
-import { computeNextAttemptAt } from "./backoff.js";
 import { classifyAgentStartError } from "./throttle-classifier.js";
+import {
+  computeRetryDecision,
+  retryReasonFromThrottleKind,
+} from "./retry-policy.js";
 import type { DispatchDoc, Provider, Runtime } from "./types.js";
 
 export type AgentTransportResult =
@@ -397,55 +400,80 @@ export class SchedulerService {
       transportError: result.transportError,
     });
 
+    // D1 / BUG-003: route the retryable + auth classifier kinds through the
+    // reason-aware retry policy. provider_throttle (rate-limit) and transport
+    // (server/network) back off on the DETERMINISTIC ladder (>=30s — never a
+    // sub-30s same-provider retry); auth_or_plan is terminal (re-auth required,
+    // never retried). agent_error / local_pause keep the existing terminal-fail
+    // behavior (the catch-all path below). attempt_count is already incremented
+    // by claimForStart, so it is the just-failed attempt number.
     if (
       classified.kind === "provider_throttle" ||
-      classified.kind === "transport"
+      classified.kind === "transport" ||
+      classified.kind === "auth_or_plan"
     ) {
-      // Retryable. Compute backoff from attempt_count (already incremented
-      // by claimForStart). If we've hit max attempts, mark exhausted.
-      if (doc.attempt_count >= this.policy.rate_limit_max_attempts) {
+      const reason = retryReasonFromThrottleKind(classified.kind);
+      const decision = computeRetryDecision(reason, doc.attempt_count, this.now());
+
+      if (decision.action === "backoff" && decision.next_attempt_at) {
+        const b = await this.client.markBounced(doc.dispatch_phid, {
+          kind: classified.kind,
+          message: classified.detail,
+          next_attempt_at: decision.next_attempt_at,
+        });
+        if (b.ok) {
+          report.bounced += 1;
+          this.logger.warn("scheduler_bounced", {
+            phid: doc.dispatch_phid,
+            attempt: doc.attempt_count,
+            next_attempt_at: decision.next_attempt_at,
+            kind: classified.kind,
+            reason,
+          });
+        } else {
+          this.logger.error("scheduler_markBounced_failed", {
+            phid: doc.dispatch_phid,
+            detail: b.detail,
+          });
+        }
+        return;
+      }
+
+      if (decision.exhausted) {
         const ex = await this.client.markRetryExhausted(
           doc.dispatch_phid,
-          `${classified.kind} after ${doc.attempt_count} attempts`,
+          `${reason} after ${doc.attempt_count} attempts`,
         );
         if (ex.ok) {
           report.failed += 1;
           this.logger.warn("scheduler_retry_exhausted", {
             phid: doc.dispatch_phid,
             attempts: doc.attempt_count,
+            reason,
           });
         }
         return;
       }
-      const next = computeNextAttemptAt(
-        this.now(),
-        doc.attempt_count,
-        this.policy,
-        this.rng,
-      );
-      const b = await this.client.markBounced(doc.dispatch_phid, {
-        kind: classified.kind,
-        message: classified.detail,
-        next_attempt_at: next,
+
+      // Non-retryable terminal (auth / contract). Typed failure_kind so the
+      // operator can tell "needs re-auth" from a generic agent error.
+      const t = await this.client.markFailed(doc.dispatch_phid, {
+        failure_kind: decision.terminal_kind ?? "agent_error",
+        detail: classified.detail,
       });
-      if (b.ok) {
-        report.bounced += 1;
-        this.logger.warn("scheduler_bounced", {
+      if (t.ok) {
+        report.failed += 1;
+        this.logger.warn("scheduler_failed_terminal", {
           phid: doc.dispatch_phid,
-          attempt: doc.attempt_count,
-          next_attempt_at: next,
           kind: classified.kind,
-        });
-      } else {
-        this.logger.error("scheduler_markBounced_failed", {
-          phid: doc.dispatch_phid,
-          detail: b.detail,
+          reason,
+          failure_kind: decision.terminal_kind,
         });
       }
       return;
     }
 
-    // Non-retryable: mark failed.
+    // Non-retryable: mark failed. (agent_error, local_pause)
     const f = await this.client.markFailed(doc.dispatch_phid, {
       failure_kind: "agent_error",
       detail: classified.detail,

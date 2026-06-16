@@ -158,7 +158,13 @@ export type FailureKind =
   // typed DispatchFailureReason is encoded into `detail` so existing
   // FailureKind consumers don't have to learn 12 new variants; the
   // strict-mode classifier owns the high-resolution reason.
-  | "strict_mode_classified";
+  | "strict_mode_classified"
+  // D1 / BUG-003 reason-aware retry policy: typed terminal states for
+  // non-retryable failures. failed_auth_required → 401/403, needs re-auth
+  // before any further fires; failed_contract_error → 409 dispatch_id_mismatch,
+  // a hard dispatcher-contract error. Neither is ever auto-retried.
+  | "failed_auth_required"
+  | "failed_contract_error";
 
 export interface BounceRecord {
   ts: string;

@@ -260,7 +260,7 @@ describe("SchedulerService.tick — provider throttle handling", () => {
 });
 
 describe("SchedulerService.tick — non-throttle errors", () => {
-  it("HTTP 401 marks failed (no retry)", async () => {
+  it("HTTP 401 marks failed (no retry — terminal auth-required)", async () => {
     const { client, transport, scheduler } = harness({ max: 1 });
     transport.setNextResponses([
       { ok: false, status: 401, body: "invalid api key" },
@@ -272,7 +272,9 @@ describe("SchedulerService.tick — non-throttle errors", () => {
     const doc = await client.getByQueryId("q");
     if (!doc.ok) throw new Error();
     expect(doc.value.status).toBe("failed");
-    expect(doc.value.failure_kind).toBe("agent_error");
+    // D1 / BUG-003: provider_auth_error is a typed terminal — never retried, and
+    // distinguishable from a generic agent error so the operator knows to re-auth.
+    expect(doc.value.failure_kind).toBe("failed_auth_required");
   });
 
   it("HTTP 500 marks failed (not bounced)", async () => {
