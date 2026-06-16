@@ -82,6 +82,26 @@ export interface DispatchReadRow {
       reason_text: string | null;
     };
   } | null;
+  // T13.2 (2026-06-17, phid:disp-1e2819f568b08704): derived effective_state
+  // per cto/output/2026-06-16-dispatch-failure-state-taxonomy-scope.md.
+  // The UI uses this (not raw `status`) to decide row treatment + sort
+  // order so the dispatch queue stops painting all failures red. Derived
+  // purely from existing scheduler+recovery fields. supersede_link is
+  // not yet on the schema (documented as v2 follow-up); rate-limit/
+  // provider retries without supersede evidence fall to
+  // failed_needs_operator (the safe direction per the scope §7).
+  effective_state:
+    | "failed_work_landed_recoverable"
+    | "moot_or_superseded"
+    | "failed_needs_operator"
+    | "queued"
+    | "in_flight"
+    | "done"
+    | "done_recovered"
+    | string; // string fallback preserves forwards-compat with unknown raw states
+  // Companion sort signal. UI groups `needs_operator=true` to the top
+  // regardless of `effective_state`. Per the scope §"Needs-You Flag".
+  needs_operator: boolean;
   source_metadata: {
     source: 'dispatch_scheduler_queue';
     team_id: string;
@@ -529,6 +549,8 @@ function rowToDispatch(row: DispatchDbRow): DispatchReadRow {
       promotion_result: parseJsonOrNull(row.promotion_result_json),
     },
     recovery_classification: deriveRecoveryClassification(row),
+    effective_state: deriveEffectiveState(row),
+    needs_operator: deriveNeedsOperator(row),
     source_metadata: {
       source: 'dispatch_scheduler_queue',
       team_id: row.team_id,
@@ -653,6 +675,179 @@ export function deriveRecoveryClassification(
       reason_text: reasonText,
     },
   };
+}
+
+/**
+ * T13.2 (2026-06-17, phid:disp-1e2819f568b08704): derive `effective_state`
+ * from {state, failure_kind, recovery_status, recovery_evidence} per the
+ * CTO taxonomy scope at cto/output/2026-06-16-dispatch-failure-state-
+ * taxonomy-scope.md §"Derivation Rules". Pure function — exported for
+ * tests and future T13.4 console consumers.
+ *
+ * Rule order matches the scope verbatim. First matching rule wins.
+ *
+ * Strict-mode failure_reason enum (per spec) hasn't fully landed yet —
+ * we map the existing free-text `failure_kind` values into the same
+ * decision tree. `recovery_evidence` is derived from the existing
+ * `recovery_classification` (Cn-EVE.1 commit 292125f).
+ *
+ * supersede_link is NOT yet on the schema (documented as v2 follow-up
+ * in the closeout). Rules 4 and the "moot via rate-limit + supersede"
+ * branch of rule 7 always evaluate as no-supersede until the column
+ * lands. This means rate-limit/provider retry rows without a recovery
+ * landing fall to `failed_needs_operator`, which is the safe direction
+ * per scope §7 ("retryable does not mean ignorable").
+ */
+export type EffectiveStateRow = Pick<
+  DispatchDbRow,
+  | "status"
+  | "recovery_status"
+  | "recovery_reason"
+  | "failure_kind"
+  | "failure_detail"
+  | "artifact_path"
+  | "promotion_result_json"
+  | "not_before_at"
+  | "started_at"
+  | "updated_at"
+>;
+
+// Strict-mode hard-failure reasons that should always surface to the
+// operator (rule 6). The current data uses free-text failure_kind values;
+// we accept the strict-mode names AND the common existing kinds that map
+// to them.
+const HARD_FAILURE_REASONS = new Set([
+  "provider_auth_error",
+  "context_length_error",
+  "tool_error",
+  "agent_refusal",
+  "malformed_agent_response",
+  "dispatch_id_mismatch",
+  "dispatch_not_found",
+  "unknown_error",
+]);
+
+// Retryable provider failure reasons (rule 7).
+const RETRYABLE_PROVIDER_REASONS = new Set([
+  "rate_limit_error",
+  "provider_server_error",
+  "provider_timeout",
+]);
+
+// Recovery statuses that prove the work landed (rule 3 / 2).
+const LANDED_RECOVERY_STATUSES = new Set(["landed_reconciled", "verified_done", "retry_done"]);
+
+// Recovery-terminal failure statuses (rule 5).
+const RECOVERY_TERMINAL_FAILURE_STATUSES = new Set([
+  "unsafe_blocked",
+  "unsafe_side_effect",
+  "exhausted",
+  "operator_attention",
+  "needs_operator",
+]);
+
+export function deriveEffectiveState(row: EffectiveStateRow): string {
+  // Rule 1 — raw active states.
+  if (row.status === "queued") return "queued";
+  if (row.status === "in_flight") return "in_flight";
+
+  // Rule 2 — done states (split done vs done_recovered).
+  if (row.status === "done") {
+    if (row.recovery_status && LANDED_RECOVERY_STATUSES.has(row.recovery_status)) {
+      // A row that ended up `done` after the recovery wiring reconciled it
+      // (the "false expire" / "lost closeout" pattern) gets done_recovered.
+      // Cn-EVE.1's recovery_classification.false_expire_recovered is the
+      // same signal viewed from the row side; here we just emit the label.
+      // Only flag as done_recovered when there was a real prior failure —
+      // otherwise it's a clean done that happened to share a marker.
+      if (row.failure_kind && row.failure_kind.length > 0) {
+        return "done_recovered";
+      }
+    }
+    return "done";
+  }
+
+  // For non-failed/non-active states (cancelled, needs_clarification, etc.)
+  // pass through the raw state so consumers can branch on it.
+  if (row.status !== "failed") return row.status;
+
+  // From here on, status === 'failed'.
+
+  // Rule 3 — recovery evidence proves the work landed.
+  // We accept landed_reconciled, verified_done, retry_done as landed
+  // recovery statuses. The cto scope says "recovery_evidence.landed === true"
+  // — the existing recovery_classification block computes that for us.
+  if (row.recovery_status && LANDED_RECOVERY_STATUSES.has(row.recovery_status)) {
+    return "failed_work_landed_recoverable";
+  }
+
+  // Rule 4 — supersede_link with replacement evidence makes the row moot.
+  // supersede_link is not yet on the schema. When it lands, branch here.
+  // For now, this rule is a no-op (rate-limit/provider retries without
+  // landed evidence fall to rule 7 → needs_operator, the safe direction).
+
+  // Rule 5 — recovery-terminal failure statuses always need an operator.
+  if (row.recovery_status && RECOVERY_TERMINAL_FAILURE_STATUSES.has(row.recovery_status)) {
+    return "failed_needs_operator";
+  }
+
+  // Rule 6 — strict-mode hard failures.
+  if (row.failure_kind && HARD_FAILURE_REASONS.has(row.failure_kind)) {
+    return "failed_needs_operator";
+  }
+
+  // Rule 7 — retryable provider failures without supersede or evidence.
+  if (row.failure_kind && RETRYABLE_PROVIDER_REASONS.has(row.failure_kind)) {
+    return "failed_needs_operator";
+  }
+
+  // Rule 8 — fallback. Unknown failures surface as needs_operator.
+  return "failed_needs_operator";
+}
+
+/**
+ * T13.2 needs-you flag — companion to effective_state. Per scope §"Needs-
+ * You Flag", a row counts as needs_operator when:
+ *   - effective_state === "failed_needs_operator"
+ *   - effective_state === "queued" and queued_age >= QUEUED_STALE_MIN
+ *   - effective_state === "in_flight" and silence_age >= INFLIGHT_STALE_MIN
+ *
+ * needs_clarification active is also a needs_operator signal but lives
+ * outside this row's columns (in needs_input.active); the read row will
+ * surface it via the needs_input block already. We keep this helper
+ * focused on the staleness math.
+ */
+const QUEUED_STALE_MINUTES = 20;
+const INFLIGHT_STALE_MINUTES = 45;
+
+export function deriveNeedsOperator(
+  row: EffectiveStateRow,
+  nowMs: number = Date.now(),
+): boolean {
+  const effective = deriveEffectiveState(row);
+  if (effective === "failed_needs_operator") return true;
+  if (effective === "queued") {
+    const queuedAtMs = parseDateMs(row.not_before_at);
+    if (queuedAtMs == null) return false;
+    return nowMs - queuedAtMs >= QUEUED_STALE_MINUTES * 60_000;
+  }
+  if (effective === "in_flight") {
+    // "silence" age proxy: started_at + INFLIGHT_STALE_MINUTES. The scope
+    // mentions last_output_at but that column is not yet on the schema
+    // (T11.x output-cadence work). Use started_at as a coarse proxy until
+    // last_output_at lands.
+    const startedAtMs = parseDateMs(row.started_at);
+    if (startedAtMs == null) return false;
+    return nowMs - startedAtMs >= INFLIGHT_STALE_MINUTES * 60_000;
+  }
+  return false;
+}
+
+function parseDateMs(raw: string | null | undefined): number | null {
+  if (!raw) return null;
+  const t = Date.parse(raw);
+  if (Number.isNaN(t)) return null;
+  return t;
 }
 
 function parseJsonObject(raw: string | null | undefined): Record<string, unknown> | null {
