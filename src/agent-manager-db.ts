@@ -109,6 +109,7 @@ import {
   type DispatchRecoveryReactor,
 } from './dispatch-recovery/service.js';
 import { DEFAULT_RECOVERY_CONFIG } from './dispatch-recovery/classifier.js';
+import { makeGitCommitEvidenceProbe } from './dispatch-recovery/git-commit-evidence.js';
 import {
   getAgentsEffectiveness,
   getAgentDispatches,
@@ -9347,6 +9348,10 @@ export class AgentManagerDb {
                 enabled: recCfg.enabled,
                 budget: recCfg.budget,
                 backoffMs: recCfg.backoffMs,
+                // D3: git ground-truth probe — a failed/expired dispatch whose
+                // promoted commit is actually on the target base is reconciled
+                // (verified_done), not retried (the lost-closeout false-expire).
+                commitEvidence: makeGitCommitEvidenceProbe(),
               });
               this.dispatchRecoveryService.start(recCfg.intervalMs);
               console.log(

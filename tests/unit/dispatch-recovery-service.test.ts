@@ -29,6 +29,7 @@ function dispatch(over: Partial<RecoverableDispatch> = {}): RecoverableDispatch 
 class FakeReactor implements DispatchRecoveryReactor {
   requeued: Array<{ phid: string; reason: string; next_attempt_at: string }> = [];
   landed: string[] = [];
+  landedOpts: Array<{ phid: string; recovery_status?: string; reason?: string }> = [];
   outcomes: Array<{ phid: string; decision: string; reason: string }> = [];
   constructor(private docs: RecoverableDispatch[]) {}
   async listFailedForRecovery() {
@@ -38,8 +39,9 @@ class FakeReactor implements DispatchRecoveryReactor {
     this.requeued.push({ phid, ...args });
     return true;
   }
-  async markRecoveryLanded(phid: string) {
+  async markRecoveryLanded(phid: string, opts?: { recovery_status?: string; reason?: string }) {
     this.landed.push(phid);
+    this.landedOpts.push({ phid, ...opts });
   }
   async recordRecoveryOutcome(phid: string, args: { decision: string; reason: string }) {
     this.outcomes.push({ phid, ...args });
@@ -130,6 +132,48 @@ describe("DispatchRecoveryService.runOnce", () => {
     };
     const report = await svc(reactor).runOnce();
     expect(report.errors).toBe(1); // counted, not thrown
+  });
+
+  it("D3: commit-evidence probe rescues a failed row → landed verified_done, NOT retried", async () => {
+    const reactor = new FakeReactor([
+      dispatch({
+        dispatch_phid: "phid:disp-8945b9e",
+        promotion_completed: false,
+        promoted_sha: "8945b9e",
+        repo_path: "/Users/kilgore/Dropbox/Code/agent-platform-task-package-v0",
+        base: "main",
+      }),
+    ]);
+    const probed: Array<{ repoPath: string; base: string; sha: string }> = [];
+    const service = svc(reactor, {
+      commitEvidence: {
+        async verifyCommitOnBase(args) {
+          probed.push(args);
+          return args.sha === "8945b9e"; // git confirms it's on main
+        },
+      },
+    });
+
+    const report = await service.runOnce();
+
+    expect(report.landed).toBe(1);
+    expect(report.retried).toBe(0);
+    expect(reactor.requeued).toHaveLength(0); // never re-dispatched
+    expect(probed).toEqual([
+      { repoPath: "/Users/kilgore/Dropbox/Code/agent-platform-task-package-v0", base: "main", sha: "8945b9e" },
+    ]);
+    expect(reactor.landedOpts[0].recovery_status).toBe("verified_done");
+  });
+
+  it("D3: a false probe result leaves the row to the normal retry path (no false landing)", async () => {
+    const reactor = new FakeReactor([
+      dispatch({ promotion_completed: false, promoted_sha: "deadbeef", repo_path: "/repo", base: "main" }),
+    ]);
+    const report = await svc(reactor, {
+      commitEvidence: { async verifyCommitOnBase() { return false; } },
+    }).runOnce();
+    expect(report.landed).toBe(0);
+    expect(report.retried).toBe(1); // still a recoverable transient
   });
 });
 

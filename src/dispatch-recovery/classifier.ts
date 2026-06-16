@@ -25,6 +25,15 @@ export interface RecoveryInput {
   /** Evidence the work actually landed despite the failed marker. */
   artifact_path: string | null;
   promotion_completed: boolean | null;
+  /**
+   * D3 commit evidence: the dispatch's promoted commit is present/verified on
+   * the target base branch (resolved by the recovery service via a
+   * CommitEvidenceProbe — git ground truth). `true` means the work landed even
+   * when the /agent-done closeout was lost and the row is failed/expired (the
+   * Roger Task substrate `8945b9e` false-expire pattern). Optional — absent on
+   * callers that don't gather git evidence.
+   */
+  commit_verified_on_base?: boolean | null;
   channel: string;
   /** External-side-effect class declared on the dispatch message metadata. */
   side_effect: "none" | "external" | "email" | "payment" | "delete" | "user_visible";
@@ -66,7 +75,19 @@ export interface RecoveryDecisionResult {
 function landed(input: RecoveryInput): boolean {
   return (
     (typeof input.artifact_path === "string" && input.artifact_path.length > 0) ||
-    input.promotion_completed === true
+    input.promotion_completed === true ||
+    input.commit_verified_on_base === true
+  );
+}
+
+/** True when the ONLY landed evidence is git commit verification (no artifact,
+ *  no completed-promotion flag). Used to surface a distinct "verified-done"
+ *  recovery state for the lost-closeout / false-expire case. */
+export function landedByCommitEvidenceOnly(input: RecoveryInput): boolean {
+  return (
+    input.commit_verified_on_base === true &&
+    input.promotion_completed !== true &&
+    !(typeof input.artifact_path === "string" && input.artifact_path.length > 0)
   );
 }
 
@@ -96,7 +117,12 @@ export function classifyRecovery(
 ): RecoveryDecisionResult {
   // 1. Landed beats everything — don't panic (or retry) about work that landed.
   if (landed(input)) {
-    return { decision: "landed", reason: "artifact/promotion evidence present" };
+    return {
+      decision: "landed",
+      reason: landedByCommitEvidenceOnly(input)
+        ? "commit verified on base — recovered despite failed/expired marker"
+        : "artifact/promotion evidence present",
+    };
   }
 
   // 2. Recovery only acts on terminal failures.

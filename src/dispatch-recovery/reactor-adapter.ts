@@ -21,7 +21,7 @@ export function makeRecoveryReactor(
         now: opts.now ? opts.now() : undefined,
       }),
     requeueForRecovery: (phid, args) => reactor.requeueForRecovery(phid, args),
-    markRecoveryLanded: (phid) => reactor.markRecoveryLanded(phid),
+    markRecoveryLanded: (phid, opts) => reactor.markRecoveryLanded(phid, opts),
     recordRecoveryOutcome: (phid, args) =>
       reactor.recordRecoveryOutcome(phid, args),
   };

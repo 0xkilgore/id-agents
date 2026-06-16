@@ -12,6 +12,7 @@
 
 import {
   classifyRecovery,
+  landedByCommitEvidenceOnly,
   type DispatchRecoveryDecision,
   type RecoveryConfig,
   type RecoveryInput,
@@ -19,6 +20,27 @@ import {
 
 export interface RecoverableDispatch extends Omit<RecoveryInput, never> {
   dispatch_phid: string;
+  /** D3 commit-evidence inputs (from the row's promotion metadata). The service
+   *  uses these to probe git for the actual landed state. All optional — absent
+   *  rows simply skip the commit-evidence pass. */
+  promoted_sha?: string | null;
+  repo_path?: string | null;
+  base?: string | null;
+}
+
+/**
+ * D3: git ground-truth probe. Given a repo + base + commit SHA, answer whether
+ * that commit is present/verified on the base branch. Injected so the service
+ * is unit-testable with a fake; the manager wires a real `git` implementation.
+ * Returns null when the answer can't be determined (probe error / missing repo);
+ * the service treats null as "no evidence" (never a false landed).
+ */
+export interface CommitEvidenceProbe {
+  verifyCommitOnBase(args: {
+    repoPath: string;
+    base: string;
+    sha: string;
+  }): Promise<boolean | null>;
 }
 
 export interface DispatchRecoveryReactor {
@@ -29,8 +51,13 @@ export interface DispatchRecoveryReactor {
     phid: string,
     args: { reason: string; next_attempt_at: string },
   ): Promise<boolean>;
-  /** Reconcile a dispatch whose work actually landed (artifact/promotion). */
-  markRecoveryLanded(phid: string): Promise<void>;
+  /** Reconcile a dispatch whose work actually landed (artifact/promotion/commit).
+   *  opts.recovery_status overrides the persisted state (e.g. "verified_done"
+   *  for commit-evidence landings). */
+  markRecoveryLanded(
+    phid: string,
+    opts?: { recovery_status?: string; reason?: string },
+  ): Promise<void>;
   /** Record a non-retry outcome for the /ops recovery surface (not panic). */
   recordRecoveryOutcome(
     phid: string,
@@ -56,6 +83,10 @@ export interface DispatchRecoveryServiceOptions {
   backoffMs: number;
   /** Cap on the backoff delay. Default 30 min. */
   maxBackoffMs?: number;
+  /** D3: optional git ground-truth probe. When present, a failed/expired row
+   *  with promotion metadata is checked against the real base before being
+   *  retried — catching the lost-closeout false-expire. */
+  commitEvidence?: CommitEvidenceProbe;
   logger?: RecoveryLogger;
 }
 
@@ -81,6 +112,7 @@ export class DispatchRecoveryService {
   private budget: number;
   private backoffMs: number;
   private maxBackoffMs: number;
+  private commitEvidence: CommitEvidenceProbe | null;
   private logger: RecoveryLogger;
   private interval: ReturnType<typeof setInterval> | null = null;
 
@@ -92,6 +124,7 @@ export class DispatchRecoveryService {
     this.budget = opts.budget;
     this.backoffMs = opts.backoffMs;
     this.maxBackoffMs = opts.maxBackoffMs ?? DEFAULT_MAX_BACKOFF_MS;
+    this.commitEvidence = opts.commitEvidence ?? null;
     this.logger = opts.logger ?? NULL_LOGGER;
   }
 
@@ -146,13 +179,30 @@ export class DispatchRecoveryService {
 
     for (const doc of docs) {
       try {
-        const decision = classifyRecovery(toInput(doc), this.config);
+        // D3: gather git ground-truth before classifying, so a failed/expired
+        // row whose commit actually landed on main is reconciled, not retried.
+        const resolved = await this.resolveCommitEvidence(doc);
+        const input = toInput(resolved);
+        const decision = classifyRecovery(input, this.config);
         switch (decision.decision) {
-          case "landed":
-            await this.reactor.markRecoveryLanded(doc.dispatch_phid);
+          case "landed": {
+            const verifiedDone = landedByCommitEvidenceOnly(input);
+            await this.reactor.markRecoveryLanded(
+              doc.dispatch_phid,
+              verifiedDone
+                ? {
+                    recovery_status: "verified_done",
+                    reason: `commit ${resolved.promoted_sha} verified on ${resolved.base ?? "main"}`,
+                  }
+                : undefined,
+            );
             report.landed += 1;
-            this.logger.info("recovery_landed", { phid: doc.dispatch_phid });
+            this.logger.info("recovery_landed", {
+              phid: doc.dispatch_phid,
+              via: verifiedDone ? "commit_evidence" : "artifact_or_promotion",
+            });
             break;
+          }
           case "retryable":
             if (report.retried >= this.budget) {
               report.deferred += 1; // budget for this run is spent; pick up next run
@@ -189,6 +239,41 @@ export class DispatchRecoveryService {
     return report;
   }
 
+  /**
+   * Resolve git commit evidence for a failed/expired row. Spends a probe only
+   * when it could change the outcome: the row isn't already known-landed and it
+   * carries a promoted SHA + repo. A null/false probe result leaves the row
+   * unchanged (never a false landed). Never throws.
+   */
+  private async resolveCommitEvidence(doc: RecoverableDispatch): Promise<RecoverableDispatch> {
+    if (!this.commitEvidence) return doc;
+    if (doc.commit_verified_on_base === true) return doc;
+    if (doc.promotion_completed === true) return doc; // already landed by flag
+    if (!doc.promoted_sha || !doc.repo_path) return doc; // nothing to probe
+    try {
+      const verified = await this.commitEvidence.verifyCommitOnBase({
+        repoPath: doc.repo_path,
+        base: doc.base ?? "main",
+        sha: doc.promoted_sha,
+      });
+      if (verified === true) {
+        this.logger.info("recovery_commit_evidence_verified", {
+          phid: doc.dispatch_phid,
+          sha: doc.promoted_sha,
+          repo: doc.repo_path,
+          base: doc.base ?? "main",
+        });
+      }
+      return { ...doc, commit_verified_on_base: verified };
+    } catch (err) {
+      this.logger.warn("recovery_commit_evidence_failed", {
+        phid: doc.dispatch_phid,
+        detail: msg(err),
+      });
+      return doc;
+    }
+  }
+
   private nextAttemptAt(recoveryAttempts: number): string {
     const exp = Math.min(recoveryAttempts, 16); // guard against overflow
     const delay = Math.min(this.backoffMs * 2 ** exp, this.maxBackoffMs);
@@ -205,6 +290,7 @@ function toInput(doc: RecoverableDispatch): RecoveryInput {
     recovery_attempts: doc.recovery_attempts,
     artifact_path: doc.artifact_path,
     promotion_completed: doc.promotion_completed,
+    commit_verified_on_base: doc.commit_verified_on_base ?? null,
     channel: doc.channel,
     side_effect: doc.side_effect,
     allow_auto_retry: doc.allow_auto_retry,

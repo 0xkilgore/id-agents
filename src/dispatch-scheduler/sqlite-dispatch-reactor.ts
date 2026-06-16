@@ -1078,15 +1078,23 @@ export class SqliteDispatchReactor {
    * Landed beats retry — there is no re-dispatch here. Guarded on the failed
    * status so a row already terminalised elsewhere is left untouched.
    */
-  async markRecoveryLanded(phid: string): Promise<void> {
+  async markRecoveryLanded(
+    phid: string,
+    opts?: { recovery_status?: string; reason?: string },
+  ): Promise<void> {
     const now = this.nowFn();
+    // D3: commit-evidence landings record a distinct "verified_done" state +
+    // reason so the /ops surface can tell a git-verified recovery from a
+    // promotion/artifact reconciliation. Defaults preserve the prior behavior.
+    const status = opts?.recovery_status ?? "landed_reconciled";
+    const reason = opts?.reason ?? "reconciled: landed evidence present";
     await this.adapter.query(
       `UPDATE dispatch_scheduler_queue
-       SET status = 'done', recovery_status = 'landed_reconciled',
-           recovery_reason = COALESCE(recovery_reason, 'reconciled: landed evidence present'),
+       SET status = 'done', recovery_status = ?,
+           recovery_reason = COALESCE(recovery_reason, ?),
            completed_at = COALESCE(completed_at, ?), updated_at = ?
        WHERE dispatch_phid = ? AND team_id = ? AND status = 'failed'`,
-      [now, now, phid, this.teamId],
+      [status, reason, now, now, phid, this.teamId],
     );
   }
 
@@ -1114,8 +1122,17 @@ export class SqliteDispatchReactor {
 /** Recovery columns of a failed row → the classifier's RecoverableDispatch. */
 function rowToRecoverable(row: Row): RecoverableDispatch {
   const promo = parseJsonOrNull(row.promotion_result_json) as
-    | { completed?: unknown }
+    | { completed?: unknown; repos?: Array<Record<string, unknown>> }
     | null;
+  // D3: surface the promoted commit + repo + base from the first promotion repo
+  // so the recovery service can git-verify it landed even when `completed` is
+  // not set (the lost-closeout false-expire).
+  const repo0 =
+    promo && Array.isArray(promo.repos) && promo.repos.length > 0
+      ? promo.repos[0]
+      : null;
+  const strOrNull = (v: unknown): string | null =>
+    typeof v === "string" && v.length > 0 ? v : null;
   return {
     dispatch_phid: row.dispatch_phid,
     status: row.status,
@@ -1126,6 +1143,9 @@ function rowToRecoverable(row: Row): RecoverableDispatch {
     artifact_path: row.artifact_path ?? null,
     promotion_completed:
       promo && typeof promo === "object" ? promo.completed === true : null,
+    promoted_sha: repo0 ? strOrNull(repo0.promoted_sha) : null,
+    repo_path: repo0 ? strOrNull(repo0.path) : null,
+    base: repo0 ? strOrNull(repo0.base) : null,
     channel: row.channel,
     side_effect: normalizeSideEffect(row.side_effect),
     allow_auto_retry:

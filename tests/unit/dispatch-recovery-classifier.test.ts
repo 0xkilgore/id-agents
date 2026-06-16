@@ -50,6 +50,26 @@ describe("classifyRecovery", () => {
     expect(d.decision).toBe("landed");
   });
 
+  it("D3: a failed/expired dispatch whose commit is VERIFIED ON BASE is LANDED (not retried)", () => {
+    // The Roger Task substrate false-expire: status=failed, no completed-promotion
+    // flag, but git confirms the promoted commit is on the target main.
+    const d = classifyRecovery(
+      input({ promotion_completed: false, commit_verified_on_base: true }),
+      DEFAULT_RECOVERY_CONFIG,
+    );
+    expect(d.decision).toBe("landed");
+    expect(d.reason).toMatch(/commit verified on base/i);
+  });
+
+  it("D3: commit evidence false/null does NOT mark landed (no false recovery)", () => {
+    expect(
+      classifyRecovery(input({ commit_verified_on_base: false }), DEFAULT_RECOVERY_CONFIG).decision,
+    ).toBe("retryable"); // falls through to the recoverable-transient path
+    expect(
+      classifyRecovery(input({ commit_verified_on_base: null }), DEFAULT_RECOVERY_CONFIG).decision,
+    ).toBe("retryable");
+  });
+
   it("NO AUTO-RETRY for an external side-effect dispatch without opt-in (email)", () => {
     const d = classifyRecovery(input({ side_effect: "email" }), DEFAULT_RECOVERY_CONFIG);
     expect(d.decision).toBe("unsafe_side_effect");

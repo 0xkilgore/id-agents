@@ -45,7 +45,7 @@ afterEach(async () => {
   rmSync(tmpDir, { recursive: true, force: true });
 });
 
-function harness() {
+function harness(opts?: { commitEvidence?: ConstructorParameters<typeof DispatchRecoveryService>[0]["commitEvidence"] }) {
   const reactor = new SqliteDispatchReactor({ adapter, teamId: "team-test", now: () => NOW });
   const client = new DispatchDocClient({ reactor, now: () => NOW });
   const service = new DispatchRecoveryService({
@@ -55,6 +55,7 @@ function harness() {
     enabled: true,
     budget: 10,
     backoffMs: 60_000,
+    commitEvidence: opts?.commitEvidence,
   });
   return { reactor, client, service };
 }
@@ -105,6 +106,56 @@ describe("dispatch recovery — live reconciliation", () => {
     expect(report.landed).toBe(1);
     expect(report.retried).toBe(0);
     expect(doc?.recovery_attempts).toBe(0); // no retry happened
+  });
+
+  it("D3 HEADLINE: the Roger Task substrate 8945b9e false-expire is recovered as verified-done, NOT retried", async () => {
+    // Reproduces the known incident: the Task substrate dispatch was marked
+    // failed/expired by the stale sweep while its commit (8945b9e) was actually
+    // promoted + verified on agent-platform-task-package-v0 main, but the
+    // promotion's `completed` flag was not recorded on the row (lost closeout).
+    // The git commit-evidence probe confirms the SHA is on main → reconcile.
+    const repoPath = "/Users/kilgore/Dropbox/Code/agent-platform-task-package-v0";
+    const probed: Array<{ repoPath: string; base: string; sha: string }> = [];
+    const { reactor, client, service } = harness({
+      commitEvidence: {
+        async verifyCommitOnBase(args) {
+          probed.push(args);
+          return args.repoPath === repoPath && args.sha === "8945b9e"; // on main
+        },
+      },
+    });
+    const phid = await seedFailed(client, reactor, "q-8945b9e", "stale in_flight: no progress for 2700000ms");
+    // Promotion metadata WAS recorded (sha/repo/base) but completed=false — the
+    // exact partial state a lost closeout leaves behind.
+    await reactor.recordPromotionResult(phid, {
+      result: {
+        required: true,
+        completed: false,
+        repos: [
+          {
+            path: repoPath,
+            base: "main",
+            source_branch: "feat/task-substrate-read-api",
+            strategy: "fast_forward",
+            promoted_sha: "8945b9e",
+            remote_main_sha: "8945b9e",
+            pushed: true,
+            verified: true,
+          },
+        ],
+      },
+    });
+
+    const report = await service.runOnce();
+
+    const doc = await reactor.getByPhid(phid);
+    expect(doc?.status).toBe("done"); // recovered, not failed/expired
+    expect(doc?.recovery_status).toBe("verified_done");
+    expect(report.landed).toBe(1);
+    expect(report.retried).toBe(0);
+    expect(doc?.recovery_attempts).toBe(0); // never re-dispatched
+    // The probe was actually consulted with the row's promotion metadata.
+    expect(probed).toEqual([{ repoPath, base: "main", sha: "8945b9e" }]);
   });
 
   it("an expired-failed INTERNAL row with NO evidence is requeued with recovery metadata", async () => {
