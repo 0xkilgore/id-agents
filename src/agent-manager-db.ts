@@ -111,6 +111,7 @@ import {
 import { DEFAULT_RECOVERY_CONFIG } from './dispatch-recovery/classifier.js';
 import { makeGitCommitEvidenceProbe } from './dispatch-recovery/git-commit-evidence.js';
 import { listLoops, getLoop, loopsSummary } from './loops/registry.js';
+import { getBuildStatusCached, type BuildStatus } from './build-info.js';
 import {
   getAgentsEffectiveness,
   getAgentDispatches,
@@ -933,6 +934,17 @@ export class AgentManagerDb {
 
   private key(teamId: string, agentId: string) {
     return `${teamId}:${agentId}`;
+  }
+
+  /**
+   * T11.1: the running build identity (compile-time SHA + timestamp) plus the
+   * local/origin main SHAs and the behind-origin staleness flag. Cached briefly
+   * so a hot /health endpoint doesn't spawn git on every hit. The compile-time
+   * stamp lives at dist/build-info.json (next to this compiled module); the repo
+   * is the manager's cwd.
+   */
+  private getBuildStatus(): BuildStatus {
+    return getBuildStatusCached({ repoDir: process.cwd(), distDir: __dirname });
   }
 
   /**
@@ -3014,6 +3026,8 @@ export class AgentManagerDb {
         agents: parseInt(count || '0'),
         timestamp: Date.now(),
         recovery_backfill,
+        // T11.1: the running build identity + staleness-vs-origin signal.
+        build: this.getBuildStatus(),
       });
     });
 
@@ -9503,6 +9517,7 @@ export class AgentManagerDb {
           mountMonitorRoutes(this.managementApp, this.db.adapter, {
             recoveryBackfillMetrics: () =>
               this.dispatchRecoveryService?.getBackfillMetrics() ?? null,
+            buildStatus: () => this.getBuildStatus(),
           });
           console.log('[Manager] Monitor /monitor/* routes mounted');
         } catch (err) {

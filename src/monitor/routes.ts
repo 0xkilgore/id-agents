@@ -22,6 +22,8 @@ const FRESHNESS_THRESHOLD_MS = 90_000; // 90 seconds
 export interface MonitorRouteDeps {
   /** T1.11: dispatch-recovery boot-backfill metrics getter for /monitor/fleet. */
   recoveryBackfillMetrics?: () => MonitorFleetResponse['recovery_backfill'] | null;
+  /** T11.1: running build identity getter for /monitor/fleet. */
+  buildStatus?: () => MonitorFleetResponse['build'] | null;
 }
 
 export function mountMonitorRoutes(
@@ -45,6 +47,7 @@ export function mountMonitorRoutes(
           recovery_backfill_runs_total: 0,
           recovery_backfill_rows_reclassified_total: 0,
         },
+        build: deps.buildStatus?.() ?? null,
       };
       res.json(response);
     } catch (err) {

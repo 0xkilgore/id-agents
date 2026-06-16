@@ -23,7 +23,8 @@
   "scripts": {
     "build:core": "tsc",
     "build:tui": "tsc -p src/tui/tsconfig.json",
-    "build": "npm run build:core && npm run build:tui",
+    "build:stamp": "node scripts/write-build-info.mjs",
+    "build": "npm run build:core && npm run build:tui && npm run build:stamp",
     "prepublishOnly": "npm run build",
     "dev": "tsc --watch",
     "claude:manager": "npm run build && node dist/start-agent-manager.js",
