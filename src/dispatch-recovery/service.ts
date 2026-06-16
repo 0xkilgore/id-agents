@@ -46,6 +46,14 @@ export interface CommitEvidenceProbe {
 export interface DispatchRecoveryReactor {
   /** Terminal-failed dispatches eligible for a recovery pass. */
   listFailedForRecovery(): Promise<RecoverableDispatch[]>;
+  /** T1.11: the wide (no-lookback) boot-backfill scan over already-stuck rows in
+   *  the targeted failure-reason set. Optional so legacy reactors still satisfy
+   *  the interface; when absent the backfill is a safe no-op. */
+  listStuckForBackfill?(opts?: {
+    failureKinds?: string[];
+    detailMarkers?: string[];
+    limit?: number;
+  }): Promise<RecoverableDispatch[]>;
   /** Reuse bounced/requeue machinery: markBounced(kind:"recovery") + requeue. */
   requeueForRecovery(
     phid: string,
@@ -90,6 +98,21 @@ export interface DispatchRecoveryServiceOptions {
   logger?: RecoveryLogger;
 }
 
+/** T1.11 counters surfaced on /health + /monitor/fleet. */
+export interface RecoveryBackfillMetrics {
+  recovery_backfill_runs_total: number;
+  recovery_backfill_rows_reclassified_total: number;
+}
+
+export interface BackfillReport {
+  skipped: boolean;
+  runs_total: number;
+  scanned: number;
+  reclassified: number;
+  left: number;
+  errors: number;
+}
+
 export interface RecoveryRunReport {
   skipped: boolean;
   scanned: number;
@@ -115,6 +138,9 @@ export class DispatchRecoveryService {
   private commitEvidence: CommitEvidenceProbe | null;
   private logger: RecoveryLogger;
   private interval: ReturnType<typeof setInterval> | null = null;
+  // T1.11 backfill metrics (monotonic for the lifetime of the manager process).
+  private backfillRunsTotal = 0;
+  private backfillRowsReclassifiedTotal = 0;
 
   constructor(opts: DispatchRecoveryServiceOptions) {
     this.reactor = opts.reactor;
@@ -135,11 +161,99 @@ export class DispatchRecoveryService {
    */
   start(intervalMs: number): void {
     if (!this.enabled || this.interval) return;
+    // T1.11: one-time wide boot backfill (reconciles already-landed work that is
+    // older than the periodic lookback window), then the periodic loop.
+    void this.runBackfill();
     void this.runOnce();
     this.interval = setInterval(() => {
       void this.runOnce();
     }, intervalMs);
     if (this.interval.unref) this.interval.unref();
+  }
+
+  /** Current backfill metrics for /health + /monitor/fleet. */
+  getBackfillMetrics(): RecoveryBackfillMetrics {
+    return {
+      recovery_backfill_runs_total: this.backfillRunsTotal,
+      recovery_backfill_rows_reclassified_total: this.backfillRowsReclassifiedTotal,
+    };
+  }
+
+  /**
+   * T1.11 boot-time backfill. A wide, lookback-free sweep over already-stuck
+   * {failed} rows in the targeted failure-reason set (the pre-restart casualty
+   * wave). Reconciles LANDED work (commit/promotion/artifact evidence) OUT of
+   * failed; never retries here (the periodic runOnce owns retries under budget).
+   * Idempotent: reconciled rows become `done` and fall out of the next scan;
+   * non-landed rows are left untouched and classify the same way every pass.
+   * Never throws.
+   */
+  async runBackfill(): Promise<BackfillReport> {
+    const report: BackfillReport = {
+      skipped: false,
+      runs_total: this.backfillRunsTotal,
+      scanned: 0,
+      reclassified: 0,
+      left: 0,
+      errors: 0,
+    };
+    if (!this.enabled || !this.reactor.listStuckForBackfill) {
+      report.skipped = true;
+      return report;
+    }
+    this.backfillRunsTotal += 1;
+    report.runs_total = this.backfillRunsTotal;
+
+    let docs: RecoverableDispatch[];
+    try {
+      docs = await this.reactor.listStuckForBackfill();
+    } catch (err) {
+      this.logger.warn("recovery_backfill_list_failed", { detail: msg(err) });
+      report.errors += 1;
+      return report;
+    }
+    report.scanned = docs.length;
+
+    for (const doc of docs) {
+      try {
+        const resolved = await this.resolveCommitEvidence(doc);
+        const input = toInput(resolved);
+        const decision = classifyRecovery(input, this.config);
+        if (decision.decision === "landed") {
+          const verifiedDone = landedByCommitEvidenceOnly(input);
+          await this.reactor.markRecoveryLanded(
+            doc.dispatch_phid,
+            verifiedDone
+              ? {
+                  recovery_status: "verified_done",
+                  reason: `backfill: commit ${resolved.promoted_sha} verified on ${resolved.base ?? "main"}`,
+                }
+              : { reason: "backfill: landed evidence present" },
+          );
+          report.reclassified += 1;
+          this.backfillRowsReclassifiedTotal += 1;
+          this.logger.info("recovery_backfill_reclassified", {
+            phid: doc.dispatch_phid,
+            via: verifiedDone ? "commit_evidence" : "artifact_or_promotion",
+          });
+        } else {
+          // Not landed — leave for the periodic recovery / operator surface.
+          report.left += 1;
+        }
+      } catch (err) {
+        this.logger.warn("recovery_backfill_apply_failed", {
+          phid: doc.dispatch_phid,
+          detail: msg(err),
+        });
+        report.errors += 1;
+      }
+    }
+    this.logger.info("recovery_backfill_done", {
+      scanned: report.scanned,
+      reclassified: report.reclassified,
+      runs_total: this.backfillRunsTotal,
+    });
+    return report;
   }
 
   stop(): void {

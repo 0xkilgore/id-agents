@@ -19,7 +19,16 @@ const DEFAULT_RECENT_LIMIT = 50;
 const DEFAULT_LOOKBACK_MS = 4 * 60 * 60 * 1000; // 4 hours
 const FRESHNESS_THRESHOLD_MS = 90_000; // 90 seconds
 
-export function mountMonitorRoutes(app: Application, adapter: DbAdapter): void {
+export interface MonitorRouteDeps {
+  /** T1.11: dispatch-recovery boot-backfill metrics getter for /monitor/fleet. */
+  recoveryBackfillMetrics?: () => MonitorFleetResponse['recovery_backfill'] | null;
+}
+
+export function mountMonitorRoutes(
+  app: Application,
+  adapter: DbAdapter,
+  deps: MonitorRouteDeps = {},
+): void {
 
   // GET /monitor/fleet — per-agent up/down, port, pid, last-seen.
   app.get('/monitor/fleet', async (_req: Request, res: Response) => {
@@ -32,6 +41,10 @@ export function mountMonitorRoutes(app: Application, adapter: DbAdapter): void {
       const response: MonitorFleetResponse = {
         generated_at: now,
         agents: [managerRow, ...agents],
+        recovery_backfill: deps.recoveryBackfillMetrics?.() ?? {
+          recovery_backfill_runs_total: 0,
+          recovery_backfill_rows_reclassified_total: 0,
+        },
       };
       res.json(response);
     } catch (err) {

@@ -44,6 +44,11 @@ import { randomBytes } from "node:crypto";
 /** Default recovery lookback: only reconcile failures from the last 7 days. */
 export const DEFAULT_RECOVERY_LOOKBACK_MS = 7 * 24 * 60 * 60 * 1000;
 
+/** T1.11 boot-backfill target failure reasons (by failure_kind). */
+export const BACKFILL_FAILURE_KINDS = ["agent_error", "provider_rate_limit_exhausted"];
+/** T1.11 boot-backfill target failure reasons (by failure_detail substring). */
+export const BACKFILL_DETAIL_MARKERS = ["linked query terminated"];
+
 interface Row {
   dispatch_phid: string;
   team_id: string;
@@ -1022,6 +1027,38 @@ export class SqliteDispatchReactor {
          AND COALESCE(recovery_status, 'none') IN ('none', 'recovering')
        ORDER BY COALESCE(completed_at, updated_at) ASC, dispatch_phid ASC`,
       [this.teamId, sinceIso],
+    );
+    return rows.map(rowToRecoverable);
+  }
+
+  /**
+   * T1.11 boot-time backfill scan. Unlike `listFailedForRecovery`, this is NOT
+   * bounded by the recovery lookback window — the pre-restart casualty wave is
+   * older than 7 days, which is exactly why those rows never reconciled. It
+   * targets the failure reasons the backfill reconciles (agent_error /
+   * provider_rate_limit_exhausted by kind, "linked query terminated" by detail)
+   * and skips rows already routed to an operator. `landed_reconciled` /
+   * `verified_done` rows are `done`, so they fall out and the pass is idempotent.
+   */
+  async listStuckForBackfill(
+    opts: { failureKinds?: string[]; detailMarkers?: string[]; limit?: number } = {},
+  ): Promise<RecoverableDispatch[]> {
+    const kinds = opts.failureKinds ?? BACKFILL_FAILURE_KINDS;
+    const markers = opts.detailMarkers ?? BACKFILL_DETAIL_MARKERS;
+    const limit = opts.limit ?? 1000;
+    const kindClause = kinds.length ? `failure_kind IN (${kinds.map(() => "?").join(", ")})` : null;
+    const markerClause = markers.length
+      ? `(${markers.map(() => "failure_detail LIKE ?").join(" OR ")})`
+      : null;
+    const reasonClause = [kindClause, markerClause].filter(Boolean).join(" OR ");
+    const { rows } = await this.adapter.query<Row>(
+      `SELECT * FROM dispatch_scheduler_queue
+       WHERE team_id = ? AND status = 'failed'
+         AND COALESCE(recovery_status, 'none') IN ('none', 'recovering')
+         ${reasonClause ? `AND (${reasonClause})` : ""}
+       ORDER BY COALESCE(completed_at, updated_at) ASC, dispatch_phid ASC
+       LIMIT ?`,
+      [this.teamId, ...kinds, ...markers.map((m) => `%${m}%`), limit],
     );
     return rows.map(rowToRecoverable);
   }

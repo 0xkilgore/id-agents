@@ -20,6 +20,7 @@ export function makeRecoveryReactor(
         lookbackMs,
         now: opts.now ? opts.now() : undefined,
       }),
+    listStuckForBackfill: (scanOpts) => reactor.listStuckForBackfill(scanOpts),
     requeueForRecovery: (phid, args) => reactor.requeueForRecovery(phid, args),
     markRecoveryLanded: (phid, opts) => reactor.markRecoveryLanded(phid, opts),
     recordRecoveryOutcome: (phid, args) =>

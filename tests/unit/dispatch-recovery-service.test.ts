@@ -31,9 +31,14 @@ class FakeReactor implements DispatchRecoveryReactor {
   landed: string[] = [];
   landedOpts: Array<{ phid: string; recovery_status?: string; reason?: string }> = [];
   outcomes: Array<{ phid: string; decision: string; reason: string }> = [];
+  /** Optional separate corpus for the backfill scan; defaults to docs. */
+  backfillDocs: RecoverableDispatch[] | null = null;
   constructor(private docs: RecoverableDispatch[]) {}
   async listFailedForRecovery() {
     return this.docs;
+  }
+  async listStuckForBackfill() {
+    return this.backfillDocs ?? this.docs;
   }
   async requeueForRecovery(phid: string, args: { reason: string; next_attempt_at: string }) {
     this.requeued.push({ phid, ...args });
@@ -174,6 +179,69 @@ describe("DispatchRecoveryService.runOnce", () => {
     }).runOnce();
     expect(report.landed).toBe(0);
     expect(report.retried).toBe(1); // still a recoverable transient
+  });
+});
+
+describe("DispatchRecoveryService.runBackfill (T1.11)", () => {
+  it("reclassifies landed-only rows OUT of failed and counts metrics", async () => {
+    const reactor = new FakeReactor([
+      dispatch({ dispatch_phid: "phid:disp-landed", promotion_completed: true }), // landed
+      dispatch({ dispatch_phid: "phid:disp-stuck" }), // recoverable transient, NOT landed
+    ]);
+    const s = svc(reactor);
+
+    const report = await s.runBackfill();
+
+    expect(report.scanned).toBe(2);
+    expect(report.reclassified).toBe(1); // only the landed one
+    expect(report.left).toBe(1); // the stuck one is NOT retried by backfill
+    expect(reactor.landed).toEqual(["phid:disp-landed"]);
+    expect(reactor.requeued).toHaveLength(0); // backfill never retries
+    expect(s.getBackfillMetrics()).toEqual({
+      recovery_backfill_runs_total: 1,
+      recovery_backfill_rows_reclassified_total: 1,
+    });
+  });
+
+  it("commit-evidence landings are reclassified verified_done", async () => {
+    const reactor = new FakeReactor([
+      dispatch({ dispatch_phid: "phid:disp-ce", promotion_completed: false, promoted_sha: "abc123", repo_path: "/r", base: "main" }),
+    ]);
+    const report = await svc(reactor, {
+      commitEvidence: { async verifyCommitOnBase() { return true; } },
+    }).runBackfill();
+    expect(report.reclassified).toBe(1);
+    expect(reactor.landedOpts[0].recovery_status).toBe("verified_done");
+  });
+
+  it("is idempotent: metrics accumulate but a settled corpus reclassifies nothing", async () => {
+    const reactor = new FakeReactor([dispatch({ promotion_completed: true })]);
+    const s = svc(reactor);
+    await s.runBackfill();
+    // simulate the row now reconciled to done → it drops out of the scan
+    reactor.backfillDocs = [];
+    const second = await s.runBackfill();
+    expect(second.reclassified).toBe(0);
+    expect(s.getBackfillMetrics()).toEqual({
+      recovery_backfill_runs_total: 2, // both passes ran
+      recovery_backfill_rows_reclassified_total: 1, // but only one row ever reclassified
+    });
+  });
+
+  it("is skipped (no metrics increment) when disabled", async () => {
+    const reactor = new FakeReactor([dispatch({ promotion_completed: true })]);
+    const s = svc(reactor, { enabled: false });
+    const report = await s.runBackfill();
+    expect(report.skipped).toBe(true);
+    expect(s.getBackfillMetrics().recovery_backfill_runs_total).toBe(0);
+  });
+
+  it("never throws even if a per-row apply fails", async () => {
+    const reactor = new FakeReactor([dispatch({ promotion_completed: true })]);
+    reactor.markRecoveryLanded = async () => { throw new Error("db down"); };
+    const report = await svc(reactor).runBackfill();
+    expect(report.errors).toBe(1);
+    expect(report.reclassified).toBe(0);
   });
 });
 

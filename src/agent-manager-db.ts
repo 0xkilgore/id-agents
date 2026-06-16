@@ -3003,7 +3003,18 @@ export class AgentManagerDb {
     this.managementApp.get('/health', async (req, res) => {
       const { id: teamId, name: teamName } = await this.getTeam(req);
       const count = await this.db.agents.count(teamId);
-      res.json({ status: 'ok', team: teamName, agents: parseInt(count || '0'), timestamp: Date.now() });
+      // T1.11: surface dispatch-recovery boot-backfill counters so operators can
+      // see the pre-restart casualty wave being reconciled (not stuck at 0).
+      const recovery_backfill = this.dispatchRecoveryService
+        ? this.dispatchRecoveryService.getBackfillMetrics()
+        : { recovery_backfill_runs_total: 0, recovery_backfill_rows_reclassified_total: 0 };
+      res.json({
+        status: 'ok',
+        team: teamName,
+        agents: parseInt(count || '0'),
+        timestamp: Date.now(),
+        recovery_backfill,
+      });
     });
 
     this.managementApp.get('/dispatches/health', async (req, res) => {
@@ -9489,7 +9500,10 @@ export class AgentManagerDb {
         // Monitor — read-only fleet health and completions endpoints.
         try {
           const { mountMonitorRoutes } = await import('./monitor/routes.js');
-          mountMonitorRoutes(this.managementApp, this.db.adapter);
+          mountMonitorRoutes(this.managementApp, this.db.adapter, {
+            recoveryBackfillMetrics: () =>
+              this.dispatchRecoveryService?.getBackfillMetrics() ?? null,
+          });
           console.log('[Manager] Monitor /monitor/* routes mounted');
         } catch (err) {
           console.warn('[Manager] Monitor routes failed to mount:', err instanceof Error ? err.message : String(err));
