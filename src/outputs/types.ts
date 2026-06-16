@@ -165,6 +165,23 @@ export interface ShipRequest {
   source_link?: string;
 }
 
+// Monday §2: a persisted, append-only artifact comment (op_type comment_recorded).
+export interface CommentRequest {
+  actor: string;                  // resolved MondayActorRef ("user:chris"|"user:liz")
+  body: string;                   // the comment text
+  anchor?: string | null;         // optional section/line anchor within the artifact
+  source_link?: string;
+}
+
+export interface ArtifactComment {
+  op_id: number;
+  artifact_id: string;
+  actor: string;
+  body: string;
+  anchor: string | null;
+  ts: string;
+}
+
 // Stub-response from POST /artifacts/:id/ship. Blockers explain why
 // ship is not yet possible. When executors exist, the same endpoint
 // will return success.

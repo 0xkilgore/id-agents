@@ -30,7 +30,7 @@ import {
   listOperations,
   registerArtifact,
 } from './storage.js';
-import { approveArtifact, shipArtifact, viewArtifact } from './ops.js';
+import { approveArtifact, commentArtifact, listComments, shipArtifact, viewArtifact } from './ops.js';
 import type {
   ApproveRequest,
   ArtifactAvailability,
@@ -43,6 +43,7 @@ import type {
   ShipRequest,
   ViewRequest,
 } from './types.js';
+import { normalizeActorRef, isValidArtifactId, type Actor } from '../actor-identity.js';
 import type { TasksRepository } from '../db/db-service.js';
 import { emitApprovalTask, type ApprovalReviewer } from './approval-emit.js';
 
@@ -74,6 +75,37 @@ export function mountOutputsRoutes(
   opts: MountOutputsRoutesOptions = {},
 ): void {
   const { tasks, resolveTeamId } = opts;
+
+  // Monday §1/§2 guards. RD-001: reject anything that isn't a stable artifact_id
+  // (display id / basename / queue index / path) as a mutation target. Actor:
+  // require one of the two fixed Monday actors. Both return typed 4xx errors and
+  // signal the caller (via the returned null) to stop.
+  function requireArtifactId(req: Request<{ id: string }>, res: Response): string | null {
+    const id = req.params.id;
+    if (!isValidArtifactId(id)) {
+      res.status(400).json({
+        ok: false,
+        error: `invalid artifact id "${id}" — operations target a stable artifact_id, not a display id, basename, index, or path`,
+        code: 'invalid_artifact_id',
+      });
+      return null;
+    }
+    return id;
+  }
+  function requireActor(req: Request, res: Response): Actor | null {
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    const raw = body.actor_ref ?? body.actorRef ?? body.actor ?? body.approver ?? body.shipper ?? body.viewer;
+    const result = normalizeActorRef(raw);
+    if (!result.ok) {
+      res.status(result.code === 'missing_actor' ? 400 : 403).json({
+        ok: false,
+        error: result.error,
+        code: result.code,
+      });
+      return null;
+    }
+    return result.actor;
+  }
 
   // ── GET /outputs/inbox ─────────────────────────────────────────────
 
@@ -242,6 +274,50 @@ export function mountOutputsRoutes(
     }
   });
 
+  // ── POST /artifacts/:id/comments ───────────────────────────────────
+  // Monday §2: durable, append-only artifact comment. This is the unblock —
+  // Chris (and now Liz) can comment on an artifact and it persists, re-readable
+  // through /operations + /review. Requires a valid Monday actor + artifact_id.
+  app.post('/artifacts/:id/comments', async (req: Request<{ id: string }>, res: Response) => {
+    try {
+      const artifactId = requireArtifactId(req, res);
+      if (!artifactId) return;
+      const actor = requireActor(req, res);
+      if (!actor) return;
+      const body = asString(req.body?.body);
+      if (!body || body.trim().length === 0) {
+        return res.status(400).json({ ok: false, error: 'comment body is required', code: 'missing_body' });
+      }
+      const { comment, op_id } = await commentArtifact(adapter, artifactId, {
+        actor: actor.ref,
+        body,
+        anchor: asString(req.body?.anchor) ?? null,
+        source_link: asString(req.body?.source_link),
+      });
+      res.json({ ok: true, schema_version: 'artifact.comment.v1', op_id, comment, actor });
+    } catch (err) {
+      res.status(500).json({ ok: false, error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  // ── GET /artifacts/:id/comments ────────────────────────────────────
+  app.get('/artifacts/:id/comments', async (req: Request<{ id: string }>, res: Response) => {
+    try {
+      const limit = Math.min(parseInt(req.query.limit as string, 10) || 100, 500);
+      const offset = parseInt(req.query.offset as string, 10) || 0;
+      const comments = await listComments(adapter, req.params.id, limit, offset);
+      res.json({
+        ok: true,
+        schema_version: 'artifact.comments.v1',
+        artifact_id: req.params.id,
+        comments,
+        count: comments.length,
+      });
+    } catch (err) {
+      res.status(500).json({ ok: false, error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
   // ── POST /artifacts/:id/approve ────────────────────────────────────
   //
   // Kapelle P3 (2026-06-09): the canonical manager-side emit target.
@@ -260,14 +336,18 @@ export function mountOutputsRoutes(
 
   app.post('/artifacts/:id/approve', async (req: Request<{ id: string }>, res: Response) => {
     try {
+      const artifactId = requireArtifactId(req, res);
+      if (!artifactId) return;
+      const actor = requireActor(req, res);
+      if (!actor) return;
       const reqBody: ApproveRequest = {
-        approver: asString(req.body?.approver),
+        approver: actor.ref, // durable Monday attribution: approved_by = user:chris|user:liz
         note: asString(req.body?.note),
         source_link: asString(req.body?.source_link),
       };
       const sourceSurface =
         asString(req.body?.source_surface) ?? asString(req.body?.source_link) ?? "manager:/artifacts/approve";
-      const { state, op_id } = await approveArtifact(adapter, req.params.id, reqBody);
+      const { state, op_id, idempotent } = await approveArtifact(adapter, artifactId, reqBody);
 
       // No tasks seam wired up → return the review state alone with an
       // explicit skip marker so kapelle-site can show the operator
@@ -278,6 +358,8 @@ export function mountOutputsRoutes(
           ok: true,
           state,
           op_id,
+          idempotent,
+          actor: actor.ref,
           task: null,
           task_emitted: false,
           task_emit_skipped: "manager_emit_target_not_configured",
@@ -300,7 +382,7 @@ export function mountOutputsRoutes(
             message: err instanceof Error ? err.message : String(err),
             retry_with: {
               method: "POST",
-              url: `/artifacts/${req.params.id}/approve`,
+              url: `/artifacts/${artifactId}/approve`,
               body: { ...req.body },
             },
           },
@@ -308,12 +390,14 @@ export function mountOutputsRoutes(
         return;
       }
 
-      const reviewer: ApprovalReviewer = parseReviewer(reqBody.approver);
+      // Emit reviewer derives from the fixed Monday actor (kind human, the
+      // operator's id), keeping the downstream approval-task attribution clean.
+      const reviewer: ApprovalReviewer = { kind: "human", id: actor.id, label: actor.displayName };
       const emit = await emitApprovalTask({
         adapter,
         tasks,
         input: {
-          artifact_id: req.params.id,
+          artifact_id: artifactId,
           reviewer,
           approval_state: "approved",
           source_surface: sourceSurface,
@@ -340,6 +424,8 @@ export function mountOutputsRoutes(
         ok: true,
         state,
         op_id,
+        idempotent,
+        actor: actor.ref,
         task: emit.task,
         task_emitted: true,
         task_idempotent: emit.idempotent,
@@ -353,13 +439,19 @@ export function mountOutputsRoutes(
 
   app.post('/artifacts/:id/ship', async (req: Request<{ id: string }>, res: Response) => {
     try {
+      const artifactId = requireArtifactId(req, res);
+      if (!artifactId) return;
+      const actor = requireActor(req, res);
+      if (!actor) return;
       const reqBody: ShipRequest = {
-        shipper: asString(req.body?.shipper),
+        shipper: actor.ref, // durable Monday attribution on the ship attempt/blocker
         source_link: asString(req.body?.source_link),
       };
-      const result = await shipArtifact(adapter, req.params.id, reqBody);
-      // 200 even when blocked — clients inspect status + blockers.
-      res.json(result);
+      const result = await shipArtifact(adapter, artifactId, reqBody);
+      // 200 even when blocked — clients inspect status + blockers. Ship stays
+      // visible-but-blocked (no_executor_configured) until a destination
+      // executor exists; the attempt is recorded as a durable operation.
+      res.json({ ...result, actor: actor.ref });
     } catch (err) {
       res.status(400).json({ error: err instanceof Error ? err.message : String(err) });
     }

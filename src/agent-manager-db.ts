@@ -112,6 +112,7 @@ import { DEFAULT_RECOVERY_CONFIG } from './dispatch-recovery/classifier.js';
 import { makeGitCommitEvidenceProbe } from './dispatch-recovery/git-commit-evidence.js';
 import { listLoops, getLoop, loopsSummary } from './loops/registry.js';
 import { getBuildStatusCached, type BuildStatus } from './build-info.js';
+import { normalizeActorRef } from './actor-identity.js';
 import {
   getAgentsEffectiveness,
   getAgentDispatches,
@@ -2112,6 +2113,8 @@ export class AgentManagerDb {
         const body = (req.body || {}) as {
           to_agent?: unknown;
           from_actor?: unknown;
+          actor_ref?: unknown;
+          actorRef?: unknown;
           message?: unknown;
           subject?: unknown;
           priority?: unknown;
@@ -2122,6 +2125,22 @@ export class AgentManagerDb {
             ok: false,
             error: 'to_agent (string) and message (string) required',
           });
+        }
+        // Monday §1: persist actor attribution on dispatch create. When a Monday
+        // actor_ref is supplied it normalizes to the fixed actor and becomes the
+        // from_actor; an invalid actor is a typed 4xx. Absent actor_ref keeps the
+        // existing from_actor behavior (agent/operator dispatches unchanged).
+        let fromActor = typeof body.from_actor === 'string' ? body.from_actor : 'operator';
+        if (body.actor_ref !== undefined || body.actorRef !== undefined) {
+          const actorRes = normalizeActorRef(body.actor_ref ?? body.actorRef);
+          if (!actorRes.ok) {
+            return res.status(actorRes.code === 'missing_actor' ? 400 : 403).json({
+              ok: false,
+              error: actorRes.error,
+              code: actorRes.code,
+            });
+          }
+          fromActor = actorRes.actor.ref;
         }
         const teamId = await this.db.teams.getOrCreateTeamId('default');
         const agent = await this.db.agents.getByName(teamId, body.to_agent).catch(() => null);
@@ -2134,7 +2153,7 @@ export class AgentManagerDb {
         const enq = await this.dispatchScheduler.enqueue(
           {
             to_agent: body.to_agent,
-            from_actor: typeof body.from_actor === 'string' ? body.from_actor : 'operator',
+            from_actor: fromActor,
             message: body.message,
             subject: typeof body.subject === 'string' ? body.subject : undefined,
             priority: typeof body.priority === 'number' ? body.priority : undefined,
