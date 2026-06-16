@@ -110,6 +110,7 @@ import {
 } from './dispatch-recovery/service.js';
 import { DEFAULT_RECOVERY_CONFIG } from './dispatch-recovery/classifier.js';
 import { makeGitCommitEvidenceProbe } from './dispatch-recovery/git-commit-evidence.js';
+import { listLoops, getLoop, loopsSummary } from './loops/registry.js';
 import {
   getAgentsEffectiveness,
   getAgentDispatches,
@@ -3056,6 +3057,58 @@ export class AgentManagerDb {
           dispatches,
           items: dispatches,
         });
+      } catch (err) {
+        return res.status(500).json({
+          ok: false,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    });
+
+    // ──────────────────────────────────────────────────────────────────
+    // Loops registry (CTO Loops page spec, 2026-06-16). v0 read-model bridge:
+    // a static seed catalog (L1-L8) the Kapelle /ops/loops page consumes before
+    // the loop_runs runtime substrate lands. Global (no team scope); read-only.
+    // Register /loops/summary BEFORE /loops/:ref so it is not captured as a ref.
+    // ──────────────────────────────────────────────────────────────────
+    this.managementApp.get('/loops', async (req, res) => {
+      try {
+        const str = (v: unknown): string | null =>
+          typeof v === 'string' && v.length > 0 ? v : null;
+        const body = listLoops(new Date().toISOString(), {
+          project_phid: str(req.query.project_phid),
+          owner_agent: str(req.query.owner_agent),
+          status: str(req.query.status),
+          kind: str(req.query.kind),
+          q: str(req.query.q),
+        });
+        return res.json({ ok: true, ...body });
+      } catch (err) {
+        return res.status(500).json({
+          ok: false,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    });
+
+    this.managementApp.get('/loops/summary', async (_req, res) => {
+      try {
+        return res.json({ ok: true, ...loopsSummary(new Date().toISOString()) });
+      } catch (err) {
+        return res.status(500).json({
+          ok: false,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    });
+
+    this.managementApp.get('/loops/:ref', async (req, res) => {
+      try {
+        const loop = getLoop(req.params.ref);
+        if (!loop) {
+          return res.status(404).json({ ok: false, error: 'loop_not_found' });
+        }
+        return res.json({ ok: true, loop });
       } catch (err) {
         return res.status(500).json({
           ok: false,
