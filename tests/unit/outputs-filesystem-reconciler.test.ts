@@ -130,7 +130,11 @@ describe("filesystem artifact reconciler", () => {
     });
 
     const freshAbs = writeArtifact(workDir, "drafts/fresh-brief.md", "fresh");
-    const freshTime = new Date("2026-06-16T18:01:00.000Z");
+    // The /outputs/inbox opportunistic reconcile uses a real-clock recent window
+    // (Date.now() - filesystemReconcileRecentMs), so the "fresh" file must be
+    // genuinely recent relative to wall-clock — a fixed past timestamp would fall
+    // outside the window whenever the suite runs later than it.
+    const freshTime = new Date();
     fs.utimesSync(freshAbs, freshTime, freshTime);
     const app = express();
     app.use(express.json());
