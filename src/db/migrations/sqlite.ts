@@ -552,6 +552,66 @@ export async function migrateSqlite(adapter: SqliteAdapter): Promise<void> {
     CREATE INDEX IF NOT EXISTS usage_gate_decision_agent_idx
       ON usage_gate_decision(agent_id, ts)
       WHERE agent_id IS NOT NULL;
+
+    -- Continuous Orchestration: machine-readable backlog the daemon pulls from.
+    -- Items enter as draft/needs_review (e.g. roadmap import) and are promoted
+    -- to 'ready' only through a human/approval gate. The daemon NEVER invents
+    -- work; it admits READY rows within guardrails.
+    CREATE TABLE IF NOT EXISTS orchestration_backlog_item (
+      item_id            TEXT PRIMARY KEY,
+      team_id            TEXT NOT NULL,
+      title              TEXT NOT NULL,
+      track              TEXT,
+      to_agent           TEXT,
+      dispatch_body      TEXT,
+      priority           INTEGER NOT NULL DEFAULT 5,
+      value_score        REAL,
+      readiness_state    TEXT NOT NULL DEFAULT 'draft',
+      risk_class         TEXT NOT NULL DEFAULT 'routine',
+      write_scope_json   TEXT NOT NULL DEFAULT '[]',
+      dependencies_json  TEXT NOT NULL DEFAULT '[]',
+      token_estimate     INTEGER,
+      provider           TEXT,
+      runtime            TEXT,
+      is_north_star      INTEGER NOT NULL DEFAULT 0,
+      source_refs_json   TEXT NOT NULL DEFAULT '[]',
+      approved_by        TEXT,
+      approved_at        TEXT,
+      last_dispatch_phid TEXT,
+      created_at         TEXT NOT NULL,
+      updated_at         TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS orchestration_backlog_ready_idx
+      ON orchestration_backlog_item(team_id, readiness_state, priority, created_at);
+
+    -- Append-only audit of every tick decision (dispatched / would_dispatch /
+    -- skipped / held / guardrail_halt / stall_alert / auto_pause).
+    CREATE TABLE IF NOT EXISTS orchestration_decision_log (
+      decision_id   TEXT PRIMARY KEY,
+      team_id       TEXT NOT NULL,
+      tick_id       TEXT NOT NULL,
+      ts            TEXT NOT NULL,
+      item_id       TEXT,
+      action        TEXT NOT NULL,
+      reason        TEXT NOT NULL,
+      dispatch_phid TEXT,
+      dry_run       INTEGER NOT NULL DEFAULT 1,
+      metadata_json TEXT NOT NULL DEFAULT '{}'
+    );
+    CREATE INDEX IF NOT EXISTS orchestration_decision_tick_idx
+      ON orchestration_decision_log(team_id, tick_id, ts);
+
+    -- Singleton per team: live mode + guardrail counters.
+    CREATE TABLE IF NOT EXISTS orchestration_state (
+      team_id                TEXT PRIMARY KEY,
+      mode                   TEXT NOT NULL DEFAULT 'paused',
+      consecutive_zero_ticks INTEGER NOT NULL DEFAULT 0,
+      last_tick_at           TEXT,
+      last_dispatch_at       TEXT,
+      auto_paused            INTEGER NOT NULL DEFAULT 0,
+      auto_pause_reason      TEXT,
+      updated_at             TEXT NOT NULL
+    );
   `);
 
   try {

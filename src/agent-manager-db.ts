@@ -9610,6 +9610,42 @@ export class AgentManagerDb {
               `${loaded.degraded ? ` DEGRADED:${loaded.degraded_reason ?? "?"}` : ""}, ` +
               `enforcement=${enforcement})`,
           );
+
+          // Continuous Orchestration daemon — reads the same usage meter for its
+          // token gate, fires READY backlog work through the scheduler. Ships
+          // DISABLED + dry-run by default; arm via CONTINUOUS_ORCHESTRATION_*.
+          // Best-effort: a failure here never wedges manager startup.
+          try {
+            if (this.dispatchScheduler) {
+              const [{ createContinuousOrchestrationDaemon }, { mountContinuousOrchestrationRoutes }] =
+                await Promise.all([
+                  import('./continuous-orchestration/factory.js'),
+                  import('./continuous-orchestration/routes.js'),
+                ]);
+              const { daemon, config: coConfig } = createContinuousOrchestrationDaemon({
+                adapter: this.db.adapter,
+                scheduler: this.dispatchScheduler,
+                usageService: service,
+                env: process.env,
+              });
+              mountContinuousOrchestrationRoutes(this.managementApp, {
+                daemon,
+                adapter: this.db.adapter,
+                config: coConfig,
+              });
+              daemon.start(); // no-op unless CONTINUOUS_ORCHESTRATION_ENABLED=true
+              console.log(
+                `[Manager] Continuous Orchestration mounted (/orchestration/*); ` +
+                  `enabled=${coConfig.enabled} dry_run=${coConfig.dry_run} ` +
+                  `ceiling=${coConfig.daily_token_ceiling} max_in_flight=${coConfig.max_in_flight}`,
+              );
+            }
+          } catch (coErr) {
+            console.warn(
+              '[Manager] Continuous Orchestration failed to mount (continuing):',
+              coErr instanceof Error ? coErr.message : String(coErr),
+            );
+          }
         } catch (err) {
           console.warn(
             '[Manager] Usage Meter routes failed to mount (continuing):',
