@@ -33,6 +33,7 @@ import {
   defaultClarificationFields,
   defaultPromotionFields,
   isTerminal,
+  exhaustedFailureKind,
 } from "./types.js";
 import type { RecoverableDispatch } from "../dispatch-recovery/service.js";
 import type {
@@ -45,7 +46,14 @@ import { randomBytes } from "node:crypto";
 export const DEFAULT_RECOVERY_LOOKBACK_MS = 7 * 24 * 60 * 60 * 1000;
 
 /** T1.11 boot-backfill target failure reasons (by failure_kind). */
-export const BACKFILL_FAILURE_KINDS = ["agent_error", "provider_rate_limit_exhausted"];
+export const BACKFILL_FAILURE_KINDS = [
+  "agent_error",
+  "provider_rate_limit_exhausted",
+  // Transport-exhausted dispatches were historically bucketed under
+  // provider_rate_limit_exhausted (and thus backfilled). Keep them recoverable
+  // now that they carry their honest kind.
+  "agent_unreachable_exhausted",
+];
 /** T1.11 boot-backfill target failure reasons (by failure_detail substring). */
 export const BACKFILL_DETAIL_MARKERS = ["linked query terminated"];
 
@@ -585,12 +593,13 @@ export class SqliteDispatchReactor {
       throw conflict(`markRetryExhausted cannot run from terminal ${doc.status}`);
     }
     const now = this.nowFn();
+    const failureKind = exhaustedFailureKind(doc.last_bounce?.kind ?? null);
     await this.adapter.query(
       `UPDATE dispatch_scheduler_queue
-       SET status = 'failed', failure_kind = 'provider_rate_limit_exhausted',
+       SET status = 'failed', failure_kind = ?,
            failure_detail = ?, completed_at = ?, updated_at = ?
        WHERE dispatch_phid = ?`,
-      [detail, now, now, phid],
+      [failureKind, detail, now, now, phid],
     );
     return this.getByPhid(phid);
   }

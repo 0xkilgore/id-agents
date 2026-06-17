@@ -19,6 +19,7 @@ import {
   type ClarificationBlocker,
   defaultClarificationFields,
   defaultPromotionFields,
+  exhaustedFailureKind,
 } from "./types.js";
 
 export interface FakeReactorOptions {
@@ -365,7 +366,7 @@ export class FakeReactor {
     const next: DispatchDoc = {
       ...doc,
       status: "failed",
-      failure_kind: "provider_rate_limit_exhausted",
+      failure_kind: exhaustedFailureKind(doc.last_bounce?.kind ?? null),
       failure_detail: detail,
       completed_at: now,
       updated_at: now,

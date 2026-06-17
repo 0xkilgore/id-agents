@@ -164,7 +164,23 @@ export type FailureKind =
   // before any further fires; failed_contract_error → 409 dispatch_id_mismatch,
   // a hard dispatcher-contract error. Neither is ever auto-retried.
   | "failed_auth_required"
-  | "failed_contract_error";
+  | "failed_contract_error"
+  // The manager exhausted its retries trying to REACH the agent (localhost
+  // transport / "fetch failed") — an infra/connectivity failure, NOT an
+  // Anthropic provider rate limit. Kept distinct so it is never misdiagnosed
+  // as a 429 (the Sentinel mislabel).
+  | "agent_unreachable_exhausted";
+
+/**
+ * The honest terminal failure_kind when retries are EXHAUSTED. A `transport`
+ * bounce means the manager could not reach the agent (localhost "fetch failed")
+ * — an infra/connectivity failure, not an Anthropic provider rate limit. Every
+ * other bounce kind keeps the historical rate-limit-exhausted bucket so the
+ * change is surgical.
+ */
+export function exhaustedFailureKind(lastBounceKind: string | null | undefined): FailureKind {
+  return lastBounceKind === "transport" ? "agent_unreachable_exhausted" : "provider_rate_limit_exhausted";
+}
 
 export interface BounceRecord {
   ts: string;
