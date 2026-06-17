@@ -16,6 +16,7 @@
 
 import { spawn, ChildProcess } from 'child_process';
 import { AgentHarness, HarnessOptions, HarnessMessage, HarnessType } from './types.js';
+import { rotateSessionsIfNeeded } from './session-rotation.js';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
@@ -118,7 +119,25 @@ export class ClaudeCodeCliHarness implements AgentHarness {
     console.log(`[Claude CLI] Starting harness`);
     console.log(`[Claude CLI] Working directory: ${workingDir}`);
     if (options.model) console.log(`[Claude CLI] Model: ${options.model} (will use alias if available)`);
-    if (options.resume) console.log(`[Claude CLI] Resuming session: ${options.resume}`);
+
+    // Pre-launch session rotation: archive an oversize/stale Claude Code session
+    // store so a long-lived agent never reloads a bloated resumed context into a
+    // provider rate-limit (the Sentinel session-bloat failure). Best-effort; if
+    // the resume target is rotated, we start a fresh session this launch.
+    let effectiveResume = options.resume;
+    try {
+      const rot = rotateSessionsIfNeeded({ workingDirectory: workingDir, resume: options.resume });
+      effectiveResume = rot.resume;
+      if (rot.rotated.length > 0) {
+        console.log(
+          `[Claude CLI] 🔄 session rotation archived ${rot.rotated.length} transcript(s)` +
+            `${rot.reason ? ' — ' + rot.reason : ''}`,
+        );
+      }
+    } catch (err) {
+      console.warn(`[Claude CLI] session rotation skipped: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    if (effectiveResume) console.log(`[Claude CLI] Resuming session: ${effectiveResume}`);
 
     // Build arguments for claude CLI
     // Use stream-json for real-time visibility into what the agent is doing
@@ -143,9 +162,10 @@ export class ClaudeCodeCliHarness implements AgentHarness {
       args.push('--model', process.env.CLAUDE_CLI_MODEL);
     }
 
-    // Add session resume if provided
-    if (options.resume) {
-      args.push('--resume', options.resume);
+    // Add session resume if provided (post-rotation: cleared when the prior
+    // session was archived for being oversize).
+    if (effectiveResume) {
+      args.push('--resume', effectiveResume);
     }
 
     // Add allowed tools if specified
