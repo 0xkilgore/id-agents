@@ -111,6 +111,8 @@ import {
 import { DEFAULT_RECOVERY_CONFIG } from './dispatch-recovery/classifier.js';
 import { makeGitCommitEvidenceProbe } from './dispatch-recovery/git-commit-evidence.js';
 import { listLoops, getLoop, loopsSummary } from './loops/registry.js';
+import { getBuildStatusCached, type BuildStatus } from './build-info.js';
+import { normalizeActorRef } from './actor-identity.js';
 import {
   getAgentsEffectiveness,
   getAgentDispatches,
@@ -934,6 +936,17 @@ export class AgentManagerDb {
 
   private key(teamId: string, agentId: string) {
     return `${teamId}:${agentId}`;
+  }
+
+  /**
+   * T11.1: the running build identity (compile-time SHA + timestamp) plus the
+   * local/origin main SHAs and the behind-origin staleness flag. Cached briefly
+   * so a hot /health endpoint doesn't spawn git on every hit. The compile-time
+   * stamp lives at dist/build-info.json (next to this compiled module); the repo
+   * is the manager's cwd.
+   */
+  private getBuildStatus(): BuildStatus {
+    return getBuildStatusCached({ repoDir: process.cwd(), distDir: __dirname });
   }
 
   /**
@@ -2138,6 +2151,8 @@ export class AgentManagerDb {
         const body = (req.body || {}) as {
           to_agent?: unknown;
           from_actor?: unknown;
+          actor_ref?: unknown;
+          actorRef?: unknown;
           message?: unknown;
           subject?: unknown;
           priority?: unknown;
@@ -2148,6 +2163,22 @@ export class AgentManagerDb {
             ok: false,
             error: 'to_agent (string) and message (string) required',
           });
+        }
+        // Monday §1: persist actor attribution on dispatch create. When a Monday
+        // actor_ref is supplied it normalizes to the fixed actor and becomes the
+        // from_actor; an invalid actor is a typed 4xx. Absent actor_ref keeps the
+        // existing from_actor behavior (agent/operator dispatches unchanged).
+        let fromActor = typeof body.from_actor === 'string' ? body.from_actor : 'operator';
+        if (body.actor_ref !== undefined || body.actorRef !== undefined) {
+          const actorRes = normalizeActorRef(body.actor_ref ?? body.actorRef);
+          if (!actorRes.ok) {
+            return res.status(actorRes.code === 'missing_actor' ? 400 : 403).json({
+              ok: false,
+              error: actorRes.error,
+              code: actorRes.code,
+            });
+          }
+          fromActor = actorRes.actor.ref;
         }
         const teamId = await this.db.teams.getOrCreateTeamId('default');
         const agent = await this.db.agents.getByName(teamId, body.to_agent).catch(() => null);
@@ -2160,7 +2191,7 @@ export class AgentManagerDb {
         const enq = await this.dispatchScheduler.enqueue(
           {
             to_agent: body.to_agent,
-            from_actor: typeof body.from_actor === 'string' ? body.from_actor : 'operator',
+            from_actor: fromActor,
             message: body.message,
             subject: typeof body.subject === 'string' ? body.subject : undefined,
             priority: typeof body.priority === 'number' ? body.priority : undefined,
@@ -3041,7 +3072,20 @@ export class AgentManagerDb {
     this.managementApp.get('/health', async (req, res) => {
       const { id: teamId, name: teamName } = await this.getTeam(req);
       const count = await this.db.agents.count(teamId);
-      res.json({ status: 'ok', team: teamName, agents: parseInt(count || '0'), timestamp: Date.now() });
+      // T1.11: surface dispatch-recovery boot-backfill counters so operators can
+      // see the pre-restart casualty wave being reconciled (not stuck at 0).
+      const recovery_backfill = this.dispatchRecoveryService
+        ? this.dispatchRecoveryService.getBackfillMetrics()
+        : { recovery_backfill_runs_total: 0, recovery_backfill_rows_reclassified_total: 0 };
+      res.json({
+        status: 'ok',
+        team: teamName,
+        agents: parseInt(count || '0'),
+        timestamp: Date.now(),
+        recovery_backfill,
+        // T11.1: the running build identity + staleness-vs-origin signal.
+        build: this.getBuildStatus(),
+      });
     });
 
     this.managementApp.get('/dispatches/health', async (req, res) => {
@@ -9527,7 +9571,11 @@ export class AgentManagerDb {
         // Monitor — read-only fleet health and completions endpoints.
         try {
           const { mountMonitorRoutes } = await import('./monitor/routes.js');
-          mountMonitorRoutes(this.managementApp, this.db.adapter);
+          mountMonitorRoutes(this.managementApp, this.db.adapter, {
+            recoveryBackfillMetrics: () =>
+              this.dispatchRecoveryService?.getBackfillMetrics() ?? null,
+            buildStatus: () => this.getBuildStatus(),
+          });
           console.log('[Manager] Monitor /monitor/* routes mounted');
         } catch (err) {
           console.warn('[Manager] Monitor routes failed to mount:', err instanceof Error ? err.message : String(err));

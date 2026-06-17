@@ -14,6 +14,20 @@ export interface FleetAgentRow {
 export interface MonitorFleetResponse {
   generated_at: number;
   agents: FleetAgentRow[];
+  /** T1.11: dispatch-recovery boot-backfill counters (0/0 when unavailable). */
+  recovery_backfill?: {
+    recovery_backfill_runs_total: number;
+    recovery_backfill_rows_reclassified_total: number;
+  };
+  /** T11.1: running build identity + behind-origin staleness (null when unavailable). */
+  build?: {
+    build_sha: string | null;
+    build_time: string | null;
+    local_main_sha: string | null;
+    origin_main_sha: string | null;
+    behind_origin: boolean | null;
+    source: string;
+  } | null;
 }
 
 export interface InFlightQueryRow {

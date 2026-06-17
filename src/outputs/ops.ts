@@ -11,11 +11,13 @@
 // will return status:"ok" once those executors land — no API break.
 
 import type { DbAdapter } from "../db/db-adapter.js";
-import { appendOperation, getReviewState, upsertReviewState } from "./storage.js";
+import { appendOperation, getReviewState, listOperations, upsertReviewState } from "./storage.js";
 import type {
   ApproveRequest,
+  ArtifactComment,
   ArtifactOpType,
   ArtifactReviewStateRow,
+  CommentRequest,
   ShipRequest,
   ShipResponse,
   ViewRequest,
@@ -64,6 +66,9 @@ export async function viewArtifact(
 export interface ApproveResult {
   state: ArtifactReviewStateRow;
   op_id: number;
+  /** Monday §2: true when the artifact was ALREADY approved before this call —
+   *  the approval is durable + idempotent (approved_at is first-write-wins). */
+  idempotent: boolean;
 }
 
 export async function approveArtifact(
@@ -74,6 +79,7 @@ export async function approveArtifact(
 ): Promise<ApproveResult> {
   const ts = nowIso(now);
   const existing = await getReviewState(adapter, artifactId);
+  const alreadyApproved = existing?.approved_at != null;
   const approver = (req.approver || DEFAULT_ACTOR).trim() || DEFAULT_ACTOR;
   const patch: Partial<ArtifactReviewStateRow> = {
     approved_at: existing?.approved_at ?? ts, // first-approve wins for the timestamp
@@ -88,10 +94,79 @@ export async function approveArtifact(
     "approve",
     approver,
     ts,
-    JSON.stringify({ note: req.note ?? null }),
+    JSON.stringify({ note: req.note ?? null, idempotent: alreadyApproved }),
     state.source_link,
   );
-  return { state, op_id: opId };
+  return { state, op_id: opId, idempotent: alreadyApproved };
+}
+
+// ── Comment (Monday §2) ─────────────────────────────────────────────
+// Append-only, durable artifact comment. Persisted as a comment_recorded
+// operation so it re-reads through /operations and /review and is visible to
+// agents. Not preview-only: every call records a real op.
+
+export interface CommentResult {
+  comment: ArtifactComment;
+  op_id: number;
+}
+
+export async function commentArtifact(
+  adapter: DbAdapter,
+  artifactId: string,
+  req: CommentRequest,
+  now?: () => Date,
+): Promise<CommentResult> {
+  const ts = nowIso(now);
+  const actor = (req.actor || DEFAULT_ACTOR).trim() || DEFAULT_ACTOR;
+  const anchor = req.anchor ?? null;
+  // Touch the review-state row so the artifact has a durable interaction record
+  // (and updated_at moves) even if it was never viewed/approved.
+  const existing = await getReviewState(adapter, artifactId);
+  await upsertReviewState(
+    adapter,
+    artifactId,
+    { source_link: req.source_link ?? existing?.source_link ?? null },
+    ts,
+  );
+  const opId = await appendOperation(
+    adapter,
+    artifactId,
+    "comment_recorded",
+    actor,
+    ts,
+    JSON.stringify({ body: req.body, anchor }),
+    req.source_link ?? existing?.source_link ?? null,
+  );
+  return {
+    op_id: opId,
+    comment: { op_id: opId, artifact_id: artifactId, actor, body: req.body, anchor, ts },
+  };
+}
+
+/** Read the persisted comments for an artifact (newest first), projected from
+ *  the append-only comment_recorded operations. */
+export async function listComments(
+  adapter: DbAdapter,
+  artifactId: string,
+  limit = 100,
+  offset = 0,
+): Promise<ArtifactComment[]> {
+  const ops = await listOperations(adapter, artifactId, limit, offset);
+  const comments: ArtifactComment[] = [];
+  for (const op of ops) {
+    if (op.op_type !== "comment_recorded") continue;
+    let body = "";
+    let anchor: string | null = null;
+    try {
+      const p = op.payload_json ? (JSON.parse(op.payload_json) as { body?: unknown; anchor?: unknown }) : {};
+      body = typeof p.body === "string" ? p.body : "";
+      anchor = typeof p.anchor === "string" ? p.anchor : null;
+    } catch {
+      /* tolerate legacy/malformed payloads */
+    }
+    comments.push({ op_id: op.op_id, artifact_id: op.artifact_id, actor: op.actor, body, anchor, ts: op.ts });
+  }
+  return comments;
 }
 
 // Blocker codes returned by /ship. Stable enum-style strings; clients
