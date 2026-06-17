@@ -1,0 +1,300 @@
+/**
+ * Cn-EVE.1 (2026-06-16, phid:disp-d70c33cec2ce5a47) — false_expire_recovered
+ * ledger classification.
+ *
+ * Pins the derivation contract for `recovery_classification` on
+ * /dispatches read rows. A dispatch is "false_expire_recovered" when the
+ * auto-recovery wiring (387f03b) found on-disk evidence (commit SHA on
+ * main, artifact at a recorded path, or promotion result) for a row that
+ * had been reported failed/expired, and the row got flipped to
+ * status='done' with recovery_status in {landed_reconciled, verified_done}.
+ *
+ * The 4 known instances called out in the dispatch:
+ *   1. Roger Task substrate first slice — commit 8945b9e (commit_evidence)
+ *   2. W2-1 DispatchVerification — original false-expire (artifact)
+ *   3. D3 auto-recovery dispatch itself — agent_error linked-query-terminated;
+ *      work landed 3f140ec / 387f03b (commit_evidence)
+ *   4. D7 cursor-coder-pilot — agent_error but no work on disk
+ *      (NOT recovered — this is the negative case)
+ */
+
+import { test, expect } from "vitest";
+
+import { deriveRecoveryClassification } from "../../src/dispatch-scheduler/read-model";
+
+// Shape matching the `RecoveryClassificationRow` Pick from read-model.ts.
+type RowFields = {
+  status: string;
+  recovery_status: string | null;
+  recovery_reason: string | null;
+  failure_kind: string | null;
+  failure_detail: string | null;
+  artifact_path: string | null;
+  promotion_result_json: string | null;
+};
+
+function row(overrides: Partial<RowFields> = {}): RowFields {
+  return {
+    status: "done",
+    recovery_status: "verified_done",
+    recovery_reason: "commit abc1234 verified on main",
+    failure_kind: "agent_error",
+    failure_detail: "linked query terminated mid-flight",
+    artifact_path: null,
+    promotion_result_json: null,
+    ...overrides,
+  };
+}
+
+// ---------- 4 known instances from the dispatch ----------
+
+test("Cn-EVE.1: Instance #1 — Roger Task substrate (commit_evidence via SHA 8945b9e)", () => {
+  const r = row({
+    recovery_status: "verified_done",
+    recovery_reason: "commit 8945b9e verified on main",
+    failure_kind: "linked_query_terminated",
+    failure_detail: "agent process exited before /agent-done",
+    artifact_path: null,
+    promotion_result_json: null,
+  });
+  const cls = deriveRecoveryClassification(r);
+  expect(cls).not.toBeNull();
+  expect(cls!.false_expire_recovered).toBe(true);
+  expect(cls!.recovery_evidence.kind).toBe("commit_evidence");
+  expect(cls!.recovery_evidence.commit_sha).toBe("8945b9e");
+  expect(cls!.original_failure_reason?.kind).toBe("linked_query_terminated");
+  expect(cls!.original_failure_reason?.detail).toBe(
+    "agent process exited before /agent-done",
+  );
+});
+
+test("Cn-EVE.1: Instance #2 — W2-1 DispatchVerification original false-expire (artifact)", () => {
+  // Pattern: failed status got flipped to done, recovery_status=landed_reconciled
+  // (not verified_done — this isn't a commit-evidence path), artifact_path
+  // points at the verification artifact that proves work landed.
+  const r = row({
+    recovery_status: "landed_reconciled",
+    recovery_reason: "reconciled: landed evidence present",
+    failure_kind: "expired",
+    failure_detail: "stale in_flight beyond runtime cap",
+    artifact_path:
+      "/Users/kilgore/Dropbox/Code/id-agents/output/2026-06-12-w2-1-dispatch-verification.md",
+    promotion_result_json: null,
+  });
+  const cls = deriveRecoveryClassification(r);
+  expect(cls).not.toBeNull();
+  expect(cls!.false_expire_recovered).toBe(true);
+  expect(cls!.recovery_evidence.kind).toBe("artifact");
+  expect(cls!.recovery_evidence.commit_sha).toBeNull();
+  expect(cls!.recovery_evidence.artifact_path).toBe(
+    "/Users/kilgore/Dropbox/Code/id-agents/output/2026-06-12-w2-1-dispatch-verification.md",
+  );
+  expect(cls!.original_failure_reason?.kind).toBe("expired");
+});
+
+test("Cn-EVE.1: Instance #3 — D3 auto-recovery (commit_evidence; 3f140ec / 387f03b)", () => {
+  // Pattern: D3 dispatch itself got reported as failed (linked_query_terminated),
+  // but the work landed as commits 3f140ec + 387f03b on id-agents/main.
+  // The recovery wiring detected the promoted_sha on main and marked
+  // verified_done. The commit SHA in recovery_reason is the auth signal.
+  const r = row({
+    recovery_status: "verified_done",
+    recovery_reason: "commit 3f140ec verified on main",
+    failure_kind: "linked_query_terminated",
+    failure_detail: "agent CLI exited 1 before reply",
+    artifact_path: null,
+    promotion_result_json: null,
+  });
+  const cls = deriveRecoveryClassification(r);
+  expect(cls).not.toBeNull();
+  expect(cls!.false_expire_recovered).toBe(true);
+  expect(cls!.recovery_evidence.kind).toBe("commit_evidence");
+  expect(cls!.recovery_evidence.commit_sha).toBe("3f140ec");
+  expect(cls!.original_failure_reason?.kind).toBe("linked_query_terminated");
+});
+
+test("Cn-EVE.1: Instance #4 — D7 cursor-coder-pilot — NOT recovered (negative case)", () => {
+  // Pattern: dispatch reported failed (agent_error), no on-disk evidence
+  // — the auto-recovery wiring left the row as failed. status stays
+  // 'failed', recovery_status stays 'needs_operator'. Must NOT be
+  // classified as false_expire_recovered.
+  const r = row({
+    status: "failed",
+    recovery_status: "needs_operator",
+    recovery_reason: "no on-disk evidence; needs operator triage",
+    failure_kind: "agent_error",
+    failure_detail: "cursor-cli child exited 137 (OOM)",
+    artifact_path: null,
+    promotion_result_json: null,
+  });
+  expect(deriveRecoveryClassification(r)).toBeNull();
+});
+
+// ---------- derivation invariants ----------
+
+test("Cn-EVE.1: clean done row (no failure_kind) is NOT a false-expire", () => {
+  const r = row({
+    status: "done",
+    recovery_status: "none",
+    recovery_reason: null,
+    failure_kind: null,
+    failure_detail: null,
+  });
+  expect(deriveRecoveryClassification(r)).toBeNull();
+});
+
+test("Cn-EVE.1: done row with landed_reconciled but no failure_kind is NOT classified", () => {
+  // Edge: a row marked landed_reconciled by an admin override (no prior
+  // failure). Without failure_kind, it's not a "false expire" — by
+  // definition, false_expire requires a prior (false) failure.
+  const r = row({
+    status: "done",
+    recovery_status: "landed_reconciled",
+    recovery_reason: "reconciled: admin override",
+    failure_kind: null,
+    failure_detail: null,
+  });
+  expect(deriveRecoveryClassification(r)).toBeNull();
+});
+
+test("Cn-EVE.1: promotion-evidence path extracts promoted_sha from promotion_result_json", () => {
+  const promo = {
+    required: true,
+    completed: true,
+    repos: [
+      {
+        path: "/abs/repo",
+        base: "main",
+        source_branch: "feat-x",
+        strategy: "fast_forward",
+        promoted_sha: "deadbeef1234567",
+        remote_main_sha: "deadbeef1234567",
+        pushed: true,
+        verified: true,
+      },
+    ],
+  };
+  const r = row({
+    recovery_status: "landed_reconciled",
+    recovery_reason: "reconciled: landed evidence present",
+    failure_kind: "expired",
+    failure_detail: "stale in_flight",
+    artifact_path: null,
+    promotion_result_json: JSON.stringify(promo),
+  });
+  const cls = deriveRecoveryClassification(r);
+  expect(cls).not.toBeNull();
+  expect(cls!.recovery_evidence.kind).toBe("promotion");
+  expect(cls!.recovery_evidence.promotion_sha).toBe("deadbeef1234567");
+});
+
+test("Cn-EVE.1: commit_evidence wins over artifact when BOTH are present", () => {
+  // Git history is the source of truth for "did this land?". If both
+  // commit SHA and artifact are present, surface the row as commit_evidence.
+  const r = row({
+    recovery_status: "verified_done",
+    recovery_reason: "commit abcd1234 verified on main",
+    failure_kind: "linked_query_terminated",
+    artifact_path: "/some/artifact.md",
+  });
+  const cls = deriveRecoveryClassification(r);
+  expect(cls).not.toBeNull();
+  expect(cls!.recovery_evidence.kind).toBe("commit_evidence");
+  expect(cls!.recovery_evidence.commit_sha).toBe("abcd1234");
+  // artifact_path still surfaced even though kind is commit_evidence.
+  expect(cls!.recovery_evidence.artifact_path).toBe("/some/artifact.md");
+});
+
+test("Cn-EVE.1: artifact_path is surfaced on the recovery_evidence regardless of kind", () => {
+  const r = row({
+    recovery_status: "verified_done",
+    recovery_reason: "commit cafe1234 verified on main",
+    failure_kind: "agent_error",
+    artifact_path: "/some/closeout.md",
+  });
+  const cls = deriveRecoveryClassification(r);
+  expect(cls).not.toBeNull();
+  expect(cls!.recovery_evidence.artifact_path).toBe("/some/closeout.md");
+});
+
+test("Cn-EVE.1: reason_text is preserved verbatim for operator audit", () => {
+  const reason = "commit fedc1234 verified on main (D3 wiring detected on-disk landed)";
+  const cls = deriveRecoveryClassification(row({ recovery_reason: reason }));
+  expect(cls).not.toBeNull();
+  expect(cls!.recovery_evidence.reason_text).toBe(reason);
+});
+
+test("Cn-EVE.1: original_failure_reason preserved across recovery", () => {
+  const cls = deriveRecoveryClassification(
+    row({
+      failure_kind: "stale_runtime_cap",
+      failure_detail: "claude-cli exceeded 60-min cap",
+    }),
+  );
+  expect(cls).not.toBeNull();
+  expect(cls!.original_failure_reason?.kind).toBe("stale_runtime_cap");
+  expect(cls!.original_failure_reason?.detail).toBe("claude-cli exceeded 60-min cap");
+});
+
+test("Cn-EVE.1: rows still in_flight are NOT classified (not yet terminal)", () => {
+  expect(deriveRecoveryClassification(row({ status: "in_flight" }))).toBeNull();
+});
+
+test("Cn-EVE.1: queued rows are NOT classified", () => {
+  expect(deriveRecoveryClassification(row({ status: "queued" }))).toBeNull();
+});
+
+test("Cn-EVE.1: recovery_status='recovering' (mid-flight) is NOT classified", () => {
+  // Active recovery — the row is being re-dispatched, not yet a false-expire
+  // recovery decision.
+  expect(
+    deriveRecoveryClassification(row({ status: "done", recovery_status: "recovering" })),
+  ).toBeNull();
+});
+
+test("Cn-EVE.1: malformed promotion_result_json doesn't crash the deriver", () => {
+  const cls = deriveRecoveryClassification(
+    row({
+      recovery_status: "landed_reconciled",
+      recovery_reason: "reconciled: landed evidence present",
+      artifact_path: null,
+      promotion_result_json: "{ not valid json",
+    }),
+  );
+  expect(cls).not.toBeNull();
+  expect(cls!.recovery_evidence.kind).toBe("unknown");
+  expect(cls!.recovery_evidence.promotion_sha).toBeNull();
+});
+
+test("Cn-EVE.1: longer commit SHAs (40 chars) are extracted from recovery_reason", () => {
+  const cls = deriveRecoveryClassification(
+    row({
+      recovery_reason: "commit a1b2c3d4e5f60718293a4b5c6d7e8f9012345678 verified on main",
+    }),
+  );
+  expect(cls).not.toBeNull();
+  expect(cls!.recovery_evidence.commit_sha).toBe(
+    "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678",
+  );
+});
+
+test("Cn-EVE.1: recovery_status='landed_reconciled' without artifact OR promotion is 'unknown'", () => {
+  // Defensive: a recovered row should never normally lack ALL evidence,
+  // but the deriver shouldn't crash if it does — it surfaces as 'unknown'
+  // so an operator can see the row was recovered but the evidence
+  // pointer is missing (audit signal).
+  const cls = deriveRecoveryClassification(
+    row({
+      recovery_status: "landed_reconciled",
+      recovery_reason: "reconciled: legacy data; no evidence pointer",
+      failure_kind: "agent_error",
+      artifact_path: null,
+      promotion_result_json: null,
+    }),
+  );
+  expect(cls).not.toBeNull();
+  expect(cls!.recovery_evidence.kind).toBe("unknown");
+  expect(cls!.recovery_evidence.commit_sha).toBeNull();
+  expect(cls!.recovery_evidence.artifact_path).toBeNull();
+  expect(cls!.recovery_evidence.promotion_sha).toBeNull();
+});
