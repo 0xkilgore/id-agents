@@ -17,6 +17,7 @@ import type {
   ArtifactOpRow,
   ArtifactOpType,
   ArtifactReviewStateRow,
+  ArtifactSourceEvidenceRow,
   OutputsInboxRow,
   RegisterArtifactRequest,
 } from "./types.js";
@@ -92,6 +93,22 @@ export async function migrateOutputsTables(adapter: DbAdapter): Promise<void> {
 
   await exec(`CREATE INDEX IF NOT EXISTS artifacts_by_agent_time ON artifacts(agent, produced_at DESC)`);
   await exec(`CREATE INDEX IF NOT EXISTS artifacts_by_basename ON artifacts(basename)`);
+
+  await exec(`
+    CREATE TABLE IF NOT EXISTS artifact_source_evidence (
+      evidence_id   TEXT PRIMARY KEY,
+      artifact_id   TEXT NOT NULL,
+      source        TEXT NOT NULL,
+      source_ref    TEXT NOT NULL,
+      observed_at   TEXT NOT NULL,
+      metadata_json TEXT,
+      created_at    TEXT NOT NULL,
+      updated_at    TEXT NOT NULL
+    )
+  `);
+
+  await exec(`CREATE INDEX IF NOT EXISTS artifact_source_evidence_by_artifact ON artifact_source_evidence(artifact_id, source, observed_at DESC)`);
+  await exec(`CREATE INDEX IF NOT EXISTS artifact_source_evidence_by_source_ref ON artifact_source_evidence(source, source_ref)`);
 }
 
 // ── Catalog read/write ────────────────────────────────────────────
@@ -148,6 +165,15 @@ export async function registerArtifact(
 
   // Merge: only overwrite fields the caller explicitly supplied; preserve
   // earliest produced_at (first writer wins for the canonical timestamp).
+  //
+  // Filesystem reconciliation is evidence, not stronger provenance. If an
+  // artifact was already cataloged by /agent-done, delivery-log, or manual
+  // /artifacts/register, seeing the same file on disk must not rewrite the
+  // catalog source to "filesystem".
+  const nextSource =
+    req.source === "filesystem" && existing.source !== "filesystem"
+      ? existing.source
+      : req.source ?? existing.source;
   const merged: ArtifactCatalogRow = {
     ...existing,
     basename: req.basename ?? existing.basename,
@@ -156,7 +182,7 @@ export async function registerArtifact(
     abs_path: req.abs_path ?? existing.abs_path,
     title: req.title !== undefined ? (req.title ?? null) : existing.title,
     produced_at: existing.produced_at, // first-writer wins
-    source: req.source ?? existing.source,
+    source: nextSource,
     availability: req.availability ?? existing.availability,
     updated_at: nowIso,
   };
@@ -171,6 +197,92 @@ export async function registerArtifact(
     ],
   );
   return { row: merged, inserted: false };
+}
+
+export function evidenceIdForSource(source: string, sourceRef: string): string {
+  const h = createHash("sha256").update(`${source}\0${sourceRef}`).digest("hex").slice(0, 24);
+  return `artev-${h}`;
+}
+
+export async function upsertArtifactSourceEvidence(
+  adapter: DbAdapter,
+  input: {
+    artifact_id: string;
+    source: ArtifactSourceEvidenceRow["source"];
+    source_ref: string;
+    observed_at: string;
+    metadata_json?: string | null;
+  },
+  nowIso: string,
+): Promise<{ row: ArtifactSourceEvidenceRow; inserted: boolean }> {
+  const evidenceId = evidenceIdForSource(input.source, input.source_ref);
+  const { rows } = await adapter.query<ArtifactSourceEvidenceRow>(
+    `SELECT evidence_id, artifact_id, source, source_ref, observed_at,
+            metadata_json, created_at, updated_at
+       FROM artifact_source_evidence
+      WHERE evidence_id = ?`,
+    [evidenceId],
+  );
+  const existing = rows[0] ?? null;
+  const metadataJson = input.metadata_json ?? null;
+  if (!existing) {
+    const row: ArtifactSourceEvidenceRow = {
+      evidence_id: evidenceId,
+      artifact_id: input.artifact_id,
+      source: input.source,
+      source_ref: input.source_ref,
+      observed_at: input.observed_at,
+      metadata_json: metadataJson,
+      created_at: nowIso,
+      updated_at: nowIso,
+    };
+    await adapter.query(
+      `INSERT INTO artifact_source_evidence
+         (evidence_id, artifact_id, source, source_ref, observed_at, metadata_json, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        row.evidence_id,
+        row.artifact_id,
+        row.source,
+        row.source_ref,
+        row.observed_at,
+        row.metadata_json,
+        row.created_at,
+        row.updated_at,
+      ],
+    );
+    return { row, inserted: true };
+  }
+
+  const row: ArtifactSourceEvidenceRow = {
+    ...existing,
+    artifact_id: input.artifact_id,
+    observed_at: input.observed_at,
+    metadata_json: metadataJson,
+    updated_at: nowIso,
+  };
+  await adapter.query(
+    `UPDATE artifact_source_evidence
+        SET artifact_id = ?, observed_at = ?, metadata_json = ?, updated_at = ?
+      WHERE evidence_id = ?`,
+    [row.artifact_id, row.observed_at, row.metadata_json, row.updated_at, row.evidence_id],
+  );
+  return { row, inserted: false };
+}
+
+export async function listArtifactSourceEvidence(
+  adapter: DbAdapter,
+  artifactId: string,
+): Promise<ArtifactSourceEvidenceRow[]> {
+  const { rows } = await adapter.query<ArtifactSourceEvidenceRow>(
+    `SELECT evidence_id, artifact_id, source, source_ref, observed_at,
+            metadata_json, created_at, updated_at
+       FROM artifact_source_evidence
+      WHERE artifact_id = ?
+   ORDER BY observed_at DESC, evidence_id ASC`,
+    [artifactId],
+  );
+  return rows;
 }
 
 // ── Read helpers ───────────────────────────────────────────────────

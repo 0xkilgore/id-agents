@@ -440,6 +440,7 @@ export class AgentManagerDb {
   private healthCheckInterval: NodeJS.Timeout | null = null;
   private remoteProbeInterval: NodeJS.Timeout | null = null;
   private querySweeperInterval: NodeJS.Timeout | null = null;
+  private filesystemArtifactReconcileInterval: NodeJS.Timeout | null = null;
   private retentionService: RetentionService | null = null;
   private checkinService: CheckinService | null = null;
   private supervisorWatcher: { stop(): void } | null = null;
@@ -1175,6 +1176,43 @@ export class AgentManagerDb {
 
   private async dbListAgents(teamId: string, includeAutomator: boolean = false): Promise<AgentRow[]> {
     return this.db.agents.list(teamId, includeAutomator);
+  }
+
+  private async filesystemArtifactRootsForTeam(teamId: string) {
+    const agents = await this.dbListAgents(teamId, true);
+    return agents
+      .filter((agent) => typeof agent.working_directory === 'string' && agent.working_directory.length > 0)
+      .map((agent) => ({
+        agent: (agent.metadata as any)?.alias || agent.name || agent.id,
+        workingDirectory: agent.working_directory!,
+      }));
+  }
+
+  private async filesystemArtifactRootsForAllTeams() {
+    const roots: Array<{ agent: string; workingDirectory: string }> = [];
+    const teams = await this.db.teams.listTeams();
+    for (const team of teams) {
+      roots.push(...await this.filesystemArtifactRootsForTeam(team.id));
+    }
+    return roots;
+  }
+
+  private startFilesystemArtifactReconciler(
+    reconcile: (recentSinceMs?: number) => Promise<unknown>,
+  ): void {
+    if (this.filesystemArtifactReconcileInterval) return;
+    const intervalMs = Number(process.env.FILESYSTEM_ARTIFACT_RECONCILE_INTERVAL_MS || 5 * 60 * 1000);
+    const runFull = () => {
+      reconcile(undefined).catch((err) => {
+        console.warn(
+          '[Manager] filesystem artifact reconciliation failed:',
+          err instanceof Error ? err.message : String(err),
+        );
+      });
+    };
+    runFull();
+    this.filesystemArtifactReconcileInterval = setInterval(runFull, intervalMs);
+    this.filesystemArtifactReconcileInterval.unref?.();
   }
 
   /**
@@ -9543,11 +9581,23 @@ export class AgentManagerDb {
         // Kapelle B11 — manager-owned artifact review surface
         // (/outputs/inbox, /artifacts/:id/{review,view,operations,approve,ship}).
         try {
-          const [{ mountOutputsRoutes }, { migrateOutputsTables }] = await Promise.all([
+          const [
+            { mountOutputsRoutes },
+            { migrateOutputsTables },
+            { reconcileFilesystemArtifacts },
+          ] = await Promise.all([
             import('./outputs/routes.js'),
             import('./outputs/storage.js'),
+            import('./outputs/filesystem-reconciler.js'),
           ]);
           await migrateOutputsTables(this.db.adapter);
+          const runFilesystemReconcile = async (recentSinceMs?: number) => {
+            const roots = await this.filesystemArtifactRootsForAllTeams();
+            return reconcileFilesystemArtifacts(this.db.adapter, {
+              roots,
+              recentSinceMs,
+            });
+          };
           // Kapelle P3 (2026-06-09): inject the tasks repo + team
           // resolver so POST /artifacts/:id/approve becomes the
           // canonical manager-side emit target for reviewed-artifact
@@ -9556,8 +9606,16 @@ export class AgentManagerDb {
           mountOutputsRoutes(this.managementApp, this.db.adapter, {
             tasks: this.db.tasks,
             resolveTeamId: async (req) => (await this.getTeam(req)).id,
+            filesystemArtifactRoots: async (req) => this.filesystemArtifactRootsForTeam((await this.getTeam(req)).id),
+            onFilesystemReconcileError: (err) => {
+              console.warn(
+                '[Manager] opportunistic filesystem artifact reconciliation failed:',
+                err instanceof Error ? err.message : String(err),
+              );
+            },
           });
-          console.log('[Manager] Kapelle B11 outputs routes mounted (/outputs/inbox, /artifacts/:id/*) with P3 emit target');
+          this.startFilesystemArtifactReconciler(runFilesystemReconcile);
+          console.log('[Manager] Kapelle B11 outputs routes mounted (/outputs/inbox, /artifacts/:id/*) with P3 emit target + filesystem reconciler');
         } catch (err) {
           console.warn('[Manager] B11 outputs routes failed to mount:', err instanceof Error ? err.message : String(err));
         }

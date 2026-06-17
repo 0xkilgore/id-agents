@@ -90,8 +90,19 @@ export interface ArtifactCatalogRow {
   abs_path: string;
   title: string | null;         // the tl_dr summary from delivery-log
   produced_at: string;          // ISO from delivery-log timestamp
-  source: "delivery-log" | "agent-done" | "manual";
+  source: "delivery-log" | "agent-done" | "manual" | "filesystem";
   availability: ArtifactAvailability;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ArtifactSourceEvidenceRow {
+  evidence_id: string;
+  artifact_id: string;
+  source: "delivery-log" | "agent-done" | "manual" | "filesystem";
+  source_ref: string;
+  observed_at: string;
+  metadata_json: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -105,7 +116,7 @@ export interface RegisterArtifactRequest {
   abs_path: string;
   title?: string;
   produced_at: string;          // ISO
-  source?: "delivery-log" | "agent-done" | "manual";
+  source?: "delivery-log" | "agent-done" | "manual" | "filesystem";
   availability?: ArtifactAvailability; // defaults to "present" — caller may say "missing"
 }
 

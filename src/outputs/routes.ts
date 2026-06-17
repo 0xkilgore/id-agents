@@ -45,6 +45,10 @@ import type {
 } from './types.js';
 import type { TasksRepository } from '../db/db-service.js';
 import { emitApprovalTask, type ApprovalReviewer } from './approval-emit.js';
+import {
+  reconcileFilesystemArtifacts,
+  type FilesystemArtifactRoot,
+} from './filesystem-reconciler.js';
 
 function asString(v: unknown): string | undefined {
   return typeof v === 'string' && v.length > 0 ? v : undefined;
@@ -66,6 +70,9 @@ function asString(v: unknown): string | undefined {
 export interface MountOutputsRoutesOptions {
   tasks?: TasksRepository;
   resolveTeamId?: (req: Request) => Promise<string>;
+  filesystemArtifactRoots?: (req: Request) => Promise<FilesystemArtifactRoot[]>;
+  filesystemReconcileRecentMs?: number;
+  onFilesystemReconcileError?: (err: unknown) => void;
 }
 
 export function mountOutputsRoutes(
@@ -83,6 +90,18 @@ export function mountOutputsRoutes(
       const agent = asString(req.query.agent);
       const limit = Math.min(parseInt(req.query.limit as string, 10) || 50, 200);
       const offset = parseInt(req.query.offset as string, 10) || 0;
+
+      if (opts.filesystemArtifactRoots) {
+        try {
+          const roots = await opts.filesystemArtifactRoots(req);
+          await reconcileFilesystemArtifacts(adapter, {
+            roots,
+            recentSinceMs: Date.now() - (opts.filesystemReconcileRecentMs ?? 24 * 60 * 60 * 1000),
+          });
+        } catch (err) {
+          opts.onFilesystemReconcileError?.(err);
+        }
+      }
 
       const items = await listInboxItems(
         adapter,
