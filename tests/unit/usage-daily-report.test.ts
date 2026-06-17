@@ -5,7 +5,10 @@ import {
   buildDailyUsageReport,
   renderDailyUsageReportMarkdown,
   providerLabel,
+  parseProjectFromSubject,
   localDate,
+  type DispatchAttribution,
+  type MeterSnapshot,
 } from "../../src/usage-meter/daily-report.js";
 import type { AgentUsageEvent } from "../../src/usage-meter/types.js";
 
@@ -110,5 +113,110 @@ describe("buildDailyUsageReport", () => {
     expect(md).toContain("## By agent");
     expect(md).toContain("## Biggest burners");
     expect(md).toMatch(/day trend/);
+  });
+});
+
+describe("parseProjectFromSubject", () => {
+  it("extracts the [project: X] tag, case/space-insensitive", () => {
+    expect(parseProjectFromSubject("[project: kapelle][BUILD] do thing")).toBe("kapelle");
+    expect(parseProjectFromSubject("[BUILD][ Project :  Cane Site ] x")).toBe("Cane Site");
+    expect(parseProjectFromSubject("no tag here")).toBeNull();
+    expect(parseProjectFromSubject(null)).toBeNull();
+    expect(parseProjectFromSubject(undefined)).toBeNull();
+  });
+});
+
+describe("buildDailyUsageReport — by-project / by-task", () => {
+  const NOW = Date.parse("2026-06-17T23:00:00.000Z");
+
+  // dispatch_id → attribution stub (what the route's DB join produces).
+  const meta: Record<string, DispatchAttribution> = {
+    "disp-a": { project: "kapelle", task: "[project: kapelle] build login" },
+    "disp-b": { project: "kapelle", task: "[project: kapelle] fix nav" },
+    "disp-c": { project: "cane", task: "[project: cane] scheduler" },
+  };
+  const dispatchMeta = (id: string | null | undefined) => (id ? meta[id] : undefined);
+
+  const events = [
+    ev({ dispatch_id: "disp-a", weighted_tokens: 100 }),
+    ev({ dispatch_id: "disp-b", weighted_tokens: 50 }),
+    ev({ dispatch_id: "disp-c", weighted_tokens: 300 }),
+    ev({ dispatch_id: null, weighted_tokens: 25 }), // unattributed
+  ];
+
+  it("aggregates tokens by project (kapelle = a+b)", () => {
+    const r = buildDailyUsageReport({ events, date: "2026-06-17", tz: TZ, nowMs: NOW, dispatchMeta });
+    const kap = r.by_project.find((p) => p.key === "kapelle")!;
+    expect(kap.weighted_tokens).toBe(150);
+    const cane = r.by_project.find((p) => p.key === "cane")!;
+    expect(cane.weighted_tokens).toBe(300);
+    const un = r.by_project.find((p) => p.key === "(unattributed)")!;
+    expect(un.weighted_tokens).toBe(25);
+    // sorted desc by weighted
+    expect(r.by_project[0].key).toBe("cane");
+  });
+
+  it("aggregates tokens by task/dispatch with the subject as label", () => {
+    const r = buildDailyUsageReport({ events, date: "2026-06-17", tz: TZ, nowMs: NOW, dispatchMeta });
+    const taskC = r.by_task.find((t) => t.key === "disp-c")!;
+    expect(taskC.weighted_tokens).toBe(300);
+    expect(taskC.label).toBe("[project: cane] scheduler");
+    expect(r.by_task[0].key).toBe("disp-c"); // biggest task
+  });
+
+  it("honors topDimensions for the top_projects / top_tasks lists", () => {
+    const r = buildDailyUsageReport({
+      events,
+      date: "2026-06-17",
+      tz: TZ,
+      nowMs: NOW,
+      dispatchMeta,
+      topDimensions: 2,
+    });
+    expect(r.top_projects).toHaveLength(2);
+    expect(r.top_tasks).toHaveLength(2);
+    expect(r.top_projects[0].key).toBe("cane");
+  });
+
+  it("buckets everything as unattributed when no resolver is given", () => {
+    const r = buildDailyUsageReport({ events, date: "2026-06-17", tz: TZ, nowMs: NOW });
+    expect(r.by_project).toHaveLength(1);
+    expect(r.by_project[0].key).toBe("(unattributed)");
+    expect(r.by_project[0].weighted_tokens).toBe(475);
+  });
+
+  it("renders the project + task sections in markdown", () => {
+    const r = buildDailyUsageReport({ events, date: "2026-06-17", tz: TZ, nowMs: NOW, dispatchMeta });
+    const md = renderDailyUsageReportMarkdown(r);
+    expect(md).toContain("## By project");
+    expect(md).toContain("## Biggest burners — by project");
+    expect(md).toContain("## Biggest burners — by task");
+    expect(md).toContain("kapelle");
+  });
+});
+
+describe("buildDailyUsageReport — live meter windows", () => {
+  const NOW = Date.parse("2026-06-17T23:00:00.000Z");
+  const meter: MeterSnapshot = {
+    daily: { percent: 42, reset_at: "2026-06-18T00:00:00.000-05:00", time_until_reset_seconds: 3600 },
+    weekly: { percent: 71, reset_at: "2026-06-22T00:00:00.000-05:00", time_until_reset_seconds: 99999 },
+  };
+
+  it("folds the meter snapshot into the report", () => {
+    const r = buildDailyUsageReport({ events: [ev({ weighted_tokens: 10 })], date: "2026-06-17", tz: TZ, nowMs: NOW, meter });
+    expect(r.meter).toEqual(meter);
+  });
+
+  it("defaults meter to null when not supplied", () => {
+    const r = buildDailyUsageReport({ events: [], date: "2026-06-17", tz: TZ, nowMs: NOW });
+    expect(r.meter).toBeNull();
+  });
+
+  it("renders the rate-limit windows section with % and reset", () => {
+    const r = buildDailyUsageReport({ events: [ev({ weighted_tokens: 10 })], date: "2026-06-17", tz: TZ, nowMs: NOW, meter });
+    const md = renderDailyUsageReportMarkdown(r);
+    expect(md).toContain("## Rate-limit windows (live meter)");
+    expect(md).toContain("71%");
+    expect(md).toContain("2026-06-22T00:00:00.000-05:00");
   });
 });

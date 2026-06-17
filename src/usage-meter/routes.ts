@@ -6,10 +6,12 @@ import type { Application, Request, Response } from "express";
 import type { UsageMeterService } from "./service.js";
 import type { DbAdapter } from "../db/db-adapter.js";
 import { listRecentAgentUsageEvents } from "./storage.js";
+import { loadDispatchAttributions } from "./dispatch-attribution.js";
 import {
   buildDailyUsageReport,
   renderDailyUsageReportMarkdown,
   DEFAULT_REPORT_TZ,
+  type MeterSnapshot,
 } from "./daily-report.js";
 
 export interface UsageMeterRouteOptions {
@@ -51,8 +53,32 @@ export function mountUsageMeterRoutes(app: Application, opts: UsageMeterRouteOpt
       const nowMs = Date.now();
       // Fetch enough history to cover the trend window (+ a day of slack).
       const sinceMs = nowMs - (trendDays + 2) * 24 * 60 * 60 * 1000;
+      const topDimensions = clampInt(req.query.top_dimensions, 10, 1, 50);
       const events = await listRecentAgentUsageEvents(opts.adapter, { since_ms: sinceMs, limit: 200_000 });
-      const report = buildDailyUsageReport({ events, date, tz, nowMs, trendDays, topBurners });
+
+      // Project/task attribution: join the events' dispatch_ids → dispatch
+      // subjects (project parsed from `[project: X]`; task = the subject).
+      const dispatchIds = events
+        .map((e) => e.dispatch_id)
+        .filter((d): d is string => typeof d === "string" && d.length > 0);
+      const attributions = await loadDispatchAttributions(opts.adapter, dispatchIds);
+      const dispatchMeta = (id: string | null | undefined) =>
+        id ? attributions.get(id) : undefined;
+
+      // Live rate-limit windows, read off the same usage-meter-v2 the gate uses.
+      const meter = await readMeterSnapshot(opts.service);
+
+      const report = buildDailyUsageReport({
+        events,
+        date,
+        tz,
+        nowMs,
+        trendDays,
+        topBurners,
+        topDimensions,
+        dispatchMeta,
+        meter,
+      });
       if (req.query.format === "md") {
         res.type("text/markdown").send(renderDailyUsageReportMarkdown(report));
         return;
@@ -75,6 +101,31 @@ export function mountUsageMeterRoutes(app: Application, opts: UsageMeterRouteOpt
       });
     }
   });
+}
+
+/**
+ * Read the live meter's daily/weekly windows (% used + reset timestamp) off
+ * usage-meter-v2 so the report and the rate-limit gate speak the same numbers.
+ * Returns null on any meter error — the report still renders without it.
+ */
+async function readMeterSnapshot(service: UsageMeterService): Promise<MeterSnapshot | null> {
+  try {
+    const r = await service.buildReport();
+    return {
+      daily: {
+        percent: r.gate?.daily_percent ?? 0,
+        reset_at: r.windows?.daily?.reset_at ?? null,
+        time_until_reset_seconds: r.windows?.daily?.time_until_reset_seconds ?? null,
+      },
+      weekly: {
+        percent: r.gate?.weekly_percent ?? 0,
+        reset_at: r.windows?.weekly?.reset_at ?? null,
+        time_until_reset_seconds: r.windows?.weekly?.time_until_reset_seconds ?? null,
+      },
+    };
+  } catch {
+    return null;
+  }
 }
 
 function clampInt(raw: unknown, dflt: number, min: number, max: number): number {
