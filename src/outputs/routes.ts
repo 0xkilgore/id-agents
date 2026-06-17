@@ -30,16 +30,27 @@ import {
   listOperations,
   registerArtifact,
 } from './storage.js';
-import { approveArtifact, commentArtifact, listComments, shipArtifact, viewArtifact } from './ops.js';
+import {
+  approveArtifact,
+  checkActionCooldown,
+  commentArtifact,
+  DEFAULT_ACTION_COOLDOWN_MS,
+  listComments,
+  rejectArtifact,
+  shipArtifact,
+  viewArtifact,
+} from './ops.js';
 import type {
   ApproveRequest,
   ArtifactAvailability,
   ArtifactOperationsResponse,
+  ArtifactOpType,
   ArtifactReviewResponse,
   OutputsInboxResponse,
   OutputsInboxRow,
   RegisterArtifactRequest,
   RegisterArtifactResponse,
+  RejectRequest,
   ShipRequest,
   ViewRequest,
 } from './types.js';
@@ -74,6 +85,10 @@ export interface MountOutputsRoutesOptions {
   filesystemArtifactRoots?: (req: Request) => Promise<FilesystemArtifactRoot[]>;
   filesystemReconcileRecentMs?: number;
   onFilesystemReconcileError?: (err: unknown) => void;
+  /** T3B-1 per-(artifact,action,actor) cooldown in ms. Defaults to 3000. */
+  actionCooldownMs?: number;
+  /** Injectable clock for deterministic cooldown tests. */
+  now?: () => Date;
 }
 
 export function mountOutputsRoutes(
@@ -82,6 +97,8 @@ export function mountOutputsRoutes(
   opts: MountOutputsRoutesOptions = {},
 ): void {
   const { tasks, resolveTeamId } = opts;
+  const cooldownMs = opts.actionCooldownMs ?? DEFAULT_ACTION_COOLDOWN_MS;
+  const clock = opts.now;
 
   // Monday §1/§2 guards. RD-001: reject anything that isn't a stable artifact_id
   // (display id / basename / queue index / path) as a mutation target. Actor:
@@ -112,6 +129,29 @@ export function mountOutputsRoutes(
       return null;
     }
     return result.actor;
+  }
+  // T3B-1 cooldown guard: blocks an actor repeating the same action on an
+  // artifact within the cooldown window (anti double-click). Per-actor, so a
+  // Chris-then-Liz multi-operator flow is never blocked. Returns true (and
+  // sends 429) when the request should stop.
+  async function cooldownBlocked(
+    artifactId: string,
+    opTypes: ArtifactOpType[],
+    actorRef: string,
+    res: Response,
+  ): Promise<boolean> {
+    const c = await checkActionCooldown(adapter, artifactId, opTypes, actorRef, cooldownMs, clock);
+    if (c.blocked) {
+      res.status(429).json({
+        ok: false,
+        code: 'action_cooldown',
+        error: `action on cooldown for ${actorRef}; retry in ${c.retry_after_ms}ms`,
+        retry_after_ms: c.retry_after_ms,
+        last_action_at: c.last_ts,
+      });
+      return true;
+    }
+    return false;
   }
 
   // ── GET /outputs/inbox ─────────────────────────────────────────────
@@ -359,6 +399,11 @@ export function mountOutputsRoutes(
       if (!artifactId) return;
       const actor = requireActor(req, res);
       if (!actor) return;
+      // Cooldown guards a non-idempotent rapid action (e.g. an approve→reject
+      // flip-flop). A harmless idempotent re-approve bypasses it and returns the
+      // current state.
+      const preApprove = await getReviewState(adapter, artifactId);
+      if (preApprove?.approved_at == null && (await cooldownBlocked(artifactId, ['approve', 'reject'], actor.ref, res))) return;
       const reqBody: ApproveRequest = {
         approver: actor.ref, // durable Monday attribution: approved_by = user:chris|user:liz
         note: asString(req.body?.note),
@@ -366,7 +411,7 @@ export function mountOutputsRoutes(
       };
       const sourceSurface =
         asString(req.body?.source_surface) ?? asString(req.body?.source_link) ?? "manager:/artifacts/approve";
-      const { state, op_id, idempotent } = await approveArtifact(adapter, artifactId, reqBody);
+      const { state, op_id, idempotent } = await approveArtifact(adapter, artifactId, reqBody, clock);
 
       // No tasks seam wired up → return the review state alone with an
       // explicit skip marker so kapelle-site can show the operator
@@ -454,6 +499,36 @@ export function mountOutputsRoutes(
     }
   });
 
+  // ── POST /artifacts/:id/reject ─────────────────────────────────────
+  // T3B-1: the reject counterpart to approve. Durable, idempotent
+  // (first-reject-wins), Monday-actor-attributed, cooldown-guarded.
+  app.post('/artifacts/:id/reject', async (req: Request<{ id: string }>, res: Response) => {
+    try {
+      const artifactId = requireArtifactId(req, res);
+      if (!artifactId) return;
+      const actor = requireActor(req, res);
+      if (!actor) return;
+      const preReject = await getReviewState(adapter, artifactId);
+      if (preReject?.rejected_at == null && (await cooldownBlocked(artifactId, ['approve', 'reject'], actor.ref, res))) return;
+      const reqBody: RejectRequest = {
+        rejecter: actor.ref, // durable Monday attribution: rejected_by = user:chris|user:liz
+        note: asString(req.body?.note),
+        source_link: asString(req.body?.source_link),
+      };
+      const { state, op_id, idempotent } = await rejectArtifact(adapter, artifactId, reqBody, clock);
+      res.json({
+        ok: true,
+        schema_version: 'artifact.reject.v1',
+        state,
+        op_id,
+        idempotent,
+        actor: actor.ref,
+      });
+    } catch (err) {
+      res.status(400).json({ ok: false, error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
   // ── POST /artifacts/:id/ship ───────────────────────────────────────
 
   app.post('/artifacts/:id/ship', async (req: Request<{ id: string }>, res: Response) => {
@@ -462,11 +537,12 @@ export function mountOutputsRoutes(
       if (!artifactId) return;
       const actor = requireActor(req, res);
       if (!actor) return;
+      if (await cooldownBlocked(artifactId, ['ship_attempted', 'ship_blocked'], actor.ref, res)) return;
       const reqBody: ShipRequest = {
         shipper: actor.ref, // durable Monday attribution on the ship attempt/blocker
         source_link: asString(req.body?.source_link),
       };
-      const result = await shipArtifact(adapter, artifactId, reqBody);
+      const result = await shipArtifact(adapter, artifactId, reqBody, clock);
       // 200 even when blocked — clients inspect status + blockers. Ship stays
       // visible-but-blocked (no_executor_configured) until a destination
       // executor exists; the attempt is recorded as a durable operation.

@@ -52,6 +52,9 @@ export async function migrateOutputsTables(adapter: DbAdapter): Promise<void> {
       approved_at TEXT,
       approved_by TEXT,
       approval_note TEXT,
+      rejected_at TEXT,
+      rejected_by TEXT,
+      reject_note TEXT,
       shipped_at TEXT,
       shipped_by TEXT,
       ship_blockers_json TEXT,
@@ -59,6 +62,15 @@ export async function migrateOutputsTables(adapter: DbAdapter): Promise<void> {
       updated_at TEXT NOT NULL
     )
   `);
+
+  // T3B-1 reject columns — additive for databases created before reject existed.
+  for (const col of ['rejected_at TEXT', 'rejected_by TEXT', 'reject_note TEXT']) {
+    try {
+      await exec(`ALTER TABLE artifact_review_state ADD COLUMN ${col}`);
+    } catch {
+      /* column already exists */
+    }
+  }
 
   await exec(`
     CREATE TABLE IF NOT EXISTS artifact_operations (
@@ -294,7 +306,8 @@ export async function getReviewState(
   const { rows } = await adapter.query<ArtifactReviewStateRow>(
     `SELECT artifact_id, source_link, first_viewed_at, last_viewed_at,
             viewed_by_last, viewed_count, approved_at, approved_by,
-            approval_note, shipped_at, shipped_by, ship_blockers_json,
+            approval_note, rejected_at, rejected_by, reject_note,
+            shipped_at, shipped_by, ship_blockers_json,
             created_at, updated_at
        FROM artifact_review_state
       WHERE artifact_id = ?`,
@@ -312,6 +325,26 @@ export async function countOperations(
     [artifactId],
   );
   return Number(rows[0]?.cnt ?? 0);
+}
+
+/** Most-recent operation of any of the given types by a given actor on an
+ *  artifact, or null. Used for the T3B-1 per-(artifact,action,actor) cooldown. */
+export async function getLastOperationByActor(
+  adapter: DbAdapter,
+  artifactId: string,
+  opTypes: ArtifactOpType[],
+  actor: string,
+): Promise<ArtifactOpRow | null> {
+  if (opTypes.length === 0) return null;
+  const placeholders = opTypes.map(() => '?').join(',');
+  const { rows } = await adapter.query<ArtifactOpRow>(
+    `SELECT op_id, artifact_id, op_type, actor, ts, payload_json, source_link
+       FROM artifact_operations
+      WHERE artifact_id = ? AND actor = ? AND op_type IN (${placeholders})
+      ORDER BY op_id DESC LIMIT 1`,
+    [artifactId, actor, ...opTypes],
+  );
+  return rows[0] ?? null;
 }
 
 export async function listOperations(
@@ -566,6 +599,9 @@ export async function upsertReviewState(
       approved_at: patch.approved_at ?? null,
       approved_by: patch.approved_by ?? null,
       approval_note: patch.approval_note ?? null,
+      rejected_at: patch.rejected_at ?? null,
+      rejected_by: patch.rejected_by ?? null,
+      reject_note: patch.reject_note ?? null,
       shipped_at: patch.shipped_at ?? null,
       shipped_by: patch.shipped_by ?? null,
       ship_blockers_json: patch.ship_blockers_json ?? null,
@@ -576,9 +612,10 @@ export async function upsertReviewState(
       `INSERT INTO artifact_review_state
          (artifact_id, source_link, first_viewed_at, last_viewed_at,
           viewed_by_last, viewed_count, approved_at, approved_by,
-          approval_note, shipped_at, shipped_by, ship_blockers_json,
+          approval_note, rejected_at, rejected_by, reject_note,
+          shipped_at, shipped_by, ship_blockers_json,
           created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         row.artifact_id,
         row.source_link,
@@ -589,6 +626,9 @@ export async function upsertReviewState(
         row.approved_at,
         row.approved_by,
         row.approval_note,
+        row.rejected_at,
+        row.rejected_by,
+        row.reject_note,
         row.shipped_at,
         row.shipped_by,
         row.ship_blockers_json,
@@ -610,7 +650,8 @@ export async function upsertReviewState(
     `UPDATE artifact_review_state
        SET source_link = ?, first_viewed_at = ?, last_viewed_at = ?,
            viewed_by_last = ?, viewed_count = ?, approved_at = ?,
-           approved_by = ?, approval_note = ?, shipped_at = ?,
+           approved_by = ?, approval_note = ?, rejected_at = ?,
+           rejected_by = ?, reject_note = ?, shipped_at = ?,
            shipped_by = ?, ship_blockers_json = ?, updated_at = ?
      WHERE artifact_id = ?`,
     [
@@ -622,6 +663,9 @@ export async function upsertReviewState(
       merged.approved_at,
       merged.approved_by,
       merged.approval_note,
+      merged.rejected_at,
+      merged.rejected_by,
+      merged.reject_note,
       merged.shipped_at,
       merged.shipped_by,
       merged.ship_blockers_json,

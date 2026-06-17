@@ -12,6 +12,7 @@
 export type ArtifactOpType =
   | "view"
   | "approve"
+  | "reject"
   | "ship_attempted"
   | "ship_blocked"
   | "comment_recorded";
@@ -39,6 +40,9 @@ export interface ArtifactReviewStateRow {
   approved_at: string | null;
   approved_by: string | null;
   approval_note: string | null;
+  rejected_at: string | null;       // T3B-1: first-reject-wins timestamp
+  rejected_by: string | null;       // user:chris | user:liz
+  reject_note: string | null;
   shipped_at: string | null;
   shipped_by: string | null;
   ship_blockers_json: string | null; // JSON array of blocker codes when ship is blocked
@@ -167,6 +171,12 @@ export interface ViewRequest {
 
 export interface ApproveRequest {
   approver?: string;              // defaults to "operator"
+  note?: string;
+  source_link?: string;
+}
+
+export interface RejectRequest {
+  rejecter?: string;              // resolved MondayActorRef; defaults to "operator"
   note?: string;
   source_link?: string;
 }

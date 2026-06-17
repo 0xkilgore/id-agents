@@ -11,13 +11,20 @@
 // will return status:"ok" once those executors land — no API break.
 
 import type { DbAdapter } from "../db/db-adapter.js";
-import { appendOperation, getReviewState, listOperations, upsertReviewState } from "./storage.js";
+import {
+  appendOperation,
+  getLastOperationByActor,
+  getReviewState,
+  listOperations,
+  upsertReviewState,
+} from "./storage.js";
 import type {
   ApproveRequest,
   ArtifactComment,
   ArtifactOpType,
   ArtifactReviewStateRow,
   CommentRequest,
+  RejectRequest,
   ShipRequest,
   ShipResponse,
   ViewRequest,
@@ -98,6 +105,84 @@ export async function approveArtifact(
     state.source_link,
   );
   return { state, op_id: opId, idempotent: alreadyApproved };
+}
+
+// ── Reject (T3B-1) ──────────────────────────────────────────────────
+// Mirrors approve: a durable, idempotent reject_recorded state + op with Monday
+// actor attribution. First-reject wins for the timestamp; repeat rejects are
+// idempotent (state unchanged).
+
+export interface RejectResult {
+  state: ArtifactReviewStateRow;
+  op_id: number;
+  /** True when the artifact was ALREADY rejected before this call. */
+  idempotent: boolean;
+}
+
+export async function rejectArtifact(
+  adapter: DbAdapter,
+  artifactId: string,
+  req: RejectRequest,
+  now?: () => Date,
+): Promise<RejectResult> {
+  const ts = nowIso(now);
+  const existing = await getReviewState(adapter, artifactId);
+  const alreadyRejected = existing?.rejected_at != null;
+  const rejecter = (req.rejecter || DEFAULT_ACTOR).trim() || DEFAULT_ACTOR;
+  const patch: Partial<ArtifactReviewStateRow> = {
+    rejected_at: existing?.rejected_at ?? ts, // first-reject wins for the timestamp
+    rejected_by: rejecter,
+    reject_note: req.note ?? existing?.reject_note ?? null,
+    source_link: req.source_link ?? existing?.source_link ?? null,
+  };
+  const state = await upsertReviewState(adapter, artifactId, patch, ts);
+  const opId = await appendOperation(
+    adapter,
+    artifactId,
+    "reject",
+    rejecter,
+    ts,
+    JSON.stringify({ note: req.note ?? null, idempotent: alreadyRejected }),
+    state.source_link,
+  );
+  return { state, op_id: opId, idempotent: alreadyRejected };
+}
+
+// ── Cooldown (T3B-1) ────────────────────────────────────────────────
+// A per-(artifact, action, actor) cooldown guards against accidental
+// double-fire (e.g. a double-click). It is intentionally per-ACTOR so a
+// multi-operator flow — Chris approves, then Liz approves — is never blocked.
+
+/** Default minimum interval between repeats of the same action by the same
+ *  actor on the same artifact. */
+export const DEFAULT_ACTION_COOLDOWN_MS = 3000;
+
+export interface CooldownResult {
+  blocked: boolean;
+  retry_after_ms?: number;
+  last_ts?: string;
+}
+
+/** Returns blocked=true when `actor` performed one of `opTypes` on `artifactId`
+ *  within `cooldownMs`. Different actors never collide. */
+export async function checkActionCooldown(
+  adapter: DbAdapter,
+  artifactId: string,
+  opTypes: ArtifactOpType[],
+  actor: string,
+  cooldownMs: number,
+  now?: () => Date,
+): Promise<CooldownResult> {
+  if (cooldownMs <= 0) return { blocked: false };
+  const last = await getLastOperationByActor(adapter, artifactId, opTypes, actor);
+  if (!last) return { blocked: false };
+  const lastMs = Date.parse(last.ts);
+  if (!Number.isFinite(lastMs)) return { blocked: false };
+  const elapsed = (now ? now() : new Date()).getTime() - lastMs;
+  if (elapsed < cooldownMs) {
+    return { blocked: true, retry_after_ms: cooldownMs - elapsed, last_ts: last.ts };
+  }
+  return { blocked: false };
 }
 
 // ── Comment (Monday §2) ─────────────────────────────────────────────
