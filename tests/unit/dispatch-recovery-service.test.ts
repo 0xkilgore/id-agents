@@ -265,3 +265,55 @@ describe("DispatchRecoveryService.start/stop", () => {
     s.stop();
   });
 });
+
+describe("T13.3 live effective_state emitter — runOnce reconciles multi-repo landed rows every cycle", () => {
+  const promo = (repos: Array<Record<string, unknown>>, completed = false) =>
+    JSON.stringify({ required: true, completed, repos });
+
+  it("verifies the promoted commit against a NON-repo[0] base — verified_done, not retried", async () => {
+    const reactor = new FakeReactor([
+      dispatch({
+        dispatch_phid: "phid:disp-multi",
+        promotion_completed: false,
+        // repo[0] NOT on base; repo[1] (agent-platform) IS — single-repo matching would miss this.
+        promotion_result_json: promo([
+          { path: "/repo/id-agents", base: "main", promoted_sha: "notonmain" },
+          { path: "/repo/agent-platform", base: "main", promoted_sha: "8945b9e" },
+        ]),
+      }),
+    ]);
+    const probed: Array<{ repoPath: string; base: string; sha: string }> = [];
+    const report = await svc(reactor, {
+      commitEvidence: {
+        async verifyCommitOnBase(args) {
+          probed.push(args);
+          return args.repoPath === "/repo/agent-platform" && args.sha === "8945b9e";
+        },
+      },
+    }).runOnce();
+
+    expect(report.landed).toBe(1);
+    expect(reactor.requeued).toHaveLength(0); // emitted, not retried
+    expect(reactor.landedOpts[0].recovery_status).toBe("verified_done");
+    expect(reactor.landedOpts[0].reason).toMatch(/agent-platform/);
+    // both repos were probed (repo[0] first, then the winning repo[1])
+    expect(probed.map((p) => p.repoPath)).toEqual(["/repo/id-agents", "/repo/agent-platform"]);
+  });
+
+  it("does NOT emit for a row whose commit is on no repo's base (still requeues)", async () => {
+    const reactor = new FakeReactor([
+      dispatch({
+        dispatch_phid: "phid:disp-notlanded",
+        failure_detail: "linked query terminated expired",
+        promotion_completed: false,
+        promotion_result_json: promo([{ path: "/repo/id-agents", base: "main", promoted_sha: "deadbeef" }]),
+      }),
+    ]);
+    const report = await svc(reactor, {
+      commitEvidence: { async verifyCommitOnBase() { return false; } },
+    }).runOnce();
+    expect(report.landed).toBe(0);
+    expect(report.retried).toBe(1); // falls through to the recoverable path
+    expect(reactor.landed).toHaveLength(0);
+  });
+});

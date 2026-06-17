@@ -1183,6 +1183,8 @@ function rowToRecoverable(row: Row): RecoverableDispatch {
     promoted_sha: repo0 ? strOrNull(repo0.promoted_sha) : null,
     repo_path: repo0 ? strOrNull(repo0.path) : null,
     base: repo0 ? strOrNull(repo0.base) : null,
+    // T13.3: raw promotion result so the live emitter verifies ALL repos, not repo[0].
+    promotion_result_json: row.promotion_result_json ?? null,
     channel: row.channel,
     side_effect: normalizeSideEffect(row.side_effect),
     allow_auto_retry:

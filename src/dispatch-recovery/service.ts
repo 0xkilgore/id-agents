@@ -26,6 +26,9 @@ export interface RecoverableDispatch extends Omit<RecoveryInput, never> {
   promoted_sha?: string | null;
   repo_path?: string | null;
   base?: string | null;
+  /** T13.3: raw promotion result so the live emitter can verify the promoted
+   *  commit against EVERY repo's base (not just repo[0]) + completed-promotion. */
+  promotion_result_json?: string | null;
 }
 
 /**
@@ -226,7 +229,7 @@ export class DispatchRecoveryService {
             verifiedDone
               ? {
                   recovery_status: "verified_done",
-                  reason: `backfill: commit ${resolved.promoted_sha} verified on ${resolved.base ?? "main"}`,
+                  reason: `backfill: commit ${resolved.promoted_sha} verified on ${resolved.repo_path ?? "?"}@${resolved.base ?? "main"}`,
                 }
               : { reason: "backfill: landed evidence present" },
           );
@@ -293,8 +296,11 @@ export class DispatchRecoveryService {
 
     for (const doc of docs) {
       try {
-        // D3: gather git ground-truth before classifying, so a failed/expired
-        // row whose commit actually landed on main is reconciled, not retried.
+        // D3/T13.3: gather git ground-truth (across ALL promotion repos) before
+        // classifying, so a failed/expired row whose commit actually landed is
+        // reconciled, not retried. runOnce runs every cycle, so this is the live
+        // effective_state emitter — the dispatch-queue UI stays truthful without
+        // a manual backfill.
         const resolved = await this.resolveCommitEvidence(doc);
         const input = toInput(resolved);
         const decision = classifyRecovery(input, this.config);
@@ -306,7 +312,7 @@ export class DispatchRecoveryService {
               verifiedDone
                 ? {
                     recovery_status: "verified_done",
-                    reason: `commit ${resolved.promoted_sha} verified on ${resolved.base ?? "main"}`,
+                    reason: `commit ${resolved.promoted_sha} verified on ${resolved.repo_path ?? "?"}@${resolved.base ?? "main"}`,
                   }
                 : undefined,
             );
@@ -363,29 +369,31 @@ export class DispatchRecoveryService {
     if (!this.commitEvidence) return doc;
     if (doc.commit_verified_on_base === true) return doc;
     if (doc.promotion_completed === true) return doc; // already landed by flag
-    if (!doc.promoted_sha || !doc.repo_path) return doc; // nothing to probe
-    try {
-      const verified = await this.commitEvidence.verifyCommitOnBase({
-        repoPath: doc.repo_path,
-        base: doc.base ?? "main",
-        sha: doc.promoted_sha,
-      });
-      if (verified === true) {
-        this.logger.info("recovery_commit_evidence_verified", {
-          phid: doc.dispatch_phid,
-          sha: doc.promoted_sha,
-          repo: doc.repo_path,
-          base: doc.base ?? "main",
-        });
-      }
-      return { ...doc, commit_verified_on_base: verified };
-    } catch (err) {
-      this.logger.warn("recovery_commit_evidence_failed", {
-        phid: doc.dispatch_phid,
-        detail: msg(err),
-      });
-      return doc;
+
+    // T13.3: a dispatch can promote to a DIFFERENT repo than id-agents
+    // (agent-platform, kapelle-site, cane, …). Verify the promoted commit against
+    // EVERY repo in the promotion result, not just repo[0] — the single-repo
+    // check is what left those casualties stuck failed_needs_operator.
+    const repos = parsePromotionRepos(doc.promotion_result_json);
+    if (repos.length === 0 && doc.promoted_sha && doc.repo_path) {
+      repos.push({ promoted_sha: doc.promoted_sha, path: doc.repo_path, base: doc.base ?? null });
     }
+    for (const repo of repos) {
+      const sha = typeof repo.promoted_sha === "string" && repo.promoted_sha ? repo.promoted_sha : null;
+      const path = typeof repo.path === "string" && repo.path ? repo.path : null;
+      if (!sha || !path) continue;
+      const base = typeof repo.base === "string" && repo.base ? repo.base : "main";
+      try {
+        const verified = await this.commitEvidence.verifyCommitOnBase({ repoPath: path, base, sha });
+        if (verified === true) {
+          this.logger.info("recovery_commit_evidence_verified", { phid: doc.dispatch_phid, sha, repo: path, base });
+          return { ...doc, commit_verified_on_base: true, promoted_sha: sha, repo_path: path, base };
+        }
+      } catch (err) {
+        this.logger.warn("recovery_commit_evidence_failed", { phid: doc.dispatch_phid, repo: path, detail: msg(err) });
+      }
+    }
+    return doc;
   }
 
   private nextAttemptAt(recoveryAttempts: number): string {
@@ -413,6 +421,17 @@ function toInput(doc: RecoverableDispatch): RecoveryInput {
 
 function msg(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
+}
+
+/** Parse the repos array out of a promotion_result_json string (T13.3). */
+function parsePromotionRepos(json: string | null | undefined): Array<Record<string, unknown>> {
+  if (!json) return [];
+  try {
+    const j = JSON.parse(json) as { repos?: unknown };
+    return Array.isArray(j?.repos) ? (j.repos as Array<Record<string, unknown>>) : [];
+  } catch {
+    return [];
+  }
 }
 
 /** Parse the recovery env config. Disabled by default during rollout. */
