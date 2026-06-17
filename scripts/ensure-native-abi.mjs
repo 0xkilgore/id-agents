@@ -1,26 +1,35 @@
 #!/usr/bin/env node
-// pretest harness guard: ensure better-sqlite3's native module matches the
-// running Node ABI before the test suite runs.
+// Ensure better-sqlite3's native module is compiled for the MANAGER's Node ABI
+// — NOT the shell node. Runs as both `pretest` and `postbuild`.
 //
-// The prebuilt better_sqlite3.node flips between Node versions across installs
-// (e.g. a Node 23 build vs a Node 22 runner = NODE_MODULE_VERSION 131 vs 127).
-// A mismatch makes EVERY DB-backed test fail at setup: `new SqliteAdapter()`
-// throws in beforeEach, so `adapter` is undefined and afterEach's
-// `adapter.close()` reports the misleading `Cannot read properties of undefined
-// (reading 'close')` — ~half the suite, which then fails the promote-to-main
-// smoke gate. This guard rebuilds better-sqlite3 for the current Node on any
-// load failure, so `npm test` self-heals under whatever Node runs it.
+// Why the manager node specifically: the promote smoke gate + this script may be
+// invoked by the interactive shell node (v22, ABI 127), but the manager runs
+// /opt/homebrew/bin/node (v23, ABI 131). A rebuild done for the shell node makes
+// the manager crash-loop on restart (ERR_DLOPEN_FAILED). So we ALWAYS build for
+// the manager node, regardless of which node runs this script.
 //
-// Fast no-op (one child spawn) when the module already matches.
+// Fast no-op (one probe) when already matching.
 
 import { execFileSync } from "node:child_process";
+import { dirname } from "node:path";
+import { managerNode } from "./native-node.mjs";
 
-function loadsCleanly() {
-  // Probe in a FRESH process so a freshly-rebuilt .node is picked up (native
-  // modules can't be reliably reloaded in-process after a failed dlopen).
+const node = managerNode();
+
+function nodeVersion(n) {
+  try {
+    return execFileSync(n, ["-v"], { encoding: "utf8" }).trim();
+  } catch {
+    return "?";
+  }
+}
+
+// Probe by actually instantiating in a FRESH process under the manager node —
+// `require` alone can be lazy, and a freshly-rebuilt .node needs a clean process.
+function loadsUnderManager() {
   try {
     execFileSync(
-      process.execPath,
+      node,
       ["-e", "const D = require('better-sqlite3'); new D(':memory:').close();"],
       { stdio: "ignore" },
     );
@@ -30,21 +39,29 @@ function loadsCleanly() {
   }
 }
 
-if (loadsCleanly()) {
+if (loadsUnderManager()) {
+  console.log(`[ensure-native-abi] better-sqlite3 OK for manager node ${node} (${nodeVersion(node)})`);
   process.exit(0);
 }
 
 console.warn(
-  `[ensure-native-abi] better-sqlite3 not loadable under Node ${process.version} — rebuilding native module…`,
+  `[ensure-native-abi] better-sqlite3 not loadable under manager node ${node} (${nodeVersion(node)}) — rebuilding for its ABI…`,
 );
 try {
-  execFileSync("npm", ["rebuild", "better-sqlite3"], { stdio: "inherit" });
+  // Prepend the manager node's dir so `npm` + node-gyp resolve to it and compile
+  // for ITS ABI, even though this script itself may run under the shell node.
+  execFileSync("npm", ["rebuild", "better-sqlite3"], {
+    stdio: "inherit",
+    env: { ...process.env, PATH: `${dirname(node)}:${process.env.PATH}` },
+  });
 } catch (err) {
   console.error(`[ensure-native-abi] npm rebuild better-sqlite3 failed: ${err?.message ?? err}`);
   process.exit(1);
 }
-if (!loadsCleanly()) {
-  console.error("[ensure-native-abi] better-sqlite3 still not loadable after rebuild");
+if (!loadsUnderManager()) {
+  console.error(
+    `[ensure-native-abi] better-sqlite3 STILL not loadable under manager node ${node} after rebuild`,
+  );
   process.exit(1);
 }
-console.warn(`[ensure-native-abi] better-sqlite3 rebuilt OK for Node ${process.version}`);
+console.warn(`[ensure-native-abi] better-sqlite3 rebuilt for manager node ${node} (${nodeVersion(node)})`);
