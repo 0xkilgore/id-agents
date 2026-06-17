@@ -9598,7 +9598,7 @@ export class AgentManagerDb {
             env: process.env,
             configsPath,
           });
-          mountUsageMeterRoutes(this.managementApp, { service });
+          mountUsageMeterRoutes(this.managementApp, { service, adapter: this.db.adapter });
           if (this.dispatchScheduler) {
             this.dispatchScheduler.scheduler.setUsageGateProvider({
               getSnapshotForScheduler: () => service.getSnapshotForScheduler(),
