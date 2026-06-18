@@ -102,6 +102,10 @@ import {
 } from './dispatch-scheduler/types.js';
 import type { SqliteAdapter } from './db/sqlite-adapter.js';
 import { DispatchVerificationStorage } from './dispatch-verification/storage.js';
+import {
+  verifyDoneClaims,
+  makeDoneVerificationProbes,
+} from './dispatch-verification/done-verification.js';
 import { DispatchVerificationJob, jobConfigFromEnv } from './dispatch-verification/job.js';
 import {
   DispatchRecoveryService,
@@ -2747,6 +2751,8 @@ export class AgentManagerDb {
           promotion?: unknown;
           mode?: unknown;
           agent?: unknown;
+          // Verify-on-done gate: the deliverable the agent claims it produced.
+          artifact_path?: unknown;
           // Harness-resilience (Spec 2026-05-29): structured terminal
           // failure on success:false. failure_kind must be one of the
           // canonical FailureKind values; error is a short prose detail.
@@ -2845,6 +2851,45 @@ export class AgentManagerDb {
             error: validation.error,
             mode,
           });
+        }
+
+        // Verify-on-done gate (THE fix for hollow-done): before accepting a
+        // successful closeout, verify the CLAIMED deliverables actually exist —
+        // a claimed artifact_path on disk, and a promoted_sha on its base. If a
+        // claim can't be verified, mark the dispatch failed_verification (NOT
+        // done) so the hollow-done surfaces instead of looking complete.
+        if (success) {
+          const claimArtifactPath =
+            typeof body.artifact_path === 'string' && body.artifact_path.trim()
+              ? body.artifact_path.trim()
+              : null;
+          const verify = verifyDoneClaims(
+            { artifact_path: claimArtifactPath, promotion },
+            makeDoneVerificationProbes(),
+          );
+          if (!verify.ok) {
+            try {
+              await reactor.markFailed(doc.dispatch_phid, {
+                failure_kind: 'failed_verification',
+                detail: verify.reason ?? 'claimed deliverable could not be verified',
+              });
+            } catch (err) {
+              this.managerLog(
+                `[agent-done] markFailed(failed_verification) failed (continuing): ${err instanceof Error ? err.message : String(err)}`,
+              );
+            }
+            this.managerLog(
+              `[agent-done] HOLLOW-DONE rejected for ${doc.dispatch_phid}: ${verify.reason}`,
+            );
+            this.evaluateGraphsForDispatchBestEffort(doc.dispatch_phid, 'dispatch_failed');
+            return res.status(422).json({
+              ok: false,
+              dispatch_id: doc.dispatch_phid,
+              state: 'failed_verification',
+              reason: verify.reason,
+              checks: verify.checks,
+            });
+          }
         }
 
         // Persist promotion result if supplied.

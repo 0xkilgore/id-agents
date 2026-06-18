@@ -169,7 +169,11 @@ export type FailureKind =
   // transport / "fetch failed") — an infra/connectivity failure, NOT an
   // Anthropic provider rate limit. Kept distinct so it is never misdiagnosed
   // as a 429 (the Sentinel mislabel).
-  | "agent_unreachable_exhausted";
+  | "agent_unreachable_exhausted"
+  // Verify-on-done gate: /agent-done claimed `done` but the claimed deliverable
+  // could not be verified (artifact missing on disk, or promoted commit not on
+  // base). NOT done, NOT auto-retryable — surfaces the hollow-done.
+  | "failed_verification";
 
 /**
  * The honest terminal failure_kind when retries are EXHAUSTED. A `transport`
