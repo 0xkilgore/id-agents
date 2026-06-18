@@ -1197,20 +1197,59 @@ export class AgentManagerDb {
 
   private async filesystemArtifactRootsForTeam(teamId: string) {
     const agents = await this.dbListAgents(teamId, true);
-    return agents
+    const agentRoots = agents
       .filter((agent) => typeof agent.working_directory === 'string' && agent.working_directory.length > 0)
       .map((agent) => ({
         agent: (agent.metadata as any)?.alias || agent.name || agent.id,
         workingDirectory: agent.working_directory!,
       }));
+    return [...agentRoots, ...this.projectArtifactRoots()];
+  }
+
+  // NW-6 / T11.6: PROJECT roots — artifacts live in project directories that are
+  // NOT agent working_directories (the Cleveland Park one-pager was invisible
+  // for exactly this reason). Configurable via FILESYSTEM_ARTIFACT_PROJECT_ROOTS
+  // (comma-separated absolute dirs); otherwise enumerate the immediate
+  // subdirectories of FILESYSTEM_ARTIFACT_PROJECT_PARENT (default ~/Dropbox/Code).
+  private projectArtifactRoots(): Array<{ agent: string; workingDirectory: string }> {
+    try {
+      const explicit = (process.env.FILESYSTEM_ARTIFACT_PROJECT_ROOTS || '')
+        .split(',')
+        .map((s) => s.trim())
+        .filter(Boolean);
+      let dirs: string[];
+      if (explicit.length > 0) {
+        dirs = explicit;
+      } else {
+        const parent =
+          process.env.FILESYSTEM_ARTIFACT_PROJECT_PARENT ||
+          `${process.env.HOME || ''}/Dropbox/Code`;
+        if (!parent || !existsSync(parent)) return [];
+        dirs = readdirSync(parent, { withFileTypes: true })
+          .filter((e) => e.isDirectory() && !e.name.startsWith('.') && e.name !== 'node_modules')
+          .map((e) => `${parent}/${e.name}`);
+      }
+      return dirs.map((d) => ({ agent: `project:${d.split('/').filter(Boolean).pop()}`, workingDirectory: d }));
+    } catch {
+      return [];
+    }
   }
 
   private async filesystemArtifactRootsForAllTeams() {
     const roots: Array<{ agent: string; workingDirectory: string }> = [];
     const teams = await this.db.teams.listTeams();
     for (const team of teams) {
-      roots.push(...await this.filesystemArtifactRootsForTeam(team.id));
+      const agents = await this.dbListAgents(team.id, true);
+      for (const agent of agents) {
+        if (typeof agent.working_directory === 'string' && agent.working_directory.length > 0) {
+          roots.push({
+            agent: (agent.metadata as any)?.alias || agent.name || agent.id,
+            workingDirectory: agent.working_directory,
+          });
+        }
+      }
     }
+    roots.push(...this.projectArtifactRoots());
     return roots;
   }
 

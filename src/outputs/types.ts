@@ -96,6 +96,11 @@ export interface ArtifactCatalogRow {
   produced_at: string;          // ISO from delivery-log timestamp
   source: "delivery-log" | "agent-done" | "manual" | "filesystem";
   availability: ArtifactAvailability;
+  // T11.7: JSON array of the distinct sources that have observed this artifact
+  // (e.g. ["filesystem","agent-done"]) — the console's source badges.
+  source_badges: string;
+  // T11.7: when the filesystem reconciler last confirmed this artifact's state.
+  reconciled_at: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -118,6 +123,8 @@ export interface RegisterArtifactRequest {
   agent: string;
   tag?: string;
   abs_path: string;
+  source_badges?: string[];     // T11.7: distinct observing sources
+  reconciled_at?: string;       // T11.7: last filesystem reconcile time
   title?: string;
   produced_at: string;          // ISO
   source?: "delivery-log" | "agent-done" | "manual" | "filesystem";

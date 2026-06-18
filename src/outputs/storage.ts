@@ -98,6 +98,8 @@ export async function migrateOutputsTables(adapter: DbAdapter): Promise<void> {
       produced_at   TEXT NOT NULL,
       source        TEXT NOT NULL,
       availability  TEXT NOT NULL DEFAULT 'present',
+      source_badges TEXT NOT NULL DEFAULT '[]',
+      reconciled_at TEXT,
       created_at    TEXT NOT NULL,
       updated_at    TEXT NOT NULL
     )
@@ -105,6 +107,15 @@ export async function migrateOutputsTables(adapter: DbAdapter): Promise<void> {
 
   await exec(`CREATE INDEX IF NOT EXISTS artifacts_by_agent_time ON artifacts(agent, produced_at DESC)`);
   await exec(`CREATE INDEX IF NOT EXISTS artifacts_by_basename ON artifacts(basename)`);
+
+  // T11.7 — accessibility columns (additive for databases created before NW-6).
+  for (const col of ["source_badges TEXT NOT NULL DEFAULT '[]'", "reconciled_at TEXT"]) {
+    try {
+      await exec(`ALTER TABLE artifacts ADD COLUMN ${col}`);
+    } catch {
+      /* column already exists */
+    }
+  }
 
   await exec(`
     CREATE TABLE IF NOT EXISTS artifact_source_evidence (
@@ -131,7 +142,7 @@ export async function getArtifact(
 ): Promise<ArtifactCatalogRow | null> {
   const { rows } = await adapter.query<ArtifactCatalogRow>(
     `SELECT artifact_id, basename, agent, tag, abs_path, title, produced_at,
-            source, availability, created_at, updated_at
+            source, availability, source_badges, reconciled_at, created_at, updated_at
        FROM artifacts WHERE artifact_id = ?`,
     [artifactId],
   );
@@ -148,6 +159,9 @@ export async function registerArtifact(
   const availability: ArtifactAvailability = req.availability ?? "present";
   const source = req.source ?? "agent-done";
 
+  const sourceBadges = JSON.stringify(req.source_badges ?? [source]);
+  const reconciledAt = req.reconciled_at ?? null;
+
   if (!existing) {
     const row: ArtifactCatalogRow = {
       artifact_id: artifactId,
@@ -159,17 +173,19 @@ export async function registerArtifact(
       produced_at: req.produced_at,
       source,
       availability,
+      source_badges: sourceBadges,
+      reconciled_at: reconciledAt,
       created_at: nowIso,
       updated_at: nowIso,
     };
     await adapter.query(
       `INSERT INTO artifacts
-         (artifact_id, basename, agent, tag, abs_path, title, produced_at, source, availability, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         (artifact_id, basename, agent, tag, abs_path, title, produced_at, source, availability, source_badges, reconciled_at, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         row.artifact_id, row.basename, row.agent, row.tag, row.abs_path,
         row.title, row.produced_at, row.source, row.availability,
-        row.created_at, row.updated_at,
+        row.source_badges, row.reconciled_at, row.created_at, row.updated_at,
       ],
     );
     return { row, inserted: true };
@@ -186,6 +202,11 @@ export async function registerArtifact(
     req.source === "filesystem" && existing.source !== "filesystem"
       ? existing.source
       : req.source ?? existing.source;
+  // Union the source badges: every source that has ever observed this artifact.
+  const existingBadges = parseBadges(existing.source_badges);
+  const incomingBadges = req.source_badges ?? [source];
+  const mergedBadges = [...new Set([...existingBadges, ...incomingBadges])].sort();
+
   const merged: ArtifactCatalogRow = {
     ...existing,
     basename: req.basename ?? existing.basename,
@@ -196,19 +217,57 @@ export async function registerArtifact(
     produced_at: existing.produced_at, // first-writer wins
     source: nextSource,
     availability: req.availability ?? existing.availability,
+    source_badges: JSON.stringify(mergedBadges),
+    reconciled_at: req.reconciled_at ?? existing.reconciled_at,
     updated_at: nowIso,
   };
   await adapter.query(
     `UPDATE artifacts
        SET basename = ?, agent = ?, tag = ?, abs_path = ?, title = ?,
-           source = ?, availability = ?, updated_at = ?
+           source = ?, availability = ?, source_badges = ?, reconciled_at = ?, updated_at = ?
      WHERE artifact_id = ?`,
     [
       merged.basename, merged.agent, merged.tag, merged.abs_path, merged.title,
-      merged.source, merged.availability, merged.updated_at, merged.artifact_id,
+      merged.source, merged.availability, merged.source_badges, merged.reconciled_at,
+      merged.updated_at, merged.artifact_id,
     ],
   );
   return { row: merged, inserted: false };
+}
+
+function parseBadges(json: string | null | undefined): string[] {
+  if (!json) return [];
+  try {
+    const v = JSON.parse(json);
+    return Array.isArray(v) ? v.map(String) : [];
+  } catch {
+    return [];
+  }
+}
+
+/** Catalog rows sourced from the filesystem — the set the missing-sweep checks. */
+export async function listFilesystemArtifacts(
+  adapter: DbAdapter,
+): Promise<Array<{ artifact_id: string; abs_path: string; availability: string }>> {
+  const { rows } = await adapter.query<{ artifact_id: string; abs_path: string; availability: string }>(
+    `SELECT artifact_id, abs_path, availability FROM artifacts WHERE source = 'filesystem'`,
+  );
+  return rows;
+}
+
+/** Set an artifact's availability (present/missing/unknown) + reconciled_at.
+ *  The fix for "missing artifact shows 404": a vanished file becomes
+ *  availability='missing' instead of disappearing/404ing. */
+export async function setArtifactAvailability(
+  adapter: DbAdapter,
+  artifactId: string,
+  availability: ArtifactAvailability,
+  reconciledAt: string,
+): Promise<void> {
+  await adapter.query(
+    `UPDATE artifacts SET availability = ?, reconciled_at = ?, updated_at = ? WHERE artifact_id = ?`,
+    [availability, reconciledAt, reconciledAt, artifactId],
+  );
 }
 
 export function evidenceIdForSource(source: string, sourceRef: string): string {

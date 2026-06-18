@@ -10,15 +10,26 @@ import type { DbAdapter } from "../db/db-adapter.js";
 import {
   artifactIdFromPath,
   getArtifact,
+  listFilesystemArtifacts,
   registerArtifact,
+  setArtifactAvailability,
   upsertArtifactSourceEvidence,
 } from "./storage.js";
 
+// Sentinel root meaning "the working directory itself" — scanned SHALLOW
+// (top-level files only) so a project-ROOT artifact (the Cleveland Park
+// one-pager lived at a project root, not in output/) is cataloged, without
+// descending into code / node_modules.
+export const ROOT_LEVEL = "." as const;
+
 export const DEFAULT_FILESYSTEM_ARTIFACT_ROOTS = [
+  ROOT_LEVEL, // project root (top-level files only)
   "output",
   "drafts",
   "reports",
   "transcripts",
+  "completed",
+  "content",
 ] as const;
 
 export interface FilesystemArtifactRoot {
@@ -27,11 +38,20 @@ export interface FilesystemArtifactRoot {
   roots?: readonly string[];
 }
 
+/** The default scan roots (project ROOT + named artifact dirs) — for introspection. */
+export function artifactRootIds(): readonly string[] {
+  return DEFAULT_FILESYSTEM_ARTIFACT_ROOTS;
+}
+
 export interface FilesystemArtifactReconcileOptions {
   roots: FilesystemArtifactRoot[];
   now?: () => Date;
   recentSinceMs?: number;
   maxFiles?: number;
+  /** Sweep filesystem-cataloged artifacts whose file vanished -> availability
+   *  'missing' (and restore 'present' if it reappears). Default true. The fix
+   *  for "missing artifact shows 404". */
+  markMissing?: boolean;
 }
 
 export interface FilesystemArtifactReconcileResult {
@@ -44,6 +64,32 @@ export interface FilesystemArtifactReconcileResult {
   evidence_inserted: number;
   evidence_updated: number;
   skipped: number;
+  /** Artifacts flipped to availability='missing' this pass. */
+  marked_missing: number;
+  /** Artifacts restored to availability='present' (file reappeared). */
+  restored_present: number;
+}
+
+/** Top-level files of a directory (no recursion) — for project-ROOT scanning. */
+function shallowFiles(dir: string, maxFiles: number, out: string[]): void {
+  let entries: Dirent<string>[];
+  try {
+    entries = readdirSync(dir, { withFileTypes: true, encoding: "utf8" });
+  } catch {
+    return;
+  }
+  entries.sort((a, b) => a.name.localeCompare(b.name));
+  for (const entry of entries) {
+    if (out.length >= maxFiles) return;
+    if (!entry.isFile()) continue;
+    const abs = path.join(dir, entry.name);
+    try {
+      if (lstatSync(abs).isSymbolicLink()) continue;
+    } catch {
+      continue;
+    }
+    out.push(abs);
+  }
 }
 
 export function validateConsoleArtifactRelativePath(filePath: string): { ok: true } | { ok: false; error: string } {
@@ -110,6 +156,8 @@ export async function reconcileFilesystemArtifacts(
     evidence_inserted: 0,
     evidence_updated: 0,
     skipped: 0,
+    marked_missing: 0,
+    restored_present: 0,
   };
 
   for (const configuredRoot of opts.roots) {
@@ -143,7 +191,13 @@ export async function reconcileFilesystemArtifacts(
 
       result.roots_scanned++;
       const files: string[] = [];
-      walkFiles(rootDir, maxFiles - result.files_seen, files);
+      // Project-ROOT: shallow (top-level files only) so we never descend into
+      // code / node_modules. Named subdirs: recursive (they are artifact dirs).
+      if (rootName === ROOT_LEVEL) {
+        shallowFiles(rootDir, maxFiles - result.files_seen, files);
+      } else {
+        walkFiles(rootDir, maxFiles - result.files_seen, files);
+      }
       for (const absPath of files) {
         if (result.files_seen >= maxFiles) break;
         result.files_seen++;
@@ -180,16 +234,19 @@ export async function reconcileFilesystemArtifacts(
           {
             basename: path.basename(absPath),
             agent: configuredRoot.agent,
-            tag: rootName,
+            tag: rootName === ROOT_LEVEL ? "root" : rootName,
             abs_path: absPath,
             produced_at: new Date(st.mtimeMs).toISOString(),
             source: "filesystem",
             availability: "present",
+            reconciled_at: nowIso,
           },
           nowIso,
         );
         if (reg.inserted) result.inserted++;
         else result.updated++;
+        // A file that was cataloged 'missing' and is now on disk is restored.
+        if (existing?.availability === "missing") result.restored_present++;
 
         const sourceRef = `filesystem:${absPath}`;
         const evidence = await upsertArtifactSourceEvidence(
@@ -211,6 +268,23 @@ export async function reconcileFilesystemArtifacts(
         );
         if (evidence.inserted) result.evidence_inserted++;
         else result.evidence_updated++;
+      }
+    }
+  }
+
+  // Missing-sweep (the "missing artifact shows 404" fix): a filesystem-cataloged
+  // artifact whose file vanished becomes availability='missing' instead of
+  // 404ing; one that reappears is restored to 'present'.
+  if (opts.markMissing !== false) {
+    const cataloged = await listFilesystemArtifacts(adapter);
+    for (const a of cataloged) {
+      const present = existsSync(a.abs_path);
+      if (present && a.availability === "missing") {
+        await setArtifactAvailability(adapter, a.artifact_id, "present", nowIso);
+        result.restored_present++;
+      } else if (!present && a.availability !== "missing") {
+        await setArtifactAvailability(adapter, a.artifact_id, "missing", nowIso);
+        result.marked_missing++;
       }
     }
   }

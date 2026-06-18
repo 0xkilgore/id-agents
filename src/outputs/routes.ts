@@ -154,6 +154,28 @@ export function mountOutputsRoutes(
     return false;
   }
 
+  // ── POST /artifacts/reconcile ──────────────────────────────────────
+  // T11.6 on-demand reconcile: catalog artifacts across all configured roots
+  // (project root + output/drafts/… ) and run the missing-sweep. A FULL scan by
+  // default (the findability fix — "I can't find the one-pager"); pass
+  // ?recent_ms=N to limit to recently-modified files.
+  app.post('/artifacts/reconcile', async (req: Request, res: Response) => {
+    try {
+      if (!opts.filesystemArtifactRoots) {
+        return res.status(503).json({ ok: false, error: 'filesystem_reconcile_not_configured' });
+      }
+      const roots = await opts.filesystemArtifactRoots(req);
+      const recentMs = parseInt(asString(req.query.recent_ms) ?? '', 10);
+      const result = await reconcileFilesystemArtifacts(adapter, {
+        roots,
+        recentSinceMs: Number.isFinite(recentMs) && recentMs > 0 ? Date.now() - recentMs : undefined,
+      });
+      res.json({ ok: true, schema_version: 'artifact.reconcile.v1', result });
+    } catch (err) {
+      res.status(500).json({ ok: false, error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
   // ── GET /outputs/inbox ─────────────────────────────────────────────
 
   app.get('/outputs/inbox', async (req: Request, res: Response) => {
