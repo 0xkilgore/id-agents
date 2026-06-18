@@ -108,6 +108,25 @@ const PROFILES: Record<RuntimeId, RuntimeProfile> = {
       supportsAllowedTools: false,
     },
   },
+  openrouter: {
+    id: 'openrouter',
+    canonicalId: 'openrouter',
+    displayName: 'OpenRouter',
+    providerName: 'OpenRouter',
+    defaultModel: 'z-ai/glm-5.2',
+    sessionPolicy: 'fresh-per-query',
+    deploymentShape: 'local-process',
+    auth: {
+      mode: 'api-key',
+      provider: 'OpenRouter',
+      requiredEnv: ['OPENROUTER_API_KEY'],
+    },
+    capabilities: {
+      supportsResume: false,
+      supportsPlugins: false,
+      supportsAllowedTools: false,
+    },
+  },
   'public-agent-remote': {
     id: 'public-agent-remote',
     canonicalId: 'public-agent-remote',
@@ -278,6 +297,10 @@ export function validateRuntimeModelCompatibility(
   // and OpenAI-family (gpt-5, ...) models, so skip cross-family checks for it.
   if (resolvedRuntime === 'cursor-cli') return issues;
 
+  // OpenRouter is a multi-provider gateway addressed by arbitrary model slugs
+  // (e.g. z-ai/glm-5.2, deepseek/deepseek-chat), so cross-family checks do not apply.
+  if (resolvedRuntime === 'openrouter') return issues;
+
   if (resolvedRuntime === 'codex' && family === 'claude') {
     issues.push({
       code: 'runtime_model_mismatch',
@@ -323,6 +346,8 @@ export function runtimeIssueHint(code: string): string | null {
       return 'Missing OPENAI_API_KEY. Add `export OPENAI_API_KEY=sk-...` to ~/.zshrc (or ~/.bashrc) or to a project .env, or run `codex login`. Docs: https://github.com/openai/codex';
     case 'cursor_auth_missing':
       return 'Cursor Agent CLI is not authenticated. Set `CURSOR_API_KEY` or run `cursor-agent login` on this host. Install: curl https://cursor.com/install -fsS | bash';
+    case 'openrouter_api_key_missing':
+      return 'Missing OPENROUTER_API_KEY. Add `export OPENROUTER_API_KEY=sk-or-...` to the agent env or a project .env. Get a key: https://openrouter.ai/keys';
     default:
       return null;
   }
@@ -349,6 +374,16 @@ export function validateRuntimePreflight(
 
   if (resolvedRuntime === 'claude-code-cli' || resolvedRuntime === 'claude-code-local') {
     return [...issues, ...checkCommandAvailable('claude')];
+  }
+
+  if (resolvedRuntime === 'openrouter') {
+    if (!process.env.OPENROUTER_API_KEY) {
+      issues.push({
+        code: 'openrouter_api_key_missing',
+        message: 'runtime "openrouter" requires OPENROUTER_API_KEY',
+      });
+    }
+    return issues;
   }
 
   if (resolvedRuntime === 'cursor-cli') {

@@ -84,6 +84,7 @@ export type Runtime =
   | "claude-code-local"
   | "codex"
   | "cursor-cli"
+  | "openrouter"
   | "public-agent-remote"
   | "other";
 
@@ -109,6 +110,7 @@ export function resolveProviderFromRuntime(runtime: string | undefined | null): 
       return "openai";
     case "cursor-cli":
       return "cursor";
+    case "openrouter":
     case "public-agent-remote":
       return "other";
     default:
@@ -134,6 +136,8 @@ export function normalizeRuntime(raw: string | undefined | null): Runtime {
     case "cursor":
     case "cursor-cli":
       return "cursor-cli";
+    case "openrouter":
+      return "openrouter";
     case "public-agent-remote":
       return "public-agent-remote";
     default:

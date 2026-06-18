@@ -12,6 +12,7 @@ import { ClaudeAgentSdkHarness } from './claude-agent-sdk.js';
 import { ClaudeCodeCliHarness } from './claude-code-cli.js';
 import { CodexHarness } from './codex.js';
 import { CursorCliHarness } from './cursor-cli.js';
+import { OpenRouterHarness } from './openrouter.js';
 import { getAvailableRuntimes, isRuntimeId } from '../runtime/registry.js';
 
 // Export all types
@@ -20,6 +21,7 @@ export { ClaudeAgentSdkHarness } from './claude-agent-sdk.js';
 export { ClaudeCodeCliHarness } from './claude-code-cli.js';
 export { CodexHarness } from './codex.js';
 export { CursorCliHarness } from './cursor-cli.js';
+export { OpenRouterHarness } from './openrouter.js';
 
 /**
  * Create a harness instance by type.
@@ -39,8 +41,10 @@ export function createHarness(type: HarnessType = 'claude-agent-sdk'): AgentHarn
       return new CodexHarness();
     case 'cursor-cli':
       return new CursorCliHarness();
+    case 'openrouter':
+      return new OpenRouterHarness();
     default:
-      throw new Error(`Unknown harness type: ${type}. Valid types: claude-agent-sdk, claude-code-cli, codex, cursor-cli`);
+      throw new Error(`Unknown harness type: ${type}. Valid types: claude-agent-sdk, claude-code-cli, codex, cursor-cli, openrouter`);
   }
 }
 
