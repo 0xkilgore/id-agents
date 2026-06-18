@@ -167,6 +167,63 @@ export interface SupersessionEvidence {
   detail: string;
 }
 
+// ── Moot classification ─────────────────────────────────────────────
+// A failed row is MOOT (not a genuine "fix me") when it died on INFRASTRUCTURE
+// rather than the agent reporting a real problem: a scheduler wedge, a
+// manager-to-agent transport-exhaustion (incl. the pre-66f4abe rate-limit
+// MISLABEL), or a closeout/expiry stale-claim. A genuine "agent reported
+// failure" is NEVER moot.
+
+export interface MootRow {
+  failure_kind: string | null;
+  failure_detail: string | null;
+  /** Used to gate the rate-limit mislabel against the 66f4abe transport fix. */
+  updated_at: string | null;
+}
+
+export interface MootOptions {
+  /** Epoch ms of the 66f4abe transport-classify fix. A
+   *  provider_rate_limit_exhausted BEFORE this is a mislabeled
+   *  transport-exhaustion (infra), not a real 429. */
+  transportFixCutoffMs: number;
+}
+
+export interface MootEvidence {
+  moot: boolean;
+  reason: string;
+}
+
+// Closeout-expiry / stale-claim infra signatures on an agent_error row.
+const INFRA_DETAIL_RE =
+  /linked query terminated|stale in.?flight|expired|TTL cleanup|no progress evidence|Operator recovery|was block/i;
+
+export function resolveMoot(row: MootRow, opts: MootOptions): MootEvidence {
+  const kind = row.failure_kind ?? "";
+  const detail = row.failure_detail ?? "";
+
+  // A real agent-reported failure is never moot.
+  if (/agent reported failure/i.test(detail)) {
+    return { moot: false, reason: "agent reported a real failure — genuine" };
+  }
+  if (kind === "scheduler_wedged") {
+    return { moot: true, reason: "scheduler wedge (in-flight infra death), not a task failure" };
+  }
+  if (kind === "agent_unreachable_exhausted") {
+    return { moot: true, reason: "manager-to-agent transport exhaustion (infra), not a task failure" };
+  }
+  if (kind === "provider_rate_limit_exhausted") {
+    const ts = row.updated_at ? Date.parse(row.updated_at) : NaN;
+    if (Number.isFinite(ts) && ts < opts.transportFixCutoffMs) {
+      return { moot: true, reason: "transport-exhaustion MISLABELED as rate-limit (predates the 66f4abe fix)" };
+    }
+    return { moot: false, reason: "post-66f4abe provider rate-limit — treat as genuine" };
+  }
+  if (kind === "agent_error" && INFRA_DETAIL_RE.test(detail)) {
+    return { moot: true, reason: "closeout-expiry / stale-claim (infra death), not an agent-reported failure" };
+  }
+  return { moot: false, reason: "no moot signal" };
+}
+
 export function resolveSupersession(
   row: DerivedRow,
   probe: SupersessionProbe,

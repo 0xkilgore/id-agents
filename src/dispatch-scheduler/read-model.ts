@@ -737,6 +737,10 @@ const RETRYABLE_PROVIDER_REASONS = new Set([
 // Recovery statuses that prove the work landed (rule 3 / 2).
 const LANDED_RECOVERY_STATUSES = new Set(["landed_reconciled", "verified_done", "retry_done"]);
 
+// Triaged-moot recovery statuses (rule 4) — infra-death / superseded, not a
+// genuine operator-action item.
+const MOOT_RECOVERY_STATUSES = new Set(["moot"]);
+
 // Recovery-terminal failure statuses (rule 5).
 const RECOVERY_TERMINAL_FAILURE_STATUSES = new Set([
   "unsafe_blocked",
@@ -781,10 +785,15 @@ export function deriveEffectiveState(row: EffectiveStateRow): string {
     return "failed_work_landed_recoverable";
   }
 
-  // Rule 4 — supersede_link with replacement evidence makes the row moot.
-  // supersede_link is not yet on the schema. When it lands, branch here.
-  // For now, this rule is a no-op (rate-limit/provider retries without
-  // landed evidence fall to rule 7 → needs_operator, the safe direction).
+  // Rule 4 — triaged MOOT: a dispatch reconciled as an infra-death (scheduler
+  // wedge / manager↔agent transport-exhaustion / closeout-expiry) or superseded
+  // by a later run is NOT a genuine operator-action item. It carries
+  // recovery_status='moot' set by the reconciler and surfaces as
+  // moot_or_superseded (out of the NEEDS-YOU queue), distinct from a clean
+  // done_recovered which asserts the work landed.
+  if (row.recovery_status && MOOT_RECOVERY_STATUSES.has(row.recovery_status)) {
+    return "moot_or_superseded";
+  }
 
   // Rule 5 — recovery-terminal failure statuses always need an operator.
   if (row.recovery_status && RECOVERY_TERMINAL_FAILURE_STATUSES.has(row.recovery_status)) {

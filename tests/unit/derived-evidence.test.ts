@@ -7,10 +7,12 @@ import {
   deriveTrackTag,
   resolveDerivedLanded,
   resolveSupersession,
+  resolveMoot,
   type DerivedProbes,
   type RepoRef,
 } from "../../src/dispatch-recovery/derived-evidence.js";
 
+const CUTOFF = Date.parse("2026-06-17T19:40:45.000Z"); // 66f4abe transport fix
 const HOME = "/Users/kilgore";
 const WIN_START = "2026-06-17T10:00:00.000Z";
 const startMs = Date.parse(WIN_START);
@@ -149,5 +151,34 @@ describe("resolveSupersession", () => {
   it("not superseded without a derivable track tag", () => {
     const noTag = { ...reFire, subject: "do a thing" };
     expect(resolveSupersession(noTag, { laterSuccessForTag: () => "phid:x" }).superseded).toBe(false);
+  });
+});
+
+describe("resolveMoot", () => {
+  const opts = { transportFixCutoffMs: CUTOFF };
+  const before = "2026-06-17T13:00:00.000Z"; // pre-cutoff
+  const after = "2026-06-17T22:00:00.000Z"; // post-cutoff
+
+  it("scheduler_wedged is moot (infra wedge)", () => {
+    expect(resolveMoot({ failure_kind: "scheduler_wedged", failure_detail: "stale in_flight", updated_at: before }, opts).moot).toBe(true);
+  });
+
+  it("agent_unreachable_exhausted is moot (transport)", () => {
+    expect(resolveMoot({ failure_kind: "agent_unreachable_exhausted", failure_detail: "transport: fetch failed", updated_at: after }, opts).moot).toBe(true);
+  });
+
+  it("provider_rate_limit_exhausted is moot ONLY before the 66f4abe cutoff (mislabel era)", () => {
+    expect(resolveMoot({ failure_kind: "provider_rate_limit_exhausted", failure_detail: "transport after 5 attempts", updated_at: before }, opts).moot).toBe(true);
+    expect(resolveMoot({ failure_kind: "provider_rate_limit_exhausted", failure_detail: "rate limited", updated_at: after }, opts).moot).toBe(false);
+  });
+
+  it("agent_error is moot for closeout-expiry/stale-claim, NOT for a real agent failure", () => {
+    expect(resolveMoot({ failure_kind: "agent_error", failure_detail: "linked query terminated expired", updated_at: before }, opts).moot).toBe(true);
+    expect(resolveMoot({ failure_kind: "agent_error", failure_detail: "stale in_flight claim, no progress evidence", updated_at: before }, opts).moot).toBe(true);
+    expect(resolveMoot({ failure_kind: "agent_error", failure_detail: "agent reported failure", updated_at: before }, opts).moot).toBe(false);
+  });
+
+  it("an agent-reported failure is NEVER moot, even on an otherwise-mootable kind", () => {
+    expect(resolveMoot({ failure_kind: "scheduler_wedged", failure_detail: "agent reported failure: bad output", updated_at: before }, opts).moot).toBe(false);
   });
 });

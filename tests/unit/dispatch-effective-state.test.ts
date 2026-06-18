@@ -44,6 +44,21 @@ function row(overrides: Partial<RowFields> = {}): RowFields {
 }
 
 // ============================================================
+// Rule 4 — triaged moot (infra-death / superseded)
+// ============================================================
+
+test("Rule 4: failed + recovery_status=moot -> moot_or_superseded (NOT needs_operator)", () => {
+  const r = row({ status: "failed", recovery_status: "moot", failure_kind: "scheduler_wedged" });
+  expect(deriveEffectiveState(r)).toBe("moot_or_superseded");
+  expect(deriveNeedsOperator(r)).toBe(false);
+});
+
+test("Rule 4: a wedge WITHOUT the moot marker still needs an operator", () => {
+  const r = row({ status: "failed", recovery_status: "none", failure_kind: "scheduler_wedged" });
+  expect(deriveEffectiveState(r)).toBe("failed_needs_operator");
+});
+
+// ============================================================
 // Rule 1 — raw active states
 // ============================================================
 
