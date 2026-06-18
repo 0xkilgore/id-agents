@@ -61,6 +61,8 @@ export interface BacklogItem {
   approved_by: string | null;
   approved_at: string | null;
   last_dispatch_phid: string | null;
+  /** Actor who last edited this item via PATCH (actor-attributed updates). */
+  updated_by: string | null;
   created_at: string;
   updated_at: string;
 }

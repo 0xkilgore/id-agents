@@ -11,6 +11,7 @@ import type { ContinuousOrchestrationDaemon } from "./daemon.js";
 import type { ContinuousOrchestrationConfig } from "./config.js";
 import type { OrchestrationMode, ReadinessState } from "./types.js";
 import {
+  getBacklogItem,
   insertBacklogItem,
   listBacklogByState,
   listRecentDecisions,
@@ -18,6 +19,7 @@ import {
   updateBacklogFields,
   type NewBacklogItem,
 } from "./storage.js";
+import type { RiskClass } from "./types.js";
 import { parseRoadmapToBacklog } from "./roadmap-import.js";
 
 export interface OrchestrationRouteOptions {
@@ -131,6 +133,92 @@ export function mountContinuousOrchestrationRoutes(app: Application, opts: Orche
       const result = await promoteToReady(adapter, id, approvedBy);
       if (!result.ok) return res.status(409).json({ ok: false, error: result.reason });
       res.json({ ok: true, item: result.item });
+    } catch (err) {
+      res.status(500).json({ ok: false, error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  // Partial update of a backlog item's dispatchable fields — lets skeleton
+  // (imported) items get populated before promotion (the daemon-enable path).
+  // Idempotent (same body => same state) and actor-attributed (updated_by).
+  // Only the dispatchable fields below are accepted; readiness_state is NOT
+  // mutable here (promotion is the only path to `ready`).
+  app.patch("/orchestration/backlog/:id", async (req: Request, res: Response) => {
+    try {
+      const id = String(req.params.id);
+      const existing = await getBacklogItem(adapter, id);
+      if (!existing) return res.status(404).json({ ok: false, error: "backlog item not found" });
+
+      const body = (req.body ?? {}) as Record<string, unknown>;
+      const actor =
+        typeof body.actor_ref === "string" && body.actor_ref
+          ? body.actor_ref
+          : typeof body.actor === "string" && body.actor
+            ? body.actor
+            : typeof body.updated_by === "string" && body.updated_by
+              ? body.updated_by
+              : "operator";
+
+      // Build the patch from ONLY the allowed fields that are present.
+      const patch: Partial<
+        Pick<
+          NewBacklogItem,
+          | "to_agent"
+          | "dispatch_body"
+          | "risk_class"
+          | "write_scope"
+          | "dependencies"
+          | "token_estimate"
+          | "provider"
+          | "runtime"
+          | "value_score"
+          | "priority"
+        >
+      > = {};
+      const errors: string[] = [];
+      const has = (k: string) => Object.prototype.hasOwnProperty.call(body, k);
+      const asStrOrNull = (v: unknown, f: string) => {
+        if (v === null || typeof v === "string") return v as string | null;
+        errors.push(`${f} must be a string or null`);
+        return undefined;
+      };
+      const asNumOrNull = (v: unknown, f: string) => {
+        if (v === null || (typeof v === "number" && Number.isFinite(v))) return v as number | null;
+        errors.push(`${f} must be a number or null`);
+        return undefined;
+      };
+      const asStrArr = (v: unknown, f: string) => {
+        if (Array.isArray(v) && v.every((x) => typeof x === "string")) return v as string[];
+        errors.push(`${f} must be an array of strings`);
+        return undefined;
+      };
+
+      if (has("to_agent")) patch.to_agent = asStrOrNull(body.to_agent, "to_agent") ?? undefined;
+      if (has("dispatch_body")) patch.dispatch_body = asStrOrNull(body.dispatch_body, "dispatch_body") ?? undefined;
+      if (has("provider")) patch.provider = asStrOrNull(body.provider, "provider") ?? undefined;
+      if (has("runtime")) patch.runtime = asStrOrNull(body.runtime, "runtime") ?? undefined;
+      if (has("risk_class")) {
+        const rc = body.risk_class;
+        const allowed = ["routine", "build", "external", "destructive", "costly", "novel"];
+        if (typeof rc === "string" && allowed.includes(rc)) patch.risk_class = rc as RiskClass;
+        else errors.push(`risk_class must be one of ${allowed.join("|")}`);
+      }
+      if (has("write_scope")) patch.write_scope = asStrArr(body.write_scope, "write_scope");
+      if (has("dependencies")) patch.dependencies = asStrArr(body.dependencies, "dependencies");
+      if (has("token_estimate")) patch.token_estimate = asNumOrNull(body.token_estimate, "token_estimate");
+      if (has("value_score")) patch.value_score = asNumOrNull(body.value_score, "value_score");
+      if (has("priority")) {
+        const p = body.priority;
+        if (typeof p === "number" && Number.isFinite(p)) patch.priority = p;
+        else errors.push("priority must be a number");
+      }
+
+      if (errors.length > 0) {
+        return res.status(400).json({ ok: false, error: "invalid patch", details: errors });
+      }
+
+      const item = await updateBacklogFields(adapter, id, patch, { updated_by: actor });
+      res.json({ ok: true, item, updated_by: actor });
     } catch (err) {
       res.status(500).json({ ok: false, error: err instanceof Error ? err.message : String(err) });
     }

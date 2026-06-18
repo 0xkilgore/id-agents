@@ -578,6 +578,7 @@ export async function migrateSqlite(adapter: SqliteAdapter): Promise<void> {
       approved_by        TEXT,
       approved_at        TEXT,
       last_dispatch_phid TEXT,
+      updated_by         TEXT,
       created_at         TEXT NOT NULL,
       updated_at         TEXT NOT NULL
     );
@@ -616,6 +617,13 @@ export async function migrateSqlite(adapter: SqliteAdapter): Promise<void> {
 
   try {
     adapter.exec(`ALTER TABLE schedule_definitions ADD COLUMN delivery_mode TEXT NOT NULL DEFAULT 'talk'`);
+  } catch {
+    // Column already exists in upgraded databases.
+  }
+
+  // Continuous-orchestration backlog: actor-attributed PATCH updates.
+  try {
+    adapter.exec(`ALTER TABLE orchestration_backlog_item ADD COLUMN updated_by TEXT`);
   } catch {
     // Column already exists in upgraded databases.
   }

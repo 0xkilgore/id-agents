@@ -35,6 +35,7 @@ interface BacklogRow {
   approved_by: string | null;
   approved_at: string | null;
   last_dispatch_phid: string | null;
+  updated_by: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -71,6 +72,7 @@ export function rowToBacklogItem(r: BacklogRow): BacklogItem {
     approved_by: r.approved_by,
     approved_at: r.approved_at,
     last_dispatch_phid: r.last_dispatch_phid,
+    updated_by: r.updated_by,
     created_at: r.created_at,
     updated_at: r.updated_at,
   };
@@ -223,6 +225,7 @@ export async function updateBacklogFields(
       | "is_north_star"
     >
   >,
+  opts: { updated_by?: string | null } = {},
 ): Promise<BacklogItem | null> {
   const sets: string[] = [];
   const params: unknown[] = [];
@@ -243,7 +246,8 @@ export async function updateBacklogFields(
   if (patch.provider !== undefined) push("provider", patch.provider);
   if (patch.runtime !== undefined) push("runtime", patch.runtime);
   if (patch.is_north_star !== undefined) push("is_north_star", patch.is_north_star ? 1 : 0);
-  if (sets.length === 0) return getBacklogItem(adapter, item_id);
+  if (sets.length === 0 && opts.updated_by === undefined) return getBacklogItem(adapter, item_id);
+  if (opts.updated_by !== undefined) push("updated_by", opts.updated_by);
   push("updated_at", new Date().toISOString());
   params.push(item_id);
   await adapter.query(
