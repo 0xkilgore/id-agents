@@ -115,6 +115,25 @@ import {
 import { DEFAULT_RECOVERY_CONFIG } from './dispatch-recovery/classifier.js';
 import { makeGitCommitEvidenceProbe } from './dispatch-recovery/git-commit-evidence.js';
 import { listLoops, getLoop, loopsSummary } from './loops/registry.js';
+import {
+  migrateLoopsTables,
+  seedLoopsFromRegistry,
+  getLoop as getLoopRecord,
+  bindLoopRecurrence,
+  createLoopRun,
+  getLoopRun,
+  getLoopRunByKey,
+  listLoopRuns,
+  countActiveRuns,
+} from './loops/storage.js';
+import {
+  buildManualRun,
+  evaluateManualTrigger,
+  isMalformedLoopRef,
+  manualRejectHttpStatus,
+  type ManualRejectCode,
+} from './loops/manual-trigger.js';
+import { ACTIVE_LOOP_RUN_STATUSES } from './loops/types.js';
 import { getBuildStatusCached, type BuildStatus } from './build-info.js';
 import { normalizeActorRef } from './actor-identity.js';
 import {
@@ -3268,13 +3287,175 @@ export class AgentManagerDb {
       }
     });
 
+    // ──────────────────────────────────────────────────────────────────
+    // B1 loops-scheduler substrate (2026-06-22): manual trigger + run
+    // evidence + recurrence link. Mutations are admin-gated (loopback +
+    // X-Id-Admin: 1). Run routes are registered BEFORE GET /loops/:ref's
+    // depth-2 pattern is consulted; depth differs so ordering is safe.
+    // ──────────────────────────────────────────────────────────────────
+
+    // GET /loops/runs/:loop_run_phid — single-run evidence (the status_url
+    // returned by manual trigger). Registered before /loops/:ref/runs; the
+    // literal "runs" 2nd segment disambiguates them.
+    this.managementApp.get('/loops/runs/:loop_run_phid', async (req, res) => {
+      try {
+        const run = await getLoopRun(this.db.adapter, req.params.loop_run_phid);
+        if (!run) {
+          return res.status(404).json({ ok: false, error: 'loop_run_not_found', code: 'loop_run_not_found' });
+        }
+        return res.json({ ok: true, schema_version: 'loop-run-v1', run });
+      } catch (err) {
+        return res.status(500).json({ ok: false, error: err instanceof Error ? err.message : String(err) });
+      }
+    });
+
+    // GET /loops/:ref/runs — run history (evidence list).
+    this.managementApp.get('/loops/:ref/runs', async (req, res) => {
+      try {
+        const ref = req.params.ref;
+        if (isMalformedLoopRef(ref)) {
+          return res.status(400).json({ ok: false, error: 'invalid_loop_identifier', code: 'invalid_loop_identifier' });
+        }
+        const loop = await getLoopRecord(this.db.adapter, ref);
+        if (!loop) {
+          return res.status(404).json({ ok: false, error: 'loop_not_found', code: 'loop_not_found' });
+        }
+        const status = typeof req.query.status === 'string' ? (req.query.status as any) : undefined;
+        const limit = parseInt(req.query.limit as string, 10) || 50;
+        const runs = await listLoopRuns(this.db.adapter, loop.loop_phid, { status, limit });
+        return res.json({ ok: true, schema_version: 'loop-runs-v1', loop_phid: loop.loop_phid, runs, count: runs.length });
+      } catch (err) {
+        return res.status(500).json({ ok: false, error: err instanceof Error ? err.message : String(err) });
+      }
+    });
+
+    // POST /loops/:ref/run — manual trigger. Admin-gated mutation. Creates a
+    // queued LoopRun (the evidence envelope); idempotent on idempotency_key;
+    // per-loop active-run cap of 1.
+    this.managementApp.post('/loops/:ref/run', async (req, res) => {
+      try {
+        if (!this.isAdminRequest(req)) {
+          return res.status(403).json({ ok: false, error: 'unauthorized', code: 'unauthorized' });
+        }
+        const ref = req.params.ref;
+        if (isMalformedLoopRef(ref)) {
+          return res.status(400).json({ ok: false, error: 'invalid_loop_identifier', code: 'invalid_loop_identifier' });
+        }
+        const loop = await getLoopRecord(this.db.adapter, ref);
+        if (!loop) {
+          return res.status(404).json({ ok: false, error: 'loop_not_found', code: 'loop_not_found' });
+        }
+        const reject: ManualRejectCode | null = evaluateManualTrigger(loop);
+        if (reject) {
+          return res.status(manualRejectHttpStatus(reject)).json({ ok: false, error: reject, code: reject });
+        }
+        const nowIso = new Date().toISOString();
+        const { run, idempotency_key } = buildManualRun(loop, (req.body ?? {}) as any, nowIso);
+        const statusUrl = (phid: string) => `/loops/runs/${phid}`;
+
+        // Duplicate idempotency key → return the existing run (never a 2nd envelope).
+        const existing = await getLoopRunByKey(this.db.adapter, loop.loop_phid, idempotency_key);
+        if (existing) {
+          return res.json({
+            ok: true, loop_run_phid: existing.loop_run_phid, loop_phid: loop.loop_phid,
+            status: existing.status, duplicate: true, idempotency_key,
+            status_url: statusUrl(existing.loop_run_phid),
+          });
+        }
+
+        // Active-run cap (1 per loop). Return the active run, not a new one.
+        const active = await countActiveRuns(this.db.adapter, loop.loop_phid);
+        if (active >= 1) {
+          const runs = await listLoopRuns(this.db.adapter, loop.loop_phid, { limit: 50 });
+          const activeRun = runs.find((r) => (ACTIVE_LOOP_RUN_STATUSES as readonly string[]).includes(r.status));
+          return res.status(409).json({
+            ok: false, error: 'loop_run_already_active', code: 'loop_run_already_active',
+            loop_run_phid: activeRun?.loop_run_phid ?? null,
+            status_url: activeRun ? statusUrl(activeRun.loop_run_phid) : null,
+          });
+        }
+
+        const result = await createLoopRun(this.db.adapter, run);
+        if (!result.created) {
+          return res.json({
+            ok: true, loop_run_phid: result.run.loop_run_phid, loop_phid: loop.loop_phid,
+            status: result.run.status, duplicate: true, idempotency_key,
+            status_url: statusUrl(result.run.loop_run_phid),
+          });
+        }
+        return res.json({
+          ok: true, loop_run_phid: result.run.loop_run_phid, loop_phid: loop.loop_phid,
+          status: result.run.status, queued_at: result.run.queued_at, idempotency_key,
+          status_url: statusUrl(result.run.loop_run_phid),
+        });
+      } catch (err) {
+        return res.status(500).json({ ok: false, error: err instanceof Error ? err.message : String(err) });
+      }
+    });
+
+    // POST /loops/:ref/schedule — the recurrence link. Admin-gated. Binds (or
+    // unbinds when recurrence_phid is null) a loop to a recurrence template.
+    this.managementApp.post('/loops/:ref/schedule', async (req, res) => {
+      try {
+        if (!this.isAdminRequest(req)) {
+          return res.status(403).json({ ok: false, error: 'unauthorized', code: 'unauthorized' });
+        }
+        const ref = req.params.ref;
+        if (isMalformedLoopRef(ref)) {
+          return res.status(400).json({ ok: false, error: 'invalid_loop_identifier', code: 'invalid_loop_identifier' });
+        }
+        const loop = await getLoopRecord(this.db.adapter, ref);
+        if (!loop) {
+          return res.status(404).json({ ok: false, error: 'loop_not_found', code: 'loop_not_found' });
+        }
+        const body = (req.body ?? {}) as { recurrence_phid?: unknown; enabled?: unknown; timezone?: unknown };
+        let recurrencePhid: string | null;
+        if (body.recurrence_phid === null || body.recurrence_phid === undefined) {
+          recurrencePhid = null;
+        } else if (typeof body.recurrence_phid === 'string' && body.recurrence_phid.startsWith('phid:')) {
+          recurrencePhid = body.recurrence_phid;
+        } else {
+          return res.status(400).json({ ok: false, error: 'invalid_recurrence_phid', code: 'invalid_recurrence_phid' });
+        }
+        const updated = await bindLoopRecurrence(this.db.adapter, loop.loop_phid, recurrencePhid, new Date().toISOString(), {
+          enabled: typeof body.enabled === 'boolean' ? body.enabled : undefined,
+          timezone: typeof body.timezone === 'string' ? body.timezone : undefined,
+        });
+        return res.json({ ok: true, loop_phid: loop.loop_phid, schedule: updated?.schedule ?? null });
+      } catch (err) {
+        return res.status(500).json({ ok: false, error: err instanceof Error ? err.message : String(err) });
+      }
+    });
+
+    // GET /loops/:ref — detail. Backward-compatible `.loop` (seed read-model)
+    // plus additive substrate fields (definition, schedule binding, recent
+    // runs, manual-run controls) when the substrate row exists.
     this.managementApp.get('/loops/:ref', async (req, res) => {
       try {
         const loop = getLoop(req.params.ref);
-        if (!loop) {
+        const record = await getLoopRecord(this.db.adapter, req.params.ref);
+        if (!loop && !record) {
           return res.status(404).json({ ok: false, error: 'loop_not_found' });
         }
-        return res.json({ ok: true, loop });
+        const recent_runs = record
+          ? await listLoopRuns(this.db.adapter, record.loop_phid, { limit: 10 })
+          : [];
+        const can_run_manual = !!record && record.enabled && record.allow_manual_run;
+        const disabled_reason = !record
+          ? 'no_substrate_row'
+          : !record.enabled
+            ? 'loop_disabled'
+            : !record.allow_manual_run
+              ? 'manual_run_not_allowed'
+              : null;
+        return res.json({
+          ok: true,
+          loop,
+          definition: record,
+          schedule: record?.schedule ?? null,
+          recent_runs,
+          controls: { can_run_manual, disabled_reason },
+        });
       } catch (err) {
         return res.status(500).json({
           ok: false,
@@ -9810,6 +9991,20 @@ export class AgentManagerDb {
           console.log('[Manager] Kapelle decisions routes mounted (/decisions/queue, /decisions/:id/decide)');
         } catch (err) {
           console.warn('[Manager] Decisions routes failed to mount:', err instanceof Error ? err.message : String(err));
+        }
+
+        // Kapelle B1 (2026-06-22): loops-scheduler substrate. Migrate the
+        // loops/loop_runs tables and seed the registry catalog into the
+        // substrate so loops are bindable to a schedule + manually runnable
+        // (POST /loops/:ref/run) with each run logged as a durable LoopRun.
+        // The read routes (GET /loops, /loops/summary, /loops/:ref) keep their
+        // existing seed_catalog DTO; substrate data is additive.
+        try {
+          await migrateLoopsTables(this.db.adapter);
+          const { seeded } = await seedLoopsFromRegistry(this.db.adapter, new Date().toISOString());
+          console.log(`[Manager] Kapelle B1 loops substrate migrated + seeded (${seeded} loops); manual-trigger + run-evidence routes live`);
+        } catch (err) {
+          console.warn('[Manager] B1 loops substrate failed to migrate/seed:', err instanceof Error ? err.message : String(err));
         }
 
         // P1 Dependency-Graph Orchestrator — mount /graphs/* routes.
