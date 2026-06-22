@@ -13,18 +13,36 @@ import type { DbAdapter } from "../db/db-adapter.js";
 import {
   countDecisionsByStatus,
   getDecisionById,
+  listActionEvents,
+  listDecisionEvents,
   listDecisions,
   recordDecideTransaction,
+  recordDecisionActionTransaction,
 } from "./storage.js";
 import { ingestDecisionsFromMarkdown } from "./producer.js";
 import type {
+  ActorRef,
   DecideDecisionInput,
   DecideDecisionResponse,
+  DecisionActedUponResponse,
+  DecisionActedUponState,
+  DecisionActionInput,
+  DecisionActionResponse,
+  DecisionActionsListItem,
+  DecisionActionsListResponse,
+  DecisionActionType,
+  DecisionEventRow,
+  DecisionOperation,
+  DecisionOperationType,
   DecisionOption,
   DecisionQueueItem,
   DecisionRow,
   DecisionStatus,
   DecisionsQueueResponse,
+  OpsProjectionFreshness,
+  OpsProjectionProvenance,
+  OpsProjectionSource,
+  OpsProjectionWarning,
   SourceRef,
 } from "./types.js";
 
@@ -238,6 +256,170 @@ export function mountDecisionsRoutes(
       });
     }
   });
+
+  // ── P5: acted-upon read model ────────────────────────────────────────
+  // GET /decisions/:decision_id/acted-upon — derives acted-upon/decided
+  // state from the decision row status + the append-only decision_events
+  // log (operations). Never inferred from prose.
+  app.get(
+    "/decisions/:decision_id/acted-upon",
+    async (req: Request<{ decision_id: string }>, res: Response) => {
+      try {
+        const decisionId = req.params.decision_id;
+        if (!decisionId || typeof decisionId !== "string") {
+          res.status(400).json({ ok: false, error: "invalid_decision_id" });
+          return;
+        }
+        const row = await getDecisionById(adapter, decisionId);
+        if (!row) {
+          res.status(404).json({ ok: false, error: "decision_not_found" });
+          return;
+        }
+        const events = await listDecisionEvents(adapter, decisionId);
+        res.json(buildActedUpon(row, events, now().toISOString()));
+      } catch (err) {
+        res.status(500).json({
+          ok: false,
+          error: "projection_failed",
+          message: err instanceof Error ? err.message : String(err),
+        });
+      }
+    },
+  );
+
+  // POST /decisions/:decision_id/actions — typed, append-only follow-up
+  // operation on a DECIDED decision (create_manager_task / create_dispatch
+  // / report_to_manager). Idempotent by idempotency_key.
+  app.post(
+    "/decisions/:decision_id/actions",
+    async (req: Request<{ decision_id: string }>, res: Response) => {
+      try {
+        const validation = validateActionInput(req.body);
+        if (!validation.ok) {
+          res.status(400).json({ ok: false, error: validation.error, message: validation.message });
+          return;
+        }
+        const input = validation.value;
+        const result = await recordDecisionActionTransaction(adapter, {
+          decision_id: req.params.decision_id,
+          action: input.action,
+          actor: input.actor,
+          idempotency_key: input.idempotency_key,
+          note_markdown: input.note_markdown ?? null,
+          artifact_id: input.artifact_id ?? null,
+          source_panel: input.source_panel ?? null,
+          now: now().toISOString(),
+        });
+
+        if (result.kind === "not_found") {
+          res.status(404).json({ ok: false, error: "decision_not_found" });
+          return;
+        }
+        if (result.kind === "requires_decision") {
+          res.status(409).json({
+            ok: false,
+            error: "action_requires_decision",
+            decision_status: result.status,
+          });
+          return;
+        }
+        if (result.kind === "key_conflict") {
+          res.status(409).json({ ok: false, error: "duplicate_idempotency_key" });
+          return;
+        }
+
+        const operation = eventToOperation(result.event);
+        if (!operation) {
+          res.status(500).json({ ok: false, error: "operation_write_failed" });
+          return;
+        }
+        const response: DecisionActionResponse = {
+          ok: true,
+          schema_version: "decision.action.v1",
+          decision_id: req.params.decision_id,
+          operation,
+          idempotent_replay: result.kind === "idempotent_replay",
+        };
+        res.json(response);
+      } catch (err) {
+        res.status(500).json({
+          ok: false,
+          error: "operation_write_failed",
+          message: err instanceof Error ? err.message : String(err),
+        });
+      }
+    },
+  );
+
+  // GET /artifacts/:artifact_id/decision-actions?limit=50 — decision action
+  // operations linked to an artifact (by action artifact_id OR the source
+  // decision's originating_artifact_id).
+  app.get(
+    "/artifacts/:artifact_id/decision-actions",
+    async (req: Request<{ artifact_id: string }>, res: Response) => {
+      try {
+        const artifactId = req.params.artifact_id;
+        if (!artifactId || typeof artifactId !== "string") {
+          res.status(400).json({ ok: false, error: "invalid_artifact_id" });
+          return;
+        }
+        const limit = parsePositiveInt(req.query.limit, 50);
+        const events = await listActionEvents(adapter, 1000);
+        const decisionCache = new Map<string, DecisionRow | null>();
+        const items: DecisionActionsListItem[] = [];
+        for (const e of events) {
+          const payload = safeParseJson<Record<string, unknown>>(e.payload_json) ?? {};
+          let linked = stringOrNull(payload.artifact_id) === artifactId;
+          if (!linked) {
+            if (!decisionCache.has(e.decision_id)) {
+              decisionCache.set(e.decision_id, await getDecisionById(adapter, e.decision_id));
+            }
+            const decision = decisionCache.get(e.decision_id) ?? null;
+            if (decision) {
+              const dp = safeParseJson<Record<string, unknown>>(decision.provenance_json) ?? {};
+              linked = stringOrNull(dp.originating_artifact_id) === artifactId;
+            }
+          }
+          if (!linked) continue;
+          const op = eventToOperation(e);
+          if (op) items.push({ ...op, decision_id: e.decision_id });
+          if (items.length >= limit) break;
+        }
+        const generatedAt = now().toISOString();
+        const response: DecisionActionsListResponse = {
+          ok: true,
+          schema_version: "decision.actions.v1",
+          generated_at: generatedAt,
+          artifact_id: artifactId,
+          limit,
+          actions: items,
+          source: {
+            system: "manager",
+            projection: "decision_actions",
+            source_type: "manager_decisions_table",
+            source_refs: [],
+          },
+          freshness: freshnessNow(generatedAt),
+          provenance: {
+            producer: "manager",
+            producer_task_name: null,
+            producer_dispatch_id: null,
+            parser_version: "decision.actions.v1",
+            source_hash: null,
+            source_paths: [],
+          },
+          warnings: [],
+        };
+        res.json(response);
+      } catch (err) {
+        res.status(500).json({
+          ok: false,
+          error: "projection_failed",
+          message: err instanceof Error ? err.message : String(err),
+        });
+      }
+    },
+  );
 }
 
 function parseStatus(raw: unknown): DecisionStatus | null {
@@ -344,6 +526,194 @@ function validateDecideInput(
       idempotency_key: body.idempotency_key,
       note_markdown: typeof body.note_markdown === "string" ? body.note_markdown : undefined,
       source_panel: body.source_panel,
+    },
+  };
+}
+
+// ── P5 helpers: acted-upon projection + decision actions ───────────────
+
+const ACTED_UPON_PARSER_VERSION = "decision.acted-upon.v1";
+const VALID_ACTIONS = new Set<DecisionActionType>([
+  "create_manager_task",
+  "create_dispatch",
+  "report_to_manager",
+]);
+const OP_TYPE_BY_EVENT: Record<string, DecisionOperationType> = {
+  "decision.decided": "DECISION_DECIDE",
+  "decision.action.create_manager_task": "DECISION_TASK_CREATED",
+  "decision.action.create_dispatch": "DECISION_DISPATCH_CREATED",
+  "decision.action.report_to_manager": "DECISION_REPORT_TO_MANAGER",
+  "decision.superseded": "DECISION_SUPERSEDED",
+};
+
+/** Parse a canonical actor string (e.g. "human:chris") into a structured ref. */
+function parseActorRef(actor: string | null | undefined): ActorRef {
+  const ref = typeof actor === "string" && actor.length > 0 ? actor : "unknown:unknown";
+  const idx = ref.indexOf(":");
+  const rawKind = idx >= 0 ? ref.slice(0, idx) : ref;
+  const id = idx >= 0 ? ref.slice(idx + 1) : ref;
+  const kind: ActorRef["kind"] =
+    rawKind === "human" || rawKind === "agent" || rawKind === "system" ? rawKind : "unknown";
+  return { kind, id: id || rawKind, ref, label: null };
+}
+
+/** Map a decision_event row to a typed operation, or null if it is not an operation. */
+function eventToOperation(e: DecisionEventRow): DecisionOperation | null {
+  const opType = OP_TYPE_BY_EVENT[e.event_type];
+  if (!opType) return null;
+  const payload = safeParseJson<Record<string, unknown>>(e.payload_json) ?? {};
+  const targetRefs = Array.isArray(payload.target_refs)
+    ? (payload.target_refs as SourceRef[])
+    : [];
+  const idempotencyKey = typeof payload.idempotency_key === "string" ? payload.idempotency_key : "";
+  return {
+    operation_id: e.event_id,
+    operation_type: opType,
+    created_at: e.created_at,
+    actor: parseActorRef(e.actor),
+    target_refs: targetRefs,
+    idempotency_key: idempotencyKey,
+  };
+}
+
+function freshnessNow(generatedAt: string): OpsProjectionFreshness {
+  return {
+    status: "fresh",
+    generated_at: generatedAt,
+    source_updated_at: null,
+    projection_updated_at: null,
+    max_age_seconds: 600,
+  };
+}
+
+function coerceProducer(raw: unknown): OpsProjectionProvenance["producer"] {
+  return raw === "maestra" || raw === "manager" || raw === "migration" ? raw : "unknown";
+}
+
+function buildActedUpon(
+  row: DecisionRow,
+  events: DecisionEventRow[],
+  generatedAt: string,
+): DecisionActedUponResponse {
+  const operations = events
+    .map(eventToOperation)
+    .filter((op): op is DecisionOperation => op !== null);
+  const provenanceRaw = safeParseJson<Record<string, unknown>>(row.provenance_json) ?? {};
+  const artifactId = stringOrNull(provenanceRaw.originating_artifact_id);
+
+  const decideOp = operations.find((o) => o.operation_type === "DECISION_DECIDE") ?? null;
+  const actionOps = operations.filter(
+    (o) =>
+      o.operation_type === "DECISION_TASK_CREATED" ||
+      o.operation_type === "DECISION_DISPATCH_CREATED" ||
+      o.operation_type === "DECISION_REPORT_TO_MANAGER",
+  );
+  // events arrive oldest-first, so the last action op is the most recent.
+  const latestAction = actionOps.length > 0 ? actionOps[actionOps.length - 1] : null;
+
+  let state: DecisionActedUponState;
+  if (row.status === "superseded") {
+    state = "superseded";
+  } else if (latestAction) {
+    state =
+      latestAction.operation_type === "DECISION_TASK_CREATED"
+        ? "task_created"
+        : latestAction.operation_type === "DECISION_DISPATCH_CREATED"
+          ? "dispatch_created"
+          : "reported_to_manager";
+  } else if (row.status === "resolved") {
+    state = "decided";
+  } else {
+    state = "not_acted";
+  }
+
+  const actedAt = decideOp?.created_at ?? (state === "superseded" ? row.updated_at : null);
+  const actor = decideOp?.actor ?? latestAction?.actor ?? null;
+
+  const producer = coerceProducer(provenanceRaw.producer);
+  const sourceType =
+    producer === "maestra"
+      ? "maestra_decisions_markdown"
+      : producer === "migration"
+        ? "hybrid_projection"
+        : "manager_decisions_table";
+  const source: OpsProjectionSource = {
+    system: "manager",
+    projection: "decision_acted_upon",
+    source_type: sourceType,
+    source_refs: safeParseJson<SourceRef[]>(row.source_refs_json) ?? [],
+  };
+  const provenance: OpsProjectionProvenance = {
+    producer,
+    producer_task_name: stringOrNull(provenanceRaw.originating_task_name),
+    producer_dispatch_id: stringOrNull(provenanceRaw.originating_dispatch_id),
+    parser_version:
+      typeof provenanceRaw.parser_version === "string"
+        ? provenanceRaw.parser_version
+        : ACTED_UPON_PARSER_VERSION,
+    source_hash: stringOrNull(provenanceRaw.source_hash),
+    source_paths: stringOrNull(provenanceRaw.source_path)
+      ? [provenanceRaw.source_path as string]
+      : [],
+  };
+
+  const warnings: OpsProjectionWarning[] = [];
+  if (producer === "maestra" || producer === "migration") {
+    warnings.push({
+      code: "migrated_from_markdown",
+      severity: "info",
+      message:
+        "Decision originated from Maestra markdown; acted-upon state is a projection over migrated provenance.",
+      source_ref: null,
+    });
+  }
+
+  return {
+    ok: true,
+    schema_version: "decision.acted-upon.v1",
+    generated_at: generatedAt,
+    decision_id: row.decision_id,
+    artifact_id: artifactId,
+    state,
+    selected_option_id: row.selected_option_id,
+    acted_at: actedAt,
+    actor,
+    operations,
+    source,
+    freshness: freshnessNow(generatedAt),
+    provenance,
+    warnings,
+  };
+}
+
+function validateActionInput(
+  body: Partial<DecisionActionInput> | undefined,
+): ValidationResult<DecisionActionInput> {
+  if (!body || typeof body !== "object") {
+    return { ok: false, error: "invalid_body", message: "POST body must be a JSON object" };
+  }
+  if (body.actor !== "human:chris") {
+    return { ok: false, error: "invalid_actor", message: "actor must be 'human:chris'" };
+  }
+  if (!body.action || !VALID_ACTIONS.has(body.action)) {
+    return {
+      ok: false,
+      error: "invalid_action",
+      message: "action must be one of: create_manager_task, create_dispatch, report_to_manager",
+    };
+  }
+  if (!body.idempotency_key || typeof body.idempotency_key !== "string") {
+    return { ok: false, error: "idempotency_key_required", message: "idempotency_key is required" };
+  }
+  return {
+    ok: true,
+    value: {
+      action: body.action,
+      actor: body.actor,
+      idempotency_key: body.idempotency_key,
+      note_markdown: typeof body.note_markdown === "string" ? body.note_markdown : undefined,
+      source_panel: body.source_panel,
+      artifact_id: typeof body.artifact_id === "string" ? body.artifact_id : undefined,
     },
   };
 }

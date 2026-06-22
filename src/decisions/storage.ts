@@ -9,6 +9,7 @@
 import { randomUUID } from "node:crypto";
 import type { DbAdapter } from "../db/db-adapter.js";
 import type {
+  DecisionActionType,
   DecisionEventRow,
   DecisionRow,
   DecisionStatus,
@@ -322,6 +323,125 @@ export async function recordDecideTransaction(
     await adapter.query(`ROLLBACK`, []).catch(() => undefined);
     throw err;
   }
+}
+
+// ── P5: acted-upon read model + typed decision actions ─────────────────
+
+const ACTION_EVENT_PREFIX = "decision.action.";
+
+/** All lifecycle events for a decision, oldest first (for the operations log). */
+export async function listDecisionEvents(
+  adapter: DbAdapter,
+  decisionId: string,
+): Promise<DecisionEventRow[]> {
+  const { rows } = await adapter.query<DecisionEventRow>(
+    `SELECT * FROM decision_events
+       WHERE decision_id = ?
+       ORDER BY created_at ASC, event_id ASC`,
+    [decisionId],
+  );
+  return rows;
+}
+
+/** Typed action events across all decisions, newest first (for the artifact list). */
+export async function listActionEvents(
+  adapter: DbAdapter,
+  limit = 500,
+): Promise<DecisionEventRow[]> {
+  const { rows } = await adapter.query<DecisionEventRow>(
+    `SELECT * FROM decision_events
+       WHERE event_type LIKE 'decision.action.%'
+       ORDER BY created_at DESC, event_id DESC
+       LIMIT ?`,
+    [Math.min(Math.max(limit, 1), 1000)],
+  );
+  return rows;
+}
+
+export interface RecordActionInput {
+  decision_id: string;
+  action: DecisionActionType;
+  actor: "human:chris";
+  idempotency_key: string;
+  note_markdown: string | null;
+  artifact_id: string | null;
+  source_panel: string | null;
+  now: string;
+}
+
+export type RecordActionResult =
+  | { kind: "recorded"; event: DecisionEventRow }
+  | { kind: "idempotent_replay"; event: DecisionEventRow }
+  | { kind: "key_conflict"; existing: DecisionEventRow }
+  | { kind: "requires_decision"; status: DecisionStatus }
+  | { kind: "not_found" };
+
+/**
+ * Append-only typed follow-up operation on a DECIDED decision. The decision
+ * must already be `resolved` (decided) — a follow-up before a decision is a
+ * 409 (`action_requires_decision`). Idempotency is keyed by the caller's
+ * `idempotency_key`: a replay with the same key + same payload returns the
+ * existing operation; the same key with a different payload is a conflict.
+ */
+export async function recordDecisionActionTransaction(
+  adapter: DbAdapter,
+  input: RecordActionInput,
+): Promise<RecordActionResult> {
+  const decision = await getDecisionById(adapter, input.decision_id);
+  if (!decision) return { kind: "not_found" };
+  if (decision.status !== "resolved") {
+    return { kind: "requires_decision", status: decision.status };
+  }
+
+  const events = await listDecisionEvents(adapter, input.decision_id);
+  const byKey = events.find((e) => {
+    if (!e.event_type.startsWith(ACTION_EVENT_PREFIX)) return false;
+    const p = safeParseJson(e.payload_json) as Record<string, unknown> | null;
+    return typeof p?.idempotency_key === "string" && p.idempotency_key === input.idempotency_key;
+  });
+  if (byKey) {
+    const p = (safeParseJson(byKey.payload_json) as Record<string, unknown>) ?? {};
+    const sameAction = p.action === input.action;
+    const sameArtifact = (p.artifact_id ?? null) === (input.artifact_id ?? null);
+    const sameNote = (p.note_markdown ?? null) === (input.note_markdown ?? null);
+    if (sameAction && sameArtifact && sameNote) {
+      return { kind: "idempotent_replay", event: byKey };
+    }
+    return { kind: "key_conflict", existing: byKey };
+  }
+
+  const targetRefs = input.artifact_id
+    ? [{ kind: "artifact", stable_id: input.artifact_id, display_id: null, title: null, href: null }]
+    : [];
+  const payload = {
+    schema_version: "decision.action.v1",
+    action: input.action,
+    idempotency_key: input.idempotency_key,
+    note_markdown: input.note_markdown,
+    artifact_id: input.artifact_id,
+    source_panel: input.source_panel,
+    target_refs: targetRefs,
+  };
+  const eventType = `${ACTION_EVENT_PREFIX}${input.action}`;
+  const payloadJson = JSON.stringify(payload);
+  const eventId = await appendDecisionEvent(adapter, {
+    decision_id: input.decision_id,
+    event_type: eventType,
+    actor: input.actor,
+    created_at: input.now,
+    payload_json: payloadJson,
+  });
+  return {
+    kind: "recorded",
+    event: {
+      event_id: eventId,
+      decision_id: input.decision_id,
+      event_type: eventType,
+      actor: input.actor,
+      created_at: input.now,
+      payload_json: payloadJson,
+    },
+  };
 }
 
 function safeParseJson(value: string | null | undefined): unknown {

@@ -69,7 +69,7 @@ export interface DecisionsQueueResponse {
 
 export interface OpsProjectionSource {
   system: "manager";
-  projection: "decisions_queue";
+  projection: "decisions_queue" | "decision_acted_upon" | "decision_actions";
   source_type:
     | "manager_decisions_table"
     | "maestra_decisions_markdown"
@@ -175,4 +175,98 @@ export interface DecideDecisionResponse {
   selected_option_id: string;
   decided_at: string;
   idempotent_replay: boolean;
+}
+
+// ── P5: acted-upon read model + typed decision actions ─────────────────
+// Contract: cto/output/2026-06-19-kapelle-pdf-ux-backend-contracts.md §P5.
+// The acted-upon state is DERIVED from the decision row status + the
+// append-only decision_events log (never inferred from prose).
+
+export interface ActorRef {
+  kind: "human" | "agent" | "system" | "unknown";
+  id: string;
+  /** Canonical reference string, e.g. "human:chris". */
+  ref: string;
+  label: string | null;
+}
+
+export type DecisionActedUponState =
+  | "not_acted"
+  | "decided"
+  | "task_created"
+  | "dispatch_created"
+  | "reported_to_manager"
+  | "superseded"
+  | "blocked";
+
+export type DecisionOperationType =
+  | "DECISION_DECIDE"
+  | "DECISION_TASK_CREATED"
+  | "DECISION_DISPATCH_CREATED"
+  | "DECISION_REPORT_TO_MANAGER"
+  | "DECISION_SUPERSEDED";
+
+export interface DecisionOperation {
+  operation_id: string;
+  operation_type: DecisionOperationType;
+  created_at: string;
+  actor: ActorRef;
+  target_refs: SourceRef[];
+  idempotency_key: string;
+}
+
+export interface DecisionActedUponResponse {
+  ok: true;
+  schema_version: "decision.acted-upon.v1";
+  generated_at: string;
+  decision_id: string;
+  artifact_id: string | null;
+  state: DecisionActedUponState;
+  selected_option_id: string | null;
+  acted_at: string | null;
+  actor: ActorRef | null;
+  operations: DecisionOperation[];
+  source: OpsProjectionSource;
+  freshness: OpsProjectionFreshness;
+  provenance: OpsProjectionProvenance;
+  warnings: OpsProjectionWarning[];
+}
+
+export type DecisionActionType =
+  | "create_manager_task"
+  | "create_dispatch"
+  | "report_to_manager";
+
+export interface DecisionActionInput {
+  action: DecisionActionType;
+  actor: "human:chris";
+  note_markdown?: string;
+  idempotency_key: string;
+  source_panel?: "pdf_decision_row" | "ops_decisions_queue";
+  artifact_id?: string;
+}
+
+export interface DecisionActionResponse {
+  ok: true;
+  schema_version: "decision.action.v1";
+  decision_id: string;
+  operation: DecisionOperation;
+  idempotent_replay: boolean;
+}
+
+export interface DecisionActionsListItem extends DecisionOperation {
+  decision_id: string;
+}
+
+export interface DecisionActionsListResponse {
+  ok: true;
+  schema_version: "decision.actions.v1";
+  generated_at: string;
+  artifact_id: string;
+  limit: number;
+  actions: DecisionActionsListItem[];
+  source: OpsProjectionSource;
+  freshness: OpsProjectionFreshness;
+  provenance: OpsProjectionProvenance;
+  warnings: OpsProjectionWarning[];
 }
