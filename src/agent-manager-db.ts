@@ -135,6 +135,7 @@ import {
 } from './loops/manual-trigger.js';
 import { ACTIVE_LOOP_RUN_STATUSES } from './loops/types.js';
 import { loadModelPolicy, type ModelPolicyService } from './model-policy/policy.js';
+import { resolveManagerBindHost } from './manager-bind-host.js';
 import { getBuildStatusCached, type BuildStatus } from './build-info.js';
 import { normalizeActorRef } from './actor-identity.js';
 import {
@@ -9681,11 +9682,19 @@ export class AgentManagerDb {
         this.handleWebSocketConnection(ws, req);
       });
 
-      this.httpServer.listen(port, '127.0.0.1', async () => {
+      // Desktop remote access (2026-06-22): bind host is configurable via
+      // AGENT_MANAGER_HOST (default 127.0.0.1). Set 0.0.0.0 to reach the
+      // manager over a private Tailscale tailnet from the Tauri desktop app.
+      const bind = resolveManagerBindHost(process.env);
+      this.httpServer.listen(port, bind.host, async () => {
+        const displayHost = bind.isLoopback ? 'localhost' : bind.host;
         console.log(`\n🚀 ID Agent Manager (DB-backed)`);
         console.log(`===============================`);
-        console.log(`Management API: http://localhost:${port}`);
-        console.log(`WebSocket: ws://localhost:${port}/ws`);
+        console.log(`Management API: http://${displayHost}:${port} (bind ${bind.host})`);
+        console.log(`WebSocket: ws://${displayHost}:${port}/ws`);
+        if (bind.warning) {
+          console.warn(`⚠️  [SECURITY] ${bind.warning}`);
+        }
         console.log(`\n`);
 
         // Initialize and start the scheduler service
