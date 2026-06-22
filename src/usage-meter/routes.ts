@@ -7,6 +7,7 @@ import type { UsageMeterService } from "./service.js";
 import type { DbAdapter } from "../db/db-adapter.js";
 import { listRecentAgentUsageEvents } from "./storage.js";
 import { loadDispatchAttributions } from "./dispatch-attribution.js";
+import { ingestTranscripts } from "./ingest-transcripts.js";
 import {
   buildDailyUsageReport,
   renderDailyUsageReportMarkdown,
@@ -101,6 +102,48 @@ export function mountUsageMeterRoutes(app: Application, opts: UsageMeterRouteOpt
       });
     }
   });
+
+  // ── Usage CAPTURE: ingest Claude Code transcripts into agent_usage_event ──
+  // Without this the meter rendered but recorded nothing (every day = 0). The
+  // ingest walks ~/.claude/projects, parses real token counts, attributes per
+  // agent, and upserts idempotent events. Wired here (not in the manager) so
+  // the manager wiring stays untouched; runs on demand + on a best-effort timer.
+  if (opts.adapter) {
+    const adapter = opts.adapter;
+
+    // POST /usage/ingest?lookback_days=9 — capture now, return counts.
+    app.post("/usage/ingest", async (req: Request, res: Response) => {
+      try {
+        const lookbackDays = clampInt(req.query.lookback_days, 9, 1, 365);
+        const result = await ingestTranscripts(adapter, { lookbackDays });
+        await opts.service.refreshRollups();
+        res.json({ ok: true, ...result });
+      } catch (err) {
+        res.status(500).json({ ok: false, error: err instanceof Error ? err.message : String(err) });
+      }
+    });
+
+    // Best-effort background capture: shortly after mount, then every 10 min.
+    const runIngest = async () => {
+      try {
+        const r = await ingestTranscripts(adapter, {});
+        await opts.service.refreshRollups();
+        if (r.inserted > 0) {
+          console.log(
+            `[usage-meter] transcript ingest: +${r.inserted} events from ${r.files_scanned} files ` +
+              `(${r.skipped_idempotent} already recorded)`,
+          );
+        }
+      } catch (err) {
+        console.warn(
+          `[usage-meter] transcript ingest failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    };
+    setTimeout(() => void runIngest(), 5_000).unref?.();
+    const timer = setInterval(() => void runIngest(), 10 * 60_000);
+    if (typeof timer.unref === "function") timer.unref();
+  }
 }
 
 /**
