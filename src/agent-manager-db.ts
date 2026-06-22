@@ -134,6 +134,7 @@ import {
   type ManualRejectCode,
 } from './loops/manual-trigger.js';
 import { ACTIVE_LOOP_RUN_STATUSES } from './loops/types.js';
+import { loadModelPolicy, type ModelPolicyService } from './model-policy/policy.js';
 import { getBuildStatusCached, type BuildStatus } from './build-info.js';
 import { normalizeActorRef } from './actor-identity.js';
 import {
@@ -446,6 +447,8 @@ export class AgentManagerDb {
    * inter-agent messages.
    */
   private dispatchScheduler: SchedulerHandle | null = null;
+  // D1 / T-MODEL.1 — per-agent model policy (Codex Light standing rule).
+  private modelPolicy: ModelPolicyService | null = null;
   // W2-1 DispatchVerification — durable projection + periodic verification job.
   // Both are constructed alongside the dispatch scheduler in start() (they share
   // the scheduler's SqliteAdapter + default team) and stay null until then.
@@ -3461,6 +3464,60 @@ export class AgentManagerDb {
           ok: false,
           error: err instanceof Error ? err.message : String(err),
         });
+      }
+    });
+
+    // ──────────────────────────────────────────────────────────────────
+    // D1 / T-MODEL.1 model policy (2026-06-22): read + dry-run the standing
+    // per-agent model policy + provider fallback order. Replaces opaque
+    // agents-table inspection — operators SEE the rule and can simulate the
+    // resolver (incl. a forced unavailable-provider) without firing a dispatch.
+    // ──────────────────────────────────────────────────────────────────
+    this.managementApp.get('/model-policy', async (_req, res) => {
+      try {
+        if (!this.modelPolicy) {
+          return res.status(503).json({ ok: false, error: 'model_policy_not_loaded' });
+        }
+        const cfg = this.modelPolicy.config;
+        return res.json({
+          ok: true,
+          schema_version: 'model-policy-v1',
+          source: cfg.source,
+          constrained_providers: cfg.constrained_providers,
+          default: cfg.default,
+          agents: cfg.agents,
+          models_metadata: this.modelPolicy.metadata.list(),
+        });
+      } catch (err) {
+        return res.status(500).json({ ok: false, error: err instanceof Error ? err.message : String(err) });
+      }
+    });
+
+    this.managementApp.get('/model-policy/resolve', async (req, res) => {
+      try {
+        if (!this.modelPolicy) {
+          return res.status(503).json({ ok: false, error: 'model_policy_not_loaded' });
+        }
+        const agent = typeof req.query.agent === 'string' ? req.query.agent : '';
+        if (!agent) {
+          return res.status(400).json({ ok: false, error: 'agent query param required', code: 'missing_agent' });
+        }
+        // ?unavailable=openai,cursor lets an operator simulate a constrained
+        // lane; omit it to dry-run against the live usage-gate signal.
+        let unavailableProviders: import('./dispatch-scheduler/types.js').Provider[] | undefined;
+        if (typeof req.query.unavailable === 'string') {
+          const valid = ['anthropic', 'openai', 'cursor', 'local', 'other'];
+          unavailableProviders = req.query.unavailable
+            .split(',')
+            .map((p) => p.trim())
+            .filter((p) => valid.includes(p)) as import('./dispatch-scheduler/types.js').Provider[];
+        } else if (this.dispatchScheduler) {
+          unavailableProviders = await this.dispatchScheduler.currentUnavailableProvidersPublic();
+        }
+        const resolved = this.modelPolicy.resolveModelChoice({ agent, unavailableProviders });
+        return res.json({ ok: true, schema_version: 'model-policy-resolve-v1', resolved, unavailable_providers: unavailableProviders ?? [] });
+      } catch (err) {
+        return res.status(500).json({ ok: false, error: err instanceof Error ? err.message : String(err) });
       }
     });
 
@@ -9658,6 +9715,18 @@ export class AgentManagerDb {
         if (this.db.adapter.dialect === 'sqlite') {
           try {
             const defaultTeamId = await this.db.teams.getOrCreateTeamId('default');
+            // D1 / T-MODEL.1: load the per-agent model policy (Codex Light
+            // standing rule) from configs/model-policy.json. Missing/broken
+            // config degrades to the builtin codex→claude default — never
+            // wedges startup.
+            this.modelPolicy = loadModelPolicy({
+              configPath: `${process.cwd()}/configs/model-policy.json`,
+              metadataPath: `${process.cwd()}/configs/models-metadata.json`,
+            });
+            console.log(
+              `[Manager] D1 model policy loaded (source=${this.modelPolicy.config.source}, ` +
+                `constrained=${this.modelPolicy.constrainedProviders().join(',')})`,
+            );
             this.dispatchScheduler = new SchedulerHandle({
               adapter: this.db.adapter as SqliteAdapter,
               teamId: defaultTeamId,
@@ -9665,6 +9734,9 @@ export class AgentManagerDb {
               // its terminal-closeout + silence-detection passes can read
               // queries.status / last_output_at evidence from B1.
               queriesRepository: this.db.queries,
+              // D1 / T-MODEL.1: the model policy resolves an agent's runtime
+              // (primary→fallback) at enqueue when no runtime is pinned.
+              modelPolicy: this.modelPolicy,
               resolveTargetUrl: async (agentName: string) => {
                 // Resolve the worker agent's REST endpoint by name (lookup is
                 // team-local; default team in Phase A).
@@ -9869,6 +9941,22 @@ export class AgentManagerDb {
               getSnapshotForScheduler: () => service.getSnapshotForScheduler(),
               getExcludedAgentsForClaim: () => service.getExcludedAgentsForClaim(),
             });
+            // D1 / T-MODEL.1: feed the live provider-availability signal to the
+            // model policy. When the global usage gate is hard-paused (budget
+            // exhausted), treat the configured constrained providers (default
+            // openai) as unavailable so Codex Light routes agents to their
+            // Claude fallback automatically — no DB edit.
+            const modelPolicy = this.modelPolicy;
+            if (modelPolicy) {
+              this.dispatchScheduler.setUnavailableProvidersSource(async () => {
+                try {
+                  const snap = await service.getSnapshotForScheduler();
+                  return snap.global.state === 'hard_paused' ? modelPolicy.constrainedProviders() : [];
+                } catch {
+                  return [];
+                }
+              });
+            }
           }
           console.log(
             `[Manager] Usage Meter /usage mounted (policy=${loaded.source}` +

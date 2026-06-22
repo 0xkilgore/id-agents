@@ -49,6 +49,7 @@ import {
   decideStrictModeOverride,
   parseStrictModeFlag,
 } from "./strict-mode-classifier.js";
+import type { ModelPolicyResolver, ResolvedModel } from "../model-policy/types.js";
 
 export type GatewayMode = "off" | "shadow" | "enforce";
 
@@ -84,6 +85,13 @@ export interface SchedulerHandleOptions {
    * only for tests that don't exercise the evidence path.
    */
   queriesRepository?: QueriesRepository;
+  /**
+   * D1 / T-MODEL.1 (2026-06-22): the per-agent model policy. When set, an
+   * enqueue that does NOT explicitly pin `runtime` resolves the agent's
+   * runtime/provider from the policy (primary → fallback). Omit to keep the
+   * pre-D1 hardcoded `claude-code-cli` default.
+   */
+  modelPolicy?: ModelPolicyResolver;
 }
 
 // Spec 054 §3.1 — structured actor / causation on every dispatch.
@@ -189,10 +197,14 @@ export class SchedulerHandle {
   private recoveryIntervalMs: number;
   private recoveryEnabled: boolean;
   private recovering = false;
+  // D1 / T-MODEL.1: per-agent model policy + live provider-availability source.
+  private modelPolicy?: ModelPolicyResolver;
+  private unavailableProvidersSource?: () => Promise<Provider[]> | Provider[];
 
   constructor(opts: SchedulerHandleOptions) {
     const env = opts.env ?? {};
     this.teamId = opts.teamId;
+    this.modelPolicy = opts.modelPolicy;
     this.mode = parseGatewayMode(env.DISPATCH_GATEWAY_MODE);
     this.enabled = schedulerEnabled(env);
     this.policy = loadSchedulerPolicy({}, env as Record<string, string | undefined>);
@@ -304,6 +316,30 @@ export class SchedulerHandle {
   }
 
   /**
+   * D1 / T-MODEL.1: wire the live provider-availability signal (e.g. derived
+   * from the usage gate). The function returns the providers currently treated
+   * as unavailable for routing; the model policy uses it to apply fallback.
+   */
+  setUnavailableProvidersSource(fn: () => Promise<Provider[]> | Provider[]): void {
+    this.unavailableProvidersSource = fn;
+  }
+
+  private async currentUnavailableProviders(): Promise<Provider[]> {
+    if (!this.unavailableProvidersSource) return [];
+    try {
+      return await this.unavailableProvidersSource();
+    } catch {
+      return [];
+    }
+  }
+
+  /** Public accessor for the live unavailable-providers signal (used by the
+   *  /model-policy/resolve dry-run route). */
+  async currentUnavailableProvidersPublic(): Promise<Provider[]> {
+    return this.currentUnavailableProviders();
+  }
+
+  /**
    * Run a single recovery pass. Bounded: overlapping ticks are skipped so a
    * slow DB never stacks passes. Never throws — the service already swallows
    * its own errors, and this guard catches anything the scheduling layer adds.
@@ -397,7 +433,26 @@ export class SchedulerHandle {
     // the provider lane FROM the runtime unless the caller explicitly pins a
     // provider. This is what keeps a cursor-cli dispatch out of the Anthropic
     // lane without every caller having to set `provider` by hand.
-    const runtime: Runtime = normalizeRuntime(input.runtime ?? "claude-code-cli");
+    //
+    // D1 / T-MODEL.1: when the caller did NOT pin a runtime, the model policy
+    // (if configured) decides the agent's runtime — applying the primary→
+    // fallback order against the currently-constrained provider lanes. This is
+    // "Codex Light": codex primary, claude fallback when the openai lane is
+    // over its usage limit. An explicit input.runtime always wins.
+    let runtime: Runtime;
+    let modelPolicyTrace: ResolvedModel | undefined;
+    if (input.runtime) {
+      runtime = normalizeRuntime(input.runtime);
+    } else if (this.modelPolicy) {
+      const unavailableProviders = await this.currentUnavailableProviders();
+      modelPolicyTrace = this.modelPolicy.resolveModelChoice({
+        agent: input.to_agent,
+        unavailableProviders,
+      });
+      runtime = modelPolicyTrace.choice.runtime;
+    } else {
+      runtime = normalizeRuntime("claude-code-cli");
+    }
     const provider: Provider = input.provider ?? resolveProviderFromRuntime(runtime);
     const payload: EnqueueInput = {
       query_id: queryId,
@@ -424,6 +479,16 @@ export class SchedulerHandle {
       query_id: doc.query_id,
       to_agent: doc.to_agent,
       priority: doc.priority,
+      runtime: doc.runtime,
+      provider: doc.provider,
+      model_policy: modelPolicyTrace
+        ? {
+            source: modelPolicyTrace.source,
+            fallback_applied: modelPolicyTrace.fallback_applied,
+            policy_agent: modelPolicyTrace.policy_agent,
+            reason: modelPolicyTrace.reason,
+          }
+        : undefined,
       actor_ref,
       causation,
     });
