@@ -9781,9 +9781,16 @@ export class AgentManagerDb {
                 err instanceof Error ? err.message : String(err),
               );
             },
+            // B2 (2026-06-22): route submitted comments to the artifact's
+            // owning agent as a real dispatch. Same enqueue seam the graph
+            // routes use; undefined when no scheduler (comments then persist
+            // without routing).
+            enqueueDispatch: this.dispatchScheduler
+              ? this.dispatchScheduler.enqueue.bind(this.dispatchScheduler)
+              : undefined,
           });
           this.startFilesystemArtifactReconciler(runFilesystemReconcile);
-          console.log('[Manager] Kapelle B11 outputs routes mounted (/outputs/inbox, /artifacts/:id/*) with P3 emit target + filesystem reconciler');
+          console.log('[Manager] Kapelle B11 outputs routes mounted (/outputs/inbox, /artifacts/:id/*) with P3 emit target + B2 comment auto-dispatch + filesystem reconciler');
         } catch (err) {
           console.warn('[Manager] B11 outputs routes failed to mount:', err instanceof Error ? err.message : String(err));
         }

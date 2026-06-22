@@ -58,6 +58,10 @@ import { normalizeActorRef, isValidArtifactId, type Actor } from '../actor-ident
 import type { TasksRepository } from '../db/db-service.js';
 import { emitApprovalTask, type ApprovalReviewer } from './approval-emit.js';
 import {
+  routeCommentToOwningAgent,
+  type CommentDispatchEnqueueFn,
+} from './comment-dispatch.js';
+import {
   reconcileFilesystemArtifacts,
   type FilesystemArtifactRoot,
 } from './filesystem-reconciler.js';
@@ -89,6 +93,14 @@ export interface MountOutputsRoutesOptions {
   actionCooldownMs?: number;
   /** Injectable clock for deterministic cooldown tests. */
   now?: () => Date;
+  /**
+   * B2 (2026-06-22): scheduler enqueue seam. When provided, a submitted
+   * artifact comment is routed to the artifact's owning agent as a real
+   * dispatch (the manager binds `dispatchScheduler.enqueue` here). When
+   * omitted, comments still persist; the response carries `dispatch: null`
+   * + `dispatch_skipped` so the console can show routing didn't run.
+   */
+  enqueueDispatch?: CommentDispatchEnqueueFn;
 }
 
 export function mountOutputsRoutes(
@@ -375,7 +387,26 @@ export function mountOutputsRoutes(
         anchor: asString(req.body?.anchor) ?? null,
         source_link: asString(req.body?.source_link),
       });
-      res.json({ ok: true, schema_version: 'artifact.comment.v1', op_id, comment, actor });
+
+      // B2 (2026-06-22): close the loop — route the now-durable comment to the
+      // artifact's owning agent as a real dispatch. The comment is already
+      // persisted above, so routing failures NEVER fail this request; they
+      // surface as dispatch:null + a typed skip/error the console can show.
+      const routed = await routeCommentToOwningAgent({
+        adapter,
+        enqueue: opts.enqueueDispatch,
+        artifactId,
+        comment,
+      });
+
+      const base = { ok: true, schema_version: 'artifact.comment.v1', op_id, comment, actor };
+      if (routed.routed) {
+        res.json({ ...base, dispatch_routed: true, dispatch: routed.dispatch });
+      } else if ('skipped' in routed) {
+        res.json({ ...base, dispatch_routed: false, dispatch: null, dispatch_skipped: routed.skipped });
+      } else {
+        res.json({ ...base, dispatch_routed: false, dispatch: null, dispatch_error: routed.error });
+      }
     } catch (err) {
       res.status(500).json({ ok: false, error: err instanceof Error ? err.message : String(err) });
     }
