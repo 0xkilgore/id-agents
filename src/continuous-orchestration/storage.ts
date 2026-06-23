@@ -9,6 +9,8 @@ import type { DbAdapter } from "../db/db-adapter.js";
 import type {
   BacklogItem,
   DecisionRecord,
+  FleshPatch,
+  FleshStatus,
   OrchestrationMode,
   ReadinessState,
   RiskClass,
@@ -36,6 +38,15 @@ interface BacklogRow {
   approved_at: string | null;
   last_dispatch_phid: string | null;
   updated_by: string | null;
+  flesh_status: string | null;
+  flesh_source: string | null;
+  flesh_confidence: number | null;
+  flesh_error: string | null;
+  flesh_attempts: number | null;
+  fleshed_at: string | null;
+  auto_ready_approved_at: string | null;
+  auto_ready_policy_version: string | null;
+  flesh_patch_json: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -73,9 +84,28 @@ export function rowToBacklogItem(r: BacklogRow): BacklogItem {
     approved_at: r.approved_at,
     last_dispatch_phid: r.last_dispatch_phid,
     updated_by: r.updated_by,
+    flesh_status: (r.flesh_status as BacklogItem["flesh_status"]) ?? "unfleshed",
+    flesh_source: r.flesh_source ?? null,
+    flesh_confidence: r.flesh_confidence ?? null,
+    flesh_error: r.flesh_error ?? null,
+    flesh_attempts: r.flesh_attempts ?? 0,
+    fleshed_at: r.fleshed_at ?? null,
+    auto_ready_approved_at: r.auto_ready_approved_at ?? null,
+    auto_ready_policy_version: r.auto_ready_policy_version ?? null,
+    flesh_patch: parseFleshPatch(r.flesh_patch_json),
     created_at: r.created_at,
     updated_at: r.updated_at,
   };
+}
+
+function parseFleshPatch(json: string | null): FleshPatch | null {
+  if (!json) return null;
+  try {
+    const v = JSON.parse(json);
+    return v && typeof v === "object" ? (v as FleshPatch) : null;
+  } catch {
+    return null;
+  }
 }
 
 export interface NewBacklogItem {
@@ -163,6 +193,15 @@ export async function listBacklogByState(
 /** READY rows — the only items the tick may admit. */
 export function listReadyItems(adapter: DbAdapter, team_id = "default"): Promise<BacklogItem[]> {
   return listBacklogByState(adapter, { team_id, state: "ready" });
+}
+
+/** All known item_ids for a team (dependency resolution during fleshing). */
+export async function listAllItemIds(adapter: DbAdapter, team_id = "default"): Promise<Set<string>> {
+  const { rows } = await adapter.query<{ item_id: string }>(
+    `SELECT item_id FROM orchestration_backlog_item WHERE team_id = $1`,
+    [team_id],
+  );
+  return new Set(rows.map((r) => r.item_id));
 }
 
 export async function listDoneItemIds(adapter: DbAdapter, team_id = "default"): Promise<Set<string>> {
@@ -271,6 +310,217 @@ export async function setItemState(
      WHERE item_id = $4`,
     [state, now, opts.dispatch_phid ?? null, item_id],
   );
+}
+
+// ── Auto-flesh (daemon SELF-REFUEL) ──────────────────────────────────
+
+/**
+ * The flesh candidate queue: skeletons the flesher may work. `unfleshed` and
+ * `failed` (retryable) rows in `needs_review`, ordered by priority. `failed`
+ * rows past the attempt cap are excluded.
+ */
+export async function listFleshCandidates(
+  adapter: DbAdapter,
+  opts: { team_id?: string; limit?: number; max_attempts?: number; item_ids?: string[] },
+): Promise<BacklogItem[]> {
+  const team_id = opts.team_id ?? "default";
+  const maxAttempts = opts.max_attempts ?? 3;
+  if (opts.item_ids && opts.item_ids.length > 0) {
+    const placeholders = opts.item_ids.map((_, i) => `$${i + 2}`).join(",");
+    const { rows } = await adapter.query<BacklogRow>(
+      `SELECT * FROM orchestration_backlog_item
+         WHERE team_id = $1 AND item_id IN (${placeholders})
+         ORDER BY priority ASC, created_at ASC`,
+      [team_id, ...opts.item_ids],
+    );
+    return rows.map(rowToBacklogItem);
+  }
+  const { rows } = await adapter.query<BacklogRow>(
+    `SELECT * FROM orchestration_backlog_item
+       WHERE team_id = $1
+         AND readiness_state IN ('needs_review', 'draft')
+         AND (flesh_status = 'unfleshed' OR (flesh_status = 'failed' AND flesh_attempts < $2))
+       ORDER BY is_north_star DESC, priority ASC, created_at ASC
+       LIMIT $3`,
+    [team_id, maxAttempts, opts.limit ?? 50],
+  );
+  return rows.map(rowToBacklogItem);
+}
+
+export interface FleshOutcome {
+  item_id: string;
+  flesh_status: FleshStatus;
+  flesh_source: string;
+  flesh_confidence: number;
+  flesh_error?: string | null;
+  policy_version?: string | null;
+  patch?: FleshPatch | null;
+  /** When true (approved_ready), apply the patch's dispatch fields + promote. */
+  promote?: boolean;
+  approved_by?: string;
+}
+
+/**
+ * Record a flesh result. Always stamps flesh_* bookkeeping and bumps the
+ * attempt counter. When `promote` is set, applies the patch's dispatch fields
+ * and flips readiness_state to `ready` (the auto-ready path — no human gate,
+ * gated by the policy upstream). Otherwise the row stays `needs_review` (held
+ * for Chris's batch) or `draft`. Returns the updated item.
+ */
+export async function recordFleshOutcome(
+  adapter: DbAdapter,
+  outcome: FleshOutcome,
+): Promise<BacklogItem | null> {
+  const item = await getBacklogItem(adapter, outcome.item_id);
+  if (!item) return null;
+  const now = new Date().toISOString();
+  const patch = outcome.patch ?? null;
+  const promote = !!outcome.promote && !!patch;
+
+  const sets: string[] = [];
+  const params: unknown[] = [];
+  const push = (col: string, val: unknown) => {
+    sets.push(`${col} = $${params.length + 1}`);
+    params.push(val);
+  };
+
+  push("flesh_status", outcome.flesh_status);
+  push("flesh_source", outcome.flesh_source);
+  push("flesh_confidence", outcome.flesh_confidence);
+  push("flesh_error", outcome.flesh_error ?? null);
+  push("flesh_attempts", (item.flesh_attempts ?? 0) + 1);
+  push("fleshed_at", now);
+  push("auto_ready_policy_version", outcome.policy_version ?? null);
+  push("flesh_patch_json", patch ? JSON.stringify(patch) : null);
+
+  if (patch) {
+    // Always persist the generated dispatch fields so the row is dispatchable
+    // (or one-click approvable) regardless of the auto-ready decision.
+    push("to_agent", patch.to_agent);
+    push("dispatch_body", patch.dispatch_body);
+    push("risk_class", patch.risk_class);
+    push("write_scope_json", JSON.stringify(patch.write_scope));
+    push("dependencies_json", JSON.stringify(patch.dependencies));
+    push("token_estimate", patch.token_estimate);
+    push("provider", patch.provider);
+    push("runtime", patch.runtime);
+    if (patch.value_score !== null && patch.value_score !== undefined) push("value_score", patch.value_score);
+    push("priority", patch.priority);
+  }
+
+  if (promote) {
+    push("readiness_state", "ready");
+    push("approved_by", outcome.approved_by ?? "continuous-orchestration");
+    push("approved_at", now);
+    push("auto_ready_approved_at", now);
+  }
+
+  push("updated_at", now);
+  params.push(outcome.item_id);
+  await adapter.query(
+    `UPDATE orchestration_backlog_item SET ${sets.join(", ")} WHERE item_id = $${params.length}`,
+    params,
+  );
+  return getBacklogItem(adapter, outcome.item_id);
+}
+
+/** Counts by flesh_status + readiness, for /orchestration/status + the queue. */
+export async function getFleshCounts(
+  adapter: DbAdapter,
+  team_id = "default",
+): Promise<Record<string, number>> {
+  const { rows } = await adapter.query<{ flesh_status: string | null; n: number }>(
+    `SELECT flesh_status, COUNT(*) AS n FROM orchestration_backlog_item
+       WHERE team_id = $1 GROUP BY flesh_status`,
+    [team_id],
+  );
+  const out: Record<string, number> = {};
+  for (const r of rows) out[r.flesh_status ?? "unfleshed"] = Number(r.n);
+  return out;
+}
+
+/** Count of flesh-log rows created since `sinceIso` with a given decision. */
+export async function countFleshLogSince(
+  adapter: DbAdapter,
+  opts: { team_id?: string; since_iso: string; decision?: string },
+): Promise<number> {
+  const params: unknown[] = [opts.team_id ?? "default", opts.since_iso];
+  let sql = `SELECT COUNT(*) AS n FROM orchestration_flesh_log WHERE team_id = $1 AND created_at >= $2`;
+  if (opts.decision) {
+    sql += ` AND decision = $3`;
+    params.push(opts.decision);
+  }
+  const { rows } = await adapter.query<{ n: number }>(sql, params);
+  return rows[0] ? Number(rows[0].n) : 0;
+}
+
+export interface FleshLogInput {
+  item_id: string;
+  team_id?: string;
+  actor_ref: string;
+  source_ref?: string | null;
+  input_hash: string;
+  output_hash?: string | null;
+  decision: string;
+  reason: string;
+  proposed_patch?: FleshPatch | null;
+}
+
+export async function insertFleshLog(adapter: DbAdapter, input: FleshLogInput): Promise<void> {
+  const now = new Date().toISOString();
+  await adapter.query(
+    `INSERT INTO orchestration_flesh_log (
+       flesh_log_id, item_id, team_id, actor_ref, source_ref, input_hash, output_hash,
+       decision, reason, proposed_patch_json, created_at
+     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+    [
+      `coflog_${crypto.randomUUID()}`,
+      input.item_id,
+      input.team_id ?? "default",
+      input.actor_ref,
+      input.source_ref ?? null,
+      input.input_hash,
+      input.output_hash ?? null,
+      input.decision,
+      input.reason,
+      input.proposed_patch ? JSON.stringify(input.proposed_patch) : null,
+      now,
+    ],
+  );
+}
+
+export interface FleshLogRow {
+  flesh_log_id: string;
+  item_id: string;
+  actor_ref: string;
+  source_ref: string | null;
+  input_hash: string;
+  output_hash: string | null;
+  decision: string;
+  reason: string;
+  proposed_patch_json: string | null;
+  created_at: string;
+}
+
+export async function listFleshLog(
+  adapter: DbAdapter,
+  opts: { team_id?: string; item_id?: string; limit?: number },
+): Promise<FleshLogRow[]> {
+  const where: string[] = ["team_id = $1"];
+  const params: unknown[] = [opts.team_id ?? "default"];
+  if (opts.item_id) {
+    where.push(`item_id = $${params.length + 1}`);
+    params.push(opts.item_id);
+  }
+  params.push(opts.limit ?? 100);
+  const { rows } = await adapter.query<FleshLogRow>(
+    `SELECT flesh_log_id, item_id, actor_ref, source_ref, input_hash, output_hash,
+            decision, reason, proposed_patch_json, created_at
+       FROM orchestration_flesh_log WHERE ${where.join(" AND ")}
+       ORDER BY created_at DESC LIMIT $${params.length}`,
+    params,
+  );
+  return rows;
 }
 
 // ── Decision log ─────────────────────────────────────────────────────

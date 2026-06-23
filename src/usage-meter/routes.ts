@@ -26,8 +26,15 @@ export interface UsageMeterRouteOptions {
  * managementApp) and a configured UsageMeterService instance.
  */
 export function mountUsageMeterRoutes(app: Application, opts: UsageMeterRouteOptions): void {
-  app.get("/usage", async (_req: Request, res: Response) => {
+  app.get("/usage", async (req: Request, res: Response) => {
     try {
+      // Gap 2: `?spend_scope=daemon_autonomous|daemon_fleshing` returns the
+      // daemon-attributed report; anything else returns the fleet-global report.
+      const scope = typeof req.query.spend_scope === "string" ? req.query.spend_scope : "fleet";
+      if (scope === "daemon_autonomous" || scope === "daemon_fleshing") {
+        res.json(await opts.service.buildDaemonReport());
+        return;
+      }
       const report = await opts.service.buildReport();
       res.json(report);
     } catch (err) {
@@ -35,6 +42,18 @@ export function mountUsageMeterRoutes(app: Application, opts: UsageMeterRouteOpt
         schema_version: "usage-meter-v2",
         error: err instanceof Error ? err.message : String(err),
         source: "manager-usage-meter",
+      });
+    }
+  });
+
+  // GET /usage/daemon — daemon-attributed spend ledger + emergency-brake gate.
+  app.get("/usage/daemon", async (_req: Request, res: Response) => {
+    try {
+      res.json(await opts.service.buildDaemonReport());
+    } catch (err) {
+      res.status(500).json({
+        schema_version: "daemon-usage.v1",
+        error: err instanceof Error ? err.message : String(err),
       });
     }
   });

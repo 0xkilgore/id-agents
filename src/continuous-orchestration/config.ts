@@ -29,6 +29,44 @@ export interface ContinuousOrchestrationConfig {
   timezone: string;
   /** Emergency kill-switch file. If it exists, the loop halts before any tick. */
   kill_switch_path: string;
+  // ── Daemon SELF-REFUEL (auto-flesh) ──
+  /** Master switch for auto-flesh. False = daemon never fleshes. Default false. */
+  auto_flesh_enabled: boolean;
+  /** Run flesh at a load-point only when READY fuel drops below this. Default 8. */
+  min_ready_fuel: number;
+  /** Max skeletons fleshed per refuel pass. Default 5. */
+  max_flesh_per_tick: number;
+  /** Weekly daemon-attributed ceiling (the emergency-brake companion to daily). */
+  weekly_token_ceiling: number;
+  /** Pause the daemon when usage attribution is degraded (live enforce only). */
+  fail_closed_on_attribution: boolean;
+  /** Deterministic flesher settings. */
+  flesh: FleshConfig;
+}
+
+/** A target lane the flesher can assign generated work to. */
+export interface FleshLane {
+  agent: string;
+  /** Repos/dirs this lane is the single writer for. */
+  write_scopes: string[];
+  /** Track prefixes that route to this lane (e.g. "T-ORCH"). Empty = default. */
+  tracks: string[];
+}
+
+/** Deterministic flesher configuration (project defaults + lane map + caps). */
+export interface FleshConfig {
+  project: string;
+  default_provider: string;
+  default_runtime: string;
+  default_risk_class: "routine" | "build";
+  /** Default weighted-token estimate stamped on a fleshed dispatch. */
+  default_token_estimate: number;
+  /** Per-item max token estimate an auto-ready candidate may carry. */
+  max_token_estimate: number;
+  /** Lane map: the first lane whose `tracks` prefix-matches wins; else default. */
+  lanes: FleshLane[];
+  /** Lane used when no track prefix matches. */
+  default_lane: FleshLane;
 }
 
 function envBool(raw: string | undefined, dflt: boolean): boolean {
@@ -48,6 +86,23 @@ function envFloat(raw: string | undefined, dflt: number): number {
 
 export const DEFAULT_KILL_SWITCH_PATH = `${process.env.HOME ?? ""}/.id-agents/orchestration-paused`;
 
+/** The default Kapelle flesher lane map. Roger owns repo-code lanes. */
+export function defaultFleshConfig(): FleshConfig {
+  const rogerScopes = ["/Users/kilgore/Dropbox/Code/cane/id-agents", "id-agents"];
+  return {
+    project: "kapelle",
+    default_provider: "anthropic",
+    default_runtime: "claude-code-cli",
+    default_risk_class: "build",
+    default_token_estimate: 300_000,
+    max_token_estimate: 2_000_000,
+    lanes: [
+      { agent: "roger", write_scopes: rogerScopes, tracks: ["T-ORCH", "T-CKPT", "T-DEPLOY", "T-MODEL"] },
+    ],
+    default_lane: { agent: "roger", write_scopes: rogerScopes, tracks: [] },
+  };
+}
+
 /** Conservative defaults. Deliberately small so an unattended run can't drain. */
 export function defaultConfig(): ContinuousOrchestrationConfig {
   return {
@@ -62,6 +117,12 @@ export function defaultConfig(): ContinuousOrchestrationConfig {
     cadence_load_points: ["07:15", "12:30", "15:30"],
     timezone: "America/Chicago",
     kill_switch_path: DEFAULT_KILL_SWITCH_PATH,
+    auto_flesh_enabled: false,
+    min_ready_fuel: 8,
+    max_flesh_per_tick: 5,
+    weekly_token_ceiling: 25_000_000,
+    fail_closed_on_attribution: false,
+    flesh: defaultFleshConfig(),
   };
 }
 
@@ -85,5 +146,14 @@ export function loadContinuousOrchestrationConfig(
       : d.cadence_load_points,
     timezone: env.CONTINUOUS_ORCHESTRATION_TZ || d.timezone,
     kill_switch_path: env.CONTINUOUS_ORCHESTRATION_KILL_SWITCH || d.kill_switch_path,
+    auto_flesh_enabled: envBool(env.CONTINUOUS_ORCHESTRATION_AUTO_FLESH_ENABLED, d.auto_flesh_enabled),
+    min_ready_fuel: envInt(env.CONTINUOUS_ORCHESTRATION_MIN_READY_FUEL, d.min_ready_fuel),
+    max_flesh_per_tick: envInt(env.CONTINUOUS_ORCHESTRATION_MAX_FLESH_PER_TICK, d.max_flesh_per_tick),
+    weekly_token_ceiling: envInt(env.CONTINUOUS_ORCHESTRATION_WEEKLY_CEILING, d.weekly_token_ceiling),
+    fail_closed_on_attribution: envBool(
+      env.CONTINUOUS_ORCHESTRATION_FAIL_CLOSED_ON_ATTRIBUTION,
+      d.fail_closed_on_attribution,
+    ),
+    flesh: d.flesh,
   };
 }

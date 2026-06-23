@@ -13,16 +13,23 @@ import {
   upsertAgentUsageRollup,
 } from "./storage.js";
 import { computeDayWindow, computeWeekWindow, rollupEvents } from "./rollup.js";
+import { loadDispatchSpendScopes } from "./dispatch-spend-attribution.js";
 import type {
   AgentUsageEvent,
   AgentUsageRollup,
+  DaemonUsageReport,
   Provider,
+  SpendScope,
   UsageBudgetPolicy,
   UsageGateDecision,
   UsageGateEnforcement,
   UsageGateSnapshot,
   UsageReportV2,
 } from "./types.js";
+
+/** Default daemon-attributed ceilings (the CONTINUOUS_ORCHESTRATION_* caps). */
+export const DEFAULT_DAEMON_DAILY_BUDGET = 5_000_000;
+export const DEFAULT_DAEMON_WEEKLY_BUDGET = 25_000_000;
 
 export interface UsageMeterServiceOptions {
   adapter: DbAdapter;
@@ -35,6 +42,12 @@ export interface UsageMeterServiceOptions {
   concurrencyProvider?: () => Promise<UsageReportV2["concurrency"]> | UsageReportV2["concurrency"];
   /** How fresh the rollups need to be (ms) before we re-roll. Default 30s. */
   refreshIntervalMs?: number;
+  /** Daemon-attributed daily ceiling (the CONTINUOUS_ORCHESTRATION_DAILY_CEILING). */
+  daemonDailyBudget?: number;
+  /** Daemon-attributed weekly ceiling. */
+  daemonWeeklyBudget?: number;
+  /** Pause the daemon when attribution is degraded (live enforce only). */
+  daemonFailClosedOnAttribution?: boolean;
 }
 
 const DEFAULT_REFRESH_MS = 30_000;
@@ -48,6 +61,9 @@ export class UsageMeterService {
   private enforcement: UsageGateEnforcement;
   private concurrencyProvider?: UsageMeterServiceOptions["concurrencyProvider"];
   private refreshIntervalMs: number;
+  private daemonDailyBudget: number;
+  private daemonWeeklyBudget: number;
+  private daemonFailClosedOnAttribution: boolean;
 
   // Cached snapshot for fast scheduler lookups.
   private cachedSnapshot: UsageGateSnapshot | null = null;
@@ -64,6 +80,9 @@ export class UsageMeterService {
     this.enforcement = opts.enforcement;
     this.concurrencyProvider = opts.concurrencyProvider;
     this.refreshIntervalMs = opts.refreshIntervalMs ?? DEFAULT_REFRESH_MS;
+    this.daemonDailyBudget = opts.daemonDailyBudget ?? DEFAULT_DAEMON_DAILY_BUDGET;
+    this.daemonWeeklyBudget = opts.daemonWeeklyBudget ?? DEFAULT_DAEMON_WEEKLY_BUDGET;
+    this.daemonFailClosedOnAttribution = !!opts.daemonFailClosedOnAttribution;
   }
 
   get currentEnforcement(): UsageGateEnforcement {
@@ -283,6 +302,130 @@ export class UsageMeterService {
   }
 
   /**
+   * Build the daemon-attributed usage report (Gap 2). Sums ONLY weighted tokens
+   * caused by continuous-orchestration dispatches (resolved usage event →
+   * dispatch from_actor → spend scope), within the policy day/week. The global
+   * report stays the fleet-wide emergency brake: the daemon hard-pauses if the
+   * global gate is enforce-hard-paused OR daemon spend is over its own cap.
+   */
+  async buildDaemonReport(
+    opts: { dailyBudget?: number; weeklyBudget?: number } = {},
+  ): Promise<DaemonUsageReport> {
+    const nowMs = this.now();
+    const dailyBudget = opts.dailyBudget ?? this.daemonDailyBudget;
+    const weeklyBudget = opts.weeklyBudget ?? this.daemonWeeklyBudget;
+    try {
+      const dayWin = computeDayWindow(nowMs, this.policy.timezone);
+      const weekWin = computeWeekWindow(nowMs, this.policy.timezone);
+      const events = await listRecentAgentUsageEvents(this.adapter, {
+        since_ms: weekWin.start_ms,
+        limit: 200_000,
+      });
+      const dispatchIds = events
+        .map((e) => e.dispatch_id)
+        .filter((d): d is string => typeof d === "string" && d.length > 0);
+      const scopes = await loadDispatchSpendScopes(this.adapter, dispatchIds);
+
+      let dAuto = 0;
+      let dFlesh = 0;
+      let wCombined = 0;
+      let attributed = 0;
+      let unknown = 0;
+      for (const e of events) {
+        if (e.ts < weekWin.start_ms || e.ts >= weekWin.end_ms) continue;
+        let scope: SpendScope;
+        if (!e.dispatch_id) {
+          scope = "fleet";
+        } else {
+          const s = scopes.get(e.dispatch_id);
+          if (s) {
+            scope = s.spend_scope;
+            attributed += 1;
+          } else {
+            scope = "unknown";
+            unknown += 1;
+          }
+        }
+        if (scope !== "daemon_autonomous" && scope !== "daemon_fleshing") continue;
+        wCombined += e.weighted_tokens;
+        if (e.ts >= dayWin.start_ms && e.ts < dayWin.end_ms) {
+          if (scope === "daemon_autonomous") dAuto += e.weighted_tokens;
+          else dFlesh += e.weighted_tokens;
+        }
+      }
+      const dCombined = dAuto + dFlesh;
+
+      // Global emergency brake — already enforce-gated inside buildReport().
+      const global = await this.buildReport();
+      const globalHardPause = global.gate.should_pause_new_dispatches;
+      const overDaily = dailyBudget > 0 && dCombined >= dailyBudget;
+      const overWeekly = weeklyBudget > 0 && wCombined >= weeklyBudget;
+
+      const considered = attributed + unknown;
+      const degraded = considered > 0 && unknown / considered > 0.5;
+      // Fail-closed only under live enforcement when configured (else allow loudly).
+      const attributionPause =
+        degraded && this.daemonFailClosedOnAttribution && this.enforcement === "enforce";
+      const hard_paused = globalHardPause || overDaily || overWeekly || attributionPause;
+
+      const reasonParts: string[] = [];
+      if (globalHardPause) reasonParts.push("fleet global emergency brake hard-paused");
+      if (overDaily) reasonParts.push(`daemon daily ${dCombined} >= ${dailyBudget}`);
+      if (overWeekly) reasonParts.push(`daemon weekly ${wCombined} >= ${weeklyBudget}`);
+      if (attributionPause) reasonParts.push("attribution degraded (fail-closed)");
+
+      return {
+        schema_version: "daemon-usage.v1",
+        generated_at: new Date(nowMs).toISOString(),
+        daily: {
+          autonomous_weighted_tokens: dAuto,
+          fleshing_weighted_tokens: dFlesh,
+          combined_weighted_tokens: dCombined,
+          budget: dailyBudget,
+          percent_consumed: dailyBudget > 0 ? dCombined / dailyBudget : 0,
+        },
+        weekly: {
+          combined_weighted_tokens: wCombined,
+          budget: weeklyBudget,
+          percent_consumed: weeklyBudget > 0 ? wCombined / weeklyBudget : 0,
+        },
+        coverage: {
+          attributed_events: attributed,
+          unknown_events: unknown,
+          confidence: degraded ? "degraded" : "fresh",
+        },
+        gate: {
+          hard_paused,
+          enforcement: this.enforcement,
+          reason: reasonParts.length ? reasonParts.join("; ") : "within daemon budget",
+        },
+      };
+    } catch (err) {
+      // Degraded: never silently charge the daemon. Default allow with loud
+      // reason unless fail-closed under live enforcement.
+      const failClosed = this.daemonFailClosedOnAttribution && this.enforcement === "enforce";
+      return {
+        schema_version: "daemon-usage.v1",
+        generated_at: new Date(nowMs).toISOString(),
+        daily: {
+          autonomous_weighted_tokens: 0,
+          fleshing_weighted_tokens: 0,
+          combined_weighted_tokens: 0,
+          budget: dailyBudget,
+          percent_consumed: 0,
+        },
+        weekly: { combined_weighted_tokens: 0, budget: weeklyBudget, percent_consumed: 0 },
+        coverage: { attributed_events: 0, unknown_events: 0, confidence: "degraded" },
+        gate: {
+          hard_paused: failClosed,
+          enforcement: this.enforcement,
+          reason: `daemon usage report failed: ${err instanceof Error ? err.message : String(err)}`,
+        },
+      };
+    }
+  }
+
+  /**
    * Compute exclusion list for a scheduler claim cycle. Always empty in
    * WARN mode (Chris's overnight mandate).
    */
@@ -434,6 +577,14 @@ export function createUsageMeterService(
       },
     };
   }
+  // Daemon-attributed ceilings — kept in lock-step with the continuous-
+  // orchestration config so /usage/daemon and the daemon cap speak the same
+  // numbers (Gap 2). Same env vars the CO config reads.
+  const daemonDailyBudget = parseEnvInt(opts.env.CONTINUOUS_ORCHESTRATION_DAILY_CEILING, DEFAULT_DAEMON_DAILY_BUDGET);
+  const daemonWeeklyBudget = parseEnvInt(opts.env.CONTINUOUS_ORCHESTRATION_WEEKLY_CEILING, DEFAULT_DAEMON_WEEKLY_BUDGET);
+  const daemonFailClosed = /^(1|true|yes|on)$/i.test(
+    (opts.env.CONTINUOUS_ORCHESTRATION_FAIL_CLOSED_ON_ATTRIBUTION ?? "").trim(),
+  );
   const service = new UsageMeterService({
     adapter: opts.adapter,
     now: opts.now ?? (() => Date.now()),
@@ -442,6 +593,9 @@ export function createUsageMeterService(
     policyDegradedReason: loaded.degraded_reason,
     enforcement,
     concurrencyProvider: opts.concurrencyProvider,
+    daemonDailyBudget,
+    daemonWeeklyBudget,
+    daemonFailClosedOnAttribution: daemonFailClosed,
   });
   return { service, loaded, enforcement };
 }
@@ -449,6 +603,11 @@ export function createUsageMeterService(
 // ─────────────────────────────────────────────────────────────────────
 // helpers
 // ─────────────────────────────────────────────────────────────────────
+
+function parseEnvInt(raw: string | undefined, dflt: number): number {
+  const n = raw === undefined ? NaN : parseInt(raw, 10);
+  return Number.isFinite(n) ? n : dflt;
+}
 
 function emptyRollup(
   agent_id: string,

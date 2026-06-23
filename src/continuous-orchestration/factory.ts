@@ -8,7 +8,7 @@
 import type { DbAdapter } from "../db/db-adapter.js";
 import type { EnqueueInputV2 } from "../dispatch-scheduler/manager-integration.js";
 import type { Provider, Runtime } from "../dispatch-scheduler/types.js";
-import type { UsageReportV2 } from "../usage-meter/types.js";
+import type { DaemonUsageReport, UsageReportV2 } from "../usage-meter/types.js";
 import { ContinuousOrchestrationDaemon } from "./daemon.js";
 import { loadContinuousOrchestrationConfig, type ContinuousOrchestrationConfig } from "./config.js";
 import { listBacklogByState } from "./storage.js";
@@ -24,6 +24,7 @@ interface SchedulerLike {
 
 interface UsageServiceLike {
   buildReport(): Promise<UsageReportV2>;
+  buildDaemonReport(opts?: { dailyBudget?: number; weeklyBudget?: number }): Promise<DaemonUsageReport>;
 }
 
 export interface BuildDaemonOptions {
@@ -70,15 +71,22 @@ export function createContinuousOrchestrationDaemon(opts: BuildDaemonOptions): {
     },
 
     readUsage: async () => {
-      const report = await opts.usageService.buildReport();
+      // Gap 2: the daemon cap now measures DAEMON-attributed spend, not the
+      // fleet-global total. Budgets are passed from the CO config so the report
+      // and the daemon's daily_token_ceiling check speak the same numbers.
+      // The global emergency brake is folded into report.gate.hard_paused.
+      const report = await opts.usageService.buildDaemonReport({
+        dailyBudget: config.daily_token_ceiling,
+        weeklyBudget: config.weekly_token_ceiling,
+      });
       return {
         view: {
-          hard_paused: report.gate.should_pause_new_dispatches,
-          daily_percent: report.gate.daily_percent,
-          weekly_percent: report.gate.weekly_percent,
+          hard_paused: report.gate.hard_paused,
+          daily_percent: report.daily.percent_consumed,
+          weekly_percent: report.weekly.percent_consumed,
           enforcement: report.gate.enforcement,
         },
-        daily_tokens_used: report.usage.daily.weighted_tokens,
+        daily_tokens_used: report.daily.combined_weighted_tokens,
       };
     },
 

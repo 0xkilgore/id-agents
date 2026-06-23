@@ -112,6 +112,48 @@ export interface AgentUsageEvent {
 
 export type WindowKind = "day" | "week";
 
+// ── Daemon-attributed spend (Gap 2) ──────────────────────────────────
+//
+// A usage event's spend scope is resolved from the dispatch that caused it:
+// dispatches the continuous-orchestration daemon enqueued are `daemon_*`;
+// everything else is `fleet`. The daemon's cap measures ONLY its own scopes,
+// so a busy day from Roger/Pipeline/Cane no longer pauses the daemon.
+export type SpendScope =
+  | "fleet"
+  | "daemon_autonomous"
+  | "daemon_fleshing"
+  | "manual_operator"
+  | "unknown";
+
+export interface DaemonUsageReport {
+  schema_version: "daemon-usage.v1";
+  generated_at: string;
+  daily: {
+    autonomous_weighted_tokens: number;
+    fleshing_weighted_tokens: number;
+    combined_weighted_tokens: number;
+    budget: number;
+    percent_consumed: number;
+  };
+  weekly: {
+    combined_weighted_tokens: number;
+    budget: number;
+    percent_consumed: number;
+  };
+  coverage: {
+    attributed_events: number;
+    unknown_events: number;
+    /** "fresh" when attribution resolved cleanly; "degraded" when it didn't. */
+    confidence: "fresh" | "degraded";
+  };
+  gate: {
+    /** True when the daemon must halt: global emergency brake OR over daemon cap. */
+    hard_paused: boolean;
+    enforcement: UsageGateEnforcement;
+    reason: string;
+  };
+}
+
 export interface AgentUsageRollup {
   provider: Provider;
   agent_id: string;

@@ -11,16 +11,23 @@ import type { ContinuousOrchestrationDaemon } from "./daemon.js";
 import type { ContinuousOrchestrationConfig } from "./config.js";
 import type { OrchestrationMode, ReadinessState } from "./types.js";
 import {
+  countFleshLogSince,
   getBacklogItem,
+  getFleshCounts,
   insertBacklogItem,
+  insertFleshLog,
   listBacklogByState,
+  listFleshLog,
   listRecentDecisions,
   promoteToReady,
+  recordFleshOutcome,
+  setItemState,
   updateBacklogFields,
   type NewBacklogItem,
 } from "./storage.js";
 import type { RiskClass } from "./types.js";
 import { parseRoadmapToBacklog } from "./roadmap-import.js";
+import { runFleshPass } from "./flesh-runner.js";
 
 export interface OrchestrationRouteOptions {
   daemon: ContinuousOrchestrationDaemon;
@@ -36,11 +43,21 @@ export function mountContinuousOrchestrationRoutes(app: Application, opts: Orche
   app.get("/orchestration/status", async (_req: Request, res: Response) => {
     try {
       const state = await daemon.getState();
-      const [ready, needsReview, inFlight] = await Promise.all([
+      const [ready, needsReview, inFlight, needsChrisBatch, fleshCounts] = await Promise.all([
         listBacklogByState(adapter, { team_id: teamId, state: "ready" }),
         listBacklogByState(adapter, { team_id: teamId, state: "needs_review" }),
         listBacklogByState(adapter, { team_id: teamId, state: "in_flight" }),
+        listBacklogByState(adapter, { team_id: teamId, state: "needs_chris_batch" }),
+        getFleshCounts(adapter, teamId),
       ]);
+      // Auto-fleshed today = approved_ready flesh-log decisions since local midnight.
+      const startOfDay = new Date();
+      startOfDay.setHours(0, 0, 0, 0);
+      const autoFleshedToday = await countFleshLogSince(adapter, {
+        team_id: teamId,
+        since_iso: startOfDay.toISOString(),
+        decision: "auto_ready",
+      });
       let killSwitch = false;
       try {
         killSwitch = fs.existsSync(config.kill_switch_path);
@@ -62,7 +79,15 @@ export function mountContinuousOrchestrationRoutes(app: Application, opts: Orche
         },
         state,
         kill_switch_active: killSwitch,
-        counts: { ready: ready.length, needs_review: needsReview.length, in_flight: inFlight.length },
+        counts: {
+          ready: ready.length,
+          needs_review: needsReview.length,
+          in_flight: inFlight.length,
+          needs_chris_batch: needsChrisBatch.length,
+          unfleshed: fleshCounts.unfleshed ?? 0,
+          auto_fleshed_today: autoFleshedToday,
+        },
+        flesh: { enabled: config.auto_flesh_enabled, min_ready_fuel: config.min_ready_fuel, by_status: fleshCounts },
       });
     } catch (err) {
       res.status(500).json({ ok: false, error: err instanceof Error ? err.message : String(err) });
@@ -238,6 +263,126 @@ export function mountContinuousOrchestrationRoutes(app: Application, opts: Orche
         inserted += 1;
       }
       res.json({ ok: true, inserted, tracks: parsed.tracks, note: "imported as needs_review; promote to ready via the approval gate" });
+    } catch (err) {
+      res.status(500).json({ ok: false, error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  // ── Auto-flesh (daemon SELF-REFUEL) ──────────────────────────────────
+
+  // POST /orchestration/flesh/run { limit?, dry_run?, item_ids?, actor? }
+  // Run a flesh pass. dry_run=true mutates nothing (returns proposed patches).
+  app.post("/orchestration/flesh/run", async (req: Request, res: Response) => {
+    try {
+      const body = (req.body ?? {}) as {
+        limit?: number;
+        dry_run?: boolean;
+        item_ids?: string[];
+        actor?: string;
+      };
+      const summary = await runFleshPass(adapter, config, {
+        teamId,
+        dry_run: !!body.dry_run,
+        limit: typeof body.limit === "number" ? body.limit : undefined,
+        item_ids: Array.isArray(body.item_ids) ? body.item_ids.map(String) : undefined,
+        actor: typeof body.actor === "string" ? body.actor : "operator",
+      });
+      res.json({ ok: true, ...summary });
+    } catch (err) {
+      res.status(500).json({ ok: false, error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  // GET /orchestration/flesh/queue?state=unfleshed|failed|needs_chris_batch
+  app.get("/orchestration/flesh/queue", async (req: Request, res: Response) => {
+    try {
+      const fleshState = typeof req.query.state === "string" ? req.query.state : undefined;
+      const byStatus = await getFleshCounts(adapter, teamId);
+      // needs_chris_batch is both a readiness_state and a flesh_status; list those rows.
+      const items =
+        fleshState === "needs_chris_batch"
+          ? await listBacklogByState(adapter, { team_id: teamId, state: "needs_chris_batch" })
+          : (await listBacklogByState(adapter, { team_id: teamId, state: "needs_review" })).filter((i) =>
+              fleshState ? i.flesh_status === fleshState : true,
+            );
+      res.json({ ok: true, counts: byStatus, items });
+    } catch (err) {
+      res.status(500).json({ ok: false, error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  // GET /orchestration/flesh/log?item_id=...
+  app.get("/orchestration/flesh/log", async (req: Request, res: Response) => {
+    try {
+      const item_id = typeof req.query.item_id === "string" ? req.query.item_id : undefined;
+      const limit = typeof req.query.limit === "string" ? parseInt(req.query.limit, 10) || 100 : 100;
+      const log = await listFleshLog(adapter, { team_id: teamId, item_id, limit });
+      res.json({ ok: true, log });
+    } catch (err) {
+      res.status(500).json({ ok: false, error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  // POST /orchestration/flesh/:item_id/approve — apply the stored patch + READY.
+  app.post("/orchestration/flesh/:item_id/approve", async (req: Request, res: Response) => {
+    try {
+      const id = String(req.params.item_id);
+      const body = (req.body ?? {}) as { approved_by?: string };
+      const item = await getBacklogItem(adapter, id);
+      if (!item) return res.status(404).json({ ok: false, error: "backlog item not found" });
+      if (!item.flesh_patch) {
+        return res.status(409).json({ ok: false, error: "no stored flesh patch to approve" });
+      }
+      const updated = await recordFleshOutcome(adapter, {
+        item_id: id,
+        flesh_status: "approved_ready",
+        flesh_source: item.flesh_source ?? item.source_refs[0] ?? "roadmap",
+        flesh_confidence: item.flesh_confidence ?? item.flesh_patch.confidence,
+        patch: item.flesh_patch,
+        promote: true,
+        approved_by: typeof body.approved_by === "string" && body.approved_by ? body.approved_by : "chris",
+      });
+      await insertFleshLog(adapter, {
+        item_id: id,
+        team_id: teamId,
+        actor_ref: typeof body.approved_by === "string" && body.approved_by ? body.approved_by : "chris",
+        source_ref: item.flesh_source ?? null,
+        input_hash: id,
+        decision: "approved_by_chris",
+        reason: "manual approval of needs_chris_batch item",
+        proposed_patch: item.flesh_patch,
+      });
+      res.json({ ok: true, item: updated });
+    } catch (err) {
+      res.status(500).json({ ok: false, error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  // POST /orchestration/flesh/:item_id/reject — leave un-dispatchable; mark failed.
+  app.post("/orchestration/flesh/:item_id/reject", async (req: Request, res: Response) => {
+    try {
+      const id = String(req.params.item_id);
+      const body = (req.body ?? {}) as { reason?: string; actor?: string };
+      const item = await getBacklogItem(adapter, id);
+      if (!item) return res.status(404).json({ ok: false, error: "backlog item not found" });
+      await setItemState(adapter, id, "needs_review");
+      const updated = await recordFleshOutcome(adapter, {
+        item_id: id,
+        flesh_status: "failed",
+        flesh_source: item.flesh_source ?? "roadmap",
+        flesh_confidence: item.flesh_confidence ?? 0,
+        flesh_error: typeof body.reason === "string" ? body.reason : "rejected by operator",
+      });
+      await insertFleshLog(adapter, {
+        item_id: id,
+        team_id: teamId,
+        actor_ref: typeof body.actor === "string" && body.actor ? body.actor : "chris",
+        source_ref: item.flesh_source ?? null,
+        input_hash: id,
+        decision: "rejected",
+        reason: typeof body.reason === "string" ? body.reason : "rejected by operator",
+      });
+      res.json({ ok: true, item: updated });
     } catch (err) {
       res.status(500).json({ ok: false, error: err instanceof Error ? err.message : String(err) });
     }

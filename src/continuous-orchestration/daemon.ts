@@ -15,7 +15,7 @@ import type { DbAdapter } from "../db/db-adapter.js";
 import type { ContinuousOrchestrationConfig } from "./config.js";
 import type { BacklogItem, DecisionRecord, OrchestrationMode, UsageGateView } from "./types.js";
 import { orderCandidates } from "./selection.js";
-import { tickAdmitLimit } from "./cadence.js";
+import { tickAdmitLimit, isLoadPoint } from "./cadence.js";
 import { planAdmission, evaluateStall, type AdmissionContext } from "./admission.js";
 import {
   appendDecisions,
@@ -26,6 +26,7 @@ import {
   setItemState,
   setMode,
 } from "./storage.js";
+import { runFleshPass, type FleshRunSummary } from "./flesh-runner.js";
 import { sendTelegramAlert, type AlertSender } from "./telegram.js";
 
 export interface DaemonDeps {
@@ -57,6 +58,8 @@ export interface TickResult {
   zero_ticks: number;
   stall_alert: boolean;
   auto_paused: { reason: string } | null;
+  /** Auto-flesh refuel summary, when a refuel pass ran this tick. */
+  refuel: FleshRunSummary | null;
   decisions: DecisionRecord[];
 }
 
@@ -100,6 +103,19 @@ export class ContinuousOrchestrationDaemon {
     const { view: usage, daily_tokens_used } = await this.deps.readUsage();
     const { count: in_flight, active_write_scopes } = await this.deps.readInFlight();
 
+    // Daemon SELF-REFUEL: when READY fuel runs low — at a batch load-point or
+    // when fully dry — flesh skeletons into dispatchable READY items BEFORE
+    // admission, so a near-empty backlog refuels itself without operator action.
+    // Mutates the backlog only when the daemon is live (dry-run computes/logs).
+    const refuel = await this.maybeRefuel({
+      config,
+      mode: state.mode,
+      killSwitch,
+      hardPaused: usage.hard_paused,
+      nowMs,
+      dailyTokensUsed: daily_tokens_used,
+    });
+
     const ready = await listReadyItems(this.deps.adapter, this.teamId);
     const done_item_ids = await listDoneItemIds(this.deps.adapter, this.teamId);
     const ordered = orderCandidates(ready);
@@ -118,6 +134,24 @@ export class ContinuousOrchestrationDaemon {
     const plan = planAdmission(ordered, ctx, config);
     const decisions: DecisionRecord[] = [];
     const admitted: Array<{ item_id: string; dispatch_phid: string | null }> = [];
+
+    if (refuel) {
+      decisions.push({
+        item_id: null,
+        action: "refuel",
+        reason:
+          `auto-flesh refuel${refuel.dry_run ? " (dry-run)" : ""}: ` +
+          `considered ${refuel.considered}, +${refuel.auto_ready} ready, ` +
+          `${refuel.needs_chris_batch} held for batch, ${refuel.failed} failed`,
+        metadata: {
+          dry_run: refuel.dry_run,
+          considered: refuel.considered,
+          auto_ready: refuel.auto_ready,
+          needs_chris_batch: refuel.needs_chris_batch,
+          failed: refuel.failed,
+        },
+      });
+    }
 
     if (plan.halt) {
       decisions.push({ item_id: null, action: "guardrail_halt", reason: plan.halt.reason });
@@ -203,8 +237,47 @@ export class ContinuousOrchestrationDaemon {
       zero_ticks: stall.zero_ticks,
       stall_alert: stall.alert,
       auto_paused,
+      refuel,
       decisions,
     };
+  }
+
+  /**
+   * Auto-flesh refuel gate. Runs a flesh pass when the feature is enabled, the
+   * daemon is running/unblocked, and READY fuel is below the threshold at a
+   * batch load-point (or fully dry). Returns the summary, or null when skipped.
+   * Mirrors the daemon's dry-run posture: a dry-run daemon fleshes dry.
+   */
+  private async maybeRefuel(args: {
+    config: DaemonDeps["config"];
+    mode: OrchestrationMode;
+    killSwitch: boolean;
+    hardPaused: boolean;
+    nowMs: number;
+    dailyTokensUsed: number;
+  }): Promise<FleshRunSummary | null> {
+    const { config } = args;
+    if (!config.auto_flesh_enabled) return null;
+    if (args.mode !== "running" || args.killSwitch || args.hardPaused) return null;
+
+    const ready = await listReadyItems(this.deps.adapter, this.teamId);
+    if (ready.length >= config.min_ready_fuel) return null;
+    // Load-point focus: flesh at a batch point, or whenever fuel is fully dry.
+    if (!isLoadPoint(args.nowMs, config) && ready.length > 0) return null;
+
+    const remaining = Math.max(0, config.daily_token_ceiling - args.dailyTokensUsed);
+    try {
+      return await runFleshPass(this.deps.adapter, config, {
+        teamId: this.teamId,
+        dry_run: config.dry_run,
+        limit: config.max_flesh_per_tick,
+        actor: "continuous-orchestration",
+        remaining_daemon_budget: remaining,
+      });
+    } catch (err) {
+      console.error("[orchestration] refuel error:", err);
+      return null;
+    }
   }
 
   /** Start the interval loop. No-op (with a log) when disabled. */

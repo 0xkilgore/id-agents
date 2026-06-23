@@ -31,6 +31,38 @@ export type ReadinessState =
 
 export type RiskClass = "routine" | "build" | "external" | "destructive" | "costly" | "novel";
 
+/**
+ * Auto-flesh lifecycle (daemon SELF-REFUEL). An imported roadmap skeleton lands
+ * `unfleshed`; the flesher fills its dispatch fields (`fleshed`), the auto-ready
+ * policy promotes safe rows (`approved_ready` → readiness_state `ready`) or holds
+ * risky/ambiguous ones for one-click Chris approval (`needs_chris_batch`).
+ */
+export type FleshStatus =
+  | "unfleshed"
+  | "fleshing"
+  | "fleshed"
+  | "approved_ready"
+  | "needs_chris_batch"
+  | "failed"
+  | "stale";
+
+/** The dispatch fields the flesher generates for an unfleshed skeleton. */
+export interface FleshPatch {
+  to_agent: string;
+  dispatch_body: string;
+  risk_class: RiskClass;
+  write_scope: string[];
+  dependencies: string[];
+  token_estimate: number;
+  provider: string;
+  runtime: string;
+  value_score: number | null;
+  priority: number;
+  confidence: number;
+  ready_decision: "auto_ready" | "needs_chris_batch";
+  reason: string;
+}
+
 /** A dispatchable unit of work the daemon can fire. */
 export interface BacklogItem {
   item_id: string;
@@ -63,6 +95,17 @@ export interface BacklogItem {
   last_dispatch_phid: string | null;
   /** Actor who last edited this item via PATCH (actor-attributed updates). */
   updated_by: string | null;
+  // ── Auto-flesh (daemon SELF-REFUEL) ──
+  flesh_status: FleshStatus;
+  flesh_source: string | null;
+  flesh_confidence: number | null;
+  flesh_error: string | null;
+  flesh_attempts: number;
+  fleshed_at: string | null;
+  auto_ready_approved_at: string | null;
+  auto_ready_policy_version: string | null;
+  /** The proposed FleshPatch (stored for one-click approve of needs_chris_batch). */
+  flesh_patch: FleshPatch | null;
   created_at: string;
   updated_at: string;
 }
@@ -77,7 +120,8 @@ export interface DecisionRecord {
     | "held"
     | "guardrail_halt"
     | "stall_alert"
-    | "auto_pause";
+    | "auto_pause"
+    | "refuel";
   reason: string;
   dispatch_phid?: string | null;
   metadata?: Record<string, unknown>;

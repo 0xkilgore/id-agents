@@ -628,6 +628,55 @@ export async function migrateSqlite(adapter: SqliteAdapter): Promise<void> {
     // Column already exists in upgraded databases.
   }
 
+  // Daemon SELF-REFUEL (auto-flesh) — turn imported roadmap skeletons into
+  // dispatch-ready READY items automatically. All additive, default-safe,
+  // idempotent. See cto/output/2026-06-22-daemon-autonomous-engine-gap-scope.md.
+  for (const stmt of [
+    `ALTER TABLE orchestration_backlog_item ADD COLUMN flesh_status TEXT NOT NULL DEFAULT 'unfleshed'`,
+    `ALTER TABLE orchestration_backlog_item ADD COLUMN flesh_source TEXT`,
+    `ALTER TABLE orchestration_backlog_item ADD COLUMN flesh_confidence REAL`,
+    `ALTER TABLE orchestration_backlog_item ADD COLUMN flesh_error TEXT`,
+    `ALTER TABLE orchestration_backlog_item ADD COLUMN flesh_attempts INTEGER NOT NULL DEFAULT 0`,
+    `ALTER TABLE orchestration_backlog_item ADD COLUMN fleshed_at TEXT`,
+    `ALTER TABLE orchestration_backlog_item ADD COLUMN auto_ready_approved_at TEXT`,
+    `ALTER TABLE orchestration_backlog_item ADD COLUMN auto_ready_policy_version TEXT`,
+    `ALTER TABLE orchestration_backlog_item ADD COLUMN flesh_patch_json TEXT`,
+    // Daemon-attributed usage (Gap 2): spend-scope attribution on usage events.
+    `ALTER TABLE agent_usage_event ADD COLUMN initiator_actor TEXT`,
+    `ALTER TABLE agent_usage_event ADD COLUMN orchestration_tick_id TEXT`,
+    `ALTER TABLE agent_usage_event ADD COLUMN orchestration_item_id TEXT`,
+    `ALTER TABLE agent_usage_event ADD COLUMN spend_scope TEXT NOT NULL DEFAULT 'fleet'`,
+  ]) {
+    try {
+      adapter.exec(stmt);
+    } catch {
+      // Column already exists in upgraded databases.
+    }
+  }
+  adapter.exec(`
+    CREATE INDEX IF NOT EXISTS orchestration_backlog_flesh_idx
+      ON orchestration_backlog_item(team_id, readiness_state, flesh_status, priority, created_at);
+    CREATE INDEX IF NOT EXISTS agent_usage_event_spend_scope_ts_idx
+      ON agent_usage_event(spend_scope, ts);
+
+    -- Append-only audit of every flesh decision (one row per item per attempt).
+    CREATE TABLE IF NOT EXISTS orchestration_flesh_log (
+      flesh_log_id        TEXT PRIMARY KEY,
+      item_id             TEXT NOT NULL,
+      team_id             TEXT NOT NULL,
+      actor_ref           TEXT NOT NULL,
+      source_ref          TEXT,
+      input_hash          TEXT NOT NULL,
+      output_hash         TEXT,
+      decision            TEXT NOT NULL,
+      reason              TEXT NOT NULL,
+      proposed_patch_json TEXT,
+      created_at          TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS orchestration_flesh_log_item_idx
+      ON orchestration_flesh_log(team_id, item_id, created_at);
+  `);
+
   // Tasks: add uuid column for short-id lookups (#xxxxxxxx)
   try {
     adapter.exec(`ALTER TABLE tasks ADD COLUMN uuid TEXT`);
