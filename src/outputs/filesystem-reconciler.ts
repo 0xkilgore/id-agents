@@ -38,6 +38,33 @@ export interface FilesystemArtifactRoot {
   roots?: readonly string[];
 }
 
+// Directory names we never descend into while scanning artifact roots: VCS
+// internals, dependency trees, and — critically — the manager's own git
+// worktree custody dir. Stale build worktrees under `.worktrees/` (and sibling
+// `<repo>-*` worktrees) hold WEEKS-OLD copies of every artifact dir; scanning
+// them resurfaces ancient .md files as freshly-"landed" artifacts.
+const EXCLUDED_SCAN_DIRS = new Set([".worktrees", ".git", "node_modules"]);
+
+/**
+ * A working directory is a NON-canonical git worktree when its `.git` entry is
+ * a regular FILE (a `gitdir:` pointer) rather than a directory. The canonical
+ * checkout has a `.git` directory. This single test excludes BOTH
+ * `<repo>/.worktrees/<name>` build worktrees and sibling `<repo>-<suffix>`
+ * worktrees, so old worktree copies never surface as landings.
+ */
+export function isLinkedWorktree(workingDirectory: string): boolean {
+  try {
+    return lstatSync(path.join(workingDirectory, ".git")).isFile();
+  } catch {
+    return false;
+  }
+}
+
+/** True if any path segment is `.worktrees` (a worktree-custody subtree). */
+export function isUnderWorktreeCustody(p: string): boolean {
+  return path.resolve(p).split(path.sep).includes(".worktrees");
+}
+
 /** The default scan roots (project ROOT + named artifact dirs) — for introspection. */
 export function artifactRootIds(): readonly string[] {
   return DEFAULT_FILESYSTEM_ARTIFACT_ROOTS;
@@ -131,6 +158,7 @@ function walkFiles(rootDir: string, maxFiles: number, out: string[]): void {
     }
     if (lst.isSymbolicLink()) continue;
     if (entry.isDirectory()) {
+      if (EXCLUDED_SCAN_DIRS.has(entry.name)) continue;
       walkFiles(abs, maxFiles, out);
     } else if (entry.isFile()) {
       out.push(abs);
@@ -167,6 +195,13 @@ export async function reconcileFilesystemArtifacts(
     }
     const workingDirectory = path.resolve(configuredRoot.workingDirectory);
     if (!existsSync(workingDirectory)) {
+      result.skipped++;
+      continue;
+    }
+    // Never scan a non-canonical git worktree or anything under a `.worktrees/`
+    // custody subtree: those are stale build copies and would resurface
+    // weeks-old artifacts as "landed today".
+    if (isUnderWorktreeCustody(workingDirectory) || isLinkedWorktree(workingDirectory)) {
       result.skipped++;
       continue;
     }

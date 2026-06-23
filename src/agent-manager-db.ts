@@ -14,7 +14,7 @@ import express from 'express';
 import crypto from 'crypto';
 import path from 'path';
 import { createServer as createHttpServer, type Server as HttpServer } from 'http';
-import { existsSync, mkdirSync, rmSync, readFileSync, writeFileSync, readdirSync, copyFileSync, statSync, openSync, closeSync } from 'fs';
+import { existsSync, mkdirSync, rmSync, readFileSync, writeFileSync, readdirSync, copyFileSync, statSync, lstatSync, openSync, closeSync } from 'fs';
 import { execFileSync, spawn } from 'child_process';
 import { fileURLToPath } from 'url';
 import { WebSocketServer, WebSocket } from 'ws';
@@ -484,6 +484,7 @@ export class AgentManagerDb {
   private remoteProbeInterval: NodeJS.Timeout | null = null;
   private querySweeperInterval: NodeJS.Timeout | null = null;
   private filesystemArtifactReconcileInterval: NodeJS.Timeout | null = null;
+  private worktreeReaperInterval: NodeJS.Timeout | null = null;
   private retentionService: RetentionService | null = null;
   private checkinService: CheckinService | null = null;
   private supervisorWatcher: { stop(): void } | null = null;
@@ -1276,6 +1277,19 @@ export class AgentManagerDb {
           .filter((e) => e.isDirectory() && !e.name.startsWith('.') && e.name !== 'node_modules')
           .map((e) => `${parent}/${e.name}`);
       }
+      // Drop non-canonical git worktrees (sibling `<repo>-*` checkouts and
+      // anything under a `.worktrees/` subtree): a linked worktree has a `.git`
+      // FILE (gitdir pointer), the canonical checkout has a `.git` DIRECTORY.
+      // Scanning stale worktree copies resurfaces weeks-old artifacts as
+      // "landed today" (P0 worktree-explosion fix).
+      dirs = dirs.filter((d) => {
+        if (d.split('/').includes('.worktrees')) return false;
+        try {
+          return !lstatSync(`${d}/.git`).isFile();
+        } catch {
+          return true; // no .git (plain project dir) — keep
+        }
+      });
       return dirs.map((d) => ({ agent: `project:${d.split('/').filter(Boolean).pop()}`, workingDirectory: d }));
     } catch {
       return [];
@@ -1316,6 +1330,38 @@ export class AgentManagerDb {
     runFull();
     this.filesystemArtifactReconcileInterval = setInterval(runFull, intervalMs);
     this.filesystemArtifactReconcileInterval.unref?.();
+  }
+
+  // P0 worktree-explosion guard: periodically reap merged + tracked-clean build
+  // worktrees from every protected root so they cannot accumulate (50 stale
+  // worktrees had built up, resurfacing weeks-old artifacts as "landed"). Only
+  // removes worktrees whose branch is fully merged into the root's canonical
+  // branch AND carry no uncommitted tracked changes — in-flight builds (ahead of
+  // base, or dirty) are always kept. Disable with WORKTREE_REAPER_ENABLED=false.
+  private startWorktreeReaper(): void {
+    if (this.worktreeReaperInterval) return;
+    if (String(process.env.WORKTREE_REAPER_ENABLED ?? 'true').toLowerCase() === 'false') return;
+    const intervalMs = Number(process.env.WORKTREE_REAPER_INTERVAL_MS || 6 * 60 * 60 * 1000);
+    const runReap = async () => {
+      try {
+        const [{ RepoRegistry }, { reapMergedWorktrees }] = await Promise.all([
+          import('./workspaces/repo-registry.js'),
+          import('./workspaces/reaper.js'),
+        ]);
+        for (const entry of RepoRegistry.load().list()) {
+          if (!existsSync(entry.root)) continue;
+          const r = reapMergedWorktrees(entry.root, { base: entry.intended_canonical_branch });
+          if (r.removed > 0) {
+            console.log(`[Manager] worktree reaper: removed ${r.removed} merged worktree(s) from ${entry.repo_name} (kept ${r.kept})`);
+          }
+        }
+      } catch (err) {
+        console.warn('[Manager] worktree reaper failed:', err instanceof Error ? err.message : String(err));
+      }
+    };
+    void runReap();
+    this.worktreeReaperInterval = setInterval(() => { void runReap(); }, intervalMs);
+    this.worktreeReaperInterval.unref?.();
   }
 
   /**
@@ -10260,7 +10306,8 @@ export class AgentManagerDb {
               : undefined,
           });
           this.startFilesystemArtifactReconciler(runFilesystemReconcile);
-          console.log('[Manager] Kapelle B11 outputs routes mounted (/outputs/inbox, /artifacts/:id/*) with P3 emit target + B2 comment auto-dispatch + filesystem reconciler');
+          this.startWorktreeReaper();
+          console.log('[Manager] Kapelle B11 outputs routes mounted (/outputs/inbox, /artifacts/:id/*) with P3 emit target + B2 comment auto-dispatch + filesystem reconciler + worktree reaper');
         } catch (err) {
           console.warn('[Manager] B11 outputs routes failed to mount:', err instanceof Error ? err.message : String(err));
         }

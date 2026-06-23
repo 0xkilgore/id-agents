@@ -54,3 +54,11 @@ export {
   type DirtySeverity,
   type SampleOptions,
 } from "./monitor.js";
+
+export {
+  reapMergedWorktrees,
+  type ReapResult,
+  type ReapedWorktree,
+  type ReapOptions,
+  type ReapAction,
+} from "./reaper.js";
