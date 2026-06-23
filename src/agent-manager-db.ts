@@ -95,6 +95,8 @@ import {
   readDispatches,
   readReconciliation,
   sweepConstrainedProviderDead,
+  failedDispatchesWithin,
+  FAILED_24H_WINDOW_MS,
 } from './dispatch-scheduler/read-model.js';
 import {
   parsePromotionEnforcement,
@@ -3342,6 +3344,40 @@ export class AgentManagerDb {
           team: teamName,
           status,
           limit,
+          count: dispatches.length,
+          dispatches,
+          items: dispatches,
+        });
+      } catch (err) {
+        return res.status(500).json({
+          ok: false,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    });
+
+    // GET /dispatches/failed-24h — dispatches that FAILED in the trailing 24h
+    // (STUB-S6 / dashboard page.tsx:270). Registered before /dispatches/:id so
+    // the literal "failed-24h" segment is not captured as a dispatch id.
+    // ?window_hours overrides the 24h window (1..168, clamped).
+    this.managementApp.get('/dispatches/failed-24h', async (req, res) => {
+      try {
+        const limit = parseReadLimit(req.query.limit, { defaultLimit: 200, maxLimit: 500 });
+        const hoursRaw = Number(req.query.window_hours);
+        const windowMs = Number.isFinite(hoursRaw) && hoursRaw > 0
+          ? Math.min(168, hoursRaw) * 60 * 60 * 1000
+          : FAILED_24H_WINDOW_MS;
+        const { id: teamId, name: teamName } = await this.getTeam(req);
+        const now = new Date().toISOString();
+        // Read the terminal page, then keep only rows that failed in-window.
+        const terminal = await readDispatches(this.db.adapter, teamId, 'terminal', limit, this.dispatchDeriveOpts());
+        const dispatches = failedDispatchesWithin(terminal, now, windowMs);
+        return res.json({
+          ok: true,
+          team: teamName,
+          window_hours: Math.round(windowMs / (60 * 60 * 1000)),
+          since: new Date(Date.parse(now) - windowMs).toISOString(),
+          now,
           count: dispatches.length,
           dispatches,
           items: dispatches,

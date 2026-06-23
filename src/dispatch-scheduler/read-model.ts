@@ -174,6 +174,34 @@ export function parseReadLimit(raw: unknown, opts: { defaultLimit?: number; maxL
   return Math.min(maxLimit, Math.floor(n));
 }
 
+/** Trailing window for the failed-24h dashboard route (24h in ms). */
+export const FAILED_24H_WINDOW_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Filter read-rows to dispatches that FAILED within `[now - windowMs, now]`.
+ *
+ * "failed" = the raw terminal status `'failed'`. Auto-recovered rows are
+ * flipped to status `'done'` upstream (see `recovery_classification`), so this
+ * correctly counts only dispatches that are still failed — the trailing-24h
+ * count the dashboard wants (STUB-S6 / page.tsx:270 TODO). The failure instant
+ * is `completed_at` (the terminal time) falling back to `updated_at`. Rows with
+ * an unparseable `now` or timestamp are excluded. Pure + deterministic.
+ */
+export function failedDispatchesWithin(
+  rows: DispatchReadRow[],
+  now: string,
+  windowMs: number = FAILED_24H_WINDOW_MS,
+): DispatchReadRow[] {
+  const nowMs = Date.parse(now);
+  if (!Number.isFinite(nowMs)) return [];
+  const cutoff = nowMs - windowMs;
+  return rows.filter((r) => {
+    if (r.status !== 'failed') return false;
+    const ts = Date.parse(r.completed_at ?? r.updated_at);
+    return Number.isFinite(ts) && ts >= cutoff;
+  });
+}
+
 export async function readDispatches(
   adapter: DbAdapterLike,
   teamId: string,
