@@ -93,6 +93,7 @@ import {
   readDispatchHealth,
   readDispatches,
   readReconciliation,
+  sweepConstrainedProviderDead,
 } from './dispatch-scheduler/read-model.js';
 import {
   parsePromotionEnforcement,
@@ -984,6 +985,16 @@ export class AgentManagerDb {
    */
   private getBuildStatus(): BuildStatus {
     return getBuildStatusCached({ repoDir: process.cwd(), distDir: __dirname });
+  }
+
+  /**
+   * T-RECON.2: classification options for the dispatch read-model. Threads the
+   * model-policy constrained_providers so a failure on an intentionally-disabled
+   * provider (e.g. openai under Codex Light) mootes out of NEEDS-YOU instead of
+   * sitting forever. Empty when no policy is loaded (pre-D1 behavior).
+   */
+  private dispatchDeriveOpts(): { constrainedProviders?: string[] } {
+    return this.modelPolicy ? { constrainedProviders: this.modelPolicy.constrainedProviders() } : {};
   }
 
   /**
@@ -2436,6 +2447,77 @@ export class AgentManagerDb {
     });
 
     // ────────────────────────────────────────────────────────────────
+    // T-RECON.2 operator actions (Regina wires the UI to these). Admin-gated
+    // (loopback + X-Id-Admin:1). When the auto-rules don't catch a dead
+    // failure, Chris files it himself: moot/dismiss, retry, or reassign.
+    // ────────────────────────────────────────────────────────────────
+    const requireScheduler = (res: express.Response): boolean => {
+      if (!this.dispatchScheduler) {
+        res.status(503).json({ ok: false, error: 'dispatch_scheduler_not_initialised' });
+        return false;
+      }
+      return true;
+    };
+
+    // POST /dispatches/:id/moot — dismiss a dead failure out of NEEDS-YOU.
+    this.managementApp.post('/dispatches/:dispatch_id/moot', async (req, res) => {
+      if (!this.isAdminRequest(req)) return res.status(403).json({ ok: false, error: 'unauthorized', code: 'unauthorized' });
+      if (!requireScheduler(res)) return;
+      try {
+        const dispatchIdRaw = normalizeDispatchIdInput(req.params.dispatch_id);
+        const doc = dispatchIdRaw ? await resolveDispatchDocForMark(dispatchIdRaw) : null;
+        if (!doc) return res.status(404).json({ ok: false, error: `dispatch not found: ${dispatchIdRaw}` });
+        const reason = typeof req.body?.reason === 'string' && req.body.reason.trim()
+          ? req.body.reason.trim()
+          : 'operator dismissed (moot)';
+        const updated = await this.dispatchScheduler!.reactor.markMoot(doc.dispatch_phid, reason);
+        return res.json({ ok: true, dispatch_phid: doc.dispatch_phid, recovery_status: 'moot', dispatch: updated });
+      } catch (err) {
+        return res.status(500).json({ ok: false, error: err instanceof Error ? err.message : String(err) });
+      }
+    });
+
+    // POST /dispatches/:id/retry — re-enqueue the same work; supersede the old.
+    // POST /dispatches/:id/reassign { to_agent } — re-enqueue to a new agent.
+    const retryOrReassign = (kind: 'retry' | 'reassign') => async (req: express.Request, res: express.Response) => {
+      if (!this.isAdminRequest(req)) return res.status(403).json({ ok: false, error: 'unauthorized', code: 'unauthorized' });
+      if (!requireScheduler(res)) return;
+      try {
+        const dispatchIdRaw = normalizeDispatchIdInput(req.params.dispatch_id);
+        const doc = dispatchIdRaw ? await resolveDispatchDocForMark(dispatchIdRaw) : null;
+        if (!doc) return res.status(404).json({ ok: false, error: `dispatch not found: ${dispatchIdRaw}` });
+        let toAgent = doc.to_agent;
+        if (kind === 'reassign') {
+          const requested = typeof req.body?.to_agent === 'string' ? req.body.to_agent.trim() : '';
+          if (!requested) return res.status(400).json({ ok: false, error: 'to_agent required', code: 'missing_to_agent' });
+          toAgent = requested;
+        }
+        // Enqueue a fresh dispatch with the original payload. Runtime is left
+        // unpinned so the D1 model policy picks the lane (Codex Light) — a
+        // retried Codex-limit failure routes to Claude automatically.
+        const enq = await this.dispatchScheduler!.enqueue({
+          to_agent: toAgent,
+          from_actor: `operator:${kind}`,
+          subject: doc.subject,
+          message: doc.body_markdown,
+        });
+        const reason = `${kind} → ${enq.dispatch_phid}${kind === 'reassign' ? ` (reassigned to ${toAgent})` : ''}`;
+        await this.dispatchScheduler!.reactor.markSuperseded(doc.dispatch_phid, enq.dispatch_phid, reason);
+        return res.json({
+          ok: true,
+          superseded_dispatch_phid: doc.dispatch_phid,
+          new_dispatch_phid: enq.dispatch_phid,
+          new_query_id: enq.query_id,
+          to_agent: toAgent,
+        });
+      } catch (err) {
+        return res.status(500).json({ ok: false, error: err instanceof Error ? err.message : String(err) });
+      }
+    };
+    this.managementApp.post('/dispatches/:dispatch_id/retry', retryOrReassign('retry'));
+    this.managementApp.post('/dispatches/:dispatch_id/reassign', retryOrReassign('reassign'));
+
+    // ────────────────────────────────────────────────────────────────
     // Spec 054 v2 — agent clarification protocol.
     //   POST /agent-needs-input  : agent pauses on a question
     //   POST /agent-resume       : manager answers, agent resumes
@@ -3253,7 +3335,7 @@ export class AgentManagerDb {
         }
         const limit = parseReadLimit(req.query.limit);
         const { id: teamId, name: teamName } = await this.getTeam(req);
-        const dispatches = await readDispatches(this.db.adapter, teamId, status, limit);
+        const dispatches = await readDispatches(this.db.adapter, teamId, status, limit, this.dispatchDeriveOpts());
         return res.json({
           ok: true,
           team: teamName,
@@ -3542,7 +3624,7 @@ export class AgentManagerDb {
     this.managementApp.get('/dispatches/:dispatch_id', async (req, res) => {
       try {
         const { id: teamId, name: teamName } = await this.getTeam(req);
-        const dispatch = await readDispatchById(this.db.adapter, teamId, req.params.dispatch_id);
+        const dispatch = await readDispatchById(this.db.adapter, teamId, req.params.dispatch_id, this.dispatchDeriveOpts());
         if (!dispatch) {
           return res.status(404).json({ ok: false, error: 'dispatch_not_found' });
         }
@@ -9790,6 +9872,21 @@ export class AgentManagerDb {
               `[Manager] D1 model policy loaded (source=${this.modelPolicy.config.source}, ` +
                 `constrained=${this.modelPolicy.constrainedProviders().join(',')})`,
             );
+            // T-RECON.2 one-time sweep: durably moot the existing dead
+            // constrained-provider failures (the ~12 Codex "usage limit" ghosts)
+            // so they clear out of NEEDS-YOU on this deploy. Best-effort.
+            try {
+              const swept = await sweepConstrainedProviderDead(
+                this.db.adapter,
+                defaultTeamId,
+                this.modelPolicy.constrainedProviders(),
+              );
+              if (swept > 0) {
+                console.log(`[Manager] T-RECON.2 swept ${swept} dead constrained-provider failure(s) → moot`);
+              }
+            } catch (err) {
+              console.warn('[Manager] T-RECON.2 dead-failure sweep failed:', err instanceof Error ? err.message : String(err));
+            }
             this.dispatchScheduler = new SchedulerHandle({
               adapter: this.db.adapter as SqliteAdapter,
               teamId: defaultTeamId,

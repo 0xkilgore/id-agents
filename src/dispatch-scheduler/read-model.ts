@@ -28,6 +28,8 @@ export interface DispatchReadRow {
   updated_at: string;
   failure_kind: string | null;
   failure_detail: string | null;
+  // T-RECON.2: the superseding dispatch_phid when this failed work was redone.
+  supersede_link: string | null;
   needs_input: {
     clarification_id: string | null;
     active: unknown | null;
@@ -154,6 +156,7 @@ interface DispatchDbRow {
   recovery_reason: string | null;
   side_effect: string | null;
   allow_auto_retry: number | null;
+  supersede_link: string | null;
 }
 
 export function parseDispatchReadStatus(raw: unknown): DispatchReadStatus | null {
@@ -176,6 +179,7 @@ export async function readDispatches(
   teamId: string,
   status: DispatchReadStatus,
   limit: number,
+  opts: DeriveOptions = {},
 ): Promise<DispatchReadRow[]> {
   const statuses = statusesForFilter(status);
   const placeholders = statuses.map(() => '?').join(', ');
@@ -189,7 +193,7 @@ export async function readDispatches(
             promotion_required_reason, promotion_input_json,
             promotion_result_json, result_json, artifact_path,
             recovery_status, recovery_attempts, recovery_reason,
-            side_effect, allow_auto_retry
+            side_effect, allow_auto_retry, supersede_link
        FROM dispatch_scheduler_queue
        WHERE team_id = ? AND status IN (${placeholders})
        ORDER BY COALESCE(completed_at, started_at, updated_at, not_before_at) DESC,
@@ -197,13 +201,14 @@ export async function readDispatches(
        LIMIT ?`,
     [teamId, ...statuses, limit],
   );
-  return rows.map(rowToDispatch);
+  return rows.map((row) => rowToDispatch(row, opts));
 }
 
 export async function readDispatchById(
   adapter: DbAdapterLike,
   teamId: string,
   dispatchId: string,
+  opts: DeriveOptions = {},
 ): Promise<DispatchReadRow | null> {
   const { rows } = await adapter.query<DispatchDbRow>(
     `SELECT dispatch_phid, team_id, query_id, to_agent, from_actor, channel, subject,
@@ -215,13 +220,66 @@ export async function readDispatchById(
             promotion_required_reason, promotion_input_json,
             promotion_result_json, result_json, artifact_path,
             recovery_status, recovery_attempts, recovery_reason,
-            side_effect, allow_auto_retry
+            side_effect, allow_auto_retry, supersede_link
        FROM dispatch_scheduler_queue
        WHERE team_id = ? AND (dispatch_phid = ? OR query_id = ? OR agent_query_id = ?)
        LIMIT 1`,
     [teamId, dispatchId, dispatchId, dispatchId],
   );
-  return rows[0] ? rowToDispatch(rows[0]) : null;
+  return rows[0] ? rowToDispatch(rows[0], opts) : null;
+}
+
+/** Normalize an optional provider iterable into a Set for O(1) membership. */
+function toSet(it: Iterable<string> | undefined): Set<string> {
+  return it ? new Set(it) : new Set();
+}
+
+/**
+ * T-RECON.2 one-time sweep: durably moot the existing dead constrained-provider
+ * failures (the ~12 Codex "usage limit" needs_operator ghosts). Stamps
+ * recovery_status='moot' on failed rows whose provider is constrained OR whose
+ * failure_detail carries the Codex usage-limit signature, EXCEPT rows already
+ * mooted or landed. Durable: survives later changes to constrained_providers.
+ * Returns the number of rows swept.
+ */
+export async function sweepConstrainedProviderDead(
+  adapter: DbAdapterLike,
+  teamId: string,
+  constrainedProviders: Iterable<string>,
+  nowIso: string = new Date().toISOString(),
+): Promise<number> {
+  const constrained = [...toSet(constrainedProviders)];
+  if (constrained.length === 0) return 0;
+  const providerPlaceholders = constrained.map(() => "?").join(", ");
+  const includeCodexSignature = constrained.includes("openai");
+  // Match: failed, not already moot/landed, and either provider IN constrained
+  // or (openai constrained AND a Codex usage-limit detail).
+  const codexClause = includeCodexSignature
+    ? `OR failure_detail LIKE '%chatgpt.com/codex%' OR failure_detail LIKE '%hit your usage limit%'`
+    : "";
+  const whereTail =
+    `WHERE team_id = ?
+       AND status = 'failed'
+       AND COALESCE(recovery_status, 'none') NOT IN ('moot', 'landed_reconciled', 'verified_done', 'retry_done')
+       AND ( provider IN (${providerPlaceholders}) ${codexClause} )`;
+
+  // Count-then-update so the returned count is deterministic across adapters.
+  const { rows: countRows } = await adapter.query<{ n: number }>(
+    `SELECT COUNT(*) AS n FROM dispatch_scheduler_queue ${whereTail}`,
+    [teamId, ...constrained],
+  );
+  const n = Number(countRows[0]?.n ?? 0);
+  if (n === 0) return 0;
+
+  await adapter.query(
+    `UPDATE dispatch_scheduler_queue
+       SET recovery_status = 'moot',
+           recovery_reason = COALESCE(recovery_reason, ?),
+           updated_at = ?
+     ${whereTail}`,
+    ["constrained_provider_dead (T-RECON.2 sweep)", nowIso, teamId, ...constrained],
+  );
+  return n;
 }
 
 // Task 11 (dispatch-canonical): a diagnostic view of dispatches whose
@@ -503,7 +561,7 @@ function statusesForFilter(status: DispatchReadStatus): string[] {
   return ALL_STATUSES;
 }
 
-function rowToDispatch(row: DispatchDbRow): DispatchReadRow {
+function rowToDispatch(row: DispatchDbRow, opts: DeriveOptions = {}): DispatchReadRow {
   const history = parseJsonArray(row.clarification_history_json);
   return {
     id: row.dispatch_phid,
@@ -549,8 +607,9 @@ function rowToDispatch(row: DispatchDbRow): DispatchReadRow {
       promotion_result: parseJsonOrNull(row.promotion_result_json),
     },
     recovery_classification: deriveRecoveryClassification(row),
-    effective_state: deriveEffectiveState(row),
-    needs_operator: deriveNeedsOperator(row),
+    effective_state: deriveEffectiveState(row, opts),
+    needs_operator: deriveNeedsOperator(row, Date.now(), opts),
+    supersede_link: row.supersede_link,
     source_metadata: {
       source: 'dispatch_scheduler_queue',
       team_id: row.team_id,
@@ -710,7 +769,40 @@ export type EffectiveStateRow = Pick<
   | "not_before_at"
   | "started_at"
   | "updated_at"
+  | "provider"
+  | "supersede_link"
 >;
+
+/**
+ * T-RECON.2 (2026-06-22): options threaded into the classification so a failure
+ * on a now-disabled provider mootes instead of sitting in NEEDS-YOU forever.
+ */
+export interface DeriveOptions {
+  /** Providers intentionally disabled (model-policy constrained_providers).
+   *  A failed dispatch on one of these is a dead ghost — retry is pointless,
+   *  the work re-routes via Codex Light — so it mootes. */
+  constrainedProviders?: Iterable<string>;
+}
+
+// The Codex usage-limit signature. Pre-Codex-Light these failed dispatches were
+// mislabeled provider='anthropic'/runtime='claude-code-cli' but the underlying
+// runtime was Codex; the durable signal is the chatgpt.com/codex limit URL.
+const CODEX_USAGE_LIMIT_RE = /chatgpt\.com\/codex|hit your usage limit/i;
+
+/** True when a failed row is a dead ghost on an intentionally-disabled provider. */
+export function isConstrainedProviderDead(
+  row: Pick<DispatchDbRow, "provider" | "failure_detail">,
+  constrained: Set<string>,
+): boolean {
+  if (constrained.size === 0) return false;
+  if (row.provider && constrained.has(row.provider)) return true;
+  // openai constrained (Codex Light) → also catch Codex-usage-limit failures
+  // that were recorded under a mislabeled provider.
+  if (constrained.has("openai") && row.failure_detail && CODEX_USAGE_LIMIT_RE.test(row.failure_detail)) {
+    return true;
+  }
+  return false;
+}
 
 // Strict-mode hard-failure reasons that should always surface to the
 // operator (rule 6). The current data uses free-text failure_kind values;
@@ -750,7 +842,7 @@ const RECOVERY_TERMINAL_FAILURE_STATUSES = new Set([
   "needs_operator",
 ]);
 
-export function deriveEffectiveState(row: EffectiveStateRow): string {
+export function deriveEffectiveState(row: EffectiveStateRow, opts: DeriveOptions = {}): string {
   // Rule 1 — raw active states.
   if (row.status === "queued") return "queued";
   if (row.status === "in_flight") return "in_flight";
@@ -795,6 +887,22 @@ export function deriveEffectiveState(row: EffectiveStateRow): string {
     return "moot_or_superseded";
   }
 
+  // Rule 4a (T-RECON.2) — SUPERSEDE_LINK: the work was redone/superseded by a
+  // later dispatch. The documented rule 7/4 supersede branch, now that the
+  // column exists. Out of NEEDS-YOU.
+  if (row.supersede_link && row.supersede_link.length > 0) {
+    return "moot_or_superseded";
+  }
+
+  // Rule 4b (T-RECON.2) — CONSTRAINED-PROVIDER MOOT: a failure on a provider
+  // that is intentionally disabled (model-policy constrained_providers — e.g.
+  // openai while we run Codex Light) is a dead ghost. Retry is pointless; if the
+  // work mattered it re-routes to the fallback. Don't make the operator triage a
+  // dead-provider failure. Takes precedence over the needs_operator rules below.
+  if (isConstrainedProviderDead(row, toSet(opts.constrainedProviders))) {
+    return "moot_or_superseded";
+  }
+
   // Rule 5 — recovery-terminal failure statuses always need an operator.
   if (row.recovery_status && RECOVERY_TERMINAL_FAILURE_STATUSES.has(row.recovery_status)) {
     return "failed_needs_operator";
@@ -832,8 +940,9 @@ const INFLIGHT_STALE_MINUTES = 45;
 export function deriveNeedsOperator(
   row: EffectiveStateRow,
   nowMs: number = Date.now(),
+  opts: DeriveOptions = {},
 ): boolean {
-  const effective = deriveEffectiveState(row);
+  const effective = deriveEffectiveState(row, opts);
   if (effective === "failed_needs_operator") return true;
   if (effective === "queued") {
     const queuedAtMs = parseDateMs(row.not_before_at);

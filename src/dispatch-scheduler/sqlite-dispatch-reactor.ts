@@ -1145,6 +1145,40 @@ export class SqliteDispatchReactor {
   }
 
   /**
+   * T-RECON.2 operator action — moot/dismiss a failed dispatch. Stamps
+   * recovery_status='moot' so the read-model reclassifies it to
+   * moot_or_superseded (out of NEEDS-YOU). Status stays `failed`; this is a
+   * triage outcome, not a claim the work landed. Returns the updated doc.
+   */
+  async markMoot(phid: string, reason: string): Promise<DispatchDoc | null> {
+    const now = this.nowFn();
+    await this.adapter.query(
+      `UPDATE dispatch_scheduler_queue
+         SET recovery_status = 'moot', recovery_reason = ?, updated_at = ?
+       WHERE dispatch_phid = ? AND team_id = ?`,
+      [reason, now, phid, this.teamId],
+    );
+    return this.getByPhid(phid);
+  }
+
+  /**
+   * T-RECON.2 — mark a failed dispatch superseded by a later one. Sets
+   * supersede_link (→ read-model mootes via the supersede rule) and stamps
+   * recovery_status='moot' for durability. Used by retry/reassign once the
+   * replacement dispatch is enqueued.
+   */
+  async markSuperseded(phid: string, supersedeLink: string, reason: string): Promise<DispatchDoc | null> {
+    const now = this.nowFn();
+    await this.adapter.query(
+      `UPDATE dispatch_scheduler_queue
+         SET supersede_link = ?, recovery_status = 'moot', recovery_reason = ?, updated_at = ?
+       WHERE dispatch_phid = ? AND team_id = ?`,
+      [supersedeLink, reason, now, phid, this.teamId],
+    );
+    return this.getByPhid(phid);
+  }
+
+  /**
    * Record a non-retry recovery outcome (unsafe side effect / exhausted /
    * ambiguous) for the /ops recovery surface. This does NOT re-dispatch and does
    * NOT change status — the row stays `failed` but its recovery_status tells

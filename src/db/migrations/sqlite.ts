@@ -766,6 +766,11 @@ export async function migrateSqlite(adapter: SqliteAdapter): Promise<void> {
     `ALTER TABLE dispatch_scheduler_queue ADD COLUMN recovery_reason TEXT`,
     `ALTER TABLE dispatch_scheduler_queue ADD COLUMN side_effect TEXT NOT NULL DEFAULT 'none'`,
     `ALTER TABLE dispatch_scheduler_queue ADD COLUMN allow_auto_retry INTEGER NOT NULL DEFAULT 0`,
+    // T-RECON.2 (2026-06-22): supersede_link — when a failed dispatch's work was
+    // redone/superseded by a later dispatch, this points at the superseding
+    // dispatch_phid so the read-model mootes it (rule 7/4) out of NEEDS-YOU.
+    // The documented v2 follow-up; null until a supersede/retry/reassign sets it.
+    `ALTER TABLE dispatch_scheduler_queue ADD COLUMN supersede_link TEXT`,
   ]) {
     try {
       adapter.exec(stmt);
