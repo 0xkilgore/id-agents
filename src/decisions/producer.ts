@@ -272,10 +272,24 @@ function buildOpenRow(opts: {
 function parseMaestraSummaryTable(md: string): SummaryOpenItem[] {
   const lines = md.split(/\r?\n/);
   let inSummarySection = false;
-  let inTable = false;
   let headerSeen = false;
   let separatorSeen = false;
+  // Column indices resolved from the HEADER row by name — NOT positionally.
+  // The canonical "## OPEN ≤60s items" table is 4 columns
+  // (| # | One-line | Recommend | Status |); the legacy "## Maestra summary"
+  // table is 3 (| # | One-line | Status |). Reading the Status column by its
+  // header keeps both layouts (and any future column inserts) working.
+  let numIdx = 0;
+  let oneLineIdx = 1;
+  let statusIdx = -1;
   const out: SummaryOpenItem[] = [];
+
+  const splitCells = (row: string): string[] =>
+    row
+      .replace(/^\|/, "")
+      .replace(/\|$/, "")
+      .split("|")
+      .map((c) => c.trim());
 
   for (const line of lines) {
     const heading = line.match(/^##\s+(.+)$/);
@@ -287,9 +301,11 @@ function parseMaestraSummaryTable(md: string): SummaryOpenItem[] {
         title.match(/^open[: ]/i) !== null;
       if (looksLikeSummary) {
         inSummarySection = true;
-        inTable = false;
         headerSeen = false;
         separatorSeen = false;
+        numIdx = 0;
+        oneLineIdx = 1;
+        statusIdx = -1;
         continue;
       }
       if (inSummarySection) break; // hit the next section — stop
@@ -298,43 +314,45 @@ function parseMaestraSummaryTable(md: string): SummaryOpenItem[] {
     if (!inSummarySection) continue;
 
     const trimmed = line.trim();
-    if (!trimmed.startsWith("|")) {
-      // table ended on a non-pipe line; reset table state but stay in
-      // section in case another table appears.
-      if (inTable) inTable = false;
-      continue;
-    }
-    // We're in a table row.
-    const cells = trimmed
-      .replace(/^\|/, "")
-      .replace(/\|$/, "")
-      .split("|")
-      .map((c) => c.trim());
+    if (!trimmed.startsWith("|")) continue;
+    const cells = splitCells(trimmed);
 
     if (!headerSeen) {
-      // First pipe row in this section is the header; remember and move on.
+      // First pipe row is the header — resolve column indices by name.
       headerSeen = true;
-      inTable = true;
+      const lower = cells.map((c) => c.toLowerCase());
+      const findIdx = (re: RegExp, dflt: number) => {
+        const i = lower.findIndex((c) => re.test(c));
+        return i >= 0 ? i : dflt;
+      };
+      numIdx = findIdx(/^#$|number|item|^id$/, 0);
+      oneLineIdx = findIdx(/one.?line|question|title|summary/, 1);
+      // Status is the canonical signal — if there is no explicit Status
+      // header, fall back to the LAST column (closest to the historical
+      // 3-column assumption) rather than a fixed index.
+      statusIdx = findIdx(/status/, cells.length - 1);
       continue;
     }
     if (!separatorSeen) {
-      // Second row is the markdown separator `---|---|---`.
       const isSeparator = cells.every((c) => /^:?-{3,}:?$/.test(c));
       if (isSeparator) {
         separatorSeen = true;
         continue;
       }
-      // Sometimes the separator was bundled with the header (rare); just
-      // fall through.
+      // Separator missing/bundled — fall through and treat as a data row.
     }
     // A data row.
-    if (cells.length < 3) continue;
-    const numCell = cells[0];
-    const oneLine = cells[1];
-    const status = cells[2].toLowerCase();
+    if (statusIdx < 0 || cells.length <= statusIdx) continue;
+    const numCell = cells[numIdx] ?? "";
+    const oneLine = cells[oneLineIdx] ?? "";
+    const status = (cells[statusIdx] ?? "").toLowerCase();
     const m = numCell.match(/^#?(\d+)$/);
     if (!m) continue;
-    if (!/open/.test(status)) continue;
+    // Only the explicit OPEN signal counts. A Status cell that begins with a
+    // resolution marker (RESOLVED/SUPERSEDED/DECLINED) is never open, even if
+    // the word "open" appears later in the prose.
+    if (/^\**\s*(resolved|superseded|declined)/.test(status)) continue;
+    if (!/\bopen\b/.test(status)) continue;
     out.push({
       display_id: `#${m[1]}`,
       one_line: oneLine,

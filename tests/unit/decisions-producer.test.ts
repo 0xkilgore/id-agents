@@ -297,7 +297,7 @@ describe("decisions producer — ingestFromMarkdown upsert + idempotency", () =>
 });
 
 describe("decisions producer — real data smoke", () => {
-  it("ingesting the live agent-platform/output/kapelle-decisions-queue.md produces 0 open items (matches Maestra's current state — all ruled)", async () => {
+  it("ingests the live kapelle-decisions-queue.md: open_count is consistent with the stored open rows and matches the file's OPEN-status table rows", async () => {
     const adapter = await setup();
     const fs = await import("node:fs/promises");
     const path = await import("node:path");
@@ -309,10 +309,8 @@ describe("decisions producer — real data smoke", () => {
       .then(() => true)
       .catch(() => false);
     if (!exists) {
-      // Real file not present in this checkout — log and skip the
-      // real-data assertion. The fixture coverage above is the contract;
-      // the live run validates the contract against Maestra's current
-      // source.
+      // Real file not present in this checkout — the fixture coverage in
+      // decisions-open-table-columns.test.ts is the deterministic contract.
       console.log(`[decisions-producer] live source not present; skipping real-data smoke: ${live}`);
       return;
     }
@@ -322,8 +320,57 @@ describe("decisions producer — real data smoke", () => {
       source_md: md,
     });
     const open = await listDecisions(adapter, { status: "open" });
-    expect(open).toEqual([]);
-    expect(result.open_count).toBe(0);
+
+    // Ingestion populated the table (so /decisions/queue is backed by live data).
     expect(result.inserted + result.updated).toBeGreaterThan(0);
+    // open_count is internally consistent with what was actually stored open.
+    expect(result.open_count).toBe(open.length);
+    // Every stored open row is well-formed (status open + a #N display id).
+    for (const d of open) {
+      expect(d.status).toBe("open");
+      expect(d.display_id).toMatch(/^#\d+$/);
+    }
+    // Re-derive the expectation from the file: count rows in the "OPEN ≤60s
+    // items" table whose Status column says OPEN (not RESOLVED/SUPERSEDED).
+    // This guards the column-resolution fix against the REAL source format
+    // without brittly pinning a number Maestra edits over time.
+    const expectedOpen = countOpenStatusRows(md);
+    expect(result.open_count).toBe(expectedOpen);
   });
 });
+
+/** Independently count OPEN-status rows in the "OPEN ≤60s items" pipe table. */
+function countOpenStatusRows(md: string): number {
+  const lines = md.split(/\r?\n/);
+  let inSection = false;
+  let statusIdx = -1;
+  let headerSeen = false;
+  let count = 0;
+  for (const line of lines) {
+    const h = line.match(/^##\s+(.+)$/);
+    if (h) {
+      if (inSection) break;
+      inSection = /open\s+[≤<=]?\s*60s\s+items/i.test(h[1]) || /maestra summary/i.test(h[1]);
+      headerSeen = false;
+      statusIdx = -1;
+      continue;
+    }
+    if (!inSection) continue;
+    const t = line.trim();
+    if (!t.startsWith("|")) continue;
+    const cells = t.replace(/^\|/, "").replace(/\|$/, "").split("|").map((c) => c.trim());
+    if (!headerSeen) {
+      headerSeen = true;
+      const i = cells.findIndex((c) => /status/i.test(c));
+      statusIdx = i >= 0 ? i : cells.length - 1;
+      continue;
+    }
+    if (cells.every((c) => /^:?-{3,}:?$/.test(c))) continue; // separator
+    if (statusIdx < 0 || cells.length <= statusIdx) continue;
+    if (!/^#?\d+$/.test(cells[0])) continue;
+    const status = cells[statusIdx].toLowerCase();
+    if (/^\**\s*(resolved|superseded|declined)/.test(status)) continue;
+    if (/\bopen\b/.test(status)) count++;
+  }
+  return count;
+}

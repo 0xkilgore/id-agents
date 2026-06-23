@@ -8,6 +8,9 @@
 // filters, counts, items, warnings) is always present so kapelle-site can
 // render empty/stale/unavailable states uniformly.
 
+import { existsSync } from "node:fs";
+import { homedir } from "node:os";
+import path from "node:path";
 import type { Application, Request, Response } from "express";
 import type { DbAdapter } from "../db/db-adapter.js";
 import {
@@ -56,6 +59,25 @@ const VALID_STATUSES = new Set<DecisionStatus>([
 
 export interface MountDecisionsRoutesOptions {
   now?: () => Date;
+  /**
+   * Auto-ingest the canonical Maestra decisions markdown on startup + on a
+   * timer so `/decisions/queue` is continuously backed by the live source
+   * without a manual POST. Default true; set DECISIONS_QUEUE_AUTOINGEST=false
+   * to disable. Source path: DECISIONS_QUEUE_SOURCE_PATH or the canonical
+   * agent-platform path.
+   */
+  autoIngest?: boolean;
+  autoIngestSourcePath?: string;
+  autoIngestIntervalMs?: number;
+  env?: NodeJS.ProcessEnv;
+}
+
+/** The canonical Maestra decisions source (overridable via env). */
+export function defaultDecisionsSourcePath(env: NodeJS.ProcessEnv = process.env): string {
+  return (
+    env.DECISIONS_QUEUE_SOURCE_PATH ||
+    path.join(homedir(), "Dropbox", "Code", "agent-platform", "output", "kapelle-decisions-queue.md")
+  );
 }
 
 export function mountDecisionsRoutes(
@@ -420,6 +442,44 @@ export function mountDecisionsRoutes(
       }
     },
   );
+
+  // ── Auto-ingest: keep the decisions table backed by the live Maestra source ──
+  // Without this the route renders but the table stays empty until an operator
+  // POSTs /decisions/ingest by hand — so the panel showed no live decisions.
+  // Mirrors the usage-meter transcript-ingest pattern (best-effort, self-
+  // refreshing). Idempotent upserts mean re-ingest is cheap + safe.
+  const env = opts.env ?? process.env;
+  // Never run the background ingest timer under the test runner (no stray IO).
+  const autoIngest =
+    !env.VITEST &&
+    (opts.autoIngest ?? !/^(0|false|no|off)$/i.test(env.DECISIONS_QUEUE_AUTOINGEST ?? ""));
+  if (autoIngest) {
+    const sourcePath = opts.autoIngestSourcePath ?? defaultDecisionsSourcePath(env);
+    const intervalMs = opts.autoIngestIntervalMs ?? 10 * 60_000;
+    const runIngest = async () => {
+      if (!existsSync(sourcePath)) return; // source not on this host — silent no-op
+      try {
+        const r = await ingestDecisionsFromMarkdown(adapter, {
+          source_path: sourcePath,
+          now: now().toISOString(),
+        });
+        if (r.inserted > 0 || r.updated > 0) {
+          console.log(
+            `[decisions] ingested ${sourcePath}: +${r.inserted}/${r.updated} ` +
+              `(open=${r.open_count} resolved=${r.resolved_count} superseded=${r.superseded_count} ` +
+              `declined=${r.declined_count}, skipped=${r.skipped.length})`,
+          );
+        }
+      } catch (err) {
+        console.warn(
+          `[decisions] auto-ingest failed for ${sourcePath}: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    };
+    setTimeout(() => void runIngest(), 5_000).unref?.();
+    const timer = setInterval(() => void runIngest(), intervalMs);
+    if (typeof timer.unref === "function") timer.unref();
+  }
 }
 
 function parseStatus(raw: unknown): DecisionStatus | null {
