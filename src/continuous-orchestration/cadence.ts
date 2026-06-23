@@ -24,12 +24,18 @@ export function isLoadPoint(nowMs: number, config: ContinuousOrchestrationConfig
 }
 
 /**
- * How many NEW dispatches this tick may admit. At a batch load-point the queue
- * refills up to the in-flight cap; between batches only a small lane-fill
- * trickle (`max_new_per_tick`) keeps lanes warm.
+ * How many NEW dispatches this tick may admit.
+ *
+ * T-ORCH P0 (continuous): EVERY tick may refill the lane up to the in-flight
+ * cap — the daemon loads + fires continuously rather than only batch-loading at
+ * the 3 cadence points. The actual headroom (`max_in_flight - in_flight`) is
+ * applied by `planAdmission` via `slotsFree`, so a tick admits only as many NEW
+ * dispatches as there are free slots. `max_new_per_tick` is kept as a floor so
+ * a tiny configured cap can't drop the lane-fill below the intended trickle.
+ *
+ * `_nowMs` is retained for signature stability (load-points still inform the
+ * refuel batch heuristic via `isLoadPoint`), but admission no longer gates on it.
  */
-export function tickAdmitLimit(nowMs: number, config: ContinuousOrchestrationConfig): number {
-  return isLoadPoint(nowMs, config)
-    ? Math.max(config.max_in_flight, config.max_new_per_tick)
-    : config.max_new_per_tick;
+export function tickAdmitLimit(_nowMs: number, config: ContinuousOrchestrationConfig): number {
+  return Math.max(config.max_in_flight, config.max_new_per_tick);
 }

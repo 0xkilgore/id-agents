@@ -15,7 +15,7 @@ import type { DbAdapter } from "../db/db-adapter.js";
 import type { ContinuousOrchestrationConfig } from "./config.js";
 import type { BacklogItem, DecisionRecord, OrchestrationMode, UsageGateView } from "./types.js";
 import { orderCandidates } from "./selection.js";
-import { tickAdmitLimit, isLoadPoint } from "./cadence.js";
+import { tickAdmitLimit } from "./cadence.js";
 import { planAdmission, evaluateStall, type AdmissionContext } from "./admission.js";
 import {
   appendDecisions,
@@ -261,9 +261,11 @@ export class ContinuousOrchestrationDaemon {
     if (args.mode !== "running" || args.killSwitch || args.hardPaused) return null;
 
     const ready = await listReadyItems(this.deps.adapter, this.teamId);
+    // T-ORCH P0 (continuous self-refuel): refuel on ANY tick where READY fuel is
+    // below threshold — not only at the 3 batch load-points. Low ready-fuel
+    // auto-promotes+fleshes backlog items into READY as the daemon drains them,
+    // so an unattended run never starves after the initial ready items.
     if (ready.length >= config.min_ready_fuel) return null;
-    // Load-point focus: flesh at a batch point, or whenever fuel is fully dry.
-    if (!isLoadPoint(args.nowMs, config) && ready.length > 0) return null;
 
     const remaining = Math.max(0, config.daily_token_ceiling - args.dailyTokensUsed);
     try {

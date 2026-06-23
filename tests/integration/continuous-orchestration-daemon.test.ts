@@ -166,6 +166,20 @@ describe("daemon — dry-run vs live", () => {
     expect(decisions.some((d) => d.action === "dispatched")).toBe(true);
   });
 
+  it("T-ORCH P0: fills up to max_in_flight EVERY tick, even off a load-point", async () => {
+    // now() is "2026-06-17T18:00:00Z" — deliberately NOT a cadence load-point.
+    // Old behavior admitted only max_new_per_tick (1) between batches; continuous
+    // admission fills the lane up to max_in_flight from the ready queue.
+    for (let i = 0; i < 5; i++) await seedReady(adapter, { title: `w${i}`, write_scope: [`scope-${i}`] });
+    const { daemon, fired } = makeDaemon(adapter, {
+      config: { dry_run: false, max_in_flight: 4, max_new_per_tick: 1 },
+    });
+    await daemon.setMode("running");
+    const r = await daemon.runTick();
+    expect(fired).toHaveLength(4); // filled to max_in_flight in ONE off-load-point tick
+    expect(r.admitted).toHaveLength(4);
+  });
+
   it("halts (fires nothing) when not running", async () => {
     await seedReady(adapter);
     const { daemon, fired } = makeDaemon(adapter, { config: { dry_run: false } });

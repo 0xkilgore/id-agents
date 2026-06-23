@@ -77,10 +77,16 @@ describe("cadence", () => {
     expect(isLoadPoint(at1230, cfg)).toBe(true);
     expect(isLoadPoint(at1300, cfg)).toBe(false);
   });
-  it("widens admit limit at load-points, trickles between", () => {
+  it("admit limit fills to max_in_flight on EVERY tick (T-ORCH P0 continuous)", () => {
     const c = { ...cfg, max_in_flight: 4, max_new_per_tick: 1 };
-    expect(tickAdmitLimit(at1230, c)).toBe(4); // batch
-    expect(tickAdmitLimit(at1300, c)).toBe(1); // lane-fill
+    // Continuous: both a load-point and an off-load-point tick may refill the
+    // lane up to the in-flight cap (slotsFree applies the real headroom).
+    expect(tickAdmitLimit(at1230, c)).toBe(4);
+    expect(tickAdmitLimit(at1300, c)).toBe(4);
+  });
+  it("admit limit never drops below the max_new_per_tick floor", () => {
+    const c = { ...cfg, max_in_flight: 0, max_new_per_tick: 2 };
+    expect(tickAdmitLimit(at1300, c)).toBe(2);
   });
 });
 

@@ -91,12 +91,17 @@ export function createContinuousOrchestrationDaemon(opts: BuildDaemonOptions): {
     },
 
     readInFlight: async () => {
-      const docs = await opts.scheduler.reactor.listInFlight();
-      // Write-scope locks come from the orchestration's own in-flight items.
+      // T-ORCH P0: `max_in_flight` caps the DAEMON's OWN concurrent lane, not
+      // the whole fleet. Counting fleet-wide in-flight (reactor.listInFlight)
+      // starved the daemon to zero whenever manual/other-agent dispatches
+      // filled ≥ max_in_flight — every ready item was held "no in-flight slots
+      // free" while backlog in_flight was 0. Count the daemon's own in-flight
+      // backlog items (the same rows the write-scope locks come from). The
+      // global brake stays the usage/rate-limit gate in readUsage().
       const inFlightItems = await listBacklogByState(opts.adapter, { team_id: teamId, state: "in_flight" });
       const scopes = new Set<string>();
       for (const it of inFlightItems) for (const s of it.write_scope) scopes.add(s);
-      return { count: docs.length, active_write_scopes: scopes };
+      return { count: inFlightItems.length, active_write_scopes: scopes };
     },
   });
 
