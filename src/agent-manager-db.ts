@@ -137,6 +137,12 @@ import { ACTIVE_LOOP_RUN_STATUSES } from './loops/types.js';
 import { loadModelPolicy, type ModelPolicyService } from './model-policy/policy.js';
 import { resolveManagerBindHost } from './manager-bind-host.js';
 import { getBuildStatusCached, type BuildStatus } from './build-info.js';
+import {
+  evaluateFreshness,
+  INITIAL_FRESHNESS,
+  type FreshnessTrackerState,
+} from './deploy-guard/freshness.js';
+import { sendTelegramAlert } from './continuous-orchestration/telegram.js';
 import { normalizeActorRef } from './actor-identity.js';
 import {
   getAgentsEffectiveness,
@@ -467,6 +473,10 @@ export class AgentManagerDb {
   private queryStatusWaiters: Map<string, Set<() => void>> = new Map(); // key: `${teamId}:${queryId}`
   private healthStatus: Map<string, { status: 'online' | 'offline' | 'unknown'; lastCheck: number }> = new Map(); // key: `${teamId}:${agentId}`
   private healthCheckInterval: NodeJS.Timeout | null = null;
+  // T-DEPLOY.1 fleet freshness — track how long the running build has been
+  // behind origin/main; alert past the threshold.
+  private freshnessState: FreshnessTrackerState = INITIAL_FRESHNESS;
+  private freshnessMonitorInterval: NodeJS.Timeout | null = null;
   private remoteProbeInterval: NodeJS.Timeout | null = null;
   private querySweeperInterval: NodeJS.Timeout | null = null;
   private filesystemArtifactReconcileInterval: NodeJS.Timeout | null = null;
@@ -3192,6 +3202,13 @@ export class AgentManagerDb {
         recovery_backfill,
         // T11.1: the running build identity + staleness-vs-origin signal.
         build: this.getBuildStatus(),
+        // T-DEPLOY.1: how long the running build has been behind origin/main +
+        // whether the freshness monitor has alerted (the drift watchdog state).
+        freshness: {
+          state: this.freshnessState.state,
+          behind_origin_since: this.freshnessState.behind_origin_since,
+          last_alert_at: this.freshnessState.last_alert_at,
+        },
       });
     });
 
@@ -9489,6 +9506,43 @@ export class AgentManagerDb {
   }
 
   /**
+   * T-DEPLOY.1 fleet-freshness monitor. Every minute, read the build status and
+   * advance the freshness tracker; when the running build has been behind
+   * origin/main past the threshold (default 15 min), fire a Telegram alert
+   * (best-effort, never throws). Recovery (build caught up) clears + notifies.
+   * The threshold is configurable via DEPLOY_FRESHNESS_THRESHOLD_MS.
+   */
+  private startFreshnessMonitor(): void {
+    if (this.freshnessMonitorInterval) return;
+    const thresholdMs = Number(process.env.DEPLOY_FRESHNESS_THRESHOLD_MS) || undefined;
+    const tick = () => {
+      try {
+        const build = this.getBuildStatus();
+        const { next, alert } = evaluateFreshness(
+          this.freshnessState,
+          {
+            behind_origin: build.behind_origin,
+            build_sha: build.build_sha,
+            origin_main_sha: build.origin_main_sha,
+          },
+          Date.now(),
+          thresholdMs ? { thresholdMs } : {},
+        );
+        this.freshnessState = next;
+        if (alert) {
+          console.warn(`[Manager] fleet-freshness ${alert.kind}: ${alert.message}`);
+          void sendTelegramAlert(alert.message).catch(() => {});
+        }
+      } catch (err) {
+        console.warn('[Manager] freshness monitor tick failed:', err instanceof Error ? err.message : String(err));
+      }
+    };
+    tick();
+    this.freshnessMonitorInterval = setInterval(tick, 60_000);
+    this.freshnessMonitorInterval.unref?.();
+  }
+
+  /**
    * Start the stuck-query sweeper.
    *
    * Agents that crash mid-query never transition their queries out of
@@ -9899,6 +9953,10 @@ export class AgentManagerDb {
         // Start periodic health monitoring (every 30s)
         this.startHealthMonitor();
 
+        // T-DEPLOY.1: start the fleet-freshness monitor (alert when the running
+        // build stays behind origin/main past the threshold).
+        this.startFreshnessMonitor();
+
         // Start stuck-query sweeper (every 5 min, expires >15 min old)
         this.startQuerySweeper();
 
@@ -10228,6 +10286,10 @@ export class AgentManagerDb {
     if (this.healthCheckInterval) {
       clearInterval(this.healthCheckInterval);
       this.healthCheckInterval = null;
+    }
+    if (this.freshnessMonitorInterval) {
+      clearInterval(this.freshnessMonitorInterval);
+      this.freshnessMonitorInterval = null;
     }
     if (this.remoteProbeInterval) {
       clearInterval(this.remoteProbeInterval);
