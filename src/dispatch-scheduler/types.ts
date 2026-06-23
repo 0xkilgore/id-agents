@@ -277,6 +277,9 @@ export interface DispatchDoc {
   // its prompt and `/agent-done` can validate that the agent promoted
   // exactly what was requested. Null on non-build dispatches.
   promotion_input: PromotionInput | null;
+  // T-OSS.2 ─ manager-owned workspace lease for leased builds (null until the
+  // allocator runs at delivery time; non-build dispatches stay null).
+  workspace_lease?: WorkspaceLease | null;
 }
 
 export interface PromotionInput {
@@ -298,6 +301,10 @@ export interface PromotionRepoResult {
   remote_main_sha: string;
   pushed: boolean;
   verified: boolean;
+  // T-OSS.2 workspace-lease evidence (optional; present for leased builds).
+  workspace_lease_id?: string;
+  worktree_path?: string;
+  protected_root_status_after?: string;
 }
 
 /** Canonical promotion-completion payload shipped on /agent-done when
@@ -306,6 +313,54 @@ export interface PromotionAgentDone {
   required: boolean;
   completed: boolean;
   repos: PromotionRepoResult[];
+}
+
+// ── T-OSS.2 Workspace Leases + Protected Canonical Checkouts ──────────
+//
+// Every build dispatch (repo + branch) gets a manager-owned WorkspaceLease: the
+// custody record for WHERE code may be written (a git worktree under the
+// protected root's `.worktrees/`), which root is protected, and the dirty state
+// observed before/after the run. The agent never writes the canonical root.
+// Spec: cto/output/2026-06-22-toss2-workspace-leases-protected-checkouts.md
+
+export type WorkspaceLeaseStatus =
+  | "active"
+  | "released"
+  | "blocked"
+  | "failed";
+
+export interface WorkspaceLease {
+  lease_id: string;
+  dispatch_id: string;
+  agent_id: string;
+  /** The repo path the dispatch declared. */
+  repo: string;
+  /** The canonical/protected root resolved from the registry. */
+  protected_root: string;
+  /** The leased worktree the agent runs in (under <protected_root>/.worktrees/). */
+  worktree_path: string;
+  remote: string;
+  base: string;
+  branch: string;
+  base_sha: string | null;
+  source_sha_before: string | null;
+  /** `git status --porcelain=v1` of the protected root at allocation time. */
+  protected_root_status_before: string;
+  /** `git status --porcelain=v1` of the worktree at allocation time. */
+  worktree_status_before: string;
+  created_at: string;
+  state: WorkspaceLeaseStatus;
+}
+
+/** Workspace evidence an agent must return on /agent-done for a leased build. */
+export interface WorkspaceCloseoutEvidence {
+  lease_id: string;
+  worktree_path: string;
+  protected_root: string;
+  protected_root_status_before: string;
+  protected_root_status_after: string;
+  worktree_status_after: string;
+  cleanup_action: "kept_for_review" | "removed" | "left_dirty";
 }
 
 /** Spec 054 v2 Part 2 — validate /agent-done.promotion against the
