@@ -1,11 +1,10 @@
 {
   "schema_version": 1,
   "_comment": "D1/T-MODEL.1 per-agent model policy. STANDING rule — edit here, not the agents table. Each agent declares a primary ModelChoice and an ordered fallback chain; when the primary's provider lane is constrained (e.g. openai over usage limit while the global usage gate is hard-paused), dispatches route to the next available provider in the chain. A ModelChoice may name a `runtime` (codex|claude-code-cli|claude-agent-sdk|cursor-cli|openrouter) and/or a `model` (resolved via configs/models-metadata.json + the runtime registry).",
-  "constrained_providers": ["openai"],
+  "constrained_providers": ["openai", "codex"],
   "default": {
-    "primary": { "runtime": "codex" },
+    "primary": { "runtime": "claude-code-cli", "model": "claude-opus-4-8" },
     "fallback": [
-      { "runtime": "claude-code-cli" },
       { "runtime": "openrouter" }
     ]
   },
