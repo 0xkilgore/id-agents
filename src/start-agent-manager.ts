@@ -12,6 +12,7 @@ import { AgentRestServer } from './agent-rest-server.js';
 import { resolveRuntime } from './runtime/registry.js';
 import { detectSessionHandoffVars } from './lib/env-hygiene.js';
 import { installFatalHandlers } from './lib/fatal-handlers.js';
+import { isAbiMismatchError, abiMismatchDiagnostic } from './lib/native-node.js';
 
 // Silent-stop incidents had the scheduler die behind a swallowed rejection —
 // the process stayed up but the tick loop was dead. Fail loud and exit so the
@@ -124,6 +125,13 @@ async function startWorkerAgent(agentId?: string) {
     const dbTeamId = process.env.ID_DB_TEAM_ID || await db.teams.getOrCreateTeamId(teamName);
     dbCtx = { db, teamId: dbTeamId, agentId: dbAgentId };
   } catch (e: any) {
+    // Two-node trap: a native-ABI mismatch must FAIL LOUD, never silently
+    // degrade to memory-only (that masking is what let this recur). See
+    // src/lib/native-node.ts.
+    if (isAbiMismatchError(e)) {
+      console.error(abiMismatchDiagnostic(e));
+      process.exit(1);
+    }
     console.warn(`⚠️ Worker agent DB disabled, running memory-only: ${e?.message || String(e)}`);
     console.warn(`⚠️ Manager daemon polling (GET :4100/query/<id>, /news) will NOT find this agent's queries while memory-only.`);
   }

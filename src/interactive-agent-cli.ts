@@ -6,6 +6,7 @@ import fetch from 'node-fetch';
 import fs from 'fs';
 import path from 'path';
 import { execFileSync, spawn } from 'child_process';
+import { resolveManagerNode } from './lib/native-node.js';
 import WebSocket from 'ws';
 import yaml from 'js-yaml';
 import { fileURLToPath } from 'url';
@@ -922,7 +923,7 @@ async function startLocalAgentProcess(agentData: any): Promise<{ success: boolea
     const logFile = path.join(logsDir, `local-${agentName}-${Date.now()}.log`);
     const logStream = fs.openSync(logFile, 'a');
 
-    const localAgent = spawn('node', spawnArgs, {
+    const localAgent = spawn(resolveManagerNode(), spawnArgs, {
       env: localEnv,
       stdio: ['ignore', logStream, logStream],
       detached: true
@@ -1378,7 +1379,7 @@ async function handleLine(line: string) {
           // Step 3: Restart the manager
           console.log(`${colors.gray}   Starting manager...${colors.reset}`);
           const managerScript = path.resolve(__cli_dirname, 'start-agent-manager.js');
-          const managerProc = spawn('node', [managerScript], {
+          const managerProc = spawn(resolveManagerNode(), [managerScript], {
             stdio: 'ignore',
             detached: true,
             env: { ...process.env, AGENT_MANAGER_PORT: String(MANAGER_PORT) }
@@ -3895,7 +3896,7 @@ async function initializeCli() {
   if (!managerRunning) {
     console.log(`${colors.yellow}Starting manager on port ${MANAGER_PORT}...${colors.reset}`);
     const managerScript = path.resolve(__cli_dirname, 'start-agent-manager.js');
-    spawn('node', [managerScript], {
+    spawn(resolveManagerNode(), [managerScript], {
       detached: true,
       stdio: 'ignore',
       env: { ...process.env, AGENT_MANAGER_PORT: String(MANAGER_PORT) }
@@ -5071,7 +5072,7 @@ async function deployFromConfig(filePath: string, args: string[] = []) {
           const logFile = path.join(logsDir, `local-${agent.name}-${Date.now()}.log`);
           const logStream = fs.openSync(logFile, 'a');
 
-          const localAgent = spawn('node', spawnArgs, {
+          const localAgent = spawn(resolveManagerNode(), spawnArgs, {
             env: localEnv,
             stdio: ['ignore', logStream, logStream],
             detached: true

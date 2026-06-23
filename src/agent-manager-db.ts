@@ -26,6 +26,7 @@ import { registerOnIdChain, createSubnameOnIdChain, setMultiChainAddresses } fro
 import { defaultDeliverFn, redactSshTarget, type DeliverFn } from './lib/ssh-deliver.js';
 import { probeRemoteAgent, defaultHealthProbeFn, type HealthProbeFn } from './lib/remote-heartbeat.js';
 import { filterClaudeEnvVars } from './lib/env-hygiene.js';
+import { resolveManagerNode } from './lib/native-node.js';
 import { sweepOrphanAgents, listMatchingProcesses } from './lib/orphan-sweep.js';
 import {
   agentDoneAuthConfigFromEnv,
@@ -10959,9 +10960,15 @@ export class AgentManagerDb {
       const logFile = `/tmp/${name}.log`;
       const logFd = openSync(logFile, 'a');
 
-      console.log(`[Manager] Spawning agent process: ${name} (port ${port}, id ${id})`);
+      // Pin the agent to the SAME node the manager runs under (= the node the
+      // native better-sqlite3 binding was built for). Bare `spawn('node', …)`
+      // would inherit the shell node off $PATH (v22, ABI 127) while the manager
+      // + binding are v23/ABI 131 — the two-node trap that silently degrades
+      // every agent to memory-only. See src/lib/native-node.ts.
+      const agentNode = resolveManagerNode();
+      console.log(`[Manager] Spawning agent process: ${name} (port ${port}, id ${id}) under node ${agentNode}`);
 
-      const proc = spawn('node', spawnArgs, {
+      const proc = spawn(agentNode, spawnArgs, {
         env: localEnv,
         stdio: ['ignore', logFd, logFd],
         detached: true

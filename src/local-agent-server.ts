@@ -17,6 +17,7 @@ import 'dotenv/config';
 import { AgentRestServer } from './agent-rest-server.js';
 import { createDb, migrateDb } from './db/index.js';
 import type { Db } from './db/db-service.js';
+import { isAbiMismatchError, abiMismatchDiagnostic } from './lib/native-node.js';
 import fetch from 'node-fetch';
 import { mkdirSync, existsSync } from 'fs';
 import path from 'path';
@@ -213,6 +214,13 @@ export async function startLocalAgent(config: LocalAgentConfig): Promise<{
       console.log(`📦 Registered in database (team: ${team})`);
     }
   } catch (err) {
+    // The two-node trap: a native-ABI mismatch means this agent was spawned
+    // under the wrong node. Silent memory-only fallback is what hid this for 3
+    // recurrences — so FAIL LOUD and exit instead of limping along degraded.
+    if (isAbiMismatchError(err)) {
+      console.error(abiMismatchDiagnostic(err));
+      process.exit(1);
+    }
     console.warn(`⚠️  Database connection failed, running in memory-only mode: ${err}`);
     console.warn(`⚠️  Manager daemon polling (GET :4100/query/<id>, /news) will NOT find this agent's queries while memory-only.`);
     db = undefined;
