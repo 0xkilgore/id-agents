@@ -10246,6 +10246,17 @@ export class AgentManagerDb {
           console.warn('[Manager] Decisions routes failed to mount:', err instanceof Error ? err.message : String(err));
         }
 
+        // Kapelle S2 (2026-06-23): manager "suggest next step" LLM route the
+        // kapelle-site TaskSweep button calls. LLM caller is injectable; the
+        // default routes through OpenRouter to a Claude model.
+        try {
+          const { mountSuggestRoutes } = await import('./suggest/routes.js');
+          mountSuggestRoutes(this.managementApp, { env: process.env });
+          console.log('[Manager] Suggest-next-step route mounted (POST /suggest-next-step)');
+        } catch (err) {
+          console.warn('[Manager] Suggest route failed to mount:', err instanceof Error ? err.message : String(err));
+        }
+
         // Kapelle B1 (2026-06-22): loops-scheduler substrate. Migrate the
         // loops/loop_runs tables and seed the registry catalog into the
         // substrate so loops are bindable to a schedule + manually runnable
