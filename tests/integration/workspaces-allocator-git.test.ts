@@ -111,6 +111,68 @@ describe("allocateWorktree — branch-in-use refusal", () => {
   });
 });
 
+describe("by-agent commit attribution", () => {
+  it("installs the hook + marker so a commit in the worktree carries an Agent trailer", () => {
+    const r = allocate({ agent_id: "hopper" });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const wt = r.lease.worktree_path;
+
+    // The hook is installed in the shared (common) hooks dir, invisible to
+    // `git status` and not in the working tree.
+    const hooksDir = execFileSync("git", ["-C", wt, "rev-parse", "--git-path", "hooks"], {
+      encoding: "utf8",
+    }).toString().trim();
+    const hookPath = path.isAbsolute(hooksDir)
+      ? path.join(hooksDir, "prepare-commit-msg")
+      : path.join(wt, hooksDir, "prepare-commit-msg");
+    expect(existsSync(hookPath)).toBe(true);
+    // Allocating did not dirty the protected root working tree.
+    expect(protectedRootStatus(repo)).toBe("");
+
+    // A commit made inside the worktree gets the trailer automatically, with
+    // the original author/message preserved.
+    writeFileSync(path.join(wt, "feature.txt"), "work\n");
+    execFileSync("git", ["-C", wt, "add", "."]);
+    execFileSync("git", ["-C", wt, "config", "user.email", "t@t.dev"]);
+    execFileSync("git", ["-C", wt, "config", "user.name", "t"]);
+    execFileSync("git", ["-C", wt, "commit", "-m", "feat: do work\n\nCo-Authored-By: Claude <noreply@anthropic.com>"]);
+
+    const trailer = execFileSync(
+      "git",
+      ["-C", wt, "log", "-1", "--format=%(trailers:key=Agent,valueonly)"],
+      { encoding: "utf8" },
+    ).toString().trim();
+    expect(trailer).toBe("hopper");
+
+    // Idempotent: a message that already carries the trailer is left alone.
+    writeFileSync(path.join(wt, "feature2.txt"), "more\n");
+    execFileSync("git", ["-C", wt, "add", "."]);
+    execFileSync("git", ["-C", wt, "commit", "-m", "feat: more\n\nAgent: someone-else"]);
+    const trailer2 = execFileSync(
+      "git",
+      ["-C", wt, "log", "-1", "--format=%(trailers:key=Agent,valueonly)"],
+      { encoding: "utf8" },
+    ).toString().trim();
+    expect(trailer2).toBe("someone-else");
+  });
+
+  it("does not clobber a pre-existing foreign prepare-commit-msg hook", () => {
+    const commonDir = execFileSync("git", ["-C", repo, "rev-parse", "--git-path", "hooks"], {
+      encoding: "utf8",
+    }).toString().trim();
+    const hooksDir = path.isAbsolute(commonDir) ? commonDir : path.join(repo, commonDir);
+    execFileSync("mkdir", ["-p", hooksDir]);
+    const hookPath = path.join(hooksDir, "prepare-commit-msg");
+    writeFileSync(hookPath, "#!/bin/sh\n# someone-elses-hook\nexit 0\n");
+
+    const r = allocate({ agent_id: "hopper" });
+    expect(r.ok).toBe(true);
+    // Foreign hook is preserved untouched.
+    expect(execFileSync("cat", [hookPath], { encoding: "utf8" }).toString()).toContain("someone-elses-hook");
+  });
+});
+
 describe("protected-root mutation detection at closeout", () => {
   it("flags protected_root_dirty_after when the agent dirties the canonical root", () => {
     const r = allocate();

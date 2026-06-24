@@ -11,9 +11,16 @@
 // Rules"). Divergent/conflicting branch state blocks rather than forcing.
 
 import { execFileSync } from "node:child_process";
+import { writeFileSync, readFileSync, existsSync, mkdirSync, chmodSync } from "node:fs";
 import path from "node:path";
 import type { ProtectedRootEntry } from "./repo-registry.js";
 import type { WorkspaceLease } from "../dispatch-scheduler/types.js";
+import {
+  ATTRIBUTION_MARKER_FILE,
+  HOOK_SENTINEL,
+  buildPrepareCommitMsgHook,
+  sanitizeAgentName,
+} from "../lib/agent-attribution.js";
 
 export type WorkspacePolicy = "default" | "reconcile_dirty_root";
 
@@ -218,6 +225,56 @@ export function findBranchWorktree(root: string, branch: string): WorktreeEntry 
   return null;
 }
 
+/**
+ * Install by-agent commit attribution for a freshly-allocated worktree.
+ *
+ * Two pieces, both invisible to `git status` (they live under `.git/`):
+ *   - A marker file `<worktree-git-dir>/agent-attribution` holding the agent
+ *     name. Per-worktree, so the protected root and other worktrees are
+ *     unaffected.
+ *   - A `prepare-commit-msg` hook in the SHARED (common) hooks dir that reads
+ *     that marker and appends an `Agent: <name>` trailer. Linked worktrees
+ *     share the common hooks dir, so one install covers them all; the hook is a
+ *     strict no-op anywhere there is no marker (e.g. the protected root).
+ *
+ * Best-effort: any failure is swallowed so attribution never blocks a build.
+ * A pre-existing foreign hook is left untouched (we only manage our own,
+ * recognized by the embedded sentinel).
+ */
+export function installAgentAttribution(
+  worktreePath: string,
+  protectedRoot: string,
+  agentId: string,
+): void {
+  try {
+    const agent = sanitizeAgentName(agentId);
+    if (!agent) return;
+
+    const worktreeGitDir = gitSafe(["rev-parse", "--absolute-git-dir"], worktreePath);
+    if (!worktreeGitDir.ok) return;
+    const markerPath = path.join(worktreeGitDir.out.trim(), ATTRIBUTION_MARKER_FILE);
+    writeFileSync(markerPath, `${agent}\n`, "utf8");
+
+    const hooksPathOut = gitSafe(["rev-parse", "--git-path", "hooks"], protectedRoot);
+    if (!hooksPathOut.ok) return;
+    const raw = hooksPathOut.out.trim();
+    const hooksDir = path.isAbsolute(raw) ? raw : path.resolve(protectedRoot, raw);
+    const hookPath = path.join(hooksDir, "prepare-commit-msg");
+
+    if (existsSync(hookPath)) {
+      // Only (re)write a hook we own; never clobber a foreign one.
+      const existing = readFileSync(hookPath, "utf8");
+      if (!existing.includes(HOOK_SENTINEL)) return;
+    } else {
+      mkdirSync(hooksDir, { recursive: true });
+    }
+    writeFileSync(hookPath, buildPrepareCommitMsgHook(), "utf8");
+    chmodSync(hookPath, 0o755);
+  } catch {
+    /* best effort — attribution must never break allocation */
+  }
+}
+
 export interface AllocateInput {
   dispatch_id: string;
   agent_id: string;
@@ -293,6 +350,12 @@ export function allocateWorktree(input: AllocateInput): AllocateResult {
       };
     }
   }
+
+  // 7b. Install by-agent commit attribution (best-effort; never blocks
+  // allocation). Writes a per-worktree marker + a shared prepare-commit-msg
+  // hook so commits made in this worktree carry an `Agent: <name>` trailer and
+  // commit-stats.py can slice by agent.
+  installAgentAttribution(worktreePath, protectedRoot, input.agent_id);
 
   // 8. Snapshot worktree + record source sha.
   const worktreeStatus = gitStatusPorcelain(worktreePath);

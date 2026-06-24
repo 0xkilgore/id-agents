@@ -135,6 +135,7 @@ id-agents promote-to-main \\
   --remote origin \\
   --strategy auto \\
   --dispatch-id "$DISPATCH_ID" \\
+  --agent "$AGENT_NAME" \\
   --smoke "npm test -- tests/unit/foo.test.ts" \\
   --json \\
   --execute

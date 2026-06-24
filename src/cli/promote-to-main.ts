@@ -17,6 +17,7 @@
 //     ready-to-send /agent-needs-input payload + exits non-zero.
 
 import { spawn } from "node:child_process";
+import { appendAgentTrailer } from "../lib/agent-attribution.js";
 
 export type Strategy =
   | "auto"
@@ -32,6 +33,8 @@ export interface PromoteArgs {
   remote: string;        // default "origin"
   strategy: Strategy;
   dispatchId: string | null;
+  /** Agent the dispatch was routed to; stamped as an `Agent:` commit trailer. */
+  agent: string | null;
   smoke: string | null;
   execute: boolean;
   allowOwnDirty: string[];
@@ -76,7 +79,7 @@ export interface GitDeps {
 
 const KNOWN_FLAGS = new Set([
   "--repo", "--branch", "--base", "--remote", "--strategy",
-  "--dispatch-id", "--smoke", "--execute",
+  "--dispatch-id", "--agent", "--smoke", "--execute",
   "--allow-own-dirty", "--json",
 ]);
 
@@ -87,6 +90,7 @@ export function parsePromoteArgs(argv: string[]): PromoteArgs {
   let remote = "origin";
   let strategy: Strategy = "auto";
   let dispatchId: string | null = null;
+  let agent: string | null = null;
   let smoke: string | null = null;
   let execute = false;
   let allowOwnDirty: string[] = [];
@@ -117,6 +121,7 @@ export function parsePromoteArgs(argv: string[]): PromoteArgs {
         break;
       }
       case "--dispatch-id": dispatchId = val; break;
+      case "--agent": agent = val; break;
       case "--smoke": smoke = val; break;
       case "--allow-own-dirty":
         allowOwnDirty = val.split(",").map((s) => s.trim()).filter(Boolean);
@@ -125,7 +130,7 @@ export function parsePromoteArgs(argv: string[]): PromoteArgs {
   }
   if (!repo) throw new PromoteArgError("--repo is required");
   if (!branch) throw new PromoteArgError("--branch is required");
-  return { repo, branch, base, remote, strategy, dispatchId, smoke, execute, allowOwnDirty, json };
+  return { repo, branch, base, remote, strategy, dispatchId, agent, smoke, execute, allowOwnDirty, json };
 }
 
 // ────────────────────────────────────────────────────────────────────
@@ -182,6 +187,7 @@ export function buildSquashCommitBody(args: {
   sourceTip: string;
   verification: string | null;
   dispatchId: string | null;
+  agent?: string | null;
 }): string {
   const lines: string[] = [];
   lines.push(`Promote ${args.featureName}`);
@@ -190,7 +196,7 @@ export function buildSquashCommitBody(args: {
   lines.push(`Source tip: ${args.sourceTip}`);
   if (args.verification) lines.push(`Verification: ${args.verification}`);
   if (args.dispatchId) lines.push(`Dispatch: ${args.dispatchId}`);
-  return lines.join("\n");
+  return appendAgentTrailer(lines.join("\n"), args.agent ?? null);
 }
 
 // ────────────────────────────────────────────────────────────────────
@@ -202,7 +208,7 @@ export async function runPromoteToMain(
   deps: GitDeps,
   io: { stdout: (s: string) => void; stderr: (s: string) => void },
 ): Promise<{ exit: number; result: PromoteResult | null; needsClarification?: NeedsClarificationPayload }> {
-  const { repo, branch, base, remote, strategy, dispatchId, smoke, execute, allowOwnDirty, json } = args;
+  const { repo, branch, base, remote, strategy, dispatchId, agent, smoke, execute, allowOwnDirty, json } = args;
 
   // Step 1: Working-tree check.
   const statusOut = await deps.git(["status", "--porcelain"], repo);
@@ -344,12 +350,14 @@ export async function runPromoteToMain(
       sourceTip: branchTip,
       verification: smoke,
       dispatchId,
+      agent,
     });
     mergeOut = await deps.git(["commit", "-m", body], repo);
   } else {
     // merge_commit
+    const mergeMsg = appendAgentTrailer(`Merge ${branch} into ${base}`, agent);
     mergeOut = await deps.git(
-      ["merge", "--no-ff", "-m", `Merge ${branch} into ${base}`, branch],
+      ["merge", "--no-ff", "-m", mergeMsg, branch],
       repo,
     );
   }
@@ -461,6 +469,7 @@ Options:
   --remote <name>        Remote to push (default: origin)
   --strategy <s>         auto|fast_forward|merge_commit|squash|follow_up_dispatch (default: auto)
   --dispatch-id <id>     Dispatch id for the /agent-needs-input payload on divergence
+  --agent <name>         Attributed agent; stamped as an "Agent: <name>" commit trailer (squash/merge)
   --smoke <cmd>          Smoke command gating promotion (e.g. "npm run build && npm test")
   --allow-own-dirty <p>  Permit a known-own dirty path (repeatable)
   --json                 Emit machine-readable JSON (drops into /agent-done.promotion.repos[])

@@ -83,6 +83,7 @@ const baseArgs: PromoteArgs = {
   remote: "origin",
   strategy: "auto",
   dispatchId: "phid:disp-abc",
+  agent: null,
   smoke: null,
   execute: false,
   allowOwnDirty: [],
@@ -150,6 +151,11 @@ describe("parsePromoteArgs", () => {
   it("--smoke takes a string", () => {
     const r = parsePromoteArgs(["--repo", "/r", "--branch", "f", "--smoke", "npm test"]);
     expect(r.smoke).toBe("npm test");
+  });
+  it("--agent takes the attributed agent name (default null)", () => {
+    expect(parsePromoteArgs(["--repo", "/r", "--branch", "f"]).agent).toBeNull();
+    const r = parsePromoteArgs(["--repo", "/r", "--branch", "f", "--agent", "hopper"]);
+    expect(r.agent).toBe("hopper");
   });
   it("--allow-own-dirty splits on comma", () => {
     const r = parsePromoteArgs(["--repo", "/r", "--branch", "f", "--allow-own-dirty", "a.ts,b.ts"]);
@@ -240,6 +246,19 @@ describe("buildSquashCommitBody", () => {
     });
     expect(body).not.toMatch(/Verification:/);
     expect(body).not.toMatch(/Dispatch:/);
+  });
+  it("appends an Agent trailer when an agent is supplied", () => {
+    const body = buildSquashCommitBody({
+      featureName: "feat-x", branch: "feat-x", sourceTip: "abc1234",
+      verification: null, dispatchId: null, agent: "hopper",
+    });
+    expect(body).toMatch(/^Agent: hopper$/m);
+  });
+  it("omits the Agent trailer when no agent is supplied", () => {
+    const body = buildSquashCommitBody({
+      featureName: "f", branch: "f", sourceTip: "x", verification: null, dispatchId: null,
+    });
+    expect(body).not.toMatch(/Agent:/);
   });
 });
 
@@ -452,6 +471,59 @@ describe("runPromoteToMain — execute squash path", () => {
     expect(body).toContain("Source tip: src1234");
     expect(body).toContain("Verification: npm test");
     expect(body).toContain("Dispatch: phid:disp-abc");
+  });
+});
+
+describe("runPromoteToMain — Agent trailer in promotion commits", () => {
+  it("squash body carries the Agent trailer when --agent is set", async () => {
+    const deps = fakeGitDeps([
+      { match: (a) => a[0] === "status", out: "" },
+      { match: (a) => a[0] === "fetch", out: "" },
+      { match: (a) => a[0] === "rev-parse" && a[1] === "feat-x", out: "src1234\n" },
+      { match: (a) => a[0] === "rev-parse" && a[1] === "main", out: "basetip\n" },
+      { match: (a) => a[0] === "rev-list" && a.includes("main..feat-x"), out: "100\n" },
+      { match: (a) => a[0] === "rev-list" && a.includes("feat-x..main"), out: "0\n" },
+      { match: (a) => a[0] === "log", out: "data.json refresh\ndata.json refresh\ndata.json refresh\nreal fix\n" },
+      { match: (a) => a[0] === "checkout", out: "" },
+      { match: (a) => a[0] === "merge" && a[1] === "--ff-only" && a[2] === "origin/main", out: "" },
+      { match: (a) => a[0] === "merge" && a[1] === "--squash", out: "" },
+      { match: (a) => a[0] === "commit" && a[1] === "-m", out: "" },
+      { match: (a) => a[0] === "rev-parse" && a[1] === "main" && a.length === 2, out: "post-squash-sha\n" },
+      { match: (a) => a[0] === "push", out: "" },
+      { match: (a) => a[0] === "rev-parse" && a[1] === "origin/main", out: "post-squash-sha\n" },
+    ]);
+    const r = await runPromoteToMain(
+      { ...baseArgs, execute: true, strategy: "auto", agent: "hopper" }, deps, captureIo(),
+    );
+    expect(r.exit).toBe(0);
+    const commitCall = deps.calls.find((c) => c[1] === "commit" && c[2] === "-m");
+    expect(commitCall![3]).toMatch(/^Agent: hopper$/m);
+  });
+
+  it("merge_commit message carries the Agent trailer when --agent is set", async () => {
+    const deps = fakeGitDeps([
+      { match: (a) => a[0] === "status", out: "" },
+      { match: (a) => a[0] === "fetch", out: "" },
+      { match: (a) => a[0] === "rev-parse" && a[1] === "feat-x", out: "src1234\n" },
+      { match: (a) => a[0] === "rev-parse" && a[1] === "main", out: "basetip\n" },
+      { match: (a) => a[0] === "rev-list" && a.includes("main..feat-x"), out: "3\n" },
+      { match: (a) => a[0] === "rev-list" && a.includes("feat-x..main"), out: "0\n" },
+      { match: (a) => a[0] === "log", out: "real fix\n" },
+      { match: (a) => a[0] === "checkout", out: "" },
+      { match: (a) => a[0] === "merge" && a[1] === "--ff-only" && a[2] === "origin/main", out: "" },
+      { match: (a) => a[0] === "merge" && a[1] === "--no-ff", out: "" },
+      { match: (a) => a[0] === "rev-parse" && a[1] === "main" && a.length === 2, out: "merge-sha\n" },
+      { match: (a) => a[0] === "push", out: "" },
+      { match: (a) => a[0] === "rev-parse" && a[1] === "origin/main", out: "merge-sha\n" },
+    ]);
+    const r = await runPromoteToMain(
+      { ...baseArgs, execute: true, strategy: "merge_commit", agent: "hopper" }, deps, captureIo(),
+    );
+    expect(r.exit).toBe(0);
+    const mergeCall = deps.calls.find((c) => c[1] === "merge" && c[2] === "--no-ff");
+    // -m value is the arg right after "-m"
+    const mIdx = mergeCall!.indexOf("-m");
+    expect(mergeCall![mIdx + 1]).toMatch(/^Agent: hopper$/m);
   });
 });
 
