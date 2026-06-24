@@ -33,6 +33,7 @@ import {
   listOperations,
   parseDraftPayload,
   registerArtifact,
+  searchArtifacts,
   upsertArtifactDraft,
 } from './storage.js';
 import { artifactRowToEntry } from './entry-projection.js';
@@ -322,6 +323,43 @@ export function mountOutputsRoutes(
         limit,
         offset,
         source: { read_path: 'substrate', projection: 'artifact_entries' },
+        parity: { status: lastParityStatus },
+      };
+      res.json(envelope);
+    } catch (err) {
+      res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  // ── GET /artifacts/search ──────────────────────────────────────────
+  // L-1/L-2 full-text search over the doc-model substrate (SQLite FTS5). Ranks
+  // artifacts by bm25 relevance to ?q= and returns the SAME read-model envelope
+  // as /artifacts/entries (ArtifactEntry[] + DV2 provenance), in rank order.
+  // Registered before the '/artifacts/:id/*' routes so 'search' isn't an :id.
+  app.get('/artifacts/search', async (req: Request, res: Response) => {
+    try {
+      const q = asString(req.query.q) ?? '';
+      const limit = Math.min(parseInt(req.query.limit as string, 10) || 50, 500);
+      const offset = parseInt(req.query.offset as string, 10) || 0;
+
+      const rows = await searchArtifacts(adapter, q, { limit, offset });
+      const items: ArtifactEntry[] = [];
+      for (const row of rows) {
+        const [review, ops] = await Promise.all([
+          getReviewState(adapter, row.artifact_id),
+          listOperations(adapter, row.artifact_id, 50, 0),
+        ]);
+        items.push(artifactRowToEntry(row, review, ops));
+      }
+
+      const envelope: ReadModelEnvelope<ArtifactEntry> = {
+        schema_version: 'read-model.v1',
+        generated_at: new Date().toISOString(),
+        items, // already in bm25 rank order (best first)
+        count: items.length,
+        limit,
+        offset,
+        source: { read_path: 'substrate', projection: 'artifact_search' },
         parity: { status: lastParityStatus },
       };
       res.json(envelope);

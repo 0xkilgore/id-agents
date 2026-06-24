@@ -148,6 +148,44 @@ export async function migrateOutputsTables(adapter: DbAdapter): Promise<void> {
     )
   `);
   await exec(`CREATE INDEX IF NOT EXISTS artifact_drafts_by_draft_id ON artifact_drafts(draft_id)`);
+
+  // L-1/L-2 — full-text search over the doc-model substrate (SQLite FTS5).
+  // An external-content FTS5 index over `artifacts` (indexes the human-meaningful
+  // text: title, basename, tag, agent) with triggers that keep it in sync on
+  // insert/update/delete, so the existing write path (registerArtifact) is
+  // untouched. `('rebuild')` backfills rows that predate the index. FTS5 is
+  // SQLite-only; on any other dialect search degrades to no-op (see
+  // searchArtifacts), so the index is created only under sqlite.
+  if (adapter.dialect === "sqlite") {
+    await exec(`
+      CREATE VIRTUAL TABLE IF NOT EXISTS artifacts_fts USING fts5(
+        title, basename, tag, agent,
+        content='artifacts', content_rowid='rowid'
+      );
+    `);
+    await exec(`
+      CREATE TRIGGER IF NOT EXISTS artifacts_fts_ai AFTER INSERT ON artifacts BEGIN
+        INSERT INTO artifacts_fts(rowid, title, basename, tag, agent)
+        VALUES (new.rowid, new.title, new.basename, new.tag, new.agent);
+      END;
+    `);
+    await exec(`
+      CREATE TRIGGER IF NOT EXISTS artifacts_fts_ad AFTER DELETE ON artifacts BEGIN
+        INSERT INTO artifacts_fts(artifacts_fts, rowid, title, basename, tag, agent)
+        VALUES ('delete', old.rowid, old.title, old.basename, old.tag, old.agent);
+      END;
+    `);
+    await exec(`
+      CREATE TRIGGER IF NOT EXISTS artifacts_fts_au AFTER UPDATE ON artifacts BEGIN
+        INSERT INTO artifacts_fts(artifacts_fts, rowid, title, basename, tag, agent)
+        VALUES ('delete', old.rowid, old.title, old.basename, old.tag, old.agent);
+        INSERT INTO artifacts_fts(rowid, title, basename, tag, agent)
+        VALUES (new.rowid, new.title, new.basename, new.tag, new.agent);
+      END;
+    `);
+    // Backfill existing artifacts (idempotent — rebuild reconstructs from content).
+    await exec(`INSERT INTO artifacts_fts(artifacts_fts) VALUES('rebuild')`);
+  }
 }
 
 // ── Catalog read/write ────────────────────────────────────────────
@@ -209,6 +247,46 @@ export async function listArtifactCatalog(
    ORDER BY produced_at DESC
       LIMIT ? OFFSET ?`,
     params,
+  );
+  return rows;
+}
+
+/**
+ * Build a safe FTS5 MATCH expression from raw user input. Only Unicode
+ * letter/number runs survive (every FTS5 operator/quote is stripped, so the
+ * input can never break the MATCH syntax), each becomes a prefix term, ANDed
+ * together. Returns null when the input has no searchable tokens.
+ */
+export function toFtsMatch(raw: string): string | null {
+  const tokens = (raw.match(/[\p{L}\p{N}]+/gu) ?? []).map((t) => t.toLowerCase());
+  if (tokens.length === 0) return null;
+  return tokens.map((t) => `${t}*`).join(" ");
+}
+
+/**
+ * Full-text search over the artifacts substrate (SQLite FTS5, L-1/L-2), ranked
+ * by bm25 (best match first). Returns catalog rows for the matches. Degrades to
+ * [] on a non-sqlite dialect or when the query has no searchable tokens.
+ */
+export async function searchArtifacts(
+  adapter: DbAdapter,
+  query: string,
+  opts: { limit?: number; offset?: number } = {},
+): Promise<ArtifactCatalogRow[]> {
+  if (adapter.dialect !== "sqlite") return [];
+  const match = toFtsMatch(query);
+  if (!match) return [];
+  const limit = Math.min(Math.max(opts.limit ?? 50, 1), 500);
+  const offset = Math.max(opts.offset ?? 0, 0);
+  const { rows } = await adapter.query<ArtifactCatalogRow>(
+    `SELECT a.artifact_id, a.basename, a.agent, a.tag, a.abs_path, a.title, a.produced_at,
+            a.source, a.availability, a.source_badges, a.reconciled_at, a.created_at, a.updated_at
+       FROM artifacts_fts
+       JOIN artifacts a ON a.rowid = artifacts_fts.rowid
+      WHERE artifacts_fts MATCH ?
+   ORDER BY bm25(artifacts_fts)
+      LIMIT ? OFFSET ?`,
+    [match, limit, offset],
   );
   return rows;
 }

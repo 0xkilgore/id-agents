@@ -268,3 +268,31 @@ describe("GET /artifacts/entries + /artifacts/parity", () => {
     expect(parity.body.status).toBe("drift"); // can't confirm parity w/o the file
   });
 });
+
+describe("GET /artifacts/search (L-1/L-2 FTS5)", () => {
+  it("returns ranked ArtifactEntry results in the read-model envelope", async () => {
+    const app = await bootApp(async () => alignedLog); // seeds 'one' (roger/spec) + 'two' (regina/build)
+    const { status, body } = await getJson(app, "/artifacts/search?q=one");
+    expect(status).toBe(200);
+    expect(body.schema_version).toBe("read-model.v1");
+    expect(body.source).toEqual({ read_path: "substrate", projection: "artifact_search" });
+    expect(body.count).toBe(1);
+    expect(body.items[0].kind).toBe("artifact");
+    expect(body.items[0].path).toBe("/a/1.md"); // the 'one' artifact
+    expect(body.items[0].provenance).toBeTruthy(); // DV2 provenance carried through
+  });
+
+  it("matches across tag and agent, not just title", async () => {
+    const app = await bootApp(async () => alignedLog);
+    expect((await getJson(app, "/artifacts/search?q=build")).body.items.map((i: any) => i.path)).toEqual(["/a/2.md"]);
+    expect((await getJson(app, "/artifacts/search?q=regina")).body.items.map((i: any) => i.path)).toEqual(["/a/2.md"]);
+  });
+
+  it("empty / missing query returns an empty envelope (no 500)", async () => {
+    const app = await bootApp(async () => alignedLog);
+    const { status, body } = await getJson(app, "/artifacts/search?q=");
+    expect(status).toBe(200);
+    expect(body.count).toBe(0);
+    expect(body.items).toEqual([]);
+  });
+});

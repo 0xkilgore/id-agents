@@ -39,7 +39,9 @@ describe('Kapelle B11 — outputs/storage migration', () => {
   it('creates the three artifact_* / artifacts tables', async () => {
     const adapter = await setup();
     const { rows } = await adapter.query<{ name: string }>(
-      "SELECT name FROM sqlite_master WHERE type='table' AND (name LIKE 'artifact_%' OR name = 'artifacts')",
+      // Exclude the FTS5 search index + its shadow tables (artifacts_fts*, L-1/L-2);
+      // this asserts the core catalog/review/ops/evidence/drafts tables exist.
+      "SELECT name FROM sqlite_master WHERE type='table' AND (name LIKE 'artifact_%' OR name = 'artifacts') AND name NOT LIKE 'artifacts_fts%'",
       [],
     );
     const names = rows.map(r => r.name).sort();
