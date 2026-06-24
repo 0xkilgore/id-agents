@@ -214,6 +214,116 @@ export function failedDispatchesWithin(
   });
 }
 
+// ── T-ORCH / L7 (phid:disp-ac1a5e19abf2f473) — Maestra weekly product log ─────
+// The deterministic collector for the manager-owned slice of the L7 report
+// (loops-catalog.md L7): "dispatches landed this period". Maestra's LLM step
+// reasons over this; the markdown-derived deltas (decisions / roadmap / bug /
+// risk) are agent-platform-owned and stay in Maestra's reasoning inputs — the
+// manager only contributes what it owns deterministically. Default window is
+// the weekly cadence.
+
+/** Trailing window for the L7 weekly product log (7d in ms). */
+export const PRODUCT_LOG_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
+
+// effective_states that mean "work landed" (completed positively, incl.
+// recovered / reconciled). Mirrors the deriveEffectiveState taxonomy.
+const LANDED_EFFECTIVE_STATES = new Set([
+  "done",
+  "done_recovered",
+  "failed_work_landed_recoverable",
+]);
+
+/**
+ * Dispatches that LANDED within `[now - windowMs, now]` — newest first.
+ * "Landed" = effective_state in {done, done_recovered,
+ * failed_work_landed_recoverable} (work that completed, including auto-recovered
+ * / reconciled rows), with the landing instant `completed_at` falling back to
+ * `updated_at`. Pure + deterministic; unparseable `now`/timestamps excluded.
+ */
+export function landedDispatchesWithin(
+  rows: DispatchReadRow[],
+  now: string,
+  windowMs: number = PRODUCT_LOG_WINDOW_MS,
+): DispatchReadRow[] {
+  const nowMs = Date.parse(now);
+  if (!Number.isFinite(nowMs)) return [];
+  const cutoff = nowMs - windowMs;
+  return rows
+    .filter((r) => {
+      if (!LANDED_EFFECTIVE_STATES.has(r.effective_state)) return false;
+      const ts = Date.parse(r.completed_at ?? r.updated_at);
+      return Number.isFinite(ts) && ts >= cutoff;
+    })
+    .sort(
+      (a, b) =>
+        Date.parse(b.completed_at ?? b.updated_at) - Date.parse(a.completed_at ?? a.updated_at),
+    );
+}
+
+export interface ProductLogDispatchDeltas {
+  schema_version: "loops.product-log.dispatches.v1";
+  window_hours: number;
+  since: string;
+  now: string;
+  /** Total dispatches that landed in the window. */
+  landed_total: number;
+  /** Landed count by owning agent (target_agent), descending by count. */
+  by_agent: Array<{ agent: string; landed: number }>;
+  /** How many of the landed rows were auto-recovered/reconciled vs clean done. */
+  recovered_total: number;
+  /** The landed rows (newest first), trimmed to the manager-owned summary. */
+  items: Array<{
+    dispatch_phid: string;
+    target_agent: string;
+    title: string;
+    effective_state: string;
+    landed_at: string | null;
+  }>;
+}
+
+/**
+ * Collect the manager-owned deterministic inputs for the L7 weekly product log:
+ * the dispatches that landed this period, totals, and a by-agent breakdown.
+ * Pure — the route layer reads rows then calls this.
+ */
+export function collectProductLogDispatchDeltas(
+  rows: DispatchReadRow[],
+  now: string,
+  windowMs: number = PRODUCT_LOG_WINDOW_MS,
+): ProductLogDispatchDeltas {
+  const landed = landedDispatchesWithin(rows, now, windowMs);
+  const counts = new Map<string, number>();
+  let recovered_total = 0;
+  for (const r of landed) {
+    const agent = r.target_agent || "unassigned";
+    counts.set(agent, (counts.get(agent) ?? 0) + 1);
+    if (r.effective_state === "done_recovered" || r.effective_state === "failed_work_landed_recoverable") {
+      recovered_total += 1;
+    }
+  }
+  const by_agent = [...counts.entries()]
+    .map(([agent, landedCount]) => ({ agent, landed: landedCount }))
+    .sort((a, b) => b.landed - a.landed || a.agent.localeCompare(b.agent));
+  const nowMs = Date.parse(now);
+  const since = Number.isFinite(nowMs) ? new Date(nowMs - windowMs).toISOString() : now;
+  return {
+    schema_version: "loops.product-log.dispatches.v1",
+    window_hours: Math.round(windowMs / (60 * 60 * 1000)),
+    since,
+    now,
+    landed_total: landed.length,
+    by_agent,
+    recovered_total,
+    items: landed.map((r) => ({
+      dispatch_phid: r.dispatch_phid,
+      target_agent: r.target_agent || "unassigned",
+      title: r.title,
+      effective_state: r.effective_state,
+      landed_at: r.completed_at ?? r.updated_at ?? null,
+    })),
+  };
+}
+
 export async function readDispatches(
   adapter: DbAdapterLike,
   teamId: string,
