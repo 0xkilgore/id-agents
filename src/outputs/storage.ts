@@ -149,6 +149,54 @@ export async function getArtifact(
   return rows[0] ?? null;
 }
 
+/** Filters for the artifacts catalog feed (GET /artifacts/entries). */
+export interface ArtifactCatalogFilters {
+  limit?: number;
+  offset?: number;
+  agent?: string;
+  tag?: string;
+  /** ISO timestamp; rows with produced_at >= since. */
+  since?: string;
+}
+
+/**
+ * List artifacts catalog rows, newest-first by produced_at. The substrate read
+ * path for GET /artifacts/entries — pure SQL, no filesystem access. Bounded to
+ * 500 rows per call (default 50).
+ */
+export async function listArtifactCatalog(
+  adapter: DbAdapter,
+  filters: ArtifactCatalogFilters = {},
+): Promise<ArtifactCatalogRow[]> {
+  const where: string[] = [];
+  const params: unknown[] = [];
+  if (filters.agent) {
+    where.push("agent = ?");
+    params.push(filters.agent);
+  }
+  if (filters.tag) {
+    where.push("tag = ?");
+    params.push(filters.tag);
+  }
+  if (filters.since) {
+    where.push("produced_at >= ?");
+    params.push(filters.since);
+  }
+  const whereSql = where.length ? ` WHERE ${where.join(" AND ")}` : "";
+  const limit = Math.min(Math.max(filters.limit ?? 50, 1), 10_000);
+  const offset = Math.max(filters.offset ?? 0, 0);
+  params.push(limit, offset);
+  const { rows } = await adapter.query<ArtifactCatalogRow>(
+    `SELECT artifact_id, basename, agent, tag, abs_path, title, produced_at,
+            source, availability, source_badges, reconciled_at, created_at, updated_at
+       FROM artifacts${whereSql}
+   ORDER BY produced_at DESC
+      LIMIT ? OFFSET ?`,
+    params,
+  );
+  return rows;
+}
+
 export async function registerArtifact(
   adapter: DbAdapter,
   req: RegisterArtifactRequest,

@@ -26,10 +26,17 @@ import {
   countOperations,
   getArtifact,
   getReviewState,
+  listArtifactCatalog,
   listInboxItems,
   listOperations,
   registerArtifact,
 } from './storage.js';
+import { artifactRowToEntry } from './entry-projection.js';
+import { checkArtifactParity } from './parity.js';
+import type { ArtifactEntry, ReadModelEnvelope } from './entry.js';
+import { promises as fsp } from 'node:fs';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
 import {
   approveArtifact,
   checkActionCooldown,
@@ -101,6 +108,20 @@ export interface MountOutputsRoutesOptions {
    * + `dispatch_skipped` so the console can show routing didn't run.
    */
   enqueueDispatch?: CommentDispatchEnqueueFn;
+  /**
+   * ARTIFACTS substrate proof-cut. Absolute path to delivery-log.md used by the
+   * auto-ingest timer and the parity walk. Defaults to
+   * ~/Dropbox/Code/cane/taskview/delivery-log.md.
+   */
+  deliveryLogPath?: string;
+  /** Injectable delivery-log reader (tests). Returns null when the file is absent. */
+  readDeliveryLog?: () => Promise<string | null>;
+  /** Enable the background catalog auto-ingest timer. Default: !test runner && ARTIFACTS_AUTOINGEST != off. */
+  autoIngest?: boolean;
+  /** Auto-ingest interval (ms). Default 600_000 (10min). */
+  autoIngestIntervalMs?: number;
+  /** Env source for feature-flag / autoingest reads (tests). Defaults to process.env. */
+  env?: NodeJS.ProcessEnv;
 }
 
 export function mountOutputsRoutes(
@@ -111,6 +132,23 @@ export function mountOutputsRoutes(
   const { tasks, resolveTeamId } = opts;
   const cooldownMs = opts.actionCooldownMs ?? DEFAULT_ACTION_COOLDOWN_MS;
   const clock = opts.now;
+
+  // ── ARTIFACTS substrate proof-cut: delivery-log seam + parity cache ──
+  const env = opts.env ?? process.env;
+  const deliveryLogPath =
+    opts.deliveryLogPath ?? join(homedir(), 'Dropbox', 'Code', 'cane', 'taskview', 'delivery-log.md');
+  const readDeliveryLog =
+    opts.readDeliveryLog ??
+    (async (): Promise<string | null> => {
+      try {
+        return await fsp.readFile(deliveryLogPath, 'utf8');
+      } catch {
+        return null;
+      }
+    });
+  // Last-known parity status, surfaced on the /artifacts/entries envelope so the
+  // console can render it without the entries handler touching the filesystem.
+  let lastParityStatus: ReadModelEnvelope<unknown>['parity']['status'] = 'unchecked';
 
   // Monday §1/§2 guards. RD-001: reject anything that isn't a stable artifact_id
   // (display id / basename / queue index / path) as a mutation target. Actor:
@@ -225,6 +263,71 @@ export function mountOutputsRoutes(
         count: items.length,
       };
       res.json(response);
+    } catch (err) {
+      res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  // ── GET /artifacts/entries ─────────────────────────────────────────
+  // ARTIFACTS substrate proof-cut (Step 2). Reads the artifacts feed from the
+  // SQL substrate (no filesystem access in this handler) and returns the shared
+  // read-model envelope with ArtifactEntry[] (DV1 shape) + DV2 provenance.
+  app.get('/artifacts/entries', async (req: Request, res: Response) => {
+    try {
+      const limit = Math.min(parseInt(req.query.limit as string, 10) || 50, 500);
+      const offset = parseInt(req.query.offset as string, 10) || 0;
+      const agent = asString(req.query.agent);
+      const tag = asString(req.query.tag);
+      const since = asString(req.query.since);
+
+      const rows = await listArtifactCatalog(adapter, { limit, offset, agent, tag, since });
+      const items: ArtifactEntry[] = [];
+      for (const row of rows) {
+        const [review, ops] = await Promise.all([
+          getReviewState(adapter, row.artifact_id),
+          listOperations(adapter, row.artifact_id, 50, 0),
+        ]);
+        items.push(artifactRowToEntry(row, review, ops));
+      }
+
+      const envelope: ReadModelEnvelope<ArtifactEntry> = {
+        schema_version: 'read-model.v1',
+        generated_at: new Date().toISOString(),
+        items,
+        count: items.length,
+        limit,
+        offset,
+        source: { read_path: 'substrate', projection: 'artifact_entries' },
+        parity: { status: lastParityStatus },
+      };
+      res.json(envelope);
+    } catch (err) {
+      res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  // ── GET /artifacts/parity ──────────────────────────────────────────
+  // ARTIFACTS substrate proof-cut (Step 3). Compares the substrate projection
+  // against a delivery-log.md walk on the do-not-break metrics. The flag flip is
+  // BLOCKED unless this returns status:"ok". Caches the status for the entries
+  // envelope.
+  app.get('/artifacts/parity', async (_req: Request, res: Response) => {
+    try {
+      const text = await readDeliveryLog();
+      if (text == null) {
+        res.json({
+          status: 'drift',
+          generated_at: new Date().toISOString(),
+          substrate_count: 0,
+          delivery_log_count: 0,
+          metrics: [],
+          drift: ['delivery-log.md is not readable; cannot confirm parity'],
+        });
+        return;
+      }
+      const report = await checkArtifactParity(adapter, text, new Date().toISOString());
+      lastParityStatus = report.status;
+      res.json(report);
     } catch (err) {
       res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
     }
@@ -604,6 +707,48 @@ export function mountOutputsRoutes(
       res.status(400).json({ error: err instanceof Error ? err.message : String(err) });
     }
   });
+
+  // ── ARTIFACTS auto-ingest timer (Step 2) ───────────────────────────
+  // Keep the catalog projection backed by the live delivery-log.md without a
+  // manual backfill POST. Mirrors the decisions auto-ingest pattern: 5s warmup +
+  // 10min interval, both .unref()'d, gated on ARTIFACTS_AUTOINGEST and never run
+  // under the test runner. Re-ingests only when delivery-log.md's mtime changed,
+  // so markdown stays canonical while the projection stays fresh. Opportunistically
+  // refreshes the cached parity status after each ingest.
+  const autoIngestEnabled =
+    opts.autoIngest ??
+    (typeof process.env.VITEST === 'undefined' &&
+      !/^(0|false|no|off)$/i.test(env.ARTIFACTS_AUTOINGEST ?? ''));
+  if (autoIngestEnabled) {
+    const intervalMs = opts.autoIngestIntervalMs ?? 600_000;
+    let lastMtimeMs = -1;
+    const runIngest = async (): Promise<void> => {
+      try {
+        const stat = await fsp.stat(deliveryLogPath).catch(() => null);
+        if (!stat) return;
+        if (stat.mtimeMs === lastMtimeMs) return; // unchanged since last ingest
+        lastMtimeMs = stat.mtimeMs;
+        const text = await readDeliveryLog();
+        if (text == null) return;
+        const r = await backfillCatalogFromDeliveryLog(adapter, text, new Date().toISOString());
+        try {
+          lastParityStatus = (await checkArtifactParity(adapter, text)).status;
+        } catch {
+          /* keep last-known parity status */
+        }
+        if (r.inserted || r.updated) {
+          console.log(
+            `[artifacts] auto-ingest ${deliveryLogPath}: +${r.inserted}/${r.updated} (parsed ${r.rows_parsed})`,
+          );
+        }
+      } catch (err) {
+        console.warn(`[artifacts] auto-ingest failed: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    };
+    setTimeout(() => void runIngest(), 5_000).unref?.();
+    const timer = setInterval(() => void runIngest(), intervalMs);
+    if (typeof timer.unref === 'function') timer.unref();
+  }
 }
 
 /**
