@@ -13,13 +13,14 @@ import fs from "node:fs";
 import crypto from "node:crypto";
 import type { DbAdapter } from "../db/db-adapter.js";
 import type { ContinuousOrchestrationConfig } from "./config.js";
-import type { BacklogItem, DecisionRecord, OrchestrationMode, UsageGateView } from "./types.js";
+import type { BacklogItem, DecisionRecord, OrchestrationMode, ReadinessState, UsageGateView } from "./types.js";
 import { orderCandidates } from "./selection.js";
 import { tickAdmitLimit } from "./cadence.js";
 import { planAdmission, evaluateStall, type AdmissionContext } from "./admission.js";
 import {
   appendDecisions,
   getOrchestrationState,
+  listBacklogByState,
   listDoneItemIds,
   listReadyItems,
   recordTickOutcome,
@@ -28,6 +29,10 @@ import {
 } from "./storage.js";
 import { runFleshPass, type FleshRunSummary } from "./flesh-runner.js";
 import { sendTelegramAlert, type AlertSender } from "./telegram.js";
+
+/** Raw dispatch statuses that mean the work is finished — its write-scope lock
+ *  can be released. Mirrors the dispatch read-model's TERMINAL_STATUSES. */
+const TERMINAL_DISPATCH_STATUSES = new Set(["done", "failed", "cancelled"]);
 
 export interface DaemonDeps {
   adapter: DbAdapter;
@@ -38,6 +43,14 @@ export interface DaemonDeps {
   readUsage: () => Promise<{ view: UsageGateView; daily_tokens_used: number }>;
   /** Read current in-flight count + the write scopes those dispatches hold. */
   readInFlight: () => Promise<{ count: number; active_write_scopes: Set<string> }>;
+  /**
+   * Resolve raw dispatch status by phid (NO team filter — phids are global).
+   * Used by the in-flight reconciler to release the write-scope lock once a
+   * fired dispatch reaches a terminal state. Optional so legacy boot/test paths
+   * mount unchanged (reconciliation is then skipped, except the reaper's
+   * unresolvable-stale net which needs no resolver).
+   */
+  resolveDispatchStates?: (phids: string[]) => Promise<Map<string, string>>;
   alert?: AlertSender;
   now?: () => number;
   /** Override the kill-switch check (defaults to fs existence of the file). */
@@ -54,6 +67,8 @@ export interface TickResult {
   halted: string | null;
   candidates: number;
   admitted: Array<{ item_id: string; dispatch_phid: string | null }>;
+  /** In-flight items whose lock was released this tick (completion + reaper). */
+  reconciled: number;
   skipped: number;
   zero_ticks: number;
   stall_alert: boolean;
@@ -100,6 +115,15 @@ export class ContinuousOrchestrationDaemon {
 
     const state = await getOrchestrationState(this.deps.adapter, this.teamId);
     const killSwitch = this.killSwitchActive();
+
+    // COMPLETION RECONCILIATION + REAPER — the missing half of the loop. Release
+    // the write-scope lock of any in_flight item whose dispatch has terminated
+    // (or is stuck unresolvable past the stale window). MUST run BEFORE
+    // readInFlight so the freed lanes are admissible THIS tick — otherwise a
+    // fired item holds its lock forever and the lanes strangle after
+    // ~max_in_flight fires (the overnight self-strangle this fixes).
+    const reconcileDecisions = await this.reconcileInFlight(nowMs, config.dry_run);
+
     const { view: usage, daily_tokens_used } = await this.deps.readUsage();
     const { count: in_flight, active_write_scopes } = await this.deps.readInFlight();
 
@@ -132,7 +156,7 @@ export class ContinuousOrchestrationDaemon {
     };
 
     const plan = planAdmission(ordered, ctx, config);
-    const decisions: DecisionRecord[] = [];
+    const decisions: DecisionRecord[] = [...reconcileDecisions];
     const admitted: Array<{ item_id: string; dispatch_phid: string | null }> = [];
 
     if (refuel) {
@@ -233,6 +257,7 @@ export class ContinuousOrchestrationDaemon {
       halted: plan.halt?.reason ?? null,
       candidates: ordered.length,
       admitted,
+      reconciled: reconcileDecisions.length,
       skipped: plan.skipped.length,
       zero_ticks: stall.zero_ticks,
       stall_alert: stall.alert,
@@ -240,6 +265,75 @@ export class ContinuousOrchestrationDaemon {
       refuel,
       decisions,
     };
+  }
+
+  /**
+   * COMPLETION RECONCILIATION + STALE REAPER — the missing half of the loop.
+   * Releases the write-scope lock of in_flight items whose dispatch has finished.
+   *
+   * Per in_flight backlog item:
+   *  - dispatch TERMINAL (done/failed/cancelled) → release immediately:
+   *    done→done, cancelled→cancelled, failed→needs_review (a human/approval
+   *    gate re-promotes rather than the loop auto-retrying a failure).
+   *  - dispatch UNRESOLVABLE (missing row / null phid) AND stuck past
+   *    stale_in_flight_ms → reaper releases it to needs_review (self-heals
+   *    missed completions, pruned rows, daemon restarts).
+   *  - dispatch resolvable but NON-terminal (active/queued) → LEFT ALONE: the
+   *    scheduler owns its recovery; reaping a live build would double-fire.
+   *
+   * Runs every tick BEFORE readInFlight so freed lanes are admissible the same
+   * tick. Dry-run mirrors the refuel posture: compute + log "would_reconcile",
+   * mutate nothing.
+   */
+  private async reconcileInFlight(nowMs: number, dryRun: boolean): Promise<DecisionRecord[]> {
+    const items = await listBacklogByState(this.deps.adapter, {
+      team_id: this.teamId,
+      state: "in_flight",
+    });
+    if (items.length === 0) return [];
+
+    const phids = items.map((i) => i.last_dispatch_phid).filter((p): p is string => !!p);
+    const states = this.deps.resolveDispatchStates
+      ? await this.deps.resolveDispatchStates(phids)
+      : new Map<string, string>();
+    const staleMs = this.deps.config.stale_in_flight_ms;
+    const out: DecisionRecord[] = [];
+
+    for (const item of items) {
+      const phid = item.last_dispatch_phid;
+      const status = phid ? states.get(phid) : undefined;
+      let toState: ReadinessState | null = null;
+      let via = "";
+      let reason = "";
+
+      if (status && TERMINAL_DISPATCH_STATUSES.has(status)) {
+        toState = status === "done" ? "done" : status === "cancelled" ? "cancelled" : "needs_review";
+        via = "completion";
+        reason = `dispatch ${status} → ${toState} (lock released)`;
+      } else if (!status) {
+        // Unresolvable dispatch (missing row / null phid): only the time-bounded
+        // reaper may release it, so a live-but-unreadable dispatch isn't reaped early.
+        const ageMs = nowMs - Date.parse(item.updated_at);
+        if (Number.isFinite(ageMs) && ageMs > staleMs) {
+          toState = "needs_review";
+          via = "reaper";
+          reason = `stale in_flight ${Math.round(ageMs / 60_000)}m, dispatch unresolvable → needs_review`;
+        }
+      }
+
+      if (!toState) continue;
+      if (!dryRun) {
+        await setItemState(this.deps.adapter, item.item_id, toState);
+      }
+      out.push({
+        item_id: item.item_id,
+        action: dryRun ? "would_reconcile" : "reconciled",
+        reason,
+        dispatch_phid: phid,
+        metadata: { via, dispatch_status: status ?? null, to_state: toState },
+      });
+    }
+    return out;
   }
 
   /**

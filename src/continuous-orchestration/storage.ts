@@ -312,6 +312,31 @@ export async function setItemState(
   );
 }
 
+/**
+ * Resolve the raw dispatch status for each phid from the scheduler queue.
+ * Keyed by `dispatch_phid` ALONE — NO team filter — because dispatch rows are
+ * keyed by the team UUID while CO storage uses the team NAME ("default"); a
+ * team-scoped read would never match (see factory.ts enqueue note). Phids are
+ * globally unique, so a phid-only lookup is correct and trap-free. Missing phids
+ * are simply absent from the returned map (the reaper treats absent as
+ * unresolvable).
+ */
+export async function getDispatchStatusesByPhid(
+  adapter: DbAdapter,
+  phids: string[],
+): Promise<Map<string, string>> {
+  const out = new Map<string, string>();
+  const unique = [...new Set(phids.filter((p): p is string => !!p))];
+  if (unique.length === 0) return out;
+  const placeholders = unique.map((_, i) => `$${i + 1}`).join(",");
+  const { rows } = await adapter.query<{ dispatch_phid: string; status: string }>(
+    `SELECT dispatch_phid, status FROM dispatch_scheduler_queue WHERE dispatch_phid IN (${placeholders})`,
+    unique,
+  );
+  for (const r of rows) out.set(r.dispatch_phid, r.status);
+  return out;
+}
+
 // ── Auto-flesh (daemon SELF-REFUEL) ──────────────────────────────────
 
 /**

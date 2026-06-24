@@ -23,6 +23,11 @@ export interface ContinuousOrchestrationConfig {
   stall_threshold_ticks: number;
   /** Tick cadence in ms (the lane-fill heartbeat between batch load-points). */
   tick_interval_ms: number;
+  /** Reaper safety net: an item stuck `in_flight` longer than this whose
+   *  dispatch is unresolvable (missing row / null phid) is auto-released so its
+   *  write-scope lock cannot strangle the lane forever. Default 30min. Terminal
+   *  dispatches are reconciled immediately every tick regardless of this. */
+  stale_in_flight_ms: number;
   /** Batch load-points (local HH:mm) where new backlog admission opens wide. */
   cadence_load_points: string[];
   /** IANA tz the load-points + ceiling-day are evaluated in. */
@@ -114,6 +119,7 @@ export function defaultConfig(): ContinuousOrchestrationConfig {
     max_new_per_tick: 1,
     stall_threshold_ticks: 3,
     tick_interval_ms: 60_000,
+    stale_in_flight_ms: 1_800_000,
     cadence_load_points: ["07:15", "12:30", "15:30"],
     timezone: "America/Chicago",
     kill_switch_path: DEFAULT_KILL_SWITCH_PATH,
@@ -141,6 +147,7 @@ export function loadContinuousOrchestrationConfig(
     max_new_per_tick: envInt(env.CONTINUOUS_ORCHESTRATION_MAX_NEW_PER_TICK, d.max_new_per_tick),
     stall_threshold_ticks: envInt(env.CONTINUOUS_ORCHESTRATION_STALL_THRESHOLD_TICKS, d.stall_threshold_ticks),
     tick_interval_ms: envInt(env.CONTINUOUS_ORCHESTRATION_TICK_INTERVAL_MS, d.tick_interval_ms),
+    stale_in_flight_ms: envInt(env.CONTINUOUS_ORCHESTRATION_STALE_IN_FLIGHT_MS, d.stale_in_flight_ms),
     cadence_load_points: loadPoints
       ? loadPoints.split(",").map((s) => s.trim()).filter(Boolean)
       : d.cadence_load_points,

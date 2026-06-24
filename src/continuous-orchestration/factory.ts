@@ -11,7 +11,7 @@ import type { Provider, Runtime } from "../dispatch-scheduler/types.js";
 import type { DaemonUsageReport, UsageReportV2 } from "../usage-meter/types.js";
 import { ContinuousOrchestrationDaemon } from "./daemon.js";
 import { loadContinuousOrchestrationConfig, type ContinuousOrchestrationConfig } from "./config.js";
-import { listBacklogByState } from "./storage.js";
+import { getDispatchStatusesByPhid, listBacklogByState } from "./storage.js";
 import type { BacklogItem } from "./types.js";
 
 interface SchedulerLike {
@@ -109,6 +109,12 @@ export function createContinuousOrchestrationDaemon(opts: BuildDaemonOptions): {
       for (const it of inFlightItems) for (const s of it.write_scope) scopes.add(s);
       return { count: inFlightItems.length, active_write_scopes: scopes };
     },
+
+    // P0 loop-strangle fix: resolve each in_flight item's dispatch status so the
+    // reconciler can release the write-scope lock once the dispatch terminates.
+    // Phid-only lookup (no team filter) — dispatch rows are team-UUID-keyed while
+    // CO storage uses the team NAME, so a scoped read would never match.
+    resolveDispatchStates: (phids: string[]) => getDispatchStatusesByPhid(opts.adapter, phids),
   });
 
   return { daemon, config };

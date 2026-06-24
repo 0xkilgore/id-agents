@@ -121,7 +121,9 @@ export interface DecisionRecord {
     | "guardrail_halt"
     | "stall_alert"
     | "auto_pause"
-    | "refuel";
+    | "refuel"
+    | "reconciled"
+    | "would_reconcile";
   reason: string;
   dispatch_phid?: string | null;
   metadata?: Record<string, unknown>;
