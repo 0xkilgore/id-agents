@@ -331,6 +331,7 @@ export async function migrateSqlite(adapter: SqliteAdapter): Promise<void> {
       created_at INTEGER NOT NULL,
       updated_at INTEGER NOT NULL,
       completed_at INTEGER,
+      track TEXT NOT NULL DEFAULT '(unassigned)',
       UNIQUE(team_id, name)
     );
 
@@ -680,6 +681,15 @@ export async function migrateSqlite(adapter: SqliteAdapter): Promise<void> {
   // Tasks: add uuid column for short-id lookups (#xxxxxxxx)
   try {
     adapter.exec(`ALTER TABLE tasks ADD COLUMN uuid TEXT`);
+  } catch {
+    // Column already exists in upgraded databases.
+  }
+
+  // Tasks: canonical-track tagging (Spec — canonical-track-registry).
+  // Existing tasks (1362 at migration time) carry no track → default to
+  // '(unassigned)'; new writes validate against the registry (soft-warn only).
+  try {
+    adapter.exec(`ALTER TABLE tasks ADD COLUMN track TEXT NOT NULL DEFAULT '(unassigned)'`);
   } catch {
     // Column already exists in upgraded databases.
   }

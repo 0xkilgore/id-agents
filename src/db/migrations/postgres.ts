@@ -491,6 +491,7 @@ export async function migratePostgres(adapter: DbAdapter): Promise<void> {
       created_at bigint NOT NULL,
       updated_at bigint NOT NULL,
       completed_at bigint,
+      track text NOT NULL DEFAULT '(unassigned)',
       UNIQUE(team_id, name)
     );
   `);
@@ -545,6 +546,10 @@ export async function migratePostgres(adapter: DbAdapter): Promise<void> {
   await adapter.query(`ALTER TABLE tasks ADD COLUMN IF NOT EXISTS uuid text;`);
   await adapter.query(`UPDATE tasks SET uuid = gen_random_uuid()::text WHERE uuid IS NULL OR uuid = '';`);
   await adapter.query(`CREATE UNIQUE INDEX IF NOT EXISTS tasks_uuid_idx ON tasks(uuid);`);
+
+  // Tasks: canonical-track tagging (canonical-track-registry). Existing rows
+  // default to '(unassigned)'; new writes validate (soft-warn only).
+  await adapter.query(`ALTER TABLE tasks ADD COLUMN IF NOT EXISTS track text NOT NULL DEFAULT '(unassigned)';`);
 
   await adapter.query(`
     CREATE TABLE IF NOT EXISTS task_event_links (

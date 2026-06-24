@@ -152,6 +152,11 @@ export interface TaskRow {
   created_at: number;
   updated_at: number;
   completed_at: number | null;
+  /**
+   * Canonical roadmap track (canonical-track-registry). '(unassigned)' when
+   * absent or non-conforming at write time. See src/track-registry/registry.ts.
+   */
+  track: string;
 }
 
 /** task_event_links table row */

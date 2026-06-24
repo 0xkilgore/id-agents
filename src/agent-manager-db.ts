@@ -27,6 +27,7 @@ import { defaultDeliverFn, redactSshTarget, type DeliverFn } from './lib/ssh-del
 import { probeRemoteAgent, defaultHealthProbeFn, type HealthProbeFn } from './lib/remote-heartbeat.js';
 import { filterClaudeEnvVars } from './lib/env-hygiene.js';
 import { buildTasksEntriesEnvelope } from './tasks-readmodel/entry-projection.js';
+import { resolveTrack } from './track-registry/registry.js';
 import { resolveManagerNode } from './lib/native-node.js';
 import { isBootSpawnableAgent } from './lib/boot-spawn.js';
 import { sweepOrphanAgents, listMatchingProcesses } from './lib/orphan-sweep.js';
@@ -6273,10 +6274,25 @@ export class AgentManagerDb {
       try {
         let { id: teamId } = await this.getTeam(req);
         const principal = (req as any).ctx?.principal || 'anon';
-        const { title, name: rawName, description, team: teamRef, from } = req.body || {};
+        const { title, name: rawName, description, team: teamRef, from, track: rawTrack } = req.body || {};
 
         if (!title || typeof title !== 'string') {
           return res.status(400).json({ error: 'Missing required field: title' });
+        }
+
+        // Validate optional `track` against the canonical-track-registry.
+        // Soft-warn only — 1362 existing tasks carry no track, so we NEVER
+        // hard-reject. Absent/non-conforming → '(unassigned)' + a warning.
+        let track = '(unassigned)';
+        if (rawTrack != null && typeof rawTrack === 'string' && rawTrack.trim() !== '') {
+          const resolved = resolveTrack(rawTrack);
+          if (resolved.conforms) {
+            track = rawTrack.trim();
+          } else {
+            console.warn(
+              `[Manager] POST /tasks: non-conforming track "${rawTrack}" — storing '(unassigned)' (see canonical-track-registry)`,
+            );
+          }
         }
 
         // Resolve created_by from `from` field first so we can recover the
@@ -6338,6 +6354,7 @@ export class AgentManagerDb {
           created_at: now,
           updated_at: now,
           completed_at: null,
+          track,
         };
 
         await this.db.tasks.create(taskRow);
@@ -7177,6 +7194,7 @@ export class AgentManagerDb {
       title: task.title,
       description: task.description,
       status: task.status,
+      track: task.track ?? '(unassigned)',
       ownerName,
       teamName,
       linkedEvents: links.map(l => l.schedule_id),

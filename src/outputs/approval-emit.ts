@@ -130,6 +130,7 @@ export async function emitApprovalTask(
     created_at: nowMs,
     updated_at: nowMs,
     completed_at: null,
+    track: "(unassigned)",
   };
 
   try {

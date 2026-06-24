@@ -46,6 +46,7 @@ export function taskRowToEntry(
     task_status: row.status,
     body_markdown: row.description ?? "",
     project: null,
+    track: row.track ?? "(unassigned)",
     owner,
     created_at: epochToIso(row.created_at),
     created_by: createdBy,

@@ -25,6 +25,8 @@ export interface TaskEntry {
   /** Task description; empty string when none. */
   body_markdown: string;
   project: string | null;
+  /** Canonical roadmap track (canonical-track-registry); '(unassigned)' when none. */
+  track: string;
   /** The agent the task is assigned to, if any. */
   owner: ActorRef | null;
   created_at: string;

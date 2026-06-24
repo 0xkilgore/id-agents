@@ -23,6 +23,7 @@ const ROW: TaskRow = {
   created_at: 1782318450, // epoch SECONDS
   updated_at: 1782319000,
   completed_at: null,
+  track: "T-CKPT",
 };
 
 describe("taskRowToEntry", () => {
@@ -38,6 +39,12 @@ describe("taskRowToEntry", () => {
     expect(e.body_markdown).toBe("look at the Q2 contracts");
     expect(e.owner).toEqual({ type: "agent", id: "regina" });
     expect(e.created_by).toEqual({ type: "agent", id: "roger" });
+    expect(e.track).toBe("T-CKPT");
+  });
+
+  it("defaults track to '(unassigned)' when the row carries none", () => {
+    const e = taskRowToEntry({ ...ROW, track: undefined as unknown as string }, new Map());
+    expect(e.track).toBe("(unassigned)");
   });
 
   it("converts epoch-second timestamps to ISO, completed_at null when open", () => {

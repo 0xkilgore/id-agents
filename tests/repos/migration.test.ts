@@ -34,6 +34,7 @@ function makeTask(overrides: Partial<TaskRow> & { team_id: string; name: string 
     created_at: now,
     updated_at: now,
     completed_at: null,
+    track: '(unassigned)',
     ...overrides,
   };
 }
