@@ -13,6 +13,10 @@ import { ContinuousOrchestrationDaemon } from "./daemon.js";
 import { loadContinuousOrchestrationConfig, type ContinuousOrchestrationConfig } from "./config.js";
 import { getDispatchStatusesByPhid, listBacklogByState } from "./storage.js";
 import type { BacklogItem } from "./types.js";
+import type { PoolRouting, ResolvedPool } from "./daemon.js";
+import { BuildPoolRegistry } from "../build-pools/index.js";
+import { leaseWorktreePath } from "../workspaces/allocator.js";
+import { randomUUID } from "node:crypto";
 
 interface SchedulerLike {
   enqueue(
@@ -115,7 +119,43 @@ export function createContinuousOrchestrationDaemon(opts: BuildDaemonOptions): {
     // Phid-only lookup (no team filter) — dispatch rows are team-UUID-keyed while
     // CO storage uses the team NAME, so a scoped read would never match.
     resolveDispatchStates: (phids: string[]) => getDispatchStatusesByPhid(opts.adapter, phids),
+
+    // Stage C build-pool routing: late-bind builder + a distinct worktree
+    // write_scope per build so N pool members build the same repo concurrently.
+    pools: buildPoolRouting(opts.env),
   });
 
   return { daemon, config };
+}
+
+/**
+ * Build the Stage-C PoolRouting from the seed BuildPoolRegistry. Resolves a
+ * pool by the item's track, spills across members not currently building, and
+ * computes a distinct worktree write_scope per build (the real worktree is
+ * created by the existing spawn/allocator path keyed on the dispatch; here we
+ * only need the distinct, observable path so the lane no longer serializes).
+ *
+ * NOTE (follow-up): `availableBuilders` treats every non-building member as
+ * available. Persisted builder state (idle/building/offline + abi_healthy +
+ * heartbeat, build-pools/select.ts `selectBuilder`) is the hardening that adds
+ * online/health filtering; until then a member is assumed online.
+ */
+export function buildPoolRouting(env: NodeJS.ProcessEnv = process.env): PoolRouting {
+  const registry = BuildPoolRegistry.load(env);
+  return {
+    poolForItem: (item: BacklogItem): ResolvedPool | null => {
+      const p = item.track ? registry.resolvePool(item.track) : undefined;
+      if (!p) return null;
+      return { pool_id: p.pool_id, repo_root: p.repo_root, max_parallel: p.max_parallel, members: [...p.members] };
+    },
+    availableBuilders: (pool: ResolvedPool, building: Set<string>): string[] =>
+      pool.members.filter((m) => !building.has(m)),
+    allocateWorktree: async ({ agent, item, pool }) => {
+      const token = randomUUID().slice(0, 8);
+      const slug = (item.track ?? "build").toLowerCase().replace(/[^a-z0-9]+/g, "-").slice(0, 24) || "build";
+      const branch = `build/${agent}-${token}-${slug}`;
+      const path = leaseWorktreePath(pool.repo_root, agent, token, branch);
+      return { path, branch, lease_id: null };
+    },
+  };
 }

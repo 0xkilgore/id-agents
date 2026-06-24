@@ -313,6 +313,27 @@ export async function setItemState(
 }
 
 /**
+ * Stage C late-binding: at FIRE time the daemon picks the pool builder and its
+ * worktree, so persist the chosen `to_agent` + the worktree `write_scope` (a
+ * distinct path per build) before the item flips to in_flight. The persisted
+ * to_agent feeds the next tick's pool "building" set; the worktree write_scope
+ * makes each in-flight build's lock distinct.
+ */
+export async function bindItemForFire(
+  adapter: DbAdapter,
+  item_id: string,
+  bind: { to_agent: string; write_scope: string[] },
+): Promise<void> {
+  const now = new Date().toISOString();
+  await adapter.query(
+    `UPDATE orchestration_backlog_item
+       SET to_agent = $1, write_scope_json = $2, updated_at = $3
+     WHERE item_id = $4`,
+    [bind.to_agent, JSON.stringify(bind.write_scope), now, item_id],
+  );
+}
+
+/**
  * Resolve the raw dispatch status for each phid from the scheduler queue.
  * Keyed by `dispatch_phid` ALONE — NO team filter — because dispatch rows are
  * keyed by the team UUID while CO storage uses the team NAME ("default"); a

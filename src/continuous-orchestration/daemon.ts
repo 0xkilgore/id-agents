@@ -19,6 +19,7 @@ import { tickAdmitLimit } from "./cadence.js";
 import { planAdmission, evaluateStall, type AdmissionContext } from "./admission.js";
 import {
   appendDecisions,
+  bindItemForFire,
   getOrchestrationState,
   listBacklogByState,
   listDoneItemIds,
@@ -33,6 +34,34 @@ import { sendTelegramAlert, type AlertSender } from "./telegram.js";
 /** Raw dispatch statuses that mean the work is finished — its write-scope lock
  *  can be released. Mirrors the dispatch read-model's TERMINAL_STATUSES. */
 const TERMINAL_DISPATCH_STATUSES = new Set(["done", "failed", "cancelled"]);
+
+/** A pool an item routes to (resolved from its track). */
+export interface ResolvedPool {
+  pool_id: string;
+  repo_root: string;
+  max_parallel: number;
+  members: string[];
+}
+
+/** A late-bound worktree lease for one build. */
+export interface BuildWorktree {
+  /** Distinct write_scope for the in-flight build (the worktree path). */
+  path: string;
+  /** Branch the builder pushes; the merge-queue serializes its merge. */
+  branch: string;
+  lease_id: string | null;
+}
+
+/** Stage-C routing seam. Factory wires it to BuildPoolRegistry + selectBuilder +
+ *  allocateWorktree; tests inject a deterministic fake. */
+export interface PoolRouting {
+  /** Resolve the pool for an item (by track), or null for non-pool items. */
+  poolForItem: (item: BacklogItem) => ResolvedPool | null;
+  /** Pool members available to take work (members minus `building`, online/healthy), in preference order. */
+  availableBuilders: (pool: ResolvedPool, building: Set<string>) => string[];
+  /** Allocate a distinct worktree for one build off the pool repo. */
+  allocateWorktree: (input: { agent: string; item: BacklogItem; pool: ResolvedPool }) => Promise<BuildWorktree>;
+}
 
 export interface DaemonDeps {
   adapter: DbAdapter;
@@ -51,6 +80,15 @@ export interface DaemonDeps {
    * unresolvable-stale net which needs no resolver).
    */
   resolveDispatchStates?: (phids: string[]) => Promise<Map<string, string>>;
+  /**
+   * Build-pool routing (Stage C). When provided, an admitted item that resolves
+   * to a pool late-binds its builder + worktree at FIRE time: the daemon spills
+   * across pool members and each in-flight build gets a DISTINCT worktree
+   * write_scope, so N builders build the same repo concurrently (admission gates
+   * on pool capacity + a free member, not the repo-scope single-writer lock).
+   * Omitted → legacy single-lane behavior (existing boot/tests unchanged).
+   */
+  pools?: PoolRouting;
   alert?: AlertSender;
   now?: () => number;
   /** Override the kill-switch check (defaults to fs existence of the file). */
@@ -144,6 +182,11 @@ export class ContinuousOrchestrationDaemon {
     const done_item_ids = await listDoneItemIds(this.deps.adapter, this.teamId);
     const ordered = orderCandidates(ready);
 
+    // Stage C: compute the per-pool capacity + free-builder gate from the
+    // current in-flight builds, so the daemon spills across pool members instead
+    // of serializing the whole backlog onto one lane.
+    const poolGate = await this.buildPoolGate(ordered);
+
     const ctx: AdmissionContext = {
       mode: state.mode,
       kill_switch_active: killSwitch,
@@ -153,6 +196,9 @@ export class ContinuousOrchestrationDaemon {
       active_write_scopes,
       done_item_ids,
       admit_limit: tickAdmitLimit(nowMs, config),
+      pool_for: poolGate?.pool_for,
+      pool_free_slots: poolGate?.pool_free_slots,
+      pool_free_builders: poolGate?.pool_free_builders,
     };
 
     const plan = planAdmission(ordered, ctx, config);
@@ -186,13 +232,29 @@ export class ContinuousOrchestrationDaemon {
           admitted.push({ item_id: item.item_id, dispatch_phid: null });
         } else {
           try {
-            const res = await this.deps.enqueue(item);
+            // Stage C late-binding: a pool item picks its builder + a distinct
+            // worktree at fire time, so N builds of the same repo run concurrently.
+            let fireItem = item;
+            let builderNote = "";
+            const assignedBuilder = plan.assignments[item.item_id];
+            const pool = this.deps.pools?.poolForItem(item) ?? null;
+            if (assignedBuilder && pool && this.deps.pools) {
+              const wt = await this.deps.pools.allocateWorktree({ agent: assignedBuilder, item, pool });
+              await bindItemForFire(this.deps.adapter, item.item_id, {
+                to_agent: assignedBuilder,
+                write_scope: [wt.path],
+              });
+              fireItem = { ...item, to_agent: assignedBuilder, write_scope: [wt.path] };
+              builderNote = ` [pool ${pool.pool_id} → ${assignedBuilder} @ ${wt.path}]`;
+            }
+            const res = await this.deps.enqueue(fireItem);
             await setItemState(this.deps.adapter, item.item_id, "in_flight", { dispatch_phid: res.dispatch_phid });
             decisions.push({
               item_id: item.item_id,
               action: "dispatched",
-              reason: `fired to ${item.to_agent}`,
+              reason: `fired to ${fireItem.to_agent}${builderNote}`,
               dispatch_phid: res.dispatch_phid,
+              metadata: assignedBuilder ? { pool_id: pool?.pool_id, builder: assignedBuilder, write_scope: fireItem.write_scope } : undefined,
             });
             admitted.push({ item_id: item.item_id, dispatch_phid: res.dispatch_phid });
           } catch (err) {
@@ -334,6 +396,59 @@ export class ContinuousOrchestrationDaemon {
       });
     }
     return out;
+  }
+
+  /**
+   * Stage C: build the per-pool admission gate from the current in-flight builds
+   * and the ready candidates. For each pool that appears, free_slots =
+   * max_parallel − current in-flight, and free_builders = members not currently
+   * building (and online/healthy per the routing seam), in preference order.
+   * Returns null when no pool routing is wired (legacy single-lane behavior).
+   */
+  private async buildPoolGate(candidates: BacklogItem[]): Promise<{
+    pool_for: (item: BacklogItem) => string | null;
+    pool_free_slots: Map<string, number>;
+    pool_free_builders: Map<string, string[]>;
+  } | null> {
+    const pools = this.deps.pools;
+    if (!pools) return null;
+
+    const inFlight = await listBacklogByState(this.deps.adapter, {
+      team_id: this.teamId,
+      state: "in_flight",
+    });
+    const resolved = new Map<string, ResolvedPool>();
+    const building = new Map<string, Set<string>>();
+    const inFlightCount = new Map<string, number>();
+
+    for (const it of inFlight) {
+      const p = pools.poolForItem(it);
+      if (!p) continue;
+      resolved.set(p.pool_id, p);
+      inFlightCount.set(p.pool_id, (inFlightCount.get(p.pool_id) ?? 0) + 1);
+      if (it.to_agent) {
+        const set = building.get(p.pool_id) ?? new Set<string>();
+        set.add(it.to_agent);
+        building.set(p.pool_id, set);
+      }
+    }
+    for (const it of candidates) {
+      const p = pools.poolForItem(it);
+      if (p) resolved.set(p.pool_id, p);
+    }
+
+    const pool_free_slots = new Map<string, number>();
+    const pool_free_builders = new Map<string, string[]>();
+    for (const [pid, pool] of resolved) {
+      pool_free_slots.set(pid, Math.max(0, pool.max_parallel - (inFlightCount.get(pid) ?? 0)));
+      pool_free_builders.set(pid, pools.availableBuilders(pool, building.get(pid) ?? new Set<string>()));
+    }
+
+    return {
+      pool_for: (item: BacklogItem) => pools.poolForItem(item)?.pool_id ?? null,
+      pool_free_slots,
+      pool_free_builders,
+    };
   }
 
   /**

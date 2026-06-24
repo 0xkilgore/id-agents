@@ -26,6 +26,17 @@ export interface AdmissionContext {
   done_item_ids: Set<string>;
   /** Max NEW dispatches this tick (from cadence). */
   admit_limit: number;
+  /**
+   * Build-pool gate (Stage C). When provided, an item that resolves to a pool
+   * is admitted by POOL CAPACITY + a FREE BUILDER instead of the repo-scope
+   * single-writer lock — this is what lets N builders build N worktrees of the
+   * same repo concurrently. Items that resolve to no pool keep the scope lock.
+   */
+  pool_for?: (item: BacklogItem) => string | null;
+  /** Free in-flight slots per pool this tick (max_parallel − current in-flight). */
+  pool_free_slots?: Map<string, number>;
+  /** Available builders per pool, in preference order (consumed as admitted). */
+  pool_free_builders?: Map<string, string[]>;
 }
 
 export interface AdmissionPlan {
@@ -33,6 +44,8 @@ export interface AdmissionPlan {
   halt: { halted: boolean; reason: string } | null;
   /** Items cleared to fire, in order. */
   admit: BacklogItem[];
+  /** Late-bound builder assignment per admitted pool item (item_id → builder). */
+  assignments: Record<string, string>;
   /** Per-candidate skip records (audit). */
   skipped: DecisionRecord[];
 }
@@ -62,9 +75,10 @@ export function planAdmission(
   config: ContinuousOrchestrationConfig,
 ): AdmissionPlan {
   const halt = tickHalt(ctx, config);
-  if (halt) return { halt: { halted: true, reason: halt }, admit: [], skipped: [] };
+  if (halt) return { halt: { halted: true, reason: halt }, admit: [], assignments: {}, skipped: [] };
 
   const admit: BacklogItem[] = [];
+  const assignments: Record<string, string> = {};
   const skipped: DecisionRecord[] = [];
 
   const slotsFree = Math.max(0, config.max_in_flight - ctx.in_flight);
@@ -72,6 +86,12 @@ export function planAdmission(
 
   // Mutable running view so multiple admits in one tick don't collide.
   const lockedScopes = new Set(ctx.active_write_scopes);
+  // Running pool capacity + free-builder view, consumed as we admit this tick.
+  const poolSlots = new Map<string, number>(ctx.pool_free_slots ? [...ctx.pool_free_slots] : []);
+  const poolBuilders = new Map<string, string[]>();
+  if (ctx.pool_free_builders) {
+    for (const [k, v] of ctx.pool_free_builders) poolBuilders.set(k, [...v]);
+  }
   let tokensUsed = ctx.daily_tokens_used;
 
   for (const item of candidates) {
@@ -101,14 +121,39 @@ export function planAdmission(
       });
       continue;
     }
-    const scopeClash = item.write_scope.find((s) => lockedScopes.has(s));
-    if (scopeClash) {
-      skipped.push({
-        item_id: item.item_id,
-        action: "skipped",
-        reason: `single-writer lane busy: ${scopeClash}`,
-      });
-      continue;
+    // Build-pool gate (Stage C) OR legacy repo-scope single-writer lock.
+    const poolId = ctx.pool_for?.(item) ?? null;
+    let assignedBuilder: string | null = null;
+    if (poolId) {
+      const free = poolSlots.get(poolId) ?? 0;
+      if (free <= 0) {
+        skipped.push({
+          item_id: item.item_id,
+          action: "held",
+          reason: `pool capacity full: ${poolId}`,
+        });
+        continue;
+      }
+      const builders = poolBuilders.get(poolId) ?? [];
+      assignedBuilder = builders.shift() ?? null;
+      if (!assignedBuilder) {
+        skipped.push({
+          item_id: item.item_id,
+          action: "held",
+          reason: `no free builder in pool: ${poolId}`,
+        });
+        continue;
+      }
+    } else {
+      const scopeClash = item.write_scope.find((s) => lockedScopes.has(s));
+      if (scopeClash) {
+        skipped.push({
+          item_id: item.item_id,
+          action: "skipped",
+          reason: `single-writer lane busy: ${scopeClash}`,
+        });
+        continue;
+      }
     }
     const estimate = item.token_estimate ?? 0;
     if (tokensUsed + estimate > config.daily_token_ceiling) {
@@ -119,7 +164,9 @@ export function planAdmission(
       });
       continue;
     }
-    if (!item.to_agent || !item.dispatch_body) {
+    // Pool items late-bind to_agent at fire (assignedBuilder); non-pool items
+    // must already carry a to_agent. Both need a dispatch body.
+    if (!item.dispatch_body || (!poolId && !item.to_agent)) {
       skipped.push({
         item_id: item.item_id,
         action: "skipped",
@@ -129,11 +176,16 @@ export function planAdmission(
     }
 
     admit.push(item);
-    for (const s of item.write_scope) lockedScopes.add(s);
+    if (poolId && assignedBuilder) {
+      assignments[item.item_id] = assignedBuilder;
+      poolSlots.set(poolId, (poolSlots.get(poolId) ?? 0) - 1);
+    } else {
+      for (const s of item.write_scope) lockedScopes.add(s);
+    }
     tokensUsed += estimate;
   }
 
-  return { halt: null, admit, skipped };
+  return { halt: null, admit, assignments, skipped };
 }
 
 /**
