@@ -1,5 +1,6 @@
 import type {
   Agent,
+  AgentDetailResponse,
   AgentsResponse,
   NewsItem,
   RemoteNewsResponse,
@@ -252,6 +253,21 @@ export async function fetchLibrarySkills(
   signal: AbortSignal,
 ): Promise<LibrarySkillListResponse> {
   return getJson<LibrarySkillListResponse>(`${manager}/library/skills`, signal);
+}
+
+// Agent detail v2 (T-CKPT.agent-v2): per-agent charts + recent-output feed +
+// skills/loops/scripts. 404 → null so the page falls back to the v1 fields.
+export async function fetchAgentDetail(
+  manager: string,
+  name: string,
+  signal: AbortSignal,
+): Promise<AgentDetailResponse | null> {
+  const res = await fetch(`${manager}/agents/${encodeURIComponent(name)}/detail`, { signal });
+  if (res.status === 404) return null;
+  if (!res.ok) {
+    throw new Error(`GET /agents/${name}/detail → ${res.status} ${res.statusText}`);
+  }
+  return (await res.json()) as AgentDetailResponse;
 }
 
 export async function fetchLibrarySkill(

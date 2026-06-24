@@ -28,6 +28,7 @@ import { probeRemoteAgent, defaultHealthProbeFn, type HealthProbeFn } from './li
 import { filterClaudeEnvVars } from './lib/env-hygiene.js';
 import { buildTasksEntriesEnvelope } from './tasks-readmodel/entry-projection.js';
 import { resolveTrack } from './track-registry/registry.js';
+import { assembleAgentDetail } from './agent-detail/assemble.js';
 import { resolveManagerNode } from './lib/native-node.js';
 import { isBootSpawnableAgent } from './lib/boot-spawn.js';
 import { sweepOrphanAgents, listMatchingProcesses } from './lib/orphan-sweep.js';
@@ -4860,6 +4861,36 @@ export class AgentManagerDb {
       const agent = await this.dbQueryAgentByNameMostRecent(teamId, req.params.name);
       if (!agent) return res.status(404).json({ error: 'Agent not found' });
       res.json(this.agentToResponse(agent, { isAdmin: this.isAdminRequest(req) }));
+    });
+
+    // GET /agents/:name/detail — agent dossier v2 (T-CKPT.agent-v2): per-agent
+    // charts (tasks/tokens/failures), the recent-output-last-20 feed, and the
+    // agent's skills/loops/scripts. Each source is best-effort (degrades to
+    // empty/zero), so the page renders even on a fresh DB. Registered BEFORE the
+    // /:id catch-all so "detail" isn't matched as an id.
+    this.managementApp.get('/agents/:name/detail', async (req, res) => {
+      try {
+        const { id: teamId } = await this.getTeam(req);
+        const name = req.params.name;
+        if (name.toLowerCase() === 'manager') {
+          return res.status(404).json({ error: 'Agent not found' });
+        }
+        const agent = await this.dbQueryAgentByNameMostRecent(teamId, name);
+        if (!agent) return res.status(404).json({ error: `Agent "${name}" not found` });
+        const detail = await assembleAgentDetail(this.db.adapter, {
+          teamId,
+          name: agent.name,
+          agentId: agent.id,
+          runtime: agent.runtime,
+          workingDirectory: agent.working_directory,
+          consecutiveFailures: agent.consecutive_failures ?? 0,
+          lastError: agent.last_error ?? null,
+          nowIso: new Date().toISOString(),
+        });
+        res.json(detail);
+      } catch (err: any) {
+        res.status(500).json({ error: err?.message || 'detail failed' });
+      }
     });
 
     this.managementApp.get('/agents/:id', async (req, res) => {

@@ -106,3 +106,40 @@ export interface RemoteSchedulesResponse {
   result?: { schedules?: Schedule[] };
   error?: string;
 }
+
+// Agent detail v2 (T-CKPT.agent-v2) — the GET /agents/:name/detail contract.
+export interface AgentDetailTokenSeriesPoint {
+  date: string;
+  weighted: number;
+}
+
+export interface AgentDetailArtifact {
+  artifact_id: string;
+  basename: string;
+  title: string | null;
+  tag: string | null;
+  abs_path: string;
+  produced_at: string;
+}
+
+export interface AgentDetailLoop {
+  slug: string;
+  name: string;
+  kind: string;
+  enabled: boolean;
+  health_state: string;
+  schedule_label: string;
+}
+
+export interface AgentDetailResponse {
+  name: string;
+  charts: {
+    tasks: { total: number; by_status: Record<string, number> };
+    tokens: { today: number; series: AgentDetailTokenSeriesPoint[] };
+    failures: { consecutive: number; failed_dispatches: number; last_error: string | null };
+  };
+  recent_outputs: AgentDetailArtifact[];
+  skills: string[];
+  loops: AgentDetailLoop[];
+  scripts: string[];
+}

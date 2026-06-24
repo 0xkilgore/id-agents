@@ -1,12 +1,14 @@
 /**
- * AgentDetail — full-screen detail view for a focused remote agent.
- * Shows: customer_domain, public_endpoint_url, ows_wallet, idchain_domain,
- * last_seen, last_error, consecutive_failures, ssh_target.
- * Accessible in the agents view via → arrow when a remote agent is selected.
+ * AgentDetail — full-screen detail view for a focused agent.
+ * v1 fields: name/runtime/health/status (+ remote endpoint/probe/access).
+ * v2 dossier (T-CKPT.agent-v2), appended when `detail` is present: per-agent
+ * charts (tasks/tokens/failures), the recent-output-last-20 feed, and the
+ * agent's skills/loops/scripts. Degrades to v1 when detail is null.
+ * Accessible in the agents view via → arrow when an agent is selected.
  */
 import React from 'react';
 import { Box, Text } from 'ink';
-import type { Agent } from '../api/types.js';
+import type { Agent, AgentDetailResponse } from '../api/types.js';
 import { humanizeLastSeen } from '../util/format.js';
 import { healthColor } from '../util/colors.js';
 
@@ -17,6 +19,25 @@ interface AgentDetailProps {
   scrollOffset: number;
   contentWidth: number;
   nowMs: number;
+  /** v2 dossier; null while loading or when the backend returns no detail. */
+  detail?: AgentDetailResponse | null;
+}
+
+/** A unicode bar for a count relative to a max (charts in a TUI). */
+function bar(n: number, max: number, width = 14): string {
+  if (max <= 0) return '';
+  const filled = Math.max(0, Math.min(width, Math.round((n / max) * width)));
+  return '█'.repeat(filled) + '░'.repeat(width - filled);
+}
+
+/** A sparkline over a numeric series (one block per point). */
+function sparkline(values: number[]): string {
+  if (values.length === 0) return '(no data)';
+  const ticks = '▁▂▃▄▅▆▇█';
+  const max = Math.max(...values, 1);
+  return values
+    .map((v) => ticks[Math.max(0, Math.min(7, Math.round((v / max) * 7)))])
+    .join('');
 }
 
 function fieldRow(label: string, value: string | null | undefined, color?: string): string {
@@ -27,7 +48,7 @@ function fieldRow(label: string, value: string | null | undefined, color?: strin
 }
 
 export function AgentDetail(props: AgentDetailProps): React.ReactElement {
-  const { agent, positionLabel, windowSize, scrollOffset, contentWidth, nowMs } = props;
+  const { agent, positionLabel, windowSize, scrollOffset, contentWidth, nowMs, detail } = props;
 
   if (!agent) {
     return (
@@ -73,6 +94,69 @@ export function AgentDetail(props: AgentDetailProps): React.ReactElement {
   } else {
     lines.push({ label: 'port', value: agent.port ? String(agent.port) : '—' });
     lines.push({ label: 'workingDirectory', value: agent.workingDirectory ?? '—' });
+  }
+
+  // ── v2 dossier (T-CKPT.agent-v2) ─────────────────────────────────────────
+  if (detail) {
+    const sec = (t: string) => lines.push({ label: `--- ${t} ---`, value: '' });
+    const blank = () => lines.push({ label: '', value: '' });
+
+    // (a) Charts — tasks by status, tokens today + 7d sparkline, failures.
+    blank();
+    sec('Charts');
+    const { tasks, tokens, failures } = detail.charts;
+    lines.push({ label: 'tasks (total)', value: String(tasks.total) });
+    const taskMax = Math.max(1, ...Object.values(tasks.by_status));
+    for (const [status, n] of Object.entries(tasks.by_status)) {
+      lines.push({ label: `  ${status}`, value: `${bar(n, taskMax)} ${n}` });
+    }
+    lines.push({ label: 'tokens today', value: tokens.today.toLocaleString() });
+    if (tokens.series.length > 0) {
+      lines.push({
+        label: 'tokens 7d',
+        value: `${sparkline(tokens.series.map((p) => p.weighted))}  (${tokens.series.length}d)`,
+      });
+    }
+    lines.push({
+      label: 'failures',
+      value: `${failures.consecutive} consec · ${failures.failed_dispatches} failed dispatch`,
+    });
+    if (failures.last_error) lines.push({ label: 'last_error', value: failures.last_error });
+
+    // (b) Recent output — last 20 artifacts, newest first.
+    blank();
+    sec(`Recent Output (${detail.recent_outputs.length})`);
+    if (detail.recent_outputs.length === 0) {
+      lines.push({ label: '', value: '(none)' });
+    } else {
+      for (const o of detail.recent_outputs) {
+        const when = humanizeLastSeen(Math.floor(Date.parse(o.produced_at) / 1000), nowMs);
+        const tag = o.tag ? ` [${o.tag}]` : '';
+        lines.push({ label: when, value: `${o.basename}${tag}` });
+      }
+    }
+
+    // (c) Skills / Loops / Scripts.
+    blank();
+    sec(`Skills (${detail.skills.length})`);
+    if (detail.skills.length === 0) lines.push({ label: '', value: '(none)' });
+    for (const s of detail.skills) lines.push({ label: '', value: `• ${s}` });
+
+    blank();
+    sec(`Loops (${detail.loops.length})`);
+    if (detail.loops.length === 0) lines.push({ label: '', value: '(none)' });
+    for (const l of detail.loops) {
+      const flag = l.enabled ? '' : ' (disabled)';
+      lines.push({ label: l.health_state, value: `${l.slug} · ${l.schedule_label}${flag}` });
+    }
+
+    blank();
+    sec(`Scripts (${detail.scripts.length})`);
+    if (detail.scripts.length === 0) lines.push({ label: '', value: '(none)' });
+    for (const s of detail.scripts) lines.push({ label: '', value: `• ${s}` });
+  } else {
+    lines.push({ label: '', value: '' });
+    lines.push({ label: '', value: '(loading dossier…)', color: 'gray' });
   }
 
   const allLines = lines.map(({ label, value, color }) => ({ label, value, color }));

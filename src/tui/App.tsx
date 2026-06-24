@@ -17,8 +17,9 @@ import { LibraryAgentsTable } from './components/LibraryAgentsTable.js';
 import { LibraryAgentDetail } from './components/LibraryAgentDetail.js';
 import { LibrarySkillsTable } from './components/LibrarySkillsTable.js';
 import { LibrarySkillDetail } from './components/LibrarySkillDetail.js';
-import type { Agent, NewsItem, Schedule, Task, Team } from './api/types.js';
+import type { Agent, AgentDetailResponse, NewsItem, Schedule, Task, Team } from './api/types.js';
 import {
+  fetchAgentDetail,
   fetchAgentNews,
   fetchAgentsAllTeams,
   fetchAgentsLatestNewsTs,
@@ -744,6 +745,22 @@ export function App({ staticMode = false }: AppProps = {}): React.ReactElement {
     [manager, selectedLibraryAgentName ?? '', view],
   );
 
+  // Agent dossier v2 (T-CKPT.agent-v2) — charts + recent-output-20 +
+  // skills/loops/scripts for the focused agent. Only polls in the detail view.
+  const agentDetailFetcher = useCallback(
+    (signal: AbortSignal): Promise<AgentDetailResponse | null> => {
+      if (!selectedAgentName) return Promise.resolve(null);
+      return fetchAgentDetail(manager, selectedAgentName, signal);
+    },
+    [manager, selectedAgentName],
+  );
+  const agentDetailPoll = usePolling<AgentDetailResponse | null>(
+    agentDetailFetcher,
+    AGENTS_POLL_MS,
+    staticMode || view !== 'agent-detail' || !selectedAgentName,
+    [manager, selectedAgentName ?? '', view],
+  );
+
   const librarySkillDetailFetcher = useCallback(
     (signal: AbortSignal): Promise<LibrarySkillDetailResponse | null> => {
       if (!selectedLibrarySkillName) return Promise.resolve(null);
@@ -1141,6 +1158,7 @@ export function App({ staticMode = false }: AppProps = {}): React.ReactElement {
           scrollOffset={agentDetailScroll}
           contentWidth={DETAIL_CONTENT_WIDTH}
           nowMs={pollTs || Date.now()}
+          detail={agentDetailPoll.data ?? null}
         />
       ) : view === 'tasks' ? (
         <>
