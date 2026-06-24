@@ -143,12 +143,19 @@ import {
 import { ACTIVE_LOOP_RUN_STATUSES } from './loops/types.js';
 import { loadModelPolicy, type ModelPolicyService } from './model-policy/policy.js';
 import { resolveManagerBindHost } from './manager-bind-host.js';
-import { getBuildStatusCached, type BuildStatus } from './build-info.js';
+import { getBuildStatusCached, loadBuildStatus, type BuildStatus } from './build-info.js';
 import {
-  evaluateFreshness,
   INITIAL_FRESHNESS,
   type FreshnessTrackerState,
 } from './deploy-guard/freshness.js';
+import {
+  evaluateFleetFreshness,
+  resolveFleetNodes,
+  EMPTY_FLEET_SUMMARY,
+  type FleetFreshnessState,
+  type FleetFreshnessSummary,
+  type FleetNodeInput,
+} from './deploy-guard/fleet-freshness.js';
 import { sendTelegramAlert } from './continuous-orchestration/telegram.js';
 import { normalizeActorRef } from './actor-identity.js';
 import {
@@ -480,9 +487,13 @@ export class AgentManagerDb {
   private queryStatusWaiters: Map<string, Set<() => void>> = new Map(); // key: `${teamId}:${queryId}`
   private healthStatus: Map<string, { status: 'online' | 'offline' | 'unknown'; lastCheck: number }> = new Map(); // key: `${teamId}:${agentId}`
   private healthCheckInterval: NodeJS.Timeout | null = null;
-  // T-DEPLOY.1 fleet freshness — track how long the running build has been
-  // behind origin/main; alert past the threshold.
+  // T-DEPLOY.1 fleet freshness — track how long each fleet node's running build
+  // has been behind origin/main; alert past the threshold. `freshnessState` is
+  // the manager node (kept for back-compat on /health); `fleetFreshnessState`
+  // holds per-node trackers across the whole fleet.
   private freshnessState: FreshnessTrackerState = INITIAL_FRESHNESS;
+  private fleetFreshnessState: FleetFreshnessState = {};
+  private fleetFreshnessSummary: FleetFreshnessSummary = EMPTY_FLEET_SUMMARY;
   private freshnessMonitorInterval: NodeJS.Timeout | null = null;
   private remoteProbeInterval: NodeJS.Timeout | null = null;
   private querySweeperInterval: NodeJS.Timeout | null = null;
@@ -3391,6 +3402,10 @@ export class AgentManagerDb {
           behind_origin_since: this.freshnessState.behind_origin_since,
           last_alert_at: this.freshnessState.last_alert_at,
         },
+        // T-DEPLOY.1 fleet-wide drift: per-node freshness across manager +
+        // configured nodes (console-server / kapelle-site), so /ops can surface
+        // drift on ANY node, not just the manager.
+        fleet_freshness: this.fleetFreshnessSummary,
       });
     });
 
@@ -9787,32 +9802,45 @@ export class AgentManagerDb {
   }
 
   /**
-   * T-DEPLOY.1 fleet-freshness monitor. Every minute, read the build status and
-   * advance the freshness tracker; when the running build has been behind
-   * origin/main past the threshold (default 15 min), fire a Telegram alert
-   * (best-effort, never throws). Recovery (build caught up) clears + notifies.
-   * The threshold is configurable via DEPLOY_FRESHNESS_THRESHOLD_MS.
+   * T-DEPLOY.1 fleet-freshness monitor. Every minute, read the build status of
+   * every fleet node (the manager's own running stamp + each configured repo
+   * checkout) and advance its freshness tracker; when ANY node has been behind
+   * origin/main past the threshold (default 15 min), fire a per-node Telegram
+   * alert (best-effort, never throws). Recovery (node caught up) clears +
+   * notifies. Threshold: DEPLOY_FRESHNESS_THRESHOLD_MS; fleet nodes:
+   * DEPLOY_FLEET_NODES (defaults to manager + kapelle-site sibling).
    */
   private startFreshnessMonitor(): void {
     if (this.freshnessMonitorInterval) return;
     const thresholdMs = Number(process.env.DEPLOY_FRESHNESS_THRESHOLD_MS) || undefined;
     const tick = () => {
       try {
-        const build = this.getBuildStatus();
-        const { next, alert } = evaluateFreshness(
-          this.freshnessState,
-          {
+        const nodes = resolveFleetNodes(process.env, process.cwd());
+        const inputs: FleetNodeInput[] = nodes.map((node) => {
+          const build = node.is_self
+            ? this.getBuildStatus()
+            : loadBuildStatus({ repoDir: node.repoDir!, distDir: node.distDir ?? node.repoDir! });
+          return {
+            node_id: node.node_id,
             behind_origin: build.behind_origin,
             build_sha: build.build_sha,
             origin_main_sha: build.origin_main_sha,
-          },
+          };
+        });
+        const { next, alerts, summary } = evaluateFleetFreshness(
+          this.fleetFreshnessState,
+          inputs,
           Date.now(),
           thresholdMs ? { thresholdMs } : {},
         );
-        this.freshnessState = next;
-        if (alert) {
-          console.warn(`[Manager] fleet-freshness ${alert.kind}: ${alert.message}`);
-          void sendTelegramAlert(alert.message).catch(() => {});
+        this.fleetFreshnessState = next;
+        this.fleetFreshnessSummary = summary;
+        // Back-compat: surface the manager node on the existing /health field.
+        this.freshnessState = next.manager ?? this.freshnessState;
+        for (const { node_id, alert } of alerts) {
+          const message = node_id === 'manager' ? alert.message : `[${node_id}] ${alert.message}`;
+          console.warn(`[Manager] fleet-freshness ${node_id} ${alert.kind}: ${message}`);
+          void sendTelegramAlert(message).catch(() => {});
         }
       } catch (err) {
         console.warn('[Manager] freshness monitor tick failed:', err instanceof Error ? err.message : String(err));
