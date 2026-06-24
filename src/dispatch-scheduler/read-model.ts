@@ -407,6 +407,56 @@ export async function readDispatchHealth(adapter: DbAdapterLike, teamId: string)
   };
 }
 
+/**
+ * Stamp each artifact with the canonical `produced_at` and return them
+ * newest-first by it. `produced_at` is the real production time, resolved as:
+ *   1. the artifacts-catalog frozen produced_at (first-seen file mtime), else
+ *   2. completed_at (a stable dispatch-completion time), else
+ *   3. modified_at (the volatile live re-stat — last resort).
+ *
+ * Pure: does not mutate the input rows. This is what keeps a genuinely-old
+ * artifact reading its real date (and sorting correctly) even after its file's
+ * live mtime was bumped to "now" by a catalog sweep or a Dropbox re-sync.
+ */
+export function enrichArtifactsWithProducedAt(
+  artifacts: Array<Record<string, unknown>>,
+  catalogByPath: Map<string, string>,
+): Array<Record<string, unknown>> {
+  return artifacts
+    .map((a) => {
+      const producedAt =
+        catalogByPath.get(String(a.path ?? '')) ??
+        (a.completed_at as string | null | undefined) ??
+        (a.modified_at as string | null | undefined) ??
+        null;
+      return { ...a, produced_at: producedAt };
+    })
+    .sort((a, b) => String(b.produced_at ?? '').localeCompare(String(a.produced_at ?? '')));
+}
+
+/** Batch-load frozen produced_at from the artifacts catalog, keyed by abs_path.
+ *  Best-effort: returns an empty map if the catalog is unavailable. */
+async function fetchCatalogProducedAt(
+  adapter: DbAdapterLike,
+  paths: string[],
+): Promise<Map<string, string>> {
+  const map = new Map<string, string>();
+  if (paths.length === 0) return map;
+  try {
+    const placeholders = paths.map(() => '?').join(', ');
+    const { rows } = await adapter.query<{ abs_path: string; produced_at: string }>(
+      `SELECT abs_path, produced_at FROM artifacts WHERE abs_path IN (${placeholders})`,
+      paths,
+    );
+    for (const row of rows) {
+      if (row.abs_path && row.produced_at) map.set(row.abs_path, row.produced_at);
+    }
+  } catch {
+    /* catalog unavailable — callers fall back to completed_at/modified_at */
+  }
+  return map;
+}
+
 export async function readArtifacts(adapter: DbAdapterLike, teamId: string, limit: number): Promise<{
   artifacts: Array<Record<string, unknown>>;
   items: Array<Record<string, unknown>>;
@@ -418,9 +468,12 @@ export async function readArtifacts(adapter: DbAdapterLike, teamId: string, limi
     readQueryResultArtifacts(adapter, teamId, limit),
     readAgentOutputArtifacts(adapter, teamId, limit),
   ]);
-  const artifacts = dedupeArtifactsByPath([...dispatchArtifacts, ...queryArtifacts, ...outputArtifacts])
-    .sort((a, b) => String(b.modified_at ?? b.completed_at ?? '').localeCompare(String(a.modified_at ?? a.completed_at ?? '')))
-    .slice(0, limit);
+  const deduped = dedupeArtifactsByPath([...dispatchArtifacts, ...queryArtifacts, ...outputArtifacts]);
+  const catalogByPath = await fetchCatalogProducedAt(
+    adapter,
+    deduped.map((a) => String(a.path ?? '')).filter(Boolean),
+  );
+  const artifacts = enrichArtifactsWithProducedAt(deduped, catalogByPath).slice(0, limit);
   return {
     artifacts,
     items: artifacts,
