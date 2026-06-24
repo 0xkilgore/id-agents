@@ -104,6 +104,18 @@ export interface DispatchReadRow {
   // Companion sort signal. UI groups `needs_operator=true` to the top
   // regardless of `effective_state`. Per the scope §"Needs-You Flag".
   needs_operator: boolean;
+  // T13.3 (2026-06-24, phid:disp-dab6b426faa23147): server-derived sort
+  // band per the scope §"Default Sort Policy" `groupRank`. A small integer
+  // 0..5 the console (T13.4) and the page-title counts order rows by, so the
+  // taxonomy is derived once here instead of re-implemented client-side.
+  // Lower sorts higher:
+  //   0 = needs you (any needs_operator row, regardless of effective_state)
+  //   1 = in_flight (healthy)        2 = queued (ready)
+  //   3 = done_recovered / failed_work_landed_recoverable (collapsed)
+  //   4 = done (collapsed)           5 = moot_or_superseded (bottom)
+  // Pure function of (effective_state, needs_operator) — both already on this
+  // row — so it can never disagree with them. See deriveSortGroup().
+  sort_group: number;
   source_metadata: {
     source: 'dispatch_scheduler_queue';
     team_id: string;
@@ -591,6 +603,10 @@ function statusesForFilter(status: DispatchReadStatus): string[] {
 
 function rowToDispatch(row: DispatchDbRow, opts: DeriveOptions = {}): DispatchReadRow {
   const history = parseJsonArray(row.clarification_history_json);
+  // Derive the taxonomy fields once so sort_group can never disagree with the
+  // effective_state / needs_operator it is computed from.
+  const effectiveState = deriveEffectiveState(row, opts);
+  const needsOperator = deriveNeedsOperator(row, Date.now(), opts);
   return {
     id: row.dispatch_phid,
     dispatch_id: row.dispatch_phid,
@@ -635,8 +651,9 @@ function rowToDispatch(row: DispatchDbRow, opts: DeriveOptions = {}): DispatchRe
       promotion_result: parseJsonOrNull(row.promotion_result_json),
     },
     recovery_classification: deriveRecoveryClassification(row),
-    effective_state: deriveEffectiveState(row, opts),
-    needs_operator: deriveNeedsOperator(row, Date.now(), opts),
+    effective_state: effectiveState,
+    needs_operator: needsOperator,
+    sort_group: deriveSortGroup(effectiveState, needsOperator),
     supersede_link: row.supersede_link,
     source_metadata: {
       source: 'dispatch_scheduler_queue',
@@ -987,6 +1004,60 @@ export function deriveNeedsOperator(
     return nowMs - startedAtMs >= INFLIGHT_STALE_MINUTES * 60_000;
   }
   return false;
+}
+
+/**
+ * T13.3 (2026-06-24, phid:disp-dab6b426faa23147): derive the sort band a
+ * dispatch row belongs to, per cto/output/2026-06-16-dispatch-failure-state-
+ * taxonomy-scope.md §"Default Sort Policy" `groupRank`. The third field the
+ * scope's Build Sequence step 3 names alongside effective_state +
+ * needs_operator. Pure + exported for the console (T13.4) and the page-title
+ * counts so the grouping is derived once server-side, not re-implemented in
+ * the UI.
+ *
+ * Returns a small integer (lower sorts higher), matching the scope verbatim:
+ *
+ *   0  needs you      — any needs_operator row, regardless of effective_state
+ *                       (covers failed_needs_operator AND stale queued /
+ *                       in_flight; the scope merges its
+ *                       *_needs_operator variants to rank 0).
+ *   1  in_flight      — healthy running work.
+ *   2  queued         — ready / soon-ready work.
+ *   3  recovered band — done_recovered AND failed_work_landed_recoverable
+ *                       (collapsed; same rank per the scope).
+ *   4  done           — clean completions (collapsed).
+ *   5  moot_or_superseded — out of the way at the bottom.
+ *
+ * Note: `needs_operator` already folds in the stale-queued / stale-in_flight
+ * timing (deriveNeedsOperator) and the failed_needs_operator state, so the
+ * `needsOperator` short-circuit is the single source of the rank-0 group. The
+ * active clarification signal lives in `needs_input.active` (outside this
+ * row's columns, same as for needs_operator) and is layered on by the UI.
+ *
+ * Any state not in the scope's map (cancelled / bounced / needs_clarification
+ * / resume_delivery_failed / unknown forwards-compat values) sorts into the
+ * active band (rank 2) rather than collapsing into terminal history — the safe
+ * direction, keeping unexpected rows visible to the operator.
+ */
+export function deriveSortGroup(effectiveState: string, needsOperator: boolean): number {
+  if (needsOperator) return 0;
+  switch (effectiveState) {
+    case "failed_needs_operator":
+      return 0; // defensive: always paired with needs_operator=true upstream.
+    case "in_flight":
+      return 1;
+    case "queued":
+      return 2;
+    case "done_recovered":
+    case "failed_work_landed_recoverable":
+      return 3;
+    case "done":
+      return 4;
+    case "moot_or_superseded":
+      return 5;
+    default:
+      return 2;
+  }
 }
 
 function parseDateMs(raw: string | null | undefined): number | null {
