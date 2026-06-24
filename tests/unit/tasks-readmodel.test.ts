@@ -75,6 +75,62 @@ describe("taskRowToEntry", () => {
   });
 });
 
+describe("taskRowToEntry — DV2 provenance (I-1)", () => {
+  const names = new Map([["agent-roger", "roger"], ["agent-regina", "regina"]]);
+
+  it("carries the shared provenance contract (actor_ref, source dispatch, derived-from, chain)", () => {
+    const e = taskRowToEntry(ROW, names);
+    expect(e.source_dispatch_phid).toBeNull(); // reserved until tasks carry a dispatch link
+    expect(e.links).toEqual([]);
+    expect(e.provenance.source_dispatch_phid).toBeNull();
+    expect(e.provenance.derived_from).toEqual([]);
+    expect(Array.isArray(e.provenance.revisions)).toBe(true);
+    expect(Array.isArray(e.provenance.contributors)).toBe(true);
+  });
+
+  it("builds a created→modified chain from the row timestamps + actors", () => {
+    const e = taskRowToEntry(ROW, names); // updated_at != created_at, owner=regina
+    expect(e.provenance.revisions).toEqual([
+      { at: "2026-06-24T16:27:30.000Z", by: { type: "agent", id: "roger" }, note: "created" },
+      { at: "2026-06-24T16:36:40.000Z", by: { type: "agent", id: "regina" }, note: "modified" },
+    ]);
+    expect(e.provenance.contributors).toEqual([
+      { type: "agent", id: "roger" },
+      { type: "agent", id: "regina" },
+    ]);
+  });
+
+  it("collapses to a single 'created' revision when never modified", () => {
+    const e = taskRowToEntry({ ...ROW, status: "todo", updated_at: ROW.created_at }, names);
+    expect(e.provenance.revisions).toHaveLength(1);
+    expect(e.provenance.revisions[0].note).toBe("created");
+    expect(e.provenance.contributors).toEqual([{ type: "agent", id: "roger" }]);
+  });
+
+  it("labels the modifying revision 'completed' when that touch closed the task", () => {
+    const e = taskRowToEntry({ ...ROW, status: "done", completed_at: ROW.updated_at }, names);
+    expect(e.provenance.revisions.map((r) => r.note)).toEqual(["created", "completed"]);
+  });
+
+  it("emits a distinct 'completed' revision when completion happened later", () => {
+    const e = taskRowToEntry(
+      { ...ROW, status: "done", updated_at: 1782319000, completed_at: 1782319500 },
+      names,
+    );
+    expect(e.provenance.revisions.map((r) => r.note)).toEqual(["created", "modified", "completed"]);
+    // regina contributed twice (modified + completed) but appears once.
+    expect(e.provenance.contributors).toEqual([
+      { type: "agent", id: "roger" },
+      { type: "agent", id: "regina" },
+    ]);
+  });
+
+  it("attributes provenance to system when the creator is unknown", () => {
+    const e = taskRowToEntry({ ...ROW, created_by: null, owner: null, updated_at: ROW.created_at }, names);
+    expect(e.provenance.contributors).toEqual([{ type: "system", id: "system" }]);
+  });
+});
+
 describe("buildTasksEntriesEnvelope", () => {
   const rows: TaskRow[] = [
     { ...ROW, id: "a", uuid: "a", updated_at: 300 },

@@ -26,7 +26,7 @@ import { registerOnIdChain, createSubnameOnIdChain, setMultiChainAddresses } fro
 import { defaultDeliverFn, redactSshTarget, type DeliverFn } from './lib/ssh-deliver.js';
 import { probeRemoteAgent, defaultHealthProbeFn, type HealthProbeFn } from './lib/remote-heartbeat.js';
 import { filterClaudeEnvVars } from './lib/env-hygiene.js';
-import { buildTasksEntriesEnvelope } from './tasks-readmodel/entry-projection.js';
+import { buildTasksEntriesEnvelope, taskRowToEntry } from './tasks-readmodel/entry-projection.js';
 import { resolveTrack } from './track-registry/registry.js';
 import { assembleAgentDetail } from './agent-detail/assemble.js';
 import { resolveManagerNode } from './lib/native-node.js';
@@ -6480,6 +6480,24 @@ export class AgentManagerDb {
       } catch (err: any) {
         console.error('[Manager] Error in GET /tasks/entries:', err);
         res.status(500).json({ error: err?.message || 'tasks entries failed' });
+      }
+    });
+
+    // GET /tasks/entries/:ref — the single doc-model TaskEntry (with DV2
+    // provenance) for one task, so provenance is queryable PER ENTRY (I-1), not
+    // just in the list feed. Registered before '/tasks/:ref' so the literal
+    // 'entries' segment isn't captured as a ref.
+    this.managementApp.get('/tasks/entries/:ref', async (req, res) => {
+      try {
+        const { id: teamId } = await this.getTeam(req);
+        const { task, error } = await this.resolveTaskRef(req.params.ref, teamId);
+        if (!task) return res.status(404).json({ error: error || `Task "${req.params.ref}" not found` });
+        const agents = await this.dbListAgents(teamId, true);
+        const agentNames = new Map(agents.map((a) => [a.id, a.name]));
+        res.json({ entry: taskRowToEntry(task, agentNames) });
+      } catch (err: any) {
+        console.error('[Manager] Error in GET /tasks/entries/:ref:', err);
+        res.status(500).json({ error: err?.message || 'task entry failed' });
       }
     });
 

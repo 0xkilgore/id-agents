@@ -30,14 +30,34 @@ export interface AssociationEdge {
   target_phid: PHID;
 }
 
-/** DV2 provenance projection — built from the artifact_operations op log. */
-export interface ArtifactProvenance {
+/** A single entry in the created/modified chain — who changed the entry, when,
+ *  and a short note. DV2 shared primitive. */
+export interface ProvenanceRevision {
+  at: string;
+  by: ActorRef;
+  note: string | null;
+}
+
+/**
+ * Shared DV2 provenance core carried by EVERY doc-model entry (artifact, task,
+ * …) so the substrate exposes one provenance contract everywhere (I-1):
+ *   - actor_ref:              `contributors` + each revision's `by`
+ *   - source dispatch:        `source_dispatch_phid`
+ *   - derived-from links:     `derived_from`
+ *   - created/modified chain: `revisions` (ascending)
+ */
+export interface EntryProvenance {
   source_dispatch_phid: string | null;
-  produced_by: string[];
   derived_from: string[];
-  references: string[];
-  revisions: { at: string; by: ActorRef; note: string | null }[];
+  revisions: ProvenanceRevision[];
   contributors: ActorRef[];
+}
+
+/** Artifact provenance — the shared core plus artifact-specific lineage,
+ *  built from the artifact_operations op log. */
+export interface ArtifactProvenance extends EntryProvenance {
+  produced_by: string[];
+  references: string[];
 }
 
 /**

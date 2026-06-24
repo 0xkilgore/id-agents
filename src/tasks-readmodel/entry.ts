@@ -5,7 +5,7 @@
 // artifacts ArtifactEntry; reuses the shared read-model envelope + actor
 // primitives so the two substrate feeds share one contract.
 
-import type { ActorRef, PHID } from "../outputs/entry.js";
+import type { ActorRef, AssociationEdge, EntryProvenance, PHID } from "../outputs/entry.js";
 
 export type { ReadModelEnvelope } from "../outputs/entry.js";
 
@@ -34,4 +34,11 @@ export interface TaskEntry {
   updated_at: string;
   updated_by: ActorRef;
   completed_at: string | null;
+  /** The dispatch this task originated from, when known (null until linked). */
+  source_dispatch_phid: string | null;
+  /** Typed associations to other entries (e.g. derived_from). Empty in v0. */
+  links: AssociationEdge[];
+  /** DV2 provenance — actor_ref, source dispatch, derived-from, and the
+   *  created/modified chain. Shared contract with ArtifactEntry (I-1). */
+  provenance: EntryProvenance;
 }

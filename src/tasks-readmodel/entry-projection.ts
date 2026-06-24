@@ -7,7 +7,12 @@
 // like the artifacts read-model.
 
 import type { TaskRow } from "../db/types.js";
-import type { ActorRef, ReadModelEnvelope } from "../outputs/entry.js";
+import type {
+  ActorRef,
+  EntryProvenance,
+  ProvenanceRevision,
+  ReadModelEnvelope,
+} from "../outputs/entry.js";
 import type { TaskEntry } from "./entry.js";
 
 /** Convert a stored epoch timestamp (seconds OR milliseconds) to ISO-8601. */
@@ -20,6 +25,56 @@ function epochToIso(value: number): string {
 /** An agent actor for a resolved (or raw) agent identifier. */
 function agentActor(idOrName: string): ActorRef {
   return { type: "agent", id: idOrName };
+}
+
+/** Append `by` to `acc` if that actor isn't already present (by type:id). */
+function addContributor(acc: ActorRef[], seen: Set<string>, by: ActorRef): void {
+  const key = `${by.type}:${by.id}`;
+  if (!seen.has(key)) {
+    seen.add(key);
+    acc.push(by);
+  }
+}
+
+/**
+ * Build the DV2 provenance for a task from the row itself. Tasks have no op log
+ * (unlike artifacts), so the created/modified chain is derived from the row's
+ * timestamps + actors: a `created` revision, a `modified` revision when the row
+ * has been touched since creation (folded to `completed` when that touch closed
+ * the task), and a distinct `completed` revision when completion happened later.
+ * `source_dispatch_phid`/`derived_from` are reserved (null/[]) until tasks carry
+ * a dispatch link — same posture as the artifacts entry.
+ */
+export function taskProvenance(
+  row: TaskRow,
+  createdBy: ActorRef,
+  updatedBy: ActorRef,
+  owner: ActorRef | null,
+): EntryProvenance {
+  const revisions: ProvenanceRevision[] = [];
+  const createdAt = epochToIso(row.created_at);
+  revisions.push({ at: createdAt, by: createdBy, note: "created" });
+
+  const updatedAt = epochToIso(row.updated_at);
+  const completedAt = row.completed_at != null ? epochToIso(row.completed_at) : null;
+  if (updatedAt !== createdAt) {
+    const closedHere = completedAt !== null && completedAt === updatedAt;
+    revisions.push({ at: updatedAt, by: updatedBy, note: closedHere ? "completed" : "modified" });
+  }
+  if (completedAt !== null && completedAt !== updatedAt && completedAt !== createdAt) {
+    revisions.push({ at: completedAt, by: owner ?? updatedBy, note: "completed" });
+  }
+
+  const contributors: ActorRef[] = [];
+  const seen = new Set<string>();
+  for (const rev of revisions) addContributor(contributors, seen, rev.by);
+
+  return {
+    source_dispatch_phid: null,
+    derived_from: [],
+    revisions,
+    contributors,
+  };
 }
 
 /**
@@ -36,6 +91,7 @@ export function taskRowToEntry(
   const createdBy: ActorRef = row.created_by
     ? agentActor(resolve(row.created_by))
     : { type: "system", id: "system" };
+  const updatedBy: ActorRef = owner ?? createdBy;
 
   return {
     phid: row.uuid || row.id,
@@ -51,8 +107,11 @@ export function taskRowToEntry(
     created_at: epochToIso(row.created_at),
     created_by: createdBy,
     updated_at: epochToIso(row.updated_at),
-    updated_by: owner ?? createdBy,
+    updated_by: updatedBy,
     completed_at: row.completed_at != null ? epochToIso(row.completed_at) : null,
+    source_dispatch_phid: null,
+    links: [],
+    provenance: taskProvenance(row, createdBy, updatedBy, owner),
   };
 }
 
