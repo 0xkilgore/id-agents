@@ -27,6 +27,7 @@ import { defaultDeliverFn, redactSshTarget, type DeliverFn } from './lib/ssh-del
 import { probeRemoteAgent, defaultHealthProbeFn, type HealthProbeFn } from './lib/remote-heartbeat.js';
 import { filterClaudeEnvVars } from './lib/env-hygiene.js';
 import { resolveManagerNode } from './lib/native-node.js';
+import { isBootSpawnableAgent } from './lib/boot-spawn.js';
 import { sweepOrphanAgents, listMatchingProcesses } from './lib/orphan-sweep.js';
 import {
   agentDoneAuthConfigFromEnv,
@@ -1362,6 +1363,53 @@ export class AgentManagerDb {
     void runReap();
     this.worktreeReaperInterval = setInterval(() => { void runReap(); }, intervalMs);
     this.worktreeReaperInterval.unref?.();
+  }
+
+  // Build-pool part 3b: spawn roster agents that are registered but never
+  // started (status "pending") on manager boot — the launchd entry has no
+  // deploy step, so pending agents (e.g. build-pool members brunel/hopper/
+  // eames/gaudi) otherwise never come up. Goes through spawnLocalAgentProcess
+  // (env-stripped via filterClaudeEnvVars, ABI-safe via resolveManagerNode).
+  // Best-effort: a failure for one agent never wedges manager startup.
+  // Disable with BOOT_SPAWN_PENDING_ENABLED=false.
+  private async spawnPendingLocalAgentsOnBoot(): Promise<void> {
+    if (String(process.env.BOOT_SPAWN_PENDING_ENABLED ?? 'true').toLowerCase() === 'false') return;
+    try {
+      const teams = await this.db.teams.listTeams();
+      let spawned = 0;
+      let failed = 0;
+      for (const team of teams) {
+        const agents = await this.dbListAgents(team.id, true);
+        for (const a of agents) {
+          if (!isBootSpawnableAgent(a)) continue;
+          try {
+            const r = await this.spawnLocalAgentProcess(team.id, team.name, {
+              name: a.name,
+              id: a.id,
+              port: a.port,
+              model: a.model,
+              workingDirectory: a.working_directory ?? undefined,
+              tokenId: a.token_id ?? undefined,
+            });
+            if (r.success) {
+              await this.db.agents.updateStatus(a.id, 'running');
+              spawned++;
+            } else {
+              failed++;
+              console.warn(`[Manager] boot-spawn failed for ${a.name}: ${r.error}`);
+            }
+          } catch (err) {
+            failed++;
+            console.warn(`[Manager] boot-spawn threw for ${a.name}:`, err instanceof Error ? err.message : String(err));
+          }
+        }
+      }
+      if (spawned > 0 || failed > 0) {
+        console.log(`[Manager] boot-spawn: started ${spawned} pending local agent(s)${failed ? ` (${failed} failed)` : ''}`);
+      }
+    } catch (err) {
+      console.warn('[Manager] boot-spawn pending agents failed:', err instanceof Error ? err.message : String(err));
+    }
   }
 
   /**
@@ -10307,6 +10355,10 @@ export class AgentManagerDb {
           });
           this.startFilesystemArtifactReconciler(runFilesystemReconcile);
           this.startWorktreeReaper();
+          // Build-pool 3b: bring up roster agents stuck in "pending" (never
+          // started) — e.g. build-pool members — on boot. Fire-and-forget;
+          // self-guarded so it never blocks/wedges startup.
+          void this.spawnPendingLocalAgentsOnBoot();
           console.log('[Manager] Kapelle B11 outputs routes mounted (/outputs/inbox, /artifacts/:id/*) with P3 emit target + B2 comment auto-dispatch + filesystem reconciler + worktree reaper');
         } catch (err) {
           console.warn('[Manager] B11 outputs routes failed to mount:', err instanceof Error ? err.message : String(err));
