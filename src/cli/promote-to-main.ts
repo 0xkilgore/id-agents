@@ -449,8 +449,33 @@ function spawnCapture(
 // Subcommand entrypoint mirroring maybeRunOutputsCli.
 // ────────────────────────────────────────────────────────────────────
 
+export const PROMOTE_USAGE = `id-agents promote-to-main — Spec 054 v2 canonical promotion (verify → merge → push → remote-tip check)
+
+Usage:
+  id-agents promote-to-main --repo <path> --branch <branch> [options]
+
+Options:
+  --repo <path>          Absolute repo path (required)
+  --branch <branch>      Feature branch to promote (required)
+  --base <branch>        Base branch (default: main)
+  --remote <name>        Remote to push (default: origin)
+  --strategy <s>         auto|fast_forward|merge_commit|squash|follow_up_dispatch (default: auto)
+  --dispatch-id <id>     Dispatch id for the /agent-needs-input payload on divergence
+  --smoke <cmd>          Smoke command gating promotion (e.g. "npm run build && npm test")
+  --allow-own-dirty <p>  Permit a known-own dirty path (repeatable)
+  --json                 Emit machine-readable JSON (drops into /agent-done.promotion.repos[])
+  --execute              Actually perform the merge+push (omit for read-only preflight)
+  -h, --help             Show this help
+
+Read-only by default; pass --execute to mutate. Never force-pushes the base branch.`;
+
 export async function maybeRunPromoteToMainCli(argv: string[]): Promise<number | null> {
   if (argv[0] !== "promote-to-main") return null;
+  const rest = argv.slice(1);
+  if (rest.includes("--help") || rest.includes("-h")) {
+    process.stdout.write(PROMOTE_USAGE + "\n");
+    return 0;
+  }
   let parsed: PromoteArgs;
   try {
     parsed = parsePromoteArgs(argv.slice(1));

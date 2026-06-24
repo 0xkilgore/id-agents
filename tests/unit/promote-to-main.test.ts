@@ -23,6 +23,8 @@ import {
   countAutocommitNoise,
   buildSquashCommitBody,
   runPromoteToMain,
+  maybeRunPromoteToMainCli,
+  PROMOTE_USAGE,
   PromoteArgError,
   type GitDeps,
   type PromoteArgs,
@@ -86,6 +88,47 @@ const baseArgs: PromoteArgs = {
   allowOwnDirty: [],
   json: true,
 };
+
+// ────────────────────────────────────────────────────────────────────
+// maybeRunPromoteToMainCli — dispatch routing + --help
+// ────────────────────────────────────────────────────────────────────
+
+describe("maybeRunPromoteToMainCli", () => {
+  it("returns null for a non-promote subcommand (lets the CLI route elsewhere)", async () => {
+    expect(await maybeRunPromoteToMainCli(["comments", "roger"])).toBeNull();
+  });
+
+  it("--help prints usage and exits 0 (acceptance probe must run, not error)", async () => {
+    const writes: string[] = [];
+    const orig = process.stdout.write;
+    (process.stdout as unknown as { write: (s: string) => boolean }).write = (s: string) => {
+      writes.push(String(s));
+      return true;
+    };
+    let exit: number | null;
+    try {
+      exit = await maybeRunPromoteToMainCli(["promote-to-main", "--help"]);
+    } finally {
+      process.stdout.write = orig;
+    }
+    expect(exit).toBe(0);
+    expect(writes.join("")).toContain("id-agents promote-to-main");
+    expect(writes.join("")).toContain("--execute");
+    expect(PROMOTE_USAGE).toContain("Read-only by default");
+  });
+
+  it("-h is an alias for --help", async () => {
+    const orig = process.stdout.write;
+    (process.stdout as unknown as { write: (s: string) => boolean }).write = () => true;
+    let exit: number | null;
+    try {
+      exit = await maybeRunPromoteToMainCli(["promote-to-main", "-h"]);
+    } finally {
+      process.stdout.write = orig;
+    }
+    expect(exit).toBe(0);
+  });
+});
 
 // ────────────────────────────────────────────────────────────────────
 // parsePromoteArgs
