@@ -331,6 +331,27 @@ export function mountOutputsRoutes(
     }
   });
 
+  // ── GET /artifacts/entries/:ref ────────────────────────────────────
+  // DV2 (I-1): the single doc-model ArtifactEntry (with provenance —
+  // actor_ref/source_dispatch/derived_from/revision-chain) for ONE artifact, so
+  // provenance is queryable PER ENTRY, symmetric with GET /tasks/entries/:ref —
+  // not only embedded in the list feed. Registered before the '/artifacts/:id/*'
+  // routes so the literal 'entries' segment isn't captured as an :id.
+  app.get('/artifacts/entries/:ref', async (req: Request<{ ref: string }>, res: Response) => {
+    try {
+      const id = req.params.ref;
+      const row = await getArtifact(adapter, id);
+      if (!row) return res.status(404).json({ error: `Artifact "${id}" not found` });
+      const [review, ops] = await Promise.all([
+        getReviewState(adapter, row.artifact_id),
+        listOperations(adapter, row.artifact_id, 50, 0),
+      ]);
+      res.json({ entry: artifactRowToEntry(row, review, ops) });
+    } catch (err) {
+      res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
   // ── GET /artifacts/search ──────────────────────────────────────────
   // L-1/L-2 full-text search over the doc-model substrate (SQLite FTS5). Ranks
   // artifacts by bm25 relevance to ?q= and returns the SAME read-model envelope

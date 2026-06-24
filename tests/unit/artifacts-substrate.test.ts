@@ -269,6 +269,33 @@ describe("GET /artifacts/entries + /artifacts/parity", () => {
   });
 });
 
+describe("GET /artifacts/entries/:ref (DV2 — provenance queryable per entry)", () => {
+  it("returns the single ArtifactEntry with its provenance block", async () => {
+    const app = await bootApp(async () => alignedLog);
+    // Discover a real phid from the list feed, then fetch that one entry.
+    const list = await getJson(app, "/artifacts/entries");
+    const phid = list.body.items[0].phid as string;
+
+    const { status, body } = await getJson(app, `/artifacts/entries/${encodeURIComponent(phid)}`);
+    expect(status).toBe(200);
+    expect(body.entry.kind).toBe("artifact");
+    expect(body.entry.phid).toBe(phid);
+    // DV2 provenance contract: the per-entry read carries the full provenance core.
+    expect(body.entry.provenance).toBeDefined();
+    expect(Array.isArray(body.entry.provenance.revisions)).toBe(true);
+    expect(Array.isArray(body.entry.provenance.contributors)).toBe(true);
+    expect(Array.isArray(body.entry.provenance.derived_from)).toBe(true);
+    expect("source_dispatch_phid" in body.entry.provenance).toBe(true);
+  });
+
+  it("404s for an unknown artifact ref", async () => {
+    const app = await bootApp(async () => alignedLog);
+    const { status, body } = await getJson(app, "/artifacts/entries/art_does_not_exist");
+    expect(status).toBe(404);
+    expect(body.error).toMatch(/not found/);
+  });
+});
+
 describe("GET /artifacts/search (L-1/L-2 FTS5)", () => {
   it("returns ranked ArtifactEntry results in the read-model envelope", async () => {
     const app = await bootApp(async () => alignedLog); // seeds 'one' (roger/spec) + 'two' (regina/build)
