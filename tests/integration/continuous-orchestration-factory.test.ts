@@ -77,6 +77,57 @@ describe("factory readInFlight — daemon-own lane, not fleet-wide", () => {
     expect(r.admitted).toHaveLength(1);
   });
 
+  it("enqueues successfully when the scheduler handle is bound to a team UUID, not the CO storage 'default' name", async () => {
+    // P0 regression: CO storage is keyed by the team NAME ("default"); the
+    // dispatch SchedulerHandle is bound to that team's UUID. The factory used to
+    // copy the CO storage teamId into the enqueue input's team_id, so the real
+    // handle's guard (`input.team_id ?? this.teamId; if (team_id !== this.teamId) throw`)
+    // rejected every enqueue with "team_id mismatch" — consecutive_zero_ticks
+    // climbed, last_dispatch_at stayed null, backlog never drained. The fix: the
+    // factory must NOT pin team_id; the handle owns it. This fake MIRRORS the real
+    // guard (the prior fake was too permissive, which is why this escaped tests).
+    const BOUND_TEAM_UUID = "36ee78b1-d817-4a29-b631-c93945404c7b";
+    await insertBacklogItem(adapter, {
+      title: "ship it",
+      to_agent: "roger",
+      dispatch_body: "do the thing",
+      readiness_state: "ready",
+      risk_class: "build",
+    });
+
+    const fired: Array<{ team_id?: string }> = [];
+    const guardingScheduler = {
+      enqueue: async (input: { team_id?: string; to_agent: string }) => {
+        const teamId = input.team_id ?? BOUND_TEAM_UUID; // == SchedulerHandle: input.team_id ?? this.teamId
+        if (teamId !== BOUND_TEAM_UUID) {
+          throw new Error(
+            `enqueue: team_id mismatch (handle is bound to ${BOUND_TEAM_UUID}, got ${teamId})`,
+          );
+        }
+        fired.push({ team_id: input.team_id });
+        return { dispatch_phid: `phid:disp-${fired.length}`, query_id: `q_${fired.length}` };
+      },
+      reactor: { listInFlight: async () => [] },
+    };
+
+    const { daemon } = createContinuousOrchestrationDaemon({
+      adapter,
+      scheduler: guardingScheduler as never,
+      usageService: usageService as never,
+      // teamId omitted -> CO storage uses "default" (matches the inserted backlog).
+      config: { ...defaultConfig(), enabled: true, dry_run: false, max_in_flight: 4 },
+    });
+    await daemon.setMode("running");
+
+    const r = await daemon.runTick();
+
+    // Pre-fix: enqueue threw team_id mismatch -> 0 admitted/fired.
+    // Post-fix: input omits team_id -> handle applies its own UUID -> fires.
+    expect(r.admitted).toHaveLength(1);
+    expect(fired).toHaveLength(1);
+    expect(fired[0]?.team_id).toBeUndefined(); // factory no longer pins team_id
+  });
+
   it("DOES cap on the daemon's own in-flight backlog items", async () => {
     // 3 ready + 2 already in_flight (daemon-owned); max_in_flight 4 -> 2 slots.
     for (let i = 0; i < 3; i++) {

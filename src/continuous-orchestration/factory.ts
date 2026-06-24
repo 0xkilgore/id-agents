@@ -51,7 +51,13 @@ export function createContinuousOrchestrationDaemon(opts: BuildDaemonOptions): {
 
     enqueue: async (item: BacklogItem) => {
       const input: EnqueueInputV2 = {
-        team_id: teamId,
+        // NOTE: do NOT pin team_id here. CO storage is keyed by the team NAME
+        // ("default"), but the dispatch SchedulerHandle is bound to that team's
+        // UUID. Passing the CO storage `teamId` ("default") tripped the handle's
+        // guard (`input.team_id ?? this.teamId; if (team_id !== this.teamId) throw`)
+        // -> "team_id mismatch" on every tick (consecutive_zero_ticks climbed,
+        // last_dispatch_at stayed null, backlog never drained). Omitting team_id
+        // lets the handle apply its own bound team id, which is the correct one.
         to_agent: item.to_agent ?? "",
         from_actor: "continuous-orchestration",
         message: item.dispatch_body ?? "",
