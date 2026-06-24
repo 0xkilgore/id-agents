@@ -26,11 +26,14 @@ import {
   backfillCatalogFromDeliveryLog,
   countOperations,
   getArtifact,
+  getArtifactDraft,
   getReviewState,
   listArtifactCatalog,
   listInboxItems,
   listOperations,
+  parseDraftPayload,
   registerArtifact,
+  upsertArtifactDraft,
 } from './storage.js';
 import { artifactRowToEntry } from './entry-projection.js';
 import { EDIT_OP_TYPE, buildEditPayload, isEditInProductEnabled, latestEdit } from './edit.js';
@@ -46,15 +49,24 @@ import {
   DEFAULT_ACTION_COOLDOWN_MS,
   listComments,
   rejectArtifact,
+  reviseDraft,
   shipArtifact,
   viewArtifact,
+  type CaneDraftShipContext,
 } from './ops.js';
+import { isCaneDraftArtifactsEnabled } from '../config/feature-flags.js';
+import {
+  defaultCaneDraftSender,
+  pendingIdFromDraftId,
+  type CaneDraftSender,
+} from './ship-executor.js';
 import type {
   ApproveRequest,
   ArtifactAvailability,
   ArtifactOperationsResponse,
   ArtifactOpType,
   ArtifactReviewResponse,
+  CaneDraftPayload,
   OutputsInboxResponse,
   OutputsInboxRow,
   RegisterArtifactRequest,
@@ -124,6 +136,12 @@ export interface MountOutputsRoutesOptions {
   autoIngestIntervalMs?: number;
   /** Env source for feature-flag / autoingest reads (tests). Defaults to process.env. */
   env?: NodeJS.ProcessEnv;
+  /**
+   * CANE_DRAFT_ARTIFACTS — injectable Cane send executor. When provided, the
+   * cane_draft ship path uses this instead of the default HTTP sender, so tests
+   * never hit the network. Defaults to defaultCaneDraftSender(CANE_BASE_URL).
+   */
+  caneDraftSender?: CaneDraftSender;
 }
 
 export function mountOutputsRoutes(
@@ -134,6 +152,9 @@ export function mountOutputsRoutes(
   const { tasks, resolveTeamId } = opts;
   const cooldownMs = opts.actionCooldownMs ?? DEFAULT_ACTION_COOLDOWN_MS;
   const clock = opts.now;
+  // CANE_DRAFT_ARTIFACTS — resolve the send executor once. Injectable for tests.
+  const caneDraftSender: CaneDraftSender =
+    opts.caneDraftSender ?? defaultCaneDraftSender();
 
   // ── ARTIFACTS substrate proof-cut: delivery-log seam + parity cache ──
   const env = opts.env ?? process.env;
@@ -234,6 +255,7 @@ export function mountOutputsRoutes(
     try {
       const status = asString(req.query.status) as OutputsInboxRow['status'] | undefined;
       const agent = asString(req.query.agent);
+      const kind = asString(req.query.kind) === 'cane_draft' ? 'cane_draft' as const : undefined;
       const limit = Math.min(parseInt(req.query.limit as string, 10) || 50, 200);
       const offset = parseInt(req.query.offset as string, 10) || 0;
 
@@ -251,7 +273,7 @@ export function mountOutputsRoutes(
 
       const items = await listInboxItems(
         adapter,
-        { status, agent, includeNeverViewed: true },
+        { status, agent, kind, includeNeverViewed: true },
         limit,
         offset,
       );
@@ -405,6 +427,107 @@ export function mountOutputsRoutes(
       res.json(response);
     } catch (err) {
       res.status(400).json({ error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  // ── POST /drafts (CANE_DRAFT_ARTIFACTS) ────────────────────────────
+  // Cane's dual-write target: register a needs_approval Cane draft as a
+  // cane_draft artifact (catalog row + typed payload side-table). Idempotent on
+  // draft_id — a re-poll updates in place, never duplicates. Flag-gated: 404
+  // when CANE_DRAFT_ARTIFACTS is OFF (so the legacy state.json flow is the only
+  // surface until piloted). The artifact_id is derived deterministically from
+  // draft_id so all writers converge on one id per draft.
+  app.post('/drafts', async (req: Request, res: Response) => {
+    try {
+      if (!isCaneDraftArtifactsEnabled(env)) {
+        return res.status(404).json({ ok: false, error: 'cane_draft_artifacts_disabled' });
+      }
+      const body = (req.body ?? {}) as Record<string, unknown>;
+      const draftId = asString(body.draft_id);
+      if (!draftId || !draftId.startsWith('cane:draft:')) {
+        return res.status(400).json({ ok: false, error: 'draft_id "cane:draft:<pending_id>" is required' });
+      }
+      if (body.send_recommendation !== 'needs_approval') {
+        // Scope guard: only needs_approval drafts become artifacts. Auto-send-
+        // eligible drafts are out of scope and must not be registered.
+        return res.status(400).json({ ok: false, error: 'only send_recommendation="needs_approval" drafts are registered' });
+      }
+      const channel = body.channel === 'telegram' ? 'telegram' : 'email';
+      const payload: CaneDraftPayload = {
+        draft_id: draftId,
+        channel,
+        to: asString(body.to) ?? '',
+        subject: asString(body.subject) ?? '',
+        body_markdown: typeof body.body_markdown === 'string' ? body.body_markdown : '',
+        in_reply_to: asString(body.in_reply_to) ?? null,
+        references: asString(body.references) ?? null,
+        source_inbox_ref: asString(body.source_inbox_ref) ?? null,
+        send_recommendation: 'needs_approval',
+        reasoning: asString(body.reasoning) ?? null,
+        revision_history: [],
+      };
+      const artifactId = artifactIdFromPath(draftId);
+      const nowIso = (clock?.() ?? new Date()).toISOString();
+      // Idempotent: a re-register preserves the existing revision_history so an
+      // operator edit isn't clobbered by a later re-poll of the same draft.
+      const existingDraft = parseDraftPayload(await getArtifactDraft(adapter, artifactId));
+      if (existingDraft) {
+        payload.revision_history = existingDraft.revision_history ?? [];
+      }
+      const { inserted: catalogInserted } = await registerArtifact(
+        adapter,
+        {
+          artifact_id: artifactId,
+          basename: `${draftId}.draft`,
+          agent: 'cane',
+          tag: 'cane_draft',
+          abs_path: draftId,
+          title: payload.subject || `Cane draft to ${payload.to}`,
+          produced_at: nowIso,
+          source: 'agent-done',
+          availability: 'present',
+        },
+        nowIso,
+      );
+      const { inserted: draftInserted } = await upsertArtifactDraft(adapter, artifactId, payload, nowIso);
+      res.json({
+        ok: true,
+        schema_version: 'cane.draft.register.v1',
+        artifact_id: artifactId,
+        draft_id: draftId,
+        source_link: draftId,
+        inserted: catalogInserted && draftInserted,
+        payload,
+      });
+    } catch (err) {
+      res.status(400).json({ ok: false, error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  // ── POST /artifacts/:id/revise (CANE_DRAFT_ARTIFACTS) ──────────────
+  // An operator's in-place rewrite of a cane_draft body — the spec's "Edit"
+  // action. Distinct from POST /artifacts/:id/edit (generic edit op): this is a
+  // `revise_draft` op that mutates the typed draft payload and appends to
+  // revision_history. Flag-gated: 404 when CANE_DRAFT_ARTIFACTS is OFF (mirrors
+  // the edit route's flag-gating).
+  app.post('/artifacts/:id/revise', async (req: Request<{ id: string }>, res: Response) => {
+    try {
+      if (!isCaneDraftArtifactsEnabled(env)) {
+        return res.status(404).json({ ok: false, error: 'cane_draft_artifacts_disabled' });
+      }
+      const bodyMarkdown = req.body?.body_markdown;
+      if (typeof bodyMarkdown !== 'string') {
+        return res.status(400).json({ ok: false, error: 'body_markdown (string) is required' });
+      }
+      const draftRow = await getArtifactDraft(adapter, req.params.id);
+      if (!parseDraftPayload(draftRow)) {
+        return res.status(404).json({ ok: false, error: 'no cane_draft for this artifact' });
+      }
+      const actor = asString(req.body?.actor) ?? 'user:operator';
+      const { payload, op_id } = await reviseDraft(adapter, req.params.id, bodyMarkdown, actor, clock);
+      res.json({ ok: true, schema_version: 'artifact.revise.v1', op_id, payload });
+    } catch (err) {
+      res.status(400).json({ ok: false, error: err instanceof Error ? err.message : String(err) });
     }
   });
 
@@ -744,10 +867,22 @@ export function mountOutputsRoutes(
         shipper: actor.ref, // durable Monday attribution on the ship attempt/blocker
         source_link: asString(req.body?.source_link),
       };
-      const result = await shipArtifact(adapter, artifactId, reqBody, clock);
-      // 200 even when blocked — clients inspect status + blockers. Ship stays
-      // visible-but-blocked (no_executor_configured) until a destination
-      // executor exists; the attempt is recorded as a durable operation.
+      // CANE_DRAFT_ARTIFACTS: when the flag is ON and this artifact is a
+      // cane_draft, inject the send executor so ship actually sends the latest
+      // body via the single Cane send path. For every other kind (or flag OFF),
+      // no context is passed → shipArtifact returns no_executor_configured.
+      let caneDraftCtx: CaneDraftShipContext | undefined;
+      if (isCaneDraftArtifactsEnabled(env)) {
+        const payload = parseDraftPayload(await getArtifactDraft(adapter, artifactId));
+        if (payload) {
+          const ops = await listOperations(adapter, artifactId, 500, 0);
+          caneDraftCtx = { payload, ops, sender: caneDraftSender };
+        }
+      }
+      const result = await shipArtifact(adapter, artifactId, reqBody, clock, caneDraftCtx);
+      // 200 even when blocked — clients inspect status + blockers. Non-cane_draft
+      // ship stays visible-but-blocked (no_executor_configured); the attempt is
+      // recorded as a durable operation.
       res.json({ ...result, actor: actor.ref });
     } catch (err) {
       res.status(400).json({ error: err instanceof Error ? err.message : String(err) });

@@ -13,22 +13,29 @@
 import type { DbAdapter } from "../db/db-adapter.js";
 import {
   appendOperation,
+  getArtifactDraft,
   getLastOperationByActor,
   getReviewState,
   listOperations,
+  parseDraftPayload,
+  upsertArtifactDraft,
   upsertReviewState,
 } from "./storage.js";
 import type {
   ApproveRequest,
   ArtifactComment,
+  ArtifactOpRow,
   ArtifactOpType,
   ArtifactReviewStateRow,
+  CaneDraftPayload,
   CommentRequest,
   RejectRequest,
   ShipRequest,
   ShipResponse,
   ViewRequest,
 } from "./types.js";
+import type { CaneDraftSender } from "./ship-executor.js";
+import { pendingIdFromDraftId } from "./ship-executor.js";
 
 const DEFAULT_ACTOR = "operator";
 
@@ -254,6 +261,84 @@ export async function listComments(
   return comments;
 }
 
+// ── Revise draft (CANE_DRAFT_ARTIFACTS) ─────────────────────────────
+// An operator's in-place rewrite of a cane_draft body. Append-only and
+// latest-wins, mirroring edit.ts's derivation pattern, but a DISTINCT op type
+// (`revise_draft`) gated by CANE_DRAFT_ARTIFACTS — it does not touch edit.ts's
+// generic `edit` op or its ARTIFACTS_EDIT_IN_PRODUCT flag. Each revise:
+//   1. updates the typed draft payload's body_markdown,
+//   2. appends a {at,by,from_len} entry to revision_history,
+//   3. records a `revise_draft` op row (the audit trail).
+
+export const REVISE_DRAFT_OP_TYPE = "revise_draft" as const;
+
+export interface ReviseDraftResult {
+  payload: CaneDraftPayload;
+  op_id: number;
+}
+
+/** The latest in-place body for a cane_draft, used by the send executor.
+ *  = the most recent `revise_draft` op's body, falling back to the registered
+ *  payload body when there has been no revision. Pure (op-log derivation). */
+export function latestDraftBody(payload: CaneDraftPayload, ops: ArtifactOpRow[]): string {
+  let latest: ArtifactOpRow | null = null;
+  for (const op of ops) {
+    if (op.op_type !== REVISE_DRAFT_OP_TYPE) continue;
+    if (!latest || op.op_id > latest.op_id) latest = op;
+  }
+  if (!latest) return payload.body_markdown;
+  try {
+    const parsed = JSON.parse(latest.payload_json ?? "{}") as { body_markdown?: unknown };
+    if (typeof parsed.body_markdown === "string") return parsed.body_markdown;
+  } catch {
+    /* malformed → fall back to registered body */
+  }
+  return payload.body_markdown;
+}
+
+export async function reviseDraft(
+  adapter: DbAdapter,
+  artifactId: string,
+  bodyMarkdown: string,
+  actor: string,
+  now?: () => Date,
+): Promise<ReviseDraftResult> {
+  const ts = nowIso(now);
+  const draftRow = await getArtifactDraft(adapter, artifactId);
+  const payload = parseDraftPayload(draftRow);
+  if (!payload) {
+    throw new Error(`no cane_draft payload for artifact ${artifactId}`);
+  }
+  const fromLen = payload.body_markdown.length;
+  const next: CaneDraftPayload = {
+    ...payload,
+    body_markdown: bodyMarkdown,
+    revision_history: [
+      ...(payload.revision_history ?? []),
+      { at: ts, by: actor, from_len: fromLen },
+    ],
+  };
+  await upsertArtifactDraft(adapter, artifactId, next, ts);
+  // Touch the review-state row so the artifact has a durable interaction record.
+  const existing = await getReviewState(adapter, artifactId);
+  await upsertReviewState(
+    adapter,
+    artifactId,
+    { source_link: existing?.source_link ?? next.draft_id },
+    ts,
+  );
+  const opId = await appendOperation(
+    adapter,
+    artifactId,
+    REVISE_DRAFT_OP_TYPE,
+    actor,
+    ts,
+    JSON.stringify({ body_markdown: bodyMarkdown, from_len: fromLen }),
+    existing?.source_link ?? next.draft_id,
+  );
+  return { payload: next, op_id: opId };
+}
+
 // Blocker codes returned by /ship. Stable enum-style strings; clients
 // match against these to render UX. Adding new codes is backwards-
 // compatible; removing one is not.
@@ -261,24 +346,41 @@ export const SHIP_BLOCKERS = {
   NO_EXECUTOR: "no_executor_configured",
   NOT_APPROVED: "artifact_not_approved",
   ALREADY_SHIPPED: "already_shipped",
+  SEND_FAILED: "cane_send_failed",
 } as const;
 
 export type ShipBlockerCode = (typeof SHIP_BLOCKERS)[keyof typeof SHIP_BLOCKERS];
 
 // Returns the current blocker set for an artifact. Pure (no I/O beyond
-// the existing state). Today every ship returns NO_EXECUTOR because
-// no executor is wired; that's intentional. The order matters:
-// ALREADY_SHIPPED checks first, NOT_APPROVED next, NO_EXECUTOR last.
-// When executors land, this function becomes the single place to
-// remove NO_EXECUTOR from the static blocker list.
-export function computeShipBlockers(state: ArtifactReviewStateRow | null): ShipBlockerCode[] {
+// the existing state). The order matters: ALREADY_SHIPPED checks first,
+// NOT_APPROVED next, NO_EXECUTOR last.
+//
+// For a cane_draft artifact (opts.isCaneDraft), the send executor IS the
+// executor, so NO_EXECUTOR is NOT pushed — ALREADY_SHIPPED + NOT_APPROVED still
+// gate it (approve-before-send + idempotent shipped_at). For EVERY OTHER kind,
+// NO_EXECUTOR is pushed exactly as before (no executor wired).
+export function computeShipBlockers(
+  state: ArtifactReviewStateRow | null,
+  opts: { isCaneDraft?: boolean } = {},
+): ShipBlockerCode[] {
   const blockers: ShipBlockerCode[] = [];
   if (state?.shipped_at) blockers.push(SHIP_BLOCKERS.ALREADY_SHIPPED);
   if (!state?.approved_at) blockers.push(SHIP_BLOCKERS.NOT_APPROVED);
-  // Stub: no executor is configured yet. This is the canonical "until
-  // executors exist" blocker the dispatch requested.
-  blockers.push(SHIP_BLOCKERS.NO_EXECUTOR);
+  if (!opts.isCaneDraft) {
+    // No executor is configured for non-cane_draft kinds. This is the canonical
+    // "until executors exist" blocker the original dispatch requested.
+    blockers.push(SHIP_BLOCKERS.NO_EXECUTOR);
+  }
   return blockers;
+}
+
+// CANE_DRAFT_ARTIFACTS — the ship context the route injects when the artifact is
+// a cane_draft and the flag is ON. Carries the typed payload, the op-log (to
+// derive the latest revised body), and the injectable Cane sender.
+export interface CaneDraftShipContext {
+  payload: CaneDraftPayload;
+  ops: ArtifactOpRow[];
+  sender: CaneDraftSender;
 }
 
 export async function shipArtifact(
@@ -286,45 +388,125 @@ export async function shipArtifact(
   artifactId: string,
   req: ShipRequest,
   now?: () => Date,
+  caneDraft?: CaneDraftShipContext,
 ): Promise<ShipResponse> {
   const ts = nowIso(now);
   const existing = await getReviewState(adapter, artifactId);
   const shipper = (req.shipper || DEFAULT_ACTOR).trim() || DEFAULT_ACTOR;
-  const blockers = computeShipBlockers(existing);
+  const isCaneDraft = !!caneDraft;
+  const blockers = computeShipBlockers(existing, { isCaneDraft });
 
   // Always record the attempt as an operation, even when blocked.
   const blocked = blockers.length > 0;
-  const opType: ArtifactOpType = blocked ? "ship_blocked" : "ship_attempted";
   const patch: Partial<ArtifactReviewStateRow> = {
     source_link: req.source_link ?? existing?.source_link ?? null,
   };
+
   if (blocked) {
     patch.ship_blockers_json = JSON.stringify(blockers);
-  } else {
-    // Future: this path lights up when executors exist.
-    patch.shipped_at = ts;
+    const state = await upsertReviewState(adapter, artifactId, patch, ts);
+    const opId = await appendOperation(
+      adapter,
+      artifactId,
+      "ship_blocked",
+      shipper,
+      ts,
+      JSON.stringify({ blockers, attempted_by: shipper }),
+      state.source_link,
+    );
+    return {
+      schema_version: "artifact.ship.v1",
+      artifact_id: artifactId,
+      status: "blocked",
+      blockers,
+      message: `Ship blocked by: ${blockers.join(", ")}. Recorded as operation #${opId}.`,
+      recorded_op_id: opId,
+    };
+  }
+
+  // Not blocked. For cane_draft, actually perform the send via the single Cane
+  // send path before recording shipped_at. The ALREADY_SHIPPED blocker above
+  // makes a second ship a no-op (no double-send) — first-write-wins shipped_at.
+  if (isCaneDraft && caneDraft) {
+    const body = latestDraftBody(caneDraft.payload, caneDraft.ops);
+    const result = await caneDraft.sender(caneDraft.payload, body);
+    if (!result.ok || !result.evidence) {
+      // Send failed: record a blocked attempt (not shipped) so a retry is
+      // possible and shipped_at stays null.
+      const sendBlockers = [SHIP_BLOCKERS.SEND_FAILED];
+      patch.ship_blockers_json = JSON.stringify(sendBlockers);
+      const state = await upsertReviewState(adapter, artifactId, patch, ts);
+      const opId = await appendOperation(
+        adapter,
+        artifactId,
+        "ship_blocked",
+        shipper,
+        ts,
+        JSON.stringify({ blockers: sendBlockers, error: result.error ?? "send failed" }),
+        state.source_link,
+      );
+      return {
+        schema_version: "artifact.ship.v1",
+        artifact_id: artifactId,
+        status: "blocked",
+        blockers: sendBlockers,
+        message: `Cane send failed: ${result.error ?? "unknown"}. Recorded as operation #${opId}.`,
+        recorded_op_id: opId,
+      };
+    }
+    // Sent. Record shipped_at (first-write-wins) + the sent evidence op.
+    patch.shipped_at = result.evidence.sent_at;
     patch.shipped_by = shipper;
     patch.ship_blockers_json = null;
+    const state = await upsertReviewState(adapter, artifactId, patch, ts);
+    const opId = await appendOperation(
+      adapter,
+      artifactId,
+      "ship_attempted",
+      shipper,
+      ts,
+      JSON.stringify({
+        cane_draft: true,
+        pending_id: pendingIdFromDraftId(caneDraft.payload.draft_id),
+        message_id: result.evidence.message_id,
+        sent_at: result.evidence.sent_at,
+        already_sent: result.evidence.already_sent ?? false,
+        attempted_by: shipper,
+      }),
+      state.source_link,
+    );
+    return {
+      schema_version: "artifact.ship.v1",
+      artifact_id: artifactId,
+      status: "ok",
+      blockers: [],
+      message: `Draft sent (message_id ${result.evidence.message_id}). Op #${opId}.`,
+      recorded_op_id: opId,
+    };
   }
+
+  // Non-cane_draft, not blocked — this path is unreachable today because
+  // computeShipBlockers always pushes NO_EXECUTOR for non-cane_draft kinds.
+  // Kept for forward-compatibility when other executors land.
+  patch.shipped_at = ts;
+  patch.shipped_by = shipper;
+  patch.ship_blockers_json = null;
   const state = await upsertReviewState(adapter, artifactId, patch, ts);
   const opId = await appendOperation(
     adapter,
     artifactId,
-    opType,
+    "ship_attempted",
     shipper,
     ts,
-    JSON.stringify({ blockers, attempted_by: shipper }),
+    JSON.stringify({ blockers: [], attempted_by: shipper }),
     state.source_link,
   );
-
   return {
     schema_version: "artifact.ship.v1",
     artifact_id: artifactId,
-    status: blocked ? "blocked" : "ok",
-    blockers,
-    message: blocked
-      ? `Ship blocked by: ${blockers.join(", ")}. Recorded as operation #${opId}.`
-      : `Ship recorded. Op #${opId}.`,
+    status: "ok",
+    blockers: [],
+    message: `Ship recorded. Op #${opId}.`,
     recorded_op_id: opId,
   };
 }

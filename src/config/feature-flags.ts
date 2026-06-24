@@ -25,3 +25,15 @@ export function useDocumentModel(
 ): boolean {
   return isOn(env[ENV_KEY[surface]]);
 }
+
+/** Cane-draft-as-approvable-artifact capability flag (CANE_DRAFT_ARTIFACTS).
+ *  OFF by default. When OFF, draft registration, the `revise_draft` op route,
+ *  and the cane_draft send executor are all inert — Cane keeps the legacy
+ *  state.json/Telegram approval flow exactly as today (zero regression). The
+ *  flip is a reversible cutover, not a migration. Distinct from the generic
+ *  ARTIFACTS_EDIT_IN_PRODUCT flag (edit.ts), which gates the generic `edit` op. */
+export function isCaneDraftArtifactsEnabled(
+  env: NodeJS.ProcessEnv = process.env,
+): boolean {
+  return isOn(env.CANE_DRAFT_ARTIFACTS);
+}

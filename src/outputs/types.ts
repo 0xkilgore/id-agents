@@ -16,7 +16,50 @@ export type ArtifactOpType =
   | "ship_attempted"
   | "ship_blocked"
   | "comment_recorded"
-  | "edit";
+  | "edit"
+  // CANE_DRAFT_ARTIFACTS: an operator's in-place rewrite of a cane_draft body.
+  // Distinct from the generic `edit` op (edit.ts): revise_draft mutates the
+  // typed draft payload's body_markdown and appends to its revision_history.
+  | "revise_draft";
+
+// Artifact kind for a Cane email/telegram draft that needs operator approval
+// before it is sent. The send executor (ship-executor.ts) only fires for this
+// kind; every other kind keeps returning no_executor_configured.
+export const CANE_DRAFT_KIND = "cane_draft" as const;
+export type CaneDraftKind = typeof CANE_DRAFT_KIND;
+
+// One append-only revision-history entry for a cane_draft (operator edits).
+export interface CaneDraftRevision {
+  at: string;        // ISO-8601 UTC
+  by: string;        // actor ref (e.g. user:chris)
+  from_len: number;  // length of the body BEFORE this revision (audit aid)
+}
+
+// Typed payload carried by a cane_draft artifact, stored in artifact_drafts.
+// draft_id is the idempotency anchor and == the artifact's source_link.
+export interface CaneDraftPayload {
+  draft_id: string;                 // "cane:draft:<pending_id>" — stable, unique
+  channel: "email" | "telegram";
+  to: string;                       // recipient address
+  subject: string;
+  body_markdown: string;            // the current draft body (editable in place)
+  in_reply_to?: string | null;      // threading: Message-ID being replied to
+  references?: string | null;       // threading: References header
+  source_inbox_ref?: string | null; // inbox-item phid | state.json pending_id
+  send_recommendation: "needs_approval"; // only needs_approval becomes an artifact
+  reasoning?: string | null;        // why it needs approval
+  revision_history: CaneDraftRevision[]; // append-only operator edits
+}
+
+// One row in artifact_drafts — the typed draft payload keyed by artifact_id,
+// with draft_id UNIQUE for idempotent (re-)registration.
+export interface ArtifactDraftRow {
+  artifact_id: string;
+  draft_id: string;
+  payload_json: string; // serialized CaneDraftPayload
+  created_at: string;
+  updated_at: string;
+}
 
 // Append-only audit event for an artifact. Lives in artifact_operations.
 export interface ArtifactOpRow {
