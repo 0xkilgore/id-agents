@@ -2166,6 +2166,7 @@ export class AgentManagerDb {
       created_at: nowSec,
       updated_at: nowSec,
       completed_at: null,
+      track: '(unassigned)',
     };
     await this.db.tasks.create(taskRow);
 
@@ -9464,6 +9465,7 @@ export class AgentManagerDb {
           let description: string | undefined;
           let teamRef: string | undefined;
           let ownerRef: string | undefined;
+          let trackRef: string | undefined;
           const eventIds: string[] = [];
 
           for (let i = 0; i < rawArgs.length; i++) {
@@ -9472,12 +9474,26 @@ export class AgentManagerDb {
             if (token === '--description') { description = rawArgs[++i]; continue; }
             if (token === '--team') { teamRef = rawArgs[++i]; continue; }
             if (token === '--owner') { ownerRef = rawArgs[++i]; continue; }
+            if (token === '--track') { trackRef = rawArgs[++i]; continue; }
             if (token === '--event') { eventIds.push(rawArgs[++i]); continue; }
             if (!title) { title = token; continue; }
           }
 
           if (!title) {
-            return { ok: false, error: 'Usage: /task create "<title>" [--name <slug>] [--description "..."] [--team <team>] [--owner <agent>] [--event <schedule-id>]...' };
+            return { ok: false, error: 'Usage: /task create "<title>" [--name <slug>] [--description "..."] [--team <team>] [--owner <agent>] [--track <id>] [--event <schedule-id>]...' };
+          }
+
+          // Validate optional --track via the canonical-track-registry — soft-warn
+          // only (conforming stored verbatim; absent/non-conforming → '(unassigned)').
+          let track = '(unassigned)';
+          if (trackRef != null && trackRef.trim() !== '') {
+            if (resolveTrack(trackRef).conforms) {
+              track = trackRef.trim();
+            } else {
+              console.warn(
+                `[Manager] /task create: non-conforming track "${trackRef}" — storing '(unassigned)' (see canonical-track-registry)`,
+              );
+            }
           }
 
           // Resolve optional team first (needed for name uniqueness check)
@@ -9543,6 +9559,7 @@ export class AgentManagerDb {
             created_at: now,
             updated_at: now,
             completed_at: null,
+            track,
           };
 
           await this.db.tasks.create(taskRow, eventIds.length > 0 ? eventIds : undefined);
