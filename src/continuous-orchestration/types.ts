@@ -95,6 +95,11 @@ export interface BacklogItem {
   last_dispatch_phid: string | null;
   /** Actor who last edited this item via PATCH (actor-attributed updates). */
   updated_by: string | null;
+  /**
+   * True when the item's `track` does not conform to the canonical-track-registry
+   * (flagged at ingest — warn + tag, never blocks). See src/track-registry.
+   */
+  track_drift: boolean;
   // ── Auto-flesh (daemon SELF-REFUEL) ──
   flesh_status: FleshStatus;
   flesh_source: string | null;

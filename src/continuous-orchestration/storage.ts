@@ -38,6 +38,7 @@ interface BacklogRow {
   approved_at: string | null;
   last_dispatch_phid: string | null;
   updated_by: string | null;
+  track_drift: number | null;
   flesh_status: string | null;
   flesh_source: string | null;
   flesh_confidence: number | null;
@@ -84,6 +85,7 @@ export function rowToBacklogItem(r: BacklogRow): BacklogItem {
     approved_at: r.approved_at,
     last_dispatch_phid: r.last_dispatch_phid,
     updated_by: r.updated_by,
+    track_drift: r.track_drift === 1,
     flesh_status: (r.flesh_status as BacklogItem["flesh_status"]) ?? "unfleshed",
     flesh_source: r.flesh_source ?? null,
     flesh_confidence: r.flesh_confidence ?? null,
@@ -125,6 +127,8 @@ export interface NewBacklogItem {
   runtime?: string | null;
   is_north_star?: boolean;
   source_refs?: string[];
+  /** Set when the item's track does not conform to the canonical-track-registry. */
+  track_drift?: boolean;
 }
 
 export async function insertBacklogItem(adapter: DbAdapter, input: NewBacklogItem): Promise<BacklogItem> {
@@ -134,8 +138,8 @@ export async function insertBacklogItem(adapter: DbAdapter, input: NewBacklogIte
     `INSERT INTO orchestration_backlog_item (
        item_id, team_id, title, track, to_agent, dispatch_body, priority, value_score,
        readiness_state, risk_class, write_scope_json, dependencies_json, token_estimate,
-       provider, runtime, is_north_star, source_refs_json, created_at, updated_at
-     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)`,
+       provider, runtime, is_north_star, source_refs_json, track_drift, created_at, updated_at
+     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)`,
     [
       item_id,
       input.team_id ?? "default",
@@ -154,6 +158,7 @@ export async function insertBacklogItem(adapter: DbAdapter, input: NewBacklogIte
       input.runtime ?? null,
       input.is_north_star ? 1 : 0,
       JSON.stringify(input.source_refs ?? []),
+      input.track_drift ? 1 : 0,
       now,
       now,
     ],

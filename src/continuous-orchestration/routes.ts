@@ -28,6 +28,7 @@ import {
 import type { RiskClass } from "./types.js";
 import { parseRoadmapToBacklog } from "./roadmap-import.js";
 import { runFleshPass } from "./flesh-runner.js";
+import { resolveTrack } from "../track-registry/registry.js";
 
 export interface OrchestrationRouteOptions {
   daemon: ContinuousOrchestrationDaemon;
@@ -138,11 +139,24 @@ export function mountContinuousOrchestrationRoutes(app: Application, opts: Orche
     try {
       const body = (req.body ?? {}) as NewBacklogItem;
       if (!body.title) return res.status(400).json({ ok: false, error: "title required" });
+      // Validate the item's track against the canonical-track-registry. A
+      // provided-but-non-conforming track is DRIFT: warn + tag, never block.
+      let trackDrift = false;
+      if (body.track != null && typeof body.track === "string" && body.track.trim() !== "") {
+        const resolved = resolveTrack(body.track);
+        if (!resolved.conforms) {
+          trackDrift = true;
+          console.warn(
+            `[orchestration] POST /orchestration/backlog: non-conforming track "${body.track}" — ingesting with track_drift=1 (see canonical-track-registry)`,
+          );
+        }
+      }
       // New items NEVER land ready — only the approval gate can do that.
       const safe: NewBacklogItem = {
         ...body,
         team_id: teamId,
         readiness_state: body.readiness_state === "ready" ? "needs_review" : body.readiness_state ?? "draft",
+        track_drift: trackDrift,
       };
       const item = await insertBacklogItem(adapter, safe);
       res.json({ ok: true, item });

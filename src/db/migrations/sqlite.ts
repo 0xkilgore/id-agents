@@ -580,6 +580,7 @@ export async function migrateSqlite(adapter: SqliteAdapter): Promise<void> {
       approved_at        TEXT,
       last_dispatch_phid TEXT,
       updated_by         TEXT,
+      track_drift        INTEGER NOT NULL DEFAULT 0,
       created_at         TEXT NOT NULL,
       updated_at         TEXT NOT NULL
     );
@@ -625,6 +626,15 @@ export async function migrateSqlite(adapter: SqliteAdapter): Promise<void> {
   // Continuous-orchestration backlog: actor-attributed PATCH updates.
   try {
     adapter.exec(`ALTER TABLE orchestration_backlog_item ADD COLUMN updated_by TEXT`);
+  } catch {
+    // Column already exists in upgraded databases.
+  }
+
+  // Continuous-orchestration backlog: track-conformance drift flag (Spec L1b).
+  // Set at ingest when an item's track does not conform to the canonical-track-
+  // registry. Warn + tag — never blocks ingestion.
+  try {
+    adapter.exec(`ALTER TABLE orchestration_backlog_item ADD COLUMN track_drift INTEGER NOT NULL DEFAULT 0`);
   } catch {
     // Column already exists in upgraded databases.
   }

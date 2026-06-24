@@ -37,6 +37,7 @@ function item(over: Partial<BacklogItem> = {}): BacklogItem {
     approved_by: "chris",
     approved_at: "2026-06-17T00:00:00Z",
     last_dispatch_phid: null,
+    track_drift: false,
     created_at: "2026-06-17T00:00:00Z",
     updated_at: "2026-06-17T00:00:00Z",
     ...over,

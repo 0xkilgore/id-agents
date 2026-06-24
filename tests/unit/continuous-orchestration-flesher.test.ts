@@ -48,6 +48,7 @@ function skeleton(over: Partial<BacklogItem> = {}): BacklogItem {
     approved_at: null,
     last_dispatch_phid: null,
     updated_by: null,
+    track_drift: false,
     flesh_status: "unfleshed",
     flesh_source: null,
     flesh_confidence: null,
