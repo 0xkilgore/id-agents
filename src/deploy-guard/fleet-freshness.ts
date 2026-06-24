@@ -20,6 +20,11 @@ import {
   type FreshnessState,
   type FreshnessTrackerState,
 } from "./freshness.js";
+import {
+  evaluateRedeployCoupling,
+  COHERENT_EMPTY_COUPLING,
+  type RedeployCouplingSummary,
+} from "./redeploy-coupling.js";
 
 /** One node's freshness observation for a tick. */
 export interface FleetNodeInput extends FreshnessInput {
@@ -47,6 +52,8 @@ export interface FleetFreshnessSummary {
   /** Total nodes observed this tick. */
   node_count: number;
   nodes: FleetNodeSummary[];
+  /** T-DEPLOY.3 — cross-node version-skew / coordinated-redeploy verdict. */
+  coupling: RedeployCouplingSummary;
 }
 
 export interface FleetNodeAlert {
@@ -65,6 +72,7 @@ export const EMPTY_FLEET_SUMMARY: FleetFreshnessSummary = {
   stale_nodes: [],
   node_count: 0,
   nodes: [],
+  coupling: COHERENT_EMPTY_COUPLING,
 };
 
 /**
@@ -123,6 +131,7 @@ export function evaluateFleetFreshness(
       stale_nodes,
       node_count: nodes.length,
       nodes,
+      coupling: evaluateRedeployCoupling(nodes),
     },
   };
 }
