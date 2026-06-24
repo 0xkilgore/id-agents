@@ -131,6 +131,12 @@ const KAPELLE_PROJECT: LoopProjectRef = {
   slug: "kapelle",
 };
 
+const BLOWOUT_PROJECT: LoopProjectRef = {
+  project_phid: "phid:proj:blowout",
+  name: "Blowout",
+  slug: "blowout",
+};
+
 /** Stable canonical id for a seed loop. */
 export function loopPhidForSlug(slug: string): string {
   return `phid:loop:${slug}`;
@@ -206,6 +212,22 @@ const SEED_LOOP_DEFS: SeedLoopDef[] = [
     allow_manual_run: true,
     schedule_label: "Weekly Sun (per project)",
     stale_after_minutes: null,
+  },
+  {
+    slug: "weekly-project-report-blowout",
+    name: "Weekly Project Report — Blowout",
+    description:
+      "Blowout's weekly synthesis (headlines / what shipped / blockers / next week's next-3) from a one-week git, dispatch and artifact-mtime sweep plus decisions/risk deltas. The L5 per-project instance bound to the Blowout project.",
+    kind: "report",
+    owner_agent: "blowout",
+    project: BLOWOUT_PROJECT,
+    // Phase-2 per-project instance: registered + manually runnable now; flip
+    // `enabled` to start the Sunday auto-cadence (paced to avoid Sunday throttle).
+    enabled: false,
+    allow_scheduled_run: true,
+    allow_manual_run: true,
+    schedule_label: "Weekly Sun",
+    stale_after_minutes: 8 * 24 * 60,
   },
   {
     slug: "biweekly-project-report",

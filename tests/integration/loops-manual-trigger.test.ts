@@ -150,6 +150,6 @@ describe('B1 loops manual-trigger + evidence + recurrence link', () => {
     const body = await res.json() as any;
     expect(body.schema_version).toBe('loops-list-v1');
     expect(body.source).toBe('seed_catalog');
-    expect(body.loops).toHaveLength(8);
+    expect(body.loops).toHaveLength(9);
   });
 });

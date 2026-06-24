@@ -19,15 +19,26 @@ const RESERVED_SLUGS = [
   "inbox-intake",
   "fantasy-baseball",
   "weekly-project-report",
+  "weekly-project-report-blowout", // L5 per-project instance (Blowout)
   "biweekly-project-report",
   "maestra-product-log",
   "sentinel-verification-2h",
 ];
 
 describe("seed catalog", () => {
-  it("registers all 8 reserved L1-L8 loops by slug", () => {
-    expect(SEED_LOOPS).toHaveLength(8);
+  it("registers all reserved L1-L8 loops (+ per-project instances) by slug", () => {
+    expect(SEED_LOOPS).toHaveLength(9);
     expect(SEED_LOOPS.map((l) => l.slug).sort()).toEqual([...RESERVED_SLUGS].sort());
+  });
+
+  it("registers the L5 Blowout weekly-report instance (report, owner blowout, project-bound, Phase-2 disabled)", () => {
+    const l = SEED_LOOPS.find((x) => x.slug === "weekly-project-report-blowout")!;
+    expect(l.kind).toBe("report");
+    expect(l.owner_agent).toBe("blowout");
+    expect(l.project?.slug).toBe("blowout");
+    expect(l.enabled).toBe(false); // registered + manual-runnable; not auto-scheduled yet
+    expect(l.allow_manual_run).toBe(true);
+    expect(l.allow_scheduled_run).toBe(true);
   });
 
   it("derives a stable canonical loop_phid from the slug", () => {
@@ -79,7 +90,7 @@ describe("listLoops", () => {
     expect(res.schema_version).toBe("loops-list-v1");
     expect(res.source).toBe("seed_catalog");
     expect(res.generated_at).toBe(NOW);
-    expect(res.loops).toHaveLength(8);
+    expect(res.loops).toHaveLength(9);
   });
 
   it("computes filter facets over the full catalog with counts", () => {
@@ -87,9 +98,9 @@ describe("listLoops", () => {
     const owners = Object.fromEntries(filters.owners.map((o) => [o.value, o.count]));
     expect(owners["maestra"]).toBe(3); // morning-digest, project-load, maestra-product-log
     const kinds = Object.fromEntries(filters.kinds.map((k) => [k.value, k.count]));
-    expect(kinds["report"]).toBe(4); // project-load, weekly, biweekly, maestra-product-log
+    expect(kinds["report"]).toBe(5); // project-load, weekly, weekly-blowout, biweekly, maestra-product-log
     expect(filters.statuses.find((s) => s.value === "unknown")?.count).toBe(5);
-    expect(filters.statuses.find((s) => s.value === "disabled")?.count).toBe(3);
+    expect(filters.statuses.find((s) => s.value === "disabled")?.count).toBe(4);
   });
 
   it("filters by owner_agent", () => {
@@ -100,11 +111,11 @@ describe("listLoops", () => {
   it("filters by kind", () => {
     const res = listLoops(NOW, { kind: "report" });
     expect(res.loops.every((l: LoopSummary) => l.kind === "report")).toBe(true);
-    expect(res.loops).toHaveLength(4);
+    expect(res.loops).toHaveLength(5);
   });
 
   it("filters by health status", () => {
-    expect(listLoops(NOW, { status: "disabled" }).loops).toHaveLength(3);
+    expect(listLoops(NOW, { status: "disabled" }).loops).toHaveLength(4);
     expect(listLoops(NOW, { status: "unknown" }).loops).toHaveLength(5);
   });
 

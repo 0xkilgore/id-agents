@@ -72,14 +72,14 @@ describe('GET /loops registry routes', () => {
     try { fs.rmSync(workDir, { recursive: true, force: true }); } catch { /* ignore */ }
   });
 
-  it('GET /loops returns the seed catalog list envelope (all 8 loops)', async () => {
+  it('GET /loops returns the seed catalog list envelope (all 9 loops)', async () => {
     const res = await fetch(`${baseUrl}/loops`);
     expect(res.status).toBe(200);
     const body = await res.json() as any;
     expect(body.ok).toBe(true);
     expect(body.schema_version).toBe('loops-list-v1');
     expect(body.source).toBe('seed_catalog');
-    expect(body.loops).toHaveLength(8);
+    expect(body.loops).toHaveLength(9);
     expect(body.filters.owners.length).toBeGreaterThan(0);
     // every row carries the read-model identity + placeholder health
     for (const l of body.loops) {
