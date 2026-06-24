@@ -5,6 +5,19 @@
 
 import type { BacklogItem } from "./types.js";
 
+/** Lane key with no declared write_scope (a single shared bucket). */
+export const NO_LANE_KEY = "∅"; // ∅
+
+/**
+ * The lane an item belongs to, identified by its write_scope. Items that write
+ * the same scope set are the same lane (a build dispatch's single-writer unit);
+ * scope-less items share one bucket. Stable: scopes are sorted so ordering can't
+ * make two equal scope sets look distinct.
+ */
+export function laneKeyOf(item: BacklogItem): string {
+  return item.write_scope.length ? [...item.write_scope].sort().join("|") : NO_LANE_KEY;
+}
+
 /** Order READY candidates highest-value first. Stable + deterministic. */
 export function orderCandidates(items: BacklogItem[]): BacklogItem[] {
   return [...items].sort((a, b) => {
@@ -20,4 +33,55 @@ export function orderCandidates(items: BacklogItem[]): BacklogItem[] {
     if (a.created_at !== b.created_at) return a.created_at < b.created_at ? -1 : 1;
     return a.item_id < b.item_id ? -1 : 1;
   });
+}
+
+/**
+ * Lane-aware FAIR scheduling. Round-robin the (already priority-ordered)
+ * candidates across distinct write_scope lanes so a single lane can't monopolize
+ * a tick's admission slots. Within a lane the original order is preserved; lanes
+ * rotate in first-seen order, which (because the input is priority-ordered) is
+ * highest-priority-lane first — so the globally top item still leads (North Star
+ * preserved) while the following slots spread across other lanes.
+ *
+ * Single-lane (or empty) input is returned unchanged: the greedy order already
+ * has nothing to be fair about. Pure + deterministic.
+ */
+export function fairInterleaveByLane(ordered: BacklogItem[]): BacklogItem[] {
+  const lanes = new Map<string, BacklogItem[]>();
+  for (const item of ordered) {
+    const key = laneKeyOf(item);
+    const bucket = lanes.get(key);
+    if (bucket) bucket.push(item);
+    else lanes.set(key, [item]);
+  }
+  if (lanes.size <= 1) return [...ordered];
+
+  const buckets = [...lanes.values()];
+  const out: BacklogItem[] = [];
+  while (out.length < ordered.length) {
+    for (const bucket of buckets) {
+      const next = bucket.shift();
+      if (next) out.push(next);
+    }
+  }
+  return out;
+}
+
+/** READY-fuel shape used by the daemon's parallel-fuel floor. */
+export function readyFuel(ready: BacklogItem[]): { total: number; lanes: number } {
+  return { total: ready.length, lanes: new Set(ready.map(laneKeyOf)).size };
+}
+
+/**
+ * Parallel-fuel floor. The daemon refuels (auto-flesh) when READY fuel is short
+ * EITHER in total OR across distinct lanes — so an unattended run keeps not just
+ * "enough ready items" but "enough ready items spread across lanes" to feed the
+ * parallel pool. `minReadyLanes <= 1` makes the lane floor a no-op (total-only).
+ */
+export function needsRefuel(
+  ready: BacklogItem[],
+  opts: { minReadyFuel: number; minReadyLanes: number },
+): boolean {
+  const { total, lanes } = readyFuel(ready);
+  return total < opts.minReadyFuel || lanes < opts.minReadyLanes;
 }

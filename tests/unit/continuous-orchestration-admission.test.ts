@@ -1,7 +1,13 @@
 // Pure guardrail core: ordering, cadence, admission, stall detection.
 
 import { describe, it, expect } from "vitest";
-import { orderCandidates } from "../../src/continuous-orchestration/selection.js";
+import {
+  orderCandidates,
+  fairInterleaveByLane,
+  needsRefuel,
+  readyFuel,
+  laneKeyOf,
+} from "../../src/continuous-orchestration/selection.js";
 import { isLoadPoint, tickAdmitLimit, localHHmm } from "../../src/continuous-orchestration/cadence.js";
 import { planAdmission, evaluateStall, type AdmissionContext } from "../../src/continuous-orchestration/admission.js";
 import { defaultConfig } from "../../src/continuous-orchestration/config.js";
@@ -61,6 +67,120 @@ describe("orderCandidates", () => {
     const ns = item({ item_id: "ns", priority: 9, is_north_star: true });
     const ordered = orderCandidates([a, b, c, ns]).map((i) => i.item_id);
     expect(ordered).toEqual(["ns", "c", "b", "a"]); // ns first; c before b (older); a last (pri 3)
+  });
+});
+
+describe("laneKeyOf", () => {
+  it("treats equal write_scope sets as one lane regardless of order", () => {
+    expect(laneKeyOf(item({ write_scope: ["a", "b"] }))).toBe(laneKeyOf(item({ write_scope: ["b", "a"] })));
+  });
+  it("buckets scope-less items under a single shared lane", () => {
+    expect(laneKeyOf(item({ write_scope: [] }))).toBe(laneKeyOf(item({ write_scope: [] })));
+    expect(laneKeyOf(item({ write_scope: [] }))).not.toBe(laneKeyOf(item({ write_scope: ["x"] })));
+  });
+});
+
+describe("fairInterleaveByLane", () => {
+  it("returns single-lane input unchanged", () => {
+    const items = [
+      item({ item_id: "a", write_scope: ["repo/x"] }),
+      item({ item_id: "b", write_scope: ["repo/x"] }),
+    ];
+    expect(fairInterleaveByLane(items).map((i) => i.item_id)).toEqual(["a", "b"]);
+  });
+
+  it("round-robins across lanes so one lane can't monopolize the prefix", () => {
+    // Priority order: 3 from lane A, then 1 from lane B.
+    const ordered = [
+      item({ item_id: "a1", write_scope: ["A"] }),
+      item({ item_id: "a2", write_scope: ["A"] }),
+      item({ item_id: "a3", write_scope: ["A"] }),
+      item({ item_id: "b1", write_scope: ["B"] }),
+    ];
+    // B surfaces in slot 2 instead of being buried behind all of A.
+    expect(fairInterleaveByLane(ordered).map((i) => i.item_id)).toEqual(["a1", "b1", "a2", "a3"]);
+  });
+
+  it("preserves the globally-top item (North Star stays first) + within-lane order", () => {
+    const ns = item({ item_id: "ns", write_scope: ["A"], is_north_star: true });
+    const ordered = orderCandidates([
+      item({ item_id: "a2", write_scope: ["A"], priority: 5 }),
+      item({ item_id: "b1", write_scope: ["B"], priority: 2 }),
+      ns,
+    ]);
+    const fair = fairInterleaveByLane(ordered).map((i) => i.item_id);
+    expect(fair[0]).toBe("ns"); // North Star still leads
+    expect(fair).toEqual(["ns", "b1", "a2"]); // lane A: ns before a2 preserved
+  });
+
+  it("is a no-op for empty input", () => {
+    expect(fairInterleaveByLane([])).toEqual([]);
+  });
+});
+
+describe("admission picks lane-diverse items (fair order + pool gate)", () => {
+  const cfg = { ...defaultConfig(), max_in_flight: 5 };
+  const lanePool = (over: Partial<AdmissionContext> = {}): Partial<AdmissionContext> => ({
+    pool_for: (it) => laneKeyOf(it), // each lane is its own pool (capacity-gated, not single-writer)
+    pool_free_slots: new Map([
+      [laneKeyOf(item({ write_scope: ["A"] })), 9],
+      [laneKeyOf(item({ write_scope: ["B"] })), 9],
+    ]),
+    pool_free_builders: new Map([
+      [laneKeyOf(item({ write_scope: ["A"] })), ["ra1", "ra2", "ra3"]],
+      [laneKeyOf(item({ write_scope: ["B"] })), ["rb1", "rb2", "rb3"]],
+    ]),
+    ...over,
+  });
+
+  it("admits one item per lane under a slot cap (vs raw greedy = same-lane)", () => {
+    const items = [
+      item({ item_id: "a1", write_scope: ["A"] }),
+      item({ item_id: "a2", write_scope: ["A"] }),
+      item({ item_id: "a3", write_scope: ["A"] }),
+      item({ item_id: "b1", write_scope: ["B"] }),
+    ];
+    // Raw greedy order would admit two from lane A.
+    const greedy = planAdmission(items, ctx({ admit_limit: 2, ...lanePool() }), cfg);
+    expect(greedy.admit.map((i) => i.item_id)).toEqual(["a1", "a2"]);
+    // Fair order admits one from each lane — lane-diverse.
+    const fair = planAdmission(fairInterleaveByLane(items), ctx({ admit_limit: 2, ...lanePool() }), cfg);
+    expect(fair.admit.map((i) => i.item_id)).toEqual(["a1", "b1"]);
+  });
+});
+
+describe("parallel-fuel floor (needsRefuel / readyFuel)", () => {
+  it("readyFuel counts total + distinct lanes", () => {
+    const ready = [
+      item({ write_scope: ["A"] }),
+      item({ write_scope: ["A"] }),
+      item({ write_scope: ["B"] }),
+    ];
+    expect(readyFuel(ready)).toEqual({ total: 3, lanes: 2 });
+  });
+
+  it("refuels when total fuel is short", () => {
+    const ready = [item({ write_scope: ["A"] })];
+    expect(needsRefuel(ready, { minReadyFuel: 8, minReadyLanes: 1 })).toBe(true);
+  });
+
+  it("refuels when lane diversity is short even if the total is fine", () => {
+    const ready = Array.from({ length: 10 }, () => item({ write_scope: ["A"] }));
+    // total 10 >= 8, but only 1 lane < 2 required → still refuel.
+    expect(needsRefuel(ready, { minReadyFuel: 8, minReadyLanes: 2 })).toBe(true);
+  });
+
+  it("does NOT refuel when both total and lane floors are satisfied", () => {
+    const ready = [
+      ...Array.from({ length: 5 }, () => item({ write_scope: ["A"] })),
+      ...Array.from({ length: 5 }, () => item({ write_scope: ["B"] })),
+    ];
+    expect(needsRefuel(ready, { minReadyFuel: 8, minReadyLanes: 2 })).toBe(false);
+  });
+
+  it("lane floor of 1 is a no-op (total-only refuel)", () => {
+    const ready = Array.from({ length: 10 }, () => item({ write_scope: ["A"] }));
+    expect(needsRefuel(ready, { minReadyFuel: 8, minReadyLanes: 1 })).toBe(false);
   });
 });
 

@@ -14,7 +14,7 @@ import crypto from "node:crypto";
 import type { DbAdapter } from "../db/db-adapter.js";
 import type { ContinuousOrchestrationConfig } from "./config.js";
 import type { BacklogItem, DecisionRecord, OrchestrationMode, ReadinessState, UsageGateView } from "./types.js";
-import { orderCandidates } from "./selection.js";
+import { fairInterleaveByLane, needsRefuel, orderCandidates } from "./selection.js";
 import { tickAdmitLimit } from "./cadence.js";
 import { planAdmission, evaluateStall, type AdmissionContext } from "./admission.js";
 import {
@@ -180,7 +180,10 @@ export class ContinuousOrchestrationDaemon {
 
     const ready = await listReadyItems(this.deps.adapter, this.teamId);
     const done_item_ids = await listDoneItemIds(this.deps.adapter, this.teamId);
-    const ordered = orderCandidates(ready);
+    // Priority-rank, then FAIR-interleave across distinct write_scope lanes so a
+    // single busy lane can't monopolize this tick's admission slots — admission
+    // consumes this order greedily, so a lane-diverse order => lane-diverse fires.
+    const ordered = fairInterleaveByLane(orderCandidates(ready));
 
     // Stage C: compute the per-pool capacity + free-builder gate from the
     // current in-flight builds, so the daemon spills across pool members instead
@@ -474,7 +477,13 @@ export class ContinuousOrchestrationDaemon {
     // below threshold — not only at the 3 batch load-points. Low ready-fuel
     // auto-promotes+fleshes backlog items into READY as the daemon drains them,
     // so an unattended run never starves after the initial ready items.
-    if (ready.length >= config.min_ready_fuel) return null;
+    //
+    // ADMISSION-V2 parallel-fuel floor: also refuel when READY spans too FEW
+    // distinct lanes (even if the total is fine) so the parallel pool stays fed
+    // across lanes, not just in aggregate.
+    if (!needsRefuel(ready, { minReadyFuel: config.min_ready_fuel, minReadyLanes: config.min_ready_lanes })) {
+      return null;
+    }
 
     const remaining = Math.max(0, config.daily_token_ceiling - args.dailyTokensUsed);
     try {

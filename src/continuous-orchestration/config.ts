@@ -37,8 +37,15 @@ export interface ContinuousOrchestrationConfig {
   // ── Daemon SELF-REFUEL (auto-flesh) ──
   /** Master switch for auto-flesh. False = daemon never fleshes. Default false. */
   auto_flesh_enabled: boolean;
-  /** Run flesh at a load-point only when READY fuel drops below this. Default 8. */
+  /** Refuel when total READY fuel drops below this. Default 8. */
   min_ready_fuel: number;
+  /**
+   * Parallel-fuel floor: refuel when READY items span FEWER than this many
+   * distinct lanes (write_scopes), independent of the total. Keeps the parallel
+   * pool fed across lanes, not just in aggregate. Default 1 (lane floor off —
+   * total-only refuel; raise to demand lane-diverse fuel).
+   */
+  min_ready_lanes: number;
   /** Max skeletons fleshed per refuel pass. Default 5. */
   max_flesh_per_tick: number;
   /** Weekly daemon-attributed ceiling (the emergency-brake companion to daily). */
@@ -125,6 +132,7 @@ export function defaultConfig(): ContinuousOrchestrationConfig {
     kill_switch_path: DEFAULT_KILL_SWITCH_PATH,
     auto_flesh_enabled: false,
     min_ready_fuel: 8,
+    min_ready_lanes: 1,
     max_flesh_per_tick: 5,
     weekly_token_ceiling: 25_000_000,
     fail_closed_on_attribution: false,
@@ -155,6 +163,7 @@ export function loadContinuousOrchestrationConfig(
     kill_switch_path: env.CONTINUOUS_ORCHESTRATION_KILL_SWITCH || d.kill_switch_path,
     auto_flesh_enabled: envBool(env.CONTINUOUS_ORCHESTRATION_AUTO_FLESH_ENABLED, d.auto_flesh_enabled),
     min_ready_fuel: envInt(env.CONTINUOUS_ORCHESTRATION_MIN_READY_FUEL, d.min_ready_fuel),
+    min_ready_lanes: envInt(env.CONTINUOUS_ORCHESTRATION_MIN_READY_LANES, d.min_ready_lanes),
     max_flesh_per_tick: envInt(env.CONTINUOUS_ORCHESTRATION_MAX_FLESH_PER_TICK, d.max_flesh_per_tick),
     weekly_token_ceiling: envInt(env.CONTINUOUS_ORCHESTRATION_WEEKLY_CEILING, d.weekly_token_ceiling),
     fail_closed_on_attribution: envBool(

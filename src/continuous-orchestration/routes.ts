@@ -87,7 +87,12 @@ export function mountContinuousOrchestrationRoutes(app: Application, opts: Orche
           unfleshed: fleshCounts.unfleshed ?? 0,
           auto_fleshed_today: autoFleshedToday,
         },
-        flesh: { enabled: config.auto_flesh_enabled, min_ready_fuel: config.min_ready_fuel, by_status: fleshCounts },
+        flesh: {
+          enabled: config.auto_flesh_enabled,
+          min_ready_fuel: config.min_ready_fuel,
+          min_ready_lanes: config.min_ready_lanes,
+          by_status: fleshCounts,
+        },
       });
     } catch (err) {
       res.status(500).json({ ok: false, error: err instanceof Error ? err.message : String(err) });
