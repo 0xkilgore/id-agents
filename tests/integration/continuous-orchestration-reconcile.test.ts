@@ -124,17 +124,105 @@ describe("completion reconciliation — terminal dispatch releases the lock", ()
     expect(await listBacklogByState(adapter, { state: "in_flight" })).toHaveLength(0);
   });
 
-  it("leaves an ACTIVE (non-terminal) dispatch in_flight even when stale-aged", async () => {
-    const item = await seedInFlight({ dispatch_phid: "phid:disp-active" });
-    await seedDispatch("phid:disp-active", "active");
+  it("leaves a FRESH non-terminal dispatch in_flight (a live build within the window)", async () => {
+    const item = await seedInFlight({ dispatch_phid: "phid:disp-live" });
+    await seedDispatch("phid:disp-live", "in_flight"); // resolvable, non-terminal, RUNNING
+    await backdateUpdatedAt(item.item_id, new Date(BASE).toISOString());
 
-    // now far past the stale window — active dispatches are the scheduler's to
-    // recover; reaping one would double-fire, so it must stay in_flight.
-    const { daemon } = makeDaemon({ nowMs: BASE + 60 * 60_000 });
+    // Only 5m old — a live build the scheduler owns; must NOT be reaped.
+    const { daemon } = makeDaemon({ config: { stale_in_flight_ms: 30 * 60_000 }, nowMs: BASE + 5 * 60_000 });
     const tick = await daemon.runTick();
 
     expect(tick.reconciled).toBe(0);
     expect((await getBacklogItem(adapter, item.item_id))!.readiness_state).toBe("in_flight");
+  });
+
+  it("REAPS a stale RESOLVABLE-but-non-terminal (stuck/zombie) dispatch — the strangle case", async () => {
+    // A dispatch that stayed `in_flight` because its worker died/parked and the
+    // scheduler never recovered it. Previously left in_flight forever (lock held);
+    // now released once past the stale window.
+    const item = await seedInFlight({ dispatch_phid: "phid:disp-zombie" });
+    await seedDispatch("phid:disp-zombie", "in_flight");
+    await backdateUpdatedAt(item.item_id, new Date(BASE).toISOString());
+
+    const { daemon } = makeDaemon({ config: { stale_in_flight_ms: 30 * 60_000 }, nowMs: BASE + 31 * 60_000 });
+    const tick = await daemon.runTick();
+
+    expect(tick.reconciled).toBe(1);
+    expect((await getBacklogItem(adapter, item.item_id))!.readiness_state).toBe("needs_review");
+  });
+});
+
+// ── POOL path (Stage C): each build holds a DISTINCT worktree write_scope.
+//    A dead pool worker's dispatch frequently never reaches terminal, so the
+//    backlog item would otherwise hold its pool slot + worktree lock forever.
+describe("POOL builds — completion + zombie reaping frees the pool slot", () => {
+  /** Seed a pool-shaped in_flight build: a distinct worktree write_scope + a pool builder. */
+  async function seedPoolBuild(phid: string, agent: string, worktree: string) {
+    return seedInFlight({ dispatch_phid: phid, to_agent: agent, write_scope: [worktree] });
+  }
+
+  it("a completed pool build (dispatch done) reconciles out of in_flight automatically", async () => {
+    const build = await seedPoolBuild("phid:disp-pool-done", "hopper", "/repo/.worktrees/hopper-a");
+    await seedDispatch("phid:disp-pool-done", "done");
+
+    const { daemon } = makeDaemon();
+    const tick = await daemon.runTick();
+
+    expect(tick.reconciled).toBe(1);
+    expect((await getBacklogItem(adapter, build.item_id))!.readiness_state).toBe("done");
+    expect(await listBacklogByState(adapter, { state: "in_flight" })).toHaveLength(0);
+  });
+
+  it("a dead pool worker (dispatch stuck in_flight) is reaped; a fresh sibling build is left running", async () => {
+    const dead = await seedPoolBuild("phid:disp-pool-dead", "hopper", "/repo/.worktrees/hopper-dead");
+    const live = await seedPoolBuild("phid:disp-pool-live", "brunel", "/repo/.worktrees/brunel-live");
+    await seedDispatch("phid:disp-pool-dead", "in_flight"); // worker died, dispatch never terminalized
+    await seedDispatch("phid:disp-pool-live", "in_flight"); // genuinely building
+    await backdateUpdatedAt(dead.item_id, new Date(BASE).toISOString());           // stale
+    await backdateUpdatedAt(live.item_id, new Date(BASE + 28 * 60_000).toISOString()); // fresh
+
+    const { daemon } = makeDaemon({ config: { stale_in_flight_ms: 30 * 60_000 }, nowMs: BASE + 31 * 60_000 });
+    const tick = await daemon.runTick();
+
+    // Only the dead build's slot is freed; the live sibling keeps its distinct worktree lock.
+    expect(tick.reconciled).toBe(1);
+    expect((await getBacklogItem(adapter, dead.item_id))!.readiness_state).toBe("needs_review");
+    expect((await getBacklogItem(adapter, live.item_id))!.readiness_state).toBe("in_flight");
+  });
+
+  it("SOAK — a phantom pool build is reaped with NO manual release, freeing the pool slot the next tick", async () => {
+    const phantom = await seedPoolBuild("phid:disp-pool-phantom", "hopper", "/repo/.worktrees/hopper-x");
+    await seedDispatch("phid:disp-pool-phantom", "in_flight"); // stuck; no worker actually running
+    await backdateUpdatedAt(phantom.item_id, new Date(BASE).toISOString());
+
+    const { daemon } = makeDaemon({ config: { stale_in_flight_ms: 30 * 60_000 }, nowMs: BASE + 45 * 60_000 });
+    const tick = await daemon.runTick();
+
+    // Reaped automatically — no manual release, no interim-reaper assist.
+    expect(tick.reconciled).toBe(1);
+    expect((await getBacklogItem(adapter, phantom.item_id))!.readiness_state).toBe("needs_review");
+    expect(await listBacklogByState(adapter, { state: "in_flight" })).toHaveLength(0);
+  });
+
+  it("reaps a dead POOL build on the short window while a same-aged MAIN-lane build is still protected", async () => {
+    const pool = await seedPoolBuild("phid:disp-pool-fast", "hopper", "/repo/.worktrees/hopper-fast");
+    const main = await seedInFlight({ dispatch_phid: "phid:disp-main-slow", write_scope: ["id-agents"] });
+    await seedDispatch("phid:disp-pool-fast", "in_flight");
+    await seedDispatch("phid:disp-main-slow", "in_flight");
+    await backdateUpdatedAt(pool.item_id, new Date(BASE).toISOString());
+    await backdateUpdatedAt(main.item_id, new Date(BASE).toISOString());
+
+    // 11m old: past the pool window (10m) but within the shared-scope window (30m).
+    const { daemon } = makeDaemon({
+      config: { stale_in_flight_ms: 30 * 60_000, pool_stale_in_flight_ms: 10 * 60_000 },
+      nowMs: BASE + 11 * 60_000,
+    });
+    const tick = await daemon.runTick();
+
+    expect(tick.reconciled).toBe(1);
+    expect((await getBacklogItem(adapter, pool.item_id))!.readiness_state).toBe("needs_review"); // pool reaped fast
+    expect((await getBacklogItem(adapter, main.item_id))!.readiness_state).toBe("in_flight");    // main still protected
   });
 });
 

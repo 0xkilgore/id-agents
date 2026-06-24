@@ -24,10 +24,16 @@ export interface ContinuousOrchestrationConfig {
   /** Tick cadence in ms (the lane-fill heartbeat between batch load-points). */
   tick_interval_ms: number;
   /** Reaper safety net: an item stuck `in_flight` longer than this whose
-   *  dispatch is unresolvable (missing row / null phid) is auto-released so its
-   *  write-scope lock cannot strangle the lane forever. Default 30min. Terminal
-   *  dispatches are reconciled immediately every tick regardless of this. */
+   *  dispatch is NON-TERMINAL (stuck/zombie OR unresolvable) is auto-released so
+   *  its write-scope lock cannot strangle the lane forever. Default 30min — long
+   *  enough that a genuinely-live SHARED-scope (single-writer) build is never
+   *  reaped mid-run. Terminal dispatches are reconciled immediately regardless. */
   stale_in_flight_ms: number;
+  /** Shorter reaper window for POOL builds — items whose write_scope is a
+   *  DISTINCT worktree (Stage C). Reaping one of these can never collide with
+   *  another build's scope, so a dead pool worker is safe to reap fast ("within
+   *  minutes"). Default 10min. */
+  pool_stale_in_flight_ms: number;
   /** Batch load-points (local HH:mm) where new backlog admission opens wide. */
   cadence_load_points: string[];
   /** IANA tz the load-points + ceiling-day are evaluated in. */
@@ -127,6 +133,7 @@ export function defaultConfig(): ContinuousOrchestrationConfig {
     stall_threshold_ticks: 3,
     tick_interval_ms: 60_000,
     stale_in_flight_ms: 1_800_000,
+    pool_stale_in_flight_ms: 600_000,
     cadence_load_points: ["07:15", "12:30", "15:30"],
     timezone: "America/Chicago",
     kill_switch_path: DEFAULT_KILL_SWITCH_PATH,
@@ -156,6 +163,7 @@ export function loadContinuousOrchestrationConfig(
     stall_threshold_ticks: envInt(env.CONTINUOUS_ORCHESTRATION_STALL_THRESHOLD_TICKS, d.stall_threshold_ticks),
     tick_interval_ms: envInt(env.CONTINUOUS_ORCHESTRATION_TICK_INTERVAL_MS, d.tick_interval_ms),
     stale_in_flight_ms: envInt(env.CONTINUOUS_ORCHESTRATION_STALE_IN_FLIGHT_MS, d.stale_in_flight_ms),
+    pool_stale_in_flight_ms: envInt(env.CONTINUOUS_ORCHESTRATION_POOL_STALE_IN_FLIGHT_MS, d.pool_stale_in_flight_ms),
     cadence_load_points: loadPoints
       ? loadPoints.split(",").map((s) => s.trim()).filter(Boolean)
       : d.cadence_load_points,

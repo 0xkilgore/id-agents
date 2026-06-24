@@ -362,6 +362,7 @@ export class ContinuousOrchestrationDaemon {
       ? await this.deps.resolveDispatchStates(phids)
       : new Map<string, string>();
     const staleMs = this.deps.config.stale_in_flight_ms;
+    const poolStaleMs = this.deps.config.pool_stale_in_flight_ms;
     const out: DecisionRecord[] = [];
 
     for (const item of items) {
@@ -375,14 +376,35 @@ export class ContinuousOrchestrationDaemon {
         toState = status === "done" ? "done" : status === "cancelled" ? "cancelled" : "needs_review";
         via = "completion";
         reason = `dispatch ${status} → ${toState} (lock released)`;
-      } else if (!status) {
-        // Unresolvable dispatch (missing row / null phid): only the time-bounded
-        // reaper may release it, so a live-but-unreadable dispatch isn't reaped early.
+      } else {
+        // Non-terminal: either RESOLVABLE-but-stuck (the dispatch is still
+        // in_flight/queued/needs_clarification because its worker died, was killed,
+        // or is parked, and the scheduler isn't recovering it) OR UNRESOLVABLE
+        // (pruned/missing row, null phid). Both are PHANTOM LOCKS once aged out.
+        // This is the build-POOL strangle: Stage C routes each build to its own
+        // worktree, and a dead pool worker's dispatch frequently never reaches a
+        // terminal status — so without this it would hold its pool slot +
+        // write-scope lock forever (the recurring "pool capacity full / single-
+        // writer lane busy with nothing running" failure). Previously only the
+        // UNRESOLVABLE branch reaped; resolvable-but-stuck zombies were left.
+        //
+        // The stale window is the safety: a genuinely-live build completes (or its
+        // worker stays alive, refreshing progress) well within it, so only
+        // phantoms are reaped. Release to needs_review — a human/approval gate,
+        // NEVER an auto-refire, so a reaped-but-secretly-live build cannot
+        // double-fire; and pool builds hold DISTINCT worktree write-scopes, so
+        // freeing one lock can never collide with another build's scope.
+        // A POOL build holds a DISTINCT worktree write_scope (Stage C late-binds
+        // `write_scope: [wt.path]`), so reaping it can never collide with another
+        // build — it's safe to reap fast. The shared-scope (single-writer) lane
+        // keeps the long window so a live build is never reaped mid-run.
+        const isPoolBuild = item.write_scope.some((s) => s.includes("/.worktrees/"));
+        const window = isPoolBuild ? poolStaleMs : staleMs;
         const ageMs = nowMs - Date.parse(item.updated_at);
-        if (Number.isFinite(ageMs) && ageMs > staleMs) {
+        if (Number.isFinite(ageMs) && ageMs > window) {
           toState = "needs_review";
           via = "reaper";
-          reason = `stale in_flight ${Math.round(ageMs / 60_000)}m, dispatch unresolvable → needs_review`;
+          reason = `stale ${isPoolBuild ? "pool " : ""}in_flight ${Math.round(ageMs / 60_000)}m, dispatch ${status ?? "unresolvable"} (non-terminal) → needs_review (phantom lock released)`;
         }
       }
 
