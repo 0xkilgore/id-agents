@@ -3,7 +3,13 @@
 import { describe, it, expect } from "vitest";
 import express, { type Express } from "express";
 import { buildSuggestPrompt, suggestNextStep } from "../../src/suggest/service.js";
-import { mountSuggestRoutes } from "../../src/suggest/routes.js";
+import {
+  mountSuggestRoutes,
+  parseSuggestRuntimeFlag,
+  selectSuggestRuntime,
+  type CursorHealthProbe,
+} from "../../src/suggest/routes.js";
+import { createCursorCliLlmComplete } from "../../src/suggest/llm-cursor-cli.js";
 import { LlmUnavailableError, type LlmComplete } from "../../src/suggest/types.js";
 
 const fakeLlm = (text: string, model = "anthropic/claude-opus-4-8"): LlmComplete =>
@@ -143,5 +149,138 @@ describe("POST /suggest-next-step", () => {
     const { status, body } = await call(app, { text: "do x" });
     expect(status).toBe(502);
     expect(body.error).toBe("suggest_failed");
+  });
+});
+
+// ── cursor-cli runtime lane ──
+
+describe("parseSuggestRuntimeFlag", () => {
+  it("defaults to openrouter", () => {
+    expect(parseSuggestRuntimeFlag({})).toBe("openrouter");
+    expect(parseSuggestRuntimeFlag({ SUGGEST_NEXT_STEP_RUNTIME: "" })).toBe("openrouter");
+    expect(parseSuggestRuntimeFlag({ SUGGEST_NEXT_STEP_RUNTIME: "openrouter" })).toBe("openrouter");
+  });
+
+  it("selects cursor-cli for cursor-cli / cursor (case-insensitive)", () => {
+    expect(parseSuggestRuntimeFlag({ SUGGEST_NEXT_STEP_RUNTIME: "cursor-cli" })).toBe("cursor-cli");
+    expect(parseSuggestRuntimeFlag({ SUGGEST_NEXT_STEP_RUNTIME: "Cursor" })).toBe("cursor-cli");
+    expect(parseSuggestRuntimeFlag({ SUGGEST_NEXT_STEP_RUNTIME: " CURSOR-CLI " })).toBe("cursor-cli");
+  });
+});
+
+describe("selectSuggestRuntime", () => {
+  it("routes to cursor-cli only when flagged AND cursor is live", () => {
+    expect(selectSuggestRuntime("cursor-cli", "live")).toBe("cursor-cli");
+  });
+
+  it("auto-excludes a degraded/unavailable host (falls back to openrouter)", () => {
+    expect(selectSuggestRuntime("cursor-cli", "degraded")).toBe("openrouter");
+    expect(selectSuggestRuntime("cursor-cli", "unavailable")).toBe("openrouter");
+    expect(selectSuggestRuntime("cursor-cli", null)).toBe("openrouter");
+  });
+
+  it("stays on openrouter when the flag is off, regardless of health", () => {
+    expect(selectSuggestRuntime("openrouter", "live")).toBe("openrouter");
+  });
+});
+
+describe("createCursorCliLlmComplete", () => {
+  it("shells cursor-agent with --print/text/-f and a pinned model, returning the trimmed text", async () => {
+    const calls: Array<{ file: string; args: string[] }> = [];
+    const complete = createCursorCliLlmComplete({
+      env: {},
+      execFile: async (file, args) => {
+        calls.push({ file, args });
+        return { stdout: "  Open the file and add the handler.\n", stderr: "" };
+      },
+    });
+    const r = await complete("the prompt");
+    expect(r.text).toBe("Open the file and add the handler.");
+    expect(r.provider).toBe("cursor-cli");
+    expect(r.model).toBe("sonnet-4");
+    expect(calls).toHaveLength(1);
+    expect(calls[0].args).toEqual(["--print", "--output-format", "text", "-f", "--model", "sonnet-4", "the prompt"]);
+  });
+
+  it("honors a model override and CURSOR_AGENT_PATH", async () => {
+    let usedFile = "";
+    let usedArgs: string[] = [];
+    const complete = createCursorCliLlmComplete({
+      env: { CURSOR_AGENT_PATH: "/opt/cursor-agent", SUGGEST_NEXT_STEP_CURSOR_MODEL: "gpt-5.2" },
+      execFile: async (file, args) => {
+        usedFile = file;
+        usedArgs = args;
+        return { stdout: "ok", stderr: "" };
+      },
+    });
+    await complete("p");
+    expect(usedFile).toBe("/opt/cursor-agent");
+    expect(usedArgs).toContain("gpt-5.2");
+  });
+
+  it("maps a spawn failure to LlmUnavailableError", async () => {
+    const complete = createCursorCliLlmComplete({
+      env: {},
+      execFile: async () => {
+        throw new Error("spawn cursor-agent ENOENT");
+      },
+    });
+    await expect(complete("p")).rejects.toBeInstanceOf(LlmUnavailableError);
+  });
+
+  it("treats empty stdout as unavailable", async () => {
+    const complete = createCursorCliLlmComplete({
+      env: {},
+      execFile: async () => ({ stdout: "   ", stderr: "" }),
+    });
+    await expect(complete("p")).rejects.toBeInstanceOf(LlmUnavailableError);
+  });
+});
+
+describe("POST /suggest-next-step — flag-gated cursor-cli", () => {
+  const cursorLlm: LlmComplete = async () => ({
+    text: "Pin the model and re-run.",
+    model: "sonnet-4",
+    provider: "cursor-cli",
+  });
+
+  function appWithRuntime(env: NodeJS.ProcessEnv, cursorStatus: CursorHealthProbe): Express {
+    const app = express();
+    app.use(express.json());
+    mountSuggestRoutes(app, {
+      env,
+      llmComplete: fakeLlm("openrouter answer"),
+      cursorLlmComplete: cursorLlm,
+      checkCursorHealth: cursorStatus,
+      now: () => new Date("2026-06-23T00:00:00Z"),
+    });
+    return app;
+  }
+
+  it("routes through cursor-cli when flagged and the host is live", async () => {
+    const app = appWithRuntime({ SUGGEST_NEXT_STEP_RUNTIME: "cursor-cli" }, async () => "live");
+    const { status, body } = await call(app, { text: "do x" });
+    expect(status).toBe(200);
+    expect(body.provider).toBe("cursor-cli");
+    expect(body.suggestion).toBe("Pin the model and re-run.");
+  });
+
+  it("falls back to openrouter when the host is degraded", async () => {
+    const app = appWithRuntime({ SUGGEST_NEXT_STEP_RUNTIME: "cursor-cli" }, async () => "degraded");
+    const { status, body } = await call(app, { text: "do x" });
+    expect(status).toBe(200);
+    expect(body.provider).toBe("openrouter");
+  });
+
+  it("stays on openrouter when the flag is off (cursor health never probed)", async () => {
+    let probed = false;
+    const app = appWithRuntime({}, async () => {
+      probed = true;
+      return "live";
+    });
+    const { status, body } = await call(app, { text: "do x" });
+    expect(status).toBe(200);
+    expect(body.provider).toBe("openrouter");
+    expect(probed).toBe(false);
   });
 });
