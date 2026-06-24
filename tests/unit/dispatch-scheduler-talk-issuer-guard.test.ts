@@ -35,7 +35,7 @@ const ALLOWLIST: Issuer[] = [
   // ─── Manager production code: candidates for Phase 4 migration ───
   {
     file: "src/agent-manager-db.ts",
-    line: 1793,
+    line: 1799,
     category: "MUST_MIGRATE",
     note: "forwardToAgent() — primary /talk-to dispatch path (now gateway-routed via DISPATCH_GATEWAY_MODE; legacy retained for shadow + fallback)",
   },
@@ -47,7 +47,7 @@ const ALLOWLIST: Issuer[] = [
   },
   {
     file: "src/agent-manager-db.ts",
-    line: 9147,
+    line: 9142,
     category: "MUST_MIGRATE",
     note: "agent heartbeat reseed — immediate /talk send",
   },
@@ -85,7 +85,7 @@ const ALLOWLIST: Issuer[] = [
   // ─── Probe/test helpers: intentionally outside the gateway ───
   {
     file: "src/agent-manager-db.ts",
-    line: 7108,
+    line: 7103,
     category: "PROBE_OR_TEST",
     note: "agent probe — end-to-end health probe by design",
   },

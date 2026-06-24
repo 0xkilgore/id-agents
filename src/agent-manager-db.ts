@@ -27,6 +27,12 @@ import { defaultDeliverFn, redactSshTarget, type DeliverFn } from './lib/ssh-del
 import { probeRemoteAgent, defaultHealthProbeFn, type HealthProbeFn } from './lib/remote-heartbeat.js';
 import { filterClaudeEnvVars } from './lib/env-hygiene.js';
 import { buildTasksEntriesEnvelope, taskRowToEntry } from './tasks-readmodel/entry-projection.js';
+import {
+  buildTaskRow,
+  draftFromAutoAttach,
+  draftFromManagerApi,
+  draftFromScheduleDerived,
+} from './tasks-readmodel/task-draft.js';
 import { resolveTrack } from './track-registry/registry.js';
 import { assembleAgentDetail } from './agent-detail/assemble.js';
 import { resolveManagerNode } from './lib/native-node.js';
@@ -2164,22 +2170,16 @@ export class AgentManagerDb {
       }
     }
 
-    const nowSec = Math.floor(Date.now() / 1000);
-    const taskRow: TaskRow = {
-      id: `task_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`,
-      name,
-      uuid: crypto.randomUUID(),
-      team_id: teamId,
-      title: taskSpec.title,
-      description: typeof taskSpec.description === 'string' ? taskSpec.description : null,
-      status: 'doing',
-      created_by: fromAgent?.id ?? null,
-      owner: targetAgent.id,
-      created_at: nowSec,
-      updated_at: nowSec,
-      completed_at: null,
-      track: '(unassigned)',
-    };
+    const taskRow: TaskRow = buildTaskRow(
+      draftFromAutoAttach({
+        name,
+        team_id: teamId,
+        title: taskSpec.title,
+        description: typeof taskSpec.description === 'string' ? taskSpec.description : null,
+        created_by: fromAgent?.id ?? null,
+        owner: targetAgent.id,
+      }),
+    );
     await this.db.tasks.create(taskRow);
 
     if (flagsResult.disabled) {
@@ -6387,22 +6387,17 @@ export class AgentManagerDb {
           name = candidate;
         }
 
-        const now = Math.floor(Date.now() / 1000);
-        const taskRow: TaskRow = {
-          id: `task_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`,
-          name,
-          uuid: crypto.randomUUID(),
-          team_id: taskTeamId,
-          title,
-          description: description || null,
-          status: 'todo',
-          created_by: createdBy,
-          owner: null,
-          created_at: now,
-          updated_at: now,
-          completed_at: null,
-          track,
-        };
+        const taskRow: TaskRow = buildTaskRow(
+          draftFromManagerApi({
+            name,
+            team_id: taskTeamId,
+            title,
+            description: description || null,
+            created_by: createdBy,
+            owner: null,
+            track,
+          }),
+        );
 
         await this.db.tasks.create(taskRow);
         res.status(201).json({ ok: true, task: await this.buildTaskResult(taskRow, teamId) });
@@ -9601,8 +9596,6 @@ export class AgentManagerDb {
             if (sDef.kind !== 'calendar') return { ok: false, error: `Schedule "${eid}" is not a calendar event (kind: ${sDef.kind})` };
           }
 
-          const now = Math.floor(Date.now() / 1000);
-          const status = ownerId ? 'doing' : 'todo';
           // Resolve created_by from callerFrom if present
           let createdBy: string | null = null;
           if (callerFrom) {
@@ -9610,21 +9603,17 @@ export class AgentManagerDb {
             if (callerAgent) createdBy = callerAgent.id;
           }
 
-          const taskRow: TaskRow = {
-            id: `task_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`,
-            name,
-            uuid: crypto.randomUUID(),
-            team_id: taskTeamId,
-            title,
-            description: description || null,
-            status,
-            created_by: createdBy,
-            owner: ownerId,
-            created_at: now,
-            updated_at: now,
-            completed_at: null,
-            track,
-          };
+          const taskRow: TaskRow = buildTaskRow(
+            draftFromScheduleDerived({
+              name,
+              team_id: taskTeamId,
+              title,
+              description: description || null,
+              created_by: createdBy,
+              owner: ownerId,
+              track,
+            }),
+          );
 
           await this.db.tasks.create(taskRow, eventIds.length > 0 ? eventIds : undefined);
 

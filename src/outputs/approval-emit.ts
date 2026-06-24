@@ -23,10 +23,11 @@
 // Regina's decisions adapter parses this. Adding new fields is
 // backwards-compatible; renaming or removing one is a breaking change.
 
-import { createHash, randomUUID } from "node:crypto";
+import { createHash } from "node:crypto";
 import type { DbAdapter } from "../db/db-adapter.js";
 import type { TasksRepository } from "../db/db-service.js";
 import type { TaskRow } from "../db/types.js";
+import { buildTaskRow, draftFromDispatchApproval } from "../tasks-readmodel/task-draft.js";
 
 export const APPROVAL_PAYLOAD_SCHEMA_VERSION = "artifact.approval.v1" as const;
 export const APPROVAL_TASK_NAME_PREFIX = "artifact-approval-" as const;
@@ -113,25 +114,21 @@ export async function emitApprovalTask(
   }
 
   const nowMs = (opts.now ? opts.now() : new Date()).getTime();
-  const row: TaskRow = {
-    id: randomUUID(),
-    name: taskName,
-    uuid: randomUUID(),
-    team_id: opts.input.team_id,
-    title: taskTitle(opts.input),
-    description: taskDescription(opts.input),
-    status: "todo",
-    // tasks.created_by REFERENCES agents(id); the manager service is
-    // not a registered agent, so leave this NULL. The "creator" trace
-    // is preserved in the description payload's schema_version + the
-    // artifact_operations op_id link.
-    created_by: null,
-    owner: null,
-    created_at: nowMs,
-    updated_at: nowMs,
-    completed_at: null,
-    track: "(unassigned)",
-  };
+  // tasks.created_by REFERENCES agents(id); the manager service is not a
+  // registered agent, so created_by stays NULL (the "creator" trace lives in
+  // the description payload's schema_version + the artifact_operations op_id
+  // link). buildTaskRow converges this source onto the canonical schema —
+  // epoch-SECONDS timestamps + `task_<ms>_<rand>` id (it previously wrote ms +
+  // a bare UUID, the lone drift the read-model only tolerated by accident).
+  const row: TaskRow = buildTaskRow(
+    draftFromDispatchApproval({
+      name: taskName,
+      team_id: opts.input.team_id,
+      title: taskTitle(opts.input),
+      description: taskDescription(opts.input),
+    }),
+    { nowMs },
+  );
 
   try {
     await opts.tasks.create(row);
