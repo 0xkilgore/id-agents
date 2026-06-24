@@ -14,10 +14,12 @@ import type { DbAdapter } from "../db/db-adapter.js";
 import type {
   ArtifactAvailability,
   ArtifactCatalogRow,
+  ArtifactDraftRow,
   ArtifactOpRow,
   ArtifactOpType,
   ArtifactReviewStateRow,
   ArtifactSourceEvidenceRow,
+  CaneDraftPayload,
   OutputsInboxRow,
   RegisterArtifactRequest,
 } from "./types.js";
@@ -132,6 +134,20 @@ export async function migrateOutputsTables(adapter: DbAdapter): Promise<void> {
 
   await exec(`CREATE INDEX IF NOT EXISTS artifact_source_evidence_by_artifact ON artifact_source_evidence(artifact_id, source, observed_at DESC)`);
   await exec(`CREATE INDEX IF NOT EXISTS artifact_source_evidence_by_source_ref ON artifact_source_evidence(source, source_ref)`);
+
+  // CANE_DRAFT_ARTIFACTS — typed draft payload side-table, keyed by artifact_id
+  // (one draft per artifact). draft_id is UNIQUE so a re-poll/re-register of the
+  // same Cane draft is an idempotent upsert, never a duplicate row.
+  await exec(`
+    CREATE TABLE IF NOT EXISTS artifact_drafts (
+      artifact_id  TEXT PRIMARY KEY,
+      draft_id     TEXT NOT NULL UNIQUE,
+      payload_json TEXT NOT NULL,
+      created_at   TEXT NOT NULL,
+      updated_at   TEXT NOT NULL
+    )
+  `);
+  await exec(`CREATE INDEX IF NOT EXISTS artifact_drafts_by_draft_id ON artifact_drafts(draft_id)`);
 }
 
 // ── Catalog read/write ────────────────────────────────────────────
@@ -404,6 +420,87 @@ export async function listArtifactSourceEvidence(
   return rows;
 }
 
+// ── Cane draft side-table (CANE_DRAFT_ARTIFACTS) ───────────────────
+
+/** Read the typed draft payload for an artifact, or null. */
+export async function getArtifactDraft(
+  adapter: DbAdapter,
+  artifactId: string,
+): Promise<ArtifactDraftRow | null> {
+  const { rows } = await adapter.query<ArtifactDraftRow>(
+    `SELECT artifact_id, draft_id, payload_json, created_at, updated_at
+       FROM artifact_drafts WHERE artifact_id = ?`,
+    [artifactId],
+  );
+  return rows[0] ?? null;
+}
+
+/** Read a draft row by its stable draft_id (the idempotency anchor), or null. */
+export async function getArtifactDraftByDraftId(
+  adapter: DbAdapter,
+  draftId: string,
+): Promise<ArtifactDraftRow | null> {
+  const { rows } = await adapter.query<ArtifactDraftRow>(
+    `SELECT artifact_id, draft_id, payload_json, created_at, updated_at
+       FROM artifact_drafts WHERE draft_id = ?`,
+    [draftId],
+  );
+  return rows[0] ?? null;
+}
+
+/** Parse a draft row's payload_json into a typed CaneDraftPayload, or null on
+ *  a malformed payload (never throws — the caller treats null as "no draft"). */
+export function parseDraftPayload(row: ArtifactDraftRow | null): CaneDraftPayload | null {
+  if (!row) return null;
+  try {
+    const p = JSON.parse(row.payload_json) as CaneDraftPayload;
+    if (!Array.isArray(p.revision_history)) p.revision_history = [];
+    return p;
+  } catch {
+    return null;
+  }
+}
+
+/** Idempotent upsert of a cane_draft payload keyed by artifact_id. The draft_id
+ *  is UNIQUE; re-registering the same draft_id updates the payload in place
+ *  rather than inserting a duplicate. created_at is set once; updated_at bumps. */
+export async function upsertArtifactDraft(
+  adapter: DbAdapter,
+  artifactId: string,
+  payload: CaneDraftPayload,
+  nowIso: string,
+): Promise<{ row: ArtifactDraftRow; inserted: boolean }> {
+  const existing = await getArtifactDraft(adapter, artifactId);
+  const payloadJson = JSON.stringify(payload);
+  if (!existing) {
+    const row: ArtifactDraftRow = {
+      artifact_id: artifactId,
+      draft_id: payload.draft_id,
+      payload_json: payloadJson,
+      created_at: nowIso,
+      updated_at: nowIso,
+    };
+    await adapter.query(
+      `INSERT INTO artifact_drafts (artifact_id, draft_id, payload_json, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?)`,
+      [row.artifact_id, row.draft_id, row.payload_json, row.created_at, row.updated_at],
+    );
+    return { row, inserted: true };
+  }
+  const row: ArtifactDraftRow = {
+    ...existing,
+    draft_id: payload.draft_id,
+    payload_json: payloadJson,
+    updated_at: nowIso,
+  };
+  await adapter.query(
+    `UPDATE artifact_drafts SET draft_id = ?, payload_json = ?, updated_at = ?
+      WHERE artifact_id = ?`,
+    [row.draft_id, row.payload_json, row.updated_at, row.artifact_id],
+  );
+  return { row, inserted: false };
+}
+
 // ── Read helpers ───────────────────────────────────────────────────
 
 export async function getReviewState(
@@ -474,6 +571,10 @@ export async function listOperations(
 export interface InboxFilters {
   status?: OutputsInboxRow["status"];
   agent?: string;
+  // CANE_DRAFT_ARTIFACTS: when "cane_draft", restrict the inbox to cane_draft
+  // artifacts (those with an artifact_drafts row) AND drop the shipped ones —
+  // a sent draft cannot re-surface (the approve-once-handled invariant).
+  kind?: "cane_draft";
   // when true (default), include artifacts that have no review row yet
   // (i.e. never_viewed via projection). On a small/early instance we
   // primarily care about *recorded* state, so this flag exists for
@@ -507,14 +608,21 @@ export async function listInboxItems(
     cat_title: string | null;
     cat_produced_at: string | null;
     cat_availability: ArtifactAvailability | null;
+    cane_draft_id: string | null;
   };
 
   const params: unknown[] = [];
-  let agentWhere = "";
+  const where: string[] = [];
   if (filters.agent) {
-    agentWhere = " WHERE a.agent = ?";
+    where.push("a.agent = ?");
     params.push(filters.agent);
   }
+  if (filters.kind === "cane_draft") {
+    // Only cane_draft artifacts, and never a shipped one (cannot re-surface).
+    where.push("d.draft_id IS NOT NULL");
+    where.push("rs.shipped_at IS NULL");
+  }
+  const agentWhere = where.length ? ` WHERE ${where.join(" AND ")}` : "";
   params.push(Math.min(limit, 500), offset);
 
   // W1-6: FULL OUTER JOIN so the inbox surfaces BOTH sides of the catalog ↔
@@ -535,9 +643,11 @@ export async function listInboxItems(
             a.abs_path     AS cat_abs_path,
             a.title        AS cat_title,
             a.produced_at  AS cat_produced_at,
-            a.availability AS cat_availability
+            a.availability AS cat_availability,
+            d.draft_id     AS cane_draft_id
        FROM artifacts a
   FULL OUTER JOIN artifact_review_state rs ON rs.artifact_id = a.artifact_id
+  LEFT JOIN artifact_drafts d ON d.artifact_id = COALESCE(rs.artifact_id, a.artifact_id)
        ${agentWhere}
    ORDER BY COALESCE(rs.updated_at, a.produced_at) DESC
       LIMIT ? OFFSET ?`,
