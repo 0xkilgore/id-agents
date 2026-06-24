@@ -193,12 +193,33 @@ export interface ShipRequest {
   source_link?: string;
 }
 
+// T-CKPT.feedback C0 (2026-06-24): the four ambient artifact reactions Chris
+// taps on the Desk — the lowest-click feedback surface. A reaction is just a
+// structured comment, so it rides the existing comment_recorded op + the
+// existing comment-auto-dispatch rail (no new routing path). 👍/👎/❓/🔁.
+export type ArtifactReaction = "ship_it" | "wrong" | "explain" | "iterate";
+
+export const ARTIFACT_REACTIONS: readonly ArtifactReaction[] = [
+  "ship_it",
+  "wrong",
+  "explain",
+  "iterate",
+] as const;
+
+/** Runtime guard for the reaction enum — tolerant of unknown payloads. */
+export function isArtifactReaction(v: unknown): v is ArtifactReaction {
+  return typeof v === "string" && (ARTIFACT_REACTIONS as readonly string[]).includes(v);
+}
+
 // Monday §2: a persisted, append-only artifact comment (op_type comment_recorded).
 export interface CommentRequest {
   actor: string;                  // resolved MondayActorRef ("user:chris"|"user:liz")
-  body: string;                   // the comment text
+  body: string;                   // the comment text (may be "" when a reaction carries the signal)
   anchor?: string | null;         // optional section/line anchor within the artifact
   source_link?: string;
+  // C0: an optional one-tap reaction. When set, a bare reaction (empty body)
+  // is valid feedback and still routes to the owning agent.
+  reaction?: ArtifactReaction | null;
 }
 
 export interface ArtifactComment {
@@ -207,6 +228,8 @@ export interface ArtifactComment {
   actor: string;
   body: string;
   anchor: string | null;
+  // C0: the one-tap reaction this comment carried, or null for a plain comment.
+  reaction: ArtifactReaction | null;
   ts: string;
 }
 

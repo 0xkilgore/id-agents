@@ -66,6 +66,7 @@ import type { TasksRepository } from '../db/db-service.js';
 import { emitApprovalTask, type ApprovalReviewer } from './approval-emit.js';
 import {
   routeCommentToOwningAgent,
+  isArtifactReaction,
   type CommentDispatchEnqueueFn,
 } from './comment-dispatch.js';
 import {
@@ -480,15 +481,25 @@ export function mountOutputsRoutes(
       if (!artifactId) return;
       const actor = requireActor(req, res);
       if (!actor) return;
-      const body = asString(req.body?.body);
-      if (!body || body.trim().length === 0) {
-        return res.status(400).json({ ok: false, error: 'comment body is required', code: 'missing_body' });
+      // C0 (T-CKPT.feedback): an optional one-tap reaction. A reaction is a
+      // structured comment and rides the SAME comment-auto-dispatch rail; the
+      // only new validation is the enum + relaxing the body requirement when a
+      // reaction carries the signal (a bare 👍 is valid feedback).
+      const rawReaction = req.body?.reaction;
+      if (rawReaction != null && !isArtifactReaction(rawReaction)) {
+        return res.status(400).json({ ok: false, error: 'unknown reaction', code: 'invalid_reaction' });
+      }
+      const reaction = isArtifactReaction(rawReaction) ? rawReaction : null;
+      const body = asString(req.body?.body) ?? '';
+      if (body.trim().length === 0 && !reaction) {
+        return res.status(400).json({ ok: false, error: 'comment body or reaction is required', code: 'missing_body' });
       }
       const { comment, op_id } = await commentArtifact(adapter, artifactId, {
         actor: actor.ref,
         body,
         anchor: asString(req.body?.anchor) ?? null,
         source_link: asString(req.body?.source_link),
+        reaction,
       });
 
       // B2 (2026-06-22): close the loop — route the now-durable comment to the

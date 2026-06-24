@@ -22,6 +22,7 @@ import type {
   ApproveRequest,
   ArtifactComment,
   ArtifactOpType,
+  ArtifactReaction,
   ArtifactReviewStateRow,
   CommentRequest,
   RejectRequest,
@@ -29,6 +30,7 @@ import type {
   ShipResponse,
   ViewRequest,
 } from "./types.js";
+import { isArtifactReaction } from "./types.js";
 
 const DEFAULT_ACTOR = "operator";
 
@@ -204,6 +206,7 @@ export async function commentArtifact(
   const ts = nowIso(now);
   const actor = (req.actor || DEFAULT_ACTOR).trim() || DEFAULT_ACTOR;
   const anchor = req.anchor ?? null;
+  const reaction = req.reaction ?? null;
   // Touch the review-state row so the artifact has a durable interaction record
   // (and updated_at moves) even if it was never viewed/approved.
   const existing = await getReviewState(adapter, artifactId);
@@ -219,12 +222,14 @@ export async function commentArtifact(
     "comment_recorded",
     actor,
     ts,
-    JSON.stringify({ body: req.body, anchor }),
+    // C0: reaction rides the same payload; omitted for plain comments so the
+    // shape stays backward-compatible with pre-reaction rows.
+    JSON.stringify(reaction ? { body: req.body, anchor, reaction } : { body: req.body, anchor }),
     req.source_link ?? existing?.source_link ?? null,
   );
   return {
     op_id: opId,
-    comment: { op_id: opId, artifact_id: artifactId, actor, body: req.body, anchor, ts },
+    comment: { op_id: opId, artifact_id: artifactId, actor, body: req.body, anchor, reaction, ts },
   };
 }
 
@@ -242,14 +247,18 @@ export async function listComments(
     if (op.op_type !== "comment_recorded") continue;
     let body = "";
     let anchor: string | null = null;
+    let reaction: ArtifactReaction | null = null;
     try {
-      const p = op.payload_json ? (JSON.parse(op.payload_json) as { body?: unknown; anchor?: unknown }) : {};
+      const p = op.payload_json
+        ? (JSON.parse(op.payload_json) as { body?: unknown; anchor?: unknown; reaction?: unknown })
+        : {};
       body = typeof p.body === "string" ? p.body : "";
       anchor = typeof p.anchor === "string" ? p.anchor : null;
+      reaction = isArtifactReaction(p.reaction) ? p.reaction : null;
     } catch {
       /* tolerate legacy/malformed payloads */
     }
-    comments.push({ op_id: op.op_id, artifact_id: op.artifact_id, actor: op.actor, body, anchor, ts: op.ts });
+    comments.push({ op_id: op.op_id, artifact_id: op.artifact_id, actor: op.actor, body, anchor, reaction, ts: op.ts });
   }
   return comments;
 }
