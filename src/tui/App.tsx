@@ -12,7 +12,7 @@ import { TaskDetail } from './components/TaskDetail.js';
 import { CalendarView } from './components/CalendarView.js';
 import { HeartbeatsView, type HeartbeatRow } from './components/HeartbeatsView.js';
 import { HeartbeatDetail } from './components/HeartbeatDetail.js';
-import { AgentDetail } from './components/AgentDetail.js';
+import { AgentDetail, type AgentDispatchComposer } from './components/AgentDetail.js';
 import { LibraryAgentsTable } from './components/LibraryAgentsTable.js';
 import { LibraryAgentDetail } from './components/LibraryAgentDetail.js';
 import { LibrarySkillsTable } from './components/LibrarySkillsTable.js';
@@ -31,11 +31,17 @@ import {
   fetchTasks,
   fetchTeams,
   getManagerUrl,
+  enqueueAgentDispatch,
   type LibraryAgentDetailResponse,
   type LibraryAgentListResponse,
   type LibrarySkillDetailResponse,
   type LibrarySkillListResponse,
 } from './api/manager.js';
+import {
+  buildAgentDispatchRequest,
+  applyComposerKeypress,
+  DEFAULT_DISPATCH_ACTOR,
+} from './api/dispatch-compose.js';
 import { usePolling } from './hooks/usePolling.js';
 import { humanizeUptime } from './util/format.js';
 import { newsAgeColor } from './util/colors.js';
@@ -522,6 +528,15 @@ export function App({ staticMode = false }: AppProps = {}): React.ReactElement {
   const [hbDetailScroll, setHbDetailScroll] = useState(0);
   const [agentDetailScroll, setAgentDetailScroll] = useState(0);
 
+  // AP8 — "dispatch to this agent" composer state (agent-detail view only).
+  const [dispatchComposer, setDispatchComposer] = useState<AgentDispatchComposer>({
+    open: false,
+    text: '',
+    status: 'idle',
+    actor: DEFAULT_DISPATCH_ACTOR,
+    note: null,
+  });
+
   useEffect(() => {
     if (newsTotal === 0) {
       if (newsSelectedIndex !== 0) setNewsSelectedIndex(0);
@@ -630,18 +645,24 @@ export function App({ staticMode = false }: AppProps = {}): React.ReactElement {
     [hbTotal],
   );
 
+  const closeDispatchComposer = useCallback(() => {
+    setDispatchComposer((c) => ({ ...c, open: false, text: '', status: 'idle', note: null }));
+  }, []);
+
   const openAgentDetail = useCallback(() => {
     if (!selectedAgent) return;
     const isRemote = selectedAgent.deploymentShape === 'remote-endpoint' ||
       selectedAgent.metadata?.runtime === 'public-agent-remote';
     if (!isRemote) return; // local agents drill into news instead
     setAgentDetailScroll(0);
+    closeDispatchComposer();
     setView('agent-detail');
-  }, [selectedAgent]);
+  }, [selectedAgent, closeDispatchComposer]);
 
   const backFromAgentDetail = useCallback(() => {
+    closeDispatchComposer();
     setView('agents');
-  }, []);
+  }, [closeDispatchComposer]);
 
   const moveAgentDetailScroll = useCallback(
     (delta: number) => {
@@ -649,6 +670,53 @@ export function App({ staticMode = false }: AppProps = {}): React.ReactElement {
     },
     [],
   );
+
+  // AP8 — open the composer on the focused agent (resets any prior draft/status).
+  const openDispatchComposer = useCallback(() => {
+    if (!selectedAgentName) return;
+    setDispatchComposer((c) => ({ ...c, open: true, text: '', status: 'idle', note: null }));
+  }, [selectedAgentName]);
+
+  // AP8 — feed one keystroke into the composer's message buffer.
+  const editDispatchComposer = useCallback((input: string, key: Parameters<typeof applyComposerKeypress>[2]) => {
+    setDispatchComposer((c) => {
+      const text = applyComposerKeypress(c.text, input, key);
+      if (text === c.text) return c;
+      // Typing after a terminal send-state starts a fresh draft cleanly.
+      return { ...c, text, status: c.status === 'sending' ? c.status : 'idle', note: null };
+    });
+  }, []);
+
+  // AP8 — validate + POST the draft to /dispatch/enqueue with the operator actor.
+  const submitDispatchComposer = useCallback(() => {
+    const toAgent = selectedAgentName;
+    if (!toAgent) return;
+    setDispatchComposer((c) => {
+      if (c.status === 'sending') return c; // ignore double-submit
+      const built = buildAgentDispatchRequest({ toAgent, message: c.text, actorRef: c.actor });
+      if (!built.ok) {
+        return { ...c, status: 'error', note: built.error };
+      }
+      void enqueueAgentDispatch(manager, built.body)
+        .then((res) => {
+          const id = typeof res.dispatch_id === 'string' ? res.dispatch_id : undefined;
+          setDispatchComposer((cur) => ({
+            ...cur,
+            status: 'sent',
+            text: '',
+            note: id ? id.replace(/^phid:disp-/, '').slice(0, 8) : null,
+          }));
+        })
+        .catch((err: unknown) => {
+          setDispatchComposer((cur) => ({
+            ...cur,
+            status: 'error',
+            note: err instanceof Error ? err.message : String(err),
+          }));
+        });
+      return { ...c, status: 'sending', note: null };
+    });
+  }, [selectedAgentName, manager]);
 
   const openNews = useCallback(() => {
     if (!selectedAgentName) return;
@@ -899,6 +967,18 @@ export function App({ staticMode = false }: AppProps = {}): React.ReactElement {
         }
         return; // swallow everything else
       }
+      // AP8 dispatch composer — while open it captures ALL keystrokes (incl. the
+      // global q/? hotkeys, which become typed text) so the operator can write a
+      // free-text message. Esc cancels, Enter sends, Ctrl-C still exits.
+      if (dispatchComposer.open && view === 'agent-detail') {
+        if (key.ctrl && input === 'c') {
+          exit();
+          return;
+        }
+        if (key.escape) return closeDispatchComposer();
+        if (key.return) return submitDispatchComposer();
+        return editDispatchComposer(input, key);
+      }
       // global
       if (key.ctrl && input === 'c') {
         exit();
@@ -979,6 +1059,7 @@ export function App({ staticMode = false }: AppProps = {}): React.ReactElement {
       }
 
       if (view === 'agent-detail') {
+        if (input === 'd') return openDispatchComposer();
         if (key.leftArrow || key.escape) return backFromAgentDetail();
         if (key.upArrow) return moveAgentDetailScroll(-1);
         if (key.downArrow) return moveAgentDetailScroll(1);
@@ -1159,6 +1240,7 @@ export function App({ staticMode = false }: AppProps = {}): React.ReactElement {
           contentWidth={DETAIL_CONTENT_WIDTH}
           nowMs={pollTs || Date.now()}
           detail={agentDetailPoll.data ?? null}
+          composer={dispatchComposer}
         />
       ) : view === 'tasks' ? (
         <>

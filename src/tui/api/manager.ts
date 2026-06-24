@@ -11,6 +11,7 @@ import type {
   Team,
   TeamsResponse,
 } from './types.js';
+import type { EnqueueDispatchBody } from './dispatch-compose.js';
 
 export function getManagerUrl(): string {
   return process.env.MANAGER_URL ?? 'http://localhost:4100';
@@ -268,6 +269,41 @@ export async function fetchAgentDetail(
     throw new Error(`GET /agents/${name}/detail → ${res.status} ${res.statusText}`);
   }
   return (await res.json()) as AgentDetailResponse;
+}
+
+// AP8 (AGENT-V2): the agent-detail "dispatch to this agent" composer POSTs the
+// shaped body (see buildAgentDispatchRequest) to the manager's enqueue route.
+// Surfaces the manager's typed { ok:false, error } as a thrown Error so the
+// composer can show it inline.
+export interface EnqueueDispatchResponse {
+  ok: true;
+  dispatch_id?: string;
+  query_id?: string;
+  [k: string]: unknown;
+}
+
+export async function enqueueAgentDispatch(
+  manager: string,
+  body: EnqueueDispatchBody,
+  signal?: AbortSignal,
+): Promise<EnqueueDispatchResponse> {
+  const res = await fetch(`${manager}/dispatch/enqueue`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+    signal,
+  });
+  let data: Record<string, unknown> = {};
+  try {
+    data = (await res.json()) as Record<string, unknown>;
+  } catch {
+    /* non-JSON body — fall through to status-based error below */
+  }
+  if (!res.ok || data.ok === false) {
+    const err = typeof data.error === 'string' ? data.error : `${res.status} ${res.statusText}`;
+    throw new Error(err);
+  }
+  return data as EnqueueDispatchResponse;
 }
 
 export async function fetchLibrarySkill(

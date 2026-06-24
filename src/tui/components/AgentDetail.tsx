@@ -12,6 +12,23 @@ import type { Agent, AgentDetailResponse } from '../api/types.js';
 import { humanizeLastSeen } from '../util/format.js';
 import { healthColor } from '../util/colors.js';
 
+/** Send-state for the AP8 "dispatch to this agent" composer. */
+export type ComposerStatus = 'idle' | 'sending' | 'sent' | 'error';
+
+/** AP8 composer view-state, owned by App and rendered below the dossier. */
+export interface AgentDispatchComposer {
+  /** Is the composer open (capturing keystrokes)? */
+  open: boolean;
+  /** The message draft typed so far. */
+  text: string;
+  /** Send lifecycle. */
+  status: ComposerStatus;
+  /** Operator actor the dispatch is attributed to (e.g. user:chris). */
+  actor: string;
+  /** Last error (status==='error') or confirmation detail (status==='sent'). */
+  note?: string | null;
+}
+
 interface AgentDetailProps {
   agent: Agent | null;
   positionLabel: string;
@@ -21,6 +38,8 @@ interface AgentDetailProps {
   nowMs: number;
   /** v2 dossier; null while loading or when the backend returns no detail. */
   detail?: AgentDetailResponse | null;
+  /** AP8 composer state; when undefined/closed the panel isn't rendered. */
+  composer?: AgentDispatchComposer;
 }
 
 /** A unicode bar for a count relative to a max (charts in a TUI). */
@@ -48,7 +67,7 @@ function fieldRow(label: string, value: string | null | undefined, color?: strin
 }
 
 export function AgentDetail(props: AgentDetailProps): React.ReactElement {
-  const { agent, positionLabel, windowSize, scrollOffset, contentWidth, nowMs, detail } = props;
+  const { agent, positionLabel, windowSize, scrollOffset, contentWidth, nowMs, detail, composer } = props;
 
   if (!agent) {
     return (
@@ -167,32 +186,73 @@ export function AgentDetail(props: AgentDetailProps): React.ReactElement {
   const hiddenBelow = total - clampedOffset - visible.length;
   const W = 22;
 
+  const agentName = agent.alias ?? agent.name;
   return (
-    <Box flexDirection="column" borderStyle="round" paddingX={1}>
-      <Box justifyContent="space-between">
-        <Text bold>agent · {agent.alias ?? agent.name}</Text>
-        <Text dimColor>{positionLabel}</Text>
+    <Box flexDirection="column">
+      <Box flexDirection="column" borderStyle="round" paddingX={1}>
+        <Box justifyContent="space-between">
+          <Text bold>agent · {agentName}</Text>
+          <Text dimColor>{positionLabel}</Text>
+        </Box>
+        <Text dimColor>{hiddenAbove > 0 ? `↑ ${hiddenAbove} more above` : ' '}</Text>
+        {visible.map((row, i) => {
+          if (!row.label && !row.value) return <Text key={i}> </Text>;
+          if (row.label.startsWith('---')) {
+            return <Text key={i} bold dimColor>{row.label}</Text>;
+          }
+          return (
+            <Text key={i}>
+              <Text dimColor>{row.label.padEnd(W)}</Text>
+              {row.color
+                ? <Text color={row.color}>{row.value}</Text>
+                : <Text>{row.value}</Text>
+              }
+            </Text>
+          );
+        })}
+        {Array.from({ length: Math.max(0, windowSize - visible.length) }, (_, i) => (
+          <Text key={`pad-${i}`}> </Text>
+        ))}
+        <Text dimColor>
+          {composer?.open ? ' ' : hiddenBelow > 0 ? `↓ ${hiddenBelow} more below` : 'press d to dispatch to this agent'}
+        </Text>
       </Box>
-      <Text dimColor>{hiddenAbove > 0 ? `↑ ${hiddenAbove} more above` : ' '}</Text>
-      {visible.map((row, i) => {
-        if (!row.label && !row.value) return <Text key={i}> </Text>;
-        if (row.label.startsWith('---')) {
-          return <Text key={i} bold dimColor>{row.label}</Text>;
-        }
-        return (
-          <Text key={i}>
-            <Text dimColor>{row.label.padEnd(W)}</Text>
-            {row.color
-              ? <Text color={row.color}>{row.value}</Text>
-              : <Text>{row.value}</Text>
-            }
-          </Text>
-        );
-      })}
-      {Array.from({ length: Math.max(0, windowSize - visible.length) }, (_, i) => (
-        <Text key={`pad-${i}`}> </Text>
-      ))}
-      <Text dimColor>{hiddenBelow > 0 ? `↓ ${hiddenBelow} more below` : ' '}</Text>
+      {composer?.open ? <DispatchComposerPanel agentName={agentName} composer={composer} /> : null}
+    </Box>
+  );
+}
+
+/** AP8 — the "dispatch to this agent" composer panel, shown below the dossier
+ *  while open. A single-line message buffer; Enter sends, Esc cancels. The send
+ *  itself (POST /dispatch/enqueue) is owned by App; this just renders state. */
+function DispatchComposerPanel(props: {
+  agentName: string;
+  composer: AgentDispatchComposer;
+}): React.ReactElement {
+  const { agentName, composer } = props;
+  const statusLine = (() => {
+    switch (composer.status) {
+      case 'sending':
+        return <Text color="yellow">sending…</Text>;
+      case 'sent':
+        return <Text color="green">✓ dispatched{composer.note ? ` (${composer.note})` : ''}</Text>;
+      case 'error':
+        return <Text color="red">error: {composer.note ?? 'failed to enqueue'}</Text>;
+      default:
+        return <Text dimColor>Enter send · Esc cancel</Text>;
+    }
+  })();
+  return (
+    <Box flexDirection="column" borderStyle="round" borderColor="cyan" paddingX={1}>
+      <Text bold>
+        dispatch → {agentName} <Text dimColor>(as {composer.actor})</Text>
+      </Text>
+      <Text>
+        <Text dimColor>{'> '}</Text>
+        {composer.text.length > 0 ? <Text>{composer.text}</Text> : <Text dimColor>(type a message)</Text>}
+        <Text color="cyan">█</Text>
+      </Text>
+      {statusLine}
     </Box>
   );
 }
