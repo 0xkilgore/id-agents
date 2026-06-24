@@ -59,6 +59,53 @@ export function decideRollback(
   };
 }
 
+/**
+ * Q-DEPLOY-2 — what to do with a rollback-eligible smoke failure. `decideRollback`
+ * answers "CAN we roll back, and to what"; the POLICY answers "SHOULD we do it
+ * automatically, or just alert and let the operator decide".
+ */
+export type RollbackPolicy = "alert_only" | "auto_rollback";
+
+/**
+ * Resolve the post-deploy rollback policy (Q-DEPLOY-2; Maestra resolution in
+ * kapelle-roadmap-reset §4.6 + §Q-table): ALERT-ONLY by default (Phase 2 — the
+ * manual post-deploy smoke surfaces the failure loudly and lets the operator
+ * decide), auto-rollback is opt-in (Phase 3, once deploy automation is proven —
+ * the runDeploy pipeline). An explicit `--alert-only` flag wins; otherwise
+ * `--auto-rollback` or `DEPLOY_GUARD_ROLLBACK_POLICY=auto_rollback` selects
+ * auto-rollback. Unknown env values are ignored (stays alert_only).
+ */
+export function resolveRollbackPolicy(
+  flags: Record<string, string | boolean>,
+  env: Record<string, string | undefined>,
+): RollbackPolicy {
+  if (flags["alert-only"] === true) return "alert_only";
+  if (flags["auto-rollback"] === true) return "auto_rollback";
+  const e = (env.DEPLOY_GUARD_ROLLBACK_POLICY ?? "").toLowerCase().replace(/-/g, "_");
+  if (e === "auto_rollback") return "auto_rollback";
+  return "alert_only";
+}
+
+/** The action the deploy flow takes after a post-deploy smoke. */
+export type PostDeployAction = "none" | "rollback" | "alert" | "needs_operator";
+
+/**
+ * Pure: combine the rollback decision with the policy into a single action.
+ *   - smoke passed                         → "none"
+ *   - smoke failed, cannot roll back safely → "needs_operator" (always surfaced)
+ *   - smoke failed, rollback possible, auto → "rollback"
+ *   - smoke failed, rollback possible, alert → "alert"
+ * `needs_operator` ignores the policy: an unsafe rollback is never auto-run.
+ */
+export function planPostDeployAction(
+  decision: RollbackDecision,
+  policy: RollbackPolicy,
+): PostDeployAction {
+  if (decision.needs_operator) return "needs_operator";
+  if (!decision.should_rollback) return "none";
+  return policy === "auto_rollback" ? "rollback" : "alert";
+}
+
 const DEFAULT_STORE_PATH = "var/deploy-guard/last-good-build.json";
 
 export function lastGoodStorePath(repoDir: string = process.cwd()): string {

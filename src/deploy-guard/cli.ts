@@ -24,7 +24,9 @@ import { runSmokeProbe, type SmokeResult } from "./smoke.js";
 import {
   decideRollback,
   lastGoodStorePath,
+  planPostDeployAction,
   readLastGood,
+  resolveRollbackPolicy,
   writeLastGood,
   type RollbackDecision,
 } from "./rollback.js";
@@ -119,17 +121,26 @@ async function cmdSmoke(args: Record<string, string | boolean>): Promise<number>
   }
 
   const decision: RollbackDecision = decideRollback(false, smoke.build_sha, lastGood);
-  const autoRollback = args["auto-rollback"] === true;
   const execute = args.execute === true;
+  // Q-DEPLOY-2: alert-only by default; auto-rollback only when the policy opts in.
+  const policy = resolveRollbackPolicy(args, process.env);
+  const action = planPostDeployAction(decision, policy);
 
   let rollback: { planned: RollbackStep[]; executed: boolean; ok: boolean } | null = null;
-  if (autoRollback && decision.should_rollback && decision.target_sha) {
+  if (action === "rollback" && decision.target_sha) {
     const steps = planRollbackSteps(decision.target_sha, { repoDir });
     const res = executeRollback(steps, execute);
     rollback = { planned: steps, executed: execute, ok: res.ok };
+  } else {
+    // Alert-only / needs-operator: surface the failure loudly (the "explicit
+    // failure surface" half of T-DEPLOY.5), but do NOT touch the running build.
+    console.error(
+      `[deploy-guard] POST-DEPLOY SMOKE FAILED (${action}, policy=${policy}): ${smoke.failures.join("; ")} — ` +
+        `${decision.reason}. Pass --auto-rollback (or DEPLOY_GUARD_ROLLBACK_POLICY=auto_rollback) to auto-revert.`,
+    );
   }
 
-  console.log(JSON.stringify({ ok: false, smoke, decision, rollback }, null, 2));
+  console.log(JSON.stringify({ ok: false, smoke, policy, action, decision, rollback }, null, 2));
   return 1;
 }
 

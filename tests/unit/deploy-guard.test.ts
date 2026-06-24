@@ -16,6 +16,9 @@ import {
   readLastGood,
   writeLastGood,
   lastGoodStorePath,
+  resolveRollbackPolicy,
+  planPostDeployAction,
+  type RollbackDecision,
 } from "../../src/deploy-guard/rollback.js";
 import { planRollbackSteps } from "../../src/deploy-guard/cli.js";
 
@@ -137,6 +140,63 @@ describe("rollback decision + last-good store (T-DEPLOY.5)", () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe("rollback policy — Q-DEPLOY-2 (T-DEPLOY.5)", () => {
+  const canRollback: RollbackDecision = {
+    should_rollback: true,
+    target_sha: "goodsha",
+    reason: "smoke failed — rolling back",
+    needs_operator: false,
+  };
+  const passed: RollbackDecision = {
+    should_rollback: false,
+    target_sha: null,
+    reason: "smoke passed",
+    needs_operator: false,
+  };
+  const unsafe: RollbackDecision = {
+    should_rollback: false,
+    target_sha: null,
+    reason: "no last-good",
+    needs_operator: true,
+  };
+
+  it("DEFAULT is alert-only (Phase 2) — no flags, no env", () => {
+    expect(resolveRollbackPolicy({}, {})).toBe("alert_only");
+  });
+
+  it("--auto-rollback or env opts into auto-rollback (Phase 3)", () => {
+    expect(resolveRollbackPolicy({ "auto-rollback": true }, {})).toBe("auto_rollback");
+    expect(resolveRollbackPolicy({}, { DEPLOY_GUARD_ROLLBACK_POLICY: "auto_rollback" })).toBe("auto_rollback");
+    expect(resolveRollbackPolicy({}, { DEPLOY_GUARD_ROLLBACK_POLICY: "auto-rollback" })).toBe("auto_rollback");
+  });
+
+  it("--alert-only wins over --auto-rollback and over env", () => {
+    expect(resolveRollbackPolicy({ "alert-only": true, "auto-rollback": true }, {})).toBe("alert_only");
+    expect(
+      resolveRollbackPolicy({ "alert-only": true }, { DEPLOY_GUARD_ROLLBACK_POLICY: "auto_rollback" }),
+    ).toBe("alert_only");
+  });
+
+  it("ignores unknown env values (stays alert-only)", () => {
+    expect(resolveRollbackPolicy({}, { DEPLOY_GUARD_ROLLBACK_POLICY: "yolo" })).toBe("alert_only");
+  });
+
+  it("planPostDeployAction: passing smoke → none", () => {
+    expect(planPostDeployAction(passed, "auto_rollback")).toBe("none");
+    expect(planPostDeployAction(passed, "alert_only")).toBe("none");
+  });
+
+  it("planPostDeployAction: rollback-eligible failure → policy decides (alert vs rollback)", () => {
+    expect(planPostDeployAction(canRollback, "alert_only")).toBe("alert");
+    expect(planPostDeployAction(canRollback, "auto_rollback")).toBe("rollback");
+  });
+
+  it("planPostDeployAction: unsafe rollback is NEVER auto-run — needs_operator under any policy", () => {
+    expect(planPostDeployAction(unsafe, "alert_only")).toBe("needs_operator");
+    expect(planPostDeployAction(unsafe, "auto_rollback")).toBe("needs_operator");
   });
 });
 
