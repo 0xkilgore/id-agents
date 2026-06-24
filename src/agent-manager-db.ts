@@ -26,6 +26,7 @@ import { registerOnIdChain, createSubnameOnIdChain, setMultiChainAddresses } fro
 import { defaultDeliverFn, redactSshTarget, type DeliverFn } from './lib/ssh-deliver.js';
 import { probeRemoteAgent, defaultHealthProbeFn, type HealthProbeFn } from './lib/remote-heartbeat.js';
 import { filterClaudeEnvVars } from './lib/env-hygiene.js';
+import { buildTasksEntriesEnvelope } from './tasks-readmodel/entry-projection.js';
 import { resolveManagerNode } from './lib/native-node.js';
 import { isBootSpawnableAgent } from './lib/boot-spawn.js';
 import { sweepOrphanAgents, listMatchingProcesses } from './lib/orphan-sweep.js';
@@ -6383,6 +6384,38 @@ export class AgentManagerDb {
       } catch (err: any) {
         console.error('[Manager] Error in GET /tasks:', err);
         res.status(500).json({ error: err?.message || 'Internal server error' });
+      }
+    });
+
+    // I-1 doc-model proof-cut (Tasks): the substrate read path the Desk/console
+    // queries instead of walking to-do.md markdown. Mirrors GET /artifacts/entries
+    // — a typed read-model.v1 envelope of TaskEntry[]. MUST be registered before
+    // '/tasks/:ref' so the literal 'entries' segment is not captured as a ref.
+    this.managementApp.get('/tasks/entries', async (req, res) => {
+      try {
+        const { id: teamId } = await this.getTeam(req);
+        const { status, owner } = req.query as Record<string, string>;
+        const limit = Math.min(parseInt(req.query.limit as string, 10) || 100, 1000);
+        const offset = parseInt(req.query.offset as string, 10) || 0;
+
+        let ownerIdFilter: string | undefined;
+        if (owner) {
+          const { agent } = await this.resolveSingleAgentForCommand(teamId, owner);
+          if (agent) ownerIdFilter = agent.id;
+        }
+
+        const validStatuses = ['todo', 'doing', 'done'];
+        const tasks = await this.db.tasks.list({
+          status: status && validStatuses.includes(status) ? status as 'todo' | 'doing' | 'done' : undefined,
+          owner: ownerIdFilter,
+          teamId,
+        });
+        const agents = await this.dbListAgents(teamId, true);
+        const agentNames = new Map(agents.map((a) => [a.id, a.name]));
+        res.json(buildTasksEntriesEnvelope(tasks, agentNames, { limit, offset }));
+      } catch (err: any) {
+        console.error('[Manager] Error in GET /tasks/entries:', err);
+        res.status(500).json({ error: err?.message || 'tasks entries failed' });
       }
     });
 
