@@ -15,7 +15,8 @@ export type ArtifactOpType =
   | "reject"
   | "ship_attempted"
   | "ship_blocked"
-  | "comment_recorded";
+  | "comment_recorded"
+  | "edit";
 
 // Append-only audit event for an artifact. Lives in artifact_operations.
 export interface ArtifactOpRow {

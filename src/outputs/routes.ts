@@ -22,6 +22,7 @@ import type { Application, Request, Response } from 'express';
 import type { DbAdapter } from '../db/db-adapter.js';
 import {
   artifactIdFromPath,
+  appendOperation,
   backfillCatalogFromDeliveryLog,
   countOperations,
   getArtifact,
@@ -32,6 +33,7 @@ import {
   registerArtifact,
 } from './storage.js';
 import { artifactRowToEntry } from './entry-projection.js';
+import { EDIT_OP_TYPE, buildEditPayload, isEditInProductEnabled, latestEdit } from './edit.js';
 import { checkArtifactParity } from './parity.js';
 import type { ArtifactEntry, ReadModelEnvelope } from './entry.js';
 import { promises as fsp } from 'node:fs';
@@ -443,6 +445,50 @@ export function mountOutputsRoutes(
       };
       const { state, op_id } = await viewArtifact(adapter, req.params.id, reqBody);
       res.json({ ok: true, state, op_id });
+    } catch (err) {
+      res.status(400).json({ error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  // ── POST /artifacts/:id/edit (T-CKPT.8 edit-in-product, phase 1) ────
+  // Capture an operator's in-place edit as an append-only `edit` op. The source
+  // FILE IS NEVER MUTATED here — the edited body lives only in the substrate, so
+  // the change is fully reversible. Flag-gated (ARTIFACTS_EDIT_IN_PRODUCT): a
+  // no-op (404) until explicitly enabled.
+  app.post('/artifacts/:id/edit', async (req: Request<{ id: string }>, res: Response) => {
+    try {
+      if (!isEditInProductEnabled(env)) {
+        return res.status(404).json({ error: 'edit_in_product_disabled' });
+      }
+      const content = req.body?.content;
+      if (typeof content !== 'string') {
+        return res.status(400).json({ error: 'content (string) is required' });
+      }
+      const actor = asString(req.body?.actor) ?? 'user:operator';
+      const note = asString(req.body?.note) ?? null;
+      const nowIso = (clock?.() ?? new Date()).toISOString();
+      const op_id = await appendOperation(
+        adapter,
+        req.params.id,
+        EDIT_OP_TYPE,
+        actor,
+        nowIso,
+        buildEditPayload(content, note),
+        'manager:/artifacts/edit',
+      );
+      res.json({ ok: true, op_id, edited_at: nowIso });
+    } catch (err) {
+      res.status(400).json({ error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  // ── GET /artifacts/:id/edit ────────────────────────────────────────
+  // The latest in-product edit (substrate-only) so the console can render the
+  // operator's edited body over the file. Reads are always available.
+  app.get('/artifacts/:id/edit', async (req: Request<{ id: string }>, res: Response) => {
+    try {
+      const ops = await listOperations(adapter, req.params.id, 500, 0);
+      res.json({ ok: true, edit: latestEdit(ops) });
     } catch (err) {
       res.status(400).json({ error: err instanceof Error ? err.message : String(err) });
     }
