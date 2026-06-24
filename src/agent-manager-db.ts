@@ -154,6 +154,9 @@ import {
   getAgentDispatches,
   type RosterEntry,
 } from './dispatch-verification/routes.js';
+import { getAgentDetail } from './agents-detail/agent-detail.js';
+import { listRecentAgentUsageEvents } from './usage-meter/storage.js';
+import { buildDailyUsageReport } from './usage-meter/daily-report.js';
 import { heartbeatToSchedule, calendarToSchedule, validateIntervalSeconds, HEARTBEAT_GENERIC_MESSAGE } from './scheduling/schedule-config.js';
 import {
   getAvailableRuntimes,
@@ -3927,6 +3930,109 @@ export class AgentManagerDb {
         res.status(r.status).json(r.body);
       } catch (err: any) {
         res.status(500).json({ error: err?.message || 'dispatches failed' });
+      }
+    });
+
+    // AGENT-V2 (phid:disp-94021fb2bd1fb039): per-agent dossier. Aggregates the
+    // existing read substrates — agent catalog (identity + current model),
+    // dispatch-verification (health + last-N dispatches), the artifacts read
+    // model (recent outputs), and the usage-meter daily report (per-agent
+    // spend). Every section is best-effort: a missing verification store or an
+    // un-ingested usage table degrades that section to null/[] (see
+    // getAgentDetail) rather than 503-ing the whole dossier. Must sit before
+    // `/agents/:id` so the 3-segment path is not captured by `:id`.
+    this.managementApp.get('/agents/:name/detail', async (req, res) => {
+      try {
+        const { id: teamId } = await this.getTeam(req);
+        const isAdmin = this.isAdminRequest(req);
+        const verificationDeps = () => {
+          const storage = this.dispatchVerificationStorage;
+          if (!storage) return null;
+          return {
+            storage,
+            listRoster: (tid: string) => this.buildVerificationRoster(tid),
+            now: () => new Date().toISOString(),
+          };
+        };
+        const r = await getAgentDetail(
+          {
+            getIdentity: async (tid, name) => {
+              const a = await this.dbQueryAgentByNameMostRecent(tid, name);
+              if (!a) return null;
+              const resp = this.agentToResponse(a, { isAdmin }) as Record<string, unknown>;
+              return {
+                id: a.id,
+                name: a.name,
+                model: a.model,
+                type: a.type,
+                status: a.status,
+                working_directory: a.working_directory,
+                health: typeof resp.health === 'string' ? resp.health : null,
+                last_health_check:
+                  typeof resp.lastHealthCheck === 'number' ? resp.lastHealthCheck : null,
+              };
+            },
+            getHealth: async (tid, name) => {
+              const vdeps = verificationDeps();
+              if (!vdeps) return null;
+              const eff = await getAgentsEffectiveness(vdeps, tid, { window: req.query.window });
+              if (eff.status !== 200 || !('agents' in eff.body)) return null;
+              const a = eff.body.agents.find((x) => x.name === name);
+              if (!a) return null;
+              return {
+                status: a.status,
+                dispatches_completed: a.dispatches_completed,
+                verified_landings: a.verified_landings,
+                verified_landing_rate: a.verified_landing_rate,
+                throughput: a.throughput,
+                in_flight_dispatch_id: a.in_flight_dispatch_id,
+              };
+            },
+            getRecentDispatches: async (tid, name, limit) => {
+              const vdeps = verificationDeps();
+              if (!vdeps) return [];
+              const d = await getAgentDispatches(vdeps, tid, name, {
+                window: req.query.window,
+                limit,
+              });
+              return d.status === 200 && 'items' in d.body ? d.body.items : [];
+            },
+            getRecentOutputs: async (tid, _agentId, limit) => {
+              // readArtifacts aggregates dispatch/query/output artifacts with an
+              // `agent`/`target_agent` owner field; filter to this agent by name.
+              const all = await readArtifacts(this.db.adapter, tid, Math.max(limit * 5, 50));
+              return all.items
+                .filter((it) => it.agent === req.params.name || it.target_agent === req.params.name)
+                .slice(0, limit);
+            },
+            getCost: async (tid, agentId) => {
+              const nowMs = Date.now();
+              const sinceMs = nowMs - 2 * 24 * 60 * 60 * 1000;
+              const events = await listRecentAgentUsageEvents(this.db.adapter, {
+                since_ms: sinceMs,
+                limit: 200_000,
+              });
+              const report = buildDailyUsageReport({ events, nowMs });
+              const a = report.by_agent.find((x) => x.agent_id === agentId);
+              if (!a) return null;
+              return {
+                date: report.date,
+                weighted_tokens: a.weighted_tokens,
+                input_tokens: a.input_tokens,
+                output_tokens: a.output_tokens,
+                providers: a.providers,
+                pct_weighted: a.pct_weighted,
+              };
+            },
+            now: () => new Date().toISOString(),
+          },
+          teamId,
+          req.params.name,
+          { limit: req.query.limit },
+        );
+        res.status(r.status).json(r.body);
+      } catch (err: any) {
+        res.status(500).json({ error: err?.message || 'agent detail failed' });
       }
     });
 
