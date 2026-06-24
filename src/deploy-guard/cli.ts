@@ -9,8 +9,17 @@
 // smoke it decides a rollback to the last-good SHA and (with --auto-rollback
 // --execute) performs it: git checkout last-good → rebuild → kickstart. Without
 // --execute it prints the plan (dry-run) — the safe default.
+//
+// T-DEPLOY.2 adds the PRE-deploy sibling — run BEFORE the kickstart:
+//
+//   node dist/deploy-guard/cli.js abi-check [--node /opt/homebrew/bin/node] \
+//     [--modules better-sqlite3] [--alert-only | --block] [--rebuild --execute]
+//
+// It verifies every native module loads under the manager node; on an ABI
+// mismatch it exits non-zero (blocks the deploy) under the default policy.
 
 import { spawnSync } from "node:child_process";
+import { runAbiCheck, resolveAbiPolicy, type AbiCheckResult } from "./abi-check.js";
 import { runSmokeProbe, type SmokeResult } from "./smoke.js";
 import {
   decideRollback,
@@ -117,6 +126,34 @@ async function cmdSmoke(args: Record<string, string | boolean>): Promise<number>
   return 1;
 }
 
+function cmdAbiCheck(args: Record<string, string | boolean>): number {
+  const node = typeof args.node === "string" ? args.node : undefined;
+  const modules = typeof args.modules === "string" ? args.modules.split(",").map((m) => m.trim()).filter(Boolean) : undefined;
+  const cwd = typeof args["repo-dir"] === "string" ? args["repo-dir"] : process.cwd();
+  const policy = resolveAbiPolicy(args, process.env);
+
+  const result: AbiCheckResult = runAbiCheck({
+    node,
+    modules,
+    cwd,
+    policy,
+    rebuild: args.rebuild === true,
+    execute: args.execute === true,
+  });
+
+  console.log(JSON.stringify(result, null, 2));
+  if (result.pass) return 0;
+  if (result.blocked) {
+    console.error(
+      `[deploy-guard] ABI gate BLOCKED the deploy: ${result.failures.join("; ")} — ` +
+        `rebuild for the manager node (npm rebuild / abi-check --rebuild --execute) before deploying.`,
+    );
+    return 1;
+  }
+  console.warn(`[deploy-guard] ABI mismatch (alert-only, deploy NOT blocked): ${result.failures.join("; ")}`);
+  return 0;
+}
+
 async function main(): Promise<void> {
   const [, , sub, ...rest] = process.argv;
   const args = parseArgs(rest);
@@ -124,6 +161,9 @@ async function main(): Promise<void> {
   switch (sub) {
     case "smoke":
       code = await cmdSmoke(args);
+      break;
+    case "abi-check":
+      code = cmdAbiCheck(args);
       break;
     case "rollback": {
       const to = typeof args.to === "string" ? args.to : null;
@@ -138,7 +178,7 @@ async function main(): Promise<void> {
       break;
     }
     default:
-      console.error("usage: deploy-guard <smoke|rollback> [...flags]");
+      console.error("usage: deploy-guard <abi-check|smoke|rollback> [...flags]");
       code = 2;
   }
   process.exit(code);
