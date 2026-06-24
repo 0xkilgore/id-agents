@@ -28,6 +28,13 @@ import {
   writeLastGood,
   type RollbackDecision,
 } from "./rollback.js";
+import {
+  gatherDeployGates,
+  lastGoodShaReader,
+  runDeploy,
+  smokeVerifier,
+  type DeployRunnerDeps,
+} from "./automation.js";
 
 export interface RollbackStep {
   label: string;
@@ -154,11 +161,58 @@ function cmdAbiCheck(args: Record<string, string | boolean>): number {
   return 0;
 }
 
+// T-DEPLOY.7 — the scripted, gated deploy: pre-flight (ABI + protected-root +
+// freshness) → build + kickstart → post-deploy smoke → rollback-on-fail. The
+// safe default is dry-run (plan only); pass --execute to act.
+async function cmdDeploy(args: Record<string, string | boolean>): Promise<number> {
+  const repoDir = typeof args["repo-dir"] === "string" ? args["repo-dir"] : process.cwd();
+  const baseUrl = String(args["base-url"] ?? "http://127.0.0.1:4100");
+  const pidBefore = args["pid-before"] != null ? Number(args["pid-before"]) : null;
+  const pidAfter = args["pid-after"] != null ? Number(args["pid-after"]) : null;
+  const routes = typeof args.routes === "string" ? args.routes.split(",") : undefined;
+  const modules = typeof args.modules === "string"
+    ? args.modules.split(",").map((m) => m.trim()).filter(Boolean)
+    : undefined;
+
+  const deps: DeployRunnerDeps = {
+    gatherGates: () =>
+      gatherDeployGates({
+        repoDir,
+        node: typeof args.node === "string" ? args.node : undefined,
+        modules,
+        abiPolicy: resolveAbiPolicy(args, process.env),
+        requireFreshness: args["require-fresh"] === true,
+        remote: typeof args.remote === "string" ? args.remote : undefined,
+        branch: typeof args.branch === "string" ? args.branch : undefined,
+      }),
+    runStep: (step) => ({ ok: spawnSync(step.cmd, step.args, { stdio: "inherit" }).status === 0 }),
+    verify: smokeVerifier({ baseUrl, pidBefore, pidAfter, routes }),
+    planRollback: (sha) => planRollbackSteps(sha, { repoDir }),
+    lastGoodSha: lastGoodShaReader(repoDir),
+  };
+
+  const result = await runDeploy(deps, { repoDir, execute: args.execute === true });
+  console.log(JSON.stringify(result, null, 2));
+  switch (result.outcome) {
+    case "deployed":
+    case "planned":
+    case "rolled_back":
+      return 0; // recovered or clean / dry-run
+    case "halted_preflight":
+      return 3; // gate blocked the deploy
+    default:
+      return 1; // deploy_step_failed / rollback_failed
+  }
+}
+
 async function main(): Promise<void> {
   const [, , sub, ...rest] = process.argv;
   const args = parseArgs(rest);
   let code = 0;
   switch (sub) {
+    case "deploy":
+      code = await cmdDeploy(args);
+      break;
     case "smoke":
       code = await cmdSmoke(args);
       break;
@@ -178,7 +232,7 @@ async function main(): Promise<void> {
       break;
     }
     default:
-      console.error("usage: deploy-guard <abi-check|smoke|rollback> [...flags]");
+      console.error("usage: deploy-guard <deploy|abi-check|smoke|rollback> [...flags]");
       code = 2;
   }
   process.exit(code);
