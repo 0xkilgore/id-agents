@@ -22,6 +22,7 @@ import {
   type ResolvedPool,
 } from "../../src/continuous-orchestration/daemon.js";
 import { defaultConfig, type ContinuousOrchestrationConfig } from "../../src/continuous-orchestration/config.js";
+import { buildPoolRouting } from "../../src/continuous-orchestration/factory.js";
 import type { BacklogItem, UsageGateView } from "../../src/continuous-orchestration/types.js";
 
 const okUsage = (): { view: UsageGateView; daily_tokens_used: number } => ({
@@ -168,5 +169,49 @@ describe("SOAK — backlog drains in parallel with no strangle", () => {
     expect(doneCount).toBe(9);
     expect(await listBacklogByState(adapter, { state: "ready" })).toHaveLength(0);
     expect(await listBacklogByState(adapter, { state: "in_flight" })).toHaveLength(0);
+  });
+});
+
+describe("snag #11 — backend pool spills to eames + gaudi (real registry)", () => {
+  it("a backend-track tick fires to eames AND gaudi, not just brunel/hopper", async () => {
+    // Wire the REAL seed router (not the fake) so this proves the live routing
+    // table: eames/gaudi were stranded in the frontend pool and never took
+    // backend (id-agents) work; now they spill alongside brunel/hopper.
+    // Width-5 here so all four local builders + the primary fire in one tick;
+    // production default is 4 (env-tunable).
+    for (let i = 0; i < 5; i++) await seedBuildItem(i);
+    const { daemon, fired } = makeDaemon({
+      config: { max_in_flight: 10 },
+      pools: buildPoolRouting({ BUILD_POOL_BACKEND_MAX_PARALLEL: "5" }),
+    });
+    await daemon.setMode("running");
+
+    const tick = await daemon.runTick();
+
+    const builders = new Set(fired.map((i) => i.to_agent));
+    // The operator's verify signal: decision log shows pool backend → eames/gaudi.
+    expect(builders.has("eames")).toBe(true);
+    expect(builders.has("gaudi")).toBe(true);
+    expect(builders.has("brunel")).toBe(true);
+    expect(builders.has("hopper")).toBe(true);
+    // Every fire is a backend-pool decision naming its builder + worktree.
+    const poolFires = tick.decisions.filter((d) => d.reason?.includes("pool backend →"));
+    expect(poolFires.length).toBe(5);
+    for (const name of ["eames", "gaudi"]) {
+      expect(poolFires.some((d) => d.reason?.includes(`→ ${name} `))).toBe(true);
+    }
+  });
+
+  it("default backend width is 4 so the local pool runs 4-wide (was effectively 2-wide)", async () => {
+    for (let i = 0; i < 6; i++) await seedBuildItem(i);
+    const { daemon, fired } = makeDaemon({
+      config: { max_in_flight: 10 },
+      pools: buildPoolRouting({}), // seed default
+    });
+    await daemon.setMode("running");
+    await daemon.runTick();
+
+    expect(fired).toHaveLength(4); // 4-wide, not 2
+    expect(new Set(fired.map((i) => i.to_agent)).size).toBe(4); // 4 DISTINCT builders
   });
 });

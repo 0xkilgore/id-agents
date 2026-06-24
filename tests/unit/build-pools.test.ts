@@ -116,6 +116,23 @@ describe("BuildPoolRegistry", () => {
     expect(r.byId("backend")!.members[0]).toBe("roger");
   });
 
+  it("backend pool includes eames + gaudi so the local builder pool runs 4-wide (snag #11)", () => {
+    // brunel/hopper alone left the 4-wide pool running 2-wide; eames/gaudi were
+    // stranded in the frontend pool with no T-UI/T-SITE/T-WEB work to take.
+    const r = BuildPoolRegistry.load({});
+    const backend = r.byId("backend")!;
+    expect(backend.members).toEqual(expect.arrayContaining(["brunel", "hopper", "eames", "gaudi"]));
+    // default width must allow all four live builders to fire concurrently.
+    expect(backend.max_parallel).toBe(4);
+    // a backend-track item resolves to a pool that can spill to eames/gaudi.
+    const resolved = r.resolvePool("T-CKPT.7")!;
+    expect(resolved.pool_id).toBe("backend");
+    expect(resolved.members).toEqual(expect.arrayContaining(["eames", "gaudi"]));
+    // eames/gaudi live in EXACTLY one pool (no dual membership → no double-book).
+    expect(r.byId("frontend")!.members).not.toContain("eames");
+    expect(r.byId("frontend")!.members).not.toContain("gaudi");
+  });
+
   it("resolvePool matches by track prefix (longest wins); unknown => undefined", () => {
     const r = BuildPoolRegistry.load({});
     expect(r.resolvePool("T-CKPT.7")!.pool_id).toBe("backend");
@@ -125,7 +142,7 @@ describe("BuildPoolRegistry", () => {
 
   it("max_parallel is env-tunable per pool; garbage ignored", () => {
     expect(BuildPoolRegistry.load({ BUILD_POOL_BACKEND_MAX_PARALLEL: "5" }).byId("backend")!.max_parallel).toBe(5);
-    expect(BuildPoolRegistry.load({ BUILD_POOL_BACKEND_MAX_PARALLEL: "x" }).byId("backend")!.max_parallel).toBe(3);
-    expect(BuildPoolRegistry.load({ BUILD_POOL_BACKEND_MAX_PARALLEL: "0" }).byId("backend")!.max_parallel).toBe(3);
+    expect(BuildPoolRegistry.load({ BUILD_POOL_BACKEND_MAX_PARALLEL: "x" }).byId("backend")!.max_parallel).toBe(4);
+    expect(BuildPoolRegistry.load({ BUILD_POOL_BACKEND_MAX_PARALLEL: "0" }).byId("backend")!.max_parallel).toBe(4);
   });
 });
