@@ -898,6 +898,10 @@ export async function migrateSqlite(adapter: SqliteAdapter): Promise<void> {
   // P1 Dependency-Graph Orchestrator tables (idempotent — CREATE IF NOT EXISTS).
   const { migrateGraphTables } = await import('../../graph/storage.js');
   migrateGraphTables(adapter);
+
+  // Build-pool merge-queue (idempotent — CREATE IF NOT EXISTS).
+  const { migrateMergeQueueTables } = await import('../../merge-queue/storage.js');
+  await migrateMergeQueueTables(adapter);
 }
 
 /**
