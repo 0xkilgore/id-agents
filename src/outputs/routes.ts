@@ -36,6 +36,7 @@ import {
   searchArtifacts,
   upsertArtifactDraft,
 } from './storage.js';
+import { planCorpusSearch } from '../corpus-search/lane.js';
 import { artifactRowToEntry } from './entry-projection.js';
 import { EDIT_OP_TYPE, buildEditPayload, isEditInProductEnabled, latestEdit } from './edit.js';
 import { checkArtifactParity } from './parity.js';
@@ -398,7 +399,18 @@ export function mountOutputsRoutes(
       const limit = Math.min(parseInt(req.query.limit as string, 10) || 50, 500);
       const offset = parseInt(req.query.offset as string, 10) || 0;
 
-      const rows = await searchArtifacts(adapter, q, { limit, offset });
+      // T-CKPT.corpus-search — lane guard. Internal corpus queries run on the
+      // local FTS5 index; a web/external-scoped query (web:/site:/URL) is NOT
+      // silently run through FTS — it 400s until a web provider is wired (per the
+      // Exa review: keep the internal + external lanes separate). An empty query
+      // keeps its existing behavior (falls through to an empty result set).
+      const plan = planCorpusSearch(q);
+      if (!plan.ok && plan.reason === 'external_lane_disabled') {
+        return res.status(400).json({ error: plan.error, lane: plan.lane, reason: plan.reason });
+      }
+      const searchQuery = plan.ok ? plan.query : q;
+
+      const rows = await searchArtifacts(adapter, searchQuery, { limit, offset });
       const items: ArtifactEntry[] = [];
       for (const row of rows) {
         const [review, ops] = await Promise.all([
