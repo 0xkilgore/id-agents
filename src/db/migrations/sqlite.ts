@@ -273,6 +273,22 @@ export async function migrateSqlite(adapter: SqliteAdapter): Promise<void> {
     CREATE INDEX IF NOT EXISTS news_items_query_idx ON news_items(team_id, agent_id, query_id);
     CREATE INDEX IF NOT EXISTS agents_token_idx ON agents(token_id) WHERE token_id IS NOT NULL;
 
+    -- T-CKPT.agent-sharing/F4: agent sharing/delegation grants over the Monday
+    -- actor-ref seed model. share = visibility for the grantee; delegate =
+    -- act-as/dispatch rights. Cross-org sharing is intentionally out of scope.
+    CREATE TABLE IF NOT EXISTS agent_grant (
+      id TEXT PRIMARY KEY,
+      team_id TEXT NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+      agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+      grantor_actor_ref TEXT NOT NULL,
+      grantee_actor_ref TEXT NOT NULL,
+      grant_kind TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      revoked_at INTEGER
+    );
+    CREATE INDEX IF NOT EXISTS agent_grant_agent_idx ON agent_grant(team_id, agent_id);
+    CREATE INDEX IF NOT EXISTS agent_grant_grantee_idx ON agent_grant(team_id, grantee_actor_ref);
+
     CREATE TABLE IF NOT EXISTS schedule_definitions (
       id TEXT PRIMARY KEY,
       kind TEXT NOT NULL,

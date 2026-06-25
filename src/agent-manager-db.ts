@@ -167,6 +167,15 @@ import {
 import { sendTelegramAlert } from './continuous-orchestration/telegram.js';
 import { normalizeActorRef } from './actor-identity.js';
 import {
+  validateGrantInput,
+  createAgentGrant,
+  listAgentGrants,
+  getAgentGrant,
+  revokeAgentGrant,
+  visibleGrantsFor,
+  canRevokeGrant,
+} from './agent-sharing/grants.js';
+import {
   getAgentsEffectiveness,
   getAgentDispatches,
   type RosterEntry,
@@ -5562,6 +5571,64 @@ export class AgentManagerDb {
       }
 
       res.json({ id: agent.id, name: agent.name, metadata: nextMetadata });
+    });
+
+    // T-CKPT.agent-sharing/F4: share/delegate an agent to another operator over
+    // the Monday actor-ref seed model. share = visibility; delegate = act-as.
+    // Backend contract; Regina's UI follows. Cross-org sharing is out of scope.
+    this.managementApp.post('/agents/:id/grants', async (req, res) => {
+      const { id: teamId } = await this.getTeam(req);
+      const agent = await this.dbQueryAgentById(teamId, req.params.id);
+      if (!agent) return res.status(404).json({ ok: false, error: 'Agent not found' });
+
+      const body = req.body || {};
+      const validated = validateGrantInput({
+        grantor: body.actor_ref ?? body.actorRef ?? body.grantor_actor_ref,
+        grantee: body.grantee_actor_ref ?? body.grantee,
+        grant_kind: body.grant_kind ?? body.kind,
+      });
+      if (!validated.ok) {
+        return res.status(400).json({ ok: false, ...validated.error });
+      }
+
+      const grant = await createAgentGrant(this.db.adapter, {
+        team_id: teamId,
+        agent_id: agent.id,
+        ...validated.value,
+      });
+      res.json({ ok: true, grant });
+    });
+
+    this.managementApp.get('/agents/:id/grants', async (req, res) => {
+      const { id: teamId } = await this.getTeam(req);
+      const agent = await this.dbQueryAgentById(teamId, req.params.id);
+      if (!agent) return res.status(404).json({ ok: false, error: 'Agent not found' });
+
+      const viewer = normalizeActorRef(req.query.actor_ref ?? req.query.actorRef);
+      if (!viewer.ok) return res.status(400).json({ ok: false, code: viewer.code, error: viewer.error });
+
+      const includeRevoked = req.query.include_revoked === '1' || req.query.include_revoked === 'true';
+      const all = await listAgentGrants(this.db.adapter, { team_id: teamId, agent_id: agent.id, includeRevoked });
+      res.json({ ok: true, grants: visibleGrantsFor(all, viewer.actor.ref) });
+    });
+
+    this.managementApp.post('/agents/:id/grants/:gid/revoke', async (req, res) => {
+      const { id: teamId } = await this.getTeam(req);
+      const agent = await this.dbQueryAgentById(teamId, req.params.id);
+      if (!agent) return res.status(404).json({ ok: false, error: 'Agent not found' });
+
+      const actor = normalizeActorRef((req.body || {}).actor_ref ?? (req.body || {}).actorRef);
+      if (!actor.ok) return res.status(400).json({ ok: false, code: actor.code, error: actor.error });
+
+      const existing = await getAgentGrant(this.db.adapter, { team_id: teamId, id: req.params.gid });
+      if (!existing || existing.agent_id !== agent.id) {
+        return res.status(404).json({ ok: false, error: 'Grant not found' });
+      }
+      if (!canRevokeGrant(existing, actor.actor.ref)) {
+        return res.status(403).json({ ok: false, error: 'only the grantor or user:chris may revoke this grant' });
+      }
+      const grant = await revokeAgentGrant(this.db.adapter, { team_id: teamId, id: req.params.gid });
+      res.json({ ok: true, grant });
     });
 
     // Note: Agent catalogs are managed by agents themselves via their /catalog endpoint
