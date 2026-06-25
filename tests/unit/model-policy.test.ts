@@ -62,6 +62,30 @@ describe("config normalization", () => {
     const svc = buildModelPolicyService({ default: { primary: { runtime: "codex" } } }, "file");
     expect(svc.constrainedProviders()).toEqual(DEFAULT_CONSTRAINED_PROVIDERS);
   });
+
+  it("treats explicit empty constrained_providers as no constrained lanes", () => {
+    const svc = buildModelPolicyService(
+      { constrained_providers: [], default: { primary: { runtime: "codex" } } },
+      "file",
+    );
+    expect(svc.constrainedProviders()).toEqual([]);
+  });
+
+  it("falls back to default constrained_providers when all configured providers are invalid", () => {
+    const svc = buildModelPolicyService(
+      { constrained_providers: ["bogus"], default: { primary: { runtime: "codex" } } },
+      "file",
+    );
+    expect(svc.constrainedProviders()).toEqual(DEFAULT_CONSTRAINED_PROVIDERS);
+  });
+
+  it("filters invalid configured providers without discarding valid providers", () => {
+    const svc = buildModelPolicyService(
+      { constrained_providers: ["bogus", "anthropic"], default: { primary: { runtime: "codex" } } },
+      "file",
+    );
+    expect(svc.constrainedProviders()).toEqual(["anthropic"]);
+  });
 });
 
 describe("resolver — Codex Light", () => {

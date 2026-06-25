@@ -45,7 +45,8 @@ const BUILTIN_DEFAULT: RawModelPolicyConfig = {
 };
 
 function normalizeProviderList(raw: string[] | undefined): Provider[] {
-  if (!raw || raw.length === 0) return [...DEFAULT_CONSTRAINED_PROVIDERS];
+  if (raw === undefined) return [...DEFAULT_CONSTRAINED_PROVIDERS];
+  if (raw.length === 0) return [];
   const valid: Provider[] = ["anthropic", "openai", "cursor", "local", "other"];
   const out = raw.filter((p): p is Provider => valid.includes(p as Provider));
   return out.length > 0 ? out : [...DEFAULT_CONSTRAINED_PROVIDERS];
