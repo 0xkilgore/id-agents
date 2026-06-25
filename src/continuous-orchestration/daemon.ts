@@ -24,11 +24,13 @@ import {
   listBacklogByState,
   listDoneItemIds,
   listReadyItems,
+  promoteToReady,
   recordTickOutcome,
   setItemState,
   setMode,
 } from "./storage.js";
 import { runFleshPass, type FleshRunSummary } from "./flesh-runner.js";
+import { selectAutoPromotions } from "./auto-promote-policy.js";
 import { sendTelegramAlert, type AlertSender } from "./telegram.js";
 
 /** Raw dispatch statuses that mean the work is finished — its write-scope lock
@@ -113,7 +115,22 @@ export interface TickResult {
   auto_paused: { reason: string } | null;
   /** Auto-flesh refuel summary, when a refuel pass ran this tick. */
   refuel: FleshRunSummary | null;
+  /** Floor-triggered auto-promote summary, when an auto-promote pass ran. */
+  auto_promote: AutoPromoteRunSummary | null;
   decisions: DecisionRecord[];
+}
+
+/** Outcome of one floor-triggered auto-promote pass. */
+export interface AutoPromoteRunSummary {
+  /** True when build-ready fuel/lanes were below floor and a top-up ran. */
+  triggered: boolean;
+  /** Items promoted needs_review -> ready this pass. */
+  promoted: number;
+  /** Safe-gate rejections among the needs_review candidates. */
+  skipped: number;
+  /** Build-ready total/lanes before the pass. */
+  before: { build_ready: number; build_lanes: number };
+  dry_run: boolean;
 }
 
 export class ContinuousOrchestrationDaemon {
@@ -165,6 +182,17 @@ export class ContinuousOrchestrationDaemon {
     const { view: usage, daily_tokens_used } = await this.deps.readUsage();
     const { count: in_flight, active_write_scopes } = await this.deps.readInFlight();
 
+    // ADMISSION-V2 follow-up: AUTO-PROMOTE first (free) — drain already-fleshed
+    // `needs_review` build items into READY to meet the build-ready floor across
+    // lanes, BEFORE the token-costly flesh refuel. Then refuel only fills any
+    // remaining gap, so the parallel pool self-maintains without manual /promote.
+    const autoPromote = await this.maybeAutoPromote({
+      config,
+      mode: state.mode,
+      killSwitch,
+      hardPaused: usage.hard_paused,
+    });
+
     // Daemon SELF-REFUEL: when READY fuel runs low — at a batch load-point or
     // when fully dry — flesh skeletons into dispatchable READY items BEFORE
     // admission, so a near-empty backlog refuels itself without operator action.
@@ -207,6 +235,24 @@ export class ContinuousOrchestrationDaemon {
     const plan = planAdmission(ordered, ctx, config);
     const decisions: DecisionRecord[] = [...reconcileDecisions];
     const admitted: Array<{ item_id: string; dispatch_phid: string | null }> = [];
+
+    if (autoPromote) {
+      decisions.push({
+        item_id: null,
+        action: "auto_promote",
+        reason:
+          `auto-promote${autoPromote.dry_run ? " (dry-run)" : ""}: ` +
+          `build-ready ${autoPromote.before.build_ready} (lanes ${autoPromote.before.build_lanes}) ` +
+          `-> +${autoPromote.promoted} promoted, ${autoPromote.skipped} held by safety gate`,
+        metadata: {
+          dry_run: autoPromote.dry_run,
+          promoted: autoPromote.promoted,
+          skipped: autoPromote.skipped,
+          build_ready_before: autoPromote.before.build_ready,
+          build_lanes_before: autoPromote.before.build_lanes,
+        },
+      });
+    }
 
     if (refuel) {
       decisions.push({
@@ -328,6 +374,7 @@ export class ContinuousOrchestrationDaemon {
       stall_alert: stall.alert,
       auto_paused,
       refuel,
+      auto_promote: autoPromote,
       decisions,
     };
   }
@@ -518,6 +565,59 @@ export class ContinuousOrchestrationDaemon {
       });
     } catch (err) {
       console.error("[orchestration] refuel error:", err);
+      return null;
+    }
+  }
+
+  /**
+   * Floor-triggered AUTO-PROMOTE (ADMISSION-V2 follow-up). Before fleshing new
+   * skeletons (token-costly), drain the cheap backlog: when build-ready fuel is
+   * below the floor, promote already-fleshed, safe `needs_review` build items to
+   * READY per-lane. Subordinate to auto_flesh_enabled (the autonomous master
+   * switch) + auto_promote_enabled. Reuses the flesh-policy safety gate — never
+   * promotes approval-gated/destructive work. Mutates only when live (dry-run
+   * computes + logs the would-promote set).
+   */
+  private async maybeAutoPromote(args: {
+    config: DaemonDeps["config"];
+    mode: OrchestrationMode;
+    killSwitch: boolean;
+    hardPaused: boolean;
+  }): Promise<AutoPromoteRunSummary | null> {
+    const { config } = args;
+    if (!config.auto_flesh_enabled || !config.auto_promote_enabled) return null;
+    if (args.mode !== "running" || args.killSwitch || args.hardPaused) return null;
+
+    try {
+      const [ready, needsReview] = await Promise.all([
+        listReadyItems(this.deps.adapter, this.teamId),
+        listBacklogByState(this.deps.adapter, { team_id: this.teamId, state: "needs_review" }),
+      ]);
+      const plan = selectAutoPromotions(needsReview, ready, {
+        floor: config.auto_promote_floor,
+        minLanes: config.auto_promote_min_lanes,
+        maxPerPass: config.auto_promote_max_per_tick,
+      });
+      if (!plan.triggered) return null;
+
+      let promoted = 0;
+      if (!config.dry_run) {
+        for (const item of plan.promote) {
+          const res = await promoteToReady(this.deps.adapter, item.item_id, "auto-promote-policy");
+          if (res.ok) promoted += 1;
+        }
+      } else {
+        promoted = plan.promote.length; // would-promote count
+      }
+      return {
+        triggered: true,
+        promoted,
+        skipped: plan.skipped.length,
+        before: plan.before,
+        dry_run: config.dry_run,
+      };
+    } catch (err) {
+      console.error("[orchestration] auto-promote error:", err);
       return null;
     }
   }

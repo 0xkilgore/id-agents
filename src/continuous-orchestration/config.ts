@@ -54,6 +54,22 @@ export interface ContinuousOrchestrationConfig {
   min_ready_lanes: number;
   /** Max skeletons fleshed per refuel pass. Default 5. */
   max_flesh_per_tick: number;
+  // ── ADMISSION-V2 follow-up: floor-triggered AUTO-PROMOTE ──
+  /**
+   * When the daemon is autonomous (auto_flesh_enabled), also auto-promote
+   * already-fleshed `needs_review` build items to READY when build-ready fuel is
+   * below the floor — draining the manual-/promote backlog so the pool
+   * self-maintains. Subordinate to auto_flesh_enabled. Default true (active
+   * whenever autonomous refuel is on). Reuses the flesh-policy safety gate;
+   * approval-gated/destructive items are never auto-promoted.
+   */
+  auto_promote_enabled: boolean;
+  /** Build-ready fuel floor the auto-promote pass tops up to. Default 12. */
+  auto_promote_floor: number;
+  /** Distinct write-scopes the build-ready pool must span. Default 2. */
+  auto_promote_min_lanes: number;
+  /** Max auto-promotions per tick. Default 5. */
+  auto_promote_max_per_tick: number;
   /** Weekly daemon-attributed ceiling (the emergency-brake companion to daily). */
   weekly_token_ceiling: number;
   /** Pause the daemon when usage attribution is degraded (live enforce only). */
@@ -141,6 +157,10 @@ export function defaultConfig(): ContinuousOrchestrationConfig {
     min_ready_fuel: 8,
     min_ready_lanes: 1,
     max_flesh_per_tick: 5,
+    auto_promote_enabled: true,
+    auto_promote_floor: 12,
+    auto_promote_min_lanes: 2,
+    auto_promote_max_per_tick: 5,
     weekly_token_ceiling: 25_000_000,
     fail_closed_on_attribution: false,
     flesh: defaultFleshConfig(),
@@ -173,6 +193,13 @@ export function loadContinuousOrchestrationConfig(
     min_ready_fuel: envInt(env.CONTINUOUS_ORCHESTRATION_MIN_READY_FUEL, d.min_ready_fuel),
     min_ready_lanes: envInt(env.CONTINUOUS_ORCHESTRATION_MIN_READY_LANES, d.min_ready_lanes),
     max_flesh_per_tick: envInt(env.CONTINUOUS_ORCHESTRATION_MAX_FLESH_PER_TICK, d.max_flesh_per_tick),
+    auto_promote_enabled: envBool(env.CONTINUOUS_ORCHESTRATION_AUTO_PROMOTE, d.auto_promote_enabled),
+    auto_promote_floor: envInt(env.CONTINUOUS_ORCHESTRATION_AUTO_PROMOTE_FLOOR, d.auto_promote_floor),
+    auto_promote_min_lanes: envInt(env.CONTINUOUS_ORCHESTRATION_AUTO_PROMOTE_MIN_LANES, d.auto_promote_min_lanes),
+    auto_promote_max_per_tick: envInt(
+      env.CONTINUOUS_ORCHESTRATION_AUTO_PROMOTE_MAX_PER_TICK,
+      d.auto_promote_max_per_tick,
+    ),
     weekly_token_ceiling: envInt(env.CONTINUOUS_ORCHESTRATION_WEEKLY_CEILING, d.weekly_token_ceiling),
     fail_closed_on_attribution: envBool(
       env.CONTINUOUS_ORCHESTRATION_FAIL_CLOSED_ON_ATTRIBUTION,

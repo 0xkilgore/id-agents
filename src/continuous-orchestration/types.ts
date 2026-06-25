@@ -127,6 +127,7 @@ export interface DecisionRecord {
     | "stall_alert"
     | "auto_pause"
     | "refuel"
+    | "auto_promote"
     | "reconciled"
     | "would_reconcile";
   reason: string;
