@@ -13,6 +13,7 @@
 import express from 'express';
 import crypto from 'crypto';
 import path from 'path';
+import { deriveMetadataWithRuntime, reconcileAgentRuntime } from './db/agent-runtime-sot.js';
 import { createServer as createHttpServer, type Server as HttpServer } from 'http';
 import { existsSync, mkdirSync, rmSync, readFileSync, writeFileSync, readdirSync, copyFileSync, statSync, lstatSync, openSync, closeSync } from 'fs';
 import { execFileSync, spawn } from 'child_process';
@@ -1246,7 +1247,11 @@ export class AgentManagerDb {
       type: a.type,
       runtime: a.runtime,
       url,
-      metadata: a.metadata,
+      // Runtime Work-Share Slice 1 (§3): metadata.runtime is DERIVED from the
+      // canonical `runtime` column at read time, so the API can never emit a
+      // top-level runtime that disagrees with metadata.runtime (the CTO/Regina/
+      // Rams divergence bug). The column is the single source of truth.
+      metadata: deriveMetadataWithRuntime(a.metadata, a.runtime),
       // Identity fields
       tokenId: a.token_id,
       domain,
@@ -10654,6 +10659,16 @@ export class AgentManagerDb {
           // started) — e.g. build-pool members — on boot. Fire-and-forget;
           // self-guarded so it never blocks/wedges startup.
           void this.spawnPendingLocalAgentsOnBoot();
+          // Runtime Work-Share Slice 1 (§3.3): one-shot idempotent reconcile of
+          // persisted metadata.runtime → the canonical runtime column (fixes the
+          // CTO/Regina/Rams divergence in stored rows). Fire-and-forget + guarded
+          // so it never blocks boot; the /agents read path already derives the
+          // correct value regardless.
+          void reconcileAgentRuntime(this.db.adapter)
+            .then((r) => {
+              if (r.reconciled > 0) console.log(`[Manager] agent-runtime SoT reconcile: fixed ${r.reconciled}/${r.scanned} (${r.already_consistent} already consistent)`);
+            })
+            .catch((err) => console.warn('[Manager] agent-runtime SoT reconcile failed:', err instanceof Error ? err.message : String(err)));
           console.log('[Manager] Kapelle B11 outputs routes mounted (/outputs/inbox, /artifacts/:id/*) with P3 emit target + B2 comment auto-dispatch + filesystem reconciler + worktree reaper');
         } catch (err) {
           console.warn('[Manager] B11 outputs routes failed to mount:', err instanceof Error ? err.message : String(err));

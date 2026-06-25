@@ -5,6 +5,12 @@
 import type { Application, Request, Response } from "express";
 import type { UsageMeterService } from "./service.js";
 import type { DbAdapter } from "../db/db-adapter.js";
+import {
+  computeRuntimeMix,
+  readWorkShareTargets,
+  RUNTIME_MIX_DEFAULT_TARGETS,
+  DEFAULT_RUNTIME_MIX_WINDOW,
+} from "./runtime-mix.js";
 import { listRecentAgentUsageEvents } from "./storage.js";
 import { loadDispatchAttributions } from "./dispatch-attribution.js";
 import { ingestTranscripts } from "./ingest-transcripts.js";
@@ -129,6 +135,23 @@ export function mountUsageMeterRoutes(app: Application, opts: UsageMeterRouteOpt
   // the manager wiring stays untouched; runs on demand + on a best-effort timer.
   if (opts.adapter) {
     const adapter = opts.adapter;
+
+    // GET /usage/runtime-mix — Runtime Work-Share Slice 1 (§4). Rolling ACTUAL
+    // provider/runtime mix of committed dispatches vs the 45/45/10 target.
+    // Read-only; changes nothing about enqueue/runtime selection.
+    //   ?window=N    rolling count (default 100)
+    //   ?team_id=…   scope to one team (default: all teams)
+    app.get("/usage/runtime-mix", async (req: Request, res: Response) => {
+      try {
+        const windowN = clampInt(req.query.window, DEFAULT_RUNTIME_MIX_WINDOW, 1, 10000);
+        const teamId = typeof req.query.team_id === "string" && req.query.team_id ? req.query.team_id : undefined;
+        const targets = (await readWorkShareTargets()) ?? RUNTIME_MIX_DEFAULT_TARGETS;
+        const mix = await computeRuntimeMix(adapter, { windowN, teamId, targets });
+        res.json(mix);
+      } catch (err) {
+        res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+      }
+    });
 
     // POST /usage/ingest?lookback_days=9 — capture now, return counts.
     app.post("/usage/ingest", async (req: Request, res: Response) => {
