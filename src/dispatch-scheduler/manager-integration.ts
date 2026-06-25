@@ -147,6 +147,9 @@ export interface EnqueueInputV2 {
   // for the same logical work reuses the existing non-terminal dispatch instead
   // of creating a duplicate (collapses continuous-orchestration re-fires).
   dedup_key?: string;
+  // Operator escape hatch for an intentional second fire. This suppresses both
+  // explicit and centrally-computed dedup keys.
+  allow_duplicate?: boolean;
   // Spec 054 v2 Part 2 - promotion metadata at enqueue time.
   // Supplying any of repo/branch promotes the dispatch to "build" status
   // (default promote=true). Use `promote: false` with a skip reason for
@@ -158,6 +161,23 @@ export interface EnqueueInputV2 {
   promote?: boolean;
   promotion_strategy?: "auto" | "fast_forward" | "merge_commit" | "squash" | "follow_up_dispatch";
   promotion_skip_reason?: string;
+}
+
+export function computeEnqueueDedupKey(input: EnqueueInputV2): string | undefined {
+  if (input.allow_duplicate) return undefined;
+  if (input.dedup_key) return input.dedup_key;
+  if (!input.repo || !input.branch) return undefined;
+  const base = input.base || "main";
+  const remote = input.remote || "origin";
+  return [
+    "build",
+    input.team_id ?? "default",
+    input.to_agent,
+    input.repo,
+    input.branch,
+    base,
+    remote,
+  ].join(":");
 }
 
 export interface EnqueueResult {
@@ -433,6 +453,7 @@ export class SchedulerHandle {
           promotion_skip_reason: input.promotion_skip_reason ?? null,
         }
       : null;
+    const dedupKey = computeEnqueueDedupKey({ ...input, team_id: teamId });
     // W1-1: normalize the runtime to its canonical identifier, then derive
     // the provider lane FROM the runtime unless the caller explicitly pins a
     // provider. This is what keeps a cursor-cli dispatch out of the Anthropic
@@ -469,7 +490,7 @@ export class SchedulerHandle {
       runtime,
       priority: input.priority ?? 5,
       not_before_at: input.not_before_at,
-      dedup_key: input.dedup_key,
+      dedup_key: dedupKey,
       promote: input.promote,
       promotion_strategy: input.promotion_strategy,
       promotion_required_reason: input.promotion_skip_reason ?? null,

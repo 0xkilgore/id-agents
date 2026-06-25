@@ -44,6 +44,7 @@ async function findFreePort(): Promise<number> {
 
 let port: number;
 let manager: AgentManagerDb;
+let db: Awaited<ReturnType<typeof createInMemoryDb>>;
 let baseUrl: string;
 let workDir: string;
 
@@ -51,9 +52,15 @@ beforeAll(async () => {
   port = await findFreePort();
   workDir = fs.mkdtempSync(path.join(os.tmpdir(), "agent-done-promo-"));
   baseUrl = `http://127.0.0.1:${port}`;
-  const db = await createInMemoryDb();
+  db = await createInMemoryDb();
   manager = new AgentManagerDb(workDir, db as any);
   await manager.start(port);
+  const defaultTeamId = await db.teams.getOrCreateTeamId("default");
+  await db.adapter.query(
+    `INSERT INTO agents (team_id, id, name, type, model, port, endpoint, status, created_at, runtime)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [defaultTeamId, "agent_coder_max", "coder-max", "persistent", "claude-opus", 24000, "http://127.0.0.1:19999", "active", Date.now(), "claude-code"],
+  );
 }, 30000);
 
 afterAll(async () => {
@@ -159,6 +166,79 @@ describe("enqueue promotion metadata propagation", () => {
     const doc = await (manager as any).dispatchScheduler.reactor.getByPhid(enq.dispatch_phid);
     expect(doc.promote).toBe(false);
     expect(doc.promotion_input).toBeNull();
+  });
+
+  it("POST /dispatch/enqueue forwards promotion_input metadata and inherits central build dedup", async () => {
+    const payload = {
+      to_agent: "coder-max",
+      from_actor: "operator",
+      message: "build the route",
+      subject: "operator build",
+      promote: true,
+      promotion_strategy: "merge_commit",
+      promotion_input: {
+        repo: "/abs/repo-route",
+        branch: "feat-route",
+        base: "main",
+        remote: "origin",
+      },
+    };
+
+    const first = await fetch(`${baseUrl}/dispatch/enqueue`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    expect(first.status).toBe(200);
+    const firstBody = await first.json() as { ok: boolean; dispatch_phid: string };
+    expect(firstBody.ok).toBe(true);
+
+    const second = await fetch(`${baseUrl}/dispatch/enqueue`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ...payload, message: "build the route again" }),
+    });
+    expect(second.status).toBe(200);
+    const secondBody = await second.json() as { ok: boolean; dispatch_phid: string };
+    expect(secondBody.dispatch_phid).toBe(firstBody.dispatch_phid);
+
+    const doc = await (manager as any).dispatchScheduler.reactor.getByPhid(firstBody.dispatch_phid);
+    expect(doc.promote).toBe(true);
+    expect(doc.promotion_strategy).toBe("merge_commit");
+    expect(doc.promotion_input).toMatchObject({
+      repo: "/abs/repo-route",
+      branch: "feat-route",
+      base: "main",
+      remote: "origin",
+    });
+  });
+
+  it("POST /dispatch/enqueue allow_duplicate bypasses central build dedup", async () => {
+    const payload = {
+      to_agent: "coder-max",
+      from_actor: "operator",
+      message: "build duplicate route",
+      promotion_input: {
+        repo: "/abs/repo-route-dup",
+        branch: "feat-route",
+      },
+    };
+
+    const first = await fetch(`${baseUrl}/dispatch/enqueue`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const firstBody = await first.json() as { dispatch_phid: string };
+
+    const second = await fetch(`${baseUrl}/dispatch/enqueue`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ...payload, allow_duplicate: true }),
+    });
+    expect(second.status).toBe(200);
+    const secondBody = await second.json() as { dispatch_phid: string };
+    expect(secondBody.dispatch_phid).not.toBe(firstBody.dispatch_phid);
   });
 });
 

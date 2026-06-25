@@ -2393,6 +2393,15 @@ export class AgentManagerDb {
           subject?: unknown;
           priority?: unknown;
           wake?: unknown;
+          promote?: unknown;
+          promotion_strategy?: unknown;
+          promotion_input?: unknown;
+          repo?: unknown;
+          branch?: unknown;
+          base?: unknown;
+          remote?: unknown;
+          promotion_skip_reason?: unknown;
+          allow_duplicate?: unknown;
         };
         if (typeof body.to_agent !== 'string' || typeof body.message !== 'string') {
           return res.status(400).json({
@@ -2424,6 +2433,33 @@ export class AgentManagerDb {
             error: `agent "${body.to_agent}" not resolvable to an endpoint`,
           });
         }
+        const promotionInput = (
+          body.promotion_input &&
+          typeof body.promotion_input === 'object' &&
+          !Array.isArray(body.promotion_input)
+        )
+          ? body.promotion_input as {
+              repo?: unknown;
+              branch?: unknown;
+              base?: unknown;
+              remote?: unknown;
+              promotion_skip_reason?: unknown;
+            }
+          : {};
+        const promotionStrategy = typeof body.promotion_strategy === 'string'
+          ? body.promotion_strategy
+          : undefined;
+        const allowedPromotionStrategies = ['auto', 'fast_forward', 'merge_commit', 'squash', 'follow_up_dispatch'] as const;
+        if (
+          promotionStrategy !== undefined &&
+          !allowedPromotionStrategies.includes(promotionStrategy as typeof allowedPromotionStrategies[number])
+        ) {
+          return res.status(400).json({
+            ok: false,
+            error: 'promotion_strategy must be one of auto, fast_forward, merge_commit, squash, follow_up_dispatch',
+          });
+        }
+        const typedPromotionStrategy = promotionStrategy as typeof allowedPromotionStrategies[number] | undefined;
         const enq = await this.dispatchScheduler.enqueue(
           {
             to_agent: body.to_agent,
@@ -2431,14 +2467,33 @@ export class AgentManagerDb {
             message: body.message,
             subject: typeof body.subject === 'string' ? body.subject : undefined,
             priority: typeof body.priority === 'number' ? body.priority : undefined,
+            repo: typeof promotionInput.repo === 'string'
+              ? promotionInput.repo
+              : typeof body.repo === 'string' ? body.repo : undefined,
+            branch: typeof promotionInput.branch === 'string'
+              ? promotionInput.branch
+              : typeof body.branch === 'string' ? body.branch : undefined,
+            base: typeof promotionInput.base === 'string'
+              ? promotionInput.base
+              : typeof body.base === 'string' ? body.base : undefined,
+            remote: typeof promotionInput.remote === 'string'
+              ? promotionInput.remote
+              : typeof body.remote === 'string' ? body.remote : undefined,
+            promote: typeof body.promote === 'boolean' ? body.promote : undefined,
+            promotion_strategy: typedPromotionStrategy,
+            promotion_skip_reason: typeof promotionInput.promotion_skip_reason === 'string'
+              ? promotionInput.promotion_skip_reason
+              : typeof body.promotion_skip_reason === 'string' ? body.promotion_skip_reason : undefined,
+            allow_duplicate: body.allow_duplicate === true,
           },
           { target_url: agent.endpoint, wake: body.wake === true },
         );
         return res.json({ ok: true, ...enq });
       } catch (err) {
-        return res.status(500).json({
+        const msg = err instanceof Error ? err.message : String(err);
+        return res.status(msg.startsWith('enqueue:') ? 400 : 500).json({
           ok: false,
-          error: err instanceof Error ? err.message : String(err),
+          error: msg,
         });
       }
     });
