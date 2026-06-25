@@ -23,11 +23,12 @@ const RESERVED_SLUGS = [
   "biweekly-project-report",
   "maestra-product-log",
   "sentinel-verification-2h",
+  "id-agents-parity-weekly", // T-DEPLOY.6 weekly id-agents↔Kapelle parity lane
 ];
 
 describe("seed catalog", () => {
   it("registers all reserved L1-L8 loops (+ per-project instances) by slug", () => {
-    expect(SEED_LOOPS).toHaveLength(9);
+    expect(SEED_LOOPS).toHaveLength(10);
     expect(SEED_LOOPS.map((l) => l.slug).sort()).toEqual([...RESERVED_SLUGS].sort());
   });
 
@@ -36,6 +37,16 @@ describe("seed catalog", () => {
     expect(l.kind).toBe("report");
     expect(l.owner_agent).toBe("blowout");
     expect(l.project?.slug).toBe("blowout");
+    expect(l.enabled).toBe(false); // registered + manual-runnable; not auto-scheduled yet
+    expect(l.allow_manual_run).toBe(true);
+    expect(l.allow_scheduled_run).toBe(true);
+  });
+
+  it("registers the T-DEPLOY.6 id-agents↔Kapelle weekly parity lane (verification, owner maestra, Kapelle-bound, registered-disabled)", () => {
+    const l = SEED_LOOPS.find((x) => x.slug === "id-agents-parity-weekly")!;
+    expect(l.kind).toBe("verification");
+    expect(l.owner_agent).toBe("maestra");
+    expect(l.project?.project_phid).toBe("phid:proj:kapelle");
     expect(l.enabled).toBe(false); // registered + manual-runnable; not auto-scheduled yet
     expect(l.allow_manual_run).toBe(true);
     expect(l.allow_scheduled_run).toBe(true);
@@ -90,17 +101,17 @@ describe("listLoops", () => {
     expect(res.schema_version).toBe("loops-list-v1");
     expect(res.source).toBe("seed_catalog");
     expect(res.generated_at).toBe(NOW);
-    expect(res.loops).toHaveLength(9);
+    expect(res.loops).toHaveLength(10);
   });
 
   it("computes filter facets over the full catalog with counts", () => {
     const { filters } = listLoops(NOW);
     const owners = Object.fromEntries(filters.owners.map((o) => [o.value, o.count]));
-    expect(owners["maestra"]).toBe(3); // morning-digest, project-load, maestra-product-log
+    expect(owners["maestra"]).toBe(4); // morning-digest, project-load, maestra-product-log, id-agents-parity-weekly
     const kinds = Object.fromEntries(filters.kinds.map((k) => [k.value, k.count]));
     expect(kinds["report"]).toBe(5); // project-load, weekly, weekly-blowout, biweekly, maestra-product-log
     expect(filters.statuses.find((s) => s.value === "unknown")?.count).toBe(5);
-    expect(filters.statuses.find((s) => s.value === "disabled")?.count).toBe(4);
+    expect(filters.statuses.find((s) => s.value === "disabled")?.count).toBe(5);
   });
 
   it("filters by owner_agent", () => {
@@ -115,7 +126,7 @@ describe("listLoops", () => {
   });
 
   it("filters by health status", () => {
-    expect(listLoops(NOW, { status: "disabled" }).loops).toHaveLength(4);
+    expect(listLoops(NOW, { status: "disabled" }).loops).toHaveLength(5);
     expect(listLoops(NOW, { status: "unknown" }).loops).toHaveLength(5);
   });
 
@@ -127,6 +138,7 @@ describe("listLoops", () => {
   it("filters by project_phid", () => {
     const res = listLoops(NOW, { project_phid: "phid:proj:kapelle" });
     expect(res.loops.map((l) => l.slug).sort()).toEqual([
+      "id-agents-parity-weekly",
       "maestra-product-log",
       "sentinel-verification-2h",
     ]);

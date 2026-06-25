@@ -79,7 +79,7 @@ describe('GET /loops registry routes', () => {
     expect(body.ok).toBe(true);
     expect(body.schema_version).toBe('loops-list-v1');
     expect(body.source).toBe('seed_catalog');
-    expect(body.loops).toHaveLength(9);
+    expect(body.loops).toHaveLength(10);
     expect(body.filters.owners.length).toBeGreaterThan(0);
     // every row carries the read-model identity + placeholder health
     for (const l of body.loops) {

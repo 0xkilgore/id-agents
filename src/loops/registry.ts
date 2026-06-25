@@ -271,6 +271,21 @@ const SEED_LOOP_DEFS: SeedLoopDef[] = [
     schedule_label: "Every 2h + weekly Sun + biweekly",
     stale_after_minutes: 3 * 60,
   },
+  {
+    slug: "id-agents-parity-weekly",
+    name: "id-agents ↔ Kapelle Parity (Weekly)",
+    description:
+      "Weekly id-agents↔Kapelle continuous-sync hygiene (T-DEPLOY.6): runs the id-agents-compat suite (tests/unit/id-agents-compat.test.ts) + reviews the executable parity ledger (src/compat/console-contract.ts), flagging manager/runtime API deltas before they cause a deploy-class incident. Owner Maestra.",
+    kind: "verification",
+    owner_agent: "maestra",
+    project: KAPELLE_PROJECT,
+    // Registered + manually runnable now; flip `enabled` to start the weekly cadence.
+    enabled: false,
+    allow_scheduled_run: true,
+    allow_manual_run: true,
+    schedule_label: "Weekly Sun",
+    stale_after_minutes: 8 * 24 * 60,
+  },
 ];
 
 /** Placeholder health for a registry-only loop (no runs recorded yet). The
