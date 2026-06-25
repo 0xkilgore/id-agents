@@ -36,6 +36,12 @@ import {
 } from './tasks-readmodel/task-draft.js';
 import { resolveTrack } from './track-registry/registry.js';
 import { assembleAgentDetail } from './agent-detail/assemble.js';
+import {
+  createReadGuard,
+  DEFAULT_MAX_CONCURRENT as READ_GUARD_MAX,
+  DEFAULT_TIMEOUT_MS as READ_GUARD_TIMEOUT_MS,
+  type ReadGuard,
+} from './control-plane/read-guard.js';
 import { resolveManagerNode } from './lib/native-node.js';
 import { isBootSpawnableAgent } from './lib/boot-spawn.js';
 import { sweepOrphanAgents, listMatchingProcesses } from './lib/orphan-sweep.js';
@@ -470,6 +476,8 @@ interface ProcessInspection {
 
 export class AgentManagerDb {
   private managementApp: express.Application;
+  /** P0 control-plane Slice 1 — heavy-read protection middleware. */
+  private readGuard: ReadGuard;
   private httpServer: HttpServer | null = null;
   private wss: WebSocketServer | null = null;
   private wsClients: Set<WSClient> = new Set();
@@ -711,6 +719,19 @@ export class AgentManagerDb {
 
     this.managementApp = express();
     this.managementApp.use(express.json());
+
+    // P0 control-plane Slice 1: read-path protection. Sheds/timeouts heavy
+    // reads (/dispatches, /agents, /outputs/inbox) BEFORE the team-context DB
+    // lookup, so a read storm against the shared sqlite connection can't starve
+    // the event loop. Health probes (/health, */health) and all writes pass
+    // through untouched. Env-tunable; defaults are the plan's 3 / 2500ms.
+    const readGuardMax = Number(process.env.MANAGER_READ_GUARD_MAX_CONCURRENT);
+    const readGuardTimeout = Number(process.env.MANAGER_READ_GUARD_TIMEOUT_MS);
+    this.readGuard = createReadGuard({
+      maxConcurrent: Number.isFinite(readGuardMax) && readGuardMax > 0 ? Math.floor(readGuardMax) : READ_GUARD_MAX,
+      timeoutMs: Number.isFinite(readGuardTimeout) && readGuardTimeout > 0 ? Math.floor(readGuardTimeout) : READ_GUARD_TIMEOUT_MS,
+    });
+    this.managementApp.use(this.readGuard.middleware);
 
     // Ensure teams + manager dirs exist in the mounted workspace
     const teamsDir = `${baseWorkDir}/teams`;
@@ -4829,8 +4850,14 @@ export class AgentManagerDb {
       const includeAll = req.query.all === 'true' || req.query.all === '1';
       const agents = await this.dbListAgents(teamId, includeAll);
       const isAdmin = this.isAdminRequest(req);
+      // P0 control-plane Slice 1 (c): bound the result so the list read can't
+      // serialize an unbounded full scan. Default 100, max 500 (?limit clamps).
+      const limit = parseReadLimit(req.query.limit);
+      const mapped = agents.map(a => this.agentToResponse(a, { isAdmin }));
       res.json({
-        agents: agents.map(a => this.agentToResponse(a, { isAdmin }))
+        count: Math.min(mapped.length, limit),
+        total: mapped.length,
+        agents: mapped.slice(0, limit),
       });
     });
 
