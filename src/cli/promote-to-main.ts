@@ -18,6 +18,7 @@
 
 import { spawn } from "node:child_process";
 import { appendAgentTrailer } from "../lib/agent-attribution.js";
+import { classifySmokeFailures } from "./smoke-exempt.js";
 
 export type Strategy =
   | "auto"
@@ -36,6 +37,9 @@ export interface PromoteArgs {
   /** Agent the dispatch was routed to; stamped as an `Agent:` commit trailer. */
   agent: string | null;
   smoke: string | null;
+  /** T-QA.7: globs of test files whose failure must NOT abort the promotion.
+   *  Empty = today's behavior (any smoke failure aborts). */
+  smokeExempt: string[];
   execute: boolean;
   allowOwnDirty: string[];
   json: boolean;
@@ -54,6 +58,14 @@ export interface PromoteResult {
   verified: boolean;
   /** Only present in preflight mode. */
   preflight?: true;
+  /** T-QA.7: present when a smoke command ran. Surfaces the gate decision so the
+   *  operator sees WHY a promotion proceeded despite a red suite. */
+  smoke?: {
+    exit_code: number;
+    gate: "passed" | "passed_with_exempt_failures";
+    /** Failing test files that were exempted (only when gate downgraded). */
+    exempt_failures?: string[];
+  };
   /** Human-readable summary line for stdout. */
   summary: string;
 }
@@ -79,7 +91,7 @@ export interface GitDeps {
 
 const KNOWN_FLAGS = new Set([
   "--repo", "--branch", "--base", "--remote", "--strategy",
-  "--dispatch-id", "--agent", "--smoke", "--execute",
+  "--dispatch-id", "--agent", "--smoke", "--smoke-exempt", "--execute",
   "--allow-own-dirty", "--json",
 ]);
 
@@ -92,6 +104,7 @@ export function parsePromoteArgs(argv: string[]): PromoteArgs {
   let dispatchId: string | null = null;
   let agent: string | null = null;
   let smoke: string | null = null;
+  let smokeExempt: string[] = [];
   let execute = false;
   let allowOwnDirty: string[] = [];
   let json = false;
@@ -123,6 +136,10 @@ export function parsePromoteArgs(argv: string[]): PromoteArgs {
       case "--dispatch-id": dispatchId = val; break;
       case "--agent": agent = val; break;
       case "--smoke": smoke = val; break;
+      case "--smoke-exempt":
+        // Repeatable + comma-separated; accumulates across occurrences.
+        smokeExempt = smokeExempt.concat(val.split(",").map((s) => s.trim()).filter(Boolean));
+        break;
       case "--allow-own-dirty":
         allowOwnDirty = val.split(",").map((s) => s.trim()).filter(Boolean);
         break;
@@ -130,7 +147,7 @@ export function parsePromoteArgs(argv: string[]): PromoteArgs {
   }
   if (!repo) throw new PromoteArgError("--repo is required");
   if (!branch) throw new PromoteArgError("--branch is required");
-  return { repo, branch, base, remote, strategy, dispatchId, agent, smoke, execute, allowOwnDirty, json };
+  return { repo, branch, base, remote, strategy, dispatchId, agent, smoke, smokeExempt, execute, allowOwnDirty, json };
 }
 
 // ────────────────────────────────────────────────────────────────────
@@ -208,7 +225,7 @@ export async function runPromoteToMain(
   deps: GitDeps,
   io: { stdout: (s: string) => void; stderr: (s: string) => void },
 ): Promise<{ exit: number; result: PromoteResult | null; needsClarification?: NeedsClarificationPayload }> {
-  const { repo, branch, base, remote, strategy, dispatchId, agent, smoke, execute, allowOwnDirty, json } = args;
+  const { repo, branch, base, remote, strategy, dispatchId, agent, smoke, smokeExempt, execute, allowOwnDirty, json } = args;
 
   // Step 1: Working-tree check.
   const statusOut = await deps.git(["status", "--porcelain"], repo);
@@ -369,11 +386,37 @@ export async function runPromoteToMain(
   const promotedSha = (await deps.git(["rev-parse", base], repo)).stdout.trim();
 
   // Step 6: Smoke command (between merge and push).
+  let smokeAnnotation: PromoteResult["smoke"];
   if (smoke) {
     const smokeOut = await deps.exec(smoke, repo);
     if (smokeOut.code !== 0) {
-      io.stderr(`smoke command failed (${smoke}):\nSTDOUT: ${smokeOut.stdout}\nSTDERR: ${smokeOut.stderr}\n`);
-      return { exit: 9, result: null };
+      // T-QA.7 trap fix: a non-zero smoke aborts as before UNLESS the operator
+      // declared --smoke-exempt globs AND every failing test file matches one of
+      // them (a flaky/unrelated red test must not block an otherwise-clean
+      // promotion). With no globs, classification.all_exempt is always false, so
+      // this path is byte-identical to the prior behavior.
+      const classification = classifySmokeFailures(`${smokeOut.stdout}\n${smokeOut.stderr}`, smokeExempt);
+      if (smokeExempt.length > 0 && classification.all_exempt) {
+        smokeAnnotation = {
+          exit_code: smokeOut.code,
+          gate: "passed_with_exempt_failures",
+          exempt_failures: classification.exempt,
+        };
+        io.stderr(
+          `smoke exited ${smokeOut.code} but all ${classification.exempt.length} failing test file(s) are --smoke-exempt; proceeding: ${classification.exempt.join(", ")}\n`,
+        );
+      } else {
+        io.stderr(`smoke command failed (${smoke}):\nSTDOUT: ${smokeOut.stdout}\nSTDERR: ${smokeOut.stderr}\n`);
+        if (smokeExempt.length > 0) {
+          const uncovered = classification.non_exempt.length
+            ? classification.non_exempt.join(", ")
+            : "(no failing test files parsed from smoke output)";
+          io.stderr(`--smoke-exempt did not cover: ${uncovered}\n`);
+        }
+        return { exit: 9, result: null };
+      }
+    } else {
+      smokeAnnotation = { exit_code: 0, gate: "passed" };
     }
   }
 
@@ -389,11 +432,16 @@ export async function runPromoteToMain(
   const remoteSha = remoteOut.stdout.trim();
   const verified = remoteSha === promotedSha;
 
+  const exemptNote =
+    smokeAnnotation?.gate === "passed_with_exempt_failures"
+      ? ` (smoke passed with ${smokeAnnotation.exempt_failures?.length ?? 0} exempt failure(s))`
+      : "";
   const result: PromoteResult = {
     path: repo, base, source_branch: branch, strategy: resolvedStrategy,
     promoted_sha: promotedSha, remote_main_sha: remoteSha,
     pushed: true, verified,
-    summary: `promoted ${branch} -> ${base} on ${remote} (${promotedSha.slice(0, 7)})${verified ? "" : " WARNING: remote SHA mismatch"}`,
+    ...(smokeAnnotation ? { smoke: smokeAnnotation } : {}),
+    summary: `promoted ${branch} -> ${base} on ${remote} (${promotedSha.slice(0, 7)})${exemptNote}${verified ? "" : " WARNING: remote SHA mismatch"}`,
   };
   io.stdout(json ? JSON.stringify(result, null, 2) + "\n" : result.summary + "\n");
   return { exit: verified ? 0 : 12, result };
@@ -471,6 +519,11 @@ Options:
   --dispatch-id <id>     Dispatch id for the /agent-needs-input payload on divergence
   --agent <name>         Attributed agent; stamped as an "Agent: <name>" commit trailer (squash/merge)
   --smoke <cmd>          Smoke command gating promotion (e.g. "npm run build && npm test")
+  --smoke-exempt <globs> T-QA.7: test-file globs whose failure does NOT abort the
+                         promotion. On smoke failure, if EVERY failing test file
+                         matches an exempt glob, the gate proceeds and records
+                         passed_with_exempt_failures (operator-visible). Any
+                         non-exempt failure aborts as normal. Repeatable/comma-sep.
   --allow-own-dirty <p>  Permit a known-own dirty path (repeatable)
   --json                 Emit machine-readable JSON (drops into /agent-done.promotion.repos[])
   --execute              Actually perform the merge+push (omit for read-only preflight)

@@ -85,10 +85,104 @@ const baseArgs: PromoteArgs = {
   dispatchId: "phid:disp-abc",
   agent: null,
   smoke: null,
+  smokeExempt: [],
   execute: false,
   allowOwnDirty: [],
   json: true,
 };
+
+// FF execute git sequence (reused by the smoke-exempt cases). Smoke runs
+// between the promoted-sha rev-parse and the push.
+function ffExecuteCommands() {
+  return [
+    { match: (a: string[]) => a[0] === "status", out: "" },
+    { match: (a: string[]) => a[0] === "fetch", out: "" },
+    { match: (a: string[]) => a[0] === "rev-parse" && a[1] === "feat-x", out: "abc1234\n" },
+    { match: (a: string[]) => a[0] === "rev-parse" && a[1] === "main", out: "basetip\n" }, // baseTip (consumed first)
+    { match: (a: string[]) => a[0] === "rev-list" && a.includes("main..feat-x"), out: "1\n" },
+    { match: (a: string[]) => a[0] === "rev-list" && a.includes("feat-x..main"), out: "0\n" },
+    { match: (a: string[]) => a[0] === "log", out: "fix\n" },
+    { match: (a: string[]) => a[0] === "checkout" && a[1] === "main", out: "" },
+    { match: (a: string[]) => a[0] === "merge" && a[1] === "--ff-only" && a[2] === "origin/main", out: "" },
+    { match: (a: string[]) => a[0] === "merge" && a[1] === "--ff-only" && a[2] === "feat-x", out: "" },
+    { match: (a: string[]) => a[0] === "rev-parse" && a[1] === "main" && a.length === 2, out: "abc1234\n" },
+    { match: (a: string[]) => a[0] === "push" && a[1] === "origin" && a[2] === "main", out: "" },
+    { match: (a: string[]) => a[0] === "rev-parse" && a[1] === "origin/main", out: "abc1234\n" },
+  ];
+}
+
+// fakeGitDeps with a scripted --smoke exec result.
+function depsWithSmoke(
+  commands: FakeCommand[],
+  smoke: { code: number; stdout?: string; stderr?: string },
+): GitDeps & { calls: string[][] } {
+  const d = fakeGitDeps(commands);
+  d.exec = async (cmd: string) => {
+    d.calls.push(["exec", cmd]);
+    return { stdout: smoke.stdout ?? "", stderr: smoke.stderr ?? "", code: smoke.code };
+  };
+  return d;
+}
+
+const SMOKE_RED_CHECKIN = `
+ ❯ tests/unit/checkin-service-integration.test.ts (5 tests | 1 failed)
+ FAIL  tests/unit/checkin-service-integration.test.ts > flushes
+ Test Files  1 failed | 40 passed (41)
+`;
+
+describe("runPromoteToMain — T-QA.7 --smoke-exempt trap fix", () => {
+  it("proceeds when a red smoke's ONLY failing file is exempt (gate downgraded, operator-visible)", async () => {
+    const deps = depsWithSmoke(ffExecuteCommands(), { code: 1, stdout: SMOKE_RED_CHECKIN });
+    const io = captureIo();
+    const r = await runPromoteToMain(
+      { ...baseArgs, execute: true, smoke: "npm test", smokeExempt: ["**/checkin-service-integration.test.ts"] },
+      deps, io,
+    );
+    expect(r.exit).toBe(0);
+    expect(r.result?.pushed).toBe(true);
+    expect(r.result?.smoke).toMatchObject({
+      exit_code: 1,
+      gate: "passed_with_exempt_failures",
+      exempt_failures: ["tests/unit/checkin-service-integration.test.ts"],
+    });
+    // it DID push despite the red smoke
+    expect(deps.calls.some((c) => c[0] === "git" && c[1] === "push")).toBe(true);
+  });
+
+  it("aborts (exit 9, no push) when a NON-exempt test also failed", async () => {
+    const out = SMOKE_RED_CHECKIN + "\n FAIL  tests/unit/gateway-eval-recommend.test.ts > x\n";
+    const deps = depsWithSmoke(ffExecuteCommands(), { code: 1, stdout: out });
+    const io = captureIo();
+    const r = await runPromoteToMain(
+      { ...baseArgs, execute: true, smoke: "npm test", smokeExempt: ["**/checkin-service-integration.test.ts"] },
+      deps, io,
+    );
+    expect(r.exit).toBe(9);
+    expect(r.result).toBeNull();
+    expect(deps.calls.some((c) => c[0] === "git" && c[1] === "push")).toBe(false);
+    expect(io.errText()).toMatch(/did not cover.*gateway-eval-recommend/);
+  });
+
+  it("with NO --smoke-exempt, a red smoke aborts exactly as before (exit 9) — reversibility", async () => {
+    const deps = depsWithSmoke(ffExecuteCommands(), { code: 1, stdout: SMOKE_RED_CHECKIN });
+    const io = captureIo();
+    const r = await runPromoteToMain(
+      { ...baseArgs, execute: true, smoke: "npm test", smokeExempt: [] },
+      deps, io,
+    );
+    expect(r.exit).toBe(9);
+    expect(r.result).toBeNull();
+    expect(deps.calls.some((c) => c[0] === "git" && c[1] === "push")).toBe(false);
+  });
+
+  it("a green smoke records gate=passed", async () => {
+    const deps = depsWithSmoke(ffExecuteCommands(), { code: 0 });
+    const io = captureIo();
+    const r = await runPromoteToMain({ ...baseArgs, execute: true, smoke: "npm test" }, deps, io);
+    expect(r.exit).toBe(0);
+    expect(r.result?.smoke).toMatchObject({ exit_code: 0, gate: "passed" });
+  });
+});
 
 // ────────────────────────────────────────────────────────────────────
 // maybeRunPromoteToMainCli — dispatch routing + --help
@@ -151,6 +245,15 @@ describe("parsePromoteArgs", () => {
   it("--smoke takes a string", () => {
     const r = parsePromoteArgs(["--repo", "/r", "--branch", "f", "--smoke", "npm test"]);
     expect(r.smoke).toBe("npm test");
+  });
+  it("--smoke-exempt is repeatable + comma-separated (default [])", () => {
+    expect(parsePromoteArgs(["--repo", "/r", "--branch", "f"]).smokeExempt).toEqual([]);
+    const r = parsePromoteArgs([
+      "--repo", "/r", "--branch", "f",
+      "--smoke-exempt", "a.test.ts,b.test.ts",
+      "--smoke-exempt", "**/c.test.ts",
+    ]);
+    expect(r.smokeExempt).toEqual(["a.test.ts", "b.test.ts", "**/c.test.ts"]);
   });
   it("--agent takes the attributed agent name (default null)", () => {
     expect(parsePromoteArgs(["--repo", "/r", "--branch", "f"]).agent).toBeNull();
