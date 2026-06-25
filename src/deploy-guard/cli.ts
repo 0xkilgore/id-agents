@@ -37,6 +37,12 @@ import {
   smokeVerifier,
   type DeployRunnerDeps,
 } from "./automation.js";
+import { resolveFleetNodes, type FleetNodeSummary } from "./fleet-freshness.js";
+import {
+  decideCoordinatedRedeploy,
+  planCoordinatedRedeploySteps,
+  type RedeployNodeConfig,
+} from "./redeploy-plan.js";
 
 export interface RollbackStep {
   label: string;
@@ -216,6 +222,47 @@ async function cmdDeploy(args: Record<string, string | boolean>): Promise<number
   }
 }
 
+// T-DEPLOY.3 — the coordinated-redeploy gate. Reads the fleet's per-node build
+// state from the manager's /health.fleet_freshness, decides redeploy_all / hold /
+// noop (all-or-hold), and prints the ordered redeploy PLAN. ALWAYS dry-run: the
+// destructive cross-repo execution saga (D-IPR.4) is HELD on HC-6, so even
+// --execute only prints the plan + a HELD notice. Never redeploys a subset.
+async function cmdRedeployPlan(args: Record<string, string | boolean>): Promise<number> {
+  const baseUrl = String(args["base-url"] ?? "http://127.0.0.1:4100").replace(/\/+$/, "");
+  const repoDir = typeof args["repo-dir"] === "string" ? args["repo-dir"] : process.cwd();
+
+  let nodes: FleetNodeSummary[] = [];
+  try {
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), 5000);
+    const res = await fetch(`${baseUrl}/health`, { signal: ctrl.signal });
+    clearTimeout(t);
+    const body = (await res.json()) as { fleet_freshness?: { nodes?: FleetNodeSummary[] } };
+    nodes = body.fleet_freshness?.nodes ?? [];
+  } catch (err) {
+    console.error(`[deploy-guard] could not read fleet state from ${baseUrl}/health: ${err instanceof Error ? err.message : String(err)}`);
+    return 1;
+  }
+
+  const fleetConfigs = resolveFleetNodes(process.env, repoDir);
+  const configs: RedeployNodeConfig[] = fleetConfigs.map((c) => ({
+    node_id: c.node_id,
+    repoDir: c.is_self ? repoDir : (c.repoDir ?? repoDir),
+  }));
+
+  const decision = decideCoordinatedRedeploy(nodes);
+  const plan = planCoordinatedRedeploySteps(decision, configs);
+
+  if (args.execute === true) {
+    console.error("[deploy-guard] coordinated-redeploy EXECUTION is HELD (HC-6, D-IPR.4 saga); printing the plan only — nothing was run.");
+  }
+  console.log(JSON.stringify({ schema_version: "deploy.redeploy_plan.v1", execute: false, decision, plan }, null, 2));
+
+  // hold => the gate is blocking a coordinated redeploy (consistent with deploy's
+  // halted_preflight = 3); redeploy_all/noop are informational successes.
+  return decision.action === "hold" ? 3 : 0;
+}
+
 async function main(): Promise<void> {
   const [, , sub, ...rest] = process.argv;
   const args = parseArgs(rest);
@@ -230,6 +277,9 @@ async function main(): Promise<void> {
     case "abi-check":
       code = cmdAbiCheck(args);
       break;
+    case "redeploy-plan":
+      code = await cmdRedeployPlan(args);
+      break;
     case "rollback": {
       const to = typeof args.to === "string" ? args.to : null;
       if (!to) {
@@ -243,7 +293,7 @@ async function main(): Promise<void> {
       break;
     }
     default:
-      console.error("usage: deploy-guard <deploy|abi-check|smoke|rollback> [...flags]");
+      console.error("usage: deploy-guard <deploy|abi-check|smoke|rollback|redeploy-plan> [...flags]");
       code = 2;
   }
   process.exit(code);
