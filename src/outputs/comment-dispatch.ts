@@ -109,18 +109,27 @@ function artifactLabel(catalog: ArtifactCatalogRow): string {
 }
 
 export function commentSubject(catalog: ArtifactCatalogRow): string {
-  return `Operator comment on "${artifactLabel(catalog)}"`.slice(0, 80);
+  // C0: a reaction is still a comment, but the subject reads "reaction" so the
+  // owning agent can triage one-tap feedback at a glance.
+  const noun = "Operator comment";
+  return `${noun} on "${artifactLabel(catalog)}"`.slice(0, 80);
 }
 
 export function commentMessage(catalog: ArtifactCatalogRow, comment: ArtifactComment): string {
   const label = artifactLabel(catalog);
+  // C0_FEEDBACK_REACTIONS: when the comment is a one-tap reaction, the verb and
+  // the section heading say "reacted" so the agent reads it as a reaction, not a
+  // free-text note. The body already carries the synthesized "👎 wrong — …".
+  const isReaction = comment.reaction != null;
+  const verb = isReaction ? `reacted (${comment.reaction})` : "left a comment";
+  const heading = isReaction ? "## Reaction" : "## Comment";
   const lines: (string | null)[] = [
-    `${comment.actor} left a comment on your artifact **${label}** (\`${catalog.artifact_id}\`).`,
+    `${comment.actor} ${verb} on your artifact **${label}** (\`${catalog.artifact_id}\`).`,
     "",
     catalog.abs_path ? `File: \`${catalog.abs_path}\`` : null,
     comment.anchor ? `Anchor: \`${comment.anchor}\`` : null,
     catalog.abs_path || comment.anchor ? "" : null,
-    "## Comment",
+    heading,
     "",
     comment.body,
     "",

@@ -37,3 +37,18 @@ export function isCaneDraftArtifactsEnabled(
 ): boolean {
   return isOn(env.CANE_DRAFT_ARTIFACTS);
 }
+
+/** C0 ambient feedback reactions (C0_FEEDBACK_REACTIONS) — the lowest-click
+ *  feedback surface from chris-feedback-system-design §3 C0. OFF by default.
+ *  When OFF, POST /artifacts/:id/reactions and GET /artifacts/:id/feedback are
+ *  inert (404) and the existing comment handler behaves exactly as today (no
+ *  comment_routed linkage op is written). When ON, reactions ride the existing
+ *  comment-auto-dispatch (T-CKPT.7) and feedback routing is persisted durably so
+ *  the acted-upon chip can trace feedback → dispatch. A reversible cutover, not
+ *  a migration — flipping it off stops new writes and the read route; the
+ *  append-only ops already written stay readable but unsurfaced. */
+export function isC0FeedbackReactionsEnabled(
+  env: NodeJS.ProcessEnv = process.env,
+): boolean {
+  return isOn(env.C0_FEEDBACK_REACTIONS);
+}

@@ -20,7 +20,13 @@ export type ArtifactOpType =
   // CANE_DRAFT_ARTIFACTS: an operator's in-place rewrite of a cane_draft body.
   // Distinct from the generic `edit` op (edit.ts): revise_draft mutates the
   // typed draft payload's body_markdown and appends to its revision_history.
-  | "revise_draft";
+  | "revise_draft"
+  // C0_FEEDBACK_REACTIONS (T-CKPT.feedback-system/C0): the durable linkage op
+  // recorded after a comment/reaction is routed to its owning agent. Carries
+  // {source_op_id, dispatch_phid, query_id, to_agent} so the acted-upon read
+  // model can trace feedback → the dispatch it fired. B2 returned the receipt
+  // only in the HTTP response; this op persists it so the chip survives reloads.
+  | "comment_routed";
 
 // Artifact kind for a Cane email/telegram draft that needs operator approval
 // before it is sent. The send executor (ship-executor.ts) only fires for this
@@ -252,6 +258,90 @@ export interface ArtifactComment {
   body: string;
   anchor: string | null;
   ts: string;
+  // C0_FEEDBACK_REACTIONS: present when this comment was a one-tap reaction
+  // (👍/👎/❓/🔁). Plain free-text comments leave it null. A reaction is still a
+  // comment_recorded op — it rides the existing /comments listing and the
+  // existing comment-auto-dispatch (T-CKPT.7) unchanged — so reactions never
+  // duplicate the comment-routing path; they are the lowest-click form of it.
+  reaction?: ReactionKind | null;
+}
+
+// ── C0 ambient reactions (T-CKPT.feedback-system/C0) ────────────────
+// The four canonical lowest-click reactions, per chris-feedback-system-design
+// §3 C0. A reaction is a one-tap structured comment; the value is the stored
+// key, `emoji`/`label` are render hints surfaced to the owning agent and chip.
+export const ARTIFACT_REACTIONS = {
+  ship_it: { emoji: "👍", label: "ship it" },
+  wrong: { emoji: "👎", label: "wrong" },
+  explain: { emoji: "❓", label: "explain" },
+  iterate: { emoji: "🔁", label: "iterate" },
+} as const;
+
+export type ReactionKind = keyof typeof ARTIFACT_REACTIONS;
+
+export function isReactionKind(v: unknown): v is ReactionKind {
+  return typeof v === "string" && Object.prototype.hasOwnProperty.call(ARTIFACT_REACTIONS, v);
+}
+
+export interface ReactionRequest {
+  actor: string; // resolved MondayActorRef ("user:chris"|"user:liz")
+  reaction: ReactionKind;
+  note?: string | null; // optional one-sentence elaboration
+  anchor?: string | null;
+  source_link?: string;
+}
+
+// ── C0 acted-upon read model (GET /artifacts/:id/feedback) ──────────
+// The close-the-loop surface: every reaction/comment on an artifact, each
+// annotated with the dispatch it fired (if any), plus a rolled-up acted-upon
+// summary the chip renders. Derived purely from the append-only op log
+// (comment_recorded + comment_routed) — never from prose.
+
+/** The dispatch a single piece of feedback fired, as persisted by the
+ *  comment_routed op. */
+export interface FeedbackRouting {
+  dispatch_phid: string;
+  query_id: string | null;
+  to_agent: string;
+  routed_at: string;
+}
+
+export interface FeedbackItem {
+  op_id: number;
+  actor: string;
+  /** "reaction" when reaction != null, else "comment". */
+  kind: "reaction" | "comment";
+  reaction: ReactionKind | null;
+  body: string;
+  anchor: string | null;
+  ts: string;
+  /** The dispatch this feedback routed to its owning agent, or null when it
+   *  never routed (no owner / no scheduler / flag was off at capture time). */
+  routing: FeedbackRouting | null;
+}
+
+/** Rolled-up acted-upon state for the chip. `routed` = at least one piece of
+ *  feedback fired a dispatch to the owning agent (the loop is in motion).
+ *  Live dispatch terminal status (done/in_flight) is intentionally NOT resolved
+ *  here — the frontend/chip resolves it from `routed_dispatches[].dispatch_phid`
+ *  so this read model stays decoupled from the manager dispatch store. */
+export interface ActedUponSummary {
+  state: "none" | "captured" | "routed";
+  feedback_count: number;
+  reaction_count: number;
+  routed_count: number;
+  last_reaction: ReactionKind | null;
+  last_feedback_at: string | null;
+  routed_dispatches: FeedbackRouting[];
+}
+
+export interface ArtifactFeedbackResponse {
+  ok: true;
+  schema_version: "artifact.feedback.v1";
+  artifact_id: string;
+  acted_upon: ActedUponSummary;
+  items: FeedbackItem[];
+  count: number;
 }
 
 // Stub-response from POST /artifacts/:id/ship. Blockers explain why

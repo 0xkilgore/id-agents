@@ -22,6 +22,7 @@ import {
   upsertReviewState,
 } from "./storage.js";
 import type {
+  ActedUponSummary,
   ApproveRequest,
   ArtifactComment,
   ArtifactOpRow,
@@ -29,11 +30,16 @@ import type {
   ArtifactReviewStateRow,
   CaneDraftPayload,
   CommentRequest,
+  FeedbackItem,
+  FeedbackRouting,
+  ReactionKind,
+  ReactionRequest,
   RejectRequest,
   ShipRequest,
   ShipResponse,
   ViewRequest,
 } from "./types.js";
+import { ARTIFACT_REACTIONS, isReactionKind } from "./types.js";
 import type { CaneDraftSender } from "./ship-executor.js";
 import { pendingIdFromDraftId } from "./ship-executor.js";
 
@@ -236,7 +242,8 @@ export async function commentArtifact(
 }
 
 /** Read the persisted comments for an artifact (newest first), projected from
- *  the append-only comment_recorded operations. */
+ *  the append-only comment_recorded operations. Reactions (C0) are
+ *  comment_recorded ops too, so they appear here with `reaction` populated. */
 export async function listComments(
   adapter: DbAdapter,
   artifactId: string,
@@ -247,18 +254,214 @@ export async function listComments(
   const comments: ArtifactComment[] = [];
   for (const op of ops) {
     if (op.op_type !== "comment_recorded") continue;
-    let body = "";
-    let anchor: string | null = null;
-    try {
-      const p = op.payload_json ? (JSON.parse(op.payload_json) as { body?: unknown; anchor?: unknown }) : {};
-      body = typeof p.body === "string" ? p.body : "";
-      anchor = typeof p.anchor === "string" ? p.anchor : null;
-    } catch {
-      /* tolerate legacy/malformed payloads */
-    }
-    comments.push({ op_id: op.op_id, artifact_id: op.artifact_id, actor: op.actor, body, anchor, ts: op.ts });
+    const { body, anchor, reaction } = parseCommentPayload(op.payload_json);
+    comments.push({ op_id: op.op_id, artifact_id: op.artifact_id, actor: op.actor, body, anchor, ts: op.ts, reaction });
   }
   return comments;
+}
+
+function parseCommentPayload(payloadJson: string | null): {
+  body: string;
+  anchor: string | null;
+  reaction: ReactionKind | null;
+} {
+  let body = "";
+  let anchor: string | null = null;
+  let reaction: ReactionKind | null = null;
+  try {
+    const p = payloadJson
+      ? (JSON.parse(payloadJson) as { body?: unknown; anchor?: unknown; reaction?: unknown })
+      : {};
+    body = typeof p.body === "string" ? p.body : "";
+    anchor = typeof p.anchor === "string" ? p.anchor : null;
+    reaction = isReactionKind(p.reaction) ? p.reaction : null;
+  } catch {
+    /* tolerate legacy/malformed payloads */
+  }
+  return { body, anchor, reaction };
+}
+
+// ── C0 ambient reactions (T-CKPT.feedback-system/C0) ────────────────
+// A reaction is the lowest-click comment: one tap → a typed reaction (and an
+// optional one-sentence note). It is persisted as a `comment_recorded` op with
+// a `reaction` field in the payload, so it rides the EXISTING /comments listing
+// and the EXISTING comment-auto-dispatch (routes.ts) unchanged — the C0 spec's
+// "increment over T-CKPT.7, do not duplicate comment-routing".
+
+/** The human-readable body synthesized for a reaction, e.g. "👎 wrong" or
+ *  "🔁 iterate — tighten the hero". Used as the comment body the owning agent
+ *  reads and the /comments listing shows. */
+export function reactionBody(reaction: ReactionKind, note?: string | null): string {
+  const { emoji, label } = ARTIFACT_REACTIONS[reaction];
+  const head = `${emoji} ${label}`;
+  const trimmed = note?.trim();
+  return trimmed ? `${head} — ${trimmed}` : head;
+}
+
+export async function reactArtifact(
+  adapter: DbAdapter,
+  artifactId: string,
+  req: ReactionRequest,
+  now?: () => Date,
+): Promise<CommentResult> {
+  if (!isReactionKind(req.reaction)) {
+    throw new Error(`invalid reaction: ${String(req.reaction)}`);
+  }
+  const ts = nowIso(now);
+  const actor = (req.actor || DEFAULT_ACTOR).trim() || DEFAULT_ACTOR;
+  const anchor = req.anchor ?? null;
+  const note = req.note?.trim() || null;
+  const body = reactionBody(req.reaction, note);
+  // Touch review-state so the artifact carries a durable interaction record.
+  const existing = await getReviewState(adapter, artifactId);
+  await upsertReviewState(
+    adapter,
+    artifactId,
+    { source_link: req.source_link ?? existing?.source_link ?? null },
+    ts,
+  );
+  const opId = await appendOperation(
+    adapter,
+    artifactId,
+    "comment_recorded",
+    actor,
+    ts,
+    JSON.stringify({ body, anchor, reaction: req.reaction, note }),
+    req.source_link ?? existing?.source_link ?? null,
+  );
+  return {
+    op_id: opId,
+    comment: { op_id: opId, artifact_id: artifactId, actor, body, anchor, ts, reaction: req.reaction },
+  };
+}
+
+// ── C0 close-the-loop: durable feedback → dispatch linkage ──────────
+// B2 (comment-auto-dispatch) returned the dispatch receipt only in the HTTP
+// response, so a page reload lost the link. This persists it as an append-only
+// `comment_routed` op keyed to the source comment's op_id, so the acted-upon
+// read model survives restarts. Append-only and additive — it NEVER blocks the
+// durable comment capture (called after routing, failures swallowed by caller).
+
+export interface CommentRoutedInput {
+  source_op_id: number;
+  dispatch_phid: string;
+  query_id: string | null;
+  to_agent: string;
+}
+
+export async function recordCommentRouted(
+  adapter: DbAdapter,
+  artifactId: string,
+  input: CommentRoutedInput,
+  actor: string,
+  now?: () => Date,
+): Promise<number> {
+  const ts = nowIso(now);
+  return appendOperation(
+    adapter,
+    artifactId,
+    "comment_routed",
+    actor,
+    ts,
+    JSON.stringify({
+      source_op_id: input.source_op_id,
+      dispatch_phid: input.dispatch_phid,
+      query_id: input.query_id,
+      to_agent: input.to_agent,
+    }),
+    null,
+  );
+}
+
+// ── C0 acted-upon read model (GET /artifacts/:id/feedback) ──────────
+// Projects the append-only op log into the chip's read model: every reaction /
+// comment, each annotated with the dispatch it fired (joined from comment_routed
+// by source_op_id), plus a rolled-up acted-upon summary. Pure derivation — no
+// prose parsing, no live dispatch-store coupling (the chip resolves terminal
+// dispatch status from routed_dispatches[].dispatch_phid itself).
+
+function parseRoutedPayload(
+  payloadJson: string | null,
+): { source_op_id: number; routing: Omit<FeedbackRouting, "routed_at"> } | null {
+  try {
+    const p = payloadJson
+      ? (JSON.parse(payloadJson) as {
+          source_op_id?: unknown;
+          dispatch_phid?: unknown;
+          query_id?: unknown;
+          to_agent?: unknown;
+        })
+      : {};
+    if (typeof p.source_op_id !== "number" || typeof p.dispatch_phid !== "string" || typeof p.to_agent !== "string") {
+      return null;
+    }
+    return {
+      source_op_id: p.source_op_id,
+      routing: {
+        dispatch_phid: p.dispatch_phid,
+        query_id: typeof p.query_id === "string" ? p.query_id : null,
+        to_agent: p.to_agent,
+      },
+    };
+  } catch {
+    return null;
+  }
+}
+
+export async function listFeedback(
+  adapter: DbAdapter,
+  artifactId: string,
+  limit = 200,
+  offset = 0,
+): Promise<{ items: FeedbackItem[]; acted_upon: ActedUponSummary }> {
+  const ops = await listOperations(adapter, artifactId, limit, offset);
+  // Index routing ops by the comment op_id they reference. Latest routed wins
+  // for a given source (re-routes are rare but additive).
+  const routingBySource = new Map<number, FeedbackRouting>();
+  for (const op of ops) {
+    if (op.op_type !== "comment_routed") continue;
+    const parsed = parseRoutedPayload(op.payload_json);
+    if (!parsed) continue;
+    // ops are newest-first, so the first routed op seen for a source is the
+    // latest — keep it, skip older re-routes.
+    if (routingBySource.has(parsed.source_op_id)) continue;
+    routingBySource.set(parsed.source_op_id, { ...parsed.routing, routed_at: op.ts });
+  }
+
+  const items: FeedbackItem[] = [];
+  for (const op of ops) {
+    if (op.op_type !== "comment_recorded") continue;
+    const { body, anchor, reaction } = parseCommentPayload(op.payload_json);
+    items.push({
+      op_id: op.op_id,
+      actor: op.actor,
+      kind: reaction ? "reaction" : "comment",
+      reaction,
+      body,
+      anchor,
+      ts: op.ts,
+      routing: routingBySource.get(op.op_id) ?? null,
+    });
+  }
+  // listOperations is op_id ASC (oldest-first). For the chip/feed we surface
+  // newest-first so items[0] is the most recent piece of feedback.
+  items.reverse();
+
+  // Build the summary off the newest-first items.
+  const reactionItems = items.filter((i) => i.reaction);
+  const routedDispatches = items.map((i) => i.routing).filter((r): r is FeedbackRouting => r != null);
+  const state: ActedUponSummary["state"] =
+    items.length === 0 ? "none" : routedDispatches.length > 0 ? "routed" : "captured";
+  const acted_upon: ActedUponSummary = {
+    state,
+    feedback_count: items.length,
+    reaction_count: reactionItems.length,
+    routed_count: routedDispatches.length,
+    last_reaction: reactionItems[0]?.reaction ?? null,
+    last_feedback_at: items[0]?.ts ?? null,
+    routed_dispatches: routedDispatches,
+  };
+  return { items, acted_upon };
 }
 
 // ── Revise draft (CANE_DRAFT_ARTIFACTS) ─────────────────────────────

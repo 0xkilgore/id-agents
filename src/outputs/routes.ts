@@ -49,13 +49,16 @@ import {
   commentArtifact,
   DEFAULT_ACTION_COOLDOWN_MS,
   listComments,
+  listFeedback,
+  reactArtifact,
+  recordCommentRouted,
   rejectArtifact,
   reviseDraft,
   shipArtifact,
   viewArtifact,
   type CaneDraftShipContext,
 } from './ops.js';
-import { isCaneDraftArtifactsEnabled } from '../config/feature-flags.js';
+import { isCaneDraftArtifactsEnabled, isC0FeedbackReactionsEnabled } from '../config/feature-flags.js';
 import {
   defaultCaneDraftSender,
   pendingIdFromDraftId,
@@ -73,9 +76,11 @@ import type {
   RegisterArtifactRequest,
   RegisterArtifactResponse,
   RejectRequest,
+  ReactionRequest,
   ShipRequest,
   ViewRequest,
 } from './types.js';
+import { isReactionKind } from './types.js';
 import { normalizeActorRef, isValidArtifactId, type Actor } from '../actor-identity.js';
 import type { TasksRepository } from '../db/db-service.js';
 import { emitApprovalTask, type ApprovalReviewer } from './approval-emit.js';
@@ -143,6 +148,36 @@ export interface MountOutputsRoutesOptions {
    * never hit the network. Defaults to defaultCaneDraftSender(CANE_BASE_URL).
    */
   caneDraftSender?: CaneDraftSender;
+}
+
+/** C0: persist the feedback→dispatch linkage (comment_routed op) after a
+ *  comment/reaction routes. Best-effort — a write failure here must NEVER fail
+ *  the request: the durable feedback and the routing receipt already landed; the
+ *  chip simply won't show this one dispatch's trace until the next interaction. */
+async function persistRoutedLinkage(
+  adapter: DbAdapter,
+  artifactId: string,
+  sourceOpId: number,
+  dispatch: { dispatch_phid: string; query_id: string; to_agent: string },
+  actor: string,
+  clock?: () => Date,
+): Promise<void> {
+  try {
+    await recordCommentRouted(
+      adapter,
+      artifactId,
+      {
+        source_op_id: sourceOpId,
+        dispatch_phid: dispatch.dispatch_phid,
+        query_id: dispatch.query_id,
+        to_agent: dispatch.to_agent,
+      },
+      actor,
+      clock,
+    );
+  } catch {
+    /* swallow — durable capture + receipt already succeeded */
+  }
 }
 
 export function mountOutputsRoutes(
@@ -730,6 +765,14 @@ export function mountOutputsRoutes(
         comment,
       });
 
+      // C0 close-the-loop: persist the feedback→dispatch linkage durably so the
+      // acted-upon chip survives reloads. Flag-gated and best-effort — it never
+      // affects the comment capture or the routing receipt. (Without the flag,
+      // this endpoint behaves exactly as B2 shipped it.)
+      if (routed.routed && isC0FeedbackReactionsEnabled(env)) {
+        await persistRoutedLinkage(adapter, artifactId, op_id, routed.dispatch, actor.ref, clock);
+      }
+
       const base = { ok: true, schema_version: 'artifact.comment.v1', op_id, comment, actor };
       if (routed.routed) {
         res.json({ ...base, dispatch_routed: true, dispatch: routed.dispatch });
@@ -755,6 +798,90 @@ export function mountOutputsRoutes(
         artifact_id: req.params.id,
         comments,
         count: comments.length,
+      });
+    } catch (err) {
+      res.status(500).json({ ok: false, error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  // ── POST /artifacts/:id/reactions (C0_FEEDBACK_REACTIONS) ──────────
+  // The lowest-click feedback surface (chris-feedback-system-design §3 C0): a
+  // one-tap reaction (👍 ship_it / 👎 wrong / ❓ explain / 🔁 iterate) + an
+  // optional one-sentence note. A reaction is a `comment_recorded` op carrying a
+  // `reaction` field, so it rides the EXISTING comment listing and the EXISTING
+  // comment-auto-dispatch (T-CKPT.7) — it never duplicates the routing path.
+  // Flag-gated: 404 when C0_FEEDBACK_REACTIONS is OFF (mirrors the revise/edit
+  // routes). Capture is durable first; routing failures degrade to typed markers.
+  app.post('/artifacts/:id/reactions', async (req: Request<{ id: string }>, res: Response) => {
+    try {
+      if (!isC0FeedbackReactionsEnabled(env)) {
+        return res.status(404).json({ ok: false, error: 'c0_feedback_reactions_disabled' });
+      }
+      const artifactId = requireArtifactId(req, res);
+      if (!artifactId) return;
+      const actor = requireActor(req, res);
+      if (!actor) return;
+      const reaction = req.body?.reaction;
+      if (!isReactionKind(reaction)) {
+        return res.status(400).json({
+          ok: false,
+          code: 'invalid_reaction',
+          error: 'reaction must be one of: ship_it, wrong, explain, iterate',
+        });
+      }
+      const reqBody: ReactionRequest = {
+        actor: actor.ref,
+        reaction,
+        note: asString(req.body?.note) ?? null,
+        anchor: asString(req.body?.anchor) ?? null,
+        source_link: asString(req.body?.source_link),
+      };
+      const { comment, op_id } = await reactArtifact(adapter, artifactId, reqBody, clock);
+
+      // Same routing path as comments — the owning agent gets a real dispatch.
+      const routed = await routeCommentToOwningAgent({
+        adapter,
+        enqueue: opts.enqueueDispatch,
+        artifactId,
+        comment,
+      });
+      if (routed.routed) {
+        await persistRoutedLinkage(adapter, artifactId, op_id, routed.dispatch, actor.ref, clock);
+      }
+
+      const base = { ok: true, schema_version: 'artifact.reaction.v1', op_id, comment, reaction, actor };
+      if (routed.routed) {
+        res.json({ ...base, dispatch_routed: true, dispatch: routed.dispatch });
+      } else if ('skipped' in routed) {
+        res.json({ ...base, dispatch_routed: false, dispatch: null, dispatch_skipped: routed.skipped });
+      } else {
+        res.json({ ...base, dispatch_routed: false, dispatch: null, dispatch_error: routed.error });
+      }
+    } catch (err) {
+      res.status(500).json({ ok: false, error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  // ── GET /artifacts/:id/feedback (C0_FEEDBACK_REACTIONS) ────────────
+  // The acted-upon chip's read model: every reaction/comment on the artifact,
+  // each annotated with the dispatch it fired, plus a rolled-up acted_upon
+  // summary {state: none|captured|routed, …}. Derived purely from the op log.
+  // Flag-gated: 404 when OFF.
+  app.get('/artifacts/:id/feedback', async (req: Request<{ id: string }>, res: Response) => {
+    try {
+      if (!isC0FeedbackReactionsEnabled(env)) {
+        return res.status(404).json({ ok: false, error: 'c0_feedback_reactions_disabled' });
+      }
+      const limit = Math.min(parseInt(req.query.limit as string, 10) || 200, 500);
+      const offset = parseInt(req.query.offset as string, 10) || 0;
+      const { items, acted_upon } = await listFeedback(adapter, req.params.id, limit, offset);
+      res.json({
+        ok: true,
+        schema_version: 'artifact.feedback.v1',
+        artifact_id: req.params.id,
+        acted_upon,
+        items,
+        count: items.length,
       });
     } catch (err) {
       res.status(500).json({ ok: false, error: err instanceof Error ? err.message : String(err) });
