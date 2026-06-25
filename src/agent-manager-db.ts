@@ -10480,6 +10480,20 @@ export class AgentManagerDb {
           console.warn('[Manager] P2 inbox routes failed to mount:', err instanceof Error ? err.message : String(err));
         }
 
+        // T-CKPT.agent-sharing / F4 — share + delegate grants over the Monday
+        // seed actor model. Mount /shares, /delegations, /grants[/:id[/revoke]].
+        try {
+          const [{ mountAgentSharingRoutes }, { migrateAgentSharingTables }] = await Promise.all([
+            import('./agent-sharing/routes.js'),
+            import('./agent-sharing/storage.js'),
+          ]);
+          await migrateAgentSharingTables(this.db.adapter);
+          mountAgentSharingRoutes(this.managementApp, this.db.adapter);
+          console.log('[Manager] F4 agent-sharing /shares /delegations /grants routes mounted');
+        } catch (err) {
+          console.warn('[Manager] F4 agent-sharing routes failed to mount:', err instanceof Error ? err.message : String(err));
+        }
+
         // Kapelle B11 — manager-owned artifact review surface
         // (/outputs/inbox, /artifacts/:id/{review,view,operations,approve,ship}).
         try {
