@@ -6,6 +6,7 @@ import {
   pickCatalogView,
   validateCatalogPatch,
   applyCatalogPatch,
+  catalogEditSchema,
   AP6_EDITABLE_FIELDS,
 } from "../../src/agent-detail/catalog-edit.js";
 import type { AgentCatalog } from "../../src/config-parser.js";
@@ -108,6 +109,51 @@ describe("validateCatalogPatch", () => {
     expect([...AP6_EDITABLE_FIELDS].sort()).toEqual(
       ["costTier", "description", "expertise", "notSuitableFor", "role", "status"].sort(),
     );
+  });
+});
+
+describe("catalogEditSchema", () => {
+  it("describes every editable field in canonical order", () => {
+    const schema = catalogEditSchema();
+    expect(schema.map((f) => f.field)).toEqual([...AP6_EDITABLE_FIELDS]);
+    for (const f of schema) expect(f.clearable).toBe(true);
+  });
+
+  it("maps each field to the expected input control", () => {
+    const byField = Object.fromEntries(catalogEditSchema().map((f) => [f.field, f.input]));
+    expect(byField).toEqual({
+      role: "text",
+      description: "textarea",
+      expertise: "tags",
+      costTier: "enum",
+      notSuitableFor: "tags",
+      status: "text",
+    });
+  });
+
+  it("costTier carries the enum options the validator accepts (no drift)", () => {
+    const costTier = catalogEditSchema().find((f) => f.field === "costTier");
+    expect(costTier?.options).toEqual(["low", "medium", "high"]);
+    // Every advertised option must validate; an off-menu value must not.
+    for (const opt of costTier!.options!) {
+      expect(validateCatalogPatch({ costTier: opt }).ok).toBe(true);
+    }
+    expect(validateCatalogPatch({ costTier: "extreme" }).ok).toBe(false);
+  });
+
+  it("non-enum fields omit options", () => {
+    for (const f of catalogEditSchema().filter((f) => f.input !== "enum")) {
+      expect(f.options).toBeUndefined();
+    }
+  });
+
+  it("returns a fresh copy callers cannot use to mutate the shared schema", () => {
+    const a = catalogEditSchema();
+    a[0].label = "MUTATED";
+    a.find((f) => f.field === "costTier")!.options!.push("x");
+    const b = catalogEditSchema();
+    expect(b[0].label).toBe("Role");
+    expect(b.find((f) => f.field === "costTier")!.options).toEqual(["low", "medium", "high"]);
   });
 });
 

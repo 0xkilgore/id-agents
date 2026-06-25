@@ -8,7 +8,12 @@
 // TUI (and any web console) consumes is verifiable without a live DB.
 
 import type { AgentCatalog } from "../config-parser.js";
-import { pickCatalogView, type CatalogView } from "./catalog-edit.js";
+import {
+  pickCatalogView,
+  catalogEditSchema,
+  type CatalogView,
+  type CatalogFieldSchema,
+} from "./catalog-edit.js";
 
 /** A task row, narrowed to the fields the charts need. */
 export interface DetailTaskRow {
@@ -76,6 +81,10 @@ export interface AgentDetailResponse {
   scripts: string[];
   /** AP6 — the agent's catalog, narrowed to the editable view fields. */
   catalog: CatalogView;
+  /** AP6 (Slice B) — self-describing schema for the inline catalog editor
+   *  (editable fields + input types + enum options), so the detail page renders
+   *  and pre-validates the editor without hard-coding the field rules. */
+  catalog_edit_schema: CatalogFieldSchema[];
 }
 
 /** Hard cap on the recent-output feed (spec: "recent-output-last-20"). */
@@ -115,6 +124,7 @@ export function buildAgentDetail(raw: RawAgentDetailData): AgentDetailResponse {
     loops: raw.loops,
     scripts: raw.scripts,
     catalog: pickCatalogView(raw.catalog),
+    catalog_edit_schema: catalogEditSchema(),
   };
 }
 

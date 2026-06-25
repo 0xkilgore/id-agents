@@ -118,4 +118,14 @@ describe("buildAgentDetail", () => {
     expect(d.catalog.costTier).toBe("low");
     expect(d.catalog.notSuitableFor).toEqual(["design"]);
   });
+
+  it("AP6 Slice B — surfaces the inline-editor schema in every detail response", () => {
+    const d = buildAgentDetail(raw());
+    expect(d.catalog_edit_schema.map((f) => f.field)).toEqual([
+      "role", "description", "expertise", "costTier", "notSuitableFor", "status",
+    ]);
+    const costTier = d.catalog_edit_schema.find((f) => f.field === "costTier");
+    expect(costTier?.input).toBe("enum");
+    expect(costTier?.options).toEqual(["low", "medium", "high"]);
+  });
 });

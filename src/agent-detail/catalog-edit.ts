@@ -41,6 +41,55 @@ export interface CatalogView {
   status: string | null;
 }
 
+// ────────────────────────────────────────────────────────────────────
+// AP6 — self-describing edit schema for the inline editor (Slice B).
+//
+// The detail page renders an inline editor; rather than hard-coding which
+// fields are editable, their input types, and the costTier enum on the
+// frontend (where it drifts from the server's validation rules), the GET
+// /agents/:name/detail payload carries this schema. The frontend renders +
+// pre-validates generically from it, and `validateCatalogPatch` remains the
+// single source of truth the server enforces.
+// ────────────────────────────────────────────────────────────────────
+
+/** How the inline editor should render a field. */
+export type CatalogFieldInput = "text" | "textarea" | "tags" | "enum";
+
+/** A self-describing descriptor for one editable catalog field. */
+export interface CatalogFieldSchema {
+  field: EditableCatalogField;
+  /** Human-readable label for the editor. */
+  label: string;
+  /** The input control the field maps to. */
+  input: CatalogFieldInput;
+  /** Allowed values when input === "enum" (e.g. costTier). */
+  options?: string[];
+  /** Whether the field may be cleared (true for all AP6 fields). */
+  clearable: boolean;
+}
+
+/** Canonical schema, ordered to match AP6_EDITABLE_FIELDS. */
+const CATALOG_EDIT_SCHEMA: readonly CatalogFieldSchema[] = [
+  { field: "role", label: "Role", input: "text", clearable: true },
+  { field: "description", label: "Description", input: "textarea", clearable: true },
+  { field: "expertise", label: "Expertise", input: "tags", clearable: true },
+  { field: "costTier", label: "Cost tier", input: "enum", options: [...COST_TIERS], clearable: true },
+  { field: "notSuitableFor", label: "Not suitable for", input: "tags", clearable: true },
+  { field: "status", label: "Status", input: "text", clearable: true },
+];
+
+/**
+ * The inline-editor schema: one descriptor per editable field, in canonical
+ * order, with enum options resolved. Pure; returns a fresh deep copy so callers
+ * cannot mutate the shared definition.
+ */
+export function catalogEditSchema(): CatalogFieldSchema[] {
+  return CATALOG_EDIT_SCHEMA.map((f) => ({
+    ...f,
+    options: f.options ? [...f.options] : undefined,
+  }));
+}
+
 /** Narrow a stored catalog (or absent catalog) to the AP6 view. Pure. */
 export function pickCatalogView(catalog: AgentCatalog | null | undefined): CatalogView {
   const c = catalog ?? {};
