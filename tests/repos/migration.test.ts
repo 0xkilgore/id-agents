@@ -161,6 +161,57 @@ describe('SQLite migration — tasks uniqueness upgrade', () => {
   });
 });
 
+describe('SQLite migration — orchestration backlog logical key', () => {
+  it('upgrades an existing backlog table before creating the logical-key index', async () => {
+    const adapter = new SqliteAdapter(':memory:');
+
+    adapter.exec(`
+      CREATE TABLE orchestration_backlog_item (
+        item_id            TEXT PRIMARY KEY,
+        team_id            TEXT NOT NULL,
+        title              TEXT NOT NULL,
+        track              TEXT,
+        to_agent           TEXT,
+        dispatch_body      TEXT,
+        priority           INTEGER NOT NULL DEFAULT 5,
+        value_score        REAL,
+        readiness_state    TEXT NOT NULL DEFAULT 'draft',
+        risk_class         TEXT NOT NULL DEFAULT 'routine',
+        write_scope_json   TEXT NOT NULL DEFAULT '[]',
+        dependencies_json  TEXT NOT NULL DEFAULT '[]',
+        token_estimate     INTEGER,
+        provider           TEXT,
+        runtime            TEXT,
+        is_north_star      INTEGER NOT NULL DEFAULT 0,
+        source_refs_json   TEXT NOT NULL DEFAULT '[]',
+        approved_by        TEXT,
+        approved_at        TEXT,
+        last_dispatch_phid TEXT,
+        updated_by         TEXT,
+        track_drift        INTEGER NOT NULL DEFAULT 0,
+        created_at         TEXT NOT NULL,
+        updated_at         TEXT NOT NULL
+      );
+    `);
+
+    await expect(migrateSqlite(adapter)).resolves.toBeUndefined();
+
+    const { rows: columns } = await adapter.query<{ name: string }>(
+      `SELECT name FROM pragma_table_info('orchestration_backlog_item')`,
+    );
+    expect(columns.map((c) => c.name)).toContain('logical_key');
+
+    const { rows: indexes } = await adapter.query<{ name: string }>(
+      `SELECT name FROM sqlite_master
+       WHERE type = 'index'
+         AND tbl_name = 'orchestration_backlog_item'`,
+    );
+    expect(indexes.map((i) => i.name)).toContain('orchestration_backlog_logical_key_idx');
+
+    await adapter.close();
+  });
+});
+
 // =====================================================================
 // Phase 2: remote endpoint column idempotency
 // =====================================================================

@@ -603,10 +603,6 @@ export async function migrateSqlite(adapter: SqliteAdapter): Promise<void> {
     );
     CREATE INDEX IF NOT EXISTS orchestration_backlog_ready_idx
       ON orchestration_backlog_item(team_id, readiness_state, priority, created_at);
-    CREATE INDEX IF NOT EXISTS orchestration_backlog_logical_key_idx
-      ON orchestration_backlog_item(team_id, logical_key)
-      WHERE logical_key IS NOT NULL;
-
     -- Append-only audit of every tick decision (dispatched / would_dispatch /
     -- skipped / held / guardrail_halt / stall_alert / auto_pause).
     CREATE TABLE IF NOT EXISTS orchestration_decision_log (
