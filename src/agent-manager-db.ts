@@ -55,6 +55,7 @@ import {
   writePersonalityFile,
 } from './config-parser.js';
 import { validateCatalogPatch, applyCatalogPatch } from './agent-detail/catalog-edit.js';
+import { resolveAgentConfigFile, writeValidatedCatalog } from './agent-catalog/durable-write.js';
 import {
   getLibraryAgent,
   getLibrarySkill,
@@ -4921,12 +4922,19 @@ export class AgentManagerDb {
       }
     });
 
-    // AP6 (AGENT-V2) — PATCH /agents/:name/catalog: inline edit of an agent's
-    // catalog (role, expertise, costTier, notSuitableFor, description, status)
-    // from the detail page. Validation + merge live in the pure catalog-edit
-    // module so the route stays thin; an invalid patch is a typed 400. The merged
-    // catalog persists to metadata.catalog (the same slot YAML seeds + a runtime
-    // /catalog PATCH write). Registered before the /:id catch-all.
+    // AP6 (AGENT-V2) + AP6-EDIT/Slice-A — PATCH /agents/:name/catalog: inline
+    // edit of an agent's catalog (role, expertise, costTier, notSuitableFor,
+    // description, status). Validation + merge live in the pure catalog-edit
+    // module; an invalid patch is a typed 400.
+    //
+    // DURABLE write (Slice A): the merged catalog is persisted to the agent's
+    // `catalog:` block in the team YAML source-of-truth (atomic temp+rename) so
+    // the edit survives a restart / re-sync — NOT just the ephemeral runtime
+    // metadata that a /sync or /deploy overwrites. The metadata.catalog write is
+    // ALSO applied so the change is live immediately. If the agent has no YAML
+    // entry the durable write degrades to durable:false (live-only); an ambiguous
+    // multi-file match is a 409 (we never guess which team config to write).
+    // Registered before the /:id catch-all.
     this.managementApp.patch('/agents/:name/catalog', async (req, res) => {
       try {
         const { id: teamId } = await this.getTeam(req);
@@ -4942,12 +4950,48 @@ export class AgentManagerDb {
           return res.status(400).json({ ok: false, error: 'no editable catalog fields provided' });
         }
 
+        // ── Durable write to the YAML source-of-truth (Slice A). ──
+        const configsDir = process.env.ID_AGENTS_CONFIGS_DIR || path.join(process.cwd(), 'configs');
+        const resolved = resolveAgentConfigFile(configsDir, name);
+        let durable = false;
+        let durableFile: string | null = null;
+        let durableError: string | null = null;
+        let durableCatalog: AgentCatalog | null = null;
+        if (resolved.ok) {
+          const wrote = writeValidatedCatalog(resolved.file, name, validated.patch);
+          if (wrote.ok) {
+            durable = true;
+            durableFile = wrote.file;
+            durableCatalog = wrote.catalog;
+          } else if (wrote.code === 'io_error') {
+            return res.status(500).json({ ok: false, error: `durable catalog write failed: ${wrote.error}` });
+          } else {
+            durableError = wrote.error; // agent_not_found in the YAML — degrade to live-only
+          }
+        } else if (resolved.code === 'ambiguous') {
+          return res.status(409).json({
+            ok: false,
+            error: `agent "${name}" appears in multiple config files — set ID_AGENTS_CATALOG_CONFIG to disambiguate`,
+            candidates: resolved.candidates,
+          });
+        } else {
+          durableError = `agent "${name}" not found in any config under ${configsDir}`;
+        }
+
+        // ── Live runtime metadata write (so the edit takes effect immediately). ──
         const meta = (agent.metadata as Record<string, unknown> | undefined) ?? {};
         const current = (meta.catalog as AgentCatalog | undefined) ?? null;
-        const nextCatalog = applyCatalogPatch(current, validated.patch);
+        const nextCatalog = durableCatalog ?? applyCatalogPatch(current, validated.patch);
         await this.db.agents.updateMetadata(agent.id, { ...meta, catalog: nextCatalog });
 
-        res.json({ ok: true, catalog: nextCatalog, updated: Object.keys(validated.patch) });
+        res.json({
+          ok: true,
+          catalog: nextCatalog,
+          updated: Object.keys(validated.patch),
+          durable,
+          ...(durableFile ? { durable_file: durableFile } : {}),
+          ...(durable ? {} : { durable_error: durableError }),
+        });
       } catch (err: any) {
         res.status(500).json({ ok: false, error: err?.message || 'catalog update failed' });
       }
