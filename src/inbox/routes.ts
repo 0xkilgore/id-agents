@@ -10,6 +10,7 @@ import {
   getPolicyViolations, getRoutingDecisions, listAllPolicyViolations,
 } from './storage.js';
 import { applyClassifyInboxItem, applyProposeRoute, applySnooze, applyCheckOff, applyAuditNote } from './ops.js';
+import { applyBulkInboxAction } from './bulk.js';
 import { evaluateInboxRouting, DEFAULT_ROUTING_RULES } from './evaluator.js';
 
 export function mountInboxRoutes(app: Application, adapter: DbAdapter): void {
@@ -234,6 +235,26 @@ export function mountInboxRoutes(app: Application, adapter: DbAdapter): void {
         note: req.body.note,
       });
       res.json({ ok: true });
+    } catch (err) {
+      res.status(400).json({ error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  // ── POST /inbox/bulk ── (PT5: bulk route / archive / mark_acted over many items)
+
+  app.post('/inbox/bulk', async (req: Request, res: Response) => {
+    try {
+      const result = await applyBulkInboxAction(adapter, {
+        action: req.body.action,
+        phids: req.body.phids ?? [],
+        actor_id: req.body.actor_id ?? 'human:chris',
+        ts: req.body.ts ?? new Date().toISOString(),
+        reason: req.body.reason ?? null,
+        action_type: req.body.action_type,
+        action_target: req.body.action_target ?? null,
+        rule_id: req.body.rule_id ?? null,
+      });
+      res.json({ schema_version: 'inbox.bulk.v1', ...result });
     } catch (err) {
       res.status(400).json({ error: err instanceof Error ? err.message : String(err) });
     }
