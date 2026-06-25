@@ -25,6 +25,11 @@ export interface UsageMeterRouteOptions {
   service: UsageMeterService;
   /** Needed for GET /usage/daily-report (reads agent_usage_event). */
   adapter?: DbAdapter;
+  /**
+   * Best-effort transcript ingest can walk and read a large ~/.claude tree.
+   * Keep it explicit so manager startup/read paths stay responsive.
+   */
+  backgroundIngest?: boolean;
 }
 
 /**
@@ -165,7 +170,9 @@ export function mountUsageMeterRoutes(app: Application, opts: UsageMeterRouteOpt
       }
     });
 
-    // Best-effort background capture: shortly after mount, then every 10 min.
+    // Best-effort background capture: opt-in only. The ingest walks and reads a
+    // potentially huge transcript tree synchronously; running it in-process can
+    // block the manager control plane. Manual POST /usage/ingest stays available.
     const runIngest = async () => {
       try {
         const r = await ingestTranscripts(adapter, {});
@@ -182,9 +189,11 @@ export function mountUsageMeterRoutes(app: Application, opts: UsageMeterRouteOpt
         );
       }
     };
-    setTimeout(() => void runIngest(), 5_000).unref?.();
-    const timer = setInterval(() => void runIngest(), 10 * 60_000);
-    if (typeof timer.unref === "function") timer.unref();
+    if (opts.backgroundIngest) {
+      setTimeout(() => void runIngest(), 5_000).unref?.();
+      const timer = setInterval(() => void runIngest(), 10 * 60_000);
+      if (typeof timer.unref === "function") timer.unref();
+    }
   }
 }
 

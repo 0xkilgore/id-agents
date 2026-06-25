@@ -10543,7 +10543,11 @@ export class AgentManagerDb {
             env: process.env,
             configsPath,
           });
-          mountUsageMeterRoutes(this.managementApp, { service, adapter: this.db.adapter });
+          mountUsageMeterRoutes(this.managementApp, {
+            service,
+            adapter: this.db.adapter,
+            backgroundIngest: process.env.USAGE_METER_BACKGROUND_INGEST === "1",
+          });
           if (this.dispatchScheduler) {
             this.dispatchScheduler.scheduler.setUsageGateProvider({
               getSnapshotForScheduler: () => service.getSnapshotForScheduler(),

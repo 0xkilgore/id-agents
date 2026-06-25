@@ -3,7 +3,7 @@
 // Verifies the public /usage v2 contract, the WARN-ONLY default
 // (no blocking), and the fail-safe degraded paths.
 
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import express, { type Express } from "express";
 import { tmpdir } from "node:os";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -48,6 +48,13 @@ function mkApp(service: UsageMeterService): Express {
   const app = express();
   app.use(express.json());
   mountUsageMeterRoutes(app, { service });
+  return app;
+}
+
+function mkAppWithAdapter(service: UsageMeterService, backgroundIngest = false): Express {
+  const app = express();
+  app.use(express.json());
+  mountUsageMeterRoutes(app, { service, adapter, backgroundIngest });
   return app;
 }
 
@@ -99,6 +106,34 @@ describe("UsageMeterService — WARN-ONLY default", () => {
     const svc = mkService();
     await svc.refreshRollups();
     expect(await svc.isAgentPaused("roger")).toBe(false);
+  });
+});
+
+describe("Usage meter routes — background ingest guard", () => {
+  it("does not schedule transcript ingest just because an adapter is present", () => {
+    const setTimeoutSpy = vi.spyOn(global, "setTimeout");
+    const setIntervalSpy = vi.spyOn(global, "setInterval");
+    try {
+      mkAppWithAdapter(mkService());
+      expect(setTimeoutSpy).not.toHaveBeenCalled();
+      expect(setIntervalSpy).not.toHaveBeenCalled();
+    } finally {
+      setTimeoutSpy.mockRestore();
+      setIntervalSpy.mockRestore();
+    }
+  });
+
+  it("schedules transcript ingest only when explicitly enabled", () => {
+    const setTimeoutSpy = vi.spyOn(global, "setTimeout");
+    const setIntervalSpy = vi.spyOn(global, "setInterval");
+    try {
+      mkAppWithAdapter(mkService(), true);
+      expect(setTimeoutSpy).toHaveBeenCalled();
+      expect(setIntervalSpy).toHaveBeenCalled();
+    } finally {
+      setTimeoutSpy.mockRestore();
+      setIntervalSpy.mockRestore();
+    }
   });
 });
 
