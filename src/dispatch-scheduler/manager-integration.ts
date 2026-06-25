@@ -33,6 +33,7 @@ import type {
   DispatchDoc,
   EnqueueInput,
   FailureKind,
+  PromotionInput,
   Provider,
   Runtime,
 } from "./types.js";
@@ -147,9 +148,6 @@ export interface EnqueueInputV2 {
   // for the same logical work reuses the existing non-terminal dispatch instead
   // of creating a duplicate (collapses continuous-orchestration re-fires).
   dedup_key?: string;
-  // Operator escape hatch for an intentional second fire. This suppresses both
-  // explicit and centrally-computed dedup keys.
-  allow_duplicate?: boolean;
   // Spec 054 v2 Part 2 - promotion metadata at enqueue time.
   // Supplying any of repo/branch promotes the dispatch to "build" status
   // (default promote=true). Use `promote: false` with a skip reason for
@@ -160,24 +158,9 @@ export interface EnqueueInputV2 {
   remote?: string;        // default "origin"
   promote?: boolean;
   promotion_strategy?: "auto" | "fast_forward" | "merge_commit" | "squash" | "follow_up_dispatch";
+  promotion_required_reason?: string | null;
+  promotion_input?: PromotionInput | null;
   promotion_skip_reason?: string;
-}
-
-export function computeEnqueueDedupKey(input: EnqueueInputV2): string | undefined {
-  if (input.allow_duplicate) return undefined;
-  if (input.dedup_key) return input.dedup_key;
-  if (!input.repo || !input.branch) return undefined;
-  const base = input.base || "main";
-  const remote = input.remote || "origin";
-  return [
-    "build",
-    input.team_id ?? "default",
-    input.to_agent,
-    input.repo,
-    input.branch,
-    base,
-    remote,
-  ].join(":");
 }
 
 export interface EnqueueResult {
@@ -424,11 +407,18 @@ export class SchedulerHandle {
     // Spec 054 v2 Part 2 (review-fix 2026-05-24): explicit promote:false
     // on a build dispatch (repo + branch present) MUST carry a non-empty
     // promotion_skip_reason so the bypass is auditable.
+    const repo = input.promotion_input?.repo ?? input.repo;
+    const branch = input.promotion_input?.branch ?? input.branch;
+    const promotionSkipReason =
+      input.promotion_input?.promotion_skip_reason ??
+      input.promotion_skip_reason ??
+      input.promotion_required_reason ??
+      null;
     const skipReasonError = validateEnqueueSkipReason({
-      repo: input.repo,
-      branch: input.branch,
+      repo,
+      branch,
       promote: input.promote,
-      promotion_skip_reason: input.promotion_skip_reason,
+      promotion_skip_reason: promotionSkipReason,
     });
     if (skipReasonError) {
       throw new Error(`enqueue: ${skipReasonError}`);
@@ -444,16 +434,23 @@ export class SchedulerHandle {
     // Spec 054 v2 Part 2 - thread promotion metadata into the enqueue
     // payload. PromotionInput is only built when repo+branch are present
     // (= build dispatch); otherwise null and `promote` defaults to false.
-    const promotion_input = input.repo && input.branch
+    const promotion_input = input.promotion_input
+      ? {
+          repo: input.promotion_input.repo,
+          branch: input.promotion_input.branch,
+          base: input.promotion_input.base || "main",
+          remote: input.promotion_input.remote || "origin",
+          promotion_skip_reason: promotionSkipReason,
+        }
+      : input.repo && input.branch
       ? {
           repo: input.repo,
           branch: input.branch,
           base: input.base || "main",
           remote: input.remote || "origin",
-          promotion_skip_reason: input.promotion_skip_reason ?? null,
+          promotion_skip_reason: promotionSkipReason,
         }
       : null;
-    const dedupKey = computeEnqueueDedupKey({ ...input, team_id: teamId });
     // W1-1: normalize the runtime to its canonical identifier, then derive
     // the provider lane FROM the runtime unless the caller explicitly pins a
     // provider. This is what keeps a cursor-cli dispatch out of the Anthropic
@@ -490,10 +487,12 @@ export class SchedulerHandle {
       runtime,
       priority: input.priority ?? 5,
       not_before_at: input.not_before_at,
-      dedup_key: dedupKey,
+      dedup_key: input.dedup_key,
       promote: input.promote,
       promotion_strategy: input.promotion_strategy,
-      promotion_required_reason: input.promotion_skip_reason ?? null,
+      promotion_required_reason: input.promotion_required_reason !== undefined
+        ? input.promotion_required_reason
+        : input.promotion_skip_reason ?? input.promotion_input?.promotion_skip_reason ?? null,
       promotion_input,
     };
     const doc = await this.reactor.enqueue({

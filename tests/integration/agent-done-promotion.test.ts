@@ -168,41 +168,69 @@ describe("enqueue promotion metadata propagation", () => {
     expect(doc.promotion_input).toBeNull();
   });
 
-  it("POST /dispatch/enqueue forwards promotion_input metadata and inherits central build dedup", async () => {
+  async function postEnqueue(payload: Record<string, unknown>) {
+    return fetch(`${baseUrl}/dispatch/enqueue`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        to_agent: "coder-max",
+        from_actor: "operator",
+        ...payload,
+      }),
+    });
+  }
+
+  it("POST /dispatch/enqueue reuses an active dispatch with the same dedup_key", async () => {
+    const dedupKey = "route-dedup-key";
     const payload = {
-      to_agent: "coder-max",
-      from_actor: "operator",
-      message: "build the route",
-      subject: "operator build",
+      message: "dedup this dispatch",
+      subject: "dedup route",
+      dedup_key: dedupKey,
+    };
+
+    const first = await postEnqueue(payload);
+    expect(first.status).toBe(200);
+    const firstBody = await first.json() as { ok: boolean; dispatch_phid: string };
+    expect(firstBody.ok).toBe(true);
+
+    const second = await postEnqueue({ ...payload, message: "dedup this dispatch again" });
+    expect(second.status).toBe(200);
+    const secondBody = await second.json() as { ok: boolean; dispatch_phid: string };
+    expect(secondBody.dispatch_phid).toBe(firstBody.dispatch_phid);
+
+    const { rows } = await db.adapter.query<{ n: number }>(
+      `SELECT COUNT(*) AS n FROM dispatch_scheduler_queue WHERE dedup_key = ?`,
+      [dedupKey],
+    );
+    expect(Number(rows[0]?.n ?? 0)).toBe(1);
+  });
+
+  it("POST /dispatch/enqueue without dedup_key preserves separate dispatches", async () => {
+    const first = await postEnqueue({ message: "old behavior first" });
+    expect(first.status).toBe(200);
+    const firstBody = await first.json() as { dispatch_phid: string };
+
+    const second = await postEnqueue({ message: "old behavior second" });
+    expect(second.status).toBe(200);
+    const secondBody = await second.json() as { dispatch_phid: string };
+
+    expect(secondBody.dispatch_phid).not.toBe(firstBody.dispatch_phid);
+  });
+
+  it("POST /dispatch/enqueue records build promotion_input and defaults base/remote", async () => {
+    const res = await postEnqueue({
+      message: "build with promotion input",
       promote: true,
       promotion_strategy: "merge_commit",
       promotion_input: {
         repo: "/abs/repo-route",
         branch: "feat-route",
-        base: "main",
-        remote: "origin",
       },
-    };
-
-    const first = await fetch(`${baseUrl}/dispatch/enqueue`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
     });
-    expect(first.status).toBe(200);
-    const firstBody = await first.json() as { ok: boolean; dispatch_phid: string };
-    expect(firstBody.ok).toBe(true);
+    expect(res.status).toBe(200);
+    const body = await res.json() as { dispatch_phid: string };
 
-    const second = await fetch(`${baseUrl}/dispatch/enqueue`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ ...payload, message: "build the route again" }),
-    });
-    expect(second.status).toBe(200);
-    const secondBody = await second.json() as { ok: boolean; dispatch_phid: string };
-    expect(secondBody.dispatch_phid).toBe(firstBody.dispatch_phid);
-
-    const doc = await (manager as any).dispatchScheduler.reactor.getByPhid(firstBody.dispatch_phid);
+    const doc = await (manager as any).dispatchScheduler.reactor.getByPhid(body.dispatch_phid);
     expect(doc.promote).toBe(true);
     expect(doc.promotion_strategy).toBe("merge_commit");
     expect(doc.promotion_input).toMatchObject({
@@ -211,34 +239,45 @@ describe("enqueue promotion metadata propagation", () => {
       base: "main",
       remote: "origin",
     });
+    expect(doc.promotion_required_reason).toBeNull();
   });
 
-  it("POST /dispatch/enqueue allow_duplicate bypasses central build dedup", async () => {
-    const payload = {
-      to_agent: "coder-max",
-      from_actor: "operator",
-      message: "build duplicate route",
+  it("POST /dispatch/enqueue rejects promote=false build promotion_input without a reason", async () => {
+    const res = await postEnqueue({
+      message: "build without promotion",
+      promote: false,
       promotion_input: {
-        repo: "/abs/repo-route-dup",
+        repo: "/abs/repo-route-skip",
         branch: "feat-route",
       },
-    };
-
-    const first = await fetch(`${baseUrl}/dispatch/enqueue`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
     });
-    const firstBody = await first.json() as { dispatch_phid: string };
+    expect(res.status).toBe(400);
+    const body = await res.json() as { error: string };
+    expect(body.error).toMatch(/non-empty promotion_skip_reason/);
+  });
 
-    const second = await fetch(`${baseUrl}/dispatch/enqueue`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ ...payload, allow_duplicate: true }),
+  it("POST /dispatch/enqueue accepts promote=false build promotion_input with a reason", async () => {
+    const res = await postEnqueue({
+      message: "build without promotion with reason",
+      promote: false,
+      promotion_required_reason: "Long-lived branch; promote in follow-up",
+      promotion_input: {
+        repo: "/abs/repo-route-skip-ok",
+        branch: "feat-route",
+      },
     });
-    expect(second.status).toBe(200);
-    const secondBody = await second.json() as { dispatch_phid: string };
-    expect(secondBody.dispatch_phid).not.toBe(firstBody.dispatch_phid);
+    expect(res.status).toBe(200);
+    const body = await res.json() as { dispatch_phid: string };
+
+    const doc = await (manager as any).dispatchScheduler.reactor.getByPhid(body.dispatch_phid);
+    expect(doc.promote).toBe(false);
+    expect(doc.promotion_required_reason).toBe("Long-lived branch; promote in follow-up");
+    expect(doc.promotion_input).toMatchObject({
+      repo: "/abs/repo-route-skip-ok",
+      branch: "feat-route",
+      base: "main",
+      remote: "origin",
+    });
   });
 });
 

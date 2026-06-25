@@ -11,7 +11,6 @@ import { SqliteAdapter } from "../../src/db/sqlite-adapter.js";
 import { migrateSqlite } from "../../src/db/migrations/sqlite.js";
 import {
   SchedulerHandle,
-  computeEnqueueDedupKey,
   parseGatewayMode,
   schedulerEnabled,
   MANAGER_LIFECYCLE_ACTOR,
@@ -66,52 +65,6 @@ describe("parseGatewayMode / schedulerEnabled", () => {
     expect(schedulerEnabled({ DISPATCH_SCHEDULER_ENABLED: "false" })).toBe(false);
     expect(schedulerEnabled({ DISPATCH_SCHEDULER_ENABLED: "0" })).toBe(false);
     expect(schedulerEnabled({ DISPATCH_SCHEDULER_ENABLED: "no" })).toBe(false);
-  });
-});
-
-describe("SchedulerHandle enqueue dedup key", () => {
-  it("computes a stable build dedup key in the enqueue chokepoint", () => {
-    expect(computeEnqueueDedupKey({
-      team_id: "team",
-      to_agent: "worker",
-      from_actor: "operator",
-      message: "build",
-      repo: "/repo",
-      branch: "feat-x",
-    })).toBe("build:team:worker:/repo:feat-x:main:origin");
-  });
-
-  it("reuses duplicate build enqueues unless allow_duplicate is true", async () => {
-    const handle = new SchedulerHandle({
-      adapter,
-      teamId: "team",
-      resolveTargetUrl: () => "http://localhost:9999",
-    });
-    const first = await handle.enqueue({
-      to_agent: "worker",
-      from_actor: "operator",
-      message: "build this",
-      repo: "/repo",
-      branch: "feat-x",
-    });
-    const second = await handle.enqueue({
-      to_agent: "worker",
-      from_actor: "operator",
-      message: "build this again",
-      repo: "/repo",
-      branch: "feat-x",
-    });
-    expect(second.dispatch_phid).toBe(first.dispatch_phid);
-
-    const duplicate = await handle.enqueue({
-      to_agent: "worker",
-      from_actor: "operator",
-      message: "intentional second fire",
-      repo: "/repo",
-      branch: "feat-x",
-      allow_duplicate: true,
-    });
-    expect(duplicate.dispatch_phid).not.toBe(first.dispatch_phid);
   });
 });
 

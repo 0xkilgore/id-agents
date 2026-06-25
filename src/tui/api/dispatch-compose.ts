@@ -38,16 +38,17 @@ export interface EnqueueDispatchBody {
   actor_ref: string;
   subject?: string;
   priority?: number;
+  dedup_key?: string;
   promote?: boolean;
   promotion_strategy?: "auto" | "fast_forward" | "merge_commit" | "squash" | "follow_up_dispatch";
+  promotion_required_reason?: string | null;
   promotion_input?: {
     repo: string;
     branch: string;
     base?: string;
     remote?: string;
-    promotion_skip_reason?: string;
+    promotion_skip_reason?: string | null;
   };
-  allow_duplicate?: boolean;
 }
 
 export type ComposeResult =
