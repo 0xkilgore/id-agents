@@ -45,7 +45,7 @@ import {
 import { type Db } from './db/db-service.js';
 import type { AgentRow, ScheduleDefinitionRow, TaskRow } from './db/types.js';
 import fetch from 'node-fetch';
-import type { PluginConfig, DeployConfig, HeartbeatConfig, CalendarSpec, ScheduleDeliveryMode } from './config-parser.js';
+import type { PluginConfig, DeployConfig, HeartbeatConfig, CalendarSpec, ScheduleDeliveryMode, AgentCatalog } from './config-parser.js';
 import {
   processConfig,
   copyAgentDirOverlay,
@@ -54,6 +54,7 @@ import {
   appendLibraryPersonaToAgentsMd,
   writePersonalityFile,
 } from './config-parser.js';
+import { validateCatalogPatch, applyCatalogPatch } from './agent-detail/catalog-edit.js';
 import {
   getLibraryAgent,
   getLibrarySkill,
@@ -4901,10 +4902,45 @@ export class AgentManagerDb {
           consecutiveFailures: agent.consecutive_failures ?? 0,
           lastError: agent.last_error ?? null,
           nowIso: new Date().toISOString(),
+          catalog:
+            ((agent.metadata as Record<string, unknown> | undefined)?.catalog as AgentCatalog | undefined) ??
+            null,
         });
         res.json(detail);
       } catch (err: any) {
         res.status(500).json({ error: err?.message || 'detail failed' });
+      }
+    });
+
+    // AP6 (AGENT-V2) — PATCH /agents/:name/catalog: inline edit of an agent's
+    // catalog (role, expertise, costTier, notSuitableFor, description, status)
+    // from the detail page. Validation + merge live in the pure catalog-edit
+    // module so the route stays thin; an invalid patch is a typed 400. The merged
+    // catalog persists to metadata.catalog (the same slot YAML seeds + a runtime
+    // /catalog PATCH write). Registered before the /:id catch-all.
+    this.managementApp.patch('/agents/:name/catalog', async (req, res) => {
+      try {
+        const { id: teamId } = await this.getTeam(req);
+        const name = req.params.name;
+        const agent = await this.dbQueryAgentByNameMostRecent(teamId, name);
+        if (!agent) return res.status(404).json({ ok: false, error: `Agent "${name}" not found` });
+
+        const validated = validateCatalogPatch(req.body);
+        if (!validated.ok) {
+          return res.status(400).json({ ok: false, error: 'invalid catalog patch', errors: validated.errors });
+        }
+        if (Object.keys(validated.patch).length === 0) {
+          return res.status(400).json({ ok: false, error: 'no editable catalog fields provided' });
+        }
+
+        const meta = (agent.metadata as Record<string, unknown> | undefined) ?? {};
+        const current = (meta.catalog as AgentCatalog | undefined) ?? null;
+        const nextCatalog = applyCatalogPatch(current, validated.patch);
+        await this.db.agents.updateMetadata(agent.id, { ...meta, catalog: nextCatalog });
+
+        res.json({ ok: true, catalog: nextCatalog, updated: Object.keys(validated.patch) });
+      } catch (err: any) {
+        res.status(500).json({ ok: false, error: err?.message || 'catalog update failed' });
       }
     });
 

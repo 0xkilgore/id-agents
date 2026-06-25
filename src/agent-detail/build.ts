@@ -7,6 +7,9 @@
 // fully unit-tested. Keeping the shaping logic pure means the JSON contract the
 // TUI (and any web console) consumes is verifiable without a live DB.
 
+import type { AgentCatalog } from "../config-parser.js";
+import { pickCatalogView, type CatalogView } from "./catalog-edit.js";
+
 /** A task row, narrowed to the fields the charts need. */
 export interface DetailTaskRow {
   status: string;
@@ -54,6 +57,8 @@ export interface RawAgentDetailData {
   skills: string[];
   loops: DetailLoopRow[];
   scripts: string[];
+  /** AP6 — the agent's stored catalog (metadata.catalog), or null if absent. */
+  catalog: AgentCatalog | null;
 }
 
 /** The stable JSON contract returned by GET /agents/:name/detail. */
@@ -69,6 +74,8 @@ export interface AgentDetailResponse {
   skills: string[];
   loops: DetailLoopRow[];
   scripts: string[];
+  /** AP6 — the agent's catalog, narrowed to the editable view fields. */
+  catalog: CatalogView;
 }
 
 /** Hard cap on the recent-output feed (spec: "recent-output-last-20"). */
@@ -107,6 +114,7 @@ export function buildAgentDetail(raw: RawAgentDetailData): AgentDetailResponse {
     skills: raw.skills,
     loops: raw.loops,
     scripts: raw.scripts,
+    catalog: pickCatalogView(raw.catalog),
   };
 }
 

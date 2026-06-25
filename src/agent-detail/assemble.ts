@@ -10,6 +10,7 @@ import type { DbAdapter } from "../db/db-adapter.js";
 import { listArtifactCatalog } from "../outputs/storage.js";
 import { listLoops } from "../loops/registry.js";
 import { getRuntimePaths } from "../runtime/registry.js";
+import type { AgentCatalog } from "../config-parser.js";
 import {
   buildAgentDetail,
   type AgentDetailResponse,
@@ -30,6 +31,8 @@ export interface AssembleOpts {
   lastError: string | null;
   /** Injectable clock for the token window math (ISO). */
   nowIso: string;
+  /** AP6 — the agent's stored catalog (metadata.catalog), or null if absent. */
+  catalog?: AgentCatalog | null;
 }
 
 const TOKEN_SERIES_DAYS = 7;
@@ -124,6 +127,7 @@ export async function assembleAgentDetail(
     skills,
     loops,
     scripts,
+    catalog: opts.catalog ?? null,
   });
 }
 

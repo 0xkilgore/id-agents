@@ -32,6 +32,7 @@ function raw(over: Partial<RawAgentDetailData> = {}): RawAgentDetailData {
     skills: [],
     loops: [],
     scripts: [],
+    catalog: null,
     ...over,
   };
 }
@@ -98,5 +99,23 @@ describe("buildAgentDetail", () => {
     expect(d.recent_outputs).toEqual([]);
     expect(d.skills).toEqual([]);
     expect(d.name).toBe("roger");
+  });
+
+  it("AP6 — surfaces the catalog view (null catalog → empty view)", () => {
+    expect(buildAgentDetail(raw()).catalog).toEqual({
+      role: null,
+      description: null,
+      expertise: [],
+      costTier: null,
+      notSuitableFor: [],
+      status: null,
+    });
+    const d = buildAgentDetail(
+      raw({ catalog: { role: "developer", expertise: ["ts"], costTier: "low", notSuitableFor: ["design"] } }),
+    );
+    expect(d.catalog.role).toBe("developer");
+    expect(d.catalog.expertise).toEqual(["ts"]);
+    expect(d.catalog.costTier).toBe("low");
+    expect(d.catalog.notSuitableFor).toEqual(["design"]);
   });
 });
