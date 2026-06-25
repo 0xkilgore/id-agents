@@ -84,13 +84,13 @@ describe("resolveLandedEvidence", () => {
 });
 
 describe("planReconcile + effective_state flip", () => {
-  it("a landed casualty flips failed_needs_operator -> done_recovered after reconcile", () => {
+  it("a completed-promotion casualty surfaces landed before reconcile and done_recovered after", () => {
     const r = row({
       failure_kind: "agent_error",
       promotion_result_json: promo({ path: "/repo/id-agents", base: "main", promoted_sha: "1d80c61" }, true),
     });
-    // before: status=failed, recovery_status=none -> failed_needs_operator
-    expect(deriveEffectiveState({ ...r } as any)).toBe("failed_needs_operator");
+    // before mutation: read-model already treats completed+verified promotion as landed.
+    expect(deriveEffectiveState({ ...r } as any)).toBe("failed_work_landed_recoverable");
 
     const plan = planReconcile(r, { gitAncestor: fakeGit([["/repo/id-agents", "1d80c61", "origin/main"]]) });
     expect(plan.landed).toBe(true);

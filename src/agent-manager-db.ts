@@ -440,6 +440,24 @@ export async function discoverRestAPEndpoints(baseEndpoint: string): Promise<{ t
   return { talk: '/talk', news: '/news', schedule: null };
 }
 
+async function withTimeout<T>(
+  promise: Promise<T>,
+  timeoutMs: number,
+): Promise<{ timedOut: false; value: T } | { timedOut: true; value: null }> {
+  let timer: NodeJS.Timeout | null = null;
+  try {
+    return await Promise.race([
+      promise.then((value) => ({ timedOut: false as const, value })),
+      new Promise<{ timedOut: true; value: null }>((resolve) => {
+        timer = setTimeout(() => resolve({ timedOut: true, value: null }), timeoutMs);
+        timer.unref?.();
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 type AgentRegistryId = {
   chainId: number;
   registryAddress: string;
@@ -3523,12 +3541,17 @@ export class AgentManagerDb {
       });
     });
 
-    // Install team/principal context middleware for all remaining routes
-    this.managementApp.use(this.teamContextMiddleware());
-
     this.managementApp.get('/health', async (req, res) => {
-      const { id: teamId, name: teamName } = await this.getTeam(req);
-      const count = await this.db.agents.count(teamId);
+      const teamName = this.getTeamName(req);
+      const dbProbe = await withTimeout(
+        (async () => {
+          const team = await this.db.teams.getTeamByName(teamName);
+          if (!team) return { teamId: null, count: null };
+          const count = await this.db.agents.count(team.id);
+          return { teamId: team.id, count };
+        })(),
+        750,
+      );
       // T1.11: surface dispatch-recovery boot-backfill counters so operators can
       // see the pre-restart casualty wave being reconciled (not stuck at 0).
       const recovery_backfill = this.dispatchRecoveryService
@@ -3537,7 +3560,8 @@ export class AgentManagerDb {
       res.json({
         status: 'ok',
         team: teamName,
-        agents: parseInt(count || '0'),
+        agents: dbProbe.timedOut || dbProbe.value.count == null ? null : parseInt(dbProbe.value.count || '0'),
+        datastore: dbProbe.timedOut ? { state: 'degraded', reason: 'health_db_probe_timeout' } : { state: 'ok' },
         timestamp: Date.now(),
         recovery_backfill,
         // T11.1: the running build identity + staleness-vs-origin signal.
@@ -3555,6 +3579,11 @@ export class AgentManagerDb {
         fleet_freshness: this.fleetFreshnessSummary,
       });
     });
+
+    // Install team/principal context middleware for all remaining routes.
+    // /health is intentionally above this middleware so liveness survives DB
+    // contention during boot-time ingest/reconciliation.
+    this.managementApp.use(this.teamContextMiddleware());
 
     this.managementApp.get('/dispatches/health', async (req, res) => {
       try {
@@ -10447,6 +10476,9 @@ export class AgentManagerDb {
               // its terminal-closeout + silence-detection passes can read
               // queries.status / last_output_at evidence from B1.
               queriesRepository: this.db.queries,
+              // Fleet-health admission: stopped/offline legacy Claude lanes
+              // stay queued when live Codex/Cursor builders exist.
+              agentsRepository: this.db.agents,
               // D1 / T-MODEL.1: the model policy resolves an agent's runtime
               // (primary→fallback) at enqueue when no runtime is pinned.
               modelPolicy: this.modelPolicy,

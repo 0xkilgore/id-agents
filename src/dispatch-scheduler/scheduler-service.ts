@@ -60,6 +60,15 @@ export interface UsageGateProvider {
 }
 
 /**
+ * Fleet admission gate: excludes stopped/offline targets from new claims while
+ * leaving their dispatches queued. This is deliberately separate from the
+ * usage gate: usage is budget state, fleet admission is liveness/routing state.
+ */
+export interface AdmissionGateProvider {
+  getExcludedAgentsForClaim(): Promise<string[]>;
+}
+
+/**
  * B0 (2026-06-08): scheduler-side reader pass over B1's
  * `queries.last_output_at` evidence. The scheduler consults this seam
  * before any requeue path to (a) close out dispatches whose linked agent
@@ -106,6 +115,8 @@ export interface SchedulerServiceOptions {
   logger?: SchedulerLogger;
   /** Optional usage gate provider. When omitted, no usage gating. */
   usageGateProvider?: UsageGateProvider;
+  /** Optional fleet-health admission gate. When omitted, no liveness gating. */
+  admissionGateProvider?: AdmissionGateProvider;
   /** Optional B0 evidence client. When omitted, evidence sweep is skipped. */
   queryEvidence?: QueryEvidenceClient;
 }
@@ -136,6 +147,10 @@ export interface TickReport {
     excluded_agents: string[];
     error?: string;
   };
+  admission_gate?: {
+    excluded_agents: string[];
+    error?: string;
+  };
 }
 
 export interface SchedulerLogger {
@@ -161,6 +176,7 @@ export class SchedulerService {
   private logger: SchedulerLogger;
   private budgetState: BudgetState = "ok";
   private usageGateProvider?: UsageGateProvider;
+  private admissionGateProvider?: AdmissionGateProvider;
   private queryEvidence?: QueryEvidenceClient;
 
   constructor(opts: SchedulerServiceOptions) {
@@ -177,11 +193,16 @@ export class SchedulerService {
     );
     this.logger = opts.logger ?? NULL_LOGGER;
     this.usageGateProvider = opts.usageGateProvider;
+    this.admissionGateProvider = opts.admissionGateProvider;
     this.queryEvidence = opts.queryEvidence;
   }
 
   setUsageGateProvider(p: UsageGateProvider | undefined): void {
     this.usageGateProvider = p;
+  }
+
+  setAdmissionGateProvider(p: AdmissionGateProvider | undefined): void {
+    this.admissionGateProvider = p;
   }
 
   setBudgetState(state: BudgetState): void {
@@ -211,7 +232,11 @@ export class SchedulerService {
     let excludeCache: string[] | null = null;
     const getExcludedAgents = async (): Promise<string[]> => {
       if (excludeCache) return excludeCache;
-      excludeCache = await this.computeExcludedAgents(report);
+      const [usageExcluded, admissionExcluded] = await Promise.all([
+        this.computeUsageExcludedAgents(report),
+        this.computeAdmissionExcludedAgents(report),
+      ]);
+      excludeCache = Array.from(new Set([...usageExcluded, ...admissionExcluded]));
       return excludeCache;
     };
 
@@ -316,7 +341,7 @@ export class SchedulerService {
    * error. Wedged-reap and /agent-done / /agent-needs-input / monitor routes
    * are NEVER gated — only new claims.
    */
-  private async computeExcludedAgents(report: TickReport): Promise<string[]> {
+  private async computeUsageExcludedAgents(report: TickReport): Promise<string[]> {
     if (!this.usageGateProvider) return [];
     try {
       const snap = await this.usageGateProvider.getSnapshotForScheduler();
@@ -342,6 +367,28 @@ export class SchedulerService {
       report.usage_gate = {
         enforcement: "warn",
         global_state: "degraded",
+        excluded_agents: [],
+        error: msg,
+      };
+      return [];
+    }
+  }
+
+  private async computeAdmissionExcludedAgents(report: TickReport): Promise<string[]> {
+    if (!this.admissionGateProvider) return [];
+    try {
+      const excludeAgents = await this.admissionGateProvider.getExcludedAgentsForClaim();
+      report.admission_gate = { excluded_agents: excludeAgents };
+      if (excludeAgents.length > 0) {
+        this.logger.info("scheduler_admission_gate", {
+          excluded_agents: excludeAgents,
+        });
+      }
+      return excludeAgents;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      this.logger.warn("scheduler_admission_gate_failed", { detail: msg });
+      report.admission_gate = {
         excluded_agents: [],
         error: msg,
       };

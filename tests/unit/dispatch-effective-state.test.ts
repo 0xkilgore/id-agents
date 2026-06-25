@@ -160,6 +160,52 @@ test("Rule 3: failed + verified_done (commit evidence) -> failed_work_landed_rec
   ).toBe("failed_work_landed_recoverable");
 });
 
+test("Rule 3: failed linked-query-expired + completed verified promotion -> failed_work_landed_recoverable", () => {
+  expect(
+    deriveEffectiveState(
+      row({
+        status: "failed",
+        recovery_status: "none",
+        failure_kind: "agent_error",
+        failure_detail: "linked query terminated expired",
+        promotion_result_json: JSON.stringify({
+          required: true,
+          completed: true,
+          repos: [
+            {
+              path: "/Users/kilgore/Dropbox/Code/cane/id-agents",
+              base: "main",
+              source_branch: "routing-lifecycle-hygiene",
+              promoted_sha: "abc123",
+              remote_main_sha: "abc123",
+              pushed: true,
+              verified: true,
+            },
+          ],
+        }),
+      }),
+    ),
+  ).toBe("failed_work_landed_recoverable");
+});
+
+test("Rule 3: completed promotion with unverified repo does not mask failure", () => {
+  expect(
+    deriveEffectiveState(
+      row({
+        status: "failed",
+        recovery_status: "none",
+        failure_kind: "agent_error",
+        failure_detail: "linked query terminated expired",
+        promotion_result_json: JSON.stringify({
+          required: true,
+          completed: true,
+          repos: [{ path: "/repo", verified: false }],
+        }),
+      }),
+    ),
+  ).toBe("failed_needs_operator");
+});
+
 // ============================================================
 // Rule 5 — recovery-terminal failure statuses
 // ============================================================

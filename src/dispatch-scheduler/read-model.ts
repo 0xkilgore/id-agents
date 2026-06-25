@@ -975,6 +975,14 @@ export function deriveEffectiveState(row: EffectiveStateRow, opts: DeriveOptions
     return "failed_work_landed_recoverable";
   }
 
+  // Spec 054 v2 false-expire guard: if promotion completed and every promoted
+  // repo verified, the work shipped even when a linked query later expired and
+  // marked the dispatch failed. Surface as landed immediately; the background
+  // reconciler can still mutate the row to done_recovered later.
+  if (promotionCompletedAndVerified(row.promotion_result_json)) {
+    return "failed_work_landed_recoverable";
+  }
+
   // Rule 4 — triaged MOOT: a dispatch reconciled as an infra-death (scheduler
   // wedge / manager↔agent transport-exhaustion / closeout-expiry) or superseded
   // by a later run is NOT a genuine operator-action item. It carries
@@ -1018,6 +1026,19 @@ export function deriveEffectiveState(row: EffectiveStateRow, opts: DeriveOptions
 
   // Rule 8 — fallback. Unknown failures surface as needs_operator.
   return "failed_needs_operator";
+}
+
+export function promotionCompletedAndVerified(raw: string | null | undefined): boolean {
+  const parsed = parseJsonOrNull(raw);
+  if (!parsed || typeof parsed !== "object") return false;
+  const promotion = parsed as { completed?: unknown; repos?: unknown };
+  if (promotion.completed !== true || !Array.isArray(promotion.repos) || promotion.repos.length === 0) {
+    return false;
+  }
+  return promotion.repos.every((repo) => {
+    if (!repo || typeof repo !== "object") return false;
+    return (repo as { verified?: unknown }).verified === true;
+  });
 }
 
 /**

@@ -43,7 +43,8 @@ import {
   validateEnqueueSkipReason,
 } from "./types.js";
 import type { SqliteAdapter } from "../db/sqlite-adapter.js";
-import type { QueriesRepository } from "../db/db-service.js";
+import type { AgentsRepository, QueriesRepository } from "../db/db-service.js";
+import type { AgentRow } from "../db/types.js";
 import { QueriesEvidenceClient } from "./queries-evidence-client.js";
 import {
   classifyAgentResponse,
@@ -86,6 +87,8 @@ export interface SchedulerHandleOptions {
    * only for tests that don't exercise the evidence path.
    */
   queriesRepository?: QueriesRepository;
+  /** Optional agents repo used by the fleet-health admission gate. */
+  agentsRepository?: AgentsRepository;
   /**
    * D1 / T-MODEL.1 (2026-06-22): the per-agent model policy. When set, an
    * enqueue that does NOT explicitly pin `runtime` resolves the agent's
@@ -93,6 +96,46 @@ export interface SchedulerHandleOptions {
    * pre-D1 hardcoded `claude-code-cli` default.
    */
   modelPolicy?: ModelPolicyResolver;
+}
+
+const OFFLINE_AGENT_STATUSES = new Set(["stopped", "offline", "deleted", "unhealthy"]);
+const LIVE_AGENT_STATUSES = new Set(["running", "active", "online", "healthy"]);
+
+export function computeFleetAdmissionExclusions(agents: AgentRow[]): string[] {
+  const liveCodexOrCursor = agents.some((agent) => {
+    if (!isLiveAgent(agent)) return false;
+    const runtime = normalizeRuntime(agent.runtime);
+    return runtime === "codex" || runtime === "cursor-cli";
+  });
+  if (!liveCodexOrCursor) return [];
+
+  return agents
+    .filter((agent) => isStoppedOrOffline(agent) && isLegacyClaudeBuilder(agent))
+    .flatMap((agent) => agentClaimRefs(agent));
+}
+
+function isLiveAgent(agent: AgentRow): boolean {
+  const status = (agent.status ?? "").toLowerCase();
+  if (OFFLINE_AGENT_STATUSES.has(status)) return false;
+  if (LIVE_AGENT_STATUSES.has(status)) return true;
+  return !!agent.endpoint;
+}
+
+function isStoppedOrOffline(agent: AgentRow): boolean {
+  return OFFLINE_AGENT_STATUSES.has((agent.status ?? "").toLowerCase());
+}
+
+function isLegacyClaudeBuilder(agent: AgentRow): boolean {
+  const runtime = normalizeRuntime(agent.runtime);
+  if (runtime === "claude-code-cli" || runtime === "claude-agent-sdk" || runtime === "claude-code-local") {
+    return true;
+  }
+  const model = (agent.model ?? "").toLowerCase();
+  return model.includes("claude");
+}
+
+function agentClaimRefs(agent: AgentRow): string[] {
+  return Array.from(new Set([agent.name, agent.id].filter((v): v is string => typeof v === "string" && v.length > 0)));
 }
 
 // Spec 054 §3.1 — structured actor / causation on every dispatch.
@@ -246,6 +289,14 @@ export class SchedulerHandle {
       // never consume each other's concurrency slots.
       providers: ["anthropic", "openai", "cursor", "other"],
     });
+    if (opts.agentsRepository) {
+      this.scheduler.setAdmissionGateProvider({
+        getExcludedAgentsForClaim: async () => {
+          const agents = await opts.agentsRepository!.list(this.teamId, true);
+          return computeFleetAdmissionExclusions(agents);
+        },
+      });
+    }
 
     // Auto-recovery (P0 disp-b329f522…). Reconciles terminal-failed dispatches
     // that actually landed and auto-requeues recoverable internal transients,

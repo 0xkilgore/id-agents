@@ -1,3 +1,5 @@
+import path from "node:path";
+
 // Typed contract for the dispatch-scheduler module.
 //
 // Status values follow the plan's deterministic lifecycle. They are a
@@ -290,6 +292,35 @@ export interface PromotionInput {
   promotion_skip_reason?: string | null;
 }
 
+const CANONICAL_REPO_ALIASES: Record<string, string> = {
+  "/Users/kilgore/Dropbox/Code/substrate-api-codex": "/Users/kilgore/Dropbox/Code/cane/id-agents",
+  "/Users/kilgore/Dropbox/Code/substrate-orch-codex": "/Users/kilgore/Dropbox/Code/cane/id-agents",
+  "/Users/kilgore/Dropbox/Code/id-agents-codex": "/Users/kilgore/Dropbox/Code/cane/id-agents",
+  "/Users/kilgore/Dropbox/Code/kapelle-site-codex": "/Users/kilgore/Dropbox/Code/kapelle-site",
+  "/Users/kilgore/Dropbox/Code/kapelle-frontend-codex": "/Users/kilgore/Dropbox/Code/kapelle-site",
+};
+
+/**
+ * Build dispatches must name canonical repo roots, not agent metadata/alias
+ * directories. Keep this pure and explicit: private Chris-machine aliases are
+ * collapsed to the protected roots used by workspace leases and promotion.
+ */
+export function canonicalizePromotionInput(input: PromotionInput): PromotionInput {
+  const repo = normalizeRepoAlias(input.repo);
+  return {
+    ...input,
+    repo,
+    base: input.base || "main",
+    remote: input.remote || "origin",
+    promotion_skip_reason: input.promotion_skip_reason ?? null,
+  };
+}
+
+function normalizeRepoAlias(repo: string): string {
+  const normalized = path.resolve(repo);
+  return CANONICAL_REPO_ALIASES[normalized] ?? normalized;
+}
+
 /** Per-repo result of a successful promotion, returned by the
  *  promote-to-main CLI helper and included on `/agent-done.promotion.repos[]`. */
 export interface PromotionRepoResult {
@@ -515,11 +546,7 @@ export function applyPromotionDefaults(input: EnqueueInput): EnqueueInput {
   const buildLike = isBuildDispatch(out);
   if (buildLike) {
     if (out.promotion_input) {
-      out.promotion_input = {
-        ...out.promotion_input,
-        base: out.promotion_input.base || "main",
-        remote: out.promotion_input.remote || "origin",
-      };
+      out.promotion_input = canonicalizePromotionInput(out.promotion_input);
     }
     if (out.promote === undefined) out.promote = true;
   } else {
@@ -681,14 +708,6 @@ export function defaultPromotionFields(input: {
     promotion_strategy: input.promotion_strategy ?? "auto",
     promotion_required_reason: input.promotion_required_reason ?? null,
     promotion_result: null,
-    promotion_input: input.promotion_input
-      ? {
-          repo: input.promotion_input.repo,
-          branch: input.promotion_input.branch,
-          base: input.promotion_input.base || "main",
-          remote: input.promotion_input.remote || "origin",
-          promotion_skip_reason: input.promotion_input.promotion_skip_reason ?? null,
-        }
-      : null,
+    promotion_input: input.promotion_input ? canonicalizePromotionInput(input.promotion_input) : null,
   };
 }

@@ -204,4 +204,51 @@ describe("scheduler tick — lanes do not consume each other's slots", () => {
     expect((await reactor.listInFlight("anthropic")).length).toBe(1); // anthropic cap 1
     expect((await reactor.listInFlight("cursor")).length).toBe(0); // cursor lane untouched
   });
+
+  it("admission gate leaves stopped legacy Claude work queued while live Cursor work starts", async () => {
+    const { reactor, scheduler } = harness(["anthropic", "cursor"]);
+    await reactor.enqueue({
+      query_id: "q-brunel",
+      to_agent: "brunel",
+      from_actor: "manager",
+      channel: "dispatch",
+      subject: "legacy build",
+      body_markdown: "build",
+      provider: "anthropic",
+      runtime: "claude-code-cli",
+      priority: 5,
+      promotion_input: {
+        repo: "/Users/kilgore/Dropbox/Code/cane/id-agents",
+        branch: "feat",
+        base: "main",
+        remote: "origin",
+      },
+    });
+    await reactor.enqueue({
+      query_id: "q-cursor",
+      to_agent: "cursor-builder",
+      from_actor: "manager",
+      channel: "dispatch",
+      subject: "cursor build",
+      body_markdown: "build",
+      provider: "cursor",
+      runtime: "cursor-cli",
+      priority: 5,
+      promotion_input: {
+        repo: "/Users/kilgore/Dropbox/Code/cane/id-agents",
+        branch: "feat",
+        base: "main",
+        remote: "origin",
+      },
+    });
+    scheduler.setAdmissionGateProvider({
+      getExcludedAgentsForClaim: async () => ["brunel"],
+    });
+
+    const report = await scheduler.tick();
+
+    expect(report.admission_gate?.excluded_agents).toContain("brunel");
+    expect((await reactor.listQueued("anthropic")).map((d) => d.to_agent)).toEqual(["brunel"]);
+    expect((await reactor.listInFlight("cursor")).map((d) => d.to_agent)).toEqual(["cursor-builder"]);
+  });
 });

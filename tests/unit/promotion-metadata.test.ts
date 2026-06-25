@@ -9,6 +9,7 @@
 import { describe, it, expect } from "vitest";
 import {
   applyPromotionDefaults,
+  canonicalizePromotionInput,
   isBuildDispatch,
   validatePromotionMetadata,
   validateEnqueueSkipReason,
@@ -105,6 +106,22 @@ describe("applyPromotionDefaults", () => {
     expect(out.promotion_input?.base).toBe("main");
     expect(out.promotion_input?.remote).toBe("origin");
   });
+  it("build dispatch: metadata alias repos are canonicalized to protected roots", () => {
+    const out = applyPromotionDefaults({
+      ...baseEnqueue,
+      promotion_input: {
+        repo: "/Users/kilgore/Dropbox/Code/substrate-api-codex",
+        branch: "routing-lifecycle-hygiene",
+        base: "",
+        remote: "",
+      },
+    });
+    expect(out.promotion_input).toMatchObject({
+      repo: "/Users/kilgore/Dropbox/Code/cane/id-agents",
+      base: "main",
+      remote: "origin",
+    });
+  });
   it("explicit promote=false on build dispatch is respected", () => {
     const out = applyPromotionDefaults({
       ...baseEnqueue,
@@ -119,6 +136,35 @@ describe("applyPromotionDefaults", () => {
       promotion_strategy: "squash",
     });
     expect(out.promotion_strategy).toBe("squash");
+  });
+});
+
+describe("canonicalizePromotionInput", () => {
+  it("maps Kapelle frontend alias roots to kapelle-site", () => {
+    expect(
+      canonicalizePromotionInput({
+        repo: "/Users/kilgore/Dropbox/Code/kapelle-site-codex",
+        branch: "feat",
+        base: "",
+        remote: "",
+      }),
+    ).toMatchObject({
+      repo: "/Users/kilgore/Dropbox/Code/kapelle-site",
+      branch: "feat",
+      base: "main",
+      remote: "origin",
+    });
+  });
+
+  it("leaves canonical repo roots intact", () => {
+    expect(
+      canonicalizePromotionInput({
+        repo: "/Users/kilgore/Dropbox/Code/cane/id-agents",
+        branch: "feat",
+        base: "main",
+        remote: "origin",
+      }).repo,
+    ).toBe("/Users/kilgore/Dropbox/Code/cane/id-agents");
   });
 });
 
