@@ -487,6 +487,11 @@ export interface EnqueueInput {
   priority?: number;
   not_before_at?: string;
   usage_policy_snapshot?: UsagePolicySnapshot;
+  // P0 control-plane Slice 3 — optional dedup key for the logical work. When set,
+  // enqueue reuses an existing NON-TERMINAL dispatch for the same key instead of
+  // creating a duplicate row (collapses continuous-orchestration re-fires).
+  // Omitted on manual /talk dispatches, which never dedup.
+  dedup_key?: string;
   // Spec 054 v2 ─ promotion metadata at enqueue time. promote defaults
   // to true when promotion_input is supplied (build dispatch) and false
   // otherwise. Detection helper: isBuildDispatch(input) below.

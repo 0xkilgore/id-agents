@@ -143,6 +143,10 @@ export interface EnqueueInputV2 {
   query_id?: string;
   actor_ref?: ActorRef;
   causation?: Causation;
+  // P0 control-plane Slice 3 — optional dedup key. When set, a repeat enqueue
+  // for the same logical work reuses the existing non-terminal dispatch instead
+  // of creating a duplicate (collapses continuous-orchestration re-fires).
+  dedup_key?: string;
   // Spec 054 v2 Part 2 - promotion metadata at enqueue time.
   // Supplying any of repo/branch promotes the dispatch to "build" status
   // (default promote=true). Use `promote: false` with a skip reason for
@@ -465,6 +469,7 @@ export class SchedulerHandle {
       runtime,
       priority: input.priority ?? 5,
       not_before_at: input.not_before_at,
+      dedup_key: input.dedup_key,
       promote: input.promote,
       promotion_strategy: input.promotion_strategy,
       promotion_required_reason: input.promotion_skip_reason ?? null,

@@ -856,6 +856,10 @@ export async function migrateSqlite(adapter: SqliteAdapter): Promise<void> {
     // dispatch_phid so the read-model mootes it (rule 7/4) out of NEEDS-YOU.
     // The documented v2 follow-up; null until a supersede/retry/reassign sets it.
     `ALTER TABLE dispatch_scheduler_queue ADD COLUMN supersede_link TEXT`,
+    // P0 control-plane Slice 3 (2026-06-25): dedup_key collapses re-fires of the
+    // same logical work. The pre-insert guard reuses an existing NON-TERMINAL
+    // dispatch for the key; the partial unique index below is the DB backstop.
+    `ALTER TABLE dispatch_scheduler_queue ADD COLUMN dedup_key TEXT`,
   ]) {
     try {
       adapter.exec(stmt);
@@ -863,6 +867,16 @@ export async function migrateSqlite(adapter: SqliteAdapter): Promise<void> {
       // Column already exists in upgraded databases.
     }
   }
+
+  // P0 control-plane Slice 3 — at most ONE active dispatch per (team, dedup_key).
+  // Partial unique index over the NON-TERMINAL statuses: terminal rows
+  // (done/failed/cancelled) are excluded so a legitimate refire is allowed.
+  adapter.exec(`
+    CREATE UNIQUE INDEX IF NOT EXISTS dispatch_scheduler_dedup_active_idx
+      ON dispatch_scheduler_queue(team_id, dedup_key)
+      WHERE dedup_key IS NOT NULL
+        AND status IN ('queued','in_flight','bounced','needs_clarification','resume_delivery_failed');
+  `);
 
   // Spec 056 ─ artifact_path index + one-time backfill from result_json.
   adapter.exec(`

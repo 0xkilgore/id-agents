@@ -140,6 +140,14 @@ export class SqliteDispatchReactor {
 
   async enqueue(input: EnqueueInputWithTarget): Promise<DispatchDoc> {
     const now = this.nowFn();
+    // P0 control-plane Slice 3 — dedup guard. When a dedup_key is provided, reuse
+    // an existing NON-TERMINAL dispatch for the same logical work instead of
+    // minting a duplicate (collapses continuous-orchestration re-fires). Terminal
+    // dispatches don't block — a legitimate refire creates a fresh row.
+    if (input.dedup_key) {
+      const existing = await this.findActiveByDedupKey(input.dedup_key);
+      if (existing) return existing;
+    }
     const priority = clampPriority(input.priority);
     const doc: DispatchDoc = {
       dispatch_phid: mintPhid(),
@@ -175,6 +183,7 @@ export class SqliteDispatchReactor {
       ...defaultPromotionFields(input),
     };
     const targetUrl = input.target_url ?? null;
+    try {
     await this.adapter.query(
       `INSERT INTO dispatch_scheduler_queue (
         dispatch_phid, team_id, query_id, to_agent, from_actor, channel,
@@ -187,8 +196,9 @@ export class SqliteDispatchReactor {
         allow_auto_retry,
         clarification_id, active_clarification_json, clarification_history_json,
         resume_delivery_status, promote, promotion_strategy,
-        promotion_required_reason, promotion_result_json, promotion_input_json
-      ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+        promotion_required_reason, promotion_result_json, promotion_input_json,
+        dedup_key
+      ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       [
         doc.dispatch_phid,
         this.teamId,
@@ -235,9 +245,35 @@ export class SqliteDispatchReactor {
         null,
         // Spec 054 v2 Part 2 column
         doc.promotion_input ? JSON.stringify(doc.promotion_input) : null,
+        // P0 control-plane Slice 3 — dedup key (null on manual dispatches).
+        input.dedup_key ?? null,
       ],
     );
+    } catch (err) {
+      // Race: a concurrent enqueue won the (team, dedup_key) unique index.
+      // Reuse the winner instead of surfacing the constraint error.
+      if (input.dedup_key && isUniqueConstraintError(err)) {
+        const existing = await this.findActiveByDedupKey(input.dedup_key);
+        if (existing) return existing;
+      }
+      throw err;
+    }
     return doc;
+  }
+
+  /** Find the existing NON-TERMINAL dispatch for a dedup_key, or null. The
+   *  partial unique index guarantees at most one, but we ORDER deterministically
+   *  for safety. */
+  private async findActiveByDedupKey(dedupKey: string): Promise<DispatchDoc | null> {
+    const { rows } = await this.adapter.query<{ dispatch_phid: string }>(
+      `SELECT dispatch_phid FROM dispatch_scheduler_queue
+        WHERE team_id = ? AND dedup_key = ?
+          AND status IN ('queued','in_flight','bounced','needs_clarification','resume_delivery_failed')
+        ORDER BY updated_at ASC, dispatch_phid ASC
+        LIMIT 1`,
+      [this.teamId, dedupKey],
+    );
+    return rows[0] ? this.getByPhid(rows[0].dispatch_phid) : null;
   }
 
   async getByPhid(phid: string): Promise<DispatchDoc | null> {
@@ -1428,4 +1464,12 @@ function conflict(msg: string): Error & { code: string } {
   const e = new Error(msg) as Error & { code: string };
   e.code = "REACTOR_CONFLICT";
   return e;
+}
+
+/** True for a sqlite UNIQUE-constraint violation (better-sqlite3 code or message)
+ *  — used to turn a dedup_key insert race into a reuse of the winning row. */
+function isUniqueConstraintError(err: unknown): boolean {
+  const code = (err as { code?: string })?.code ?? "";
+  const msg = err instanceof Error ? err.message : String(err);
+  return code === "SQLITE_CONSTRAINT_UNIQUE" || /UNIQUE constraint failed/i.test(msg);
 }
