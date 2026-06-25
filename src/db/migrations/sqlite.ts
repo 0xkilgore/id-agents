@@ -577,6 +577,7 @@ export async function migrateSqlite(adapter: SqliteAdapter): Promise<void> {
     CREATE TABLE IF NOT EXISTS orchestration_backlog_item (
       item_id            TEXT PRIMARY KEY,
       team_id            TEXT NOT NULL,
+      logical_key        TEXT,
       title              TEXT NOT NULL,
       track              TEXT,
       to_agent           TEXT,
@@ -602,6 +603,9 @@ export async function migrateSqlite(adapter: SqliteAdapter): Promise<void> {
     );
     CREATE INDEX IF NOT EXISTS orchestration_backlog_ready_idx
       ON orchestration_backlog_item(team_id, readiness_state, priority, created_at);
+    CREATE INDEX IF NOT EXISTS orchestration_backlog_logical_key_idx
+      ON orchestration_backlog_item(team_id, logical_key)
+      WHERE logical_key IS NOT NULL;
 
     -- Append-only audit of every tick decision (dispatched / would_dispatch /
     -- skipped / held / guardrail_halt / stall_alert / auto_pause).
@@ -638,6 +642,20 @@ export async function migrateSqlite(adapter: SqliteAdapter): Promise<void> {
   } catch {
     // Column already exists in upgraded databases.
   }
+
+  // Continuous-orchestration backlog: stable logical-work key for idempotent
+  // roadmap import/refuel. Nullable + non-unique to avoid migration failure on
+  // pre-existing duplicate live rows; storage helpers enforce forward dedup.
+  try {
+    adapter.exec(`ALTER TABLE orchestration_backlog_item ADD COLUMN logical_key TEXT`);
+  } catch {
+    // Column already exists in upgraded databases.
+  }
+  adapter.exec(`
+    CREATE INDEX IF NOT EXISTS orchestration_backlog_logical_key_idx
+      ON orchestration_backlog_item(team_id, logical_key)
+      WHERE logical_key IS NOT NULL;
+  `);
 
   // Continuous-orchestration backlog: actor-attributed PATCH updates.
   try {

@@ -25,6 +25,18 @@ function isNorthStar(text: string): boolean {
   return /north\s*star|liz|T15\b/i.test(text);
 }
 
+export function normalizeRoadmapLogicalKeyPart(text: string): string {
+  return stripMarkdown(text)
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .replace(/-{2,}/g, "-");
+}
+
+export function roadmapLogicalKey(input: { track: string; title: string }): string {
+  return `roadmap:${normalizeRoadmapLogicalKeyPart(input.track)}:${normalizeRoadmapLogicalKeyPart(input.title)}`;
+}
+
 export interface RoadmapImportResult {
   items: NewBacklogItem[];
   /** Track tags seen, for the import summary. */
@@ -69,6 +81,7 @@ export function parseRoadmapToBacklog(
 
     items.push({
       team_id: opts.team_id ?? "default",
+      logical_key: roadmapLogicalKey({ track: tag, title }),
       title: `${tag} — ${title}`.slice(0, 200),
       track: tag,
       readiness_state: "needs_review", // human gate required before READY

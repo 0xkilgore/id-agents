@@ -67,6 +67,8 @@ export interface FleshPatch {
 export interface BacklogItem {
   item_id: string;
   team_id: string;
+  /** Stable identity for the logical work across roadmap imports/refuels. */
+  logical_key?: string | null;
   title: string;
   /** Roadmap track, e.g. "T-ORCH", "T15", "T-CKPT". */
   track: string | null;

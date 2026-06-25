@@ -15,6 +15,7 @@ import {
   getBacklogItem,
   getFleshCounts,
   insertBacklogItem,
+  insertBacklogItemIfAbsentByLogicalKey,
   insertFleshLog,
   listBacklogByState,
   listFleshLog,
@@ -277,11 +278,19 @@ export function mountContinuousOrchestrationRoutes(app: Application, opts: Orche
       const md = fs.readFileSync(body.path, "utf8");
       const parsed = parseRoadmapToBacklog(md, { team_id: teamId, source_ref: body.path });
       let inserted = 0;
+      let skipped_existing = 0;
       for (const item of parsed.items) {
-        await insertBacklogItem(adapter, item);
-        inserted += 1;
+        const result = await insertBacklogItemIfAbsentByLogicalKey(adapter, item);
+        if (result.inserted) inserted += 1;
+        else skipped_existing += 1;
       }
-      res.json({ ok: true, inserted, tracks: parsed.tracks, note: "imported as needs_review; promote to ready via the approval gate" });
+      res.json({
+        ok: true,
+        inserted,
+        skipped_existing,
+        tracks: parsed.tracks,
+        note: "imported as needs_review; promote to ready via the approval gate",
+      });
     } catch (err) {
       res.status(500).json({ ok: false, error: err instanceof Error ? err.message : String(err) });
     }

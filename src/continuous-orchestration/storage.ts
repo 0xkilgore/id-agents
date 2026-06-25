@@ -19,6 +19,7 @@ import type {
 interface BacklogRow {
   item_id: string;
   team_id: string;
+  logical_key: string | null;
   title: string;
   track: string | null;
   to_agent: string | null;
@@ -66,6 +67,7 @@ export function rowToBacklogItem(r: BacklogRow): BacklogItem {
   return {
     item_id: r.item_id,
     team_id: r.team_id,
+    logical_key: r.logical_key ?? null,
     title: r.title,
     track: r.track,
     to_agent: r.to_agent,
@@ -112,6 +114,7 @@ function parseFleshPatch(json: string | null): FleshPatch | null {
 
 export interface NewBacklogItem {
   team_id?: string;
+  logical_key?: string | null;
   title: string;
   track?: string | null;
   to_agent?: string | null;
@@ -136,13 +139,14 @@ export async function insertBacklogItem(adapter: DbAdapter, input: NewBacklogIte
   const item_id = `coitem_${crypto.randomUUID()}`;
   await adapter.query(
     `INSERT INTO orchestration_backlog_item (
-       item_id, team_id, title, track, to_agent, dispatch_body, priority, value_score,
+       item_id, team_id, logical_key, title, track, to_agent, dispatch_body, priority, value_score,
        readiness_state, risk_class, write_scope_json, dependencies_json, token_estimate,
        provider, runtime, is_north_star, source_refs_json, track_drift, created_at, updated_at
-     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)`,
+     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)`,
     [
       item_id,
       input.team_id ?? "default",
+      input.logical_key ?? null,
       input.title,
       input.track ?? null,
       input.to_agent ?? null,
@@ -166,6 +170,46 @@ export async function insertBacklogItem(adapter: DbAdapter, input: NewBacklogIte
   const got = await getBacklogItem(adapter, item_id);
   if (!got) throw new Error("insertBacklogItem: row not found after insert");
   return got;
+}
+
+export async function getBacklogItemByLogicalKey(
+  adapter: DbAdapter,
+  team_id: string,
+  logical_key: string,
+): Promise<BacklogItem | null> {
+  const { rows } = await adapter.query<BacklogRow>(
+    `SELECT * FROM orchestration_backlog_item
+       WHERE team_id = $1 AND logical_key = $2
+       ORDER BY
+         CASE readiness_state
+           WHEN 'in_flight' THEN 0
+           WHEN 'queued' THEN 1
+           WHEN 'ready' THEN 2
+           WHEN 'needs_chris_batch' THEN 3
+           WHEN 'done' THEN 4
+           WHEN 'needs_review' THEN 5
+           WHEN 'draft' THEN 6
+           ELSE 7
+         END,
+         updated_at DESC,
+         created_at ASC
+       LIMIT 1`,
+    [team_id, logical_key],
+  );
+  return rows[0] ? rowToBacklogItem(rows[0]) : null;
+}
+
+export async function insertBacklogItemIfAbsentByLogicalKey(
+  adapter: DbAdapter,
+  input: NewBacklogItem,
+): Promise<{ item: BacklogItem; inserted: boolean }> {
+  const teamId = input.team_id ?? "default";
+  const logicalKey = input.logical_key?.trim() || null;
+  if (logicalKey) {
+    const existing = await getBacklogItemByLogicalKey(adapter, teamId, logicalKey);
+    if (existing) return { item: existing, inserted: false };
+  }
+  return { item: await insertBacklogItem(adapter, input), inserted: true };
 }
 
 export async function getBacklogItem(adapter: DbAdapter, item_id: string): Promise<BacklogItem | null> {
@@ -235,6 +279,12 @@ export async function promoteToReady(
   if (!item.to_agent || !item.dispatch_body) {
     return { ok: false, reason: "missing to_agent or dispatch_body" };
   }
+  if (item.logical_key) {
+    const existing = await getBacklogItemByLogicalKey(adapter, item.team_id, item.logical_key);
+    if (existing && existing.item_id !== item.item_id && blocksLogicalPromotion(existing.readiness_state)) {
+      return { ok: false, reason: `logical work already ${existing.readiness_state}` };
+    }
+  }
   const now = new Date().toISOString();
   await adapter.query(
     `UPDATE orchestration_backlog_item
@@ -244,6 +294,18 @@ export async function promoteToReady(
   );
   const updated = await getBacklogItem(adapter, item_id);
   return { ok: true, item: updated ?? undefined };
+}
+
+function blocksLogicalPromotion(state: ReadinessState): boolean {
+  return [
+    "ready",
+    "queued",
+    "in_flight",
+    "blocked_dependency",
+    "needs_chris_batch",
+    "waiting_window",
+    "done",
+  ].includes(state);
 }
 
 /** Patch a subset of editable fields (used at the approval gate to attach the
@@ -376,11 +438,24 @@ export async function listFleshCandidates(
 ): Promise<BacklogItem[]> {
   const team_id = opts.team_id ?? "default";
   const maxAttempts = opts.max_attempts ?? 3;
+  const logicalWorkNotBlockedByPeer = `
+    NOT EXISTS (
+      SELECT 1 FROM orchestration_backlog_item peer
+       WHERE peer.team_id = orchestration_backlog_item.team_id
+         AND peer.logical_key = orchestration_backlog_item.logical_key
+         AND peer.item_id <> orchestration_backlog_item.item_id
+         AND orchestration_backlog_item.logical_key IS NOT NULL
+         AND peer.readiness_state IN (
+           'ready','queued','in_flight','blocked_dependency',
+           'needs_chris_batch','waiting_window','done'
+         )
+    )`;
   if (opts.item_ids && opts.item_ids.length > 0) {
     const placeholders = opts.item_ids.map((_, i) => `$${i + 2}`).join(",");
     const { rows } = await adapter.query<BacklogRow>(
       `SELECT * FROM orchestration_backlog_item
          WHERE team_id = $1 AND item_id IN (${placeholders})
+           AND ${logicalWorkNotBlockedByPeer}
          ORDER BY priority ASC, created_at ASC`,
       [team_id, ...opts.item_ids],
     );
@@ -391,6 +466,7 @@ export async function listFleshCandidates(
        WHERE team_id = $1
          AND readiness_state IN ('needs_review', 'draft')
          AND (flesh_status = 'unfleshed' OR (flesh_status = 'failed' AND flesh_attempts < $2))
+         AND ${logicalWorkNotBlockedByPeer}
        ORDER BY is_north_star DESC, priority ASC, created_at ASC
        LIMIT $3`,
     [team_id, maxAttempts, opts.limit ?? 50],

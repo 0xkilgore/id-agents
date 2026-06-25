@@ -73,6 +73,7 @@ export function createContinuousOrchestrationDaemon(opts: BuildDaemonOptions): {
           label: "Continuous Orchestration",
           source: "manager",
         },
+        dedup_key: item.logical_key ?? `orchestration-item:${item.item_id}`,
       };
       if (item.provider) input.provider = item.provider as Provider;
       if (item.runtime) input.runtime = item.runtime as Runtime;
