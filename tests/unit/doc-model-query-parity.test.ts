@@ -15,10 +15,19 @@
 //    fidelity, ordering, pagination). When to-do.md ingestion lands, a
 //    markdown-source parity mirroring the artifact gate should be added here.
 
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, beforeEach } from "vitest";
+import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 import { parseDeliveryLogRows, computeArtifactParity } from "../../src/outputs/parity.js";
 import { buildTasksEntriesEnvelope } from "../../src/tasks-readmodel/entry-projection.js";
 import type { TaskRow } from "../../src/db/types.js";
+import { computeParity } from "../../src/substrate-migration/parity.js";
+import type { ParityComparable } from "../../src/substrate-migration/types.js";
+import { SqliteAdapter } from "../../src/db/sqlite-adapter.js";
+import { migrateInboxTables, listInboxItems } from "../../src/inbox/storage.js";
+import { parseInboxMdLine, runFullProjection } from "../../src/inbox/projection.js";
+import type { InboxItemRow } from "../../src/inbox/types.js";
 
 const NOW = "2026-06-25T12:00:00.000Z";
 
@@ -137,5 +146,190 @@ describe("tasks substrate query ↔ rows projection fidelity gate", () => {
     // union of pages == every row, once.
     const all = [...page1.items, ...page2.items, ...page3.items].map((e) => e.display_id);
     expect(new Set(all).size).toBe(5);
+  });
+});
+
+// ---- INBOX: doc-model query (inbox_items) ↔ intake SoT parity ---------------
+//
+// Sibling to the TASKS gate above, run through the SAME generic parity engine
+// the ARTIFACTS gate uses (computeParity from the substrate-migration toolkit).
+// The inbox doc-model substrate is the `inbox_items` table; its intake SoT is
+// the two real write paths in src/inbox/projection.ts — structured shadow-JSON
+// docs and the legacy inbox.md lines (the legacy-backfilled rows). This pins
+// field-level parity between what the doc-model query SERVES (listInboxItems)
+// and what the SoT implies:
+//   - canonical id     → inbox_phid                  (ParityComparable.key)
+//   - legacy_origin_id → origin_ref (shadow) ?? legacy inbox.md line (backfill)
+//   - status           → operator_state
+// INCLUDING the legacy-backfilled inbox.md rows. Unlike tasks (no markdown read
+// path yet), inbox HAS one, so this exercises the real SoT→substrate projection
+// end to end against an in-memory SqliteAdapter.
+
+interface ShadowGlobalOverrides {
+  origin_kind?: string;
+  origin_ref?: string | null;
+  received_at?: string;
+  lifecycle_state?: string;
+  assigned_agent?: string | null;
+  dispatch_id?: string | null;
+  done_at?: string | null;
+  artifact_path?: string | null;
+}
+
+function shadowDoc(id: string, over: ShadowGlobalOverrides): string {
+  return JSON.stringify({
+    documentType: "kilgore/inbox-item",
+    id,
+    shadow: true,
+    state: {
+      global: {
+        origin_kind: over.origin_kind ?? "email",
+        origin_ref: over.origin_ref ?? null,
+        received_at: over.received_at ?? "2026-05-27T12:00:00.000Z",
+        received_by: "cane",
+        lifecycle_state: over.lifecycle_state ?? "received",
+        classification: "unknown",
+        classification_reason: null,
+        source_subject: null,
+        source_from: null,
+        source_text: "Body",
+        source_excerpt: "Body",
+        source_attachments: [],
+        project_hint: null,
+        priority_hint: null,
+        triaged_at: null,
+        triaged_by: null,
+        claimed_at: null,
+        claimed_by: null,
+        assigned_agent: over.assigned_agent ?? null,
+        dispatch_id: over.dispatch_id ?? null,
+        query_id: null,
+        started_at: null,
+        done_at: over.done_at ?? null,
+        artifact_path: over.artifact_path ?? null,
+        artifact_tl_dr: null,
+        shadow_refs: {},
+        external_refs: {},
+        last_error_code: null,
+        last_error_message: null,
+        last_error_at: null,
+      },
+    },
+  });
+}
+
+// SoT-implied comparable: the canonical id, legacy origin, and status the intake
+// SoT demands for a row — asserted against the projection, not read back from it.
+function inboxSot(key: string, ordering_ts: string, legacy_origin_id: string, status: string): ParityComparable {
+  return { key, ordering_ts, fidelity: { legacy_origin_id, status } };
+}
+
+// The doc-model query row reduced to the same comparable shape (the read side).
+function inboxServedToComparable(row: InboxItemRow): ParityComparable {
+  return {
+    key: row.inbox_phid,
+    ordering_ts: row.received_at,
+    fidelity: {
+      legacy_origin_id: row.origin_ref ?? row.legacy_inbox_md_line,
+      status: row.operator_state,
+    },
+  };
+}
+
+// The two legacy-backfilled inbox.md lines, kept as constants so the expected
+// legacy_origin_id is byte-identical to what projectInboxMd stores.
+const MD_DONE = "- [x] [2026-05-27 10:00] [email] #task — Backfilled done item → done";
+const MD_OPEN = "- [ ] [2026-05-27 09:00] [telegram] #note — Backfilled open item";
+
+function mdPhid(line: string): string {
+  return `inbox-md-${parseInboxMdLine(line)!.lineHash}`;
+}
+
+describe("inbox doc-model query (inbox_items) ↔ intake SoT parity gate", () => {
+  let adapter: SqliteAdapter;
+  let shadowDir: string;
+  let mdPath: string;
+
+  beforeEach(async () => {
+    adapter = new SqliteAdapter(":memory:");
+    migrateInboxTables(adapter);
+
+    const root = mkdtempSync(join(tmpdir(), "inbox-docmodel-parity-"));
+    shadowDir = join(root, "shadow");
+    mkdirSync(shadowDir);
+    mdPath = join(root, "inbox.md");
+
+    // SoT — structured shadow intake: one 'received' (→ new), one dispatch-linked
+    // (→ waiting_on_agent).
+    writeFileSync(
+      join(shadowDir, "new.json"),
+      shadowDoc("shadow-new-1", { origin_ref: "cane:new-1", received_at: "2026-05-27T12:00:00.000Z" }),
+    );
+    writeFileSync(
+      join(shadowDir, "disp.json"),
+      shadowDoc("shadow-disp-1", {
+        origin_ref: "cane:disp-1",
+        received_at: "2026-05-27T11:00:00.000Z",
+        assigned_agent: "finances",
+        dispatch_id: "disp-x",
+      }),
+    );
+
+    // SoT — legacy inbox.md backfill: one checked (→ checked_off), one open (→ new).
+    writeFileSync(mdPath, `# Inbox\n${MD_DONE}\n${MD_OPEN}\n`);
+
+    await runFullProjection(adapter, shadowDir, mdPath);
+  });
+
+  // The SoT-implied population, newest-first. Status values are the intake
+  // semantics, asserted against the projection (not re-derived from it).
+  function sotPopulation(): ParityComparable[] {
+    return [
+      inboxSot("shadow-new-1", "2026-05-27T12:00:00.000Z", "cane:new-1", "new"),
+      inboxSot("shadow-disp-1", "2026-05-27T11:00:00.000Z", "cane:disp-1", "waiting_on_agent"),
+      inboxSot(mdPhid(MD_DONE), "2026-05-27T10:00:00.000Z", MD_DONE, "checked_off"),
+      inboxSot(mdPhid(MD_OPEN), "2026-05-27T09:00:00.000Z", MD_OPEN, "new"),
+    ];
+  }
+
+  it("serves every SoT row with faithful canonical id, legacy_origin_id, and status — including legacy-backfilled inbox.md rows", async () => {
+    const served = await listInboxItems(adapter, {}, 100, 0);
+    const report = computeParity(served.map(inboxServedToComparable), sotPopulation(), NOW);
+
+    expect(report.status).toBe("ok");
+    expect(report.drift).toEqual([]);
+    expect(report.legacy_count).toBe(4);
+    expect(report.substrate_count).toBe(4);
+
+    // Explicitly pin the legacy-backfilled rows (the inbox.md path).
+    const byId = new Map(served.map((r) => [r.inbox_phid, r]));
+    const done = byId.get(mdPhid(MD_DONE));
+    const open = byId.get(mdPhid(MD_OPEN));
+    expect(done?.operator_state).toBe("checked_off");
+    expect(done?.legacy_inbox_md_line).toBe(MD_DONE);
+    expect(open?.operator_state).toBe("new");
+    expect(open?.legacy_inbox_md_line).toBe(MD_OPEN);
+  });
+
+  it("DRIFTS when a served row's status diverges from the SoT (the cutover blocker)", async () => {
+    // Corrupt the doc-model read: flip the backfilled checked_off row to 'new'.
+    await adapter.query("UPDATE inbox_items SET operator_state = $1 WHERE inbox_phid = $2", [
+      "new",
+      mdPhid(MD_DONE),
+    ]);
+    const served = await listInboxItems(adapter, {}, 100, 0);
+    const report = computeParity(served.map(inboxServedToComparable), sotPopulation(), NOW);
+
+    expect(report.status).toBe("drift");
+    expect(report.drift.some((d) => d.includes("status drift") && d.includes(mdPhid(MD_DONE)))).toBe(true);
+  });
+
+  it("DRIFTS when a SoT row is missing from the doc-model read", async () => {
+    await adapter.query("DELETE FROM inbox_items WHERE inbox_phid = $1", [mdPhid(MD_OPEN)]);
+    const served = await listInboxItems(adapter, {}, 100, 0);
+    const report = computeParity(served.map(inboxServedToComparable), sotPopulation(), NOW);
+
+    expect(report.status).toBe("drift");
+    expect(report.drift.some((d) => d.includes("missing in substrate") && d.includes(mdPhid(MD_OPEN)))).toBe(true);
   });
 });
