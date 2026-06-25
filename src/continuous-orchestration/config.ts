@@ -5,6 +5,8 @@
 // enabled after a clean dry-run. Caps are easy to raise once the daily
 // token-usage report shows real burn.
 
+import { clampTickInterval } from "./backpressure.js";
+
 export interface ContinuousOrchestrationConfig {
   /** Master switch. False = daemon never ticks. Default false. */
   enabled: boolean;
@@ -21,8 +23,19 @@ export interface ContinuousOrchestrationConfig {
   /** Consecutive zero-dispatch ticks (while work is admissible) before a loud
    *  stall alert. The overnight-drain failure mode. Default 3. */
   stall_threshold_ticks: number;
-  /** Tick cadence in ms (the lane-fill heartbeat between batch load-points). */
+  /** Tick cadence in ms (the lane-fill heartbeat between batch load-points).
+   *  Clamped to >= min_tick_interval_ms at load (Slice 4 mechanism 4). */
   tick_interval_ms: number;
+  // ── Slice 4: daemon backpressure (config-driven, inert until re-enabled) ──
+  /** Global per-tick write ceiling shared across refuel + admission. Default 3. */
+  max_enqueues_per_tick: number;
+  /** A tick at/above this wall-time grows the adaptive backoff. Default 1500ms. */
+  slow_tick_ms: number;
+  /** Max backoff multiplier — tick delay never exceeds tick_interval_ms*this.
+   *  Default 8. */
+  backoff_max: number;
+  /** Hard floor for tick_interval_ms (clamped at config load). Default 5000ms. */
+  min_tick_interval_ms: number;
   /** Reaper safety net: an item stuck `in_flight` longer than this whose
    *  dispatch is NON-TERMINAL (stuck/zombie OR unresolvable) is auto-released so
    *  its write-scope lock cannot strangle the lane forever. Default 30min — long
@@ -148,6 +161,10 @@ export function defaultConfig(): ContinuousOrchestrationConfig {
     max_new_per_tick: 1,
     stall_threshold_ticks: 3,
     tick_interval_ms: 60_000,
+    max_enqueues_per_tick: 0,
+    slow_tick_ms: 1_500,
+    backoff_max: 8,
+    min_tick_interval_ms: 5_000,
     stale_in_flight_ms: 1_800_000,
     pool_stale_in_flight_ms: 600_000,
     cadence_load_points: ["07:15", "12:30", "15:30"],
@@ -181,7 +198,15 @@ export function loadContinuousOrchestrationConfig(
     max_in_flight: envInt(env.CONTINUOUS_ORCHESTRATION_MAX_IN_FLIGHT, d.max_in_flight),
     max_new_per_tick: envInt(env.CONTINUOUS_ORCHESTRATION_MAX_NEW_PER_TICK, d.max_new_per_tick),
     stall_threshold_ticks: envInt(env.CONTINUOUS_ORCHESTRATION_STALL_THRESHOLD_TICKS, d.stall_threshold_ticks),
-    tick_interval_ms: envInt(env.CONTINUOUS_ORCHESTRATION_TICK_INTERVAL_MS, d.tick_interval_ms),
+    // Slice 4 mechanism 4: clamp the configured cadence to its floor.
+    tick_interval_ms: clampTickInterval(
+      envInt(env.CONTINUOUS_ORCHESTRATION_TICK_INTERVAL_MS, d.tick_interval_ms),
+      envInt(env.CONTINUOUS_ORCHESTRATION_MIN_TICK_INTERVAL_MS, d.min_tick_interval_ms),
+    ),
+    max_enqueues_per_tick: envInt(env.CONTINUOUS_ORCHESTRATION_MAX_ENQUEUES_PER_TICK, d.max_enqueues_per_tick),
+    slow_tick_ms: envInt(env.CONTINUOUS_ORCHESTRATION_SLOW_TICK_MS, d.slow_tick_ms),
+    backoff_max: envInt(env.CONTINUOUS_ORCHESTRATION_BACKOFF_MAX, d.backoff_max),
+    min_tick_interval_ms: envInt(env.CONTINUOUS_ORCHESTRATION_MIN_TICK_INTERVAL_MS, d.min_tick_interval_ms),
     stale_in_flight_ms: envInt(env.CONTINUOUS_ORCHESTRATION_STALE_IN_FLIGHT_MS, d.stale_in_flight_ms),
     pool_stale_in_flight_ms: envInt(env.CONTINUOUS_ORCHESTRATION_POOL_STALE_IN_FLIGHT_MS, d.pool_stale_in_flight_ms),
     cadence_load_points: loadPoints

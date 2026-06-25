@@ -17,6 +17,7 @@ import type { BacklogItem, DecisionRecord, OrchestrationMode, ReadinessState, Us
 import { fairInterleaveByLane, needsRefuel, orderCandidates } from "./selection.js";
 import { tickAdmitLimit } from "./cadence.js";
 import { planAdmission, evaluateStall, type AdmissionContext } from "./admission.js";
+import { computeNextDelay, tickWriteCaps } from "./backpressure.js";
 import {
   appendDecisions,
   bindItemForFire,
@@ -137,6 +138,9 @@ export class ContinuousOrchestrationDaemon {
   private readonly deps: DaemonDeps;
   private readonly teamId: string;
   private timer: NodeJS.Timeout | null = null;
+  // Slice 4: adaptive-backoff carry + stop flag for the self-scheduling loop.
+  private backoffMult = 1;
+  private stopped = false;
 
   constructor(deps: DaemonDeps) {
     this.deps = deps;
@@ -197,6 +201,13 @@ export class ContinuousOrchestrationDaemon {
     // when fully dry — flesh skeletons into dispatchable READY items BEFORE
     // admission, so a near-empty backlog refuels itself without operator action.
     // Mutates the backlog only when the daemon is live (dry-run computes/logs).
+    // Slice 4 mechanism 1: refuel + admission share ONE per-tick write budget.
+    const writeCfg = {
+      maxEnqueuesPerTick: config.max_enqueues_per_tick,
+      maxFleshPerTick: config.max_flesh_per_tick,
+      maxNewPerTick: config.max_new_per_tick,
+    };
+    const refuelCap = tickWriteCaps(writeCfg, 0).refuelCap;
     const refuel = await this.maybeRefuel({
       config,
       mode: state.mode,
@@ -204,7 +215,12 @@ export class ContinuousOrchestrationDaemon {
       hardPaused: usage.hard_paused,
       nowMs,
       dailyTokensUsed: daily_tokens_used,
+      fleshLimit: refuelCap,
     });
+    // Slice 4 mechanism 2: if the refuel fleshed anything this tick, suppress
+    // admission so the daemon never stacks two write bursts in one tick.
+    const refuelFleshed = refuel?.auto_ready ?? 0;
+    const admitCap = tickWriteCaps(writeCfg, refuelFleshed).admitCap;
 
     const ready = await listReadyItems(this.deps.adapter, this.teamId);
     const done_item_ids = await listDoneItemIds(this.deps.adapter, this.teamId);
@@ -226,7 +242,7 @@ export class ContinuousOrchestrationDaemon {
       in_flight,
       active_write_scopes,
       done_item_ids,
-      admit_limit: tickAdmitLimit(nowMs, config),
+      admit_limit: Math.min(tickAdmitLimit(nowMs, config), admitCap),
       pool_for: poolGate?.pool_for,
       pool_free_slots: poolGate?.pool_free_slots,
       pool_free_builders: poolGate?.pool_free_builders,
@@ -536,6 +552,8 @@ export class ContinuousOrchestrationDaemon {
     hardPaused: boolean;
     nowMs: number;
     dailyTokensUsed: number;
+    /** Slice 4: per-tick flesh budget (defaults to config.max_flesh_per_tick). */
+    fleshLimit?: number;
   }): Promise<FleshRunSummary | null> {
     const { config } = args;
     if (!config.auto_flesh_enabled) return null;
@@ -559,7 +577,7 @@ export class ContinuousOrchestrationDaemon {
       return await runFleshPass(this.deps.adapter, config, {
         teamId: this.teamId,
         dry_run: config.dry_run,
-        limit: config.max_flesh_per_tick,
+        limit: Math.min(config.max_flesh_per_tick, args.fleshLimit ?? config.max_flesh_per_tick),
         actor: "continuous-orchestration",
         remaining_daemon_budget: remaining,
       });
@@ -622,24 +640,55 @@ export class ContinuousOrchestrationDaemon {
     }
   }
 
-  /** Start the interval loop. No-op (with a log) when disabled. */
+  /** Start the loop. No-op (with a log) when disabled. Slice 4: a self-scheduling
+   *  setTimeout loop (not a fixed setInterval) so the cadence can adaptively back
+   *  off after slow ticks and recover after fast ones. */
   start(): void {
     if (!this.deps.config.enabled) {
       console.log("[orchestration] daemon DISABLED (set CONTINUOUS_ORCHESTRATION_ENABLED=true to arm); not ticking.");
       return;
     }
     if (this.timer) return;
+    this.stopped = false;
+    this.backoffMult = 1;
     const mode = this.deps.config.dry_run ? "DRY-RUN" : "LIVE";
-    console.log(`[orchestration] daemon armed in ${mode}; tick every ${this.deps.config.tick_interval_ms}ms.`);
-    this.timer = setInterval(() => {
-      this.runTick().catch((err) => console.error("[orchestration] tick error:", err));
-    }, this.deps.config.tick_interval_ms);
+    console.log(`[orchestration] daemon armed in ${mode}; base tick ${this.deps.config.tick_interval_ms}ms (adaptive backoff up to ×${this.deps.config.backoff_max}).`);
+    this.scheduleNext(this.deps.config.tick_interval_ms);
+  }
+
+  /** Arm the next tick. Each fired tick measures its wall-time and uses
+   *  computeNextDelay to pick the following delay (adaptive backoff). */
+  private scheduleNext(delayMs: number): void {
+    this.timer = setTimeout(() => {
+      void this.tickAndReschedule();
+    }, delayMs);
     if (typeof this.timer.unref === "function") this.timer.unref();
   }
 
+  private async tickAndReschedule(): Promise<void> {
+    const startedMs = Date.now();
+    try {
+      await this.runTick();
+    } catch (err) {
+      console.error("[orchestration] tick error:", err);
+    }
+    if (this.stopped) return; // stop() called during the tick — don't re-arm.
+    const lastTickMs = Date.now() - startedMs;
+    const { delayMs, mult } = computeNextDelay(
+      this.deps.config.tick_interval_ms,
+      lastTickMs,
+      this.deps.config.slow_tick_ms,
+      this.deps.config.backoff_max,
+      this.backoffMult,
+    );
+    this.backoffMult = mult;
+    this.scheduleNext(delayMs);
+  }
+
   stop(): void {
+    this.stopped = true;
     if (this.timer) {
-      clearInterval(this.timer);
+      clearTimeout(this.timer);
       this.timer = null;
     }
   }
