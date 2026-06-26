@@ -37,11 +37,13 @@ function makeDaemon(
     inFlight?: number;
     activeScopes?: Set<string>;
     alerts?: string[];
+    newsEvents?: Array<{ type: string; message: string; data?: Record<string, unknown> }>;
     killSwitch?: boolean;
   } = {},
 ) {
   const fired: BacklogItem[] = [];
   const alerts = over.alerts ?? [];
+  const newsEvents = over.newsEvents ?? [];
   const daemon = new ContinuousOrchestrationDaemon({
     adapter,
     config: { ...defaultConfig(), ...over.config },
@@ -57,10 +59,13 @@ function makeDaemon(
     alert: async (m) => {
       alerts.push(m);
     },
+    emitNews: async (event) => {
+      newsEvents.push(event);
+    },
     killSwitchActive: () => over.killSwitch ?? false,
     now: () => Date.parse("2026-06-17T18:00:00Z"), // not a load-point
   });
-  return { daemon, fired, alerts };
+  return { daemon, fired, alerts, newsEvents };
 }
 
 async function seedReady(adapter: SqliteAdapter, over: Partial<BacklogItem> = {}) {
@@ -229,5 +234,45 @@ describe("daemon — guardrail alerts", () => {
     expect(r2.zero_ticks).toBe(2);
     expect(r2.stall_alert).toBe(true);
     expect(alerts.some((a) => /STALL/.test(a))).toBe(true);
+  });
+
+  it("emits fleet.blockage and runs flesh/run when zero-admit stall has low ready fuel", async () => {
+    for (let i = 0; i < 3; i++) {
+      await seedReady(adapter, { title: `ready ${i}`, write_scope: [`ready-${i}`] });
+    }
+    await insertBacklogItem(adapter, {
+      title: "T-ORCH.9 — add a read-only watchdog status route",
+      track: "T-ORCH",
+      readiness_state: "needs_review",
+      source_refs: ["roadmap.md"],
+    });
+
+    const { daemon, newsEvents } = makeDaemon(adapter, {
+      config: {
+        dry_run: false,
+        stall_threshold_ticks: 2,
+        min_ready_fuel: 8,
+        max_in_flight: 0,
+        max_flesh_per_tick: 5,
+      },
+    });
+    await daemon.setMode("running");
+
+    const r1 = await daemon.runTick();
+    expect(r1.stall_alert).toBe(false);
+    expect(r1.refuel).toBeNull();
+
+    const r2 = await daemon.runTick();
+    expect(r2.stall_alert).toBe(true);
+    expect(newsEvents).toHaveLength(1);
+    expect(newsEvents[0].type).toBe("fleet.blockage");
+    expect(newsEvents[0].data).toMatchObject({ zero_ticks: 2, ready: 3, min_ready_fuel: 8 });
+    expect(r2.refuel?.considered).toBe(1);
+    expect(r2.refuel?.auto_ready).toBe(1);
+    expect(r2.decisions.some((d) => d.action === "fleet_blockage")).toBe(true);
+    expect(r2.decisions.some((d) => d.action === "refuel" && d.metadata?.trigger === "zero_admit_stall_watchdog")).toBe(true);
+
+    const readyAfter = await listBacklogByState(adapter, { state: "ready" });
+    expect(readyAfter).toHaveLength(4);
   });
 });

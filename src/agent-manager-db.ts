@@ -10828,6 +10828,19 @@ export class AgentManagerDb {
                 scheduler: this.dispatchScheduler,
                 usageService: service,
                 env: process.env,
+                emitNews: async (event) => {
+                  const teamId = await this.db.teams.getOrCreateTeamId('default');
+                  await this.db.news.add(teamId, null, {
+                    timestamp: Date.now(),
+                    type: event.type,
+                    message: event.message,
+                    data: event.data,
+                    kind: 'notify',
+                    reply_expected: false,
+                    owner_kind: 'manager',
+                    owner_id: teamId,
+                  });
+                },
               });
               mountContinuousOrchestrationRoutes(this.managementApp, {
                 daemon,

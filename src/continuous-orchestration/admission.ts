@@ -206,3 +206,17 @@ export function evaluateStall(
   const zero = prevZeroTicks + 1;
   return { zero_ticks: zero, alert: zero >= config.stall_threshold_ticks };
 }
+
+/**
+ * Zero-admit stall watchdog. This is narrower than the normal stall alert:
+ * it only trips when zero-admit has reached the configured threshold AND the
+ * READY queue is below the refuel floor, which means the daemon needs to make
+ * the blockage visible and attempt a flesh refuel before a manual refill.
+ */
+export function shouldRunZeroAdmitStallWatchdog(
+  zeroTicks: number,
+  readyCount: number,
+  config: ContinuousOrchestrationConfig,
+): boolean {
+  return zeroTicks >= config.stall_threshold_ticks && readyCount < config.min_ready_fuel;
+}

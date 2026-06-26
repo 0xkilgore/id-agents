@@ -9,7 +9,12 @@ import {
   laneKeyOf,
 } from "../../src/continuous-orchestration/selection.js";
 import { isLoadPoint, tickAdmitLimit, localHHmm } from "../../src/continuous-orchestration/cadence.js";
-import { planAdmission, evaluateStall, type AdmissionContext } from "../../src/continuous-orchestration/admission.js";
+import {
+  planAdmission,
+  evaluateStall,
+  shouldRunZeroAdmitStallWatchdog,
+  type AdmissionContext,
+} from "../../src/continuous-orchestration/admission.js";
 import { defaultConfig } from "../../src/continuous-orchestration/config.js";
 import type { BacklogItem, UsageGateView } from "../../src/continuous-orchestration/types.js";
 
@@ -315,5 +320,16 @@ describe("evaluateStall", () => {
     expect(evaluateStall(2, { mode: "running", halted: false, candidates_available: 0, admitted: 0 }, cfg).zero_ticks).toBe(0);
     expect(evaluateStall(2, { mode: "running", halted: true, candidates_available: 9, admitted: 0 }, cfg).zero_ticks).toBe(0);
     expect(evaluateStall(2, { mode: "paused", halted: true, candidates_available: 9, admitted: 0 }, cfg).zero_ticks).toBe(0);
+  });
+});
+
+describe("shouldRunZeroAdmitStallWatchdog", () => {
+  const cfg = { ...defaultConfig(), stall_threshold_ticks: 3, min_ready_fuel: 8 };
+
+  it("trips only at the zero-admit threshold while ready fuel is below floor", () => {
+    expect(shouldRunZeroAdmitStallWatchdog(2, 3, cfg)).toBe(false);
+    expect(shouldRunZeroAdmitStallWatchdog(3, 8, cfg)).toBe(false);
+    expect(shouldRunZeroAdmitStallWatchdog(3, 7, cfg)).toBe(true);
+    expect(shouldRunZeroAdmitStallWatchdog(24, 3, cfg)).toBe(true);
   });
 });

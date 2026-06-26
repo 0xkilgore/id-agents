@@ -16,7 +16,7 @@ import type { ContinuousOrchestrationConfig } from "./config.js";
 import type { BacklogItem, DecisionRecord, OrchestrationMode, ReadinessState, UsageGateView } from "./types.js";
 import { fairInterleaveByLane, needsRefuel, orderCandidates } from "./selection.js";
 import { tickAdmitLimit } from "./cadence.js";
-import { planAdmission, evaluateStall, type AdmissionContext } from "./admission.js";
+import { planAdmission, evaluateStall, shouldRunZeroAdmitStallWatchdog, type AdmissionContext } from "./admission.js";
 import { computeNextDelay, tickWriteCaps } from "./backpressure.js";
 import {
   appendDecisions,
@@ -93,6 +93,8 @@ export interface DaemonDeps {
    */
   pools?: PoolRouting;
   alert?: AlertSender;
+  /** Emit a manager/news event so fleet-visible daemon blockages do not stay silent. */
+  emitNews?: (event: { type: string; message: string; data?: Record<string, unknown> }) => Promise<void>;
   now?: () => number;
   /** Override the kill-switch check (defaults to fs existence of the file). */
   killSwitchActive?: () => boolean;
@@ -208,7 +210,7 @@ export class ContinuousOrchestrationDaemon {
       maxNewPerTick: config.max_new_per_tick,
     };
     const refuelCap = tickWriteCaps(writeCfg, 0).refuelCap;
-    const refuel = await this.maybeRefuel({
+    let refuel = await this.maybeRefuel({
       config,
       mode: state.mode,
       killSwitch,
@@ -367,6 +369,55 @@ export class ContinuousOrchestrationDaemon {
       await this.alert(
         `⚠️ Continuous orchestration STALL — ${stall.zero_ticks} ticks in a row fired nothing while ${ordered.length} ready item(s) wait. Check lanes/budget.`,
       );
+    }
+
+    if (shouldRunZeroAdmitStallWatchdog(stall.zero_ticks, ready.length, config)) {
+      const message =
+        `Continuous orchestration zero-admit stall: ${stall.zero_ticks} consecutive zero-admit ticks, ` +
+        `${ready.length} ready item(s), min_ready_fuel=${config.min_ready_fuel}`;
+      decisions.push({
+        item_id: null,
+        action: "fleet_blockage",
+        reason: `${message}; emitting fleet.blockage and triggering flesh/run`,
+        metadata: {
+          event_type: "fleet.blockage",
+          zero_ticks: stall.zero_ticks,
+          ready: ready.length,
+          min_ready_fuel: config.min_ready_fuel,
+        },
+      });
+      await this.emitFleetBlockage(message, {
+        tick_id,
+        zero_ticks: stall.zero_ticks,
+        ready: ready.length,
+        min_ready_fuel: config.min_ready_fuel,
+        candidates: ordered.length,
+      });
+
+      if (!refuel) {
+        refuel = await this.runStallWatchdogRefuel({
+          config,
+          dailyTokensUsed: daily_tokens_used,
+        });
+        if (refuel) {
+          decisions.push({
+            item_id: null,
+            action: "refuel",
+            reason:
+              `stall watchdog flesh/run${refuel.dry_run ? " (dry-run)" : ""}: ` +
+              `considered ${refuel.considered}, +${refuel.auto_ready} ready, ` +
+              `${refuel.needs_chris_batch} held for batch, ${refuel.failed} failed`,
+            metadata: {
+              trigger: "zero_admit_stall_watchdog",
+              dry_run: refuel.dry_run,
+              considered: refuel.considered,
+              auto_ready: refuel.auto_ready,
+              needs_chris_batch: refuel.needs_chris_batch,
+              failed: refuel.failed,
+            },
+          });
+        }
+      }
     }
 
     await appendDecisions(this.deps.adapter, { team_id: this.teamId, tick_id, dry_run: config.dry_run, records: decisions });
@@ -584,6 +635,34 @@ export class ContinuousOrchestrationDaemon {
     } catch (err) {
       console.error("[orchestration] refuel error:", err);
       return null;
+    }
+  }
+
+  private async runStallWatchdogRefuel(args: {
+    config: DaemonDeps["config"];
+    dailyTokensUsed: number;
+  }): Promise<FleshRunSummary | null> {
+    const remaining = Math.max(0, args.config.daily_token_ceiling - args.dailyTokensUsed);
+    try {
+      return await runFleshPass(this.deps.adapter, args.config, {
+        teamId: this.teamId,
+        dry_run: args.config.dry_run,
+        limit: args.config.max_flesh_per_tick,
+        actor: "continuous-orchestration-stall-watchdog",
+        remaining_daemon_budget: remaining,
+      });
+    } catch (err) {
+      console.error("[orchestration] stall watchdog refuel error:", err);
+      return null;
+    }
+  }
+
+  private async emitFleetBlockage(message: string, data: Record<string, unknown>): Promise<void> {
+    if (!this.deps.emitNews) return;
+    try {
+      await this.deps.emitNews({ type: "fleet.blockage", message, data });
+    } catch (err) {
+      console.error("[orchestration] fleet blockage news emit failed:", err);
     }
   }
 

@@ -35,6 +35,7 @@ export interface BuildDaemonOptions {
   adapter: DbAdapter;
   scheduler: SchedulerLike;
   usageService: UsageServiceLike;
+  emitNews?: (event: { type: string; message: string; data?: Record<string, unknown> }) => Promise<void>;
   config?: ContinuousOrchestrationConfig;
   env?: NodeJS.ProcessEnv;
   teamId?: string;
@@ -120,6 +121,7 @@ export function createContinuousOrchestrationDaemon(opts: BuildDaemonOptions): {
     // Phid-only lookup (no team filter) — dispatch rows are team-UUID-keyed while
     // CO storage uses the team NAME, so a scoped read would never match.
     resolveDispatchStates: (phids: string[]) => getDispatchStatusesByPhid(opts.adapter, phids),
+    emitNews: opts.emitNews,
 
     // Stage C build-pool routing: late-bind builder + a distinct worktree
     // write_scope per build so N pool members build the same repo concurrently.

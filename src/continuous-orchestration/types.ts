@@ -129,6 +129,7 @@ export interface DecisionRecord {
     | "stall_alert"
     | "auto_pause"
     | "refuel"
+    | "fleet_blockage"
     | "auto_promote"
     | "reconciled"
     | "would_reconcile";
