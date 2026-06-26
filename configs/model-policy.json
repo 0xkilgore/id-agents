@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "_comment": "Claude Light policy set 2026-06-25 by codex-manager after Chris saw Claude weekly usage at 59% on day two. Target work share: 60% Codex/OpenAI, 20% Claude/Anthropic, 20% Cursor. Standing rule: new unpinned scheduler-created implementation work prefers Codex, then Cursor, then Claude. Claude remains for judgment/review/high-risk exceptions and domain agents explicitly dispatched by name. constrained_providers means disabled provider lanes; [] explicitly means no disabled providers.",
+  "_comment": "Claude Light policy \u2014 auto-reverted 2026-06-25 ~19:07 CDT post-Codex reset (cursor-conduit bedtime watch).",
   "work_share": {
     "label": "claude-light-60-20-20",
     "targets": {
