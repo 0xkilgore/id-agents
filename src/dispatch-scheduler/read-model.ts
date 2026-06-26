@@ -2,6 +2,7 @@ import path from 'path';
 import { existsSync, readdirSync, statSync } from 'fs';
 
 import type { DbAdapterLike } from '../supervisor/manager-source-reader.js';
+import { readFleetBlockages, type FleetBlockagesReport } from './fleet-blockages.js';
 
 const ACTIVE_STATUSES = ['queued', 'in_flight', 'bounced', 'needs_clarification', 'resume_delivery_failed'];
 const TERMINAL_STATUSES = ['done', 'failed', 'cancelled'];
@@ -368,6 +369,7 @@ export async function readDispatchHealth(adapter: DbAdapterLike, teamId: string)
   oldest_active_at: string | null;
   newest_terminal_at: string | null;
   generated_at: string;
+  blockages: FleetBlockagesReport;
 }> {
   const { rows: countsRows } = await adapter.query<{ status: string; count: number }>(
     `SELECT status, COUNT(*) as count
@@ -394,6 +396,8 @@ export async function readDispatchHealth(adapter: DbAdapterLike, teamId: string)
     [...ACTIVE_STATUSES, ...TERMINAL_STATUSES, teamId],
   );
 
+  const blockages = await readFleetBlockages(adapter, teamId);
+
   return {
     status: 'ok',
     team_id: teamId,
@@ -404,6 +408,7 @@ export async function readDispatchHealth(adapter: DbAdapterLike, teamId: string)
     oldest_active_at: ageRows[0]?.oldest_active_at ?? null,
     newest_terminal_at: ageRows[0]?.newest_terminal_at ?? null,
     generated_at: new Date().toISOString(),
+    blockages,
   };
 }
 

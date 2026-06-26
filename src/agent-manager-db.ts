@@ -118,6 +118,12 @@ import {
   FAILED_24H_WINDOW_MS,
 } from './dispatch-scheduler/read-model.js';
 import {
+  DIRTY_WORKTREE_AUTO_ANSWER,
+  isDirtyWorktreeClarification,
+} from './dispatch-scheduler/dirty-worktree-policy.js';
+import { deliverClarificationResume } from './dispatch-scheduler/clarification-resume-delivery.js';
+import { readFleetBlockages } from './dispatch-scheduler/fleet-blockages.js';
+import {
   parsePromotionEnforcement,
   validatePromotionMetadata,
   type PromotionAgentDone,
@@ -521,6 +527,9 @@ export class AgentManagerDb {
   private dispatchVerificationStorage: DispatchVerificationStorage | null = null;
   private dispatchVerificationJob: DispatchVerificationJob | null = null;
   private dispatchRecoveryService: DispatchRecoveryService | null = null;
+  private fleetBlockageMonitorInterval: NodeJS.Timeout | null = null;
+  private fleetBlockageAlertFingerprint = '';
+  private fleetBlockageAlertAtMs = 0;
   // Task 10: cached canonical-mode flag, parsed once at startup. Exposed for
   // gateway code paths (legacy direct /talk) that need to emit observation
   // warnings under enforce, and for /system-live / tests to inspect.
@@ -1088,6 +1097,58 @@ export class AgentManagerDb {
       ownerKind: 'manager',
       ownerId: teamId,
     };
+  }
+
+  private startFleetBlockageMonitor(teamId: string): void {
+    if (this.fleetBlockageMonitorInterval) return;
+    const intervalMs = 120_000;
+    const run = async () => {
+      try {
+        const report = await readFleetBlockages(this.db.adapter, teamId);
+        if (!report.blocked || report.blockages.length === 0) return;
+        const fingerprint = report.blockages.map((b) => `${b.kind}:${b.count}`).join('|');
+        const now = Date.now();
+        if (
+          fingerprint === this.fleetBlockageAlertFingerprint &&
+          now - this.fleetBlockageAlertAtMs < intervalMs
+        ) {
+          return;
+        }
+        this.fleetBlockageAlertFingerprint = fingerprint;
+        this.fleetBlockageAlertAtMs = now;
+        const headline = report.blockages
+          .filter((b) => b.severity === 'critical')
+          .map((b) => b.message)
+          .slice(0, 2)
+          .join(' · ');
+        const message =
+          headline ||
+          report.blockages.map((b) => b.message).slice(0, 2).join(' · ');
+        const managerInbox = this.getManagerInboxRef(teamId, 'default');
+        await this.db.news.add(teamId, null, {
+          timestamp: now,
+          type: 'fleet.blockage',
+          message: `Fleet blocked: ${message}`,
+          data: {
+            blockages: report.blockages,
+            generated_at: report.generated_at,
+          },
+          kind: 'notify',
+          reply_expected: false,
+          owner_kind: managerInbox.ownerKind,
+          owner_id: managerInbox.ownerId,
+        });
+      } catch (err) {
+        this.managerLog(
+          `[fleet-blockage-monitor] ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    };
+    void run();
+    this.fleetBlockageMonitorInterval = setInterval(() => {
+      void run();
+    }, intervalMs);
+    if (this.fleetBlockageMonitorInterval.unref) this.fleetBlockageMonitorInterval.unref();
   }
 
   /**
@@ -2900,6 +2961,39 @@ export class AgentManagerDb {
           result.doc.dispatch_phid,
           'dispatch_needs_clarification',
         );
+
+        // Fleet policy: dirty canonical checkout is mechanical — auto-resume with
+        // isolated-worktree answer so builders never idle on this snag.
+        if (
+          isDirtyWorktreeClarification(question, body.context ?? null) &&
+          result.doc.status === 'needs_clarification'
+        ) {
+          const auto = await deliverClarificationResume({
+            reactor,
+            resolveEndpoint: async (agentName: string) => {
+              const agent = await this.db.agents.getByName(teamId, agentName).catch(() => null);
+              return agent?.endpoint ?? null;
+            },
+            dispatchPhid: result.doc.dispatch_phid,
+            answer: DIRTY_WORKTREE_AUTO_ANSWER,
+            actor: 'manager:auto-dirty-worktree',
+            clarificationId: result.clarification_id,
+          });
+          if (auto.delivered) {
+            this.evaluateGraphsForDispatchBestEffort(result.doc.dispatch_phid, 'dispatch_resumed');
+            return res.json({
+              ok: true,
+              dispatch_id: result.doc.dispatch_phid,
+              state: auto.state,
+              clarification_id: result.clarification_id,
+              auto_resumed: true,
+              auto_resume_reason: 'dirty_worktree_policy',
+              delivered_to_agent: true,
+              agent_query_id: auto.agent_query_id,
+              idempotent: result.idempotent,
+            });
+          }
+        }
 
         return res.json({
           ok: true,
@@ -10506,6 +10600,7 @@ export class AgentManagerDb {
               },
             });
             this.dispatchScheduler.start();
+            this.startFleetBlockageMonitor(defaultTeamId);
             // W2-1 DispatchVerification — stand up the durable projection on the
             // SAME SqliteAdapter + default team the reactor uses, then start the
             // periodic verification job. The Agents endpoints (mounted in
