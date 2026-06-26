@@ -883,13 +883,15 @@ export async function migrateSqlite(adapter: SqliteAdapter): Promise<void> {
   }
 
   // P0 control-plane Slice 3 — at most ONE active dispatch per (team, dedup_key).
-  // Partial unique index over the NON-TERMINAL statuses: terminal rows
-  // (done/failed/cancelled) are excluded so a legitimate refire is allowed.
+  // Partial unique index over the NON-TERMINAL, non-recovered statuses:
+  // terminal/mooted/reconciled rows are excluded so a legitimate refire is allowed.
+  adapter.exec(`DROP INDEX IF EXISTS dispatch_scheduler_dedup_active_idx`);
   adapter.exec(`
     CREATE UNIQUE INDEX IF NOT EXISTS dispatch_scheduler_dedup_active_idx
       ON dispatch_scheduler_queue(team_id, dedup_key)
       WHERE dedup_key IS NOT NULL
-        AND status IN ('queued','in_flight','bounced','needs_clarification','resume_delivery_failed');
+        AND status IN ('queued','in_flight','bounced','needs_clarification','resume_delivery_failed')
+        AND COALESCE(recovery_status, 'none') NOT IN ('moot', 'landed_reconciled', 'verified_done', 'retry_done');
   `);
 
   // Spec 056 ─ artifact_path index + one-time backfill from result_json.

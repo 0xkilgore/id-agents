@@ -269,6 +269,7 @@ export class SqliteDispatchReactor {
       `SELECT dispatch_phid FROM dispatch_scheduler_queue
         WHERE team_id = ? AND dedup_key = ?
           AND status IN ('queued','in_flight','bounced','needs_clarification','resume_delivery_failed')
+          AND COALESCE(recovery_status, 'none') NOT IN ('moot', 'landed_reconciled', 'verified_done', 'retry_done')
         ORDER BY updated_at ASC, dispatch_phid ASC
         LIMIT 1`,
       [this.teamId, dedupKey],

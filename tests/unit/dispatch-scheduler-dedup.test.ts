@@ -58,6 +58,13 @@ async function setStatus(phid: string, status: string): Promise<void> {
   await adapter.query(`UPDATE dispatch_scheduler_queue SET status = ? WHERE dispatch_phid = ?`, [status, phid]);
 }
 
+async function setRecoveryStatus(phid: string, recoveryStatus: string): Promise<void> {
+  await adapter.query(`UPDATE dispatch_scheduler_queue SET recovery_status = ? WHERE dispatch_phid = ?`, [
+    recoveryStatus,
+    phid,
+  ]);
+}
+
 describe("dispatch enqueue dedup guard", () => {
   it("reuses the existing dispatch when re-enqueued with the same dedup_key while QUEUED", async () => {
     const r = reactorOf();
@@ -91,6 +98,18 @@ describe("dispatch enqueue dedup guard", () => {
     const b = await r.enqueue({ ...base, query_id: "q2", dedup_key: "k" });
     expect(b.dispatch_phid).not.toBe(a.dispatch_phid); // refire allowed
     expect(await rowCount("k")).toBe(2); // one terminal + one fresh active
+  });
+
+  it("allows a fresh dispatch once a prior non-terminal row is mooted", async () => {
+    const r = reactorOf();
+    const a = await r.enqueue({ ...base, dedup_key: "k" });
+    await setStatus(a.dispatch_phid, "needs_clarification");
+    await setRecoveryStatus(a.dispatch_phid, "moot");
+
+    const b = await r.enqueue({ ...base, query_id: "q2", dedup_key: "k" });
+
+    expect(b.dispatch_phid).not.toBe(a.dispatch_phid);
+    expect(await rowCount("k")).toBe(2);
   });
 
   it("allows a fresh dispatch after CANCEL (terminal)", async () => {
