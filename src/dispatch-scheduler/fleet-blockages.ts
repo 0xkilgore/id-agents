@@ -39,7 +39,8 @@ export async function readFleetBlockages(
     `SELECT active_clarification_json, updated_at
        FROM dispatch_scheduler_queue
        WHERE team_id = ?
-         AND status = 'needs_clarification'`,
+         AND status = 'needs_clarification'
+         AND COALESCE(recovery_status, 'none') NOT IN ('moot', 'landed_reconciled', 'verified_done', 'retry_done')`,
     [teamId],
   );
 
