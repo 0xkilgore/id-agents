@@ -10978,7 +10978,9 @@ export class AgentManagerDb {
             import('./decisions/storage.js'),
           ]);
           await migrateDecisionsTables(this.db.adapter);
-          mountDecisionsRoutes(this.managementApp, this.db.adapter);
+          mountDecisionsRoutes(this.managementApp, this.db.adapter, {
+            autoIngest: process.env.DECISIONS_QUEUE_AUTOINGEST === 'true' ? true : undefined,
+          });
           console.log('[Manager] Kapelle decisions routes mounted (/decisions/queue, /decisions/:id/decide)');
         } catch (err) {
           console.warn('[Manager] Decisions routes failed to mount:', err instanceof Error ? err.message : String(err));

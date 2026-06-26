@@ -22,7 +22,7 @@ import {
   recordDecideTransaction,
   recordDecisionActionTransaction,
 } from "./storage.js";
-import { ingestDecisionsFromMarkdown } from "./producer.js";
+import { ingestDecisionsFromMarkdown, type IngestResult } from "./producer.js";
 import type {
   ActorRef,
   DecideDecisionInput,
@@ -86,6 +86,55 @@ export function mountDecisionsRoutes(
   opts: MountDecisionsRoutesOptions = {},
 ): void {
   const now = opts.now ?? (() => new Date());
+  const env = opts.env ?? process.env;
+  // Under Vitest, background filesystem IO stays disabled unless a test
+  // explicitly opts this route into auto-ingest.
+  const autoIngest =
+    opts.autoIngest ??
+    (!env.VITEST && !/^(0|false|no|off)$/i.test(env.DECISIONS_QUEUE_AUTOINGEST ?? ""));
+  const autoIngestSourcePath = opts.autoIngestSourcePath ?? defaultDecisionsSourcePath(env);
+  const autoIngestIntervalMs = opts.autoIngestIntervalMs ?? 10 * 60_000;
+  let lastIngestResult: IngestResult | null = null;
+  let lastIngestAttemptMs = 0;
+
+  async function runAutoIngest(force = false): Promise<OpsProjectionWarning[]> {
+    if (!autoIngest) return [];
+    const elapsedMs = Date.now() - lastIngestAttemptMs;
+    if (!force && lastIngestResult && elapsedMs < autoIngestIntervalMs) return [];
+    lastIngestAttemptMs = Date.now();
+    if (!existsSync(autoIngestSourcePath)) {
+      return [{
+        code: "decisions_source_missing",
+        severity: "warning",
+        message: `Decisions source not found: ${autoIngestSourcePath}`,
+        source_ref: null,
+      }];
+    }
+    try {
+      const result = await ingestDecisionsFromMarkdown(adapter, {
+        source_path: autoIngestSourcePath,
+        now: now().toISOString(),
+      });
+      lastIngestResult = result;
+      if (result.inserted > 0 || result.updated > 0) {
+        console.log(
+          `[decisions] ingested ${autoIngestSourcePath}: +${result.inserted}/${result.updated} ` +
+            `(open=${result.open_count} resolved=${result.resolved_count} superseded=${result.superseded_count} ` +
+            `declined=${result.declined_count}, skipped=${result.skipped.length})`,
+        );
+      }
+      return [];
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.warn(`[decisions] auto-ingest failed for ${autoIngestSourcePath}: ${message}`);
+      return [{
+        code: "decisions_ingest_failed",
+        severity: "error",
+        message,
+        source_ref: null,
+      }];
+    }
+  }
 
   app.get(
     "/decisions/queue",
@@ -103,6 +152,7 @@ export function mountDecisionsRoutes(
         }
         const maxEstimatedSeconds = parsePositiveInt(req.query.max_estimated_seconds, 60);
         const limit = parsePositiveInt(req.query.limit, 8);
+        const ingestWarnings = await runAutoIngest(false);
 
         const rows = await listDecisions(adapter, {
           status,
@@ -120,7 +170,7 @@ export function mountDecisionsRoutes(
           source: {
             system: "manager",
             projection: "decisions_queue",
-            source_type: "manager_decisions_table",
+            source_type: lastIngestResult ? "maestra_decisions_markdown" : "manager_decisions_table",
             source_refs: [],
           },
           freshness: {
@@ -131,12 +181,12 @@ export function mountDecisionsRoutes(
             max_age_seconds: 600,
           },
           provenance: {
-            producer: "manager",
+            producer: lastIngestResult ? "maestra" : "manager",
             producer_task_name: null,
             producer_dispatch_id: null,
-            parser_version: QUEUE_PARSER_VERSION,
-            source_hash: null,
-            source_paths: [],
+            parser_version: lastIngestResult?.parser_version ?? QUEUE_PARSER_VERSION,
+            source_hash: lastIngestResult?.source_hash ?? null,
+            source_paths: lastIngestResult ? [lastIngestResult.source_path] : [],
           },
           filters: {
             status,
@@ -150,7 +200,7 @@ export function mountDecisionsRoutes(
             blocked: items.filter((i) => i.status === "blocked").length,
           },
           items,
-          warnings: [],
+          warnings: ingestWarnings,
         };
         res.json(response);
       } catch (err) {
@@ -448,36 +498,9 @@ export function mountDecisionsRoutes(
   // POSTs /decisions/ingest by hand — so the panel showed no live decisions.
   // Mirrors the usage-meter transcript-ingest pattern (best-effort, self-
   // refreshing). Idempotent upserts mean re-ingest is cheap + safe.
-  const env = opts.env ?? process.env;
-  // Never run the background ingest timer under the test runner (no stray IO).
-  const autoIngest =
-    !env.VITEST &&
-    (opts.autoIngest ?? !/^(0|false|no|off)$/i.test(env.DECISIONS_QUEUE_AUTOINGEST ?? ""));
   if (autoIngest) {
-    const sourcePath = opts.autoIngestSourcePath ?? defaultDecisionsSourcePath(env);
-    const intervalMs = opts.autoIngestIntervalMs ?? 10 * 60_000;
-    const runIngest = async () => {
-      if (!existsSync(sourcePath)) return; // source not on this host — silent no-op
-      try {
-        const r = await ingestDecisionsFromMarkdown(adapter, {
-          source_path: sourcePath,
-          now: now().toISOString(),
-        });
-        if (r.inserted > 0 || r.updated > 0) {
-          console.log(
-            `[decisions] ingested ${sourcePath}: +${r.inserted}/${r.updated} ` +
-              `(open=${r.open_count} resolved=${r.resolved_count} superseded=${r.superseded_count} ` +
-              `declined=${r.declined_count}, skipped=${r.skipped.length})`,
-          );
-        }
-      } catch (err) {
-        console.warn(
-          `[decisions] auto-ingest failed for ${sourcePath}: ${err instanceof Error ? err.message : String(err)}`,
-        );
-      }
-    };
-    setTimeout(() => void runIngest(), 5_000).unref?.();
-    const timer = setInterval(() => void runIngest(), intervalMs);
+    setTimeout(() => void runAutoIngest(true), 0).unref?.();
+    const timer = setInterval(() => void runAutoIngest(true), autoIngestIntervalMs);
     if (typeof timer.unref === "function") timer.unref();
   }
 }

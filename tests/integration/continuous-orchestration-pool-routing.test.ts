@@ -178,6 +178,7 @@ describe("backend pool routing (real registry)", () => {
     // table. Legacy local Claude builder names were removed from the seed pool
     // after they stopped being heartbeat-backed; the current live backend lanes
     // are roger + the two substrate Codex builders.
+    // Width-5 here proves env tuning does not invent unavailable members.
     for (let i = 0; i < 5; i++) await seedBuildItem(i);
     const { daemon, fired } = makeDaemon({
       config: { max_in_flight: 10 },
