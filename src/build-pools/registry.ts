@@ -5,17 +5,12 @@
 // intentionally below member count for usage headroom and is env-tunable via
 // BUILD_POOL_<ID>_MAX_PARALLEL.
 //
-// Snag #11 (2026-06-24): eames + gaudi were seeded into the frontend pool but
-// all real work is backend (id-agents) — the backlog carries no T-UI/T-SITE/
-// T-WEB tracks — so they sat idle while the daemon spilled every pool build to
-// brunel/hopper (the 4-wide local builder pool effectively ran 2-wide). They now
-// live in the BACKEND pool (the repo with the work) so the daemon can spill
-// roger→brunel→hopper→eames→gaudi, and backend max_parallel is 4 so all four
-// live builders can fire concurrently. They are in EXACTLY one pool (not also
-// frontend) because the daemon's per-pool free-builder gate would otherwise
-// double-book an agent across pools. Frontend keeps regina (+ the coders tail);
-// re-add named frontend builders when kapelle-site work is fleshed with T-UI/
-// T-SITE/T-WEB tracks.
+// Snag #12 (2026-06-26): the old local Claude builder names (brunel/eames/
+// hopper/gaudi/regina/rams) can be stopped while Codex/Cursor builders are
+// live. Seeding pools with stopped legacy names lets continuous orchestration
+// create queued rows that the scheduler correctly refuses to deliver, clogging
+// pool capacity. Seed only the currently maintained live lanes here; re-add
+// legacy names only when they have a heartbeat-backed availability source.
 
 import type { BuildPool, PoolId, RepoAlias } from "./types.js";
 
@@ -24,7 +19,7 @@ const SEED: readonly BuildPool[] = [
     pool_id: "backend",
     repo_alias: "id-agents",
     repo_root: "/Users/kilgore/Dropbox/Code/cane/id-agents",
-    members: ["roger", "brunel", "hopper", "eames", "gaudi", "coder-max", "coders"],
+    members: ["roger", "substrate-orch-codex", "substrate-api-codex"],
     tracks: ["T-ORCH", "T-CKPT", "T-DEPLOY", "T-MODEL"],
     max_parallel: 4,
     merge_strategy: "auto",
@@ -33,10 +28,7 @@ const SEED: readonly BuildPool[] = [
     pool_id: "frontend",
     repo_alias: "kapelle-site",
     repo_root: "/Users/kilgore/Dropbox/Code/kapelle-site",
-    // Q2 (spec §10): T-UI/T-SITE/T-WEB seeded per spec; flag Regina to confirm.
-    // eames/gaudi moved to the backend pool (snag #11) — re-add named frontend
-    // builders here once kapelle-site work is fleshed with frontend tracks.
-    members: ["regina", "coders"],
+    members: ["frontend-ui-codex", "frontend-qa-cursor"],
     tracks: ["T-UI", "T-SITE", "T-WEB"],
     max_parallel: 3,
     merge_strategy: "auto",

@@ -143,9 +143,26 @@ export function createContinuousOrchestrationDaemon(opts: BuildDaemonOptions): {
  */
 export function buildPoolRouting(env: NodeJS.ProcessEnv = process.env): PoolRouting {
   const registry = BuildPoolRegistry.load(env);
+  const looksLikeKapelleFrontendWork = (item: BacklogItem): boolean => {
+    const haystack = `${item.title}\n${item.dispatch_body ?? ""}\n${item.write_scope.join("\n")}`.toLowerCase();
+    return (
+      haystack.includes("kapelle-site") ||
+      haystack.includes("/ops") ||
+      haystack.includes("artifact") ||
+      haystack.includes("inbox") ||
+      haystack.includes("dashboard") ||
+      haystack.includes("projects page") ||
+      haystack.includes("agents page") ||
+      haystack.startsWith("ui ")
+    );
+  };
   return {
     poolForItem: (item: BacklogItem): ResolvedPool | null => {
-      const p = item.track ? registry.resolvePool(item.track) : undefined;
+      const p = looksLikeKapelleFrontendWork(item)
+        ? registry.byId("frontend")
+        : item.track
+          ? registry.resolvePool(item.track)
+          : undefined;
       if (!p) return null;
       return { pool_id: p.pool_id, repo_root: p.repo_root, max_parallel: p.max_parallel, members: [...p.members] };
     },

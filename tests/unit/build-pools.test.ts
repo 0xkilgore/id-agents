@@ -116,21 +116,14 @@ describe("BuildPoolRegistry", () => {
     expect(r.byId("backend")!.members[0]).toBe("roger");
   });
 
-  it("backend pool includes eames + gaudi so the local builder pool runs 4-wide (snag #11)", () => {
-    // brunel/hopper alone left the 4-wide pool running 2-wide; eames/gaudi were
-    // stranded in the frontend pool with no T-UI/T-SITE/T-WEB work to take.
+  it("pools seed maintained live lanes, not stopped legacy Claude builders", () => {
     const r = BuildPoolRegistry.load({});
     const backend = r.byId("backend")!;
-    expect(backend.members).toEqual(expect.arrayContaining(["brunel", "hopper", "eames", "gaudi"]));
-    // default width must allow all four live builders to fire concurrently.
-    expect(backend.max_parallel).toBe(4);
-    // a backend-track item resolves to a pool that can spill to eames/gaudi.
+    expect(backend.members).toEqual(["roger", "substrate-orch-codex", "substrate-api-codex"]);
     const resolved = r.resolvePool("T-CKPT.7")!;
     expect(resolved.pool_id).toBe("backend");
-    expect(resolved.members).toEqual(expect.arrayContaining(["eames", "gaudi"]));
-    // eames/gaudi live in EXACTLY one pool (no dual membership → no double-book).
-    expect(r.byId("frontend")!.members).not.toContain("eames");
-    expect(r.byId("frontend")!.members).not.toContain("gaudi");
+    expect(resolved.members).not.toEqual(expect.arrayContaining(["brunel", "hopper", "eames", "gaudi"]));
+    expect(r.byId("frontend")!.members).toEqual(["frontend-ui-codex", "frontend-qa-cursor"]);
   });
 
   it("resolvePool matches by track prefix (longest wins); unknown => undefined", () => {
