@@ -41,13 +41,13 @@ const ALLOWLIST: Issuer[] = [
   },
   {
     file: "src/agent-manager-db.ts",
-    line: 2877,
+    line: 2986,
     category: "MUST_MIGRATE",
     note: "Spec 054 v2 /agent-resume — direct /talk follow-up to deliver the resume payload to the paused agent. Migrate to session-side injection in a follow-up.",
   },
   {
     file: "src/agent-manager-db.ts",
-    line: 9321,
+    line: 9430,
     category: "MUST_MIGRATE",
     note: "agent heartbeat reseed — immediate /talk send",
   },
@@ -85,7 +85,7 @@ const ALLOWLIST: Issuer[] = [
   // ─── Probe/test helpers: intentionally outside the gateway ───
   {
     file: "src/agent-manager-db.ts",
-    line: 7282,
+    line: 7391,
     category: "PROBE_OR_TEST",
     note: "agent probe — end-to-end health probe by design",
   },
