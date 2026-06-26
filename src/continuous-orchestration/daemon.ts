@@ -34,9 +34,9 @@ import { runFleshPass, type FleshRunSummary } from "./flesh-runner.js";
 import { selectAutoPromotions } from "./auto-promote-policy.js";
 import { sendTelegramAlert, type AlertSender } from "./telegram.js";
 
-/** Raw dispatch statuses that mean the work is finished — its write-scope lock
- *  can be released. Mirrors the dispatch read-model's TERMINAL_STATUSES. */
-const TERMINAL_DISPATCH_STATUSES = new Set(["done", "failed", "cancelled"]);
+/** Dispatch/effective statuses that mean the work is finished — its write-scope
+ *  lock can be released. Mirrors dispatch terminal states plus recovery moot. */
+const TERMINAL_DISPATCH_STATUSES = new Set(["done", "failed", "cancelled", "moot"]);
 
 /** A pool an item routes to (resolved from its track). */
 export interface ResolvedPool {

@@ -417,11 +417,15 @@ export async function getDispatchStatusesByPhid(
   const unique = [...new Set(phids.filter((p): p is string => !!p))];
   if (unique.length === 0) return out;
   const placeholders = unique.map((_, i) => `$${i + 1}`).join(",");
-  const { rows } = await adapter.query<{ dispatch_phid: string; status: string }>(
-    `SELECT dispatch_phid, status FROM dispatch_scheduler_queue WHERE dispatch_phid IN (${placeholders})`,
+  const { rows } = await adapter.query<{ dispatch_phid: string; status: string; recovery_status: string | null }>(
+    `SELECT dispatch_phid, status, recovery_status
+       FROM dispatch_scheduler_queue
+      WHERE dispatch_phid IN (${placeholders})`,
     unique,
   );
-  for (const r of rows) out.set(r.dispatch_phid, r.status);
+  for (const r of rows) {
+    out.set(r.dispatch_phid, r.recovery_status === "moot" ? "moot" : r.status);
+  }
   return out;
 }
 

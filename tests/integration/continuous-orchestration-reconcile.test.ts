@@ -65,14 +65,29 @@ async function backdateUpdatedAt(itemId: string, iso: string) {
 }
 
 /** Seed a dispatch_scheduler_queue row (team_id is any string — no FK). */
-async function seedDispatch(phid: string, status: string, teamId = "team-uuid-9999") {
+async function seedDispatch(phid: string, status: string, teamId = "team-uuid-9999", recoveryStatus = "none") {
   const now = new Date(BASE).toISOString();
   await adapter.query(
     `INSERT INTO dispatch_scheduler_queue
        (dispatch_phid, team_id, query_id, to_agent, from_actor, channel, subject,
-        body_markdown, provider, runtime, status, not_before_at, updated_at)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
-    [phid, teamId, `q_${phid}`, "roger", "co", "manager", "s", "b", "anthropic", "claude-code-cli", status, now, now],
+        body_markdown, provider, runtime, status, not_before_at, updated_at, recovery_status)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
+    [
+      phid,
+      teamId,
+      `q_${phid}`,
+      "roger",
+      "co",
+      "manager",
+      "s",
+      "b",
+      "anthropic",
+      "claude-code-cli",
+      status,
+      now,
+      now,
+      recoveryStatus,
+    ],
   );
 }
 
@@ -121,6 +136,18 @@ describe("completion reconciliation — terminal dispatch releases the lock", ()
     expect((await getBacklogItem(adapter, failed.item_id))!.readiness_state).toBe("needs_review");
     expect((await getBacklogItem(adapter, cancelled.item_id))!.readiness_state).toBe("cancelled");
     // No items remain in_flight → all lanes unlocked.
+    expect(await listBacklogByState(adapter, { state: "in_flight" })).toHaveLength(0);
+  });
+
+  it("mooted dispatch clarification releases the in_flight lock to needs_review", async () => {
+    const item = await seedInFlight({ dispatch_phid: "phid:disp-mooted-clarification" });
+    await seedDispatch("phid:disp-mooted-clarification", "needs_clarification", "team-uuid-9999", "moot");
+
+    const { daemon } = makeDaemon();
+    const tick = await daemon.runTick();
+
+    expect(tick.reconciled).toBe(1);
+    expect((await getBacklogItem(adapter, item.item_id))!.readiness_state).toBe("needs_review");
     expect(await listBacklogByState(adapter, { state: "in_flight" })).toHaveLength(0);
   });
 
