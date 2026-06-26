@@ -24,12 +24,15 @@ import {
 import type {
   ActedUponSummary,
   ApproveRequest,
+  ArtifactDispatchReceipt,
   ArtifactComment,
   ArtifactOpRow,
   ArtifactOpType,
   ArtifactReviewStateRow,
+  ArtifactTimelineEvent,
   CaneDraftPayload,
   CommentRequest,
+  DispatchFollowUpRequest,
   FeedbackItem,
   FeedbackRouting,
   ReactionKind,
@@ -37,6 +40,7 @@ import type {
   RejectRequest,
   ShipRequest,
   ShipResponse,
+  SuggestedChangeRequest,
   ViewRequest,
 } from "./types.js";
 import { ARTIFACT_REACTIONS, isReactionKind } from "./types.js";
@@ -116,6 +120,7 @@ export async function approveArtifact(
     ts,
     JSON.stringify({ note: req.note ?? null, idempotent: alreadyApproved }),
     state.source_link,
+    req.idempotency_key,
   );
   return { state, op_id: opId, idempotent: alreadyApproved };
 }
@@ -234,11 +239,111 @@ export async function commentArtifact(
     ts,
     JSON.stringify({ body: req.body, anchor }),
     req.source_link ?? existing?.source_link ?? null,
+    req.idempotency_key,
   );
   return {
     op_id: opId,
     comment: { op_id: opId, artifact_id: artifactId, actor, body: req.body, anchor, ts },
   };
+}
+
+export interface SuggestedChangeResult {
+  event: ArtifactTimelineEvent;
+  op_id: number;
+  idempotent: boolean;
+}
+
+export async function suggestArtifactChange(
+  adapter: DbAdapter,
+  artifactId: string,
+  req: SuggestedChangeRequest,
+  now?: () => Date,
+): Promise<SuggestedChangeResult> {
+  const ts = nowIso(now);
+  const actor = (req.actor || DEFAULT_ACTOR).trim() || DEFAULT_ACTOR;
+  const anchor = req.anchor ?? null;
+  const status = req.status ?? "open";
+  const existing = await getReviewState(adapter, artifactId);
+  await upsertReviewState(
+    adapter,
+    artifactId,
+    { source_link: req.source_link ?? existing?.source_link ?? null },
+    ts,
+  );
+  const before = req.idempotency_key ? await countMatchingIdempotency(adapter, artifactId, req.idempotency_key) : 0;
+  const opId = await appendOperation(
+    adapter,
+    artifactId,
+    "suggested_change",
+    actor,
+    ts,
+    JSON.stringify({
+      body: req.body,
+      anchor,
+      suggested_markdown: req.suggested_markdown ?? null,
+      status,
+    }),
+    req.source_link ?? existing?.source_link ?? null,
+    req.idempotency_key,
+  );
+  const op = (await listOperations(adapter, artifactId, 1000, 0)).find((row) => row.op_id === opId);
+  if (!op) throw new Error(`suggested_change op ${opId} was not readable`);
+  return { op_id: opId, event: timelineEventFromOperation(op), idempotent: before > 0 };
+}
+
+export interface DispatchFollowUpResult {
+  event: ArtifactTimelineEvent;
+  op_id: number;
+  idempotent: boolean;
+}
+
+export async function recordDispatchFollowUp(
+  adapter: DbAdapter,
+  artifactId: string,
+  req: DispatchFollowUpRequest,
+  now?: () => Date,
+): Promise<DispatchFollowUpResult> {
+  const ts = nowIso(now);
+  const actor = (req.actor || DEFAULT_ACTOR).trim() || DEFAULT_ACTOR;
+  const existing = await getReviewState(adapter, artifactId);
+  await upsertReviewState(
+    adapter,
+    artifactId,
+    { source_link: req.source_link ?? existing?.source_link ?? null },
+    ts,
+  );
+  const before = req.idempotency_key ? await countMatchingIdempotency(adapter, artifactId, req.idempotency_key) : 0;
+  const opId = await appendOperation(
+    adapter,
+    artifactId,
+    "dispatch_follow_up",
+    actor,
+    ts,
+    JSON.stringify({
+      body: req.body ?? null,
+      target_agent: req.target_agent ?? null,
+      query_id: req.query_id ?? null,
+      dispatch_phid: req.dispatch_phid ?? null,
+      status: req.status ?? "queued",
+    }),
+    req.source_link ?? existing?.source_link ?? null,
+    req.idempotency_key,
+  );
+  const op = (await listOperations(adapter, artifactId, 1000, 0)).find((row) => row.op_id === opId);
+  if (!op) throw new Error(`dispatch_follow_up op ${opId} was not readable`);
+  return { op_id: opId, event: timelineEventFromOperation(op), idempotent: before > 0 };
+}
+
+async function countMatchingIdempotency(
+  adapter: DbAdapter,
+  artifactId: string,
+  idempotencyKey: string,
+): Promise<number> {
+  const { rows } = await adapter.query<{ n: number }>(
+    `SELECT COUNT(*) AS n FROM artifact_operations WHERE artifact_id = ? AND idempotency_key = ?`,
+    [artifactId, idempotencyKey],
+  );
+  return Number(rows[0]?.n ?? 0);
 }
 
 /** Read the persisted comments for an artifact (newest first), projected from
@@ -462,6 +567,125 @@ export async function listFeedback(
     routed_dispatches: routedDispatches,
   };
   return { items, acted_upon };
+}
+
+// ── Artifact review timeline (T-CKPT Artifact Review v1) ───────────
+// Durable read model over artifact_operations. This keeps legacy operation
+// writes as the source of truth while exposing typed review events for the
+// Artifact Review UI.
+
+export async function listTimelineEvents(
+  adapter: DbAdapter,
+  artifactId: string,
+  limit = 100,
+  offset = 0,
+): Promise<ArtifactTimelineEvent[]> {
+  const ops = await listOperations(adapter, artifactId, limit, offset);
+  return ops.map(timelineEventFromOperation);
+}
+
+export function timelineEventFromOperation(op: ArtifactOpRow): ArtifactTimelineEvent {
+  const payload = parsePayloadObject(op.payload_json);
+  const body = stringOrNull(payload.body) ?? stringOrNull(payload.note);
+  const anchor = stringOrNull(payload.anchor);
+  const receipt = dispatchReceiptFromPayload(payload);
+  return {
+    event_id: `artifact-event-${op.op_id}`,
+    op_id: op.op_id,
+    artifact_id: op.artifact_id,
+    kind: timelineKind(op.op_type, payload),
+    status: timelineStatus(op.op_type, payload),
+    actor: op.actor,
+    ts: op.ts,
+    markdown: stringOrNull(payload.suggested_markdown) ?? body,
+    body,
+    anchor,
+    source_link: op.source_link,
+    idempotency_key: op.idempotency_key ?? null,
+    dispatch_receipt: receipt,
+    payload,
+  };
+}
+
+function parsePayloadObject(payloadJson: string | null): Record<string, unknown> {
+  if (!payloadJson) return {};
+  try {
+    const value = JSON.parse(payloadJson);
+    return value && typeof value === "object" && !Array.isArray(value)
+      ? value as Record<string, unknown>
+      : {};
+  } catch {
+    return {};
+  }
+}
+
+function stringOrNull(value: unknown): string | null {
+  return typeof value === "string" && value.length > 0 ? value : null;
+}
+
+function dispatchReceiptFromPayload(payload: Record<string, unknown>): ArtifactDispatchReceipt | null {
+  const targetAgent = stringOrNull(payload.target_agent) ?? stringOrNull(payload.to_agent);
+  const queryId = stringOrNull(payload.query_id);
+  const dispatchPhid = stringOrNull(payload.dispatch_phid);
+  const status = stringOrNull(payload.status);
+  if (!targetAgent && !queryId && !dispatchPhid && !status) return null;
+  return {
+    target_agent: targetAgent,
+    query_id: queryId,
+    dispatch_phid: dispatchPhid,
+    status,
+  };
+}
+
+function timelineKind(opType: ArtifactOpType, payload: Record<string, unknown>): ArtifactTimelineEvent["kind"] {
+  switch (opType) {
+    case "view":
+      return "view";
+    case "approve":
+      return "approval";
+    case "reject":
+      return "rejection";
+    case "suggested_change":
+      return "suggested_change";
+    case "dispatch_follow_up":
+      return "dispatch_follow_up";
+    case "comment_routed":
+      return "comment_routed";
+    case "ship_attempted":
+      return "ship";
+    case "ship_blocked":
+      return "ship_blocked";
+    case "edit":
+      return "edit";
+    case "revise_draft":
+      return "draft_revision";
+    case "comment_recorded":
+      return stringOrNull(payload.suggested_markdown) ? "suggested_change" : "comment";
+  }
+}
+
+function timelineStatus(opType: ArtifactOpType, payload: Record<string, unknown>): string {
+  const payloadStatus = stringOrNull(payload.status);
+  if (payloadStatus) return payloadStatus;
+  switch (opType) {
+    case "view":
+      return "viewed";
+    case "approve":
+      return "approved";
+    case "reject":
+      return "rejected";
+    case "dispatch_follow_up":
+    case "comment_routed":
+      return "routed";
+    case "ship_attempted":
+      return "shipped";
+    case "ship_blocked":
+      return "blocked";
+    case "suggested_change":
+      return "open";
+    default:
+      return "recorded";
+  }
 }
 
 // ── Revise draft (CANE_DRAFT_ARTIFACTS) ─────────────────────────────

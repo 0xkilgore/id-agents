@@ -82,12 +82,19 @@ export async function migrateOutputsTables(adapter: DbAdapter): Promise<void> {
       actor TEXT NOT NULL,
       ts TEXT NOT NULL,
       payload_json TEXT,
-      source_link TEXT
+      source_link TEXT,
+      idempotency_key TEXT
     )
   `);
 
+  try {
+    await exec(`ALTER TABLE artifact_operations ADD COLUMN idempotency_key TEXT`);
+  } catch {
+    /* column already exists */
+  }
   await exec(`CREATE INDEX IF NOT EXISTS artifact_ops_by_artifact ON artifact_operations(artifact_id, op_id)`);
   await exec(`CREATE INDEX IF NOT EXISTS artifact_ops_by_ts ON artifact_operations(ts)`);
+  await exec(`CREATE UNIQUE INDEX IF NOT EXISTS artifact_ops_idempotency ON artifact_operations(artifact_id, idempotency_key) WHERE idempotency_key IS NOT NULL`);
 
   await exec(`
     CREATE TABLE IF NOT EXISTS artifacts (
@@ -620,7 +627,7 @@ export async function getLastOperationByActor(
   if (opTypes.length === 0) return null;
   const placeholders = opTypes.map(() => '?').join(',');
   const { rows } = await adapter.query<ArtifactOpRow>(
-    `SELECT op_id, artifact_id, op_type, actor, ts, payload_json, source_link
+    `SELECT op_id, artifact_id, op_type, actor, ts, payload_json, source_link, idempotency_key
        FROM artifact_operations
       WHERE artifact_id = ? AND actor = ? AND op_type IN (${placeholders})
       ORDER BY op_id DESC LIMIT 1`,
@@ -636,7 +643,7 @@ export async function listOperations(
   offset: number,
 ): Promise<ArtifactOpRow[]> {
   const { rows } = await adapter.query<ArtifactOpRow>(
-    `SELECT op_id, artifact_id, op_type, actor, ts, payload_json, source_link
+    `SELECT op_id, artifact_id, op_type, actor, ts, payload_json, source_link, idempotency_key
        FROM artifact_operations
       WHERE artifact_id = ?
    ORDER BY op_id ASC
@@ -979,11 +986,22 @@ export async function appendOperation(
   nowIso: string,
   payloadJson: string | null,
   sourceLink: string | null,
+  idempotencyKey?: string | null,
 ): Promise<number> {
+  const normalizedKey = idempotencyKey?.trim() || null;
+  if (normalizedKey) {
+    const { rows } = await adapter.query<{ op_id: number }>(
+      `SELECT op_id FROM artifact_operations
+        WHERE artifact_id = ? AND idempotency_key = ?
+        ORDER BY op_id ASC LIMIT 1`,
+      [artifactId, normalizedKey],
+    );
+    if (rows[0]) return Number(rows[0].op_id);
+  }
   await adapter.query(
-    `INSERT INTO artifact_operations (artifact_id, op_type, actor, ts, payload_json, source_link)
-     VALUES (?, ?, ?, ?, ?, ?)`,
-    [artifactId, opType, actor, nowIso, payloadJson, sourceLink],
+    `INSERT INTO artifact_operations (artifact_id, op_type, actor, ts, payload_json, source_link, idempotency_key)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    [artifactId, opType, actor, nowIso, payloadJson, sourceLink, normalizedKey],
   );
   // Return the new op_id. SQLite-style last-insert-rowid via a follow-up read.
   const { rows } = await adapter.query<{ op_id: number }>(

@@ -13,6 +13,8 @@ export type ArtifactOpType =
   | "view"
   | "approve"
   | "reject"
+  | "suggested_change"
+  | "dispatch_follow_up"
   | "ship_attempted"
   | "ship_blocked"
   | "comment_recorded"
@@ -76,6 +78,7 @@ export interface ArtifactOpRow {
   ts: string;                     // ISO-8601 UTC
   payload_json: string | null;    // structured op-specific JSON (note, blockers, etc.)
   source_link: string | null;     // doc-model pointer when mirrored from upstream
+  idempotency_key?: string | null; // optional caller-supplied dedupe key
 }
 
 // Current review state for one artifact. Lives in artifact_review_state.
@@ -221,6 +224,53 @@ export interface ArtifactOperationsResponse {
   count: number;
 }
 
+export type ArtifactTimelineEventKind =
+  | "view"
+  | "comment"
+  | "suggested_change"
+  | "approval"
+  | "rejection"
+  | "dispatch_follow_up"
+  | "comment_routed"
+  | "ship"
+  | "ship_blocked"
+  | "edit"
+  | "draft_revision";
+
+export interface ArtifactDispatchReceipt {
+  target_agent: string | null;
+  query_id: string | null;
+  dispatch_phid: string | null;
+  status: string | null;
+}
+
+export interface ArtifactTimelineEvent {
+  event_id: string;
+  op_id: number;
+  artifact_id: string;
+  kind: ArtifactTimelineEventKind;
+  status: string;
+  actor: string;
+  ts: string;
+  markdown: string | null;
+  body: string | null;
+  anchor: string | null;
+  source_link: string | null;
+  idempotency_key: string | null;
+  dispatch_receipt: ArtifactDispatchReceipt | null;
+  payload: Record<string, unknown>;
+}
+
+export interface ArtifactTimelineResponse {
+  ok: true;
+  schema_version: "artifact.timeline.v1";
+  artifact_id: string;
+  events: ArtifactTimelineEvent[];
+  limit: number;
+  offset: number;
+  count: number;
+}
+
 export interface ViewRequest {
   viewer?: string;                // optional override; defaults to "operator"
   source_link?: string;           // optional upstream pointer to backfill
@@ -230,6 +280,7 @@ export interface ApproveRequest {
   approver?: string;              // defaults to "operator"
   note?: string;
   source_link?: string;
+  idempotency_key?: string | null;
 }
 
 export interface RejectRequest {
@@ -249,6 +300,28 @@ export interface CommentRequest {
   body: string;                   // the comment text
   anchor?: string | null;         // optional section/line anchor within the artifact
   source_link?: string;
+  idempotency_key?: string | null;
+}
+
+export interface SuggestedChangeRequest {
+  actor: string;
+  body: string;
+  anchor?: string | null;
+  suggested_markdown?: string | null;
+  status?: "open" | "applied" | "dismissed";
+  source_link?: string;
+  idempotency_key?: string | null;
+}
+
+export interface DispatchFollowUpRequest {
+  actor: string;
+  body?: string | null;
+  target_agent?: string | null;
+  query_id?: string | null;
+  dispatch_phid?: string | null;
+  status?: string | null;
+  source_link?: string;
+  idempotency_key?: string | null;
 }
 
 export interface ArtifactComment {

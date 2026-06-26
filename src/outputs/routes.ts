@@ -49,13 +49,16 @@ import {
   checkActionCooldown,
   commentArtifact,
   DEFAULT_ACTION_COOLDOWN_MS,
+  listTimelineEvents,
   listComments,
   listFeedback,
   reactArtifact,
   recordCommentRouted,
+  recordDispatchFollowUp,
   rejectArtifact,
   reviseDraft,
   shipArtifact,
+  suggestArtifactChange,
   viewArtifact,
   type CaneDraftShipContext,
 } from './ops.js';
@@ -71,7 +74,9 @@ import type {
   ArtifactOperationsResponse,
   ArtifactOpType,
   ArtifactReviewResponse,
+  ArtifactTimelineResponse,
   CaneDraftPayload,
+  DispatchFollowUpRequest,
   OutputsInboxResponse,
   OutputsInboxRow,
   RegisterArtifactRequest,
@@ -79,6 +84,7 @@ import type {
   RejectRequest,
   ReactionRequest,
   ShipRequest,
+  SuggestedChangeRequest,
   ViewRequest,
 } from './types.js';
 import { isReactionKind } from './types.js';
@@ -96,6 +102,16 @@ import {
 
 function asString(v: unknown): string | undefined {
   return typeof v === 'string' && v.length > 0 ? v : undefined;
+}
+
+function idempotencyKey(req: Request, suffix?: string): string | null {
+  const body = (req.body ?? {}) as Record<string, unknown>;
+  const raw =
+    asString(body.idempotency_key) ??
+    asString(body.idempotencyKey) ??
+    asString(req.header('idempotency-key'));
+  if (!raw) return null;
+  return suffix ? `${raw}:${suffix}` : raw;
 }
 
 /**
@@ -745,6 +761,98 @@ export function mountOutputsRoutes(
     }
   });
 
+  // ── GET /artifacts/:id/timeline ───────────────────────────────────
+  // Artifact Review v1 read contract: typed, durable timeline events projected
+  // from artifact_operations. This is the bounded API for reload-safe review
+  // state; legacy /operations remains available unchanged.
+  app.get('/artifacts/:id/timeline', async (req: Request<{ id: string }>, res: Response) => {
+    try {
+      const limit = Math.min(parseInt(req.query.limit as string, 10) || 100, 500);
+      const offset = parseInt(req.query.offset as string, 10) || 0;
+      const events = await listTimelineEvents(adapter, req.params.id, limit, offset);
+      const response: ArtifactTimelineResponse = {
+        ok: true,
+        schema_version: 'artifact.timeline.v1',
+        artifact_id: req.params.id,
+        events,
+        limit,
+        offset,
+        count: events.length,
+      };
+      res.json(response);
+    } catch (err) {
+      res.status(500).json({ ok: false, error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  // ── POST /artifacts/:id/timeline ──────────────────────────────────
+  // Bounded event-write surface for the Artifact Review timeline. General
+  // comments/approve/reject/view keep their legacy endpoints; this endpoint
+  // adds typed suggested-change comments and follow-up dispatch receipts.
+  app.post('/artifacts/:id/timeline', async (req: Request<{ id: string }>, res: Response) => {
+    try {
+      const artifactId = requireArtifactId(req, res);
+      if (!artifactId) return;
+      const actor = requireActor(req, res);
+      if (!actor) return;
+      const kind = asString(req.body?.kind) ?? asString(req.body?.event_kind);
+      if (kind === 'suggested_change') {
+        const body = asString(req.body?.body) ?? asString(req.body?.markdown);
+        if (!body || body.trim().length === 0) {
+          return res.status(400).json({ ok: false, error: 'suggested change body is required', code: 'missing_body' });
+        }
+        const status = asString(req.body?.status);
+        if (status && !['open', 'applied', 'dismissed'].includes(status)) {
+          return res.status(400).json({ ok: false, error: 'invalid suggested change status', code: 'invalid_status' });
+        }
+        const reqBody: SuggestedChangeRequest = {
+          actor: actor.ref,
+          body,
+          anchor: asString(req.body?.anchor) ?? null,
+          suggested_markdown: asString(req.body?.suggested_markdown) ?? asString(req.body?.suggestedMarkdown) ?? null,
+          status: status as SuggestedChangeRequest['status'],
+          source_link: asString(req.body?.source_link),
+          idempotency_key: idempotencyKey(req),
+        };
+        const result = await suggestArtifactChange(adapter, artifactId, reqBody, clock);
+        return res.json({
+          ok: true,
+          schema_version: 'artifact.timeline.write.v1',
+          event: result.event,
+          op_id: result.op_id,
+          idempotent: result.idempotent,
+        });
+      }
+      if (kind === 'dispatch_follow_up') {
+        const reqBody: DispatchFollowUpRequest = {
+          actor: actor.ref,
+          body: asString(req.body?.body) ?? null,
+          target_agent: asString(req.body?.target_agent) ?? asString(req.body?.to_agent) ?? null,
+          query_id: asString(req.body?.query_id) ?? null,
+          dispatch_phid: asString(req.body?.dispatch_phid) ?? asString(req.body?.dispatch_id) ?? null,
+          status: asString(req.body?.status) ?? null,
+          source_link: asString(req.body?.source_link),
+          idempotency_key: idempotencyKey(req),
+        };
+        const result = await recordDispatchFollowUp(adapter, artifactId, reqBody, clock);
+        return res.json({
+          ok: true,
+          schema_version: 'artifact.timeline.write.v1',
+          event: result.event,
+          op_id: result.op_id,
+          idempotent: result.idempotent,
+        });
+      }
+      return res.status(400).json({
+        ok: false,
+        code: 'invalid_timeline_event_kind',
+        error: 'kind must be one of: suggested_change, dispatch_follow_up',
+      });
+    } catch (err) {
+      res.status(500).json({ ok: false, error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
   // ── POST /artifacts/:id/comments ───────────────────────────────────
   // Monday §2: durable, append-only artifact comment. This is the unblock —
   // Chris (and now Liz) can comment on an artifact and it persists, re-readable
@@ -764,6 +872,7 @@ export function mountOutputsRoutes(
         body,
         anchor: asString(req.body?.anchor) ?? null,
         source_link: asString(req.body?.source_link),
+        idempotency_key: idempotencyKey(req),
       });
 
       // B2 (2026-06-22): close the loop — route the now-durable comment to the
@@ -931,9 +1040,23 @@ export function mountOutputsRoutes(
         approver: actor.ref, // durable Monday attribution: approved_by = user:chris|user:liz
         note: asString(req.body?.note),
         source_link: asString(req.body?.source_link),
+        idempotency_key: idempotencyKey(req, 'approval'),
       };
       const sourceSurface =
         asString(req.body?.source_surface) ?? asString(req.body?.source_link) ?? "manager:/artifacts/approve";
+      const approvalCommentBody =
+        asString(req.body?.comment) ??
+        asString(req.body?.comment_body) ??
+        asString(req.body?.approval_comment);
+      const approvalComment = approvalCommentBody && approvalCommentBody.trim().length > 0
+        ? await commentArtifact(adapter, artifactId, {
+            actor: actor.ref,
+            body: approvalCommentBody,
+            anchor: asString(req.body?.anchor) ?? null,
+            source_link: asString(req.body?.source_link),
+            idempotency_key: idempotencyKey(req, 'comment'),
+          }, clock)
+        : null;
       const { state, op_id, idempotent } = await approveArtifact(adapter, artifactId, reqBody, clock);
 
       // No tasks seam wired up → return the review state alone with an
@@ -947,6 +1070,8 @@ export function mountOutputsRoutes(
           op_id,
           idempotent,
           actor: actor.ref,
+          comment: approvalComment?.comment ?? null,
+          comment_op_id: approvalComment?.op_id ?? null,
           task: null,
           task_emitted: false,
           task_emit_skipped: "manager_emit_target_not_configured",
@@ -962,6 +1087,8 @@ export function mountOutputsRoutes(
           ok: true,
           state,
           op_id,
+          comment: approvalComment?.comment ?? null,
+          comment_op_id: approvalComment?.op_id ?? null,
           task: null,
           task_emitted: false,
           task_emit_error: {
@@ -1000,6 +1127,8 @@ export function mountOutputsRoutes(
           ok: true,
           state,
           op_id,
+          comment: approvalComment?.comment ?? null,
+          comment_op_id: approvalComment?.op_id ?? null,
           task: null,
           task_emitted: false,
           task_emit_error: emit.error,
@@ -1013,6 +1142,8 @@ export function mountOutputsRoutes(
         op_id,
         idempotent,
         actor: actor.ref,
+        comment: approvalComment?.comment ?? null,
+        comment_op_id: approvalComment?.op_id ?? null,
         task: emit.task,
         task_emitted: true,
         task_idempotent: emit.idempotent,
