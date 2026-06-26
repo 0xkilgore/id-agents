@@ -10736,6 +10736,19 @@ export class AgentManagerDb {
           console.warn('[Manager] P2 inbox routes failed to mount:', err instanceof Error ? err.message : String(err));
         }
 
+        // Desk doc-model — mount /desk/* routes (tray + items upsert).
+        try {
+          const [{ mountDeskRoutes }, { migrateDeskTables }] = await Promise.all([
+            import('./desk/routes.js'),
+            import('./desk/storage.js'),
+          ]);
+          await migrateDeskTables(this.db.adapter);
+          mountDeskRoutes(this.managementApp, this.db.adapter);
+          console.log('[Manager] Desk /desk/* routes mounted');
+        } catch (err) {
+          console.warn('[Manager] Desk routes failed to mount:', err instanceof Error ? err.message : String(err));
+        }
+
         // T-CKPT.agent-sharing / F4 — share + delegate grants over the Monday
         // seed actor model. Mount /shares, /delegations, /grants[/:id[/revoke]].
         try {
