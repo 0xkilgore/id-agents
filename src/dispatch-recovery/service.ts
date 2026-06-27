@@ -408,6 +408,7 @@ function toInput(doc: RecoverableDispatch): RecoveryInput {
     status: doc.status,
     failure_kind: doc.failure_kind,
     failure_detail: doc.failure_detail,
+    agent_query_id: doc.agent_query_id,
     attempt_count: doc.attempt_count,
     recovery_attempts: doc.recovery_attempts,
     artifact_path: doc.artifact_path,

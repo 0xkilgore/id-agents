@@ -77,6 +77,7 @@ async function seedFailed(
     completed_at?: string;
     artifact_path?: string | null;
     promotion_completed?: boolean;
+    agent_query_id?: string | null;
     recovery_attempts?: number;
     recovery_status?: string;
     side_effect?: string;
@@ -95,6 +96,7 @@ async function seedFailed(
            channel = ?,
            artifact_path = ?,
            promotion_result_json = ?,
+           agent_query_id = ?,
            recovery_attempts = ?,
            recovery_status = ?,
            side_effect = ?,
@@ -106,6 +108,7 @@ async function seedFailed(
       overrides.channel ?? "dispatch",
       overrides.artifact_path ?? null,
       overrides.promotion_completed ? JSON.stringify({ completed: true }) : null,
+      overrides.agent_query_id ?? null,
       overrides.recovery_attempts ?? 0,
       overrides.recovery_status ?? "none",
       overrides.side_effect ?? "none",
@@ -131,8 +134,9 @@ async function recoveryOf(phid: string) {
     recovery_attempts: number;
     recovery_reason: string | null;
     not_before_at: string;
+    agent_query_id: string | null;
   }>(
-    `SELECT status, recovery_status, recovery_attempts, recovery_reason, not_before_at
+    `SELECT status, recovery_status, recovery_attempts, recovery_reason, not_before_at, agent_query_id
        FROM dispatch_scheduler_queue WHERE dispatch_phid = ?`,
     [phid],
   );
@@ -177,7 +181,11 @@ describe("SqliteDispatchReactor recovery primitives", () => {
 
   it("requeueForRecovery moves failed → bounced with bumped attempts", async () => {
     const { reactor, client } = harness();
-    const phid = await seedFailed(client, { query_id: "retry", recovery_attempts: 1 });
+    const phid = await seedFailed(client, {
+      query_id: "retry",
+      agent_query_id: "agent-q-stale",
+      recovery_attempts: 1,
+    });
     const ok = await reactor.requeueForRecovery(phid, {
       reason: "recovery: recoverable failure",
       next_attempt_at: "2026-06-15T20:05:00.000Z",
@@ -187,6 +195,7 @@ describe("SqliteDispatchReactor recovery primitives", () => {
     expect(r.status).toBe("bounced");
     expect(r.recovery_status).toBe("recovering");
     expect(r.recovery_attempts).toBe(2);
+    expect(r.agent_query_id).toBeNull();
     expect(r.not_before_at).toBe("2026-06-15T20:05:00.000Z");
     expect(r.recovery_reason).toBe("recovery: recoverable failure");
   });

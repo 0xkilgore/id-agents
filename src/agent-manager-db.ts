@@ -10676,6 +10676,7 @@ export class AgentManagerDb {
                 reactor: this.dispatchScheduler.reactor as unknown as DispatchRecoveryReactor,
                 config: {
                   max_attempts: recCfg.maxAttempts,
+                  max_linked_query_retries: DEFAULT_RECOVERY_CONFIG.max_linked_query_retries,
                   retryable_detail_markers: DEFAULT_RECOVERY_CONFIG.retryable_detail_markers,
                 },
                 now: () => new Date().toISOString(),

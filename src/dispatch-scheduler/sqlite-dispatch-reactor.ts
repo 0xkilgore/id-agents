@@ -1137,6 +1137,7 @@ export class SqliteDispatchReactor {
        SET status = 'bounced', bounce_count = bounce_count + 1,
            last_bounce_json = ?, bounce_history_json = ?,
            not_before_at = ?, completed_at = NULL,
+           agent_query_id = NULL,
            failure_kind = NULL, failure_detail = NULL,
            recovery_status = 'recovering',
            recovery_attempts = recovery_attempts + 1,
@@ -1256,6 +1257,7 @@ function rowToRecoverable(row: Row): RecoverableDispatch {
     failure_kind: row.failure_kind ?? null,
     failure_detail: row.failure_detail ?? null,
     attempt_count: Number(row.attempt_count ?? 0),
+    agent_query_id: row.agent_query_id ?? null,
     recovery_attempts: Number(row.recovery_attempts ?? 0),
     artifact_path: row.artifact_path ?? null,
     promotion_completed:
