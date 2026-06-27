@@ -75,6 +75,7 @@ import {
 import type {
   ApproveRequest,
   ArtifactAvailability,
+  ArtifactDetailResponse,
   ArtifactOperationsResponse,
   ArtifactOpType,
   ArtifactReviewResponse,
@@ -103,6 +104,11 @@ import {
   reconcileFilesystemArtifacts,
   type FilesystemArtifactRoot,
 } from './filesystem-reconciler.js';
+import {
+  buildArtifactDetail,
+  resolveArtifactDetailRef,
+  type ArtifactDetailRef,
+} from './detail-projection.js';
 
 function asString(v: unknown): string | undefined {
   return typeof v === 'string' && v.length > 0 ? v : undefined;
@@ -229,6 +235,48 @@ export function mountOutputsRoutes(
   // Last-known parity status, surfaced on the /artifacts/entries envelope so the
   // console can render it without the entries handler touching the filesystem.
   let lastParityStatus: ReadModelEnvelope<unknown>['parity']['status'] = 'unchecked';
+  const detailCache = new Map<string, ArtifactDetailResponse>();
+  const detailInflight = new Map<string, Promise<ArtifactDetailResponse | null>>();
+  const detailCacheMax = 100;
+
+  function invalidateArtifactDetail(artifactId: string): void {
+    detailCache.delete(artifactId);
+    detailInflight.delete(artifactId);
+  }
+
+  function clearArtifactDetailCache(): void {
+    detailCache.clear();
+    detailInflight.clear();
+  }
+
+  function rememberArtifactDetail(detail: ArtifactDetailResponse): void {
+    if (detailCache.has(detail.artifact_id)) detailCache.delete(detail.artifact_id);
+    detailCache.set(detail.artifact_id, detail);
+    while (detailCache.size > detailCacheMax) {
+      const oldest = detailCache.keys().next().value;
+      if (!oldest) break;
+      detailCache.delete(oldest);
+    }
+  }
+
+  async function getArtifactDetailCached(ref: ArtifactDetailRef): Promise<{
+    detail: ArtifactDetailResponse | null;
+    cache: 'hit' | 'miss' | 'deduped';
+  }> {
+    const hit = detailCache.get(ref.artifactId);
+    if (hit) return { detail: hit, cache: 'hit' };
+    const existing = detailInflight.get(ref.artifactId);
+    if (existing) return { detail: await existing, cache: 'deduped' };
+    const pending = buildArtifactDetail(adapter, ref);
+    detailInflight.set(ref.artifactId, pending);
+    try {
+      const detail = await pending;
+      if (detail) rememberArtifactDetail(detail);
+      return { detail, cache: 'miss' };
+    } finally {
+      detailInflight.delete(ref.artifactId);
+    }
+  }
 
   // Monday §1/§2 guards. RD-001: reject anything that isn't a stable artifact_id
   // (display id / basename / queue index / path) as a mutation target. Actor:
@@ -300,6 +348,7 @@ export function mountOutputsRoutes(
         roots,
         recentSinceMs: Number.isFinite(recentMs) && recentMs > 0 ? Date.now() - recentMs : undefined,
       });
+      clearArtifactDetailCache();
       res.json({ ok: true, schema_version: 'artifact.reconcile.v1', result });
     } catch (err) {
       res.status(500).json({ ok: false, error: err instanceof Error ? err.message : String(err) });
@@ -483,6 +532,46 @@ export function mountOutputsRoutes(
     }
   });
 
+  async function sendArtifactDetail(ref: ArtifactDetailRef, res: Response): Promise<void> {
+    const { detail, cache } = await getArtifactDetailCached(ref);
+    res.setHeader('X-Artifact-Detail-Cache', cache);
+    if (!detail) {
+      res.status(404).json({
+        ok: false,
+        code: 'artifact_not_found',
+        error: `Artifact "${ref.requestedRef}" not found`,
+        artifact_id: ref.artifactId,
+      });
+      return;
+    }
+    res.json(detail);
+  }
+
+  // ── GET /artifacts/detail?path=<encoded-or-plain-path> ─────────────
+  // Bounded single-artifact read model for instant reader pane switching. This
+  // query route preserves the legacy encoded-path fallback while the stable-id
+  // route below is the preferred cache key.
+  app.get('/artifacts/detail', async (req: Request, res: Response) => {
+    try {
+      const ref = asString(req.query.path) ?? asString(req.query.ref) ?? asString(req.query.id);
+      if (!ref) return res.status(400).json({ ok: false, code: 'missing_ref', error: 'path, ref, or id is required' });
+      await sendArtifactDetail(resolveArtifactDetailRef(ref), res);
+    } catch (err) {
+      res.status(500).json({ ok: false, error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  // ── GET /artifacts/:id/detail ─────────────────────────────────────
+  // One request hydrates body/render metadata, compact catalog fields, review
+  // summary, comments/timeline, and provenance for the center reader pane.
+  app.get('/artifacts/:id/detail', async (req: Request<{ id: string }>, res: Response) => {
+    try {
+      await sendArtifactDetail(resolveArtifactDetailRef(req.params.id), res);
+    } catch (err) {
+      res.status(500).json({ ok: false, error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
   // ── GET /artifacts/:id/review ──────────────────────────────────────
 
   app.get('/artifacts/:id/review', async (req: Request<{ id: string }>, res: Response) => {
@@ -544,6 +633,7 @@ export function mountOutputsRoutes(
         availability: body.availability === 'missing' || body.availability === 'unknown' ? body.availability : 'present',
       };
       const { row, inserted } = await registerArtifact(adapter, payload, new Date().toISOString());
+      invalidateArtifactDetail(row.artifact_id);
       const response: RegisterArtifactResponse = {
         schema_version: 'artifact.register.v1',
         artifact_id: row.artifact_id,
@@ -616,6 +706,7 @@ export function mountOutputsRoutes(
         nowIso,
       );
       const { inserted: draftInserted } = await upsertArtifactDraft(adapter, artifactId, payload, nowIso);
+      invalidateArtifactDetail(artifactId);
       res.json({
         ok: true,
         schema_version: 'cane.draft.register.v1',
@@ -651,6 +742,7 @@ export function mountOutputsRoutes(
       }
       const actor = asString(req.body?.actor) ?? 'user:operator';
       const { payload, op_id } = await reviseDraft(adapter, req.params.id, bodyMarkdown, actor, clock);
+      invalidateArtifactDetail(req.params.id);
       res.json({ ok: true, schema_version: 'artifact.revise.v1', op_id, payload });
     } catch (err) {
       res.status(400).json({ ok: false, error: err instanceof Error ? err.message : String(err) });
@@ -678,6 +770,7 @@ export function mountOutputsRoutes(
         return;
       }
       const result = await backfillCatalogFromDeliveryLog(adapter, text, new Date().toISOString());
+      clearArtifactDetailCache();
       res.json({ schema_version: 'artifact.catalog.backfill.v1', ...result });
     } catch (err) {
       res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
@@ -693,6 +786,7 @@ export function mountOutputsRoutes(
         source_link: asString(req.body?.source_link),
       };
       const { state, op_id } = await viewArtifact(adapter, req.params.id, reqBody);
+      invalidateArtifactDetail(req.params.id);
       res.json({ ok: true, state, op_id });
     } catch (err) {
       res.status(400).json({ error: err instanceof Error ? err.message : String(err) });
@@ -725,6 +819,7 @@ export function mountOutputsRoutes(
         buildEditPayload(content, note),
         'manager:/artifacts/edit',
       );
+      invalidateArtifactDetail(req.params.id);
       res.json({ ok: true, op_id, edited_at: nowIso });
     } catch (err) {
       res.status(400).json({ error: err instanceof Error ? err.message : String(err) });
@@ -819,6 +914,7 @@ export function mountOutputsRoutes(
           idempotency_key: idempotencyKey(req),
         };
         const result = await suggestArtifactChange(adapter, artifactId, reqBody, clock);
+        invalidateArtifactDetail(artifactId);
         return res.json({
           ok: true,
           schema_version: 'artifact.timeline.write.v1',
@@ -839,6 +935,7 @@ export function mountOutputsRoutes(
           idempotency_key: idempotencyKey(req),
         };
         const result = await recordDispatchFollowUp(adapter, artifactId, reqBody, clock);
+        invalidateArtifactDetail(artifactId);
         return res.json({
           ok: true,
           schema_version: 'artifact.timeline.write.v1',
@@ -898,6 +995,7 @@ export function mountOutputsRoutes(
         await persistRoutedLinkage(adapter, artifactId, op_id, routed.dispatch, actor.ref, clock);
       }
 
+      invalidateArtifactDetail(artifactId);
       const base = { ok: true, schema_version: 'artifact.comment.v1', op_id, comment, actor };
       if (routed.routed) {
         res.json({ ...base, dispatch_routed: true, dispatch: routed.dispatch });
@@ -974,6 +1072,7 @@ export function mountOutputsRoutes(
         await persistRoutedLinkage(adapter, artifactId, op_id, routed.dispatch, actor.ref, clock);
       }
 
+      invalidateArtifactDetail(artifactId);
       const base = { ok: true, schema_version: 'artifact.reaction.v1', op_id, comment, reaction, actor };
       if (routed.routed) {
         res.json({ ...base, dispatch_routed: true, dispatch: routed.dispatch });
@@ -1062,6 +1161,7 @@ export function mountOutputsRoutes(
           }, clock)
         : null;
       const { state, op_id, idempotent } = await approveArtifact(adapter, artifactId, reqBody, clock);
+      invalidateArtifactDetail(artifactId);
 
       // No tasks seam wired up → return the review state alone with an
       // explicit skip marker so kapelle-site can show the operator
@@ -1174,6 +1274,7 @@ export function mountOutputsRoutes(
         source_link: asString(req.body?.source_link),
       };
       const { state, op_id, idempotent } = await rejectArtifact(adapter, artifactId, reqBody, clock);
+      invalidateArtifactDetail(artifactId);
       res.json({
         ok: true,
         schema_version: 'artifact.reject.v1',
@@ -1213,6 +1314,7 @@ export function mountOutputsRoutes(
         }
       }
       const result = await shipArtifact(adapter, artifactId, reqBody, clock, caneDraftCtx);
+      invalidateArtifactDetail(artifactId);
       // 200 even when blocked — clients inspect status + blockers. Non-cane_draft
       // ship stays visible-but-blocked (no_executor_configured); the attempt is
       // recorded as a durable operation.
@@ -1251,6 +1353,7 @@ export function mountOutputsRoutes(
           /* keep last-known parity status */
         }
         if (r.inserted || r.updated) {
+          clearArtifactDetailCache();
           console.log(
             `[artifacts] auto-ingest ${deliveryLogPath}: +${r.inserted}/${r.updated} (parsed ${r.rows_parsed})`,
           );

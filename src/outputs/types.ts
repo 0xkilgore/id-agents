@@ -417,6 +417,75 @@ export interface ArtifactFeedbackResponse {
   count: number;
 }
 
+export interface ArtifactDetailBody {
+  kind: "markdown" | "text" | "json" | "image" | "binary" | "missing" | "unavailable";
+  text: string | null;
+  bytes: number | null;
+  truncated: boolean;
+  source: "file" | "cane_draft" | "none";
+  error: string | null;
+}
+
+export interface ArtifactDetailRender {
+  renderer: "markdown" | "text" | "json" | "image" | "download" | "empty";
+  mime_type: string;
+  filename: string | null;
+}
+
+export interface ArtifactDetailMetadata {
+  artifact_id: string;
+  display_title: string;
+  basename: string | null;
+  agent: string | null;
+  tag: string | null;
+  produced_at: string | null;
+  abs_path: string | null;
+  source: ArtifactCatalogRow["source"] | null;
+  availability: ArtifactAvailability;
+  source_badges: string[];
+  reconciled_at: string | null;
+  created_at: string | null;
+  updated_at: string | null;
+}
+
+export interface ArtifactDetailReviewSummary {
+  state: ArtifactReviewStateRow | null;
+  status: OutputsInboxRow["status"];
+  operations_count: number;
+  comments_count: number;
+  timeline_count: number;
+  latest_comment: ArtifactComment | null;
+  latest_timeline_event: ArtifactTimelineEvent | null;
+  is_viewed: boolean;
+  is_approved: boolean;
+  is_rejected: boolean;
+  is_shipped: boolean;
+  is_ship_blocked: boolean;
+}
+
+export interface ArtifactDetailProvenanceSummary {
+  entry: import("./entry.js").ArtifactEntry | null;
+  evidence: ArtifactSourceEvidenceRow[];
+}
+
+export interface ArtifactDetailResponse {
+  ok: true;
+  schema_version: "artifact.detail.v1";
+  generated_at: string;
+  artifact_id: string;
+  requested_ref: string;
+  resolved_from: "artifact_id" | "encoded_path" | "path";
+  displayTitle: string;
+  metadata: ArtifactDetailMetadata;
+  body: ArtifactDetailBody;
+  render: ArtifactDetailRender;
+  review: ArtifactDetailReviewSummary;
+  comments: ArtifactComment[];
+  timeline: ArtifactTimelineEvent[];
+  provenance: ArtifactDetailProvenanceSummary;
+  draft: CaneDraftPayload | null;
+}
+
 // Stub-response from POST /artifacts/:id/ship. Blockers explain why
 // ship is not yet possible. When executors exist, the same endpoint
 // will return success.
