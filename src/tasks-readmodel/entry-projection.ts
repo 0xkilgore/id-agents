@@ -70,6 +70,9 @@ export function taskProvenance(
   for (const rev of revisions) addContributor(contributors, seen, rev.by);
 
   return {
+    actor_ref: createdBy,
+    source: row.name,
+    origin: "substrate",
     source_dispatch_phid: null,
     derived_from: [],
     revisions,

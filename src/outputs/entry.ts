@@ -40,13 +40,26 @@ export interface ProvenanceRevision {
 
 /**
  * Shared DV2 provenance core carried by EVERY doc-model entry (artifact, task,
- * …) so the substrate exposes one provenance contract everywhere (I-1):
- *   - actor_ref:              `contributors` + each revision's `by`
- *   - source dispatch:        `source_dispatch_phid`
- *   - derived-from links:     `derived_from`
- *   - created/modified chain: `revisions` (ascending)
+ * desk, …) so the substrate exposes one provenance contract everywhere (I-1/DV2):
+ *   - actor_ref: primary actor (creator / last meaningful actor)
+ *   - source: human or machine pointer (path, handle, anchor, dispatch ref)
+ *   - origin: how the row entered the doc-model
+ *   - source_dispatch_phid: dispatch that produced the row, when known
+ *   - derived_from: upstream entry phids
+ *   - revisions: created/modified chain (ascending)
+ *   - contributors: deduped actors seen in the chain
  */
 export interface EntryProvenance {
+  actor_ref: ActorRef | null;
+  source: string | null;
+  origin:
+    | "substrate"
+    | "markdown_walk"
+    | "federation"
+    | "manual"
+    | "migration"
+    | "dispatch"
+    | null;
   source_dispatch_phid: string | null;
   derived_from: string[];
   revisions: ProvenanceRevision[];

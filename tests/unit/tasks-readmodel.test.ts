@@ -82,6 +82,9 @@ describe("taskRowToEntry — DV2 provenance (I-1)", () => {
     const e = taskRowToEntry(ROW, names);
     expect(e.source_dispatch_phid).toBeNull(); // reserved until tasks carry a dispatch link
     expect(e.links).toEqual([]);
+    expect(e.provenance.actor_ref).toEqual({ type: "agent", id: "roger" });
+    expect(e.provenance.source).toBe("audit-contracts-apr");
+    expect(e.provenance.origin).toBe("substrate");
     expect(e.provenance.source_dispatch_phid).toBeNull();
     expect(e.provenance.derived_from).toEqual([]);
     expect(Array.isArray(e.provenance.revisions)).toBe(true);

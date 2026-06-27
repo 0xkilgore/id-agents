@@ -11,7 +11,8 @@ import { listDecisions } from "../decisions/storage.js";
 import { listInboxItems } from "../outputs/storage.js";
 import { buildDeskTrayEnvelope } from "./projection.js";
 import { computeDeskParity } from "./parity.js";
-import { listDeskItems, upsertDeskItem } from "./storage.js";
+import { deskRowToEntry } from "./entry-projection.js";
+import { getDeskItemById, listDeskItems, listDeskOperations, upsertDeskItem } from "./storage.js";
 import type { DeskItemKind, DeskTrayZone, UpsertDeskItemInput } from "./types.js";
 
 const VALID_KINDS = new Set<DeskItemKind>([
@@ -66,6 +67,26 @@ export function mountDeskRoutes(
         env,
       });
       res.json(response);
+    } catch (err) {
+      res.status(500).json({
+        ok: false,
+        error: "internal_error",
+        message: err instanceof Error ? err.message : String(err),
+      });
+    }
+  });
+
+  // GET /desk/entries/:ref — the single doc-model DeskEntry (with DV2
+  // provenance) for one desk item, symmetric with artifacts/tasks per-entry reads.
+  app.get("/desk/entries/:ref", async (req: Request<{ ref: string }>, res: Response) => {
+    try {
+      const row = await getDeskItemById(adapter, req.params.ref);
+      if (!row) {
+        res.status(404).json({ error: `Desk item "${req.params.ref}" not found` });
+        return;
+      }
+      const ops = await listDeskOperations(adapter, row.desk_item_id);
+      res.json({ entry: deskRowToEntry(row, ops) });
     } catch (err) {
       res.status(500).json({
         ok: false,

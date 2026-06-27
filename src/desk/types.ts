@@ -3,6 +3,7 @@
 // Contract: cto/output/2026-06-23-readmodel-contract-operator-surfaces-scope.md §4.2
 // Console UX: rams/output/2026-06-23-desk-and-console-needs-you-redesign.md
 
+import type { DocModelOrigin } from "../doc-model/provenance.js";
 export type DeskItemKind =
   | "artifact"
   | "tickler"
@@ -25,6 +26,10 @@ export interface DeskItemProvenance {
   anchor: string | null;
   parser_version: string;
   source_ref?: string | null;
+  /** DV2 — canonical source pointer (path, ref, anchor). */
+  source?: string | null;
+  /** DV2 — how this desk row entered the substrate. */
+  origin?: DocModelOrigin | null;
 }
 
 export interface DeskItemRow {
@@ -116,5 +121,5 @@ export interface UpsertDeskItemInput {
   added_at?: string;
   added_by?: string;
   tray_state?: TrayState;
-  provenance?: Partial<DeskItemProvenance>;
+  provenance?: Partial<DeskItemProvenance> & { origin?: DocModelOrigin | null };
 }

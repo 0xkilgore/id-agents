@@ -126,6 +126,9 @@ describe("artifactRowToEntry", () => {
     expect(entry.updated_at).toBe("2026-06-23T12:00:00.000Z");
     expect(entry.provenance.revisions).toHaveLength(1);
     expect(entry.provenance.contributors).toEqual([{ type: "user", id: "chris" }]);
+    expect(entry.provenance.actor_ref).toEqual({ type: "agent", id: "roger" });
+    expect(entry.provenance.source).toBe("/Users/kilgore/Dropbox/Code/kapelle-site/output/report.md");
+    expect(entry.provenance.origin).toBe("substrate");
   });
 
   it("falls back title→basename and tag→'artifact' when absent", () => {
@@ -286,6 +289,9 @@ describe("GET /artifacts/entries/:ref (DV2 — provenance queryable per entry)",
     expect(Array.isArray(body.entry.provenance.contributors)).toBe(true);
     expect(Array.isArray(body.entry.provenance.derived_from)).toBe(true);
     expect("source_dispatch_phid" in body.entry.provenance).toBe(true);
+    expect("actor_ref" in body.entry.provenance).toBe(true);
+    expect("source" in body.entry.provenance).toBe(true);
+    expect("origin" in body.entry.provenance).toBe(true);
   });
 
   it("404s for an unknown artifact ref", async () => {

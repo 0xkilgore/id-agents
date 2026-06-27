@@ -427,7 +427,7 @@ describe("GET /desk/tray + POST /desk/items", () => {
       provenance: {
         source_path: "/tmp/Desk.md",
         anchor: "tickler-due-soon",
-        parser_version: "desk.producer.v1",
+        parser_version: "desk.producer.v2",
         source_ref: "tickler:due-soon",
       },
     });

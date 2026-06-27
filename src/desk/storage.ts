@@ -12,7 +12,7 @@ import type {
   UpsertDeskItemInput,
 } from "./types.js";
 
-export const DESK_PARSER_VERSION = "desk.producer.v1";
+export const DESK_PARSER_VERSION = "desk.producer.v2";
 
 export async function migrateDeskTables(adapter: DbAdapter): Promise<void> {
   await adapter.query(
@@ -79,6 +79,8 @@ function defaultProvenance(over?: Partial<DeskItemProvenance>): DeskItemProvenan
     anchor: over?.anchor ?? null,
     parser_version: over?.parser_version ?? DESK_PARSER_VERSION,
     source_ref: over?.source_ref ?? null,
+    source: over?.source ?? over?.source_ref ?? over?.source_path ?? null,
+    origin: over?.origin ?? "manual",
   };
 }
 
@@ -164,6 +166,17 @@ export async function countDeskItemsByZone(
   return Number(rows[0]?.cnt ?? 0);
 }
 
+export async function listDeskOperations(
+  adapter: DbAdapter,
+  deskItemId: string,
+): Promise<DeskItemOperationRow[]> {
+  const { rows } = await adapter.query<DeskItemOperationRow>(
+    `SELECT * FROM desk_item_operations WHERE desk_item_id = ? ORDER BY op_id ASC`,
+    [deskItemId],
+  );
+  return rows;
+}
+
 export async function appendDeskOperation(
   adapter: DbAdapter,
   op: Omit<DeskItemOperationRow, "op_id">,
@@ -184,9 +197,19 @@ export async function upsertDeskItem(
   const deskItemId =
     input.desk_item_id ??
     deriveDeskItemId(input.label, input.source_ref ?? null, addedAt);
+  const existing = await getDeskItemById(adapter, deskItemId);
+  const prior = existing ? parseProvenance(existing.provenance_json) : null;
   const provenance = defaultProvenance({
+    ...prior,
     ...input.provenance,
-    source_ref: input.source_ref ?? input.provenance?.source_ref ?? null,
+    source_ref: input.source_ref ?? input.provenance?.source_ref ?? prior?.source_ref ?? null,
+    source:
+      input.provenance?.source ??
+      input.source_ref ??
+      input.provenance?.source_path ??
+      prior?.source ??
+      null,
+    origin: input.provenance?.origin ?? prior?.origin ?? "manual",
   });
   const row: DeskItemRow = {
     desk_item_id: deskItemId,
@@ -203,7 +226,6 @@ export async function upsertDeskItem(
     provenance_json: JSON.stringify(provenance),
   };
 
-  const existing = await getDeskItemById(adapter, deskItemId);
   if (!existing) {
     await adapter.query(
       `INSERT INTO desk_items
@@ -230,10 +252,18 @@ export async function upsertDeskItem(
       op_type: "DESK_ADD",
       actor,
       ts: addedAt,
-      payload_json: JSON.stringify({ label: row.label, kind: row.kind }),
+      payload_json: JSON.stringify({ label: row.label, kind: row.kind, origin: provenance.origin }),
     });
     return { desk_item_id: deskItemId, outcome: "inserted" };
   }
+
+  await appendDeskOperation(adapter, {
+    desk_item_id: deskItemId,
+    op_type: "DESK_ADD",
+    actor,
+    ts: new Date().toISOString(),
+    payload_json: JSON.stringify({ note: "updated", label: row.label, kind: row.kind }),
+  });
 
   await adapter.query(
     `UPDATE desk_items
