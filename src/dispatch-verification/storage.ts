@@ -11,6 +11,7 @@ import type {
   DispatchVerificationFailureType,
   DispatchArtifactKind,
 } from "./types.js";
+import type { Provider } from "../dispatch-scheduler/types.js";
 
 /** Shape of a raw row read back from the dispatch_verifications table. */
 interface DispatchVerificationDbRow {
@@ -18,6 +19,7 @@ interface DispatchVerificationDbRow {
   dispatch_id: string;
   query_id: string | null;
   agent_name: string;
+  provider: string | null;
   status: string;
   verified: number;
   failure_type: string | null;
@@ -62,7 +64,7 @@ export class DispatchVerificationStorage {
     this.adapter.exec(`
       CREATE TABLE IF NOT EXISTS dispatch_verifications (
         team_id TEXT NOT NULL, dispatch_id TEXT NOT NULL, query_id TEXT,
-        agent_name TEXT NOT NULL, status TEXT NOT NULL,
+        agent_name TEXT NOT NULL, provider TEXT NOT NULL DEFAULT 'other', status TEXT NOT NULL,
         verified INTEGER NOT NULL DEFAULT 0, failure_type TEXT, failure_detail TEXT,
         artifact_path TEXT, artifact_exists INTEGER, artifact_mtime TEXT,
         delivery_window_start TEXT, delivery_window_end TEXT,
@@ -75,15 +77,18 @@ export class DispatchVerificationStorage {
       );
       CREATE INDEX IF NOT EXISTS dispatch_verifications_team_agent_time_idx ON dispatch_verifications(team_id, agent_name, dispatch_completed_at DESC, dispatch_id);
       CREATE INDEX IF NOT EXISTS dispatch_verifications_team_time_idx ON dispatch_verifications(team_id, dispatch_completed_at DESC, dispatch_id);
+      CREATE INDEX IF NOT EXISTS dispatch_verifications_team_provider_time_idx ON dispatch_verifications(team_id, provider, dispatch_completed_at DESC, dispatch_id);
       CREATE INDEX IF NOT EXISTS dispatch_verifications_team_failure_idx ON dispatch_verifications(team_id, failure_type, dispatch_completed_at DESC) WHERE failure_type IS NOT NULL;
     `);
+    await this.addColumnIfMissing("dispatch_verifications", "provider", "TEXT NOT NULL DEFAULT 'other'");
   }
 
   async upsertMany(rows: DispatchVerification[]): Promise<void> {
     if (rows.length === 0) return;
     const sql = `
       INSERT INTO dispatch_verifications (
-        team_id, dispatch_id, query_id, agent_name, status,
+        team_id, dispatch_id, query_id, agent_name, provider,
+        status,
         verified, failure_type, failure_detail,
         artifact_path, artifact_exists, artifact_mtime,
         delivery_window_start, delivery_window_end,
@@ -92,16 +97,18 @@ export class DispatchVerificationStorage {
         result_success, tl_dr, kind, checked_at, source_metadata_json
       ) VALUES (
         $1, $2, $3, $4, $5,
-        $6, $7, $8,
-        $9, $10, $11,
-        $12, $13,
-        $14, $15, $16,
-        $17, $18, $19, $20,
-        $21, $22, $23, $24, $25
+        $6,
+        $7, $8, $9,
+        $10, $11, $12,
+        $13, $14,
+        $15, $16, $17,
+        $18, $19, $20, $21,
+        $22, $23, $24, $25, $26
       )
       ON CONFLICT(team_id, dispatch_id) DO UPDATE SET
         query_id = excluded.query_id,
         agent_name = excluded.agent_name,
+        provider = excluded.provider,
         status = excluded.status,
         verified = excluded.verified,
         failure_type = excluded.failure_type,
@@ -207,6 +214,7 @@ export class DispatchVerificationStorage {
       dispatch_id: row.dispatch_id,
       query_id: row.query_id,
       agent_name: row.agent_name,
+      provider: normalizeProvider(row.provider),
       status: row.status as DispatchVerificationStatus,
       verified: toBool(row.verified) === true,
       failure_type: (row.failure_type as DispatchVerificationFailureType | null) ?? null,
@@ -237,6 +245,7 @@ export class DispatchVerificationStorage {
       v.dispatch_id,
       v.query_id,
       v.agent_name,
+      v.provider,
       v.status,
       fromBool(v.verified),
       v.failure_type,
@@ -259,5 +268,30 @@ export class DispatchVerificationStorage {
       v.checked_at,
       JSON.stringify(v.source_metadata),
     ];
+  }
+
+  private async addColumnIfMissing(
+    table: string,
+    column: string,
+    definition: string,
+  ): Promise<void> {
+    const info = await this.adapter.query<{ name: string }>(
+      `SELECT name FROM pragma_table_info('${table}')`,
+    );
+    if (info.rows.some((r) => r.name === column)) return;
+    this.adapter.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+  }
+}
+
+function normalizeProvider(raw: string | null | undefined): Provider {
+  switch (raw) {
+    case "anthropic":
+    case "openai":
+    case "cursor":
+    case "local":
+    case "other":
+      return raw;
+    default:
+      return "other";
   }
 }

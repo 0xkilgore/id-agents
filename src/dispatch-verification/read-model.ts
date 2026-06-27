@@ -22,6 +22,22 @@ import {
   type DispatchArtifactKind,
   type EffectivenessWindow,
 } from './types.js';
+import type { Provider } from '../dispatch-scheduler/types.js';
+
+export interface ProviderVerificationRollup {
+  provider: Provider;
+  dispatches_completed: number;
+  verified_landings: number;
+  verification_pass_rate: number;
+  share_of_completed: number;
+}
+
+export interface ProviderDiversityCheck {
+  passed: boolean;
+  distinct_completed_providers: number;
+  required_min_providers: number;
+  providers: Provider[];
+}
 
 export interface AgentsEffectivenessResponse {
   schema_version: 'agents.effectiveness.v1';
@@ -34,6 +50,8 @@ export interface AgentsEffectivenessResponse {
     throughput_per_week: number;
     failure_breakdown: Record<DispatchVerificationFailureType, number>;
     trend_4w: number[];
+    by_provider: ProviderVerificationRollup[];
+    provider_diversity_check: ProviderDiversityCheck;
   };
   agents: Array<{
     name: string;
@@ -61,6 +79,7 @@ export interface AgentDispatchesResponse {
   items: Array<{
     dispatch_id: string;
     query_id: string | null;
+    provider: Provider;
     time: string;
     subject: string;
     dispatch_status: string;
@@ -104,6 +123,11 @@ interface AgentRollup {
   last_verified_landing: AgentsEffectivenessResponse['agents'][number]['last_verified_landing'];
 }
 
+interface ProviderRollup {
+  dispatches_completed: number;
+  verified_landings: number;
+}
+
 function emptyRollup(): AgentRollup {
   return {
     dispatches_completed: 0,
@@ -121,6 +145,7 @@ export function buildAgentsEffectiveness(
 ): AgentsEffectivenessResponse {
   // Group rows by agent into per-agent rollups.
   const rollups = new Map<string, AgentRollup>();
+  const providerRollups = new Map<Provider, ProviderRollup>();
   const ensure = (name: string): AgentRollup => {
     let r = rollups.get(name);
     if (!r) {
@@ -129,12 +154,25 @@ export function buildAgentsEffectiveness(
     }
     return r;
   };
+  const ensureProvider = (provider: Provider): ProviderRollup => {
+    let r = providerRollups.get(provider);
+    if (!r) {
+      r = { dispatches_completed: 0, verified_landings: 0 };
+      providerRollups.set(provider, r);
+    }
+    return r;
+  };
 
   for (const row of rows) {
     const r = ensure(row.agent_name);
 
     // "completed" = reached a terminal/classified verification state.
-    if (row.status !== 'pending') r.dispatches_completed += 1;
+    if (row.status !== 'pending') {
+      r.dispatches_completed += 1;
+      const pr = ensureProvider(providerFor(row));
+      pr.dispatches_completed += 1;
+      if (row.verified) pr.verified_landings += 1;
+    }
 
     if (row.verified) {
       r.verified_landings += 1;
@@ -216,6 +254,7 @@ export function buildAgentsEffectiveness(
   const fleetRate =
     fleetCompleted === 0 ? 0 : round(fleetVerified / fleetCompleted, 4);
   const fleetThroughput = round((fleetVerified / windowDays) * 7, 2);
+  const byProvider = buildProviderRollups(providerRollups, fleetCompleted);
 
   return {
     schema_version: 'agents.effectiveness.v1',
@@ -228,6 +267,8 @@ export function buildAgentsEffectiveness(
       throughput_per_week: fleetThroughput,
       failure_breakdown: fleetFailureBreakdown,
       trend_4w: buildTrend4w(rows, generatedAtIso),
+      by_provider: byProvider,
+      provider_diversity_check: buildProviderDiversityCheck(byProvider),
     },
     agents,
   };
@@ -316,6 +357,7 @@ export function buildAgentDispatches(
     return {
       dispatch_id: row.dispatch_id,
       query_id: row.query_id,
+      provider: providerFor(row),
       time: row.dispatch_completed_at ?? row.dispatch_created_at,
       subject,
       dispatch_status: row.dispatch_status,
@@ -341,4 +383,59 @@ export function buildAgentDispatches(
     window,
     items,
   };
+}
+
+function buildProviderRollups(
+  rollups: Map<Provider, ProviderRollup>,
+  fleetCompleted: number,
+): ProviderVerificationRollup[] {
+  return [...rollups.entries()]
+    .map(([provider, r]) => ({
+      provider,
+      dispatches_completed: r.dispatches_completed,
+      verified_landings: r.verified_landings,
+      verification_pass_rate:
+        r.dispatches_completed === 0
+          ? 0
+          : round(r.verified_landings / r.dispatches_completed, 4),
+      share_of_completed:
+        fleetCompleted === 0
+          ? 0
+          : round(r.dispatches_completed / fleetCompleted, 4),
+    }))
+    .sort((a, b) => {
+      if (b.dispatches_completed !== a.dispatches_completed) {
+        return b.dispatches_completed - a.dispatches_completed;
+      }
+      return a.provider < b.provider ? -1 : a.provider > b.provider ? 1 : 0;
+    });
+}
+
+function buildProviderDiversityCheck(
+  byProvider: ProviderVerificationRollup[],
+): ProviderDiversityCheck {
+  const providers = byProvider
+    .filter((p) => p.dispatches_completed > 0)
+    .map((p) => p.provider)
+    .sort();
+  const requiredMinProviders = 2;
+  return {
+    passed: providers.length >= requiredMinProviders,
+    distinct_completed_providers: providers.length,
+    required_min_providers: requiredMinProviders,
+    providers,
+  };
+}
+
+function providerFor(row: DispatchVerification): Provider {
+  switch (row.provider) {
+    case 'anthropic':
+    case 'openai':
+    case 'cursor':
+    case 'local':
+    case 'other':
+      return row.provider;
+    default:
+      return 'other';
+  }
 }

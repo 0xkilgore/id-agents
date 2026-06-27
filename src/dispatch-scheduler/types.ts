@@ -566,6 +566,7 @@ export interface DispatchVerificationSourceRow {
   dispatch_phid: string;
   query_id: string;
   to_agent: string;
+  provider: Provider;
   subject: string;
   status: SchedulerStatus;
   artifact_path: string | null;

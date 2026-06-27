@@ -123,6 +123,7 @@ describe("DispatchVerificationJob.runOnce", () => {
 
     const fresh = byId.get(freshPhid);
     expect(fresh).toBeDefined();
+    expect(fresh?.provider).toBe("anthropic");
     expect(fresh?.verified).toBe(true);
     expect(fresh?.failure_type).toBeNull();
     expect(fresh?.status).toBe("verified");

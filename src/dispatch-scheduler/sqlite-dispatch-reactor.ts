@@ -1310,6 +1310,7 @@ function rowToVerificationSourceRow(row: Row): DispatchVerificationSourceRow {
     dispatch_phid: row.dispatch_phid,
     query_id: row.query_id,
     to_agent: row.to_agent,
+    provider: row.provider,
     subject: row.subject,
     status: row.status,
     artifact_path: row.artifact_path ?? null,

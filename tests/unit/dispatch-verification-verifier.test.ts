@@ -22,6 +22,7 @@ function makeRow(overrides: Partial<VerifierDispatchRow> = {}): VerifierDispatch
     dispatch_id: 'phid:disp-abc',
     query_id: 'query_123',
     agent_name: 'finances',
+    provider: 'anthropic',
     status: 'done',
     artifact_path: '/abs/report.md',
     result_success: true,

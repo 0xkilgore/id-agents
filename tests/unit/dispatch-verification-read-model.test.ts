@@ -28,6 +28,7 @@ function makeRow(overrides: Partial<DispatchVerification> = {}): DispatchVerific
     dispatch_id: 'phid:disp-' + Math.random().toString(36).slice(2),
     query_id: 'query_1',
     agent_name: 'finances',
+    provider: 'anthropic',
     status: 'verified',
     verified: true,
     failure_type: null,
@@ -96,6 +97,55 @@ describe('buildAgentsEffectiveness', () => {
     }
     expect(res.fleet.failure_breakdown.expired).toBe(2);
     expect(res.fleet.failure_breakdown.artifact_missing).toBe(1);
+    expect(res.fleet.by_provider).toEqual([
+      {
+        provider: 'anthropic',
+        dispatches_completed: 6,
+        verified_landings: 3,
+        verification_pass_rate: 0.5,
+        share_of_completed: 1,
+      },
+    ]);
+    expect(res.fleet.provider_diversity_check).toEqual({
+      passed: false,
+      distinct_completed_providers: 1,
+      required_min_providers: 2,
+      providers: ['anthropic'],
+    });
+  });
+
+  it('computes per-provider verification pass rates and passes diversity with multiple completed providers', () => {
+    const rows: DispatchVerification[] = [
+      makeRow({ provider: 'anthropic', status: 'verified', verified: true }),
+      makeRow({ provider: 'anthropic', status: 'unverified', verified: false, failure_type: 'expired' }),
+      makeRow({ provider: 'openai', status: 'verified', verified: true }),
+      makeRow({ provider: 'cursor', status: 'pending', verified: false }),
+    ];
+
+    const res = buildAgentsEffectiveness(rows, [], '7d', GENERATED_AT);
+
+    expect(res.fleet.by_provider).toEqual([
+      {
+        provider: 'anthropic',
+        dispatches_completed: 2,
+        verified_landings: 1,
+        verification_pass_rate: 0.5,
+        share_of_completed: 0.6667,
+      },
+      {
+        provider: 'openai',
+        dispatches_completed: 1,
+        verified_landings: 1,
+        verification_pass_rate: 1,
+        share_of_completed: 0.3333,
+      },
+    ]);
+    expect(res.fleet.provider_diversity_check).toEqual({
+      passed: true,
+      distinct_completed_providers: 2,
+      required_min_providers: 2,
+      providers: ['anthropic', 'openai'],
+    });
   });
 
   it('computes verified_landing_rate and is 0-denominator safe', () => {
@@ -252,6 +302,7 @@ describe('buildAgentDispatches', () => {
     const first = res.items[0];
     expect(first.time).toBe('2026-06-14T00:00:00.000Z');
     expect(first.subject).toBe('b');
+    expect(first.provider).toBe('anthropic');
     expect(first.verification_status).toBe('verified');
     expect(first.kind).toBe('report');
     expect(first.artifact_path).toBe('/abs/report.md');

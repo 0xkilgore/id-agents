@@ -182,6 +182,7 @@ export function verifyDispatch(
     dispatch_id: row.dispatch_id,
     query_id: row.query_id,
     agent_name: row.agent_name,
+    provider: row.provider,
     status,
     verified,
     failure_type: failureType,

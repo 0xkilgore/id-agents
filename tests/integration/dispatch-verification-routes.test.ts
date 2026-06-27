@@ -309,6 +309,21 @@ describe("W2-1 DispatchVerification — integration (routes + job + reactor)", (
 
     // roger fresh + rams = at least 2 verified landings.
     expect(fleet.verified_landings).toBeGreaterThanOrEqual(2);
+    expect(fleet.by_provider).toEqual([
+      expect.objectContaining({
+        provider: "anthropic",
+        dispatches_completed: 5,
+        verified_landings: 2,
+        verification_pass_rate: 0.4,
+        share_of_completed: 1,
+      }),
+    ]);
+    expect(fleet.provider_diversity_check).toEqual({
+      passed: false,
+      distinct_completed_providers: 1,
+      required_min_providers: 2,
+      providers: ["anthropic"],
+    });
 
     // Per-agent verified-landing expectations.
     const agentByName = new Map(agents.map((a) => [a.name, a]));
@@ -349,6 +364,7 @@ describe("W2-1 DispatchVerification — integration (routes + job + reactor)", (
       (i) => i.verified && i.artifact_path?.endsWith("fresh-report.md"),
     );
     expect(verifiedFresh).toBeDefined();
+    expect(verifiedFresh?.provider).toBe("anthropic");
     const missing = items.find((i) => i.failure_type === "artifact_missing");
     expect(missing).toBeDefined();
 

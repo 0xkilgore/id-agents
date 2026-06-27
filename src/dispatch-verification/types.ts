@@ -9,6 +9,8 @@
 // durable projection on a 5-minute job; the Agents endpoints read the
 // projection and never stat files on request.
 
+import type { Provider } from "../dispatch-scheduler/types.js";
+
 /** v0 public failure enum (do NOT add promotion_failed in W2-1). */
 export type DispatchVerificationFailureType =
   | "expired"
@@ -40,6 +42,7 @@ export interface DispatchVerification {
   dispatch_id: string;
   query_id: string | null;
   agent_name: string;
+  provider: Provider;
   status: DispatchVerificationStatus;
   verified: boolean;
   failure_type: DispatchVerificationFailureType | null;
@@ -75,6 +78,7 @@ export interface VerifierDispatchRow {
   dispatch_id: string;
   query_id: string | null;
   agent_name: string;
+  provider: Provider;
   status: string;
   artifact_path: string | null;
   /** Parsed `/agent-done` result, if any. */

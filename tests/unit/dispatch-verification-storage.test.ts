@@ -30,6 +30,7 @@ function makeVerification(
     dispatch_id: "phid:disp-1",
     query_id: "query-1",
     agent_name: "coder-max",
+    provider: "anthropic",
     status: "verified",
     verified: true,
     failure_type: null,
@@ -91,6 +92,7 @@ describe("DispatchVerificationStorage", () => {
       result_source: "artifact_path",
     });
     expect(got.schema_version).toBe("dispatch-verification.v1");
+    expect(got.provider).toBe("anthropic");
   });
 
   it("round-trips false / null boolean fields correctly", async () => {

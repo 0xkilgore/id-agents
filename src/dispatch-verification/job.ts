@@ -141,6 +141,7 @@ export class DispatchVerificationJob {
       dispatch_id: row.dispatch_phid,
       query_id: row.query_id ?? null,
       agent_name: row.to_agent,
+      provider: row.provider,
       status: row.status,
       artifact_path: row.artifact_path,
       result_success: resultSuccess,
