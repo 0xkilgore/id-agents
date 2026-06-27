@@ -961,6 +961,10 @@ export async function migrateSqlite(adapter: SqliteAdapter): Promise<void> {
   const { migrateOutputsTables } = await import('../../outputs/storage.js');
   await migrateOutputsTables(adapter);
 
+  // DV3 — doc-model FTS indexes (desk + tasks) for GET /search.
+  const { migrateDocModelFtsIndexes } = await import('../../doc-model/fts-migration.js');
+  await migrateDocModelFtsIndexes(adapter);
+
   // P1 Dependency-Graph Orchestrator tables (idempotent — CREATE IF NOT EXISTS).
   const { migrateGraphTables } = await import('../../graph/storage.js');
   migrateGraphTables(adapter);

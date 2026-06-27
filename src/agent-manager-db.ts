@@ -10889,6 +10889,19 @@ export class AgentManagerDb {
           console.warn('[Manager] Desk routes failed to mount:', err instanceof Error ? err.message : String(err));
         }
 
+        // DV3 — unified doc-model FTS search (artifacts + desk + tasks).
+        try {
+          const [{ mountDocModelSearchRoutes }, { migrateDocModelFtsIndexes }] = await Promise.all([
+            import('./doc-model/routes.js'),
+            import('./doc-model/fts-migration.js'),
+          ]);
+          await migrateDocModelFtsIndexes(this.db.adapter);
+          mountDocModelSearchRoutes(this.managementApp, this.db.adapter);
+          console.log('[Manager] DV3 doc-model /search route mounted');
+        } catch (err) {
+          console.warn('[Manager] DV3 doc-model search routes failed to mount:', err instanceof Error ? err.message : String(err));
+        }
+
         // T-CKPT.agent-sharing / F4 — share + delegate grants over the Monday
         // seed actor model. Mount /shares, /delegations, /grants[/:id[/revoke]].
         try {
