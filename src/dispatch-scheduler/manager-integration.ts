@@ -315,6 +315,7 @@ export class SchedulerHandle {
       }),
       config: {
         max_attempts: recoveryCfg.maxAttempts,
+        max_linked_query_retries: DEFAULT_RECOVERY_CONFIG.max_linked_query_retries,
         retryable_detail_markers: DEFAULT_RECOVERY_CONFIG.retryable_detail_markers,
       },
       now,

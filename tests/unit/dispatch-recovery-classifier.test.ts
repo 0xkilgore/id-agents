@@ -14,6 +14,7 @@ function input(over: Partial<RecoveryInput> = {}): RecoveryInput {
     status: "failed",
     failure_kind: "agent_error",
     failure_detail: "linked query terminated expired",
+    agent_query_id: null,
     attempt_count: 1,
     recovery_attempts: 0,
     artifact_path: null,
@@ -27,9 +28,21 @@ function input(over: Partial<RecoveryInput> = {}): RecoveryInput {
 
 describe("classifyRecovery", () => {
   it("HEADLINE: a failed internal dispatch with 'linked query terminated expired' is RETRYABLE", () => {
-    const d = classifyRecovery(input(), DEFAULT_RECOVERY_CONFIG);
+    const d = classifyRecovery(input({ agent_query_id: "agent-q-1" }), DEFAULT_RECOVERY_CONFIG);
     expect(d.decision).toBe("retryable");
     expect(d.reason).toMatch(/expired/);
+  });
+
+  it("W-006: repeated linked-query terminal failures stop at needs_operator after the linked-query cap", () => {
+    const d = classifyRecovery(
+      input({
+        agent_query_id: "agent-q-repeat",
+        recovery_attempts: DEFAULT_RECOVERY_CONFIG.max_linked_query_retries,
+      }),
+      DEFAULT_RECOVERY_CONFIG,
+    );
+    expect(d.decision).toBe("needs_operator");
+    expect(d.reason).toContain("agent-q-repeat");
   });
 
   it("scheduler_wedged internal failure is retryable", () => {

@@ -19,6 +19,8 @@ export interface RecoveryInput {
   status: string;
   failure_kind: string | null;
   failure_detail: string | null;
+  /** Target-agent query linked to the failed run, when the scheduler observed one. */
+  agent_query_id: string | null;
   attempt_count: number;
   /** How many times the recovery system has already auto-retried this dispatch. */
   recovery_attempts: number;
@@ -44,6 +46,13 @@ export interface RecoveryInput {
 export interface RecoveryConfig {
   max_attempts: number;
   /**
+   * Linked-query terminal failures are special: retrying too many times can
+   * create a self-feeding dispatch/query loop. This cap is separate from the
+   * broader recovery_attempts budget so other transient recovery paths keep
+   * their existing behavior.
+   */
+  max_linked_query_retries: number;
+  /**
    * Substrings (lowercased) in failure_detail that mark a recoverable
    * transient. failure_kind === "scheduler_wedged" is always retryable.
    */
@@ -52,6 +61,7 @@ export interface RecoveryConfig {
 
 export const DEFAULT_RECOVERY_CONFIG: RecoveryConfig = {
   max_attempts: 3,
+  max_linked_query_retries: 1,
   retryable_detail_markers: [
     "linked query terminated expired",
     "expired",
@@ -102,6 +112,10 @@ function isRecoverableFailure(input: RecoveryInput, config: RecoveryConfig): boo
   return config.retryable_detail_markers.some((m) => detail.includes(m.toLowerCase()));
 }
 
+function isLinkedQueryTerminalFailure(input: RecoveryInput): boolean {
+  return Boolean(input.agent_query_id && (input.failure_detail ?? "").toLowerCase().includes("linked query terminated"));
+}
+
 /**
  * Decision order:
  *   1. landed       — the work actually completed (artifact / promotion); never retry.
@@ -138,7 +152,20 @@ export function classifyRecovery(
     };
   }
 
-  // 4. Exhausted → operator.
+  // 4. Exhausted → operator. Linked-query terminal retries get a tighter cap
+  // than generic transient recovery because repeating the same failure mode can
+  // otherwise create a retry storm.
+  if (
+    isLinkedQueryTerminalFailure(input) &&
+    input.recovery_attempts >= config.max_linked_query_retries
+  ) {
+    return {
+      decision: "needs_operator",
+      reason: `linked query ${input.agent_query_id} already retried ${input.recovery_attempts} time(s)`,
+    };
+  }
+
+  // 5. Exhausted → operator.
   if (input.recovery_attempts >= config.max_attempts) {
     return {
       decision: "exhausted",
@@ -146,7 +173,7 @@ export function classifyRecovery(
     };
   }
 
-  // 5. Recoverable transient on (now-safe) internal work → retry.
+  // 6. Recoverable transient on (now-safe) internal work → retry.
   if (isRecoverableFailure(input, config)) {
     return {
       decision: "retryable",
@@ -154,7 +181,7 @@ export function classifyRecovery(
     };
   }
 
-  // 6. Default — surface to operator, don't blindly retry.
+  // 7. Default — surface to operator, don't blindly retry.
   return {
     decision: "needs_operator",
     reason: `non-transient failure (${input.failure_kind ?? "unknown"}): ${input.failure_detail ?? ""}`.trim(),

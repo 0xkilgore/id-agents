@@ -15,6 +15,7 @@ function dispatch(over: Partial<RecoverableDispatch> = {}): RecoverableDispatch 
     status: "failed",
     failure_kind: "agent_error",
     failure_detail: "linked query terminated expired",
+    agent_query_id: null,
     attempt_count: 1,
     recovery_attempts: 0,
     artifact_path: null,
@@ -67,11 +68,33 @@ function svc(reactor: FakeReactor, over: Partial<ConstructorParameters<typeof Di
 
 describe("DispatchRecoveryService.runOnce", () => {
   it("REGRESSION: a failed dispatch with 'linked query terminated expired' is auto-requeued", async () => {
-    const reactor = new FakeReactor([dispatch({ dispatch_phid: "phid:disp-expired" })]);
+    const reactor = new FakeReactor([
+      dispatch({ dispatch_phid: "phid:disp-expired", agent_query_id: "agent-q-1" }),
+    ]);
     const report = await svc(reactor).runOnce();
     expect(reactor.requeued.map((r) => r.phid)).toEqual(["phid:disp-expired"]);
     expect(report.retried).toBe(1);
     expect(reactor.requeued[0].reason).toMatch(/expired/);
+  });
+
+  it("W-006: caps repeated linked-query terminal retries and records a single operator outcome", async () => {
+    const reactor = new FakeReactor([
+      dispatch({
+        dispatch_phid: "phid:disp-repeat",
+        agent_query_id: "agent-q-repeat",
+        recovery_attempts: DEFAULT_RECOVERY_CONFIG.max_linked_query_retries,
+      }),
+    ]);
+    const report = await svc(reactor).runOnce();
+    expect(reactor.requeued).toHaveLength(0);
+    expect(report.needs_operator).toBe(1);
+    expect(reactor.outcomes).toEqual([
+      {
+        phid: "phid:disp-repeat",
+        decision: "needs_operator",
+        reason: "linked query agent-q-repeat already retried 1 time(s)",
+      },
+    ]);
   });
 
   it("REGRESSION: an external side-effect dispatch is NOT auto-resent (no requeue)", async () => {
