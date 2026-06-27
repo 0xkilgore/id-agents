@@ -148,6 +148,19 @@ describe("resolveFleetNodes", () => {
     expect(nodes[2]).toMatchObject({ node_id: "kapelle-site", repoDir: "/srv/site", distDir: "/srv/site" });
   });
 
+  it("uses the configured kapelle-site serving checkout instead of the manager cwd sibling", () => {
+    const env = {
+      DEPLOY_FLEET_NODES: "kapelle-site:/Users/kilgore/Dropbox/Code/kapelle-site",
+    } as unknown as NodeJS.ProcessEnv;
+    const nodes = resolveFleetNodes(env, "/Users/kilgore/Dropbox/Code/cane/id-agents");
+    expect(nodes[1]).toMatchObject({
+      node_id: "kapelle-site",
+      repoDir: "/Users/kilgore/Dropbox/Code/kapelle-site",
+      distDir: "/Users/kilgore/Dropbox/Code/kapelle-site",
+    });
+    expect(nodes[1].repoDir).not.toBe("/Users/kilgore/Dropbox/Code/cane/kapelle-site");
+  });
+
   it("ignores malformed DEPLOY_FLEET_NODES entries (missing repoDir)", () => {
     const env = { DEPLOY_FLEET_NODES: "bogus,,real:/srv/real" } as unknown as NodeJS.ProcessEnv;
     const nodes = resolveFleetNodes(env, "/repo/id-agents");
