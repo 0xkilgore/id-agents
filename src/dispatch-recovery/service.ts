@@ -20,6 +20,9 @@ import {
 
 export interface RecoverableDispatch extends Omit<RecoveryInput, never> {
   dispatch_phid: string;
+  target_agent: string;
+  title: string;
+  dedup_key?: string | null;
   /** D3 commit-evidence inputs (from the row's promotion metadata). The service
    *  uses these to probe git for the actual landed state. All optional — absent
    *  rows simply skip the commit-evidence pass. */
@@ -411,6 +414,7 @@ function toInput(doc: RecoverableDispatch): RecoveryInput {
     agent_query_id: doc.agent_query_id,
     attempt_count: doc.attempt_count,
     recovery_attempts: doc.recovery_attempts,
+    logical_linked_query_failures: doc.logical_linked_query_failures,
     artifact_path: doc.artifact_path,
     promotion_completed: doc.promotion_completed,
     commit_verified_on_base: doc.commit_verified_on_base ?? null,

@@ -17,6 +17,7 @@ function input(over: Partial<RecoveryInput> = {}): RecoveryInput {
     agent_query_id: null,
     attempt_count: 1,
     recovery_attempts: 0,
+    logical_linked_query_failures: 1,
     artifact_path: null,
     promotion_completed: null,
     channel: "dispatch",
@@ -43,6 +44,19 @@ describe("classifyRecovery", () => {
     );
     expect(d.decision).toBe("needs_operator");
     expect(d.reason).toContain("agent-q-repeat");
+  });
+
+  it("W-006: duplicate linked-query failures for one logical task stop even across fresh rows", () => {
+    const d = classifyRecovery(
+      input({
+        agent_query_id: "agent-q-fresh-row",
+        recovery_attempts: 0,
+        logical_linked_query_failures: DEFAULT_RECOVERY_CONFIG.max_linked_query_retries + 1,
+      }),
+      DEFAULT_RECOVERY_CONFIG,
+    );
+    expect(d.decision).toBe("needs_operator");
+    expect(d.reason).toContain("logical linked-query task");
   });
 
   it("scheduler_wedged internal failure is retryable", () => {

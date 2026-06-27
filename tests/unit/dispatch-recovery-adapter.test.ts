@@ -82,9 +82,16 @@ async function seedFailed(
     recovery_status?: string;
     side_effect?: string;
     allow_auto_retry?: boolean;
+    subject?: string;
+    dedup_key?: string | null;
   },
 ): Promise<string> {
-  const enq = await client.enqueueDispatch({ ...base, query_id: overrides.query_id });
+  const enq = await client.enqueueDispatch({
+    ...base,
+    query_id: overrides.query_id,
+    subject: overrides.subject ?? base.subject,
+    dedup_key: overrides.dedup_key ?? undefined,
+  });
   if (!enq.ok) throw new Error("enqueue failed");
   const phid = enq.value.dispatch_phid;
   await adapter.query(
@@ -177,6 +184,27 @@ describe("SqliteDispatchReactor recovery primitives", () => {
     const list = await reactor.listFailedForRecovery();
     expect(list).toHaveLength(1);
     expect(list[0]!.promotion_completed).toBe(true);
+  });
+
+  it("W-006: listFailedForRecovery counts duplicate linked-query failures by logical task", async () => {
+    const { reactor, client } = harness();
+    await seedFailed(client, {
+      query_id: "storm-a",
+      subject: "same title",
+      dedup_key: "same-key",
+      agent_query_id: "agent-q-a",
+    });
+    await seedFailed(client, {
+      query_id: "storm-b",
+      subject: "same title changed text ignored by key",
+      dedup_key: "same-key",
+      agent_query_id: "agent-q-b",
+    });
+
+    const list = await reactor.listFailedForRecovery();
+
+    expect(list).toHaveLength(2);
+    expect(list.map((r) => r.logical_linked_query_failures)).toEqual([2, 2]);
   });
 
   it("requeueForRecovery moves failed → bounced with bumped attempts", async () => {

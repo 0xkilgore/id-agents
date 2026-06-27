@@ -102,6 +102,8 @@ interface Row {
   promotion_result_json: string | null;
   // Spec 054 v2 Part 2 — enqueue-side promotion input JSON.
   promotion_input_json: string | null;
+  dedup_key: string | null;
+  logical_linked_query_failures?: number | null;
 }
 
 export interface SqliteDispatchReactorOptions {
@@ -148,6 +150,8 @@ export class SqliteDispatchReactor {
       const existing = await this.findActiveByDedupKey(input.dedup_key);
       if (existing) return existing;
     }
+    const stopped = await this.findStoppedLinkedQueryFailure(input);
+    if (stopped) return stopped;
     const priority = clampPriority(input.priority);
     const doc: DispatchDoc = {
       dispatch_phid: mintPhid(),
@@ -273,6 +277,31 @@ export class SqliteDispatchReactor {
         ORDER BY updated_at ASC, dispatch_phid ASC
         LIMIT 1`,
       [this.teamId, dedupKey],
+    );
+    return rows[0] ? this.getByPhid(rows[0].dispatch_phid) : null;
+  }
+
+  /**
+   * W-006 storm guard. Once a logical task has already failed from a linked
+   * query terminating and recovery routed it to operator attention, do not mint
+   * a fresh dispatch every scheduler minute. Successful terminal rows and
+   * unrelated failures still allow normal refires.
+   */
+  private async findStoppedLinkedQueryFailure(input: EnqueueInputWithTarget): Promise<DispatchDoc | null> {
+    const logicalClause = input.dedup_key
+      ? "dedup_key = ?"
+      : "dedup_key IS NULL AND subject = ?";
+    const logicalValue = input.dedup_key ?? input.subject;
+    const { rows } = await this.adapter.query<{ dispatch_phid: string }>(
+      `SELECT dispatch_phid FROM dispatch_scheduler_queue
+        WHERE team_id = ? AND to_agent = ? AND ${logicalClause}
+          AND status = 'failed'
+          AND COALESCE(recovery_status, 'none') IN ('needs_operator', 'exhausted')
+          AND agent_query_id IS NOT NULL
+          AND COALESCE(failure_detail, '') LIKE '%linked query terminated%'
+        ORDER BY COALESCE(completed_at, updated_at) DESC, dispatch_phid DESC
+        LIMIT 1`,
+      [this.teamId, input.to_agent, logicalValue],
     );
     return rows[0] ? this.getByPhid(rows[0].dispatch_phid) : null;
   }
@@ -1067,7 +1096,18 @@ export class SqliteDispatchReactor {
     const now = opts.now ?? this.nowFn();
     const sinceIso = new Date(Date.parse(now) - lookbackMs).toISOString();
     const { rows } = await this.adapter.query<Row>(
-      `SELECT * FROM dispatch_scheduler_queue
+      `SELECT q.*,
+              (
+                SELECT COUNT(*)
+                  FROM dispatch_scheduler_queue p
+                 WHERE p.team_id = q.team_id
+                   AND p.to_agent = q.to_agent
+                   AND COALESCE(p.dedup_key, p.subject) = COALESCE(q.dedup_key, q.subject)
+                   AND p.status = 'failed'
+                   AND p.agent_query_id IS NOT NULL
+                   AND COALESCE(p.failure_detail, '') LIKE '%linked query terminated%'
+              ) AS logical_linked_query_failures
+         FROM dispatch_scheduler_queue q
        WHERE team_id = ? AND status = 'failed'
          AND COALESCE(completed_at, updated_at) >= ?
          AND COALESCE(recovery_status, 'none') IN ('none', 'recovering')
@@ -1098,7 +1138,18 @@ export class SqliteDispatchReactor {
       : null;
     const reasonClause = [kindClause, markerClause].filter(Boolean).join(" OR ");
     const { rows } = await this.adapter.query<Row>(
-      `SELECT * FROM dispatch_scheduler_queue
+      `SELECT q.*,
+              (
+                SELECT COUNT(*)
+                  FROM dispatch_scheduler_queue p
+                 WHERE p.team_id = q.team_id
+                   AND p.to_agent = q.to_agent
+                   AND COALESCE(p.dedup_key, p.subject) = COALESCE(q.dedup_key, q.subject)
+                   AND p.status = 'failed'
+                   AND p.agent_query_id IS NOT NULL
+                   AND COALESCE(p.failure_detail, '') LIKE '%linked query terminated%'
+              ) AS logical_linked_query_failures
+         FROM dispatch_scheduler_queue q
        WHERE team_id = ? AND status = 'failed'
          AND COALESCE(recovery_status, 'none') IN ('none', 'recovering')
          ${reasonClause ? `AND (${reasonClause})` : ""}
@@ -1253,12 +1304,16 @@ function rowToRecoverable(row: Row): RecoverableDispatch {
     typeof v === "string" && v.length > 0 ? v : null;
   return {
     dispatch_phid: row.dispatch_phid,
+    target_agent: row.to_agent,
+    title: row.subject,
+    dedup_key: row.dedup_key ?? null,
     status: row.status,
     failure_kind: row.failure_kind ?? null,
     failure_detail: row.failure_detail ?? null,
     attempt_count: Number(row.attempt_count ?? 0),
     agent_query_id: row.agent_query_id ?? null,
     recovery_attempts: Number(row.recovery_attempts ?? 0),
+    logical_linked_query_failures: Number(row.logical_linked_query_failures ?? 0),
     artifact_path: row.artifact_path ?? null,
     promotion_completed:
       promo && typeof promo === "object" ? promo.completed === true : null,
@@ -1411,6 +1466,7 @@ function rowToDoc(row: Row): DispatchDoc {
     recovery_reason: row.recovery_reason ?? null,
     side_effect: row.side_effect ?? "none",
     allow_auto_retry: row.allow_auto_retry != null && Number(row.allow_auto_retry) === 1,
+    dedup_key: row.dedup_key ?? null,
     promotion_input: parsePromotionInput(row.promotion_input_json),
   };
 }

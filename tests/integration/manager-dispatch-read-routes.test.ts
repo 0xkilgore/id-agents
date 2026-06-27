@@ -230,6 +230,32 @@ describe('manager dispatch read routes', () => {
     expect(healthBody.active).toBe(0);
   });
 
+  it('W-006: dispatch health surfaces circuit-open lanes after linked-query agent errors', async () => {
+    const teamId = await db.teams.getOrCreateTeamId('dispatch-read-w006-health');
+    for (let i = 0; i < 3; i++) {
+      await insertDispatch(teamId, {
+        dispatch_phid: `phid:disp-w006-${i}`,
+        query_id: `query_w006_${i}`,
+        to_agent: 'frontend-ui-codex',
+        status: 'failed',
+        completed_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+        agent_query_id: `agent_query_w006_${i}`,
+        failure_kind: 'agent_error',
+        failure_detail: 'linked query terminated failed',
+      });
+    }
+
+    const health = await fetch(`${baseUrl}/dispatches/health`, { headers: headers('dispatch-read-w006-health') });
+    expect(health.status).toBe(200);
+    const healthBody = await health.json() as any;
+    expect(healthBody.lane_health.unhealthy[0]).toMatchObject({
+      agent: 'frontend-ui-codex',
+      status: 'circuit_open',
+      linked_query_failures_24h: 3,
+    });
+  });
+
   it('lists artifacts from dispatch results and agent output directories', async () => {
     const teamId = await db.teams.getOrCreateTeamId('dispatch-read-artifacts');
     const agentDir = path.join(workDir, 'artifact-agent');
@@ -319,6 +345,7 @@ async function insertDispatch(teamId: string, overrides: Partial<{
   updated_at: string;
   failure_kind: string | null;
   failure_detail: string | null;
+  agent_query_id: string | null;
   clarification_id: string | null;
   active_clarification_json: string | null;
   clarification_history_json: string;
@@ -338,8 +365,9 @@ async function insertDispatch(teamId: string, overrides: Partial<{
       failure_detail, target_url, result_json, clarification_id,
       active_clarification_json, clarification_history_json,
       resume_delivery_status, promote, promotion_strategy,
-      promotion_required_reason, promotion_result_json, promotion_input_json
-    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      promotion_required_reason, promotion_result_json, promotion_input_json,
+      dedup_key
+    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
     [
       dispatchPhid,
       teamId,
@@ -361,7 +389,7 @@ async function insertDispatch(teamId: string, overrides: Partial<{
       overrides.started_at ?? null,
       overrides.completed_at ?? null,
       overrides.updated_at ?? now,
-      null,
+      overrides.agent_query_id ?? null,
       null,
       overrides.failure_kind ?? null,
       overrides.failure_detail ?? null,
@@ -376,6 +404,7 @@ async function insertDispatch(teamId: string, overrides: Partial<{
       null,
       overrides.promotion_result_json ?? null,
       overrides.promotion_input_json ?? null,
+      null,
     ],
   );
 }

@@ -18,6 +18,7 @@ function dispatch(over: Partial<RecoverableDispatch> = {}): RecoverableDispatch 
     agent_query_id: null,
     attempt_count: 1,
     recovery_attempts: 0,
+    logical_linked_query_failures: 1,
     artifact_path: null,
     promotion_completed: null,
     channel: "dispatch",
@@ -95,6 +96,21 @@ describe("DispatchRecoveryService.runOnce", () => {
         reason: "linked query agent-q-repeat already retried 1 time(s)",
       },
     ]);
+  });
+
+  it("W-006: caps a linked-query storm across duplicate logical rows", async () => {
+    const reactor = new FakeReactor([
+      dispatch({
+        dispatch_phid: "phid:disp-duplicate",
+        agent_query_id: "agent-q-duplicate",
+        recovery_attempts: 0,
+        logical_linked_query_failures: 2,
+      }),
+    ]);
+    const report = await svc(reactor).runOnce();
+    expect(reactor.requeued).toHaveLength(0);
+    expect(report.needs_operator).toBe(1);
+    expect(reactor.outcomes[0].reason).toContain("logical linked-query task");
   });
 
   it("REGRESSION: an external side-effect dispatch is NOT auto-resent (no requeue)", async () => {

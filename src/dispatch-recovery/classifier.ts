@@ -24,6 +24,13 @@ export interface RecoveryInput {
   attempt_count: number;
   /** How many times the recovery system has already auto-retried this dispatch. */
   recovery_attempts: number;
+  /**
+   * Number of failed linked-query terminal rows for the same logical task
+   * (same target agent + dedup_key when present, otherwise title/subject).
+   * This is intentionally cross-row: W-006 was a storm of fresh rows, not just
+   * repeated retries on one row.
+   */
+  logical_linked_query_failures: number;
   /** Evidence the work actually landed despite the failed marker. */
   artifact_path: string | null;
   promotion_completed: boolean | null;
@@ -162,6 +169,15 @@ export function classifyRecovery(
     return {
       decision: "needs_operator",
       reason: `linked query ${input.agent_query_id} already retried ${input.recovery_attempts} time(s)`,
+    };
+  }
+  if (
+    isLinkedQueryTerminalFailure(input) &&
+    input.logical_linked_query_failures > config.max_linked_query_retries
+  ) {
+    return {
+      decision: "needs_operator",
+      reason: `logical linked-query task already has ${input.logical_linked_query_failures} failed row(s)`,
     };
   }
 

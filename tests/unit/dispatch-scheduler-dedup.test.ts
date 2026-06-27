@@ -65,6 +65,19 @@ async function setRecoveryStatus(phid: string, recoveryStatus: string): Promise<
   ]);
 }
 
+async function setLinkedQueryFailed(phid: string, recoveryStatus = "needs_operator"): Promise<void> {
+  await adapter.query(
+    `UPDATE dispatch_scheduler_queue
+        SET status = 'failed',
+            agent_query_id = 'agent-q-failed',
+            failure_kind = 'agent_error',
+            failure_detail = 'linked query terminated failed',
+            recovery_status = ?
+      WHERE dispatch_phid = ?`,
+    [recoveryStatus, phid],
+  );
+}
+
 describe("dispatch enqueue dedup guard", () => {
   it("reuses the existing dispatch when re-enqueued with the same dedup_key while QUEUED", async () => {
     const r = reactorOf();
@@ -98,6 +111,46 @@ describe("dispatch enqueue dedup guard", () => {
     const b = await r.enqueue({ ...base, query_id: "q2", dedup_key: "k" });
     expect(b.dispatch_phid).not.toBe(a.dispatch_phid); // refire allowed
     expect(await rowCount("k")).toBe(2); // one terminal + one fresh active
+  });
+
+  it("W-006: reuses a terminal linked-query failure by dedup_key once operator attention is recorded", async () => {
+    const r = reactorOf();
+    const a = await r.enqueue({ ...base, dedup_key: "storm-key" });
+    await setLinkedQueryFailed(a.dispatch_phid);
+
+    const b = await r.enqueue({ ...base, query_id: "q2", dedup_key: "storm-key" });
+
+    expect(b.dispatch_phid).toBe(a.dispatch_phid);
+    expect(await rowCount("storm-key")).toBe(1);
+  });
+
+  it("W-006: reuses a terminal linked-query failure by agent and title when no dedup_key exists", async () => {
+    const r = reactorOf();
+    const a = await r.enqueue({ ...base, subject: "storm title" });
+    await setLinkedQueryFailed(a.dispatch_phid);
+
+    const b = await r.enqueue({ ...base, query_id: "q2", subject: "storm title" });
+
+    expect(b.dispatch_phid).toBe(a.dispatch_phid);
+  });
+
+  it("W-006: does not reuse unrelated terminal failures", async () => {
+    const r = reactorOf();
+    const a = await r.enqueue({ ...base, dedup_key: "k" });
+    await adapter.query(
+      `UPDATE dispatch_scheduler_queue
+          SET status = 'failed',
+              failure_kind = 'agent_error',
+              failure_detail = 'ordinary validation failed',
+              recovery_status = 'needs_operator'
+        WHERE dispatch_phid = ?`,
+      [a.dispatch_phid],
+    );
+
+    const b = await r.enqueue({ ...base, query_id: "q2", dedup_key: "k" });
+
+    expect(b.dispatch_phid).not.toBe(a.dispatch_phid);
+    expect(await rowCount("k")).toBe(2);
   });
 
   it("allows a fresh dispatch once a prior non-terminal row is mooted", async () => {

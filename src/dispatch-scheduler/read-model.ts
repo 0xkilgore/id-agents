@@ -117,6 +117,11 @@ export interface DispatchReadRow {
   // Pure function of (effective_state, needs_operator) — both already on this
   // row — so it can never disagree with them. See deriveSortGroup().
   sort_group: number;
+  collapse: {
+    key: string;
+    duplicate_count: number;
+    dispatch_ids: string[];
+  } | null;
   source_metadata: {
     source: 'dispatch_scheduler_queue';
     team_id: string;
@@ -128,6 +133,7 @@ export interface DispatchReadRow {
     attempt_count: number | null;
     bounce_count: number | null;
     not_before_at: string | null;
+    dedup_key: string | null;
   };
   source: 'manager-http';
 }
@@ -170,6 +176,7 @@ interface DispatchDbRow {
   side_effect: string | null;
   allow_auto_retry: number | null;
   supersede_link: string | null;
+  dedup_key: string | null;
 }
 
 export function parseDispatchReadStatus(raw: unknown): DispatchReadStatus | null {
@@ -234,7 +241,7 @@ export async function readDispatches(
             promotion_required_reason, promotion_input_json,
             promotion_result_json, result_json, artifact_path,
             recovery_status, recovery_attempts, recovery_reason,
-            side_effect, allow_auto_retry, supersede_link
+            side_effect, allow_auto_retry, supersede_link, dedup_key
        FROM dispatch_scheduler_queue
        WHERE team_id = ? AND status IN (${placeholders})
        ORDER BY COALESCE(completed_at, started_at, updated_at, not_before_at) DESC,
@@ -242,7 +249,7 @@ export async function readDispatches(
        LIMIT ?`,
     [teamId, ...statuses, limit],
   );
-  return rows.map((row) => rowToDispatch(row, opts));
+  return collapseLogicalNeedsOperatorRows(rows.map((row) => rowToDispatch(row, opts)));
 }
 
 export async function readDispatchById(
@@ -261,7 +268,7 @@ export async function readDispatchById(
             promotion_required_reason, promotion_input_json,
             promotion_result_json, result_json, artifact_path,
             recovery_status, recovery_attempts, recovery_reason,
-            side_effect, allow_auto_retry, supersede_link
+            side_effect, allow_auto_retry, supersede_link, dedup_key
        FROM dispatch_scheduler_queue
        WHERE team_id = ? AND (dispatch_phid = ? OR query_id = ? OR agent_query_id = ?)
        LIMIT 1`,
@@ -370,6 +377,15 @@ export async function readDispatchHealth(adapter: DbAdapterLike, teamId: string)
   newest_terminal_at: string | null;
   generated_at: string;
   blockages: FleetBlockagesReport;
+  lane_health: {
+    unhealthy: Array<{
+      agent: string;
+      status: "circuit_open";
+      reason: string;
+      linked_query_failures_24h: number;
+      sample_dispatch_ids: string[];
+    }>;
+  };
 }> {
   const { rows: countsRows } = await adapter.query<{ status: string; count: number }>(
     `SELECT status, COUNT(*) as count
@@ -397,6 +413,7 @@ export async function readDispatchHealth(adapter: DbAdapterLike, teamId: string)
   );
 
   const blockages = await readFleetBlockages(adapter, teamId);
+  const laneHealth = await readLaneHealth(adapter, teamId);
 
   return {
     status: 'ok',
@@ -409,6 +426,58 @@ export async function readDispatchHealth(adapter: DbAdapterLike, teamId: string)
     newest_terminal_at: ageRows[0]?.newest_terminal_at ?? null,
     generated_at: new Date().toISOString(),
     blockages,
+    lane_health: laneHealth,
+  };
+}
+
+const LANE_HEALTH_WINDOW_MS = 24 * 60 * 60 * 1000;
+const LANE_HEALTH_FAILURE_THRESHOLD = 3;
+
+async function readLaneHealth(
+  adapter: DbAdapterLike,
+  teamId: string,
+): Promise<{
+  unhealthy: Array<{
+    agent: string;
+    status: "circuit_open";
+    reason: string;
+    linked_query_failures_24h: number;
+    sample_dispatch_ids: string[];
+  }>;
+}> {
+  const since = new Date(Date.now() - LANE_HEALTH_WINDOW_MS).toISOString();
+  const { rows } = await adapter.query<{
+    agent: string;
+    failures: number;
+    sample_dispatch_ids: string | null;
+  }>(
+    `SELECT to_agent AS agent,
+            COUNT(*) AS failures,
+            GROUP_CONCAT(dispatch_phid) AS sample_dispatch_ids
+       FROM (
+         SELECT dispatch_phid, to_agent
+           FROM dispatch_scheduler_queue
+          WHERE team_id = ?
+            AND status = 'failed'
+            AND failure_kind = 'agent_error'
+            AND agent_query_id IS NOT NULL
+            AND COALESCE(failure_detail, '') LIKE '%linked query terminated%'
+            AND COALESCE(completed_at, updated_at) >= ?
+          ORDER BY COALESCE(completed_at, updated_at) DESC, dispatch_phid DESC
+       )
+      GROUP BY to_agent
+     HAVING COUNT(*) >= ?
+      ORDER BY failures DESC, agent ASC`,
+    [teamId, since, LANE_HEALTH_FAILURE_THRESHOLD],
+  );
+  return {
+    unhealthy: rows.map((row) => ({
+      agent: row.agent,
+      status: "circuit_open",
+      reason: "repeated linked-query agent_error failures",
+      linked_query_failures_24h: Number(row.failures),
+      sample_dispatch_ids: (row.sample_dispatch_ids ?? "").split(",").filter(Boolean).slice(0, 10),
+    })),
   };
 }
 
@@ -712,6 +781,7 @@ function rowToDispatch(row: DispatchDbRow, opts: DeriveOptions = {}): DispatchRe
     effective_state: effectiveState,
     needs_operator: needsOperator,
     sort_group: deriveSortGroup(effectiveState, needsOperator),
+    collapse: null,
     supersede_link: row.supersede_link,
     source_metadata: {
       source: 'dispatch_scheduler_queue',
@@ -724,9 +794,50 @@ function rowToDispatch(row: DispatchDbRow, opts: DeriveOptions = {}): DispatchRe
       attempt_count: row.attempt_count == null ? null : Number(row.attempt_count),
       bounce_count: row.bounce_count == null ? null : Number(row.bounce_count),
       not_before_at: row.not_before_at,
+      dedup_key: row.dedup_key ?? null,
     },
     source: 'manager-http',
   };
+}
+
+function collapseLogicalNeedsOperatorRows(rows: DispatchReadRow[]): DispatchReadRow[] {
+  const firstByKey = new Map<string, DispatchReadRow>();
+  const idsByKey = new Map<string, string[]>();
+  const out: DispatchReadRow[] = [];
+  for (const row of rows) {
+    const key = logicalNeedsOperatorCollapseKey(row);
+    if (!key) {
+      out.push(row);
+      continue;
+    }
+    const first = firstByKey.get(key);
+    if (!first) {
+      firstByKey.set(key, row);
+      idsByKey.set(key, [row.dispatch_phid]);
+      out.push(row);
+      continue;
+    }
+    idsByKey.get(key)!.push(row.dispatch_phid);
+  }
+  for (const [key, first] of firstByKey) {
+    const ids = idsByKey.get(key) ?? [];
+    if (ids.length <= 1) continue;
+    first.collapse = {
+      key,
+      duplicate_count: ids.length - 1,
+      dispatch_ids: ids,
+    };
+  }
+  return out;
+}
+
+function logicalNeedsOperatorCollapseKey(row: DispatchReadRow): string | null {
+  if (!row.needs_operator) return null;
+  if (row.status !== "failed") return null;
+  if (!row.agent_query_id) return null;
+  if (!/linked query terminated/i.test(row.failure_detail ?? "")) return null;
+  const logical = row.source_metadata.dedup_key ?? row.subject;
+  return `${row.target_agent}\n${logical}`;
 }
 
 /**

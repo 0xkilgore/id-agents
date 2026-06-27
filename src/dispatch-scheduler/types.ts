@@ -273,6 +273,8 @@ export interface DispatchDoc {
   recovery_reason: string | null;
   side_effect: string;
   allow_auto_retry: boolean;
+  // P0 control-plane Slice 3 / W-006 — optional logical dedup key.
+  dedup_key?: string | null;
   // Spec 054 v2 Part 2 ─ enqueue-side promotion inputs (repo, branch,
   // base, remote, plus an optional skip-reason). Carried verbatim from
   // EnqueueInput so the agent receives canonical promotion context in

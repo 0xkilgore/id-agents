@@ -165,11 +165,20 @@ function adapterWithRow(overrides: Record<string, unknown> = {}): DbAdapterLike 
     side_effect: null,
     allow_auto_retry: null,
     supersede_link: null,
+    dedup_key: null,
     ...overrides,
   };
   return {
     async query<T = unknown>(): Promise<{ rows: T[] }> {
       return { rows: [base as unknown as T] };
+    },
+  };
+}
+
+function adapterWithRows(rows: Array<Record<string, unknown>>): DbAdapterLike {
+  return {
+    async query<T = unknown>(): Promise<{ rows: T[] }> {
+      return { rows: rows as T[] };
     },
   };
 }
@@ -193,4 +202,63 @@ test("readDispatches sorts a hard failure into the needs-you band on the row", a
   expect(rows[0].effective_state).toBe("failed_needs_operator");
   expect(rows[0].needs_operator).toBe(true);
   expect(rows[0].sort_group).toBe(0);
+});
+
+test("W-006: readDispatches collapses duplicate linked-query needs-operator rows by logical task", async () => {
+  const base = (id: string, completed_at: string) => ({
+    dispatch_phid: id,
+    team_id: "t",
+    query_id: null,
+    to_agent: "frontend-ui-codex",
+    from_actor: null,
+    channel: "dispatch",
+    subject: "I-1 artifacts read-model queries doc-model substrate",
+    provider: "anthropic",
+    runtime: "claude-code-cli",
+    priority: null,
+    status: "failed",
+    not_before_at: null,
+    attempt_count: null,
+    bounce_count: null,
+    started_at: null,
+    completed_at,
+    updated_at: completed_at,
+    agent_query_id: `agent-${id}`,
+    failure_kind: "agent_error",
+    failure_detail: "linked query terminated failed",
+    clarification_id: null,
+    active_clarification_json: null,
+    clarification_history_json: null,
+    resume_delivery_status: null,
+    promote: null,
+    promotion_strategy: null,
+    promotion_required_reason: null,
+    promotion_input_json: null,
+    promotion_result_json: null,
+    result_json: null,
+    artifact_path: null,
+    recovery_status: "needs_operator",
+    recovery_attempts: 1,
+    recovery_reason: null,
+    side_effect: null,
+    allow_auto_retry: null,
+    supersede_link: null,
+    dedup_key: "w006-linked-query",
+  });
+  const rows = await readDispatches(
+    adapterWithRows([
+      base("phid:disp-newest", "2026-06-27T12:00:00.000Z"),
+      base("phid:disp-older", "2026-06-27T11:00:00.000Z"),
+    ]),
+    "t",
+    "all",
+    10,
+  );
+
+  expect(rows).toHaveLength(1);
+  expect(rows[0].collapse).toEqual({
+    key: "frontend-ui-codex\nw006-linked-query",
+    duplicate_count: 1,
+    dispatch_ids: ["phid:disp-newest", "phid:disp-older"],
+  });
 });
