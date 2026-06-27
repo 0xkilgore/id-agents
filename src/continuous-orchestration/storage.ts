@@ -459,6 +459,7 @@ export async function listFleshCandidates(
     const { rows } = await adapter.query<BacklogRow>(
       `SELECT * FROM orchestration_backlog_item
          WHERE team_id = $1 AND item_id IN (${placeholders})
+           AND readiness_state IN ('needs_review', 'draft')
            AND ${logicalWorkNotBlockedByPeer}
          ORDER BY priority ASC, created_at ASC`,
       [team_id, ...opts.item_ids],
@@ -504,6 +505,20 @@ export async function recordFleshOutcome(
 ): Promise<BacklogItem | null> {
   const item = await getBacklogItem(adapter, outcome.item_id);
   if (!item) return null;
+
+  // Idempotency guard (operator dispatch f4ce4782): a flesh / re-ingest pass must
+  // never demote or re-route work that has moved past the review gate. Only
+  // draft / needs_review items are flesh-eligible; anything at `ready` or beyond
+  // is left untouched (no write), so a re-flesh can't undo a promotion or the
+  // ready-fuel floor.
+  if (item.readiness_state !== "draft" && item.readiness_state !== "needs_review") {
+    return item;
+  }
+  // Sticky routing guard: never overwrite a to_agent / priority an operator or
+  // human explicitly set (signalled by `updated_by`, which only the field-PATCH
+  // endpoint sets — the flesher never does), preserving Claude-Light lane routing.
+  const operatorRouted = item.updated_by != null;
+
   const now = new Date().toISOString();
   const patch = outcome.patch ?? null;
   const promote = !!outcome.promote && !!patch;
@@ -525,9 +540,8 @@ export async function recordFleshOutcome(
   push("flesh_patch_json", patch ? JSON.stringify(patch) : null);
 
   if (patch) {
-    // Always persist the generated dispatch fields so the row is dispatchable
-    // (or one-click approvable) regardless of the auto-ready decision.
-    push("to_agent", patch.to_agent);
+    // Persist the generated dispatch payload so the row is dispatchable (or
+    // one-click approvable) regardless of the auto-ready decision.
     push("dispatch_body", patch.dispatch_body);
     push("risk_class", patch.risk_class);
     push("write_scope_json", JSON.stringify(patch.write_scope));
@@ -536,7 +550,12 @@ export async function recordFleshOutcome(
     push("provider", patch.provider);
     push("runtime", patch.runtime);
     if (patch.value_score !== null && patch.value_score !== undefined) push("value_score", patch.value_score);
-    push("priority", patch.priority);
+    // Routing fields are sticky: keep an operator/human-set to_agent + priority
+    // (sticky-routing guard above) instead of resetting it to the flesher's pick.
+    if (!operatorRouted) {
+      push("to_agent", patch.to_agent);
+      push("priority", patch.priority);
+    }
   }
 
   if (promote) {
