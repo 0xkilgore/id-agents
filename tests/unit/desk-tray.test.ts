@@ -232,7 +232,9 @@ describe("artifactInboxToTrayItem + decisionRowToTrayItem", () => {
   });
 });
 
-async function bootDeskHarness(): Promise<{ app: Express; adapter: SqliteAdapter }> {
+async function bootDeskHarness(
+  env: NodeJS.ProcessEnv = { DESK_USE_DOCUMENT_MODEL: "true" },
+): Promise<{ app: Express; adapter: SqliteAdapter }> {
   const adapter = new SqliteAdapter(":memory:");
   await migrateDeskTables(adapter);
   await migrateOutputsTables(adapter);
@@ -242,7 +244,7 @@ async function bootDeskHarness(): Promise<{ app: Express; adapter: SqliteAdapter
   mountDeskRoutes(app, adapter, {
     now: () => new Date("2026-06-25T12:00:00.000Z"),
     deskMarkdownPath: "/nonexistent/Desk.md",
-    env: { DESK_USE_DOCUMENT_MODEL: "true" },
+    env,
   });
   return { app, adapter };
 }
@@ -469,6 +471,26 @@ describe("GET /desk/tray + POST /desk/items", () => {
     const tray = await getJson(app, "/desk/tray");
     expect(tray.body.items).toHaveLength(1);
     expect(tray.body.items[0].label).toBe("Review spec");
+  });
+
+  it("GET /desk/entries serves read-model.v1 with parity ok while cutover flag stays off", async () => {
+    const { app } = await bootDeskHarness({});
+    await getJson(app, "/desk/items", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ label: "Review spec", kind: "note", tray_zone: "needs_you" }),
+    });
+
+    const [tray, entries] = await Promise.all([getJson(app, "/desk/tray"), getJson(app, "/desk/entries")]);
+    expect(tray.status).toBe(200);
+    expect(tray.body.source.read_path).toBe("markdown_walk");
+    expect(entries.status).toBe(200);
+    expect(entries.body.schema_version).toBe("read-model.v1");
+    expect(entries.body.source).toEqual({ read_path: "substrate", projection: "desk_entries" });
+    expect(entries.body.parity.status).toBe("ok");
+    expect(entries.body.items).toHaveLength(1);
+    expect(entries.body.items[0].title).toBe("Review spec");
+    expect(entries.body.items[0].kind).toBe("desk_item");
   });
 
   it("rejects POST /desk/items without label", async () => {

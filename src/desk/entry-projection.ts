@@ -1,4 +1,4 @@
-import type { ActorRef, EntryProvenance } from "../outputs/entry.js";
+import type { ActorRef, EntryProvenance, ReadModelEnvelope } from "../outputs/entry.js";
 import type { DeskItemOperationRow, DeskItemRow } from "./types.js";
 import {
   buildProvenanceFromOpLog,
@@ -97,4 +97,30 @@ function deskProvenance(
     },
     createdBy,
   );
+}
+
+/**
+ * Wrap a page of desk rows in the shared read-model.v1 envelope — the substrate
+ * query path for GET /desk/entries (I-1). Does not flip the operator cutover flag;
+ * consumers keep reading GET /desk/tray until DESK_USE_DOCUMENT_MODEL is enabled.
+ */
+export function buildDeskEntriesEnvelope(
+  rows: DeskItemRow[],
+  opsByItemId: Map<string, DeskItemOperationRow[]>,
+  page: { limit: number; offset: number },
+  parityStatus: ReadModelEnvelope<DeskEntry>["parity"]["status"] = "unchecked",
+): ReadModelEnvelope<DeskEntry> {
+  const items = rows
+    .slice(page.offset, page.offset + page.limit)
+    .map((row) => deskRowToEntry(row, opsByItemId.get(row.desk_item_id) ?? []));
+  return {
+    schema_version: "read-model.v1",
+    generated_at: new Date().toISOString(),
+    items,
+    count: items.length,
+    limit: page.limit,
+    offset: page.offset,
+    source: { read_path: "substrate", projection: "desk_entries" },
+    parity: { status: parityStatus },
+  };
 }

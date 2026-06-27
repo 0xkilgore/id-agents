@@ -28,6 +28,18 @@ import { SqliteAdapter } from "../../src/db/sqlite-adapter.js";
 import { migrateInboxTables, listInboxItems } from "../../src/inbox/storage.js";
 import { parseInboxMdLine, runFullProjection } from "../../src/inbox/projection.js";
 import type { InboxItemRow } from "../../src/inbox/types.js";
+import { useDocumentModel } from "../../src/config/feature-flags.js";
+import {
+  buildDeskEntriesEnvelope,
+  deskRowToEntry,
+} from "../../src/desk/entry-projection.js";
+import {
+  computeDeskDocModelParity,
+  deskEntryToComparable,
+  deskTrayItemToComparable,
+} from "../../src/desk/doc-model-parity.js";
+import { deskRowToTrayItem } from "../../src/desk/projection.js";
+import { listDeskItems, migrateDeskTables, upsertDeskItem } from "../../src/desk/storage.js";
 
 const NOW = "2026-06-25T12:00:00.000Z";
 
@@ -331,5 +343,97 @@ describe("inbox doc-model query (inbox_items) ↔ intake SoT parity gate", () =>
 
     expect(report.status).toBe("drift");
     expect(report.drift.some((d) => d.includes("missing in substrate") && d.includes(mdPhid(MD_OPEN)))).toBe(true);
+  });
+});
+
+describe("desk doc-model query ↔ current tray projection parity gate", () => {
+  it("DESK_USE_DOCUMENT_MODEL defaults OFF (cutover not flipped)", () => {
+    expect(useDocumentModel("desk", {})).toBe(false);
+    expect(useDocumentModel("desk", { DESK_USE_DOCUMENT_MODEL: "false" })).toBe(false);
+  });
+
+  it("substrate entries match current tray items for a sample set of on_desk rows", async () => {
+    const adapter = new SqliteAdapter(":memory:");
+    await migrateDeskTables(adapter);
+    await upsertDeskItem(adapter, {
+      label: "Review Wave 4 closeout",
+      kind: "artifact",
+      source_ref: "art_wave4",
+      tray_zone: "needs_you",
+      added_at: "2026-06-25T10:00:00.000Z",
+    });
+    await upsertDeskItem(adapter, {
+      label: "Shipped report",
+      kind: "note",
+      tray_zone: "shipped",
+      added_at: "2026-06-24T09:00:00.000Z",
+    });
+
+    const deskRows = await listDeskItems(adapter, { desk_class: "tray", tray_state: "on_desk", limit: 50 });
+    const opsByItemId = new Map<string, never[]>();
+    const substrateEntries = deskRows.map((row) => deskRowToEntry(row, opsByItemId.get(row.desk_item_id) ?? []));
+    const currentTrayItems = deskRows.map(deskRowToTrayItem);
+
+    const report = computeDeskDocModelParity(substrateEntries, currentTrayItems, NOW);
+    expect(report.status).toBe("ok");
+    expect(report.drift).toEqual([]);
+
+    const envelope = buildDeskEntriesEnvelope(deskRows, opsByItemId, { limit: 50, offset: 0 }, report.status);
+    expect(envelope.schema_version).toBe("read-model.v1");
+    expect(envelope.source).toEqual({ read_path: "substrate", projection: "desk_entries" });
+    expect(envelope.items).toHaveLength(2);
+    expect(envelope.items.map((e) => e.title)).toEqual(["Review Wave 4 closeout", "Shipped report"]);
+  });
+
+  it("DRIFTS when a tray projection title diverges from the substrate entry (cutover blocker)", () => {
+    const rowKey = "desk_sample_1";
+    const substrate = [
+      deskEntryToComparable({
+        phid: rowKey,
+        kind: "desk_item",
+        schema_version: 1,
+        display_id: rowKey,
+        title: "Substrate title",
+        body_markdown: "",
+        desk_item_kind: "note",
+        tray_zone: "needs_you",
+        tray_state: "on_desk",
+        source_ref: null,
+        created_at: NOW,
+        created_by: { type: "system", id: "system" },
+        updated_at: NOW,
+        updated_by: { type: "system", id: "system" },
+        provenance: {
+          actor_ref: { type: "system", id: "system" },
+          source: null,
+          origin: "substrate",
+          source_dispatch_phid: null,
+          derived_from: [],
+          revisions: [],
+          contributors: [],
+        },
+      }),
+    ];
+    const legacy = [
+      deskTrayItemToComparable({
+        desk_item_id: rowKey,
+        label: "Legacy tray label",
+        kind: "note",
+        desk_class: "tray",
+        tray_zone: "needs_you",
+        body_md: "",
+        source_ref: null,
+        added_at: NOW,
+        added_by: "system",
+        tray_state: "on_desk",
+        dismissed_at: null,
+        provenance: { source_path: null, anchor: null, parser_version: "desk.tray.v1" },
+        href: null,
+        priority: null,
+      }),
+    ];
+    const report = computeParity(substrate, legacy, NOW);
+    expect(report.status).toBe("drift");
+    expect(report.drift.some((d) => d.includes("title drift"))).toBe(true);
   });
 });
