@@ -24,11 +24,13 @@ const RESERVED_SLUGS = [
   "maestra-product-log",
   "sentinel-verification-2h",
   "id-agents-parity-weekly", // T-DEPLOY.6 weekly id-agents↔Kapelle parity lane
+  "ux-research", // L10 UX research loop (Rams)
+  "library-research", // L11 software/library research loop (Researcher)
 ];
 
 describe("seed catalog", () => {
   it("registers all reserved L1-L8 loops (+ per-project instances) by slug", () => {
-    expect(SEED_LOOPS).toHaveLength(10);
+    expect(SEED_LOOPS).toHaveLength(12);
     expect(SEED_LOOPS.map((l) => l.slug).sort()).toEqual([...RESERVED_SLUGS].sort());
   });
 
@@ -40,6 +42,30 @@ describe("seed catalog", () => {
     expect(l.enabled).toBe(false); // registered + manual-runnable; not auto-scheduled yet
     expect(l.allow_manual_run).toBe(true);
     expect(l.allow_scheduled_run).toBe(true);
+  });
+
+  it("registers the L10 UX research loop (report, owner rams, Kapelle-bound, manual + weekly schedule)", () => {
+    const l = SEED_LOOPS.find((x) => x.slug === "ux-research")!;
+    expect(l.kind).toBe("report");
+    expect(l.owner_agent).toBe("rams");
+    expect(l.project?.slug).toBe("kapelle");
+    expect(l.enabled).toBe(true);
+    expect(l.allow_manual_run).toBe(true);
+    expect(l.allow_scheduled_run).toBe(true);
+    expect(l.schedule_label).toBe("Weekly Mon 09:00 local");
+    expect(l.description).toMatch(/first-time-user walk/i);
+  });
+
+  it("registers the L11 library research loop (report, owner researcher, Kapelle-bound, manual + biweekly schedule)", () => {
+    const l = SEED_LOOPS.find((x) => x.slug === "library-research")!;
+    expect(l.kind).toBe("report");
+    expect(l.owner_agent).toBe("researcher");
+    expect(l.project?.slug).toBe("kapelle");
+    expect(l.enabled).toBe(true);
+    expect(l.allow_manual_run).toBe(true);
+    expect(l.allow_scheduled_run).toBe(true);
+    expect(l.schedule_label).toBe("Biweekly Wed 09:00 local");
+    expect(l.description).toMatch(/license tag/i);
   });
 
   it("registers the T-DEPLOY.6 id-agents↔Kapelle weekly parity lane (verification, owner maestra, Kapelle-bound, registered-disabled)", () => {
@@ -89,6 +115,8 @@ describe("seed catalog", () => {
     expect(enabled("inbox-intake")).toBe(true);
     expect(enabled("maestra-product-log")).toBe(true);
     expect(enabled("sentinel-verification-2h")).toBe(true);
+    expect(enabled("ux-research")).toBe(true);
+    expect(enabled("library-research")).toBe(true);
     expect(enabled("fantasy-baseball")).toBe(false);
     expect(enabled("weekly-project-report")).toBe(false);
     expect(enabled("biweekly-project-report")).toBe(false);
@@ -101,16 +129,18 @@ describe("listLoops", () => {
     expect(res.schema_version).toBe("loops-list-v1");
     expect(res.source).toBe("seed_catalog");
     expect(res.generated_at).toBe(NOW);
-    expect(res.loops).toHaveLength(10);
+    expect(res.loops).toHaveLength(12);
   });
 
   it("computes filter facets over the full catalog with counts", () => {
     const { filters } = listLoops(NOW);
     const owners = Object.fromEntries(filters.owners.map((o) => [o.value, o.count]));
     expect(owners["maestra"]).toBe(4); // morning-digest, project-load, maestra-product-log, id-agents-parity-weekly
+    expect(owners["rams"]).toBe(1);
+    expect(owners["researcher"]).toBe(1);
     const kinds = Object.fromEntries(filters.kinds.map((k) => [k.value, k.count]));
-    expect(kinds["report"]).toBe(5); // project-load, weekly, weekly-blowout, biweekly, maestra-product-log
-    expect(filters.statuses.find((s) => s.value === "unknown")?.count).toBe(5);
+    expect(kinds["report"]).toBe(7); // project-load, weekly, weekly-blowout, biweekly, maestra-product-log, ux-research, library-research
+    expect(filters.statuses.find((s) => s.value === "unknown")?.count).toBe(7);
     expect(filters.statuses.find((s) => s.value === "disabled")?.count).toBe(5);
   });
 
@@ -122,12 +152,12 @@ describe("listLoops", () => {
   it("filters by kind", () => {
     const res = listLoops(NOW, { kind: "report" });
     expect(res.loops.every((l: LoopSummary) => l.kind === "report")).toBe(true);
-    expect(res.loops).toHaveLength(5);
+    expect(res.loops).toHaveLength(7);
   });
 
   it("filters by health status", () => {
     expect(listLoops(NOW, { status: "disabled" }).loops).toHaveLength(5);
-    expect(listLoops(NOW, { status: "unknown" }).loops).toHaveLength(5);
+    expect(listLoops(NOW, { status: "unknown" }).loops).toHaveLength(7);
   });
 
   it("filters by free-text query over name/slug/description", () => {
@@ -139,8 +169,10 @@ describe("listLoops", () => {
     const res = listLoops(NOW, { project_phid: "phid:proj:kapelle" });
     expect(res.loops.map((l) => l.slug).sort()).toEqual([
       "id-agents-parity-weekly",
+      "library-research",
       "maestra-product-log",
       "sentinel-verification-2h",
+      "ux-research",
     ]);
   });
 });
@@ -162,7 +194,7 @@ describe("loopsSummary", () => {
   it("reports honest registry-only rollups (no runs yet)", () => {
     const s = loopsSummary(NOW);
     expect(s.schema_version).toBe("loops-dashboard-summary-v1");
-    expect(s.total_enabled).toBe(5);
+    expect(s.total_enabled).toBe(7);
     expect(s.healthy_count).toBe(0);
     expect(s.degraded_count).toBe(0);
     expect(s.failed_count).toBe(0);

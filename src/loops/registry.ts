@@ -286,6 +286,34 @@ const SEED_LOOP_DEFS: SeedLoopDef[] = [
     schedule_label: "Weekly Sun",
     stale_after_minutes: 8 * 24 * 60,
   },
+  {
+    slug: "ux-research",
+    name: "UX Research Loop",
+    description:
+      "First-time-user walk of the live /ops console and artifact-reader; pulls open feedback register rows, recent UI commits, and Chris UI feedback; ranks UX issues with concrete copy/layout fixes and buildable slices posted to the orchestration backlog.",
+    kind: "report",
+    owner_agent: "rams",
+    project: KAPELLE_PROJECT,
+    enabled: true,
+    allow_scheduled_run: true,
+    allow_manual_run: true,
+    schedule_label: "Weekly Mon 09:00 local",
+    stale_after_minutes: 8 * 24 * 60,
+  },
+  {
+    slug: "library-research",
+    name: "Software / Library Research Loop",
+    description:
+      "Surveys Kapelle stack/deps, open build forks, and roadmap NOW/NEXT against changelogs; enumerates library/pattern candidates with license tag, provenance plan, and DIRECT-LIFT / pattern-reference / skip recommendation; ends in build slices posted to the backlog.",
+    kind: "report",
+    owner_agent: "researcher",
+    project: KAPELLE_PROJECT,
+    enabled: true,
+    allow_scheduled_run: true,
+    allow_manual_run: true,
+    schedule_label: "Biweekly Wed 09:00 local",
+    stale_after_minutes: 16 * 24 * 60,
+  },
 ];
 
 /** Placeholder health for a registry-only loop (no runs recorded yet). The

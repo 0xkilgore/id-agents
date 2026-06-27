@@ -79,7 +79,7 @@ describe('GET /loops registry routes', () => {
     expect(body.ok).toBe(true);
     expect(body.schema_version).toBe('loops-list-v1');
     expect(body.source).toBe('seed_catalog');
-    expect(body.loops).toHaveLength(10);
+    expect(body.loops).toHaveLength(12);
     expect(body.filters.owners.length).toBeGreaterThan(0);
     // every row carries the read-model identity + placeholder health
     for (const l of body.loops) {
@@ -100,7 +100,7 @@ describe('GET /loops registry routes', () => {
     const body = await res.json() as any;
     expect(body.ok).toBe(true);
     expect(body.schema_version).toBe('loops-dashboard-summary-v1');
-    expect(body.total_enabled).toBe(5);
+    expect(body.total_enabled).toBe(7);
   });
 
   it('GET /loops/:ref resolves by slug and by phid; 404 otherwise', async () => {
