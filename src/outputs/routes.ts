@@ -593,6 +593,7 @@ export function mountOutputsRoutes(
         source_link: state?.source_link ?? null,
         is_viewed: !!state?.first_viewed_at,
         is_approved: !!state?.approved_at,
+        is_rejected: !!state?.rejected_at,
         is_shipped: !!state?.shipped_at,
         is_ship_blocked: !!state?.ship_blockers_json && !state?.shipped_at,
       };

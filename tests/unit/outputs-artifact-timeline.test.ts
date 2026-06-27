@@ -57,6 +57,81 @@ const OTHER = "art-timeline-2";
 beforeEach(setup);
 
 describe("Artifact Review v1 timeline", () => {
+  it("supports the UI contract across durable write actions and reload readback", async () => {
+    const comment = await call("POST", `/artifacts/${ART}/comments`, {
+      actor_ref: "user:chris",
+      body: "Please add concrete numbers.",
+    });
+    expect(comment.status).toBe(200);
+    expect(comment.body.dispatch_routed).toBe(false);
+    expect(comment.body.dispatch_skipped).toBe("scheduler_unavailable");
+
+    const comments = await call("GET", `/artifacts/${ART}/comments`);
+    expect(comments.status).toBe(200);
+    expect(comments.body.comments[0]).toMatchObject({
+      actor: "user:chris",
+      body: "Please add concrete numbers.",
+    });
+
+    const approve = await call("POST", `/artifacts/${ART}/approve`, {
+      actor_ref: "user:chris",
+      note: "Approved for UI build.",
+      comment: "Good to ship once numbers land.",
+      idempotency_key: "ui-approve",
+    });
+    expect(approve.status).toBe(200);
+    expect(approve.body.state.approved_by).toBe("user:chris");
+    expect(approve.body.state.approval_note).toBe("Approved for UI build.");
+    expect(approve.body.comment.body).toBe("Good to ship once numbers land.");
+
+    const reject = await call("POST", `/artifacts/${ART}/reject`, {
+      actor_ref: "user:liz",
+      note: "Request changes on the final copy.",
+    });
+    expect(reject.status).toBe(200);
+    expect(reject.body.state.rejected_by).toBe("user:liz");
+    expect(reject.body.state.reject_note).toBe("Request changes on the final copy.");
+
+    const followUp = await call("POST", `/artifacts/${ART}/timeline`, {
+      kind: "dispatch_follow_up",
+      actor_ref: "user:liz",
+      body: "Route copy fixes to backend owner.",
+      target_agent: "substrate-api-codex",
+      query_id: "query_ui_contract",
+      dispatch_phid: "phid:disp-ui-contract",
+      status: "queued",
+    });
+    expect(followUp.status).toBe(200);
+    expect(followUp.body.event.dispatch_receipt).toMatchObject({
+      target_agent: "substrate-api-codex",
+      query_id: "query_ui_contract",
+      dispatch_phid: "phid:disp-ui-contract",
+      status: "queued",
+    });
+
+    const review = await call("GET", `/artifacts/${ART}/review`);
+    expect(review.status).toBe(200);
+    expect(review.body).toMatchObject({
+      schema_version: "artifact.review.v1",
+      artifact_id: ART,
+      is_approved: true,
+      is_rejected: true,
+    });
+    expect(review.body.state.approval_note).toBe("Approved for UI build.");
+    expect(review.body.state.reject_note).toBe("Request changes on the final copy.");
+
+    const timeline = await call("GET", `/artifacts/${ART}/timeline`);
+    expect(timeline.status).toBe(200);
+    expect(timeline.body.events.map((e: any) => e.kind)).toEqual([
+      "comment",
+      "comment",
+      "approval",
+      "rejection",
+      "dispatch_follow_up",
+    ]);
+    expect(timeline.body.events.at(-1).dispatch_receipt.dispatch_phid).toBe("phid:disp-ui-contract");
+  });
+
   it("lists durable events by artifact, including view and general comments", async () => {
     await call("POST", `/artifacts/${ART}/view`, { viewer: "user:chris" });
     await call("POST", `/artifacts/${ART}/comments`, {

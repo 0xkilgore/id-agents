@@ -211,6 +211,7 @@ export interface ArtifactReviewResponse {
   // Convenience flags for the dashboard:
   is_viewed: boolean;
   is_approved: boolean;
+  is_rejected: boolean;
   is_shipped: boolean;
   is_ship_blocked: boolean;
 }
