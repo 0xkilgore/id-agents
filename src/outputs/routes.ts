@@ -62,7 +62,11 @@ import {
   viewArtifact,
   type CaneDraftShipContext,
 } from './ops.js';
-import { isCaneDraftArtifactsEnabled, isC0FeedbackReactionsEnabled } from '../config/feature-flags.js';
+import {
+  isCaneDraftArtifactsEnabled,
+  isC0FeedbackReactionsEnabled,
+  useDocumentModel,
+} from '../config/feature-flags.js';
 import {
   defaultCaneDraftSender,
   pendingIdFromDraftId,
@@ -312,7 +316,7 @@ export function mountOutputsRoutes(
       const limit = Math.min(parseInt(req.query.limit as string, 10) || 50, 200);
       const offset = parseInt(req.query.offset as string, 10) || 0;
 
-      if (opts.filesystemArtifactRoots) {
+      if (opts.filesystemArtifactRoots && !useDocumentModel('artifacts', env)) {
         try {
           const roots = await opts.filesystemArtifactRoots(req);
           await reconcileFilesystemArtifacts(adapter, {

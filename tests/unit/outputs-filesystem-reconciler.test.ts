@@ -148,6 +148,44 @@ describe("filesystem artifact reconciler", () => {
     expect(res.body.items.map((item: any) => item.abs_path)).toContain(freshAbs);
   });
 
+  it("uses the substrate catalog for /outputs/inbox under ARTIFACTS_USE_DOCUMENT_MODEL", async () => {
+    const { adapter, workDir } = await setup();
+    const catalogAbs = path.join(workDir, "output/cataloged.md");
+    const freshAbs = writeArtifact(workDir, "output/fresh-disk-only.md", "fresh");
+    const now = "2026-06-26T01:00:00.000Z";
+
+    await registerArtifact(adapter, {
+      basename: "cataloged.md",
+      agent: "cto",
+      tag: "output",
+      abs_path: catalogAbs,
+      title: "Cataloged",
+      produced_at: now,
+      source: "agent-done",
+    }, now);
+
+    const app = express();
+    app.use(express.json());
+    mountOutputsRoutes(app, adapter, {
+      filesystemArtifactRoots: async () => [{ agent: "cto", workingDirectory: workDir }],
+      filesystemReconcileRecentMs: 60 * 60 * 1000,
+      env: { ARTIFACTS_USE_DOCUMENT_MODEL: "true" },
+    });
+
+    const entries = await request(app).get("/artifacts/entries?limit=20");
+    const inbox = await request(app).get("/outputs/inbox?limit=20");
+
+    expect(entries.status).toBe(200);
+    expect(inbox.status).toBe(200);
+    expect(entries.body.source).toEqual({ read_path: "substrate", projection: "artifact_entries" });
+    expect(inbox.body.items.map((item: any) => item.artifact_id)).toEqual(
+      entries.body.items.map((item: any) => item.phid),
+    );
+    expect(inbox.body.items.map((item: any) => item.abs_path)).toEqual([catalogAbs]);
+    expect(inbox.body.items.map((item: any) => item.abs_path)).not.toContain(freshAbs);
+    expect(await getArtifact(adapter, artifactIdFromPath(freshAbs))).toBeNull();
+  });
+
   it("keeps console path safety and skips symlink escapes", async () => {
     const { adapter, workDir } = await setup();
     expect(validateConsoleArtifactRelativePath("../secrets.txt")).toEqual({
