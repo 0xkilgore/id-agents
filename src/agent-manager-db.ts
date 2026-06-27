@@ -179,6 +179,7 @@ import {
   type FleetFreshnessSummary,
   type FleetNodeInput,
 } from './deploy-guard/fleet-freshness.js';
+import { readReleaseState } from './deploy-guard/release-state.js';
 import { sendTelegramAlert } from './continuous-orchestration/telegram.js';
 import { normalizeActorRef } from './actor-identity.js';
 import {
@@ -10291,11 +10292,15 @@ export class AgentManagerDb {
           const build = node.is_self
             ? this.getBuildStatus()
             : loadBuildStatus({ repoDir: node.repoDir!, distDir: node.distDir ?? node.repoDir! });
+          const releaseState = !node.is_self && node.repoDir
+            ? readReleaseState(node.repoDir)
+            : null;
           return {
             node_id: node.node_id,
             behind_origin: build.behind_origin,
             build_sha: build.build_sha,
             origin_main_sha: build.origin_main_sha,
+            release_state: releaseState,
           };
         });
         const { next, alerts, summary } = evaluateFleetFreshness(

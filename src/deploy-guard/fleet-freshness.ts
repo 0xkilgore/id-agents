@@ -25,11 +25,14 @@ import {
   COHERENT_EMPTY_COUPLING,
   type RedeployCouplingSummary,
 } from "./redeploy-coupling.js";
+import type { ReleaseState } from "./release-state.js";
 
 /** One node's freshness observation for a tick. */
 export interface FleetNodeInput extends FreshnessInput {
   /** Stable node identity, e.g. "manager", "console-server", "kapelle-site". */
   node_id: string;
+  /** Optional serving-checkout/lock diagnosis for non-manager ops nodes. */
+  release_state?: ReleaseState | null;
 }
 
 /** Per-node freshness tracker state, keyed by node_id. */
@@ -42,6 +45,8 @@ export interface FleetNodeSummary {
   behind_origin_since: string | null;
   build_sha: string | null;
   origin_main_sha: string | null;
+  /** Checkout/lock guardrail: present for kapelle-site and other ops nodes. */
+  release_state?: ReleaseState | null;
 }
 
 export interface FleetFreshnessSummary {
@@ -116,6 +121,7 @@ export function evaluateFleetFreshness(
       behind_origin_since: nodeNext.behind_origin_since,
       build_sha: input.build_sha,
       origin_main_sha: input.origin_main_sha,
+      release_state: input.release_state ?? null,
     });
   }
 

@@ -19,6 +19,7 @@ function node(over: Partial<FleetNodeInput> = {}): FleetNodeInput {
     behind_origin: over.behind_origin === undefined ? false : over.behind_origin,
     build_sha: over.build_sha ?? "aaaaaaa",
     origin_main_sha: over.origin_main_sha ?? "aaaaaaa",
+    release_state: over.release_state ?? null,
   };
 }
 
@@ -32,6 +33,38 @@ describe("evaluateFleetFreshness", () => {
     expect(r.summary.fleet_behind).toBe(false);
     expect(r.summary.stale_nodes).toEqual([]);
     expect(r.summary.node_count).toBe(2);
+  });
+
+  it("carries kapelle-site release-state diagnosis into the health payload", () => {
+    const release_state = {
+      repo_dir: "/srv/kapelle-site",
+      observed_at: "2026-06-27T00:00:00.000Z",
+      status: "red" as const,
+      checkout: {
+        exists: true,
+        is_git: true,
+        branch: "feature/local-ops",
+        intended_branch: "main",
+        upstream: "origin/main",
+        ahead: 0,
+        behind: 0,
+        dirty_count: 1,
+        status_short: " M app/ops/page.tsx",
+        severity: "red" as const,
+        code: "dirty" as const,
+        message: "kapelle-site has 1 uncommitted change(s)",
+        remediation: "Commit or stash the listed changes, then rebuild and restart /ops from clean origin/main.",
+      },
+      locks: [],
+      actions: ["Commit or stash the listed changes, then rebuild and restart /ops from clean origin/main."],
+    };
+    const r = evaluateFleetFreshness(
+      {},
+      [node({ node_id: "kapelle-site", release_state })],
+      T0,
+    );
+    expect(r.summary.nodes[0].release_state?.status).toBe("red");
+    expect(r.summary.nodes[0].release_state?.checkout.remediation).toMatch(/rebuild and restart/);
   });
 
   it("marks a behind node stale (under threshold) without alerting", () => {
