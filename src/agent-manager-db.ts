@@ -117,6 +117,7 @@ import {
   failedDispatchesWithin,
   FAILED_24H_WINDOW_MS,
 } from './dispatch-scheduler/read-model.js';
+import { readDispatchDetailById } from './dispatch-detail/read.js';
 import {
   DIRTY_WORKTREE_AUTO_ANSWER,
   isDirtyWorktreeClarification,
@@ -4037,6 +4038,27 @@ export class AgentManagerDb {
         return res.json({ ok: true, schema_version: 'model-policy-resolve-v1', resolved, unavailable_providers: unavailableProviders ?? [] });
       } catch (err) {
         return res.status(500).json({ ok: false, error: err instanceof Error ? err.message : String(err) });
+      }
+    });
+
+    this.managementApp.get('/dispatches/:dispatch_id/detail', async (req, res) => {
+      try {
+        const { id: teamId, name: teamName } = await this.getTeam(req);
+        const detail = await readDispatchDetailById(
+          this.db.adapter,
+          teamId,
+          req.params.dispatch_id,
+          this.dispatchDeriveOpts(),
+        );
+        if (!detail) {
+          return res.status(404).json({ ok: false, error: 'dispatch_not_found' });
+        }
+        return res.json({ ...detail, team: teamName });
+      } catch (err) {
+        return res.status(500).json({
+          ok: false,
+          error: err instanceof Error ? err.message : String(err),
+        });
       }
     });
 

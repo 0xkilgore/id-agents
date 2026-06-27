@@ -161,6 +161,44 @@ describe('manager dispatch read routes', () => {
     expect(body.error).toBe('dispatch_not_found');
   });
 
+  it('returns enriched dispatch-detail.v1 payload for in-flight dispatch', async () => {
+    const teamId = await db.teams.getOrCreateTeamId('dispatch-read-detail');
+    await insertDispatch(teamId, {
+      dispatch_phid: 'phid:disp-detail-enriched',
+      query_id: 'query_detail_enriched',
+      to_agent: 'substrate-api-codex',
+      status: 'in_flight',
+      subject: 'Detail enrich smoke',
+      started_at: '2026-06-26T10:05:00.000Z',
+      body_markdown: '[project:kapelle] enrich detail payload',
+      promotion_input_json: JSON.stringify({
+        repo: '/repo/id-agents',
+        branch: 'feat/x',
+        base: 'main',
+        remote: 'origin',
+      }),
+      result_json: JSON.stringify({ artifact_path: '/repo/id-agents/output/report.md' }),
+    });
+
+    const res = await fetch(
+      `${baseUrl}/dispatches/phid:disp-detail-enriched/detail`,
+      { headers: headers('dispatch-read-detail') },
+    );
+    expect(res.status).toBe(200);
+    const body = await res.json() as any;
+    expect(body.ok).toBe(true);
+    expect(body.schema_version).toBe('dispatch-detail.v1');
+    expect(body.dispatch.dispatch_id).toBe('phid:disp-detail-enriched');
+    expect(body.dispatch.write_scope).toEqual(['/repo/id-agents', '/repo/id-agents@feat/x']);
+    expect(body.dispatch.message_excerpt).toMatch(/enrich detail payload/i);
+    expect(body.dispatch.status_timeline.map((event: any) => event.label)).toContain('In flight');
+    expect(body.dispatch.linked_artifact).toMatchObject({
+      id: 'dispatch:phid:disp-detail-enriched',
+      basename: 'report.md',
+      source: 'result_json',
+    });
+  });
+
   it('honors limit for all dispatches', async () => {
     const teamId = await db.teams.getOrCreateTeamId('dispatch-read-limit');
     await insertDispatch(teamId, { dispatch_phid: 'phid:disp-limit-1', query_id: 'query_limit_1', status: 'queued' });
@@ -274,6 +312,7 @@ async function insertDispatch(teamId: string, overrides: Partial<{
   to_agent: string;
   status: string;
   subject: string;
+  body_markdown: string;
   not_before_at: string;
   started_at: string | null;
   completed_at: string | null;
@@ -309,7 +348,7 @@ async function insertDispatch(teamId: string, overrides: Partial<{
       'manager',
       'talk',
       overrides.subject ?? 'Dispatch read route test',
-      'Test body',
+      overrides.body_markdown ?? 'Test body',
       'anthropic',
       'codex',
       5,
