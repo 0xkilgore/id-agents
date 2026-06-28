@@ -157,8 +157,9 @@ export interface FleetNodeConfig {
 /**
  * Resolve the fleet to monitor. The manager (self) is always node 0. Additional
  * nodes come from `DEPLOY_FLEET_NODES` (comma list of `id:repoDir[:distDir]`);
- * when unset, the kapelle-site sibling checkout is the default extra node so the
- * common two-repo box is covered without configuration. Pure: env + path only.
+ * when unset, the kapelle-site checkout is inferred from the manager checkout
+ * layout so the common two-repo box is covered without configuration. Pure:
+ * env + path only.
  */
 export function resolveFleetNodes(
   env: NodeJS.ProcessEnv,
@@ -175,7 +176,15 @@ export function resolveFleetNodes(
     }
     return nodes;
   }
-  const sibling = path.join(path.dirname(managerRepoDir), "kapelle-site");
-  nodes.push({ node_id: "kapelle-site", repoDir: sibling, distDir: sibling });
+  const kapelleSite = inferKapelleSiteRepoDir(managerRepoDir);
+  nodes.push({ node_id: "kapelle-site", repoDir: kapelleSite, distDir: kapelleSite });
   return nodes;
+}
+
+export function inferKapelleSiteRepoDir(managerRepoDir: string): string {
+  const managerParent = path.dirname(managerRepoDir);
+  if (path.basename(managerRepoDir) === "id-agents" && path.basename(managerParent) === "cane") {
+    return path.join(path.dirname(managerParent), "kapelle-site");
+  }
+  return path.join(managerParent, "kapelle-site");
 }

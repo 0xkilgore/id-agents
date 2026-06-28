@@ -4,6 +4,7 @@
 import { describe, it, expect } from "vitest";
 import {
   evaluateFleetFreshness,
+  inferKapelleSiteRepoDir,
   resolveFleetNodes,
   type FleetFreshnessState,
   type FleetNodeInput,
@@ -135,9 +136,16 @@ describe("evaluateFleetFreshness", () => {
 
 describe("resolveFleetNodes", () => {
   it("always lists the manager (self) first, then the kapelle-site sibling by default", () => {
+    const nodes = resolveFleetNodes({} as NodeJS.ProcessEnv, "/Users/x/Code/id-agents");
+    expect(nodes[0]).toMatchObject({ node_id: "manager", is_self: true });
+    expect(nodes[1]).toMatchObject({ node_id: "kapelle-site", repoDir: "/Users/x/Code/kapelle-site" });
+  });
+
+  it("infers the real kapelle-site checkout when the manager cwd is under cane/id-agents", () => {
     const nodes = resolveFleetNodes({} as NodeJS.ProcessEnv, "/Users/x/Code/cane/id-agents");
     expect(nodes[0]).toMatchObject({ node_id: "manager", is_self: true });
-    expect(nodes[1]).toMatchObject({ node_id: "kapelle-site", repoDir: "/Users/x/Code/cane/kapelle-site" });
+    expect(nodes[1]).toMatchObject({ node_id: "kapelle-site", repoDir: "/Users/x/Code/kapelle-site" });
+    expect(nodes[1].repoDir).not.toBe("/Users/x/Code/cane/kapelle-site");
   });
 
   it("parses DEPLOY_FLEET_NODES (id:repoDir[:distDir]) over the default", () => {
@@ -165,5 +173,13 @@ describe("resolveFleetNodes", () => {
     const env = { DEPLOY_FLEET_NODES: "bogus,,real:/srv/real" } as unknown as NodeJS.ProcessEnv;
     const nodes = resolveFleetNodes(env, "/repo/id-agents");
     expect(nodes.map((n) => n.node_id)).toEqual(["manager", "real"]);
+  });
+});
+
+describe("inferKapelleSiteRepoDir", () => {
+  it("does not append kapelle-site under cane for the production manager layout", () => {
+    expect(inferKapelleSiteRepoDir("/Users/kilgore/Dropbox/Code/cane/id-agents")).toBe(
+      "/Users/kilgore/Dropbox/Code/kapelle-site",
+    );
   });
 });
