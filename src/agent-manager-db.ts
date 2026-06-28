@@ -5190,18 +5190,22 @@ export class AgentManagerDb {
         }
         const agent = await this.dbQueryAgentByNameMostRecent(teamId, name);
         if (!agent) return res.status(404).json({ error: `Agent "${name}" not found` });
+        const metadata = (agent.metadata as Record<string, unknown> | undefined) ?? {};
         const detail = await assembleAgentDetail(this.db.adapter, {
           teamId,
-          name: agent.name,
+          name: (typeof metadata.alias === 'string' && metadata.alias.trim()) ? metadata.alias : agent.name,
+          attributionNames: [
+            name,
+            agent.name,
+            ...(typeof metadata.alias === 'string' ? [metadata.alias] : []),
+          ],
           agentId: agent.id,
           runtime: agent.runtime,
           workingDirectory: agent.working_directory,
           consecutiveFailures: agent.consecutive_failures ?? 0,
           lastError: agent.last_error ?? null,
           nowIso: new Date().toISOString(),
-          catalog:
-            ((agent.metadata as Record<string, unknown> | undefined)?.catalog as AgentCatalog | undefined) ??
-            null,
+          catalog: (metadata.catalog as AgentCatalog | undefined) ?? null,
         });
         res.json(detail);
       } catch (err: any) {

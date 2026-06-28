@@ -86,8 +86,9 @@ export function AgentDetail(props: AgentDetailProps): React.ReactElement {
     agent.metadata?.runtime === 'public-agent-remote';
 
   const lines: Array<{ label: string; value: string; color?: string }> = [];
+  const agentName = agent.alias ?? agent.name;
 
-  lines.push({ label: 'name', value: agent.alias ?? agent.name });
+  lines.push({ label: 'name', value: agentName });
   lines.push({ label: 'runtime', value: agent.metadata?.runtime ?? '—' });
   lines.push({ label: 'health', value: agent.health, color: healthColor(agent.health) });
   lines.push({ label: 'status', value: agent.status });
@@ -155,6 +156,34 @@ export function AgentDetail(props: AgentDetailProps): React.ReactElement {
       }
     }
 
+    const verifiedLandings = detail.verified_landings ?? [];
+    const recentDispatches = detail.recent_dispatches ?? [];
+
+    blank();
+    sec(`Verified Landings (${verifiedLandings.length})`);
+    if (verifiedLandings.length === 0) {
+      lines.push({ label: '', value: '(none)' });
+    } else {
+      for (const d of verifiedLandings.slice(0, 8)) {
+        const when = humanizeLastSeen(Math.floor(Date.parse(d.time) / 1000), nowMs);
+        const attr = d.attributed_agent && d.attributed_agent !== agentName ? ` · ${d.attributed_agent}` : '';
+        lines.push({ label: when, value: `${d.subject || d.dispatch_id}${attr}` });
+      }
+    }
+
+    blank();
+    sec(`Recent Dispatches (${recentDispatches.length})`);
+    if (recentDispatches.length === 0) {
+      lines.push({ label: '', value: '(none)' });
+    } else {
+      for (const d of recentDispatches.slice(0, 8)) {
+        const when = humanizeLastSeen(Math.floor(Date.parse(d.time) / 1000), nowMs);
+        const mark = d.verified ? '✓' : d.verification_status;
+        const attr = d.attributed_agent && d.attributed_agent !== agentName ? ` · ${d.attributed_agent}` : '';
+        lines.push({ label: when, value: `${mark} ${d.subject || d.dispatch_id}${attr}` });
+      }
+    }
+
     // (c) Skills / Loops / Scripts.
     blank();
     sec(`Skills (${detail.skills.length})`);
@@ -186,7 +215,6 @@ export function AgentDetail(props: AgentDetailProps): React.ReactElement {
   const hiddenBelow = total - clampedOffset - visible.length;
   const W = 22;
 
-  const agentName = agent.alias ?? agent.name;
   return (
     <Box flexDirection="column">
       <Box flexDirection="column" borderStyle="round" paddingX={1}>

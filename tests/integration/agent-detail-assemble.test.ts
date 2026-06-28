@@ -6,7 +6,9 @@ import { describe, it, expect, beforeEach } from "vitest";
 import { SqliteAdapter } from "../../src/db/sqlite-adapter.js";
 import { migrateSqlite } from "../../src/db/migrations/sqlite.js";
 import { registerArtifact } from "../../src/outputs/storage.js";
-import { assembleAgentDetail } from "../../src/agent-detail/assemble.js";
+import { assembleAgentDetail, normalizeAttributionNames } from "../../src/agent-detail/assemble.js";
+import { DispatchVerificationStorage } from "../../src/dispatch-verification/storage.js";
+import type { DispatchVerification } from "../../src/dispatch-verification/types.js";
 
 let adapter: SqliteAdapter;
 const TID = "team-1";
@@ -61,6 +63,39 @@ function assemble() {
     lastError: "last boom",
     nowIso: new Date().toISOString(),
   });
+}
+
+function makeVerification(overrides: Partial<DispatchVerification> = {}): DispatchVerification {
+  return {
+    schema_version: "dispatch-verification.v1",
+    team_id: TID,
+    dispatch_id: "phid:disp-test",
+    query_id: "query_test",
+    agent_name: NAME,
+    provider: "anthropic",
+    status: "verified",
+    verified: true,
+    failure_type: null,
+    failure_detail: null,
+    artifact_path: `/out/${NAME}.md`,
+    artifact_exists: true,
+    artifact_mtime: "2026-06-28T12:00:00.000Z",
+    delivery_window_start: null,
+    delivery_window_end: null,
+    promotion_required: false,
+    promotion_verified: null,
+    promotion_failure_detail: null,
+    dispatch_status: "done",
+    dispatch_created_at: "2026-06-28T11:00:00.000Z",
+    dispatch_started_at: "2026-06-28T11:01:00.000Z",
+    dispatch_completed_at: "2026-06-28T12:00:00.000Z",
+    result_success: true,
+    tl_dr: "landed the thing",
+    kind: "report",
+    checked_at: "2026-06-28T12:01:00.000Z",
+    source_metadata: { source: "dispatch_scheduler_queue", result_source: "artifact_path" },
+    ...overrides,
+  };
 }
 
 describe("assembleAgentDetail (real schema)", () => {
@@ -123,6 +158,55 @@ describe("assembleAgentDetail (real schema)", () => {
     }
   });
 
+  it("maps alias/detail name/project basename to recent artifacts and verified dispatches", async () => {
+    const storage = new DispatchVerificationStorage(adapter);
+    await storage.migrate();
+
+    await registerArtifact(
+      adapter,
+      {
+        abs_path: "/out/agent-platform-roadmap.md",
+        basename: "agent-platform-roadmap.md",
+        agent: "agent-platform",
+        tag: "kapelle",
+        title: "Roadmap",
+        produced_at: "2026-06-28T12:00:00.000Z",
+      },
+      "2026-06-28T12:01:00.000Z",
+    );
+    await storage.upsertMany([
+      makeVerification({
+        dispatch_id: "phid:disp-maestra",
+        agent_name: "agent-platform",
+        artifact_path: "/out/agent-platform-roadmap.md",
+        tl_dr: "roadmap landed",
+      }),
+      makeVerification({
+        dispatch_id: "phid:disp-other",
+        agent_name: "other",
+        artifact_path: "/out/other.md",
+      }),
+    ]);
+
+    const d = await assembleAgentDetail(adapter, {
+      teamId: TID,
+      name: "maestra",
+      attributionNames: ["maestra"],
+      agentId: AID,
+      runtime: "claude-code-cli",
+      workingDirectory: "/Users/kilgore/Dropbox/Code/agent-platform",
+      consecutiveFailures: 0,
+      lastError: null,
+      nowIso: "2026-06-28T13:00:00.000Z",
+    });
+
+    expect(d.name).toBe("maestra");
+    expect(d.recent_outputs.map((o) => o.basename)).toEqual(["agent-platform-roadmap.md"]);
+    expect(d.recent_dispatches.map((x) => x.dispatch_id)).toEqual(["phid:disp-maestra"]);
+    expect(d.verified_landings.map((x) => x.artifact_path)).toEqual(["/out/agent-platform-roadmap.md"]);
+    expect(d.recent_dispatches[0].attributed_agent).toBe("agent-platform");
+  });
+
   it("degrades to a zeroed dossier when nothing is seeded (never throws)", async () => {
     const d = await assemble();
     expect(d.charts.tasks.total).toBe(0);
@@ -132,5 +216,14 @@ describe("assembleAgentDetail (real schema)", () => {
     expect(d.skills).toEqual([]);
     expect(d.scripts).toEqual([]);
     expect(d.name).toBe(NAME);
+  });
+});
+
+describe("normalizeAttributionNames", () => {
+  it("dedupes case-insensitively and drops empty values", () => {
+    expect(normalizeAttributionNames(["maestra", "Maestra", "", null, "agent-platform"])).toEqual([
+      "maestra",
+      "agent-platform",
+    ]);
   });
 });

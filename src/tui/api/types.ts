@@ -122,6 +122,22 @@ export interface AgentDetailArtifact {
   produced_at: string;
 }
 
+export interface AgentDetailDispatch {
+  dispatch_id: string;
+  query_id: string | null;
+  time: string;
+  subject: string;
+  dispatch_status: string;
+  verification_status: string;
+  verified: boolean;
+  artifact_path: string | null;
+  artifact_exists: boolean | null;
+  artifact_mtime: string | null;
+  tl_dr: string | null;
+  kind: string;
+  attributed_agent: string;
+}
+
 export interface AgentDetailLoop {
   slug: string;
   name: string;
@@ -139,6 +155,8 @@ export interface AgentDetailResponse {
     failures: { consecutive: number; failed_dispatches: number; last_error: string | null };
   };
   recent_outputs: AgentDetailArtifact[];
+  recent_dispatches?: AgentDetailDispatch[];
+  verified_landings?: AgentDetailDispatch[];
   skills: string[];
   loops: AgentDetailLoop[];
   scripts: string[];

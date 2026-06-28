@@ -29,6 +29,7 @@ function raw(over: Partial<RawAgentDetailData> = {}): RawAgentDetailData {
     token_series: [],
     failed_dispatches: 0,
     recent_outputs: [],
+    recent_dispatches: [],
     skills: [],
     loops: [],
     scripts: [],
@@ -97,8 +98,34 @@ describe("buildAgentDetail", () => {
     expect(d.charts.tasks).toEqual({ total: 0, by_status: {} });
     expect(d.charts.tokens).toEqual({ today: 0, series: [] });
     expect(d.recent_outputs).toEqual([]);
+    expect(d.recent_dispatches).toEqual([]);
+    expect(d.verified_landings).toEqual([]);
     expect(d.skills).toEqual([]);
     expect(d.name).toBe("roger");
+  });
+
+  it("caps recent dispatches and exposes verified landings", () => {
+    const rows = Array.from({ length: 25 }, (_, i) => ({
+      dispatch_id: `d-${i}`,
+      query_id: null,
+      time: `2026-06-${String((i % 28) + 1).padStart(2, "0")}T00:00:00.000Z`,
+      subject: `dispatch ${i}`,
+      dispatch_status: "done",
+      verification_status: i % 2 === 0 ? "verified" : "unverified",
+      verified: i % 2 === 0,
+      artifact_path: i % 2 === 0 ? `/out/${i}.md` : null,
+      artifact_exists: i % 2 === 0 ? true : null,
+      artifact_mtime: i % 2 === 0 ? `2026-06-${String((i % 28) + 1).padStart(2, "0")}T00:01:00.000Z` : null,
+      tl_dr: `dispatch ${i}`,
+      kind: "report",
+      attributed_agent: i % 2 === 0 ? "maestra" : "agent-platform",
+    }));
+    const d = buildAgentDetail(raw({ recent_dispatches: rows }));
+    expect(d.recent_dispatches).toHaveLength(RECENT_OUTPUT_LIMIT);
+    for (let i = 1; i < d.recent_dispatches.length; i++) {
+      expect(d.recent_dispatches[i - 1].time >= d.recent_dispatches[i].time).toBe(true);
+    }
+    expect(d.verified_landings.every((x) => x.verified && x.artifact_path)).toBe(true);
   });
 
   it("AP6 — surfaces the catalog view (null catalog → empty view)", () => {

@@ -38,6 +38,23 @@ export interface DetailArtifactRow {
   produced_at: string;
 }
 
+/** A recent dispatch/verified landing attributed to the agent. */
+export interface DetailDispatchRow {
+  dispatch_id: string;
+  query_id: string | null;
+  time: string;
+  subject: string;
+  dispatch_status: string;
+  verification_status: string;
+  verified: boolean;
+  artifact_path: string | null;
+  artifact_exists: boolean | null;
+  artifact_mtime: string | null;
+  tl_dr: string | null;
+  kind: string;
+  attributed_agent: string;
+}
+
 /** A loop the agent owns (LoopSummary, narrowed to what the page shows). */
 export interface DetailLoopRow {
   slug: string;
@@ -59,6 +76,7 @@ export interface RawAgentDetailData {
   token_series: TokenSeriesPoint[];
   failed_dispatches: number;
   recent_outputs: DetailArtifactRow[];
+  recent_dispatches: DetailDispatchRow[];
   skills: string[];
   loops: DetailLoopRow[];
   scripts: string[];
@@ -76,6 +94,10 @@ export interface AgentDetailResponse {
   };
   /** Newest-first, capped at 20 — the recent-output feed. */
   recent_outputs: DetailArtifactRow[];
+  /** Newest-first, capped at 20 — recent dispatches from the verification projection. */
+  recent_dispatches: DetailDispatchRow[];
+  /** Convenience subset of recent_dispatches where verification produced a landing. */
+  verified_landings: DetailDispatchRow[];
   skills: string[];
   loops: DetailLoopRow[];
   scripts: string[];
@@ -108,6 +130,10 @@ export function buildAgentDetail(raw: RawAgentDetailData): AgentDetailResponse {
     .sort((a, b) => (a.produced_at < b.produced_at ? 1 : a.produced_at > b.produced_at ? -1 : 0))
     .slice(0, RECENT_OUTPUT_LIMIT);
 
+  const recentDispatches = [...raw.recent_dispatches]
+    .sort((a, b) => (a.time < b.time ? 1 : a.time > b.time ? -1 : 0))
+    .slice(0, RECENT_OUTPUT_LIMIT);
+
   return {
     name: raw.name,
     charts: {
@@ -120,6 +146,8 @@ export function buildAgentDetail(raw: RawAgentDetailData): AgentDetailResponse {
       },
     },
     recent_outputs: recent,
+    recent_dispatches: recentDispatches,
+    verified_landings: recentDispatches.filter((d) => d.verified && d.artifact_path != null),
     skills: raw.skills,
     loops: raw.loops,
     scripts: raw.scripts,

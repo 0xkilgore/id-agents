@@ -15,6 +15,7 @@ import {
   buildAgentDetail,
   type AgentDetailResponse,
   type DetailLoopRow,
+  type DetailDispatchRow,
   type TokenSeriesPoint,
   RECENT_OUTPUT_LIMIT,
 } from "./build.js";
@@ -23,6 +24,8 @@ export interface AssembleOpts {
   teamId: string;
   /** Agent name (artifacts/loops/dispatch attribution key). */
   name: string;
+  /** Additional historical/current attribution keys (alias, requested name, project basename). */
+  attributionNames?: string[];
   /** Agent row id (tasks.owner / usage attribution key). */
   agentId: string;
   runtime: string;
@@ -43,6 +46,11 @@ export async function assembleAgentDetail(
   opts: AssembleOpts,
 ): Promise<AgentDetailResponse> {
   const { teamId, name, agentId, runtime, workingDirectory } = opts;
+  const attributionNames = normalizeAttributionNames([
+    name,
+    ...(opts.attributionNames ?? []),
+    workingDirectory ? path.basename(workingDirectory) : null,
+  ]);
 
   const tasks = await safe(async () => {
     const { rows } = await adapter.query<{ status: string }>(
@@ -80,15 +88,17 @@ export async function assembleAgentDetail(
   const failed_dispatches = await safe(async () => {
     const { rows } = await adapter.query<{ c: number }>(
       `SELECT COUNT(*) AS c FROM dispatch_scheduler_queue
-        WHERE team_id = $1 AND to_agent = $2 AND status IN ('bounced', 'failed')`,
-      [teamId, name],
+        WHERE team_id = ? AND to_agent IN (${placeholders(attributionNames.length)}) AND status IN ('bounced', 'failed')`,
+      [teamId, ...attributionNames],
     );
     return Number(rows[0]?.c ?? 0);
   }, 0);
 
   const recent_outputs = await safe(async () => {
-    const cat = await listArtifactCatalog(adapter, { agent: name, limit: RECENT_OUTPUT_LIMIT });
-    return cat.map((a) => ({
+    const rows = await Promise.all(
+      attributionNames.map((agent) => listArtifactCatalog(adapter, { agent, limit: RECENT_OUTPUT_LIMIT })),
+    );
+    return rows.flat().map((a) => ({
       artifact_id: a.artifact_id,
       basename: a.basename,
       title: a.title ?? null,
@@ -97,6 +107,52 @@ export async function assembleAgentDetail(
       produced_at: a.produced_at,
     }));
   }, [] as AgentDetailResponse["recent_outputs"]);
+
+  const recent_dispatches = await safe(async () => {
+    const { rows } = await adapter.query<{
+      dispatch_id: string;
+      query_id: string | null;
+      agent_name: string;
+      status: string;
+      verified: number;
+      artifact_path: string | null;
+      artifact_exists: number | null;
+      artifact_mtime: string | null;
+      dispatch_status: string;
+      dispatch_created_at: string;
+      dispatch_completed_at: string | null;
+      tl_dr: string | null;
+      kind: string;
+    }>(
+      `SELECT dispatch_id, query_id, agent_name, status, verified, artifact_path,
+              artifact_exists, artifact_mtime, dispatch_status, dispatch_created_at,
+              dispatch_completed_at, tl_dr, kind
+         FROM dispatch_verifications
+        WHERE team_id = ?
+          AND agent_name IN (${placeholders(attributionNames.length)})
+          AND dispatch_completed_at IS NOT NULL
+        ORDER BY dispatch_completed_at DESC, dispatch_id
+        LIMIT ?`,
+      [teamId, ...attributionNames, RECENT_OUTPUT_LIMIT],
+    );
+    return rows.map(
+      (r): DetailDispatchRow => ({
+        dispatch_id: r.dispatch_id,
+        query_id: r.query_id,
+        time: r.dispatch_completed_at ?? r.dispatch_created_at,
+        subject: r.tl_dr ?? "",
+        dispatch_status: r.dispatch_status,
+        verification_status: r.status,
+        verified: r.verified !== 0,
+        artifact_path: r.artifact_path,
+        artifact_exists: r.artifact_exists == null ? null : r.artifact_exists !== 0,
+        artifact_mtime: r.artifact_mtime,
+        tl_dr: r.tl_dr,
+        kind: r.kind,
+        attributed_agent: r.agent_name,
+      }),
+    );
+  }, [] as DetailDispatchRow[]);
 
   const loops = await safe(async () => {
     const resp = listLoops(opts.nowIso, { owner_agent: name });
@@ -124,11 +180,30 @@ export async function assembleAgentDetail(
     token_series,
     failed_dispatches,
     recent_outputs,
+    recent_dispatches,
     skills,
     loops,
     scripts,
     catalog: opts.catalog ?? null,
   });
+}
+
+export function normalizeAttributionNames(values: Array<string | null | undefined>): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const raw of values) {
+    const value = String(raw ?? "").trim();
+    if (!value) continue;
+    const key = value.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(value);
+  }
+  return out.length > 0 ? out : ["unknown"];
+}
+
+function placeholders(count: number): string {
+  return Array.from({ length: Math.max(1, count) }, () => "?").join(",");
 }
 
 /** Resolve the agent's runtime-specific skills dir (e.g. <wd>/.claude/skills). */
