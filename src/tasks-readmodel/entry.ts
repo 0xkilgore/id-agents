@@ -24,6 +24,13 @@ export interface TaskEntry {
   task_status: "todo" | "doing" | "done";
   /** Task description; empty string when none. */
   body_markdown: string;
+  /** Taskview-compatible priority token parsed from title/description. */
+  priority: "high" | "med" | "low" | null;
+  /** Taskview-compatible due date parsed from title/description. */
+  due_iso: string | null;
+  done: boolean;
+  archived: boolean;
+  band: "overdue" | "today" | "tomorrow" | "high_no_due" | "later" | "done";
   project: string | null;
   /** Canonical roadmap track (canonical-track-registry); '(unassigned)' when none. */
   track: string;
