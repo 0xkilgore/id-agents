@@ -27,6 +27,14 @@ import { registerOnIdChain, createSubnameOnIdChain, setMultiChainAddresses } fro
 import { defaultDeliverFn, redactSshTarget, type DeliverFn } from './lib/ssh-deliver.js';
 import { probeRemoteAgent, defaultHealthProbeFn, type HealthProbeFn } from './lib/remote-heartbeat.js';
 import { filterClaudeEnvVars } from './lib/env-hygiene.js';
+import {
+  credentialEnv,
+  normalizeClaudeCredentialKind,
+  OsKeychainClaudeCredentialStore,
+  validateClaudeCredentialSecret,
+  type ClaudeCredentialStore,
+  type StoredClaudeCredential,
+} from './lib/claude-auth-store.js';
 import { buildTasksEntriesEnvelope, taskRowToEntry } from './tasks-readmodel/entry-projection.js';
 import { classifyTaskBand, extractTaskScheduleFacts, summarizeTaskRows, todayIso } from './tasks-readmodel/bands.js';
 import {
@@ -584,6 +592,8 @@ export class AgentManagerDb {
   private registerOnIdChainFn: typeof registerOnIdChain = registerOnIdChain;
   /** Injectable HTTP probe function — override in tests to mock remote health checks. */
   private healthProbeFn: HealthProbeFn = defaultHealthProbeFn;
+  /** Injectable Claude credential storage — defaults to OS keychain. */
+  private claudeCredentialStore: ClaudeCredentialStore = new OsKeychainClaudeCredentialStore();
   /**
    * Library root used by the read-only `/library/*` endpoints. Captured at
    * construction so tests can override without touching process.env. Null
@@ -731,6 +741,8 @@ export class AgentManagerDb {
       registerOnIdChainFn?: typeof registerOnIdChain;
       /** Override remote health probe function (for tests). */
       healthProbeFn?: HealthProbeFn;
+      /** Override Claude credential storage (for tests). Defaults to OS keychain. */
+      claudeCredentialStore?: ClaudeCredentialStore;
       /**
        * Override library root for the `/library/*` endpoints. Pass an
        * absolute path to serve a specific library, or `null` to force
@@ -745,6 +757,7 @@ export class AgentManagerDb {
     if (opts?.deliverFn) this.deliverFn = opts.deliverFn;
     if (opts?.registerOnIdChainFn) this.registerOnIdChainFn = opts.registerOnIdChainFn;
     if (opts?.healthProbeFn) this.healthProbeFn = opts.healthProbeFn;
+    if (opts?.claudeCredentialStore) this.claudeCredentialStore = opts.claudeCredentialStore;
     this.libraryRoot =
       opts && Object.prototype.hasOwnProperty.call(opts, 'libraryRoot')
         ? (opts.libraryRoot ?? null)
@@ -3688,6 +3701,48 @@ export class AgentManagerDb {
     // /health is intentionally above this middleware so liveness survives DB
     // contention during boot-time ingest/reconciliation.
     this.managementApp.use(this.teamContextMiddleware());
+
+    this.managementApp.get('/auth/claude', async (req, res) => {
+      try {
+        const { id: teamId, name: teamName } = await this.getTeam(req);
+        const status = await this.claudeCredentialStore.status(teamId);
+        res.json({ ok: true, team: teamName, ...status });
+      } catch (err: any) {
+        res.status(500).json({ ok: false, error: err?.message || 'claude auth status failed' });
+      }
+    });
+
+    this.managementApp.post('/auth/claude/connect', async (req, res) => {
+      try {
+        const { id: teamId, name: teamName } = await this.getTeam(req);
+        const secret = validateClaudeCredentialSecret(req.body?.credential);
+        const kind = normalizeClaudeCredentialKind(req.body?.kind);
+        const stored = await this.claudeCredentialStore.set(teamId, { kind, secret });
+        res.status(201).json({
+          ok: true,
+          team: teamName,
+          connected: true,
+          team_id: teamId,
+          kind: stored.kind,
+          updated_at: stored.updated_at,
+          storage: this.claudeCredentialStore.storage,
+        });
+      } catch (err: any) {
+        const message = err?.message || 'claude auth connect failed';
+        const status = message.includes('credential must') ? 400 : 500;
+        res.status(status).json({ ok: false, error: message });
+      }
+    });
+
+    this.managementApp.delete('/auth/claude', async (req, res) => {
+      try {
+        const { id: teamId, name: teamName } = await this.getTeam(req);
+        await this.claudeCredentialStore.delete(teamId);
+        res.json({ ok: true, team: teamName, connected: false, team_id: teamId, storage: this.claudeCredentialStore.storage });
+      } catch (err: any) {
+        res.status(500).json({ ok: false, error: err?.message || 'claude auth disconnect failed' });
+      }
+    });
 
     this.managementApp.get('/dispatches/health', async (req, res) => {
       try {
@@ -11651,6 +11706,7 @@ export class AgentManagerDb {
     agentRow: AgentRow | null,
     model?: string,
     tokenId?: string,
+    storedClaudeCredential?: StoredClaudeCredential | null,
   ): Record<string, string> {
     const owsWallet = (agentRow?.metadata as any)?.ows_wallet || null;
     const skipPermsRaw = (agentRow?.metadata as any)?.dangerouslySkipPermissions;
@@ -11681,6 +11737,7 @@ export class AgentManagerDb {
       ...(owsWallet && { OWS_WALLET: owsWallet }),
       ...(catalogEnv && { ID_AGENT_CATALOG: catalogEnv }),
       ...(process.env.ANTHROPIC_API_KEY && { ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY }),
+      ...credentialEnv(storedClaudeCredential ?? null),
       ...(process.env.OPENAI_API_KEY && { OPENAI_API_KEY: process.env.OPENAI_API_KEY }),
     };
   }
@@ -11776,7 +11833,8 @@ export class AgentManagerDb {
       // Set environment
       // Look up OWS wallet name and permissions flag from agent metadata
       const agentRow = await this.dbQueryAgentById(teamId, id);
-      const localEnv = this.buildLocalAgentEnv(teamName, port, agentRow, model, tokenId);
+      const storedClaudeCredential = await this.claudeCredentialStore.get(teamId);
+      const localEnv = this.buildLocalAgentEnv(teamName, port, agentRow, model, tokenId, storedClaudeCredential);
 
       // Create log file
       const logFile = `/tmp/${name}.log`;

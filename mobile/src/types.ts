@@ -6,6 +6,19 @@ export interface ServerEntry {
   name: string; // user-given label for this server
 }
 
+export type ClaudeCredentialKind = 'claude-code-oauth' | 'anthropic-api-key';
+
+export interface ClaudeAuthStatus {
+  ok: boolean;
+  connected: boolean;
+  team_id: string;
+  team?: string;
+  kind?: ClaudeCredentialKind;
+  updated_at?: number;
+  storage: 'os-keychain' | 'memory';
+  error?: string;
+}
+
 // Response from POST /remote
 export interface RemoteResponse {
   ok?: boolean;

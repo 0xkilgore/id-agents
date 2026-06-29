@@ -1,4 +1,4 @@
-import { ServerEntry, RemoteResponse, AgentInfo } from '../types';
+import { ServerEntry, RemoteResponse, AgentInfo, ClaudeAuthStatus, ClaudeCredentialKind } from '../types';
 
 /**
  * Execute a CLI command on the manager via POST /remote
@@ -96,4 +96,53 @@ export async function fetchAgents(
 
   const data = await response.json();
   return data.agents || data || [];
+}
+
+export async function fetchClaudeAuthStatus(server: ServerEntry): Promise<ClaudeAuthStatus> {
+  const response = await fetch(`${server.url}/auth/claude`, {
+    headers: {
+      'X-Api-Key': server.apiKey,
+      'X-Id-Team': server.team,
+    },
+  });
+
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    return {
+      ok: false,
+      connected: false,
+      team_id: '',
+      storage: 'os-keychain',
+      error: data?.error || `Server returned ${response.status}`,
+    };
+  }
+  return data;
+}
+
+export async function connectClaudeAuth(
+  server: ServerEntry,
+  credential: string,
+  kind: ClaudeCredentialKind = 'claude-code-oauth'
+): Promise<ClaudeAuthStatus> {
+  const response = await fetch(`${server.url}/auth/claude/connect`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Api-Key': server.apiKey,
+      'X-Id-Team': server.team,
+    },
+    body: JSON.stringify({ credential, kind }),
+  });
+
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    return {
+      ok: false,
+      connected: false,
+      team_id: '',
+      storage: 'os-keychain',
+      error: data?.error || `Server returned ${response.status}`,
+    };
+  }
+  return data;
 }

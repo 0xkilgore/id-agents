@@ -15,7 +15,7 @@ import { CameraView, useCameraPermissions } from 'expo-camera';
 import { NativeStackScreenProps } from '@react-navigation/native-stack';
 import { colors, fonts, spacing } from '../theme';
 import { RootStackParamList, QrPayload, ServerEntry } from '../types';
-import { testConnection } from '../services/api';
+import { connectClaudeAuth, testConnection } from '../services/api';
 import { saveServer, setCurrentServer } from '../services/storage';
 
 type Props = NativeStackScreenProps<RootStackParamList, 'Scan'>;
@@ -31,12 +31,20 @@ export function ScanScreen({ navigation }: Props) {
   const [url, setUrl] = useState('');
   const [apiKey, setApiKey] = useState('');
   const [team, setTeam] = useState('');
+  const [claudeCredential, setClaudeCredential] = useState('');
 
   const connectToServer = async (server: ServerEntry) => {
     setConnecting(true);
     try {
       const result = await testConnection(server.url, server.apiKey, server.team);
       if (result.success) {
+        if (claudeCredential.trim()) {
+          const auth = await connectClaudeAuth(server, claudeCredential.trim(), 'claude-code-oauth');
+          if (!auth.ok || !auth.connected) {
+            Alert.alert('Claude Auth Failed', auth.error || 'Could not store Claude credential');
+            return;
+          }
+        }
         await saveServer(server);
         await setCurrentServer(server.name);
         navigation.replace('Terminal', { server });
@@ -146,6 +154,18 @@ export function ScanScreen({ navigation }: Props) {
             placeholderTextColor={colors.textDim}
             autoCapitalize="none"
             autoCorrect={false}
+          />
+
+          <Text style={styles.label}>Claude OAuth Token</Text>
+          <TextInput
+            style={styles.input}
+            value={claudeCredential}
+            onChangeText={setClaudeCredential}
+            placeholder="optional"
+            placeholderTextColor={colors.textDim}
+            autoCapitalize="none"
+            autoCorrect={false}
+            secureTextEntry
           />
 
           <TouchableOpacity
