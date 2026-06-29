@@ -13,6 +13,7 @@ import { resolveRuntime } from './runtime/registry.js';
 import { detectSessionHandoffVars } from './lib/env-hygiene.js';
 import { installFatalHandlers } from './lib/fatal-handlers.js';
 import { isAbiMismatchError, abiMismatchDiagnostic } from './lib/native-node.js';
+import { resolveDefaultWorkspaceDir } from './lib/data-root.js';
 
 // Silent-stop incidents had the scheduler die behind a swallowed rejection —
 // the process stayed up but the tick loop was dead. Fail loud and exit so the
@@ -64,7 +65,7 @@ async function main() {
 
 async function startManagerAgent() {
   const managementPort = parseInt(process.env.AGENT_MANAGER_PORT || '4100');
-  const workingDir = process.env.AGENT_MANAGER_WORKDIR || '/workspace';
+  const workingDir = process.env.AGENT_MANAGER_WORKDIR || resolveDefaultWorkspaceDir();
 
   // Initialize DB (required for persistence)
   const db = await createDb();
@@ -103,10 +104,11 @@ async function startWorkerAgent(agentId?: string) {
 
   // Worker agents run a single REST-AP AgentRestServer (not the manager API).
   const port = parseInt(process.env.CLAUDE_AGENT_PORT || process.env.AGENT_PORT || '4100');
-  const workingDir = process.env.CLAUDE_AGENT_WORKDIR || process.env.AGENT_MANAGER_WORKDIR || `/workspace/agents/${agentId}`;
+  const baseWorkDir = process.env.AGENT_MANAGER_WORKDIR || resolveDefaultWorkspaceDir();
+  const workingDir = process.env.CLAUDE_AGENT_WORKDIR || `${baseWorkDir}/agents/${agentId}`;
   // Team name determines the shared directory scope - all agents in a team share files
   const teamName = process.env.ID_TEAM || process.env.ID_PROJECT || 'default';
-  const sharedDir = process.env.ID_SHARED_DIR || `/workspace/teams/${teamName}`;
+  const sharedDir = process.env.ID_SHARED_DIR || `${baseWorkDir}/teams/${teamName}`;
   // Use ID_AGENT_ALIAS for the base name (e.g., "max"), not ID_AGENT_NAME which may be an ENS domain
   const agentAlias = process.env.ID_AGENT_ALIAS || process.env.ID_AGENT_NAME || process.env.AGENT_NAME || agentId;
   const agentTokenId = process.env.ID_AGENT_TOKEN_ID || undefined;

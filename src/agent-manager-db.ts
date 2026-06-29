@@ -808,7 +808,10 @@ export class AgentManagerDb {
           const content = readFileSync(configPath, 'utf-8');
           const config = yaml.load(content) as DeployConfig;
           this.defaultConfig = config?.defaults || null;
-          console.log(`[AgentManager] Loaded default config from ${configPath}`);
+          const displayPath = path.isAbsolute(configPath) && configPath.startsWith(process.cwd() + path.sep)
+            ? path.relative(process.cwd(), configPath)
+            : configPath;
+          console.log(`[AgentManager] Loaded default config from ${displayPath}`);
           if (this.defaultConfig?.plugins) {
             console.log(`[AgentManager] Default plugins: ${this.defaultConfig.plugins.map(p => p.name).join(', ')}`);
           }

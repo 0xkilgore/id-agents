@@ -156,10 +156,11 @@ export interface FleetNodeConfig {
 
 /**
  * Resolve the fleet to monitor. The manager (self) is always node 0. Additional
- * nodes come from `DEPLOY_FLEET_NODES` (comma list of `id:repoDir[:distDir]`);
- * when unset, the kapelle-site checkout is inferred from the manager checkout
- * layout so the common two-repo box is covered without configuration. Pure:
- * env + path only.
+ * nodes come from `DEPLOY_FLEET_NODES` (comma list of `id:repoDir[:distDir]`).
+ * Empty/stranger installs stay self-only by default so boot does not leak or
+ * warn about operator-specific sibling checkouts. Set
+ * `DEPLOY_FLEET_INFER_KAPELLE_SITE=true` to opt into the legacy inferred
+ * kapelle-site sibling.
  */
 export function resolveFleetNodes(
   env: NodeJS.ProcessEnv,
@@ -174,6 +175,9 @@ export function resolveFleetNodes(
         nodes.push({ node_id, repoDir, distDir: distDir || repoDir });
       }
     }
+    return nodes;
+  }
+  if (env.DEPLOY_FLEET_INFER_KAPELLE_SITE !== "true") {
     return nodes;
   }
   const kapelleSite = inferKapelleSiteRepoDir(managerRepoDir);

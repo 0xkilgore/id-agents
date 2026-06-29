@@ -135,17 +135,17 @@ describe("evaluateFleetFreshness", () => {
 });
 
 describe("resolveFleetNodes", () => {
-  it("always lists the manager (self) first, then the kapelle-site sibling by default", () => {
-    const nodes = resolveFleetNodes({} as NodeJS.ProcessEnv, "/Users/x/Code/id-agents");
-    expect(nodes[0]).toMatchObject({ node_id: "manager", is_self: true });
-    expect(nodes[1]).toMatchObject({ node_id: "kapelle-site", repoDir: "/Users/x/Code/kapelle-site" });
+  it("lists only the manager by default for empty/stranger boots", () => {
+    const nodes = resolveFleetNodes({} as NodeJS.ProcessEnv, "/home/stranger/work/id-agents");
+    expect(nodes).toEqual([{ node_id: "manager", is_self: true }]);
   });
 
-  it("infers the real kapelle-site checkout when the manager cwd is under cane/id-agents", () => {
-    const nodes = resolveFleetNodes({} as NodeJS.ProcessEnv, "/Users/x/Code/cane/id-agents");
+  it("can opt into the inferred kapelle-site checkout when the manager cwd is under cane/id-agents", () => {
+    const env = { DEPLOY_FLEET_INFER_KAPELLE_SITE: "true" } as NodeJS.ProcessEnv;
+    const nodes = resolveFleetNodes(env, "/home/stranger/work/cane/id-agents");
     expect(nodes[0]).toMatchObject({ node_id: "manager", is_self: true });
-    expect(nodes[1]).toMatchObject({ node_id: "kapelle-site", repoDir: "/Users/x/Code/kapelle-site" });
-    expect(nodes[1].repoDir).not.toBe("/Users/x/Code/cane/kapelle-site");
+    expect(nodes[1]).toMatchObject({ node_id: "kapelle-site", repoDir: "/home/stranger/work/kapelle-site" });
+    expect(nodes[1].repoDir).not.toBe("/home/stranger/work/cane/kapelle-site");
   });
 
   it("parses DEPLOY_FLEET_NODES (id:repoDir[:distDir]) over the default", () => {
@@ -158,15 +158,15 @@ describe("resolveFleetNodes", () => {
 
   it("uses the configured kapelle-site serving checkout instead of the manager cwd sibling", () => {
     const env = {
-      DEPLOY_FLEET_NODES: "kapelle-site:/Users/kilgore/Dropbox/Code/kapelle-site",
+      DEPLOY_FLEET_NODES: "kapelle-site:/home/stranger/work/kapelle-site",
     } as unknown as NodeJS.ProcessEnv;
-    const nodes = resolveFleetNodes(env, "/Users/kilgore/Dropbox/Code/cane/id-agents");
+    const nodes = resolveFleetNodes(env, "/home/stranger/work/cane/id-agents");
     expect(nodes[1]).toMatchObject({
       node_id: "kapelle-site",
-      repoDir: "/Users/kilgore/Dropbox/Code/kapelle-site",
-      distDir: "/Users/kilgore/Dropbox/Code/kapelle-site",
+      repoDir: "/home/stranger/work/kapelle-site",
+      distDir: "/home/stranger/work/kapelle-site",
     });
-    expect(nodes[1].repoDir).not.toBe("/Users/kilgore/Dropbox/Code/cane/kapelle-site");
+    expect(nodes[1].repoDir).not.toBe("/home/stranger/work/cane/kapelle-site");
   });
 
   it("ignores malformed DEPLOY_FLEET_NODES entries (missing repoDir)", () => {
@@ -178,8 +178,8 @@ describe("resolveFleetNodes", () => {
 
 describe("inferKapelleSiteRepoDir", () => {
   it("does not append kapelle-site under cane for the production manager layout", () => {
-    expect(inferKapelleSiteRepoDir("/Users/kilgore/Dropbox/Code/cane/id-agents")).toBe(
-      "/Users/kilgore/Dropbox/Code/kapelle-site",
+    expect(inferKapelleSiteRepoDir("/home/stranger/work/cane/id-agents")).toBe(
+      "/home/stranger/work/kapelle-site",
     );
   });
 });

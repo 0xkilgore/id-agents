@@ -28,6 +28,7 @@ import {
   resolveRuntime,
   usesCliLogin,
 } from './runtime/registry.js';
+import { resolveDefaultWorkspaceDir } from './lib/data-root.js';
 
 interface LocalAgentConfig {
   name: string;
@@ -153,7 +154,7 @@ export async function startLocalAgent(config: LocalAgentConfig): Promise<{
   const isPreRegistered = !!preRegisteredId;
 
   // Set up working directory
-  const baseWorkDir = process.env.ID_WORKSPACE_DIR || process.env.WORKSPACE_DIR || '/tmp/id-agents';
+  const baseWorkDir = process.env.ID_WORKSPACE_DIR || process.env.WORKSPACE_DIR || resolveDefaultWorkspaceDir();
   const workingDirectory = configWorkDir || path.join(baseWorkDir, 'local-agents', agentId);
   const sharedDirectory = path.join(baseWorkDir, 'teams', team);
 
@@ -393,6 +394,8 @@ Options:
 
 Environment Variables:
   ID_TEAM              Default team name
+  ID_AGENTS_HOME       Per-user data root (default: ~/.id-agents)
+  ID_WORKSPACE_DIR     Workspace root (default: $ID_AGENTS_HOME/workspace)
   MANAGER_URL          Manager URL (default: http://localhost:4100)
   DATABASE_URL         PostgreSQL connection string (optional)
   CLAUDE_MODEL         Default model (default: claude-opus-4-20250514)

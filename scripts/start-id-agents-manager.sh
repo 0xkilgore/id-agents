@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-cd /Users/kilgore/Dropbox/Code/cane/id-agents
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+REPO_DIR="$(cd -- "${ID_AGENTS_REPO_DIR:-"${SCRIPT_DIR}/.."}" && pwd)"
+cd "$REPO_DIR"
 
-export HOME=/Users/kilgore
 export NODE_ENV=production
 export AGENT_MANAGER_PORT="${AGENT_MANAGER_PORT:-4100}"
-export AGENT_MANAGER_WORKDIR="${AGENT_MANAGER_WORKDIR:-/Users/kilgore/Dropbox/Code/id-agents/workspace}"
-export DEPLOY_FLEET_NODES="${DEPLOY_FLEET_NODES:-kapelle-site:/Users/kilgore/Dropbox/Code/kapelle-site}"
-export PATH="/Users/kilgore/.local/bin:/Users/kilgore/.bun/bin:/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+export ID_TEAM="${ID_TEAM:-default}"
+export ID_AGENTS_HOME="${ID_AGENTS_HOME:-"${HOME}/.id-agents"}"
+export AGENT_MANAGER_WORKDIR="${AGENT_MANAGER_WORKDIR:-"${ID_AGENTS_HOME}/workspace"}"
+export PATH="${HOME}/.local/bin:${HOME}/.bun/bin:/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:${PATH:-}"
 
-exec /opt/homebrew/bin/node dist/start-agent-manager.js
+exec "${NODE_BIN:-node}" dist/start-agent-manager.js

@@ -2,6 +2,7 @@
 import type { Db } from './db-service.js';
 import type { DbAdapter } from './db-adapter.js';
 import type { SqliteAdapter } from './sqlite-adapter.js';
+import { resolveIdAgentsHome } from '../lib/data-root.js';
 
 export async function createDb(): Promise<Db> {
   const databaseUrl = process.env.DATABASE_URL;
@@ -16,10 +17,9 @@ export async function createDb(): Promise<Db> {
 
   // SQLite mode (zero-config default)
   const { SqliteAdapter: SqliteAdapterImpl } = await import('./sqlite-adapter.js');
-  const os = await import('node:os');
   const path = await import('node:path');
   const { mkdirSync } = await import('node:fs');
-  const dataDir = path.join(os.homedir(), '.id-agents');
+  const dataDir = resolveIdAgentsHome();
   mkdirSync(dataDir, { recursive: true });
   const dbPath = process.env.SQLITE_PATH || path.join(dataDir, 'id-agents.db');
   const adapter = new SqliteAdapterImpl(dbPath);
