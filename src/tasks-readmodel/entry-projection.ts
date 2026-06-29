@@ -13,6 +13,15 @@ import type {
   ProvenanceRevision,
   ReadModelEnvelope,
 } from "../outputs/entry.js";
+import {
+  buildTaskBands,
+  classifyTaskBand,
+  extractTaskScheduleFacts,
+  summarizeTaskRows,
+  todayIso,
+  type TaskBand,
+  type TaskBandSummary,
+} from "./bands.js";
 import type { TaskEntry } from "./entry.js";
 
 /** Convert a stored epoch timestamp (seconds OR milliseconds) to ISO-8601. */
@@ -88,6 +97,7 @@ export function taskProvenance(
 export function taskRowToEntry(
   row: TaskRow,
   agentNames: Map<string, string> = new Map(),
+  today: string = todayIso(),
 ): TaskEntry {
   const resolve = (id: string) => agentNames.get(id) ?? id;
   const owner: ActorRef | null = row.owner ? agentActor(resolve(row.owner)) : null;
@@ -95,6 +105,8 @@ export function taskRowToEntry(
     ? agentActor(resolve(row.created_by))
     : { type: "system", id: "system" };
   const updatedBy: ActorRef = owner ?? createdBy;
+  const facts = extractTaskScheduleFacts(row);
+  const band = classifyTaskBand(facts, today);
 
   return {
     phid: row.uuid || row.id,
@@ -104,6 +116,11 @@ export function taskRowToEntry(
     title: row.title,
     task_status: row.status,
     body_markdown: row.description ?? "",
+    priority: facts.priority,
+    due_iso: facts.due_iso,
+    done: facts.done,
+    archived: facts.archived,
+    band,
     project: null,
     track: row.track ?? "(unassigned)",
     owner,
@@ -126,18 +143,22 @@ export function taskRowToEntry(
 export function buildTasksEntriesEnvelope(
   rows: TaskRow[],
   agentNames: Map<string, string>,
-  page: { limit: number; offset: number },
-): ReadModelEnvelope<TaskEntry> {
+  page: { limit: number; offset: number; today?: string },
+): ReadModelEnvelope<TaskEntry> & { summary: TaskBandSummary; bands: Array<TaskBand<TaskEntry>>; today: string } {
+  const today = page.today ?? todayIso();
   const items = rows
     .slice(page.offset, page.offset + page.limit)
-    .map((row) => taskRowToEntry(row, agentNames));
+    .map((row) => taskRowToEntry(row, agentNames, today));
   return {
     schema_version: "read-model.v1",
     generated_at: new Date().toISOString(),
+    today,
     items,
     count: items.length,
     limit: page.limit,
     offset: page.offset,
+    summary: summarizeTaskRows(rows, today),
+    bands: buildTaskBands(items, (item) => item.band),
     source: { read_path: "substrate", projection: "task_entries" },
     parity: { status: "unchecked" },
   };

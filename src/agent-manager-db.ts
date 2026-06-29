@@ -28,6 +28,7 @@ import { defaultDeliverFn, redactSshTarget, type DeliverFn } from './lib/ssh-del
 import { probeRemoteAgent, defaultHealthProbeFn, type HealthProbeFn } from './lib/remote-heartbeat.js';
 import { filterClaudeEnvVars } from './lib/env-hygiene.js';
 import { buildTasksEntriesEnvelope, taskRowToEntry } from './tasks-readmodel/entry-projection.js';
+import { classifyTaskBand, extractTaskScheduleFacts, summarizeTaskRows, todayIso } from './tasks-readmodel/bands.js';
 import {
   buildTaskRow,
   draftFromAutoAttach,
@@ -315,6 +316,13 @@ function expandTopicAliases(topics: readonly string[]): string[] {
     }
   }
   return Array.from(out);
+}
+
+function parseTodayQuery(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return null;
+  const parsed = new Date(`${value}T00:00:00.000Z`);
+  return Number.isFinite(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value ? value : null;
 }
 
 /**
@@ -6849,6 +6857,7 @@ export class AgentManagerDb {
       try {
         const { id: teamId } = await this.getTeam(req);
         const { status, owner, team: teamRef } = req.query as Record<string, string>;
+        const today = parseTodayQuery(req.query.today) ?? todayIso();
 
         // Resolve owner
         let ownerIdFilter: string | undefined;
@@ -6875,9 +6884,9 @@ export class AgentManagerDb {
 
         const results = [];
         for (const t of tasks) {
-          results.push(await this.buildTaskResult(t, teamId));
+          results.push(await this.buildTaskResult(t, teamId, today));
         }
-        res.json({ ok: true, tasks: results });
+        res.json({ ok: true, tasks: results, today, summary: summarizeTaskRows(tasks, today) });
       } catch (err: any) {
         console.error('[Manager] Error in GET /tasks:', err);
         res.status(500).json({ error: err?.message || 'Internal server error' });
@@ -6894,6 +6903,7 @@ export class AgentManagerDb {
         const { status, owner } = req.query as Record<string, string>;
         const limit = Math.min(parseInt(req.query.limit as string, 10) || 100, 1000);
         const offset = parseInt(req.query.offset as string, 10) || 0;
+        const today = parseTodayQuery(req.query.today) ?? todayIso();
 
         let ownerIdFilter: string | undefined;
         if (owner) {
@@ -6909,7 +6919,7 @@ export class AgentManagerDb {
         });
         const agents = await this.dbListAgents(teamId, true);
         const agentNames = new Map(agents.map((a) => [a.id, a.name]));
-        res.json(buildTasksEntriesEnvelope(tasks, agentNames, { limit, offset }));
+        res.json(buildTasksEntriesEnvelope(tasks, agentNames, { limit, offset, today }));
       } catch (err: any) {
         console.error('[Manager] Error in GET /tasks/entries:', err);
         res.status(500).json({ error: err?.message || 'tasks entries failed' });
@@ -7667,7 +7677,7 @@ export class AgentManagerDb {
     return { agent: matches[0] };
   }
 
-  private async buildTaskResult(task: TaskRow, teamId: string): Promise<Record<string, unknown>> {
+  private async buildTaskResult(task: TaskRow, teamId: string, today: string = todayIso()): Promise<Record<string, unknown>> {
     let ownerName: string | null = null;
     if (task.owner) {
       const ownerAgent = await this.db.agents.getById(task.owner);
@@ -7684,6 +7694,7 @@ export class AgentManagerDb {
 
     const links = await this.db.tasks.listEventLinksForTask(task.id);
     const shortId = task.uuid ? `#${task.uuid.replace(/-/g, '').slice(0, 8)}` : null;
+    const facts = extractTaskScheduleFacts(task);
 
     return {
       name: task.name,
@@ -7693,6 +7704,11 @@ export class AgentManagerDb {
       description: task.description,
       status: task.status,
       track: task.track ?? '(unassigned)',
+      priority: facts.priority,
+      due_iso: facts.due_iso,
+      done: facts.done,
+      archived: facts.archived,
+      band: classifyTaskBand(facts, today),
       ownerName,
       teamName,
       linkedEvents: links.map(l => l.schedule_id),

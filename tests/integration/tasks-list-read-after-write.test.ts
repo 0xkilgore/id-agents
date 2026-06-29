@@ -97,14 +97,15 @@ async function insertTaskDirect(
   name: string,
   ownerId: string | null = null,
   initialStatus: 'todo' | 'doing' | 'done' = 'doing',
+  fields: { title?: string; description?: string | null } = {},
 ): Promise<{ id: string; uuid: string }> {
   const id = `task_${crypto.randomUUID()}`;
   const uuid = crypto.randomUUID();
   const now = Math.floor(Date.now() / 1000);
   await db.adapter.query(
-    `INSERT INTO tasks (id, name, uuid, team_id, title, status, owner, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    [id, name, uuid, teamId, `Title for ${name}`, initialStatus, ownerId, now, now],
+    `INSERT INTO tasks (id, name, uuid, team_id, title, description, status, owner, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [id, name, uuid, teamId, fields.title ?? `Title for ${name}`, fields.description ?? null, initialStatus, ownerId, now, now],
   );
   return { id, uuid };
 }
@@ -201,6 +202,63 @@ describe('GET /tasks read-model immediate reflect', () => {
     expect(
       (doneList.tasks as Array<Record<string, unknown>>).find((t) => t.name === taskName),
     ).toBeDefined();
+  });
+
+  it('REGRESSION — zero today with overdue/high tasks still returns nonzero task summary and read-model bands', async () => {
+    const today = '2026-06-29';
+    await insertTaskDirect(db, teamId, 'cobra-election', null, 'todo', {
+      title: 'COBRA election due:2026-06-01 !high',
+      description: 'Keep health coverage moving.',
+    });
+    await insertTaskDirect(db, teamId, 'term-life', null, 'todo', {
+      title: 'Term life application !high',
+    });
+    await insertTaskDirect(db, teamId, 'paperclip-later', null, 'todo', {
+      title: 'Paperclip account review due:2026-07-15 !med',
+    });
+    await insertTaskDirect(db, teamId, 'closed-old-task', null, 'done', {
+      title: 'Already closed due:2026-06-01 !high',
+    });
+
+    const list = await fetch(`${baseUrl}/tasks?today=${today}`, {
+      headers: { 'X-Id-Team': TEAM },
+    }).then((r) => r.json());
+
+    expect(list.summary).toMatchObject({
+      total: 4,
+      open: 3,
+      overdue: 1,
+      today: 0,
+      high: 2,
+      high_no_due: 1,
+      done: 1,
+    });
+    expect(list.tasks.find((task: Record<string, unknown>) => task.name === 'cobra-election')).toMatchObject({
+      priority: 'high',
+      due_iso: '2026-06-01',
+      band: 'overdue',
+    });
+    expect(list.tasks.find((task: Record<string, unknown>) => task.name === 'term-life')).toMatchObject({
+      priority: 'high',
+      due_iso: null,
+      band: 'high_no_due',
+    });
+
+    const entries = await fetch(`${baseUrl}/tasks/entries?today=${today}`, {
+      headers: { 'X-Id-Team': TEAM },
+    }).then((r) => r.json());
+
+    expect(entries.summary).toMatchObject({
+      overdue: 1,
+      today: 0,
+      high: 2,
+      high_no_due: 1,
+    });
+    const counts = Object.fromEntries(
+      entries.bands.map((band: { kind: string; count: number }) => [band.kind, band.count]),
+    );
+    expect(counts).toMatchObject({ overdue: 1, today: 0, high_no_due: 1, later: 1 });
+    expect(entries.items).toHaveLength(4);
   });
 
   it('GET /tasks/:ref returns the just-closed status (single-row read parity with the list read)', async () => {
