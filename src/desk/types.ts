@@ -110,6 +110,57 @@ export interface DeskTrayResponse {
   warnings: Array<{ code: string; message: string }>;
 }
 
+export type DeskNeedsMeSourceType =
+  | "approval"
+  | "artifact_review"
+  | "unread_comment"
+  | "routed_item";
+
+export interface DeskNeedsMeItem {
+  id: string;
+  source_type: DeskNeedsMeSourceType;
+  label: string;
+  body_md: string;
+  href: string | null;
+  priority: string | null;
+  actor: string | null;
+  source_ref: string;
+  source_agent: string | null;
+  created_at: string;
+  updated_at: string;
+  metadata: Record<string, unknown>;
+}
+
+export interface DeskNeedsMeResponse {
+  schema_version: "desk.needs_me.v1";
+  generated_at: string;
+  owner: string;
+  team: {
+    id: string | null;
+    name: string | null;
+  };
+  source: {
+    system: "manager";
+    projection: "desk_needs_me";
+    source_type: "hybrid_projection";
+    read_path: "substrate";
+  };
+  filters: {
+    owner: string;
+    limit: number;
+  };
+  counts: {
+    total: number;
+    returned: number;
+    approvals: number;
+    artifact_review: number;
+    unread_comments: number;
+    routed_items: number;
+  };
+  items: DeskNeedsMeItem[];
+  warnings: Array<{ code: string; message: string }>;
+}
+
 export interface UpsertDeskItemInput {
   desk_item_id?: string;
   label: string;
