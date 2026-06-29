@@ -140,6 +140,38 @@ describe("applyPromotionDefaults", () => {
 });
 
 describe("canonicalizePromotionInput", () => {
+  it("maps bare kapelle-site alias to the canonical checkout", () => {
+    expect(
+      canonicalizePromotionInput({
+        repo: "kapelle-site",
+        branch: "feat",
+        base: "",
+        remote: "",
+      }),
+    ).toMatchObject({
+      repo: "/Users/kilgore/Dropbox/Code/kapelle-site",
+      branch: "feat",
+      base: "main",
+      remote: "origin",
+    });
+  });
+
+  it("maps bare id-agents alias to the canonical checkout", () => {
+    expect(
+      canonicalizePromotionInput({
+        repo: "id-agents",
+        branch: "feat",
+        base: "",
+        remote: "",
+      }),
+    ).toMatchObject({
+      repo: "/Users/kilgore/Dropbox/Code/cane/id-agents",
+      branch: "feat",
+      base: "main",
+      remote: "origin",
+    });
+  });
+
   it("maps Kapelle frontend alias roots to kapelle-site", () => {
     expect(
       canonicalizePromotionInput({
@@ -165,6 +197,17 @@ describe("canonicalizePromotionInput", () => {
         remote: "origin",
       }).repo,
     ).toBe("/Users/kilgore/Dropbox/Code/cane/id-agents");
+  });
+
+  it("rejects ambiguous relative repo names instead of resolving under the manager cwd", () => {
+    expect(() =>
+      canonicalizePromotionInput({
+        repo: "some-other-repo",
+        branch: "feat",
+        base: "main",
+        remote: "origin",
+      }),
+    ).toThrow(/ambiguous relative repo name/);
   });
 });
 

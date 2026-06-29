@@ -116,6 +116,22 @@ describe("enqueue promotion metadata propagation", () => {
     });
   });
 
+  it("bare known repo aliases propagate as canonical promotion_input paths", async () => {
+    const kapelle = await enqueue({ repo: "kapelle-site", branch: "feat-k" });
+    const kapelleDoc = await (manager as any).dispatchScheduler.reactor.getByPhid(kapelle.dispatch_phid);
+    expect(kapelleDoc.promotion_input?.repo).toBe("/Users/kilgore/Dropbox/Code/kapelle-site");
+
+    const idAgents = await enqueue({ repo: "id-agents", branch: "feat-i" });
+    const idAgentsDoc = await (manager as any).dispatchScheduler.reactor.getByPhid(idAgents.dispatch_phid);
+    expect(idAgentsDoc.promotion_input?.repo).toBe("/Users/kilgore/Dropbox/Code/cane/id-agents");
+  });
+
+  it("rejects ambiguous relative repo names before enqueue persists metadata", async () => {
+    await expect(enqueue({ repo: "other-repo", branch: "feat-x" })).rejects.toThrow(
+      /enqueue: ambiguous relative repo name/,
+    );
+  });
+
   it("non-build dispatch (no repo/branch) defaults promote=false; promotion_input=null", async () => {
     const enq = await enqueue({});
     const doc = await (manager as any).dispatchScheduler.reactor.getByPhid(enq.dispatch_phid);

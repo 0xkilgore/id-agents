@@ -293,6 +293,8 @@ export interface PromotionInput {
 }
 
 const CANONICAL_REPO_ALIASES: Record<string, string> = {
+  "id-agents": "/Users/kilgore/Dropbox/Code/cane/id-agents",
+  "kapelle-site": "/Users/kilgore/Dropbox/Code/kapelle-site",
   "/Users/kilgore/Dropbox/Code/substrate-api-codex": "/Users/kilgore/Dropbox/Code/cane/id-agents",
   "/Users/kilgore/Dropbox/Code/substrate-orch-codex": "/Users/kilgore/Dropbox/Code/cane/id-agents",
   "/Users/kilgore/Dropbox/Code/id-agents-codex": "/Users/kilgore/Dropbox/Code/cane/id-agents",
@@ -317,7 +319,15 @@ export function canonicalizePromotionInput(input: PromotionInput): PromotionInpu
 }
 
 function normalizeRepoAlias(repo: string): string {
-  const normalized = path.resolve(repo);
+  const trimmed = repo.trim();
+  const directAlias = CANONICAL_REPO_ALIASES[trimmed];
+  if (directAlias) return directAlias;
+  if (!path.isAbsolute(trimmed)) {
+    throw new Error(
+      `ambiguous relative repo name "${repo}"; use a canonical absolute repo path or a known repo alias: id-agents, kapelle-site`,
+    );
+  }
+  const normalized = path.resolve(trimmed);
   return CANONICAL_REPO_ALIASES[normalized] ?? normalized;
 }
 

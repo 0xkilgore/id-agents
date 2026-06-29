@@ -38,6 +38,7 @@ import type {
   Runtime,
 } from "./types.js";
 import {
+  canonicalizePromotionInput,
   normalizeRuntime,
   resolveProviderFromRuntime,
   validateEnqueueSkipReason,
@@ -486,23 +487,29 @@ export class SchedulerHandle {
     // Spec 054 v2 Part 2 - thread promotion metadata into the enqueue
     // payload. PromotionInput is only built when repo+branch are present
     // (= build dispatch); otherwise null and `promote` defaults to false.
-    const promotion_input = input.promotion_input
-      ? {
-          repo: input.promotion_input.repo,
-          branch: input.promotion_input.branch,
-          base: input.promotion_input.base || "main",
-          remote: input.promotion_input.remote || "origin",
-          promotion_skip_reason: promotionSkipReason,
-        }
-      : input.repo && input.branch
-      ? {
-          repo: input.repo,
-          branch: input.branch,
-          base: input.base || "main",
-          remote: input.remote || "origin",
-          promotion_skip_reason: promotionSkipReason,
-        }
-      : null;
+    let promotion_input: PromotionInput | null = null;
+    try {
+      promotion_input = input.promotion_input
+        ? canonicalizePromotionInput({
+            repo: input.promotion_input.repo,
+            branch: input.promotion_input.branch,
+            base: input.promotion_input.base || "main",
+            remote: input.promotion_input.remote || "origin",
+            promotion_skip_reason: promotionSkipReason,
+          })
+        : input.repo && input.branch
+        ? canonicalizePromotionInput({
+            repo: input.repo,
+            branch: input.branch,
+            base: input.base || "main",
+            remote: input.remote || "origin",
+            promotion_skip_reason: promotionSkipReason,
+          })
+        : null;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      throw new Error(`enqueue: ${msg}`);
+    }
     // W1-1: normalize the runtime to its canonical identifier, then derive
     // the provider lane FROM the runtime unless the caller explicitly pins a
     // provider. This is what keeps a cursor-cli dispatch out of the Anthropic
