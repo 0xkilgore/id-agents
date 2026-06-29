@@ -494,7 +494,7 @@ describe("GET /desk/tray + POST /desk/items", () => {
     expect(entries.body.items[0].kind).toBe("desk_item");
   });
 
-  it("serves a bounded Needs Me queue from durable approvals, artifact review, unread comments, and routed items", async () => {
+  it("serves a bounded Needs Me queue without turning artifact comments into Chris inbox items", async () => {
     const adapter = new SqliteAdapter(":memory:");
     await migrateSqlite(adapter);
     await migrateDeskTables(adapter);
@@ -609,10 +609,10 @@ describe("GET /desk/tray + POST /desk/items", () => {
       counts: {
         approvals: 1,
         artifact_review: 2,
-        unread_comments: 1,
+        unread_comments: 0,
         routed_items: 1,
-        total: 5,
-        returned: 5,
+        total: 4,
+        returned: 4,
       },
       warnings: [],
     });
@@ -621,14 +621,8 @@ describe("GET /desk/tray + POST /desk/items", () => {
       "artifact_review",
       "artifact_review",
       "routed_item",
-      "unread_comment",
     ]);
-    expect(body.items.find((item: { source_type: string }) => item.source_type === "unread_comment")).toMatchObject({
-      label: "Comment on Commented artifact",
-      body_md: "Please revise the summary",
-      actor: "user:liz",
-      href: "/ops/artifacts/art_comment",
-    });
+    expect(body.items.some((item: { source_type: string }) => item.source_type === "unread_comment")).toBe(false);
     expect(body.items.find((item: { source_type: string }) => item.source_type === "routed_item")).toMatchObject({
       source_ref: "phid:disp-needs",
       source_agent: "substrate-api-codex",

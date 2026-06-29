@@ -77,6 +77,7 @@ import type {
   ArtifactAvailability,
   ArtifactDetailResponse,
   ArtifactOperationsResponse,
+  ArtifactComment,
   ArtifactOpType,
   ArtifactReviewResponse,
   ArtifactTimelineResponse,
@@ -97,7 +98,9 @@ import { normalizeActorRef, isValidArtifactId, type Actor } from '../actor-ident
 import type { TasksRepository } from '../db/db-service.js';
 import { emitApprovalTask, type ApprovalReviewer } from './approval-emit.js';
 import {
+  classifyArtifactComment,
   routeCommentToOwningAgent,
+  type ArtifactCommentRouteKind,
   type CommentDispatchEnqueueFn,
 } from './comment-dispatch.js';
 import {
@@ -205,6 +208,54 @@ async function persistRoutedLinkage(
   } catch {
     /* swallow — durable capture + receipt already succeeded */
   }
+}
+
+async function handleClassifiedCommentRouting(
+  adapter: DbAdapter,
+  artifactId: string,
+  comment: ArtifactComment,
+  sourceOpId: number,
+  opts: MountOutputsRoutesOptions,
+  actorRef: string,
+  env: NodeJS.ProcessEnv,
+  clock?: () => Date,
+): Promise<{
+  route_kind: ArtifactCommentRouteKind;
+  approval?: { state: Awaited<ReturnType<typeof approveArtifact>>["state"]; op_id: number; idempotent: boolean };
+  routed: Awaited<ReturnType<typeof routeCommentToOwningAgent>>;
+}> {
+  const routeKind = classifyArtifactComment(comment);
+  if (routeKind === "approval_signal") {
+    const approval = await approveArtifact(
+      adapter,
+      artifactId,
+      {
+        approver: actorRef,
+        note: comment.body,
+        idempotency_key: `comment-approval:${sourceOpId}`,
+      },
+      clock,
+    );
+    return {
+      route_kind: routeKind,
+      approval: { state: approval.state, op_id: approval.op_id, idempotent: approval.idempotent },
+      routed: { routed: false, skipped: "approval_signal" },
+    };
+  }
+  if (routeKind === "question") {
+    return { route_kind: routeKind, routed: { routed: false, skipped: "question_threaded" } };
+  }
+
+  const routed = await routeCommentToOwningAgent({
+    adapter,
+    enqueue: opts.enqueueDispatch,
+    artifactId,
+    comment,
+  });
+  if (routed.routed && isC0FeedbackReactionsEnabled(env)) {
+    await persistRoutedLinkage(adapter, artifactId, sourceOpId, routed.dispatch, actorRef, clock);
+  }
+  return { route_kind: routeKind, routed };
 }
 
 export function mountOutputsRoutes(
@@ -977,33 +1028,36 @@ export function mountOutputsRoutes(
         idempotency_key: idempotencyKey(req),
       });
 
-      // B2 (2026-06-22): close the loop — route the now-durable comment to the
-      // artifact's owning agent as a real dispatch. The comment is already
-      // persisted above, so routing failures NEVER fail this request; they
-      // surface as dispatch:null + a typed skip/error the console can show.
-      const routed = await routeCommentToOwningAgent({
+      // Artifact comment routing policy: durable comments are internal artifact
+      // signals. Approval signals approve the artifact; questions stay threaded
+      // on the artifact; only substantive follow-up dispatches to the owner.
+      const routed = await handleClassifiedCommentRouting(
         adapter,
-        enqueue: opts.enqueueDispatch,
         artifactId,
         comment,
-      });
-
-      // C0 close-the-loop: persist the feedback→dispatch linkage durably so the
-      // acted-upon chip survives reloads. Flag-gated and best-effort — it never
-      // affects the comment capture or the routing receipt. (Without the flag,
-      // this endpoint behaves exactly as B2 shipped it.)
-      if (routed.routed && isC0FeedbackReactionsEnabled(env)) {
-        await persistRoutedLinkage(adapter, artifactId, op_id, routed.dispatch, actor.ref, clock);
-      }
+        op_id,
+        opts,
+        actor.ref,
+        env,
+        clock,
+      );
 
       invalidateArtifactDetail(artifactId);
-      const base = { ok: true, schema_version: 'artifact.comment.v1', op_id, comment, actor };
-      if (routed.routed) {
-        res.json({ ...base, dispatch_routed: true, dispatch: routed.dispatch });
-      } else if ('skipped' in routed) {
-        res.json({ ...base, dispatch_routed: false, dispatch: null, dispatch_skipped: routed.skipped });
+      const base = {
+        ok: true,
+        schema_version: 'artifact.comment.v1',
+        op_id,
+        comment,
+        actor,
+        route_kind: routed.route_kind,
+        approval: routed.approval ?? null,
+      };
+      if (routed.routed.routed) {
+        res.json({ ...base, dispatch_routed: true, dispatch: routed.routed.dispatch });
+      } else if ('skipped' in routed.routed) {
+        res.json({ ...base, dispatch_routed: false, dispatch: null, dispatch_skipped: routed.routed.skipped });
       } else {
-        res.json({ ...base, dispatch_routed: false, dispatch: null, dispatch_error: routed.error });
+        res.json({ ...base, dispatch_routed: false, dispatch: null, dispatch_error: routed.routed.error });
       }
     } catch (err) {
       res.status(500).json({ ok: false, error: err instanceof Error ? err.message : String(err) });
@@ -1062,25 +1116,34 @@ export function mountOutputsRoutes(
       };
       const { comment, op_id } = await reactArtifact(adapter, artifactId, reqBody, clock);
 
-      // Same routing path as comments — the owning agent gets a real dispatch.
-      const routed = await routeCommentToOwningAgent({
+      const routed = await handleClassifiedCommentRouting(
         adapter,
-        enqueue: opts.enqueueDispatch,
         artifactId,
         comment,
-      });
-      if (routed.routed) {
-        await persistRoutedLinkage(adapter, artifactId, op_id, routed.dispatch, actor.ref, clock);
-      }
+        op_id,
+        opts,
+        actor.ref,
+        env,
+        clock,
+      );
 
       invalidateArtifactDetail(artifactId);
-      const base = { ok: true, schema_version: 'artifact.reaction.v1', op_id, comment, reaction, actor };
-      if (routed.routed) {
-        res.json({ ...base, dispatch_routed: true, dispatch: routed.dispatch });
-      } else if ('skipped' in routed) {
-        res.json({ ...base, dispatch_routed: false, dispatch: null, dispatch_skipped: routed.skipped });
+      const base = {
+        ok: true,
+        schema_version: 'artifact.reaction.v1',
+        op_id,
+        comment,
+        reaction,
+        actor,
+        route_kind: routed.route_kind,
+        approval: routed.approval ?? null,
+      };
+      if (routed.routed.routed) {
+        res.json({ ...base, dispatch_routed: true, dispatch: routed.routed.dispatch });
+      } else if ('skipped' in routed.routed) {
+        res.json({ ...base, dispatch_routed: false, dispatch: null, dispatch_skipped: routed.routed.skipped });
       } else {
-        res.json({ ...base, dispatch_routed: false, dispatch: null, dispatch_error: routed.error });
+        res.json({ ...base, dispatch_routed: false, dispatch: null, dispatch_error: routed.routed.error });
       }
     } catch (err) {
       res.status(500).json({ ok: false, error: err instanceof Error ? err.message : String(err) });

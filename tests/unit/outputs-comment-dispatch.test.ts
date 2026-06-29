@@ -104,6 +104,7 @@ describe("POST /artifacts/:id/comments — B2 auto-dispatch", () => {
 
     expect(res.status).toBe(200);
     expect(res.body.ok).toBe(true);
+    expect(res.body.route_kind).toBe("substantive_follow_up");
     expect(res.body.dispatch_routed).toBe(true);
     expect(res.body.dispatch).toMatchObject({
       query_id: "q-b2-1",
@@ -123,6 +124,56 @@ describe("POST /artifacts/:id/comments — B2 auto-dispatch", () => {
     const get = await call(app, "GET", `/artifacts/${ART}/comments`);
     expect(get.body.comments).toHaveLength(1);
     expect(get.body.comments[0].body).toBe("Tighten the hero hierarchy.");
+  });
+
+  it("classifies approval-signal comments as artifact approvals without dispatching", async () => {
+    const { fn, calls } = makeFakeEnqueue();
+    const { app, adapter } = await buildApp(fn);
+    await catalogArtifact(adapter, "regina");
+
+    const res = await call(app, "POST", `/artifacts/${ART}/comments`, {
+      actor_ref: "user:chris",
+      body: "Ship it",
+    });
+
+    expect(res.status).toBe(200);
+    expect(res.body.route_kind).toBe("approval_signal");
+    expect(res.body.dispatch_routed).toBe(false);
+    expect(res.body.dispatch_skipped).toBe("approval_signal");
+    expect(res.body.approval.state.approved_by).toBe("user:chris");
+    expect(res.body.approval.state.approval_note).toBe("Ship it");
+    expect(calls).toHaveLength(0);
+
+    const { rows } = await adapter.query<{ approved_at: string | null; approved_by: string | null }>(
+      `SELECT approved_at, approved_by FROM artifact_review_state WHERE artifact_id = ?`,
+      [ART],
+    );
+    expect(rows[0].approved_at).toBeTruthy();
+    expect(rows[0].approved_by).toBe("user:chris");
+  });
+
+  it("classifies questions as artifact-thread comments without dispatching or approving", async () => {
+    const { fn, calls } = makeFakeEnqueue();
+    const { app, adapter } = await buildApp(fn);
+    await catalogArtifact(adapter, "regina");
+
+    const res = await call(app, "POST", `/artifacts/${ART}/comments`, {
+      actor_ref: "user:liz",
+      body: "Can we keep this version for the demo?",
+    });
+
+    expect(res.status).toBe(200);
+    expect(res.body.route_kind).toBe("question");
+    expect(res.body.dispatch_routed).toBe(false);
+    expect(res.body.dispatch_skipped).toBe("question_threaded");
+    expect(res.body.approval).toBeNull();
+    expect(calls).toHaveLength(0);
+
+    const { rows } = await adapter.query<{ approved_at: string | null }>(
+      `SELECT approved_at FROM artifact_review_state WHERE artifact_id = ?`,
+      [ART],
+    );
+    expect(rows[0].approved_at).toBeNull();
   });
 
   it("persists but skips routing with artifact_owner_unknown when the artifact is not catalogued", async () => {

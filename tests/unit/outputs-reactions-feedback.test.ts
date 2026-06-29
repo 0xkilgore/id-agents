@@ -143,8 +143,8 @@ describe("POST /artifacts/:id/reactions — C0 ambient reactions", () => {
     expect(fb.body.items[0].routing.routed_at).toBeTruthy();
   });
 
-  it("accepts a bare reaction with no note (lowest click)", async () => {
-    const { fn } = makeFakeEnqueue();
+  it("accepts a bare ship_it reaction as an approval signal with no owner dispatch", async () => {
+    const { fn, calls } = makeFakeEnqueue();
     const { app, adapter } = await buildApp({ enqueue: fn });
     await catalogArtifact(adapter, "regina");
 
@@ -154,7 +154,11 @@ describe("POST /artifacts/:id/reactions — C0 ambient reactions", () => {
     });
     expect(res.status).toBe(200);
     expect(res.body.comment.body).toBe("👍 ship it");
-    expect(res.body.dispatch_routed).toBe(true);
+    expect(res.body.route_kind).toBe("approval_signal");
+    expect(res.body.dispatch_routed).toBe(false);
+    expect(res.body.dispatch_skipped).toBe("approval_signal");
+    expect(res.body.approval.state.approved_by).toBe("user:chris");
+    expect(calls).toHaveLength(0);
   });
 
   it("rejects an unknown reaction with 400 invalid_reaction", async () => {
@@ -195,7 +199,7 @@ describe("POST /artifacts/:id/reactions — C0 ambient reactions", () => {
 
     const res = await call(app, "POST", `/artifacts/${ART}/reactions`, {
       actor_ref: "user:chris",
-      reaction: "explain",
+      reaction: "wrong",
     });
     expect(res.status).toBe(200);
     expect(res.body.dispatch_routed).toBe(false);
@@ -203,7 +207,7 @@ describe("POST /artifacts/:id/reactions — C0 ambient reactions", () => {
     // still durable
     const comments = await call(app, "GET", `/artifacts/${ART}/comments`);
     expect(comments.body.comments).toHaveLength(1);
-    expect(comments.body.comments[0].reaction).toBe("explain");
+    expect(comments.body.comments[0].reaction).toBe("wrong");
   });
 });
 

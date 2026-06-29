@@ -48,12 +48,16 @@ export interface CommentDispatchReceipt {
 
 export type CommentDispatchSkipReason =
   | "scheduler_unavailable" // no enqueue seam wired (bootstrap / legacy mount)
-  | "artifact_owner_unknown"; // artifact not catalogued or has no owning agent
+  | "artifact_owner_unknown" // artifact not catalogued or has no owning agent
+  | "approval_signal" // comment was handled as an artifact approval, not agent work
+  | "question_threaded"; // question remains attached to the artifact thread
 
 export type CommentDispatchResult =
   | { routed: true; dispatch: CommentDispatchReceipt }
   | { routed: false; skipped: CommentDispatchSkipReason }
   | { routed: false; error: { message: string } };
+
+export type ArtifactCommentRouteKind = "approval_signal" | "substantive_follow_up" | "question";
 
 export interface RouteCommentInput {
   adapter: DbAdapter;
@@ -62,6 +66,41 @@ export interface RouteCommentInput {
   enqueue: CommentDispatchEnqueueFn | undefined;
   artifactId: string;
   comment: ArtifactComment;
+}
+
+export function classifyArtifactComment(comment: ArtifactComment): ArtifactCommentRouteKind {
+  if (comment.reaction === "ship_it") return "approval_signal";
+  if (comment.reaction === "explain") return "question";
+  if (comment.reaction === "wrong" || comment.reaction === "iterate") return "substantive_follow_up";
+
+  const normalized = normalizeCommentText(comment.body);
+  if (isApprovalSignal(normalized)) return "approval_signal";
+  if (isQuestion(normalized)) return "question";
+  return "substantive_follow_up";
+}
+
+function normalizeCommentText(raw: string): string {
+  return raw
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}\s?']/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function isApprovalSignal(text: string): boolean {
+  if (!text) return false;
+  if (/\b(not|don't|do not|cannot|can't|isn't|is not|needs?|fix|change|revise|iterate|wrong|blocked)\b/.test(text)) {
+    return false;
+  }
+  return (
+    /^(ship it|approved|approve|lgtm|looks good|looks good to me|ready to ship|good to ship|ship)$/i.test(text) ||
+    /\b(ship it|approved|lgtm|looks good|ready to ship|good to ship)\b/i.test(text)
+  );
+}
+
+function isQuestion(text: string): boolean {
+  if (!text) return false;
+  return text.includes("?") || /^(can|could|would|should|why|what|when|where|who|how|is|are|does|do)\b/.test(text);
 }
 
 /**

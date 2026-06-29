@@ -20,17 +20,6 @@ export interface BuildDeskNeedsMeOptions {
   generatedAt: string;
 }
 
-interface CommentOpRow {
-  op_id: number;
-  artifact_id: string;
-  actor: string;
-  ts: string;
-  payload_json: string | null;
-  title: string | null;
-  basename: string | null;
-  agent: string | null;
-}
-
 export async function buildDeskNeedsMe(
   adapter: DbAdapter,
   opts: BuildDeskNeedsMeOptions,
@@ -40,10 +29,9 @@ export async function buildDeskNeedsMe(
   const team = await resolveTeam(adapter, opts.teamName ?? "default");
   const warnings: DeskNeedsMeResponse["warnings"] = [];
 
-  const [decisions, artifactRows, unreadComments, dispatchRows] = await Promise.all([
+  const [decisions, artifactRows, dispatchRows] = await Promise.all([
     listDecisions(adapter, { status: "open", owner, limit: Math.min(limit, 100) }),
     listInboxItems(adapter, { includeNeverViewed: true }, Math.min(limit * 2, 200), 0),
-    listUnreadCommentItems(adapter, Math.min(limit * 4, 200)),
     team.id ? readDispatches(adapter, team.id, "all", Math.min(limit * 4, 200)) : Promise.resolve([]),
   ]);
 
@@ -62,7 +50,7 @@ export async function buildDeskNeedsMe(
     .filter((row) => row.needs_operator || row.needs_input.active != null)
     .map(dispatchToNeedsMeItem);
 
-  const items = [...approvalItems, ...artifactItems, ...unreadComments, ...routedItems]
+  const items = [...approvalItems, ...artifactItems, ...routedItems]
     .sort((a, b) => Date.parse(b.updated_at) - Date.parse(a.updated_at))
     .slice(0, limit);
 
@@ -79,11 +67,11 @@ export async function buildDeskNeedsMe(
     },
     filters: { owner, limit },
     counts: {
-      total: approvalItems.length + artifactItems.length + unreadComments.length + routedItems.length,
+      total: approvalItems.length + artifactItems.length + routedItems.length,
       returned: items.length,
       approvals: approvalItems.length,
       artifact_review: artifactItems.length,
-      unread_comments: unreadComments.length,
+      unread_comments: 0,
       routed_items: routedItems.length,
     },
     items,
@@ -165,65 +153,6 @@ function artifactInboxToNeedsMeItem(row: OutputsInboxRow): DeskNeedsMeItem {
   };
 }
 
-async function listUnreadCommentItems(adapter: DbAdapter, limit: number): Promise<DeskNeedsMeItem[]> {
-  const routedSourceOpIds = await listRoutedCommentSourceOpIds(adapter);
-  const { rows } = await adapter.query<CommentOpRow>(
-    `SELECT op.op_id, op.artifact_id, op.actor, op.ts, op.payload_json,
-            a.title, a.basename, a.agent
-       FROM artifact_operations op
-       LEFT JOIN artifacts a ON a.artifact_id = op.artifact_id
-      WHERE op.op_type = 'comment_recorded'
-      ORDER BY op.op_id DESC
-      LIMIT ?`,
-    [limit],
-  );
-
-  return rows
-    .filter((row) => !routedSourceOpIds.has(Number(row.op_id)))
-    .map(commentToNeedsMeItem);
-}
-
-async function listRoutedCommentSourceOpIds(adapter: DbAdapter): Promise<Set<number>> {
-  const { rows } = await adapter.query<{ payload_json: string | null }>(
-    `SELECT payload_json
-       FROM artifact_operations
-      WHERE op_type = 'comment_routed'
-      ORDER BY op_id DESC
-      LIMIT 1000`,
-  );
-  const routed = new Set<number>();
-  for (const row of rows) {
-    const sourceOpId = parseSourceOpId(row.payload_json);
-    if (sourceOpId != null) routed.add(sourceOpId);
-  }
-  return routed;
-}
-
-function commentToNeedsMeItem(row: CommentOpRow): DeskNeedsMeItem {
-  const payload = parseCommentPayload(row.payload_json);
-  const labelBase = row.title ?? row.basename ?? row.artifact_id;
-  return {
-    id: `unread_comment:${row.op_id}`,
-    source_type: "unread_comment",
-    label: `Comment on ${labelBase}`,
-    body_md: payload.body,
-    href: `/ops/artifacts/${encodeURIComponent(row.artifact_id)}`,
-    priority: payload.reaction === "wrong" || payload.reaction === "question" ? "high" : null,
-    actor: row.actor,
-    source_ref: `${row.artifact_id}#op-${row.op_id}`,
-    source_agent: row.agent,
-    created_at: row.ts,
-    updated_at: row.ts,
-    metadata: {
-      artifact_id: row.artifact_id,
-      op_id: row.op_id,
-      anchor: payload.anchor,
-      reaction: payload.reaction,
-      routed: false,
-    },
-  };
-}
-
 function dispatchToNeedsMeItem(row: DispatchReadRow): DeskNeedsMeItem {
   return {
     id: `routed_item:${row.dispatch_phid}`,
@@ -249,32 +178,4 @@ function dispatchToNeedsMeItem(row: DispatchReadRow): DeskNeedsMeItem {
       sort_group: row.sort_group,
     },
   };
-}
-
-function parseSourceOpId(payloadJson: string | null): number | null {
-  try {
-    const parsed = payloadJson ? JSON.parse(payloadJson) as { source_op_id?: unknown } : {};
-    return typeof parsed.source_op_id === "number" ? parsed.source_op_id : null;
-  } catch {
-    return null;
-  }
-}
-
-function parseCommentPayload(payloadJson: string | null): {
-  body: string;
-  anchor: string | null;
-  reaction: string | null;
-} {
-  try {
-    const parsed = payloadJson
-      ? JSON.parse(payloadJson) as { body?: unknown; anchor?: unknown; reaction?: unknown }
-      : {};
-    return {
-      body: typeof parsed.body === "string" ? parsed.body : "",
-      anchor: typeof parsed.anchor === "string" ? parsed.anchor : null,
-      reaction: typeof parsed.reaction === "string" ? parsed.reaction : null,
-    };
-  } catch {
-    return { body: "", anchor: null, reaction: null };
-  }
 }
