@@ -50,6 +50,8 @@ describe('Inbox 2.0 — Storage', () => {
     const names = tables.map(t => t.name).sort();
     expect(names).toEqual([
       'inbox_audit_events',
+      'inbox_email_aliases',
+      'inbox_email_messages',
       'inbox_items',
       'inbox_links',
       'inbox_policy_violations',

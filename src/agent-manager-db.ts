@@ -10982,6 +10982,24 @@ export class AgentManagerDb {
           console.warn('[Manager] P2 inbox routes failed to mount:', err instanceof Error ? err.message : String(err));
         }
 
+        // Chief-of-Staff email intake v1 — forward-to-address ingestion over
+        // the Inbox 2.0 substrate. Gmail OAuth is intentionally out of scope:
+        // mailbox pollers POST forwarded messages here, and this route records
+        // the inbox item plus a deterministic task/dispatch triage result.
+        try {
+          const { mountInboxEmailRoutes } = await import('./inbox-email/routes.js');
+          mountInboxEmailRoutes(this.managementApp, this.db.adapter, {
+            tasks: this.db.tasks,
+            resolveTeamId: async (req) => (await this.getTeam(req)).id,
+            enqueueDispatch: this.dispatchScheduler
+              ? this.dispatchScheduler.enqueue.bind(this.dispatchScheduler)
+              : undefined,
+          });
+          console.log('[Manager] CoS email intake routes mounted (/inbox/email/*)');
+        } catch (err) {
+          console.warn('[Manager] CoS email intake routes failed to mount:', err instanceof Error ? err.message : String(err));
+        }
+
         // Desk doc-model — mount /desk/* routes (tray + items upsert).
         try {
           const [{ mountDeskRoutes }, { migrateDeskTables }] = await Promise.all([

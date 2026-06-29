@@ -113,6 +113,44 @@ export function migrateInboxTables(adapter: DbAdapter): void {
   `);
 
   exec(`CREATE INDEX IF NOT EXISTS inbox_rd_phid_idx ON inbox_routing_decisions(inbox_phid)`);
+
+  exec(`
+    CREATE TABLE IF NOT EXISTS inbox_email_aliases (
+      id TEXT PRIMARY KEY,
+      team_id TEXT NOT NULL,
+      user_id TEXT NOT NULL,
+      address TEXT NOT NULL,
+      default_project TEXT,
+      default_agent TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      UNIQUE(team_id, address)
+    )
+  `);
+
+  exec(`CREATE INDEX IF NOT EXISTS inbox_email_aliases_team_user_idx ON inbox_email_aliases(team_id, user_id)`);
+  exec(`CREATE INDEX IF NOT EXISTS inbox_email_aliases_address_idx ON inbox_email_aliases(address)`);
+
+  exec(`
+    CREATE TABLE IF NOT EXISTS inbox_email_messages (
+      idempotency_key TEXT PRIMARY KEY,
+      team_id TEXT NOT NULL,
+      alias_id TEXT NOT NULL,
+      inbox_phid TEXT NOT NULL,
+      message_id TEXT,
+      source_from TEXT,
+      source_to TEXT NOT NULL,
+      source_subject TEXT,
+      received_at TEXT NOT NULL,
+      triage_action TEXT NOT NULL,
+      task_id TEXT,
+      dispatch_phid TEXT,
+      created_at TEXT NOT NULL
+    )
+  `);
+
+  exec(`CREATE INDEX IF NOT EXISTS inbox_email_messages_team_idx ON inbox_email_messages(team_id, received_at)`);
+  exec(`CREATE INDEX IF NOT EXISTS inbox_email_messages_alias_idx ON inbox_email_messages(alias_id, received_at)`);
 }
 
 // ── CRUD ───────────────────────────────────────────────────────────
