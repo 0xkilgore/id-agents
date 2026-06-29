@@ -2,9 +2,12 @@
 
 import express, { type Express } from "express";
 import { describe, it, expect } from "vitest";
+import { insertBacklogItem } from "../../src/continuous-orchestration/storage.js";
 import { SqliteAdapter } from "../../src/db/sqlite-adapter.js";
+import { migrateSqlite } from "../../src/db/migrations/sqlite.js";
 import { insertDecision, migrateDecisionsTables } from "../../src/decisions/storage.js";
 import { migrateOutputsTables, registerArtifact } from "../../src/outputs/storage.js";
+import { commentArtifact } from "../../src/outputs/ops.js";
 import { mountDeskRoutes } from "../../src/desk/routes.js";
 import {
   migrateDeskTables,
@@ -236,6 +239,7 @@ async function bootDeskHarness(
   env: NodeJS.ProcessEnv = { DESK_USE_DOCUMENT_MODEL: "true" },
 ): Promise<{ app: Express; adapter: SqliteAdapter }> {
   const adapter = new SqliteAdapter(":memory:");
+  await migrateSqlite(adapter);
   await migrateDeskTables(adapter);
   await migrateOutputsTables(adapter);
   await migrateDecisionsTables(adapter);
@@ -491,6 +495,113 @@ describe("GET /desk/tray + POST /desk/items", () => {
     expect(entries.body.items).toHaveLength(1);
     expect(entries.body.items[0].title).toBe("Review spec");
     expect(entries.body.items[0].kind).toBe("desk_item");
+  });
+
+  it("GET /desk/needs-me serves real approvals, artifact review, unread comments, and needs-Chris rows", async () => {
+    const { app, adapter } = await bootDeskHarness();
+    await insertDecision(adapter, {
+      decision_id: "dec_needs_chris",
+      display_id: "D-NEEDS",
+      title: "Approve rollout?",
+      question: "Chris needs to approve the rollout.",
+      context_excerpt: null,
+      recommendation_json: null,
+      options_json: null,
+      status: "open",
+      estimated_seconds: 45,
+      priority: "high",
+      owner: "chris",
+      requested_by: "maestra",
+      created_at: "2026-06-25T13:00:00.000Z",
+      updated_at: "2026-06-25T13:00:00.000Z",
+      resolved_at: null,
+      resolved_by: null,
+      resolution_note: null,
+      selected_option_id: null,
+      source_refs_json: "[]",
+      provenance_json: "{}",
+    });
+    await registerArtifact(adapter, {
+      artifact_id: "art_review_needed",
+      basename: "review.md",
+      agent: "rams",
+      tag: "review",
+      abs_path: "/tmp/review.md",
+      title: "Review packet",
+      produced_at: "2026-06-25T12:00:00.000Z",
+      source: "agent-done",
+    }, NOW);
+    await registerArtifact(adapter, {
+      artifact_id: "art_comment_needed",
+      basename: "comment.md",
+      agent: "roger",
+      tag: "feedback",
+      abs_path: "/tmp/comment.md",
+      title: "Commented packet",
+      produced_at: "2026-06-25T11:00:00.000Z",
+      source: "agent-done",
+    }, NOW);
+    await commentArtifact(adapter, "art_comment_needed", {
+      actor: "roger",
+      body: "Chris should read this before promotion.",
+      source_link: "agent-done:roger",
+    }, () => new Date("2026-06-25T14:00:00.000Z"));
+    await insertBacklogItem(adapter, {
+      team_id: "default",
+      title: "Approve risky orchestration item",
+      readiness_state: "needs_chris_batch",
+      risk_class: "destructive",
+      priority: 2,
+      to_agent: "substrate-orch-codex",
+      dispatch_body: "Needs Chris approval before dispatch.",
+    });
+
+    const { status, body } = await getJson(app, "/desk/needs-me?limit=20");
+    expect(status).toBe(200);
+    expect(body).toMatchObject({
+      schema_version: "desk.needs_me.v1",
+      generated_at: NOW,
+      source: {
+        system: "manager",
+        projection: "desk_needs_me",
+        source_type: "hybrid_projection",
+        read_path: "substrate",
+      },
+      filters: {
+        actor: "user:chris",
+        team_id: "default",
+        limit: 20,
+      },
+      counts: {
+        approvals: 1,
+        needs_chris: 1,
+      },
+      warnings: [],
+    });
+    expect(body.counts.artifact_review).toBeGreaterThanOrEqual(2);
+    expect(body.counts.unread_comments).toBe(1);
+    expect(body.items.map((item: { kind: string }) => item.kind)).toEqual(
+      expect.arrayContaining(["approval", "artifact_review", "unread_comment", "needs_chris"]),
+    );
+    const byKind = new Map(body.items.map((item: { kind: string }) => [item.kind, item]));
+    expect(byKind.get("approval")).toMatchObject({
+      label: "Approve rollout?",
+      source_ref: "dec_needs_chris",
+      href: "/ops/decisions/dec_needs_chris",
+      provenance: { source_table: "decisions" },
+    });
+    expect(byKind.get("unread_comment")).toMatchObject({
+      label: "Unread comment on Commented packet",
+      body_md: "Chris should read this before promotion.",
+      actor: "roger",
+      provenance: { source_table: "artifact_operations" },
+    });
+    expect(byKind.get("needs_chris")).toMatchObject({
+      label: "Approve risky orchestration item",
+      status: "needs_chris_batch",
+      agent: "substrate-orch-codex",
+      provenance: { source_table: "orchestration_backlog_item" },
+    });
   });
 
   it("rejects POST /desk/items without label", async () => {

@@ -110,6 +110,57 @@ export interface DeskTrayResponse {
   warnings: Array<{ code: string; message: string }>;
 }
 
+export type DeskNeedsMeItemKind =
+  | "approval"
+  | "artifact_review"
+  | "unread_comment"
+  | "needs_chris";
+
+export interface DeskNeedsMeItem {
+  id: string;
+  kind: DeskNeedsMeItemKind;
+  label: string;
+  body_md: string;
+  source_ref: string;
+  href: string | null;
+  actor: string | null;
+  agent: string | null;
+  priority: string | number | null;
+  status: string;
+  added_at: string;
+  provenance: {
+    source: "decisions" | "artifact_review_state" | "artifact_operations" | "orchestration_backlog_item";
+    source_table: string;
+    source_ref: string;
+    parser_version: "desk.needs_me.v1";
+  };
+}
+
+export interface DeskNeedsMeResponse {
+  schema_version: "desk.needs_me.v1";
+  generated_at: string;
+  source: {
+    system: "manager";
+    projection: "desk_needs_me";
+    source_type: "hybrid_projection";
+    read_path: "substrate";
+  };
+  filters: {
+    actor: "user:chris";
+    team_id: string;
+    limit: number;
+  };
+  counts: {
+    total: number;
+    approvals: number;
+    artifact_review: number;
+    unread_comments: number;
+    needs_chris: number;
+  };
+  items: DeskNeedsMeItem[];
+  warnings: Array<{ code: string; message: string }>;
+}
+
 export interface UpsertDeskItemInput {
   desk_item_id?: string;
   label: string;
