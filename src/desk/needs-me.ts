@@ -1,12 +1,26 @@
-import type { BacklogItem } from "../continuous-orchestration/types.js";
 import type { DbAdapter } from "../db/db-adapter.js";
 import type { DecisionRow } from "../decisions/types.js";
+import { listDecisions } from "../decisions/storage.js";
+import { readDispatches, type DispatchReadRow } from "../dispatch-scheduler/read-model.js";
+import { listInboxItems } from "../outputs/storage.js";
 import type { OutputsInboxRow } from "../outputs/types.js";
 import type { DeskNeedsMeItem, DeskNeedsMeResponse } from "./types.js";
 
-export const DESK_NEEDS_ME_PARSER_VERSION = "desk.needs_me.v1" as const;
+export const DESK_NEEDS_ME_SCHEMA_VERSION = "desk.needs_me.v1" as const;
 
-export interface UnreadArtifactCommentRow {
+interface TeamRef {
+  id: string | null;
+  name: string | null;
+}
+
+export interface BuildDeskNeedsMeOptions {
+  owner?: string;
+  teamName?: string;
+  limit?: number;
+  generatedAt: string;
+}
+
+interface CommentOpRow {
   op_id: number;
   artifact_id: string;
   actor: string;
@@ -15,173 +29,252 @@ export interface UnreadArtifactCommentRow {
   title: string | null;
   basename: string | null;
   agent: string | null;
-  abs_path: string | null;
 }
 
-export async function listUnreadArtifactComments(
+export async function buildDeskNeedsMe(
   adapter: DbAdapter,
-  opts: { actor?: string; limit?: number } = {},
-): Promise<UnreadArtifactCommentRow[]> {
-  const actor = opts.actor ?? "user:chris";
-  const actorAliases = actor === "user:chris" ? ["user:chris", "human:chris", "chris"] : [actor];
-  const aliasPlaceholders = actorAliases.map(() => "?").join(", ");
-  const limit = Math.min(Math.max(opts.limit ?? 50, 1), 200);
-  const { rows } = await adapter.query<UnreadArtifactCommentRow>(
-    `SELECT op.op_id, op.artifact_id, op.actor, op.ts, op.payload_json,
-            a.title, a.basename, a.agent, a.abs_path
-       FROM artifact_operations op
-  LEFT JOIN artifact_review_state rs ON rs.artifact_id = op.artifact_id
-  LEFT JOIN artifacts a ON a.artifact_id = op.artifact_id
-      WHERE op.op_type = 'comment_recorded'
-        AND op.actor NOT IN (${aliasPlaceholders})
-        AND (rs.last_viewed_at IS NULL OR op.ts > rs.last_viewed_at)
-   ORDER BY op.ts DESC, op.op_id DESC
-      LIMIT ?`,
-    [...actorAliases, limit],
-  );
-  return rows;
-}
+  opts: BuildDeskNeedsMeOptions,
+): Promise<DeskNeedsMeResponse> {
+  const owner = normalizeOwner(opts.owner);
+  const limit = normalizeLimit(opts.limit);
+  const team = await resolveTeam(adapter, opts.teamName ?? "default");
+  const warnings: DeskNeedsMeResponse["warnings"] = [];
 
-export interface BuildDeskNeedsMeInput {
-  generatedAt: string;
-  teamId: string;
-  limit: number;
-  approvals: DecisionRow[];
-  artifactReview: OutputsInboxRow[];
-  unreadComments: UnreadArtifactCommentRow[];
-  needsChris: BacklogItem[];
-}
+  const [decisions, artifactRows, unreadComments, dispatchRows] = await Promise.all([
+    listDecisions(adapter, { status: "open", owner, limit: Math.min(limit, 100) }),
+    listInboxItems(adapter, { includeNeverViewed: true }, Math.min(limit * 2, 200), 0),
+    listUnreadCommentItems(adapter, Math.min(limit * 4, 200)),
+    team.id ? readDispatches(adapter, team.id, "all", Math.min(limit * 4, 200)) : Promise.resolve([]),
+  ]);
 
-export function buildDeskNeedsMeEnvelope(input: BuildDeskNeedsMeInput): DeskNeedsMeResponse {
-  const approvalItems = input.approvals.map(approvalToNeedsMeItem);
-  const reviewItems = input.artifactReview.map(artifactReviewToNeedsMeItem);
-  const commentItems = input.unreadComments.map(unreadCommentToNeedsMeItem);
-  const needsChrisItems = input.needsChris.map(needsChrisBacklogToNeedsMeItem);
+  if (!team.id) {
+    warnings.push({
+      code: "team_not_found",
+      message: `No team row found for "${team.name ?? opts.teamName ?? "default"}"; routed dispatch items were omitted.`,
+    });
+  }
 
-  const items = [...approvalItems, ...reviewItems, ...commentItems, ...needsChrisItems]
-    .sort((a, b) => Date.parse(b.added_at) - Date.parse(a.added_at))
-    .slice(0, input.limit);
+  const approvalItems = decisions.map(decisionToNeedsMeItem);
+  const artifactItems = artifactRows
+    .filter((row) => row.status !== "shipped")
+    .map(artifactInboxToNeedsMeItem);
+  const routedItems = dispatchRows
+    .filter((row) => row.needs_operator || row.needs_input.active != null)
+    .map(dispatchToNeedsMeItem);
+
+  const items = [...approvalItems, ...artifactItems, ...unreadComments, ...routedItems]
+    .sort((a, b) => Date.parse(b.updated_at) - Date.parse(a.updated_at))
+    .slice(0, limit);
 
   return {
-    schema_version: "desk.needs_me.v1",
-    generated_at: input.generatedAt,
+    schema_version: DESK_NEEDS_ME_SCHEMA_VERSION,
+    generated_at: opts.generatedAt,
+    owner,
+    team,
     source: {
       system: "manager",
       projection: "desk_needs_me",
       source_type: "hybrid_projection",
       read_path: "substrate",
     },
-    filters: {
-      actor: "user:chris",
-      team_id: input.teamId,
-      limit: input.limit,
-    },
+    filters: { owner, limit },
     counts: {
-      total: items.length,
+      total: approvalItems.length + artifactItems.length + unreadComments.length + routedItems.length,
+      returned: items.length,
       approvals: approvalItems.length,
-      artifact_review: reviewItems.length,
-      unread_comments: commentItems.length,
-      needs_chris: needsChrisItems.length,
+      artifact_review: artifactItems.length,
+      unread_comments: unreadComments.length,
+      routed_items: routedItems.length,
     },
     items,
-    warnings: [],
+    warnings,
   };
 }
 
-export function approvalToNeedsMeItem(row: DecisionRow): DeskNeedsMeItem {
+function normalizeOwner(owner: string | undefined): string {
+  const trimmed = owner?.trim();
+  return trimmed || "chris";
+}
+
+export function normalizeLimit(raw: unknown): number {
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n <= 0) return 50;
+  return Math.min(Math.floor(n), 200);
+}
+
+async function resolveTeam(adapter: DbAdapter, teamName: string): Promise<TeamRef> {
+  try {
+    const { rows } = await adapter.query<{ id: string; name: string }>(
+      `SELECT id, name FROM teams WHERE name = ? LIMIT 1`,
+      [teamName],
+    );
+    if (rows[0]) return { id: rows[0].id, name: rows[0].name };
+  } catch {
+    // Some unit harnesses mount Desk without the manager teams table.
+  }
+  return { id: null, name: teamName };
+}
+
+function decisionToNeedsMeItem(row: DecisionRow): DeskNeedsMeItem {
   return {
-    id: `needs_approval_${row.decision_id}`,
-    kind: "approval",
+    id: `approval:${row.decision_id}`,
+    source_type: "approval",
     label: row.title,
     body_md: row.question,
-    source_ref: row.decision_id,
     href: `/ops/decisions/${encodeURIComponent(row.decision_id)}`,
-    actor: row.requested_by,
-    agent: row.owner,
     priority: row.priority,
-    status: row.status,
-    added_at: row.created_at,
-    provenance: provenance("decisions", row.decision_id),
+    actor: row.requested_by,
+    source_ref: row.decision_id,
+    source_agent: row.requested_by,
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+    metadata: {
+      decision_id: row.decision_id,
+      display_id: row.display_id,
+      estimated_seconds: row.estimated_seconds,
+      owner: row.owner,
+      status: row.status,
+    },
   };
 }
 
-export function artifactReviewToNeedsMeItem(row: OutputsInboxRow): DeskNeedsMeItem {
+function artifactInboxToNeedsMeItem(row: OutputsInboxRow): DeskNeedsMeItem {
   const label = row.title ?? row.basename ?? row.artifact_id;
   return {
-    id: `needs_artifact_${row.artifact_id}`,
-    kind: "artifact_review",
+    id: `artifact_review:${row.artifact_id}`,
+    source_type: "artifact_review",
     label,
     body_md: row.abs_path ?? "",
-    source_ref: row.artifact_id,
     href: `/ops/artifacts/${encodeURIComponent(row.artifact_id)}`,
-    actor: null,
-    agent: row.agent,
-    priority: reviewPriority(row.status),
-    status: row.status,
-    added_at: row.last_op_at ?? row.produced_at ?? new Date(0).toISOString(),
-    provenance: provenance("artifact_review_state", row.artifact_id),
+    priority: row.status === "ship_blocked" ? "high" : null,
+    actor: row.agent,
+    source_ref: row.artifact_id,
+    source_agent: row.agent,
+    created_at: row.produced_at ?? row.last_op_at ?? new Date(0).toISOString(),
+    updated_at: row.last_op_at ?? row.produced_at ?? new Date(0).toISOString(),
+    metadata: {
+      artifact_id: row.artifact_id,
+      status: row.status,
+      availability: row.availability,
+      first_viewed_at: row.first_viewed_at,
+      approved_at: row.approved_at,
+      shipped_at: row.shipped_at,
+      ship_blockers_json: row.ship_blockers_json,
+      op_count: row.op_count,
+    },
   };
 }
 
-export function unreadCommentToNeedsMeItem(row: UnreadArtifactCommentRow): DeskNeedsMeItem {
-  const parsed = parseCommentPayload(row.payload_json);
-  const label = row.title ?? row.basename ?? row.artifact_id;
+async function listUnreadCommentItems(adapter: DbAdapter, limit: number): Promise<DeskNeedsMeItem[]> {
+  const routedSourceOpIds = await listRoutedCommentSourceOpIds(adapter);
+  const { rows } = await adapter.query<CommentOpRow>(
+    `SELECT op.op_id, op.artifact_id, op.actor, op.ts, op.payload_json,
+            a.title, a.basename, a.agent
+       FROM artifact_operations op
+       LEFT JOIN artifacts a ON a.artifact_id = op.artifact_id
+      WHERE op.op_type = 'comment_recorded'
+      ORDER BY op.op_id DESC
+      LIMIT ?`,
+    [limit],
+  );
+
+  return rows
+    .filter((row) => !routedSourceOpIds.has(Number(row.op_id)))
+    .map(commentToNeedsMeItem);
+}
+
+async function listRoutedCommentSourceOpIds(adapter: DbAdapter): Promise<Set<number>> {
+  const { rows } = await adapter.query<{ payload_json: string | null }>(
+    `SELECT payload_json
+       FROM artifact_operations
+      WHERE op_type = 'comment_routed'
+      ORDER BY op_id DESC
+      LIMIT 1000`,
+  );
+  const routed = new Set<number>();
+  for (const row of rows) {
+    const sourceOpId = parseSourceOpId(row.payload_json);
+    if (sourceOpId != null) routed.add(sourceOpId);
+  }
+  return routed;
+}
+
+function commentToNeedsMeItem(row: CommentOpRow): DeskNeedsMeItem {
+  const payload = parseCommentPayload(row.payload_json);
+  const labelBase = row.title ?? row.basename ?? row.artifact_id;
   return {
-    id: `needs_comment_${row.artifact_id}_${row.op_id}`,
-    kind: "unread_comment",
-    label: `Unread comment on ${label}`,
-    body_md: parsed.body,
-    source_ref: `${row.artifact_id}#${row.op_id}`,
-    href: `/ops/artifacts/${encodeURIComponent(row.artifact_id)}?comment=${row.op_id}`,
+    id: `unread_comment:${row.op_id}`,
+    source_type: "unread_comment",
+    label: `Comment on ${labelBase}`,
+    body_md: payload.body,
+    href: `/ops/artifacts/${encodeURIComponent(row.artifact_id)}`,
+    priority: payload.reaction === "wrong" || payload.reaction === "question" ? "high" : null,
     actor: row.actor,
-    agent: row.agent,
-    priority: "normal",
-    status: "unread",
-    added_at: row.ts,
-    provenance: provenance("artifact_operations", String(row.op_id)),
+    source_ref: `${row.artifact_id}#op-${row.op_id}`,
+    source_agent: row.agent,
+    created_at: row.ts,
+    updated_at: row.ts,
+    metadata: {
+      artifact_id: row.artifact_id,
+      op_id: row.op_id,
+      anchor: payload.anchor,
+      reaction: payload.reaction,
+      routed: false,
+    },
   };
 }
 
-export function needsChrisBacklogToNeedsMeItem(row: BacklogItem): DeskNeedsMeItem {
+function dispatchToNeedsMeItem(row: DispatchReadRow): DeskNeedsMeItem {
   return {
-    id: `needs_chris_${row.item_id}`,
-    kind: "needs_chris",
-    label: row.title,
-    body_md: row.flesh_patch?.reason ?? row.dispatch_body ?? "",
-    source_ref: row.item_id,
-    href: `/orchestration/backlog/${encodeURIComponent(row.item_id)}`,
-    actor: row.updated_by ?? row.flesh_source,
-    agent: row.to_agent,
-    priority: row.priority,
-    status: row.readiness_state,
-    added_at: row.updated_at,
-    provenance: provenance("orchestration_backlog_item", row.item_id),
+    id: `routed_item:${row.dispatch_phid}`,
+    source_type: "routed_item",
+    label: row.title || row.subject || row.dispatch_phid,
+    body_md: row.failure_detail ?? "",
+    href: `/ops/dispatches/${encodeURIComponent(row.dispatch_phid)}`,
+    priority: row.source_metadata.priority == null ? null : String(row.source_metadata.priority),
+    actor: row.source_metadata.from_actor,
+    source_ref: row.dispatch_phid,
+    source_agent: row.target_agent,
+    created_at: row.queued_at ?? row.updated_at,
+    updated_at: row.completed_at ?? row.in_flight_at ?? row.updated_at,
+    metadata: {
+      dispatch_id: row.dispatch_phid,
+      query_id: row.query_id,
+      agent_query_id: row.agent_query_id,
+      target_agent: row.target_agent,
+      status: row.status,
+      effective_state: row.effective_state,
+      needs_operator: row.needs_operator,
+      needs_input: row.needs_input,
+      sort_group: row.sort_group,
+    },
   };
 }
 
-function provenance(
-  source: DeskNeedsMeItem["provenance"]["source"],
-  sourceRef: string,
-): DeskNeedsMeItem["provenance"] {
-  return {
-    source,
-    source_table: source,
-    source_ref: sourceRef,
-    parser_version: DESK_NEEDS_ME_PARSER_VERSION,
-  };
-}
-
-function parseCommentPayload(payloadJson: string | null): { body: string } {
+function parseSourceOpId(payloadJson: string | null): number | null {
   try {
-    const parsed = payloadJson ? (JSON.parse(payloadJson) as { body?: unknown }) : {};
-    return { body: typeof parsed.body === "string" ? parsed.body : "" };
+    const parsed = payloadJson ? JSON.parse(payloadJson) as { source_op_id?: unknown } : {};
+    return typeof parsed.source_op_id === "number" ? parsed.source_op_id : null;
   } catch {
-    return { body: "" };
+    return null;
   }
 }
 
-function reviewPriority(status: OutputsInboxRow["status"]): string {
-  if (status === "ship_blocked") return "high";
-  if (status === "approved") return "normal";
-  return "review";
+function parseCommentPayload(payloadJson: string | null): {
+  body: string;
+  anchor: string | null;
+  reaction: string | null;
+} {
+  try {
+    const parsed = payloadJson
+      ? JSON.parse(payloadJson) as { body?: unknown; anchor?: unknown; reaction?: unknown }
+      : {};
+    return {
+      body: typeof parsed.body === "string" ? parsed.body : "",
+      anchor: typeof parsed.anchor === "string" ? parsed.anchor : null,
+      reaction: typeof parsed.reaction === "string" ? parsed.reaction : null,
+    };
+  } catch {
+    return { body: "", anchor: null, reaction: null };
+  }
 }

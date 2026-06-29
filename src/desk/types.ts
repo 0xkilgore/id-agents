@@ -110,35 +110,35 @@ export interface DeskTrayResponse {
   warnings: Array<{ code: string; message: string }>;
 }
 
-export type DeskNeedsMeItemKind =
+export type DeskNeedsMeSourceType =
   | "approval"
   | "artifact_review"
   | "unread_comment"
-  | "needs_chris";
+  | "routed_item";
 
 export interface DeskNeedsMeItem {
   id: string;
-  kind: DeskNeedsMeItemKind;
+  source_type: DeskNeedsMeSourceType;
   label: string;
   body_md: string;
-  source_ref: string;
   href: string | null;
+  priority: string | null;
   actor: string | null;
-  agent: string | null;
-  priority: string | number | null;
-  status: string;
-  added_at: string;
-  provenance: {
-    source: "decisions" | "artifact_review_state" | "artifact_operations" | "orchestration_backlog_item";
-    source_table: string;
-    source_ref: string;
-    parser_version: "desk.needs_me.v1";
-  };
+  source_ref: string;
+  source_agent: string | null;
+  created_at: string;
+  updated_at: string;
+  metadata: Record<string, unknown>;
 }
 
 export interface DeskNeedsMeResponse {
   schema_version: "desk.needs_me.v1";
   generated_at: string;
+  owner: string;
+  team: {
+    id: string | null;
+    name: string | null;
+  };
   source: {
     system: "manager";
     projection: "desk_needs_me";
@@ -146,16 +146,16 @@ export interface DeskNeedsMeResponse {
     read_path: "substrate";
   };
   filters: {
-    actor: "user:chris";
-    team_id: string;
+    owner: string;
     limit: number;
   };
   counts: {
     total: number;
+    returned: number;
     approvals: number;
     artifact_review: number;
     unread_comments: number;
-    needs_chris: number;
+    routed_items: number;
   };
   items: DeskNeedsMeItem[];
   warnings: Array<{ code: string; message: string }>;

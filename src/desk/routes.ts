@@ -7,13 +7,12 @@
 import { homedir } from "node:os";
 import path from "node:path";
 import type { Application, Request, Response } from "express";
-import { listBacklogByState } from "../continuous-orchestration/storage.js";
 import type { DbAdapter } from "../db/db-adapter.js";
 import { listDecisions } from "../decisions/storage.js";
 import { listInboxItems } from "../outputs/storage.js";
 import { computeDeskDocModelParity } from "./doc-model-parity.js";
 import { buildDeskEntriesEnvelope, deskRowToEntry } from "./entry-projection.js";
-import { buildDeskNeedsMeEnvelope, listUnreadArtifactComments } from "./needs-me.js";
+import { buildDeskNeedsMe, normalizeLimit } from "./needs-me.js";
 import { buildDeskTrayEnvelope, deskRowToTrayItem } from "./projection.js";
 import { computeDeskParity } from "./parity.js";
 import { getDeskItemById, listDeskItems, listDeskOperations, upsertDeskItem } from "./storage.js";
@@ -83,26 +82,11 @@ export function mountDeskRoutes(
   app.get("/desk/needs-me", async (req: Request, res: Response) => {
     try {
       const generatedAt = now().toISOString();
-      const limit = Math.min(Math.max(parseInt(String(req.query.limit ?? "50"), 10) || 50, 1), 200);
-      const teamId = typeof req.query.team_id === "string" && req.query.team_id.trim()
-        ? req.query.team_id.trim()
-        : "default";
-      const perSourceLimit = Math.min(limit, 100);
-      const [approvals, artifactReview, unreadComments, needsChris] = await Promise.all([
-        listDecisions(adapter, { status: "open", limit: perSourceLimit }),
-        listInboxItems(adapter, { includeNeverViewed: true }, perSourceLimit, 0),
-        listUnreadArtifactComments(adapter, { actor: "user:chris", limit: perSourceLimit }),
-        listBacklogByState(adapter, { team_id: teamId, state: "needs_chris_batch", limit: perSourceLimit }),
-      ]);
-      res.json(buildDeskNeedsMeEnvelope({
-        generatedAt,
-        teamId,
-        limit,
-        approvals,
-        artifactReview,
-        unreadComments,
-        needsChris,
-      }));
+      const owner = typeof req.query.owner === "string" ? req.query.owner : undefined;
+      const teamName = typeof req.query.team === "string" ? req.query.team : undefined;
+      const limit = normalizeLimit(req.query.limit);
+      const response = await buildDeskNeedsMe(adapter, { generatedAt, owner, teamName, limit });
+      res.json(response);
     } catch (err) {
       res.status(500).json({
         ok: false,
