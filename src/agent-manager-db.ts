@@ -10934,6 +10934,16 @@ export class AgentManagerDb {
           console.warn('[Manager] DV3 doc-model search routes failed to mount:', err instanceof Error ? err.message : String(err));
         }
 
+        // Project tracks conformance read-model — project pages use this to
+        // group goals/tracks/tasks/artifacts/dispatches and surface taxonomy drift.
+        try {
+          const { mountProjectTracksRoutes } = await import('./project-tracks/routes.js');
+          mountProjectTracksRoutes(this.managementApp, this.db.adapter);
+          console.log('[Manager] Project tracks /projects/:project/tracks route mounted');
+        } catch (err) {
+          console.warn('[Manager] Project tracks routes failed to mount:', err instanceof Error ? err.message : String(err));
+        }
+
         // T-CKPT.agent-sharing / F4 — share + delegate grants over the Monday
         // seed actor model. Mount /shares, /delegations, /grants[/:id[/revoke]].
         try {
