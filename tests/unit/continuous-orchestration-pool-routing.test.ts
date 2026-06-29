@@ -36,7 +36,20 @@ describe("continuous orchestration pool routing", () => {
     const pools = buildPoolRouting({});
     const pool = pools.poolForItem(item());
     expect(pool?.pool_id).toBe("frontend");
-    expect(pool?.members).toEqual(["frontend-ui-codex", "frontend-qa-cursor"]);
+    // Snag #13: widened with live idle Claude builders (listed first) so frontend
+    // work fans out instead of stalling on the 2 throttle-prone codex/cursor lanes.
+    expect(pool?.members).toEqual([
+      "regina", "brunel", "eames", "gaudi", "hopper", "frontend-ui-codex", "frontend-qa-cursor",
+    ]);
+  });
+
+  it("frontend pool fans out to multiple idle Claude builders when the codex/cursor lanes are busy", () => {
+    const pools = buildPoolRouting({});
+    const pool = pools.poolForItem(item())!;
+    // both throttle-prone lanes building -> still 5 Claude builders free
+    const free = pools.availableBuilders(pool, new Set(["frontend-ui-codex", "frontend-qa-cursor"]));
+    expect(free).toEqual(["regina", "brunel", "eames", "gaudi", "hopper"]);
+    expect(free.length).toBeGreaterThanOrEqual(4);
   });
 
   it("keeps non-UI T-CKPT rows in the backend pool", () => {

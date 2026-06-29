@@ -11,6 +11,16 @@
 // create queued rows that the scheduler correctly refuses to deliver, clogging
 // pool capacity. Seed only the currently maintained live lanes here; re-add
 // legacy names only when they have a heartbeat-backed availability source.
+//
+// Snag #13 (2026-06-29): the frontend pool was only 2 lanes (frontend-ui-codex +
+// parked frontend-qa-cursor), both throttle-prone; with both in_flight the
+// daemon stalled (zero_ticks rising) on "no free builder in pool: frontend"
+// while 4-5 idle Claude builders (regina/brunel/eames/gaudi/hopper) sat in NO
+// pool. Widened the frontend pool with those Claude builders (verified live +
+// LISTENING on their ports at seed time; availableBuilders treats a non-building
+// member as available, so port-live Claude lanes fan work out immediately).
+// Claude builders are listed FIRST so they are selected ahead of the
+// throttle-prone codex/cursor lanes.
 
 import type { BuildPool, PoolId, RepoAlias } from "./types.js";
 
@@ -28,9 +38,9 @@ const SEED: readonly BuildPool[] = [
     pool_id: "frontend",
     repo_alias: "kapelle-site",
     repo_root: "/Users/kilgore/Dropbox/Code/kapelle-site",
-    members: ["frontend-ui-codex", "frontend-qa-cursor"],
+    members: ["regina", "brunel", "eames", "gaudi", "hopper", "frontend-ui-codex", "frontend-qa-cursor"],
     tracks: ["T-UI", "T-SITE", "T-WEB"],
-    max_parallel: 3,
+    max_parallel: 6,
     merge_strategy: "auto",
   },
 ] as const;

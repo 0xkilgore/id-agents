@@ -123,7 +123,12 @@ describe("BuildPoolRegistry", () => {
     const resolved = r.resolvePool("T-CKPT.7")!;
     expect(resolved.pool_id).toBe("backend");
     expect(resolved.members).not.toEqual(expect.arrayContaining(["brunel", "hopper", "eames", "gaudi"]));
-    expect(r.byId("frontend")!.members).toEqual(["frontend-ui-codex", "frontend-qa-cursor"]);
+    // Snag #13: frontend pool widened with live idle Claude builders so frontend
+    // builds fan out >2 wide instead of stalling on the 2 throttle-prone lanes.
+    expect(r.byId("frontend")!.members).toEqual([
+      "regina", "brunel", "eames", "gaudi", "hopper", "frontend-ui-codex", "frontend-qa-cursor",
+    ]);
+    expect(r.byId("frontend")!.max_parallel).toBe(6);
   });
 
   it("resolvePool matches by track prefix (longest wins); unknown => undefined", () => {
