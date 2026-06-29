@@ -1,28 +1,24 @@
 {
   "schema_version": 1,
-  "_comment": "Claude Light policy \u2014 auto-reverted 2026-06-25 ~19:07 CDT post-Codex reset (cursor-conduit bedtime watch).",
+  "_comment": "Claude-lead policy set 2026-06-29 by manager per Chris: 75% Anthropic / 25% OpenAI / 0% Cursor. Chris is on full Claude Max with ample credits; Codex (the single frontend-ui lane) was the usage-limit casualty, so lean on Claude and de-risk Codex concentration. Cursor disabled for now (constrained_providers). 5h rolling limits + non-API billing mean 'too much burn' has little downside per Chris. Standing rule: new unpinned scheduler-created implementation work prefers Claude, then Codex; Cursor lane disabled. constrained_providers = disabled provider lanes; [] means none disabled. NOTE: a 'cursor-conduit bedtime watch' previously auto-reverted this file (see git history 2026-06-25) — that watcher must be reconciled to this policy or it will revert these targets.",
   "work_share": {
-    "label": "claude-light-60-20-20",
+    "label": "claude-lead-75-25-0",
     "targets": {
-      "openai": 0.6,
-      "anthropic": 0.2,
-      "cursor": 0.2
+      "anthropic": 0.75,
+      "openai": 0.25,
+      "cursor": 0.0
     }
   },
-  "constrained_providers": [],
+  "constrained_providers": ["cursor"],
   "default": {
     "primary": {
-      "runtime": "codex",
-      "model": "gpt-5.5"
+      "runtime": "claude-code-cli",
+      "model": "claude-opus-4-8"
     },
     "fallback": [
       {
-        "runtime": "cursor-cli",
-        "model": "auto"
-      },
-      {
-        "runtime": "claude-code-cli",
-        "model": "claude-opus-4-8"
+        "runtime": "codex",
+        "model": "gpt-5.5"
       }
     ]
   },
@@ -58,8 +54,8 @@
       },
       "fallback": [
         {
-          "runtime": "cursor-cli",
-          "model": "auto"
+          "runtime": "codex",
+          "model": "gpt-5.5"
         }
       ]
     },
