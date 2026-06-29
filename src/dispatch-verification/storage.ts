@@ -61,6 +61,13 @@ export class DispatchVerificationStorage {
   constructor(private readonly adapter: SqliteAdapter) {}
 
   async migrate(): Promise<void> {
+    // Migration order matters on LEGACY tables (dispatch a43d02dd): an index that
+    // references `provider` must not be created before the column exists, or an
+    // older `dispatch_verifications` table (predating `provider`) throws
+    // "no such column: provider" at startup (live failure 2026-06-29).
+    // Order: (1) table if missing -> (2) add missing columns -> (3) indexes.
+
+    // (1) Table (fresh installs get `provider` here; legacy tables won't have it).
     this.adapter.exec(`
       CREATE TABLE IF NOT EXISTS dispatch_verifications (
         team_id TEXT NOT NULL, dispatch_id TEXT NOT NULL, query_id TEXT,
@@ -75,12 +82,19 @@ export class DispatchVerificationStorage {
         checked_at TEXT NOT NULL, source_metadata_json TEXT NOT NULL DEFAULT '{}',
         PRIMARY KEY (team_id, dispatch_id)
       );
+    `);
+
+    // (2) Add missing columns BEFORE any index references them. ADD COLUMN with
+    //     NOT NULL DEFAULT backfills existing rows, so no separate backfill step.
+    await this.addColumnIfMissing("dispatch_verifications", "provider", "TEXT NOT NULL DEFAULT 'other'");
+
+    // (3) Indexes (the provider index is safe now the column is guaranteed).
+    this.adapter.exec(`
       CREATE INDEX IF NOT EXISTS dispatch_verifications_team_agent_time_idx ON dispatch_verifications(team_id, agent_name, dispatch_completed_at DESC, dispatch_id);
       CREATE INDEX IF NOT EXISTS dispatch_verifications_team_time_idx ON dispatch_verifications(team_id, dispatch_completed_at DESC, dispatch_id);
       CREATE INDEX IF NOT EXISTS dispatch_verifications_team_provider_time_idx ON dispatch_verifications(team_id, provider, dispatch_completed_at DESC, dispatch_id);
       CREATE INDEX IF NOT EXISTS dispatch_verifications_team_failure_idx ON dispatch_verifications(team_id, failure_type, dispatch_completed_at DESC) WHERE failure_type IS NOT NULL;
     `);
-    await this.addColumnIfMissing("dispatch_verifications", "provider", "TEXT NOT NULL DEFAULT 'other'");
   }
 
   async upsertMany(rows: DispatchVerification[]): Promise<void> {
