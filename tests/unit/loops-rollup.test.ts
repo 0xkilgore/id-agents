@@ -295,3 +295,122 @@ function baseRun(loopPhid: string, key: string): LoopRunRecord {
     updated_at: NOW,
   };
 }
+
+// ---------------------------------------------------------------------------
+// T-QA integrity test: LoopRun rollups (last / next / health) shape + values.
+// The describes above cover per-scenario behaviour; this block guards the
+// DTO *contract* — exact key-set (catches field drift), per-field types, and
+// the cross-field invariants tying last_*, next_run_at and state together.
+// ---------------------------------------------------------------------------
+
+const LOOP_HEALTH_KEYS = [
+  "state",
+  "last_run_at",
+  "last_run_status",
+  "last_run_phid",
+  "last_success_at",
+  "consecutive_failures",
+  "next_run_at",
+  "runs_last_7d",
+  "stale_after_minutes",
+].sort();
+
+const HEALTH_STATES = ["healthy", "degraded", "failed", "disabled", "unknown"];
+const COARSE_STATUSES = ["queued", "running", "succeeded", "failed", "cancelled"];
+
+/** A pending scheduled run firing `scheduledFor`. */
+function scheduledRun(over: RunOverrides & { scheduled_for: string }): LoopRunRecord {
+  const { scheduled_for, ...rest } = over;
+  return makeRun({
+    ...rest,
+    trigger: {
+      kind: "scheduled",
+      recurrence_phid: "phid:rec:test",
+      recurrence_instance_phid: null,
+      scheduled_for,
+      dedup_key: `dedup-${scheduled_for}`,
+    },
+  });
+}
+
+describe("rollupLoopHealth — DTO shape + last/next/health invariant integrity", () => {
+  it("returns exactly the LoopHealth keys (no missing/extra) for empty AND populated", () => {
+    const cases = [
+      rollupLoopHealth(ENABLED, [], NOW),
+      rollupLoopHealth({ enabled: false, stale_after_minutes: null }, [], NOW),
+      rollupLoopHealth(
+        { enabled: true, stale_after_minutes: 60 },
+        [makeRun({ status: "succeeded", finished_at: ago(10) })],
+        NOW,
+      ),
+    ];
+    for (const h of cases) {
+      expect(Object.keys(h).sort()).toEqual(LOOP_HEALTH_KEYS);
+    }
+  });
+
+  it("every field carries its contract type", () => {
+    const h = rollupLoopHealth(
+      { enabled: true, stale_after_minutes: 60 },
+      [makeRun({ status: "succeeded", fired_at: ago(5), finished_at: ago(4) })],
+      NOW,
+    );
+    expect(HEALTH_STATES).toContain(h.state);
+    expect(typeof h.last_run_at).toBe("string");
+    expect(h.last_run_status === null || COARSE_STATUSES.includes(h.last_run_status)).toBe(true);
+    expect(h.last_run_phid === null || typeof h.last_run_phid === "string").toBe(true);
+    expect(h.last_success_at === null || typeof h.last_success_at === "string").toBe(true);
+    expect(typeof h.consecutive_failures).toBe("number");
+    expect(Number.isInteger(h.consecutive_failures)).toBe(true);
+    expect(typeof h.runs_last_7d).toBe("number");
+    expect(h.next_run_at === null || typeof h.next_run_at === "string").toBe(true);
+    expect(h.stale_after_minutes).toBe(60); // echoes the input verbatim
+  });
+
+  it("last/next/health stay mutually coherent across a mixed history", () => {
+    const futureIso = ago(-90); // 90 min after NOW
+    const runs = [
+      makeRun({ status: "succeeded", fired_at: ago(30), finished_at: ago(28), loop_run_phid: "phid:looprun:succ" }),
+      makeRun({ status: "failed", fired_at: ago(120), finished_at: ago(118) }),
+      makeRun({ status: "cancelled", fired_at: ago(400), finished_at: ago(399) }),
+      scheduledRun({ status: "queued", fired_at: ago(2), finished_at: null, scheduled_for: futureIso }),
+    ];
+    const h = rollupLoopHealth({ enabled: true, stale_after_minutes: null }, runs, NOW);
+
+    // last_run_at is the MAX fired_at (the queued scheduled run at ago(2)).
+    expect(h.last_run_at).toBe(ago(2));
+    expect(h.last_run_status).toBe("queued"); // coarse status of the newest run
+    // health derives from the newest TERMINAL run (the success at ago(30)).
+    expect(h.state).toBe("healthy");
+    // healthy ⟹ a success is recorded, and it is not after the newest run.
+    expect(h.last_success_at).toBe(ago(28));
+    expect(h.last_success_at! <= h.last_run_at!).toBe(true);
+    // next_run_at, when present, is strictly in the future.
+    expect(h.next_run_at).toBe(futureIso);
+    expect(h.next_run_at! > NOW).toBe(true);
+    // counts are non-negative and bounded by total runs.
+    expect(h.consecutive_failures).toBe(0); // newest terminal succeeded
+    expect(h.runs_last_7d).toBeGreaterThanOrEqual(0);
+    expect(h.runs_last_7d).toBeLessThanOrEqual(runs.length);
+  });
+
+  it("state=failed ⟹ consecutive_failures ≥ threshold; disabled ⟺ not enabled", () => {
+    const failed = rollupLoopHealth(
+      { enabled: true, stale_after_minutes: null, fail_threshold: 2 },
+      [
+        makeRun({ status: "failed", fired_at: ago(1) }),
+        makeRun({ status: "failed", fired_at: ago(2) }),
+      ],
+      NOW,
+    );
+    expect(failed.state).toBe("failed");
+    expect(failed.consecutive_failures).toBeGreaterThanOrEqual(2);
+
+    const disabled = rollupLoopHealth(
+      { enabled: false, stale_after_minutes: null },
+      [makeRun({ status: "succeeded" })],
+      NOW,
+    );
+    expect(disabled.state).toBe("disabled"); // disabled wins regardless of a green run
+  });
+});
