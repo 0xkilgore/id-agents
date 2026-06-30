@@ -64,11 +64,16 @@ export async function buildArtifactDetail(
   ]);
   const draft = parseDraftPayload(draftRow);
   const fallbackPath = ref.decodedPath;
+  // The only 404 is "nothing to resolve at all". A reference that resolves to a
+  // path (an uncataloged artifact reached via the encoded-path fallback —
+  // notably cursor-lane artifacts authored inside build worktrees that the
+  // filesystem reconciler never catalogs) MUST open to a full detail payload,
+  // even when the underlying file is no longer readable (e.g. the worktree was
+  // reaped). It surfaces an honest "unavailable" body, not a hard 404.
   if (!catalog && !review && !draft && !fallbackPath) return null;
 
   const syntheticCatalog = catalog ?? syntheticCatalogFromPath(ref.artifactId, fallbackPath, nowIso);
   const body = await readDetailBody(syntheticCatalog, draft);
-  if (!catalog && !review && !draft && body.kind === "missing") return null;
   const render = renderMetadata(syntheticCatalog, body);
   const entry = syntheticCatalog ? artifactRowToEntry(syntheticCatalog, review, ops) : null;
   const displayTitle = humanDisplayTitle(catalog, draft, fallbackPath, ref.artifactId);
@@ -93,7 +98,10 @@ export async function buildArtifactDetail(
       produced_at: syntheticCatalog?.produced_at ?? null,
       abs_path: syntheticCatalog?.abs_path ?? null,
       source: syntheticCatalog?.source ?? null,
-      availability: syntheticCatalog?.availability ?? availabilityFromBody(body, catalog),
+      // A real catalog row carries its own (reconciled) availability; a
+      // synthetic path-only artifact derives it honestly from the body, so a
+      // file that is gone reads "missing" rather than a hardcoded "unknown".
+      availability: catalog?.availability ?? availabilityFromBody(body, catalog),
       source_badges: parseSourceBadges(syntheticCatalog?.source_badges),
       reconciled_at: syntheticCatalog?.reconciled_at ?? null,
       created_at: syntheticCatalog?.created_at ?? null,

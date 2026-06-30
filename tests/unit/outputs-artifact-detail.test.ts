@@ -172,4 +172,47 @@ describe("GET /artifacts/:id/detail", () => {
       artifact_id: "art-missing",
     });
   });
+
+  // Bug #10: a cursor-lane artifact lives inside a build worktree under
+  // `.worktrees/`, which the filesystem reconciler deliberately never scans
+  // (it would resurrect stale worktree copies). So a cursor-authored artifact
+  // is NEVER cataloged and is reachable only via the encoded-path fallback.
+  // Once that worktree is reaped, the manager can no longer read the file — and
+  // the reader pane showed "Artifact detail unavailable / not found" (a hard
+  // 404) instead of opening. A path-resolvable reference must resolve to a full
+  // detail payload like any other artifact, with an honest unavailable body
+  // rather than a 404.
+  it("opens a cursor-authored artifact to a full detail view even when its worktree file is gone", async () => {
+    // A path into a reaped cursor build worktree; the file is intentionally not
+    // written, modeling a worktree that has since been removed.
+    const reapedWorktreePath = path.join(
+      tmp,
+      ".worktrees",
+      "cursor-lane-build",
+      "output",
+      "cursor-authored-closeout.md",
+    );
+    const encoded = Buffer.from(reapedWorktreePath, "utf8").toString("base64url");
+    const artifactId = artifactIdFromPath(reapedWorktreePath);
+
+    const res = await call("GET", `/artifacts/detail?path=${encodeURIComponent(encoded)}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({
+      ok: true,
+      schema_version: "artifact.detail.v1",
+      artifact_id: artifactId,
+      resolved_from: "encoded_path",
+      // Honest empty state — the reference resolves, the body is unavailable.
+      metadata: {
+        abs_path: reapedWorktreePath,
+        availability: "missing",
+      },
+    });
+    // Reader pane has a human title (the basename) and an honest, non-fabricated
+    // body rather than a 404.
+    expect(res.body.displayTitle).toBe("cursor-authored-closeout.md");
+    expect(res.body.body.kind).toBe("missing");
+    expect(res.body.body.text).toBeNull();
+  });
 });
