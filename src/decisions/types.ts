@@ -200,6 +200,7 @@ export type DecisionActedUponState =
   | "blocked";
 
 export type DecisionOperationType =
+  | "DECISION_VIEWED"
   | "DECISION_DECIDE"
   | "DECISION_TASK_CREATED"
   | "DECISION_DISPATCH_CREATED"

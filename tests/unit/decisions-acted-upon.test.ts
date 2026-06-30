@@ -9,7 +9,7 @@
 import express, { type Express } from "express";
 import { describe, it, expect } from "vitest";
 import { SqliteAdapter } from "../../src/db/sqlite-adapter.js";
-import { insertDecision, migrateDecisionsTables } from "../../src/decisions/storage.js";
+import { insertDecision, listDecisionEvents, migrateDecisionsTables } from "../../src/decisions/storage.js";
 import { mountDecisionsRoutes } from "../../src/decisions/routes.js";
 import type { DecisionRow } from "../../src/decisions/types.js";
 
@@ -97,7 +97,28 @@ describe("P5 acted-upon read model", () => {
     expect(res.body.schema_version).toBe("decision.acted-upon.v1");
     expect(res.body.state).toBe("not_acted");
     expect(res.body.selected_option_id).toBeNull();
-    expect(res.body.operations).toEqual([]);
+    expect(res.body.acted_at).toBeNull();
+    expect(res.body.operations).toHaveLength(1);
+    expect(res.body.operations[0]).toMatchObject({
+      operation_type: "DECISION_VIEWED",
+      actor: { kind: "human", id: "chris", ref: "human:chris" },
+      idempotency_key: "decision:viewed:v1:dec_1:human:chris",
+    });
+  });
+
+  it("marks the decision read when the acted-upon detail is viewed, idempotently", async () => {
+    const { app, adapter } = await bootApp();
+    await insertDecision(adapter, makeRow());
+    const first = await client(app).get("/decisions/dec_1/acted-upon");
+    const second = await client(app).get("/decisions/dec_1/acted-upon");
+    expect(first.status).toBe(200);
+    expect(second.status).toBe(200);
+
+    const events = await listDecisionEvents(adapter, "dec_1");
+    const viewed = events.filter((event) => event.event_type === "decision.viewed");
+    expect(viewed).toHaveLength(1);
+    expect(viewed[0]!.actor).toBe("human:chris");
+    expect(second.body.operations.filter((op: any) => op.operation_type === "DECISION_VIEWED")).toHaveLength(1);
   });
 
   it("flips to decided after the decide endpoint", async () => {

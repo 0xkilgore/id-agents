@@ -21,6 +21,7 @@ import {
   listDecisions,
   recordDecideTransaction,
   recordDecisionActionTransaction,
+  recordDecisionViewedTransaction,
 } from "./storage.js";
 import { ingestDecisionsFromMarkdown, type IngestResult } from "./producer.js";
 import type {
@@ -347,8 +348,14 @@ export function mountDecisionsRoutes(
           res.status(404).json({ ok: false, error: "decision_not_found" });
           return;
         }
+        const generatedAt = now().toISOString();
+        await recordDecisionViewedTransaction(adapter, {
+          decision_id: decisionId,
+          actor: "human:chris",
+          now: generatedAt,
+        });
         const events = await listDecisionEvents(adapter, decisionId);
-        res.json(buildActedUpon(row, events, now().toISOString()));
+        res.json(buildActedUpon(row, events, generatedAt));
       } catch (err) {
         res.status(500).json({
           ok: false,
@@ -622,6 +629,7 @@ const VALID_ACTIONS = new Set<DecisionActionType>([
   "report_to_manager",
 ]);
 const OP_TYPE_BY_EVENT: Record<string, DecisionOperationType> = {
+  "decision.viewed": "DECISION_VIEWED",
   "decision.decided": "DECISION_DECIDE",
   "decision.action.create_manager_task": "DECISION_TASK_CREATED",
   "decision.action.create_dispatch": "DECISION_DISPATCH_CREATED",

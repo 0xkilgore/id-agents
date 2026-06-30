@@ -376,6 +376,58 @@ export type RecordActionResult =
   | { kind: "requires_decision"; status: DecisionStatus }
   | { kind: "not_found" };
 
+export type RecordViewedResult =
+  | { kind: "recorded"; event: DecisionEventRow }
+  | { kind: "idempotent_replay"; event: DecisionEventRow }
+  | { kind: "not_found" };
+
+/**
+ * Mark a decision as read/viewed without changing its decision lifecycle status.
+ * The marker is append-only and idempotent per `(decision_id, actor)`, so a
+ * refresh of the acted-upon detail does not keep growing the event log.
+ */
+export async function recordDecisionViewedTransaction(
+  adapter: DbAdapter,
+  input: {
+    decision_id: string;
+    actor: "human:chris";
+    now: string;
+  },
+): Promise<RecordViewedResult> {
+  const decision = await getDecisionById(adapter, input.decision_id);
+  if (!decision) return { kind: "not_found" };
+
+  const events = await listDecisionEvents(adapter, input.decision_id);
+  const existing = events.find((e) => e.event_type === "decision.viewed" && e.actor === input.actor);
+  if (existing) return { kind: "idempotent_replay", event: existing };
+
+  const payload = {
+    schema_version: "decision.viewed.v1",
+    idempotency_key: `decision:viewed:v1:${input.decision_id}:${input.actor}`,
+    source_panel: "decision_acted_upon",
+    target_refs: [],
+  };
+  const payloadJson = JSON.stringify(payload);
+  const eventId = await appendDecisionEvent(adapter, {
+    decision_id: input.decision_id,
+    event_type: "decision.viewed",
+    actor: input.actor,
+    created_at: input.now,
+    payload_json: payloadJson,
+  });
+  return {
+    kind: "recorded",
+    event: {
+      event_id: eventId,
+      decision_id: input.decision_id,
+      event_type: "decision.viewed",
+      actor: input.actor,
+      created_at: input.now,
+      payload_json: payloadJson,
+    },
+  };
+}
+
 /**
  * Append-only typed follow-up operation on a DECIDED decision. The decision
  * must already be `resolved` (decided) — a follow-up before a decision is a
