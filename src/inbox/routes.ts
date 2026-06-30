@@ -8,10 +8,17 @@ import {
   countInboxItems, countReceivedSince, getOldestUnresolved, getNewestReceived,
   listInboxItems, getInboxItem, getLinks, getAuditEvents,
   getPolicyViolations, getRoutingDecisions, listAllPolicyViolations,
+  countInboxBySourceKind, listInboxItemsByChannel,
 } from './storage.js';
 import { applyClassifyInboxItem, applyProposeRoute, applySnooze, applyCheckOff, applyAuditNote } from './ops.js';
 import { applyBulkInboxAction } from './bulk.js';
 import { evaluateInboxRouting, DEFAULT_ROUTING_RULES } from './evaluator.js';
+import {
+  INBOX_CHANNELS, type InboxChannel, type InboxByChannelResponse,
+  type InboxChannelGroup, type InboxChannelItemDetail,
+  isInboxChannel, channelForItem, channelCountsTowardNeedsYou,
+  groupChannelCounts, sumNeedsYouUnresolved, buildProvenance,
+} from './channels.js';
 
 export function mountInboxRoutes(app: Application, adapter: DbAdapter): void {
 
@@ -110,6 +117,101 @@ export function mountInboxRoutes(app: Application, adapter: DbAdapter): void {
         routing_decisions,
       };
 
+      res.json(detail);
+    } catch (err) {
+      res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  // ── GET /inbox/by-channel ──
+  // Channel-grouped read-model. Returns a stable set of channels (email,
+  // telegram, voice, artifact-comment, forward, other), each with totals and a
+  // bounded item slice. Filterable by ?channel= and ?state=. needs_you_unresolved
+  // excludes artifact-comment per the 2026-06-29 policy.
+  app.get('/inbox/by-channel', async (req: Request, res: Response) => {
+    try {
+      const channelParam = req.query.channel as string | undefined;
+      if (channelParam && !isInboxChannel(channelParam)) {
+        res.status(400).json({ error: `Unknown channel: ${channelParam}`, valid_channels: INBOX_CHANNELS });
+        return;
+      }
+      const channelFilter = (channelParam as InboxChannel | undefined) ?? null;
+      const state = req.query.state as OperatorState | undefined;
+      const limit = Math.min(parseInt(req.query.limit as string) || 50, 200);
+      const offset = parseInt(req.query.offset as string) || 0;
+
+      const counts = await countInboxBySourceKind(adapter, { state });
+      const totals = groupChannelCounts(counts);
+
+      const selected = channelFilter ? [channelFilter] : [...INBOX_CHANNELS];
+      const groups: InboxChannelGroup[] = await Promise.all(
+        selected.map(async (channel): Promise<InboxChannelGroup> => {
+          const t = totals.get(channel)!;
+          const items = await listInboxItemsByChannel(adapter, channel, { state }, limit, offset);
+          return {
+            channel,
+            counts_toward_needs_you: channelCountsTowardNeedsYou(channel),
+            total: t.total,
+            unresolved: t.unresolved,
+            items,
+          };
+        }),
+      );
+
+      const response: InboxByChannelResponse = {
+        schema_version: 'inbox.by_channel.v1',
+        generated_at: new Date().toISOString(),
+        filters: { channel: channelFilter, state: state ?? null, limit, offset },
+        total: groups.reduce((sum, g) => sum + g.total, 0),
+        needs_you_unresolved: sumNeedsYouUnresolved(totals),
+        channels: groups,
+      };
+      res.json(response);
+    } catch (err) {
+      res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  // ── GET /inbox/by-channel/:channel/items/:phid ──
+  // Per-channel drill-in: full item detail + provenance. 404 if the item does
+  // not exist; 409 if the item exists but belongs to a different channel.
+  app.get('/inbox/by-channel/:channel/items/:phid', async (req: Request<{ channel: string; phid: string }>, res: Response) => {
+    try {
+      const { channel, phid } = req.params;
+      if (!isInboxChannel(channel)) {
+        res.status(400).json({ error: `Unknown channel: ${channel}`, valid_channels: INBOX_CHANNELS });
+        return;
+      }
+
+      const item = await getInboxItem(adapter, phid);
+      if (!item) {
+        res.status(404).json({ error: 'Item not found' });
+        return;
+      }
+
+      const actualChannel = channelForItem(item);
+      if (actualChannel !== channel) {
+        res.status(409).json({ error: 'Channel mismatch', expected_channel: actualChannel });
+        return;
+      }
+
+      const [links, audit_events, policy_violations, routing_decisions] = await Promise.all([
+        getLinks(adapter, phid),
+        getAuditEvents(adapter, phid),
+        getPolicyViolations(adapter, phid),
+        getRoutingDecisions(adapter, phid),
+      ]);
+
+      const detail: InboxChannelItemDetail = {
+        schema_version: 'inbox.channel_item.v1',
+        channel: actualChannel,
+        item,
+        links,
+        audit_events,
+        policy_violations,
+        routing_decisions,
+        provenance: buildProvenance(item),
+      };
       res.json(detail);
     } catch (err) {
       res.status(500).json({ error: err instanceof Error ? err.message : String(err) });

@@ -4,8 +4,12 @@ import type { DbAdapter } from '../db/db-adapter.js';
 import type {
   InboxItemRow, InboxLinkRow, InboxAuditEvent,
   InboxPolicyViolation, InboxRoutingDecision,
-  OperatorState, LinkKind,
+  OperatorState, LinkKind, SourceKind,
 } from './types.js';
+import {
+  type InboxChannel, type ChannelCount,
+  sourceKindsForChannel, UNRESOLVED_OPERATOR_STATES,
+} from './channels.js';
 
 // ── DDL (idempotent, safe to call every startup) ───────────────────
 
@@ -262,6 +266,73 @@ export async function countReceivedSince(adapter: DbAdapter, since: string): Pro
     [since],
   );
   return Number(rows[0]?.cnt ?? 0);
+}
+
+// ── Channel-aware read-model (Inbox channel grouping + drill-in) ──────
+
+// Per-source-kind totals + unresolved counts, optionally constrained to a
+// single operator state. Callers fold these into channels via
+// channels.ts#groupChannelCounts.
+export async function countInboxBySourceKind(
+  adapter: DbAdapter,
+  filters: { state?: OperatorState } = {},
+): Promise<ChannelCount[]> {
+  const conditions: string[] = [];
+  const params: any[] = [];
+  let idx = 1;
+  if (filters.state) {
+    conditions.push(`operator_state = $${idx++}`);
+    params.push(filters.state);
+  }
+  const where = conditions.length > 0 ? 'WHERE ' + conditions.join(' AND ') : '';
+
+  const unresolvedList = UNRESOLVED_OPERATOR_STATES.map(() => `$${idx++}`).join(', ');
+  params.push(...UNRESOLVED_OPERATOR_STATES);
+
+  const { rows } = await adapter.query<{ source_kind: SourceKind; total: number; unresolved: number }>(
+    `SELECT source_kind,
+            COUNT(*) AS total,
+            SUM(CASE WHEN operator_state IN (${unresolvedList}) THEN 1 ELSE 0 END) AS unresolved
+       FROM inbox_items ${where}
+       GROUP BY source_kind`,
+    params,
+  );
+  return rows.map((r) => ({
+    source_kind: r.source_kind,
+    total: Number(r.total) || 0,
+    unresolved: Number(r.unresolved) || 0,
+  }));
+}
+
+// Bounded list of items for one channel (mapped to its source kinds),
+// most-recent first, with an optional state filter.
+export async function listInboxItemsByChannel(
+  adapter: DbAdapter,
+  channel: InboxChannel,
+  filters: { state?: OperatorState } = {},
+  limit = 50,
+  offset = 0,
+): Promise<InboxItemRow[]> {
+  const kinds = sourceKindsForChannel(channel);
+  if (kinds.length === 0) return [];
+
+  const params: any[] = [];
+  let idx = 1;
+  const kindPlaceholders = kinds.map(() => `$${idx++}`).join(', ');
+  params.push(...kinds);
+
+  const conditions = [`source_kind IN (${kindPlaceholders})`];
+  if (filters.state) {
+    conditions.push(`operator_state = $${idx++}`);
+    params.push(filters.state);
+  }
+
+  const { rows } = await adapter.query<InboxItemRow>(
+    `SELECT * FROM inbox_items WHERE ${conditions.join(' AND ')}
+       ORDER BY received_at DESC LIMIT $${idx++} OFFSET $${idx}`,
+    [...params, limit, offset],
+  );
+  return rows;
 }
 
 export async function getOldestUnresolved(adapter: DbAdapter): Promise<string | null> {

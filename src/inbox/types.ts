@@ -17,6 +17,7 @@ export type SourceKind =
   | 'telegram'
   | 'voice_note'
   | 'forwarded_instruction'
+  | 'artifact_comment'
   | 'manual_capture'
   | 'api';
 
