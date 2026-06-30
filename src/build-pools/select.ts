@@ -11,10 +11,21 @@ import type { BuildPool, BuilderSlot } from "./types.js";
 
 /** Default heartbeat freshness window; env-tunable. */
 export const DEFAULT_ONLINE_WINDOW_MS = 10 * 60 * 1000;
+export const CODEX_ONLY_LOAD_LOOP_ALLOWED_AGENTS = [
+  "frontend-ui-codex",
+  "substrate-api-codex",
+  "substrate-orch-codex",
+] as const;
 
 export interface SelectOptions {
   now?: Date;
   onlineWindowMs?: number;
+  /**
+   * Optional runtime exclusion guard. When omitted, selection is unchanged.
+   * Supplying this lets a scheduler load-loop explicitly constrain dispatches
+   * during Codex-only usage-exhaustion windows without mutating pool seeds.
+   */
+  allowedAgents?: readonly string[];
 }
 
 function onlineWindow(opts?: SelectOptions): number {
@@ -47,7 +58,9 @@ export function selectBuilder(
   slots: BuilderSlot[],
   opts?: SelectOptions,
 ): string | null {
+  const allowedAgents = opts?.allowedAgents ? new Set(opts.allowedAgents) : null;
   const avail = pool.members
+    .filter((m) => !allowedAgents || allowedAgents.has(m))
     .map((m) => slots.find((s) => s.agent === m && s.pool_id === pool.pool_id))
     .filter((s): s is BuilderSlot => !!s && isAvailable(s, opts));
   if (avail.length === 0) return null;

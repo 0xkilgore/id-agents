@@ -2,7 +2,12 @@
 
 import { describe, it, expect } from "vitest";
 import { BuildPoolRegistry } from "../../src/build-pools/registry.js";
-import { selectBuilder, isOnline, isAvailable } from "../../src/build-pools/select.js";
+import {
+  CODEX_ONLY_LOAD_LOOP_ALLOWED_AGENTS,
+  selectBuilder,
+  isOnline,
+  isAvailable,
+} from "../../src/build-pools/select.js";
 import type { BuildPool, BuilderSlot } from "../../src/build-pools/types.js";
 
 const NOW = new Date("2026-06-23T20:00:00.000Z");
@@ -88,6 +93,51 @@ describe("selectBuilder", () => {
     const solo: BuildPool = { ...pool, members: ["roger"], max_parallel: 1 };
     expect(selectBuilder(solo, [slot("roger")], { now: NOW })).toBe("roger");
     expect(selectBuilder(solo, [slot("roger", { state: "building" })], { now: NOW })).toBeNull();
+  });
+
+  it("is default-inert: normal frontend selection still picks Claude first when no runtime exclusion is supplied", () => {
+    const frontend = BuildPoolRegistry.load({}).byId("frontend")!;
+    const slots = frontend.members.map((agent) => slot(agent, { pool_id: "frontend" }));
+
+    expect(selectBuilder(frontend, slots, { now: NOW })).toBe("regina");
+  });
+
+  it("supports an explicit Codex-only load-loop guard that excludes Claude/Anthropic/Cursor lanes", () => {
+    const frontend = BuildPoolRegistry.load({}).byId("frontend")!;
+    const frontendSlots = frontend.members.map((agent) => slot(agent, { pool_id: "frontend" }));
+
+    expect(
+      selectBuilder(frontend, frontendSlots, {
+        now: NOW,
+        allowedAgents: CODEX_ONLY_LOAD_LOOP_ALLOWED_AGENTS,
+      }),
+    ).toBe("frontend-ui-codex");
+
+    const backend = BuildPoolRegistry.load({}).byId("backend")!;
+    const backendSlots = backend.members.map((agent) => slot(agent));
+    expect(
+      selectBuilder(backend, backendSlots, {
+        now: NOW,
+        allowedAgents: CODEX_ONLY_LOAD_LOOP_ALLOWED_AGENTS,
+      }),
+    ).toBe("substrate-orch-codex");
+  });
+
+  it("returns null under Codex-only guard when only Claude/Anthropic/Cursor lanes are available", () => {
+    const claudeAndCursorOnly: BuildPool = {
+      ...pool,
+      members: ["regina", "brunel", "frontend-qa-cursor"],
+      pool_id: "frontend",
+      repo_alias: "kapelle-site",
+    };
+    const slots = claudeAndCursorOnly.members.map((agent) => slot(agent, { pool_id: "frontend" }));
+
+    expect(
+      selectBuilder(claudeAndCursorOnly, slots, {
+        now: NOW,
+        allowedAgents: CODEX_ONLY_LOAD_LOOP_ALLOWED_AGENTS,
+      }),
+    ).toBeNull();
   });
 });
 

@@ -12,6 +12,7 @@ export {
   selectBuilder,
   isAvailable,
   isOnline,
+  CODEX_ONLY_LOAD_LOOP_ALLOWED_AGENTS,
   DEFAULT_ONLINE_WINDOW_MS,
   type SelectOptions,
 } from "./select.js";
