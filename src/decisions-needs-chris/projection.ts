@@ -10,7 +10,19 @@
 // Pure + `now`-injected (deterministic, unit-testable). The route fetches the
 // two sources, maps them to the inputs below, and calls buildNeedsChrisQueue.
 
+import type { ApprovalPolicySummary } from "../approval-policy/types.js";
+
 export type NeedsChrisKind = "clarification" | "build_approval";
+
+/** Per-row approval-policy verdict (T-CKPT). The Approvals surface reads the
+ *  data-driven policy and annotates each build approval with whether it needs
+ *  Chris and which rule(s) gated it — so the row shows *why*, not just that it's
+ *  in the batch. */
+export interface NeedsChrisGate {
+  needs_chris: boolean;
+  matched_rules: string[];
+  rationale: string;
+}
 
 export type NeedsChrisActionType = "approve" | "hold" | "re_route" | "reclassify";
 
@@ -39,6 +51,9 @@ export interface NeedsChrisRow {
   allowed_actions: NeedsChrisActionType[];
   /** Full action affordances (method + path) the UI invokes. */
   actions: NeedsChrisAction[];
+  /** Approval-policy verdict (build approvals only; present when a classifier
+   *  is supplied). Lets the surface show why a row gates to Chris. */
+  gate?: NeedsChrisGate;
 }
 
 export interface NeedsChrisQueue {
@@ -46,6 +61,18 @@ export interface NeedsChrisQueue {
   generated_at: string;
   counts: { total: number; clarification: number; build_approval: number };
   rows: NeedsChrisRow[];
+  /** The data-driven approval policy in effect (present when supplied). The
+   *  surface shows this so "what needs Chris" is visible, not implicit. */
+  approval_policy?: ApprovalPolicySummary;
+}
+
+/** Optional hooks so the Approvals surface can layer its data-driven approval
+ *  policy onto the queue without coupling this pure projection to the loader. */
+export interface BuildNeedsChrisOptions {
+  /** Classify one build approval against the policy → its per-row gate verdict. */
+  classifyBuildApproval?: (input: BuildApprovalInput) => NeedsChrisGate;
+  /** The policy summary to embed at the top of the queue. */
+  approvalPolicy?: ApprovalPolicySummary;
 }
 
 export interface ClarificationInput {
@@ -111,6 +138,7 @@ export function buildNeedsChrisQueue(
   clarifications: readonly ClarificationInput[],
   buildApprovals: readonly BuildApprovalInput[],
   nowIso: string,
+  options: BuildNeedsChrisOptions = {},
 ): NeedsChrisQueue {
   const nowMs = Date.parse(nowIso);
 
@@ -135,7 +163,7 @@ export function buildNeedsChrisQueue(
     .sort((a, b) => (a.priority - b.priority) || (a.item_id < b.item_id ? -1 : 1))
     .map((b) => {
       const actions = buildApprovalActions(b.item_id);
-      return {
+      const row: NeedsChrisRow = {
         kind: "build_approval",
         id: b.item_id, // RD-001 stable id
         dispatch_id: null,
@@ -148,10 +176,12 @@ export function buildNeedsChrisQueue(
         allowed_actions: actions.map((a) => a.action),
         actions,
       };
+      if (options.classifyBuildApproval) row.gate = options.classifyBuildApproval(b);
+      return row;
     });
 
   const rows = [...clarificationRows, ...buildRows];
-  return {
+  const queue: NeedsChrisQueue = {
     schema_version: "decisions.needs-chris.v1",
     generated_at: nowIso,
     counts: {
@@ -161,4 +191,6 @@ export function buildNeedsChrisQueue(
     },
     rows,
   };
+  if (options.approvalPolicy) queue.approval_policy = options.approvalPolicy;
+  return queue;
 }

@@ -1,0 +1,40 @@
+{
+  "schema_version": "approval-policy.v1",
+  "_comment": "Data-driven approval policy — what needs Chris vs what agents auto-decide. Kapelle Fleet Doctrine 2026-06-29 §'Approval / merge discipline': scope changes (risk=scope), spend over a threshold, external sends, and irreversible domain-data cutovers gate to Chris; everything else, agents decide. Edit this file to change the gate — no code change required. Keywords are case-insensitive substring matches scanned against an item's title/body. Consumed by src/approval-policy/policy.ts (loadApprovalPolicy) and surfaced by GET /decisions/needs-chris (approval_policy block + per-row gate).",
+  "default_decision": "auto",
+  "gated_risk_classes": ["scope"],
+  "spend": {
+    "currency": "USD",
+    "threshold": 50
+  },
+  "external_send": {
+    "gate": true,
+    "keywords": [
+      "send email",
+      "email campaign",
+      "email blast",
+      "mailing list",
+      "publish",
+      "tweet",
+      "post to",
+      "external account",
+      "outbound send"
+    ]
+  },
+  "irreversible_cutover": {
+    "gate": true,
+    "keywords": [
+      "cutover",
+      "migrate production",
+      "delete data",
+      "drop table",
+      "drop database",
+      "force push",
+      "data deletion",
+      "irreversible",
+      "rotate keys",
+      "revoke credentials",
+      "wipe"
+    ]
+  }
+}

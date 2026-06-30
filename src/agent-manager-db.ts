@@ -180,6 +180,7 @@ import {
 } from './loops/manual-trigger.js';
 import { ACTIVE_LOOP_RUN_STATUSES } from './loops/types.js';
 import { loadModelPolicy, type ModelPolicyService } from './model-policy/policy.js';
+import { loadApprovalPolicy, type ApprovalPolicyService } from './approval-policy/policy.js';
 import { resolveManagerBindHost } from './manager-bind-host.js';
 import { getBuildStatusCached, loadBuildStatus, type BuildStatus } from './build-info.js';
 import {
@@ -545,6 +546,9 @@ export class AgentManagerDb {
   private dispatchScheduler: SchedulerHandle | null = null;
   // D1 / T-MODEL.1 — per-agent model policy (Codex Light standing rule).
   private modelPolicy: ModelPolicyService | null = null;
+  // T-CKPT — data-driven approval policy (what needs Chris vs auto). Lazily
+  // loaded + cached from configs/approval-policy.json; never throws.
+  private approvalPolicy: ApprovalPolicyService | null = null;
   // W2-1 DispatchVerification — durable projection + periodic verification job.
   // Both are constructed alongside the dispatch scheduler in start() (they share
   // the scheduler's SqliteAdapter + default team) and stay null until then.
@@ -1112,6 +1116,20 @@ export class AgentManagerDb {
    */
   private dispatchDeriveOpts(): { constrainedProviders?: string[] } {
     return this.modelPolicy ? { constrainedProviders: this.modelPolicy.constrainedProviders() } : {};
+  }
+
+  /**
+   * T-CKPT: the data-driven approval policy (what needs Chris vs auto). Loaded
+   * once from configs/approval-policy.json and cached; loadApprovalPolicy never
+   * throws (a missing/broken file degrades to the builtin doctrine default).
+   */
+  private getApprovalPolicy(): ApprovalPolicyService {
+    if (!this.approvalPolicy) {
+      this.approvalPolicy = loadApprovalPolicy({
+        configPath: `${process.cwd()}/configs/approval-policy.json`,
+      });
+    }
+    return this.approvalPolicy;
   }
 
   /**
@@ -3307,7 +3325,27 @@ export class AgentManagerDb {
           created_at: b.created_at,
         }));
 
-        const queue = buildNeedsChrisQueue(clarifications, buildApprovals, new Date(now).toISOString());
+        // T-CKPT — the data-driven approval policy decides what needs Chris vs
+        // auto (scope/spend/external/irreversible gate, rest auto). The surface
+        // reads it: embed the policy in effect + annotate each build approval
+        // with its gate verdict (which rule matched, and why).
+        const approvalPolicy = this.getApprovalPolicy();
+        const queue = buildNeedsChrisQueue(
+          clarifications,
+          buildApprovals,
+          new Date(now).toISOString(),
+          {
+            approvalPolicy: approvalPolicy.summary(),
+            classifyBuildApproval: (b) => {
+              const d = approvalPolicy.classify({ risk_class: b.risk_class, text: b.title });
+              return {
+                needs_chris: d.gate === 'chris',
+                matched_rules: d.matched_rules.map((m) => m.rule),
+                rationale: d.rationale,
+              };
+            },
+          },
+        );
         return res.json({ ok: true, ...queue });
       } catch (err) {
         return res.status(500).json({
