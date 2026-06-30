@@ -8,6 +8,7 @@ import {
   taskRowToEntry,
   buildTasksEntriesEnvelope,
 } from "../../src/tasks-readmodel/entry-projection.js";
+import { todayIso } from "../../src/tasks-readmodel/bands.js";
 import type { TaskRow } from "../../src/db/types.js";
 
 const ROW: TaskRow = {
@@ -27,6 +28,11 @@ const ROW: TaskRow = {
 };
 
 describe("taskRowToEntry", () => {
+  it("uses the operator local day for default today boundaries", () => {
+    const localEvening = new Date("2026-06-30T03:30:00.000Z"); // 2026-06-29 22:30 America/Chicago
+    expect(todayIso(localEvening)).toBe("2026-06-29");
+  });
+
   it("projects a task row into the typed TaskEntry doc-model shape", () => {
     const names = new Map([["agent-roger", "roger"], ["agent-regina", "regina"]]);
     const e = taskRowToEntry(ROW, names);
@@ -72,6 +78,17 @@ describe("taskRowToEntry", () => {
 
   it("uses id as phid when uuid is empty", () => {
     expect(taskRowToEntry({ ...ROW, uuid: "" }, new Map()).phid).toBe("tsk_1");
+  });
+
+  it("does not promote tomorrow's local due date into today at the UTC boundary", () => {
+    const localEvening = new Date("2026-06-30T03:30:00.000Z"); // still 2026-06-29 in America/Chicago
+    const e = taskRowToEntry(
+      { ...ROW, title: "Send status due:2026-06-30", description: null },
+      new Map(),
+      todayIso(localEvening),
+    );
+    expect(e.due_iso).toBe("2026-06-30");
+    expect(e.band).toBe("tomorrow");
   });
 });
 

@@ -33,9 +33,17 @@ const PRIORITY_RE = /(?:^|\s)!(high|med|low)\b|(?:^|\s)(?:priority|prio|p):(high
 const DUE_RE = /\bdue:(\d{4}-\d{2}-\d{2})\b/i;
 const DONE_RE = /\bdone:\d{4}-\d{2}-\d{2}\b/i;
 const ARCHIVED_RE = /\barchived:\d{4}-\d{2}-\d{2}\b/i;
+const DEFAULT_TASK_TIMEZONE = "America/Chicago";
 
-export function todayIso(now: Date = new Date()): string {
-  return now.toISOString().slice(0, 10);
+export function todayIso(now: Date = new Date(), timeZone: string = DEFAULT_TASK_TIMEZONE): string {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(now);
+  const get = (type: string): string => parts.find((part) => part.type === type)?.value ?? "";
+  return `${get("year")}-${get("month")}-${get("day")}`;
 }
 
 export function addDaysIso(iso: string, days: number): string {
