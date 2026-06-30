@@ -54,6 +54,9 @@ export interface InboxItemRow {
   projection_version: number;
   legacy_inbox_md_line: string | null;
   legacy_shadow_path: string | null;
+  // Operator "mark-read" marker; null until the operator marks the item read.
+  // Optional so existing row constructors (fixtures, projection) need no change.
+  read_at?: string | null;
 }
 
 // ── inbox_links row ──

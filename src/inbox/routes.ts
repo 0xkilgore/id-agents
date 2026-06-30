@@ -19,8 +19,28 @@ import {
   isInboxChannel, channelForItem, channelCountsTowardNeedsYou,
   groupChannelCounts, sumNeedsYouUnresolved, buildProvenance,
 } from './channels.js';
+import type { TasksRepository } from '../db/db-service.js';
+import {
+  triageInboxToTask, routeInboxToDispatch, markInboxRead,
+  InboxActionError, type EnqueueDispatchFn,
+} from './actions.js';
 
-export function mountInboxRoutes(app: Application, adapter: DbAdapter): void {
+export interface InboxRouteDeps {
+  tasks?: TasksRepository;
+  enqueueDispatch?: EnqueueDispatchFn;
+  resolveTeamId?: (req: Request) => Promise<string | null>;
+}
+
+export function mountInboxRoutes(app: Application, adapter: DbAdapter, deps: InboxRouteDeps = {}): void {
+
+  const resolveTeam = async (req: Request): Promise<string | null> => {
+    if (!deps.resolveTeamId) return null;
+    try { return await deps.resolveTeamId(req); } catch { return null; }
+  };
+  const sendActionError = (res: Response, err: unknown): void => {
+    const status = err instanceof InboxActionError ? err.status : 400;
+    res.status(status).json({ error: err instanceof Error ? err.message : String(err) });
+  };
 
   // ── GET /inbox/summary ──
 
@@ -233,6 +253,60 @@ export function mountInboxRoutes(app: Application, adapter: DbAdapter): void {
       res.json({ violations, count: violations.length });
     } catch (err) {
       res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  // ── POST /inbox/items/:phid/triage ── (triage -> real task)
+  app.post('/inbox/items/:phid/triage', async (req: Request<{ phid: string }>, res: Response) => {
+    try {
+      const team_id = req.body.team_id ?? (await resolveTeam(req));
+      const result = await triageInboxToTask(adapter, deps, {
+        inbox_phid: req.params.phid,
+        team_id,
+        actor_id: req.body.actor_id,
+        ts: req.body.ts,
+        title: req.body.title,
+        description: req.body.description,
+        owner: req.body.owner ?? null,
+        track: req.body.track ?? null,
+      });
+      res.json({ ok: true, ...result });
+    } catch (err) {
+      sendActionError(res, err);
+    }
+  });
+
+  // ── POST /inbox/items/:phid/route ── (route -> real dispatch)
+  app.post('/inbox/items/:phid/route', async (req: Request<{ phid: string }>, res: Response) => {
+    try {
+      const team_id = req.body.team_id ?? (await resolveTeam(req));
+      const result = await routeInboxToDispatch(adapter, deps, {
+        inbox_phid: req.params.phid,
+        to_agent: req.body.to_agent,
+        team_id,
+        actor_id: req.body.actor_id,
+        ts: req.body.ts,
+        message: req.body.message,
+        subject: req.body.subject,
+        reason: req.body.reason,
+      });
+      res.json({ ok: true, ...result });
+    } catch (err) {
+      sendActionError(res, err);
+    }
+  });
+
+  // ── POST /inbox/items/:phid/mark-read ── (persists read_at; survives reload)
+  app.post('/inbox/items/:phid/mark-read', async (req: Request<{ phid: string }>, res: Response) => {
+    try {
+      const result = await markInboxRead(adapter, {
+        inbox_phid: req.params.phid,
+        actor_id: req.body?.actor_id,
+        ts: req.body?.ts,
+      });
+      res.json({ ok: true, ...result });
+    } catch (err) {
+      sendActionError(res, err);
     }
   });
 
