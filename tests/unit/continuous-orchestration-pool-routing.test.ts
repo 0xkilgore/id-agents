@@ -1,4 +1,6 @@
 import { describe, expect, it } from "vitest";
+import { planAdmission } from "../../src/continuous-orchestration/admission.js";
+import { defaultConfig } from "../../src/continuous-orchestration/config.js";
 import { buildPoolRouting } from "../../src/continuous-orchestration/factory.js";
 import type { BacklogItem } from "../../src/continuous-orchestration/types.js";
 
@@ -63,5 +65,42 @@ describe("continuous orchestration pool routing", () => {
     );
     expect(pool?.pool_id).toBe("backend");
     expect(pool?.members).toEqual(["roger", "substrate-orch-codex", "substrate-api-codex"]);
+  });
+
+  it("honors a backend-track operator target instead of rerouting to frontend or roger", () => {
+    const pools = buildPoolRouting({});
+    const backendItem = item({
+      item_id: "coitem_backend_read_models",
+      title: "T-ORCH - substrate read-model artifact routing",
+      track: "T-ORCH",
+      to_agent: "substrate-api-codex",
+      dispatch_body: "[project: kapelle][T-ORCH] substrate-api-codex: fix backend read-model dispatch routing",
+      write_scope: ["/Users/kilgore/Dropbox/Code/cane/id-agents/src/project-tracks"],
+    });
+    const pool = pools.poolForItem(backendItem);
+
+    expect(pool?.pool_id).toBe("backend");
+    expect(pool?.members).toEqual(["substrate-api-codex"]);
+
+    const plan = planAdmission(
+      [backendItem],
+      {
+        mode: "running",
+        kill_switch_active: false,
+        usage: { hard_paused: false, daily_percent: 0, weekly_percent: 0, enforcement: "enforce" },
+        daily_tokens_used: 0,
+        in_flight: 0,
+        active_write_scopes: new Set(),
+        done_item_ids: new Set(),
+        admit_limit: 1,
+        pool_for: (it) => pools.poolForItem(it)?.pool_id ?? null,
+        pool_free_slots: new Map([["backend", 1]]),
+        pool_free_builders: new Map([["backend", pools.availableBuilders(pool!, new Set())]]),
+      },
+      defaultConfig(),
+    );
+
+    expect(plan.admit.map((it) => it.item_id)).toEqual(["coitem_backend_read_models"]);
+    expect(plan.assignments).toEqual({ coitem_backend_read_models: "substrate-api-codex" });
   });
 });

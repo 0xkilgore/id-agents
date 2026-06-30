@@ -160,11 +160,17 @@ export function buildPoolRouting(env: NodeJS.ProcessEnv = process.env): PoolRout
   };
   return {
     poolForItem: (item: BacklogItem): ResolvedPool | null => {
-      const p = looksLikeKapelleFrontendWork(item)
-        ? registry.byId("frontend")
-        : item.track
-          ? registry.resolvePool(item.track)
-          : undefined;
+      const trackPool = item.track ? registry.resolvePool(item.track) : undefined;
+      const requestedAgent = item.to_agent?.trim();
+      if (trackPool?.pool_id === "backend" && requestedAgent && trackPool.members.includes(requestedAgent)) {
+        return {
+          pool_id: trackPool.pool_id,
+          repo_root: trackPool.repo_root,
+          max_parallel: trackPool.max_parallel,
+          members: [requestedAgent],
+        };
+      }
+      const p = looksLikeKapelleFrontendWork(item) ? registry.byId("frontend") : trackPool;
       if (!p) return null;
       return { pool_id: p.pool_id, repo_root: p.repo_root, max_parallel: p.max_parallel, members: [...p.members] };
     },
