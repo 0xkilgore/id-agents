@@ -160,6 +160,7 @@ import {
 import { DEFAULT_RECOVERY_CONFIG } from './dispatch-recovery/classifier.js';
 import { makeGitCommitEvidenceProbe } from './dispatch-recovery/git-commit-evidence.js';
 import { listLoops, getLoop, loopsSummary } from './loops/registry.js';
+import { buildLoopsList, buildLoopsSummary, buildLoopSummaryWithHealth } from './loops/rollup.js';
 import {
   migrateLoopsTables,
   seedLoopsFromRegistry,
@@ -3912,13 +3913,19 @@ export class AgentManagerDb {
       try {
         const str = (v: unknown): string | null =>
           typeof v === 'string' && v.length > 0 ? v : null;
-        const body = listLoops(new Date().toISOString(), {
-          project_phid: str(req.query.project_phid),
-          owner_agent: str(req.query.owner_agent),
-          status: str(req.query.status),
-          kind: str(req.query.kind),
-          q: str(req.query.q),
-        });
+        // Real (runs-derived) health from the LoopRun substrate, not placeholders.
+        const body = await buildLoopsList(
+          this.db.adapter,
+          new Date().toISOString(),
+          {
+            project_phid: str(req.query.project_phid),
+            owner_agent: str(req.query.owner_agent),
+            status: str(req.query.status),
+            kind: str(req.query.kind),
+            q: str(req.query.q),
+          },
+          { team_id: str(req.query.team_id) },
+        );
         return res.json({ ok: true, ...body });
       } catch (err) {
         return res.status(500).json({
@@ -3928,9 +3935,16 @@ export class AgentManagerDb {
       }
     });
 
-    this.managementApp.get('/loops/summary', async (_req, res) => {
+    this.managementApp.get('/loops/summary', async (req, res) => {
       try {
-        return res.json({ ok: true, ...loopsSummary(new Date().toISOString()) });
+        const teamId =
+          typeof req.query.team_id === 'string' && req.query.team_id.length > 0
+            ? req.query.team_id
+            : null;
+        const summary = await buildLoopsSummary(this.db.adapter, new Date().toISOString(), {
+          team_id: teamId,
+        });
+        return res.json({ ok: true, ...summary });
       } catch (err) {
         return res.status(500).json({
           ok: false,
@@ -4084,11 +4098,21 @@ export class AgentManagerDb {
     // runs, manual-run controls) when the substrate row exists.
     this.managementApp.get('/loops/:ref', async (req, res) => {
       try {
-        const loop = getLoop(req.params.ref);
+        const seedLoop = getLoop(req.params.ref);
         const record = await getLoopRecord(this.db.adapter, req.params.ref);
-        if (!loop && !record) {
+        if (!seedLoop && !record) {
           return res.status(404).json({ ok: false, error: 'loop_not_found' });
         }
+        const teamId =
+          typeof req.query.team_id === 'string' && req.query.team_id.length > 0
+            ? req.query.team_id
+            : null;
+        // Real (runs-derived) health overlay for the detail summary.
+        const loop = seedLoop
+          ? await buildLoopSummaryWithHealth(this.db.adapter, seedLoop, new Date().toISOString(), {
+              team_id: teamId,
+            })
+          : null;
         const recent_runs = record
           ? await listLoopRuns(this.db.adapter, record.loop_phid, { limit: 10 })
           : [];

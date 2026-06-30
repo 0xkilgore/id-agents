@@ -8,7 +8,16 @@
 // Pure + `now`-injected so it is deterministic and unit-testable, matching the
 // rest of the loops read-model layer.
 
-import type { LoopHealth, LoopHealthState, LoopRunStatus as CoarseRunStatus } from "./registry.js";
+import type {
+  DashboardLoopsSummary,
+  LoopHealth,
+  LoopHealthState,
+  LoopListFilters,
+  LoopRunStatus as CoarseRunStatus,
+  LoopSummary,
+  LoopsListResponse,
+} from "./registry.js";
+import { SEED_LOOPS, listLoopsFrom, loopsSummaryFrom } from "./registry.js";
 import type { LoopRunRecord, LoopRunStatus as SubstrateRunStatus } from "./types.js";
 import type { DbAdapter } from "../db/db-adapter.js";
 import { listLoopRuns } from "./storage.js";
@@ -169,7 +178,90 @@ export async function loadLoopHealth(
   loopPhid: string,
   input: LoopRollupInput,
   nowIso: string,
+  teamId: string | null = null,
 ): Promise<LoopHealth> {
-  const runs = await listLoopRuns(adapter, loopPhid, { limit: 200 });
+  const runs = await listLoopRuns(adapter, loopPhid, { limit: 200, team_id: teamId });
   return rollupLoopHealth(input, runs, nowIso);
+}
+
+// ---------------------------------------------------------------------------
+// Read-model overlay — swap each seed loop's placeholderHealth for the real
+// runs-derived rollup, then reuse the registry's pure list/summary projections.
+// This is what the `/loops`, `/loops/summary`, `/loops/:ref` routes serve so the
+// page shows real LoopRun data, never placeholders or fixtures.
+// ---------------------------------------------------------------------------
+
+export interface LoopsReadModelOptions {
+  /**
+   * Team scope. Threaded end-to-end (→ loadLoopHealth → listLoopRuns) for parity
+   * with the other team-scoped read-models. loop_runs has no team_id column yet,
+   * so it is currently a documented no-op (see ListRunsFilter.team_id).
+   */
+  team_id?: string | null;
+  /** Consecutive terminal failures that flip degraded → failed. Default 2. */
+  fail_threshold?: number;
+}
+
+/**
+ * Overlay runs-derived health onto each loop, replacing `placeholderHealth`.
+ * Honest emptiness: a loop with no runs rolls up to `unknown` (or `disabled`
+ * when the loop is off) — never a fixture or fabricated success. The summary's
+ * top-level `next_run_at` is kept in sync with the derived health.
+ */
+export async function overlayLoopHealth(
+  adapter: DbAdapter,
+  loops: readonly LoopSummary[],
+  nowIso: string,
+  opts: LoopsReadModelOptions = {},
+): Promise<LoopSummary[]> {
+  return Promise.all(
+    loops.map(async (loop): Promise<LoopSummary> => {
+      const health = await loadLoopHealth(
+        adapter,
+        loop.loop_phid,
+        {
+          enabled: loop.enabled,
+          stale_after_minutes: loop.health.stale_after_minutes,
+          fail_threshold: opts.fail_threshold,
+        },
+        nowIso,
+        opts.team_id ?? null,
+      );
+      return { ...loop, health, next_run_at: health.next_run_at };
+    }),
+  );
+}
+
+/** `/loops` read-model with real (runs-derived) health. Definitions come from
+ *  the seed catalog and health from the loop_runs substrate, so `source` is
+ *  `"mixed"`. Status/other filters run against the real health state. */
+export async function buildLoopsList(
+  adapter: DbAdapter,
+  nowIso: string,
+  filters: LoopListFilters = {},
+  opts: LoopsReadModelOptions = {},
+): Promise<LoopsListResponse> {
+  const overlaid = await overlayLoopHealth(adapter, SEED_LOOPS, nowIso, opts);
+  return listLoopsFrom(overlaid, nowIso, filters, "mixed");
+}
+
+/** `/loops/summary` dashboard rollup with real (runs-derived) health. */
+export async function buildLoopsSummary(
+  adapter: DbAdapter,
+  nowIso: string,
+  opts: LoopsReadModelOptions = {},
+): Promise<DashboardLoopsSummary> {
+  const overlaid = await overlayLoopHealth(adapter, SEED_LOOPS, nowIso, opts);
+  return loopsSummaryFrom(overlaid, nowIso, "mixed");
+}
+
+/** Real-health overlay for a single loop summary (the `/loops/:ref` detail). */
+export async function buildLoopSummaryWithHealth(
+  adapter: DbAdapter,
+  loop: LoopSummary,
+  nowIso: string,
+  opts: LoopsReadModelOptions = {},
+): Promise<LoopSummary> {
+  const [overlaid] = await overlayLoopHealth(adapter, [loop], nowIso, opts);
+  return overlaid!;
 }

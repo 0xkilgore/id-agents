@@ -145,11 +145,12 @@ describe('B1 loops manual-trigger + evidence + recurrence link', () => {
     expect(body.controls.can_run_manual).toBe(true);
   });
 
-  it('GET /loops still returns the seed_catalog DTO (backward compatible)', async () => {
+  it('GET /loops returns the loops-list DTO with runs-derived health (backward compatible shape)', async () => {
     const res = await fetch(`${baseUrl}/loops`);
     const body = await res.json() as any;
     expect(body.schema_version).toBe('loops-list-v1');
-    expect(body.source).toBe('seed_catalog');
+    // Same DTO shape; health is now substrate-derived so source is `mixed`.
+    expect(body.source).toBe('mixed');
     expect(body.loops).toHaveLength(12);
   });
 });

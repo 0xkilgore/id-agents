@@ -398,11 +398,18 @@ function buildFilters(loops: readonly LoopSummary[]): LoopsListResponse["filters
   };
 }
 
-/** List loops for `/ops/loops`, applying optional filters. Facets are computed
- *  over the full catalog so the UI can offer every option. */
-export function listLoops(nowIso: string, filters: LoopListFilters = {}): LoopsListResponse {
+/** List loops from a provided catalog, applying optional filters. Facets are
+ *  computed over the full (unfiltered) catalog so the UI can offer every option.
+ *  Filters (including `status`) run against each loop's CURRENT `health.state`,
+ *  so passing a runs-derived catalog filters on real health, not placeholders. */
+export function listLoopsFrom(
+  loops: readonly LoopSummary[],
+  nowIso: string,
+  filters: LoopListFilters = {},
+  source: LoopsListResponse["source"] = "seed_catalog",
+): LoopsListResponse {
   const q = (filters.q ?? "").trim().toLowerCase();
-  const loops = SEED_LOOPS.filter((l) => {
+  const filtered = loops.filter((l) => {
     if (filters.project_phid && l.project?.project_phid !== filters.project_phid) return false;
     if (filters.owner_agent && l.owner_agent !== filters.owner_agent) return false;
     if (filters.status && l.health.state !== filters.status) return false;
@@ -416,10 +423,17 @@ export function listLoops(nowIso: string, filters: LoopListFilters = {}): LoopsL
   return {
     schema_version: "loops-list-v1",
     generated_at: nowIso,
-    source: "seed_catalog",
-    loops,
-    filters: buildFilters(SEED_LOOPS),
+    source,
+    loops: filtered,
+    filters: buildFilters(loops),
   };
+}
+
+/** List loops for `/ops/loops` from the static seed catalog (placeholder
+ *  health). The manager route overlays runs-derived health via
+ *  `buildLoopsList` (rollup.ts) before serving. */
+export function listLoops(nowIso: string, filters: LoopListFilters = {}): LoopsListResponse {
+  return listLoopsFrom(SEED_LOOPS, nowIso, filters, "seed_catalog");
 }
 
 /** Resolve a loop by `loop_phid` or `slug` (read routes accept either). Returns
@@ -434,10 +448,14 @@ export function getLoop(ref: string): LoopSummary | null {
 
 /** Compact dashboard summary. With registry-only health every loop is
  *  unknown/disabled, so the rollup counts are honest zeros until runs exist. */
-export function loopsSummary(nowIso: string): DashboardLoopsSummary {
-  const enabled = SEED_LOOPS.filter((l) => l.enabled);
-  const count = (s: LoopHealthState) => SEED_LOOPS.filter((l) => l.health.state === s).length;
-  const degraded = SEED_LOOPS.filter(
+export function loopsSummaryFrom(
+  loops: readonly LoopSummary[],
+  nowIso: string,
+  source: DashboardLoopsSummary["source"] = "seed_catalog",
+): DashboardLoopsSummary {
+  const enabled = loops.filter((l) => l.enabled);
+  const count = (s: LoopHealthState) => loops.filter((l) => l.health.state === s).length;
+  const degraded = loops.filter(
     (l) => l.health.state === "degraded" || l.health.state === "failed",
   ).map((l) => ({
     loop_phid: l.loop_phid,
@@ -447,7 +465,7 @@ export function loopsSummary(nowIso: string): DashboardLoopsSummary {
     consecutive_failures: l.health.consecutive_failures,
     failure_reason: null as string | null,
   }));
-  const next_scheduled = SEED_LOOPS.filter((l) => l.enabled && l.next_run_at != null)
+  const next_scheduled = loops.filter((l) => l.enabled && l.next_run_at != null)
     .sort((a, b) => (a.next_run_at! < b.next_run_at! ? -1 : 1))
     .slice(0, 3)
     .map((l) => ({
@@ -459,7 +477,7 @@ export function loopsSummary(nowIso: string): DashboardLoopsSummary {
   return {
     schema_version: "loops-dashboard-summary-v1",
     generated_at: nowIso,
-    source: "seed_catalog",
+    source,
     total_enabled: enabled.length,
     healthy_count: count("healthy"),
     degraded_count: count("degraded"),
@@ -467,4 +485,10 @@ export function loopsSummary(nowIso: string): DashboardLoopsSummary {
     next_scheduled,
     degraded,
   };
+}
+
+/** Compact dashboard summary over the static seed catalog (placeholder health).
+ *  The manager route overlays runs-derived health via `buildLoopsSummary`. */
+export function loopsSummary(nowIso: string): DashboardLoopsSummary {
+  return loopsSummaryFrom(SEED_LOOPS, nowIso, "seed_catalog");
 }

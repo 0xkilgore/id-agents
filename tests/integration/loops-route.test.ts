@@ -78,13 +78,19 @@ describe('GET /loops registry routes', () => {
     const body = await res.json() as any;
     expect(body.ok).toBe(true);
     expect(body.schema_version).toBe('loops-list-v1');
-    expect(body.source).toBe('seed_catalog');
+    // Health is now derived from the LoopRun substrate (definitions still from
+    // the seed catalog), so the envelope reports `mixed`. With an empty
+    // loop_runs table every loop rolls up to honest unknown/disabled — no fixture.
+    expect(body.source).toBe('mixed');
     expect(body.loops).toHaveLength(12);
     expect(body.filters.owners.length).toBeGreaterThan(0);
-    // every row carries the read-model identity + placeholder health
+    // every row carries the read-model identity + real (runs-derived) health
     for (const l of body.loops) {
       expect(l.loop_phid).toMatch(/^phid:loop:/);
       expect(['healthy', 'degraded', 'failed', 'disabled', 'unknown']).toContain(l.health.state);
+      // empty substrate ⇒ honest emptiness, not a fabricated last run
+      expect(l.health.last_run_at).toBeNull();
+      expect(l.health.runs_last_7d).toBe(0);
     }
   });
 

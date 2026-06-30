@@ -324,6 +324,14 @@ export async function getLoopRunByKey(
 export interface ListRunsFilter {
   status?: LoopRunStatus;
   limit?: number;
+  /**
+   * Team scope. Threaded end-to-end for parity with the other team-scoped
+   * read-models. MISSING PIECE: `loop_runs` has no `team_id` column yet (loops
+   * + loop_runs are global per cto/output/2026-06-16-loops-runtime-scope.md §3),
+   * so this is currently a documented no-op — when the column lands, add the
+   * `team_id = ?` clause below and the call sites already carry the value.
+   */
+  team_id?: string | null;
 }
 
 export async function listLoopRuns(
@@ -338,6 +346,7 @@ export async function listLoopRuns(
     clauses.push("status = ?");
     params.push(filter.status);
   }
+  // filter.team_id intentionally unused until loop_runs gains a team_id column.
   params.push(limit);
   const { rows } = await adapter.query<LoopRunRow>(
     `SELECT * FROM loop_runs WHERE ${clauses.join(" AND ")} ORDER BY fired_at DESC LIMIT ?`,
