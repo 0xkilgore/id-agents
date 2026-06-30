@@ -121,6 +121,10 @@ test("a needs_operator=true unknown state still sorts to group 0", () => {
   expect(deriveSortGroup("cancelled", true)).toBe(0);
 });
 
+test("needs_review sorts into group 0", () => {
+  expect(deriveSortGroup("needs_review", true)).toBe(0);
+});
+
 // ============================================================
 // Row path — readDispatches emits sort_group on every read row
 // ============================================================
@@ -193,4 +197,51 @@ test("readDispatches sorts a hard failure into the needs-you band on the row", a
   expect(rows[0].effective_state).toBe("failed_needs_operator");
   expect(rows[0].needs_operator).toBe(true);
   expect(rows[0].sort_group).toBe(0);
+});
+
+test("readDispatches surfaces fast empty success as needs_review", async () => {
+  const rows = await readDispatches(
+    adapterWithRow({
+      status: "done",
+      not_before_at: "2026-06-30T03:26:00.000Z",
+      started_at: "2026-06-30T03:26:10.000Z",
+      completed_at: "2026-06-30T03:26:31.000Z",
+      updated_at: "2026-06-30T03:26:31.000Z",
+      result_json: JSON.stringify({ reply: "Done." }),
+      artifact_path: null,
+      promotion_result_json: null,
+    }),
+    "t",
+    "all",
+    10,
+  );
+  expect(rows[0].status).toBe("done");
+  expect(rows[0].effective_state).toBe("needs_review");
+  expect(rows[0].needs_operator).toBe(true);
+  expect(rows[0].sort_group).toBe(0);
+  expect(rows[0].recovery_classification?.empty_success_candidate).toBe(true);
+});
+
+test("readDispatches preserves explicit skip closeouts as clean done", async () => {
+  const rows = await readDispatches(
+    adapterWithRow({
+      status: "done",
+      started_at: "2026-06-30T03:26:10.000Z",
+      completed_at: "2026-06-30T03:26:31.000Z",
+      updated_at: "2026-06-30T03:26:31.000Z",
+      result_json: JSON.stringify({
+        skipped: true,
+        reason: "Skipped: duplicate dispatch, later run already delivered the artifact.",
+      }),
+      artifact_path: null,
+      promotion_result_json: null,
+    }),
+    "t",
+    "all",
+    10,
+  );
+  expect(rows[0].effective_state).toBe("done");
+  expect(rows[0].needs_operator).toBe(false);
+  expect(rows[0].sort_group).toBe(4);
+  expect(rows[0].recovery_classification).toBeNull();
 });

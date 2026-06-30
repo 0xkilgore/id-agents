@@ -20,7 +20,10 @@
 
 import { test, expect } from "vitest";
 
-import { deriveRecoveryClassification } from "../../src/dispatch-scheduler/read-model";
+import {
+  deriveEmptySuccessCandidate,
+  deriveRecoveryClassification,
+} from "../../src/dispatch-scheduler/read-model";
 
 // Shape matching the `RecoveryClassificationRow` Pick from read-model.ts.
 type RowFields = {
@@ -297,4 +300,66 @@ test("Cn-EVE.1: recovery_status='landed_reconciled' without artifact OR promotio
   expect(cls!.recovery_evidence.commit_sha).toBeNull();
   expect(cls!.recovery_evidence.artifact_path).toBeNull();
   expect(cls!.recovery_evidence.promotion_sha).toBeNull();
+});
+
+test("empty-success guard: fast done with no artifact/promotion/substantial output is classified", () => {
+  const cls = deriveRecoveryClassification({
+    status: "done",
+    not_before_at: "2026-06-30T03:26:00.000Z",
+    started_at: "2026-06-30T03:26:10.000Z",
+    completed_at: "2026-06-30T03:26:31.000Z",
+    recovery_status: null,
+    recovery_reason: null,
+    failure_kind: null,
+    failure_detail: null,
+    artifact_path: null,
+    promotion_result_json: null,
+    result_json: JSON.stringify({ reply: "Done." }),
+  });
+  expect(cls).not.toBeNull();
+  expect(cls!.false_expire_recovered).toBe(false);
+  expect(cls!.empty_success_candidate).toBe(true);
+  expect(cls!.completion_evidence?.elapsed_ms).toBe(21_000);
+});
+
+test("empty-success guard: explicit skip/noop evidence is preserved as clean done", () => {
+  expect(
+    deriveEmptySuccessCandidate({
+      status: "done",
+      started_at: "2026-06-30T03:26:10.000Z",
+      completed_at: "2026-06-30T03:26:31.000Z",
+      artifact_path: null,
+      promotion_result_json: null,
+      result_json: JSON.stringify({
+        skipped: true,
+        reason: "Skipped: upstream dispatch already produced the requested artifact.",
+      }),
+    }).empty_success_candidate,
+  ).toBe(false);
+});
+
+test("empty-success guard: substantial worker output is not suspect", () => {
+  const substantial =
+    "Verified existing implementation and intentionally made no code changes because the requested behavior is already covered by current tests and live route evidence.";
+  expect(
+    deriveEmptySuccessCandidate({
+      status: "done",
+      started_at: "2026-06-30T03:26:10.000Z",
+      completed_at: "2026-06-30T03:26:31.000Z",
+      artifact_path: null,
+      promotion_result_json: null,
+      result_json: JSON.stringify({ summary: substantial }),
+    }).empty_success_candidate,
+  ).toBe(false);
+});
+
+test("empty-success guard: missing timing does not classify legacy done rows", () => {
+  expect(
+    deriveEmptySuccessCandidate({
+      status: "done",
+      artifact_path: null,
+      promotion_result_json: null,
+      result_json: JSON.stringify({ reply: "Done." }),
+    }).empty_success_candidate,
+  ).toBe(false);
 });

@@ -73,6 +73,8 @@ export interface DispatchReadRow {
   // still failed / never failed).
   recovery_classification: {
     false_expire_recovered: boolean;
+    empty_success_candidate?: boolean;
+    empty_success_reason?: string | null;
     original_failure_reason: {
       kind: string | null;
       detail: string | null;
@@ -83,6 +85,11 @@ export interface DispatchReadRow {
       artifact_path: string | null;
       promotion_sha: string | null;
       reason_text: string | null;
+    };
+    completion_evidence?: {
+      elapsed_ms: number | null;
+      result_text_length: number;
+      result_keys: string[];
     };
   } | null;
   // T13.2 (2026-06-17, phid:disp-1e2819f568b08704): derived effective_state
@@ -99,6 +106,7 @@ export interface DispatchReadRow {
     | "failed_needs_operator"
     | "queued"
     | "in_flight"
+    | "needs_review"
     | "done"
     | "done_recovered"
     | string; // string fallback preserves forwards-compat with unknown raw states
@@ -753,16 +761,19 @@ function rowToDispatch(row: DispatchDbRow, opts: DeriveOptions = {}): DispatchRe
  * Returns null for rows that were not auto-recovered (normal done / still
  * failed / never failed).
  */
-export type RecoveryClassificationRow = Pick<
-  DispatchDbRow,
-  | "status"
-  | "recovery_status"
-  | "recovery_reason"
-  | "failure_kind"
-  | "failure_detail"
-  | "artifact_path"
-  | "promotion_result_json"
->;
+export interface RecoveryClassificationRow {
+  status: string;
+  not_before_at?: string | null;
+  started_at?: string | null;
+  completed_at?: string | null;
+  recovery_status: string | null;
+  recovery_reason: string | null;
+  failure_kind: string | null;
+  failure_detail: string | null;
+  artifact_path: string | null;
+  promotion_result_json: string | null;
+  result_json?: string | null;
+}
 
 const COMMIT_EVIDENCE_REASON_RE = /\bcommit\s+([0-9a-f]{7,40})\s+verified\s+on\b/i;
 
@@ -770,6 +781,8 @@ export function deriveRecoveryClassification(
   row: RecoveryClassificationRow,
 ): {
   false_expire_recovered: boolean;
+  empty_success_candidate?: boolean;
+  empty_success_reason?: string | null;
   original_failure_reason: { kind: string | null; detail: string | null } | null;
   recovery_evidence: {
     kind: "commit_evidence" | "artifact" | "promotion" | "unknown";
@@ -778,12 +791,38 @@ export function deriveRecoveryClassification(
     promotion_sha: string | null;
     reason_text: string | null;
   };
+  completion_evidence?: {
+    elapsed_ms: number | null;
+    result_text_length: number;
+    result_keys: string[];
+  };
 } | null {
   const isAutoRecovered =
     row.status === "done" &&
     (row.recovery_status === "landed_reconciled" ||
       row.recovery_status === "verified_done");
-  if (!isAutoRecovered) return null;
+  if (!isAutoRecovered) {
+    const emptySuccess = deriveEmptySuccessCandidate(row);
+    if (!emptySuccess.empty_success_candidate) return null;
+    return {
+      false_expire_recovered: false,
+      empty_success_candidate: true,
+      empty_success_reason: emptySuccess.reason,
+      original_failure_reason: null,
+      recovery_evidence: {
+        kind: "unknown",
+        commit_sha: null,
+        artifact_path: null,
+        promotion_sha: null,
+        reason_text: null,
+      },
+      completion_evidence: {
+        elapsed_ms: emptySuccess.elapsed_ms,
+        result_text_length: emptySuccess.result_text_length,
+        result_keys: emptySuccess.result_keys,
+      },
+    };
+  }
 
   // No original failure → this wasn't a "false expire" — the row just got
   // recovered without ever being marked failed. Surface as not-a-recovery
@@ -825,6 +864,8 @@ export function deriveRecoveryClassification(
 
   return {
     false_expire_recovered: true,
+    empty_success_candidate: false,
+    empty_success_reason: null,
     original_failure_reason: {
       kind: row.failure_kind ?? null,
       detail: row.failure_detail ?? null,
@@ -837,6 +878,127 @@ export function deriveRecoveryClassification(
       reason_text: reasonText,
     },
   };
+}
+
+export interface EmptySuccessCandidateRow {
+  status: string;
+  not_before_at?: string | null;
+  started_at?: string | null;
+  completed_at?: string | null;
+  artifact_path: string | null;
+  promotion_result_json: string | null;
+  result_json?: string | null;
+}
+
+export interface EmptySuccessCandidate {
+  empty_success_candidate: boolean;
+  reason: string | null;
+  elapsed_ms: number | null;
+  result_text_length: number;
+  result_keys: string[];
+}
+
+const EMPTY_SUCCESS_FAST_MS = 2 * 60_000;
+const SUBSTANTIAL_RESULT_TEXT_MIN = 120;
+const EXPLICIT_NOOP_RE = /\b(no-?op|skip(?:ped)?|not applicable|already (?:done|current|up to date)|no changes? (?:needed|required)|intentionally no work)\b/i;
+const EVIDENCE_KEY_RE = /^(artifact_path|artifact|artifact_id|output_path|output|comment_id|comment|timeline_event_id|timeline_id|commit_sha|sha|promotion|promotion_result|diff|summary|closeout)$/i;
+
+export function deriveEmptySuccessCandidate(row: EmptySuccessCandidateRow): EmptySuccessCandidate {
+  const parsed = parseJsonObject(row.result_json);
+  const resultKeys = parsed ? Object.keys(parsed).sort() : [];
+  const resultText = collectResultText(parsed);
+  const resultTextLength = resultText.trim().length;
+  const elapsedMs = completionElapsedMs(row);
+
+  if (row.status !== "done") {
+    return emptySuccess(false, null, elapsedMs, resultTextLength, resultKeys);
+  }
+  if (row.artifact_path && row.artifact_path.trim().length > 0) {
+    return emptySuccess(false, null, elapsedMs, resultTextLength, resultKeys);
+  }
+  if (promotionCompletedAndVerified(row.promotion_result_json)) {
+    return emptySuccess(false, null, elapsedMs, resultTextLength, resultKeys);
+  }
+  if (elapsedMs === null || elapsedMs > EMPTY_SUCCESS_FAST_MS) {
+    return emptySuccess(false, null, elapsedMs, resultTextLength, resultKeys);
+  }
+  if (hasExplicitNoopEvidence(parsed, resultText)) {
+    return emptySuccess(false, null, elapsedMs, resultTextLength, resultKeys);
+  }
+  if (hasSubstantialResultEvidence(parsed, resultTextLength)) {
+    return emptySuccess(false, null, elapsedMs, resultTextLength, resultKeys);
+  }
+
+  return emptySuccess(
+    true,
+    "done within 2m with no artifact_path, verified promotion, explicit noop/skip evidence, or substantial result output",
+    elapsedMs,
+    resultTextLength,
+    resultKeys,
+  );
+}
+
+function emptySuccess(
+  candidate: boolean,
+  reason: string | null,
+  elapsedMs: number | null,
+  resultTextLength: number,
+  resultKeys: string[],
+): EmptySuccessCandidate {
+  return {
+    empty_success_candidate: candidate,
+    reason,
+    elapsed_ms: elapsedMs,
+    result_text_length: resultTextLength,
+    result_keys: resultKeys,
+  };
+}
+
+function completionElapsedMs(row: Pick<EmptySuccessCandidateRow, "not_before_at" | "started_at" | "completed_at">): number | null {
+  const completed = parseDateMs(row.completed_at);
+  const started = parseDateMs(row.started_at) ?? parseDateMs(row.not_before_at);
+  if (completed == null || started == null) return null;
+  return Math.max(0, completed - started);
+}
+
+function collectResultText(parsed: Record<string, unknown> | null): string {
+  if (!parsed) return "";
+  const chunks: string[] = [];
+  const visit = (value: unknown) => {
+    if (typeof value === "string") {
+      chunks.push(value);
+      return;
+    }
+    if (Array.isArray(value)) {
+      for (const item of value) visit(item);
+      return;
+    }
+    if (value && typeof value === "object") {
+      for (const item of Object.values(value as Record<string, unknown>)) visit(item);
+    }
+  };
+  visit(parsed);
+  return chunks.join("\n");
+}
+
+function hasExplicitNoopEvidence(parsed: Record<string, unknown> | null, resultText: string): boolean {
+  if (!parsed) return false;
+  if (parsed.noop === true || parsed.no_op === true || parsed.skipped === true || parsed.skip === true) {
+    return resultText.trim().length >= 20 || typeof parsed.reason === "string";
+  }
+  return EXPLICIT_NOOP_RE.test(resultText) && resultText.trim().length >= 20;
+}
+
+function hasSubstantialResultEvidence(parsed: Record<string, unknown> | null, resultTextLength: number): boolean {
+  if (!parsed) return false;
+  if (resultTextLength >= SUBSTANTIAL_RESULT_TEXT_MIN) return true;
+  return Object.entries(parsed).some(([key, value]) => {
+    if (!EVIDENCE_KEY_RE.test(key)) return false;
+    if (typeof value === "string") return value.trim().length > 0;
+    if (typeof value === "boolean") return value;
+    if (Array.isArray(value)) return value.length > 0;
+    return value != null;
+  });
 }
 
 /**
@@ -869,8 +1031,10 @@ export type EffectiveStateRow = Pick<
   | "failure_detail"
   | "artifact_path"
   | "promotion_result_json"
+  | "result_json"
   | "not_before_at"
   | "started_at"
+  | "completed_at"
   | "updated_at"
   | "provider"
   | "supersede_link"
@@ -952,6 +1116,9 @@ export function deriveEffectiveState(row: EffectiveStateRow, opts: DeriveOptions
 
   // Rule 2 — done states (split done vs done_recovered).
   if (row.status === "done") {
+    if (deriveEmptySuccessCandidate(row).empty_success_candidate) {
+      return "needs_review";
+    }
     if (row.recovery_status && LANDED_RECOVERY_STATUSES.has(row.recovery_status)) {
       // A row that ended up `done` after the recovery wiring reconciled it
       // (the "false expire" / "lost closeout" pattern) gets done_recovered.
@@ -1068,6 +1235,7 @@ export function deriveNeedsOperator(
 ): boolean {
   const effective = deriveEffectiveState(row, opts);
   if (effective === "failed_needs_operator") return true;
+  if (effective === "needs_review") return true;
   if (effective === "queued") {
     const queuedAtMs = parseDateMs(row.not_before_at);
     if (queuedAtMs == null) return false;
@@ -1122,6 +1290,7 @@ export function deriveSortGroup(effectiveState: string, needsOperator: boolean):
   if (needsOperator) return 0;
   switch (effectiveState) {
     case "failed_needs_operator":
+    case "needs_review":
       return 0; // defensive: always paired with needs_operator=true upstream.
     case "in_flight":
       return 1;
