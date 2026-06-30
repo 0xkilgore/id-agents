@@ -11036,6 +11036,17 @@ export class AgentManagerDb {
           console.warn('[Manager] Project tracks routes failed to mount:', err instanceof Error ? err.message : String(err));
         }
 
+        // Fleet activity read-model — "what your fleet did since you last
+        // looked": team-scoped, since-watermark feed of artifacts + dispatch
+        // completions/queues behind the daily surface.
+        try {
+          const { mountFleetActivityRoutes } = await import('./fleet-activity/routes.js');
+          mountFleetActivityRoutes(this.managementApp, this.db.adapter);
+          console.log('[Manager] Fleet activity /fleet/activity route mounted');
+        } catch (err) {
+          console.warn('[Manager] Fleet activity routes failed to mount:', err instanceof Error ? err.message : String(err));
+        }
+
         // T-CKPT.agent-sharing / F4 — share + delegate grants over the Monday
         // seed actor model. Mount /shares, /delegations, /grants[/:id[/revoke]].
         try {
