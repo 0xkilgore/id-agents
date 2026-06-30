@@ -65,10 +65,36 @@ export interface DetailLoopRow {
   schedule_label: string;
 }
 
+export type ContributionMetric = "activity" | "artifacts" | "failure_rate";
+
+export interface ContributionGridCell {
+  /** ISO date (YYYY-MM-DD). */
+  date: string;
+  /** Raw metric value for the day. */
+  value: number;
+  /** GitHub-style shade bucket: 0=no activity, 4=highest activity. */
+  intensity: 0 | 1 | 2 | 3 | 4;
+}
+
+export interface ContributionGridVariant {
+  metric: ContributionMetric;
+  label: string;
+  unit: string;
+  total: number;
+  max: number;
+  cells: ContributionGridCell[];
+}
+
+export interface ContributionGrid {
+  days: number;
+  variants: ContributionGridVariant[];
+}
+
 /** Everything the route fetches, ready to be shaped. All fields required so the
  *  route is explicit about what it could/couldn't load (empty != absent). */
 export interface RawAgentDetailData {
   name: string;
+  now_iso: string;
   consecutive_failures: number;
   last_error: string | null;
   tasks: DetailTaskRow[];
@@ -92,6 +118,8 @@ export interface AgentDetailResponse {
     tokens: { today: number; series: TokenSeriesPoint[] };
     failures: { consecutive: number; failed_dispatches: number; last_error: string | null };
   };
+  /** GitHub-style daily contribution grids for the agent profile. */
+  contribution_grid: ContributionGrid;
   /** Newest-first, capped at 20 — the recent-output feed. */
   recent_outputs: DetailArtifactRow[];
   /** Newest-first, capped at 20 — recent dispatches from the verification projection. */
@@ -111,6 +139,7 @@ export interface AgentDetailResponse {
 
 /** Hard cap on the recent-output feed (spec: "recent-output-last-20"). */
 export const RECENT_OUTPUT_LIMIT = 20;
+export const CONTRIBUTION_GRID_DAYS = 35;
 
 /**
  * Shape raw per-agent data into the AgentDetailResponse contract. Pure: no I/O,
@@ -134,6 +163,8 @@ export function buildAgentDetail(raw: RawAgentDetailData): AgentDetailResponse {
     .sort((a, b) => (a.time < b.time ? 1 : a.time > b.time ? -1 : 0))
     .slice(0, RECENT_OUTPUT_LIMIT);
 
+  const contribution_grid = buildContributionGrid(raw, recent, recentDispatches);
+
   return {
     name: raw.name,
     charts: {
@@ -145,6 +176,7 @@ export function buildAgentDetail(raw: RawAgentDetailData): AgentDetailResponse {
         last_error: raw.last_error,
       },
     },
+    contribution_grid,
     recent_outputs: recent,
     recent_dispatches: recentDispatches,
     verified_landings: recentDispatches.filter((d) => d.verified && d.artifact_path != null),
@@ -158,4 +190,97 @@ export function buildAgentDetail(raw: RawAgentDetailData): AgentDetailResponse {
 
 function nonNeg(n: number): number {
   return Number.isFinite(n) && n > 0 ? Math.floor(n) : 0;
+}
+
+function buildContributionGrid(
+  raw: RawAgentDetailData,
+  recentOutputs: DetailArtifactRow[],
+  recentDispatches: DetailDispatchRow[],
+): ContributionGrid {
+  const dates = contributionDates(raw.now_iso, CONTRIBUTION_GRID_DAYS);
+  const activity = new Map<string, number>();
+  for (const p of raw.token_series) {
+    if (!dates.includes(p.date)) continue;
+    activity.set(p.date, (activity.get(p.date) ?? 0) + nonNeg(p.weighted));
+  }
+
+  const artifacts = new Map<string, number>();
+  for (const o of recentOutputs) {
+    const d = isoDate(o.produced_at);
+    if (!d || !dates.includes(d)) continue;
+    artifacts.set(d, (artifacts.get(d) ?? 0) + 1);
+  }
+
+  const dispatchTotals = new Map<string, number>();
+  const dispatchFailures = new Map<string, number>();
+  for (const d of recentDispatches) {
+    const day = isoDate(d.time);
+    if (!day || !dates.includes(day)) continue;
+    dispatchTotals.set(day, (dispatchTotals.get(day) ?? 0) + 1);
+    if (isFailedDispatch(d)) {
+      dispatchFailures.set(day, (dispatchFailures.get(day) ?? 0) + 1);
+    }
+  }
+  const failureRate = new Map<string, number>();
+  for (const [day, total] of dispatchTotals) {
+    if (total <= 0) continue;
+    failureRate.set(day, Math.round(((dispatchFailures.get(day) ?? 0) / total) * 100));
+  }
+
+  return {
+    days: dates.length,
+    variants: [
+      variant("activity", "Activity", "tokens", dates, activity),
+      variant("artifacts", "Artifacts", "outputs", dates, artifacts),
+      variant("failure_rate", "Failure %", "%", dates, failureRate),
+    ],
+  };
+}
+
+function contributionDates(nowIso: string, days: number): string[] {
+  const now = new Date(nowIso);
+  const end = Number.isFinite(now.getTime()) ? now : new Date();
+  const endUtc = Date.UTC(end.getUTCFullYear(), end.getUTCMonth(), end.getUTCDate());
+  return Array.from({ length: days }, (_, i) => {
+    const t = endUtc - (days - 1 - i) * 24 * 60 * 60 * 1000;
+    return new Date(t).toISOString().slice(0, 10);
+  });
+}
+
+function variant(
+  metric: ContributionMetric,
+  label: string,
+  unit: string,
+  dates: string[],
+  values: Map<string, number>,
+): ContributionGridVariant {
+  const rawValues = dates.map((d) => nonNeg(values.get(d) ?? 0));
+  const max = Math.max(0, ...rawValues);
+  return {
+    metric,
+    label,
+    unit,
+    total: rawValues.reduce((sum, n) => sum + n, 0),
+    max,
+    cells: dates.map((date, i) => {
+      const value = rawValues[i] ?? 0;
+      return { date, value, intensity: intensity(value, max) };
+    }),
+  };
+}
+
+function intensity(value: number, max: number): 0 | 1 | 2 | 3 | 4 {
+  if (value <= 0 || max <= 0) return 0;
+  return Math.max(1, Math.min(4, Math.ceil((value / max) * 4))) as 1 | 2 | 3 | 4;
+}
+
+function isoDate(value: string): string | null {
+  const d = new Date(value);
+  if (!Number.isFinite(d.getTime())) return null;
+  return d.toISOString().slice(0, 10);
+}
+
+function isFailedDispatch(d: DetailDispatchRow): boolean {
+  const status = `${d.dispatch_status} ${d.verification_status}`.toLowerCase();
+  return !d.verified || status.includes("fail") || status.includes("bounce") || status.includes("error");
 }

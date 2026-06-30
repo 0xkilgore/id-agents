@@ -147,6 +147,28 @@ export interface AgentDetailLoop {
   schedule_label: string;
 }
 
+export type AgentDetailContributionMetric = 'activity' | 'artifacts' | 'failure_rate';
+
+export interface AgentDetailContributionGridCell {
+  date: string;
+  value: number;
+  intensity: 0 | 1 | 2 | 3 | 4;
+}
+
+export interface AgentDetailContributionGridVariant {
+  metric: AgentDetailContributionMetric;
+  label: string;
+  unit: string;
+  total: number;
+  max: number;
+  cells: AgentDetailContributionGridCell[];
+}
+
+export interface AgentDetailContributionGrid {
+  days: number;
+  variants: AgentDetailContributionGridVariant[];
+}
+
 export interface AgentDetailResponse {
   name: string;
   charts: {
@@ -154,6 +176,7 @@ export interface AgentDetailResponse {
     tokens: { today: number; series: AgentDetailTokenSeriesPoint[] };
     failures: { consecutive: number; failed_dispatches: number; last_error: string | null };
   };
+  contribution_grid?: AgentDetailContributionGrid;
   recent_outputs: AgentDetailArtifact[];
   recent_dispatches?: AgentDetailDispatch[];
   verified_landings?: AgentDetailDispatch[];
