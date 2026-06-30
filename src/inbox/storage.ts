@@ -50,12 +50,20 @@ export function migrateInboxTables(adapter: DbAdapter): void {
       generated_at TEXT NOT NULL,
       projection_version INTEGER NOT NULL DEFAULT 1,
       legacy_inbox_md_line TEXT,
-      legacy_shadow_path TEXT
+      legacy_shadow_path TEXT,
+      read_at TEXT
     )
   `);
 
   exec(`CREATE INDEX IF NOT EXISTS inbox_items_state_idx ON inbox_items(operator_state)`);
   exec(`CREATE INDEX IF NOT EXISTS inbox_items_received_idx ON inbox_items(received_at)`);
+
+  // Additive: operator "mark-read" marker for databases created before read_at existed.
+  try {
+    exec(`ALTER TABLE inbox_items ADD COLUMN read_at TEXT`);
+  } catch {
+    // Column already exists in upgraded databases.
+  }
 
   exec(`
     CREATE TABLE IF NOT EXISTS inbox_links (
@@ -214,6 +222,25 @@ export async function upsertInboxItem(adapter: DbAdapter, row: InboxItemRow): Pr
 export async function getInboxItem(adapter: DbAdapter, phid: string): Promise<InboxItemRow | null> {
   const { rows } = await adapter.query<InboxItemRow>('SELECT * FROM inbox_items WHERE inbox_phid = $1', [phid]);
   return rows[0] ?? null;
+}
+
+// Persist the operator "mark-read" marker. Idempotent: only sets read_at when
+// currently null, so the first read wins and the timestamp is stable.
+export async function markInboxItemRead(
+  adapter: DbAdapter,
+  phid: string,
+  readAt: string,
+): Promise<{ read_at: string | null; already_read: boolean }> {
+  await adapter.query(
+    'UPDATE inbox_items SET read_at = $1 WHERE inbox_phid = $2 AND read_at IS NULL',
+    [readAt, phid],
+  );
+  const { rows } = await adapter.query<{ read_at: string | null }>(
+    'SELECT read_at FROM inbox_items WHERE inbox_phid = $1',
+    [phid],
+  );
+  const current = rows[0]?.read_at ?? null;
+  return { read_at: current, already_read: current !== readAt };
 }
 
 export async function listInboxItems(

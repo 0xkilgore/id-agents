@@ -11038,7 +11038,13 @@ export class AgentManagerDb {
         // P2 Inbox 2.0 — mount /inbox/* routes.
         try {
           const { mountInboxRoutes } = await import('./inbox/routes.js');
-          mountInboxRoutes(this.managementApp, this.db.adapter);
+          mountInboxRoutes(this.managementApp, this.db.adapter, {
+            tasks: this.db.tasks,
+            resolveTeamId: async (req) => (await this.getTeam(req)).id,
+            enqueueDispatch: this.dispatchScheduler
+              ? this.dispatchScheduler.enqueue.bind(this.dispatchScheduler)
+              : undefined,
+          });
           console.log('[Manager] P2 inbox /inbox/* routes mounted');
         } catch (err) {
           console.warn('[Manager] P2 inbox routes failed to mount:', err instanceof Error ? err.message : String(err));

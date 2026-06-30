@@ -5,5 +5,7 @@ export * from './projection.js';
 export * from './ops.js';
 export * from './evaluator.js';
 export * from './channels.js';
+export * from './actions.js';
 export { mountInboxRoutes } from './routes.js';
+export type { InboxRouteDeps } from './routes.js';
 export { FIXTURES, FIXTURE_LINKS } from './fixtures.js';
