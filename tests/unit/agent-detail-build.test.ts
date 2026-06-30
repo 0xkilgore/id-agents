@@ -3,6 +3,7 @@
 import { describe, it, expect } from "vitest";
 import {
   buildAgentDetail,
+  CONTRIBUTION_GRID_DAYS,
   RECENT_OUTPUT_LIMIT,
   type RawAgentDetailData,
   type DetailArtifactRow,
@@ -22,6 +23,7 @@ function artifact(n: number, producedAt: string): DetailArtifactRow {
 function raw(over: Partial<RawAgentDetailData> = {}): RawAgentDetailData {
   return {
     name: "roger",
+    now_iso: "2026-06-29T12:00:00.000Z",
     consecutive_failures: 0,
     last_error: null,
     tasks: [],
@@ -59,6 +61,75 @@ describe("buildAgentDetail", () => {
     expect(d.charts.tokens.series).toEqual(series);
     expect(buildAgentDetail(raw({ tokens_today: -5 })).charts.tokens.today).toBe(0);
     expect(buildAgentDetail(raw({ tokens_today: NaN })).charts.tokens.today).toBe(0);
+  });
+
+  it("builds a GitHub-style contribution grid from activity, artifacts, and failures", () => {
+    const d = buildAgentDetail(
+      raw({
+        token_series: [
+          { date: "2026-06-27", weighted: 100 },
+          { date: "2026-06-28", weighted: 250 },
+          { date: "2026-06-29", weighted: 500 },
+        ],
+        recent_outputs: [
+          artifact(1, "2026-06-28T10:00:00.000Z"),
+          artifact(2, "2026-06-28T11:00:00.000Z"),
+          artifact(3, "2026-06-29T10:00:00.000Z"),
+        ],
+        recent_dispatches: [
+          {
+            dispatch_id: "d-ok",
+            query_id: null,
+            time: "2026-06-28T12:00:00.000Z",
+            subject: "ok",
+            dispatch_status: "done",
+            verification_status: "verified",
+            verified: true,
+            artifact_path: "/out/ok.md",
+            artifact_exists: true,
+            artifact_mtime: null,
+            tl_dr: "ok",
+            kind: "build",
+            attributed_agent: "roger",
+          },
+          {
+            dispatch_id: "d-fail",
+            query_id: null,
+            time: "2026-06-28T13:00:00.000Z",
+            subject: "fail",
+            dispatch_status: "failed",
+            verification_status: "failed",
+            verified: false,
+            artifact_path: null,
+            artifact_exists: null,
+            artifact_mtime: null,
+            tl_dr: "fail",
+            kind: "build",
+            attributed_agent: "roger",
+          },
+        ],
+      }),
+    );
+
+    expect(d.contribution_grid.days).toBe(CONTRIBUTION_GRID_DAYS);
+    expect(d.contribution_grid.variants.map((v) => v.metric)).toEqual([
+      "activity",
+      "artifacts",
+      "failure_rate",
+    ]);
+
+    const activity = d.contribution_grid.variants.find((v) => v.metric === "activity")!;
+    expect(activity.cells.at(-1)).toEqual({ date: "2026-06-29", value: 500, intensity: 4 });
+    expect(activity.cells.at(-2)).toMatchObject({ date: "2026-06-28", value: 250, intensity: 2 });
+    expect(activity.total).toBe(850);
+
+    const artifacts = d.contribution_grid.variants.find((v) => v.metric === "artifacts")!;
+    expect(artifacts.cells.at(-2)).toMatchObject({ date: "2026-06-28", value: 2, intensity: 4 });
+    expect(artifacts.cells.at(-1)).toMatchObject({ date: "2026-06-29", value: 1, intensity: 2 });
+
+    const failureRate = d.contribution_grid.variants.find((v) => v.metric === "failure_rate")!;
+    expect(failureRate.cells.at(-2)).toMatchObject({ date: "2026-06-28", value: 50, intensity: 4 });
+    expect(failureRate.max).toBe(50);
   });
 
   it("surfaces failure stats (consecutive + failed dispatches + last_error)", () => {

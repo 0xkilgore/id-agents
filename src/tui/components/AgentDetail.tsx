@@ -8,7 +8,7 @@
  */
 import React from 'react';
 import { Box, Text } from 'ink';
-import type { Agent, AgentDetailResponse } from '../api/types.js';
+import type { Agent, AgentDetailContributionGridVariant, AgentDetailResponse } from '../api/types.js';
 import { humanizeLastSeen } from '../util/format.js';
 import { healthColor } from '../util/colors.js';
 
@@ -57,6 +57,18 @@ function sparkline(values: number[]): string {
   return values
     .map((v) => ticks[Math.max(0, Math.min(7, Math.round((v / max) * 7)))])
     .join('');
+}
+
+function contributionShade(intensity: number): string {
+  return ['·', '░', '▒', '▓', '█'][Math.max(0, Math.min(4, Math.floor(intensity)))] ?? '·';
+}
+
+function contributionRow(variant: AgentDetailContributionGridVariant): string {
+  const grid = variant.cells.map((c) => contributionShade(c.intensity)).join('');
+  const total = variant.metric === 'failure_rate'
+    ? `${variant.max}% max`
+    : `${variant.total.toLocaleString()} ${variant.unit}`;
+  return `${grid}  ${total}`;
 }
 
 function fieldRow(label: string, value: string | null | undefined, color?: string): string {
@@ -142,6 +154,15 @@ export function AgentDetail(props: AgentDetailProps): React.ReactElement {
       value: `${failures.consecutive} consec · ${failures.failed_dispatches} failed dispatch`,
     });
     if (failures.last_error) lines.push({ label: 'last_error', value: failures.last_error });
+
+    const contribution = detail.contribution_grid;
+    if (contribution?.variants.length) {
+      blank();
+      sec(`Contribution Grid (${contribution.days}d)`);
+      for (const v of contribution.variants) {
+        lines.push({ label: v.label, value: contributionRow(v) });
+      }
+    }
 
     // (b) Recent output — last 20 artifacts, newest first.
     blank();

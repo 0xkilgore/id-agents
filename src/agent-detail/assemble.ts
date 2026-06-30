@@ -173,6 +173,7 @@ export async function assembleAgentDetail(
 
   return buildAgentDetail({
     name,
+    now_iso: opts.nowIso,
     consecutive_failures: opts.consecutiveFailures,
     last_error: opts.lastError,
     tasks,
