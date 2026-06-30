@@ -1,5 +1,5 @@
 import path from 'path';
-import { existsSync, readdirSync, statSync } from 'fs';
+import { existsSync, readdirSync, statSync, type Stats } from 'fs';
 
 import type { DbAdapterLike } from '../supervisor/manager-source-reader.js';
 import { readFleetBlockages, type FleetBlockagesReport } from './fleet-blockages.js';
@@ -9,6 +9,17 @@ const TERMINAL_STATUSES = ['done', 'failed', 'cancelled'];
 const ALL_STATUSES = [...ACTIVE_STATUSES, ...TERMINAL_STATUSES];
 
 export type DispatchReadStatus = 'active' | 'terminal' | 'all';
+
+export type ArtifactStatFn = (filePath: string) => Stats;
+
+export interface ReadArtifactsOptions {
+  /**
+   * Test seam for deterministic cache/call-count assertions. Production uses
+   * fs.statSync and caches results only for the lifetime of one readArtifacts()
+   * request.
+   */
+  statFile?: ArtifactStatFn;
+}
 
 export interface DispatchReadRow {
   id: string;
@@ -462,16 +473,17 @@ async function fetchCatalogProducedAt(
   return map;
 }
 
-export async function readArtifacts(adapter: DbAdapterLike, teamId: string, limit: number): Promise<{
+export async function readArtifacts(adapter: DbAdapterLike, teamId: string, limit: number, opts: ReadArtifactsOptions = {}): Promise<{
   artifacts: Array<Record<string, unknown>>;
   items: Array<Record<string, unknown>>;
   count: number;
   source_metadata: { sources: string[]; team_id: string };
 }> {
+  const statArtifactPath = createArtifactStatCache(opts.statFile);
   const [dispatchArtifacts, queryArtifacts, outputArtifacts] = await Promise.all([
-    readDispatchResultArtifacts(adapter, teamId, limit),
-    readQueryResultArtifacts(adapter, teamId, limit),
-    readAgentOutputArtifacts(adapter, teamId, limit),
+    readDispatchResultArtifacts(adapter, teamId, limit, statArtifactPath),
+    readQueryResultArtifacts(adapter, teamId, limit, statArtifactPath),
+    readAgentOutputArtifacts(adapter, teamId, limit, statArtifactPath),
   ]);
   const deduped = dedupeArtifactsByPath([...dispatchArtifacts, ...queryArtifacts, ...outputArtifacts]);
   const catalogByPath = await fetchCatalogProducedAt(
@@ -494,6 +506,7 @@ async function readDispatchResultArtifacts(
   adapter: DbAdapterLike,
   teamId: string,
   limit: number,
+  statArtifactPath: (filePath: string) => Stats | null,
 ): Promise<Array<Record<string, unknown>>> {
   const { rows } = await adapter.query<Pick<DispatchDbRow,
     'dispatch_phid' | 'query_id' | 'to_agent' | 'status' | 'subject' | 'completed_at' | 'updated_at' | 'result_json'
@@ -510,7 +523,7 @@ async function readDispatchResultArtifacts(
     const parsed = parseJsonObject(row.result_json);
     const artifactPath = typeof parsed?.artifact_path === 'string' ? parsed.artifact_path : null;
     if (!artifactPath) continue;
-    const stat = safeStat(artifactPath);
+    const stat = statArtifactPath(artifactPath);
     artifacts.push({
       id: `dispatch:${row.dispatch_phid}`,
       path: artifactPath,
@@ -539,6 +552,7 @@ async function readQueryResultArtifacts(
   adapter: DbAdapterLike,
   teamId: string,
   limit: number,
+  statArtifactPath: (filePath: string) => Stats | null,
 ): Promise<Array<Record<string, unknown>>> {
   const { rows } = await adapter.query<{
     query_id: string;
@@ -572,7 +586,7 @@ async function readQueryResultArtifacts(
         : '';
     for (const artifactPath of extractOutputPaths(resultText)) {
       if (artifacts.length >= limit) break;
-      const stat = safeStat(artifactPath);
+      const stat = statArtifactPath(artifactPath);
       if (!stat?.isFile()) continue;
       artifacts.push({
         id: `query:${row.query_id}:${path.basename(artifactPath)}`,
@@ -602,6 +616,7 @@ async function readAgentOutputArtifacts(
   adapter: DbAdapterLike,
   teamId: string,
   limit: number,
+  statArtifactPath: (filePath: string) => Stats | null,
 ): Promise<Array<Record<string, unknown>>> {
   const { rows: agents } = await adapter.query<{
     id: string;
@@ -628,7 +643,7 @@ async function readAgentOutputArtifacts(
     for (const entry of entries) {
       if (!entry.isFile()) continue;
       const filePath = path.join(outputDir, entry.name);
-      const stat = safeStat(filePath);
+      const stat = statArtifactPath(filePath);
       artifacts.push({
         id: `output:${agent.id}:${entry.name}`,
         path: filePath,
@@ -1167,12 +1182,19 @@ function parseJsonOrNull(raw: string | null | undefined): unknown | null {
   }
 }
 
-function safeStat(filePath: string) {
-  try {
-    return statSync(filePath);
-  } catch {
-    return null;
-  }
+export function createArtifactStatCache(statFile: ArtifactStatFn = statSync): (filePath: string) => Stats | null {
+  const cache = new Map<string, Stats | null>();
+  return (filePath: string): Stats | null => {
+    if (cache.has(filePath)) return cache.get(filePath) ?? null;
+    try {
+      const stat = statFile(filePath);
+      cache.set(filePath, stat);
+      return stat;
+    } catch {
+      cache.set(filePath, null);
+      return null;
+    }
+  };
 }
 
 function extractOutputPaths(text: string): string[] {
