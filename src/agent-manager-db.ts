@@ -38,6 +38,12 @@ import {
 import { buildTasksEntriesEnvelope, taskRowToEntry } from './tasks-readmodel/entry-projection.js';
 import { classifyTaskBand, extractTaskScheduleFacts, summarizeTaskRows, todayIso } from './tasks-readmodel/bands.js';
 import {
+  buildNeedsChrisQueue,
+  type ClarificationInput,
+  type BuildApprovalInput,
+} from './decisions-needs-chris/projection.js';
+import { listBacklogByState } from './continuous-orchestration/storage.js';
+import {
   buildTaskRow,
   draftFromAutoAttach,
   draftFromManagerApi,
@@ -3247,6 +3253,62 @@ export class AgentManagerDb {
           };
         });
         return res.json({ ok: true, items });
+      } catch (err) {
+        return res.status(500).json({
+          ok: false,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    });
+
+    // A1 — manager "needs-Chris decisions" projection (approvals cockpit scope,
+    // cto/output/2026-06-29-approvals-cockpit-scope.md). Unifies open dispatch
+    // clarifications + needs_chris_batch build items into ONE typed decision
+    // queue, each row tagged by kind with server-authored allowed actions. The
+    // cockpit UI (A2) renders this; it never re-derives the two feeds or guesses
+    // how to act on a row.
+    this.managementApp.get('/decisions/needs-chris', async (req, res) => {
+      try {
+        const { id: teamId } = await this.getTeam(req);
+        const now = Date.now();
+
+        // Source 1 — open clarifications (blocked-on-Chris dispatches). Empty
+        // when the scheduler isn't initialised (the build feed still returns).
+        let clarifications: ClarificationInput[] = [];
+        if (this.dispatchScheduler) {
+          const docs = await this.dispatchScheduler.reactor.listOpenClarifications({});
+          clarifications = docs.map((d) => {
+            const blocker = d.active_clarification;
+            const createdMs = blocker ? Date.parse(blocker.created_at) : 0;
+            return {
+              dispatch_id: d.dispatch_phid,
+              clarification_id: d.clarification_id,
+              agent_id: blocker?.agent_id ?? d.to_agent,
+              subject: d.subject,
+              question: blocker?.question ?? '',
+              urgency: blocker?.urgency ?? 'normal',
+              stale_at: blocker?.stale_at ?? null,
+              age_seconds: createdMs ? Math.max(0, Math.floor((now - createdMs) / 1000)) : 0,
+            };
+          });
+        }
+
+        // Source 2 — needs_chris_batch build items (one-click approve / promote).
+        const backlog = await listBacklogByState(this.db.adapter, {
+          team_id: teamId,
+          state: 'needs_chris_batch',
+        });
+        const buildApprovals: BuildApprovalInput[] = backlog.map((b) => ({
+          item_id: b.item_id,
+          title: b.title,
+          to_agent: b.to_agent,
+          risk_class: b.risk_class,
+          priority: b.priority,
+          created_at: b.created_at,
+        }));
+
+        const queue = buildNeedsChrisQueue(clarifications, buildApprovals, new Date(now).toISOString());
+        return res.json({ ok: true, ...queue });
       } catch (err) {
         return res.status(500).json({
           ok: false,
