@@ -28,7 +28,13 @@ export type ArtifactOpType =
   // {source_op_id, dispatch_phid, query_id, to_agent} so the acted-upon read
   // model can trace feedback → the dispatch it fired. B2 returned the receipt
   // only in the HTTP response; this op persists it so the chip survives reloads.
-  | "comment_routed";
+  | "comment_routed"
+  // Artifact Review v1 (2026-06-29 suggested-change contract): a span-edit
+  // proposal + its append-only lifecycle (proposed → accepted/rejected/
+  // superseded/stale). Distinct from the v0 free-form `suggested_change` op:
+  // a `suggestion` carries original_text/proposed_text and is applied via the
+  // reversible `edit` op. See outputs/suggestion.ts.
+  | "suggestion";
 
 // Artifact kind for a Cane email/telegram draft that needs operator approval
 // before it is sent. The send executor (ship-executor.ts) only fires for this

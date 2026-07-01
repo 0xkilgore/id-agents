@@ -45,9 +45,11 @@ import { promises as fsp } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import {
+  acceptSuggestion,
   approveArtifact,
   checkActionCooldown,
   commentArtifact,
+  createSuggestion,
   DEFAULT_ACTION_COOLDOWN_MS,
   listTimelineEvents,
   listComments,
@@ -59,9 +61,17 @@ import {
   reviseDraft,
   shipArtifact,
   suggestArtifactChange,
+  transitionSuggestion,
   viewArtifact,
   type CaneDraftShipContext,
+  type TransitionSuggestionResult,
 } from './ops.js';
+import {
+  type SuggestionAnchor,
+  type SuggestionCreateInput,
+  type SuggestionReaction,
+  type SuggestionRecord,
+} from './suggestion.js';
 import {
   isCaneDraftArtifactsEnabled,
   isC0FeedbackReactionsEnabled,
@@ -102,6 +112,7 @@ import {
   routeCommentToOwningAgent,
   type ArtifactCommentRouteKind,
   type CommentDispatchEnqueueFn,
+  type CommentDispatchResult,
 } from './comment-dispatch.js';
 import {
   reconcileFilesystemArtifacts,
@@ -256,6 +267,102 @@ async function handleClassifiedCommentRouting(
     await persistRoutedLinkage(adapter, artifactId, sourceOpId, routed.dispatch, actorRef, clock);
   }
   return { route_kind: routeKind, routed };
+}
+
+/** Compose the dispatch body a routed suggestion carries to the owning agent:
+ *  the span diff + anchor + rationale + the accept/reject/supersede instruction
+ *  (contract §2). Fed through the SAME comment router (commentMessage wraps it),
+ *  so suggestions invent no new routing path. */
+function suggestionDispatchBody(s: SuggestionRecord): string {
+  const anchorLine = s.anchor.heading_path?.length
+    ? s.anchor.heading_path.join(' › ')
+    : `chars ${s.anchor.char_start}–${s.anchor.char_end}`;
+  const lines: (string | null)[] = [
+    `A suggested change was proposed on this artifact (\`${s.suggestion_id}\`).`,
+    '',
+    `**Anchor:** ${anchorLine}`,
+    '',
+    '**Original:**',
+    '```',
+    s.original_text,
+    '```',
+    '',
+    '**Proposed:**',
+    '```',
+    s.proposed_text,
+    '```',
+    '',
+    s.rationale ? `**Rationale:** ${s.rationale}` : null,
+    s.rationale ? '' : null,
+    'Review this suggested change: **accept** / **reject** / **supersede**. ' +
+      'Accepting applies it as a reversible `edit` op — the source file is never mutated.',
+  ];
+  return lines.filter((l): l is string => l !== null).join('\n');
+}
+
+/**
+ * Route a persisted suggestion to the artifact's owning agent, reusing the
+ * comment classifier + router on its `rationale` (contract §2). The durable
+ * suggestion op is ALWAYS written before this runs; routing is a typed,
+ * non-fatal skip/error — mirrors CommentDispatchResult exactly.
+ */
+/** Parse + validate the client anchor. Only char_start/char_end are
+ *  load-bearing (apply/drift); quote defaults to original_text. */
+function parseSuggestionAnchor(raw: unknown, originalText: string): SuggestionAnchor | null {
+  const a = (raw ?? {}) as Record<string, unknown>;
+  const cs = a.char_start;
+  const ce = a.char_end;
+  if (!Number.isInteger(cs) || !Number.isInteger(ce)) return null;
+  if ((cs as number) < 0 || (ce as number) < (cs as number)) return null;
+  const heading = Array.isArray(a.heading_path)
+    ? a.heading_path.filter((x): x is string => typeof x === 'string')
+    : null;
+  return {
+    kind: 'span',
+    quote: typeof a.quote === 'string' ? a.quote : originalText,
+    char_start: cs as number,
+    char_end: ce as number,
+    heading_path: heading && heading.length ? heading : null,
+  };
+}
+
+/** Shape the routing block for the response — mirrors CommentDispatchResult
+ *  plus the classified `kind` (contract §1 response). */
+function routingResponse(r: { kind: ArtifactCommentRouteKind; result: CommentDispatchResult }):
+  | { kind: ArtifactCommentRouteKind; routed: true; dispatch: { query_id: string; dispatch_phid: string; to_agent: string } }
+  | { kind: ArtifactCommentRouteKind; routed: false; skipped: string }
+  | { kind: ArtifactCommentRouteKind; routed: false; error: { message: string } } {
+  if (r.result.routed) return { kind: r.kind, routed: true, dispatch: r.result.dispatch };
+  if ('skipped' in r.result) return { kind: r.kind, routed: false, skipped: r.result.skipped };
+  return { kind: r.kind, routed: false, error: r.result.error };
+}
+
+async function routeSuggestionToOwningAgent(
+  adapter: DbAdapter,
+  enqueue: CommentDispatchEnqueueFn | undefined,
+  artifactId: string,
+  suggestion: SuggestionRecord,
+  sourceOpId: number,
+): Promise<{ kind: ArtifactCommentRouteKind; result: CommentDispatchResult }> {
+  const forClassify: ArtifactComment = {
+    op_id: sourceOpId,
+    artifact_id: artifactId,
+    actor: suggestion.author,
+    body: suggestion.rationale,
+    anchor: suggestion.anchor.quote ?? null,
+    ts: suggestion.created_at,
+    reaction: suggestion.reaction ?? null,
+  };
+  const kind = classifyArtifactComment(forClassify);
+  if (kind === 'approval_signal') return { kind, result: { routed: false, skipped: 'approval_signal' } };
+  if (kind === 'question') return { kind, result: { routed: false, skipped: 'question_threaded' } };
+  const result = await routeCommentToOwningAgent({
+    adapter,
+    enqueue,
+    artifactId,
+    comment: { ...forClassify, body: suggestionDispatchBody(suggestion) },
+  });
+  return { kind, result };
 }
 
 export function mountOutputsRoutes(
@@ -1081,6 +1188,194 @@ export function mountOutputsRoutes(
       res.status(500).json({ ok: false, error: err instanceof Error ? err.message : String(err) });
     }
   });
+
+  // ── Suggested-change model (Artifact Review v1, 2026-06-29 contract) ─
+  // POST /artifacts/:id/suggestions             — propose a span edit (+route)
+  // POST /artifacts/:id/suggestions/:sid/accept — drift-guard + apply via edit
+  // POST /artifacts/:id/suggestions/:sid/reject
+  // POST /artifacts/:id/suggestions/:sid/supersede
+  //
+  // The durable suggestion op ALWAYS lands first; routing (via the SAME comment
+  // classifier/router on the rationale) is a typed, non-fatal skip/error — the
+  // create route still returns 200 with the persisted suggestion. Accept applies
+  // via the reversible `edit` op (source file untouched) → gated by the same
+  // ARTIFACTS_EDIT_IN_PRODUCT flag the /edit route uses. Drift → 409 + stale.
+
+  /** Current body for the drift guard/apply: the substrate-only edited body
+   *  (latest `edit` op) if any, else the canonical file body. */
+  async function resolveCurrentBody(artifactId: string): Promise<string> {
+    const ops = await listOperations(adapter, artifactId, 1000, 0);
+    const edited = latestEdit(ops);
+    if (edited) return edited.content;
+    const { detail } = await getArtifactDetailCached(resolveArtifactDetailRef(artifactId));
+    return detail?.body?.text ?? '';
+  }
+
+  function sendTransition(res: Response, result: TransitionSuggestionResult): void {
+    if (result.ok) {
+      res.json({ ok: true, schema_version: 'artifact.suggestion.v1', suggestion: result.suggestion, op_id: result.op_id });
+      return;
+    }
+    if (result.reason === 'not_found') {
+      res.status(404).json({ ok: false, code: 'suggestion_not_found', error: 'no such suggestion on this artifact' });
+      return;
+    }
+    res.status(409).json({
+      ok: false,
+      code: 'suggestion_not_proposed',
+      error: `suggestion is ${result.suggestion.state}, not proposed`,
+      suggestion: result.suggestion,
+    });
+  }
+
+  app.post('/artifacts/:id/suggestions', async (req: Request<{ id: string }>, res: Response) => {
+    try {
+      const artifactId = requireArtifactId(req, res);
+      if (!artifactId) return;
+      const actor = requireActor(req, res);
+      if (!actor) return;
+      const body = (req.body ?? {}) as Record<string, unknown>;
+      const original_text = typeof body.original_text === 'string' ? body.original_text : undefined;
+      const proposed_text = typeof body.proposed_text === 'string' ? body.proposed_text : undefined;
+      if (!original_text || original_text.length === 0) {
+        return res.status(400).json({ ok: false, code: 'missing_original_text', error: 'original_text (non-empty string) is required' });
+      }
+      if (typeof proposed_text !== 'string') {
+        return res.status(400).json({ ok: false, code: 'missing_proposed_text', error: 'proposed_text (string) is required' });
+      }
+      const anchor = parseSuggestionAnchor(body.anchor, original_text);
+      if (!anchor) {
+        return res.status(400).json({ ok: false, code: 'invalid_anchor', error: 'anchor { char_start, char_end } (non-negative integers, start ≤ end) is required' });
+      }
+      const rawReaction = asString(body.reaction);
+      const reaction: SuggestionReaction | null =
+        rawReaction && isReactionKind(rawReaction) ? (rawReaction as SuggestionReaction) : null;
+      const input: SuggestionCreateInput = {
+        anchor,
+        original_text,
+        proposed_text,
+        author: actor.ref,
+        rationale: asString(body.rationale) ?? '',
+        reaction,
+      };
+      const { suggestion, op_id, idempotent } = await createSuggestion(
+        adapter,
+        artifactId,
+        input,
+        { idempotency_key: idempotencyKey(req), source_link: asString(body.source_link) ?? null },
+        clock,
+      );
+      const routing = await routeSuggestionToOwningAgent(adapter, opts.enqueueDispatch, artifactId, suggestion, op_id);
+      invalidateArtifactDetail(artifactId);
+      return res.json({
+        ok: true,
+        schema_version: 'artifact.suggestion.v1',
+        suggestion,
+        op_id,
+        idempotent,
+        routing: routingResponse(routing),
+      });
+    } catch (err) {
+      res.status(500).json({ ok: false, error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  app.post(
+    '/artifacts/:id/suggestions/:suggestion_id/accept',
+    async (req: Request<{ id: string; suggestion_id: string }>, res: Response) => {
+      try {
+        if (!isEditInProductEnabled(env)) {
+          return res.status(404).json({ ok: false, code: 'edit_in_product_disabled', error: 'edit_in_product_disabled' });
+        }
+        const artifactId = requireArtifactId(req, res);
+        if (!artifactId) return;
+        const actor = requireActor(req, res);
+        if (!actor) return;
+        const suggestionId = req.params.suggestion_id;
+        const currentBody = await resolveCurrentBody(artifactId);
+        const result = await acceptSuggestion(adapter, artifactId, suggestionId, currentBody, actor.ref, clock);
+        invalidateArtifactDetail(artifactId);
+        if (result.ok) {
+          return res.json({
+            ok: true,
+            schema_version: 'artifact.suggestion.v1',
+            suggestion: result.suggestion,
+            edit_op_id: result.edit_op_id,
+            idempotent: result.idempotent,
+          });
+        }
+        if (result.reason === 'not_found') {
+          return res.status(404).json({ ok: false, code: 'suggestion_not_found', error: `no suggestion ${suggestionId} on this artifact` });
+        }
+        if (result.reason === 'drift') {
+          return res.status(409).json({
+            ok: false,
+            code: 'suggestion_stale',
+            error: 'original_text no longer matches the artifact body — suggestion marked stale, no edit written',
+            suggestion: result.suggestion,
+          });
+        }
+        return res.status(409).json({
+          ok: false,
+          code: 'suggestion_not_proposed',
+          error: `suggestion is ${result.suggestion.state}, not proposed`,
+          suggestion: result.suggestion,
+        });
+      } catch (err) {
+        res.status(500).json({ ok: false, error: err instanceof Error ? err.message : String(err) });
+      }
+    },
+  );
+
+  app.post(
+    '/artifacts/:id/suggestions/:suggestion_id/reject',
+    async (req: Request<{ id: string; suggestion_id: string }>, res: Response) => {
+      try {
+        const artifactId = requireArtifactId(req, res);
+        if (!artifactId) return;
+        const actor = requireActor(req, res);
+        if (!actor) return;
+        const result = await transitionSuggestion(
+          adapter,
+          artifactId,
+          req.params.suggestion_id,
+          'rejected',
+          actor.ref,
+          { reason: asString(req.body?.reason) ?? asString(req.body?.note) ?? null },
+          clock,
+        );
+        invalidateArtifactDetail(artifactId);
+        return sendTransition(res, result);
+      } catch (err) {
+        res.status(500).json({ ok: false, error: err instanceof Error ? err.message : String(err) });
+      }
+    },
+  );
+
+  app.post(
+    '/artifacts/:id/suggestions/:suggestion_id/supersede',
+    async (req: Request<{ id: string; suggestion_id: string }>, res: Response) => {
+      try {
+        const artifactId = requireArtifactId(req, res);
+        if (!artifactId) return;
+        const actor = requireActor(req, res);
+        if (!actor) return;
+        const result = await transitionSuggestion(
+          adapter,
+          artifactId,
+          req.params.suggestion_id,
+          'superseded',
+          actor.ref,
+          { superseded_by: asString(req.body?.superseded_by) ?? null },
+          clock,
+        );
+        invalidateArtifactDetail(artifactId);
+        return sendTransition(res, result);
+      } catch (err) {
+        res.status(500).json({ ok: false, error: err instanceof Error ? err.message : String(err) });
+      }
+    },
+  );
 
   // ── POST /artifacts/:id/reactions (C0_FEEDBACK_REACTIONS) ──────────
   // The lowest-click feedback surface (chris-feedback-system-design §3 C0): a

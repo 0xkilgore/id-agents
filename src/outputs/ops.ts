@@ -46,6 +46,17 @@ import type {
 import { ARTIFACT_REACTIONS, isReactionKind } from "./types.js";
 import type { CaneDraftSender } from "./ship-executor.js";
 import { pendingIdFromDraftId } from "./ship-executor.js";
+import { EDIT_OP_TYPE, buildEditPayload } from "./edit.js";
+import {
+  SUGGESTION_OP_TYPE,
+  applySuggestionSpan,
+  buildSuggestionCreatePayload,
+  buildSuggestionTransitionPayload,
+  mintSuggestionId,
+  reconstructSuggestion,
+  type SuggestionCreateInput,
+  type SuggestionRecord,
+} from "./suggestion.js";
 
 const DEFAULT_ACTOR = "operator";
 
@@ -289,6 +300,204 @@ export async function suggestArtifactChange(
   const op = (await listOperations(adapter, artifactId, 1000, 0)).find((row) => row.op_id === opId);
   if (!op) throw new Error(`suggested_change op ${opId} was not readable`);
   return { op_id: opId, event: timelineEventFromOperation(op), idempotent: before > 0 };
+}
+
+// ── Suggested-change model (Artifact Review v1, 2026-06-29 contract) ─
+// A span-edit proposal + its append-only lifecycle. Create records a durable
+// `suggestion` op (state proposed); accept applies the change via the existing
+// reversible `edit` op (source file untouched) after a drift guard. Reject /
+// supersede are terminal transition ops. State is reconstructed from the op-log
+// (suggestion.ts), never stored as mutable rows.
+
+const SUGGESTION_SOURCE_LINK = "manager:/artifacts/suggestions" as const;
+
+export interface CreateSuggestionResult {
+  suggestion: SuggestionRecord;
+  op_id: number;
+  idempotent: boolean;
+}
+
+export async function createSuggestion(
+  adapter: DbAdapter,
+  artifactId: string,
+  input: SuggestionCreateInput,
+  opts: { idempotency_key?: string | null; source_link?: string | null } = {},
+  now?: () => Date,
+): Promise<CreateSuggestionResult> {
+  const ts = nowIso(now);
+  const suggestionId = mintSuggestionId();
+  const existing = await getReviewState(adapter, artifactId);
+  await upsertReviewState(
+    adapter,
+    artifactId,
+    { source_link: opts.source_link ?? existing?.source_link ?? null },
+    ts,
+  );
+  const before = opts.idempotency_key
+    ? await countMatchingIdempotency(adapter, artifactId, opts.idempotency_key)
+    : 0;
+  const opId = await appendOperation(
+    adapter,
+    artifactId,
+    SUGGESTION_OP_TYPE,
+    input.author,
+    ts,
+    buildSuggestionCreatePayload(suggestionId, input),
+    opts.source_link ?? existing?.source_link ?? SUGGESTION_SOURCE_LINK,
+    opts.idempotency_key,
+  );
+  // On an idempotent replay appendOperation returns the ORIGINAL op (our fresh
+  // suggestionId was never written), so resolve the real id from the op we got.
+  const ops = await listOperations(adapter, artifactId, 1000, 0);
+  const opRow = ops.find((row) => row.op_id === opId);
+  let resolvedId = suggestionId;
+  try {
+    const parsed = JSON.parse(opRow?.payload_json ?? "{}") as { suggestion_id?: unknown };
+    if (typeof parsed.suggestion_id === "string") resolvedId = parsed.suggestion_id;
+  } catch {
+    /* keep freshly minted id */
+  }
+  const suggestion = reconstructSuggestion(ops, artifactId, resolvedId);
+  if (!suggestion) throw new Error(`suggestion ${resolvedId} was not readable after create`);
+  return { suggestion, op_id: opId, idempotent: before > 0 };
+}
+
+export type AcceptSuggestionResult =
+  | { ok: true; suggestion: SuggestionRecord; edit_op_id: number; transition_op_id: number; idempotent: boolean }
+  | { ok: false; reason: "not_found" }
+  | { ok: false; reason: "not_proposed"; suggestion: SuggestionRecord }
+  | { ok: false; reason: "drift"; suggestion: SuggestionRecord };
+
+/**
+ * Accept a proposed suggestion: drift-guard `original_text` against the CURRENT
+ * body (caller resolves it), then apply via the reversible `edit` op and mark
+ * the suggestion accepted. On drift the suggestion is marked `stale` and NO edit
+ * is written. Idempotent: re-accepting an already-accepted suggestion is a no-op
+ * that returns the existing record.
+ */
+export async function acceptSuggestion(
+  adapter: DbAdapter,
+  artifactId: string,
+  suggestionId: string,
+  currentBody: string,
+  actor: string,
+  now?: () => Date,
+): Promise<AcceptSuggestionResult> {
+  const ts = nowIso(now);
+  const existing = reconstructSuggestion(
+    await listOperations(adapter, artifactId, 1000, 0),
+    artifactId,
+    suggestionId,
+  );
+  if (!existing) return { ok: false, reason: "not_found" };
+  if (existing.state === "accepted") {
+    return {
+      ok: true,
+      suggestion: existing,
+      edit_op_id: existing.applied_edit_op_id ?? -1,
+      transition_op_id: -1,
+      idempotent: true,
+    };
+  }
+  if (existing.state !== "proposed") {
+    return { ok: false, reason: "not_proposed", suggestion: existing };
+  }
+
+  const applied = applySuggestionSpan(currentBody, existing.original_text, existing.proposed_text, existing.anchor);
+  if (!applied.ok) {
+    await appendOperation(
+      adapter,
+      artifactId,
+      SUGGESTION_OP_TYPE,
+      actor,
+      ts,
+      buildSuggestionTransitionPayload(suggestionId, "stale"),
+      SUGGESTION_SOURCE_LINK,
+    );
+    const stale = reconstructSuggestion(
+      await listOperations(adapter, artifactId, 1000, 0),
+      artifactId,
+      suggestionId,
+    );
+    return { ok: false, reason: "drift", suggestion: stale ?? existing };
+  }
+
+  // Apply = one append-only `edit` op (source file NEVER mutated; reversible).
+  const editOpId = await appendOperation(
+    adapter,
+    artifactId,
+    EDIT_OP_TYPE,
+    actor,
+    ts,
+    buildEditPayload(applied.next_body, `applied suggestion ${suggestionId}`),
+    SUGGESTION_SOURCE_LINK,
+  );
+  const transitionOpId = await appendOperation(
+    adapter,
+    artifactId,
+    SUGGESTION_OP_TYPE,
+    actor,
+    ts,
+    buildSuggestionTransitionPayload(suggestionId, "accepted", { applied_edit_op_id: editOpId }),
+    SUGGESTION_SOURCE_LINK,
+  );
+  const after = reconstructSuggestion(
+    await listOperations(adapter, artifactId, 1000, 0),
+    artifactId,
+    suggestionId,
+  );
+  return {
+    ok: true,
+    suggestion: after ?? existing,
+    edit_op_id: editOpId,
+    transition_op_id: transitionOpId,
+    idempotent: false,
+  };
+}
+
+export type TransitionSuggestionResult =
+  | { ok: true; suggestion: SuggestionRecord; op_id: number }
+  | { ok: false; reason: "not_found" }
+  | { ok: false; reason: "not_proposed"; suggestion: SuggestionRecord };
+
+/** Reject or supersede a proposed suggestion (terminal transition; no edit). */
+export async function transitionSuggestion(
+  adapter: DbAdapter,
+  artifactId: string,
+  suggestionId: string,
+  target: "rejected" | "superseded",
+  actor: string,
+  extra: { reason?: string | null; superseded_by?: string | null } = {},
+  now?: () => Date,
+): Promise<TransitionSuggestionResult> {
+  const ts = nowIso(now);
+  const existing = reconstructSuggestion(
+    await listOperations(adapter, artifactId, 1000, 0),
+    artifactId,
+    suggestionId,
+  );
+  if (!existing) return { ok: false, reason: "not_found" };
+  if (existing.state !== "proposed") {
+    return { ok: false, reason: "not_proposed", suggestion: existing };
+  }
+  const opId = await appendOperation(
+    adapter,
+    artifactId,
+    SUGGESTION_OP_TYPE,
+    actor,
+    ts,
+    buildSuggestionTransitionPayload(suggestionId, target, {
+      reason: extra.reason ?? null,
+      superseded_by: extra.superseded_by ?? null,
+    }),
+    SUGGESTION_SOURCE_LINK,
+  );
+  const after = reconstructSuggestion(
+    await listOperations(adapter, artifactId, 1000, 0),
+    artifactId,
+    suggestionId,
+  );
+  return { ok: true, suggestion: after ?? existing, op_id: opId };
 }
 
 export interface DispatchFollowUpResult {
@@ -646,6 +855,10 @@ function timelineKind(opType: ArtifactOpType, payload: Record<string, unknown>):
     case "reject":
       return "rejection";
     case "suggested_change":
+      return "suggested_change";
+    case "suggestion":
+      // Artifact Review v1 span-edit proposal — reuses the suggested_change
+      // timeline kind; the payload's `state` drives timelineStatus.
       return "suggested_change";
     case "dispatch_follow_up":
       return "dispatch_follow_up";
