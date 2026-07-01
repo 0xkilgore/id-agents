@@ -23,9 +23,26 @@ export interface MonitorFleetResponse {
   build?: {
     build_sha: string | null;
     build_time: string | null;
+    source_branch_sha: string | null;
+    source_branch_name: string | null;
     local_main_sha: string | null;
     origin_main_sha: string | null;
     behind_origin: boolean | null;
+    freshness: {
+      classification:
+        | 'fresh'
+        | 'server_not_rebuilt'
+        | 'stale_by_design_cross_repo_diff'
+        | 'server_stale_and_source_unpromoted'
+        | 'unknown';
+      running_manager_build_sha: string | null;
+      source_branch_sha: string | null;
+      source_branch_name: string | null;
+      promoted_main_sha: string | null;
+      behind_promoted_main: boolean | null;
+      source_differs_from_promoted_main: boolean | null;
+      message: string;
+    };
     source: string;
   } | null;
 }

@@ -104,9 +104,12 @@ function setupTables(a: SqliteAdapter): void {
   `);
 }
 
-async function startServer(a: SqliteAdapter): Promise<number> {
+async function startServer(
+  a: SqliteAdapter,
+  deps: Parameters<typeof mountMonitorRoutes>[2] = {},
+): Promise<number> {
   const app = express();
-  mountMonitorRoutes(app, a);
+  mountMonitorRoutes(app, a, deps);
   return new Promise((resolve) => {
     server = createServer(app);
     server.listen(0, () => {
@@ -169,6 +172,40 @@ describe('GET /monitor/fleet', () => {
     const body = await res.json();
     expect(body.agents).toHaveLength(1);
     expect(body.agents[0].agent).toBe('manager');
+  });
+
+  it('exposes manager build freshness classification on the existing fleet health surface', async () => {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    port = await startServer(adapter, {
+      buildStatus: () => ({
+        build_sha: 'old1234',
+        build_time: '2026-07-01T12:00:00.000Z',
+        source_branch_sha: 'new5678',
+        source_branch_name: 'main',
+        local_main_sha: 'new5678',
+        origin_main_sha: 'new5678',
+        behind_origin: true,
+        source: 'build_stamp',
+        freshness: {
+          classification: 'server_not_rebuilt',
+          running_manager_build_sha: 'old1234',
+          source_branch_sha: 'new5678',
+          source_branch_name: 'main',
+          promoted_main_sha: 'new5678',
+          behind_promoted_main: true,
+          source_differs_from_promoted_main: false,
+          message: 'code is promoted to main, but the running manager process was built from an older SHA',
+        },
+      }),
+    });
+
+    const res = await fetch(`http://localhost:${port}/monitor/fleet`);
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.build.freshness.classification).toBe('server_not_rebuilt');
+    expect(body.build.freshness.running_manager_build_sha).toBe('old1234');
+    expect(body.build.freshness.promoted_main_sha).toBe('new5678');
+    expect(body.build.freshness.source_branch_sha).toBe('new5678');
   });
 });
 

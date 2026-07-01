@@ -20,15 +20,43 @@ export type BuildInfoSource = "build_stamp" | "runtime_fallback" | "unknown";
 export interface BuildStatusInput {
   build_sha: string | null;
   build_time: string | null;
+  source_branch_sha: string | null;
+  source_branch_name: string | null;
   local_main_sha: string | null;
   origin_main_sha: string | null;
   source: BuildInfoSource;
+}
+
+export type BuildFreshnessClassification =
+  | "fresh"
+  | "server_not_rebuilt"
+  | "stale_by_design_cross_repo_diff"
+  | "server_stale_and_source_unpromoted"
+  | "unknown";
+
+export interface BuildFreshnessSignal {
+  classification: BuildFreshnessClassification;
+  /** SHA the running manager process was built from. */
+  running_manager_build_sha: string | null;
+  /** SHA currently checked out in the manager source repo. */
+  source_branch_sha: string | null;
+  /** Branch currently checked out in the manager source repo, when readable. */
+  source_branch_name: string | null;
+  /** Canonical pushed main SHA that promotion made visible to deploys. */
+  promoted_main_sha: string | null;
+  /** Back-compat staleness axis: running manager build differs from promoted main. */
+  behind_promoted_main: boolean | null;
+  /** Source branch is ahead/different from promoted main; often intentional build work. */
+  source_differs_from_promoted_main: boolean | null;
+  message: string;
 }
 
 export interface BuildStatus extends BuildStatusInput {
   /** The running build differs from origin/main → the manager is stale.
    *  null when either side is unknown (can't decide). */
   behind_origin: boolean | null;
+  /** Read-model signal for consoles: separates deploy freshness from source drift. */
+  freshness: BuildFreshnessSignal;
 }
 
 /** Pure: derive the staleness verdict from the resolved SHAs. */
@@ -37,7 +65,63 @@ export function computeBuildStatus(input: BuildStatusInput): BuildStatus {
     input.build_sha && input.origin_main_sha
       ? input.build_sha !== input.origin_main_sha
       : null;
-  return { ...input, behind_origin };
+  const sourceDiffers =
+    input.source_branch_sha && input.origin_main_sha
+      ? input.source_branch_sha !== input.origin_main_sha
+      : null;
+  const freshness = classifyBuildFreshness({
+    running_manager_build_sha: input.build_sha,
+    source_branch_sha: input.source_branch_sha,
+    source_branch_name: input.source_branch_name,
+    promoted_main_sha: input.origin_main_sha,
+    behind_promoted_main: behind_origin,
+    source_differs_from_promoted_main: sourceDiffers,
+  });
+  return { ...input, behind_origin, freshness };
+}
+
+export function classifyBuildFreshness(input: Omit<BuildFreshnessSignal, "classification" | "message">): BuildFreshnessSignal {
+  const {
+    running_manager_build_sha,
+    source_branch_sha,
+    source_branch_name,
+    promoted_main_sha,
+    behind_promoted_main,
+    source_differs_from_promoted_main,
+  } = input;
+
+  let classification: BuildFreshnessClassification;
+  let message: string;
+  if (behind_promoted_main === null) {
+    classification = "unknown";
+    message = "manager build freshness unknown; running build or promoted main SHA is unreadable";
+  } else if (behind_promoted_main) {
+    classification =
+      source_differs_from_promoted_main === true
+        ? "server_stale_and_source_unpromoted"
+        : "server_not_rebuilt";
+    message =
+      classification === "server_not_rebuilt"
+        ? "code is promoted to main, but the running manager process was built from an older SHA"
+        : "running manager is behind promoted main, and the checked-out source branch also differs from promoted main";
+  } else if (source_differs_from_promoted_main) {
+    classification = "stale_by_design_cross_repo_diff";
+    message = "running manager matches promoted main; source branch differs from main by design";
+  } else {
+    classification = "fresh";
+    message = "running manager build, source branch, and promoted main are aligned";
+  }
+
+  return {
+    classification,
+    running_manager_build_sha,
+    source_branch_sha,
+    source_branch_name,
+    promoted_main_sha,
+    behind_promoted_main,
+    source_differs_from_promoted_main,
+    message,
+  };
 }
 
 interface BuildStamp {
@@ -68,6 +152,13 @@ function gitRev(repoDir: string, ref: string): string | null {
   return /^[0-9a-f]{7,40}$/.test(sha) ? sha : null;
 }
 
+function gitBranchName(repoDir: string): string | null {
+  const r = runWithTimeout("git", ["-C", repoDir, "branch", "--show-current"], { timeoutMs: 5000 });
+  if (!r.ok) return null;
+  const branch = r.stdout.trim();
+  return branch.length > 0 ? branch : null;
+}
+
 export interface LoadBuildStatusOptions {
   /** Repo dir the manager runs from (for local/origin main lookups). */
   repoDir: string;
@@ -96,8 +187,18 @@ export function loadBuildStatus(opts: LoadBuildStatusOptions): BuildStatus {
 
   const local_main_sha = gitRev(opts.repoDir, "main") ?? gitRev(opts.repoDir, "HEAD");
   const origin_main_sha = gitRev(opts.repoDir, "origin/main");
+  const source_branch_sha = gitRev(opts.repoDir, "HEAD");
+  const source_branch_name = gitBranchName(opts.repoDir);
 
-  return computeBuildStatus({ build_sha, build_time, local_main_sha, origin_main_sha, source });
+  return computeBuildStatus({
+    build_sha,
+    build_time,
+    source_branch_sha,
+    source_branch_name,
+    local_main_sha,
+    origin_main_sha,
+    source,
+  });
 }
 
 // Short in-process cache so a hot /health endpoint doesn't spawn git on every
