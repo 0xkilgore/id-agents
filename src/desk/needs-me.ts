@@ -4,9 +4,21 @@ import { listDecisions } from "../decisions/storage.js";
 import { readDispatches, type DispatchReadRow } from "../dispatch-scheduler/read-model.js";
 import { listInboxItems } from "../outputs/storage.js";
 import type { OutputsInboxRow } from "../outputs/types.js";
+import { ARTIFACT_COMMENT_DISPATCH_CHANNEL } from "../outputs/comment-dispatch.js";
 import type { DeskNeedsMeItem, DeskNeedsMeResponse } from "./types.js";
 
 export const DESK_NEEDS_ME_SCHEMA_VERSION = "desk.needs_me.v1" as const;
+
+/**
+ * Digest-exclusion invariant (2026-06-30, T-RELIABILITY): an artifact comment
+ * MUST NEVER surface as a "Chris needs-you" item. Comment routing stamps every
+ * dispatch it fires with ARTIFACT_COMMENT_DISPATCH_CHANNEL, so this predicate is
+ * the deterministic guard that keeps a recovered-comment batch out of the
+ * needs_you digest even if such a dispatch is flagged needs_operator/needs_input.
+ */
+export function isArtifactCommentDispatch(row: DispatchReadRow): boolean {
+  return row.source_metadata?.channel === ARTIFACT_COMMENT_DISPATCH_CHANNEL;
+}
 
 interface TeamRef {
   id: string | null;
@@ -47,7 +59,7 @@ export async function buildDeskNeedsMe(
     .filter((row) => row.status !== "shipped")
     .map(artifactInboxToNeedsMeItem);
   const routedItems = dispatchRows
-    .filter((row) => row.needs_operator || row.needs_input.active != null)
+    .filter((row) => (row.needs_operator || row.needs_input.active != null) && !isArtifactCommentDispatch(row))
     .map(dispatchToNeedsMeItem);
 
   const items = [...approvalItems, ...artifactItems, ...routedItems]
