@@ -91,6 +91,43 @@ describe('verifyDispatch', () => {
     expect(out.kind).toBe('other');
   });
 
+  it('verifies a done code build that promoted to main with NO artifact (promotion landing)', () => {
+    const out = verifyDispatch(
+      makeRow({ artifact_path: null, promotion_required: true, promotion_verified: true }),
+      makeDeps(),
+    );
+    expect(out.status).toBe('verified');
+    expect(out.verified).toBe(true);
+    expect(out.failure_type).toBeNull();
+  });
+
+  it('does NOT credit a promotion landing when promotion_verified is false', () => {
+    const out = verifyDispatch(
+      makeRow({ artifact_path: null, promotion_required: true, promotion_verified: false }),
+      makeDeps(),
+    );
+    expect(out.verified).toBe(false);
+    expect(out.status).toBe('unverified');
+  });
+
+  it('does NOT credit an artifact-less build with no promotion required', () => {
+    const out = verifyDispatch(
+      makeRow({ artifact_path: null, promotion_required: false, promotion_verified: null }),
+      makeDeps(),
+    );
+    expect(out.verified).toBe(false);
+    expect(out.failure_type).toBe('artifact_missing');
+  });
+
+  it('does NOT credit a promotion-required build not yet promotion-verified (null)', () => {
+    const out = verifyDispatch(
+      makeRow({ artifact_path: null, promotion_required: true, promotion_verified: null }),
+      makeDeps(),
+    );
+    expect(out.verified).toBe(false);
+    expect(out.failure_type).toBe('artifact_missing');
+  });
+
   it('flags artifact_stale when mtime is before the delivery window start', () => {
     // window start = started_at = 11:55:00; mtime before that
     const out = verifyDispatch(
