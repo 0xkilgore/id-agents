@@ -179,7 +179,11 @@ export function buildAgentDetail(raw: RawAgentDetailData): AgentDetailResponse {
     contribution_grid,
     recent_outputs: recent,
     recent_dispatches: recentDispatches,
-    verified_landings: recentDispatches.filter((d) => d.verified && d.artifact_path != null),
+    // A verified landing is any verified dispatch — an artifact landing (has a
+    // path) OR a promotion landing (code promoted to main, no artifact file).
+    // Requiring artifact_path here silently dropped every code build, so agents
+    // showed zero landings despite shipping (Maestra bug, 2026-06-30).
+    verified_landings: recentDispatches.filter((d) => d.verified),
     skills: raw.skills,
     loops: raw.loops,
     scripts: raw.scripts,

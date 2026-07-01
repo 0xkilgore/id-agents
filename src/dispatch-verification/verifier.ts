@@ -129,9 +129,22 @@ export function verifyDispatch(
     failureDetail = failureDetail ?? `dispatch failed (${row.failure_kind ?? 'unknown'})`;
   } else if (row.status === 'done') {
     if (!hasArtifact) {
-      failureType = 'artifact_missing';
-      status = 'unverified';
-      failureDetail = failureDetail ?? 'dispatch done without an artifact_path';
+      if (row.promotion_required === true && row.promotion_verified === true) {
+        // A promotion-required build that verifiably promoted to its base branch
+        // IS a verified landing even with no artifact file: code lands as a
+        // commit on main, not a doc. Without this credit, every green code build
+        // reads as `artifact_missing` and agents show zero verified landings in
+        // the effectiveness/detail projection despite shipping (Maestra bug,
+        // 2026-06-30). The promotion gate below still demotes a FAILED promotion.
+        verified = true;
+        status = 'verified';
+        failureType = null;
+        failureDetail = null;
+      } else {
+        failureType = 'artifact_missing';
+        status = 'unverified';
+        failureDetail = failureDetail ?? 'dispatch done without an artifact_path';
+      }
     } else if (!stat || !stat.exists || !stat.is_file) {
       failureType = 'artifact_missing';
       status = 'unverified';

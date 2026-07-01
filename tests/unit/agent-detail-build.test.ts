@@ -199,6 +199,24 @@ describe("buildAgentDetail", () => {
     expect(d.verified_landings.every((x) => x.verified && x.artifact_path)).toBe(true);
   });
 
+  it("counts a promotion landing (verified, no artifact) as a verified landing", () => {
+    const mk = (over: Partial<(typeof rows)[number]>) => ({
+      dispatch_id: "d", query_id: null, time: "2026-06-28T12:00:00.000Z", subject: "s",
+      dispatch_status: "done", verification_status: "verified", verified: true,
+      artifact_path: null as string | null, artifact_exists: null as boolean | null,
+      artifact_mtime: null as string | null, tl_dr: "s", kind: "build", attributed_agent: "hopper",
+      ...over,
+    });
+    const rows = [
+      mk({ dispatch_id: "artifact-landing", artifact_path: "/out/x.md", artifact_exists: true }),
+      mk({ dispatch_id: "promotion-landing", artifact_path: null }), // code build, promoted, no artifact
+      mk({ dispatch_id: "unverified", verified: false, verification_status: "unverified" }),
+    ];
+    const d = buildAgentDetail(raw({ recent_dispatches: rows }));
+    const landed = d.verified_landings.map((x) => x.dispatch_id).sort();
+    expect(landed).toEqual(["artifact-landing", "promotion-landing"]);
+  });
+
   it("AP6 — surfaces the catalog view (null catalog → empty view)", () => {
     expect(buildAgentDetail(raw()).catalog).toEqual({
       role: null,

@@ -24,6 +24,14 @@ import type { ArtifactCatalogRow, ArtifactComment } from "./types.js";
 export const COMMENT_DISPATCH_SCHEMA_VERSION = "artifact.comment.dispatch.v1" as const;
 
 /**
+ * Deterministic origin channel stamped on EVERY dispatch that an artifact
+ * comment routes. This is the canonical discriminator the needs_you digest uses
+ * to guarantee that no artifact comment — however it was recovered or batched —
+ * ever surfaces as a "Chris needs-you" item (see desk/needs-me.isArtifactCommentDispatch).
+ */
+export const ARTIFACT_COMMENT_DISPATCH_CHANNEL = "artifact_comment" as const;
+
+/**
  * Minimal enqueue seam — structurally compatible with
  * `SchedulerHandle.enqueue` (the manager binds `dispatchScheduler.enqueue`
  * here). Only the fields the comment router needs are declared; the scheduler
@@ -37,6 +45,8 @@ export interface CommentDispatchEnqueueFn {
     message: string;
     subject?: string;
     priority?: number;
+    /** Origin channel; comment routing always stamps ARTIFACT_COMMENT_DISPATCH_CHANNEL. */
+    channel?: string;
   }): Promise<{ query_id: string; dispatch_phid: string; status: "queued" }>;
 }
 
@@ -126,6 +136,7 @@ export async function routeCommentToOwningAgent(
       subject: commentSubject(catalog),
       message: commentMessage(catalog, input.comment),
       priority: 5,
+      channel: ARTIFACT_COMMENT_DISPATCH_CHANNEL,
     });
     return {
       routed: true,
@@ -141,6 +152,74 @@ export async function routeCommentToOwningAgent(
       error: { message: err instanceof Error ? err.message : String(err) },
     };
   }
+}
+
+// ── Recovered-comment batch sweep (deterministic) ─────────────────────
+
+export interface RecoveredCommentSweepInput {
+  adapter: DbAdapter;
+  enqueue: CommentDispatchEnqueueFn | undefined;
+  comments: Array<{ artifactId: string; comment: ArtifactComment }>;
+}
+
+export interface RecoveredCommentSweepEntry {
+  artifactId: string;
+  op_id: number;
+  route_kind: ArtifactCommentRouteKind;
+  result: CommentDispatchResult;
+}
+
+export interface RecoveredCommentSweepReport {
+  schema_version: typeof COMMENT_DISPATCH_SCHEMA_VERSION;
+  total: number;
+  counts: Record<ArtifactCommentRouteKind, number>;
+  entries: RecoveredCommentSweepEntry[];
+}
+
+/**
+ * Deterministic sweep of a recovered artifact-comment batch. Classification is
+ * pure (classifyArtifactComment); routing is applied in stable input order.
+ * approval_signal / question never dispatch agent work; substantive_follow_up
+ * routes to the owning agent. EVERY routed dispatch carries the
+ * artifact_comment channel, so a recovered batch can never reach needs_you.
+ * Same input → identical report (no clocks, no randomness here).
+ */
+export async function sweepRecoveredArtifactComments(
+  input: RecoveredCommentSweepInput,
+): Promise<RecoveredCommentSweepReport> {
+  const counts: Record<ArtifactCommentRouteKind, number> = {
+    approval_signal: 0,
+    substantive_follow_up: 0,
+    question: 0,
+  };
+  const entries: RecoveredCommentSweepEntry[] = [];
+
+  for (const { artifactId, comment } of input.comments) {
+    const route_kind = classifyArtifactComment(comment);
+    counts[route_kind] += 1;
+
+    let result: CommentDispatchResult;
+    if (route_kind === "approval_signal") {
+      result = { routed: false, skipped: "approval_signal" };
+    } else if (route_kind === "question") {
+      result = { routed: false, skipped: "question_threaded" };
+    } else {
+      result = await routeCommentToOwningAgent({
+        adapter: input.adapter,
+        enqueue: input.enqueue,
+        artifactId,
+        comment,
+      });
+    }
+    entries.push({ artifactId, op_id: comment.op_id, route_kind, result });
+  }
+
+  return {
+    schema_version: COMMENT_DISPATCH_SCHEMA_VERSION,
+    total: input.comments.length,
+    counts,
+    entries,
+  };
 }
 
 function artifactLabel(catalog: ArtifactCatalogRow): string {
