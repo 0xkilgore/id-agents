@@ -6,10 +6,18 @@
 //                              This is the commit the running binary was built from.
 //   local_main_sha           — the repo's current local main (runtime).
 //   origin_main_sha          — the last-fetched origin/main (runtime).
-//   behind_origin            — build_sha !== origin_main_sha (the staleness signal).
+//   behind_origin            — the EXACT-SHA staleness signal: true only when the
+//                              promoted main has commits the running build lacks
+//                              that actually change the built binary. A build that
+//                              is even-with/AHEAD of main, or behind only by a
+//                              runtime-read config/docs commit, is NOT stale (this
+//                              kills the false drift where any SHA difference —
+//                              e.g. a runtime-policy-only commit — flagged stale).
 //
 // The pure decision (computeBuildStatus) is split from the I/O (loadBuildStatus)
-// so it is unit-testable without git or a filesystem.
+// so it is unit-testable without git or a filesystem. The exact behind-delta
+// (files promoted main has that the build does not) is resolved by git in the
+// I/O layer and passed to the pure decision.
 
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -59,12 +67,45 @@ export interface BuildStatus extends BuildStatusInput {
   freshness: BuildFreshnessSignal;
 }
 
-/** Pure: derive the staleness verdict from the resolved SHAs. */
-export function computeBuildStatus(input: BuildStatusInput): BuildStatus {
-  const behind_origin =
-    input.build_sha && input.origin_main_sha
-      ? input.build_sha !== input.origin_main_sha
-      : null;
+/** Paths read at RUNTIME by the manager (not compiled into `dist/`), so a commit
+ *  confined to these does NOT make the running binary stale. Kept deliberately
+ *  tight: runtime policy/config (e.g. configs/model-policy.json) + pure docs.
+ *  Everything else (src/, scripts/, package manifests, tsconfig, …) is
+ *  build-affecting and DOES require a rebuild. */
+export function isRuntimeOnlyPath(path: string): boolean {
+  const p = path.trim();
+  if (p === "") return false;
+  return (
+    p.startsWith("configs/") || // runtime-read policy/config (model-policy.json, …)
+    p.startsWith("docs/") ||
+    /^[^/]+\.md$/.test(p) // top-level markdown (README.md, CHANGELOG.md, NOTICE …)
+  );
+}
+
+/** True when EVERY path in the behind-delta is runtime-only (no rebuild needed).
+ *  An empty delta is not "policy-only" — the caller treats [] as "not behind". */
+export function isRuntimePolicyOnlyDelta(paths: readonly string[]): boolean {
+  return paths.length > 0 && paths.every(isRuntimeOnlyPath);
+}
+
+/**
+ * Pure: derive the EXACT-SHA staleness verdict.
+ *
+ * `behindPaths` is the set of files that commits on promoted main have but the
+ * running build does NOT — the three-dot `build_sha...origin_main_sha` delta:
+ *   - `undefined`/`null` → the delta could not be computed; fall back to the raw
+ *     SHA comparison (any difference = behind), preserving the legacy signal.
+ *   - `[]`               → the build is even-with or AHEAD of promoted main (e.g.
+ *     a just-promoted build while the local origin ref lags) → NOT behind.
+ *   - only runtime-only paths (config/docs) → a by-design advance the running
+ *     manager reads live → NOT a stale binary (fixes the false drift).
+ *   - any build-affecting path (src/, scripts/, …) → genuinely behind.
+ */
+export function computeBuildStatus(
+  input: BuildStatusInput,
+  behindPaths?: readonly string[] | null,
+): BuildStatus {
+  const behind_origin = computeBehindOrigin(input, behindPaths);
   const sourceDiffers =
     input.source_branch_sha && input.origin_main_sha
       ? input.source_branch_sha !== input.origin_main_sha
@@ -78,6 +119,24 @@ export function computeBuildStatus(input: BuildStatusInput): BuildStatus {
     source_differs_from_promoted_main: sourceDiffers,
   });
   return { ...input, behind_origin, freshness };
+}
+
+/** The exact-SHA behind verdict (see computeBuildStatus for the `behindPaths`
+ *  contract). Pure; `null` when either SHA is unreadable. */
+function computeBehindOrigin(
+  input: BuildStatusInput,
+  behindPaths?: readonly string[] | null,
+): boolean | null {
+  const { build_sha, origin_main_sha } = input;
+  if (!build_sha || !origin_main_sha) return null; // can't decide
+  if (build_sha === origin_main_sha) return false; // exact match → fresh
+  if (behindPaths === undefined || behindPaths === null) {
+    return build_sha !== origin_main_sha; // exact delta unknown → raw comparison
+  }
+  if (behindPaths.length === 0) return false; // build is even-with/ahead of main
+  // Promoted main is ahead: stale only if a build-affecting path changed. A delta
+  // confined to runtime-read config/docs is not a stale binary.
+  return !isRuntimePolicyOnlyDelta(behindPaths);
 }
 
 export function classifyBuildFreshness(input: Omit<BuildFreshnessSignal, "classification" | "message">): BuildFreshnessSignal {
@@ -159,6 +218,26 @@ function gitBranchName(repoDir: string): string | null {
   return branch.length > 0 ? branch : null;
 }
 
+/**
+ * Files that promoted main (`originSha`) has ahead of the running build
+ * (`buildSha`) — the three-dot delta (changes on the origin side since the merge
+ * base). `[]` when the build is even-with or AHEAD of main. `null` on any git
+ * failure (e.g. the build SHA isn't in this repo, or unrelated histories) so the
+ * caller falls back to the raw SHA comparison rather than trusting an empty diff.
+ */
+function gitBehindPaths(repoDir: string, buildSha: string, originSha: string): string[] | null {
+  const r = runWithTimeout(
+    "git",
+    ["-C", repoDir, "diff", "--name-only", `${buildSha}...${originSha}`],
+    { timeoutMs: 5000 },
+  );
+  if (!r.ok) return null;
+  return r.stdout
+    .split("\n")
+    .map((l) => l.trim())
+    .filter((l) => l.length > 0);
+}
+
 export interface LoadBuildStatusOptions {
   /** Repo dir the manager runs from (for local/origin main lookups). */
   repoDir: string;
@@ -190,15 +269,29 @@ export function loadBuildStatus(opts: LoadBuildStatusOptions): BuildStatus {
   const source_branch_sha = gitRev(opts.repoDir, "HEAD");
   const source_branch_name = gitBranchName(opts.repoDir);
 
-  return computeBuildStatus({
-    build_sha,
-    build_time,
-    source_branch_sha,
-    source_branch_name,
-    local_main_sha,
-    origin_main_sha,
-    source,
-  });
+  // Resolve the exact behind-delta (files promoted main has that the running
+  // build lacks) so a build that is ahead/even, or behind only by a runtime-read
+  // config/docs commit, is not flagged stale. Only computed when both SHAs are
+  // known and differ; git failure → null → raw-SHA fallback in the pure decision.
+  const behind_paths =
+    build_sha && origin_main_sha && build_sha !== origin_main_sha
+      ? gitBehindPaths(opts.repoDir, build_sha, origin_main_sha)
+      : build_sha && origin_main_sha
+        ? []
+        : null;
+
+  return computeBuildStatus(
+    {
+      build_sha,
+      build_time,
+      source_branch_sha,
+      source_branch_name,
+      local_main_sha,
+      origin_main_sha,
+      source,
+    },
+    behind_paths,
+  );
 }
 
 // Short in-process cache so a hot /health endpoint doesn't spawn git on every

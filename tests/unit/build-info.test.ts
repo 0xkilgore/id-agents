@@ -5,6 +5,8 @@ import { describe, it, expect } from "vitest";
 import {
   classifyBuildFreshness,
   computeBuildStatus,
+  isRuntimeOnlyPath,
+  isRuntimePolicyOnlyDelta,
   loadBuildStatus,
   type BuildStatusInput,
 } from "../../src/build-info.js";
@@ -91,6 +93,83 @@ describe("computeBuildStatus", () => {
       source_differs_from_promoted_main: true,
     });
     expect(s.classification).toBe("server_stale_and_source_unpromoted");
+  });
+});
+
+describe("computeBuildStatus — exact promoted-sha delta (no false-stale)", () => {
+  it("is NOT behind when the running build is ahead of / even with promoted main (empty delta)", () => {
+    // build differs from origin only because the build is AHEAD (the local origin
+    // ref lags a just-promoted build): the three-dot delta is empty → not stale.
+    const s = computeBuildStatus(input({ build_sha: "ahead99", origin_main_sha: "old0001" }), []);
+    expect(s.behind_origin).toBe(false);
+    expect(s.freshness.classification).not.toBe("server_not_rebuilt");
+    expect(s.freshness.classification).not.toBe("server_stale_and_source_unpromoted");
+  });
+
+  it("is NOT behind when promoted main is ahead only by a runtime-policy/config commit", () => {
+    // The 4644345 false drift: origin advanced by configs/model-policy.json only,
+    // which the running manager reads live — no rebuild required, so not stale.
+    const s = computeBuildStatus(
+      input({ build_sha: "old0001", origin_main_sha: "cfg9999" }),
+      ["configs/model-policy.json"],
+    );
+    expect(s.behind_origin).toBe(false);
+  });
+
+  it("is NOT behind when the behind-delta is docs-only", () => {
+    const s = computeBuildStatus(
+      input({ build_sha: "old0001", origin_main_sha: "doc9999" }),
+      ["README.md", "docs/manager-deploy-runbook.md"],
+    );
+    expect(s.behind_origin).toBe(false);
+  });
+
+  it("IS behind (server_not_rebuilt) when promoted main is ahead by a build-affecting src/ commit", () => {
+    const s = computeBuildStatus(
+      input({ build_sha: "old0001", source_branch_sha: "src9999", origin_main_sha: "src9999" }),
+      ["src/agent-manager-db.ts"],
+    );
+    expect(s.behind_origin).toBe(true);
+    expect(s.freshness.classification).toBe("server_not_rebuilt");
+  });
+
+  it("IS behind when a mixed delta touches any build-affecting path", () => {
+    const s = computeBuildStatus(
+      input({ build_sha: "old0001", origin_main_sha: "mix9999" }),
+      ["configs/model-policy.json", "src/loops/registry.ts"],
+    );
+    expect(s.behind_origin).toBe(true);
+  });
+
+  it("falls back to the raw sha comparison when the exact delta is unavailable (null)", () => {
+    const s = computeBuildStatus(input({ build_sha: "old0001", origin_main_sha: "new9999" }), null);
+    expect(s.behind_origin).toBe(true);
+  });
+
+  it("still resolves to fresh when build equals promoted main regardless of delta arg", () => {
+    const s = computeBuildStatus(input(), []); // build === origin
+    expect(s.behind_origin).toBe(false);
+    expect(s.freshness.classification).toBe("fresh");
+  });
+});
+
+describe("runtime-only path classification", () => {
+  it("isRuntimeOnlyPath: configs/, docs/, and top-level *.md are runtime-only", () => {
+    expect(isRuntimeOnlyPath("configs/model-policy.json")).toBe(true);
+    expect(isRuntimeOnlyPath("docs/manager-deploy-runbook.md")).toBe(true);
+    expect(isRuntimeOnlyPath("README.md")).toBe(true);
+    expect(isRuntimeOnlyPath("src/build-info.ts")).toBe(false);
+    expect(isRuntimeOnlyPath("scripts/write-build-info.mjs")).toBe(false);
+    expect(isRuntimeOnlyPath("package.json")).toBe(false);
+    expect(isRuntimeOnlyPath("tsconfig.json")).toBe(false);
+    expect(isRuntimeOnlyPath("")).toBe(false);
+  });
+
+  it("isRuntimePolicyOnlyDelta: true only when EVERY path is runtime-only; [] is not policy-only", () => {
+    expect(isRuntimePolicyOnlyDelta(["configs/a.json", "docs/x.md", "README.md"])).toBe(true);
+    expect(isRuntimePolicyOnlyDelta(["configs/a.json", "src/x.ts"])).toBe(false);
+    expect(isRuntimePolicyOnlyDelta(["scripts/build.mjs"])).toBe(false);
+    expect(isRuntimePolicyOnlyDelta([])).toBe(false);
   });
 });
 
