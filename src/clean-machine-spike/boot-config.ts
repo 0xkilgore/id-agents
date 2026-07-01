@@ -85,8 +85,27 @@ export interface ChrisPathFinding {
 }
 
 /** The running user's home directory (the relocation target on a clean Mac). */
-function currentHome(env: NodeJS.ProcessEnv): string {
+export function currentHome(env: NodeJS.ProcessEnv = process.env): string {
   return env.HOME?.trim() || os.homedir();
+}
+
+/**
+ * Return every non-relocatable Chris-machine marker present in a single path
+ * value (fixed markers + a foreign hardcoded home), or an empty array when the
+ * value is portable. Shared by the R2 boot scan and the R1 credential probe so
+ * both apply one definition of "clean".
+ */
+export function chrisPathMarkersFor(
+  value: string,
+  env: NodeJS.ProcessEnv = process.env,
+): string[] {
+  const markers: string[] = [];
+  for (const marker of CHRIS_PATH_MARKERS) {
+    if (value.includes(marker)) markers.push(marker);
+  }
+  const foreign = foreignHomeMarker(value, currentHome(env));
+  if (foreign) markers.push(foreign);
+  return markers;
 }
 
 /** If `value` hardcodes a `/Users/<name>` home that is NOT the running user's,
@@ -112,7 +131,6 @@ export function scanForChrisPaths(
   env: NodeJS.ProcessEnv = process.env,
 ): ChrisPathFinding[] {
   const findings: ChrisPathFinding[] = [];
-  const home = currentHome(env);
   const fields: (keyof BundleBootConfig)[] = [
     'idAgentsHome',
     'workdir',
@@ -122,11 +140,9 @@ export function scanForChrisPaths(
   for (const field of fields) {
     const value = config[field];
     if (typeof value !== 'string') continue;
-    for (const marker of CHRIS_PATH_MARKERS) {
-      if (value.includes(marker)) findings.push({ field, value, marker });
+    for (const marker of chrisPathMarkersFor(value, env)) {
+      findings.push({ field, value, marker });
     }
-    const foreign = foreignHomeMarker(value, home);
-    if (foreign) findings.push({ field, value, marker: foreign });
   }
   return findings;
 }
