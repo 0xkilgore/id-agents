@@ -52,7 +52,26 @@ export interface RoutingHealthInput {
   online_window_ms?: number;
   /** Provider budget actuals vs the 60/20/20 target; null/absent = no data. */
   provider_budget?: ProviderBudgetInput | null;
+  /** Per-runtime liveness (primary + fallbacks). Folded into summary.healthy so a
+   *  dead runtime (e.g. a cert-revoked Codex fallback) can never read as green.
+   *  Absent/empty = no runtime data supplied (vacuously all-live). */
+  runtimes?: RuntimeLiveness[];
 }
+
+/** Whether a runtime the fleet can route to is actually usable right now. */
+export interface RuntimeLiveness {
+  /** Runtime/provider name (e.g. 'claude', 'codex', 'cursor'). */
+  name: string;
+  /** 'primary' outages are red (fleet unhealthy); 'fallback' outages are yellow. */
+  role: 'primary' | 'fallback';
+  /** True when the runtime is present and executes; false when unavailable. */
+  live: boolean;
+  /** Optional one-line reason/detail (e.g. 'runtime_unavailable:cert_revoked'). */
+  detail?: string;
+}
+
+/** Overall routing-health severity: green / yellow / red. */
+export type RoutingHealthSeverity = 'ok' | 'degraded' | 'unhealthy';
 
 export type LaneStallReason =
   | 'no_live_members' // queued work but zero members online → routing can't drain
@@ -114,8 +133,17 @@ export interface RoutingHealthSummary {
   mis_routes: number;
   total_in_flight: number;
   total_queued: number;
-  /** True when no lane is stalled and no mis-route is flagged. */
+  /** Number of runtimes evaluated for liveness (0 = none supplied). */
+  runtimes: number;
+  /** How many of those runtimes are live. */
+  runtimes_live: number;
+  /** Names of runtimes that are NOT live (empty when all live / none supplied). */
+  runtimes_down: string[];
+  /** True when no lane is stalled, no mis-route is flagged, AND all runtimes live. */
   healthy: boolean;
+  /** green (ok) / yellow (degraded: only a fallback runtime is down) / red
+   *  (unhealthy: a stall, mis-route, or a PRIMARY runtime is down). */
+  severity: RoutingHealthSeverity;
 }
 
 export interface RoutingHealthReadModel {

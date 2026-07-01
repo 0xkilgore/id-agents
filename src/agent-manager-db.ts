@@ -91,6 +91,11 @@ import { validateName } from './name-validation.js';
 import { checkCursorFallbackHealth } from './harness/cursor-fallback-health.js';
 import { checkCodexFallbackHealth } from './harness/codex-fallback-health.js';
 import {
+  computeRoutingHealth,
+  runtimeLivenessFromFallbackHealth,
+  type RuntimeLiveness,
+} from './routing-health/index.js';
+import {
   emitQueryDelivered,
   emitQueryExpired,
   emitQueryFailed,
@@ -3806,6 +3811,39 @@ export class AgentManagerDb {
     // /health is intentionally above this middleware so liveness survives DB
     // contention during boot-time ingest/reconciliation.
     this.managementApp.use(this.teamContextMiddleware());
+
+    // C3: GET /routing-health — previously unregistered (404, the "cosmetic" note
+    // in kapelle-remote-check.sh). Registers the read-model AND folds runtime
+    // liveness into summary.healthy so a cert-revoked Codex fallback (or any dead
+    // runtime) can never read as green. Runtime probes are the make-or-break axis
+    // here; lanes/dispatches are honest-empty pending the read-model data wire-up.
+    this.managementApp.get('/routing-health', async (req, res) => {
+      try {
+        const teamName = this.getTeamName(req);
+        const [codex, cursor] = await Promise.all([
+          checkCodexFallbackHealth(),
+          checkCursorFallbackHealth({ live: false }),
+        ]);
+        const runtimes: RuntimeLiveness[] = [
+          // The manager is serving this request on the Claude runtime, so the
+          // primary is live by construction.
+          { name: 'claude', role: 'primary', live: true, detail: 'manager process is running' },
+          runtimeLivenessFromFallbackHealth('codex', codex),
+          runtimeLivenessFromFallbackHealth('cursor', cursor),
+        ];
+        const model = computeRoutingHealth({
+          team_id: teamName,
+          now: new Date().toISOString(),
+          pools: [],
+          builders: [],
+          dispatches: [],
+          runtimes,
+        });
+        res.json(model);
+      } catch (err: any) {
+        res.status(500).json({ error: 'routing_health_failed', detail: String(err?.message || err) });
+      }
+    });
 
     this.managementApp.get('/auth/claude', async (req, res) => {
       try {

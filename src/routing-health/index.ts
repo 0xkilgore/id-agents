@@ -7,6 +7,7 @@
 export {
   computeRoutingHealth,
   resolvePoolForTrack,
+  runtimeLivenessFromFallbackHealth,
   DEFAULT_ONLINE_WINDOW_MS,
 } from './read-model.js';
 
@@ -22,4 +23,6 @@ export type {
   ProviderBudgetHealth,
   RoutingHealthSummary,
   RoutingHealthReadModel,
+  RuntimeLiveness,
+  RoutingHealthSeverity,
 } from './types.js';

@@ -11,6 +11,7 @@ import { describe, it, expect } from 'vitest';
 import {
   computeRoutingHealth,
   resolvePoolForTrack,
+  runtimeLivenessFromFallbackHealth,
   DEFAULT_ONLINE_WINDOW_MS,
   type RoutingHealthInput,
 } from '../../src/routing-health/index.js';
@@ -190,6 +191,85 @@ describe('mis-route flags', () => {
       }),
     );
     expect(rm.mis_routes).toEqual([]);
+  });
+});
+
+describe('runtime liveness folded into summary.healthy (C3 — no false-green)', () => {
+  it('all runtimes live → healthy true, severity ok, counts populated', () => {
+    const rm = computeRoutingHealth(
+      baseInput({
+        pools: [], // isolate the runtime axis from lane stalls
+        runtimes: [
+          { name: 'claude', role: 'primary', live: true },
+          { name: 'codex', role: 'fallback', live: true },
+          { name: 'cursor', role: 'fallback', live: true },
+        ],
+      }),
+    );
+    expect(rm.summary.healthy).toBe(true);
+    expect(rm.summary.severity).toBe('ok');
+    expect(rm.summary.runtimes).toBe(3);
+    expect(rm.summary.runtimes_live).toBe(3);
+    expect(rm.summary.runtimes_down).toEqual([]);
+  });
+
+  it('a dead FALLBACK (revoked Codex) → NOT healthy, severity degraded (yellow, not green)', () => {
+    const rm = computeRoutingHealth(
+      baseInput({
+        pools: [],
+        runtimes: [
+          { name: 'claude', role: 'primary', live: true },
+          { name: 'codex', role: 'fallback', live: false, detail: 'runtime_unavailable:cert_revoked' },
+        ],
+      }),
+    );
+    expect(rm.summary.healthy).toBe(false); // the anti-false-green guarantee
+    expect(rm.summary.severity).toBe('degraded');
+    expect(rm.summary.runtimes_down).toEqual(['codex']);
+  });
+
+  it('a dead PRIMARY → severity unhealthy (red)', () => {
+    const rm = computeRoutingHealth(
+      baseInput({
+        pools: [],
+        runtimes: [{ name: 'claude', role: 'primary', live: false }],
+      }),
+    );
+    expect(rm.summary.healthy).toBe(false);
+    expect(rm.summary.severity).toBe('unhealthy');
+  });
+
+  it('a stall/mis-route stays unhealthy (red) even when all runtimes live', () => {
+    const rm = computeRoutingHealth(
+      baseInput({
+        builders: [slot('substrate-orch-codex', 'offline')],
+        dispatches: [{ dispatch_id: 'd', track: 'T-ORCH', to_agent: 'roger', status: 'queued', pool_id: 'backend' }],
+        runtimes: [{ name: 'claude', role: 'primary', live: true }],
+      }),
+    );
+    expect(rm.summary.stalled_lanes).toBe(1);
+    expect(rm.summary.healthy).toBe(false);
+    expect(rm.summary.severity).toBe('unhealthy');
+  });
+
+  it('no runtimes supplied → backward compatible (healthy unchanged, severity ok when lanes clean)', () => {
+    const rm = computeRoutingHealth(baseInput({ pools: [] }));
+    expect(rm.summary.healthy).toBe(true);
+    expect(rm.summary.severity).toBe('ok');
+    expect(rm.summary.runtimes).toBe(0);
+    expect(rm.summary.runtimes_down).toEqual([]);
+  });
+});
+
+describe('runtimeLivenessFromFallbackHealth', () => {
+  it('maps unavailable → not live, with the reason surfaced', () => {
+    const r = runtimeLivenessFromFallbackHealth('codex', { status: 'unavailable', reason: 'cert_revoked' });
+    expect(r).toEqual({ name: 'codex', role: 'fallback', live: false, detail: 'runtime_unavailable:cert_revoked' });
+  });
+
+  it('maps live and degraded (present/usable) → live', () => {
+    expect(runtimeLivenessFromFallbackHealth('codex', { status: 'live' }).live).toBe(true);
+    expect(runtimeLivenessFromFallbackHealth('cursor', { status: 'degraded' }).live).toBe(true);
   });
 });
 

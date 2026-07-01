@@ -12,8 +12,30 @@ import type {
   RoutingDispatch,
   RoutingHealthInput,
   RoutingHealthReadModel,
+  RoutingHealthSeverity,
   RoutingLaneHealth,
+  RuntimeLiveness,
 } from './types.js';
+
+/** A fallback-health probe result shape (cursor/codex fallback health share this
+ *  status vocabulary). Kept structural so the read-model doesn't import the
+ *  harness. */
+interface FallbackHealthLike {
+  status: 'live' | 'degraded' | 'unavailable';
+  reason?: string | null;
+  detail?: string;
+}
+
+/** Map a fallback-health probe to a RuntimeLiveness row. A runtime is "live" when
+ *  present/usable (`live` or `degraded`); only `unavailable` counts as down. */
+export function runtimeLivenessFromFallbackHealth(
+  name: string,
+  health: FallbackHealthLike,
+): RuntimeLiveness {
+  const live = health.status !== 'unavailable';
+  const reason = health.reason ? `runtime_unavailable:${health.reason}` : health.detail;
+  return { name, role: 'fallback', live, detail: reason };
+}
 
 /** Default heartbeat freshness window: a slot last seen longer ago is treated
  *  offline. Overridable per call via input.online_window_ms. */
@@ -166,6 +188,19 @@ export function computeRoutingHealth(input: RoutingHealthInput): RoutingHealthRe
   const totalInFlight = lanes.reduce((n, l) => n + l.in_flight, 0);
   const totalQueued = lanes.reduce((n, l) => n + l.queued, 0);
 
+  // Fold runtime liveness into the fleet verdict (C3) so a dead runtime — e.g. a
+  // cert-revoked Codex fallback — can never read as green. A dead PRIMARY (or any
+  // stall/mis-route) is red; only a fallback being down is yellow/degraded.
+  const runtimes = input.runtimes ?? [];
+  const downRuntimes = runtimes.filter((r) => !r.live);
+  const primaryDown = downRuntimes.some((r) => r.role === 'primary');
+  const allRuntimesLive = downRuntimes.length === 0;
+
+  const laneHealthy = stalledLanes === 0 && misRoutes.length === 0;
+  const healthy = laneHealthy && allRuntimesLive;
+  const severity: RoutingHealthSeverity =
+    !laneHealthy || primaryDown ? 'unhealthy' : !allRuntimesLive ? 'degraded' : 'ok';
+
   return {
     schema_version: 'routing-health-v1',
     generated_at: input.now,
@@ -179,7 +214,11 @@ export function computeRoutingHealth(input: RoutingHealthInput): RoutingHealthRe
       mis_routes: misRoutes.length,
       total_in_flight: totalInFlight,
       total_queued: totalQueued,
-      healthy: stalledLanes === 0 && misRoutes.length === 0,
+      runtimes: runtimes.length,
+      runtimes_live: runtimes.length - downRuntimes.length,
+      runtimes_down: downRuntimes.map((r) => r.name),
+      healthy,
+      severity,
     },
   };
 }
