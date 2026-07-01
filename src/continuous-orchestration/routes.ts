@@ -30,6 +30,7 @@ import type { RiskClass } from "./types.js";
 import { parseRoadmapToBacklog } from "./roadmap-import.js";
 import { runFleshPass } from "./flesh-runner.js";
 import { resolveTrack } from "../track-registry/registry.js";
+import { readOrchestrationHealthProjection } from "./health-projection.js";
 
 export interface OrchestrationRouteOptions {
   daemon: ContinuousOrchestrationDaemon;
@@ -52,6 +53,7 @@ export function mountContinuousOrchestrationRoutes(app: Application, opts: Orche
         listBacklogByState(adapter, { team_id: teamId, state: "needs_chris_batch" }),
         getFleshCounts(adapter, teamId),
       ]);
+      const health = await readOrchestrationHealthProjection(adapter, teamId);
       // Auto-fleshed today = approved_ready flesh-log decisions since local midnight.
       const startOfDay = new Date();
       startOfDay.setHours(0, 0, 0, 0);
@@ -95,7 +97,16 @@ export function mountContinuousOrchestrationRoutes(app: Application, opts: Orche
           min_ready_lanes: config.min_ready_lanes,
           by_status: fleshCounts,
         },
+        health,
       });
+    } catch (err) {
+      res.status(500).json({ ok: false, error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  app.get("/orchestration/health", async (_req: Request, res: Response) => {
+    try {
+      res.json(await readOrchestrationHealthProjection(adapter, teamId));
     } catch (err) {
       res.status(500).json({ ok: false, error: err instanceof Error ? err.message : String(err) });
     }
