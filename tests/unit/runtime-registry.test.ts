@@ -3,6 +3,7 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  classifyCommandError,
   getDefaultModelForRuntime,
   getDefaultRuntime,
   getRuntimeDisplayName,
@@ -97,5 +98,28 @@ describe('runtime registry', () => {
     expect(validateRuntimeModelCompatibility('cursor-cli', 'gpt-5')).toEqual([]);
     expect(validateRuntimeModelCompatibility('cursor-cli', 'sonnet-4')).toEqual([]);
     expect(validateRuntimeModelCompatibility('cursor-cli', 'claude-opus-4-20250514')).toEqual([]);
+  });
+});
+
+describe('classifyCommandError (C4 — binary_missing vs unavailable)', () => {
+  it('labels ENOENT as runtime_binary_missing (genuinely not installed)', () => {
+    const issue = classifyCommandError('codex', Object.assign(new Error('spawn ENOENT'), { code: 'ENOENT' }));
+    expect(issue.code).toBe('runtime_binary_missing');
+  });
+
+  it('labels a revoked-cert kill (SIGKILL/137) as runtime_unavailable, NOT missing', () => {
+    const issue = classifyCommandError('codex', Object.assign(new Error('killed'), { signal: 'SIGKILL', status: 137 }));
+    expect(issue.code).toBe('runtime_unavailable');
+    expect(issue.message).toMatch(/installed but failed to run/);
+  });
+
+  it('labels a timeout as runtime_unavailable (present but hangs)', () => {
+    const issue = classifyCommandError('codex', Object.assign(new Error('timeout'), { code: 'ETIMEDOUT' }));
+    expect(issue.code).toBe('runtime_unavailable');
+  });
+
+  it('labels a non-zero exit as runtime_unavailable (present but won\'t run)', () => {
+    const issue = classifyCommandError('codex', Object.assign(new Error('exit 1'), { status: 1 }));
+    expect(issue.code).toBe('runtime_unavailable');
   });
 });

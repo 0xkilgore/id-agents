@@ -89,6 +89,7 @@ import { PROTOCOL_DEFAULTS } from './protocol-defaults.js';
 import { computeSyncPlan, formatSyncSummary, formatSyncVerbose } from './sync.js';
 import { validateName } from './name-validation.js';
 import { checkCursorFallbackHealth } from './harness/cursor-fallback-health.js';
+import { checkCodexFallbackHealth } from './harness/codex-fallback-health.js';
 import {
   emitQueryDelivered,
   emitQueryExpired,
@@ -8050,6 +8051,10 @@ export class AgentManagerDb {
             offlineAgents: offline,
             agents: agentHealth,
             cursorFallback: await checkCursorFallbackHealth({ live: liveCursorFallback }),
+            // The Codex `--version` probe IS the liveness check (cheap, closed
+            // stdin, 3s timeout) — always run it so a revoked/dead Codex fallback
+            // surfaces as runtime_unavailable instead of implicit green (C2).
+            codexFallback: await checkCodexFallbackHealth(),
             status: 'ok'
           }
         };

@@ -3957,6 +3957,20 @@ async function checkAgentStatus(longFormat: boolean = false, liveCheck: boolean 
           }
           console.log('');
         }
+        const codex = statusData?.result?.codexFallback;
+        if (codex) {
+          const color = codex.status === 'live'
+            ? colors.green
+            : codex.status === 'unavailable'
+              ? colors.red
+              : colors.yellow;
+          const reason = codex.reason ? ` / runtime_unavailable:${codex.reason}` : '';
+          console.log(`codex fallback: ${color}${codex.status}${colors.reset}${reason} (${codex.detail})`);
+          if (longFormat || codex.status !== 'live') {
+            console.log(`${colors.gray}  binary: ${codex.binary}${codex.version ? ` / ${codex.version}` : ''}${colors.reset}`);
+          }
+          console.log('');
+        }
       } else {
         console.log(`${colors.yellow}cursor fallback: degraded (manager status check failed: ${statusResponse.status})${colors.reset}\n`);
       }

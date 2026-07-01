@@ -326,12 +326,30 @@ function checkCommandAvailable(command: string): RuntimeValidationIssue[] {
       timeout: 10000,
     });
     return [];
-  } catch {
-    return [{
+  } catch (err) {
+    return [classifyCommandError(command, err)];
+  }
+}
+
+/**
+ * Distinguish "not installed" from "present but won't run" (C4). A revoked
+ * signing cert (Codex) is present-but-killed — calling it "not installed" is
+ * wrong and hides the real fault. ENOENT is the only genuine missing-binary
+ * signal; a timeout/SIGKILL/non-zero exit means the binary exists but is unusable
+ * → runtime_unavailable. Pure + exported so the label logic is unit-testable.
+ */
+export function classifyCommandError(command: string, err: unknown): RuntimeValidationIssue {
+  const e = err as { code?: string | number; signal?: string; killed?: boolean; status?: number };
+  if (e?.code === 'ENOENT') {
+    return {
       code: 'runtime_binary_missing',
       message: `required runtime command "${command}" is not installed or not on PATH`,
-    }];
+    };
   }
+  return {
+    code: 'runtime_unavailable',
+    message: `runtime command "${command}" is installed but failed to run (present-but-unusable, e.g. revoked signing cert or hang)`,
+  };
 }
 
 /**
@@ -348,6 +366,8 @@ export function runtimeIssueHint(code: string): string | null {
       return 'Cursor Agent CLI is not authenticated. Set `CURSOR_API_KEY` or run `cursor-agent login` on this host. Install: curl https://cursor.com/install -fsS | bash';
     case 'openrouter_api_key_missing':
       return 'Missing OPENROUTER_API_KEY. Add `export OPENROUTER_API_KEY=sk-or-...` to the agent env or a project .env. Get a key: https://openrouter.ai/keys';
+    case 'runtime_unavailable':
+      return 'Runtime binary is installed but will not run (e.g. a revoked Developer-ID signing cert or a hang). Reinstall a known-good build and verify with `spctl -a -vvv -t execute <binary>` (must NOT print CSSMERR_TP_CERT_REVOKED); do not ad-hoc re-sign.';
     default:
       return null;
   }
