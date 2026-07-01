@@ -18,6 +18,8 @@ const RESERVED_SLUGS = [
   "project-load",
   "inbox-intake",
   "fantasy-baseball",
+  "fantasy-basketball", // T-PERSONAL: Gideon sports agent (NBA counterpart to fantasy-baseball)
+  "gideon-sports-brief", // T-PERSONAL: Gideon sports agent daily brief
   "weekly-project-report",
   "weekly-project-report-blowout", // L5 per-project instance (Blowout)
   "biweekly-project-report",
@@ -30,7 +32,7 @@ const RESERVED_SLUGS = [
 
 describe("seed catalog", () => {
   it("registers all reserved L1-L8 loops (+ per-project instances) by slug", () => {
-    expect(SEED_LOOPS).toHaveLength(12);
+    expect(SEED_LOOPS).toHaveLength(14);
     expect(SEED_LOOPS.map((l) => l.slug).sort()).toEqual([...RESERVED_SLUGS].sort());
   });
 
@@ -76,6 +78,37 @@ describe("seed catalog", () => {
     expect(l.enabled).toBe(false); // registered + manual-runnable; not auto-scheduled yet
     expect(l.allow_manual_run).toBe(true);
     expect(l.allow_scheduled_run).toBe(true);
+  });
+
+  it("registers the T-PERSONAL Gideon sports agent as three Personal-project loops (owner gideon, Phase-2 disabled)", () => {
+    const sports = SEED_LOOPS.filter((l) => l.owner_agent === "gideon");
+    expect(sports.map((l) => l.slug).sort()).toEqual([
+      "fantasy-baseball", // reassigned from unassigned → gideon (his fantasy MLB)
+      "fantasy-basketball",
+      "gideon-sports-brief",
+    ]);
+    for (const l of sports) {
+      expect(l.project?.slug).toBe("personal");
+      expect(l.enabled).toBe(false); // Phase-2: external sports-data integration not built yet
+      expect(l.allow_manual_run).toBe(true);
+      expect(l.allow_scheduled_run).toBe(true);
+    }
+  });
+
+  it("models fantasy-basketball on fantasy-baseball (external_data, Personal-project, gideon-owned)", () => {
+    const l = SEED_LOOPS.find((x) => x.slug === "fantasy-basketball")!;
+    expect(l.kind).toBe("external_data");
+    expect(l.owner_agent).toBe("gideon");
+    expect(l.project?.slug).toBe("personal");
+    expect(l.description).toMatch(/NBA/i);
+  });
+
+  it("registers the gideon-sports-brief as a daily sports digest (sports info + fantasy status)", () => {
+    const l = SEED_LOOPS.find((x) => x.slug === "gideon-sports-brief")!;
+    expect(l.kind).toBe("digest");
+    expect(l.owner_agent).toBe("gideon");
+    expect(l.project?.slug).toBe("personal");
+    expect(l.description).toMatch(/scores|standings|headlines/i);
   });
 
   it("derives a stable canonical loop_phid from the slug", () => {
@@ -129,7 +162,7 @@ describe("listLoops", () => {
     expect(res.schema_version).toBe("loops-list-v1");
     expect(res.source).toBe("seed_catalog");
     expect(res.generated_at).toBe(NOW);
-    expect(res.loops).toHaveLength(12);
+    expect(res.loops).toHaveLength(14);
   });
 
   it("computes filter facets over the full catalog with counts", () => {
@@ -140,8 +173,12 @@ describe("listLoops", () => {
     expect(owners["researcher"]).toBe(1);
     const kinds = Object.fromEntries(filters.kinds.map((k) => [k.value, k.count]));
     expect(kinds["report"]).toBe(7); // project-load, weekly, weekly-blowout, biweekly, maestra-product-log, ux-research, library-research
+    expect(kinds["external_data"]).toBe(2); // fantasy-baseball + fantasy-basketball
+    expect(kinds["digest"]).toBe(2); // morning-digest + gideon-sports-brief
+    const owners2 = Object.fromEntries(filters.owners.map((o) => [o.value, o.count]));
+    expect(owners2["gideon"]).toBe(3); // Gideon sports agent: fantasy-baseball, fantasy-basketball, gideon-sports-brief
     expect(filters.statuses.find((s) => s.value === "unknown")?.count).toBe(7);
-    expect(filters.statuses.find((s) => s.value === "disabled")?.count).toBe(5);
+    expect(filters.statuses.find((s) => s.value === "disabled")?.count).toBe(7);
   });
 
   it("filters by owner_agent", () => {
@@ -156,8 +193,17 @@ describe("listLoops", () => {
   });
 
   it("filters by health status", () => {
-    expect(listLoops(NOW, { status: "disabled" }).loops).toHaveLength(5);
+    expect(listLoops(NOW, { status: "disabled" }).loops).toHaveLength(7);
     expect(listLoops(NOW, { status: "unknown" }).loops).toHaveLength(7);
+  });
+
+  it("filters by project_phid personal (the Gideon sports agent loops)", () => {
+    const res = listLoops(NOW, { project_phid: "phid:proj:personal" });
+    expect(res.loops.map((l) => l.slug).sort()).toEqual([
+      "fantasy-baseball",
+      "fantasy-basketball",
+      "gideon-sports-brief",
+    ]);
   });
 
   it("filters by free-text query over name/slug/description", () => {

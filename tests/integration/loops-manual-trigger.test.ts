@@ -151,6 +151,6 @@ describe('B1 loops manual-trigger + evidence + recurrence link', () => {
     expect(body.schema_version).toBe('loops-list-v1');
     // Same DTO shape; health is now substrate-derived so source is `mixed`.
     expect(body.source).toBe('mixed');
-    expect(body.loops).toHaveLength(12);
+    expect(body.loops).toHaveLength(14);
   });
 });

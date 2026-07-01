@@ -137,6 +137,13 @@ const BLOWOUT_PROJECT: LoopProjectRef = {
   slug: "blowout",
 };
 
+// T-PERSONAL: the Gideon sports agent's loops live in the Personal project.
+const PERSONAL_PROJECT: LoopProjectRef = {
+  project_phid: "phid:proj:personal",
+  name: "Personal",
+  slug: "personal",
+};
+
 /** Stable canonical id for a seed loop. */
 export function loopPhidForSlug(slug: string): string {
   return `phid:loop:${slug}`;
@@ -185,19 +192,52 @@ const SEED_LOOP_DEFS: SeedLoopDef[] = [
     schedule_label: "Manual only",
     stale_after_minutes: 3 * 24 * 60,
   },
+  // ── T-PERSONAL: Gideon sports agent (models the personal fantasy-sports
+  // workflow Chris named). Three Personal-project loops owned by `gideon`:
+  // fantasy MLB + fantasy NBA (external-data pulls) and a daily sports brief.
+  // All Phase-2 (registered + manually runnable now; auto-cadence flips on once
+  // the external sports-data integration lands). ──
   {
     slug: "fantasy-baseball",
     name: "Fantasy Baseball",
     description:
       "Pulls MLB matchup/injury/roster data and recommends lineup changes and waiver targets. (Phase 2 — external data integration.)",
     kind: "external_data",
-    owner_agent: "unassigned",
-    project: { project_phid: "phid:proj:personal", name: "Personal", slug: "personal" },
+    owner_agent: "gideon",
+    project: PERSONAL_PROJECT,
     enabled: false,
     allow_scheduled_run: true,
     allow_manual_run: true,
     schedule_label: "Daily in season (manual override)",
     stale_after_minutes: null,
+  },
+  {
+    slug: "fantasy-basketball",
+    name: "Fantasy Basketball",
+    description:
+      "Pulls NBA matchup/injury/roster data and recommends lineup changes and waiver targets. The basketball counterpart to fantasy-baseball. (Phase 2 — external data integration.)",
+    kind: "external_data",
+    owner_agent: "gideon",
+    project: PERSONAL_PROJECT,
+    enabled: false,
+    allow_scheduled_run: true,
+    allow_manual_run: true,
+    schedule_label: "Daily in season (manual override)",
+    stale_after_minutes: null,
+  },
+  {
+    slug: "gideon-sports-brief",
+    name: "Gideon Sports Brief",
+    description:
+      "Daily sports brief: scores, standings and headlines for Gideon's teams plus his fantasy roster status and start/sit flags across MLB and NBA. (Phase 2 — external sports-data integration.)",
+    kind: "digest",
+    owner_agent: "gideon",
+    project: PERSONAL_PROJECT,
+    enabled: false,
+    allow_scheduled_run: true,
+    allow_manual_run: true,
+    schedule_label: "Daily 08:00 local (in season)",
+    stale_after_minutes: 24 * 60,
   },
   {
     slug: "weekly-project-report",
