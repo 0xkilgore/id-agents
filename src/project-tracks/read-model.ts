@@ -252,10 +252,17 @@ export async function buildProjectTracksEnvelope(
   let totalAssociations = 0;
   let conformingAssociations = 0;
   let driftCount = 0;
+  let unassignedCount = 0;
+  let unknownCount = 0;
   const countTrack = (track: ProjectTrackResolution) => {
     totalAssociations += 1;
     if (track.conforms) conformingAssociations += 1;
     if (track.drift) driftCount += 1;
+    // Conformance breakdown for the non-conforming set (acceptance: report
+    // unassigned/unknown track counts). "(unassigned)" = no track; any other
+    // non-conforming raw value = an assigned-but-unrecognized (unknown) track.
+    if (track.raw === UNASSIGNED_TRACK) unassignedCount += 1;
+    else if (!track.conforms) unknownCount += 1;
   };
 
   for (const row of tasks) {
@@ -366,6 +373,8 @@ export async function buildProjectTracksEnvelope(
       threshold: DEFAULT_REGISTRY.conformanceThreshold,
       below_threshold: conformingShare < DEFAULT_REGISTRY.conformanceThreshold,
       drift_count: driftCount,
+      unassigned_count: unassignedCount,
+      unknown_count: unknownCount,
     },
     empty: totalAssociations === 0,
   };

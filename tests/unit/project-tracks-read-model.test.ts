@@ -61,6 +61,15 @@ describe("project tracks read-model", () => {
          ('task_1','agent-platform-task','uuid-task-1',$1,'Agent platform task',NULL,'doing','agent_maestra','agent_maestra',1782690000,1782690100,NULL,'T15')`,
       [TEAM],
     );
+    // A task with no assigned track (the NOT NULL column defaults to "(unassigned)")
+    // → counts as unassigned, distinct from an unknown/unrecognized track value.
+    await adapter.query(
+      `INSERT INTO tasks
+       (id, name, uuid, team_id, title, description, status, created_by, owner, created_at, updated_at, completed_at, track)
+       VALUES
+         ('task_2','agent-platform-untracked','uuid-task-2',$1,'Untracked task',NULL,'todo','agent_maestra','agent_maestra',1782690000,1782690100,NULL,'(unassigned)')`,
+      [TEAM],
+    );
     await adapter.query(
       `INSERT INTO artifacts
        (artifact_id, basename, agent, tag, abs_path, title, produced_at, source, availability, created_at, updated_at)
@@ -107,6 +116,11 @@ describe("project tracks read-model", () => {
       status: "blocked_dependency",
     });
     expect(envelope.drift.drift_count).toBe(1);
+    // Conformance breakdown: T-NOPE is an assigned-but-unrecognized (unknown)
+    // track; task_2 has no track (unassigned). These are reported separately.
+    expect(envelope.drift.unknown_count).toBe(1);
+    expect(envelope.drift.unassigned_count).toBe(1);
+    expect(envelope.tracks.find((t) => t.track === "(unassigned)")?.tasks[0].id).toBe("task_2");
 
     await adapter.close();
   });
@@ -125,6 +139,8 @@ describe("project tracks read-model", () => {
     expect(res.body.tracks).toEqual([]);
     expect(res.body.drift.total_associations).toBe(0);
     expect(res.body.drift.conforming_share).toBe(1);
+    expect(res.body.drift.unassigned_count).toBe(0);
+    expect(res.body.drift.unknown_count).toBe(0);
 
     await adapter.close();
   });

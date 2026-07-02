@@ -82,6 +82,11 @@ export interface ProjectTrackDriftSummary {
   threshold: number;
   below_threshold: boolean;
   drift_count: number;
+  /** Associations with NO track assigned (raw === "(unassigned)"). */
+  unassigned_count: number;
+  /** Associations with a track value that does not conform to the registry
+   *  (assigned-but-unrecognized — distinct from unassigned). */
+  unknown_count: number;
 }
 
 export interface ProjectTracksEnvelope {
