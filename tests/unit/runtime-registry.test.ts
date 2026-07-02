@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
   classifyCommandError,
+  classifyModelFamily,
   getDefaultModelForRuntime,
   getDefaultRuntime,
   getRuntimeDisplayName,
@@ -98,6 +99,25 @@ describe('runtime registry', () => {
     expect(validateRuntimeModelCompatibility('cursor-cli', 'gpt-5')).toEqual([]);
     expect(validateRuntimeModelCompatibility('cursor-cli', 'sonnet-4')).toEqual([]);
     expect(validateRuntimeModelCompatibility('cursor-cli', 'claude-opus-4-20250514')).toEqual([]);
+  });
+});
+
+describe('classifyModelFamily (new Anthropic models)', () => {
+  it('classifies claude-fable-5 and claude-sonnet-5 as the claude family', () => {
+    expect(classifyModelFamily('claude-fable-5')).toBe('claude');
+    expect(classifyModelFamily('claude-sonnet-5')).toBe('claude');
+  });
+  it('still classifies existing families correctly', () => {
+    expect(classifyModelFamily('claude-opus-4-8')).toBe('claude');
+    expect(classifyModelFamily('gpt-5.5')).toBe('openai');
+    expect(classifyModelFamily(undefined)).toBe('unknown');
+  });
+});
+
+describe('claude-code-cli accepts the new Anthropic models (runtime compatibility)', () => {
+  it('raises no compatibility issue for claude-fable-5 / claude-sonnet-5 on the Claude CLI', () => {
+    expect(validateRuntimeModelCompatibility('claude-code-cli', 'claude-fable-5')).toEqual([]);
+    expect(validateRuntimeModelCompatibility('claude-code-cli', 'claude-sonnet-5')).toEqual([]);
   });
 });
 

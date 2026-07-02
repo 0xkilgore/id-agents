@@ -40,6 +40,44 @@ describe("models metadata seam", () => {
     expect(md.lookup("next-codex")?.model).toBe("gpt-6");
     expect(md.lookup("gpt-6")?.source).toBe("models_dev");
   });
+
+  it("registers claude-fable-5 (canonical + aliases) → claude-code-cli / anthropic", () => {
+    const md = buildModelsMetadata();
+    for (const key of ["claude-fable-5", "fable", "claude-fable"]) {
+      expect(md.lookup(key)?.model).toBe("claude-fable-5");
+      expect(md.lookup(key)?.runtime).toBe("claude-code-cli");
+      expect(md.lookup(key)?.provider).toBe("anthropic");
+    }
+  });
+
+  it("registers claude-sonnet-5 (canonical + aliases) → claude-code-cli / anthropic", () => {
+    const md = buildModelsMetadata();
+    for (const key of ["claude-sonnet-5", "sonnet-5"]) {
+      expect(md.lookup(key)?.model).toBe("claude-sonnet-5");
+      expect(md.lookup(key)?.runtime).toBe("claude-code-cli");
+      expect(md.lookup(key)?.provider).toBe("anthropic");
+    }
+  });
+});
+
+describe("known_models catalog (config enumeration)", () => {
+  it("parses the declared known_models, deduped, and includes the new models", () => {
+    const svc = buildModelPolicyService(
+      {
+        default: { primary: { runtime: "claude-code-cli", model: "claude-opus-4-8" } },
+        known_models: ["claude-opus-4-8", "claude-fable-5", "claude-sonnet-5", "claude-fable-5", "  "],
+      },
+      "file",
+    );
+    expect(svc.knownModels()).toEqual(["claude-opus-4-8", "claude-fable-5", "claude-sonnet-5"]);
+    expect(svc.config.known_models).toContain("claude-fable-5");
+    expect(svc.config.known_models).toContain("claude-sonnet-5");
+  });
+
+  it("defaults to an empty catalog when known_models is absent", () => {
+    const svc = buildModelPolicyService({ default: { primary: { runtime: "codex" } } }, "file");
+    expect(svc.knownModels()).toEqual([]);
+  });
 });
 
 describe("config normalization", () => {

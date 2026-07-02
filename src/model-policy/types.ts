@@ -46,6 +46,9 @@ export interface RawModelPolicyConfig {
   default: RawAgentModelPolicy;
   /** Per-agent overrides, keyed by agent id/name. */
   agents?: Record<string, RawAgentModelPolicy>;
+  /** Declared catalog of known/permitted model ids (informational enumeration;
+   *  the canonical model→runtime registry is src/model-policy/metadata.ts). */
+  known_models?: string[];
 }
 
 /** Normalized (loaded) per-agent policy. */
@@ -60,6 +63,8 @@ export interface ModelPolicyConfig {
   constrained_providers: Provider[];
   default: AgentModelPolicy;
   agents: Record<string, AgentModelPolicy>;
+  /** Declared catalog of known/permitted model ids from the config (deduped). */
+  known_models: string[];
   /** Where the config came from — for the read API + diagnostics. */
   source: "file" | "builtin_default";
 }

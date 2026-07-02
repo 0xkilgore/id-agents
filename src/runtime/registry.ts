@@ -263,7 +263,7 @@ export function isRemoteEndpointRuntime(runtime: string | undefined): boolean {
   return PROFILES[runtime as RuntimeId].deploymentShape === 'remote-endpoint';
 }
 
-function classifyModelFamily(model: string | undefined): 'claude' | 'openai' | 'unknown' {
+export function classifyModelFamily(model: string | undefined): 'claude' | 'openai' | 'unknown' {
   if (!model) return 'unknown';
   const normalized = model.trim().toLowerCase();
 

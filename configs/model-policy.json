@@ -10,6 +10,12 @@
     }
   },
   "constrained_providers": ["cursor"],
+  "known_models": [
+    "claude-opus-4-8",
+    "claude-fable-5",
+    "claude-sonnet-5",
+    "gpt-5.5"
+  ],
   "default": {
     "primary": {
       "runtime": "claude-code-cli",

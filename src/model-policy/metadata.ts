@@ -32,6 +32,9 @@ const SEED_ROWS: RawModelMetadataRow[] = [
   { model: "claude-opus-4-20250514", runtime: "claude-code-cli", aliases: ["opus", "claude-opus"] },
   { model: "claude-sonnet-4-5-20250514", runtime: "claude-code-cli", aliases: ["sonnet", "claude-sonnet"] },
   { model: "claude-haiku-4-5-20251001", runtime: "claude-agent-sdk", aliases: ["haiku", "claude-haiku"] },
+  // Latest Anthropic models (2026) — served by the Claude Code CLI (BYO-Claude auth).
+  { model: "claude-fable-5", runtime: "claude-code-cli", aliases: ["fable", "claude-fable"] },
+  { model: "claude-sonnet-5", runtime: "claude-code-cli", aliases: ["sonnet-5", "claude-sonnet-5"] },
   { model: "gpt-5.4", runtime: "codex", aliases: ["gpt-5", "codex", "gpt"] },
   { model: "z-ai/glm-5.2", runtime: "openrouter", aliases: ["glm", "glm-5.2", "openrouter"] },
 ];

@@ -52,6 +52,22 @@ function normalizeProviderList(raw: string[] | undefined): Provider[] {
   return out.length > 0 ? out : [...DEFAULT_CONSTRAINED_PROVIDERS];
 }
 
+/** Normalize the declared known-models catalog: trimmed, non-empty, deduped,
+ *  order-preserving. Absent/invalid → empty list. */
+function normalizeKnownModels(raw: string[] | undefined): string[] {
+  if (!Array.isArray(raw)) return [];
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const m of raw) {
+    if (typeof m !== "string") continue;
+    const id = m.trim();
+    if (id.length === 0 || seen.has(id)) continue;
+    seen.add(id);
+    out.push(id);
+  }
+  return out;
+}
+
 /** Resolve a raw {runtime?,model?} entry into a complete ModelChoice. */
 function normalizeChoice(raw: RawModelChoice, metadata: ModelsMetadata): ModelChoice {
   // Prefer an explicit runtime; else resolve the runtime from the model via
@@ -101,6 +117,11 @@ export class ModelPolicyService implements ModelPolicyResolver {
 
   constrainedProviders(): Provider[] {
     return [...this.config.constrained_providers];
+  }
+
+  /** The declared known/permitted model ids from the config (may be empty). */
+  knownModels(): string[] {
+    return [...this.config.known_models];
   }
 
   /** The policy that applies to an agent (specific entry or the default). */
@@ -170,6 +191,7 @@ export function buildModelPolicyService(
     agents: Object.fromEntries(
       Object.entries(raw.agents ?? {}).map(([agent, p]) => [agent, normalizeAgentPolicy(agent, p, metadata)]),
     ),
+    known_models: normalizeKnownModels(raw.known_models),
     source,
   };
   return new ModelPolicyService(config, metadata);
