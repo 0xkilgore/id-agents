@@ -23,6 +23,7 @@
 
 import { spawn, ChildProcess } from 'child_process';
 import { AgentHarness, HarnessOptions, HarnessMessage, HarnessType } from './types.js';
+import { armProcessTimeout, resolveHarnessTimeoutMs, KILL_GRACE_MS, HANG_TIMEOUT_MARKER } from './process-timeout.js';
 
 /** Extract concatenated text from a Cursor message.content[] block. */
 function extractMessageText(message: any): string {
@@ -178,8 +179,19 @@ export class CursorCliHarness implements AgentHarness {
 
     this.currentProcess = proc;
 
+    const timeoutMs = resolveHarnessTimeoutMs(options);
+    let timedOut = false;
+    const clearWatchdog = armProcessTimeout(proc, timeoutMs, {
+      graceMs: KILL_GRACE_MS,
+      onTimeout: () => {
+        timedOut = true;
+        console.error(`[Cursor CLI] Timed out after ${timeoutMs}ms (PID: ${proc.pid}); killing.`);
+      },
+    });
+
     let spawnError: Error | null = null;
     proc.on('error', (err) => {
+      clearWatchdog();
       console.error(`[Cursor CLI] Process error: ${err.message}`);
       spawnError = err;
     });
@@ -231,6 +243,7 @@ export class CursorCliHarness implements AgentHarness {
       }
 
       proc.on('exit', (code) => {
+        clearWatchdog();
         console.log(`[Cursor CLI] Process exited with code ${code}`);
         exitCode = code;
         checkDone();
@@ -267,6 +280,15 @@ export class CursorCliHarness implements AgentHarness {
     }
 
     await completionPromise;
+
+    if (timedOut) {
+      yield {
+        type: 'error',
+        content: `Cursor CLI timed out after ${timeoutMs}ms (${HANG_TIMEOUT_MARKER})`,
+      };
+      this.currentProcess = null;
+      return;
+    }
 
     if (spawnError) {
       yield { type: 'error', content: `Process spawn error: ${(spawnError as Error).message}` };
