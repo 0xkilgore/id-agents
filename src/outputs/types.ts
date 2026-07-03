@@ -331,7 +331,22 @@ export interface DispatchFollowUpRequest {
   idempotency_key?: string | null;
 }
 
+/**
+ * Stable, globally-unique id for one artifact comment — the dedup/idempotency
+ * key the inbox digest ledger keys on (fix-spec 2026-06-29 §S5). `op_id` alone
+ * is only per-artifact-unique (and FeedbackItem doesn't even carry artifact_id),
+ * so the digest needs one string that is globally unique + deterministic +
+ * stable across reads. Derived from (artifact_id, op_id): a comment written
+ * idempotently (same idempotency_key → same op_id) yields the SAME comment_id,
+ * so it is counted once ever across digest windows.
+ */
+export function artifactCommentId(artifactId: string, opId: number): string {
+  return `acmt:${artifactId}:${opId}`;
+}
+
 export interface ArtifactComment {
+  /** Stable, globally-unique dedup key = artifactCommentId(artifact_id, op_id). */
+  comment_id: string;
   op_id: number;
   artifact_id: string;
   actor: string;
@@ -421,6 +436,10 @@ export type TeamAwareDispatchStatusResolver = (
 ) => Promise<DispatchStatusLite | null>;
 
 export interface FeedbackItem {
+  /** Stable, globally-unique dedup key = artifactCommentId(artifact_id, op_id).
+   *  FeedbackItem carries no artifact_id, so op_id alone is not globally unique —
+   *  this is the id the digest ledger dedups/reconciles on (fix-spec §S5). */
+  comment_id: string;
   op_id: number;
   actor: string;
   /** "reaction" when reaction != null, else "comment". */

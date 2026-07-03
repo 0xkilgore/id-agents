@@ -105,7 +105,7 @@ import type {
   SuggestedChangeRequest,
   ViewRequest,
 } from './types.js';
-import { isReactionKind } from './types.js';
+import { artifactCommentId, isReactionKind } from './types.js';
 import { normalizeActorRef, isValidArtifactId, type Actor } from '../actor-identity.js';
 import type { TasksRepository } from '../db/db-service.js';
 import { emitApprovalTask, type ApprovalReviewer } from './approval-emit.js';
@@ -356,6 +356,7 @@ async function routeSuggestionToOwningAgent(
   sourceOpId: number,
 ): Promise<{ kind: ArtifactCommentRouteKind; result: CommentDispatchResult }> {
   const forClassify: ArtifactComment = {
+    comment_id: artifactCommentId(artifactId, sourceOpId),
     op_id: sourceOpId,
     artifact_id: artifactId,
     actor: suggestion.author,

@@ -44,7 +44,7 @@ import type {
   SuggestedChangeRequest,
   ViewRequest,
 } from "./types.js";
-import { ARTIFACT_REACTIONS, isReactionKind } from "./types.js";
+import { ARTIFACT_REACTIONS, artifactCommentId, isReactionKind } from "./types.js";
 import type { CaneDraftSender } from "./ship-executor.js";
 import { pendingIdFromDraftId } from "./ship-executor.js";
 import { EDIT_OP_TYPE, buildEditPayload } from "./edit.js";
@@ -255,7 +255,7 @@ export async function commentArtifact(
   );
   return {
     op_id: opId,
-    comment: { op_id: opId, artifact_id: artifactId, actor, body: req.body, anchor, ts },
+    comment: { comment_id: artifactCommentId(artifactId, opId), op_id: opId, artifact_id: artifactId, actor, body: req.body, anchor, ts },
   };
 }
 
@@ -570,7 +570,7 @@ export async function listComments(
   for (const op of ops) {
     if (op.op_type !== "comment_recorded") continue;
     const { body, anchor, reaction } = parseCommentPayload(op.payload_json);
-    comments.push({ op_id: op.op_id, artifact_id: op.artifact_id, actor: op.actor, body, anchor, ts: op.ts, reaction });
+    comments.push({ comment_id: artifactCommentId(op.artifact_id, op.op_id), op_id: op.op_id, artifact_id: op.artifact_id, actor: op.actor, body, anchor, ts: op.ts, reaction });
   }
   return comments;
 }
@@ -646,7 +646,7 @@ export async function reactArtifact(
   );
   return {
     op_id: opId,
-    comment: { op_id: opId, artifact_id: artifactId, actor, body, anchor, ts, reaction: req.reaction },
+    comment: { comment_id: artifactCommentId(artifactId, opId), op_id: opId, artifact_id: artifactId, actor, body, anchor, ts, reaction: req.reaction },
   };
 }
 
@@ -748,6 +748,7 @@ export async function listFeedback(
     if (op.op_type !== "comment_recorded") continue;
     const { body, anchor, reaction } = parseCommentPayload(op.payload_json);
     items.push({
+      comment_id: artifactCommentId(op.artifact_id, op.op_id),
       op_id: op.op_id,
       actor: op.actor,
       kind: reaction ? "reaction" : "comment",
