@@ -86,6 +86,22 @@ export function decisionStableId(source_path: string, display_id: string): strin
 }
 
 /**
+ * Read the human-declared open count from the decisions-queue header line
+ * (`**N genuinely open ≤60s items** as of …`). This is prose, NOT a status
+ * signal — the producer never gates open/resolved on it. It exists only so the
+ * "false-open bug class" can be MACHINE-checked: a reconciled file's declared
+ * count must equal the number of rows the structured parser actually imports as
+ * open (see decisions-rd007-open-parity.test.ts). Returns null when no such
+ * line is present, so callers can distinguish "no claim" from "claims zero".
+ */
+export function parseDeclaredOpenCount(md: string): number | null {
+  const m = md.match(/(\d+)\s+genuinely\s+open\b/i);
+  if (!m) return null;
+  const n = Number.parseInt(m[1], 10);
+  return Number.isFinite(n) ? n : null;
+}
+
+/**
  * Two-pass parser that distinguishes the structured OPEN signal
  * (Maestra summary table) from the structured RESOLVED signal
  * (per-item "→ **RESOLVED..." markers). Rows that satisfy NEITHER
