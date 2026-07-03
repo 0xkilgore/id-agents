@@ -105,6 +105,19 @@ describe("post-deploy smoke (T-DEPLOY.5)", () => {
     expect(r.pass).toBe(false);
     expect(r.failures.join()).toMatch(/\/loops/);
   });
+
+  it("fails on a boot-error class even when /health + routes look healthy (P1b)", () => {
+    // Stamp matches, pid changed, routes 200 — but the boot logged a migration
+    // error. A healthy-looking /health must NOT pass smoke.
+    const r = evaluateSmoke({ ...good, startup_errors: ["no such column: provider"] });
+    expect(r.pass).toBe(false);
+    expect(r.failures.join()).toMatch(/zero_startup_errors/);
+    expect(r.failures.join()).toMatch(/provider/);
+  });
+
+  it("passes with an explicit clean boot (empty startup_errors)", () => {
+    expect(evaluateSmoke({ ...good, startup_errors: [] }).pass).toBe(true);
+  });
 });
 
 describe("rollback decision + last-good store (T-DEPLOY.5)", () => {

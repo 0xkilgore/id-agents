@@ -19,6 +19,11 @@ export interface SmokeProbe {
   origin_main_sha: string | null;
   behind_origin: boolean | null;
   routes: RouteProbe[];
+  /** Startup/migration errors the freshly-booted manager reported (e.g.
+   *  "no such column: provider"). A non-empty list is a boot-failure class and
+   *  MUST fail the smoke — a healthy-looking /health can still hide a broken boot.
+   *  Absent/[] = clean boot. */
+  startup_errors?: string[];
 }
 
 export interface SmokeCheck {
@@ -62,7 +67,18 @@ export function evaluateSmoke(probe: SmokeProbe): SmokeResult {
     detail: `behind_origin=${probe.behind_origin}`,
   });
 
-  // 4. Every key route answers 200.
+  // 4. Zero startup/migration errors — a boot-error class fails the smoke even
+  //    when /health and the routes look healthy (P1b acceptance).
+  const startupErrors = probe.startup_errors ?? [];
+  checks.push({
+    name: "zero_startup_errors",
+    pass: startupErrors.length === 0,
+    detail: startupErrors.length === 0
+      ? "clean boot"
+      : `${startupErrors.length} startup error(s): ${startupErrors[0]}`,
+  });
+
+  // 5. Every key route answers 200.
   for (const r of probe.routes) {
     checks.push({
       name: `route ${r.path}`,
@@ -112,15 +128,22 @@ export async function runSmokeProbe(opts: RunSmokeOptions): Promise<SmokeResult>
   let build_sha: string | null = null;
   let origin_main_sha: string | null = null;
   let behind_origin: boolean | null = null;
+  let startup_errors: string[] = [];
   try {
     const ctrl = new AbortController();
     const t = setTimeout(() => ctrl.abort(), timeoutMs);
     const res = await doFetch(`${base}/health`, { signal: ctrl.signal });
     clearTimeout(t);
-    const body = (await res.json()) as { build?: { build_sha?: string; origin_main_sha?: string; behind_origin?: boolean | null } };
+    const body = (await res.json()) as {
+      build?: { build_sha?: string; origin_main_sha?: string; behind_origin?: boolean | null; startup_errors?: string[] };
+      startup_errors?: string[];
+    };
     build_sha = body.build?.build_sha ?? null;
     origin_main_sha = body.build?.origin_main_sha ?? null;
     behind_origin = body.build?.behind_origin ?? null;
+    // Accept startup_errors at either build.startup_errors or the top level.
+    const errs = body.build?.startup_errors ?? body.startup_errors;
+    if (Array.isArray(errs)) startup_errors = errs.filter((e): e is string => typeof e === "string");
   } catch {
     /* leave nulls — the checks will fail appropriately */
   }
@@ -132,6 +155,7 @@ export async function runSmokeProbe(opts: RunSmokeOptions): Promise<SmokeResult>
     origin_main_sha,
     behind_origin,
     routes,
+    startup_errors,
   });
 }
 
