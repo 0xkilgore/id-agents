@@ -13,6 +13,8 @@ export {
 
 export { formatDoctorMarkdown } from './format.js';
 
+export { computeConsoleRouteStatus, type ConsoleRouteStatus } from './route-status.js';
+
 export {
   DOCTOR_VERSION,
   type DoctorProbeInput,
