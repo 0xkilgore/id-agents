@@ -2,6 +2,36 @@ import type { ResolveVia } from "../track-registry/registry.js";
 
 export type ProjectTrackAssociationKind = "task" | "artifact" | "dispatch" | "backlog_item";
 
+/** Live-status pipeline buckets for the tracks/projects status tracker. */
+export type TrackStatusBucket =
+  | "queued"
+  | "building"
+  | "built_pending_review"
+  | "landed"
+  | "held"
+  | "other";
+export type TrackStatusCounts = Record<TrackStatusBucket, number>;
+
+/** Honesty doctrine: each feeding source declares its availability so the panel
+ *  can say "unavailable/stale" explicitly instead of rendering a fixture as real. */
+export type SourceAvailability = "available" | "derived" | "unavailable" | "stale";
+export interface ProjectTracksSources {
+  /** orchestration_backlog_item.readiness_state. */
+  orchestration_backlog: SourceAvailability;
+  /** tasks.status stream (doing/done/…). */
+  task_stream: SourceAvailability;
+  /** dispatch_scheduler_queue.status. */
+  dispatch_queue: SourceAvailability;
+  /** Refactor-debt ledger (RD rows + built-pending-review/built-and-reviewed).
+   *  Not present in this datastore yet → `unavailable` (never faked). */
+  refactor_debt_ledger: SourceAvailability;
+  /** Spec-054 landed/merge signal — currently inferred from terminal dispatch/
+   *  backlog status rather than a dedicated promotion feed → `derived`. */
+  spec054_landed: SourceAvailability;
+  /** Human-readable notes for any non-`available` source (surfaced by the UI). */
+  notes: string[];
+}
+
 export interface ProjectTrackResolution {
   raw: string | null;
   canonical: string | null;
@@ -68,6 +98,12 @@ export interface ProjectTrackSummary {
   deferred: boolean;
   drift: boolean;
   counts: Record<ProjectTrackAssociationKind, number>;
+  /** Live pipeline status counts across the track's items (tracker per-row data). */
+  status_counts: TrackStatusCounts;
+  /** Most recent state-change timestamp across the track's items (ISO), or null. */
+  latest_activity_at: string | null;
+  /** Distinct owner agents/lanes carrying the track, sorted. */
+  owner_lanes: string[];
   tasks: ProjectTrackTask[];
   artifacts: ProjectTrackArtifact[];
   dispatches: ProjectTrackDispatch[];
@@ -106,5 +142,7 @@ export interface ProjectTracksEnvelope {
   canonical_tracks: string[];
   deferred_tracks: string[];
   drift: ProjectTrackDriftSummary;
+  /** Per-source availability (honesty doctrine — never fake an unavailable feed). */
+  sources: ProjectTracksSources;
   empty: boolean;
 }

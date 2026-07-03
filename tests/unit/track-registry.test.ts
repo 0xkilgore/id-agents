@@ -79,6 +79,35 @@ describe('resolveTrack', () => {
   });
 });
 
+describe('canonical-track-registry v2 (RD-006 — reset families + refactor wave)', () => {
+  it('conforms the 6/29 reset NOW tracks that previously resolved to (unassigned)', () => {
+    for (const t of ['T-PACK', 'T-COS', 'T-FIN', 'T-CTOBOX', 'T-DECHRIS', 'T-DAILY', 'T-RELY']) {
+      const r = resolveTrack(t);
+      expect(r.conforms, `${t} should conform`).toBe(true);
+      expect(r.via).toBe('canonical');
+      expect(DEFAULT_REGISTRY.canonical).toContain(t);
+    }
+  });
+
+  it('conforms T-POWERHOUSE and T-REMOTE', () => {
+    expect(resolveTrack('T-POWERHOUSE').conforms).toBe(true);
+    expect(resolveTrack('T-REMOTE').conforms).toBe(true);
+  });
+
+  it('rolls up a T-REFACTOR.<repo> sub-track via prefix to T-REFACTOR', () => {
+    const r = resolveTrack('T-REFACTOR.cane');
+    expect(r).toEqual({ conforms: true, canonical: 'T-REFACTOR', via: 'prefix' });
+    expect(resolveTrack('T-REFACTOR.id-agents').canonical).toBe('T-REFACTOR');
+    expect(resolveTrack('T-REFACTOR').via).toBe('canonical');
+  });
+
+  it('keeps older families conforming (no alias-merge regression)', () => {
+    expect(resolveTrack('T-DIST').conforms).toBe(true); // retained alongside T-PACK
+    expect(resolveTrack('T-RELIABILITY').conforms).toBe(true); // retained alongside T-RELY
+    expect(resolveTrack('T15').via).toBe('alias'); // legacy alias unchanged
+  });
+});
+
 describe('parseRegistryYaml', () => {
   const YAML = `
 # canonical-track-registry v1 (2026-06-23) — owner: maestra

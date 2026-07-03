@@ -9,7 +9,9 @@ import type {
   ProjectTrackResolution,
   ProjectTrackSummary,
   ProjectTracksEnvelope,
+  ProjectTracksSources,
   ProjectTrackTask,
+  TrackStatusBucket,
 } from "./types.js";
 
 interface AgentProjectRow {
@@ -153,12 +155,61 @@ function makeTrackSummary(track: ProjectTrackResolution): ProjectTrackSummary {
     deferred: track.via === "deferred",
     drift: track.drift,
     counts: { task: 0, artifact: 0, dispatch: 0, backlog_item: 0 },
+    status_counts: { queued: 0, building: 0, built_pending_review: 0, landed: 0, held: 0, other: 0 },
+    latest_activity_at: null,
+    owner_lanes: [],
     tasks: [],
     artifacts: [],
     dispatches: [],
     backlog_items: [],
     blockers: [],
   };
+}
+
+/** Record one item's live status into its track summary: bump the pipeline
+ *  bucket, advance the latest-activity watermark (ISO sorts lexically), and add
+ *  the owner lane. */
+function recordStatus(
+  summary: ProjectTrackSummary,
+  bucket: TrackStatusBucket,
+  activityIso: string | null,
+  owner: string | null | undefined,
+): void {
+  summary.status_counts[bucket] += 1;
+  if (activityIso && (!summary.latest_activity_at || activityIso > summary.latest_activity_at)) {
+    summary.latest_activity_at = activityIso;
+  }
+  if (owner && !summary.owner_lanes.includes(owner)) summary.owner_lanes.push(owner);
+}
+
+function taskBucket(status: string | null | undefined): TrackStatusBucket {
+  switch ((status ?? "").toLowerCase()) {
+    case "todo": case "queued": case "ready": return "queued";
+    case "doing": case "building": case "in_flight": return "building";
+    case "done": case "landed": case "promoted": return "landed";
+    case "blocked": case "held": case "paused": return "held";
+    default: return "other";
+  }
+}
+
+function dispatchBucket(status: string): TrackStatusBucket {
+  switch (status) {
+    case "queued": return "queued";
+    case "in_flight": return "building";
+    case "done": return "landed";
+    default: return "other"; // failed / resume_delivery_failed / unknown
+  }
+}
+
+function backlogBucket(readiness: string): TrackStatusBucket {
+  if (BLOCKED_BACKLOG_STATES.has(readiness)) return "held";
+  switch (readiness) {
+    case "ready": case "queued": case "admitted": return "queued";
+    case "building": case "in_flight": case "dispatched": return "building";
+    case "needs_review": case "built_pending_review": return "built_pending_review";
+    case "landed": case "done": case "promoted": return "landed";
+    default: return "other";
+  }
 }
 
 function addToSummary(
@@ -280,6 +331,7 @@ export async function buildProjectTracksEnvelope(
     const summary = addToSummary(summaries, track);
     if (summary.tasks.length < limit) summary.tasks.push(item);
     summary.counts.task += 1;
+    recordStatus(summary, taskBucket(row.status), item.updated_at, item.owner);
     countTrack(track);
   }
 
@@ -299,6 +351,8 @@ export async function buildProjectTracksEnvelope(
     const summary = addToSummary(summaries, track);
     if (summary.artifacts.length < limit) summary.artifacts.push(item);
     summary.counts.artifact += 1;
+    // A produced artifact is landed deliverable evidence.
+    recordStatus(summary, "landed", item.produced_at, row.agent);
     countTrack(track);
   }
 
@@ -321,6 +375,7 @@ export async function buildProjectTracksEnvelope(
       summary.blockers.push(dispatchBlocker(row, track));
     }
     summary.counts.dispatch += 1;
+    recordStatus(summary, dispatchBucket(row.status), item.updated_at, item.to_agent);
     countTrack(track);
   }
 
@@ -344,6 +399,7 @@ export async function buildProjectTracksEnvelope(
       summary.blockers.push(backlogBlocker(row, track));
     }
     summary.counts.backlog_item += 1;
+    recordStatus(summary, backlogBucket(row.readiness_state), item.updated_at, item.to_agent);
     countTrack(track);
   }
 
@@ -352,7 +408,25 @@ export async function buildProjectTracksEnvelope(
     const bc = Object.values(b.counts).reduce((sum, n) => sum + n, 0);
     return bc - ac || a.track.localeCompare(b.track);
   });
+  for (const s of tracks) s.owner_lanes.sort();
   const conformingShare = totalAssociations > 0 ? conformingAssociations / totalAssociations : 1;
+
+  // Honesty doctrine (spec §"Honesty bar"): declare each feeding source's
+  // availability explicitly so the UI can render "unavailable/stale" instead of
+  // faking a fixture. The refactor-debt ledger has no table in this datastore, so
+  // T-REFACTOR built-pending-review / built-and-reviewed / per-finding X-of-Y are
+  // NOT sourced — reported unavailable, never faked.
+  const sources: ProjectTracksSources = {
+    orchestration_backlog: "available",
+    task_stream: "available",
+    dispatch_queue: "available",
+    refactor_debt_ledger: "unavailable",
+    spec054_landed: "derived",
+    notes: [
+      "refactor_debt_ledger unavailable: no RD-ledger table in this datastore; T-REFACTOR built-pending-review / built-and-reviewed and per-finding X-of-Y counts are not sourced yet (shown unavailable, never faked).",
+      "spec054_landed derived: landed counts are inferred from terminal dispatch/backlog status, not a dedicated promotion/merge feed.",
+    ],
+  };
 
   return {
     schema_version: "project-tracks.v1",
@@ -376,6 +450,7 @@ export async function buildProjectTracksEnvelope(
       unassigned_count: unassignedCount,
       unknown_count: unknownCount,
     },
+    sources,
     empty: totalAssociations === 0,
   };
 }

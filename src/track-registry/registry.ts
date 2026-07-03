@@ -25,8 +25,16 @@ export interface TrackRegistry {
 }
 
 /**
- * Vendored snapshot of canonical-track-registry v1 (2026-06-23).
+ * Vendored snapshot of canonical-track-registry v2 (2026-07-02).
  * Source: agent-platform/goals-tracks-tasks.md §1b.
+ *
+ * RD-006: v1 predated the 2026-06-29 8-week roadmap reset track families and the
+ * `T-REFACTOR.<repo>` refactor-wave family, so live items on those tracks resolved
+ * to `(unassigned)` — a lying surface for the tracks/projects status tracker.
+ * v2 adds the reset NOW tracks (T-PACK/T-COS/T-FIN/T-CTOBOX/T-DECHRIS/T-DAILY/
+ * T-RELY), the refactor wave (T-REFACTOR — `T-REFACTOR.<repo>` conforms via prefix),
+ * plus T-POWERHOUSE and T-REMOTE. Older families are retained (not alias-merged)
+ * so existing items keep conforming.
  */
 export const DEFAULT_REGISTRY: TrackRegistry = {
   canonical: [
@@ -41,6 +49,17 @@ export const DEFAULT_REGISTRY: TrackRegistry = {
     'T-QA',
     'T14',
     'I-1',
+    // v2 (2026-07-02, RD-006) — 6/29 reset NOW tracks + refactor wave + live tracks.
+    'T-PACK',
+    'T-COS',
+    'T-FIN',
+    'T-CTOBOX',
+    'T-DECHRIS',
+    'T-DAILY',
+    'T-RELY',
+    'T-REFACTOR', // refactor wave; `T-REFACTOR.<repo>` rolls up via prefix
+    'T-POWERHOUSE',
+    'T-REMOTE',
   ],
   deferred: ['I-2', 'I-15'],
   legacyAliases: {

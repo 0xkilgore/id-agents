@@ -122,6 +122,28 @@ describe("project tracks read-model", () => {
     expect(envelope.drift.unassigned_count).toBe(1);
     expect(envelope.tracks.find((t) => t.track === "(unassigned)")?.tasks[0].id).toBe("task_2");
 
+    // Status tracker per-row data: live status_counts, owner lanes, activity ts.
+    // Rows are keyed by RAW track string: T15 (task_1) and T-CKPT (art_1) are separate.
+    const t15 = envelope.tracks.find((t) => t.track === "T15")!; // task_1 status "doing"
+    expect(t15.status_counts.building).toBe(1);
+    expect(t15.owner_lanes).toContain("maestra");
+    expect(t15.latest_activity_at).not.toBeNull();
+    const ckptArtifact = envelope.tracks.find((t) => t.track === "T-CKPT")!; // art_1
+    expect(ckptArtifact.status_counts.landed).toBe(1); // produced artifact = landed
+    const unassigned = envelope.tracks.find((t) => t.track === "(unassigned)")!;
+    expect(unassigned.status_counts.queued).toBe(1); // task_2 status "todo"
+    const nope = envelope.tracks.find((t) => t.track === "T-NOPE")!;
+    expect(nope.status_counts.held).toBe(1); // coitem_1 readiness "blocked_dependency"
+    const orch = envelope.tracks.find((t) => t.track === "T-ORCH.2")!;
+    expect(orch.status_counts.queued).toBe(1); // disp-pt-1 status "queued"
+
+    // Honesty bar: the refactor-debt ledger is not a real source here → declared
+    // unavailable, never faked.
+    expect(envelope.sources.refactor_debt_ledger).toBe("unavailable");
+    expect(envelope.sources.spec054_landed).toBe("derived");
+    expect(envelope.sources.orchestration_backlog).toBe("available");
+    expect(envelope.sources.notes.some((n) => /refactor_debt_ledger unavailable/.test(n))).toBe(true);
+
     await adapter.close();
   });
 
@@ -141,6 +163,8 @@ describe("project tracks read-model", () => {
     expect(res.body.drift.conforming_share).toBe(1);
     expect(res.body.drift.unassigned_count).toBe(0);
     expect(res.body.drift.unknown_count).toBe(0);
+    // Honest-unavailable case surfaces even on an empty project (never faked).
+    expect(res.body.sources.refactor_debt_ledger).toBe("unavailable");
 
     await adapter.close();
   });
