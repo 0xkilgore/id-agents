@@ -8,6 +8,13 @@ const ACTIVE_STATUSES = ['queued', 'in_flight', 'bounced', 'needs_clarification'
 const TERMINAL_STATUSES = ['done', 'failed', 'cancelled'];
 const ALL_STATUSES = [...ACTIVE_STATUSES, ...TERMINAL_STATUSES];
 
+/** True when a dispatch status is terminal (done/failed/cancelled). Exposed so
+ *  consumers (e.g. the S4 outputs feedback-reconcile view) can drop closed
+ *  loops from live views without re-encoding the terminal set. */
+export function isTerminalDispatchStatus(status: string): boolean {
+  return TERMINAL_STATUSES.includes(status);
+}
+
 export type DispatchReadStatus = 'active' | 'terminal' | 'all';
 
 export interface DispatchReadRow {

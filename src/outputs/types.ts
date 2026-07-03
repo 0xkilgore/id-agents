@@ -384,7 +384,41 @@ export interface FeedbackRouting {
   query_id: string | null;
   to_agent: string;
   routed_at: string;
+  // S4 (inbox-digest-manager-source): the routed dispatch's LIVE status,
+  // resolved only on the reconcile view (GET /artifacts/:id/feedback?reconcile=1)
+  // when the manager binds a dispatch-status resolver. On the default decoupled
+  // read model these stay null so the existing chip contract is unchanged.
+  // `is_terminal` lets the Cane digest drop already-closed loops (done/failed/
+  // cancelled) from live "needs you" / "routed" views without re-encoding the
+  // terminal set. `status: null` (unresolved) is treated as still-live.
+  status?: string | null;
+  effective_state?: string | null;
+  is_terminal?: boolean;
 }
+
+/** S4: the minimal live-status view of a routed dispatch, returned by the
+ *  injected resolver and stamped onto FeedbackRouting on the reconcile view. */
+export interface DispatchStatusLite {
+  status: string;
+  effective_state: string | null;
+  is_terminal: boolean;
+}
+
+/** S4: resolves a routed dispatch's live status by its stable `dispatch_phid`.
+ *  Team is already bound (the route resolves it per-request), so the pure
+ *  reconcile helper stays team-agnostic. Returns null when the dispatch is not
+ *  found (e.g. purged) — the reconcile view then leaves status null (live). */
+export type DispatchStatusResolver = (
+  dispatchPhid: string,
+) => Promise<DispatchStatusLite | null>;
+
+/** S4: the team-aware seam the manager binds into mountOutputsRoutes (the
+ *  dispatch store is keyed by team). The route resolves the request's team via
+ *  `resolveTeamId` and curries it down to a plain DispatchStatusResolver. */
+export type TeamAwareDispatchStatusResolver = (
+  dispatchPhid: string,
+  teamId: string,
+) => Promise<DispatchStatusLite | null>;
 
 export interface FeedbackItem {
   op_id: number;

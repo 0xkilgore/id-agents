@@ -54,6 +54,7 @@ import {
   listTimelineEvents,
   listComments,
   listFeedback,
+  reconcileFeedbackDispatchStatus,
   reactArtifact,
   recordCommentRouted,
   recordDispatchFollowUp,
@@ -93,6 +94,7 @@ import type {
   ArtifactTimelineResponse,
   CaneDraftPayload,
   DispatchFollowUpRequest,
+  TeamAwareDispatchStatusResolver,
   OutputsInboxResponse,
   OutputsInboxRow,
   RegisterArtifactRequest,
@@ -169,6 +171,15 @@ export interface MountOutputsRoutesOptions {
    * + `dispatch_skipped` so the console can show routing didn't run.
    */
   enqueueDispatch?: CommentDispatchEnqueueFn;
+  /**
+   * S4 (inbox-digest-manager-source): resolve a routed dispatch's LIVE status by
+   * its stable `dispatch_phid`. When provided, GET /artifacts/:id/feedback?reconcile=1
+   * stamps each routing with {status, effective_state, is_terminal} so the Cane
+   * inbox digest can show "routed to <owner> (dispatch <id>, status <…>)" and drop
+   * closed loops from live views. The manager binds this to the dispatch-scheduler
+   * read model; when omitted, the reconcile view is a no-op (routings stay decoupled).
+   */
+  resolveDispatchStatus?: TeamAwareDispatchStatusResolver;
   /**
    * ARTIFACTS substrate proof-cut. Absolute path to delivery-log.md used by the
    * auto-ingest timer and the parity walk. Defaults to
@@ -370,7 +381,7 @@ export function mountOutputsRoutes(
   adapter: DbAdapter,
   opts: MountOutputsRoutesOptions = {},
 ): void {
-  const { tasks, resolveTeamId } = opts;
+  const { tasks, resolveTeamId, resolveDispatchStatus } = opts;
   const cooldownMs = opts.actionCooldownMs ?? DEFAULT_ACTION_COOLDOWN_MS;
   const clock = opts.now;
   // CANE_DRAFT_ARTIFACTS — resolve the send executor once. Injectable for tests.
@@ -1457,14 +1468,27 @@ export function mountOutputsRoutes(
       }
       const limit = Math.min(parseInt(req.query.limit as string, 10) || 200, 500);
       const offset = parseInt(req.query.offset as string, 10) || 0;
-      const { items, acted_upon } = await listFeedback(adapter, req.params.id, limit, offset);
+      let feedback = await listFeedback(adapter, req.params.id, limit, offset);
+      // S4: opt-in dispatch reconciliation. When the caller asks (?reconcile=1)
+      // AND the manager bound a resolver, stamp each routing with its live
+      // dispatch status so the digest can filter closed loops. Default view is
+      // unchanged (reconciled:false, routings carry no status) — decoupled.
+      const reconcile = req.query.reconcile === '1' || req.query.reconcile === 'true';
+      const doReconcile = reconcile && !!resolveDispatchStatus;
+      if (doReconcile && resolveDispatchStatus) {
+        const teamId = resolveTeamId ? await resolveTeamId(req) : 'default';
+        feedback = await reconcileFeedbackDispatchStatus(feedback, (phid) =>
+          resolveDispatchStatus(phid, teamId),
+        );
+      }
       res.json({
         ok: true,
         schema_version: 'artifact.feedback.v1',
         artifact_id: req.params.id,
-        acted_upon,
-        items,
-        count: items.length,
+        reconciled: doReconcile,
+        acted_upon: feedback.acted_upon,
+        items: feedback.items,
+        count: feedback.items.length,
       });
     } catch (err) {
       res.status(500).json({ ok: false, error: err instanceof Error ? err.message : String(err) });

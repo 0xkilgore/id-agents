@@ -129,6 +129,7 @@ import {
 import {
   parseDispatchReadStatus,
   parseReadLimit,
+  isTerminalDispatchStatus,
   readArtifacts,
   readDispatchById,
   readDispatchHealth,
@@ -11276,6 +11277,25 @@ export class AgentManagerDb {
             enqueueDispatch: this.dispatchScheduler
               ? this.dispatchScheduler.enqueue.bind(this.dispatchScheduler)
               : undefined,
+            // S4 (inbox-digest-manager-source): resolve a routed comment's live
+            // dispatch status so GET /artifacts/:id/feedback?reconcile=1 can show
+            // "routed to <owner> (dispatch <id>, status <…>)" and the Cane digest
+            // can drop closed loops. Reads the same dispatch-scheduler store the
+            // scheduler writes; null when the dispatch row is gone.
+            resolveDispatchStatus: async (dispatchPhid, teamId) => {
+              const row = await readDispatchById(
+                this.db.adapter,
+                teamId,
+                dispatchPhid,
+                this.dispatchDeriveOpts(),
+              );
+              if (!row) return null;
+              return {
+                status: row.status,
+                effective_state: row.effective_state ?? null,
+                is_terminal: isTerminalDispatchStatus(row.status),
+              };
+            },
           });
           this.startFilesystemArtifactReconciler(runFilesystemReconcile);
           this.startWorktreeReaper();

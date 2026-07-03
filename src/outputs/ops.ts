@@ -33,6 +33,7 @@ import type {
   CaneDraftPayload,
   CommentRequest,
   DispatchFollowUpRequest,
+  DispatchStatusResolver,
   FeedbackItem,
   FeedbackRouting,
   ReactionKind,
@@ -774,6 +775,46 @@ export async function listFeedback(
     last_reaction: reactionItems[0]?.reaction ?? null,
     last_feedback_at: items[0]?.ts ?? null,
     routed_dispatches: routedDispatches,
+  };
+  return { items, acted_upon };
+}
+
+// ── S4 dispatch reconciliation (inbox-digest-manager-source) ────────
+// The manager-canonical join the Cane inbox digest reads: take a feedback
+// projection (whose routings carry only a stable `dispatch_phid`) and stamp
+// each routing with its dispatch's LIVE status, resolved once per unique phid
+// via the injected resolver. Pure over `resolve` — `listFeedback` stays
+// decoupled from the dispatch store; only this opt-in view couples them. A phid
+// the resolver can't find (purged/unknown) is left status:null (treated as
+// still-live, never silently dropped).
+export async function reconcileFeedbackDispatchStatus(
+  feedback: { items: FeedbackItem[]; acted_upon: ActedUponSummary },
+  resolve: DispatchStatusResolver,
+): Promise<{ items: FeedbackItem[]; acted_upon: ActedUponSummary }> {
+  const phids = new Set<string>();
+  for (const it of feedback.items) if (it.routing) phids.add(it.routing.dispatch_phid);
+  for (const r of feedback.acted_upon.routed_dispatches) phids.add(r.dispatch_phid);
+
+  const statusByPhid = new Map<string, Awaited<ReturnType<DispatchStatusResolver>>>();
+  await Promise.all(
+    [...phids].map(async (phid) => {
+      statusByPhid.set(phid, await resolve(phid));
+    }),
+  );
+
+  const enrich = (r: FeedbackRouting): FeedbackRouting => {
+    const s = statusByPhid.get(r.dispatch_phid) ?? null;
+    return s
+      ? { ...r, status: s.status, effective_state: s.effective_state, is_terminal: s.is_terminal }
+      : { ...r, status: null, effective_state: null, is_terminal: false };
+  };
+
+  const items = feedback.items.map((it) =>
+    it.routing ? { ...it, routing: enrich(it.routing) } : it,
+  );
+  const acted_upon: ActedUponSummary = {
+    ...feedback.acted_upon,
+    routed_dispatches: feedback.acted_upon.routed_dispatches.map(enrich),
   };
   return { items, acted_upon };
 }
