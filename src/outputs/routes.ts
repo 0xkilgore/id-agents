@@ -1551,6 +1551,12 @@ export function mountOutputsRoutes(
         : null;
       const { state, op_id, idempotent } = await approveArtifact(adapter, artifactId, reqBody, clock);
       invalidateArtifactDetail(artifactId);
+      const baseReceipt = {
+        approval: { state: "approved", label: "Approved", op_id, idempotent },
+        comment: approvalComment
+          ? { state: "applied", label: "Comment applied", op_id: approvalComment.op_id }
+          : { state: "skipped", label: "No approval comment", op_id: null },
+      };
 
       // No tasks seam wired up → return the review state alone with an
       // explicit skip marker so kapelle-site can show the operator
@@ -1565,6 +1571,10 @@ export function mountOutputsRoutes(
           actor: actor.ref,
           comment: approvalComment?.comment ?? null,
           comment_op_id: approvalComment?.op_id ?? null,
+          receipt: {
+            ...baseReceipt,
+            task: { state: "skipped", label: "Approval task not configured", task_id: null },
+          },
           task: null,
           task_emitted: false,
           task_emit_skipped: "manager_emit_target_not_configured",
@@ -1582,6 +1592,10 @@ export function mountOutputsRoutes(
           op_id,
           comment: approvalComment?.comment ?? null,
           comment_op_id: approvalComment?.op_id ?? null,
+          receipt: {
+            ...baseReceipt,
+            task: { state: "error", label: "Approval task not queued", task_id: null },
+          },
           task: null,
           task_emitted: false,
           task_emit_error: {
@@ -1622,6 +1636,10 @@ export function mountOutputsRoutes(
           op_id,
           comment: approvalComment?.comment ?? null,
           comment_op_id: approvalComment?.op_id ?? null,
+          receipt: {
+            ...baseReceipt,
+            task: { state: "error", label: "Approval task not queued", task_id: null },
+          },
           task: null,
           task_emitted: false,
           task_emit_error: emit.error,
@@ -1637,6 +1655,14 @@ export function mountOutputsRoutes(
         actor: actor.ref,
         comment: approvalComment?.comment ?? null,
         comment_op_id: approvalComment?.op_id ?? null,
+        receipt: {
+          ...baseReceipt,
+          task: {
+            state: emit.idempotent ? "already_queued" : "queued",
+            label: emit.idempotent ? "Approval task already queued" : "Approval task queued",
+            task_id: emit.task.id,
+          },
+        },
         task: emit.task,
         task_emitted: true,
         task_idempotent: emit.idempotent,

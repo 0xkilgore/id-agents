@@ -81,6 +81,12 @@ describe("Kapelle P3 — POST /artifacts/:id/approve emits a manager task", () =
     expect(res.body.ok).toBe(true);
     expect(res.body.task_emitted).toBe(true);
     expect(res.body.task_idempotent).toBe(false);
+    expect(res.body.receipt).toMatchObject({
+      approval: { state: "approved", label: "Approved", op_id: res.body.op_id, idempotent: false },
+      comment: { state: "skipped", label: "No approval comment", op_id: null },
+      task: { state: "queued", label: "Approval task queued" },
+    });
+    expect(res.body.receipt.task.task_id).toBe(res.body.task.id);
     expect(res.body.task).toBeTruthy();
     expect(res.body.task.name).toMatch(/^artifact-approval-[a-f0-9]{12}$/);
     expect(res.body.task.team_id).toBe(teamId);
@@ -91,6 +97,25 @@ describe("Kapelle P3 — POST /artifacts/:id/approve emits a manager task", () =
     expect(payload?.reviewer.kind).toBe("human");
     expect(payload?.source_surface).toBe("/ops/artifacts/art:regina:digest.md");
     expect(payload?.approval_state).toBe("approved");
+  });
+
+  it("returns a legible receipt when approve includes a comment", async () => {
+    const { app } = await bootApp({ withEmit: true });
+    const artifactId = "art:regina:commented.md";
+    const res = await request(app).post(`/artifacts/${artifactId}/approve`, {
+      approver: "human:liz",
+      comment: "Approved with the typo fix noted.",
+      source_surface: "/ops/artifacts/art:regina:commented.md",
+    });
+
+    expect(res.status).toBe(200);
+    expect(res.body.ok).toBe(true);
+    expect(res.body.comment.body).toBe("Approved with the typo fix noted.");
+    expect(res.body.receipt).toMatchObject({
+      approval: { state: "approved", label: "Approved", op_id: res.body.op_id, idempotent: false },
+      comment: { state: "applied", label: "Comment applied", op_id: res.body.comment_op_id },
+      task: { state: "queued", label: "Approval task queued", task_id: res.body.task.id },
+    });
   });
 
   it("returns task_idempotent: true on a second approve of the same artifact", async () => {
