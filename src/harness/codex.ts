@@ -19,6 +19,7 @@ import { AgentHarness, HarnessOptions, HarnessMessage, HarnessType } from './typ
 import * as os from 'os';
 import * as path from 'path';
 import * as fs from 'fs';
+import { armProcessTimeout, resolveHarnessTimeoutMs, KILL_GRACE_MS, HANG_TIMEOUT_MARKER } from './process-timeout.js';
 
 export class CodexHarness implements AgentHarness {
   readonly type: HarnessType = 'codex' as HarnessType;
@@ -92,9 +93,20 @@ export class CodexHarness implements AgentHarness {
 
     this.currentProcess = proc;
 
+    const timeoutMs = resolveHarnessTimeoutMs(options);
+    let timedOut = false;
+    const clearWatchdog = armProcessTimeout(proc, timeoutMs, {
+      graceMs: KILL_GRACE_MS,
+      onTimeout: () => {
+        timedOut = true;
+        console.error(`[Codex] Timed out after ${timeoutMs}ms (PID: ${proc.pid}); killing.`);
+      },
+    });
+
     // Issue 4: Handle spawn errors
     let spawnError: Error | null = null;
     proc.on('error', (err) => {
+      clearWatchdog();
       console.error(`[Codex] Process error: ${err.message}`);
       spawnError = err;
     });
@@ -155,6 +167,7 @@ export class CodexHarness implements AgentHarness {
       }
 
       proc.on('exit', (code) => {
+        clearWatchdog();
         console.log(`[Codex] Process exited with code ${code}`);
         exitCode = code;
         checkDone();
@@ -415,6 +428,15 @@ export class CodexHarness implements AgentHarness {
 
     // Issue 3: Wait for both stdout end AND process exit
     await completionPromise;
+
+    if (timedOut) {
+      yield {
+        type: 'error',
+        content: `Codex CLI timed out after ${timeoutMs}ms (${HANG_TIMEOUT_MARKER})`,
+      };
+      this.currentProcess = null;
+      return;
+    }
 
     // Issue 4: If spawn failed, yield error
     if (spawnError) {
