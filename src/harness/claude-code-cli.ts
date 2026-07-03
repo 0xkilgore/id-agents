@@ -21,90 +21,25 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 
-// W-004 subprocess-timeout reliability fix.
-//
-// The spawned `claude` process can hang indefinitely during a dispatch — a
-// child blocked on stdin (the "Not logged in · Please run /login" interactive
-// prompt) or a stalled network call never closes, so the dispatch neither
-// resolves nor fails: it just wedges silently. A watchdog kills the process
-// and rejects so the dispatch closes as a typed error instead of hanging.
-//
-// The default is a generous backstop so legitimate long agent runs are not
-// killed; operators tune it down via ID_AGENT_HARNESS_TIMEOUT_MS, and 0
-// disables the watchdog entirely.
-export const DEFAULT_HARNESS_TIMEOUT_MS = 30 * 60_000; // 30 minutes
-const KILL_GRACE_MS = 2000;
+import {
+  DEFAULT_HARNESS_TIMEOUT_MS,
+  KILL_GRACE_MS,
+  HANG_TIMEOUT_MARKER,
+  resolveHarnessTimeoutMs,
+  armProcessTimeout,
+  KillableProcess,
+} from './process-timeout.js';
 
-/**
- * Resolve the effective harness timeout (ms). Precedence: explicit option →
- * ID_AGENT_HARNESS_TIMEOUT_MS env → DEFAULT_HARNESS_TIMEOUT_MS. A value of 0
- * disables the watchdog; a garbage/negative env value is ignored. Pure.
- */
-export function resolveHarnessTimeoutMs(
-  opts: { timeoutMs?: number },
-  env: NodeJS.ProcessEnv = process.env,
-): number {
-  if (typeof opts.timeoutMs === 'number' && Number.isFinite(opts.timeoutMs) && opts.timeoutMs >= 0) {
-    return opts.timeoutMs;
-  }
-  const raw = env.ID_AGENT_HARNESS_TIMEOUT_MS;
-  if (raw !== undefined) {
-    const n = Number(raw);
-    if (Number.isFinite(n) && n >= 0) return n;
-  }
-  return DEFAULT_HARNESS_TIMEOUT_MS;
-}
-
-/** A child process we can signal — the subset of ChildProcess the watchdog needs. */
-export interface KillableProcess {
-  killed: boolean;
-  kill(signal?: NodeJS.Signals | number): boolean;
-}
-
-/**
- * Arm a SIGTERM→SIGKILL watchdog on a child process. After `timeoutMs` it
- * calls `onTimeout()` and sends SIGTERM; if the process is still alive after
- * `graceMs` it sends SIGKILL. `timeoutMs <= 0` disables the watchdog. Returns
- * a `clear()` that cancels both timers (call it when the process exits in
- * time). Pure aside from the timers it owns; testable with fake clocks.
- */
-export function armProcessTimeout(
-  proc: KillableProcess,
-  timeoutMs: number,
-  options: { graceMs: number; onTimeout: () => void },
-): () => void {
-  if (!(timeoutMs > 0)) {
-    return () => {};
-  }
-  let killTimer: ReturnType<typeof setTimeout> | null = null;
-  const timer = setTimeout(() => {
-    options.onTimeout();
-    try {
-      proc.kill('SIGTERM');
-    } catch {
-      // process already gone
-    }
-    killTimer = setTimeout(() => {
-      if (!proc.killed) {
-        try {
-          proc.kill('SIGKILL');
-        } catch {
-          // already gone
-        }
-      }
-    }, options.graceMs);
-    if (typeof (killTimer as { unref?: () => void }).unref === 'function') {
-      (killTimer as { unref?: () => void }).unref!();
-    }
-  }, timeoutMs);
-  if (typeof (timer as { unref?: () => void }).unref === 'function') {
-    (timer as { unref?: () => void }).unref!();
-  }
-  return () => {
-    clearTimeout(timer);
-    if (killTimer) clearTimeout(killTimer);
-  };
-}
+// Re-export for existing callers/tests (tests/unit/claude-code-cli-timeout.test.ts
+// imports these from this module) — the implementation now lives in
+// process-timeout.ts, shared with codex.ts and cursor-cli.ts.
+export {
+  DEFAULT_HARNESS_TIMEOUT_MS,
+  KILL_GRACE_MS,
+  resolveHarnessTimeoutMs,
+  armProcessTimeout,
+};
+export type { KillableProcess };
 
 export class ClaudeCodeCliHarness implements AgentHarness {
   readonly type: HarnessType = 'claude-code-cli' as HarnessType;
@@ -403,7 +338,7 @@ export class ClaudeCodeCliHarness implements AgentHarness {
           console.error(`[Claude CLI] Timed out after ${timeoutMs}ms (PID: ${proc.pid}); killing.`);
           // Best-effort temp-file cleanup (the trailing `rm` won't run on kill).
           try { fs.unlinkSync(tmpFile); } catch { /* already gone */ }
-          reject(new Error(`Claude CLI timed out after ${timeoutMs}ms`));
+          reject(new Error(`Claude CLI timed out after ${timeoutMs}ms (${HANG_TIMEOUT_MARKER})`));
         },
       });
 
