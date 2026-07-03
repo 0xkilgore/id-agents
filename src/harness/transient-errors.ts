@@ -10,6 +10,8 @@
 // must never retry real build/test failures, auth/billing, content-filter
 // bounces, or promotion conflicts.
 
+import { HANG_TIMEOUT_MARKER } from './process-timeout.js';
+
 export type HarnessFailureKind =
   | 'thinking_block_400'
   | 'provider_overloaded'
@@ -17,6 +19,7 @@ export type HarnessFailureKind =
   | 'provider_timeout'
   | 'network_transport'
   | 'harness_process_exit'
+  | 'harness_hang_timeout'
   | 'harness_empty_result'
   | 'auth_or_plan'
   | 'content_filter'
@@ -28,6 +31,7 @@ export type HarnessTerminalFailureKind =
   | 'model_api_error_exhausted'
   | 'harness_empty_result_exhausted'
   | 'harness_process_error_exhausted'
+  | 'harness_hang_timeout_exhausted'
   | 'agent_error';
 
 export interface HarnessFailureClassification {
@@ -292,6 +296,20 @@ export function classifyHarnessFailure(input: HarnessFailureInput): HarnessFailu
       terminalFailureKind: 'model_api_error_exhausted',
       confidence: 'high',
       reason: 'matches provider overload/capacity signal',
+      redactedMessage: redacted,
+    };
+  }
+
+  // Harness watchdog hang-timeout kill (2026-07-03) — our own SIGTERM/SIGKILL
+  // fired because the child wedged, not a provider-reported timeout. More
+  // specific than the generic TIMEOUT_PHRASES check below, so it runs first.
+  if (combined.includes(HANG_TIMEOUT_MARKER)) {
+    return {
+      kind: 'harness_hang_timeout',
+      retryable: true,
+      terminalFailureKind: 'harness_hang_timeout_exhausted',
+      confidence: 'high',
+      reason: 'harness watchdog killed a hung child process',
       redactedMessage: redacted,
     };
   }

@@ -12,6 +12,7 @@ import {
   classifyHarnessFailure,
   redactSecrets,
 } from '../../src/harness/transient-errors.js';
+import { HANG_TIMEOUT_MARKER } from '../../src/harness/process-timeout.js';
 
 describe('classifyHarnessFailure — thinking-block 400 (Anthropic latest-turn corruption)', () => {
   it('matches the canonical 400 message with thinking blocks', () => {
@@ -146,6 +147,38 @@ describe('classifyHarnessFailure — timeouts & network transport', () => {
       expect(c.kind).toBe('network_transport');
       expect(c.retryable).toBe(true);
     }
+  });
+});
+
+describe('classifyHarnessFailure — harness hang-timeout watchdog (2026-07-03)', () => {
+  it('classifies a claude-code-cli watchdog kill distinctly from a generic provider timeout', () => {
+    const message = `Claude CLI timed out after 1800000ms (${HANG_TIMEOUT_MARKER})`;
+    const c = classifyHarnessFailure({ message, source: 'harness_error_message' });
+    expect(c.kind).toBe('harness_hang_timeout');
+    expect(c.retryable).toBe(true);
+    expect(c.terminalFailureKind).toBe('harness_hang_timeout_exhausted');
+    expect(c.confidence).toBe('high');
+  });
+
+  it('classifies a codex hang-timeout kill', () => {
+    const message = `Codex CLI timed out after 1800000ms (${HANG_TIMEOUT_MARKER})`;
+    const c = classifyHarnessFailure({ message, source: 'harness_error_message' });
+    expect(c.kind).toBe('harness_hang_timeout');
+    expect(c.retryable).toBe(true);
+  });
+
+  it('classifies a cursor-cli hang-timeout kill', () => {
+    const message = `Cursor CLI timed out after 1800000ms (${HANG_TIMEOUT_MARKER})`;
+    const c = classifyHarnessFailure({ message, source: 'harness_error_message' });
+    expect(c.kind).toBe('harness_hang_timeout');
+    expect(c.retryable).toBe(true);
+  });
+
+  it('a generic provider timeout WITHOUT the hang-timeout marker still falls into provider_timeout', () => {
+    const message = 'API Error: request timed out after 60s';
+    const c = classifyHarnessFailure({ message, source: 'harness_error_message' });
+    expect(c.kind).toBe('provider_timeout');
+    expect(c.kind).not.toBe('harness_hang_timeout');
   });
 });
 
