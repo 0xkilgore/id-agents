@@ -448,21 +448,26 @@ export function mountOutputsRoutes(
     }
   }
 
-  // Monday §1/§2 guards. RD-001: reject anything that isn't a stable artifact_id
-  // (display id / basename / queue index / path) as a mutation target. Actor:
-  // require one of the two fixed Monday actors. Both return typed 4xx errors and
-  // signal the caller (via the returned null) to stop.
-  function requireArtifactId(req: Request<{ id: string }>, res: Response): string | null {
+  // Monday §1/§2 guards. RD-001: mutation targets must normalize to a stable
+  // artifact_id. A stable artifact_id passes through; an ENCODED ARTIFACT PATH is
+  // resolved to its stable artifact_id (so the review loop — comment → approve →
+  // ship — accepts the same ref the /detail + /comments GETs already resolve).
+  // Display ids / basenames / queue indices are still rejected (RD-027: every
+  // mutation route resolves the SAME way — no half-migrated dead-end). Returns a
+  // typed 4xx + null to signal the caller to stop.
+  function resolveMutationArtifactId(req: Request<{ id: string }>, res: Response): string | null {
     const id = req.params.id;
-    if (!isValidArtifactId(id)) {
-      res.status(400).json({
-        ok: false,
-        error: `invalid artifact id "${id}" — operations target a stable artifact_id, not a display id, basename, index, or path`,
-        code: 'invalid_artifact_id',
-      });
-      return null;
+    if (isValidArtifactId(id)) return id;
+    const ref = resolveArtifactDetailRef(id);
+    if (ref.resolvedFrom !== 'artifact_id' && isValidArtifactId(ref.artifactId)) {
+      return ref.artifactId;
     }
-    return id;
+    res.status(400).json({
+      ok: false,
+      error: `invalid artifact id "${id}" — operations target a stable artifact_id or encoded artifact path, not a display id, basename, or index`,
+      code: 'invalid_artifact_id',
+    });
+    return null;
   }
   function requireActor(req: Request, res: Response): Actor | null {
     const body = (req.body ?? {}) as Record<string, unknown>;
@@ -1061,7 +1066,7 @@ export function mountOutputsRoutes(
   // adds typed suggested-change comments and follow-up dispatch receipts.
   app.post('/artifacts/:id/timeline', async (req: Request<{ id: string }>, res: Response) => {
     try {
-      const artifactId = requireArtifactId(req, res);
+      const artifactId = resolveMutationArtifactId(req, res);
       if (!artifactId) return;
       const actor = requireActor(req, res);
       if (!actor) return;
@@ -1131,7 +1136,7 @@ export function mountOutputsRoutes(
   // through /operations + /review. Requires a valid Monday actor + artifact_id.
   app.post('/artifacts/:id/comments', async (req: Request<{ id: string }>, res: Response) => {
     try {
-      const artifactId = requireArtifactId(req, res);
+      const artifactId = resolveMutationArtifactId(req, res);
       if (!artifactId) return;
       const actor = requireActor(req, res);
       if (!actor) return;
@@ -1242,7 +1247,7 @@ export function mountOutputsRoutes(
 
   app.post('/artifacts/:id/suggestions', async (req: Request<{ id: string }>, res: Response) => {
     try {
-      const artifactId = requireArtifactId(req, res);
+      const artifactId = resolveMutationArtifactId(req, res);
       if (!artifactId) return;
       const actor = requireActor(req, res);
       if (!actor) return;
@@ -1299,7 +1304,7 @@ export function mountOutputsRoutes(
         if (!isEditInProductEnabled(env)) {
           return res.status(404).json({ ok: false, code: 'edit_in_product_disabled', error: 'edit_in_product_disabled' });
         }
-        const artifactId = requireArtifactId(req, res);
+        const artifactId = resolveMutationArtifactId(req, res);
         if (!artifactId) return;
         const actor = requireActor(req, res);
         if (!actor) return;
@@ -1343,7 +1348,7 @@ export function mountOutputsRoutes(
     '/artifacts/:id/suggestions/:suggestion_id/reject',
     async (req: Request<{ id: string; suggestion_id: string }>, res: Response) => {
       try {
-        const artifactId = requireArtifactId(req, res);
+        const artifactId = resolveMutationArtifactId(req, res);
         if (!artifactId) return;
         const actor = requireActor(req, res);
         if (!actor) return;
@@ -1368,7 +1373,7 @@ export function mountOutputsRoutes(
     '/artifacts/:id/suggestions/:suggestion_id/supersede',
     async (req: Request<{ id: string; suggestion_id: string }>, res: Response) => {
       try {
-        const artifactId = requireArtifactId(req, res);
+        const artifactId = resolveMutationArtifactId(req, res);
         if (!artifactId) return;
         const actor = requireActor(req, res);
         if (!actor) return;
@@ -1402,7 +1407,7 @@ export function mountOutputsRoutes(
       if (!isC0FeedbackReactionsEnabled(env)) {
         return res.status(404).json({ ok: false, error: 'c0_feedback_reactions_disabled' });
       }
-      const artifactId = requireArtifactId(req, res);
+      const artifactId = resolveMutationArtifactId(req, res);
       if (!artifactId) return;
       const actor = requireActor(req, res);
       if (!actor) return;
@@ -1514,7 +1519,7 @@ export function mountOutputsRoutes(
 
   app.post('/artifacts/:id/approve', async (req: Request<{ id: string }>, res: Response) => {
     try {
-      const artifactId = requireArtifactId(req, res);
+      const artifactId = resolveMutationArtifactId(req, res);
       if (!artifactId) return;
       const actor = requireActor(req, res);
       if (!actor) return;
@@ -1646,7 +1651,7 @@ export function mountOutputsRoutes(
   // (first-reject-wins), Monday-actor-attributed, cooldown-guarded.
   app.post('/artifacts/:id/reject', async (req: Request<{ id: string }>, res: Response) => {
     try {
-      const artifactId = requireArtifactId(req, res);
+      const artifactId = resolveMutationArtifactId(req, res);
       if (!artifactId) return;
       const actor = requireActor(req, res);
       if (!actor) return;
@@ -1676,7 +1681,7 @@ export function mountOutputsRoutes(
 
   app.post('/artifacts/:id/ship', async (req: Request<{ id: string }>, res: Response) => {
     try {
-      const artifactId = requireArtifactId(req, res);
+      const artifactId = resolveMutationArtifactId(req, res);
       if (!artifactId) return;
       const actor = requireActor(req, res);
       if (!actor) return;
