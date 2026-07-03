@@ -24,6 +24,10 @@ import {
 } from "../dispatch-recovery/service.js";
 import { DEFAULT_RECOVERY_CONFIG } from "../dispatch-recovery/classifier.js";
 import { makeRecoveryReactor } from "../dispatch-recovery/reactor-adapter.js";
+import type {
+  RoutingHealthReadModel,
+  RuntimeLiveness,
+} from "../routing-health/types.js";
 import {
   type SchedulerPolicy,
   loadSchedulerPolicy,
@@ -113,6 +117,68 @@ export function computeFleetAdmissionExclusions(agents: AgentRow[]): string[] {
   return agents
     .filter((agent) => isStoppedOrOffline(agent) && isLegacyClaudeBuilder(agent))
     .flatMap((agent) => agentClaimRefs(agent));
+}
+
+/**
+ * RD-014 (Fable critique 2026-07-01) — routing admission consults runtime/lane
+ * health. Fold the routing-health read-model's runtime-liveness verdict into the
+ * set of "constrained" provider lanes so the model policy's existing primary→
+ * fallback order steers work OFF a stalled lane. This is the production consumer
+ * `computeRoutingHealth` never had: the read-model already surfaces which
+ * runtimes are down (e.g. a cert-revoked Codex fallback → `codex` unavailable),
+ * but nothing routed on it — the admission gate never asked. Now enqueue does.
+ *
+ * The partial-implementation ancestor (branch cto/codex-runtime-health-gate,
+ * d9e7406) gated the codex lane at CLAIM time via a bespoke agent-exclusion list
+ * and a live per-tick `codex --version` probe. That commit's other pieces
+ * (codex-fallback-health probe C1, /status C2, /routing-health route C3, the
+ * runtime_unavailable classifier C4) have since landed independently on main.
+ * Its RESIDUAL intent — health-gate the codex lane at admission — is delivered
+ * here through the read-model instead of a duplicate probe, and at ENQUEUE (so
+ * the dispatch is routed to the fallback lane up front) rather than by excluding
+ * agents from the claim query after the fact. This composes with model-policy —
+ * it never reorders resolution; it only marks a down runtime's provider lane
+ * constrained, exactly like the usage signal already does.
+ *
+ * Pure: maps a RuntimeLiveness[] to the Provider lanes to treat as constrained.
+ * A runtime that is not live constrains its provider lane. Fail-safe by
+ * construction — only ever ADDS a lane to the constrained set (never removes),
+ * so it can steer AWAY from a broken lane but can never force work onto one.
+ */
+export function providersConstrainedByRuntimeHealth(
+  runtimes: RuntimeLiveness[] | undefined,
+): Provider[] {
+  if (!runtimes || runtimes.length === 0) return [];
+  const constrained = new Set<Provider>();
+  for (const rt of runtimes) {
+    if (rt.live) continue;
+    // The RuntimeLiveness name is a runtime/provider label (e.g. 'codex',
+    // 'claude', 'cursor'); normalize through the runtime→provider map so a
+    // 'codex' outage constrains the 'openai' lane the way model-policy names it.
+    const provider = resolveProviderFromRuntime(normalizeRuntime(rt.name));
+    constrained.add(provider);
+  }
+  return [...constrained];
+}
+
+/**
+ * RD-014 — derive the constrained provider lanes from a routing-health
+ * read-model. A lane is treated as constrained when its runtime is down OR the
+ * lane is stalled (queued work that cannot drain). Currently the runtime-down
+ * axis is the load-bearing signal (a cert-revoked Codex); the stall axis is
+ * folded in defensively so a lane with no live members also steers work away.
+ */
+export function providersConstrainedByRoutingHealth(
+  model: RoutingHealthReadModel | null | undefined,
+): Provider[] {
+  if (!model) return [];
+  return providersConstrainedByRuntimeHealth(
+    // Reconstruct RuntimeLiveness rows from the summary's down list; the
+    // read-model already computed liveness, we only need the down names here.
+    model.summary.runtimes_down.map(
+      (name): RuntimeLiveness => ({ name, role: "fallback", live: false }),
+    ),
+  );
 }
 
 function isLiveAgent(agent: AgentRow): boolean {
@@ -251,6 +317,14 @@ export class SchedulerHandle {
   // D1 / T-MODEL.1: per-agent model policy + live provider-availability source.
   private modelPolicy?: ModelPolicyResolver;
   private unavailableProvidersSource?: () => Promise<Provider[]> | Provider[];
+  // RD-014: live routing-health read-model source. When set, enqueue folds the
+  // read-model's down/stalled runtime lanes into the constrained-provider set so
+  // the model policy steers work off a stalled lane onto its fallback. This is
+  // the production consumer computeRoutingHealth previously lacked.
+  private routingHealthSource?: () =>
+    | Promise<RoutingHealthReadModel | null>
+    | RoutingHealthReadModel
+    | null;
 
   constructor(opts: SchedulerHandleOptions) {
     const env = opts.env ?? {};
@@ -400,6 +474,37 @@ export class SchedulerHandle {
   }
 
   /**
+   * RD-014: wire the live routing-health read-model source. The manager passes a
+   * function that returns the current computeRoutingHealth() output (runtime
+   * liveness + lane stall). Enqueue folds its verdict into the constrained-lane
+   * set so a stalled lane is routed around via the model policy's fallback order.
+   */
+  setRoutingHealthSource(
+    fn: () =>
+      | Promise<RoutingHealthReadModel | null>
+      | RoutingHealthReadModel
+      | null,
+  ): void {
+    this.routingHealthSource = fn;
+  }
+
+  /**
+   * RD-014: the provider lanes routing-health currently reports as unhealthy
+   * (runtime down / lane stalled). Never throws — a failing/absent source yields
+   * an empty set, so enqueue degrades to the pre-RD-014 usage-only signal rather
+   * than blocking. Fail-open on the health source, fail-safe in the mapping.
+   */
+  private async currentRoutingHealthConstrainedProviders(): Promise<Provider[]> {
+    if (!this.routingHealthSource) return [];
+    try {
+      const model = await this.routingHealthSource();
+      return providersConstrainedByRoutingHealth(model);
+    } catch {
+      return [];
+    }
+  }
+
+  /**
    * Run a single recovery pass. Bounded: overlapping ticks are skipped so a
    * slow DB never stacks passes. Never throws — the service already swallows
    * its own errors, and this guard catches anything the scheduling layer adds.
@@ -525,7 +630,17 @@ export class SchedulerHandle {
     if (input.runtime) {
       runtime = normalizeRuntime(input.runtime);
     } else if (this.modelPolicy) {
-      const unavailableProviders = await this.currentUnavailableProviders();
+      // Usage-constrain signal (model-policy fallback off provider budget/limits).
+      const usageUnavailable = await this.currentUnavailableProviders();
+      // RD-014: liveness signal — fold the routing-health read-model's down/
+      // stalled lanes into the constrained set so a lane that is UNAVAILABLE
+      // (not merely usage-limited) is also routed around. Union of the two: a
+      // lane is constrained if EITHER over budget OR unhealthy. This is what
+      // gives computeRoutingHealth a production consumer at the admission path.
+      const healthUnavailable = await this.currentRoutingHealthConstrainedProviders();
+      const unavailableProviders = [
+        ...new Set<Provider>([...usageUnavailable, ...healthUnavailable]),
+      ];
       modelPolicyTrace = this.modelPolicy.resolveModelChoice({
         agent: input.to_agent,
         unavailableProviders,
