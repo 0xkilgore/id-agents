@@ -251,24 +251,30 @@ export async function runPromoteToMain(
   }
 
   // Step 3: Branch ahead/behind + tips.
+  // RD-013: resolve strategy + divergence against the FRESHLY-FETCHED REMOTE base
+  // (`origin/main`), NOT the stale LOCAL base ref. The local base can lag origin
+  // (it is only fast-forwarded at execute), so measuring against it makes a branch
+  // that is behind origin look up-to-date — bypassing the divergence → needs-input
+  // gate and letting a fast-forward run on a stale base.
+  const remoteBaseRef = `${remote}/${base}`;
   const branchTip = (await deps.git(["rev-parse", branch], repo)).stdout.trim();
-  const baseTip = (await deps.git(["rev-parse", base], repo)).stdout.trim();
+  const baseTip = (await deps.git(["rev-parse", remoteBaseRef], repo)).stdout.trim();
   if (!branchTip || !baseTip) {
-    io.stderr(`cannot resolve branch/base SHAs (branch=${branch} base=${base})\n`);
+    io.stderr(`cannot resolve branch/base SHAs (branch=${branch} base=${remoteBaseRef})\n`);
     return { exit: 5, result: null };
   }
   const aheadOut = await deps.git(
-    ["rev-list", "--count", `${base}..${branch}`], repo,
+    ["rev-list", "--count", `${remoteBaseRef}..${branch}`], repo,
   );
   const behindOut = await deps.git(
-    ["rev-list", "--count", `${branch}..${base}`], repo,
+    ["rev-list", "--count", `${branch}..${remoteBaseRef}`], repo,
   );
   const ahead = Number(aheadOut.stdout.trim()) || 0;
   const behind = Number(behindOut.stdout.trim()) || 0;
 
   // Step 4: Detect autocommit noise.
   const logOut = await deps.git(
-    ["log", "--format=%s", `${base}..${branch}`], repo,
+    ["log", "--format=%s", `${remoteBaseRef}..${branch}`], repo,
   );
   const messages = logOut.stdout.split("\n").filter((l) => l.trim());
   const branchStatus: BranchStatus = {

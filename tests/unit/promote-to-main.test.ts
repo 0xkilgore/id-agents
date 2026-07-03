@@ -98,9 +98,9 @@ function ffExecuteCommands() {
     { match: (a: string[]) => a[0] === "status", out: "" },
     { match: (a: string[]) => a[0] === "fetch", out: "" },
     { match: (a: string[]) => a[0] === "rev-parse" && a[1] === "feat-x", out: "abc1234\n" },
-    { match: (a: string[]) => a[0] === "rev-parse" && a[1] === "main", out: "basetip\n" }, // baseTip (consumed first)
-    { match: (a: string[]) => a[0] === "rev-list" && a.includes("main..feat-x"), out: "1\n" },
-    { match: (a: string[]) => a[0] === "rev-list" && a.includes("feat-x..main"), out: "0\n" },
+    { match: (a: string[]) => a[0] === "rev-parse" && a[1] === "origin/main", out: "basetip\n" }, // RD-013: baseTip = REMOTE base (Step-3, consumed first)
+    { match: (a: string[]) => a[0] === "rev-list" && a.includes("origin/main..feat-x"), out: "1\n" },
+    { match: (a: string[]) => a[0] === "rev-list" && a.includes("feat-x..origin/main"), out: "0\n" },
     { match: (a: string[]) => a[0] === "log", out: "fix\n" },
     { match: (a: string[]) => a[0] === "checkout" && a[1] === "main", out: "" },
     { match: (a: string[]) => a[0] === "merge" && a[1] === "--ff-only" && a[2] === "origin/main", out: "" },
@@ -375,9 +375,9 @@ describe("runPromoteToMain — preflight (default)", () => {
       { match: (a) => a[0] === "status", out: "" },                            // clean
       { match: (a) => a[0] === "fetch", out: "" },
       { match: (a) => a[0] === "rev-parse" && a[1] === "feat-x", out: "branchtip\n" },
-      { match: (a) => a[0] === "rev-parse" && a[1] === "main", out: "basetip\n" },
-      { match: (a) => a[0] === "rev-list" && a.includes("main..feat-x"), out: "3\n" },
-      { match: (a) => a[0] === "rev-list" && a.includes("feat-x..main"), out: "0\n" },
+      { match: (a) => a[0] === "rev-parse" && a[1] === "origin/main", out: "basetip\n" },
+      { match: (a) => a[0] === "rev-list" && a.includes("origin/main..feat-x"), out: "3\n" },
+      { match: (a) => a[0] === "rev-list" && a.includes("feat-x..origin/main"), out: "0\n" },
       { match: (a) => a[0] === "log", out: "real fix\nanother fix\nmore fix\n" },
     ]);
     const io = captureIo();
@@ -397,9 +397,9 @@ describe("runPromoteToMain — preflight (default)", () => {
       { match: (a) => a[0] === "status", out: "" },
       { match: (a) => a[0] === "fetch", out: "" },
       { match: (a) => a[0] === "rev-parse" && a[1] === "feat-x", out: "branchtip\n" },
-      { match: (a) => a[0] === "rev-parse" && a[1] === "main", out: "basetip\n" },
-      { match: (a) => a[0] === "rev-list" && a.includes("main..feat-x"), out: "3\n" },
-      { match: (a) => a[0] === "rev-list" && a.includes("feat-x..main"), out: "0\n" },
+      { match: (a) => a[0] === "rev-parse" && a[1] === "origin/main", out: "basetip\n" },
+      { match: (a) => a[0] === "rev-list" && a.includes("origin/main..feat-x"), out: "3\n" },
+      { match: (a) => a[0] === "rev-list" && a.includes("feat-x..origin/main"), out: "0\n" },
       { match: (a) => a[0] === "log", out: "fix\nfix\nfix\n" },
     ]);
     const io = captureIo();
@@ -434,9 +434,9 @@ describe("runPromoteToMain — dirty working tree", () => {
       { match: (a) => a[0] === "status", out: " M unrelated.ts\n" },
       { match: (a) => a[0] === "fetch", out: "" },
       { match: (a) => a[0] === "rev-parse" && a[1] === "feat-x", out: "branchtip\n" },
-      { match: (a) => a[0] === "rev-parse" && a[1] === "main", out: "basetip\n" },
-      { match: (a) => a[0] === "rev-list" && a.includes("main..feat-x"), out: "1\n" },
-      { match: (a) => a[0] === "rev-list" && a.includes("feat-x..main"), out: "0\n" },
+      { match: (a) => a[0] === "rev-parse" && a[1] === "origin/main", out: "basetip\n" },
+      { match: (a) => a[0] === "rev-list" && a.includes("origin/main..feat-x"), out: "1\n" },
+      { match: (a) => a[0] === "rev-list" && a.includes("feat-x..origin/main"), out: "0\n" },
       { match: (a) => a[0] === "log", out: "fix\n" },
     ]);
     const io = captureIo();
@@ -451,9 +451,9 @@ describe("runPromoteToMain — divergent ancestry", () => {
       { match: (a) => a[0] === "status", out: "" },
       { match: (a) => a[0] === "fetch", out: "" },
       { match: (a) => a[0] === "rev-parse" && a[1] === "feat-x", out: "branchtip\n" },
-      { match: (a) => a[0] === "rev-parse" && a[1] === "main", out: "basetip\n" },
-      { match: (a) => a[0] === "rev-list" && a.includes("main..feat-x"), out: "3\n" },
-      { match: (a) => a[0] === "rev-list" && a.includes("feat-x..main"), out: "2\n" }, // diverged!
+      { match: (a) => a[0] === "rev-parse" && a[1] === "origin/main", out: "basetip\n" },
+      { match: (a) => a[0] === "rev-list" && a.includes("origin/main..feat-x"), out: "3\n" },
+      { match: (a) => a[0] === "rev-list" && a.includes("feat-x..origin/main"), out: "2\n" }, // diverged!
       { match: (a) => a[0] === "log", out: "fix\nfix\n" },
     ]);
     const io = captureIo();
@@ -472,9 +472,9 @@ describe("runPromoteToMain — explicit fast_forward refuses when behind != 0", 
       { match: (a) => a[0] === "status", out: "" },
       { match: (a) => a[0] === "fetch", out: "" },
       { match: (a) => a[0] === "rev-parse" && a[1] === "feat-x", out: "branchtip\n" },
-      { match: (a) => a[0] === "rev-parse" && a[1] === "main", out: "basetip\n" },
-      { match: (a) => a[0] === "rev-list" && a.includes("main..feat-x"), out: "1\n" },
-      { match: (a) => a[0] === "rev-list" && a.includes("feat-x..main"), out: "1\n" },
+      { match: (a) => a[0] === "rev-parse" && a[1] === "origin/main", out: "basetip\n" },
+      { match: (a) => a[0] === "rev-list" && a.includes("origin/main..feat-x"), out: "1\n" },
+      { match: (a) => a[0] === "rev-list" && a.includes("feat-x..origin/main"), out: "1\n" },
       { match: (a) => a[0] === "log", out: "fix\n" },
     ]);
     const io = captureIo();
@@ -493,9 +493,9 @@ describe("runPromoteToMain — execute fast-forward path", () => {
       { match: (a) => a[0] === "status", out: "" },
       { match: (a) => a[0] === "fetch", out: "" },
       { match: (a) => a[0] === "rev-parse" && a[1] === "feat-x", out: "abc1234\n" },
-      { match: (a) => a[0] === "rev-parse" && a[1] === "main", out: "basetip\n" },
-      { match: (a) => a[0] === "rev-list" && a.includes("main..feat-x"), out: "1\n" },
-      { match: (a) => a[0] === "rev-list" && a.includes("feat-x..main"), out: "0\n" },
+      { match: (a) => a[0] === "rev-parse" && a[1] === "origin/main", out: "basetip\n" },
+      { match: (a) => a[0] === "rev-list" && a.includes("origin/main..feat-x"), out: "1\n" },
+      { match: (a) => a[0] === "rev-list" && a.includes("feat-x..origin/main"), out: "0\n" },
       { match: (a) => a[0] === "log", out: "fix\n" },
       // execute path:
       { match: (a) => a[0] === "checkout" && a[1] === "main", out: "" },
@@ -522,9 +522,9 @@ describe("runPromoteToMain — execute fast-forward path", () => {
       { match: (a) => a[0] === "status", out: "" },
       { match: (a) => a[0] === "fetch", out: "" },
       { match: (a) => a[0] === "rev-parse" && a[1] === "feat-x", out: "abc1234\n" },
-      { match: (a) => a[0] === "rev-parse" && a[1] === "main", out: "basetip\n" },
-      { match: (a) => a[0] === "rev-list" && a.includes("main..feat-x"), out: "1\n" },
-      { match: (a) => a[0] === "rev-list" && a.includes("feat-x..main"), out: "0\n" },
+      { match: (a) => a[0] === "rev-parse" && a[1] === "origin/main", out: "basetip\n" },
+      { match: (a) => a[0] === "rev-list" && a.includes("origin/main..feat-x"), out: "1\n" },
+      { match: (a) => a[0] === "rev-list" && a.includes("feat-x..origin/main"), out: "0\n" },
       { match: (a) => a[0] === "log", out: "fix\n" },
       { match: (a) => a[0] === "checkout", out: "" },
       { match: (a) => a[0] === "merge" && a[1] === "--ff-only" && a[2] === "origin/main", out: "" },
@@ -546,9 +546,9 @@ describe("runPromoteToMain — execute squash path", () => {
       { match: (a) => a[0] === "status", out: "" },
       { match: (a) => a[0] === "fetch", out: "" },
       { match: (a) => a[0] === "rev-parse" && a[1] === "feat-x", out: "src1234\n" },
-      { match: (a) => a[0] === "rev-parse" && a[1] === "main", out: "basetip\n" },
-      { match: (a) => a[0] === "rev-list" && a.includes("main..feat-x"), out: "100\n" },
-      { match: (a) => a[0] === "rev-list" && a.includes("feat-x..main"), out: "0\n" },
+      { match: (a) => a[0] === "rev-parse" && a[1] === "origin/main", out: "basetip\n" },
+      { match: (a) => a[0] === "rev-list" && a.includes("origin/main..feat-x"), out: "100\n" },
+      { match: (a) => a[0] === "rev-list" && a.includes("feat-x..origin/main"), out: "0\n" },
       { match: (a) => a[0] === "log", out: "data.json refresh\ndata.json refresh\ndata.json refresh\nreal fix\n" },
       { match: (a) => a[0] === "checkout", out: "" },
       { match: (a) => a[0] === "merge" && a[1] === "--ff-only" && a[2] === "origin/main", out: "" },
@@ -583,9 +583,9 @@ describe("runPromoteToMain — Agent trailer in promotion commits", () => {
       { match: (a) => a[0] === "status", out: "" },
       { match: (a) => a[0] === "fetch", out: "" },
       { match: (a) => a[0] === "rev-parse" && a[1] === "feat-x", out: "src1234\n" },
-      { match: (a) => a[0] === "rev-parse" && a[1] === "main", out: "basetip\n" },
-      { match: (a) => a[0] === "rev-list" && a.includes("main..feat-x"), out: "100\n" },
-      { match: (a) => a[0] === "rev-list" && a.includes("feat-x..main"), out: "0\n" },
+      { match: (a) => a[0] === "rev-parse" && a[1] === "origin/main", out: "basetip\n" },
+      { match: (a) => a[0] === "rev-list" && a.includes("origin/main..feat-x"), out: "100\n" },
+      { match: (a) => a[0] === "rev-list" && a.includes("feat-x..origin/main"), out: "0\n" },
       { match: (a) => a[0] === "log", out: "data.json refresh\ndata.json refresh\ndata.json refresh\nreal fix\n" },
       { match: (a) => a[0] === "checkout", out: "" },
       { match: (a) => a[0] === "merge" && a[1] === "--ff-only" && a[2] === "origin/main", out: "" },
@@ -608,9 +608,9 @@ describe("runPromoteToMain — Agent trailer in promotion commits", () => {
       { match: (a) => a[0] === "status", out: "" },
       { match: (a) => a[0] === "fetch", out: "" },
       { match: (a) => a[0] === "rev-parse" && a[1] === "feat-x", out: "src1234\n" },
-      { match: (a) => a[0] === "rev-parse" && a[1] === "main", out: "basetip\n" },
-      { match: (a) => a[0] === "rev-list" && a.includes("main..feat-x"), out: "3\n" },
-      { match: (a) => a[0] === "rev-list" && a.includes("feat-x..main"), out: "0\n" },
+      { match: (a) => a[0] === "rev-parse" && a[1] === "origin/main", out: "basetip\n" },
+      { match: (a) => a[0] === "rev-list" && a.includes("origin/main..feat-x"), out: "3\n" },
+      { match: (a) => a[0] === "rev-list" && a.includes("feat-x..origin/main"), out: "0\n" },
       { match: (a) => a[0] === "log", out: "real fix\n" },
       { match: (a) => a[0] === "checkout", out: "" },
       { match: (a) => a[0] === "merge" && a[1] === "--ff-only" && a[2] === "origin/main", out: "" },
@@ -636,9 +636,9 @@ describe("runPromoteToMain — smoke command failure aborts push", () => {
       { match: (a) => a[0] === "status", out: "" },
       { match: (a) => a[0] === "fetch", out: "" },
       { match: (a) => a[0] === "rev-parse" && a[1] === "feat-x", out: "abc\n" },
-      { match: (a) => a[0] === "rev-parse" && a[1] === "main", out: "def\n" },
-      { match: (a) => a[0] === "rev-list" && a.includes("main..feat-x"), out: "1\n" },
-      { match: (a) => a[0] === "rev-list" && a.includes("feat-x..main"), out: "0\n" },
+      { match: (a) => a[0] === "rev-parse" && a[1] === "origin/main", out: "def\n" },
+      { match: (a) => a[0] === "rev-list" && a.includes("origin/main..feat-x"), out: "1\n" },
+      { match: (a) => a[0] === "rev-list" && a.includes("feat-x..origin/main"), out: "0\n" },
       { match: (a) => a[0] === "log", out: "fix\n" },
       { match: (a) => a[0] === "checkout", out: "" },
       { match: (a) => a[0] === "merge" && a[1] === "--ff-only" && a[2] === "origin/main", out: "" },
@@ -661,5 +661,47 @@ describe("runPromoteToMain — smoke command failure aborts push", () => {
     // Did NOT push.
     expect(deps.calls.find((c) => c[0] === "git" && c[1] === "push")).toBeUndefined();
     void origExec;
+  });
+});
+
+describe("runPromoteToMain — RD-013: strategy/divergence measured against origin base, not stale local base", () => {
+  it("a branch behind origin/main (origin advanced) is detected DIVERGENT — not falsely fast-forwardable off a stale local base", async () => {
+    const deps = fakeGitDeps([
+      { match: (a) => a[0] === "status", out: "" },
+      { match: (a) => a[0] === "fetch", out: "" },
+      { match: (a) => a[0] === "rev-parse" && a[1] === "feat-x", out: "branchtip\n" },
+      // MUST resolve the base tip from the freshly-fetched origin/main, not local main.
+      { match: (a) => a[0] === "rev-parse" && a[1] === "origin/main", out: "remote-tip\n" },
+      { match: (a) => a[0] === "rev-list" && a.includes("origin/main..feat-x"), out: "1\n" }, // ahead of remote
+      { match: (a) => a[0] === "rev-list" && a.includes("feat-x..origin/main"), out: "2\n" }, // BEHIND remote (origin advanced)
+      { match: (a) => a[0] === "log", out: "feat\n" },
+      // decoy: a STALE local main would report behind=0; if the tool used it, it'd FF.
+      { match: (a) => a[0] === "rev-parse" && a[1] === "main" && a.length === 2, out: "stale-local\n" },
+    ]);
+    const io = captureIo();
+    const r = await runPromoteToMain({ ...baseArgs, dispatchId: "phid:disp-x" }, deps, io);
+
+    expect(r.exit).toBe(10); // divergent → /agent-needs-input, NOT a silent FF on a stale base
+    expect(r.needsClarification).toBeTruthy();
+    // proves the decision used origin/main, and never touched the stale local main
+    expect(deps.calls.some((c) => c[1] === "rev-parse" && c[2] === "origin/main")).toBe(true);
+    expect(deps.calls.some((c) => c[1] === "rev-parse" && c[2] === "main")).toBe(false);
+  });
+
+  it("a branch cleanly ahead of origin/main (local base stale-behind) still fast-forwards", async () => {
+    const deps = fakeGitDeps([
+      { match: (a) => a[0] === "status", out: "" },
+      { match: (a) => a[0] === "fetch", out: "" },
+      { match: (a) => a[0] === "rev-parse" && a[1] === "feat-x", out: "aaa\n" },
+      { match: (a) => a[0] === "rev-parse" && a[1] === "origin/main", out: "remote-tip\n" },
+      { match: (a) => a[0] === "rev-list" && a.includes("origin/main..feat-x"), out: "2\n" },
+      { match: (a) => a[0] === "rev-list" && a.includes("feat-x..origin/main"), out: "0\n" },
+      { match: (a) => a[0] === "log", out: "feat\n" },
+    ]);
+    const io = captureIo();
+    const r = await runPromoteToMain({ ...baseArgs }, deps, io); // preflight
+    expect(r.exit).toBe(0);
+    expect(r.result?.strategy).toBe("fast_forward");
+    expect(r.result?.remote_main_sha).toBe("remote-tip");
   });
 });
