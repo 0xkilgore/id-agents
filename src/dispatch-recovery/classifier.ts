@@ -112,7 +112,7 @@ function isRecoverableFailure(input: RecoveryInput, config: RecoveryConfig): boo
   return config.retryable_detail_markers.some((m) => detail.includes(m.toLowerCase()));
 }
 
-function isLinkedQueryTerminalFailure(input: RecoveryInput): boolean {
+export function isLinkedQueryTerminalFailure(input: RecoveryInput): boolean {
   return Boolean(input.agent_query_id && (input.failure_detail ?? "").toLowerCase().includes("linked query terminated"));
 }
 
