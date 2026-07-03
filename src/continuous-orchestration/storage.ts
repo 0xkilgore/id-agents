@@ -386,10 +386,16 @@ export async function setItemState(
  * to_agent feeds the next tick's pool "building" set; the worktree write_scope
  * makes each in-flight build's lock distinct.
  */
+/**
+ * Persist a fire-time bind (to_agent + write_scope). `to_agent` is nullable so the
+ * fire path can REVERT to an item's prior (possibly unbound) state when enqueue
+ * fails after the bind — the RD-003 mode-(a) strand fix (never leave an item bound
+ * to a worktree it never dispatched to).
+ */
 export async function bindItemForFire(
   adapter: DbAdapter,
   item_id: string,
-  bind: { to_agent: string; write_scope: string[] },
+  bind: { to_agent: string | null; write_scope: string[] },
 ): Promise<void> {
   const now = new Date().toISOString();
   await adapter.query(

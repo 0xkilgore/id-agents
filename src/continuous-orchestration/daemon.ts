@@ -305,16 +305,36 @@ export class ContinuousOrchestrationDaemon {
             let builderNote = "";
             const assignedBuilder = plan.assignments[item.item_id];
             const pool = this.deps.pools?.poolForItem(item) ?? null;
+            // RD-003 mode (a): the pool bind is PERSISTED before enqueue, and enqueue
+            // can throw. Capture the pre-fire bind so we can revert on failure and
+            // never strand the item on a worktree it never dispatched to.
+            let didBind = false;
+            const priorBind = { to_agent: item.to_agent, write_scope: item.write_scope };
             if (assignedBuilder && pool && this.deps.pools) {
               const wt = await this.deps.pools.allocateWorktree({ agent: assignedBuilder, item, pool });
               await bindItemForFire(this.deps.adapter, item.item_id, {
                 to_agent: assignedBuilder,
                 write_scope: [wt.path],
               });
+              didBind = true;
               fireItem = { ...item, to_agent: assignedBuilder, write_scope: [wt.path] };
               builderNote = ` [pool ${pool.pool_id} → ${assignedBuilder} @ ${wt.path}]`;
             }
-            const res = await this.deps.enqueue(fireItem);
+            let res: { dispatch_phid: string; query_id: string };
+            try {
+              res = await this.deps.enqueue(fireItem);
+            } catch (enqErr) {
+              // Enqueue failed AFTER the bind persisted → revert to the pre-fire
+              // bind so the item stays cleanly 'ready' (not bound to an unused
+              // worktree / lane-blocking). Re-throw to the skipped-decision handler.
+              if (didBind) await bindItemForFire(this.deps.adapter, item.item_id, priorBind);
+              throw enqErr;
+            }
+            // Enqueue succeeded (dispatch exists). Transition ready→in_flight bound
+            // to the dispatch in a single write. If THIS throws (mode b), the item
+            // stays 'ready' with a live dispatch; the next tick re-fires with the
+            // same stable dedup_key, so the idempotent scheduler returns the SAME
+            // dispatch (no double-fire) and the transition retries.
             await setItemState(this.deps.adapter, item.item_id, "in_flight", { dispatch_phid: res.dispatch_phid });
             decisions.push({
               item_id: item.item_id,
