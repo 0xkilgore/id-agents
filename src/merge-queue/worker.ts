@@ -12,6 +12,7 @@
 import type { DbAdapter } from "../db/db-adapter.js";
 import {
   dequeueOldestQueued,
+  getMergeRequest,
   updateMergeRequest,
 } from "./storage.js";
 import { isTerminalMergeState, type MergeFailure, type MergeFailureReason, type MergeRequest } from "./types.js";
@@ -99,12 +100,22 @@ export async function drainOneMergeRequest(
   const remote = deps.remote ?? "origin";
   const release = await deps.acquireRepoLock(picked.repo_root);
   try {
+    // RD-038: dequeueOldestQueued is a lock-free SELECT, so two entrants (cadence
+    // tick + route-triggered drain) can pick the SAME MR. Re-validate the claim
+    // under the repo lock — a concurrent drain may have already merged/claimed it
+    // between our SELECT and this lock. Without this, the second entrant re-runs
+    // the full rebase+promote on an already-merged MR (attempts inflate, state
+    // flip-flops merged→merging, and a stale branch can be re-merged).
+    const claimed = await getMergeRequest(adapter, picked.mr_id);
+    if (!claimed || !(claimed.state === "queued" || claimed.state === "conflict")) {
+      return claimed; // already claimed/merged by another drain — nothing to do
+    }
     let mr =
-      (await updateMergeRequest(adapter, picked.mr_id, {
+      (await updateMergeRequest(adapter, claimed.mr_id, {
         state: "merging",
-        attempts: picked.attempts + 1,
-        started_at: picked.started_at ?? nowIso(deps),
-      })) ?? picked;
+        attempts: claimed.attempts + 1,
+        started_at: claimed.started_at ?? nowIso(deps),
+      })) ?? claimed;
 
     const fetched = await deps.git.fetchBase(mr.repo_root, remote, mr.base);
     if (!fetched.ok) {

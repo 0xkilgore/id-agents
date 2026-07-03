@@ -175,3 +175,63 @@ describe("merge-queue worker", () => {
     expect((await listMergeRequests(adapter, { state: "merged" })).length).toBe(3);
   });
 });
+
+describe("merge-queue concurrent drain (RD-038)", () => {
+  it("two overlapping drains of one queued MR → promote runs once, merged, attempts=1", async () => {
+    await enqueueMergeRequest(adapter, sub());
+
+    let promoteCalls = 0;
+    // Barrier: hold BOTH entrants at the lock until each has already dequeued the
+    // same queued MR (reproducing the lock-free-SELECT race), then serialize the
+    // critical section so the second must re-validate under the lock and bail.
+    let reachedLock = 0;
+    let bothReached!: () => void;
+    const bothReachedP = new Promise<void>((res) => {
+      bothReached = res;
+    });
+    let lockChain = Promise.resolve();
+
+    const deps: MergeWorkerDeps = {
+      git: {
+        fetchBase: async () => ({ ok: true, baseTip: "main-tip" }),
+        needsRebase: async () => false,
+        rebaseOntoBase: async () => ({ ok: true, conflict: false, newHeadSha: "sha-r" }),
+      },
+      promote: async () => {
+        promoteCalls++;
+        return { ok: true, promoted_sha: "merged-sha" };
+      },
+      smoke: async () => ({ ok: true }),
+      acquireRepoLock: async () => {
+        reachedLock++;
+        if (reachedLock === 2) bothReached();
+        await bothReachedP; // both entrants have dequeued the same MR
+        let release!: () => void;
+        const gate = new Promise<void>((r) => {
+          release = r;
+        });
+        const prev = lockChain;
+        lockChain = lockChain.then(() => gate);
+        await prev; // serialize: wait for the previous holder to release
+        return async () => {
+          release();
+        };
+      },
+      emitFixForward: async () => "phid:ff",
+      releaseLease: async () => {},
+      now: () => new Date("2026-06-23T22:00:00.000Z"),
+    };
+
+    await Promise.all([
+      drainOneMergeRequest(adapter, "id-agents", deps),
+      drainOneMergeRequest(adapter, "id-agents", deps),
+    ]);
+
+    // The loser re-validated under the lock and bailed: exactly one merge ran.
+    expect(promoteCalls).toBe(1);
+    const all = await listMergeRequests(adapter);
+    expect(all).toHaveLength(1);
+    expect(all[0].state).toBe("merged");
+    expect(all[0].attempts).toBe(1);
+  });
+});
