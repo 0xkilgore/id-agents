@@ -4,6 +4,7 @@
 import { describe, it, expect } from "vitest";
 import {
   evaluateRedeployCoupling,
+  parseReleaseManifest,
   COHERENT_EMPTY_COUPLING,
 } from "../../src/deploy-guard/redeploy-coupling.js";
 import { evaluateFleetFreshness, type FleetNodeInput } from "../../src/deploy-guard/fleet-freshness.js";
@@ -80,14 +81,18 @@ describe("evaluateRedeployCoupling", () => {
     expect(r.reason).toMatch(/unreadable/);
   });
 
-  it("disagreeing origin across nodes → no agreed target, lagging not computed", () => {
+  it("different-repo nodes (different origins) → NOT coupled: no pending, cohort n/a (spec §3 false-positive fix)", () => {
     const r = evaluateRedeployCoupling([
       summary({ node_id: "manager", build_sha: "a", origin_main_sha: "x" }),
       summary({ node_id: "kapelle-site", build_sha: "b", origin_main_sha: "y" }),
     ]);
-    expect(r.coordinated_redeploy_pending).toBe(true); // distinct builds
+    // Different repos ALWAYS have distinct build_shas + different origins; this must
+    // NOT read as a coordinated redeploy (the permanent false-positive we fixed).
+    expect(r.coordinated_redeploy_pending).toBe(false);
+    expect(r.release_cohort).toBe("n/a");
     expect(r.target_sha).toBeNull();
-    expect(r.lagging_nodes).toEqual([]); // can't pick a target
+    expect(r.lagging_nodes).toEqual([]);
+    expect(r.reason).toMatch(/mixed \(uncoupled\)/);
   });
 
   it("single node on origin → coherent, single-node reason", () => {
@@ -97,6 +102,59 @@ describe("evaluateRedeployCoupling", () => {
     expect(r.coordinated_redeploy_pending).toBe(false);
     expect(r.coherent).toBe(true);
     expect(r.reason).toMatch(/single node manager/);
+  });
+});
+
+describe("evaluateRedeployCoupling — release manifest cohort (spec §3)", () => {
+  const manifest = { release: "alpha-2026-07-02", targets: { manager: "m-sha", "kapelle-site": "k-sha" } };
+
+  it("cohort at target → coherent, no pending (even across different repos/origins)", () => {
+    const r = evaluateRedeployCoupling(
+      [
+        summary({ node_id: "manager", build_sha: "m-sha", origin_main_sha: "m-origin" }),
+        summary({ node_id: "kapelle-site", build_sha: "k-sha", origin_main_sha: "k-origin" }),
+      ],
+      manifest,
+    );
+    expect(r.coordinated_redeploy_pending).toBe(false);
+    expect(r.release_cohort).toBe("coherent");
+    expect(r.lagging_nodes).toEqual([]);
+  });
+
+  it("a cohort node off its pinned target → incoherent, pending, lagging listed", () => {
+    const r = evaluateRedeployCoupling(
+      [
+        summary({ node_id: "manager", build_sha: "m-sha", origin_main_sha: "m-origin" }),
+        summary({ node_id: "kapelle-site", build_sha: "k-OLD", origin_main_sha: "k-origin" }),
+      ],
+      manifest,
+    );
+    expect(r.coordinated_redeploy_pending).toBe(true);
+    expect(r.release_cohort).toBe("incoherent");
+    expect(r.lagging_nodes).toEqual(["kapelle-site"]);
+    expect(r.reason).toMatch(/INCOHERENT/);
+  });
+
+  it("an unreadable cohort node counts as off-target (incoherent)", () => {
+    const r = evaluateRedeployCoupling(
+      [summary({ node_id: "manager", build_sha: null }), summary({ node_id: "kapelle-site", build_sha: "k-sha" })],
+      manifest,
+    );
+    expect(r.coordinated_redeploy_pending).toBe(true);
+    expect(r.release_cohort).toBe("incoherent");
+  });
+});
+
+describe("parseReleaseManifest", () => {
+  it("parses a valid manifest and trims/drops empties", () => {
+    const m = parseReleaseManifest('{"release":"r1","targets":{"manager":" m-sha ","x":""}}');
+    expect(m).toEqual({ release: "r1", targets: { manager: "m-sha" } });
+  });
+  it("returns null for absent/invalid/empty-targets input (never faked)", () => {
+    expect(parseReleaseManifest(null)).toBeNull();
+    expect(parseReleaseManifest("not json")).toBeNull();
+    expect(parseReleaseManifest('{"release":"r1"}')).toBeNull();
+    expect(parseReleaseManifest('{"release":"r1","targets":{}}')).toBeNull();
   });
 });
 
