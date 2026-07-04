@@ -572,10 +572,24 @@ export async function recordFleshOutcome(
   push("auto_ready_policy_version", outcome.policy_version ?? null);
   push("flesh_patch_json", patch ? JSON.stringify(patch) : null);
 
+  // Sticky dispatch_body guard: a `needs_review`/`draft` item can already carry
+  // a real, human/maestra-authored dispatch_body — POST /orchestration/backlog
+  // forces every new item into draft/needs_review regardless of the requested
+  // state (only the promote endpoint may set `ready`), so there is a window
+  // between "item created with a full dispatch_body" and "item promoted" where
+  // it is genuinely flesh-eligible per the idempotency guard above. If the
+  // daemon's periodic flesh tick fires in that window, it would otherwise
+  // overwrite the authored body with a generic template before promotion
+  // completes (confirmed reproducing live 2026-07-04: created+approved at
+  // 16:20:29, dispatch_body clobbered at 16:21:56). Mirrors the sticky-routing
+  // guard above, applied to dispatch_body specifically: only a true empty
+  // skeleton (no existing dispatch_body) may have it set by a flesh pass.
+  const hasAuthoredDispatchBody = typeof item.dispatch_body === "string" && item.dispatch_body.trim().length > 0;
+
   if (patch) {
     // Persist the generated dispatch payload so the row is dispatchable (or
     // one-click approvable) regardless of the auto-ready decision.
-    push("dispatch_body", patch.dispatch_body);
+    if (!hasAuthoredDispatchBody) push("dispatch_body", patch.dispatch_body);
     push("risk_class", patch.risk_class);
     push("write_scope_json", JSON.stringify(patch.write_scope));
     push("dependencies_json", JSON.stringify(patch.dependencies));

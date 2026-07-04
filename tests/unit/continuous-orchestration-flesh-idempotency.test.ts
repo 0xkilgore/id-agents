@@ -140,6 +140,75 @@ describe("recordFleshOutcome — sticky routing guard (operator-set to_agent/pri
   });
 });
 
+describe("recordFleshOutcome — sticky dispatch_body guard (2026-07-04 clobber fix)", () => {
+  it("does NOT overwrite an already-authored dispatch_body on an item still in needs_review (the promotion-race window)", async () => {
+    // POST /orchestration/backlog forces every new item into draft/needs_review
+    // regardless of the requested state — so a maestra/human-authored item with
+    // a full dispatch_body can sit genuinely needs_review for a brief window
+    // before the promote call lands. If a flesh tick fires in that window, it
+    // was previously indistinguishable from a true empty skeleton.
+    const created = await insertBacklogItem(adapter, {
+      title: "T-CLOBBER — authored body, still needs_review",
+      readiness_state: "needs_review",
+      dispatch_body: "[project: kapelle] roger: the real, specific, human-authored task",
+    });
+
+    const result = await recordFleshOutcome(adapter, {
+      item_id: created.item_id,
+      flesh_status: "approved_ready",
+      flesh_source: "roadmap",
+      flesh_confidence: 0.65,
+      patch: patch({ dispatch_body: "generic templated dispatch body" }),
+      promote: false,
+    });
+
+    expect(result?.dispatch_body).toBe("[project: kapelle] roger: the real, specific, human-authored task");
+    const persisted = await getBacklogItem(adapter, created.item_id);
+    expect(persisted?.dispatch_body).toBe("[project: kapelle] roger: the real, specific, human-authored task");
+    // Everything else the flesh pass computes still lands — only dispatch_body is sticky.
+    expect(persisted?.flesh_confidence).toBe(0.65);
+    expect(persisted?.risk_class).toBe("build");
+  });
+
+  it("still flesh-fills dispatch_body normally on a true empty skeleton (no existing body)", async () => {
+    const created = await insertBacklogItem(adapter, {
+      title: "T-SKELETON — unfleshed roadmap import",
+      readiness_state: "needs_review",
+      // no dispatch_body — a genuine unfleshed skeleton.
+    });
+
+    const result = await recordFleshOutcome(adapter, {
+      item_id: created.item_id,
+      flesh_status: "approved_ready",
+      flesh_source: "roadmap",
+      flesh_confidence: 0.9,
+      patch: patch({ dispatch_body: "freshly generated dispatch body" }),
+      promote: false,
+    });
+
+    expect(result?.dispatch_body).toBe("freshly generated dispatch body");
+  });
+
+  it("treats an empty-string dispatch_body the same as null — still flesh-eligible", async () => {
+    const created = await insertBacklogItem(adapter, {
+      title: "T-BLANK — blank string body",
+      readiness_state: "draft",
+      dispatch_body: "   ",
+    });
+
+    const result = await recordFleshOutcome(adapter, {
+      item_id: created.item_id,
+      flesh_status: "approved_ready",
+      flesh_source: "roadmap",
+      flesh_confidence: 0.9,
+      patch: patch({ dispatch_body: "freshly generated dispatch body" }),
+      promote: false,
+    });
+
+    expect(result?.dispatch_body).toBe("freshly generated dispatch body");
+  });
+});
+
 describe("listFleshCandidates — never selects ready-or-beyond items, even when targeted by id", () => {
   it("excludes a ready item passed explicitly via item_ids", async () => {
     const ready = await insertBacklogItem(adapter, {
