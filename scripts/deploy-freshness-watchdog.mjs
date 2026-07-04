@@ -77,13 +77,27 @@ function readNodeBin() {
 async function runRedeploy() {
   const date = new Date().toISOString().slice(0, 10).replace(/-/g, '');
 
+  // Gotcha 2b (2026-07-04) — node_modules has twice ended up git-tracked as a
+  // symlink blob (env/worktree-sharing artifact, never source). `npm ci`
+  // materializes a REAL directory over that tracked path, so ANY branch
+  // switch below (the WIP-snapshot switch, or its same-day fallback to an
+  // already-created wip branch) trips "local changes to node_modules would
+  // be overwritten" and the whole redeploy aborts — recurred every 15 min
+  // for ~24h on 2026-07-03/04. Untrack + physically clear it before any
+  // switch; npm ci further down regenerates it on whichever branch we land
+  // on regardless, so this is always safe to do unconditionally.
+  sh('git rm -r --cached --ignore-unmatch node_modules');
+  sh('rm -rf node_modules');
+
   // Gotcha 2 — snapshot a dirty canonical checkout; NEVER clobber, never stash-drop.
   const dirty = sh('git status --porcelain').trim();
   if (dirty) {
     log(`Gotcha-2: canonical checkout dirty (${dirty.split('\n').length} paths) → snapshot to wip/pre-redeploy-snapshot-${date}`);
     sh(`git switch -c wip/pre-redeploy-snapshot-${date} 2>/dev/null || git switch wip/pre-redeploy-snapshot-${date}`);
-    // Snapshot tracked+untracked SOURCE/config, but not stray db/lockfiles (Gotcha 2).
-    sh(`git add -A -- . ':!manager.db' ':!*.db' ':!pnpm-lock.yaml'`);
+    // Snapshot tracked+untracked SOURCE/config, but never stray db/lockfiles
+    // or node_modules (Gotcha 2 / Gotcha 2b — node_modules is a build
+    // artifact, never source, and must never be re-added to the index).
+    sh(`git add -A -- . ':!manager.db' ':!*.db' ':!pnpm-lock.yaml' ':!node_modules'`);
     sh(`git commit -m "WIP snapshot before manager redeploy ${new Date().toISOString()}" || true`);
   }
 
