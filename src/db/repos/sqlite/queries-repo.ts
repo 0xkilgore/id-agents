@@ -3,53 +3,14 @@
 import type { QueriesRepository } from '../../db-service.js';
 import type { InboxOwnerKind, QueryRow } from '../../types.js';
 import type { DbAdapter } from '../../db-adapter.js';
-import { parseJsonObject, stringifyJson } from '../../db-json.js';
-
-function resolveQueryOwnership(
-  teamId: string,
-  agentId: string | null,
-  override?: { owner_kind: InboxOwnerKind; owner_id: string },
-): { owner_kind: InboxOwnerKind; owner_id: string } {
-  if (override) return override;
-  if (agentId != null && agentId !== '') {
-    if (agentId.startsWith('manager-')) {
-      return { owner_kind: 'manager', owner_id: teamId };
-    }
-    return { owner_kind: 'agent', owner_id: agentId };
-  }
-  throw new Error('SqliteQueriesRepo: ownership override required when agentId is null');
-}
+import { stringifyJson } from '../../db-json.js';
+import { normalizeQueryRow, resolveQueryOwnership } from '../query-row-normalize.js';
 
 export class SqliteQueriesRepo implements QueriesRepository {
   constructor(private readonly db: DbAdapter) {}
 
   private parseQueryRow(row: any): QueryRow | null {
-    if (!row) return null;
-    const agent_id =
-      row.agent_id != null && row.agent_id !== ''
-        ? String(row.agent_id)
-        : null;
-    const team_id = String(row.team_id ?? '');
-    const owner_kind: InboxOwnerKind =
-      row.owner_kind === 'manager' || row.owner_kind === 'agent'
-        ? row.owner_kind
-        : agent_id?.startsWith('manager-')
-          ? 'manager'
-          : 'agent';
-    const owner_id =
-      row.owner_id != null && String(row.owner_id) !== ''
-        ? String(row.owner_id)
-        : owner_kind === 'manager'
-          ? team_id
-          : agent_id ?? '';
-    return {
-      ...row,
-      team_id,
-      agent_id,
-      owner_kind,
-      owner_id,
-      result: parseJsonObject(row.result),
-    };
+    return normalizeQueryRow(row);
   }
 
   async getById(agentId: string, queryId: string): Promise<QueryRow | null> {
@@ -185,7 +146,8 @@ export class SqliteQueriesRepo implements QueriesRepository {
     const r = await this.db.query<QueryRow>(
       `SELECT team_id, agent_id, query_id, status, prompt, created, completed, result, error, session_id, owner_kind, owner_id, last_output_at, manager_dispatch_id, manager_query_id
        FROM queries
-       WHERE agent_id = ? AND status IN ('pending', 'processing')`,
+       WHERE agent_id = ? AND status IN ('pending', 'processing')
+       ORDER BY created ASC`,
       [agentId],
     );
     return r.rows.map((row) => this.parseQueryRow(row)!);

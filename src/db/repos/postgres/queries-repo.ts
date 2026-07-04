@@ -3,21 +3,7 @@
 import type { DbAdapter } from '../../db-adapter.js';
 import type { QueriesRepository } from '../../db-service.js';
 import type { InboxOwnerKind, QueryRow } from '../../types.js';
-
-function resolveQueryOwnership(
-  teamId: string,
-  agentId: string | null,
-  override?: { owner_kind: InboxOwnerKind; owner_id: string },
-): { owner_kind: InboxOwnerKind; owner_id: string } {
-  if (override) return override;
-  if (agentId != null && agentId !== '') {
-    if (agentId.startsWith('manager-')) {
-      return { owner_kind: 'manager', owner_id: teamId };
-    }
-    return { owner_kind: 'agent', owner_id: agentId };
-  }
-  throw new Error('PgQueriesRepo: ownership override required when agentId is null');
-}
+import { normalizeQueryRow, resolveQueryOwnership } from '../query-row-normalize.js';
 
 export class PgQueriesRepo implements QueriesRepository {
   constructor(private db: DbAdapter) {}
@@ -29,7 +15,7 @@ export class PgQueriesRepo implements QueriesRepository {
        WHERE agent_id = $1 AND query_id = $2`,
       [agentId, queryId],
     );
-    return rows[0] ?? null;
+    return normalizeQueryRow(rows[0]);
   }
 
   async getByQueryIdForTeam(teamId: string, queryId: string): Promise<QueryRow | null> {
@@ -40,7 +26,7 @@ export class PgQueriesRepo implements QueriesRepository {
        LIMIT 1`,
       [teamId, queryId],
     );
-    return rows[0] ?? null;
+    return normalizeQueryRow(rows[0]);
   }
 
   async expireStale(cutoffCreated: number, statuses: string[]): Promise<QueryRow[]> {
@@ -53,7 +39,7 @@ export class PgQueriesRepo implements QueriesRepository {
        RETURNING team_id, agent_id, query_id, status, prompt, created, completed, result, error, session_id, owner_kind, owner_id`,
       [Date.now(), cutoffCreated, ...statuses],
     );
-    return rows;
+    return rows.map((row) => normalizeQueryRow(row)!);
   }
 
   async create(
@@ -159,7 +145,7 @@ export class PgQueriesRepo implements QueriesRepository {
        ORDER BY created ASC`,
       [agentId],
     );
-    return rows;
+    return rows.map((row) => normalizeQueryRow(row)!);
   }
 
   async getPendingByOwner(teamId: string, ownerKind: InboxOwnerKind, ownerId: string): Promise<QueryRow[]> {
@@ -170,7 +156,7 @@ export class PgQueriesRepo implements QueriesRepository {
        ORDER BY created ASC`,
       [teamId, ownerKind, ownerId],
     );
-    return rows;
+    return rows.map((row) => normalizeQueryRow(row)!);
   }
 
   async recordOutput(teamId: string, queryId: string, ts: number): Promise<void> {

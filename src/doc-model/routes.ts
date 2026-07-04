@@ -6,6 +6,7 @@ import { planCorpusSearch } from "../corpus-search/lane.js";
 import type { ReadModelEnvelope } from "../outputs/entry.js";
 import {
   DOC_MODEL_SEARCH_MAX_LIMIT,
+  DocModelSearchUnsupportedError,
   parseDocModelSearchKinds,
   searchDocModel,
   type DocModelSearchHit,
@@ -49,6 +50,9 @@ export function mountDocModelSearchRoutes(app: Application, adapter: DbAdapter):
       };
       res.json(envelope);
     } catch (err) {
+      if (err instanceof DocModelSearchUnsupportedError) {
+        return res.status(501).json({ error: err.message });
+      }
       res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
     }
   });

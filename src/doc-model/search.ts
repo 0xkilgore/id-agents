@@ -14,6 +14,24 @@ export const DOC_MODEL_SEARCH_KINDS: readonly DocModelSearchKind[] = [
   "task",
 ] as const;
 
+/**
+ * RD-009: doc-model search (artifacts_fts/desk_items_fts/tasks_fts) is
+ * SQLite FTS5-only today — the artifact/desk_item tables don't exist in the
+ * Postgres schema at all. A Postgres-backed deployment used to get
+ * `{ items: [] }` back from every query, indistinguishable from "no rows
+ * matched." Surface that as an explicit, typed error instead of a masked
+ * empty result.
+ */
+export class DocModelSearchUnsupportedError extends Error {
+  constructor(dialect: string) {
+    super(
+      `doc-model search is not implemented for the '${dialect}' backend yet (RD-009) — ` +
+        'artifacts/desk_items/tasks full-text search is SQLite FTS5-only.',
+    );
+    this.name = 'DocModelSearchUnsupportedError';
+  }
+}
+
 export interface DocModelSearchHit {
   kind: DocModelSearchKind;
   phid: string;
@@ -157,7 +175,7 @@ export async function searchDocModel(
   const offset = Math.max(opts.offset ?? 0, 0);
 
   if (adapter.dialect !== "sqlite") {
-    return { items: [], limit, offset };
+    throw new DocModelSearchUnsupportedError(adapter.dialect);
   }
 
   const match = toFtsMatch(query);
