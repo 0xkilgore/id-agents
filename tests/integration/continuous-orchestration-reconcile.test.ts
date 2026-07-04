@@ -178,6 +178,70 @@ describe("completion reconciliation — terminal dispatch releases the lock", ()
     expect(tick.reconciled).toBe(1);
     expect((await getBacklogItem(adapter, item.item_id))!.readiness_state).toBe("needs_review");
   });
+
+  it("does NOT reap a PENDING (non-moot) needs_clarification dispatch, no matter how stale", async () => {
+    // Root-caused 2026-07-04: a dispatch parked in needs_clarification (waiting
+    // on an external human/manager decision — its duration is unrelated to
+    // whether the worker is alive) got phantom-lock-reaped by this exact
+    // staleness window every ~10 min for 3+ hours. Only recovery_status='moot'
+    // (the ALREADY-CORRECT signal for an abandoned clarification, covered by
+    // the "mooted dispatch clarification" test above) should release it.
+    const item = await seedInFlight({ dispatch_phid: "phid:disp-pending-clarification" });
+    await seedDispatch("phid:disp-pending-clarification", "needs_clarification"); // recovery_status default "none", NOT moot
+    await backdateUpdatedAt(item.item_id, new Date(BASE).toISOString());
+
+    // Absurdly far past any stale window (10x the default pool window) —
+    // proves this is not merely "not stale yet", it is exempt entirely.
+    const { daemon } = makeDaemon({ config: { pool_stale_in_flight_ms: 10 * 60_000 }, nowMs: BASE + 100 * 60_000 });
+    const tick = await daemon.runTick();
+
+    expect(tick.reconciled).toBe(0);
+    expect((await getBacklogItem(adapter, item.item_id))!.readiness_state).toBe("in_flight");
+  });
+});
+
+// ── DOUBLE-FIRE regression (2026-07-04): a phantom-reaped item must never be
+//    silently auto-promoted back to `ready` and re-fired in the SAME tick that
+//    reaped it — daemon.ts's own reconciler comment says reaping goes "to
+//    needs_review... NEVER an auto-refire", but auto-promote-policy.ts had no
+//    way to tell a just-reaped (or genuinely-failed) retry apart from a
+//    freshly-fleshed item that has never fired, so it silently re-fired both.
+describe("reap → auto-promote interaction — a reaped item must wait for a human /promote", () => {
+  async function markFleshedHighConfidence(itemId: string) {
+    await adapter.query(
+      `UPDATE orchestration_backlog_item SET flesh_status = 'fleshed', flesh_confidence = 0.95 WHERE item_id = $1`,
+      [itemId],
+    );
+  }
+
+  it("a stale phantom-locked pool build is reaped but NOT auto-promoted/re-fired in the same tick", async () => {
+    const item = await seedInFlight({ dispatch_phid: "phid:disp-phantom-autopromote", write_scope: ["/repo/.worktrees/roger-a"] });
+    await seedDispatch("phid:disp-phantom-autopromote", "in_flight"); // resolvable, non-terminal, stuck
+    await backdateUpdatedAt(item.item_id, new Date(BASE).toISOString());
+    await markFleshedHighConfidence(item.item_id); // otherwise-perfect auto-promote candidate
+
+    const fired: BacklogItem[] = [];
+    const { daemon } = makeDaemon({
+      fired,
+      config: {
+        pool_stale_in_flight_ms: 10 * 60_000,
+        auto_flesh_enabled: true,
+        auto_promote_enabled: true,
+        auto_promote_floor: 1,
+        auto_promote_min_lanes: 1,
+      },
+      nowMs: BASE + 11 * 60_000, // just past the pool stale window
+    });
+    const tick = await daemon.runTick();
+
+    expect(tick.reconciled).toBe(1);
+    // Reaped to needs_review — and MUST STAY there, not bounce straight back to
+    // ready/in_flight via auto-promote in this same tick.
+    const after = (await getBacklogItem(adapter, item.item_id))!;
+    expect(after.readiness_state).toBe("needs_review");
+    // No re-fire happened: the only dispatch on record is the original one.
+    expect(fired.map((i) => i.item_id)).not.toContain(item.item_id);
+  });
 });
 
 // ── POOL path (Stage C): each build holds a DISTINCT worktree write_scope.

@@ -71,6 +71,23 @@ export function autoPromoteRejections(
   }
   const denyHit = matchesHighRiskDenylist(item.dispatch_body, item.title);
   if (denyHit) reasons.push(`high-risk denylist match: /${denyHit}/`);
+  // A needs_review item with a last_dispatch_phid was already fired once —
+  // it is in needs_review because the reconciler either reaped a phantom
+  // lock (daemon.ts's own comment: "release to needs_review... NEVER an
+  // auto-refire, so a reaped-but-secretly-live build cannot double-fire")
+  // or released a genuine failure ("a human/approval gate re-promotes
+  // rather than the loop auto-retrying a failure"). This gate previously
+  // had no way to tell a reaped/failed retry apart from a freshly-fleshed
+  // item that has never fired (last_dispatch_phid is null until the first
+  // fire — see setItemState), so it silently violated both of those stated
+  // invariants and auto-re-fired reaped items as duplicate dispatches
+  // (root-caused 2026-07-04: a phantom-locked pool build and a stale
+  // needs_clarification each got reaped then immediately auto-promoted and
+  // re-fired in the SAME tick). Any previously-dispatched item requires a
+  // human /promote, never this automatic path.
+  if (item.last_dispatch_phid) {
+    reasons.push(`already dispatched once (last_dispatch_phid=${item.last_dispatch_phid}) — requires human /promote, not auto-promote`);
+  }
   // Confidence is required: a null/low confidence holds for the human gate.
   if (item.flesh_confidence == null) {
     reasons.push("no flesh_confidence (cannot assert it is high-confidence)");

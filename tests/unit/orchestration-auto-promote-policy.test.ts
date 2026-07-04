@@ -139,6 +139,19 @@ describe("autoPromoteRejections — safety gate (never auto-promote unsafe work)
     );
   });
 
+  it("rejects an item that was already dispatched once (last_dispatch_phid set) — the reap/failure de-dup guard", () => {
+    // Root-caused 2026-07-04: an item lands back in needs_review two ways —
+    // freshly fleshed (never fired, last_dispatch_phid null) or RE-parked
+    // there by the reconciler after a phantom-lock reap or a genuine failure
+    // (last_dispatch_phid still set — setItemState's COALESCE preserves it).
+    // Only the former is safe to auto-promote; the latter must wait for a
+    // human /promote (daemon.ts's own comment: "release to needs_review...
+    // NEVER an auto-refire"). Before this gate, both looked identical here.
+    expect(autoPromoteRejections(item({ last_dispatch_phid: "phid:disp-already-fired" }), thr)).toContainEqual(
+      expect.stringContaining("already dispatched once"),
+    );
+  });
+
   it("rejects non-needs_review state, unfleshed items, and empty write_scope", () => {
     expect(autoPromoteRejections(item({ readiness_state: "ready" }), thr).length).toBeGreaterThan(0);
     expect(autoPromoteRejections(item({ dispatch_body: null }), thr)).toContainEqual(

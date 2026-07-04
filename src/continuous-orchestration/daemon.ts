@@ -510,11 +510,27 @@ export class ContinuousOrchestrationDaemon {
         toState = status === "done" ? "done" : status === "cancelled" ? "cancelled" : "needs_review";
         via = "completion";
         reason = `dispatch ${status} → ${toState} (lock released)`;
+      } else if (status === "needs_clarification") {
+        // A pending clarification is waiting on an external human/manager
+        // decision — its duration is unbounded and unrelated to whether the
+        // worker is alive, so the stale-in_flight/pool windows (10-30 min)
+        // are the wrong signal for it entirely. Root-caused 2026-07-04: a
+        // dispatch parked in needs_clarification got phantom-lock-reaped to
+        // needs_review every ~10 min for 3+ hours while genuinely awaiting a
+        // reply, and (see auto-promote-policy.ts) each reap was immediately
+        // auto-promoted back to ready and re-fired as a duplicate dispatch.
+        // The ALREADY-CORRECT release path for an abandoned clarification is
+        // recovery_status='moot' (resolved to the synthetic "moot" status
+        // above, which IS terminal) — leave a live, non-moot clarification
+        // in_flight indefinitely and let that signal (or the eventual
+        // manager resume) be what moves it, never this staleness window.
       } else {
         // Non-terminal: either RESOLVABLE-but-stuck (the dispatch is still
-        // in_flight/queued/needs_clarification because its worker died, was killed,
-        // or is parked, and the scheduler isn't recovering it) OR UNRESOLVABLE
-        // (pruned/missing row, null phid). Both are PHANTOM LOCKS once aged out.
+        // in_flight/queued because its worker died, was killed, or is parked,
+        // and the scheduler isn't recovering it) OR UNRESOLVABLE (pruned/
+        // missing row, null phid). Both are PHANTOM LOCKS once aged out.
+        // needs_clarification is handled separately above — it is never a
+        // phantom-lock candidate on this timer.
         // This is the build-POOL strangle: Stage C routes each build to its own
         // worktree, and a dead pool worker's dispatch frequently never reaches a
         // terminal status — so without this it would hold its pool slot +
