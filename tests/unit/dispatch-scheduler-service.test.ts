@@ -16,7 +16,8 @@ import type {
   AgentTransport,
   AgentTransportResult,
 } from "../../src/dispatch-scheduler/scheduler-service.js";
-import type { DispatchDoc, EnqueueInput } from "../../src/dispatch-scheduler/types.js";
+import type { DispatchDoc, EnqueueInput, Provider, Runtime } from "../../src/dispatch-scheduler/types.js";
+import type { ModelPolicyResolver, ResolvedModel } from "../../src/model-policy/types.js";
 
 const base: EnqueueInput = {
   query_id: "q",
@@ -71,7 +72,34 @@ class FakeAgentTransport implements AgentTransport {
   }
 }
 
-function harness(opts?: { max?: number; now?: string }) {
+/** A fake model-policy resolver that always resolves a fixed choice,
+ *  regardless of `unavailableProviders` (tests assert on the CALL, not the
+ *  policy's own primary/fallback matching logic — that lives in model-policy
+ *  tests). Returns the resolver plus its call log for assertions. */
+function fakeModelPolicy(choice: { provider: Provider; runtime: Runtime }): {
+  policy: ModelPolicyResolver;
+  calls: Array<{ agent: string; unavailableProviders?: Provider[] }>;
+} {
+  const calls: Array<{ agent: string; unavailableProviders?: Provider[] }> = [];
+  const policy: ModelPolicyResolver = {
+    resolveModelChoice(input): ResolvedModel {
+      calls.push(input);
+      return {
+        agent: input.agent,
+        choice: { runtime: choice.runtime, model: "fake-model", provider: choice.provider },
+        source: "fallback",
+        fallback_applied: true,
+        reason: "fake fallback for test",
+        policy_agent: input.agent,
+        considered: [{ runtime: choice.runtime, model: "fake-model", provider: choice.provider }],
+      };
+    },
+    constrainedProviders: () => [],
+  };
+  return { policy, calls };
+}
+
+function harness(opts?: { max?: number; now?: string; modelPolicy?: ModelPolicyResolver }) {
   const now = opts?.now ?? "2026-05-19T20:00:00.000Z";
   const reactor = new FakeReactor({ now: () => now });
   const client = new DispatchDocClient({ reactor, now: () => now });
@@ -86,6 +114,7 @@ function harness(opts?: { max?: number; now?: string }) {
     policy,
     now: () => reactor.now(),
     rng: () => 0.5,
+    modelPolicy: opts?.modelPolicy,
   });
   return { reactor, client, transport, policy, scheduler };
 }
@@ -256,6 +285,74 @@ describe("SchedulerService.tick — provider throttle handling", () => {
     if (!doc.ok) throw new Error();
     expect(doc.value.status).toBe("failed");
     expect(doc.value.failure_kind).toBe("provider_rate_limit_exhausted");
+  });
+});
+
+describe("SchedulerService.tick — BUG-003 rate-limit fallback routing", () => {
+  it("a rate-limit bounce with a configured model policy retries on the FALLBACK lane, not the same one", async () => {
+    const { policy: modelPolicy, calls } = fakeModelPolicy({ provider: "cursor", runtime: "cursor-cli" });
+    const { client, transport, scheduler } = harness({ max: 3, modelPolicy });
+    transport.setNextResponses([{ ok: false, status: 429, body: "rate_limit_exceeded" }]);
+    await client.enqueueDispatch(base); // base is provider: "anthropic", runtime: "claude-code-cli"
+
+    const report = await scheduler.tick();
+    expect(report.bounced).toBe(1);
+
+    const doc = await client.getByQueryId("q");
+    if (!doc.ok) throw new Error();
+    expect(doc.value.status).toBe("bounced");
+    // Retry now targets the resolved fallback lane, not the throttled one.
+    expect(doc.value.provider).toBe("cursor");
+    expect(doc.value.runtime).toBe("cursor-cli");
+
+    // The policy was asked with the CURRENT (throttled) provider marked unavailable.
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toMatchObject({ agent: "coder-max", unavailableProviders: ["anthropic"] });
+  });
+
+  it("does NOT change the lane when no model policy is configured (unchanged pre-fallback behavior)", async () => {
+    const { client, transport, scheduler } = harness({ max: 3 }); // no modelPolicy
+    transport.setNextResponses([{ ok: false, status: 429, body: "rate_limit_exceeded" }]);
+    await client.enqueueDispatch(base);
+    await scheduler.tick();
+
+    const doc = await client.getByQueryId("q");
+    if (!doc.ok) throw new Error();
+    expect(doc.value.status).toBe("bounced");
+    expect(doc.value.provider).toBe("anthropic");
+    expect(doc.value.runtime).toBe("claude-code-cli");
+  });
+
+  it("does NOT change the lane when the resolved choice IS the current lane (no viable fallback)", async () => {
+    const { policy: modelPolicy } = fakeModelPolicy({ provider: "anthropic", runtime: "claude-code-cli" });
+    const { client, transport, scheduler } = harness({ max: 3, modelPolicy });
+    transport.setNextResponses([{ ok: false, status: 429, body: "rate_limit_exceeded" }]);
+    await client.enqueueDispatch(base);
+    await scheduler.tick();
+
+    const doc = await client.getByQueryId("q");
+    if (!doc.ok) throw new Error();
+    expect(doc.value.provider).toBe("anthropic");
+    expect(doc.value.runtime).toBe("claude-code-cli");
+  });
+
+  it("does NOT apply fallback routing to a non-throttle (transport) bounce", async () => {
+    const { policy: modelPolicy, calls } = fakeModelPolicy({ provider: "cursor", runtime: "cursor-cli" });
+    const { client, transport, scheduler } = harness({ max: 3, modelPolicy });
+    transport.setNextResponses([
+      { ok: false, status: 0, body: "", cause: "transport", transportError: "ECONNREFUSED" },
+    ]);
+    await client.enqueueDispatch(base);
+    await scheduler.tick();
+
+    const doc = await client.getByQueryId("q");
+    if (!doc.ok) throw new Error();
+    expect(doc.value.status).toBe("bounced");
+    expect(doc.value.last_bounce?.kind).toBe("transport");
+    // Same lane — a connectivity failure isn't a capacity problem a fallback provider fixes.
+    expect(doc.value.provider).toBe("anthropic");
+    expect(doc.value.runtime).toBe("claude-code-cli");
+    expect(calls).toHaveLength(0);
   });
 });
 

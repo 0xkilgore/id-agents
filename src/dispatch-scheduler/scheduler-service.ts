@@ -29,6 +29,7 @@ import {
   retryReasonFromThrottleKind,
 } from "./retry-policy.js";
 import type { DispatchDoc, Provider, Runtime } from "./types.js";
+import type { ModelPolicyResolver } from "../model-policy/types.js";
 
 export type AgentTransportResult =
   | { ok: true; agent_query_id: string }
@@ -119,6 +120,14 @@ export interface SchedulerServiceOptions {
   admissionGateProvider?: AdmissionGateProvider;
   /** Optional B0 evidence client. When omitted, evidence sweep is skipped. */
   queryEvidence?: QueryEvidenceClient;
+  /**
+   * BUG-003: when set, a `provider_rate_limit_exhausted` bounce resolves a
+   * fallback lane via the model policy's primary→fallback order (the SAME
+   * resolver the enqueue path already uses) instead of retrying the SAME
+   * already-throttled provider on the deterministic backoff ladder alone.
+   * Omitted → same-lane retry (pre-fallback behavior, unchanged).
+   */
+  modelPolicy?: ModelPolicyResolver;
 }
 
 export interface TickReport {
@@ -178,6 +187,7 @@ export class SchedulerService {
   private usageGateProvider?: UsageGateProvider;
   private admissionGateProvider?: AdmissionGateProvider;
   private queryEvidence?: QueryEvidenceClient;
+  private modelPolicy?: ModelPolicyResolver;
 
   constructor(opts: SchedulerServiceOptions) {
     this.client = opts.client;
@@ -195,6 +205,7 @@ export class SchedulerService {
     this.usageGateProvider = opts.usageGateProvider;
     this.admissionGateProvider = opts.admissionGateProvider;
     this.queryEvidence = opts.queryEvidence;
+    this.modelPolicy = opts.modelPolicy;
   }
 
   setUsageGateProvider(p: UsageGateProvider | undefined): void {
@@ -207,6 +218,26 @@ export class SchedulerService {
 
   setBudgetState(state: BudgetState): void {
     this.budgetState = state;
+  }
+
+  /**
+   * BUG-003: resolve a fallback lane for a rate-limited retry via the model
+   * policy's primary→fallback order — the SAME resolver the enqueue path
+   * already uses (manager-integration.ts), just applied at retry time. Marks
+   * the dispatch's CURRENT provider unavailable so the policy is forced past
+   * it. Returns `null` (same-lane retry, unchanged behavior) when no policy
+   * is configured, or the resolved choice is the SAME lane the dispatch is
+   * already on (nothing gained by "falling back" to yourself).
+   */
+  private resolveFallbackLane(doc: DispatchDoc): { provider: Provider; runtime: Runtime } | null {
+    if (!this.modelPolicy) return null;
+    const resolved = this.modelPolicy.resolveModelChoice({
+      agent: doc.to_agent,
+      unavailableProviders: [doc.provider],
+    });
+    const { provider, runtime } = resolved.choice;
+    if (provider === doc.provider && runtime === doc.runtime) return null;
+    return { provider, runtime };
   }
 
   async tick(): Promise<TickReport> {
@@ -463,10 +494,17 @@ export class SchedulerService {
       const decision = computeRetryDecision(reason, doc.attempt_count, this.now());
 
       if (decision.action === "backoff" && decision.next_attempt_at) {
+        // BUG-003 (§3.4, previously deferred): a rate-limit bounce prefers a
+        // fallback lane over re-hammering the SAME already-throttled provider.
+        // Only for provider_throttle — transport/auth failures aren't a
+        // capacity problem a different provider would fix.
+        const fallback =
+          classified.kind === "provider_throttle" ? this.resolveFallbackLane(doc) : null;
         const b = await this.client.markBounced(doc.dispatch_phid, {
           kind: classified.kind,
           message: classified.detail,
           next_attempt_at: decision.next_attempt_at,
+          ...(fallback ? { provider: fallback.provider, runtime: fallback.runtime } : {}),
         });
         if (b.ok) {
           report.bounced += 1;
@@ -476,6 +514,9 @@ export class SchedulerService {
             next_attempt_at: decision.next_attempt_at,
             kind: classified.kind,
             reason,
+            ...(fallback
+              ? { fallback_provider: fallback.provider, fallback_runtime: fallback.runtime }
+              : {}),
           });
         } else {
           this.logger.error("scheduler_markBounced_failed", {

@@ -567,17 +567,31 @@ export class SqliteDispatchReactor {
       attempt: doc.attempt_count,
     };
     const history = [...doc.bounce_history, record];
+    // BUG-003 fallback routing: only overridden when the caller resolved a
+    // different lane for this retry; omitted → identical to pre-fallback
+    // behavior (same-lane retry).
+    const laneSets: string[] = [];
+    const laneParams: unknown[] = [];
+    if (bounce.provider) {
+      laneSets.push("provider = ?");
+      laneParams.push(bounce.provider);
+    }
+    if (bounce.runtime) {
+      laneSets.push("runtime = ?");
+      laneParams.push(bounce.runtime);
+    }
     await this.adapter.query(
       `UPDATE dispatch_scheduler_queue
        SET status = 'bounced', bounce_count = bounce_count + 1,
            last_bounce_json = ?, bounce_history_json = ?,
-           not_before_at = ?, updated_at = ?
+           not_before_at = ?, updated_at = ?${laneSets.length ? ", " + laneSets.join(", ") : ""}
        WHERE dispatch_phid = ?`,
       [
         JSON.stringify(record),
         JSON.stringify(history),
         bounce.next_attempt_at,
         now,
+        ...laneParams,
         phid,
       ],
     );

@@ -41,6 +41,15 @@ export interface BounceInput {
   kind: string;
   message: string;
   next_attempt_at: string;
+  /**
+   * BUG-003: when the scheduler resolved a fallback lane for this retry
+   * (model-policy primary→fallback, applied because the CURRENT lane just
+   * rate-limited), the retry targets this provider/runtime instead of
+   * re-hammering the one that just throttled. Omitted → same-lane retry
+   * (pre-BUG-003-fallback behavior, unchanged).
+   */
+  provider?: Provider;
+  runtime?: Runtime;
 }
 
 export interface ClaimResult {
@@ -310,6 +319,10 @@ export class FakeReactor {
       bounce_history: [...doc.bounce_history, record],
       not_before_at: bounce.next_attempt_at,
       updated_at: now,
+      // BUG-003 fallback routing: only overridden when the caller resolved a
+      // different lane; omitted → identical to pre-fallback behavior.
+      ...(bounce.provider ? { provider: bounce.provider } : {}),
+      ...(bounce.runtime ? { runtime: bounce.runtime } : {}),
     };
     this.docs.set(phid, next);
     return clone(next);

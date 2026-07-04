@@ -363,6 +363,10 @@ export class SchedulerHandle {
       // its own in-flight count, so Anthropic / OpenAI(Codex) / Cursor queues
       // never consume each other's concurrency slots.
       providers: ["anthropic", "openai", "cursor", "other"],
+      // BUG-003: same resolver the enqueue path uses, now also consulted when
+      // a rate-limit bounce retries — prefers a fallback lane over hammering
+      // the SAME already-throttled provider.
+      modelPolicy: this.modelPolicy,
     });
     if (opts.agentsRepository) {
       this.scheduler.setAdmissionGateProvider({
