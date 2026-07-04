@@ -2,11 +2,39 @@
 // POST /tasks and POST /orchestration/backlog.
 
 import { describe, it, expect } from 'vitest';
+import { existsSync, readFileSync } from 'node:fs';
 import {
   resolveTrack,
   parseRegistryYaml,
   DEFAULT_REGISTRY,
 } from '../../src/track-registry/registry.js';
+
+// RD-006 — the human-maintained source of truth
+// (agent-platform/goals-tracks-tasks.md §1b) is a separate repo, not vendored
+// here. DEFAULT_REGISTRY was hand-bumped v1 → v2 without a test tying it back
+// to §1b, so a future one-sided edit (registry.ts changes but §1b doesn't, or
+// vice versa) would silently drift with nothing to catch it. This extracts the
+// live §1b YAML fence and asserts it parses to exactly DEFAULT_REGISTRY.
+const GOALS_TRACKS_TASKS_PATH = '/Users/kilgore/Dropbox/Code/agent-platform/goals-tracks-tasks.md';
+
+/** Pull the YAML fence out of the §1b section (not just the first ```yaml
+ *  fence in the file, in case an unrelated one is ever added elsewhere). */
+function extractSection1bYaml(markdown: string): string {
+  const sectionStart = markdown.indexOf('§1b');
+  if (sectionStart === -1) {
+    throw new Error('goals-tracks-tasks.md: §1b heading not found');
+  }
+  const fenceStart = markdown.indexOf('```yaml', sectionStart);
+  if (fenceStart === -1) {
+    throw new Error('goals-tracks-tasks.md: no ```yaml fence found after §1b');
+  }
+  const bodyStart = markdown.indexOf('\n', fenceStart) + 1;
+  const fenceEnd = markdown.indexOf('```', bodyStart);
+  if (fenceEnd === -1) {
+    throw new Error('goals-tracks-tasks.md: unterminated ```yaml fence after §1b');
+  }
+  return markdown.slice(bodyStart, fenceEnd);
+}
 
 describe('resolveTrack', () => {
   it('conforms an exact canonical id', () => {
@@ -150,5 +178,33 @@ describe('DEFAULT_REGISTRY snapshot', () => {
     expect(DEFAULT_REGISTRY.deferred).toEqual(['I-2', 'I-15']);
     expect(DEFAULT_REGISTRY.legacyAliases.T11).toBe('T-LOOP-CLOSE');
     expect(DEFAULT_REGISTRY.conformanceThreshold).toBe(0.95);
+  });
+});
+
+// RD-006 — live parity guard against agent-platform/goals-tracks-tasks.md §1b,
+// the human-maintained source of truth. DEFAULT_REGISTRY is a hand-maintained
+// vendored copy (see registry.ts's own "Keep this snapshot in sync with §1b"
+// comment) — this test is what actually enforces that instruction instead of
+// just asking nicely. Skips (rather than fails) when the sibling agent-platform
+// repo isn't checked out alongside id-agents, per registry.ts's documented
+// deployment caveat; runs for real whenever both repos are present, which is
+// the case in this dev environment.
+const goalsTracksTasksAvailable = existsSync(GOALS_TRACKS_TASKS_PATH);
+
+describe.runIf(goalsTracksTasksAvailable)('canonical-track-registry parity with §1b (RD-006)', () => {
+  const liveRegistry = () =>
+    parseRegistryYaml(extractSection1bYaml(readFileSync(GOALS_TRACKS_TASKS_PATH, 'utf-8')));
+
+  it('parses the live §1b YAML fence into exactly DEFAULT_REGISTRY', () => {
+    expect(liveRegistry()).toEqual(DEFAULT_REGISTRY);
+  });
+
+  it('is a real guard: a one-sided edit to either side breaks the match', () => {
+    const live = liveRegistry();
+    // Prove the equality check above isn't vacuously true by mutating a copy
+    // of the live-parsed registry the way an unmirrored §1b edit would, and
+    // confirming that no longer matches DEFAULT_REGISTRY.
+    const drifted = { ...live, canonical: [...live.canonical, 'T-NEW-UNMIRRORED'] };
+    expect(drifted).not.toEqual(DEFAULT_REGISTRY);
   });
 });
