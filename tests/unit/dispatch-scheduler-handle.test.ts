@@ -225,6 +225,72 @@ describe("SchedulerHandle bootstrap + flow", () => {
     expect(handle.enabled).toBe(false);
   });
 
+  it("acceptDispatchStart supports direct starts before the scheduler claims", async () => {
+    const handle = new SchedulerHandle({
+      adapter,
+      teamId: "team",
+      resolveTargetUrl: () => "http://localhost:9999",
+    });
+    const enq = await handle.enqueue({
+      to_agent: "worker",
+      from_actor: "manager",
+      message: "direct start",
+    });
+
+    const accepted = await handle.acceptDispatchStart({
+      dispatch_id: enq.dispatch_phid,
+      agent_query_id: "agent-q-direct",
+    });
+
+    expect(accepted?.status).toBe("in_flight");
+    expect(accepted?.agent_query_id).toBe("agent-q-direct");
+    const snap = await handle.snapshot();
+    expect(snap.in_flight).toBe(1);
+    expect(snap.oldest_in_flight_age_ms).toBeGreaterThanOrEqual(0);
+  });
+
+  it("stale in_flight claim with agent_query_id is failed and frees the slot", async () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch") as ReturnType<typeof vi.spyOn>;
+    fetchSpy.mockResolvedValueOnce(
+      new Response(JSON.stringify({ query_id: "agent-q-stale" }), { status: 200 }) as unknown as Response,
+    );
+    let now = "2026-06-02T20:00:00.000Z";
+    const handle = new SchedulerHandle({
+      adapter,
+      teamId: "team",
+      resolveTargetUrl: () => "http://localhost:9999",
+      now: () => now,
+      env: {
+        DISPATCH_MAX_IN_FLIGHT_ANTHROPIC: "1",
+        DISPATCH_STALE_IN_FLIGHT_TTL_MS: "1000",
+      },
+    });
+    const enq = await handle.enqueue({
+      to_agent: "worker",
+      from_actor: "manager",
+      message: "go stale",
+    });
+    await handle.tick();
+    let snap = await handle.snapshot();
+    expect(snap.in_flight).toBe(1);
+    expect(snap.stale_in_flight_count).toBe(0);
+
+    now = "2026-06-02T20:01:01.000Z";
+    snap = await handle.snapshot();
+    expect(snap.stale_in_flight_count).toBe(1);
+    await handle.tick();
+
+    const final = await handle.client.getByQueryId(enq.query_id);
+    if (!final.ok) throw new Error();
+    expect(final.value.status).toBe("failed");
+    expect(final.value.failure_kind).toBe("scheduler_wedged");
+    expect(final.value.failure_detail).toContain("stale in_flight dispatch");
+    snap = await handle.snapshot();
+    expect(snap.in_flight).toBe(0);
+    expect(snap.available_slots).toBe(1);
+    fetchSpy.mockRestore();
+  });
+
   it("handleAgentDone with success:false marks failed", async () => {
     const fetchSpy = vi.spyOn(globalThis, "fetch") as ReturnType<typeof vi.spyOn>;
     fetchSpy.mockResolvedValueOnce(

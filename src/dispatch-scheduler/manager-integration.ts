@@ -328,6 +328,7 @@ export class SchedulerHandle {
    * time) OR the target agent's agent_query_id.
    */
   async handleAgentDone(args: {
+    dispatch_id?: string;
     query_id?: string;
     agent_query_id?: string;
     result?: Record<string, unknown> | null;
@@ -345,7 +346,14 @@ export class SchedulerHandle {
     causation?: Causation;
   }): Promise<DispatchDoc | null> {
     let doc: DispatchDoc | null = null;
-    if (args.query_id) {
+    if (args.dispatch_id) {
+      doc = await this.reactor.getByPhid(args.dispatch_id);
+      if (!doc) {
+        const r = await this.client.getByQueryId(args.dispatch_id);
+        if (r.ok) doc = r.value;
+      }
+    }
+    if (!doc && args.query_id) {
       const r = await this.client.getByQueryId(args.query_id);
       if (r.ok) doc = r.value;
     }
@@ -353,6 +361,20 @@ export class SchedulerHandle {
       doc = await this.reactor.getByAgentQueryId(args.agent_query_id);
     }
     if (!doc) return null;
+    if (args.query_id && args.query_id !== doc.query_id) {
+      throw new Error(
+        `agent-done query_id mismatch: ${args.query_id} does not belong to ${doc.dispatch_phid}`,
+      );
+    }
+    if (
+      args.agent_query_id &&
+      doc.agent_query_id &&
+      args.agent_query_id !== doc.agent_query_id
+    ) {
+      throw new Error(
+        `agent-done agent_query_id mismatch: ${args.agent_query_id} does not belong to ${doc.dispatch_phid}`,
+      );
+    }
     if (doc.status === "done" || doc.status === "failed" || doc.status === "cancelled") {
       return doc; // already terminal, no-op
     }
@@ -407,6 +429,21 @@ export class SchedulerHandle {
     return this.reactor.markDoneWithResult(doc.dispatch_phid, args.result ?? null);
   }
 
+  async acceptDispatchStart(args: {
+    dispatch_id: string;
+    agent_query_id: string;
+  }): Promise<DispatchDoc | null> {
+    const doc = args.dispatch_id.startsWith("phid:")
+      ? await this.reactor.getByPhid(args.dispatch_id)
+      : await this.reactor.getByQueryId(args.dispatch_id);
+    if (!doc) return null;
+    const r = await this.client.acceptDispatchStart(doc.dispatch_phid, {
+      agent_query_id: args.agent_query_id,
+    });
+    if (!r.ok) throw new Error(r.detail);
+    return r.value;
+  }
+
   /** Live snapshot for /system-live and operator probes. */
   async snapshot(provider: Provider = "anthropic"): Promise<{
     in_flight: number;
@@ -418,11 +455,26 @@ export class SchedulerHandle {
     last_bounce_kind: string | null;
     mode: GatewayMode;
     policy_version: string;
+    oldest_in_flight_age_ms: number;
+    stale_in_flight_count: number;
+    stale_in_flight_ttl_ms: number;
   }> {
     const snap = await this.reactor.snapshot({
       max_safe: this.policy.max_in_flight_anthropic,
       provider,
     });
+    const inflight = await this.client.dispatchesInFlight({ provider });
+    const nowMs = Date.parse(this.reactor.now());
+    let oldestInFlightAgeMs = 0;
+    let staleInFlightCount = 0;
+    if (inflight.ok) {
+      for (const doc of inflight.value) {
+        const base = doc.started_at ?? doc.updated_at;
+        const age = Math.max(0, nowMs - Date.parse(base));
+        oldestInFlightAgeMs = Math.max(oldestInFlightAgeMs, age);
+        if (age >= this.policy.stale_in_flight_ttl_ms) staleInFlightCount += 1;
+      }
+    }
     return {
       in_flight: snap.in_flight,
       queued: snap.queued,
@@ -433,6 +485,9 @@ export class SchedulerHandle {
       last_bounce_kind: snap.last_bounce_kind,
       mode: this.mode,
       policy_version: this.policy.policy_version,
+      oldest_in_flight_age_ms: oldestInFlightAgeMs,
+      stale_in_flight_count: staleInFlightCount,
+      stale_in_flight_ttl_ms: this.policy.stale_in_flight_ttl_ms,
     };
   }
 }

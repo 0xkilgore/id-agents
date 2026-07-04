@@ -1937,6 +1937,35 @@ export class AgentManagerDb {
       }
     });
 
+    this.managementApp.get('/dispatches/health', async (_req, res) => {
+      if (!this.dispatchScheduler) {
+        return res.status(503).json({
+          ok: false,
+          error: 'dispatch_scheduler_not_initialised',
+        });
+      }
+      try {
+        const snap = await this.dispatchScheduler.snapshot('anthropic');
+        return res.json({
+          ok: true,
+          in_flight_count: snap.in_flight,
+          queued_count: snap.queued,
+          bounced_count: snap.bounced,
+          oldest_in_flight_age_ms: snap.oldest_in_flight_age_ms,
+          stale_in_flight_count: snap.stale_in_flight_count,
+          stale_in_flight_ttl_ms: snap.stale_in_flight_ttl_ms,
+          expired_unhandled_count: snap.stale_in_flight_count,
+          mode: snap.mode,
+          policy_version: snap.policy_version,
+        });
+      } catch (err) {
+        return res.status(500).json({
+          ok: false,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    });
+
     // Phase 4.1c: explicit operator enqueue route. The /message and /talk-to
     // routes auto-enqueue under DISPATCH_GATEWAY_MODE; this is the named
     // surface for callers that specifically want a queued dispatch
@@ -1988,6 +2017,51 @@ export class AgentManagerDb {
         });
       }
     });
+
+    const acceptDispatchRoute = async (req: any, res: any) => {
+      if (!this.dispatchScheduler) {
+        return res.status(503).json({
+          ok: false,
+          error: 'dispatch_scheduler_not_initialised',
+        });
+      }
+      try {
+        const dispatchIdRaw = normalizeDispatchIdInput(req.params.dispatch_id);
+        const body = (req.body || {}) as { agent_query_id?: unknown };
+        const agentQueryId =
+          typeof body.agent_query_id === 'string' ? body.agent_query_id.trim() : '';
+        if (!dispatchIdRaw || !agentQueryId) {
+          return res.status(400).json({
+            ok: false,
+            error: 'dispatch_id and non-empty agent_query_id required',
+          });
+        }
+        const doc = await this.dispatchScheduler.acceptDispatchStart({
+          dispatch_id: dispatchIdRaw,
+          agent_query_id: agentQueryId,
+        });
+        if (!doc) {
+          return res.status(404).json({
+            ok: false,
+            error: `dispatch not found: ${dispatchIdRaw}`,
+          });
+        }
+        return res.json({
+          ok: true,
+          dispatch_id: doc.dispatch_phid,
+          query_id: doc.query_id,
+          agent_query_id: doc.agent_query_id,
+          state: doc.status,
+          started_at: doc.started_at,
+        });
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        const status = /conflict|terminal|requires/i.test(msg) ? 409 : 500;
+        return res.status(status).json({ ok: false, error: msg });
+      }
+    };
+    this.managementApp.post('/dispatches/:dispatch_id/accept', acceptDispatchRoute);
+    this.managementApp.post('/dispatches/:dispatch_id/in-flight', acceptDispatchRoute);
 
     // ────────────────────────────────────────────────────────────────
     // Spec 054 v2 — agent clarification protocol.
@@ -2360,6 +2434,7 @@ export class AgentManagerDb {
           promotion?: unknown;
           mode?: unknown;
           agent?: unknown;
+          agent_query_id?: unknown;
           // Harness-resilience (Spec 2026-05-29): structured terminal
           // failure on success:false. failure_kind must be one of the
           // canonical FailureKind values; error is a short prose detail.
@@ -2375,10 +2450,14 @@ export class AgentManagerDb {
               ? String(body.dispatch_id)
               : '';
         const queryId = typeof body.query_id === 'string' ? body.query_id : null;
-        if (!dispatchIdRaw && !queryId) {
+        const agentQueryId =
+          typeof body.agent_query_id === 'string' && body.agent_query_id.trim()
+            ? body.agent_query_id.trim()
+            : null;
+        if (!dispatchIdRaw && !queryId && !agentQueryId) {
           return res.status(400).json({
             ok: false,
-            error: 'dispatch_id or query_id required',
+            error: 'dispatch_id, query_id, or agent_query_id required',
           });
         }
 
@@ -2393,10 +2472,27 @@ export class AgentManagerDb {
         if (!doc && queryId) {
           doc = await reactor.getByQueryId(queryId);
         }
+        if (!doc && agentQueryId) {
+          doc = await reactor.getByAgentQueryId(agentQueryId);
+        }
         if (!doc) {
           return res.status(404).json({
             ok: false,
-            error: `dispatch not found: ${dispatchIdRaw || queryId}`,
+            error: `dispatch not found: ${dispatchIdRaw || queryId || agentQueryId}`,
+          });
+        }
+        if (queryId && queryId !== doc.query_id) {
+          return res.status(409).json({
+            ok: false,
+            error: `query_id ${queryId} does not match dispatch ${doc.dispatch_phid}`,
+            dispatch_id: doc.dispatch_phid,
+          });
+        }
+        if (agentQueryId && doc.agent_query_id && agentQueryId !== doc.agent_query_id) {
+          return res.status(409).json({
+            ok: false,
+            error: `agent_query_id ${agentQueryId} does not match dispatch ${doc.dispatch_phid}`,
+            dispatch_id: doc.dispatch_phid,
           });
         }
 
@@ -2466,7 +2562,9 @@ export class AgentManagerDb {
         // Mark the dispatch done.
         try {
           await this.dispatchScheduler.handleAgentDone({
+            dispatch_id: doc.dispatch_phid,
             query_id: doc.query_id,
+            agent_query_id: agentQueryId ?? undefined,
             result:
               body.result && typeof body.result === 'object'
                 ? (body.result as Record<string, unknown>)
@@ -2495,6 +2593,7 @@ export class AgentManagerDb {
           ok: true,
           dispatch_id: doc.dispatch_phid,
           state: success ? 'done' : 'failed',
+          closeout_path: doc.status === 'queued' && success ? 'queued_out_of_band' : doc.status,
           mode,
           promotion_warning: ('warning' in validation ? validation.warning : null) ?? null,
         });

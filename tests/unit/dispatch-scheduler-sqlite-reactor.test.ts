@@ -244,6 +244,41 @@ describe("SqliteDispatchReactor — round-trip parity with FakeReactor", () => {
     expect(found?.dispatch_phid).toBe(phid);
   });
 
+  it("acceptDispatchStart moves queued dispatch to in_flight with agent_query_id", async () => {
+    const { client, reactor } = harness();
+    const enq = await client.enqueueDispatch(base);
+    if (!enq.ok) throw new Error();
+
+    const accepted = await reactor.acceptDispatchStart(enq.value.dispatch_phid, {
+      agent_query_id: "agent-q-direct",
+    });
+
+    expect(accepted?.status).toBe("in_flight");
+    expect(accepted?.agent_query_id).toBe("agent-q-direct");
+    expect(accepted?.attempt_count).toBe(1);
+    expect(accepted?.started_at).not.toBeNull();
+  });
+
+  it("acceptDispatchStart is idempotent for the same agent_query_id and conflicts on a different one", async () => {
+    const { client, reactor } = harness();
+    const enq = await client.enqueueDispatch(base);
+    if (!enq.ok) throw new Error();
+
+    await reactor.acceptDispatchStart(enq.value.dispatch_phid, {
+      agent_query_id: "agent-q-direct",
+    });
+    const second = await reactor.acceptDispatchStart(enq.value.dispatch_phid, {
+      agent_query_id: "agent-q-direct",
+    });
+    expect(second?.status).toBe("in_flight");
+
+    await expect(
+      reactor.acceptDispatchStart(enq.value.dispatch_phid, {
+        agent_query_id: "agent-q-other",
+      }),
+    ).rejects.toThrow(/conflict|agent_query_id/i);
+  });
+
   it("markDoneWithResult stashes the agent reply payload for /talk-to waiters", async () => {
     const { client, reactor } = harness();
     const enq = await client.enqueueDispatch(base);

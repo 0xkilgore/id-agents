@@ -291,6 +291,61 @@ describe("POST /agent-done — input validation", () => {
     });
     expect(r.status).toBe(404);
   });
+
+  it("rejects mismatched dispatch_id and query_id instead of silently closing the wrong row", async () => {
+    const first = await enqueue({});
+    const second = await enqueue({});
+
+    const r = await fetch(`${baseUrl}/agent-done`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        dispatch_id: first.dispatch_phid,
+        query_id: second.query_id,
+        success: true,
+      }),
+    });
+
+    expect(r.status).toBe(409);
+    const firstDoc = await (manager as any).dispatchScheduler.reactor.getByPhid(first.dispatch_phid);
+    const secondDoc = await (manager as any).dispatchScheduler.reactor.getByPhid(second.dispatch_phid);
+    expect(firstDoc.status).toBe("queued");
+    expect(secondDoc.status).toBe("queued");
+  });
+});
+
+describe("dispatch accept + health routes", () => {
+  it("POST /dispatches/:id/accept marks a queued dispatch in_flight with correlation", async () => {
+    const enq = await enqueue({});
+
+    const r = await fetch(`${baseUrl}/dispatches/${encodeURIComponent(enq.dispatch_phid)}/accept`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ agent_query_id: "agent-q-direct-route" }),
+    });
+
+    expect(r.status).toBe(200);
+    const body = await r.json();
+    expect(body).toMatchObject({
+      ok: true,
+      dispatch_id: enq.dispatch_phid,
+      query_id: enq.query_id,
+      agent_query_id: "agent-q-direct-route",
+      state: "in_flight",
+    });
+  });
+
+  it("GET /dispatches/health exposes stale in-flight visibility fields", async () => {
+    const r = await fetch(`${baseUrl}/dispatches/health`);
+
+    expect(r.status).toBe(200);
+    const body = await r.json();
+    expect(body.ok).toBe(true);
+    expect(body).toHaveProperty("in_flight_count");
+    expect(body).toHaveProperty("oldest_in_flight_age_ms");
+    expect(body).toHaveProperty("stale_in_flight_count");
+    expect(body).toHaveProperty("expired_unhandled_count");
+  });
 });
 
 // Queued-dispatch closeout (Spec 2026-06-01-queued-dispatch-closeout-spec.md).

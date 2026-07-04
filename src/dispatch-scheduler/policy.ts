@@ -25,6 +25,7 @@ export interface SchedulerPolicy {
   jitter_pct: number;
   claim_batch_limit: number;
   starting_timeout_ms: number;
+  stale_in_flight_ttl_ms: number;
   policy_version: string;
 }
 
@@ -42,13 +43,15 @@ export const POLICY_DEFAULTS: SchedulerPolicy = {
   jitter_pct: 0.2,
   claim_batch_limit: 10,
   starting_timeout_ms: 60_000,
+  stale_in_flight_ttl_ms: 30 * 60_000,
   policy_version: "v1",
 };
 
 const SAFETY_CEILING = 20;
 const MIN_CAP = 1;
 
-const ENV_KEY = "DISPATCH_MAX_IN_FLIGHT_ANTHROPIC";
+const MAX_IN_FLIGHT_ENV_KEY = "DISPATCH_MAX_IN_FLIGHT_ANTHROPIC";
+const STALE_IN_FLIGHT_TTL_ENV_KEY = "DISPATCH_STALE_IN_FLIGHT_TTL_MS";
 
 function parsePositiveInt(raw: string | undefined): number | null {
   if (raw == null) return null;
@@ -67,11 +70,17 @@ export function loadSchedulerPolicy(
   env: Record<string, string | undefined>,
 ): SchedulerPolicy {
   const merged: SchedulerPolicy = { ...POLICY_DEFAULTS, ...(overrides.dispatch ?? {}) };
-  const envAnth = parsePositiveInt(env[ENV_KEY]);
+  const envAnth = parsePositiveInt(env[MAX_IN_FLIGHT_ENV_KEY]);
   if (envAnth != null) merged.max_in_flight_anthropic = envAnth;
+  const staleTtl = parsePositiveInt(env[STALE_IN_FLIGHT_TTL_ENV_KEY]);
+  if (staleTtl != null) merged.stale_in_flight_ttl_ms = staleTtl;
   merged.max_in_flight_anthropic = clampCap(merged.max_in_flight_anthropic);
   merged.max_in_flight_openai = clampCap(merged.max_in_flight_openai);
   merged.max_in_flight_other = clampCap(merged.max_in_flight_other);
+  merged.stale_in_flight_ttl_ms = Math.max(
+    merged.starting_timeout_ms,
+    merged.stale_in_flight_ttl_ms,
+  );
   return merged;
 }
 

@@ -74,6 +74,7 @@ export interface TickReport {
   failed: number;
   requeued: number;
   wedged_reaped: number;
+  stale_in_flight_failed: number;
   cap_decision: { max_safe: number; reason: string; source: string };
   usage_gate?: {
     enforcement: "warn" | "enforce";
@@ -133,11 +134,16 @@ export class SchedulerService {
       failed: 0,
       requeued: 0,
       wedged_reaped: 0,
+      stale_in_flight_failed: 0,
       cap_decision: { max_safe: 0, reason: "", source: "" },
     };
 
     const wedged = await this.reapWedgedInFlight();
     report.wedged_reaped = wedged;
+
+    const staleFailed = await this.failStaleInFlight();
+    report.stale_in_flight_failed = staleFailed;
+    report.failed += staleFailed;
 
     const requeued = await this.sweepBounced();
     report.requeued = requeued;
@@ -409,6 +415,35 @@ export class SchedulerService {
       }
     }
     return reaped;
+  }
+
+  private async failStaleInFlight(): Promise<number> {
+    const inflight = await this.client.dispatchesInFlight({
+      provider: this.provider,
+    });
+    if (!inflight.ok) return 0;
+    const nowMs = Date.parse(this.now());
+    let failed = 0;
+    for (const doc of inflight.value) {
+      if (!doc.agent_query_id) continue;
+      const startedAt = doc.started_at ?? doc.updated_at;
+      const age = nowMs - Date.parse(startedAt);
+      if (age < this.policy.stale_in_flight_ttl_ms) continue;
+      const r = await this.client.markFailed(doc.dispatch_phid, {
+        failure_kind: "scheduler_wedged",
+        detail: `stale in_flight dispatch with agent_query_id=${doc.agent_query_id} for ${age}ms`,
+      });
+      if (r.ok) {
+        failed += 1;
+        this.logger.warn("scheduler_stale_in_flight_failed", {
+          phid: doc.dispatch_phid,
+          agent_query_id: doc.agent_query_id,
+          age_ms: age,
+          stale_in_flight_ttl_ms: this.policy.stale_in_flight_ttl_ms,
+        });
+      }
+    }
+    return failed;
   }
 
   private async countInFlight(): Promise<number> {
