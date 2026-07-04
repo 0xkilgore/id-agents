@@ -874,6 +874,13 @@ export async function migrateSqlite(adapter: SqliteAdapter): Promise<void> {
     // same logical work. The pre-insert guard reuses an existing NON-TERMINAL
     // dispatch for the key; the partial unique index below is the DB backstop.
     `ALTER TABLE dispatch_scheduler_queue ADD COLUMN dedup_key TEXT`,
+    // T-RELIABILITY (2026-07-04): durable classification of FAILED rows into
+    // real_failure / replay_duplicate / superseded, split out of the ~1100+
+    // failed-dispatch count (2026-06-30 overnight routing audit) so reliability
+    // metrics stop conflating scheduler-replay noise with genuine task
+    // failures. Null until the sweep (sweepReliabilityClassification) runs.
+    `ALTER TABLE dispatch_scheduler_queue ADD COLUMN reliability_classification TEXT`,
+    `ALTER TABLE dispatch_scheduler_queue ADD COLUMN reliability_classification_reason TEXT`,
   ]) {
     try {
       adapter.exec(stmt);
@@ -921,6 +928,8 @@ export async function migrateSqlite(adapter: SqliteAdapter): Promise<void> {
     CREATE INDEX IF NOT EXISTS dispatch_scheduler_team_agent_query_idx
       ON dispatch_scheduler_queue(team_id, agent_query_id)
       WHERE agent_query_id IS NOT NULL;
+    CREATE INDEX IF NOT EXISTS dispatch_scheduler_reliability_idx
+      ON dispatch_scheduler_queue(team_id, status, reliability_classification);
   `);
 
   await migrateQueriesTeamQueryPkSqlite(adapter);

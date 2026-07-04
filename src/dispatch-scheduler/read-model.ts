@@ -38,6 +38,11 @@ export interface DispatchReadRow {
   failure_detail: string | null;
   // T-RECON.2: the superseding dispatch_phid when this failed work was redone.
   supersede_link: string | null;
+  // T-RELIABILITY (2026-07-04): durable real_failure / replay_duplicate /
+  // superseded tag on FAILED rows (see sweepReliabilityClassification).
+  // Null until the sweep runs, or on non-failed rows.
+  reliability_classification: ReliabilityClassification | null;
+  reliability_classification_reason: string | null;
   needs_input: {
     clarification_id: string | null;
     active: unknown | null;
@@ -185,6 +190,8 @@ interface DispatchDbRow {
   side_effect: string | null;
   allow_auto_retry: number | null;
   supersede_link: string | null;
+  reliability_classification: string | null;
+  reliability_classification_reason: string | null;
 }
 
 export function parseDispatchReadStatus(raw: unknown): DispatchReadStatus | null {
@@ -249,7 +256,8 @@ export async function readDispatches(
             promotion_required_reason, promotion_input_json,
             promotion_result_json, result_json, artifact_path,
             recovery_status, recovery_attempts, recovery_reason,
-            side_effect, allow_auto_retry, supersede_link
+            side_effect, allow_auto_retry, supersede_link,
+            reliability_classification, reliability_classification_reason
        FROM dispatch_scheduler_queue
        WHERE team_id = ? AND status IN (${placeholders})
        ORDER BY COALESCE(completed_at, started_at, updated_at, not_before_at) DESC,
@@ -276,7 +284,8 @@ export async function readDispatchById(
             promotion_required_reason, promotion_input_json,
             promotion_result_json, result_json, artifact_path,
             recovery_status, recovery_attempts, recovery_reason,
-            side_effect, allow_auto_retry, supersede_link
+            side_effect, allow_auto_retry, supersede_link,
+            reliability_classification, reliability_classification_reason
        FROM dispatch_scheduler_queue
        WHERE team_id = ? AND (dispatch_phid = ? OR query_id = ? OR agent_query_id = ?)
        LIMIT 1`,
@@ -336,6 +345,182 @@ export async function sweepConstrainedProviderDead(
     ["constrained_provider_dead (T-RECON.2 sweep)", nowIso, teamId, ...constrained],
   );
   return n;
+}
+
+export type ReliabilityClassification = 'real_failure' | 'replay_duplicate' | 'superseded';
+
+export interface ReliabilityDedupSibling {
+  dispatch_phid: string;
+  status: string;
+  updated_at: string;
+}
+
+// Recovery-reason phrasing that already records an explicit replacement /
+// duplicate-resolved outcome (retry/reassign links, "already sent/handled",
+// or the word "superseded" itself) rather than a bare scheduler/infra death.
+const EXPLICIT_SUPERSEDE_REASON_RE =
+  /^retry →|^reassign →|superseded|already (?:sent|handled|on main)|artifact verified/i;
+
+/**
+ * T-RELIABILITY (2026-07-04): classify a FAILED dispatch as real_failure /
+ * replay_duplicate / superseded so the ~1100+ failed-dispatch count (mixes
+ * real failures with scheduler-replay noise per the 2026-06-30 overnight
+ * routing audit, incl. a +149 spike from one dead-lane wave) stops polluting
+ * reliability metrics downstream.
+ *
+ * Reuses the already-validated deriveEffectiveState taxonomy (T13.2 /
+ * T-RECON.2) as the primary signal — it already distinguishes landed work,
+ * triaged-moot infra/scheduler deaths, and explicit supersede_link rows from
+ * genuine needs-operator failures. For the tail that taxonomy still leaves in
+ * failed_needs_operator, this falls back to dedup_key + timestamp clustering
+ * (`dedupSiblings`, the dispatch_id de-dup signal requested by the reliability
+ * sweep): a later sibling sharing the same dedup_key means the scheduler
+ * re-fired the same logical work, so this row is noise (or superseded)
+ * relative to that later attempt.
+ *
+ * Pure — no IO. Returns null for non-failed rows (nothing to classify).
+ */
+export function classifyDispatchReliability(
+  row: EffectiveStateRow,
+  opts: DeriveOptions = {},
+  dedupSiblings: ReliabilityDedupSibling[] = [],
+): { classification: ReliabilityClassification; reason: string } | null {
+  if (row.status !== 'failed') return null;
+
+  const effective = deriveEffectiveState(row, opts);
+
+  if (effective === 'failed_work_landed_recoverable') {
+    return { classification: 'superseded', reason: 'recovery evidence proves the work landed' };
+  }
+
+  if (effective === 'moot_or_superseded') {
+    if (row.supersede_link) {
+      return { classification: 'superseded', reason: `supersede_link=${row.supersede_link}` };
+    }
+    if (row.recovery_reason && EXPLICIT_SUPERSEDE_REASON_RE.test(row.recovery_reason)) {
+      return { classification: 'superseded', reason: row.recovery_reason };
+    }
+    return {
+      classification: 'replay_duplicate',
+      reason: row.recovery_reason ?? 'moot: scheduler/infra-death noise, not a genuine task failure',
+    };
+  }
+
+  // effective === 'failed_needs_operator' (or any other not-yet-resolved
+  // bucket): fall back to dedup_key timestamp clustering for the tail the
+  // existing taxonomy leaves untriaged.
+  const laterSiblings = dedupSiblings.filter((s) => s.updated_at > row.updated_at);
+  if (laterSiblings.some((s) => s.status === 'done')) {
+    return { classification: 'superseded', reason: 'a later dedup_key sibling completed successfully' };
+  }
+  if (laterSiblings.some((s) => s.status === 'failed')) {
+    return {
+      classification: 'replay_duplicate',
+      reason: 'a later dedup_key sibling also failed — scheduler re-fired the same logical work',
+    };
+  }
+
+  return { classification: 'real_failure', reason: 'no supersede/recovery/dedup evidence of noise' };
+}
+
+export interface ReliabilitySweepResult {
+  scanned: number;
+  classified: number;
+  breakdown: Record<ReliabilityClassification, number>;
+}
+
+/**
+ * Classification sweep over FAILED dispatches that don't have a
+ * reliability_classification yet. Persists reliability_classification /
+ * reliability_classification_reason so the dashboard chip (STUB-S6) and
+ * future reliability audits can query a durable column instead of
+ * re-deriving noise-vs-real on every read. Safe to re-run: only touches
+ * unclassified rows, so re-running after new failures land is cheap and a
+ * fresh dedup_key sibling only ever reclassifies rows that are still
+ * unclassified.
+ */
+export async function sweepReliabilityClassification(
+  adapter: DbAdapterLike,
+  teamId: string,
+  opts: DeriveOptions = {},
+): Promise<ReliabilitySweepResult> {
+  const { rows: failedRows } = await adapter.query<DispatchDbRow & { dedup_key: string | null }>(
+    `SELECT dispatch_phid, team_id, query_id, to_agent, from_actor, channel, subject,
+            provider, runtime, priority, status, not_before_at, attempt_count,
+            bounce_count, started_at, completed_at, updated_at, agent_query_id,
+            failure_kind, failure_detail, clarification_id,
+            active_clarification_json, clarification_history_json,
+            resume_delivery_status, promote, promotion_strategy,
+            promotion_required_reason, promotion_input_json,
+            promotion_result_json, result_json, artifact_path,
+            recovery_status, recovery_attempts, recovery_reason,
+            side_effect, allow_auto_retry, supersede_link,
+            reliability_classification, reliability_classification_reason, dedup_key
+       FROM dispatch_scheduler_queue
+      WHERE team_id = ? AND status = 'failed' AND reliability_classification IS NULL`,
+    [teamId],
+  );
+
+  const breakdown: Record<ReliabilityClassification, number> = {
+    real_failure: 0,
+    replay_duplicate: 0,
+    superseded: 0,
+  };
+  if (failedRows.length === 0) return { scanned: 0, classified: 0, breakdown };
+
+  const dedupKeys = [...new Set(failedRows.map((r) => r.dedup_key).filter((k): k is string => !!k))];
+  const siblingsByKey = new Map<string, ReliabilityDedupSibling[]>();
+  if (dedupKeys.length > 0) {
+    const placeholders = dedupKeys.map(() => '?').join(', ');
+    const { rows: siblingRows } = await adapter.query<ReliabilityDedupSibling & { dedup_key: string }>(
+      `SELECT dispatch_phid, dedup_key, status, updated_at
+         FROM dispatch_scheduler_queue
+        WHERE team_id = ? AND dedup_key IN (${placeholders})`,
+      [teamId, ...dedupKeys],
+    );
+    for (const s of siblingRows) {
+      const arr = siblingsByKey.get(s.dedup_key) ?? [];
+      arr.push(s);
+      siblingsByKey.set(s.dedup_key, arr);
+    }
+  }
+
+  let classified = 0;
+  for (const row of failedRows) {
+    const siblings = (row.dedup_key ? siblingsByKey.get(row.dedup_key) ?? [] : []).filter(
+      (s) => s.dispatch_phid !== row.dispatch_phid,
+    );
+    const result = classifyDispatchReliability(row, opts, siblings);
+    if (!result) continue;
+    breakdown[result.classification]++;
+    await adapter.query(
+      `UPDATE dispatch_scheduler_queue
+          SET reliability_classification = ?, reliability_classification_reason = ?
+        WHERE team_id = ? AND dispatch_phid = ?`,
+      [result.classification, result.reason, teamId, row.dispatch_phid],
+    );
+    classified++;
+  }
+
+  return { scanned: failedRows.length, classified, breakdown };
+}
+
+/** Tally a page of read rows by reliability_classification for the
+ *  failed-24h dashboard chip. Pure — exported for tests and API handlers. */
+export function summarizeReliabilityBreakdown(rows: DispatchReadRow[]): {
+  real_failure: number;
+  replay_duplicate: number;
+  superseded: number;
+  unclassified: number;
+} {
+  const out = { real_failure: 0, replay_duplicate: 0, superseded: 0, unclassified: 0 };
+  for (const r of rows) {
+    if (r.reliability_classification === 'real_failure') out.real_failure++;
+    else if (r.reliability_classification === 'replay_duplicate') out.replay_duplicate++;
+    else if (r.reliability_classification === 'superseded') out.superseded++;
+    else out.unclassified++;
+  }
+  return out;
 }
 
 // Task 11 (dispatch-canonical): a diagnostic view of dispatches whose
@@ -728,6 +913,8 @@ function rowToDispatch(row: DispatchDbRow, opts: DeriveOptions = {}): DispatchRe
     needs_operator: needsOperator,
     sort_group: deriveSortGroup(effectiveState, needsOperator),
     supersede_link: row.supersede_link,
+    reliability_classification: (row.reliability_classification as ReliabilityClassification | null) ?? null,
+    reliability_classification_reason: row.reliability_classification_reason ?? null,
     source_metadata: {
       source: 'dispatch_scheduler_queue',
       team_id: row.team_id,
