@@ -100,12 +100,24 @@ export function isRuntimePolicyOnlyDelta(paths: readonly string[]): boolean {
  *   - only runtime-only paths (config/docs) → a by-design advance the running
  *     manager reads live → NOT a stale binary (fixes the false drift).
  *   - any build-affecting path (src/, scripts/, …) → genuinely behind.
+ *
+ * `treeIdentical` (RD-012) is a direct, history-IGNORANT two-dot tree
+ * comparison (`git diff build_sha origin_main_sha`, not `...`). A squash or
+ * rebase merge produces a new SHA on main whose commit graph is unrelated to
+ * (or not a descendant of) the SHA the running build was compiled from, even
+ * when the two SHAs' file trees are byte-identical — the three-dot diff above
+ * is history-aware (it diffs against the merge-base), so it can report a
+ * non-empty or unresolvable delta for a promotion that changed nothing. When
+ * `treeIdentical` is `true`, it wins over `behindPaths` unconditionally: two
+ * SHAs with identical trees cannot make the compiled binary stale, regardless
+ * of how their commit graphs relate.
  */
 export function computeBuildStatus(
   input: BuildStatusInput,
   behindPaths?: readonly string[] | null,
+  treeIdentical?: boolean | null,
 ): BuildStatus {
-  const behind_origin = computeBehindOrigin(input, behindPaths);
+  const behind_origin = computeBehindOrigin(input, behindPaths, treeIdentical);
   const sourceDiffers =
     input.source_branch_sha && input.origin_main_sha
       ? input.source_branch_sha !== input.origin_main_sha
@@ -122,14 +134,18 @@ export function computeBuildStatus(
 }
 
 /** The exact-SHA behind verdict (see computeBuildStatus for the `behindPaths`
- *  contract). Pure; `null` when either SHA is unreadable. */
+ *  and `treeIdentical` contracts). Pure; `null` when either SHA is unreadable. */
 function computeBehindOrigin(
   input: BuildStatusInput,
   behindPaths?: readonly string[] | null,
+  treeIdentical?: boolean | null,
 ): boolean | null {
   const { build_sha, origin_main_sha } = input;
   if (!build_sha || !origin_main_sha) return null; // can't decide
   if (build_sha === origin_main_sha) return false; // exact match → fresh
+  // RD-012: identical trees can never mean a stale binary, independent of the
+  // (potentially squash/rebase-rewritten) commit history between the SHAs.
+  if (treeIdentical === true) return false;
   if (behindPaths === undefined || behindPaths === null) {
     return build_sha !== origin_main_sha; // exact delta unknown → raw comparison
   }
@@ -238,6 +254,25 @@ function gitBehindPaths(repoDir: string, buildSha: string, originSha: string): s
     .filter((l) => l.length > 0);
 }
 
+/**
+ * RD-012: are `buildSha` and `originSha`'s file TREES byte-identical, ignoring
+ * commit history entirely? Two-dot diff (`git diff A B`, not `A...B`) compares
+ * the two trees directly rather than against their merge-base, so it correctly
+ * reports "no difference" for a squash/rebase-merged promotion even when the
+ * commits have no ancestor relationship (where the three-dot delta above can
+ * be non-empty or fail outright). `null` on any git failure — the caller then
+ * relies solely on the three-dot-based behindPaths verdict, unchanged.
+ */
+function gitTreesIdentical(repoDir: string, buildSha: string, originSha: string): boolean | null {
+  const r = runWithTimeout(
+    "git",
+    ["-C", repoDir, "diff", "--name-only", buildSha, originSha],
+    { timeoutMs: 5000 },
+  );
+  if (!r.ok) return null;
+  return r.stdout.trim().length === 0;
+}
+
 export interface LoadBuildStatusOptions {
   /** Repo dir the manager runs from (for local/origin main lookups). */
   repoDir: string;
@@ -280,6 +315,15 @@ export function loadBuildStatus(opts: LoadBuildStatusOptions): BuildStatus {
         ? []
         : null;
 
+  // RD-012: a squash/rebase-merged promotion can leave the three-dot delta
+  // above non-empty (or unresolvable) even when the compiled tree hasn't
+  // actually changed. A direct two-dot tree comparison is the tiebreaker;
+  // only worth the extra git call when both SHAs are known and differ.
+  const tree_identical =
+    build_sha && origin_main_sha && build_sha !== origin_main_sha
+      ? gitTreesIdentical(opts.repoDir, build_sha, origin_main_sha)
+      : null;
+
   return computeBuildStatus(
     {
       build_sha,
@@ -291,6 +335,7 @@ export function loadBuildStatus(opts: LoadBuildStatusOptions): BuildStatus {
       source,
     },
     behind_paths,
+    tree_identical,
   );
 }
 

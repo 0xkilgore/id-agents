@@ -153,6 +153,59 @@ describe("computeBuildStatus — exact promoted-sha delta (no false-stale)", () 
   });
 });
 
+describe("computeBuildStatus — RD-012 squash/rebase promotion (tree-identical override)", () => {
+  it("is NOT behind when a squash-merge's three-dot delta looks build-affecting but the trees are identical", () => {
+    // A squash merge on main is a NEW commit with no history relationship to the
+    // feature-branch SHA the build was compiled from — three-dot diffs against
+    // their merge-base, so it can list every file the feature branch ever
+    // touched (including src/) even though main's final tree is byte-identical
+    // to what's already running. treeIdentical=true must win.
+    const s = computeBuildStatus(
+      input({ build_sha: "feat0001", source_branch_sha: "squash999", origin_main_sha: "squash999" }),
+      ["src/agent-manager-db.ts", "src/build-info.ts"],
+      true,
+    );
+    expect(s.behind_origin).toBe(false);
+    expect(s.freshness.classification).toBe("fresh");
+  });
+
+  it("is NOT behind when the three-dot delta is unresolvable (unrelated histories) but the trees are identical", () => {
+    // git failed to compute the three-dot delta at all (behindPaths=null) — the
+    // documented "unrelated histories" case a squash/rebase can produce. Without
+    // treeIdentical this used to fall back to the raw-SHA comparison (stale).
+    const s = computeBuildStatus(
+      input({ build_sha: "feat0001", source_branch_sha: "squash999", origin_main_sha: "squash999" }),
+      null,
+      true,
+    );
+    expect(s.behind_origin).toBe(false);
+  });
+
+  it("still uses the behindPaths verdict when trees are NOT identical (treeIdentical=false)", () => {
+    const s = computeBuildStatus(
+      input({ build_sha: "old0001", source_branch_sha: "src9999", origin_main_sha: "src9999" }),
+      ["src/agent-manager-db.ts"],
+      false,
+    );
+    expect(s.behind_origin).toBe(true);
+    expect(s.freshness.classification).toBe("server_not_rebuilt");
+  });
+
+  it("still uses the behindPaths verdict when treeIdentical is unknown (null) — no behavior change from before RD-012", () => {
+    const s = computeBuildStatus(
+      input({ build_sha: "old0001", source_branch_sha: "src9999", origin_main_sha: "src9999" }),
+      ["src/agent-manager-db.ts"],
+      null,
+    );
+    expect(s.behind_origin).toBe(true);
+  });
+
+  it("treeIdentical cannot override an exact SHA match short-circuit (already fresh either way)", () => {
+    const s = computeBuildStatus(input(), [], false);
+    expect(s.behind_origin).toBe(false);
+  });
+});
+
 describe("runtime-only path classification", () => {
   it("isRuntimeOnlyPath: configs/, docs/, and top-level *.md are runtime-only", () => {
     expect(isRuntimeOnlyPath("configs/model-policy.json")).toBe(true);
