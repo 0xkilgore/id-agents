@@ -84,6 +84,14 @@ export interface DaemonDeps {
    */
   resolveDispatchStates?: (phids: string[]) => Promise<Map<string, string>>;
   /**
+   * RD-014: resolve which of the given agent names are currently
+   * healthy/running. Optional so legacy boot/test paths mount unchanged
+   * (health gating is then skipped, matching pre-RD-014 behavior) — a
+   * missing resolver is a degraded-but-safe default, not a silent gap,
+   * since the daemon still admits (it just can't tell healthy from not).
+   */
+  resolveAgentHealth?: (names: string[]) => Promise<Set<string>>;
+  /**
    * Build-pool routing (Stage C). When provided, an admitted item that resolves
    * to a pool late-binds its builder + worktree at FIRE time: the daemon spills
    * across pool members and each in-flight build gets a DISTINCT worktree
@@ -236,6 +244,18 @@ export class ContinuousOrchestrationDaemon {
     // of serializing the whole backlog onto one lane.
     const poolGate = await this.buildPoolGate(ordered);
 
+    // RD-014: resolve live health for every agent name admission might target
+    // this tick — non-pool candidates' to_agent, plus every pool's builder
+    // list (any of them could be late-bound). Root cause of the pending-lane
+    // cascade (+149 failed dispatches in one overnight wave): admission fired
+    // to a lane with no check the target runtime was actually up.
+    const candidateAgentNames = new Set<string>();
+    for (const item of ordered) if (item.to_agent) candidateAgentNames.add(item.to_agent);
+    if (poolGate) for (const builders of poolGate.pool_free_builders.values()) for (const b of builders) candidateAgentNames.add(b);
+    const healthy_agents = this.deps.resolveAgentHealth
+      ? await this.deps.resolveAgentHealth([...candidateAgentNames])
+      : undefined;
+
     const ctx: AdmissionContext = {
       mode: state.mode,
       kill_switch_active: killSwitch,
@@ -248,6 +268,7 @@ export class ContinuousOrchestrationDaemon {
       pool_for: poolGate?.pool_for,
       pool_free_slots: poolGate?.pool_free_slots,
       pool_free_builders: poolGate?.pool_free_builders,
+      healthy_agents,
     };
 
     const plan = planAdmission(ordered, ctx, config);

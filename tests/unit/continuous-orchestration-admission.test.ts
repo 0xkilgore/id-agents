@@ -302,6 +302,83 @@ describe("planAdmission — per-item guardrails", () => {
   });
 });
 
+// RD-014: the admission daemon previously fired dispatches to a lane with no
+// live check that the target runtime was actually up — root cause of the
+// pending-lane cascade (+149 failed dispatches in one overnight wave per the
+// routing audit). These prove the gate rejects an unhealthy target and still
+// lets a healthy candidate through in the same tick.
+describe("planAdmission — RD-014 agent-health gate", () => {
+  const cfg = { ...defaultConfig(), max_in_flight: 5 };
+
+  it("rejects a non-pool item whose to_agent is not in healthy_agents, with a clear reason", () => {
+    const p = planAdmission(
+      [item({ to_agent: "gaudi" })],
+      ctx({ admit_limit: 5, healthy_agents: new Set(["roger"]) }),
+      cfg,
+    );
+    expect(p.admit).toHaveLength(0);
+    expect(p.skipped[0].reason).toMatch(/target agent 'gaudi' is not healthy/);
+  });
+
+  it("admits a non-pool item whose to_agent IS in healthy_agents", () => {
+    const p = planAdmission(
+      [item({ to_agent: "roger" })],
+      ctx({ admit_limit: 5, healthy_agents: new Set(["roger"]) }),
+      cfg,
+    );
+    expect(p.admit).toHaveLength(1);
+  });
+
+  it("does not health-gate at all when healthy_agents is undefined (resolver unavailable — pre-RD-014 fallback)", () => {
+    const p = planAdmission([item({ to_agent: "nobody-knows-this-agent" })], ctx({ admit_limit: 5 }), cfg);
+    expect(p.admit).toHaveLength(1);
+  });
+
+  it("a candidate with an unhealthy target does not block a healthy candidate later in the same tick", () => {
+    const unhealthy = item({ item_id: "a", to_agent: "gaudi" });
+    const healthy = item({ item_id: "b", to_agent: "roger" });
+    const p = planAdmission(
+      [unhealthy, healthy],
+      ctx({ admit_limit: 5, healthy_agents: new Set(["roger"]) }),
+      cfg,
+    );
+    expect(p.admit.map((i) => i.item_id)).toEqual(["b"]);
+    expect(p.skipped[0].item_id).toBe("a");
+  });
+
+  it("rejects a POOL item whose assigned builder is not healthy", () => {
+    const p = planAdmission(
+      [item({ item_id: "pool-item", write_scope: [] })],
+      ctx({
+        admit_limit: 5,
+        pool_for: () => "backend",
+        pool_free_slots: new Map([["backend", 1]]),
+        pool_free_builders: new Map([["backend", ["substrate-api-codex"]]]),
+        healthy_agents: new Set(["roger"]), // substrate-api-codex is NOT healthy
+      }),
+      cfg,
+    );
+    expect(p.admit).toHaveLength(0);
+    expect(p.skipped[0].reason).toMatch(/target agent 'substrate-api-codex' is not healthy/);
+  });
+
+  it("admits a POOL item whose assigned builder IS healthy", () => {
+    const p = planAdmission(
+      [item({ item_id: "pool-item", write_scope: [] })],
+      ctx({
+        admit_limit: 5,
+        pool_for: () => "backend",
+        pool_free_slots: new Map([["backend", 1]]),
+        pool_free_builders: new Map([["backend", ["roger"]]]),
+        healthy_agents: new Set(["roger"]),
+      }),
+      cfg,
+    );
+    expect(p.admit).toHaveLength(1);
+    expect(p.assignments["pool-item"]).toBe("roger");
+  });
+});
+
 describe("evaluateStall", () => {
   const cfg = { ...defaultConfig(), stall_threshold_ticks: 3 };
   it("counts consecutive zero-dispatch ticks with work available", () => {

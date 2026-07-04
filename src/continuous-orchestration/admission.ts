@@ -37,6 +37,19 @@ export interface AdmissionContext {
   pool_free_slots?: Map<string, number>;
   /** Available builders per pool, in preference order (consumed as admitted). */
   pool_free_builders?: Map<string, string[]>;
+  /**
+   * RD-014: agent names currently healthy/online. When provided, admission
+   * rejects any candidate whose resolved target (the pool-assigned builder,
+   * or `to_agent` for non-pool items) is NOT in this set — the admission
+   * daemon previously fired dispatches to a lane with no live check that the
+   * target runtime was actually up, which was the root cause of the
+   * pending-lane cascade (+149 failed dispatches in one overnight wave).
+   * `undefined`/`null` means health data was unavailable this tick (the
+   * resolver is optional/best-effort) — admission then falls back to the
+   * pre-RD-014 behavior (no health gate) rather than halting the whole
+   * daemon on a health-check outage.
+   */
+  healthy_agents?: Set<string> | null;
 }
 
 export interface AdmissionPlan {
@@ -171,6 +184,21 @@ export function planAdmission(
         item_id: item.item_id,
         action: "skipped",
         reason: "ready item missing to_agent or dispatch_body",
+      });
+      continue;
+    }
+    // RD-014: reject admission to a target whose runtime is not live. The
+    // resolved target is the pool-assigned builder (if this is a pool item)
+    // or item.to_agent otherwise — both are guaranteed non-null past the
+    // check above. Skipping (not halting the tick) matches every other
+    // per-candidate gate here; a later, healthier candidate in this same
+    // tick still gets a chance.
+    const target = poolId ? assignedBuilder : item.to_agent;
+    if (ctx.healthy_agents && target && !ctx.healthy_agents.has(target)) {
+      skipped.push({
+        item_id: item.item_id,
+        action: "skipped",
+        reason: `target agent '${target}' is not healthy/online (RD-014 admission health gate)`,
       });
       continue;
     }

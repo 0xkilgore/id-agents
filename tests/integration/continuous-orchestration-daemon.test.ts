@@ -11,6 +11,7 @@ import {
   getBacklogItem,
   listRecentDecisions,
   getOrchestrationState,
+  getHealthyAgentNames,
 } from "../../src/continuous-orchestration/storage.js";
 import { parseRoadmapToBacklog } from "../../src/continuous-orchestration/roadmap-import.js";
 import { ContinuousOrchestrationDaemon } from "../../src/continuous-orchestration/daemon.js";
@@ -39,6 +40,9 @@ function makeDaemon(
     alerts?: string[];
     newsEvents?: Array<{ type: string; message: string; data?: Record<string, unknown> }>;
     killSwitch?: boolean;
+    // RD-014: undefined (the default) means "no health resolver wired" —
+    // matches every pre-RD-014 test in this file exactly (no gating at all).
+    resolveAgentHealth?: (names: string[]) => Promise<Set<string>>;
   } = {},
 ) {
   const fired: BacklogItem[] = [];
@@ -56,6 +60,7 @@ function makeDaemon(
     readUsage: over.readUsage ?? (() => Promise.resolve(okUsage())),
     readInFlight: () =>
       Promise.resolve({ count: over.inFlight ?? 0, active_write_scopes: over.activeScopes ?? new Set() }),
+    resolveAgentHealth: over.resolveAgentHealth,
     alert: async (m) => {
       alerts.push(m);
     },
@@ -80,6 +85,19 @@ async function seedReady(adapter: SqliteAdapter, over: Partial<BacklogItem> = {}
     token_estimate: over.token_estimate ?? 0,
   });
   return item;
+}
+
+/** Minimal valid `agents` row — RD-014 health-gate tests only care about name+status. */
+async function seedAgent(adapter: SqliteAdapter, name: string, status: string) {
+  await adapter.query(
+    `INSERT OR IGNORE INTO teams (id, name) VALUES ($1, $2)`,
+    ["team-uuid-9999", "default"],
+  );
+  await adapter.query(
+    `INSERT INTO agents (id, team_id, name, type, model, port, status, created_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+    [`agent_${name}`, "team-uuid-9999", name, "claude", "claude-fable-5", 0, status, Date.now()],
+  );
 }
 
 let adapter: SqliteAdapter;
@@ -274,5 +292,54 @@ describe("daemon — guardrail alerts", () => {
 
     const readyAfter = await listBacklogByState(adapter, { state: "ready" });
     expect(readyAfter).toHaveLength(4);
+  });
+});
+
+// RD-014: admission previously fired to a lane with no live check the target
+// runtime was actually up — root cause of the pending-lane cascade (+149
+// failed dispatches in one overnight wave per the routing audit).
+describe("RD-014 — admission health gate (real getHealthyAgentNames against the agents table)", () => {
+  it("getHealthyAgentNames returns only running, non-deleted agents by name (no team filter)", async () => {
+    await seedAgent(adapter, "roger", "running");
+    await seedAgent(adapter, "gaudi", "pending");
+    await seedAgent(adapter, "hopper", "stopped");
+    const healthy = await getHealthyAgentNames(adapter, ["roger", "gaudi", "hopper", "unknown-agent"]);
+    expect(healthy).toEqual(new Set(["roger"]));
+  });
+
+  it("a running agent that flips to pending MID-TICK is excluded from the very next tick's admission", async () => {
+    await seedAgent(adapter, "roger", "running");
+    const first = await seedReady(adapter, { title: "first", to_agent: "roger", write_scope: ["lane-1"] });
+
+    const { daemon, fired } = makeDaemon(adapter, {
+      config: { dry_run: false, max_in_flight: 5 },
+      resolveAgentHealth: (names) => getHealthyAgentNames(adapter, names),
+    });
+    await daemon.setMode("running");
+
+    // Tick 1: roger is running — admits normally.
+    const t1 = await daemon.runTick();
+    expect(fired.map((i) => i.item_id)).toContain(first.item_id);
+    expect((await getBacklogItem(adapter, first.item_id))!.readiness_state).toBe("in_flight");
+
+    // roger flips to pending mid-tick (e.g. a restart/redeploy in progress).
+    await adapter.query(`UPDATE agents SET status = 'pending' WHERE name = 'roger'`);
+    const second = await seedReady(adapter, { title: "second", to_agent: "roger", write_scope: ["lane-2"] });
+
+    // Tick 2: same daemon, same target agent — now held, not fired.
+    const t2 = await daemon.runTick();
+    expect(fired.map((i) => i.item_id)).not.toContain(second.item_id);
+    expect((await getBacklogItem(adapter, second.item_id))!.readiness_state).toBe("ready");
+    expect(
+      t2.decisions.some((d) => d.item_id === second.item_id && /not healthy\/online/.test(d.reason)),
+    ).toBe(true);
+  });
+
+  it("falls back to no gating when resolveAgentHealth is not wired (legacy/degraded default)", async () => {
+    await seedReady(adapter, { title: "no health resolver wired", to_agent: "nobody-registered-this-agent" });
+    const { daemon, fired } = makeDaemon(adapter, { config: { dry_run: false, max_in_flight: 5 } }); // no resolveAgentHealth
+    await daemon.setMode("running");
+    await daemon.runTick();
+    expect(fired).toHaveLength(1);
   });
 });

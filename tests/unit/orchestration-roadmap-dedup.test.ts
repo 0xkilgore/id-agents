@@ -220,6 +220,16 @@ describe("daemon enqueue dedup key", () => {
         weekly: { percent_consumed: 0, combined_weighted_tokens: 0, budget: 1_000_000 },
       }),
     };
+    // RD-014: the factory wires a real agent-health resolver against `agents`
+    // — seed roger as running so this test's admission isn't rejected as
+    // "not healthy" for an agent that was simply never registered here.
+    await adapter.query(`INSERT OR IGNORE INTO teams (id, name) VALUES ($1, $2)`, ["team-uuid-9999", "default"]);
+    await adapter.query(
+      `INSERT INTO agents (id, team_id, name, type, model, port, status, created_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+      ["agent_roger", "team-uuid-9999", "roger", "claude", "claude-fable-5", 0, "running", Date.now()],
+    );
+
     const { daemon } = createContinuousOrchestrationDaemon({
       adapter,
       scheduler: scheduler as never,

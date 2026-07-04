@@ -11,7 +11,7 @@ import type { Provider, Runtime } from "../dispatch-scheduler/types.js";
 import type { DaemonUsageReport, UsageReportV2 } from "../usage-meter/types.js";
 import { ContinuousOrchestrationDaemon } from "./daemon.js";
 import { loadContinuousOrchestrationConfig, type ContinuousOrchestrationConfig } from "./config.js";
-import { getDispatchStatusesByPhid, listBacklogByState } from "./storage.js";
+import { getDispatchStatusesByPhid, getHealthyAgentNames, listBacklogByState } from "./storage.js";
 import type { BacklogItem } from "./types.js";
 import type { PoolRouting, ResolvedPool } from "./daemon.js";
 import { BuildPoolRegistry } from "../build-pools/index.js";
@@ -121,6 +121,9 @@ export function createContinuousOrchestrationDaemon(opts: BuildDaemonOptions): {
     // Phid-only lookup (no team filter) — dispatch rows are team-UUID-keyed while
     // CO storage uses the team NAME, so a scoped read would never match.
     resolveDispatchStates: (phids: string[]) => getDispatchStatusesByPhid(opts.adapter, phids),
+    // RD-014: live agent-health gate at admission — name-only lookup (no team
+    // filter), same trap-avoidance reasoning as resolveDispatchStates above.
+    resolveAgentHealth: (names: string[]) => getHealthyAgentNames(opts.adapter, names),
     emitNews: opts.emitNews,
 
     // Stage C build-pool routing: late-bind builder + a distinct worktree

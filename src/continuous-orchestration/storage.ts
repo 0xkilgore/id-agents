@@ -435,6 +435,33 @@ export async function getDispatchStatusesByPhid(
   return out;
 }
 
+/**
+ * RD-014: which of `names` are currently a healthy/running agent. No team
+ * filter, by name only — mirrors getDispatchStatusesByPhid's "phid-only, no
+ * team filter" trap avoidance, since continuous-orchestration's team_id
+ * ("default", a name) does not match the `agents` table's team_id (a UUID).
+ * An agent name can have more than one row (e.g. a stale port from a prior
+ * process alongside the live one) — healthy if ANY non-deleted row for that
+ * name is `running`. Names absent from the returned set are either unknown
+ * or not running; both are treated as "not healthy" by the admission gate.
+ */
+export async function getHealthyAgentNames(
+  adapter: DbAdapter,
+  names: string[],
+): Promise<Set<string>> {
+  const out = new Set<string>();
+  const unique = [...new Set(names.filter((n): n is string => !!n))];
+  if (unique.length === 0) return out;
+  const placeholders = unique.map((_, i) => `$${i + 1}`).join(",");
+  const { rows } = await adapter.query<{ name: string }>(
+    `SELECT DISTINCT name FROM agents
+      WHERE name IN (${placeholders}) AND status = 'running' AND deleted_at IS NULL`,
+    unique,
+  );
+  for (const r of rows) out.add(r.name);
+  return out;
+}
+
 // ── Auto-flesh (daemon SELF-REFUEL) ──────────────────────────────────
 
 /**
