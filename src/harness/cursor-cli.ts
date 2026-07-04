@@ -181,10 +181,12 @@ export class CursorCliHarness implements AgentHarness {
 
     const timeoutMs = resolveHarnessTimeoutMs(options);
     let timedOut = false;
+    let timedOutAt = 0;
     const clearWatchdog = armProcessTimeout(proc, timeoutMs, {
       graceMs: KILL_GRACE_MS,
       onTimeout: () => {
         timedOut = true;
+        timedOutAt = Date.now();
         console.error(`[Cursor CLI] Timed out after ${timeoutMs}ms (PID: ${proc.pid}); killing.`);
       },
     });
@@ -277,9 +279,29 @@ export class CursorCliHarness implements AgentHarness {
         state.terminalEmitted = true;
         break;
       }
+
+      // A killed process can leave a pipe open — cursor-agent can run shell
+      // commands as children, and an orphaned grandchild that inherited
+      // stdout keeps `stdout.on('end')` from ever firing even though the
+      // process the watchdog cared about is long dead. Without this, `done`
+      // never flips and this loop (and the dispatch behind it) hangs
+      // forever — reproduced 2026-07-03. Force the loop closed a bounded
+      // window after the watchdog kill.
+      if (timedOut && Date.now() - timedOutAt > KILL_GRACE_MS + 1000) {
+        break;
+      }
     }
 
-    await completionPromise;
+    // Bounded when we broke out early on a timeout, for the same
+    // orphaned-pipe reason above.
+    if (timedOut) {
+      await Promise.race([
+        completionPromise,
+        new Promise<void>((resolve) => setTimeout(resolve, KILL_GRACE_MS + 1000)),
+      ]);
+    } else {
+      await completionPromise;
+    }
 
     if (timedOut) {
       yield {

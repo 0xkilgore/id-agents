@@ -95,10 +95,12 @@ export class CodexHarness implements AgentHarness {
 
     const timeoutMs = resolveHarnessTimeoutMs(options);
     let timedOut = false;
+    let timedOutAt = 0;
     const clearWatchdog = armProcessTimeout(proc, timeoutMs, {
       graceMs: KILL_GRACE_MS,
       onTimeout: () => {
         timedOut = true;
+        timedOutAt = Date.now();
         console.error(`[Codex] Timed out after ${timeoutMs}ms (PID: ${proc.pid}); killing.`);
       },
     });
@@ -424,10 +426,30 @@ export class CodexHarness implements AgentHarness {
         yield { type: 'error', content: 'Cancelled' };
         break;
       }
+
+      // A killed process can leave a pipe open — e.g. `codex exec` itself
+      // runs shell commands as children, and an orphaned grandchild that
+      // inherited stdout keeps `stdout.on('end')` from ever firing even
+      // though the process the watchdog cared about is long dead. Without
+      // this, `done` never flips and this loop (and the dispatch behind it)
+      // hangs forever — reproduced 2026-07-03 with a child that forks and
+      // detaches a background command before the watchdog fires. Force the
+      // loop closed a bounded window after the watchdog kill.
+      if (timedOut && Date.now() - timedOutAt > KILL_GRACE_MS + 1000) {
+        break;
+      }
     }
 
-    // Issue 3: Wait for both stdout end AND process exit
-    await completionPromise;
+    // Issue 3: Wait for both stdout end AND process exit. Bounded when we
+    // broke out early on a timeout, for the same orphaned-pipe reason above.
+    if (timedOut) {
+      await Promise.race([
+        completionPromise,
+        new Promise<void>((resolve) => setTimeout(resolve, KILL_GRACE_MS + 1000)),
+      ]);
+    } else {
+      await completionPromise;
+    }
 
     if (timedOut) {
       yield {
