@@ -136,6 +136,8 @@ import {
   readDispatches,
   readReconciliation,
   sweepConstrainedProviderDead,
+  sweepReliabilityClassification,
+  summarizeReliabilityBreakdown,
   failedDispatchesWithin,
   FAILED_24H_WINDOW_MS,
 } from './dispatch-scheduler/read-model.js';
@@ -3970,6 +3972,10 @@ export class AgentManagerDb {
           since: new Date(Date.parse(now) - windowMs).toISOString(),
           now,
           count: dispatches.length,
+          // T-RELIABILITY (2026-07-04): classified breakdown so the dashboard
+          // "Failures 24h" chip can show real vs scheduler-replay noise
+          // instead of one undifferentiated count.
+          reliability_breakdown: summarizeReliabilityBreakdown(dispatches),
           dispatches,
           items: dispatches,
         });
@@ -10835,6 +10841,29 @@ export class AgentManagerDb {
               }
             } catch (err) {
               console.warn('[Manager] T-RECON.2 dead-failure sweep failed:', err instanceof Error ? err.message : String(err));
+            }
+            // T-RELIABILITY (2026-07-04): one-time (+ safe-to-repeat) sweep
+            // classifying FAILED rows as real_failure / replay_duplicate /
+            // superseded, so the ~1100+ failed-dispatch count (2026-06-30
+            // overnight routing audit) stops conflating scheduler-replay
+            // noise with genuine task failures downstream (dashboard chip,
+            // reliability audits). Only touches unclassified rows each run.
+            try {
+              const reliabilitySweep = await sweepReliabilityClassification(
+                this.db.adapter,
+                defaultTeamId,
+                { constrainedProviders: this.modelPolicy.constrainedProviders() },
+              );
+              if (reliabilitySweep.classified > 0) {
+                console.log(
+                  `[Manager] T-RELIABILITY classified ${reliabilitySweep.classified} failed dispatch(es) ` +
+                    `(real_failure=${reliabilitySweep.breakdown.real_failure}, ` +
+                    `replay_duplicate=${reliabilitySweep.breakdown.replay_duplicate}, ` +
+                    `superseded=${reliabilitySweep.breakdown.superseded})`,
+                );
+              }
+            } catch (err) {
+              console.warn('[Manager] T-RELIABILITY classification sweep failed:', err instanceof Error ? err.message : String(err));
             }
             this.dispatchScheduler = new SchedulerHandle({
               adapter: this.db.adapter as SqliteAdapter,
