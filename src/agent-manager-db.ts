@@ -207,6 +207,14 @@ import {
 } from './deploy-guard/fleet-freshness.js';
 import { readReleaseState } from './deploy-guard/release-state.js';
 import { sendTelegramAlert } from './continuous-orchestration/telegram.js';
+import {
+  evaluateFleetRuntimeDrift,
+  deriveRuntimeDriftState,
+  EMPTY_FLEET_DRIFT_SUMMARY,
+  type FleetRuntimeDriftState,
+  type FleetRuntimeDriftSummary,
+  type AgentDriftInput,
+} from './dispatch-scheduler/runtime-drift.js';
 import { normalizeActorRef } from './actor-identity.js';
 import {
   validateGrantInput,
@@ -587,6 +595,14 @@ export class AgentManagerDb {
   private fleetFreshnessState: FleetFreshnessState = {};
   private fleetFreshnessSummary: FleetFreshnessSummary = EMPTY_FLEET_SUMMARY;
   private freshnessMonitorInterval: NodeJS.Timeout | null = null;
+  // RD-014 drift-guard Ticket A — per-agent runtime-liveness drift tracker,
+  // same durability class (in-memory, not persisted) as fleetFreshnessState
+  // above. Advanced on the SAME 60s freshness-monitor tick rather than a
+  // second interval. `runtimeDriftSummary` is read by readFleetBlockages via
+  // readDispatchHealth (/dispatches/health) since the drift tracker is
+  // in-memory and can't be queried like the other blockage sources.
+  private runtimeDriftState: FleetRuntimeDriftState = {};
+  private runtimeDriftSummary: FleetRuntimeDriftSummary = EMPTY_FLEET_DRIFT_SUMMARY;
   private remoteProbeInterval: NodeJS.Timeout | null = null;
   private querySweeperInterval: NodeJS.Timeout | null = null;
   private filesystemArtifactReconcileInterval: NodeJS.Timeout | null = null;
@@ -1164,7 +1180,7 @@ export class AgentManagerDb {
     const intervalMs = 120_000;
     const run = async () => {
       try {
-        const report = await readFleetBlockages(this.db.adapter, teamId);
+        const report = await readFleetBlockages(this.db.adapter, teamId, this.runtimeDriftSummary);
         if (!report.blocked || report.blockages.length === 0) return;
         const fingerprint = report.blockages.map((b) => `${b.kind}:${b.count}`).join('|');
         const now = Date.now();
@@ -3893,7 +3909,7 @@ export class AgentManagerDb {
     this.managementApp.get('/dispatches/health', async (req, res) => {
       try {
         const { id: teamId, name: teamName } = await this.getTeam(req);
-        const health = await readDispatchHealth(this.db.adapter, teamId);
+        const health = await readDispatchHealth(this.db.adapter, teamId, this.runtimeDriftSummary);
         return res.json({ ok: true, team: teamName, ...health });
       } catch (err) {
         return res.status(500).json({
@@ -10537,7 +10553,7 @@ export class AgentManagerDb {
   private startFreshnessMonitor(): void {
     if (this.freshnessMonitorInterval) return;
     const thresholdMs = Number(process.env.DEPLOY_FRESHNESS_THRESHOLD_MS) || undefined;
-    const tick = () => {
+    const tick = async () => {
       try {
         const nodes = resolveFleetNodes(process.env, process.cwd());
         const inputs: FleetNodeInput[] = nodes.map((node) => {
@@ -10573,8 +10589,51 @@ export class AgentManagerDb {
       } catch (err) {
         console.warn('[Manager] freshness monitor tick failed:', err instanceof Error ? err.message : String(err));
       }
+
+      // RD-014 drift-guard Ticket A — same 60s tick as fleet-freshness above
+      // (no second interval). Own try/catch so a drift-check failure can
+      // never block freshness alerting, and vice versa.
+      try {
+        const teamId = await this.db.teams.getOrCreateTeamId('default');
+        const agents = await this.db.agents.list(teamId, true);
+        const [codex, cursor] = await Promise.all([
+          checkCodexFallbackHealth(),
+          checkCursorFallbackHealth({ live: false }),
+        ]);
+        const runtimes: RuntimeLiveness[] = [
+          { name: 'claude', role: 'primary', live: true, detail: 'manager process is running' },
+          runtimeLivenessFromFallbackHealth('codex', codex),
+          runtimeLivenessFromFallbackHealth('cursor', cursor),
+        ];
+        const healthModel = computeRoutingHealth({
+          team_id: teamId,
+          now: new Date().toISOString(),
+          pools: [],
+          builders: [],
+          dispatches: [],
+          runtimes,
+        });
+        const driftInputs: AgentDriftInput[] = agents.map((a) => ({
+          agent_id: a.id,
+          agent_name: a.name,
+          state: deriveRuntimeDriftState(a, healthModel),
+        }));
+        const { next: nextDrift, alerts: driftAlerts, summary: driftSummary } = evaluateFleetRuntimeDrift(
+          this.runtimeDriftState,
+          driftInputs,
+          Date.now(),
+        );
+        this.runtimeDriftState = nextDrift;
+        this.runtimeDriftSummary = driftSummary;
+        for (const { agent_name, alert } of driftAlerts) {
+          console.warn(`[Manager] runtime-drift ${agent_name} ${alert.kind}: ${alert.message}`);
+          void sendTelegramAlert(`[${agent_name}] ${alert.message}`).catch(() => {});
+        }
+      } catch (err) {
+        console.warn('[Manager] runtime-drift monitor tick failed:', err instanceof Error ? err.message : String(err));
+      }
     };
-    tick();
+    void tick();
     this.freshnessMonitorInterval = setInterval(tick, 60_000);
     this.freshnessMonitorInterval.unref?.();
   }

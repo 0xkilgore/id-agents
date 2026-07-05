@@ -70,4 +70,32 @@ describe("readFleetBlockages", () => {
     expect(report.blockages[0]?.kind).toBe("needs_clarification");
     expect(report.blockages[0]?.count).toBe(1);
   });
+
+  // RD-014 drift-guard Ticket A — the in-memory runtime-drift summary is
+  // threaded through as a 3rd param (it can't be queried via `adapter` like
+  // every other blockage source here, since the tracker is in-memory).
+  it("includes stall_class_pending_agent when >=1 agent is currently drifted", async () => {
+    const report = await readFleetBlockages(new MemoryAdapter([]), "personal", {
+      drifted_agents: [
+        { agent_id: "a1", agent_name: "roger", state: "pending", since: "2026-07-05T00:00:00.000Z" },
+      ],
+    });
+
+    expect(report.blocked).toBe(true);
+    const block = report.blockages.find((b) => b.kind === "stall_class_pending_agent");
+    expect(block).toBeDefined();
+    expect(block?.severity).toBe("critical");
+    expect(block?.count).toBe(1);
+    expect(block?.message).toContain("roger (pending)");
+  });
+
+  it("omits stall_class_pending_agent when no agent is drifted", async () => {
+    const report = await readFleetBlockages(new MemoryAdapter([]), "personal", { drifted_agents: [] });
+    expect(report.blockages.find((b) => b.kind === "stall_class_pending_agent")).toBeUndefined();
+  });
+
+  it("omits stall_class_pending_agent when no drift summary is passed at all (back-compat)", async () => {
+    const report = await readFleetBlockages(new MemoryAdapter([]), "personal");
+    expect(report.blockages.find((b) => b.kind === "stall_class_pending_agent")).toBeUndefined();
+  });
 });

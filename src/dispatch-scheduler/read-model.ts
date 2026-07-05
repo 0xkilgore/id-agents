@@ -3,6 +3,7 @@ import { existsSync, readdirSync, statSync } from 'fs';
 
 import type { DbAdapterLike } from '../supervisor/manager-source-reader.js';
 import { readFleetBlockages, type FleetBlockagesReport } from './fleet-blockages.js';
+import type { FleetRuntimeDriftSummary } from './runtime-drift.js';
 
 const ACTIVE_STATUSES = ['queued', 'in_flight', 'bounced', 'needs_clarification', 'resume_delivery_failed'];
 const TERMINAL_STATUSES = ['done', 'failed', 'cancelled'];
@@ -559,7 +560,11 @@ export async function readReconciliation(
   return { stuck_queued: rows };
 }
 
-export async function readDispatchHealth(adapter: DbAdapterLike, teamId: string): Promise<{
+export async function readDispatchHealth(
+  adapter: DbAdapterLike,
+  teamId: string,
+  driftSummary?: FleetRuntimeDriftSummary | null,
+): Promise<{
   status: 'ok';
   team_id: string;
   counts: Record<string, number>;
@@ -596,7 +601,7 @@ export async function readDispatchHealth(adapter: DbAdapterLike, teamId: string)
     [...ACTIVE_STATUSES, ...TERMINAL_STATUSES, teamId],
   );
 
-  const blockages = await readFleetBlockages(adapter, teamId);
+  const blockages = await readFleetBlockages(adapter, teamId, driftSummary);
 
   return {
     status: 'ok',

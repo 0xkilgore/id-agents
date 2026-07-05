@@ -1,11 +1,13 @@
 import type { DbAdapterLike } from "../supervisor/manager-source-reader.js";
+import type { FleetRuntimeDriftSummary } from "./runtime-drift.js";
 
 export type FleetBlockageKind =
   | "needs_clarification"
   | "stale_clarification"
   | "co_stall"
   | "orchestration_paused"
-  | "usage_gate_enforced";
+  | "usage_gate_enforced"
+  | "stall_class_pending_agent";
 
 export type FleetBlockage = {
   kind: FleetBlockageKind;
@@ -28,6 +30,15 @@ const CO_STALL_TICK_THRESHOLD = 3;
 export async function readFleetBlockages(
   adapter: DbAdapterLike,
   teamId: string,
+  /**
+   * RD-014 drift-guard Ticket A: the runtime-drift tracker is in-memory
+   * (same durability class as the deploy-guard freshness tracker), not a DB
+   * table like every other blockage source here — so it can't be queried
+   * inside this function. The caller (the periodic tick that owns the
+   * tracker) passes its current summary through instead of this function
+   * reaching for global state.
+   */
+  driftSummary?: FleetRuntimeDriftSummary | null,
 ): Promise<FleetBlockagesReport> {
   const nowMs = Date.now();
   const blockages: FleetBlockage[] = [];
@@ -105,6 +116,24 @@ export async function readFleetBlockages(
       count: Number(orch?.consecutive_zero_ticks ?? 0),
       oldest_at: null,
       action: "/ops",
+    });
+  }
+
+  const drifted = driftSummary?.drifted_agents ?? [];
+  if (drifted.length > 0) {
+    const oldestDrifted = drifted.reduce<string | null>((oldest, a) => {
+      if (!a.since) return oldest;
+      return !oldest || a.since < oldest ? a.since : oldest;
+    }, null);
+    blockages.push({
+      kind: "stall_class_pending_agent",
+      severity: "critical",
+      message: `${drifted.length} agent(s) drifted off healthy: ${drifted
+        .map((a) => `${a.agent_name} (${a.state})`)
+        .join(", ")}`,
+      count: drifted.length,
+      oldest_at: oldestDrifted,
+      action: "/ops/agents",
     });
   }
 

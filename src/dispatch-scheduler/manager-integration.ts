@@ -103,8 +103,12 @@ export interface SchedulerHandleOptions {
   modelPolicy?: ModelPolicyResolver;
 }
 
-const OFFLINE_AGENT_STATUSES = new Set(["stopped", "offline", "deleted", "unhealthy"]);
-const LIVE_AGENT_STATUSES = new Set(["running", "active", "online", "healthy"]);
+// Exported for reuse by runtime-drift.ts (RD-014 drift-guard Ticket A), which
+// derives its per-agent RuntimeDriftState from the SAME status vocabulary
+// this admission gate already uses, rather than re-declaring a second set
+// that could silently drift out of sync.
+export const OFFLINE_AGENT_STATUSES = new Set(["stopped", "offline", "deleted", "unhealthy"]);
+export const LIVE_AGENT_STATUSES = new Set(["running", "active", "online", "healthy"]);
 
 export function computeFleetAdmissionExclusions(agents: AgentRow[]): string[] {
   const liveCodexOrCursor = agents.some((agent) => {
