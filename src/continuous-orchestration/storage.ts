@@ -15,6 +15,7 @@ import type {
   ReadinessState,
   RiskClass,
 } from "./types.js";
+import { extractRegisterIds } from "./register-id-extraction.js";
 
 interface BacklogRow {
   item_id: string;
@@ -210,6 +211,46 @@ export async function insertBacklogItemIfAbsentByLogicalKey(
     if (existing) return { item: existing, inserted: false };
   }
   return { item: await insertBacklogItem(adapter, input), inserted: true };
+}
+
+/**
+ * Defensive cross-check for callers that mint a FRESH logical_key per item
+ * (e.g. maestra's refuel waves POSTing directly to /orchestration/backlog) —
+ * the exact-logical_key dedup above can never catch this shape of duplicate,
+ * since the new row's key never matches an existing row's key even when both
+ * reference the SAME kapelle-feedback-register.md entry.
+ *
+ * Extracts register-native ID substrings (arf:, t-ckpt:, kfb:, or similar —
+ * see register-id-extraction.ts) from the candidate's title/source_refs and
+ * checks EVERY existing backlog row for the team — in ANY readiness_state,
+ * including `done` — for the same substring in ITS title/source_refs.
+ * Caller-agnostic: doesn't care whether the candidate came from a human,
+ * another agent, or a future importer. Returns the first matching existing
+ * row, or null when the candidate carries no register-native ID or no
+ * existing row shares one.
+ */
+export async function findProbableDuplicateByRegisterId(
+  adapter: DbAdapter,
+  teamId: string,
+  candidate: { title: string; source_refs?: string[] | null },
+): Promise<BacklogItem | null> {
+  const candidateIds = extractRegisterIds(
+    `${candidate.title} ${(candidate.source_refs ?? []).join(" ")}`,
+  );
+  if (candidateIds.length === 0) return null;
+
+  const { rows } = await adapter.query<BacklogRow>(
+    `SELECT * FROM orchestration_backlog_item WHERE team_id = $1`,
+    [teamId],
+  );
+  for (const row of rows) {
+    const item = rowToBacklogItem(row);
+    const existingIds = extractRegisterIds(`${item.title} ${item.source_refs.join(" ")}`);
+    if (existingIds.some((id) => candidateIds.includes(id))) {
+      return item;
+    }
+  }
+  return null;
 }
 
 export async function getBacklogItem(adapter: DbAdapter, item_id: string): Promise<BacklogItem | null> {

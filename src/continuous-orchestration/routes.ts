@@ -12,6 +12,7 @@ import type { ContinuousOrchestrationConfig } from "./config.js";
 import type { OrchestrationMode, ReadinessState } from "./types.js";
 import {
   countFleshLogSince,
+  findProbableDuplicateByRegisterId,
   getBacklogItem,
   getFleshCounts,
   insertBacklogItem,
@@ -149,7 +150,7 @@ export function mountContinuousOrchestrationRoutes(app: Application, opts: Orche
 
   app.post("/orchestration/backlog", async (req: Request, res: Response) => {
     try {
-      const body = (req.body ?? {}) as NewBacklogItem;
+      const body = (req.body ?? {}) as NewBacklogItem & { force?: boolean };
       if (!body.title) return res.status(400).json({ ok: false, error: "title required" });
       // Validate the item's track against the canonical-track-registry. A
       // provided-but-non-conforming track is DRIFT: warn + tag, never block.
@@ -161,6 +162,30 @@ export function mountContinuousOrchestrationRoutes(app: Application, opts: Orche
           console.warn(
             `[orchestration] POST /orchestration/backlog: non-conforming track "${body.track}" — ingesting with track_drift=1 (see canonical-track-registry)`,
           );
+        }
+      }
+      // Defensive cross-check: this endpoint is hit directly by external
+      // authors (e.g. maestra's refuel-wave scripts) that mint a fresh
+      // logical_key per item, so the exact-logical_key dedup elsewhere never
+      // catches a re-authored duplicate referencing the same
+      // kapelle-feedback-register.md entry under a different key. Caller can
+      // set `force: true` to insert anyway (e.g. a register item that was
+      // genuinely reopened).
+      if (!body.force) {
+        const dup = await findProbableDuplicateByRegisterId(adapter, teamId, {
+          title: body.title,
+          source_refs: body.source_refs ?? null,
+        });
+        if (dup) {
+          return res.status(409).json({
+            ok: false,
+            error: "probable_duplicate",
+            message:
+              `A backlog item referencing the same register ID already exists ` +
+              `(item_id=${dup.item_id}, readiness_state=${dup.readiness_state}). ` +
+              `Pass force:true to insert anyway.`,
+            existing_item: dup,
+          });
         }
       }
       // New items NEVER land ready — only the approval gate can do that.
