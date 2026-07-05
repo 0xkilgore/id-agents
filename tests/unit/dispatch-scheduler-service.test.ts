@@ -13,11 +13,16 @@ import { FakeReactor } from "../../src/dispatch-scheduler/fake-reactor.js";
 import { loadSchedulerPolicy } from "../../src/dispatch-scheduler/policy.js";
 import { SchedulerService } from "../../src/dispatch-scheduler/scheduler-service.js";
 import type {
+  AdmissionGateProvider,
   AgentTransport,
   AgentTransportResult,
 } from "../../src/dispatch-scheduler/scheduler-service.js";
+import { computeRoutingHealthClaimExclusions } from "../../src/dispatch-scheduler/manager-integration.js";
+import { computeRoutingHealth } from "../../src/routing-health/read-model.js";
 import type { DispatchDoc, EnqueueInput, Provider, Runtime } from "../../src/dispatch-scheduler/types.js";
 import type { ModelPolicyResolver, ResolvedModel } from "../../src/model-policy/types.js";
+import type { AgentRow } from "../../src/db/types.js";
+import type { RoutingHealthReadModel } from "../../src/routing-health/types.js";
 
 const base: EnqueueInput = {
   query_id: "q",
@@ -99,7 +104,12 @@ function fakeModelPolicy(choice: { provider: Provider; runtime: Runtime }): {
   return { policy, calls };
 }
 
-function harness(opts?: { max?: number; now?: string; modelPolicy?: ModelPolicyResolver }) {
+function harness(opts?: {
+  max?: number;
+  now?: string;
+  modelPolicy?: ModelPolicyResolver;
+  admissionGateProvider?: AdmissionGateProvider;
+}) {
   const now = opts?.now ?? "2026-05-19T20:00:00.000Z";
   const reactor = new FakeReactor({ now: () => now });
   const client = new DispatchDocClient({ reactor, now: () => now });
@@ -116,6 +126,9 @@ function harness(opts?: { max?: number; now?: string; modelPolicy?: ModelPolicyR
     rng: () => 0.5,
     modelPolicy: opts?.modelPolicy,
   });
+  if (opts?.admissionGateProvider) {
+    scheduler.setAdmissionGateProvider(opts.admissionGateProvider);
+  }
   return { reactor, client, transport, policy, scheduler };
 }
 
@@ -595,5 +608,108 @@ describe("SchedulerService — crash tolerance (Phase 3.4)", () => {
     expect(allClaimed).toBe(3); // capped at max_safe = 3
     const ids = [...transport.calls, ...t2.calls].map((c) => c.phid);
     expect(new Set(ids).size).toBe(ids.length);
+  });
+});
+
+// RD-014 Ticket B: the overnight-audit cascade — "agents silently flip to
+// pending... admission keeps dispatching to them anyway." computeFleetAdmissionExclusions
+// (fleet-composition, unrelated to live health) alone can't catch this: a
+// dispatch already queued against a lane whose runtime degrades AFTER enqueue
+// needs the claim query itself to consult live routing-health.
+describe("SchedulerService.tick — RD-014 Ticket B: claim-time routing-health gate", () => {
+  function agentRow(overrides: Partial<AgentRow>): AgentRow {
+    return {
+      team_id: "team",
+      id: overrides.name ?? "agent-id",
+      name: overrides.name ?? "agent",
+      type: "persistent",
+      model: "claude-sonnet",
+      port: 1,
+      endpoint: "http://127.0.0.1:1",
+      working_directory: null,
+      status: "running",
+      created_at: 0,
+      registry: null,
+      metadata: null,
+      deleted_at: null,
+      runtime: "claude-code-cli",
+      token_id: null,
+      domain: null,
+      api_key: null,
+      customer_domain: null,
+      public_endpoint_url: null,
+      internal_endpoint_url: null,
+      ssh_target: null,
+      last_seen: null,
+      last_probed_at: null,
+      last_error: null,
+      consecutive_failures: 0,
+      ...overrides,
+    };
+  }
+
+  function healthModelWith(runtimesDown: string[]): RoutingHealthReadModel {
+    return computeRoutingHealth({
+      team_id: "team",
+      now: new Date().toISOString(),
+      pools: [],
+      builders: [],
+      dispatches: [],
+      runtimes: [{ name: "claude", role: "primary", live: !runtimesDown.includes("claude") }],
+    });
+  }
+
+  it("a lane that degrades to down AFTER enqueue is excluded from the very next claim (never silently claimed by the dead lane)", async () => {
+    // base.to_agent = "coder-max", provider "anthropic" / runtime "claude-code-cli".
+    const agents = [agentRow({ id: "agent_coder-max", name: "coder-max", runtime: "claude-code-cli" })];
+    let healthModel: RoutingHealthReadModel | null = healthModelWith([]); // starts healthy
+    const admissionGateProvider: AdmissionGateProvider = {
+      getExcludedAgentsForClaim: async () => computeRoutingHealthClaimExclusions(agents, healthModel),
+    };
+    const { client, transport, scheduler } = harness({ max: 3, admissionGateProvider });
+
+    await client.enqueueDispatch(base);
+    const t1 = await scheduler.tick();
+    expect(t1.claimed).toBe(1); // healthy — claims normally
+    expect(transport.calls).toHaveLength(1);
+
+    // A second dispatch queues, then the lane degrades BEFORE this tick claims it
+    // (the overnight-audit scenario: enqueue-time health was fine; it died after).
+    await client.enqueueDispatch({ ...base, query_id: "q2" });
+    healthModel = healthModelWith(["claude"]);
+
+    const t2 = await scheduler.tick();
+    expect(t2.claimed).toBe(0);
+    expect(transport.calls).toHaveLength(1); // unchanged — q2 was NOT claimed
+
+    const doc2 = await client.getByQueryId("q2");
+    if (!doc2.ok) throw new Error();
+    expect(doc2.value.status).toBe("queued"); // stays queued with a surfaced reason, never silently claimed
+  });
+
+  it("all lanes healthy → unchanged behavior (claims normally, no behavior change)", async () => {
+    const agents = [agentRow({ id: "agent_coder-max", name: "coder-max", runtime: "claude-code-cli" })];
+    const healthModel = healthModelWith([]);
+    const admissionGateProvider: AdmissionGateProvider = {
+      getExcludedAgentsForClaim: async () => computeRoutingHealthClaimExclusions(agents, healthModel),
+    };
+    const { client, transport, scheduler } = harness({ max: 3, admissionGateProvider });
+
+    await client.enqueueDispatch(base);
+    const report = await scheduler.tick();
+    expect(report.claimed).toBe(1);
+    expect(transport.calls).toHaveLength(1);
+  });
+
+  it("/routing-health and the claim gate agree on which lanes are excluded (both read the same computeRoutingHealth output)", async () => {
+    const model = healthModelWith(["claude"]);
+    // The read-model itself is what /routing-health serves — asserting on it
+    // directly proves the claim gate and that route can never disagree, since
+    // both consume this exact object.
+    expect(model.summary.runtimes_down).toContain("claude");
+    const agents = [agentRow({ id: "agent_coder-max", name: "coder-max", runtime: "claude-code-cli" })];
+    expect(computeRoutingHealthClaimExclusions(agents, model)).toEqual(
+      expect.arrayContaining(["coder-max", "agent_coder-max"]),
+    );
   });
 });

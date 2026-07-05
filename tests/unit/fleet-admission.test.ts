@@ -1,7 +1,12 @@
 import { describe, expect, it } from "vitest";
 
-import { computeFleetAdmissionExclusions } from "../../src/dispatch-scheduler/manager-integration.js";
+import {
+  computeFleetAdmissionExclusions,
+  computeRoutingHealthClaimExclusions,
+} from "../../src/dispatch-scheduler/manager-integration.js";
+import { computeRoutingHealth } from "../../src/routing-health/read-model.js";
 import type { AgentRow } from "../../src/db/types.js";
+import type { RoutingHealthReadModel } from "../../src/routing-health/types.js";
 
 function agent(overrides: Partial<AgentRow>): AgentRow {
   return {
@@ -59,5 +64,64 @@ describe("computeFleetAdmissionExclusions", () => {
         agent({ id: "agent_cursor", name: "cursor-builder", status: "active", runtime: "cursor-cli" }),
       ]),
     ).toEqual([]);
+  });
+});
+
+// RD-014 Ticket B — the claim-time counterpart. computeFleetAdmissionExclusions
+// (above) is a fleet-COMPOSITION check (stopped/offline + a live alternative);
+// this is a live-HEALTH check, independent of the agent row's own `status` —
+// a `running` agent whose runtime itself is down (e.g. a revoked Codex cert)
+// still cannot execute anything.
+describe("computeRoutingHealthClaimExclusions", () => {
+  function healthModelWith(runtimesDown: string[]): RoutingHealthReadModel {
+    return computeRoutingHealth({
+      team_id: "team",
+      now: new Date().toISOString(),
+      pools: [],
+      builders: [],
+      dispatches: [],
+      runtimes: [
+        { name: "claude", role: "primary", live: !runtimesDown.includes("claude") },
+        { name: "codex", role: "fallback", live: !runtimesDown.includes("codex") },
+      ],
+    });
+  }
+
+  it("excludes an agent whose runtime is down, regardless of its own row status being `running`", () => {
+    const agents = [agent({ id: "agent_roger", name: "roger", status: "running", runtime: "codex" })];
+    const model = healthModelWith(["codex"]);
+    expect(computeRoutingHealthClaimExclusions(agents, model)).toEqual(
+      expect.arrayContaining(["roger", "agent_roger"]),
+    );
+  });
+
+  it("does not exclude an agent whose runtime is live", () => {
+    const agents = [agent({ id: "agent_roger", name: "roger", status: "running", runtime: "codex" })];
+    const model = healthModelWith([]); // nothing down
+    expect(computeRoutingHealthClaimExclusions(agents, model)).toEqual([]);
+  });
+
+  it("only excludes agents on the affected runtime, not the whole fleet", () => {
+    const agents = [
+      agent({ id: "agent_roger", name: "roger", status: "running", runtime: "codex" }),
+      agent({ id: "agent_regina", name: "regina", status: "running", runtime: "claude-code-cli" }),
+    ];
+    const model = healthModelWith(["codex"]);
+    const excluded = computeRoutingHealthClaimExclusions(agents, model);
+    expect(excluded).toEqual(expect.arrayContaining(["roger", "agent_roger"]));
+    expect(excluded).not.toEqual(expect.arrayContaining(["regina", "agent_regina"]));
+  });
+
+  it("fails safe: a null/absent model excludes nothing", () => {
+    const agents = [agent({ id: "agent_roger", name: "roger", runtime: "codex" })];
+    expect(computeRoutingHealthClaimExclusions(agents, null)).toEqual([]);
+    expect(computeRoutingHealthClaimExclusions(agents, undefined)).toEqual([]);
+  });
+
+  it("fails safe: an all-healthy model excludes nothing (empty runtimes_down)", () => {
+    const agents = [agent({ id: "agent_roger", name: "roger", runtime: "codex" })];
+    const model = healthModelWith([]);
+    expect(model.summary.runtimes_down).toEqual([]);
+    expect(computeRoutingHealthClaimExclusions(agents, model)).toEqual([]);
   });
 });

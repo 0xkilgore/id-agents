@@ -122,11 +122,14 @@ export function resolveProviderFromRuntime(runtime: string | undefined | null): 
 
 /**
  * Normalize a runtime string to the canonical Runtime enum. Tolerates the
- * legacy `cursor` alias and unknown values (→ "other"). Pure.
+ * legacy `cursor` alias, the bare `claude` CLI-tool label used by
+ * routing-health's `RuntimeLiveness.name` (see routing-health/types.ts),
+ * and unknown values (→ "other"). Pure.
  */
 export function normalizeRuntime(raw: string | undefined | null): Runtime {
   const v = (raw ?? "").trim().toLowerCase();
   switch (v) {
+    case "claude":
     case "claude-code-cli":
       return "claude-code-cli";
     case "claude-agent-sdk":

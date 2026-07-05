@@ -181,6 +181,47 @@ export function providersConstrainedByRoutingHealth(
   );
 }
 
+/**
+ * RD-014 Ticket B — claim-time counterpart to `providersConstrainedByRoutingHealth`.
+ * `computeFleetAdmissionExclusions` only excludes stopped/offline legacy
+ * builders when a live alternative exists — a fleet-COMPOSITION check, never
+ * consulting live runtime health. So a dispatch already queued against a lane
+ * whose runtime degrades AFTER enqueue (e.g. a Codex cert revocation) is not
+ * protected at claim time: the agent's row can still say `running` while its
+ * CLI runtime itself cannot execute anything. This closes that gap by
+ * excluding any agent whose lane routing-health reports down, independent of
+ * the agent row's `status`.
+ *
+ * Deliberately routes through `providersConstrainedByRoutingHealth` (the SAME
+ * already-tested function the enqueue-time gate calls) rather than comparing
+ * `RoutingHealthReadModel.summary.runtimes_down` entries against
+ * `agent.runtime` directly: `runtimes_down` uses coarse CLI-tool labels
+ * ("claude", "codex", "cursor" — see `runtimeLivenessFromFallbackHealth`),
+ * a DIFFERENT vocabulary than the `Runtime` enum `agent.runtime` holds
+ * ("claude-code-cli", "claude-agent-sdk", …) — a direct string comparison
+ * would silently under-match. Going through the shared provider mapping
+ * (`resolveProviderFromRuntime`) is also what guarantees this can never
+ * disagree with `providersConstrainedByRoutingHealth`'s own verdict, which is
+ * what `/routing-health` and `/dispatches/health` both surface.
+ *
+ * Reuses the ALREADY-COMPUTED `computeRoutingHealth()` read-model (passed in
+ * by the caller, which reads it the same way `currentRoutingHealthConstrainedProviders`
+ * does for enqueue) — no second health probe. Fail-safe by construction: a
+ * `null`/absent model or no constrained providers excludes nothing, so this
+ * can only ADD agents to the exclusion set the caller already computed via
+ * `computeFleetAdmissionExclusions`, never remove any.
+ */
+export function computeRoutingHealthClaimExclusions(
+  agents: AgentRow[],
+  model: RoutingHealthReadModel | null | undefined,
+): string[] {
+  const constrained = new Set(providersConstrainedByRoutingHealth(model));
+  if (constrained.size === 0) return [];
+  return agents
+    .filter((agent) => constrained.has(resolveProviderFromRuntime(agent.runtime)))
+    .flatMap((agent) => agentClaimRefs(agent));
+}
+
 function isLiveAgent(agent: AgentRow): boolean {
   const status = (agent.status ?? "").toLowerCase();
   if (OFFLINE_AGENT_STATUSES.has(status)) return false;
@@ -372,7 +413,25 @@ export class SchedulerHandle {
       this.scheduler.setAdmissionGateProvider({
         getExcludedAgentsForClaim: async () => {
           const agents = await opts.agentsRepository!.list(this.teamId, true);
-          return computeFleetAdmissionExclusions(agents);
+          const fleetExcluded = computeFleetAdmissionExclusions(agents);
+          // RD-014 Ticket B: OR in agents whose runtime routing-health
+          // reports down, so a lane that degrades AFTER enqueue is excluded
+          // from claim too — the enqueue-time RD-014 gate alone can't
+          // protect a dispatch already sitting in the queue. Kill-switched
+          // (default ON) since this changes live claim behavior fleet-wide;
+          // fails open (excludes nothing extra) on any error or when the
+          // health source itself is absent, same fail-safe posture as the
+          // enqueue-time gate.
+          let healthExcluded: string[] = [];
+          if (process.env.ID_AGENTS_DISABLE_RD014_CLAIM_HEALTH_GATE !== "1") {
+            try {
+              const model = await this.routingHealthSource?.();
+              healthExcluded = computeRoutingHealthClaimExclusions(agents, model ?? null);
+            } catch {
+              healthExcluded = [];
+            }
+          }
+          return Array.from(new Set([...fleetExcluded, ...healthExcluded]));
         },
       });
     }
