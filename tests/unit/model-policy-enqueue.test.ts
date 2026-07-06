@@ -8,6 +8,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { SqliteAdapter } from "../../src/db/sqlite-adapter.js";
 import { migrateSqlite } from "../../src/db/migrations/sqlite.js";
+import { SqliteAgentsRepo } from "../../src/db/repos/sqlite/agents-repo.js";
 import {
   SchedulerHandle,
   providersConstrainedByRoutingHealth,
@@ -52,6 +53,26 @@ function makeHandle(unavailable: Provider[]): SchedulerHandle {
   return handle;
 }
 
+function makeHandleWithAgents(unavailable: Provider[]): SchedulerHandle {
+  const handle = new SchedulerHandle({
+    adapter,
+    teamId: "team",
+    resolveTargetUrl: () => "http://localhost:1",
+    agentsRepository: new SqliteAgentsRepo(adapter),
+    modelPolicy: buildModelPolicyService(CODEX_LIGHT, "file"),
+  });
+  handle.setUnavailableProvidersSource(() => unavailable);
+  return handle;
+}
+
+async function insertAgentRuntime(name: string, runtime: string): Promise<void> {
+  await adapter.query(
+    `INSERT INTO agents (team_id, id, name, type, model, port, status, created_at, runtime, endpoint)
+     VALUES ('team', ?, ?, 'persistent', ?, 24000, 'running', ?, ?, 'http://localhost:1')`,
+    [`agent-${name}`, name, runtime === "codex" ? "gpt-5.5" : "claude-opus", Date.now(), runtime],
+  );
+}
+
 async function enqueuedRuntime(handle: SchedulerHandle, input: Parameters<SchedulerHandle["enqueue"]>[0]) {
   const { query_id } = await handle.enqueue(input);
   const r = await handle.client.getByQueryId(query_id);
@@ -81,6 +102,21 @@ describe("model policy at enqueue", () => {
     });
     expect(got.runtime).toBe("cursor-cli");
     expect(got.provider).toBe("cursor");
+  });
+
+  it("registered target agent runtime is the source of truth for stored provider/runtime metadata", async () => {
+    await insertAgentRuntime("eames", "claude-code-cli");
+    const handle = makeHandleWithAgents([]);
+    const got = await enqueuedRuntime(handle, {
+      to_agent: "eames",
+      from_actor: "test",
+      message: "hi",
+      provider: "openai",
+      runtime: "codex",
+    });
+
+    expect(got.runtime).toBe("claude-code-cli");
+    expect(got.provider).toBe("anthropic");
   });
 
   it("no policy configured → preserves the pre-D1 default (claude-code-cli)", async () => {

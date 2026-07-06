@@ -157,6 +157,29 @@ describe("B0 — query-evidence-driven terminal closeout", () => {
     expect(doc?.status).toBe("done");
   });
 
+  it("marks a completed linked query failed when the result says it is still waiting", async () => {
+    const { client, reactor, scheduler, queryEvidence } = harness();
+    await client.enqueueDispatch({ ...base, query_id: "q-agent-waiting" });
+    const queued = await reactor.listQueued();
+    const phid = queued[0].dispatch_phid;
+    await reactor.claim(phid);
+    await reactor.recordAgentStart(phid, "agent-q-agent-waiting");
+    queryEvidence.set("agent-q-agent-waiting", {
+      status: "completed",
+      last_output_at: Date.parse("2026-06-08T21:58:00.000Z"),
+      result_text:
+        "Waiting on the test suite and the live recovery dispatch to finish before continuing verification and promotion.",
+    });
+
+    const report = await scheduler.tick();
+
+    expect(report.evidence_closed_done).toBe(0);
+    expect(report.evidence_closed_failed).toBe(1);
+    const doc = await reactor.getByPhid(phid);
+    expect(doc?.status).toBe("failed");
+    expect(doc?.failure_kind).toBe("failed_verification");
+  });
+
   it("marks an in_flight dispatch failed when the linked query has failed", async () => {
     const { client, reactor, scheduler, queryEvidence } = harness();
     await client.enqueueDispatch({ ...base, query_id: "q-agent-failed" });

@@ -23,6 +23,10 @@ import {
   assessClaudeOnlyGraceful,
   NON_CLAUDE_PROVIDER_ISSUE_CODES,
 } from '../../src/clean-machine-spike/graceful.js';
+import {
+  evaluateSyntheticStrangerStarterFleet,
+  syntheticStrangerClaudeOnlyEnv,
+} from '../../src/clean-machine-spike/starter-fleet.js';
 import { validateRuntimePreflight } from '../../src/runtime/registry.js';
 
 /** A representative app-local env the Tauri sidecar would set on a clean Mac. */
@@ -121,5 +125,40 @@ describe('R5 — Claude-only graceful', () => {
       expect(NON_CLAUDE_PROVIDER_ISSUE_CODES).toContain(c as any);
     }
     expect(result.graceful).toBe(result.offendingCodes.length === 0);
+  });
+});
+
+describe('R2+R5 — synthetic stranger starter-fleet smoke', () => {
+  it('boots a clean empty cockpit shape with only Claude credentials present', () => {
+    const env = syntheticStrangerClaudeOnlyEnv('/Users/stranger');
+    const result = evaluateSyntheticStrangerStarterFleet(env);
+
+    expect(result.ok).toBe(true);
+    expect(result.cockpit).toMatchObject({
+      ready: true,
+      state: 'ready-empty',
+      managerUrl: 'http://127.0.0.1:<dynamic>',
+      opsUrl: 'http://127.0.0.1:<dynamic>/ops',
+    });
+    expect(result.chrisPathFindings).toEqual([]);
+    expect(result.credential.ok).toBe(true);
+    expect(result.credential.sources.map((s) => s.seam)).toEqual(['ANTHROPIC_API_KEY']);
+    expect(result.graceful.offendingCodes).toEqual([]);
+    expect(result.providerAssumptions).toEqual([]);
+    expect(result.agents).toEqual([
+      { name: 'coder', runtime: 'claude-code-cli', model: 'claude-sonnet-4-6' },
+      { name: 'researcher', runtime: 'claude-code-cli', model: 'claude-sonnet-4-6' },
+    ]);
+  });
+
+  it('does not require Codex or Cursor credentials', () => {
+    const env = syntheticStrangerClaudeOnlyEnv('/Users/stranger', {
+      OPENAI_API_KEY: '',
+      CURSOR_API_KEY: '',
+    });
+    const result = evaluateSyntheticStrangerStarterFleet(env);
+
+    expect(result.providerAssumptions).toEqual([]);
+    expect(result.ok).toBe(true);
   });
 });

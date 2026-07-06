@@ -47,8 +47,21 @@ beforeEach(async () => {
   adapter = await freshDb();
 });
 
+async function seedRunningAgent(name: string) {
+  await adapter.query(
+    `INSERT OR IGNORE INTO teams (id, name) VALUES ($1, $2)`,
+    ["team-uuid-9999", "default"],
+  );
+  await adapter.query(
+    `INSERT INTO agents (id, team_id, name, type, model, port, status, created_at, runtime)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+    [`agent_${name}`, "team-uuid-9999", name, "claude", "claude-sonnet-4-6", 0, "running", Date.now(), "claude-code-cli"],
+  );
+}
+
 describe("factory readInFlight — daemon-own lane, not fleet-wide", () => {
   it("fires from READY even when the fleet has >= max_in_flight in-flight dispatches", async () => {
+    await seedRunningAgent("roger");
     await insertBacklogItem(adapter, {
       title: "ship it",
       to_agent: "roger",
@@ -78,6 +91,7 @@ describe("factory readInFlight — daemon-own lane, not fleet-wide", () => {
   });
 
   it("enqueues successfully when the scheduler handle is bound to a team UUID, not the CO storage 'default' name", async () => {
+    await seedRunningAgent("roger");
     // P0 regression: CO storage is keyed by the team NAME ("default"); the
     // dispatch SchedulerHandle is bound to that team's UUID. The factory used to
     // copy the CO storage teamId into the enqueue input's team_id, so the real
@@ -129,6 +143,7 @@ describe("factory readInFlight — daemon-own lane, not fleet-wide", () => {
   });
 
   it("DOES cap on the daemon's own in-flight backlog items", async () => {
+    await seedRunningAgent("roger");
     // 3 ready + 2 already in_flight (daemon-owned); max_in_flight 4 -> 2 slots.
     for (let i = 0; i < 3; i++) {
       await insertBacklogItem(adapter, {

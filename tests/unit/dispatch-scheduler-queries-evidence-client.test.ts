@@ -61,6 +61,7 @@ describe("QueriesEvidenceClient", () => {
     expect(await client.getEvidence("q-1")).toEqual({
       status: "completed",
       last_output_at: 1_780_000_000_000,
+      result_text: null,
     });
   });
 
@@ -74,6 +75,7 @@ describe("QueriesEvidenceClient", () => {
     expect(await client.getEvidence("q-2")).toEqual({
       status: "processing",
       last_output_at: null,
+      result_text: null,
     });
   });
 

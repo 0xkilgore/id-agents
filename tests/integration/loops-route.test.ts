@@ -72,7 +72,7 @@ describe('GET /loops registry routes', () => {
     try { fs.rmSync(workDir, { recursive: true, force: true }); } catch { /* ignore */ }
   });
 
-  it('GET /loops returns the seed catalog list envelope (all 9 loops)', async () => {
+  it('GET /loops returns the seed catalog list envelope (all 14 loops)', async () => {
     const res = await fetch(`${baseUrl}/loops`);
     expect(res.status).toBe(200);
     const body = await res.json() as any;
@@ -82,7 +82,7 @@ describe('GET /loops registry routes', () => {
     // the seed catalog), so the envelope reports `mixed`. With an empty
     // loop_runs table every loop rolls up to honest unknown/disabled — no fixture.
     expect(body.source).toBe('mixed');
-    expect(body.loops).toHaveLength(12);
+    expect(body.loops).toHaveLength(14);
     expect(body.filters.owners.length).toBeGreaterThan(0);
     // every row carries the read-model identity + real (runs-derived) health
     for (const l of body.loops) {

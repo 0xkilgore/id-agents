@@ -82,6 +82,7 @@ export interface AdmissionGateProvider {
 export interface QueryEvidence {
   status: string;
   last_output_at: number | null;
+  result_text?: string | null;
 }
 
 export interface QueryEvidenceClient {
@@ -94,6 +95,22 @@ const TERMINAL_QUERY_STATUSES = new Set([
   "cancelled",
   "expired",
 ]);
+
+const INCOMPLETE_COMPLETED_RESULT_PATTERNS = [
+  /\bwaiting on\b/i,
+  /\bwaiting for\b/i,
+  /\bbefore continuing\b/i,
+  /\bwill continue\b/i,
+  /\bnot (?:yet )?(?:complete|completed|done|finished)\b/i,
+  /\bstill (?:running|pending|in progress)\b/i,
+];
+
+function completedResultIsIncomplete(evidence: QueryEvidence): boolean {
+  if (evidence.status !== "completed") return false;
+  const text = evidence.result_text?.trim();
+  if (!text) return false;
+  return INCOMPLETE_COMPLETED_RESULT_PATTERNS.some((pattern) => pattern.test(text));
+}
 
 function isTerminalSchedulerStatus(status: string): boolean {
   return status === "done" || status === "failed" || status === "cancelled";
@@ -732,6 +749,20 @@ export class SchedulerService {
       }
       if (!evidence) continue;
 
+      if (completedResultIsIncomplete(evidence)) {
+        const r = await this.client.markFailed(doc.dispatch_phid, {
+          failure_kind: "failed_verification",
+          detail: "completed linked query returned incomplete/waiting text",
+        });
+        if (r.ok) {
+          report.evidence_closed_failed += 1;
+          this.logger.warn("scheduler_evidence_completed_but_incomplete", {
+            phid: doc.dispatch_phid,
+            agent_query_id: doc.agent_query_id,
+          });
+        }
+        continue;
+      }
       if (evidence.status === "completed") {
         const r = await this.client.markDone(doc.dispatch_phid);
         if (r.ok) {

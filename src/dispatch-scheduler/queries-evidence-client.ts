@@ -33,6 +33,12 @@ export class QueriesEvidenceClient implements QueryEvidenceClient {
       status: row.status,
       last_output_at:
         typeof row.last_output_at === "number" ? row.last_output_at : null,
+      result_text: extractResultText(row.result),
     };
   }
+}
+
+function extractResultText(result: Record<string, unknown> | null): string | null {
+  const value = result?.result;
+  return typeof value === "string" ? value : null;
 }

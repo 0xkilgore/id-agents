@@ -359,6 +359,7 @@ export class SchedulerHandle {
   private recoveryIntervalMs: number;
   private recoveryEnabled: boolean;
   private recovering = false;
+  private agentsRepository?: AgentsRepository;
   // D1 / T-MODEL.1: per-agent model policy + live provider-availability source.
   private modelPolicy?: ModelPolicyResolver;
   private unavailableProvidersSource?: () => Promise<Provider[]> | Provider[];
@@ -375,6 +376,7 @@ export class SchedulerHandle {
     const env = opts.env ?? {};
     this.teamId = opts.teamId;
     this.modelPolicy = opts.modelPolicy;
+    this.agentsRepository = opts.agentsRepository;
     this.mode = parseGatewayMode(env.DISPATCH_GATEWAY_MODE);
     this.enabled = schedulerEnabled(env);
     this.policy = loadSchedulerPolicy({}, env as Record<string, string | undefined>);
@@ -716,7 +718,13 @@ export class SchedulerHandle {
     } else {
       runtime = normalizeRuntime("claude-code-cli");
     }
-    const provider: Provider = input.provider ?? resolveProviderFromRuntime(runtime);
+    const targetAgent = await this.agentsRepository
+      ?.getByName(this.teamId, input.to_agent)
+      .catch(() => null);
+    if (targetAgent?.runtime && (input.runtime || input.provider)) {
+      runtime = normalizeRuntime(targetAgent.runtime);
+    }
+    const provider: Provider = resolveProviderFromRuntime(runtime);
     const payload: EnqueueInput = {
       query_id: queryId,
       to_agent: input.to_agent,

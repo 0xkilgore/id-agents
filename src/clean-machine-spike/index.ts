@@ -32,3 +32,10 @@ export {
   assessClaudeOnlyGraceful,
   type ClaudeOnlyGracefulResult,
 } from './graceful.js';
+
+export {
+  syntheticStrangerClaudeOnlyEnv,
+  buildClaudeOnlyStarterFleetConfig,
+  evaluateSyntheticStrangerStarterFleet,
+  type StarterFleetSmokeResult,
+} from './starter-fleet.js';

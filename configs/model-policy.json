@@ -1,11 +1,11 @@
 {
   "schema_version": 1,
-  "_comment": "Claude-lead policy set 2026-06-29 by manager per Chris: 75% Anthropic / 25% OpenAI / 0% Cursor. Chris is on full Claude Max with ample credits; Codex (the single frontend-ui lane) was the usage-limit casualty, so lean on Claude and de-risk Codex concentration. Cursor disabled for now (constrained_providers). 5h rolling limits + non-API billing mean 'too much burn' has little downside per Chris. Standing rule: new unpinned scheduler-created implementation work prefers Claude, then Codex; Cursor lane disabled. constrained_providers = disabled provider lanes; [] means none disabled. NOTE: a 'cursor-conduit bedtime watch' previously auto-reverted this file (see git history 2026-06-25) — that watcher must be reconciled to this policy or it will revert these targets.",
+  "_comment": "Codex-primary policy set 2026-07-06 by manager per Chris: 95% OpenAI Codex / 5% Anthropic / 0% Cursor. Claude and Codex are both unblocked, but preserve Claude for sparse specialist/escalation use. Standing rule: new unpinned scheduler-created implementation work prefers Codex, then Claude. Cursor disabled for now (constrained_providers). NOTE: a prior watcher has reverted this file before; if policy drifts, reconcile the watcher rather than accepting silent reversion.",
   "work_share": {
-    "label": "claude-lead-75-25-0",
+    "label": "codex-primary-95-5-0",
     "targets": {
-      "anthropic": 0.75,
-      "openai": 0.25,
+      "anthropic": 0.05,
+      "openai": 0.95,
       "cursor": 0.0
     }
   },
@@ -18,62 +18,62 @@
   ],
   "default": {
     "primary": {
-      "runtime": "claude-code-cli",
-      "model": "claude-opus-4-8"
+      "runtime": "codex",
+      "model": "gpt-5.5"
     },
     "fallback": [
       {
-        "runtime": "codex",
-        "model": "gpt-5.5"
+        "runtime": "claude-code-cli",
+        "model": "claude-sonnet-5"
       }
     ]
   },
   "agents": {
     "cto": {
       "primary": {
-        "runtime": "claude-code-cli",
-        "model": "claude-opus-4-8"
+        "runtime": "codex",
+        "model": "gpt-5.5"
       },
       "fallback": [
         {
-          "runtime": "codex",
-          "model": "gpt-5.5"
+          "runtime": "claude-code-cli",
+          "model": "claude-sonnet-5"
         }
       ]
     },
     "maestra": {
       "primary": {
-        "runtime": "claude-code-cli",
-        "model": "claude-opus-4-8"
+        "runtime": "codex",
+        "model": "gpt-5.5"
       },
       "fallback": [
         {
-          "runtime": "codex",
-          "model": "gpt-5.5"
+          "runtime": "claude-code-cli",
+          "model": "claude-sonnet-5"
         }
       ]
     },
     "sentinel": {
       "primary": {
-        "runtime": "claude-code-cli",
-        "model": "claude-opus-4-8"
+        "runtime": "codex",
+        "model": "gpt-5.5"
       },
       "fallback": [
         {
-          "runtime": "codex",
-          "model": "gpt-5.5"
+          "runtime": "claude-code-cli",
+          "model": "claude-sonnet-5"
         }
       ]
     },
     "rams": {
       "primary": {
-        "runtime": "claude-code-cli",
-        "model": "claude-opus-4-8"
+        "runtime": "codex",
+        "model": "gpt-5.5"
       },
       "fallback": [
         {
-          "runtime": "codex",
-          "model": "gpt-5.5"
+          "runtime": "claude-code-cli",
+          "model": "claude-sonnet-5"
         }
       ]
     }
