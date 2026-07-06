@@ -90,11 +90,13 @@ export class ClaudeCodeCliHarness implements AgentHarness {
     ];
     console.log(`[Claude CLI] Permission mode: ${skipPermissions ? '--dangerously-skip-permissions (default)' : 'interactive (config opt-out)'}`);
 
-    // Don't pass --model flag for CLI harness - let Claude Code use its default settings
-    // This ensures Max subscription users don't get charged API credits
-    // The model can still be overridden via CLAUDE_CLI_MODEL env var if needed
-    if (process.env.CLAUDE_CLI_MODEL) {
-      args.push('--model', process.env.CLAUDE_CLI_MODEL);
+    // Honor the manager/agent model selection for Claude Code CLI agents.
+    // CLAUDE_CLI_MODEL remains an explicit operator override; otherwise the
+    // agent row / dispatch policy model is passed through so a Sonnet-pinned
+    // agent cannot silently drift to the CLI's default Opus model.
+    const cliModel = process.env.CLAUDE_CLI_MODEL || options.model;
+    if (cliModel) {
+      args.push('--model', cliModel);
     }
 
     // Add session resume if provided (post-rotation: cleared when the prior

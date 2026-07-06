@@ -174,6 +174,19 @@ describe("classifyAgentResponse — plain-text patterns (fallback)", () => {
     });
     expect(c.failure_reason).toBe("provider_auth_error");
   });
+
+  it("Claude session-limit text on a 200 closeout → rate_limit_error with reset time", () => {
+    const c = classifyAgentResponse({
+      body: "You've hit your session limit · resets 1:10pm (America/Chicago)",
+      transport_status: 200,
+      classified_at: NOW,
+    });
+    expect(c.classification).toBe("failed");
+    expect(c.failure_reason).toBe("rate_limit_error");
+    expect(c.matched_pattern).toBe("text:claude-session-limit");
+    expect(c.provider_reset_label).toBe("1:10pm (America/Chicago)");
+    expect(c.provider_reset_at).toBe("2026-06-11T18:10:00.000Z");
+  });
 });
 
 describe("classifyAgentResponse — false-positive guards (the hard part)", () => {

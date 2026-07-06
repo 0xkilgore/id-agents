@@ -56,6 +56,8 @@ export interface StrictModeClassification {
   matched_pattern: string | null;
   response_excerpt: string | null;
   classified_at: string;
+  provider_reset_at: string | null;
+  provider_reset_label: string | null;
 }
 
 const EXCERPT_LIMIT = 500;
@@ -75,6 +77,8 @@ export function classifyAgentResponse(
       matched_pattern: transportFailure.matched_pattern,
       response_excerpt: excerpt,
       classified_at: args.classified_at,
+      provider_reset_at: null,
+      provider_reset_label: null,
     };
   }
 
@@ -95,6 +99,8 @@ export function classifyAgentResponse(
         matched_pattern: mismatch,
         response_excerpt: excerpt,
         classified_at: args.classified_at,
+        provider_reset_at: null,
+        provider_reset_label: null,
       };
     }
   }
@@ -110,6 +116,8 @@ export function classifyAgentResponse(
         matched_pattern: structured.matched_pattern,
         response_excerpt: excerpt,
         classified_at: args.classified_at,
+        provider_reset_at: null,
+        provider_reset_label: null,
       };
     }
   }
@@ -123,6 +131,8 @@ export function classifyAgentResponse(
       matched_pattern: "expected_json_but_not_parseable",
       response_excerpt: excerpt,
       classified_at: args.classified_at,
+      provider_reset_at: null,
+      provider_reset_label: null,
     };
   }
 
@@ -130,7 +140,7 @@ export function classifyAgentResponse(
   // transport status suggests something might be wrong. A 200 OK with
   // the word "rate limit" in a valid agent answer is delivered.
   if (isLikelyErrorByTransport(args.transport_status) || hasStrongInlineMarker(bodyText)) {
-    const text = matchPlainText(bodyText);
+    const text = matchPlainText(bodyText, args.classified_at);
     if (text) {
       return {
         classification: "failed",
@@ -139,6 +149,8 @@ export function classifyAgentResponse(
         matched_pattern: text.matched_pattern,
         response_excerpt: excerpt,
         classified_at: args.classified_at,
+        provider_reset_at: text.provider_reset_at ?? null,
+        provider_reset_label: text.provider_reset_label ?? null,
       };
     }
   }
@@ -151,6 +163,8 @@ export function classifyAgentResponse(
     matched_pattern: null,
     response_excerpt: excerpt,
     classified_at: args.classified_at,
+    provider_reset_at: null,
+    provider_reset_label: null,
   };
 }
 
@@ -284,11 +298,22 @@ function matchStructured(parsed: Record<string, unknown>): {
   return null;
 }
 
-function matchPlainText(text: string): {
+function matchPlainText(text: string, classifiedAt: string): {
   reason: DispatchFailureReason;
   matched_pattern: string;
+  provider_reset_at?: string | null;
+  provider_reset_label?: string | null;
 } | null {
   const lower = text.toLowerCase();
+  const sessionLimit = parseClaudeSessionLimit(text, classifiedAt);
+  if (sessionLimit) {
+    return {
+      reason: "rate_limit_error",
+      matched_pattern: "text:claude-session-limit",
+      provider_reset_at: sessionLimit.reset_at,
+      provider_reset_label: sessionLimit.reset_label,
+    };
+  }
   if (lower.includes("rate_limit_error")) {
     return { reason: "rate_limit_error", matched_pattern: "text:rate_limit_error" };
   }
@@ -338,12 +363,121 @@ function hasStrongInlineMarker(text: string): boolean {
   const lower = text.toLowerCase();
   return (
     lower.includes("tool execution failed") ||
+    lower.includes("you've hit your session limit") ||
+    lower.includes("you have hit your session limit") ||
     lower.includes("rate_limit_error") ||
     lower.includes("provider_server_error") ||
     lower.includes("authentication_error") ||
     lower.includes("not logged in") ||
     lower.includes("please run /login")
   );
+}
+
+function parseClaudeSessionLimit(text: string, classifiedAt: string): {
+  reset_at: string | null;
+  reset_label: string | null;
+} | null {
+  const lower = text.toLowerCase();
+  if (!lower.includes("session limit")) return null;
+  if (!lower.includes("hit your session limit") && !lower.includes("session limit · resets")) {
+    return null;
+  }
+  const reset = text.match(/\bresets?\s+([0-9]{1,2})(?::([0-9]{2}))?\s*(am|pm)\b(?:\s*\(([^)]+)\))?/i);
+  if (!reset) return { reset_at: null, reset_label: null };
+  const label = reset[0].replace(/^resets?\s+/i, "").trim();
+  const hour = Number(reset[1]);
+  const minute = reset[2] ? Number(reset[2]) : 0;
+  const meridiem = reset[3].toLowerCase();
+  const timeZone = reset[4]?.trim() || "America/Chicago";
+  if (!Number.isInteger(hour) || hour < 1 || hour > 12 || !Number.isInteger(minute) || minute < 0 || minute > 59) {
+    return { reset_at: null, reset_label: label };
+  }
+  const classified = new Date(classifiedAt);
+  if (Number.isNaN(classified.getTime())) return { reset_at: null, reset_label: label };
+  const parts = zonedParts(classified, timeZone);
+  if (!parts) return { reset_at: null, reset_label: label };
+  let hour24 = hour % 12;
+  if (meridiem === "pm") hour24 += 12;
+  let resetAt = zonedWallTimeToUtc({
+    year: parts.year,
+    month: parts.month,
+    day: parts.day,
+    hour: hour24,
+    minute,
+    second: 0,
+    timeZone,
+  });
+  if (resetAt && resetAt.getTime() <= classified.getTime()) {
+    const tomorrow = new Date(Date.UTC(parts.year, parts.month - 1, parts.day + 1));
+    const tomorrowParts = zonedParts(tomorrow, timeZone);
+    if (tomorrowParts) {
+      resetAt = zonedWallTimeToUtc({
+        year: tomorrowParts.year,
+        month: tomorrowParts.month,
+        day: tomorrowParts.day,
+        hour: hour24,
+        minute,
+        second: 0,
+        timeZone,
+      });
+    }
+  }
+  return { reset_at: resetAt?.toISOString() ?? null, reset_label: label };
+}
+
+function zonedParts(date: Date, timeZone: string): {
+  year: number;
+  month: number;
+  day: number;
+  hour: number;
+  minute: number;
+  second: number;
+} | null {
+  try {
+    const parts = new Intl.DateTimeFormat("en-US", {
+      timeZone,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+      hour12: false,
+    }).formatToParts(date);
+    const get = (type: string) => Number(parts.find((p) => p.type === type)?.value);
+    return {
+      year: get("year"),
+      month: get("month"),
+      day: get("day"),
+      hour: get("hour"),
+      minute: get("minute"),
+      second: get("second"),
+    };
+  } catch {
+    return null;
+  }
+}
+
+function zonedWallTimeToUtc(input: {
+  year: number;
+  month: number;
+  day: number;
+  hour: number;
+  minute: number;
+  second: number;
+  timeZone: string;
+}): Date | null {
+  let guess = new Date(Date.UTC(input.year, input.month - 1, input.day, input.hour, input.minute, input.second));
+  for (let i = 0; i < 3; i += 1) {
+    const parts = zonedParts(guess, input.timeZone);
+    if (!parts) return null;
+    const asUtc = Date.UTC(parts.year, parts.month - 1, parts.day, parts.hour, parts.minute, parts.second);
+    const wanted = Date.UTC(input.year, input.month - 1, input.day, input.hour, input.minute, input.second);
+    const delta = wanted - asUtc;
+    if (delta === 0) return guess;
+    guess = new Date(guess.getTime() + delta);
+  }
+  return guess;
 }
 
 function tryParseObject(body: unknown): Record<string, unknown> | null {

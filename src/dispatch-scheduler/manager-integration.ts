@@ -866,16 +866,48 @@ export class SchedulerHandle {
     // patterns BEFORE marking delivered. The classifier is pure; the
     // feature flag DISPATCH_CANONICAL_STRICT_MODE gates whether we
     // override the closeout in `enforce` or just log it in `shadow`.
+    const classifiedAt = new Date().toISOString();
+    const closeoutClassification = classifyAgentResponse({
+      body: args.result ?? null,
+      transport_status: 200, // agent-done implies a delivered transport
+      classified_at: classifiedAt,
+    });
+    if (
+      closeoutClassification.classification === "failed" &&
+      closeoutClassification.failure_reason === "rate_limit_error" &&
+      closeoutClassification.matched_pattern === "text:claude-session-limit"
+    ) {
+      const nextAttemptAt =
+        closeoutClassification.provider_reset_at ??
+        new Date(Date.parse(classifiedAt) + 30 * 60_000).toISOString();
+      const fallback = this.resolveFallbackLaneForProviderLimit(doc);
+      const resetLabel = closeoutClassification.provider_reset_label ?? "the provider reset time";
+      const detail = `Claude limited until ${resetLabel}; dispatch will retry${fallback ? " / routed to fallback" : ""}`;
+      this.logger.warn("provider_limit_closeout_bounced", {
+        phid: doc.dispatch_phid,
+        query_id: doc.query_id,
+        provider: doc.provider,
+        runtime: doc.runtime,
+        next_attempt_at: nextAttemptAt,
+        reset_label: closeoutClassification.provider_reset_label,
+        reset_at: closeoutClassification.provider_reset_at,
+        message: detail,
+        ...(fallback ? { fallback_provider: fallback.provider, fallback_runtime: fallback.runtime } : {}),
+      });
+      const bounced = await this.client.markBounced(doc.dispatch_phid, {
+        kind: "provider_limit",
+        message: detail,
+        next_attempt_at: nextAttemptAt,
+        allow_auto_retry: true,
+        ...(fallback ? { provider: fallback.provider, runtime: fallback.runtime } : {}),
+      });
+      return bounced.ok ? bounced.value : doc;
+    }
     const strictModeFlag = parseStrictModeFlag(
       process.env.DISPATCH_CANONICAL_STRICT_MODE,
     );
     if (strictModeFlag !== "off") {
-      const classification = classifyAgentResponse({
-        body: args.result ?? null,
-        transport_status: 200, // agent-done implies a delivered transport
-        classified_at: new Date().toISOString(),
-      });
-      const decision = decideStrictModeOverride(strictModeFlag, classification);
+      const decision = decideStrictModeOverride(strictModeFlag, closeoutClassification);
       if (decision) {
         this.logger.warn("strict_mode_classified", {
           phid: doc.dispatch_phid,
@@ -908,6 +940,17 @@ export class SchedulerHandle {
       );
     }
     return this.reactor.markDoneWithResult(doc.dispatch_phid, args.result ?? null);
+  }
+
+  private resolveFallbackLaneForProviderLimit(doc: DispatchDoc): { provider: Provider; runtime: Runtime } | null {
+    if (!this.modelPolicy) return null;
+    const resolved = this.modelPolicy.resolveModelChoice({
+      agent: doc.to_agent,
+      unavailableProviders: [doc.provider],
+    });
+    const { provider, runtime } = resolved.choice;
+    if (provider === doc.provider && runtime === doc.runtime) return null;
+    return { provider, runtime };
   }
 
   async acceptDispatchStart(args: {

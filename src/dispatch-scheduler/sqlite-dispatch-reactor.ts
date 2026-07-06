@@ -584,13 +584,15 @@ export class SqliteDispatchReactor {
       `UPDATE dispatch_scheduler_queue
        SET status = 'bounced', bounce_count = bounce_count + 1,
            last_bounce_json = ?, bounce_history_json = ?,
-           not_before_at = ?, updated_at = ?${laneSets.length ? ", " + laneSets.join(", ") : ""}
+           not_before_at = ?, updated_at = ?, allow_auto_retry = ?
+           ${laneSets.length ? ", " + laneSets.join(", ") : ""}
        WHERE dispatch_phid = ?`,
       [
         JSON.stringify(record),
         JSON.stringify(history),
         bounce.next_attempt_at,
         now,
+        bounce.allow_auto_retry ? 1 : doc.allow_auto_retry ? 1 : 0,
         ...laneParams,
         phid,
       ],

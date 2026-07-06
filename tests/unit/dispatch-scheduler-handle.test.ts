@@ -17,6 +17,7 @@ import {
   CHRIS_DASHBOARD_ACTOR,
   actorRefForAgentCompletion,
 } from "../../src/dispatch-scheduler/manager-integration.js";
+import { buildModelPolicyService } from "../../src/model-policy/policy.js";
 
 let tmpDir: string;
 let adapter: SqliteAdapter;
@@ -737,6 +738,55 @@ describe("handleAgentDone — queued-dispatch closeout (Spec 2026-06-01)", () =>
     expect(second?.status).toBe("done");
     const r = await handle.reactor.getResult(enq.dispatch_phid);
     expect(r).toEqual({ artifact_path: "/tmp/first.md" });
+  });
+});
+
+describe("handleAgentDone — Claude provider/session limit", () => {
+  it("session-limit child result is bounced for retry/fallback, not marked done or empty-success", async () => {
+    const handle = new SchedulerHandle({
+      adapter,
+      teamId: "team",
+      resolveTargetUrl: () => "http://localhost:9999",
+      now: () => "2026-07-06T17:55:00.000Z",
+      modelPolicy: buildModelPolicyService(
+        {
+          default: {
+            primary: { runtime: "claude-code-cli" },
+            fallback: [{ runtime: "codex" }],
+          },
+        },
+        "file",
+      ),
+    });
+    const enq = await handle.enqueue({
+      to_agent: "finances",
+      from_actor: "manager",
+      message: "finance follow-up",
+      runtime: "claude-code-cli",
+    });
+    await handle.acceptDispatchStart({
+      dispatch_id: enq.dispatch_phid,
+      agent_query_id: "query_1783354128298_pr3kdlp",
+    });
+
+    const final = await handle.handleAgentDone({
+      agent_query_id: "query_1783354128298_pr3kdlp",
+      success: true,
+      result: {
+        text: "You've hit your session limit · resets 1:10pm (America/Chicago)",
+        model: "claude-opus-4-20250514",
+      },
+    });
+
+    expect(final?.status).toBe("bounced");
+    expect(final?.last_bounce?.kind).toBe("provider_limit");
+    expect(final?.last_bounce?.message).toContain("Claude limited until 1:10pm");
+    expect(final?.not_before_at).toBe("2026-07-06T18:10:00.000Z");
+    expect(final?.allow_auto_retry).toBe(true);
+    expect(final?.provider).toBe("openai");
+    expect(final?.runtime).toBe("codex");
+    expect(final?.failure_kind).toBeNull();
+    expect(final?.completed_at).toBeNull();
   });
 });
 

@@ -50,6 +50,7 @@ export interface BounceInput {
    */
   provider?: Provider;
   runtime?: Runtime;
+  allow_auto_retry?: boolean;
 }
 
 export interface ClaimResult {
@@ -319,6 +320,7 @@ export class FakeReactor {
       bounce_history: [...doc.bounce_history, record],
       not_before_at: bounce.next_attempt_at,
       updated_at: now,
+      allow_auto_retry: bounce.allow_auto_retry ?? doc.allow_auto_retry,
       // BUG-003 fallback routing: only overridden when the caller resolved a
       // different lane; omitted → identical to pre-fallback behavior.
       ...(bounce.provider ? { provider: bounce.provider } : {}),
