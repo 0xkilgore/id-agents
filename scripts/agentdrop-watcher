@@ -1,0 +1,83 @@
+#!/usr/bin/env node
+// SPDX-License-Identifier: MIT
+//
+// agentdrop-watcher — receiver watcher for the fleet file-drop feature.
+// Runs on blitz as a persistent launchd job (KeepAlive: true). Two things
+// run for the life of this process:
+//
+//   1. `tailscale file get --wait --loop --conflict=rename <staging-dir>` as
+//      a child process — Tailscale's own battle-tested drain loop, writing
+//      whatever lands in the tailnet Taildrop inbox into `staging-dir` flat.
+//      `--conflict=rename` so a same-named collision from an overlapping
+//      drop never gets silently overwritten.
+//   2. This process's own scan loop (runOneScanCycle, ./lib/agentdrop-watcher-cycle.mjs),
+//      polling `staging-dir` every SCAN_INTERVAL_MS: validates each drained
+//      manifest, verifies its batch is complete, resolves the target agent
+//      LIVE against the manager registry (never a static map), delivers to
+//      `<agent.workingDirectory>/inbox/<batch_id>/`, POSTs a task, and sends
+//      a Telegram confirmation — or quarantines + alerts loudly on any
+//      failure. See ./lib/agentdrop-watcher-decision.mjs for why polling
+//      (not per-event handling) is what makes a process restart mid-batch
+//      safe: nothing here depends on in-memory state a restart would lose.
+//
+// Plan: docs/superpowers/plans/2026-07-04-fleet-file-drop.md, Slice B.
+
+import { spawn } from 'node:child_process';
+import { mkdirSync } from 'node:fs';
+
+import { runOneScanCycle } from './lib/agentdrop-watcher-cycle.mjs';
+
+const MANAGER_URL = process.env.AGENTDROP_MANAGER_URL || process.env.MANAGER_URL || 'http://127.0.0.1:4100';
+const STAGING_DIR = process.env.AGENTDROP_STAGING_DIR || `${process.env.HOME}/AgentDrops/.staging`;
+const SCAN_INTERVAL_MS = Number(process.env.AGENTDROP_SCAN_INTERVAL_MS) || 3000;
+
+function log(message) {
+  console.log(`${new Date().toISOString()} [agentdrop-watcher] ${message}`);
+}
+
+function startTailscaleDrain() {
+  mkdirSync(STAGING_DIR, { recursive: true });
+  log(`starting tailscale drain loop into ${STAGING_DIR}`);
+  const child = spawn('tailscale', ['file', 'get', '--wait', '--loop', '--conflict=rename', STAGING_DIR], {
+    stdio: ['ignore', 'inherit', 'inherit'],
+  });
+  child.on('exit', (code, signal) => {
+    log(`tailscale drain process exited (code=${code} signal=${signal}) — will be restarted by launchd's KeepAlive on process exit, or by re-spawn below`);
+  });
+  child.on('error', (err) => {
+    log(`tailscale drain process failed to start: ${err.message}`);
+  });
+  return child;
+}
+
+async function scanLoop() {
+  try {
+    const results = await runOneScanCycle(STAGING_DIR, { managerUrl: MANAGER_URL });
+    for (const r of results) {
+      if (r.outcome.action === 'wait') continue; // quiet — nothing new to log each cycle
+      log(`batch ${r.manifestFile ?? '(no manifest)'} -> ${r.outcome.action}: ${r.outcome.reason}`);
+    }
+  } catch (err) {
+    log(`scan cycle failed unexpectedly: ${err instanceof Error ? err.stack : err}`);
+  }
+}
+
+function main() {
+  let tailscaleChild = startTailscaleDrain();
+
+  const scanTimer = setInterval(scanLoop, SCAN_INTERVAL_MS);
+  scanTimer.unref?.();
+
+  const shutdown = () => {
+    log('shutting down');
+    clearInterval(scanTimer);
+    tailscaleChild.kill();
+    process.exit(0);
+  };
+  process.on('SIGTERM', shutdown);
+  process.on('SIGINT', shutdown);
+
+  log(`agentdrop-watcher started (manager=${MANAGER_URL} staging=${STAGING_DIR} scan_interval_ms=${SCAN_INTERVAL_MS})`);
+}
+
+main();

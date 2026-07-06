@@ -1,0 +1,111 @@
+#!/usr/bin/env node
+// SPDX-License-Identifier: MIT
+//
+// agentdrop — sender CLI for the fleet file-drop feature. Replaces
+// Dropbox/Downloads as the agent file-intake path for recurring batch
+// hand-offs (bank CSVs, exports, etc.) with a Tailscale-Taildrop transport
+// that gives an immediate, in-terminal, bytes-landed confirmation instead of
+// Dropbox's silent-placeholder failure mode.
+//
+//   agentdrop --for finances bank1.csv bank2.csv bank3.csv
+//
+// Spec: cto/output/fleet-file-drop-spec.md §4.1
+// Plan: docs/superpowers/plans/2026-07-04-fleet-file-drop.md, Slice A
+//
+// Pure manifest-construction logic lives in ./lib/agentdrop-manifest.mjs
+// (unit-tested without a real tailnet). This file is the thin imperative
+// wrapper: argv parsing, the live agent-resolution call, writing the
+// manifest to disk, and the blocking `tailscale file cp` subprocess call.
+
+import { execFileSync } from 'node:child_process';
+import { existsSync, statSync, writeFileSync } from 'node:fs';
+import path from 'node:path';
+import os from 'node:os';
+
+import { buildManifest, MANIFEST_FILENAME } from './lib/agentdrop-manifest.mjs';
+import { resolveAgent } from './lib/agentdrop-fs.mjs';
+
+const MANAGER_URL = process.env.AGENTDROP_MANAGER_URL || process.env.MANAGER_URL || 'http://127.0.0.1:4100';
+// v1: single hardcoded fleet host, per spec §4.1 ("hardcoded map, just blitz,
+// since that's the only fleet host today"). Env-overridable for testing.
+const TARGET_HOST = process.env.AGENTDROP_TARGET_HOST || 'blitz';
+
+function usageError(message) {
+  console.error(`agentdrop: ${message}`);
+  console.error('Usage: agentdrop --for <agent-name> <file> [<file> ...]');
+  process.exit(1);
+}
+
+function parseArgs(argv) {
+  const args = [...argv];
+  let agent = null;
+  const files = [];
+  while (args.length > 0) {
+    const arg = args.shift();
+    if (arg === '--for') {
+      agent = args.shift();
+      if (!agent) usageError('--for requires an agent name');
+    } else {
+      files.push(arg);
+    }
+  }
+  return { agent, files };
+}
+
+async function main() {
+  const { agent, files } = parseArgs(process.argv.slice(2));
+  if (!agent) usageError('--for <agent-name> is required');
+  if (files.length === 0) usageError('at least one file is required');
+
+  for (const f of files) {
+    if (!existsSync(f)) usageError(`file not found: ${f}`);
+  }
+
+  // Fail fast on an unresolvable agent BEFORE attempting any transfer —
+  // this is the exact "typo'd agent name sends bytes nowhere" failure mode
+  // the plan's acceptance criteria calls out.
+  let resolution;
+  try {
+    resolution = await resolveAgent(MANAGER_URL, agent);
+  } catch (err) {
+    console.error(`agentdrop: could not reach manager at ${MANAGER_URL} to resolve agent "${agent}": ${err.message}`);
+    process.exit(1);
+  }
+  if (!resolution.found) {
+    console.error(`agentdrop: agent "${agent}" not found in the live registry (${MANAGER_URL}/agents) — not sending anywhere.`);
+    process.exit(1);
+  }
+
+  const fileBasenames = files.map((f) => path.basename(f));
+  const manifest = buildManifest({ agent, sender: os.userInfo().username, files: fileBasenames });
+  const manifestPath = path.join(path.dirname(path.resolve(files[0])), MANIFEST_FILENAME);
+  writeFileSync(manifestPath, JSON.stringify(manifest, null, 2));
+
+  const totalBytes = files.reduce((sum, f) => sum + statSync(f).size, 0);
+
+  console.log(`agentdrop: sending ${files.length} file(s) (${totalBytes} bytes) to ${TARGET_HOST} for "${agent}" (batch ${manifest.batch_id})...`);
+
+  // Test-only escape hatch — never invoke the real tailscale binary (and
+  // never risk a real transfer over Chris's real tailnet) from an automated
+  // test run. Unset/absent in every real invocation.
+  if (process.env.AGENTDROP_FAKE_TRANSFER === '1') {
+    console.log('agentdrop: AGENTDROP_FAKE_TRANSFER=1 — skipping the real tailscale call (test mode).');
+  } else {
+    try {
+      // Blocks until the transfer completes; inherits stdio so a non-zero exit
+      // (peer offline, ACL denial, etc.) shows raw tailscale stderr in THIS
+      // terminal, at send time — not 90 minutes later from somewhere else.
+      execFileSync('tailscale', ['file', 'cp', ...files, manifestPath, `${TARGET_HOST}:`], { stdio: 'inherit' });
+    } catch (err) {
+      console.error(`agentdrop: transfer FAILED (tailscale exited non-zero). Bytes did not land on ${TARGET_HOST}.`);
+      process.exit(typeof err.status === 'number' ? err.status : 1);
+    }
+  }
+
+  console.log(`agentdrop: ✅ ${files.length} file(s), ${totalBytes} bytes confirmed landed in ${TARGET_HOST}'s Taildrop inbox (batch ${manifest.batch_id}).`);
+}
+
+main().catch((err) => {
+  console.error(`agentdrop: unexpected error: ${err instanceof Error ? err.stack : err}`);
+  process.exit(1);
+});

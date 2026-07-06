@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.kilgore.agentdrop-watcher</string>
+    <!-- Fleet file-drop Slice B (docs/superpowers/plans/2026-07-04-fleet-file-drop.md).
+         Persistent receiver: drains the Taildrop inbox on blitz, verifies +
+         delivers each batch, POSTs a task, alerts via Telegram. The only
+         long-running new process this feature introduces. -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/opt/homebrew/bin/node</string>
+        <string>/Users/kilgore/Dropbox/Code/cane/id-agents/scripts/agentdrop-watcher</string>
+    </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <!-- tailscale / node must resolve; launchd's default PATH is minimal. -->
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>HOME</key>
+        <string>/Users/kilgore</string>
+    </dict>
+    <key>StandardOutPath</key>
+    <string>/tmp/agentdrop-watcher.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/agentdrop-watcher.err</string>
+    <!-- Always-on infrastructure, not something Chris has to remember to
+         start: survives a blitz reboot (RunAtLoad) and any crash (KeepAlive). -->
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+</dict>
+</plist>
