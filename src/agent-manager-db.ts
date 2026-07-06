@@ -94,6 +94,7 @@ import {
   computeRoutingHealth,
   runtimeLivenessFromFallbackHealth,
   type RuntimeLiveness,
+  type RoutingHealthReadModel,
 } from './routing-health/index.js';
 import {
   emitQueryDelivered,
@@ -417,6 +418,34 @@ function makeAutoAttachError(status: number, code: string): Error & { status: nu
   return err;
 }
 
+// RD-014 (Fable critique, 3rd attempt — 2026-07-06): the SAME probe shape the
+// GET /routing-health route already uses, factored out so the production
+// SchedulerHandle.setRoutingHealthSource wiring (see AgentManagerDb boot,
+// near the SchedulerHandle construction) can reuse it instead of a THIRD
+// copy of this construction (a second copy already exists in the drift-guard
+// tick added earlier this session). Pure I/O wrapper — no caching here; the
+// manager's cachedRoutingHealthModel() method owns the short-TTL cache.
+async function computeLiveRoutingHealthModel(teamLabel: string): Promise<RoutingHealthReadModel> {
+  const [codex, cursor] = await Promise.all([
+    checkCodexFallbackHealth(),
+    checkCursorFallbackHealth({ live: false }),
+  ]);
+  const runtimes: RuntimeLiveness[] = [
+    // The manager runs on the Claude runtime, so the primary is live by construction.
+    { name: 'claude', role: 'primary', live: true, detail: 'manager process is running' },
+    runtimeLivenessFromFallbackHealth('codex', codex),
+    runtimeLivenessFromFallbackHealth('cursor', cursor),
+  ];
+  return computeRoutingHealth({
+    team_id: teamLabel,
+    now: new Date().toISOString(),
+    pools: [],
+    builders: [],
+    dispatches: [],
+    runtimes,
+  });
+}
+
 function getCatalogEndpoint(catalog: RestAPCatalog, key: 'talk' | 'news' | 'schedule'): string | null {
   if (catalog.endpoints && !Array.isArray(catalog.endpoints)) {
     return catalog.endpoints[key] || null;
@@ -603,6 +632,14 @@ export class AgentManagerDb {
   // in-memory and can't be queried like the other blockage sources.
   private runtimeDriftState: FleetRuntimeDriftState = {};
   private runtimeDriftSummary: FleetRuntimeDriftSummary = EMPTY_FLEET_DRIFT_SUMMARY;
+  // RD-014 (3rd attempt) — short-TTL cache backing BOTH GET /routing-health
+  // and the production SchedulerHandle.setRoutingHealthSource wiring, so a
+  // burst of enqueues (or a dashboard poll landing in the same window)
+  // shares one Codex/Cursor fallback probe instead of spawning a subprocess
+  // per call. In-memory only, same durability class as the other trackers
+  // above — never persisted, always safe to drop on restart.
+  private routingHealthCache: { at: number; model: RoutingHealthReadModel } | null = null;
+  private static readonly ROUTING_HEALTH_CACHE_TTL_MS = 5_000;
   private remoteProbeInterval: NodeJS.Timeout | null = null;
   private querySweeperInterval: NodeJS.Timeout | null = null;
   private filesystemArtifactReconcileInterval: NodeJS.Timeout | null = null;
@@ -2504,6 +2541,28 @@ export class AgentManagerDb {
     };
   }
 
+  /**
+   * RD-014 (3rd attempt) — short-TTL-cached wrapper around
+   * computeLiveRoutingHealthModel(). Shared by GET /routing-health and the
+   * production SchedulerHandle.setRoutingHealthSource callback so a burst of
+   * calls within the TTL window reuses one probe rather than re-spawning the
+   * Codex/Cursor fallback checks per call. Cache is only written on a
+   * successful probe — a thrown error leaves the cache untouched (and the
+   * caller's own fail-open handling, e.g.
+   * currentRoutingHealthConstrainedProviders's try/catch, takes it from
+   * there) so a transient probe failure never poisons the cache with a
+   * missing value.
+   */
+  private async cachedRoutingHealthModel(teamLabel: string): Promise<RoutingHealthReadModel> {
+    const now = Date.now();
+    if (this.routingHealthCache && now - this.routingHealthCache.at < AgentManagerDb.ROUTING_HEALTH_CACHE_TTL_MS) {
+      return this.routingHealthCache.model;
+    }
+    const model = await computeLiveRoutingHealthModel(teamLabel);
+    this.routingHealthCache = { at: now, model };
+    return model;
+  }
+
   private setupRoutes() {
     // Phase 6.1: deterministic concurrency snapshot for /system-live and
     // operator probes. Returns in_flight, queued, bounced, available_slots,
@@ -3839,25 +3898,7 @@ export class AgentManagerDb {
     this.managementApp.get('/routing-health', async (req, res) => {
       try {
         const teamName = this.getTeamName(req);
-        const [codex, cursor] = await Promise.all([
-          checkCodexFallbackHealth(),
-          checkCursorFallbackHealth({ live: false }),
-        ]);
-        const runtimes: RuntimeLiveness[] = [
-          // The manager is serving this request on the Claude runtime, so the
-          // primary is live by construction.
-          { name: 'claude', role: 'primary', live: true, detail: 'manager process is running' },
-          runtimeLivenessFromFallbackHealth('codex', codex),
-          runtimeLivenessFromFallbackHealth('cursor', cursor),
-        ];
-        const model = computeRoutingHealth({
-          team_id: teamName,
-          now: new Date().toISOString(),
-          pools: [],
-          builders: [],
-          dispatches: [],
-          runtimes,
-        });
+        const model = await this.cachedRoutingHealthModel(teamName);
         res.json(model);
       } catch (err: any) {
         res.status(500).json({ error: 'routing_health_failed', detail: String(err?.message || err) });
@@ -10961,6 +11002,16 @@ export class AgentManagerDb {
               },
             });
             this.dispatchScheduler.start();
+            // RD-014 (3rd attempt — Fable critique confirmed this was still
+            // unwired 07-04/07-05/07-06): the enqueue-time admission gate
+            // (providersConstrainedByRoutingHealth, folded in via
+            // currentRoutingHealthConstrainedProviders) is dead code without
+            // a live source. Wire the SAME short-TTL-cached probe GET
+            // /routing-health uses, so a stalled/unhealthy Codex lane is
+            // actually routed around at enqueue, not just observed.
+            this.dispatchScheduler.setRoutingHealthSource(() =>
+              this.cachedRoutingHealthModel(defaultTeamId),
+            );
             this.startFleetBlockageMonitor(defaultTeamId);
             // W2-1 DispatchVerification — stand up the durable projection on the
             // SAME SqliteAdapter + default team the reactor uses, then start the
