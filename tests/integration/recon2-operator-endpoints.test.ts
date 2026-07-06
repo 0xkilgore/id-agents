@@ -99,7 +99,9 @@ describe("T-RECON.2 operator-action endpoints", () => {
     await seedFailed("phid:disp-moot1", "dead failure");
     const res = await post("/dispatches/phid:disp-moot1/moot", { reason: "not real work" });
     expect(res.status).toBe(200);
-    expect((await res.json() as any).recovery_status).toBe("moot");
+    const body = await res.json() as any;
+    expect(body.action_status).toBe("delivered");
+    expect(body.recovery_status).toBe("moot");
 
     const got = await fetch(`${baseUrl}/dispatches/phid:disp-moot1`);
     const dispatch = (await got.json() as any).dispatch;
@@ -107,11 +109,48 @@ describe("T-RECON.2 operator-action endpoints", () => {
     expect(dispatch.needs_operator).toBe(false);
   });
 
+  it("POST /dispatches/:id/moot is typed and idempotent when already moot", async () => {
+    await seedFailed("phid:disp-moot2", "dead failure");
+    const first = await post("/dispatches/phid:disp-moot2/moot", { reason: "not real work" });
+    expect(first.status).toBe(200);
+
+    const second = await post("/dispatches/phid:disp-moot2/moot", { reason: "clicked twice" });
+    expect(second.status).toBe(200);
+    const body = await second.json() as any;
+    expect(body.action_status).toBe("delivered");
+    expect(body.deduped).toBe(true);
+    expect(body.recovery_status).toBe("moot");
+  });
+
+  it("POST /dispatches/:id/moot returns timed_out at the caller bound", async () => {
+    await seedFailed("phid:disp-moot-slow", "dead failure");
+    const scheduler = (manager as any).dispatchScheduler;
+    const originalMarkMoot = scheduler.reactor.markMoot.bind(scheduler.reactor);
+    scheduler.reactor.markMoot = async (...args: unknown[]) => {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      return originalMarkMoot(...args as [string, string]);
+    };
+    try {
+      const res = await post("/dispatches/phid:disp-moot-slow/moot", {
+        reason: "slow",
+        timeout_ms: 5,
+        idempotency_key: "slow-moot-key",
+      });
+      expect(res.status).toBe(504);
+      const body = await res.json() as any;
+      expect(body.action_status).toBe("timed_out");
+      expect(body.idempotency_key).toBe("slow-moot-key");
+    } finally {
+      scheduler.reactor.markMoot = originalMarkMoot;
+    }
+  });
+
   it("POST /dispatches/:id/retry re-enqueues + supersedes the original", async () => {
     await seedFailed("phid:disp-retry1", "transient");
     const res = await post("/dispatches/phid:disp-retry1/retry", {});
     expect(res.status).toBe(200);
     const body = await res.json() as any;
+    expect(body.action_status).toBe("delivered");
     expect(body.new_dispatch_phid).toMatch(/^phid:/);
     expect(body.superseded_dispatch_phid).toBe("phid:disp-retry1");
 
@@ -126,8 +165,50 @@ describe("T-RECON.2 operator-action endpoints", () => {
     const res = await post("/dispatches/phid:disp-reassign1/reassign", { to_agent: "regina" });
     expect(res.status).toBe(200);
     const body = await res.json() as any;
+    expect(body.action_status).toBe("delivered");
     expect(body.to_agent).toBe("regina");
     expect(body.new_dispatch_phid).toMatch(/^phid:/);
+  });
+
+  it("POST /dispatches/:id/retry reuses the replacement dispatch after a partial failure", async () => {
+    await seedFailed("phid:disp-retry-partial", "transient");
+    const scheduler = (manager as any).dispatchScheduler;
+    const originalMarkSuperseded = scheduler.reactor.markSuperseded.bind(scheduler.reactor);
+    let failedOnce = false;
+    scheduler.reactor.markSuperseded = async (...args: unknown[]) => {
+      if (!failedOnce) {
+        failedOnce = true;
+        throw new Error("simulated supersede failure");
+      }
+      return originalMarkSuperseded(...args as [string, string, string]);
+    };
+    try {
+      const first = await post("/dispatches/phid:disp-retry-partial/retry", {});
+      expect(first.status).toBe(500);
+      const firstBody = await first.json() as any;
+      expect(firstBody.action_status).toBe("failed");
+
+      const queued = await db.adapter.query<{ dispatch_phid: string }>(
+        `SELECT dispatch_phid FROM dispatch_scheduler_queue
+         WHERE dedup_key = ?
+         ORDER BY updated_at ASC`,
+        ["operator-action:retry:phid:disp-retry-partial:finances"],
+      );
+      expect(queued.rows).toHaveLength(1);
+      const replacement = queued.rows[0].dispatch_phid;
+
+      const second = await post("/dispatches/phid:disp-retry-partial/retry", {});
+      expect(second.status).toBe(200);
+      const secondBody = await second.json() as any;
+      expect(secondBody.action_status).toBe("delivered");
+      expect(secondBody.new_dispatch_phid).toBe(replacement);
+
+      const after = await fetch(`${baseUrl}/dispatches/phid:disp-retry-partial`);
+      const dispatch = (await after.json() as any).dispatch;
+      expect(dispatch.supersede_link).toBe(replacement);
+    } finally {
+      scheduler.reactor.markSuperseded = originalMarkSuperseded;
+    }
   });
 
   it("rejects an unauthenticated (non-admin) operator action", async () => {

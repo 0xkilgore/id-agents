@@ -58,6 +58,7 @@ import {
   type ReadGuard,
 } from './control-plane/read-guard.js';
 import { resolveManagerNode } from './lib/native-node.js';
+import { createActionDeliverer, type ActionStatus } from './action-delivery/deliver.js';
 import { isBootSpawnableAgent } from './lib/boot-spawn.js';
 import { sweepOrphanAgents, listMatchingProcesses } from './lib/orphan-sweep.js';
 import {
@@ -2930,6 +2931,29 @@ export class AgentManagerDb {
       }
       return true;
     };
+    const OPERATOR_ACTION_TIMEOUT_MS = 10_000;
+    const actionDeliverer = createActionDeliverer();
+    const operatorActionStatusFromError = (err: unknown): { status: ActionStatus; http: number; message: string } => {
+      const message = err instanceof Error ? err.message : String(err);
+      if (/required|invalid|missing/i.test(message)) return { status: 'failed', http: 400, message };
+      if (/not found/i.test(message)) return { status: 'failed', http: 404, message };
+      return { status: 'failed', http: 500, message };
+    };
+    const operatorActionTimeoutMs = (body: unknown): number => {
+      const raw = typeof body === 'object' && body && 'timeout_ms' in body
+        ? (body as { timeout_ms?: unknown }).timeout_ms
+        : undefined;
+      if (typeof raw !== 'number' || !Number.isFinite(raw)) return OPERATOR_ACTION_TIMEOUT_MS;
+      return Math.min(60_000, Math.max(1, Math.floor(raw)));
+    };
+    const operatorActionIdempotencyKey = (fallback: string, body: unknown): string => {
+      const raw = typeof body === 'object' && body && 'idempotency_key' in body
+        ? (body as { idempotency_key?: unknown }).idempotency_key
+        : undefined;
+      return typeof raw === 'string' && raw.trim() ? raw.trim() : fallback;
+    };
+    const operatorActionDedupKey = (kind: 'retry' | 'reassign', dispatchPhid: string, toAgent: string) =>
+      `operator-action:${kind}:${dispatchPhid}:${toAgent}`;
 
     // POST /dispatches/:id/moot — dismiss a dead failure out of NEEDS-YOU.
     this.managementApp.post('/dispatches/:dispatch_id/moot', async (req, res) => {
@@ -2942,10 +2966,55 @@ export class AgentManagerDb {
         const reason = typeof req.body?.reason === 'string' && req.body.reason.trim()
           ? req.body.reason.trim()
           : 'operator dismissed (moot)';
-        const updated = await this.dispatchScheduler!.reactor.markMoot(doc.dispatch_phid, reason);
-        return res.json({ ok: true, dispatch_phid: doc.dispatch_phid, recovery_status: 'moot', dispatch: updated });
+        if (doc.recovery_status === 'moot') {
+          return res.json({
+            ok: true,
+            action_status: 'delivered' satisfies ActionStatus,
+            deduped: true,
+            dispatch_phid: doc.dispatch_phid,
+            recovery_status: 'moot',
+            dispatch: doc,
+          });
+        }
+        const action = await actionDeliverer.deliverAction({
+          idempotency_key: operatorActionIdempotencyKey(`operator-action:moot:${doc.dispatch_phid}`, req.body),
+          timeout_ms: operatorActionTimeoutMs(req.body),
+          run: () => this.dispatchScheduler!.reactor.markMoot(doc.dispatch_phid, reason),
+        });
+        if (action.status === 'timed_out') {
+          return res.status(504).json({
+            ok: false,
+            action_status: action.status,
+            idempotency_key: action.idempotency_key,
+            latency_ms: action.latency_ms,
+            deduped: action.deduped,
+            error: 'operator action timed out',
+          });
+        }
+        if (action.status === 'failed') {
+          actionDeliverer.forget(action.idempotency_key);
+          return res.status(500).json({
+            ok: false,
+            action_status: action.status,
+            idempotency_key: action.idempotency_key,
+            latency_ms: action.latency_ms,
+            deduped: action.deduped,
+            error: action.error,
+          });
+        }
+        return res.json({
+          ok: true,
+          action_status: action.status,
+          idempotency_key: action.idempotency_key,
+          latency_ms: action.latency_ms,
+          deduped: action.deduped,
+          dispatch_phid: doc.dispatch_phid,
+          recovery_status: 'moot',
+          dispatch: action.value,
+        });
       } catch (err) {
-        return res.status(500).json({ ok: false, error: err instanceof Error ? err.message : String(err) });
+        const typed = operatorActionStatusFromError(err);
+        return res.status(typed.http).json({ ok: false, action_status: typed.status, error: typed.message });
       }
     });
 
@@ -2964,26 +3033,84 @@ export class AgentManagerDb {
           if (!requested) return res.status(400).json({ ok: false, error: 'to_agent required', code: 'missing_to_agent' });
           toAgent = requested;
         }
+        if (doc.recovery_status === 'moot') {
+          return res.json({
+            ok: true,
+            action_status: 'delivered' satisfies ActionStatus,
+            deduped: true,
+            superseded_dispatch_phid: doc.dispatch_phid,
+            new_dispatch_phid: null,
+            new_query_id: null,
+            to_agent: toAgent,
+          });
+        }
         // Enqueue a fresh dispatch with the original payload. Runtime is left
         // unpinned so the D1 model policy picks the lane (Codex Light) — a
         // retried Codex-limit failure routes to Claude automatically.
-        const enq = await this.dispatchScheduler!.enqueue({
-          to_agent: toAgent,
-          from_actor: `operator:${kind}`,
-          subject: doc.subject,
-          message: doc.body_markdown,
+        const dedupKey = operatorActionDedupKey(kind, doc.dispatch_phid, toAgent);
+        const action = await actionDeliverer.deliverAction({
+          idempotency_key: operatorActionIdempotencyKey(dedupKey, req.body),
+          timeout_ms: operatorActionTimeoutMs(req.body),
+          run: async () => {
+            const enq = await this.dispatchScheduler!.enqueue({
+              to_agent: toAgent,
+              from_actor: `operator:${kind}`,
+              subject: doc.subject,
+              message: doc.body_markdown,
+              dedup_key: dedupKey,
+            });
+            const reason = `${kind} → ${enq.dispatch_phid}${kind === 'reassign' ? ` (reassigned to ${toAgent})` : ''}`;
+            await this.dispatchScheduler!.reactor.markSuperseded(doc.dispatch_phid, enq.dispatch_phid, reason);
+            return enq;
+          },
         });
-        const reason = `${kind} → ${enq.dispatch_phid}${kind === 'reassign' ? ` (reassigned to ${toAgent})` : ''}`;
-        await this.dispatchScheduler!.reactor.markSuperseded(doc.dispatch_phid, enq.dispatch_phid, reason);
+        if (action.status === 'timed_out') {
+          return res.status(504).json({
+            ok: false,
+            action_status: action.status,
+            idempotency_key: action.idempotency_key,
+            latency_ms: action.latency_ms,
+            deduped: action.deduped,
+            error: 'operator action timed out',
+          });
+        }
+        if (action.status === 'failed') {
+          actionDeliverer.forget(action.idempotency_key);
+          return res.status(500).json({
+            ok: false,
+            action_status: action.status,
+            idempotency_key: action.idempotency_key,
+            latency_ms: action.latency_ms,
+            deduped: action.deduped,
+            error: action.error,
+          });
+        }
+        const enq = action.value;
+        if (!enq) {
+          actionDeliverer.forget(action.idempotency_key);
+          return res.status(500).json({
+            ok: false,
+            action_status: 'failed' satisfies ActionStatus,
+            idempotency_key: action.idempotency_key,
+            latency_ms: action.latency_ms,
+            deduped: action.deduped,
+            error: 'operator action delivered without enqueue result',
+          });
+        }
         return res.json({
           ok: true,
+          action_status: action.status,
+          idempotency_key: action.idempotency_key,
+          latency_ms: action.latency_ms,
+          deduped: action.deduped,
           superseded_dispatch_phid: doc.dispatch_phid,
           new_dispatch_phid: enq.dispatch_phid,
           new_query_id: enq.query_id,
           to_agent: toAgent,
         });
       } catch (err) {
-        return res.status(500).json({ ok: false, error: err instanceof Error ? err.message : String(err) });
+        const typed = operatorActionStatusFromError(err);
+        return res.status(typed.http).json({ ok: false, action_status: typed.status, error: typed.message });
       }
     };
     this.managementApp.post('/dispatches/:dispatch_id/retry', retryOrReassign('retry'));

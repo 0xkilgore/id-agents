@@ -269,6 +269,7 @@ export interface DispatchDoc {
     | "none"
     | "recovering"
     | "landed_reconciled"
+    | "moot"
     | "needs_operator"
     | "exhausted"
     | "unsafe_side_effect";
