@@ -14,6 +14,7 @@ import type { AgentCatalog } from "../config-parser.js";
 import {
   buildAgentDetail,
   type AgentDetailResponse,
+  type DetailCommentReceiptRow,
   type DetailLoopRow,
   type DetailDispatchRow,
   type TokenSeriesPoint,
@@ -154,6 +155,34 @@ export async function assembleAgentDetail(
     );
   }, [] as DetailDispatchRow[]);
 
+  const recent_comment_receipts = await safe(async () => {
+    const { rows } = await adapter.query<{
+      op_id: number;
+      artifact_id: string;
+      actor: string;
+      ts: string;
+      payload_json: string | null;
+      artifact_title: string | null;
+      artifact_basename: string | null;
+      artifact_agent: string | null;
+    }>(
+      `SELECT o.op_id, o.artifact_id, o.actor, o.ts, o.payload_json,
+              a.title AS artifact_title, a.basename AS artifact_basename, a.agent AS artifact_agent
+         FROM artifact_operations o
+         LEFT JOIN artifacts a ON a.artifact_id = o.artifact_id
+        WHERE o.op_type = 'comment_recorded'
+        ORDER BY o.ts DESC, o.op_id DESC
+        LIMIT 500`,
+    );
+    const receipts: DetailCommentReceiptRow[] = [];
+    for (const row of rows) {
+      const receipt = commentReceiptFromOperation(row, attributionNames);
+      if (receipt) receipts.push(receipt);
+      if (receipts.length >= RECENT_OUTPUT_LIMIT) break;
+    }
+    return receipts;
+  }, [] as DetailCommentReceiptRow[]);
+
   const loops = await safe(async () => {
     const resp = listLoops(opts.nowIso, { owner_agent: name });
     return resp.loops.map(
@@ -182,6 +211,7 @@ export async function assembleAgentDetail(
     failed_dispatches,
     recent_outputs,
     recent_dispatches,
+    recent_comment_receipts,
     skills,
     loops,
     scripts,
@@ -205,6 +235,118 @@ export function normalizeAttributionNames(values: Array<string | null | undefine
 
 function placeholders(count: number): string {
   return Array.from({ length: Math.max(1, count) }, () => "?").join(",");
+}
+
+function commentReceiptFromOperation(
+  row: {
+    op_id: number;
+    artifact_id: string;
+    actor: string;
+    ts: string;
+    payload_json: string | null;
+    artifact_title: string | null;
+    artifact_basename: string | null;
+    artifact_agent: string | null;
+  },
+  attributionNames: string[],
+): DetailCommentReceiptRow | null {
+  const payload = parseObject(row.payload_json);
+  const routeStatus = parseObject(payload.route_status);
+  const visibleState = stringValue(routeStatus.visible_state);
+  if (
+    visibleState !== "recorded+routed" &&
+    visibleState !== "recorded-but-route-failed-with-retry" &&
+    visibleState !== "not-recorded"
+  ) {
+    return null;
+  }
+  const routeKind = stringValue(routeStatus.route_kind);
+  if (routeKind !== "approval_signal" && routeKind !== "substantive_follow_up" && routeKind !== "question") {
+    return null;
+  }
+
+  const dispatch = parseObject(routeStatus.dispatch);
+  const targetAgent = stringValue(routeStatus.target_agent);
+  const targetAgentRaw = stringValue(routeStatus.target_agent_raw);
+  const candidates = [
+    targetAgent,
+    targetAgentRaw,
+    row.artifact_agent,
+    projectOwnerName(targetAgentRaw),
+    projectOwnerName(row.artifact_agent),
+  ];
+  if (!matchesAttribution(candidates, attributionNames)) return null;
+
+  const retryable = routeStatus.retryable === true;
+  const skipped = stringValue(routeStatus.skipped);
+  const error = parseObject(routeStatus.error);
+  const errorMessage = stringValue(error.message);
+  const dispatchId = stringValue(dispatch.dispatch_phid);
+  const queryId = stringValue(dispatch.query_id);
+  const updatedAt = stringValue(routeStatus.updated_at);
+  const routeStatusLabel =
+    visibleState === "recorded+routed"
+      ? "routed"
+      : visibleState === "recorded-but-route-failed-with-retry"
+        ? "recorded-but-route-failed"
+        : "not-recorded";
+
+  return {
+    receipt_id: `artifact-comment-receipt:${row.artifact_id}:${row.op_id}`,
+    artifact_id: row.artifact_id,
+    artifact_title: row.artifact_title,
+    artifact_basename: row.artifact_basename,
+    actor: row.actor,
+    time: updatedAt || row.ts,
+    route_status: routeStatusLabel,
+    visible_state: visibleState,
+    retryable,
+    route_kind: routeKind,
+    target_agent: targetAgent,
+    target_agent_raw: targetAgentRaw,
+    dispatch_id: dispatchId,
+    query_id: queryId,
+    failure_reason: errorMessage ?? skipped,
+    retry_metadata: {
+      retryable,
+      skipped,
+      error: errorMessage ? { message: errorMessage } : null,
+      updated_at: updatedAt,
+    },
+  };
+}
+
+function parseObject(value: unknown): Record<string, unknown> {
+  if (typeof value === "string") {
+    try {
+      const parsed = JSON.parse(value);
+      return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+        ? (parsed as Record<string, unknown>)
+        : {};
+    } catch {
+      return {};
+    }
+  }
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : {};
+}
+
+function stringValue(value: unknown): string | null {
+  return typeof value === "string" && value.length > 0 ? value : null;
+}
+
+function projectOwnerName(value: string | null | undefined): string | null {
+  const match = value?.match(/^project:\s*(.+)$/i);
+  return match?.[1]?.trim() || null;
+}
+
+function matchesAttribution(values: Array<string | null | undefined>, attributionNames: string[]): boolean {
+  const wanted = new Set(attributionNames.map((v) => v.toLowerCase()));
+  return values.some((value) => {
+    const normalized = value?.trim().toLowerCase();
+    return normalized ? wanted.has(normalized) : false;
+  });
 }
 
 /** Resolve the agent's runtime-specific skills dir (e.g. <wd>/.claude/skills). */

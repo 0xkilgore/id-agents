@@ -55,6 +55,31 @@ export interface DetailDispatchRow {
   attributed_agent: string;
 }
 
+/** A routed artifact-comment receipt visible in the owning agent history. */
+export interface DetailCommentReceiptRow {
+  receipt_id: string;
+  artifact_id: string;
+  artifact_title: string | null;
+  artifact_basename: string | null;
+  actor: string;
+  time: string;
+  route_status: string;
+  visible_state: "recorded+routed" | "recorded-but-route-failed-with-retry" | "not-recorded";
+  retryable: boolean;
+  route_kind: "approval_signal" | "substantive_follow_up" | "question";
+  target_agent: string | null;
+  target_agent_raw: string | null;
+  dispatch_id: string | null;
+  query_id: string | null;
+  failure_reason: string | null;
+  retry_metadata: {
+    retryable: boolean;
+    skipped: string | null;
+    error: { message: string } | null;
+    updated_at: string | null;
+  };
+}
+
 /** A loop the agent owns (LoopSummary, narrowed to what the page shows). */
 export interface DetailLoopRow {
   slug: string;
@@ -103,6 +128,7 @@ export interface RawAgentDetailData {
   failed_dispatches: number;
   recent_outputs: DetailArtifactRow[];
   recent_dispatches: DetailDispatchRow[];
+  recent_comment_receipts: DetailCommentReceiptRow[];
   skills: string[];
   loops: DetailLoopRow[];
   scripts: string[];
@@ -124,6 +150,8 @@ export interface AgentDetailResponse {
   recent_outputs: DetailArtifactRow[];
   /** Newest-first, capped at 20 — recent dispatches from the verification projection. */
   recent_dispatches: DetailDispatchRow[];
+  /** Newest-first, capped at 20 — routed artifact-comment receipts for this agent. */
+  recent_comment_receipts: DetailCommentReceiptRow[];
   /** Convenience subset of recent_dispatches where verification produced a landing. */
   verified_landings: DetailDispatchRow[];
   skills: string[];
@@ -162,6 +190,9 @@ export function buildAgentDetail(raw: RawAgentDetailData): AgentDetailResponse {
   const recentDispatches = [...raw.recent_dispatches]
     .sort((a, b) => (a.time < b.time ? 1 : a.time > b.time ? -1 : 0))
     .slice(0, RECENT_OUTPUT_LIMIT);
+  const recentCommentReceipts = [...raw.recent_comment_receipts]
+    .sort((a, b) => (a.time < b.time ? 1 : a.time > b.time ? -1 : 0))
+    .slice(0, RECENT_OUTPUT_LIMIT);
 
   const contribution_grid = buildContributionGrid(raw, recent, recentDispatches);
 
@@ -179,6 +210,7 @@ export function buildAgentDetail(raw: RawAgentDetailData): AgentDetailResponse {
     contribution_grid,
     recent_outputs: recent,
     recent_dispatches: recentDispatches,
+    recent_comment_receipts: recentCommentReceipts,
     // A verified landing is any verified dispatch — an artifact landing (has a
     // path) OR a promotion landing (code promoted to main, no artifact file).
     // Requiring artifact_path here silently dropped every code build, so agents

@@ -138,6 +138,30 @@ export interface AgentDetailDispatch {
   attributed_agent: string;
 }
 
+export interface AgentDetailCommentReceipt {
+  receipt_id: string;
+  artifact_id: string;
+  artifact_title: string | null;
+  artifact_basename: string | null;
+  actor: string;
+  time: string;
+  route_status: string;
+  visible_state: 'recorded+routed' | 'recorded-but-route-failed-with-retry' | 'not-recorded';
+  retryable: boolean;
+  route_kind: 'approval_signal' | 'substantive_follow_up' | 'question';
+  target_agent: string | null;
+  target_agent_raw: string | null;
+  dispatch_id: string | null;
+  query_id: string | null;
+  failure_reason: string | null;
+  retry_metadata: {
+    retryable: boolean;
+    skipped: string | null;
+    error: { message: string } | null;
+    updated_at: string | null;
+  };
+}
+
 export interface AgentDetailLoop {
   slug: string;
   name: string;
@@ -179,6 +203,7 @@ export interface AgentDetailResponse {
   contribution_grid?: AgentDetailContributionGrid;
   recent_outputs: AgentDetailArtifact[];
   recent_dispatches?: AgentDetailDispatch[];
+  recent_comment_receipts?: AgentDetailCommentReceipt[];
   verified_landings?: AgentDetailDispatch[];
   skills: string[];
   loops: AgentDetailLoop[];
