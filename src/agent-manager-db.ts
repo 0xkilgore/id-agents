@@ -143,6 +143,7 @@ import {
   failedDispatchesWithin,
   FAILED_24H_WINDOW_MS,
 } from './dispatch-scheduler/read-model.js';
+import { mountAgentObligationsRoutes } from './agent-obligations/routes.js';
 import { readDispatchDetailById } from './dispatch-detail/read.js';
 import {
   DIRTY_WORKTREE_AUTO_ANSWER,
@@ -4207,6 +4208,12 @@ export class AgentManagerDb {
         });
       }
     });
+
+    mountAgentObligationsRoutes(
+      this.managementApp,
+      this.db.adapter,
+      async (req) => this.getTeam(req),
+    );
 
     // GET /dispatches/failed-24h — dispatches that FAILED in the trailing 24h
     // (STUB-S6 / dashboard page.tsx:270). Registered before /dispatches/:id so

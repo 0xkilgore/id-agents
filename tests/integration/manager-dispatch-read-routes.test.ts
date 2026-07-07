@@ -304,12 +304,111 @@ describe('manager dispatch read routes', () => {
       exists: true,
     });
   });
+
+  it('lists agent obligations with expected, done, late, and failed states', async () => {
+    const teamId = await db.teams.getOrCreateTeamId('agent-obligations-fixture');
+    await insertDispatch(teamId, {
+      dispatch_phid: 'phid:disp-obligation-expected',
+      query_id: 'query_obligation_expected',
+      to_agent: 'roger',
+      from_actor: 'manager',
+      status: 'queued',
+      subject: 'Write report',
+      not_before_at: '2099-07-07T11:45:00.000Z',
+      updated_at: '2099-07-07T11:45:00.000Z',
+    });
+    await insertDispatch(teamId, {
+      dispatch_phid: 'phid:disp-obligation-done',
+      query_id: 'query_obligation_done',
+      to_agent: 'roger',
+      from_actor: 'manager',
+      status: 'done',
+      subject: 'Prepare handoff',
+      completed_at: '2026-07-07T11:50:00.000Z',
+      updated_at: '2026-07-07T11:50:00.000Z',
+    });
+    await insertDispatch(teamId, {
+      dispatch_phid: 'phid:disp-obligation-late-closeout',
+      query_id: 'query_obligation_late',
+      to_agent: 'regina',
+      from_actor: 'continuous-orchestration',
+      status: 'in_flight',
+      subject: 'Build dispatch closeout',
+      started_at: '2026-07-07T10:00:00.000Z',
+      updated_at: '2026-07-07T10:00:00.000Z',
+    });
+    await insertDispatch(teamId, {
+      dispatch_phid: 'phid:disp-obligation-failed',
+      query_id: 'query_obligation_failed',
+      to_agent: 'cane',
+      from_actor: 'operator',
+      channel: 'artifact_comment',
+      status: 'failed',
+      subject: 'Operator comment follow-up',
+      completed_at: '2026-07-07T10:20:00.000Z',
+      updated_at: '2026-07-07T10:20:00.000Z',
+      failure_kind: 'agent_error',
+      failure_detail: 'comment route failed',
+    });
+
+    const res = await fetch(`${baseUrl}/agent-obligations?limit=20`, { headers: headers('agent-obligations-fixture') });
+    expect(res.status).toBe(200);
+    const body = await res.json() as any;
+    expect(body.ok).toBe(true);
+    expect(body.schema_version).toBe('agent-obligations.v1');
+    expect(body.obligations).toHaveLength(4);
+
+    const byId = new Map(body.obligations.map((o: any) => [o.obligation_id, o]));
+    expect(byId.get('agent-obligation:phid:disp-obligation-expected')).toMatchObject({
+      source_kind: 'report',
+      source_ref: 'query_obligation_expected',
+      agent: 'roger',
+      owner: 'manager',
+      status: 'expected',
+      stale_after: '2099-07-07T12:15:00.000Z',
+      due_at: '2099-07-07T12:15:00.000Z',
+    });
+    expect(byId.get('agent-obligation:phid:disp-obligation-done')).toMatchObject({
+      source_kind: 'handoff',
+      agent: 'roger',
+      status: 'done',
+      stale_after: null,
+      due_at: null,
+      last_event_at: '2026-07-07T11:50:00.000Z',
+    });
+    expect(byId.get('agent-obligation:phid:disp-obligation-late-closeout')).toMatchObject({
+      source_kind: 'closeout',
+      agent: 'regina',
+      owner: 'continuous-orchestration',
+      status: 'late',
+      stale_after: '2026-07-07T10:30:00.000Z',
+      due_at: '2026-07-07T10:30:00.000Z',
+    });
+    expect(byId.get('agent-obligation:phid:disp-obligation-late-closeout').dashboard_reason)
+      .toMatch(/stale missing closeout/i);
+    expect(byId.get('agent-obligation:phid:disp-obligation-failed')).toMatchObject({
+      source_kind: 'comment',
+      source_ref: 'query_obligation_failed',
+      agent: 'cane',
+      owner: 'operator',
+      status: 'failed',
+      dashboard_reason: 'Comment follow-up failed: comment route failed',
+    });
+
+    const late = await fetch(`${baseUrl}/agent-obligations?status=late`, { headers: headers('agent-obligations-fixture') });
+    const lateBody = await late.json() as any;
+    expect(lateBody.obligations.map((o: any) => o.obligation_id)).toEqual([
+      'agent-obligation:phid:disp-obligation-late-closeout',
+    ]);
+  });
 });
 
 async function insertDispatch(teamId: string, overrides: Partial<{
   dispatch_phid: string;
   query_id: string;
   to_agent: string;
+  from_actor: string;
+  channel: string;
   status: string;
   subject: string;
   body_markdown: string;
@@ -345,8 +444,8 @@ async function insertDispatch(teamId: string, overrides: Partial<{
       teamId,
       overrides.query_id ?? `query_${dispatchPhid.replace(/[^a-z0-9]/gi, '_')}`,
       overrides.to_agent ?? 'coder-max',
-      'manager',
-      'talk',
+      overrides.from_actor ?? 'manager',
+      overrides.channel ?? 'talk',
       overrides.subject ?? 'Dispatch read route test',
       overrides.body_markdown ?? 'Test body',
       'anthropic',
