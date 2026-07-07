@@ -78,7 +78,7 @@ export interface SchedulerEnv {
 export interface SchedulerHandleOptions {
   adapter: SqliteAdapter;
   teamId: string;
-  resolveTargetUrl: (agent: string) => Promise<string | null> | string | null;
+  resolveTargetUrl: (agent: string, doc?: DispatchDoc) => Promise<string | null> | string | null;
   env?: SchedulerEnv;
   /** Optional override for tests; default polls process.hrtime. */
   now?: () => string;
@@ -391,7 +391,11 @@ export class SchedulerHandle {
     });
     this.client = new DispatchDocClient({ reactor: this.reactor, now, onStatusChanged: opts.onDispatchStatusChanged });
     this.transport = new HttpAgentTransport({
-      resolveTargetUrl: async (doc) => opts.resolveTargetUrl(doc.to_agent),
+      resolveTargetUrl: async (doc) => {
+        const laneTarget = await this.resolveRuntimeLaneTargetUrl(doc);
+        if (laneTarget) return laneTarget;
+        return opts.resolveTargetUrl(doc.to_agent, doc);
+      },
     });
     const queryEvidence = opts.queriesRepository
       ? new QueriesEvidenceClient({
@@ -570,6 +574,33 @@ export class SchedulerHandle {
       return providersConstrainedByRoutingHealth(model);
     } catch {
       return [];
+    }
+  }
+
+  /**
+   * Multi-LLM Slice D: keep `to_agent` as the durable logical agent identity,
+   * but deliver to a physical agent endpoint whose runtime matches the dispatch
+   * lane. This is intentionally narrow: same-runtime dispatches keep routing to
+   * the logical agent; fallback dispatches (for example finances/Claude →
+   * Codex) use the first live same-runtime executor already registered in the
+   * agents table.
+   */
+  private async resolveRuntimeLaneTargetUrl(doc: DispatchDoc): Promise<string | null> {
+    if (!this.agentsRepository) return null;
+    try {
+      const target = await this.agentsRepository.getByName(this.teamId, doc.to_agent);
+      if (target?.endpoint && normalizeRuntime(target.runtime) === doc.runtime) {
+        return target.endpoint;
+      }
+      const agents = await this.agentsRepository.list(this.teamId, true);
+      const lane = agents.find((agent) => {
+        if (!agent.endpoint) return false;
+        if (!isLiveAgent(agent)) return false;
+        return normalizeRuntime(agent.runtime) === doc.runtime;
+      });
+      return lane?.endpoint ?? null;
+    } catch {
+      return null;
     }
   }
 

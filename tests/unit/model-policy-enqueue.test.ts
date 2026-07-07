@@ -2,7 +2,7 @@
 // (SchedulerHandle), applying Codex Light fallback off the live
 // unavailable-providers signal. Explicit runtime pins always win.
 
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { tmpdir } from "node:os";
 import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
@@ -25,6 +25,13 @@ const CODEX_LIGHT: RawModelPolicyConfig = {
   schema_version: 1,
   constrained_providers: ["openai"],
   default: { primary: { runtime: "codex" }, fallback: [{ runtime: "claude-code-cli" }] },
+  agents: {},
+};
+
+const CLAUDE_TO_CODEX: RawModelPolicyConfig = {
+  schema_version: 1,
+  constrained_providers: ["anthropic"],
+  default: { primary: { runtime: "claude-code-cli" }, fallback: [{ runtime: "codex" }] },
   agents: {},
 };
 
@@ -53,23 +60,26 @@ function makeHandle(unavailable: Provider[]): SchedulerHandle {
   return handle;
 }
 
-function makeHandleWithAgents(unavailable: Provider[]): SchedulerHandle {
+function makeHandleWithAgents(
+  unavailable: Provider[],
+  policyConfig: RawModelPolicyConfig = CODEX_LIGHT,
+): SchedulerHandle {
   const handle = new SchedulerHandle({
     adapter,
     teamId: "team",
     resolveTargetUrl: () => "http://localhost:1",
     agentsRepository: new SqliteAgentsRepo(adapter),
-    modelPolicy: buildModelPolicyService(CODEX_LIGHT, "file"),
+    modelPolicy: buildModelPolicyService(policyConfig, "file"),
   });
   handle.setUnavailableProvidersSource(() => unavailable);
   return handle;
 }
 
-async function insertAgentRuntime(name: string, runtime: string): Promise<void> {
+async function insertAgentRuntime(name: string, runtime: string, endpoint = "http://localhost:1"): Promise<void> {
   await adapter.query(
     `INSERT INTO agents (team_id, id, name, type, model, port, status, created_at, runtime, endpoint)
-     VALUES ('team', ?, ?, 'persistent', ?, 24000, 'running', ?, ?, 'http://localhost:1')`,
-    [`agent-${name}`, name, runtime === "codex" ? "gpt-5.5" : "claude-opus", Date.now(), runtime],
+     VALUES ('team', ?, ?, 'persistent', ?, 24000, 'running', ?, ?, ?)`,
+    [`agent-${name}`, name, runtime === "codex" ? "gpt-5.5" : "claude-opus", Date.now(), runtime, endpoint],
   );
 }
 
@@ -117,6 +127,29 @@ describe("model policy at enqueue", () => {
 
     expect(got.runtime).toBe("claude-code-cli");
     expect(got.provider).toBe("anthropic");
+  });
+
+  it("Claude-constrained project agent dispatches to a live Codex executor lane", async () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch") as ReturnType<typeof vi.spyOn>;
+    fetchSpy.mockResolvedValueOnce(
+      new Response(JSON.stringify({ query_id: "agent-q-codex" }), { status: 200 }) as unknown as Response,
+    );
+    await insertAgentRuntime("finances", "claude-code-cli", "http://localhost:4101");
+    await insertAgentRuntime("roger", "codex", "http://localhost:4102");
+
+    const handle = makeHandleWithAgents(["anthropic"], CLAUDE_TO_CODEX);
+    const got = await enqueuedRuntime(handle, {
+      to_agent: "finances",
+      from_actor: "test",
+      message: "recover through Codex",
+    });
+    expect(got.runtime).toBe("codex");
+    expect(got.provider).toBe("openai");
+
+    await handle.tick();
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    expect(fetchSpy.mock.calls[0]?.[0]).toBe("http://localhost:4102/talk");
+    fetchSpy.mockRestore();
   });
 
   it("no policy configured → preserves the pre-D1 default (claude-code-cli)", async () => {
