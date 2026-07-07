@@ -159,6 +159,11 @@ import {
 import type { SqliteAdapter } from './db/sqlite-adapter.js';
 import { DispatchVerificationStorage } from './dispatch-verification/storage.js';
 import {
+  buildFleetMetricsHistoryResponse,
+  FleetMetricsHistoryStorage,
+  type FleetMetricsHistoryResponse,
+} from './dispatch-verification/fleet-metrics-history.js';
+import {
   verifyDoneClaims,
   makeDoneVerificationProbes,
 } from './dispatch-verification/done-verification.js';
@@ -233,6 +238,8 @@ import {
   getAgentDispatches,
   type RosterEntry,
 } from './dispatch-verification/routes.js';
+import type { AgentsEffectivenessResponse } from './dispatch-verification/read-model.js';
+import type { UsageGateSnapshot } from './usage-meter/types.js';
 import { heartbeatToSchedule, calendarToSchedule, validateIntervalSeconds, HEARTBEAT_GENERIC_MESSAGE } from './scheduling/schedule-config.js';
 import {
   getAvailableRuntimes,
@@ -259,6 +266,41 @@ const MODEL_ALIASES: Record<string, string> = {
 
 function resolveModelAlias(model: string): string {
   return MODEL_ALIASES[model.toLowerCase()] || model;
+}
+
+type FleetMetricsHistoryRange = FleetMetricsHistoryResponse["range"];
+
+function parseFleetMetricsHistoryRange(raw: unknown): FleetMetricsHistoryRange | null {
+  if (raw === undefined || raw === null || raw === "") return "30d";
+  if (raw === "24h" || raw === "7d" || raw === "30d" || raw === "90d") return raw;
+  return null;
+}
+
+function fleetMetricsRangeDays(range: FleetMetricsHistoryRange): number {
+  switch (range) {
+    case "24h":
+      return 1;
+    case "7d":
+      return 7;
+    case "30d":
+      return 30;
+    case "90d":
+      return 90;
+  }
+}
+
+function parseFleetMetricsHistoryWindow(raw: unknown): "24h" | "7d" | "30d" | null | undefined {
+  if (raw === undefined || raw === null || raw === "") return null;
+  if (raw === "24h" || raw === "7d" || raw === "30d") return raw;
+  return undefined;
+}
+
+function fleetMetricsHistoryRetentionDaysFromEnv(env: Record<string, string | undefined>): number {
+  const raw = env.FLEET_METRICS_HISTORY_RETENTION_DAYS;
+  if (!raw) return 35;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed < 7) return 35;
+  return Math.floor(parsed);
 }
 
 /**
@@ -602,8 +644,10 @@ export class AgentManagerDb {
   // Both are constructed alongside the dispatch scheduler in start() (they share
   // the scheduler's SqliteAdapter + default team) and stay null until then.
   private dispatchVerificationStorage: DispatchVerificationStorage | null = null;
+  private fleetMetricsHistoryStorage: FleetMetricsHistoryStorage | null = null;
   private dispatchVerificationJob: DispatchVerificationJob | null = null;
   private dispatchRecoveryService: DispatchRecoveryService | null = null;
+  private usageGateSnapshotProvider: (() => Promise<UsageGateSnapshot>) | null = null;
   private fleetBlockageMonitorInterval: NodeJS.Timeout | null = null;
   private fleetBlockageAlertFingerprint = '';
   private fleetBlockageAlertAtMs = 0;
@@ -1694,6 +1738,36 @@ export class AgentManagerDb {
     } catch {
       return [];
     }
+  }
+
+  private async persistFleetMetricsSnapshot(
+    teamId: string,
+    window: '24h' | '7d' | '30d',
+    effectiveness: AgentsEffectivenessResponse,
+    roster: RosterEntry[],
+  ): Promise<void> {
+    const storage = this.fleetMetricsHistoryStorage;
+    if (!storage) return;
+    const usageGate = this.usageGateSnapshotProvider
+      ? await this.usageGateSnapshotProvider().catch(() => null)
+      : null;
+    const healthy = roster.filter((agent) =>
+      ['running', 'active', 'online', 'healthy', 'ok'].includes((agent.status || '').toLowerCase()),
+    ).length;
+    const stale = this.fleetFreshnessSummary.stale_nodes.length;
+    const sampledAt = effectiveness.generated_at || new Date().toISOString();
+    await storage.insertSnapshot({
+      team_id: teamId,
+      sampled_at: sampledAt,
+      window,
+      effectiveness,
+      fleet_total: roster.length,
+      fleet_healthy: healthy,
+      fleet_stale: stale,
+      manager_freshness: this.fleetFreshnessSummary,
+      usage_gate: usageGate,
+    });
+    await storage.prune(sampledAt);
   }
 
   /**
@@ -4638,18 +4712,55 @@ export class AgentManagerDb {
           return res.status(503).json({ error: 'verification_disabled' });
         }
         const { id: teamId } = await this.getTeam(req);
+        const roster = await this.buildVerificationRoster(teamId);
         const r = await getAgentsEffectiveness(
           {
             storage,
-            listRoster: (tid) => this.buildVerificationRoster(tid),
+            listRoster: async () => roster,
             now: () => new Date().toISOString(),
           },
           teamId,
           { window: req.query.window },
         );
+        if (r.status === 200 && !('error' in r.body)) {
+          void this.persistFleetMetricsSnapshot(teamId, r.body.window, r.body, roster).catch((err) => {
+            console.warn('[Manager] fleet metrics snapshot failed:', err instanceof Error ? err.message : String(err));
+          });
+        }
         res.status(r.status).json(r.body);
       } catch (err: any) {
         res.status(500).json({ error: err?.message || 'effectiveness failed' });
+      }
+    });
+
+    this.managementApp.get('/metrics/fleet/history', async (req, res) => {
+      try {
+        const storage = this.fleetMetricsHistoryStorage;
+        if (!storage) {
+          return res.status(503).json({ error: 'fleet_metrics_history_disabled' });
+        }
+        const range = parseFleetMetricsHistoryRange(req.query.range);
+        if (!range) return res.status(400).json({ error: 'invalid_range' });
+        const window = parseFleetMetricsHistoryWindow(req.query.window);
+        if (window === undefined) return res.status(400).json({ error: 'invalid_window' });
+        const nowIso = new Date().toISOString();
+        const fromIso = new Date(Date.parse(nowIso) - fleetMetricsRangeDays(range) * 86_400_000).toISOString();
+        const points = await storage.readHistory({
+          teamId: (await this.getTeam(req)).id,
+          fromIso,
+          toIso: nowIso,
+          window: window ?? null,
+          limit: 1000,
+        });
+        const body: FleetMetricsHistoryResponse = buildFleetMetricsHistoryResponse({
+          points,
+          range,
+          generated_at: nowIso,
+          retention_days: storage.retentionWindowDays(),
+        });
+        res.json(body);
+      } catch (err: any) {
+        res.status(500).json({ error: err?.message || 'fleet metrics history failed' });
       }
     });
 
@@ -11167,6 +11278,11 @@ export class AgentManagerDb {
                 this.db.adapter as SqliteAdapter,
               );
               await this.dispatchVerificationStorage.migrate();
+              this.fleetMetricsHistoryStorage = new FleetMetricsHistoryStorage(
+                this.db.adapter as SqliteAdapter,
+                fleetMetricsHistoryRetentionDaysFromEnv(process.env),
+              );
+              await this.fleetMetricsHistoryStorage.migrate();
               const dvStat = (p: string) => {
                 try {
                   const s = statSync(p);
@@ -11195,6 +11311,7 @@ export class AgentManagerDb {
                 dvErr instanceof Error ? dvErr.message : String(dvErr),
               );
               this.dispatchVerificationStorage = null;
+              this.fleetMetricsHistoryStorage = null;
               this.dispatchVerificationJob = null;
             }
             // P0 dispatch recovery — stand up the auto-recovery loop over the
@@ -11334,6 +11451,7 @@ export class AgentManagerDb {
             env: process.env,
             configsPath,
           });
+          this.usageGateSnapshotProvider = () => service.getSnapshotForScheduler();
           mountUsageMeterRoutes(this.managementApp, {
             service,
             adapter: this.db.adapter,
