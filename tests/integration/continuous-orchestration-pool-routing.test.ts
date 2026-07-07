@@ -78,15 +78,19 @@ function makeDaemon(over: { config?: Partial<ContinuousOrchestrationConfig>; poo
   return { daemon, fired };
 }
 
-async function seedBuildItem(n: number) {
+async function seedBuildItem(
+  n: number,
+  over: Partial<Pick<BacklogItem, "title" | "track" | "to_agent" | "dispatch_body" | "write_scope">> = {},
+) {
   return insertBacklogItem(adapter, {
-    title: `build ${n}`,
-    track: "T-CKPT.X",
-    dispatch_body: `implement ${n}`,
+    title: over.title ?? `build ${n}`,
+    track: over.track ?? "T-CKPT.X",
+    to_agent: over.to_agent,
+    dispatch_body: over.dispatch_body ?? `implement ${n}`,
     readiness_state: "ready",
     risk_class: "build",
     priority: 5,
-    write_scope: ["/repo/id-agents"], // repo root at flesh; daemon late-binds to a worktree
+    write_scope: over.write_scope ?? ["/repo/id-agents"], // repo root at flesh; daemon late-binds to a worktree
     token_estimate: 0,
   });
 }
@@ -173,6 +177,31 @@ describe("SOAK — backlog drains in parallel with no strangle", () => {
 });
 
 describe("backend pool routing (real registry)", () => {
+  it("preserves explicit non-pool to_agent values instead of reassigning them to a build pool", async () => {
+    const explicitAgents = ["cto", "maestra", "sentinel"];
+    for (let i = 0; i < explicitAgents.length; i++) {
+      await seedBuildItem(i, {
+        title: `explicit ${explicitAgents[i]} /ops dashboard scope ${i}`,
+        track: "T-ORCH",
+        to_agent: explicitAgents[i],
+        dispatch_body: `Scope the kapelle-site /ops artifact dashboard path without changing owner ${i}`,
+        write_scope: [`/repo/id-agents/explicit-${i}`],
+      });
+    }
+    const { daemon, fired } = makeDaemon({
+      config: { max_in_flight: 10 },
+      pools: buildPoolRouting({ BUILD_POOL_BACKEND_MAX_PARALLEL: "5" }),
+    });
+    await daemon.setMode("running");
+
+    const tick = await daemon.runTick();
+
+    expect(fired.map((i) => i.to_agent).sort()).toEqual([...explicitAgents].sort());
+    expect(fired.flatMap((i) => i.write_scope).every((s) => !s.includes("/.worktrees/"))).toBe(true);
+    expect(tick.decisions.some((d) => d.reason?.includes("pool frontend"))).toBe(false);
+    expect(tick.decisions.some((d) => d.reason?.includes("pool backend"))).toBe(false);
+  });
+
   it("a backend-track tick fires to the maintained backend Codex lanes", async () => {
     // Wire the REAL seed router (not the fake) so this proves the live routing
     // table. Legacy local Claude builder names were removed from the seed pool

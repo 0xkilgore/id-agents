@@ -148,6 +148,7 @@ export function createContinuousOrchestrationDaemon(opts: BuildDaemonOptions): {
  */
 export function buildPoolRouting(env: NodeJS.ProcessEnv = process.env): PoolRouting {
   const registry = BuildPoolRegistry.load(env);
+  const poolMembers = new Set(registry.list().flatMap((p) => p.members));
   const looksLikeKapelleFrontendWork = (item: BacklogItem): boolean => {
     const haystack = `${item.title}\n${item.dispatch_body ?? ""}\n${item.write_scope.join("\n")}`.toLowerCase();
     return (
@@ -165,6 +166,7 @@ export function buildPoolRouting(env: NodeJS.ProcessEnv = process.env): PoolRout
     poolForItem: (item: BacklogItem): ResolvedPool | null => {
       const trackPool = item.track ? registry.resolvePool(item.track) : undefined;
       const requestedAgent = item.to_agent?.trim();
+      if (requestedAgent && !poolMembers.has(requestedAgent)) return null;
       if (trackPool?.pool_id === "backend" && requestedAgent && trackPool.members.includes(requestedAgent)) {
         return {
           pool_id: trackPool.pool_id,
