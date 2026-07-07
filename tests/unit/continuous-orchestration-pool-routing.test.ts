@@ -99,6 +99,22 @@ describe("continuous orchestration pool routing", () => {
     expect(rows.map((row) => pools.poolForItem(row))).toEqual([null, null, null]);
   });
 
+  it("preserves explicit non-pool target agents even when frontend heuristics match", () => {
+    const pools = buildPoolRouting({});
+    for (const to_agent of ["cto", "maestra", "sentinel"]) {
+      const pool = pools.poolForItem(
+        item({
+          item_id: `coitem_${to_agent}`,
+          title: "Scope artifact routing visibility",
+          to_agent,
+          dispatch_body: "Review the artifact comments dashboard routing contract",
+          write_scope: ["/Users/kilgore/Dropbox/Code/kapelle-site"],
+        }),
+      );
+      expect(pool, to_agent).toBeNull();
+    }
+  });
+
   it("routes an explicit pool sentinel to the frontend pool", () => {
     const pools = buildPoolRouting({});
     const pool = pools.poolForItem(
