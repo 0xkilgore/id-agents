@@ -289,6 +289,24 @@ export async function migrateSqlite(adapter: SqliteAdapter): Promise<void> {
     CREATE INDEX IF NOT EXISTS agent_grant_agent_idx ON agent_grant(team_id, agent_id);
     CREATE INDEX IF NOT EXISTS agent_grant_grantee_idx ON agent_grant(team_id, grantee_actor_ref);
 
+    -- Multi-LLM Slice B: runtime policy read-model. A logical agent ("*" for
+    -- default) can declare which provider lanes are allowed plus the ordered
+    -- runtime/model fallback chain. JSON keeps the migration additive while the
+    -- manager still normalizes the public read API.
+    CREATE TABLE IF NOT EXISTS agent_runtime_policy (
+      team_id TEXT NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+      logical_agent TEXT NOT NULL,
+      allowed_lanes_json TEXT NOT NULL DEFAULT '[]',
+      fallback_order_json TEXT NOT NULL DEFAULT '[]',
+      enabled INTEGER NOT NULL DEFAULT 1,
+      note TEXT,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      PRIMARY KEY (team_id, logical_agent)
+    );
+    CREATE INDEX IF NOT EXISTS agent_runtime_policy_team_idx
+      ON agent_runtime_policy(team_id, enabled, logical_agent);
+
     CREATE TABLE IF NOT EXISTS schedule_definitions (
       id TEXT PRIMARY KEY,
       kind TEXT NOT NULL,
@@ -839,6 +857,23 @@ export async function migrateSqlite(adapter: SqliteAdapter): Promise<void> {
   }
 
   adapter.exec(`CREATE UNIQUE INDEX IF NOT EXISTS tasks_uuid_idx ON tasks(uuid)`);
+
+  // Multi-LLM Slice B: runtime policy read-model for upgraded databases.
+  adapter.exec(`
+    CREATE TABLE IF NOT EXISTS agent_runtime_policy (
+      team_id TEXT NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+      logical_agent TEXT NOT NULL,
+      allowed_lanes_json TEXT NOT NULL DEFAULT '[]',
+      fallback_order_json TEXT NOT NULL DEFAULT '[]',
+      enabled INTEGER NOT NULL DEFAULT 1,
+      note TEXT,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      PRIMARY KEY (team_id, logical_agent)
+    );
+    CREATE INDEX IF NOT EXISTS agent_runtime_policy_team_idx
+      ON agent_runtime_policy(team_id, enabled, logical_agent);
+  `);
 
   // Spec 054 v2 ─ dispatch_scheduler_queue clarification + promotion columns.
   // All additive, default-safe, idempotent (try/catch so re-running is a no-op).

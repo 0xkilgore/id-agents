@@ -192,6 +192,7 @@ import {
 } from './loops/manual-trigger.js';
 import { ACTIVE_LOOP_RUN_STATUSES } from './loops/types.js';
 import { loadModelPolicy, type ModelPolicyService } from './model-policy/policy.js';
+import { readRuntimePolicies } from './model-policy/runtime-policy.js';
 import { loadApprovalPolicy, type ApprovalPolicyService } from './approval-policy/policy.js';
 import { resolveManagerBindHost } from './manager-bind-host.js';
 import { getBuildStatusCached, loadBuildStatus, type BuildStatus } from './build-info.js';
@@ -4414,6 +4415,20 @@ export class AgentManagerDb {
     // agents-table inspection — operators SEE the rule and can simulate the
     // resolver (incl. a forced unavailable-provider) without firing a dispatch.
     // ──────────────────────────────────────────────────────────────────
+    this.managementApp.get('/runtime-policy', async (req, res) => {
+      try {
+        const { id: teamId } = await this.getTeam(req);
+        const payload = await readRuntimePolicies({
+          adapter: this.db.adapter,
+          teamId,
+          modelPolicy: this.modelPolicy,
+        });
+        return res.json(payload);
+      } catch (err) {
+        return res.status(500).json({ ok: false, error: err instanceof Error ? err.message : String(err) });
+      }
+    });
+
     this.managementApp.get('/model-policy', async (_req, res) => {
       try {
         if (!this.modelPolicy) {
