@@ -32,6 +32,7 @@ function raw(over: Partial<RawAgentDetailData> = {}): RawAgentDetailData {
     failed_dispatches: 0,
     recent_outputs: [],
     recent_dispatches: [],
+    recent_comment_receipts: [],
     skills: [],
     loops: [],
     scripts: [],
@@ -170,9 +171,36 @@ describe("buildAgentDetail", () => {
     expect(d.charts.tokens).toEqual({ today: 0, series: [] });
     expect(d.recent_outputs).toEqual([]);
     expect(d.recent_dispatches).toEqual([]);
+    expect(d.recent_comment_receipts).toEqual([]);
     expect(d.verified_landings).toEqual([]);
     expect(d.skills).toEqual([]);
     expect(d.name).toBe("roger");
+  });
+
+  it("caps recent comment receipts and orders newest-first", () => {
+    const rows = Array.from({ length: 25 }, (_, i) => ({
+      receipt_id: `receipt-${i}`,
+      artifact_id: `art-${i}`,
+      artifact_title: `Artifact ${i}`,
+      artifact_basename: `artifact-${i}.md`,
+      actor: "user:chris",
+      time: `2026-06-${String((i % 28) + 1).padStart(2, "0")}T00:00:00.000Z`,
+      route_status: "routed",
+      visible_state: "recorded+routed" as const,
+      retryable: false,
+      route_kind: "substantive_follow_up" as const,
+      target_agent: "roger",
+      target_agent_raw: "roger",
+      dispatch_id: `phid:disp-${i}`,
+      query_id: `query_${i}`,
+      failure_reason: null,
+      retry_metadata: { retryable: false, skipped: null, error: null, updated_at: null },
+    }));
+    const d = buildAgentDetail(raw({ recent_comment_receipts: rows }));
+    expect(d.recent_comment_receipts).toHaveLength(RECENT_OUTPUT_LIMIT);
+    for (let i = 1; i < d.recent_comment_receipts.length; i++) {
+      expect(d.recent_comment_receipts[i - 1].time >= d.recent_comment_receipts[i].time).toBe(true);
+    }
   });
 
   it("caps recent dispatches and exposes verified landings", () => {
