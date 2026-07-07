@@ -56,9 +56,17 @@ describe("GET /ops/surfaced-artifacts", () => {
       id: "artifact:art-route",
       title: "Kapelle route test",
       status: "unread",
-      relevance_reason: "latest_project_critical",
+      relevance_reason: "changed_product_behavior",
+      rank_score: expect.any(Number),
+      group_count: 1,
       source_kind: "artifact",
       visibility_proof: { discovered_by: "manual_fixture", artifact_path_present: true, body_renderable: false },
     });
+    expect(body.recent_flood).toMatchObject({
+      total_raw_count: 1,
+      grouped_count: 1,
+      suppressed_from_primary_count: 0,
+    });
+    expect(body.recent_flood.raw_rows).toHaveLength(1);
   });
 });
