@@ -97,6 +97,12 @@ export function mountContinuousOrchestrationRoutes(app: Application, opts: Orche
           enabled: config.auto_flesh_enabled,
           min_ready_fuel: config.min_ready_fuel,
           min_ready_lanes: config.min_ready_lanes,
+          auto_promote: {
+            enabled: config.auto_promote_enabled,
+            floor: config.auto_promote_floor,
+            min_lanes: config.auto_promote_min_lanes,
+            max_per_tick: config.auto_promote_max_per_tick,
+          },
           by_status: fleshCounts,
         },
         ready_admission: readyAdmission,

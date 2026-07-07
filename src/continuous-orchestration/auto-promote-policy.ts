@@ -29,7 +29,10 @@ export interface AutoPromoteOptions {
   floor: number;
   /** Distinct write-scopes the build-ready pool must span. */
   minLanes: number;
-  /** Max promotions in a single pass (cost/safety bound). */
+  /**
+   * Soft max promotions in a single pass. The floor deficit wins so an eligible
+   * pool can restore the configured floor in one tick.
+   */
   maxPerPass: number;
   /** Confidence floor; defaults to the flesh-policy auto-ready threshold. */
   confidenceThreshold?: number;
@@ -57,6 +60,7 @@ export function autoPromoteRejections(
   confidenceThreshold: number,
 ): string[] {
   const reasons: string[] = [];
+  const explicitlyApproved = !!item.approved_by || item.flesh_status === "approved_ready" || !!item.auto_ready_approved_at;
   if (item.readiness_state !== "needs_review") {
     reasons.push(`state ${item.readiness_state} (only needs_review is auto-promotable)`);
   }
@@ -88,11 +92,15 @@ export function autoPromoteRejections(
   if (item.last_dispatch_phid) {
     reasons.push(`already dispatched once (last_dispatch_phid=${item.last_dispatch_phid}) — requires human /promote, not auto-promote`);
   }
-  // Confidence is required: a null/low confidence holds for the human gate.
-  if (item.flesh_confidence == null) {
-    reasons.push("no flesh_confidence (cannot assert it is high-confidence)");
-  } else if (item.flesh_confidence < confidenceThreshold) {
-    reasons.push(`confidence ${item.flesh_confidence.toFixed(2)} < ${confidenceThreshold}`);
+  // Confidence is required unless a human/system approval already exists. The
+  // approval override drains stale approved/fleshed fuel without weakening the
+  // structural safety gates above.
+  if (!explicitlyApproved) {
+    if (item.flesh_confidence == null) {
+      reasons.push("no flesh_confidence (cannot assert it is high-confidence)");
+    } else if (item.flesh_confidence < confidenceThreshold) {
+      reasons.push(`confidence ${item.flesh_confidence.toFixed(2)} < ${confidenceThreshold}`);
+    }
   }
   return reasons;
 }
@@ -147,10 +155,13 @@ export function selectAutoPromotions(
   const promote: BacklogItem[] = [];
   const lanes = new Set(buildReady.map(laneKeyOf));
   let total = before.build_ready;
+  const laneDeficit = Math.max(0, opts.minLanes - before.build_lanes);
+  const floorDeficit = Math.max(0, opts.floor - before.build_ready);
+  const passLimit = Math.max(0, opts.maxPerPass, laneDeficit, floorDeficit);
 
   // Phase 1 — lane coverage: prefer candidates introducing a NEW lane.
   for (const item of ranked) {
-    if (promote.length >= opts.maxPerPass) break;
+    if (promote.length >= passLimit) break;
     if (lanes.size >= opts.minLanes) break;
     const lane = laneKeyOf(item);
     if (lanes.has(lane)) continue;
@@ -162,7 +173,7 @@ export function selectAutoPromotions(
   // Phase 2 — total top-up: fill remaining floor with the best remaining items.
   const chosen = new Set(promote.map((p) => p.item_id));
   for (const item of ranked) {
-    if (promote.length >= opts.maxPerPass) break;
+    if (promote.length >= passLimit) break;
     if (total >= opts.floor) break;
     if (chosen.has(item.item_id)) continue;
     promote.push(item);

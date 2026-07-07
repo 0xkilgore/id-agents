@@ -92,6 +92,40 @@ async function seedReady(adapter: SqliteAdapter, over: Partial<BacklogItem> = {}
   return item;
 }
 
+async function seedApprovedReview(adapter: SqliteAdapter, over: Partial<BacklogItem> = {}) {
+  const item = await insertBacklogItem(adapter, {
+    title: over.title ?? "approved build fuel",
+    track: over.track ?? "T-ORCH",
+    to_agent: over.to_agent ?? "roger",
+    dispatch_body: over.dispatch_body ?? "[project: kapelle][T-ORCH][BUILD] roger: do work. Verify with tests. Promote on green.",
+    readiness_state: "needs_review",
+    risk_class: over.risk_class ?? "build",
+    priority: over.priority ?? 5,
+    write_scope: over.write_scope ?? ["repo/a"],
+    token_estimate: over.token_estimate ?? 1000,
+    provider: over.provider ?? "openai",
+    runtime: over.runtime ?? "codex",
+  });
+  await adapter.query(
+    `UPDATE orchestration_backlog_item
+       SET approved_by = $1,
+           approved_at = $2,
+           flesh_status = $3,
+           flesh_confidence = $4,
+           last_dispatch_phid = $5
+     WHERE item_id = $6`,
+    [
+      over.approved_by ?? "maestra",
+      over.approved_at ?? "2026-07-07T00:00:00Z",
+      over.flesh_status ?? "needs_chris_batch",
+      over.flesh_confidence ?? 0.65,
+      over.last_dispatch_phid ?? null,
+      item.item_id,
+    ],
+  );
+  return (await getBacklogItem(adapter, item.item_id))!;
+}
+
 /** Minimal valid `agents` row — RD-014 health-gate tests only care about name+status. */
 async function seedAgent(adapter: SqliteAdapter, name: string, status: string, runtime = "claude-code-cli") {
   await adapter.query(
@@ -290,6 +324,43 @@ describe("daemon — dry-run vs live", () => {
     const r = await daemon.runTick();
     expect(fired).toHaveLength(0);
     expect(r.halted).toMatch(/kill switch/);
+  });
+
+  it("auto-promotes approved fleshed build fuel to restore the ready floor with duplicate gate evidence", async () => {
+    await seedApprovedReview(adapter);
+    await seedApprovedReview(adapter, { write_scope: ["repo/b"] });
+    await seedApprovedReview(adapter, { write_scope: ["repo/c"] });
+    const dup = await seedApprovedReview(adapter, {
+      write_scope: ["repo/d"],
+      last_dispatch_phid: "phid:disp-already-fired",
+    });
+
+    const { daemon, fired } = makeDaemon(adapter, {
+      config: {
+        dry_run: false,
+        max_in_flight: 0,
+        auto_flesh_enabled: true,
+        auto_promote_enabled: true,
+        auto_promote_floor: 3,
+        auto_promote_min_lanes: 3,
+        auto_promote_max_per_tick: 1,
+      },
+    });
+    await daemon.setMode("running");
+
+    const r = await daemon.runTick();
+
+    expect(fired).toHaveLength(0);
+    expect(r.auto_promote?.promoted).toBe(3);
+    expect(r.auto_promote?.skipped_items).toEqual([
+      expect.objectContaining({
+        item_id: dup.item_id,
+        reasons: expect.arrayContaining([expect.stringContaining("already dispatched once")]),
+      }),
+    ]);
+    const ready = await listBacklogByState(adapter, { state: "ready" });
+    expect(ready).toHaveLength(3);
+    expect(new Set(ready.map((i) => i.write_scope[0])).size).toBe(3);
   });
 });
 

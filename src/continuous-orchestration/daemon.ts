@@ -158,6 +158,8 @@ export interface AutoPromoteRunSummary {
   promoted: number;
   /** Safe-gate rejections among the needs_review candidates. */
   skipped: number;
+  /** Exact safety-gate reasons for every skipped candidate. */
+  skipped_items: Array<{ item_id: string; reasons: string[] }>;
   /** Build-ready total/lanes before the pass. */
   before: { build_ready: number; build_lanes: number };
   dry_run: boolean;
@@ -312,6 +314,7 @@ export class ContinuousOrchestrationDaemon {
           dry_run: autoPromote.dry_run,
           promoted: autoPromote.promoted,
           skipped: autoPromote.skipped,
+          skipped_items: autoPromote.skipped_items,
           build_ready_before: autoPromote.before.build_ready,
           build_lanes_before: autoPromote.before.build_lanes,
         },
@@ -897,6 +900,7 @@ export class ContinuousOrchestrationDaemon {
         triggered: true,
         promoted,
         skipped: plan.skipped.length,
+        skipped_items: plan.skipped,
         before: plan.before,
         dry_run: config.dry_run,
       };
