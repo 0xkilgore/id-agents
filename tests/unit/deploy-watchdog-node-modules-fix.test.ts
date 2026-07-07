@@ -17,7 +17,7 @@
 //
 // 1. Structural: the actual script source must run the defensive
 //    untrack-and-clear step before any git switch, and the WIP-snapshot
-//    `git add -A` must exclude node_modules. Catches a regression even if
+//    stash pathspec must exclude node_modules. Catches a regression even if
 //    nobody re-runs the git-mechanics test below.
 // 2. Git-mechanics smoke test: replays the exact failure shape (tracked
 //    symlink → `npm ci` materializes a real directory → dirty-checkout
@@ -41,22 +41,28 @@ const WATCHDOG_SRC = readFileSync(
 );
 
 describe('deploy-freshness-watchdog source — Gotcha-2b defensive steps present', () => {
-  it('untracks + clears node_modules before the first branch switch', () => {
+  it('untracks + clears node_modules before the deploy branch switch', () => {
     const untrackIdx = WATCHDOG_SRC.indexOf("git rm -r --cached --ignore-unmatch node_modules");
     const clearIdx = WATCHDOG_SRC.indexOf("rm -rf node_modules");
-    const firstSwitchIdx = WATCHDOG_SRC.indexOf('git switch -c wip/pre-redeploy-snapshot');
+    const deploySwitchIdx = WATCHDOG_SRC.indexOf('git switch -c deploy/manager-${date}');
 
     expect(untrackIdx).toBeGreaterThan(-1);
     expect(clearIdx).toBeGreaterThan(-1);
-    expect(firstSwitchIdx).toBeGreaterThan(-1);
-    expect(untrackIdx).toBeLessThan(firstSwitchIdx);
-    expect(clearIdx).toBeLessThan(firstSwitchIdx);
+    expect(deploySwitchIdx).toBeGreaterThan(-1);
+    expect(untrackIdx).toBeLessThan(deploySwitchIdx);
+    expect(clearIdx).toBeLessThan(deploySwitchIdx);
   });
 
-  it('the WIP-snapshot git add -A excludes node_modules', () => {
-    const addLineMatch = WATCHDOG_SRC.match(/git add -A -- \. [^`]*/);
-    expect(addLineMatch).not.toBeNull();
-    expect(addLineMatch![0]).toContain("':!node_modules'");
+  it('does not switch to a WIP branch before preserving dirty work', () => {
+    expect(WATCHDOG_SRC).not.toContain('git switch -c wip/pre-redeploy-snapshot');
+    expect(WATCHDOG_SRC).toContain('git stash push -u');
+    expect(WATCHDOG_SRC).toContain('git branch -f wip/pre-redeploy-snapshot-${date}');
+  });
+
+  it('the WIP-snapshot stash excludes node_modules', () => {
+    const stashLineMatch = WATCHDOG_SRC.match(/git stash push -u [^`]*/);
+    expect(stashLineMatch).not.toBeNull();
+    expect(stashLineMatch![0]).toContain("':!node_modules'");
   });
 });
 
@@ -74,15 +80,16 @@ function sh(cmd: string, cwd: string): string {
 function runSnapshotSequence(cwd: string, date: string): void {
   sh('git rm -r --cached --ignore-unmatch node_modules', cwd);
   sh('rm -rf node_modules', cwd);
-  const dirty = sh('git status --porcelain', cwd).trim();
+  const dirty = sh(`git status --porcelain -- . ':!manager.db' ':!*.db' ':!pnpm-lock.yaml' ':!node_modules'`, cwd).trim();
   if (dirty) {
     sh(
-      `git switch -c wip/pre-redeploy-snapshot-${date} 2>/dev/null || git switch wip/pre-redeploy-snapshot-${date}`,
+      `git stash push -u -m 'WIP snapshot before manager redeploy' -- . ':!manager.db' ':!*.db' ':!pnpm-lock.yaml' ':!node_modules'`,
       cwd,
     );
-    sh(`git add -A -- . ':!manager.db' ':!*.db' ':!pnpm-lock.yaml' ':!node_modules'`, cwd);
-    sh(`git commit -m "WIP snapshot before manager redeploy" || true`, cwd);
+    const stashSha = sh('git rev-parse stash@{0}', cwd).trim();
+    sh(`git branch -f wip/pre-redeploy-snapshot-${date} ${stashSha}`, cwd);
   }
+  sh('git restore --staged --worktree node_modules 2>/dev/null || true', cwd);
 }
 
 describe('deploy-freshness-watchdog — node_modules symlink switch-failure regression (2026-07-03/04)', () => {
@@ -179,5 +186,50 @@ describe('deploy-freshness-watchdog — node_modules symlink switch-failure regr
       // same-day-fallback shape from a clean start.
       sh('git switch main', repo);
     }
+  });
+});
+
+describe('deploy-freshness-watchdog — dirty checkout snapshot does not switch to stale WIP branch', () => {
+  let repo: string;
+
+  beforeEach(() => {
+    repo = mkdtempSync(join(tmpdir(), 'watchdog-dirty-repo-'));
+    sh('git init -q -b main', repo);
+    sh('git config user.email test@example.com', repo);
+    sh('git config user.name test', repo);
+    mkdirSync(join(repo, 'src', 'dispatch-scheduler'), { recursive: true });
+    writeFileSync(join(repo, 'src', 'dispatch-scheduler', 'types.ts'), 'base\n');
+    sh('git add src/dispatch-scheduler/types.ts', repo);
+    sh('git commit -q -m init', repo);
+
+    sh('git switch -c wip/pre-redeploy-snapshot-20260707', repo);
+    writeFileSync(join(repo, 'src', 'dispatch-scheduler', 'types.ts'), 'old snapshot\n');
+    sh('git add src/dispatch-scheduler/types.ts', repo);
+    sh('git commit -q -m "old snapshot branch"', repo);
+    sh('git switch main', repo);
+
+    writeFileSync(join(repo, 'src', 'dispatch-scheduler', 'types.ts'), 'dirty production work\n');
+  });
+
+  afterEach(() => {
+    rmSync(repo, { recursive: true, force: true });
+  });
+
+  it('reproduces the pre-fix conflict when switching to the existing WIP branch', () => {
+    expect(() =>
+      sh(
+        'git switch -c wip/pre-redeploy-snapshot-20260707 2>/dev/null || git switch wip/pre-redeploy-snapshot-20260707',
+        repo,
+      ),
+    ).toThrow(/src\/dispatch-scheduler\/types\.ts/);
+  });
+
+  it('preserves dirty work without switching, leaving the checkout clean for deploy branch reset', () => {
+    expect(() => runSnapshotSequence(repo, '20260707')).not.toThrow();
+
+    expect(sh('git status --porcelain', repo)).toBe('');
+    const wipTip = sh('git rev-parse wip/pre-redeploy-snapshot-20260707', repo).trim();
+    const stashTip = sh('git rev-parse stash@{0}', repo).trim();
+    expect(wipTip).toBe(stashTip);
   });
 });

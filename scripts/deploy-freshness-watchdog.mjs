@@ -90,16 +90,22 @@ async function runRedeploy() {
   sh('rm -rf node_modules');
 
   // Gotcha 2 — snapshot a dirty canonical checkout; NEVER clobber, never stash-drop.
-  const dirty = sh('git status --porcelain').trim();
+  // Do not switch to the WIP branch to create the snapshot: if the branch
+  // already exists and has a different version of a dirty file, the switch
+  // itself fails before anything is preserved.
+  const dirty = sh(`git status --porcelain -- . ':!manager.db' ':!*.db' ':!pnpm-lock.yaml' ':!node_modules'`).trim();
   if (dirty) {
-    log(`Gotcha-2: canonical checkout dirty (${dirty.split('\n').length} paths) → snapshot to wip/pre-redeploy-snapshot-${date}`);
-    sh(`git switch -c wip/pre-redeploy-snapshot-${date} 2>/dev/null || git switch wip/pre-redeploy-snapshot-${date}`);
+    const stamp = new Date().toISOString();
+    log(`Gotcha-2: canonical checkout dirty (${dirty.split('\n').length} paths) → stash snapshot + wip/pre-redeploy-snapshot-${date}`);
     // Snapshot tracked+untracked SOURCE/config, but never stray db/lockfiles
     // or node_modules (Gotcha 2 / Gotcha 2b — node_modules is a build
     // artifact, never source, and must never be re-added to the index).
-    sh(`git add -A -- . ':!manager.db' ':!*.db' ':!pnpm-lock.yaml' ':!node_modules'`);
-    sh(`git commit -m "WIP snapshot before manager redeploy ${new Date().toISOString()}" || true`);
+    sh(`git stash push -u -m 'WIP snapshot before manager redeploy ${stamp}' -- . ':!manager.db' ':!*.db' ':!pnpm-lock.yaml' ':!node_modules'`);
+    const stashSha = sh('git rev-parse stash@{0}').trim();
+    sh(`git branch -f wip/pre-redeploy-snapshot-${date} ${stashSha}`);
+    log(`Gotcha-2: dirty work preserved as stash@{0} (${stashSha.slice(0, 12)}) and wip/pre-redeploy-snapshot-${date}`);
   }
+  sh('git restore --staged --worktree node_modules 2>/dev/null || true');
 
   // Gotcha 3 — build from a dated deploy branch at origin/main (main is worktree-held).
   sh('git fetch origin');
