@@ -54,6 +54,7 @@ export interface CommentDispatchReceipt {
   query_id: string;
   dispatch_phid: string;
   to_agent: string;
+  to_agent_raw?: string | null;
 }
 
 export type CommentDispatchSkipReason =
@@ -64,8 +65,8 @@ export type CommentDispatchSkipReason =
 
 export type CommentDispatchResult =
   | { routed: true; dispatch: CommentDispatchReceipt }
-  | { routed: false; skipped: CommentDispatchSkipReason }
-  | { routed: false; error: { message: string } };
+  | { routed: false; skipped: CommentDispatchSkipReason; target_agent?: string | null; target_agent_raw?: string | null }
+  | { routed: false; error: { message: string }; target_agent?: string | null; target_agent_raw?: string | null };
 
 export type ArtifactCommentRouteKind = "approval_signal" | "substantive_follow_up" | "question";
 
@@ -87,6 +88,16 @@ export function classifyArtifactComment(comment: ArtifactComment): ArtifactComme
   if (isApprovalSignal(normalized)) return "approval_signal";
   if (isQuestion(normalized)) return "question";
   return "substantive_follow_up";
+}
+
+export function resolveArtifactCommentTargetAgent(
+  catalog: ArtifactCatalogRow | null | undefined,
+): { target_agent: string | null; target_agent_raw: string | null } {
+  const raw = catalog?.agent?.trim() || null;
+  if (!raw) return { target_agent: null, target_agent_raw: raw };
+  const projectMatch = raw.match(/^project:\s*(.+)$/i);
+  const target = (projectMatch?.[1] ?? raw).trim();
+  return { target_agent: target || null, target_agent_raw: raw };
 }
 
 function normalizeCommentText(raw: string): string {
@@ -125,9 +136,9 @@ export async function routeCommentToOwningAgent(
     return { routed: false, skipped: "scheduler_unavailable" };
   }
   const catalog = await getArtifact(input.adapter, input.artifactId);
-  const owner = catalog?.agent?.trim();
+  const { target_agent: owner, target_agent_raw: rawOwner } = resolveArtifactCommentTargetAgent(catalog);
   if (!catalog || !owner) {
-    return { routed: false, skipped: "artifact_owner_unknown" };
+    return { routed: false, skipped: "artifact_owner_unknown", target_agent: owner, target_agent_raw: rawOwner };
   }
   try {
     const receipt = await input.enqueue({
@@ -144,12 +155,15 @@ export async function routeCommentToOwningAgent(
         query_id: receipt.query_id,
         dispatch_phid: receipt.dispatch_phid,
         to_agent: owner,
+        to_agent_raw: rawOwner,
       },
     };
   } catch (err) {
     return {
       routed: false,
       error: { message: err instanceof Error ? err.message : String(err) },
+      target_agent: owner,
+      target_agent_raw: rawOwner,
     };
   }
 }

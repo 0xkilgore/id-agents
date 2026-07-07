@@ -95,6 +95,37 @@ describe("comment auto-dispatch — acceptance (T-LOOP-CLOSE.1)", () => {
     expect(dispatch!.source_metadata.from_actor).toBe("user:liz");
   });
 
+  it("resolves project:<slug> catalog owners before enqueueing so route status is recorded+routed", async () => {
+    const ART = "art-fin-project-owner";
+    await catalogArtifact(ART, "project:finances");
+
+    const res = await call("POST", `/artifacts/${ART}/comments`, {
+      actor_ref: "user:liz",
+      body: "Please reconcile the recurring subscriptions section.",
+    });
+
+    expect(res.status).toBe(200);
+    expect(res.body.visible_state).toBe("recorded+routed");
+    expect(res.body.dispatch_routed).toBe(true);
+    expect(res.body.dispatch.to_agent).toBe("finances");
+    expect(res.body.route_status).toMatchObject({
+      visible_state: "recorded+routed",
+      target_agent: "finances",
+      target_agent_raw: "project:finances",
+    });
+
+    const dispatch = await readDispatchById(adapter, TEAM, res.body.dispatch.dispatch_phid);
+    expect(dispatch).not.toBeNull();
+    expect(dispatch!.target_agent).toBe("finances");
+
+    const comments = await call("GET", `/artifacts/${ART}/comments`);
+    expect(comments.body.comments[0].route_status).toMatchObject({
+      visible_state: "recorded+routed",
+      target_agent: "finances",
+      target_agent_raw: "project:finances",
+    });
+  });
+
   it("a Chris comment preserves from_actor=user:chris and resolves the owning agent", async () => {
     const ART = "art-pipe-1";
     await catalogArtifact(ART, "cane");

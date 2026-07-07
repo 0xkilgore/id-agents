@@ -251,6 +251,29 @@ export interface ArtifactDispatchReceipt {
   status: string | null;
 }
 
+export type ArtifactCommentVisibleState =
+  | "recorded+routed"
+  | "recorded-but-route-failed-with-retry"
+  | "not-recorded";
+
+export interface ArtifactCommentRouteStatus {
+  visible_state: ArtifactCommentVisibleState;
+  route_kind: "approval_signal" | "substantive_follow_up" | "question";
+  routed: boolean;
+  retryable: boolean;
+  recorded_op_id: number;
+  target_agent: string | null;
+  target_agent_raw: string | null;
+  dispatch: {
+    query_id: string;
+    dispatch_phid: string;
+    to_agent: string;
+  } | null;
+  skipped: string | null;
+  error: { message: string } | null;
+  updated_at: string;
+}
+
 export interface ArtifactTimelineEvent {
   event_id: string;
   op_id: number;
@@ -359,6 +382,7 @@ export interface ArtifactComment {
   // existing comment-auto-dispatch (T-CKPT.7) unchanged — so reactions never
   // duplicate the comment-routing path; they are the lowest-click form of it.
   reaction?: ReactionKind | null;
+  route_status?: ArtifactCommentRouteStatus | null;
 }
 
 // ── C0 ambient reactions (T-CKPT.feedback-system/C0) ────────────────
@@ -451,6 +475,7 @@ export interface FeedbackItem {
   /** The dispatch this feedback routed to its owning agent, or null when it
    *  never routed (no owner / no scheduler / flag was off at capture time). */
   routing: FeedbackRouting | null;
+  route_status?: ArtifactCommentRouteStatus | null;
 }
 
 /** Rolled-up acted-upon state for the chip. `routed` = at least one piece of

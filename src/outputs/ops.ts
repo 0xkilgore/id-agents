@@ -24,6 +24,7 @@ import {
 import type {
   ActedUponSummary,
   ApproveRequest,
+  ArtifactCommentRouteStatus,
   ArtifactDispatchReceipt,
   ArtifactComment,
   ArtifactOpRow,
@@ -257,6 +258,26 @@ export async function commentArtifact(
     op_id: opId,
     comment: { comment_id: artifactCommentId(artifactId, opId), op_id: opId, artifact_id: artifactId, actor, body: req.body, anchor, ts },
   };
+}
+
+export async function updateCommentRouteStatus(
+  adapter: DbAdapter,
+  artifactId: string,
+  opId: number,
+  routeStatus: ArtifactCommentRouteStatus,
+): Promise<void> {
+  const { rows } = await adapter.query<{ payload_json: string | null }>(
+    `SELECT payload_json FROM artifact_operations
+     WHERE artifact_id = ? AND op_id = ? AND op_type = 'comment_recorded'`,
+    [artifactId, opId],
+  );
+  const current = parsePayloadObject(rows[0]?.payload_json ?? null);
+  await adapter.query(
+    `UPDATE artifact_operations
+     SET payload_json = ?
+     WHERE artifact_id = ? AND op_id = ? AND op_type = 'comment_recorded'`,
+    [JSON.stringify({ ...current, route_status: routeStatus }), artifactId, opId],
+  );
 }
 
 export interface SuggestedChangeResult {
@@ -569,8 +590,8 @@ export async function listComments(
   const comments: ArtifactComment[] = [];
   for (const op of ops) {
     if (op.op_type !== "comment_recorded") continue;
-    const { body, anchor, reaction } = parseCommentPayload(op.payload_json);
-    comments.push({ comment_id: artifactCommentId(op.artifact_id, op.op_id), op_id: op.op_id, artifact_id: op.artifact_id, actor: op.actor, body, anchor, ts: op.ts, reaction });
+    const { body, anchor, reaction, route_status } = parseCommentPayload(op.payload_json);
+    comments.push({ comment_id: artifactCommentId(op.artifact_id, op.op_id), op_id: op.op_id, artifact_id: op.artifact_id, actor: op.actor, body, anchor, ts: op.ts, reaction, route_status });
   }
   return comments;
 }
@@ -579,21 +600,52 @@ function parseCommentPayload(payloadJson: string | null): {
   body: string;
   anchor: string | null;
   reaction: ReactionKind | null;
+  route_status: ArtifactCommentRouteStatus | null;
 } {
   let body = "";
   let anchor: string | null = null;
   let reaction: ReactionKind | null = null;
+  let route_status: ArtifactCommentRouteStatus | null = null;
   try {
     const p = payloadJson
-      ? (JSON.parse(payloadJson) as { body?: unknown; anchor?: unknown; reaction?: unknown })
+      ? (JSON.parse(payloadJson) as { body?: unknown; anchor?: unknown; reaction?: unknown; route_status?: unknown })
       : {};
     body = typeof p.body === "string" ? p.body : "";
     anchor = typeof p.anchor === "string" ? p.anchor : null;
     reaction = isReactionKind(p.reaction) ? p.reaction : null;
+    route_status = parseRouteStatus(p.route_status);
   } catch {
     /* tolerate legacy/malformed payloads */
   }
-  return { body, anchor, reaction };
+  return { body, anchor, reaction, route_status };
+}
+
+function parseRouteStatus(value: unknown): ArtifactCommentRouteStatus | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const v = value as Partial<ArtifactCommentRouteStatus>;
+  if (
+    v.visible_state !== "recorded+routed" &&
+    v.visible_state !== "recorded-but-route-failed-with-retry" &&
+    v.visible_state !== "not-recorded"
+  ) {
+    return null;
+  }
+  return {
+    visible_state: v.visible_state,
+    route_kind:
+      v.route_kind === "approval_signal" || v.route_kind === "substantive_follow_up" || v.route_kind === "question"
+        ? v.route_kind
+        : "substantive_follow_up",
+    routed: v.routed === true,
+    retryable: v.retryable === true,
+    recorded_op_id: typeof v.recorded_op_id === "number" ? v.recorded_op_id : 0,
+    target_agent: typeof v.target_agent === "string" ? v.target_agent : null,
+    target_agent_raw: typeof v.target_agent_raw === "string" ? v.target_agent_raw : null,
+    dispatch: v.dispatch && typeof v.dispatch === "object" ? v.dispatch : null,
+    skipped: typeof v.skipped === "string" ? v.skipped : null,
+    error: v.error && typeof v.error.message === "string" ? { message: v.error.message } : null,
+    updated_at: typeof v.updated_at === "string" ? v.updated_at : "",
+  };
 }
 
 // ── C0 ambient reactions (T-CKPT.feedback-system/C0) ────────────────
@@ -746,7 +798,7 @@ export async function listFeedback(
   const items: FeedbackItem[] = [];
   for (const op of ops) {
     if (op.op_type !== "comment_recorded") continue;
-    const { body, anchor, reaction } = parseCommentPayload(op.payload_json);
+    const { body, anchor, reaction, route_status } = parseCommentPayload(op.payload_json);
     items.push({
       comment_id: artifactCommentId(op.artifact_id, op.op_id),
       op_id: op.op_id,
@@ -757,6 +809,7 @@ export async function listFeedback(
       anchor,
       ts: op.ts,
       routing: routingBySource.get(op.op_id) ?? null,
+      route_status,
     });
   }
   // listOperations is op_id ASC (oldest-first). For the chip/feed we surface

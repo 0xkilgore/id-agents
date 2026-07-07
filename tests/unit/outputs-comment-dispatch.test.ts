@@ -111,6 +111,21 @@ describe("POST /artifacts/:id/comments — B2 auto-dispatch", () => {
       dispatch_phid: "phid:disp-b2-1",
       to_agent: "regina",
     });
+    expect(res.body.visible_state).toBe("recorded+routed");
+    expect(res.body.route_status).toMatchObject({
+      visible_state: "recorded+routed",
+      route_kind: "substantive_follow_up",
+      routed: true,
+      retryable: false,
+      recorded_op_id: res.body.op_id,
+      target_agent: "regina",
+      target_agent_raw: "regina",
+      dispatch: {
+        query_id: "q-b2-1",
+        dispatch_phid: "phid:disp-b2-1",
+        to_agent: "regina",
+      },
+    });
 
     // the dispatch carried the right routing + payload
     expect(calls).toHaveLength(1);
@@ -124,6 +139,11 @@ describe("POST /artifacts/:id/comments — B2 auto-dispatch", () => {
     const get = await call(app, "GET", `/artifacts/${ART}/comments`);
     expect(get.body.comments).toHaveLength(1);
     expect(get.body.comments[0].body).toBe("Tighten the hero hierarchy.");
+    expect(get.body.comments[0].route_status).toMatchObject({
+      visible_state: "recorded+routed",
+      target_agent: "regina",
+      dispatch: { dispatch_phid: "phid:disp-b2-1" },
+    });
   });
 
   it("classifies approval-signal comments as artifact approvals without dispatching", async () => {
@@ -189,10 +209,18 @@ describe("POST /artifacts/:id/comments — B2 auto-dispatch", () => {
     expect(res.body.dispatch_routed).toBe(false);
     expect(res.body.dispatch).toBeNull();
     expect(res.body.dispatch_skipped).toBe("artifact_owner_unknown");
+    expect(res.body.visible_state).toBe("recorded-but-route-failed-with-retry");
+    expect(res.body.route_status).toMatchObject({
+      visible_state: "recorded-but-route-failed-with-retry",
+      routed: false,
+      retryable: true,
+      skipped: "artifact_owner_unknown",
+    });
     expect(calls).toHaveLength(0);
 
     const get = await call(app, "GET", `/artifacts/${ART}/comments`);
     expect(get.body.comments).toHaveLength(1);
+    expect(get.body.comments[0].route_status.visible_state).toBe("recorded-but-route-failed-with-retry");
   });
 
   it("persists but skips routing with scheduler_unavailable when no enqueue seam is wired", async () => {
@@ -228,11 +256,21 @@ describe("POST /artifacts/:id/comments — B2 auto-dispatch", () => {
     expect(res.body.dispatch_routed).toBe(false);
     expect(res.body.dispatch).toBeNull();
     expect(res.body.dispatch_error.message).toContain("scheduler boom");
+    expect(res.body.visible_state).toBe("recorded-but-route-failed-with-retry");
+    expect(res.body.route_status).toMatchObject({
+      visible_state: "recorded-but-route-failed-with-retry",
+      routed: false,
+      retryable: true,
+      target_agent: "regina",
+      target_agent_raw: "regina",
+      error: { message: "scheduler boom" },
+    });
     expect(calls).toHaveLength(1);
 
     // durable capture survived the routing crash
     const get = await call(app, "GET", `/artifacts/${ART}/comments`);
     expect(get.body.comments).toHaveLength(1);
     expect(get.body.comments[0].body).toBe("route crash but I must persist");
+    expect(get.body.comments[0].route_status.error.message).toContain("scheduler boom");
   });
 });

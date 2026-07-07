@@ -63,6 +63,7 @@ import {
   shipArtifact,
   suggestArtifactChange,
   transitionSuggestion,
+  updateCommentRouteStatus,
   viewArtifact,
   type CaneDraftShipContext,
   type TransitionSuggestionResult,
@@ -89,6 +90,7 @@ import type {
   ArtifactDetailResponse,
   ArtifactOperationsResponse,
   ArtifactComment,
+  ArtifactCommentRouteStatus,
   ArtifactOpType,
   ArtifactReviewResponse,
   ArtifactTimelineResponse,
@@ -346,6 +348,48 @@ function routingResponse(r: { kind: ArtifactCommentRouteKind; result: CommentDis
   if (r.result.routed) return { kind: r.kind, routed: true, dispatch: r.result.dispatch };
   if ('skipped' in r.result) return { kind: r.kind, routed: false, skipped: r.result.skipped };
   return { kind: r.kind, routed: false, error: r.result.error };
+}
+
+function commentRouteStatus(
+  routeKind: ArtifactCommentRouteKind,
+  result: CommentDispatchResult,
+  recordedOpId: number,
+  updatedAt: string,
+): ArtifactCommentRouteStatus {
+  if (result.routed) {
+    return {
+      visible_state: "recorded+routed",
+      route_kind: routeKind,
+      routed: true,
+      retryable: false,
+      recorded_op_id: recordedOpId,
+      target_agent: result.dispatch.to_agent,
+      target_agent_raw: result.dispatch.to_agent_raw ?? result.dispatch.to_agent,
+      dispatch: {
+        query_id: result.dispatch.query_id,
+        dispatch_phid: result.dispatch.dispatch_phid,
+        to_agent: result.dispatch.to_agent,
+      },
+      skipped: null,
+      error: null,
+      updated_at: updatedAt,
+    };
+  }
+  const skipped = "skipped" in result ? result.skipped : null;
+  const isPolicySkip = skipped === "approval_signal" || skipped === "question_threaded";
+  return {
+    visible_state: isPolicySkip ? "recorded+routed" : "recorded-but-route-failed-with-retry",
+    route_kind: routeKind,
+    routed: false,
+    retryable: !isPolicySkip,
+    recorded_op_id: recordedOpId,
+    target_agent: "target_agent" in result && typeof result.target_agent === "string" ? result.target_agent : null,
+    target_agent_raw: "target_agent_raw" in result && typeof result.target_agent_raw === "string" ? result.target_agent_raw : null,
+    dispatch: null,
+    skipped,
+    error: "error" in result ? result.error : null,
+    updated_at: updatedAt,
+  };
 }
 
 async function routeSuggestionToOwningAgent(
@@ -1165,11 +1209,21 @@ export function mountOutputsRoutes(
         env,
         clock,
       );
+      const route_status = commentRouteStatus(
+        routed.route_kind,
+        routed.routed,
+        op_id,
+        (clock ? clock() : new Date()).toISOString(),
+      );
+      await updateCommentRouteStatus(adapter, artifactId, op_id, route_status);
+      comment.route_status = route_status;
 
       invalidateArtifactDetail(artifactId);
       const base = {
         ok: true,
         schema_version: 'artifact.comment.v1',
+        visible_state: route_status.visible_state,
+        route_status,
         op_id,
         comment,
         actor,
