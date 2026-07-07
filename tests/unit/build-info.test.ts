@@ -124,6 +124,26 @@ describe("computeBuildStatus — exact promoted-sha delta (no false-stale)", () 
     expect(s.behind_origin).toBe(false);
   });
 
+  it("is NOT behind when promoted main only changes the external deploy watchdog", () => {
+    const s = computeBuildStatus(
+      input({ build_sha: "old0001", origin_main_sha: "watch999" }),
+      [
+        "scripts/deploy-freshness-watchdog.mjs",
+        "scripts/lib/deploy-watchdog-decision.mjs",
+        "tests/unit/deploy-watchdog-node-modules-fix.test.ts",
+      ],
+    );
+    expect(s.behind_origin).toBe(false);
+  });
+
+  it("is NOT behind when promoted main only changes tests", () => {
+    const s = computeBuildStatus(
+      input({ build_sha: "old0001", origin_main_sha: "test999" }),
+      ["tests/unit/build-info.test.ts"],
+    );
+    expect(s.behind_origin).toBe(false);
+  });
+
   it("IS behind (server_not_rebuilt) when promoted main is ahead by a build-affecting src/ commit", () => {
     const s = computeBuildStatus(
       input({ build_sha: "old0001", source_branch_sha: "src9999", origin_main_sha: "src9999" }),
@@ -211,6 +231,10 @@ describe("runtime-only path classification", () => {
     expect(isRuntimeOnlyPath("configs/model-policy.json")).toBe(true);
     expect(isRuntimeOnlyPath("docs/manager-deploy-runbook.md")).toBe(true);
     expect(isRuntimeOnlyPath("README.md")).toBe(true);
+    expect(isRuntimeOnlyPath("tests/unit/build-info.test.ts")).toBe(true);
+    expect(isRuntimeOnlyPath("scripts/deploy-freshness-watchdog.mjs")).toBe(true);
+    expect(isRuntimeOnlyPath("scripts/lib/deploy-watchdog-decision.mjs")).toBe(true);
+    expect(isRuntimeOnlyPath("scripts/launchd/com.kilgore.deploy-freshness-watchdog.plist")).toBe(true);
     expect(isRuntimeOnlyPath("src/build-info.ts")).toBe(false);
     expect(isRuntimeOnlyPath("scripts/write-build-info.mjs")).toBe(false);
     expect(isRuntimeOnlyPath("package.json")).toBe(false);

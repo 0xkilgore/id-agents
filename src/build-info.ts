@@ -78,6 +78,10 @@ export function isRuntimeOnlyPath(path: string): boolean {
   return (
     p.startsWith("configs/") || // runtime-read policy/config (model-policy.json, …)
     p.startsWith("docs/") ||
+    p.startsWith("tests/") || // test-only changes never alter the running manager binary
+    p === "scripts/deploy-freshness-watchdog.mjs" || // external launchd watchdog, not compiled into manager dist
+    p === "scripts/lib/deploy-watchdog-decision.mjs" ||
+    p === "scripts/launchd/com.kilgore.deploy-freshness-watchdog.plist" ||
     /^[^/]+\.md$/.test(p) // top-level markdown (README.md, CHANGELOG.md, NOTICE …)
   );
 }
