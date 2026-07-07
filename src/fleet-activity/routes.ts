@@ -4,7 +4,8 @@
 //   ?team=<name>    team to scope to (default "default")
 //   ?since=<iso>    inclusive lower-bound watermark ("what changed since I last looked")
 //   ?limit=<n>      max events returned (default 50, max 200)
-//   ?kinds=<csv>    subset of artifact_produced,dispatch_completed,dispatch_queued
+//   ?kinds=<csv>    subset of artifact_produced,dispatch_completed,dispatch_queued,
+//                   task_claimed,task_completed,artifact_commented
 
 import type { Application, Request, Response } from "express";
 import type { DbAdapter } from "../db/db-adapter.js";

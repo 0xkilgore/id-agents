@@ -5,6 +5,9 @@
 //   - artifact_produced   (artifacts catalog, by produced_at)
 //   - dispatch_completed  (terminal dispatch_scheduler_queue rows, by completed_at)
 //   - dispatch_queued     (active dispatch_scheduler_queue rows, by queued_at)
+//   - task_claimed        (tasks assigned/started, by updated_at)
+//   - task_completed      (tasks finished, by completed_at)
+//   - artifact_commented  (artifact_operations comment_recorded, by op ts)
 //
 // The feed is the read path behind the daily surface. It is deliberately
 // owner-agnostic: scoping is by team_id, never by a hard-coded operator
@@ -13,12 +16,18 @@
 export type FleetActivityKind =
   | "artifact_produced"
   | "dispatch_completed"
-  | "dispatch_queued";
+  | "dispatch_queued"
+  | "task_claimed"
+  | "task_completed"
+  | "artifact_commented";
 
 export const FLEET_ACTIVITY_KINDS: readonly FleetActivityKind[] = [
   "artifact_produced",
   "dispatch_completed",
   "dispatch_queued",
+  "task_claimed",
+  "task_completed",
+  "artifact_commented",
 ] as const;
 
 export interface FleetActivityEvent {
@@ -71,6 +80,21 @@ export interface FleetActivityResponse {
     artifact_produced: number;
     dispatch_completed: number;
     dispatch_queued: number;
+    task_claimed: number;
+    task_completed: number;
+    artifact_commented: number;
+  };
+  instrumentation: {
+    generated_for_day: string;
+    active_window_hours: number;
+    daily_active_agents: number;
+    agents: Array<{
+      id: string;
+      name: string;
+      status: string | null;
+      last_seen_at: string | null;
+      active_today: boolean;
+    }>;
   };
   items: FleetActivityEvent[];
   warnings: Array<{ code: string; message: string }>;
