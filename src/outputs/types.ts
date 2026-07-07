@@ -258,7 +258,7 @@ export type ArtifactCommentVisibleState =
 
 export interface ArtifactCommentRouteStatus {
   visible_state: ArtifactCommentVisibleState;
-  route_kind: "approval_signal" | "substantive_follow_up" | "question";
+  route_kind: "acknowledgement" | "approval_signal" | "substantive_follow_up" | "question";
   routed: boolean;
   retryable: boolean;
   recorded_op_id: number;
@@ -390,7 +390,8 @@ export interface ArtifactComment {
 // §3 C0. A reaction is a one-tap structured comment; the value is the stored
 // key, `emoji`/`label` are render hints surfaced to the owning agent and chip.
 export const ARTIFACT_REACTIONS = {
-  ship_it: { emoji: "👍", label: "ship it" },
+  acknowledged: { emoji: "👍", label: "acknowledged" },
+  ship_it: { emoji: "🚢", label: "ship it" },
   wrong: { emoji: "👎", label: "wrong" },
   explain: { emoji: "❓", label: "explain" },
   iterate: { emoji: "🔁", label: "iterate" },

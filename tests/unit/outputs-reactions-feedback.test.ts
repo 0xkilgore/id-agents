@@ -1,5 +1,6 @@
 // C0 ambient feedback (T-CKPT.feedback-system/C0) — the lowest-click feedback
-// surface. A one-tap reaction (👍/👎/❓/🔁) is a structured comment that rides
+// surface. One-tap reactions are structured comments. The thumbs-up reaction is
+// a lightweight acknowledgement, not approval or ship; substantive reactions ride
 // the EXISTING comment-auto-dispatch (T-CKPT.7) to the owning agent, and the
 // feedback→dispatch linkage is persisted so the acted-upon chip
 // (GET /artifacts/:id/feedback) can trace it across reloads. Flag-gated behind
@@ -143,6 +144,61 @@ describe("POST /artifacts/:id/reactions — C0 ambient reactions", () => {
     expect(fb.body.items[0].routing.routed_at).toBeTruthy();
   });
 
+  it("treats thumbs-up as durable acknowledgement, not approve/ship, and reload preserves it", async () => {
+    const { fn, calls } = makeFakeEnqueue();
+    const { app, adapter } = await buildApp({ enqueue: fn });
+    await catalogArtifact(adapter, "regina");
+
+    const res = await call(app, "POST", `/artifacts/${ART}/reactions`, {
+      actor_ref: "user:chris",
+      reaction: "acknowledged",
+    });
+
+    expect(res.status).toBe(200);
+    expect(res.body.ok).toBe(true);
+    expect(res.body.comment.body).toBe("👍 acknowledged");
+    expect(res.body.route_kind).toBe("acknowledgement");
+    expect(res.body.dispatch_routed).toBe(false);
+    expect(res.body.dispatch_skipped).toBe("acknowledged");
+    expect(res.body.approval).toBeNull();
+    expect(calls).toHaveLength(0);
+
+    const comments = await call(app, "GET", `/artifacts/${ART}/comments`);
+    expect(comments.body.comments[0].route_status).toMatchObject({
+      visible_state: "recorded+routed",
+      route_kind: "acknowledgement",
+      routed: false,
+      retryable: false,
+      skipped: "acknowledged",
+    });
+
+    const { rows } = await adapter.query<{ payload_json: string | null }>(
+      `SELECT payload_json FROM artifact_operations WHERE artifact_id = ? AND op_type = 'comment_recorded'`,
+      [ART],
+    );
+    expect(rows).toHaveLength(1);
+    expect(JSON.parse(rows[0].payload_json ?? "{}")).toMatchObject({
+      body: "👍 acknowledged",
+      reaction: "acknowledged",
+    });
+
+    const fb = await call(app, "GET", `/artifacts/${ART}/feedback`);
+    expect(fb.body.acted_upon.state).toBe("captured");
+    expect(fb.body.acted_upon.reaction_count).toBe(1);
+    expect(fb.body.acted_upon.routed_count).toBe(0);
+    expect(fb.body.acted_upon.last_reaction).toBe("acknowledged");
+    expect(fb.body.items[0]).toMatchObject({
+      kind: "reaction",
+      reaction: "acknowledged",
+      body: "👍 acknowledged",
+      routing: null,
+    });
+
+    const afterReload = await call(app, "GET", `/artifacts/${ART}/feedback`);
+    expect(afterReload.body.acted_upon).toEqual(fb.body.acted_upon);
+    expect(afterReload.body.items).toEqual(fb.body.items);
+  });
+
   it("accepts a bare ship_it reaction as an approval signal with no owner dispatch", async () => {
     const { fn, calls } = makeFakeEnqueue();
     const { app, adapter } = await buildApp({ enqueue: fn });
@@ -153,7 +209,7 @@ describe("POST /artifacts/:id/reactions — C0 ambient reactions", () => {
       reaction: "ship_it",
     });
     expect(res.status).toBe(200);
-    expect(res.body.comment.body).toBe("👍 ship it");
+    expect(res.body.comment.body).toBe("🚢 ship it");
     expect(res.body.route_kind).toBe("approval_signal");
     expect(res.body.dispatch_routed).toBe(false);
     expect(res.body.dispatch_skipped).toBe("approval_signal");
@@ -219,7 +275,7 @@ describe("C0 flag gating (C0_FEEDBACK_REACTIONS off)", () => {
 
     const post = await call(app, "POST", `/artifacts/${ART}/reactions`, {
       actor_ref: "user:chris",
-      reaction: "ship_it",
+      reaction: "acknowledged",
     });
     expect(post.status).toBe(404);
     expect(post.body.error).toBe("c0_feedback_reactions_disabled");

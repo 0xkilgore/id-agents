@@ -60,6 +60,7 @@ export interface CommentDispatchReceipt {
 export type CommentDispatchSkipReason =
   | "scheduler_unavailable" // no enqueue seam wired (bootstrap / legacy mount)
   | "artifact_owner_unknown" // artifact not catalogued or has no owning agent
+  | "acknowledged" // lightweight read/ack signal, not approval and not agent work
   | "approval_signal" // comment was handled as an artifact approval, not agent work
   | "question_threaded"; // question remains attached to the artifact thread
 
@@ -68,7 +69,7 @@ export type CommentDispatchResult =
   | { routed: false; skipped: CommentDispatchSkipReason; target_agent?: string | null; target_agent_raw?: string | null }
   | { routed: false; error: { message: string }; target_agent?: string | null; target_agent_raw?: string | null };
 
-export type ArtifactCommentRouteKind = "approval_signal" | "substantive_follow_up" | "question";
+export type ArtifactCommentRouteKind = "acknowledgement" | "approval_signal" | "substantive_follow_up" | "question";
 
 export interface RouteCommentInput {
   adapter: DbAdapter;
@@ -80,6 +81,7 @@ export interface RouteCommentInput {
 }
 
 export function classifyArtifactComment(comment: ArtifactComment): ArtifactCommentRouteKind {
+  if (comment.reaction === "acknowledged") return "acknowledgement";
   if (comment.reaction === "ship_it") return "approval_signal";
   if (comment.reaction === "explain") return "question";
   if (comment.reaction === "wrong" || comment.reaction === "iterate") return "substantive_follow_up";
@@ -193,8 +195,8 @@ export interface RecoveredCommentSweepReport {
 /**
  * Deterministic sweep of a recovered artifact-comment batch. Classification is
  * pure (classifyArtifactComment); routing is applied in stable input order.
- * approval_signal / question never dispatch agent work; substantive_follow_up
- * routes to the owning agent. EVERY routed dispatch carries the
+ * acknowledgement / approval_signal / question never dispatch agent work;
+ * substantive_follow_up routes to the owning agent. EVERY routed dispatch carries the
  * artifact_comment channel, so a recovered batch can never reach needs_you.
  * Same input → identical report (no clocks, no randomness here).
  */
@@ -202,6 +204,7 @@ export async function sweepRecoveredArtifactComments(
   input: RecoveredCommentSweepInput,
 ): Promise<RecoveredCommentSweepReport> {
   const counts: Record<ArtifactCommentRouteKind, number> = {
+    acknowledgement: 0,
     approval_signal: 0,
     substantive_follow_up: 0,
     question: 0,
@@ -213,7 +216,9 @@ export async function sweepRecoveredArtifactComments(
     counts[route_kind] += 1;
 
     let result: CommentDispatchResult;
-    if (route_kind === "approval_signal") {
+    if (route_kind === "acknowledgement") {
+      result = { routed: false, skipped: "acknowledged" };
+    } else if (route_kind === "approval_signal") {
       result = { routed: false, skipped: "approval_signal" };
     } else if (route_kind === "question") {
       result = { routed: false, skipped: "question_threaded" };

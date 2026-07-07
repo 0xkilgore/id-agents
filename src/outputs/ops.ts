@@ -633,7 +633,10 @@ function parseRouteStatus(value: unknown): ArtifactCommentRouteStatus | null {
   return {
     visible_state: v.visible_state,
     route_kind:
-      v.route_kind === "approval_signal" || v.route_kind === "substantive_follow_up" || v.route_kind === "question"
+      v.route_kind === "acknowledgement" ||
+      v.route_kind === "approval_signal" ||
+      v.route_kind === "substantive_follow_up" ||
+      v.route_kind === "question"
         ? v.route_kind
         : "substantive_follow_up",
     routed: v.routed === true,
