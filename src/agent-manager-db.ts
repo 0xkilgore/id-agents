@@ -11502,6 +11502,17 @@ export class AgentManagerDb {
           console.warn('[Manager] Fleet activity routes failed to mount:', err instanceof Error ? err.message : String(err));
         }
 
+        // Surfaced Artifacts v1 — authoritative Read This Next query layer.
+        // Composes artifact catalog/review state, dispatch done closeouts, and
+        // comment routing rows. Filesystem reads are only fallback evidence.
+        try {
+          const { mountSurfacedArtifactsRoutes } = await import('./surfaced-artifacts/routes.js');
+          mountSurfacedArtifactsRoutes(this.managementApp, this.db.adapter);
+          console.log('[Manager] Surfaced artifacts /ops/surfaced-artifacts route mounted');
+        } catch (err) {
+          console.warn('[Manager] Surfaced artifacts routes failed to mount:', err instanceof Error ? err.message : String(err));
+        }
+
         // T-CKPT.agent-sharing / F4 — share + delegate grants over the Monday
         // seed actor model. Mount /shares, /delegations, /grants[/:id[/revoke]].
         try {
