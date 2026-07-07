@@ -4,6 +4,7 @@ import { readOrchestrationHealthProjection } from "../../src/continuous-orchestr
 import { insertBacklogItem, setItemState } from "../../src/continuous-orchestration/storage.js";
 import { migrateSqlite } from "../../src/db/migrations/sqlite.js";
 import { SqliteAdapter } from "../../src/db/sqlite-adapter.js";
+import { migrateOutputsTables } from "../../src/outputs/storage.js";
 
 let adapter: SqliteAdapter;
 
@@ -140,7 +141,131 @@ describe("orchestration health projection", () => {
     });
     expect(health.blockers.promotion.items[1]?.reason).toBe("promotion incomplete: completed=false");
   });
+
+  it("counts duplicate/no-op artifact acknowledgement noise deterministically", async () => {
+    await migrateOutputsTables(adapter);
+    await insertArtifact("art:regina:ack.md", "regina");
+    await insertCommentOp({
+      artifact_id: "art:regina:ack.md",
+      actor: "user:chris",
+      body: "👍 acknowledged",
+      reaction: "acknowledged",
+      route_status: {
+        visible_state: "recorded+routed",
+        route_kind: "acknowledgement",
+        routed: false,
+        retryable: false,
+        recorded_op_id: 1,
+        target_agent: null,
+        target_agent_raw: null,
+        dispatch: null,
+        skipped: "acknowledged",
+        error: null,
+        updated_at: "2026-07-01T15:00:00.000Z",
+      },
+    });
+    await insertCommentOp({
+      artifact_id: "art:regina:ack.md",
+      actor: "user:chris",
+      body: "👍 acknowledged",
+      reaction: "acknowledged",
+      route_status: {
+        visible_state: "recorded+routed",
+        route_kind: "acknowledgement",
+        routed: false,
+        retryable: false,
+        recorded_op_id: 2,
+        target_agent: null,
+        target_agent_raw: null,
+        dispatch: null,
+        skipped: "acknowledged",
+        error: null,
+        updated_at: "2026-07-01T15:01:00.000Z",
+      },
+    });
+    await insertCommentOp({
+      artifact_id: "art:regina:ack.md",
+      actor: "user:liz",
+      body: "🚢 ship it",
+      reaction: "ship_it",
+      route_status: {
+        visible_state: "recorded+routed",
+        route_kind: "approval_signal",
+        routed: false,
+        retryable: false,
+        recorded_op_id: 3,
+        target_agent: null,
+        target_agent_raw: null,
+        dispatch: null,
+        skipped: "approval_signal",
+        error: null,
+        updated_at: "2026-07-01T15:02:00.000Z",
+      },
+    });
+
+    const health = await readOrchestrationHealthProjection(adapter, "default");
+
+    expect(health.queue_quality).toMatchObject({
+      raw_queued: 0,
+      actionable_ready: 0,
+      duplicate_or_noop_backfill: 3,
+      suppressed_by_dedupe: 1,
+    });
+    expect(health.queue_quality.explanation).toContain("duplicate/no-op artifact acknowledgement");
+    expect(health.queue_quality.top_noise_patterns[0]).toMatchObject({
+      pattern: "acknowledgement:regina:acknowledged",
+      count: 2,
+      examples: ["art:regina:ack.md#1", "art:regina:ack.md#2"],
+    });
+  });
 });
+
+async function insertArtifact(artifactId: string, agent: string): Promise<void> {
+  await adapter.query(
+    `INSERT INTO artifacts (
+       artifact_id, basename, agent, tag, abs_path, title, produced_at, source,
+       availability, source_badges, reconciled_at, created_at, updated_at
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      artifactId,
+      "ack.md",
+      agent,
+      null,
+      "/tmp/ack.md",
+      "Ack",
+      "2026-07-01T14:00:00.000Z",
+      "manual",
+      "present",
+      "[]",
+      null,
+      "2026-07-01T14:00:00.000Z",
+      "2026-07-01T14:00:00.000Z",
+    ],
+  );
+}
+
+async function insertCommentOp(input: {
+  artifact_id: string;
+  actor: string;
+  body: string;
+  reaction: string;
+  route_status: Record<string, unknown>;
+}): Promise<void> {
+  await adapter.query(
+    `INSERT INTO artifact_operations (artifact_id, op_type, actor, ts, payload_json, source_link, idempotency_key)
+     VALUES (?, 'comment_recorded', ?, ?, ?, NULL, NULL)`,
+    [
+      input.artifact_id,
+      input.actor,
+      String(input.route_status.updated_at),
+      JSON.stringify({
+        body: input.body,
+        reaction: input.reaction,
+        route_status: input.route_status,
+      }),
+    ],
+  );
+}
 
 async function insertDispatch(overrides: Partial<{
   dispatch_phid: string;
