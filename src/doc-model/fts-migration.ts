@@ -13,10 +13,38 @@ async function execSqlite(adapter: DbAdapter, sql: string): Promise<void> {
 }
 
 export async function migrateDocModelFtsIndexes(adapter: DbAdapter): Promise<void> {
-  if (adapter.dialect !== "sqlite") return;
-
-  // desk_items may not exist until migrateDeskTables runs (not part of core DDL).
+  // artifacts/desk_items may not exist until their route modules run. Search owns
+  // the read surface, so make the substrate tables available before indexing.
+  const { migrateOutputsTables } = await import("../outputs/storage.js");
+  await migrateOutputsTables(adapter);
   await migrateDeskTables(adapter);
+
+  if (adapter.dialect === "postgres") {
+    await adapter.query(`
+      CREATE INDEX IF NOT EXISTS artifacts_doc_model_search_idx
+          ON artifacts
+       USING GIN (to_tsvector('simple',
+         coalesce(title, '') || ' ' || basename || ' ' || coalesce(tag, '') || ' ' || agent
+       ))
+    `);
+    await adapter.query(`
+      CREATE INDEX IF NOT EXISTS desk_items_doc_model_search_idx
+          ON desk_items
+       USING GIN (to_tsvector('simple',
+         label || ' ' || body_md || ' ' || kind || ' ' || coalesce(source_ref, '')
+       ))
+    `);
+    await adapter.query(`
+      CREATE INDEX IF NOT EXISTS tasks_doc_model_search_idx
+          ON tasks
+       USING GIN (to_tsvector('simple',
+         name || ' ' || title || ' ' || coalesce(description, '') || ' ' || coalesce(track, '') || ' ' || status
+       ))
+    `);
+    return;
+  }
+
+  if (adapter.dialect !== "sqlite") return;
 
   await execSqlite(
     adapter,

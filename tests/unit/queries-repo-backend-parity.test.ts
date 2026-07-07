@@ -2,8 +2,8 @@
 //
 // RD-009/RD-010: doc-model search and the queries-repo read path used to
 // behave differently depending on backend dialect:
-//   - search.ts silently returned `{ items: [] }` for any non-sqlite
-//     adapter, indistinguishable from "no rows matched" (RD-009).
+//   - search.ts used to return either a masked empty result or HTTP 501 for
+//     non-sqlite adapters. Postgres now has a native search path (RD-009).
 //   - SqliteQueriesRepo.getPending() had no ORDER BY (undefined order),
 //     while PgQueriesRepo.getPending() ordered by created ASC (RD-010a).
 //   - owner_kind/owner_id backfill + `result` null-vs-{} coercion only
@@ -25,7 +25,7 @@ import {
   normalizeQueryRow,
   resolveQueryOwnership,
 } from "../../src/db/repos/query-row-normalize.js";
-import { searchDocModel, DocModelSearchUnsupportedError } from "../../src/doc-model/search.js";
+import { searchDocModel } from "../../src/doc-model/search.js";
 import type { DbAdapter } from "../../src/db/db-adapter.js";
 
 describe("normalizeQueryRow — same row battery, same output regardless of backend", () => {
@@ -174,19 +174,18 @@ describe("SqliteQueriesRepo.getPending — RD-010a ordering parity", () => {
   });
 });
 
-describe("searchDocModel — RD-009 non-sqlite dialect surfaces an explicit error", () => {
-  it("throws DocModelSearchUnsupportedError instead of silently returning empty results", async () => {
+describe("searchDocModel — RD-009 Postgres dialect support", () => {
+  it("uses the normal search envelope for Postgres instead of throwing HTTP 501", async () => {
     const fakeAdapter: DbAdapter = {
       dialect: "postgres",
       query: async () => ({ rows: [], rowCount: 0 }),
       close: async () => {},
     };
 
-    await expect(searchDocModel(fakeAdapter, "anything")).rejects.toThrow(
-      DocModelSearchUnsupportedError,
-    );
-    await expect(searchDocModel(fakeAdapter, "anything")).rejects.toThrow(
-      /not implemented for the 'postgres' backend/,
-    );
+    await expect(searchDocModel(fakeAdapter, "anything")).resolves.toEqual({
+      items: [],
+      limit: 50,
+      offset: 0,
+    });
   });
 });
