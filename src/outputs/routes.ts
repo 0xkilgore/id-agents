@@ -249,6 +249,9 @@ async function handleClassifiedCommentRouting(
   routed: Awaited<ReturnType<typeof routeCommentToOwningAgent>>;
 }> {
   const routeKind = classifyArtifactComment(comment);
+  if (routeKind === "acknowledgement") {
+    return { route_kind: routeKind, routed: { routed: false, skipped: "acknowledged" } };
+  }
   if (routeKind === "approval_signal") {
     const approval = await approveArtifact(
       adapter,
@@ -376,7 +379,7 @@ function commentRouteStatus(
     };
   }
   const skipped = "skipped" in result ? result.skipped : null;
-  const isPolicySkip = skipped === "approval_signal" || skipped === "question_threaded";
+  const isPolicySkip = skipped === "acknowledged" || skipped === "approval_signal" || skipped === "question_threaded";
   return {
     visible_state: isPolicySkip ? "recorded+routed" : "recorded-but-route-failed-with-retry",
     route_kind: routeKind,
@@ -410,6 +413,7 @@ async function routeSuggestionToOwningAgent(
     reaction: suggestion.reaction ?? null,
   };
   const kind = classifyArtifactComment(forClassify);
+  if (kind === 'acknowledgement') return { kind, result: { routed: false, skipped: 'acknowledged' } };
   if (kind === 'approval_signal') return { kind, result: { routed: false, skipped: 'approval_signal' } };
   if (kind === 'question') return { kind, result: { routed: false, skipped: 'question_threaded' } };
   const result = await routeCommentToOwningAgent({
@@ -1238,7 +1242,11 @@ export function mountOutputsRoutes(
         res.json({ ...base, dispatch_routed: false, dispatch: null, dispatch_error: routed.routed.error });
       }
     } catch (err) {
-      res.status(500).json({ ok: false, error: err instanceof Error ? err.message : String(err) });
+      res.status(500).json({
+        ok: false,
+        visible_state: "not-recorded",
+        error: err instanceof Error ? err.message : String(err),
+      });
     }
   });
 
@@ -1450,7 +1458,7 @@ export function mountOutputsRoutes(
 
   // ── POST /artifacts/:id/reactions (C0_FEEDBACK_REACTIONS) ──────────
   // The lowest-click feedback surface (chris-feedback-system-design §3 C0): a
-  // one-tap reaction (👍 ship_it / 👎 wrong / ❓ explain / 🔁 iterate) + an
+  // one-tap reaction (👍 acknowledged / 🚢 ship_it / 👎 wrong / ❓ explain / 🔁 iterate) + an
   // optional one-sentence note. A reaction is a `comment_recorded` op carrying a
   // `reaction` field, so it rides the EXISTING comment listing and the EXISTING
   // comment-auto-dispatch (T-CKPT.7) — it never duplicates the routing path.
@@ -1470,7 +1478,7 @@ export function mountOutputsRoutes(
         return res.status(400).json({
           ok: false,
           code: 'invalid_reaction',
-          error: 'reaction must be one of: ship_it, wrong, explain, iterate',
+          error: 'reaction must be one of: acknowledged, ship_it, wrong, explain, iterate',
         });
       }
       const reqBody: ReactionRequest = {
@@ -1492,11 +1500,21 @@ export function mountOutputsRoutes(
         env,
         clock,
       );
+      const route_status = commentRouteStatus(
+        routed.route_kind,
+        routed.routed,
+        op_id,
+        (clock ? clock() : new Date()).toISOString(),
+      );
+      await updateCommentRouteStatus(adapter, artifactId, op_id, route_status);
+      comment.route_status = route_status;
 
       invalidateArtifactDetail(artifactId);
       const base = {
         ok: true,
         schema_version: 'artifact.reaction.v1',
+        visible_state: route_status.visible_state,
+        route_status,
         op_id,
         comment,
         reaction,

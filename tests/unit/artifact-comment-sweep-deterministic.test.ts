@@ -57,6 +57,7 @@ function recoveredBatch(): ArtifactComment[] {
     comment(5, 'thumbs down', { reaction: 'wrong' }),   // substantive_follow_up (reaction)
     comment(6, 'explain please', { reaction: 'explain' }), // question (reaction)
     comment(7, 'ship_it', { reaction: 'ship_it' }),     // approval_signal (reaction)
+    comment(8, 'acknowledged', { reaction: 'acknowledged' }), // acknowledgement (reaction)
   ];
 }
 
@@ -71,6 +72,7 @@ describe('artifact-comment classification — deterministic', () => {
       [comment(6, 'x', { reaction: 'wrong' }), 'substantive_follow_up'],
       [comment(7, 'x', { reaction: 'iterate' }), 'substantive_follow_up'],
       [comment(8, 'x', { reaction: 'explain' }), 'question'],
+      [comment(9, 'x', { reaction: 'acknowledged' }), 'acknowledgement'],
     ];
     for (const [c, kind] of cases) {
       expect(classifyArtifactComment(c)).toBe(kind);
@@ -89,10 +91,10 @@ describe('recovered-comment batch sweep — deterministic + channel-stamped', ()
     const e2 = makeEnqueue();
     const r2 = await sweepRecoveredArtifactComments({ adapter, enqueue: e2.fn, comments: recoveredBatch().map((c) => ({ artifactId: ART, comment: c })) });
 
-    expect(r1.counts).toEqual({ approval_signal: 3, substantive_follow_up: 2, question: 2 });
+    expect(r1.counts).toEqual({ acknowledgement: 1, approval_signal: 3, substantive_follow_up: 2, question: 2 });
     expect(r2.counts).toEqual(r1.counts);
     expect(r2.entries.map((x) => x.route_kind)).toEqual(r1.entries.map((x) => x.route_kind));
-    expect(r1.total).toBe(7);
+    expect(r1.total).toBe(8);
   });
 
   it('routes ONLY substantive comments, and stamps the artifact_comment channel', async () => {

@@ -261,7 +261,12 @@ function commentReceiptFromOperation(
     return null;
   }
   const routeKind = stringValue(routeStatus.route_kind);
-  if (routeKind !== "approval_signal" && routeKind !== "substantive_follow_up" && routeKind !== "question") {
+  if (
+    routeKind !== "acknowledgement" &&
+    routeKind !== "approval_signal" &&
+    routeKind !== "substantive_follow_up" &&
+    routeKind !== "question"
+  ) {
     return null;
   }
 

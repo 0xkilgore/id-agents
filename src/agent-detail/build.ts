@@ -66,7 +66,7 @@ export interface DetailCommentReceiptRow {
   route_status: string;
   visible_state: "recorded+routed" | "recorded-but-route-failed-with-retry" | "not-recorded";
   retryable: boolean;
-  route_kind: "approval_signal" | "substantive_follow_up" | "question";
+  route_kind: "acknowledgement" | "approval_signal" | "substantive_follow_up" | "question";
   target_agent: string | null;
   target_agent_raw: string | null;
   dispatch_id: string | null;

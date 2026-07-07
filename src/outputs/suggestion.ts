@@ -36,7 +36,7 @@ export type SuggestionState =
   | "stale";
 
 /** A one-tap reaction carried alongside the rationale (parity with comments). */
-export type SuggestionReaction = "ship_it" | "wrong" | "explain" | "iterate";
+export type SuggestionReaction = "acknowledged" | "ship_it" | "wrong" | "explain" | "iterate";
 
 /** Span anchor Regina renders against. Only `char_start`/`char_end` +
  *  `original_text` are load-bearing for apply; the rest are drift-tolerant
