@@ -145,4 +145,45 @@ describe("continuous orchestration pool routing", () => {
     expect(plan.admit.map((it) => it.item_id)).toEqual(["coitem_backend_read_models"]);
     expect(plan.assignments).toEqual({});
   });
+
+  it("preserves a wave17 cto clarification row instead of routing kapelle-site scope through the frontend pool", () => {
+    const pools = buildPoolRouting({});
+    const ctoClarification = item({
+      item_id: "coitem_wave17_cto_clarification",
+      title:
+        "[project: kapelle][T-RELY][BUILD][REGRESSION] substrate-orch-codex: tick_2d16caa4 routed explicit to_agent=cto through frontend pool",
+      track: "T-RELY",
+      to_agent: "cto",
+      dispatch_body: `Blocked on a clarification - Spec 054 v2
+
+If you cannot safely continue because the dispatch is ambiguous, call POST /agent-needs-input with the manager dispatch_id.
+
+Maestra refuel note 2026-07-07: Infra regression: explicit non-pool backlog rows routed through frontend pool.`,
+      write_scope: ["/Users/kilgore/Dropbox/Code/kapelle-site"],
+    });
+    const pool = pools.poolForItem(ctoClarification);
+
+    expect(pool).toBeNull();
+
+    const plan = planAdmission(
+      [ctoClarification],
+      {
+        mode: "running",
+        kill_switch_active: false,
+        usage: { hard_paused: false, daily_percent: 0, weekly_percent: 0, enforcement: "enforce" },
+        daily_tokens_used: 0,
+        in_flight: 0,
+        active_write_scopes: new Set(),
+        done_item_ids: new Set(),
+        admit_limit: 1,
+        pool_for: (it) => pools.poolForItem(it)?.pool_id ?? null,
+        pool_free_slots: new Map([["frontend", 1]]),
+        pool_free_builders: new Map([["frontend", ["regina"]]]),
+      },
+      defaultConfig(),
+    );
+
+    expect(plan.admit.map((it) => it.item_id)).toEqual(["coitem_wave17_cto_clarification"]);
+    expect(plan.assignments).toEqual({});
+  });
 });
