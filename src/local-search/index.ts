@@ -1,4 +1,5 @@
 export * from "./contract.js";
+export * from "./read-mutation.js";
 
 import {
   LOCAL_SEARCH_INDEX_SCHEMA_VERSION,

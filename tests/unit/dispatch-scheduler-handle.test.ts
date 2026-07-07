@@ -782,7 +782,7 @@ describe("handleAgentDone — Claude provider/session limit", () => {
     expect(final?.last_bounce?.kind).toBe("provider_limit");
     expect(final?.last_bounce?.message).toContain("Claude limited until 1:10pm");
     expect(final?.not_before_at).toMatch(/T18:10:00\.000Z$/);
-    expect(Date.parse(final?.not_before_at ?? "")).toBeGreaterThan(Date.now());
+    expect(Date.parse(final?.not_before_at ?? "")).toBeGreaterThan(Date.parse("2026-07-06T17:55:00.000Z"));
     expect(final?.allow_auto_retry).toBe(true);
     expect(final?.provider).toBe("openai");
     expect(final?.runtime).toBe("codex");

@@ -47,7 +47,7 @@ const ALLOWLIST: Issuer[] = [
   },
   {
     file: "src/agent-manager-db.ts",
-    line: 10133,
+    line: 10264,
     category: "MUST_MIGRATE",
     note: "agent heartbeat reseed — immediate /talk send",
   },
@@ -85,7 +85,7 @@ const ALLOWLIST: Issuer[] = [
   // ─── Probe/test helpers: intentionally outside the gateway ───
   {
     file: "src/agent-manager-db.ts",
-    line: 8084,
+    line: 8116,
     category: "PROBE_OR_TEST",
     note: "agent probe — end-to-end health probe by design",
   },
