@@ -8,6 +8,12 @@ import {
   type LocalSearchDocument,
 } from "../../src/local-search/index.js";
 import { mountLocalSearchRoutes } from "../../src/local-search/routes.js";
+import {
+  localHealthVisualForFreshness,
+  localHealthVisualForIndex,
+  localHealthVisualState,
+  type LocalHealthVisualState,
+} from "../../src/local-search/visual-state.js";
 
 const NOW = new Date("2026-07-07T17:00:00.000Z");
 
@@ -142,6 +148,12 @@ describe("local search v0 contract", () => {
       status: "available",
       readState: "unread",
       freshness: "current",
+      local_visual_state: {
+        state: "current",
+        label: "Current",
+        tone: "neutral",
+        scope: "artifact",
+      },
       openTarget: { kind: "artifact" },
     });
     expect(response.items[0].matchFields).toContain("title");
@@ -197,6 +209,12 @@ describe("local search v0 contract", () => {
       partialScopes: ["artifact"],
       staleReason: "artifact body cache catch-up in progress",
     });
+    expect(response.index_visual_state).toMatchObject({
+      state: "index_partial",
+      label: "Partial index",
+      tone: "warning",
+      scope: "artifact index",
+    });
   });
 
   it("mounts /read-model/search with query filters", async () => {
@@ -207,5 +225,42 @@ describe("local search v0 contract", () => {
     expect(body.schemaVersion).toBe("read_model.search.v1");
     expect(body.items.map((item: any) => item.id)).toEqual(["artifact:fall-fest-rundown"]);
     expect(body.index.state).toBe("index_partial");
+    expect(body.index_visual_state.state).toBe("index_partial");
+  });
+
+  it("covers every restrained local health visual state", () => {
+    const states: LocalHealthVisualState[] = [
+      "current",
+      "syncing",
+      "stale",
+      "event_gap",
+      "index_building",
+      "index_partial",
+      "mutation_failed",
+      "error",
+    ];
+
+    for (const state of states) {
+      const visual = localHealthVisualState(state, "fixture");
+      expect(visual).toMatchObject({ state, scope: "fixture" });
+      expect(visual.label.length).toBeGreaterThan(0);
+      expect(visual.message).toContain(".");
+    }
+
+    expect(localHealthVisualForFreshness("syncing", "artifact").state).toBe("syncing");
+    expect(localHealthVisualForFreshness("event_gap", "task").state).toBe("event_gap");
+    expect(localHealthVisualForFreshness("mutation_failed", "artifact").state).toBe("mutation_failed");
+    expect(localHealthVisualForFreshness("error", "project").state).toBe("error");
+    expect(localHealthVisualForIndex({
+      state: "indexing",
+      indexedAt: NOW.toISOString(),
+      documentCount: 0,
+    }).state).toBe("index_building");
+    expect(localHealthVisualForIndex({
+      state: "index_partial",
+      indexedAt: NOW.toISOString(),
+      documentCount: 2,
+      partialScopes: ["task", "artifact"],
+    })).toMatchObject({ state: "index_partial", scope: "task, artifact index" });
   });
 });

@@ -13,6 +13,7 @@ import {
   finalizeEntryProvenance,
   parseActorRef,
 } from "../doc-model/provenance.js";
+import { artifactListVisualState } from "./local-health.js";
 
 export { parseActorRef };
 
@@ -83,6 +84,11 @@ export function artifactRowToEntry(
     created_by: createdBy,
     updated_at: updatedAt,
     updated_by: updatedBy,
+    local_visual_state: artifactListVisualState({
+      availability: catalog.availability,
+      status: review?.ship_blockers_json && !review.shipped_at ? "ship_blocked" : undefined,
+      catalogPresent: true,
+    }),
     provenance,
   };
 }

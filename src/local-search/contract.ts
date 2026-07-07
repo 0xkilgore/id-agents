@@ -1,3 +1,5 @@
+import type { LocalHealthVisual } from "./visual-state.js";
+
 export const LOCAL_SEARCH_SCHEMA_VERSION = "read_model.search.v1" as const;
 export const LOCAL_SEARCH_INDEX_SCHEMA_VERSION = "local_search.index.v0" as const;
 
@@ -5,6 +7,11 @@ export type LocalSearchEntityType = "artifact" | "project" | "task";
 export type LocalSearchReadState = "read" | "unread" | "read_but_has_new_activity" | "unknown";
 export type LocalSearchFreshness = "current" | "syncing" | "stale" | "event_gap" | "mutation_failed" | "error";
 export type LocalSearchIndexHealthState = "ready" | "indexing" | "stale" | "index_partial" | "error";
+export type {
+  LocalHealthVisual,
+  LocalHealthVisualState,
+  LocalHealthVisualTone,
+} from "./visual-state.js";
 
 export interface LocalSearchOpenTarget {
   kind: "artifact" | "project" | "task" | "dispatch";
@@ -68,6 +75,7 @@ export interface LocalSearchHit {
   matchFields: string[];
   snippet: string;
   freshness: LocalSearchFreshness;
+  local_visual_state: LocalHealthVisual;
   openTarget: LocalSearchOpenTarget;
   score: number;
 }
@@ -83,6 +91,7 @@ export interface LocalSearchResponse {
   limit: number;
   nextCursor: string | null;
   index: LocalSearchIndexHealth;
+  index_visual_state: LocalHealthVisual;
 }
 
 export interface LocalSearchIndexSnapshot {

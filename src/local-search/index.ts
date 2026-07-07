@@ -14,6 +14,10 @@ import {
   type LocalSearchReadState,
   type LocalSearchResponse,
 } from "./contract.js";
+import {
+  localHealthVisualForFreshness,
+  localHealthVisualForIndex,
+} from "./visual-state.js";
 
 export const LOCAL_SEARCH_DEFAULT_LIMIT = 25;
 export const LOCAL_SEARCH_MAX_LIMIT = 100;
@@ -73,6 +77,10 @@ export function searchLocalIndex(
     .sort((a, b) => b.score - a.score || b.updatedAt.localeCompare(a.updatedAt) || a.id.localeCompare(b.id));
 
   const page = hits.slice(offset, offset + limit);
+  const index = {
+    ...snapshot.health,
+    documentCount: snapshot.health.documentCount ?? snapshot.documents.length,
+  };
   return {
     ok: true,
     schemaVersion: LOCAL_SEARCH_SCHEMA_VERSION,
@@ -83,10 +91,8 @@ export function searchLocalIndex(
     count: page.length,
     limit,
     nextCursor: offset + limit < hits.length ? encodeCursor(offset + limit) : null,
-    index: {
-      ...snapshot.health,
-      documentCount: snapshot.health.documentCount ?? snapshot.documents.length,
-    },
+    index,
+    index_visual_state: localHealthVisualForIndex(index),
   };
 }
 
@@ -130,6 +136,7 @@ function scoreDocument(doc: LocalSearchDocument, tokens: string[]): LocalSearchH
   }
   if (tokens.length > 0 && matchedTokenCount !== tokens.length) score = 0;
 
+  const freshness = normalizeFreshness(doc.freshness);
   return {
     entityType: doc.entityType,
     id: doc.id,
@@ -143,7 +150,8 @@ function scoreDocument(doc: LocalSearchDocument, tokens: string[]): LocalSearchH
     updatedAt: doc.updatedAt,
     matchFields: [...matchedFields].sort(),
     snippet: makeSnippet(doc, tokens),
-    freshness: normalizeFreshness(doc.freshness),
+    freshness,
+    local_visual_state: localHealthVisualForFreshness(freshness, doc.entityType),
     openTarget: doc.openTarget,
     score,
   };

@@ -12,6 +12,8 @@
 //
 // OSS lift: mirrors DV1/DV2 (Powerhouse document-model lineage, AGPL).
 
+import type { LocalHealthVisual } from "../local-search/visual-state.js";
+
 /** Stable cross-system id. For artifacts this is the existing artifact_id
  *  (`art_<sha256(abs_path)[:16]>`). */
 export type PHID = string;
@@ -96,6 +98,7 @@ export interface ArtifactEntry {
   created_by: ActorRef;
   updated_at: string;
   updated_by: ActorRef;
+  local_visual_state: LocalHealthVisual;
   provenance: ArtifactProvenance;
 }
 

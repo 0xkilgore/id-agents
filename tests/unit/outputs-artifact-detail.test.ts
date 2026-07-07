@@ -104,6 +104,12 @@ describe("GET /artifacts/:id/detail", () => {
         agent: "regina",
         tag: "report",
         availability: "present",
+        local_visual_state: {
+          state: "current",
+          label: "Current",
+          tone: "neutral",
+          scope: "artifact detail",
+        },
       },
       body: {
         kind: "markdown",
@@ -123,6 +129,24 @@ describe("GET /artifacts/:id/detail", () => {
     expect(res.body.comments[0].body).toBe("ready");
     expect(res.body.timeline.map((e: any) => e.kind)).toEqual(["comment", "approval"]);
     expect(res.body.provenance.entry.title).toBe("Readable title");
+    expect(res.body.provenance.entry.local_visual_state.state).toBe("current");
+  });
+
+  it("includes restrained local health state on artifact list rows", async () => {
+    const { artifactId } = await catalogFile("list.md", "Listed title");
+
+    const res = await call("GET", "/outputs/inbox");
+
+    expect(res.status).toBe(200);
+    expect(res.body.items.find((item: any) => item.artifact_id === artifactId)).toMatchObject({
+      artifact_id: artifactId,
+      local_visual_state: {
+        state: "current",
+        label: "Current",
+        tone: "neutral",
+        scope: "artifact",
+      },
+    });
   });
 
   it("returns cache hits for repeated reads and invalidates after comments", async () => {
@@ -160,6 +184,10 @@ describe("GET /artifacts/:id/detail", () => {
     expect(res.body.displayTitle).toBe("encoded.md");
     expect(res.body.body.text).toContain("Path fallback.");
     expect(res.body.metadata.abs_path).toBe(filePath);
+    expect(res.body.metadata.local_visual_state).toMatchObject({
+      state: "stale",
+      scope: "artifact catalog",
+    });
   });
 
   it("returns a typed 404 for missing artifacts", async () => {

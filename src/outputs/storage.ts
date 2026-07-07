@@ -23,6 +23,7 @@ import type {
   OutputsInboxRow,
   RegisterArtifactRequest,
 } from "./types.js";
+import { artifactListVisualState } from "./local-health.js";
 
 // Derive a stable artifact_id from an absolute path. Same path → same id,
 // across machines and across days. Used by /deliver, /agent-done, and the
@@ -757,6 +758,7 @@ export async function listInboxItems(
       [r.artifact_id],
     );
     const availability: ArtifactAvailability = r.cat_availability ?? "unknown";
+    const catalogPresent = Boolean(r.cat_basename || r.cat_abs_path || r.cat_produced_at);
     items.push({
       artifact_id: r.artifact_id,
       source_link: r.source_link,
@@ -774,6 +776,7 @@ export async function listInboxItems(
       ship_blockers_json: r.ship_blockers_json,
       op_count: Number(opAgg[0]?.cnt ?? 0),
       last_op_at: opAgg[0]?.last_ts ?? null,
+      local_visual_state: artifactListVisualState({ availability, status, catalogPresent }),
     });
   }
   return items;

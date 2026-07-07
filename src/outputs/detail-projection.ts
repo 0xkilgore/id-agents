@@ -2,6 +2,7 @@ import { promises as fsp } from "node:fs";
 import { basename as pathBasename, extname } from "node:path";
 import type { DbAdapter } from "../db/db-adapter.js";
 import { artifactRowToEntry } from "./entry-projection.js";
+import { artifactDetailVisualState } from "./local-health.js";
 import { listComments, listTimelineEvents } from "./ops.js";
 import {
   artifactIdFromPath,
@@ -75,6 +76,13 @@ export async function buildArtifactDetail(
   const status = review ? deriveStatus(review) : "never_viewed";
   const latestTimeline = timeline[timeline.length - 1] ?? null;
   const latestComment = comments[comments.length - 1] ?? null;
+  const availability = syntheticCatalog?.availability ?? availabilityFromBody(body, catalog);
+  const localVisualState = artifactDetailVisualState({
+    availability,
+    body,
+    catalogPresent: Boolean(catalog),
+    status,
+  });
 
   return {
     ok: true,
@@ -93,11 +101,12 @@ export async function buildArtifactDetail(
       produced_at: syntheticCatalog?.produced_at ?? null,
       abs_path: syntheticCatalog?.abs_path ?? null,
       source: syntheticCatalog?.source ?? null,
-      availability: syntheticCatalog?.availability ?? availabilityFromBody(body, catalog),
+      availability,
       source_badges: parseSourceBadges(syntheticCatalog?.source_badges),
       reconciled_at: syntheticCatalog?.reconciled_at ?? null,
       created_at: syntheticCatalog?.created_at ?? null,
       updated_at: syntheticCatalog?.updated_at ?? review?.updated_at ?? null,
+      local_visual_state: localVisualState,
     },
     body,
     render,

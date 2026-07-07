@@ -9,6 +9,8 @@
 // can be rebuilt from source if it drifts. Backfill semantics are:
 // missing rows are created lazily on first /view or /approve mutation.
 
+import type { LocalHealthVisual } from "../local-search/visual-state.js";
+
 export type ArtifactOpType =
   | "view"
   | "approve"
@@ -140,6 +142,7 @@ export interface OutputsInboxRow {
   // operator-facing meta:
   op_count: number;               // total operations recorded against this artifact
   last_op_at: string | null;
+  local_visual_state: LocalHealthVisual;
 }
 
 // Artifact catalog row. One per artifact ever produced + delivered. Created
@@ -532,6 +535,7 @@ export interface ArtifactDetailMetadata {
   reconciled_at: string | null;
   created_at: string | null;
   updated_at: string | null;
+  local_visual_state: LocalHealthVisual;
 }
 
 export interface ArtifactDetailReviewSummary {
