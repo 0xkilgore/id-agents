@@ -71,6 +71,7 @@ describe('probeByoClaudeCredential', () => {
     expect(r.ok).toBe(false);
     expect(r.sources).toEqual([]);
     expect(r.reason).toBe(BYO_CLAUDE_REQUIRED_HANDOFF);
+    expect(r.reason).toMatch(/Connect Claude in Kapelle first-run setup/);
     expect(r.reason).toMatch(/CLAUDE_CODE_OAUTH_TOKEN/);
     expect(r.reason).toMatch(/ANTHROPIC_API_KEY/);
   });

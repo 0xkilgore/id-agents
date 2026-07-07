@@ -21,6 +21,13 @@ const env = syntheticStrangerClaudeOnlyEnv(profileHome, {
 });
 
 const result = evaluateSyntheticStrangerStarterFleet(env);
+const missingAuthResult = evaluateSyntheticStrangerStarterFleet(syntheticStrangerClaudeOnlyEnv(profileHome, {
+  ANTHROPIC_API_KEY: '',
+  CLAUDE_CODE_OAUTH_TOKEN: '',
+  OPENAI_API_KEY: '',
+  CURSOR_API_KEY: '',
+  OPENROUTER_API_KEY: '',
+}));
 const summary = {
   ok: result.ok,
   profileHome,
@@ -30,10 +37,23 @@ const summary = {
   privateMachinePathFindings: result.privateMachinePathFindings,
   providerAssumptions: result.providerAssumptions,
   claudeOnlyOffendingCodes: result.graceful.offendingCodes,
+  missingAuth: {
+    ok: missingAuthResult.ok,
+    cockpit: missingAuthResult.cockpit,
+    reason: missingAuthResult.credential.reason,
+    credentialSeams: missingAuthResult.credential.sources.map((source) => source.seam),
+    providerAssumptions: missingAuthResult.providerAssumptions,
+    claudeOnlyOffendingCodes: missingAuthResult.graceful.offendingCodes,
+  },
 };
 
 console.log(JSON.stringify(summary, null, 2));
 
-if (!result.ok) {
+if (
+  !result.ok
+  || missingAuthResult.ok
+  || missingAuthResult.cockpit.state !== 'blocked'
+  || !missingAuthResult.credential.reason?.includes('Connect Claude in Kapelle first-run setup')
+) {
   process.exitCode = 1;
 }

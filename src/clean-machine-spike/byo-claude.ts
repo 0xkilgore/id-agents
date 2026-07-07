@@ -108,9 +108,10 @@ export function resolveClaudeCredentialSources(
 
 /** The required-handoff documentation surfaced when no credential is present. */
 export const BYO_CLAUDE_REQUIRED_HANDOFF =
-  'No Claude credential handoff found. Provide ONE of: ' +
-  'CLAUDE_CODE_OAUTH_TOKEN (Claude subscription token from the user\'s keychain, ' +
-  'the BYO-subscription path) or ANTHROPIC_API_KEY (Claude API key). ' +
+  'No Claude credential handoff found. Connect Claude in Kapelle first-run setup, ' +
+  'which stores the user\'s Claude subscription token in their keychain and injects ' +
+  'CLAUDE_CODE_OAUTH_TOKEN for the bundled manager. Advanced/local fallback: provide ' +
+  'ANTHROPIC_API_KEY in the app-local env. ' +
   'Non-Claude providers (OpenRouter/Cursor/Codex) do not satisfy the Claude-only requirement.';
 
 /**

@@ -165,4 +165,28 @@ describe('R2+R5 — synthetic stranger starter-fleet smoke', () => {
     expect(result.providerAssumptions).toEqual([]);
     expect(result.ok).toBe(true);
   });
+
+  it('blocks clearly when Claude auth is missing', () => {
+    const env = syntheticStrangerClaudeOnlyEnv('/Users/stranger', {
+      ANTHROPIC_API_KEY: '',
+      CLAUDE_CODE_OAUTH_TOKEN: '',
+      OPENAI_API_KEY: '',
+      CURSOR_API_KEY: '',
+      OPENROUTER_API_KEY: '',
+    });
+    const result = evaluateSyntheticStrangerStarterFleet(env);
+
+    expect(result.ok).toBe(false);
+    expect(result.cockpit).toMatchObject({
+      ready: false,
+      state: 'blocked',
+      managerUrl: 'http://127.0.0.1:<dynamic>',
+      opsUrl: 'http://127.0.0.1:<dynamic>/ops',
+    });
+    expect(result.credential.ok).toBe(false);
+    expect(result.credential.sources).toEqual([]);
+    expect(result.credential.reason).toMatch(/Connect Claude in Kapelle first-run setup/);
+    expect(result.providerAssumptions).toEqual([]);
+    expect(result.graceful.offendingCodes).toEqual([]);
+  });
 });
