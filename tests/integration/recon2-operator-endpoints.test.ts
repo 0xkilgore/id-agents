@@ -160,6 +160,42 @@ describe("T-RECON.2 operator-action endpoints", () => {
     expect(dispatch.effective_state).toBe("moot_or_superseded");
   });
 
+  it("POST /dispatches/:id/retry is bounded and same-key retry does not double-enqueue", async () => {
+    await seedFailed("phid:disp-retry-slow", "transient");
+    const scheduler = (manager as any).dispatchScheduler;
+    const originalMarkSuperseded = scheduler.reactor.markSuperseded.bind(scheduler.reactor);
+    scheduler.reactor.markSuperseded = async (...args: unknown[]) => {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      return originalMarkSuperseded(...args as [string, string, string]);
+    };
+
+    try {
+      const body = { timeout_ms: 5, idempotency_key: "slow-retry-key" };
+      const first = await post("/dispatches/phid:disp-retry-slow/retry", body);
+      expect(first.status).toBe(504);
+      const firstBody = await first.json() as any;
+      expect(firstBody.action_status).toBe("timed_out");
+      expect(firstBody.idempotency_key).toBe("slow-retry-key");
+
+      const second = await post("/dispatches/phid:disp-retry-slow/retry", { ...body, timeout_ms: 500 });
+      expect(second.status).toBe(200);
+      const secondBody = await second.json() as any;
+      expect(secondBody.action_status).toBe("delivered");
+      expect(secondBody.deduped).toBe(true);
+
+      const queued = await db.adapter.query<{ dispatch_phid: string }>(
+        `SELECT dispatch_phid FROM dispatch_scheduler_queue
+         WHERE dedup_key = ?
+         ORDER BY updated_at ASC`,
+        ["operator-action:retry:phid:disp-retry-slow:finances"],
+      );
+      expect(queued.rows).toHaveLength(1);
+      expect(secondBody.new_dispatch_phid).toBe(queued.rows[0].dispatch_phid);
+    } finally {
+      scheduler.reactor.markSuperseded = originalMarkSuperseded;
+    }
+  });
+
   it("POST /dispatches/:id/reassign re-routes to a new agent", async () => {
     await seedFailed("phid:disp-reassign1", "wrong owner");
     const res = await post("/dispatches/phid:disp-reassign1/reassign", { to_agent: "regina" });

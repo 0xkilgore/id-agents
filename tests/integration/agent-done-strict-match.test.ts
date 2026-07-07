@@ -88,6 +88,7 @@ describe('POST /agent-done strict mismatch handling', () => {
   let db: Awaited<ReturnType<typeof createInMemoryDb>>;
   let baseUrl: string;
   let workDir: string;
+  let prevSchedulerEnabled: string | undefined;
 
   async function enqueueDispatch(): Promise<{ ok: boolean; dispatch_phid: string; query_id: string }> {
     const res = await fetch(`${baseUrl}/dispatch/enqueue`, {
@@ -99,6 +100,9 @@ describe('POST /agent-done strict mismatch handling', () => {
   }
 
   beforeAll(async () => {
+    prevSchedulerEnabled = process.env.DISPATCH_SCHEDULER_ENABLED;
+    process.env.DISPATCH_SCHEDULER_ENABLED = 'false';
+
     const port = await findFreePort();
     baseUrl = `http://127.0.0.1:${port}`;
     workDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-done-strict-match-test-'));
@@ -112,6 +116,8 @@ describe('POST /agent-done strict mismatch handling', () => {
 
   afterAll(async () => {
     if (manager) await stopManager(manager);
+    if (prevSchedulerEnabled === undefined) delete process.env.DISPATCH_SCHEDULER_ENABLED;
+    else process.env.DISPATCH_SCHEDULER_ENABLED = prevSchedulerEnabled;
     try { fs.rmSync(workDir, { recursive: true, force: true }); } catch { /* ignore */ }
   });
 

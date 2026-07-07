@@ -289,10 +289,9 @@ export async function migrateSqlite(adapter: SqliteAdapter): Promise<void> {
     CREATE INDEX IF NOT EXISTS agent_grant_agent_idx ON agent_grant(team_id, agent_id);
     CREATE INDEX IF NOT EXISTS agent_grant_grantee_idx ON agent_grant(team_id, grantee_actor_ref);
 
-    -- Multi-LLM Slice B: runtime policy read-model. A logical agent ("*" for
-    -- default) can declare which provider lanes are allowed plus the ordered
-    -- runtime/model fallback chain. JSON keeps the migration additive while the
-    -- manager still normalizes the public read API.
+    -- Multi-LLM Slice B: runtime policy read model. A logical agent ("*" for
+    -- default) can declare allowed provider lanes and an ordered runtime/model
+    -- fallback chain without baking Claude-only assumptions into code.
     CREATE TABLE IF NOT EXISTS agent_runtime_policy (
       team_id TEXT NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
       logical_agent TEXT NOT NULL,
@@ -858,7 +857,7 @@ export async function migrateSqlite(adapter: SqliteAdapter): Promise<void> {
 
   adapter.exec(`CREATE UNIQUE INDEX IF NOT EXISTS tasks_uuid_idx ON tasks(uuid)`);
 
-  // Multi-LLM Slice B: runtime policy read-model for upgraded databases.
+  // Multi-LLM Slice B: runtime policy read model for upgraded databases.
   adapter.exec(`
     CREATE TABLE IF NOT EXISTS agent_runtime_policy (
       team_id TEXT NOT NULL REFERENCES teams(id) ON DELETE CASCADE,

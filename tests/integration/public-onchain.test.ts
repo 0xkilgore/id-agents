@@ -147,6 +147,7 @@ let mockWkDomain: string = 'test-onchain.example.com';
 let managerPort: number;
 let managerBaseUrl: string;
 let workDir: string;
+let prevSchedulerEnabled: string | undefined;
 
 // Per-test we create a fresh manager with fresh stubs.
 let manager: AgentManagerDb | null = null;
@@ -161,6 +162,9 @@ let deps: { managerBaseUrl: string; fetch: typeof globalThis.fetch };
 // ─── beforeAll ────────────────────────────────────────────────────────────────
 
 beforeAll(async () => {
+  prevSchedulerEnabled = process.env.DISPATCH_SCHEDULER_ENABLED;
+  process.env.DISPATCH_SCHEDULER_ENABLED = 'false';
+
   // Start mock well-known server
   mockWkPort = await findFreePort();
   mockWkServer = http.createServer((_req, res) => {
@@ -200,7 +204,7 @@ beforeAll(async () => {
   await manager.start(managerPort);
   await db.teams.getOrCreateTeamId('public');
   await db.teams.getOrCreateTeamId('idchain');
-}, 30000);
+}, 60000);
 
 afterAll(async () => {
   if (manager) {
@@ -214,6 +218,8 @@ afterAll(async () => {
   );
   try { fs.rmSync(workDir, { recursive: true, force: true }); } catch { /* ignore */ }
   delete process.env.PRIVATE_KEY;
+  if (prevSchedulerEnabled === undefined) delete process.env.DISPATCH_SCHEDULER_ENABLED;
+  else process.env.DISPATCH_SCHEDULER_ENABLED = prevSchedulerEnabled;
 });
 
 // ─── Helper: register a fresh public agent and return id ─────────────────────

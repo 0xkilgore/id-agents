@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: MIT
+// Multi-LLM Slice B: runtime policy schema/read model.
 
 import type { DbAdapter } from "../db/db-adapter.js";
 import type { ModelPolicyService } from "./policy.js";
@@ -63,7 +64,9 @@ function parseJsonArray<T>(raw: string | T[] | null | undefined): unknown[] {
 }
 
 function normalizeAllowedLanes(raw: string | Provider[]): Provider[] {
-  const lanes = parseJsonArray<Provider>(raw).filter((p): p is Provider => VALID_PROVIDERS.includes(p as Provider));
+  const lanes = parseJsonArray<Provider>(raw).filter((p): p is Provider =>
+    VALID_PROVIDERS.includes(p as Provider),
+  );
   return [...new Set(lanes)];
 }
 

@@ -1,12 +1,14 @@
 // Multi-LLM Slice B: runtime policy schema/read API.
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import express, { type Express } from "express";
 import { tmpdir } from "node:os";
 import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { SqliteAdapter } from "../../src/db/sqlite-adapter.js";
 import { migrateSqlite } from "../../src/db/migrations/sqlite.js";
 import { buildModelPolicyService } from "../../src/model-policy/policy.js";
+import { mountRuntimePolicyRoutes } from "../../src/model-policy/runtime-policy-routes.js";
 import {
   buildRuntimePolicyReadModel,
   readRuntimePolicies,
@@ -23,7 +25,7 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
-  if (adapter) await adapter.close();
+  await adapter.close();
   rmSync(tmpDir, { recursive: true, force: true });
 });
 
@@ -109,3 +111,77 @@ describe("agent_runtime_policy migration + read model", () => {
     ]);
   });
 });
+
+describe("runtime policy route", () => {
+  it("serves GET /runtime-policy scoped to the resolved team", async () => {
+    await adapter.query(
+      `INSERT INTO agent_runtime_policy
+        (team_id, logical_agent, allowed_lanes_json, fallback_order_json, enabled, note, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        "team",
+        "*",
+        JSON.stringify(["openai", "anthropic"]),
+        JSON.stringify([
+          { runtime: "codex", model: "gpt-5.4", provider: "openai" },
+          { runtime: "claude-code-cli", model: "claude-sonnet-5", provider: "anthropic" },
+        ]),
+        1,
+        null,
+        1,
+        2,
+      ],
+    );
+
+    const app = express();
+    mountRuntimePolicyRoutes(app, {
+      adapter,
+      getTeamId: async () => "team",
+      getModelPolicy: () =>
+        buildModelPolicyService(
+          { default: { primary: { runtime: "codex" }, fallback: [{ runtime: "claude-code-cli" }] } },
+          "file",
+        ),
+    });
+
+    const res = await request(app).get("/runtime-policy");
+    expect(res.status).toBe(200);
+    expect(res.body.schema_version).toBe("runtime-policy-v1");
+    expect(res.body.policies[0].logical_agent).toBe("*");
+    expect(res.body.policies[0].fallback_order.map((c: { runtime: string }) => c.runtime)).toEqual([
+      "codex",
+      "claude-code-cli",
+    ]);
+    expect(res.body.effective_model_policy.default.allowed_lanes).toEqual(["openai", "anthropic"]);
+  });
+});
+
+function request(app: Express) {
+  return {
+    async get(path: string): Promise<{ status: number; body: any }> {
+      return new Promise((resolve, reject) => {
+        const server = app.listen(0, "127.0.0.1", async () => {
+          const addr = server.address();
+          if (!addr || typeof addr === "string") {
+            server.close();
+            reject(new Error("no address"));
+            return;
+          }
+          try {
+            const r = await fetch(`http://127.0.0.1:${addr.port}${path}`);
+            const text = await r.text();
+            let body: any;
+            try {
+              body = JSON.parse(text);
+            } catch {
+              body = text;
+            }
+            server.close(() => resolve({ status: r.status, body }));
+          } catch (e) {
+            server.close(() => reject(e));
+          }
+        });
+      });
+    },
+  };
+}

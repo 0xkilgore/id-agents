@@ -328,7 +328,7 @@ export async function migratePostgres(adapter: DbAdapter): Promise<void> {
     WHERE token_id IS NOT NULL;
   `);
 
-  // Multi-LLM Slice B: runtime policy read-model. A logical agent ("*" for
+  // Multi-LLM Slice B: runtime policy read model. A logical agent ("*" for
   // default) can declare allowed provider lanes and an ordered runtime/model
   // fallback chain without baking Claude-only assumptions into code.
   await adapter.query(`

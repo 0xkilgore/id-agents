@@ -93,6 +93,7 @@ describe('POST /agent-done authentication (R.2)', () => {
   let baseUrl: string;
   let workDir: string;
   let prevToken: string | undefined;
+  let prevSchedulerEnabled: string | undefined;
 
   async function enqueueDispatch(): Promise<{ ok: boolean; dispatch_phid: string; query_id: string }> {
     const res = await fetch(`${baseUrl}/dispatch/enqueue`, {
@@ -110,7 +111,9 @@ describe('POST /agent-done authentication (R.2)', () => {
 
   beforeAll(async () => {
     prevToken = process.env.DISPATCH_DONE_TOKEN;
+    prevSchedulerEnabled = process.env.DISPATCH_SCHEDULER_ENABLED;
     process.env.DISPATCH_DONE_TOKEN = TOKEN;
+    process.env.DISPATCH_SCHEDULER_ENABLED = 'false';
 
     const port = await findFreePort();
     baseUrl = `http://127.0.0.1:${port}`;
@@ -127,6 +130,8 @@ describe('POST /agent-done authentication (R.2)', () => {
     if (manager) await stopManager(manager);
     if (prevToken === undefined) delete process.env.DISPATCH_DONE_TOKEN;
     else process.env.DISPATCH_DONE_TOKEN = prevToken;
+    if (prevSchedulerEnabled === undefined) delete process.env.DISPATCH_SCHEDULER_ENABLED;
+    else process.env.DISPATCH_SCHEDULER_ENABLED = prevSchedulerEnabled;
     try { fs.rmSync(workDir, { recursive: true, force: true }); } catch { /* ignore */ }
   });
 
