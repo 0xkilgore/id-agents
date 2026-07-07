@@ -98,6 +98,7 @@ export function taskRowToEntry(
   row: TaskRow,
   agentNames: Map<string, string> = new Map(),
   today: string = todayIso(),
+  counts: { taskNoteCount?: number; reconciliationCount?: number } = {},
 ): TaskEntry {
   const resolve = (id: string) => agentNames.get(id) ?? id;
   const owner: ActorRef | null = row.owner ? agentActor(resolve(row.owner)) : null;
@@ -123,6 +124,8 @@ export function taskRowToEntry(
     band,
     project: null,
     track: row.track ?? "(unassigned)",
+    task_note_count: counts.taskNoteCount ?? 0,
+    reconciliation_count: counts.reconciliationCount ?? counts.taskNoteCount ?? 0,
     owner,
     created_at: epochToIso(row.created_at),
     created_by: createdBy,
@@ -143,12 +146,21 @@ export function taskRowToEntry(
 export function buildTasksEntriesEnvelope(
   rows: TaskRow[],
   agentNames: Map<string, string>,
-  page: { limit: number; offset: number; today?: string },
+  page: {
+    limit: number;
+    offset: number;
+    today?: string;
+    taskNoteCounts?: Map<string, number>;
+    reconciliationCounts?: Map<string, number>;
+  },
 ): ReadModelEnvelope<TaskEntry> & { summary: TaskBandSummary; bands: Array<TaskBand<TaskEntry>>; today: string } {
   const today = page.today ?? todayIso();
   const items = rows
     .slice(page.offset, page.offset + page.limit)
-    .map((row) => taskRowToEntry(row, agentNames, today));
+    .map((row) => taskRowToEntry(row, agentNames, today, {
+      taskNoteCount: page.taskNoteCounts?.get(row.uuid) ?? page.taskNoteCounts?.get(row.name) ?? 0,
+      reconciliationCount: page.reconciliationCounts?.get(row.uuid) ?? page.reconciliationCounts?.get(row.name) ?? 0,
+    }));
   return {
     schema_version: "read-model.v1",
     generated_at: new Date().toISOString(),

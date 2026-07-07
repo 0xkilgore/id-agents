@@ -34,6 +34,10 @@ export interface TaskEntry {
   project: string | null;
   /** Canonical roadmap track (canonical-track-registry); '(unassigned)' when none. */
   track: string;
+  /** Durable note events appended to this task. */
+  task_note_count: number;
+  /** Actionable reconciliation items attached to this task. */
+  reconciliation_count: number;
   /** The agent the task is assigned to, if any. */
   owner: ActorRef | null;
   created_at: string;

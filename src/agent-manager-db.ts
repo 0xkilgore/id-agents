@@ -105,6 +105,14 @@ import {
   emitTaskCompleted,
   recordCheckinCreated,
 } from './wakeup-service/event-producer.js';
+import {
+  consumeTaskNoteEvent,
+  createTaskNoteEvent,
+  listTaskNoteEvents,
+  migrateTaskNoteTables,
+  updateTaskNoteRouting,
+  type TaskNoteEventRow,
+} from './task-notes/storage.js';
 import { RetentionService } from './wakeup-service/retention.js';
 import { CheckinService } from './checkins/checkin-service.js';
 import {
@@ -252,6 +260,13 @@ import {
   runtimeIssueHint,
   validateRuntimePreflight,
 } from './runtime/registry.js';
+import {
+  buildTaskTriageReview,
+  classifyTaskNote,
+  taskNoteEventToSignal,
+  taskNoteDispatchMessage,
+  type TaskTriageItem,
+} from './task-triage/reconciliation.js';
 
 // ES module equivalent of __dirname
 const __filename = fileURLToPath(import.meta.url);
@@ -612,6 +627,118 @@ interface ProcessInspection {
   ppid: number | null;
   argv0: string;
   commandLine: string;
+}
+
+function inferTaskNoteTargetAgent(
+  noteBody: string,
+  sourceProject: string | null,
+  sourcePath: string | null,
+): string | null {
+  const haystack = `${noteBody}\n${sourceProject ?? ''}\n${sourcePath ?? ''}`.toLowerCase();
+  if (/\bpersonal\s+agent\b/.test(haystack) || /(^|[\/\s])personal([\/\s]|$)/.test(haystack)) {
+    return 'personal';
+  }
+  return null;
+}
+
+function incrementCount(map: Map<string, number>, key: string | null | undefined): void {
+  if (!key) return;
+  map.set(key, (map.get(key) ?? 0) + 1);
+}
+
+function countTaskNotesByTask(notes: TaskNoteEventRow[]): Map<string, number> {
+  const counts = new Map<string, number>();
+  for (const note of notes) {
+    incrementCount(counts, note.task_uuid);
+    incrementCount(counts, note.task_name);
+    incrementCount(counts, note.task_ref);
+  }
+  return counts;
+}
+
+function countTriageItemsByTask(items: TaskTriageItem[]): Map<string, number> {
+  const counts = new Map<string, number>();
+  for (const item of items) {
+    incrementCount(counts, item.task_uuid);
+    incrementCount(counts, item.task_ref);
+    incrementCount(counts, item.provenance.task_name);
+  }
+  return counts;
+}
+
+interface TaskviewTodoSummary {
+  path: string;
+  available: boolean;
+  total: number;
+  open: number;
+  done: number;
+  error: string | null;
+}
+
+interface TaskTriageParity {
+  generated_at: string;
+  manager_tasks: {
+    total: number;
+    open: number;
+    todo: number;
+    doing: number;
+    done: number;
+    stale_open: number;
+  };
+  taskview: TaskviewTodoSummary;
+  dispatch_reconciliation: {
+    stuck_queued: number;
+  };
+  deltas: {
+    manager_open_minus_taskview_open: number | null;
+    manager_done_minus_taskview_done: number | null;
+  };
+  divergence_explanations: string[];
+  stale_tasks: Array<{
+    name: string;
+    title: string;
+    status: string;
+    updated_at: number;
+    age_days: number;
+    escalation: string;
+  }>;
+}
+
+function parseTaskviewTodoMarkdown(content: string): Omit<TaskviewTodoSummary, 'path' | 'available' | 'error'> {
+  let total = 0;
+  let open = 0;
+  let done = 0;
+  for (const line of content.split(/\r?\n/)) {
+    const match = line.match(/^\s*[-*]\s+\[([ xX])\]\s+/);
+    if (!match) continue;
+    total++;
+    if (match[1].toLowerCase() === 'x') done++;
+    else open++;
+  }
+  return { total, open, done };
+}
+
+function countTaskRowsByStatus(tasks: TaskRow[]): TaskTriageParity['manager_tasks'] {
+  const nowSeconds = Math.floor(Date.now() / 1000);
+  const staleCutoff = nowSeconds - 7 * 24 * 60 * 60;
+  let todo = 0;
+  let doing = 0;
+  let done = 0;
+  let staleOpen = 0;
+  for (const task of tasks) {
+    if (task.status === 'todo') todo++;
+    if (task.status === 'doing') doing++;
+    if (task.status === 'done') done++;
+    if (task.status !== 'done' && task.updated_at < staleCutoff) staleOpen++;
+  }
+  return {
+    total: tasks.length,
+    open: todo + doing,
+    todo,
+    doing,
+    done,
+    stale_open: staleOpen,
+  };
 }
 
 export class AgentManagerDb {
@@ -7414,15 +7541,330 @@ export class AgentManagerDb {
           owner: ownerIdFilter,
           teamId: teamIdFilter,
         });
+        const taskNotes = await listTaskNoteEvents(this.db.adapter, { teamId: teamIdFilter, limit: 200 });
+        const noteCounts = countTaskNotesByTask(taskNotes);
+        const triageReview = buildTaskTriageReview({
+          tasks,
+          agents: await this.dbListAgents(teamIdFilter, true),
+          taskNotes,
+        });
+        const reconciliationCounts = countTriageItemsByTask(triageReview.items);
 
         const results = [];
         for (const t of tasks) {
-          results.push(await this.buildTaskResult(t, teamId, today));
+          results.push(await this.buildTaskResult(t, teamId, today, {
+            taskNoteCount: noteCounts.get(t.uuid) ?? noteCounts.get(t.name) ?? 0,
+            reconciliationCount: reconciliationCounts.get(t.uuid) ?? reconciliationCounts.get(t.name) ?? 0,
+          }));
         }
-        res.json({ ok: true, tasks: results, today, summary: summarizeTaskRows(tasks, today) });
+        res.json({
+          ok: true,
+          tasks: results,
+          today,
+          summary: summarizeTaskRows(tasks, today),
+          reconciliation: {
+            task_note_count: taskNotes.length,
+            item_count: triageReview.items.length,
+            stale_count: triageReview.summary.stale_defer,
+            completed_count: triageReview.summary.archive_done,
+            duplicate_count: triageReview.summary.duplicate_superseded,
+          },
+        });
       } catch (err: any) {
         console.error('[Manager] Error in GET /tasks:', err);
         res.status(500).json({ error: err?.message || 'Internal server error' });
+      }
+    });
+
+    const buildTaskTriageForRequest = async (req: express.Request) => {
+      const { id: teamId, name: teamName } = await this.getTeam(req);
+      const tasks = await this.db.tasks.list({ teamId });
+      const agents = await this.dbListAgents(teamId, true);
+      const taskNotes = await listTaskNoteEvents(this.db.adapter, { teamId, limit: 200 });
+      const review = buildTaskTriageReview({ tasks, agents, taskNotes });
+      const parity = await this.buildTaskTriageParity(teamId, tasks);
+      return { teamId, teamName, review, parity };
+    };
+
+    const writeTaskTriageArtifact = (
+      review: ReturnType<typeof buildTaskTriageReview>,
+      parity: TaskTriageParity,
+      run: {
+        mode: string;
+        idempotency_key: string;
+        routed: Array<{
+          item_id: string;
+          target_agent: string;
+          dispatch_phid: string | null;
+          query_id: string | null;
+          ok: boolean;
+          error?: string;
+          dedup_key?: string;
+        }>;
+      },
+    ) => {
+      const date = review.generated_at.slice(0, 10);
+      const outputDir = path.join(this.baseWorkDir, 'output');
+      mkdirSync(outputDir, { recursive: true });
+      const artifactPath = path.join(outputDir, `${date}-task-triage-review.md`);
+      const routedById = new Map(run.routed.map((item) => [item.item_id, item]));
+      const deterministic = review.items.filter((item) => item.classification === 'route_to_project_agent' && item.deterministic_safe);
+      const approvalReview = review.items.filter((item) => item.console_lane === 'needs_chris');
+      const staleUnresolved = review.items.filter((item) => item.classification === 'stale_defer' || item.console_lane === 'deferred');
+      const itemLines = (items: typeof review.items) => items.flatMap((item) => {
+        const routed = routedById.get(item.item_id);
+        return [
+          `### ${item.item_id}`,
+          '',
+          `- task: ${item.task_ref}`,
+          `- classification: ${item.classification}`,
+          `- confidence: ${item.confidence}`,
+          `- deterministic_safe: ${item.deterministic_safe}`,
+          `- status: ${routed ? (routed.ok ? 'routed' : 'route_failed') : item.console_lane}`,
+          `- next_action: ${item.proposed_action}`,
+          `- console_lane: ${item.console_lane}`,
+          `- target_agent: ${item.target_agent ?? '(none)'}`,
+          `- source: ${item.source_surface} line ${item.description_line}`,
+          `- provenance: \`${JSON.stringify(item.provenance)}\``,
+          ...(routed
+            ? [
+                `- dedup_key: ${routed.dedup_key ?? '(none)'}`,
+                `- dispatch_phid: ${routed.dispatch_phid ?? '(none)'}`,
+                `- query_id: ${routed.query_id ?? '(none)'}`,
+                ...(routed.error ? [`- route_error: ${routed.error}`] : []),
+              ]
+            : []),
+          '',
+          item.note_text,
+          '',
+        ];
+      });
+      const lines = [
+        '---',
+        'schema_version: task-triage-review.v1',
+        `generated_at: ${review.generated_at}`,
+        'inbox_digest: excluded',
+        '---',
+        '',
+        '# Task triage review',
+        '',
+        `- Manager tasks scanned: ${review.source.manager_tasks}`,
+        `- Task notes scanned: ${review.source.task_notes}`,
+        `- Auto-route candidates: ${review.summary.auto_route_candidates}`,
+        `- Console lane items: ${review.summary.console_lane_items}`,
+        `- Taskview tasks scanned: ${parity.taskview.available ? parity.taskview.total : 'unavailable'}`,
+        `- Dispatch reconciliation stuck queued: ${parity.dispatch_reconciliation.stuck_queued}`,
+        '- Inbox digest: excluded',
+        `- Run mode: ${run.mode}`,
+        `- Idempotency key: ${run.idempotency_key}`,
+        '',
+        '## Source parity',
+        '',
+        `- manager_total: ${parity.manager_tasks.total}`,
+        `- manager_open: ${parity.manager_tasks.open}`,
+        `- manager_done: ${parity.manager_tasks.done}`,
+        `- manager_stale_open: ${parity.manager_tasks.stale_open}`,
+        `- taskview_path: ${parity.taskview.path}`,
+        `- taskview_available: ${parity.taskview.available}`,
+        `- taskview_total: ${parity.taskview.total}`,
+        `- taskview_open: ${parity.taskview.open}`,
+        `- taskview_done: ${parity.taskview.done}`,
+        `- manager_open_minus_taskview_open: ${parity.deltas.manager_open_minus_taskview_open ?? 'n/a'}`,
+        `- manager_done_minus_taskview_done: ${parity.deltas.manager_done_minus_taskview_done ?? 'n/a'}`,
+        `- dispatch_stuck_queued: ${parity.dispatch_reconciliation.stuck_queued}`,
+        '',
+        ...(parity.divergence_explanations.length
+          ? parity.divergence_explanations.map((line) => `- ${line}`)
+          : ['- No task source divergence detected.']),
+        '',
+        '## Stale task escalations',
+        '',
+        ...(parity.stale_tasks.length
+          ? parity.stale_tasks.flatMap((task) => [
+              `- ${task.name}: ${task.status}, age_days=${task.age_days}, escalation=${task.escalation}`,
+            ])
+          : ['No stale manager tasks crossed the escalation threshold.']),
+        '',
+        '## Deterministic routed notes',
+        '',
+        ...(deterministic.length ? itemLines(deterministic) : ['No deterministic routed notes.', '']),
+        '## Approval / review',
+        '',
+        ...(approvalReview.length ? itemLines(approvalReview) : ['No ambiguous approval/review notes.', '']),
+        '## Stale unresolved rows',
+        '',
+        ...(staleUnresolved.length ? itemLines(staleUnresolved) : ['No stale unresolved rows.', '']),
+        '## Idempotency / dedup',
+        '',
+        `- artifact_path: ${artifactPath}`,
+        `- artifact_policy: one file per local date; reruns overwrite ${date}-task-triage-review.md`,
+        '- dispatch_policy: deterministic routes use stable dispatch scheduler dedup keys',
+        ...run.routed.map((item) => `- ${item.item_id}: ${item.dedup_key ?? '(none)'} -> ${item.dispatch_phid ?? item.error ?? 'not dispatched'}`),
+        '',
+        '## All items',
+        '',
+        ...itemLines(review.items),
+      ];
+      writeFileSync(artifactPath, `${lines.join('\n').trimEnd()}\n`, 'utf8');
+      return artifactPath;
+    };
+
+    // Deterministic task triage console lane. This deliberately reads manager
+    // task notes from the task substrate and never feeds inbox digest counts.
+    this.managementApp.get('/tasks/triage/review', async (req, res) => {
+      try {
+        const { teamName, review, parity } = await buildTaskTriageForRequest(req);
+        res.json({
+          ok: true,
+          team: teamName,
+          lane: 'task_triage',
+          inbox_digest: 'excluded',
+          review,
+          parity,
+          items: review.items.filter((item) => item.console_lane === 'needs_chris'),
+        });
+      } catch (err: any) {
+        console.error('[Manager] Error in GET /tasks/triage/review:', err);
+        res.status(500).json({ error: err?.message || 'task triage review failed' });
+      }
+    });
+
+    // On-demand/scheduled run endpoint. `auto_route` only dispatches high-
+    // confidence route_to_project_agent items and uses scheduler dedup keys.
+    this.managementApp.post('/tasks/triage/run', async (req, res) => {
+      try {
+        const { teamId, teamName, review, parity } = await buildTaskTriageForRequest(req);
+        const body = req.body ?? {};
+        const autoRoute = body.auto_route === true || body.auto_route === 'true';
+        const runMode = typeof body.mode === 'string' && body.mode.trim() ? body.mode.trim() : 'on_demand';
+        const idempotencyKey = typeof body.idempotency_key === 'string' && body.idempotency_key.trim()
+          ? body.idempotency_key.trim()
+          : `task-triage:${teamName}:${review.generated_at.slice(0, 10)}:${runMode}`;
+        const routed: Array<{
+          item_id: string;
+          target_agent: string;
+          dispatch_phid: string | null;
+          query_id: string | null;
+          ok: boolean;
+          error?: string;
+          dedup_key?: string;
+        }> = [];
+
+        if (autoRoute) {
+          const candidates = review.items.filter(
+            (item): item is TaskTriageItem & { target_agent: string } =>
+              item.classification === 'route_to_project_agent' &&
+              item.deterministic_safe &&
+              typeof item.target_agent === 'string' &&
+              item.target_agent.length > 0,
+          );
+
+          for (const item of candidates) {
+            const dedupKey = `task-triage:${item.item_id}:${item.target_agent}`;
+            if (!this.dispatchScheduler) {
+              routed.push({
+                item_id: item.item_id,
+                target_agent: item.target_agent,
+                dispatch_phid: null,
+                query_id: null,
+                ok: false,
+                error: 'dispatch_scheduler_not_initialised',
+                dedup_key: dedupKey,
+              });
+              if (item.source_surface === 'task_note_event' && item.provenance.task_note_id) {
+                await updateTaskNoteRouting(this.db.adapter, {
+                  teamId,
+                  noteId: item.provenance.task_note_id,
+                  routingStatus: 'route_failed',
+                  targetAgent: item.target_agent,
+                  routeError: 'dispatch_scheduler_not_initialised',
+                });
+              }
+              continue;
+            }
+
+            try {
+              const enq = await this.dispatchScheduler.enqueue({
+                to_agent: item.target_agent,
+                from_actor: 'task-triage-loop',
+                channel: 'task_triage',
+                subject: `Task note: ${item.task_title}`.slice(0, 120),
+                message: taskNoteDispatchMessage(item),
+                priority: 7,
+                dedup_key: dedupKey,
+                promote: false,
+                promotion_skip_reason: 'task triage routing note; no repo promotion',
+                actor_ref: { kind: 'service', id: 'task-triage-loop', label: 'Task triage loop' },
+                causation: {
+                  kind: 'task_note',
+                  id: item.item_id,
+                  source: item.source_surface,
+                } as any,
+              });
+              routed.push({
+                item_id: item.item_id,
+                target_agent: item.target_agent,
+                dispatch_phid: enq.dispatch_phid,
+                query_id: enq.query_id,
+                ok: true,
+                dedup_key: dedupKey,
+              });
+              if (item.source_surface === 'task_note_event' && item.provenance.task_note_id) {
+                await updateTaskNoteRouting(this.db.adapter, {
+                  teamId,
+                  noteId: item.provenance.task_note_id,
+                  routingStatus: 'routed',
+                  targetAgent: item.target_agent,
+                  dispatchPhid: enq.dispatch_phid,
+                  queryId: enq.query_id,
+                });
+              }
+            } catch (err: any) {
+              routed.push({
+                item_id: item.item_id,
+                target_agent: item.target_agent,
+                dispatch_phid: null,
+                query_id: null,
+                ok: false,
+                error: err?.message || String(err),
+                dedup_key: dedupKey,
+              });
+              if (item.source_surface === 'task_note_event' && item.provenance.task_note_id) {
+                await updateTaskNoteRouting(this.db.adapter, {
+                  teamId,
+                  noteId: item.provenance.task_note_id,
+                  routingStatus: 'route_failed',
+                  targetAgent: item.target_agent,
+                  routeError: err?.message || String(err),
+                });
+              }
+            }
+          }
+        }
+
+        const artifactPath = writeTaskTriageArtifact(review, parity, {
+          mode: runMode,
+          idempotency_key: idempotencyKey,
+          routed,
+        });
+        res.json({
+          ok: true,
+          team: teamName,
+          lane: 'task_triage',
+          inbox_digest: 'excluded',
+          artifact_path: artifactPath,
+          run: {
+            mode: runMode,
+            idempotency_key: idempotencyKey,
+            idempotency: 'date_artifact_overwrite_plus_dispatch_dedup_key',
+          },
+          review,
+          parity,
+          routed,
+        });
+      } catch (err: any) {
+        console.error('[Manager] Error in POST /tasks/triage/run:', err);
+        res.status(500).json({ error: err?.message || 'task triage run failed' });
       }
     });
 
@@ -7452,7 +7894,15 @@ export class AgentManagerDb {
         });
         const agents = await this.dbListAgents(teamId, true);
         const agentNames = new Map(agents.map((a) => [a.id, a.name]));
-        res.json(buildTasksEntriesEnvelope(tasks, agentNames, { limit, offset, today }));
+        const taskNotes = await listTaskNoteEvents(this.db.adapter, { teamId, limit: 200 });
+        const triageReview = buildTaskTriageReview({ tasks, agents, taskNotes });
+        res.json(buildTasksEntriesEnvelope(tasks, agentNames, {
+          limit,
+          offset,
+          today,
+          taskNoteCounts: countTaskNotesByTask(taskNotes),
+          reconciliationCounts: countTriageItemsByTask(triageReview.items),
+        }));
       } catch (err: any) {
         console.error('[Manager] Error in GET /tasks/entries:', err);
         res.status(500).json({ error: err?.message || 'tasks entries failed' });
@@ -7636,6 +8086,220 @@ export class AgentManagerDb {
         res.json({ ok: true, removed: task.name });
       } catch (err: any) {
         console.error('[Manager] Error in DELETE /tasks/:ref:', err);
+        res.status(500).json({ error: err?.message || 'Internal server error' });
+      }
+    });
+
+    // ==================== TASK NOTE INTAKE ====================
+    // Durable append-note intake for the /ops Tasks page. This is intentionally
+    // separate from mutable task descriptions and taskview markdown write-through:
+    // notes are actionable events with routing status, and consumers claim them
+    // exactly once through /task-notes/:note_id/consume.
+    this.managementApp.post('/task-notes', async (req, res) => {
+      try {
+        const { id: teamId } = await this.getTeam(req);
+        const body = req.body || {};
+        const noteBody = typeof body.note_body === 'string'
+          ? body.note_body.trim()
+          : typeof body.note === 'string'
+            ? body.note.trim()
+            : '';
+        if (!noteBody) return res.status(400).json({ error: 'note_body is required' });
+
+        const taskRef = typeof body.task_ref === 'string' && body.task_ref.trim()
+          ? body.task_ref.trim()
+          : typeof body.task_id === 'string' && body.task_id.trim()
+            ? body.task_id.trim()
+            : typeof body.task_name === 'string' && body.task_name.trim()
+              ? body.task_name.trim()
+              : '';
+        if (!taskRef) return res.status(400).json({ error: 'task_ref or task_id is required' });
+
+        const actorRef = typeof body.actor_ref === 'string' && body.actor_ref.trim()
+          ? body.actor_ref.trim()
+          : typeof body.actor === 'string' && body.actor.trim()
+            ? body.actor.trim()
+            : 'user:chris';
+        const sourcePath = typeof body.source_path === 'string' && body.source_path.trim()
+          ? body.source_path.trim()
+          : null;
+        const sourceProject = typeof body.source_project === 'string' && body.source_project.trim()
+          ? body.source_project.trim()
+          : null;
+        const lineNumber = Number.isInteger(body.line_number) && body.line_number > 0
+          ? body.line_number
+          : null;
+
+        let taskUuid: string | null = null;
+        let taskName: string | null = typeof body.task_name === 'string' ? body.task_name : null;
+        const resolved = await this.resolveTaskRef(taskRef, teamId);
+        if (resolved.task) {
+          taskUuid = resolved.task.uuid;
+          taskName = resolved.task.name;
+        }
+
+        const created = await createTaskNoteEvent(this.db.adapter, {
+          team_id: teamId,
+          task_ref: taskRef,
+          task_uuid: taskUuid,
+          task_name: taskName,
+          source_path: sourcePath,
+          source_project: sourceProject,
+          line_number: lineNumber,
+          actor_ref: actorRef,
+          note_body: noteBody,
+          target_agent: null,
+          routing_status: 'queued',
+          metadata: {
+            source_surface: typeof body.source_surface === 'string' ? body.source_surface : 'ops/tasks',
+            route_policy: 'deterministic-task-note-v1',
+          },
+        });
+
+        let finalEvent = created.event;
+        let routeResult: Record<string, unknown> = { status: finalEvent.routing_status };
+        if (!created.idempotent) {
+          const agents = await this.dbListAgents(teamId, true);
+          const taskForSignal = resolved.task ?? null;
+          const signal = taskNoteEventToSignal(created.event, taskForSignal);
+          const triageItem = classifyTaskNote(signal, agents);
+          const targetAgent = triageItem.target_agent ?? inferTaskNoteTargetAgent(noteBody, sourceProject, sourcePath);
+
+          if (triageItem.classification === 'route_to_project_agent' && targetAgent) {
+            if (!this.dispatchScheduler) {
+              finalEvent = await updateTaskNoteRouting(this.db.adapter, {
+                teamId,
+                noteId: created.event.note_id,
+                routingStatus: 'route_failed',
+                targetAgent,
+                routeError: 'dispatch_scheduler_not_initialised',
+              }) ?? created.event;
+              routeResult = { status: 'route_failed', target_agent: targetAgent, error: 'dispatch_scheduler_not_initialised' };
+            } else {
+              try {
+                const enq = await this.dispatchScheduler.enqueue({
+                  to_agent: targetAgent,
+                  from_actor: 'task-note-intake',
+                  channel: 'task_note',
+                  subject: `Task note: ${triageItem.task_title}`.slice(0, 120),
+                  message: taskNoteDispatchMessage(triageItem),
+                  priority: 7,
+                  dedup_key: `task-note:${created.event.note_id}:${targetAgent}`,
+                  promote: false,
+                  promotion_skip_reason: 'task note routing; no repo promotion',
+                  actor_ref: { kind: 'user', id: actorRef, label: actorRef },
+                  causation: {
+                    kind: 'task_note',
+                    id: created.event.note_id,
+                    source: signal.source_surface,
+                  } as any,
+                });
+                finalEvent = await updateTaskNoteRouting(this.db.adapter, {
+                  teamId,
+                  noteId: created.event.note_id,
+                  routingStatus: 'routed',
+                  targetAgent,
+                  dispatchPhid: enq.dispatch_phid,
+                  queryId: enq.query_id,
+                }) ?? created.event;
+                routeResult = {
+                  status: 'routed',
+                  target_agent: targetAgent,
+                  dispatch_phid: enq.dispatch_phid,
+                  query_id: enq.query_id,
+                };
+              } catch (err: any) {
+                finalEvent = await updateTaskNoteRouting(this.db.adapter, {
+                  teamId,
+                  noteId: created.event.note_id,
+                  routingStatus: 'route_failed',
+                  targetAgent,
+                  routeError: err?.message || String(err),
+                }) ?? created.event;
+                routeResult = { status: 'route_failed', target_agent: targetAgent, error: err?.message || String(err) };
+              }
+            }
+          } else {
+            routeResult = {
+              status: 'queued',
+              target_agent: null,
+              classification: triageItem.classification,
+              console_lane: triageItem.console_lane,
+            };
+          }
+        }
+
+        if (!created.idempotent) {
+          await this.db.events.insert({
+            team_id: teamId,
+            topic: 'task:note',
+            actor_agent_id: null,
+            subject_kind: 'task_note',
+            subject_id: finalEvent.note_id,
+            occurred_at: Date.parse(finalEvent.created_at),
+            data: {
+              note_id: finalEvent.note_id,
+              task_ref: finalEvent.task_ref,
+              task_uuid: finalEvent.task_uuid,
+              task_name: finalEvent.task_name,
+              source_path: finalEvent.source_path,
+              source_project: finalEvent.source_project,
+              line_number: finalEvent.line_number,
+              actor_ref: finalEvent.actor_ref,
+              note_body: finalEvent.note_body,
+              routing_status: finalEvent.routing_status,
+              target_agent: finalEvent.target_agent,
+              route_error: finalEvent.route_error,
+              dispatch_phid: finalEvent.dispatch_phid,
+              query_id: finalEvent.query_id,
+              idempotent: false,
+            },
+          });
+        }
+
+        res.status(created.idempotent ? 200 : 201).json({
+          ok: true,
+          task_note: finalEvent,
+          route: routeResult,
+          idempotent: created.idempotent,
+        });
+      } catch (err: any) {
+        console.error('[Manager] Error in POST /task-notes:', err);
+        res.status(500).json({ error: err?.message || 'Internal server error' });
+      }
+    });
+
+    this.managementApp.get('/task-notes', async (req, res) => {
+      try {
+        const { id: teamId } = await this.getTeam(req);
+        const status = typeof req.query.status === 'string' ? req.query.status : undefined;
+        const limit = typeof req.query.limit === 'string' ? parseInt(req.query.limit, 10) : undefined;
+        const events = await listTaskNoteEvents(this.db.adapter, { teamId, status, limit });
+        res.json({ ok: true, task_notes: events, count: events.length });
+      } catch (err: any) {
+        console.error('[Manager] Error in GET /task-notes:', err);
+        res.status(500).json({ error: err?.message || 'Internal server error' });
+      }
+    });
+
+    this.managementApp.post('/task-notes/:note_id/consume', async (req, res) => {
+      try {
+        const { id: teamId } = await this.getTeam(req);
+        const consumer = typeof req.body?.consumer === 'string' && req.body.consumer.trim()
+          ? req.body.consumer.trim()
+          : typeof req.body?.agent_id === 'string' && req.body.agent_id.trim()
+            ? req.body.agent_id.trim()
+            : null;
+        if (!consumer) return res.status(400).json({ error: 'consumer or agent_id is required' });
+        const result = await consumeTaskNoteEvent(this.db.adapter, {
+          teamId,
+          noteId: req.params.note_id,
+          consumer,
+        });
+        if (!result.event) return res.status(404).json({ error: `Task note "${req.params.note_id}" not found` });
+        res.json({ ok: true, claimed: result.claimed, task_note: result.event });
+      } catch (err: any) {
+        console.error('[Manager] Error in POST /task-notes/:note_id/consume:', err);
         res.status(500).json({ error: err?.message || 'Internal server error' });
       }
     });
@@ -8242,7 +8906,12 @@ export class AgentManagerDb {
     return { agent: matches[0] };
   }
 
-  private async buildTaskResult(task: TaskRow, teamId: string, today: string = todayIso()): Promise<Record<string, unknown>> {
+  private async buildTaskResult(
+    task: TaskRow,
+    teamId: string,
+    today: string = todayIso(),
+    counts: { taskNoteCount?: number; reconciliationCount?: number } = {},
+  ): Promise<Record<string, unknown>> {
     let ownerName: string | null = null;
     if (task.owner) {
       const ownerAgent = await this.db.agents.getById(task.owner);
@@ -8269,6 +8938,8 @@ export class AgentManagerDb {
       description: task.description,
       status: task.status,
       track: task.track ?? '(unassigned)',
+      task_note_count: counts.taskNoteCount ?? 0,
+      reconciliation_count: counts.reconciliationCount ?? counts.taskNoteCount ?? 0,
       priority: facts.priority,
       due_iso: facts.due_iso,
       done: facts.done,
@@ -8280,6 +8951,111 @@ export class AgentManagerDb {
       createdAt: task.created_at,
       updatedAt: task.updated_at,
       completedAt: task.completed_at,
+    };
+  }
+
+  private resolveTaskviewTodoPath(): string {
+    if (process.env.TASKVIEW_TODO_PATH?.trim()) return process.env.TASKVIEW_TODO_PATH.trim();
+    const workspaceCandidate = path.join(this.baseWorkDir, 'taskview', 'to-do.md');
+    if (existsSync(workspaceCandidate)) return workspaceCandidate;
+    return '/Users/kilgore/Dropbox/Code/cane/taskview/to-do.md';
+  }
+
+  private readTaskviewTodoSummary(): TaskviewTodoSummary {
+    const taskviewPath = this.resolveTaskviewTodoPath();
+    try {
+      if (!existsSync(taskviewPath)) {
+        return {
+          path: taskviewPath,
+          available: false,
+          total: 0,
+          open: 0,
+          done: 0,
+          error: 'taskview to-do.md not found',
+        };
+      }
+      const parsed = parseTaskviewTodoMarkdown(readFileSync(taskviewPath, 'utf8'));
+      return {
+        path: taskviewPath,
+        available: true,
+        ...parsed,
+        error: null,
+      };
+    } catch (err) {
+      return {
+        path: taskviewPath,
+        available: false,
+        total: 0,
+        open: 0,
+        done: 0,
+        error: err instanceof Error ? err.message : String(err),
+      };
+    }
+  }
+
+  private async buildTaskTriageParity(teamId: string, tasks: TaskRow[]): Promise<TaskTriageParity> {
+    const managerTasks = countTaskRowsByStatus(tasks);
+    const taskview = this.readTaskviewTodoSummary();
+    let stuckQueued = 0;
+    const explanations: string[] = [];
+
+    try {
+      const dispatchReconciliation = await readReconciliation(this.db.adapter, teamId);
+      stuckQueued = dispatchReconciliation.stuck_queued.length;
+      if (stuckQueued > 0) {
+        explanations.push(`${stuckQueued} dispatch row(s) are queued while linked agent queries show processing/completed evidence.`);
+      }
+    } catch (err) {
+      explanations.push(`Dispatch reconciliation unavailable: ${err instanceof Error ? err.message : String(err)}`);
+    }
+
+    const openDelta = taskview.available ? managerTasks.open - taskview.open : null;
+    const doneDelta = taskview.available ? managerTasks.done - taskview.done : null;
+    if (!taskview.available) {
+      explanations.push(`Taskview parity unavailable: ${taskview.error ?? 'unknown error'}.`);
+    } else {
+      if (openDelta !== 0) {
+        explanations.push(`Manager open task count differs from taskview by ${openDelta}; taskview may include legacy rows not yet ingested or manager may contain newer substrate-only tasks.`);
+      }
+      if (doneDelta !== 0) {
+        explanations.push(`Manager done task count differs from taskview by ${doneDelta}; completed task migration/backfill is not one-to-one.`);
+      }
+    }
+    if (managerTasks.stale_open > 0) {
+      explanations.push(`${managerTasks.stale_open} manager open task(s) are older than 7 days and should remain visible for operator escalation.`);
+    }
+    if (explanations.length === 0) {
+      explanations.push('Manager tasks, taskview markdown, and dispatch reconciliation are in parity for counted open/done rows.');
+    }
+
+    const nowSeconds = Math.floor(Date.now() / 1000);
+    const staleCutoff = nowSeconds - 7 * 24 * 60 * 60;
+    const staleTasks = tasks
+      .filter((task) => task.status !== 'done' && task.updated_at < staleCutoff)
+      .sort((a, b) => a.updated_at - b.updated_at)
+      .slice(0, 25)
+      .map((task) => ({
+        name: task.name,
+        title: task.title,
+        status: task.status,
+        updated_at: task.updated_at,
+        age_days: Math.floor((nowSeconds - task.updated_at) / 86_400),
+        escalation: task.status === 'doing' ? 'owner_follow_up' : 'operator_review',
+      }));
+
+    return {
+      generated_at: new Date().toISOString(),
+      manager_tasks: managerTasks,
+      taskview,
+      dispatch_reconciliation: {
+        stuck_queued: stuckQueued,
+      },
+      deltas: {
+        manager_open_minus_taskview_open: openDelta,
+        manager_done_minus_taskview_done: doneDelta,
+      },
+      divergence_explanations: explanations,
+      stale_tasks: staleTasks,
     };
   }
 
@@ -11679,6 +12455,17 @@ export class AgentManagerDb {
           console.log('[Manager] P2 inbox /inbox/* routes mounted');
         } catch (err) {
           console.warn('[Manager] P2 inbox routes failed to mount:', err instanceof Error ? err.message : String(err));
+        }
+
+        // Task note intake — durable events emitted by append-note surfaces.
+        // The REST endpoints are registered in the core manager route block;
+        // this migration makes upgraded local managers ready without a manual
+        // schema step.
+        try {
+          await migrateTaskNoteTables(this.db.adapter);
+          console.log('[Manager] Task note intake table ready');
+        } catch (err) {
+          console.warn('[Manager] Task note intake migration failed:', err instanceof Error ? err.message : String(err));
         }
 
         // Chief-of-Staff email intake v1 — forward-to-address ingestion over
