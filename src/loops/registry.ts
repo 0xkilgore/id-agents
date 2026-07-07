@@ -42,6 +42,37 @@ export interface LoopLastOutput {
   label: string | null;
 }
 
+export type ReportCadence =
+  | {
+      kind: "weekly";
+      /** 0 = Sunday, 1 = Monday, ... */
+      weekday: number;
+      hour_utc: number;
+      minute_utc: number;
+    }
+  | {
+      kind: "biweekly";
+      /** ISO instant for a known due occurrence; subsequent due dates repeat every 14 days. */
+      anchor_due_at: string;
+      hour_utc: number;
+      minute_utc: number;
+    }
+  | {
+      kind: "interval_hours";
+      every_hours: number;
+      anchor_due_at: string;
+    };
+
+export interface ReportDefinition {
+  report_key: string;
+  label: string;
+  cadence: ReportCadence;
+  enabled: boolean;
+  grace_minutes: number;
+  stale_after_minutes: number;
+  artifact_required: boolean;
+}
+
 export interface LoopSummary {
   loop_phid: string;
   slug: string;
@@ -57,6 +88,8 @@ export interface LoopSummary {
   next_run_at: string | null;
   health: LoopHealth;
   last_output: LoopLastOutput | null;
+  /** Additive scheduler/report facts consumed by dashboard/API due projections. */
+  report_definitions: ReportDefinition[];
   customization_summary: string | null;
 }
 
@@ -123,6 +156,7 @@ interface SeedLoopDef {
   allow_manual_run: boolean;
   schedule_label: string;
   stale_after_minutes: number | null;
+  report_definitions?: ReportDefinition[];
 }
 
 const KAPELLE_PROJECT: LoopProjectRef = {
@@ -268,6 +302,17 @@ const SEED_LOOP_DEFS: SeedLoopDef[] = [
     allow_manual_run: true,
     schedule_label: "Weekly Sun",
     stale_after_minutes: 8 * 24 * 60,
+    report_definitions: [
+      {
+        report_key: "kapelle:weekly-project-report",
+        label: "Kapelle Weekly Project Report",
+        cadence: { kind: "weekly", weekday: 0, hour_utc: 15, minute_utc: 0 },
+        enabled: true,
+        grace_minutes: 12 * 60,
+        stale_after_minutes: 8 * 24 * 60,
+        artifact_required: true,
+      },
+    ],
   },
   {
     slug: "biweekly-project-report",
@@ -282,6 +327,22 @@ const SEED_LOOP_DEFS: SeedLoopDef[] = [
     allow_manual_run: true,
     schedule_label: "Biweekly (per project)",
     stale_after_minutes: null,
+    report_definitions: [
+      {
+        report_key: "kapelle:biweekly-project-report",
+        label: "Kapelle Biweekly Project Report",
+        cadence: {
+          kind: "biweekly",
+          anchor_due_at: "2026-07-05T15:00:00.000Z",
+          hour_utc: 15,
+          minute_utc: 0,
+        },
+        enabled: true,
+        grace_minutes: 12 * 60,
+        stale_after_minutes: 16 * 24 * 60,
+        artifact_required: true,
+      },
+    ],
   },
   {
     slug: "maestra-product-log",
@@ -296,6 +357,31 @@ const SEED_LOOP_DEFS: SeedLoopDef[] = [
     allow_manual_run: true,
     schedule_label: "Weekly Sun + biweekly",
     stale_after_minutes: 8 * 24 * 60,
+    report_definitions: [
+      {
+        report_key: "kapelle:product-log-weekly",
+        label: "Kapelle Product Log Weekly",
+        cadence: { kind: "weekly", weekday: 0, hour_utc: 16, minute_utc: 0 },
+        enabled: true,
+        grace_minutes: 12 * 60,
+        stale_after_minutes: 8 * 24 * 60,
+        artifact_required: true,
+      },
+      {
+        report_key: "kapelle:product-log-biweekly",
+        label: "Kapelle Product Log Biweekly",
+        cadence: {
+          kind: "biweekly",
+          anchor_due_at: "2026-07-05T16:00:00.000Z",
+          hour_utc: 16,
+          minute_utc: 0,
+        },
+        enabled: true,
+        grace_minutes: 12 * 60,
+        stale_after_minutes: 16 * 24 * 60,
+        artifact_required: true,
+      },
+    ],
   },
   {
     slug: "sentinel-verification-2h",
@@ -310,6 +396,44 @@ const SEED_LOOP_DEFS: SeedLoopDef[] = [
     allow_manual_run: true,
     schedule_label: "Every 2h + weekly Sun + biweekly",
     stale_after_minutes: 3 * 60,
+    report_definitions: [
+      {
+        report_key: "kapelle:sentinel-verification-2h",
+        label: "Sentinel Verification 2h",
+        cadence: {
+          kind: "interval_hours",
+          every_hours: 2,
+          anchor_due_at: "2026-07-05T00:00:00.000Z",
+        },
+        enabled: true,
+        grace_minutes: 30,
+        stale_after_minutes: 3 * 60,
+        artifact_required: true,
+      },
+      {
+        report_key: "kapelle:sentinel-weekly",
+        label: "Sentinel Weekly Verification",
+        cadence: { kind: "weekly", weekday: 0, hour_utc: 17, minute_utc: 0 },
+        enabled: true,
+        grace_minutes: 12 * 60,
+        stale_after_minutes: 8 * 24 * 60,
+        artifact_required: true,
+      },
+      {
+        report_key: "kapelle:sentinel-biweekly",
+        label: "Sentinel Biweekly Verification",
+        cadence: {
+          kind: "biweekly",
+          anchor_due_at: "2026-07-05T17:00:00.000Z",
+          hour_utc: 17,
+          minute_utc: 0,
+        },
+        enabled: true,
+        grace_minutes: 12 * 60,
+        stale_after_minutes: 16 * 24 * 60,
+        artifact_required: true,
+      },
+    ],
   },
   {
     slug: "id-agents-parity-weekly",
@@ -339,6 +463,17 @@ const SEED_LOOP_DEFS: SeedLoopDef[] = [
     allow_manual_run: true,
     schedule_label: "Weekly Mon 09:00 local",
     stale_after_minutes: 8 * 24 * 60,
+    report_definitions: [
+      {
+        report_key: "kapelle:ux-research-weekly",
+        label: "UX Research Weekly",
+        cadence: { kind: "weekly", weekday: 1, hour_utc: 14, minute_utc: 0 },
+        enabled: true,
+        grace_minutes: 12 * 60,
+        stale_after_minutes: 8 * 24 * 60,
+        artifact_required: true,
+      },
+    ],
   },
   {
     slug: "library-research",
@@ -353,6 +488,80 @@ const SEED_LOOP_DEFS: SeedLoopDef[] = [
     allow_manual_run: true,
     schedule_label: "Biweekly Wed 09:00 local",
     stale_after_minutes: 16 * 24 * 60,
+    report_definitions: [
+      {
+        report_key: "kapelle:library-research-biweekly",
+        label: "Library Research Biweekly",
+        cadence: {
+          kind: "biweekly",
+          anchor_due_at: "2026-07-08T14:00:00.000Z",
+          hour_utc: 14,
+          minute_utc: 0,
+        },
+        enabled: true,
+        grace_minutes: 12 * 60,
+        stale_after_minutes: 16 * 24 * 60,
+        artifact_required: true,
+      },
+    ],
+  },
+  {
+    slug: "surface-feeder",
+    name: "Surface Feeder Loop",
+    description:
+      "Feeds dashboard/API surfaces from recent artifacts, decisions and dispatch outcomes; reports freshness gaps and proof refs for surfaced rows.",
+    kind: "report",
+    owner_agent: "maestra",
+    project: KAPELLE_PROJECT,
+    enabled: true,
+    allow_scheduled_run: true,
+    allow_manual_run: true,
+    schedule_label: "Every 6h",
+    stale_after_minutes: 8 * 60,
+    report_definitions: [
+      {
+        report_key: "kapelle:surface-feeder-6h",
+        label: "Surface Feeder 6h",
+        cadence: {
+          kind: "interval_hours",
+          every_hours: 6,
+          anchor_due_at: "2026-07-05T00:00:00.000Z",
+        },
+        enabled: true,
+        grace_minutes: 90,
+        stale_after_minutes: 8 * 60,
+        artifact_required: true,
+      },
+    ],
+  },
+  {
+    slug: "task-reconciliation",
+    name: "Task Reconciliation Loop",
+    description:
+      "Reconciles task lifecycle facts against scheduler dispatches and artifacts, flagging stale doing rows, false done states and missing closeout proof.",
+    kind: "verification",
+    owner_agent: "sentinel",
+    project: KAPELLE_PROJECT,
+    enabled: true,
+    allow_scheduled_run: true,
+    allow_manual_run: true,
+    schedule_label: "Every 6h",
+    stale_after_minutes: 8 * 60,
+    report_definitions: [
+      {
+        report_key: "kapelle:task-reconciliation-6h",
+        label: "Task Reconciliation 6h",
+        cadence: {
+          kind: "interval_hours",
+          every_hours: 6,
+          anchor_due_at: "2026-07-05T00:00:00.000Z",
+        },
+        enabled: true,
+        grace_minutes: 90,
+        stale_after_minutes: 8 * 60,
+        artifact_required: true,
+      },
+    ],
   },
 ];
 
@@ -388,6 +597,7 @@ function toSummary(def: SeedLoopDef): LoopSummary {
     next_run_at: null, // no runtime computing next fire yet
     health: placeholderHealth(def),
     last_output: null, // no runs yet
+    report_definitions: def.report_definitions ?? [],
     customization_summary: null,
   };
 }
