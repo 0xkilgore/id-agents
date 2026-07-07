@@ -63,6 +63,29 @@ export interface AdmissionPlan {
   skipped: DecisionRecord[];
 }
 
+export type NonAdmissionCode =
+  | "not_ready"
+  | "no_in_flight_slots"
+  | "tick_admission_cap"
+  | "risk_requires_approval"
+  | "blocked_dependency"
+  | "pool_capacity_full"
+  | "no_free_pool_builder"
+  | "single_writer_lane_busy"
+  | "daily_token_ceiling"
+  | "missing_dispatch_target"
+  | "target_unhealthy";
+
+function nonAdmission(
+  item_id: string,
+  action: "skipped" | "held",
+  code: NonAdmissionCode,
+  reason: string,
+  extra: Record<string, unknown> = {},
+): DecisionRecord {
+  return { item_id, action, reason, metadata: { code, ...extra } };
+}
+
 /** Tick-level halt checks, in precedence order. Null = proceed. */
 function tickHalt(ctx: AdmissionContext, config: ContinuousOrchestrationConfig): string | null {
   if (ctx.kill_switch_active) return "kill switch present";
@@ -109,29 +132,40 @@ export function planAdmission(
 
   for (const item of candidates) {
     if (item.readiness_state !== "ready") {
-      skipped.push({ item_id: item.item_id, action: "skipped", reason: `not ready (${item.readiness_state})` });
+      skipped.push(nonAdmission(item.item_id, "skipped", "not_ready", `not ready (${item.readiness_state})`, {
+        readiness_state: item.readiness_state,
+      }));
       continue;
     }
     if (admit.length >= limit) {
       const why = slotsFree === 0 ? "no in-flight slots free" : "tick admission cap reached";
-      skipped.push({ item_id: item.item_id, action: "held", reason: why });
+      skipped.push(nonAdmission(
+        item.item_id,
+        "held",
+        slotsFree === 0 ? "no_in_flight_slots" : "tick_admission_cap",
+        why,
+      ));
       continue;
     }
     if (!AUTO_RUN_RISK.has(item.risk_class)) {
-      skipped.push({
-        item_id: item.item_id,
-        action: "held",
-        reason: `risk_class=${item.risk_class} requires approval batch`,
-      });
+      skipped.push(nonAdmission(
+        item.item_id,
+        "held",
+        "risk_requires_approval",
+        `risk_class=${item.risk_class} requires approval batch`,
+        { risk_class: item.risk_class },
+      ));
       continue;
     }
     const unresolved = item.dependencies.filter((d) => !ctx.done_item_ids.has(d));
     if (unresolved.length > 0) {
-      skipped.push({
-        item_id: item.item_id,
-        action: "skipped",
-        reason: `blocked: dependency not done (${unresolved.join(", ")})`,
-      });
+      skipped.push(nonAdmission(
+        item.item_id,
+        "skipped",
+        "blocked_dependency",
+        `blocked: dependency not done (${unresolved.join(", ")})`,
+        { dependencies: unresolved },
+      ));
       continue;
     }
     // Build-pool gate (Stage C) OR legacy repo-scope single-writer lock.
@@ -140,51 +174,53 @@ export function planAdmission(
     if (poolId) {
       const free = poolSlots.get(poolId) ?? 0;
       if (free <= 0) {
-        skipped.push({
-          item_id: item.item_id,
-          action: "held",
-          reason: `pool capacity full: ${poolId}`,
-        });
+        skipped.push(nonAdmission(item.item_id, "held", "pool_capacity_full", `pool capacity full: ${poolId}`, {
+          pool_id: poolId,
+        }));
         continue;
       }
       const builders = poolBuilders.get(poolId) ?? [];
       assignedBuilder = builders.shift() ?? null;
       if (!assignedBuilder) {
-        skipped.push({
-          item_id: item.item_id,
-          action: "held",
-          reason: `no free builder in pool: ${poolId}`,
-        });
+        skipped.push(nonAdmission(item.item_id, "held", "no_free_pool_builder", `no free builder in pool: ${poolId}`, {
+          pool_id: poolId,
+        }));
         continue;
       }
     } else {
       const scopeClash = item.write_scope.find((s) => lockedScopes.has(s));
       if (scopeClash) {
-        skipped.push({
-          item_id: item.item_id,
-          action: "skipped",
-          reason: `single-writer lane busy: ${scopeClash}`,
-        });
+        skipped.push(nonAdmission(
+          item.item_id,
+          "skipped",
+          "single_writer_lane_busy",
+          `single-writer lane busy: ${scopeClash}`,
+          { write_scope: scopeClash },
+        ));
         continue;
       }
     }
     const estimate = item.token_estimate ?? 0;
     if (tokensUsed + estimate > config.daily_token_ceiling) {
-      skipped.push({
-        item_id: item.item_id,
-        action: "skipped",
-        reason: `would exceed daily token ceiling (${tokensUsed} + ${estimate} > ${config.daily_token_ceiling})`,
-      });
+      skipped.push(nonAdmission(
+        item.item_id,
+        "skipped",
+        "daily_token_ceiling",
+        `would exceed daily token ceiling (${tokensUsed} + ${estimate} > ${config.daily_token_ceiling})`,
+        { tokens_used: tokensUsed, token_estimate: estimate, daily_token_ceiling: config.daily_token_ceiling },
+      ));
       continue;
     }
     // Pool items late-bind to_agent at fire (assignedBuilder); non-pool items
     // must already carry a to_agent. Both need a dispatch body.
     if (!item.dispatch_body || (!poolId && !item.to_agent)) {
-      skipped.push({
-        item_id: item.item_id,
-        action: "skipped",
-        reason: "ready item missing to_agent or dispatch_body",
-      });
+      skipped.push(nonAdmission(
+        item.item_id,
+        "skipped",
+        "missing_dispatch_target",
+        "ready item missing to_agent or dispatch_body",
+        { has_to_agent: !!item.to_agent, has_dispatch_body: !!item.dispatch_body },
+      ));
       continue;
     }
     // RD-014: reject admission to a target whose runtime is not live. The
@@ -195,11 +231,13 @@ export function planAdmission(
     // tick still gets a chance.
     const target = poolId ? assignedBuilder : item.to_agent;
     if (ctx.healthy_agents && target && !ctx.healthy_agents.has(target)) {
-      skipped.push({
-        item_id: item.item_id,
-        action: "skipped",
-        reason: `target agent '${target}' is not healthy/online (RD-014 admission health gate)`,
-      });
+      skipped.push(nonAdmission(
+        item.item_id,
+        "skipped",
+        "target_unhealthy",
+        `target agent '${target}' is not healthy/online (RD-014 admission health gate)`,
+        { target },
+      ));
       continue;
     }
 

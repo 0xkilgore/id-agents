@@ -131,6 +131,22 @@ export interface TickResult {
   decisions: DecisionRecord[];
 }
 
+export interface ReadyAdmissionExplanation {
+  candidates: number;
+  admissible: Array<{ item_id: string; title: string; to_agent: string | null; risk_class: string }>;
+  non_admitted: Array<{
+    item_id: string;
+    title: string;
+    to_agent: string | null;
+    risk_class: string;
+    action: "skipped" | "held";
+    code: string;
+    reason: string;
+    metadata?: Record<string, unknown>;
+  }>;
+  halted: string | null;
+}
+
 /** Outcome of one floor-triggered auto-promote pass. */
 export interface AutoPromoteRunSummary {
   /** True when build-ready fuel/lanes were below floor and a top-up ran. */
@@ -484,6 +500,77 @@ export class ContinuousOrchestrationDaemon {
       refuel,
       auto_promote: autoPromote,
       decisions,
+    };
+  }
+
+  /**
+   * Read-only status helper: explain why current READY rows would or would not
+   * admit with the same guardrails as a tick. It intentionally does not
+   * reconcile, auto-promote, refuel, enqueue, or mutate tick counters.
+   */
+  async explainReadyAdmission(): Promise<ReadyAdmissionExplanation> {
+    const config = this.deps.config;
+    const nowMs = this.now();
+    const state = await getOrchestrationState(this.deps.adapter, this.teamId);
+    const killSwitch = this.killSwitchActive();
+    const { view: usage, daily_tokens_used } = await this.deps.readUsage();
+    const { count: in_flight, active_write_scopes } = await this.deps.readInFlight();
+    const ready = await listReadyItems(this.deps.adapter, this.teamId);
+    const done_item_ids = await listDoneItemIds(this.deps.adapter, this.teamId);
+    const ordered = fairInterleaveByLane(orderCandidates(ready));
+    const poolGate = await this.buildPoolGate(ordered);
+
+    const candidateAgentNames = new Set<string>();
+    for (const item of ordered) if (item.to_agent) candidateAgentNames.add(item.to_agent);
+    if (poolGate) for (const builders of poolGate.pool_free_builders.values()) for (const b of builders) candidateAgentNames.add(b);
+    const healthy_agents = this.deps.resolveAgentHealth
+      ? await this.deps.resolveAgentHealth([...candidateAgentNames])
+      : undefined;
+
+    const writeCfg = {
+      maxEnqueuesPerTick: config.max_enqueues_per_tick,
+      maxFleshPerTick: config.max_flesh_per_tick,
+      maxNewPerTick: config.max_new_per_tick,
+    };
+    const ctx: AdmissionContext = {
+      mode: state.mode,
+      kill_switch_active: killSwitch,
+      usage,
+      daily_tokens_used,
+      in_flight,
+      active_write_scopes,
+      done_item_ids,
+      admit_limit: Math.min(tickAdmitLimit(nowMs, config), tickWriteCaps(writeCfg, 0).admitCap),
+      pool_for: poolGate?.pool_for,
+      pool_free_slots: poolGate?.pool_free_slots,
+      pool_free_builders: poolGate?.pool_free_builders,
+      healthy_agents,
+    };
+
+    const plan = planAdmission(ordered, ctx, config);
+    const byId = new Map(ordered.map((item) => [item.item_id, item]));
+    return {
+      candidates: ordered.length,
+      admissible: plan.admit.map((item) => ({
+        item_id: item.item_id,
+        title: item.title,
+        to_agent: plan.assignments[item.item_id] ?? item.to_agent,
+        risk_class: item.risk_class,
+      })),
+      non_admitted: plan.skipped.map((decision) => {
+        const item = decision.item_id ? byId.get(decision.item_id) : undefined;
+        return {
+          item_id: decision.item_id ?? "",
+          title: item?.title ?? "",
+          to_agent: item?.to_agent ?? null,
+          risk_class: item?.risk_class ?? "",
+          action: decision.action === "held" ? "held" : "skipped",
+          code: typeof decision.metadata?.code === "string" ? decision.metadata.code : "unknown",
+          reason: decision.reason,
+          metadata: decision.metadata,
+        };
+      }),
+      halted: plan.halt?.reason ?? null,
     };
   }
 

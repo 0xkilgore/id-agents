@@ -246,6 +246,16 @@ describe("planAdmission — per-item guardrails", () => {
     const p = planAdmission([item(), item(), item()], ctx({ admit_limit: 2 }), cfg);
     expect(p.admit).toHaveLength(2);
     expect(p.skipped[0].reason).toMatch(/tick admission cap/);
+    expect(p.skipped[0].metadata?.code).toBe("tick_admission_cap");
+  });
+
+  it("admits a ready build item with no blockers when in_flight is below max_in_flight", () => {
+    const p = planAdmission([item({ item_id: "ready-build", risk_class: "build" })], ctx({ in_flight: 3 }), {
+      ...cfg,
+      max_in_flight: 4,
+    });
+    expect(p.admit.map((i) => i.item_id)).toEqual(["ready-build"]);
+    expect(p.skipped).toHaveLength(0);
   });
 
   it("respects free in-flight slots over the admit limit", () => {
@@ -263,6 +273,7 @@ describe("planAdmission — per-item guardrails", () => {
     const p = planAdmission([item({ dependencies: ["dep1"] })], ctx(), cfg);
     expect(p.admit).toHaveLength(0);
     expect(p.skipped[0].reason).toMatch(/dependency not done/);
+    expect(p.skipped[0].metadata?.code).toBe("blocked_dependency");
     const p2 = planAdmission([item({ dependencies: ["dep1"] })], ctx({ done_item_ids: new Set(["dep1"]) }), cfg);
     expect(p2.admit).toHaveLength(1);
   });
@@ -278,6 +289,7 @@ describe("planAdmission — per-item guardrails", () => {
   it("skips when scope is already locked by an in-flight dispatch", () => {
     const p = planAdmission([item({ write_scope: ["repo/y"] })], ctx({ active_write_scopes: new Set(["repo/y"]) }), cfg);
     expect(p.admit).toHaveLength(0);
+    expect(p.skipped[0].metadata?.code).toBe("single_writer_lane_busy");
   });
 
   it("enforces the token ceiling per-item across the tick", () => {

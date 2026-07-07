@@ -203,6 +203,42 @@ describe("daemon — dry-run vs live", () => {
     expect(r.admitted).toHaveLength(4);
   });
 
+  it("admits a ready build item with no blockers when daemon in_flight is below max_in_flight", async () => {
+    const item = await seedReady(adapter, { title: "admittable build", write_scope: ["free-lane"] });
+    const { daemon, fired } = makeDaemon(adapter, {
+      config: { dry_run: false, max_in_flight: 4 },
+      inFlight: 3,
+    });
+    await daemon.setMode("running");
+
+    const r = await daemon.runTick();
+
+    expect(r.admitted.map((a) => a.item_id)).toEqual([item.item_id]);
+    expect(fired.map((i) => i.item_id)).toEqual([item.item_id]);
+  });
+
+  it("explains intentionally non-admittable ready rows with typed reason codes", async () => {
+    const item = await seedReady(adapter, { title: "busy lane build", write_scope: ["repo/busy"] });
+    const { daemon } = makeDaemon(adapter, {
+      config: { dry_run: false, max_in_flight: 4 },
+      inFlight: 1,
+      activeScopes: new Set(["repo/busy"]),
+    });
+    await daemon.setMode("running");
+
+    const explanation = await daemon.explainReadyAdmission();
+
+    expect(explanation.candidates).toBe(1);
+    expect(explanation.admissible).toHaveLength(0);
+    expect(explanation.non_admitted).toEqual([
+      expect.objectContaining({
+        item_id: item.item_id,
+        action: "skipped",
+        code: "single_writer_lane_busy",
+      }),
+    ]);
+  });
+
   it("halts (fires nothing) when not running", async () => {
     await seedReady(adapter);
     const { daemon, fired } = makeDaemon(adapter, { config: { dry_run: false } });

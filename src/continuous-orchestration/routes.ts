@@ -63,6 +63,7 @@ export function mountContinuousOrchestrationRoutes(app: Application, opts: Orche
         since_iso: startOfDay.toISOString(),
         decision: "auto_ready",
       });
+      const readyAdmission = await daemon.explainReadyAdmission();
       let killSwitch = false;
       try {
         killSwitch = fs.existsSync(config.kill_switch_path);
@@ -98,6 +99,7 @@ export function mountContinuousOrchestrationRoutes(app: Application, opts: Orche
           min_ready_lanes: config.min_ready_lanes,
           by_status: fleshCounts,
         },
+        ready_admission: readyAdmission,
         health,
       });
     } catch (err) {
