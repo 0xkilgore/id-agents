@@ -825,18 +825,33 @@ export interface DecisionLogRow {
   reason: string;
   dispatch_phid: string | null;
   dry_run: number;
+  metadata?: Record<string, unknown>;
+}
+
+interface DecisionLogDbRow extends DecisionLogRow {
+  metadata_json: string | null;
 }
 
 export async function listRecentDecisions(
   adapter: DbAdapter,
   opts: { team_id?: string; limit?: number } = {},
 ): Promise<DecisionLogRow[]> {
-  const { rows } = await adapter.query<DecisionLogRow>(
-    `SELECT decision_id, tick_id, ts, item_id, action, reason, dispatch_phid, dry_run
+  const { rows } = await adapter.query<DecisionLogDbRow>(
+    `SELECT decision_id, tick_id, ts, item_id, action, reason, dispatch_phid, dry_run,
+            metadata_json
        FROM orchestration_decision_log WHERE team_id = $1 ORDER BY ts DESC LIMIT $2`,
     [opts.team_id ?? "default", opts.limit ?? 100],
   );
-  return rows;
+  return rows.map((r) => {
+    let metadata: Record<string, unknown> = {};
+    try {
+      metadata = r.metadata_json ? JSON.parse(r.metadata_json) : {};
+    } catch {
+      metadata = {};
+    }
+    const { metadata_json: _metadata_json, ...rest } = r;
+    return { ...rest, metadata };
+  });
 }
 
 // ── Singleton state ──────────────────────────────────────────────────

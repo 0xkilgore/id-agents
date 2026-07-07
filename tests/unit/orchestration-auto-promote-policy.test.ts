@@ -81,6 +81,19 @@ describe("selectAutoPromotions — floor trigger", () => {
     // floor 4, already 1 ready → promote 3 to reach 4.
     expect(plan.promote.length).toBe(3);
   });
+
+  it("restores the floor in one pass when eligible approved rows exceed the soft max", () => {
+    const ready = [item({ readiness_state: "ready", write_scope: ["a"] })]; // 1 build-ready
+    const needsReview = [
+      item({ item_id: "b", write_scope: ["b"], flesh_confidence: 0.65, approved_by: "maestra" }),
+      item({ item_id: "c", write_scope: ["c"], flesh_confidence: 0.65, approved_by: "maestra" }),
+      item({ item_id: "d", write_scope: ["d"], flesh_confidence: 0.65, approved_by: "maestra" }),
+      item({ item_id: "e", write_scope: ["e"], flesh_confidence: 0.65, approved_by: "maestra" }),
+    ];
+    const plan = selectAutoPromotions(needsReview, ready, { floor: 4, minLanes: 3, maxPerPass: 1 });
+    expect(plan.promote.map((p) => p.item_id)).toEqual(["b", "c", "d"]);
+    expect(new Set(plan.promote.map((p) => p.write_scope[0])).size).toBe(3);
+  });
 });
 
 describe("selectAutoPromotions — lane coverage first", () => {
@@ -102,14 +115,14 @@ describe("selectAutoPromotions — lane coverage first", () => {
 });
 
 describe("selectAutoPromotions — ranking + cap", () => {
-  it("promotes highest-confidence first and respects maxPerPass", () => {
+  it("promotes highest-confidence first up to the configured floor", () => {
     const ready: BacklogItem[] = [];
     const needsReview = [
       item({ item_id: "low", write_scope: ["a"], flesh_confidence: 0.83 }),
       item({ item_id: "high", write_scope: ["a"], flesh_confidence: 0.97 }),
       item({ item_id: "mid", write_scope: ["a"], flesh_confidence: 0.9 }),
     ];
-    const plan = selectAutoPromotions(needsReview, ready, { floor: 10, minLanes: 1, maxPerPass: 2 });
+    const plan = selectAutoPromotions(needsReview, ready, { floor: 2, minLanes: 1, maxPerPass: 2 });
     expect(plan.promote.map((p) => p.item_id)).toEqual(["high", "mid"]);
   });
 });
@@ -139,6 +152,15 @@ describe("autoPromoteRejections — safety gate (never auto-promote unsafe work)
     );
   });
 
+  it("accepts explicit approval as the confidence override but keeps other safety gates", () => {
+    expect(autoPromoteRejections(item({ flesh_confidence: 0.65, approved_by: "maestra" }), thr)).toEqual([]);
+    expect(autoPromoteRejections(item({ flesh_confidence: null, flesh_status: "approved_ready" }), thr)).toEqual([]);
+    expect(autoPromoteRejections(item({ flesh_confidence: null, auto_ready_approved_at: "2026-07-07T00:00:00Z" }), thr)).toEqual([]);
+    expect(autoPromoteRejections(item({ flesh_confidence: 0.65, approved_by: "maestra", risk_class: "costly" }), thr)).toContainEqual(
+      expect.stringContaining("not auto-promotable"),
+    );
+  });
+
   it("rejects an item that was already dispatched once (last_dispatch_phid set) — the reap/failure de-dup guard", () => {
     // Root-caused 2026-07-04: an item lands back in needs_review two ways —
     // freshly fleshed (never fired, last_dispatch_phid null) or RE-parked
@@ -147,7 +169,7 @@ describe("autoPromoteRejections — safety gate (never auto-promote unsafe work)
     // Only the former is safe to auto-promote; the latter must wait for a
     // human /promote (daemon.ts's own comment: "release to needs_review...
     // NEVER an auto-refire"). Before this gate, both looked identical here.
-    expect(autoPromoteRejections(item({ last_dispatch_phid: "phid:disp-already-fired" }), thr)).toContainEqual(
+    expect(autoPromoteRejections(item({ approved_by: "maestra", last_dispatch_phid: "phid:disp-already-fired" }), thr)).toContainEqual(
       expect.stringContaining("already dispatched once"),
     );
   });
