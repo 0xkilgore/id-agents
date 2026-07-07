@@ -47,6 +47,12 @@ function epochToIso(value: number): string {
   return new Date(ms).toISOString();
 }
 
+function toPostgresTsQuery(raw: string): string | null {
+  const tokens = (raw.match(/[\p{L}\p{N}]+/gu) ?? []).map((t) => t.toLowerCase());
+  if (tokens.length === 0) return null;
+  return tokens.map((token) => `${token}:*`).join(" & ");
+}
+
 function parseKinds(raw: string | null | undefined): DocModelSearchKind[] | null {
   if (!raw) return null;
   const allowed = new Set<string>(DOC_MODEL_SEARCH_KINDS);
@@ -67,6 +73,43 @@ async function searchArtifactHits(
   match: string,
   limit: number,
 ): Promise<DocModelSearchHit[]> {
+  if (adapter.dialect === "postgres") {
+    const { rows } = await adapter.query<{
+      phid: string;
+      title: string;
+      display_id: string;
+      score: number;
+      updated_at: string;
+    }>(
+      `WITH q AS (SELECT to_tsquery('simple', $1) AS query)
+       SELECT a.artifact_id AS phid,
+              COALESCE(a.title, a.basename) AS title,
+              a.basename AS display_id,
+              -ts_rank_cd(
+                to_tsvector('simple',
+                  COALESCE(a.title, '') || ' ' || a.basename || ' ' || COALESCE(a.tag, '') || ' ' || a.agent
+                ),
+                q.query
+              ) AS score,
+              a.produced_at AS updated_at
+         FROM artifacts a, q
+        WHERE to_tsvector('simple',
+                COALESCE(a.title, '') || ' ' || a.basename || ' ' || COALESCE(a.tag, '') || ' ' || a.agent
+              ) @@ q.query
+     ORDER BY score ASC, a.produced_at ASC, a.artifact_id ASC
+        LIMIT $2`,
+      [match, limit],
+    );
+    return rows.map((row) => ({
+      kind: "artifact",
+      phid: row.phid,
+      title: row.title,
+      display_id: row.display_id,
+      score: row.score,
+      updated_at: row.updated_at,
+    }));
+  }
+
   const { rows } = await adapter.query<{
     phid: string;
     title: string;
@@ -101,6 +144,41 @@ async function searchDeskHits(
   match: string,
   limit: number,
 ): Promise<DocModelSearchHit[]> {
+  if (adapter.dialect === "postgres") {
+    const { rows } = await adapter.query<{
+      phid: string;
+      title: string;
+      score: number;
+      updated_at: string;
+    }>(
+      `WITH q AS (SELECT to_tsquery('simple', $1) AS query)
+       SELECT d.desk_item_id AS phid,
+              d.label AS title,
+              -ts_rank_cd(
+                to_tsvector('simple',
+                  d.label || ' ' || d.body_md || ' ' || d.kind || ' ' || COALESCE(d.source_ref, '')
+                ),
+                q.query
+              ) AS score,
+              COALESCE(d.dismissed_at, d.added_at) AS updated_at
+         FROM desk_items d, q
+        WHERE to_tsvector('simple',
+                d.label || ' ' || d.body_md || ' ' || d.kind || ' ' || COALESCE(d.source_ref, '')
+              ) @@ q.query
+     ORDER BY score ASC, COALESCE(d.dismissed_at, d.added_at) ASC, d.desk_item_id ASC
+        LIMIT $2`,
+      [match, limit],
+    );
+    return rows.map((row) => ({
+      kind: "desk_item",
+      phid: row.phid,
+      title: row.title,
+      display_id: row.phid,
+      score: row.score,
+      updated_at: row.updated_at,
+    }));
+  }
+
   const { rows } = await adapter.query<{
     phid: string;
     title: string;
@@ -133,6 +211,43 @@ async function searchTaskHits(
   match: string,
   limit: number,
 ): Promise<DocModelSearchHit[]> {
+  if (adapter.dialect === "postgres") {
+    const { rows } = await adapter.query<{
+      phid: string;
+      title: string;
+      display_id: string;
+      score: number;
+      updated_at: number;
+    }>(
+      `WITH q AS (SELECT to_tsquery('simple', $1) AS query)
+       SELECT COALESCE(NULLIF(t.uuid, ''), t.id) AS phid,
+              t.title AS title,
+              t.name AS display_id,
+              -ts_rank_cd(
+                to_tsvector('simple',
+                  t.name || ' ' || t.title || ' ' || COALESCE(t.description, '') || ' ' || COALESCE(t.track, '') || ' ' || t.status
+                ),
+                q.query
+              ) AS score,
+              t.updated_at AS updated_at
+         FROM tasks t, q
+        WHERE to_tsvector('simple',
+                t.name || ' ' || t.title || ' ' || COALESCE(t.description, '') || ' ' || COALESCE(t.track, '') || ' ' || t.status
+              ) @@ q.query
+     ORDER BY score ASC, t.updated_at ASC, t.id ASC
+        LIMIT $2`,
+      [match, limit],
+    );
+    return rows.map((row) => ({
+      kind: "task",
+      phid: row.phid,
+      title: row.title,
+      display_id: row.display_id,
+      score: row.score,
+      updated_at: epochToIso(row.updated_at),
+    }));
+  }
+
   const { rows } = await adapter.query<{
     phid: string;
     title: string;
@@ -174,13 +289,13 @@ export async function searchDocModel(
   const limit = Math.min(Math.max(opts.limit ?? DOC_MODEL_SEARCH_DEFAULT_LIMIT, 1), DOC_MODEL_SEARCH_MAX_LIMIT);
   const offset = Math.max(opts.offset ?? 0, 0);
 
-  if (adapter.dialect !== "sqlite") {
-    throw new DocModelSearchUnsupportedError(adapter.dialect);
-  }
-
-  const match = toFtsMatch(query);
+  const match = adapter.dialect === "postgres" ? toPostgresTsQuery(query) : toFtsMatch(query);
   if (!match) {
     return { items: [], limit, offset };
+  }
+
+  if (adapter.dialect !== "sqlite" && adapter.dialect !== "postgres") {
+    throw new DocModelSearchUnsupportedError(adapter.dialect);
   }
 
   const kinds = opts.kinds ?? [...DOC_MODEL_SEARCH_KINDS];

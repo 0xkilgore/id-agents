@@ -15,6 +15,9 @@ import type {
 export const DESK_PARSER_VERSION = "desk.producer.v2";
 
 export async function migrateDeskTables(adapter: DbAdapter): Promise<void> {
+  const autoIncrementPrimaryKey = adapter.dialect === "postgres"
+    ? "BIGSERIAL PRIMARY KEY"
+    : "INTEGER PRIMARY KEY AUTOINCREMENT";
   await adapter.query(
     `
     CREATE TABLE IF NOT EXISTS desk_items (
@@ -45,7 +48,7 @@ export async function migrateDeskTables(adapter: DbAdapter): Promise<void> {
   await adapter.query(
     `
     CREATE TABLE IF NOT EXISTS desk_item_operations (
-      op_id          INTEGER PRIMARY KEY AUTOINCREMENT,
+      op_id          ${autoIncrementPrimaryKey},
       desk_item_id   TEXT NOT NULL,
       op_type        TEXT NOT NULL CHECK (op_type IN ('DESK_ADD', 'DESK_DISMISS', 'DESK_ACT')),
       actor          TEXT NOT NULL,

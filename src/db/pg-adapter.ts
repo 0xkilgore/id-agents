@@ -8,8 +8,14 @@ export class PgAdapter implements DbAdapter {
 
   constructor(private pool: Pool) {}
 
+  private normaliseSql(sql: string): string {
+    const existing = [...sql.matchAll(/\$(\d+)/g)].map((match) => Number(match[1]));
+    let index = existing.length > 0 ? Math.max(...existing) : 0;
+    return sql.replace(/\?/g, () => `$${++index}`);
+  }
+
   async query<T = unknown>(sql: string, params: unknown[] = []): Promise<QueryResult<T>> {
-    const result = await this.pool.query(sql, params);
+    const result = await this.pool.query(this.normaliseSql(sql), params);
     return { rows: result.rows as T[], rowCount: result.rowCount ?? 0 };
   }
 

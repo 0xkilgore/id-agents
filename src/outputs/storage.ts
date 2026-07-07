@@ -35,6 +35,9 @@ export function artifactIdFromPath(absPath: string): string {
 // ── DDL (idempotent) ───────────────────────────────────────────────
 
 export async function migrateOutputsTables(adapter: DbAdapter): Promise<void> {
+  const autoIncrementPrimaryKey = adapter.dialect === "postgres"
+    ? "BIGSERIAL PRIMARY KEY"
+    : "INTEGER PRIMARY KEY AUTOINCREMENT";
   const exec = async (sql: string) => {
     if (adapter.dialect === "sqlite" && typeof (adapter as unknown as { exec?: (s: string) => void }).exec === "function") {
       (adapter as unknown as { exec: (s: string) => void }).exec(sql);
@@ -76,7 +79,7 @@ export async function migrateOutputsTables(adapter: DbAdapter): Promise<void> {
 
   await exec(`
     CREATE TABLE IF NOT EXISTS artifact_operations (
-      op_id INTEGER PRIMARY KEY AUTOINCREMENT,
+      op_id ${autoIncrementPrimaryKey},
       artifact_id TEXT NOT NULL,
       op_type TEXT NOT NULL,
       actor TEXT NOT NULL,

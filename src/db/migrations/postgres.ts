@@ -767,6 +767,9 @@ export async function migratePostgres(adapter: DbAdapter): Promise<void> {
       END IF;
     END $$;
   `);
+
+  const { migrateDocModelFtsIndexes } = await import('../../doc-model/fts-migration.js');
+  await migrateDocModelFtsIndexes(adapter);
 }
 
 /** Null manager-owned FK columns and delete manager-<team> shadow agent rows. */
