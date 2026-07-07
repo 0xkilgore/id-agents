@@ -1,6 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { readOrchestrationHealthProjection } from "../../src/continuous-orchestration/health-projection.js";
+import {
+  classifyOrchestrationAdmissionStatus,
+  readOrchestrationHealthProjection,
+} from "../../src/continuous-orchestration/health-projection.js";
 import { insertBacklogItem, setItemState } from "../../src/continuous-orchestration/storage.js";
 import { migrateSqlite } from "../../src/db/migrations/sqlite.js";
 import { SqliteAdapter } from "../../src/db/sqlite-adapter.js";
@@ -17,6 +20,116 @@ afterEach(async () => {
 });
 
 describe("orchestration health projection", () => {
+  it("classifies recent ready=0 ticks as no_ready_fuel, not a daemon-stuck incident", () => {
+    const now = Date.parse("2026-07-07T12:00:00.000Z");
+
+    const status = classifyOrchestrationAdmissionStatus({
+      mode: "running",
+      last_tick_at: "2026-07-07T11:59:30.000Z",
+      last_dispatch_at: "2026-07-07T10:00:00.000Z",
+      consecutive_zero_ticks: 0,
+      ready: 0,
+      min_ready_fuel: 8,
+      stall_threshold_ticks: 3,
+      tick_interval_ms: 60_000,
+      active_clarification_count: 0,
+      now_ms: now,
+    });
+
+    expect(status).toMatchObject({
+      kind: "no_ready_fuel",
+      ok: true,
+      page_operator: false,
+      severity: "watch",
+      seconds_since_tick: 30,
+    });
+  });
+
+  it("classifies recent ready=1 zero-admit ticks as no_ready_fuel, not a live incident page", () => {
+    const now = Date.parse("2026-07-07T12:00:00.000Z");
+
+    const status = classifyOrchestrationAdmissionStatus({
+      mode: "running",
+      last_tick_at: "2026-07-07T11:59:45.000Z",
+      last_dispatch_at: "2026-07-07T09:00:00.000Z",
+      consecutive_zero_ticks: 7,
+      ready: 1,
+      min_ready_fuel: 8,
+      stall_threshold_ticks: 3,
+      tick_interval_ms: 60_000,
+      active_clarification_count: 0,
+      now_ms: now,
+    });
+
+    expect(status).toMatchObject({
+      kind: "no_ready_fuel",
+      ok: true,
+      page_operator: false,
+      severity: "watch",
+      seconds_since_tick: 15,
+    });
+  });
+
+  it("distinguishes stale tick progress from stale dispatch progress", () => {
+    const now = Date.parse("2026-07-07T12:00:00.000Z");
+
+    const status = classifyOrchestrationAdmissionStatus({
+      mode: "running",
+      last_tick_at: "2026-07-07T11:45:00.000Z",
+      last_dispatch_at: "2026-07-07T10:00:00.000Z",
+      consecutive_zero_ticks: 0,
+      ready: 0,
+      min_ready_fuel: 8,
+      stall_threshold_ticks: 3,
+      tick_interval_ms: 60_000,
+      active_clarification_count: 0,
+      now_ms: now,
+    });
+
+    expect(status).toMatchObject({
+      kind: "daemon_stuck",
+      ok: false,
+      page_operator: true,
+      severity: "incident",
+      seconds_since_tick: 900,
+    });
+  });
+
+  it("reports clarification and admission-policy holds separately from daemon liveness", () => {
+    const now = Date.parse("2026-07-07T12:00:00.000Z");
+    const base = {
+      mode: "running" as const,
+      last_tick_at: "2026-07-07T11:59:45.000Z",
+      last_dispatch_at: "2026-07-07T10:00:00.000Z",
+      min_ready_fuel: 8,
+      stall_threshold_ticks: 3,
+      tick_interval_ms: 60_000,
+      now_ms: now,
+    };
+
+    expect(classifyOrchestrationAdmissionStatus({
+      ...base,
+      consecutive_zero_ticks: 0,
+      ready: 12,
+      active_clarification_count: 2,
+    })).toMatchObject({
+      kind: "blocked_by_clarification",
+      page_operator: false,
+      severity: "action_needed",
+    });
+
+    expect(classifyOrchestrationAdmissionStatus({
+      ...base,
+      consecutive_zero_ticks: 3,
+      ready: 12,
+      active_clarification_count: 0,
+    })).toMatchObject({
+      kind: "admission_policy_held",
+      page_operator: false,
+      severity: "action_needed",
+    });
+  });
+
   it("counts active needs_clarification blockers, recent ids, and backlog dependency impact", async () => {
     const owner = await insertBacklogItem(adapter, {
       title: "land upstream change",

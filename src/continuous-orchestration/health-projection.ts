@@ -5,6 +5,7 @@
 // work and clarification waits are visible in the orchestration health surface.
 
 import type { DbAdapter } from "../db/db-adapter.js";
+import type { OrchestrationMode } from "./types.js";
 
 export interface OrchestrationHealthBlocker {
   dispatch_phid: string;
@@ -19,6 +20,7 @@ export interface OrchestrationHealthBlocker {
 export interface OrchestrationHealthProjection {
   ok: boolean;
   generated_at: string;
+  admission_status: OrchestrationAdmissionStatus | null;
   blockers: {
     blocked: boolean;
     needs_clarification: {
@@ -34,6 +36,43 @@ export interface OrchestrationHealthProjection {
       items: OrchestrationHealthBlocker[];
     };
   };
+}
+
+export type OrchestrationAdmissionStatusKind =
+  | "healthy"
+  | "paused"
+  | "daemon_stuck"
+  | "no_ready_fuel"
+  | "blocked_by_clarification"
+  | "admission_policy_held";
+
+export interface OrchestrationAdmissionStatus {
+  kind: OrchestrationAdmissionStatusKind;
+  ok: boolean;
+  page_operator: boolean;
+  severity: "ok" | "watch" | "action_needed" | "incident";
+  reason: string;
+  ready: number;
+  min_ready_fuel: number;
+  consecutive_zero_ticks: number;
+  last_tick_at: string | null;
+  last_dispatch_at: string | null;
+  seconds_since_tick: number | null;
+  seconds_since_dispatch: number | null;
+}
+
+export interface OrchestrationAdmissionStatusInput {
+  mode: OrchestrationMode;
+  auto_paused?: boolean;
+  last_tick_at: string | null;
+  last_dispatch_at: string | null;
+  consecutive_zero_ticks: number;
+  ready: number;
+  min_ready_fuel: number;
+  stall_threshold_ticks: number;
+  tick_interval_ms: number;
+  active_clarification_count: number;
+  now_ms?: number;
 }
 
 interface DispatchRow {
@@ -57,7 +96,7 @@ const RECOVERED_STATUSES = ["moot", "landed_reconciled", "verified_done", "retry
 export async function readOrchestrationHealthProjection(
   adapter: DbAdapter,
   teamId = "default",
-  opts: { recentLimit?: number } = {},
+  opts: { recentLimit?: number; admissionStatus?: OrchestrationAdmissionStatus | null } = {},
 ): Promise<OrchestrationHealthProjection> {
   const recentLimit = Math.max(1, opts.recentLimit ?? 5);
   const dependencyImpact = await readDependencyImpact(adapter, teamId);
@@ -80,11 +119,104 @@ export async function readOrchestrationHealthProjection(
   return {
     ok: true,
     generated_at: new Date().toISOString(),
+    admission_status: opts.admissionStatus ?? null,
     blockers: {
       blocked: needsClarification.length > 0 || promotion.length > 0,
       needs_clarification: summarize(needsClarification, recentLimit),
       promotion: summarize(promotion, recentLimit),
     },
+  };
+}
+
+export function classifyOrchestrationAdmissionStatus(
+  input: OrchestrationAdmissionStatusInput,
+): OrchestrationAdmissionStatus {
+  const nowMs = input.now_ms ?? Date.now();
+  const tickAge = ageSeconds(input.last_tick_at, nowMs);
+  const dispatchAge = ageSeconds(input.last_dispatch_at, nowMs);
+  const daemonStuckAfterSeconds = Math.max(120, Math.ceil((input.tick_interval_ms * 3) / 1000));
+
+  const base = {
+    ready: input.ready,
+    min_ready_fuel: input.min_ready_fuel,
+    consecutive_zero_ticks: input.consecutive_zero_ticks,
+    last_tick_at: input.last_tick_at,
+    last_dispatch_at: input.last_dispatch_at,
+    seconds_since_tick: tickAge,
+    seconds_since_dispatch: dispatchAge,
+  };
+
+  const notRunning = input.mode !== "running" || input.auto_paused === true;
+  if (notRunning) {
+    return {
+      ...base,
+      kind: "paused",
+      ok: true,
+      page_operator: false,
+      severity: "watch",
+      reason: input.auto_paused ? "orchestration is auto-paused" : `orchestration mode is ${input.mode}`,
+    };
+  }
+
+  if (tickAge == null || tickAge > daemonStuckAfterSeconds) {
+    return {
+      ...base,
+      kind: "daemon_stuck",
+      ok: false,
+      page_operator: true,
+      severity: "incident",
+      reason:
+        tickAge == null
+          ? "orchestration is running but has not recorded a tick"
+          : `orchestration tick is stale (${tickAge}s since last tick; threshold ${daemonStuckAfterSeconds}s)`,
+    };
+  }
+
+  if (input.active_clarification_count > 0) {
+    return {
+      ...base,
+      kind: "blocked_by_clarification",
+      ok: false,
+      page_operator: false,
+      severity: "action_needed",
+      reason: `${input.active_clarification_count} dispatch clarification(s) need operator input`,
+    };
+  }
+
+  if (input.ready < input.min_ready_fuel) {
+    return {
+      ...base,
+      kind: "no_ready_fuel",
+      ok: true,
+      page_operator: false,
+      severity: "watch",
+      reason: `daemon is ticking, but ready fuel is low (${input.ready}/${input.min_ready_fuel}); refuel/flesh is the next lever`,
+    };
+  }
+
+  if (input.consecutive_zero_ticks >= input.stall_threshold_ticks) {
+    return {
+      ...base,
+      kind: "admission_policy_held",
+      ok: false,
+      page_operator: false,
+      severity: "action_needed",
+      reason:
+        `${input.consecutive_zero_ticks} recent tick(s) admitted no dispatches while ready fuel exists; ` +
+        "check admission policy, in-flight slots, health gates, and write-scope locks",
+    };
+  }
+
+  return {
+    ...base,
+    kind: "healthy",
+    ok: true,
+    page_operator: false,
+    severity: "ok",
+    reason:
+      input.consecutive_zero_ticks > 0
+        ? "daemon is ticking; zero-admit count is below the stall threshold"
+        : "daemon is ticking and admission is not stalled",
   };
 }
 
@@ -227,4 +359,11 @@ function parseJson(raw: string | null | undefined): any | null {
   } catch {
     return null;
   }
+}
+
+function ageSeconds(iso: string | null, nowMs: number): number | null {
+  if (!iso) return null;
+  const t = Date.parse(iso);
+  if (!Number.isFinite(t)) return null;
+  return Math.max(0, Math.floor((nowMs - t) / 1000));
 }
