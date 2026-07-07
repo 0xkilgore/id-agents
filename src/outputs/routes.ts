@@ -1238,7 +1238,11 @@ export function mountOutputsRoutes(
         res.json({ ...base, dispatch_routed: false, dispatch: null, dispatch_error: routed.routed.error });
       }
     } catch (err) {
-      res.status(500).json({ ok: false, error: err instanceof Error ? err.message : String(err) });
+      res.status(500).json({
+        ok: false,
+        visible_state: "not-recorded",
+        error: err instanceof Error ? err.message : String(err),
+      });
     }
   });
 
