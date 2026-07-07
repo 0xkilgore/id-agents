@@ -28,11 +28,13 @@ const RESERVED_SLUGS = [
   "id-agents-parity-weekly", // T-DEPLOY.6 weekly id-agents↔Kapelle parity lane
   "ux-research", // L10 UX research loop (Rams)
   "library-research", // L11 software/library research loop (Researcher)
+  "surface-feeder",
+  "task-reconciliation",
 ];
 
 describe("seed catalog", () => {
-  it("registers all reserved L1-L8 loops (+ per-project instances) by slug", () => {
-    expect(SEED_LOOPS).toHaveLength(14);
+  it("registers all reserved loops (+ per-project/report instances) by slug", () => {
+    expect(SEED_LOOPS).toHaveLength(16);
     expect(SEED_LOOPS.map((l) => l.slug).sort()).toEqual([...RESERVED_SLUGS].sort());
   });
 
@@ -128,6 +130,7 @@ describe("seed catalog", () => {
       expect(typeof l.allow_scheduled_run).toBe("boolean");
       expect(typeof l.allow_manual_run).toBe("boolean");
       expect(typeof l.schedule_label).toBe("string");
+      expect(Array.isArray(l.report_definitions)).toBe(true);
       // health is a placeholder rollup (no runs yet)
       expect(l.health.last_run_at).toBeNull();
       expect(l.health.runs_last_7d).toBe(0);
@@ -150,6 +153,8 @@ describe("seed catalog", () => {
     expect(enabled("sentinel-verification-2h")).toBe(true);
     expect(enabled("ux-research")).toBe(true);
     expect(enabled("library-research")).toBe(true);
+    expect(enabled("surface-feeder")).toBe(true);
+    expect(enabled("task-reconciliation")).toBe(true);
     expect(enabled("fantasy-baseball")).toBe(false);
     expect(enabled("weekly-project-report")).toBe(false);
     expect(enabled("biweekly-project-report")).toBe(false);
@@ -162,39 +167,41 @@ describe("listLoops", () => {
     expect(res.schema_version).toBe("loops-list-v1");
     expect(res.source).toBe("seed_catalog");
     expect(res.generated_at).toBe(NOW);
-    expect(res.loops).toHaveLength(14);
+    expect(res.loops).toHaveLength(16);
   });
 
   it("computes filter facets over the full catalog with counts", () => {
     const { filters } = listLoops(NOW);
     const owners = Object.fromEntries(filters.owners.map((o) => [o.value, o.count]));
-    expect(owners["maestra"]).toBe(4); // morning-digest, project-load, maestra-product-log, id-agents-parity-weekly
+    expect(owners["maestra"]).toBe(5); // adds surface-feeder
     expect(owners["rams"]).toBe(1);
     expect(owners["researcher"]).toBe(1);
+    expect(owners["sentinel"]).toBe(2); // sentinel-verification + task-reconciliation
     const kinds = Object.fromEntries(filters.kinds.map((k) => [k.value, k.count]));
-    expect(kinds["report"]).toBe(7); // project-load, weekly, weekly-blowout, biweekly, maestra-product-log, ux-research, library-research
+    expect(kinds["report"]).toBe(8); // adds surface-feeder
+    expect(kinds["verification"]).toBe(3); // sentinel-verification, id-agents-parity, task-reconciliation
     expect(kinds["external_data"]).toBe(2); // fantasy-baseball + fantasy-basketball
     expect(kinds["digest"]).toBe(2); // morning-digest + gideon-sports-brief
     const owners2 = Object.fromEntries(filters.owners.map((o) => [o.value, o.count]));
     expect(owners2["gideon"]).toBe(3); // Gideon sports agent: fantasy-baseball, fantasy-basketball, gideon-sports-brief
-    expect(filters.statuses.find((s) => s.value === "unknown")?.count).toBe(7);
+    expect(filters.statuses.find((s) => s.value === "unknown")?.count).toBe(9);
     expect(filters.statuses.find((s) => s.value === "disabled")?.count).toBe(7);
   });
 
   it("filters by owner_agent", () => {
     const res = listLoops(NOW, { owner_agent: "sentinel" });
-    expect(res.loops.map((l) => l.slug)).toEqual(["sentinel-verification-2h"]);
+    expect(res.loops.map((l) => l.slug).sort()).toEqual(["sentinel-verification-2h", "task-reconciliation"]);
   });
 
   it("filters by kind", () => {
     const res = listLoops(NOW, { kind: "report" });
     expect(res.loops.every((l: LoopSummary) => l.kind === "report")).toBe(true);
-    expect(res.loops).toHaveLength(7);
+    expect(res.loops).toHaveLength(8);
   });
 
   it("filters by health status", () => {
     expect(listLoops(NOW, { status: "disabled" }).loops).toHaveLength(7);
-    expect(listLoops(NOW, { status: "unknown" }).loops).toHaveLength(7);
+    expect(listLoops(NOW, { status: "unknown" }).loops).toHaveLength(9);
   });
 
   it("filters by project_phid personal (the Gideon sports agent loops)", () => {
@@ -218,6 +225,8 @@ describe("listLoops", () => {
       "library-research",
       "maestra-product-log",
       "sentinel-verification-2h",
+      "surface-feeder",
+      "task-reconciliation",
       "ux-research",
     ]);
   });
@@ -240,7 +249,7 @@ describe("loopsSummary", () => {
   it("reports honest registry-only rollups (no runs yet)", () => {
     const s = loopsSummary(NOW);
     expect(s.schema_version).toBe("loops-dashboard-summary-v1");
-    expect(s.total_enabled).toBe(7);
+    expect(s.total_enabled).toBe(9);
     expect(s.healthy_count).toBe(0);
     expect(s.degraded_count).toBe(0);
     expect(s.failed_count).toBe(0);

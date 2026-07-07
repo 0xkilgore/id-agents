@@ -72,7 +72,7 @@ describe('GET /loops registry routes', () => {
     try { fs.rmSync(workDir, { recursive: true, force: true }); } catch { /* ignore */ }
   });
 
-  it('GET /loops returns the seed catalog list envelope (all 14 loops)', async () => {
+  it('GET /loops returns the seed catalog list envelope (all 16 loops)', async () => {
     const res = await fetch(`${baseUrl}/loops`);
     expect(res.status).toBe(200);
     const body = await res.json() as any;
@@ -82,7 +82,7 @@ describe('GET /loops registry routes', () => {
     // the seed catalog), so the envelope reports `mixed`. With an empty
     // loop_runs table every loop rolls up to honest unknown/disabled — no fixture.
     expect(body.source).toBe('mixed');
-    expect(body.loops).toHaveLength(14);
+    expect(body.loops).toHaveLength(16);
     expect(body.filters.owners.length).toBeGreaterThan(0);
     // every row carries the read-model identity + real (runs-derived) health
     for (const l of body.loops) {
@@ -97,7 +97,7 @@ describe('GET /loops registry routes', () => {
   it('GET /loops?owner_agent= filters the list', async () => {
     const res = await fetch(`${baseUrl}/loops?owner_agent=sentinel`);
     const body = await res.json() as any;
-    expect(body.loops.map((l: any) => l.slug)).toEqual(['sentinel-verification-2h']);
+    expect(body.loops.map((l: any) => l.slug).sort()).toEqual(['sentinel-verification-2h', 'task-reconciliation']);
   });
 
   it('GET /loops/summary returns the dashboard rollup', async () => {
@@ -106,7 +106,28 @@ describe('GET /loops registry routes', () => {
     const body = await res.json() as any;
     expect(body.ok).toBe(true);
     expect(body.schema_version).toBe('loops-dashboard-summary-v1');
-    expect(body.total_enabled).toBe(7);
+    expect(body.total_enabled).toBe(9);
+  });
+
+  it('GET /loops/reports/due returns report obligations with status and proof fields', async () => {
+    const res = await fetch(`${baseUrl}/loops/reports/due?now=2026-07-07T21:00:00.000Z`);
+    expect(res.status).toBe(200);
+    const body = await res.json() as any;
+    expect(body.ok).toBe(true);
+    expect(body.schema_version).toBe('report-facts-v1');
+    expect(body.definitions.map((d: any) => d.report_key)).toContain('kapelle:sentinel-verification-2h');
+    expect(body.definitions.map((d: any) => d.report_key)).toContain('kapelle:surface-feeder-6h');
+    expect(body.definitions.map((d: any) => d.report_key)).toContain('kapelle:task-reconciliation-6h');
+    const sentinel = body.runs.find((r: any) => r.report_key === 'kapelle:sentinel-verification-2h');
+    expect(sentinel).toMatchObject({
+      status: 'late',
+      reason: 'no_run_recorded_past_grace_window',
+      loop_run_phid: null,
+      artifact_refs: [],
+      ref_proof: [],
+    });
+    expect(body.owed_now.map((r: any) => r.report_key)).toContain('kapelle:sentinel-verification-2h');
+    expect(body.summary.late).toBeGreaterThan(0);
   });
 
   it('GET /loops/:ref resolves by slug and by phid; 404 otherwise', async () => {

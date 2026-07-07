@@ -178,6 +178,7 @@ import { DEFAULT_RECOVERY_CONFIG } from './dispatch-recovery/classifier.js';
 import { makeGitCommitEvidenceProbe } from './dispatch-recovery/git-commit-evidence.js';
 import { listLoops, getLoop, loopsSummary } from './loops/registry.js';
 import { buildLoopsList, buildLoopsSummary, buildLoopSummaryWithHealth } from './loops/rollup.js';
+import { buildReportsDue } from './loops/report-facts.js';
 import {
   migrateLoopsTables,
   seedLoopsFromRegistry,
@@ -4295,6 +4296,29 @@ export class AgentManagerDb {
           team_id: teamId,
         });
         return res.json({ ok: true, ...summary });
+      } catch (err) {
+        return res.status(500).json({
+          ok: false,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    });
+
+    // GET /loops/reports/due — scheduler/report facts for dashboard/API:
+    // which report definitions are owed now, stale, done, failed, or skipped,
+    // with run/artifact/ref proof for each obligation.
+    this.managementApp.get('/loops/reports/due', async (req, res) => {
+      try {
+        const teamId =
+          typeof req.query.team_id === 'string' && req.query.team_id.length > 0
+            ? req.query.team_id
+            : null;
+        const nowIso =
+          typeof req.query.now === 'string' && req.query.now.length > 0
+            ? req.query.now
+            : new Date().toISOString();
+        const body = await buildReportsDue(this.db.adapter, nowIso, { team_id: teamId });
+        return res.json({ ok: true, ...body });
       } catch (err) {
         return res.status(500).json({
           ok: false,
