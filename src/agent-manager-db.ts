@@ -7489,6 +7489,38 @@ export class AgentManagerDb {
       }
     });
 
+    this.managementApp.patch('/tasks/:ref', async (req, res) => {
+      try {
+        const { id: teamId } = await this.getTeam(req);
+        const body = req.body || {};
+        const { task, error } = await this.resolveTaskRef(req.params.ref, teamId);
+        if (!task) return res.status(404).json({ error: error || `Task "${req.params.ref}" not found` });
+
+        if (task.team_id && task.team_id !== teamId) {
+          return res.status(404).json({ error: `Task "${req.params.ref}" not found` });
+        }
+
+        const patch = this.parseTaskFieldPatch(body);
+        if (!patch.ok) return res.status(400).json({ error: patch.error });
+        if (!patch.changed) {
+          return res.status(400).json({ error: 'no_supported_task_fields' });
+        }
+
+        const next = this.applyTaskFieldPatch(task, patch.fields);
+        await this.db.tasks.updateFields(task.id, {
+          title: next.title,
+          description: next.description,
+          updated_at: Math.floor(Date.now() / 1000),
+        });
+
+        const updated = await this.db.tasks.getByNameForTeam(task.name, teamId);
+        res.json({ ok: true, task: await this.buildTaskResult(updated!, teamId) });
+      } catch (err: any) {
+        console.error('[Manager] Error in PATCH /tasks/:ref:', err);
+        res.status(500).json({ error: err?.message || 'Internal server error' });
+      }
+    });
+
     this.managementApp.post('/tasks/:ref/claim', async (req, res) => {
       try {
         let { id: teamId } = await this.getTeam(req);
@@ -8249,6 +8281,105 @@ export class AgentManagerDb {
       updatedAt: task.updated_at,
       completedAt: task.completed_at,
     };
+  }
+
+  private parseTaskFieldPatch(body: Record<string, unknown>): {
+    ok: true;
+    changed: boolean;
+    fields: {
+      priority?: 'high' | 'med' | 'low' | '';
+      due?: string;
+      note?: string;
+    };
+  } | { ok: false; error: string } {
+    const fields: {
+      priority?: 'high' | 'med' | 'low' | '';
+      due?: string;
+      note?: string;
+    } = {};
+
+    if (body.priority !== undefined) {
+      if (body.priority !== '' && body.priority !== 'high' && body.priority !== 'med' && body.priority !== 'low') {
+        return { ok: false, error: 'priority must be one of high|med|low|""' };
+      }
+      fields.priority = body.priority;
+    }
+
+    if (body.due !== undefined) {
+      if (typeof body.due !== 'string' || (body.due !== '' && !/^\d{4}-\d{2}-\d{2}$/.test(body.due))) {
+        return { ok: false, error: 'due must be YYYY-MM-DD or ""' };
+      }
+      fields.due = body.due;
+    }
+
+    if (body.note !== undefined) {
+      if (typeof body.note !== 'string') {
+        return { ok: false, error: 'note must be a string' };
+      }
+      fields.note = body.note.trim();
+    }
+
+    return { ok: true, changed: Object.keys(fields).length > 0, fields };
+  }
+
+  private applyTaskFieldPatch(
+    task: Pick<TaskRow, 'title' | 'description'>,
+    fields: {
+      priority?: 'high' | 'med' | 'low' | '';
+      due?: string;
+      note?: string;
+    },
+  ): { title: string; description: string | null } {
+    let title = task.title;
+    let description = task.description;
+
+    if (fields.priority !== undefined) {
+      ({ title, description } = this.replaceTaskToken(title, description, /(?:^|\s)!(high|med|low)\b/gi, fields.priority ? `!${fields.priority}` : ''));
+    }
+
+    if (fields.due !== undefined) {
+      ({ title, description } = this.replaceTaskToken(title, description, /\bdue:\d{4}-\d{2}-\d{2}\b/gi, fields.due ? `due:${fields.due}` : ''));
+    }
+
+    if (fields.note !== undefined && fields.note.length > 0) {
+      description = description && description.trim().length > 0
+        ? `${description.trimEnd()}\n${fields.note}`
+        : fields.note;
+    }
+
+    return { title, description };
+  }
+
+  private replaceTaskToken(
+    title: string,
+    description: string | null,
+    token: RegExp,
+    replacement: string,
+  ): { title: string; description: string | null } {
+    const clean = (value: string) => value.replace(/\s{2,}/g, ' ').trim();
+    token.lastIndex = 0;
+
+    if (token.test(title)) {
+      token.lastIndex = 0;
+      return {
+        title: clean(title.replace(token, replacement ? ` ${replacement}` : '')),
+        description,
+      };
+    }
+
+    if (description) {
+      token.lastIndex = 0;
+      if (token.test(description)) {
+        token.lastIndex = 0;
+        return {
+          title,
+          description: description.replace(token, replacement).replace(/[ \t]{2,}/g, ' ').trimEnd(),
+        };
+      }
+    }
+
+    if (!replacement) return { title: clean(title.replace(token, '')), description };
+    return { title: clean(`${title} ${replacement}`), description };
   }
 
   /**
