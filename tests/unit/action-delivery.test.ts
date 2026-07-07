@@ -45,6 +45,25 @@ describe("createActionDeliverer", () => {
     expect(runCalls).toBe(1); // run() invoked exactly ONCE across both attempts
   });
 
+  it("a same-key retry after timeout reuses the original failed delivery", async () => {
+    const { deliverAction } = createActionDeliverer();
+    let runCalls = 0;
+    const run = async () => {
+      runCalls += 1;
+      await sleep(40);
+      throw new Error(`failed-${runCalls}`);
+    };
+
+    const first = await deliverAction({ idempotency_key: "slow-fail", timeout_ms: 5, run });
+    expect(first.status).toBe("timed_out");
+
+    const second = await deliverAction({ idempotency_key: "slow-fail", timeout_ms: 500, run });
+    expect(second.status).toBe("failed");
+    expect(second.error).toBe("failed-1");
+    expect(second.deduped).toBe(true);
+    expect(runCalls).toBe(1);
+  });
+
   it("concurrent same-key calls share one delivery (idempotent fan-in)", async () => {
     const { deliverAction } = createActionDeliverer();
     let runCalls = 0;

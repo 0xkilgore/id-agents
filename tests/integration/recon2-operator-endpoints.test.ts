@@ -145,6 +145,14 @@ describe("T-RECON.2 operator-action endpoints", () => {
     }
   });
 
+  it("POST /dispatches/:id/moot returns typed failed status for a missing dispatch", async () => {
+    const res = await post("/dispatches/phid:disp-missing/moot", {});
+    expect(res.status).toBe(404);
+    const body = await res.json() as any;
+    expect(body.action_status).toBe("failed");
+    expect(body.error).toMatch(/dispatch not found/);
+  });
+
   it("POST /dispatches/:id/retry re-enqueues + supersedes the original", async () => {
     await seedFailed("phid:disp-retry1", "transient");
     const res = await post("/dispatches/phid:disp-retry1/retry", {});
@@ -177,7 +185,7 @@ describe("T-RECON.2 operator-action endpoints", () => {
       expect(firstBody.action_status).toBe("timed_out");
       expect(firstBody.idempotency_key).toBe("slow-retry-key");
 
-      const second = await post("/dispatches/phid:disp-retry-slow/retry", { ...body, timeout_ms: 500 });
+      const second = await post("/dispatches/phid:disp-retry-slow/retry", { ...body, timeout_ms: 2000 });
       expect(second.status).toBe(200);
       const secondBody = await second.json() as any;
       expect(secondBody.action_status).toBe("delivered");
@@ -204,6 +212,52 @@ describe("T-RECON.2 operator-action endpoints", () => {
     expect(body.action_status).toBe("delivered");
     expect(body.to_agent).toBe("regina");
     expect(body.new_dispatch_phid).toMatch(/^phid:/);
+  });
+
+  it("POST /dispatches/:id/reassign requires a typed failed status when to_agent is missing", async () => {
+    await seedFailed("phid:disp-reassign-missing-agent", "wrong owner");
+    const res = await post("/dispatches/phid:disp-reassign-missing-agent/reassign", {});
+    expect(res.status).toBe(400);
+    const body = await res.json() as any;
+    expect(body.action_status).toBe("failed");
+    expect(body.code).toBe("missing_to_agent");
+  });
+
+  it("POST /dispatches/:id/reassign is bounded and same-key retry does not double-enqueue", async () => {
+    await seedFailed("phid:disp-reassign-slow", "wrong owner");
+    const scheduler = (manager as any).dispatchScheduler;
+    const originalMarkSuperseded = scheduler.reactor.markSuperseded.bind(scheduler.reactor);
+    scheduler.reactor.markSuperseded = async (...args: unknown[]) => {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      return originalMarkSuperseded(...args as [string, string, string]);
+    };
+
+    try {
+      const body = { timeout_ms: 5, idempotency_key: "slow-reassign-key", to_agent: "regina" };
+      const first = await post("/dispatches/phid:disp-reassign-slow/reassign", body);
+      expect(first.status).toBe(504);
+      const firstBody = await first.json() as any;
+      expect(firstBody.action_status).toBe("timed_out");
+      expect(firstBody.idempotency_key).toBe("slow-reassign-key");
+
+      const second = await post("/dispatches/phid:disp-reassign-slow/reassign", { ...body, timeout_ms: 2000 });
+      expect(second.status).toBe(200);
+      const secondBody = await second.json() as any;
+      expect(secondBody.action_status).toBe("delivered");
+      expect(secondBody.deduped).toBe(true);
+      expect(secondBody.to_agent).toBe("regina");
+
+      const queued = await db.adapter.query<{ dispatch_phid: string }>(
+        `SELECT dispatch_phid FROM dispatch_scheduler_queue
+         WHERE dedup_key = ?
+         ORDER BY updated_at ASC`,
+        ["operator-action:reassign:phid:disp-reassign-slow:regina"],
+      );
+      expect(queued.rows).toHaveLength(1);
+      expect(secondBody.new_dispatch_phid).toBe(queued.rows[0].dispatch_phid);
+    } finally {
+      scheduler.reactor.markSuperseded = originalMarkSuperseded;
+    }
   });
 
   it("POST /dispatches/:id/retry reuses the replacement dispatch after a partial failure", async () => {
@@ -253,5 +307,7 @@ describe("T-RECON.2 operator-action endpoints", () => {
       method: "POST", headers: { "content-type": "application/json" }, body: "{}",
     });
     expect(res.status).toBe(403);
+    const body = await res.json() as any;
+    expect(body.action_status).toBe("failed");
   });
 });

@@ -3001,7 +3001,7 @@ export class AgentManagerDb {
     // ────────────────────────────────────────────────────────────────
     const requireScheduler = (res: express.Response): boolean => {
       if (!this.dispatchScheduler) {
-        res.status(503).json({ ok: false, error: 'dispatch_scheduler_not_initialised' });
+        res.status(503).json({ ok: false, action_status: 'failed' satisfies ActionStatus, error: 'dispatch_scheduler_not_initialised' });
         return false;
       }
       return true;
@@ -3032,12 +3032,12 @@ export class AgentManagerDb {
 
     // POST /dispatches/:id/moot — dismiss a dead failure out of NEEDS-YOU.
     this.managementApp.post('/dispatches/:dispatch_id/moot', async (req, res) => {
-      if (!this.isAdminRequest(req)) return res.status(403).json({ ok: false, error: 'unauthorized', code: 'unauthorized' });
+      if (!this.isAdminRequest(req)) return res.status(403).json({ ok: false, action_status: 'failed' satisfies ActionStatus, error: 'unauthorized', code: 'unauthorized' });
       if (!requireScheduler(res)) return;
       try {
         const dispatchIdRaw = normalizeDispatchIdInput(req.params.dispatch_id);
         const doc = dispatchIdRaw ? await resolveDispatchDocForMark(dispatchIdRaw) : null;
-        if (!doc) return res.status(404).json({ ok: false, error: `dispatch not found: ${dispatchIdRaw}` });
+        if (!doc) return res.status(404).json({ ok: false, action_status: 'failed' satisfies ActionStatus, error: `dispatch not found: ${dispatchIdRaw}` });
         const reason = typeof req.body?.reason === 'string' && req.body.reason.trim()
           ? req.body.reason.trim()
           : 'operator dismissed (moot)';
@@ -3096,16 +3096,16 @@ export class AgentManagerDb {
     // POST /dispatches/:id/retry — re-enqueue the same work; supersede the old.
     // POST /dispatches/:id/reassign { to_agent } — re-enqueue to a new agent.
     const retryOrReassign = (kind: 'retry' | 'reassign') => async (req: express.Request, res: express.Response) => {
-      if (!this.isAdminRequest(req)) return res.status(403).json({ ok: false, error: 'unauthorized', code: 'unauthorized' });
+      if (!this.isAdminRequest(req)) return res.status(403).json({ ok: false, action_status: 'failed' satisfies ActionStatus, error: 'unauthorized', code: 'unauthorized' });
       if (!requireScheduler(res)) return;
       try {
         const dispatchIdRaw = normalizeDispatchIdInput(req.params.dispatch_id);
         const doc = dispatchIdRaw ? await resolveDispatchDocForMark(dispatchIdRaw) : null;
-        if (!doc) return res.status(404).json({ ok: false, error: `dispatch not found: ${dispatchIdRaw}` });
+        if (!doc) return res.status(404).json({ ok: false, action_status: 'failed' satisfies ActionStatus, error: `dispatch not found: ${dispatchIdRaw}` });
         let toAgent = doc.to_agent;
         if (kind === 'reassign') {
           const requested = typeof req.body?.to_agent === 'string' ? req.body.to_agent.trim() : '';
-          if (!requested) return res.status(400).json({ ok: false, error: 'to_agent required', code: 'missing_to_agent' });
+          if (!requested) return res.status(400).json({ ok: false, action_status: 'failed' satisfies ActionStatus, error: 'to_agent required', code: 'missing_to_agent' });
           toAgent = requested;
         }
         if (doc.recovery_status === 'moot') {
