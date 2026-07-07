@@ -127,6 +127,22 @@ For build dispatches (dispatches that include \`repo\` + \`branch\` metadata), p
 
 The canonical helper is the \`id-agents promote-to-main\` subcommand. It handles preflight (read-only by default), strategy selection (fast_forward / merge_commit / squash), the merge, the smoke command, the push, and the remote-tip verification. Output is JSON that drops directly into the \`/agent-done.promotion.repos[]\` array.
 
+\`id-agents promote-scoped-commit\` is the narrow helper for the recurring dirty/divergent branch case where a single scoped fix commit must land but the source branch also has unrelated ahead commits or dirty worktree state. It creates a clean temporary clone from \`origin/main\`, cherry-picks only the named single-parent commit with provenance, runs the required smoke in that clean clone, verifies the clean branch is exactly one commit ahead, then delegates the final merge/push/remote-tip check to \`promote-to-main --json --execute\`. It never force-pushes and refuses unrelated commit promotion.
+
+\`\`\`bash
+id-agents promote-scoped-commit \\
+  --repo "$REPO" \\
+  --commit "$FIX_COMMIT" \\
+  --clean-branch "scoped-promotion/$FIX_COMMIT" \\
+  --base main \\
+  --remote origin \\
+  --dispatch-id "$DISPATCH_ID" \\
+  --agent "$AGENT_NAME" \\
+  --smoke "npm test -- tests/unit/foo.test.ts" \\
+  --json \\
+  --execute
+\`\`\`
+
 \`\`\`bash
 id-agents promote-to-main \\
   --repo "$REPO" \\

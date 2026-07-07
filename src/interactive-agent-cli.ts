@@ -30,6 +30,7 @@ import {
 import { maybeRunOutputsCli } from './cli/outputs.js';
 import { maybeRunCommentsCli } from './cli/comments.js';
 import { maybeRunPromoteToMainCli } from './cli/promote-to-main.js';
+import { maybeRunPromoteScopedCommitCli } from './cli/promote-scoped-commit.js';
 import { waitForAgentReady } from './cli/agent-readiness.js';
 
 const oneShotSyncExit = await maybeRunWorkspaceSyncCli(process.argv.slice(2));
@@ -51,6 +52,10 @@ if (oneShotCommentsExit !== null) {
 const oneShotPromoteExit = await maybeRunPromoteToMainCli(process.argv.slice(2));
 if (oneShotPromoteExit !== null) {
   process.exit(oneShotPromoteExit);
+}
+const oneShotPromoteScopedExit = await maybeRunPromoteScopedCommitCli(process.argv.slice(2));
+if (oneShotPromoteScopedExit !== null) {
+  process.exit(oneShotPromoteScopedExit);
 }
 
 const colors = {
