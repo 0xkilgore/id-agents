@@ -192,6 +192,7 @@ import {
 } from './loops/manual-trigger.js';
 import { ACTIVE_LOOP_RUN_STATUSES } from './loops/types.js';
 import { loadModelPolicy, type ModelPolicyService } from './model-policy/policy.js';
+import { mountRuntimePolicyRoutes } from './model-policy/runtime-policy-routes.js';
 import { loadApprovalPolicy, type ApprovalPolicyService } from './approval-policy/policy.js';
 import { resolveManagerBindHost } from './manager-bind-host.js';
 import { getBuildStatusCached, loadBuildStatus, type BuildStatus } from './build-info.js';
@@ -4460,6 +4461,15 @@ export class AgentManagerDb {
       } catch (err) {
         return res.status(500).json({ ok: false, error: err instanceof Error ? err.message : String(err) });
       }
+    });
+
+    // Multi-LLM Slice B: database-backed runtime policy read API. This exposes
+    // allowed provider lanes and ordered fallback chains per logical agent,
+    // plus the current config-derived effective model policy for comparison.
+    mountRuntimePolicyRoutes(this.managementApp, {
+      adapter: this.db.adapter,
+      getTeamId: async (req) => (await this.getTeam(req)).id,
+      getModelPolicy: () => this.modelPolicy,
     });
 
     this.managementApp.get('/dispatches/:dispatch_id/detail', async (req, res) => {

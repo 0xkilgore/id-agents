@@ -328,6 +328,27 @@ export async function migratePostgres(adapter: DbAdapter): Promise<void> {
     WHERE token_id IS NOT NULL;
   `);
 
+  // Multi-LLM Slice B: runtime policy read model. A logical agent ("*" for
+  // default) can declare allowed provider lanes and an ordered runtime/model
+  // fallback chain without baking Claude-only assumptions into code.
+  await adapter.query(`
+    CREATE TABLE IF NOT EXISTS agent_runtime_policy (
+      team_id uuid NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+      logical_agent text NOT NULL,
+      allowed_lanes_json jsonb NOT NULL DEFAULT '[]'::jsonb,
+      fallback_order_json jsonb NOT NULL DEFAULT '[]'::jsonb,
+      enabled boolean NOT NULL DEFAULT true,
+      note text,
+      created_at bigint NOT NULL,
+      updated_at bigint NOT NULL,
+      PRIMARY KEY (team_id, logical_agent)
+    );
+  `);
+  await adapter.query(`
+    CREATE INDEX IF NOT EXISTS agent_runtime_policy_team_idx
+    ON agent_runtime_policy(team_id, enabled, logical_agent);
+  `);
+
   // 10) Migrate existing registry JSONB to new columns
   await adapter.query(`
     UPDATE agents
