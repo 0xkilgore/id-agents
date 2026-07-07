@@ -231,6 +231,16 @@ function gitRev(repoDir: string, ref: string): string | null {
   return /^[0-9a-f]{7,40}$/.test(sha) ? sha : null;
 }
 
+/** Resolve the pushed main tip directly from the remote. Falls back elsewhere on failure. */
+function gitRemoteMainSha(repoDir: string): string | null {
+  const r = runWithTimeout("git", ["-C", repoDir, "ls-remote", "--exit-code", "origin", "refs/heads/main"], {
+    timeoutMs: 5000,
+  });
+  if (!r.ok) return null;
+  const sha = r.stdout.trim().split(/\s+/)[0] ?? "";
+  return /^[0-9a-f]{7,40}$/.test(sha) ? sha : null;
+}
+
 function gitBranchName(repoDir: string): string | null {
   const r = runWithTimeout("git", ["-C", repoDir, "branch", "--show-current"], { timeoutMs: 5000 });
   if (!r.ok) return null;
@@ -304,7 +314,7 @@ export function loadBuildStatus(opts: LoadBuildStatusOptions): BuildStatus {
   }
 
   const local_main_sha = gitRev(opts.repoDir, "main") ?? gitRev(opts.repoDir, "HEAD");
-  const origin_main_sha = gitRev(opts.repoDir, "origin/main");
+  const origin_main_sha = gitRemoteMainSha(opts.repoDir) ?? gitRev(opts.repoDir, "origin/main");
   const source_branch_sha = gitRev(opts.repoDir, "HEAD");
   const source_branch_name = gitBranchName(opts.repoDir);
 

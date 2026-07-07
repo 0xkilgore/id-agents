@@ -2,6 +2,10 @@
 // that surfaces on /health + /monitor/fleet.
 
 import { describe, it, expect } from "vitest";
+import { execFileSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 import {
   classifyBuildFreshness,
   computeBuildStatus,
@@ -261,5 +265,50 @@ describe("loadBuildStatus (runtime resolution against this repo)", () => {
     } else {
       expect(s.source).toBe("unknown");
     }
+  });
+
+  it("uses the pushed remote main tip even when local origin/main has not been fetched", () => {
+    const root = mkdtempSync(join(tmpdir(), "build-info-remote-tip-"));
+    const remote = join(root, "origin.git");
+    const seed = join(root, "seed");
+    const manager = join(root, "manager");
+    const dist = join(manager, "dist");
+
+    const git = (cwd: string, args: string[]) =>
+      execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
+
+    execFileSync("git", ["init", "--bare", remote], { stdio: "ignore" });
+    execFileSync("git", ["clone", remote, seed], { stdio: "ignore" });
+    git(seed, ["checkout", "-b", "main"]);
+    git(seed, ["config", "user.email", "test@example.com"]);
+    git(seed, ["config", "user.name", "Test User"]);
+    writeFileSync(join(seed, "package.json"), "{}\n", "utf8");
+    git(seed, ["add", "package.json"]);
+    git(seed, ["commit", "-m", "initial"]);
+    git(seed, ["push", "-u", "origin", "main"]);
+
+    execFileSync("git", ["clone", remote, manager], { stdio: "ignore" });
+    git(manager, ["checkout", "main"]);
+    const oldSha = git(manager, ["rev-parse", "HEAD"]);
+    mkdirSync(dist, { recursive: true });
+    writeFileSync(
+      join(dist, "build-info.json"),
+      JSON.stringify({ build_sha: oldSha, build_time: "2026-07-07T00:00:00.000Z" }, null, 2) + "\n",
+      "utf8",
+    );
+
+    writeFileSync(join(seed, "package.json"), "{\"scripts\":{\"start\":\"node dist/index.js\"}}\n", "utf8");
+    git(seed, ["add", "package.json"]);
+    git(seed, ["commit", "-m", "promote build-affecting change"]);
+    git(seed, ["push", "origin", "main"]);
+    const newSha = git(seed, ["rev-parse", "HEAD"]);
+
+    expect(git(manager, ["rev-parse", "origin/main"])).toBe(oldSha);
+
+    const s = loadBuildStatus({ repoDir: manager, distDir: dist });
+    expect(s.origin_main_sha).toBe(newSha);
+    expect(s.build_sha).toBe(oldSha);
+    expect(s.behind_origin).toBe(true);
+    expect(s.freshness.promoted_main_sha).toBe(newSha);
   });
 });
