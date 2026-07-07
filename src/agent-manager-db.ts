@@ -11725,6 +11725,26 @@ export class AgentManagerDb {
           console.warn('[Manager] DV3 doc-model search routes failed to mount:', err instanceof Error ? err.message : String(err));
         }
 
+        // Local-first read-model search v0 — shared frontend/server contract for
+        // artifacts, projects, and tasks. The core contract is storage-neutral;
+        // this manager mount feeds it from durable tables.
+        try {
+          const [{ mountLocalSearchRoutes }, { loadLocalSearchDocuments }] = await Promise.all([
+            import('./local-search/routes.js'),
+            import('./local-search/db-documents.js'),
+          ]);
+          mountLocalSearchRoutes(this.managementApp, {
+            loadDocuments: () => loadLocalSearchDocuments(this.db.adapter),
+            loadHealth: async () => ({
+              state: "ready",
+              indexedAt: new Date().toISOString(),
+            }),
+          });
+          console.log('[Manager] Local read-model /read-model/search route mounted');
+        } catch (err) {
+          console.warn('[Manager] Local read-model search routes failed to mount:', err instanceof Error ? err.message : String(err));
+        }
+
         // Project tracks conformance read-model — project pages use this to
         // group goals/tracks/tasks/artifacts/dispatches and surface taxonomy drift.
         try {
