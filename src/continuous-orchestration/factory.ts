@@ -148,7 +148,16 @@ export function createContinuousOrchestrationDaemon(opts: BuildDaemonOptions): {
  */
 export function buildPoolRouting(env: NodeJS.ProcessEnv = process.env): PoolRouting {
   const registry = BuildPoolRegistry.load(env);
-  const poolMembers = new Set(registry.list().flatMap((p) => p.members));
+  const legacyPoolOptInAgents = new Set(["frontend-ui-codex", "frontend-qa-cursor"]);
+  const explicitPoolRequest = (raw: string | undefined): ResolvedPool | null => {
+    const normalized = raw?.trim().toLowerCase();
+    if (!normalized?.startsWith("pool:")) return null;
+    const requestedPoolId = normalized.slice("pool:".length);
+    const pool = registry.list().find((candidate) => candidate.pool_id === requestedPoolId);
+    return pool
+      ? { pool_id: pool.pool_id, repo_root: pool.repo_root, max_parallel: pool.max_parallel, members: [...pool.members] }
+      : null;
+  };
   const looksLikeKapelleFrontendWork = (item: BacklogItem): boolean => {
     const haystack = `${item.title}\n${item.dispatch_body ?? ""}\n${item.write_scope.join("\n")}`.toLowerCase();
     return (
@@ -166,15 +175,9 @@ export function buildPoolRouting(env: NodeJS.ProcessEnv = process.env): PoolRout
     poolForItem: (item: BacklogItem): ResolvedPool | null => {
       const trackPool = item.track ? registry.resolvePool(item.track) : undefined;
       const requestedAgent = item.to_agent?.trim();
-      if (requestedAgent && !poolMembers.has(requestedAgent)) return null;
-      if (trackPool?.pool_id === "backend" && requestedAgent && trackPool.members.includes(requestedAgent)) {
-        return {
-          pool_id: trackPool.pool_id,
-          repo_root: trackPool.repo_root,
-          max_parallel: trackPool.max_parallel,
-          members: [requestedAgent],
-        };
-      }
+      const requestedPool = explicitPoolRequest(requestedAgent);
+      if (requestedPool) return requestedPool;
+      if (requestedAgent && !legacyPoolOptInAgents.has(requestedAgent)) return null;
       const p = looksLikeKapelleFrontendWork(item) ? registry.byId("frontend") : trackPool;
       if (!p) return null;
       return { pool_id: p.pool_id, repo_root: p.repo_root, max_parallel: p.max_parallel, members: [...p.members] };

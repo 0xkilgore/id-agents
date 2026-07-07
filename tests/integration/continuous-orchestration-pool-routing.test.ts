@@ -177,27 +177,51 @@ describe("SOAK — backlog drains in parallel with no strangle", () => {
 });
 
 describe("backend pool routing (real registry)", () => {
-  it("preserves explicit non-pool to_agent values instead of reassigning them to a build pool", async () => {
-    const explicitAgents = ["cto", "maestra", "sentinel"];
-    for (let i = 0; i < explicitAgents.length; i++) {
+  it("preserves wave17/wave18 explicit kapelle-site to_agent values instead of reassigning them to the frontend pool", async () => {
+    const explicitRows = [
+      {
+        wave: "wave17",
+        agent: "cto",
+        title: "wave17 cto review - kapelle-site release routing",
+        body: "Review kapelle-site /ops release routing without changing owner.",
+        scope: "/repo/kapelle-site/wave17-cto",
+      },
+      {
+        wave: "wave18",
+        agent: "regina",
+        title: "wave18 regina fix - kapelle-site approval console",
+        body: "Fix kapelle-site approval console wiring in the Regina lane.",
+        scope: "/repo/kapelle-site/wave18-regina",
+      },
+      {
+        wave: "wave18",
+        agent: "roger",
+        title: "wave18 roger audit - kapelle-site orchestration telemetry",
+        body: "Audit kapelle-site orchestration telemetry from the Roger lane.",
+        scope: "/repo/kapelle-site/wave18-roger",
+      },
+    ];
+    for (let i = 0; i < explicitRows.length; i++) {
+      const row = explicitRows[i];
       await seedBuildItem(i, {
-        title: `explicit ${explicitAgents[i]} /ops dashboard scope ${i}`,
-        track: "T-ORCH",
-        to_agent: explicitAgents[i],
-        dispatch_body: `Scope the kapelle-site /ops artifact dashboard path without changing owner ${i}`,
-        write_scope: [`/repo/id-agents/explicit-${i}`],
+        title: row.title,
+        track: "T-UI",
+        to_agent: row.agent,
+        dispatch_body: `[${row.wave}] ${row.body}`,
+        write_scope: [row.scope],
       });
     }
     const { daemon, fired } = makeDaemon({
       config: { max_in_flight: 10 },
-      pools: buildPoolRouting({ BUILD_POOL_BACKEND_MAX_PARALLEL: "5" }),
+      pools: buildPoolRouting({ BUILD_POOL_FRONTEND_MAX_PARALLEL: "6" }),
     });
     await daemon.setMode("running");
 
     const tick = await daemon.runTick();
 
-    expect(fired.map((i) => i.to_agent).sort()).toEqual([...explicitAgents].sort());
+    expect(fired.map((i) => i.to_agent).sort()).toEqual(explicitRows.map((row) => row.agent).sort());
     expect(fired.flatMap((i) => i.write_scope).every((s) => !s.includes("/.worktrees/"))).toBe(true);
+    expect(fired.flatMap((i) => i.write_scope).every((s) => s.includes("kapelle-site"))).toBe(true);
     expect(tick.decisions.some((d) => d.reason?.includes("pool frontend"))).toBe(false);
     expect(tick.decisions.some((d) => d.reason?.includes("pool backend"))).toBe(false);
   });

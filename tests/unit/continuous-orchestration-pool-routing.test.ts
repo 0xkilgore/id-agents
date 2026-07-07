@@ -67,6 +67,51 @@ describe("continuous orchestration pool routing", () => {
     expect(pool?.members).toEqual(["roger", "substrate-orch-codex", "substrate-api-codex"]);
   });
 
+  it("keeps wave17/wave18 explicit kapelle-site owners out of the frontend pool", () => {
+    const pools = buildPoolRouting({});
+    const rows = [
+      item({
+        item_id: "coitem_wave17_cto",
+        title: "wave17 cto review - kapelle-site release routing",
+        track: "T-UI",
+        to_agent: "cto",
+        dispatch_body: "Review the kapelle-site /ops release plan without changing owner.",
+        write_scope: ["/Users/kilgore/Dropbox/Code/kapelle-site"],
+      }),
+      item({
+        item_id: "coitem_wave18_regina",
+        title: "wave18 regina fix - kapelle-site approval console",
+        track: "T-SITE",
+        to_agent: "regina",
+        dispatch_body: "Fix kapelle-site approval console wiring in the Regina lane.",
+        write_scope: ["/Users/kilgore/Dropbox/Code/kapelle-site/app/ops"],
+      }),
+      item({
+        item_id: "coitem_wave18_roger",
+        title: "wave18 roger audit - kapelle-site orchestration telemetry",
+        track: "T-UI",
+        to_agent: "roger",
+        dispatch_body: "Audit kapelle-site orchestration telemetry from the Roger lane.",
+        write_scope: ["/Users/kilgore/Dropbox/Code/kapelle-site"],
+      }),
+    ];
+
+    expect(rows.map((row) => pools.poolForItem(row))).toEqual([null, null, null]);
+  });
+
+  it("routes an explicit pool sentinel to the frontend pool", () => {
+    const pools = buildPoolRouting({});
+    const pool = pools.poolForItem(
+      item({
+        to_agent: "pool:frontend",
+        write_scope: ["/Users/kilgore/Dropbox/Code/kapelle-site"],
+      }),
+    );
+
+    expect(pool?.pool_id).toBe("frontend");
+    expect(pool?.members).toContain("regina");
+  });
+
   it("honors a backend-track operator target instead of rerouting to frontend or roger", () => {
     const pools = buildPoolRouting({});
     const backendItem = item({
@@ -79,8 +124,7 @@ describe("continuous orchestration pool routing", () => {
     });
     const pool = pools.poolForItem(backendItem);
 
-    expect(pool?.pool_id).toBe("backend");
-    expect(pool?.members).toEqual(["substrate-api-codex"]);
+    expect(pool).toBeNull();
 
     const plan = planAdmission(
       [backendItem],
@@ -94,13 +138,11 @@ describe("continuous orchestration pool routing", () => {
         done_item_ids: new Set(),
         admit_limit: 1,
         pool_for: (it) => pools.poolForItem(it)?.pool_id ?? null,
-        pool_free_slots: new Map([["backend", 1]]),
-        pool_free_builders: new Map([["backend", pools.availableBuilders(pool!, new Set())]]),
       },
       defaultConfig(),
     );
 
     expect(plan.admit.map((it) => it.item_id)).toEqual(["coitem_backend_read_models"]);
-    expect(plan.assignments).toEqual({ coitem_backend_read_models: "substrate-api-codex" });
+    expect(plan.assignments).toEqual({});
   });
 });
