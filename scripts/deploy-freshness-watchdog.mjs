@@ -15,6 +15,11 @@ import { execSync, execFileSync } from 'node:child_process';
 import { existsSync, readFileSync, writeFileSync, appendFileSync, mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { decideWatchdogAction } from './lib/deploy-watchdog-decision.mjs';
+import {
+  DEFAULT_REDEPLOY_COMMAND,
+  classifyCloseout,
+  formatCloseoutMarkdown,
+} from './lib/deploy-watchdog-closeout.mjs';
 
 const HOME = process.env.HOME || '/Users/kilgore';
 const MANAGER_URL = process.env.DEPLOY_WATCHDOG_MANAGER_URL || 'http://localhost:4100';
@@ -56,6 +61,41 @@ async function getHealth() {
   } catch {
     return { ok: false };
   }
+}
+
+function getRemoteMainSha() {
+  try {
+    const out = execFileSync('git', ['ls-remote', 'origin', 'refs/heads/main'], {
+      cwd: CANE,
+      encoding: 'utf8',
+      timeout: 10000,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    }).trim();
+    const sha = out.split(/\s+/)[0] || null;
+    if (sha) return { sha, source: 'git ls-remote origin refs/heads/main' };
+  } catch (e) {
+    log(`WARN could not read remote main tip via ls-remote: ${e.message}`);
+  }
+  try {
+    const sha = sh('git rev-parse origin/main', { stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+    return { sha, source: 'git rev-parse origin/main' };
+  } catch (e) {
+    log(`WARN could not read origin/main: ${e.message}`);
+    return { sha: null, source: 'unavailable' };
+  }
+}
+
+async function getCloseoutEvidence() {
+  const [health, remote] = await Promise.all([getHealth(), Promise.resolve(getRemoteMainSha())]);
+  return {
+    healthOk: health.ok,
+    freshnessState: health.freshnessState ?? null,
+    buildSha: health.buildSha ?? null,
+    originMainSha: health.originMainSha ?? null,
+    remoteMainSha: remote.sha,
+    remoteMainSource: remote.source,
+    redeployCommand: DEFAULT_REDEPLOY_COMMAND,
+  };
 }
 
 function sh(cmd, opts = {}) {
@@ -132,9 +172,17 @@ async function runRedeploy() {
   // Gotcha 8.1 — build_sha == origin_main_sha + freshness fresh.
   await sleep(20000);
   const h = await getHealth();
-  if (!h.ok) throw new Error('post-restart /health unreadable (Gotcha 7: check /tmp/id-agents-manager.err + launchctl print)');
-  if (h.buildSha !== h.originMainSha) throw new Error(`build_sha ${h.buildSha} != origin_main_sha ${h.originMainSha}`);
-  if (h.freshnessState !== 'fresh') throw new Error(`freshness=${h.freshnessState} (expected fresh) after restart`);
+  const remote = getRemoteMainSha();
+  const closeout = classifyCloseout({
+    healthOk: h.ok,
+    freshnessState: h.freshnessState ?? null,
+    buildSha: h.buildSha ?? null,
+    originMainSha: h.originMainSha ?? null,
+    remoteMainSha: remote.sha,
+    remoteMainSource: remote.source,
+    redeployCommand: DEFAULT_REDEPLOY_COMMAND,
+  });
+  if (!closeout.ok) throw new Error(closeout.summary);
 
   // Gotcha 8.2 — prove fleet auth survived the restart (post-restart 401s are silent:
   // /health passes while every dispatch fails). An authenticated fleet-API call
@@ -148,7 +196,7 @@ async function runRedeploy() {
   }
   if (!authRes.ok) throw new Error(`post-restart /agents → HTTP ${authRes.status}`);
 
-  return { promotedSha: h.buildSha };
+  return { promotedSha: h.buildSha, closeoutEvidence: { ...h, remoteMainSha: remote.sha, remoteMainSource: remote.source } };
 }
 
 function writeArtifact(kind, body) {
@@ -213,16 +261,22 @@ async function main() {
   log('ACT: persistent stale_alerted confirmed — running gotchas redeploy sequence.');
   try {
     const { promotedSha } = await runRedeploy();
-    const ok = `# Deploy watchdog — REDEPLOY OK ${new Date().toISOString()}\n\nManager was stale_alerted for ${decision.nextConsecutiveStale} consecutive checks; redeployed to ${promotedSha} (build_sha==origin_main_sha, freshness fresh, fleet auth OK).`;
+    const closeoutEvidence = await getCloseoutEvidence();
+    const closeout = classifyCloseout(closeoutEvidence);
+    if (!closeout.ok) throw new Error(closeout.summary);
+    const ok = `# Deploy watchdog — REDEPLOY OK ${new Date().toISOString()}\n\nManager was stale_alerted for ${decision.nextConsecutiveStale} consecutive checks; redeployed to ${promotedSha} (build_sha==origin_main_sha, origin_main_sha==remote tip, freshness fresh, fleet auth OK).\n\n${formatCloseoutMarkdown(closeoutEvidence)}`;
     writeArtifact('redeploy', ok);
     await postNote(`✅ deploy-watchdog auto-redeployed the manager to ${promotedSha} (was stale_alerted 30+ min).`, 'normal');
     process.exitCode = 0;
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    const loud = `# ⛔ Deploy watchdog — REDEPLOY FAILED ${new Date().toISOString()}\n\nThe automated redeploy FAILED and the manager may be down or stale.\n\n**Error:** ${msg}\n\n**Do NOT assume the manager is healthy.** Manual redeploy per agent-platform/manager-redeploy-gotchas-20260702.md. Check /tmp/id-agents-manager.err and \`launchctl print gui/$(id -u)/${SVC}\`. Watchdog log: ${LOG}.`;
+    const closeoutEvidence = await getCloseoutEvidence();
+    const closeout = classifyCloseout(closeoutEvidence);
+    const escalation = closeout.escalation || `Manager state unknown after watchdog remediation. Run exactly: ${DEFAULT_REDEPLOY_COMMAND}`;
+    const loud = `# ⛔ Deploy watchdog — REDEPLOY FAILED ${new Date().toISOString()}\n\nThe automated redeploy FAILED and the manager may be down or stale.\n\n**Error:** ${msg}\n\n${formatCloseoutMarkdown(closeoutEvidence)}\n\n**Escalation command:**\n\n\`\`\`bash\n${DEFAULT_REDEPLOY_COMMAND}\n\`\`\`\n\nWatchdog log: ${LOG}. launchd state: \`launchctl print gui/$(id -u)/${SVC}\`.`;
     writeArtifact('FAILURE', loud);
     log(`REDEPLOY FAILED: ${msg}`);
-    await postNote(`⛔ deploy-watchdog FAILED to redeploy the manager: ${msg}. Manual intervention needed — see agent-platform/output/ failure artifact.`, 'time_sensitive');
+    await postNote(`⛔ deploy-watchdog closeout failed: ${msg}. ${escalation}`, 'time_sensitive');
     process.exitCode = 1;
   }
 }
