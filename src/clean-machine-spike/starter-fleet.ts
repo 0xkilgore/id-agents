@@ -11,9 +11,9 @@ import type { DeployConfig } from '../config-parser.js';
 import { resolveRuntime } from '../runtime/registry.js';
 import {
   resolveBundleBootConfig,
-  scanForChrisPaths,
+  scanForPrivateMachinePaths,
   type BundleBootConfig,
-  type ChrisPathFinding,
+  type PrivateMachinePathFinding,
 } from './boot-config.js';
 import { probeByoClaudeCredential, type ByoClaudeProbeResult } from './byo-claude.js';
 import { assessClaudeOnlyGraceful, type ClaudeOnlyGracefulResult } from './graceful.js';
@@ -31,7 +31,7 @@ export interface StarterFleetSmokeResult {
   agents: Array<{ name: string; runtime: string; model: string }>;
   credential: ByoClaudeProbeResult;
   graceful: ClaudeOnlyGracefulResult;
-  chrisPathFindings: ChrisPathFinding[];
+  privateMachinePathFindings: PrivateMachinePathFinding[];
   providerAssumptions: string[];
 }
 
@@ -84,7 +84,7 @@ export function evaluateSyntheticStrangerStarterFleet(
 ): StarterFleetSmokeResult {
   const boot = resolveBundleBootConfig(env);
   const fleet = buildClaudeOnlyStarterFleetConfig();
-  const chrisPathFindings = scanForChrisPaths(boot, env);
+  const privateMachinePathFindings = scanForPrivateMachinePaths(boot, env);
   const credential = probeByoClaudeCredential(env);
   const graceful = assessClaudeOnlyGraceful('claude-agent-sdk');
   const providerAssumptions = findNonClaudeProviderAssumptions(fleet);
@@ -102,7 +102,7 @@ export function evaluateSyntheticStrangerStarterFleet(
   });
 
   const ok =
-    chrisPathFindings.length === 0
+    privateMachinePathFindings.length === 0
     && credential.ok
     && graceful.graceful
     && providerAssumptions.length === 0;
@@ -120,7 +120,7 @@ export function evaluateSyntheticStrangerStarterFleet(
     agents,
     credential,
     graceful,
-    chrisPathFindings,
+    privateMachinePathFindings,
     providerAssumptions,
   };
 }

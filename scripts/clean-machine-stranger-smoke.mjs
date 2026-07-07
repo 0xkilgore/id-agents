@@ -27,7 +27,7 @@ const summary = {
   cockpit: result.cockpit,
   agents: result.agents,
   credentialSeams: result.credential.sources.map((source) => source.seam),
-  chrisPathFindings: result.chrisPathFindings,
+  privateMachinePathFindings: result.privateMachinePathFindings,
   providerAssumptions: result.providerAssumptions,
   claudeOnlyOffendingCodes: result.graceful.offendingCodes,
 };

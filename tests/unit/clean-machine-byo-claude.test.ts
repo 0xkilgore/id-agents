@@ -79,28 +79,29 @@ describe('probeByoClaudeCredential', () => {
     const r = probeByoClaudeCredential(base({ CLAUDE_CODE_OAUTH_TOKEN: 'oauth-xxxx' }));
     expect(r.ok).toBe(true);
     expect(r.reason).toBeNull();
-    expect(r.chrisPathFindings).toEqual([]);
+    expect(r.privateMachinePathFindings).toEqual([]);
   });
 
   it('PASSES with an app-local API key', () => {
     expect(isByoClaudeCredentialReady(base({ ANTHROPIC_API_KEY: 'sk-test' }))).toBe(true);
   });
 
-  it('FAILS when the subscription login store leaks a Chris path (Dropbox)', () => {
+  it('FAILS when the subscription login store leaks a private-machine path', () => {
     const r = probeByoClaudeCredential(
       base({ CLAUDE_CODE_OAUTH_TOKEN: 't', CLAUDE_CONFIG_DIR: '/Users/stranger/Dropbox/.claude' }),
     );
     expect(r.ok).toBe(false);
-    expect(r.chrisPathFindings.map((f) => f.marker)).toContain('Dropbox');
-    expect(r.reason).toMatch(/leaks a Chris-machine path/);
+    expect(r.privateMachinePathFindings.map((f) => f.marker)).toContain('Dropbox');
+    expect(r.reason).toMatch(/leaks a private-machine path/);
   });
 
   it('FAILS when the login store is a hardcoded foreign home', () => {
+    const previousOperatorHome = '/Users/previous-operator';
     const r = probeByoClaudeCredential(
-      base({ CLAUDE_CODE_OAUTH_TOKEN: 't', CLAUDE_CONFIG_DIR: '/Users/kilgore/.claude' }),
+      base({ CLAUDE_CODE_OAUTH_TOKEN: 't', CLAUDE_CONFIG_DIR: `${previousOperatorHome}/.claude` }),
     );
     expect(r.ok).toBe(false);
-    expect(r.chrisPathFindings.map((f) => f.marker)).toContain('/Users/kilgore');
+    expect(r.privateMachinePathFindings.map((f) => f.marker)).toContain(previousOperatorHome);
   });
 
   it('a foreign key does not rescue an otherwise-clean stranger env (Claude-only)', () => {

@@ -3,7 +3,7 @@
  * Clean-machine spike eval (cto/output/2026-06-29-clean-machine-spike-spec.md).
  *
  * Encodes the two go/no-go risks that are fully resolvable in code today:
- *   R2 — de-Chris boot-from-bundle: app-local env yields zero Chris-path leaks.
+ *   R2 — private-machine cleanup: app-local env yields zero private-machine leaks.
  *   R5 — Claude-only graceful:      a Claude runtime's preflight never probes
  *                                   Cursor/Codex, so their absence can't block it.
  *
@@ -16,7 +16,7 @@ import os from 'node:os';
 import path from 'node:path';
 import {
   resolveBundleBootConfig,
-  scanForChrisPaths,
+  scanForPrivateMachinePaths,
   isCleanMachineBootable,
 } from '../../src/clean-machine-spike/boot-config.js';
 import {
@@ -41,7 +41,7 @@ function bundleEnv(): NodeJS.ProcessEnv {
   };
 }
 
-describe('R2 — de-Chris boot-from-bundle', () => {
+describe('R2 — private-machine boot-from-bundle cleanup', () => {
   it('resolves every boot path from app-local env (no fallback to defaults)', () => {
     const env = bundleEnv();
     const cfg = resolveBundleBootConfig(env);
@@ -52,48 +52,52 @@ describe('R2 — de-Chris boot-from-bundle', () => {
     expect(cfg.managerPort).toBe(0); // dynamic
   });
 
-  it('PASS: app-local env produces zero Chris-path leaks', () => {
+  it('PASS: app-local env produces zero private-machine path leaks', () => {
     const cfg = resolveBundleBootConfig(bundleEnv());
-    expect(scanForChrisPaths(cfg)).toEqual([]);
+    expect(scanForPrivateMachinePaths(cfg)).toEqual([]);
     expect(isCleanMachineBootable(bundleEnv())).toBe(true);
   });
 
   it('a path under the running user home is clean, not a leak (portability)', () => {
-    // The Tauri bundle relocates onto the *tester's* home; that this expands to
-    // /Users/kilgore on Chris's own build machine must NOT be flagged.
+    // The Tauri bundle relocates onto the tester's home; that current-home
+    // expansion must NOT be flagged.
     const env = bundleEnv();
-    const findings = scanForChrisPaths(resolveBundleBootConfig(env), env);
+    const findings = scanForPrivateMachinePaths(resolveBundleBootConfig(env), env);
     expect(findings).toEqual([]);
   });
 
-  it('the scanner catches non-relocatable Chris leaks (negative control)', () => {
+  it('the scanner catches non-relocatable private-machine leaks (negative control)', () => {
     const env = bundleEnv();
     const leaky = resolveBundleBootConfig({
       ...env,
-      ID_AGENTS_HOME: '/Users/kilgore/Dropbox/Code/cane/id-agents', // Dropbox leak
-      AGENT_MANAGER_WORKDIR: '/Users/liz/Library/Application Support/Kapelle', // foreign home
+      ID_AGENTS_HOME: path.join(os.homedir(), 'Dropbox', 'Code', 'cane', 'id-agents'),
+      AGENT_MANAGER_WORKDIR: '/Users/previous-operator/Library/Application Support/Kapelle',
     });
-    const findings = scanForChrisPaths(leaky, env);
+    const findings = scanForPrivateMachinePaths(leaky, env);
     expect(findings.length).toBeGreaterThan(0);
     // Dropbox sync-tree leak on idAgentsHome.
     expect(findings.some((f) => f.field === 'idAgentsHome' && f.marker === 'Dropbox')).toBe(true);
-    // Foreign hardcoded home on workdir (not the running user's /Users/kilgore).
-    expect(findings.some((f) => f.field === 'workdir' && f.marker === '/Users/liz')).toBe(true);
+    // Foreign hardcoded home on workdir, not the running user's home.
+    expect(findings.some((f) => f.field === 'workdir' && f.marker === '/Users/previous-operator')).toBe(true);
     // The clean SQLITE_PATH under the tester's home is NOT flagged.
     expect(findings.some((f) => f.field === 'sqlitePath')).toBe(false);
   });
 
-  it('a com.kilgore launchd reference is always flagged', () => {
+  it('a legacy launchd namespace reference is always flagged', () => {
     const env = bundleEnv();
-    const cfg = resolveBundleBootConfig({ ...env, SQLITE_PATH: '/Library/LaunchAgents/com.kilgore.id-agents.db' });
-    expect(scanForChrisPaths(cfg, env).some((f) => f.marker === 'com.kilgore')).toBe(true);
+    const marker = `com.${['kil', 'gore'].join('')}`;
+    const cfg = resolveBundleBootConfig({
+      ...env,
+      SQLITE_PATH: `/Library/LaunchAgents/${marker}.id-agents.db`,
+    });
+    expect(scanForPrivateMachinePaths(cfg, env).some((f) => f.marker === marker)).toBe(true);
   });
 
   it('a null repo-registry overlay is exempt (defaults apply, not a leak)', () => {
     const env = bundleEnv();
     const cfg = resolveBundleBootConfig(env);
     const noOverlay = { ...cfg, repoRegistryFile: null };
-    expect(scanForChrisPaths(noOverlay, env).some((f) => f.field === 'repoRegistryFile')).toBe(false);
+    expect(scanForPrivateMachinePaths(noOverlay, env).some((f) => f.field === 'repoRegistryFile')).toBe(false);
   });
 });
 
@@ -140,7 +144,7 @@ describe('R2+R5 — synthetic stranger starter-fleet smoke', () => {
       managerUrl: 'http://127.0.0.1:<dynamic>',
       opsUrl: 'http://127.0.0.1:<dynamic>/ops',
     });
-    expect(result.chrisPathFindings).toEqual([]);
+    expect(result.privateMachinePathFindings).toEqual([]);
     expect(result.credential.ok).toBe(true);
     expect(result.credential.sources.map((s) => s.seam)).toEqual(['ANTHROPIC_API_KEY']);
     expect(result.graceful.offendingCodes).toEqual([]);

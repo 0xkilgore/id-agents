@@ -6,14 +6,14 @@
 // cto/output/2026-06-29-clean-machine-spike-report.md.
 
 export {
-  CHRIS_PATH_MARKERS,
+  PRIVATE_MACHINE_PATH_MARKERS,
   resolveBundleBootConfig,
-  scanForChrisPaths,
+  scanForPrivateMachinePaths,
   isCleanMachineBootable,
-  chrisPathMarkersFor,
+  privateMachinePathMarkersFor,
   currentHome,
   type BundleBootConfig,
-  type ChrisPathFinding,
+  type PrivateMachinePathFinding,
 } from './boot-config.js';
 
 export {
