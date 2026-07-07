@@ -60,6 +60,7 @@ export const DEFAULT_REGISTRY: TrackRegistry = {
     'T-REFACTOR', // refactor wave; `T-REFACTOR.<repo>` rolls up via prefix
     'T-POWERHOUSE',
     'T-REMOTE',
+    'T-LOCALREAD',
   ],
   deferred: ['I-2', 'I-15'],
   legacyAliases: {
