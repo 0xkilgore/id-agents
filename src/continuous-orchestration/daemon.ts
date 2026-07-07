@@ -33,6 +33,7 @@ import {
 import { runFleshPass, type FleshRunSummary } from "./flesh-runner.js";
 import { selectAutoPromotions } from "./auto-promote-policy.js";
 import { sendTelegramAlert, type AlertSender } from "./telegram.js";
+import { readOrchestrationHealthProjection } from "./health-projection.js";
 
 /** Dispatch/effective statuses that mean the work is finished — its write-scope
  *  lock can be released. Mirrors dispatch terminal states plus recovery moot. */
@@ -91,6 +92,8 @@ export interface DaemonDeps {
    * since the daemon still admits (it just can't tell healthy from not).
    */
   resolveAgentHealth?: (names: string[]) => Promise<Set<string>>;
+  /** Resolve registered runtime by agent name so admission can diagnose provider/runtime lane mismatches. */
+  resolveAgentRuntimes?: (names: string[]) => Promise<Map<string, string>>;
   /**
    * Build-pool routing (Stage C). When provided, an admitted item that resolves
    * to a pool late-binds its builder + worktree at FIRE time: the daemon spills
@@ -271,6 +274,10 @@ export class ContinuousOrchestrationDaemon {
     const healthy_agents = this.deps.resolveAgentHealth
       ? await this.deps.resolveAgentHealth([...candidateAgentNames])
       : undefined;
+    const target_agent_runtimes = this.deps.resolveAgentRuntimes
+      ? await this.deps.resolveAgentRuntimes([...candidateAgentNames])
+      : undefined;
+    const ready_item_blockers = await this.readyItemBlockers();
 
     const ctx: AdmissionContext = {
       mode: state.mode,
@@ -285,6 +292,8 @@ export class ContinuousOrchestrationDaemon {
       pool_free_slots: poolGate?.pool_free_slots,
       pool_free_builders: poolGate?.pool_free_builders,
       healthy_agents,
+      target_agent_runtimes,
+      ready_item_blockers,
     };
 
     const plan = planAdmission(ordered, ctx, config);
@@ -526,6 +535,10 @@ export class ContinuousOrchestrationDaemon {
     const healthy_agents = this.deps.resolveAgentHealth
       ? await this.deps.resolveAgentHealth([...candidateAgentNames])
       : undefined;
+    const target_agent_runtimes = this.deps.resolveAgentRuntimes
+      ? await this.deps.resolveAgentRuntimes([...candidateAgentNames])
+      : undefined;
+    const ready_item_blockers = await this.readyItemBlockers();
 
     const writeCfg = {
       maxEnqueuesPerTick: config.max_enqueues_per_tick,
@@ -545,6 +558,8 @@ export class ContinuousOrchestrationDaemon {
       pool_free_slots: poolGate?.pool_free_slots,
       pool_free_builders: poolGate?.pool_free_builders,
       healthy_agents,
+      target_agent_runtimes,
+      ready_item_blockers,
     };
 
     const plan = planAdmission(ordered, ctx, config);
@@ -572,6 +587,34 @@ export class ContinuousOrchestrationDaemon {
       }),
       halted: plan.halt?.reason ?? null,
     };
+  }
+
+  private async readyItemBlockers(): Promise<AdmissionContext["ready_item_blockers"]> {
+    const health = await readOrchestrationHealthProjection(this.deps.adapter, this.teamId);
+    const out: NonNullable<AdmissionContext["ready_item_blockers"]> = new Map();
+    for (const item of health.blockers.needs_clarification.items) {
+      for (const blockedId of item.blocked_dependency_item_ids) {
+        if (!out.has(blockedId)) {
+          out.set(blockedId, {
+            code: "clarification_blocker",
+            reason: item.reason,
+            metadata: { dispatch_phid: item.dispatch_phid, query_id: item.query_id },
+          });
+        }
+      }
+    }
+    for (const item of health.blockers.promotion.items) {
+      for (const blockedId of item.blocked_dependency_item_ids) {
+        if (!out.has(blockedId)) {
+          out.set(blockedId, {
+            code: "promotion_blocker",
+            reason: item.reason,
+            metadata: { dispatch_phid: item.dispatch_phid, query_id: item.query_id },
+          });
+        }
+      }
+    }
+    return out;
   }
 
   /**

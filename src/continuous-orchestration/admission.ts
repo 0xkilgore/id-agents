@@ -6,6 +6,7 @@
 // I/O around it. NEVER admits outside the guardrails.
 
 import type { ContinuousOrchestrationConfig } from "./config.js";
+import { normalizeRuntime, resolveProviderFromRuntime } from "../dispatch-scheduler/types.js";
 import type { BacklogItem, DecisionRecord, OrchestrationMode, UsageGateView } from "./types.js";
 
 /** Risk classes safe to auto-run unattended. Everything else escalates. */
@@ -50,6 +51,10 @@ export interface AdmissionContext {
    * daemon on a health-check outage.
    */
   healthy_agents?: Set<string> | null;
+  /** Registered runtime per target agent name. Used to flag provider/runtime rows that cannot land on that lane. */
+  target_agent_runtimes?: Map<string, string> | null;
+  /** Active clarification/promotion blockers keyed by ready backlog item_id. */
+  ready_item_blockers?: Map<string, { code: "clarification_blocker" | "promotion_blocker"; reason: string; metadata?: Record<string, unknown> }> | null;
 }
 
 export interface AdmissionPlan {
@@ -74,7 +79,37 @@ export type NonAdmissionCode =
   | "single_writer_lane_busy"
   | "daily_token_ceiling"
   | "missing_dispatch_target"
-  | "target_unhealthy";
+  | "target_unhealthy"
+  | "provider_runtime_mismatch"
+  | "clarification_blocker"
+  | "promotion_blocker";
+
+function reasonClass(code: NonAdmissionCode): string {
+  switch (code) {
+    case "risk_requires_approval":
+      return "risk_class";
+    case "provider_runtime_mismatch":
+      return "provider_runtime";
+    case "blocked_dependency":
+      return "blocked_dependency";
+    case "target_unhealthy":
+    case "no_free_pool_builder":
+      return "agent_availability";
+    case "single_writer_lane_busy":
+      return "write_scope_lock";
+    case "clarification_blocker":
+      return "clarification_blocker";
+    case "promotion_blocker":
+      return "promotion_blocker";
+    case "tick_admission_cap":
+    case "no_in_flight_slots":
+    case "pool_capacity_full":
+    case "daily_token_ceiling":
+      return "config_cap";
+    default:
+      return "readiness";
+  }
+}
 
 function nonAdmission(
   item_id: string,
@@ -83,7 +118,50 @@ function nonAdmission(
   reason: string,
   extra: Record<string, unknown> = {},
 ): DecisionRecord {
-  return { item_id, action, reason, metadata: { code, ...extra } };
+  return { item_id, action, reason, metadata: { code, class: reasonClass(code), ...extra } };
+}
+
+function providerRuntimeMismatch(
+  item: BacklogItem,
+  target: string | null,
+  targetRuntime: string | undefined,
+): { reason: string; metadata: Record<string, unknown> } | null {
+  if (!item.provider && !item.runtime) return null;
+
+  const requestedRuntime = item.runtime ? normalizeRuntime(item.runtime) : null;
+  const requestedProvider = item.provider ?? (requestedRuntime ? resolveProviderFromRuntime(requestedRuntime) : null);
+  const providerFromRequestedRuntime = requestedRuntime ? resolveProviderFromRuntime(requestedRuntime) : null;
+
+  if (item.provider && requestedRuntime && item.provider !== providerFromRequestedRuntime) {
+    return {
+      reason: `provider/runtime mismatch: provider=${item.provider} does not match runtime=${requestedRuntime} (expected provider=${providerFromRequestedRuntime})`,
+      metadata: {
+        provider: item.provider,
+        runtime: requestedRuntime,
+        expected_provider: providerFromRequestedRuntime,
+      },
+    };
+  }
+
+  if (requestedRuntime && targetRuntime) {
+    const normalizedTargetRuntime = normalizeRuntime(targetRuntime);
+    if (requestedRuntime !== normalizedTargetRuntime) {
+      return {
+        reason:
+          `provider/runtime mismatch: ready row requests ${requestedProvider}/${requestedRuntime} ` +
+          `but target agent ${target ?? "(unknown)"} is registered for ${resolveProviderFromRuntime(normalizedTargetRuntime)}/${normalizedTargetRuntime}`,
+        metadata: {
+          provider: requestedProvider,
+          runtime: requestedRuntime,
+          target,
+          target_runtime: normalizedTargetRuntime,
+          target_provider: resolveProviderFromRuntime(normalizedTargetRuntime),
+        },
+      };
+    }
+  }
+
+  return null;
 }
 
 /** Tick-level halt checks, in precedence order. Null = proceed. */
@@ -135,6 +213,17 @@ export function planAdmission(
       skipped.push(nonAdmission(item.item_id, "skipped", "not_ready", `not ready (${item.readiness_state})`, {
         readiness_state: item.readiness_state,
       }));
+      continue;
+    }
+    const activeBlocker = ctx.ready_item_blockers?.get(item.item_id);
+    if (activeBlocker) {
+      skipped.push(nonAdmission(
+        item.item_id,
+        "held",
+        activeBlocker.code,
+        activeBlocker.reason,
+        activeBlocker.metadata ?? {},
+      ));
       continue;
     }
     if (admit.length >= limit) {
@@ -230,6 +319,17 @@ export function planAdmission(
     // per-candidate gate here; a later, healthier candidate in this same
     // tick still gets a chance.
     const target = poolId ? assignedBuilder : item.to_agent;
+    const laneMismatch = providerRuntimeMismatch(item, target, target ? ctx.target_agent_runtimes?.get(target) : undefined);
+    if (laneMismatch) {
+      skipped.push(nonAdmission(
+        item.item_id,
+        "held",
+        "provider_runtime_mismatch",
+        laneMismatch.reason,
+        laneMismatch.metadata,
+      ));
+      continue;
+    }
     if (ctx.healthy_agents && target && !ctx.healthy_agents.has(target)) {
       skipped.push(nonAdmission(
         item.item_id,

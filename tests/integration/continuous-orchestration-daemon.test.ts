@@ -11,6 +11,7 @@ import {
   getBacklogItem,
   listRecentDecisions,
   getOrchestrationState,
+  getAgentRuntimeMap,
   getHealthyAgentNames,
 } from "../../src/continuous-orchestration/storage.js";
 import { parseRoadmapToBacklog } from "../../src/continuous-orchestration/roadmap-import.js";
@@ -43,6 +44,7 @@ function makeDaemon(
     // RD-014: undefined (the default) means "no health resolver wired" —
     // matches every pre-RD-014 test in this file exactly (no gating at all).
     resolveAgentHealth?: (names: string[]) => Promise<Set<string>>;
+    resolveAgentRuntimes?: (names: string[]) => Promise<Map<string, string>>;
   } = {},
 ) {
   const fired: BacklogItem[] = [];
@@ -61,6 +63,7 @@ function makeDaemon(
     readInFlight: () =>
       Promise.resolve({ count: over.inFlight ?? 0, active_write_scopes: over.activeScopes ?? new Set() }),
     resolveAgentHealth: over.resolveAgentHealth,
+    resolveAgentRuntimes: over.resolveAgentRuntimes,
     alert: async (m) => {
       alerts.push(m);
     },
@@ -83,20 +86,22 @@ async function seedReady(adapter: SqliteAdapter, over: Partial<BacklogItem> = {}
     priority: over.priority ?? 5,
     write_scope: over.write_scope ?? [],
     token_estimate: over.token_estimate ?? 0,
+    provider: over.provider ?? null,
+    runtime: over.runtime ?? null,
   });
   return item;
 }
 
 /** Minimal valid `agents` row — RD-014 health-gate tests only care about name+status. */
-async function seedAgent(adapter: SqliteAdapter, name: string, status: string) {
+async function seedAgent(adapter: SqliteAdapter, name: string, status: string, runtime = "claude-code-cli") {
   await adapter.query(
     `INSERT OR IGNORE INTO teams (id, name) VALUES ($1, $2)`,
     ["team-uuid-9999", "default"],
   );
   await adapter.query(
-    `INSERT INTO agents (id, team_id, name, type, model, port, status, created_at)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
-    [`agent_${name}`, "team-uuid-9999", name, "claude", "claude-fable-5", 0, status, Date.now()],
+    `INSERT INTO agents (id, team_id, name, type, model, port, status, created_at, runtime)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+    [`agent_${name}`, "team-uuid-9999", name, "claude", "claude-fable-5", 0, status, Date.now(), runtime],
   );
 }
 
@@ -235,6 +240,36 @@ describe("daemon — dry-run vs live", () => {
         item_id: item.item_id,
         action: "skipped",
         code: "single_writer_lane_busy",
+      }),
+    ]);
+  });
+
+  it("exposes provider/runtime non-admission diagnostics through ready admission explanation", async () => {
+    await seedAgent(adapter, "substrate-orch-codex", "running", "codex");
+    const item = await seedReady(adapter, {
+      title: "wrong runtime lane",
+      to_agent: "substrate-orch-codex",
+      provider: "anthropic",
+      runtime: "claude-code-cli",
+    });
+    const { daemon } = makeDaemon(adapter, {
+      config: { dry_run: false, max_in_flight: 4 },
+      resolveAgentRuntimes: (names) => getAgentRuntimeMap(adapter, names),
+    });
+    await daemon.setMode("running");
+
+    const explanation = await daemon.explainReadyAdmission();
+
+    expect(explanation.admissible).toHaveLength(0);
+    expect(explanation.non_admitted).toEqual([
+      expect.objectContaining({
+        item_id: item.item_id,
+        action: "held",
+        code: "provider_runtime_mismatch",
+        metadata: expect.objectContaining({
+          class: "provider_runtime",
+          target_runtime: "codex",
+        }),
       }),
     ]);
   });

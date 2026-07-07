@@ -503,6 +503,33 @@ export async function getHealthyAgentNames(
   return out;
 }
 
+/**
+ * Registered runtime per agent name. No team filter for the same reason as
+ * getHealthyAgentNames: orchestration storage uses team names while agents rows
+ * are UUID-scoped. Prefer a currently-running non-deleted row when duplicates
+ * exist, but return any known runtime so status can diagnose a lane mismatch.
+ */
+export async function getAgentRuntimeMap(
+  adapter: DbAdapter,
+  names: string[],
+): Promise<Map<string, string>> {
+  const out = new Map<string, string>();
+  const unique = [...new Set(names.filter((n): n is string => !!n))];
+  if (unique.length === 0) return out;
+  const placeholders = unique.map((_, i) => `$${i + 1}`).join(",");
+  const { rows } = await adapter.query<{ name: string; runtime: string | null; running_rank: number }>(
+    `SELECT name, runtime, CASE WHEN status = 'running' AND deleted_at IS NULL THEN 0 ELSE 1 END AS running_rank
+       FROM agents
+      WHERE name IN (${placeholders}) AND deleted_at IS NULL
+      ORDER BY running_rank ASC, name ASC`,
+    unique,
+  );
+  for (const r of rows) {
+    if (r.runtime && !out.has(r.name)) out.set(r.name, r.runtime);
+  }
+  return out;
+}
+
 // ── Auto-flesh (daemon SELF-REFUEL) ──────────────────────────────────
 
 /**

@@ -307,6 +307,84 @@ describe("planAdmission — per-item guardrails", () => {
     expect(p.skipped[0].reason).toMatch(/missing to_agent or dispatch_body/);
   });
 
+  it("labels at least five non-admission classes for zero-admit debugging", () => {
+    const cases = [
+      {
+        name: "risk_class",
+        plan: planAdmission([item({ risk_class: "external" })], ctx(), cfg),
+        code: "risk_requires_approval",
+      },
+      {
+        name: "blocked_dependency",
+        plan: planAdmission([item({ dependencies: ["dep1"] })], ctx(), cfg),
+        code: "blocked_dependency",
+      },
+      {
+        name: "agent_availability",
+        plan: planAdmission([item({ to_agent: "offline" })], ctx({ healthy_agents: new Set(["roger"]) }), cfg),
+        code: "target_unhealthy",
+      },
+      {
+        name: "write_scope_lock",
+        plan: planAdmission([item({ write_scope: ["repo/busy"] })], ctx({ active_write_scopes: new Set(["repo/busy"]) }), cfg),
+        code: "single_writer_lane_busy",
+      },
+      {
+        name: "config_cap",
+        plan: planAdmission([item()], ctx({ in_flight: 5 }), cfg),
+        code: "no_in_flight_slots",
+      },
+    ];
+
+    for (const c of cases) {
+      expect(c.plan.admit, c.name).toHaveLength(0);
+      expect(c.plan.skipped[0].metadata).toMatchObject({ code: c.code, class: c.name });
+    }
+  });
+
+  it("holds rows with provider/runtime incompatible with the target lane", () => {
+    const p = planAdmission(
+      [item({ to_agent: "substrate-orch-codex", provider: "anthropic", runtime: "claude-code-cli" })],
+      ctx({ target_agent_runtimes: new Map([["substrate-orch-codex", "codex"]]) }),
+      cfg,
+    );
+    expect(p.admit).toHaveLength(0);
+    expect(p.skipped[0]).toMatchObject({
+      action: "held",
+      metadata: { code: "provider_runtime_mismatch", class: "provider_runtime" },
+    });
+  });
+
+  it("holds rows blocked by active clarification or promotion blockers", () => {
+    const clarification = planAdmission(
+      [item({ item_id: "needs-answer" })],
+      ctx({
+        ready_item_blockers: new Map([
+          ["needs-answer", { code: "clarification_blocker", reason: "needs clarification: Which merge strategy?" }],
+        ]),
+      }),
+      cfg,
+    );
+    expect(clarification.skipped[0].metadata).toMatchObject({
+      code: "clarification_blocker",
+      class: "clarification_blocker",
+    });
+
+    const promotion = planAdmission(
+      [item({ item_id: "needs-promotion" })],
+      ctx({
+        ready_item_blockers: new Map([
+          ["needs-promotion", { code: "promotion_blocker", reason: "missing promotion result" }],
+        ]),
+      }),
+      cfg,
+    );
+    expect(promotion.skipped[0].metadata).toMatchObject({
+      code: "promotion_blocker",
+      class: "promotion_blocker",
+    });
+  });
+
   it("never admits a non-ready item even if passed in", () => {
     const p = planAdmission([item({ readiness_state: "needs_review" })], ctx(), cfg);
     expect(p.admit).toHaveLength(0);
