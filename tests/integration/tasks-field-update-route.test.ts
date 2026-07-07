@@ -211,7 +211,7 @@ describe('PATCH /tasks/:ref field updates', () => {
     expect(json.lane).toBe('task_triage');
     expect(json.inbox_digest).toBe('excluded');
     expect(json.review.source.inbox_digest).toBe('excluded');
-    expect(json.review.summary.auto_route_candidates).toBe(1);
+    expect(json.review.summary.safe_action_candidates).toBe(1);
     expect(json.review.summary.console_lane_items).toBe(0);
     expect(json.parity.taskview).toMatchObject({
       available: true,
@@ -230,7 +230,7 @@ describe('PATCH /tasks/:ref field updates', () => {
     );
     expect(json.review.items[0]).toMatchObject({
       task_ref: created.task.name,
-      classification: 'route_to_project_agent',
+      classification: 'task_note_to_action',
       target_agent: 'personal',
       deterministic_safe: true,
       source_surface: 'manager_task_description',
@@ -348,7 +348,7 @@ describe('PATCH /tasks/:ref field updates', () => {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'X-Id-Team': TEAM },
       body: JSON.stringify({
-        auto_route: true,
+        apply_safe_actions: true,
         mode: 'on_demand',
         idempotency_key: 'test-task-triage-on-demand',
       }),
@@ -375,7 +375,8 @@ describe('PATCH /tasks/:ref field updates', () => {
     const artifact = fs.readFileSync(json.artifact_path, 'utf8');
     expect(path.dirname(json.artifact_path)).toBe(path.join(workDir, 'output'));
     expect(path.basename(json.artifact_path)).toMatch(/^\d{4}-\d{2}-\d{2}-task-triage-review\.md$/);
-    expect(artifact).toContain('## Deterministic routed notes');
+    expect(artifact).toContain('## Safe-action audit');
+    expect(artifact).toContain('## Deterministic routed task-note actions');
     expect(artifact).toContain('## Source parity');
     expect(artifact).toContain('## Stale task escalations');
     expect(artifact).toContain('## Approval / review');

@@ -71,12 +71,12 @@ describe("task triage reconciliation", () => {
     });
 
     expect(review.source.inbox_digest).toBe("excluded");
-    expect(review.summary.route_to_project_agent).toBe(1);
+    expect(review.summary.task_note_to_action).toBe(1);
     expect(review.summary.needs_chris).toBe(1);
-    expect(review.summary.auto_route_candidates).toBe(1);
+    expect(review.summary.safe_action_candidates).toBe(1);
     expect(review.summary.console_lane_items).toBe(1);
 
-    const route = review.items.find((item) => item.classification === "route_to_project_agent");
+    const route = review.items.find((item) => item.classification === "task_note_to_action");
     expect(route).toMatchObject({
       target_agent: "personal",
       deterministic_safe: true,
@@ -125,11 +125,11 @@ describe("task triage reconciliation", () => {
     });
 
     expect(review.source.task_notes).toBe(1);
-    expect(review.summary.duplicate_superseded).toBe(1);
+    expect(review.summary.duplicate).toBe(1);
     expect(review.items[0]).toMatchObject({
       item_id: "tnote_123",
       source_surface: "task_note_event",
-      classification: "duplicate_superseded",
+      classification: "duplicate",
       console_lane: "needs_chris",
     });
   });

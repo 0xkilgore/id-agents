@@ -32,7 +32,7 @@ const response = await fetch(`${manager}/tasks/triage/run`, {
     "x-id-team": team,
   },
   body: JSON.stringify({
-    auto_route: !dryRun,
+    apply_safe_actions: !dryRun,
     mode,
     idempotency_key: idempotencyKey,
   }),
@@ -51,6 +51,6 @@ console.log(JSON.stringify({
   artifact_path: body.artifact_path,
   idempotency_key: body.run?.idempotency_key ?? idempotencyKey,
   routed: body.routed?.length ?? 0,
-  auto_route_candidates: body.review?.summary?.auto_route_candidates ?? 0,
+  safe_action_candidates: body.review?.summary?.safe_action_candidates ?? 0,
   approval_review_items: body.review?.summary?.console_lane_items ?? 0,
 }, null, 2));

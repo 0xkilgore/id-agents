@@ -7565,9 +7565,9 @@ export class AgentManagerDb {
           reconciliation: {
             task_note_count: taskNotes.length,
             item_count: triageReview.items.length,
-            stale_count: triageReview.summary.stale_defer,
-            completed_count: triageReview.summary.archive_done,
-            duplicate_count: triageReview.summary.duplicate_superseded,
+            stale_count: triageReview.summary.stale,
+            completed_count: triageReview.summary.completed_in_reality,
+            duplicate_count: triageReview.summary.duplicate,
           },
         });
       } catch (err: any) {
@@ -7581,8 +7581,22 @@ export class AgentManagerDb {
       const tasks = await this.db.tasks.list({ teamId });
       const agents = await this.dbListAgents(teamId, true);
       const taskNotes = await listTaskNoteEvents(this.db.adapter, { teamId, limit: 200 });
-      const review = buildTaskTriageReview({ tasks, agents, taskNotes });
       const parity = await this.buildTaskTriageParity(teamId, tasks);
+      const review = buildTaskTriageReview({
+        tasks,
+        agents,
+        taskNotes,
+        sourceCounts: {
+          taskview_markdown: parity.taskview.available ? parity.taskview.total : 'unavailable',
+          dispatch_shadow_logs: parity.dispatch_reconciliation.stuck_queued,
+          console_review_queue: 'unavailable',
+        },
+        sourceFreshness: {
+          taskview_markdown: parity.taskview.available ? new Date().toISOString() : null,
+          dispatch_shadow_logs: new Date().toISOString(),
+          console_review_queue: null,
+        },
+      });
       return { teamId, teamName, review, parity };
     };
 
@@ -7608,9 +7622,9 @@ export class AgentManagerDb {
       mkdirSync(outputDir, { recursive: true });
       const artifactPath = path.join(outputDir, `${date}-task-triage-review.md`);
       const routedById = new Map(run.routed.map((item) => [item.item_id, item]));
-      const deterministic = review.items.filter((item) => item.classification === 'route_to_project_agent' && item.deterministic_safe);
+      const deterministic = review.items.filter((item) => item.classification === 'task_note_to_action' && item.deterministic_safe);
       const approvalReview = review.items.filter((item) => item.console_lane === 'needs_chris');
-      const staleUnresolved = review.items.filter((item) => item.classification === 'stale_defer' || item.console_lane === 'deferred');
+      const staleUnresolved = review.items.filter((item) => item.classification === 'stale' || item.console_lane === 'deferred');
       const itemLines = (items: typeof review.items) => items.flatMap((item) => {
         const routed = routedById.get(item.item_id);
         return [
@@ -7650,7 +7664,10 @@ export class AgentManagerDb {
         '',
         `- Manager tasks scanned: ${review.source.manager_tasks}`,
         `- Task notes scanned: ${review.source.task_notes}`,
-        `- Auto-route candidates: ${review.summary.auto_route_candidates}`,
+        `- Taskview markdown scanned: ${review.source.taskview_markdown}`,
+        `- Dispatch/shadow records scanned: ${review.source.dispatch_shadow_logs}`,
+        `- Console review rows scanned: ${review.source.console_review_queue}`,
+        `- Safe-action candidates: ${review.summary.safe_action_candidates}`,
         `- Console lane items: ${review.summary.console_lane_items}`,
         `- Taskview tasks scanned: ${parity.taskview.available ? parity.taskview.total : 'unavailable'}`,
         `- Dispatch reconciliation stuck queued: ${parity.dispatch_reconciliation.stuck_queued}`,
@@ -7685,9 +7702,17 @@ export class AgentManagerDb {
             ])
           : ['No stale manager tasks crossed the escalation threshold.']),
         '',
-        '## Deterministic routed notes',
+        '## Safe-action audit',
         '',
-        ...(deterministic.length ? itemLines(deterministic) : ['No deterministic routed notes.', '']),
+        ...(review.safe_action_audit.length
+          ? review.safe_action_audit.map((item) =>
+              `- ${item.item_id}: action=${item.action}, status=${item.status}, target=${item.target_agent ?? '(none)'}, reason=${item.reason}`,
+            )
+          : ['No safe-action candidates.']),
+        '',
+        '## Deterministic routed task-note actions',
+        '',
+        ...(deterministic.length ? itemLines(deterministic) : ['No deterministic routed task-note actions.', '']),
         '## Approval / review',
         '',
         ...(approvalReview.length ? itemLines(approvalReview) : ['No ambiguous approval/review notes.', '']),
@@ -7729,13 +7754,14 @@ export class AgentManagerDb {
       }
     });
 
-    // On-demand/scheduled run endpoint. `auto_route` only dispatches high-
-    // confidence route_to_project_agent items and uses scheduler dedup keys.
+    // On-demand/scheduled run endpoint. Safe actions only dispatch high-
+    // confidence task_note_to_action items and use scheduler dedup keys.
     this.managementApp.post('/tasks/triage/run', async (req, res) => {
       try {
         const { teamId, teamName, review, parity } = await buildTaskTriageForRequest(req);
         const body = req.body ?? {};
-        const autoRoute = body.auto_route === true || body.auto_route === 'true';
+        const applySafeActions = body.apply_safe_actions === true || body.apply_safe_actions === 'true';
+        const autoRoute = applySafeActions || body.auto_route === true || body.auto_route === 'true';
         const runMode = typeof body.mode === 'string' && body.mode.trim() ? body.mode.trim() : 'on_demand';
         const idempotencyKey = typeof body.idempotency_key === 'string' && body.idempotency_key.trim()
           ? body.idempotency_key.trim()
@@ -7753,7 +7779,7 @@ export class AgentManagerDb {
         if (autoRoute) {
           const candidates = review.items.filter(
             (item): item is TaskTriageItem & { target_agent: string } =>
-              item.classification === 'route_to_project_agent' &&
+              item.classification === 'task_note_to_action' &&
               item.deterministic_safe &&
               typeof item.target_agent === 'string' &&
               item.target_agent.length > 0,
@@ -7842,7 +7868,27 @@ export class AgentManagerDb {
           }
         }
 
-        const artifactPath = writeTaskTriageArtifact(review, parity, {
+        const routedByItemId = new Map(routed.map((item) => [item.item_id, item]));
+        const auditedReview = {
+          ...review,
+          safe_action_audit: review.safe_action_audit.map((audit) => {
+            const route = routedByItemId.get(audit.item_id);
+            if (!route) {
+              return autoRoute
+                ? { ...audit, status: 'skipped' as const, reason: `${audit.reason}; no route was attempted` }
+                : audit;
+            }
+            return {
+              ...audit,
+              status: route.ok ? 'applied' as const : 'failed' as const,
+              reason: route.ok
+                ? `${audit.reason}; dispatch=${route.dispatch_phid ?? 'unknown'}; dedup_key=${route.dedup_key ?? 'unknown'}`
+                : `${audit.reason}; error=${route.error ?? 'unknown'}; dedup_key=${route.dedup_key ?? 'unknown'}`,
+            };
+          }),
+        };
+
+        const artifactPath = writeTaskTriageArtifact(auditedReview, parity, {
           mode: runMode,
           idempotency_key: idempotencyKey,
           routed,
@@ -7858,7 +7904,7 @@ export class AgentManagerDb {
             idempotency_key: idempotencyKey,
             idempotency: 'date_artifact_overwrite_plus_dispatch_dedup_key',
           },
-          review,
+          review: auditedReview,
           parity,
           routed,
         });
@@ -8165,7 +8211,7 @@ export class AgentManagerDb {
           const triageItem = classifyTaskNote(signal, agents);
           const targetAgent = triageItem.target_agent ?? inferTaskNoteTargetAgent(noteBody, sourceProject, sourcePath);
 
-          if (triageItem.classification === 'route_to_project_agent' && targetAgent) {
+          if (triageItem.classification === 'task_note_to_action' && targetAgent) {
             if (!this.dispatchScheduler) {
               finalEvent = await updateTaskNoteRouting(this.db.adapter, {
                 teamId,

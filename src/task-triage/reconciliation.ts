@@ -3,11 +3,12 @@ import type { AgentRow, TaskRow } from "../db/types.js";
 import type { TaskNoteEventRow } from "../task-notes/storage.js";
 
 export type TaskTriageClassification =
-  | "route_to_project_agent"
-  | "archive_done"
+  | "completed_in_reality"
+  | "stale"
+  | "duplicate"
+  | "task_note_to_action"
   | "needs_chris"
-  | "stale_defer"
-  | "duplicate_superseded";
+  | "orphan_shadow_or_dispatch";
 
 export interface TaskNoteSignal {
   item_id: string;
@@ -38,18 +39,39 @@ export interface TaskTriageItem extends TaskNoteSignal {
   console_lane: "auto_routed" | "needs_chris" | "deferred" | "closed";
 }
 
+export interface TaskTriageSafeActionAudit {
+  item_id: string;
+  classification: TaskTriageClassification;
+  action: "route_to_agent" | "stale_metadata" | "suppress_duplicate_detection" | "none";
+  deterministic_safe: boolean;
+  target_agent: string | null;
+  status: "candidate" | "applied" | "skipped" | "failed";
+  reason: string;
+}
+
 export interface TaskTriageReview {
   schema_version: "task-triage-review.v1";
   generated_at: string;
   source: {
     manager_tasks: number;
     task_notes: number;
+    taskview_markdown: number | "unavailable";
+    dispatch_shadow_logs: number | "unavailable";
+    console_review_queue: number | "unavailable";
     inbox_digest: "excluded";
   };
+  source_freshness: {
+    manager_tasks: string;
+    task_notes: string;
+    taskview_markdown: string | null;
+    dispatch_shadow_logs: string | null;
+    console_review_queue: string | null;
+  };
   summary: Record<TaskTriageClassification, number> & {
-    auto_route_candidates: number;
+    safe_action_candidates: number;
     console_lane_items: number;
   };
+  safe_action_audit: TaskTriageSafeActionAudit[];
   items: TaskTriageItem[];
 }
 
@@ -199,7 +221,7 @@ export function classifyTaskNote(signal: TaskNoteSignal, agents: AgentRow[]): Ta
     reasons.push(route.reason ?? "agent route matched");
     return {
       ...signal,
-      classification: "route_to_project_agent",
+      classification: "task_note_to_action",
       confidence: "high",
       deterministic_safe: true,
       proposed_action: `Route task note to ${route.agent.name}`,
@@ -213,7 +235,7 @@ export function classifyTaskNote(signal: TaskNoteSignal, agents: AgentRow[]): Ta
     reasons.push("duplicate/superseded language");
     return {
       ...signal,
-      classification: "duplicate_superseded",
+      classification: "duplicate",
       confidence: "medium",
       deterministic_safe: false,
       proposed_action: "Surface for Chris to confirm duplicate/superseded handling",
@@ -227,7 +249,7 @@ export function classifyTaskNote(signal: TaskNoteSignal, agents: AgentRow[]): Ta
     reasons.push("done/archive language");
     return {
       ...signal,
-      classification: "archive_done",
+      classification: "completed_in_reality",
       confidence: "medium",
       deterministic_safe: false,
       proposed_action: "Surface for Chris to confirm task can be archived/done",
@@ -255,7 +277,7 @@ export function classifyTaskNote(signal: TaskNoteSignal, agents: AgentRow[]): Ta
     reasons.push("stale/defer language");
     return {
       ...signal,
-      classification: "stale_defer",
+      classification: "stale",
       confidence: "low",
       deterministic_safe: false,
       proposed_action: "Defer until a stronger routing or closure signal appears",
@@ -281,6 +303,8 @@ export function buildTaskTriageReview(input: {
   tasks: TaskRow[];
   agents: AgentRow[];
   taskNotes?: TaskNoteEventRow[];
+  sourceCounts?: Partial<Pick<TaskTriageReview["source"], "taskview_markdown" | "dispatch_shadow_logs" | "console_review_queue">>;
+  sourceFreshness?: Partial<Omit<TaskTriageReview["source_freshness"], "manager_tasks" | "task_notes">>;
   nowIso?: string;
 }): TaskTriageReview {
   const tasksByUuid = new Map(input.tasks.map((task) => [task.uuid, task]));
@@ -297,30 +321,55 @@ export function buildTaskTriageReview(input: {
   const signals = [...input.tasks.flatMap(extractTaskNoteSignals), ...eventSignals];
   const items = signals.map((signal) => classifyTaskNote(signal, input.agents));
   const summary = {
-    route_to_project_agent: 0,
-    archive_done: 0,
+    completed_in_reality: 0,
+    stale: 0,
+    duplicate: 0,
+    task_note_to_action: 0,
     needs_chris: 0,
-    stale_defer: 0,
-    duplicate_superseded: 0,
-    auto_route_candidates: 0,
+    orphan_shadow_or_dispatch: 0,
+    safe_action_candidates: 0,
     console_lane_items: 0,
   };
+  const safeActionAudit: TaskTriageSafeActionAudit[] = [];
 
   for (const item of items) {
     summary[item.classification] += 1;
-    if (item.deterministic_safe && item.target_agent) summary.auto_route_candidates += 1;
+    if (item.deterministic_safe && item.target_agent) {
+      summary.safe_action_candidates += 1;
+      safeActionAudit.push({
+        item_id: item.item_id,
+        classification: item.classification,
+        action: "route_to_agent",
+        deterministic_safe: true,
+        target_agent: item.target_agent,
+        status: "candidate",
+        reason: item.reasons.join("; ") || "deterministic rule matched",
+      });
+    }
     if (item.console_lane === "needs_chris") summary.console_lane_items += 1;
   }
+  const now = input.nowIso ?? new Date().toISOString();
 
   return {
     schema_version: "task-triage-review.v1",
-    generated_at: input.nowIso ?? new Date().toISOString(),
+    generated_at: now,
     source: {
       manager_tasks: input.tasks.length,
       task_notes: signals.length,
+      taskview_markdown: input.sourceCounts?.taskview_markdown ?? "unavailable",
+      dispatch_shadow_logs: input.sourceCounts?.dispatch_shadow_logs ?? "unavailable",
+      console_review_queue: input.sourceCounts?.console_review_queue ?? "unavailable",
       inbox_digest: "excluded",
     },
+    source_freshness: {
+      manager_tasks: now,
+      task_notes: now,
+      taskview_markdown: input.sourceFreshness?.taskview_markdown ?? null,
+      dispatch_shadow_logs: input.sourceFreshness?.dispatch_shadow_logs ?? null,
+      console_review_queue: input.sourceFreshness?.console_review_queue ?? null,
+    },
     summary,
+    safe_action_audit: safeActionAudit,
     items,
   };
 }
