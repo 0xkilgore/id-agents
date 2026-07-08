@@ -23,7 +23,8 @@ import {
 
 const HOME = process.env.HOME || '/Users/kilgore';
 const MANAGER_URL = process.env.DEPLOY_WATCHDOG_MANAGER_URL || 'http://localhost:4100';
-const CANE = process.env.DEPLOY_WATCHDOG_REPO || `${HOME}/Dropbox/Code/cane/id-agents`;
+const PRIMARY_CANE = process.env.DEPLOY_WATCHDOG_PRIMARY_REPO || `${HOME}/Dropbox/Code/cane/id-agents`;
+const CANE = process.env.DEPLOY_WATCHDOG_REPO || `${HOME}/Dropbox/Code/cane/id-agents-deploy-main`;
 const PLIST = `${HOME}/Library/LaunchAgents/com.kilgore.id-agents-manager.plist`;
 const SVC = 'com.kilgore.id-agents-manager';
 const LOG = '/tmp/deploy-watchdog.log';
@@ -103,6 +104,100 @@ function sh(cmd, opts = {}) {
   return execSync(cmd, { cwd: CANE, stdio: ['ignore', 'pipe', 'pipe'], encoding: 'utf8', ...opts });
 }
 
+function gitOutput(repo, args) {
+  return execFileSync('git', args, {
+    cwd: repo,
+    encoding: 'utf8',
+    timeout: 10000,
+    stdio: ['ignore', 'pipe', 'pipe'],
+  }).trim();
+}
+
+function repoBranch(repo) {
+  try { return gitOutput(repo, ['rev-parse', '--abbrev-ref', 'HEAD']) || 'unknown'; } catch { return 'unknown'; }
+}
+
+function repoDirtyCount(repo) {
+  try {
+    const out = gitOutput(repo, ['status', '--porcelain']);
+    return out ? out.split('\n').length : 0;
+  } catch {
+    return -1;
+  }
+}
+
+function deployCheckoutExists() {
+  return existsSync(`${CANE}/.git`) && existsSync(`${CANE}/scripts/start-id-agents-manager.sh`);
+}
+
+function plistValue(keyPath) {
+  try {
+    return execFileSync('/usr/libexec/PlistBuddy', ['-c', `Print ${keyPath}`, PLIST], {
+      encoding: 'utf8',
+      timeout: 10000,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    }).trim();
+  } catch {
+    return null;
+  }
+}
+
+function managerPlistPointsAtDeployCheckout() {
+  return plistValue(':WorkingDirectory') === CANE
+    && plistValue(':ProgramArguments:1') === `${CANE}/scripts/start-id-agents-manager.sh`;
+}
+
+function logPrimaryHygiene() {
+  const branch = repoBranch(PRIMARY_CANE);
+  const dirtyCount = repoDirtyCount(PRIMARY_CANE);
+  if (branch !== 'main' || dirtyCount !== 0) {
+    log(`HYGIENE-BLOCKED repo=${PRIMARY_CANE} branch=${branch} dirty_count=${dirtyCount} next_action=preserve primary work; rebuild from clean deploy checkout ${CANE}`);
+  } else {
+    log(`primary hygiene ok repo=${PRIMARY_CANE} branch=${branch} dirty_count=${dirtyCount}`);
+  }
+}
+
+function ensureDeployCheckout() {
+  if (!existsSync(`${PRIMARY_CANE}/.git`)) {
+    throw new Error(`primary id-agents checkout missing: ${PRIMARY_CANE}`);
+  }
+  if (!existsSync(`${CANE}/.git`)) {
+    const remoteUrl = gitOutput(PRIMARY_CANE, ['remote', 'get-url', 'origin']);
+    log(`creating clean deploy checkout: git clone ${remoteUrl} ${CANE}`);
+    execFileSync('git', ['clone', remoteUrl, CANE], { stdio: ['ignore', 'pipe', 'pipe'] });
+  }
+  sh('git fetch --quiet origin');
+  sh('git checkout -q -B main origin/main');
+  sh('git reset --hard -q origin/main');
+  sh("git clean -ffd -e node_modules -e 'node_modules/**' -q");
+  const branch = repoBranch(CANE);
+  const dirtyCount = repoDirtyCount(CANE);
+  if (branch !== 'main' || dirtyCount !== 0) {
+    throw new Error(`deploy checkout not clean main: repo=${CANE} branch=${branch} dirty_count=${dirtyCount}`);
+  }
+}
+
+function ensureManagerPlistUsesDeployCheckout() {
+  execFileSync('/usr/libexec/PlistBuddy', ['-c', `Set :WorkingDirectory ${CANE}`, PLIST], { stdio: ['ignore', 'pipe', 'pipe'] });
+  execFileSync('/usr/libexec/PlistBuddy', ['-c', `Set :ProgramArguments:1 ${CANE}/scripts/start-id-agents-manager.sh`, PLIST], { stdio: ['ignore', 'pipe', 'pipe'] });
+  log(`manager plist points at deploy checkout repo=${CANE}`);
+}
+
+function installDependencies() {
+  try {
+    sh('npm ci');
+    return;
+  } catch (e) {
+    log(`WARN npm ci failed; attempting ignored node_modules symlink fallback from primary checkout: ${e.message}`);
+  }
+  if (!existsSync(`${PRIMARY_CANE}/node_modules`)) {
+    throw new Error(`npm ci failed and primary node_modules is unavailable; repo=${PRIMARY_CANE}`);
+  }
+  sh('rm -rf node_modules');
+  execFileSync('ln', ['-s', `${PRIMARY_CANE}/node_modules`, `${CANE}/node_modules`], { stdio: ['ignore', 'pipe', 'pipe'] });
+  log(`node_modules fallback linked: ${CANE}/node_modules -> ${PRIMARY_CANE}/node_modules`);
+}
+
 /** Read NODE_BIN from the manager plist (Gotcha 6 — do NOT hardcode; it moved once). */
 function readNodeBin() {
   try {
@@ -115,44 +210,11 @@ function readNodeBin() {
 
 /** The full gotchas redeploy sequence. Throws on any failure (caller alerts). */
 async function runRedeploy() {
-  const date = new Date().toISOString().slice(0, 10).replace(/-/g, '');
-
-  // Gotcha 2b (2026-07-04) — node_modules has twice ended up git-tracked as a
-  // symlink blob (env/worktree-sharing artifact, never source). `npm ci`
-  // materializes a REAL directory over that tracked path, so ANY branch
-  // switch below (the WIP-snapshot switch, or its same-day fallback to an
-  // already-created wip branch) trips "local changes to node_modules would
-  // be overwritten" and the whole redeploy aborts — recurred every 15 min
-  // for ~24h on 2026-07-03/04. Untrack + physically clear it before any
-  // switch; npm ci further down regenerates it on whichever branch we land
-  // on regardless, so this is always safe to do unconditionally.
-  sh('git rm -r --cached --ignore-unmatch node_modules');
-  sh('rm -rf node_modules');
-
-  // Gotcha 2 — snapshot a dirty canonical checkout; NEVER clobber, never stash-drop.
-  // Do not switch to the WIP branch to create the snapshot: if the branch
-  // already exists and has a different version of a dirty file, the switch
-  // itself fails before anything is preserved.
-  const dirty = sh(`git status --porcelain -- . ':!manager.db' ':!*.db' ':!pnpm-lock.yaml' ':!node_modules'`).trim();
-  if (dirty) {
-    const stamp = new Date().toISOString();
-    log(`Gotcha-2: canonical checkout dirty (${dirty.split('\n').length} paths) → stash snapshot + wip/pre-redeploy-snapshot-${date}`);
-    // Snapshot tracked+untracked SOURCE/config, but never stray db/lockfiles
-    // or node_modules (Gotcha 2 / Gotcha 2b — node_modules is a build
-    // artifact, never source, and must never be re-added to the index).
-    sh(`git stash push -u -m 'WIP snapshot before manager redeploy ${stamp}' -- . ':!manager.db' ':!*.db' ':!pnpm-lock.yaml' ':!node_modules'`);
-    const stashSha = sh('git rev-parse stash@{0}').trim();
-    sh(`git branch -f wip/pre-redeploy-snapshot-${date} ${stashSha}`);
-    log(`Gotcha-2: dirty work preserved as stash@{0} (${stashSha.slice(0, 12)}) and wip/pre-redeploy-snapshot-${date}`);
-  }
-  sh('git restore --staged --worktree node_modules 2>/dev/null || true');
-
-  // Gotcha 3 — build from a dated deploy branch at origin/main (main is worktree-held).
-  sh('git fetch origin');
-  sh(`git switch -c deploy/manager-${date} origin/main 2>/dev/null || (git switch deploy/manager-${date} && git reset --hard origin/main)`);
+  logPrimaryHygiene();
+  ensureDeployCheckout();
 
   // Gotcha 5 — new code / old node_modules → missing deps crash on boot.
-  sh('npm ci');
+  installDependencies();
 
   // Gotcha 6 — rebuild the native module against the plist NODE_BIN (two-node ABI split).
   const nodeBin = readNodeBin();
@@ -165,9 +227,11 @@ async function runRedeploy() {
   sh('npx tsc');
   sh('npx tsc -p src/tui/tsconfig.json');
   sh('node scripts/write-build-info.mjs'); // writes dist/build-info.json — the freshness truth
+  ensureManagerPlistUsesDeployCheckout();
 
   // Restart via launchd (hermetic env — no CLAUDECODE / parent-shell leak).
-  sh(`launchctl kickstart -k gui/$(id -u)/${SVC}`);
+  sh(`launchctl bootout gui/$(id -u)/${SVC} || true`);
+  sh(`launchctl bootstrap gui/$(id -u) ${PLIST}`);
 
   // Gotcha 8.1 — build_sha == origin_main_sha + freshness fresh.
   await sleep(20000);
@@ -239,6 +303,8 @@ async function main() {
     priorConsecutiveStale: prior,
     pauseFileExists,
     healthOk: health.ok,
+    deployCheckoutOk: deployCheckoutExists(),
+    managerPlistOk: managerPlistPointsAtDeployCheckout(),
   });
   writeState({ consecutiveStale: decision.nextConsecutiveStale, lastAction: decision.action, lastAt: new Date().toISOString() });
   log(`decision=${decision.action} (${decision.reason}) health_ok=${health.ok} freshness=${health.freshnessState ?? 'n/a'} build_sha=${(health.buildSha || '').slice(0, 7)}`);

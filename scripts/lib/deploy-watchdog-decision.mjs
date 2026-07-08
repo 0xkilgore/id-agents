@@ -23,6 +23,8 @@ export const CONSECUTIVE_THRESHOLD = 2;
  * @property {number} priorConsecutiveStale - streak carried from the last run's state file
  * @property {boolean} pauseFileExists       - kill-switch file present
  * @property {boolean} healthOk              - true when /health was read successfully
+ * @property {boolean} deployCheckoutOk      - true when the dedicated deploy checkout exists
+ * @property {boolean} managerPlistOk        - true when launchd points at the dedicated deploy checkout
  *
  * @typedef {Object} WatchdogDecision
  * @property {'noop'|'wait'|'act'} action
@@ -41,6 +43,8 @@ export function decideWatchdogAction(input) {
     priorConsecutiveStale = 0,
     pauseFileExists = false,
     healthOk = true,
+    deployCheckoutOk = true,
+    managerPlistOk = true,
   } = input || {};
 
   // Kill switch wins over everything — never act while paused. Streak preserved
@@ -50,6 +54,20 @@ export function decideWatchdogAction(input) {
       action: 'noop',
       nextConsecutiveStale: priorConsecutiveStale,
       reason: 'paused (kill-switch file present)',
+    };
+  }
+
+  // Structural launchd/deploy-root breakage is independent of freshness. If the
+  // manager currently runs from a temporary source checkout, /health can still be
+  // readable while the next restart would fail or keep serving stale live code.
+  if (!deployCheckoutOk || !managerPlistOk) {
+    return {
+      action: 'act',
+      nextConsecutiveStale: priorConsecutiveStale,
+      reason: [
+        !deployCheckoutOk ? 'deploy checkout missing' : null,
+        !managerPlistOk ? 'manager launchd plist not pointed at deploy checkout' : null,
+      ].filter(Boolean).join('; '),
     };
   }
 

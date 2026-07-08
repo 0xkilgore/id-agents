@@ -39,6 +39,32 @@ describe('decideWatchdogAction', () => {
     expect(d.nextConsecutiveStale).toBe(0);
   });
 
+  it('missing deploy checkout → act immediately even before stale_alerted', () => {
+    const d = decideWatchdogAction({
+      freshnessState: 'stale',
+      priorConsecutiveStale: 0,
+      pauseFileExists: false,
+      healthOk: true,
+      deployCheckoutOk: false,
+      managerPlistOk: true,
+    });
+    expect(d.action).toBe('act');
+    expect(d.reason).toMatch(/deploy checkout missing/);
+  });
+
+  it('manager plist pointed away from deploy checkout → act immediately', () => {
+    const d = decideWatchdogAction({
+      freshnessState: 'fresh',
+      priorConsecutiveStale: 0,
+      pauseFileExists: false,
+      healthOk: true,
+      deployCheckoutOk: true,
+      managerPlistOk: false,
+    });
+    expect(d.action).toBe('act');
+    expect(d.reason).toMatch(/launchd plist/);
+  });
+
   it('recovery: stale then fresh resets the streak so a later single stale only waits', () => {
     const stale1 = decideWatchdogAction({ freshnessState: STALE_STATE, priorConsecutiveStale: 0, pauseFileExists: false, healthOk: true });
     expect(stale1.action).toBe('wait');

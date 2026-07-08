@@ -51,6 +51,17 @@ describe("RepoRegistry", () => {
     expect(reg.isProtectedRoot(`${idAgents}/src`)).toBe(false);
   });
 
+  it("registers the clean id-agents deploy checkout as the most-specific protected root", () => {
+    const reg = new RepoRegistry();
+    const deploy = "/Users/kilgore/Dropbox/Code/cane/id-agents-deploy-main";
+    expect(reg.isProtectedRoot(deploy)).toBe(true);
+    expect(reg.resolve(`${deploy}/scripts/start-id-agents-manager.sh`)).toMatchObject({
+      repo_name: "id-agents-deploy-main",
+      dirty_severity: "critical",
+      block_builds_without_lease: true,
+    });
+  });
+
   it("isWithin handles trailing slashes and exact roots", () => {
     expect(isWithin("/a/b/", "/a/b")).toBe(true);
     expect(isWithin("/a/b", "/a/b/c")).toBe(true);
