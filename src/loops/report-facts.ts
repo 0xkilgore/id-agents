@@ -104,8 +104,11 @@ export function previousDueAt(def: ReportDefinition, nowIso: string): string {
     case "biweekly": {
       const anchorMs = Date.parse(def.cadence.anchor_due_at);
       if (!Number.isFinite(anchorMs)) throw new Error(`invalid anchor_due_at: ${def.cadence.anchor_due_at}`);
-      if (nowMs < anchorMs) return iso(anchorMs);
-      return iso(anchorMs + Math.floor((nowMs - anchorMs) / BIWEEK_MS) * BIWEEK_MS);
+      const anchor = new Date(anchorMs);
+      const anchorDayStart = Date.UTC(anchor.getUTCFullYear(), anchor.getUTCMonth(), anchor.getUTCDate());
+      const alignedAnchorMs = setUtcTime(anchorDayStart, def.cadence.hour_utc, def.cadence.minute_utc);
+      if (nowMs < alignedAnchorMs) return iso(alignedAnchorMs);
+      return iso(alignedAnchorMs + Math.floor((nowMs - alignedAnchorMs) / BIWEEK_MS) * BIWEEK_MS);
     }
   }
 }

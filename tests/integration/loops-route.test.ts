@@ -19,6 +19,9 @@ import { SqliteTasksRepo } from '../../src/db/repos/sqlite/tasks-repo.js';
 import { SqliteEventsRepo } from '../../src/db/repos/sqlite/events-repo.js';
 import { SqliteSubscriptionsRepo } from '../../src/db/repos/sqlite/subscriptions-repo.js';
 import { SqliteCheckinsRepo } from '../../src/db/repos/sqlite/checkins-repo.js';
+import { SEED_LOOPS } from '../../src/loops/registry.js';
+import { createLoopRun, loopRunPhid } from '../../src/loops/storage.js';
+import type { ActorRef, LoopRunRecord, LoopRunStatus } from '../../src/loops/types.js';
 
 async function createInMemoryDb() {
   const adapter = new SqliteAdapter(':memory:');
@@ -47,6 +50,70 @@ async function findFreePort(): Promise<number> {
     });
     server.on('error', reject);
   });
+}
+
+const REPORT_NOW = '2026-07-07T21:00:00.000Z';
+const REPORT_EXPECTED_FOR = '2026-07-07T18:00:00.000Z';
+const REPORT_ACTOR: ActorRef = { kind: 'agent', id: 'sentinel' };
+
+function persistedReportRun(over: {
+  loop_slug: string;
+  status: LoopRunStatus;
+  output_path?: string | null;
+  dispatch_phids?: string[];
+  failure_detail?: string | null;
+}): LoopRunRecord {
+  const loop = SEED_LOOPS.find((l) => l.slug === over.loop_slug);
+  if (!loop) throw new Error(`missing seed loop ${over.loop_slug}`);
+  const idempotencyKey = `scheduled:${loop.loop_phid}:${REPORT_EXPECTED_FOR}`;
+  return {
+    loop_run_phid: loopRunPhid(loop.loop_phid, idempotencyKey),
+    loop_phid: loop.loop_phid,
+    trigger: {
+      kind: 'scheduled',
+      recurrence_phid: `phid:recurrence:${over.loop_slug}`,
+      recurrence_instance_phid: null,
+      scheduled_for: REPORT_EXPECTED_FOR,
+      dedup_key: idempotencyKey,
+    },
+    status: over.status,
+    failure_reason: over.status === 'failed' ? 'collector_failed' : null,
+    failure_detail: over.failure_detail ?? null,
+    step_log: [
+      {
+        step_id: 'collector',
+        phase: 'collector',
+        name: 'collect',
+        status: over.status === 'failed' ? 'failed' : 'succeeded',
+        started_at: REPORT_EXPECTED_FOR,
+        finished_at: REPORT_NOW,
+        failure_reason: over.status === 'failed' ? 'collector_failed' : null,
+        detail: over.failure_detail ?? null,
+        evidence_refs: [{ kind: 'query', ref: `${over.loop_slug}-ledger` }],
+      },
+    ],
+    output_refs: over.output_path === undefined
+      ? []
+      : [{
+          kind: 'markdown_report',
+          artifact_phid: `phid:artifact:${over.loop_slug}`,
+          path: over.output_path,
+          href: null,
+          dispatch_phids: over.dispatch_phids ?? [],
+          delivery_status: 'not_applicable',
+          required: true,
+        }],
+    spawned_dispatch_phids: over.dispatch_phids ?? [],
+    idempotency_key: idempotencyKey,
+    retry_of_phid: null,
+    fired_at: REPORT_EXPECTED_FOR,
+    queued_at: REPORT_EXPECTED_FOR,
+    admitted_at: REPORT_EXPECTED_FOR,
+    started_at: REPORT_EXPECTED_FOR,
+    finished_at: REPORT_NOW,
+    created_by: REPORT_ACTOR,
+    updated_at: REPORT_NOW,
+  };
 }
 
 describe('GET /loops registry routes', () => {
@@ -110,7 +177,19 @@ describe('GET /loops registry routes', () => {
   });
 
   it('GET /loops/reports/due returns report obligations with status and proof fields', async () => {
-    const res = await fetch(`${baseUrl}/loops/reports/due?now=2026-07-07T21:00:00.000Z`);
+    await createLoopRun(db.adapter, persistedReportRun({
+      loop_slug: 'surface-feeder',
+      status: 'succeeded',
+      output_path: '/output/surface-feeder.md',
+      dispatch_phids: ['phid:disp-surface'],
+    }));
+    await createLoopRun(db.adapter, persistedReportRun({
+      loop_slug: 'task-reconciliation',
+      status: 'failed',
+      failure_detail: 'collector_failed_for_test',
+    }));
+
+    const res = await fetch(`${baseUrl}/loops/reports/due?now=${encodeURIComponent(REPORT_NOW)}`);
     expect(res.status).toBe(200);
     const body = await res.json() as any;
     expect(body.ok).toBe(true);
@@ -126,8 +205,35 @@ describe('GET /loops registry routes', () => {
       artifact_refs: [],
       ref_proof: [],
     });
+    const surface = body.runs.find((r: any) => r.report_key === 'kapelle:surface-feeder-6h');
+    expect(surface).toMatchObject({
+      status: 'done',
+      reason: 'artifact_or_ref_proof_present',
+      artifact_refs: expect.arrayContaining([
+        { kind: 'path', ref: '/output/surface-feeder.md' },
+      ]),
+      ref_proof: expect.arrayContaining([
+        { kind: 'dispatch', ref: 'phid:disp-surface' },
+      ]),
+    });
+    const failed = body.runs.find((r: any) => r.report_key === 'kapelle:task-reconciliation-6h');
+    expect(failed).toMatchObject({
+      status: 'failed',
+      reason: 'collector_failed_for_test',
+      artifact_refs: [],
+    });
+    expect(body.runs.find((r: any) => r.report_key === 'kapelle:library-research-biweekly')?.status).toBe('expected');
+    expect(body.runs.find((r: any) => r.report_key === 'kapelle:weekly-project-report')?.status).toBe('skipped');
     expect(body.owed_now.map((r: any) => r.report_key)).toContain('kapelle:sentinel-verification-2h');
+    expect(body.stale.map((r: any) => r.report_key)).toEqual(expect.arrayContaining([
+      'kapelle:sentinel-verification-2h',
+      'kapelle:task-reconciliation-6h',
+    ]));
+    expect(body.summary.expected).toBeGreaterThan(0);
+    expect(body.summary.done).toBeGreaterThan(0);
     expect(body.summary.late).toBeGreaterThan(0);
+    expect(body.summary.failed).toBeGreaterThan(0);
+    expect(body.summary.skipped).toBeGreaterThan(0);
   });
 
   it('GET /loops/:ref resolves by slug and by phid; 404 otherwise', async () => {

@@ -4,7 +4,7 @@ import {
   projectReportRunFact,
   reportDefinitionFacts,
 } from "../../src/loops/report-facts.js";
-import { SEED_LOOPS } from "../../src/loops/registry.js";
+import { SEED_LOOPS, type ReportDefinition } from "../../src/loops/registry.js";
 import type { ActorRef, LoopRunRecord, LoopRunStatus } from "../../src/loops/types.js";
 
 const NOW = "2026-07-07T21:00:00.000Z";
@@ -96,6 +96,26 @@ describe("loop report facts", () => {
   it("computes previous weekly and interval due instants", () => {
     expect(previousDueAt(WEEKLY, NOW)).toBe("2026-07-05T16:00:00.000Z");
     expect(previousDueAt(SENTINEL_2H, NOW)).toBe("2026-07-07T20:00:00.000Z");
+  });
+
+  it("aligns biweekly due instants to the declared UTC time", () => {
+    const biweekly: ReportDefinition = {
+      report_key: "kapelle:test-biweekly",
+      label: "Test Biweekly",
+      cadence: {
+        kind: "biweekly",
+        anchor_due_at: "2026-07-01T00:00:00.000Z",
+        hour_utc: 14,
+        minute_utc: 30,
+      },
+      enabled: true,
+      grace_minutes: 60,
+      stale_after_minutes: 24 * 60,
+      artifact_required: true,
+    };
+
+    expect(previousDueAt(biweekly, "2026-07-07T21:00:00.000Z")).toBe("2026-07-01T14:30:00.000Z");
+    expect(previousDueAt(biweekly, "2026-07-15T15:00:00.000Z")).toBe("2026-07-15T14:30:00.000Z");
   });
 
   it("marks a proof-backed scheduled run as done", () => {
