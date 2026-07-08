@@ -5,6 +5,7 @@ import { readDispatches, type DispatchReadRow } from "../dispatch-scheduler/read
 import { listInboxItems } from "../outputs/storage.js";
 import type { OutputsInboxRow } from "../outputs/types.js";
 import { ARTIFACT_COMMENT_DISPATCH_CHANNEL } from "../outputs/comment-dispatch.js";
+import { listPendingTaskCommentEvents, type TaskCommentEvent } from "../tasks-readmodel/comment-router.js";
 import type { DeskNeedsMeItem, DeskNeedsMeResponse } from "./types.js";
 
 export const DESK_NEEDS_ME_SCHEMA_VERSION = "desk.needs_me.v1" as const;
@@ -46,6 +47,7 @@ export async function buildDeskNeedsMe(
     listInboxItems(adapter, { includeNeverViewed: true }, Math.min(limit * 2, 200), 0),
     team.id ? readDispatches(adapter, team.id, "all", Math.min(limit * 4, 200)) : Promise.resolve([]),
   ]);
+  const taskCommentRows = team.id ? await listPendingTaskCommentEvents(adapter, team.id, Math.min(limit * 2, 200)) : [];
 
   if (!team.id) {
     warnings.push({
@@ -61,8 +63,11 @@ export async function buildDeskNeedsMe(
   const routedItems = dispatchRows
     .filter((row) => (row.needs_operator || row.needs_input.active != null) && !isArtifactCommentDispatch(row))
     .map(dispatchToNeedsMeItem);
+  const taskCommentItems = taskCommentRows
+    .filter((row) => row.route_state === "held" || row.route_state === "failed")
+    .map(taskCommentToNeedsMeItem);
 
-  const items = [...approvalItems, ...artifactItems, ...routedItems]
+  const items = [...approvalItems, ...artifactItems, ...routedItems, ...taskCommentItems]
     .sort((a, b) => Date.parse(b.updated_at) - Date.parse(a.updated_at))
     .slice(0, limit);
 
@@ -79,12 +84,13 @@ export async function buildDeskNeedsMe(
     },
     filters: { owner, limit },
     counts: {
-      total: approvalItems.length + artifactItems.length + routedItems.length,
+      total: approvalItems.length + artifactItems.length + routedItems.length + taskCommentItems.length,
       returned: items.length,
       approvals: approvalItems.length,
       artifact_review: artifactItems.length,
       unread_comments: 0,
       routed_items: routedItems.length,
+      task_comments: taskCommentItems.length,
     },
     items,
     warnings,
@@ -188,6 +194,38 @@ function dispatchToNeedsMeItem(row: DispatchReadRow): DeskNeedsMeItem {
       needs_operator: row.needs_operator,
       needs_input: row.needs_input,
       sort_group: row.sort_group,
+    },
+  };
+}
+
+function taskCommentToNeedsMeItem(row: TaskCommentEvent): DeskNeedsMeItem {
+  const updated = new Date(row.updated_at * 1000).toISOString();
+  const created = new Date(row.created_at * 1000).toISOString();
+  return {
+    id: `task_comment:${row.event_id}`,
+    source_type: "task_comment",
+    label: `Task comment route ${row.route_state}: ${row.task_title}`,
+    body_md: row.held_reason ?? row.comment_text,
+    href: `/ops/tasks/${encodeURIComponent(row.task_name)}`,
+    priority: row.route_state === "failed" ? "high" : "normal",
+    actor: row.actor,
+    source_ref: row.event_id,
+    source_agent: row.target_agent,
+    created_at: created,
+    updated_at: updated,
+    metadata: {
+      event_id: row.event_id,
+      dedupe_key: row.dedupe_key,
+      task_name: row.task_name,
+      task_uuid: row.task_uuid,
+      route_state: row.route_state,
+      held_reason: row.held_reason,
+      target_agent: row.target_agent,
+      dispatch_phid: row.dispatch_phid,
+      query_id: row.query_id,
+      source_path: row.source_path,
+      source_line: row.source_line,
+      comment_hash: row.comment_hash,
     },
   };
 }

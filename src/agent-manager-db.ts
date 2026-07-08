@@ -49,6 +49,13 @@ import {
   draftFromManagerApi,
   draftFromScheduleDerived,
 } from './tasks-readmodel/task-draft.js';
+import {
+  appendAndRouteTaskComment,
+  listTaskCommentEvents,
+  listPendingTaskCommentEvents,
+  migrateTaskCommentTables,
+  TASK_COMMENT_EVENT_TOPIC,
+} from './tasks-readmodel/comment-router.js';
 import { resolveTrack } from './track-registry/registry.js';
 import { assembleAgentDetail } from './agent-detail/assemble.js';
 import {
@@ -387,7 +394,7 @@ interface RestAPCatalog {
  */
 const TOPIC_ALIASES: Record<string, readonly string[]> = {
   'query:terminal': ['query:delivered', 'query:failed', 'query:expired'],
-  'task:status': ['task:created', 'task:claimed', 'task:completed'],
+  'task:status': ['task:created', 'task:claimed', 'task:completed', TASK_COMMENT_EVENT_TOPIC],
   'agent:lifecycle': ['agent:started', 'agent:stopped', 'agent:rebuild'],
 };
 
@@ -402,6 +409,13 @@ function expandTopicAliases(topics: readonly string[]): string[] {
     }
   }
   return Array.from(out);
+}
+
+function taskCommentVisibleState(routeState: string): string {
+  if (routeState === 'routed') return 'comment-routed';
+  if (routeState === 'pending') return 'comment-pending';
+  if (routeState === 'held') return 'comment-held';
+  return 'comment-route-failed';
 }
 
 function parseTodayQuery(value: unknown): string | null {
@@ -7672,6 +7686,129 @@ export class AgentManagerDb {
       }
     });
 
+    this.managementApp.post('/tasks/:ref/append-note', async (req, res) => {
+      try {
+        const { id: teamId } = await this.getTeam(req);
+        const body = req.body || {};
+        const { task, error } = await this.resolveTaskRef(req.params.ref, teamId);
+        if (!task) return res.status(404).json({ error: error || `Task "${req.params.ref}" not found` });
+        if (task.team_id && task.team_id !== teamId) {
+          return res.status(404).json({ error: `Task "${req.params.ref}" not found` });
+        }
+
+        const commentText = typeof body.comment === 'string'
+          ? body.comment
+          : typeof body.text === 'string'
+          ? body.text
+          : typeof body.note === 'string'
+          ? body.note
+          : '';
+        if (!commentText.trim()) {
+          return res.status(400).json({ error: 'comment_required' });
+        }
+
+        const actorRef = typeof body.actor === 'string'
+          ? body.actor
+          : typeof body.actor_ref === 'string'
+          ? body.actor_ref
+          : typeof body.from === 'string'
+          ? body.from
+          : typeof body.agent_id === 'string'
+          ? body.agent_id
+          : 'user:chris';
+        const sourcePath = typeof body.source_path === 'string'
+          ? body.source_path
+          : typeof body.sourcePath === 'string'
+          ? body.sourcePath
+          : null;
+        const rawLine = body.source_line ?? body.sourceLine;
+        const sourceLine = Number.isInteger(rawLine) && Number(rawLine) > 0 ? Number(rawLine) : null;
+
+        const result = await appendAndRouteTaskComment({
+          adapter: this.db.adapter,
+          enqueue: this.dispatchScheduler
+            ? this.dispatchScheduler.enqueue.bind(this.dispatchScheduler)
+            : undefined,
+          teamId,
+          task,
+          actor: actorRef,
+          commentText,
+          sourcePath,
+          sourceLine,
+        });
+
+        if (!result.deduped) {
+          await this.db.events.insert({
+            team_id: teamId,
+            topic: TASK_COMMENT_EVENT_TOPIC,
+            actor_agent_id: null,
+            subject_kind: 'task',
+            subject_id: task.uuid || task.id,
+            occurred_at: result.event.created_at * 1000,
+            data: {
+              event_id: result.event.event_id,
+              dedupe_key: result.event.dedupe_key,
+              task_name: task.name,
+              task_uuid: task.uuid,
+              task_title: task.title,
+              actor: result.event.actor,
+              source_path: result.event.source_path,
+              source_line: result.event.source_line,
+              comment_hash: result.event.comment_hash,
+              comment_preview: result.event.comment_text.slice(0, 280),
+              route_state: result.event.route_state,
+              held_reason: result.event.held_reason,
+              target_agent: result.event.target_agent,
+              target_agent_raw: result.event.target_agent_raw,
+              dispatch_phid: result.event.dispatch_phid,
+              query_id: result.event.query_id,
+              artifact_link: result.event.artifact_link,
+            },
+          });
+        }
+
+        const visibleState = taskCommentVisibleState(result.event.route_state);
+        res.json({
+          ok: true,
+          schema_version: 'task.comment.append.v1',
+          deduped: result.deduped,
+          visible_state: visibleState,
+          route_state: result.event.route_state,
+          held_reason: result.event.held_reason,
+          event: result.event,
+          dispatch: result.event.dispatch_phid
+            ? {
+                dispatch_phid: result.event.dispatch_phid,
+                query_id: result.event.query_id,
+                to_agent: result.event.target_agent,
+              }
+            : null,
+          task: await this.buildTaskResult(task, teamId),
+        });
+      } catch (err: any) {
+        console.error('[Manager] Error in POST /tasks/:ref/append-note:', err);
+        res.status(500).json({ error: err?.message || 'Internal server error' });
+      }
+    });
+
+    this.managementApp.post('/tasks/comment-sweep', async (req, res) => {
+      try {
+        const { id: teamId } = await this.getTeam(req);
+        const limit = Math.min(parseInt(String(req.body?.limit ?? req.query.limit ?? '100'), 10) || 100, 500);
+        const pending = await listPendingTaskCommentEvents(this.db.adapter, teamId, limit);
+        res.json({
+          ok: true,
+          schema_version: 'task.comment.sweep.v1',
+          count: pending.length,
+          comments: pending,
+          held: pending.filter((e) => e.route_state === 'held' || e.route_state === 'failed').length,
+        });
+      } catch (err: any) {
+        console.error('[Manager] Error in POST /tasks/comment-sweep:', err);
+        res.status(500).json({ error: err?.message || 'Internal server error' });
+      }
+    });
+
     this.managementApp.post('/tasks/:ref/claim', async (req, res) => {
       try {
         let { id: teamId } = await this.getTeam(req);
@@ -8411,6 +8548,10 @@ export class AgentManagerDb {
     const links = await this.db.tasks.listEventLinksForTask(task.id);
     const shortId = task.uuid ? `#${task.uuid.replace(/-/g, '').slice(0, 8)}` : null;
     const facts = extractTaskScheduleFacts(task);
+    const commentHistory = task.team_id
+      ? await listTaskCommentEvents(this.db.adapter, task.team_id, task.id).catch(() => [])
+      : [];
+    const latestComment = commentHistory[0] ?? null;
 
     return {
       name: task.name,
@@ -8428,6 +8569,20 @@ export class AgentManagerDb {
       ownerName,
       teamName,
       linkedEvents: links.map(l => l.schedule_id),
+      commentRouting: latestComment
+        ? {
+            visible_state: taskCommentVisibleState(latestComment.route_state),
+            route_state: latestComment.route_state,
+            held_reason: latestComment.held_reason,
+            target_agent: latestComment.target_agent,
+            target_agent_raw: latestComment.target_agent_raw,
+            dispatch_phid: latestComment.dispatch_phid,
+            query_id: latestComment.query_id,
+            artifact_link: latestComment.artifact_link,
+            updated_at: latestComment.updated_at,
+          }
+        : { visible_state: 'no-comments', route_state: null },
+      commentHistory,
       createdAt: task.created_at,
       updatedAt: task.updated_at,
       completedAt: task.completed_at,
@@ -11957,6 +12112,7 @@ export class AgentManagerDb {
             import('./outputs/filesystem-reconciler.js'),
           ]);
           await migrateOutputsTables(this.db.adapter);
+          await migrateTaskCommentTables(this.db.adapter);
           const runFilesystemReconcile = async (recentSinceMs?: number) => {
             const roots = await this.filesystemArtifactRootsForAllTeams();
             return reconcileFilesystemArtifacts(this.db.adapter, {

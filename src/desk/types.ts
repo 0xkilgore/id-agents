@@ -114,7 +114,8 @@ export type DeskNeedsMeSourceType =
   | "approval"
   | "artifact_review"
   | "unread_comment"
-  | "routed_item";
+  | "routed_item"
+  | "task_comment";
 
 export interface DeskNeedsMeItem {
   id: string;
@@ -156,6 +157,7 @@ export interface DeskNeedsMeResponse {
     artifact_review: number;
     unread_comments: number;
     routed_items: number;
+    task_comments: number;
   };
   items: DeskNeedsMeItem[];
   warnings: Array<{ code: string; message: string }>;
