@@ -218,6 +218,70 @@ describe("orchestration health projection", () => {
       examples: ["art:regina:ack.md#1", "art:regina:ack.md#2"],
     });
   });
+
+  it("separates duplicate acknowledgement noise by task-triage id before deduping", async () => {
+    await migrateOutputsTables(adapter);
+    await insertArtifact("art:triage:ack.md", "regina");
+    const baseRouteStatus = {
+      visible_state: "recorded+routed",
+      route_kind: "acknowledgement",
+      routed: false,
+      retryable: false,
+      recorded_op_id: 1,
+      target_agent: "regina",
+      target_agent_raw: "regina",
+      dispatch: null,
+      skipped: "acknowledged",
+      error: null,
+    };
+
+    await insertCommentOp({
+      artifact_id: "art:triage:ack.md",
+      actor: "user:chris",
+      body: "acknowledged",
+      reaction: "acknowledged",
+      task_triage_id: "triage-a",
+      route_status: {
+        ...baseRouteStatus,
+        task_triage_id: "triage-a",
+        updated_at: "2026-07-01T15:00:00.000Z",
+      },
+    });
+    await insertCommentOp({
+      artifact_id: "art:triage:ack.md",
+      actor: "user:chris",
+      body: "acknowledged",
+      reaction: "acknowledged",
+      task_triage_id: "triage-b",
+      route_status: {
+        ...baseRouteStatus,
+        task_triage_id: "triage-b",
+        updated_at: "2026-07-01T15:01:00.000Z",
+      },
+    });
+    await insertCommentOp({
+      artifact_id: "art:triage:ack.md",
+      actor: "user:chris",
+      body: "acknowledged",
+      reaction: "acknowledged",
+      task_triage_id: "triage-a",
+      route_status: {
+        ...baseRouteStatus,
+        task_triage_id: "triage-a",
+        updated_at: "2026-07-01T15:02:00.000Z",
+      },
+    });
+
+    const health = await readOrchestrationHealthProjection(adapter, "default");
+
+    expect(health.queue_quality.duplicate_or_noop_backfill).toBe(3);
+    expect(health.queue_quality.suppressed_by_dedupe).toBe(1);
+    expect(health.queue_quality.top_noise_patterns[0]).toMatchObject({
+      pattern: "acknowledgement:regina:acknowledged",
+      count: 2,
+      examples: ["art:triage:ack.md#1", "art:triage:ack.md#3"],
+    });
+  });
 });
 
 async function insertArtifact(artifactId: string, agent: string): Promise<void> {
@@ -249,6 +313,7 @@ async function insertCommentOp(input: {
   actor: string;
   body: string;
   reaction: string;
+  task_triage_id?: string;
   route_status: Record<string, unknown>;
 }): Promise<void> {
   await adapter.query(
@@ -261,6 +326,7 @@ async function insertCommentOp(input: {
       JSON.stringify({
         body: input.body,
         reaction: input.reaction,
+        task_triage_id: input.task_triage_id,
         route_status: input.route_status,
       }),
     ],

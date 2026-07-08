@@ -259,10 +259,11 @@ function classifyArtifactNoise(rows: ArtifactCommentNoiseRow[]): {
 
     duplicateOrNoop += 1;
     const routeReceipt = routeStatus.dispatch?.dispatch_phid ?? routeStatus.skipped ?? "no_receipt";
+    const workItemId = workItemIdentity(row, payload, routeStatus);
     const targetAgent = routeStatus.target_agent ?? row.artifact_agent ?? "unknown_agent";
     const routeKind = routeStatus.route_kind;
     const fingerprint = payloadFingerprint(payload);
-    const key = `${row.artifact_id}|${targetAgent}|${fingerprint}|${routeReceipt}`;
+    const key = `${workItemId}|${targetAgent}|${fingerprint}|${routeReceipt}`;
     const pattern = `${routeKind}:${targetAgent}:${routeReceipt}`;
     const existing = groups.get(key) ?? { count: 0, examples: [], pattern };
     existing.count += 1;
@@ -296,6 +297,7 @@ interface ParsedRouteStatus {
   target_agent: string | null;
   skipped: string | null;
   dispatch: { dispatch_phid?: string | null } | null;
+  task_triage_id: string | null;
 }
 
 function parseRouteStatus(value: unknown): ParsedRouteStatus | null {
@@ -311,7 +313,30 @@ function parseRouteStatus(value: unknown): ParsedRouteStatus | null {
     target_agent: typeof v.target_agent === "string" ? v.target_agent : null,
     skipped: typeof v.skipped === "string" ? v.skipped : null,
     dispatch,
+    task_triage_id: firstString(v.task_triage_id, v.taskTriageId, v.triage_id, v.triageId),
   };
+}
+
+function workItemIdentity(
+  row: ArtifactCommentNoiseRow,
+  payload: Record<string, unknown> | null,
+  routeStatus: ParsedRouteStatus,
+): string {
+  const taskTriageId = firstString(
+    routeStatus.task_triage_id,
+    payload?.task_triage_id,
+    payload?.taskTriageId,
+    payload?.triage_id,
+    payload?.triageId,
+  );
+  return taskTriageId ? `task-triage:${taskTriageId}` : `artifact:${row.artifact_id}`;
+}
+
+function firstString(...values: unknown[]): string | null {
+  for (const value of values) {
+    if (typeof value === "string" && value.trim() !== "") return value.trim();
+  }
+  return null;
 }
 
 function payloadFingerprint(payload: Record<string, unknown> | null): string {
