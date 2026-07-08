@@ -560,7 +560,7 @@ export async function buildSurfacedArtifactsReadModel(
     }));
   }
 
-  const grouped = groupPrimaryRows(rawRows);
+  const grouped = groupPrimaryRows(rawRows.filter((row) => !isRawCloseoutDiagnosticOnly(row)));
   const rows = grouped.sort(compareSurfacedRows).slice(0, primaryLimit);
   return {
     rows,
@@ -827,6 +827,14 @@ function groupPrimaryRows(rawRows: SurfacedArtifactRow[]): SurfacedArtifactRow[]
     primary.rank_score = rankScore(primary) + Math.min(rows.length, 12);
     return primary;
   });
+}
+
+function isRawCloseoutDiagnosticOnly(row: SurfacedArtifactRow): boolean {
+  return row.source_kind === "dispatch_done"
+    && row.needs === "inspect_closeout"
+    && row.visibility_proof.discovered_by === "agent_done"
+    && row.visibility_proof.artifact_path_present === false
+    && row.title.startsWith("Untitled artifact from ");
 }
 
 function compareSurfacedRows(a: SurfacedArtifactRow, b: SurfacedArtifactRow): number {
