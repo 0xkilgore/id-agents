@@ -620,6 +620,31 @@ export async function migratePostgres(adapter: DbAdapter): Promise<void> {
   await adapter.query(`CREATE INDEX IF NOT EXISTS event_log_team_subject_idx ON event_log(team_id, subject_kind, subject_id, seq);`);
 
   await adapter.query(`
+    CREATE TABLE IF NOT EXISTS task_comment_events (
+      id text PRIMARY KEY,
+      team_id uuid NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+      task_id text NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+      task_uuid text,
+      task_name text NOT NULL,
+      task_title text NOT NULL,
+      source_path text,
+      source_line integer,
+      comment_text text NOT NULL,
+      actor text NOT NULL,
+      occurred_at bigint NOT NULL,
+      hash text NOT NULL,
+      event_seq bigint REFERENCES event_log(seq) ON DELETE SET NULL,
+      routing_status text NOT NULL DEFAULT 'pending',
+      routing_results_json jsonb NOT NULL DEFAULT '[]'::jsonb,
+      created_at bigint NOT NULL,
+      updated_at bigint NOT NULL,
+      UNIQUE(team_id, hash)
+    );
+  `);
+  await adapter.query(`CREATE INDEX IF NOT EXISTS task_comment_events_task_idx ON task_comment_events(team_id, task_id, occurred_at);`);
+  await adapter.query(`CREATE INDEX IF NOT EXISTS task_comment_events_status_idx ON task_comment_events(team_id, routing_status, updated_at);`);
+
+  await adapter.query(`
     CREATE TABLE IF NOT EXISTS subscriptions (
       id text PRIMARY KEY,
       team_id uuid NOT NULL REFERENCES teams(id) ON DELETE CASCADE,

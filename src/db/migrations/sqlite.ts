@@ -1026,6 +1026,10 @@ export async function migrateSqlite(adapter: SqliteAdapter): Promise<void> {
   const { migrateInboxTables } = await import('../../inbox/storage.js');
   migrateInboxTables(adapter);
 
+  // Task comment reactor v0 — durable note intake + routing receipts.
+  const { migrateTaskCommentTables } = await import('../../task-comments/storage.js');
+  await migrateTaskCommentTables(adapter);
+
   // Kapelle B11 — artifact review surface (idempotent — CREATE IF NOT EXISTS).
   const { migrateOutputsTables } = await import('../../outputs/storage.js');
   await migrateOutputsTables(adapter);

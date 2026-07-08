@@ -278,6 +278,75 @@ describe('GET /tasks read-model immediate reflect', () => {
     expect(single.task.completedAt).not.toBeNull();
   });
 
+  it('POST /tasks/:ref/notes emits one durable task_comment event, routes once, and shows receipts on task detail', async () => {
+    const taskName = 'comment-routing-task';
+    await insertAgentDirect(db, teamId, 'cane');
+    await insertTaskDirect(db, teamId, taskName, coderAgentId, 'doing', {
+      title: 'Comment routing task',
+    });
+
+    const appendRes = await fetch(`${baseUrl}/tasks/${taskName}/notes`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Id-Team': TEAM },
+      body: JSON.stringify({
+        text: 'Chris note: please route this to the right agents.',
+        actor: 'user:chris',
+        source_path: '/tmp/tasks.md',
+        source_line: 42,
+        timestamp: '2026-07-08T12:00:00.000Z',
+      }),
+    });
+    expect(appendRes.status).toBe(201);
+    const append = await appendRes.json();
+    expect(append.idempotent).toBe(false);
+    expect(append.note.routing_status).toBe('routed');
+    expect(append.note.routing_results.map((r: Record<string, unknown>) => r.target_agent).sort()).toEqual(['cane', 'coder']);
+    expect(append.note.routing_results.every((r: Record<string, unknown>) => typeof r.dispatch_phid === 'string')).toBe(true);
+
+    const detail = await fetch(`${baseUrl}/tasks/${taskName}`, {
+      headers: { 'X-Id-Team': TEAM },
+    }).then((r) => r.json());
+    expect(detail.task.notes).toHaveLength(1);
+    expect(detail.task.notes[0]).toMatchObject({
+      text: 'Chris note: please route this to the right agents.',
+      actor: 'user:chris',
+      source_path: '/tmp/tasks.md',
+      source_line: 42,
+      routing_status: 'routed',
+    });
+    expect(detail.task.commentRouting).toMatchObject({
+      status: 'routed',
+      routed_count: 2,
+      failed_count: 0,
+      pending_count: 0,
+    });
+    expect(typeof detail.task.commentRouting.latest_dispatch_id).toBe('string');
+
+    const duplicateRes = await fetch(`${baseUrl}/tasks/${taskName}/notes`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Id-Team': TEAM },
+      body: JSON.stringify({
+        text: 'Chris note: please route this to the right agents.',
+        actor: 'user:chris',
+        source_path: '/tmp/tasks.md',
+        source_line: 42,
+        timestamp: '2026-07-08T12:05:00.000Z',
+      }),
+    });
+    expect(duplicateRes.status).toBe(200);
+    const duplicate = await duplicateRes.json();
+    expect(duplicate.idempotent).toBe(true);
+
+    const events = await db.adapter.query<{ c: number }>(
+      `SELECT COUNT(*) AS c FROM event_log WHERE topic = 'task_comment'`,
+    );
+    expect(Number(events.rows[0]?.c ?? 0)).toBe(1);
+    const dispatches = await db.adapter.query<{ c: number }>(
+      `SELECT COUNT(*) AS c FROM dispatch_scheduler_queue WHERE channel = 'task_comment'`,
+    );
+    expect(Number(dispatches.rows[0]?.c ?? 0)).toBe(2);
+  });
+
   it('multiple closes in rapid succession do not produce a stale GET /tasks read', async () => {
     // Two tasks closed back-to-back; the list must reflect both
     // immediately without needing to re-poll.

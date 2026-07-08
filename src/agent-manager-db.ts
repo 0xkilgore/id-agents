@@ -111,6 +111,19 @@ import {
 import { RetentionService } from './wakeup-service/retention.js';
 import { CheckinService } from './checkins/checkin-service.js';
 import {
+  TASK_COMMENT_DISPATCH_CHANNEL,
+  TASK_COMMENT_EVENT_TOPIC,
+  appendTaskComment,
+  getTaskCommentByHash,
+  listPendingTaskComments,
+  listTaskCommentsForTask,
+  setTaskCommentEventSeq,
+  taskCommentView,
+  updateTaskCommentRouting,
+  type TaskCommentRow,
+  type TaskCommentRoutingResult,
+} from './task-comments/storage.js';
+import {
   DEFAULT_CLOSE_WHEN,
   DEFAULT_INTERVAL_SECONDS,
   buildCheckinResponse,
@@ -303,6 +316,71 @@ function parseFleetMetricsHistoryWindow(raw: unknown): "24h" | "7d" | "30d" | nu
   if (raw === undefined || raw === null || raw === "") return null;
   if (raw === "24h" || raw === "7d" || raw === "30d") return raw;
   return undefined;
+}
+
+function taskCommentActor(body: Record<string, unknown>): string {
+  const raw = body.actor ?? body.from;
+  if (typeof raw !== 'string' || raw.trim() === '') return 'user:chris';
+  const trimmed = raw.trim();
+  if (/^(user|agent|system|service):/.test(trimmed)) return trimmed;
+  return body.actor ? trimmed : `agent:${trimmed}`;
+}
+
+function parseTaskCommentOccurredAt(raw: unknown): number | undefined | null {
+  if (raw === undefined || raw === null || raw === '') return undefined;
+  if (typeof raw === 'number' && Number.isFinite(raw) && raw > 0) return raw;
+  if (typeof raw === 'string') {
+    const parsed = Date.parse(raw);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return null;
+}
+
+function actorRefFromTaskComment(actor: string): { kind: 'agent' | 'user' | 'system' | 'service' | 'unknown'; id: string; label: string; source: string } {
+  const match = actor.match(/^(user|agent|system|service):(.+)$/);
+  if (!match) return { kind: 'unknown', id: actor, label: actor, source: 'task_comment' };
+  const kind = match[1] as 'agent' | 'user' | 'system' | 'service';
+  const id = match[2].trim() || actor;
+  return { kind, id, label: id, source: 'task_comment' };
+}
+
+function taskCommentDispatchMessage(row: TaskCommentRow, task: TaskRow, target: string): string {
+  const lines = [
+    `A task note was appended and needs routing/action.`,
+    ``,
+    `Task: ${task.title}`,
+    `Task ref: ${task.name}${task.uuid ? ` (${task.uuid})` : ''}`,
+    `Target: ${target}`,
+    `Actor: ${row.actor}`,
+    `Timestamp: ${new Date(row.occurred_at).toISOString()}`,
+    `Hash: ${row.hash}`,
+    row.source_path ? `Source: ${row.source_path}${row.source_line ? `:${row.source_line}` : ''}` : null,
+    ``,
+    `Comment:`,
+    row.comment_text,
+  ].filter((line): line is string => line !== null);
+  return lines.join('\n');
+}
+
+function summarizeTaskCommentRouting(notes: Array<ReturnType<typeof taskCommentView>>): {
+  status: 'none' | 'pending' | 'routed' | 'failed';
+  latest_dispatch_id: string | null;
+  failed_count: number;
+  pending_count: number;
+  routed_count: number;
+} {
+  const results = notes.flatMap((note) => note.routing_results);
+  const failed = results.filter((r) => r.status === 'failed').length;
+  const pending = results.filter((r) => r.status === 'pending').length;
+  const routed = results.filter((r) => r.status === 'routed').length;
+  const latest = [...results].reverse().find((r) => r.dispatch_phid)?.dispatch_phid ?? null;
+  return {
+    status: failed > 0 ? 'failed' : pending > 0 ? 'pending' : routed > 0 ? 'routed' : 'none',
+    latest_dispatch_id: latest,
+    failed_count: failed,
+    pending_count: pending,
+    routed_count: routed,
+  };
 }
 
 function fleetMetricsHistoryRetentionDaysFromEnv(env: Record<string, string | undefined>): number {
@@ -698,6 +776,7 @@ export class AgentManagerDb {
   private static readonly ROUTING_HEALTH_CACHE_TTL_MS = 5_000;
   private remoteProbeInterval: NodeJS.Timeout | null = null;
   private querySweeperInterval: NodeJS.Timeout | null = null;
+  private taskCommentSweepInterval: NodeJS.Timeout | null = null;
   private filesystemArtifactReconcileInterval: NodeJS.Timeout | null = null;
   private worktreeReaperInterval: NodeJS.Timeout | null = null;
   private retentionService: RetentionService | null = null;
@@ -7654,6 +7733,80 @@ export class AgentManagerDb {
       }
     });
 
+    this.managementApp.post(['/tasks/:ref/notes', '/tasks/:ref/note'], async (req, res) => {
+      try {
+        const { id: teamId } = await this.getTeam(req);
+        const taskRef = String(req.params.ref);
+        const { task, error } = await this.resolveTaskRef(taskRef, teamId);
+        if (!task) return res.status(404).json({ error: error || `Task "${taskRef}" not found` });
+        if (task.team_id && task.team_id !== teamId) {
+          return res.status(404).json({ error: `Task "${taskRef}" not found` });
+        }
+
+        const body = req.body || {};
+        const rawText = body.text ?? body.comment ?? body.note;
+        if (typeof rawText !== 'string' || rawText.trim() === '') {
+          return res.status(400).json({ error: 'Missing required field: text' });
+        }
+        const sourceLine = body.source_line ?? body.sourceLine;
+        const occurredAt = parseTaskCommentOccurredAt(body.timestamp ?? body.occurred_at ?? body.occurredAt);
+        if (occurredAt === null) {
+          return res.status(400).json({ error: 'invalid_timestamp' });
+        }
+        const append = await appendTaskComment(this.db.adapter, {
+          teamId,
+          task,
+          text: rawText,
+          actor: taskCommentActor(body),
+          sourcePath: typeof body.source_path === 'string'
+            ? body.source_path
+            : typeof body.sourcePath === 'string'
+            ? body.sourcePath
+            : `/tasks/${task.name}`,
+          sourceLine: sourceLine == null ? null : Number(sourceLine),
+          occurredAtMs: occurredAt,
+        });
+
+        if (append.inserted) {
+          const event = await this.db.events.insert({
+            team_id: teamId,
+            topic: TASK_COMMENT_EVENT_TOPIC,
+            actor_agent_id: null,
+            subject_kind: 'task',
+            subject_id: task.uuid ?? task.id,
+            occurred_at: append.row.occurred_at,
+            data: {
+              schema_version: 'task_comment.v0',
+              source_path: append.row.source_path,
+              source_line: append.row.source_line,
+              task_id: task.uuid ?? task.id,
+              task_name: task.name,
+              task_title: task.title,
+              comment_text: append.row.comment_text,
+              actor: append.row.actor,
+              timestamp: new Date(append.row.occurred_at).toISOString(),
+              hash: append.row.hash,
+            },
+          });
+          await setTaskCommentEventSeq(this.db.adapter, append.row.id, event.seq);
+          append.row.event_seq = event.seq;
+          await this.routeTaskComment(append.row, task, teamId);
+        }
+
+        const noteRow = await getTaskCommentByHash(this.db.adapter, teamId, append.row.hash);
+        const updated = await this.db.tasks.getByNameForTeam(task.name, teamId);
+        res.status(append.inserted ? 201 : 200).json({
+          ok: true,
+          idempotent: !append.inserted,
+          note: taskCommentView(noteRow ?? append.row),
+          task: await this.buildTaskResult(updated ?? task, teamId),
+        });
+      } catch (err: any) {
+        console.error('[Manager] Error in POST /tasks/:ref/notes:', err);
+        res.status(500).json({ error: err?.message || 'Internal server error' });
+      }
+    });
+
     this.managementApp.get('/tasks/:ref', async (req, res) => {
       try {
         const { id: teamId } = await this.getTeam(req);
@@ -8419,6 +8572,75 @@ export class AgentManagerDb {
     return { agent: matches[0] };
   }
 
+  private async taskCommentTargets(task: TaskRow): Promise<string[]> {
+    const targets = new Set<string>(['cane']);
+    if (task.owner) {
+      const owner = await this.db.agents.getById(task.owner);
+      if (owner?.name) targets.add(owner.name);
+    }
+    return [...targets];
+  }
+
+  private async routeTaskComment(row: TaskCommentRow, task: TaskRow, teamId: string): Promise<void> {
+    const targets = await this.taskCommentTargets(task);
+    const results: TaskCommentRoutingResult[] = [];
+
+    if (!this.dispatchScheduler) {
+      for (const target of targets) {
+        results.push({
+          target_agent: target,
+          status: 'pending',
+          dispatch_phid: null,
+          query_id: null,
+          error: 'scheduler_unavailable',
+          routed_at: null,
+        });
+      }
+      await updateTaskCommentRouting(this.db.adapter, row.id, 'pending', results);
+      return;
+    }
+
+    for (const target of targets) {
+      try {
+        const receipt = await this.dispatchScheduler.enqueue({
+          to_agent: target,
+          from_actor: row.actor,
+          channel: TASK_COMMENT_DISPATCH_CHANNEL,
+          subject: `Task note on "${task.title}"`.slice(0, 80),
+          message: taskCommentDispatchMessage(row, task, target),
+          priority: target === 'cane' ? 6 : 5,
+          dedup_key: `task_comment:${row.hash}:${target}`,
+          actor_ref: actorRefFromTaskComment(row.actor),
+          causation: { source_event_id: row.event_seq ? `event_log:${row.event_seq}` : row.id },
+        });
+        results.push({
+          target_agent: target,
+          status: 'routed',
+          dispatch_phid: receipt.dispatch_phid,
+          query_id: receipt.query_id,
+          error: null,
+          routed_at: new Date().toISOString(),
+        });
+      } catch (err) {
+        results.push({
+          target_agent: target,
+          status: 'failed',
+          dispatch_phid: null,
+          query_id: null,
+          error: err instanceof Error ? err.message : String(err),
+          routed_at: new Date().toISOString(),
+        });
+      }
+    }
+
+    const status = results.some((r) => r.status === 'failed')
+      ? 'failed'
+      : results.some((r) => r.status === 'pending')
+      ? 'pending'
+      : 'routed';
+    await updateTaskCommentRouting(this.db.adapter, row.id, status, results);
+  }
+
   private async buildTaskResult(task: TaskRow, teamId: string, today: string = todayIso()): Promise<Record<string, unknown>> {
     let ownerName: string | null = null;
     if (task.owner) {
@@ -8438,6 +8660,25 @@ export class AgentManagerDb {
     const shortId = task.uuid ? `#${task.uuid.replace(/-/g, '').slice(0, 8)}` : null;
     const facts = extractTaskScheduleFacts(task);
     const reconciliation = taskReconciliationFacts(task, { today });
+    const taskComments = await listTaskCommentsForTask(this.db.adapter, teamId, task.id);
+    const notes = taskComments.map(taskCommentView);
+    const failedCommentRouting = notes.some((note) => note.routing_status === 'failed');
+    const currentness = failedCommentRouting && task.status !== 'done'
+      ? {
+          ...reconciliation.currentness,
+          state: 'blocked' as const,
+          bucket: 'blocked_or_failed' as const,
+          urgency: 'now' as const,
+          stale: true,
+          stale_reason: 'task_comment_routing_failed',
+          needs_chris: true,
+          proposed_action: 'resume_or_close' as const,
+          evidence: [
+            ...reconciliation.currentness.evidence,
+            'task comment routing failed; health debt needs operator attention',
+          ],
+        }
+      : reconciliation.currentness;
 
     return {
       name: task.name,
@@ -8455,7 +8696,9 @@ export class AgentManagerDb {
       done: facts.done,
       archived: facts.archived,
       band: classifyTaskBand(facts, today),
-      currentness: reconciliation.currentness,
+      currentness,
+      notes,
+      commentRouting: summarizeTaskCommentRouting(notes),
       ownerName,
       teamName,
       linkedEvents: links.map(l => l.schedule_id),
@@ -11278,6 +11521,57 @@ export class AgentManagerDb {
     this.retentionService.start();
   }
 
+  private startTaskCommentSweep(): void {
+    const raw = process.env.TASK_COMMENT_SWEEP_INTERVAL_MS;
+    const parsed = raw ? Number(raw) : NaN;
+    const intervalMs = Number.isFinite(parsed) && parsed > 0
+      ? Math.max(60_000, Math.floor(parsed))
+      : 8 * 60 * 60 * 1000;
+    const runSweep = () => {
+      this.sweepTaskComments().catch((err) => {
+        console.error('[Manager] Task comment sweep failed:', err);
+      });
+    };
+    runSweep();
+    this.taskCommentSweepInterval = setInterval(runSweep, intervalMs);
+    this.taskCommentSweepInterval.unref?.();
+  }
+
+  private async sweepTaskComments(): Promise<void> {
+    const teams = await this.db.teams.listTeams();
+    let routed = 0;
+    let failed = 0;
+    for (const team of teams) {
+      const comments = await listPendingTaskComments(this.db.adapter, team.id, 100);
+      for (const comment of comments) {
+        const { rows } = await this.db.adapter.query<TaskRow>(
+          `SELECT * FROM tasks WHERE id = ? AND team_id = ?`,
+          [comment.task_id, team.id],
+        );
+        const task = rows[0];
+        if (!task) {
+          await updateTaskCommentRouting(this.db.adapter, comment.id, 'failed', [{
+            target_agent: 'cane',
+            status: 'failed',
+            dispatch_phid: null,
+            query_id: null,
+            error: 'task_not_found',
+            routed_at: new Date().toISOString(),
+          }]);
+          failed += 1;
+          continue;
+        }
+        await this.routeTaskComment(comment, task, team.id);
+        const refreshed = await getTaskCommentByHash(this.db.adapter, team.id, comment.hash);
+        if (refreshed?.routing_status === 'routed') routed += 1;
+        if (refreshed?.routing_status === 'failed') failed += 1;
+      }
+    }
+    if (routed > 0 || failed > 0) {
+      console.log(`[Manager] Task comment sweep processed routed=${routed} failed=${failed}`);
+    }
+  }
+
   private async sweepStaleQueries(): Promise<void> {
     const cutoff = Date.now() - this.QUERY_EXPIRY_MINUTES * 60 * 1000;
     const expired = await this.db.queries.expireStale(cutoff, ['pending', 'processing']);
@@ -11722,6 +12016,10 @@ export class AgentManagerDb {
 
         // Start event_log retention sweep (every 5 min, 7d / 100k-per-team caps)
         this.startEventLogRetentionSweep();
+
+        // Start task comment routing sweep (default every 8h; picks up pending
+        // rows from append paths that ran while the scheduler was unavailable).
+        this.startTaskCommentSweep();
 
         // P6 Agent Performance Telemetry — mount /metrics/* routes.
         try {
@@ -12237,6 +12535,10 @@ export class AgentManagerDb {
     if (this.querySweeperInterval) {
       clearInterval(this.querySweeperInterval);
       this.querySweeperInterval = null;
+    }
+    if (this.taskCommentSweepInterval) {
+      clearInterval(this.taskCommentSweepInterval);
+      this.taskCommentSweepInterval = null;
     }
     if (this.healthCheckInterval) {
       clearInterval(this.healthCheckInterval);
