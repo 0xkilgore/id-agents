@@ -14,6 +14,9 @@ export interface OrchestrationHealthBlocker {
   to_agent: string | null;
   updated_at: string | null;
   reason: string;
+  owner_lane: string;
+  recommended_action: string;
+  needs_chris: boolean;
   blocks_backlog_dependency: boolean;
   blocked_dependency_item_ids: string[];
 }
@@ -127,7 +130,11 @@ export async function readOrchestrationHealthProjection(
     .filter((row) => !promotionHygieneIncident(row))
     .map((row) => ({ row, reason: promotionBlockerReason(row.promotion_result_json) }))
     .filter((x): x is { row: DispatchRow; reason: string } => x.reason != null)
-    .map(({ row, reason }) => blockerFromRow(row, dependencyImpact, reason))
+    .map(({ row, reason }) => blockerFromRow(row, dependencyImpact, reason, {
+      owner_lane: "release-engineering",
+      recommended_action: "complete promotion, push the base branch, and verify the remote tip",
+      needs_chris: false,
+    }))
     .sort(compareBlockersRecent);
 
   return {
@@ -483,14 +490,19 @@ function blockerFromRow(
   row: DispatchRow,
   dependencyImpact: Map<string, string[]>,
   reason: string,
+  routeOverride?: ClarificationRoute,
 ): OrchestrationHealthBlocker {
   const blocked = dependencyImpact.get(row.dispatch_phid) ?? [];
+  const route = routeOverride ?? classifyClarificationBlocker(row, reason);
   return {
     dispatch_phid: row.dispatch_phid,
     query_id: row.query_id ?? null,
     to_agent: row.to_agent ?? null,
     updated_at: row.completed_at ?? row.updated_at ?? null,
     reason,
+    owner_lane: route.owner_lane,
+    recommended_action: route.recommended_action,
+    needs_chris: route.needs_chris,
     blocks_backlog_dependency: blocked.length > 0,
     blocked_dependency_item_ids: blocked,
   };
@@ -515,6 +527,59 @@ function clarificationReason(row: DispatchRow): string {
   const active = parseJson(row.active_clarification_json);
   const question = active && typeof active.question === "string" ? active.question.trim() : "";
   return question ? `needs clarification: ${question}` : "needs clarification";
+}
+
+interface ClarificationRoute {
+  owner_lane: string;
+  recommended_action: string;
+  needs_chris: boolean;
+}
+
+function classifyClarificationBlocker(row: DispatchRow, reason: string): ClarificationRoute {
+  const text = [
+    row.dispatch_phid,
+    row.query_id,
+    row.to_agent,
+    reason,
+    row.active_clarification_json,
+  ]
+    .filter((x): x is string => typeof x === "string" && x.length > 0)
+    .join(" ")
+    .toLowerCase();
+
+  if (matchesAny(text, ["dirty ui worktree", "ui worktree", "worktree dirty", "dirty worktree"])) {
+    return {
+      owner_lane: "ui-builder",
+      recommended_action: "route to the UI worktree owner to preserve or commit local changes before resume",
+      needs_chris: false,
+    };
+  }
+
+  if (matchesAny(text, ["divergent task-cleanup promotion", "task-cleanup", "divergent promotion", "branch ahead and behind", "divergent ancestry"])) {
+    return {
+      owner_lane: "release-engineering",
+      recommended_action: "run promotion preflight and resolve the task-cleanup branch divergence with the repo owner",
+      needs_chris: false,
+    };
+  }
+
+  if (matchesAny(text, ["unrelated dirty local-search", "local-search", "unrelated dirty local search", "unrelated dirty files"])) {
+    return {
+      owner_lane: "search-infra",
+      recommended_action: "route to the local-search owner to stash, commit, or isolate unrelated dirty files",
+      needs_chris: false,
+    };
+  }
+
+  return {
+    owner_lane: "chris",
+    recommended_action: "ask Chris for the product or operator decision needed to resume",
+    needs_chris: true,
+  };
+}
+
+function matchesAny(text: string, needles: string[]): boolean {
+  return needles.some((needle) => text.includes(needle));
 }
 
 function promotionBlockerReason(raw: string | null | undefined): string | null {

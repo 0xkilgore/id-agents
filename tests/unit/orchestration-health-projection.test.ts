@@ -65,8 +65,67 @@ describe("orchestration health projection", () => {
     expect(health.blockers.needs_clarification.items[1]).toMatchObject({
       dispatch_phid: "phid:disp-clarifies-dependency",
       reason: "needs clarification: Which merge strategy?",
+      owner_lane: "chris",
+      recommended_action: "ask Chris for the product or operator decision needed to resume",
+      needs_chris: true,
       blocks_backlog_dependency: true,
     });
+  });
+
+  it("routes known deterministic needs_clarification infra blockers away from Chris", async () => {
+    await insertDispatch({
+      dispatch_phid: "phid:disp-dirty-ui",
+      query_id: "query_dirty_ui",
+      to_agent: "frontend-builder",
+      status: "needs_clarification",
+      updated_at: "2026-07-01T15:00:00.000Z",
+      active_clarification_json: JSON.stringify({
+        question: "Dirty UI worktree has user edits; should I overwrite them?",
+      }),
+    });
+    await insertDispatch({
+      dispatch_phid: "phid:disp-task-cleanup",
+      query_id: "query_task_cleanup",
+      to_agent: "release-agent",
+      status: "needs_clarification",
+      updated_at: "2026-07-01T14:00:00.000Z",
+      active_clarification_json: JSON.stringify({
+        question: "Divergent task-cleanup promotion: branch ahead and behind main.",
+      }),
+    });
+    await insertDispatch({
+      dispatch_phid: "phid:disp-local-search",
+      query_id: "query_local_search",
+      to_agent: "search-agent",
+      status: "needs_clarification",
+      updated_at: "2026-07-01T13:00:00.000Z",
+      active_clarification_json: JSON.stringify({
+        question: "Unrelated dirty local-search files are present before the change.",
+      }),
+    });
+
+    const health = await readOrchestrationHealthProjection(adapter, "default");
+
+    expect(health.blockers.needs_clarification.items).toEqual([
+      expect.objectContaining({
+        dispatch_phid: "phid:disp-dirty-ui",
+        owner_lane: "ui-builder",
+        recommended_action: "route to the UI worktree owner to preserve or commit local changes before resume",
+        needs_chris: false,
+      }),
+      expect.objectContaining({
+        dispatch_phid: "phid:disp-task-cleanup",
+        owner_lane: "release-engineering",
+        recommended_action: "run promotion preflight and resolve the task-cleanup branch divergence with the repo owner",
+        needs_chris: false,
+      }),
+      expect.objectContaining({
+        dispatch_phid: "phid:disp-local-search",
+        owner_lane: "search-infra",
+        recommended_action: "route to the local-search owner to stash, commit, or isolate unrelated dirty files",
+        needs_chris: false,
+      }),
+    ]);
   });
 
   it("classifies promotion blockers and ignores verified or explicitly skipped promotions", async () => {
@@ -137,6 +196,9 @@ describe("orchestration health projection", () => {
     expect(health.blockers.promotion.items[0]).toMatchObject({
       dispatch_phid: "phid:disp-promo-missing",
       reason: "missing promotion result",
+      owner_lane: "release-engineering",
+      recommended_action: "complete promotion, push the base branch, and verify the remote tip",
+      needs_chris: false,
       blocks_backlog_dependency: true,
     });
     expect(health.blockers.promotion.items[1]?.reason).toBe("promotion incomplete: completed=false");
