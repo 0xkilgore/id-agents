@@ -34,6 +34,7 @@ import {
   listOperations,
   parseDraftPayload,
   registerArtifact,
+  registerArtifactPathDelivery,
   searchArtifacts,
   upsertArtifactDraft,
 } from './storage.js';
