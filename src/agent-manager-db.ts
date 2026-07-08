@@ -2488,14 +2488,17 @@ export class AgentManagerDb {
   }
 
   /**
-   * Unified message handler for both /message and /talk-to.
+   * Unified message handler for /message, /talk-to, and /news-to.
    * Default: fire-and-forget. With wait:true or timeout: waits for reply.
+   * /talk-to marks async calls as dispatch-receipt preferred so operator
+   * surfaces get a durable receipt without depending on the target /talk SLA.
    */
   private async handleMessage(req: express.Request, res: express.Response) {
     try {
       const { id: teamId } = await this.getTeam(req);
       const { agent: agentField, to: toField, message, from, session_id, wait, timeout: requestTimeout } = req.body || {};
       const agent = toField || agentField;
+      const preferDispatchReceipt = (req as any)._preferDispatchReceipt === true;
 
       if (!agent || !message) {
         return res.status(400).json({ error: 'Missing "to" (agent name) or "message"' });
@@ -2641,16 +2644,18 @@ export class AgentManagerDb {
             { target_url: targetUrl, wake: true },
           );
 
-          if (this.dispatchScheduler.mode === 'enforce') {
+          if (this.dispatchScheduler.mode === 'enforce' || (!shouldWait && preferDispatchReceipt)) {
             // Persist a manager-side queries row so /query/:id?wait= keeps
             // working through the scheduler-driven path. The Dispatch doc is
             // the canonical state; this row is the legacy mirror waiters poll.
             await this.db.queries.create(teamId, enq.query_id, targetAgent.id, message, Date.now());
 
             if (!shouldWait) {
-              this.managerLog(`Enqueued via dispatch scheduler (enforce); query_id=${enq.query_id}`);
+              this.managerLog(`Enqueued via dispatch scheduler; query_id=${enq.query_id}`);
               return res.json({
                 success: true,
+                dispatch_id: enq.dispatch_phid,
+                dispatch_phid: enq.dispatch_phid,
                 query_id: enq.query_id,
                 delivered_to: targetDisplayId,
                 status: 'queued',
@@ -2662,9 +2667,14 @@ export class AgentManagerDb {
               timeoutMs: timeout,
               pollMs: 250,
             });
-            if (!final) {
+            if (
+              !final ||
+              !['done', 'failed', 'cancelled'].includes(final.status)
+            ) {
               return res.json({
                 success: false,
+                dispatch_id: enq.dispatch_phid,
+                dispatch_phid: enq.dispatch_phid,
                 query_id: enq.query_id,
                 delivered_to: targetDisplayId,
                 status: 'pending',
@@ -2675,6 +2685,8 @@ export class AgentManagerDb {
               const result = await this.dispatchScheduler.reactor.getResult(final.dispatch_phid);
               return res.json({
                 success: true,
+                dispatch_id: enq.dispatch_phid,
+                dispatch_phid: enq.dispatch_phid,
                 query_id: enq.query_id,
                 delivered_to: targetDisplayId,
                 status: 'completed',
@@ -2683,6 +2695,8 @@ export class AgentManagerDb {
             }
             return res.status(502).json({
               success: false,
+              dispatch_id: enq.dispatch_phid,
+              dispatch_phid: enq.dispatch_phid,
               query_id: enq.query_id,
               delivered_to: targetDisplayId,
               status: final.status,
@@ -5582,7 +5596,9 @@ export class AgentManagerDb {
       this.handleMessage(req, res).catch(next);
     });
 
-    // /talk-to - backwards-compatible alias for /message with wait:true.
+    // /talk-to - dispatch-oriented send endpoint. It returns immediately with
+    // a durable dispatch receipt by default; callers that genuinely need
+    // synchronous Q&A must opt in with wait:true or timeout.
     // When the body carries a `task` object the dispatch is treated as a
     // task delegation: the manager creates the task (owner = target agent,
     // status = 'doing') and auto-attaches an active checkin owned by the
@@ -5590,12 +5606,9 @@ export class AgentManagerDb {
     //   - no_checkin: true            disables auto-attach for this dispatch
     //   - checkin: <duration|seconds> overrides interval (default 10m)
     //   - checkin_iters: <N>          sets max_iterations (default null)
-    // If no `task` object is supplied, /talk-to behaves exactly as before.
+    // If no `task` object is supplied, /talk-to only sends the dispatch.
     this.managementApp.post('/talk-to', async (req, res, next) => {
-      // Inject wait:true if not explicitly set
-      if (req.body && req.body.wait === undefined && req.body.timeout === undefined) {
-        req.body.wait = true;
-      }
+      (req as any)._preferDispatchReceipt = true;
       try {
         const result = await this.maybeAutoAttachForTalkTo(req);
         if (result) (req as any)._autoAttach = result;
