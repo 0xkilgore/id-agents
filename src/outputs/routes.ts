@@ -128,6 +128,11 @@ import {
   resolveArtifactDetailRef,
   type ArtifactDetailRef,
 } from './detail-projection.js';
+import {
+  evaluateSurfacingHealth,
+  type ArtifactActionProbe,
+  type SurfacingHealthEvent,
+} from './surfacing-health.js';
 
 function asString(v: unknown): string | undefined {
   return typeof v === 'string' && v.length > 0 ? v : undefined;
@@ -197,6 +202,8 @@ export interface MountOutputsRoutesOptions {
   autoIngestIntervalMs?: number;
   /** Env source for feature-flag / autoingest reads (tests). Defaults to process.env. */
   env?: NodeJS.ProcessEnv;
+  /** Fresh-output miss alert event sink. Production can bridge these to the operator health surface; tests assert it fires. */
+  onSurfacingHealthEvent?: (event: SurfacingHealthEvent) => void;
   /**
    * CANE_DRAFT_ARTIFACTS — injectable Cane send executor. When provided, the
    * cane_draft ship path uses this instead of the default HTTP sender, so tests
@@ -497,6 +504,37 @@ export function mountOutputsRoutes(
     }
   }
 
+  async function probeArtifact(row: Awaited<ReturnType<typeof getArtifact>>): Promise<ArtifactActionProbe> {
+    if (!row) {
+      return { bodyRenderable: false, copyAvailable: false, downloadAvailable: false, error: 'artifact_not_registered' };
+    }
+    const detail = await buildArtifactDetail(adapter, resolveArtifactDetailRef(row.artifact_id));
+    const cached = await getArtifactBodyCache(adapter, row.artifact_id).catch(() => null);
+    const bodyText = detail?.body.text ?? cached?.body_text ?? undefined;
+    const bodyRenderable = Boolean(detail?.delivery.bodyRenderable && bodyText != null);
+    const copyAvailable = Boolean(bodyText);
+    const sourceDownloadAvailable = row.abs_path
+      ? await fsp.access(row.abs_path).then(() => true, () => false)
+      : false;
+    const downloadAvailable = sourceDownloadAvailable || cached?.body_text != null;
+    const error =
+      row.availability !== 'present'
+        ? 'body_unavailable'
+        : detail?.delivery.bodyUnavailable
+          ? detail.body.error ?? 'body_unavailable'
+          : undefined;
+    return {
+      bodyRenderable,
+      copyAvailable,
+      downloadAvailable,
+      bodyText,
+      bodyPreview: detail?.delivery.bodyPreview ?? bodyText?.slice(0, 2000),
+      sourceMtime: detail?.metadata.source_mtime ?? cached?.source_mtime ?? undefined,
+      contentHash: detail?.metadata.content_hash ?? cached?.content_hash ?? undefined,
+      error,
+    };
+  }
+
   // Monday §1/§2 guards. RD-001: mutation targets must normalize to a stable
   // artifact_id. A stable artifact_id passes through; an ENCODED ARTIFACT PATH is
   // resolved to its stable artifact_id (so the review loop — comment → approve →
@@ -753,6 +791,31 @@ export function mountOutputsRoutes(
       res.json(report);
     } catch (err) {
       res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  // ── GET /artifacts/surfacing/health ───────────────────────────────
+  // Fresh-output miss alert: fail closed when a registered artifact is absent
+  // from Desk/Recent Output, or when stable body/copy/download delivery cannot
+  // be served through the manager.
+  app.get('/artifacts/surfacing/health', async (req: Request, res: Response) => {
+    try {
+      const limit = Math.min(parseInt(req.query.limit as string, 10) || 200, 500);
+      const since = asString(req.query.since);
+      const nowIso = (clock?.() ?? new Date()).toISOString();
+      const registered = await listArtifactCatalog(adapter, { limit, offset: 0, since });
+      const surfaced = await listInboxItems(adapter, { includeNeverViewed: true }, limit, 0);
+      const probes = new Map<string, ArtifactActionProbe>();
+      for (const row of registered) {
+        probes.set(row.artifact_id, await probeArtifact(row));
+      }
+      const report = evaluateSurfacingHealth({ registered, surfaced, probes, nowIso });
+      for (const event of report.events) {
+        opts.onSurfacingHealthEvent?.(event);
+      }
+      res.status(report.ok ? 200 : 503).json(report);
+    } catch (err) {
+      res.status(500).json({ ok: false, error: err instanceof Error ? err.message : String(err) });
     }
   });
 
