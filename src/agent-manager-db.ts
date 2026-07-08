@@ -49,6 +49,7 @@ import {
   draftFromManagerApi,
   draftFromScheduleDerived,
 } from './tasks-readmodel/task-draft.js';
+import { buildResetConformanceSummary } from './conformance/reset.js';
 import { resolveTrack } from './track-registry/registry.js';
 import { assembleAgentDetail } from './agent-detail/assemble.js';
 import {
@@ -4127,6 +4128,34 @@ export class AgentManagerDb {
       const recovery_backfill = this.dispatchRecoveryService
         ? this.dispatchRecoveryService.getBackfillMetrics()
         : { recovery_backfill_runs_total: 0, recovery_backfill_rows_reclassified_total: 0 };
+      const conformance = dbProbe.timedOut || !dbProbe.value.teamId
+        ? {
+            schema_version: 'reset-conformance.v1',
+            state: 'unavailable',
+            counts: { total: 0, accepted: 0, quarantined: 0, unassigned: 0, track_unknown: 0 },
+          }
+        : await buildResetConformanceSummary(this.db.adapter, {
+            teamId: dbProbe.value.teamId,
+            limit: 1000,
+          }).then((summary) => ({
+            schema_version: summary.schema_version,
+            state: summary.state,
+            counts: {
+              total: summary.counts.total,
+              accepted: summary.counts.accepted,
+              quarantined: summary.counts.quarantined,
+              unassigned: summary.counts.unassigned,
+              track_unknown: summary.counts.track_unknown,
+              by_kind: summary.counts.by_kind,
+            },
+            sample: summary.records.slice(0, 10),
+            sources: summary.sources,
+          })).catch((err) => ({
+            schema_version: 'reset-conformance.v1',
+            state: 'unavailable',
+            error: err instanceof Error ? err.message : String(err),
+            counts: { total: 0, accepted: 0, quarantined: 0, unassigned: 0, track_unknown: 0 },
+          }));
       res.json({
         status: 'ok',
         team: teamName,
@@ -4134,6 +4163,7 @@ export class AgentManagerDb {
         datastore: dbProbe.timedOut ? { state: 'degraded', reason: 'health_db_probe_timeout' } : { state: 'ok' },
         timestamp: Date.now(),
         recovery_backfill,
+        conformance,
         // T11.1: the running build identity + staleness-vs-origin signal.
         build: this.getBuildStatus(),
         // T-DEPLOY.1: how long the running build has been behind origin/main +
@@ -7445,16 +7475,18 @@ export class AgentManagerDb {
         }
 
         // Validate optional `track` against the canonical-track-registry.
-        // Soft-warn only — 1362 existing tasks carry no track, so we NEVER
-        // hard-reject. Absent/non-conforming → '(unassigned)' + a warning.
+        // Missing tracks are explicit `(unassigned)` quarantine candidates.
+        // Non-conforming tracks are stored verbatim so `track:unknown` remains
+        // countable on dashboards/system health; never silently rewrite them.
         let track = '(unassigned)';
         if (rawTrack != null && typeof rawTrack === 'string' && rawTrack.trim() !== '') {
           const resolved = resolveTrack(rawTrack);
           if (resolved.conforms) {
             track = rawTrack.trim();
           } else {
+            track = rawTrack.trim();
             console.warn(
-              `[Manager] POST /tasks: non-conforming track "${rawTrack}" — storing '(unassigned)' (see canonical-track-registry)`,
+              `[Manager] POST /tasks: non-conforming track "${rawTrack}" — storing verbatim for track:unknown quarantine (see canonical-track-registry)`,
             );
           }
         }
@@ -10802,15 +10834,18 @@ export class AgentManagerDb {
             return { ok: false, error: 'Usage: /task create "<title>" [--name <slug>] [--description "..."] [--team <team>] [--owner <agent>] [--track <id>] [--event <schedule-id>]...' };
           }
 
-          // Validate optional --track via the canonical-track-registry — soft-warn
-          // only (conforming stored verbatim; absent/non-conforming → '(unassigned)').
+          // Validate optional --track via the canonical-track-registry. Missing
+          // tracks remain `(unassigned)`; non-conforming tracks are stored
+          // verbatim so `track:unknown` remains visible instead of silently
+          // becoming canonical metadata.
           let track = '(unassigned)';
           if (trackRef != null && trackRef.trim() !== '') {
             if (resolveTrack(trackRef).conforms) {
               track = trackRef.trim();
             } else {
+              track = trackRef.trim();
               console.warn(
-                `[Manager] /task create: non-conforming track "${trackRef}" — storing '(unassigned)' (see canonical-track-registry)`,
+                `[Manager] /task create: non-conforming track "${trackRef}" — storing verbatim for track:unknown quarantine (see canonical-track-registry)`,
               );
             }
           }

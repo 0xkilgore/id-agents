@@ -5,9 +5,9 @@
  * The `track` field tags a task with a canonical-track-registry id. Rules:
  *   - conforming track (canonical / deferred / sub-track prefix / legacy alias)
  *     is stored verbatim;
- *   - absent OR non-conforming track is SOFT-handled — stored as
- *     '(unassigned)' with a warning, never a hard-reject (1362 legacy tasks
- *     carry no track).
+ *   - absent track is stored as '(unassigned)';
+ *   - non-conforming track is stored verbatim so reset conformance can count it
+ *     as track:unknown instead of silently rewriting metadata.
  *
  * `track` is surfaced in POST /tasks, GET /tasks, GET /tasks/:ref and
  * GET /tasks/entries, and is a real column (so conformance is countable in SQL).
@@ -126,11 +126,11 @@ describe('POST /tasks track field', () => {
     expect(json.task.track).toBe('T15');
   });
 
-  it('soft-handles a NON-conforming track: stored as (unassigned), no rejection', async () => {
+  it('quarantines a NON-conforming track by storing it verbatim for track:unknown accounting', async () => {
     const { status, json } = await postTask(baseUrl, { title: 'Bad track', track: 'T-NOPE' });
-    expect(status).toBe(201); // NOT a 4xx — soft-warn only
+    expect(status).toBe(201); // NOT a 4xx — quarantine/read-model handles it
     expect(json.ok).toBe(true);
-    expect(json.task.track).toBe('(unassigned)');
+    expect(json.task.track).toBe('T-NOPE');
   });
 
   it('defaults to (unassigned) when no track is supplied', async () => {
@@ -141,14 +141,15 @@ describe('POST /tasks track field', () => {
 
   it('persists track as a real column (countable via SQL)', async () => {
     await postTask(baseUrl, { title: 'A', track: 'T-ORCH' });
-    await postTask(baseUrl, { title: 'B', track: 'T-NOPE' });   // → (unassigned)
+    await postTask(baseUrl, { title: 'B', track: 'T-NOPE' });   // → track:unknown
     await postTask(baseUrl, { title: 'C' });                    // → (unassigned)
     const { rows } = await db.adapter.query<{ track: string; c: number }>(
       `SELECT track, COUNT(*) AS c FROM tasks GROUP BY track ORDER BY track`,
     );
     const byTrack = Object.fromEntries(rows.map((r) => [r.track, Number(r.c)]));
     expect(byTrack['T-ORCH']).toBe(1);
-    expect(byTrack['(unassigned)']).toBe(2);
+    expect(byTrack['T-NOPE']).toBe(1);
+    expect(byTrack['(unassigned)']).toBe(1);
   });
 
   it('surfaces track in GET /tasks and GET /tasks/entries', async () => {
