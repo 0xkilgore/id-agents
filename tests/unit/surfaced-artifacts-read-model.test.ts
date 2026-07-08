@@ -1,3 +1,5 @@
+import { mkdir, writeFile } from "node:fs/promises";
+import { resolve } from "node:path";
 import { beforeEach, describe, expect, it } from "vitest";
 import { SqliteAdapter } from "../../src/db/sqlite-adapter.js";
 import { migrateSqlite } from "../../src/db/migrations/sqlite.js";
@@ -476,6 +478,96 @@ describe("buildSurfacedArtifacts", () => {
     expect(model.recent_flood.groups.some((g) => g.raw_count > 1 && g.work_item_ref.includes("artifact-surfacing"))).toBe(true);
   });
 
+  it("keeps the Artifact Desk first viewport focused and leaves raw closeout floods in diagnostics", async () => {
+    files.set("/tmp/action-final.md", [
+      "---",
+      "project: kapelle",
+      "track: T-QA",
+      "---",
+      "# Operator verification handoff",
+      "",
+      "A focused deliverable for the operator.",
+    ].join("\n"));
+    files.set("/tmp/product-change.md", "# Artifact Desk product behavior change");
+
+    await seedDone(adapter, {
+      dispatch_phid: "phid:disp-action-final",
+      subject: "Final Artifact Desk verification handoff",
+      body_markdown: "[project: kapelle][T-QA] Final deliverable",
+      completed_at: "2026-07-07T12:10:00.000Z",
+      updated_at: "2026-07-07T12:10:00.000Z",
+      artifact_path: "/tmp/action-final.md",
+    });
+    await seedDone(adapter, {
+      dispatch_phid: "phid:disp-product-change",
+      subject: "Promote Artifact Desk first viewport behavior",
+      body_markdown: "[project: kapelle][T-QA] changed product behavior",
+      completed_at: "2026-07-07T12:09:00.000Z",
+      updated_at: "2026-07-07T12:09:00.000Z",
+      artifact_path: "/tmp/product-change.md",
+      promote: 1,
+      promotion_input_json: JSON.stringify({ repo: "/repo/id-agents", branch: "artifact-desk-smoke", base: "main", remote: "origin" }),
+    });
+    await registerArtifact(adapter, {
+      artifact_id: "art-needs-decision",
+      basename: "2026-07-07-needs-decision-artifact-desk-density.md",
+      agent: "maestra",
+      tag: "needs-decision",
+      abs_path: "/tmp/needs-decision-artifact-desk-density.md",
+      title: "Needs decision on Artifact Desk row density",
+      produced_at: "2026-07-07T12:08:00.000Z",
+      source: "manual",
+    }, NOW);
+    await registerArtifact(adapter, {
+      artifact_id: "art-domain-action",
+      basename: "2026-07-07-cleveland-park-domain-action.md",
+      agent: "cleveland-park",
+      tag: "urgent",
+      abs_path: "/Users/kilgore/Dropbox/Code/cleveland-park/output/2026-07-07-cleveland-park-domain-action.md",
+      title: "Cleveland Park domain action",
+      produced_at: "2026-07-07T12:07:00.000Z",
+      source: "manual",
+    }, NOW);
+
+    for (let i = 0; i < 18; i++) {
+      await seedDone(adapter, {
+        dispatch_phid: `phid:disp-closeout-spam-${i}`,
+        subject: `phid:disp-closeout-spam-${i}`,
+        body_markdown: "raw closeout heartbeat",
+        completed_at: `2026-07-07T12:${String(30 + i).padStart(2, "0")}:00.000Z`,
+        updated_at: `2026-07-07T12:${String(30 + i).padStart(2, "0")}:00.000Z`,
+      });
+    }
+
+    const model = await buildSurfacedArtifactsReadModel(adapter, { limit: 7, readFile });
+    const rawCloseoutSpam = model.recent_flood.raw_rows.filter((row) => row.dispatch_ref?.includes("closeout-spam"));
+
+    expect(model.rows.length).toBeLessThanOrEqual(7);
+    expect(model.rows.length).toBeGreaterThanOrEqual(4);
+    expect(model.rows.every((row) => row.status && row.relevance_reason && row.needs)).toBe(true);
+    expect(model.rows.some((row) => row.title === "Operator verification handoff")).toBe(true);
+    expect(model.rows.some((row) => row.relevance_reason === "needs_decision")).toBe(true);
+    expect(model.rows.some((row) => row.relevance_reason === "changed_product_behavior")).toBe(true);
+    expect(model.rows.some((row) => row.relevance_reason === "domain_action")).toBe(true);
+    expect(model.rows.some((row) => row.dispatch_ref?.includes("closeout-spam"))).toBe(false);
+    expect(model.rows.some((row) => row.title.startsWith("Untitled artifact from "))).toBe(false);
+    expect(rawCloseoutSpam).toHaveLength(18);
+    expect(model.recent_flood.source_data).toMatchObject({
+      primary_limit: 7,
+      primary_row_count: model.rows.length,
+      raw_row_count: model.recent_flood.total_raw_count,
+      capped: true,
+    });
+    expect(SURFACED_ARTIFACTS_SAVED_VIEW.diagnostic_field_ids).toEqual(expect.arrayContaining([
+      "surfaced_artifacts.recent_flood.source_data",
+      "surfaced_artifacts.recent_flood.raw_rows",
+    ]));
+
+    const screenshots = await writeArtifactDeskSmokeScreenshots(model.rows, model.recent_flood.total_raw_count);
+    expect(screenshots.desktop.boxes.every((box, index, boxes) => boxes.slice(index + 1).every((next) => !boxesOverlap(box, next)))).toBe(true);
+    expect(screenshots.mobile.boxes.every((box, index, boxes) => boxes.slice(index + 1).every((next) => !boxesOverlap(box, next)))).toBe(true);
+  });
+
   it("discovers the local-first handoff by human title, project, program, track, and dispatch", async () => {
     const handoffPath = "/tmp/local-first-handoff.md";
     files.set(handoffPath, `---
@@ -532,3 +624,91 @@ This program should be queued as the Local-First Project/Artifact Surfacing prog
     expect(SURFACED_ARTIFACTS_SAVED_VIEW.field_ids).not.toContain("surfaced_artifacts.row.project_ref");
   });
 });
+
+interface SmokeBox {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+async function writeArtifactDeskSmokeScreenshots(rows: Array<{
+  title: string;
+  status: string;
+  relevance_reason: string;
+  needs?: string;
+  source_kind: string;
+}>, rawCount: number): Promise<{ desktop: { path: string; boxes: SmokeBox[] }; mobile: { path: string; boxes: SmokeBox[] } }> {
+  const outDir = resolve(process.env.ARTIFACT_DESK_SMOKE_OUTPUT_DIR ?? "output");
+  await mkdir(outDir, { recursive: true });
+  const desktop = renderArtifactDeskSmokeSvg(rows, rawCount, { width: 1280, rowHeight: 68, titleLimit: 62 });
+  const mobile = renderArtifactDeskSmokeSvg(rows, rawCount, { width: 390, rowHeight: 86, titleLimit: 34 });
+  const desktopPath = resolve(outDir, "artifact-desk-first-viewport-desktop.svg");
+  const mobilePath = resolve(outDir, "artifact-desk-first-viewport-mobile.svg");
+  await Promise.all([
+    writeFile(desktopPath, desktop.svg, "utf8"),
+    writeFile(mobilePath, mobile.svg, "utf8"),
+  ]);
+  return {
+    desktop: { path: desktopPath, boxes: desktop.boxes },
+    mobile: { path: mobilePath, boxes: mobile.boxes },
+  };
+}
+
+function renderArtifactDeskSmokeSvg(
+  rows: Array<{ title: string; status: string; relevance_reason: string; needs?: string; source_kind: string }>,
+  rawCount: number,
+  opts: { width: number; rowHeight: number; titleLimit: number },
+): { svg: string; boxes: SmokeBox[] } {
+  const margin = 24;
+  const headerHeight = 58;
+  const gap = 10;
+  const rowsHeight = rows.length * opts.rowHeight + Math.max(0, rows.length - 1) * gap;
+  const height = headerHeight + rowsHeight + 76;
+  const boxes = rows.map((_, index) => ({
+    x: margin,
+    y: headerHeight + index * (opts.rowHeight + gap),
+    width: opts.width - margin * 2,
+    height: opts.rowHeight,
+  }));
+  const rowSvg = rows.map((row, index) => {
+    const box = boxes[index];
+    const title = escapeSvg(truncateForSvg(row.title, opts.titleLimit));
+    const meta = escapeSvg(`${row.relevance_reason} / ${row.needs ?? "inspect"} / ${row.status}`);
+    const kind = escapeSvg(row.source_kind);
+    return [
+      `<g data-row="${index + 1}">`,
+      `<rect x="${box.x}" y="${box.y}" width="${box.width}" height="${box.height}" rx="6" fill="#ffffff" stroke="#b7bec8"/>`,
+      `<text x="${box.x + 14}" y="${box.y + 26}" font-family="Arial, sans-serif" font-size="16" font-weight="700" fill="#17202a">${title}</text>`,
+      `<text x="${box.x + 14}" y="${box.y + 50}" font-family="Arial, sans-serif" font-size="12" fill="#495563">${meta}</text>`,
+      `<text x="${box.x + box.width - 132}" y="${box.y + 50}" font-family="Arial, sans-serif" font-size="12" fill="#495563">${kind}</text>`,
+      "</g>",
+    ].join("");
+  }).join("");
+  const diagnosticY = headerHeight + rowsHeight + 34;
+  const svg = [
+    `<svg xmlns="http://www.w3.org/2000/svg" width="${opts.width}" height="${height}" viewBox="0 0 ${opts.width} ${height}">`,
+    `<rect width="${opts.width}" height="${height}" fill="#f6f8fb"/>`,
+    `<text x="${margin}" y="34" font-family="Arial, sans-serif" font-size="22" font-weight="700" fill="#17202a">Artifact Desk</text>`,
+    `<text x="${opts.width - margin - 230}" y="34" font-family="Arial, sans-serif" font-size="13" fill="#495563">Primary rows: ${rows.length} / 7</text>`,
+    rowSvg,
+    `<text x="${margin}" y="${diagnosticY}" font-family="Arial, sans-serif" font-size="13" fill="#495563">Recent Flood diagnostics kept secondary: ${rawCount} raw rows</text>`,
+    "</svg>",
+  ].join("");
+  return { svg, boxes };
+}
+
+function boxesOverlap(a: SmokeBox, b: SmokeBox): boolean {
+  return a.x < b.x + b.width
+    && a.x + a.width > b.x
+    && a.y < b.y + b.height
+    && a.y + a.height > b.y;
+}
+
+function escapeSvg(value: string): string {
+  return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+}
+
+function truncateForSvg(value: string, max: number): string {
+  return value.length > max ? `${value.slice(0, max - 3)}...` : value;
+}
