@@ -538,6 +538,7 @@ export interface ReadyRuntimeRepair {
   from_runtime: string | null;
   to_provider: string;
   to_runtime: string;
+  reason?: string;
 }
 
 /**
@@ -546,21 +547,51 @@ export interface ReadyRuntimeRepair {
  * The flesher stamps provider/runtime before the final lane may be known. A
  * ready, approved row targeting a Codex agent must not stay pinned to the old
  * Anthropic/Claude lane, because admission will correctly hold it forever as a
- * provider/runtime mismatch. This pass is deliberately narrow and idempotent:
- * only approved READY rows with a known target agent runtime of `codex` are
- * updated, and already-correct rows are ignored.
+ * provider/runtime mismatch. Build-pool rows can also keep the logical owner
+ * lane (`roger`, `regina`, or `pool:*`) while the actual admission target
+ * late-binds to a maintained Codex builder, so stale Claude metadata must be
+ * normalized before the admission planner sees it. This pass is deliberately
+ * narrow and idempotent: only approved READY rows that either target a known
+ * Codex runtime or still carry Claude metadata for a legacy/pool owner lane are
+ * updated, and already-correct rows are ignored. It never changes `to_agent`.
  */
+const LEGACY_CODEX_OWNER_LANES = new Set(["roger", "regina"]);
+
+function shouldRepairReadyRowToCodex(row: BacklogRow & { agent_runtime: string | null; agent_status: string | null }): {
+  repair: boolean;
+  reason: string;
+} {
+  const targetRuntime = row.agent_runtime ? normalizeRuntime(row.agent_runtime) : null;
+  if (targetRuntime === "codex") return { repair: true, reason: "target_agent_runtime_codex" };
+
+  const currentRuntime = row.runtime ? normalizeRuntime(row.runtime) : null;
+  const currentProvider = row.provider ?? (currentRuntime ? resolveProviderFromRuntime(currentRuntime) : null);
+  const carriesClaudeMetadata =
+    currentProvider === "anthropic" ||
+    currentRuntime === "claude-code-cli" ||
+    currentRuntime === "claude-agent-sdk" ||
+    currentRuntime === "claude-code-local";
+  if (!carriesClaudeMetadata) return { repair: false, reason: "not_claude_metadata" };
+
+  const target = row.to_agent?.trim().toLowerCase() ?? "";
+  if (target.startsWith("pool:")) return { repair: true, reason: "explicit_pool_owner_lane" };
+  if (LEGACY_CODEX_OWNER_LANES.has(target) && row.agent_status !== "running") {
+    return { repair: true, reason: "legacy_owner_lane_unavailable" };
+  }
+  return { repair: false, reason: "not_codex_repair_candidate" };
+}
+
 export async function repairReadyCodexRuntimeMetadata(
   adapter: DbAdapter,
   team_id = "default",
 ): Promise<ReadyRuntimeRepair[]> {
-  const { rows } = await adapter.query<BacklogRow & { agent_runtime: string | null }>(
-    `SELECT i.*, a.runtime AS agent_runtime
+  const { rows } = await adapter.query<BacklogRow & { agent_runtime: string | null; agent_status: string | null }>(
+    `SELECT i.*, a.runtime AS agent_runtime, a.status AS agent_status
        FROM orchestration_backlog_item i
-       JOIN (
-         SELECT name, runtime
+       LEFT JOIN (
+         SELECT name, runtime, status
            FROM (
-             SELECT name, runtime,
+             SELECT name, runtime, status,
                     ROW_NUMBER() OVER (
                       PARTITION BY name
                       ORDER BY CASE WHEN status = 'running' THEN 0 ELSE 1 END, name ASC
@@ -574,15 +605,15 @@ export async function repairReadyCodexRuntimeMetadata(
         AND i.readiness_state = 'ready'
         AND i.approved_by IS NOT NULL
         AND i.approved_at IS NOT NULL
-        AND i.to_agent IS NOT NULL
-        AND a.runtime IS NOT NULL`,
+        AND i.to_agent IS NOT NULL`,
     [team_id],
   );
 
   const repairs: ReadyRuntimeRepair[] = [];
   for (const row of rows) {
-    const targetRuntime = normalizeRuntime(row.agent_runtime);
-    if (targetRuntime !== "codex") continue;
+    const decision = shouldRepairReadyRowToCodex(row);
+    if (!decision.repair) continue;
+    const targetRuntime = "codex";
     const targetProvider = resolveProviderFromRuntime(targetRuntime);
     const currentRuntime = row.runtime ? normalizeRuntime(row.runtime) : null;
     const currentProvider = row.provider ?? (currentRuntime ? resolveProviderFromRuntime(currentRuntime) : null);
@@ -605,6 +636,7 @@ export async function repairReadyCodexRuntimeMetadata(
       from_runtime: row.runtime,
       to_provider: targetProvider,
       to_runtime: targetRuntime,
+      reason: decision.reason,
     });
   }
   return repairs;

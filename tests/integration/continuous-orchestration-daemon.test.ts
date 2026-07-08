@@ -16,7 +16,7 @@ import {
   getHealthyAgentNames,
 } from "../../src/continuous-orchestration/storage.js";
 import { parseRoadmapToBacklog } from "../../src/continuous-orchestration/roadmap-import.js";
-import { ContinuousOrchestrationDaemon } from "../../src/continuous-orchestration/daemon.js";
+import { ContinuousOrchestrationDaemon, type PoolRouting } from "../../src/continuous-orchestration/daemon.js";
 import { defaultConfig, type ContinuousOrchestrationConfig } from "../../src/continuous-orchestration/config.js";
 import { mountContinuousOrchestrationRoutes } from "../../src/continuous-orchestration/routes.js";
 import type { BacklogItem, UsageGateView } from "../../src/continuous-orchestration/types.js";
@@ -43,6 +43,7 @@ function makeDaemon(
     alerts?: string[];
     newsEvents?: Array<{ type: string; message: string; data?: Record<string, unknown> }>;
     killSwitch?: boolean;
+    pools?: PoolRouting;
     // RD-014: undefined (the default) means "no health resolver wired" —
     // matches every pre-RD-014 test in this file exactly (no gating at all).
     resolveAgentHealth?: (names: string[]) => Promise<Set<string>>;
@@ -72,6 +73,7 @@ function makeDaemon(
     emitNews: async (event) => {
       newsEvents.push(event);
     },
+    pools: over.pools,
     killSwitchActive: () => over.killSwitch ?? false,
     now: () => Date.parse("2026-06-17T18:00:00Z"), // not a load-point
   });
@@ -187,6 +189,24 @@ async function seedAgent(adapter: SqliteAdapter, name: string, status: string, r
      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
     [`agent_${name}`, "team-uuid-9999", name, "claude", "claude-fable-5", 0, status, Date.now(), runtime],
   );
+}
+
+function testPoolRouting(): PoolRouting {
+  const pool = {
+    pool_id: "backend",
+    repo_root: "/tmp/id-agents",
+    max_parallel: 2,
+    members: ["substrate-orch-codex", "substrate-api-codex"],
+  };
+  return {
+    poolForItem: (item) => (item.to_agent === "pool:backend" || item.track === "T-ORCH" ? { ...pool } : null),
+    availableBuilders: (p, building) => p.members.filter((m) => !building.has(m)),
+    allocateWorktree: async ({ agent, item }) => ({
+      path: `/tmp/id-agents/.worktrees/${agent}-${item.item_id}`,
+      branch: `build/${agent}-${item.item_id}`,
+      lease_id: null,
+    }),
+  };
 }
 
 let adapter: SqliteAdapter;
@@ -416,6 +436,99 @@ describe("daemon — dry-run vs live", () => {
     ]);
     expect(explanation.non_admitted).toHaveLength(0);
     expect(repaired).toMatchObject({ provider: "openai", runtime: "codex", readiness_state: "ready" });
+  });
+
+  it("repairs stale Claude metadata for approved Regina ready fuel without changing the logical owner", async () => {
+    await seedAgent(adapter, "regina", "stopped", "claude-code-cli");
+    const stale = await seedReady(adapter, {
+      title: "regina-owned ready fuel with stale runtime",
+      to_agent: "regina",
+      provider: "anthropic",
+      runtime: "claude-code-cli",
+    });
+    await markApproved(adapter, stale.item_id);
+    const { daemon, fired } = makeDaemon(adapter, { config: { dry_run: false, max_in_flight: 4 } });
+    await daemon.setMode("running");
+
+    const result = await daemon.runTick();
+    const repaired = await getBacklogItem(adapter, stale.item_id);
+
+    expect(result.ready_runtime_repairs).toEqual([
+      expect.objectContaining({
+        item_id: stale.item_id,
+        to_agent: "regina",
+        from_provider: "anthropic",
+        from_runtime: "claude-code-cli",
+        to_provider: "openai",
+        to_runtime: "codex",
+        reason: "legacy_owner_lane_unavailable",
+      }),
+    ]);
+    expect(fired[0]).toMatchObject({ to_agent: "regina", provider: "openai", runtime: "codex" });
+    expect(repaired).toMatchObject({ to_agent: "regina", provider: "openai", runtime: "codex" });
+  });
+
+  it("repairs stale Claude metadata for approved Roger ready fuel without changing the logical owner", async () => {
+    await seedAgent(adapter, "roger", "offline", "claude-code-cli");
+    const stale = await seedReady(adapter, {
+      title: "roger-owned ready fuel with stale runtime",
+      to_agent: "roger",
+      provider: "anthropic",
+      runtime: "claude-code-cli",
+    });
+    await markApproved(adapter, stale.item_id);
+    const { daemon, fired } = makeDaemon(adapter, { config: { dry_run: false, max_in_flight: 4 } });
+    await daemon.setMode("running");
+
+    const result = await daemon.runTick();
+    const repaired = await getBacklogItem(adapter, stale.item_id);
+
+    expect(result.ready_runtime_repairs).toEqual([
+      expect.objectContaining({
+        item_id: stale.item_id,
+        to_agent: "roger",
+        to_provider: "openai",
+        to_runtime: "codex",
+        reason: "legacy_owner_lane_unavailable",
+      }),
+    ]);
+    expect(fired[0]).toMatchObject({ to_agent: "roger", provider: "openai", runtime: "codex" });
+    expect(repaired).toMatchObject({ to_agent: "roger", provider: "openai", runtime: "codex" });
+  });
+
+  it("repairs stale Claude metadata for explicit build-pool ready fuel before admission without changing the logical owner", async () => {
+    await seedAgent(adapter, "substrate-orch-codex", "running", "codex");
+    const stale = await seedReady(adapter, {
+      title: "pool-owned backend ready fuel with stale runtime",
+      track: "T-ORCH",
+      to_agent: "pool:backend",
+      provider: "anthropic",
+      runtime: "claude-code-cli",
+    });
+    await markApproved(adapter, stale.item_id);
+    const { daemon } = makeDaemon(adapter, {
+      config: { dry_run: false, max_in_flight: 4 },
+      pools: testPoolRouting(),
+      resolveAgentRuntimes: (names) => getAgentRuntimeMap(adapter, names),
+    });
+    await daemon.setMode("running");
+
+    const explanation = await daemon.explainReadyAdmission();
+    const repaired = await getBacklogItem(adapter, stale.item_id);
+
+    expect(explanation.ready_runtime_repairs).toEqual([
+      expect.objectContaining({
+        item_id: stale.item_id,
+        to_agent: "pool:backend",
+        to_provider: "openai",
+        to_runtime: "codex",
+        reason: "explicit_pool_owner_lane",
+      }),
+    ]);
+    expect(explanation.admissible).toEqual([
+      expect.objectContaining({ item_id: stale.item_id, to_agent: "substrate-orch-codex" }),
+    ]);
+    expect(repaired).toMatchObject({ to_agent: "pool:backend", provider: "openai", runtime: "codex" });
   });
 
   it("halts (fires nothing) when not running", async () => {
