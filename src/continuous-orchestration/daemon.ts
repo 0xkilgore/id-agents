@@ -14,7 +14,7 @@ import crypto from "node:crypto";
 import type { DbAdapter } from "../db/db-adapter.js";
 import type { ContinuousOrchestrationConfig } from "./config.js";
 import type { BacklogItem, DecisionRecord, OrchestrationMode, ReadinessState, UsageGateView } from "./types.js";
-import { fairInterleaveByLane, needsRefuel, orderCandidates } from "./selection.js";
+import { fairInterleaveByLane, laneKeyOf, needsRefuel, orderCandidates } from "./selection.js";
 import { tickAdmitLimit } from "./cadence.js";
 import { planAdmission, evaluateStall, shouldRunZeroAdmitStallWatchdog, type AdmissionContext } from "./admission.js";
 import { computeNextDelay, tickWriteCaps } from "./backpressure.js";
@@ -152,6 +152,40 @@ export interface ReadyAdmissionExplanation {
     metadata?: Record<string, unknown>;
   }>;
   halted: string | null;
+  ready_runtime_repairs: ReadyRuntimeRepair[];
+}
+
+export interface AutoPromoteHealth {
+  enabled: boolean;
+  blocked_reason: string | null;
+  min_ready_fuel: number;
+  floor: number;
+  min_ready_lanes: number;
+  lanes: {
+    build_ready: number;
+    build_ready_lanes: number;
+    ready_lane_keys: string[];
+    candidate_lane_keys: string[];
+  };
+  below_floor: boolean;
+  below_lanes: boolean;
+  triggered: boolean;
+  candidates_considered: number;
+  candidates: Array<{
+    item_id: string;
+    title: string;
+    lane: string;
+    risk_class: string;
+    to_agent: string | null;
+    flesh_confidence: number | null;
+  }>;
+  promoted_count: number;
+  promoted_items: Array<{ item_id: string; title: string; lane: string }>;
+  skipped_count: number;
+  skipped_items: Array<{ item_id: string; reasons: string[] }>;
+  top_skip_reasons: Array<{ reason: string; count: number }>;
+  ready_runtime_repairs: ReadyRuntimeRepair[];
+  summary: string;
 }
 
 /** Outcome of one floor-triggered auto-promote pass. */
@@ -162,6 +196,10 @@ export interface AutoPromoteRunSummary {
   promoted: number;
   /** Safe-gate rejections among the needs_review candidates. */
   skipped: number;
+  /** Needs-review candidates evaluated by the safety gate. */
+  candidates_considered: number;
+  /** Most frequent safety-gate skip reasons in this pass. */
+  top_skip_reasons: Array<{ reason: string; count: number }>;
   /** Exact safety-gate reasons for every skipped candidate. */
   skipped_items: Array<{ item_id: string; reasons: string[] }>;
   /** Build-ready total/lanes before the pass. */
@@ -544,7 +582,7 @@ export class ContinuousOrchestrationDaemon {
     const killSwitch = this.killSwitchActive();
     const { view: usage, daily_tokens_used } = await this.deps.readUsage();
     const { count: in_flight, active_write_scopes } = await this.deps.readInFlight();
-    await repairReadyCodexRuntimeMetadata(this.deps.adapter, this.teamId);
+    const readyRuntimeRepairs = await repairReadyCodexRuntimeMetadata(this.deps.adapter, this.teamId);
     const ready = await listReadyItems(this.deps.adapter, this.teamId);
     const done_item_ids = await listDoneItemIds(this.deps.adapter, this.teamId);
     const ordered = fairInterleaveByLane(orderCandidates(ready));
@@ -607,6 +645,95 @@ export class ContinuousOrchestrationDaemon {
         };
       }),
       halted: plan.halt?.reason ?? null,
+      ready_runtime_repairs: readyRuntimeRepairs,
+    };
+  }
+
+  async explainAutoPromoteHealth(): Promise<AutoPromoteHealth> {
+    const config = this.deps.config;
+    const state = await getOrchestrationState(this.deps.adapter, this.teamId);
+    const killSwitch = this.killSwitchActive();
+    const { view: usage } = await this.deps.readUsage();
+    const readyRuntimeRepairs = await repairReadyCodexRuntimeMetadata(this.deps.adapter, this.teamId);
+
+    const [ready, needsReview] = await Promise.all([
+      listReadyItems(this.deps.adapter, this.teamId),
+      listBacklogByState(this.deps.adapter, { team_id: this.teamId, state: "needs_review" }),
+    ]);
+    const plan = selectAutoPromotions(needsReview, ready, {
+      floor: config.auto_promote_floor,
+      minLanes: config.auto_promote_min_lanes,
+      maxPerPass: config.auto_promote_max_per_tick,
+    });
+    const readyLaneKeys = [...new Set(ready.filter((item) => item.risk_class === "build").map(laneKeyOf))].sort();
+    const candidateLaneKeys = [...new Set(needsReview.map(laneKeyOf))].sort();
+    const blockedReason =
+      !config.auto_flesh_enabled ? "auto_flesh_disabled" :
+      !config.auto_promote_enabled ? "auto_promote_disabled" :
+      state.mode !== "running" ? `mode_${state.mode}` :
+      killSwitch ? "kill_switch_active" :
+      usage.hard_paused ? "usage_hard_paused" :
+      null;
+    const belowFloor = plan.before.build_ready < config.auto_promote_floor;
+    const belowLanes = plan.before.build_lanes < config.auto_promote_min_lanes;
+    const skippedItems = plan.skipped;
+    const promotedItems = plan.promote.map((item) => ({
+      item_id: item.item_id,
+      title: item.title,
+      lane: laneKeyOf(item),
+    }));
+    const topSkipReasons = topSkipReasonsFrom(skippedItems);
+    const promotedCount = blockedReason ? 0 : plan.promote.length;
+    const triggered = blockedReason ? false : plan.triggered;
+    const candidatesConsidered = triggered ? plan.candidates_considered : 0;
+    const summary = summarizeAutoPromoteHealth({
+      blockedReason,
+      belowFloor,
+      belowLanes,
+      triggered,
+      ready: plan.before.build_ready,
+      floor: config.auto_promote_floor,
+      lanes: plan.before.build_lanes,
+      minLanes: config.auto_promote_min_lanes,
+      candidates: candidatesConsidered,
+      promoted: promotedCount,
+      skipped: triggered ? skippedItems.length : 0,
+      topReason: topSkipReasons[0]?.reason ?? null,
+    });
+
+    return {
+      enabled: config.auto_flesh_enabled && config.auto_promote_enabled,
+      blocked_reason: blockedReason,
+      min_ready_fuel: config.min_ready_fuel,
+      floor: config.auto_promote_floor,
+      min_ready_lanes: config.auto_promote_min_lanes,
+      lanes: {
+        build_ready: plan.before.build_ready,
+        build_ready_lanes: plan.before.build_lanes,
+        ready_lane_keys: readyLaneKeys,
+        candidate_lane_keys: candidateLaneKeys,
+      },
+      below_floor: belowFloor,
+      below_lanes: belowLanes,
+      triggered,
+      candidates_considered: candidatesConsidered,
+      candidates: triggered
+        ? needsReview.map((item) => ({
+          item_id: item.item_id,
+          title: item.title,
+          lane: laneKeyOf(item),
+          risk_class: item.risk_class,
+          to_agent: item.to_agent,
+          flesh_confidence: item.flesh_confidence,
+        }))
+        : [],
+      promoted_count: promotedCount,
+      promoted_items: blockedReason ? [] : promotedItems,
+      skipped_count: triggered ? skippedItems.length : 0,
+      skipped_items: triggered ? skippedItems : [],
+      top_skip_reasons: triggered ? topSkipReasons : [],
+      ready_runtime_repairs: readyRuntimeRepairs,
+      summary,
     };
   }
 
@@ -918,6 +1045,8 @@ export class ContinuousOrchestrationDaemon {
         triggered: true,
         promoted,
         skipped: plan.skipped.length,
+        candidates_considered: plan.candidates_considered,
+        top_skip_reasons: topSkipReasonsFrom(plan.skipped),
         skipped_items: plan.skipped,
         before: plan.before,
         dry_run: config.dry_run,
@@ -988,4 +1117,44 @@ export class ContinuousOrchestrationDaemon {
   getState() {
     return getOrchestrationState(this.deps.adapter, this.teamId);
   }
+}
+
+function topSkipReasonsFrom(
+  skipped: Array<{ reasons: string[] }>,
+): Array<{ reason: string; count: number }> {
+  const counts = new Map<string, number>();
+  for (const item of skipped) {
+    for (const reason of item.reasons) counts.set(reason, (counts.get(reason) ?? 0) + 1);
+  }
+  return [...counts.entries()]
+    .map(([reason, count]) => ({ reason, count }))
+    .sort((a, b) => b.count - a.count || a.reason.localeCompare(b.reason))
+    .slice(0, 5);
+}
+
+function summarizeAutoPromoteHealth(args: {
+  blockedReason: string | null;
+  belowFloor: boolean;
+  belowLanes: boolean;
+  triggered: boolean;
+  ready: number;
+  floor: number;
+  lanes: number;
+  minLanes: number;
+  candidates: number;
+  promoted: number;
+  skipped: number;
+  topReason: string | null;
+}): string {
+  if (args.blockedReason) return `auto-promote blocked: ${args.blockedReason}`;
+  if (!args.belowFloor && !args.belowLanes) {
+    return `ready build fuel meets floor: ready=${args.ready} floor=${args.floor}, lanes=${args.lanes}/${args.minLanes}`;
+  }
+  if (!args.triggered || args.candidates === 0) {
+    return `ready build fuel below floor: ready=${args.ready} floor=${args.floor}, lanes=${args.lanes}/${args.minLanes}; no needs_review candidates considered`;
+  }
+  if (args.promoted > 0) {
+    return `ready build fuel below floor: ready=${args.ready} floor=${args.floor}, lanes=${args.lanes}/${args.minLanes}; would promote ${args.promoted}, skipped ${args.skipped}`;
+  }
+  return `ready build fuel below floor: ready=${args.ready} floor=${args.floor}, lanes=${args.lanes}/${args.minLanes}; promoted 0 of ${args.candidates}, top skip reason: ${args.topReason ?? "none"}`;
 }

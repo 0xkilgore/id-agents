@@ -50,6 +50,8 @@ export interface AutoPromotePlan {
   promote: BacklogItem[];
   /** Candidates rejected by the safety gate (audit). */
   skipped: AutoPromoteSkip[];
+  /** Needs-review rows evaluated by the safety gate. */
+  candidates_considered: number;
   /** Build-ready totals before the pass (for logging). */
   before: { build_ready: number; build_lanes: number };
 }
@@ -140,7 +142,7 @@ export function selectAutoPromotions(
   const belowFuel = before.build_ready < opts.floor;
   const belowLanes = before.build_lanes < opts.minLanes;
   if (!belowFuel && !belowLanes) {
-    return { triggered: false, promote: [], skipped: [], before };
+    return { triggered: false, promote: [], skipped: [], candidates_considered: 0, before };
   }
 
   const skipped: AutoPromoteSkip[] = [];
@@ -182,5 +184,5 @@ export function selectAutoPromotions(
     total += 1;
   }
 
-  return { triggered: true, promote, skipped, before };
+  return { triggered: true, promote, skipped, candidates_considered: needsReview.length, before };
 }

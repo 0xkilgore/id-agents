@@ -63,6 +63,7 @@ export function mountContinuousOrchestrationRoutes(app: Application, opts: Orche
         since_iso: startOfDay.toISOString(),
         decision: "auto_ready",
       });
+      const autoPromoteHealth = await daemon.explainAutoPromoteHealth();
       const readyAdmission = await daemon.explainReadyAdmission();
       let killSwitch = false;
       try {
@@ -102,9 +103,11 @@ export function mountContinuousOrchestrationRoutes(app: Application, opts: Orche
             floor: config.auto_promote_floor,
             min_lanes: config.auto_promote_min_lanes,
             max_per_tick: config.auto_promote_max_per_tick,
+            health: autoPromoteHealth,
           },
           by_status: fleshCounts,
         },
+        auto_promote_health: autoPromoteHealth,
         ready_admission: readyAdmission,
         health,
       });

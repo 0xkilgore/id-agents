@@ -1,6 +1,7 @@
 // Continuous Orchestration — storage + roadmap import + daemon integration.
 // Backed by in-memory SQLite (same migration path as production).
 
+import express, { type Express } from "express";
 import { describe, it, expect, beforeEach } from "vitest";
 import { SqliteAdapter } from "../../src/db/sqlite-adapter.js";
 import { migrateSqlite } from "../../src/db/migrations/sqlite.js";
@@ -17,6 +18,7 @@ import {
 import { parseRoadmapToBacklog } from "../../src/continuous-orchestration/roadmap-import.js";
 import { ContinuousOrchestrationDaemon } from "../../src/continuous-orchestration/daemon.js";
 import { defaultConfig, type ContinuousOrchestrationConfig } from "../../src/continuous-orchestration/config.js";
+import { mountContinuousOrchestrationRoutes } from "../../src/continuous-orchestration/routes.js";
 import type { BacklogItem, UsageGateView } from "../../src/continuous-orchestration/types.js";
 
 async function freshDb() {
@@ -134,6 +136,44 @@ async function seedApprovedReview(adapter: SqliteAdapter, over: Partial<BacklogI
     ],
   );
   return (await getBacklogItem(adapter, item.item_id))!;
+}
+
+async function callApp(app: Express, path: string): Promise<{ status: number; body: any }> {
+  return new Promise((resolve, reject) => {
+    const server = app.listen(0, "127.0.0.1", async () => {
+      const addr = server.address();
+      if (!addr || typeof addr === "string") {
+        server.close();
+        reject(new Error("no addr"));
+        return;
+      }
+      try {
+        const r = await fetch(`http://127.0.0.1:${addr.port}${path}`);
+        const text = await r.text();
+        server.close(() => resolve({ status: r.status, body: JSON.parse(text) }));
+      } catch (e) {
+        server.close(() => reject(e));
+      }
+    });
+  });
+}
+
+function mountStatusApp(
+  adapter: SqliteAdapter,
+  config: Partial<ContinuousOrchestrationConfig> = {},
+  deps: Parameters<typeof makeDaemon>[1] = {},
+): { app: Express; daemon: ContinuousOrchestrationDaemon } {
+  const fullConfig = { ...defaultConfig(), ...config };
+  const { daemon } = makeDaemon(adapter, { ...deps, config: fullConfig });
+  const app = express();
+  app.use(express.json());
+  mountContinuousOrchestrationRoutes(app, {
+    daemon,
+    adapter,
+    config: fullConfig,
+    teamId: "default",
+  });
+  return { app, daemon };
 }
 
 /** Minimal valid `agents` row — RD-014 health-gate tests only care about name+status. */
@@ -431,6 +471,116 @@ describe("daemon — dry-run vs live", () => {
     const ready = await listBacklogByState(adapter, { state: "ready" });
     expect(ready).toHaveLength(3);
     expect(new Set(ready.map((i) => i.write_scope[0])).size).toBe(3);
+  });
+
+  it("status explains below-floor auto-promote with no candidates", async () => {
+    for (let i = 0; i < 8; i++) {
+      await seedReady(adapter, { title: `ready ${i}`, write_scope: [`repo/ready-${i}`] });
+    }
+    const { app, daemon } = mountStatusApp(adapter, {
+      dry_run: true,
+      auto_flesh_enabled: true,
+      auto_promote_enabled: true,
+      auto_promote_floor: 12,
+      auto_promote_min_lanes: 1,
+    });
+    await daemon.setMode("running");
+
+    const res = await callApp(app, "/orchestration/status");
+
+    expect(res.status).toBe(200);
+    expect(res.body.counts.ready).toBe(8);
+    expect(res.body.auto_promote_health).toMatchObject({
+      min_ready_fuel: 8,
+      floor: 12,
+      below_floor: true,
+      triggered: true,
+      candidates_considered: 0,
+      promoted_count: 0,
+      skipped_count: 0,
+    });
+    expect(res.body.auto_promote_health.summary).toMatch(/ready=8 floor=12/);
+    expect(res.body.auto_promote_health.summary).toMatch(/no needs_review candidates/);
+  });
+
+  it("status explains below-floor auto-promote blocked by safety risk", async () => {
+    for (let i = 0; i < 8; i++) {
+      await seedReady(adapter, { title: `ready ${i}`, write_scope: [`repo/ready-${i}`] });
+    }
+    const risky = await seedApprovedReview(adapter, {
+      title: "blocked destructive candidate",
+      risk_class: "destructive",
+      write_scope: ["repo/risky"],
+    });
+    const { app, daemon } = mountStatusApp(adapter, {
+      dry_run: true,
+      auto_flesh_enabled: true,
+      auto_promote_enabled: true,
+      auto_promote_floor: 12,
+      auto_promote_min_lanes: 1,
+    });
+    await daemon.setMode("running");
+
+    const res = await callApp(app, "/orchestration/status");
+
+    expect(res.status).toBe(200);
+    expect(res.body.auto_promote_health).toMatchObject({
+      floor: 12,
+      below_floor: true,
+      candidates_considered: 1,
+      promoted_count: 0,
+      skipped_count: 1,
+    });
+    expect(res.body.auto_promote_health.skipped_items).toEqual([
+      expect.objectContaining({
+        item_id: risky.item_id,
+        reasons: expect.arrayContaining([expect.stringContaining("not auto-promotable")]),
+      }),
+    ]);
+    expect(res.body.auto_promote_health.top_skip_reasons[0]).toEqual(
+      expect.objectContaining({ reason: expect.stringContaining("not auto-promotable"), count: 1 }),
+    );
+  });
+
+  it("status includes provider/runtime repair interaction before admission diagnostics", async () => {
+    await seedAgent(adapter, "roger", "running", "codex");
+    const stale = await seedReady(adapter, {
+      title: "approved stale runtime ready fuel",
+      to_agent: "roger",
+      provider: "anthropic",
+      runtime: "claude-code-cli",
+      write_scope: ["repo/stale"],
+    });
+    await markApproved(adapter, stale.item_id);
+    const { app, daemon } = mountStatusApp(
+      adapter,
+      {
+        dry_run: true,
+        auto_flesh_enabled: true,
+        auto_promote_enabled: true,
+        auto_promote_floor: 12,
+      },
+      { resolveAgentRuntimes: (names) => getAgentRuntimeMap(adapter, names) },
+    );
+    await daemon.setMode("running");
+
+    const res = await callApp(app, "/orchestration/status");
+    const repaired = await getBacklogItem(adapter, stale.item_id);
+
+    expect(res.status).toBe(200);
+    expect(res.body.auto_promote_health.ready_runtime_repairs).toEqual([
+      expect.objectContaining({
+        item_id: stale.item_id,
+        from_provider: "anthropic",
+        from_runtime: "claude-code-cli",
+        to_provider: "openai",
+        to_runtime: "codex",
+      }),
+    ]);
+    expect(res.body.ready_admission.admissible).toEqual([
+      expect.objectContaining({ item_id: stale.item_id, to_agent: "roger" }),
+    ]);
+    expect(repaired).toMatchObject({ provider: "openai", runtime: "codex", readiness_state: "ready" });
   });
 });
 
