@@ -131,6 +131,7 @@ export interface DecisionRecord {
     | "refuel"
     | "fleet_blockage"
     | "auto_promote"
+    | "ready_metadata_repair"
     | "reconciled"
     | "would_reconcile";
   reason: string;

@@ -6,6 +6,7 @@
 
 import crypto from "node:crypto";
 import type { DbAdapter } from "../db/db-adapter.js";
+import { normalizeRuntime, resolveProviderFromRuntime } from "../dispatch-scheduler/types.js";
 import type {
   BacklogItem,
   DecisionRecord,
@@ -528,6 +529,85 @@ export async function getAgentRuntimeMap(
     if (r.runtime && !out.has(r.name)) out.set(r.name, r.runtime);
   }
   return out;
+}
+
+export interface ReadyRuntimeRepair {
+  item_id: string;
+  to_agent: string;
+  from_provider: string | null;
+  from_runtime: string | null;
+  to_provider: string;
+  to_runtime: string;
+}
+
+/**
+ * Repair stale ready-fuel metadata after an agent lane changes runtime.
+ *
+ * The flesher stamps provider/runtime before the final lane may be known. A
+ * ready, approved row targeting a Codex agent must not stay pinned to the old
+ * Anthropic/Claude lane, because admission will correctly hold it forever as a
+ * provider/runtime mismatch. This pass is deliberately narrow and idempotent:
+ * only approved READY rows with a known target agent runtime of `codex` are
+ * updated, and already-correct rows are ignored.
+ */
+export async function repairReadyCodexRuntimeMetadata(
+  adapter: DbAdapter,
+  team_id = "default",
+): Promise<ReadyRuntimeRepair[]> {
+  const { rows } = await adapter.query<BacklogRow & { agent_runtime: string | null }>(
+    `SELECT i.*, a.runtime AS agent_runtime
+       FROM orchestration_backlog_item i
+       JOIN (
+         SELECT name, runtime
+           FROM (
+             SELECT name, runtime,
+                    ROW_NUMBER() OVER (
+                      PARTITION BY name
+                      ORDER BY CASE WHEN status = 'running' THEN 0 ELSE 1 END, name ASC
+                    ) AS rn
+               FROM agents
+              WHERE deleted_at IS NULL
+           ) ranked_agents
+          WHERE rn = 1
+       ) a ON a.name = i.to_agent
+      WHERE i.team_id = $1
+        AND i.readiness_state = 'ready'
+        AND i.approved_by IS NOT NULL
+        AND i.approved_at IS NOT NULL
+        AND i.to_agent IS NOT NULL
+        AND a.runtime IS NOT NULL`,
+    [team_id],
+  );
+
+  const repairs: ReadyRuntimeRepair[] = [];
+  for (const row of rows) {
+    const targetRuntime = normalizeRuntime(row.agent_runtime);
+    if (targetRuntime !== "codex") continue;
+    const targetProvider = resolveProviderFromRuntime(targetRuntime);
+    const currentRuntime = row.runtime ? normalizeRuntime(row.runtime) : null;
+    const currentProvider = row.provider ?? (currentRuntime ? resolveProviderFromRuntime(currentRuntime) : null);
+    if (currentRuntime === targetRuntime && currentProvider === targetProvider) continue;
+
+    const now = new Date().toISOString();
+    await adapter.query(
+      `UPDATE orchestration_backlog_item
+          SET provider = $1, runtime = $2, updated_at = $3
+        WHERE item_id = $4
+          AND readiness_state = 'ready'
+          AND approved_by IS NOT NULL
+          AND approved_at IS NOT NULL`,
+      [targetProvider, targetRuntime, now, row.item_id],
+    );
+    repairs.push({
+      item_id: row.item_id,
+      to_agent: row.to_agent ?? "",
+      from_provider: row.provider,
+      from_runtime: row.runtime,
+      to_provider: targetProvider,
+      to_runtime: targetRuntime,
+    });
+  }
+  return repairs;
 }
 
 // ── Auto-flesh (daemon SELF-REFUEL) ──────────────────────────────────

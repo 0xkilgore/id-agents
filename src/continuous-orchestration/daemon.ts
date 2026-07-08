@@ -27,8 +27,10 @@ import {
   listReadyItems,
   promoteToReady,
   recordTickOutcome,
+  repairReadyCodexRuntimeMetadata,
   setItemState,
   setMode,
+  type ReadyRuntimeRepair,
 } from "./storage.js";
 import { runFleshPass, type FleshRunSummary } from "./flesh-runner.js";
 import { selectAutoPromotions } from "./auto-promote-policy.js";
@@ -131,6 +133,8 @@ export interface TickResult {
   refuel: FleshRunSummary | null;
   /** Floor-triggered auto-promote summary, when an auto-promote pass ran. */
   auto_promote: AutoPromoteRunSummary | null;
+  /** Ready rows whose stale provider/runtime metadata was corrected before admission. */
+  ready_runtime_repairs: ReadyRuntimeRepair[];
   decisions: DecisionRecord[];
 }
 
@@ -253,6 +257,7 @@ export class ContinuousOrchestrationDaemon {
     const refuelFleshed = refuel?.auto_ready ?? 0;
     const admitCap = tickWriteCaps(writeCfg, refuelFleshed).admitCap;
 
+    const readyRuntimeRepairs = await repairReadyCodexRuntimeMetadata(this.deps.adapter, this.teamId);
     const ready = await listReadyItems(this.deps.adapter, this.teamId);
     const done_item_ids = await listDoneItemIds(this.deps.adapter, this.teamId);
     // Priority-rank, then FAIR-interleave across distinct write_scope lanes so a
@@ -301,6 +306,17 @@ export class ContinuousOrchestrationDaemon {
     const plan = planAdmission(ordered, ctx, config);
     const decisions: DecisionRecord[] = [...reconcileDecisions];
     const admitted: Array<{ item_id: string; dispatch_phid: string | null }> = [];
+
+    for (const repair of readyRuntimeRepairs) {
+      decisions.push({
+        item_id: repair.item_id,
+        action: "ready_metadata_repair",
+        reason:
+          `repaired ready provider/runtime metadata for ${repair.to_agent}: ` +
+          `${repair.from_provider ?? "(null)"}/${repair.from_runtime ?? "(null)"} -> ${repair.to_provider}/${repair.to_runtime}`,
+        metadata: { ...repair },
+      });
+    }
 
     if (autoPromote) {
       decisions.push({
@@ -511,6 +527,7 @@ export class ContinuousOrchestrationDaemon {
       auto_paused,
       refuel,
       auto_promote: autoPromote,
+      ready_runtime_repairs: readyRuntimeRepairs,
       decisions,
     };
   }
@@ -527,6 +544,7 @@ export class ContinuousOrchestrationDaemon {
     const killSwitch = this.killSwitchActive();
     const { view: usage, daily_tokens_used } = await this.deps.readUsage();
     const { count: in_flight, active_write_scopes } = await this.deps.readInFlight();
+    await repairReadyCodexRuntimeMetadata(this.deps.adapter, this.teamId);
     const ready = await listReadyItems(this.deps.adapter, this.teamId);
     const done_item_ids = await listDoneItemIds(this.deps.adapter, this.teamId);
     const ordered = fairInterleaveByLane(orderCandidates(ready));

@@ -92,6 +92,16 @@ async function seedReady(adapter: SqliteAdapter, over: Partial<BacklogItem> = {}
   return item;
 }
 
+async function markApproved(adapter: SqliteAdapter, item_id: string) {
+  await adapter.query(
+    `UPDATE orchestration_backlog_item
+       SET approved_by = $1, approved_at = $2
+     WHERE item_id = $3`,
+    ["maestra", "2026-07-08T12:00:00Z", item_id],
+  );
+  return (await getBacklogItem(adapter, item_id))!;
+}
+
 async function seedApprovedReview(adapter: SqliteAdapter, over: Partial<BacklogItem> = {}) {
   const item = await insertBacklogItem(adapter, {
     title: over.title ?? "approved build fuel",
@@ -306,6 +316,66 @@ describe("daemon — dry-run vs live", () => {
         }),
       }),
     ]);
+  });
+
+  it("repairs stale Claude metadata for approved Roger Codex ready fuel before admission and logs it", async () => {
+    await seedAgent(adapter, "roger", "running", "codex");
+    const stale = await seedReady(adapter, {
+      title: "roger codex ready fuel with stale runtime",
+      to_agent: "roger",
+      provider: "anthropic",
+      runtime: "claude-code-cli",
+    });
+    await markApproved(adapter, stale.item_id);
+    const { daemon, fired } = makeDaemon(adapter, {
+      config: { dry_run: false, max_in_flight: 4 },
+      resolveAgentRuntimes: (names) => getAgentRuntimeMap(adapter, names),
+    });
+    await daemon.setMode("running");
+
+    const result = await daemon.runTick();
+    const repaired = await getBacklogItem(adapter, stale.item_id);
+    const decisions = await listRecentDecisions(adapter, {});
+
+    expect(result.ready_runtime_repairs).toEqual([
+      expect.objectContaining({
+        item_id: stale.item_id,
+        to_agent: "roger",
+        from_provider: "anthropic",
+        from_runtime: "claude-code-cli",
+        to_provider: "openai",
+        to_runtime: "codex",
+      }),
+    ]);
+    expect(result.admitted.map((a) => a.item_id)).toEqual([stale.item_id]);
+    expect(fired[0]).toMatchObject({ provider: "openai", runtime: "codex" });
+    expect(repaired).toMatchObject({ provider: "openai", runtime: "codex", readiness_state: "in_flight" });
+    expect(decisions.some((d) => d.action === "ready_metadata_repair" && d.item_id === stale.item_id)).toBe(true);
+  });
+
+  it("repairs stale Claude metadata for approved frontend Codex ready fuel in ready admission status", async () => {
+    await seedAgent(adapter, "frontend-ui-codex", "running", "codex");
+    const stale = await seedReady(adapter, {
+      title: "frontend lane ready fuel with stale runtime",
+      to_agent: "frontend-ui-codex",
+      provider: "anthropic",
+      runtime: "claude-code-cli",
+    });
+    await markApproved(adapter, stale.item_id);
+    const { daemon } = makeDaemon(adapter, {
+      config: { dry_run: false, max_in_flight: 4 },
+      resolveAgentRuntimes: (names) => getAgentRuntimeMap(adapter, names),
+    });
+    await daemon.setMode("running");
+
+    const explanation = await daemon.explainReadyAdmission();
+    const repaired = await getBacklogItem(adapter, stale.item_id);
+
+    expect(explanation.admissible).toEqual([
+      expect.objectContaining({ item_id: stale.item_id, to_agent: "frontend-ui-codex" }),
+    ]);
+    expect(explanation.non_admitted).toHaveLength(0);
+    expect(repaired).toMatchObject({ provider: "openai", runtime: "codex", readiness_state: "ready" });
   });
 
   it("halts (fires nothing) when not running", async () => {
