@@ -318,10 +318,15 @@ describe("POST /agent-done — warn mode (default)", () => {
     expect(body.ok).toBe(true);
     expect(body.mode).toBe("warn");
     expect(body.promotion_warning).toMatch(/missing promotion metadata/);
+    expect(body.promotion.closeout_report).toMatchObject({
+      required: true,
+      status: "missing_required_evidence",
+      reason_code: "missing_required_evidence",
+    });
     expect(body.state).toBe("done");
   });
 
-  it("non-build dispatch + missing promotion payload => 200 with no warning", async () => {
+  it("non-build coordinator/no-code dispatch records explicit promotion-not-required reason", async () => {
     const enq = await enqueue({});
     await claim(enq.dispatch_phid);
     const r = await fetch(`${baseUrl}/agent-done`, {
@@ -335,6 +340,64 @@ describe("POST /agent-done — warn mode (default)", () => {
     expect(r.status).toBe(200);
     const body = await r.json();
     expect(body.promotion_warning).toBeNull();
+    expect(body.receipt.promotion).toMatchObject({
+      required: false,
+      status: "not_required",
+      reason_code: "coordinator_no_code",
+      reason: "Coordinator/no-code dispatch; no repo/branch promotion required",
+    });
+
+    const list = await fetch(`${baseUrl}/dispatches?status=terminal`, {
+      headers: { "X-Id-Team": "default" },
+    });
+    expect(list.status).toBe(200);
+    const listBody = await list.json() as any;
+    const row = listBody.dispatches.find((d: any) => d.dispatch_id === enq.dispatch_phid);
+    expect(row.promotion.closeout_report).toMatchObject({
+      required: false,
+      status: "not_required",
+      reason_code: "coordinator_no_code",
+    });
+  });
+
+  it("promote:false build closeout reports the recorded WIP/long-lived skip reason, not coordinator/no-code", async () => {
+    const enq = await enqueue({
+      repo: "/abs/repo-skip-closeout",
+      branch: "wip-long-lived",
+      promote: false,
+      promotion_skip_reason: "WIP long-lived branch; revisit when follow-up dispatch lands",
+    });
+    await claim(enq.dispatch_phid);
+    const r = await fetch(`${baseUrl}/agent-done`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        dispatch_id: enq.dispatch_phid,
+        success: true,
+      }),
+    });
+    expect(r.status).toBe(200);
+    const body = await r.json() as any;
+    expect(body.promotion_warning).toBeNull();
+    expect(body.receipt.promotion).toMatchObject({
+      required: false,
+      status: "skipped",
+      reason_code: "promote_false_skip",
+      reason: "WIP long-lived branch; revisit when follow-up dispatch lands",
+    });
+
+    const list = await fetch(`${baseUrl}/dispatches?status=terminal`, {
+      headers: { "X-Id-Team": "default" },
+    });
+    expect(list.status).toBe(200);
+    const listBody = await list.json() as any;
+    const row = listBody.dispatches.find((d: any) => d.dispatch_id === enq.dispatch_phid);
+    expect(row.promotion.closeout_report).toMatchObject({
+      required: false,
+      status: "skipped",
+      reason_code: "promote_false_skip",
+      reason: "WIP long-lived branch; revisit when follow-up dispatch lands",
+    });
   });
 });
 
@@ -428,6 +491,11 @@ describe("POST /agent-done — enforce mode", () => {
     expect(body.ok).toBe(false);
     expect(body.error).toMatch(/missing promotion metadata/);
     expect(body.mode).toBe("enforce");
+    expect(body.promotion.closeout_report).toMatchObject({
+      required: true,
+      status: "missing_required_evidence",
+      reason_code: "missing_required_evidence",
+    });
   });
 
   it("env SPEC054_PROMOTION_ENFORCEMENT=enforce is honoured", async () => {

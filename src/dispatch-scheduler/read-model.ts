@@ -2,6 +2,12 @@ import path from 'path';
 import { existsSync, readdirSync, statSync } from 'fs';
 
 import type { DbAdapterLike } from '../supervisor/manager-source-reader.js';
+import {
+  buildPromotionCloseoutReport,
+  validatePromotionMetadata,
+  type PromotionCloseoutReport,
+  type PromotionInput,
+} from './types.js';
 import { readFleetBlockages, type FleetBlockagesReport } from './fleet-blockages.js';
 import type { FleetRuntimeDriftSummary } from './runtime-drift.js';
 
@@ -56,6 +62,7 @@ export interface DispatchReadRow {
     required_reason: string | null;
     input: unknown | null;
     result: unknown | null;
+    closeout_report: PromotionCloseoutReport;
   };
   // Recovery-state posture so /ops can distinguish landed/recovering from
   // needs-attention. Additive; legacy rows read as a clean "none" posture.
@@ -901,6 +908,7 @@ function rowToDispatch(row: DispatchDbRow, opts: DeriveOptions = {}): DispatchRe
       required_reason: row.promotion_required_reason,
       input: parseJsonOrNull(row.promotion_input_json),
       result: parseJsonOrNull(row.promotion_result_json),
+      closeout_report: buildRowPromotionCloseoutReport(row),
     },
     recovery: {
       status: row.recovery_status ?? 'none',
@@ -1519,6 +1527,51 @@ function parseJsonObject(raw: string | null | undefined): Record<string, unknown
   return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
     ? (parsed as Record<string, unknown>)
     : null;
+}
+
+function parsePromotionInput(raw: string | null | undefined): PromotionInput | null {
+  const parsed = parseJsonObject(raw);
+  if (
+    typeof parsed?.repo !== 'string' ||
+    typeof parsed.branch !== 'string' ||
+    typeof parsed.base !== 'string' ||
+    typeof parsed.remote !== 'string'
+  ) {
+    return null;
+  }
+  return {
+    repo: parsed.repo,
+    branch: parsed.branch,
+    base: parsed.base,
+    remote: parsed.remote,
+    promotion_skip_reason:
+      typeof parsed.promotion_skip_reason === 'string'
+        ? parsed.promotion_skip_reason
+        : null,
+  };
+}
+
+function buildRowPromotionCloseoutReport(row: DispatchDbRow): PromotionCloseoutReport {
+  const promotionInput = parsePromotionInput(row.promotion_input_json);
+  const promotionResult = parseJsonObject(row.promotion_result_json);
+  const promote = row.promote == null ? true : Number(row.promote) === 1;
+  const validation = validatePromotionMetadata(
+    {
+      promote,
+      promotion_strategy: row.promotion_strategy as any,
+      promotion_input: promotionInput,
+    },
+    promotionResult as any,
+    "warn",
+  );
+  return buildPromotionCloseoutReport(
+    {
+      promote,
+      promotion_input: promotionInput,
+      promotion_required_reason: row.promotion_required_reason,
+    },
+    validation,
+  );
 }
 
 function parseJsonArray(raw: string | null | undefined): unknown[] {

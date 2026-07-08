@@ -423,6 +423,21 @@ export type PromotionValidation =
   | { ok: true; warning?: string }
   | { ok: false; error: string };
 
+export type PromotionCloseoutReasonCode =
+  | "coordinator_no_code"
+  | "promote_false_skip"
+  | "closeout_policy_skip"
+  | "missing_required_evidence"
+  | "completed";
+
+export interface PromotionCloseoutReport {
+  required: boolean;
+  status: "completed" | "missing_required_evidence" | "skipped" | "not_required";
+  reason_code: PromotionCloseoutReasonCode;
+  reason: string | null;
+  warning: string | null;
+}
+
 export function validatePromotionMetadata(
   doc: Pick<DispatchDoc, "promote" | "promotion_input" | "promotion_strategy">,
   promotion: PromotionAgentDone | null | undefined,
@@ -477,6 +492,63 @@ export function validatePromotionMetadata(
   }
 
   return { ok: true };
+}
+
+export function buildPromotionCloseoutReport(
+  doc: Pick<DispatchDoc, "promote" | "promotion_input" | "promotion_required_reason">,
+  validation: PromotionValidation,
+): PromotionCloseoutReport {
+  const skipReason = [
+    doc.promotion_input?.promotion_skip_reason,
+    doc.promotion_required_reason,
+  ].find((value): value is string => typeof value === "string" && value.trim().length > 0)?.trim() ?? null;
+
+  if (!doc.promote) {
+    if (doc.promotion_input?.repo && doc.promotion_input?.branch) {
+      return {
+        required: false,
+        status: "skipped",
+        reason_code: "promote_false_skip",
+        reason: skipReason ?? "Promotion explicitly skipped for this build dispatch",
+        warning: null,
+      };
+    }
+    return {
+      required: false,
+      status: "not_required",
+      reason_code: "coordinator_no_code",
+      reason: "Coordinator/no-code dispatch; no repo/branch promotion required",
+      warning: null,
+    };
+  }
+
+  if (!validation.ok) {
+    return {
+      required: true,
+      status: "missing_required_evidence",
+      reason_code: "missing_required_evidence",
+      reason: validation.error,
+      warning: validation.error,
+    };
+  }
+
+  if (validation.warning) {
+    return {
+      required: true,
+      status: "missing_required_evidence",
+      reason_code: "missing_required_evidence",
+      reason: validation.warning,
+      warning: validation.warning,
+    };
+  }
+
+  return {
+    required: true,
+    status: "completed",
+    reason_code: "completed",
+    reason: null,
+    warning: null,
+  };
 }
 
 /** Parse the SPEC054_PROMOTION_ENFORCEMENT env var. Default `warn`. */

@@ -173,8 +173,10 @@ import {
 import { deliverClarificationResume } from './dispatch-scheduler/clarification-resume-delivery.js';
 import { readFleetBlockages } from './dispatch-scheduler/fleet-blockages.js';
 import {
+  buildPromotionCloseoutReport,
   parsePromotionEnforcement,
   validatePromotionMetadata,
+  type PromotionCloseoutReport,
   type PromotionAgentDone,
   type FailureKind,
 } from './dispatch-scheduler/types.js';
@@ -3901,6 +3903,15 @@ export class AgentManagerDb {
         const validation = success && !promotionBypass
           ? validatePromotionMetadata(doc, promotion, mode)
           : ({ ok: true } as const);
+        const promotionCloseoutReport: PromotionCloseoutReport = promotionBypass
+          ? {
+              required: false,
+              status: 'skipped',
+              reason_code: 'closeout_policy_skip',
+              reason: closeoutPolicy.reason,
+              warning: null,
+            }
+          : buildPromotionCloseoutReport(doc, validation);
 
         if (!validation.ok) {
           // enforce mode rejection.
@@ -3908,6 +3919,9 @@ export class AgentManagerDb {
             ok: false,
             error: validation.error,
             mode,
+            promotion: {
+              closeout_report: promotionCloseoutReport,
+            },
           });
         }
 
@@ -4122,6 +4136,15 @@ export class AgentManagerDb {
           state: success ? 'done' : 'failed',
           mode,
           promotion_warning: ('warning' in validation ? validation.warning : null) ?? null,
+          promotion: {
+            closeout_report: promotionCloseoutReport,
+          },
+          receipt: {
+            schema_version: 'agent_done.receipt.v1',
+            dispatch_id: doc.dispatch_phid,
+            query_id: doc.query_id,
+            promotion: promotionCloseoutReport,
+          },
         });
       } catch (err) {
         return res.status(500).json({
