@@ -14,6 +14,7 @@ import { SqliteQueriesRepo } from "../../src/db/repos/sqlite/queries-repo.js";
 import { SqliteNewsRepo } from "../../src/db/repos/sqlite/news-repo.js";
 import { SqliteSchedulesRepo } from "../../src/db/repos/sqlite/schedules-repo.js";
 import { SqliteTasksRepo } from "../../src/db/repos/sqlite/tasks-repo.js";
+import { getArtifact } from "../../src/outputs/storage.js";
 
 async function createInMemoryDb() {
   const adapter = new SqliteAdapter(":memory:");
@@ -458,6 +459,7 @@ describe("POST /agent-done — queued-dispatch closeout (out-of-band success)", 
     expect(body.ok).toBe(true);
     expect(body.dispatch_id).toBe(enq.dispatch_phid);
     expect(body.state).toBe("done");
+    expect(body.artifact_id).toMatch(/^art-/);
 
     // Persisted state — row is `done` with the result JSON round-tripped.
     const reactor = (manager as any).dispatchScheduler.reactor;
@@ -466,6 +468,16 @@ describe("POST /agent-done — queued-dispatch closeout (out-of-band success)", 
     expect(doc.completed_at).not.toBeNull();
     const result = await reactor.getResult(enq.dispatch_phid);
     expect(result).toEqual({ artifact_path: "/tmp/spec.md" });
+
+    const artifact = await getArtifact(db.adapter, body.artifact_id);
+    expect(artifact).toMatchObject({
+      abs_path: "/tmp/spec.md",
+      agent: "coder-max",
+      dispatch_id: enq.dispatch_phid,
+      source: "agent-done",
+      availability: "missing",
+      body_unavailable: "ENOENT",
+    });
   });
 
   it("idempotent: a second /agent-done is a terminal no-op (no 500, state stays done)", async () => {

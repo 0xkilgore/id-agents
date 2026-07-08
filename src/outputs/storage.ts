@@ -10,6 +10,8 @@
 // callbacks) if drift is detected.
 
 import { createHash } from "node:crypto";
+import { promises as fsp } from "node:fs";
+import { basename as pathBasename, extname, sep } from "node:path";
 import type { DbAdapter } from "../db/db-adapter.js";
 import type {
   ArtifactAvailability,
@@ -111,6 +113,14 @@ export async function migrateOutputsTables(adapter: DbAdapter): Promise<void> {
       produced_at   TEXT NOT NULL,
       source        TEXT NOT NULL,
       availability  TEXT NOT NULL DEFAULT 'present',
+      media_type    TEXT,
+      content_hash  TEXT,
+      mtime_ms      REAL,
+      project       TEXT,
+      dispatch_id   TEXT,
+      registered_at TEXT,
+      cached_body   TEXT,
+      body_unavailable TEXT,
       source_badges TEXT NOT NULL DEFAULT '[]',
       reconciled_at TEXT,
       created_at    TEXT NOT NULL,
@@ -122,7 +132,18 @@ export async function migrateOutputsTables(adapter: DbAdapter): Promise<void> {
   await exec(`CREATE INDEX IF NOT EXISTS artifacts_by_basename ON artifacts(basename)`);
 
   // T11.7 — accessibility columns (additive for databases created before NW-6).
-  for (const col of ["source_badges TEXT NOT NULL DEFAULT '[]'", "reconciled_at TEXT"]) {
+  for (const col of [
+    "source_badges TEXT NOT NULL DEFAULT '[]'",
+    "reconciled_at TEXT",
+    "media_type TEXT",
+    "content_hash TEXT",
+    "mtime_ms REAL",
+    "project TEXT",
+    "dispatch_id TEXT",
+    "registered_at TEXT",
+    "cached_body TEXT",
+    "body_unavailable TEXT",
+  ]) {
     try {
       await exec(`ALTER TABLE artifacts ADD COLUMN ${col}`);
     } catch {
@@ -207,7 +228,9 @@ export async function getArtifact(
 ): Promise<ArtifactCatalogRow | null> {
   const { rows } = await adapter.query<ArtifactCatalogRow>(
     `SELECT artifact_id, basename, agent, tag, abs_path, title, produced_at,
-            source, availability, source_badges, reconciled_at, created_at, updated_at
+            source, availability, media_type, content_hash, mtime_ms, project,
+            dispatch_id, registered_at, cached_body, body_unavailable,
+            source_badges, reconciled_at, created_at, updated_at
        FROM artifacts WHERE artifact_id = ?`,
     [artifactId],
   );
@@ -253,7 +276,9 @@ export async function listArtifactCatalog(
   params.push(limit, offset);
   const { rows } = await adapter.query<ArtifactCatalogRow>(
     `SELECT artifact_id, basename, agent, tag, abs_path, title, produced_at,
-            source, availability, source_badges, reconciled_at, created_at, updated_at
+            source, availability, media_type, content_hash, mtime_ms, project,
+            dispatch_id, registered_at, cached_body, body_unavailable,
+            source_badges, reconciled_at, created_at, updated_at
        FROM artifacts${whereSql}
    ORDER BY produced_at DESC
       LIMIT ? OFFSET ?`,
@@ -291,7 +316,9 @@ export async function searchArtifacts(
   const offset = Math.max(opts.offset ?? 0, 0);
   const { rows } = await adapter.query<ArtifactCatalogRow>(
     `SELECT a.artifact_id, a.basename, a.agent, a.tag, a.abs_path, a.title, a.produced_at,
-            a.source, a.availability, a.source_badges, a.reconciled_at, a.created_at, a.updated_at
+            a.source, a.availability, a.media_type, a.content_hash, a.mtime_ms, a.project,
+            a.dispatch_id, a.registered_at, a.cached_body, a.body_unavailable,
+            a.source_badges, a.reconciled_at, a.created_at, a.updated_at
        FROM artifacts_fts
        JOIN artifacts a ON a.rowid = artifacts_fts.rowid
       WHERE artifacts_fts MATCH ?
@@ -326,6 +353,14 @@ export async function registerArtifact(
       produced_at: req.produced_at,
       source,
       availability,
+      media_type: req.media_type ?? null,
+      content_hash: req.content_hash ?? null,
+      mtime_ms: req.mtime_ms ?? null,
+      project: req.project ?? null,
+      dispatch_id: req.dispatch_id ?? null,
+      registered_at: req.registered_at ?? null,
+      cached_body: req.cached_body ?? null,
+      body_unavailable: req.body_unavailable ?? null,
       source_badges: sourceBadges,
       reconciled_at: reconciledAt,
       created_at: nowIso,
@@ -333,11 +368,15 @@ export async function registerArtifact(
     };
     await adapter.query(
       `INSERT INTO artifacts
-         (artifact_id, basename, agent, tag, abs_path, title, produced_at, source, availability, source_badges, reconciled_at, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         (artifact_id, basename, agent, tag, abs_path, title, produced_at, source, availability,
+          media_type, content_hash, mtime_ms, project, dispatch_id, registered_at, cached_body, body_unavailable,
+          source_badges, reconciled_at, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         row.artifact_id, row.basename, row.agent, row.tag, row.abs_path,
         row.title, row.produced_at, row.source, row.availability,
+        row.media_type, row.content_hash, row.mtime_ms, row.project, row.dispatch_id,
+        row.registered_at, row.cached_body, row.body_unavailable,
         row.source_badges, row.reconciled_at, row.created_at, row.updated_at,
       ],
     );
@@ -370,6 +409,14 @@ export async function registerArtifact(
     produced_at: existing.produced_at, // first-writer wins
     source: nextSource,
     availability: req.availability ?? existing.availability,
+    media_type: req.media_type !== undefined ? req.media_type : existing.media_type ?? null,
+    content_hash: req.content_hash !== undefined ? req.content_hash : existing.content_hash ?? null,
+    mtime_ms: req.mtime_ms !== undefined ? req.mtime_ms : existing.mtime_ms ?? null,
+    project: req.project !== undefined ? req.project : existing.project ?? null,
+    dispatch_id: req.dispatch_id !== undefined ? req.dispatch_id : existing.dispatch_id ?? null,
+    registered_at: req.registered_at !== undefined ? req.registered_at : existing.registered_at ?? null,
+    cached_body: req.cached_body !== undefined ? req.cached_body : existing.cached_body ?? null,
+    body_unavailable: req.body_unavailable !== undefined ? req.body_unavailable : existing.body_unavailable ?? null,
     source_badges: JSON.stringify(mergedBadges),
     reconciled_at: req.reconciled_at ?? existing.reconciled_at,
     updated_at: nowIso,
@@ -377,15 +424,118 @@ export async function registerArtifact(
   await adapter.query(
     `UPDATE artifacts
        SET basename = ?, agent = ?, tag = ?, abs_path = ?, title = ?,
-           source = ?, availability = ?, source_badges = ?, reconciled_at = ?, updated_at = ?
+           source = ?, availability = ?, media_type = ?, content_hash = ?, mtime_ms = ?,
+           project = ?, dispatch_id = ?, registered_at = ?, cached_body = ?, body_unavailable = ?,
+           source_badges = ?, reconciled_at = ?, updated_at = ?
      WHERE artifact_id = ?`,
     [
       merged.basename, merged.agent, merged.tag, merged.abs_path, merged.title,
-      merged.source, merged.availability, merged.source_badges, merged.reconciled_at,
+      merged.source, merged.availability, merged.media_type, merged.content_hash, merged.mtime_ms,
+      merged.project, merged.dispatch_id, merged.registered_at, merged.cached_body, merged.body_unavailable,
+      merged.source_badges, merged.reconciled_at,
       merged.updated_at, merged.artifact_id,
     ],
   );
   return { row: merged, inserted: false };
+}
+
+export interface AgentDoneArtifactRegistrationInput {
+  abs_path: string;
+  agent: string;
+  dispatch_id: string;
+  query_id?: string | null;
+  title?: string | null;
+  produced_at: string;
+}
+
+export async function registerAgentDoneArtifact(
+  adapter: DbAdapter,
+  input: AgentDoneArtifactRegistrationInput,
+  nowIso: string,
+): Promise<{ row: ArtifactCatalogRow; inserted: boolean }> {
+  const snapshot = await snapshotArtifactPath(input.abs_path);
+  return registerArtifact(
+    adapter,
+    {
+      basename: pathBasename(input.abs_path),
+      agent: input.agent,
+      tag: "agent-done",
+      abs_path: input.abs_path,
+      title: input.title ?? undefined,
+      produced_at: input.produced_at,
+      source: "agent-done",
+      availability: snapshot.exists ? "present" : "missing",
+      media_type: snapshot.media_type,
+      content_hash: snapshot.content_hash,
+      mtime_ms: snapshot.mtime_ms,
+      project: projectFromArtifactPath(input.abs_path),
+      dispatch_id: input.dispatch_id,
+      registered_at: nowIso,
+      cached_body: snapshot.cached_body,
+      body_unavailable: snapshot.body_unavailable,
+      source_badges: ["agent-done"],
+      reconciled_at: nowIso,
+    },
+    nowIso,
+  );
+}
+
+async function snapshotArtifactPath(absPath: string): Promise<{
+  exists: boolean;
+  media_type: string;
+  content_hash: string | null;
+  mtime_ms: number | null;
+  cached_body: string | null;
+  body_unavailable: string | null;
+}> {
+  const mediaType = mediaTypeFromPath(absPath);
+  try {
+    const stat = await fsp.stat(absPath);
+    if (!stat.isFile()) {
+      return { exists: false, media_type: mediaType, content_hash: null, mtime_ms: stat.mtimeMs, cached_body: null, body_unavailable: "not_file" };
+    }
+    const data = await fsp.readFile(absPath);
+    const contentHash = createHash("sha256").update(data).digest("hex");
+    const cachedBody = isCacheableBodyMediaType(mediaType) ? data.toString("utf8") : null;
+    return {
+      exists: true,
+      media_type: mediaType,
+      content_hash: contentHash,
+      mtime_ms: stat.mtimeMs,
+      cached_body: cachedBody,
+      body_unavailable: cachedBody == null ? "non_text_media_type" : null,
+    };
+  } catch (err) {
+    const code = typeof err === "object" && err && "code" in err ? String((err as { code?: unknown }).code) : "read_failed";
+    return { exists: false, media_type: mediaType, content_hash: null, mtime_ms: null, cached_body: null, body_unavailable: code };
+  }
+}
+
+function isCacheableBodyMediaType(mediaType: string): boolean {
+  return mediaType.startsWith("text/") || mediaType === "application/json";
+}
+
+function mediaTypeFromPath(absPath: string): string {
+  const ext = extname(absPath).toLowerCase();
+  if ([".md", ".markdown", ".mdx"].includes(ext)) return "text/markdown; charset=utf-8";
+  if ([".html", ".htm"].includes(ext)) return "text/html; charset=utf-8";
+  if (ext === ".json") return "application/json";
+  if ([".txt", ".log", ".csv", ".tsv", ".yaml", ".yml"].includes(ext)) return "text/plain; charset=utf-8";
+  if (ext === ".png") return "image/png";
+  if (ext === ".jpg" || ext === ".jpeg") return "image/jpeg";
+  if (ext === ".gif") return "image/gif";
+  if (ext === ".webp") return "image/webp";
+  if (ext === ".svg") return "image/svg+xml";
+  return "application/octet-stream";
+}
+
+function projectFromArtifactPath(absPath: string): string | null {
+  const parts = absPath.split(sep).filter(Boolean);
+  const outputIndex = parts.lastIndexOf("output");
+  if (outputIndex > 0) return parts[outputIndex - 1] ?? null;
+  const codeIndex = parts.lastIndexOf("Code");
+  if (codeIndex >= 0 && parts[codeIndex + 1]) return parts[codeIndex + 1];
+  return null;
 }
 
 function parseBadges(json: string | null | undefined): string[] {

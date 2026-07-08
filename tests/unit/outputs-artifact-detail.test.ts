@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { SqliteAdapter } from "../../src/db/sqlite-adapter.js";
 import { migrateSqlite } from "../../src/db/migrations/sqlite.js";
 import { mountOutputsRoutes } from "../../src/outputs/routes.js";
-import { artifactIdFromPath, migrateOutputsTables, registerArtifact } from "../../src/outputs/storage.js";
+import { artifactIdFromPath, migrateOutputsTables, registerAgentDoneArtifact, registerArtifact } from "../../src/outputs/storage.js";
 
 let app: Express;
 let adapter: SqliteAdapter;
@@ -198,6 +198,95 @@ describe("GET /artifacts/:id/detail", () => {
       ok: false,
       code: "artifact_not_found",
       artifact_id: "art-missing",
+    });
+  });
+
+  it("serves a registered markdown artifact by stable id after the source path disappears", async () => {
+    const filePath = path.join(tmp, "fresh-finance.md");
+    writeFileSync(filePath, "# Finance\n\nFresh markdown body.\n");
+    const registered = await registerAgentDoneArtifact(
+      adapter,
+      {
+        abs_path: filePath,
+        agent: "substrate-api-codex",
+        dispatch_id: "phid:disp-md",
+        title: "Fresh finance markdown",
+        produced_at: "2026-07-08T12:00:00.000Z",
+      },
+      "2026-07-08T12:00:01.000Z",
+    );
+    rmSync(filePath);
+
+    const res = await call("GET", `/artifacts/${registered.row.artifact_id}/detail`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.metadata).toMatchObject({
+      agent: "substrate-api-codex",
+      dispatch_id: "phid:disp-md",
+      media_type: "text/markdown; charset=utf-8",
+      body_unavailable: null,
+    });
+    expect(res.body.body).toMatchObject({
+      kind: "markdown",
+      text: "# Finance\n\nFresh markdown body.\n",
+      error: "cached_after_ENOENT",
+    });
+  });
+
+  it("serves a registered HTML artifact by stable id from the cached body", async () => {
+    const filePath = path.join(tmp, "fresh-finance.html");
+    writeFileSync(filePath, "<main><h1>Finance</h1><p>Fresh HTML body.</p></main>");
+    const registered = await registerAgentDoneArtifact(
+      adapter,
+      {
+        abs_path: filePath,
+        agent: "substrate-api-codex",
+        dispatch_id: "phid:disp-html",
+        title: "Fresh finance HTML",
+        produced_at: "2026-07-08T12:00:00.000Z",
+      },
+      "2026-07-08T12:00:01.000Z",
+    );
+    rmSync(filePath);
+
+    const res = await call("GET", `/artifacts/${registered.row.artifact_id}/detail`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.render).toMatchObject({
+      renderer: "html",
+      mime_type: "text/html; charset=utf-8",
+    });
+    expect(res.body.body).toMatchObject({
+      kind: "html",
+      text: "<main><h1>Finance</h1><p>Fresh HTML body.</p></main>",
+      error: "cached_after_ENOENT",
+    });
+  });
+
+  it("records explicit body_unavailable when an agent-done path cannot be read", async () => {
+    const filePath = path.join(tmp, "missing.md");
+    const registered = await registerAgentDoneArtifact(
+      adapter,
+      {
+        abs_path: filePath,
+        agent: "substrate-api-codex",
+        dispatch_id: "phid:disp-missing",
+        produced_at: "2026-07-08T12:00:00.000Z",
+      },
+      "2026-07-08T12:00:01.000Z",
+    );
+
+    expect(registered.row).toMatchObject({
+      availability: "missing",
+      body_unavailable: "ENOENT",
+      cached_body: null,
+    });
+    const res = await call("GET", `/artifacts/${registered.row.artifact_id}/detail`);
+    expect(res.status).toBe(200);
+    expect(res.body.body).toMatchObject({
+      kind: "unavailable",
+      text: null,
+      error: "ENOENT",
     });
   });
 });

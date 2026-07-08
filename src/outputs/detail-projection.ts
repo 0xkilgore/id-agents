@@ -102,6 +102,13 @@ export async function buildArtifactDetail(
       abs_path: syntheticCatalog?.abs_path ?? null,
       source: syntheticCatalog?.source ?? null,
       availability,
+      media_type: syntheticCatalog?.media_type ?? null,
+      content_hash: syntheticCatalog?.content_hash ?? null,
+      mtime_ms: syntheticCatalog?.mtime_ms ?? null,
+      project: syntheticCatalog?.project ?? null,
+      dispatch_id: syntheticCatalog?.dispatch_id ?? null,
+      registered_at: syntheticCatalog?.registered_at ?? null,
+      body_unavailable: syntheticCatalog?.body_unavailable ?? null,
       source_badges: parseSourceBadges(syntheticCatalog?.source_badges),
       reconciled_at: syntheticCatalog?.reconciled_at ?? null,
       created_at: syntheticCatalog?.created_at ?? null,
@@ -203,9 +210,11 @@ async function readDetailBody(
   if (!catalog?.abs_path) {
     return { kind: "unavailable", text: null, bytes: null, truncated: false, source: "none", error: null };
   }
+  const cachedBody = catalog.cached_body;
   try {
     const stat = await fsp.stat(catalog.abs_path);
     if (!stat.isFile()) {
+      if (cachedBody != null) return cachedDetailBody(catalog, "not_file");
       return { kind: "unavailable", text: null, bytes: stat.size, truncated: false, source: "file", error: "not_file" };
     }
     const ext = extname(catalog.abs_path).toLowerCase();
@@ -230,17 +239,34 @@ async function readDetailBody(
       await handle.close();
     }
   } catch (err) {
+    if (cachedBody != null) {
+      const code = typeof err === "object" && err && "code" in err ? String((err as { code?: unknown }).code) : "read_failed";
+      return cachedDetailBody(catalog, code);
+    }
     const code = typeof err === "object" && err && "code" in err ? String((err as { code?: unknown }).code) : "read_failed";
-    return { kind: "missing", text: null, bytes: null, truncated: false, source: "file", error: code };
+    return { kind: catalog.body_unavailable ? "unavailable" : "missing", text: null, bytes: null, truncated: false, source: "file", error: catalog.body_unavailable ?? code };
   }
 }
 
 function bodyKindFromExtension(ext: string): ArtifactDetailBody["kind"] {
   if ([".md", ".markdown", ".mdx"].includes(ext)) return "markdown";
+  if ([".html", ".htm"].includes(ext)) return "html";
   if (ext === ".json") return "json";
   if ([".txt", ".log", ".csv", ".tsv", ".yaml", ".yml"].includes(ext)) return "text";
   if ([".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg"].includes(ext)) return "image";
   return "binary";
+}
+
+function cachedDetailBody(catalog: ArtifactCatalogRow, error: string): ArtifactDetailBody {
+  const text = catalog.cached_body ?? "";
+  return {
+    kind: bodyKindFromExtension(extname(catalog.abs_path).toLowerCase()),
+    text,
+    bytes: Buffer.byteLength(text, "utf8"),
+    truncated: false,
+    source: "file",
+    error: `cached_after_${error}`,
+  };
 }
 
 function renderMetadata(catalog: ArtifactCatalogRow | null, body: ArtifactDetailBody): ArtifactDetailRender {
@@ -248,6 +274,8 @@ function renderMetadata(catalog: ArtifactCatalogRow | null, body: ArtifactDetail
   switch (body.kind) {
     case "markdown":
       return { renderer: "markdown", mime_type: "text/markdown; charset=utf-8", filename };
+    case "html":
+      return { renderer: "html", mime_type: "text/html; charset=utf-8", filename };
     case "json":
       return { renderer: "json", mime_type: "application/json; charset=utf-8", filename };
     case "text":

@@ -158,6 +158,14 @@ export interface ArtifactCatalogRow {
   produced_at: string;          // ISO from delivery-log timestamp
   source: "delivery-log" | "agent-done" | "manual" | "filesystem";
   availability: ArtifactAvailability;
+  media_type?: string | null;
+  content_hash?: string | null;
+  mtime_ms?: number | null;
+  project?: string | null;
+  dispatch_id?: string | null;
+  registered_at?: string | null;
+  cached_body?: string | null;
+  body_unavailable?: string | null;
   // T11.7: JSON array of the distinct sources that have observed this artifact
   // (e.g. ["filesystem","agent-done"]) — the console's source badges.
   source_badges: string;
@@ -191,6 +199,14 @@ export interface RegisterArtifactRequest {
   produced_at: string;          // ISO
   source?: "delivery-log" | "agent-done" | "manual" | "filesystem";
   availability?: ArtifactAvailability; // defaults to "present" — caller may say "missing"
+  media_type?: string | null;
+  content_hash?: string | null;
+  mtime_ms?: number | null;
+  project?: string | null;
+  dispatch_id?: string | null;
+  registered_at?: string | null;
+  cached_body?: string | null;
+  body_unavailable?: string | null;
 }
 
 export interface RegisterArtifactResponse {
@@ -507,7 +523,7 @@ export interface ArtifactFeedbackResponse {
 }
 
 export interface ArtifactDetailBody {
-  kind: "markdown" | "text" | "json" | "image" | "binary" | "missing" | "unavailable";
+  kind: "markdown" | "html" | "text" | "json" | "image" | "binary" | "missing" | "unavailable";
   text: string | null;
   bytes: number | null;
   truncated: boolean;
@@ -516,7 +532,7 @@ export interface ArtifactDetailBody {
 }
 
 export interface ArtifactDetailRender {
-  renderer: "markdown" | "text" | "json" | "image" | "download" | "empty";
+  renderer: "markdown" | "html" | "text" | "json" | "image" | "download" | "empty";
   mime_type: string;
   filename: string | null;
 }
@@ -531,6 +547,13 @@ export interface ArtifactDetailMetadata {
   abs_path: string | null;
   source: ArtifactCatalogRow["source"] | null;
   availability: ArtifactAvailability;
+  media_type?: string | null;
+  content_hash?: string | null;
+  mtime_ms?: number | null;
+  project?: string | null;
+  dispatch_id?: string | null;
+  registered_at?: string | null;
+  body_unavailable?: string | null;
   source_badges: string[];
   reconciled_at: string | null;
   created_at: string | null;

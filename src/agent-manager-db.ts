@@ -168,6 +168,7 @@ import {
   verifyDoneClaims,
   makeDoneVerificationProbes,
 } from './dispatch-verification/done-verification.js';
+import { registerAgentDoneArtifact } from './outputs/storage.js';
 import { DispatchVerificationJob, jobConfigFromEnv } from './dispatch-verification/job.js';
 import {
   DispatchRecoveryService,
@@ -3889,6 +3890,64 @@ export class AgentManagerDb {
           });
         }
 
+        let registeredArtifactId: string | null = null;
+        if (success) {
+          try {
+            const reactor = this.dispatchScheduler.reactor as unknown as {
+              getResult?: (dispatchPhid: string) => Promise<unknown>;
+            };
+            const persistedResult =
+              typeof reactor.getResult === 'function'
+                ? await reactor.getResult(doc.dispatch_phid)
+                : null;
+            const persistedResultObj =
+              persistedResult && typeof persistedResult === 'object'
+                ? (persistedResult as Record<string, unknown>)
+                : null;
+            const requestResultObj =
+              body.result && typeof body.result === 'object'
+                ? (body.result as Record<string, unknown>)
+                : null;
+            const artifactPath =
+              typeof persistedResultObj?.artifact_path === 'string' && persistedResultObj.artifact_path.trim()
+                ? persistedResultObj.artifact_path.trim()
+                : typeof requestResultObj?.artifact_path === 'string' && requestResultObj.artifact_path.trim()
+                  ? requestResultObj.artifact_path.trim()
+                  : typeof body.artifact_path === 'string' && body.artifact_path.trim()
+                    ? body.artifact_path.trim()
+                    : null;
+            if (artifactPath) {
+              const title =
+                typeof persistedResultObj?.tl_dr === 'string' && persistedResultObj.tl_dr.trim()
+                  ? persistedResultObj.tl_dr.trim()
+                  : typeof persistedResultObj?.title === 'string' && persistedResultObj.title.trim()
+                    ? persistedResultObj.title.trim()
+                    : typeof requestResultObj?.tl_dr === 'string' && requestResultObj.tl_dr.trim()
+                      ? requestResultObj.tl_dr.trim()
+                      : typeof requestResultObj?.title === 'string' && requestResultObj.title.trim()
+                        ? requestResultObj.title.trim()
+                        : null;
+              const registered = await registerAgentDoneArtifact(
+                this.db.adapter,
+                {
+                  abs_path: artifactPath,
+                  agent: doc.to_agent,
+                  dispatch_id: doc.dispatch_phid,
+                  query_id: doc.query_id,
+                  title,
+                  produced_at: new Date().toISOString(),
+                },
+                new Date().toISOString(),
+              );
+              registeredArtifactId = registered.row.artifact_id;
+            }
+          } catch (err) {
+            this.managerLog(
+              `[agent-done] artifact registration failed (continuing): ${err instanceof Error ? err.message : String(err)}`,
+            );
+          }
+        }
+
         // Read-model back-write (2026-06-13): the scheduler closes
         // dispatch_scheduler_queue above, but historically nothing
         // back-wrote the corresponding queries row. Result: /query/<id>
@@ -3948,6 +4007,7 @@ export class AgentManagerDb {
           state: success ? 'done' : 'failed',
           mode,
           promotion_warning: ('warning' in validation ? validation.warning : null) ?? null,
+          artifact_id: registeredArtifactId,
         });
       } catch (err) {
         return res.status(500).json({
