@@ -2,6 +2,7 @@ import React from 'react';
 import { Box, Text } from 'ink';
 import type { Task } from '../api/types.js';
 import { taskStatusColor } from '../util/colors.js';
+import type { TaskSurfaceState } from '../tasks/task-surface-state.js';
 
 interface TaskDetailProps {
   task: Task | null;
@@ -9,15 +10,17 @@ interface TaskDetailProps {
   windowSize: number;
   scrollOffset: number;
   contentWidth: number;
+  surface: TaskSurfaceState;
 }
 
 export function TaskDetail(props: TaskDetailProps): React.ReactElement {
-  const { task, positionLabel, windowSize, scrollOffset, contentWidth } = props;
+  const { task, positionLabel, windowSize, scrollOffset, contentWidth, surface } = props;
 
+  const bodyWindowSize = Math.max(0, windowSize - 1);
   const lines = task ? buildBodyLines(task, contentWidth) : ['(no task selected)'];
   const total = lines.length;
-  const start = clamp(scrollOffset, 0, Math.max(0, total - windowSize));
-  const end = Math.min(total, start + windowSize);
+  const start = clamp(scrollOffset, 0, Math.max(0, total - bodyWindowSize));
+  const end = Math.min(total, start + bodyWindowSize);
   const visible = lines.slice(start, end);
   const hiddenAbove = start;
   const hiddenBelow = total - end;
@@ -33,8 +36,13 @@ export function TaskDetail(props: TaskDetailProps): React.ReactElement {
         </Text>
         <Text dimColor>{positionLabel}</Text>
       </Box>
+      <Text color={colorForTone(surface.tone)}>
+        {surface.label}
+        {surface.detail ? <Text dimColor> · {surface.detail}</Text> : null}
+        <Text dimColor> · press r to refresh</Text>
+      </Text>
       <Text dimColor>{hiddenAbove > 0 ? `↑ ${hiddenAbove} more above` : ' '}</Text>
-      <Body visible={visible} windowSize={windowSize} />
+      <Body visible={visible} windowSize={bodyWindowSize} />
       <Text dimColor>{hiddenBelow > 0 ? `↓ ${hiddenBelow} more below` : ' '}</Text>
     </Box>
   );
@@ -137,4 +145,17 @@ function clamp(n: number, lo: number, hi: number): number {
   if (n < lo) return lo;
   if (n > hi) return hi;
   return n;
+}
+
+function colorForTone(tone: TaskSurfaceState['tone']): string {
+  switch (tone) {
+    case 'success':
+      return 'green';
+    case 'warning':
+      return 'yellow';
+    case 'danger':
+      return 'red';
+    case 'neutral':
+      return 'gray';
+  }
 }

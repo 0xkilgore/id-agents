@@ -50,6 +50,10 @@ import {
   formatTotalMemory,
   totalMemoryColor as totalMemColor,
 } from './util/memory.js';
+import {
+  deriveTaskSurfaceState,
+  type TaskActionState,
+} from './tasks/task-surface-state.js';
 
 type View =
   | 'agents'
@@ -70,6 +74,7 @@ const AGENTS_POLL_MS = 2000;
 const TEAMS_POLL_MS = 15000;
 const NEWS_POLL_MS = 3000;
 const TASKS_POLL_MS = 5000;
+const TASKS_STALE_AFTER_MS = 15_000;
 const SCHEDULES_POLL_MS = 5000;
 const LIBRARY_POLL_MS = 5000;
 const NEWS_COOLDOWN_TICK_MS = 10_000;
@@ -146,6 +151,13 @@ export function App({ staticMode = false }: AppProps = {}): React.ReactElement {
   const [showQuitConfirm, setShowQuitConfirm] = useState(false);
   const [showHelp, setShowHelp] = useState(false);
   const [cooldownEpoch, setCooldownEpoch] = useState<number>(() => Date.now());
+  const [taskRefreshState, setTaskRefreshState] = useState<{
+    state: TaskActionState;
+    message: string | null;
+    at: number;
+  }>({ state: 'idle', message: null, at: 0 });
+  const [manualTasks, setManualTasks] = useState<Task[] | null>(null);
+  const [taskStatusEpoch, setTaskStatusEpoch] = useState<number>(() => Date.now());
 
   // Cooldown tick runs on news AND agents so the news-freshness dot in
   // the agents table colours against the same 10s epoch rather than a
@@ -339,7 +351,16 @@ export function App({ staticMode = false }: AppProps = {}): React.ReactElement {
     staticMode || (view !== 'tasks' && view !== 'task-detail'),
     [manager, view],
   );
-  const allTasks = tasksPoll.data ?? [];
+  const allTasks = manualTasks ?? tasksPoll.data ?? [];
+  useEffect(() => {
+    if (tasksPoll.data) setManualTasks(null);
+  }, [tasksPoll.lastUpdated, tasksPoll.data]);
+  useEffect(() => {
+    if (view !== 'tasks' && view !== 'task-detail') return;
+    setTaskStatusEpoch(Date.now());
+    const id = setInterval(() => setTaskStatusEpoch(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, [view]);
   const visibleTasks = useMemo(
     () =>
       selectedTeam === null
@@ -378,6 +399,74 @@ export function App({ staticMode = false }: AppProps = {}): React.ReactElement {
   }, [tasksTotal, taskSelectedIndex, taskWindowStart, tasksWindowSize]);
 
   const selectedTaskName = visibleTasks[taskSelectedIndex]?.name ?? null;
+  const taskSurface = useMemo(
+    () =>
+      deriveTaskSurfaceState({
+        totalCount: allTasks.length,
+        visibleCount: visibleTasks.length,
+        selectedTeam,
+        loading: tasksPoll.lastUpdated === 0 && !tasksPoll.error && !staticMode,
+        errorMessage: tasksPoll.error?.message ?? null,
+        lastUpdatedMs: tasksPoll.lastUpdated,
+        nowMs: taskStatusEpoch,
+        actionState: taskRefreshState.state,
+        actionMessage: taskRefreshState.message,
+        staleAfterMs: TASKS_STALE_AFTER_MS,
+      }),
+    [
+      allTasks.length,
+      visibleTasks.length,
+      selectedTeam,
+      tasksPoll.lastUpdated,
+      tasksPoll.error,
+      staticMode,
+      taskStatusEpoch,
+      taskRefreshState,
+    ],
+  );
+
+  const refreshTasksNow = useCallback(() => {
+    if (taskRefreshState.state === 'pending') return;
+    const beforeSig = signatureOfTasks(allTasks);
+    const startedAt = Date.now();
+    setTaskStatusEpoch(startedAt);
+    setTaskRefreshState({
+      state: 'pending',
+      message: 'requesting latest task read model',
+      at: startedAt,
+    });
+    const ac = new AbortController();
+    void fetchTasks(manager, SELF_AGENT, ac.signal)
+      .then((rows) => {
+        const changed = signatureOfTasks(rows) !== beforeSig;
+        setManualTasks(rows);
+        setTaskStatusEpoch(Date.now());
+        setTaskRefreshState({
+          state: changed ? 'refreshed' : 'acknowledged',
+          message: changed ? `${rows.length} task rows loaded` : 'latest task rows already displayed',
+          at: Date.now(),
+        });
+      })
+      .catch((err: unknown) => {
+        setTaskStatusEpoch(Date.now());
+        setTaskRefreshState({
+          state: 'failed',
+          message: err instanceof Error ? err.message : String(err),
+          at: Date.now(),
+        });
+      });
+  }, [allTasks, manager, taskRefreshState.state]);
+
+  useEffect(() => {
+    if (taskRefreshState.state === 'idle' || taskRefreshState.state === 'pending') return;
+    const id = setTimeout(() => {
+      setTaskRefreshState((cur) => {
+        if (cur.at !== taskRefreshState.at || cur.state === 'pending') return cur;
+        return { state: 'idle', message: null, at: Date.now() };
+      });
+    }, 4000);
+    return () => clearTimeout(id);
+  }, [taskRefreshState]);
 
   // Schedules polling — drives Calendar view.
   const schedulesFetcher = useCallback(
@@ -1015,6 +1104,7 @@ export function App({ staticMode = false }: AppProps = {}): React.ReactElement {
       }
 
       if (view === 'tasks') {
+        if (input === 'r') return refreshTasksNow();
         if (input === 't') return toggleTasksView();
         if (input === 'c') return openCalendar();
         if (input === 'h') return openHeartbeats();
@@ -1033,6 +1123,7 @@ export function App({ staticMode = false }: AppProps = {}): React.ReactElement {
       }
 
       if (view === 'task-detail') {
+        if (input === 'r') return refreshTasksNow();
         if (key.leftArrow || key.escape) return backToTasks();
         if (key.upArrow) return moveTaskDetailScroll(-1);
         if (key.downArrow) return moveTaskDetailScroll(1);
@@ -1252,12 +1343,12 @@ export function App({ staticMode = false }: AppProps = {}): React.ReactElement {
           />
           <TasksTable
             tasks={visibleTasks}
+            totalCount={allTasks.length}
             ageByName={ageByTaskName}
             selectedIndex={taskSelectedIndex}
             windowStart={taskWindowStart}
             windowSize={tasksWindowSize}
-            loading={tasksPoll.lastUpdated === 0 && !tasksPoll.error && !staticMode}
-            error={tasksPoll.error}
+            surface={taskSurface}
           />
         </>
       ) : view === 'calendar' ? (
@@ -1319,6 +1410,7 @@ export function App({ staticMode = false }: AppProps = {}): React.ReactElement {
           windowSize={detailWindowSize}
           scrollOffset={taskDetailScroll}
           contentWidth={DETAIL_CONTENT_WIDTH}
+          surface={taskSurface}
         />
       ) : view === 'library-agents' ? (
         <LibraryAgentsTable
@@ -1418,4 +1510,18 @@ function isHomeKey(input: string): boolean {
 
 function isEndKey(input: string): boolean {
   return input === '\u001b[F' || input === '\u001bOF' || input === '\u001b[4~';
+}
+
+function signatureOfTasks(tasks: Task[]): string {
+  return JSON.stringify(
+    tasks.map((task) => ({
+      name: task.name,
+      title: task.title,
+      status: task.status,
+      ownerName: task.ownerName ?? null,
+      teamName: task.teamName ?? null,
+      updatedAt: task.updatedAt ?? null,
+      completedAt: task.completedAt ?? null,
+    })),
+  );
 }
