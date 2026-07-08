@@ -1,5 +1,7 @@
 import express, { type Express } from "express";
 import { describe, expect, it } from "vitest";
+import { migrateSqlite } from "../../src/db/migrations/sqlite.js";
+import { SqliteAdapter } from "../../src/db/sqlite-adapter.js";
 import {
   LOCAL_SEARCH_INDEX_SCHEMA_VERSION,
   LOCAL_SEARCH_SCHEMA_VERSION,
@@ -7,7 +9,9 @@ import {
   searchLocalIndex,
   type LocalSearchDocument,
 } from "../../src/local-search/index.js";
+import { loadLocalSearchDocuments } from "../../src/local-search/db-documents.js";
 import { mountLocalSearchRoutes } from "../../src/local-search/routes.js";
+import { migrateOutputsTables, registerArtifact } from "../../src/outputs/storage.js";
 import {
   localHealthVisualForFreshness,
   localHealthVisualForIndex,
@@ -38,6 +42,19 @@ const fixtureDocs: LocalSearchDocument[] = [
     },
     freshness: "current",
     openTarget: { kind: "artifact", ref: "artifact:fall-fest-rundown", route: "/artifacts/artifact:fall-fest-rundown" },
+    routeMetadata: {
+      sourceType: "artifact",
+      sourcePath: "/cleveland-park/output/fall-fest.md",
+      sourceProof: "filesystem:/cleveland-park/output/fall-fest.md",
+      linkedArtifact: "artifact:fall-fest-rundown",
+      linkedDispatch: "phid:disp-cleveland-park",
+      stableUrl: "/artifacts/artifact:fall-fest-rundown/detail",
+      copyTextUrl: "/artifacts/artifact:fall-fest-rundown/copy-text",
+      downloadUrl: "/artifacts/artifact:fall-fest-rundown/download",
+      bodyAvailable: true,
+      bodyCached: true,
+      bodySource: "cache",
+    },
   },
   {
     entityType: "project",
@@ -155,6 +172,14 @@ describe("local search v0 contract", () => {
         scope: "artifact",
       },
       openTarget: { kind: "artifact" },
+      routeMetadata: {
+        sourceType: "artifact",
+        sourcePath: "/cleveland-park/output/fall-fest.md",
+        linkedDispatch: "phid:disp-cleveland-park",
+        bodyAvailable: true,
+        copyTextUrl: "/artifacts/artifact:fall-fest-rundown/copy-text",
+        downloadUrl: "/artifacts/artifact:fall-fest-rundown/download",
+      },
     });
     expect(response.items[0].matchFields).toContain("title");
     expect(response.items[0].snippet).toContain("Fall Fest");
@@ -226,6 +251,70 @@ describe("local search v0 contract", () => {
     expect(body.items.map((item: any) => item.id)).toEqual(["artifact:fall-fest-rundown"]);
     expect(body.index.state).toBe("index_partial");
     expect(body.index_visual_state.state).toBe("index_partial");
+  });
+
+  it("loads registered artifact source/body route metadata for search", async () => {
+    const adapter = new SqliteAdapter(":memory:");
+    try {
+      await migrateSqlite(adapter);
+      await migrateOutputsTables(adapter);
+      await registerArtifact(adapter, {
+        artifact_id: "cleveland-fall-fest",
+        basename: "2026-07-07-fall-fest.md",
+        agent: "maestra",
+        tag: "fallback-tag",
+        abs_path: "/Users/kilgore/Dropbox/Code/cleveland-park/output/2026-07-07-fall-fest.md",
+        title: "Same-Morning Fall Fest Rundown for Chris",
+        produced_at: "2026-07-07T15:40:00.000Z",
+        source: "filesystem",
+        media_type: "text/markdown",
+        project_ref: "cleveland-park",
+        dispatch_ref: "phid:disp-cleveland-park",
+        source_host: "local-dev",
+      }, NOW.toISOString());
+      await adapter.query(
+        `INSERT INTO artifact_bodies
+           (artifact_id, media_type, content_hash, source_mtime, source_size,
+            body_text, body_truncated, body_error, cached_at, updated_at)
+         VALUES (?, 'text/markdown', NULL, NULL, NULL, ?, 0, NULL, ?, ?)`,
+        [
+          "cleveland-fall-fest",
+          "Cached body contains vendor staging phrase only present in hydrated artifact text.",
+          NOW.toISOString(),
+          NOW.toISOString(),
+        ],
+      );
+
+      const response = searchLocalIndex(
+        createLocalSearchIndex(await loadLocalSearchDocuments(adapter)),
+        { q: "vendor staging phrase", types: ["artifact"] },
+        NOW,
+      );
+
+      expect(response.items).toHaveLength(1);
+      expect(response.items[0]).toMatchObject({
+        id: "cleveland-fall-fest",
+        title: "Same-Morning Fall Fest Rundown for Chris",
+        project: "cleveland-park",
+        openTarget: { route: "/artifacts/cleveland-fall-fest" },
+        routeMetadata: {
+          sourceType: "artifact",
+          sourcePath: "/Users/kilgore/Dropbox/Code/cleveland-park/output/2026-07-07-fall-fest.md",
+          sourceProof: "filesystem:local-dev:/Users/kilgore/Dropbox/Code/cleveland-park/output/2026-07-07-fall-fest.md",
+          linkedArtifact: "cleveland-fall-fest",
+          linkedDispatch: "phid:disp-cleveland-park",
+          stableUrl: "/artifacts/cleveland-fall-fest/detail",
+          copyTextUrl: "/artifacts/cleveland-fall-fest/copy-text",
+          downloadUrl: "/artifacts/cleveland-fall-fest/download",
+          bodyAvailable: true,
+          bodyCached: true,
+          bodySource: "cache",
+        },
+      });
+      expect(response.items[0].matchFields).toContain("body");
+    } finally {
+      await adapter.close();
+    }
   });
 
   it("covers every restrained local health visual state", () => {

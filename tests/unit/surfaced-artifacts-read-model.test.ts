@@ -124,6 +124,12 @@ describe("buildSurfacedArtifacts", () => {
       field_ids: expect.arrayContaining([
         "artifact.projectRef",
         "artifact.agentName",
+        "artifact.sourceType",
+        "artifact.sourcePath",
+        "artifact.sourceProof",
+        "artifact.delivery.bodyAvailable",
+        "artifact.delivery.bodySource",
+        "artifact.delivery.openUrl",
         "artifact.relevanceReason",
         "dispatch.id",
         "loop.nextRunAt",
@@ -132,6 +138,9 @@ describe("buildSurfacedArtifacts", () => {
       raw_row_key_mapping: expect.objectContaining({
         project_ref: "artifact.projectRef",
         agent_name: "artifact.agentName",
+        source_type: "artifact.sourceType",
+        source_path: "artifact.sourcePath",
+        source_proof: "artifact.sourceProof",
         relevance_reason: "artifact.relevanceReason",
       }),
     });
@@ -143,6 +152,14 @@ describe("buildSurfacedArtifacts", () => {
         field: "project_ref",
         canonical_field: "artifact.projectRef",
         message: 'Raw SurfacedArtifactRow key "project_ref" is not a saved-view field id; use "artifact.projectRef".',
+      },
+    ]);
+    expect(validateSavedViewPredicateFields({ op: "eq", field: "source_type", value: "artifact" })).toEqual([
+      {
+        code: "unsupported_field",
+        field: "source_type",
+        canonical_field: "artifact.sourceType",
+        message: 'Raw SurfacedArtifactRow key "source_type" is not a saved-view field id; use "artifact.sourceType".',
       },
     ]);
   });
@@ -168,6 +185,9 @@ describe("buildSurfacedArtifacts", () => {
       relevance_reason: "final_user_facing_deliverable",
       needs: "read",
       source_kind: "artifact",
+      source_type: "artifact",
+      source_path: criticalPath,
+      source_proof: `delivery-log:${criticalPath}`,
       rank_score: expect.any(Number),
       group_count: 1,
       visibility_proof: { discovered_by: "delivery_log", artifact_path_present: true, body_renderable: true },
@@ -176,6 +196,9 @@ describe("buildSurfacedArtifacts", () => {
         copy_text_url: `/artifacts/${encodeURIComponent(artifactIdForSurfacingPath(criticalPath))}/copy-text`,
         download_url: `/artifacts/${encodeURIComponent(artifactIdForSurfacingPath(criticalPath))}/download`,
         freshness: "current",
+        body_available: true,
+        body_source: "filesystem",
+        open_url: `/artifacts/${encodeURIComponent(artifactIdForSurfacingPath(criticalPath))}/detail`,
       }),
     });
     expect(rows.find((r) => r.dispatch_ref === "phid:disp-missing")?.relevance_reason).toBe("blocked_or_stale");
@@ -194,8 +217,15 @@ describe("buildSurfacedArtifacts", () => {
     expect(rows.find((r) => r.dispatch_ref === "phid:disp-readable")).toMatchObject({
       relevance_reason: "final_user_facing_deliverable",
       source_kind: "dispatch_done",
+      source_type: "artifact",
+      source_path: "/tmp/readable.md",
+      source_proof: "agent-done:/tmp/readable.md",
       title: "Renderable closeout",
       visibility_proof: { discovered_by: "agent_done", artifact_path_present: true, body_renderable: true },
+      delivery: expect.objectContaining({
+        body_available: true,
+        body_source: "filesystem",
+      }),
     });
   });
 

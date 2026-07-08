@@ -46,6 +46,16 @@ export type SurfacedArtifactSourceKind =
   | "task"
   | "filesystem_reconcile";
 
+export type SurfacedArtifactSourceType =
+  | "transcript"
+  | "image"
+  | "pdf"
+  | "email"
+  | "artifact"
+  | "other";
+
+export type SurfacedArtifactBodySource = "cache" | "filesystem" | "unavailable";
+
 export interface SurfacedArtifactRow {
   id: string;
   title: string;
@@ -67,7 +77,10 @@ export interface SurfacedArtifactRow {
   created_at: string;
   updated_at: string;
   source_kind: SurfacedArtifactSourceKind;
+  source_type: SurfacedArtifactSourceType;
   source_label: string;
+  source_path?: string;
+  source_proof: string;
   visibility_proof: {
     discovered_by: "agent_done" | "delivery_log" | "filesystem" | "comment" | "manual_fixture";
     artifact_path_present: boolean;
@@ -83,7 +96,10 @@ export interface SurfacedArtifactRow {
     source_mtime?: string | null;
     content_hash?: string | null;
     body_cached: boolean;
+    body_available: boolean;
+    body_source: SurfacedArtifactBodySource;
     body_preview?: string | null;
+    open_url: string;
   };
 }
 
@@ -164,7 +180,10 @@ export type SavedViewFieldId =
   | "artifact.createdAt"
   | "artifact.updatedAt"
   | "artifact.sourceKind"
+  | "artifact.sourceType"
   | "artifact.sourceLabel"
+  | "artifact.sourcePath"
+  | "artifact.sourceProof"
   | "artifact.visibility.discoveredBy"
   | "artifact.visibility.pathPresent"
   | "artifact.visibility.bodyRenderable"
@@ -177,6 +196,9 @@ export type SavedViewFieldId =
   | "artifact.delivery.sourceMtime"
   | "artifact.delivery.contentHash"
   | "artifact.delivery.bodyCached"
+  | "artifact.delivery.bodyAvailable"
+  | "artifact.delivery.bodySource"
+  | "artifact.delivery.openUrl"
   | "artifact.readState"
   | "artifact.tags"
   | "artifact.contentHash"
@@ -258,7 +280,10 @@ export type RawSurfacedArtifactRowKey =
   | "created_at"
   | "updated_at"
   | "source_kind"
+  | "source_type"
   | "source_label"
+  | "source_path"
+  | "source_proof"
   | "visibility_proof";
 
 export interface SavedViewFieldRegistryEntry {

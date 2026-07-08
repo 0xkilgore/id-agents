@@ -7,6 +7,8 @@ export type LocalSearchEntityType = "artifact" | "project" | "task";
 export type LocalSearchReadState = "read" | "unread" | "read_but_has_new_activity" | "unknown";
 export type LocalSearchFreshness = "current" | "syncing" | "stale" | "event_gap" | "mutation_failed" | "error";
 export type LocalSearchIndexHealthState = "ready" | "indexing" | "stale" | "index_partial" | "error";
+export type LocalSearchSourceType = "transcript" | "image" | "pdf" | "email" | "artifact" | "other";
+export type LocalSearchBodySource = "cache" | "filesystem" | "unavailable";
 export type {
   LocalHealthVisual,
   LocalHealthVisualState,
@@ -35,6 +37,21 @@ export interface LocalSearchDocument {
   matchFields: Record<string, string | string[] | number | boolean | null | undefined>;
   freshness?: LocalSearchFreshness;
   openTarget: LocalSearchOpenTarget;
+  routeMetadata?: LocalSearchRouteMetadata;
+}
+
+export interface LocalSearchRouteMetadata {
+  sourceType?: LocalSearchSourceType;
+  sourcePath?: string | null;
+  sourceProof?: string | null;
+  linkedArtifact?: string | null;
+  linkedDispatch?: string | null;
+  stableUrl?: string | null;
+  copyTextUrl?: string | null;
+  downloadUrl?: string | null;
+  bodyAvailable?: boolean;
+  bodyCached?: boolean;
+  bodySource?: LocalSearchBodySource;
 }
 
 export interface LocalSearchIndexHealth {
@@ -77,6 +94,7 @@ export interface LocalSearchHit {
   freshness: LocalSearchFreshness;
   local_visual_state: LocalHealthVisual;
   openTarget: LocalSearchOpenTarget;
+  routeMetadata?: LocalSearchRouteMetadata;
   score: number;
 }
 

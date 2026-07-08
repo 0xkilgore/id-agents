@@ -153,6 +153,7 @@ function scoreDocument(doc: LocalSearchDocument, tokens: string[]): LocalSearchH
     freshness,
     local_visual_state: localHealthVisualForFreshness(freshness, doc.entityType),
     openTarget: doc.openTarget,
+    routeMetadata: doc.routeMetadata,
     score,
   };
 }

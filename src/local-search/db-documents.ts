@@ -1,5 +1,5 @@
 import type { DbAdapter } from "../db/db-adapter.js";
-import type { LocalSearchDocument } from "./contract.js";
+import type { LocalSearchDocument, LocalSearchSourceType } from "./contract.js";
 
 export async function loadLocalSearchDocuments(adapter: DbAdapter): Promise<LocalSearchDocument[]> {
   const [artifacts, tasks, projects] = await Promise.all([
@@ -20,19 +20,31 @@ async function loadArtifactDocuments(adapter: DbAdapter): Promise<LocalSearchDoc
       tag: string | null;
       abs_path: string;
       availability: string;
+      media_type: string | null;
+      source: string;
+      source_host: string | null;
+      project_ref: string | null;
+      dispatch_ref: string | null;
+      body_text: string | null;
+      body_error: string | null;
       updated_at: string;
       produced_at: string;
     }>(
-      `SELECT artifact_id, title, basename, agent, tag, abs_path, availability, updated_at, produced_at
-         FROM artifacts
-     ORDER BY updated_at DESC
+      `SELECT a.artifact_id, a.title, a.basename, a.agent, a.tag, a.abs_path,
+              a.availability, a.media_type, a.source, a.source_host,
+              a.project_ref, a.dispatch_ref, b.body_text, b.body_error,
+              a.updated_at, a.produced_at
+         FROM artifacts a
+    LEFT JOIN artifact_bodies b ON b.artifact_id = a.artifact_id
+     ORDER BY a.updated_at DESC
         LIMIT 1000`,
     );
+    const artifactRoute = (artifactId: string) => `/artifacts/${encodeURIComponent(artifactId)}`;
     return rows.map((row) => ({
       entityType: "artifact",
       id: row.artifact_id,
       title: row.title ?? row.basename,
-      project: row.tag,
+      project: row.project_ref ?? row.tag,
       task: null,
       agent: row.agent,
       author: row.agent,
@@ -43,12 +55,27 @@ async function loadArtifactDocuments(adapter: DbAdapter): Promise<LocalSearchDoc
       matchFields: {
         title: row.title ?? row.basename,
         basename: row.basename,
-        project: row.tag,
+        project: row.project_ref ?? row.tag,
         path: row.abs_path,
         agent: row.agent,
+        dispatch: row.dispatch_ref,
+        body: row.body_text,
       },
-      freshness: "current",
-      openTarget: { kind: "artifact", ref: row.artifact_id, route: `/artifacts/${encodeURIComponent(row.artifact_id)}` },
+      freshness: row.body_error ? "error" : "current",
+      openTarget: { kind: "artifact", ref: row.artifact_id, route: artifactRoute(row.artifact_id) },
+      routeMetadata: {
+        sourceType: sourceTypeFromPath(row.abs_path, row.media_type, row.title ?? row.basename, row.body_text),
+        sourcePath: row.abs_path,
+        sourceProof: `${row.source}:${row.source_host ? `${row.source_host}:` : ""}${row.abs_path}`,
+        linkedArtifact: row.artifact_id,
+        linkedDispatch: row.dispatch_ref,
+        stableUrl: `${artifactRoute(row.artifact_id)}/detail`,
+        copyTextUrl: `${artifactRoute(row.artifact_id)}/copy-text`,
+        downloadUrl: `${artifactRoute(row.artifact_id)}/download`,
+        bodyAvailable: Boolean(row.body_text) && !row.body_error,
+        bodyCached: Boolean(row.body_text),
+        bodySource: row.body_text ? "cache" : "unavailable",
+      },
     }));
   } catch {
     return [];
@@ -143,4 +170,21 @@ async function loadProjectDocuments(adapter: DbAdapter): Promise<LocalSearchDocu
 function epochToIso(value: number): string {
   const ms = value > 1e12 ? value : value * 1000;
   return new Date(ms).toISOString();
+}
+
+function sourceTypeFromPath(
+  path: string | null | undefined,
+  mediaType: string | null | undefined,
+  title: string | null | undefined,
+  body: string | null | undefined,
+): LocalSearchSourceType {
+  const media = (mediaType ?? "").toLowerCase();
+  const ext = (path ?? "").toLowerCase().match(/\.[a-z0-9]+$/)?.[0] ?? "";
+  const haystack = [path, title, body?.slice(0, 2000)].filter(Boolean).join(" ").toLowerCase();
+  if (media.startsWith("image/") || [".png", ".jpg", ".jpeg", ".gif", ".webp", ".heic", ".svg"].includes(ext)) return "image";
+  if (media === "application/pdf" || ext === ".pdf") return "pdf";
+  if ([".eml", ".msg"].includes(ext) || /\b(email|mailbox|inbox|subject:|from:)\b/.test(haystack)) return "email";
+  if (/\b(transcript|transcription|recording|call notes|meeting notes)\b/.test(haystack)) return "transcript";
+  if ([".md", ".markdown", ".txt", ".json", ".html", ".htm"].includes(ext) || media.startsWith("text/") || media === "application/json") return "artifact";
+  return "other";
 }

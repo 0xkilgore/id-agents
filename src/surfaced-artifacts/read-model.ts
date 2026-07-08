@@ -16,8 +16,10 @@ import type {
   SurfacedArtifactsSavedView,
   SurfacedArtifactNeed,
   SurfacedArtifactRelevanceReason,
+  SurfacedArtifactBodySource,
   SurfacedArtifactRow,
   SurfacedArtifactSourceKind,
+  SurfacedArtifactSourceType,
   SurfacedArtifactStatus,
 } from "./types.js";
 
@@ -37,6 +39,8 @@ interface ArtifactRow {
   content_hash: string | null;
   source_mtime: string | null;
   source_host: string | null;
+  project_ref: string | null;
+  dispatch_ref: string | null;
   body_text: string | null;
   body_error: string | null;
   updated_at: string;
@@ -132,7 +136,10 @@ export const SURFACED_ARTIFACTS_SAVED_VIEW: SurfacedArtifactsSavedView = {
     "artifact.createdAt",
     "artifact.updatedAt",
     "artifact.sourceKind",
+    "artifact.sourceType",
     "artifact.sourceLabel",
+    "artifact.sourcePath",
+    "artifact.sourceProof",
     "artifact.visibility.discoveredBy",
     "artifact.visibility.pathPresent",
     "artifact.visibility.bodyRenderable",
@@ -149,6 +156,9 @@ export const SURFACED_ARTIFACTS_SAVED_VIEW: SurfacedArtifactsSavedView = {
     "artifact.tags",
     "artifact.contentHash",
     "artifact.hasComments",
+    "artifact.delivery.bodyAvailable",
+    "artifact.delivery.bodySource",
+    "artifact.delivery.openUrl",
     "dispatch.id",
     "dispatch.queryId",
     "dispatch.title",
@@ -205,7 +215,10 @@ export const SURFACED_ARTIFACTS_SAVED_VIEW: SurfacedArtifactsSavedView = {
     created_at: "artifact.createdAt",
     updated_at: "artifact.updatedAt",
     source_kind: "artifact.sourceKind",
+    source_type: "artifact.sourceType",
     source_label: "artifact.sourceLabel",
+    source_path: "artifact.sourcePath",
+    source_proof: "artifact.sourceProof",
     visibility_proof: "artifact.visibility.discoveredBy",
   },
   diagnostic_field_ids: [
@@ -284,7 +297,7 @@ function fieldValueType(id: SavedViewFieldId): SavedViewFieldRegistryEntry["valu
   if (id.endsWith("At") || id === "task.due" || id === "work_item.due" || id === "user_task.due" || id === "dispatch.completedAt") return "timestamp";
   if (id === "artifact.rankScore" || id === "artifact.groupCount" || id === "work_item.rank") return "number";
   if (id === "artifact.groupedSourceKinds" || id === "artifact.tags") return "string[]";
-  if (id.includes(".has") || id === "loop.late" || id === "dispatch.needsOperator" || id === "artifact.visibility.pathPresent" || id === "artifact.visibility.bodyRenderable" || id === "artifact.delivery.bodyCached") return "boolean";
+  if (id.includes(".has") || id === "loop.late" || id === "dispatch.needsOperator" || id === "artifact.visibility.pathPresent" || id === "artifact.visibility.bodyRenderable" || id === "artifact.delivery.bodyCached" || id === "artifact.delivery.bodyAvailable") return "boolean";
   if (id.endsWith("status") || id.endsWith("Status") || id.endsWith("freshness") || id.endsWith("Freshness") || id === "artifact.needs") return "enum";
   return "string";
 }
@@ -414,10 +427,16 @@ export async function buildSurfacedArtifactsReadModel(
     const body = await readRenderableBody(artifact.abs_path, readFile);
     const signals = titleSignalsFromBody(body.text);
     const metadata = metadataSignalsFromText(body.text);
-    const project = projectFromPath(artifact.abs_path) ?? metadata.project ?? projectFromText([artifact.title, artifact.basename, artifact.tag].join(" "));
+    const project = cleanTitle(artifact.project_ref) ?? projectFromPath(artifact.abs_path) ?? metadata.project ?? projectFromText([artifact.title, artifact.basename, artifact.tag].join(" "));
     const track = metadata.track ?? trackFromText([artifact.tag, artifact.title, artifact.basename, body.text].join(" "));
     const program = metadata.program ?? programFromText([artifact.title, artifact.basename, body.text].join(" "));
     const sourceKind = artifactSourceKind(artifact);
+    const sourceType = sourceTypeFromPath({
+      path: artifact.abs_path,
+      mediaType: artifact.media_type,
+      title: artifact.title ?? artifact.basename,
+      body: artifact.body_text ?? body.text,
+    });
     const reason = artifactReason(artifact);
     const status = artifactStatus(artifact);
     rawRows.push(withRank({
@@ -438,6 +457,7 @@ export async function buildSurfacedArtifactsReadModel(
       relevance_reason: reason,
       needs: needForReason(reason, status),
       artifact_ref: artifact.abs_path || artifact.artifact_id,
+      dispatch_ref: artifact.dispatch_ref ?? undefined,
       project_ref: project ?? undefined,
       program_ref: program ?? undefined,
       track_ref: track ?? undefined,
@@ -445,7 +465,10 @@ export async function buildSurfacedArtifactsReadModel(
       created_at: artifact.produced_at,
       updated_at: artifact.last_op_at ?? artifact.updated_at ?? artifact.produced_at,
       source_kind: sourceKind,
+      source_type: sourceType,
       source_label: sourceLabel([project, artifact.agent, artifact.title ?? artifact.basename]),
+      source_path: artifact.abs_path || undefined,
+      source_proof: sourceProof(artifact.abs_path, artifact.source, artifact.source_host),
       visibility_proof: {
         discovered_by: discoveredBy(artifact.source),
         artifact_path_present: Boolean(artifact.abs_path),
@@ -458,6 +481,8 @@ export async function buildSurfacedArtifactsReadModel(
         sourceMtime: artifact.source_mtime,
         contentHash: artifact.content_hash,
         bodyCached: Boolean(artifact.body_text),
+        bodyAvailable: body.renderable || Boolean(artifact.body_text),
+        bodySource: artifact.body_text ? "cache" : body.renderable ? "filesystem" : "unavailable",
         bodyPreview: artifact.body_text?.slice(0, 1200) ?? body.text?.slice(0, 1200) ?? null,
       }),
     }));
@@ -475,6 +500,12 @@ export async function buildSurfacedArtifactsReadModel(
     const reason = missing ? "blocked_or_stale" : dispatchReasonFor(dispatch);
     const status: SurfacedArtifactStatus = "unread";
     const sourceKind = dispatchSourceKind(dispatch, missing);
+    const sourceType = sourceTypeFromPath({
+      path: artifactPath,
+      mediaType: mediaTypeFromPathForDelivery(artifactPath),
+      title: dispatch.subject,
+      body: body.text ?? dispatch.body_markdown,
+    });
     rawRows.push(withRank({
       id: missing ? `dispatch-missing:${dispatch.dispatch_phid}` : `dispatch:${dispatch.dispatch_phid}`,
       title: humanTitleFromParts({
@@ -501,7 +532,10 @@ export async function buildSurfacedArtifactsReadModel(
       created_at: dispatch.completed_at ?? dispatch.updated_at,
       updated_at: dispatch.completed_at ?? dispatch.updated_at,
       source_kind: sourceKind,
+      source_type: sourceType,
       source_label: sourceLabel([project, dispatch.to_agent, dispatch.subject]),
+      source_path: artifactPath ?? undefined,
+      source_proof: artifactPath ? sourceProof(artifactPath, "agent-done", null) : `dispatch:${dispatch.dispatch_phid}`,
       visibility_proof: {
         discovered_by: "agent_done",
         artifact_path_present: Boolean(artifactPath),
@@ -514,6 +548,8 @@ export async function buildSurfacedArtifactsReadModel(
         sourceMtime: null,
         contentHash: null,
         bodyCached: false,
+        bodyAvailable: body.renderable,
+        bodySource: body.renderable ? "filesystem" : "unavailable",
         bodyPreview: body.text?.slice(0, 1200) ?? null,
       }),
     }));
@@ -546,7 +582,10 @@ export async function buildSurfacedArtifactsReadModel(
       created_at: comment.ts,
       updated_at: comment.ts,
       source_kind: "comment",
+      source_type: sourceTypeFromPath({ path: comment.abs_path, title }),
       source_label: sourceLabel([comment.agent, title]),
+      source_path: comment.abs_path ?? undefined,
+      source_proof: comment.abs_path ? sourceProof(comment.abs_path, "comment", null) : `comment:${comment.artifact_id}:${comment.op_id}`,
       visibility_proof: { discovered_by: "comment", artifact_path_present: Boolean(comment.abs_path) },
       delivery: artifactDelivery(comment.artifact_id, {
         mediaType: mediaTypeFromPathForDelivery(comment.abs_path),
@@ -555,6 +594,8 @@ export async function buildSurfacedArtifactsReadModel(
         sourceMtime: null,
         contentHash: null,
         bodyCached: false,
+        bodyAvailable: false,
+        bodySource: "unavailable",
         bodyPreview: null,
       }),
     }));
@@ -643,7 +684,8 @@ async function readArtifacts(adapter: DbAdapter, limit: number): Promise<Artifac
   const { rows } = await adapter.query<ArtifactRow>(
     `SELECT a.artifact_id, a.basename, a.agent, a.tag, a.abs_path, a.title,
             a.produced_at, a.source, a.availability, a.media_type, a.content_hash,
-            a.source_mtime, a.source_host, b.body_text, b.body_error, a.updated_at,
+            a.source_mtime, a.source_host, a.project_ref, a.dispatch_ref,
+            b.body_text, b.body_error, a.updated_at,
             rs.first_viewed_at, rs.last_viewed_at, rs.approved_at, rs.rejected_at,
             rs.shipped_at,
             SUM(CASE WHEN op.op_type = 'comment_recorded' THEN 1 ELSE 0 END) AS comment_count,
@@ -655,7 +697,8 @@ async function readArtifacts(adapter: DbAdapter, limit: number): Promise<Artifac
   LEFT JOIN artifact_operations op ON op.artifact_id = a.artifact_id
    GROUP BY a.artifact_id, a.basename, a.agent, a.tag, a.abs_path, a.title,
             a.produced_at, a.source, a.availability, a.media_type, a.content_hash,
-            a.source_mtime, a.source_host, b.body_text, b.body_error, a.updated_at,
+            a.source_mtime, a.source_host, a.project_ref, a.dispatch_ref,
+            b.body_text, b.body_error, a.updated_at,
             rs.first_viewed_at, rs.last_viewed_at, rs.approved_at, rs.rejected_at, rs.shipped_at
    ORDER BY COALESCE(MAX(op.ts), a.produced_at) DESC
       LIMIT ?`,
@@ -958,6 +1001,28 @@ function sourceLabel(parts: Array<string | null | undefined>): string {
   return subtitle(parts) ?? "Artifact source";
 }
 
+function sourceProof(path: string | null | undefined, source: string, host: string | null | undefined): string {
+  const prefix = host ? `${host}:` : "";
+  return path ? `${source}:${prefix}${path}` : source;
+}
+
+function sourceTypeFromPath(input: {
+  path?: string | null;
+  mediaType?: string | null;
+  title?: string | null;
+  body?: string | null;
+}): SurfacedArtifactSourceType {
+  const media = (input.mediaType ?? "").toLowerCase();
+  const ext = extname(input.path ?? "").toLowerCase();
+  const haystack = [input.path, input.title, input.body?.slice(0, 2000)].filter(Boolean).join(" ").toLowerCase();
+  if (media.startsWith("image/") || [".png", ".jpg", ".jpeg", ".gif", ".webp", ".heic", ".svg"].includes(ext)) return "image";
+  if (media === "application/pdf" || ext === ".pdf") return "pdf";
+  if ([".eml", ".msg"].includes(ext) || /\b(email|mailbox|inbox|subject:|from:)\b/.test(haystack)) return "email";
+  if (/\b(transcript|transcription|recording|call notes|meeting notes)\b/.test(haystack)) return "transcript";
+  if ([".md", ".markdown", ".txt", ".json", ".html", ".htm"].includes(ext) || media.startsWith("text/") || media === "application/json") return "artifact";
+  return "other";
+}
+
 function discoveredBy(source: ArtifactSource): SurfacedArtifactRow["visibility_proof"]["discovered_by"] {
   if (source === "agent-done") return "agent_done";
   if (source === "delivery-log") return "delivery_log";
@@ -974,11 +1039,14 @@ function artifactDelivery(
     sourceMtime: string | null | undefined;
     contentHash: string | null | undefined;
     bodyCached: boolean;
+    bodyAvailable: boolean;
+    bodySource: SurfacedArtifactBodySource;
     bodyPreview: string | null | undefined;
   },
 ): SurfacedArtifactRow["delivery"] {
+  const stableUrl = `/artifacts/${encodeURIComponent(artifactId)}/detail`;
   return {
-    stable_url: `/artifacts/${encodeURIComponent(artifactId)}/detail`,
+    stable_url: stableUrl,
     copy_text_url: `/artifacts/${encodeURIComponent(artifactId)}/copy-text`,
     download_url: `/artifacts/${encodeURIComponent(artifactId)}/download`,
     media_type: normalizeDeliveryMediaType(input.mediaType),
@@ -987,7 +1055,10 @@ function artifactDelivery(
     source_mtime: input.sourceMtime ?? null,
     content_hash: input.contentHash ?? null,
     body_cached: input.bodyCached,
+    body_available: input.bodyAvailable,
+    body_source: input.bodySource,
     body_preview: input.bodyPreview ?? null,
+    open_url: stableUrl,
   };
 }
 
