@@ -11,7 +11,7 @@
 // testable. When the typed substrate lands, the manager routes can swap this
 // adapter for a substrate-backed one without changing the DTO contract.
 
-export type LoopKind = "digest" | "report" | "intake" | "external_data" | "verification";
+export type LoopKind = "digest" | "report" | "intake" | "external_data" | "verification" | "maintenance";
 
 export type LoopRunStatus = "queued" | "running" | "succeeded" | "failed" | "cancelled";
 
@@ -211,6 +211,35 @@ const SEED_LOOP_DEFS: SeedLoopDef[] = [
     allow_manual_run: true,
     schedule_label: "Manual only",
     stale_after_minutes: 18 * 60,
+  },
+  {
+    slug: "worktree-hygiene",
+    name: "Worktree Hygiene",
+    description:
+      "Recurring branch/worktree hygiene lane for dirty primary checkouts, unlinked branches, stale bases, branch-held worktrees and ahead/behind promotion divergence.",
+    kind: "maintenance",
+    owner_agent: "maestra",
+    project: null,
+    enabled: true,
+    allow_scheduled_run: true,
+    allow_manual_run: true,
+    schedule_label: "Every 36h and on hygiene-classified promotion failures",
+    stale_after_minutes: 48 * 60,
+    report_definitions: [
+      {
+        report_key: "worktree-hygiene:guard",
+        label: "Worktree Hygiene Guard",
+        cadence: {
+          kind: "interval_hours",
+          every_hours: 36,
+          anchor_due_at: "2026-07-08T15:00:00.000Z",
+        },
+        enabled: true,
+        grace_minutes: 12 * 60,
+        stale_after_minutes: 48 * 60,
+        artifact_required: true,
+      },
+    ],
   },
   {
     slug: "inbox-intake",

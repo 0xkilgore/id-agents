@@ -298,6 +298,35 @@ describe('supervisor rules — promotion failures', () => {
     const findings = evaluatePromotionFailures(snapshot, cfg());
     expect(findings).toHaveLength(0);
   });
+
+  it('routes hygiene-classified promotion failures to Worktree Hygiene instead of promotion_failure', () => {
+    const snapshot = emptySnapshot({
+      terminal_dispatches: [{
+        dispatch_phid: 'phid:disp-hygiene',
+        query_id: 'q-hygiene',
+        to_agent: 'roger',
+        status: 'done',
+        completed_at: '2026-05-28T12:00:00.000Z',
+        subject: 'Build thing',
+        failure_kind: null,
+        failure_detail: null,
+        promote: true,
+        promotion_input: { repo: '/repo/app', branch: 'feature/diverged', base: 'main', remote: 'origin' },
+        promotion_result: {
+          required: true,
+          completed: false,
+          failure_detail: 'branch feature/diverged has diverged from main (ahead=1, behind=2)',
+        },
+      }],
+    });
+
+    const findings = evaluatePromotionFailures(snapshot, cfg());
+    expect(findings).toHaveLength(1);
+    expect(findings[0]).toMatchObject({
+      kind: 'worktree_hygiene',
+      dedupe_key: 'worktree_hygiene:/repo/app:feature/diverged:ahead_behind_divergence',
+    });
+  });
 });
 
 describe('supervisor rules — repeated news errors', () => {

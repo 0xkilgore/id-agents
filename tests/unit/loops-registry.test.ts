@@ -16,6 +16,7 @@ const NOW = "2026-06-16T23:00:00.000Z";
 const RESERVED_SLUGS = [
   "morning-digest",
   "project-load",
+  "worktree-hygiene",
   "inbox-intake",
   "fantasy-baseball",
   "fantasy-basketball", // T-PERSONAL: Gideon sports agent (NBA counterpart to fantasy-baseball)
@@ -34,7 +35,7 @@ const RESERVED_SLUGS = [
 
 describe("seed catalog", () => {
   it("registers all reserved loops (+ per-project/report instances) by slug", () => {
-    expect(SEED_LOOPS).toHaveLength(16);
+    expect(SEED_LOOPS).toHaveLength(17);
     expect(SEED_LOOPS.map((l) => l.slug).sort()).toEqual([...RESERVED_SLUGS].sort());
   });
 
@@ -121,7 +122,7 @@ describe("seed catalog", () => {
   });
 
   it("every loop is schema-complete for LoopSummary", () => {
-    const kinds = new Set(["digest", "report", "intake", "external_data", "verification"]);
+    const kinds = new Set(["digest", "report", "intake", "external_data", "verification", "maintenance"]);
     for (const l of SEED_LOOPS) {
       expect(typeof l.name).toBe("string");
       expect(l.name.length).toBeGreaterThan(0);
@@ -148,6 +149,7 @@ describe("seed catalog", () => {
     const enabled = (s: string) => SEED_LOOPS.find((l) => l.slug === s)!.enabled;
     expect(enabled("morning-digest")).toBe(true);
     expect(enabled("project-load")).toBe(true);
+    expect(enabled("worktree-hygiene")).toBe(true);
     expect(enabled("inbox-intake")).toBe(true);
     expect(enabled("maestra-product-log")).toBe(true);
     expect(enabled("sentinel-verification-2h")).toBe(true);
@@ -167,13 +169,13 @@ describe("listLoops", () => {
     expect(res.schema_version).toBe("loops-list-v1");
     expect(res.source).toBe("seed_catalog");
     expect(res.generated_at).toBe(NOW);
-    expect(res.loops).toHaveLength(16);
+    expect(res.loops).toHaveLength(17);
   });
 
   it("computes filter facets over the full catalog with counts", () => {
     const { filters } = listLoops(NOW);
     const owners = Object.fromEntries(filters.owners.map((o) => [o.value, o.count]));
-    expect(owners["maestra"]).toBe(5); // adds surface-feeder
+    expect(owners["maestra"]).toBe(6); // adds surface-feeder + worktree-hygiene
     expect(owners["rams"]).toBe(1);
     expect(owners["researcher"]).toBe(1);
     expect(owners["sentinel"]).toBe(2); // sentinel-verification + task-reconciliation
@@ -182,9 +184,10 @@ describe("listLoops", () => {
     expect(kinds["verification"]).toBe(3); // sentinel-verification, id-agents-parity, task-reconciliation
     expect(kinds["external_data"]).toBe(2); // fantasy-baseball + fantasy-basketball
     expect(kinds["digest"]).toBe(2); // morning-digest + gideon-sports-brief
+    expect(kinds["maintenance"]).toBe(1); // worktree-hygiene
     const owners2 = Object.fromEntries(filters.owners.map((o) => [o.value, o.count]));
     expect(owners2["gideon"]).toBe(3); // Gideon sports agent: fantasy-baseball, fantasy-basketball, gideon-sports-brief
-    expect(filters.statuses.find((s) => s.value === "unknown")?.count).toBe(9);
+    expect(filters.statuses.find((s) => s.value === "unknown")?.count).toBe(10);
     expect(filters.statuses.find((s) => s.value === "disabled")?.count).toBe(7);
   });
 
@@ -201,7 +204,7 @@ describe("listLoops", () => {
 
   it("filters by health status", () => {
     expect(listLoops(NOW, { status: "disabled" }).loops).toHaveLength(7);
-    expect(listLoops(NOW, { status: "unknown" }).loops).toHaveLength(9);
+    expect(listLoops(NOW, { status: "unknown" }).loops).toHaveLength(10);
   });
 
   it("filters by project_phid personal (the Gideon sports agent loops)", () => {
@@ -249,7 +252,7 @@ describe("loopsSummary", () => {
   it("reports honest registry-only rollups (no runs yet)", () => {
     const s = loopsSummary(NOW);
     expect(s.schema_version).toBe("loops-dashboard-summary-v1");
-    expect(s.total_enabled).toBe(9);
+    expect(s.total_enabled).toBe(10);
     expect(s.healthy_count).toBe(0);
     expect(s.degraded_count).toBe(0);
     expect(s.failed_count).toBe(0);

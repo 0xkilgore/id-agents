@@ -6,6 +6,7 @@
 
 import type { DbAdapter } from "../db/db-adapter.js";
 import { createHash } from "node:crypto";
+import { classifyPromotionHygieneFailure } from "../loops/worktree-hygiene.js";
 
 export interface OrchestrationHealthBlocker {
   dispatch_phid: string;
@@ -115,6 +116,7 @@ export async function readOrchestrationHealthProjection(
     .sort(compareBlockersRecent);
 
   const promotion = promotionRows
+    .filter((row) => !promotionHygieneIncident(row))
     .map((row) => ({ row, reason: promotionBlockerReason(row.promotion_result_json) }))
     .filter((x): x is { row: DispatchRow; reason: string } => x.reason != null)
     .map(({ row, reason }) => blockerFromRow(row, dependencyImpact, reason))
@@ -499,6 +501,19 @@ function promotionBlockerReason(raw: string | null | undefined): string | null {
     if (issues.length > 0) return `promotion verification failed: ${issues.join(", ")}`;
   }
   return null;
+}
+
+function promotionHygieneIncident(row: DispatchRow): boolean {
+  const input = parseJson(row.promotion_input_json);
+  const result = parseJson(row.promotion_result_json);
+  const incident = classifyPromotionHygieneFailure({
+    repo: typeof input?.repo === "string" ? input.repo : null,
+    branch: typeof input?.branch === "string" ? input.branch : null,
+    dispatch_id: row.dispatch_phid,
+    text: `${row.active_clarification_json ?? ""}\n${row.promotion_result_json ?? ""}`,
+    payload: result ?? input,
+  });
+  return incident != null;
 }
 
 function promotionWasExplicitlySkipped(raw: string | null | undefined): boolean {

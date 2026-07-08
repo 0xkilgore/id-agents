@@ -142,6 +142,34 @@ describe("orchestration health projection", () => {
     expect(health.blockers.promotion.items[1]?.reason).toBe("promotion incomplete: completed=false");
   });
 
+  it("routes hygiene promotion failures out of generic promotion blockers", async () => {
+    await insertDispatch({
+      dispatch_phid: "phid:disp-hygiene",
+      query_id: "query_hygiene",
+      status: "done",
+      completed_at: "2026-07-01T15:00:00.000Z",
+      promotion_input_json: JSON.stringify({ repo: "/repo/app", branch: "feature/diverged", base: "main", remote: "origin" }),
+      promotion_result_json: JSON.stringify({
+        required: true,
+        completed: false,
+        failure_detail: "branch feature/diverged has diverged from main (ahead=1, behind=2)",
+      }),
+    });
+    await insertDispatch({
+      dispatch_phid: "phid:disp-generic",
+      query_id: "query_generic",
+      status: "done",
+      completed_at: "2026-07-01T14:00:00.000Z",
+      promotion_input_json: JSON.stringify({ repo: "/repo/app", branch: "feature/generic", base: "main", remote: "origin" }),
+      promotion_result_json: JSON.stringify({ required: true, completed: false, repos: [] }),
+    });
+
+    const health = await readOrchestrationHealthProjection(adapter, "default");
+
+    expect(health.blockers.promotion.count).toBe(1);
+    expect(health.blockers.promotion.recent_dispatch_ids).toEqual(["phid:disp-generic"]);
+  });
+
   it("counts duplicate/no-op artifact acknowledgement noise deterministically", async () => {
     await migrateOutputsTables(adapter);
     await insertArtifact("art:regina:ack.md", "regina");

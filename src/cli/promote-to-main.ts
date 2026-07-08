@@ -478,6 +478,9 @@ function buildNeedsClarification(opts: {
         "squash (squash branch into one commit on base)",
         "follow_up_dispatch (defer promotion to a named follow-up dispatch)",
       ],
+      recommended_option: "follow_up_dispatch (defer promotion to a named follow-up dispatch)",
+      incident_code: "ahead_behind_divergence",
+      action: "route_to_worktree_hygiene",
     },
     urgency: "normal",
   };

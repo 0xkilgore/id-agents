@@ -25,6 +25,13 @@ import {
   normalizeActor,
   synthesizeIdempotencyKey,
 } from "../../src/loops/manual-trigger.js";
+import {
+  buildPromotionHygieneRun,
+  classifyPromotionHygieneFailure,
+  hygieneDedupeKey,
+  hygieneTaskName,
+  shouldEmitNeedsOperatorInput,
+} from "../../src/loops/worktree-hygiene.js";
 import type { LoopRecord } from "../../src/loops/types.js";
 
 let adapter: SqliteAdapter;
@@ -134,6 +141,35 @@ describe("LoopRun evidence contract — idempotency, cap, transitions", () => {
     expect(advanced?.output_refs).toHaveLength(1);
     expect(await countActiveRuns(adapter, loop.loop_phid)).toBe(0); // succeeded is terminal
   });
+
+  it("records promotion hygiene trigger context and dedupes by repo:branch:incident_code", async () => {
+    const loop = await getLoop(adapter, "worktree-hygiene");
+    if (!loop) throw new Error("seed missing worktree-hygiene");
+    const incident = classifyPromotionHygieneFailure({
+      repo: "/repo/app",
+      branch: "feature/a",
+      dispatch_id: "phid:disp-1",
+      text: "branch feature/a has diverged from main (ahead=2, behind=3)",
+    });
+    expect(incident?.incident_code).toBe("ahead_behind_divergence");
+
+    const run = buildPromotionHygieneRun(loop, incident!, NOW);
+    expect(run.trigger).toMatchObject({
+      kind: "promotion_hygiene",
+      repo: "/repo/app",
+      branch: "feature/a",
+      incident_code: "ahead_behind_divergence",
+      linked_dispatch: "phid:disp-1",
+      action: "create_fresh_branch_from_base",
+    });
+    expect(run.idempotency_key).toBe("promotion-hygiene:/repo/app:feature/a:ahead_behind_divergence");
+
+    const first = await createLoopRun(adapter, run);
+    const second = await createLoopRun(adapter, run);
+    expect(first.created).toBe(true);
+    expect(second.created).toBe(false);
+    expect(await listLoopRuns(adapter, loop.loop_phid, {})).toHaveLength(1);
+  });
 });
 
 describe("manual-trigger admission (pure)", () => {
@@ -174,5 +210,60 @@ describe("manual-trigger admission (pure)", () => {
     expect(run.loop_run_phid).toBe(loopRunPhid(loop.loop_phid, "kX"));
     expect(idempotency_key).toBe("kX");
     expect(run.status).toBe("queued");
+  });
+});
+
+describe("worktree hygiene classification", () => {
+  it("classifies dirty primary checkout and chooses inventory preservation", () => {
+    const incident = classifyPromotionHygieneFailure({
+      repo: "/repo/app",
+      branch: "main",
+      text: "Promotion failed: dirty primary checkout has uncommitted changes",
+    });
+    expect(incident).toMatchObject({
+      incident_code: "dirty_primary_checkout",
+      action: "inventory_and_preserve_dirty_paths",
+    });
+  });
+
+  it("classifies unlinked branch and derives a stable hygiene task name", () => {
+    const incident = classifyPromotionHygieneFailure({
+      repo: "/repo/app",
+      branch: "feature/no-ticket",
+      text: "feature branch with no linked dispatch/RD/task",
+    });
+    expect(incident).toMatchObject({
+      incident_code: "unlinked_branch",
+      action: "link_or_retire_branch",
+    });
+    expect(hygieneDedupeKey(incident!)).toBe("/repo/app:feature/no-ticket:unlinked_branch");
+    expect(hygieneTaskName(incident!)).toBe("worktree-hygiene-app-feature-no-ticket-unlinked-branch");
+  });
+
+  it("classifies ahead+behind divergence as fresh-branch work", () => {
+    const incident = classifyPromotionHygieneFailure({
+      repo: "/repo/app",
+      branch: "feature/diverged",
+      text: "branch feature/diverged has diverged from main (ahead=1, behind=2)",
+    });
+    expect(incident).toMatchObject({
+      incident_code: "ahead_behind_divergence",
+      action: "create_fresh_branch_from_base",
+    });
+  });
+
+  it("only emits needs_operator_input for concrete unresolved choices with a recommendation", () => {
+    expect(shouldEmitNeedsOperatorInput({
+      unresolved_choice: true,
+      question: "Preserve or abandon branch?",
+      options: ["preserve", "abandon"],
+      recommended_option: "preserve",
+    })).toMatchObject({ emit: true, recommended_option: "preserve" });
+
+    expect(shouldEmitNeedsOperatorInput({
+      unresolved_choice: true,
+      question: "Preserve or abandon branch?",
+      options: ["preserve", "abandon"],
+    }).emit).toBe(false);
   });
 });

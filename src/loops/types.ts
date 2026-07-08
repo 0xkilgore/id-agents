@@ -86,7 +86,37 @@ export type LoopTrigger =
       recurrence_instance_phid: string | null;
       scheduled_for: string;
       dedup_key: string;
+    }
+  | {
+      kind: "promotion_hygiene";
+      source: "promote-to-main" | "supervisor" | "orchestration" | "api";
+      repo: string;
+      branch: string;
+      incident_code: WorktreeHygieneIncidentCode;
+      linked_task: string | null;
+      linked_dispatch: string | null;
+      linked_rd: string | null;
+      action: WorktreeHygieneAction;
+      dedupe_key: string;
+      observed_at: string;
     };
+
+export type WorktreeHygieneIncidentCode =
+  | "dirty_checkout"
+  | "dirty_primary_checkout"
+  | "stale_base"
+  | "branch_held_by_worktree"
+  | "ahead_behind_divergence"
+  | "unlinked_branch";
+
+export type WorktreeHygieneAction =
+  | "route_to_worktree_hygiene"
+  | "create_or_update_hygiene_task"
+  | "create_fresh_branch_from_base"
+  | "inventory_and_preserve_dirty_paths"
+  | "link_or_retire_branch"
+  | "use_clean_clone_or_worktree"
+  | "needs_operator_input";
 
 /** Loop-run failure taxonomy (cto scope §3.8, B1 subset). */
 export type LoopFailureReason =

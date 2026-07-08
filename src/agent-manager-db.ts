@@ -199,6 +199,11 @@ import {
   type ManualRejectCode,
 } from './loops/manual-trigger.js';
 import { ACTIVE_LOOP_RUN_STATUSES } from './loops/types.js';
+import {
+  buildPromotionHygieneRun,
+  classifyPromotionHygieneFailure,
+  hygieneDedupeKey,
+} from './loops/worktree-hygiene.js';
 import { loadModelPolicy, type ModelPolicyService } from './model-policy/policy.js';
 import { mountRuntimePolicyRoutes } from './model-policy/runtime-policy-routes.js';
 import { loadApprovalPolicy, type ApprovalPolicyService } from './approval-policy/policy.js';
@@ -4483,6 +4488,52 @@ export class AgentManagerDb {
           ok: true, loop_run_phid: result.run.loop_run_phid, loop_phid: loop.loop_phid,
           status: result.run.status, queued_at: result.run.queued_at, idempotency_key,
           status_url: statusUrl(result.run.loop_run_phid),
+        });
+      } catch (err) {
+        return res.status(500).json({ ok: false, error: err instanceof Error ? err.message : String(err) });
+      }
+    });
+
+    // POST /loops/worktree-hygiene/promotion-failure — immediate hygiene lane
+    // trigger for promote-to-main/supervisor failures. Dedupe is
+    // repo:branch:incident_code via the LoopRun idempotency key.
+    this.managementApp.post('/loops/worktree-hygiene/promotion-failure', async (req, res) => {
+      try {
+        if (!this.isAdminRequest(req)) {
+          return res.status(403).json({ ok: false, error: 'unauthorized', code: 'unauthorized' });
+        }
+        const body = (req.body ?? {}) as any;
+        const loop = await getLoopRecord(this.db.adapter, 'worktree-hygiene');
+        if (!loop) {
+          return res.status(404).json({ ok: false, error: 'loop_not_found', code: 'loop_not_found' });
+        }
+        const incident = classifyPromotionHygieneFailure({
+          repo: typeof body.repo === 'string' ? body.repo : null,
+          branch: typeof body.branch === 'string' ? body.branch : null,
+          dispatch_id: typeof body.dispatch_id === 'string' ? body.dispatch_id : null,
+          task: typeof body.task === 'string' ? body.task : null,
+          rd: typeof body.rd === 'string' ? body.rd : null,
+          text: typeof body.text === 'string' ? body.text : null,
+          payload: body.payload,
+        });
+        if (!incident) {
+          return res.status(422).json({ ok: false, error: 'not_worktree_hygiene_failure', code: 'not_worktree_hygiene_failure' });
+        }
+        const nowIso = new Date().toISOString();
+        const run = buildPromotionHygieneRun(loop, incident, nowIso, {
+          source: 'api',
+          actor: { kind: 'system', id: 'promotion-hygiene-router', label: 'Promotion Hygiene Router' },
+        });
+        const result = await createLoopRun(this.db.adapter, run);
+        return res.json({
+          ok: true,
+          loop_phid: loop.loop_phid,
+          loop_run_phid: result.run.loop_run_phid,
+          status: result.run.status,
+          duplicate: !result.created,
+          dedupe_key: hygieneDedupeKey(incident),
+          incident,
+          status_url: `/loops/runs/${result.run.loop_run_phid}`,
         });
       } catch (err) {
         return res.status(500).json({ ok: false, error: err instanceof Error ? err.message : String(err) });

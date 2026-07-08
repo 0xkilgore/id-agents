@@ -12,6 +12,7 @@ import type {
 } from './types.js';
 import type { SupervisorWatchConfig } from './config.js';
 import { getEffectiveStuckQuerySeconds, getEffectiveAgentDownSeconds, isAgentWatched } from './config.js';
+import { classifyPromotionHygieneFailure, hygieneDedupeKey } from '../loops/worktree-hygiene.js';
 
 // Terminal dispatch statuses that should not trigger stuck alerts.
 const SUPPRESSED_STATUSES = new Set([
@@ -237,6 +238,10 @@ export function evaluatePromotionFailures(
     const promo = d.promotion_result as {
       required?: boolean;
       completed?: boolean;
+      failure_detail?: string;
+      error?: string;
+      stderr?: string;
+      summary?: string;
       repos?: Array<{
         pushed?: boolean;
         verified?: boolean;
@@ -244,6 +249,34 @@ export function evaluatePromotionFailures(
         remote_main_sha?: string;
       }>;
     } | null | undefined;
+
+    const hygieneIncident = classifyPromotionHygieneFailure({
+      repo: d.promotion_input?.repo ?? null,
+      branch: d.promotion_input?.branch ?? null,
+      dispatch_id: d.dispatch_phid,
+      text: `${d.failure_detail ?? ''}\n${JSON.stringify(d.promotion_result ?? {})}`,
+      payload: d.promotion_result ?? d.promotion_input,
+    });
+    if (hygieneIncident) {
+      findings.push({
+        dedupe_key: `worktree_hygiene:${hygieneDedupeKey(hygieneIncident)}`,
+        kind: 'worktree_hygiene',
+        severity: 'warning',
+        confidence: 'high',
+        title: `Promotion hygiene incident on ${hygieneIncident.branch}`,
+        summary: `Routed to Worktree Hygiene: ${hygieneIncident.incident_code}; action=${hygieneIncident.action}.`,
+        evidence: [{
+          source: 'agent_done',
+          ref: d.dispatch_phid,
+          observed_at: snapshot.collected_at,
+          detail: `repo=${hygieneIncident.repo}, branch=${hygieneIncident.branch}, incident=${hygieneIncident.incident_code}`,
+        }],
+        dispatch_id: d.dispatch_phid,
+        agent_id: d.to_agent,
+        query_id: d.query_id,
+      });
+      continue;
+    }
 
     // No promotion payload at all
     if (!promo) {

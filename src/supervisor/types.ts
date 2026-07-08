@@ -8,6 +8,7 @@ export type AlertKind =
   | 'agent_down'
   | 'build_failure'
   | 'promotion_failure'
+  | 'worktree_hygiene'
   | 'news_repeated_error'
   | 'protocol_gap'
   // Harness-resilience (Spec: 2026-05-29-harness-resilience-spec.md):
