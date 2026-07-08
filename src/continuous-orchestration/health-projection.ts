@@ -5,6 +5,7 @@
 // work and clarification waits are visible in the orchestration health surface.
 
 import type { DbAdapter } from "../db/db-adapter.js";
+import { createHash } from "node:crypto";
 
 export interface OrchestrationHealthBlocker {
   dispatch_phid: string;
@@ -19,6 +20,7 @@ export interface OrchestrationHealthBlocker {
 export interface OrchestrationHealthProjection {
   ok: boolean;
   generated_at: string;
+  queue_quality: OrchestrationQueueQualityProjection;
   blockers: {
     blocked: boolean;
     needs_clarification: {
@@ -36,6 +38,23 @@ export interface OrchestrationHealthProjection {
   };
 }
 
+export interface OrchestrationQueueNoisePattern {
+  pattern: string;
+  count: number;
+  examples: string[];
+}
+
+export interface OrchestrationQueueQualityProjection {
+  raw_queued: number;
+  actionable_ready: number;
+  needs_approval: number;
+  duplicate_or_noop_backfill: number;
+  suppressed_by_dedupe: number;
+  blocked_or_failed: number;
+  top_noise_patterns: OrchestrationQueueNoisePattern[];
+  explanation: string;
+}
+
 interface DispatchRow {
   dispatch_phid: string;
   query_id: string | null;
@@ -50,6 +69,30 @@ interface DispatchRow {
 interface BacklogDependencyRow {
   item_id: string;
   dependencies_json: string | null;
+}
+
+interface BacklogQueueRow {
+  item_id: string;
+  title: string | null;
+  readiness_state: string;
+  risk_class: string | null;
+  to_agent: string | null;
+  dispatch_body: string | null;
+  dependencies_json: string | null;
+}
+
+interface DispatchQueueCountRow {
+  status: string | null;
+  n: number;
+}
+
+interface ArtifactCommentNoiseRow {
+  artifact_id: string;
+  op_id: number;
+  actor: string | null;
+  payload_json: string | null;
+  idempotency_key: string | null;
+  artifact_agent: string | null;
 }
 
 const RECOVERED_STATUSES = ["moot", "landed_reconciled", "verified_done", "retry_done"];
@@ -80,12 +123,236 @@ export async function readOrchestrationHealthProjection(
   return {
     ok: true,
     generated_at: new Date().toISOString(),
+    queue_quality: await readQueueQualityProjection(adapter, teamId, dependencyImpact, {
+      needsClarification: needsClarification.length,
+      promotion: promotion.length,
+    }),
     blockers: {
       blocked: needsClarification.length > 0 || promotion.length > 0,
       needs_clarification: summarize(needsClarification, recentLimit),
       promotion: summarize(promotion, recentLimit),
     },
   };
+}
+
+async function readQueueQualityProjection(
+  adapter: DbAdapter,
+  teamId: string,
+  dependencyImpact: Map<string, string[]>,
+  activeBlockerCounts: { needsClarification: number; promotion: number },
+): Promise<OrchestrationQueueQualityProjection> {
+  const [backlogRows, dispatchCounts, artifactNoise] = await Promise.all([
+    readBacklogQueueRows(adapter, teamId),
+    readDispatchQueueCounts(adapter, teamId),
+    readArtifactCommentNoise(adapter),
+  ]);
+
+  const dispatchByStatus = new Map(dispatchCounts.map((r) => [r.status ?? "unknown", Number(r.n)]));
+  const rawQueued = Number(dispatchByStatus.get("queued") ?? 0) + Number(dispatchByStatus.get("bounced") ?? 0);
+
+  const readyRows = backlogRows.filter((row) => row.readiness_state === "ready");
+  const blockedDependencyItemIds = new Set<string>();
+  for (const ids of dependencyImpact.values()) for (const id of ids) blockedDependencyItemIds.add(id);
+
+  const actionableReady = readyRows.filter((row) =>
+    hasDispatchPayload(row) &&
+    isAutoRunRisk(row.risk_class) &&
+    parseStringArray(row.dependencies_json).length === 0 &&
+    !blockedDependencyItemIds.has(row.item_id)
+  ).length;
+
+  const needsApproval = backlogRows.filter((row) =>
+    row.readiness_state === "needs_review" ||
+    row.readiness_state === "needs_chris_batch" ||
+    (row.readiness_state === "ready" && !isAutoRunRisk(row.risk_class))
+  ).length;
+
+  const blockedBacklog = backlogRows.filter((row) =>
+    row.readiness_state === "blocked_dependency" ||
+    (row.readiness_state === "ready" && blockedDependencyItemIds.has(row.item_id))
+  ).length;
+  const failedDispatches =
+    Number(dispatchByStatus.get("failed") ?? 0) +
+    Number(dispatchByStatus.get("cancelled") ?? 0) +
+    Number(dispatchByStatus.get("needs_clarification") ?? 0);
+
+  const noise = classifyArtifactNoise(artifactNoise);
+  const blockedOrFailed = blockedBacklog + failedDispatches + noise.retryableRouteFailures;
+  const explanation = queueQualityExplanation({
+    actionableReady,
+    rawQueued,
+    needsApproval,
+    duplicateOrNoop: noise.duplicateOrNoop,
+    suppressedByDedupe: noise.suppressedByDedupe,
+    blockedOrFailed,
+    activeBlockerCounts,
+  });
+
+  return {
+    raw_queued: rawQueued,
+    actionable_ready: actionableReady,
+    needs_approval: needsApproval,
+    duplicate_or_noop_backfill: noise.duplicateOrNoop,
+    suppressed_by_dedupe: noise.suppressedByDedupe,
+    blocked_or_failed: blockedOrFailed,
+    top_noise_patterns: noise.topPatterns,
+    explanation,
+  };
+}
+
+async function readBacklogQueueRows(adapter: DbAdapter, teamId: string): Promise<BacklogQueueRow[]> {
+  const { rows } = await adapter.query<BacklogQueueRow>(
+    `SELECT item_id, title, readiness_state, risk_class, to_agent, dispatch_body, dependencies_json
+       FROM orchestration_backlog_item
+      WHERE team_id = ?
+        AND readiness_state NOT IN ('done', 'cancelled', 'superseded')`,
+    [teamId],
+  );
+  return rows;
+}
+
+async function readDispatchQueueCounts(adapter: DbAdapter, teamId: string): Promise<DispatchQueueCountRow[]> {
+  const { rows } = await adapter.query<DispatchQueueCountRow>(
+    `SELECT status, COUNT(*) AS n
+       FROM dispatch_scheduler_queue
+      WHERE team_id = ?
+        AND COALESCE(recovery_status, 'none') NOT IN ('moot', 'landed_reconciled', 'verified_done', 'retry_done')
+      GROUP BY status`,
+    [teamId],
+  );
+  return rows;
+}
+
+async function readArtifactCommentNoise(adapter: DbAdapter): Promise<ArtifactCommentNoiseRow[]> {
+  try {
+    const { rows } = await adapter.query<ArtifactCommentNoiseRow>(
+      `SELECT o.artifact_id, o.op_id, o.actor, o.payload_json, o.idempotency_key,
+              a.agent AS artifact_agent
+         FROM artifact_operations o
+         LEFT JOIN artifacts a ON a.artifact_id = o.artifact_id
+        WHERE o.op_type = 'comment_recorded'
+        ORDER BY o.artifact_id ASC, o.op_id ASC`,
+      [],
+    );
+    return rows;
+  } catch (err) {
+    if (err instanceof Error && /no such table|does not exist/i.test(err.message)) return [];
+    throw err;
+  }
+}
+
+function classifyArtifactNoise(rows: ArtifactCommentNoiseRow[]): {
+  duplicateOrNoop: number;
+  suppressedByDedupe: number;
+  retryableRouteFailures: number;
+  topPatterns: OrchestrationQueueNoisePattern[];
+} {
+  const groups = new Map<string, { count: number; examples: string[]; pattern: string }>();
+  let duplicateOrNoop = 0;
+  let retryableRouteFailures = 0;
+
+  for (const row of rows) {
+    const payload = parseJson(row.payload_json);
+    const routeStatus = parseRouteStatus(payload?.route_status);
+    if (routeStatus?.retryable) retryableRouteFailures += 1;
+    if (!isNoopAckRoute(routeStatus)) continue;
+
+    duplicateOrNoop += 1;
+    const routeReceipt = routeStatus.dispatch?.dispatch_phid ?? routeStatus.skipped ?? "no_receipt";
+    const targetAgent = routeStatus.target_agent ?? row.artifact_agent ?? "unknown_agent";
+    const routeKind = routeStatus.route_kind;
+    const fingerprint = payloadFingerprint(payload);
+    const key = `${row.artifact_id}|${targetAgent}|${fingerprint}|${routeReceipt}`;
+    const pattern = `${routeKind}:${targetAgent}:${routeReceipt}`;
+    const existing = groups.get(key) ?? { count: 0, examples: [], pattern };
+    existing.count += 1;
+    if (existing.examples.length < 3) existing.examples.push(`${row.artifact_id}#${row.op_id}`);
+    groups.set(key, existing);
+  }
+
+  const suppressedByDedupe = [...groups.values()].reduce((sum, group) => sum + Math.max(0, group.count - 1), 0);
+  const topPatterns = [...groups.values()]
+    .sort((a, b) => b.count - a.count || a.pattern.localeCompare(b.pattern))
+    .slice(0, 5)
+    .map((group) => ({ pattern: group.pattern, count: group.count, examples: group.examples }));
+
+  return { duplicateOrNoop, suppressedByDedupe, retryableRouteFailures, topPatterns };
+}
+
+function isNoopAckRoute(routeStatus: ParsedRouteStatus | null): routeStatus is ParsedRouteStatus {
+  return !!routeStatus &&
+    routeStatus.routed === false &&
+    routeStatus.retryable === false &&
+    (routeStatus.route_kind === "acknowledgement" ||
+      routeStatus.route_kind === "approval_signal" ||
+      routeStatus.skipped === "acknowledged" ||
+      routeStatus.skipped === "approval_signal");
+}
+
+interface ParsedRouteStatus {
+  route_kind: string | null;
+  routed: boolean;
+  retryable: boolean;
+  target_agent: string | null;
+  skipped: string | null;
+  dispatch: { dispatch_phid?: string | null } | null;
+}
+
+function parseRouteStatus(value: unknown): ParsedRouteStatus | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const v = value as Record<string, unknown>;
+  const dispatch = v.dispatch && typeof v.dispatch === "object" && !Array.isArray(v.dispatch)
+    ? v.dispatch as { dispatch_phid?: string | null }
+    : null;
+  return {
+    route_kind: typeof v.route_kind === "string" ? v.route_kind : null,
+    routed: v.routed === true,
+    retryable: v.retryable === true,
+    target_agent: typeof v.target_agent === "string" ? v.target_agent : null,
+    skipped: typeof v.skipped === "string" ? v.skipped : null,
+    dispatch,
+  };
+}
+
+function payloadFingerprint(payload: Record<string, unknown> | null): string {
+  const stable = {
+    body: typeof payload?.body === "string" ? payload.body.trim().toLowerCase().replace(/\s+/g, " ") : "",
+    reaction: typeof payload?.reaction === "string" ? payload.reaction : null,
+    anchor: typeof payload?.anchor === "string" ? payload.anchor : null,
+  };
+  return createHash("sha256").update(JSON.stringify(stable)).digest("hex").slice(0, 12);
+}
+
+function hasDispatchPayload(row: BacklogQueueRow): boolean {
+  return typeof row.to_agent === "string" && row.to_agent.trim() !== "" &&
+    typeof row.dispatch_body === "string" && row.dispatch_body.trim() !== "";
+}
+
+function isAutoRunRisk(risk: string | null | undefined): boolean {
+  return risk === "routine" || risk === "build";
+}
+
+function queueQualityExplanation(input: {
+  actionableReady: number;
+  rawQueued: number;
+  needsApproval: number;
+  duplicateOrNoop: number;
+  suppressedByDedupe: number;
+  blockedOrFailed: number;
+  activeBlockerCounts: { needsClarification: number; promotion: number };
+}): string {
+  if (input.actionableReady > 0) return `${input.actionableReady} ready row(s) are admissible now.`;
+  const reasons: string[] = [];
+  if (input.needsApproval > 0) reasons.push(`${input.needsApproval} need approval/review`);
+  if (input.blockedOrFailed > 0) reasons.push(`${input.blockedOrFailed} blocked or failed`);
+  if (input.duplicateOrNoop > 0) reasons.push(`${input.duplicateOrNoop} duplicate/no-op artifact acknowledgement(s)`);
+  if (input.suppressedByDedupe > 0) reasons.push(`${input.suppressedByDedupe} suppressed by dedupe`);
+  if (input.activeBlockerCounts.needsClarification > 0) reasons.push(`${input.activeBlockerCounts.needsClarification} clarification blocker(s)`);
+  if (input.activeBlockerCounts.promotion > 0) reasons.push(`${input.activeBlockerCounts.promotion} promotion blocker(s)`);
+  if (input.rawQueued > 0) reasons.push(`${input.rawQueued} raw queued dispatch(es) are not ready fuel`);
+  return reasons.length > 0
+    ? `No ready fuel is admissible: ${reasons.join("; ")}.`
+    : "No ready fuel is admissible because no dispatchable ready rows are present.";
 }
 
 async function readActiveClarifications(adapter: DbAdapter, teamId: string): Promise<DispatchRow[]> {
