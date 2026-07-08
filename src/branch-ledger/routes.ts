@@ -2,6 +2,7 @@ import type { Application, Request, Response } from "express";
 import type { DbAdapter } from "../db/db-adapter.js";
 import {
   ingestBranchLedgerScannerJson,
+  countBranchLedgerExceptions,
   listBranchLedgerRows,
   migrateBranchLedgerTables,
 } from "./storage.js";
@@ -54,6 +55,7 @@ export async function mountBranchLedgerRoutes(
         limit: queryNumber(req.query.limit),
         now: now().toISOString(),
       });
+      const exceptionCounts = await countBranchLedgerExceptions(adapter);
       return res.json({
         ok: true,
         schema_version: "branch-ledger.v1",
@@ -72,7 +74,7 @@ export async function mountBranchLedgerRoutes(
           stale_age_days: queryNumber(req.query.stale_age_days) ?? queryNumber(req.query.min_stale_age_days),
           limit: queryNumber(req.query.limit) ?? 100,
         },
-        counts: { returned: rows.length },
+        counts: { returned: rows.length, exceptions: exceptionCounts },
         items: rows,
       });
     } catch (err) {

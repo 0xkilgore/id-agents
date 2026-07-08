@@ -1,5 +1,5 @@
 import type { DbAdapter } from "../db/db-adapter.js";
-import type { BranchLedgerFilters, BranchLedgerRow } from "./types.js";
+import type { BranchLedgerExceptionCounts, BranchLedgerFilters, BranchLedgerRow } from "./types.js";
 
 const DEFAULT_LIMIT = 100;
 const MAX_LIMIT = 500;
@@ -131,6 +131,39 @@ export async function listBranchLedgerRows(
     params,
   );
   return rows.map(rowFromDb);
+}
+
+export async function countBranchLedgerExceptions(adapter: DbAdapter): Promise<BranchLedgerExceptionCounts> {
+  const { rows } = await adapter.query<{
+    class_code: string;
+    action_class: string;
+    owner_lane: string | null;
+    n: number;
+  }>(
+    `SELECT class_code, action_class, owner_lane, COUNT(*) AS n
+       FROM branch_ledger
+      GROUP BY class_code, action_class, owner_lane`,
+  );
+  const counts: BranchLedgerExceptionCounts = {
+    total: 0,
+    by_class_code: {},
+    by_action_class: {},
+    by_owner_lane: {},
+    needs_chris: 0,
+    needs_fresh_branch: 0,
+    owner_routed_quarantine: 0,
+  };
+  for (const row of rows) {
+    const n = Number(row.n) || 0;
+    counts.total += n;
+    counts.by_class_code[row.class_code] = (counts.by_class_code[row.class_code] ?? 0) + n;
+    counts.by_action_class[row.action_class] = (counts.by_action_class[row.action_class] ?? 0) + n;
+    if (row.owner_lane) counts.by_owner_lane[row.owner_lane] = (counts.by_owner_lane[row.owner_lane] ?? 0) + n;
+    if (row.action_class === "needs_chris") counts.needs_chris += n;
+    if (row.action_class === "needs_fresh_branch") counts.needs_fresh_branch += n;
+    if (row.action_class === "owner_routed_quarantine") counts.owner_routed_quarantine += n;
+  }
+  return counts;
 }
 
 export async function getBranchLedgerRow(adapter: DbAdapter, dedupeKey: string): Promise<BranchLedgerRow | null> {

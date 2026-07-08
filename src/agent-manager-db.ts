@@ -165,6 +165,11 @@ import {
   DIRTY_WORKTREE_AUTO_ANSWER,
   isDirtyWorktreeClarification,
 } from './dispatch-scheduler/dirty-worktree-policy.js';
+import {
+  CLEAN_DEPLOY_CHECKOUT_REPAIR_DEPENDENCY,
+  WORKTREE_OS_POLICY_VERSION,
+  validateCloseoutPromotionPolicy,
+} from './workspaces/policy.js';
 import { deliverClarificationResume } from './dispatch-scheduler/clarification-resume-delivery.js';
 import { readFleetBlockages } from './dispatch-scheduler/fleet-blockages.js';
 import {
@@ -3775,6 +3780,9 @@ export class AgentManagerDb {
           success?: unknown;
           result?: unknown;
           promotion?: unknown;
+          promotion_mode?: unknown;
+          promotion_exempt_reason?: unknown;
+          manual_lab_reason?: unknown;
           mode?: unknown;
           agent?: unknown;
           // Verify-on-done gate: the deliverable the agent claims it produced.
@@ -3866,7 +3874,31 @@ export class AgentManagerDb {
         // Harness-resilience (Spec 2026-05-29): failed dispatches do NOT
         // need promotion metadata — promotion only applies to successful
         // build completions. Validate only on success.
-        const validation = success
+        const explicitPromotionMode =
+          typeof body.promotion_mode === 'string' ? body.promotion_mode : null;
+        const closeoutPolicy = success && explicitPromotionMode
+          ? validateCloseoutPromotionPolicy({
+              promotion_mode: explicitPromotionMode,
+              promotion_exempt_reason: typeof body.promotion_exempt_reason === 'string'
+                ? body.promotion_exempt_reason
+                : null,
+              manual_lab_reason: typeof body.manual_lab_reason === 'string'
+                ? body.manual_lab_reason
+                : null,
+              promotion,
+            })
+          : ({ ok: true, code: 'not_build_closeout', reason: 'standard promotion validation path' } as const);
+        if (!closeoutPolicy.ok) {
+          return res.status(400).json({
+            ok: false,
+            error: closeoutPolicy.reason,
+            code: closeoutPolicy.code,
+          });
+        }
+        const promotionBypass =
+          closeoutPolicy.ok &&
+          (closeoutPolicy.code === 'promotion_exempt' || closeoutPolicy.code === 'manual_lab');
+        const validation = success && !promotionBypass
           ? validatePromotionMetadata(doc, promotion, mode)
           : ({ ok: true } as const);
 
@@ -4252,6 +4284,10 @@ export class AgentManagerDb {
           state: this.freshnessState.state,
           behind_origin_since: this.freshnessState.behind_origin_since,
           last_alert_at: this.freshnessState.last_alert_at,
+        },
+        worktree_os_policy: {
+          schema_version: WORKTREE_OS_POLICY_VERSION,
+          deploy_checkout_dependency: CLEAN_DEPLOY_CHECKOUT_REPAIR_DEPENDENCY,
         },
         // T-DEPLOY.1 fleet-wide drift: per-node freshness across manager +
         // configured nodes (console-server / kapelle-site), so /ops can surface

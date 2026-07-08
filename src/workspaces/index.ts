@@ -44,6 +44,18 @@ export {
   type WorkspaceCloseout,
   type CloseoutValidation,
 } from "./closeout.js";
+export {
+  CLEAN_DEPLOY_CHECKOUT_REPAIR_DEPENDENCY,
+  WORKTREE_OS_POLICY_VERSION,
+  evaluateCodeDispatchAdmission,
+  classifyWorktreeScannerPolicy,
+  validateCloseoutPromotionPolicy,
+  type AdmissionPolicyDecision,
+  type CodeDispatchAdmissionInput,
+  type CloseoutPolicyDecision,
+  type WorktreeQuarantineRecord,
+  type WorktreeScannerPolicyInput,
+} from "./policy.js";
 
 export {
   sampleProtectedRoot,

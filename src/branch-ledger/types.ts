@@ -42,3 +42,13 @@ export interface BranchLedgerFilters {
   limit?: number | null;
   now?: string;
 }
+
+export interface BranchLedgerExceptionCounts {
+  total: number;
+  by_class_code: Record<string, number>;
+  by_action_class: Record<string, number>;
+  by_owner_lane: Record<string, number>;
+  needs_chris: number;
+  needs_fresh_branch: number;
+  owner_routed_quarantine: number;
+}
