@@ -121,6 +121,32 @@ describe("project tracks read-model", () => {
     expect(envelope.drift.unknown_count).toBe(1);
     expect(envelope.drift.unassigned_count).toBe(1);
     expect(envelope.tracks.find((t) => t.track === "(unassigned)")?.tasks[0].id).toBe("task_2");
+    expect(envelope.conformance_quarantine).toMatchObject({
+      policy: "quarantine_non_conforming_track_records",
+      total: 2,
+      unknown_count: 1,
+      unassigned_count: 1,
+    });
+    expect(envelope.conformance_quarantine.items).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          kind: "task",
+          id: "task_2",
+          owner: "maestra",
+          raw_track: "(unassigned)",
+          reason: "missing_track",
+          next_action: "assign_canonical_track",
+        }),
+        expect.objectContaining({
+          kind: "backlog_item",
+          id: "coitem_1",
+          owner: "maestra",
+          raw_track: "T-NOPE",
+          reason: "unknown_track",
+          next_action: "register_or_alias_track",
+        }),
+      ]),
+    );
 
     // Status tracker per-row data: live status_counts, owner lanes, activity ts.
     // Rows are keyed by RAW track string: T15 (task_1) and T-CKPT (art_1) are separate.
@@ -163,6 +189,13 @@ describe("project tracks read-model", () => {
     expect(res.body.drift.conforming_share).toBe(1);
     expect(res.body.drift.unassigned_count).toBe(0);
     expect(res.body.drift.unknown_count).toBe(0);
+    expect(res.body.conformance_quarantine).toMatchObject({
+      policy: "quarantine_non_conforming_track_records",
+      total: 0,
+      unassigned_count: 0,
+      unknown_count: 0,
+      items: [],
+    });
     // Honest-unavailable case surfaces even on an empty project (never faked).
     expect(res.body.sources.refactor_debt_ledger).toBe("unavailable");
 

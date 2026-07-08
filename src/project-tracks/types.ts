@@ -1,6 +1,7 @@
 import type { ResolveVia } from "../track-registry/registry.js";
 
 export type ProjectTrackAssociationKind = "task" | "artifact" | "dispatch" | "backlog_item";
+export type ProjectTrackQuarantineReason = "missing_track" | "unknown_track";
 
 /** Live-status pipeline buckets for the tracks/projects status tracker. */
 export type TrackStatusBucket =
@@ -125,6 +126,27 @@ export interface ProjectTrackDriftSummary {
   unknown_count: number;
 }
 
+export interface ProjectTrackQuarantineItem {
+  kind: ProjectTrackAssociationKind;
+  id: string;
+  title: string;
+  owner: string | null;
+  status: string | null;
+  updated_at: string;
+  raw_track: string;
+  canonical_track: string | null;
+  reason: ProjectTrackQuarantineReason;
+  next_action: "assign_canonical_track" | "register_or_alias_track";
+}
+
+export interface ProjectTrackConformanceQuarantine {
+  policy: "quarantine_non_conforming_track_records";
+  total: number;
+  unassigned_count: number;
+  unknown_count: number;
+  items: ProjectTrackQuarantineItem[];
+}
+
 export interface ProjectTracksEnvelope {
   schema_version: "project-tracks.v1";
   generated_at: string;
@@ -142,6 +164,7 @@ export interface ProjectTracksEnvelope {
   canonical_tracks: string[];
   deferred_tracks: string[];
   drift: ProjectTrackDriftSummary;
+  conformance_quarantine: ProjectTrackConformanceQuarantine;
   /** Per-source availability (honesty doctrine — never fake an unavailable feed). */
   sources: ProjectTracksSources;
   empty: boolean;

@@ -5,7 +5,10 @@ import type {
   ProjectTrackArtifact,
   ProjectTrackBacklogItem,
   ProjectTrackBlocker,
+  ProjectTrackAssociationKind,
+  ProjectTrackConformanceQuarantine,
   ProjectTrackDispatch,
+  ProjectTrackQuarantineItem,
   ProjectTrackResolution,
   ProjectTrackSummary,
   ProjectTracksEnvelope,
@@ -227,6 +230,45 @@ function addToSummary(
   return summary;
 }
 
+function quarantineReason(track: ProjectTrackResolution): ProjectTrackQuarantineItem["reason"] | null {
+  if (track.conforms) return null;
+  return track.raw === UNASSIGNED_TRACK ? "missing_track" : "unknown_track";
+}
+
+function quarantineNextAction(
+  reason: ProjectTrackQuarantineItem["reason"],
+): ProjectTrackQuarantineItem["next_action"] {
+  return reason === "missing_track" ? "assign_canonical_track" : "register_or_alias_track";
+}
+
+function addQuarantineItem(
+  items: ProjectTrackQuarantineItem[],
+  input: {
+    kind: ProjectTrackAssociationKind;
+    id: string;
+    title: string;
+    owner: string | null;
+    status: string | null;
+    updated_at: string;
+    track: ProjectTrackResolution;
+  },
+): void {
+  const reason = quarantineReason(input.track);
+  if (!reason) return;
+  items.push({
+    kind: input.kind,
+    id: input.id,
+    title: input.title,
+    owner: input.owner,
+    status: input.status,
+    updated_at: input.updated_at,
+    raw_track: input.track.raw ?? UNASSIGNED_TRACK,
+    canonical_track: input.track.canonical,
+    reason,
+    next_action: quarantineNextAction(reason),
+  });
+}
+
 export async function buildProjectTracksEnvelope(
   adapter: DbAdapter,
   opts: { project: string; generatedAt?: string; limitPerKind?: number },
@@ -305,6 +347,7 @@ export async function buildProjectTracksEnvelope(
   let driftCount = 0;
   let unassignedCount = 0;
   let unknownCount = 0;
+  const quarantineItems: ProjectTrackQuarantineItem[] = [];
   const countTrack = (track: ProjectTrackResolution) => {
     totalAssociations += 1;
     if (track.conforms) conformingAssociations += 1;
@@ -333,6 +376,15 @@ export async function buildProjectTracksEnvelope(
     summary.counts.task += 1;
     recordStatus(summary, taskBucket(row.status), item.updated_at, item.owner);
     countTrack(track);
+    addQuarantineItem(quarantineItems, {
+      kind: "task",
+      id: item.id,
+      title: item.title,
+      owner: item.owner,
+      status: item.status,
+      updated_at: item.updated_at,
+      track,
+    });
   }
 
   for (const row of artifacts) {
@@ -354,6 +406,15 @@ export async function buildProjectTracksEnvelope(
     // A produced artifact is landed deliverable evidence.
     recordStatus(summary, "landed", item.produced_at, row.agent);
     countTrack(track);
+    addQuarantineItem(quarantineItems, {
+      kind: "artifact",
+      id: item.artifact_id,
+      title: item.title ?? item.basename,
+      owner: item.agent,
+      status: "present",
+      updated_at: item.produced_at,
+      track,
+    });
   }
 
   for (const row of dispatches) {
@@ -377,6 +438,15 @@ export async function buildProjectTracksEnvelope(
     summary.counts.dispatch += 1;
     recordStatus(summary, dispatchBucket(row.status), item.updated_at, item.to_agent);
     countTrack(track);
+    addQuarantineItem(quarantineItems, {
+      kind: "dispatch",
+      id: item.dispatch_phid,
+      title: item.subject,
+      owner: item.to_agent,
+      status: item.status,
+      updated_at: item.updated_at,
+      track,
+    });
   }
 
   for (const row of backlog) {
@@ -401,6 +471,15 @@ export async function buildProjectTracksEnvelope(
     summary.counts.backlog_item += 1;
     recordStatus(summary, backlogBucket(row.readiness_state), item.updated_at, item.to_agent);
     countTrack(track);
+    addQuarantineItem(quarantineItems, {
+      kind: "backlog_item",
+      id: item.item_id,
+      title: item.title,
+      owner: item.to_agent,
+      status: item.readiness_state,
+      updated_at: item.updated_at,
+      track,
+    });
   }
 
   const tracks = [...summaries.values()].sort((a, b) => {
@@ -410,6 +489,14 @@ export async function buildProjectTracksEnvelope(
   });
   for (const s of tracks) s.owner_lanes.sort();
   const conformingShare = totalAssociations > 0 ? conformingAssociations / totalAssociations : 1;
+  quarantineItems.sort((a, b) => b.updated_at.localeCompare(a.updated_at) || a.kind.localeCompare(b.kind) || a.id.localeCompare(b.id));
+  const conformanceQuarantine: ProjectTrackConformanceQuarantine = {
+    policy: "quarantine_non_conforming_track_records",
+    total: quarantineItems.length,
+    unassigned_count: quarantineItems.filter((item) => item.reason === "missing_track").length,
+    unknown_count: quarantineItems.filter((item) => item.reason === "unknown_track").length,
+    items: quarantineItems.slice(0, limit),
+  };
 
   // Honesty doctrine (spec §"Honesty bar"): declare each feeding source's
   // availability explicitly so the UI can render "unavailable/stale" instead of
@@ -450,6 +537,7 @@ export async function buildProjectTracksEnvelope(
       unassigned_count: unassignedCount,
       unknown_count: unknownCount,
     },
+    conformance_quarantine: conformanceQuarantine,
     sources,
     empty: totalAssociations === 0,
   };
