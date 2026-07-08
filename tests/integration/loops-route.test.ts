@@ -139,7 +139,7 @@ describe('GET /loops registry routes', () => {
     try { fs.rmSync(workDir, { recursive: true, force: true }); } catch { /* ignore */ }
   });
 
-  it('GET /loops returns the seed catalog list envelope (all 16 loops)', async () => {
+  it('GET /loops returns the seed catalog list envelope (all 17 loops)', async () => {
     const res = await fetch(`${baseUrl}/loops`);
     expect(res.status).toBe(200);
     const body = await res.json() as any;
@@ -149,7 +149,7 @@ describe('GET /loops registry routes', () => {
     // the seed catalog), so the envelope reports `mixed`. With an empty
     // loop_runs table every loop rolls up to honest unknown/disabled — no fixture.
     expect(body.source).toBe('mixed');
-    expect(body.loops).toHaveLength(16);
+    expect(body.loops).toHaveLength(17);
     expect(body.filters.owners.length).toBeGreaterThan(0);
     // every row carries the read-model identity + real (runs-derived) health
     for (const l of body.loops) {
@@ -173,7 +173,7 @@ describe('GET /loops registry routes', () => {
     const body = await res.json() as any;
     expect(body.ok).toBe(true);
     expect(body.schema_version).toBe('loops-dashboard-summary-v1');
-    expect(body.total_enabled).toBe(9);
+    expect(body.total_enabled).toBe(10);
   });
 
   it('GET /loops/reports/due returns report obligations with status and proof fields', async () => {
@@ -195,12 +195,25 @@ describe('GET /loops registry routes', () => {
     expect(body.ok).toBe(true);
     expect(body.schema_version).toBe('report-facts-v1');
     expect(body.definitions.map((d: any) => d.report_key)).toContain('kapelle:sentinel-verification-2h');
+    expect(body.definitions.map((d: any) => d.report_key)).toContain('kapelle:product-overview-weekly');
     expect(body.definitions.map((d: any) => d.report_key)).toContain('kapelle:surface-feeder-6h');
     expect(body.definitions.map((d: any) => d.report_key)).toContain('kapelle:task-reconciliation-6h');
+    expect(body.definitions.find((d: any) => d.report_key === 'kapelle:product-overview-weekly')).toMatchObject({
+      owner_agent: 'maestra',
+      artifact_required: true,
+      closeout_required: true,
+      closeout_requirement: 'artifact_or_ref_proof',
+    });
     const sentinel = body.runs.find((r: any) => r.report_key === 'kapelle:sentinel-verification-2h');
     expect(sentinel).toMatchObject({
       status: 'late',
+      owner_agent: 'sentinel',
+      cadence: { kind: 'interval_hours', every_hours: 2, anchor_due_at: '2026-07-05T00:00:00.000Z' },
+      freshness: 'due',
       reason: 'no_run_recorded_past_grace_window',
+      artifact_link: null,
+      closeout_required: true,
+      closeout_requirement: 'artifact_or_ref_proof',
       loop_run_phid: null,
       artifact_refs: [],
       ref_proof: [],
@@ -208,7 +221,10 @@ describe('GET /loops registry routes', () => {
     const surface = body.runs.find((r: any) => r.report_key === 'kapelle:surface-feeder-6h');
     expect(surface).toMatchObject({
       status: 'done',
+      owner_agent: 'maestra',
+      freshness: 'fresh',
       reason: 'artifact_or_ref_proof_present',
+      artifact_link: '/output/surface-feeder.md',
       artifact_refs: expect.arrayContaining([
         { kind: 'path', ref: '/output/surface-feeder.md' },
       ]),
@@ -219,7 +235,11 @@ describe('GET /loops registry routes', () => {
     const failed = body.runs.find((r: any) => r.report_key === 'kapelle:task-reconciliation-6h');
     expect(failed).toMatchObject({
       status: 'failed',
+      owner_agent: 'sentinel',
+      freshness: 'stale',
       reason: 'collector_failed_for_test',
+      artifact_link: null,
+      closeout_required: true,
       artifact_refs: [],
     });
     expect(body.runs.find((r: any) => r.report_key === 'kapelle:library-research-biweekly')?.status).toBe('expected');

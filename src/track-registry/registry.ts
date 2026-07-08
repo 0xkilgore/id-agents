@@ -61,6 +61,7 @@ export const DEFAULT_REGISTRY: TrackRegistry = {
     'T-POWERHOUSE',
     'T-REMOTE',
     'T-LOCALREAD',
+    'T-OPRESET',
   ],
   deferred: ['I-2', 'I-15'],
   legacyAliases: {

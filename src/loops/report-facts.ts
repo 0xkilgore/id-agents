@@ -18,6 +18,7 @@ const TERMINAL_STATUSES: ReadonlySet<LoopRunStatus> = new Set([
 ]);
 
 export type ReportRunFactStatus = "expected" | "done" | "late" | "failed" | "skipped";
+export type ReportFreshness = "fresh" | "due" | "stale";
 
 export interface ReportProofRef {
   kind: "artifact" | "path" | "href" | "dispatch" | "evidence";
@@ -28,14 +29,20 @@ export interface ReportRunFact {
   report_key: string;
   loop_phid: string;
   loop_slug: string;
+  owner_agent: string;
+  cadence: ReportDefinition["cadence"];
   loop_run_phid: string | null;
   expected_for: string;
   due_at: string;
   stale_at: string;
+  freshness: ReportFreshness;
   status: ReportRunFactStatus;
   reason: string;
+  artifact_link: string | null;
   artifact_refs: ReportProofRef[];
   ref_proof: ReportProofRef[];
+  closeout_required: boolean;
+  closeout_requirement: string;
   fired_at: string | null;
   finished_at: string | null;
 }
@@ -53,6 +60,8 @@ export interface ReportDefinitionFact {
   grace_minutes: number;
   stale_after_minutes: number;
   artifact_required: boolean;
+  closeout_required: boolean;
+  closeout_requirement: string;
 }
 
 export interface ReportsDueResponse {
@@ -139,6 +148,23 @@ function refProof(run: LoopRunRecord | null): ReportProofRef[] {
   ];
 }
 
+function closeoutRequirement(def: ReportDefinition): string {
+  return def.artifact_required ? "artifact_or_ref_proof" : "none";
+}
+
+function artifactLink(refs: readonly ReportProofRef[]): string | null {
+  return refs.find((p) => p.kind === "href")?.ref
+    ?? refs.find((p) => p.kind === "path")?.ref
+    ?? refs.find((p) => p.kind === "artifact")?.ref
+    ?? null;
+}
+
+function freshnessFor(status: ReportRunFactStatus, nowMs: number, staleMs: number): ReportFreshness {
+  if (status === "done") return "fresh";
+  if (status === "failed" || nowMs > staleMs) return "stale";
+  return "due";
+}
+
 function runExpectedFor(run: LoopRunRecord): string | null {
   return run.trigger.kind === "scheduled" ? run.trigger.scheduled_for : null;
 }
@@ -179,6 +205,8 @@ export function reportDefinitionFacts(loops: readonly LoopSummary[] = SEED_LOOPS
       grace_minutes: def.grace_minutes,
       stale_after_minutes: def.stale_after_minutes,
       artifact_required: def.artifact_required,
+      closeout_required: def.artifact_required,
+      closeout_requirement: closeoutRequirement(def),
     })),
   );
 }
@@ -228,14 +256,20 @@ export function projectReportRunFact(
     report_key: def.report_key,
     loop_phid: loop.loop_phid,
     loop_slug: loop.slug,
+    owner_agent: loop.owner_agent,
+    cadence: def.cadence,
     loop_run_phid: run?.loop_run_phid ?? null,
     expected_for: expectedFor,
     due_at: dueAt,
     stale_at: staleAt,
+    freshness: freshnessFor(status, nowMs, staleMs),
     status,
     reason,
+    artifact_link: artifactLink(artifactRefs),
     artifact_refs: artifactRefs,
     ref_proof: proof,
+    closeout_required: def.artifact_required,
+    closeout_requirement: closeoutRequirement(def),
     fired_at: run?.fired_at ?? null,
     finished_at: run?.finished_at ?? null,
   };

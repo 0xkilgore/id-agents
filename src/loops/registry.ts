@@ -410,6 +410,15 @@ const SEED_LOOP_DEFS: SeedLoopDef[] = [
         stale_after_minutes: 16 * 24 * 60,
         artifact_required: true,
       },
+      {
+        report_key: "kapelle:product-overview-weekly",
+        label: "Kapelle Product Overview Weekly",
+        cadence: { kind: "weekly", weekday: 1, hour_utc: 15, minute_utc: 0 },
+        enabled: true,
+        grace_minutes: 12 * 60,
+        stale_after_minutes: 8 * 24 * 60,
+        artifact_required: true,
+      },
     ],
   },
   {

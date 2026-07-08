@@ -45,7 +45,14 @@ describe('Kapelle B11 — outputs/storage migration', () => {
       [],
     );
     const names = rows.map(r => r.name).sort();
-    expect(names).toEqual(['artifact_drafts', 'artifact_operations', 'artifact_review_state', 'artifact_source_evidence', 'artifacts']);
+    expect(names).toEqual([
+      'artifact_bodies',
+      'artifact_drafts',
+      'artifact_operations',
+      'artifact_review_state',
+      'artifact_source_evidence',
+      'artifacts',
+    ]);
   });
 
   it('is idempotent — second migration call is a no-op', async () => {

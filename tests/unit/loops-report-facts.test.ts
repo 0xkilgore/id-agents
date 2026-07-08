@@ -83,6 +83,7 @@ describe("loop report facts", () => {
     expect(defs.map((d) => d.report_key)).toEqual(expect.arrayContaining([
       "kapelle:weekly-project-report",
       "kapelle:biweekly-project-report",
+      "kapelle:product-overview-weekly",
       "kapelle:sentinel-verification-2h",
       "kapelle:sentinel-weekly",
       "kapelle:sentinel-biweekly",
@@ -125,7 +126,13 @@ describe("loop report facts", () => {
     ], NOW);
 
     expect(fact.status).toBe("done");
+    expect(fact.owner_agent).toBe("sentinel");
+    expect(fact.cadence).toMatchObject({ kind: "interval_hours", every_hours: 2 });
+    expect(fact.freshness).toBe("fresh");
     expect(fact.reason).toBe("artifact_or_ref_proof_present");
+    expect(fact.artifact_link).toBe("/output/sentinel.md");
+    expect(fact.closeout_required).toBe(true);
+    expect(fact.closeout_requirement).toBe("artifact_or_ref_proof");
     expect(fact.artifact_refs.map((r) => r.ref)).toContain("/output/sentinel.md");
     expect(fact.ref_proof.map((r) => r.ref)).toContain("phid:disp-1");
   });
@@ -143,7 +150,18 @@ describe("loop report facts", () => {
   it("marks missing overdue work as late and owed now", () => {
     const fact = projectReportRunFact(SENTINEL, SENTINEL_2H, [], NOW);
     expect(fact.status).toBe("late");
+    expect(fact.freshness).toBe("due");
+    expect(fact.artifact_link).toBeNull();
     expect(fact.reason).toBe("no_run_recorded_past_grace_window");
+  });
+
+  it("marks a report still inside its grace window as expected", () => {
+    const fact = projectReportRunFact(SENTINEL, SENTINEL_2H, [], "2026-07-07T20:10:00.000Z");
+    expect(fact.status).toBe("expected");
+    expect(fact.freshness).toBe("due");
+    expect(fact.reason).toBe("due_window_open");
+    expect(fact.owner_agent).toBe("sentinel");
+    expect(fact.closeout_required).toBe(true);
   });
 
   it("marks disabled report definitions as skipped with a reason", () => {
