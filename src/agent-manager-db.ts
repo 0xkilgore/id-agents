@@ -11951,6 +11951,18 @@ export class AgentManagerDb {
           console.warn('[Manager] Fleet activity routes failed to mount:', err instanceof Error ? err.message : String(err));
         }
 
+        // Worktree Hygiene Branch Ledger v0 — scanner JSON ingestion plus
+        // queryable repo/action/owner/staleness/needs-Chris read model.
+        try {
+          const { mountBranchLedgerRoutes } = await import('./branch-ledger/routes.js');
+          await mountBranchLedgerRoutes(this.managementApp, this.db.adapter, {
+            isAdminRequest: (req) => this.isAdminRequest(req),
+          });
+          console.log('[Manager] Branch Ledger routes mounted (/branch-ledger, /worktree-hygiene/branch-ledger)');
+        } catch (err) {
+          console.warn('[Manager] Branch Ledger routes failed to mount:', err instanceof Error ? err.message : String(err));
+        }
+
         // Surfaced Artifacts v1 — authoritative Read This Next query layer.
         // Composes artifact catalog/review state, dispatch done closeouts, and
         // comment routing rows. Filesystem reads are only fallback evidence.
