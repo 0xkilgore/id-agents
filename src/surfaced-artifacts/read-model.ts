@@ -5,6 +5,7 @@ import { projectFromPath } from "../outputs/entry-projection.js";
 import { artifactIdFromPath } from "../outputs/storage.js";
 import type {
   RecentFloodDiagnostic,
+  SurfacedArtifactsSavedView,
   SurfacedArtifactNeed,
   SurfacedArtifactRelevanceReason,
   SurfacedArtifactRow,
@@ -91,6 +92,45 @@ const REASON_SCORE: Record<SurfacedArtifactRelevanceReason, number> = {
 const RENDERABLE_EXTENSIONS = new Set([".md", ".markdown", ".txt", ".json", ".html", ".htm"]);
 const CRITICAL_PROJECTS = new Set(["kapelle", "trinity"]);
 const DOMAIN_PROJECTS = new Set(["cleveland-park", "finances", "politics", "personal", "rams"]);
+const TRACK_RE = /\bT-[A-Z0-9][A-Z0-9_.-]*\b/g;
+
+export const SURFACED_ARTIFACTS_SAVED_VIEW: SurfacedArtifactsSavedView = {
+  id: "surfaced-artifacts.v1.primary",
+  field_ids: [
+    "surfaced_artifacts.row.id",
+    "surfaced_artifacts.row.title",
+    "surfaced_artifacts.row.subtitle",
+    "surfaced_artifacts.row.work_item_ref",
+    "surfaced_artifacts.row.group_count",
+    "surfaced_artifacts.row.grouped_source_kinds",
+    "surfaced_artifacts.row.rank_score",
+    "surfaced_artifacts.row.status",
+    "surfaced_artifacts.row.relevance_reason",
+    "surfaced_artifacts.row.needs",
+    "surfaced_artifacts.row.artifact_ref",
+    "surfaced_artifacts.row.dispatch_ref",
+    "surfaced_artifacts.row.task_ref",
+    "surfaced_artifacts.row.project_ref",
+    "surfaced_artifacts.row.program_ref",
+    "surfaced_artifacts.row.track_ref",
+    "surfaced_artifacts.row.agent_name",
+    "surfaced_artifacts.row.created_at",
+    "surfaced_artifacts.row.updated_at",
+    "surfaced_artifacts.row.source_kind",
+    "surfaced_artifacts.row.source_label",
+    "surfaced_artifacts.row.visibility_proof",
+  ],
+  diagnostic_field_ids: [
+    "surfaced_artifacts.recent_flood.window_start",
+    "surfaced_artifacts.recent_flood.window_end",
+    "surfaced_artifacts.recent_flood.source_data",
+    "surfaced_artifacts.recent_flood.total_raw_count",
+    "surfaced_artifacts.recent_flood.grouped_count",
+    "surfaced_artifacts.recent_flood.suppressed_from_primary_count",
+    "surfaced_artifacts.recent_flood.groups",
+    "surfaced_artifacts.recent_flood.raw_rows",
+  ],
+};
 
 export function isRawPrimaryTitle(value: string | null | undefined): boolean {
   const s = (value ?? "").trim();
@@ -113,6 +153,33 @@ export function titleSignalsFromBody(body: string | null | undefined): {
   return {
     frontmatterTitle: fm?.[1].match(/^title:\s*["']?(.+?)["']?\s*$/m)?.[1]?.trim() ?? null,
     firstH1: text.match(/^#\s+(.+?)\s*$/m)?.[1]?.trim() ?? null,
+  };
+}
+
+function metadataSignalsFromText(text: string | null | undefined): {
+  project: string | null;
+  program: string | null;
+  track: string | null;
+} {
+  const body = text ?? "";
+  const frontmatter = body.match(/^---\s*\n([\s\S]*?)\n---\s*(?:\n|$)/)?.[1] ?? "";
+  const project = firstClean([
+    frontmatter.match(/^project:\s*["']?([^\n]+?)["']?\s*$/m)?.[1],
+    body.match(/\bproject:\s*`?([A-Za-z0-9_.-]+)`?/i)?.[1],
+  ]);
+  const program = firstClean([
+    frontmatter.match(/^program:\s*["']?([^\n]+?)["']?\s*$/m)?.[1],
+    body.match(/\b(Local-First Project\/Artifact Surfacing program)\b/i)?.[1],
+    body.match(/\bprogram:\s*`?([^`\n]+?)`?\s*(?:\n|$)/i)?.[1],
+  ]);
+  const track = normalizeTrack(firstClean([
+    frontmatter.match(/^track:\s*["']?([^\n]+?)["']?\s*$/m)?.[1],
+    body.match(TRACK_RE)?.[0],
+  ]));
+  return {
+    project: project ? slugify(project) : null,
+    program: programFromText(program) ?? slugify(program),
+    track,
   };
 }
 
@@ -162,7 +229,10 @@ export async function buildSurfacedArtifactsReadModel(
   for (const artifact of artifacts) {
     const body = await readRenderableBody(artifact.abs_path, readFile);
     const signals = titleSignalsFromBody(body.text);
-    const project = projectFromPath(artifact.abs_path);
+    const metadata = metadataSignalsFromText(body.text);
+    const project = projectFromPath(artifact.abs_path) ?? metadata.project ?? projectFromText([artifact.title, artifact.basename, artifact.tag].join(" "));
+    const track = metadata.track ?? trackFromText([artifact.tag, artifact.title, artifact.basename, body.text].join(" "));
+    const program = metadata.program ?? programFromText([artifact.title, artifact.basename, body.text].join(" "));
     const sourceKind = artifactSourceKind(artifact);
     const reason = artifactReason(artifact);
     const status = artifactStatus(artifact);
@@ -185,6 +255,8 @@ export async function buildSurfacedArtifactsReadModel(
       needs: needForReason(reason, status),
       artifact_ref: artifact.abs_path || artifact.artifact_id,
       project_ref: project ?? undefined,
+      program_ref: program ?? undefined,
+      track_ref: track ?? undefined,
       agent_name: artifact.agent,
       created_at: artifact.produced_at,
       updated_at: artifact.last_op_at ?? artifact.updated_at ?? artifact.produced_at,
@@ -202,8 +274,11 @@ export async function buildSurfacedArtifactsReadModel(
     const artifactPath = dispatchArtifactPath(dispatch);
     const body = artifactPath ? await readRenderableBody(artifactPath, readFile) : { renderable: false, text: null };
     const signals = titleSignalsFromBody(body.text);
+    const metadata = metadataSignalsFromText([body.text, dispatch.body_markdown].filter(Boolean).join("\n"));
     const missing = !artifactPath || !body.renderable;
-    const project = projectFromPath(artifactPath);
+    const project = projectFromPath(artifactPath) ?? metadata.project ?? projectFromText([dispatch.subject, dispatch.body_markdown, dispatch.result_json].join(" "));
+    const track = metadata.track ?? trackFromText([dispatch.subject, dispatch.body_markdown, dispatch.result_json].join(" "));
+    const program = metadata.program ?? programFromText([dispatch.subject, dispatch.body_markdown].join(" "));
     const reason = missing ? "blocked_or_stale" : dispatchReasonFor(dispatch);
     const status: SurfacedArtifactStatus = "unread";
     const sourceKind = dispatchSourceKind(dispatch, missing);
@@ -227,6 +302,8 @@ export async function buildSurfacedArtifactsReadModel(
       artifact_ref: artifactPath ?? undefined,
       dispatch_ref: dispatch.dispatch_phid,
       project_ref: project ?? undefined,
+      program_ref: program ?? undefined,
+      track_ref: track ?? undefined,
       agent_name: dispatch.to_agent,
       created_at: dispatch.completed_at ?? dispatch.updated_at,
       updated_at: dispatch.completed_at ?? dispatch.updated_at,
@@ -242,7 +319,8 @@ export async function buildSurfacedArtifactsReadModel(
 
   for (const comment of comments) {
     if (!commentNeedsRouting(comment.payload_json)) continue;
-    const project = projectFromPath(comment.abs_path);
+    const project = projectFromPath(comment.abs_path) ?? projectFromText([comment.artifact_title, comment.basename, comment.tag].join(" "));
+    const track = trackFromText([comment.tag, comment.artifact_title, comment.basename, parseCommentBody(comment.payload_json)].join(" "));
     const title = humanTitleFromParts({
       dispatchTitle: comment.artifact_title,
       basename: comment.basename,
@@ -261,6 +339,7 @@ export async function buildSurfacedArtifactsReadModel(
       needs: "route",
       artifact_ref: comment.abs_path ?? comment.artifact_id,
       project_ref: project ?? undefined,
+      track_ref: track ?? undefined,
       agent_name: comment.agent ?? undefined,
       created_at: comment.ts,
       updated_at: comment.ts,
@@ -272,7 +351,7 @@ export async function buildSurfacedArtifactsReadModel(
 
   const grouped = groupPrimaryRows(rawRows);
   const rows = grouped.sort(compareSurfacedRows).slice(0, primaryLimit);
-  return { rows, recent_flood: buildRecentFloodDiagnostic(rawRows, grouped, rows) };
+  return { rows, recent_flood: buildRecentFloodDiagnostic(rawRows, grouped, rows, { rawLimit, primaryLimit }) };
 }
 
 async function readArtifacts(adapter: DbAdapter, limit: number): Promise<ArtifactRow[]> {
@@ -473,6 +552,7 @@ function buildRecentFloodDiagnostic(
   rawRows: SurfacedArtifactRow[],
   groupedRows: SurfacedArtifactRow[],
   primaryRows: SurfacedArtifactRow[],
+  limits: { rawLimit: number; primaryLimit: number },
 ): RecentFloodDiagnostic {
   const groups = new Map<string, SurfacedArtifactRow[]>();
   for (const row of rawRows) {
@@ -482,6 +562,13 @@ function buildRecentFloodDiagnostic(
   return {
     window_start: minIso(rawRows.map((r) => r.updated_at)) ?? "",
     window_end: maxIso(rawRows.map((r) => r.updated_at)) ?? "",
+    source_data: {
+      raw_limit: limits.rawLimit,
+      primary_limit: limits.primaryLimit,
+      raw_row_count: rawRows.length,
+      primary_row_count: primaryRows.length,
+      capped: rawRows.length >= limits.rawLimit || rawRows.length > primaryRows.length,
+    },
     total_raw_count: rawRows.length,
     grouped_count: groupedRows.length,
     suppressed_from_primary_count: Math.max(0, rawRows.length - primaryRows.length),
@@ -492,6 +579,8 @@ function buildRecentFloodDiagnostic(
       return {
         work_item_ref,
         title: sorted[0]?.title ?? work_item_ref,
+        program_ref: sorted.find((r) => r.program_ref)?.program_ref,
+        track_ref: sorted.find((r) => r.track_ref)?.track_ref,
         project_ref: sorted.find((r) => r.project_ref)?.project_ref,
         agent_names: [...new Set(rows.map((r) => r.agent_name).filter((v): v is string => Boolean(v)))].sort(),
         raw_count: rows.length,
@@ -526,6 +615,51 @@ function titleFromBasename(value: string | null | undefined): string | null {
 function cleanTitle(value: string | null | undefined): string | null {
   const s = (value ?? "").trim().replace(/^["']|["']$/g, "").replace(/\s+/g, " ");
   return s || null;
+}
+
+function firstClean(values: Array<string | null | undefined>): string | null {
+  for (const value of values) {
+    const cleaned = cleanTitle(value);
+    if (cleaned) return cleaned;
+  }
+  return null;
+}
+
+function projectFromText(value: string | null | undefined): string | null {
+  const s = value ?? "";
+  const explicit = s.match(/\bproject:\s*`?([A-Za-z0-9_.-]+)`?/i)?.[1];
+  if (explicit) return explicit.toLowerCase();
+  if (/\bkapelle\b/i.test(s)) return "kapelle";
+  if (/\btrinity\b/i.test(s)) return "trinity";
+  for (const project of DOMAIN_PROJECTS) {
+    if (new RegExp(`\\b${escapeRegExp(project)}\\b`, "i").test(s)) return project;
+  }
+  return null;
+}
+
+function programFromText(value: string | null | undefined): string | null {
+  const s = value ?? "";
+  if (/\bLocal-First Project\/Artifact Surfacing\b/i.test(s)) return "local-first-project-artifact-surfacing";
+  const explicit = s.match(/\bprogram:\s*`?([^`\n]+?)`?\s*(?:\n|$)/i)?.[1];
+  return slugify(explicit);
+}
+
+function trackFromText(value: string | null | undefined): string | null {
+  return normalizeTrack((value ?? "").match(TRACK_RE)?.[0]);
+}
+
+function normalizeTrack(value: string | null | undefined): string | null {
+  return (value ?? "").match(TRACK_RE)?.[0] ?? null;
+}
+
+function slugify(value: string | null | undefined): string | null {
+  const s = cleanTitle(value);
+  if (!s) return null;
+  return s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || null;
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function subtitle(parts: Array<string | null | undefined>): string | undefined {

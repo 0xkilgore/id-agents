@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { SqliteAdapter } from "../../src/db/sqlite-adapter.js";
 import { migrateSqlite } from "../../src/db/migrations/sqlite.js";
+import { approveArtifact, viewArtifact } from "../../src/outputs/ops.js";
 import { appendOperation, migrateOutputsTables, registerArtifact } from "../../src/outputs/storage.js";
 import {
   artifactIdForSurfacingPath,
@@ -8,6 +9,7 @@ import {
   buildSurfacedArtifactsReadModel,
   humanTitleFromParts,
   isRawPrimaryTitle,
+  SURFACED_ARTIFACTS_SAVED_VIEW,
 } from "../../src/surfaced-artifacts/read-model.js";
 
 const NOW = "2026-07-07T12:00:00.000Z";
@@ -177,6 +179,30 @@ describe("buildSurfacedArtifacts", () => {
     expect(comments[0]).toMatchObject({ title: "Route comment on Comment target", relevance_reason: "blocked_or_stale", needs: "route", source_kind: "comment" });
   });
 
+  it("emits read, commented, routed, and approved statuses deterministically", async () => {
+    for (const id of ["art-read", "art-commented", "art-routed", "art-approved"]) {
+      await registerArtifact(adapter, {
+        artifact_id: id,
+        basename: `${id}.md`,
+        agent: "maestra",
+        abs_path: `/tmp/${id}.md`,
+        title: id,
+        produced_at: NOW,
+        source: "manual",
+      }, NOW);
+    }
+    await viewArtifact(adapter, "art-read", { viewer: "human:chris" }, () => new Date(NOW));
+    await appendOperation(adapter, "art-commented", "comment_recorded", "human:chris", NOW, JSON.stringify({ body: "Needs a reply" }), null, null);
+    await appendOperation(adapter, "art-routed", "comment_routed", "manager", NOW, JSON.stringify({ to: "maestra" }), null, null);
+    await approveArtifact(adapter, "art-approved", { approver: "human:chris" }, () => new Date(NOW));
+
+    const byId = new Map((await buildSurfacedArtifacts(adapter, { limit: 7, readFile })).map((r) => [r.id, r.status]));
+    expect(byId.get("artifact:art-read")).toBe("read");
+    expect(byId.get("artifact:art-commented")).toBe("commented");
+    expect(byId.get("artifact:art-routed")).toBe("routed");
+    expect(byId.get("artifact:art-approved")).toBe("approved");
+  });
+
   it("ranks accepted reasons before freshness", async () => {
     await seedDone(adapter, {
       dispatch_phid: "phid:disp-newest-missing",
@@ -314,8 +340,69 @@ describe("buildSurfacedArtifacts", () => {
     });
     expect(floodGroup!.group_count).toBeGreaterThan(1);
     expect(model.recent_flood.total_raw_count).toBeGreaterThan(25);
+    expect(model.recent_flood.source_data).toMatchObject({
+      raw_limit: 250,
+      primary_limit: 7,
+      raw_row_count: model.recent_flood.total_raw_count,
+      primary_row_count: model.rows.length,
+      capped: true,
+    });
     expect(model.recent_flood.raw_rows).toHaveLength(model.recent_flood.total_raw_count);
     expect(model.recent_flood.suppressed_from_primary_count).toBeGreaterThan(0);
     expect(model.recent_flood.groups.some((g) => g.raw_count > 1 && g.work_item_ref.includes("artifact-surfacing"))).toBe(true);
+  });
+
+  it("discovers the local-first handoff by human title, project, program, track, and dispatch", async () => {
+    const handoffPath = "/tmp/local-first-handoff.md";
+    files.set(handoffPath, `---
+project: kapelle
+track:
+  - T-LOCALREAD
+source_dispatch: phid:disp-local-first
+---
+
+# Local-First Project/Artifact Surfacing Integration Handoff
+
+This program should be queued as the Local-First Project/Artifact Surfacing program.
+`);
+    await seedDone(adapter, {
+      dispatch_phid: "phid:disp-local-first",
+      query_id: "query_local_first",
+      subject: "artifact:v4:raw-token-should-not-win",
+      body_markdown: "[project: kapelle][T-LOCALREAD] Local-first artifact surfacing handoff",
+      completed_at: "2026-07-07T12:30:00.000Z",
+      updated_at: "2026-07-07T12:30:00.000Z",
+      artifact_path: handoffPath,
+    });
+
+    const row = (await buildSurfacedArtifacts(adapter, { limit: 7, readFile }))
+      .find((r) => r.dispatch_ref === "phid:disp-local-first");
+    expect(row).toMatchObject({
+      title: "Local-First Project/Artifact Surfacing Integration Handoff",
+      project_ref: "kapelle",
+      program_ref: "local-first-project-artifact-surfacing",
+      track_ref: "T-LOCALREAD",
+      dispatch_ref: "phid:disp-local-first",
+      source_kind: "dispatch_done",
+    });
+  });
+
+  it("registers row fields as stable saved-view ids", () => {
+    expect(SURFACED_ARTIFACTS_SAVED_VIEW).toMatchObject({
+      id: "surfaced-artifacts.v1.primary",
+      field_ids: expect.arrayContaining([
+        "surfaced_artifacts.row.title",
+        "surfaced_artifacts.row.status",
+        "surfaced_artifacts.row.relevance_reason",
+        "surfaced_artifacts.row.project_ref",
+        "surfaced_artifacts.row.program_ref",
+        "surfaced_artifacts.row.track_ref",
+        "surfaced_artifacts.row.dispatch_ref",
+      ]),
+      diagnostic_field_ids: expect.arrayContaining([
+        "surfaced_artifacts.recent_flood.source_data",
+        "surfaced_artifacts.recent_flood.raw_rows",
+      ]),
+    });
   });
 });

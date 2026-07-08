@@ -1,6 +1,6 @@
 import type { Application, Request, Response } from "express";
 import type { DbAdapter } from "../db/db-adapter.js";
-import { buildSurfacedArtifactsReadModel } from "./read-model.js";
+import { buildSurfacedArtifactsReadModel, SURFACED_ARTIFACTS_SAVED_VIEW } from "./read-model.js";
 import type { SurfacedArtifactsResponse } from "./types.js";
 
 export function mountSurfacedArtifactsRoutes(app: Application, adapter: DbAdapter): void {
@@ -12,6 +12,7 @@ export function mountSurfacedArtifactsRoutes(app: Application, adapter: DbAdapte
         ok: true,
         schema_version: "surfaced-artifacts.v1",
         generated_at: new Date().toISOString(),
+        saved_view: SURFACED_ARTIFACTS_SAVED_VIEW,
         rows: model.rows,
         count: model.rows.length,
         recent_flood: model.recent_flood,

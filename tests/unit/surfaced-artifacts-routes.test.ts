@@ -51,7 +51,15 @@ describe("GET /ops/surfaced-artifacts", () => {
     const res = await fetch(`${b.base}/ops/surfaced-artifacts`);
     expect(res.status).toBe(200);
     const body = await res.json() as any;
-    expect(body).toMatchObject({ ok: true, schema_version: "surfaced-artifacts.v1", count: 1 });
+    expect(body).toMatchObject({
+      ok: true,
+      schema_version: "surfaced-artifacts.v1",
+      count: 1,
+      saved_view: {
+        id: "surfaced-artifacts.v1.primary",
+        field_ids: expect.arrayContaining(["surfaced_artifacts.row.title", "surfaced_artifacts.row.status"]),
+      },
+    });
     expect(body.rows[0]).toMatchObject({
       id: "artifact:art-route",
       title: "Kapelle route test",
@@ -66,6 +74,7 @@ describe("GET /ops/surfaced-artifacts", () => {
       total_raw_count: 1,
       grouped_count: 1,
       suppressed_from_primary_count: 0,
+      source_data: { raw_limit: 250, primary_limit: 5, raw_row_count: 1, primary_row_count: 1, capped: false },
     });
     expect(body.recent_flood.raw_rows).toHaveLength(1);
   });
