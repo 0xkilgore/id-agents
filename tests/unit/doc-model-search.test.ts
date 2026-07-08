@@ -178,6 +178,7 @@ class MemoryPostgresDocModelAdapter implements DbAdapter {
         title: row.title,
         display_id: row.name,
         score: -1,
+        created_at: row.created_at,
         updated_at: row.updated_at,
       }))
       .sort((a, b) => a.updated_at - b.updated_at || a.phid.localeCompare(b.phid))
@@ -337,6 +338,7 @@ function comparableHits(items: Awaited<ReturnType<typeof searchDocModel>>["items
     phid: item.phid,
     title: item.title,
     display_id: item.display_id,
+    created_at: item.created_at,
     updated_at: item.updated_at,
   })).sort((a, b) =>
     a.kind.localeCompare(b.kind) ||
@@ -383,6 +385,10 @@ describe("searchDocModel", () => {
     const kinds = items.map((item) => item.kind);
     expect(kinds).toContain("desk_item");
     expect(kinds).toContain("task");
+    expect(items.find((item) => item.kind === "task")).toMatchObject({
+      created_at: "2026-06-26T21:40:00.000Z",
+      updated_at: "2026-06-26T22:40:00.000Z",
+    });
     expect(items.some((item) => item.kind === "artifact" && item.display_id === "ops-walk.png")).toBe(false);
   });
 
@@ -433,6 +439,9 @@ describe("GET /search (DV3 read-model route)", () => {
     expect(body.count).toBeGreaterThanOrEqual(2);
     expect(body.items.some((item: any) => item.kind === "desk_item")).toBe(true);
     expect(body.items.some((item: any) => item.kind === "task")).toBe(true);
+    expect(body.items.find((item: any) => item.kind === "task")).toMatchObject({
+      created_at: "2026-06-26T21:40:00.000Z",
+    });
   });
 
   it("supports kind filtering and bounded limits", async () => {

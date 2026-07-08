@@ -369,6 +369,11 @@ function taskCommentDispatchMessage(row: TaskCommentRow, task: TaskRow, target: 
   return lines.join('\n');
 }
 
+function projectOwnerName(value: string | null | undefined): string | null {
+  const match = value?.match(/^project:\s*(.+)$/i);
+  return match?.[1]?.trim() || null;
+}
+
 function summarizeTaskCommentRouting(notes: Array<ReturnType<typeof taskCommentView>>): {
   status: 'none' | 'pending' | 'routed' | 'failed';
   latest_dispatch_id: string | null;
@@ -8631,62 +8636,126 @@ export class AgentManagerDb {
     return { agent: matches[0] };
   }
 
-  private async taskCommentTargets(task: TaskRow): Promise<string[]> {
-    const targets = new Set<string>(['cane']);
+  private async resolveTaskCommentTarget(
+    teamId: string,
+    rawTarget: string,
+  ): Promise<{ target_agent: string; target_agent_raw: string; error: string | null }> {
+    const normalized = rawTarget.trim();
+    const projectOwner = projectOwnerName(normalized);
+    const logical = (projectOwner ?? normalized).trim();
+    if (!logical) {
+      return { target_agent: normalized, target_agent_raw: rawTarget, error: 'target_agent_empty' };
+    }
+
+    const identity = await this.db.agents.getLogicalIdentity(teamId, logical);
+    if (identity?.logical_agent) {
+      return { target_agent: identity.logical_agent, target_agent_raw: rawTarget, error: null };
+    }
+
+    const agent = await this.db.agents.getForRouting(teamId, logical);
+    if (agent?.name) {
+      return { target_agent: agent.name, target_agent_raw: rawTarget, error: null };
+    }
+
+    if (!projectOwner) {
+      return { target_agent: logical, target_agent_raw: rawTarget, error: null };
+    }
+
+    return {
+      target_agent: logical,
+      target_agent_raw: rawTarget,
+      error: `agent_not_found:${logical}`,
+    };
+  }
+
+  private async taskCommentTargets(
+    task: TaskRow,
+    teamId: string,
+  ): Promise<Array<{ target_agent: string; target_agent_raw: string; error: string | null }>> {
+    const rawTargets = new Set<string>(['cane']);
     if (task.owner) {
       const owner = await this.db.agents.getById(task.owner);
-      if (owner?.name) targets.add(owner.name);
+      rawTargets.add(owner?.name ?? task.owner);
     }
-    return [...targets];
+    const resolved = await Promise.all([...rawTargets].map((target) => this.resolveTaskCommentTarget(teamId, target)));
+    const byResolved = new Map<string, { target_agent: string; target_agent_raw: string; error: string | null }>();
+    for (const target of resolved) {
+      byResolved.set(target.target_agent, target);
+    }
+    return [...byResolved.values()];
   }
 
   private async routeTaskComment(row: TaskCommentRow, task: TaskRow, teamId: string): Promise<void> {
-    const targets = await this.taskCommentTargets(task);
+    const targets = await this.taskCommentTargets(task, teamId);
     const results: TaskCommentRoutingResult[] = [];
 
     if (!this.dispatchScheduler) {
       for (const target of targets) {
         results.push({
-          target_agent: target,
-          status: 'pending',
+          target_agent: target.target_agent,
+          target_agent_raw: target.target_agent_raw,
+          status: target.error ? 'failed' : 'pending',
           dispatch_phid: null,
           query_id: null,
-          error: 'scheduler_unavailable',
+          error: target.error ?? 'scheduler_unavailable',
+          retryable: !target.error,
           routed_at: null,
         });
       }
-      await updateTaskCommentRouting(this.db.adapter, row.id, 'pending', results);
+      await updateTaskCommentRouting(
+        this.db.adapter,
+        row.id,
+        results.some((r) => r.status === 'failed') ? 'failed' : 'pending',
+        results,
+      );
       return;
     }
 
     for (const target of targets) {
+      if (target.error) {
+        results.push({
+          target_agent: target.target_agent,
+          target_agent_raw: target.target_agent_raw,
+          status: 'failed',
+          dispatch_phid: null,
+          query_id: null,
+          error: target.error,
+          retryable: false,
+          routed_at: new Date().toISOString(),
+        });
+        continue;
+      }
       try {
         const receipt = await this.dispatchScheduler.enqueue({
-          to_agent: target,
+          to_agent: target.target_agent,
           from_actor: row.actor,
           channel: TASK_COMMENT_DISPATCH_CHANNEL,
           subject: `Task note on "${task.title}"`.slice(0, 80),
-          message: taskCommentDispatchMessage(row, task, target),
-          priority: target === 'cane' ? 6 : 5,
-          dedup_key: `task_comment:${row.hash}:${target}`,
+          message: taskCommentDispatchMessage(row, task, target.target_agent),
+          priority: target.target_agent === 'cane' ? 6 : 5,
+          dedup_key: `task_comment:${row.hash}:${target.target_agent}`,
           actor_ref: actorRefFromTaskComment(row.actor),
           causation: { source_event_id: row.event_seq ? `event_log:${row.event_seq}` : row.id },
         });
         results.push({
-          target_agent: target,
+          target_agent: target.target_agent,
+          target_agent_raw: target.target_agent_raw,
           status: 'routed',
           dispatch_phid: receipt.dispatch_phid,
           query_id: receipt.query_id,
           error: null,
+          retryable: false,
           routed_at: new Date().toISOString(),
         });
       } catch (err) {
         results.push({
-          target_agent: target,
+          target_agent: target.target_agent,
+          target_agent_raw: target.target_agent_raw,
           status: 'failed',
           dispatch_phid: null,
           query_id: null,
           error: err instanceof Error ? err.message : String(err),
+          retryable: true,
           routed_at: new Date().toISOString(),
         });
       }
@@ -8716,6 +8785,13 @@ export class AgentManagerDb {
     }
 
     const links = await this.db.tasks.listEventLinksForTask(task.id);
+    const eventLinks = links.map(l => ({
+      kind: 'schedule' as const,
+      id: l.schedule_id,
+      ref: l.schedule_id,
+      route: `/schedules/${encodeURIComponent(l.schedule_id)}`,
+      href: `/schedules/${encodeURIComponent(l.schedule_id)}`,
+    }));
     const shortId = task.uuid ? `#${task.uuid.replace(/-/g, '').slice(0, 8)}` : null;
     const facts = extractTaskScheduleFacts(task);
     const reconciliation = taskReconciliationFacts(task, { today });
@@ -8761,8 +8837,17 @@ export class AgentManagerDb {
       ownerName,
       teamName,
       linkedEvents: links.map(l => l.schedule_id),
+      links: eventLinks,
+      linkFields: {
+        task: { kind: 'task', ref: task.name, route: `/tasks/${encodeURIComponent(task.name)}`, href: `/tasks/${encodeURIComponent(task.name)}` },
+        events: eventLinks,
+      },
+      openTarget: { kind: 'task', ref: task.name, route: `/tasks/${encodeURIComponent(task.name)}`, href: `/tasks/${encodeURIComponent(task.name)}` },
+      created_at: task.created_at,
       createdAt: task.created_at,
+      updated_at: task.updated_at,
       updatedAt: task.updated_at,
+      completed_at: task.completed_at,
       completedAt: task.completed_at,
     };
   }

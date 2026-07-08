@@ -39,6 +39,7 @@ export interface DocModelSearchHit {
   display_id: string | null;
   /** bm25 rank — lower is a better match (SQLite FTS5 convention). */
   score: number;
+  created_at?: string;
   updated_at: string;
 }
 
@@ -217,6 +218,7 @@ async function searchTaskHits(
       title: string;
       display_id: string;
       score: number;
+      created_at: number;
       updated_at: number;
     }>(
       `WITH q AS (SELECT to_tsquery('simple', $1) AS query)
@@ -229,6 +231,7 @@ async function searchTaskHits(
                 ),
                 q.query
               ) AS score,
+              t.created_at AS created_at,
               t.updated_at AS updated_at
          FROM tasks t, q
         WHERE to_tsvector('simple',
@@ -244,6 +247,7 @@ async function searchTaskHits(
       title: row.title,
       display_id: row.display_id,
       score: row.score,
+      created_at: epochToIso(row.created_at),
       updated_at: epochToIso(row.updated_at),
     }));
   }
@@ -253,12 +257,14 @@ async function searchTaskHits(
     title: string;
     display_id: string;
     score: number;
+    created_at: number;
     updated_at: number;
   }>(
     `SELECT COALESCE(NULLIF(t.uuid, ''), t.id) AS phid,
             t.title AS title,
             t.name AS display_id,
             bm25(tasks_fts) AS score,
+            t.created_at AS created_at,
             t.updated_at AS updated_at
        FROM tasks_fts
        JOIN tasks t ON t.rowid = tasks_fts.rowid
@@ -273,6 +279,7 @@ async function searchTaskHits(
     title: row.title,
     display_id: row.display_id,
     score: row.score,
+    created_at: epochToIso(row.created_at),
     updated_at: epochToIso(row.updated_at),
   }));
 }

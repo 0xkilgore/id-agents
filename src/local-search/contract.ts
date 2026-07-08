@@ -33,6 +33,7 @@ export interface LocalSearchDocument {
   status?: string | null;
   readState?: LocalSearchReadState | null;
   needsReview?: boolean;
+  createdAt?: string;
   updatedAt: string;
   matchFields: Record<string, string | string[] | number | boolean | null | undefined>;
   freshness?: LocalSearchFreshness;

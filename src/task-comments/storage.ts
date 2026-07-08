@@ -9,10 +9,12 @@ export type TaskCommentRoutingStatus = "pending" | "routed" | "failed";
 
 export interface TaskCommentRoutingResult {
   target_agent: string;
+  target_agent_raw?: string | null;
   status: TaskCommentRoutingStatus;
   dispatch_phid: string | null;
   query_id: string | null;
   error: string | null;
+  retryable?: boolean;
   routed_at: string | null;
 }
 

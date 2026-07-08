@@ -94,9 +94,10 @@ async function loadTaskDocuments(adapter: DbAdapter): Promise<LocalSearchDocumen
       created_by: string | null;
       owner: string | null;
       track: string | null;
+      created_at: number;
       updated_at: number;
     }>(
-      `SELECT id, name, uuid, title, description, status, created_by, owner, track, updated_at
+      `SELECT id, name, uuid, title, description, status, created_by, owner, track, created_at, updated_at
          FROM tasks
      ORDER BY updated_at DESC
         LIMIT 1000`,
@@ -112,6 +113,7 @@ async function loadTaskDocuments(adapter: DbAdapter): Promise<LocalSearchDocumen
       status: row.status,
       readState: "unknown",
       needsReview: false,
+      createdAt: epochToIso(row.created_at),
       updatedAt: epochToIso(row.updated_at),
       matchFields: {
         title: row.title,
@@ -121,6 +123,7 @@ async function loadTaskDocuments(adapter: DbAdapter): Promise<LocalSearchDocumen
         status: row.status,
         owner: row.owner,
         createdBy: row.created_by,
+        createdAt: epochToIso(row.created_at),
       },
       freshness: "current",
       openTarget: { kind: "task", ref: row.name, route: `/tasks/${encodeURIComponent(row.name)}` },

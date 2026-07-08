@@ -317,6 +317,42 @@ describe("local search v0 contract", () => {
     }
   });
 
+  it("preserves task createdAt from loaded task documents", async () => {
+    const adapter = new SqliteAdapter(":memory:");
+    try {
+      await migrateSqlite(adapter);
+      await adapter.query(
+        `INSERT INTO tasks (id, name, uuid, team_id, title, description, status, created_by, owner, created_at, updated_at, track)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          "task_created_doc",
+          "created-doc-task",
+          "uuid-created-doc-task",
+          null,
+          "Created date survives load loop",
+          "Local search should preserve the original created timestamp.",
+          "todo",
+          null,
+          null,
+          1782510000,
+          1782513600,
+          "T-DOC",
+        ],
+      );
+
+      const docs = await loadLocalSearchDocuments(adapter);
+      const task = docs.find((doc) => doc.entityType === "task" && doc.task === "created-doc-task");
+      expect(task).toMatchObject({
+        createdAt: "2026-06-26T21:40:00.000Z",
+        updatedAt: "2026-06-26T22:40:00.000Z",
+        openTarget: { kind: "task", ref: "created-doc-task", route: "/tasks/created-doc-task" },
+      });
+      expect(task?.matchFields.createdAt).toBe("2026-06-26T21:40:00.000Z");
+    } finally {
+      await adapter.close();
+    }
+  });
+
   it("covers every restrained local health visual state", () => {
     const states: LocalHealthVisualState[] = [
       "current",

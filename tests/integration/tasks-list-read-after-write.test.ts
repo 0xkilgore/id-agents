@@ -81,8 +81,8 @@ async function insertAgentDirect(
   db: Awaited<ReturnType<typeof createInMemoryDb>>,
   teamId: string,
   name: string,
+  id: string = `agent_${crypto.randomUUID()}`,
 ): Promise<string> {
-  const id = `agent_${crypto.randomUUID()}`;
   await db.adapter.query(
     `INSERT INTO agents (team_id, id, name, type, model, port, status, created_at, runtime)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -301,6 +301,7 @@ describe('GET /tasks read-model immediate reflect', () => {
     expect(append.idempotent).toBe(false);
     expect(append.note.routing_status).toBe('routed');
     expect(append.note.routing_results.map((r: Record<string, unknown>) => r.target_agent).sort()).toEqual(['cane', 'coder']);
+    expect(append.note.routing_results.map((r: Record<string, unknown>) => r.target_agent_raw).sort()).toEqual(['cane', 'coder']);
     expect(append.note.routing_results.every((r: Record<string, unknown>) => typeof r.dispatch_phid === 'string')).toBe(true);
 
     const detail = await fetch(`${baseUrl}/tasks/${taskName}`, {
@@ -321,6 +322,9 @@ describe('GET /tasks read-model immediate reflect', () => {
       pending_count: 0,
     });
     expect(typeof detail.task.commentRouting.latest_dispatch_id).toBe('string');
+    expect(detail.task.openTarget).toMatchObject({ kind: 'task', ref: taskName, route: `/tasks/${taskName}` });
+    expect(detail.task.linkFields.task).toMatchObject({ kind: 'task', ref: taskName, href: `/tasks/${taskName}` });
+    expect(detail.task.created_at).toBe(detail.task.createdAt);
 
     const duplicateRes = await fetch(`${baseUrl}/tasks/${taskName}/notes`, {
       method: 'POST',
@@ -345,6 +349,86 @@ describe('GET /tasks read-model immediate reflect', () => {
       `SELECT COUNT(*) AS c FROM dispatch_scheduler_queue WHERE channel = 'task_comment'`,
     );
     expect(Number(dispatches.rows[0]?.c ?? 0)).toBe(2);
+  });
+
+  it('routes task comments for project-labeled owners to the resolved logical agent id', async () => {
+    const taskName = 'project-finances-comment-routing';
+    await insertAgentDirect(db, teamId, 'cane');
+    await insertAgentDirect(db, teamId, 'finances');
+    await insertAgentDirect(db, teamId, 'project:finances', 'project:finances');
+    await insertTaskDirect(db, teamId, taskName, 'project:finances', 'doing', {
+      title: '[project:finances] Reconcile task note routing',
+    });
+
+    const appendRes = await fetch(`${baseUrl}/tasks/${taskName}/notes`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Id-Team': TEAM },
+      body: JSON.stringify({
+        text: 'Please reconcile the project routing target.',
+        actor: 'user:chris',
+        timestamp: '2026-07-08T12:10:00.000Z',
+      }),
+    });
+
+    expect(appendRes.status).toBe(201);
+    const append = await appendRes.json();
+    expect(append.note.routing_status).toBe('routed');
+    expect(append.note.routing_results).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          target_agent: 'finances',
+          target_agent_raw: 'project:finances',
+          status: 'routed',
+          retryable: false,
+        }),
+      ]),
+    );
+    expect(append.note.routing_results.map((r: Record<string, unknown>) => r.target_agent)).not.toContain('project:finances');
+
+    const routedDispatchIds = append.note.routing_results
+      .map((r: Record<string, unknown>) => r.dispatch_phid)
+      .filter((v: unknown): v is string => typeof v === 'string');
+    const dispatches = await db.adapter.query<{ to_agent: string }>(
+      `SELECT to_agent FROM dispatch_scheduler_queue WHERE channel = 'task_comment' AND dispatch_phid IN (?, ?)`,
+      routedDispatchIds,
+    );
+    expect(dispatches.rows.map((r) => r.to_agent)).toContain('finances');
+  });
+
+  it('shows terminal route status when a project-labeled task owner cannot resolve', async () => {
+    const taskName = 'project-missing-comment-routing';
+    await insertAgentDirect(db, teamId, 'cane');
+    await insertAgentDirect(db, teamId, 'project:missing-finances', 'project:missing-finances');
+    await insertTaskDirect(db, teamId, taskName, 'project:missing-finances', 'doing', {
+      title: '[project:missing-finances] Route failure visibility',
+    });
+
+    const appendRes = await fetch(`${baseUrl}/tasks/${taskName}/notes`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Id-Team': TEAM },
+      body: JSON.stringify({
+        text: 'This should expose a terminal route failure.',
+        actor: 'user:chris',
+        timestamp: '2026-07-08T12:20:00.000Z',
+      }),
+    });
+
+    expect(appendRes.status).toBe(201);
+    const append = await appendRes.json();
+    expect(append.note.routing_status).toBe('failed');
+    expect(append.note.routing_results).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          target_agent: 'missing-finances',
+          target_agent_raw: 'project:missing-finances',
+          status: 'failed',
+          error: 'agent_not_found:missing-finances',
+          retryable: false,
+        }),
+      ]),
+    );
+    expect(append.task.commentRouting).toMatchObject({ status: 'failed', failed_count: 1 });
+    expect(append.task.currentness.stale_reason).toBe('task_comment_routing_failed');
   });
 
   it('multiple closes in rapid succession do not produce a stale GET /tasks read', async () => {
