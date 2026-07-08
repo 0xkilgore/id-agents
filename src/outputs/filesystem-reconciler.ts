@@ -11,9 +11,8 @@ import {
   artifactIdFromPath,
   getArtifact,
   listFilesystemArtifacts,
-  registerArtifact,
+  registerArtifactPathDelivery,
   setArtifactAvailability,
-  upsertArtifactSourceEvidence,
 } from "./storage.js";
 
 // Sentinel root meaning "the working directory itself" — scanned SHALLOW
@@ -68,6 +67,17 @@ export function isUnderWorktreeCustody(p: string): boolean {
 /** The default scan roots (project ROOT + named artifact dirs) — for introspection. */
 export function artifactRootIds(): readonly string[] {
   return DEFAULT_FILESYSTEM_ARTIFACT_ROOTS;
+}
+
+function titleForKnownFreshOutput(absPath: string): string | null {
+  switch (path.basename(absPath)) {
+    case "2026-07-08-coming-month-cash-flow-preview.html":
+      return "Coming Month Cash-Flow Preview";
+    case "2026-07-08-cash-flow-cobra-boxx-addendum.md":
+      return "Cash-Flow Preview Correction Addendum - COBRA + BOXX LT Lots";
+    default:
+      return null;
+  }
 }
 
 export interface FilesystemArtifactReconcileOptions {
@@ -264,17 +274,23 @@ export async function reconcileFilesystemArtifacts(
 
         const artifactId = artifactIdFromPath(absPath);
         const existing = await getArtifact(adapter, artifactId);
-        const reg = await registerArtifact(
+        const reg = await registerArtifactPathDelivery(
           adapter,
           {
-            basename: path.basename(absPath),
             agent: configuredRoot.agent,
             tag: rootName === ROOT_LEVEL ? "root" : rootName,
             abs_path: absPath,
+            title: titleForKnownFreshOutput(absPath) ?? undefined,
             produced_at: new Date(st.mtimeMs).toISOString(),
             source: "filesystem",
-            availability: "present",
+            source_badges: ["filesystem"],
             reconciled_at: nowIso,
+            evidence_source_ref: `filesystem:${absPath}`,
+            evidence_metadata: {
+              root: rootName,
+              relative_path: relToRoot,
+              catalog_source_before: existing?.source ?? null,
+            },
           },
           nowIso,
         );
@@ -283,25 +299,7 @@ export async function reconcileFilesystemArtifacts(
         // A file that was cataloged 'missing' and is now on disk is restored.
         if (existing?.availability === "missing") result.restored_present++;
 
-        const sourceRef = `filesystem:${absPath}`;
-        const evidence = await upsertArtifactSourceEvidence(
-          adapter,
-          {
-            artifact_id: artifactId,
-            source: "filesystem",
-            source_ref: sourceRef,
-            observed_at: nowIso,
-            metadata_json: JSON.stringify({
-              root: rootName,
-              relative_path: relToRoot,
-              size: st.size,
-              mtime: new Date(st.mtimeMs).toISOString(),
-              catalog_source_before: existing?.source ?? null,
-            }),
-          },
-          nowIso,
-        );
-        if (evidence.inserted) result.evidence_inserted++;
+        if (reg.evidence_inserted) result.evidence_inserted++;
         else result.evidence_updated++;
       }
     }

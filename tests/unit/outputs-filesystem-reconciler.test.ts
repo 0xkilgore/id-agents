@@ -7,6 +7,7 @@ import { SqliteAdapter } from "../../src/db/sqlite-adapter.js";
 import {
   artifactIdFromPath,
   getArtifact,
+  getArtifactBodyCache,
   listArtifactSourceEvidence,
   listInboxItems,
   migrateOutputsTables,
@@ -56,6 +57,25 @@ function request(app: Express) {
             const response = await fetch(`http://127.0.0.1:${addr.port}${urlPath}`);
             const body = await response.json();
             server.close(() => resolve({ status: response.status, body }));
+          } catch (err) {
+            server.close(() => reject(err));
+          }
+        });
+      });
+    },
+    async getRaw(urlPath: string): Promise<{ status: number; text: string; headers: Headers }> {
+      return new Promise((resolve, reject) => {
+        const server = app.listen(0, "127.0.0.1", async () => {
+          const addr = server.address();
+          if (!addr || typeof addr === "string") {
+            server.close();
+            reject(new Error("no address"));
+            return;
+          }
+          try {
+            const response = await fetch(`http://127.0.0.1:${addr.port}${urlPath}`);
+            const text = await response.text();
+            server.close(() => resolve({ status: response.status, text, headers: response.headers }));
           } catch (err) {
             server.close(() => reject(err));
           }
@@ -112,6 +132,119 @@ describe("filesystem artifact reconciler", () => {
     expect(evidence[0].source).toBe("filesystem");
     expect(evidence[0].source_ref).toBe(`filesystem:${abs}`);
     expect(evidence[0].metadata_json).toContain('"catalog_source_before":"agent-done"');
+    expect(evidence[0].metadata_json).toContain('"content_hash"');
+  });
+
+  it("backfills the two finance outputs with cached bodies for stable detail/copy/download after source loss", async () => {
+    const { adapter, workDir: tmpRoot } = await setup();
+    const financesDir = path.join(tmpRoot, "Code", "finances");
+    const htmlPath = writeArtifact(
+      financesDir,
+      "output/2026-07-08-coming-month-cash-flow-preview.html",
+      "<h1>Coming Month Cash-Flow Preview</h1><p>Readable without Dropbox sync.</p>",
+    );
+    const mdPath = writeArtifact(
+      financesDir,
+      "output/2026-07-08-cash-flow-cobra-boxx-addendum.md",
+      "# Cash-Flow Preview Correction Addendum\n\nCOBRA + BOXX LT Lots detail.\n",
+    );
+
+    const result = await reconcileFilesystemArtifacts(adapter, {
+      roots: [{ agent: "finances", workingDirectory: financesDir }],
+      now: () => new Date("2026-07-08T13:00:00.000Z"),
+    });
+
+    expect(result.inserted).toBe(2);
+    const htmlId = artifactIdFromPath(htmlPath);
+    const mdId = artifactIdFromPath(mdPath);
+    expect(await getArtifact(adapter, htmlId)).toMatchObject({
+      artifact_id: htmlId,
+      title: "Coming Month Cash-Flow Preview",
+      agent: "finances",
+      tag: "output",
+      source: "filesystem",
+      media_type: "text/html",
+      project_ref: "finances",
+      availability: "present",
+    });
+    expect(await getArtifact(adapter, mdId)).toMatchObject({
+      artifact_id: mdId,
+      title: "Cash-Flow Preview Correction Addendum - COBRA + BOXX LT Lots",
+      media_type: "text/markdown",
+      project_ref: "finances",
+    });
+    expect((await getArtifact(adapter, htmlId))?.content_hash).toMatch(/^[a-f0-9]{64}$/);
+    expect((await getArtifact(adapter, mdId))?.source_mtime).toBeTruthy();
+    expect(await getArtifactBodyCache(adapter, htmlId)).toMatchObject({
+      artifact_id: htmlId,
+      media_type: "text/html",
+      body_error: null,
+    });
+    expect(await getArtifactBodyCache(adapter, mdId)).toMatchObject({
+      artifact_id: mdId,
+      media_type: "text/markdown",
+      body_error: null,
+    });
+
+    fs.unlinkSync(htmlPath);
+    fs.unlinkSync(mdPath);
+    const app = express();
+    app.use(express.json());
+    mountOutputsRoutes(app, adapter, { autoIngest: false });
+    const client = request(app);
+
+    const htmlDetail = await client.get(`/artifacts/${htmlId}/detail`);
+    expect(htmlDetail.status).toBe(200);
+    expect(htmlDetail.body).toMatchObject({
+      artifact_id: htmlId,
+      displayTitle: "Coming Month Cash-Flow Preview",
+      stableUrl: `/artifacts/${htmlId}/detail`,
+      copyTextUrl: `/artifacts/${htmlId}/copy-text`,
+      downloadUrl: `/artifacts/${htmlId}/download`,
+      metadata: {
+        abs_path: htmlPath,
+        media_type: "text/html",
+        project_ref: "finances",
+        source: "filesystem",
+      },
+      body: {
+        kind: "html",
+        source: "artifact_body_cache",
+      },
+      delivery: {
+        sourcePath: htmlPath,
+        bodyRenderable: true,
+        bodyUnavailable: false,
+        discoveredBy: "filesystem_reconcile",
+        freshness: "current",
+      },
+    });
+    expect(htmlDetail.body.body.text).toContain("Readable without Dropbox sync.");
+
+    const mdDetail = await client.get(`/artifacts/${mdId}/detail`);
+    expect(mdDetail.status).toBe(200);
+    expect(mdDetail.body).toMatchObject({
+      displayTitle: "Cash-Flow Preview Correction Addendum - COBRA + BOXX LT Lots",
+      body: { kind: "markdown", source: "artifact_body_cache" },
+      delivery: { bodyRenderable: true, discoveredBy: "filesystem_reconcile" },
+    });
+    expect(mdDetail.body.body.text).toContain("COBRA + BOXX LT Lots detail.");
+
+    const copy = await client.getRaw(`/artifacts/${mdId}/copy-text`);
+    expect(copy.status).toBe(200);
+    expect(copy.text).toContain("COBRA + BOXX LT Lots detail.");
+
+    const download = await client.getRaw(`/artifacts/${htmlId}/download`);
+    expect(download.status).toBe(200);
+    expect(download.headers.get("content-disposition")).toContain("2026-07-08-coming-month-cash-flow-preview.html");
+    expect(download.text).toContain("Coming Month Cash-Flow Preview");
+
+    const htmlEvidence = await listArtifactSourceEvidence(adapter, htmlId);
+    expect(htmlEvidence[0]).toMatchObject({
+      source: "filesystem",
+      source_ref: `filesystem:${htmlPath}`,
+    });
+    expect(htmlEvidence[0].metadata_json).toContain('"content_hash"');
   });
 
   it("supports startup-style full reconciliation and opportunistic /outputs/inbox recent reconciliation", async () => {
@@ -214,4 +347,3 @@ describe("filesystem artifact reconciler", () => {
     expect(await getArtifact(adapter, artifactIdFromPath(outsideFile))).toBeNull();
   });
 });
-

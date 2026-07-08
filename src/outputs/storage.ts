@@ -532,15 +532,28 @@ export async function registerArtifactPathDelivery(
   input: {
     abs_path: string;
     agent: string;
+    tag?: string | null;
     produced_at: string;
     title?: string | null;
     project_ref?: string | null;
     dispatch_ref?: string | null;
     source_host?: string | null;
+    source?: ArtifactCatalogRow["source"];
+    source_badges?: string[];
+    reconciled_at?: string | null;
+    evidence_source_ref?: string | null;
+    evidence_metadata?: Record<string, unknown>;
   },
   nowIso: string,
-): Promise<{ row: ArtifactCatalogRow; inserted: boolean; body_cached: boolean; body_error: string | null }> {
+): Promise<{
+  row: ArtifactCatalogRow;
+  inserted: boolean;
+  body_cached: boolean;
+  body_error: string | null;
+  evidence_inserted: boolean;
+}> {
   const artifactId = artifactIdFromPath(input.abs_path);
+  const source = input.source ?? "agent-done";
   const mediaType = mediaTypeFromPath(input.abs_path);
   let contentHash: string | null = null;
   let sourceMtime: string | null = null;
@@ -580,10 +593,11 @@ export async function registerArtifactPathDelivery(
       artifact_id: artifactId,
       basename: pathBasename(input.abs_path),
       agent: input.agent,
+      tag: input.tag ?? undefined,
       abs_path: input.abs_path,
       title: input.title ?? undefined,
       produced_at: input.produced_at,
-      source: "agent-done",
+      source,
       availability,
       media_type: mediaType,
       content_hash: contentHash,
@@ -592,7 +606,8 @@ export async function registerArtifactPathDelivery(
       project_ref: input.project_ref ?? inferProjectRefFromPath(input.abs_path),
       dispatch_ref: input.dispatch_ref ?? null,
       source_host: input.source_host ?? hostname(),
-      source_badges: ["agent-done"],
+      source_badges: input.source_badges ?? [source],
+      reconciled_at: input.reconciled_at ?? undefined,
     },
     nowIso,
   );
@@ -612,12 +627,12 @@ export async function registerArtifactPathDelivery(
     nowIso,
   );
 
-  await upsertArtifactSourceEvidence(
+  const evidence = await upsertArtifactSourceEvidence(
     adapter,
     {
       artifact_id: artifactId,
-      source: "agent-done",
-      source_ref: input.dispatch_ref ?? input.abs_path,
+      source,
+      source_ref: input.evidence_source_ref ?? input.dispatch_ref ?? input.abs_path,
       observed_at: nowIso,
       metadata_json: JSON.stringify({
         abs_path: input.abs_path,
@@ -627,12 +642,13 @@ export async function registerArtifactPathDelivery(
         source_size: sourceSize,
         project_ref: input.project_ref ?? inferProjectRefFromPath(input.abs_path),
         source_host: input.source_host ?? hostname(),
+        ...(input.evidence_metadata ?? {}),
       }),
     },
     nowIso,
   );
 
-  return { ...result, body_cached: bodyText != null, body_error: bodyError };
+  return { ...result, body_cached: bodyText != null, body_error: bodyError, evidence_inserted: evidence.inserted };
 }
 
 export function mediaTypeFromPath(absPath: string): ArtifactMediaType {
