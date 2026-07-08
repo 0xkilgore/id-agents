@@ -237,6 +237,16 @@ export async function migrateSqlite(adapter: SqliteAdapter): Promise<void> {
       PRIMARY KEY (agent_id)
     );
 
+    CREATE TABLE IF NOT EXISTS logical_agent_identities (
+      team_id TEXT NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+      logical_agent TEXT NOT NULL,
+      display_name TEXT NOT NULL,
+      metadata TEXT,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      PRIMARY KEY (team_id, logical_agent)
+    );
+
     CREATE TABLE IF NOT EXISTS news_items (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       team_id TEXT NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
@@ -269,6 +279,8 @@ export async function migrateSqlite(adapter: SqliteAdapter): Promise<void> {
     );
 
     CREATE INDEX IF NOT EXISTS agents_team_name_idx ON agents(team_id, name);
+    CREATE INDEX IF NOT EXISTS logical_agent_identities_team_idx
+      ON logical_agent_identities(team_id, logical_agent);
     CREATE INDEX IF NOT EXISTS news_items_agent_time_idx ON news_items(team_id, agent_id, timestamp);
     CREATE INDEX IF NOT EXISTS news_items_query_idx ON news_items(team_id, agent_id, query_id);
     CREATE INDEX IF NOT EXISTS agents_token_idx ON agents(token_id) WHERE token_id IS NOT NULL;
@@ -648,6 +660,20 @@ export async function migrateSqlite(adapter: SqliteAdapter): Promise<void> {
       auto_pause_reason      TEXT,
       updated_at             TEXT NOT NULL
     );
+  `);
+
+  adapter.exec(`
+    CREATE TABLE IF NOT EXISTS logical_agent_identities (
+      team_id TEXT NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+      logical_agent TEXT NOT NULL,
+      display_name TEXT NOT NULL,
+      metadata TEXT,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      PRIMARY KEY (team_id, logical_agent)
+    );
+    CREATE INDEX IF NOT EXISTS logical_agent_identities_team_idx
+      ON logical_agent_identities(team_id, logical_agent);
   `);
 
   try {

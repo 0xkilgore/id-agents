@@ -2,12 +2,22 @@
 
 import type { DbAdapter } from '../../db-adapter.js';
 import type { AgentsRepository } from '../../db-service.js';
-import type { AgentRow } from '../../types.js';
+import type { AgentRow, LogicalAgentIdentityRow } from '../../types.js';
 import { parseJsonObject, stringifyJson } from '../../db-json.js';
 import { parseAgentRef } from '../../../core/agent-identifier.js';
 
 export class SqliteAgentsRepo implements AgentsRepository {
   constructor(private db: DbAdapter) {}
+
+  private logicalIdentityMetadata(metadata: Record<string, unknown> | null | undefined): Record<string, unknown> {
+    const {
+      runtime_lane: _runtimeLane,
+      provider_lane: _providerLane,
+      exhausted_reason: _exhaustedReason,
+      ...logicalMetadata
+    } = metadata ?? {};
+    return logicalMetadata;
+  }
 
   // ---------------------------------------------------------------------------
   // Row helpers — parse JSON TEXT columns into JS objects on every read
@@ -36,6 +46,21 @@ export class SqliteAgentsRepo implements AgentsRepository {
       [agentId],
     );
     return this.parseRow(rows[0]);
+  }
+
+  async getLogicalIdentity(teamId: string, logicalAgent: string): Promise<LogicalAgentIdentityRow | null> {
+    const { rows } = await this.db.query(
+      `SELECT * FROM logical_agent_identities
+       WHERE team_id = ? AND logical_agent = ?
+       LIMIT 1`,
+      [teamId, logicalAgent],
+    );
+    const row = rows[0] as any;
+    if (!row) return null;
+    return {
+      ...row,
+      metadata: parseJsonObject(row.metadata),
+    };
   }
 
   async getByName(teamId: string, name: string): Promise<AgentRow | null> {
@@ -324,6 +349,39 @@ export class SqliteAgentsRepo implements AgentsRepository {
         agent.ssh_target ?? null,
       ],
     );
+    await this.upsertLogicalIdentityFromAgent(agent);
+  }
+
+  async upsertLogicalIdentityFromAgent(
+    agent: Pick<AgentRow, 'team_id' | 'name' | 'created_at'> & { metadata?: Record<string, unknown> | null },
+  ): Promise<void> {
+    const metadata = this.logicalIdentityMetadata(agent.metadata);
+    const logicalAgent =
+      typeof metadata.logical_agent === 'string' && metadata.logical_agent.trim()
+        ? metadata.logical_agent.trim()
+        : agent.name;
+    const displayName =
+      typeof metadata.display_name === 'string' && metadata.display_name.trim()
+        ? metadata.display_name.trim()
+        : logicalAgent;
+    const now = Date.now();
+    await this.db.query(
+      `INSERT INTO logical_agent_identities
+         (team_id, logical_agent, display_name, metadata, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?)
+       ON CONFLICT (team_id, logical_agent) DO UPDATE SET
+         display_name = excluded.display_name,
+         metadata = excluded.metadata,
+         updated_at = excluded.updated_at`,
+      [
+        agent.team_id,
+        logicalAgent,
+        displayName,
+        stringifyJson(metadata),
+        agent.created_at ?? now,
+        now,
+      ],
+    );
   }
 
   async upsert(
@@ -367,6 +425,12 @@ export class SqliteAgentsRepo implements AgentsRepository {
         agent.ssh_target ?? null,
       ],
     );
+    await this.upsertLogicalIdentityFromAgent({
+      team_id: agent.team_id,
+      name: agent.name,
+      metadata: agent.metadata ?? null,
+      created_at: agent.created_at ?? Date.now(),
+    });
   }
 
   async updateIdentity(
