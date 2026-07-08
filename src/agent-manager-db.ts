@@ -65,6 +65,7 @@ import {
   agentDoneAuthConfigFromEnv,
   authenticateAgentDone,
 } from './lib/agent-done-auth.js';
+import { migrateOutputsTables, registerArtifactPathDelivery } from './outputs/storage.js';
 import { type Db } from './db/db-service.js';
 import type { AgentRow, ScheduleDefinitionRow, TaskRow } from './db/types.js';
 import fetch from 'node-fetch';
@@ -168,7 +169,6 @@ import {
   verifyDoneClaims,
   makeDoneVerificationProbes,
 } from './dispatch-verification/done-verification.js';
-import { registerAgentDoneArtifact } from './outputs/storage.js';
 import { DispatchVerificationJob, jobConfigFromEnv } from './dispatch-verification/job.js';
 import {
   DispatchRecoveryService,
@@ -3890,61 +3890,58 @@ export class AgentManagerDb {
           });
         }
 
-        let registeredArtifactId: string | null = null;
+        // Fresh artifact delivery: /agent-done is the first reliable event that
+        // an output exists. Register the claimed path immediately so Desk /
+        // Recent Output can surface stable artifact metadata and explicit
+        // missing-body state without waiting for filesystem reconciliation.
         if (success) {
-          try {
-            const reactor = this.dispatchScheduler.reactor as unknown as {
-              getResult?: (dispatchPhid: string) => Promise<unknown>;
-            };
-            const persistedResult =
-              typeof reactor.getResult === 'function'
-                ? await reactor.getResult(doc.dispatch_phid)
+          const resultProjection: Record<string, unknown> | null =
+            body.result && typeof body.result === 'object'
+              ? (body.result as Record<string, unknown>)
+              : null;
+          const artifactPath =
+            typeof resultProjection?.artifact_path === 'string' && resultProjection.artifact_path.trim()
+              ? resultProjection.artifact_path.trim()
+              : typeof body.artifact_path === 'string' && body.artifact_path.trim()
+                ? body.artifact_path.trim()
                 : null;
-            const persistedResultObj =
-              persistedResult && typeof persistedResult === 'object'
-                ? (persistedResult as Record<string, unknown>)
-                : null;
-            const requestResultObj =
-              body.result && typeof body.result === 'object'
-                ? (body.result as Record<string, unknown>)
-                : null;
-            const artifactPath =
-              typeof persistedResultObj?.artifact_path === 'string' && persistedResultObj.artifact_path.trim()
-                ? persistedResultObj.artifact_path.trim()
-                : typeof requestResultObj?.artifact_path === 'string' && requestResultObj.artifact_path.trim()
-                  ? requestResultObj.artifact_path.trim()
-                  : typeof body.artifact_path === 'string' && body.artifact_path.trim()
-                    ? body.artifact_path.trim()
-                    : null;
-            if (artifactPath) {
+          if (artifactPath) {
+            try {
+              await migrateOutputsTables(this.db.adapter);
               const title =
-                typeof persistedResultObj?.tl_dr === 'string' && persistedResultObj.tl_dr.trim()
-                  ? persistedResultObj.tl_dr.trim()
-                  : typeof persistedResultObj?.title === 'string' && persistedResultObj.title.trim()
-                    ? persistedResultObj.title.trim()
-                    : typeof requestResultObj?.tl_dr === 'string' && requestResultObj.tl_dr.trim()
-                      ? requestResultObj.tl_dr.trim()
-                      : typeof requestResultObj?.title === 'string' && requestResultObj.title.trim()
-                        ? requestResultObj.title.trim()
-                        : null;
-              const registered = await registerAgentDoneArtifact(
+                typeof resultProjection?.title === 'string' && resultProjection.title.trim()
+                  ? resultProjection.title.trim()
+                  : typeof resultProjection?.tl_dr === 'string' && resultProjection.tl_dr.trim()
+                    ? resultProjection.tl_dr.trim()
+                    : doc.subject;
+              const projectRef =
+                typeof resultProjection?.project === 'string' && resultProjection.project.trim()
+                  ? resultProjection.project.trim()
+                  : typeof resultProjection?.project_ref === 'string' && resultProjection.project_ref.trim()
+                    ? resultProjection.project_ref.trim()
+                    : null;
+              const sourceHost =
+                typeof resultProjection?.source_host === 'string' && resultProjection.source_host.trim()
+                  ? resultProjection.source_host.trim()
+                  : null;
+              await registerArtifactPathDelivery(
                 this.db.adapter,
                 {
                   abs_path: artifactPath,
-                  agent: doc.to_agent,
-                  dispatch_id: doc.dispatch_phid,
-                  query_id: doc.query_id,
-                  title,
+                  agent: typeof body.agent === 'string' && body.agent.trim() ? body.agent.trim() : doc.to_agent,
                   produced_at: new Date().toISOString(),
+                  title,
+                  project_ref: projectRef,
+                  dispatch_ref: doc.dispatch_phid,
+                  source_host: sourceHost,
                 },
                 new Date().toISOString(),
               );
-              registeredArtifactId = registered.row.artifact_id;
+            } catch (err) {
+              this.managerLog(
+                `[agent-done] artifact registration failed for ${doc.dispatch_phid}: ${err instanceof Error ? err.message : String(err)}`,
+              );
             }
-          } catch (err) {
-            this.managerLog(
-              `[agent-done] artifact registration failed (continuing): ${err instanceof Error ? err.message : String(err)}`,
-            );
           }
         }
 
@@ -4007,7 +4004,6 @@ export class AgentManagerDb {
           state: success ? 'done' : 'failed',
           mode,
           promotion_warning: ('warning' in validation ? validation.warning : null) ?? null,
-          artifact_id: registeredArtifactId,
         });
       } catch (err) {
         return res.status(500).json({
@@ -11862,7 +11858,9 @@ export class AgentManagerDb {
         // comment routing rows. Filesystem reads are only fallback evidence.
         try {
           const { mountSurfacedArtifactsRoutes } = await import('./surfaced-artifacts/routes.js');
-          mountSurfacedArtifactsRoutes(this.managementApp, this.db.adapter);
+          mountSurfacedArtifactsRoutes(this.managementApp, this.db.adapter, {
+            resolveTeamId: async (req) => (await this.getTeam(req)).id,
+          });
           console.log('[Manager] Surfaced artifacts /ops/surfaced-artifacts route mounted');
         } catch (err) {
           console.warn('[Manager] Surfaced artifacts routes failed to mount:', err instanceof Error ? err.message : String(err));

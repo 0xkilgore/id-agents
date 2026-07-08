@@ -12,11 +12,13 @@
 import { createHash } from "node:crypto";
 import { promises as fsp } from "node:fs";
 import { basename as pathBasename, extname, sep } from "node:path";
+import { hostname } from "node:os";
 import type { DbAdapter } from "../db/db-adapter.js";
 import type {
   ArtifactAvailability,
   ArtifactCatalogRow,
   ArtifactDraftRow,
+  ArtifactMediaType,
   ArtifactOpRow,
   ArtifactOpType,
   ArtifactReviewStateRow,
@@ -34,6 +36,8 @@ export function artifactIdFromPath(absPath: string): string {
   const h = createHash("sha256").update(absPath).digest("hex").slice(0, 16);
   return `art-${h}`;
 }
+
+const MAX_CACHED_BODY_BYTES = 1_048_576;
 
 // ── DDL (idempotent) ───────────────────────────────────────────────
 
@@ -115,12 +119,11 @@ export async function migrateOutputsTables(adapter: DbAdapter): Promise<void> {
       availability  TEXT NOT NULL DEFAULT 'present',
       media_type    TEXT,
       content_hash  TEXT,
-      mtime_ms      REAL,
-      project       TEXT,
-      dispatch_id   TEXT,
-      registered_at TEXT,
-      cached_body   TEXT,
-      body_unavailable TEXT,
+      source_mtime  TEXT,
+      source_size   INTEGER,
+      project_ref   TEXT,
+      dispatch_ref  TEXT,
+      source_host   TEXT,
       source_badges TEXT NOT NULL DEFAULT '[]',
       reconciled_at TEXT,
       created_at    TEXT NOT NULL,
@@ -137,12 +140,11 @@ export async function migrateOutputsTables(adapter: DbAdapter): Promise<void> {
     "reconciled_at TEXT",
     "media_type TEXT",
     "content_hash TEXT",
-    "mtime_ms REAL",
-    "project TEXT",
-    "dispatch_id TEXT",
-    "registered_at TEXT",
-    "cached_body TEXT",
-    "body_unavailable TEXT",
+    "source_mtime TEXT",
+    "source_size INTEGER",
+    "project_ref TEXT",
+    "dispatch_ref TEXT",
+    "source_host TEXT",
   ]) {
     try {
       await exec(`ALTER TABLE artifacts ADD COLUMN ${col}`);
@@ -166,6 +168,21 @@ export async function migrateOutputsTables(adapter: DbAdapter): Promise<void> {
 
   await exec(`CREATE INDEX IF NOT EXISTS artifact_source_evidence_by_artifact ON artifact_source_evidence(artifact_id, source, observed_at DESC)`);
   await exec(`CREATE INDEX IF NOT EXISTS artifact_source_evidence_by_source_ref ON artifact_source_evidence(source, source_ref)`);
+
+  await exec(`
+    CREATE TABLE IF NOT EXISTS artifact_bodies (
+      artifact_id      TEXT PRIMARY KEY,
+      media_type       TEXT NOT NULL,
+      content_hash     TEXT,
+      source_mtime     TEXT,
+      source_size      INTEGER,
+      body_text        TEXT,
+      body_truncated   INTEGER NOT NULL DEFAULT 0,
+      body_error       TEXT,
+      cached_at        TEXT NOT NULL,
+      updated_at       TEXT NOT NULL
+    )
+  `);
 
   // CANE_DRAFT_ARTIFACTS — typed draft payload side-table, keyed by artifact_id
   // (one draft per artifact). draft_id is UNIQUE so a re-poll/re-register of the
@@ -228,8 +245,8 @@ export async function getArtifact(
 ): Promise<ArtifactCatalogRow | null> {
   const { rows } = await adapter.query<ArtifactCatalogRow>(
     `SELECT artifact_id, basename, agent, tag, abs_path, title, produced_at,
-            source, availability, media_type, content_hash, mtime_ms, project,
-            dispatch_id, registered_at, cached_body, body_unavailable,
+            source, availability, media_type, content_hash, source_mtime, source_size,
+            project_ref, dispatch_ref, source_host,
             source_badges, reconciled_at, created_at, updated_at
        FROM artifacts WHERE artifact_id = ?`,
     [artifactId],
@@ -276,8 +293,8 @@ export async function listArtifactCatalog(
   params.push(limit, offset);
   const { rows } = await adapter.query<ArtifactCatalogRow>(
     `SELECT artifact_id, basename, agent, tag, abs_path, title, produced_at,
-            source, availability, media_type, content_hash, mtime_ms, project,
-            dispatch_id, registered_at, cached_body, body_unavailable,
+            source, availability, media_type, content_hash, source_mtime, source_size,
+            project_ref, dispatch_ref, source_host,
             source_badges, reconciled_at, created_at, updated_at
        FROM artifacts${whereSql}
    ORDER BY produced_at DESC
@@ -316,8 +333,8 @@ export async function searchArtifacts(
   const offset = Math.max(opts.offset ?? 0, 0);
   const { rows } = await adapter.query<ArtifactCatalogRow>(
     `SELECT a.artifact_id, a.basename, a.agent, a.tag, a.abs_path, a.title, a.produced_at,
-            a.source, a.availability, a.media_type, a.content_hash, a.mtime_ms, a.project,
-            a.dispatch_id, a.registered_at, a.cached_body, a.body_unavailable,
+            a.source, a.availability, a.media_type, a.content_hash, a.source_mtime, a.source_size,
+            a.project_ref, a.dispatch_ref, a.source_host,
             a.source_badges, a.reconciled_at, a.created_at, a.updated_at
        FROM artifacts_fts
        JOIN artifacts a ON a.rowid = artifacts_fts.rowid
@@ -355,12 +372,11 @@ export async function registerArtifact(
       availability,
       media_type: req.media_type ?? null,
       content_hash: req.content_hash ?? null,
-      mtime_ms: req.mtime_ms ?? null,
-      project: req.project ?? null,
-      dispatch_id: req.dispatch_id ?? null,
-      registered_at: req.registered_at ?? null,
-      cached_body: req.cached_body ?? null,
-      body_unavailable: req.body_unavailable ?? null,
+      source_mtime: req.source_mtime ?? null,
+      source_size: req.source_size ?? null,
+      project_ref: req.project_ref ?? null,
+      dispatch_ref: req.dispatch_ref ?? null,
+      source_host: req.source_host ?? null,
       source_badges: sourceBadges,
       reconciled_at: reconciledAt,
       created_at: nowIso,
@@ -369,14 +385,14 @@ export async function registerArtifact(
     await adapter.query(
       `INSERT INTO artifacts
          (artifact_id, basename, agent, tag, abs_path, title, produced_at, source, availability,
-          media_type, content_hash, mtime_ms, project, dispatch_id, registered_at, cached_body, body_unavailable,
+          media_type, content_hash, source_mtime, source_size, project_ref, dispatch_ref, source_host,
           source_badges, reconciled_at, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         row.artifact_id, row.basename, row.agent, row.tag, row.abs_path,
         row.title, row.produced_at, row.source, row.availability,
-        row.media_type, row.content_hash, row.mtime_ms, row.project, row.dispatch_id,
-        row.registered_at, row.cached_body, row.body_unavailable,
+        row.media_type, row.content_hash, row.source_mtime, row.source_size,
+        row.project_ref, row.dispatch_ref, row.source_host,
         row.source_badges, row.reconciled_at, row.created_at, row.updated_at,
       ],
     );
@@ -409,14 +425,13 @@ export async function registerArtifact(
     produced_at: existing.produced_at, // first-writer wins
     source: nextSource,
     availability: req.availability ?? existing.availability,
-    media_type: req.media_type !== undefined ? req.media_type : existing.media_type ?? null,
-    content_hash: req.content_hash !== undefined ? req.content_hash : existing.content_hash ?? null,
-    mtime_ms: req.mtime_ms !== undefined ? req.mtime_ms : existing.mtime_ms ?? null,
-    project: req.project !== undefined ? req.project : existing.project ?? null,
-    dispatch_id: req.dispatch_id !== undefined ? req.dispatch_id : existing.dispatch_id ?? null,
-    registered_at: req.registered_at !== undefined ? req.registered_at : existing.registered_at ?? null,
-    cached_body: req.cached_body !== undefined ? req.cached_body : existing.cached_body ?? null,
-    body_unavailable: req.body_unavailable !== undefined ? req.body_unavailable : existing.body_unavailable ?? null,
+    media_type: req.media_type !== undefined ? (req.media_type ?? null) : existing.media_type,
+    content_hash: req.content_hash !== undefined ? (req.content_hash ?? null) : existing.content_hash,
+    source_mtime: req.source_mtime !== undefined ? (req.source_mtime ?? null) : existing.source_mtime,
+    source_size: req.source_size !== undefined ? (req.source_size ?? null) : existing.source_size,
+    project_ref: req.project_ref !== undefined ? (req.project_ref ?? null) : existing.project_ref,
+    dispatch_ref: req.dispatch_ref !== undefined ? (req.dispatch_ref ?? null) : existing.dispatch_ref,
+    source_host: req.source_host !== undefined ? (req.source_host ?? null) : existing.source_host,
     source_badges: JSON.stringify(mergedBadges),
     reconciled_at: req.reconciled_at ?? existing.reconciled_at,
     updated_at: nowIso,
@@ -424,117 +439,222 @@ export async function registerArtifact(
   await adapter.query(
     `UPDATE artifacts
        SET basename = ?, agent = ?, tag = ?, abs_path = ?, title = ?,
-           source = ?, availability = ?, media_type = ?, content_hash = ?, mtime_ms = ?,
-           project = ?, dispatch_id = ?, registered_at = ?, cached_body = ?, body_unavailable = ?,
+           source = ?, availability = ?, media_type = ?, content_hash = ?, source_mtime = ?,
+           source_size = ?, project_ref = ?, dispatch_ref = ?, source_host = ?,
            source_badges = ?, reconciled_at = ?, updated_at = ?
      WHERE artifact_id = ?`,
     [
       merged.basename, merged.agent, merged.tag, merged.abs_path, merged.title,
-      merged.source, merged.availability, merged.media_type, merged.content_hash, merged.mtime_ms,
-      merged.project, merged.dispatch_id, merged.registered_at, merged.cached_body, merged.body_unavailable,
-      merged.source_badges, merged.reconciled_at,
+      merged.source, merged.availability, merged.media_type, merged.content_hash,
+      merged.source_mtime, merged.source_size, merged.project_ref, merged.dispatch_ref,
+      merged.source_host, merged.source_badges, merged.reconciled_at,
       merged.updated_at, merged.artifact_id,
     ],
   );
   return { row: merged, inserted: false };
 }
 
-export interface AgentDoneArtifactRegistrationInput {
-  abs_path: string;
-  agent: string;
-  dispatch_id: string;
-  query_id?: string | null;
-  title?: string | null;
-  produced_at: string;
+export interface ArtifactBodyCacheRow {
+  artifact_id: string;
+  media_type: ArtifactMediaType;
+  content_hash: string | null;
+  source_mtime: string | null;
+  source_size: number | null;
+  body_text: string | null;
+  body_truncated: number;
+  body_error: string | null;
+  cached_at: string;
+  updated_at: string;
 }
 
-export async function registerAgentDoneArtifact(
+export async function getArtifactBodyCache(
   adapter: DbAdapter,
-  input: AgentDoneArtifactRegistrationInput,
+  artifactId: string,
+): Promise<ArtifactBodyCacheRow | null> {
+  const { rows } = await adapter.query<ArtifactBodyCacheRow>(
+    `SELECT artifact_id, media_type, content_hash, source_mtime, source_size,
+            body_text, body_truncated, body_error, cached_at, updated_at
+       FROM artifact_bodies
+      WHERE artifact_id = ?`,
+    [artifactId],
+  );
+  return rows[0] ?? null;
+}
+
+async function upsertArtifactBodyCache(
+  adapter: DbAdapter,
+  input: Omit<ArtifactBodyCacheRow, "cached_at" | "updated_at">,
   nowIso: string,
-): Promise<{ row: ArtifactCatalogRow; inserted: boolean }> {
-  const snapshot = await snapshotArtifactPath(input.abs_path);
-  return registerArtifact(
+): Promise<void> {
+  const existing = await getArtifactBodyCache(adapter, input.artifact_id);
+  if (!existing) {
+    await adapter.query(
+      `INSERT INTO artifact_bodies
+         (artifact_id, media_type, content_hash, source_mtime, source_size,
+          body_text, body_truncated, body_error, cached_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        input.artifact_id,
+        input.media_type,
+        input.content_hash,
+        input.source_mtime,
+        input.source_size,
+        input.body_text,
+        input.body_truncated,
+        input.body_error,
+        nowIso,
+        nowIso,
+      ],
+    );
+    return;
+  }
+  await adapter.query(
+    `UPDATE artifact_bodies
+        SET media_type = ?, content_hash = ?, source_mtime = ?, source_size = ?,
+            body_text = ?, body_truncated = ?, body_error = ?, updated_at = ?
+      WHERE artifact_id = ?`,
+    [
+      input.media_type,
+      input.content_hash,
+      input.source_mtime,
+      input.source_size,
+      input.body_text,
+      input.body_truncated,
+      input.body_error,
+      nowIso,
+      input.artifact_id,
+    ],
+  );
+}
+
+export async function registerArtifactPathDelivery(
+  adapter: DbAdapter,
+  input: {
+    abs_path: string;
+    agent: string;
+    produced_at: string;
+    title?: string | null;
+    project_ref?: string | null;
+    dispatch_ref?: string | null;
+    source_host?: string | null;
+  },
+  nowIso: string,
+): Promise<{ row: ArtifactCatalogRow; inserted: boolean; body_cached: boolean; body_error: string | null }> {
+  const artifactId = artifactIdFromPath(input.abs_path);
+  const mediaType = mediaTypeFromPath(input.abs_path);
+  let contentHash: string | null = null;
+  let sourceMtime: string | null = null;
+  let sourceSize: number | null = null;
+  let availability: ArtifactAvailability = "present";
+  let bodyText: string | null = null;
+  let bodyTruncated = 0;
+  let bodyError: string | null = null;
+
+  try {
+    const stat = await fsp.stat(input.abs_path);
+    if (!stat.isFile()) {
+      availability = "unknown";
+      sourceSize = stat.size;
+      sourceMtime = stat.mtime.toISOString();
+      bodyError = "not_file";
+    } else {
+      sourceSize = stat.size;
+      sourceMtime = stat.mtime.toISOString();
+      const size = Math.min(stat.size, MAX_CACHED_BODY_BYTES);
+      const buffer = await fsp.readFile(input.abs_path);
+      const fullBuffer = buffer;
+      contentHash = createHash("sha256").update(fullBuffer).digest("hex");
+      if (isRenderableMediaType(mediaType)) {
+        bodyText = fullBuffer.subarray(0, size).toString("utf8");
+        bodyTruncated = stat.size > MAX_CACHED_BODY_BYTES ? 1 : 0;
+      }
+    }
+  } catch (err) {
+    availability = "missing";
+    bodyError = typeof err === "object" && err && "code" in err ? String((err as { code?: unknown }).code) : "read_failed";
+  }
+
+  const result = await registerArtifact(
     adapter,
     {
+      artifact_id: artifactId,
       basename: pathBasename(input.abs_path),
       agent: input.agent,
-      tag: "agent-done",
       abs_path: input.abs_path,
       title: input.title ?? undefined,
       produced_at: input.produced_at,
       source: "agent-done",
-      availability: snapshot.exists ? "present" : "missing",
-      media_type: snapshot.media_type,
-      content_hash: snapshot.content_hash,
-      mtime_ms: snapshot.mtime_ms,
-      project: projectFromArtifactPath(input.abs_path),
-      dispatch_id: input.dispatch_id,
-      registered_at: nowIso,
-      cached_body: snapshot.cached_body,
-      body_unavailable: snapshot.body_unavailable,
+      availability,
+      media_type: mediaType,
+      content_hash: contentHash,
+      source_mtime: sourceMtime,
+      source_size: sourceSize,
+      project_ref: input.project_ref ?? inferProjectRefFromPath(input.abs_path),
+      dispatch_ref: input.dispatch_ref ?? null,
+      source_host: input.source_host ?? hostname(),
       source_badges: ["agent-done"],
-      reconciled_at: nowIso,
     },
     nowIso,
   );
-}
 
-async function snapshotArtifactPath(absPath: string): Promise<{
-  exists: boolean;
-  media_type: string;
-  content_hash: string | null;
-  mtime_ms: number | null;
-  cached_body: string | null;
-  body_unavailable: string | null;
-}> {
-  const mediaType = mediaTypeFromPath(absPath);
-  try {
-    const stat = await fsp.stat(absPath);
-    if (!stat.isFile()) {
-      return { exists: false, media_type: mediaType, content_hash: null, mtime_ms: stat.mtimeMs, cached_body: null, body_unavailable: "not_file" };
-    }
-    const data = await fsp.readFile(absPath);
-    const contentHash = createHash("sha256").update(data).digest("hex");
-    const cachedBody = isCacheableBodyMediaType(mediaType) ? data.toString("utf8") : null;
-    return {
-      exists: true,
+  await upsertArtifactBodyCache(
+    adapter,
+    {
+      artifact_id: artifactId,
       media_type: mediaType,
       content_hash: contentHash,
-      mtime_ms: stat.mtimeMs,
-      cached_body: cachedBody,
-      body_unavailable: cachedBody == null ? "non_text_media_type" : null,
-    };
-  } catch (err) {
-    const code = typeof err === "object" && err && "code" in err ? String((err as { code?: unknown }).code) : "read_failed";
-    return { exists: false, media_type: mediaType, content_hash: null, mtime_ms: null, cached_body: null, body_unavailable: code };
-  }
+      source_mtime: sourceMtime,
+      source_size: sourceSize,
+      body_text: bodyText,
+      body_truncated: bodyTruncated,
+      body_error: bodyError,
+    },
+    nowIso,
+  );
+
+  await upsertArtifactSourceEvidence(
+    adapter,
+    {
+      artifact_id: artifactId,
+      source: "agent-done",
+      source_ref: input.dispatch_ref ?? input.abs_path,
+      observed_at: nowIso,
+      metadata_json: JSON.stringify({
+        abs_path: input.abs_path,
+        media_type: mediaType,
+        content_hash: contentHash,
+        source_mtime: sourceMtime,
+        source_size: sourceSize,
+        project_ref: input.project_ref ?? inferProjectRefFromPath(input.abs_path),
+        source_host: input.source_host ?? hostname(),
+      }),
+    },
+    nowIso,
+  );
+
+  return { ...result, body_cached: bodyText != null, body_error: bodyError };
 }
 
-function isCacheableBodyMediaType(mediaType: string): boolean {
-  return mediaType.startsWith("text/") || mediaType === "application/json";
-}
-
-function mediaTypeFromPath(absPath: string): string {
+export function mediaTypeFromPath(absPath: string): ArtifactMediaType {
   const ext = extname(absPath).toLowerCase();
-  if ([".md", ".markdown", ".mdx"].includes(ext)) return "text/markdown; charset=utf-8";
-  if ([".html", ".htm"].includes(ext)) return "text/html; charset=utf-8";
+  if ([".md", ".markdown", ".mdx"].includes(ext)) return "text/markdown";
+  if ([".html", ".htm"].includes(ext)) return "text/html";
+  if ([".txt", ".log", ".csv", ".tsv", ".yaml", ".yml"].includes(ext)) return "text/plain";
   if (ext === ".json") return "application/json";
-  if ([".txt", ".log", ".csv", ".tsv", ".yaml", ".yml"].includes(ext)) return "text/plain; charset=utf-8";
-  if (ext === ".png") return "image/png";
-  if (ext === ".jpg" || ext === ".jpeg") return "image/jpeg";
-  if (ext === ".gif") return "image/gif";
-  if (ext === ".webp") return "image/webp";
-  if (ext === ".svg") return "image/svg+xml";
-  return "application/octet-stream";
+  if (ext === ".pdf") return "application/pdf";
+  return "unknown";
 }
 
-function projectFromArtifactPath(absPath: string): string | null {
+export function isRenderableMediaType(mediaType: ArtifactMediaType): boolean {
+  return mediaType === "text/markdown" || mediaType === "text/html" || mediaType === "text/plain" || mediaType === "application/json";
+}
+
+function inferProjectRefFromPath(absPath: string): string | null {
   const parts = absPath.split(sep).filter(Boolean);
-  const outputIndex = parts.lastIndexOf("output");
-  if (outputIndex > 0) return parts[outputIndex - 1] ?? null;
   const codeIndex = parts.lastIndexOf("Code");
   if (codeIndex >= 0 && parts[codeIndex + 1]) return parts[codeIndex + 1];
+  const outputIndex = parts.lastIndexOf("output");
+  if (outputIndex > 0) return parts[outputIndex - 1];
   return null;
 }
 

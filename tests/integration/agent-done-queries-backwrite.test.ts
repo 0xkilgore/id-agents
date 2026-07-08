@@ -34,6 +34,7 @@ import { SqliteTasksRepo } from '../../src/db/repos/sqlite/tasks-repo.js';
 import { SqliteEventsRepo } from '../../src/db/repos/sqlite/events-repo.js';
 import { SqliteSubscriptionsRepo } from '../../src/db/repos/sqlite/subscriptions-repo.js';
 import { SqliteCheckinsRepo } from '../../src/db/repos/sqlite/checkins-repo.js';
+import { artifactIdFromPath, getArtifact, getArtifactBodyCache } from '../../src/outputs/storage.js';
 
 const TEAM = 'agent-done-queries-backwrite-test';
 
@@ -188,6 +189,56 @@ describe('POST /agent-done — queries-row back-write', () => {
     expect(after!.result).not.toBeNull();
     expect(after!.result!.artifact_path).toBe('/abs/path/to/output.md');
     expect(after!.result!.task).toBe('kapelle-architecture-review');
+  });
+
+  it('registers an agent-done artifact with stable detail/copy/download URLs and cached body metadata', async () => {
+    const { dispatch_phid, query_id } = await setupDispatchWithQueryRow();
+    const artifactPath = path.join(workDir, 'output', 'cash-flow-addendum.md');
+    fs.mkdirSync(path.dirname(artifactPath), { recursive: true });
+    fs.writeFileSync(artifactPath, '# Cash-Flow Preview Correction Addendum\n\nCOBRA and BOXX detail.\n');
+    const artifactId = artifactIdFromPath(artifactPath);
+
+    const res = await fetch(`${baseUrl}/agent-done`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Id-Team': TEAM },
+      body: JSON.stringify({
+        dispatch_id: dispatch_phid,
+        query_id,
+        success: true,
+        agent: 'finances',
+        result: {
+          artifact_path: artifactPath,
+          title: 'Cash-Flow Preview Correction Addendum - COBRA + BOXX LT Lots',
+          project: 'finances',
+          source_host: 'M4',
+        },
+      }),
+    });
+    expect(res.status).toBe(200);
+
+    const catalog = await getArtifact(db.adapter, artifactId);
+    expect(catalog).toMatchObject({
+      artifact_id: artifactId,
+      agent: 'finances',
+      project_ref: 'finances',
+      dispatch_ref: dispatch_phid,
+      source_host: 'M4',
+      media_type: 'text/markdown',
+      availability: 'present',
+      abs_path: artifactPath,
+    });
+    expect(catalog?.content_hash).toMatch(/^[a-f0-9]{64}$/);
+    expect(catalog?.source_mtime).toBeTruthy();
+
+    fs.unlinkSync(artifactPath);
+    const cached = await getArtifactBodyCache(db.adapter, artifactId);
+    expect(cached).toMatchObject({
+      artifact_id: artifactId,
+      media_type: 'text/markdown',
+      body_truncated: 0,
+      body_error: null,
+    });
+    expect(cached?.body_text).toContain('COBRA and BOXX detail');
   });
 
   it('marks the matching queries row as failed on success=false with the error string', async () => {

@@ -4,7 +4,15 @@ import type { DbAdapter } from "../db/db-adapter.js";
 import { projectFromPath } from "../outputs/entry-projection.js";
 import { artifactIdFromPath } from "../outputs/storage.js";
 import type {
+  ArtifactDeliveryFreshness,
   RecentFloodDiagnostic,
+  RawSurfacedArtifactRowKey,
+  SavedViewExecutionResult,
+  SavedViewFieldId,
+  SavedViewFieldRegistryEntry,
+  SavedViewUnsupportedFieldError,
+  SurfacedArtifactHealthEvent,
+  SurfacedArtifactsHealth,
   SurfacedArtifactsSavedView,
   SurfacedArtifactNeed,
   SurfacedArtifactRelevanceReason,
@@ -25,6 +33,12 @@ interface ArtifactRow {
   produced_at: string;
   source: ArtifactSource;
   availability: string;
+  media_type: string | null;
+  content_hash: string | null;
+  source_mtime: string | null;
+  source_host: string | null;
+  body_text: string | null;
+  body_error: string | null;
   updated_at: string;
   first_viewed_at: string | null;
   last_viewed_at: string | null;
@@ -96,30 +110,104 @@ const TRACK_RE = /\bT-[A-Z0-9][A-Z0-9_.-]*\b/g;
 
 export const SURFACED_ARTIFACTS_SAVED_VIEW: SurfacedArtifactsSavedView = {
   id: "surfaced-artifacts.v1.primary",
+  execution: "saved_view_backed",
   field_ids: [
-    "surfaced_artifacts.row.id",
-    "surfaced_artifacts.row.title",
-    "surfaced_artifacts.row.subtitle",
-    "surfaced_artifacts.row.work_item_ref",
-    "surfaced_artifacts.row.group_count",
-    "surfaced_artifacts.row.grouped_source_kinds",
-    "surfaced_artifacts.row.rank_score",
-    "surfaced_artifacts.row.status",
-    "surfaced_artifacts.row.relevance_reason",
-    "surfaced_artifacts.row.needs",
-    "surfaced_artifacts.row.artifact_ref",
-    "surfaced_artifacts.row.dispatch_ref",
-    "surfaced_artifacts.row.task_ref",
-    "surfaced_artifacts.row.project_ref",
-    "surfaced_artifacts.row.program_ref",
-    "surfaced_artifacts.row.track_ref",
-    "surfaced_artifacts.row.agent_name",
-    "surfaced_artifacts.row.created_at",
-    "surfaced_artifacts.row.updated_at",
-    "surfaced_artifacts.row.source_kind",
-    "surfaced_artifacts.row.source_label",
-    "surfaced_artifacts.row.visibility_proof",
+    "artifact.id",
+    "artifact.title",
+    "artifact.subtitle",
+    "artifact.workItemRef",
+    "artifact.groupCount",
+    "artifact.groupedSourceKinds",
+    "artifact.rankScore",
+    "artifact.status",
+    "artifact.relevanceReason",
+    "artifact.needs",
+    "artifact.artifactRef",
+    "artifact.dispatchRef",
+    "artifact.taskRef",
+    "artifact.projectRef",
+    "artifact.programRef",
+    "artifact.trackRef",
+    "artifact.agentName",
+    "artifact.createdAt",
+    "artifact.updatedAt",
+    "artifact.sourceKind",
+    "artifact.sourceLabel",
+    "artifact.visibility.discoveredBy",
+    "artifact.visibility.pathPresent",
+    "artifact.visibility.bodyRenderable",
+    "artifact.delivery.stableUrl",
+    "artifact.delivery.copyTextUrl",
+    "artifact.delivery.downloadUrl",
+    "artifact.delivery.mediaType",
+    "artifact.delivery.freshness",
+    "artifact.delivery.sourceHost",
+    "artifact.delivery.sourceMtime",
+    "artifact.delivery.contentHash",
+    "artifact.delivery.bodyCached",
+    "artifact.readState",
+    "artifact.tags",
+    "artifact.contentHash",
+    "artifact.hasComments",
+    "dispatch.id",
+    "dispatch.queryId",
+    "dispatch.title",
+    "dispatch.status",
+    "dispatch.agentId",
+    "dispatch.taskName",
+    "dispatch.createdAt",
+    "dispatch.queuedAt",
+    "dispatch.startedAt",
+    "dispatch.completedAt",
+    "dispatch.updatedAt",
+    "dispatch.needsOperator",
+    "dispatch.failureKind",
+    "dispatch.recoveryStatus",
+    "loop.id",
+    "loop.slug",
+    "loop.title",
+    "loop.status",
+    "loop.nextRunAt",
+    "loop.lastRunAt",
+    "loop.dueAt",
+    "loop.late",
+    "loop.deliveryStatus",
+    "user_task.id",
+    "user_task.title",
+    "user_task.status",
+    "user_task.owner",
+    "user_task.due",
+    "user_task.priority",
+    "user_task.source",
+    "user_task.context",
+    "user_task.projectRef",
+    "user_task.updatedAt",
   ],
+  field_registry: [],
+  raw_row_key_mapping: {
+    id: "artifact.id",
+    title: "artifact.title",
+    subtitle: "artifact.subtitle",
+    work_item_ref: "artifact.workItemRef",
+    group_count: "artifact.groupCount",
+    grouped_source_kinds: "artifact.groupedSourceKinds",
+    rank_score: "artifact.rankScore",
+    status: "artifact.status",
+    relevance_reason: "artifact.relevanceReason",
+    needs: "artifact.needs",
+    artifact_ref: "artifact.artifactRef",
+    dispatch_ref: "artifact.dispatchRef",
+    task_ref: "artifact.taskRef",
+    project_ref: "artifact.projectRef",
+    program_ref: "artifact.programRef",
+    track_ref: "artifact.trackRef",
+    agent_name: "artifact.agentName",
+    created_at: "artifact.createdAt",
+    updated_at: "artifact.updatedAt",
+    source_kind: "artifact.sourceKind",
+    source_label: "artifact.sourceLabel",
+    visibility_proof: "artifact.visibility.discoveredBy",
+  },
   diagnostic_field_ids: [
     "surfaced_artifacts.recent_flood.window_start",
     "surfaced_artifacts.recent_flood.window_end",
@@ -131,6 +219,102 @@ export const SURFACED_ARTIFACTS_SAVED_VIEW: SurfacedArtifactsSavedView = {
     "surfaced_artifacts.recent_flood.raw_rows",
   ],
 };
+
+SURFACED_ARTIFACTS_SAVED_VIEW.field_registry = buildFieldRegistry(SURFACED_ARTIFACTS_SAVED_VIEW.field_ids);
+
+const FIELD_IDS = new Set<SavedViewFieldId>(SURFACED_ARTIFACTS_SAVED_VIEW.field_ids);
+const RAW_TO_CANONICAL = SURFACED_ARTIFACTS_SAVED_VIEW.raw_row_key_mapping;
+
+export function validateSavedViewField(field: string): SavedViewUnsupportedFieldError | null {
+  if (FIELD_IDS.has(field as SavedViewFieldId)) return null;
+  const canonical = RAW_TO_CANONICAL[field as RawSurfacedArtifactRowKey];
+  return {
+    code: "unsupported_field",
+    field,
+    canonical_field: canonical,
+    message: canonical
+      ? `Raw SurfacedArtifactRow key "${field}" is not a saved-view field id; use "${canonical}".`
+      : `Unsupported saved-view field "${field}".`,
+  };
+}
+
+export function validateSavedViewPredicateFields(input: unknown): SavedViewUnsupportedFieldError[] {
+  const fields = collectPredicateFields(input);
+  const errors: SavedViewUnsupportedFieldError[] = [];
+  for (const field of fields) {
+    const error = validateSavedViewField(field);
+    if (error) errors.push(error);
+  }
+  return errors;
+}
+
+export function executeSurfacedArtifactsSavedView(
+  rows: SurfacedArtifactRow[],
+  predicate: unknown,
+  nowIso = new Date().toISOString(),
+): SavedViewExecutionResult<SurfacedArtifactRow> {
+  const errors = validateSavedViewPredicateFields(predicate);
+  return {
+    ok: errors.length === 0,
+    schema_version: "view-execution.v1",
+    view_id: SURFACED_ARTIFACTS_SAVED_VIEW.id,
+    generated_at: nowIso,
+    rows: errors.length === 0 ? rows : [],
+    count: errors.length === 0 ? rows.length : 0,
+    errors,
+  };
+}
+
+function buildFieldRegistry(fieldIds: SavedViewFieldId[]): SavedViewFieldRegistryEntry[] {
+  return fieldIds.map((id) => ({
+    id,
+    raw_row_key: rawKeyForCanonical(id),
+    value_type: fieldValueType(id),
+    operators: fieldOperators(id),
+  }));
+}
+
+function rawKeyForCanonical(id: SavedViewFieldId): RawSurfacedArtifactRowKey | undefined {
+  const found = Object.entries(SURFACED_ARTIFACTS_SAVED_VIEW.raw_row_key_mapping)
+    .find(([, canonical]) => canonical === id);
+  return found?.[0] as RawSurfacedArtifactRowKey | undefined;
+}
+
+function fieldValueType(id: SavedViewFieldId): SavedViewFieldRegistryEntry["value_type"] {
+  if (id.endsWith("At") || id === "task.due" || id === "work_item.due" || id === "user_task.due" || id === "dispatch.completedAt") return "timestamp";
+  if (id === "artifact.rankScore" || id === "artifact.groupCount" || id === "work_item.rank") return "number";
+  if (id === "artifact.groupedSourceKinds" || id === "artifact.tags") return "string[]";
+  if (id.includes(".has") || id === "loop.late" || id === "dispatch.needsOperator" || id === "artifact.visibility.pathPresent" || id === "artifact.visibility.bodyRenderable" || id === "artifact.delivery.bodyCached") return "boolean";
+  if (id.endsWith("status") || id.endsWith("Status") || id.endsWith("freshness") || id.endsWith("Freshness") || id === "artifact.needs") return "enum";
+  return "string";
+}
+
+function fieldOperators(id: SavedViewFieldId): SavedViewFieldRegistryEntry["operators"] {
+  const type = fieldValueType(id);
+  if (type === "number" || type === "timestamp") return ["eq", "neq", "exists", "gt", "gte", "lt", "lte"];
+  if (type === "string[]") return ["contains", "exists"];
+  if (type === "boolean") return ["eq", "neq", "exists"];
+  if (type === "enum") return ["eq", "neq", "in", "not_in", "exists"];
+  return ["eq", "neq", "in", "not_in", "contains", "exists"];
+}
+
+function collectPredicateFields(input: unknown): string[] {
+  const fields: string[] = [];
+  const walk = (node: unknown) => {
+    if (!node || typeof node !== "object") return;
+    if (Array.isArray(node)) {
+      node.forEach(walk);
+      return;
+    }
+    const record = node as Record<string, unknown>;
+    if (typeof record.field === "string") fields.push(record.field);
+    for (const key of ["and", "or", "not", "predicates", "filters", "where", "query"]) {
+      if (key in record) walk(record[key]);
+    }
+  };
+  walk(input);
+  return [...new Set(fields)];
+}
 
 export function isRawPrimaryTitle(value: string | null | undefined): boolean {
   const s = (value ?? "").trim();
@@ -215,7 +399,7 @@ export async function buildSurfacedArtifacts(
 export async function buildSurfacedArtifactsReadModel(
   adapter: DbAdapter,
   opts: BuildSurfacedArtifactsOptions = {},
-): Promise<{ rows: SurfacedArtifactRow[]; recent_flood: RecentFloodDiagnostic }> {
+): Promise<{ rows: SurfacedArtifactRow[]; recent_flood: RecentFloodDiagnostic; health: SurfacedArtifactsHealth }> {
   const primaryLimit = Math.min(Math.max(opts.limit ?? 5, 1), 7);
   const rawLimit = Math.min(Math.max(opts.rawLimit ?? 250, primaryLimit), 500);
   const readFile = opts.readFile ?? ((p: string) => fsp.readFile(p, "utf8"));
@@ -267,6 +451,15 @@ export async function buildSurfacedArtifactsReadModel(
         artifact_path_present: Boolean(artifact.abs_path),
         body_renderable: body.renderable,
       },
+      delivery: artifactDelivery(artifact.artifact_id, {
+        mediaType: artifact.media_type,
+        freshness: body.renderable ? "current" : artifact.body_error ? "error" : "body_unavailable",
+        sourceHost: artifact.source_host,
+        sourceMtime: artifact.source_mtime,
+        contentHash: artifact.content_hash,
+        bodyCached: Boolean(artifact.body_text),
+        bodyPreview: artifact.body_text?.slice(0, 1200) ?? body.text?.slice(0, 1200) ?? null,
+      }),
     }));
   }
 
@@ -314,6 +507,15 @@ export async function buildSurfacedArtifactsReadModel(
         artifact_path_present: Boolean(artifactPath),
         body_renderable: !missing,
       },
+      delivery: artifactDelivery(artifactPath ? artifactIdFromPath(artifactPath) : dispatch.dispatch_phid, {
+        mediaType: mediaTypeFromPathForDelivery(artifactPath),
+        freshness: missing ? "body_unavailable" : "current",
+        sourceHost: null,
+        sourceMtime: null,
+        contentHash: null,
+        bodyCached: false,
+        bodyPreview: body.text?.slice(0, 1200) ?? null,
+      }),
     }));
   }
 
@@ -346,28 +548,114 @@ export async function buildSurfacedArtifactsReadModel(
       source_kind: "comment",
       source_label: sourceLabel([comment.agent, title]),
       visibility_proof: { discovered_by: "comment", artifact_path_present: Boolean(comment.abs_path) },
+      delivery: artifactDelivery(comment.artifact_id, {
+        mediaType: mediaTypeFromPathForDelivery(comment.abs_path),
+        freshness: comment.abs_path ? "current" : "body_unavailable",
+        sourceHost: null,
+        sourceMtime: null,
+        contentHash: null,
+        bodyCached: false,
+        bodyPreview: null,
+      }),
     }));
   }
 
   const grouped = groupPrimaryRows(rawRows);
   const rows = grouped.sort(compareSurfacedRows).slice(0, primaryLimit);
-  return { rows, recent_flood: buildRecentFloodDiagnostic(rawRows, grouped, rows, { rawLimit, primaryLimit }) };
+  return {
+    rows,
+    recent_flood: buildRecentFloodDiagnostic(rawRows, grouped, rows, { rawLimit, primaryLimit }),
+    health: buildSurfacedArtifactsHealth(rawRows, rows),
+  };
+}
+
+export function buildSurfacedArtifactsHealth(
+  rawRows: SurfacedArtifactRow[],
+  primaryRows: SurfacedArtifactRow[],
+): SurfacedArtifactsHealth {
+  const primaryKeys = new Set<string>();
+  for (const row of primaryRows) {
+    primaryKeys.add(row.id);
+    if (row.artifact_ref) primaryKeys.add(`artifact_ref:${row.artifact_ref}`);
+    if (row.dispatch_ref) primaryKeys.add(`dispatch_ref:${row.dispatch_ref}`);
+    if (row.work_item_ref) primaryKeys.add(`work_item_ref:${row.work_item_ref}`);
+  }
+
+  const events = new Map<string, SurfacedArtifactHealthEvent>();
+  for (const row of rawRows) {
+    if (row.visibility_proof.artifact_path_present && row.visibility_proof.body_renderable === false) {
+      addHealthEvent(events, {
+        topic: "artifact.surfacing.body_unavailable",
+        severity: "error",
+        subject_kind: row.dispatch_ref ? "dispatch" : row.artifact_ref ? "artifact" : "surfaced_artifact",
+        subject_id: row.dispatch_ref ?? row.artifact_ref ?? row.id,
+        message: `Artifact body is unavailable for ${row.title}`,
+        data: healthEventData(row),
+      });
+    }
+
+    const inPrimary = primaryKeys.has(row.id)
+      || (row.artifact_ref ? primaryKeys.has(`artifact_ref:${row.artifact_ref}`) : false)
+      || (row.dispatch_ref ? primaryKeys.has(`dispatch_ref:${row.dispatch_ref}`) : false)
+      || (row.work_item_ref ? primaryKeys.has(`work_item_ref:${row.work_item_ref}`) : false);
+    if (!inPrimary && (row.source_kind === "artifact" || row.source_kind === "dispatch_done")) {
+      addHealthEvent(events, {
+        topic: "artifact.surfacing.missing_from_primary",
+        severity: "warning",
+        subject_kind: row.dispatch_ref ? "dispatch" : row.artifact_ref ? "artifact" : "surfaced_artifact",
+        subject_id: row.dispatch_ref ?? row.artifact_ref ?? row.id,
+        message: `Fresh artifact is not present in the primary Desk/Recent Output rows: ${row.title}`,
+        data: healthEventData(row),
+      });
+    }
+  }
+
+  const ordered = [...events.values()].sort((a, b) => {
+    const severity = (a.severity === "error" ? 0 : 1) - (b.severity === "error" ? 0 : 1);
+    return severity || a.topic.localeCompare(b.topic) || a.subject_id.localeCompare(b.subject_id);
+  });
+  return {
+    ok: ordered.length === 0,
+    surface: "ops.surfaced-artifacts.health",
+    event_count: ordered.length,
+    events: ordered,
+  };
+}
+
+function addHealthEvent(events: Map<string, SurfacedArtifactHealthEvent>, event: SurfacedArtifactHealthEvent): void {
+  events.set(`${event.topic}:${event.subject_kind}:${event.subject_id}`, event);
+}
+
+function healthEventData(row: SurfacedArtifactRow): SurfacedArtifactHealthEvent["data"] {
+  return {
+    artifact_ref: row.artifact_ref,
+    dispatch_ref: row.dispatch_ref,
+    row_id: row.id,
+    title: row.title,
+    source_kind: row.source_kind,
+    discovered_by: row.visibility_proof.discovered_by,
+    artifact_path_present: row.visibility_proof.artifact_path_present,
+    body_renderable: row.visibility_proof.body_renderable,
+  };
 }
 
 async function readArtifacts(adapter: DbAdapter, limit: number): Promise<ArtifactRow[]> {
   const { rows } = await adapter.query<ArtifactRow>(
     `SELECT a.artifact_id, a.basename, a.agent, a.tag, a.abs_path, a.title,
-            a.produced_at, a.source, a.availability, a.updated_at,
+            a.produced_at, a.source, a.availability, a.media_type, a.content_hash,
+            a.source_mtime, a.source_host, b.body_text, b.body_error, a.updated_at,
             rs.first_viewed_at, rs.last_viewed_at, rs.approved_at, rs.rejected_at,
             rs.shipped_at,
             SUM(CASE WHEN op.op_type = 'comment_recorded' THEN 1 ELSE 0 END) AS comment_count,
             SUM(CASE WHEN op.op_type = 'comment_routed' THEN 1 ELSE 0 END) AS routed_count,
             MAX(op.ts) AS last_op_at
        FROM artifacts a
+  LEFT JOIN artifact_bodies b ON b.artifact_id = a.artifact_id
   LEFT JOIN artifact_review_state rs ON rs.artifact_id = a.artifact_id
   LEFT JOIN artifact_operations op ON op.artifact_id = a.artifact_id
    GROUP BY a.artifact_id, a.basename, a.agent, a.tag, a.abs_path, a.title,
-            a.produced_at, a.source, a.availability, a.updated_at,
+            a.produced_at, a.source, a.availability, a.media_type, a.content_hash,
+            a.source_mtime, a.source_host, b.body_text, b.body_error, a.updated_at,
             rs.first_viewed_at, rs.last_viewed_at, rs.approved_at, rs.rejected_at, rs.shipped_at
    ORDER BY COALESCE(MAX(op.ts), a.produced_at) DESC
       LIMIT ?`,
@@ -675,6 +963,49 @@ function discoveredBy(source: ArtifactSource): SurfacedArtifactRow["visibility_p
   if (source === "delivery-log") return "delivery_log";
   if (source === "filesystem") return "filesystem";
   return "manual_fixture";
+}
+
+function artifactDelivery(
+  artifactId: string,
+  input: {
+    mediaType: string | null | undefined;
+    freshness: ArtifactDeliveryFreshness;
+    sourceHost: string | null | undefined;
+    sourceMtime: string | null | undefined;
+    contentHash: string | null | undefined;
+    bodyCached: boolean;
+    bodyPreview: string | null | undefined;
+  },
+): SurfacedArtifactRow["delivery"] {
+  return {
+    stable_url: `/artifacts/${encodeURIComponent(artifactId)}/detail`,
+    copy_text_url: `/artifacts/${encodeURIComponent(artifactId)}/copy-text`,
+    download_url: `/artifacts/${encodeURIComponent(artifactId)}/download`,
+    media_type: normalizeDeliveryMediaType(input.mediaType),
+    freshness: input.freshness,
+    source_host: input.sourceHost ?? null,
+    source_mtime: input.sourceMtime ?? null,
+    content_hash: input.contentHash ?? null,
+    body_cached: input.bodyCached,
+    body_preview: input.bodyPreview ?? null,
+  };
+}
+
+function mediaTypeFromPathForDelivery(path: string | null | undefined): SurfacedArtifactRow["delivery"]["media_type"] {
+  const ext = extname(path ?? "").toLowerCase();
+  if (ext === ".md" || ext === ".markdown") return "text/markdown";
+  if (ext === ".html" || ext === ".htm") return "text/html";
+  if (ext === ".txt") return "text/plain";
+  if (ext === ".json") return "application/json";
+  if (ext === ".pdf") return "application/pdf";
+  return "unknown";
+}
+
+function normalizeDeliveryMediaType(value: string | null | undefined): SurfacedArtifactRow["delivery"]["media_type"] {
+  if (value === "text/markdown" || value === "text/html" || value === "text/plain" || value === "application/json" || value === "application/pdf") {
+    return value;
+  }
+  return "unknown";
 }
 
 function truncate(s: string, max: number): string {

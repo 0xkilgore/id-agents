@@ -9,6 +9,7 @@ import {
   countOperations,
   deriveStatus,
   getArtifact,
+  getArtifactBodyCache,
   getArtifactDraft,
   getReviewState,
   listArtifactSourceEvidence,
@@ -68,7 +69,7 @@ export async function buildArtifactDetail(
   if (!catalog && !review && !draft && !fallbackPath) return null;
 
   const syntheticCatalog = catalog ?? syntheticCatalogFromPath(ref.artifactId, fallbackPath, nowIso);
-  const body = await readDetailBody(syntheticCatalog, draft);
+  const body = await readDetailBody(adapter, syntheticCatalog, draft);
   if (!catalog && !review && !draft && body.kind === "missing") return null;
   const render = renderMetadata(syntheticCatalog, body);
   const entry = syntheticCatalog ? artifactRowToEntry(syntheticCatalog, review, ops) : null;
@@ -77,6 +78,11 @@ export async function buildArtifactDetail(
   const latestTimeline = timeline[timeline.length - 1] ?? null;
   const latestComment = comments[comments.length - 1] ?? null;
   const availability = syntheticCatalog?.availability ?? availabilityFromBody(body, catalog);
+  const stableUrl = `/artifacts/${encodeURIComponent(ref.artifactId)}/detail`;
+  const copyTextUrl = `/artifacts/${encodeURIComponent(ref.artifactId)}/copy-text`;
+  const downloadUrl = `/artifacts/${encodeURIComponent(ref.artifactId)}/download`;
+  const bodyRenderable = body.text != null && ["markdown", "html", "text", "json"].includes(body.kind);
+  const freshness = bodyRenderable ? "current" : body.kind === "missing" || body.kind === "unavailable" ? "body_unavailable" : "current";
   const localVisualState = artifactDetailVisualState({
     availability,
     body,
@@ -92,6 +98,9 @@ export async function buildArtifactDetail(
     requested_ref: ref.requestedRef,
     resolved_from: ref.resolvedFrom,
     displayTitle,
+    stableUrl,
+    copyTextUrl,
+    downloadUrl,
     metadata: {
       artifact_id: ref.artifactId,
       display_title: displayTitle,
@@ -104,11 +113,11 @@ export async function buildArtifactDetail(
       availability,
       media_type: syntheticCatalog?.media_type ?? null,
       content_hash: syntheticCatalog?.content_hash ?? null,
-      mtime_ms: syntheticCatalog?.mtime_ms ?? null,
-      project: syntheticCatalog?.project ?? null,
-      dispatch_id: syntheticCatalog?.dispatch_id ?? null,
-      registered_at: syntheticCatalog?.registered_at ?? null,
-      body_unavailable: syntheticCatalog?.body_unavailable ?? null,
+      source_mtime: syntheticCatalog?.source_mtime ?? null,
+      source_size: syntheticCatalog?.source_size ?? null,
+      project_ref: syntheticCatalog?.project_ref ?? null,
+      dispatch_ref: syntheticCatalog?.dispatch_ref ?? null,
+      source_host: syntheticCatalog?.source_host ?? null,
       source_badges: parseSourceBadges(syntheticCatalog?.source_badges),
       reconciled_at: syntheticCatalog?.reconciled_at ?? null,
       created_at: syntheticCatalog?.created_at ?? null,
@@ -117,6 +126,18 @@ export async function buildArtifactDetail(
     },
     body,
     render,
+    delivery: {
+      artifactId: ref.artifactId,
+      stableUrl,
+      copyTextUrl,
+      downloadUrl,
+      sourcePath: syntheticCatalog?.abs_path ?? null,
+      bodyRenderable,
+      bodyPreview: body.text ? body.text.slice(0, 1200) : null,
+      bodyUnavailable: !bodyRenderable,
+      freshness,
+      discoveredBy: discoveredBy(syntheticCatalog),
+    },
     review: {
       state: review,
       status,
@@ -186,6 +207,13 @@ function syntheticCatalogFromPath(
     produced_at: nowIso,
     source: "filesystem",
     availability: "unknown",
+    media_type: null,
+    content_hash: null,
+    source_mtime: null,
+    source_size: null,
+    project_ref: null,
+    dispatch_ref: null,
+    source_host: null,
     source_badges: JSON.stringify(["filesystem"]),
     reconciled_at: null,
     created_at: nowIso,
@@ -194,6 +222,7 @@ function syntheticCatalogFromPath(
 }
 
 async function readDetailBody(
+  adapter: DbAdapter,
   catalog: ArtifactCatalogRow | null,
   draft: ReturnType<typeof parseDraftPayload>,
 ): Promise<ArtifactDetailBody> {
@@ -210,11 +239,10 @@ async function readDetailBody(
   if (!catalog?.abs_path) {
     return { kind: "unavailable", text: null, bytes: null, truncated: false, source: "none", error: null };
   }
-  const cachedBody = catalog.cached_body;
+  let fileReadError: string | null = null;
   try {
     const stat = await fsp.stat(catalog.abs_path);
     if (!stat.isFile()) {
-      if (cachedBody != null) return cachedDetailBody(catalog, "not_file");
       return { kind: "unavailable", text: null, bytes: stat.size, truncated: false, source: "file", error: "not_file" };
     }
     const ext = extname(catalog.abs_path).toLowerCase();
@@ -239,13 +267,21 @@ async function readDetailBody(
       await handle.close();
     }
   } catch (err) {
-    if (cachedBody != null) {
-      const code = typeof err === "object" && err && "code" in err ? String((err as { code?: unknown }).code) : "read_failed";
-      return cachedDetailBody(catalog, code);
-    }
     const code = typeof err === "object" && err && "code" in err ? String((err as { code?: unknown }).code) : "read_failed";
-    return { kind: catalog.body_unavailable ? "unavailable" : "missing", text: null, bytes: null, truncated: false, source: "file", error: catalog.body_unavailable ?? code };
+    fileReadError = code;
   }
+  const cached = await getArtifactBodyCache(adapter, catalog.artifact_id).catch(() => null);
+  if (cached?.body_text != null) {
+    return {
+      kind: bodyKindFromMediaType(cached.media_type),
+      text: cached.body_text,
+      bytes: cached.source_size,
+      truncated: cached.body_truncated === 1,
+      source: "artifact_body_cache",
+      error: cached.body_error,
+    };
+  }
+  return { kind: "missing", text: null, bytes: null, truncated: false, source: "file", error: fileReadError ?? "read_failed" };
 }
 
 function bodyKindFromExtension(ext: string): ArtifactDetailBody["kind"] {
@@ -257,16 +293,12 @@ function bodyKindFromExtension(ext: string): ArtifactDetailBody["kind"] {
   return "binary";
 }
 
-function cachedDetailBody(catalog: ArtifactCatalogRow, error: string): ArtifactDetailBody {
-  const text = catalog.cached_body ?? "";
-  return {
-    kind: bodyKindFromExtension(extname(catalog.abs_path).toLowerCase()),
-    text,
-    bytes: Buffer.byteLength(text, "utf8"),
-    truncated: false,
-    source: "file",
-    error: `cached_after_${error}`,
-  };
+function bodyKindFromMediaType(mediaType: string): ArtifactDetailBody["kind"] {
+  if (mediaType === "text/markdown") return "markdown";
+  if (mediaType === "text/html") return "html";
+  if (mediaType === "application/json") return "json";
+  if (mediaType === "text/plain") return "text";
+  return "unavailable";
 }
 
 function renderMetadata(catalog: ArtifactCatalogRow | null, body: ArtifactDetailBody): ArtifactDetailRender {
@@ -326,4 +358,11 @@ function availabilityFromBody(
   if (body.kind === "missing") return "missing";
   if (body.source === "file") return "present";
   return "unknown";
+}
+
+function discoveredBy(catalog: ArtifactCatalogRow | null): "agent_done" | "artifact_register" | "filesystem_reconcile" | "manual_fixture" {
+  if (catalog?.source === "agent-done") return "agent_done";
+  if (catalog?.source === "filesystem") return "filesystem_reconcile";
+  if (catalog?.source === "manual") return "manual_fixture";
+  return "artifact_register";
 }

@@ -121,6 +121,14 @@ export interface ArtifactReviewStateRow {
 // catalog row with availability=present|missing.
 export type ArtifactAvailability = "present" | "missing" | "unknown";
 
+export type ArtifactMediaType =
+  | "text/markdown"
+  | "text/html"
+  | "text/plain"
+  | "application/json"
+  | "application/pdf"
+  | "unknown";
+
 // Returned by GET /outputs/inbox — minimal summary per row.
 // The "inbox" framing: artifacts the operator needs to look at.
 // Filter rules in storage.ts: never-viewed | viewed-not-approved | approved-not-shipped.
@@ -158,14 +166,13 @@ export interface ArtifactCatalogRow {
   produced_at: string;          // ISO from delivery-log timestamp
   source: "delivery-log" | "agent-done" | "manual" | "filesystem";
   availability: ArtifactAvailability;
-  media_type?: string | null;
-  content_hash?: string | null;
-  mtime_ms?: number | null;
-  project?: string | null;
-  dispatch_id?: string | null;
-  registered_at?: string | null;
-  cached_body?: string | null;
-  body_unavailable?: string | null;
+  media_type: ArtifactMediaType | null;
+  content_hash: string | null;
+  source_mtime: string | null;
+  source_size: number | null;
+  project_ref: string | null;
+  dispatch_ref: string | null;
+  source_host: string | null;
   // T11.7: JSON array of the distinct sources that have observed this artifact
   // (e.g. ["filesystem","agent-done"]) — the console's source badges.
   source_badges: string;
@@ -199,14 +206,13 @@ export interface RegisterArtifactRequest {
   produced_at: string;          // ISO
   source?: "delivery-log" | "agent-done" | "manual" | "filesystem";
   availability?: ArtifactAvailability; // defaults to "present" — caller may say "missing"
-  media_type?: string | null;
+  media_type?: ArtifactMediaType;
   content_hash?: string | null;
-  mtime_ms?: number | null;
-  project?: string | null;
-  dispatch_id?: string | null;
-  registered_at?: string | null;
-  cached_body?: string | null;
-  body_unavailable?: string | null;
+  source_mtime?: string | null;
+  source_size?: number | null;
+  project_ref?: string | null;
+  dispatch_ref?: string | null;
+  source_host?: string | null;
 }
 
 export interface RegisterArtifactResponse {
@@ -527,7 +533,7 @@ export interface ArtifactDetailBody {
   text: string | null;
   bytes: number | null;
   truncated: boolean;
-  source: "file" | "cane_draft" | "none";
+  source: "file" | "artifact_body_cache" | "cane_draft" | "none";
   error: string | null;
 }
 
@@ -547,13 +553,13 @@ export interface ArtifactDetailMetadata {
   abs_path: string | null;
   source: ArtifactCatalogRow["source"] | null;
   availability: ArtifactAvailability;
-  media_type?: string | null;
-  content_hash?: string | null;
-  mtime_ms?: number | null;
-  project?: string | null;
-  dispatch_id?: string | null;
-  registered_at?: string | null;
-  body_unavailable?: string | null;
+  media_type: ArtifactMediaType | null;
+  content_hash: string | null;
+  source_mtime: string | null;
+  source_size: number | null;
+  project_ref: string | null;
+  dispatch_ref: string | null;
+  source_host: string | null;
   source_badges: string[];
   reconciled_at: string | null;
   created_at: string | null;
@@ -581,6 +587,19 @@ export interface ArtifactDetailProvenanceSummary {
   evidence: ArtifactSourceEvidenceRow[];
 }
 
+export interface ArtifactDeliveryLinks {
+  artifactId: string;
+  stableUrl: string;
+  copyTextUrl: string;
+  downloadUrl: string;
+  sourcePath: string | null;
+  bodyRenderable: boolean;
+  bodyPreview: string | null;
+  bodyUnavailable: boolean;
+  freshness: "current" | "syncing" | "stale" | "event_gap" | "body_unavailable" | "error";
+  discoveredBy: "agent_done" | "artifact_register" | "filesystem_reconcile" | "manual_fixture";
+}
+
 export interface ArtifactDetailResponse {
   ok: true;
   schema_version: "artifact.detail.v1";
@@ -589,9 +608,13 @@ export interface ArtifactDetailResponse {
   requested_ref: string;
   resolved_from: "artifact_id" | "encoded_path" | "path";
   displayTitle: string;
+  stableUrl: string;
+  copyTextUrl: string;
+  downloadUrl: string;
   metadata: ArtifactDetailMetadata;
   body: ArtifactDetailBody;
   render: ArtifactDetailRender;
+  delivery: ArtifactDeliveryLinks;
   review: ArtifactDetailReviewSummary;
   comments: ArtifactComment[];
   timeline: ArtifactTimelineEvent[];

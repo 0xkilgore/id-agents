@@ -10,6 +10,8 @@ import {
   humanTitleFromParts,
   isRawPrimaryTitle,
   SURFACED_ARTIFACTS_SAVED_VIEW,
+  validateSavedViewField,
+  validateSavedViewPredicateFields,
 } from "../../src/surfaced-artifacts/read-model.js";
 
 const NOW = "2026-07-07T12:00:00.000Z";
@@ -115,6 +117,36 @@ describe("buildSurfacedArtifacts", () => {
     files.clear();
   });
 
+  it("publishes the canonical dotted saved-view field registry and maps raw row keys without accepting them as predicates", () => {
+    expect(SURFACED_ARTIFACTS_SAVED_VIEW).toMatchObject({
+      id: "surfaced-artifacts.v1.primary",
+      execution: "saved_view_backed",
+      field_ids: expect.arrayContaining([
+        "artifact.projectRef",
+        "artifact.agentName",
+        "artifact.relevanceReason",
+        "dispatch.id",
+        "loop.nextRunAt",
+        "user_task.title",
+      ]),
+      raw_row_key_mapping: expect.objectContaining({
+        project_ref: "artifact.projectRef",
+        agent_name: "artifact.agentName",
+        relevance_reason: "artifact.relevanceReason",
+      }),
+    });
+    expect(SURFACED_ARTIFACTS_SAVED_VIEW.field_ids).not.toContain("project_ref");
+    expect(validateSavedViewField("artifact.projectRef")).toBeNull();
+    expect(validateSavedViewPredicateFields({ op: "eq", field: "project_ref", value: "kapelle" })).toEqual([
+      {
+        code: "unsupported_field",
+        field: "project_ref",
+        canonical_field: "artifact.projectRef",
+        message: 'Raw SurfacedArtifactRow key "project_ref" is not a saved-view field id; use "artifact.projectRef".',
+      },
+    ]);
+  });
+
   it("emits the row shape and orders relevance before freshness", async () => {
     const criticalPath = "/Users/kilgore/Dropbox/Code/trinity/output/2026-06-02-zach-meeting-prep.md";
     files.set(criticalPath, "# Zach meeting - scan-before-you-walk-in prep\n\nBody");
@@ -139,6 +171,12 @@ describe("buildSurfacedArtifacts", () => {
       rank_score: expect.any(Number),
       group_count: 1,
       visibility_proof: { discovered_by: "delivery_log", artifact_path_present: true, body_renderable: true },
+      delivery: expect.objectContaining({
+        stable_url: `/artifacts/${encodeURIComponent(artifactIdForSurfacingPath(criticalPath))}/detail`,
+        copy_text_url: `/artifacts/${encodeURIComponent(artifactIdForSurfacingPath(criticalPath))}/copy-text`,
+        download_url: `/artifacts/${encodeURIComponent(artifactIdForSurfacingPath(criticalPath))}/download`,
+        freshness: "current",
+      }),
     });
     expect(rows.find((r) => r.dispatch_ref === "phid:disp-missing")?.relevance_reason).toBe("blocked_or_stale");
   });
@@ -159,6 +197,62 @@ describe("buildSurfacedArtifacts", () => {
       title: "Renderable closeout",
       visibility_proof: { discovered_by: "agent_done", artifact_path_present: true, body_renderable: true },
     });
+  });
+
+  it("emits fail-loud health events for unreadable bodies and rows missing from the primary surface", async () => {
+    files.set("/tmp/current.md", "# Current surfaced artifact\n\nReadable.");
+    files.set("/tmp/suppressed.md", "# Suppressed readable artifact\n\nReadable but outside the cap.");
+    await seedDone(adapter, {
+      dispatch_phid: "phid:disp-current",
+      subject: "Current surfaced artifact",
+      completed_at: "2026-07-07T12:10:00.000Z",
+      updated_at: "2026-07-07T12:10:00.000Z",
+      artifact_path: "/tmp/current.md",
+    });
+    await seedDone(adapter, {
+      dispatch_phid: "phid:disp-unreadable",
+      subject: "Unreadable registered artifact",
+      completed_at: "2026-07-07T12:09:00.000Z",
+      updated_at: "2026-07-07T12:09:00.000Z",
+      artifact_path: "/tmp/vanished.md",
+    });
+    await seedDone(adapter, {
+      dispatch_phid: "phid:disp-suppressed",
+      subject: "Suppressed readable artifact",
+      completed_at: "2026-07-07T12:08:00.000Z",
+      updated_at: "2026-07-07T12:08:00.000Z",
+      artifact_path: "/tmp/suppressed.md",
+    });
+
+    const model = await buildSurfacedArtifactsReadModel(adapter, { limit: 1, readFile });
+    expect(model.health.ok).toBe(false);
+    expect(model.health.surface).toBe("ops.surfaced-artifacts.health");
+    expect(model.health.events).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        topic: "artifact.surfacing.body_unavailable",
+        severity: "error",
+        subject_kind: "dispatch",
+        subject_id: "phid:disp-unreadable",
+        data: expect.objectContaining({
+          dispatch_ref: "phid:disp-unreadable",
+          artifact_ref: "/tmp/vanished.md",
+          discovered_by: "agent_done",
+          body_renderable: false,
+        }),
+      }),
+      expect.objectContaining({
+        topic: "artifact.surfacing.missing_from_primary",
+        severity: "warning",
+        subject_kind: "dispatch",
+        subject_id: "phid:disp-suppressed",
+        data: expect.objectContaining({
+          dispatch_ref: "phid:disp-suppressed",
+          artifact_ref: "/tmp/suppressed.md",
+          discovered_by: "agent_done",
+          body_renderable: true,
+        }),
+      }),
+    ]));
   });
 
   it("surfaces comment-needs-routing rows and drops routed comments", async () => {
@@ -387,22 +481,24 @@ This program should be queued as the Local-First Project/Artifact Surfacing prog
     });
   });
 
-  it("registers row fields as stable saved-view ids", () => {
+  it("registers canonical saved-view ids for surfaced row fields", () => {
     expect(SURFACED_ARTIFACTS_SAVED_VIEW).toMatchObject({
       id: "surfaced-artifacts.v1.primary",
       field_ids: expect.arrayContaining([
-        "surfaced_artifacts.row.title",
-        "surfaced_artifacts.row.status",
-        "surfaced_artifacts.row.relevance_reason",
-        "surfaced_artifacts.row.project_ref",
-        "surfaced_artifacts.row.program_ref",
-        "surfaced_artifacts.row.track_ref",
-        "surfaced_artifacts.row.dispatch_ref",
+        "artifact.title",
+        "artifact.status",
+        "artifact.relevanceReason",
+        "artifact.projectRef",
+        "artifact.programRef",
+        "artifact.trackRef",
+        "artifact.dispatchRef",
+        "artifact.delivery.copyTextUrl",
       ]),
       diagnostic_field_ids: expect.arrayContaining([
         "surfaced_artifacts.recent_flood.source_data",
         "surfaced_artifacts.recent_flood.raw_rows",
       ]),
     });
+    expect(SURFACED_ARTIFACTS_SAVED_VIEW.field_ids).not.toContain("surfaced_artifacts.row.project_ref");
   });
 });

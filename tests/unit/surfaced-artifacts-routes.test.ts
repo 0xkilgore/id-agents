@@ -11,6 +11,7 @@ async function boot(): Promise<{ base: string; server: Server; adapter: SqliteAd
   const adapter = new SqliteAdapter(":memory:");
   await migrateSqlite(adapter);
   await migrateOutputsTables(adapter);
+  await adapter.query(`INSERT INTO teams (id, name) VALUES ('default', 'default')`);
   const app = express();
   app.use(express.json());
   mountSurfacedArtifactsRoutes(app, adapter);
@@ -57,7 +58,9 @@ describe("GET /ops/surfaced-artifacts", () => {
       count: 1,
       saved_view: {
         id: "surfaced-artifacts.v1.primary",
-        field_ids: expect.arrayContaining(["surfaced_artifacts.row.title", "surfaced_artifacts.row.status"]),
+        execution: "saved_view_backed",
+        field_ids: expect.arrayContaining(["artifact.title", "artifact.status", "artifact.projectRef"]),
+        raw_row_key_mapping: expect.objectContaining({ project_ref: "artifact.projectRef" }),
       },
     });
     expect(body.rows[0]).toMatchObject({
@@ -69,6 +72,13 @@ describe("GET /ops/surfaced-artifacts", () => {
       group_count: 1,
       source_kind: "artifact",
       visibility_proof: { discovered_by: "manual_fixture", artifact_path_present: true, body_renderable: false },
+      delivery: expect.objectContaining({
+        stable_url: "/artifacts/art-route/detail",
+        copy_text_url: "/artifacts/art-route/copy-text",
+        download_url: "/artifacts/art-route/download",
+        freshness: "body_unavailable",
+        body_cached: false,
+      }),
     });
     expect(body.recent_flood).toMatchObject({
       total_raw_count: 1,
@@ -77,5 +87,64 @@ describe("GET /ops/surfaced-artifacts", () => {
       source_data: { raw_limit: 250, primary_limit: 5, raw_row_count: 1, primary_row_count: 1, capped: false },
     });
     expect(body.recent_flood.raw_rows).toHaveLength(1);
+    expect(body.health).toMatchObject({
+      ok: false,
+      surface: "ops.surfaced-artifacts.health",
+      event_count: 1,
+      events: [
+        expect.objectContaining({
+          topic: "artifact.surfacing.body_unavailable",
+          severity: "error",
+          subject_kind: "artifact",
+          subject_id: "/tmp/does-not-need-to-exist.md",
+        }),
+      ],
+    });
+
+    const eventRows = await b.adapter.query<{ topic: string; subject_id: string; data: string }>(
+      `SELECT topic, subject_id, data FROM event_log ORDER BY seq ASC`,
+    );
+    expect(eventRows.rows).toHaveLength(1);
+    expect(eventRows.rows[0]).toMatchObject({
+      topic: "artifact.surfacing.body_unavailable",
+      subject_id: "/tmp/does-not-need-to-exist.md",
+    });
+
+    const second = await fetch(`${b.base}/ops/surfaced-artifacts`);
+    expect(second.status).toBe(200);
+    const afterRefresh = await b.adapter.query<{ c: number | string }>(
+      `SELECT COUNT(*) AS c FROM event_log WHERE topic = 'artifact.surfacing.body_unavailable'`,
+    );
+    expect(Number(afterRefresh.rows[0]?.c ?? 0)).toBe(1);
+  });
+
+  it("rejects raw snake_case predicate fields through the saved-view execution route", async () => {
+    const b = await boot();
+    server = b.server;
+
+    const res = await fetch(`${b.base}/ops/views/surfaced-artifacts.v1.primary/execute`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        query: { op: "eq", field: "project_ref", value: "kapelle" },
+      }),
+    });
+
+    expect(res.status).toBe(422);
+    const body = await res.json() as any;
+    expect(body).toMatchObject({
+      ok: false,
+      schema_version: "view-execution.v1",
+      view_id: "surfaced-artifacts.v1.primary",
+      rows: [],
+      count: 0,
+      errors: [
+        {
+          code: "unsupported_field",
+          field: "project_ref",
+          canonical_field: "artifact.projectRef",
+        },
+      ],
+    });
   });
 });

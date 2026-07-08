@@ -26,6 +26,7 @@ import {
   backfillCatalogFromDeliveryLog,
   countOperations,
   getArtifact,
+  getArtifactBodyCache,
   getArtifactDraft,
   getReviewState,
   listArtifactCatalog,
@@ -795,6 +796,54 @@ export function mountOutputsRoutes(
     }
   });
 
+  app.get('/artifacts/:id/copy-text', async (req: Request<{ id: string }>, res: Response) => {
+    try {
+      const ref = resolveArtifactDetailRef(req.params.id);
+      const { detail } = await getArtifactDetailCached(ref);
+      const text = detail?.body.text ?? (await getArtifactBodyCache(adapter, ref.artifactId))?.body_text ?? null;
+      if (text == null) {
+        return res.status(404).json({
+          ok: false,
+          code: 'body_unavailable',
+          artifact_id: ref.artifactId,
+          error: 'artifact body is unavailable for copy',
+        });
+      }
+      res.type('text/plain; charset=utf-8').send(text);
+    } catch (err) {
+      res.status(500).json({ ok: false, error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  app.get('/artifacts/:id/download', async (req: Request<{ id: string }>, res: Response) => {
+    try {
+      const ref = resolveArtifactDetailRef(req.params.id);
+      const catalog = await getArtifact(adapter, ref.artifactId);
+      if (catalog?.abs_path) {
+        try {
+          await fsp.access(catalog.abs_path);
+          return res.download(catalog.abs_path, catalog.basename);
+        } catch {
+          // Fall through to cached body below.
+        }
+      }
+      const cached = await getArtifactBodyCache(adapter, ref.artifactId);
+      if (cached?.body_text == null) {
+        return res.status(404).json({
+          ok: false,
+          code: 'body_unavailable',
+          artifact_id: ref.artifactId,
+          error: 'artifact source and cached body are unavailable for download',
+        });
+      }
+      const filename = catalog?.basename ?? `${ref.artifactId}.txt`;
+      res.setHeader('content-disposition', `attachment; filename="${filename.replace(/"/g, '')}"`);
+      res.type(cached.media_type === 'text/html' ? 'text/html; charset=utf-8' : 'text/plain; charset=utf-8').send(cached.body_text);
+    } catch (err) {
+      res.status(500).json({ ok: false, error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
   // ── GET /artifacts/:id/review ──────────────────────────────────────
 
   app.get('/artifacts/:id/review', async (req: Request<{ id: string }>, res: Response) => {
@@ -855,6 +904,13 @@ export function mountOutputsRoutes(
         produced_at: String(body.produced_at),
         source: body.source === 'delivery-log' || body.source === 'manual' ? body.source : 'agent-done',
         availability: body.availability === 'missing' || body.availability === 'unknown' ? body.availability : 'present',
+        media_type: typeof body.media_type === 'string' ? body.media_type as RegisterArtifactRequest['media_type'] : undefined,
+        content_hash: typeof body.content_hash === 'string' ? body.content_hash : undefined,
+        source_mtime: typeof body.source_mtime === 'string' ? body.source_mtime : undefined,
+        source_size: typeof body.source_size === 'number' ? body.source_size : undefined,
+        project_ref: typeof body.project_ref === 'string' ? body.project_ref : undefined,
+        dispatch_ref: typeof body.dispatch_ref === 'string' ? body.dispatch_ref : undefined,
+        source_host: typeof body.source_host === 'string' ? body.source_host : undefined,
       };
       const { row, inserted } = await registerArtifact(adapter, payload, new Date().toISOString());
       invalidateArtifactDetail(row.artifact_id);
