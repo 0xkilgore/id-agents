@@ -37,6 +37,7 @@ import {
 } from './lib/claude-auth-store.js';
 import { buildTasksEntriesEnvelope, taskRowToEntry } from './tasks-readmodel/entry-projection.js';
 import { classifyTaskBand, extractTaskScheduleFacts, summarizeTaskRows, todayIso } from './tasks-readmodel/bands.js';
+import { summarizeTaskReconciliation, taskReconciliationFacts } from './task-reconciliation/currentness.js';
 import {
   buildNeedsChrisQueue,
   type ClarificationInput,
@@ -7589,7 +7590,13 @@ export class AgentManagerDb {
         for (const t of tasks) {
           results.push(await this.buildTaskResult(t, teamId, today));
         }
-        res.json({ ok: true, tasks: results, today, summary: summarizeTaskRows(tasks, today) });
+        res.json({
+          ok: true,
+          tasks: results,
+          today,
+          summary: summarizeTaskRows(tasks, today),
+          task_reconciliation: summarizeTaskReconciliation(tasks, { today }),
+        });
       } catch (err: any) {
         console.error('[Manager] Error in GET /tasks:', err);
         res.status(500).json({ error: err?.message || 'Internal server error' });
@@ -8430,12 +8437,16 @@ export class AgentManagerDb {
     const links = await this.db.tasks.listEventLinksForTask(task.id);
     const shortId = task.uuid ? `#${task.uuid.replace(/-/g, '').slice(0, 8)}` : null;
     const facts = extractTaskScheduleFacts(task);
+    const reconciliation = taskReconciliationFacts(task, { today });
 
     return {
       name: task.name,
       uuid: task.uuid,
       shortId,
       title: task.title,
+      display_title: reconciliation.title.display_title,
+      full_title: reconciliation.title.full_title,
+      title_audit: reconciliation.title,
       description: task.description,
       status: task.status,
       track: task.track ?? '(unassigned)',
@@ -8444,6 +8455,7 @@ export class AgentManagerDb {
       done: facts.done,
       archived: facts.archived,
       band: classifyTaskBand(facts, today),
+      currentness: reconciliation.currentness,
       ownerName,
       teamName,
       linkedEvents: links.map(l => l.schedule_id),

@@ -23,6 +23,8 @@ import {
   type TaskBandSummary,
 } from "./bands.js";
 import type { TaskEntry } from "./entry.js";
+import { summarizeTaskReconciliation, taskReconciliationFacts } from "../task-reconciliation/currentness.js";
+import type { TaskReconciliationSummary } from "../task-reconciliation/currentness.js";
 
 /** Convert a stored epoch timestamp (seconds OR milliseconds) to ISO-8601. */
 function epochToIso(value: number): string {
@@ -107,12 +109,15 @@ export function taskRowToEntry(
   const updatedBy: ActorRef = owner ?? createdBy;
   const facts = extractTaskScheduleFacts(row);
   const band = classifyTaskBand(facts, today);
+  const reconciliation = taskReconciliationFacts(row, { today });
 
   return {
     phid: row.uuid || row.id,
     kind: "task",
     schema_version: 1,
     display_id: row.name,
+    display_title: reconciliation.title.display_title,
+    full_title: reconciliation.title.full_title,
     title: row.title,
     task_status: row.status,
     body_markdown: row.description ?? "",
@@ -129,6 +134,8 @@ export function taskRowToEntry(
     updated_at: epochToIso(row.updated_at),
     updated_by: updatedBy,
     completed_at: row.completed_at != null ? epochToIso(row.completed_at) : null,
+    currentness: reconciliation.currentness,
+    title_audit: reconciliation.title,
     source_dispatch_phid: null,
     links: [],
     provenance: taskProvenance(row, createdBy, updatedBy, owner),
@@ -144,7 +151,12 @@ export function buildTasksEntriesEnvelope(
   rows: TaskRow[],
   agentNames: Map<string, string>,
   page: { limit: number; offset: number; today?: string },
-): ReadModelEnvelope<TaskEntry> & { summary: TaskBandSummary; bands: Array<TaskBand<TaskEntry>>; today: string } {
+): ReadModelEnvelope<TaskEntry> & {
+  summary: TaskBandSummary;
+  task_reconciliation: TaskReconciliationSummary;
+  bands: Array<TaskBand<TaskEntry>>;
+  today: string;
+} {
   const today = page.today ?? todayIso();
   const items = rows
     .slice(page.offset, page.offset + page.limit)
@@ -158,6 +170,7 @@ export function buildTasksEntriesEnvelope(
     limit: page.limit,
     offset: page.offset,
     summary: summarizeTaskRows(rows, today),
+    task_reconciliation: summarizeTaskReconciliation(rows, { today }),
     bands: buildTaskBands(items, (item) => item.band),
     source: { read_path: "substrate", projection: "task_entries" },
     parity: { status: "unchecked" },

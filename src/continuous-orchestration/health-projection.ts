@@ -52,8 +52,16 @@ export interface OrchestrationQueueQualityProjection {
   duplicate_or_noop_backfill: number;
   suppressed_by_dedupe: number;
   blocked_or_failed: number;
+  task_action_receipts: TaskActionReceiptCounts;
   top_noise_patterns: OrchestrationQueueNoisePattern[];
   explanation: string;
+}
+
+export interface TaskActionReceiptCounts {
+  routed: number;
+  failed: number;
+  needs_chris: number;
+  consumed: number;
 }
 
 interface DispatchRow {
@@ -197,6 +205,7 @@ async function readQueueQualityProjection(
     duplicate_or_noop_backfill: noise.duplicateOrNoop,
     suppressed_by_dedupe: noise.suppressedByDedupe,
     blocked_or_failed: blockedOrFailed,
+    task_action_receipts: noise.taskActionReceipts,
     top_noise_patterns: noise.topPatterns,
     explanation,
   };
@@ -247,15 +256,18 @@ function classifyArtifactNoise(rows: ArtifactCommentNoiseRow[]): {
   duplicateOrNoop: number;
   suppressedByDedupe: number;
   retryableRouteFailures: number;
+  taskActionReceipts: TaskActionReceiptCounts;
   topPatterns: OrchestrationQueueNoisePattern[];
 } {
   const groups = new Map<string, { count: number; examples: string[]; pattern: string }>();
   let duplicateOrNoop = 0;
   let retryableRouteFailures = 0;
+  const taskActionReceipts: TaskActionReceiptCounts = { routed: 0, failed: 0, needs_chris: 0, consumed: 0 };
 
   for (const row of rows) {
     const payload = parseJson(row.payload_json);
     const routeStatus = parseRouteStatus(payload?.route_status);
+    countTaskActionReceipt(taskActionReceipts, routeStatus);
     if (routeStatus?.retryable) retryableRouteFailures += 1;
     if (!isNoopAckRoute(routeStatus)) continue;
 
@@ -279,7 +291,24 @@ function classifyArtifactNoise(rows: ArtifactCommentNoiseRow[]): {
     .slice(0, 5)
     .map((group) => ({ pattern: group.pattern, count: group.count, examples: group.examples }));
 
-  return { duplicateOrNoop, suppressedByDedupe, retryableRouteFailures, topPatterns };
+  return { duplicateOrNoop, suppressedByDedupe, retryableRouteFailures, taskActionReceipts, topPatterns };
+}
+
+function countTaskActionReceipt(counts: TaskActionReceiptCounts, routeStatus: ParsedRouteStatus | null): void {
+  if (!routeStatus) return;
+  if (routeStatus.routed) counts.routed += 1;
+  else if (routeStatus.retryable || routeStatus.error) counts.failed += 1;
+  else if (routeStatus.needs_chris) counts.needs_chris += 1;
+  else if (
+    routeStatus.skipped === "acknowledged" ||
+    routeStatus.skipped === "approval_signal" ||
+    routeStatus.skipped === "already_consumed" ||
+    routeStatus.skipped === "consumed" ||
+    routeStatus.route_kind === "acknowledgement" ||
+    routeStatus.route_kind === "approval_signal"
+  ) {
+    counts.consumed += 1;
+  }
 }
 
 function isNoopAckRoute(routeStatus: ParsedRouteStatus | null): routeStatus is ParsedRouteStatus {
@@ -298,6 +327,8 @@ interface ParsedRouteStatus {
   retryable: boolean;
   target_agent: string | null;
   skipped: string | null;
+  error: string | null;
+  needs_chris: boolean;
   dispatch: { dispatch_phid?: string | null } | null;
   task_triage_id: string | null;
 }
@@ -314,6 +345,8 @@ function parseRouteStatus(value: unknown): ParsedRouteStatus | null {
     retryable: v.retryable === true,
     target_agent: typeof v.target_agent === "string" ? v.target_agent : null,
     skipped: typeof v.skipped === "string" ? v.skipped : null,
+    error: typeof v.error === "string" && v.error.trim() !== "" ? v.error : null,
+    needs_chris: v.needs_chris === true || v.requires_chris === true || v.skipped === "needs_chris",
     dispatch,
     task_triage_id: firstString(v.task_triage_id, v.taskTriageId, v.triage_id, v.triageId),
   };

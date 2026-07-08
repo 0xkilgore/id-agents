@@ -6,6 +6,7 @@
 // primitives so the two substrate feeds share one contract.
 
 import type { ActorRef, AssociationEdge, EntryProvenance, PHID } from "../outputs/entry.js";
+import type { TaskCurrentness, TaskTitleAudit } from "../task-reconciliation/currentness.js";
 
 export type { ReadModelEnvelope } from "../outputs/entry.js";
 
@@ -20,6 +21,10 @@ export interface TaskEntry {
   schema_version: 1;
   /** The operator-facing kebab handle (`tasks.name`). */
   display_id: string;
+  /** Concise title for task lanes; capped at 90 chars by default. */
+  display_title: string;
+  /** Full stored title retained for detail panes and audit. */
+  full_title: string;
   title: string;
   task_status: "todo" | "doing" | "done";
   /** Task description; empty string when none. */
@@ -41,6 +46,10 @@ export interface TaskEntry {
   updated_at: string;
   updated_by: ActorRef;
   completed_at: string | null;
+  /** Deterministic task-reconciliation currentness facts for console lanes. */
+  currentness: TaskCurrentness;
+  /** Title compaction audit: reversible because the full title is retained. */
+  title_audit: TaskTitleAudit;
   /** The dispatch this task originated from, when known (null until linked). */
   source_dispatch_phid: string | null;
   /** Typed associations to other entries (e.g. derived_from). Empty in v0. */

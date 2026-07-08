@@ -238,6 +238,12 @@ describe("orchestration health projection", () => {
       actionable_ready: 0,
       duplicate_or_noop_backfill: 3,
       suppressed_by_dedupe: 1,
+      task_action_receipts: {
+        routed: 0,
+        failed: 0,
+        needs_chris: 0,
+        consumed: 3,
+      },
     });
     expect(health.queue_quality.explanation).toContain("duplicate/no-op artifact acknowledgement");
     expect(health.queue_quality.top_noise_patterns[0]).toMatchObject({
@@ -309,6 +315,86 @@ describe("orchestration health projection", () => {
       count: 2,
       examples: ["art:triage:ack.md#1", "art:triage:ack.md#3"],
     });
+  });
+
+  it("counts task note/comment action receipts by routed, failed, needs-Chris, and consumed state", async () => {
+    await migrateOutputsTables(adapter);
+    await insertArtifact("art:triage:receipts.md", "roger");
+
+    await insertCommentOp({
+      artifact_id: "art:triage:receipts.md",
+      actor: "user:chris",
+      body: "route",
+      reaction: "comment",
+      route_status: {
+        route_kind: "task_note",
+        routed: true,
+        retryable: false,
+        target_agent: "roger",
+        dispatch: { dispatch_phid: "phid:disp-routed" },
+        skipped: null,
+        error: null,
+        updated_at: "2026-07-01T15:00:00.000Z",
+      },
+    });
+    await insertCommentOp({
+      artifact_id: "art:triage:receipts.md",
+      actor: "user:chris",
+      body: "route fail",
+      reaction: "comment",
+      route_status: {
+        route_kind: "task_note",
+        routed: false,
+        retryable: true,
+        target_agent: "roger",
+        dispatch: null,
+        skipped: null,
+        error: "agent unavailable",
+        updated_at: "2026-07-01T15:01:00.000Z",
+      },
+    });
+    await insertCommentOp({
+      artifact_id: "art:triage:receipts.md",
+      actor: "user:chris",
+      body: "needs decision",
+      reaction: "comment",
+      route_status: {
+        route_kind: "task_note",
+        routed: false,
+        retryable: false,
+        target_agent: null,
+        dispatch: null,
+        skipped: "needs_chris",
+        error: null,
+        updated_at: "2026-07-01T15:02:00.000Z",
+      },
+    });
+    await insertCommentOp({
+      artifact_id: "art:triage:receipts.md",
+      actor: "user:chris",
+      body: "already handled",
+      reaction: "acknowledged",
+      route_status: {
+        route_kind: "task_note",
+        routed: false,
+        retryable: false,
+        target_agent: "roger",
+        dispatch: null,
+        skipped: "already_consumed",
+        error: null,
+        updated_at: "2026-07-01T15:03:00.000Z",
+      },
+    });
+
+    const health = await readOrchestrationHealthProjection(adapter, "default");
+
+    expect(health.queue_quality.task_action_receipts).toEqual({
+      routed: 1,
+      failed: 1,
+      needs_chris: 1,
+      consumed: 1,
+    });
+    expect(health.queue_quality.blocked_or_failed).toBe(1);
   });
 });
 

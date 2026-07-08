@@ -34,12 +34,27 @@ describe("taskRowToEntry", () => {
     expect(e.kind).toBe("task");
     expect(e.schema_version).toBe(1);
     expect(e.display_id).toBe("audit-contracts-apr");
+    expect(e.display_title).toBe("Audit contracts (April)");
+    expect(e.full_title).toBe("Audit contracts (April)");
     expect(e.title).toBe("Audit contracts (April)");
     expect(e.task_status).toBe("doing");
     expect(e.body_markdown).toBe("look at the Q2 contracts");
     expect(e.owner).toEqual({ type: "agent", id: "regina" });
     expect(e.created_by).toEqual({ type: "agent", id: "roger" });
     expect(e.track).toBe("T-CKPT");
+    expect(e.currentness.bucket).toBe("blocked_or_failed");
+    expect(e.title_audit).toMatchObject({ compacted: false, max_chars: 90 });
+  });
+
+  it("retains full long titles while exposing a compact display title", () => {
+    const longTitle =
+      "This is a stale task with an unnecessarily long title that should be compacted for task lanes while retaining detail";
+    const e = taskRowToEntry({ ...ROW, title: longTitle }, new Map(), "2026-07-08");
+
+    expect(e.display_title.length).toBeLessThanOrEqual(90);
+    expect(e.display_title).not.toBe(longTitle);
+    expect(e.full_title).toBe(longTitle);
+    expect(e.title_audit.full_title).toBe(longTitle);
   });
 
   it("defaults track to '(unassigned)' when the row carries none", () => {
@@ -148,6 +163,11 @@ describe("buildTasksEntriesEnvelope", () => {
     expect(env.count).toBe(3);
     expect(env.limit).toBe(50);
     expect(env.items.every((i) => i.kind === "task")).toBe(true);
+    expect(env.task_reconciliation).toMatchObject({
+      actionable_ready: 0,
+      blocked_or_failed: 3,
+      duplicate_or_noop: 0,
+    });
   });
 
   it("applies limit/offset to the (caller-ordered) rows", () => {
