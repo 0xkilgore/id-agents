@@ -1,12 +1,22 @@
 // SPDX-License-Identifier: MIT
 
 import type { AgentsRepository } from '../../db-service.js';
-import type { AgentRow } from '../../types.js';
+import type { AgentRow, LogicalAgentIdentityRow } from '../../types.js';
 import type { DbAdapter } from '../../db-adapter.js';
 import { parseAgentRef } from '../../../core/agent-identifier.js';
 
 export class PgAgentsRepo implements AgentsRepository {
   constructor(private readonly db: DbAdapter) {}
+
+  private logicalIdentityMetadata(metadata: Record<string, unknown> | null | undefined): Record<string, unknown> {
+    const {
+      runtime_lane: _runtimeLane,
+      provider_lane: _providerLane,
+      exhausted_reason: _exhaustedReason,
+      ...logicalMetadata
+    } = metadata ?? {};
+    return logicalMetadata;
+  }
 
   // ---------------------------------------------------------------------------
   // Single-row lookups
@@ -16,6 +26,16 @@ export class PgAgentsRepo implements AgentsRepository {
     const r = await this.db.query<AgentRow>(
       `SELECT * FROM agents WHERE id = $1 AND deleted_at IS NULL`,
       [agentId],
+    );
+    return r.rows[0] || null;
+  }
+
+  async getLogicalIdentity(teamId: string, logicalAgent: string): Promise<LogicalAgentIdentityRow | null> {
+    const r = await this.db.query<LogicalAgentIdentityRow>(
+      `SELECT * FROM logical_agent_identities
+       WHERE team_id = $1 AND logical_agent = $2
+       LIMIT 1`,
+      [teamId, logicalAgent],
     );
     return r.rows[0] || null;
   }
@@ -285,6 +305,39 @@ export class PgAgentsRepo implements AgentsRepository {
         agent.ssh_target ?? null,
       ],
     );
+    await this.upsertLogicalIdentityFromAgent(agent);
+  }
+
+  async upsertLogicalIdentityFromAgent(
+    agent: Pick<AgentRow, 'team_id' | 'name' | 'created_at'> & { metadata?: Record<string, unknown> | null },
+  ): Promise<void> {
+    const metadata = this.logicalIdentityMetadata(agent.metadata);
+    const logicalAgent =
+      typeof metadata.logical_agent === 'string' && metadata.logical_agent.trim()
+        ? metadata.logical_agent.trim()
+        : agent.name;
+    const displayName =
+      typeof metadata.display_name === 'string' && metadata.display_name.trim()
+        ? metadata.display_name.trim()
+        : logicalAgent;
+    const now = Date.now();
+    await this.db.query(
+      `INSERT INTO logical_agent_identities
+         (team_id, logical_agent, display_name, metadata, created_at, updated_at)
+       VALUES ($1, $2, $3, $4, $5, $6)
+       ON CONFLICT (team_id, logical_agent) DO UPDATE SET
+         display_name = EXCLUDED.display_name,
+         metadata = EXCLUDED.metadata,
+         updated_at = EXCLUDED.updated_at`,
+      [
+        agent.team_id,
+        logicalAgent,
+        displayName,
+        metadata,
+        agent.created_at ?? now,
+        now,
+      ],
+    );
   }
 
   async upsert(
@@ -323,6 +376,12 @@ export class PgAgentsRepo implements AgentsRepository {
         agent.ssh_target ?? null,
       ],
     );
+    await this.upsertLogicalIdentityFromAgent({
+      team_id: agent.team_id,
+      name: agent.name,
+      metadata: agent.metadata ?? null,
+      created_at: agent.created_at ?? Date.now(),
+    });
   }
 
   async updateIdentity(

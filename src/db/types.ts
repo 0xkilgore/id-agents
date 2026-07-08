@@ -40,6 +40,16 @@ export interface AgentRow {
   consecutive_failures: number;
 }
 
+/** durable logical agent identity, independent of physical runtime sessions */
+export interface LogicalAgentIdentityRow {
+  team_id: string;
+  logical_agent: string;
+  display_name: string;
+  metadata: Record<string, unknown> | null;
+  created_at: number;
+  updated_at: number;
+}
+
 /** teams table row */
 export interface TeamRow {
   id: string;

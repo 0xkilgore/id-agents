@@ -14,6 +14,7 @@
 import type { DbAdapter } from './db-adapter.js';
 import type {
   AgentRow,
+  LogicalAgentIdentityRow,
   TeamRow,
   QueryRow,
   NewsItemRow,
@@ -72,6 +73,9 @@ export interface TeamsRepository {
 export interface AgentsRepository {
   /** Look up an agent by its primary key (id). Non-deleted only. */
   getById(agentId: string): Promise<AgentRow | null>;
+
+  /** Fetch a durable logical identity bundle by stable logical agent name. */
+  getLogicalIdentity(teamId: string, logicalAgent: string): Promise<LogicalAgentIdentityRow | null>;
 
   /**
    * Look up the most recent non-deleted agent by exact name match
@@ -149,6 +153,11 @@ export interface AgentsRepository {
       status: string;
       created_at: number;
     },
+  ): Promise<void>;
+
+  /** Upsert the durable logical identity bundle represented by a physical agent row. */
+  upsertLogicalIdentityFromAgent(
+    agent: Pick<AgentRow, 'team_id' | 'name' | 'created_at'> & { metadata?: Record<string, unknown> | null },
   ): Promise<void>;
 
   /**

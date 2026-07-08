@@ -352,6 +352,22 @@ export async function migratePostgres(adapter: DbAdapter): Promise<void> {
   // 12) Add runtime column for harness type
   await adapter.query(`ALTER TABLE agents ADD COLUMN IF NOT EXISTS runtime text DEFAULT 'claude-agent-sdk';`);
 
+  await adapter.query(`
+    CREATE TABLE IF NOT EXISTS logical_agent_identities (
+      team_id uuid NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+      logical_agent text NOT NULL,
+      display_name text NOT NULL,
+      metadata jsonb,
+      created_at bigint NOT NULL,
+      updated_at bigint NOT NULL,
+      PRIMARY KEY (team_id, logical_agent)
+    );
+  `);
+  await adapter.query(`
+    CREATE INDEX IF NOT EXISTS logical_agent_identities_team_idx
+    ON logical_agent_identities(team_id, logical_agent);
+  `);
+
   // 12b) Remote endpoint columns for public-agent-remote registry entries (Phase 2).
   // All four columns are nullable so existing rows stay intact (backfill-safe).
   // ADD COLUMN IF NOT EXISTS is idempotent: repeated runs are no-ops.

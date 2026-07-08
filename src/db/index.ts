@@ -92,6 +92,7 @@ export type { Db } from './db-service.js';
 export type { DbAdapter, QueryResult } from './db-adapter.js';
 export type {
   AgentRow,
+  LogicalAgentIdentityRow,
   TeamRow,
   QueryRow,
   NewsItemRow,
