@@ -22,11 +22,15 @@ export function mountAgentObligationsRoutes(
       }
       const limit = parseAgentObligationLimit(req.query.limit);
       const agent = typeof req.query.agent === "string" ? req.query.agent : null;
+      const now = typeof req.query.now === "string" && req.query.now.length > 0 ? req.query.now : undefined;
+      const includeReports = req.query.include_reports === "false" ? false : undefined;
       const { id: teamId, name: teamName } = await getTeam(req);
       const envelope = await readAgentObligations(adapter, teamId, {
         limit,
         agent,
         status,
+        now,
+        includeReports,
       });
       return res.json({ ...envelope, team: teamName, limit, status });
     } catch (err) {

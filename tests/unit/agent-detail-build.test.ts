@@ -33,6 +33,7 @@ function raw(over: Partial<RawAgentDetailData> = {}): RawAgentDetailData {
     recent_outputs: [],
     recent_dispatches: [],
     recent_comment_receipts: [],
+    pending_obligations: [],
     skills: [],
     loops: [],
     scripts: [],
@@ -172,9 +173,39 @@ describe("buildAgentDetail", () => {
     expect(d.recent_outputs).toEqual([]);
     expect(d.recent_dispatches).toEqual([]);
     expect(d.recent_comment_receipts).toEqual([]);
+    expect(d.pending_obligations).toEqual([]);
     expect(d.verified_landings).toEqual([]);
     expect(d.skills).toEqual([]);
     expect(d.name).toBe("roger");
+  });
+
+  it("caps pending obligations and keeps stale escalation fields", () => {
+    const rows = Array.from({ length: 25 }, (_, i) => ({
+      obligation_id: `agent-obligation:phid:disp-${i}:closeout`,
+      source_kind: "closeout" as const,
+      obligation_type: "closeout" as const,
+      source_record: `phid:disp-${i}`,
+      source_ref: `query_${i}`,
+      agent: "roger",
+      owner: "manager",
+      status: i === 0 ? "done" as const : "late" as const,
+      stale_after: `2026-06-${String((i % 28) + 1).padStart(2, "0")}T00:00:00.000Z`,
+      due_at: `2026-06-${String((i % 28) + 1).padStart(2, "0")}T00:00:00.000Z`,
+      last_event_at: null,
+      is_stale: i !== 0,
+      stale_seconds: i * 60,
+      escalation_level: i > 10 ? "critical" as const : i === 0 ? "none" as const : "stale" as const,
+      escalates_at: `2026-06-${String((i % 28) + 1).padStart(2, "0")}T00:00:00.000Z`,
+      dashboard_reason: `Obligation ${i}`,
+    }));
+    const d = buildAgentDetail(raw({ pending_obligations: rows }));
+    expect(d.pending_obligations).toHaveLength(RECENT_OUTPUT_LIMIT);
+    expect(d.pending_obligations.some((o) => o.status === "done")).toBe(false);
+    expect(d.pending_obligations[0]).toMatchObject({
+      obligation_id: "agent-obligation:phid:disp-1:closeout",
+      is_stale: true,
+      escalation_level: "stale",
+    });
   });
 
   it("caps recent comment receipts and orders newest-first", () => {

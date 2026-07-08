@@ -10,6 +10,7 @@ import type { DbAdapter } from "../db/db-adapter.js";
 import { listArtifactCatalog } from "../outputs/storage.js";
 import { listLoops } from "../loops/registry.js";
 import { getRuntimePaths } from "../runtime/registry.js";
+import { readAgentObligations } from "../agent-obligations/read-model.js";
 import type { AgentCatalog } from "../config-parser.js";
 import {
   buildAgentDetail,
@@ -197,6 +198,18 @@ export async function assembleAgentDetail(
     );
   }, [] as DetailLoopRow[]);
 
+  const pending_obligations = await safe(async () => {
+    const envelope = await readAgentObligations(adapter, teamId, {
+      agent: name,
+      status: "all",
+      now: opts.nowIso,
+      limit: RECENT_OUTPUT_LIMIT,
+    });
+    return envelope.obligations.filter(
+      (o) => o.status === "expected" || o.status === "late" || o.status === "failed",
+    );
+  }, [] as AgentDetailResponse["pending_obligations"]);
+
   const skills = listDirNames(skillsDirFor(workingDirectory, runtime));
   const scripts = listScriptNames(workingDirectory);
 
@@ -212,6 +225,7 @@ export async function assembleAgentDetail(
     recent_outputs,
     recent_dispatches,
     recent_comment_receipts,
+    pending_obligations,
     skills,
     loops,
     scripts,

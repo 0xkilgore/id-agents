@@ -162,6 +162,25 @@ export interface AgentDetailCommentReceipt {
   };
 }
 
+export interface AgentDetailObligation {
+  obligation_id: string;
+  source_kind: 'report' | 'handoff' | 'comment' | 'closeout';
+  obligation_type: 'report' | 'handoff' | 'comment' | 'closeout';
+  source_record: string;
+  source_ref: string;
+  agent: string;
+  owner: string;
+  status: 'expected' | 'done' | 'late' | 'failed';
+  stale_after: string | null;
+  due_at: string | null;
+  last_event_at: string | null;
+  is_stale: boolean;
+  stale_seconds: number;
+  escalation_level: 'none' | 'stale' | 'critical';
+  escalates_at: string | null;
+  dashboard_reason: string;
+}
+
 export interface AgentDetailLoop {
   slug: string;
   name: string;
@@ -204,6 +223,7 @@ export interface AgentDetailResponse {
   recent_outputs: AgentDetailArtifact[];
   recent_dispatches?: AgentDetailDispatch[];
   recent_comment_receipts?: AgentDetailCommentReceipt[];
+  pending_obligations?: AgentDetailObligation[];
   verified_landings?: AgentDetailDispatch[];
   skills: string[];
   loops: AgentDetailLoop[];

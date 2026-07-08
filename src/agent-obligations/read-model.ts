@@ -1,3 +1,5 @@
+import type { DbAdapter } from "../db/db-adapter.js";
+import { buildReportsDue, type ReportRunFact } from "../loops/report-facts.js";
 import type { DbAdapterLike } from "../supervisor/manager-source-reader.js";
 
 const ACTIVE_STATUSES = new Set(["queued", "in_flight", "bounced", "needs_clarification", "resume_delivery_failed"]);
@@ -10,6 +12,8 @@ export type AgentObligationSourceKind = "report" | "handoff" | "comment" | "clos
 export interface AgentObligation {
   obligation_id: string;
   source_kind: AgentObligationSourceKind;
+  obligation_type: AgentObligationSourceKind;
+  source_record: string;
   source_ref: string;
   agent: string;
   owner: string;
@@ -17,6 +21,10 @@ export interface AgentObligation {
   stale_after: string | null;
   due_at: string | null;
   last_event_at: string | null;
+  is_stale: boolean;
+  stale_seconds: number;
+  escalation_level: "none" | "stale" | "critical";
+  escalates_at: string | null;
   dashboard_reason: string;
 }
 
@@ -43,6 +51,7 @@ export interface ReadAgentObligationsOptions {
   staleAfterMs?: number;
   agent?: string | null;
   status?: AgentObligationStatus | "all" | null;
+  includeReports?: boolean;
 }
 
 export interface AgentObligationsEnvelope {
@@ -99,9 +108,15 @@ export async function readAgentObligations(
     params,
   );
 
-  const obligations = rows
-    .map((row) => rowToAgentObligation(row, { now, staleAfterMs }))
+  const dispatchObligations = rows.map((row) => rowToAgentObligation(row, { now, staleAfterMs }));
+  const reportObligations = opts.includeReports === false
+    ? []
+    : await reportObligationsFor(adapter as DbAdapter, teamId, { now, agent });
+
+  const obligations = dedupeObligations([...dispatchObligations, ...reportObligations])
+    .filter((o) => (agent ? sameAgent(o.agent, agent) : true))
     .filter((o) => status === "all" || o.status === status)
+    .sort(compareObligations)
     .slice(0, limit);
 
   return {
@@ -120,13 +135,17 @@ export function rowToAgentObligation(
   opts: { now: string; staleAfterMs: number },
 ): AgentObligation {
   const sourceKind = inferSourceKind(row);
+  const sourceRecord = row.dispatch_phid;
   const lastEventAt = row.completed_at ?? row.started_at ?? row.updated_at ?? row.not_before_at;
   const staleAfter = staleAfterFor(row, opts.staleAfterMs);
   const status = deriveObligationStatus(row.status, staleAfter, opts.now);
+  const escalation = escalationFields(status, staleAfter, opts.now);
 
   return {
-    obligation_id: `agent-obligation:${row.dispatch_phid}`,
+    obligation_id: obligationId(sourceRecord, sourceKind),
     source_kind: sourceKind,
+    obligation_type: sourceKind,
+    source_record: sourceRecord,
     source_ref: row.query_id ?? row.dispatch_phid,
     agent: row.to_agent,
     owner: row.from_actor ?? "manager",
@@ -134,6 +153,7 @@ export function rowToAgentObligation(
     stale_after: staleAfter,
     due_at: staleAfter,
     last_event_at: lastEventAt,
+    ...escalation,
     dashboard_reason: dashboardReason(row, sourceKind, status, staleAfter),
   };
 }
@@ -183,4 +203,103 @@ function label(kind: AgentObligationSourceKind): string {
   if (kind === "closeout") return "Closeout";
   if (kind === "comment") return "Comment follow-up";
   return kind[0].toUpperCase() + kind.slice(1);
+}
+
+async function reportObligationsFor(
+  adapter: DbAdapter,
+  teamId: string,
+  opts: { now: string; agent: string | null },
+): Promise<AgentObligation[]> {
+  let reports: Awaited<ReturnType<typeof buildReportsDue>>;
+  try {
+    reports = await buildReportsDue(adapter, opts.now, { team_id: teamId });
+  } catch {
+    return [];
+  }
+  return reports.runs
+    .filter((run) => run.status !== "skipped")
+    .filter((run) => (opts.agent ? sameAgent(run.owner_agent, opts.agent) : true))
+    .map((run) => reportRunToObligation(run, opts.now));
+}
+
+function reportRunToObligation(run: ReportRunFact, now: string): AgentObligation {
+  const sourceRecord = `${run.report_key}:${run.expected_for}`;
+  const status = run.status === "failed" ? "failed" : run.status === "done" ? "done" : run.status === "late" ? "late" : "expected";
+  const staleAfter = status === "done" ? null : run.stale_at;
+  const escalation = escalationFields(status, staleAfter, now);
+  return {
+    obligation_id: obligationId(sourceRecord, "report"),
+    source_kind: "report",
+    obligation_type: "report",
+    source_record: sourceRecord,
+    source_ref: run.loop_run_phid ?? run.report_key,
+    agent: run.owner_agent,
+    owner: run.owner_agent,
+    status,
+    stale_after: staleAfter,
+    due_at: run.due_at,
+    last_event_at: run.finished_at ?? run.fired_at,
+    ...escalation,
+    dashboard_reason:
+      status === "done"
+        ? "Report complete"
+        : status === "failed"
+          ? `Report failed: ${run.reason}`
+          : status === "late"
+            ? `Stale missing report: ${run.reason}`
+            : `Report expected from ${run.owner_agent}`,
+  };
+}
+
+function obligationId(sourceRecord: string, obligationType: AgentObligationSourceKind): string {
+  return `agent-obligation:${sourceRecord}:${obligationType}`;
+}
+
+function dedupeObligations(obligations: AgentObligation[]): AgentObligation[] {
+  const byKey = new Map<string, AgentObligation>();
+  for (const obligation of obligations) {
+    const key = `${obligation.source_record}:${obligation.obligation_type}`;
+    const existing = byKey.get(key);
+    if (!existing || compareObligations(obligation, existing) < 0) {
+      byKey.set(key, obligation);
+    }
+  }
+  return [...byKey.values()];
+}
+
+function compareObligations(a: AgentObligation, b: AgentObligation): number {
+  const severity = (o: AgentObligation): number => {
+    if (o.status === "late") return 0;
+    if (o.status === "failed") return 1;
+    if (o.status === "expected") return 2;
+    return 3;
+  };
+  const sev = severity(a) - severity(b);
+  if (sev !== 0) return sev;
+  const at = a.due_at ?? a.last_event_at ?? "";
+  const bt = b.due_at ?? b.last_event_at ?? "";
+  return at < bt ? -1 : at > bt ? 1 : a.obligation_id.localeCompare(b.obligation_id);
+}
+
+function escalationFields(
+  status: AgentObligationStatus,
+  staleAfter: string | null,
+  now: string,
+): Pick<AgentObligation, "is_stale" | "stale_seconds" | "escalation_level" | "escalates_at"> {
+  const staleMs = staleAfter ? Date.parse(staleAfter) : NaN;
+  const nowMs = Date.parse(now);
+  const staleSeconds = Number.isFinite(staleMs) && Number.isFinite(nowMs)
+    ? Math.max(0, Math.floor((nowMs - staleMs) / 1000))
+    : 0;
+  const isStale = (status === "late" || status === "failed") && staleSeconds > 0;
+  return {
+    is_stale: isStale,
+    stale_seconds: isStale ? staleSeconds : 0,
+    escalation_level: isStale ? (staleSeconds >= 24 * 60 * 60 ? "critical" : "stale") : "none",
+    escalates_at: staleAfter,
+  };
+}
+
+function sameAgent(a: string, b: string): boolean {
+  return a.trim().toLowerCase() === b.trim().toLowerCase();
 }

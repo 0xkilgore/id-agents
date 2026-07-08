@@ -14,6 +14,7 @@ import {
   type CatalogView,
   type CatalogFieldSchema,
 } from "./catalog-edit.js";
+import type { AgentObligation } from "../agent-obligations/read-model.js";
 
 /** A task row, narrowed to the fields the charts need. */
 export interface DetailTaskRow {
@@ -129,6 +130,7 @@ export interface RawAgentDetailData {
   recent_outputs: DetailArtifactRow[];
   recent_dispatches: DetailDispatchRow[];
   recent_comment_receipts: DetailCommentReceiptRow[];
+  pending_obligations: AgentObligation[];
   skills: string[];
   loops: DetailLoopRow[];
   scripts: string[];
@@ -152,6 +154,8 @@ export interface AgentDetailResponse {
   recent_dispatches: DetailDispatchRow[];
   /** Newest-first, capped at 20 — routed artifact-comment receipts for this agent. */
   recent_comment_receipts: DetailCommentReceiptRow[];
+  /** Newest/highest-priority open obligations for the agent, including stale escalation fields. */
+  pending_obligations: AgentObligation[];
   /** Convenience subset of recent_dispatches where verification produced a landing. */
   verified_landings: DetailDispatchRow[];
   skills: string[];
@@ -193,6 +197,9 @@ export function buildAgentDetail(raw: RawAgentDetailData): AgentDetailResponse {
   const recentCommentReceipts = [...raw.recent_comment_receipts]
     .sort((a, b) => (a.time < b.time ? 1 : a.time > b.time ? -1 : 0))
     .slice(0, RECENT_OUTPUT_LIMIT);
+  const pendingObligations = [...raw.pending_obligations]
+    .filter((o) => o.status === "expected" || o.status === "late" || o.status === "failed")
+    .slice(0, RECENT_OUTPUT_LIMIT);
 
   const contribution_grid = buildContributionGrid(raw, recent, recentDispatches);
 
@@ -211,6 +218,7 @@ export function buildAgentDetail(raw: RawAgentDetailData): AgentDetailResponse {
     recent_outputs: recent,
     recent_dispatches: recentDispatches,
     recent_comment_receipts: recentCommentReceipts,
+    pending_obligations: pendingObligations,
     // A verified landing is any verified dispatch — an artifact landing (has a
     // path) OR a promotion landing (code promoted to main, no artifact file).
     // Requiring artifact_path here silently dropped every code build, so agents

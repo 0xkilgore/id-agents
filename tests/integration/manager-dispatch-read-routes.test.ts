@@ -351,7 +351,7 @@ describe('manager dispatch read routes', () => {
       failure_detail: 'comment route failed',
     });
 
-    const res = await fetch(`${baseUrl}/agent-obligations?limit=20`, { headers: headers('agent-obligations-fixture') });
+    const res = await fetch(`${baseUrl}/agent-obligations?limit=20&include_reports=false&now=2026-07-07T11:00:00.000Z`, { headers: headers('agent-obligations-fixture') });
     expect(res.status).toBe(200);
     const body = await res.json() as any;
     expect(body.ok).toBe(true);
@@ -359,35 +359,49 @@ describe('manager dispatch read routes', () => {
     expect(body.obligations).toHaveLength(4);
 
     const byId = new Map(body.obligations.map((o: any) => [o.obligation_id, o]));
-    expect(byId.get('agent-obligation:phid:disp-obligation-expected')).toMatchObject({
+    expect(byId.get('agent-obligation:phid:disp-obligation-expected:report')).toMatchObject({
       source_kind: 'report',
+      obligation_type: 'report',
+      source_record: 'phid:disp-obligation-expected',
       source_ref: 'query_obligation_expected',
       agent: 'roger',
       owner: 'manager',
       status: 'expected',
       stale_after: '2099-07-07T12:15:00.000Z',
       due_at: '2099-07-07T12:15:00.000Z',
+      is_stale: false,
+      escalation_level: 'none',
     });
-    expect(byId.get('agent-obligation:phid:disp-obligation-done')).toMatchObject({
+    expect(byId.get('agent-obligation:phid:disp-obligation-done:handoff')).toMatchObject({
       source_kind: 'handoff',
+      obligation_type: 'handoff',
+      source_record: 'phid:disp-obligation-done',
       agent: 'roger',
       status: 'done',
       stale_after: null,
       due_at: null,
       last_event_at: '2026-07-07T11:50:00.000Z',
     });
-    expect(byId.get('agent-obligation:phid:disp-obligation-late-closeout')).toMatchObject({
+    expect(byId.get('agent-obligation:phid:disp-obligation-late-closeout:closeout')).toMatchObject({
       source_kind: 'closeout',
+      obligation_type: 'closeout',
+      source_record: 'phid:disp-obligation-late-closeout',
       agent: 'regina',
       owner: 'continuous-orchestration',
       status: 'late',
       stale_after: '2026-07-07T10:30:00.000Z',
       due_at: '2026-07-07T10:30:00.000Z',
+      is_stale: true,
+      stale_seconds: 1800,
+      escalation_level: 'stale',
+      escalates_at: '2026-07-07T10:30:00.000Z',
     });
-    expect(byId.get('agent-obligation:phid:disp-obligation-late-closeout').dashboard_reason)
+    expect(byId.get('agent-obligation:phid:disp-obligation-late-closeout:closeout').dashboard_reason)
       .toMatch(/stale missing closeout/i);
-    expect(byId.get('agent-obligation:phid:disp-obligation-failed')).toMatchObject({
+    expect(byId.get('agent-obligation:phid:disp-obligation-failed:comment')).toMatchObject({
       source_kind: 'comment',
+      obligation_type: 'comment',
+      source_record: 'phid:disp-obligation-failed',
       source_ref: 'query_obligation_failed',
       agent: 'cane',
       owner: 'operator',
@@ -395,10 +409,10 @@ describe('manager dispatch read routes', () => {
       dashboard_reason: 'Comment follow-up failed: comment route failed',
     });
 
-    const late = await fetch(`${baseUrl}/agent-obligations?status=late`, { headers: headers('agent-obligations-fixture') });
+    const late = await fetch(`${baseUrl}/agent-obligations?status=late&include_reports=false&now=2026-07-07T11:00:00.000Z`, { headers: headers('agent-obligations-fixture') });
     const lateBody = await late.json() as any;
     expect(lateBody.obligations.map((o: any) => o.obligation_id)).toEqual([
-      'agent-obligation:phid:disp-obligation-late-closeout',
+      'agent-obligation:phid:disp-obligation-late-closeout:closeout',
     ]);
   });
 });
