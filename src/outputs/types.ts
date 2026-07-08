@@ -535,6 +535,7 @@ export interface ArtifactDetailBody {
   truncated: boolean;
   source: "file" | "artifact_body_cache" | "cane_draft" | "none";
   error: string | null;
+  body_unavailable: boolean;
 }
 
 export interface ArtifactDetailRender {

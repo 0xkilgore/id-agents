@@ -5,7 +5,9 @@ import { describe, it, expect, beforeAll, afterAll, afterEach } from "vitest";
 import * as os from "os";
 import * as path from "path";
 import * as fs from "fs";
+import * as crypto from "crypto";
 import { AgentManagerDb } from "../../src/agent-manager-db.js";
+import { artifactIdFromPath } from "../../src/outputs/storage.js";
 import { SqliteAdapter } from "../../src/db/sqlite-adapter.js";
 import { migrateSqlite } from "../../src/db/migrations/sqlite.js";
 import { SqliteTeamsRepo } from "../../src/db/repos/sqlite/teams-repo.js";
@@ -333,6 +335,78 @@ describe("POST /agent-done — warn mode (default)", () => {
     expect(r.status).toBe(200);
     const body = await r.json();
     expect(body.promotion_warning).toBeNull();
+  });
+});
+
+describe("POST /agent-done — fresh artifact registration", () => {
+  it.each([
+    {
+      filename: "finance-fresh.md",
+      content: "# Finance Artifact\n\nFresh markdown body.\n",
+      renderer: "markdown",
+      mediaType: "text/markdown",
+      renderMimeType: "text/markdown; charset=utf-8",
+      expectedText: "Fresh markdown body.",
+    },
+    {
+      filename: "finance-fresh.html",
+      content: "<!doctype html><h1>Finance Artifact</h1><p>Fresh HTML body.</p>\n",
+      renderer: "html",
+      mediaType: "text/html",
+      renderMimeType: "text/html; charset=utf-8",
+      expectedText: "Fresh HTML body.",
+    },
+  ])("registers and serves a fresh $renderer artifact by stable id", async ({ filename, content, renderer, mediaType, renderMimeType, expectedText }) => {
+    const outputDir = path.join(workDir, "finance-project", "output");
+    fs.mkdirSync(outputDir, { recursive: true });
+    const artifactPath = path.join(outputDir, filename);
+    fs.writeFileSync(artifactPath, content);
+    const expectedHash = crypto.createHash("sha256").update(Buffer.from(content)).digest("hex");
+    const artifactId = artifactIdFromPath(artifactPath);
+    const enq = await enqueue({});
+    await claim(enq.dispatch_phid);
+
+    const done = await fetch(`${baseUrl}/agent-done`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        dispatch_id: enq.dispatch_phid,
+        success: true,
+        artifact_path: artifactPath,
+        result: { artifact_path: artifactPath, tl_dr: "Fresh finance artifact" },
+      }),
+    });
+    expect(done.status).toBe(200);
+    fs.rmSync(artifactPath);
+
+    const detail = await fetch(`${baseUrl}/artifacts/${encodeURIComponent(artifactId)}/detail`);
+    expect(detail.status).toBe(200);
+    const body = await detail.json();
+    expect(body.artifact_id).toBe(artifactId);
+    expect(body.metadata).toMatchObject({
+      basename: filename,
+      agent: "coder-max",
+      media_type: mediaType,
+      content_hash: expectedHash,
+      project_ref: "finance-project",
+      dispatch_ref: enq.dispatch_phid,
+      availability: "present",
+    });
+    expect(body.metadata.source_mtime).toEqual(expect.any(String));
+    expect(body.metadata.source_size).toBe(Buffer.byteLength(content));
+    expect(body.delivery).toMatchObject({
+      sourcePath: artifactPath,
+      bodyRenderable: true,
+      bodyUnavailable: false,
+      discoveredBy: "agent_done",
+    });
+    expect(body.body).toMatchObject({
+      source: "artifact_body_cache",
+      text: content,
+      body_unavailable: false,
+    });
+    expect(body.body.text).toContain(expectedText);
+    expect(body.render).toMatchObject({ renderer, mime_type: renderMimeType });
   });
 });
 

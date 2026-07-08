@@ -234,21 +234,22 @@ async function readDetailBody(
       truncated: false,
       source: "cane_draft",
       error: null,
+      body_unavailable: false,
     };
   }
   if (!catalog?.abs_path) {
-    return { kind: "unavailable", text: null, bytes: null, truncated: false, source: "none", error: null };
+    return { kind: "unavailable", text: null, bytes: null, truncated: false, source: "none", error: null, body_unavailable: true };
   }
   let fileReadError: string | null = null;
   try {
     const stat = await fsp.stat(catalog.abs_path);
     if (!stat.isFile()) {
-      return { kind: "unavailable", text: null, bytes: stat.size, truncated: false, source: "file", error: "not_file" };
+      return { kind: "unavailable", text: null, bytes: stat.size, truncated: false, source: "file", error: "not_file", body_unavailable: true };
     }
     const ext = extname(catalog.abs_path).toLowerCase();
     const kind = bodyKindFromExtension(ext);
     if (kind === "image" || kind === "binary") {
-      return { kind, text: null, bytes: stat.size, truncated: false, source: "file", error: null };
+      return { kind, text: null, bytes: stat.size, truncated: false, source: "file", error: null, body_unavailable: true };
     }
     const handle = await fsp.open(catalog.abs_path, "r");
     try {
@@ -262,6 +263,7 @@ async function readDetailBody(
         truncated: stat.size > MAX_DETAIL_BODY_BYTES,
         source: "file",
         error: null,
+        body_unavailable: false,
       };
     } finally {
       await handle.close();
@@ -279,9 +281,10 @@ async function readDetailBody(
       truncated: cached.body_truncated === 1,
       source: "artifact_body_cache",
       error: cached.body_error,
+      body_unavailable: false,
     };
   }
-  return { kind: "missing", text: null, bytes: null, truncated: false, source: "file", error: fileReadError ?? "read_failed" };
+  return { kind: "missing", text: null, bytes: null, truncated: false, source: "file", error: fileReadError ?? "read_failed", body_unavailable: true };
 }
 
 function bodyKindFromExtension(ext: string): ArtifactDetailBody["kind"] {
