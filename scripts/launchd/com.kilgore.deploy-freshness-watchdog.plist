@@ -10,7 +10,7 @@
     <key>ProgramArguments</key>
     <array>
         <string>/opt/homebrew/bin/node</string>
-        <string>/Users/kilgore/Dropbox/Code/cane/id-agents/scripts/deploy-freshness-watchdog.mjs</string>
+        <string>/Users/kilgore/Dropbox/Code/cane/id-agents-deploy-main/scripts/deploy-freshness-watchdog.mjs</string>
     </array>
     <!-- every 15 minutes; acts only after 2 consecutive stale readings (>15 min). -->
     <key>StartInterval</key>

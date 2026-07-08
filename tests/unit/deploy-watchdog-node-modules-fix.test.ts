@@ -14,6 +14,10 @@ const WATCHDOG_SRC = readFileSync(
   join(__dirname, '../../scripts/deploy-freshness-watchdog.mjs'),
   'utf8',
 );
+const WATCHDOG_PLIST_SRC = readFileSync(
+  join(__dirname, '../../scripts/launchd/com.kilgore.deploy-freshness-watchdog.plist'),
+  'utf8',
+);
 
 describe('deploy-freshness-watchdog source — clean deploy checkout hygiene', () => {
   it('does not snapshot or switch the primary checkout', () => {
@@ -37,6 +41,11 @@ describe('deploy-freshness-watchdog source — clean deploy checkout hygiene', (
     expect(WATCHDOG_SRC).toContain('Set :WorkingDirectory ${CANE}');
     expect(WATCHDOG_SRC).toContain('Set :ProgramArguments:1 ${CANE}/scripts/start-id-agents-manager.sh');
     expect(WATCHDOG_SRC).toContain('launchctl bootstrap gui/$(id -u) ${PLIST}');
+  });
+
+  it('runs the launchd watchdog itself from the clean deploy checkout', () => {
+    expect(WATCHDOG_PLIST_SRC).toContain('/Users/kilgore/Dropbox/Code/cane/id-agents-deploy-main/scripts/deploy-freshness-watchdog.mjs');
+    expect(WATCHDOG_PLIST_SRC).not.toContain('/Users/kilgore/Dropbox/Code/cane/id-agents/scripts/deploy-freshness-watchdog.mjs');
   });
 });
 
