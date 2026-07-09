@@ -216,6 +216,7 @@ describe("buildAgentDetail", () => {
       artifact_basename: `artifact-${i}.md`,
       actor: "user:chris",
       time: `2026-06-${String((i % 28) + 1).padStart(2, "0")}T00:00:00.000Z`,
+      timestamp: `2026-06-${String((i % 28) + 1).padStart(2, "0")}T00:00:00.000Z`,
       route_status: "routed",
       visible_state: "recorded+routed" as const,
       retryable: false,

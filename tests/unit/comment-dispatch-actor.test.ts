@@ -38,6 +38,7 @@ beforeEach(async () => {
   app = express();
   app.use(express.json());
   mountOutputsRoutes(app, adapter, { enqueueDispatch: handle.enqueue.bind(handle) });
+  mountAgentDetailRoute(app);
 });
 
 async function call(method: "POST" | "GET", path: string, body?: unknown) {
@@ -89,6 +90,16 @@ function agentDetail(name: string) {
   });
 }
 
+function mountAgentDetailRoute(targetApp: Express) {
+  targetApp.get("/agents/:name/detail", async (req, res) => {
+    try {
+      res.json(await agentDetail(req.params.name));
+    } catch (err) {
+      res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+}
+
 describe("comment auto-dispatch — acceptance (T-LOOP-CLOSE.1)", () => {
   it("a Liz comment on a finances artifact → dispatch to finances with source_metadata.from_actor=user:liz", async () => {
     const ART = "art-fin-1";
@@ -115,6 +126,7 @@ describe("comment auto-dispatch — acceptance (T-LOOP-CLOSE.1)", () => {
       artifact_title: "Q3 cash flow",
       actor: "user:liz",
       route_status: "routed",
+      timestamp: expect.any(String),
       visible_state: "recorded+routed",
       retryable: false,
       target_agent: "finances",
@@ -122,6 +134,20 @@ describe("comment auto-dispatch — acceptance (T-LOOP-CLOSE.1)", () => {
       dispatch_id: res.body.dispatch.dispatch_phid,
       query_id: res.body.dispatch.query_id,
       failure_reason: null,
+    });
+
+    const detailApi = await call("GET", "/agents/finances/detail");
+    expect(detailApi.status).toBe(200);
+    expect(detailApi.body.recent_comment_receipts[0]).toMatchObject({
+      artifact_id: ART,
+      artifact_title: "Q3 cash flow",
+      actor: "user:liz",
+      timestamp: expect.any(String),
+      route_status: "routed",
+      visible_state: "recorded+routed",
+      target_agent: "finances",
+      dispatch_id: res.body.dispatch.dispatch_phid,
+      query_id: res.body.dispatch.query_id,
     });
   });
 
@@ -165,6 +191,7 @@ describe("comment auto-dispatch — acceptance (T-LOOP-CLOSE.1)", () => {
     app = express();
     app.use(express.json());
     mountOutputsRoutes(app, adapter, { enqueueDispatch: failingEnqueue });
+    mountAgentDetailRoute(app);
 
     const ART = "art-fin-project-failed";
     await catalogArtifact(ART, "project:finances");
@@ -192,6 +219,7 @@ describe("comment auto-dispatch — acceptance (T-LOOP-CLOSE.1)", () => {
       artifact_title: "Q3 cash flow",
       actor: "user:chris",
       route_status: "recorded-but-route-failed",
+      timestamp: expect.any(String),
       visible_state: "recorded-route-failed-retryable",
       retryable: true,
       target_agent: "finances",
@@ -203,6 +231,29 @@ describe("comment auto-dispatch — acceptance (T-LOOP-CLOSE.1)", () => {
         retryable: true,
         skipped: null,
         error: { message: "scheduler unavailable for project owner" },
+      },
+    });
+
+    const detailApi = await call("GET", "/agents/finances/detail");
+    expect(detailApi.status).toBe(200);
+    expect(detailApi.body.recent_comment_receipts[0]).toMatchObject({
+      artifact_id: ART,
+      artifact_title: "Q3 cash flow",
+      actor: "user:chris",
+      timestamp: expect.any(String),
+      route_status: "recorded-but-route-failed",
+      visible_state: "recorded-route-failed-retryable",
+      retryable: true,
+      target_agent: "finances",
+      target_agent_raw: "project:finances",
+      dispatch_id: null,
+      query_id: null,
+      failure_reason: "scheduler unavailable for project owner",
+      retry_metadata: {
+        retryable: true,
+        skipped: null,
+        error: { message: "scheduler unavailable for project owner" },
+        updated_at: expect.any(String),
       },
     });
   });

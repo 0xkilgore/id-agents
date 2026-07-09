@@ -306,6 +306,7 @@ function commentReceiptFromOperation(
   const dispatchId = stringValue(dispatch.dispatch_phid);
   const queryId = stringValue(dispatch.query_id);
   const updatedAt = stringValue(routeStatus.updated_at);
+  const timestamp = updatedAt || row.ts;
   const routeStatusLabel =
     visibleState === "recorded+routed"
       ? "routed"
@@ -324,7 +325,8 @@ function commentReceiptFromOperation(
     artifact_title: row.artifact_title,
     artifact_basename: row.artifact_basename,
     actor: row.actor,
-    time: updatedAt || row.ts,
+    time: timestamp,
+    timestamp,
     route_status: routeStatusLabel,
     visible_state: visibleState,
     retryable,

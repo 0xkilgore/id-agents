@@ -175,6 +175,7 @@ export interface AgentDetailCommentReceipt {
   artifact_basename: string | null;
   actor: string;
   time: string;
+  timestamp: string;
   route_status: string;
   visible_state:
     | 'recorded+routed'
