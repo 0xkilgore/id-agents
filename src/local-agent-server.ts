@@ -29,6 +29,7 @@ import {
   usesCliLogin,
 } from './runtime/registry.js';
 import { resolveDefaultWorkspaceDir } from './lib/data-root.js';
+import { sanitizeCatalogRuntimeTruth } from './db/agent-runtime-sot.js';
 
 interface LocalAgentConfig {
   name: string;
@@ -270,7 +271,7 @@ export async function startLocalAgent(config: LocalAgentConfig): Promise<{
       name,
       team,
       ...(tokenId && { tokenId }),
-      ...(catalogSeed && { metadata: { catalog: catalogSeed } }),
+      ...(catalogSeed && { metadata: { catalog: sanitizeCatalogRuntimeTruth(catalogSeed) } }),
     },
     ...(db && dbTeamId && { db: { db, teamId: dbTeamId, agentId } })
   });

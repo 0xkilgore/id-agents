@@ -1,5 +1,16 @@
 export interface AgentMetadata {
   runtime?: string;
+  runtimeUsageTruth?: {
+    actualRuntime: string;
+    actualModel: string;
+    catalogDesiredModel?: string;
+    catalogModelStale: boolean;
+    usageTelemetry: {
+      provider: 'anthropic' | 'openai' | 'cursor' | 'other';
+      source: string;
+      authoritativeFields: ['runtime', 'model'];
+    };
+  };
   description?: string;
   heartbeat?: boolean;
   pid?: number;
@@ -14,6 +25,7 @@ export interface Agent {
   status: string;
   health: string;
   model?: string;
+  runtime?: string;
   type?: string;
   url?: string;
   workingDirectory?: string;

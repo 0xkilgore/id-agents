@@ -6,7 +6,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import express, { type Express } from "express";
 import { tmpdir } from "node:os";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { SqliteAdapter } from "../../src/db/sqlite-adapter.js";
 import { migrateSqlite } from "../../src/db/migrations/sqlite.js";
@@ -231,6 +231,56 @@ describe("GET /usage — v2 schema contract", () => {
     expect(res.status).toBe(200);
     expect(res.body.usage.daily.weighted_tokens).toBe(500);
     expect(res.body.usage.daily.percent_consumed).toBeCloseTo(0.5);
+  });
+
+  it("captures Claude transcript usage before rendering /usage when an adapter is mounted", async () => {
+    const transcriptRoot = join(tmpDir, "claude-projects");
+    const projectDir = join(transcriptRoot, "-Users-test-cto");
+    mkdirSync(projectDir, { recursive: true });
+    writeFileSync(
+      join(projectDir, "session.jsonl"),
+      JSON.stringify({
+        type: "assistant",
+        timestamp: "2026-05-31T17:59:00.000Z",
+        session_id: "sess-usage-read",
+        uuid: "u-read",
+        message: {
+          model: "claude-sonnet-5",
+          usage: {
+            input_tokens: 100,
+            output_tokens: 50,
+            cache_creation_input_tokens: 0,
+            cache_read_input_tokens: 0,
+          },
+        },
+      }),
+    );
+    await adapter.query(
+      `INSERT INTO agents (id, team_id, name, type, model, status, created_at, runtime, working_directory)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+      ["cto", "team", "cto", "claude", "claude-sonnet-5", "running", FIXED_NOW, "claude-code-cli", "/Users/test/cto"],
+    );
+
+    const svc = mkService();
+    const app = express();
+    app.use(express.json());
+    mountUsageMeterRoutes(app, {
+      service: svc,
+      adapter,
+      transcriptsDir: transcriptRoot,
+    });
+
+    const res = await request(app).get("/usage");
+    expect(res.status).toBe(200);
+    expect(res.body.usage.daily.weighted_tokens).toBe(150);
+    expect(res.body.by_agent[0]).toMatchObject({
+      agent: "cto",
+      daily: { weighted_tokens: 150, raw_tokens: 150, requests: 1 },
+    });
+    expect(res.body.by_model[0]).toMatchObject({
+      model: "claude-sonnet-5",
+      daily: { weighted_tokens: 150, raw_tokens: 150, requests: 1 },
+    });
   });
 
   it("GET /usage/gate returns a snapshot", async () => {

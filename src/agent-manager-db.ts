@@ -13,7 +13,7 @@
 import express from 'express';
 import crypto from 'crypto';
 import path from 'path';
-import { deriveMetadataWithRuntime, reconcileAgentRuntime } from './db/agent-runtime-sot.js';
+import { deriveMetadataWithRuntime, reconcileAgentRuntime, reconcileCatalogModelTruth } from './db/agent-runtime-sot.js';
 import { createServer as createHttpServer, type Server as HttpServer } from 'http';
 import { existsSync, mkdirSync, rmSync, readFileSync, writeFileSync, readdirSync, copyFileSync, statSync, lstatSync, openSync, closeSync } from 'fs';
 import { execFileSync, spawn } from 'child_process';
@@ -1827,7 +1827,7 @@ export class AgentManagerDb {
       // canonical `runtime` column at read time, so the API can never emit a
       // top-level runtime that disagrees with metadata.runtime (the CTO/Regina/
       // Rams divergence bug). The column is the single source of truth.
-      metadata: deriveMetadataWithRuntime(a.metadata, a.runtime),
+      metadata: deriveMetadataWithRuntime(a.metadata, a.runtime, a.model),
       // Identity fields
       tokenId: a.token_id,
       domain,
@@ -12727,6 +12727,13 @@ export class AgentManagerDb {
               if (r.reconciled > 0) console.log(`[Manager] agent-runtime SoT reconcile: fixed ${r.reconciled}/${r.scanned} (${r.already_consistent} already consistent)`);
             })
             .catch((err) => console.warn('[Manager] agent-runtime SoT reconcile failed:', err instanceof Error ? err.message : String(err)));
+          void reconcileCatalogModelTruth(this.db.adapter)
+            .then((r) => {
+              if (r.reconciled > 0 || r.stale_desired_model > 0) {
+                console.log(`[Manager] catalog model truth reconcile: moved ${r.reconciled}/${r.scanned} legacy catalog.model value(s); ${r.stale_desired_model} desired model(s) differ from live model`);
+              }
+            })
+            .catch((err) => console.warn('[Manager] catalog model truth reconcile failed:', err instanceof Error ? err.message : String(err)));
           console.log('[Manager] Kapelle B11 outputs routes mounted (/outputs/inbox, /artifacts/:id/*) with P3 emit target + B2 comment auto-dispatch + filesystem reconciler + worktree reaper');
         } catch (err) {
           console.warn('[Manager] B11 outputs routes failed to mount:', err instanceof Error ? err.message : String(err));

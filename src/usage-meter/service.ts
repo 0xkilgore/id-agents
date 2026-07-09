@@ -126,6 +126,8 @@ export class UsageMeterService {
       for (const r of rollups) {
         await upsertAgentUsageRollup(this.adapter, r);
       }
+      this.cachedSnapshotAtMs = 0;
+      this.cachedReportAtMs = 0;
       return rollups;
     } catch (err) {
       // Best-effort; degraded snapshot will absorb.

@@ -26,6 +26,14 @@ export interface UsageMeterRouteOptions {
   /** Needed for GET /usage/daily-report (reads agent_usage_event). */
   adapter?: DbAdapter;
   /**
+   * Capture Claude Code transcript usage before serving /usage.
+   * Defaults on when an adapter is present so the dashboard reflects real
+   * Anthropic burn without requiring a manual POST /usage/ingest first.
+   */
+  captureOnRead?: boolean;
+  /** Test/ops override for the Claude Code transcript root. Defaults to ~/.claude/projects. */
+  transcriptsDir?: string;
+  /**
    * Best-effort transcript ingest can walk and read a large ~/.claude tree.
    * Keep it explicit so manager startup/read paths stay responsive.
    */
@@ -37,8 +45,31 @@ export interface UsageMeterRouteOptions {
  * managementApp) and a configured UsageMeterService instance.
  */
 export function mountUsageMeterRoutes(app: Application, opts: UsageMeterRouteOptions): void {
+  const adapter = opts.adapter;
+  const captureOnRead = adapter && opts.captureOnRead !== false;
+  let captureInFlight: Promise<void> | null = null;
+  const captureUsageBeforeRead = async (): Promise<void> => {
+    if (!adapter || !captureOnRead) return;
+    if (!captureInFlight) {
+      captureInFlight = (async () => {
+        try {
+          await ingestTranscripts(adapter, { transcriptsDir: opts.transcriptsDir });
+          await opts.service.refreshRollups();
+        } catch (err) {
+          console.warn(
+            `[usage-meter] read-path transcript ingest failed: ${err instanceof Error ? err.message : String(err)}`,
+          );
+        } finally {
+          captureInFlight = null;
+        }
+      })();
+    }
+    await captureInFlight;
+  };
+
   app.get("/usage", async (req: Request, res: Response) => {
     try {
+      await captureUsageBeforeRead();
       // Gap 2: `?spend_scope=daemon_autonomous|daemon_fleshing` returns the
       // daemon-attributed report; anything else returns the fleet-global report.
       const scope = typeof req.query.spend_scope === "string" ? req.query.spend_scope : "fleet";
@@ -138,8 +169,7 @@ export function mountUsageMeterRoutes(app: Application, opts: UsageMeterRouteOpt
   // ingest walks ~/.claude/projects, parses real token counts, attributes per
   // agent, and upserts idempotent events. Wired here (not in the manager) so
   // the manager wiring stays untouched; runs on demand + on a best-effort timer.
-  if (opts.adapter) {
-    const adapter = opts.adapter;
+  if (adapter) {
 
     // GET /usage/runtime-mix — Runtime Work-Share Slice 1 (§4). Rolling ACTUAL
     // provider/runtime mix of committed dispatches vs the 45/45/10 target.
@@ -162,7 +192,7 @@ export function mountUsageMeterRoutes(app: Application, opts: UsageMeterRouteOpt
     app.post("/usage/ingest", async (req: Request, res: Response) => {
       try {
         const lookbackDays = clampInt(req.query.lookback_days, 9, 1, 365);
-        const result = await ingestTranscripts(adapter, { lookbackDays });
+        const result = await ingestTranscripts(adapter, { lookbackDays, transcriptsDir: opts.transcriptsDir });
         await opts.service.refreshRollups();
         res.json({ ok: true, ...result });
       } catch (err) {
@@ -175,7 +205,7 @@ export function mountUsageMeterRoutes(app: Application, opts: UsageMeterRouteOpt
     // block the manager control plane. Manual POST /usage/ingest stays available.
     const runIngest = async () => {
       try {
-        const r = await ingestTranscripts(adapter, {});
+        const r = await ingestTranscripts(adapter, { transcriptsDir: opts.transcriptsDir });
         await opts.service.refreshRollups();
         if (r.inserted > 0) {
           console.log(
