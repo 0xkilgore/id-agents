@@ -15,6 +15,7 @@ import {
 } from "../../src/surfaced-artifacts/read-model.js";
 
 const NOW = "2026-07-07T12:00:00.000Z";
+const C0_ON = { C0_FEEDBACK_REACTIONS: "1" } as NodeJS.ProcessEnv;
 
 async function setup() {
   const adapter = new SqliteAdapter(":memory:");
@@ -298,9 +299,27 @@ describe("buildSurfacedArtifacts", () => {
     }, NOW);
     await appendOperation(adapter, "art-comment", "comment_recorded", "user:chris", NOW, JSON.stringify({ body: "Please route this" }), null, null);
     await appendOperation(adapter, "art-comment", "comment_recorded", "user:chris", "2026-07-07T12:01:00.000Z", JSON.stringify({ body: "Already routed", route_status: { visible_state: "recorded+routed", routed: true } }), null, null);
-    const comments = (await buildSurfacedArtifacts(adapter, { readFile })).filter((r) => r.needs === "route");
+    const comments = (await buildSurfacedArtifacts(adapter, { readFile, env: C0_ON })).filter((r) => r.needs === "route");
     expect(comments).toHaveLength(1);
     expect(comments[0]).toMatchObject({ title: "Route comment on Comment target", relevance_reason: "blocked_or_stale", needs: "route", source_kind: "comment" });
+  });
+
+  it("does not surface disabled feedback comments as stale route work", async () => {
+    await registerArtifact(adapter, {
+      artifact_id: "art-disabled-comment",
+      basename: "2026-07-07-disabled-comment.md",
+      agent: "maestra",
+      tag: "feedback",
+      abs_path: "/tmp/disabled-comment.md",
+      title: "Disabled comment target",
+      produced_at: NOW,
+      source: "manual",
+    }, NOW);
+    await appendOperation(adapter, "art-disabled-comment", "comment_recorded", "user:chris", NOW, JSON.stringify({ body: "Old feedback before flag rollback" }), null, null);
+
+    const rows = await buildSurfacedArtifacts(adapter, { limit: 7, readFile, env: {} as NodeJS.ProcessEnv });
+    expect(rows.some((r) => r.id.startsWith("comment:art-disabled-comment:"))).toBe(false);
+    expect(rows.find((r) => r.id === "artifact:art-disabled-comment")?.status).toBe("unread");
   });
 
   it("emits read, commented, routed, and approved statuses deterministically", async () => {
@@ -320,7 +339,7 @@ describe("buildSurfacedArtifacts", () => {
     await appendOperation(adapter, "art-routed", "comment_routed", "manager", NOW, JSON.stringify({ to: "maestra" }), null, null);
     await approveArtifact(adapter, "art-approved", { approver: "human:chris" }, () => new Date(NOW));
 
-    const byId = new Map((await buildSurfacedArtifacts(adapter, { limit: 7, readFile })).map((r) => [r.id, r.status]));
+    const byId = new Map((await buildSurfacedArtifacts(adapter, { limit: 7, readFile, env: C0_ON })).map((r) => [r.id, r.status]));
     expect(byId.get("artifact:art-read")).toBe("read");
     expect(byId.get("artifact:art-commented")).toBe("commented");
     expect(byId.get("artifact:art-routed")).toBe("routed");

@@ -18,7 +18,11 @@ async function setup(): Promise<void> {
   await migrateOutputsTables(adapter);
   app = express();
   app.use(express.json());
-  mountOutputsRoutes(app, adapter, { autoIngest: false, actionCooldownMs: 0 });
+  mountOutputsRoutes(app, adapter, {
+    autoIngest: false,
+    actionCooldownMs: 0,
+    env: { C0_FEEDBACK_REACTIONS: "1" } as NodeJS.ProcessEnv,
+  });
   tmp = mkdtempSync(path.join(tmpdir(), "artifact-detail-"));
 }
 

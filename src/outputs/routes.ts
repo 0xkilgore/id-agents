@@ -474,6 +474,19 @@ export function mountOutputsRoutes(
     }
   }
 
+  function hideDisabledFeedbackDetail(detail: ArtifactDetailResponse): ArtifactDetailResponse {
+    if (isC0FeedbackReactionsEnabled(env)) return detail;
+    return {
+      ...detail,
+      review: {
+        ...detail.review,
+        comments_count: 0,
+        latest_comment: null,
+      },
+      comments: [],
+    };
+  }
+
   async function getArtifactDetailCached(ref: ArtifactDetailRef): Promise<{
     detail: ArtifactDetailResponse | null;
     cache: 'hit' | 'miss' | 'deduped';
@@ -820,7 +833,7 @@ export function mountOutputsRoutes(
       });
       return;
     }
-    res.json(detail);
+    res.json(hideDisabledFeedbackDetail(detail));
   }
 
   // ── GET /artifacts/detail?path=<encoded-or-plain-path> ─────────────
@@ -1376,6 +1389,9 @@ export function mountOutputsRoutes(
   // ── GET /artifacts/:id/comments ────────────────────────────────────
   app.get('/artifacts/:id/comments', async (req: Request<{ id: string }>, res: Response) => {
     try {
+      if (!isC0FeedbackReactionsEnabled(env)) {
+        return res.status(404).json({ ok: false, error: 'c0_feedback_reactions_disabled' });
+      }
       const limit = Math.min(parseInt(req.query.limit as string, 10) || 100, 500);
       const offset = parseInt(req.query.offset as string, 10) || 0;
       const comments = await listComments(adapter, req.params.id, limit, offset);

@@ -12,6 +12,7 @@ import { SqliteAdapter } from "../../src/db/sqlite-adapter.js";
 import { migrateSqlite } from "../../src/db/migrations/sqlite.js";
 import { migrateOutputsTables, registerArtifact } from "../../src/outputs/storage.js";
 import { mountOutputsRoutes } from "../../src/outputs/routes.js";
+import { commentArtifact } from "../../src/outputs/ops.js";
 import type { CommentDispatchEnqueueFn } from "../../src/outputs/comment-dispatch.js";
 
 const ART = "art-c0-1";
@@ -268,7 +269,7 @@ describe("POST /artifacts/:id/reactions — C0 ambient reactions", () => {
 });
 
 describe("C0 flag gating (C0_FEEDBACK_REACTIONS off)", () => {
-  it("404s POST /reactions, POST /comments, and GET /feedback when the flag is off without writing artifact state", async () => {
+  it("keeps disabled reaction/comment controls from writing or surfacing misleading artifact state", async () => {
     const { fn } = makeFakeEnqueue();
     const { app, adapter } = await buildApp({ enqueue: fn, env: {} as NodeJS.ProcessEnv });
     await catalogArtifact(adapter, "regina");
@@ -300,6 +301,27 @@ describe("C0 flag gating (C0_FEEDBACK_REACTIONS off)", () => {
       [ART],
     );
     expect(Number(states.rows[0].n)).toBe(0);
+
+    await commentArtifact(adapter, ART, {
+      actor: "user:chris",
+      body: "old feedback from before the disabled rollout",
+    });
+
+    const comments = await call(app, "GET", `/artifacts/${ART}/comments`);
+    expect(comments.status).toBe(404);
+    expect(comments.body.error).toBe("c0_feedback_reactions_disabled");
+
+    const detail = await call(app, "GET", `/artifacts/${ART}/detail`);
+    expect(detail.status).toBe(200);
+    expect(detail.body.review.comments_count).toBe(0);
+    expect(detail.body.review.latest_comment).toBeNull();
+    expect(detail.body.comments).toEqual([]);
+
+    const stored = await adapter.query<{ n: number }>(
+      `SELECT COUNT(*) AS n FROM artifact_operations WHERE artifact_id = ? AND op_type = 'comment_recorded'`,
+      [ART],
+    );
+    expect(Number(stored.rows[0].n)).toBe(1);
   });
 });
 

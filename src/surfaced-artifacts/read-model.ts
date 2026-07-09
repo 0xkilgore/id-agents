@@ -1,5 +1,6 @@
 import { promises as fsp } from "node:fs";
 import { basename, extname } from "node:path";
+import { isC0FeedbackReactionsEnabled } from "../config/feature-flags.js";
 import type { DbAdapter } from "../db/db-adapter.js";
 import { projectFromPath } from "../outputs/entry-projection.js";
 import { artifactIdFromPath } from "../outputs/storage.js";
@@ -89,6 +90,7 @@ export interface BuildSurfacedArtifactsOptions {
   limit?: number;
   rawLimit?: number;
   readFile?: (path: string) => Promise<string>;
+  env?: NodeJS.ProcessEnv;
 }
 
 const REASON_RANK: Record<SurfacedArtifactRelevanceReason, number> = {
@@ -416,6 +418,7 @@ export async function buildSurfacedArtifactsReadModel(
   const primaryLimit = Math.min(Math.max(opts.limit ?? 5, 1), 7);
   const rawLimit = Math.min(Math.max(opts.rawLimit ?? 250, primaryLimit), 500);
   const readFile = opts.readFile ?? ((p: string) => fsp.readFile(p, "utf8"));
+  const feedbackEnabled = isC0FeedbackReactionsEnabled(opts.env);
   const [artifacts, comments, dispatches] = await Promise.all([
     readArtifacts(adapter, rawLimit),
     readCommentRows(adapter, rawLimit),
@@ -438,7 +441,7 @@ export async function buildSurfacedArtifactsReadModel(
       body: artifact.body_text ?? body.text,
     });
     const reason = artifactReason(artifact);
-    const status = artifactStatus(artifact);
+    const status = artifactStatus(artifact, feedbackEnabled);
     rawRows.push(withRank({
       id: `artifact:${artifact.artifact_id}`,
       title: humanTitleFromParts({
@@ -555,50 +558,52 @@ export async function buildSurfacedArtifactsReadModel(
     }));
   }
 
-  for (const comment of comments) {
-    if (!commentNeedsRouting(comment.payload_json)) continue;
-    const project = projectFromPath(comment.abs_path) ?? projectFromText([comment.artifact_title, comment.basename, comment.tag].join(" "));
-    const track = trackFromText([comment.tag, comment.artifact_title, comment.basename, parseCommentBody(comment.payload_json)].join(" "));
-    const title = humanTitleFromParts({
-      dispatchTitle: comment.artifact_title,
-      basename: comment.basename,
-      agent: comment.agent,
-      date: comment.ts,
-    });
-    rawRows.push(withRank({
-      id: `comment:${comment.artifact_id}:${comment.op_id}`,
-      title: `Route comment on ${title}`,
-      subtitle: subtitle([comment.agent, truncate(parseCommentBody(comment.payload_json), 72)]),
-      work_item_ref: `artifact:${comment.artifact_id}`,
-      group_count: 1,
-      grouped_source_kinds: ["comment"],
-      status: "commented",
-      relevance_reason: "blocked_or_stale",
-      needs: "route",
-      artifact_ref: comment.abs_path ?? comment.artifact_id,
-      project_ref: project ?? undefined,
-      track_ref: track ?? undefined,
-      agent_name: comment.agent ?? undefined,
-      created_at: comment.ts,
-      updated_at: comment.ts,
-      source_kind: "comment",
-      source_type: sourceTypeFromPath({ path: comment.abs_path, title }),
-      source_label: sourceLabel([comment.agent, title]),
-      source_path: comment.abs_path ?? undefined,
-      source_proof: comment.abs_path ? sourceProof(comment.abs_path, "comment", null) : `comment:${comment.artifact_id}:${comment.op_id}`,
-      visibility_proof: { discovered_by: "comment", artifact_path_present: Boolean(comment.abs_path) },
-      delivery: artifactDelivery(comment.artifact_id, {
-        mediaType: mediaTypeFromPathForDelivery(comment.abs_path),
-        freshness: comment.abs_path ? "current" : "body_unavailable",
-        sourceHost: null,
-        sourceMtime: null,
-        contentHash: null,
-        bodyCached: false,
-        bodyAvailable: false,
-        bodySource: "unavailable",
-        bodyPreview: null,
-      }),
-    }));
+  if (feedbackEnabled) {
+    for (const comment of comments) {
+      if (!commentNeedsRouting(comment.payload_json)) continue;
+      const project = projectFromPath(comment.abs_path) ?? projectFromText([comment.artifact_title, comment.basename, comment.tag].join(" "));
+      const track = trackFromText([comment.tag, comment.artifact_title, comment.basename, parseCommentBody(comment.payload_json)].join(" "));
+      const title = humanTitleFromParts({
+        dispatchTitle: comment.artifact_title,
+        basename: comment.basename,
+        agent: comment.agent,
+        date: comment.ts,
+      });
+      rawRows.push(withRank({
+        id: `comment:${comment.artifact_id}:${comment.op_id}`,
+        title: `Route comment on ${title}`,
+        subtitle: subtitle([comment.agent, truncate(parseCommentBody(comment.payload_json), 72)]),
+        work_item_ref: `artifact:${comment.artifact_id}`,
+        group_count: 1,
+        grouped_source_kinds: ["comment"],
+        status: "commented",
+        relevance_reason: "blocked_or_stale",
+        needs: "route",
+        artifact_ref: comment.abs_path ?? comment.artifact_id,
+        project_ref: project ?? undefined,
+        track_ref: track ?? undefined,
+        agent_name: comment.agent ?? undefined,
+        created_at: comment.ts,
+        updated_at: comment.ts,
+        source_kind: "comment",
+        source_type: sourceTypeFromPath({ path: comment.abs_path, title }),
+        source_label: sourceLabel([comment.agent, title]),
+        source_path: comment.abs_path ?? undefined,
+        source_proof: comment.abs_path ? sourceProof(comment.abs_path, "comment", null) : `comment:${comment.artifact_id}:${comment.op_id}`,
+        visibility_proof: { discovered_by: "comment", artifact_path_present: Boolean(comment.abs_path) },
+        delivery: artifactDelivery(comment.artifact_id, {
+          mediaType: mediaTypeFromPathForDelivery(comment.abs_path),
+          freshness: comment.abs_path ? "current" : "body_unavailable",
+          sourceHost: null,
+          sourceMtime: null,
+          contentHash: null,
+          bodyCached: false,
+          bodyAvailable: false,
+          bodySource: "unavailable",
+          bodyPreview: null,
+        }),
+      }));
+    }
   }
 
   const grouped = groupPrimaryRows(rawRows);
@@ -748,10 +753,10 @@ function artifactReason(row: ArtifactRow): SurfacedArtifactRelevanceReason {
   return "final_user_facing_deliverable";
 }
 
-function artifactStatus(row: ArtifactRow): SurfacedArtifactStatus {
+function artifactStatus(row: ArtifactRow, feedbackEnabled = true): SurfacedArtifactStatus {
   if (row.approved_at) return "approved";
   if (Number(row.routed_count ?? 0) > 0) return "routed";
-  if (Number(row.comment_count ?? 0) > 0) return "commented";
+  if (feedbackEnabled && Number(row.comment_count ?? 0) > 0) return "commented";
   if (row.last_viewed_at || row.first_viewed_at) return "read";
   return "unread";
 }
