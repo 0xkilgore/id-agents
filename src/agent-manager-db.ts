@@ -8075,15 +8075,17 @@ export class AgentManagerDb {
 
         const noteRow = await getTaskCommentByHash(this.db.adapter, teamId, append.row.hash);
         const updated = await this.db.tasks.getByNameForTeam(task.name, teamId);
+        const note = taskCommentView(noteRow ?? append.row);
         res.status(append.inserted ? 201 : 200).json({
           ok: true,
           idempotent: !append.inserted,
-          note: taskCommentView(noteRow ?? append.row),
+          visible_state: note.operation_state,
+          note,
           task: await this.buildTaskResult(updated ?? task, teamId),
         });
       } catch (err: any) {
         console.error('[Manager] Error in POST /tasks/:ref/notes:', err);
-        res.status(500).json({ error: err?.message || 'Internal server error' });
+        res.status(500).json({ ok: false, visible_state: 'not-recorded', error: 'task_comment_write_failed' });
       }
     });
 
@@ -8963,14 +8965,14 @@ export class AgentManagerDb {
           retryable: false,
           routed_at: new Date().toISOString(),
         });
-      } catch (err) {
+      } catch {
         results.push({
           target_agent: target.target_agent,
           target_agent_raw: target.target_agent_raw,
           status: 'failed',
           dispatch_phid: null,
           query_id: null,
-          error: err instanceof Error ? err.message : String(err),
+          error: 'route_failed_retryable',
           retryable: true,
           routed_at: new Date().toISOString(),
         });
@@ -9030,6 +9032,7 @@ export class AgentManagerDb {
           ],
         }
       : reconciliation.currentness;
+    const taskOpenTarget = { kind: 'task', ref: task.name, route: `/tasks/${encodeURIComponent(task.name)}`, href: `/tasks/${encodeURIComponent(task.name)}` };
 
     return {
       name: task.name,
@@ -11917,6 +11920,7 @@ export class AgentManagerDb {
             dispatch_phid: null,
             query_id: null,
             error: 'task_not_found',
+            retryable: false,
             routed_at: new Date().toISOString(),
           }]);
           failed += 1;

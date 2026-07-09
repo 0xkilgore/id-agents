@@ -6,6 +6,10 @@ export const TASK_COMMENT_EVENT_TOPIC = "task_comment" as const;
 export const TASK_COMMENT_DISPATCH_CHANNEL = "task_comment" as const;
 
 export type TaskCommentRoutingStatus = "pending" | "routed" | "failed";
+export type TaskCommentOperationState =
+  | "recorded+routed"
+  | "recorded-route-failed-with-retry"
+  | "terminal failure";
 
 export interface TaskCommentRoutingResult {
   target_agent: string;
@@ -48,10 +52,13 @@ export interface TaskCommentView {
   source_line: number | null;
   text: string;
   actor: string;
+  source: string;
   timestamp: string;
   hash: string;
   event_seq: number | null;
   routing_status: TaskCommentRoutingStatus;
+  operation_state: TaskCommentOperationState;
+  visible_state: TaskCommentOperationState;
   routing_results: TaskCommentRoutingResult[];
   created_at: string;
   updated_at: string;
@@ -205,7 +212,7 @@ export async function updateTaskCommentRouting(
     `UPDATE task_comment_events
      SET routing_status = ?, routing_results_json = ?, updated_at = ?
      WHERE id = ?`,
-    [status, JSON.stringify(results), Date.now(), id],
+    [status, JSON.stringify(results.map(sanitizeRoutingResult)), Date.now(), id],
   );
 }
 
@@ -238,7 +245,15 @@ export async function listPendingTaskComments(
   return rows;
 }
 
+export function taskCommentOperationState(results: TaskCommentRoutingResult[]): TaskCommentOperationState {
+  if (results.length > 0 && results.every((r) => r.status === "routed")) return "recorded+routed";
+  if (results.some((r) => r.retryable || r.status === "pending")) return "recorded-route-failed-with-retry";
+  return "terminal failure";
+}
+
 export function taskCommentView(row: TaskCommentRow): TaskCommentView {
+  const routingResults = parseRoutingResults(row.routing_results_json);
+  const operationState = taskCommentOperationState(routingResults);
   return {
     id: row.id,
     task_id: row.task_id,
@@ -249,11 +264,14 @@ export function taskCommentView(row: TaskCommentRow): TaskCommentView {
     source_line: row.source_line ?? null,
     text: row.comment_text,
     actor: row.actor,
+    source: row.actor,
     timestamp: new Date(row.occurred_at).toISOString(),
     hash: row.hash,
     event_seq: row.event_seq ?? null,
     routing_status: row.routing_status,
-    routing_results: parseRoutingResults(row.routing_results_json),
+    operation_state: operationState,
+    visible_state: operationState,
+    routing_results: routingResults,
     created_at: new Date(row.created_at).toISOString(),
     updated_at: new Date(row.updated_at).toISOString(),
   };
@@ -263,10 +281,30 @@ export function parseRoutingResults(raw: string | null | undefined): TaskComment
   if (!raw) return [];
   try {
     const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? parsed.filter(isRoutingResult) : [];
+    return Array.isArray(parsed) ? parsed.filter(isRoutingResult).map(sanitizeRoutingResult) : [];
   } catch {
     return [];
   }
+}
+
+function sanitizeRoutingResult(result: TaskCommentRoutingResult): TaskCommentRoutingResult {
+  return {
+    target_agent: result.target_agent,
+    target_agent_raw: result.target_agent_raw ?? null,
+    status: result.status,
+    dispatch_phid: result.dispatch_phid ?? null,
+    query_id: result.query_id ?? null,
+    error: sanitizePublicRoutingError(result.error, result.retryable),
+    retryable: Boolean(result.retryable),
+    routed_at: result.routed_at ?? null,
+  };
+}
+
+function sanitizePublicRoutingError(error: string | null | undefined, retryable?: boolean): string | null {
+  if (!error) return null;
+  if (error === "scheduler_unavailable" || error === "target_agent_unresolved" || error === "task_not_found") return error;
+  if (error.startsWith("agent_not_found:")) return "target_agent_unresolved";
+  return retryable ? "route_failed_retryable" : "route_failed_terminal";
 }
 
 function isRoutingResult(v: unknown): v is TaskCommentRoutingResult {

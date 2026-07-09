@@ -135,9 +135,9 @@ describe('GET /tasks read-model immediate reflect', () => {
   });
 
   beforeEach(async () => {
+    await db.adapter.query(`DELETE FROM task_comment_events`);
     await db.adapter.query(`DELETE FROM tasks`);
     await db.adapter.query(`DELETE FROM event_log`);
-    await db.adapter.query(`DELETE FROM task_comment_events`);
     await db.adapter.query(`DELETE FROM dispatch_scheduler_queue`);
   });
 
@@ -469,7 +469,7 @@ describe('GET /tasks read-model immediate reflect', () => {
           target_agent: 'missing-finances',
           target_agent_raw: 'project:missing-finances',
           status: 'failed',
-          error: 'agent_not_found:missing-finances',
+          error: 'target_agent_unresolved',
           retryable: false,
         }),
       ]),
@@ -488,7 +488,7 @@ describe('GET /tasks read-model immediate reflect', () => {
           state: 'failed',
           target_agent: 'missing-finances',
           target_agent_raw: 'project:missing-finances',
-          error: 'agent_not_found:missing-finances',
+          error: 'target_agent_unresolved',
           retry: expect.objectContaining({
             available: false,
             source_ref: expect.stringContaining(`task:${taskName}:comment:`),
@@ -537,7 +537,7 @@ describe('GET /tasks read-model immediate reflect', () => {
             target_agent: 'coder',
             dispatch_phid: null,
             query_id: null,
-            error: 'scheduler transport unavailable',
+            error: 'route_failed_retryable',
             retry: expect.objectContaining({
               available: true,
               reason: 'retryable_route_attempt',
@@ -673,5 +673,163 @@ describe('GET /tasks read-model immediate reflect', () => {
     expect(secondRow?.status).toBe('done');
     expect(typeof secondRow?.completedAt).toBe('number');
     expect(secondRow?.completedAt as number).toBeGreaterThanOrEqual(firstCompletedAt);
+  });
+
+  it('records and routes a task note with canonical state that survives detail reload', async () => {
+    const taskName = 'comment-route-success';
+    await insertTaskDirect(db, teamId, taskName, coderAgentId, 'doing');
+    const enqueues: any[] = [];
+    (manager as any).dispatchScheduler = {
+      enqueue: async (input: any) => {
+        enqueues.push(input);
+        return {
+          dispatch_phid: `phid:disp-note-${enqueues.length}`,
+          query_id: `query_note_${enqueues.length}`,
+          status: 'queued',
+        };
+      },
+    };
+
+    const res = await fetch(`${baseUrl}/tasks/${taskName}/notes`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Id-Team': TEAM },
+      body: JSON.stringify({
+        actor: 'user:chris',
+        text: 'Please route this canonical note.',
+        timestamp: '2026-07-09T12:00:00.000Z',
+      }),
+    });
+
+    expect(res.status).toBe(201);
+    const body = await res.json();
+    expect(body.visible_state).toBe('recorded+routed');
+    expect(body.note).toMatchObject({
+      actor: 'user:chris',
+      source: 'user:chris',
+      operation_state: 'recorded+routed',
+      created_at: expect.any(String),
+      updated_at: expect.any(String),
+    });
+    expect(enqueues.map((e) => e.to_agent).sort()).toEqual(['cane', 'coder']);
+
+    const detail = await fetch(`${baseUrl}/tasks/${taskName}`, {
+      headers: { 'X-Id-Team': TEAM },
+    }).then((r) => r.json());
+    expect(detail.task.notes).toHaveLength(1);
+    expect(detail.task.notes[0].operation_state).toBe('recorded+routed');
+    expect(detail.task.commentRouting).toMatchObject({
+      status: 'routed',
+      routed_count: 2,
+      failed_count: 0,
+    });
+  });
+
+  it('records route failures as retryable canonical state without leaking raw transport errors', async () => {
+    const taskName = 'comment-route-failure';
+    await insertTaskDirect(db, teamId, taskName, coderAgentId, 'doing');
+    (manager as any).dispatchScheduler = {
+      enqueue: async () => {
+        throw new Error('connect ECONNREFUSED 127.0.0.1:65535\n    at raw stack frame');
+      },
+    };
+
+    const res = await fetch(`${baseUrl}/tasks/${taskName}/notes`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Id-Team': TEAM },
+      body: JSON.stringify({ actor: 'user:chris', text: 'This should retry.' }),
+    });
+
+    expect(res.status).toBe(201);
+    const body = await res.json();
+    expect(body.visible_state).toBe('recorded-route-failed-with-retry');
+    const serialized = JSON.stringify(body);
+    expect(serialized).not.toContain('ECONNREFUSED');
+    expect(serialized).not.toContain('raw stack frame');
+    expect(body.note.routing_results.every((r: any) => r.error === 'route_failed_retryable')).toBe(true);
+
+    const detail = await fetch(`${baseUrl}/tasks/${taskName}`, {
+      headers: { 'X-Id-Team': TEAM },
+    }).then((r) => r.json());
+    const detailText = JSON.stringify(detail);
+    expect(detail.task.notes[0].operation_state).toBe('recorded-route-failed-with-retry');
+    expect(detailText).not.toContain('ECONNREFUSED');
+    expect(detail.task.currentness.stale_reason).toBe('task_comment_routing_failed');
+  });
+
+  it('suppresses duplicate task notes and preserves the original canonical operation state', async () => {
+    const taskName = 'comment-route-duplicate';
+    await insertTaskDirect(db, teamId, taskName, coderAgentId, 'doing');
+    let count = 0;
+    (manager as any).dispatchScheduler = {
+      enqueue: async () => ({
+        dispatch_phid: `phid:disp-dup-${++count}`,
+        query_id: `query_dup_${count}`,
+        status: 'queued',
+      }),
+    };
+    const payload = {
+      actor: 'user:chris',
+      text: 'Duplicate me once.',
+      source_path: '/tasks/comment-route-duplicate',
+      timestamp: '2026-07-09T12:05:00.000Z',
+    };
+
+    const first = await fetch(`${baseUrl}/tasks/${taskName}/notes`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Id-Team': TEAM },
+      body: JSON.stringify(payload),
+    }).then((r) => r.json());
+    const secondRes = await fetch(`${baseUrl}/tasks/${taskName}/notes`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Id-Team': TEAM },
+      body: JSON.stringify(payload),
+    });
+    const second = await secondRes.json();
+
+    expect(secondRes.status).toBe(200);
+    expect(second.idempotent).toBe(true);
+    expect(second.note.id).toBe(first.note.id);
+    expect(second.note.operation_state).toBe('recorded+routed');
+    expect(count).toBe(2);
+
+    const rows = await db.adapter.query<{ c: number }>(`SELECT COUNT(*) AS c FROM task_comment_events`);
+    expect(rows.rows[0]?.c).toBe(1);
+  });
+
+  it('falls back to terminal failure for mismatched project owner docs without breaking task detail', async () => {
+    const projectOwnerId = await insertAgentDirect(db, teamId, 'project:missing-owner');
+    const taskName = 'comment-doc-mismatch';
+    await insertTaskDirect(db, teamId, taskName, projectOwnerId, 'doing');
+    (manager as any).dispatchScheduler = {
+      enqueue: async () => ({ dispatch_phid: 'phid:disp-cane', query_id: 'query_cane', status: 'queued' }),
+    };
+
+    const res = await fetch(`${baseUrl}/tasks/${taskName}/notes`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Id-Team': TEAM },
+      body: JSON.stringify({ actor: 'user:chris', text: 'Owner doc-model label is stale.' }),
+    });
+    const body = await res.json();
+
+    expect(res.status).toBe(201);
+    expect(body.visible_state).toBe('terminal failure');
+    expect(body.note.routing_results).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ target_agent: 'cane', status: 'routed' }),
+        expect.objectContaining({
+          target_agent: 'missing-owner',
+          target_agent_raw: 'project:missing-owner',
+          status: 'failed',
+          error: 'target_agent_unresolved',
+          retryable: false,
+        }),
+      ]),
+    );
+
+    const detail = await fetch(`${baseUrl}/tasks/${taskName}`, {
+      headers: { 'X-Id-Team': TEAM },
+    }).then((r) => r.json());
+    expect(detail.task.notes[0].operation_state).toBe('terminal failure');
+    expect(detail.task.openTarget).toMatchObject({ kind: 'task', route: `/tasks/${taskName}` });
   });
 });
