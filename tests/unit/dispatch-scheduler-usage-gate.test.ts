@@ -59,6 +59,45 @@ async function ingestHugeRogerUsage(): Promise<void> {
   });
 }
 
+async function insertActiveProviderLimitBounce(agent = "roger"): Promise<void> {
+  const nowIso = new Date().toISOString();
+  const nextIso = new Date(Date.now() + 30 * 60_000).toISOString();
+  await adapter.query(
+    `INSERT INTO dispatch_scheduler_queue (
+      dispatch_phid, team_id, query_id, to_agent, from_actor, channel,
+      subject, body_markdown, provider, runtime, priority, status,
+      not_before_at, attempt_count, bounce_count, last_bounce_json,
+      bounce_history_json, updated_at
+    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+    [
+      `phid:disp-${Math.random().toString(16).slice(2)}`,
+      "team",
+      `query_${Math.random().toString(36).slice(2)}`,
+      agent,
+      "schedule",
+      "talk",
+      "provider limit",
+      "body",
+      "anthropic",
+      "claude-code-cli",
+      5,
+      "bounced",
+      nextIso,
+      1,
+      1,
+      JSON.stringify({
+        ts: nowIso,
+        kind: "provider_limit",
+        message: "Claude limited until reset",
+        next_attempt_at: nextIso,
+        attempt: 1,
+      }),
+      "[]",
+      nowIso,
+    ],
+  );
+}
+
 describe("Scheduler usage-gate integration", () => {
   it("WARN-ONLY default: even with budget exhausted, claim still picks up roger", async () => {
     const policyPath = policyFile();
@@ -72,7 +111,7 @@ describe("Scheduler usage-gate integration", () => {
     // Confirm enforcement is warn:
     const snap = await service.getSnapshotForScheduler();
     expect(snap.enforcement).toBe("warn");
-    expect(snap.agents.roger?.state).toBe("hard_paused"); // state IS reported
+    expect(snap.agents.roger?.state).toBe("soft_warning"); // configured-token overage is a warning
     // But excluded list is empty in warn mode:
     expect(await service.getExcludedAgentsForClaim()).toEqual([]);
 
@@ -100,7 +139,7 @@ describe("Scheduler usage-gate integration", () => {
     expect(report.started).toBe(1); // roger was claimed despite budget exhausted
   });
 
-  it("ENFORCE mode: budget-exhausted agent is excluded from claim and its doc stays queued", async () => {
+  it("ENFORCE mode: configured token overage does not exclude or block claims", async () => {
     const policyPath = policyFile();
     const { service } = createUsageMeterService({
       adapter,
@@ -125,16 +164,16 @@ describe("Scheduler usage-gate integration", () => {
     const report = await handle.scheduler.tick();
 
     expect(report.usage_gate?.enforcement).toBe("enforce");
-    expect(report.usage_gate?.excluded_agents).toContain("roger");
-    expect(report.started).toBe(0);
+    expect(report.usage_gate?.excluded_agents).toEqual([]);
+    expect(report.started).toBe(1);
 
-    // Doc remains queued (not failed, not bounced).
+    // Doc starts normally; configured tokens are not a real provider limit.
     const got = await handle.client.getByQueryId(enq.query_id);
     expect(got.ok).toBe(true);
-    if (got.ok) expect(got.value.status).toBe("queued");
+    if (got.ok) expect(got.value.status).toBe("in_flight");
   });
 
-  it("ENFORCE mode: exempt agents (manager/sentinel) still start even when global is hard_paused", async () => {
+  it("ENFORCE mode: active provider limit excludes non-exempt agents but leaves exempt agents startable", async () => {
     // Drive global budget over hard threshold using a giant _global event
     // (via an agent that's NOT in the exempt list). Roger is in the
     // policy so the gate knows it exists and can pause it; the queue
@@ -147,25 +186,8 @@ describe("Scheduler usage-gate integration", () => {
       env: { USAGE_BUDGET_POLICY_PATH: policyPath, USAGE_GATE_ENFORCEMENT: "enforce" },
       now: () => Date.now(),
     });
-    await upsertAgentUsageEvent(adapter, {
-      event_id: "evt-burn",
-      provider: "anthropic",
-      agent_id: "burn-agent",
-      dispatch_id: null,
-      query_id: null,
-      session_id: null,
-      model: "claude-sonnet-4-6",
-      ts: Date.now() - 60_000,
-      input_tokens: 50_000,
-      output_tokens: 0,
-      cache_creation_input_tokens: 0,
-      cache_read_input_tokens: 0,
-      raw_tokens: 50_000,
-      weighted_tokens: 50_000,
-      source: "claude_code_transcripts",
-      confidence: "canonical",
-      idempotency_key: "ik-burn",
-    });
+    await ingestHugeRogerUsage();
+    await insertActiveProviderLimitBounce("roger");
     await service.refreshRollups();
 
     const handle = new SchedulerHandle({
@@ -185,7 +207,7 @@ describe("Scheduler usage-gate integration", () => {
     handle.scheduler["transport"].sendTalk = async () => ({ ok: true as const, agent_query_id: "aq-x" });
     const report = await handle.scheduler.tick();
 
-    // Roger should be excluded (global hard pause); manager is exempt.
+    // Roger should be excluded (real provider limit); manager is exempt.
     expect(report.usage_gate?.excluded_agents).toContain("roger");
     expect(report.usage_gate?.excluded_agents).not.toContain("manager");
   });

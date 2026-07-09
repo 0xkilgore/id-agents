@@ -11,6 +11,7 @@ import {
   listRecentAgentUsageEvents,
   listAgentUsageRollupsForWindow,
   upsertAgentUsageRollup,
+  listActiveProviderLimitSignals,
 } from "./storage.js";
 import { computeDayWindow, computeWeekWindow, rollupEvents } from "./rollup.js";
 import { loadDispatchSpendScopes } from "./dispatch-spend-attribution.js";
@@ -25,6 +26,7 @@ import type {
   UsageGateEnforcement,
   UsageGateSnapshot,
   UsageReportV2,
+  UsageReportProviderWindow,
 } from "./types.js";
 
 /** Default daemon-attributed ceilings (the CONTINUOUS_ORCHESTRATION_* caps). */
@@ -107,7 +109,9 @@ export class UsageMeterService {
         limit: 100_000,
       });
       const rollups = rollupEvents(
-        events.map((e: AgentUsageEvent) => ({
+        events
+          .filter((e) => e.provider === this.policy.provider)
+          .map((e: AgentUsageEvent) => ({
           agent_id: e.agent_id,
           ts: e.ts,
           raw_tokens: e.raw_tokens,
@@ -123,6 +127,28 @@ export class UsageMeterService {
           window_kinds: ["day", "week"],
         },
       );
+      const extraProviders = uniqueProviders(events).filter((p) => p !== this.policy.provider);
+      for (const provider of extraProviders) {
+        rollups.push(...rollupEvents(
+          events
+            .filter((e) => e.provider === provider)
+            .map((e) => ({
+              agent_id: e.agent_id,
+              ts: e.ts,
+              raw_tokens: e.raw_tokens,
+              weighted_tokens: e.weighted_tokens,
+              model: e.model,
+              source: e.source,
+              confidence: e.confidence,
+            })),
+          {
+            provider,
+            timezone: this.policy.timezone,
+            now_iso: new Date(nowMs).toISOString(),
+            window_kinds: ["day", "week"],
+          },
+        ));
+      }
       for (const r of rollups) {
         await upsertAgentUsageRollup(this.adapter, r);
       }
@@ -155,6 +181,7 @@ export class UsageMeterService {
       void this.refreshRollups();
 
       const { rollupsByAgent, globalRollup } = await this.loadCurrentRollups();
+      const providerLimits = await listActiveProviderLimitSignals(this.adapter, new Date(nowMs).toISOString());
       const snap = evaluateGate({
         policy: this.policy,
         rollupsByAgent,
@@ -162,6 +189,7 @@ export class UsageMeterService {
         enforcement: this.enforcement,
         now_iso: new Date(nowMs).toISOString(),
         data_freshness_ms: this.computeDataFreshness(rollupsByAgent, globalRollup, nowMs),
+        provider_limits: providerLimits,
       });
       // Patch in the policy-load degraded state if applicable.
       const final: UsageGateSnapshot =
@@ -193,6 +221,7 @@ export class UsageMeterService {
         enforcement: this.enforcement,
         override_active: false,
         degraded_reason: "usage-meter snapshot failed",
+        provider_limits: [],
         generated_at: new Date(nowMs).toISOString(),
       };
       this.cachedSnapshot = fallback;
@@ -227,8 +256,6 @@ export class UsageMeterService {
       const weekWin = computeWeekWindow(nowMs, this.policy.timezone);
       const concurrency = await this.resolveConcurrency();
 
-      const dailyBudget = this.policy.global.daily_weighted_tokens;
-      const weeklyBudget = this.policy.global.weekly_weighted_tokens;
       const gd = globalRollup.day;
       const gw = globalRollup.week;
 
@@ -242,6 +269,7 @@ export class UsageMeterService {
       });
 
       const by_model = computeByModel(rollupsByAgent);
+      const providerWindows = await this.computeProviderWindows(dayWin, weekWin, snap.provider_limits);
 
       const report: UsageReportV2 = {
         schema_version: "usage-meter-v2",
@@ -259,9 +287,10 @@ export class UsageMeterService {
           },
         },
         usage: {
-          daily: globalWindow(gd, dailyBudget, this.policy.global.soft_threshold_pct, this.policy.global.hard_threshold_pct),
-          weekly: globalWindow(gw, weeklyBudget, this.policy.global.soft_threshold_pct, this.policy.global.hard_threshold_pct),
+          daily: globalWindow(gd),
+          weekly: globalWindow(gw),
         },
+        by_provider: providerWindows,
         by_agent,
         by_model,
         concurrency,
@@ -272,8 +301,8 @@ export class UsageMeterService {
             (snap.global.decision === "pause_non_core" ||
               snap.global.decision === "pause_unknown"),
           reason: snap.global.reason,
-          daily_percent: snap.global.daily_pct ?? 0,
-          weekly_percent: snap.global.weekly_pct ?? 0,
+          daily_percent: null,
+          weekly_percent: null,
           override_active: snap.override_active,
           enforcement: snap.enforcement,
           agent_overrides: Object.entries(snap.agents).map(([agent, d]) => ({
@@ -281,14 +310,15 @@ export class UsageMeterService {
             state: d.state,
             reason: d.reason,
           })),
+          provider_limits: snap.provider_limits,
         },
         calibration: {
-          denominator_kind: "configured_policy_budget",
+          denominator_kind: "usage_with_no_limit",
           calibrated_at: null,
           notes:
             this.policyDegraded
               ? `policy load degraded: ${this.policyDegradedReason ?? "?"}; using defaults`
-              : "Budgets are operator-configured weighted-token limits, not Anthropic billing API limits.",
+              : "Provider plan limits are not token-metered API budgets. Percent consumed is intentionally omitted until a calibrated estimate is derived from observed limit-hit events.",
         },
         source: "manager-usage-meter",
       };
@@ -454,23 +484,26 @@ export class UsageMeterService {
     const nowMs = this.now();
     const dayWin = computeDayWindow(nowMs, this.policy.timezone);
     const weekWin = computeWeekWindow(nowMs, this.policy.timezone);
-    const provider = this.policy.provider;
-
-    const dayRollups = await listAgentUsageRollupsForWindow(this.adapter, {
-      provider,
-      window_kind: "day",
-      window_start: dayWin.start,
-    });
-    const weekRollups = await listAgentUsageRollupsForWindow(this.adapter, {
-      provider,
-      window_kind: "week",
-      window_start: weekWin.start,
-    });
+    const providers: Provider[] = ["anthropic", "openai", "cursor", "other"];
+    const dayRollups = (
+      await Promise.all(providers.map((provider) => listAgentUsageRollupsForWindow(this.adapter, {
+        provider,
+        window_kind: "day",
+        window_start: dayWin.start,
+      })))
+    ).flat();
+    const weekRollups = (
+      await Promise.all(providers.map((provider) => listAgentUsageRollupsForWindow(this.adapter, {
+        provider,
+        window_kind: "week",
+        window_start: weekWin.start,
+      })))
+    ).flat();
 
     const dayByAgent = new Map<string, AgentUsageRollup>();
     const weekByAgent = new Map<string, AgentUsageRollup>();
-    for (const r of dayRollups) dayByAgent.set(r.agent_id, r);
-    for (const r of weekRollups) weekByAgent.set(r.agent_id, r);
+    for (const r of dayRollups) mergeRollup(dayByAgent, r);
+    for (const r of weekRollups) mergeRollup(weekByAgent, r);
 
     const allAgents = new Set<string>([
       ...dayByAgent.keys(),
@@ -481,15 +514,15 @@ export class UsageMeterService {
     const rollupsByAgent: Record<string, { day: AgentUsageRollup; week: AgentUsageRollup }> = {};
     for (const a of allAgents) {
       rollupsByAgent[a] = {
-        day: dayByAgent.get(a) ?? emptyRollup(a, "day", dayWin.start, dayWin.end, provider, nowMs),
-        week: weekByAgent.get(a) ?? emptyRollup(a, "week", weekWin.start, weekWin.end, provider, nowMs),
+        day: dayByAgent.get(a) ?? emptyRollup(a, "day", dayWin.start, dayWin.end, this.policy.provider, nowMs),
+        week: weekByAgent.get(a) ?? emptyRollup(a, "week", weekWin.start, weekWin.end, this.policy.provider, nowMs),
       };
     }
     return {
       rollupsByAgent,
       globalRollup: {
-        day: dayByAgent.get("_global") ?? emptyRollup("_global", "day", dayWin.start, dayWin.end, provider, nowMs),
-        week: weekByAgent.get("_global") ?? emptyRollup("_global", "week", weekWin.start, weekWin.end, provider, nowMs),
+        day: dayByAgent.get("_global") ?? emptyRollup("_global", "day", dayWin.start, dayWin.end, this.policy.provider, nowMs),
+        week: weekByAgent.get("_global") ?? emptyRollup("_global", "week", weekWin.start, weekWin.end, this.policy.provider, nowMs),
       },
     };
   }
@@ -542,6 +575,57 @@ export class UsageMeterService {
         source_status: "degraded",
       };
     }
+  }
+
+  private async computeProviderWindows(
+    dayWin: { start_ms: number; end_ms: number },
+    weekWin: { start_ms: number; end_ms: number },
+    providerLimits: UsageReportV2["gate"]["provider_limits"],
+  ): Promise<UsageReportProviderWindow[]> {
+    const events = await listRecentAgentUsageEvents(this.adapter, {
+      since_ms: weekWin.start_ms,
+      limit: 200_000,
+    });
+    const acc = new Map<string, {
+      daily: { weighted_tokens: number; raw_tokens: number; requests: number };
+      weekly: { weighted_tokens: number; raw_tokens: number; requests: number };
+    }>();
+    const ensure = (provider: string) => {
+      const key = normalizeProvider(provider);
+      let value = acc.get(key);
+      if (!value) {
+        value = {
+          daily: { weighted_tokens: 0, raw_tokens: 0, requests: 0 },
+          weekly: { weighted_tokens: 0, raw_tokens: 0, requests: 0 },
+        };
+        acc.set(key, value);
+      }
+      return value;
+    };
+    for (const event of events) {
+      if (event.ts < weekWin.start_ms || event.ts >= weekWin.end_ms) continue;
+      const bucket = ensure(event.provider);
+      bucket.weekly.weighted_tokens += event.weighted_tokens;
+      bucket.weekly.raw_tokens += event.raw_tokens;
+      bucket.weekly.requests += 1;
+      if (event.ts >= dayWin.start_ms && event.ts < dayWin.end_ms) {
+        bucket.daily.weighted_tokens += event.weighted_tokens;
+        bucket.daily.raw_tokens += event.raw_tokens;
+        bucket.daily.requests += 1;
+      }
+    }
+    for (const signal of providerLimits) ensure(signal.provider);
+    return [...acc.entries()].sort((a, b) => b[1].daily.weighted_tokens - a[1].daily.weighted_tokens).map(([provider, value]) => {
+      const activeLimit = providerLimits.find((s) => s.provider === provider);
+      return {
+        provider: normalizeProvider(provider),
+        daily: { ...value.daily, limit: null, percent_of_limit: null },
+        weekly: { ...value.weekly, limit: null, percent_of_limit: null },
+        limit_state: activeLimit ? "limited" : "unknown",
+        limit_source: activeLimit ? "observed_provider_signal" : "not_available",
+        reset_at: activeLimit?.reset_at ?? null,
+      };
+    });
   }
 }
 
@@ -636,19 +720,15 @@ function emptyRollup(
 
 function globalWindow(
   r: AgentUsageRollup,
-  budget: number,
-  soft: number,
-  hard: number,
 ): UsageReportV2["usage"]["daily"] {
-  const pct = budget > 0 ? r.weighted_tokens / budget : 0;
   return {
     weighted_tokens: r.weighted_tokens,
     raw_tokens: r.raw_tokens,
     requests: r.requests,
-    budget,
-    percent_consumed: pct,
-    soft_threshold: soft,
-    hard_threshold: hard,
+    budget: null,
+    percent_consumed: null,
+    soft_threshold: null,
+    hard_threshold: null,
   };
 }
 
@@ -692,6 +772,34 @@ function computeByModel(
     .sort((a, b) => b.daily.weighted_tokens - a.daily.weighted_tokens);
 }
 
+function uniqueProviders(events: AgentUsageEvent[]): Array<AgentUsageEvent["provider"]> {
+  return [...new Set(events.map((e) => e.provider))];
+}
+
+function normalizeProvider(raw: string): UsageReportProviderWindow["provider"] {
+  return raw === "anthropic" || raw === "openai" || raw === "cursor" || raw === "other"
+    ? raw
+    : "other";
+}
+
+function mergeRollup(map: Map<string, AgentUsageRollup>, rollup: AgentUsageRollup): void {
+  const prev = map.get(rollup.agent_id);
+  if (!prev) {
+    map.set(rollup.agent_id, { ...rollup, models: [...rollup.models], source_coverage: { ...rollup.source_coverage } });
+    return;
+  }
+  prev.raw_tokens += rollup.raw_tokens;
+  prev.weighted_tokens += rollup.weighted_tokens;
+  prev.requests += rollup.requests;
+  prev.models = [...new Set([...prev.models, ...rollup.models])];
+  for (const [source, count] of Object.entries(rollup.source_coverage)) {
+    prev.source_coverage[source] = (prev.source_coverage[source] ?? 0) + count;
+  }
+  if (Date.parse(rollup.computed_at) > Date.parse(prev.computed_at)) {
+    prev.computed_at = rollup.computed_at;
+  }
+}
+
 function degradedReport(
   policy: UsageBudgetPolicy,
   nowMs: number,
@@ -699,14 +807,14 @@ function degradedReport(
 ): UsageReportV2 {
   const dayWin = computeDayWindow(nowMs, policy.timezone);
   const weekWin = computeWeekWindow(nowMs, policy.timezone);
-  const emptyG = (budget: number) => ({
+  const emptyG = () => ({
     weighted_tokens: 0,
     raw_tokens: 0,
     requests: 0,
-    budget,
-    percent_consumed: 0,
-    soft_threshold: policy.global.soft_threshold_pct,
-    hard_threshold: policy.global.hard_threshold_pct,
+    budget: null,
+    percent_consumed: null,
+    soft_threshold: null,
+    hard_threshold: null,
   });
   return {
     schema_version: "usage-meter-v2",
@@ -716,9 +824,10 @@ function degradedReport(
       weekly: { start: weekWin.start, reset_at: weekWin.end, time_until_reset_seconds: Math.max(0, Math.floor((weekWin.end_ms - nowMs) / 1000)) },
     },
     usage: {
-      daily: emptyG(policy.global.daily_weighted_tokens),
-      weekly: emptyG(policy.global.weekly_weighted_tokens),
+      daily: emptyG(),
+      weekly: emptyG(),
     },
+    by_provider: [],
     by_agent: [],
     by_model: [],
     concurrency: {
@@ -736,14 +845,15 @@ function degradedReport(
       global_state: "degraded",
       should_pause_new_dispatches: false,
       reason: `usage report unavailable: ${err instanceof Error ? err.message : String(err)}`,
-      daily_percent: 0,
-      weekly_percent: 0,
+      daily_percent: null,
+      weekly_percent: null,
       override_active: false,
       enforcement: "warn",
       agent_overrides: [],
+      provider_limits: [],
     },
     calibration: {
-      denominator_kind: "configured_policy_budget",
+      denominator_kind: "usage_with_no_limit",
       calibrated_at: null,
       notes: "report degraded",
     },

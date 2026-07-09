@@ -145,8 +145,8 @@ describe("evaluateGate — soft threshold: warn_allow, never blocks", () => {
   });
 });
 
-describe("evaluateGate — hard threshold: pause decisions (in enforce mode)", () => {
-  it("global at hard threshold → hard_paused + pause_non_core", () => {
+describe("evaluateGate — configured token thresholds are reference warnings only", () => {
+  it("global at configured hard threshold → soft_warning + warn_allow without provider signal", () => {
     const snap = evaluateGate({
       policy: policy(),
       rollupsByAgent: {},
@@ -155,11 +155,12 @@ describe("evaluateGate — hard threshold: pause decisions (in enforce mode)", (
       now_iso: NOW_ISO,
       data_freshness_ms: 1000,
     });
-    expect(snap.global.state).toBe("hard_paused");
-    expect(snap.global.decision).toBe("pause_non_core");
+    expect(snap.global.state).toBe("soft_warning");
+    expect(snap.global.decision).toBe("warn_allow");
+    expect(snap.global.reason).toMatch(/no real provider limit/i);
   });
 
-  it("per-agent above hard threshold → hard_paused + pause_agent", () => {
+  it("per-agent above configured hard threshold → soft_warning + warn_allow without provider signal", () => {
     const snap = evaluateGate({
       policy: policy(),
       rollupsByAgent: {
@@ -170,11 +171,11 @@ describe("evaluateGate — hard threshold: pause decisions (in enforce mode)", (
       now_iso: NOW_ISO,
       data_freshness_ms: 1000,
     });
-    expect(snap.agents.roger?.state).toBe("hard_paused");
-    expect(snap.agents.roger?.decision).toBe("pause_agent");
+    expect(snap.agents.roger?.state).toBe("soft_warning");
+    expect(snap.agents.roger?.decision).toBe("warn_allow");
   });
 
-  it("weekly above hard threshold ALSO triggers hard pause (not just daily)", () => {
+  it("weekly above configured hard threshold is still not a hard pause without provider signal", () => {
     const snap = evaluateGate({
       policy: policy(),
       rollupsByAgent: {
@@ -185,7 +186,31 @@ describe("evaluateGate — hard threshold: pause decisions (in enforce mode)", (
       now_iso: NOW_ISO,
       data_freshness_ms: 1000,
     });
-    expect(snap.agents.roger?.state).toBe("hard_paused");
+    expect(snap.agents.roger?.state).toBe("soft_warning");
+  });
+
+  it("active provider limit signal is the hard pause source", () => {
+    const snap = evaluateGate({
+      policy: policy(),
+      rollupsByAgent: {},
+      globalRollup: { day: rollup("_global", "day", 0), week: rollup("_global", "week", 0) },
+      enforcement: "enforce",
+      now_iso: NOW_ISO,
+      data_freshness_ms: 1000,
+      provider_limits: [{
+        provider: "anthropic",
+        runtime: "claude-code-cli",
+        agent: "cto",
+        dispatch_phid: "disp-1",
+        observed_at: NOW_ISO,
+        reset_at: "2026-05-31T23:00:00.000-05:00",
+        message: "Claude limited until reset",
+        source: "scheduler_bounce",
+      }],
+    });
+    expect(snap.global.state).toBe("hard_paused");
+    expect(snap.global.decision).toBe("pause_non_core");
+    expect(snap.provider_limits[0]?.provider).toBe("anthropic");
   });
 });
 
@@ -202,11 +227,11 @@ describe("evaluateGate — exempt agents bypass global hard pause", () => {
       now_iso: NOW_ISO,
       data_freshness_ms: 1000,
     });
-    expect(snap.global.state).toBe("hard_paused");
+    expect(snap.global.state).toBe("soft_warning");
     expect(snap.agents.manager?.decision).toBe("allow");
     expect(snap.agents.manager?.reason).toMatch(/exempt/i);
-    // Non-exempt roger inherits global pause:
-    expect(snap.agents.roger?.decision).toBe("pause_non_core");
+    // Non-exempt roger does not inherit a hard pause from configured tokens:
+    expect(snap.agents.roger?.decision).toBe("allow");
   });
 });
 
@@ -226,11 +251,10 @@ describe("evaluateGate — WARN-ONLY enforcement (Chris's overnight default)", (
       now_iso: NOW_ISO,
       data_freshness_ms: 1000,
     });
-    // State still surfaces hard_paused so the dashboard shows it,
-    // but the decision is warn_allow so nothing is ever blocked.
-    expect(snap.global.state).toBe("hard_paused");
+    // State does not claim a hard pause unless the provider actually limited us.
+    expect(snap.global.state).toBe("soft_warning");
     expect(snap.global.decision).toBe("warn_allow");
-    expect(snap.agents.roger?.state).toBe("hard_paused");
+    expect(snap.agents.roger?.state).toBe("soft_warning");
     expect(snap.agents.roger?.decision).toBe("warn_allow");
     expect(snap.enforcement).toBe("warn");
   });
@@ -319,7 +343,7 @@ describe("evaluateGate — emergency override", () => {
     expect(snap.global.reason).toMatch(/override/i);
   });
 
-  it("expired override does NOT bypass hard pause", () => {
+  it("expired override does NOT fabricate a hard pause from configured tokens", () => {
     const snap = evaluateGate({
       policy: policy({
         emergency_override: { enabled: true, reason: "incident-9192", expires_at: "2026-05-31T00:00:00.000-05:00" },
@@ -331,7 +355,7 @@ describe("evaluateGate — emergency override", () => {
       data_freshness_ms: 1000,
     });
     expect(snap.override_active).toBe(false);
-    expect(snap.global.decision).toBe("pause_non_core");
+    expect(snap.global.decision).toBe("warn_allow");
   });
 });
 
@@ -354,7 +378,7 @@ describe("resolveExcludedAgents — agents to skip in claim (enforce mode only)"
     expect(resolveExcludedAgents(snap)).toEqual([]);
   });
 
-  it("enforce mode + global hard pause → returns ALL non-exempt agents seen in rollups + a sentinel marker", () => {
+  it("enforce mode + configured global token overage → returns no exclusions without provider signal", () => {
     const snap = evaluateGate({
       policy: policy({ exempt_agents: ["manager"] }),
       rollupsByAgent: {
@@ -368,12 +392,10 @@ describe("resolveExcludedAgents — agents to skip in claim (enforce mode only)"
       data_freshness_ms: 1000,
     });
     const excluded = resolveExcludedAgents(snap);
-    expect(excluded).toContain("roger");
-    expect(excluded).toContain("cto");
-    expect(excluded).not.toContain("manager"); // exempt
+    expect(excluded).toEqual([]);
   });
 
-  it("enforce mode + per-agent hard pause → returns only that agent", () => {
+  it("enforce mode + configured per-agent token overage → returns no exclusions without provider signal", () => {
     const snap = evaluateGate({
       policy: policy(),
       rollupsByAgent: {
@@ -385,6 +407,6 @@ describe("resolveExcludedAgents — agents to skip in claim (enforce mode only)"
       now_iso: NOW_ISO,
       data_freshness_ms: 1000,
     });
-    expect(resolveExcludedAgents(snap)).toEqual(["roger"]);
+    expect(resolveExcludedAgents(snap)).toEqual([]);
   });
 });

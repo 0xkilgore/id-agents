@@ -44,6 +44,7 @@ export interface UsageGateSnapshot {
   override_reason?: string;
   override_expires_at?: string;
   degraded_reason?: string;
+  provider_limits: ProviderLimitSignal[];
   generated_at: string;
 }
 
@@ -191,6 +192,7 @@ export interface UsageReportV2 {
     daily: UsageReportWindow;
     weekly: UsageReportWindow;
   };
+  by_provider: UsageReportProviderWindow[];
   by_agent: Array<{
     agent: string;
     daily: UsageReportAgentWindow;
@@ -215,8 +217,8 @@ export interface UsageReportV2 {
     global_state: UsageGateState;
     should_pause_new_dispatches: boolean;
     reason: string;
-    daily_percent: number;
-    weekly_percent: number;
+    daily_percent: number | null;
+    weekly_percent: number | null;
     override_active: boolean;
     enforcement: UsageGateEnforcement;
     agent_overrides: Array<{
@@ -224,9 +226,10 @@ export interface UsageReportV2 {
       state: UsageGateState;
       reason: string;
     }>;
+    provider_limits: ProviderLimitSignal[];
   };
   calibration: {
-    denominator_kind: "configured_policy_budget";
+    denominator_kind: "usage_with_no_limit" | "calibrated_estimate";
     calibrated_at: string | null;
     notes: string;
   };
@@ -237,10 +240,10 @@ export interface UsageReportWindow {
   weighted_tokens: number;
   raw_tokens: number;
   requests: number;
-  budget: number;
-  percent_consumed: number;
-  soft_threshold: number;
-  hard_threshold: number;
+  budget: number | null;
+  percent_consumed: number | null;
+  soft_threshold: number | null;
+  hard_threshold: number | null;
 }
 
 export interface UsageReportAgentWindow {
@@ -249,6 +252,38 @@ export interface UsageReportAgentWindow {
   requests: number;
   budget: number | null;
   percent_of_budget: number | null;
+}
+
+export interface UsageReportProviderWindow {
+  provider: Provider;
+  daily: {
+    weighted_tokens: number;
+    raw_tokens: number;
+    requests: number;
+    limit: number | null;
+    percent_of_limit: number | null;
+  };
+  weekly: {
+    weighted_tokens: number;
+    raw_tokens: number;
+    requests: number;
+    limit: number | null;
+    percent_of_limit: number | null;
+  };
+  limit_state: "ok" | "limited" | "unknown";
+  limit_source: "observed_provider_signal" | "not_available";
+  reset_at: string | null;
+}
+
+export interface ProviderLimitSignal {
+  provider: Provider;
+  runtime: string | null;
+  agent: string | null;
+  dispatch_phid: string | null;
+  observed_at: string;
+  reset_at: string | null;
+  message: string;
+  source: "scheduler_bounce";
 }
 
 // ── Audit (usage_gate_decision row) ──────────────────────────────────
