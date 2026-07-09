@@ -28,11 +28,15 @@ const PRIMARY_CANE = process.env.DEPLOY_WATCHDOG_PRIMARY_REPO || `${HOME}/Dropbo
 const CANE = process.env.DEPLOY_WATCHDOG_REPO || `${HOME}/Dropbox/Code/cane/id-agents-deploy-main`;
 const PLIST = `${HOME}/Library/LaunchAgents/com.kilgore.id-agents-manager.plist`;
 const SVC = 'com.kilgore.id-agents-manager';
-const LOG = '/tmp/deploy-watchdog.log';
-const STATE_FILE = '/tmp/deploy-watchdog.state';
-const PAUSE_FILE = '/tmp/deploy-watchdog.pause';
-const ARTIFACT_DIR = `${HOME}/Dropbox/Code/agent-platform/output`;
+const LOG = process.env.DEPLOY_WATCHDOG_LOG || '/tmp/deploy-watchdog.log';
+const STATE_FILE = process.env.DEPLOY_WATCHDOG_STATE_FILE || '/tmp/deploy-watchdog.state';
+const PAUSE_FILE = process.env.DEPLOY_WATCHDOG_PAUSE_FILE || '/tmp/deploy-watchdog.pause';
+const ARTIFACT_DIR = process.env.DEPLOY_WATCHDOG_ARTIFACT_DIR || `${HOME}/Dropbox/Code/agent-platform/output`;
 const DRY_RUN = process.env.DEPLOY_WATCHDOG_DRY_RUN === '1' || process.argv.includes('--dry-run');
+const ENV_FILES = process.env.DEPLOY_WATCHDOG_ENV_FILE
+  ? [process.env.DEPLOY_WATCHDOG_ENV_FILE]
+  : [`${HOME}/Dropbox/Code/cane/taskview/.env`, `${HOME}/Dropbox/Code/cane/taskview/.env.cane`];
+const TELEGRAM_API_BASE = process.env.DEPLOY_WATCHDOG_TELEGRAM_API_BASE || 'https://api.telegram.org';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -47,6 +51,72 @@ function readState() {
 }
 function writeState(s) {
   try { writeFileSync(STATE_FILE, JSON.stringify(s)); } catch (e) { log(`WARN could not persist state: ${e.message}`); }
+}
+
+function loadEnvFile(path) {
+  if (!existsSync(path)) return false;
+  try {
+    const body = readFileSync(path, 'utf8');
+    for (const rawLine of body.split(/\r?\n/)) {
+      const line = rawLine.trim();
+      if (!line || line.startsWith('#')) continue;
+      const match = line.match(/^(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)=(.*)$/);
+      if (!match) continue;
+      const [, key, rawValue] = match;
+      if (process.env[key] !== undefined) continue;
+      let value = rawValue.trim();
+      if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
+        value = value.slice(1, -1);
+      }
+      process.env[key] = value;
+    }
+    return true;
+  } catch (e) {
+    log(`WARN could not load env file ${path}: ${e.message}`);
+    return false;
+  }
+}
+
+for (const envFile of ENV_FILES) loadEnvFile(envFile);
+if (!process.env.TELEGRAM_BOT_TOKEN && process.env.CANE_TELEGRAM_BOT_TOKEN) {
+  process.env.TELEGRAM_BOT_TOKEN = process.env.CANE_TELEGRAM_BOT_TOKEN;
+}
+if (!process.env.TELEGRAM_CHAT_ID && process.env.CANE_TELEGRAM_CHAT_ID) {
+  process.env.TELEGRAM_CHAT_ID = process.env.CANE_TELEGRAM_CHAT_ID;
+}
+
+function alertText({ title, reason, lines = [] }) {
+  return [
+    `DEPLOY WATCHDOG PAGE: ${title}`,
+    `Time: ${new Date().toISOString()}`,
+    `Manager: ${MANAGER_URL}`,
+    `Reason: ${reason}`,
+    ...lines.filter(Boolean),
+    `Log: ${LOG}`,
+  ].join('\n');
+}
+
+async function sendTelegramPage({ title, reason, lines = [] }) {
+  const token = process.env.TELEGRAM_BOT_TOKEN;
+  const chat = process.env.TELEGRAM_CHAT_ID;
+  if (!token || !chat) {
+    log('WARN Telegram not configured; alert dropped');
+    return false;
+  }
+  try {
+    const res = await fetch(`${TELEGRAM_API_BASE}/bot${token}/sendMessage`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ chat_id: chat, text: alertText({ title, reason, lines }) }),
+      signal: AbortSignal.timeout(8000),
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    log(`Telegram alert sent: ${title}`);
+    return true;
+  } catch (e) {
+    log(`WARN Telegram alert failed: ${e.message}`);
+    return false;
+  }
 }
 
 async function getHealth() {
@@ -312,11 +382,34 @@ async function main() {
   writeState({ consecutiveStale: decision.nextConsecutiveStale, lastAction: decision.action, lastAt: new Date().toISOString() });
   log(`decision=${decision.action} (${decision.reason}) health_ok=${health.ok} freshness=${health.freshnessState ?? 'n/a'} build_sha=${(health.buildSha || '').slice(0, 7)}`);
 
+  if (!health.ok) {
+    await sendTelegramPage({
+      title: 'manager health unreachable',
+      reason: decision.reason,
+      lines: [
+        `Action: ${decision.action}`,
+        `Prior stale count: ${prior}`,
+        `Pause file present: ${pauseFileExists ? 'yes' : 'no'}`,
+      ],
+    });
+  }
+
   if (decision.action !== 'act') {
     // Quiet pass — log only, no artifact.
     process.exitCode = 0;
     return;
   }
+
+  await sendTelegramPage({
+    title: 'manager stale/behind threshold exceeded',
+    reason: decision.reason,
+    lines: [
+      `Freshness: ${health.freshnessState ?? 'n/a'}`,
+      `build_sha: ${health.buildSha ?? 'n/a'}`,
+      `origin_main_sha: ${health.originMainSha ?? 'n/a'}`,
+      `Dry run: ${DRY_RUN ? 'yes' : 'no'}`,
+    ],
+  });
 
   if (DRY_RUN) {
     const note = `[DRY-RUN] deploy-watchdog WOULD redeploy: ${decision.reason}. build_sha=${health.buildSha} origin_main_sha=${health.originMainSha}. (No action taken.)`;
@@ -345,6 +438,15 @@ async function main() {
     const loud = `# ⛔ Deploy watchdog — REDEPLOY FAILED ${new Date().toISOString()}\n\nThe automated redeploy FAILED and the manager may be down or stale.\n\n**Error:** ${msg}\n\n${formatCloseoutMarkdown(closeoutEvidence)}\n\n**Escalation command:**\n\n\`\`\`bash\n${DEFAULT_REDEPLOY_COMMAND}\n\`\`\`\n\nWatchdog log: ${LOG}. launchd state: \`launchctl print gui/$(id -u)/${SVC}\`.`;
     writeArtifact('FAILURE', loud);
     log(`REDEPLOY FAILED: ${msg}`);
+    await sendTelegramPage({
+      title: 'redeploy attempt FAILED',
+      reason: msg,
+      lines: [
+        `Watchdog reason: ${decision.reason}`,
+        `Escalation: ${escalation}`,
+        `Artifact: ${ARTIFACT_DIR}`,
+      ],
+    });
     await postNote(`⛔ deploy-watchdog closeout failed: ${msg}. ${escalation}`, 'time_sensitive');
     process.exitCode = 1;
   }
