@@ -133,13 +133,13 @@ export interface DaemonUsageReport {
     autonomous_weighted_tokens: number;
     fleshing_weighted_tokens: number;
     combined_weighted_tokens: number;
-    budget: number;
-    percent_consumed: number;
+    budget: number | null;
+    percent_consumed: number | null;
   };
   weekly: {
     combined_weighted_tokens: number;
-    budget: number;
-    percent_consumed: number;
+    budget: number | null;
+    percent_consumed: number | null;
   };
   coverage: {
     attributed_events: number;
@@ -148,7 +148,7 @@ export interface DaemonUsageReport {
     confidence: "fresh" | "degraded";
   };
   gate: {
-    /** True when the daemon must halt: global emergency brake OR over daemon cap. */
+    /** True only when a real provider limit signal or emergency brake requires a halt. */
     hard_paused: boolean;
     enforcement: UsageGateEnforcement;
     reason: string;

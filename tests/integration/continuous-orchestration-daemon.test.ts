@@ -831,7 +831,7 @@ describe("daemon — dry-run vs live", () => {
 });
 
 describe("daemon — guardrail alerts", () => {
-  it("auto-pauses + alerts when the daily token ceiling is hit", async () => {
+  it("warns but does not auto-pause when the configured token reference is hit", async () => {
     await seedReady(adapter);
     const { daemon, alerts } = makeDaemon(adapter, {
       config: { dry_run: false, daily_token_ceiling: 1000 },
@@ -839,11 +839,11 @@ describe("daemon — guardrail alerts", () => {
     });
     await daemon.setMode("running");
     const r = await daemon.runTick();
-    expect(r.auto_paused?.reason).toMatch(/ceiling/);
-    expect(alerts.some((a) => /AUTO-PAUSED/.test(a))).toBe(true);
+    expect(r.auto_paused).toBeNull();
+    expect(alerts.some((a) => /AUTO-PAUSED/.test(a))).toBe(false);
     const state = await getOrchestrationState(adapter, "default");
-    expect(state.mode).toBe("paused");
-    expect(state.auto_paused).toBe(true);
+    expect(state.mode).toBe("running");
+    expect(state.auto_paused).toBe(false);
   });
 
   it("fires a loud STALL alert after N zero-dispatch ticks with work waiting", async () => {

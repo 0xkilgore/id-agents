@@ -416,16 +416,16 @@ describe("SchedulerService.tick — non-throttle errors", () => {
 });
 
 describe("SchedulerService — budget gate", () => {
-  it("hard pause prevents claiming new docs", async () => {
+  it("hard budget metadata does not prevent claiming new docs", async () => {
     const { client, transport, scheduler } = harness({ max: 3 });
     scheduler.setBudgetState("hard_pause");
     await client.enqueueDispatch(base);
     const report = await scheduler.tick();
-    expect(report.claimed).toBe(0);
-    expect(transport.calls).toHaveLength(0);
+    expect(report.claimed).toBe(1);
+    expect(transport.calls).toHaveLength(1);
   });
 
-  it("soft pause holds current in-flight, no new starts", async () => {
+  it("soft budget metadata does not hold current in-flight", async () => {
     const { client, transport, scheduler } = harness({ max: 3 });
     // First, start one normally.
     await client.enqueueDispatch({ ...base, query_id: "running" });
@@ -435,8 +435,8 @@ describe("SchedulerService — budget gate", () => {
     scheduler.setBudgetState("soft_pause");
     await client.enqueueDispatch({ ...base, query_id: "waiting" });
     const report = await scheduler.tick();
-    expect(report.claimed).toBe(0);
-    expect(transport.calls).toHaveLength(1);
+    expect(report.claimed).toBe(1);
+    expect(transport.calls).toHaveLength(2);
   });
 });
 

@@ -83,10 +83,9 @@ export function createContinuousOrchestrationDaemon(opts: BuildDaemonOptions): {
     },
 
     readUsage: async () => {
-      // Gap 2: the daemon cap now measures DAEMON-attributed spend, not the
-      // fleet-global total. Budgets are passed from the CO config so the report
-      // and the daemon's daily_token_ceiling check speak the same numbers.
-      // The global emergency brake is folded into report.gate.hard_paused.
+      // Gap 2: daemon-attributed spend stays visible, but plan-based provider
+      // accounts do not have a token denominator. Config ceilings are reference
+      // values only; the global emergency brake is folded into gate.hard_paused.
       const report = await opts.usageService.buildDaemonReport({
         dailyBudget: config.daily_token_ceiling,
         weeklyBudget: config.weekly_token_ceiling,
@@ -94,8 +93,8 @@ export function createContinuousOrchestrationDaemon(opts: BuildDaemonOptions): {
       return {
         view: {
           hard_paused: report.gate.hard_paused,
-          daily_percent: report.daily.percent_consumed,
-          weekly_percent: report.weekly.percent_consumed,
+          daily_percent: null,
+          weekly_percent: null,
           enforcement: report.gate.enforcement,
         },
         daily_tokens_used: report.daily.combined_weighted_tokens,

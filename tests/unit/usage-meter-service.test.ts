@@ -271,7 +271,7 @@ describe("GET /usage — v2 schema contract", () => {
     expect(res.body.gate.should_pause_new_dispatches).toBe(false);
   });
 
-  it("reports weighted burn without a fabricated percent denominator", async () => {
+  it("reports over-reference weighted burn without a fabricated percent denominator", async () => {
     const policyFile = join(tmpDir, "policy.json");
     writeFileSync(policyFile, JSON.stringify({
       schema_version: "usage-budget-policy.v1",
@@ -282,7 +282,7 @@ describe("GET /usage — v2 schema contract", () => {
       exempt_agents: [],
       emergency_override: { enabled: false, reason: null, expires_at: null },
     }));
-    await ingestEvent({ weighted_tokens: 500, raw_tokens: 500 });
+    await ingestEvent({ weighted_tokens: 1_500, raw_tokens: 1_500 });
 
     const { service } = createUsageMeterService({
       adapter,
@@ -294,12 +294,17 @@ describe("GET /usage — v2 schema contract", () => {
     const app = mkApp(service);
     const res = await request(app).get("/usage");
     expect(res.status).toBe(200);
-    expect(res.body.usage.daily.weighted_tokens).toBe(500);
+    expect(res.body.usage.daily.weighted_tokens).toBe(1_500);
+    expect(res.body.usage.daily.budget).toBeNull();
     expect(res.body.usage.daily.percent_consumed).toBeNull();
     expect(res.body.calibration.denominator_kind).toBe("usage_with_no_limit");
     expect(res.body.by_provider[0]).toMatchObject({
       provider: "anthropic",
-      daily: { weighted_tokens: 500, limit: null, percent_of_limit: null },
+      daily: { weighted_tokens: 1_500, limit: null, percent_of_limit: null },
+    });
+    expect(res.body.by_agent[0]).toMatchObject({
+      agent: "roger",
+      daily: { weighted_tokens: 1_500, budget: null, percent_of_budget: null },
     });
   });
 

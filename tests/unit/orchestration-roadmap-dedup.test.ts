@@ -216,8 +216,8 @@ describe("daemon enqueue dedup key", () => {
       buildReport: async () => ({}) as never,
       buildDaemonReport: async () => ({
         gate: { hard_paused: false, enforcement: "enforce" as const },
-        daily: { percent_consumed: 0, combined_weighted_tokens: 0, budget: 1_000_000 },
-        weekly: { percent_consumed: 0, combined_weighted_tokens: 0, budget: 1_000_000 },
+        daily: { percent_consumed: null, combined_weighted_tokens: 0, budget: 1_000_000 },
+        weekly: { percent_consumed: null, combined_weighted_tokens: 0, budget: 1_000_000 },
       }),
     };
     // RD-014: the factory wires a real agent-health resolver against `agents`

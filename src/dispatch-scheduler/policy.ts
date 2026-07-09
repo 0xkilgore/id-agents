@@ -243,23 +243,6 @@ export function getSafeConcurrency(
   input: SafeConcurrencyInput,
   policy: SchedulerPolicy,
 ): SafeConcurrencyResult {
-  if (input.budget_state === "hard_pause") {
-    return {
-      max_safe: 0,
-      reason: "budget hard pause: no new dispatches",
-      source: "budget",
-      policy_version: policy.policy_version,
-    };
-  }
-  if (input.budget_state === "soft_pause") {
-    return {
-      max_safe: Math.max(0, input.current_in_flight ?? 0),
-      reason: "budget soft pause: hold at current in-flight, no new starts",
-      source: "budget",
-      policy_version: policy.policy_version,
-    };
-  }
-
   let base: number;
   let source: SafeConcurrencyResult["source"];
   let reason: string;
@@ -284,6 +267,11 @@ export function getSafeConcurrency(
       source = "default";
       reason = `${input.provider} cap = ${base}`;
       break;
+  }
+  if (input.budget_state === "hard_pause") {
+    reason = `${reason}; usage reference exceeded without reducing concurrency`;
+  } else if (input.budget_state === "soft_pause") {
+    reason = `${reason}; usage reference near threshold without reducing concurrency`;
   }
 
   const exempt = Math.max(0, Math.floor(input.exempt_extra ?? 0));

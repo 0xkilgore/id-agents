@@ -12,9 +12,9 @@ export interface ContinuousOrchestrationConfig {
   enabled: boolean;
   /** Dry-run: compute + log decisions but fire NO dispatches. Default true. */
   dry_run: boolean;
-  /** Hard daily weighted-token ceiling. At/above this the loop auto-pauses. */
+  /** Daily weighted-token reference for reporting/warnings; not a hard provider limit. */
   daily_token_ceiling: number;
-  /** Warn (Telegram heads-up) at this fraction of the ceiling. Default 0.75. */
+  /** Warn (Telegram heads-up) at this fraction of the reference. Default 0.75. */
   warn_fraction: number;
   /** Max concurrent in-flight dispatches the loop will allow. Default 2. */
   max_in_flight: number;
@@ -83,7 +83,7 @@ export interface ContinuousOrchestrationConfig {
   auto_promote_min_lanes: number;
   /** Max auto-promotions per tick. Default 5. */
   auto_promote_max_per_tick: number;
-  /** Weekly daemon-attributed ceiling (the emergency-brake companion to daily). */
+  /** Weekly daemon-attributed reference for reporting/warnings. */
   weekly_token_ceiling: number;
   /** Pause the daemon when usage attribution is degraded (live enforce only). */
   fail_closed_on_attribution: boolean;
@@ -150,7 +150,7 @@ export function defaultFleshConfig(): FleshConfig {
   };
 }
 
-/** Conservative defaults. Deliberately small so an unattended run can't drain. */
+/** Conservative defaults for warning references and admission cadence. */
 export function defaultConfig(): ContinuousOrchestrationConfig {
   return {
     enabled: false,

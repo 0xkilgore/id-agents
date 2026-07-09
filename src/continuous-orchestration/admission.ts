@@ -175,9 +175,6 @@ function tickHalt(ctx: AdmissionContext, config: ContinuousOrchestrationConfig):
   if (ctx.mode === "drain_only") return "mode=drain_only (no new admission)";
   if (ctx.mode === "approve_only") return "mode=approve_only (candidates batch for approval, not fired)";
   if (ctx.usage.hard_paused) return "usage gate hard-paused";
-  if (ctx.daily_tokens_used >= config.daily_token_ceiling) {
-    return `daily token ceiling reached (${ctx.daily_tokens_used} >= ${config.daily_token_ceiling})`;
-  }
   return null;
 }
 
@@ -209,8 +206,6 @@ export function planAdmission(
   if (ctx.pool_free_builders) {
     for (const [k, v] of ctx.pool_free_builders) poolBuilders.set(k, [...v]);
   }
-  let tokensUsed = ctx.daily_tokens_used;
-
   for (const item of candidates) {
     if (item.readiness_state !== "ready") {
       skipped.push(nonAdmission(item.item_id, "skipped", "not_ready", `not ready (${item.readiness_state})`, {
@@ -311,17 +306,6 @@ export function planAdmission(
         continue;
       }
     }
-    const estimate = item.token_estimate ?? 0;
-    if (tokensUsed + estimate > config.daily_token_ceiling) {
-      skipped.push(nonAdmission(
-        item.item_id,
-        "skipped",
-        "daily_token_ceiling",
-        `would exceed daily token ceiling (${tokensUsed} + ${estimate} > ${config.daily_token_ceiling})`,
-        { tokens_used: tokensUsed, token_estimate: estimate, daily_token_ceiling: config.daily_token_ceiling },
-      ));
-      continue;
-    }
     // Pool items late-bind to_agent at fire (assignedBuilder); non-pool items
     // must already carry a to_agent. Both need a dispatch body.
     if (!item.dispatch_body || (!poolId && !item.to_agent)) {
@@ -370,7 +354,6 @@ export function planAdmission(
     } else {
       for (const s of item.write_scope) lockedScopes.add(s);
     }
-    tokensUsed += estimate;
   }
 
   return { halt: null, admit, assignments, skipped };

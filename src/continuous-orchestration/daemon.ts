@@ -549,21 +549,17 @@ export class ContinuousOrchestrationDaemon {
     }
     decisions.push(...plan.skipped);
 
-    // Guardrail: daily-ceiling auto-pause (loud) — the named unattended trigger.
+    // Guardrail: daily reference warning (loud). Plan-based provider accounts
+    // are not token-metered, so this never auto-pauses by itself.
     let auto_paused: { reason: string } | null = null;
-    if (state.mode === "running" && !killSwitch && daily_tokens_used >= config.daily_token_ceiling) {
-      const reason = `daily token ceiling reached: ${daily_tokens_used} >= ${config.daily_token_ceiling}`;
-      auto_paused = { reason };
-      decisions.push({ item_id: null, action: "auto_pause", reason });
-      await this.alert(`🛑 Continuous orchestration AUTO-PAUSED — ${reason}. New dispatches halted.`);
-    } else if (
+    if (
       state.mode === "running" &&
       daily_tokens_used >= config.daily_token_ceiling * config.warn_fraction
     ) {
       decisions.push({
         item_id: null,
         action: "held",
-        reason: `token budget warn: ${daily_tokens_used} >= ${Math.round(config.daily_token_ceiling * config.warn_fraction)} (${Math.round(config.warn_fraction * 100)}% of ceiling)`,
+        reason: `token reference warn: ${daily_tokens_used} >= ${Math.round(config.daily_token_ceiling * config.warn_fraction)} (${Math.round(config.warn_fraction * 100)}% of configured reference)`,
       });
     }
 

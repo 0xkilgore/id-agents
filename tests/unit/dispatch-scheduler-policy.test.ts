@@ -197,17 +197,17 @@ describe("getSafeConcurrency (Phase 2.2)", () => {
     expect(r.source).toBe("default");
   });
 
-  it("budget hard pause sets max_safe = 0 regardless of provider cap", () => {
+  it("budget hard pause metadata does not reduce concurrency without a provider-limit signal", () => {
     const r = getSafeConcurrency(
       { provider: "anthropic", runtime: "claude-code-cli", budget_state: "hard_pause" },
       policy,
     );
-    expect(r.max_safe).toBe(0);
-    expect(r.reason).toMatch(/budget/i);
-    expect(r.source).toBe("budget");
+    expect(r.max_safe).toBe(policy.max_in_flight_anthropic);
+    expect(r.reason).toMatch(/usage reference exceeded/i);
+    expect(r.source).toBe("config");
   });
 
-  it("budget soft pause holds at current in-flight (no new starts) without going negative", () => {
+  it("budget soft pause metadata does not hold at current in-flight", () => {
     const r = getSafeConcurrency(
       {
         provider: "anthropic",
@@ -217,9 +217,9 @@ describe("getSafeConcurrency (Phase 2.2)", () => {
       },
       policy,
     );
-    expect(r.max_safe).toBe(2);
-    expect(r.source).toBe("budget");
-    expect(r.reason).toMatch(/soft/i);
+    expect(r.max_safe).toBe(policy.max_in_flight_anthropic);
+    expect(r.source).toBe("config");
+    expect(r.reason).toMatch(/near threshold/i);
   });
 
   it("agent exemption raises max_safe by exempt_extra slots", () => {
@@ -236,7 +236,7 @@ describe("getSafeConcurrency (Phase 2.2)", () => {
     expect(r.source).toBe("exemption");
   });
 
-  it("budget gate beats agent exemption (no override on hard pause)", () => {
+  it("agent exemption still applies when only budget metadata is hard-paused", () => {
     const r = getSafeConcurrency(
       {
         provider: "anthropic",
@@ -246,7 +246,7 @@ describe("getSafeConcurrency (Phase 2.2)", () => {
       },
       policy,
     );
-    expect(r.max_safe).toBe(0);
+    expect(r.max_safe).toBe(policy.max_in_flight_anthropic + 2);
   });
 });
 

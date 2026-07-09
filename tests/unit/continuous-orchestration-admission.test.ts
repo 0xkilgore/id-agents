@@ -233,9 +233,10 @@ describe("planAdmission — halts", () => {
     const p = planAdmission([item()], ctx({ usage: { ...okGate, hard_paused: true } }), cfg);
     expect(p.halt?.reason).toMatch(/hard-paused/);
   });
-  it("halts at the daily token ceiling", () => {
+  it("does not halt at the configured daily token reference", () => {
     const p = planAdmission([item()], ctx({ daily_tokens_used: cfg.daily_token_ceiling }), cfg);
-    expect(p.halt?.reason).toMatch(/ceiling/);
+    expect(p.halt).toBeNull();
+    expect(p.admit).toHaveLength(1);
   });
 });
 
@@ -334,13 +335,13 @@ describe("planAdmission — per-item guardrails", () => {
     expect(p.skipped[0].metadata?.code).toBe("single_writer_lane_busy");
   });
 
-  it("enforces the token ceiling per-item across the tick", () => {
+  it("does not enforce the token reference per-item across the tick", () => {
     const c = { ...cfg, daily_token_ceiling: 100 };
     const a = item({ item_id: "a", token_estimate: 60 });
     const b = item({ item_id: "b", token_estimate: 60 });
     const p = planAdmission([a, b], ctx({ admit_limit: 5 }), c);
-    expect(p.admit.map((i) => i.item_id)).toEqual(["a"]); // a=60 ok; a+b=120 > 100
-    expect(p.skipped[0].reason).toMatch(/would exceed daily token ceiling/);
+    expect(p.admit.map((i) => i.item_id)).toEqual(["a", "b"]);
+    expect(p.skipped).toHaveLength(0);
   });
 
   it("skips ready items missing a dispatch body or agent", () => {

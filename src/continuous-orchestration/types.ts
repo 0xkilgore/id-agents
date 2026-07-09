@@ -143,7 +143,7 @@ export interface DecisionRecord {
 export interface UsageGateView {
   /** True when the global gate is hard-paused under enforcement. */
   hard_paused: boolean;
-  daily_percent: number;
-  weekly_percent: number;
+  daily_percent: number | null;
+  weekly_percent: number | null;
   enforcement: "warn" | "enforce";
 }

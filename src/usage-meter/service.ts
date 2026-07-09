@@ -260,11 +260,10 @@ export class UsageMeterService {
       const gw = globalRollup.week;
 
       const by_agent = Object.entries(rollupsByAgent).map(([agent, rolls]) => {
-        const agentBudget = this.policy.agents[agent];
         return {
           agent,
-          daily: agentWindow(rolls.day, agentBudget?.daily_weighted_tokens ?? null),
-          weekly: agentWindow(rolls.week, agentBudget?.weekly_weighted_tokens ?? null),
+          daily: agentWindow(rolls.day),
+          weekly: agentWindow(rolls.week),
         };
       });
 
@@ -336,9 +335,9 @@ export class UsageMeterService {
   /**
    * Build the daemon-attributed usage report (Gap 2). Sums ONLY weighted tokens
    * caused by continuous-orchestration dispatches (resolved usage event →
-   * dispatch from_actor → spend scope), within the policy day/week. The global
-   * report stays the fleet-wide emergency brake: the daemon hard-pauses if the
-   * global gate is enforce-hard-paused OR daemon spend is over its own cap.
+   * dispatch from_actor → spend scope), within the policy day/week. Plan-based
+   * provider limits are not token ceilings, so configured daemon ceilings are
+   * reported only as reference values and never create hard pause by themselves.
    */
   async buildDaemonReport(
     opts: { dailyBudget?: number; weeklyBudget?: number } = {},
@@ -390,8 +389,10 @@ export class UsageMeterService {
       // Global emergency brake — already enforce-gated inside buildReport().
       const global = await this.buildReport();
       const globalHardPause = global.gate.should_pause_new_dispatches;
-      const overDaily = dailyBudget > 0 && dCombined >= dailyBudget;
-      const overWeekly = weeklyBudget > 0 && wCombined >= weeklyBudget;
+      const hasDailyReference = dailyBudget > 0;
+      const hasWeeklyReference = weeklyBudget > 0;
+      const overDaily = hasDailyReference && dCombined >= dailyBudget;
+      const overWeekly = hasWeeklyReference && wCombined >= weeklyBudget;
 
       const considered = attributed + unknown;
       const degraded = considered > 0 && unknown / considered > 0.5;
@@ -413,13 +414,13 @@ export class UsageMeterService {
           autonomous_weighted_tokens: dAuto,
           fleshing_weighted_tokens: dFlesh,
           combined_weighted_tokens: dCombined,
-          budget: dailyBudget,
-          percent_consumed: dailyBudget > 0 ? dCombined / dailyBudget : 0,
+          budget: hasDailyReference ? dailyBudget : null,
+          percent_consumed: null,
         },
         weekly: {
           combined_weighted_tokens: wCombined,
-          budget: weeklyBudget,
-          percent_consumed: weeklyBudget > 0 ? wCombined / weeklyBudget : 0,
+          budget: hasWeeklyReference ? weeklyBudget : null,
+          percent_consumed: null,
         },
         coverage: {
           attributed_events: attributed,
@@ -429,7 +430,7 @@ export class UsageMeterService {
         gate: {
           hard_paused,
           enforcement: this.enforcement,
-          reason: reasonParts.length ? reasonParts.join("; ") : "within daemon budget",
+          reason: reasonParts.length ? reasonParts.join("; ") : "usage observed with no daemon token limit denominator",
         },
       };
     } catch (err) {
@@ -443,10 +444,10 @@ export class UsageMeterService {
           autonomous_weighted_tokens: 0,
           fleshing_weighted_tokens: 0,
           combined_weighted_tokens: 0,
-          budget: dailyBudget,
-          percent_consumed: 0,
+          budget: dailyBudget > 0 ? dailyBudget : null,
+          percent_consumed: null,
         },
-        weekly: { combined_weighted_tokens: 0, budget: weeklyBudget, percent_consumed: 0 },
+        weekly: { combined_weighted_tokens: 0, budget: weeklyBudget > 0 ? weeklyBudget : null, percent_consumed: null },
         coverage: { attributed_events: 0, unknown_events: 0, confidence: "degraded" },
         gate: {
           hard_paused: failClosed,
@@ -734,14 +735,13 @@ function globalWindow(
 
 function agentWindow(
   r: AgentUsageRollup,
-  budget: number | null,
 ): UsageReportV2["by_agent"][number]["daily"] {
   return {
     weighted_tokens: r.weighted_tokens,
     raw_tokens: r.raw_tokens,
     requests: r.requests,
-    budget,
-    percent_of_budget: budget && budget > 0 ? r.weighted_tokens / budget : null,
+    budget: null,
+    percent_of_budget: null,
   };
 }
 
