@@ -101,13 +101,13 @@ describe("buildDaemonReport — attribution", () => {
     expect(report.daily.combined_weighted_tokens).toBe(0);
   });
 
-  it("daemon burn over its own cap hard-pauses the daemon", async () => {
+  it("daemon burn over its own reference cap warns but does not hard-pause", async () => {
     await insertDispatch(adapter, "D_daemon", "continuous-orchestration");
     await insertEvent(adapter, { dispatch_id: "D_daemon", weighted: 6_000_000 });
     const report = await buildService(adapter).buildDaemonReport();
     expect(report.daily.combined_weighted_tokens).toBe(6_000_000);
-    expect(report.gate.hard_paused).toBe(true);
-    expect(report.gate.reason).toMatch(/daemon daily/);
+    expect(report.gate.hard_paused).toBe(false);
+    expect(report.gate.reason).toMatch(/daemon daily reference exceeded/);
   });
 
   it("attribution degraded (dispatch row missing) is reported; fail-open by default", async () => {

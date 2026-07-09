@@ -398,12 +398,12 @@ export class UsageMeterService {
       // Fail-closed only under live enforcement when configured (else allow loudly).
       const attributionPause =
         degraded && this.daemonFailClosedOnAttribution && this.enforcement === "enforce";
-      const hard_paused = globalHardPause || overDaily || overWeekly || attributionPause;
+      const hard_paused = globalHardPause || attributionPause;
 
       const reasonParts: string[] = [];
       if (globalHardPause) reasonParts.push("fleet global emergency brake hard-paused");
-      if (overDaily) reasonParts.push(`daemon daily ${dCombined} >= ${dailyBudget}`);
-      if (overWeekly) reasonParts.push(`daemon weekly ${wCombined} >= ${weeklyBudget}`);
+      if (overDaily) reasonParts.push(`daemon daily reference exceeded (${dCombined} >= ${dailyBudget}; warn-only)`);
+      if (overWeekly) reasonParts.push(`daemon weekly reference exceeded (${wCombined} >= ${weeklyBudget}; warn-only)`);
       if (attributionPause) reasonParts.push("attribution degraded (fail-closed)");
 
       return {
