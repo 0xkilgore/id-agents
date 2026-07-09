@@ -174,7 +174,10 @@ export function evaluateGate(input: EvaluateGateInput): UsageGateSnapshot {
     global = {
       state: "normal",
       decision: applyEnforcement("allow", enforcement),
-      reason: "global budget under soft threshold",
+      reason:
+        gDay == null && gWeek == null
+          ? "usage observed with no provider limit denominator; no active provider limit"
+          : "configured token reference under soft threshold",
       daily_pct: gDay,
       weekly_pct: gWeek,
     };
