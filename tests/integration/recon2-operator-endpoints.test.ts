@@ -140,6 +140,22 @@ describe("T-RECON.2 operator-action endpoints", () => {
       const body = await res.json() as any;
       expect(body.action_status).toBe("timed_out");
       expect(body.idempotency_key).toBe("slow-moot-key");
+
+      const retry = await post("/dispatches/phid:disp-moot-slow/moot", {
+        reason: "slow",
+        timeout_ms: 2000,
+        idempotency_key: "slow-moot-key",
+      });
+      expect(retry.status).toBe(200);
+      const retryBody = await retry.json() as any;
+      expect(retryBody.action_status).toBe("delivered");
+      expect(retryBody.deduped).toBe(true);
+      expect(retryBody.recovery_status).toBe("moot");
+
+      const got = await fetch(`${baseUrl}/dispatches/phid:disp-moot-slow`);
+      const dispatch = (await got.json() as any).dispatch;
+      expect(dispatch.effective_state).toBe("moot_or_superseded");
+      expect(dispatch.recovery.status).toBe("moot");
     } finally {
       scheduler.reactor.markMoot = originalMarkMoot;
     }
@@ -199,6 +215,12 @@ describe("T-RECON.2 operator-action endpoints", () => {
       );
       expect(queued.rows).toHaveLength(1);
       expect(secondBody.new_dispatch_phid).toBe(queued.rows[0].dispatch_phid);
+
+      const got = await fetch(`${baseUrl}/dispatches/phid:disp-retry-slow`);
+      const dispatch = (await got.json() as any).dispatch;
+      expect(dispatch.effective_state).toBe("moot_or_superseded");
+      expect(dispatch.recovery.status).toBe("moot");
+      expect(dispatch.supersede_link).toBe(secondBody.new_dispatch_phid);
     } finally {
       scheduler.reactor.markSuperseded = originalMarkSuperseded;
     }
@@ -255,6 +277,12 @@ describe("T-RECON.2 operator-action endpoints", () => {
       );
       expect(queued.rows).toHaveLength(1);
       expect(secondBody.new_dispatch_phid).toBe(queued.rows[0].dispatch_phid);
+
+      const got = await fetch(`${baseUrl}/dispatches/phid:disp-reassign-slow`);
+      const dispatch = (await got.json() as any).dispatch;
+      expect(dispatch.effective_state).toBe("moot_or_superseded");
+      expect(dispatch.recovery.status).toBe("moot");
+      expect(dispatch.supersede_link).toBe(secondBody.new_dispatch_phid);
     } finally {
       scheduler.reactor.markSuperseded = originalMarkSuperseded;
     }
