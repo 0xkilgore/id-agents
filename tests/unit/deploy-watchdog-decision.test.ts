@@ -39,6 +39,19 @@ describe('decideWatchdogAction', () => {
     expect(d.nextConsecutiveStale).toBe(0);
   });
 
+  it('health unreadable after a prior action → act so failed closeout escalates visibly', () => {
+    const d = decideWatchdogAction({
+      freshnessState: null,
+      priorConsecutiveStale: 2,
+      pauseFileExists: false,
+      healthOk: false,
+      priorLastAction: 'act',
+    });
+    expect(d.action).toBe('act');
+    expect(d.nextConsecutiveStale).toBe(2);
+    expect(d.reason).toMatch(/health unreadable after prior watchdog action/);
+  });
+
   it('missing deploy checkout → act immediately even before stale_alerted', () => {
     const d = decideWatchdogAction({
       freshnessState: 'stale',
@@ -74,9 +87,16 @@ describe('decideWatchdogAction', () => {
     expect(staleAgain.action).toBe('wait'); // NOT act — streak was reset by the fresh reading
   });
 
-  it("plain 'stale' (not yet alerted) → noop, streak reset (only stale_alerted counts)", () => {
+  it("plain 'stale' persists across checks and acts even before stale_alerted", () => {
     const d = decideWatchdogAction({ freshnessState: 'stale', priorConsecutiveStale: 1, pauseFileExists: false, healthOk: true });
-    expect(d.action).toBe('noop');
-    expect(d.nextConsecutiveStale).toBe(0);
+    expect(d.action).toBe('act');
+    expect(d.nextConsecutiveStale).toBe(CONSECUTIVE_THRESHOLD);
+    expect(d.reason).toMatch(/stale for 2 consecutive checks/);
+  });
+
+  it("one plain 'stale' reading waits and preserves the streak", () => {
+    const d = decideWatchdogAction({ freshnessState: 'stale', priorConsecutiveStale: 0, pauseFileExists: false, healthOk: true });
+    expect(d.action).toBe('wait');
+    expect(d.nextConsecutiveStale).toBe(1);
   });
 });

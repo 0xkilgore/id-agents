@@ -297,7 +297,8 @@ async function main() {
 
   const pauseFileExists = existsSync(PAUSE_FILE);
   const health = await getHealth();
-  const prior = Number(readState().consecutiveStale || 0);
+  const state = readState();
+  const prior = Number(state.consecutiveStale || 0);
   const decision = decideWatchdogAction({
     freshnessState: health.freshnessState ?? null,
     priorConsecutiveStale: prior,
@@ -305,6 +306,7 @@ async function main() {
     healthOk: health.ok,
     deployCheckoutOk: deployCheckoutExists(),
     managerPlistOk: managerPlistPointsAtDeployCheckout(),
+    priorLastAction: state.lastAction ?? null,
   });
   writeState({ consecutiveStale: decision.nextConsecutiveStale, lastAction: decision.action, lastAt: new Date().toISOString() });
   log(`decision=${decision.action} (${decision.reason}) health_ok=${health.ok} freshness=${health.freshnessState ?? 'n/a'} build_sha=${(health.buildSha || '').slice(0, 7)}`);
@@ -324,13 +326,13 @@ async function main() {
   }
 
   // Real redeploy.
-  log('ACT: persistent stale_alerted confirmed — running gotchas redeploy sequence.');
+  log(`ACT: ${decision.reason} — running gotchas redeploy sequence.`);
   try {
     const { promotedSha } = await runRedeploy();
     const closeoutEvidence = await getCloseoutEvidence();
     const closeout = classifyCloseout(closeoutEvidence);
     if (!closeout.ok) throw new Error(closeout.summary);
-    const ok = `# Deploy watchdog — REDEPLOY OK ${new Date().toISOString()}\n\nManager was stale_alerted for ${decision.nextConsecutiveStale} consecutive checks; redeployed to ${promotedSha} (build_sha==origin_main_sha, origin_main_sha==remote tip, freshness fresh, fleet auth OK).\n\n${formatCloseoutMarkdown(closeoutEvidence)}`;
+    const ok = `# Deploy watchdog — REDEPLOY OK ${new Date().toISOString()}\n\nWatchdog reason: ${decision.reason}. Redeployed to ${promotedSha} (build_sha==origin_main_sha, origin_main_sha==remote tip, freshness fresh, fleet auth OK).\n\n${formatCloseoutMarkdown(closeoutEvidence)}`;
     writeArtifact('redeploy', ok);
     await postNote(`✅ deploy-watchdog auto-redeployed the manager to ${promotedSha} (was stale_alerted 30+ min).`, 'normal');
     process.exitCode = 0;
