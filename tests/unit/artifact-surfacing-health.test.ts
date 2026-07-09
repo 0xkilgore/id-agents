@@ -114,6 +114,21 @@ describe("fresh-output surfacing health", () => {
     expect(report.events.map((event) => event.code)).toEqual(["copy_failed", "download_failed"]);
   });
 
+  it("emits body_render_failed when body delivery exists but the console cannot render it", () => {
+    const report = evaluate(
+      artifact(),
+      probe({ bodyRenderable: false, error: "renderer_failed" }),
+    );
+    expect(report.ok).toBe(false);
+    expect(report.events).toEqual([
+      expect.objectContaining({
+        code: "body_render_failed",
+        operator_visible: true,
+        artifact_id: "art-finance",
+      }),
+    ]);
+  });
+
   it("passes a healthy current Markdown artifact with body, copy, and download", () => {
     const report = evaluate();
     expect(report.ok).toBe(true);
@@ -127,6 +142,22 @@ describe("fresh-output surfacing health", () => {
       discoveredBy: "agent_done",
       freshness: "current",
     });
+  });
+
+  it("dedupes operator-visible events by artifact id and failure code", () => {
+    const row = artifact();
+    const report = evaluateSurfacingHealth({
+      registered: [row, row],
+      surfaced: [],
+      probes: new Map([[row.artifact_id, probe({ copyAvailable: false, downloadAvailable: false })]]),
+      nowIso: NOW,
+    });
+    expect(report.ok).toBe(false);
+    expect(report.events.map((event) => `${event.artifact_id}:${event.code}`)).toEqual([
+      "art-finance:absent_row",
+      "art-finance:copy_failed",
+      "art-finance:download_failed",
+    ]);
   });
 
   it("serves a healthy current artifact through stable body, copy, download, and health routes", async () => {

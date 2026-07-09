@@ -144,7 +144,20 @@ export function evaluateSurfacingHealth(input: {
 }): SurfacingHealthReport {
   const surfacedIds = new Set(input.surfaced.map((row) => row.artifact_id));
   const events: SurfacingHealthEvent[] = [];
+  const emitted = new Set<string>();
   const deliveries: OperatorArtifactDelivery[] = [];
+
+  function pushEvent(
+    code: SurfacingHealthCode,
+    row: ArtifactCatalogRow,
+    message: string,
+    details: Record<string, unknown> = {},
+  ): void {
+    const key = `${row.artifact_id}:${code}`;
+    if (emitted.has(key)) return;
+    emitted.add(key);
+    events.push(eventFor(code, row, input.nowIso, message, details));
+  }
 
   for (const row of input.registered) {
     const probe = input.probes.get(row.artifact_id) ?? {
@@ -157,32 +170,32 @@ export function evaluateSurfacingHealth(input: {
     deliveries.push(delivery);
 
     if (!surfacedIds.has(row.artifact_id)) {
-      events.push(eventFor("absent_row", row, input.nowIso, "Registered artifact is absent from Desk/Recent Output", {
+      pushEvent("absent_row", row, "Registered artifact is absent from Desk/Recent Output", {
         expected_surface: "outputs/inbox",
-      }));
+      });
     }
     if (row.availability !== "present" || probe.error === "body_unavailable") {
-      events.push(eventFor("body_unavailable", row, input.nowIso, "Artifact body is unavailable through the manager", {
+      pushEvent("body_unavailable", row, "Artifact body is unavailable through the manager", {
         availability: row.availability,
         error: probe.error ?? null,
-      }));
+      });
     } else if (!probe.bodyRenderable) {
-      events.push(eventFor("body_render_failed", row, input.nowIso, "Artifact body is not renderable in the console", {
+      pushEvent("body_render_failed", row, "Artifact body is not renderable in the console", {
         media_type: delivery.mediaType,
         error: probe.error ?? null,
-      }));
+      });
     }
     if (!probe.copyAvailable) {
-      events.push(eventFor("copy_failed", row, input.nowIso, "Artifact fallback copy action is unavailable", {
+      pushEvent("copy_failed", row, "Artifact fallback copy action is unavailable", {
         copyTextUrl: delivery.copyTextUrl,
         error: probe.error ?? null,
-      }));
+      });
     }
     if (!probe.downloadAvailable) {
-      events.push(eventFor("download_failed", row, input.nowIso, "Artifact fallback download action is unavailable", {
+      pushEvent("download_failed", row, "Artifact fallback download action is unavailable", {
         downloadUrl: delivery.downloadUrl,
         error: probe.error ?? null,
-      }));
+      });
     }
   }
 
