@@ -39,6 +39,7 @@ import {
   upsertArtifactDraft,
 } from './storage.js';
 import { planCorpusSearch } from '../corpus-search/lane.js';
+import { buildCommentRouteAttemptsProjection, type CommentRouteAttemptStatus } from '../comment-routing/attempts-projection.js';
 import { artifactRowToEntry } from './entry-projection.js';
 import { EDIT_OP_TYPE, buildEditPayload, isEditInProductEnabled, latestEdit } from './edit.js';
 import { checkArtifactParity } from './parity.js';
@@ -1383,6 +1384,32 @@ export function mountOutputsRoutes(
         comments,
         count: comments.length,
       });
+    } catch (err) {
+      res.status(500).json({ ok: false, error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  // ── GET /comment-routing/attempts ─────────────────────────────────
+  // Operator/debug projection over durable artifact/task comment route rows.
+  // Read-only: pending rows may project as timeout, but no storage state mutates.
+  app.get('/comment-routing/attempts', async (req: Request, res: Response) => {
+    try {
+      const teamId = resolveTeamId ? await resolveTeamId(req) : 'default';
+      const rawStatus = asString(req.query.status);
+      const status: CommentRouteAttemptStatus | 'all' =
+        rawStatus === 'pending' || rawStatus === 'routed' || rawStatus === 'failed' || rawStatus === 'timeout'
+          ? rawStatus
+          : 'all';
+      const timeoutAfterMs = Number(req.query.timeout_after_ms);
+      const limit = Number(req.query.limit);
+      const projection = await buildCommentRouteAttemptsProjection(adapter, {
+        teamId,
+        status,
+        timeoutAfterMs: Number.isFinite(timeoutAfterMs) && timeoutAfterMs >= 0 ? timeoutAfterMs : undefined,
+        limit: Number.isFinite(limit) ? limit : undefined,
+        now: clock ? clock() : new Date(),
+      });
+      res.json(projection);
     } catch (err) {
       res.status(500).json({ ok: false, error: err instanceof Error ? err.message : String(err) });
     }
