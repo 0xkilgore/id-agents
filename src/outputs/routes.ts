@@ -92,6 +92,7 @@ import type {
   ApproveRequest,
   ArtifactAvailability,
   ArtifactDetailResponse,
+  ArtifactFeedbackCompatStatus,
   ArtifactOperationsResponse,
   ArtifactComment,
   ArtifactOpType,
@@ -433,6 +434,31 @@ export function mountOutputsRoutes(
   function clearArtifactDetailCache(): void {
     detailCache.clear();
     detailInflight.clear();
+  }
+
+  function artifactFeedbackCapability() {
+    const commentRoutingEnabled = Boolean(opts.enqueueDispatch);
+    const reactionsEnabled = isC0FeedbackReactionsEnabled(env);
+    return {
+      ok: true,
+      schema_version: "artifact.feedback.capability.v1",
+      comments: {
+        recordable: true,
+        route_enabled: commentRoutingEnabled,
+        route_status: commentRoutingEnabled ? "enabled" : "disabled",
+      },
+      reactions: {
+        recordable: reactionsEnabled,
+        route_enabled: reactionsEnabled && commentRoutingEnabled,
+        route_status: !reactionsEnabled ? "disabled" : commentRoutingEnabled ? "enabled" : "disabled",
+      },
+      statuses: [
+        "recorded+routed",
+        "recorded-route-failed-retryable",
+        "disabled/not-recorded",
+        "terminal-failure",
+      ] satisfies ArtifactFeedbackCompatStatus[],
+    };
   }
 
   function rememberArtifactDetail(detail: ArtifactDetailResponse): void {
@@ -1306,6 +1332,8 @@ export function mountOutputsRoutes(
         ok: true,
         schema_version: 'artifact.comment.v1',
         visible_state: route_status.visible_state,
+        compat_status: route_status.compat_status,
+        feedback_status: route_status.feedback_status,
         route_status,
         op_id,
         comment,
@@ -1324,9 +1352,15 @@ export function mountOutputsRoutes(
       res.status(500).json({
         ok: false,
         visible_state: "not-recorded",
+        compat_status: "disabled/not-recorded",
+        feedback_status: "disabled/not-recorded",
         error: err instanceof Error ? err.message : String(err),
       });
     }
+  });
+
+  app.get('/artifacts/feedback/status', (_req: Request, res: Response) => {
+    res.json(artifactFeedbackCapability());
   });
 
   // ── GET /artifacts/:id/comments ────────────────────────────────────
@@ -1572,7 +1606,14 @@ export function mountOutputsRoutes(
   app.post('/artifacts/:id/reactions', async (req: Request<{ id: string }>, res: Response) => {
     try {
       if (!isC0FeedbackReactionsEnabled(env)) {
-        return res.status(404).json({ ok: false, error: 'c0_feedback_reactions_disabled' });
+        return res.status(404).json({
+          ok: false,
+          error: 'c0_feedback_reactions_disabled',
+          visible_state: "disabled/not-recorded",
+          compat_status: "disabled/not-recorded",
+          feedback_status: "disabled/not-recorded",
+          capability: artifactFeedbackCapability(),
+        });
       }
       const artifactId = resolveMutationArtifactId(req, res);
       if (!artifactId) return;
@@ -1619,6 +1660,8 @@ export function mountOutputsRoutes(
         ok: true,
         schema_version: 'artifact.reaction.v1',
         visible_state: route_status.visible_state,
+        compat_status: route_status.compat_status,
+        feedback_status: route_status.feedback_status,
         route_status,
         op_id,
         comment,

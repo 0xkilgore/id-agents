@@ -279,10 +279,21 @@ export interface ArtifactDispatchReceipt {
 export type ArtifactCommentVisibleState =
   | "recorded+routed"
   | "recorded-but-route-failed-with-retry"
+  | "recorded-route-failed-retryable"
+  | "disabled/not-recorded"
+  | "terminal-failure"
   | "not-recorded";
+
+export type ArtifactFeedbackCompatStatus =
+  | "recorded+routed"
+  | "recorded-route-failed-retryable"
+  | "disabled/not-recorded"
+  | "terminal-failure";
 
 export interface ArtifactCommentRouteStatus {
   visible_state: ArtifactCommentVisibleState;
+  compat_status: ArtifactFeedbackCompatStatus;
+  feedback_status: ArtifactFeedbackCompatStatus;
   route_kind: "acknowledgement" | "approval_signal" | "substantive_follow_up" | "question";
   routed: boolean;
   retryable: boolean;

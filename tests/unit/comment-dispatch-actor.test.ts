@@ -176,7 +176,8 @@ describe("comment auto-dispatch — acceptance (T-LOOP-CLOSE.1)", () => {
 
     expect(res.status).toBe(200);
     expect(calls).toHaveLength(1);
-    expect(res.body.visible_state).toBe("recorded-but-route-failed-with-retry");
+    expect(res.body.visible_state).toBe("recorded-route-failed-retryable");
+    expect(res.body.feedback_status).toBe("recorded-route-failed-retryable");
     expect(res.body.route_status).toMatchObject({
       routed: false,
       retryable: true,
@@ -191,7 +192,7 @@ describe("comment auto-dispatch — acceptance (T-LOOP-CLOSE.1)", () => {
       artifact_title: "Q3 cash flow",
       actor: "user:chris",
       route_status: "recorded-but-route-failed",
-      visible_state: "recorded-but-route-failed-with-retry",
+      visible_state: "recorded-route-failed-retryable",
       retryable: true,
       target_agent: "finances",
       target_agent_raw: "project:finances",

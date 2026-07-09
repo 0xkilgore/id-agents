@@ -1,4 +1,4 @@
-import type { ArtifactCommentRouteStatus } from "./types.js";
+import type { ArtifactCommentRouteStatus, ArtifactFeedbackCompatStatus } from "./types.js";
 import type { ArtifactCommentRouteKind, CommentDispatchResult } from "./comment-dispatch.js";
 
 export type ArtifactReviewDocumentOperationType =
@@ -209,6 +209,8 @@ export function commentRouteStatusFromDispatchResult(
   if (result.routed) {
     return {
       visible_state: "recorded+routed",
+      compat_status: "recorded+routed",
+      feedback_status: "recorded+routed",
       route_kind: routeKind,
       routed: true,
       retryable: false,
@@ -227,11 +229,19 @@ export function commentRouteStatusFromDispatchResult(
   }
   const skipped = "skipped" in result ? result.skipped : null;
   const isPolicySkip = skipped === "acknowledged" || skipped === "approval_signal" || skipped === "question_threaded";
+  const compatStatus: ArtifactFeedbackCompatStatus =
+    skipped === "scheduler_unavailable"
+      ? "disabled/not-recorded"
+      : isPolicySkip
+        ? "recorded+routed"
+        : "recorded-route-failed-retryable";
   return {
-    visible_state: isPolicySkip ? "recorded+routed" : "recorded-but-route-failed-with-retry",
+    visible_state: compatStatus,
+    compat_status: compatStatus,
+    feedback_status: compatStatus,
     route_kind: routeKind,
     routed: false,
-    retryable: !isPolicySkip,
+    retryable: compatStatus === "recorded-route-failed-retryable",
     recorded_op_id: recordedOpId,
     target_agent: "target_agent" in result && typeof result.target_agent === "string" ? result.target_agent : null,
     target_agent_raw: "target_agent_raw" in result && typeof result.target_agent_raw === "string" ? result.target_agent_raw : null,
@@ -266,7 +276,21 @@ function parseRouteStatus(value: unknown): ArtifactCommentRouteStatus | null {
   if (
     v.visible_state !== "recorded+routed" &&
     v.visible_state !== "recorded-but-route-failed-with-retry" &&
+    v.visible_state !== "recorded-route-failed-retryable" &&
+    v.visible_state !== "disabled/not-recorded" &&
+    v.visible_state !== "terminal-failure" &&
     v.visible_state !== "not-recorded"
   ) return null;
-  return v as ArtifactCommentRouteStatus;
+  const compat =
+    v.compat_status === "recorded+routed" ||
+    v.compat_status === "recorded-route-failed-retryable" ||
+    v.compat_status === "disabled/not-recorded" ||
+    v.compat_status === "terminal-failure"
+      ? v.compat_status
+      : v.visible_state === "recorded-but-route-failed-with-retry"
+        ? "recorded-route-failed-retryable"
+        : v.visible_state === "not-recorded"
+          ? "disabled/not-recorded"
+          : v.visible_state;
+  return { ...v, compat_status: compat, feedback_status: compat } as ArtifactCommentRouteStatus;
 }

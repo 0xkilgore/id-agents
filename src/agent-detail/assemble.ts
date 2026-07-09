@@ -270,6 +270,9 @@ function commentReceiptFromOperation(
   if (
     visibleState !== "recorded+routed" &&
     visibleState !== "recorded-but-route-failed-with-retry" &&
+    visibleState !== "recorded-route-failed-retryable" &&
+    visibleState !== "disabled/not-recorded" &&
+    visibleState !== "terminal-failure" &&
     visibleState !== "not-recorded"
   ) {
     return null;
@@ -306,8 +309,13 @@ function commentReceiptFromOperation(
   const routeStatusLabel =
     visibleState === "recorded+routed"
       ? "routed"
-      : visibleState === "recorded-but-route-failed-with-retry"
+      : visibleState === "recorded-but-route-failed-with-retry" ||
+          visibleState === "recorded-route-failed-retryable"
         ? "recorded-but-route-failed"
+        : visibleState === "terminal-failure"
+          ? "terminal-failure"
+          : visibleState === "disabled/not-recorded"
+            ? "disabled/not-recorded"
         : "not-recorded";
 
   return {

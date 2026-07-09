@@ -112,8 +112,11 @@ describe("POST /artifacts/:id/comments — B2 auto-dispatch", () => {
       to_agent: "regina",
     });
     expect(res.body.visible_state).toBe("recorded+routed");
+    expect(res.body.feedback_status).toBe("recorded+routed");
     expect(res.body.route_status).toMatchObject({
       visible_state: "recorded+routed",
+      compat_status: "recorded+routed",
+      feedback_status: "recorded+routed",
       route_kind: "substantive_follow_up",
       routed: true,
       retryable: false,
@@ -209,9 +212,12 @@ describe("POST /artifacts/:id/comments — B2 auto-dispatch", () => {
     expect(res.body.dispatch_routed).toBe(false);
     expect(res.body.dispatch).toBeNull();
     expect(res.body.dispatch_skipped).toBe("artifact_owner_unknown");
-    expect(res.body.visible_state).toBe("recorded-but-route-failed-with-retry");
+    expect(res.body.visible_state).toBe("recorded-route-failed-retryable");
+    expect(res.body.feedback_status).toBe("recorded-route-failed-retryable");
     expect(res.body.route_status).toMatchObject({
-      visible_state: "recorded-but-route-failed-with-retry",
+      visible_state: "recorded-route-failed-retryable",
+      compat_status: "recorded-route-failed-retryable",
+      feedback_status: "recorded-route-failed-retryable",
       routed: false,
       retryable: true,
       skipped: "artifact_owner_unknown",
@@ -220,7 +226,8 @@ describe("POST /artifacts/:id/comments — B2 auto-dispatch", () => {
 
     const get = await call(app, "GET", `/artifacts/${ART}/comments`);
     expect(get.body.comments).toHaveLength(1);
-    expect(get.body.comments[0].route_status.visible_state).toBe("recorded-but-route-failed-with-retry");
+    expect(get.body.comments[0].route_status.visible_state).toBe("recorded-route-failed-retryable");
+    expect(get.body.comments[0].route_status.feedback_status).toBe("recorded-route-failed-retryable");
   });
 
   it("persists but skips routing with scheduler_unavailable when no enqueue seam is wired", async () => {
@@ -236,9 +243,18 @@ describe("POST /artifacts/:id/comments — B2 auto-dispatch", () => {
     expect(res.body.dispatch_routed).toBe(false);
     expect(res.body.dispatch).toBeNull();
     expect(res.body.dispatch_skipped).toBe("scheduler_unavailable");
+    expect(res.body.visible_state).toBe("disabled/not-recorded");
+    expect(res.body.feedback_status).toBe("disabled/not-recorded");
+    expect(res.body.route_status).toMatchObject({
+      visible_state: "disabled/not-recorded",
+      routed: false,
+      retryable: false,
+      skipped: "scheduler_unavailable",
+    });
 
     const get = await call(app, "GET", `/artifacts/${ART}/comments`);
     expect(get.body.comments).toHaveLength(1);
+    expect(get.body.comments[0].route_status.feedback_status).toBe("disabled/not-recorded");
   });
 
   it("preserves the durable comment and returns dispatch_error when enqueue throws", async () => {
@@ -256,9 +272,12 @@ describe("POST /artifacts/:id/comments — B2 auto-dispatch", () => {
     expect(res.body.dispatch_routed).toBe(false);
     expect(res.body.dispatch).toBeNull();
     expect(res.body.dispatch_error.message).toContain("scheduler boom");
-    expect(res.body.visible_state).toBe("recorded-but-route-failed-with-retry");
+    expect(res.body.visible_state).toBe("recorded-route-failed-retryable");
+    expect(res.body.feedback_status).toBe("recorded-route-failed-retryable");
     expect(res.body.route_status).toMatchObject({
-      visible_state: "recorded-but-route-failed-with-retry",
+      visible_state: "recorded-route-failed-retryable",
+      compat_status: "recorded-route-failed-retryable",
+      feedback_status: "recorded-route-failed-retryable",
       routed: false,
       retryable: true,
       target_agent: "regina",
@@ -272,5 +291,34 @@ describe("POST /artifacts/:id/comments — B2 auto-dispatch", () => {
     expect(get.body.comments).toHaveLength(1);
     expect(get.body.comments[0].body).toBe("route crash but I must persist");
     expect(get.body.comments[0].route_status.error.message).toContain("scheduler boom");
+  });
+
+  it("reports live feedback capabilities and canonicalizes DEFAULT owner routing", async () => {
+    const { fn, calls } = makeFakeEnqueue();
+    const { app, adapter } = await buildApp(fn);
+    await catalogArtifact(adapter, "project:DEFAULT");
+
+    const status = await call(app, "GET", "/artifacts/feedback/status");
+    expect(status.status).toBe(200);
+    expect(status.body).toMatchObject({
+      schema_version: "artifact.feedback.capability.v1",
+      comments: { recordable: true, route_enabled: true, route_status: "enabled" },
+    });
+    expect(status.body.statuses).toContain("disabled/not-recorded");
+
+    const res = await call(app, "POST", `/artifacts/${ART}/comments`, {
+      actor_ref: "user:chris",
+      body: "Please route to the default team owner.",
+    });
+
+    expect(res.status).toBe(200);
+    expect(res.body.dispatch_routed).toBe(true);
+    expect(res.body.dispatch.to_agent).toBe("default");
+    expect(res.body.route_status).toMatchObject({
+      target_agent: "default",
+      target_agent_raw: "project:DEFAULT",
+      feedback_status: "recorded+routed",
+    });
+    expect(calls[0].to_agent).toBe("default");
   });
 });

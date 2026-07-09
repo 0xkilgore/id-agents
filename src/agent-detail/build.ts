@@ -65,7 +65,13 @@ export interface DetailCommentReceiptRow {
   actor: string;
   time: string;
   route_status: string;
-  visible_state: "recorded+routed" | "recorded-but-route-failed-with-retry" | "not-recorded";
+  visible_state:
+    | "recorded+routed"
+    | "recorded-but-route-failed-with-retry"
+    | "recorded-route-failed-retryable"
+    | "disabled/not-recorded"
+    | "terminal-failure"
+    | "not-recorded";
   retryable: boolean;
   route_kind: "acknowledgement" | "approval_signal" | "substantive_follow_up" | "question";
   target_agent: string | null;

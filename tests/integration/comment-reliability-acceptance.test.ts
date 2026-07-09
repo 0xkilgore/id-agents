@@ -2,7 +2,8 @@
 //
 // Drives the manager outputs API over HTTP and verifies every comment submit has
 // exactly one visible state:
-//   recorded+routed, recorded-but-route-failed-with-retry, or not-recorded.
+//   recorded+routed, recorded-route-failed-retryable,
+//   disabled/not-recorded, or terminal-failure.
 
 import express, { type Express } from "express";
 import { describe, expect, it } from "vitest";
@@ -194,9 +195,11 @@ describe("comment reliability acceptance states", () => {
     );
 
     expect(first.status).toBe(200);
-    expect(first.body.visible_state).toBe("recorded-but-route-failed-with-retry");
+    expect(first.body.visible_state).toBe("recorded-route-failed-retryable");
+    expect(first.body.feedback_status).toBe("recorded-route-failed-retryable");
     expect(first.body.route_status).toMatchObject({
-      visible_state: "recorded-but-route-failed-with-retry",
+      visible_state: "recorded-route-failed-retryable",
+      feedback_status: "recorded-route-failed-retryable",
       routed: false,
       retryable: true,
       target_agent: "kapelle",
@@ -253,6 +256,7 @@ describe("comment reliability acceptance states", () => {
     expect(res.body).toMatchObject({
       ok: false,
       visible_state: "not-recorded",
+      feedback_status: "disabled/not-recorded",
       error: "comment write failed",
     });
 
