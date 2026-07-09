@@ -110,6 +110,8 @@ export function taskRowToEntry(
   const facts = extractTaskScheduleFacts(row);
   const band = classifyTaskBand(facts, today);
   const reconciliation = taskReconciliationFacts(row, { today });
+  const taskRoute = `/tasks/${encodeURIComponent(row.name)}`;
+  const openTarget = { kind: "task" as const, ref: row.name, route: taskRoute, href: taskRoute };
 
   return {
     phid: row.uuid || row.id,
@@ -138,6 +140,8 @@ export function taskRowToEntry(
     title_audit: reconciliation.title,
     source_dispatch_phid: null,
     links: [],
+    link_fields: { task: openTarget },
+    openTarget,
     provenance: taskProvenance(row, createdBy, updatedBy, owner),
   };
 }

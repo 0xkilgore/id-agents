@@ -44,6 +44,13 @@ describe("taskRowToEntry", () => {
     expect(e.track).toBe("T-CKPT");
     expect(e.currentness.bucket).toBe("blocked_or_failed");
     expect(e.title_audit).toMatchObject({ compacted: false, max_chars: 90 });
+    expect(e.link_fields.task).toEqual({
+      kind: "task",
+      ref: "audit-contracts-apr",
+      route: "/tasks/audit-contracts-apr",
+      href: "/tasks/audit-contracts-apr",
+    });
+    expect(e.openTarget).toEqual(e.link_fields.task);
   });
 
   it("retains full long titles while exposing a compact display title", () => {
@@ -163,6 +170,7 @@ describe("buildTasksEntriesEnvelope", () => {
     expect(env.count).toBe(3);
     expect(env.limit).toBe(50);
     expect(env.items.every((i) => i.kind === "task")).toBe(true);
+    expect(env.items[0].openTarget).toMatchObject({ kind: "task", route: "/tasks/audit-contracts-apr" });
     expect(env.task_reconciliation).toMatchObject({
       actionable_ready: 0,
       blocked_or_failed: 3,

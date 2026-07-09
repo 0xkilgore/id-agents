@@ -10,6 +10,17 @@ import type { TaskCurrentness, TaskTitleAudit } from "../task-reconciliation/cur
 
 export type { ReadModelEnvelope } from "../outputs/entry.js";
 
+export interface TaskOpenTarget {
+  kind: "task";
+  ref: string;
+  route: string;
+  href: string;
+}
+
+export interface TaskLinkFields {
+  task: TaskOpenTarget;
+}
+
 /**
  * DV1-style TaskEntry — a pure projection over the `tasks` table (see
  * tasks-readmodel/entry-projection.ts). No schema migration: the substrate
@@ -54,6 +65,10 @@ export interface TaskEntry {
   source_dispatch_phid: string | null;
   /** Typed associations to other entries (e.g. derived_from). Empty in v0. */
   links: AssociationEdge[];
+  /** Frontend-consumable task link fields; mirrors manager detail/open-target contract. */
+  link_fields: TaskLinkFields;
+  /** Canonical open target for task detail navigation. */
+  openTarget: TaskOpenTarget;
   /** DV2 provenance — actor_ref, source dispatch, derived-from, and the
    *  created/modified chain. Shared contract with ArtifactEntry (I-1). */
   provenance: EntryProvenance;
