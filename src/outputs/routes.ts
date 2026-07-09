@@ -1286,12 +1286,18 @@ export function mountOutputsRoutes(
     }
   });
 
-  // ── POST /artifacts/:id/comments ───────────────────────────────────
+  // ── POST /artifacts/:id/comments (C0_FEEDBACK_REACTIONS) ───────────
   // Monday §2: durable, append-only artifact comment. This is the unblock —
   // Chris (and now Liz) can comment on an artifact and it persists, re-readable
   // through /operations + /review. Requires a valid Monday actor + artifact_id.
+  // Flag-gated with reactions/feedback so a disabled feedback surface cannot
+  // still create artifact state or route follow-up dispatches through a dead
+  // control path.
   app.post('/artifacts/:id/comments', async (req: Request<{ id: string }>, res: Response) => {
     try {
+      if (!isC0FeedbackReactionsEnabled(env)) {
+        return res.status(404).json({ ok: false, error: 'c0_feedback_reactions_disabled' });
+      }
       const artifactId = resolveMutationArtifactId(req, res);
       if (!artifactId) return;
       const actor = requireActor(req, res);

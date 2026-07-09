@@ -56,7 +56,7 @@ async function buildApp(
   app.use(express.json());
   mountOutputsRoutes(app, adapter, {
     enqueueDispatch: enqueue,
-    env: opts.env,
+    env: opts.env ?? C0_ON,
     now: opts.now,
     actionDeliveryDeadlineMs: opts.actionDeliveryDeadlineMs,
   });

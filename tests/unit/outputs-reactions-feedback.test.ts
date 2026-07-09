@@ -268,7 +268,7 @@ describe("POST /artifacts/:id/reactions — C0 ambient reactions", () => {
 });
 
 describe("C0 flag gating (C0_FEEDBACK_REACTIONS off)", () => {
-  it("404s POST /reactions and GET /feedback when the flag is off", async () => {
+  it("404s POST /reactions, POST /comments, and GET /feedback when the flag is off without writing artifact state", async () => {
     const { fn } = makeFakeEnqueue();
     const { app, adapter } = await buildApp({ enqueue: fn, env: {} as NodeJS.ProcessEnv });
     await catalogArtifact(adapter, "regina");
@@ -282,25 +282,24 @@ describe("C0 flag gating (C0_FEEDBACK_REACTIONS off)", () => {
 
     const get = await call(app, "GET", `/artifacts/${ART}/feedback`);
     expect(get.status).toBe(404);
-  });
 
-  it("leaves the existing comment endpoint behaving exactly as before (no linkage op) when the flag is off", async () => {
-    const { fn } = makeFakeEnqueue();
-    const { app, adapter } = await buildApp({ enqueue: fn, env: {} as NodeJS.ProcessEnv });
-    await catalogArtifact(adapter, "regina");
-
-    const res = await call(app, "POST", `/artifacts/${ART}/comments`, {
+    const comment = await call(app, "POST", `/artifacts/${ART}/comments`, {
       actor_ref: "user:chris",
       body: "tighten the hero",
     });
-    expect(res.status).toBe(200);
-    expect(res.body.dispatch_routed).toBe(true);
-    // no comment_routed op should have been written (flag off)
-    const { rows } = await adapter.query<{ n: number }>(
-      `SELECT COUNT(*) AS n FROM artifact_operations WHERE artifact_id = ? AND op_type = 'comment_routed'`,
+    expect(comment.status).toBe(404);
+    expect(comment.body.error).toBe("c0_feedback_reactions_disabled");
+
+    const ops = await adapter.query<{ n: number }>(
+      `SELECT COUNT(*) AS n FROM artifact_operations WHERE artifact_id = ?`,
       [ART],
     );
-    expect(Number(rows[0].n)).toBe(0);
+    expect(Number(ops.rows[0].n)).toBe(0);
+    const states = await adapter.query<{ n: number }>(
+      `SELECT COUNT(*) AS n FROM artifact_review_state WHERE artifact_id = ?`,
+      [ART],
+    );
+    expect(Number(states.rows[0].n)).toBe(0);
   });
 });
 
