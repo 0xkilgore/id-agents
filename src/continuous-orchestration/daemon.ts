@@ -23,7 +23,7 @@ import {
   bindItemForFire,
   getOrchestrationState,
   listBacklogByState,
-  listDoneItemIds,
+  listDependencyResolution,
   listReadyItems,
   promoteToReady,
   recordTickOutcome,
@@ -267,6 +267,7 @@ function readyAdmissionBlockerCategory(code: string): ReadyAdmissionBlockerCateg
     case "no_free_pool_builder":
       return "capacity_gate";
     case "risk_requires_approval":
+    case "broken_dependency":
     case "blocked_dependency":
     case "single_writer_lane_busy":
       return "lane_eligibility";
@@ -386,7 +387,7 @@ export class ContinuousOrchestrationDaemon {
 
     const readyRuntimeRepairs = await repairReadyCodexRuntimeMetadata(this.deps.adapter, this.teamId);
     const ready = await listReadyItems(this.deps.adapter, this.teamId);
-    const done_item_ids = await listDoneItemIds(this.deps.adapter, this.teamId);
+    const dependency_index = await listDependencyResolution(this.deps.adapter, this.teamId);
     // Priority-rank, then FAIR-interleave across distinct write_scope lanes so a
     // single busy lane can't monopolize this tick's admission slots — admission
     // consumes this order greedily, so a lane-diverse order => lane-diverse fires.
@@ -420,7 +421,7 @@ export class ContinuousOrchestrationDaemon {
       daily_tokens_used,
       in_flight,
       active_write_scopes,
-      done_item_ids,
+      dependency_index,
       admit_limit: Math.min(tickAdmitLimit(nowMs, config), admitCap),
       pool_for: poolGate?.pool_for,
       pool_free_slots: poolGate?.pool_free_slots,
@@ -676,7 +677,7 @@ export class ContinuousOrchestrationDaemon {
     const { count: in_flight, active_write_scopes } = await this.deps.readInFlight();
     const readyRuntimeRepairs = await repairReadyCodexRuntimeMetadata(this.deps.adapter, this.teamId);
     const ready = await listReadyItems(this.deps.adapter, this.teamId);
-    const done_item_ids = await listDoneItemIds(this.deps.adapter, this.teamId);
+    const dependency_index = await listDependencyResolution(this.deps.adapter, this.teamId);
     const ordered = fairInterleaveByLane(orderCandidates(ready));
     const poolGate = await this.buildPoolGate(ordered);
 
@@ -703,7 +704,7 @@ export class ContinuousOrchestrationDaemon {
       daily_tokens_used,
       in_flight,
       active_write_scopes,
-      done_item_ids,
+      dependency_index,
       admit_limit: Math.min(tickAdmitLimit(nowMs, config), tickWriteCaps(writeCfg, 0).admitCap),
       pool_for: poolGate?.pool_for,
       pool_free_slots: poolGate?.pool_free_slots,

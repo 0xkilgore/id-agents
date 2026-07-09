@@ -59,7 +59,7 @@ function ctx(over: Partial<AdmissionContext> = {}): AdmissionContext {
     daily_tokens_used: 0,
     in_flight: 0,
     active_write_scopes: new Set(),
-    done_item_ids: new Set(),
+    dependency_index: new Map(),
     admit_limit: 5,
     ...over,
   };
@@ -264,18 +264,60 @@ describe("planAdmission — per-item guardrails", () => {
   });
 
   it("holds risky classes for approval", () => {
-    const p = planAdmission([item({ risk_class: "external" }), item({ risk_class: "destructive" })], ctx(), cfg);
+    const p = planAdmission(
+      [item({ risk_class: "external", approved_at: null }), item({ risk_class: "destructive", approved_at: null })],
+      ctx(),
+      cfg,
+    );
     expect(p.admit).toHaveLength(0);
     expect(p.skipped.every((s) => /requires approval/.test(s.reason))).toBe(true);
   });
 
+  it("BUG A regression: approved_at admits an item outside AUTO_RUN_RISK (2026-07-07 CTO scope stall)", () => {
+    const p = planAdmission(
+      [item({ risk_class: "novel", approved_at: "2026-07-07T00:00:00Z" })],
+      ctx(),
+      cfg,
+    );
+    expect(p.admit).toHaveLength(1);
+  });
+
+  it("BUG A regression: auto_ready_approved_at alone is also sufficient", () => {
+    const p = planAdmission(
+      [item({ risk_class: "novel", approved_at: null, auto_ready_approved_at: "2026-07-07T00:00:00Z" })],
+      ctx(),
+      cfg,
+    );
+    expect(p.admit).toHaveLength(1);
+  });
+
   it("blocks items with unresolved dependencies", () => {
-    const p = planAdmission([item({ dependencies: ["dep1"] })], ctx(), cfg);
+    const p = planAdmission([item({ dependencies: ["dep1"] })], ctx({ dependency_index: new Map([["dep1", false]]) }), cfg);
     expect(p.admit).toHaveLength(0);
     expect(p.skipped[0].reason).toMatch(/dependency not done/);
     expect(p.skipped[0].metadata?.code).toBe("blocked_dependency");
-    const p2 = planAdmission([item({ dependencies: ["dep1"] })], ctx({ done_item_ids: new Set(["dep1"]) }), cfg);
+    const p2 = planAdmission([item({ dependencies: ["dep1"] })], ctx({ dependency_index: new Map([["dep1", true]]) }), cfg);
     expect(p2.admit).toHaveLength(1);
+  });
+
+  it("BUG B regression: dependency resolves by logical_key, not just item_id, when target is done", () => {
+    const p = planAdmission(
+      [item({ dependencies: ["T-ORCH-some-logical-key"] })],
+      ctx({ dependency_index: new Map([["T-ORCH-some-logical-key", true]]) }),
+      cfg,
+    );
+    expect(p.admit).toHaveLength(1);
+  });
+
+  it("BUG B regression: a dependency matching no known item is held as broken, not silently satisfied", () => {
+    const p = planAdmission(
+      [item({ dependencies: ["wave23-replaced-smoke-row-do-not-run"] })],
+      ctx(),
+      cfg,
+    );
+    expect(p.admit).toHaveLength(0);
+    expect(p.skipped[0].metadata?.code).toBe("broken_dependency");
+    expect(p.skipped[0].action).toBe("held");
   });
 
   it("enforces single-writer lanes (write-scope conflict)", () => {
@@ -311,12 +353,12 @@ describe("planAdmission — per-item guardrails", () => {
     const cases = [
       {
         name: "risk_class",
-        plan: planAdmission([item({ risk_class: "external" })], ctx(), cfg),
+        plan: planAdmission([item({ risk_class: "external", approved_at: null })], ctx(), cfg),
         code: "risk_requires_approval",
       },
       {
         name: "blocked_dependency",
-        plan: planAdmission([item({ dependencies: ["dep1"] })], ctx(), cfg),
+        plan: planAdmission([item({ dependencies: ["dep1"] })], ctx({ dependency_index: new Map([["dep1", false]]) }), cfg),
         code: "blocked_dependency",
       },
       {

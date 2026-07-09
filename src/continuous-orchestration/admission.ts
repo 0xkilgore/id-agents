@@ -23,8 +23,8 @@ export interface AdmissionContext {
   in_flight: number;
   /** Write scopes already locked by in-flight/active dispatches. */
   active_write_scopes: Set<string>;
-  /** item_ids known to be `done` (for dependency resolution). */
-  done_item_ids: Set<string>;
+  /** Dependency identifiers (item_id and logical_key) mapped to done state. */
+  dependency_index: Map<string, boolean>;
   /** Max NEW dispatches this tick (from cadence). */
   admit_limit: number;
   /**
@@ -73,6 +73,7 @@ export type NonAdmissionCode =
   | "no_in_flight_slots"
   | "tick_admission_cap"
   | "risk_requires_approval"
+  | "broken_dependency"
   | "blocked_dependency"
   | "pool_capacity_full"
   | "no_free_pool_builder"
@@ -90,6 +91,8 @@ function reasonClass(code: NonAdmissionCode): string {
       return "risk_class";
     case "provider_runtime_mismatch":
       return "provider_runtime";
+    case "broken_dependency":
+      return "broken_dependency";
     case "blocked_dependency":
       return "blocked_dependency";
     case "target_unhealthy":
@@ -236,7 +239,8 @@ export function planAdmission(
       ));
       continue;
     }
-    if (!AUTO_RUN_RISK.has(item.risk_class)) {
+    const isApproved = item.approved_at != null || item.auto_ready_approved_at != null;
+    if (!AUTO_RUN_RISK.has(item.risk_class) && !isApproved) {
       skipped.push(nonAdmission(
         item.item_id,
         "held",
@@ -246,14 +250,32 @@ export function planAdmission(
       ));
       continue;
     }
-    const unresolved = item.dependencies.filter((d) => !ctx.done_item_ids.has(d));
-    if (unresolved.length > 0) {
+    const brokenDeps: string[] = [];
+    const pendingDeps: string[] = [];
+    for (const d of item.dependencies) {
+      if (!ctx.dependency_index.has(d)) {
+        brokenDeps.push(d);
+        continue;
+      }
+      if (!ctx.dependency_index.get(d)) pendingDeps.push(d);
+    }
+    if (brokenDeps.length > 0) {
+      skipped.push(nonAdmission(
+        item.item_id,
+        "held",
+        "broken_dependency",
+        `dependency references no known item (item_id or logical_key): ${brokenDeps.join(", ")}`,
+        { dependencies: brokenDeps },
+      ));
+      continue;
+    }
+    if (pendingDeps.length > 0) {
       skipped.push(nonAdmission(
         item.item_id,
         "skipped",
         "blocked_dependency",
-        `blocked: dependency not done (${unresolved.join(", ")})`,
-        { dependencies: unresolved },
+        `blocked: dependency not done (${pendingDeps.join(", ")})`,
+        { dependencies: pendingDeps },
       ));
       continue;
     }

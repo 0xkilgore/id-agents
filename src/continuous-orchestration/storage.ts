@@ -304,6 +304,25 @@ export async function listDoneItemIds(adapter: DbAdapter, team_id = "default"): 
 }
 
 /**
+ * Dependency resolution index. Every item_id and non-empty logical_key maps to
+ * whether that item is done; absence means the dependency reference is broken.
+ */
+export async function listDependencyResolution(adapter: DbAdapter, team_id = "default"): Promise<Map<string, boolean>> {
+  const { rows } = await adapter.query<{ item_id: string; logical_key: string | null; readiness_state: string }>(
+    `SELECT item_id, logical_key, readiness_state FROM orchestration_backlog_item WHERE team_id = $1`,
+    [team_id],
+  );
+  const map = new Map<string, boolean>();
+  for (const r of rows) {
+    const done = r.readiness_state === "done";
+    map.set(r.item_id, done);
+    // If identifiers collide, the database row order decides the winner.
+    if (r.logical_key) map.set(r.logical_key, done);
+  }
+  return map;
+}
+
+/**
  * The human/approval gate: promote a draft/needs_review item to READY. Refuses
  * to promote from any other state, and refuses items with no dispatch body/agent
  * (they would never be admissible).
