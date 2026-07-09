@@ -253,6 +253,44 @@ describe("GET /artifacts/:id/detail", () => {
     expect(copy.text).toContain("Readable from registration cache.");
   });
 
+  it("serves body cached by the artifact registration API after the source file is removed", async () => {
+    const filePath = path.join(tmp, "registered-api.md");
+    writeFileSync(filePath, "# API Registration\n\nReadable from API cache.\n");
+    const artifactId = artifactIdFromPath(filePath);
+
+    const registered = await call("POST", "/artifacts/register", {
+      basename: "registered-api.md",
+      agent: "backend-pool",
+      tag: "checkpoint",
+      abs_path: filePath,
+      title: "API Registration",
+      produced_at: "2026-07-09T12:10:00.000Z",
+      source: "manual",
+    });
+    expect(registered.status).toBe(200);
+    expect(registered.body.artifact_id).toBe(artifactId);
+
+    unlinkSync(filePath);
+
+    const detail = await call("GET", `/artifacts/${artifactId}/detail`);
+    expect(detail.status).toBe(200);
+    expect(detail.body.displayTitle).toBe("API Registration");
+    expect(detail.body.body).toMatchObject({
+      kind: "markdown",
+      source: "artifact_body_cache",
+      body_unavailable: false,
+      cache: {
+        freshness: "current",
+      },
+    });
+    expect(detail.body.body.text).toContain("Readable from API cache.");
+    expect(detail.body.metadata.content_hash).toMatch(/^[a-f0-9]{64}$/);
+
+    const copy = await callRaw(`/artifacts/${artifactId}/copy-text`);
+    expect(copy.status).toBe(200);
+    expect(copy.text).toContain("Readable from API cache.");
+  });
+
   it("preserves encoded-path fallback for uncataloged artifacts", async () => {
     const filePath = path.join(tmp, "encoded.md");
     writeFileSync(filePath, "# Encoded\n\nPath fallback.\n");
