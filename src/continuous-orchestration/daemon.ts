@@ -184,7 +184,36 @@ export interface AutoPromoteHealth {
   skipped_count: number;
   skipped_items: Array<{ item_id: string; reasons: string[] }>;
   top_skip_reasons: Array<{ reason: string; count: number }>;
+  blocker_class_counts: AutoPromoteBlockerClassCount[];
+  next_action: AutoPromoteNextAction;
   ready_runtime_repairs: ReadyRuntimeRepair[];
+  summary: string;
+}
+
+export type AutoPromoteBlockerClass =
+  | "already_dispatched"
+  | "review_held_risk"
+  | "blocked_dependencies"
+  | "confidence_threshold"
+  | "not_fleshed"
+  | "missing_lane"
+  | "wrong_state"
+  | "other";
+
+export interface AutoPromoteBlockerClassCount {
+  class: AutoPromoteBlockerClass;
+  count: number;
+  label: string;
+}
+
+export interface AutoPromoteNextAction {
+  code:
+    | "none"
+    | "manual_promote_or_close_already_dispatched"
+    | "approve_review_held_risk"
+    | "resolve_blocked_dependencies"
+    | "raise_candidate_confidence"
+    | "flesh_or_refuel_candidates";
   summary: string;
 }
 
@@ -200,6 +229,10 @@ export interface AutoPromoteRunSummary {
   candidates_considered: number;
   /** Most frequent safety-gate skip reasons in this pass. */
   top_skip_reasons: Array<{ reason: string; count: number }>;
+  /** Safety-gate rejections grouped into operator-actionable classes. */
+  blocker_class_counts: AutoPromoteBlockerClassCount[];
+  /** Highest-leverage next operator move for this pass. */
+  next_action: AutoPromoteNextAction;
   /** Exact safety-gate reasons for every skipped candidate. */
   skipped_items: Array<{ item_id: string; reasons: string[] }>;
   /** Build-ready total/lanes before the pass. */
@@ -686,6 +719,16 @@ export class ContinuousOrchestrationDaemon {
     const promotedCount = blockedReason ? 0 : plan.promote.length;
     const triggered = blockedReason ? false : plan.triggered;
     const candidatesConsidered = triggered ? plan.candidates_considered : 0;
+    const blockerClassCounts = triggered ? blockerClassCountsFrom(skippedItems) : [];
+    const nextAction = nextAutoPromoteAction({
+      blockedReason,
+      belowFloor,
+      belowLanes,
+      triggered,
+      candidates: candidatesConsidered,
+      promoted: promotedCount,
+      blockerClassCounts,
+    });
     const summary = summarizeAutoPromoteHealth({
       blockedReason,
       belowFloor,
@@ -699,6 +742,8 @@ export class ContinuousOrchestrationDaemon {
       promoted: promotedCount,
       skipped: triggered ? skippedItems.length : 0,
       topReason: topSkipReasons[0]?.reason ?? null,
+      blockerClassCounts,
+      nextAction,
     });
 
     return {
@@ -732,6 +777,8 @@ export class ContinuousOrchestrationDaemon {
       skipped_count: triggered ? skippedItems.length : 0,
       skipped_items: triggered ? skippedItems : [],
       top_skip_reasons: triggered ? topSkipReasons : [],
+      blocker_class_counts: blockerClassCounts,
+      next_action: nextAction,
       ready_runtime_repairs: readyRuntimeRepairs,
       summary,
     };
@@ -1041,12 +1088,23 @@ export class ContinuousOrchestrationDaemon {
       } else {
         promoted = plan.promote.length; // would-promote count
       }
+      const blockerClassCounts = blockerClassCountsFrom(plan.skipped);
       return {
         triggered: true,
         promoted,
         skipped: plan.skipped.length,
         candidates_considered: plan.candidates_considered,
         top_skip_reasons: topSkipReasonsFrom(plan.skipped),
+        blocker_class_counts: blockerClassCounts,
+        next_action: nextAutoPromoteAction({
+          blockedReason: null,
+          belowFloor: plan.before.build_ready < config.auto_promote_floor,
+          belowLanes: plan.before.build_lanes < config.auto_promote_min_lanes,
+          triggered: plan.triggered,
+          candidates: plan.candidates_considered,
+          promoted,
+          blockerClassCounts,
+        }),
         skipped_items: plan.skipped,
         before: plan.before,
         dry_run: config.dry_run,
@@ -1132,6 +1190,80 @@ function topSkipReasonsFrom(
     .slice(0, 5);
 }
 
+function autoPromoteBlockerClass(reason: string): AutoPromoteBlockerClass {
+  if (reason.includes("already dispatched once")) return "already_dispatched";
+  if (reason.includes("blocked dependencies") || reason.includes("dependency")) return "blocked_dependencies";
+  if (reason.includes("risk_class") || reason.includes("high-risk denylist")) return "review_held_risk";
+  if (reason.includes("confidence") || reason.includes("flesh_confidence")) return "confidence_threshold";
+  if (reason.includes("missing to_agent") || reason.includes("not fleshed")) return "not_fleshed";
+  if (reason.includes("empty write_scope")) return "missing_lane";
+  if (reason.startsWith("state ")) return "wrong_state";
+  return "other";
+}
+
+function autoPromoteBlockerLabel(cls: AutoPromoteBlockerClass): string {
+  switch (cls) {
+    case "already_dispatched": return "already-dispatched rows";
+    case "review_held_risk": return "review-held risk classes";
+    case "blocked_dependencies": return "blocked dependencies";
+    case "confidence_threshold": return "confidence threshold";
+    case "not_fleshed": return "not fleshed";
+    case "missing_lane": return "missing lane";
+    case "wrong_state": return "wrong state";
+    case "other": return "other";
+  }
+}
+
+function blockerClassCountsFrom(
+  skipped: Array<{ reasons: string[] }>,
+): AutoPromoteBlockerClassCount[] {
+  const counts = new Map<AutoPromoteBlockerClass, number>();
+  for (const item of skipped) {
+    const classes = new Set(item.reasons.map(autoPromoteBlockerClass));
+    for (const cls of classes) counts.set(cls, (counts.get(cls) ?? 0) + 1);
+  }
+  return [...counts.entries()]
+    .map(([cls, count]) => ({ class: cls, count, label: autoPromoteBlockerLabel(cls) }))
+    .sort((a, b) => b.count - a.count || a.class.localeCompare(b.class));
+}
+
+function nextAutoPromoteAction(args: {
+  blockedReason: string | null;
+  belowFloor: boolean;
+  belowLanes: boolean;
+  triggered: boolean;
+  candidates: number;
+  promoted: number;
+  blockerClassCounts: AutoPromoteBlockerClassCount[];
+}): AutoPromoteNextAction {
+  if (args.blockedReason) {
+    return { code: "none", summary: `clear auto-promote block: ${args.blockedReason}` };
+  }
+  if (!args.belowFloor && !args.belowLanes) {
+    return { code: "none", summary: "ready build fuel meets the configured floor" };
+  }
+  if (args.promoted > 0) {
+    return { code: "none", summary: "auto-promote has safe candidates; let the daemon promote them on the next live tick" };
+  }
+  if (!args.triggered || args.candidates === 0) {
+    return { code: "flesh_or_refuel_candidates", summary: "refuel or flesh more needs_review build candidates" };
+  }
+
+  const top = args.blockerClassCounts[0]?.class;
+  switch (top) {
+    case "already_dispatched":
+      return { code: "manual_promote_or_close_already_dispatched", summary: "manually /promote safe retries or close stale already-dispatched rows" };
+    case "review_held_risk":
+      return { code: "approve_review_held_risk", summary: "review and explicitly approve held risk classes; auto-promote only moves build risk" };
+    case "blocked_dependencies":
+      return { code: "resolve_blocked_dependencies", summary: "finish or unblock dependency items before refueling this lane" };
+    case "confidence_threshold":
+      return { code: "raise_candidate_confidence", summary: "re-flesh low-confidence rows or approve them manually after review" };
+    default:
+      return { code: "flesh_or_refuel_candidates", summary: "refuel with safe build rows or inspect skipped_items for manual approval" };
+  }
+}
+
 function summarizeAutoPromoteHealth(args: {
   blockedReason: string | null;
   belowFloor: boolean;
@@ -1145,16 +1277,22 @@ function summarizeAutoPromoteHealth(args: {
   promoted: number;
   skipped: number;
   topReason: string | null;
+  blockerClassCounts: AutoPromoteBlockerClassCount[];
+  nextAction: AutoPromoteNextAction;
 }): string {
   if (args.blockedReason) return `auto-promote blocked: ${args.blockedReason}`;
   if (!args.belowFloor && !args.belowLanes) {
     return `ready build fuel meets floor: ready=${args.ready} floor=${args.floor}, lanes=${args.lanes}/${args.minLanes}`;
   }
+  const blockers = args.blockerClassCounts.length > 0
+    ? `; blocker classes: ${args.blockerClassCounts.map((b) => `${b.class}=${b.count}`).join(", ")}`
+    : "";
+  const next = `; next: ${args.nextAction.summary}`;
   if (!args.triggered || args.candidates === 0) {
-    return `ready build fuel below floor: ready=${args.ready} floor=${args.floor}, lanes=${args.lanes}/${args.minLanes}; no needs_review candidates considered`;
+    return `ready build fuel below floor: ready=${args.ready} floor=${args.floor}, lanes=${args.lanes}/${args.minLanes}; no needs_review candidates considered${next}`;
   }
   if (args.promoted > 0) {
-    return `ready build fuel below floor: ready=${args.ready} floor=${args.floor}, lanes=${args.lanes}/${args.minLanes}; would promote ${args.promoted}, skipped ${args.skipped}`;
+    return `ready build fuel below floor: ready=${args.ready} floor=${args.floor}, lanes=${args.lanes}/${args.minLanes}; would promote ${args.promoted}, skipped ${args.skipped}${blockers}${next}`;
   }
-  return `ready build fuel below floor: ready=${args.ready} floor=${args.floor}, lanes=${args.lanes}/${args.minLanes}; promoted 0 of ${args.candidates}, top skip reason: ${args.topReason ?? "none"}`;
+  return `ready build fuel below floor: ready=${args.ready} floor=${args.floor}, lanes=${args.lanes}/${args.minLanes}; promoted 0 of ${args.candidates}, top skip reason: ${args.topReason ?? "none"}${blockers}${next}`;
 }
