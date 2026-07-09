@@ -238,9 +238,7 @@ export function commentRouteStatusFromDispatchResult(
   const skipped = "skipped" in result ? result.skipped : null;
   const isPolicySkip = skipped === "acknowledged" || skipped === "approval_signal" || skipped === "question_threaded";
   const compatStatus: ArtifactFeedbackCompatStatus =
-    skipped === "scheduler_unavailable"
-      ? "disabled/not-recorded"
-      : isPolicySkip
+    isPolicySkip
         ? "recorded+routed"
         : "recorded-route-failed-retryable";
   return {

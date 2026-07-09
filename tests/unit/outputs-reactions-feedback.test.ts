@@ -301,6 +301,10 @@ describe("C0 flag gating (C0_FEEDBACK_REACTIONS off)", () => {
       [ART],
     );
     expect(Number(states.rows[0].n)).toBe(0);
+    const queued = await adapter.query<{ n: number }>(
+      `SELECT COUNT(*) AS n FROM dispatch_scheduler_queue WHERE channel = 'artifact_comment'`,
+    );
+    expect(Number(queued.rows[0]?.n ?? 0)).toBe(0);
 
     await commentArtifact(adapter, ART, {
       actor: "user:chris",

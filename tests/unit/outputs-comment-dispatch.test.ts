@@ -245,7 +245,7 @@ describe("POST /artifacts/:id/comments — B2 auto-dispatch", () => {
     expect(get.body.comments[0].route_status.feedback_status).toBe("recorded-route-failed-retryable");
   });
 
-  it("persists but skips routing with scheduler_unavailable when no enqueue seam is wired", async () => {
+  it("persists comments without misleading not-recorded state when no enqueue seam is wired", async () => {
     const { app, adapter } = await buildApp(undefined); // legacy/bootstrap mount
     await catalogArtifact(adapter, "regina");
 
@@ -258,18 +258,57 @@ describe("POST /artifacts/:id/comments — B2 auto-dispatch", () => {
     expect(res.body.dispatch_routed).toBe(false);
     expect(res.body.dispatch).toBeNull();
     expect(res.body.dispatch_skipped).toBe("scheduler_unavailable");
-    expect(res.body.visible_state).toBe("disabled/not-recorded");
-    expect(res.body.feedback_status).toBe("disabled/not-recorded");
+    expect(res.body.visible_state).toBe("recorded-route-failed-retryable");
+    expect(res.body.feedback_status).toBe("recorded-route-failed-retryable");
     expect(res.body.route_status).toMatchObject({
-      visible_state: "disabled/not-recorded",
+      visible_state: "recorded-route-failed-retryable",
       routed: false,
-      retryable: false,
+      retryable: true,
       skipped: "scheduler_unavailable",
+      dispatch: null,
     });
+
+    const queued = await adapter.query<{ n: number }>(
+      `SELECT COUNT(*) AS n FROM dispatch_scheduler_queue WHERE channel = 'artifact_comment'`,
+    );
+    expect(Number(queued.rows[0]?.n ?? 0)).toBe(0);
 
     const get = await call(app, "GET", `/artifacts/${ART}/comments`);
     expect(get.body.comments).toHaveLength(1);
-    expect(get.body.comments[0].route_status.feedback_status).toBe("disabled/not-recorded");
+    expect(get.body.comments[0].route_status.feedback_status).toBe("recorded-route-failed-retryable");
+    expect(get.body.comments[0].route_status.dispatch).toBeNull();
+  });
+
+  it("persists reactions without stale queue items when no enqueue seam is wired", async () => {
+    const { app, adapter } = await buildApp(undefined);
+    await catalogArtifact(adapter, "regina");
+
+    const res = await call(app, "POST", `/artifacts/${ART}/reactions`, {
+      actor_ref: "user:chris",
+      reaction: "iterate",
+      note: "needs another pass",
+    });
+
+    expect(res.status).toBe(200);
+    expect(res.body.dispatch_routed).toBe(false);
+    expect(res.body.dispatch).toBeNull();
+    expect(res.body.dispatch_skipped).toBe("scheduler_unavailable");
+    expect(res.body.visible_state).toBe("recorded-route-failed-retryable");
+    expect(res.body.comment.reaction).toBe("iterate");
+
+    const queued = await adapter.query<{ n: number }>(
+      `SELECT COUNT(*) AS n FROM dispatch_scheduler_queue WHERE channel = 'artifact_comment'`,
+    );
+    expect(Number(queued.rows[0]?.n ?? 0)).toBe(0);
+
+    const comments = await call(app, "GET", `/artifacts/${ART}/comments`);
+    expect(comments.body.comments).toHaveLength(1);
+    expect(comments.body.comments[0].reaction).toBe("iterate");
+    expect(comments.body.comments[0].route_status).toMatchObject({
+      visible_state: "recorded-route-failed-retryable",
+      skipped: "scheduler_unavailable",
+      dispatch: null,
+    });
   });
 
   it("preserves the durable comment and returns dispatch_error when enqueue throws", async () => {
