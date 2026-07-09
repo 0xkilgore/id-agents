@@ -281,6 +281,32 @@ export async function listBacklogByState(
   return rows.map(rowToBacklogItem);
 }
 
+/**
+ * Low-confidence fleshed rows that are parked in needs_review specifically for
+ * confidence review. Explicitly approved rows are excluded because the
+ * auto-promote policy treats approval as the confidence override.
+ */
+export async function listHeldConfidenceReviewItems(
+  adapter: DbAdapter,
+  opts: { team_id?: string; confidence_threshold: number; limit?: number },
+): Promise<BacklogItem[]> {
+  const { rows } = await adapter.query<BacklogRow>(
+    `SELECT * FROM orchestration_backlog_item
+       WHERE team_id = $1
+         AND readiness_state = 'needs_review'
+         AND flesh_confidence IS NOT NULL
+         AND flesh_confidence < $2
+         AND approved_by IS NULL
+         AND approved_at IS NULL
+         AND auto_ready_approved_at IS NULL
+         AND COALESCE(flesh_status, 'unfleshed') <> 'approved_ready'
+       ORDER BY flesh_confidence ASC, priority ASC, created_at ASC
+       LIMIT $3`,
+    [opts.team_id ?? "default", opts.confidence_threshold, opts.limit ?? 500],
+  );
+  return rows.map(rowToBacklogItem);
+}
+
 /** READY rows — the only items the tick may admit. */
 export function listReadyItems(adapter: DbAdapter, team_id = "default"): Promise<BacklogItem[]> {
   return listBacklogByState(adapter, { team_id, state: "ready" });

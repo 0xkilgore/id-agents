@@ -9,6 +9,7 @@ import type { Application, Request, Response } from "express";
 import type { DbAdapter } from "../db/db-adapter.js";
 import type { ContinuousOrchestrationDaemon } from "./daemon.js";
 import type { ContinuousOrchestrationConfig } from "./config.js";
+import { AUTO_READY_CONFIDENCE_THRESHOLD } from "./flesh-policy.js";
 import type { OrchestrationMode, ReadinessState } from "./types.js";
 import {
   countFleshLogSince,
@@ -19,6 +20,7 @@ import {
   insertBacklogItemIfAbsentByLogicalKey,
   insertFleshLog,
   listBacklogByState,
+  listHeldConfidenceReviewItems,
   listFleshLog,
   listRecentDecisions,
   promoteToReady,
@@ -47,9 +49,11 @@ export function mountContinuousOrchestrationRoutes(app: Application, opts: Orche
   app.get("/orchestration/status", async (_req: Request, res: Response) => {
     try {
       const state = await daemon.getState();
-      const [ready, needsReview, inFlight, needsChrisBatch, fleshCounts] = await Promise.all([
+      const confidenceThreshold = AUTO_READY_CONFIDENCE_THRESHOLD;
+      const [ready, needsReview, heldConfidenceReview, inFlight, needsChrisBatch, fleshCounts] = await Promise.all([
         listBacklogByState(adapter, { team_id: teamId, state: "ready" }),
         listBacklogByState(adapter, { team_id: teamId, state: "needs_review" }),
+        listHeldConfidenceReviewItems(adapter, { team_id: teamId, confidence_threshold: confidenceThreshold }),
         listBacklogByState(adapter, { team_id: teamId, state: "in_flight" }),
         listBacklogByState(adapter, { team_id: teamId, state: "needs_chris_batch" }),
         getFleshCounts(adapter, teamId),
@@ -88,7 +92,8 @@ export function mountContinuousOrchestrationRoutes(app: Application, opts: Orche
         kill_switch_active: killSwitch,
         counts: {
           ready: ready.length,
-          needs_review: needsReview.length,
+          needs_review: Math.max(0, needsReview.length - heldConfidenceReview.length),
+          held_confidence_review: heldConfidenceReview.length,
           in_flight: inFlight.length,
           needs_chris_batch: needsChrisBatch.length,
           unfleshed: fleshCounts.unfleshed ?? 0,
@@ -103,6 +108,7 @@ export function mountContinuousOrchestrationRoutes(app: Application, opts: Orche
             floor: config.auto_promote_floor,
             min_lanes: config.auto_promote_min_lanes,
             max_per_tick: config.auto_promote_max_per_tick,
+            confidence_threshold: confidenceThreshold,
             health: autoPromoteHealth,
           },
           by_status: fleshCounts,
@@ -381,6 +387,25 @@ export function mountContinuousOrchestrationRoutes(app: Application, opts: Orche
               fleshState ? i.flesh_status === fleshState : true,
             );
       res.json({ ok: true, counts: byStatus, items });
+    } catch (err) {
+      res.status(500).json({ ok: false, error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  // GET /orchestration/flesh/held-confidence-review
+  app.get("/orchestration/flesh/held-confidence-review", async (_req: Request, res: Response) => {
+    try {
+      const confidenceThreshold = AUTO_READY_CONFIDENCE_THRESHOLD;
+      const items = await listHeldConfidenceReviewItems(adapter, {
+        team_id: teamId,
+        confidence_threshold: confidenceThreshold,
+      });
+      res.json({
+        ok: true,
+        confidence_threshold: confidenceThreshold,
+        count: items.length,
+        items,
+      });
     } catch (err) {
       res.status(500).json({ ok: false, error: err instanceof Error ? err.message : String(err) });
     }

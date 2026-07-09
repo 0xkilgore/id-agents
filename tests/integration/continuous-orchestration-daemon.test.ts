@@ -14,11 +14,13 @@ import {
   getOrchestrationState,
   getAgentRuntimeMap,
   getHealthyAgentNames,
+  listHeldConfidenceReviewItems,
 } from "../../src/continuous-orchestration/storage.js";
 import { parseRoadmapToBacklog } from "../../src/continuous-orchestration/roadmap-import.js";
 import { ContinuousOrchestrationDaemon, type PoolRouting } from "../../src/continuous-orchestration/daemon.js";
 import { defaultConfig, type ContinuousOrchestrationConfig } from "../../src/continuous-orchestration/config.js";
 import { mountContinuousOrchestrationRoutes } from "../../src/continuous-orchestration/routes.js";
+import { AUTO_READY_CONFIDENCE_THRESHOLD } from "../../src/continuous-orchestration/flesh-policy.js";
 import type { BacklogItem, UsageGateView } from "../../src/continuous-orchestration/types.js";
 
 async function freshDb() {
@@ -715,6 +717,75 @@ describe("daemon — dry-run vs live", () => {
     expect(res.body.auto_promote_health.summary).toMatch(/blocker classes:/);
     expect(res.body.auto_promote_health.summary).toMatch(/already_dispatched=1/);
     expect(res.body.auto_promote_health.summary).toMatch(/next: manually \/promote/);
+  });
+
+  it("surfaces below-threshold flesh rows as held confidence review, separate from plain needs_review", async () => {
+    await seedApprovedReview(adapter, {
+      title: "below confidence held one",
+      approved_by: null,
+      approved_at: null,
+      flesh_status: "fleshed",
+      flesh_confidence: 0.65,
+      write_scope: ["repo/low-a"],
+    });
+    await seedApprovedReview(adapter, {
+      title: "below confidence held two",
+      approved_by: null,
+      approved_at: null,
+      flesh_status: "needs_chris_batch",
+      flesh_confidence: AUTO_READY_CONFIDENCE_THRESHOLD - 0.01,
+      write_scope: ["repo/low-b"],
+    });
+    await seedApprovedReview(adapter, {
+      title: "above confidence plain review",
+      approved_by: null,
+      approved_at: null,
+      flesh_status: "fleshed",
+      flesh_confidence: AUTO_READY_CONFIDENCE_THRESHOLD,
+      write_scope: ["repo/high"],
+    });
+    await seedApprovedReview(adapter, {
+      title: "approved low confidence override",
+      approved_by: "maestra",
+      approved_at: "2026-07-08T12:00:00Z",
+      flesh_status: "needs_chris_batch",
+      flesh_confidence: 0.65,
+      write_scope: ["repo/approved-low"],
+    });
+    await insertBacklogItem(adapter, {
+      title: "plain unfleshed review",
+      readiness_state: "needs_review",
+      risk_class: "build",
+      write_scope: ["repo/plain"],
+    });
+    const { app } = mountStatusApp(adapter, {
+      dry_run: true,
+      auto_flesh_enabled: true,
+      auto_promote_enabled: true,
+    });
+
+    const status = await callApp(app, "/orchestration/status");
+    const held = await callApp(app, "/orchestration/flesh/held-confidence-review");
+
+    expect(status.status).toBe(200);
+    expect(status.body.counts.held_confidence_review).toBe(2);
+    expect(status.body.counts.needs_review).toBe(3);
+    expect(status.body.flesh.auto_promote.confidence_threshold).toBe(AUTO_READY_CONFIDENCE_THRESHOLD);
+    expect(held.status).toBe(200);
+    expect(held.body).toMatchObject({
+      ok: true,
+      confidence_threshold: AUTO_READY_CONFIDENCE_THRESHOLD,
+      count: 2,
+    });
+    expect(held.body.items.map((item: BacklogItem) => item.title)).toEqual([
+      "below confidence held one",
+      "below confidence held two",
+    ]);
+
+    const direct = await listHeldConfidenceReviewItems(adapter, {
+      confidence_threshold: AUTO_READY_CONFIDENCE_THRESHOLD,
+    });
+    expect(direct.map((item) => item.title)).toEqual(held.body.items.map((item: BacklogItem) => item.title));
   });
 
   it("status includes provider/runtime repair interaction before admission diagnostics", async () => {
