@@ -205,7 +205,10 @@ export function commentRouteStatusFromDispatchResult(
   result: CommentDispatchResult,
   recordedOpId: number,
   updatedAt: string,
+  deadlineMs = 300_000,
 ): ArtifactCommentRouteStatus {
+  const deadlineAt = new Date(Date.parse(updatedAt) + deadlineMs).toISOString();
+  const suppressDuplicateKey = `artifact-comment:${recordedOpId}:timeout`;
   if (result.routed) {
     return {
       visible_state: "recorded+routed",
@@ -224,6 +227,11 @@ export function commentRouteStatusFromDispatchResult(
       },
       skipped: null,
       error: null,
+      deadline_at: deadlineAt,
+      timed_out_at: null,
+      notification_status: "pending",
+      next_retry_at: null,
+      suppress_duplicate_key: suppressDuplicateKey,
       updated_at: updatedAt,
     };
   }
@@ -248,6 +256,11 @@ export function commentRouteStatusFromDispatchResult(
     dispatch: null,
     skipped,
     error: "error" in result ? result.error : null,
+    deadline_at: deadlineAt,
+    timed_out_at: null,
+    notification_status: compatStatus === "recorded-route-failed-retryable" ? "pending" : "suppressed",
+    next_retry_at: compatStatus === "recorded-route-failed-retryable" ? deadlineAt : null,
+    suppress_duplicate_key: suppressDuplicateKey,
     updated_at: updatedAt,
   };
 }

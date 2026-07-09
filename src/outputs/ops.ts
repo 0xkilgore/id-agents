@@ -663,6 +663,22 @@ function parseRouteStatus(value: unknown): ArtifactCommentRouteStatus | null {
     dispatch: v.dispatch && typeof v.dispatch === "object" ? v.dispatch : null,
     skipped: typeof v.skipped === "string" ? v.skipped : null,
     error: v.error && typeof v.error.message === "string" ? { message: v.error.message } : null,
+    deadline_at: typeof v.deadline_at === "string" ? v.deadline_at : null,
+    timed_out_at: typeof v.timed_out_at === "string" ? v.timed_out_at : null,
+    notification_status:
+      v.notification_status === "pending" ||
+      v.notification_status === "sent" ||
+      v.notification_status === "acked" ||
+      v.notification_status === "suppressed"
+        ? v.notification_status
+        : v.routed === true
+          ? "pending"
+          : "suppressed",
+    next_retry_at: typeof v.next_retry_at === "string" ? v.next_retry_at : null,
+    suppress_duplicate_key:
+      typeof v.suppress_duplicate_key === "string" && v.suppress_duplicate_key.length > 0
+        ? v.suppress_duplicate_key
+        : `artifact-comment:${typeof v.recorded_op_id === "number" ? v.recorded_op_id : "unknown"}:timeout`,
     updated_at: typeof v.updated_at === "string" ? v.updated_at : "",
   };
 }

@@ -172,6 +172,8 @@ export interface MountOutputsRoutesOptions {
   onFilesystemReconcileError?: (err: unknown) => void;
   /** T3B-1 per-(artifact,action,actor) cooldown in ms. Defaults to 3000. */
   actionCooldownMs?: number;
+  /** Operator-visible action delivery SLO window. Defaults to 5 minutes. */
+  actionDeliveryDeadlineMs?: number;
   /** Injectable clock for deterministic cooldown tests. */
   now?: () => Date;
   /**
@@ -401,6 +403,7 @@ export function mountOutputsRoutes(
 ): void {
   const { tasks, resolveTeamId, resolveDispatchStatus } = opts;
   const cooldownMs = opts.actionCooldownMs ?? DEFAULT_ACTION_COOLDOWN_MS;
+  const actionDeliveryDeadlineMs = opts.actionDeliveryDeadlineMs ?? 300_000;
   const clock = opts.now;
   // CANE_DRAFT_ARTIFACTS — resolve the send executor once. Injectable for tests.
   const caneDraftSender: CaneDraftSender =
@@ -1323,6 +1326,7 @@ export function mountOutputsRoutes(
         routed.routed,
         op_id,
         (clock ? clock() : new Date()).toISOString(),
+        actionDeliveryDeadlineMs,
       );
       await updateCommentRouteStatus(adapter, artifactId, op_id, route_status);
       comment.route_status = route_status;
@@ -1651,6 +1655,7 @@ export function mountOutputsRoutes(
         routed.routed,
         op_id,
         (clock ? clock() : new Date()).toISOString(),
+        actionDeliveryDeadlineMs,
       );
       await updateCommentRouteStatus(adapter, artifactId, op_id, route_status);
       comment.route_status = route_status;

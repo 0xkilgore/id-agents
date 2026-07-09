@@ -307,6 +307,11 @@ export interface ArtifactCommentRouteStatus {
   } | null;
   skipped: string | null;
   error: { message: string } | null;
+  deadline_at: string | null;
+  timed_out_at: string | null;
+  notification_status: "pending" | "sent" | "acked" | "suppressed";
+  next_retry_at: string | null;
+  suppress_duplicate_key: string;
   updated_at: string;
 }
 

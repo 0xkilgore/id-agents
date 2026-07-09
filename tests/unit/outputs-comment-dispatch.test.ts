@@ -9,8 +9,14 @@ import { migrateSqlite } from "../../src/db/migrations/sqlite.js";
 import { migrateOutputsTables, registerArtifact } from "../../src/outputs/storage.js";
 import { mountOutputsRoutes } from "../../src/outputs/routes.js";
 import type { CommentDispatchEnqueueFn } from "../../src/outputs/comment-dispatch.js";
+import {
+  ACTION_DELIVERY_TIMEOUT_TOPIC,
+  acknowledgeActionDelivery,
+  sweepActionDeliveryTimeouts,
+} from "../../src/outputs/action-delivery-slo.js";
 
 const ART = "art-b2-1";
+const C0_ON = { C0_FEEDBACK_REACTIONS: "1" } as NodeJS.ProcessEnv;
 
 interface EnqueueCall {
   to_agent: string;
@@ -35,16 +41,25 @@ function makeFakeEnqueue(opts: { throws?: boolean } = {}): {
   return { fn, calls };
 }
 
-async function buildApp(enqueue?: CommentDispatchEnqueueFn): Promise<{
+async function buildApp(
+  enqueue?: CommentDispatchEnqueueFn,
+  opts: { env?: NodeJS.ProcessEnv; now?: () => Date; actionDeliveryDeadlineMs?: number } = {},
+): Promise<{
   app: Express;
   adapter: SqliteAdapter;
 }> {
   const adapter = new SqliteAdapter(":memory:");
   await migrateSqlite(adapter);
+  await adapter.query(`INSERT OR IGNORE INTO teams (id, name) VALUES (?, ?)`, ["default", "default"]);
   await migrateOutputsTables(adapter);
   const app = express();
   app.use(express.json());
-  mountOutputsRoutes(app, adapter, { enqueueDispatch: enqueue });
+  mountOutputsRoutes(app, adapter, {
+    enqueueDispatch: enqueue,
+    env: opts.env,
+    now: opts.now,
+    actionDeliveryDeadlineMs: opts.actionDeliveryDeadlineMs,
+  });
   return { app, adapter };
 }
 
@@ -320,5 +335,109 @@ describe("POST /artifacts/:id/comments — B2 auto-dispatch", () => {
       feedback_status: "recorded+routed",
     });
     expect(calls[0].to_agent).toBe("default");
+  });
+
+  it("times out an unacked artifact reaction route with one notification and one visible delivery state", async () => {
+    const { fn } = makeFakeEnqueue();
+    let now = new Date("2026-07-08T12:00:00.000Z");
+    const { app, adapter } = await buildApp(fn, {
+      env: C0_ON,
+      now: () => now,
+      actionDeliveryDeadlineMs: 1000,
+    });
+    await catalogArtifact(adapter, "regina");
+
+    const res = await call(app, "POST", `/artifacts/${ART}/reactions`, {
+      actor_ref: "user:chris",
+      reaction: "wrong",
+      note: "numbers do not reconcile",
+    });
+
+    expect(res.status).toBe(200);
+    expect(res.body.route_status).toMatchObject({
+      routed: true,
+      notification_status: "pending",
+      deadline_at: "2026-07-08T12:00:01.000Z",
+      timed_out_at: null,
+      next_retry_at: null,
+      suppress_duplicate_key: `artifact-comment:${res.body.op_id}:timeout`,
+    });
+    const beforeOps = await adapter.query<{ n: number }>(
+      `SELECT COUNT(*) AS n FROM artifact_operations WHERE artifact_id = ?`,
+      [ART],
+    );
+
+    now = new Date("2026-07-08T12:00:02.000Z");
+    expect(await sweepActionDeliveryTimeouts(adapter, { now: () => now })).toMatchObject({
+      timed_out: 1,
+      notifications_created: 1,
+      notifications_suppressed: 0,
+    });
+    expect(await sweepActionDeliveryTimeouts(adapter, { now: () => now })).toMatchObject({
+      timed_out: 0,
+      notifications_created: 0,
+    });
+
+    const events = await adapter.query<{ n: number }>(
+      `SELECT COUNT(*) AS n FROM event_log WHERE topic = ?`,
+      [ACTION_DELIVERY_TIMEOUT_TOPIC],
+    );
+    expect(Number(events.rows[0]?.n ?? 0)).toBe(1);
+    const afterOps = await adapter.query<{ n: number }>(
+      `SELECT COUNT(*) AS n FROM artifact_operations WHERE artifact_id = ?`,
+      [ART],
+    );
+    expect(Number(afterOps.rows[0]?.n ?? 0)).toBe(Number(beforeOps.rows[0]?.n ?? 0));
+
+    const get = await call(app, "GET", `/artifacts/${ART}/comments`);
+    expect(get.body.comments).toHaveLength(1);
+    expect(get.body.comments[0].route_status).toMatchObject({
+      visible_state: "recorded-but-route-failed-with-retry",
+      timed_out_at: "2026-07-08T12:00:02.000Z",
+      notification_status: "sent",
+      suppress_duplicate_key: `artifact-comment:${res.body.op_id}:timeout`,
+    });
+  });
+
+  it("suppresses timeout notification when action delivery is acked before the deadline", async () => {
+    const { fn } = makeFakeEnqueue();
+    let now = new Date("2026-07-08T12:00:00.000Z");
+    const { app, adapter } = await buildApp(fn, {
+      env: C0_ON,
+      now: () => now,
+      actionDeliveryDeadlineMs: 1000,
+    });
+    await catalogArtifact(adapter, "regina");
+
+    const res = await call(app, "POST", `/artifacts/${ART}/reactions`, {
+      actor_ref: "user:liz",
+      reaction: "iterate",
+      note: "tighten this",
+    });
+    expect(res.status).toBe(200);
+
+    now = new Date("2026-07-08T12:00:00.500Z");
+    const ack = await acknowledgeActionDelivery(adapter, {
+      artifactId: ART,
+      opId: res.body.op_id,
+      now: () => now,
+    });
+    expect(ack?.notification_status).toBe("acked");
+
+    now = new Date("2026-07-08T12:00:02.000Z");
+    expect(await sweepActionDeliveryTimeouts(adapter, { now: () => now })).toMatchObject({
+      timed_out: 0,
+      notifications_created: 0,
+    });
+    const events = await adapter.query<{ n: number }>(
+      `SELECT COUNT(*) AS n FROM event_log WHERE topic = ?`,
+      [ACTION_DELIVERY_TIMEOUT_TOPIC],
+    );
+    expect(Number(events.rows[0]?.n ?? 0)).toBe(0);
+    const get = await call(app, "GET", `/artifacts/${ART}/comments`);
+    expect(get.body.comments[0].route_status).toMatchObject({
+      notification_status: "acked",
+      timed_out_at: null,
+    });
   });
 });
