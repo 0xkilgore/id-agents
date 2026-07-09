@@ -798,6 +798,103 @@ async function withTimeout<T>(
   }
 }
 
+const MANAGER_ROUTE_TIMEOUT_MS = 10_000;
+const MANAGER_ROUTE_TIMEOUT_MAX_MS = 60_000;
+
+function parseManagerRouteTimeout(req: express.Request): number {
+  const candidates = [
+    req.headers['x-id-route-timeout-ms'],
+    req.query.timeout_ms,
+    (req.body && typeof req.body === 'object' ? (req.body as { timeout_ms?: unknown }).timeout_ms : undefined),
+  ];
+  for (const raw of candidates) {
+    const value = Array.isArray(raw) ? raw[0] : raw;
+    const parsed = typeof value === 'number'
+      ? value
+      : typeof value === 'string'
+        ? Number(value)
+        : NaN;
+    if (Number.isFinite(parsed) && parsed > 0) {
+      return Math.min(MANAGER_ROUTE_TIMEOUT_MAX_MS, Math.max(1, Math.floor(parsed)));
+    }
+  }
+  return MANAGER_ROUTE_TIMEOUT_MS;
+}
+
+function isDurableStateRoute(pathname: string): boolean {
+  return (
+    pathname === '/agent-done' ||
+    pathname === '/agent-needs-input' ||
+    pathname === '/agent-resume' ||
+    pathname === '/dispatch/enqueue' ||
+    pathname === '/dispatches' ||
+    pathname.startsWith('/dispatches/') ||
+    pathname === '/tasks' ||
+    pathname.startsWith('/tasks/') ||
+    pathname === '/artifacts' ||
+    pathname.startsWith('/artifacts/') ||
+    pathname === '/outputs/inbox' ||
+    pathname.startsWith('/outputs/')
+  );
+}
+
+function routeTimeoutIdempotencyKey(req: express.Request): string | undefined {
+  const body = req.body as { idempotency_key?: unknown } | undefined;
+  const raw = body && typeof body === 'object' ? body.idempotency_key : undefined;
+  return typeof raw === 'string' && raw.trim() ? raw.trim() : undefined;
+}
+
+function createManagerRouteTimeoutMiddleware(): express.RequestHandler {
+  return (req, res, next) => {
+    if (!isDurableStateRoute(req.path)) return next();
+
+    const timeoutMs = parseManagerRouteTimeout(req);
+    let timedOut = false;
+    let sendingTimeout = false;
+    const startedAt = Date.now();
+    const originalJson = res.json.bind(res);
+    const originalSend = res.send.bind(res);
+    const originalEnd = res.end.bind(res);
+
+    res.json = ((body?: unknown) => {
+      if (timedOut && !sendingTimeout) return res;
+      return originalJson(body);
+    }) as typeof res.json;
+    res.send = ((body?: unknown) => {
+      if (timedOut && !sendingTimeout) return res;
+      return originalSend(body as any);
+    }) as typeof res.send;
+    res.end = ((...args: unknown[]) => {
+      if (timedOut && !sendingTimeout) return res;
+      return originalEnd(...(args as Parameters<typeof res.end>));
+    }) as typeof res.end;
+
+    const timer = setTimeout(() => {
+      if (res.headersSent || res.writableEnded) return;
+      timedOut = true;
+      sendingTimeout = true;
+      res.status(504);
+      originalJson({
+        ok: false,
+        error: 'manager route timed out',
+        code: 'route_timeout',
+        action_status: 'timed_out' satisfies ActionStatus,
+        idempotency_key: routeTimeoutIdempotencyKey(req),
+        route: req.path,
+        method: req.method,
+        timeout_ms: timeoutMs,
+        latency_ms: Math.max(0, Date.now() - startedAt),
+      });
+      sendingTimeout = false;
+    }, timeoutMs);
+    timer.unref?.();
+
+    res.on('finish', () => clearTimeout(timer));
+    res.on('close', () => clearTimeout(timer));
+    next();
+  };
+}
+
 type AgentRegistryId = {
   chainId: number;
   registryAddress: string;
@@ -1120,6 +1217,7 @@ export class AgentManagerDb {
       timeoutMs: Number.isFinite(readGuardTimeout) && readGuardTimeout > 0 ? Math.floor(readGuardTimeout) : READ_GUARD_TIMEOUT_MS,
     });
     this.managementApp.use(this.readGuard.middleware);
+    this.managementApp.use(createManagerRouteTimeoutMiddleware());
 
     // Ensure teams + manager dirs exist in the mounted workspace
     const teamsDir = `${baseWorkDir}/teams`;
