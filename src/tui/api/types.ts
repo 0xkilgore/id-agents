@@ -76,6 +76,36 @@ export interface Task {
   createdAt: number;
   updatedAt?: number;
   completedAt?: number | null;
+  operationTimeline?: {
+    schema_version: 'task.operation_timeline.v1';
+    count: number;
+    counts: Record<'recorded' | 'pending' | 'routed' | 'failed', number>;
+    items: Array<{
+      id: string;
+      kind: 'comment' | 'route_attempt';
+      state: 'recorded' | 'pending' | 'routed' | 'failed';
+      actor: string;
+      created_at: string;
+      comment_id: string;
+      comment_text: string;
+      source_ref: string;
+      target_agent: string | null;
+      target_agent_raw: string | null;
+      dispatch_phid: string | null;
+      query_id: string | null;
+      error: string | null;
+      retry: {
+        available: boolean;
+        reason: string;
+        source_ref: string;
+        target_agent: string | null;
+      };
+      links: {
+        task: { kind: 'task'; ref: string; route: string; href: string };
+        artifact: null;
+      };
+    }>;
+  };
 }
 
 export interface RemoteTasksResponse {

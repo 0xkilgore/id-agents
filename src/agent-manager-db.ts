@@ -395,6 +395,124 @@ function summarizeTaskCommentRouting(notes: Array<ReturnType<typeof taskCommentV
   };
 }
 
+type TaskOperationTimelineState = 'recorded' | 'pending' | 'routed' | 'failed';
+
+interface TaskOperationTimelineEntry {
+  id: string;
+  kind: 'comment' | 'route_attempt';
+  state: TaskOperationTimelineState;
+  actor: string;
+  created_at: string;
+  comment_id: string;
+  comment_text: string;
+  source_ref: string;
+  target_agent: string | null;
+  target_agent_raw: string | null;
+  dispatch_phid: string | null;
+  query_id: string | null;
+  error: string | null;
+  retry: {
+    available: boolean;
+    reason: string;
+    source_ref: string;
+    target_agent: string | null;
+  };
+  links: {
+    task: { kind: 'task'; ref: string; route: string; href: string };
+    artifact: null;
+  };
+}
+
+function buildTaskOperationTimeline(
+  task: TaskRow,
+  notes: Array<ReturnType<typeof taskCommentView>>,
+): {
+  schema_version: 'task.operation_timeline.v1';
+  count: number;
+  counts: Record<TaskOperationTimelineState, number>;
+  items: TaskOperationTimelineEntry[];
+} {
+  const taskLink = { kind: 'task' as const, ref: task.name, route: `/tasks/${encodeURIComponent(task.name)}`, href: `/tasks/${encodeURIComponent(task.name)}` };
+  const items: TaskOperationTimelineEntry[] = [];
+
+  for (const note of notes) {
+    const sourceRef = `task:${note.task_name}:comment:${note.id}`;
+    items.push({
+      id: `task-comment:${note.id}:recorded`,
+      kind: 'comment',
+      state: 'recorded',
+      actor: note.actor,
+      created_at: note.created_at,
+      comment_id: note.id,
+      comment_text: note.text,
+      source_ref: sourceRef,
+      target_agent: null,
+      target_agent_raw: null,
+      dispatch_phid: null,
+      query_id: null,
+      error: null,
+      retry: {
+        available: false,
+        reason: 'comment_recorded',
+        source_ref: sourceRef,
+        target_agent: null,
+      },
+      links: { task: taskLink, artifact: null },
+    });
+
+    const routeResults = note.routing_results.length > 0
+      ? note.routing_results
+      : [{
+          target_agent: null,
+          target_agent_raw: null,
+          status: note.routing_status,
+          dispatch_phid: null,
+          query_id: null,
+          error: null,
+          retryable: note.routing_status !== 'routed',
+          routed_at: null,
+        }];
+
+    for (const result of routeResults) {
+      const retryable = result.retryable ?? result.status !== 'routed';
+      const target = result.target_agent ?? null;
+      items.push({
+        id: `task-comment:${note.id}:route:${target ?? 'unassigned'}`,
+        kind: 'route_attempt',
+        state: result.status,
+        actor: note.actor,
+        created_at: result.routed_at ?? note.updated_at,
+        comment_id: note.id,
+        comment_text: note.text,
+        source_ref: sourceRef,
+        target_agent: target,
+        target_agent_raw: result.target_agent_raw ?? target,
+        dispatch_phid: result.dispatch_phid ?? null,
+        query_id: result.query_id ?? null,
+        error: result.error ?? null,
+        retry: {
+          available: retryable && result.status !== 'routed',
+          reason: retryable && result.status !== 'routed' ? 'retryable_route_attempt' : 'route_attempt_not_retryable',
+          source_ref: sourceRef,
+          target_agent: target,
+        },
+        links: { task: taskLink, artifact: null },
+      });
+    }
+  }
+
+  const rank = { comment: 0, route_attempt: 1 };
+  items.sort((a, b) => a.created_at.localeCompare(b.created_at) || rank[a.kind] - rank[b.kind] || a.id.localeCompare(b.id));
+  const counts: Record<TaskOperationTimelineState, number> = { recorded: 0, pending: 0, routed: 0, failed: 0 };
+  for (const item of items) counts[item.state] += 1;
+  return {
+    schema_version: 'task.operation_timeline.v1',
+    count: items.length,
+    counts,
+    items,
+  };
+}
+
 function fleetMetricsHistoryRetentionDaysFromEnv(env: Record<string, string | undefined>): number {
   const raw = env.FLEET_METRICS_HISTORY_RETENTION_DAYS;
   if (!raw) return 35;
@@ -8834,6 +8952,7 @@ export class AgentManagerDb {
       currentness,
       notes,
       commentRouting: summarizeTaskCommentRouting(notes),
+      operationTimeline: buildTaskOperationTimeline(task, notes),
       ownerName,
       teamName,
       linkedEvents: links.map(l => l.schedule_id),

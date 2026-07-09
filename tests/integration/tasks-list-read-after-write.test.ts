@@ -137,6 +137,8 @@ describe('GET /tasks read-model immediate reflect', () => {
   beforeEach(async () => {
     await db.adapter.query(`DELETE FROM tasks`);
     await db.adapter.query(`DELETE FROM event_log`);
+    await db.adapter.query(`DELETE FROM task_comment_events`);
+    await db.adapter.query(`DELETE FROM dispatch_scheduler_queue`);
   });
 
   it('after POST /tasks/:ref/done, GET /tasks shows status:done immediately with completedAt populated', async () => {
@@ -321,10 +323,55 @@ describe('GET /tasks read-model immediate reflect', () => {
       failed_count: 0,
       pending_count: 0,
     });
+    expect(detail.task.operationTimeline).toMatchObject({
+      schema_version: 'task.operation_timeline.v1',
+      count: 3,
+      counts: { recorded: 1, routed: 2, failed: 0, pending: 0 },
+    });
+    expect(detail.task.operationTimeline.items.map((item: Record<string, unknown>) => item.kind)).toEqual([
+      'comment',
+      'route_attempt',
+      'route_attempt',
+    ]);
+    expect(detail.task.operationTimeline.items[0]).toMatchObject({
+      state: 'recorded',
+      actor: 'user:chris',
+      comment_text: 'Chris note: please route this to the right agents.',
+      links: {
+        task: { kind: 'task', ref: taskName, route: `/tasks/${taskName}` },
+        artifact: null,
+      },
+    });
+    expect(detail.task.operationTimeline.items.slice(1)).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          kind: 'route_attempt',
+          state: 'routed',
+          actor: 'user:chris',
+          target_agent: 'coder',
+          dispatch_phid: expect.any(String),
+          retry: expect.objectContaining({ available: false }),
+        }),
+        expect.objectContaining({
+          kind: 'route_attempt',
+          state: 'routed',
+          actor: 'user:chris',
+          target_agent: 'cane',
+          dispatch_phid: expect.any(String),
+          retry: expect.objectContaining({ available: false }),
+        }),
+      ]),
+    );
     expect(typeof detail.task.commentRouting.latest_dispatch_id).toBe('string');
     expect(detail.task.openTarget).toMatchObject({ kind: 'task', ref: taskName, route: `/tasks/${taskName}` });
     expect(detail.task.linkFields.task).toMatchObject({ kind: 'task', ref: taskName, href: `/tasks/${taskName}` });
     expect(detail.task.created_at).toBe(detail.task.createdAt);
+
+    const list = await fetch(`${baseUrl}/tasks`, {
+      headers: { 'X-Id-Team': TEAM },
+    }).then((r) => r.json());
+    const listTask = list.tasks.find((task: Record<string, unknown>) => task.name === taskName);
+    expect(listTask.operationTimeline).toEqual(detail.task.operationTimeline);
 
     const duplicateRes = await fetch(`${baseUrl}/tasks/${taskName}/notes`, {
       method: 'POST',
@@ -429,6 +476,84 @@ describe('GET /tasks read-model immediate reflect', () => {
     );
     expect(append.task.commentRouting).toMatchObject({ status: 'failed', failed_count: 1 });
     expect(append.task.currentness.stale_reason).toBe('task_comment_routing_failed');
+    expect(append.task.operationTimeline).toMatchObject({
+      schema_version: 'task.operation_timeline.v1',
+      count: 3,
+      counts: { recorded: 1, failed: 1, routed: 1, pending: 0 },
+    });
+    expect(append.task.operationTimeline.items).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          kind: 'route_attempt',
+          state: 'failed',
+          target_agent: 'missing-finances',
+          target_agent_raw: 'project:missing-finances',
+          error: 'agent_not_found:missing-finances',
+          retry: expect.objectContaining({
+            available: false,
+            source_ref: expect.stringContaining(`task:${taskName}:comment:`),
+          }),
+        }),
+        expect.objectContaining({
+          kind: 'route_attempt',
+          state: 'routed',
+          target_agent: 'cane',
+          retry: expect.objectContaining({ available: false }),
+        }),
+      ]),
+    );
+  });
+
+  it('keeps failed scheduler route attempts visible with retry metadata in the task operation timeline', async () => {
+    const taskName = 'scheduler-failed-comment-route';
+    await insertTaskDirect(db, teamId, taskName, coderAgentId, 'doing', {
+      title: 'Scheduler failure route visibility',
+    });
+    const scheduler = (manager as any).dispatchScheduler;
+    const originalEnqueue = scheduler.enqueue;
+    scheduler.enqueue = async () => {
+      throw new Error('scheduler transport unavailable');
+    };
+    try {
+      const appendRes = await fetch(`${baseUrl}/tasks/${taskName}/notes`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Id-Team': TEAM },
+        body: JSON.stringify({
+          text: 'Please retry this route when scheduler recovers.',
+          actor: 'user:chris',
+          timestamp: '2026-07-08T12:25:00.000Z',
+        }),
+      });
+
+      expect(appendRes.status).toBe(201);
+      const append = await appendRes.json();
+      expect(append.note.routing_status).toBe('failed');
+      expect(append.task.operationTimeline.count).toBeGreaterThanOrEqual(2);
+      expect(append.task.operationTimeline.items).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            kind: 'route_attempt',
+            state: 'failed',
+            target_agent: 'coder',
+            dispatch_phid: null,
+            query_id: null,
+            error: 'scheduler transport unavailable',
+            retry: expect.objectContaining({
+              available: true,
+              reason: 'retryable_route_attempt',
+              target_agent: 'coder',
+            }),
+          }),
+        ]),
+      );
+
+      const detail = await fetch(`${baseUrl}/tasks/${taskName}`, {
+        headers: { 'X-Id-Team': TEAM },
+      }).then((r) => r.json());
+      expect(detail.task.operationTimeline).toEqual(append.task.operationTimeline);
+    } finally {
+      scheduler.enqueue = originalEnqueue;
+    }
   });
 
   it('multiple closes in rapid succession do not produce a stale GET /tasks read', async () => {
