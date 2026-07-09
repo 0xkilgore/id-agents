@@ -223,7 +223,7 @@ const SEED_LOOP_DEFS: SeedLoopDef[] = [
     enabled: true,
     allow_scheduled_run: true,
     allow_manual_run: true,
-    schedule_label: "Every 36h and on hygiene-classified promotion failures",
+    schedule_label: "Every 18h and on hygiene-classified promotion failures",
     stale_after_minutes: 48 * 60,
     report_definitions: [
       {
@@ -231,7 +231,7 @@ const SEED_LOOP_DEFS: SeedLoopDef[] = [
         label: "Worktree Hygiene Guard",
         cadence: {
           kind: "interval_hours",
-          every_hours: 36,
+          every_hours: 18,
           anchor_due_at: "2026-07-08T15:00:00.000Z",
         },
         enabled: true,

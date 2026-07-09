@@ -14,6 +14,7 @@ import { detectSessionHandoffVars } from './lib/env-hygiene.js';
 import { installFatalHandlers } from './lib/fatal-handlers.js';
 import { isAbiMismatchError, abiMismatchDiagnostic } from './lib/native-node.js';
 import { resolveDefaultWorkspaceDir } from './lib/data-root.js';
+import { createManagerDbWithAbiRecovery } from './lib/startup-db.js';
 
 // Silent-stop incidents had the scheduler die behind a swallowed rejection —
 // the process stayed up but the tick loop was dead. Fail loud and exit so the
@@ -68,8 +69,7 @@ async function startManagerAgent() {
   const workingDir = process.env.AGENT_MANAGER_WORKDIR || resolveDefaultWorkspaceDir();
 
   // Initialize DB (required for persistence)
-  const db = await createDb();
-  await migrateDb(db);
+  const db = await createManagerDbWithAbiRecovery(createDb, migrateDb);
 
   const manager = new AgentManagerDb(workingDir, db);
 

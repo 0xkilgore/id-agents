@@ -38,9 +38,17 @@ describe('deploy-freshness-watchdog source — clean deploy checkout hygiene', (
 
   it('routes launchd manager restart to the deploy checkout', () => {
     expect(WATCHDOG_SRC).toContain('ensureManagerPlistUsesDeployCheckout');
-    expect(WATCHDOG_SRC).toContain('Set :WorkingDirectory ${CANE}');
-    expect(WATCHDOG_SRC).toContain('Set :ProgramArguments:1 ${CANE}/scripts/start-id-agents-manager.sh');
-    expect(WATCHDOG_SRC).toContain('launchctl bootstrap gui/$(id -u) ${PLIST}');
+    expect(WATCHDOG_SRC).toContain("setPlistValue(':WorkingDirectory', CANE)");
+    expect(WATCHDOG_SRC).toContain("setPlistValue(':ProgramArguments:1', `${CANE}/scripts/start-id-agents-manager.sh`)");
+    expect(WATCHDOG_SRC).toContain('retryLaunchdBootstrap');
+    expect(WATCHDOG_SRC).toContain('restoreManagerPlist(previousTarget)');
+  });
+
+  it('treats successful rollback as non-loud closeout instead of manager-down failure', () => {
+    expect(WATCHDOG_SRC).toContain("writeArtifact('rollback'");
+    expect(WATCHDOG_SRC).toContain('rollback bootstrap succeeded');
+    expect(WATCHDOG_SRC).toContain('process.exitCode = 0');
+    expect(WATCHDOG_SRC).toContain('rollback bootstrap also failed');
   });
 
   it('runs the launchd watchdog itself from the clean deploy checkout', () => {

@@ -13,9 +13,10 @@
 // artifact ONLY when it acts (redeploy or failure), never on quiet passes.
 
 import { execSync, execFileSync } from 'node:child_process';
-import { existsSync, readFileSync, writeFileSync, appendFileSync, mkdirSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync, appendFileSync, mkdirSync, openSync, closeSync, unlinkSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { decideWatchdogAction } from './lib/deploy-watchdog-decision.mjs';
+import { retryLaunchdBootstrap } from './lib/deploy-watchdog-bootstrap.mjs';
 import {
   DEFAULT_REDEPLOY_COMMAND,
   classifyCloseout,
@@ -31,6 +32,7 @@ const SVC = 'com.kilgore.id-agents-manager';
 const LOG = process.env.DEPLOY_WATCHDOG_LOG || '/tmp/deploy-watchdog.log';
 const STATE_FILE = process.env.DEPLOY_WATCHDOG_STATE_FILE || '/tmp/deploy-watchdog.state';
 const PAUSE_FILE = process.env.DEPLOY_WATCHDOG_PAUSE_FILE || '/tmp/deploy-watchdog.pause';
+const LOCK_FILE = process.env.DEPLOY_WATCHDOG_LOCK_FILE || '/tmp/deploy-watchdog.lock';
 const ARTIFACT_DIR = process.env.DEPLOY_WATCHDOG_ARTIFACT_DIR || `${HOME}/Dropbox/Code/agent-platform/output`;
 const DRY_RUN = process.env.DEPLOY_WATCHDOG_DRY_RUN === '1' || process.argv.includes('--dry-run');
 const ENV_FILES = process.env.DEPLOY_WATCHDOG_ENV_FILE
@@ -51,6 +53,25 @@ function readState() {
 }
 function writeState(s) {
   try { writeFileSync(STATE_FILE, JSON.stringify(s)); } catch (e) { log(`WARN could not persist state: ${e.message}`); }
+}
+
+function acquireLock() {
+  try {
+    return openSync(LOCK_FILE, 'wx');
+  } catch (e) {
+    if (e?.code === 'EEXIST') {
+      log(`another deploy watchdog run is active; lock exists at ${LOCK_FILE}`);
+      process.exitCode = 0;
+      return null;
+    }
+    throw e;
+  }
+}
+
+function releaseLock(fd) {
+  if (fd === null || fd === undefined) return;
+  try { closeSync(fd); } catch { /* best-effort */ }
+  try { unlinkSync(LOCK_FILE); } catch { /* best-effort */ }
 }
 
 function loadEnvFile(path) {
@@ -213,6 +234,10 @@ function plistValue(keyPath) {
   }
 }
 
+function setPlistValue(keyPath, value) {
+  execFileSync('/usr/libexec/PlistBuddy', ['-c', `Set ${keyPath} ${value}`, PLIST], { stdio: ['ignore', 'pipe', 'pipe'] });
+}
+
 function managerPlistPointsAtDeployCheckout() {
   return plistValue(':WorkingDirectory') === CANE
     && plistValue(':ProgramArguments:1') === `${CANE}/scripts/start-id-agents-manager.sh`;
@@ -249,9 +274,15 @@ function ensureDeployCheckout() {
 }
 
 function ensureManagerPlistUsesDeployCheckout() {
-  execFileSync('/usr/libexec/PlistBuddy', ['-c', `Set :WorkingDirectory ${CANE}`, PLIST], { stdio: ['ignore', 'pipe', 'pipe'] });
-  execFileSync('/usr/libexec/PlistBuddy', ['-c', `Set :ProgramArguments:1 ${CANE}/scripts/start-id-agents-manager.sh`, PLIST], { stdio: ['ignore', 'pipe', 'pipe'] });
+  setPlistValue(':WorkingDirectory', CANE);
+  setPlistValue(':ProgramArguments:1', `${CANE}/scripts/start-id-agents-manager.sh`);
   log(`manager plist points at deploy checkout repo=${CANE}`);
+}
+
+function restoreManagerPlist(target) {
+  if (target?.workingDirectory) setPlistValue(':WorkingDirectory', target.workingDirectory);
+  if (target?.programArg1) setPlistValue(':ProgramArguments:1', target.programArg1);
+  log(`manager plist rolled back to previous target repo=${target?.workingDirectory ?? 'unknown'} program=${target?.programArg1 ?? 'unknown'}`);
 }
 
 function installDependencies() {
@@ -281,6 +312,11 @@ function readNodeBin() {
 
 /** The full gotchas redeploy sequence. Throws on any failure (caller alerts). */
 async function runRedeploy() {
+  const previousTarget = {
+    workingDirectory: plistValue(':WorkingDirectory'),
+    programArg1: plistValue(':ProgramArguments:1'),
+  };
+  const previousHealth = await getHealth();
   logPrimaryHygiene();
   ensureDeployCheckout();
 
@@ -297,12 +333,36 @@ async function runRedeploy() {
   // Gotcha 4 — run the three build sub-steps directly (chained npm run build dies opaquely).
   sh('npx tsc');
   sh('npx tsc -p src/tui/tsconfig.json');
-  sh('node scripts/write-build-info.mjs'); // writes dist/build-info.json — the freshness truth
+  sh(`"${nodeBin}" scripts/write-build-info.mjs`); // writes dist/build-info.json — the freshness truth
   ensureManagerPlistUsesDeployCheckout();
 
   // Restart via launchd (hermetic env — no CLAUDECODE / parent-shell leak).
-  sh(`launchctl bootout gui/$(id -u)/${SVC} || true`);
-  sh(`launchctl bootstrap gui/$(id -u) ${PLIST}`);
+  const forward = await retryLaunchdBootstrap({
+    service: SVC,
+    plist: PLIST,
+    run: (cmd) => sh(cmd),
+    log,
+  });
+  if (!forward.ok) {
+    const forwardMessage = forward.error?.message ?? 'bootstrap failed';
+    log(`forward bootstrap failed after ${forward.attempts} attempts; rolling back to previous manager target sha=${previousHealth.buildSha ?? 'unknown'}`);
+    restoreManagerPlist(previousTarget);
+    const rollback = await retryLaunchdBootstrap({
+      service: SVC,
+      plist: PLIST,
+      run: (cmd) => sh(cmd),
+      log,
+    });
+    if (!rollback.ok) {
+      throw new Error(`forward bootstrap failed (${forwardMessage}); rollback bootstrap also failed (${rollback.error?.message ?? 'unknown'})`);
+    }
+    return {
+      promotedSha: previousHealth.buildSha ?? 'rolled-back-previous-build',
+      rolledBack: true,
+      rollbackReason: forwardMessage,
+      closeoutEvidence: { ...previousHealth, remoteMainSha: null, remoteMainSource: 'rollback-after-forward-bootstrap-failure' },
+    };
+  }
 
   // Gotcha 8.1 — build_sha == origin_main_sha + freshness fresh.
   await sleep(20000);
@@ -365,90 +425,114 @@ async function postNote(message, urgency = 'time_sensitive') {
 
 async function main() {
   try { mkdirSync(dirname(LOG), { recursive: true }); } catch { /* /tmp exists */ }
+  const lockFd = acquireLock();
+  if (lockFd === null) return;
 
-  const pauseFileExists = existsSync(PAUSE_FILE);
-  const health = await getHealth();
-  const state = readState();
-  const prior = Number(state.consecutiveStale || 0);
-  const decision = decideWatchdogAction({
-    freshnessState: health.freshnessState ?? null,
-    priorConsecutiveStale: prior,
-    pauseFileExists,
-    healthOk: health.ok,
-    deployCheckoutOk: deployCheckoutExists(),
-    managerPlistOk: managerPlistPointsAtDeployCheckout(),
-    priorLastAction: state.lastAction ?? null,
-  });
-  writeState({ consecutiveStale: decision.nextConsecutiveStale, lastAction: decision.action, lastAt: new Date().toISOString() });
-  log(`decision=${decision.action} (${decision.reason}) health_ok=${health.ok} freshness=${health.freshnessState ?? 'n/a'} build_sha=${(health.buildSha || '').slice(0, 7)}`);
+  try {
+    const pauseFileExists = existsSync(PAUSE_FILE);
+    const health = await getHealth();
+    const state = readState();
+    const prior = Number(state.consecutiveStale || 0);
+    const remote = getRemoteMainSha();
+    const targetSha = remote.sha ?? health.originMainSha ?? null;
+    const decision = decideWatchdogAction({
+      freshnessState: health.freshnessState ?? null,
+      priorConsecutiveStale: prior,
+      pauseFileExists,
+      healthOk: health.ok,
+      deployCheckoutOk: deployCheckoutExists(),
+      managerPlistOk: managerPlistPointsAtDeployCheckout(),
+      priorLastAction: state.lastAction ?? null,
+      targetSha,
+      priorTargetSha: state.targetSha ?? null,
+      priorTargetStableCount: Number(state.targetStableCount || 0),
+    });
+    writeState({
+      consecutiveStale: decision.nextConsecutiveStale,
+      targetSha: decision.nextTargetSha,
+      targetStableCount: decision.nextTargetStableCount,
+      lastAction: decision.action,
+      lastAt: new Date().toISOString(),
+    });
+    log(`decision=${decision.action} (${decision.reason}) health_ok=${health.ok} freshness=${health.freshnessState ?? 'n/a'} build_sha=${(health.buildSha || '').slice(0, 7)} target_sha=${(targetSha || '').slice(0, 7)} target_stable=${decision.nextTargetStableCount}`);
 
-  if (!health.ok) {
+    if (!health.ok) {
+      await sendTelegramPage({
+        title: 'manager health unreachable',
+        reason: decision.reason,
+        lines: [
+          `Action: ${decision.action}`,
+          `Prior stale count: ${prior}`,
+          `Pause file present: ${pauseFileExists ? 'yes' : 'no'}`,
+        ],
+      });
+    }
+
+    if (decision.action !== 'act') {
+      // Quiet pass — log only, no artifact.
+      process.exitCode = 0;
+      return;
+    }
+
     await sendTelegramPage({
-      title: 'manager health unreachable',
+      title: 'manager stale/behind threshold exceeded',
       reason: decision.reason,
       lines: [
-        `Action: ${decision.action}`,
-        `Prior stale count: ${prior}`,
-        `Pause file present: ${pauseFileExists ? 'yes' : 'no'}`,
+        `Freshness: ${health.freshnessState ?? 'n/a'}`,
+        `build_sha: ${health.buildSha ?? 'n/a'}`,
+        `origin_main_sha: ${health.originMainSha ?? 'n/a'}`,
+        `Dry run: ${DRY_RUN ? 'yes' : 'no'}`,
       ],
     });
-  }
 
-  if (decision.action !== 'act') {
-    // Quiet pass — log only, no artifact.
-    process.exitCode = 0;
-    return;
-  }
+    if (DRY_RUN) {
+      const note = `[DRY-RUN] deploy-watchdog WOULD redeploy: ${decision.reason}. build_sha=${health.buildSha} origin_main_sha=${health.originMainSha}. (No action taken.)`;
+      log(note);
+      writeArtifact('dryrun', `# Deploy watchdog — DRY-RUN act simulation ${new Date().toISOString()}\n\n${note}`);
+      process.exitCode = 0;
+      return;
+    }
 
-  await sendTelegramPage({
-    title: 'manager stale/behind threshold exceeded',
-    reason: decision.reason,
-    lines: [
-      `Freshness: ${health.freshnessState ?? 'n/a'}`,
-      `build_sha: ${health.buildSha ?? 'n/a'}`,
-      `origin_main_sha: ${health.originMainSha ?? 'n/a'}`,
-      `Dry run: ${DRY_RUN ? 'yes' : 'no'}`,
-    ],
-  });
-
-  if (DRY_RUN) {
-    const note = `[DRY-RUN] deploy-watchdog WOULD redeploy: ${decision.reason}. build_sha=${health.buildSha} origin_main_sha=${health.originMainSha}. (No action taken.)`;
-    log(note);
-    writeArtifact('dryrun', `# Deploy watchdog — DRY-RUN act simulation ${new Date().toISOString()}\n\n${note}`);
-    process.exitCode = 0;
-    return;
-  }
-
-  // Real redeploy.
-  log(`ACT: ${decision.reason} — running gotchas redeploy sequence.`);
-  try {
-    const { promotedSha } = await runRedeploy();
-    const closeoutEvidence = await getCloseoutEvidence();
-    const closeout = classifyCloseout(closeoutEvidence);
-    if (!closeout.ok) throw new Error(closeout.summary);
-    const ok = `# Deploy watchdog — REDEPLOY OK ${new Date().toISOString()}\n\nWatchdog reason: ${decision.reason}. Redeployed to ${promotedSha} (build_sha==origin_main_sha, origin_main_sha==remote tip, freshness fresh, fleet auth OK).\n\n${formatCloseoutMarkdown(closeoutEvidence)}`;
-    writeArtifact('redeploy', ok);
-    await postNote(`✅ deploy-watchdog auto-redeployed the manager to ${promotedSha}. Reason: ${decision.reason}.`, 'normal');
-    process.exitCode = 0;
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    const closeoutEvidence = await getCloseoutEvidence();
-    const closeout = classifyCloseout(closeoutEvidence);
-    const escalation = closeout.escalation || `Manager state unknown after watchdog remediation. Run exactly: ${DEFAULT_REDEPLOY_COMMAND}`;
-    const loud = `# ⛔ Deploy watchdog — REDEPLOY FAILED ${new Date().toISOString()}\n\nThe automated redeploy FAILED and the manager may be down or stale.\n\n**Error:** ${msg}\n\n${formatCloseoutMarkdown(closeoutEvidence)}\n\n**Escalation command:**\n\n\`\`\`bash\n${DEFAULT_REDEPLOY_COMMAND}\n\`\`\`\n\nWatchdog log: ${LOG}. launchd state: \`launchctl print gui/$(id -u)/${SVC}\`.`;
-    writeArtifact('FAILURE', loud);
-    log(`REDEPLOY FAILED: ${msg}`);
-    await sendTelegramPage({
-      title: 'redeploy attempt FAILED',
-      reason: msg,
-      lines: [
-        `Watchdog reason: ${decision.reason}`,
-        `Escalation: ${escalation}`,
-        `Artifact: ${ARTIFACT_DIR}`,
-      ],
-    });
-    await postNote(`⛔ deploy-watchdog closeout failed: ${msg}. ${escalation}`, 'time_sensitive');
-    process.exitCode = 1;
+    // Real redeploy.
+    log(`ACT: ${decision.reason} — running gotchas redeploy sequence.`);
+    try {
+      const result = await runRedeploy();
+      if (result.rolledBack) {
+        const body = `# Deploy watchdog — ROLLED BACK ${new Date().toISOString()}\n\nWatchdog reason: ${decision.reason}.\n\nForward bootstrap failed after retries: ${result.rollbackReason}. Rollback bootstrap succeeded, so the previous manager build is running instead of leaving the manager down.\n\nPrevious build_sha: ${result.promotedSha}\n\nWatchdog log: ${LOG}.`;
+        writeArtifact('rollback', body);
+        await postNote(`deploy-watchdog forward redeploy failed but rollback bootstrap succeeded; previous manager build is running. Reason: ${result.rollbackReason}.`, 'normal');
+        process.exitCode = 0;
+        return;
+      }
+      const closeoutEvidence = await getCloseoutEvidence();
+      const closeout = classifyCloseout(closeoutEvidence);
+      if (!closeout.ok) throw new Error(closeout.summary);
+      const ok = `# Deploy watchdog — REDEPLOY OK ${new Date().toISOString()}\n\nWatchdog reason: ${decision.reason}. Redeployed to ${result.promotedSha} (build_sha==origin_main_sha, origin_main_sha==remote tip, freshness fresh, fleet auth OK).\n\n${formatCloseoutMarkdown(closeoutEvidence)}`;
+      writeArtifact('redeploy', ok);
+      await postNote(`✅ deploy-watchdog auto-redeployed the manager to ${result.promotedSha}. Reason: ${decision.reason}.`, 'normal');
+      process.exitCode = 0;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      const closeoutEvidence = await getCloseoutEvidence();
+      const closeout = classifyCloseout(closeoutEvidence);
+      const escalation = closeout.escalation || `Manager state unknown after watchdog remediation. Run exactly: ${DEFAULT_REDEPLOY_COMMAND}`;
+      const loud = `# ⛔ Deploy watchdog — REDEPLOY FAILED ${new Date().toISOString()}\n\nThe automated redeploy FAILED and the manager may be down or stale.\n\n**Error:** ${msg}\n\n${formatCloseoutMarkdown(closeoutEvidence)}\n\n**Escalation command:**\n\n\`\`\`bash\n${DEFAULT_REDEPLOY_COMMAND}\n\`\`\`\n\nWatchdog log: ${LOG}. launchd state: \`launchctl print gui/$(id -u)/${SVC}\`.`;
+      writeArtifact('FAILURE', loud);
+      log(`REDEPLOY FAILED: ${msg}`);
+      await sendTelegramPage({
+        title: 'redeploy attempt FAILED',
+        reason: msg,
+        lines: [
+          `Watchdog reason: ${decision.reason}`,
+          `Escalation: ${escalation}`,
+          `Artifact: ${ARTIFACT_DIR}`,
+        ],
+      });
+      await postNote(`⛔ deploy-watchdog closeout failed: ${msg}. ${escalation}`, 'time_sensitive');
+      process.exitCode = 1;
+    }
+  } finally {
+    releaseLock(lockFd);
   }
 }
 

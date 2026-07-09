@@ -161,6 +161,16 @@ describe("seed catalog", () => {
     expect(enabled("weekly-project-report")).toBe(false);
     expect(enabled("biweekly-project-report")).toBe(false);
   });
+
+  it("keeps worktree hygiene on the doctrine-approved 12-24h cadence", () => {
+    const loop = SEED_LOOPS.find((l) => l.slug === "worktree-hygiene");
+    expect(loop?.schedule_label).toContain("Every 18h");
+    expect(loop?.report_definitions[0]?.cadence).toEqual({
+      kind: "interval_hours",
+      every_hours: 18,
+      anchor_due_at: "2026-07-08T15:00:00.000Z",
+    });
+  });
 });
 
 describe("listLoops", () => {

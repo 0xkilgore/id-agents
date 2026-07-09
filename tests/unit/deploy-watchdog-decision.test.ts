@@ -5,7 +5,18 @@
 
 import { describe, it, expect } from 'vitest';
 // @ts-expect-error — plain ESM module (no d.ts); imported for its runtime behavior.
-import { decideWatchdogAction, STALE_STATE, CONSECUTIVE_THRESHOLD } from '../../scripts/lib/deploy-watchdog-decision.mjs';
+import {
+  decideWatchdogAction,
+  STALE_STATE,
+  CONSECUTIVE_THRESHOLD,
+  TARGET_STABLE_THRESHOLD,
+} from '../../scripts/lib/deploy-watchdog-decision.mjs';
+
+const SETTLED_TARGET = {
+  targetSha: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+  priorTargetSha: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+  priorTargetStableCount: TARGET_STABLE_THRESHOLD - 1,
+};
 
 describe('decideWatchdogAction', () => {
   it('fresh → noop, streak reset to 0', () => {
@@ -21,7 +32,13 @@ describe('decideWatchdogAction', () => {
   });
 
   it('two consecutive stale_alerted (prior 1) → act, streak 2', () => {
-    const d = decideWatchdogAction({ freshnessState: STALE_STATE, priorConsecutiveStale: 1, pauseFileExists: false, healthOk: true });
+    const d = decideWatchdogAction({
+      freshnessState: STALE_STATE,
+      priorConsecutiveStale: 1,
+      pauseFileExists: false,
+      healthOk: true,
+      ...SETTLED_TARGET,
+    });
     expect(d.action).toBe('act');
     expect(d.nextConsecutiveStale).toBe(CONSECUTIVE_THRESHOLD);
   });
@@ -79,16 +96,34 @@ describe('decideWatchdogAction', () => {
   });
 
   it('recovery: stale then fresh resets the streak so a later single stale only waits', () => {
-    const stale1 = decideWatchdogAction({ freshnessState: STALE_STATE, priorConsecutiveStale: 0, pauseFileExists: false, healthOk: true });
+    const stale1 = decideWatchdogAction({
+      freshnessState: STALE_STATE,
+      priorConsecutiveStale: 0,
+      pauseFileExists: false,
+      healthOk: true,
+      ...SETTLED_TARGET,
+    });
     expect(stale1.action).toBe('wait');
     const recovered = decideWatchdogAction({ freshnessState: 'fresh', priorConsecutiveStale: stale1.nextConsecutiveStale, pauseFileExists: false, healthOk: true });
     expect(recovered.nextConsecutiveStale).toBe(0);
-    const staleAgain = decideWatchdogAction({ freshnessState: STALE_STATE, priorConsecutiveStale: recovered.nextConsecutiveStale, pauseFileExists: false, healthOk: true });
+    const staleAgain = decideWatchdogAction({
+      freshnessState: STALE_STATE,
+      priorConsecutiveStale: recovered.nextConsecutiveStale,
+      pauseFileExists: false,
+      healthOk: true,
+      ...SETTLED_TARGET,
+    });
     expect(staleAgain.action).toBe('wait'); // NOT act — streak was reset by the fresh reading
   });
 
   it("plain 'stale' persists across checks and acts even before stale_alerted", () => {
-    const d = decideWatchdogAction({ freshnessState: 'stale', priorConsecutiveStale: 1, pauseFileExists: false, healthOk: true });
+    const d = decideWatchdogAction({
+      freshnessState: 'stale',
+      priorConsecutiveStale: 1,
+      pauseFileExists: false,
+      healthOk: true,
+      ...SETTLED_TARGET,
+    });
     expect(d.action).toBe('act');
     expect(d.nextConsecutiveStale).toBe(CONSECUTIVE_THRESHOLD);
     expect(d.reason).toMatch(/stale for 2 consecutive checks/);
@@ -98,5 +133,55 @@ describe('decideWatchdogAction', () => {
     const d = decideWatchdogAction({ freshnessState: 'stale', priorConsecutiveStale: 0, pauseFileExists: false, healthOk: true });
     expect(d.action).toBe('wait');
     expect(d.nextConsecutiveStale).toBe(1);
+  });
+
+  it('moving target SHA never redeploys even with persistent stale evidence', () => {
+    let priorConsecutiveStale = 0;
+    let priorTargetSha: string | null = null;
+    let priorTargetStableCount = 0;
+
+    for (let i = 0; i < 6; i += 1) {
+      const targetSha = `${i}`.repeat(40);
+      const d = decideWatchdogAction({
+        freshnessState: STALE_STATE,
+        priorConsecutiveStale,
+        pauseFileExists: false,
+        healthOk: true,
+        targetSha,
+        priorTargetSha,
+        priorTargetStableCount,
+      });
+      expect(d.action).toBe('wait');
+      expect(d.reason).toMatch(/not settled/);
+      priorConsecutiveStale = d.nextConsecutiveStale;
+      priorTargetSha = d.nextTargetSha;
+      priorTargetStableCount = d.nextTargetStableCount;
+    }
+  });
+
+  it('stable target SHA across two polls allows stale redeploy', () => {
+    const first = decideWatchdogAction({
+      freshnessState: STALE_STATE,
+      priorConsecutiveStale: 0,
+      pauseFileExists: false,
+      healthOk: true,
+      targetSha: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+      priorTargetSha: null,
+      priorTargetStableCount: 0,
+    });
+    expect(first.action).toBe('wait');
+    expect(first.nextTargetStableCount).toBe(1);
+
+    const second = decideWatchdogAction({
+      freshnessState: STALE_STATE,
+      priorConsecutiveStale: first.nextConsecutiveStale,
+      pauseFileExists: false,
+      healthOk: true,
+      targetSha: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+      priorTargetSha: first.nextTargetSha,
+      priorTargetStableCount: first.nextTargetStableCount,
+    });
+    expect(second.action).toBe('act');
+    expect(second.nextTargetStableCount).toBe(TARGET_STABLE_THRESHOLD);
   });
 });
