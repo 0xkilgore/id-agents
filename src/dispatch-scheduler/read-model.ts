@@ -571,6 +571,7 @@ export async function readDispatchHealth(
   adapter: DbAdapterLike,
   teamId: string,
   driftSummary?: FleetRuntimeDriftSummary | null,
+  teamName?: string | null,
 ): Promise<{
   status: 'ok';
   team_id: string;
@@ -608,7 +609,7 @@ export async function readDispatchHealth(
     [...ACTIVE_STATUSES, ...TERMINAL_STATUSES, teamId],
   );
 
-  const blockages = await readFleetBlockages(adapter, teamId, driftSummary);
+  const blockages = await readFleetBlockages(adapter, teamId, driftSummary, teamName);
 
   return {
     status: 'ok',

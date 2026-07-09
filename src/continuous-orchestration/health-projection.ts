@@ -25,6 +25,7 @@ export interface OrchestrationHealthProjection {
   ok: boolean;
   generated_at: string;
   queue_quality: OrchestrationQueueQualityProjection;
+  ready_item_blockers: OrchestrationReadyItemBlockerProjection;
   blockers: {
     blocked: boolean;
     needs_clarification: {
@@ -58,6 +59,13 @@ export interface OrchestrationQueueQualityProjection {
   task_action_receipts: TaskActionReceiptCounts;
   top_noise_patterns: OrchestrationQueueNoisePattern[];
   explanation: string;
+}
+
+export interface OrchestrationReadyItemBlockerProjection {
+  ready: number;
+  actionable: number;
+  stale_ready_floor: boolean;
+  categories: Array<{ code: string; category: string; count: number; examples: string[] }>;
 }
 
 export interface TaskActionReceiptCounts {
@@ -137,18 +145,60 @@ export async function readOrchestrationHealthProjection(
     }))
     .sort(compareBlockersRecent);
 
+  const queueQuality = await readQueueQualityProjection(adapter, teamId, dependencyImpact, {
+    needsClarification: needsClarification.length,
+    promotion: promotion.length,
+  });
+
   return {
     ok: true,
     generated_at: new Date().toISOString(),
-    queue_quality: await readQueueQualityProjection(adapter, teamId, dependencyImpact, {
-      needsClarification: needsClarification.length,
-      promotion: promotion.length,
-    }),
+    queue_quality: queueQuality,
+    ready_item_blockers: await readReadyItemBlockerProjection(adapter, teamId, dependencyImpact),
     blockers: {
       blocked: needsClarification.length > 0 || promotion.length > 0,
       needs_clarification: summarize(needsClarification, recentLimit),
       promotion: summarize(promotion, recentLimit),
     },
+  };
+}
+
+async function readReadyItemBlockerProjection(
+  adapter: DbAdapter,
+  teamId: string,
+  dependencyImpact: Map<string, string[]>,
+): Promise<OrchestrationReadyItemBlockerProjection> {
+  const rows = (await readBacklogQueueRows(adapter, teamId)).filter((row) => row.readiness_state === "ready");
+  const blockedDependencyItemIds = new Set<string>();
+  for (const ids of dependencyImpact.values()) for (const id of ids) blockedDependencyItemIds.add(id);
+
+  const categories = new Map<string, { code: string; category: string; count: number; examples: string[] }>();
+  let actionable = 0;
+  const add = (code: string, category: string, itemId: string) => {
+    const key = `${category}:${code}`;
+    const current = categories.get(key) ?? { code, category, count: 0, examples: [] };
+    current.count += 1;
+    if (current.examples.length < 5) current.examples.push(itemId);
+    categories.set(key, current);
+  };
+
+  for (const row of rows) {
+    if (!hasDispatchPayload(row)) {
+      add("missing_dispatch_target", "dispatch_admission", row.item_id);
+    } else if (!isAutoRunRisk(row.risk_class)) {
+      add("risk_requires_approval", "lane_eligibility", row.item_id);
+    } else if (parseStringArray(row.dependencies_json).length > 0 || blockedDependencyItemIds.has(row.item_id)) {
+      add("blocked_dependency", "lane_eligibility", row.item_id);
+    } else {
+      actionable += 1;
+    }
+  }
+
+  return {
+    ready: rows.length,
+    actionable,
+    stale_ready_floor: rows.length > 0 && actionable === 0,
+    categories: [...categories.values()].sort((a, b) => b.count - a.count || a.category.localeCompare(b.category) || a.code.localeCompare(b.code)),
   };
 }
 

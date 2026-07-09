@@ -458,6 +458,46 @@ describe("orchestration health projection", () => {
     });
     expect(health.queue_quality.blocked_or_failed).toBe(1);
   });
+
+  it("surfaces reason-coded ready item blockers and stale ready floor", async () => {
+    await insertBacklogItem(adapter, {
+      title: "dependency-blocked ready item",
+      readiness_state: "ready",
+      risk_class: "build",
+      to_agent: "roger",
+      dispatch_body: "continue",
+      dependencies: ["missing-dependency"],
+    });
+    await insertBacklogItem(adapter, {
+      title: "approval-blocked ready item",
+      readiness_state: "ready",
+      risk_class: "external",
+      to_agent: "roger",
+      dispatch_body: "continue",
+    });
+
+    const health = await readOrchestrationHealthProjection(adapter, "default");
+
+    expect(health.ready_item_blockers).toMatchObject({
+      ready: 2,
+      actionable: 0,
+      stale_ready_floor: true,
+    });
+    expect(health.ready_item_blockers.categories).toEqual([
+      {
+        code: "blocked_dependency",
+        category: "lane_eligibility",
+        count: 1,
+        examples: [expect.any(String)],
+      },
+      {
+        code: "risk_requires_approval",
+        category: "lane_eligibility",
+        count: 1,
+        examples: [expect.any(String)],
+      },
+    ]);
+  });
 });
 
 async function insertArtifact(artifactId: string, agent: string): Promise<void> {

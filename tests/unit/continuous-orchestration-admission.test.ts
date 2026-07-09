@@ -493,10 +493,14 @@ describe("evaluateStall", () => {
 describe("shouldRunZeroAdmitStallWatchdog", () => {
   const cfg = { ...defaultConfig(), stall_threshold_ticks: 3, min_ready_fuel: 8 };
 
-  it("trips only at the zero-admit threshold while ready fuel is below floor", () => {
+  it("trips only at the zero-admit threshold while admissible ready fuel is below floor", () => {
     expect(shouldRunZeroAdmitStallWatchdog(2, 3, cfg)).toBe(false);
     expect(shouldRunZeroAdmitStallWatchdog(3, 8, cfg)).toBe(false);
     expect(shouldRunZeroAdmitStallWatchdog(3, 7, cfg)).toBe(true);
     expect(shouldRunZeroAdmitStallWatchdog(24, 3, cfg)).toBe(true);
+  });
+
+  it("treats a full raw READY queue as below floor when zero items are admissible", () => {
+    expect(shouldRunZeroAdmitStallWatchdog(174, 0, cfg)).toBe(true);
   });
 });

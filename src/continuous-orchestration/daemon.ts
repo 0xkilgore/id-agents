@@ -151,9 +151,26 @@ export interface ReadyAdmissionExplanation {
     reason: string;
     metadata?: Record<string, unknown>;
   }>;
+  blocker_counts: Array<{ code: string; category: ReadyAdmissionBlockerCategory; count: number }>;
+  stale_ready_floor: {
+    stale: boolean;
+    ready: number;
+    admissible: number;
+    min_ready_fuel: number;
+    reason: string | null;
+  };
   halted: string | null;
   ready_runtime_repairs: ReadyRuntimeRepair[];
 }
+
+export type ReadyAdmissionBlockerCategory =
+  | "usage_gate"
+  | "capacity_gate"
+  | "lane_eligibility"
+  | "runtime_unavailable"
+  | "dispatch_admission"
+  | "route_sync"
+  | "stale_ready_floor";
 
 export interface AutoPromoteHealth {
   enabled: boolean;
@@ -238,6 +255,45 @@ export interface AutoPromoteRunSummary {
   /** Build-ready total/lanes before the pass. */
   before: { build_ready: number; build_lanes: number };
   dry_run: boolean;
+}
+
+function readyAdmissionBlockerCategory(code: string): ReadyAdmissionBlockerCategory {
+  switch (code) {
+    case "daily_token_ceiling":
+      return "usage_gate";
+    case "no_in_flight_slots":
+    case "tick_admission_cap":
+    case "pool_capacity_full":
+    case "no_free_pool_builder":
+      return "capacity_gate";
+    case "risk_requires_approval":
+    case "blocked_dependency":
+    case "single_writer_lane_busy":
+      return "lane_eligibility";
+    case "target_unhealthy":
+    case "provider_runtime_mismatch":
+      return "runtime_unavailable";
+    case "missing_dispatch_target":
+      return "dispatch_admission";
+    case "clarification_blocker":
+    case "promotion_blocker":
+      return "route_sync";
+    default:
+      return "stale_ready_floor";
+  }
+}
+
+function readyAdmissionBlockerCounts(plan: { skipped: DecisionRecord[] }): ReadyAdmissionExplanation["blocker_counts"] {
+  const counts = new Map<string, { code: string; category: ReadyAdmissionBlockerCategory; count: number }>();
+  for (const decision of plan.skipped) {
+    const code = typeof decision.metadata?.code === "string" ? decision.metadata.code : "unknown";
+    const category = readyAdmissionBlockerCategory(code);
+    const key = `${category}:${code}`;
+    const existing = counts.get(key);
+    if (existing) existing.count += 1;
+    else counts.set(key, { code, category, count: 1 });
+  }
+  return [...counts.values()].sort((a, b) => b.count - a.count || a.category.localeCompare(b.category) || a.code.localeCompare(b.code));
 }
 
 export class ContinuousOrchestrationDaemon {
@@ -527,10 +583,11 @@ export class ContinuousOrchestrationDaemon {
       );
     }
 
-    if (shouldRunZeroAdmitStallWatchdog(stall.zero_ticks, ready.length, config)) {
+    const admissibleReady = plan.admit.length;
+    if (shouldRunZeroAdmitStallWatchdog(stall.zero_ticks, admissibleReady, config)) {
       const message =
         `Continuous orchestration zero-admit stall: ${stall.zero_ticks} consecutive zero-admit ticks, ` +
-        `${ready.length} ready item(s), min_ready_fuel=${config.min_ready_fuel}`;
+        `${ready.length} ready item(s), ${admissibleReady} admissible, min_ready_fuel=${config.min_ready_fuel}`;
       decisions.push({
         item_id: null,
         action: "fleet_blockage",
@@ -539,6 +596,7 @@ export class ContinuousOrchestrationDaemon {
           event_type: "fleet.blockage",
           zero_ticks: stall.zero_ticks,
           ready: ready.length,
+          admissible_ready: admissibleReady,
           min_ready_fuel: config.min_ready_fuel,
         },
       });
@@ -546,6 +604,7 @@ export class ContinuousOrchestrationDaemon {
         tick_id,
         zero_ticks: stall.zero_ticks,
         ready: ready.length,
+        admissible_ready: admissibleReady,
         min_ready_fuel: config.min_ready_fuel,
         candidates: ordered.length,
       });
@@ -656,6 +715,9 @@ export class ContinuousOrchestrationDaemon {
 
     const plan = planAdmission(ordered, ctx, config);
     const byId = new Map(ordered.map((item) => [item.item_id, item]));
+    const blockerCounts = readyAdmissionBlockerCounts(plan);
+    const staleReadyFloor =
+      ordered.length >= config.min_ready_fuel && plan.admit.length < config.min_ready_fuel && plan.skipped.length > 0;
     return {
       candidates: ordered.length,
       admissible: plan.admit.map((item) => ({
@@ -677,6 +739,16 @@ export class ContinuousOrchestrationDaemon {
           metadata: decision.metadata,
         };
       }),
+      blocker_counts: blockerCounts,
+      stale_ready_floor: {
+        stale: staleReadyFloor,
+        ready: ordered.length,
+        admissible: plan.admit.length,
+        min_ready_fuel: config.min_ready_fuel,
+        reason: staleReadyFloor
+          ? `raw READY floor is satisfied (${ordered.length}) but only ${plan.admit.length} item(s) are admissible`
+          : null,
+      },
       halted: plan.halt?.reason ?? null,
       ready_runtime_repairs: readyRuntimeRepairs,
     };

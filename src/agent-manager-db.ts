@@ -4605,7 +4605,7 @@ export class AgentManagerDb {
     this.managementApp.get('/dispatches/health', async (req, res) => {
       try {
         const { id: teamId, name: teamName } = await this.getTeam(req);
-        const health = await readDispatchHealth(this.db.adapter, teamId, this.runtimeDriftSummary);
+        const health = await readDispatchHealth(this.db.adapter, teamId, this.runtimeDriftSummary, teamName);
         return res.json({ ok: true, team: teamName, ...health });
       } catch (err) {
         return res.status(500).json({

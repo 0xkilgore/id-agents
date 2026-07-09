@@ -39,6 +39,7 @@ export async function readFleetBlockages(
    * reaching for global state.
    */
   driftSummary?: FleetRuntimeDriftSummary | null,
+  teamName?: string | null,
 ): Promise<FleetBlockagesReport> {
   const nowMs = Date.now();
   const blockages: FleetBlockage[] = [];
@@ -88,15 +89,16 @@ export async function readFleetBlockages(
     });
   }
 
+  const orchestrationTeamKeys = [...new Set([teamId, teamName].filter((v): v is string => !!v))];
   const { rows: orchRows } = await adapter.query<{
     mode: string;
     consecutive_zero_ticks: number;
   }>(
     `SELECT mode, consecutive_zero_ticks
        FROM orchestration_state
-       WHERE team_id = ?
+       WHERE team_id IN (${orchestrationTeamKeys.map(() => "?").join(", ")})
        LIMIT 1`,
-    [teamId],
+    orchestrationTeamKeys,
   );
   const orch = orchRows[0];
   if (orch?.mode === "paused") {
