@@ -23,6 +23,7 @@ import { assembleAgentDetail } from "../../src/agent-detail/assemble.js";
 import type { CommentDispatchEnqueueFn } from "../../src/outputs/comment-dispatch.js";
 
 const TEAM = "default";
+const C0_ON = { C0_FEEDBACK_REACTIONS: "1" } as NodeJS.ProcessEnv;
 let adapter: SqliteAdapter;
 let handle: SchedulerHandle;
 let app: Express;
@@ -37,7 +38,7 @@ beforeEach(async () => {
   handle = new SchedulerHandle({ adapter, teamId: TEAM, resolveTargetUrl: () => null });
   app = express();
   app.use(express.json());
-  mountOutputsRoutes(app, adapter, { enqueueDispatch: handle.enqueue.bind(handle) });
+  mountOutputsRoutes(app, adapter, { enqueueDispatch: handle.enqueue.bind(handle), env: C0_ON });
   mountAgentDetailRoute(app);
 });
 
@@ -190,7 +191,7 @@ describe("comment auto-dispatch — acceptance (T-LOOP-CLOSE.1)", () => {
     };
     app = express();
     app.use(express.json());
-    mountOutputsRoutes(app, adapter, { enqueueDispatch: failingEnqueue });
+    mountOutputsRoutes(app, adapter, { enqueueDispatch: failingEnqueue, env: C0_ON });
     mountAgentDetailRoute(app);
 
     const ART = "art-fin-project-failed";
