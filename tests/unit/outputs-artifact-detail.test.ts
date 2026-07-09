@@ -213,6 +213,46 @@ describe("GET /artifacts/:id/detail", () => {
     expect(after.body.comments[0].body).toBe("invalidate this artifact");
   });
 
+  it("serves body cached during direct artifact registration after the source file is removed", async () => {
+    const filePath = path.join(tmp, "registered-direct.md");
+    writeFileSync(filePath, "# Direct Registration\n\nReadable from registration cache.\n");
+    const artifactId = artifactIdFromPath(filePath);
+
+    await registerArtifact(
+      adapter,
+      {
+        artifact_id: artifactId,
+        basename: "registered-direct.md",
+        agent: "backend-pool",
+        tag: "checkpoint",
+        abs_path: filePath,
+        title: "Direct Registration",
+        produced_at: "2026-07-09T12:00:00.000Z",
+        source: "manual",
+      },
+      "2026-07-09T12:01:00.000Z",
+    );
+    unlinkSync(filePath);
+
+    const detail = await call("GET", `/artifacts/${artifactId}/detail`);
+    expect(detail.status).toBe(200);
+    expect(detail.body.body).toMatchObject({
+      kind: "markdown",
+      source: "artifact_body_cache",
+      body_unavailable: false,
+      cache: {
+        freshness: "current",
+      },
+    });
+    expect(detail.body.body.text).toContain("Readable from registration cache.");
+    expect(detail.body.metadata.content_hash).toMatch(/^[a-f0-9]{64}$/);
+    expect(detail.body.body.cache.content_hash).toBe(detail.body.metadata.content_hash);
+
+    const copy = await callRaw(`/artifacts/${artifactId}/copy-text`);
+    expect(copy.status).toBe(200);
+    expect(copy.text).toContain("Readable from registration cache.");
+  });
+
   it("preserves encoded-path fallback for uncataloged artifacts", async () => {
     const filePath = path.join(tmp, "encoded.md");
     writeFileSync(filePath, "# Encoded\n\nPath fallback.\n");

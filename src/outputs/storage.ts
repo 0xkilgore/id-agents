@@ -39,6 +39,18 @@ export function artifactIdFromPath(absPath: string): string {
 
 const MAX_CACHED_BODY_BYTES = 1_048_576;
 
+interface ArtifactBodySnapshot {
+  mediaType: ArtifactMediaType;
+  contentHash: string | null;
+  versionKey: string | null;
+  sourceMtime: string | null;
+  sourceSize: number | null;
+  availability: ArtifactAvailability;
+  bodyText: string | null;
+  bodyTruncated: number;
+  bodyError: string | null;
+}
+
 // ── DDL (idempotent) ───────────────────────────────────────────────
 
 export async function migrateOutputsTables(adapter: DbAdapter): Promise<void> {
@@ -360,8 +372,14 @@ export async function registerArtifact(
 ): Promise<{ row: ArtifactCatalogRow; inserted: boolean }> {
   const artifactId = req.artifact_id ?? artifactIdFromPath(req.abs_path);
   const existing = await getArtifact(adapter, artifactId);
-  const availability: ArtifactAvailability = req.availability ?? "present";
   const source = req.source ?? "agent-done";
+  const shouldSnapshotBody = source !== "delivery-log" && source !== "filesystem";
+  const bodySnapshot = shouldSnapshotBody
+    ? await readArtifactBodySnapshot(req.abs_path, req.media_type ?? existing?.media_type ?? undefined)
+    : emptyArtifactBodySnapshot(req.media_type ?? existing?.media_type ?? mediaTypeFromPath(req.abs_path));
+  // Preserve the historical default: callers can register expected/future paths
+  // and still get availability=present unless they explicitly mark otherwise.
+  const availability: ArtifactAvailability = req.availability ?? "present";
 
   const sourceBadges = JSON.stringify(req.source_badges ?? [source]);
   const reconciledAt = req.reconciled_at ?? null;
@@ -377,10 +395,10 @@ export async function registerArtifact(
       produced_at: req.produced_at,
       source,
       availability,
-      media_type: req.media_type ?? null,
-      content_hash: req.content_hash ?? null,
-      source_mtime: req.source_mtime ?? null,
-      source_size: req.source_size ?? null,
+      media_type: req.media_type ?? bodySnapshot.mediaType,
+      content_hash: req.content_hash ?? bodySnapshot.contentHash,
+      source_mtime: req.source_mtime ?? bodySnapshot.sourceMtime,
+      source_size: req.source_size ?? bodySnapshot.sourceSize,
       project_ref: req.project_ref ?? null,
       dispatch_ref: req.dispatch_ref ?? null,
       source_host: req.source_host ?? null,
@@ -403,6 +421,9 @@ export async function registerArtifact(
         row.source_badges, row.reconciled_at, row.created_at, row.updated_at,
       ],
     );
+    if (shouldPersistSnapshot(bodySnapshot)) {
+      await upsertArtifactBodyCache(adapter, snapshotCacheInput(artifactId, bodySnapshot), nowIso);
+    }
     return { row, inserted: true };
   }
 
@@ -432,10 +453,10 @@ export async function registerArtifact(
     produced_at: existing.produced_at, // first-writer wins
     source: nextSource,
     availability: req.availability ?? existing.availability,
-    media_type: req.media_type !== undefined ? (req.media_type ?? null) : existing.media_type,
-    content_hash: req.content_hash !== undefined ? (req.content_hash ?? null) : existing.content_hash,
-    source_mtime: req.source_mtime !== undefined ? (req.source_mtime ?? null) : existing.source_mtime,
-    source_size: req.source_size !== undefined ? (req.source_size ?? null) : existing.source_size,
+    media_type: req.media_type !== undefined ? (req.media_type ?? null) : bodySnapshot.mediaType ?? existing.media_type,
+    content_hash: req.content_hash !== undefined ? (req.content_hash ?? null) : bodySnapshot.contentHash ?? existing.content_hash,
+    source_mtime: req.source_mtime !== undefined ? (req.source_mtime ?? null) : bodySnapshot.sourceMtime ?? existing.source_mtime,
+    source_size: req.source_size !== undefined ? (req.source_size ?? null) : bodySnapshot.sourceSize ?? existing.source_size,
     project_ref: req.project_ref !== undefined ? (req.project_ref ?? null) : existing.project_ref,
     dispatch_ref: req.dispatch_ref !== undefined ? (req.dispatch_ref ?? null) : existing.dispatch_ref,
     source_host: req.source_host !== undefined ? (req.source_host ?? null) : existing.source_host,
@@ -458,6 +479,9 @@ export async function registerArtifact(
       merged.updated_at, merged.artifact_id,
     ],
   );
+  if (shouldPersistSnapshot(bodySnapshot)) {
+    await upsertArtifactBodyCache(adapter, snapshotCacheInput(artifactId, bodySnapshot), nowIso);
+  }
   return { row: merged, inserted: false };
 }
 
@@ -537,6 +561,91 @@ async function upsertArtifactBodyCache(
   );
 }
 
+async function readArtifactBodySnapshot(
+  absPath: string,
+  mediaType = mediaTypeFromPath(absPath),
+): Promise<ArtifactBodySnapshot> {
+  let contentHash: string | null = null;
+  let versionKey: string | null = null;
+  let sourceMtime: string | null = null;
+  let sourceSize: number | null = null;
+  let availability: ArtifactAvailability = "present";
+  let bodyText: string | null = null;
+  let bodyTruncated = 0;
+  let bodyError: string | null = null;
+
+  try {
+    const stat = await fsp.stat(absPath);
+    if (!stat.isFile()) {
+      availability = "unknown";
+      sourceSize = stat.size;
+      sourceMtime = stat.mtime.toISOString();
+      bodyError = "not_file";
+    } else {
+      sourceSize = stat.size;
+      sourceMtime = stat.mtime.toISOString();
+      const size = Math.min(stat.size, MAX_CACHED_BODY_BYTES);
+      const fullBuffer = await fsp.readFile(absPath);
+      contentHash = createHash("sha256").update(fullBuffer).digest("hex");
+      versionKey = artifactBodyVersionKey(contentHash, sourceMtime, sourceSize);
+      if (isRenderableMediaType(mediaType)) {
+        bodyText = fullBuffer.subarray(0, size).toString("utf8");
+        bodyTruncated = stat.size > MAX_CACHED_BODY_BYTES ? 1 : 0;
+      }
+    }
+  } catch (err) {
+    availability = "missing";
+    bodyError = typeof err === "object" && err && "code" in err ? String((err as { code?: unknown }).code) : "read_failed";
+  }
+
+  return {
+    mediaType,
+    contentHash,
+    versionKey,
+    sourceMtime,
+    sourceSize,
+    availability,
+    bodyText,
+    bodyTruncated,
+    bodyError,
+  };
+}
+
+function emptyArtifactBodySnapshot(mediaType: ArtifactMediaType): ArtifactBodySnapshot {
+  return {
+    mediaType,
+    contentHash: null,
+    versionKey: null,
+    sourceMtime: null,
+    sourceSize: null,
+    availability: "unknown",
+    bodyText: null,
+    bodyTruncated: 0,
+    bodyError: null,
+  };
+}
+
+function shouldPersistSnapshot(snapshot: ArtifactBodySnapshot): boolean {
+  return snapshot.bodyText != null || snapshot.contentHash != null;
+}
+
+function snapshotCacheInput(
+  artifactId: string,
+  snapshot: ArtifactBodySnapshot,
+): Omit<ArtifactBodyCacheRow, "cached_at" | "updated_at"> {
+  return {
+    artifact_id: artifactId,
+    media_type: snapshot.mediaType,
+    content_hash: snapshot.contentHash,
+    version_key: snapshot.versionKey,
+    source_mtime: snapshot.sourceMtime,
+    source_size: snapshot.sourceSize,
+    body_text: snapshot.bodyText,
+    body_truncated: snapshot.bodyTruncated,
+    body_error: snapshot.bodyError,
+  };
+}
+
 export async function registerArtifactPathDelivery(
   adapter: DbAdapter,
   input: {
@@ -564,40 +673,7 @@ export async function registerArtifactPathDelivery(
 }> {
   const artifactId = artifactIdFromPath(input.abs_path);
   const source = input.source ?? "agent-done";
-  const mediaType = mediaTypeFromPath(input.abs_path);
-  let contentHash: string | null = null;
-  let versionKey: string | null = null;
-  let sourceMtime: string | null = null;
-  let sourceSize: number | null = null;
-  let availability: ArtifactAvailability = "present";
-  let bodyText: string | null = null;
-  let bodyTruncated = 0;
-  let bodyError: string | null = null;
-
-  try {
-    const stat = await fsp.stat(input.abs_path);
-    if (!stat.isFile()) {
-      availability = "unknown";
-      sourceSize = stat.size;
-      sourceMtime = stat.mtime.toISOString();
-      bodyError = "not_file";
-    } else {
-      sourceSize = stat.size;
-      sourceMtime = stat.mtime.toISOString();
-      const size = Math.min(stat.size, MAX_CACHED_BODY_BYTES);
-      const buffer = await fsp.readFile(input.abs_path);
-      const fullBuffer = buffer;
-      contentHash = createHash("sha256").update(fullBuffer).digest("hex");
-      versionKey = artifactBodyVersionKey(contentHash, sourceMtime, sourceSize);
-      if (isRenderableMediaType(mediaType)) {
-        bodyText = fullBuffer.subarray(0, size).toString("utf8");
-        bodyTruncated = stat.size > MAX_CACHED_BODY_BYTES ? 1 : 0;
-      }
-    }
-  } catch (err) {
-    availability = "missing";
-    bodyError = typeof err === "object" && err && "code" in err ? String((err as { code?: unknown }).code) : "read_failed";
-  }
+  const snapshot = await readArtifactBodySnapshot(input.abs_path);
 
   const result = await registerArtifact(
     adapter,
@@ -610,11 +686,11 @@ export async function registerArtifactPathDelivery(
       title: input.title ?? undefined,
       produced_at: input.produced_at,
       source,
-      availability,
-      media_type: mediaType,
-      content_hash: contentHash,
-      source_mtime: sourceMtime,
-      source_size: sourceSize,
+      availability: snapshot.availability,
+      media_type: snapshot.mediaType,
+      content_hash: snapshot.contentHash,
+      source_mtime: snapshot.sourceMtime,
+      source_size: snapshot.sourceSize,
       project_ref: input.project_ref ?? inferProjectRefFromPath(input.abs_path),
       dispatch_ref: input.dispatch_ref ?? null,
       source_host: input.source_host ?? hostname(),
@@ -626,17 +702,7 @@ export async function registerArtifactPathDelivery(
 
   await upsertArtifactBodyCache(
     adapter,
-    {
-      artifact_id: artifactId,
-      media_type: mediaType,
-      content_hash: contentHash,
-      version_key: versionKey,
-      source_mtime: sourceMtime,
-      source_size: sourceSize,
-      body_text: bodyText,
-      body_truncated: bodyTruncated,
-      body_error: bodyError,
-    },
+    snapshotCacheInput(artifactId, snapshot),
     nowIso,
   );
 
@@ -649,10 +715,10 @@ export async function registerArtifactPathDelivery(
       observed_at: nowIso,
       metadata_json: JSON.stringify({
         abs_path: input.abs_path,
-        media_type: mediaType,
-        content_hash: contentHash,
-        source_mtime: sourceMtime,
-        source_size: sourceSize,
+        media_type: snapshot.mediaType,
+        content_hash: snapshot.contentHash,
+        source_mtime: snapshot.sourceMtime,
+        source_size: snapshot.sourceSize,
         project_ref: input.project_ref ?? inferProjectRefFromPath(input.abs_path),
         source_host: input.source_host ?? hostname(),
         ...(input.evidence_metadata ?? {}),
@@ -661,7 +727,7 @@ export async function registerArtifactPathDelivery(
     nowIso,
   );
 
-  return { ...result, body_cached: bodyText != null, body_error: bodyError, evidence_inserted: evidence.inserted };
+  return { ...result, body_cached: snapshot.bodyText != null, body_error: snapshot.bodyError, evidence_inserted: evidence.inserted };
 }
 
 export function artifactBodyVersionKey(
