@@ -3,8 +3,9 @@
 //
 // T-DEPLOY.5 — deploy-freshness watchdog. A launchd job OUTSIDE the fleet (fleet
 // agents structurally cannot restart their own manager — Gotcha 0). Every 15 min:
-//   1. GET /health. If freshness != stale_alerted → exit 0 quietly.
-//   2. If stale_alerted persists (2 consecutive checks, >15 min) → redeploy the
+//   1. GET /health and inspect launchd/deploy-checkout hygiene.
+//   2. If stale evidence persists (2 consecutive checks, >15 min), or the
+//      deploy checkout / manager plist is structurally wrong, redeploy the
 //      manager per agent-platform/manager-redeploy-gotchas-20260702.md.
 // Decision logic lives in ./lib/deploy-watchdog-decision.mjs (pure + unit-tested).
 // Kill switch: touch /tmp/deploy-watchdog.pause. Dry-run: --dry-run or
@@ -334,7 +335,7 @@ async function main() {
     if (!closeout.ok) throw new Error(closeout.summary);
     const ok = `# Deploy watchdog — REDEPLOY OK ${new Date().toISOString()}\n\nWatchdog reason: ${decision.reason}. Redeployed to ${promotedSha} (build_sha==origin_main_sha, origin_main_sha==remote tip, freshness fresh, fleet auth OK).\n\n${formatCloseoutMarkdown(closeoutEvidence)}`;
     writeArtifact('redeploy', ok);
-    await postNote(`✅ deploy-watchdog auto-redeployed the manager to ${promotedSha} (was stale_alerted 30+ min).`, 'normal');
+    await postNote(`✅ deploy-watchdog auto-redeployed the manager to ${promotedSha}. Reason: ${decision.reason}.`, 'normal');
     process.exitCode = 0;
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
