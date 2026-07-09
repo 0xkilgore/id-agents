@@ -85,6 +85,9 @@ async function seedDone(adapter: SqliteAdapter, input: Partial<{
 describe("surfaced artifacts title guard", () => {
   it("rejects raw PHIDs, paths, artifact tokens, and base64-like labels", () => {
     expect(isRawPrimaryTitle("phid:disp-abc123")).toBe(true);
+    expect(isRawPrimaryTitle("query_1783603546849_56slpvk")).toBe(true);
+    expect(isRawPrimaryTitle("dispatch-phid-disp-0e69020874071c73")).toBe(true);
+    expect(isRawPrimaryTitle("task:implement-read-next-surfaced-contract")).toBe(true);
     expect(isRawPrimaryTitle("/Users/kilgore/Dropbox/Code/x/output/a.md")).toBe(true);
     expect(isRawPrimaryTitle("art-257a7e369057ef2d")).toBe(true);
     expect(isRawPrimaryTitle("artifact:v4:abc123")).toBe(true);
@@ -99,6 +102,7 @@ describe("surfaced artifacts title guard", () => {
     expect(humanTitleFromParts({ dispatchTitle: "Dispatch title" })).toBe("Dispatch title");
     expect(humanTitleFromParts({ basename: "2026-07-07-zach-meeting-prep.md" })).toBe("Zach meeting prep");
     expect(humanTitleFromParts({ dispatchTitle: "art-257a7e369057ef2d", basename: "2026-07-07-human-fallback.md" })).toBe("Human fallback");
+    expect(humanTitleFromParts({ dispatchTitle: "query_1783603546849_56slpvk", basename: "2026-07-07-readable-closeout.md" })).toBe("Readable closeout");
     expect(humanTitleFromParts({ dispatchTitle: "phid:disp-raw", basename: "/Users/raw.md", agent: "maestra", date: NOW }))
       .toBe("Untitled artifact from maestra on 2026-07-07");
   });
@@ -527,7 +531,92 @@ This program should be queued as the Local-First Project/Artifact Surfacing prog
       track_ref: "T-LOCALREAD",
       dispatch_ref: "phid:disp-local-first",
       source_kind: "dispatch_done",
+      visibility_proof: { discovered_by: "agent_done", artifact_path_present: true, body_renderable: true },
+      delivery: expect.objectContaining({
+        body_available: true,
+        body_source: "filesystem",
+        freshness: "current",
+      }),
     });
+    expect(isRawPrimaryTitle(row!.title)).toBe(false);
+  });
+
+  it("keeps a Cleveland Park same-morning artifact visible as a domain action after grouping", async () => {
+    for (let i = 0; i < 10; i++) {
+      await registerArtifact(adapter, {
+        artifact_id: `art-localread-spam-${i}`,
+        basename: `2026-07-07-localread-${i % 2 === 0 ? "verification" : "promotion"}-${i}.md`,
+        agent: "substrate-api-codex",
+        tag: "T-LOCALREAD",
+        abs_path: `/tmp/localread/${i % 2 === 0 ? "verification" : "promotion"}-${i}.md`,
+        title: `Localread ${i % 2 === 0 ? "verification" : "promotion"} ${i}`,
+        produced_at: `2026-07-07T08:${String(i).padStart(2, "0")}:00.000Z`,
+        source: "manual",
+      }, NOW);
+    }
+    const sameMorningPath = "/Users/kilgore/Dropbox/Code/cleveland-park/output/2026-07-07-same-morning-fall-fest-rundown.md";
+    files.set(sameMorningPath, `---
+project: cleveland-park
+---
+
+# Same Morning Fall Fest Rundown
+
+Vendor staging and volunteer assignments for this morning.
+`);
+    await registerArtifact(adapter, {
+      artifact_id: "art-cleveland-park-same-morning",
+      basename: "2026-07-07-same-morning-fall-fest-rundown.md",
+      agent: "cleveland-park",
+      tag: "newsletter",
+      abs_path: sameMorningPath,
+      title: "artifact:v4:raw-cleveland-token",
+      produced_at: "2026-07-07T08:35:00.000Z",
+      source: "delivery-log",
+    }, NOW);
+
+    const model = await buildSurfacedArtifactsReadModel(adapter, { limit: 7, readFile });
+    const cleveland = model.rows.find((r) => r.artifact_ref === sameMorningPath);
+    expect(cleveland).toMatchObject({
+      title: "Same Morning Fall Fest Rundown",
+      project_ref: "cleveland-park",
+      relevance_reason: "domain_action",
+      needs: "read",
+      source_kind: "artifact",
+      source_type: "artifact",
+      visibility_proof: { discovered_by: "delivery_log", artifact_path_present: true, body_renderable: true },
+      delivery: expect.objectContaining({
+        body_available: true,
+        body_source: "filesystem",
+        freshness: "current",
+      }),
+    });
+    expect(model.recent_flood.groups.some((g) => g.work_item_ref.includes("localread") && g.raw_count > 1)).toBe(true);
+    expect(model.rows.length).toBeLessThanOrEqual(7);
+    expect(isRawPrimaryTitle(cleveland!.title)).toBe(false);
+  });
+
+  it("rejects raw ids as surfaced row titles and falls back to human derivation", async () => {
+    const rawPath = "/tmp/2026-07-07-human-readable-closeout.md";
+    files.set(rawPath, "No heading in this artifact body.");
+    await seedDone(adapter, {
+      dispatch_phid: "phid:disp-raw-title",
+      query_id: "query_1783603546849_56slpvk",
+      subject: "query_1783603546849_56slpvk",
+      body_markdown: "Done.",
+      completed_at: "2026-07-07T12:45:00.000Z",
+      updated_at: "2026-07-07T12:45:00.000Z",
+      artifact_path: rawPath,
+    });
+
+    const row = (await buildSurfacedArtifacts(adapter, { limit: 7, readFile }))
+      .find((r) => r.dispatch_ref === "phid:disp-raw-title");
+    expect(row).toMatchObject({
+      title: "Human readable closeout",
+      source_path: rawPath,
+      visibility_proof: { discovered_by: "agent_done", artifact_path_present: true, body_renderable: true },
+    });
+    expect(row!.title).not.toBe("query_1783603546849_56slpvk");
+    expect(isRawPrimaryTitle(row!.title)).toBe(false);
   });
 
   it("registers canonical saved-view ids for surfaced row fields", () => {

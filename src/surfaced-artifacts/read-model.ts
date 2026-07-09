@@ -335,6 +335,7 @@ export function isRawPrimaryTitle(value: string | null | undefined): boolean {
   const s = (value ?? "").trim();
   if (!s) return true;
   if (/^phid:/i.test(s)) return true;
+  if (/^(query|dispatch|task|artifact)[-_:][a-z0-9][a-z0-9_.:-]{5,}$/i.test(s)) return true;
   if (/^art[-_:][a-z0-9_-]{6,}$/i.test(s)) return true;
   if (/^artifact:v\d+:/i.test(s)) return true;
   if (/^\/(?:Users|var|tmp|home)\//i.test(s)) return true;
