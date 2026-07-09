@@ -453,20 +453,28 @@ describe("POST /agent-done — fresh artifact registration", () => {
       content_hash: expectedHash,
       project_ref: "finance-project",
       dispatch_ref: enq.dispatch_phid,
-      availability: "present",
+      availability: "missing",
     });
     expect(body.metadata.source_mtime).toEqual(expect.any(String));
     expect(body.metadata.source_size).toBe(Buffer.byteLength(content));
     expect(body.delivery).toMatchObject({
       sourcePath: artifactPath,
+      sourceStatus: "missing",
       bodyRenderable: true,
       bodyUnavailable: false,
       discoveredBy: "agent_done",
+      freshness: "current",
     });
     expect(body.body).toMatchObject({
       source: "artifact_body_cache",
       text: content,
       body_unavailable: false,
+      error: "ENOENT",
+      cache: {
+        content_hash: expectedHash,
+        version_key: `sha256:${expectedHash}`,
+        freshness: "current",
+      },
     });
     expect(body.body.text).toContain(expectedText);
     expect(body.render).toMatchObject({ renderer, mime_type: renderMimeType });

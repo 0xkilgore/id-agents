@@ -174,6 +174,7 @@ export async function migrateOutputsTables(adapter: DbAdapter): Promise<void> {
       artifact_id      TEXT PRIMARY KEY,
       media_type       TEXT NOT NULL,
       content_hash     TEXT,
+      version_key      TEXT,
       source_mtime     TEXT,
       source_size      INTEGER,
       body_text        TEXT,
@@ -183,6 +184,12 @@ export async function migrateOutputsTables(adapter: DbAdapter): Promise<void> {
       updated_at       TEXT NOT NULL
     )
   `);
+
+  try {
+    await exec(`ALTER TABLE artifact_bodies ADD COLUMN version_key TEXT`);
+  } catch {
+    /* column already exists */
+  }
 
   // CANE_DRAFT_ARTIFACTS — typed draft payload side-table, keyed by artifact_id
   // (one draft per artifact). draft_id is UNIQUE so a re-poll/re-register of the
@@ -458,6 +465,7 @@ export interface ArtifactBodyCacheRow {
   artifact_id: string;
   media_type: ArtifactMediaType;
   content_hash: string | null;
+  version_key: string | null;
   source_mtime: string | null;
   source_size: number | null;
   body_text: string | null;
@@ -472,7 +480,7 @@ export async function getArtifactBodyCache(
   artifactId: string,
 ): Promise<ArtifactBodyCacheRow | null> {
   const { rows } = await adapter.query<ArtifactBodyCacheRow>(
-    `SELECT artifact_id, media_type, content_hash, source_mtime, source_size,
+    `SELECT artifact_id, media_type, content_hash, version_key, source_mtime, source_size,
             body_text, body_truncated, body_error, cached_at, updated_at
        FROM artifact_bodies
       WHERE artifact_id = ?`,
@@ -490,13 +498,14 @@ async function upsertArtifactBodyCache(
   if (!existing) {
     await adapter.query(
       `INSERT INTO artifact_bodies
-         (artifact_id, media_type, content_hash, source_mtime, source_size,
+         (artifact_id, media_type, content_hash, version_key, source_mtime, source_size,
           body_text, body_truncated, body_error, cached_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         input.artifact_id,
         input.media_type,
         input.content_hash,
+        input.version_key,
         input.source_mtime,
         input.source_size,
         input.body_text,
@@ -510,12 +519,13 @@ async function upsertArtifactBodyCache(
   }
   await adapter.query(
     `UPDATE artifact_bodies
-        SET media_type = ?, content_hash = ?, source_mtime = ?, source_size = ?,
+        SET media_type = ?, content_hash = ?, version_key = ?, source_mtime = ?, source_size = ?,
             body_text = ?, body_truncated = ?, body_error = ?, updated_at = ?
       WHERE artifact_id = ?`,
     [
       input.media_type,
       input.content_hash,
+      input.version_key,
       input.source_mtime,
       input.source_size,
       input.body_text,
@@ -556,6 +566,7 @@ export async function registerArtifactPathDelivery(
   const source = input.source ?? "agent-done";
   const mediaType = mediaTypeFromPath(input.abs_path);
   let contentHash: string | null = null;
+  let versionKey: string | null = null;
   let sourceMtime: string | null = null;
   let sourceSize: number | null = null;
   let availability: ArtifactAvailability = "present";
@@ -577,6 +588,7 @@ export async function registerArtifactPathDelivery(
       const buffer = await fsp.readFile(input.abs_path);
       const fullBuffer = buffer;
       contentHash = createHash("sha256").update(fullBuffer).digest("hex");
+      versionKey = artifactBodyVersionKey(contentHash, sourceMtime, sourceSize);
       if (isRenderableMediaType(mediaType)) {
         bodyText = fullBuffer.subarray(0, size).toString("utf8");
         bodyTruncated = stat.size > MAX_CACHED_BODY_BYTES ? 1 : 0;
@@ -618,6 +630,7 @@ export async function registerArtifactPathDelivery(
       artifact_id: artifactId,
       media_type: mediaType,
       content_hash: contentHash,
+      version_key: versionKey,
       source_mtime: sourceMtime,
       source_size: sourceSize,
       body_text: bodyText,
@@ -649,6 +662,16 @@ export async function registerArtifactPathDelivery(
   );
 
   return { ...result, body_cached: bodyText != null, body_error: bodyError, evidence_inserted: evidence.inserted };
+}
+
+export function artifactBodyVersionKey(
+  contentHash: string | null,
+  sourceMtime: string | null,
+  sourceSize: number | null,
+): string | null {
+  if (contentHash) return `sha256:${contentHash}`;
+  if (sourceMtime && sourceSize != null) return `mtime:${sourceMtime}:size:${sourceSize}`;
+  return null;
 }
 
 export function mediaTypeFromPath(absPath: string): ArtifactMediaType {

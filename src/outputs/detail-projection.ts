@@ -77,7 +77,7 @@ export async function buildArtifactDetail(
   const status = review ? deriveStatus(review) : "never_viewed";
   const latestTimeline = timeline[timeline.length - 1] ?? null;
   const latestComment = comments[comments.length - 1] ?? null;
-  const availability = syntheticCatalog?.availability ?? availabilityFromBody(body, catalog);
+  const availability = availabilityFromBody(body, syntheticCatalog);
   const stableUrl = `/artifacts/${encodeURIComponent(ref.artifactId)}/detail`;
   const copyTextUrl = `/artifacts/${encodeURIComponent(ref.artifactId)}/copy-text`;
   const downloadUrl = `/artifacts/${encodeURIComponent(ref.artifactId)}/download`;
@@ -132,6 +132,7 @@ export async function buildArtifactDetail(
       copyTextUrl,
       downloadUrl,
       sourcePath: syntheticCatalog?.abs_path ?? null,
+      sourceStatus: availability,
       bodyRenderable,
       bodyPreview: body.text ? body.text.slice(0, 1200) : null,
       bodyUnavailable: !bodyRenderable,
@@ -235,21 +236,22 @@ async function readDetailBody(
       source: "cane_draft",
       error: null,
       body_unavailable: false,
+      cache: null,
     };
   }
   if (!catalog?.abs_path) {
-    return { kind: "unavailable", text: null, bytes: null, truncated: false, source: "none", error: null, body_unavailable: true };
+    return { kind: "unavailable", text: null, bytes: null, truncated: false, source: "none", error: null, body_unavailable: true, cache: null };
   }
   let fileReadError: string | null = null;
   try {
     const stat = await fsp.stat(catalog.abs_path);
     if (!stat.isFile()) {
-      return { kind: "unavailable", text: null, bytes: stat.size, truncated: false, source: "file", error: "not_file", body_unavailable: true };
+      return { kind: "unavailable", text: null, bytes: stat.size, truncated: false, source: "file", error: "not_file", body_unavailable: true, cache: null };
     }
     const ext = extname(catalog.abs_path).toLowerCase();
     const kind = bodyKindFromExtension(ext);
     if (kind === "image" || kind === "binary") {
-      return { kind, text: null, bytes: stat.size, truncated: false, source: "file", error: null, body_unavailable: true };
+      return { kind, text: null, bytes: stat.size, truncated: false, source: "file", error: null, body_unavailable: true, cache: null };
     }
     const handle = await fsp.open(catalog.abs_path, "r");
     try {
@@ -264,6 +266,7 @@ async function readDetailBody(
         source: "file",
         error: null,
         body_unavailable: false,
+        cache: null,
       };
     } finally {
       await handle.close();
@@ -280,11 +283,17 @@ async function readDetailBody(
       bytes: cached.source_size,
       truncated: cached.body_truncated === 1,
       source: "artifact_body_cache",
-      error: cached.body_error,
+      error: fileReadError ?? cached.body_error,
       body_unavailable: false,
+      cache: {
+        content_hash: cached.content_hash,
+        version_key: cached.version_key,
+        cached_at: cached.cached_at,
+        freshness: cached.version_key ? "current" : "unversioned",
+      },
     };
   }
-  return { kind: "missing", text: null, bytes: null, truncated: false, source: "file", error: fileReadError ?? "read_failed", body_unavailable: true };
+  return { kind: "missing", text: null, bytes: null, truncated: false, source: "file", error: fileReadError ?? "read_failed", body_unavailable: true, cache: null };
 }
 
 function bodyKindFromExtension(ext: string): ArtifactDetailBody["kind"] {
@@ -357,10 +366,15 @@ function availabilityFromBody(
   body: ArtifactDetailBody,
   catalog: ArtifactCatalogRow | null,
 ): ArtifactAvailability {
-  if (catalog) return catalog.availability;
   if (body.kind === "missing") return "missing";
+  if (body.source === "artifact_body_cache" && isMissingSourceError(body.error)) return "missing";
+  if (catalog) return catalog.availability;
   if (body.source === "file") return "present";
   return "unknown";
+}
+
+function isMissingSourceError(error: string | null): boolean {
+  return error === "ENOENT" || error === "ENOTDIR";
 }
 
 function discoveredBy(catalog: ArtifactCatalogRow | null): "agent_done" | "artifact_register" | "filesystem_reconcile" | "manual_fixture" {

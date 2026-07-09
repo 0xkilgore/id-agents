@@ -257,11 +257,15 @@ describe("GET /artifacts/:id/detail", () => {
         project_ref: "finances",
         dispatch_ref: "phid:disp-fixture",
         source_host: "M4",
-        availability: "present",
+        availability: "missing",
       },
       body: {
         kind: "html",
         source: "artifact_body_cache",
+        error: "ENOENT",
+        cache: {
+          freshness: "current",
+        },
       },
       render: {
         renderer: "html",
@@ -270,11 +274,14 @@ describe("GET /artifacts/:id/detail", () => {
       delivery: {
         bodyRenderable: true,
         bodyUnavailable: false,
+        sourceStatus: "missing",
         discoveredBy: "agent_done",
         freshness: "current",
       },
     });
     expect(detail.body.metadata.content_hash).toMatch(/^[a-f0-9]{64}$/);
+    expect(detail.body.body.cache.content_hash).toBe(detail.body.metadata.content_hash);
+    expect(detail.body.body.cache.version_key).toBe(`sha256:${detail.body.metadata.content_hash}`);
     expect(detail.body.body.text).toContain("Readable without sync.");
 
     const copy = await callRaw(`/artifacts/${registered.row.artifact_id}/copy-text`);

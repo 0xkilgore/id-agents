@@ -552,6 +552,12 @@ export interface ArtifactDetailBody {
   source: "file" | "artifact_body_cache" | "cane_draft" | "none";
   error: string | null;
   body_unavailable: boolean;
+  cache?: {
+    content_hash: string | null;
+    version_key: string | null;
+    cached_at: string;
+    freshness: "current" | "unversioned";
+  } | null;
 }
 
 export interface ArtifactDetailRender {
@@ -610,6 +616,7 @@ export interface ArtifactDeliveryLinks {
   copyTextUrl: string;
   downloadUrl: string;
   sourcePath: string | null;
+  sourceStatus: ArtifactAvailability;
   bodyRenderable: boolean;
   bodyPreview: string | null;
   bodyUnavailable: boolean;
