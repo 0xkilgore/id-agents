@@ -209,6 +209,8 @@ export interface MountOutputsRoutesOptions {
   env?: NodeJS.ProcessEnv;
   /** Fresh-output miss alert event sink. Production can bridge these to the operator health surface; tests assert it fires. */
   onSurfacingHealthEvent?: (event: SurfacingHealthEvent) => void;
+  /** Injectable filesystem reconciler for route-level tests. Defaults to reconcileFilesystemArtifacts. */
+  filesystemReconciler?: typeof reconcileFilesystemArtifacts;
   /**
    * CANE_DRAFT_ARTIFACTS — injectable Cane send executor. When provided, the
    * cane_draft ship path uses this instead of the default HTTP sender, so tests
@@ -428,6 +430,7 @@ export function mountOutputsRoutes(
   const detailCache = new Map<string, ArtifactDetailResponse>();
   const detailInflight = new Map<string, Promise<ArtifactDetailResponse | null>>();
   const detailCacheMax = 100;
+  const filesystemReconciler = opts.filesystemReconciler ?? reconcileFilesystemArtifacts;
 
   function invalidateArtifactDetail(artifactId: string): void {
     detailCache.delete(artifactId);
@@ -608,7 +611,7 @@ export function mountOutputsRoutes(
       }
       const roots = await opts.filesystemArtifactRoots(req);
       const recentMs = parseInt(asString(req.query.recent_ms) ?? '', 10);
-      const result = await reconcileFilesystemArtifacts(adapter, {
+      const result = await filesystemReconciler(adapter, {
         roots,
         recentSinceMs: Number.isFinite(recentMs) && recentMs > 0 ? Date.now() - recentMs : undefined,
       });
@@ -632,7 +635,7 @@ export function mountOutputsRoutes(
       if (opts.filesystemArtifactRoots && !useDocumentModel('artifacts', env)) {
         try {
           const roots = await opts.filesystemArtifactRoots(req);
-          await reconcileFilesystemArtifacts(adapter, {
+          await filesystemReconciler(adapter, {
             roots,
             recentSinceMs: Date.now() - (opts.filesystemReconcileRecentMs ?? 24 * 60 * 60 * 1000),
           });
@@ -821,8 +824,19 @@ export function mountOutputsRoutes(
     }
   });
 
-  async function sendArtifactDetail(ref: ArtifactDetailRef, res: Response): Promise<void> {
-    const { detail, cache } = await getArtifactDetailCached(ref);
+  async function sendArtifactDetail(req: Request, ref: ArtifactDetailRef, res: Response): Promise<void> {
+    let { detail, cache } = await getArtifactDetailCached(ref);
+    if (!detail && opts.filesystemArtifactRoots && !useDocumentModel('artifacts', env)) {
+      try {
+        const roots = await opts.filesystemArtifactRoots(req);
+        await filesystemReconciler(adapter, { roots });
+        clearArtifactDetailCache();
+        ({ detail } = await getArtifactDetailCached(ref));
+        cache = 'miss';
+      } catch (err) {
+        opts.onFilesystemReconcileError?.(err);
+      }
+    }
     res.setHeader('X-Artifact-Detail-Cache', cache);
     if (!detail) {
       res.status(404).json({
@@ -844,7 +858,7 @@ export function mountOutputsRoutes(
     try {
       const ref = asString(req.query.path) ?? asString(req.query.ref) ?? asString(req.query.id);
       if (!ref) return res.status(400).json({ ok: false, code: 'missing_ref', error: 'path, ref, or id is required' });
-      await sendArtifactDetail(resolveArtifactDetailRef(ref), res);
+      await sendArtifactDetail(req, resolveArtifactDetailRef(ref), res);
     } catch (err) {
       res.status(500).json({ ok: false, error: err instanceof Error ? err.message : String(err) });
     }
@@ -855,7 +869,7 @@ export function mountOutputsRoutes(
   // summary, comments/timeline, and provenance for the center reader pane.
   app.get('/artifacts/:id/detail', async (req: Request<{ id: string }>, res: Response) => {
     try {
-      await sendArtifactDetail(resolveArtifactDetailRef(req.params.id), res);
+      await sendArtifactDetail(req, resolveArtifactDetailRef(req.params.id), res);
     } catch (err) {
       res.status(500).json({ ok: false, error: err instanceof Error ? err.message : String(err) });
     }

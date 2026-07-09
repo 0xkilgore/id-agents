@@ -7,6 +7,7 @@ import { SqliteAdapter } from "../../src/db/sqlite-adapter.js";
 import { migrateSqlite } from "../../src/db/migrations/sqlite.js";
 import { mountOutputsRoutes } from "../../src/outputs/routes.js";
 import { artifactIdFromPath, migrateOutputsTables, registerArtifact, registerArtifactPathDelivery } from "../../src/outputs/storage.js";
+import type { FilesystemArtifactReconcileResult } from "../../src/outputs/filesystem-reconciler.js";
 
 let app: Express;
 let adapter: SqliteAdapter;
@@ -104,6 +105,22 @@ async function catalogFile(name: string, title = "Human artifact title"): Promis
     "2026-06-27T12:01:00.000Z",
   );
   return { filePath, artifactId };
+}
+
+function emptyReconcileResult(): FilesystemArtifactReconcileResult {
+  return {
+    roots_seen: 0,
+    roots_scanned: 0,
+    files_seen: 0,
+    files_recent: 0,
+    inserted: 0,
+    updated: 0,
+    evidence_inserted: 0,
+    evidence_updated: 0,
+    skipped: 0,
+    marked_missing: 0,
+    restored_present: 0,
+  };
 }
 
 describe("GET /artifacts/:id/detail", () => {
@@ -225,6 +242,34 @@ describe("GET /artifacts/:id/detail", () => {
       code: "artifact_not_found",
       artifact_id: "art-missing",
     });
+  });
+
+  it("does not full-scan again when navigating to an adjacent already-indexed artifact", async () => {
+    const first = await catalogFile("seeded-a.md", "Seeded A");
+    const second = await catalogFile("seeded-b.md", "Seeded B");
+    let fullScanCalls = 0;
+
+    app = express();
+    app.use(express.json());
+    mountOutputsRoutes(app, adapter, {
+      autoIngest: false,
+      actionCooldownMs: 0,
+      env: { C0_FEEDBACK_REACTIONS: "1" } as NodeJS.ProcessEnv,
+      filesystemArtifactRoots: async () => [{ agent: "regina", workingDirectory: tmp }],
+      filesystemReconciler: async () => {
+        fullScanCalls += 1;
+        return emptyReconcileResult();
+      },
+    });
+
+    const firstDetail = await call("GET", `/artifacts/${first.artifactId}/detail`);
+    const secondDetail = await call("GET", `/artifacts/${second.artifactId}/detail`);
+    const coldDetail = await call("GET", "/artifacts/art-cold-miss/detail");
+
+    expect(firstDetail.status).toBe(200);
+    expect(secondDetail.status).toBe(200);
+    expect(coldDetail.status).toBe(404);
+    expect(fullScanCalls).toBe(1);
   });
 
   it("serves registered html body, copy text, and download from cache when the source path disappears", async () => {
