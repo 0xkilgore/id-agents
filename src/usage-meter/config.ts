@@ -11,19 +11,18 @@ export const DEFAULT_USAGE_BUDGET_POLICY: UsageBudgetPolicy = Object.freeze({
   timezone: "America/Chicago",
   provider: "anthropic",
   global: {
-    // Conservative defaults — small enough that operators will notice
-    // soft warnings before any real burn, but large enough that real
-    // overnight aggregate runs don't soft-warn immediately if the
-    // operator hasn't configured a policy file yet.
-    daily_weighted_tokens: 10_000_000,
-    weekly_weighted_tokens: 50_000_000,
+    // Chris is on plan-based provider limits, not token-metered API billing.
+    // Unknown real limits are represented as 0 so no fabricated hard percent
+    // can be produced from defaults.
+    daily_weighted_tokens: 0,
+    weekly_weighted_tokens: 0,
     soft_threshold_pct: 0.8,
     hard_threshold_pct: 1.0,
   },
   agents: {},
   exempt_agents: ["manager", "sentinel"],
   emergency_override: { enabled: false, reason: null, expires_at: null },
-  fail_closed_on_unknown: true,
+  fail_closed_on_unknown: false,
 }) as UsageBudgetPolicy;
 
 export interface LoadPolicyOptions {
@@ -123,7 +122,7 @@ function validatePolicy(input: unknown): ValidationResult {
   if (typeof o.timezone !== "string" || !o.timezone) {
     return { ok: false, reason: "timezone must be a non-empty string" };
   }
-  if (o.provider !== "anthropic" && o.provider !== "openai" && o.provider !== "other") {
+  if (o.provider !== "anthropic" && o.provider !== "openai" && o.provider !== "cursor" && o.provider !== "other") {
     return { ok: false, reason: `invalid provider ${JSON.stringify(o.provider)}` };
   }
   const g = o.global as Record<string, unknown> | undefined;

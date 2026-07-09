@@ -15,6 +15,7 @@ import type {
   UsageGateEnforcement,
   UsageGateSnapshot,
   UsageGateState,
+  ProviderLimitSignal,
 } from "./types.js";
 
 // ─────────────────────────────────────────────────────────────────────
@@ -95,15 +96,19 @@ export interface EvaluateGateInput extends GateRollups {
   now_iso: string;
   /** Age of the underlying usage data in milliseconds. */
   data_freshness_ms: number;
+  /** Real provider limit observations. This is the only source of hard_paused. */
+  provider_limits?: ProviderLimitSignal[];
 }
 
 const STALE_AFTER_MS = 5 * 60 * 1000;
 
 export function evaluateGate(input: EvaluateGateInput): UsageGateSnapshot {
   const { policy, enforcement, now_iso, data_freshness_ms } = input;
+  const providerLimits = input.provider_limits ?? [];
   const override = overrideIsActive(policy, now_iso);
   const stale = data_freshness_ms > STALE_AFTER_MS;
   const failClosed = policy.fail_closed_on_unknown !== false;
+  const providerLimited = providerLimits.length > 0;
 
   // ── Global decision ─────────────────────────────────────────────
   const gDay = pctOrNull(
@@ -114,7 +119,7 @@ export function evaluateGate(input: EvaluateGateInput): UsageGateSnapshot {
     input.globalRollup.week.weighted_tokens,
     policy.global.weekly_weighted_tokens,
   );
-  const gState = classifyState(gDay, gWeek, policy);
+  const gState = providerLimited ? "hard_paused" : classifyState(gDay, gWeek, policy);
 
   let global: UsageGateDecision;
   if (override) {
@@ -141,11 +146,19 @@ export function evaluateGate(input: EvaluateGateInput): UsageGateSnapshot {
       daily_pct: gDay,
       weekly_pct: gWeek,
     };
-  } else if (gState === "hard_paused") {
+  } else if (providerLimited) {
     global = {
       state: "hard_paused",
       decision: applyEnforcement("pause_non_core", enforcement),
-      reason: `global budget exhausted (daily ${pctStr(gDay)}, weekly ${pctStr(gWeek)})`,
+      reason: `provider limit observed: ${providerLimits.map(limitSummary).join("; ")}`,
+      daily_pct: gDay,
+      weekly_pct: gWeek,
+    };
+  } else if (gState === "hard_paused") {
+    global = {
+      state: "soft_warning",
+      decision: applyEnforcement("warn_allow", enforcement),
+      reason: `configured token reference exceeded, but no real provider limit observed (daily ${pctStr(gDay)}, weekly ${pctStr(gWeek)})`,
       daily_pct: gDay,
       weekly_pct: gWeek,
     };
@@ -212,7 +225,7 @@ export function evaluateGate(input: EvaluateGateInput): UsageGateSnapshot {
     const weeklyPct = agentBudget
       ? pctOrNull(r.week.weighted_tokens, agentBudget.weekly_weighted_tokens)
       : null;
-    const aState = classifyAgentState(dailyPct, weeklyPct, policy);
+    const aState = providerLimited ? "hard_paused" : classifyAgentState(dailyPct, weeklyPct, policy);
 
     // Global hard pause overrides per-agent normal state for non-exempt.
     if (global.state === "hard_paused" || global.state === "degraded") {
@@ -229,11 +242,19 @@ export function evaluateGate(input: EvaluateGateInput): UsageGateSnapshot {
       continue;
     }
 
-    if (aState === "hard_paused") {
+    if (aState === "hard_paused" && providerLimited) {
       agents[agentId] = {
         state: "hard_paused",
         decision: applyEnforcement("pause_agent", enforcement),
-        reason: `agent ${agentId} budget exhausted (daily ${pctStr(dailyPct)}, weekly ${pctStr(weeklyPct)})`,
+        reason: `provider limit observed: ${providerLimits.map(limitSummary).join("; ")}`,
+        daily_pct: dailyPct,
+        weekly_pct: weeklyPct,
+      };
+    } else if (aState === "hard_paused") {
+      agents[agentId] = {
+        state: "soft_warning",
+        decision: applyEnforcement("warn_allow", enforcement),
+        reason: `agent ${agentId} configured token reference exceeded, but no real provider limit observed`,
         daily_pct: dailyPct,
         weekly_pct: weeklyPct,
       };
@@ -267,8 +288,14 @@ export function evaluateGate(input: EvaluateGateInput): UsageGateSnapshot {
     override_reason: override ? policy.emergency_override.reason ?? undefined : undefined,
     override_expires_at: override ? policy.emergency_override.expires_at ?? undefined : undefined,
     degraded_reason: stale ? "usage telemetry stale" : undefined,
+    provider_limits: providerLimits,
     generated_at: now_iso,
   };
+}
+
+function limitSummary(signal: ProviderLimitSignal): string {
+  const reset = signal.reset_at ? ` until ${signal.reset_at}` : "";
+  return `${signal.provider}${reset}`;
 }
 
 function classifyAgentState(

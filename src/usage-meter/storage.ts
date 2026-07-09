@@ -5,6 +5,7 @@ import type { DbAdapter } from "../db/db-adapter.js";
 import type {
   AgentUsageEvent,
   AgentUsageRollup,
+  ProviderLimitSignal,
   Provider,
   UsageGateDecisionRecord,
   WindowKind,
@@ -216,6 +217,65 @@ export async function listAgentUsageRollupsForWindow(
     [filter.provider, filter.window_kind, filter.window_start],
   );
   return rows.map(rowToRollup);
+}
+
+interface ProviderLimitRow {
+  dispatch_phid: string;
+  to_agent: string;
+  provider: string;
+  runtime: string | null;
+  not_before_at: string;
+  last_bounce_json: string | null;
+  updated_at: string;
+}
+
+export async function listActiveProviderLimitSignals(
+  adapter: DbAdapter,
+  nowIso: string,
+): Promise<ProviderLimitSignal[]> {
+  const { rows } = await adapter.query<ProviderLimitRow>(
+    `SELECT dispatch_phid, to_agent, provider, runtime, not_before_at, last_bounce_json, updated_at
+       FROM dispatch_scheduler_queue
+      WHERE status = 'bounced'
+        AND last_bounce_json IS NOT NULL
+        AND not_before_at > ?
+      ORDER BY updated_at DESC
+      LIMIT 50`,
+    [nowIso],
+  );
+  const out: ProviderLimitSignal[] = [];
+  for (const row of rows) {
+    const bounce = safeJsonObject(row.last_bounce_json ?? "{}");
+    const kind = typeof bounce.kind === "string" ? bounce.kind : "";
+    const message = typeof bounce.message === "string" ? bounce.message : "";
+    const lower = `${kind} ${message}`.toLowerCase();
+    const isProviderLimit =
+      kind === "provider_limit" ||
+      kind === "provider_throttle" ||
+      lower.includes("rate_limit") ||
+      lower.includes("rate limit") ||
+      lower.includes("usage limit") ||
+      lower.includes("too many requests") ||
+      lower.includes("429");
+    if (!isProviderLimit) continue;
+    out.push({
+      provider: normalizeProvider(row.provider),
+      runtime: row.runtime ?? null,
+      agent: row.to_agent,
+      dispatch_phid: row.dispatch_phid,
+      observed_at: typeof bounce.ts === "string" ? bounce.ts : row.updated_at,
+      reset_at: row.not_before_at,
+      message,
+      source: "scheduler_bounce",
+    });
+  }
+  return out;
+}
+
+function normalizeProvider(raw: string): Provider {
+  return raw === "anthropic" || raw === "openai" || raw === "cursor" || raw === "other"
+    ? raw
+    : "other";
 }
 
 // ── Gate decisions ───────────────────────────────────────────────────

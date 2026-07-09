@@ -3,23 +3,12 @@
   "timezone": "America/Chicago",
   "provider": "anthropic",
   "global": {
-    "daily_weighted_tokens": 10000000,
-    "weekly_weighted_tokens": 50000000,
+    "daily_weighted_tokens": 0,
+    "weekly_weighted_tokens": 0,
     "soft_threshold_pct": 0.8,
     "hard_threshold_pct": 1.0
   },
-  "agents": {
-    "cto": {
-      "daily_weighted_tokens": 2500000,
-      "weekly_weighted_tokens": 10000000,
-      "priority": "core"
-    },
-    "roger": {
-      "daily_weighted_tokens": 3500000,
-      "weekly_weighted_tokens": 15000000,
-      "priority": "worker"
-    }
-  },
+  "agents": {},
   "exempt_agents": [
     "manager",
     "sentinel"
@@ -29,5 +18,5 @@
     "reason": null,
     "expires_at": null
   },
-  "fail_closed_on_unknown": true
+  "fail_closed_on_unknown": false
 }

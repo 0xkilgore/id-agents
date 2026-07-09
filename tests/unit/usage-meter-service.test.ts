@@ -82,6 +82,52 @@ async function ingestEvent(overrides: Partial<AgentUsageEvent> = {}): Promise<vo
   await upsertAgentUsageEvent(adapter, ev);
 }
 
+async function insertProviderLimitBounce(overrides: {
+  provider?: string;
+  runtime?: string;
+  to_agent?: string;
+  not_before_at?: string;
+  kind?: string;
+  message?: string;
+} = {}): Promise<void> {
+  const nowIso = new Date(FIXED_NOW).toISOString();
+  const nextIso = overrides.not_before_at ?? new Date(FIXED_NOW + 30 * 60_000).toISOString();
+  await adapter.query(
+    `INSERT INTO dispatch_scheduler_queue (
+      dispatch_phid, team_id, query_id, to_agent, from_actor, channel,
+      subject, body_markdown, provider, runtime, priority, status,
+      not_before_at, attempt_count, bounce_count, last_bounce_json,
+      bounce_history_json, updated_at
+    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+    [
+      `disp_${Math.random().toString(36).slice(2)}`,
+      "team",
+      `query_${Math.random().toString(36).slice(2)}`,
+      overrides.to_agent ?? "cto",
+      "schedule",
+      "talk",
+      "limit test",
+      "body",
+      overrides.provider ?? "anthropic",
+      overrides.runtime ?? "claude-code-cli",
+      5,
+      "bounced",
+      nextIso,
+      1,
+      1,
+      JSON.stringify({
+        ts: nowIso,
+        kind: overrides.kind ?? "provider_limit",
+        message: overrides.message ?? "Claude limited until reset",
+        next_attempt_at: nextIso,
+        attempt: 1,
+      }),
+      "[]",
+      nowIso,
+    ],
+  );
+}
+
 // ─────────────────────────────────────────────────────────────────────
 // WARN-ONLY defaults
 // ─────────────────────────────────────────────────────────────────────
@@ -142,7 +188,7 @@ describe("Usage meter routes — background ingest guard", () => {
 // ─────────────────────────────────────────────────────────────────────
 
 describe("UsageMeterService — enforce mode (opt-in)", () => {
-  it("getExcludedAgentsForClaim excludes overspent agents when enforce", async () => {
+  it("getExcludedAgentsForClaim ignores configured token overages when enforce", async () => {
     // Build a policy file with low budgets so roger blows past hard.
     const policyFile = join(tmpDir, "policy.json");
     writeFileSync(policyFile, JSON.stringify({
@@ -163,7 +209,23 @@ describe("UsageMeterService — enforce mode (opt-in)", () => {
     });
     await service.refreshRollups();
     const excluded = await service.getExcludedAgentsForClaim();
-    expect(excluded).toContain("roger");
+    expect(excluded).toEqual([]);
+  });
+
+  it("getExcludedAgentsForClaim excludes non-exempt agents only after an active provider limit bounce", async () => {
+    await ingestEvent({ agent_id: "cto", weighted_tokens: 1, raw_tokens: 1 });
+    await insertProviderLimitBounce();
+    const { service } = createUsageMeterService({
+      adapter,
+      env: { USAGE_GATE_ENFORCEMENT: "enforce" },
+      now: () => FIXED_NOW,
+    });
+    await service.refreshRollups();
+    const snap = await service.snapshot();
+    expect(snap.global.state).toBe("hard_paused");
+    expect(snap.provider_limits[0]?.provider).toBe("anthropic");
+    const excluded = await service.getExcludedAgentsForClaim();
+    expect(excluded).toContain("cto");
   });
 
   it("emergency override env vars activate the override", async () => {
@@ -196,8 +258,11 @@ describe("GET /usage — v2 schema contract", () => {
     expect(res.body.source).toBe("manager-usage-meter");
     expect(res.body.windows.daily.start).toBeDefined();
     expect(res.body.windows.weekly.start).toBeDefined();
-    expect(res.body.usage.daily.budget).toBeGreaterThan(0);
-    expect(res.body.usage.weekly.budget).toBeGreaterThan(0);
+    expect(res.body.usage.daily.budget).toBeNull();
+    expect(res.body.usage.weekly.budget).toBeNull();
+    expect(res.body.usage.daily.percent_consumed).toBeNull();
+    expect(res.body.usage.weekly.percent_consumed).toBeNull();
+    expect(Array.isArray(res.body.by_provider)).toBe(true);
     expect(Array.isArray(res.body.by_agent)).toBe(true);
     expect(Array.isArray(res.body.by_model)).toBe(true);
     expect(res.body.concurrency).toBeDefined();
@@ -206,7 +271,7 @@ describe("GET /usage — v2 schema contract", () => {
     expect(res.body.gate.should_pause_new_dispatches).toBe(false);
   });
 
-  it("reports daily.percent_consumed reflecting ingested events", async () => {
+  it("reports weighted burn without a fabricated percent denominator", async () => {
     const policyFile = join(tmpDir, "policy.json");
     writeFileSync(policyFile, JSON.stringify({
       schema_version: "usage-budget-policy.v1",
@@ -230,7 +295,12 @@ describe("GET /usage — v2 schema contract", () => {
     const res = await request(app).get("/usage");
     expect(res.status).toBe(200);
     expect(res.body.usage.daily.weighted_tokens).toBe(500);
-    expect(res.body.usage.daily.percent_consumed).toBeCloseTo(0.5);
+    expect(res.body.usage.daily.percent_consumed).toBeNull();
+    expect(res.body.calibration.denominator_kind).toBe("usage_with_no_limit");
+    expect(res.body.by_provider[0]).toMatchObject({
+      provider: "anthropic",
+      daily: { weighted_tokens: 500, limit: null, percent_of_limit: null },
+    });
   });
 
   it("captures Claude transcript usage before rendering /usage when an adapter is mounted", async () => {
