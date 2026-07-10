@@ -12856,10 +12856,16 @@ export class AgentManagerDb {
         // artifacts, projects, and tasks. The core contract is storage-neutral;
         // this manager mount feeds it from durable tables.
         try {
-          const [{ mountLocalSearchRoutes }, { loadLocalSearchDocuments }] = await Promise.all([
+          const [
+            { mountLocalSearchRoutes },
+            { loadLocalSearchDocuments },
+            { createSqliteLocalReadMutationStore, migrateLocalReadMutationTables, mountLocalReadMutationRoutes },
+          ] = await Promise.all([
             import('./local-search/routes.js'),
             import('./local-search/db-documents.js'),
+            import('./local-search/read-mutation.js'),
           ]);
+          await migrateLocalReadMutationTables(this.db.adapter);
           mountLocalSearchRoutes(this.managementApp, {
             loadDocuments: () => loadLocalSearchDocuments(this.db.adapter),
             loadHealth: async () => ({
@@ -12867,9 +12873,10 @@ export class AgentManagerDb {
               indexedAt: new Date().toISOString(),
             }),
           });
-          console.log('[Manager] Local read-model /read-model/search route mounted');
+          mountLocalReadMutationRoutes(this.managementApp, createSqliteLocalReadMutationStore(this.db.adapter));
+          console.log('[Manager] Local read-model /read-model/search and /read-model/read-state routes mounted');
         } catch (err) {
-          console.warn('[Manager] Local read-model search routes failed to mount:', err instanceof Error ? err.message : String(err));
+          console.warn('[Manager] Local read-model routes failed to mount:', err instanceof Error ? err.message : String(err));
         }
 
         // Project tracks conformance read-model — project pages use this to
