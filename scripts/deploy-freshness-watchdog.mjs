@@ -13,10 +13,11 @@
 // artifact ONLY when it acts (redeploy or failure), never on quiet passes.
 
 import { execSync, execFileSync } from 'node:child_process';
-import { existsSync, readFileSync, writeFileSync, appendFileSync, mkdirSync, openSync, closeSync, unlinkSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync, appendFileSync, mkdirSync, closeSync, unlinkSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { decideWatchdogAction } from './lib/deploy-watchdog-decision.mjs';
 import { retryLaunchdBootstrap } from './lib/deploy-watchdog-bootstrap.mjs';
+import { acquireWatchdogLock, DEFAULT_LOCK_STALE_MS } from './lib/deploy-watchdog-lock.mjs';
 import {
   DEFAULT_REDEPLOY_COMMAND,
   classifyCloseout,
@@ -33,6 +34,7 @@ const LOG = process.env.DEPLOY_WATCHDOG_LOG || '/tmp/deploy-watchdog.log';
 const STATE_FILE = process.env.DEPLOY_WATCHDOG_STATE_FILE || '/tmp/deploy-watchdog.state';
 const PAUSE_FILE = process.env.DEPLOY_WATCHDOG_PAUSE_FILE || '/tmp/deploy-watchdog.pause';
 const LOCK_FILE = process.env.DEPLOY_WATCHDOG_LOCK_FILE || '/tmp/deploy-watchdog.lock';
+const LOCK_STALE_MS = Number(process.env.DEPLOY_WATCHDOG_LOCK_STALE_MS || DEFAULT_LOCK_STALE_MS);
 const ARTIFACT_DIR = process.env.DEPLOY_WATCHDOG_ARTIFACT_DIR || `${HOME}/Dropbox/Code/agent-platform/output`;
 const DRY_RUN = process.env.DEPLOY_WATCHDOG_DRY_RUN === '1' || process.argv.includes('--dry-run');
 const ENV_FILES = process.env.DEPLOY_WATCHDOG_ENV_FILE
@@ -56,16 +58,13 @@ function writeState(s) {
 }
 
 function acquireLock() {
-  try {
-    return openSync(LOCK_FILE, 'wx');
-  } catch (e) {
-    if (e?.code === 'EEXIST') {
-      log(`another deploy watchdog run is active; lock exists at ${LOCK_FILE}`);
-      process.exitCode = 0;
-      return null;
-    }
-    throw e;
-  }
+  const result = acquireWatchdogLock({
+    lockFile: LOCK_FILE,
+    staleMs: LOCK_STALE_MS,
+    log,
+  });
+  if (!result.acquired) process.exitCode = 0;
+  return result.fd;
 }
 
 function releaseLock(fd) {

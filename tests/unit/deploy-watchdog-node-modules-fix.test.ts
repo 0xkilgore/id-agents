@@ -41,7 +41,7 @@ describe('deploy-freshness-watchdog source — clean deploy checkout hygiene', (
     expect(WATCHDOG_SRC).toContain("setPlistValue(':WorkingDirectory', CANE)");
     expect(WATCHDOG_SRC).toContain("setPlistValue(':ProgramArguments:1', `${CANE}/scripts/start-id-agents-manager.sh`)");
     expect(WATCHDOG_SRC).toContain('retryLaunchdBootstrap');
-    expect(WATCHDOG_SRC).toContain('restoreManagerPlist(previousTarget)');
+    expect(WATCHDOG_SRC).toContain('restorePlist: restoreManagerPlist');
   });
 
   it('treats successful rollback as non-loud closeout instead of manager-down failure', () => {
@@ -71,6 +71,6 @@ describe('manager-promote-rebuild-restart source — clean deploy checkout hygie
     expect(WRAPPER_SRC).toContain('ensure_manager_plist_uses_deploy_checkout');
     expect(WRAPPER_SRC).toContain('Set :WorkingDirectory $ID_AGENTS');
     expect(WRAPPER_SRC).toContain('Set :ProgramArguments:1 $ID_AGENTS/scripts/start-id-agents-manager.sh');
-    expect(WRAPPER_SRC).toContain('launchctl bootstrap "gui/$(id -u)" "$PLIST"');
+    expect(WRAPPER_SRC).toContain('"$LAUNCHCTL_BIN" bootstrap "gui/$(id -u)" "$PLIST"');
   });
 });
