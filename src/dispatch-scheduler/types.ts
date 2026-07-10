@@ -412,8 +412,9 @@ export interface WorkspaceCloseoutEvidence {
  *  enqueued doc's `promote`/`promotion_input`. Pure; no side effects.
  *
  *  Modes:
- *    - "warn": missing/incomplete promotion is allowed; returns
- *      `{ ok: true, warning: "..." }` so the caller can log and continue.
+ *    - "warn": retained for response/report compatibility. Build dispatches
+ *      still reject missing/incomplete promotion evidence so they cannot
+ *      terminalize silently.
  *    - "enforce": missing/incomplete promotion is a hard error; returns
  *      `{ ok: false, error: "..." }` so the caller can 4xx.
  *  Non-build dispatches (`promote: false`) always pass.
@@ -449,34 +450,34 @@ export function validatePromotionMetadata(
   // Build dispatch with no promotion payload at all.
   if (!promotion) {
     const msg = "promote=true but /agent-done is missing promotion metadata";
-    return mode === "enforce" ? { ok: false, error: msg } : { ok: true, warning: msg };
+    return { ok: false, error: msg };
   }
 
   // Build dispatch with promotion.completed !== true.
   if (promotion.completed !== true) {
     const msg = "promote=true but promotion.completed is not true";
-    return mode === "enforce" ? { ok: false, error: msg } : { ok: true, warning: msg };
+    return { ok: false, error: msg };
   }
 
   // Build dispatch but no repos[] entries.
   if (!Array.isArray(promotion.repos) || promotion.repos.length === 0) {
     const msg = "promote=true but promotion.repos[] is empty";
-    return mode === "enforce" ? { ok: false, error: msg } : { ok: true, warning: msg };
+    return { ok: false, error: msg };
   }
 
   // Per-repo shape sanity.
   for (const [i, r] of promotion.repos.entries()) {
     if (!r.path || !r.base || !r.source_branch || !r.promoted_sha || !r.remote_main_sha) {
       const msg = `promotion.repos[${i}] missing required fields (path/base/source_branch/promoted_sha/remote_main_sha)`;
-      return mode === "enforce" ? { ok: false, error: msg } : { ok: true, warning: msg };
+      return { ok: false, error: msg };
     }
     if (r.pushed !== true) {
       const msg = `promotion.repos[${i}] reports pushed=false`;
-      return mode === "enforce" ? { ok: false, error: msg } : { ok: true, warning: msg };
+      return { ok: false, error: msg };
     }
     if (r.verified !== true) {
       const msg = `promotion.repos[${i}] reports verified=false`;
-      return mode === "enforce" ? { ok: false, error: msg } : { ok: true, warning: msg };
+      return { ok: false, error: msg };
     }
   }
 
@@ -487,7 +488,7 @@ export function validatePromotionMetadata(
     const found = promotion.repos.some((r) => r.path === expected);
     if (!found) {
       const msg = `promotion.repos[] does not include the enqueued repo "${expected}"`;
-      return mode === "enforce" ? { ok: false, error: msg } : { ok: true, warning: msg };
+      return { ok: false, error: msg };
     }
   }
 

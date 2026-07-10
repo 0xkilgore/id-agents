@@ -300,7 +300,7 @@ describe("enqueue promotion metadata propagation", () => {
 });
 
 describe("POST /agent-done — warn mode (default)", () => {
-  it("build dispatch + missing promotion payload => 200 with promotion_warning", async () => {
+  it("build dispatch + missing promotion payload => 400 and does not mark done", async () => {
     const enq = await enqueue({ repo: "/abs/repo-warn", branch: "f1" });
     await claim(enq.dispatch_phid);
     const r = await fetch(`${baseUrl}/agent-done`, {
@@ -313,17 +313,18 @@ describe("POST /agent-done — warn mode (default)", () => {
         // no promotion payload
       }),
     });
-    expect(r.status).toBe(200);
+    expect(r.status).toBe(400);
     const body = await r.json();
-    expect(body.ok).toBe(true);
+    expect(body.ok).toBe(false);
     expect(body.mode).toBe("warn");
-    expect(body.promotion_warning).toMatch(/missing promotion metadata/);
+    expect(body.error).toMatch(/missing promotion metadata/);
     expect(body.promotion.closeout_report).toMatchObject({
       required: true,
       status: "missing_required_evidence",
       reason_code: "missing_required_evidence",
     });
-    expect(body.state).toBe("done");
+    const doc = await (manager as any).dispatchScheduler.reactor.getByPhid(enq.dispatch_phid);
+    expect(["done", "failed", "cancelled"]).not.toContain(doc.status);
   });
 
   it("non-build coordinator/no-code dispatch records explicit promotion-not-required reason", async () => {

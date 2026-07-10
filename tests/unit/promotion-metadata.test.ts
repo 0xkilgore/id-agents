@@ -310,10 +310,10 @@ describe("validatePromotionMetadata", () => {
     expect(r.ok).toBe(true);
   });
 
-  it("build dispatch, no promotion payload, warn => ok with warning", () => {
+  it("build dispatch, no promotion payload, warn => error", () => {
     const r = validatePromotionMetadata(buildDoc, null, "warn");
-    expect(r.ok).toBe(true);
-    if (r.ok) expect(r.warning).toMatch(/missing promotion metadata/);
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error).toMatch(/missing promotion metadata/);
   });
 
   it("build dispatch, no promotion payload, enforce => error", () => {
