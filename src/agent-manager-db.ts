@@ -8232,12 +8232,65 @@ export class AgentManagerDb {
 
     this.managementApp.get('/tasks/:ref/detail', async (req, res) => {
       try {
-        const { id: teamId } = await this.getTeam(req);
-        const { task, error } = await this.resolveTaskRef(req.params.ref, teamId);
+        const { id: currentTeamId } = await this.getTeam(req);
+        const { status, owner, team: teamRef } = req.query as Record<string, string>;
+        const today = parseTodayQuery(req.query.today) ?? todayIso();
+
+        let ownerIdFilter: string | undefined;
+        if (owner) {
+          const { agent, error } = await this.resolveSingleAgentForCommand(currentTeamId, owner);
+          if (!agent) return res.status(404).json({ error: error || `Agent "${owner}" not found` });
+          ownerIdFilter = agent.id;
+        }
+
+        let teamId: string = currentTeamId;
+        if (teamRef) {
+          const teamRow = await this.db.teams.getTeamByName(teamRef);
+          if (!teamRow) return res.status(404).json({ error: `Team "${teamRef}" not found` });
+          teamId = teamRow.id;
+        }
+
+        const validStatuses = ['todo', 'doing', 'done'];
+        const statusFilter = status && validStatuses.includes(status) ? status as 'todo' | 'doing' | 'done' : undefined;
+        let tasks = this.getCachedTaskList({ teamId, status: statusFilter, owner: ownerIdFilter });
+        if (!tasks) {
+          tasks = await this.db.tasks.list({
+            status: statusFilter,
+            owner: ownerIdFilter,
+            teamId,
+          });
+          this.cacheTaskList({ teamId, status: statusFilter, owner: ownerIdFilter, rows: tasks });
+        }
+
+        const index = tasks.findIndex((candidate) => this.taskMatchesRef(candidate, req.params.ref));
+        let task: TaskRow | undefined = index >= 0 ? tasks[index] : undefined;
+        let error: string | undefined;
+        if (!task) {
+          const resolved = await this.resolveTaskRef(req.params.ref, teamId);
+          task = resolved.task;
+          error = resolved.error;
+        }
         if (!task) return res.status(404).json({ error: error || `Task "${req.params.ref}" not found` });
         const { detail, cache } = await this.getTaskDetailCached(task, teamId);
+        const adjacentPrefetch = this.buildTaskAdjacentPrefetch(tasks, index, statusFilter, ownerIdFilter, today);
+        await Promise.all(
+          [index > 0 ? tasks[index - 1] : null, index >= 0 && index < tasks.length - 1 ? tasks[index + 1] : null]
+            .filter((candidate): candidate is TaskRow => Boolean(candidate))
+            .map((candidate) =>
+              this.buildTaskDetailCached(candidate, teamId, today).catch((err) => {
+                this.managerLog(`[task-detail-cache] prefetch failed for ${candidate.name}: ${err instanceof Error ? err.message : String(err)}`);
+                return null;
+              }),
+            ),
+        );
         res.setHeader('X-Task-Detail-Cache', cache);
-        res.json({ ok: true, task: detail });
+        res.json({
+          ok: true,
+          schema_version: 'task.detail.v1',
+          version_key: detail.version_key ?? null,
+          task: detail,
+          adjacent_prefetch: adjacentPrefetch,
+        });
       } catch (err: any) {
         console.error('[Manager] Error in GET /tasks/:ref/detail:', err);
         res.status(500).json({ error: err?.message || 'Internal server error' });
@@ -9267,6 +9320,21 @@ export class AgentManagerDb {
     });
   }
 
+  private getCachedTaskList(input: {
+    teamId: string;
+    status?: 'todo' | 'doing' | 'done';
+    owner?: string;
+  }): TaskRow[] | null {
+    const key = this.taskListCacheKey(input);
+    const entry = this.taskListCache.get(key);
+    if (!entry) return null;
+    if (Date.now() - entry.at > AgentManagerDb.TASK_LIST_CACHE_TTL_MS) {
+      this.taskListCache.delete(key);
+      return null;
+    }
+    return entry.rows;
+  }
+
   private clearTaskListCache(teamId?: string): void {
     if (!teamId) {
       this.taskListCache.clear();
@@ -9295,6 +9363,41 @@ export class AgentManagerDb {
       if (found) return found;
     }
     return null;
+  }
+
+  private taskMatchesRef(task: TaskRow, ref: string): boolean {
+    const cleanRef = decodeURIComponent(ref);
+    if (task.name === cleanRef) return true;
+    if (!cleanRef.startsWith('#') || !task.uuid) return false;
+    const shortRef = cleanRef.slice(1).toLowerCase();
+    return task.uuid.replace(/-/g, '').toLowerCase().startsWith(shortRef);
+  }
+
+  private buildTaskAdjacentPrefetch(
+    tasks: TaskRow[],
+    index: number,
+    status: 'todo' | 'doing' | 'done' | undefined,
+    owner: string | undefined,
+    today: string,
+  ): Record<string, unknown> {
+    const previous = index > 0 ? tasks[index - 1] : null;
+    const next = index >= 0 && index < tasks.length - 1 ? tasks[index + 1] : null;
+    return {
+      list_key: JSON.stringify({
+        route: 'tasks',
+        status: status ?? null,
+        owner: owner ?? null,
+        today,
+      }),
+      index: index >= 0 ? index : null,
+      list_length: index >= 0 ? tasks.length : null,
+      previous: previous
+        ? { name: previous.name, url: `/tasks/${encodeURIComponent(previous.name)}/detail` }
+        : null,
+      next: next
+        ? { name: next.name, url: `/tasks/${encodeURIComponent(next.name)}/detail` }
+        : null,
+    };
   }
 
   private taskDetailCacheKey(teamId: string, taskName: string): string {
