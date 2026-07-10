@@ -53,6 +53,7 @@ import {
 import { buildResetConformanceSummary } from './conformance/reset.js';
 import { resolveTrack } from './track-registry/registry.js';
 import { assembleAgentDetail } from './agent-detail/assemble.js';
+import { buildAllocationTelemetry, clampTrailingHours } from './telemetry/allocation-telemetry.js';
 import {
   createReadGuard,
   DEFAULT_MAX_CONCURRENT as READ_GUARD_MAX,
@@ -6458,6 +6459,24 @@ export class AgentManagerDb {
         });
       } catch (err: any) {
         res.status(500).json({ ok: false, error: err?.message || 'catalog update failed' });
+      }
+    });
+
+    // GET /agents/allocation-telemetry — data-only per-agent allocation inputs
+    // for CTO's model. Registered before /agents/:id so the literal endpoint is
+    // not interpreted as an agent id.
+    this.managementApp.get('/agents/allocation-telemetry', async (req, res) => {
+      try {
+        const rawHours = typeof req.query.window_hours === 'string'
+          ? Number(req.query.window_hours)
+          : typeof req.query.trailing_hours === 'string'
+            ? Number(req.query.trailing_hours)
+            : undefined;
+        res.json(await buildAllocationTelemetry(this.db.adapter, {
+          trailingHours: clampTrailingHours(rawHours ?? 48),
+        }));
+      } catch (err: any) {
+        res.status(500).json({ error: 'internal', detail: err?.message || String(err) });
       }
     });
 

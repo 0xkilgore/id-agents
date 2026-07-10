@@ -6,6 +6,7 @@ import type { Application, Request, Response } from 'express';
 import type { DbAdapter } from '../db/db-adapter.js';
 import { getSnapshots, querySignals } from './storage.js';
 import { windowBoundary, computeSourceCoverage } from './rollup.js';
+import { buildAllocationTelemetry, clampTrailingHours } from './allocation-telemetry.js';
 import type { WindowKind, MetricsSummaryResponse, AgentMetricsRow, SourceName, Confidence, SignalKind, SignalSeverity } from './types.js';
 
 const VALID_WINDOWS: WindowKind[] = ['hour', 'day', 'week'];
@@ -23,6 +24,25 @@ function parseBool(raw: unknown, def = true): boolean {
 }
 
 export function mountMetricsRoutes(app: Application, adapter: DbAdapter): void {
+  // -------------------------------------------------------------------------
+  // GET /agents/allocation-telemetry
+  // -------------------------------------------------------------------------
+  app.get('/agents/allocation-telemetry', async (req: Request, res: Response) => {
+    try {
+      const rawHours = typeof req.query.window_hours === 'string'
+        ? Number(req.query.window_hours)
+        : typeof req.query.trailing_hours === 'string'
+          ? Number(req.query.trailing_hours)
+          : undefined;
+      res.json(await buildAllocationTelemetry(adapter, {
+        trailingHours: clampTrailingHours(rawHours ?? 48),
+      }));
+    } catch (err) {
+      console.error('/agents/allocation-telemetry error:', err);
+      res.status(500).json({ error: 'internal', detail: String(err) });
+    }
+  });
+
   // -------------------------------------------------------------------------
   // GET /metrics/summary
   // -------------------------------------------------------------------------
