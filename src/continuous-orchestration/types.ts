@@ -130,6 +130,7 @@ export interface DecisionRecord {
     | "auto_pause"
     | "refuel"
     | "fleet_blockage"
+    | "model_policy_drift_alert"
     | "auto_promote"
     | "ready_metadata_repair"
     | "reconciled"

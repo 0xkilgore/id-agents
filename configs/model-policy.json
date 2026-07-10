@@ -9,6 +9,15 @@
       "cursor": 0.0
     }
   },
+  "authorized_directive": {
+    "work_share": {
+      "targets": {
+        "anthropic": 0.5,
+        "openai": 0.5,
+        "cursor": 0.0
+      }
+    }
+  },
   "constrained_providers": ["cursor"],
   "known_models": [
     "claude-opus-4-8",

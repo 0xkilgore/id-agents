@@ -11,6 +11,7 @@
 
 import fs from "node:fs";
 import crypto from "node:crypto";
+import path from "node:path";
 import type { DbAdapter } from "../db/db-adapter.js";
 import type { ContinuousOrchestrationConfig } from "./config.js";
 import type { BacklogItem, DecisionRecord, OrchestrationMode, ReadinessState, UsageGateView } from "./types.js";
@@ -36,6 +37,10 @@ import { runFleshPass, type FleshRunSummary } from "./flesh-runner.js";
 import { selectAutoPromotions } from "./auto-promote-policy.js";
 import { sendTelegramAlert, type AlertSender } from "./telegram.js";
 import { readOrchestrationHealthProjection } from "./health-projection.js";
+import {
+  readWorkShareDirectiveDrift,
+  type WorkShareDirectiveDrift,
+} from "../model-policy/work-share-drift.js";
 
 /** Dispatch/effective statuses that mean the work is finished — its write-scope
  *  lock can be released. Mirrors dispatch terminal states plus recovery moot. */
@@ -108,6 +113,10 @@ export interface DaemonDeps {
   alert?: AlertSender;
   /** Emit a manager/news event so fleet-visible daemon blockages do not stay silent. */
   emitNews?: (event: { type: string; message: string; data?: Record<string, unknown> }) => Promise<void>;
+  /** Absolute path to configs/model-policy.json for the directive drift guard. */
+  modelPolicyPath?: string;
+  /** Test seam for the directive drift guard. */
+  readModelPolicyDirectiveDrift?: () => WorkShareDirectiveDrift;
   now?: () => number;
   /** Override the kill-switch check (defaults to fs existence of the file). */
   killSwitchActive?: () => boolean;
@@ -135,6 +144,8 @@ export interface TickResult {
   auto_promote: AutoPromoteRunSummary | null;
   /** Ready rows whose stale provider/runtime metadata was corrected before admission. */
   ready_runtime_repairs: ReadyRuntimeRepair[];
+  /** Per-tick model-policy directive drift guard outcome. */
+  model_policy_drift: WorkShareDirectiveDrift;
   decisions: DecisionRecord[];
 }
 
@@ -328,6 +339,13 @@ export class ContinuousOrchestrationDaemon {
     await send(message);
   }
 
+  private readModelPolicyDirectiveDrift(): WorkShareDirectiveDrift {
+    if (this.deps.readModelPolicyDirectiveDrift) return this.deps.readModelPolicyDirectiveDrift();
+    return readWorkShareDirectiveDrift({
+      policyPath: this.deps.modelPolicyPath ?? path.join(process.cwd(), "configs", "model-policy.json"),
+    });
+  }
+
   /** Run exactly one orchestration tick. Idempotent w.r.t. external state. */
   async runTick(): Promise<TickResult> {
     const config = this.deps.config;
@@ -434,6 +452,7 @@ export class ContinuousOrchestrationDaemon {
     const plan = planAdmission(ordered, ctx, config);
     const decisions: DecisionRecord[] = [...reconcileDecisions];
     const admitted: Array<{ item_id: string; dispatch_phid: string | null }> = [];
+    const modelPolicyDrift = this.readModelPolicyDirectiveDrift();
 
     for (const repair of readyRuntimeRepairs) {
       decisions.push({
@@ -632,6 +651,32 @@ export class ContinuousOrchestrationDaemon {
       }
     }
 
+    if (modelPolicyDrift.status !== "match") {
+      const message = modelPolicyDrift.message ?? `model-policy directive guard failed with status ${modelPolicyDrift.status}`;
+      decisions.push({
+        item_id: null,
+        action: "model_policy_drift_alert",
+        reason: message,
+        metadata: {
+          event_type: "model_policy.drift",
+          status: modelPolicyDrift.status,
+          policy_path: modelPolicyDrift.policy_path,
+          diffs: modelPolicyDrift.diffs,
+          directive_targets: modelPolicyDrift.directive_targets,
+          work_share_targets: modelPolicyDrift.work_share_targets,
+        },
+      });
+      await this.alert(`Continuous orchestration model-policy drift: ${message}`);
+      await this.emitModelPolicyDrift(message, {
+        tick_id,
+        status: modelPolicyDrift.status,
+        policy_path: modelPolicyDrift.policy_path,
+        diffs: modelPolicyDrift.diffs,
+        directive_targets: modelPolicyDrift.directive_targets,
+        work_share_targets: modelPolicyDrift.work_share_targets,
+      });
+    }
+
     await appendDecisions(this.deps.adapter, { team_id: this.teamId, tick_id, dry_run: config.dry_run, records: decisions });
     await recordTickOutcome(this.deps.adapter, this.teamId, {
       zero_ticks: stall.zero_ticks,
@@ -655,6 +700,7 @@ export class ContinuousOrchestrationDaemon {
       refuel,
       auto_promote: autoPromote,
       ready_runtime_repairs: readyRuntimeRepairs,
+      model_policy_drift: modelPolicyDrift,
       decisions,
     };
   }
@@ -1114,6 +1160,15 @@ export class ContinuousOrchestrationDaemon {
       await this.deps.emitNews({ type: "fleet.blockage", message, data });
     } catch (err) {
       console.error("[orchestration] fleet blockage news emit failed:", err);
+    }
+  }
+
+  private async emitModelPolicyDrift(message: string, data: Record<string, unknown>): Promise<void> {
+    if (!this.deps.emitNews) return;
+    try {
+      await this.deps.emitNews({ type: "model_policy.drift", message, data });
+    } catch (err) {
+      console.error("[orchestration] model-policy drift news emit failed:", err);
     }
   }
 

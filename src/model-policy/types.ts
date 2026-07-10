@@ -38,6 +38,19 @@ export interface RawAgentModelPolicy {
 
 export interface RawModelPolicyConfig {
   schema_version?: number;
+  /** Operator-authorized baseline the daemon compares work_share.targets
+   *  against. This is intentionally separate from work_share so config drift
+   *  is detectable instead of self-certifying. */
+  authorized_directive?: {
+    work_share?: {
+      targets?: Record<string, number>;
+    };
+  };
+  /** Current provider-share target used by usage/routing health surfaces. */
+  work_share?: {
+    label?: string;
+    targets?: Record<string, number>;
+  };
   /** Providers automated availability derivation treats as constrained when
    *  the global usage gate is hard-paused (this is what makes Codex Light
    *  fire on usage limits). Defaults to ["openai"]. */

@@ -2,6 +2,9 @@
 // Backed by in-memory SQLite (same migration path as production).
 
 import express, { type Express } from "express";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, it, expect, beforeEach } from "vitest";
 import { SqliteAdapter } from "../../src/db/sqlite-adapter.js";
 import { migrateSqlite } from "../../src/db/migrations/sqlite.js";
@@ -50,6 +53,7 @@ function makeDaemon(
     // matches every pre-RD-014 test in this file exactly (no gating at all).
     resolveAgentHealth?: (names: string[]) => Promise<Set<string>>;
     resolveAgentRuntimes?: (names: string[]) => Promise<Map<string, string>>;
+    modelPolicyPath?: string;
   } = {},
 ) {
   const fired: BacklogItem[] = [];
@@ -75,6 +79,17 @@ function makeDaemon(
     emitNews: async (event) => {
       newsEvents.push(event);
     },
+    modelPolicyPath: over.modelPolicyPath,
+    readModelPolicyDirectiveDrift: over.modelPolicyPath
+      ? undefined
+      : () => ({
+          status: "match",
+          policy_path: "test-model-policy.json",
+          directive_targets: { anthropic: 0.5, openai: 0.5 },
+          work_share_targets: { anthropic: 0.5, openai: 0.5 },
+          diffs: [],
+          message: null,
+        }),
     pools: over.pools,
     killSwitchActive: () => over.killSwitch ?? false,
     now: () => Date.parse("2026-06-17T18:00:00Z"), // not a load-point
@@ -141,6 +156,28 @@ async function seedApprovedReview(adapter: SqliteAdapter, over: Partial<BacklogI
     ],
   );
   return (await getBacklogItem(adapter, item.item_id))!;
+}
+
+function writeModelPolicy(seed: {
+  directive: Record<string, number>;
+  workShare: Record<string, number>;
+}): string {
+  const dir = mkdtempSync(join(tmpdir(), "model-policy-drift-"));
+  const policyPath = join(dir, "model-policy.json");
+  writeFileSync(
+    policyPath,
+    JSON.stringify(
+      {
+        schema_version: 1,
+        authorized_directive: { work_share: { targets: seed.directive } },
+        work_share: { label: "test", targets: seed.workShare },
+        default: { primary: { runtime: "codex" } },
+      },
+      null,
+      2,
+    ),
+  );
+  return policyPath;
 }
 
 async function callApp(app: Express, path: string): Promise<{ status: number; body: any }> {
@@ -831,6 +868,41 @@ describe("daemon — dry-run vs live", () => {
 });
 
 describe("daemon — guardrail alerts", () => {
+  it("fires a drift alert when model-policy work_share diverges from the authorized directive", async () => {
+    const modelPolicyPath = writeModelPolicy({
+      directive: { anthropic: 0.5, openai: 0.5, cursor: 0 },
+      workShare: { anthropic: 0.05, openai: 0.95, cursor: 0 },
+    });
+    const { daemon, alerts, newsEvents } = makeDaemon(adapter, { modelPolicyPath });
+
+    const r = await daemon.runTick();
+
+    expect(r.model_policy_drift.status).toBe("drift");
+    expect(r.decisions.some((d) => d.action === "model_policy_drift_alert")).toBe(true);
+    expect(alerts.some((a) => /model-policy drift/.test(a))).toBe(true);
+    expect(newsEvents).toEqual([
+      expect.objectContaining({
+        type: "model_policy.drift",
+        data: expect.objectContaining({ status: "drift", policy_path: modelPolicyPath }),
+      }),
+    ]);
+  });
+
+  it("does not alert when model-policy work_share matches the authorized directive", async () => {
+    const modelPolicyPath = writeModelPolicy({
+      directive: { anthropic: 0.5, openai: 0.5, cursor: 0 },
+      workShare: { anthropic: 0.5, openai: 0.5, cursor: 0 },
+    });
+    const { daemon, alerts, newsEvents } = makeDaemon(adapter, { modelPolicyPath });
+
+    const r = await daemon.runTick();
+
+    expect(r.model_policy_drift.status).toBe("match");
+    expect(r.decisions.some((d) => d.action === "model_policy_drift_alert")).toBe(false);
+    expect(alerts.some((a) => /model-policy drift/.test(a))).toBe(false);
+    expect(newsEvents).toEqual([]);
+  });
+
   it("warns but does not auto-pause when the configured token reference is hit", async () => {
     await seedReady(adapter);
     const { daemon, alerts } = makeDaemon(adapter, {
