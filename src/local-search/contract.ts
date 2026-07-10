@@ -27,6 +27,7 @@ export interface LocalSearchDocument {
   id: string;
   title: string;
   project?: string | null;
+  track?: string | null;
   task?: string | null;
   agent?: string | null;
   author?: string | null;
@@ -68,6 +69,7 @@ export interface LocalSearchQuery {
   q?: string;
   types?: LocalSearchEntityType[];
   project?: string;
+  track?: string;
   task?: string;
   status?: string;
   readState?: LocalSearchReadState;
@@ -82,8 +84,11 @@ export interface LocalSearchQuery {
 export interface LocalSearchHit {
   entityType: LocalSearchEntityType;
   id: string;
+  rank: number;
+  resultDomId: string;
   title: string;
   project: string | null;
+  track: string | null;
   task: string | null;
   agent: string | null;
   author: string | null;
@@ -92,11 +97,29 @@ export interface LocalSearchHit {
   updatedAt: string;
   matchFields: string[];
   snippet: string;
+  snippet_highlights: LocalSearchSnippetHighlight[];
   freshness: LocalSearchFreshness;
   local_visual_state: LocalHealthVisual;
   openTarget: LocalSearchOpenTarget;
   routeMetadata?: LocalSearchRouteMetadata;
   score: number;
+}
+
+export interface LocalSearchSnippetHighlight {
+  field: string;
+  text: string;
+  ranges: Array<{ start: number; end: number }>;
+}
+
+export interface LocalSearchResultUx {
+  rankedList: true;
+  keyboardNavigation: {
+    role: "listbox";
+    itemRole: "option";
+    orientation: "vertical";
+    activeDescendantPattern: "local-search-result-{rank}";
+  };
+  scopeControls: Array<"project" | "track" | "agent" | "type" | "read_state" | "needs_review">;
 }
 
 export interface LocalSearchResponse {
@@ -111,6 +134,7 @@ export interface LocalSearchResponse {
   nextCursor: string | null;
   index: LocalSearchIndexHealth;
   index_visual_state: LocalHealthVisual;
+  ux: LocalSearchResultUx;
 }
 
 export interface LocalSearchIndexSnapshot {
