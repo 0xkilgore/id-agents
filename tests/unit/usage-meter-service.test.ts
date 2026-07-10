@@ -308,7 +308,50 @@ describe("GET /usage — v2 schema contract", () => {
     });
   });
 
-  it("captures Claude transcript usage before rendering /usage when an adapter is mounted", async () => {
+  it("does not capture Claude transcript usage on /usage by default", async () => {
+    const transcriptRoot = join(tmpDir, "claude-projects");
+    const projectDir = join(transcriptRoot, "-Users-test-cto");
+    mkdirSync(projectDir, { recursive: true });
+    writeFileSync(
+      join(projectDir, "session.jsonl"),
+      JSON.stringify({
+        type: "assistant",
+        timestamp: "2026-05-31T17:59:00.000Z",
+        session_id: "sess-usage-read-default",
+        uuid: "u-read-default",
+        message: {
+          model: "claude-sonnet-5",
+          usage: {
+            input_tokens: 100,
+            output_tokens: 50,
+            cache_creation_input_tokens: 0,
+            cache_read_input_tokens: 0,
+          },
+        },
+      }),
+    );
+    await adapter.query(
+      `INSERT INTO agents (id, team_id, name, type, model, status, created_at, runtime, working_directory)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+      ["cto", "team", "cto", "claude", "claude-sonnet-5", "running", FIXED_NOW, "claude-code-cli", "/Users/test/cto"],
+    );
+
+    const svc = mkService();
+    const app = express();
+    app.use(express.json());
+    mountUsageMeterRoutes(app, {
+      service: svc,
+      adapter,
+      transcriptsDir: transcriptRoot,
+    });
+
+    const res = await request(app).get("/usage");
+    expect(res.status).toBe(200);
+    expect(res.body.usage.daily.weighted_tokens).toBe(0);
+    expect(res.body.by_agent).toEqual([]);
+  });
+
+  it("captures Claude transcript usage before rendering /usage when captureOnRead is enabled", async () => {
     const transcriptRoot = join(tmpDir, "claude-projects");
     const projectDir = join(transcriptRoot, "-Users-test-cto");
     mkdirSync(projectDir, { recursive: true });
@@ -342,6 +385,7 @@ describe("GET /usage — v2 schema contract", () => {
     mountUsageMeterRoutes(app, {
       service: svc,
       adapter,
+      captureOnRead: true,
       transcriptsDir: transcriptRoot,
     });
 

@@ -27,8 +27,9 @@ export interface UsageMeterRouteOptions {
   adapter?: DbAdapter;
   /**
    * Capture Claude Code transcript usage before serving /usage.
-   * Defaults on when an adapter is present so the dashboard reflects real
-   * Anthropic burn without requiring a manual POST /usage/ingest first.
+   * Defaults off so dashboard reads never walk the transcript tree or contend
+   * with the manager control plane. Use POST /usage/ingest or backgroundIngest
+   * for freshness.
    */
   captureOnRead?: boolean;
   /** Test/ops override for the Claude Code transcript root. Defaults to ~/.claude/projects. */
@@ -40,15 +41,19 @@ export interface UsageMeterRouteOptions {
   backgroundIngest?: boolean;
 }
 
+const USAGE_ROUTE_CACHE_TTL_MS = 15_000;
+
 /**
  * Mount usage-meter routes. Pass an Express app (the manager's
  * managementApp) and a configured UsageMeterService instance.
  */
 export function mountUsageMeterRoutes(app: Application, opts: UsageMeterRouteOptions): void {
   const adapter = opts.adapter;
-  const captureOnRead = adapter && opts.captureOnRead !== false;
+  const captureOnRead = !!adapter && opts.captureOnRead === true;
   let captureInFlight: Promise<void> | null = null;
-  const captureUsageBeforeRead = async (): Promise<void> => {
+  let usageRouteCache: { at: number; key: string; body: unknown } | null = null;
+  let daemonRouteCache: { at: number; body: unknown } | null = null;
+  const triggerUsageCapture = (): void => {
     if (!adapter || !captureOnRead) return;
     if (!captureInFlight) {
       captureInFlight = (async () => {
@@ -64,21 +69,34 @@ export function mountUsageMeterRoutes(app: Application, opts: UsageMeterRouteOpt
         }
       })();
     }
-    await captureInFlight;
   };
 
   app.get("/usage", async (req: Request, res: Response) => {
     try {
-      await captureUsageBeforeRead();
+      triggerUsageCapture();
       // Gap 2: `?spend_scope=daemon_autonomous|daemon_fleshing` returns the
       // daemon-attributed report; anything else returns the fleet-global report.
       const scope = typeof req.query.spend_scope === "string" ? req.query.spend_scope : "fleet";
       if (scope === "daemon_autonomous" || scope === "daemon_fleshing") {
-        res.json(await opts.service.buildDaemonReport());
+        const now = Date.now();
+        if (daemonRouteCache && now - daemonRouteCache.at < USAGE_ROUTE_CACHE_TTL_MS) {
+          res.json(daemonRouteCache.body);
+          return;
+        }
+        const body = await opts.service.buildDaemonReport();
+        daemonRouteCache = { at: now, body };
+        res.json(body);
         return;
       }
-      const report = await opts.service.buildReport();
-      res.json(report);
+      const cacheKey = "fleet";
+      const now = Date.now();
+      if (usageRouteCache && usageRouteCache.key === cacheKey && now - usageRouteCache.at < USAGE_ROUTE_CACHE_TTL_MS) {
+        res.json(usageRouteCache.body);
+        return;
+      }
+      const body = await opts.service.buildReport();
+      usageRouteCache = { at: now, key: cacheKey, body };
+      res.json(body);
     } catch (err) {
       res.status(500).json({
         schema_version: "usage-meter-v2",
@@ -91,7 +109,14 @@ export function mountUsageMeterRoutes(app: Application, opts: UsageMeterRouteOpt
   // GET /usage/daemon — daemon-attributed spend ledger + emergency-brake gate.
   app.get("/usage/daemon", async (_req: Request, res: Response) => {
     try {
-      res.json(await opts.service.buildDaemonReport());
+      const now = Date.now();
+      if (daemonRouteCache && now - daemonRouteCache.at < USAGE_ROUTE_CACHE_TTL_MS) {
+        res.json(daemonRouteCache.body);
+        return;
+      }
+      const body = await opts.service.buildDaemonReport();
+      daemonRouteCache = { at: now, body };
+      res.json(body);
     } catch (err) {
       res.status(500).json({
         schema_version: "daemon-usage.v1",

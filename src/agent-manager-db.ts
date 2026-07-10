@@ -800,6 +800,7 @@ async function withTimeout<T>(
 
 const MANAGER_ROUTE_TIMEOUT_MS = 10_000;
 const MANAGER_ROUTE_TIMEOUT_MAX_MS = 60_000;
+const CONSOLE_ENDPOINT_CACHE_TTL_MS = 15_000;
 
 function parseManagerRouteTimeout(req: express.Request): number {
   const candidates = [
@@ -929,6 +930,12 @@ interface ProcessInspection {
   commandLine: string;
 }
 
+type AgentsListCacheEntry = {
+  at: number;
+  total: number;
+  agents: unknown[];
+};
+
 export class AgentManagerDb {
   private managementApp: express.Application;
   /** P0 control-plane Slice 1 — heavy-read protection middleware. */
@@ -1001,6 +1008,9 @@ export class AgentManagerDb {
   // above — never persisted, always safe to drop on restart.
   private routingHealthCache: { at: number; model: RoutingHealthReadModel } | null = null;
   private static readonly ROUTING_HEALTH_CACHE_TTL_MS = 5_000;
+  private agentsListCache: Map<string, AgentsListCacheEntry> = new Map();
+  private agentsListRefreshes: Map<string, Promise<void>> = new Map();
+  private healthResponseCache: Map<string, { at: number; body: unknown }> = new Map();
   private remoteProbeInterval: NodeJS.Timeout | null = null;
   private querySweeperInterval: NodeJS.Timeout | null = null;
   private taskCommentSweepInterval: NodeJS.Timeout | null = null;
@@ -1854,6 +1864,49 @@ export class AgentManagerDb {
 
   private async dbListAgents(teamId: string, includeAutomator: boolean = false): Promise<AgentRow[]> {
     return this.db.agents.list(teamId, includeAutomator);
+  }
+
+  private async cachedAgentsListResponse(
+    teamId: string,
+    includeAll: boolean,
+    isAdmin: boolean,
+  ): Promise<AgentsListCacheEntry> {
+    const now = Date.now();
+    const cacheKey = `${teamId}:${includeAll ? 'all' : 'default'}:${isAdmin ? 'admin' : 'redacted'}`;
+    const cached = this.agentsListCache.get(cacheKey);
+    if (cached) {
+      if (now - cached.at >= CONSOLE_ENDPOINT_CACHE_TTL_MS) {
+        this.refreshAgentsListCache(cacheKey, teamId, includeAll, isAdmin);
+      }
+      return cached;
+    }
+
+    const agents = await this.dbListAgents(teamId, includeAll);
+    const mapped = agents.map(a => this.agentToResponse(a, { isAdmin }));
+    const entry = { at: now, total: mapped.length, agents: mapped };
+    this.agentsListCache.set(cacheKey, entry);
+    return entry;
+  }
+
+  private refreshAgentsListCache(
+    cacheKey: string,
+    teamId: string,
+    includeAll: boolean,
+    isAdmin: boolean,
+  ): void {
+    if (this.agentsListRefreshes.has(cacheKey)) return;
+    const refresh = (async () => {
+      try {
+        const agents = await this.dbListAgents(teamId, includeAll);
+        const mapped = agents.map(a => this.agentToResponse(a, { isAdmin }));
+        this.agentsListCache.set(cacheKey, { at: Date.now(), total: mapped.length, agents: mapped });
+      } catch (err) {
+        console.warn(`[Manager] /agents cache refresh failed: ${err instanceof Error ? err.message : String(err)}`);
+      } finally {
+        this.agentsListRefreshes.delete(cacheKey);
+      }
+    })();
+    this.agentsListRefreshes.set(cacheKey, refresh);
   }
 
   private async filesystemArtifactRootsForTeam(teamId: string) {
@@ -4470,6 +4523,12 @@ export class AgentManagerDb {
 
     this.managementApp.get('/health', async (req, res) => {
       const teamName = this.getTeamName(req);
+      const now = Date.now();
+      const cached = this.healthResponseCache.get(teamName);
+      if (cached && now - cached.at < CONSOLE_ENDPOINT_CACHE_TTL_MS) {
+        res.json(cached.body);
+        return;
+      }
       const dbProbe = await withTimeout(
         (async () => {
           const team = await this.db.teams.getTeamByName(teamName);
@@ -4512,12 +4571,12 @@ export class AgentManagerDb {
             error: err instanceof Error ? err.message : String(err),
             counts: { total: 0, accepted: 0, quarantined: 0, unassigned: 0, track_unknown: 0 },
           }));
-      res.json({
+      const body = {
         status: 'ok',
         team: teamName,
         agents: dbProbe.timedOut || dbProbe.value.count == null ? null : parseInt(dbProbe.value.count || '0'),
         datastore: dbProbe.timedOut ? { state: 'degraded', reason: 'health_db_probe_timeout' } : { state: 'ok' },
-        timestamp: Date.now(),
+        timestamp: now,
         recovery_backfill,
         conformance,
         // T11.1: the running build identity + staleness-vs-origin signal.
@@ -4537,7 +4596,9 @@ export class AgentManagerDb {
         // configured nodes (console-server / kapelle-site), so /ops can surface
         // drift on ANY node, not just the manager.
         fleet_freshness: this.fleetFreshnessSummary,
-      });
+      };
+      this.healthResponseCache.set(teamName, { at: now, body });
+      res.json(body);
     });
 
     // Install team/principal context middleware for all remaining routes.
@@ -6172,16 +6233,15 @@ export class AgentManagerDb {
       const { id: teamId } = await this.getTeam(req);
       // ?all=true includes automator agents (normally hidden)
       const includeAll = req.query.all === 'true' || req.query.all === '1';
-      const agents = await this.dbListAgents(teamId, includeAll);
       const isAdmin = this.isAdminRequest(req);
       // P0 control-plane Slice 1 (c): bound the result so the list read can't
       // serialize an unbounded full scan. Default 100, max 500 (?limit clamps).
       const limit = parseReadLimit(req.query.limit);
-      const mapped = agents.map(a => this.agentToResponse(a, { isAdmin }));
+      const cached = await this.cachedAgentsListResponse(teamId, includeAll, isAdmin);
       res.json({
-        count: Math.min(mapped.length, limit),
-        total: mapped.length,
-        agents: mapped.slice(0, limit),
+        count: Math.min(cached.total, limit),
+        total: cached.total,
+        agents: cached.agents.slice(0, limit),
       });
     });
 
