@@ -269,15 +269,133 @@ export function executeSurfacedArtifactsSavedView(
   nowIso = new Date().toISOString(),
 ): SavedViewExecutionResult<SurfacedArtifactRow> {
   const errors = validateSavedViewPredicateFields(predicate);
+  const filtered = errors.length === 0 ? rows.filter((row) => matchesSavedViewPredicate(row, predicate)) : [];
   return {
     ok: errors.length === 0,
     schema_version: "view-execution.v1",
     view_id: SURFACED_ARTIFACTS_SAVED_VIEW.id,
     generated_at: nowIso,
-    rows: errors.length === 0 ? rows : [],
-    count: errors.length === 0 ? rows.length : 0,
+    rows: filtered,
+    count: filtered.length,
     errors,
   };
+}
+
+function matchesSavedViewPredicate(row: SurfacedArtifactRow, input: unknown): boolean {
+  if (!input || typeof input !== "object") return true;
+  if (Array.isArray(input)) return input.every((child) => matchesSavedViewPredicate(row, child));
+
+  const predicate = input as Record<string, unknown>;
+  if (Array.isArray(predicate.and)) return predicate.and.every((child) => matchesSavedViewPredicate(row, child));
+  if (Array.isArray(predicate.or)) return predicate.or.some((child) => matchesSavedViewPredicate(row, child));
+  if ("not" in predicate) return !matchesSavedViewPredicate(row, predicate.not);
+  if ("where" in predicate) return matchesSavedViewPredicate(row, predicate.where);
+  if ("query" in predicate) return matchesSavedViewPredicate(row, predicate.query);
+  if ("predicate" in predicate) return matchesSavedViewPredicate(row, predicate.predicate);
+  if (Array.isArray(predicate.predicates)) return predicate.predicates.every((child) => matchesSavedViewPredicate(row, child));
+  if (Array.isArray(predicate.filters)) return predicate.filters.every((child) => matchesSavedViewPredicate(row, child));
+
+  if (typeof predicate.field !== "string") return true;
+  const op = typeof predicate.op === "string" ? predicate.op : "eq";
+  return compareSavedViewValue(valueForSavedViewField(row, predicate.field as SavedViewFieldId), op, predicate.value);
+}
+
+function valueForSavedViewField(row: SurfacedArtifactRow, field: SavedViewFieldId): unknown {
+  switch (field) {
+    case "artifact.id": return row.id;
+    case "artifact.title": return row.title;
+    case "artifact.subtitle": return row.subtitle;
+    case "artifact.workItemRef": return row.work_item_ref;
+    case "artifact.groupCount": return row.group_count;
+    case "artifact.groupedSourceKinds": return row.grouped_source_kinds;
+    case "artifact.rankScore": return row.rank_score;
+    case "artifact.status": return row.status;
+    case "artifact.relevanceReason": return row.relevance_reason;
+    case "artifact.needs": return row.needs;
+    case "artifact.artifactRef": return row.artifact_ref;
+    case "artifact.dispatchRef":
+    case "dispatch.id":
+      return row.dispatch_ref;
+    case "artifact.taskRef":
+    case "user_task.id":
+      return row.task_ref;
+    case "artifact.projectRef":
+    case "user_task.projectRef":
+      return row.project_ref;
+    case "artifact.programRef": return row.program_ref;
+    case "artifact.trackRef": return row.track_ref;
+    case "artifact.agentName": return row.agent_name;
+    case "artifact.createdAt": return row.created_at;
+    case "artifact.updatedAt":
+    case "user_task.updatedAt":
+      return row.updated_at;
+    case "artifact.sourceKind": return row.source_kind;
+    case "artifact.sourceType": return row.source_type;
+    case "artifact.sourceLabel": return row.source_label;
+    case "artifact.sourcePath": return row.source_path;
+    case "artifact.sourceProof": return row.source_proof;
+    case "artifact.visibility.discoveredBy": return row.visibility_proof.discovered_by;
+    case "artifact.visibility.pathPresent": return row.visibility_proof.artifact_path_present;
+    case "artifact.visibility.bodyRenderable": return row.visibility_proof.body_renderable;
+    case "artifact.delivery.stableUrl": return row.delivery.stable_url;
+    case "artifact.delivery.copyTextUrl": return row.delivery.copy_text_url;
+    case "artifact.delivery.downloadUrl": return row.delivery.download_url;
+    case "artifact.delivery.mediaType": return row.delivery.media_type;
+    case "artifact.delivery.freshness": return row.delivery.freshness;
+    case "artifact.delivery.sourceHost": return row.delivery.source_host;
+    case "artifact.delivery.sourceMtime": return row.delivery.source_mtime;
+    case "artifact.delivery.contentHash":
+    case "artifact.contentHash":
+      return row.delivery.content_hash;
+    case "artifact.delivery.bodyCached": return row.delivery.body_cached;
+    case "artifact.delivery.bodyAvailable": return row.delivery.body_available;
+    case "artifact.delivery.bodySource": return row.delivery.body_source;
+    case "artifact.delivery.openUrl": return row.delivery.open_url;
+    case "user_task.title": return row.title;
+    case "user_task.status": return row.status;
+    case "user_task.owner": return row.agent_name;
+    case "user_task.context": return row.subtitle;
+    default: return undefined;
+  }
+}
+
+function compareSavedViewValue(actual: unknown, op: string, expected: unknown): boolean {
+  if (op === "exists") return actual !== undefined && actual !== null && actual !== "";
+  if (op === "contains") {
+    if (Array.isArray(actual)) return actual.some((item) => scalarEquals(item, expected));
+    return String(actual ?? "").toLowerCase().includes(String(expected ?? "").toLowerCase());
+  }
+  if (op === "in" || op === "not_in") {
+    const values = Array.isArray(expected) ? expected : [expected];
+    const matched = values.some((value) => scalarEquals(actual, value));
+    return op === "in" ? matched : !matched;
+  }
+  if (op === "neq") return !scalarEquals(actual, expected);
+  if (op === "gt" || op === "gte" || op === "lt" || op === "lte") {
+    const left = comparableValue(actual);
+    const right = comparableValue(expected);
+    if (left == null || right == null) return false;
+    if (op === "gt") return left > right;
+    if (op === "gte") return left >= right;
+    if (op === "lt") return left < right;
+    return left <= right;
+  }
+  return scalarEquals(actual, expected);
+}
+
+function scalarEquals(left: unknown, right: unknown): boolean {
+  if (left === right) return true;
+  if (left == null || right == null) return false;
+  return String(left).toLowerCase() === String(right).toLowerCase();
+}
+
+function comparableValue(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value !== "string" || !value.trim()) return null;
+  const numeric = Number(value);
+  if (Number.isFinite(numeric)) return numeric;
+  const time = Date.parse(value);
+  return Number.isFinite(time) ? time : null;
 }
 
 function buildFieldRegistry(fieldIds: SavedViewFieldId[]): SavedViewFieldRegistryEntry[] {

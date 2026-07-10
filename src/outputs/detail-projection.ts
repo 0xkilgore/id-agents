@@ -1,4 +1,5 @@
 import { promises as fsp } from "node:fs";
+import { createHash } from "node:crypto";
 import { basename as pathBasename, extname } from "node:path";
 import type { DbAdapter } from "../db/db-adapter.js";
 import { artifactRowToEntry } from "./entry-projection.js";
@@ -89,11 +90,22 @@ export async function buildArtifactDetail(
     catalogPresent: Boolean(catalog),
     status,
   });
+  const versionKey = artifactDetailVersionKey({
+    artifactId: ref.artifactId,
+    catalog,
+    review,
+    body,
+    operationsCount,
+    comments,
+    timeline,
+    draftUpdatedAt: draftRow?.updated_at ?? null,
+  });
 
   return {
     ok: true,
     schema_version: "artifact.detail.v1",
     generated_at: nowIso,
+    version_key: versionKey,
     artifact_id: ref.artifactId,
     requested_ref: ref.requestedRef,
     resolved_from: ref.resolvedFrom,
@@ -161,6 +173,39 @@ export async function buildArtifactDetail(
     },
     draft,
   };
+}
+
+function artifactDetailVersionKey(input: {
+  artifactId: string;
+  catalog: ArtifactCatalogRow | null;
+  review: ArtifactReviewStateRow | null;
+  body: ArtifactDetailBody;
+  operationsCount: number;
+  comments: ArtifactDetailResponse["comments"];
+  timeline: ArtifactDetailResponse["timeline"];
+  draftUpdatedAt: string | null;
+}): string {
+  const latestComment = input.comments[input.comments.length - 1] ?? null;
+  const latestTimeline = input.timeline[input.timeline.length - 1] ?? null;
+  const payload = {
+    artifact_id: input.artifactId,
+    catalog_updated_at: input.catalog?.updated_at ?? null,
+    review_updated_at: input.review?.updated_at ?? null,
+    body_cache_version_key: input.body.cache?.version_key ?? null,
+    body_cache_content_hash: input.body.cache?.content_hash ?? null,
+    body_source: input.body.source,
+    body_bytes: input.body.bytes,
+    body_error: input.body.error,
+    operations_count: input.operationsCount,
+    comments_count: input.comments.length,
+    latest_comment_id: latestComment?.comment_id ?? null,
+    latest_comment_ts: latestComment?.ts ?? null,
+    timeline_count: input.timeline.length,
+    latest_timeline_id: latestTimeline?.event_id ?? null,
+    latest_timeline_ts: latestTimeline?.ts ?? null,
+    draft_updated_at: input.draftUpdatedAt,
+  };
+  return `sha256:${createHash("sha256").update(JSON.stringify(payload)).digest("hex")}`;
 }
 
 function decodePathRef(ref: string): string | null {

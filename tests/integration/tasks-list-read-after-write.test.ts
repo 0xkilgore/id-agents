@@ -280,6 +280,82 @@ describe('GET /tasks read-model immediate reflect', () => {
     expect(single.task.completedAt).not.toBeNull();
   });
 
+  it('GET /tasks/:ref reuses the adjacent task list cache for listed rows', async () => {
+    const first = 'adjacent-prefetch-first';
+    const second = 'adjacent-prefetch-second';
+    await insertTaskDirect(db, teamId, first, coderAgentId, 'doing');
+    await insertTaskDirect(db, teamId, second, coderAgentId, 'doing');
+
+    const originalList = db.tasks.list.bind(db.tasks);
+    let listCalls = 0;
+    db.tasks.list = (async (...args: Parameters<typeof originalList>) => {
+      listCalls += 1;
+      return originalList(...args);
+    }) as typeof db.tasks.list;
+
+    try {
+      const list = await fetch(`${baseUrl}/tasks`, {
+        headers: { 'X-Id-Team': TEAM },
+      }).then((r) => r.json());
+      expect(list.tasks.map((task: Record<string, unknown>) => task.name)).toContain(second);
+      expect(listCalls).toBe(1);
+
+      const detail = await fetch(`${baseUrl}/tasks/${second}`, {
+        headers: { 'X-Id-Team': TEAM },
+      }).then((r) => r.json());
+      expect(detail.task.name).toBe(second);
+      expect(listCalls).toBe(1);
+    } finally {
+      db.tasks.list = originalList as typeof db.tasks.list;
+    }
+  });
+
+  it('GET /tasks/:ref/detail/version returns a bumped version after another session appends a note', async () => {
+    const taskName = 'version-check-task';
+    await insertTaskDirect(db, teamId, taskName, coderAgentId, 'doing', {
+      title: 'Version check task',
+    });
+
+    const firstOpen = await fetch(`${baseUrl}/tasks/${taskName}/detail`, {
+      headers: { 'X-Id-Team': TEAM, 'X-Test-Session': 'session-a' },
+    }).then(async (r) => ({ status: r.status, body: await r.json() }));
+    const secondOpen = await fetch(`${baseUrl}/tasks/${taskName}/detail`, {
+      headers: { 'X-Id-Team': TEAM, 'X-Test-Session': 'session-b' },
+    }).then(async (r) => ({ status: r.status, body: await r.json() }));
+
+    expect(firstOpen.status).toBe(200);
+    expect(secondOpen.status).toBe(200);
+    expect(secondOpen.body.task.version_key).toBe(firstOpen.body.task.version_key);
+
+    const before = await fetch(`${baseUrl}/tasks/${taskName}/detail/version`, {
+      headers: { 'X-Id-Team': TEAM, 'X-Test-Session': 'session-b' },
+    }).then((r) => r.json());
+    expect(before.version_key).toBe(firstOpen.body.task.version_key);
+
+    const appendRes = await fetch(`${baseUrl}/tasks/${taskName}/notes`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Id-Team': TEAM, 'X-Test-Session': 'session-a' },
+      body: JSON.stringify({
+        text: 'Out-of-band note that should bump the detail key.',
+        actor: 'user:chris',
+        source_path: '/tmp/tasks.md',
+        source_line: 50,
+        timestamp: '2026-07-10T12:00:00.000Z',
+      }),
+    });
+    expect(appendRes.status).toBe(201);
+
+    const after = await fetch(`${baseUrl}/tasks/${taskName}/detail/version`, {
+      headers: { 'X-Id-Team': TEAM, 'X-Test-Session': 'session-b' },
+    }).then((r) => r.json());
+    expect(after).toMatchObject({
+      ok: true,
+      schema_version: 'task.detail.version.v1',
+      task_name: taskName,
+    });
+    expect(after.version_key).not.toBe(before.version_key);
+  });
+
   it('POST /tasks/:ref/notes emits one durable task_comment event, routes once, and shows receipts on task detail', async () => {
     const taskName = 'comment-routing-task';
     await insertAgentDirect(db, teamId, 'cane');
