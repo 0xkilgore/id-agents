@@ -16,7 +16,14 @@ import type { CheckinsRepository, EventsRepository } from '../db/db-service.js';
 import type { CheckinPriority } from '../db/types.js';
 
 export const TASK_CLAIMED = 'task:claimed';
+export const TASK_CREATED = 'task:created';
 export const TASK_COMPLETED = 'task:completed';
+export const DISPATCH_QUEUED = 'dispatch:queued';
+export const DISPATCH_IN_FLIGHT = 'dispatch:in_flight';
+export const DISPATCH_BOUNCED = 'dispatch:bounced';
+export const DISPATCH_FAILED = 'dispatch:failed';
+export const DISPATCH_DONE = 'dispatch:done';
+export const ARTIFACT_REGISTERED = 'artifact:registered';
 export const QUERY_DELIVERED = 'query:delivered';
 export const QUERY_FAILED = 'query:failed';
 export const QUERY_EXPIRED = 'query:expired';
@@ -37,6 +44,15 @@ export interface TaskClaimedInput {
   occurredAt: number;
 }
 
+export interface TaskCreatedInput {
+  teamId: string;
+  taskUuid: string;
+  taskName: string;
+  title?: string | null;
+  createdByAgentId?: string | null;
+  occurredAt: number;
+}
+
 export interface TaskCompletedInput {
   teamId: string;
   taskUuid: string;
@@ -44,6 +60,32 @@ export interface TaskCompletedInput {
   title?: string | null;
   ownerAgentId: string | null;
   actorAgentId: string | null;
+  occurredAt: number;
+}
+
+export interface DispatchStatusInput {
+  teamId: string;
+  dispatchId: string;
+  queryId: string;
+  toAgent: string;
+  fromActor: string;
+  subject?: string | null;
+  status: string;
+  occurredAt: number;
+  failureKind?: string | null;
+  failureDetail?: string | null;
+  artifactPath?: string | null;
+}
+
+export interface ArtifactRegisteredInput {
+  teamId: string;
+  artifactId: string;
+  dispatchId?: string | null;
+  agent?: string | null;
+  title?: string | null;
+  absPath?: string | null;
+  availability?: string | null;
+  inserted: boolean;
   occurredAt: number;
 }
 
@@ -91,6 +133,27 @@ export async function emitTaskClaimed(
   });
 }
 
+export async function emitTaskCreated(
+  events: EventsRepository,
+  input: TaskCreatedInput,
+): Promise<{ seq: number }> {
+  return events.insert({
+    team_id: input.teamId,
+    topic: TASK_CREATED,
+    actor_agent_id: input.createdByAgentId ?? null,
+    subject_kind: 'task',
+    subject_id: input.taskUuid,
+    occurred_at: input.occurredAt,
+    data: {
+      task_name: input.taskName,
+      task_uuid: input.taskUuid,
+      status: 'todo',
+      owner: null,
+      ...(input.title ? { title_preview: truncate(input.title) } : {}),
+    },
+  });
+}
+
 export async function emitTaskCompleted(
   events: EventsRepository,
   input: TaskCompletedInput,
@@ -111,6 +174,71 @@ export async function emitTaskCompleted(
       ...(input.title ? { title_preview: truncate(input.title) } : {}),
     },
   });
+}
+
+export async function emitDispatchStatus(
+  events: EventsRepository,
+  input: DispatchStatusInput,
+): Promise<{ seq: number }> {
+  return events.insert({
+    team_id: input.teamId,
+    topic: dispatchTopicForStatus(input.status),
+    actor_agent_id: input.toAgent,
+    subject_kind: 'dispatch',
+    subject_id: input.dispatchId,
+    occurred_at: input.occurredAt,
+    data: {
+      dispatch_id: input.dispatchId,
+      query_id: input.queryId,
+      to_agent: input.toAgent,
+      from_actor: input.fromActor,
+      status: input.status,
+      ...(input.subject ? { subject_preview: truncate(input.subject) } : {}),
+      ...(input.failureKind ? { failure_kind: input.failureKind } : {}),
+      ...(input.failureDetail ? { failure_detail_preview: truncate(input.failureDetail) } : {}),
+      ...(input.artifactPath ? { artifact_path: input.artifactPath } : {}),
+    },
+  });
+}
+
+export async function emitArtifactRegistered(
+  events: EventsRepository,
+  input: ArtifactRegisteredInput,
+): Promise<{ seq: number }> {
+  return events.insert({
+    team_id: input.teamId,
+    topic: ARTIFACT_REGISTERED,
+    actor_agent_id: input.agent ?? null,
+    subject_kind: 'artifact',
+    subject_id: input.artifactId,
+    occurred_at: input.occurredAt,
+    data: {
+      artifact_id: input.artifactId,
+      dispatch_id: input.dispatchId ?? null,
+      agent: input.agent ?? null,
+      inserted: input.inserted,
+      ...(input.title ? { title_preview: truncate(input.title) } : {}),
+      ...(input.absPath ? { abs_path: input.absPath } : {}),
+      ...(input.availability ? { availability: input.availability } : {}),
+    },
+  });
+}
+
+function dispatchTopicForStatus(status: string): string {
+  switch (status) {
+    case 'queued':
+      return DISPATCH_QUEUED;
+    case 'in_flight':
+      return DISPATCH_IN_FLIGHT;
+    case 'bounced':
+      return DISPATCH_BOUNCED;
+    case 'failed':
+      return DISPATCH_FAILED;
+    case 'done':
+      return DISPATCH_DONE;
+    default:
+      return `dispatch:${status}`;
+  }
 }
 
 export async function emitQueryDelivered(

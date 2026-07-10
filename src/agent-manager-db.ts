@@ -105,8 +105,11 @@ import {
   emitQueryDelivered,
   emitQueryExpired,
   emitQueryFailed,
+  emitArtifactRegistered,
+  emitDispatchStatus,
   emitTaskClaimed,
   emitTaskCompleted,
+  emitTaskCreated,
   recordCheckinCreated,
 } from './wakeup-service/event-producer.js';
 import { RetentionService } from './wakeup-service/retention.js';
@@ -619,6 +622,19 @@ interface RestAPCatalog {
 const TOPIC_ALIASES: Record<string, readonly string[]> = {
   'query:terminal': ['query:delivered', 'query:failed', 'query:expired'],
   'task:status': ['task:created', 'task:claimed', 'task:completed'],
+  'dispatch:status': ['dispatch:queued', 'dispatch:in_flight', 'dispatch:bounced', 'dispatch:failed', 'dispatch:done'],
+  'artifact:state': ['artifact:registered'],
+  'manager:feed': [
+    'task:created',
+    'task:claimed',
+    'task:completed',
+    'dispatch:queued',
+    'dispatch:in_flight',
+    'dispatch:bounced',
+    'dispatch:failed',
+    'dispatch:done',
+    'artifact:registered',
+  ],
   'agent:lifecycle': ['agent:started', 'agent:stopped', 'agent:rebuild'],
 };
 
@@ -3248,6 +3264,18 @@ export class AgentManagerDb {
           },
           { target_url: agent.endpoint, wake: body.wake === true },
         );
+        if (this.db.events) {
+          await emitDispatchStatus(this.db.events, {
+            teamId,
+            dispatchId: enq.dispatch_phid,
+            queryId: enq.query_id,
+            toAgent: body.to_agent,
+            fromActor,
+            subject: typeof body.subject === 'string' ? body.subject : undefined,
+            status: enq.status,
+            occurredAt: Date.now(),
+          });
+        }
         return res.json({ ok: true, ...enq });
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
@@ -3284,6 +3312,19 @@ export class AgentManagerDb {
           return res.status(404).json({
             ok: false,
             error: `dispatch not found: ${dispatchIdRaw}`,
+          });
+        }
+        if (this.db.events) {
+          const { id: teamId } = await this.getTeam(req);
+          await emitDispatchStatus(this.db.events, {
+            teamId,
+            dispatchId: doc.dispatch_phid,
+            queryId: doc.query_id,
+            toAgent: doc.to_agent,
+            fromActor: doc.from_actor,
+            subject: doc.subject,
+            status: doc.status,
+            occurredAt: Date.now(),
           });
         }
         return res.json({
@@ -3355,6 +3396,21 @@ export class AgentManagerDb {
           detail,
         });
         if (!r.ok) throw new Error(r.detail);
+        if (this.db.events) {
+          const { id: teamId } = await this.getTeam(req);
+          await emitDispatchStatus(this.db.events, {
+            teamId,
+            dispatchId: r.value.dispatch_phid,
+            queryId: r.value.query_id,
+            toAgent: r.value.to_agent,
+            fromActor: r.value.from_actor,
+            subject: r.value.subject,
+            status: r.value.status,
+            failureKind: r.value.failure_kind,
+            failureDetail: r.value.failure_detail,
+            occurredAt: Date.now(),
+          });
+        }
         return res.json({ ok: true, dispatch: r.value });
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
@@ -3402,6 +3458,19 @@ export class AgentManagerDb {
           next_attempt_at: new Date(nextAttemptMs).toISOString(),
         });
         if (!r.ok) throw new Error(r.detail);
+        if (this.db.events) {
+          const { id: teamId } = await this.getTeam(req);
+          await emitDispatchStatus(this.db.events, {
+            teamId,
+            dispatchId: r.value.dispatch_phid,
+            queryId: r.value.query_id,
+            toAgent: r.value.to_agent,
+            fromActor: r.value.from_actor,
+            subject: r.value.subject,
+            status: r.value.status,
+            occurredAt: Date.now(),
+          });
+        }
         return res.json({ ok: true, dispatch: r.value });
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
@@ -4321,8 +4390,9 @@ export class AgentManagerDb {
         })();
 
         // Mark the dispatch done.
+        let terminalDoc: typeof doc | null = null;
         try {
-          await this.dispatchScheduler.handleAgentDone({
+          terminalDoc = await this.dispatchScheduler.handleAgentDone({
             query_id: doc.query_id,
             result:
               body.result && typeof body.result === 'object'
@@ -4332,6 +4402,23 @@ export class AgentManagerDb {
             failure_kind: failureKind,
             error: errorDetail,
           });
+          if (this.db.events && terminalDoc) {
+            const eventTeamId = await this.db.queries.findTeam(terminalDoc.query_id)
+              ?? await this.db.teams.getOrCreateTeamId('default');
+            await emitDispatchStatus(this.db.events, {
+              teamId: eventTeamId,
+              dispatchId: terminalDoc.dispatch_phid,
+              queryId: terminalDoc.query_id,
+              toAgent: terminalDoc.to_agent,
+              fromActor: terminalDoc.from_actor,
+              subject: terminalDoc.subject,
+              status: terminalDoc.status,
+              failureKind: terminalDoc.failure_kind,
+              failureDetail: terminalDoc.failure_detail,
+              artifactPath: terminalDoc.artifact_path,
+              occurredAt: Date.now(),
+            });
+          }
         } catch (err) {
           this.managerLog(
             `[agent-done] handleAgentDone failed: ${err instanceof Error ? err.message : String(err)}`,
@@ -4376,7 +4463,7 @@ export class AgentManagerDb {
                 typeof resultProjection?.source_host === 'string' && resultProjection.source_host.trim()
                   ? resultProjection.source_host.trim()
                   : null;
-              await registerArtifactPathDelivery(
+              const artifactDelivery = await registerArtifactPathDelivery(
                 this.db.adapter,
                 {
                   abs_path: artifactPath,
@@ -4389,6 +4476,21 @@ export class AgentManagerDb {
                 },
                 new Date().toISOString(),
               );
+              if (this.db.events) {
+                const eventTeamId = await this.db.queries.findTeam(doc.query_id)
+                  ?? await this.db.teams.getOrCreateTeamId('default');
+                await emitArtifactRegistered(this.db.events, {
+                  teamId: eventTeamId,
+                  artifactId: artifactDelivery.row.artifact_id,
+                  dispatchId: doc.dispatch_phid,
+                  agent: artifactDelivery.row.agent,
+                  title: artifactDelivery.row.title,
+                  absPath: artifactDelivery.row.abs_path,
+                  availability: artifactDelivery.row.availability,
+                  inserted: artifactDelivery.inserted,
+                  occurredAt: Date.now(),
+                });
+              }
             } catch (err) {
               this.managerLog(
                 `[agent-done] artifact registration failed for ${doc.dispatch_phid}: ${err instanceof Error ? err.message : String(err)}`,
@@ -8032,6 +8134,16 @@ export class AgentManagerDb {
         );
 
         await this.db.tasks.create(taskRow);
+        if (this.db.events) {
+          await emitTaskCreated(this.db.events, {
+            teamId: taskTeamId,
+            taskUuid: taskRow.uuid,
+            taskName: taskRow.name,
+            title: taskRow.title,
+            createdByAgentId: taskRow.created_by,
+            occurredAt: Date.now(),
+          });
+        }
         this.clearTaskListCache(taskTeamId);
         res.status(201).json({ ok: true, task: await this.buildTaskResult(taskRow, teamId) });
       } catch (err: any) {
