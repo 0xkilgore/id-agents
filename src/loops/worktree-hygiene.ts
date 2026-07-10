@@ -24,6 +24,17 @@ export interface WorktreeHygieneIncident {
   detail: string | null;
 }
 
+export interface StaleBaseAdmissionInput {
+  repo: string;
+  branch: string;
+  base_ref?: string | null;
+  behind?: number | null;
+  threshold?: number | null;
+  linked_task?: string | null;
+  linked_dispatch?: string | null;
+  linked_rd?: string | null;
+}
+
 export interface WorktreeHygieneNeedsOperatorInput {
   emit: boolean;
   question: string | null;
@@ -94,6 +105,24 @@ export function classifyPromotionHygieneFailure(input: {
     linked_rd: input.rd ?? null,
     action,
     detail: firstLine(input.text) ?? null,
+  };
+}
+
+export function classifyStaleBaseAdmission(input: StaleBaseAdmissionInput): WorktreeHygieneIncident | null {
+  const behind = Math.max(0, Number(input.behind ?? 0));
+  const threshold = Math.max(0, Number(input.threshold ?? 20));
+  if (behind <= threshold) return null;
+
+  const baseRef = input.base_ref?.trim() || "origin/main";
+  return {
+    repo: input.repo,
+    branch: input.branch,
+    incident_code: "stale_base",
+    linked_task: input.linked_task ?? null,
+    linked_dispatch: input.linked_dispatch ?? null,
+    linked_rd: input.linked_rd ?? null,
+    action: "create_fresh_branch_from_base",
+    detail: `stale-base: branch ${input.branch} is ${behind} commits behind ${baseRef}; suggested remediation=fresh-branch-off-origin-main`,
   };
 }
 

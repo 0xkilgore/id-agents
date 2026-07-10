@@ -78,7 +78,7 @@ export function decideAdmission(input: AdmissionInput): AdmissionDecision {
     return {
       ok: false,
       code: "stale_base",
-      reason: `stale-base: branch ${input.stale_base.branch} is ${input.stale_base.behind} commits behind ${input.stale_base.base_ref}; create a fresh branch off origin/main and reapply only the scoped work`,
+      reason: `stale-base: branch ${input.stale_base.branch} is ${input.stale_base.behind} commits behind ${input.stale_base.base_ref}; suggested remediation=fresh-branch-off-origin-main; create a fresh branch off origin/main and reapply only the scoped work`,
     };
   }
   const conflict = input.branch_conflict;

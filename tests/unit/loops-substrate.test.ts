@@ -28,6 +28,7 @@ import {
 import {
   buildPromotionHygieneRun,
   classifyPromotionHygieneFailure,
+  classifyStaleBaseAdmission,
   hygieneDedupeKey,
   hygieneTaskName,
   shouldEmitNeedsOperatorInput,
@@ -250,6 +251,36 @@ describe("worktree hygiene classification", () => {
       incident_code: "ahead_behind_divergence",
       action: "create_fresh_branch_from_base",
     });
+  });
+
+  it("flags stale-base admission before agent work with fresh-branch-off-origin-main remediation", () => {
+    const incident = classifyStaleBaseAdmission({
+      repo: "/repo/id-agents",
+      branch: "async-first-dispatch-path",
+      base_ref: "origin/main",
+      behind: 25,
+      threshold: 20,
+      linked_dispatch: "phid:disp-stale",
+    });
+
+    expect(incident).toMatchObject({
+      incident_code: "stale_base",
+      action: "create_fresh_branch_from_base",
+      linked_dispatch: "phid:disp-stale",
+    });
+    expect(incident?.detail).toContain("25 commits behind origin/main");
+    expect(incident?.detail).toContain("fresh-branch-off-origin-main");
+    expect(hygieneDedupeKey(incident!)).toBe("/repo/id-agents:async-first-dispatch-path:stale_base");
+  });
+
+  it("does not flag branches at the stale-base threshold", () => {
+    expect(classifyStaleBaseAdmission({
+      repo: "/repo/id-agents",
+      branch: "fresh-enough",
+      base_ref: "origin/main",
+      behind: 20,
+      threshold: 20,
+    })).toBeNull();
   });
 
   it("only emits needs_operator_input for concrete unresolved choices with a recommendation", () => {

@@ -132,6 +132,7 @@ describe("allocateWorktree — stale-base branch refusal", () => {
     if (r.ok) return;
     expect(r.decision.code).toBe("stale_base");
     expect(r.decision.reason).toContain("25 commits behind origin/main");
+    expect(r.decision.reason).toContain("fresh-branch-off-origin-main");
     expect(r.decision.reason).toContain("create a fresh branch off origin/main");
     expect(existsSync(path.join(repo, ".worktrees", "roger-abc12345-async-first-dispatch-path"))).toBe(false);
   });
