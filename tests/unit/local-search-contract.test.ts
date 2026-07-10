@@ -27,6 +27,7 @@ const fixtureDocs: LocalSearchDocument[] = [
     id: "artifact:fall-fest-rundown",
     title: "Same-Morning Fall Fest Rundown for Chris",
     project: "cleveland-park",
+    track: "launch",
     task: "fall-fest-load-loop",
     agent: "maestra",
     author: "rams",
@@ -75,6 +76,7 @@ const fixtureDocs: LocalSearchDocument[] = [
     id: "task:dispatch-title",
     title: "Dispatch title: prep Zach safe-haven readout",
     project: "kapelle",
+    track: "T-LOCALREAD",
     task: "prep-zach-safe-haven",
     agent: "continuous-orchestration",
     author: "substrate-api-codex",
@@ -94,6 +96,7 @@ const fixtureDocs: LocalSearchDocument[] = [
     id: "artifact:stale-closeout",
     title: "Stale closeout with index gap",
     project: "kapelle",
+    track: "T-LOCALREAD",
     task: "stale-index-gap",
     agent: "substrate-api-codex",
     author: "substrate-api-codex",
@@ -158,7 +161,10 @@ describe("local search v0 contract", () => {
       entityType: "artifact",
       id: "artifact:fall-fest-rundown",
       title: "Same-Morning Fall Fest Rundown for Chris",
+      rank: 1,
+      resultDomId: "local-search-result-1",
       project: "cleveland-park",
+      track: "launch",
       task: "fall-fest-load-loop",
       agent: "maestra",
       author: "rams",
@@ -183,6 +189,23 @@ describe("local search v0 contract", () => {
     });
     expect(response.items[0].matchFields).toContain("title");
     expect(response.items[0].snippet).toContain("Fall Fest");
+    expect(response.items[0].snippet_highlights[0]).toMatchObject({
+      field: "title",
+      text: "Same-Morning Fall Fest Rundown for Chris",
+      ranges: [
+        { start: 13, end: 17 },
+        { start: 18, end: 22 },
+      ],
+    });
+    expect(response.ux).toMatchObject({
+      rankedList: true,
+      keyboardNavigation: {
+        role: "listbox",
+        itemRole: "option",
+        activeDescendantPattern: "local-search-result-{rank}",
+      },
+      scopeControls: expect.arrayContaining(["project", "track", "agent"]),
+    });
   });
 
   it("finds a known artifact title", () => {
@@ -213,6 +236,11 @@ describe("local search v0 contract", () => {
   it("filters by author and agent independently", () => {
     expect(ids({ author: "rams" })).toEqual(["artifact:fall-fest-rundown"]);
     expect(ids({ agent: "continuous-orchestration" })).toEqual(["task:dispatch-title"]);
+  });
+
+  it("filters by project, track, and agent scopes over the same index", () => {
+    expect(ids({ q: "index", project: "kapelle", track: "T-LOCALREAD", agent: "substrate-api-codex" }))
+      .toEqual(["artifact:stale-closeout"]);
   });
 
   it("surfaces stale rows and index_partial health", () => {

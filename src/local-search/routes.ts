@@ -1,7 +1,7 @@
 import type { Application, Request, Response } from "express";
 import {
   LOCAL_SEARCH_MAX_LIMIT,
-  createLocalSearchIndex,
+  createCachedLocalSearchIndex,
   parseLocalSearchBool,
   parseLocalSearchTypes,
   searchLocalIndex,
@@ -24,14 +24,15 @@ function asString(value: unknown): string | undefined {
 }
 
 export function mountLocalSearchRoutes(app: Application, deps: LocalSearchRouteDeps): void {
+  const index = createCachedLocalSearchIndex(deps);
+
   app.get("/read-model/search", async (req: Request, res: Response) => {
     try {
-      const documents = await deps.loadDocuments();
-      const health = deps.loadHealth ? await deps.loadHealth() : {};
       const query: LocalSearchQuery = {
         q: asString(req.query.q) ?? "",
         types: parseLocalSearchTypes(asString(req.query.types) ?? asString(req.query.type)),
         project: asString(req.query.project),
+        track: asString(req.query.track),
         task: asString(req.query.task),
         status: asString(req.query.status),
         readState: asString(req.query.read_state) as LocalSearchReadState | undefined,
@@ -42,7 +43,7 @@ export function mountLocalSearchRoutes(app: Application, deps: LocalSearchRouteD
         limit: Math.min(parseInt(asString(req.query.limit) ?? "25", 10) || 25, LOCAL_SEARCH_MAX_LIMIT),
         cursor: asString(req.query.cursor),
       };
-      res.json(searchLocalIndex(createLocalSearchIndex(documents, health), query));
+      res.json(searchLocalIndex(await index.getSnapshot(), query));
     } catch (err) {
       res.status(500).json({ ok: false, error: err instanceof Error ? err.message : String(err) });
     }
@@ -50,9 +51,7 @@ export function mountLocalSearchRoutes(app: Application, deps: LocalSearchRouteD
 
   app.get("/read-model/search/health", async (_req: Request, res: Response) => {
     try {
-      const documents = await deps.loadDocuments();
-      const health = deps.loadHealth ? await deps.loadHealth() : {};
-      res.json(createLocalSearchIndex(documents, health).health);
+      res.json((await index.getSnapshot()).health);
     } catch (err) {
       res.status(500).json({ state: "error", error: err instanceof Error ? err.message : String(err) });
     }
