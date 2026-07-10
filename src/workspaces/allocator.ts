@@ -27,6 +27,7 @@ export type WorkspacePolicy = "default" | "reconcile_dirty_root";
 export type AdmissionCode =
   | "ok"
   | "blocked_dirty_protected_root"
+  | "stale_base"
   | "needs_clarification"
   | "branch_conflict"
   | "no_protected_root"
@@ -55,12 +56,13 @@ export interface AdmissionInput {
    * lease id matches `requested_lease_id`.
    */
   branch_conflict?: { worktree_path: string; lease_id?: string | null } | null;
+  stale_base?: { branch: string; base_ref: string; behind: number; threshold: number } | null;
   requested_lease_id?: string | null;
 }
 
 /**
  * Pure admission decision for a build dispatch (spec §"Allocation Rules" 3, 6).
- * Order: dirty-root block → branch conflict → ok.
+ * Order: dirty-root block → stale-base block → branch conflict → ok.
  */
 export function decideAdmission(input: AdmissionInput): AdmissionDecision {
   const dirty = input.protected_root_status.trim().length > 0;
@@ -70,6 +72,13 @@ export function decideAdmission(input: AdmissionInput): AdmissionDecision {
       code: "blocked_dirty_protected_root",
       reason: "protected root is dirty; declare workspace_policy=reconcile_dirty_root to proceed",
       status_short: input.protected_root_status_short ?? input.protected_root_status,
+    };
+  }
+  if (input.stale_base && input.stale_base.behind > input.stale_base.threshold) {
+    return {
+      ok: false,
+      code: "stale_base",
+      reason: `stale-base: branch ${input.stale_base.branch} is ${input.stale_base.behind} commits behind ${input.stale_base.base_ref}; create a fresh branch off origin/main and reapply only the scoped work`,
     };
   }
   const conflict = input.branch_conflict;
@@ -181,7 +190,12 @@ export function gitCurrentBranch(root: string): string | null {
 
 /** ahead/behind of HEAD relative to `upstream` (e.g. "origin/main"). */
 export function gitAheadBehind(root: string, upstream: string): { ahead: number; behind: number } | null {
-  const r = gitSafe(["rev-list", "--left-right", "--count", `${upstream}...HEAD`], root);
+  return gitRefAheadBehind(root, "HEAD", upstream);
+}
+
+/** ahead/behind of `ref` relative to `upstream` (e.g. branch vs "origin/main"). */
+export function gitRefAheadBehind(root: string, ref: string, upstream: string): { ahead: number; behind: number } | null {
+  const r = gitSafe(["rev-list", "--left-right", "--count", `${upstream}...${ref}`], root);
   if (!r.ok) return null;
   const m = r.out.trim().split(/\s+/);
   if (m.length < 2) return null;
@@ -288,6 +302,8 @@ export interface AllocateInput {
   skip_fetch?: boolean;
   /** Lease id of an existing worktree we are allowed to reuse. */
   requested_lease_id?: string | null;
+  /** Existing branches more than this many commits behind base are refused. Default 20. */
+  stale_base_behind_threshold?: number;
 }
 
 export type AllocateResult =
@@ -301,6 +317,8 @@ export type AllocateResult =
  */
 export function allocateWorktree(input: AllocateInput): AllocateResult {
   const protectedRoot = path.resolve(input.protected.root);
+  const baseRef = `${input.remote}/${input.base}`;
+  const staleThreshold = input.stale_base_behind_threshold ?? 20;
 
   // 1-2. Snapshot the protected root status BEFORE any mutation. Strip our own
   // `.worktrees/` custody infra so it never counts as dirtying the root.
@@ -310,6 +328,16 @@ export function allocateWorktree(input: AllocateInput): AllocateResult {
   // 4. Fetch the remote (best-effort; offline tests skip).
   if (!input.skip_fetch) gitSafe(["fetch", input.remote], protectedRoot);
 
+  const existingBranch = gitSafe(["rev-parse", "--verify", "--quiet", input.branch], protectedRoot).ok;
+  const staleBase = existingBranch
+    ? (() => {
+        const ab = gitRefAheadBehind(protectedRoot, input.branch, baseRef);
+        return ab && ab.behind > staleThreshold
+          ? { branch: input.branch, base_ref: baseRef, behind: ab.behind, threshold: staleThreshold }
+          : null;
+      })()
+    : null;
+
   // 6. Branch already checked out in another live worktree?
   const conflict = findBranchWorktree(protectedRoot, input.branch);
 
@@ -318,6 +346,7 @@ export function allocateWorktree(input: AllocateInput): AllocateResult {
     protected_root_status: protectedStatus,
     protected_root_status_short: protectedStatusShort,
     workspace_policy: input.workspace_policy,
+    stale_base: staleBase,
     branch_conflict: conflict ? { worktree_path: conflict.path, lease_id: null } : null,
     requested_lease_id: input.requested_lease_id ?? null,
   });
@@ -325,7 +354,7 @@ export function allocateWorktree(input: AllocateInput): AllocateResult {
 
   const worktreePath = leaseWorktreePath(protectedRoot, input.agent_id, input.dispatch_id, input.branch);
   const baseSha = (() => {
-    const r = gitSafe(["rev-parse", `${input.remote}/${input.base}`], protectedRoot);
+    const r = gitSafe(["rev-parse", baseRef], protectedRoot);
     if (r.ok) return r.out.trim();
     const local = gitSafe(["rev-parse", input.base], protectedRoot);
     return local.ok ? local.out.trim() : null;
@@ -334,7 +363,7 @@ export function allocateWorktree(input: AllocateInput): AllocateResult {
   // 5 + 7. Create the worktree off <remote>/<base> WITHOUT touching the
   // protected root's working tree. `-B` creates/resets the branch in the NEW
   // worktree only. Prefer remote base; fall back to local base when offline.
-  const startPoint = baseSha ?? `${input.remote}/${input.base}`;
+  const startPoint = baseSha ?? baseRef;
   const add = gitSafe(["worktree", "add", "-B", input.branch, worktreePath, startPoint], protectedRoot);
   if (!add.ok) {
     // Fall back to the local base ref if the remote ref was unavailable.

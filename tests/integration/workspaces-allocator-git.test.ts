@@ -111,6 +111,32 @@ describe("allocateWorktree — branch-in-use refusal", () => {
   });
 });
 
+describe("allocateWorktree — stale-base branch refusal", () => {
+  it("flags a branch 25+ commits behind origin/main before admission", () => {
+    git(["checkout", "-b", "async-first-dispatch-path"]);
+    writeFileSync(path.join(repo, "feature.txt"), "old branch work\n");
+    git(["add", "."]);
+    git(["commit", "-m", "feature work"]);
+
+    git(["checkout", "main"]);
+    for (let i = 0; i < 25; i += 1) {
+      writeFileSync(path.join(repo, "main.txt"), `main ${i}\n`);
+      git(["add", "."]);
+      git(["commit", "-m", `main ${i}`]);
+    }
+    git(["update-ref", "refs/remotes/origin/main", "main"]);
+
+    const r = allocate({ branch: "async-first-dispatch-path", stale_base_behind_threshold: 20 });
+
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.decision.code).toBe("stale_base");
+    expect(r.decision.reason).toContain("25 commits behind origin/main");
+    expect(r.decision.reason).toContain("create a fresh branch off origin/main");
+    expect(existsSync(path.join(repo, ".worktrees", "roger-abc12345-async-first-dispatch-path"))).toBe(false);
+  });
+});
+
 describe("by-agent commit attribution", () => {
   it("installs the hook + marker so a commit in the worktree carries an Agent trailer", () => {
     const r = allocate({ agent_id: "hopper" });

@@ -15,6 +15,7 @@ export type PromotionMode = "promote" | "promotion_exempt" | "manual_lab";
 export type WorktreeQuarantineClass =
   | "missing_metadata"
   | "dirty_worktree"
+  | "stale_base"
   | "ahead_behind_divergence"
   | "missing_git"
   | "unknown_owner";
@@ -54,6 +55,7 @@ export interface WorktreeScannerPolicyInput {
   dirty_untracked_count?: number | null;
   ahead?: number | null;
   behind?: number | null;
+  stale_base_behind_threshold?: number | null;
   is_git?: boolean | null;
   git_error?: string | null;
   evidence?: string[] | null;
@@ -140,6 +142,7 @@ export function classifyWorktreeScannerPolicy(input: WorktreeScannerPolicyInput)
   const dirtyCount = Math.max(0, Number(input.dirty_tracked_count ?? 0)) + Math.max(0, Number(input.dirty_untracked_count ?? 0));
   const ahead = Math.max(0, Number(input.ahead ?? 0));
   const behind = Math.max(0, Number(input.behind ?? 0));
+  const staleBaseThreshold = Math.max(0, Number(input.stale_base_behind_threshold ?? 20));
 
   if (input.is_git === false || present(input.git_error)) {
     return buildQuarantineRecord({
@@ -177,6 +180,19 @@ export function classifyWorktreeScannerPolicy(input: WorktreeScannerPolicyInput)
       owner_agent: owner,
       recommended_action: "create a fresh branch from base and cherry-pick scoped commits; do not promote the divergent branch",
       evidence: [...(input.evidence ?? []), `ahead:${ahead}`, `behind:${behind}`],
+    });
+  }
+
+  if (behind > staleBaseThreshold) {
+    return buildQuarantineRecord({
+      class_code: "stale_base",
+      action_class: "needs_fresh_branch",
+      repo,
+      branch,
+      worktree_path: worktree,
+      owner_agent: owner,
+      recommended_action: "create a fresh branch off origin/main and reapply only the scoped work",
+      evidence: [...(input.evidence ?? []), `ahead:${ahead}`, `behind:${behind}`, `stale_base_threshold:${staleBaseThreshold}`],
     });
   }
 

@@ -87,6 +87,25 @@ describe("worktree OS policy", () => {
     expect(record?.recommended_action).toContain("fresh branch");
   });
 
+  it("classifies behind-only branches as stale-base fresh-branch work", () => {
+    const record = classifyWorktreeScannerPolicy({
+      repo: "/repo/id-agents",
+      branch: "async-first-dispatch-path",
+      worktree: "/repo/id-agents/.worktrees/async-first-dispatch-path",
+      owner_agent: "substrate-orch-codex",
+      ahead: 0,
+      behind: 25,
+    });
+
+    expect(record).toMatchObject({
+      class_code: "stale_base",
+      action_class: "needs_fresh_branch",
+      owner_lane: "substrate-orch-codex",
+      recommended_action: "create a fresh branch off origin/main and reapply only the scoped work",
+    });
+    expect(record?.evidence).toEqual(expect.arrayContaining(["ahead:0", "behind:25", "stale_base_threshold:20"]));
+  });
+
   it("requires closeout promotion evidence for promote mode", () => {
     expect(validateCloseoutPromotionPolicy({ promotion_mode: "promote", promotion: null })).toMatchObject({
       ok: false,

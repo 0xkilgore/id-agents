@@ -124,6 +124,23 @@ describe("decideAdmission", () => {
     expect(d.conflict_worktree).toBe("/repo/.worktrees/other");
   });
 
+  it("blocks stale-base branches before admission with fresh-branch remediation", () => {
+    const d = decideAdmission({
+      protected_root_status: "",
+      stale_base: {
+        branch: "async-first-dispatch-path",
+        base_ref: "origin/main",
+        behind: 25,
+        threshold: 20,
+      },
+    });
+
+    expect(d.ok).toBe(false);
+    expect(d.code).toBe("stale_base");
+    expect(d.reason).toContain("stale-base");
+    expect(d.reason).toContain("create a fresh branch off origin/main");
+  });
+
   it("reuses a worktree when the existing lease id matches", () => {
     const d = decideAdmission({
       protected_root_status: "",
