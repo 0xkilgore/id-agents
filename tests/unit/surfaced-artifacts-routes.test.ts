@@ -147,4 +147,55 @@ describe("GET /ops/surfaced-artifacts", () => {
       ],
     });
   });
+
+  it("filters saved-view execution rows with canonical dotted fields", async () => {
+    const b = await boot();
+    server = b.server;
+    await registerArtifact(b.adapter, {
+      artifact_id: "art-kapelle-filter",
+      basename: "2026-07-07-kapelle-filter.md",
+      agent: "maestra",
+      tag: "critical",
+      abs_path: "/tmp/kapelle-filter.md",
+      title: "Kapelle saved view filter",
+      produced_at: "2026-07-07T12:00:00.000Z",
+      source: "manual",
+      project_ref: "kapelle",
+    }, "2026-07-07T12:00:00.000Z");
+    await registerArtifact(b.adapter, {
+      artifact_id: "art-trinity-filter",
+      basename: "2026-07-07-trinity-filter.md",
+      agent: "maestra",
+      tag: "critical",
+      abs_path: "/tmp/trinity-filter.md",
+      title: "Trinity saved view filter",
+      produced_at: "2026-07-07T12:01:00.000Z",
+      source: "manual",
+      project_ref: "trinity",
+    }, "2026-07-07T12:01:00.000Z");
+
+    const res = await fetch(`${b.base}/ops/views/surfaced-artifacts.v1.primary/execute`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        query: { op: "eq", field: "artifact.projectRef", value: "kapelle" },
+      }),
+    });
+
+    expect(res.status).toBe(200);
+    const body = await res.json() as any;
+    expect(body).toMatchObject({
+      ok: true,
+      schema_version: "view-execution.v1",
+      view_id: "surfaced-artifacts.v1.primary",
+      count: 1,
+      errors: [],
+    });
+    expect(body.rows).toHaveLength(1);
+    expect(body.rows[0]).toMatchObject({
+      id: "artifact:art-kapelle-filter",
+      project_ref: "kapelle",
+      title: "Kapelle saved view filter",
+    });
+  });
 });
