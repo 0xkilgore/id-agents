@@ -201,4 +201,53 @@ describe("project tracks read-model", () => {
 
     await adapter.close();
   });
+
+  it("serves project detail and adjacent project detail from prefetch cache", async () => {
+    const adapter = new SqliteAdapter(":memory:");
+    await seedBase(adapter);
+    await adapter.query(`INSERT INTO teams (id, name) VALUES ($1, $2), ($3, $4)`, [
+      "team_alpha",
+      "alpha",
+      "team_zulu",
+      "zulu",
+    ]);
+
+    let teamListQueries = 0;
+    const originalQuery = adapter.query.bind(adapter);
+    adapter.query = (async (...args: Parameters<typeof originalQuery>) => {
+      if (typeof args[0] === "string" && /\bFROM teams\b/i.test(args[0])) teamListQueries += 1;
+      return originalQuery(...args);
+    }) as typeof adapter.query;
+
+    const app = express();
+    mountProjectTracksRoutes(app, adapter);
+
+    try {
+      const first = await request(app, "/projects/project-tracks/detail");
+      expect(first.status).toBe(200);
+      expect(first.body).toMatchObject({
+        ok: true,
+        schema_version: "project.detail.v1",
+        project: { canonical: "project-tracks" },
+        metadata: { source: "local_project_index" },
+        body: { kind: "project_tracks" },
+      });
+      expect(first.body.version_key).toMatch(/^project:[a-f0-9]{24}$/);
+      expect(first.body.body.text).toContain("Project: project-tracks");
+      expect(first.body.comments).toEqual([]);
+      expect(first.body.timeline).toEqual([]);
+      expect(first.body.adjacent_prefetch.previous.name).toBe("alpha");
+      expect(first.body.adjacent_prefetch.next.name).toBe("zulu");
+      expect(teamListQueries).toBe(1);
+
+      const second = await request(app, "/projects/zulu/detail");
+      expect(second.status).toBe(200);
+      expect(second.body.project.canonical).toBe("zulu");
+      expect(second.body.adjacent_prefetch.previous.name).toBe("project-tracks");
+      expect(teamListQueries).toBe(1);
+    } finally {
+      adapter.query = originalQuery as typeof adapter.query;
+      await adapter.close();
+    }
+  });
 });

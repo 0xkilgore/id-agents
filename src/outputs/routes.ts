@@ -91,6 +91,7 @@ import {
 import type {
   ApproveRequest,
   ArtifactAvailability,
+  ArtifactCatalogRow,
   ArtifactDetailResponse,
   ArtifactFeedbackCompatStatus,
   ArtifactOperationsResponse,
@@ -429,7 +430,9 @@ export function mountOutputsRoutes(
   let lastParityStatus: ReadModelEnvelope<unknown>['parity']['status'] = 'unchecked';
   const detailCache = new Map<string, ArtifactDetailResponse>();
   const detailInflight = new Map<string, Promise<ArtifactDetailResponse | null>>();
+  const artifactListCache = new Map<string, { at: number; rows: ArtifactCatalogRow[] }>();
   const detailCacheMax = 100;
+  const artifactListCacheTtlMs = 30_000;
   const filesystemReconciler = opts.filesystemReconciler ?? reconcileFilesystemArtifacts;
 
   function invalidateArtifactDetail(artifactId: string): void {
@@ -440,6 +443,7 @@ export function mountOutputsRoutes(
   function clearArtifactDetailCache(): void {
     detailCache.clear();
     detailInflight.clear();
+    artifactListCache.clear();
   }
 
   function artifactFeedbackCapability() {
@@ -507,6 +511,45 @@ export function mountOutputsRoutes(
     } finally {
       detailInflight.delete(ref.artifactId);
     }
+  }
+
+  async function getArtifactDetailList(): Promise<ArtifactCatalogRow[]> {
+    const hit = artifactListCache.get('artifacts');
+    if (hit && Date.now() - hit.at < artifactListCacheTtlMs) return hit.rows;
+    const rows = await listArtifactCatalog(adapter, { limit: 500, offset: 0 });
+    artifactListCache.set('artifacts', { at: Date.now(), rows });
+    return rows;
+  }
+
+  async function artifactAdjacentPrefetch(artifactId: string): Promise<Record<string, unknown>> {
+    const rows = await getArtifactDetailList();
+    const index = rows.findIndex((row) => row.artifact_id === artifactId);
+    const previous = index > 0 ? rows[index - 1] : null;
+    const next = index >= 0 && index < rows.length - 1 ? rows[index + 1] : null;
+    await Promise.all(
+      [previous, next].filter((row): row is ArtifactCatalogRow => Boolean(row)).map((row) =>
+        getArtifactDetailCached(resolveArtifactDetailRef(row.artifact_id)).catch(() => null),
+      ),
+    );
+    return {
+      list_key: 'artifacts',
+      index: index >= 0 ? index : null,
+      list_length: rows.length,
+      previous: previous
+        ? {
+            artifact_id: previous.artifact_id,
+            title: previous.title ?? previous.basename,
+            url: `/artifacts/${encodeURIComponent(previous.artifact_id)}/detail`,
+          }
+        : null,
+      next: next
+        ? {
+            artifact_id: next.artifact_id,
+            title: next.title ?? next.basename,
+            url: `/artifacts/${encodeURIComponent(next.artifact_id)}/detail`,
+          }
+        : null,
+    };
   }
 
   async function probeArtifact(row: Awaited<ReturnType<typeof getArtifact>>): Promise<ArtifactActionProbe> {
@@ -847,7 +890,11 @@ export function mountOutputsRoutes(
       });
       return;
     }
-    res.json(hideDisabledFeedbackDetail(detail));
+    const visibleDetail = hideDisabledFeedbackDetail(detail);
+    res.json({
+      ...visibleDetail,
+      adjacent_prefetch: await artifactAdjacentPrefetch(ref.artifactId),
+    });
   }
 
   // ── GET /artifacts/detail?path=<encoded-or-plain-path> ─────────────

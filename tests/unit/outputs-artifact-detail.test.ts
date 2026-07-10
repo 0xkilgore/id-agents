@@ -85,7 +85,11 @@ async function callRaw(
   });
 }
 
-async function catalogFile(name: string, title = "Human artifact title"): Promise<{ filePath: string; artifactId: string }> {
+async function catalogFile(
+  name: string,
+  title = "Human artifact title",
+  producedAt = "2026-06-27T12:00:00.000Z",
+): Promise<{ filePath: string; artifactId: string }> {
   const filePath = path.join(tmp, name);
   writeFileSync(filePath, "# Detail Body\n\nFast switch content.\n");
   const artifactId = artifactIdFromPath(filePath);
@@ -98,7 +102,7 @@ async function catalogFile(name: string, title = "Human artifact title"): Promis
       tag: "report",
       abs_path: filePath,
       title,
-      produced_at: "2026-06-27T12:00:00.000Z",
+      produced_at: producedAt,
       source: "manual",
       availability: "present",
     },
@@ -323,9 +327,20 @@ describe("GET /artifacts/:id/detail", () => {
   });
 
   it("does not full-scan again when navigating to an adjacent already-indexed artifact", async () => {
-    const first = await catalogFile("seeded-a.md", "Seeded A");
-    const second = await catalogFile("seeded-b.md", "Seeded B");
+    const first = await catalogFile("seeded-a.md", "Seeded A", "2026-06-27T12:00:00.000Z");
+    const second = await catalogFile("seeded-b.md", "Seeded B", "2026-06-27T12:01:00.000Z");
     let fullScanCalls = 0;
+    let catalogListCalls = 0;
+    const originalQuery = adapter.query.bind(adapter);
+    adapter.query = (async (...args: Parameters<typeof originalQuery>) => {
+      if (
+        typeof args[0] === "string" &&
+        /\bFROM artifacts\b[\s\S]*\bORDER BY produced_at DESC\b/i.test(args[0])
+      ) {
+        catalogListCalls += 1;
+      }
+      return originalQuery(...args);
+    }) as typeof adapter.query;
 
     app = express();
     app.use(express.json());
@@ -340,14 +355,24 @@ describe("GET /artifacts/:id/detail", () => {
       },
     });
 
-    const firstDetail = await call("GET", `/artifacts/${first.artifactId}/detail`);
-    const secondDetail = await call("GET", `/artifacts/${second.artifactId}/detail`);
-    const coldDetail = await call("GET", "/artifacts/art-cold-miss/detail");
+    try {
+      const firstDetail = await call("GET", `/artifacts/${first.artifactId}/detail`);
+      const secondDetail = await call("GET", `/artifacts/${second.artifactId}/detail`);
+      const coldDetail = await call("GET", "/artifacts/art-cold-miss/detail");
 
-    expect(firstDetail.status).toBe(200);
-    expect(secondDetail.status).toBe(200);
-    expect(coldDetail.status).toBe(404);
-    expect(fullScanCalls).toBe(1);
+      expect(firstDetail.status).toBe(200);
+      expect(firstDetail.headers.get("x-artifact-detail-cache")).toBe("miss");
+      expect(firstDetail.body.body.text).toContain("Fast switch content.");
+      expect(firstDetail.body.adjacent_prefetch.previous.artifact_id).toBe(second.artifactId);
+      expect(secondDetail.status).toBe(200);
+      expect(secondDetail.headers.get("x-artifact-detail-cache")).toBe("hit");
+      expect(secondDetail.body.adjacent_prefetch.next.artifact_id).toBe(first.artifactId);
+      expect(coldDetail.status).toBe(404);
+      expect(fullScanCalls).toBe(1);
+      expect(catalogListCalls).toBe(1);
+    } finally {
+      adapter.query = originalQuery as typeof adapter.query;
+    }
   });
 
   it("serves registered html body, copy text, and download from cache when the source path disappears", async () => {
