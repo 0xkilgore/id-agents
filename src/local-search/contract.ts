@@ -3,7 +3,7 @@ import type { LocalHealthVisual } from "./visual-state.js";
 export const LOCAL_SEARCH_SCHEMA_VERSION = "read_model.search.v1" as const;
 export const LOCAL_SEARCH_INDEX_SCHEMA_VERSION = "local_search.index.v0" as const;
 
-export type LocalSearchEntityType = "artifact" | "project" | "task";
+export type LocalSearchEntityType = "artifact" | "project" | "task" | "source";
 export type LocalSearchReadState = "read" | "unread" | "read_but_has_new_activity" | "unknown";
 export type LocalSearchFreshness = "current" | "syncing" | "stale" | "event_gap" | "mutation_failed" | "error";
 export type LocalSearchIndexHealthState = "ready" | "indexing" | "stale" | "index_partial" | "error";

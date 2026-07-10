@@ -1,10 +1,15 @@
 import express, { type Express } from "express";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { migrateSqlite } from "../../src/db/migrations/sqlite.js";
 import { SqliteAdapter } from "../../src/db/sqlite-adapter.js";
+import { loadLocalSearchDocuments } from "../../src/local-search/db-documents.js";
 import { migrateOutputsTables } from "../../src/outputs/storage.js";
 import { buildProjectTracksEnvelope, canonicalProjectName } from "../../src/project-tracks/read-model.js";
 import { mountProjectTracksRoutes } from "../../src/project-tracks/routes.js";
+import { buildProjectSourcesEnvelope } from "../../src/project-tracks/sources-read-model.js";
 
 const TEAM = "team_project_tracks";
 const NOW = "2026-06-28T12:00:00.000Z";
@@ -248,6 +253,145 @@ describe("project tracks read-model", () => {
     } finally {
       adapter.query = originalQuery as typeof adapter.query;
       await adapter.close();
+    }
+  });
+
+  it("indexes Cleveland Park source rows from deterministic project roots and exposes them to local search", async () => {
+    const adapter = new SqliteAdapter(":memory:");
+    const tmp = mkdtempSync(path.join(os.tmpdir(), "id-agents-cleveland-park-"));
+    const root = path.join(tmp, "Dropbox", "Code", "cleveland-park");
+    try {
+      await seedBase(adapter);
+      mkdirSync(path.join(root, "meetings"), { recursive: true });
+      mkdirSync(path.join(root, "forms"), { recursive: true });
+      mkdirSync(path.join(root, "images"), { recursive: true });
+      mkdirSync(path.join(root, "newsletters"), { recursive: true });
+      mkdirSync(path.join(root, "output"), { recursive: true });
+      mkdirSync(path.join(root, "source"), { recursive: true });
+      writeFileSync(path.join(root, "meetings", "neighborhood-parks-transcript.md"), "Neighborhood Parks transcript\n");
+      writeFileSync(path.join(root, "forms", "park-permit-form.pdf"), "%PDF-1.4\n");
+      writeFileSync(path.join(root, "images", "cleveland-park-logo.png"), "png");
+      writeFileSync(path.join(root, "newsletters", "july-newsletter-source.md"), "Newsletter source copy\n");
+      writeFileSync(path.join(root, "source", "vendor-list.csv"), "name\n");
+      const artifactPath = path.join(root, "output", "agent-artifact-report.md");
+      writeFileSync(artifactPath, "# Agent artifact report\n");
+
+      await adapter.query(`INSERT INTO teams (id, name) VALUES ($1, $2)`, ["team_cleveland", "cleveland-park"]);
+      await adapter.query(
+        `INSERT INTO agents
+           (id, team_id, name, type, model, port, endpoint, working_directory, status, created_at, registry, metadata)
+         VALUES
+           ('agent_cp','team_cleveland','cleveland-park','worker','test',0,NULL,$1,'running',1782690000,NULL,NULL)`,
+        [root],
+      );
+      await adapter.query(
+        `INSERT INTO dispatch_scheduler_queue
+           (dispatch_phid, team_id, query_id, to_agent, from_actor, channel, subject, body_markdown, provider, runtime,
+            priority, status, not_before_at, updated_at, completed_at, agent_query_id, artifact_path, result_json)
+         VALUES
+           ('phid:disp-cp','team_cleveland','query_cp_dispatch','agent_cp','manager','dispatch',
+            '[project: cleveland-park][T-LOCALREAD] Cleveland Park source lane','discover Parks transcripts and forms',
+            'openai','codex',5,'done',$1,$2,$3,'query_cp_agent',$4,$5)`,
+        [NOW, NOW, NOW, artifactPath, JSON.stringify({ artifact_path: artifactPath })],
+      );
+      await adapter.query(
+        `INSERT INTO queries
+           (team_id, agent_id, query_id, status, prompt, created, completed, result, error, session_id, owner_kind, owner_id, manager_dispatch_id, manager_query_id)
+         VALUES
+           ('team_cleveland','agent_cp','query_cp_agent','completed','Neighborhood Parks transcript capture',1782690000,1782690100,'ok',NULL,NULL,'agent','agent_cp','phid:disp-cp','query_cp_dispatch')`,
+      );
+      await adapter.query(
+        `INSERT INTO artifacts
+           (artifact_id, basename, agent, tag, abs_path, title, produced_at, source, availability, media_type,
+            source_mtime, source_size, project_ref, dispatch_ref, created_at, updated_at)
+         VALUES
+           ('art_cp_report','agent-artifact-report.md','cleveland-park','[T-LOCALREAD] artifact report',$1,
+            'Cleveland Park agent artifact report',$2,'test','present','text/markdown',$3,1024,'cleveland-park','phid:disp-cp',$4,$5)`,
+        [artifactPath, NOW, NOW, NOW, NOW],
+      );
+      await adapter.query(
+        `INSERT INTO artifact_review_state
+           (artifact_id, first_viewed_at, last_viewed_at, viewed_count, created_at, updated_at)
+         VALUES
+           ('art_cp_report',NULL,NULL,0,$1,$2)`,
+        [NOW, NOW],
+      );
+
+      const envelope = await buildProjectSourcesEnvelope(adapter, {
+        project: "cleveland-park",
+        generatedAt: NOW,
+        limit: 50,
+      });
+      const byTitle = new Map(envelope.rows.map((row) => [row.title, row]));
+
+      expect(envelope.schema_version).toBe("project-sources.v1");
+      expect(envelope.saved_view.filters).toEqual(["type", "project", "agent", "date", "read_state", "status", "q"]);
+      expect(envelope.roots).toEqual([
+        expect.objectContaining({
+          project: "cleveland-park",
+          root_path: root,
+          owner_agent: "cleveland-park",
+          proof: "agent.working_directory",
+        }),
+      ]);
+      expect(envelope.groups.transcripts).toBeGreaterThanOrEqual(2);
+      expect(envelope.groups.pdfs_forms).toBeGreaterThanOrEqual(1);
+      expect(envelope.groups.images_screenshots_logos).toBeGreaterThanOrEqual(1);
+      expect(envelope.groups.emails_captures).toBeGreaterThanOrEqual(1);
+      expect(envelope.groups.artifacts_reports).toBeGreaterThanOrEqual(1);
+      expect(envelope.groups.other_files).toBeGreaterThanOrEqual(1);
+      expect(byTitle.get("Cleveland Park agent artifact report")).toMatchObject({
+        source: { kind: "artifact_catalog", path: artifactPath, proof: "artifacts.abs_path" },
+        ownership: { project: "cleveland-park", agent: "cleveland-park" },
+        links: { dispatch_id: "phid:disp-cp", artifact_id: "art_cp_report" },
+        preview: { renderable: true, state: "inline" },
+        read: { state: "unread" },
+        freshness: { status: "fresh" },
+      });
+      expect(byTitle.get("Neighborhood Parks transcript capture")).toMatchObject({
+        group: "transcripts",
+        links: { dispatch_id: "phid:disp-cp", query_id: "query_cp_agent" },
+      });
+      expect(byTitle.get("park permit form")).toMatchObject({ group: "pdfs_forms", preview: { renderable: true } });
+      expect(byTitle.get("cleveland park logo")).toMatchObject({ group: "images_screenshots_logos", preview: { renderable: true } });
+      expect(byTitle.get("july newsletter source")).toMatchObject({ group: "emails_captures" });
+      expect(byTitle.get("vendor list")).toMatchObject({ group: "other_files" });
+
+      const filtered = await buildProjectSourcesEnvelope(adapter, { project: "cleveland-park", q: "Parks", type: "transcripts" });
+      expect(filtered.rows.map((row) => row.title)).toEqual(expect.arrayContaining([
+        "Neighborhood Parks transcript capture",
+        "neighborhood parks transcript",
+      ]));
+
+      const app = express();
+      mountProjectTracksRoutes(app, adapter);
+      const route = await request(app, "/projects/cleveland-park/sources?q=logo&type=images_screenshots_logos");
+      expect(route.status).toBe(200);
+      expect(route.body).toMatchObject({
+        schema_version: "project-sources.v1",
+        filters: { q: "logo", type: "images_screenshots_logos", project: "cleveland-park" },
+      });
+      expect(route.body.rows.map((row: any) => row.title)).toEqual(["cleveland park logo"]);
+
+      const searchDocs = await loadLocalSearchDocuments(adapter);
+      const sourceHit = searchDocs.find((doc) => doc.entityType === "source" && doc.title === "Cleveland Park agent artifact report");
+      expect(sourceHit).toMatchObject({
+        project: "cleveland-park",
+        agent: "cleveland-park",
+        status: "fresh",
+        readState: "unread",
+        routeMetadata: {
+          sourceType: "artifact",
+          sourcePath: artifactPath,
+          sourceProof: "artifacts.abs_path",
+          linkedArtifact: "art_cp_report",
+          linkedDispatch: "phid:disp-cp",
+          bodyAvailable: true,
+        },
+      });
+    } finally {
+      await adapter.close();
+      rmSync(tmp, { recursive: true, force: true });
     }
   });
 });

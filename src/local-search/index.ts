@@ -46,7 +46,7 @@ export function createLocalSearchIndex(
 export function parseLocalSearchTypes(raw: string | string[] | undefined): LocalSearchEntityType[] | undefined {
   const value = Array.isArray(raw) ? raw[0] : raw;
   if (!value) return undefined;
-  const allowed = new Set<LocalSearchEntityType>(["artifact", "project", "task"]);
+  const allowed = new Set<LocalSearchEntityType>(["artifact", "project", "task", "source"]);
   const types = value
     .split(",")
     .map((part) => part.trim())

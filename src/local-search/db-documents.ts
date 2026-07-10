@@ -1,5 +1,7 @@
 import type { DbAdapter } from "../db/db-adapter.js";
 import type { LocalSearchDocument, LocalSearchSourceType } from "./contract.js";
+import { buildProjectSourcesEnvelope } from "../project-tracks/sources-read-model.js";
+import type { ProjectSourceRow } from "../project-tracks/sources-types.js";
 
 export async function loadLocalSearchDocuments(adapter: DbAdapter): Promise<LocalSearchDocument[]> {
   const [artifacts, tasks, projects] = await Promise.all([
@@ -7,7 +9,8 @@ export async function loadLocalSearchDocuments(adapter: DbAdapter): Promise<Loca
     loadTaskDocuments(adapter),
     loadProjectDocuments(adapter),
   ]);
-  return [...artifacts, ...tasks, ...projects];
+  const sources = await loadProjectSourceDocuments(adapter, projects);
+  return [...artifacts, ...tasks, ...projects, ...sources];
 }
 
 async function loadArtifactDocuments(adapter: DbAdapter): Promise<LocalSearchDocument[]> {
@@ -167,6 +170,119 @@ async function loadProjectDocuments(adapter: DbAdapter): Promise<LocalSearchDocu
     }));
   } catch {
     return [];
+  }
+}
+
+async function loadProjectSourceDocuments(
+  adapter: DbAdapter,
+  projects: LocalSearchDocument[],
+): Promise<LocalSearchDocument[]> {
+  const documents: LocalSearchDocument[] = [];
+  for (const project of projects.slice(0, 100)) {
+    const projectName = project.project ?? project.title;
+    try {
+      const envelope = await buildProjectSourcesEnvelope(adapter, {
+        project: projectName,
+        limit: 200,
+        maxFiles: 100,
+        maxDepth: 5,
+      });
+      for (const row of envelope.rows) documents.push(projectSourceToDocument(row));
+    } catch {
+      continue;
+    }
+  }
+  return documents;
+}
+
+function projectSourceToDocument(row: ProjectSourceRow): LocalSearchDocument {
+  const updatedAt = row.dates.modified_at ?? row.dates.created_at ?? new Date(0).toISOString();
+  const sourceType = sourceTypeFromGroup(row.group);
+  const stableUrl = row.open.fallback === "artifact" && row.links.artifact_id
+    ? `/artifacts/${encodeURIComponent(row.links.artifact_id)}/detail`
+    : row.open.href;
+  return {
+    entityType: "source",
+    id: row.id,
+    title: row.title,
+    project: row.ownership.project,
+    task: null,
+    agent: row.ownership.agent,
+    author: row.ownership.agent,
+    status: row.freshness.status,
+    readState: localReadState(row.read.state),
+    needsReview: row.read.state === "unread",
+    createdAt: row.dates.created_at ?? undefined,
+    updatedAt,
+    matchFields: {
+      title: row.title,
+      group: row.group,
+      sourcePath: row.source.path,
+      sourceProof: row.source.proof,
+      project: row.ownership.project,
+      agent: row.ownership.agent,
+      dispatch: row.links.dispatch_id,
+      artifact: row.links.artifact_id,
+      query: row.links.query_id,
+      status: row.freshness.status,
+      freshnessReason: row.freshness.reason,
+    },
+    freshness: localFreshness(row.freshness.status),
+    openTarget: openTargetForSource(row),
+    routeMetadata: {
+      sourceType,
+      sourcePath: row.source.path,
+      sourceProof: row.source.proof,
+      linkedArtifact: row.links.artifact_id,
+      linkedDispatch: row.links.dispatch_id,
+      stableUrl,
+      copyTextUrl: row.links.artifact_id ? `/artifacts/${encodeURIComponent(row.links.artifact_id)}/copy-text` : null,
+      downloadUrl: row.links.artifact_id ? `/artifacts/${encodeURIComponent(row.links.artifact_id)}/download` : row.open.href,
+      bodyAvailable: row.preview.renderable,
+      bodyCached: row.source.kind !== "filesystem",
+      bodySource: row.preview.renderable ? "filesystem" : "unavailable",
+    },
+  };
+}
+
+function openTargetForSource(row: ProjectSourceRow): LocalSearchDocument["openTarget"] {
+  if (row.links.artifact_id) {
+    return { kind: "artifact", ref: row.links.artifact_id, route: `/artifacts/${encodeURIComponent(row.links.artifact_id)}` };
+  }
+  if (row.links.dispatch_id) {
+    return { kind: "dispatch", ref: row.links.dispatch_id, route: `/dispatches/${encodeURIComponent(row.links.dispatch_id)}` };
+  }
+  return { kind: "project", ref: row.ownership.project, route: row.open.href };
+}
+
+function sourceTypeFromGroup(group: ProjectSourceRow["group"]): LocalSearchSourceType {
+  switch (group) {
+    case "transcripts": return "transcript";
+    case "images_screenshots_logos": return "image";
+    case "pdfs_forms": return "pdf";
+    case "emails_captures": return "email";
+    case "artifacts_reports": return "artifact";
+    case "other_files": return "other";
+  }
+}
+
+function localReadState(state: ProjectSourceRow["read"]["state"]): LocalSearchDocument["readState"] {
+  switch (state) {
+    case "unread": return "unread";
+    case "read":
+    case "approved":
+    case "shipped":
+      return "read";
+    case "unknown": return "unknown";
+  }
+}
+
+function localFreshness(status: ProjectSourceRow["freshness"]["status"]): LocalSearchDocument["freshness"] {
+  switch (status) {
+    case "fresh": return "current";
+    case "stale": return "stale";
+    case "missing": return "stale";
+    case "unknown": return "syncing";
   }
 }
 

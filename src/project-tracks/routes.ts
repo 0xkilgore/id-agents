@@ -3,6 +3,8 @@ import crypto from "node:crypto";
 import type { DbAdapter } from "../db/db-adapter.js";
 import { localHealthVisualState, type LocalHealthVisual } from "../local-search/visual-state.js";
 import { buildProjectTracksEnvelope, canonicalProjectName } from "./read-model.js";
+import { buildProjectSourcesEnvelope } from "./sources-read-model.js";
+import type { ProjectSourceFreshnessStatus, ProjectSourceGroup, ProjectSourceReadState } from "./sources-types.js";
 
 type ProjectListItem = {
   id: string;
@@ -438,6 +440,30 @@ export function mountProjectTracksRoutes(app: Application, adapter: DbAdapter): 
     }
   });
 
+  app.get("/projects/:project/sources", async (req: Request<{ project: string }>, res: Response) => {
+    try {
+      const limit = Math.min(parseInt(String(req.query.limit ?? "100"), 10) || 100, 500);
+      const envelope = await buildProjectSourcesEnvelope(adapter, {
+        project: req.params.project,
+        limit,
+        type: stringParam(req.query.type) as ProjectSourceGroup | null,
+        agent: stringParam(req.query.agent),
+        since: stringParam(req.query.since),
+        until: stringParam(req.query.until),
+        readState: stringParam(req.query.read_state) as ProjectSourceReadState | null,
+        status: stringParam(req.query.status) as ProjectSourceFreshnessStatus | null,
+        q: stringParam(req.query.q),
+      });
+      res.json(envelope);
+    } catch (err) {
+      res.status(500).json({
+        ok: false,
+        error: "internal_error",
+        message: err instanceof Error ? err.message : String(err),
+      });
+    }
+  });
+
   app.post("/projects/:project/resync", async (req: Request<{ project: string }>, res: Response) => {
     try {
       const detail = await localIndex.boundedResync(req.params.project);
@@ -469,4 +495,10 @@ function parseEventData(data: EventLogProjectRow["data"]): Record<string, unknow
 
 function stringValue(value: unknown): string | null {
   return typeof value === "string" && value.trim() ? value : null;
+}
+
+function stringParam(value: unknown): string | null {
+  if (typeof value === "string" && value.trim()) return value.trim();
+  if (Array.isArray(value) && typeof value[0] === "string" && value[0].trim()) return value[0].trim();
+  return null;
 }
