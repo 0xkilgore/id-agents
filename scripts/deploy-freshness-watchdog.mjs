@@ -285,6 +285,41 @@ function restoreManagerPlist(target) {
   log(`manager plist rolled back to previous target repo=${target?.workingDirectory ?? 'unknown'} program=${target?.programArg1 ?? 'unknown'}`);
 }
 
+/**
+ * Slice 2 durability: forward bootstrap with retry, rolling back to the
+ * previous manager plist target if every forward attempt fails. Extracted
+ * from runRedeploy() so the rollback branch is unit-testable without real
+ * launchd/git/network I/O — inject retryBootstrap/restorePlist for tests.
+ * Throws only when BOTH forward and rollback bootstrap exhaust retries
+ * (the manager is left down; caller alerts).
+ */
+export async function bootstrapForwardWithRollback({
+  previousTarget,
+  previousHealth,
+  retryBootstrap,
+  restorePlist,
+  log: logFn = () => {},
+}) {
+  const forward = await retryBootstrap();
+  if (forward.ok) {
+    return { ok: true, rolledBack: false };
+  }
+  const forwardMessage = forward.error?.message ?? 'bootstrap failed';
+  logFn(`forward bootstrap failed after ${forward.attempts} attempts; rolling back to previous manager target sha=${previousHealth?.buildSha ?? 'unknown'}`);
+  restorePlist(previousTarget);
+  const rollback = await retryBootstrap();
+  if (!rollback.ok) {
+    throw new Error(`forward bootstrap failed (${forwardMessage}); rollback bootstrap also failed (${rollback.error?.message ?? 'unknown'})`);
+  }
+  return {
+    ok: false,
+    rolledBack: true,
+    rollbackReason: forwardMessage,
+    promotedSha: previousHealth?.buildSha ?? 'rolled-back-previous-build',
+    closeoutEvidence: { ...previousHealth, remoteMainSha: null, remoteMainSource: 'rollback-after-forward-bootstrap-failure' },
+  };
+}
+
 function installDependencies() {
   try {
     sh('npm ci');
@@ -337,30 +372,19 @@ async function runRedeploy() {
   ensureManagerPlistUsesDeployCheckout();
 
   // Restart via launchd (hermetic env — no CLAUDECODE / parent-shell leak).
-  const forward = await retryLaunchdBootstrap({
-    service: SVC,
-    plist: PLIST,
-    run: (cmd) => sh(cmd),
+  const bootstrapResult = await bootstrapForwardWithRollback({
+    previousTarget,
+    previousHealth,
+    retryBootstrap: () => retryLaunchdBootstrap({ service: SVC, plist: PLIST, run: (cmd) => sh(cmd), log }),
+    restorePlist: restoreManagerPlist,
     log,
   });
-  if (!forward.ok) {
-    const forwardMessage = forward.error?.message ?? 'bootstrap failed';
-    log(`forward bootstrap failed after ${forward.attempts} attempts; rolling back to previous manager target sha=${previousHealth.buildSha ?? 'unknown'}`);
-    restoreManagerPlist(previousTarget);
-    const rollback = await retryLaunchdBootstrap({
-      service: SVC,
-      plist: PLIST,
-      run: (cmd) => sh(cmd),
-      log,
-    });
-    if (!rollback.ok) {
-      throw new Error(`forward bootstrap failed (${forwardMessage}); rollback bootstrap also failed (${rollback.error?.message ?? 'unknown'})`);
-    }
+  if (!bootstrapResult.ok) {
     return {
-      promotedSha: previousHealth.buildSha ?? 'rolled-back-previous-build',
+      promotedSha: bootstrapResult.promotedSha,
       rolledBack: true,
-      rollbackReason: forwardMessage,
-      closeoutEvidence: { ...previousHealth, remoteMainSha: null, remoteMainSource: 'rollback-after-forward-bootstrap-failure' },
+      rollbackReason: bootstrapResult.rollbackReason,
+      closeoutEvidence: bootstrapResult.closeoutEvidence,
     };
   }
 
