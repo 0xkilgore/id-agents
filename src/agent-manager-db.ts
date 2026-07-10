@@ -936,6 +936,11 @@ type AgentsListCacheEntry = {
   agents: unknown[];
 };
 
+interface TaskListCacheEntry {
+  at: number;
+  rows: TaskRow[];
+}
+
 export class AgentManagerDb {
   private managementApp: express.Application;
   /** P0 control-plane Slice 1 — heavy-read protection middleware. */
@@ -1011,6 +1016,8 @@ export class AgentManagerDb {
   private agentsListCache: Map<string, AgentsListCacheEntry> = new Map();
   private agentsListRefreshes: Map<string, Promise<void>> = new Map();
   private healthResponseCache: Map<string, { at: number; body: unknown }> = new Map();
+  private taskListCache: Map<string, TaskListCacheEntry> = new Map();
+  private static readonly TASK_LIST_CACHE_TTL_MS = 10_000;
   private remoteProbeInterval: NodeJS.Timeout | null = null;
   private querySweeperInterval: NodeJS.Timeout | null = null;
   private taskCommentSweepInterval: NodeJS.Timeout | null = null;
@@ -1123,6 +1130,7 @@ export class AgentManagerDb {
       completed_at: nowSec,
       updated_at: nowSec,
     });
+    this.clearTaskListCache(teamId);
     const updated = await this.db.tasks.getByNameForTeam(task.name, teamId);
     if (!updated) {
       // updateFields succeeded against `task.id` but the re-read missed
@@ -7982,6 +7990,7 @@ export class AgentManagerDb {
         );
 
         await this.db.tasks.create(taskRow);
+        this.clearTaskListCache(taskTeamId);
         res.status(201).json({ ok: true, task: await this.buildTaskResult(taskRow, teamId) });
       } catch (err: any) {
         console.error('[Manager] Error in POST /tasks:', err);
@@ -8016,6 +8025,12 @@ export class AgentManagerDb {
           status: status && validStatuses.includes(status) ? status as 'todo' | 'doing' | 'done' : undefined,
           owner: ownerIdFilter,
           teamId: teamIdFilter,
+        });
+        this.cacheTaskList({
+          teamId: teamIdFilter,
+          status: status && validStatuses.includes(status) ? status as 'todo' | 'doing' | 'done' : undefined,
+          owner: ownerIdFilter,
+          rows: tasks,
         });
 
         const results = [];
@@ -8165,7 +8180,10 @@ export class AgentManagerDb {
     this.managementApp.get('/tasks/:ref', async (req, res) => {
       try {
         const { id: teamId } = await this.getTeam(req);
-        const { task, error } = await this.resolveTaskRef(req.params.ref, teamId);
+        const cachedTask = this.findTaskInCachedLists(req.params.ref, teamId);
+        const { task, error } = cachedTask
+          ? { task: cachedTask, error: undefined }
+          : await this.resolveTaskRef(req.params.ref, teamId);
         if (!task) return res.status(404).json({ error: error || `Task "${req.params.ref}" not found` });
         res.json({ ok: true, task: await this.buildTaskResult(task, teamId) });
       } catch (err: any) {
@@ -8197,6 +8215,7 @@ export class AgentManagerDb {
           description: next.description,
           updated_at: Math.floor(Date.now() / 1000),
         });
+        this.clearTaskListCache(teamId);
 
         const updated = await this.db.tasks.getByNameForTeam(task.name, teamId);
         res.json({ ok: true, task: await this.buildTaskResult(updated!, teamId) });
@@ -8247,6 +8266,7 @@ export class AgentManagerDb {
         if (!claimed) {
           return res.status(409).json({ error: `Cannot claim "${task.name}" — already owned or not in todo status` });
         }
+        this.clearTaskListCache(teamId);
 
         const updated = await this.db.tasks.getByNameForTeam(task.name, teamId);
         await emitTaskClaimed(this.db.events, {
@@ -8318,6 +8338,7 @@ export class AgentManagerDb {
         const { task, error } = await this.resolveTaskRef(req.params.ref, teamId);
         if (!task) return res.status(404).json({ error: error || `Task "${req.params.ref}" not found` });
         await this.db.tasks.delete(task.id);
+        this.clearTaskListCache(teamId);
         res.json({ ok: true, removed: task.name });
       } catch (err: any) {
         console.error('[Manager] Error in DELETE /tasks/:ref:', err);
@@ -9143,6 +9164,60 @@ export class AgentManagerDb {
       completed_at: task.completed_at,
       completedAt: task.completed_at,
     };
+  }
+
+  private taskListCacheKey(input: {
+    teamId: string;
+    status?: 'todo' | 'doing' | 'done';
+    owner?: string;
+  }): string {
+    return [
+      input.teamId,
+      input.status ?? '*',
+      input.owner ?? '*',
+    ].join(':');
+  }
+
+  private cacheTaskList(input: {
+    teamId: string;
+    status?: 'todo' | 'doing' | 'done';
+    owner?: string;
+    rows: TaskRow[];
+  }): void {
+    this.taskListCache.set(this.taskListCacheKey(input), {
+      at: Date.now(),
+      rows: input.rows,
+    });
+  }
+
+  private clearTaskListCache(teamId?: string): void {
+    if (!teamId) {
+      this.taskListCache.clear();
+      return;
+    }
+    for (const key of this.taskListCache.keys()) {
+      if (key.startsWith(`${teamId}:`)) this.taskListCache.delete(key);
+    }
+  }
+
+  private findTaskInCachedLists(ref: string, teamId: string): TaskRow | null {
+    const now = Date.now();
+    const cleanRef = decodeURIComponent(ref);
+    const shortRef = cleanRef.startsWith('#') ? cleanRef.slice(1).toLowerCase() : null;
+    for (const [key, entry] of this.taskListCache) {
+      if (!key.startsWith(`${teamId}:`)) continue;
+      if (now - entry.at > AgentManagerDb.TASK_LIST_CACHE_TTL_MS) {
+        this.taskListCache.delete(key);
+        continue;
+      }
+      const found = entry.rows.find((task) => {
+        if (task.name === cleanRef) return true;
+        if (!shortRef || !task.uuid) return false;
+        return task.uuid.replace(/-/g, '').toLowerCase().startsWith(shortRef);
+      });
+      if (found) return found;
+    }
+    return null;
   }
 
   private parseTaskFieldPatch(body: Record<string, unknown>): {

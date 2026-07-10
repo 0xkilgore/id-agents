@@ -280,6 +280,36 @@ describe('GET /tasks read-model immediate reflect', () => {
     expect(single.task.completedAt).not.toBeNull();
   });
 
+  it('GET /tasks/:ref reuses the adjacent task list cache for listed rows', async () => {
+    const first = 'adjacent-prefetch-first';
+    const second = 'adjacent-prefetch-second';
+    await insertTaskDirect(db, teamId, first, coderAgentId, 'doing');
+    await insertTaskDirect(db, teamId, second, coderAgentId, 'doing');
+
+    const originalList = db.tasks.list.bind(db.tasks);
+    let listCalls = 0;
+    db.tasks.list = (async (...args: Parameters<typeof originalList>) => {
+      listCalls += 1;
+      return originalList(...args);
+    }) as typeof db.tasks.list;
+
+    try {
+      const list = await fetch(`${baseUrl}/tasks`, {
+        headers: { 'X-Id-Team': TEAM },
+      }).then((r) => r.json());
+      expect(list.tasks.map((task: Record<string, unknown>) => task.name)).toContain(second);
+      expect(listCalls).toBe(1);
+
+      const detail = await fetch(`${baseUrl}/tasks/${second}`, {
+        headers: { 'X-Id-Team': TEAM },
+      }).then((r) => r.json());
+      expect(detail.task.name).toBe(second);
+      expect(listCalls).toBe(1);
+    } finally {
+      db.tasks.list = originalList as typeof db.tasks.list;
+    }
+  });
+
   it('POST /tasks/:ref/notes emits one durable task_comment event, routes once, and shows receipts on task detail', async () => {
     const taskName = 'comment-routing-task';
     await insertAgentDirect(db, teamId, 'cane');
