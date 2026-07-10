@@ -867,6 +867,33 @@ export function mountOutputsRoutes(
   // ── GET /artifacts/:id/detail ─────────────────────────────────────
   // One request hydrates body/render metadata, compact catalog fields, review
   // summary, comments/timeline, and provenance for the center reader pane.
+  app.get('/artifacts/:id/detail/version', async (req: Request<{ id: string }>, res: Response) => {
+    try {
+      const ref = resolveArtifactDetailRef(req.params.id);
+      const { detail, cache } = await getArtifactDetailCached(ref);
+      res.setHeader('X-Artifact-Detail-Cache', cache);
+      if (!detail) {
+        res.status(404).json({
+          ok: false,
+          code: 'artifact_not_found',
+          error: `Artifact "${ref.requestedRef}" not found`,
+          artifact_id: ref.artifactId,
+        });
+        return;
+      }
+      res.json({
+        ok: true,
+        schema_version: 'artifact.detail.version.v1',
+        generated_at: new Date().toISOString(),
+        artifact_id: ref.artifactId,
+        requested_ref: ref.requestedRef,
+        version_key: detail.version_key,
+      });
+    } catch (err) {
+      res.status(500).json({ ok: false, error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
   app.get('/artifacts/:id/detail', async (req: Request<{ id: string }>, res: Response) => {
     try {
       await sendArtifactDetail(req, resolveArtifactDetailRef(req.params.id), res);

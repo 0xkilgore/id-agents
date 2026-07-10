@@ -513,6 +513,26 @@ function buildTaskOperationTimeline(
   };
 }
 
+function taskDetailVersionKey(task: TaskRow, notes: Array<ReturnType<typeof taskCommentView>>): string {
+  const latestNote = notes[notes.length - 1] ?? null;
+  const payload = {
+    id: task.id,
+    uuid: task.uuid,
+    name: task.name,
+    status: task.status,
+    owner: task.owner,
+    title: task.title,
+    description: task.description,
+    updated_at: task.updated_at,
+    completed_at: task.completed_at,
+    notes_count: notes.length,
+    latest_note_id: latestNote?.id ?? null,
+    latest_note_updated_at: latestNote?.updated_at ?? null,
+    latest_note_routing_status: latestNote?.routing_status ?? null,
+  };
+  return `sha256:${crypto.createHash('sha256').update(JSON.stringify(payload)).digest('hex')}`;
+}
+
 function fleetMetricsHistoryRetentionDaysFromEnv(env: Record<string, string | undefined>): number {
   const raw = env.FLEET_METRICS_HISTORY_RETENTION_DAYS;
   if (!raw) return 35;
@@ -1018,6 +1038,9 @@ export class AgentManagerDb {
   private healthResponseCache: Map<string, { at: number; body: unknown }> = new Map();
   private taskListCache: Map<string, TaskListCacheEntry> = new Map();
   private static readonly TASK_LIST_CACHE_TTL_MS = 10_000;
+  private taskDetailCache: Map<string, { taskUpdatedAt: number; detail: Record<string, unknown> }> = new Map();
+  private taskDetailInflight: Map<string, Promise<Record<string, unknown>>> = new Map();
+  private static readonly TASK_DETAIL_CACHE_MAX = 250;
   private remoteProbeInterval: NodeJS.Timeout | null = null;
   private querySweeperInterval: NodeJS.Timeout | null = null;
   private taskCommentSweepInterval: NodeJS.Timeout | null = null;
@@ -8076,7 +8099,14 @@ export class AgentManagerDb {
         });
         const agents = await this.dbListAgents(teamId, true);
         const agentNames = new Map(agents.map((a) => [a.id, a.name]));
-        res.json(buildTasksEntriesEnvelope(tasks, agentNames, { limit, offset, today }));
+        const envelope = buildTasksEntriesEnvelope(tasks, agentNames, { limit, offset, today });
+        await Promise.all(tasks.slice(offset, offset + limit).map((task) =>
+          this.buildTaskDetailCached(task, teamId, today).catch((err) => {
+            this.managerLog(`[task-detail-cache] prefetch failed for ${task.name}: ${err instanceof Error ? err.message : String(err)}`);
+            return null;
+          }),
+        ));
+        res.json(envelope);
       } catch (err: any) {
         console.error('[Manager] Error in GET /tasks/entries:', err);
         res.status(500).json({ error: err?.message || 'tasks entries failed' });
@@ -8163,6 +8193,8 @@ export class AgentManagerDb {
 
         const noteRow = await getTaskCommentByHash(this.db.adapter, teamId, append.row.hash);
         const updated = await this.db.tasks.getByNameForTeam(task.name, teamId);
+        this.invalidateTaskDetailCache(teamId, task);
+        if (updated) this.invalidateTaskDetailCache(teamId, updated);
         const note = taskCommentView(noteRow ?? append.row);
         res.status(append.inserted ? 201 : 200).json({
           ok: true,
@@ -8177,6 +8209,41 @@ export class AgentManagerDb {
       }
     });
 
+    this.managementApp.get('/tasks/:ref/detail/version', async (req, res) => {
+      try {
+        const { id: teamId } = await this.getTeam(req);
+        const { task, error } = await this.resolveTaskRef(req.params.ref, teamId);
+        if (!task) return res.status(404).json({ error: error || `Task "${req.params.ref}" not found` });
+        const { detail, cache } = await this.getTaskDetailCached(task, teamId);
+        res.setHeader('X-Task-Detail-Cache', cache);
+        res.json({
+          ok: true,
+          schema_version: 'task.detail.version.v1',
+          generated_at: new Date().toISOString(),
+          task_name: task.name,
+          task_uuid: task.uuid,
+          version_key: detail.version_key,
+        });
+      } catch (err: any) {
+        console.error('[Manager] Error in GET /tasks/:ref/detail/version:', err);
+        res.status(500).json({ error: err?.message || 'Internal server error' });
+      }
+    });
+
+    this.managementApp.get('/tasks/:ref/detail', async (req, res) => {
+      try {
+        const { id: teamId } = await this.getTeam(req);
+        const { task, error } = await this.resolveTaskRef(req.params.ref, teamId);
+        if (!task) return res.status(404).json({ error: error || `Task "${req.params.ref}" not found` });
+        const { detail, cache } = await this.getTaskDetailCached(task, teamId);
+        res.setHeader('X-Task-Detail-Cache', cache);
+        res.json({ ok: true, task: detail });
+      } catch (err: any) {
+        console.error('[Manager] Error in GET /tasks/:ref/detail:', err);
+        res.status(500).json({ error: err?.message || 'Internal server error' });
+      }
+    });
+
     this.managementApp.get('/tasks/:ref', async (req, res) => {
       try {
         const { id: teamId } = await this.getTeam(req);
@@ -8185,7 +8252,9 @@ export class AgentManagerDb {
           ? { task: cachedTask, error: undefined }
           : await this.resolveTaskRef(req.params.ref, teamId);
         if (!task) return res.status(404).json({ error: error || `Task "${req.params.ref}" not found` });
-        res.json({ ok: true, task: await this.buildTaskResult(task, teamId) });
+        const { detail, cache } = await this.getTaskDetailCached(task, teamId);
+        res.setHeader('X-Task-Detail-Cache', cache);
+        res.json({ ok: true, task: detail });
       } catch (err: any) {
         console.error('[Manager] Error in GET /tasks/:ref:', err);
         res.status(500).json({ error: err?.message || 'Internal server error' });
@@ -8218,6 +8287,8 @@ export class AgentManagerDb {
         this.clearTaskListCache(teamId);
 
         const updated = await this.db.tasks.getByNameForTeam(task.name, teamId);
+        this.invalidateTaskDetailCache(teamId, task);
+        if (updated) this.invalidateTaskDetailCache(teamId, updated);
         res.json({ ok: true, task: await this.buildTaskResult(updated!, teamId) });
       } catch (err: any) {
         console.error('[Manager] Error in PATCH /tasks/:ref:', err);
@@ -8269,6 +8340,8 @@ export class AgentManagerDb {
         this.clearTaskListCache(teamId);
 
         const updated = await this.db.tasks.getByNameForTeam(task.name, teamId);
+        this.invalidateTaskDetailCache(teamId, task);
+        if (updated) this.invalidateTaskDetailCache(teamId, updated);
         await emitTaskClaimed(this.db.events, {
           teamId,
           taskUuid: updated!.uuid,
@@ -8325,6 +8398,8 @@ export class AgentManagerDb {
           teamId,
           actorAgentId: callerAgent?.id ?? null,
         });
+        this.invalidateTaskDetailCache(teamId, task);
+        this.invalidateTaskDetailCache(teamId, updated);
         res.json({ ok: true, task: await this.buildTaskResult(updated, teamId) });
       } catch (err: any) {
         console.error('[Manager] Error in POST /tasks/:ref/done:', err);
@@ -8339,6 +8414,7 @@ export class AgentManagerDb {
         if (!task) return res.status(404).json({ error: error || `Task "${req.params.ref}" not found` });
         await this.db.tasks.delete(task.id);
         this.clearTaskListCache(teamId);
+        this.invalidateTaskDetailCache(teamId, task);
         res.json({ ok: true, removed: task.name });
       } catch (err: any) {
         console.error('[Manager] Error in DELETE /tasks/:ref:', err);
@@ -9148,6 +9224,7 @@ export class AgentManagerDb {
       notes,
       commentRouting: summarizeTaskCommentRouting(notes),
       operationTimeline: buildTaskOperationTimeline(task, notes),
+      version_key: taskDetailVersionKey(task, notes),
       ownerName,
       teamName,
       linkedEvents: links.map(l => l.schedule_id),
@@ -9218,6 +9295,60 @@ export class AgentManagerDb {
       if (found) return found;
     }
     return null;
+  }
+
+  private taskDetailCacheKey(teamId: string, taskName: string): string {
+    return `${teamId}:${taskName}`;
+  }
+
+  private invalidateTaskDetailCache(teamId: string, task: Pick<TaskRow, 'name'>): void {
+    const key = this.taskDetailCacheKey(teamId, task.name);
+    this.taskDetailCache.delete(key);
+    this.taskDetailInflight.delete(key);
+  }
+
+  private rememberTaskDetailCache(key: string, taskUpdatedAt: number, detail: Record<string, unknown>): void {
+    if (this.taskDetailCache.has(key)) this.taskDetailCache.delete(key);
+    this.taskDetailCache.set(key, { taskUpdatedAt, detail });
+    while (this.taskDetailCache.size > AgentManagerDb.TASK_DETAIL_CACHE_MAX) {
+      const oldest = this.taskDetailCache.keys().next().value;
+      if (!oldest) break;
+      this.taskDetailCache.delete(oldest);
+    }
+  }
+
+  private async buildTaskDetailCached(task: TaskRow, teamId: string, today: string = todayIso()): Promise<Record<string, unknown>> {
+    const key = this.taskDetailCacheKey(teamId, task.name);
+    const hit = this.taskDetailCache.get(key);
+    if (hit && hit.taskUpdatedAt === task.updated_at) return hit.detail;
+
+    const existing = this.taskDetailInflight.get(key);
+    if (existing) return existing;
+
+    const pending = this.buildTaskResult(task, teamId, today);
+    this.taskDetailInflight.set(key, pending);
+    try {
+      const detail = await pending;
+      this.rememberTaskDetailCache(key, task.updated_at, detail);
+      return detail;
+    } finally {
+      this.taskDetailInflight.delete(key);
+    }
+  }
+
+  private async getTaskDetailCached(task: TaskRow, teamId: string, today: string = todayIso()): Promise<{
+    detail: Record<string, unknown>;
+    cache: 'hit' | 'miss' | 'deduped';
+  }> {
+    const key = this.taskDetailCacheKey(teamId, task.name);
+    const hit = this.taskDetailCache.get(key);
+    if (hit && hit.taskUpdatedAt === task.updated_at) {
+      return { detail: hit.detail, cache: 'hit' };
+    }
+    if (this.taskDetailInflight.has(key)) {
+      return { detail: await this.taskDetailInflight.get(key)!, cache: 'deduped' };
+    }
+    return { detail: await this.buildTaskDetailCached(task, teamId, today), cache: 'miss' };
   }
 
   private parseTaskFieldPatch(body: Record<string, unknown>): {

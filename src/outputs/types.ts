@@ -628,6 +628,7 @@ export interface ArtifactDetailResponse {
   ok: true;
   schema_version: "artifact.detail.v1";
   generated_at: string;
+  version_key: string;
   artifact_id: string;
   requested_ref: string;
   resolved_from: "artifact_id" | "encoded_path" | "path";
