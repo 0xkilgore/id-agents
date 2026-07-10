@@ -15,6 +15,7 @@ import {
   countFleshLogSince,
   findProbableDuplicateByRegisterId,
   getBacklogItem,
+  getDispatchStatusesByPhid,
   getFleshCounts,
   insertBacklogItem,
   insertBacklogItemIfAbsentByLogicalKey,
@@ -30,6 +31,7 @@ import {
   type NewBacklogItem,
 } from "./storage.js";
 import type { RiskClass } from "./types.js";
+import { autoPromoteRejections } from "./auto-promote-policy.js";
 import { parseRoadmapToBacklog } from "./roadmap-import.js";
 import { runFleshPass } from "./flesh-runner.js";
 import { resolveTrack } from "../track-registry/registry.js";
@@ -40,6 +42,17 @@ export interface OrchestrationRouteOptions {
   adapter: DbAdapter;
   config: ContinuousOrchestrationConfig;
   teamId?: string;
+}
+
+type NeedsPromoteSkipClass = "already_dispatched" | "confidence_threshold" | "review_held_risk";
+
+function classifyNeedsPromoteSkip(reasons: string[]): NeedsPromoteSkipClass | null {
+  if (reasons.some((r) => r.includes("already dispatched once"))) return "already_dispatched";
+  if (reasons.some((r) => r.includes("flesh_confidence") || r.includes("confidence "))) {
+    return "confidence_threshold";
+  }
+  if (reasons.length > 0) return "review_held_risk";
+  return null;
 }
 
 export function mountContinuousOrchestrationRoutes(app: Application, opts: OrchestrationRouteOptions): void {
@@ -160,6 +173,70 @@ export function mountContinuousOrchestrationRoutes(app: Application, opts: Orche
       const state = typeof req.query.state === "string" ? (req.query.state as ReadinessState) : undefined;
       const items = await listBacklogByState(adapter, { team_id: teamId, state });
       res.json({ ok: true, items });
+    } catch (err) {
+      res.status(500).json({ ok: false, error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  app.get("/orchestration/backlog/needs-promote-report", async (_req: Request, res: Response) => {
+    try {
+      const items = await listBacklogByState(adapter, { team_id: teamId, state: "needs_review" });
+      const dispatchStatuses = await getDispatchStatusesByPhid(
+        adapter,
+        items.map((item) => item.last_dispatch_phid).filter((phid): phid is string => !!phid),
+      );
+      const groups: Record<
+        NeedsPromoteSkipClass,
+        {
+          count: number;
+          items: Array<{
+            item_id: string;
+            title: string;
+            reasons: string[];
+            prior_dispatch_phid?: string;
+            prior_dispatch_status?: string | null;
+          }>;
+        }
+      > = {
+        already_dispatched: { count: 0, items: [] },
+        confidence_threshold: { count: 0, items: [] },
+        review_held_risk: { count: 0, items: [] },
+      };
+      let autoPromotable = 0;
+
+      for (const item of items) {
+        const reasons = autoPromoteRejections(item, AUTO_READY_CONFIDENCE_THRESHOLD);
+        const klass = classifyNeedsPromoteSkip(reasons);
+        if (!klass) {
+          autoPromotable += 1;
+          continue;
+        }
+        const priorDispatchPhid = item.last_dispatch_phid ?? undefined;
+        groups[klass].items.push({
+          item_id: item.item_id,
+          title: item.title,
+          reasons,
+          ...(priorDispatchPhid
+            ? {
+                prior_dispatch_phid: priorDispatchPhid,
+                prior_dispatch_status: dispatchStatuses.get(priorDispatchPhid) ?? null,
+              }
+            : {}),
+        });
+      }
+
+      for (const group of Object.values(groups)) group.count = group.items.length;
+      res.json({
+        ok: true,
+        total_needs_review: items.length,
+        auto_promotable: autoPromotable,
+        counts: {
+          already_dispatched: groups.already_dispatched.count,
+          confidence_threshold: groups.confidence_threshold.count,
+          review_held_risk: groups.review_held_risk.count,
+        },
+        groups,
+      });
     } catch (err) {
       res.status(500).json({ ok: false, error: err instanceof Error ? err.message : String(err) });
     }
