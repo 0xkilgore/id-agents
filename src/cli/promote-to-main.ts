@@ -17,7 +17,7 @@
 //     ready-to-send /agent-needs-input payload + exits non-zero.
 
 import { spawn } from "node:child_process";
-import { appendAgentTrailer } from "../lib/agent-attribution.js";
+import { appendAgentTrailer, sanitizeAgentName } from "../lib/agent-attribution.js";
 import { classifySmokeFailures } from "./smoke-exempt.js";
 
 export type Strategy =
@@ -160,6 +160,8 @@ export interface BranchStatus {
   branchTip: string;
   baseTip: string;
   hasAutocommitNoise: boolean; // many small commits with autocommit-shaped messages
+  hasMissingAgentTrailers?: boolean; // commits that would land unattributed on fast-forward
+  sourceAgent?: string | null; // first Agent trailer found on the source branch
 }
 
 /** Decide a concrete strategy from `auto`. Pure; tested directly. */
@@ -170,6 +172,7 @@ export function pickAutoStrategy(
   // (behind == 0) and there's at least one commit ahead.
   if (status.behind === 0 && status.ahead >= 1) {
     if (status.hasAutocommitNoise) return "squash";
+    if (status.hasMissingAgentTrailers && status.sourceAgent) return "squash";
     return "fast_forward";
   }
   // Otherwise prefer merge_commit; if caller wanted no merge commit,
@@ -192,6 +195,33 @@ export function hasAutocommitNoise(messages: readonly string[]): boolean {
   if (messages.length === 0) return false;
   const noisy = countAutocommitNoise(messages);
   return noisy / messages.length >= 0.5;
+}
+
+export interface SourceBranchAttribution {
+  sourceAgent: string | null;
+  hasMissingAgentTrailers: boolean;
+}
+
+/** Inspect commit trailer values in newest-to-oldest branch order. */
+export function sourceBranchAttribution(trailerValues: readonly string[]): SourceBranchAttribution {
+  let sourceAgent: string | null = null;
+  let hasMissingAgentTrailers = false;
+  for (const raw of trailerValues) {
+    const agent = sanitizeAgentName(raw.split(",")[0]);
+    if (agent && !sourceAgent) sourceAgent = agent;
+    if (!agent) hasMissingAgentTrailers = true;
+  }
+  return { sourceAgent, hasMissingAgentTrailers };
+}
+
+const SOURCE_ATTRIBUTION_RECORD_SEP = "\x1e";
+const SOURCE_ATTRIBUTION_FIELD_SEP = "\x1f";
+
+function parseSourceBranchAttributionLog(stdout: string): string[] {
+  return stdout
+    .split(SOURCE_ATTRIBUTION_RECORD_SEP)
+    .map((rec) => rec.replace(new RegExp(`^${SOURCE_ATTRIBUTION_FIELD_SEP}`), "").trim())
+    .filter((_, idx, all) => idx < all.length - 1 || all[idx] !== "");
 }
 
 // ────────────────────────────────────────────────────────────────────
@@ -277,9 +307,21 @@ export async function runPromoteToMain(
     ["log", "--format=%s", `${remoteBaseRef}..${branch}`], repo,
   );
   const messages = logOut.stdout.split("\n").filter((l) => l.trim());
+  const trailerOut = await deps.git(
+    [
+      "log",
+      `--format=%x1f%(trailers:key=Agent,valueonly,separator=%x2c)%x1e`,
+      `${remoteBaseRef}..${branch}`,
+    ],
+    repo,
+  );
+  const sourceAttribution = sourceBranchAttribution(parseSourceBranchAttributionLog(trailerOut.stdout));
+  const effectiveAgent = sanitizeAgentName(agent) || sourceAttribution.sourceAgent;
   const branchStatus: BranchStatus = {
     ahead, behind, branchTip, baseTip,
     hasAutocommitNoise: hasAutocommitNoise(messages),
+    hasMissingAgentTrailers: sourceAttribution.hasMissingAgentTrailers,
+    sourceAgent: effectiveAgent,
   };
 
   // Step 5: Strategy resolution.
@@ -373,12 +415,12 @@ export async function runPromoteToMain(
       sourceTip: branchTip,
       verification: smoke,
       dispatchId,
-      agent,
+      agent: effectiveAgent,
     });
     mergeOut = await deps.git(["commit", "-m", body], repo);
   } else {
     // merge_commit
-    const mergeMsg = appendAgentTrailer(`Merge ${branch} into ${base}`, agent);
+    const mergeMsg = appendAgentTrailer(`Merge ${branch} into ${base}`, effectiveAgent);
     mergeOut = await deps.git(
       ["merge", "--no-ff", "-m", mergeMsg, branch],
       repo,

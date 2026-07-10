@@ -184,19 +184,33 @@ describe("by-agent commit attribution", () => {
     expect(trailer2).toBe("someone-else");
   });
 
-  it("does not clobber a pre-existing foreign prepare-commit-msg hook", () => {
+  it("chains a pre-existing foreign prepare-commit-msg hook and still stamps attribution", () => {
     const commonDir = execFileSync("git", ["-C", repo, "rev-parse", "--git-path", "hooks"], {
       encoding: "utf8",
     }).toString().trim();
     const hooksDir = path.isAbsolute(commonDir) ? commonDir : path.join(repo, commonDir);
     execFileSync("mkdir", ["-p", hooksDir]);
     const hookPath = path.join(hooksDir, "prepare-commit-msg");
-    writeFileSync(hookPath, "#!/bin/sh\n# someone-elses-hook\nexit 0\n");
+    writeFileSync(hookPath, "#!/bin/sh\nprintf '\\nForeign: yes\\n' >> \"$1\"\nexit 0\n");
 
     const r = allocate({ agent_id: "hopper" });
     expect(r.ok).toBe(true);
-    // Foreign hook is preserved untouched.
-    expect(execFileSync("cat", [hookPath], { encoding: "utf8" }).toString()).toContain("someone-elses-hook");
+    if (!r.ok) return;
+    // Foreign hook is preserved as a chained hook, while prepare-commit-msg is
+    // replaced with the id-agents wrapper.
+    expect(execFileSync("cat", [hookPath], { encoding: "utf8" }).toString()).toContain("id-agents-managed");
+    expect(existsSync(path.join(hooksDir, "prepare-commit-msg.before-id-agents"))).toBe(true);
+
+    const wt = r.lease.worktree_path;
+    writeFileSync(path.join(wt, "foreign-hook.txt"), "work\n");
+    execFileSync("git", ["-C", wt, "add", "."]);
+    execFileSync("git", ["-C", wt, "config", "user.email", "t@t.dev"]);
+    execFileSync("git", ["-C", wt, "config", "user.name", "t"]);
+    execFileSync("git", ["-C", wt, "commit", "-m", "feat: preserve hook"]);
+
+    const body = execFileSync("git", ["-C", wt, "log", "-1", "--format=%B"], { encoding: "utf8" }).toString();
+    expect(body).toMatch(/^Foreign: yes$/m);
+    expect(body).toMatch(/^Agent: hopper$/m);
   });
 });
 

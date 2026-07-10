@@ -25,6 +25,9 @@ export const ATTRIBUTION_MARKER_FILE = "agent-attribution";
 /** Sentinel embedded in the generated hook so installers recognize their own. */
 export const HOOK_SENTINEL = "id-agents-managed:agent-commit-attribution";
 
+/** Name used when wrapping a pre-existing prepare-commit-msg hook. */
+export const CHAINED_PREPARE_COMMIT_MSG_HOOK = "prepare-commit-msg.before-id-agents";
+
 /** Strip anything that would corrupt a one-line git trailer value. */
 export function sanitizeAgentName(agent: string | null | undefined): string {
   if (!agent) return "";
@@ -69,12 +72,17 @@ export function appendAgentTrailer(message: string, agent: string | null | undef
  * not already carry one. It is a strict no-op outside leased worktrees (the
  * protected root has no marker) and never fails a commit (always exits 0).
  */
-export function buildPrepareCommitMsgHook(): string {
+export function buildPrepareCommitMsgHook(chainedHookPath?: string | null): string {
+  const chained = chainedHookPath ? JSON.stringify(chainedHookPath) : "";
   return `#!/bin/sh
 # ${HOOK_SENTINEL}
 # Appends an "Agent: <name>" trailer (from the leased-worktree marker) so
 # commit-stats.py can slice commits by agent. No-op outside leased worktrees;
 # never blocks a commit.
+chained_hook=${chained}
+if [ -n "$chained_hook" ] && [ -x "$chained_hook" ]; then
+  "$chained_hook" "$@" || true
+fi
 gitdir=$(git rev-parse --absolute-git-dir 2>/dev/null) || exit 0
 marker="$gitdir/${ATTRIBUTION_MARKER_FILE}"
 [ -f "$marker" ] || exit 0

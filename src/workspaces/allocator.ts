@@ -17,6 +17,7 @@ import type { ProtectedRootEntry } from "./repo-registry.js";
 import type { WorkspaceLease } from "../dispatch-scheduler/types.js";
 import {
   ATTRIBUTION_MARKER_FILE,
+  CHAINED_PREPARE_COMMIT_MSG_HOOK,
   HOOK_SENTINEL,
   buildPrepareCommitMsgHook,
   sanitizeAgentName,
@@ -252,8 +253,8 @@ export function findBranchWorktree(root: string, branch: string): WorktreeEntry 
  *     strict no-op anywhere there is no marker (e.g. the protected root).
  *
  * Best-effort: any failure is swallowed so attribution never blocks a build.
- * A pre-existing foreign hook is left untouched (we only manage our own,
- * recognized by the embedded sentinel).
+ * A pre-existing foreign hook is preserved by moving it to a chained hook path
+ * and installing a small id-agents wrapper that invokes it first.
  */
 export function installAgentAttribution(
   worktreePath: string,
@@ -274,15 +275,23 @@ export function installAgentAttribution(
     const raw = hooksPathOut.out.trim();
     const hooksDir = path.isAbsolute(raw) ? raw : path.resolve(protectedRoot, raw);
     const hookPath = path.join(hooksDir, "prepare-commit-msg");
+    const chainedHookPath = path.join(hooksDir, CHAINED_PREPARE_COMMIT_MSG_HOOK);
 
     if (existsSync(hookPath)) {
-      // Only (re)write a hook we own; never clobber a foreign one.
       const existing = readFileSync(hookPath, "utf8");
-      if (!existing.includes(HOOK_SENTINEL)) return;
+      if (!existing.includes(HOOK_SENTINEL)) {
+        if (!existsSync(chainedHookPath)) {
+          writeFileSync(chainedHookPath, existing, "utf8");
+          chmodSync(chainedHookPath, 0o755);
+        }
+        writeFileSync(hookPath, buildPrepareCommitMsgHook(chainedHookPath), "utf8");
+        chmodSync(hookPath, 0o755);
+        return;
+      }
     } else {
       mkdirSync(hooksDir, { recursive: true });
     }
-    writeFileSync(hookPath, buildPrepareCommitMsgHook(), "utf8");
+    writeFileSync(hookPath, buildPrepareCommitMsgHook(existsSync(chainedHookPath) ? chainedHookPath : null), "utf8");
     chmodSync(hookPath, 0o755);
   } catch {
     /* best effort — attribution must never break allocation */
