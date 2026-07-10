@@ -130,8 +130,10 @@ import {
 import {
   buildArtifactDetail,
   resolveArtifactDetailRef,
+  syntheticCatalogFromPath,
   type ArtifactDetailRef,
 } from './detail-projection.js';
+import { readArtifactByLiveSourceId } from '../dispatch-scheduler/read-model.js';
 import {
   evaluateSurfacingHealth,
   type ArtifactActionProbe,
@@ -550,6 +552,14 @@ export function mountOutputsRoutes(
           }
         : null,
     };
+  }
+
+  async function getArtifactOrLiveSourceCatalog(artifactId: string, teamId: string): Promise<ArtifactCatalogRow | null> {
+    const catalog = await getArtifact(adapter, artifactId);
+    if (catalog) return catalog;
+    const liveSourceRow = await readArtifactByLiveSourceId(adapter, teamId, artifactId).catch(() => null);
+    const liveSourcePath = typeof liveSourceRow?.path === 'string' ? liveSourceRow.path : null;
+    return syntheticCatalogFromPath(artifactId, liveSourcePath, new Date().toISOString(), liveSourceRow);
   }
 
   async function probeArtifact(
@@ -980,7 +990,7 @@ export function mountOutputsRoutes(
   app.get('/artifacts/:id/download', async (req: Request<{ id: string }>, res: Response) => {
     try {
       const ref = resolveArtifactDetailRef(req.params.id);
-      const catalog = await getArtifact(adapter, ref.artifactId);
+      const catalog = await getArtifactOrLiveSourceCatalog(ref.artifactId, await resolveRequestTeamId(req));
       if (catalog?.abs_path) {
         try {
           await fsp.access(catalog.abs_path);
@@ -1012,7 +1022,7 @@ export function mountOutputsRoutes(
     try {
       const artifactId = req.params.id;
       const state = await getReviewState(adapter, artifactId);
-      const catalog = await getArtifact(adapter, artifactId);
+      const catalog = await getArtifactOrLiveSourceCatalog(artifactId, await resolveRequestTeamId(req));
       const operations_count = await countOperations(adapter, artifactId);
 
       const availability: ArtifactAvailability = catalog?.availability ?? 'unknown';

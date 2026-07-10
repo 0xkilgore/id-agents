@@ -253,7 +253,7 @@ function safeBase64UrlDecode(value: string): string | null {
   }
 }
 
-function syntheticCatalogFromPath(
+export function syntheticCatalogFromPath(
   artifactId: string,
   absPath: string | null,
   nowIso: string,

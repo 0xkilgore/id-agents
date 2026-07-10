@@ -129,6 +129,52 @@ function emptyReconcileResult(): FilesystemArtifactReconcileResult {
   };
 }
 
+async function seedQueryResultArtifact(name: string, body: string): Promise<{ artifactId: string; filePath: string }> {
+  await adapter.query(`INSERT INTO teams (id, name) VALUES ('default', 'default')`, []);
+  const agents = new SqliteAgentsRepo(adapter);
+  await agents.upsert({
+    team_id: "default",
+    id: "agent_1",
+    name: "cursor-coder-pilot",
+    type: "claude",
+    model: "test",
+    port: 0,
+    endpoint: "http://localhost:0",
+    working_directory: null,
+    status: "running",
+    created_at: Date.now(),
+    metadata: {},
+  });
+
+  const outputDir = path.join(tmp, "agent_1781286770776_sq6usr9", "output");
+  mkdirSync(outputDir, { recursive: true });
+  const filePath = path.join(outputDir, name);
+  writeFileSync(filePath, body);
+
+  const queries = new SqliteQueriesRepo(adapter);
+  await queries.upsert("default", "agent_1", {
+    query_id: "query_1783708383412_bfv84pi",
+    status: "completed",
+    completed: Date.now(),
+    result: { result: `Wrote the reconciled key to ${filePath}` },
+    manager_dispatch_id: "phid:disp-93238fa4a6d93e91",
+  });
+
+  return { artifactId: `query:query_1783708383412_bfv84pi:${name}`, filePath };
+}
+
+function remountWithDefaultTeam(): Express {
+  const app2 = express();
+  app2.use(express.json());
+  mountOutputsRoutes(app2, adapter, {
+    autoIngest: false,
+    actionCooldownMs: 0,
+    env: { C0_FEEDBACK_REACTIONS: "1" } as NodeJS.ProcessEnv,
+    resolveTeamId: async () => "default",
+  });
+  return app2;
+}
+
 describe("GET /artifacts/:id/detail", () => {
   it("hydrates the reader pane from one bounded detail projection", async () => {
     const { artifactId } = await catalogFile("normal.md", "Readable title");
@@ -457,6 +503,52 @@ describe("GET /artifacts/:id/detail", () => {
 // pin the fix: buildArtifactDetail must fall back to the live queries /
 // dispatch_scheduler_queue source rows when the direct catalog lookup misses.
 describe("GET /artifacts/:id/detail — query:/dispatch: synthesized ids", () => {
+  it("downloads a query:<query_id>:<basename> id the direct catalog table never received a row for", async () => {
+    const { artifactId } = await seedQueryResultArtifact(
+      "download-live-source.md",
+      "# Live Download\n\nDownload body from query result source.\n",
+    );
+    const prevApp = app;
+    app = remountWithDefaultTeam();
+    try {
+      const res = await callRaw(`/artifacts/${encodeURIComponent(artifactId)}/download`);
+
+      expect(res.status).toBe(200);
+      expect(res.headers.get("content-disposition")).toContain("download-live-source.md");
+      expect(res.text).toContain("Download body from query result source.");
+    } finally {
+      app = prevApp;
+    }
+  });
+
+  it("reports present review availability for a query:<query_id>:<basename> id with only a live source row", async () => {
+    const { artifactId } = await seedQueryResultArtifact(
+      "review-live-source.md",
+      "# Live Review\n\nReview body from query result source.\n",
+    );
+    const prevApp = app;
+    app = remountWithDefaultTeam();
+    try {
+      const res = await call("GET", `/artifacts/${encodeURIComponent(artifactId)}/review`);
+
+      expect(res.status).toBe(200);
+      expect(res.body).toMatchObject({
+        schema_version: "artifact.review.v1",
+        artifact_id: artifactId,
+        availability: "present",
+        catalog: {
+          artifact_id: artifactId,
+          basename: "review-live-source.md",
+          agent: "cursor-coder-pilot",
+          availability: "present",
+          dispatch_ref: "phid:disp-93238fa4a6d93e91",
+        },
+      });
+    } finally {
+      app = prevApp;
+    }
+  });
+
   it("hydrates a query:<query_id>:<basename> id the direct catalog table never received a row for", async () => {
     await adapter.query(`INSERT INTO teams (id, name) VALUES ('default', 'default')`, []);
     const agents = new SqliteAgentsRepo(adapter);
