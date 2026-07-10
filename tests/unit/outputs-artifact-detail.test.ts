@@ -1,5 +1,5 @@
 import express, { type Express } from "express";
-import { mkdtempSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -8,6 +8,8 @@ import { migrateSqlite } from "../../src/db/migrations/sqlite.js";
 import { mountOutputsRoutes } from "../../src/outputs/routes.js";
 import { artifactIdFromPath, migrateOutputsTables, registerArtifact, registerArtifactPathDelivery } from "../../src/outputs/storage.js";
 import type { FilesystemArtifactReconcileResult } from "../../src/outputs/filesystem-reconciler.js";
+import { SqliteAgentsRepo } from "../../src/db/repos/sqlite/agents-repo.js";
+import { SqliteQueriesRepo } from "../../src/db/repos/sqlite/queries-repo.js";
 
 let app: Express;
 let adapter: SqliteAdapter;
@@ -441,5 +443,163 @@ describe("GET /artifacts/:id/detail", () => {
     expect(download.status).toBe(200);
     expect(download.headers.get("content-disposition")).toContain("fresh-report.html");
     expect(download.text).toContain("Readable without sync.");
+  });
+});
+
+// 2026-07-10 Spencer-demo bug: clicking a surfaced artifact link whose id came
+// from GET /artifacts (the bulk catalog feed, which synthesizes rows for
+// query-result and dispatch-result artifacts read-time from the queries /
+// dispatch_scheduler_queue tables) 404'd on GET /artifacts/:id/detail with
+// "Moved or unavailable artifact", even though the manager's own bulk feed
+// reported the exact same id as status "available" / exists true. Root cause:
+// getArtifact() looks the id up in the persisted `artifacts` catalog table,
+// which query:/dispatch: synthesized ids are never written to. These tests
+// pin the fix: buildArtifactDetail must fall back to the live queries /
+// dispatch_scheduler_queue source rows when the direct catalog lookup misses.
+describe("GET /artifacts/:id/detail — query:/dispatch: synthesized ids", () => {
+  it("hydrates a query:<query_id>:<basename> id the direct catalog table never received a row for", async () => {
+    await adapter.query(`INSERT INTO teams (id, name) VALUES ('default', 'default')`, []);
+    const agents = new SqliteAgentsRepo(adapter);
+    await agents.upsert({
+      team_id: "default",
+      id: "agent_1",
+      name: "cursor-coder-pilot",
+      type: "claude",
+      model: "test",
+      port: 0,
+      endpoint: "http://localhost:0",
+      working_directory: null,
+      status: "running",
+      created_at: Date.now(),
+      metadata: {},
+    });
+
+    // extractOutputPaths() only recognizes absolute paths with an `/output/`
+    // segment (matching real agent working-directory output layout).
+    const outputDir = path.join(tmp, "agent_1781286770776_sq6usr9", "output");
+    mkdirSync(outputDir, { recursive: true });
+    const filePath = path.join(outputDir, "cleveland-park-2026-07-09-reconciled-speaker-key.md");
+    writeFileSync(filePath, "# Reconciled Speaker Key\n\nBrand new query-result artifact.\n");
+
+    const queries = new SqliteQueriesRepo(adapter);
+    await queries.upsert("default", "agent_1", {
+      query_id: "query_1783708383412_bfv84pi",
+      status: "completed",
+      completed: Date.now(),
+      result: { result: `Wrote the reconciled key to ${filePath}` },
+      manager_dispatch_id: "phid:disp-93238fa4a6d93e91",
+    });
+
+    const artifactId = `query:query_1783708383412_bfv84pi:cleveland-park-2026-07-09-reconciled-speaker-key.md`;
+
+    let app2 = express();
+    app2.use(express.json());
+    mountOutputsRoutes(app2, adapter, {
+      autoIngest: false,
+      actionCooldownMs: 0,
+      env: { C0_FEEDBACK_REACTIONS: "1" } as NodeJS.ProcessEnv,
+      resolveTeamId: async () => "default",
+    });
+    const prevApp = app;
+    app = app2;
+    try {
+      const res = await call("GET", `/artifacts/${encodeURIComponent(artifactId)}/detail`);
+
+      expect(res.status).toBe(200);
+      expect(res.body.artifact_id).toBe(artifactId);
+      expect(res.body.resolved_from).toBe("artifact_id");
+      expect(res.body.metadata).toMatchObject({
+        basename: "cleveland-park-2026-07-09-reconciled-speaker-key.md",
+        agent: "cursor-coder-pilot",
+        dispatch_ref: "phid:disp-93238fa4a6d93e91",
+        availability: "present",
+      });
+      expect(res.body.body.kind).toBe("markdown");
+      expect(res.body.body.body_unavailable).toBe(false);
+      expect(res.body.body.text).toContain("Brand new query-result artifact.");
+      expect(res.body.delivery.bodyUnavailable).toBe(false);
+    } finally {
+      app = prevApp;
+    }
+  });
+
+  it("hydrates a dispatch:<dispatch_phid> id the direct catalog table never received a row for", async () => {
+    const filePath = path.join(tmp, "dispatch-result-report.md");
+    writeFileSync(filePath, "# Dispatch Result\n\nSynthesized from dispatch_scheduler_queue.\n");
+    const dispatchPhid = "phid:disp-live-source-fixture";
+    const nowIso = new Date().toISOString();
+
+    await adapter.query(
+      `INSERT INTO dispatch_scheduler_queue
+         (dispatch_phid, team_id, query_id, to_agent, from_actor, channel, subject, body_markdown,
+          provider, runtime, status, not_before_at, completed_at, updated_at, result_json)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        dispatchPhid,
+        "default",
+        "query_live_source_fixture",
+        "backend-pool",
+        "user:chris",
+        "manager",
+        "Dispatch result fixture",
+        "body",
+        "manager",
+        "claude",
+        "done",
+        nowIso,
+        nowIso,
+        nowIso,
+        JSON.stringify({ artifact_path: filePath, tl_dr: "dispatch fixture" }),
+      ],
+    );
+
+    const artifactId = `dispatch:${dispatchPhid}`;
+
+    let app2 = express();
+    app2.use(express.json());
+    mountOutputsRoutes(app2, adapter, {
+      autoIngest: false,
+      actionCooldownMs: 0,
+      env: { C0_FEEDBACK_REACTIONS: "1" } as NodeJS.ProcessEnv,
+      resolveTeamId: async () => "default",
+    });
+    const prevApp = app;
+    app = app2;
+    try {
+      const res = await call("GET", `/artifacts/${encodeURIComponent(artifactId)}/detail`);
+
+      expect(res.status).toBe(200);
+      expect(res.body.artifact_id).toBe(artifactId);
+      expect(res.body.metadata).toMatchObject({
+        basename: "dispatch-result-report.md",
+        agent: "backend-pool",
+      });
+      expect(res.body.body.kind).toBe("markdown");
+      expect(res.body.body.body_unavailable).toBe(false);
+      expect(res.body.body.text).toContain("Synthesized from dispatch_scheduler_queue.");
+    } finally {
+      app = prevApp;
+    }
+  });
+
+  it("still returns a typed 404 for a query:-shaped id with no matching live source row", async () => {
+    await adapter.query(`INSERT INTO teams (id, name) VALUES ('default', 'default')`, []);
+    let app2 = express();
+    app2.use(express.json());
+    mountOutputsRoutes(app2, adapter, {
+      autoIngest: false,
+      actionCooldownMs: 0,
+      env: { C0_FEEDBACK_REACTIONS: "1" } as NodeJS.ProcessEnv,
+      resolveTeamId: async () => "default",
+    });
+    const prevApp = app;
+    app = app2;
+    try {
+      const res = await call("GET", "/artifacts/query:query_never_existed:missing.md/detail");
+      expect(res.status).toBe(404);
+      expect(res.body).toMatchObject({ ok: false, code: "artifact_not_found" });
+    } finally {
+      app = prevApp;
+    }
   });
 });

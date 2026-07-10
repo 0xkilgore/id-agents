@@ -2,6 +2,7 @@ import { promises as fsp } from "node:fs";
 import { createHash } from "node:crypto";
 import { basename as pathBasename, extname } from "node:path";
 import type { DbAdapter } from "../db/db-adapter.js";
+import { readArtifactByLiveSourceId } from "../dispatch-scheduler/read-model.js";
 import { artifactRowToEntry } from "./entry-projection.js";
 import { artifactDetailVisualState } from "./local-health.js";
 import { listComments, listTimelineEvents } from "./ops.js";
@@ -54,6 +55,7 @@ export async function buildArtifactDetail(
   adapter: DbAdapter,
   ref: ArtifactDetailRef,
   nowIso = new Date().toISOString(),
+  teamId = "default",
 ): Promise<ArtifactDetailResponse | null> {
   const [catalog, review, ops, operationsCount, comments, timeline, evidence, draftRow] = await Promise.all([
     getArtifact(adapter, ref.artifactId),
@@ -66,10 +68,24 @@ export async function buildArtifactDetail(
     getArtifactDraft(adapter, ref.artifactId),
   ]);
   const draft = parseDraftPayload(draftRow);
-  const fallbackPath = ref.decodedPath;
+  let fallbackPath = ref.decodedPath;
+  // query:<query_id>:<basename> / dispatch:<dispatch_phid> ids are synthesized
+  // read-time by readArtifacts (GET /artifacts) from the queries/dispatch
+  // tables and never written to the `artifacts` catalog table, so the direct
+  // getArtifact lookup above always misses them. Without this fallback the
+  // bulk list shows them as available while the single-artifact detail route
+  // reports "unavailable" for the exact same id (2026-07-10 Spencer-demo bug).
+  let liveSourceRow: Record<string, unknown> | null = null;
+  if (!catalog && !fallbackPath) {
+    liveSourceRow = await readArtifactByLiveSourceId(adapter, teamId, ref.artifactId).catch(() => null);
+    if (liveSourceRow && typeof liveSourceRow.path === "string") {
+      fallbackPath = liveSourceRow.path;
+    }
+  }
   if (!catalog && !review && !draft && !fallbackPath) return null;
 
-  const syntheticCatalog = catalog ?? syntheticCatalogFromPath(ref.artifactId, fallbackPath, nowIso);
+  const syntheticCatalog =
+    catalog ?? syntheticCatalogFromPath(ref.artifactId, fallbackPath, nowIso, liveSourceRow);
   const body = await readDetailBody(adapter, syntheticCatalog, draft);
   if (!catalog && !review && !draft && body.kind === "missing") return null;
   const render = renderMetadata(syntheticCatalog, body);
@@ -241,8 +257,44 @@ function syntheticCatalogFromPath(
   artifactId: string,
   absPath: string | null,
   nowIso: string,
+  liveSourceRow: Record<string, unknown> | null = null,
 ): ArtifactCatalogRow | null {
   if (!absPath) return null;
+  if (liveSourceRow) {
+    const producedAt =
+      typeof liveSourceRow.completed_at === "string"
+        ? liveSourceRow.completed_at
+        : typeof liveSourceRow.modified_at === "string"
+          ? liveSourceRow.modified_at
+          : nowIso;
+    // ArtifactCatalogRow.source is a closed literal union (reconciler / registration
+    // provenance kinds); the live-source row's finer-grained origin (e.g.
+    // "queries.result") doesn't fit it, so it goes in source_badges below instead.
+    const liveSourceBadge =
+      (liveSourceRow.source_metadata as { source?: string } | undefined)?.source ?? "live-source";
+    return {
+      artifact_id: artifactId,
+      basename: typeof liveSourceRow.basename === "string" ? liveSourceRow.basename : pathBasename(absPath),
+      agent: typeof liveSourceRow.agent === "string" ? liveSourceRow.agent : "unknown",
+      tag: null,
+      abs_path: absPath,
+      title: typeof liveSourceRow.title === "string" ? liveSourceRow.title : null,
+      produced_at: producedAt,
+      source: "filesystem",
+      availability: "present",
+      media_type: null,
+      content_hash: null,
+      source_mtime: null,
+      source_size: typeof liveSourceRow.size_bytes === "number" ? liveSourceRow.size_bytes : null,
+      project_ref: null,
+      dispatch_ref: typeof liveSourceRow.dispatch_id === "string" ? liveSourceRow.dispatch_id : null,
+      source_host: null,
+      source_badges: JSON.stringify([liveSourceBadge]),
+      reconciled_at: null,
+      created_at: nowIso,
+      updated_at: nowIso,
+    };
+  }
   return {
     artifact_id: artifactId,
     basename: pathBasename(absPath),

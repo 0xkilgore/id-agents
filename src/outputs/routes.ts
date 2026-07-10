@@ -494,7 +494,7 @@ export function mountOutputsRoutes(
     };
   }
 
-  async function getArtifactDetailCached(ref: ArtifactDetailRef): Promise<{
+  async function getArtifactDetailCached(ref: ArtifactDetailRef, teamId: string): Promise<{
     detail: ArtifactDetailResponse | null;
     cache: 'hit' | 'miss' | 'deduped';
   }> {
@@ -502,7 +502,7 @@ export function mountOutputsRoutes(
     if (hit) return { detail: hit, cache: 'hit' };
     const existing = detailInflight.get(ref.artifactId);
     if (existing) return { detail: await existing, cache: 'deduped' };
-    const pending = buildArtifactDetail(adapter, ref);
+    const pending = buildArtifactDetail(adapter, ref, undefined, teamId);
     detailInflight.set(ref.artifactId, pending);
     try {
       const detail = await pending;
@@ -521,14 +521,14 @@ export function mountOutputsRoutes(
     return rows;
   }
 
-  async function artifactAdjacentPrefetch(artifactId: string): Promise<Record<string, unknown>> {
+  async function artifactAdjacentPrefetch(artifactId: string, teamId: string): Promise<Record<string, unknown>> {
     const rows = await getArtifactDetailList();
     const index = rows.findIndex((row) => row.artifact_id === artifactId);
     const previous = index > 0 ? rows[index - 1] : null;
     const next = index >= 0 && index < rows.length - 1 ? rows[index + 1] : null;
     await Promise.all(
       [previous, next].filter((row): row is ArtifactCatalogRow => Boolean(row)).map((row) =>
-        getArtifactDetailCached(resolveArtifactDetailRef(row.artifact_id)).catch(() => null),
+        getArtifactDetailCached(resolveArtifactDetailRef(row.artifact_id), teamId).catch(() => null),
       ),
     );
     return {
@@ -552,11 +552,14 @@ export function mountOutputsRoutes(
     };
   }
 
-  async function probeArtifact(row: Awaited<ReturnType<typeof getArtifact>>): Promise<ArtifactActionProbe> {
+  async function probeArtifact(
+    row: Awaited<ReturnType<typeof getArtifact>>,
+    teamId = 'default',
+  ): Promise<ArtifactActionProbe> {
     if (!row) {
       return { bodyRenderable: false, copyAvailable: false, downloadAvailable: false, error: 'artifact_not_registered' };
     }
-    const detail = await buildArtifactDetail(adapter, resolveArtifactDetailRef(row.artifact_id));
+    const detail = await buildArtifactDetail(adapter, resolveArtifactDetailRef(row.artifact_id), undefined, teamId);
     const cached = await getArtifactBodyCache(adapter, row.artifact_id).catch(() => null);
     const bodyText = detail?.body.text ?? cached?.body_text ?? undefined;
     const bodyRenderable = Boolean(detail?.delivery.bodyRenderable && bodyText != null);
@@ -853,9 +856,10 @@ export function mountOutputsRoutes(
       const nowIso = (clock?.() ?? new Date()).toISOString();
       const registered = await listArtifactCatalog(adapter, { limit, offset: 0, since });
       const surfaced = await listInboxItems(adapter, { includeNeverViewed: true }, limit, 0);
+      const teamId = await resolveRequestTeamId(req);
       const probes = new Map<string, ArtifactActionProbe>();
       for (const row of registered) {
-        probes.set(row.artifact_id, await probeArtifact(row));
+        probes.set(row.artifact_id, await probeArtifact(row, teamId));
       }
       const report = evaluateSurfacingHealth({ registered, surfaced, probes, nowIso });
       for (const event of report.events) {
@@ -867,14 +871,19 @@ export function mountOutputsRoutes(
     }
   });
 
+  async function resolveRequestTeamId(req: Request): Promise<string> {
+    return resolveTeamId ? await resolveTeamId(req) : 'default';
+  }
+
   async function sendArtifactDetail(req: Request, ref: ArtifactDetailRef, res: Response): Promise<void> {
-    let { detail, cache } = await getArtifactDetailCached(ref);
+    const teamId = await resolveRequestTeamId(req);
+    let { detail, cache } = await getArtifactDetailCached(ref, teamId);
     if (!detail && opts.filesystemArtifactRoots && !useDocumentModel('artifacts', env)) {
       try {
         const roots = await opts.filesystemArtifactRoots(req);
         await filesystemReconciler(adapter, { roots });
         clearArtifactDetailCache();
-        ({ detail } = await getArtifactDetailCached(ref));
+        ({ detail } = await getArtifactDetailCached(ref, teamId));
         cache = 'miss';
       } catch (err) {
         opts.onFilesystemReconcileError?.(err);
@@ -893,7 +902,7 @@ export function mountOutputsRoutes(
     const visibleDetail = hideDisabledFeedbackDetail(detail);
     res.json({
       ...visibleDetail,
-      adjacent_prefetch: await artifactAdjacentPrefetch(ref.artifactId),
+      adjacent_prefetch: await artifactAdjacentPrefetch(ref.artifactId, teamId),
     });
   }
 
@@ -917,7 +926,7 @@ export function mountOutputsRoutes(
   app.get('/artifacts/:id/detail/version', async (req: Request<{ id: string }>, res: Response) => {
     try {
       const ref = resolveArtifactDetailRef(req.params.id);
-      const { detail, cache } = await getArtifactDetailCached(ref);
+      const { detail, cache } = await getArtifactDetailCached(ref, await resolveRequestTeamId(req));
       res.setHeader('X-Artifact-Detail-Cache', cache);
       if (!detail) {
         res.status(404).json({
@@ -952,7 +961,7 @@ export function mountOutputsRoutes(
   app.get('/artifacts/:id/copy-text', async (req: Request<{ id: string }>, res: Response) => {
     try {
       const ref = resolveArtifactDetailRef(req.params.id);
-      const { detail } = await getArtifactDetailCached(ref);
+      const { detail } = await getArtifactDetailCached(ref, await resolveRequestTeamId(req));
       const text = detail?.body.text ?? (await getArtifactBodyCache(adapter, ref.artifactId))?.body_text ?? null;
       if (text == null) {
         return res.status(404).json({
@@ -1539,7 +1548,7 @@ export function mountOutputsRoutes(
     const ops = await listOperations(adapter, artifactId, 1000, 0);
     const edited = latestEdit(ops);
     if (edited) return edited.content;
-    const { detail } = await getArtifactDetailCached(resolveArtifactDetailRef(artifactId));
+    const { detail } = await getArtifactDetailCached(resolveArtifactDetailRef(artifactId), 'default');
     return detail?.body?.text ?? '';
   }
 

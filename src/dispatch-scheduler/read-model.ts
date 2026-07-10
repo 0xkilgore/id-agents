@@ -811,6 +811,120 @@ async function readQueryResultArtifacts(
   return artifacts;
 }
 
+/** Resolve a single `query:<query_id>:<basename>` or `dispatch:<dispatch_phid>`
+ *  artifact id directly against its live source row (the `queries` /
+ *  `dispatch_scheduler_queue` tables), bypassing the bulk scan+limit windows
+ *  `readArtifacts` uses. These ids are synthesized read-time by
+ *  readQueryResultArtifacts/readDispatchResultArtifacts above and are never
+ *  written to the persisted `artifacts` catalog table, so a direct catalog
+ *  lookup (getArtifact) always misses them — this is the gap that made
+ *  GET /artifacts/:id/detail show "unavailable" for artifacts the bulk
+ *  GET /artifacts list already reported as available (2026-07-10 Spencer-demo
+ *  bug: query:-id artifact resolved to "Moved or unavailable artifact").
+ *  Returns a row shaped like readArtifacts' output, or null if the id doesn't
+ *  match either synthesized-id shape or its source row/file can't be found. */
+export async function readArtifactByLiveSourceId(
+  adapter: DbAdapterLike,
+  teamId: string,
+  artifactId: string,
+): Promise<Record<string, unknown> | null> {
+  const queryMatch = /^query:([^:]+):(.+)$/.exec(artifactId);
+  if (queryMatch) {
+    const [, queryId, basename] = queryMatch;
+    const { rows } = await adapter.query<{
+      query_id: string;
+      agent_id: string | null;
+      agent_name: string | null;
+      completed: number | null;
+      result: string | null;
+      manager_dispatch_id: string | null;
+      manager_query_id: string | null;
+    }>(
+      `SELECT q.query_id, q.agent_id, a.name AS agent_name, q.completed, q.result,
+              q.manager_dispatch_id, q.manager_query_id
+         FROM queries q
+         LEFT JOIN agents a ON a.id = q.agent_id
+        WHERE q.team_id = ? AND q.query_id = ? AND q.status = 'completed' AND q.result IS NOT NULL`,
+      [teamId, queryId],
+    );
+    const row = rows[0];
+    if (!row) return null;
+    const parsed = parseJsonObject(row.result);
+    const resultText = typeof parsed?.result === 'string'
+      ? parsed.result
+      : typeof row.result === 'string'
+        ? row.result
+        : '';
+    for (const artifactPath of extractOutputPaths(resultText)) {
+      if (path.basename(artifactPath) !== basename) continue;
+      const stat = safeStat(artifactPath);
+      if (!stat?.isFile()) continue;
+      return {
+        id: artifactId,
+        path: artifactPath,
+        basename: path.basename(artifactPath),
+        agent: row.agent_name ?? row.agent_id ?? 'unknown',
+        target_agent: row.agent_name ?? row.agent_id ?? 'unknown',
+        dispatch_id: row.manager_dispatch_id,
+        query_id: row.query_id,
+        manager_query_id: row.manager_query_id,
+        status: 'available',
+        exists: true,
+        size_bytes: stat.size,
+        modified_at: stat.mtime.toISOString(),
+        completed_at: row.completed ? new Date(Number(row.completed)).toISOString() : null,
+        source_metadata: {
+          source: 'queries.result',
+          agent_id: row.agent_id,
+        },
+      };
+    }
+    return null;
+  }
+
+  const dispatchMatch = /^dispatch:(.+)$/.exec(artifactId);
+  if (dispatchMatch) {
+    const [, dispatchPhid] = dispatchMatch;
+    const { rows } = await adapter.query<Pick<DispatchDbRow,
+      'dispatch_phid' | 'query_id' | 'to_agent' | 'status' | 'subject' | 'completed_at' | 'updated_at' | 'result_json'
+    >>(
+      `SELECT dispatch_phid, query_id, to_agent, status, subject, completed_at, updated_at, result_json
+         FROM dispatch_scheduler_queue
+        WHERE team_id = ? AND dispatch_phid = ? AND result_json IS NOT NULL`,
+      [teamId, dispatchPhid],
+    );
+    const row = rows[0];
+    if (!row) return null;
+    const parsed = parseJsonObject(row.result_json);
+    const artifactPath = typeof parsed?.artifact_path === 'string' ? parsed.artifact_path : null;
+    if (!artifactPath) return null;
+    const stat = safeStat(artifactPath);
+    if (!stat?.isFile()) return null;
+    return {
+      id: artifactId,
+      path: artifactPath,
+      basename: path.basename(artifactPath),
+      agent: row.to_agent,
+      target_agent: row.to_agent,
+      dispatch_id: row.dispatch_phid,
+      query_id: row.query_id,
+      status: 'available',
+      exists: true,
+      size_bytes: stat.size,
+      modified_at: stat.mtime.toISOString(),
+      completed_at: row.completed_at,
+      title: row.subject,
+      tl_dr: typeof parsed?.tl_dr === 'string' ? parsed.tl_dr : null,
+      source_metadata: {
+        source: 'dispatch_scheduler_queue.result_json',
+        dispatch_status: row.status,
+      },
+    };
+  }
+
+  return null;
+}
+
 async function readAgentOutputArtifacts(
   adapter: DbAdapterLike,
   teamId: string,
