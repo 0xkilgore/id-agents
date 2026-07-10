@@ -154,6 +154,111 @@ function idempotencyKey(req: Request, suffix?: string): string | null {
   return suffix ? `${raw}:${suffix}` : raw;
 }
 
+const LOCAL_FIRST_ARTIFACT_WRITE_SCHEMA_VERSION = 'artifact.local_first_write.v1' as const;
+
+function clientMutationId(req: Request): string | null {
+  const body = (req.body ?? {}) as Record<string, unknown>;
+  return asString(body.clientMutationId) ?? asString(body.client_mutation_id) ?? null;
+}
+
+function baseVersion(req: Request): number | null | undefined {
+  const body = (req.body ?? {}) as Record<string, unknown>;
+  const raw = body.baseVersion ?? body.base_version;
+  if (raw === undefined || raw === null || raw === '') return undefined;
+  const n = typeof raw === 'number' ? raw : typeof raw === 'string' ? Number(raw) : NaN;
+  return Number.isSafeInteger(n) && n >= 0 ? n : null;
+}
+
+function writeIdempotencyKey(req: Request, suffix?: string): string | null {
+  return idempotencyKey(req, suffix) ?? clientMutationId(req);
+}
+
+async function artifactMutationVersion(adapter: DbAdapter, artifactId: string): Promise<number> {
+  return countOperations(adapter, artifactId);
+}
+
+async function existingOpForClientMutation(
+  adapter: DbAdapter,
+  artifactId: string,
+  mutationId: string | null,
+): Promise<{ op_id: number } | null> {
+  if (!mutationId) return null;
+  const { rows } = await adapter.query<{ op_id: number }>(
+    `SELECT op_id FROM artifact_operations
+      WHERE artifact_id = ? AND idempotency_key = ?
+      ORDER BY op_id ASC LIMIT 1`,
+    [artifactId, mutationId],
+  );
+  return rows[0] ? { op_id: Number(rows[0].op_id) } : null;
+}
+
+function localFirstReconciliation(input: {
+  artifactId: string;
+  clientMutationId: string | null;
+  baseVersion: number | undefined;
+  ackVersion: number | null;
+  visibleState: string;
+  idempotent?: boolean;
+}) {
+  if (!input.clientMutationId && input.baseVersion === undefined) return undefined;
+  return {
+    schema_version: LOCAL_FIRST_ARTIFACT_WRITE_SCHEMA_VERSION,
+    entity: { type: 'artifact', id: input.artifactId },
+    clientMutationId: input.clientMutationId,
+    baseVersion: input.baseVersion ?? null,
+    ackVersion: input.ackVersion,
+    status: input.visibleState === 'not-recorded' ? 'failed' : 'acked',
+    visible_state: input.visibleState,
+    idempotent: Boolean(input.idempotent),
+  };
+}
+
+async function rejectStaleBaseVersion(
+  adapter: DbAdapter,
+  artifactId: string,
+  req: Request,
+  res: Response,
+): Promise<boolean> {
+  const mutationId = clientMutationId(req);
+  const parsedBase = baseVersion(req);
+  if (parsedBase === null) {
+    res.status(400).json({
+      ok: false,
+      schema_version: LOCAL_FIRST_ARTIFACT_WRITE_SCHEMA_VERSION,
+      visible_state: 'not-recorded',
+      error: 'baseVersion must be a non-negative integer',
+    });
+    return true;
+  }
+  if (parsedBase === undefined) return false;
+  const currentVersion = await artifactMutationVersion(adapter, artifactId);
+  if (currentVersion === parsedBase) return false;
+  const replay = await existingOpForClientMutation(adapter, artifactId, mutationId);
+  if (replay) return false;
+  res.status(409).json({
+    ok: false,
+    schema_version: LOCAL_FIRST_ARTIFACT_WRITE_SCHEMA_VERSION,
+    visible_state: 'not-recorded',
+    reconciliation: {
+      schema_version: LOCAL_FIRST_ARTIFACT_WRITE_SCHEMA_VERSION,
+      entity: { type: 'artifact', id: artifactId },
+      clientMutationId: mutationId,
+      baseVersion: parsedBase,
+      ackVersion: currentVersion,
+      status: 'conflict',
+      visible_state: 'not-recorded',
+      idempotent: false,
+      conflict: {
+        code: 'stale_base_version',
+        message: `baseVersion ${parsedBase} is stale; current version is ${currentVersion}`,
+        baseVersion: parsedBase,
+        currentVersion,
+      },
+    },
+  });
+  return true;
+}
+
 /**
  * Kapelle P3 (2026-06-09) — runtime deps for the manager-side approval
  * emit target. `tasks` is the manager's TasksRepository; `resolveTeamId`
@@ -1320,7 +1425,10 @@ export function mountOutputsRoutes(
     try {
       const limit = Math.min(parseInt(req.query.limit as string, 10) || 100, 500);
       const offset = parseInt(req.query.offset as string, 10) || 0;
-      const events = await listTimelineEvents(adapter, req.params.id, limit, offset);
+      const [events, version] = await Promise.all([
+        listTimelineEvents(adapter, req.params.id, limit, offset),
+        artifactMutationVersion(adapter, req.params.id),
+      ]);
       const response: ArtifactTimelineResponse = {
         ok: true,
         schema_version: 'artifact.timeline.v1',
@@ -1329,6 +1437,7 @@ export function mountOutputsRoutes(
         limit,
         offset,
         count: events.length,
+        version,
       };
       res.json(response);
     } catch (err) {
@@ -1346,6 +1455,9 @@ export function mountOutputsRoutes(
       if (!artifactId) return;
       const actor = requireActor(req, res);
       if (!actor) return;
+      if (await rejectStaleBaseVersion(adapter, artifactId, req, res)) return;
+      const mutationId = clientMutationId(req);
+      const requestedBaseVersion = baseVersion(req);
       const kind = asString(req.body?.kind) ?? asString(req.body?.event_kind);
       if (kind === 'suggested_change') {
         const body = asString(req.body?.body) ?? asString(req.body?.markdown);
@@ -1363,9 +1475,10 @@ export function mountOutputsRoutes(
           suggested_markdown: asString(req.body?.suggested_markdown) ?? asString(req.body?.suggestedMarkdown) ?? null,
           status: status as SuggestedChangeRequest['status'],
           source_link: asString(req.body?.source_link),
-          idempotency_key: idempotencyKey(req),
+          idempotency_key: writeIdempotencyKey(req),
         };
         const result = await suggestArtifactChange(adapter, artifactId, reqBody, clock);
+        const ackVersion = await artifactMutationVersion(adapter, artifactId);
         invalidateArtifactDetail(artifactId);
         return res.json({
           ok: true,
@@ -1373,6 +1486,15 @@ export function mountOutputsRoutes(
           event: result.event,
           op_id: result.op_id,
           idempotent: result.idempotent,
+          version: ackVersion,
+          reconciliation: localFirstReconciliation({
+            artifactId,
+            clientMutationId: mutationId,
+            baseVersion: requestedBaseVersion ?? undefined,
+            ackVersion,
+            visibleState: 'recorded',
+            idempotent: result.idempotent,
+          }),
         });
       }
       if (kind === 'dispatch_follow_up') {
@@ -1384,9 +1506,10 @@ export function mountOutputsRoutes(
           dispatch_phid: asString(req.body?.dispatch_phid) ?? asString(req.body?.dispatch_id) ?? null,
           status: asString(req.body?.status) ?? null,
           source_link: asString(req.body?.source_link),
-          idempotency_key: idempotencyKey(req),
+          idempotency_key: writeIdempotencyKey(req),
         };
         const result = await recordDispatchFollowUp(adapter, artifactId, reqBody, clock);
+        const ackVersion = await artifactMutationVersion(adapter, artifactId);
         invalidateArtifactDetail(artifactId);
         return res.json({
           ok: true,
@@ -1394,6 +1517,15 @@ export function mountOutputsRoutes(
           event: result.event,
           op_id: result.op_id,
           idempotent: result.idempotent,
+          version: ackVersion,
+          reconciliation: localFirstReconciliation({
+            artifactId,
+            clientMutationId: mutationId,
+            baseVersion: requestedBaseVersion ?? undefined,
+            ackVersion,
+            visibleState: 'recorded',
+            idempotent: result.idempotent,
+          }),
         });
       }
       return res.status(400).json({
@@ -1426,12 +1558,16 @@ export function mountOutputsRoutes(
       if (!body || body.trim().length === 0) {
         return res.status(400).json({ ok: false, error: 'comment body is required', code: 'missing_body' });
       }
+      if (await rejectStaleBaseVersion(adapter, artifactId, req, res)) return;
+      const mutationId = clientMutationId(req);
+      const requestedBaseVersion = baseVersion(req);
+      const replay = await existingOpForClientMutation(adapter, artifactId, writeIdempotencyKey(req));
       const { comment, op_id } = await commentArtifact(adapter, artifactId, {
         actor: actor.ref,
         body,
         anchor: asString(req.body?.anchor) ?? null,
         source_link: asString(req.body?.source_link),
-        idempotency_key: idempotencyKey(req),
+        idempotency_key: writeIdempotencyKey(req),
       });
 
       // Artifact comment routing policy: durable comments are internal artifact
@@ -1457,6 +1593,7 @@ export function mountOutputsRoutes(
       await updateCommentRouteStatus(adapter, artifactId, op_id, route_status);
       comment.route_status = route_status;
 
+      const ackVersion = await artifactMutationVersion(adapter, artifactId);
       invalidateArtifactDetail(artifactId);
       const base = {
         ok: true,
@@ -1470,6 +1607,15 @@ export function mountOutputsRoutes(
         actor,
         route_kind: routed.route_kind,
         approval: routed.approval ?? null,
+        version: ackVersion,
+        reconciliation: localFirstReconciliation({
+          artifactId,
+          clientMutationId: mutationId,
+          baseVersion: requestedBaseVersion ?? undefined,
+          ackVersion,
+          visibleState: route_status.visible_state,
+          idempotent: Boolean(replay),
+        }),
       };
       if (routed.routed.routed) {
         res.json({ ...base, dispatch_routed: true, dispatch: routed.routed.dispatch });
@@ -1501,13 +1647,17 @@ export function mountOutputsRoutes(
       }
       const limit = Math.min(parseInt(req.query.limit as string, 10) || 100, 500);
       const offset = parseInt(req.query.offset as string, 10) || 0;
-      const comments = await listComments(adapter, req.params.id, limit, offset);
+      const [comments, version] = await Promise.all([
+        listComments(adapter, req.params.id, limit, offset),
+        artifactMutationVersion(adapter, req.params.id),
+      ]);
       res.json({
         ok: true,
         schema_version: 'artifact.comments.v1',
         artifact_id: req.params.id,
         comments,
         count: comments.length,
+        version,
       });
     } catch (err) {
       res.status(500).json({ ok: false, error: err instanceof Error ? err.message : String(err) });

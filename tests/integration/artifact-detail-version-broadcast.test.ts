@@ -114,4 +114,114 @@ describe("artifact detail version checks", () => {
     });
     expect(after.body.version_key).not.toBe(before.body.version_key);
   });
+
+  it("reconciles local-first artifact comments with clientMutationId, baseVersion, replay, and stale-base conflict", async () => {
+    const artifactId = await seedArtifact();
+
+    const initial = await call("GET", `/artifacts/${artifactId}/comments`);
+    expect(initial.status).toBe(200);
+    expect(initial.body).toMatchObject({ version: 0, count: 0 });
+
+    const first = await call("POST", `/artifacts/${artifactId}/comments`, {
+      actor_ref: "user:chris",
+      body: "Optimistic comment.",
+      clientMutationId: "comment-local-first-1",
+      baseVersion: 0,
+    });
+    expect(first.status).toBe(200);
+    expect(first.body).toMatchObject({
+      version: 1,
+      reconciliation: {
+        schema_version: "artifact.local_first_write.v1",
+        clientMutationId: "comment-local-first-1",
+        baseVersion: 0,
+        ackVersion: 1,
+        status: "acked",
+        idempotent: false,
+      },
+    });
+
+    const replay = await call("POST", `/artifacts/${artifactId}/comments`, {
+      actor_ref: "user:chris",
+      body: "Optimistic comment.",
+      clientMutationId: "comment-local-first-1",
+      baseVersion: 0,
+    });
+    expect(replay.status).toBe(200);
+    expect(replay.body.op_id).toBe(first.body.op_id);
+    expect(replay.body.reconciliation).toMatchObject({
+      clientMutationId: "comment-local-first-1",
+      ackVersion: 1,
+      idempotent: true,
+    });
+
+    const stale = await call("POST", `/artifacts/${artifactId}/comments`, {
+      actor_ref: "user:chris",
+      body: "This stale write must not record.",
+      clientMutationId: "comment-local-first-2",
+      baseVersion: 0,
+    });
+    expect(stale.status).toBe(409);
+    expect(stale.body).toMatchObject({
+      ok: false,
+      visible_state: "not-recorded",
+      reconciliation: {
+        status: "conflict",
+        clientMutationId: "comment-local-first-2",
+        baseVersion: 0,
+        ackVersion: 1,
+        conflict: { code: "stale_base_version", currentVersion: 1 },
+      },
+    });
+
+    const after = await call("GET", `/artifacts/${artifactId}/comments`);
+    expect(after.body).toMatchObject({ version: 1, count: 1 });
+  });
+
+  it("reconciles local-first artifact timeline writes and exposes timeline version", async () => {
+    const artifactId = await seedArtifact();
+
+    const initial = await call("GET", `/artifacts/${artifactId}/timeline`);
+    expect(initial.status).toBe(200);
+    expect(initial.body).toMatchObject({ version: 0, count: 0 });
+
+    const write = await call("POST", `/artifacts/${artifactId}/timeline`, {
+      actor_ref: "user:chris",
+      kind: "dispatch_follow_up",
+      body: "Routed from optimistic timeline UI.",
+      target_agent: "regina",
+      dispatch_phid: "phid:disp-local-first",
+      query_id: "query_local_first",
+      status: "queued",
+      clientMutationId: "timeline-local-first-1",
+      baseVersion: 0,
+    });
+    expect(write.status).toBe(200);
+    expect(write.body).toMatchObject({
+      version: 1,
+      reconciliation: {
+        schema_version: "artifact.local_first_write.v1",
+        clientMutationId: "timeline-local-first-1",
+        baseVersion: 0,
+        ackVersion: 1,
+        status: "acked",
+      },
+    });
+
+    const stale = await call("POST", `/artifacts/${artifactId}/timeline`, {
+      actor_ref: "user:chris",
+      kind: "dispatch_follow_up",
+      body: "Stale timeline write.",
+      clientMutationId: "timeline-local-first-2",
+      baseVersion: 0,
+    });
+    expect(stale.status).toBe(409);
+    expect(stale.body.reconciliation).toMatchObject({
+      status: "conflict",
+      ackVersion: 1,
+    });
+
+    const after = await call("GET", `/artifacts/${artifactId}/timeline`);
+    expect(after.body).toMatchObject({ version: 1, count: 1 });
+  });
 });

@@ -340,6 +340,8 @@ export interface ArtifactTimelineResponse {
   limit: number;
   offset: number;
   count: number;
+  /** Monotonic per-artifact operation count for optimistic cache reconciliation. */
+  version?: number;
 }
 
 export interface ViewRequest {
