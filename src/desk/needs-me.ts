@@ -6,6 +6,7 @@ import { listInboxItems } from "../outputs/storage.js";
 import type { OutputsInboxRow } from "../outputs/types.js";
 import { ARTIFACT_COMMENT_DISPATCH_CHANNEL } from "../outputs/comment-dispatch.js";
 import type { DeskNeedsMeItem, DeskNeedsMeResponse } from "./types.js";
+import { DEFAULT_ACTOR_ID } from "../lib/default-actor.js";
 
 export const DESK_NEEDS_ME_SCHEMA_VERSION = "desk.needs_me.v1" as const;
 
@@ -93,7 +94,7 @@ export async function buildDeskNeedsMe(
 
 function normalizeOwner(owner: string | undefined): string {
   const trimmed = owner?.trim();
-  return trimmed || "chris";
+  return trimmed || DEFAULT_ACTOR_ID;
 }
 
 export function normalizeLimit(raw: unknown): number {

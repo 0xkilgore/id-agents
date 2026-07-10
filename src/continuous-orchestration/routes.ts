@@ -36,6 +36,7 @@ import { parseRoadmapToBacklog } from "./roadmap-import.js";
 import { runFleshPass } from "./flesh-runner.js";
 import { resolveTrack } from "../track-registry/registry.js";
 import { readOrchestrationHealthProjection } from "./health-projection.js";
+import { DEFAULT_ACTOR_ID } from "../lib/default-actor.js";
 
 export interface OrchestrationRouteOptions {
   daemon: ContinuousOrchestrationDaemon;
@@ -302,7 +303,7 @@ export function mountContinuousOrchestrationRoutes(app: Application, opts: Orche
     try {
       const id = String(req.params.id);
       const body = (req.body ?? {}) as Record<string, unknown>;
-      const approvedBy = typeof body.approved_by === "string" && body.approved_by ? body.approved_by : "chris";
+      const approvedBy = typeof body.approved_by === "string" && body.approved_by ? body.approved_by : DEFAULT_ACTOR_ID;
       const patch = body.patch && typeof body.patch === "object" ? (body.patch as Partial<NewBacklogItem>) : undefined;
       if (patch) await updateBacklogFields(adapter, id, patch);
       const result = await promoteToReady(adapter, id, approvedBy);
@@ -517,12 +518,12 @@ export function mountContinuousOrchestrationRoutes(app: Application, opts: Orche
         flesh_confidence: item.flesh_confidence ?? item.flesh_patch.confidence,
         patch: item.flesh_patch,
         promote: true,
-        approved_by: typeof body.approved_by === "string" && body.approved_by ? body.approved_by : "chris",
+        approved_by: typeof body.approved_by === "string" && body.approved_by ? body.approved_by : DEFAULT_ACTOR_ID,
       });
       await insertFleshLog(adapter, {
         item_id: id,
         team_id: teamId,
-        actor_ref: typeof body.approved_by === "string" && body.approved_by ? body.approved_by : "chris",
+        actor_ref: typeof body.approved_by === "string" && body.approved_by ? body.approved_by : DEFAULT_ACTOR_ID,
         source_ref: item.flesh_source ?? null,
         input_hash: id,
         decision: "approved_by_chris",
@@ -553,7 +554,7 @@ export function mountContinuousOrchestrationRoutes(app: Application, opts: Orche
       await insertFleshLog(adapter, {
         item_id: id,
         team_id: teamId,
-        actor_ref: typeof body.actor === "string" && body.actor ? body.actor : "chris",
+        actor_ref: typeof body.actor === "string" && body.actor ? body.actor : DEFAULT_ACTOR_ID,
         source_ref: item.flesh_source ?? null,
         input_hash: id,
         decision: "rejected",
