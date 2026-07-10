@@ -12982,10 +12982,12 @@ export class AgentManagerDb {
             { mountLocalSearchRoutes },
             { loadLocalSearchDocuments },
             { createSqliteLocalReadMutationStore, migrateLocalReadMutationTables, mountLocalReadMutationRoutes },
+            { mountLocalReadEventRoutes },
           ] = await Promise.all([
             import('./local-search/routes.js'),
             import('./local-search/db-documents.js'),
             import('./local-search/read-mutation.js'),
+            import('./local-search/event-feed.js'),
           ]);
           await migrateLocalReadMutationTables(this.db.adapter);
           mountLocalSearchRoutes(this.managementApp, {
@@ -12996,7 +12998,11 @@ export class AgentManagerDb {
             }),
           });
           mountLocalReadMutationRoutes(this.managementApp, createSqliteLocalReadMutationStore(this.db.adapter));
-          console.log('[Manager] Local read-model /read-model/search and /read-model/read-state routes mounted');
+          mountLocalReadEventRoutes(this.managementApp, {
+            events: this.db.events,
+            resolveTeam: (req) => this.getTeam(req),
+          });
+          console.log('[Manager] Local read-model /read-model/search, /read-model/read-state, and /read-model/events routes mounted');
         } catch (err) {
           console.warn('[Manager] Local read-model routes failed to mount:', err instanceof Error ? err.message : String(err));
         }

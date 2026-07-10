@@ -1,4 +1,5 @@
 export * from "./contract.js";
+export * from "./event-feed.js";
 export * from "./read-mutation.js";
 
 import {

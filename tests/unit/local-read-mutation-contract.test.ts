@@ -223,9 +223,16 @@ describe("local read/unread mutation ack contract", () => {
       const first = await store.applyReadMutation(input);
       const reloaded = createSqliteLocalReadMutationStore(adapter, () => new Date("2026-07-07T17:05:00.000Z"));
       const replay = await reloaded.applyReadMutation(input);
+      const events = await adapter.query<{ topic: string; subject_kind: string; subject_id: string }>(
+        `SELECT topic, subject_kind, subject_id FROM event_log WHERE team_id = ? ORDER BY seq ASC`,
+        ["team-a"],
+      );
 
       expect(first).toMatchObject({ status: "acked", ackVersion: 1, record: { readState: "read", version: 1 } });
       expect(replay).toEqual(first);
+      expect(events.rows).toEqual([
+        { topic: "read_state:changed", subject_kind: "task", subject_id: "task-durable" },
+      ]);
       await expect(reloaded.get("team-a", { type: "task", id: "task-durable" }))
         .resolves.toMatchObject({ readState: "read", version: 1 });
     } finally {

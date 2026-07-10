@@ -446,6 +446,34 @@ export function mountOutputsRoutes(
     artifactListCache.clear();
   }
 
+  async function emitArtifactLocalReadEvent(
+    req: Request,
+    topic: "artifact:metadata_changed" | "artifact:body_changed" | "artifact:comment_changed" | "artifact:timeline_changed",
+    artifactId: string,
+    data: Record<string, unknown> = {},
+  ): Promise<void> {
+    try {
+      const teamId = resolveTeamId ? await resolveTeamId(req) : "default";
+      await adapter.query(
+        `INSERT INTO event_log
+           (team_id, topic, actor_agent_id, subject_kind, subject_id, occurred_at, data)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        [
+          teamId,
+          topic,
+          null,
+          "artifact",
+          artifactId,
+          (clock?.() ?? new Date()).getTime(),
+          JSON.stringify({ artifact_id: artifactId, ...data }),
+        ],
+      );
+    } catch {
+      // Some standalone artifact route tests mount only the artifact tables.
+      // The manager mount has event_log and will persist these invalidations.
+    }
+  }
+
   function artifactFeedbackCapability() {
     const commentRoutingEnabled = Boolean(opts.enqueueDispatch);
     const reactionsEnabled = isC0FeedbackReactionsEnabled(env);
@@ -1067,6 +1095,8 @@ export function mountOutputsRoutes(
       };
       const { row, inserted } = await registerArtifact(adapter, payload, new Date().toISOString());
       invalidateArtifactDetail(row.artifact_id);
+      await emitArtifactLocalReadEvent(req, "artifact:metadata_changed", row.artifact_id, { inserted });
+      await emitArtifactLocalReadEvent(req, "artifact:body_changed", row.artifact_id, { inserted });
       const response: RegisterArtifactResponse = {
         schema_version: 'artifact.register.v1',
         artifact_id: row.artifact_id,
@@ -1140,6 +1170,8 @@ export function mountOutputsRoutes(
       );
       const { inserted: draftInserted } = await upsertArtifactDraft(adapter, artifactId, payload, nowIso);
       invalidateArtifactDetail(artifactId);
+      await emitArtifactLocalReadEvent(req, "artifact:metadata_changed", artifactId, { inserted: catalogInserted });
+      await emitArtifactLocalReadEvent(req, "artifact:body_changed", artifactId, { inserted: draftInserted });
       res.json({
         ok: true,
         schema_version: 'cane.draft.register.v1',
@@ -1414,6 +1446,8 @@ export function mountOutputsRoutes(
         source_link: asString(req.body?.source_link),
         idempotency_key: idempotencyKey(req),
       });
+      await emitArtifactLocalReadEvent(req, "artifact:comment_changed", artifactId, { op_id, comment_id: comment.comment_id });
+      await emitArtifactLocalReadEvent(req, "artifact:timeline_changed", artifactId, { op_id, comment_id: comment.comment_id });
 
       // Artifact comment routing policy: durable comments are internal artifact
       // signals. Approval signals approve the artifact; questions stay threaded
@@ -1884,8 +1918,15 @@ export function mountOutputsRoutes(
             idempotency_key: idempotencyKey(req, 'comment'),
           }, clock)
         : null;
+      if (approvalComment) {
+        await emitArtifactLocalReadEvent(req, "artifact:comment_changed", artifactId, {
+          op_id: approvalComment.op_id,
+          comment_id: approvalComment.comment.comment_id,
+        });
+      }
       const { state, op_id, idempotent } = await approveArtifact(adapter, artifactId, reqBody, clock);
       invalidateArtifactDetail(artifactId);
+      await emitArtifactLocalReadEvent(req, "artifact:timeline_changed", artifactId, { op_id, action: "approve" });
       const baseReceipt = {
         approval: { state: "approved", label: "Approved", op_id, idempotent },
         comment: approvalComment

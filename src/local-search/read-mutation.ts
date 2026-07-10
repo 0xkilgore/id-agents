@@ -272,6 +272,7 @@ export function createSqliteLocalReadMutationStore(
         ],
       );
       const ack = acked(input, next);
+      await emitReadStateChanged(adapter, input, next);
       await saveDurableAck(adapter, input, ack, now);
       return ack;
     },
@@ -465,6 +466,33 @@ async function saveDurableAck(
       input.clientMutationId,
       JSON.stringify(ack),
       now().toISOString(),
+    ],
+  );
+}
+
+async function emitReadStateChanged(
+  adapter: DbAdapter,
+  input: LocalReadMutationRequest,
+  record: LocalReadMutationRecord,
+): Promise<void> {
+  await adapter.query(
+    `INSERT INTO event_log
+       (team_id, topic, actor_agent_id, subject_kind, subject_id, occurred_at, data)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    [
+      input.team_id,
+      "read_state:changed",
+      input.actor.type === "agent" ? input.actor.id : null,
+      input.entity.type,
+      input.entity.id,
+      Date.parse(record.updatedAt),
+      JSON.stringify({
+        entity: input.entity,
+        read_state: record.readState,
+        version: record.version,
+        client_mutation_id: input.clientMutationId,
+        updated_by: input.actor,
+      }),
     ],
   );
 }

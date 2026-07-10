@@ -16,6 +16,11 @@ async function setup(): Promise<void> {
   adapter = new SqliteAdapter(":memory:");
   await migrateSqlite(adapter);
   await migrateOutputsTables(adapter);
+  await adapter.query(
+    `INSERT INTO teams (id, name, config, port_start, port_end, created_at)
+     VALUES ('default', 'default', '{}', 4101, 4125, ?)`,
+    [Date.now()],
+  );
   app = express();
   app.use(express.json());
   mountOutputsRoutes(app, adapter, {
@@ -104,6 +109,17 @@ describe("artifact detail version checks", () => {
       body: "Second tab needs to refetch.",
     }, "session-a");
     expect(comment.status).toBe(200);
+    const eventRows = await adapter.query<{ topic: string; subject_kind: string; subject_id: string }>(
+      `SELECT topic, subject_kind, subject_id
+         FROM event_log
+        WHERE subject_id = ?
+        ORDER BY seq ASC`,
+      [artifactId],
+    );
+    expect(eventRows.rows).toEqual([
+      { topic: "artifact:comment_changed", subject_kind: "artifact", subject_id: artifactId },
+      { topic: "artifact:timeline_changed", subject_kind: "artifact", subject_id: artifactId },
+    ]);
 
     const after = await call("GET", `/artifacts/${artifactId}/detail/version`, undefined, "session-b");
     expect(after.status).toBe(200);
