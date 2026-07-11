@@ -38,27 +38,207 @@
     ]
   },
   "agents": {
-    "cto": {
+    "blowout": {
       "primary": {
-        "runtime": "claude-code-cli",
-        "model": "claude-sonnet-5"
+        "runtime": "codex",
+        "model": "gpt-5.5"
       },
       "fallback": [
         {
-          "runtime": "codex",
-          "model": "gpt-5.5"
+          "runtime": "claude-code-cli",
+          "model": "claude-sonnet-5"
+        }
+      ]
+    },
+    "brunel": {
+      "primary": {
+        "runtime": "codex",
+        "model": "gpt-5.5"
+      },
+      "fallback": [
+        {
+          "runtime": "claude-code-cli",
+          "model": "claude-sonnet-5"
+        }
+      ]
+    },
+    "cane": {
+      "primary": {
+        "runtime": "codex",
+        "model": "gpt-5.5"
+      },
+      "fallback": [
+        {
+          "runtime": "claude-code-cli",
+          "model": "claude-sonnet-5"
+        }
+      ]
+    },
+    "cleveland-park": {
+      "primary": {
+        "runtime": "codex",
+        "model": "gpt-5.5"
+      },
+      "fallback": [
+        {
+          "runtime": "claude-code-cli",
+          "model": "claude-sonnet-5"
+        }
+      ]
+    },
+    "cto": {
+      "primary": {
+        "runtime": "codex",
+        "model": "gpt-5.5"
+      },
+      "fallback": [
+        {
+          "runtime": "claude-code-cli",
+          "model": "claude-sonnet-5"
+        }
+      ]
+    },
+    "defi": {
+      "primary": {
+        "runtime": "codex",
+        "model": "gpt-5.5"
+      },
+      "fallback": [
+        {
+          "runtime": "claude-code-cli",
+          "model": "claude-sonnet-5"
+        }
+      ]
+    },
+    "eames": {
+      "primary": {
+        "runtime": "codex",
+        "model": "gpt-5.5"
+      },
+      "fallback": [
+        {
+          "runtime": "claude-code-cli",
+          "model": "claude-sonnet-5"
+        }
+      ]
+    },
+    "finances": {
+      "primary": {
+        "runtime": "codex",
+        "model": "gpt-5.5"
+      },
+      "fallback": [
+        {
+          "runtime": "claude-code-cli",
+          "model": "claude-sonnet-5"
+        }
+      ]
+    },
+    "gaudi": {
+      "primary": {
+        "runtime": "codex",
+        "model": "gpt-5.5"
+      },
+      "fallback": [
+        {
+          "runtime": "claude-code-cli",
+          "model": "claude-sonnet-5"
+        }
+      ]
+    },
+    "hopper": {
+      "primary": {
+        "runtime": "codex",
+        "model": "gpt-5.5"
+      },
+      "fallback": [
+        {
+          "runtime": "claude-code-cli",
+          "model": "claude-sonnet-5"
         }
       ]
     },
     "maestra": {
       "primary": {
-        "runtime": "claude-code-cli",
-        "model": "claude-sonnet-5"
+        "runtime": "codex",
+        "model": "gpt-5.5"
       },
       "fallback": [
         {
-          "runtime": "codex",
-          "model": "gpt-5.5"
+          "runtime": "claude-code-cli",
+          "model": "claude-sonnet-5"
+        }
+      ]
+    },
+    "personal": {
+      "primary": {
+        "runtime": "codex",
+        "model": "gpt-5.5"
+      },
+      "fallback": [
+        {
+          "runtime": "claude-code-cli",
+          "model": "claude-sonnet-5"
+        }
+      ]
+    },
+    "pipeline": {
+      "primary": {
+        "runtime": "codex",
+        "model": "gpt-5.5"
+      },
+      "fallback": [
+        {
+          "runtime": "claude-code-cli",
+          "model": "claude-sonnet-5"
+        }
+      ]
+    },
+    "politics": {
+      "primary": {
+        "runtime": "codex",
+        "model": "gpt-5.5"
+      },
+      "fallback": [
+        {
+          "runtime": "claude-code-cli",
+          "model": "claude-sonnet-5"
+        }
+      ]
+    },
+    "rams": {
+      "primary": {
+        "runtime": "codex",
+        "model": "gpt-5.5"
+      },
+      "fallback": [
+        {
+          "runtime": "claude-code-cli",
+          "model": "claude-sonnet-5"
+        }
+      ]
+    },
+    "regina": {
+      "primary": {
+        "runtime": "codex",
+        "model": "gpt-5.5"
+      },
+      "fallback": [
+        {
+          "runtime": "claude-code-cli",
+          "model": "claude-sonnet-5"
+        }
+      ]
+    },
+    "roger": {
+      "primary": {
+        "runtime": "codex",
+        "model": "gpt-5.5"
+      },
+      "fallback": [
+        {
+          "runtime": "claude-code-cli",
+          "model": "claude-sonnet-5"
         }
       ]
     },
@@ -74,15 +254,15 @@
         }
       ]
     },
-    "rams": {
+    "trinity": {
       "primary": {
-        "runtime": "claude-code-cli",
-        "model": "claude-sonnet-5"
+        "runtime": "codex",
+        "model": "gpt-5.5"
       },
       "fallback": [
         {
-          "runtime": "codex",
-          "model": "gpt-5.5"
+          "runtime": "claude-code-cli",
+          "model": "claude-sonnet-5"
         }
       ]
     }

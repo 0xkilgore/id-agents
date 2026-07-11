@@ -195,3 +195,58 @@ describe("loadModelPolicy degradation", () => {
     expect(svc.config.agents.sentinel.primary.runtime).toBe("claude-code-cli");
   });
 });
+
+describe("Slice G project-agent policy migration", () => {
+  const projectAgents = [
+    "blowout",
+    "brunel",
+    "cane",
+    "cleveland-park",
+    "cto",
+    "defi",
+    "eames",
+    "finances",
+    "gaudi",
+    "hopper",
+    "maestra",
+    "personal",
+    "pipeline",
+    "politics",
+    "rams",
+    "regina",
+    "roger",
+    "sentinel",
+    "trinity",
+  ];
+
+  it("gives every canonical project agent an explicit Codex->Claude policy", () => {
+    const svc = loadModelPolicy({
+      configPath: "configs/model-policy.json",
+      onWarn: (msg) => {
+        throw new Error(msg);
+      },
+    });
+
+    expect(Object.keys(svc.config.agents).sort()).toEqual(projectAgents);
+    for (const agent of projectAgents) {
+      const policy = svc.policyForAgent(agent);
+      expect(policy.agent).toBe(agent);
+      expect(policy.primary).toMatchObject({
+        runtime: "codex",
+        model: "gpt-5.5",
+        provider: "openai",
+      });
+      expect(policy.fallback).toHaveLength(1);
+      expect(policy.fallback[0]).toMatchObject({
+        runtime: "claude-code-cli",
+        model: "claude-sonnet-5",
+        provider: "anthropic",
+      });
+
+      const fallback = svc.resolveModelChoice({ agent, unavailableProviders: ["openai"] });
+      expect(fallback.choice.runtime).toBe("claude-code-cli");
+      expect(fallback.choice.provider).toBe("anthropic");
+      expect(fallback.fallback_applied).toBe(true);
+    }
+  });
+});
