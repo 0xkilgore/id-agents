@@ -1037,6 +1037,7 @@ export interface OrchestrationState {
   team_id: string;
   mode: OrchestrationMode;
   consecutive_zero_ticks: number;
+  last_admission_block_reasons: Record<string, number>;
   last_tick_at: string | null;
   last_dispatch_at: string | null;
   auto_paused: boolean;
@@ -1048,11 +1049,28 @@ interface StateRow {
   team_id: string;
   mode: string;
   consecutive_zero_ticks: number;
+  last_admission_block_reasons_json: string | null;
   last_tick_at: string | null;
   last_dispatch_at: string | null;
   auto_paused: number;
   auto_pause_reason: string | null;
   updated_at: string;
+}
+
+function parseCountMap(json: string | null): Record<string, number> {
+  if (!json) return {};
+  try {
+    const parsed = JSON.parse(json);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+    const out: Record<string, number> = {};
+    for (const [key, value] of Object.entries(parsed)) {
+      const n = Number(value);
+      if (Number.isFinite(n) && n > 0) out[key] = n;
+    }
+    return out;
+  } catch {
+    return {};
+  }
 }
 
 /** Read the team's orchestration state, creating a paused default if absent. */
@@ -1072,6 +1090,7 @@ export async function getOrchestrationState(adapter: DbAdapter, team_id = "defau
       team_id,
       mode: "paused",
       consecutive_zero_ticks: 0,
+      last_admission_block_reasons: {},
       last_tick_at: null,
       last_dispatch_at: null,
       auto_paused: false,
@@ -1084,6 +1103,7 @@ export async function getOrchestrationState(adapter: DbAdapter, team_id = "defau
     team_id: r.team_id,
     mode: r.mode as OrchestrationMode,
     consecutive_zero_ticks: r.consecutive_zero_ticks,
+    last_admission_block_reasons: parseCountMap(r.last_admission_block_reasons_json),
     last_tick_at: r.last_tick_at,
     last_dispatch_at: r.last_dispatch_at,
     auto_paused: r.auto_paused === 1,
@@ -1121,6 +1141,7 @@ export async function recordTickOutcome(
   opts: {
     zero_ticks: number;
     fired: boolean;
+    admission_block_reasons?: Record<string, number>;
     auto_pause?: { reason: string } | null;
   },
 ): Promise<void> {
@@ -1140,8 +1161,19 @@ export async function recordTickOutcome(
            mode = $4,
            auto_paused = $5,
            auto_pause_reason = $6,
-           updated_at = $7
-     WHERE team_id = $8`,
-    [opts.zero_ticks, now, lastDispatchAt, newMode, newAutoPaused, newReason, now, team_id],
+           last_admission_block_reasons_json = $7,
+           updated_at = $8
+     WHERE team_id = $9`,
+    [
+      opts.zero_ticks,
+      now,
+      lastDispatchAt,
+      newMode,
+      newAutoPaused,
+      newReason,
+      JSON.stringify(opts.fired ? {} : opts.admission_block_reasons ?? {}),
+      now,
+      team_id,
+    ],
   );
 }

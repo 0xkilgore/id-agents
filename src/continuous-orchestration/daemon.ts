@@ -186,6 +186,8 @@ export interface ReadyAdmissionExplanation {
 }
 
 export const READY_ADMISSION_BLOCK_REASONS = [
+  "no_in_flight_slots",
+  "tick_admission_cap",
   "blocked_dependency",
   "risk_requires_approval",
   "pool_capacity_full",
@@ -787,6 +789,7 @@ export class ContinuousOrchestrationDaemon {
     await recordTickOutcome(this.deps.adapter, this.teamId, {
       zero_ticks: stall.zero_ticks,
       fired: admitted.length > 0 && !config.dry_run,
+      admission_block_reasons: readyAdmissionBlockReasonCounts(plan),
       auto_pause: auto_paused,
     });
 

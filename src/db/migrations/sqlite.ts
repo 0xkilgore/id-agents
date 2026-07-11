@@ -654,6 +654,7 @@ export async function migrateSqlite(adapter: SqliteAdapter): Promise<void> {
       team_id                TEXT PRIMARY KEY,
       mode                   TEXT NOT NULL DEFAULT 'paused',
       consecutive_zero_ticks INTEGER NOT NULL DEFAULT 0,
+      last_admission_block_reasons_json TEXT NOT NULL DEFAULT '{}',
       last_tick_at           TEXT,
       last_dispatch_at       TEXT,
       auto_paused            INTEGER NOT NULL DEFAULT 0,
@@ -687,6 +688,11 @@ export async function migrateSqlite(adapter: SqliteAdapter): Promise<void> {
   // pre-existing duplicate live rows; storage helpers enforce forward dedup.
   try {
     adapter.exec(`ALTER TABLE orchestration_backlog_item ADD COLUMN logical_key TEXT`);
+  } catch {
+    // Column already exists in upgraded databases.
+  }
+  try {
+    adapter.exec(`ALTER TABLE orchestration_state ADD COLUMN last_admission_block_reasons_json TEXT NOT NULL DEFAULT '{}'`);
   } catch {
     // Column already exists in upgraded databases.
   }

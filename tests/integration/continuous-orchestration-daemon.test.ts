@@ -734,6 +734,8 @@ describe("daemon — dry-run vs live", () => {
     expect(res.body.counts.ready).toBe(6);
     expect(res.body.counts.admissible_now).toBe(1);
     expect(res.body.counts.ready_block_reasons).toEqual({
+      no_in_flight_slots: 0,
+      tick_admission_cap: 0,
       blocked_dependency: 1,
       risk_requires_approval: 1,
       pool_capacity_full: 1,

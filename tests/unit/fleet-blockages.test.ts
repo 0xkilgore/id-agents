@@ -4,9 +4,12 @@ import { readFleetBlockages } from "../../src/dispatch-scheduler/fleet-blockages
 
 class MemoryAdapter {
   public dispatchSql = "";
-  public orchestrationParams: unknown[] = [];
+  public orchestrationParams: unknown[][] = [];
 
-  constructor(private rows: Array<Record<string, unknown>>) {}
+  constructor(
+    private rows: Array<Record<string, unknown>>,
+    private orchestrationRows: Record<string, unknown>[] = [{ team_id: "default", mode: "running", consecutive_zero_ticks: 0 }],
+  ) {}
 
   async query<T = Record<string, unknown>>(sql: string, params: unknown[] = []): Promise<{ rows: T[] }> {
     if (sql.includes("FROM dispatch_scheduler_queue")) {
@@ -21,8 +24,11 @@ class MemoryAdapter {
       };
     }
     if (sql.includes("FROM orchestration_state")) {
-      this.orchestrationParams = params;
-      return { rows: [{ mode: "running", consecutive_zero_ticks: 0 }] as T[] };
+      this.orchestrationParams.push(params);
+      if (sql.includes("SELECT team_id")) {
+        return { rows: this.orchestrationRows.filter((row) => row.team_id === params[0]).map((row) => ({ team_id: row.team_id })) as T[] };
+      }
+      return { rows: this.orchestrationRows.filter((row) => row.team_id === params[0]) as T[] };
     }
     return { rows: [] };
   }
@@ -102,9 +108,13 @@ describe("readFleetBlockages", () => {
   });
 
   it("checks orchestration state by team id and team name so /dispatches/health is not blind to name-keyed CO rows", async () => {
-    const adapter = new MemoryAdapter([]);
+    const adapter = new MemoryAdapter([], [{ team_id: "default", mode: "running", consecutive_zero_ticks: 0 }]);
     await readFleetBlockages(adapter, "36ee78b1-d817-4a29-b631-c93945404c7b", null, "default");
 
-    expect(adapter.orchestrationParams).toEqual(["36ee78b1-d817-4a29-b631-c93945404c7b", "default"]);
+    expect(adapter.orchestrationParams).toEqual([
+      ["36ee78b1-d817-4a29-b631-c93945404c7b"],
+      ["default"],
+      ["default"],
+    ]);
   });
 });

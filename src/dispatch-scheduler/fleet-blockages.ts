@@ -1,5 +1,7 @@
 import type { DbAdapterLike } from "../supervisor/manager-source-reader.js";
 import type { FleetRuntimeDriftSummary } from "./runtime-drift.js";
+import { loadContinuousOrchestrationConfig } from "../continuous-orchestration/config.js";
+import { readOrchestrationLoopHealthProjection } from "../continuous-orchestration/health-projection.js";
 
 export type FleetBlockageKind =
   | "needs_clarification"
@@ -25,7 +27,6 @@ export type FleetBlockagesReport = {
 };
 
 const STALE_CLARIFICATION_MS = 30 * 60 * 1000;
-const CO_STALL_TICK_THRESHOLD = 3;
 
 export async function readFleetBlockages(
   adapter: DbAdapterLike,
@@ -90,18 +91,8 @@ export async function readFleetBlockages(
   }
 
   const orchestrationTeamKeys = [...new Set([teamId, teamName].filter((v): v is string => !!v))];
-  const { rows: orchRows } = await adapter.query<{
-    mode: string;
-    consecutive_zero_ticks: number;
-  }>(
-    `SELECT mode, consecutive_zero_ticks
-       FROM orchestration_state
-       WHERE team_id IN (${orchestrationTeamKeys.map(() => "?").join(", ")})
-       LIMIT 1`,
-    orchestrationTeamKeys,
-  );
-  const orch = orchRows[0];
-  if (orch?.mode === "paused") {
+  const loopHealth = await readFirstOrchestrationLoopHealth(adapter, orchestrationTeamKeys);
+  if (loopHealth?.state === "paused") {
     blockages.push({
       kind: "orchestration_paused",
       severity: "critical",
@@ -110,12 +101,12 @@ export async function readFleetBlockages(
       oldest_at: null,
       action: "/ops",
     });
-  } else if (Number(orch?.consecutive_zero_ticks ?? 0) >= CO_STALL_TICK_THRESHOLD) {
+  } else if (loopHealth?.state === "stalled_ready_not_launching") {
     blockages.push({
       kind: "co_stall",
       severity: "critical",
-      message: `CO stall: ${orch?.consecutive_zero_ticks} ticks admitted nothing`,
-      count: Number(orch?.consecutive_zero_ticks ?? 0),
+      message: `CO stall: ${loopHealth.consecutive_zero_ticks} ticks admitted nothing without structured explanation`,
+      count: loopHealth.consecutive_zero_ticks,
       oldest_at: null,
       action: "/ops",
     });
@@ -145,6 +136,28 @@ export async function readFleetBlockages(
     blockages,
     generated_at: new Date(nowMs).toISOString(),
   };
+}
+
+async function readFirstOrchestrationLoopHealth(
+  adapter: DbAdapterLike,
+  teamKeys: string[],
+): Promise<Awaited<ReturnType<typeof readOrchestrationLoopHealthProjection>> | null> {
+  const config = loadContinuousOrchestrationConfig();
+  for (const teamKey of teamKeys) {
+    const { rows } = await adapter.query<{ team_id: string }>(
+      `SELECT team_id
+         FROM orchestration_state
+        WHERE team_id = ?
+        LIMIT 1`,
+      [teamKey],
+    );
+    if (rows.length > 0) {
+      return readOrchestrationLoopHealthProjection(adapter as Parameters<typeof readOrchestrationLoopHealthProjection>[0], teamKey, {
+        stallThresholdTicks: config.stall_threshold_ticks,
+      });
+    }
+  }
+  return null;
 }
 
 function parseActiveClarification(

@@ -1,7 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
+import { readDispatchHealth } from "../../src/dispatch-scheduler/read-model.js";
 import { readOrchestrationHealthProjection } from "../../src/continuous-orchestration/health-projection.js";
-import { insertBacklogItem, setItemState } from "../../src/continuous-orchestration/storage.js";
+import { insertBacklogItem, recordTickOutcome, setItemState, setMode } from "../../src/continuous-orchestration/storage.js";
 import { migrateSqlite } from "../../src/db/migrations/sqlite.js";
 import { SqliteAdapter } from "../../src/db/sqlite-adapter.js";
 import { migrateOutputsTables } from "../../src/outputs/storage.js";
@@ -18,6 +19,67 @@ afterEach(async () => {
 });
 
 describe("orchestration health projection", () => {
+  it("reports capacity-explained zero-admit ticks as running_at_capacity instead of critical stall", async () => {
+    await setMode(adapter, "default", "running");
+    await insertBacklogItem(adapter, {
+      title: "current lane holder",
+      readiness_state: "in_flight",
+      to_agent: "roger",
+      dispatch_body: "continue",
+      write_scope: ["repo/shared"],
+    });
+    await insertBacklogItem(adapter, {
+      title: "blocked by lane",
+      readiness_state: "ready",
+      to_agent: "roger",
+      dispatch_body: "continue",
+      write_scope: ["repo/shared"],
+    });
+    await recordTickOutcome(adapter, "default", {
+      zero_ticks: 5,
+      fired: false,
+      admission_block_reasons: { single_writer_lane_busy: 1 },
+    });
+
+    const orchestration = await readOrchestrationHealthProjection(adapter, "default");
+    const dispatches = await readDispatchHealth(adapter, "default");
+
+    expect(orchestration.orchestration_loop).toMatchObject({
+      state: "running_at_capacity",
+      severity: "warn",
+      consecutive_zero_ticks: 5,
+      in_flight: 1,
+      last_admission_block_reasons: { single_writer_lane_busy: 1 },
+    });
+    expect(dispatches.blockages.blockages.find((b) => b.kind === "co_stall")).toBeUndefined();
+  });
+
+  it("escalates unexplained zero-admit ticks after the stall threshold", async () => {
+    await setMode(adapter, "default", "running");
+    await recordTickOutcome(adapter, "default", {
+      zero_ticks: 5,
+      fired: false,
+      admission_block_reasons: {},
+    });
+
+    const orchestration = await readOrchestrationHealthProjection(adapter, "default");
+    const dispatches = await readDispatchHealth(adapter, "default");
+
+    expect(orchestration.orchestration_loop).toMatchObject({
+      state: "stalled_ready_not_launching",
+      severity: "critical",
+      consecutive_zero_ticks: 5,
+      last_admission_block_reasons: {},
+    });
+    expect(dispatches.blockages.blockages).toEqual([
+      expect.objectContaining({
+        kind: "co_stall",
+        severity: "critical",
+        count: 5,
+      }),
+    ]);
+  });
+
   it("counts active needs_clarification blockers, recent ids, and backlog dependency impact", async () => {
     const owner = await insertBacklogItem(adapter, {
       title: "land upstream change",

@@ -7,6 +7,23 @@
 import type { DbAdapter } from "../db/db-adapter.js";
 import { createHash } from "node:crypto";
 import { classifyPromotionHygieneFailure } from "../loops/worktree-hygiene.js";
+import { loadContinuousOrchestrationConfig } from "./config.js";
+
+export type OrchestrationLoopState =
+  | "paused"
+  | "running"
+  | "running_at_capacity"
+  | "stalled_ready_not_launching";
+
+export interface OrchestrationLoopHealthProjection {
+  state: OrchestrationLoopState;
+  severity: "ok" | "warn" | "critical";
+  consecutive_zero_ticks: number;
+  stall_threshold_ticks: number;
+  in_flight: number;
+  last_admission_block_reasons: Record<string, number>;
+  explanation: string;
+}
 
 export interface OrchestrationHealthBlocker {
   dispatch_phid: string;
@@ -24,6 +41,7 @@ export interface OrchestrationHealthBlocker {
 export interface OrchestrationHealthProjection {
   ok: boolean;
   generated_at: string;
+  orchestration_loop: OrchestrationLoopHealthProjection;
   queue_quality: OrchestrationQueueQualityProjection;
   ready_item_blockers: OrchestrationReadyItemBlockerProjection;
   blockers: {
@@ -153,6 +171,7 @@ export async function readOrchestrationHealthProjection(
   return {
     ok: true,
     generated_at: new Date().toISOString(),
+    orchestration_loop: await readOrchestrationLoopHealthProjection(adapter, teamId),
     queue_quality: queueQuality,
     ready_item_blockers: await readReadyItemBlockerProjection(adapter, teamId, dependencyImpact),
     blockers: {
@@ -161,6 +180,122 @@ export async function readOrchestrationHealthProjection(
       promotion: summarize(promotion, recentLimit),
     },
   };
+}
+
+const CAPACITY_OR_LANE_REASONS = new Set([
+  "single_writer_lane_busy",
+  "pool_capacity_full",
+  "no_free_pool_builder",
+  "no_in_flight_slots",
+  "tick_admission_cap",
+]);
+
+interface OrchestrationLoopStateRow {
+  mode: string;
+  consecutive_zero_ticks: number | null;
+  last_admission_block_reasons_json: string | null;
+}
+
+export async function readOrchestrationLoopHealthProjection(
+  adapter: DbAdapter,
+  teamId = "default",
+  opts: { stallThresholdTicks?: number } = {},
+): Promise<OrchestrationLoopHealthProjection> {
+  const stallThresholdTicks = Math.max(
+    1,
+    Math.floor(opts.stallThresholdTicks ?? loadContinuousOrchestrationConfig().stall_threshold_ticks),
+  );
+  const [{ rows: stateRows }, { rows: inFlightRows }] = await Promise.all([
+    adapter.query<OrchestrationLoopStateRow>(
+      `SELECT mode, consecutive_zero_ticks, last_admission_block_reasons_json
+         FROM orchestration_state
+        WHERE team_id = ?
+        LIMIT 1`,
+      [teamId],
+    ),
+    adapter.query<{ count: number }>(
+      `SELECT COUNT(*) AS count
+         FROM orchestration_backlog_item
+        WHERE team_id = ?
+          AND readiness_state = 'in_flight'`,
+      [teamId],
+    ),
+  ]);
+  const state = stateRows[0];
+  const mode = state?.mode ?? "paused";
+  const consecutiveZeroTicks = Number(state?.consecutive_zero_ticks ?? 0);
+  const inFlight = Number(inFlightRows[0]?.count ?? 0);
+  const lastAdmissionBlockReasons = parseCountMap(state?.last_admission_block_reasons_json ?? null);
+  const explainedCount = Object.values(lastAdmissionBlockReasons).reduce((sum, count) => sum + count, 0);
+  const allCapacityOrLane =
+    explainedCount > 0 &&
+    Object.entries(lastAdmissionBlockReasons)
+      .filter(([, count]) => count > 0)
+      .every(([code]) => CAPACITY_OR_LANE_REASONS.has(code));
+
+  if (mode === "paused" || mode === "stopped") {
+    return {
+      state: "paused",
+      severity: "warn",
+      consecutive_zero_ticks: consecutiveZeroTicks,
+      stall_threshold_ticks: stallThresholdTicks,
+      in_flight: inFlight,
+      last_admission_block_reasons: lastAdmissionBlockReasons,
+      explanation: `orchestration mode is ${mode}`,
+    };
+  }
+
+  if (consecutiveZeroTicks >= stallThresholdTicks && explainedCount === 0) {
+    return {
+      state: "stalled_ready_not_launching",
+      severity: "critical",
+      consecutive_zero_ticks: consecutiveZeroTicks,
+      stall_threshold_ticks: stallThresholdTicks,
+      in_flight: inFlight,
+      last_admission_block_reasons: lastAdmissionBlockReasons,
+      explanation: `${consecutiveZeroTicks} consecutive zero-admit ticks with no structured admission explanation`,
+    };
+  }
+
+  if (consecutiveZeroTicks >= stallThresholdTicks && inFlight > 0 && allCapacityOrLane) {
+    return {
+      state: "running_at_capacity",
+      severity: "warn",
+      consecutive_zero_ticks: consecutiveZeroTicks,
+      stall_threshold_ticks: stallThresholdTicks,
+      in_flight: inFlight,
+      last_admission_block_reasons: lastAdmissionBlockReasons,
+      explanation: `${consecutiveZeroTicks} consecutive zero-admit ticks explained by capacity or lane eligibility`,
+    };
+  }
+
+  return {
+    state: "running",
+    severity: "ok",
+    consecutive_zero_ticks: consecutiveZeroTicks,
+    stall_threshold_ticks: stallThresholdTicks,
+    in_flight: inFlight,
+    last_admission_block_reasons: lastAdmissionBlockReasons,
+    explanation: explainedCount > 0
+      ? "zero-admit ticks have structured admission explanations"
+      : "orchestration loop is below the zero-admit stall threshold",
+  };
+}
+
+function parseCountMap(json: string | null): Record<string, number> {
+  if (!json) return {};
+  try {
+    const parsed = JSON.parse(json);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+    const out: Record<string, number> = {};
+    for (const [key, value] of Object.entries(parsed)) {
+      const n = Number(value);
+      if (Number.isFinite(n) && n > 0) out[key] = n;
+    }
+    return out;
+  } catch {
+    return {};
+  }
 }
 
 async function readReadyItemBlockerProjection(
