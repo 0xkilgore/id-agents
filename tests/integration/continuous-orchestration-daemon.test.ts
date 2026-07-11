@@ -100,12 +100,14 @@ function makeDaemon(
 async function seedReady(adapter: SqliteAdapter, over: Partial<BacklogItem> = {}) {
   const item = await insertBacklogItem(adapter, {
     title: over.title ?? "do work",
+    track: over.track ?? null,
     to_agent: over.to_agent ?? "roger",
     dispatch_body: over.dispatch_body ?? "implement X",
     readiness_state: "ready",
     risk_class: over.risk_class ?? "build",
     priority: over.priority ?? 5,
     write_scope: over.write_scope ?? [],
+    dependencies: over.dependencies ?? [],
     token_estimate: over.token_estimate ?? 0,
     provider: over.provider ?? null,
     runtime: over.runtime ?? null,
@@ -654,6 +656,94 @@ describe("daemon — dry-run vs live", () => {
     });
     expect(res.body.auto_promote_health.summary).toMatch(/ready=8 floor=12/);
     expect(res.body.auto_promote_health.summary).toMatch(/no needs_review candidates/);
+  });
+
+  it("status exposes admissible_now separately from raw ready with ready block reasons", async () => {
+    await seedReady(adapter, { title: "admissible now", write_scope: ["repo/open"] });
+
+    await insertBacklogItem(adapter, {
+      title: "pending dependency",
+      logical_key: "dep-pending",
+      readiness_state: "draft",
+      risk_class: "build",
+    });
+    await seedReady(adapter, {
+      title: "blocked by dependency",
+      dependencies: ["dep-pending"],
+      write_scope: ["repo/dependent"],
+    });
+    await seedReady(adapter, {
+      title: "risk needs approval",
+      risk_class: "novel",
+      write_scope: ["repo/risk"],
+    });
+    await seedReady(adapter, {
+      title: "single writer busy",
+      write_scope: ["repo/busy"],
+    });
+    await seedReady(adapter, {
+      title: "pool full",
+      track: "T-FULL",
+      to_agent: null,
+      write_scope: ["repo/full-pool"],
+    });
+    await seedReady(adapter, {
+      title: "pool has no builder",
+      track: "T-EMPTY",
+      to_agent: null,
+      write_scope: ["repo/empty-pool"],
+    });
+
+    const pools: PoolRouting = {
+      poolForItem: (item) => {
+        if (item.track === "T-FULL") {
+          return { pool_id: "full", repo_root: "/repo/full", max_parallel: 0, members: ["roger"] };
+        }
+        if (item.track === "T-EMPTY") {
+          return { pool_id: "empty", repo_root: "/repo/empty", max_parallel: 1, members: [] };
+        }
+        return null;
+      },
+      availableBuilders: (pool) => pool.members,
+      allocateWorktree: async ({ agent, item, pool }) => ({
+        path: `${pool.repo_root}/.worktrees/${agent}-${item.item_id.slice(-6)}`,
+        branch: `build/${agent}-${item.item_id.slice(-6)}`,
+        lease_id: null,
+      }),
+    };
+    const { app, daemon } = mountStatusApp(
+      adapter,
+      {
+        dry_run: true,
+        auto_flesh_enabled: false,
+        auto_promote_enabled: false,
+        max_in_flight: 20,
+        max_new_per_tick: 20,
+      },
+      { activeScopes: new Set(["repo/busy"]), pools },
+    );
+    await daemon.setMode("running");
+
+    const res = await callApp(app, "/orchestration/status");
+
+    expect(res.status).toBe(200);
+    expect(res.body.counts.ready).toBe(6);
+    expect(res.body.counts.admissible_now).toBe(1);
+    expect(res.body.counts.ready_block_reasons).toEqual({
+      blocked_dependency: 1,
+      risk_requires_approval: 1,
+      pool_capacity_full: 1,
+      single_writer_lane_busy: 1,
+      no_free_pool_builder: 1,
+    });
+    expect(res.body.ready_admission).toMatchObject({
+      candidates: 6,
+      admissible_now: 1,
+      block_reason_counts: res.body.counts.ready_block_reasons,
+    });
+    const blockedSum = Object.values(res.body.counts.ready_block_reasons)
+      .reduce((sum: number, count: unknown) => sum + Number(count), 0);
+    expect(blockedSum).toBe(res.body.counts.ready - res.body.counts.admissible_now);
   });
 
   it("status explains below-floor auto-promote blocked by safety risk", async () => {

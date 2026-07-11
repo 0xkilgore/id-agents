@@ -106,6 +106,8 @@ export function mountContinuousOrchestrationRoutes(app: Application, opts: Orche
         kill_switch_active: killSwitch,
         counts: {
           ready: ready.length,
+          admissible_now: readyAdmission.admissible_now,
+          ready_block_reasons: readyAdmission.block_reason_counts,
           needs_review: Math.max(0, needsReview.length - heldConfidenceReview.length),
           held_confidence_review: heldConfidenceReview.length,
           in_flight: inFlight.length,

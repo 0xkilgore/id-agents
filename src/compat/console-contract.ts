@@ -45,6 +45,7 @@ export const CONSOLE_CONTRACT_ROUTES: ConsoleContractRoute[] = [
   { method: "get", path: "/agents/:name/detail", consumer: "agent detail dossier (agent-page-v2)" },
   { method: "get", path: "/tasks", consumer: "taskAdapter (/tasks?team=default)" },
   { method: "get", path: "/usage", consumer: "usageAdapter (tokens/cost panel)" },
+  { method: "get", path: "/orchestration/status", consumer: "fleetStatusAdapter / Fleet Status panel (ready/admissible orchestration pool)" },
   { method: "get", path: "/dispatches", consumer: "provenanceAdapter (dispatch pipeline)" },
   { method: "get", path: "/dispatches/health", consumer: "provenanceAdapter (dispatch health)" },
   { method: "get", path: "/artifacts", consumer: "artifactAdapter / provenanceAdapter (artifact lane)" },
@@ -59,6 +60,7 @@ export const CONSOLE_CONTRACT_ROUTES: ConsoleContractRoute[] = [
 export const MANAGER_ROUTE_SOURCE_FILES: string[] = [
   "src/agent-manager-db.ts",
   "src/usage-meter/routes.ts",
+  "src/continuous-orchestration/routes.ts",
   "src/inbox/routes.ts",
   "src/outputs/routes.ts",
   "src/graph/routes.ts",

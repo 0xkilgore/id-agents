@@ -151,6 +151,8 @@ export interface TickResult {
 
 export interface ReadyAdmissionExplanation {
   candidates: number;
+  admissible_now: number;
+  block_reason_counts: ReadyAdmissionBlockReasonCounts;
   admissible: Array<{ item_id: string; title: string; to_agent: string | null; risk_class: string }>;
   non_admitted: Array<{
     item_id: string;
@@ -173,6 +175,17 @@ export interface ReadyAdmissionExplanation {
   halted: string | null;
   ready_runtime_repairs: ReadyRuntimeRepair[];
 }
+
+export const READY_ADMISSION_BLOCK_REASONS = [
+  "blocked_dependency",
+  "risk_requires_approval",
+  "pool_capacity_full",
+  "single_writer_lane_busy",
+  "no_free_pool_builder",
+] as const;
+
+export type ReadyAdmissionBlockReason = typeof READY_ADMISSION_BLOCK_REASONS[number];
+export type ReadyAdmissionBlockReasonCounts = Record<ReadyAdmissionBlockReason, number>;
 
 export type ReadyAdmissionBlockerCategory =
   | "usage_gate"
@@ -306,6 +319,15 @@ function readyAdmissionBlockerCounts(plan: { skipped: DecisionRecord[] }): Ready
     else counts.set(key, { code, category, count: 1 });
   }
   return [...counts.values()].sort((a, b) => b.count - a.count || a.category.localeCompare(b.category) || a.code.localeCompare(b.code));
+}
+
+function readyAdmissionBlockReasonCounts(plan: { skipped: DecisionRecord[] }): ReadyAdmissionBlockReasonCounts {
+  const counts = Object.fromEntries(READY_ADMISSION_BLOCK_REASONS.map((code) => [code, 0])) as ReadyAdmissionBlockReasonCounts;
+  for (const decision of plan.skipped) {
+    const code = decision.metadata?.code;
+    if (typeof code === "string" && code in counts) counts[code as ReadyAdmissionBlockReason] += 1;
+  }
+  return counts;
 }
 
 export class ContinuousOrchestrationDaemon {
@@ -763,6 +785,8 @@ export class ContinuousOrchestrationDaemon {
       ordered.length >= config.min_ready_fuel && plan.admit.length < config.min_ready_fuel && plan.skipped.length > 0;
     return {
       candidates: ordered.length,
+      admissible_now: plan.admit.length,
+      block_reason_counts: readyAdmissionBlockReasonCounts(plan),
       admissible: plan.admit.map((item) => ({
         item_id: item.item_id,
         title: item.title,
