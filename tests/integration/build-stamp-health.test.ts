@@ -90,5 +90,14 @@ describe('GET /health build-stamp (T11.1)', () => {
     expect(body.build).toHaveProperty('origin_main_sha');
     expect(body.build).toHaveProperty('behind_origin');
     expect(['build_stamp', 'runtime_fallback', 'unknown']).toContain(body.build.source);
+
+    expect(body.disk).toMatchObject({
+      schema_version: 'disk-headroom.v1',
+      path: expect.any(String),
+      state: expect.stringMatching(/^(ok|warn|critical|unknown)$/),
+      min_free_bytes: expect.any(Number),
+      warn_free_bytes: expect.any(Number),
+    });
+    expect(typeof body.disk.available_gib === 'number' || body.disk.available_gib === null).toBe(true);
   });
 });

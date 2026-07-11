@@ -240,6 +240,7 @@ import { mountRuntimePolicyRoutes } from './model-policy/runtime-policy-routes.j
 import { loadApprovalPolicy, type ApprovalPolicyService } from './approval-policy/policy.js';
 import { resolveManagerBindHost } from './manager-bind-host.js';
 import { getBuildStatusCached, loadBuildStatus, type BuildStatus } from './build-info.js';
+import { readDiskHeadroom } from './disk-health.js';
 import {
   INITIAL_FRESHNESS,
   type FreshnessTrackerState,
@@ -4901,6 +4902,9 @@ export class AgentManagerDb {
         conformance,
         // T11.1: the running build identity + staleness-vs-origin signal.
         build: this.getBuildStatus(),
+        // T-RELY: fail-loud disk headroom so build waves see ENOSPC risk before
+        // database I/O and test runs start failing mid-flight.
+        disk: readDiskHeadroom(),
         // T-DEPLOY.1: how long the running build has been behind origin/main +
         // whether the freshness monitor has alerted (the drift watchdog state).
         freshness: {
