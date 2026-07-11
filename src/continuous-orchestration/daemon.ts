@@ -236,6 +236,7 @@ export interface AutoPromoteHealth {
   top_skip_reasons: Array<{ reason: string; count: number }>;
   blocker_class_counts: AutoPromoteBlockerClassCount[];
   next_action: AutoPromoteNextAction;
+  empty_pipe_alert: AutoPromoteEmptyPipeAlert;
   ready_runtime_repairs: ReadyRuntimeRepair[];
   summary: string;
 }
@@ -265,6 +266,22 @@ export interface AutoPromoteNextAction {
     | "raise_candidate_confidence"
     | "flesh_or_refuel_candidates";
   summary: string;
+}
+
+export interface AutoPromoteEmptyPipeAlertItem {
+  item_id: string;
+  blocker_classes: AutoPromoteBlockerClass[];
+  next_actions: string[];
+  reasons: string[];
+}
+
+export interface AutoPromoteEmptyPipeAlert {
+  active: boolean;
+  ready: number;
+  admissible_now: number;
+  reason: string | null;
+  message: string | null;
+  items: AutoPromoteEmptyPipeAlertItem[];
 }
 
 /** Outcome of one floor-triggered auto-promote pass. */
@@ -710,6 +727,34 @@ export class ContinuousOrchestrationDaemon {
       }
     }
 
+    const emptyPipeAlert = autoPromoteEmptyPipeAlertFrom({
+      ready: ready.length,
+      admissibleReady,
+      autoPromote,
+    });
+    if (emptyPipeAlert.active) {
+      const message = emptyPipeAlert.message ?? "Continuous orchestration empty auto-promote pipe";
+      decisions.push({
+        item_id: null,
+        action: "fleet_blockage",
+        reason: message,
+        metadata: {
+          event_type: "fleet.blockage",
+          kind: "empty_auto_promote_pipe",
+          ready: emptyPipeAlert.ready,
+          admissible_now: emptyPipeAlert.admissible_now,
+          items: emptyPipeAlert.items,
+        },
+      });
+      await this.emitFleetBlockage(message, {
+        tick_id,
+        kind: "empty_auto_promote_pipe",
+        ready: emptyPipeAlert.ready,
+        admissible_now: emptyPipeAlert.admissible_now,
+        items: emptyPipeAlert.items,
+      });
+    }
+
     if (modelPolicyDrift.status !== "match") {
       const message = modelPolicyDrift.message ?? `model-policy directive guard failed with status ${modelPolicyDrift.status}`;
       decisions.push({
@@ -907,6 +952,19 @@ export class ContinuousOrchestrationDaemon {
       promoted: promotedCount,
       blockerClassCounts,
     });
+    const emptyPipeAlert = autoPromoteEmptyPipeAlertFrom({
+      ready: plan.before.build_ready,
+      admissibleReady: plan.before.build_ready === 0 ? 0 : null,
+      autoPromote: triggered
+        ? {
+          triggered,
+          promoted: promotedCount,
+          skipped: skippedItems.length,
+          candidates_considered: candidatesConsidered,
+          skipped_items: skippedItems,
+        }
+        : null,
+    });
     const summary = summarizeAutoPromoteHealth({
       blockedReason,
       belowFloor,
@@ -957,6 +1015,7 @@ export class ContinuousOrchestrationDaemon {
       top_skip_reasons: triggered ? topSkipReasons : [],
       blocker_class_counts: blockerClassCounts,
       next_action: nextAction,
+      empty_pipe_alert: emptyPipeAlert,
       ready_runtime_repairs: readyRuntimeRepairs,
       summary,
     };
@@ -1412,6 +1471,69 @@ function blockerClassCountsFrom(
   return [...counts.entries()]
     .map(([cls, count]) => ({ class: cls, count, label: autoPromoteBlockerLabel(cls) }))
     .sort((a, b) => b.count - a.count || a.class.localeCompare(b.class));
+}
+
+function emptyPipeNextAction(cls: AutoPromoteBlockerClass): string | null {
+  switch (cls) {
+    case "confidence_threshold":
+      return "needs a human /promote decision or Chris batch review";
+    case "already_dispatched":
+      return "needs reconciliation (verify done-vs-failed per output/2026-07-11-needs-review-promotion-reconciliation.md) or a fresh authored wave";
+    default:
+      return null;
+  }
+}
+
+function autoPromoteEmptyPipeAlertFrom(args: {
+  ready: number;
+  admissibleReady: number | null;
+  autoPromote: Pick<AutoPromoteRunSummary, "triggered" | "promoted" | "skipped" | "candidates_considered" | "skipped_items"> | null;
+}): AutoPromoteEmptyPipeAlert {
+  const inactive = (reason: string | null = null): AutoPromoteEmptyPipeAlert => ({
+    active: false,
+    ready: args.ready,
+    admissible_now: args.admissibleReady ?? 0,
+    reason,
+    message: null,
+    items: [],
+  });
+  if (args.ready !== 0 || args.admissibleReady !== 0) return inactive();
+  const autoPromote = args.autoPromote;
+  if (!autoPromote?.triggered) return inactive("auto_promote_not_triggered");
+  if (autoPromote.promoted !== 0) return inactive("auto_promote_has_promotions");
+  if (autoPromote.candidates_considered === 0) return inactive("no_needs_review_candidates");
+  if (autoPromote.skipped !== autoPromote.candidates_considered) return inactive("not_every_candidate_skipped");
+
+  const allowed = new Set<AutoPromoteBlockerClass>(["confidence_threshold", "already_dispatched"]);
+  const items: AutoPromoteEmptyPipeAlertItem[] = [];
+  for (const item of autoPromote.skipped_items) {
+    const blockerClasses = [...new Set(item.reasons.map(autoPromoteBlockerClass))].sort();
+    if (blockerClasses.length === 0 || blockerClasses.some((cls) => !allowed.has(cls))) {
+      return inactive("skips_include_other_reasons");
+    }
+    const nextActions = [...new Set(blockerClasses.map(emptyPipeNextAction).filter((x): x is string => x != null))];
+    items.push({
+      item_id: item.item_id,
+      blocker_classes: blockerClasses,
+      next_actions: nextActions,
+      reasons: item.reasons,
+    });
+  }
+
+  const actionSummary = items
+    .map((item) => `${item.item_id}: ${item.next_actions.join("; ")}`)
+    .join(" | ");
+  return {
+    active: true,
+    ready: args.ready,
+    admissible_now: args.admissibleReady,
+    reason: "ready_and_admissible_zero_all_needs_review_skipped_by_confidence_or_already_dispatched",
+    message:
+      `Continuous orchestration empty auto-promote pipe: ready=0, admissible_now=0, ` +
+      `all ${items.length} needs_review candidate(s) were skipped by confidence/already-dispatched gates. ` +
+      `Next actions: ${actionSummary}`,
+    items,
+  };
 }
 
 function nextAutoPromoteAction(args: {

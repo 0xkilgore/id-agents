@@ -1131,6 +1131,99 @@ describe("daemon — guardrail alerts", () => {
     const readyAfter = await listBacklogByState(adapter, { state: "ready" });
     expect(readyAfter).toHaveLength(4);
   });
+
+  it("fires a single-tick empty-pipe alert when all needs_review candidates are confidence or already-dispatched skips", async () => {
+    const lowConfidence = await seedApprovedReview(adapter, {
+      title: "low confidence needs human decision",
+      approved_by: null,
+      approved_at: null,
+      flesh_status: "fleshed",
+      flesh_confidence: 0.55,
+      write_scope: ["repo/low-confidence"],
+    });
+    const alreadyDispatched = await seedApprovedReview(adapter, {
+      title: "already dispatched needs reconciliation",
+      last_dispatch_phid: "phid:disp-old",
+      write_scope: ["repo/already-dispatched"],
+    });
+
+    const { daemon, newsEvents } = makeDaemon(adapter, {
+      config: {
+        dry_run: false,
+        auto_flesh_enabled: true,
+        auto_promote_enabled: true,
+        auto_promote_floor: 8,
+        auto_promote_min_lanes: 1,
+        max_flesh_per_tick: 0,
+      },
+    });
+    await daemon.setMode("running");
+
+    const tick = await daemon.runTick();
+
+    expect(tick.zero_ticks).toBe(0);
+    expect(tick.auto_promote).toMatchObject({
+      triggered: true,
+      promoted: 0,
+      skipped: 2,
+      candidates_considered: 2,
+    });
+    expect(newsEvents).toEqual([
+      expect.objectContaining({
+        type: "fleet.blockage",
+        data: expect.objectContaining({
+          kind: "empty_auto_promote_pipe",
+          ready: 0,
+          admissible_now: 0,
+          items: expect.arrayContaining([
+            expect.objectContaining({
+              item_id: lowConfidence.item_id,
+              blocker_classes: ["confidence_threshold"],
+              next_actions: ["needs a human /promote decision or Chris batch review"],
+            }),
+            expect.objectContaining({
+              item_id: alreadyDispatched.item_id,
+              blocker_classes: ["already_dispatched"],
+              next_actions: [
+                "needs reconciliation (verify done-vs-failed per output/2026-07-11-needs-review-promotion-reconciliation.md) or a fresh authored wave",
+              ],
+            }),
+          ]),
+        }),
+      }),
+    ]);
+    expect(tick.decisions.some((d) => d.action === "fleet_blockage" && d.metadata?.kind === "empty_auto_promote_pipe")).toBe(true);
+
+    const { app, daemon: statusDaemon } = mountStatusApp(adapter, {
+      dry_run: true,
+      auto_flesh_enabled: true,
+      auto_promote_enabled: true,
+      auto_promote_floor: 8,
+      auto_promote_min_lanes: 1,
+    });
+    await statusDaemon.setMode("running");
+    const status = await callApp(app, "/orchestration/status");
+
+    expect(status.status).toBe(200);
+    expect(status.body.auto_promote_health.empty_pipe_alert).toMatchObject({
+      active: true,
+      ready: 0,
+      admissible_now: 0,
+      reason: "ready_and_admissible_zero_all_needs_review_skipped_by_confidence_or_already_dispatched",
+      items: expect.arrayContaining([
+        expect.objectContaining({
+          item_id: lowConfidence.item_id,
+          next_actions: ["needs a human /promote decision or Chris batch review"],
+        }),
+        expect.objectContaining({
+          item_id: alreadyDispatched.item_id,
+          next_actions: [
+            "needs reconciliation (verify done-vs-failed per output/2026-07-11-needs-review-promotion-reconciliation.md) or a fresh authored wave",
+          ],
+        }),
+      ]),
+    });
+  });
 });
 
 // RD-014: admission previously fired to a lane with no live check the target

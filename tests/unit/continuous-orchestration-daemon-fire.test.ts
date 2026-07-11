@@ -38,6 +38,40 @@ const usage = async () => ({
 });
 const noInFlight = async () => ({ count: 0, active_write_scopes: new Set<string>() });
 
+async function seedNeedsReviewItem(adapter: SqliteAdapter, overrides: Partial<BacklogItem>): Promise<BacklogItem> {
+  const seeded = await insertBacklogItem(adapter, {
+    team_id: "default",
+    title: overrides.title ?? "T-ORCH backend review candidate",
+    track: "T-ORCH",
+    to_agent: "roger",
+    dispatch_body: "[project: kapelle][T-ORCH][BUILD] roger: do the backend work; verify; promote per Spec 054",
+    readiness_state: "needs_review",
+    risk_class: "build",
+    write_scope: overrides.write_scope ?? ["repo/unit"],
+    token_estimate: 1000,
+    provider: "openai",
+    runtime: "codex",
+  });
+  await adapter.query(
+    `UPDATE orchestration_backlog_item
+       SET approved_by = $1,
+           approved_at = $2,
+           flesh_status = $3,
+           flesh_confidence = $4,
+           last_dispatch_phid = $5
+     WHERE item_id = $6`,
+    [
+      overrides.approved_by !== undefined ? overrides.approved_by : "maestra",
+      overrides.approved_at !== undefined ? overrides.approved_at : "2026-07-11T00:00:00Z",
+      overrides.flesh_status ?? "fleshed",
+      overrides.flesh_confidence ?? 0.95,
+      overrides.last_dispatch_phid ?? null,
+      seeded.item_id,
+    ],
+  );
+  return (await getBacklogItem(adapter, seeded.item_id))!;
+}
+
 async function seedReadyItem(adapter: SqliteAdapter): Promise<BacklogItem> {
   await setMode(adapter, "default", "running");
   return insertBacklogItem(adapter, {
@@ -140,5 +174,99 @@ describe("RD-003 — atomic CO fire", () => {
     const finalItem = await getBacklogItem(real, seeded.item_id);
     expect(finalItem?.readiness_state).toBe("in_flight");
     expect(finalItem?.last_dispatch_phid).toBe(`phid:disp-rd003-fire-key`);
+  });
+});
+
+describe("empty auto-promote pipe alert", () => {
+  it("fires on one tick when every needs_review candidate is confidence-threshold or already-dispatched blocked", async () => {
+    const adapter = new SqliteAdapter(":memory:");
+    await migrateSqlite(adapter);
+    await setMode(adapter, "default", "running");
+
+    const lowConfidence = await seedNeedsReviewItem(adapter, {
+      title: "low confidence needs human decision",
+      approved_by: null,
+      approved_at: null,
+      flesh_confidence: 0.55,
+      write_scope: ["repo/low-confidence"],
+    });
+    const alreadyDispatched = await seedNeedsReviewItem(adapter, {
+      title: "already dispatched needs reconciliation",
+      last_dispatch_phid: "phid:disp-old",
+      write_scope: ["repo/already-dispatched"],
+    });
+
+    const newsEvents: Array<{ type: string; message: string; data?: Record<string, unknown> }> = [];
+    const daemon = new ContinuousOrchestrationDaemon({
+      adapter,
+      config: {
+        ...config(),
+        auto_flesh_enabled: true,
+        auto_promote_enabled: true,
+        auto_promote_floor: 8,
+        auto_promote_min_lanes: 1,
+        max_flesh_per_tick: 0,
+      },
+      enqueue: async (item) => ({ dispatch_phid: `phid:disp-${item.item_id}`, query_id: `q-${item.item_id}` }),
+      readUsage: usage,
+      readInFlight: noInFlight,
+      emitNews: async (event) => {
+        newsEvents.push(event);
+      },
+    });
+
+    const tick = await daemon.runTick();
+
+    expect(tick.zero_ticks).toBe(0);
+    expect(tick.auto_promote).toMatchObject({
+      triggered: true,
+      promoted: 0,
+      skipped: 2,
+      candidates_considered: 2,
+    });
+    expect(newsEvents).toEqual([
+      expect.objectContaining({
+        type: "fleet.blockage",
+        data: expect.objectContaining({
+          kind: "empty_auto_promote_pipe",
+          ready: 0,
+          admissible_now: 0,
+          items: expect.arrayContaining([
+            expect.objectContaining({
+              item_id: lowConfidence.item_id,
+              blocker_classes: ["confidence_threshold"],
+              next_actions: ["needs a human /promote decision or Chris batch review"],
+            }),
+            expect.objectContaining({
+              item_id: alreadyDispatched.item_id,
+              blocker_classes: ["already_dispatched"],
+              next_actions: [
+                "needs reconciliation (verify done-vs-failed per output/2026-07-11-needs-review-promotion-reconciliation.md) or a fresh authored wave",
+              ],
+            }),
+          ]),
+        }),
+      }),
+    ]);
+
+    const status = await daemon.explainAutoPromoteHealth();
+    expect(status.empty_pipe_alert).toMatchObject({
+      active: true,
+      ready: 0,
+      admissible_now: 0,
+      reason: "ready_and_admissible_zero_all_needs_review_skipped_by_confidence_or_already_dispatched",
+      items: expect.arrayContaining([
+        expect.objectContaining({
+          item_id: lowConfidence.item_id,
+          next_actions: ["needs a human /promote decision or Chris batch review"],
+        }),
+        expect.objectContaining({
+          item_id: alreadyDispatched.item_id,
+          next_actions: [
+            "needs reconciliation (verify done-vs-failed per output/2026-07-11-needs-review-promotion-reconciliation.md) or a fresh authored wave",
+          ],
+        }),
+      ]),
+    });
   });
 });
