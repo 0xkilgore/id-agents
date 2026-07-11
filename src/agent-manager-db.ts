@@ -177,6 +177,11 @@ import {
 import { deliverClarificationResume } from './dispatch-scheduler/clarification-resume-delivery.js';
 import { readFleetBlockages } from './dispatch-scheduler/fleet-blockages.js';
 import {
+  migrateDispatchAttemptLedger,
+  readDispatchAttemptLedger,
+  recordDispatchAttempt,
+} from './dispatch-attempt-ledger/storage.js';
+import {
   buildPromotionCloseoutReport,
   parsePromotionEnforcement,
   validatePromotionMetadata,
@@ -300,6 +305,52 @@ const MODEL_ALIASES: Record<string, string> = {
 
 function resolveModelAlias(model: string): string {
   return MODEL_ALIASES[model.toLowerCase()] || model;
+}
+
+function extractDispatchAttemptMetadata(body: any): {
+  to_agent: string | null;
+  from_actor: string | null;
+  original_query_id: string | null;
+  original_dispatch_id: string | null;
+  subject: string | null;
+} {
+  const data = body && typeof body.data === 'object' && body.data !== null ? body.data : {};
+  const to = attemptStringField(body?.to) ?? attemptStringField(body?.agent) ?? attemptStringField(data.to) ?? attemptStringField(data.agent);
+  const from = attemptStringField(body?.from) ?? attemptStringField(data.from);
+  const queryId =
+    attemptStringField(body?.original_query_id) ??
+    attemptStringField(body?.query_id) ??
+    attemptStringField(body?.queryId) ??
+    attemptStringField(body?.in_reply_to) ??
+    attemptStringField(data.original_query_id) ??
+    attemptStringField(data.query_id) ??
+    attemptStringField(data.queryId) ??
+    attemptStringField(data.in_reply_to);
+  const dispatchId =
+    attemptStringField(body?.original_dispatch_id) ??
+    attemptStringField(body?.dispatch_id) ??
+    attemptStringField(body?.dispatchId) ??
+    attemptStringField(data.original_dispatch_id) ??
+    attemptStringField(data.dispatch_id) ??
+    attemptStringField(data.dispatchId);
+  const message = attemptStringField(body?.message) ?? attemptStringField(data.message);
+  return {
+    to_agent: to,
+    from_actor: from,
+    original_query_id: queryId,
+    original_dispatch_id: dispatchId,
+    subject: message ? message.slice(0, 160) : null,
+  };
+}
+
+function responseErrorMessage(payload: unknown): string | null {
+  if (!payload || typeof payload !== 'object') return null;
+  const rec = payload as Record<string, unknown>;
+  return attemptStringField(rec.error) ?? attemptStringField(rec.message);
+}
+
+function attemptStringField(value: unknown): string | null {
+  return typeof value === 'string' && value.length > 0 ? value : null;
 }
 
 type FleetMetricsHistoryRange = FleetMetricsHistoryResponse["range"];
@@ -2535,6 +2586,44 @@ export class AgentManagerDb {
     return { ok: true, data };
   }
 
+  private async forwardNewsToAgent(
+    targetUrl: string,
+    input: {
+      message: string;
+      from: string;
+      data?: unknown;
+      trigger?: boolean;
+      session_id?: string;
+    },
+  ): Promise<{ ok: true; data: any } | { ok: false; status: number; error: string }> {
+    const newsRes = await fetch(`${targetUrl}/news`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        type: 'message',
+        message: input.message,
+        from: input.from,
+        data: input.data,
+        session_id: input.session_id,
+        ...(input.trigger === true ? { trigger: true } : {}),
+      }),
+      signal: AbortSignal.timeout(5000),
+    });
+
+    if (!newsRes.ok) {
+      const errorText = await newsRes.text().catch(() => newsRes.statusText);
+      return { ok: false, status: newsRes.status, error: errorText };
+    }
+
+    let data: any = {};
+    try {
+      data = await newsRes.json();
+    } catch {
+      data = { accepted: true };
+    }
+    return { ok: true, data };
+  }
+
   /**
    * Unified message handler for /message, /talk-to, and /news-to.
    * Default: fire-and-forget. With wait:true or timeout: waits for reply.
@@ -2544,9 +2633,10 @@ export class AgentManagerDb {
   private async handleMessage(req: express.Request, res: express.Response) {
     try {
       const { id: teamId } = await this.getTeam(req);
-      const { agent: agentField, to: toField, message, from, session_id, wait, timeout: requestTimeout } = req.body || {};
+      const { agent: agentField, to: toField, message, from, session_id, wait, timeout: requestTimeout, data, trigger } = req.body || {};
       const agent = toField || agentField;
       const preferDispatchReceipt = (req as any)._preferDispatchReceipt === true;
+      const newsTo = (req as any)._newsTo === true;
 
       if (!agent || !message) {
         return res.status(400).json({ error: 'Missing "to" (agent name) or "message"' });
@@ -2671,6 +2761,27 @@ export class AgentManagerDb {
       }
 
       this.managerLog(`${shouldWait ? 'Forwarding' : 'Sending async'} message to ${targetDisplayId} at ${targetUrl}`);
+
+      if (newsTo) {
+        const newsResult = await this.forwardNewsToAgent(targetUrl, {
+          message,
+          from: from || 'manager',
+          data,
+          trigger,
+          session_id,
+        });
+        if (!newsResult.ok) {
+          console.error(`[Manager] Failed to deliver news to ${targetDisplayId}: ${newsResult.status}`);
+          return res.status(newsResult.status).json({ error: newsResult.error });
+        }
+        return res.status(202).json({
+          success: true,
+          delivered_to: targetDisplayId,
+          status: 'delivered',
+          triggered: trigger === true || newsResult.data?.triggered === true,
+          query_id: newsResult.data?.query_id ?? newsResult.data?.queryId ?? null,
+        });
+      }
 
       // Gateway path: under DISPATCH_GATEWAY_MODE=shadow|enforce, enqueue a
       // Dispatch doc and let the scheduler drain the queue at safe
@@ -3069,6 +3180,46 @@ export class AgentManagerDb {
     const model = await computeLiveRoutingHealthModel(teamLabel);
     this.routingHealthCache = { at: now, model };
     return model;
+  }
+
+  private async installDispatchAttemptRecorder(
+    req: express.Request,
+    res: express.Response,
+    route: "/talk-to" | "/news-to",
+  ): Promise<void> {
+    const { id: teamId } = await this.getTeam(req);
+    const body = req.body || {};
+    let responseJson: unknown = null;
+    const originalJson = res.json.bind(res);
+    res.json = ((payload: unknown) => {
+      responseJson = payload;
+      return originalJson(payload);
+    }) as typeof res.json;
+
+    res.once("finish", () => {
+      const metadata = extractDispatchAttemptMetadata(body);
+      void recordDispatchAttempt(this.db.adapter, {
+        team_id: teamId,
+        route,
+        to_agent: metadata.to_agent,
+        from_actor: metadata.from_actor,
+        original_query_id: metadata.original_query_id,
+        original_dispatch_id: metadata.original_dispatch_id,
+        subject: metadata.subject,
+        status_code: res.statusCode,
+        ok: res.statusCode >= 200 && res.statusCode < 300,
+        error: res.statusCode >= 400
+          ? responseErrorMessage(responseJson) ?? res.statusMessage ?? null
+          : null,
+        response_json: responseJson,
+        created_at: new Date().toISOString(),
+      }).catch((err) => {
+        console.warn(
+          "[Manager] dispatch attempt ledger write failed:",
+          err instanceof Error ? err.message : String(err),
+        );
+      });
+    });
   }
 
   private setupRoutes() {
@@ -4012,6 +4163,27 @@ export class AgentManagerDb {
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         return res.status(500).json({ ok: false, error: msg });
+      }
+    });
+
+    this.managementApp.get('/dispatch-attempt-ledger', async (req, res) => {
+      try {
+        const { id: teamId } = await this.getTeam(req);
+        await migrateDispatchAttemptLedger(this.db.adapter);
+        const limit = parseReadLimit(req.query.limit, { defaultLimit: 25, maxLimit: 100 });
+        const rows = await readDispatchAttemptLedger(this.db.adapter, teamId, limit);
+        res.json({
+          ok: true,
+          schema_version: 'dispatch-attempt-ledger.v1',
+          team_id: teamId,
+          limit,
+          attempts: rows,
+        });
+      } catch (err) {
+        res.status(500).json({
+          ok: false,
+          error: err instanceof Error ? err.message : String(err),
+        });
       }
     });
 
@@ -5744,6 +5916,7 @@ export class AgentManagerDb {
     this.managementApp.post('/talk-to', async (req, res, next) => {
       (req as any)._preferDispatchReceipt = true;
       try {
+        await this.installDispatchAttemptRecorder(req, res, '/talk-to');
         const result = await this.maybeAutoAttachForTalkTo(req);
         if (result) (req as any)._autoAttach = result;
       } catch (err: any) {
@@ -5754,7 +5927,9 @@ export class AgentManagerDb {
 
     // /news-to - fire-and-forget notification to another agent (no reply wait).
     // Mesh-membership gate applies identically to /talk-to (handled inside handleMessage).
-    this.managementApp.post('/news-to', (req, res, next) => {
+    this.managementApp.post('/news-to', async (req, res, next) => {
+      (req as any)._newsTo = true;
+      await this.installDispatchAttemptRecorder(req, res, '/news-to');
       // Ensure wait is explicitly false (fire-and-forget)
       if (req.body) {
         req.body.wait = false;

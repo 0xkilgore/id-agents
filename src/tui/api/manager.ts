@@ -2,6 +2,8 @@ import type {
   Agent,
   AgentDetailResponse,
   AgentsResponse,
+  DispatchAttemptLedgerResponse,
+  DispatchAttemptLedgerRow,
   NewsItem,
   RemoteNewsResponse,
   RemoteSchedulesResponse,
@@ -269,6 +271,18 @@ export async function fetchAgentDetail(
     throw new Error(`GET /agents/${name}/detail → ${res.status} ${res.statusText}`);
   }
   return (await res.json()) as AgentDetailResponse;
+}
+
+export async function fetchDispatchAttemptLedger(
+  manager: string,
+  signal: AbortSignal,
+  limit = 8,
+): Promise<DispatchAttemptLedgerRow[]> {
+  const data = await getJson<DispatchAttemptLedgerResponse>(
+    `${manager}/dispatch-attempt-ledger?limit=${encodeURIComponent(String(limit))}`,
+    signal,
+  );
+  return data.attempts ?? [];
 }
 
 // AP8 (AGENT-V2): the agent-detail "dispatch to this agent" composer POSTs the

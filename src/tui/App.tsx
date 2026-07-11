@@ -7,6 +7,7 @@ import { AgentsTable } from './components/AgentsTable.js';
 import { NewsView } from './components/NewsView.js';
 import { NewsDetail } from './components/NewsDetail.js';
 import { StatusStrip } from './components/StatusStrip.js';
+import { DispatchAttemptLedgerPanel } from './components/DispatchAttemptLedgerPanel.js';
 import { TasksTable } from './components/TasksTable.js';
 import { TaskDetail } from './components/TaskDetail.js';
 import { CalendarView } from './components/CalendarView.js';
@@ -23,6 +24,7 @@ import {
   fetchAgentNews,
   fetchAgentsAllTeams,
   fetchAgentsLatestNewsTs,
+  fetchDispatchAttemptLedger,
   fetchLibraryAgent,
   fetchLibraryAgents,
   fetchLibrarySkill,
@@ -74,11 +76,12 @@ const AGENTS_POLL_MS = 2000;
 const TEAMS_POLL_MS = 15000;
 const NEWS_POLL_MS = 3000;
 const TASKS_POLL_MS = 5000;
+const DISPATCH_ATTEMPTS_POLL_MS = 5000;
 const TASKS_STALE_AFTER_MS = 15_000;
 const SCHEDULES_POLL_MS = 5000;
 const LIBRARY_POLL_MS = 5000;
 const NEWS_COOLDOWN_TICK_MS = 10_000;
-const AGENTS_CHROME_ROWS = 11;
+const AGENTS_CHROME_ROWS = 12;
 const NEWS_CHROME_ROWS = 6;
 const DETAIL_CHROME_ROWS = 6;
 const TASKS_CHROME_ROWS = 10;
@@ -329,6 +332,17 @@ export function App({ staticMode = false }: AppProps = {}): React.ReactElement {
   }, [memBytesById, localAgentIds]);
   const totalMemoryLabel = useMemo(() => formatTotalMemory(totalMemoryBytes), [totalMemoryBytes]);
   const totalMemoryColor = useMemo(() => totalMemColor(totalMemoryBytes), [totalMemoryBytes]);
+
+  const dispatchAttemptsFetcher = useCallback(
+    (signal: AbortSignal) => fetchDispatchAttemptLedger(manager, signal, 8),
+    [manager],
+  );
+  const dispatchAttemptsPoll = usePolling(
+    dispatchAttemptsFetcher,
+    DISPATCH_ATTEMPTS_POLL_MS,
+    staticMode || view !== 'agents',
+    [manager, view],
+  );
 
   const rows = stdout?.rows ?? 30;
   const agentsWindowSize = Math.max(MIN_VISIBLE, rows - AGENTS_CHROME_ROWS);
@@ -1300,6 +1314,11 @@ export function App({ staticMode = false }: AppProps = {}): React.ReactElement {
             teamCounts={teamCounts}
           />
           <StatusStrip agents={allAgents} selectedAgentId={selectedAgentId} />
+          <DispatchAttemptLedgerPanel
+            rows={dispatchAttemptsPoll.data ?? []}
+            loading={dispatchAttemptsPoll.lastUpdated === 0 && !dispatchAttemptsPoll.error && !staticMode}
+            error={dispatchAttemptsPoll.error}
+          />
           <AgentsTable
             agents={visibleAgents}
             uptimeById={uptimeById}
