@@ -11,6 +11,7 @@ import { Box, Text } from 'ink';
 import type { Agent, AgentDetailContributionGridVariant, AgentDetailResponse } from '../api/types.js';
 import { humanizeLastSeen } from '../util/format.js';
 import { healthColor } from '../util/colors.js';
+import { agentRuntimeTruth } from '../util/runtime-truth.js';
 
 /** Send-state for the AP8 "dispatch to this agent" composer. */
 export type ComposerStatus = 'idle' | 'sending' | 'sent' | 'error';
@@ -100,14 +101,17 @@ export function AgentDetail(props: AgentDetailProps): React.ReactElement {
 
   const lines: Array<{ label: string; value: string; color?: string }> = [];
   const agentName = agent.alias ?? agent.name;
+  const liveRuntime = agentRuntimeTruth(agent);
 
   lines.push({ label: 'name', value: agentName });
-  lines.push({ label: 'runtime', value: agent.runtime ?? agent.metadata?.runtime ?? '—' });
-  lines.push({ label: 'model', value: agent.model ?? '—' });
-  const desiredModel = agent.metadata?.runtimeUsageTruth?.catalogDesiredModel;
-  if (desiredModel && desiredModel !== agent.model) {
-    lines.push({ label: 'desired_model', value: desiredModel });
+  lines.push({ label: 'runtime_lane', value: liveRuntime.runtime });
+  lines.push({ label: 'provider_lane', value: liveRuntime.providerLane });
+  lines.push({ label: 'model', value: liveRuntime.model });
+  if (liveRuntime.staleDesiredModel) {
+    lines.push({ label: 'desired_model', value: liveRuntime.staleDesiredModel });
   }
+  lines.push({ label: 'runtime_source', value: liveRuntime.source });
+  lines.push({ label: 'runtime_why', value: liveRuntime.why });
   lines.push({ label: 'health', value: agent.health, color: healthColor(agent.health) });
   lines.push({ label: 'status', value: agent.status });
 

@@ -5,6 +5,7 @@ import { padRight, truncate, humanizeLastSeen } from '../util/format.js';
 import { statusColor, healthColor, healthDot } from '../util/colors.js';
 import { formatMemory, memoryColor } from '../util/memory.js';
 import { abbrevModel } from '../util/models.js';
+import { agentRuntimeTruth } from '../util/runtime-truth.js';
 
 interface AgentRowProps {
   agent: Agent;
@@ -72,8 +73,9 @@ function isRemoteAgent(agent: Agent): boolean {
 function AgentRowInner({ agent, selected, uptime, newsColor, memBytes, nowMs }: AgentRowProps): React.ReactElement {
   const marker = selected ? '▶ ' : '  ';
   const name = padRight(agent.alias ?? agent.name, COLS.name);
-  const runtime = padRight(abbrevRuntime(agent.runtime ?? agent.metadata?.runtime), COLS.runtime);
-  const model = padRight(truncate(abbrevModel(agent.model), COLS.model - 1), COLS.model);
+  const liveRuntime = agentRuntimeTruth(agent);
+  const runtime = padRight(abbrevRuntime(liveRuntime.runtime), COLS.runtime);
+  const model = padRight(truncate(abbrevModel(liveRuntime.model), COLS.model - 1), COLS.model);
   const health = padRight(renderHealth(agent.health), COLS.health);
   const hb = padRight(agent.metadata?.heartbeat ? '♥' : '-', COLS.hb);
   const newsGlyph = NEWS_GLYPH;
@@ -154,6 +156,12 @@ export const AgentRow = React.memo(AgentRowInner, (prev, next) => {
     a.model === b.model &&
     a.runtime === b.runtime &&
     a.metadata?.runtime === b.metadata?.runtime &&
+    a.metadata?.runtimeUsageTruth?.actualRuntime === b.metadata?.runtimeUsageTruth?.actualRuntime &&
+    a.metadata?.runtimeUsageTruth?.actualModel === b.metadata?.runtimeUsageTruth?.actualModel &&
+    a.metadata?.runtimeUsageTruth?.catalogDesiredModel === b.metadata?.runtimeUsageTruth?.catalogDesiredModel &&
+    a.metadata?.runtimeUsageTruth?.catalogModelStale === b.metadata?.runtimeUsageTruth?.catalogModelStale &&
+    a.metadata?.runtimeUsageTruth?.usageTelemetry?.provider === b.metadata?.runtimeUsageTruth?.usageTelemetry?.provider &&
+    a.metadata?.runtimeUsageTruth?.usageTelemetry?.source === b.metadata?.runtimeUsageTruth?.usageTelemetry?.source &&
     a.metadata?.heartbeat === b.metadata?.heartbeat &&
     (a.metadata as Record<string, unknown> | undefined)?.dmz ===
       (b.metadata as Record<string, unknown> | undefined)?.dmz &&
