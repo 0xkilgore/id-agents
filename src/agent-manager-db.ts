@@ -143,6 +143,7 @@ import type { CheckinRow } from './db/types.js';
 import { parseAgentRef, normalizeAlias, buildAmbiguityWarning, type AgentMatch } from './core/agent-identifier.js';
 import { resolveNewsTrigger } from './core/messaging-service.js';
 import type { HarnessType } from './harness/types.js';
+import { normalizeRuntime, resolveProviderFromRuntime, type Provider, type Runtime } from './dispatch-scheduler/types.js';
 import { SchedulerService } from './scheduling/scheduler-service.js';
 import { SchedulerHandle, parseGatewayMode } from './dispatch-scheduler/manager-integration.js';
 import {
@@ -1024,6 +1025,34 @@ type AgentsListCacheEntry = {
   at: number;
   total: number;
   agents: unknown[];
+};
+
+type RuntimeLifecycleOperation = 'runtime_switch' | 'relaunch';
+
+type RuntimeLifecycleBlocker = {
+  code: string;
+  message: string;
+  detail?: unknown;
+};
+
+type RuntimeLifecyclePreflight = {
+  ok: boolean;
+  agent: AgentRow;
+  runtime: Runtime;
+  model: string;
+  provider: Provider;
+  current_runtime: string;
+  current_model: string;
+  blockers: RuntimeLifecycleBlocker[];
+  warnings: RuntimeLifecycleBlocker[];
+  configured_choices: Array<{ runtime: Runtime; model: string; provider: Provider; source: string }>;
+};
+
+type RuntimeLifecycleTimelineEvent = {
+  at: string;
+  step: string;
+  status: 'ok' | 'blocked' | 'skipped' | 'failed';
+  detail?: Record<string, unknown>;
 };
 
 interface TaskListCacheEntry {
@@ -2008,6 +2037,360 @@ export class AgentManagerDb {
       }
     })();
     this.agentsListRefreshes.set(cacheKey, refresh);
+  }
+
+  private invalidateAgentsListCache(teamId: string): void {
+    for (const key of [...this.agentsListCache.keys()]) {
+      if (key.startsWith(`${teamId}:`)) this.agentsListCache.delete(key);
+    }
+  }
+
+  private runtimeLifecycleEvent(
+    step: string,
+    status: RuntimeLifecycleTimelineEvent['status'],
+    detail?: Record<string, unknown>,
+  ): RuntimeLifecycleTimelineEvent {
+    return { at: new Date().toISOString(), step, status, ...(detail ? { detail } : {}) };
+  }
+
+  private runtimeIssueBlockers(runtime: Runtime, issues: ReturnType<typeof validateRuntimePreflight>): RuntimeLifecycleBlocker[] {
+    return issues.map((issue) => ({
+      code: issue.code,
+      message: runtimeIssueHint(issue.code) ?? issue.message,
+      detail: { runtime, raw_message: issue.message },
+    }));
+  }
+
+  private async activeDispatchBlockersForAgent(teamId: string, agentName: string): Promise<RuntimeLifecycleBlocker[]> {
+    const blockers: RuntimeLifecycleBlocker[] = [];
+    const rows = await this.db.adapter.query<{
+      dispatch_phid: string;
+      query_id: string;
+      status: string;
+      subject: string | null;
+      started_at: string | null;
+    }>(
+      `SELECT dispatch_phid, query_id, status, subject, started_at
+         FROM dispatch_scheduler_queue
+        WHERE team_id = $1
+          AND to_agent = $2
+          AND status IN ('queued','in_flight','bounced','needs_clarification','resume_delivery_failed')
+        ORDER BY updated_at DESC
+        LIMIT 1`,
+      [teamId, agentName],
+    ).catch(() => ({ rows: [] }));
+    const row = rows.rows[0];
+    if (row) {
+      blockers.push({
+        code: 'active_dispatch_conflict',
+        message: `agent "${agentName}" has active dispatch ${row.dispatch_phid} (${row.status})`,
+        detail: row,
+      });
+    }
+    return blockers;
+  }
+
+  private async staleReadinessBlockersForAgent(teamId: string, agentName: string): Promise<RuntimeLifecycleBlocker[]> {
+    const rows = await this.db.adapter.query<{
+      item_id: string;
+      title: string;
+      readiness_state: string;
+      last_dispatch_phid: string | null;
+      updated_at: string;
+    }>(
+      `SELECT item_id, title, readiness_state, last_dispatch_phid, updated_at
+         FROM orchestration_backlog_item
+        WHERE team_id = $1
+          AND to_agent = $2
+          AND readiness_state = 'in_flight'
+        ORDER BY updated_at ASC
+        LIMIT 3`,
+      [teamId, agentName],
+    ).catch(() => ({ rows: [] }));
+
+    return rows.rows.map((row) => ({
+      code: 'stale_readiness_row',
+      message: `orchestration backlog row ${row.item_id} is still in_flight for ${agentName}; reconcile or close it before relaunch`,
+      detail: row,
+    }));
+  }
+
+  private configuredRuntimeChoicesForAgent(agentName: string): RuntimeLifecyclePreflight['configured_choices'] {
+    if (!this.modelPolicy) return [];
+    const policy = this.modelPolicy.policyForAgent(agentName);
+    return [policy.primary, ...policy.fallback].map((choice, idx) => ({
+      runtime: choice.runtime,
+      model: choice.model,
+      provider: choice.provider,
+      source: idx === 0 ? 'primary' : `fallback_${idx}`,
+    }));
+  }
+
+  private async runtimePolicyAllows(teamId: string, agentName: string, runtime: Runtime, provider: Provider): Promise<boolean | null> {
+    const rows = await this.db.adapter.query<{ logical_agent: string; allowed_lanes_json: string | Provider[]; fallback_order_json: string | Array<{ runtime?: string }> }>(
+      `SELECT logical_agent, allowed_lanes_json, fallback_order_json
+         FROM agent_runtime_policy
+        WHERE team_id = $1
+          AND enabled = 1
+          AND logical_agent IN ($2, '*')
+        ORDER BY CASE WHEN logical_agent = $3 THEN 0 ELSE 1 END
+        LIMIT 1`,
+      [teamId, agentName, agentName],
+    ).catch(() => ({ rows: [] }));
+    const row = rows.rows[0];
+    if (!row) return null;
+
+    const parse = (raw: unknown): unknown[] => {
+      if (Array.isArray(raw)) return raw;
+      if (typeof raw !== 'string') return [];
+      try {
+        const parsed = JSON.parse(raw);
+        return Array.isArray(parsed) ? parsed : [];
+      } catch {
+        return [];
+      }
+    };
+    const allowed = parse(row.allowed_lanes_json).filter((lane): lane is Provider =>
+      ['anthropic', 'openai', 'cursor', 'local', 'other'].includes(String(lane)),
+    );
+    const fallbacks = parse(row.fallback_order_json);
+    const runtimeListed = fallbacks.some((choice) =>
+      choice && typeof choice === 'object' && normalizeRuntime((choice as { runtime?: string }).runtime) === runtime,
+    );
+    return (allowed.length === 0 || allowed.includes(provider)) && runtimeListed;
+  }
+
+  private async routeReadyBlockersForRuntime(runtime: Runtime, provider: Provider): Promise<RuntimeLifecycleBlocker[]> {
+    if (runtime !== 'cursor-cli' && runtime !== 'openrouter' && runtime !== 'codex') return [];
+    try {
+      const model = await this.cachedRoutingHealthModel('default');
+      const downRuntime = model.summary.runtimes_down.find((name) => normalizeRuntime(name) === runtime);
+      if (downRuntime) {
+        return [{
+          code: 'runtime_route_not_ready',
+          message: `runtime "${runtime}" is not route-ready according to routing health`,
+          detail: { runtime, provider, runtimes_down: model.summary.runtimes_down },
+        }];
+      }
+    } catch {
+      // Runtime preflight remains authoritative; routing health is best-effort.
+    }
+    return [];
+  }
+
+  private async preflightRuntimeLifecycle(input: {
+    teamId: string;
+    agentName: string;
+    runtime?: string;
+    model?: string;
+    force?: boolean;
+  }): Promise<RuntimeLifecyclePreflight> {
+    const agent = await this.dbQueryAgentByNameMostRecent(input.teamId, input.agentName);
+    if (!agent) {
+      throw Object.assign(new Error(`Agent "${input.agentName}" not found`), { statusCode: 404 });
+    }
+    if (agent.type !== 'claude' && agent.type !== 'automator') {
+      throw Object.assign(new Error('Only local runtime-backed agents can be relaunched'), { statusCode: 400 });
+    }
+    if (isRemoteEndpointRuntime(agent.runtime)) {
+      throw Object.assign(new Error('lifecycle_not_supported_for_remote'), { statusCode: 400 });
+    }
+
+    const runtime = normalizeRuntime(input.runtime ?? agent.runtime);
+    if (runtime === 'other' || runtime === 'public-agent-remote') {
+      throw Object.assign(new Error(`unsupported local runtime "${input.runtime ?? agent.runtime}"`), { statusCode: 400 });
+    }
+    const provider = resolveProviderFromRuntime(runtime);
+    const model = input.model?.trim() || getDefaultModelForRuntime(runtime);
+    const configured = this.configuredRuntimeChoicesForAgent(agent.name);
+
+    const blockers: RuntimeLifecycleBlocker[] = [];
+    blockers.push(...this.runtimeIssueBlockers(runtime, validateRuntimePreflight(runtime, model)));
+
+    const policyAllows = await this.runtimePolicyAllows(input.teamId, agent.name, runtime, provider);
+    const modelPolicyAllows = configured.length === 0
+      ? null
+      : configured.some((choice) => choice.runtime === runtime && choice.provider === provider);
+    const allowed = policyAllows ?? modelPolicyAllows ?? true;
+    if (!allowed) {
+      blockers.push({
+        code: 'runtime_not_allowed_for_agent',
+        message: `runtime "${runtime}" is not configured as an allowed route for agent "${agent.name}"`,
+        detail: { runtime, provider, configured_choices: configured },
+      });
+    }
+
+    blockers.push(...await this.routeReadyBlockersForRuntime(runtime, provider));
+
+    if (!input.force) {
+      blockers.push(...await this.activeDispatchBlockersForAgent(input.teamId, agent.name));
+      blockers.push(...await this.staleReadinessBlockersForAgent(input.teamId, agent.name));
+    }
+
+    return {
+      ok: blockers.length === 0,
+      agent,
+      runtime,
+      model,
+      provider,
+      current_runtime: agent.runtime,
+      current_model: agent.model,
+      blockers,
+      warnings: [],
+      configured_choices: configured,
+    };
+  }
+
+  private async persistRuntimePolicyChoice(
+    teamId: string,
+    agentName: string,
+    runtime: Runtime,
+    model: string,
+    provider: Provider,
+    note: string,
+  ): Promise<void> {
+    const now = Date.now();
+    const allowed = JSON.stringify([provider]);
+    const fallbackOrder = JSON.stringify([{ runtime, model, provider }]);
+    await this.db.adapter.query(
+      `INSERT INTO agent_runtime_policy
+         (team_id, logical_agent, allowed_lanes_json, fallback_order_json, enabled, note, created_at, updated_at)
+       VALUES ($1, $2, $3, $4, 1, $5, $6, $7)
+       ON CONFLICT(team_id, logical_agent) DO UPDATE SET
+         allowed_lanes_json = excluded.allowed_lanes_json,
+         fallback_order_json = excluded.fallback_order_json,
+         enabled = 1,
+         note = excluded.note,
+         updated_at = excluded.updated_at`,
+      [teamId, agentName, allowed, fallbackOrder, note, now, now],
+    );
+  }
+
+  private async updateAgentRuntimeAndModel(agentId: string, runtime: Runtime, model: string, status: string): Promise<void> {
+    await this.db.adapter.query(
+      `UPDATE agents
+          SET runtime = $1,
+              model = $2,
+              status = $3
+        WHERE id = $4`,
+      [runtime, model, status, agentId],
+    );
+    const fresh = await this.db.agents.getById(agentId);
+    const meta = (fresh?.metadata as Record<string, unknown> | null) ?? {};
+    await this.db.agents.updateMetadata(agentId, { ...meta, runtime });
+  }
+
+  private async emitAgentLifecycleEvent(input: {
+    teamId: string;
+    topic: string;
+    agent: AgentRow;
+    operation: RuntimeLifecycleOperation;
+    timeline: RuntimeLifecycleTimelineEvent[];
+    data: Record<string, unknown>;
+  }): Promise<void> {
+    if (!this.db.events) return;
+    await this.db.events.insert({
+      team_id: input.teamId,
+      topic: input.topic,
+      actor_agent_id: 'manager',
+      subject_kind: 'agent',
+      subject_id: input.agent.name,
+      occurred_at: Date.now(),
+      data: {
+        schema_version: 'agent-runtime-lifecycle-v1',
+        operation: input.operation,
+        agent_id: input.agent.id,
+        agent_name: input.agent.name,
+        timeline: input.timeline,
+        ...input.data,
+      },
+    });
+  }
+
+  private async relaunchAgentWithPreflight(input: {
+    teamId: string;
+    teamName: string;
+    preflight: RuntimeLifecyclePreflight;
+    preserveContext: boolean;
+    dryRun?: boolean;
+    force?: boolean;
+    timeline?: RuntimeLifecycleTimelineEvent[];
+  }): Promise<{ ok: boolean; timeline: RuntimeLifecycleTimelineEvent[]; result?: Record<string, unknown>; error?: string }> {
+    const timeline = input.timeline ?? [];
+    const { agent, runtime, model } = input.preflight;
+    timeline.push(this.runtimeLifecycleEvent('preflight', input.preflight.ok ? 'ok' : 'blocked', {
+      runtime,
+      model,
+      blockers: input.preflight.blockers,
+      force: input.force === true,
+    }));
+    if (!input.preflight.ok) {
+      return { ok: false, timeline, error: input.preflight.blockers[0]?.message ?? 'preflight blocked' };
+    }
+    if (input.dryRun) {
+      timeline.push(this.runtimeLifecycleEvent('dry_run', 'skipped', { would_relaunch: true }));
+      return {
+        ok: true,
+        timeline,
+        result: {
+          dry_run: true,
+          runtime,
+          model,
+          workingDirectory: agent.working_directory,
+          preserve_context: input.preserveContext,
+        },
+      };
+    }
+
+    const workingDirectory = agent.working_directory || `${this.baseWorkDir}/agents/${agent.id}`;
+    if (!existsSync(workingDirectory)) mkdirSync(workingDirectory, { recursive: true });
+    timeline.push(this.runtimeLifecycleEvent('preserve_context', 'ok', {
+      workingDirectory,
+      agent_id: agent.id,
+      output_directory: path.join(workingDirectory, 'output'),
+      preserves: ['workingDirectory', 'agent identity', 'skills/tools metadata', 'catalog metadata', 'task history', 'output directory'],
+    }));
+
+    await this.updateAgentRuntimeAndModel(agent.id, runtime, model, 'starting');
+    timeline.push(this.runtimeLifecycleEvent('live_runtime_updated', 'ok', { runtime, model }));
+
+    if (agent.port) {
+      const killed = await this.killAgentProcess(agent.port);
+      timeline.push(this.runtimeLifecycleEvent('stop_existing_process', 'ok', { port: agent.port, ...killed }));
+      await new Promise(r => setTimeout(r, 500));
+    }
+
+    const spawnResult = await this.spawnLocalAgentProcess(input.teamId, input.teamName, {
+      name: agent.name,
+      id: agent.id,
+      port: agent.port,
+      model,
+      workingDirectory,
+      tokenId: agent.token_id ?? undefined,
+    });
+    if (!spawnResult.success) {
+      await this.db.agents.updateStatus(agent.id, 'error');
+      timeline.push(this.runtimeLifecycleEvent('spawn', 'failed', { error: spawnResult.error ?? 'spawn failed' }));
+      return { ok: false, timeline, error: spawnResult.error ?? 'spawn failed' };
+    }
+
+    await this.db.agents.updateStatus(agent.id, 'running', { model });
+    this.invalidateAgentsListCache(input.teamId);
+    this.broadcastAgentsChanged(input.teamId, { reason: 'update', updated: [agent.name] });
+    timeline.push(this.runtimeLifecycleEvent('spawn', 'ok', { pid: spawnResult.pid ?? null, logFile: spawnResult.logFile ?? null }));
+    return {
+      ok: true,
+      timeline,
+      result: {
+        runtime,
+        model,
+        status: 'running',
+        pid: spawnResult.pid ?? null,
+        logFile: spawnResult.logFile ?? null,
+        workingDirectory,
+        preserve_context: input.preserveContext,
+      },
+    };
   }
 
   private async filesystemArtifactRootsForTeam(teamId: string) {
@@ -4931,12 +5314,11 @@ export class AgentManagerDb {
     // contention during boot-time ingest/reconciliation.
     this.managementApp.use(this.teamContextMiddleware());
 
-    // C3: GET /routing-health — previously unregistered (404, the "cosmetic" note
-    // in kapelle-remote-check.sh). Registers the read-model AND folds runtime
-    // liveness into summary.healthy so a cert-revoked Codex fallback (or any dead
-    // runtime) can never read as green. Runtime probes are the make-or-break axis
-    // here; lanes/dispatches are honest-empty pending the read-model data wire-up.
-    this.managementApp.get('/routing-health', async (req, res) => {
+    // C3: GET /routing-health and /routing/health — registers the read-model
+    // AND folds runtime liveness into summary.healthy so a cert-revoked Codex
+    // fallback (or any dead runtime) can never read as green. Keep both spellings:
+    // older probes used /routing/health while the Desk panel uses /routing-health.
+    const routingHealthHandler = async (req: express.Request, res: express.Response) => {
       try {
         const teamName = this.getTeamName(req);
         const model = await this.cachedRoutingHealthModel(teamName);
@@ -4944,7 +5326,9 @@ export class AgentManagerDb {
       } catch (err: any) {
         res.status(500).json({ error: 'routing_health_failed', detail: String(err?.message || err) });
       }
-    });
+    };
+    this.managementApp.get('/routing-health', routingHealthHandler);
+    this.managementApp.get('/routing/health', routingHealthHandler);
 
     this.managementApp.get('/auth/claude', async (req, res) => {
       try {
@@ -6741,6 +7125,187 @@ export class AgentManagerDb {
         });
       } catch (err: any) {
         res.status(500).json({ ok: false, error: err?.message || 'catalog update failed' });
+      }
+    });
+
+    // Runtime work-share Slice 4: operator API for durable desired-runtime
+    // switch followed by an in-place relaunch. The policy write intentionally
+    // precedes process restart so the desired state is auditable even if spawn
+    // fails halfway through.
+    this.managementApp.post('/agents/:name/runtime/switch', async (req, res) => {
+      const timeline: RuntimeLifecycleTimelineEvent[] = [];
+      try {
+        const { id: teamId, name: teamName } = await this.getTeam(req);
+        const agentName = req.params.name;
+        const runtime = typeof req.body?.runtime === 'string' ? req.body.runtime.trim() : '';
+        const model = typeof req.body?.model === 'string' ? req.body.model.trim() : undefined;
+        const dryRun = req.body?.dry_run === true;
+        const force = req.body?.force === true || req.body?.operator_forced === true;
+        if (!runtime) {
+          return res.status(400).json({ ok: false, error: 'runtime is required' });
+        }
+
+        const preflight = await this.preflightRuntimeLifecycle({ teamId, agentName, runtime, model, force });
+        timeline.push(this.runtimeLifecycleEvent('preflight', preflight.ok ? 'ok' : 'blocked', {
+          runtime: preflight.runtime,
+          model: preflight.model,
+          blockers: preflight.blockers,
+          force,
+        }));
+        if (!preflight.ok) {
+          return res.status(409).json({
+            ok: false,
+            code: preflight.blockers[0]?.code ?? 'preflight_blocked',
+            error: preflight.blockers[0]?.message ?? 'preflight blocked',
+            preflight,
+            timeline,
+          });
+        }
+        if (dryRun) {
+          timeline.push(this.runtimeLifecycleEvent('policy_update', 'skipped', { dry_run: true }));
+          timeline.push(this.runtimeLifecycleEvent('relaunch', 'skipped', { dry_run: true }));
+          return res.json({
+            ok: true,
+            dry_run: true,
+            agent: preflight.agent.name,
+            runtime: preflight.runtime,
+            model: preflight.model,
+            preflight,
+            timeline,
+          });
+        }
+
+        await this.persistRuntimePolicyChoice(
+          teamId,
+          preflight.agent.name,
+          preflight.runtime,
+          preflight.model,
+          preflight.provider,
+          `runtime switch requested via POST /agents/${preflight.agent.name}/runtime/switch`,
+        );
+        timeline.push(this.runtimeLifecycleEvent('policy_update', 'ok', {
+          logical_agent: preflight.agent.name,
+          runtime: preflight.runtime,
+          model: preflight.model,
+          provider: preflight.provider,
+        }));
+
+        const relaunch = await this.relaunchAgentWithPreflight({
+          teamId,
+          teamName,
+          preflight,
+          preserveContext: true,
+          dryRun: false,
+          force,
+          timeline,
+        });
+        await this.emitAgentLifecycleEvent({
+          teamId,
+          topic: 'agent.runtime.switch',
+          agent: preflight.agent,
+          operation: 'runtime_switch',
+          timeline: relaunch.timeline,
+          data: {
+            success: relaunch.ok,
+            from: { runtime: preflight.current_runtime, model: preflight.current_model },
+            to: { runtime: preflight.runtime, model: preflight.model, provider: preflight.provider },
+            policy_updated_first: true,
+            force,
+          },
+        });
+
+        if (!relaunch.ok) {
+          return res.status(500).json({
+            ok: false,
+            code: 'relaunch_failed',
+            error: relaunch.error ?? 'relaunch failed',
+            preflight,
+            timeline: relaunch.timeline,
+          });
+        }
+        return res.json({
+          ok: true,
+          agent: preflight.agent.name,
+          runtime: preflight.runtime,
+          model: preflight.model,
+          policy_updated_first: true,
+          relaunch: relaunch.result,
+          timeline: relaunch.timeline,
+        });
+      } catch (err: any) {
+        const status = Number(err?.statusCode ?? 500);
+        return res.status(status).json({ ok: false, error: err?.message || String(err), timeline });
+      }
+    });
+
+    this.managementApp.post('/agents/:name/relaunch', async (req, res) => {
+      try {
+        const { id: teamId, name: teamName } = await this.getTeam(req);
+        const preserveContext = req.body?.preserve_context === true;
+        if (!preserveContext) {
+          return res.status(400).json({
+            ok: false,
+            code: 'preserve_context_required',
+            error: 'preserve_context:true is required for relaunch',
+          });
+        }
+        const runtime = typeof req.body?.runtime === 'string' ? req.body.runtime.trim() : undefined;
+        const model = typeof req.body?.model === 'string' ? req.body.model.trim() : undefined;
+        const dryRun = req.body?.dry_run === true;
+        const force = req.body?.force === true || req.body?.operator_forced === true;
+        const preflight = await this.preflightRuntimeLifecycle({
+          teamId,
+          agentName: req.params.name,
+          runtime,
+          model,
+          force,
+        });
+        const relaunch = await this.relaunchAgentWithPreflight({
+          teamId,
+          teamName,
+          preflight,
+          preserveContext,
+          dryRun,
+          force,
+        });
+        if (!dryRun) {
+          await this.emitAgentLifecycleEvent({
+            teamId,
+            topic: 'agent.relaunch',
+            agent: preflight.agent,
+            operation: 'relaunch',
+            timeline: relaunch.timeline,
+            data: {
+              success: relaunch.ok,
+              from: { runtime: preflight.current_runtime, model: preflight.current_model },
+              to: { runtime: preflight.runtime, model: preflight.model, provider: preflight.provider },
+              preserve_context: true,
+              force,
+            },
+          });
+        }
+        if (!relaunch.ok) {
+          return res.status(409).json({
+            ok: false,
+            code: preflight.blockers[0]?.code ?? 'relaunch_failed',
+            error: relaunch.error ?? 'relaunch failed',
+            preflight,
+            timeline: relaunch.timeline,
+          });
+        }
+        return res.json({
+          ok: true,
+          dry_run: dryRun,
+          agent: preflight.agent.name,
+          runtime: preflight.runtime,
+          model: preflight.model,
+          relaunch: relaunch.result,
+          preflight,
+          timeline: relaunch.timeline,
+        });
+      } catch (err: any) {
+        const status = Number(err?.statusCode ?? 500);
+        return res.status(status).json({ ok: false, error: err?.message || String(err) });
       }
     });
 
@@ -14110,6 +14675,8 @@ export class AgentManagerDb {
       ...(process.env.ANTHROPIC_API_KEY && { ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY }),
       ...credentialEnv(storedClaudeCredential ?? null),
       ...(process.env.OPENAI_API_KEY && { OPENAI_API_KEY: process.env.OPENAI_API_KEY }),
+      ...(process.env.CURSOR_API_KEY && { CURSOR_API_KEY: process.env.CURSOR_API_KEY }),
+      ...(process.env.OPENROUTER_API_KEY && { OPENROUTER_API_KEY: process.env.OPENROUTER_API_KEY }),
     };
   }
 
