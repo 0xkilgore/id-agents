@@ -68,6 +68,18 @@ async function closeServer(server: http.Server): Promise<void> {
   });
 }
 
+async function dispatchLedgerEntries(baseUrl: string): Promise<any[]> {
+  const res = await fetch(`${baseUrl}/logs?limit=100`, {
+    headers: { 'X-Id-Team': 'default' },
+  });
+  expect(res.status).toBe(200);
+  const body = await res.json() as { logs: Array<{ msg: string }> };
+  return body.logs
+    .map((entry) => entry.msg)
+    .filter((msg) => msg.startsWith('[dispatch-attempt-ledger] '))
+    .map((msg) => JSON.parse(msg.slice('[dispatch-attempt-ledger] '.length)));
+}
+
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -108,6 +120,12 @@ describe('/talk-to async dispatch receipt', () => {
         }, 1500);
         return;
       }
+      if (req.method === 'POST' && req.url === '/news') {
+        res.statusCode = 202;
+        res.setHeader('Content-Type', 'application/json');
+        res.end(JSON.stringify({ ok: true, query_id: `fallback_q_${Date.now()}`, triggered: true }));
+        return;
+      }
       res.statusCode = 404;
       res.end('not found');
     });
@@ -116,6 +134,7 @@ describe('/talk-to async dispatch receipt', () => {
     db = await createInMemoryDb();
     const defaultTeamId = await db.teams.getOrCreateTeamId('default');
     await insertAgent(db, defaultTeamId, 'slow-agent', `http://127.0.0.1:${slowPort}`);
+    await insertAgent(db, defaultTeamId, 'dead-agent', `http://127.0.0.1:9`);
 
     const managerPort = await findFreePort();
     baseUrl = `http://127.0.0.1:${managerPort}`;
@@ -177,6 +196,19 @@ describe('/talk-to async dispatch receipt', () => {
     const healthBody = await health.json() as any;
     expect(healthBody.active).toBe(1);
     expect(healthBody.terminal).toBe(0);
+
+    const ledger = await dispatchLedgerEntries(baseUrl);
+    expect(ledger).toContainEqual(expect.objectContaining({
+      target_agent: 'slow-agent',
+      path: 'talk-to',
+      status: 'queued',
+      query_id: body.query_id,
+      dispatch_id: body.dispatch_id,
+      http_status: 200,
+      original_query_metadata: expect.objectContaining({
+        from: 'operator',
+      }),
+    }));
     await sleep(1700);
   });
 
@@ -209,6 +241,100 @@ describe('/talk-to async dispatch receipt', () => {
     const doc = await (manager as any).dispatchScheduler.reactor.getByPhid(body.dispatch_id);
     expect(doc.status === 'queued' || doc.status === 'in_flight').toBe(true);
     expect(doc.status).not.toBe('failed');
+
+    const ledger = await dispatchLedgerEntries(baseUrl);
+    expect(ledger).toContainEqual(expect.objectContaining({
+      target_agent: 'slow-agent',
+      path: 'talk-to',
+      status: 'pending',
+      query_id: body.query_id,
+      dispatch_id: body.dispatch_id,
+      http_status: 200,
+      original_query_metadata: expect.objectContaining({
+        from: 'operator',
+        wait: true,
+        timeout: 1000,
+      }),
+    }));
     await sleep(1200);
+  });
+
+  it('logs retryable primary dispatch failures as pending with original query metadata', async () => {
+    const res = await fetch(`${baseUrl}/talk-to`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Id-Team': 'default' },
+      body: JSON.stringify({
+        to: 'dead-agent',
+        from: 'operator',
+        message: 'this target is down',
+        wait: true,
+        timeout: 3000,
+        original_query_id: 'query_original_primary',
+      }),
+    });
+    expect(res.status).toBe(200);
+    const body = await res.json() as {
+      dispatch_id: string;
+      query_id: string;
+      status: string;
+    };
+    expect(body.dispatch_id).toMatch(/^phid:disp-/);
+    expect(body.query_id).toMatch(/^query_/);
+    expect(body.status).toBe('pending');
+
+    const ledger = await dispatchLedgerEntries(baseUrl);
+    expect(ledger).toContainEqual(expect.objectContaining({
+      target_agent: 'dead-agent',
+      path: 'talk-to',
+      status: 'pending',
+      query_id: body.query_id,
+      dispatch_id: body.dispatch_id,
+      http_status: 200,
+      original_query_metadata: expect.objectContaining({
+        from: 'operator',
+        wait: true,
+        timeout: 3000,
+        original_query_id: 'query_original_primary',
+      }),
+    }));
+  }, 10000);
+
+  it('logs /news-to as a fallback send preserving original query metadata', async () => {
+    const res = await fetch(`${baseUrl}/news-to`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Id-Team': 'default' },
+      body: JSON.stringify({
+        to: 'slow-agent',
+        from: 'operator',
+        message: 'fallback notification',
+        trigger: true,
+        original_query_id: 'query_failed_primary',
+        original_dispatch_id: 'phid:disp-primary',
+      }),
+    });
+    expect(res.status).toBe(202);
+    const body = await res.json() as {
+      query_id: string;
+      status: string;
+      triggered: boolean;
+    };
+    expect(body.query_id).toMatch(/^fallback_q_/);
+    expect(body.status).toBe('delivered');
+    expect(body.triggered).toBe(true);
+
+    const ledger = await dispatchLedgerEntries(baseUrl);
+    expect(ledger).toContainEqual(expect.objectContaining({
+      target_agent: 'slow-agent',
+      path: 'news-to fallback',
+      status: 'fallback_sent',
+      query_id: body.query_id,
+      http_status: 202,
+      original_query_metadata: expect.objectContaining({
+        from: 'operator',
+        trigger: true,
+        original_query_id: 'query_failed_primary',
+        original_dispatch_id: 'phid:disp-primary',
+      }),
+    }));
   });
 });

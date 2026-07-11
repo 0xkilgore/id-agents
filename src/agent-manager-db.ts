@@ -1183,6 +1183,56 @@ export class AgentManagerDb {
     }
   }
 
+  private buildDispatchAttemptMetadata(req: express.Request): Record<string, unknown> {
+    const body = (req.body && typeof req.body === 'object') ? req.body as Record<string, any> : {};
+    const task = (body.task && typeof body.task === 'object') ? body.task as Record<string, unknown> : null;
+    return {
+      request_query_id: typeof body.query_id === 'string' ? body.query_id : undefined,
+      original_query_id: typeof body.original_query_id === 'string' ? body.original_query_id : undefined,
+      in_reply_to: typeof body.in_reply_to === 'string' ? body.in_reply_to : undefined,
+      request_dispatch_id: typeof body.dispatch_id === 'string' ? body.dispatch_id : undefined,
+      original_dispatch_id: typeof body.original_dispatch_id === 'string' ? body.original_dispatch_id : undefined,
+      session_id: typeof body.session_id === 'string' ? body.session_id : undefined,
+      from: typeof body.from === 'string' ? body.from : undefined,
+      wait: body.wait === undefined ? undefined : body.wait === true,
+      timeout: body.timeout,
+      trigger: body.trigger === true ? true : undefined,
+      task: task
+        ? {
+            name: typeof task.name === 'string' ? task.name : undefined,
+            title: typeof task.title === 'string' ? task.title : undefined,
+          }
+        : undefined,
+    };
+  }
+
+  private recordDispatchAttemptLedger(req: express.Request, entry: {
+    target: string;
+    path: 'talk-to' | 'message' | 'news-to';
+    status: 'sent' | 'fallback_sent' | 'failed' | 'pending' | 'completed' | 'queued';
+    query_id?: string | null;
+    dispatch_id?: string | null;
+    http_status?: number;
+    detail?: string | null;
+  }) {
+    const at = new Date().toISOString();
+    const payload = {
+      timestamp: at,
+      ts: at,
+      target_agent: entry.target,
+      path: entry.path === 'news-to' ? 'news-to fallback' : entry.path,
+      status: entry.status,
+      query_id: entry.query_id || undefined,
+      dispatch_id: entry.dispatch_id || undefined,
+      http_status: entry.http_status,
+      detail: entry.detail || undefined,
+      original_query_metadata: this.buildDispatchAttemptMetadata(req),
+    };
+    const line = `[dispatch-attempt-ledger] ${JSON.stringify(payload)}`;
+    this.managerLog(line);
+    console.log(line);
+  }
+
   /**
    * N1.3: best-effort, non-blocking graph re-evaluation after a dispatch
    * lifecycle mutation. Fires and forgets — errors are logged, never thrown.
@@ -3022,6 +3072,11 @@ export class AgentManagerDb {
       const agent = toField || agentField;
       const preferDispatchReceipt = (req as any)._preferDispatchReceipt === true;
       const newsTo = (req as any)._newsTo === true;
+      const dispatchAttemptPath = newsTo
+        ? 'news-to'
+        : req.path === '/message'
+          ? 'message'
+          : 'talk-to';
 
       if (!agent || !message) {
         return res.status(400).json({ error: 'Missing "to" (agent name) or "message"' });
@@ -3157,14 +3212,29 @@ export class AgentManagerDb {
         });
         if (!newsResult.ok) {
           console.error(`[Manager] Failed to deliver news to ${targetDisplayId}: ${newsResult.status}`);
+          this.recordDispatchAttemptLedger(req, {
+            target: targetDisplayId,
+            path: dispatchAttemptPath,
+            status: 'failed',
+            http_status: newsResult.status,
+            detail: newsResult.error,
+          });
           return res.status(newsResult.status).json({ error: newsResult.error });
         }
+        const queryId = newsResult.data?.query_id ?? newsResult.data?.queryId ?? null;
+        this.recordDispatchAttemptLedger(req, {
+          target: targetDisplayId,
+          path: dispatchAttemptPath,
+          status: 'fallback_sent',
+          query_id: queryId,
+          http_status: 202,
+        });
         return res.status(202).json({
           success: true,
           delivered_to: targetDisplayId,
           status: 'delivered',
           triggered: trigger === true || newsResult.data?.triggered === true,
-          query_id: newsResult.data?.query_id ?? newsResult.data?.queryId ?? null,
+          query_id: queryId,
         });
       }
 
@@ -3196,6 +3266,14 @@ export class AgentManagerDb {
 
             if (!shouldWait) {
               this.managerLog(`Enqueued via dispatch scheduler; query_id=${enq.query_id}`);
+              this.recordDispatchAttemptLedger(req, {
+                target: targetDisplayId,
+                path: dispatchAttemptPath,
+                status: 'queued',
+                query_id: enq.query_id,
+                dispatch_id: enq.dispatch_phid,
+                http_status: 200,
+              });
               return res.json({
                 success: true,
                 dispatch_id: enq.dispatch_phid,
@@ -3215,6 +3293,15 @@ export class AgentManagerDb {
               !final ||
               !['done', 'failed', 'cancelled'].includes(final.status)
             ) {
+              this.recordDispatchAttemptLedger(req, {
+                target: targetDisplayId,
+                path: dispatchAttemptPath,
+                status: 'pending',
+                query_id: enq.query_id,
+                dispatch_id: enq.dispatch_phid,
+                http_status: 200,
+                detail: `timeout after ${timeout}ms`,
+              });
               return res.json({
                 success: false,
                 dispatch_id: enq.dispatch_phid,
@@ -3227,6 +3314,14 @@ export class AgentManagerDb {
             }
             if (final.status === 'done') {
               const result = await this.dispatchScheduler.reactor.getResult(final.dispatch_phid);
+              this.recordDispatchAttemptLedger(req, {
+                target: targetDisplayId,
+                path: dispatchAttemptPath,
+                status: 'completed',
+                query_id: enq.query_id,
+                dispatch_id: enq.dispatch_phid,
+                http_status: 200,
+              });
               return res.json({
                 success: true,
                 dispatch_id: enq.dispatch_phid,
@@ -3237,6 +3332,15 @@ export class AgentManagerDb {
                 reply: result?.reply ?? null,
               });
             }
+            this.recordDispatchAttemptLedger(req, {
+              target: targetDisplayId,
+              path: dispatchAttemptPath,
+              status: 'failed',
+              query_id: enq.query_id,
+              dispatch_id: enq.dispatch_phid,
+              http_status: 502,
+              detail: final.failure_detail ?? `dispatch ended in ${final.status}`,
+            });
             return res.status(502).json({
               success: false,
               dispatch_id: enq.dispatch_phid,
@@ -3250,6 +3354,12 @@ export class AgentManagerDb {
           // shadow mode: legacy direct call also runs, so just log + fall through.
           this.managerLog(`Shadow enqueue created Dispatch ${enq.dispatch_phid} alongside legacy /talk`);
         } catch (err) {
+          this.recordDispatchAttemptLedger(req, {
+            target: targetDisplayId,
+            path: dispatchAttemptPath,
+            status: 'failed',
+            detail: `dispatch scheduler enqueue failed: ${err instanceof Error ? err.message : String(err)}`,
+          });
           console.warn(
             '[Manager] Dispatch scheduler enqueue failed; falling back to legacy /talk:',
             err instanceof Error ? err.message : String(err),
@@ -3268,6 +3378,13 @@ export class AgentManagerDb {
       const result = await this.forwardToAgent(targetUrl, message, from || 'manager', session_id);
       if (!result.ok) {
         console.error(`[Manager] Failed to deliver message to ${targetDisplayId}: ${result.status}`);
+        this.recordDispatchAttemptLedger(req, {
+          target: targetDisplayId,
+          path: dispatchAttemptPath,
+          status: 'failed',
+          http_status: result.status,
+          detail: result.error,
+        });
         return res.status(result.status).json({ error: result.error });
       }
 
@@ -3281,6 +3398,13 @@ export class AgentManagerDb {
       // Fire-and-forget: return immediately
       if (!shouldWait) {
         this.managerLog(`Message delivered to ${targetDisplayId}, query_id: ${queryId} (fire-and-forget)`);
+        this.recordDispatchAttemptLedger(req, {
+          target: targetDisplayId,
+          path: dispatchAttemptPath,
+          status: 'sent',
+          query_id: queryId,
+          http_status: 200,
+        });
         return res.json({
           success: true,
           query_id: queryId,
@@ -3293,6 +3417,13 @@ export class AgentManagerDb {
       this.managerLog(`Waiting up to ${timeout}ms for reply from ${targetDisplayId}, query_id: ${queryId}`);
 
       if (!queryId) {
+        this.recordDispatchAttemptLedger(req, {
+          target: targetDisplayId,
+          path: dispatchAttemptPath,
+          status: 'sent',
+          http_status: 200,
+          detail: 'target returned no query_id',
+        });
         return res.json(result.data);
       }
 
@@ -3322,6 +3453,14 @@ export class AgentManagerDb {
 
       if (httpTimedOut) {
         this.managerLog(`HTTP timeout waiting for ${targetDisplayId} (${timeout}ms) - waiter persists`);
+        this.recordDispatchAttemptLedger(req, {
+          target: targetDisplayId,
+          path: dispatchAttemptPath,
+          status: 'pending',
+          query_id: queryId,
+          http_status: 200,
+          detail: `timeout after ${timeout}ms`,
+        });
         return res.json({
           success: false,
           from: targetDisplayId,
@@ -3332,6 +3471,13 @@ export class AgentManagerDb {
       }
 
       this.managerLog(`Received reply from ${targetDisplayId} for query ${queryId}`);
+      this.recordDispatchAttemptLedger(req, {
+        target: targetDisplayId,
+        path: dispatchAttemptPath,
+        status: 'completed',
+        query_id: queryId,
+        http_status: 200,
+      });
       return res.json({
         success: true,
         from: replyResult.from || targetDisplayId,
