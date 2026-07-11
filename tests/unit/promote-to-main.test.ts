@@ -46,13 +46,16 @@ interface FakeCommand {
 // that fits gets used and is removed from the queue, so repeated calls
 // for the same args can return different scripted responses. Unmatched
 // calls return a non-zero result so failures surface clearly.
-function fakeGitDeps(commands: FakeCommand[]): GitDeps & { calls: string[][] } {
+function fakeGitDeps(commands: FakeCommand[]): GitDeps & { calls: string[][]; cwds: string[] } {
   const calls: string[][] = [];
+  const cwds: string[] = [];
   const queue = [...commands];
   return {
     calls,
-    git: async (args: string[]) => {
+    cwds,
+    git: async (args: string[], cwd: string) => {
       calls.push(["git", ...args]);
+      cwds.push(cwd);
       const idx = queue.findIndex((c) => c.match(args));
       if (idx < 0) {
         if (args[0] === "log" && args.some((a) => a.includes("trailers:key=Agent"))) {
@@ -93,6 +96,8 @@ const baseArgs: PromoteArgs = {
   execute: false,
   allowOwnDirty: [],
   json: true,
+  strictSmoke: false,
+  noWorktreeFallback: false,
 };
 
 // FF execute git sequence (reused by the smoke-exempt cases). Smoke runs
@@ -119,7 +124,7 @@ function ffExecuteCommands() {
 function depsWithSmoke(
   commands: FakeCommand[],
   smoke: { code: number; stdout?: string; stderr?: string },
-): GitDeps & { calls: string[][] } {
+): GitDeps & { calls: string[][]; cwds: string[] } {
   const d = fakeGitDeps(commands);
   d.exec = async (cmd: string) => {
     d.calls.push(["exec", cmd]);
@@ -185,6 +190,157 @@ describe("runPromoteToMain — T-QA.7 --smoke-exempt trap fix", () => {
     const r = await runPromoteToMain({ ...baseArgs, execute: true, smoke: "npm test" }, deps, io);
     expect(r.exit).toBe(0);
     expect(r.result?.smoke).toMatchObject({ exit_code: 0, gate: "passed" });
+  });
+});
+
+// ────────────────────────────────────────────────────────────────────
+// T-RELY snag #15 — auto-exempt smoke failures outside this branch's diff
+// (default; no --smoke-exempt required). See pipeline-reliability-register.md.
+// ────────────────────────────────────────────────────────────────────
+
+describe("runPromoteToMain — T-RELY snag #15: auto-exempt unrelated smoke failures (default)", () => {
+  it("auto-exempts (no --smoke-exempt needed) when the only failing file is outside this branch's diff", async () => {
+    const deps = depsWithSmoke(
+      [...ffExecuteCommands(), { match: (a) => a[0] === "diff" && a[1] === "--name-only", out: "src/other/module.ts\n" }],
+      { code: 1, stdout: SMOKE_RED_CHECKIN },
+    );
+    const io = captureIo();
+    const r = await runPromoteToMain({ ...baseArgs, execute: true, smoke: "npm test" }, deps, io);
+    expect(r.exit).toBe(0);
+    expect(r.result?.pushed).toBe(true);
+    expect(r.result?.smoke).toMatchObject({
+      exit_code: 1,
+      gate: "passed_with_exempt_failures",
+      exempt_failures: ["tests/unit/checkin-service-integration.test.ts"],
+      auto_exempt_failures: ["tests/unit/checkin-service-integration.test.ts"],
+    });
+    expect(io.errText()).toMatch(/auto-exempt.*pre-existing\/unrelated/);
+  });
+
+  it("does NOT auto-exempt (aborts, exit 9) when the failing file IS inside this branch's diff", async () => {
+    const deps = depsWithSmoke(
+      [
+        ...ffExecuteCommands(),
+        { match: (a) => a[0] === "diff" && a[1] === "--name-only", out: "tests/unit/checkin-service-integration.test.ts\n" },
+      ],
+      { code: 1, stdout: SMOKE_RED_CHECKIN },
+    );
+    const io = captureIo();
+    const r = await runPromoteToMain({ ...baseArgs, execute: true, smoke: "npm test" }, deps, io);
+    expect(r.exit).toBe(9);
+    expect(r.result).toBeNull();
+    expect(deps.calls.some((c) => c[0] === "git" && c[1] === "push")).toBe(false);
+  });
+
+  it("--strict-smoke opts out: an outside-diff failure still aborts and never queries the diff", async () => {
+    const deps = depsWithSmoke(ffExecuteCommands(), { code: 1, stdout: SMOKE_RED_CHECKIN });
+    const io = captureIo();
+    const r = await runPromoteToMain(
+      { ...baseArgs, execute: true, smoke: "npm test", strictSmoke: true },
+      deps, io,
+    );
+    expect(r.exit).toBe(9);
+    expect(r.result).toBeNull();
+    expect(deps.calls.some((c) => c[0] === "git" && c[1] === "diff")).toBe(false);
+  });
+
+  it("still gracefully falls back to non-exempt when the diff lookup itself fails (fail-safe, no guessing)", async () => {
+    // No "diff" matcher scripted at all → fakeGitDeps returns its default
+    // unmatched/code-1 response, exercising the fail-safe path directly.
+    const deps = depsWithSmoke(ffExecuteCommands(), { code: 1, stdout: SMOKE_RED_CHECKIN });
+    const io = captureIo();
+    const r = await runPromoteToMain({ ...baseArgs, execute: true, smoke: "npm test" }, deps, io);
+    expect(r.exit).toBe(9);
+    expect(r.result).toBeNull();
+  });
+});
+
+// ────────────────────────────────────────────────────────────────────
+// T-RELY snag #15 — worktree-contention auto-fallback (default; no human
+// clarification round-trip). See pipeline-reliability-register.md.
+// ────────────────────────────────────────────────────────────────────
+
+function worktreeFallbackCommands(checkoutErr: string) {
+  return [
+    { match: (a: string[]) => a[0] === "status", out: "" },
+    { match: (a: string[]) => a[0] === "fetch" && a[1] === "origin" && a[2] === "main", out: "" }, // Step 2 fetch, in contended repo
+    { match: (a: string[]) => a[0] === "rev-parse" && a[1] === "feat-x", out: "abc1234\n" },
+    { match: (a: string[]) => a[0] === "rev-parse" && a[1] === "origin/main", out: "basetip\n" },
+    { match: (a: string[]) => a[0] === "rev-list" && a.includes("origin/main..feat-x"), out: "1\n" },
+    { match: (a: string[]) => a[0] === "rev-list" && a.includes("feat-x..origin/main"), out: "0\n" },
+    { match: (a: string[]) => a[0] === "log", out: "fix\n" },
+    // Step 5, first attempt: checkout fails — the shared repo is contended/dirty elsewhere.
+    { match: (a: string[]) => a[0] === "checkout" && a[1] === "main", out: "", err: checkoutErr, code: 1 },
+  ];
+}
+
+function worktreeFallbackSetupCommands() {
+  return [
+    { match: (a: string[]) => a[0] === "config" && a[1] === "--get" && a[2] === "remote.origin.url", out: "https://example.com/repo.git\n" },
+    { match: (a: string[]) => a[0] === "clone", out: "" },
+    { match: (a: string[]) => a[0] === "remote" && a[1] === "set-url", out: "" },
+    { match: (a: string[]) => a[0] === "fetch" && a[1] === "origin" && a[2] === "main", out: "" }, // fallback's own base fetch, in workdir
+    { match: (a: string[]) => a[0] === "branch" && a[1] === "-f" && a[2] === "main", out: "" },
+    { match: (a: string[]) => a[0] === "fetch" && a[2] === "feat-x:feat-x", out: "" },
+    // Step 5 retry, now in the disposable clone: succeeds.
+    { match: (a: string[]) => a[0] === "checkout" && a[1] === "main", out: "" },
+  ];
+}
+
+describe("runPromoteToMain — T-RELY snag #15: worktree-contention auto-fallback (default)", () => {
+  it("auto-falls-back to a disposable clone and completes the promotion there, never touching the contended repo again", async () => {
+    const deps = fakeGitDeps([
+      ...worktreeFallbackCommands("fatal: 'main' is already used by worktree at '/other/path'"),
+      ...worktreeFallbackSetupCommands(),
+      { match: (a) => a[0] === "merge" && a[1] === "--ff-only" && a[2] === "origin/main", out: "" },
+      { match: (a) => a[0] === "merge" && a[1] === "--ff-only" && a[2] === "feat-x", out: "" },
+      { match: (a) => a[0] === "rev-parse" && a[1] === "main" && a.length === 2, out: "abc1234\n" },
+      { match: (a) => a[0] === "push" && a[1] === "origin" && a[2] === "main", out: "" },
+      { match: (a) => a[0] === "rev-parse" && a[1] === "origin/main", out: "abc1234\n" },
+    ]);
+    const io = captureIo();
+    const r = await runPromoteToMain({ ...baseArgs, execute: true }, deps, io);
+
+    expect(r.exit).toBe(0);
+    expect(r.result?.pushed).toBe(true);
+    expect(r.result?.worktree_fallback?.workdir).toMatch(/id-agents-promote-worktree-fallback-feat-x-/);
+    expect(r.result?.worktree_fallback?.reason).toMatch(/already used by worktree/);
+    expect(deps.calls.some((c) => c[0] === "git" && c[1] === "clone")).toBe(true);
+
+    // The contended repo path is only ever used for the failed checkout +
+    // the fallback's read-only setup (status/fetch/rev-parse/rev-list/log/
+    // config/clone/fetch-branch) — every mutating step from the retry
+    // onward runs in the disposable clone, never back in /abs/repo.
+    const lastCwd = deps.cwds[deps.cwds.length - 1];
+    expect(lastCwd).not.toBe("/abs/repo");
+    expect(lastCwd).toMatch(/id-agents-promote-worktree-fallback-feat-x-/);
+  });
+
+  it("--no-worktree-fallback opts out: a contended checkout fails outright, no clone attempted", async () => {
+    const deps = fakeGitDeps(
+      worktreeFallbackCommands("fatal: 'main' is already used by worktree at '/other/path'"),
+    );
+    const io = captureIo();
+    const r = await runPromoteToMain(
+      { ...baseArgs, execute: true, noWorktreeFallback: true },
+      deps, io,
+    );
+    expect(r.exit).toBe(7);
+    expect(r.result).toBeNull();
+    expect(deps.calls.some((c) => c[0] === "git" && c[1] === "clone")).toBe(false);
+  });
+
+  it("falls through to the original checkout error when the fallback clone setup itself fails", async () => {
+    const deps = fakeGitDeps([
+      ...worktreeFallbackCommands("fatal: 'main' is already used by worktree at '/other/path'"),
+      // remote URL resolution fails → createWorktreeFallbackClone bails out early.
+      { match: (a) => a[0] === "config" && a[1] === "--get" && a[2] === "remote.origin.url", out: "", err: "no such remote", code: 1 },
+    ]);
+    const io = captureIo();
+    const r = await runPromoteToMain({ ...baseArgs, execute: true }, deps, io);
+    expect(r.exit).toBe(7);
+    expect(r.result).toBeNull();
+    expect(io.errText()).toMatch(/git checkout main failed/);
   });
 });
 

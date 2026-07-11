@@ -203,4 +203,13 @@ Manager applies validation per env \`SPEC054_PROMOTION_ENFORCEMENT\`:
 
 ### When promotion is ambiguous, ask via /agent-needs-input
 
-The \`promote-to-main\` helper detects divergent ancestry (branch ahead AND behind \`base\`) and exits non-zero with a ready-to-send \`/agent-needs-input\` payload. The right move is to forward that payload to the manager, NOT to guess a merge strategy. Never force-push \`main\`.`;
+The \`promote-to-main\` helper detects divergent ancestry (branch ahead AND behind \`base\`) and exits non-zero with a ready-to-send \`/agent-needs-input\` payload. The right move is to forward that payload to the manager, NOT to guess a merge strategy. Never force-push \`main\`.
+
+### Routine promotion mechanics are NEVER a clarification reason — T-RELY snag #15
+
+Twice in one evening (2026-07-11), fully-implemented and verified work stalled in \`needs_clarification\` purely on promotion mechanics, not real product ambiguity. \`promote-to-main\` now handles both automatically — do not call \`/agent-needs-input\` for either:
+
+1. **Shared worktree contended/dirty elsewhere.** If \`--execute\`'s checkout of \`base\` fails because the repo is checked out to something else or has unrelated dirty state, \`promote-to-main\` auto-falls-back to a disposable clone off the real remote, pulls your branch's own commits into it, and finishes the promotion there. It never touches or cleans the contended worktree. This is the default; do not pass \`--no-worktree-fallback\` unless you have a specific reason to require the original path.
+2. **Unrelated pre-existing smoke failures.** If \`--smoke\` fails only in test files outside your branch's own diff (files it never touched), \`promote-to-main\` auto-exempts them as pre-existing/unrelated and proceeds, recording \`smoke.auto_exempt_failures\` in the JSON output as a non-blocking warning. This is the default; do not pass \`--strict-smoke\` unless the dispatch specifically requires a fully-green full suite (e.g. a release branch). A failure in a file YOUR branch's diff touched still aborts as normal — that's real signal, not noise.
+
+If \`promote-to-main\` exits non-zero for either of these reasons even with the defaults on, that's real signal (e.g. the fallback clone itself couldn't reach the remote) — surface it, don't retry blindly.`;
