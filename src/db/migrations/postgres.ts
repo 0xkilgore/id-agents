@@ -633,6 +633,7 @@ export async function migratePostgres(adapter: DbAdapter): Promise<void> {
       actor text NOT NULL,
       occurred_at bigint NOT NULL,
       hash text NOT NULL,
+      client_op_id text,
       event_seq bigint REFERENCES event_log(seq) ON DELETE SET NULL,
       routing_status text NOT NULL DEFAULT 'pending',
       routing_results_json jsonb NOT NULL DEFAULT '[]'::jsonb,
@@ -641,8 +642,10 @@ export async function migratePostgres(adapter: DbAdapter): Promise<void> {
       UNIQUE(team_id, hash)
     );
   `);
+  await adapter.query(`ALTER TABLE task_comment_events ADD COLUMN IF NOT EXISTS client_op_id text;`);
   await adapter.query(`CREATE INDEX IF NOT EXISTS task_comment_events_task_idx ON task_comment_events(team_id, task_id, occurred_at);`);
   await adapter.query(`CREATE INDEX IF NOT EXISTS task_comment_events_status_idx ON task_comment_events(team_id, routing_status, updated_at);`);
+  await adapter.query(`CREATE UNIQUE INDEX IF NOT EXISTS task_comment_events_client_op_idx ON task_comment_events(team_id, client_op_id) WHERE client_op_id IS NOT NULL;`);
 
   await adapter.query(`
     CREATE TABLE IF NOT EXISTS subscriptions (

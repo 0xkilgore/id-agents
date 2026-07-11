@@ -8,8 +8,9 @@ export const TASK_COMMENT_DISPATCH_CHANNEL = "task_comment" as const;
 export type TaskCommentRoutingStatus = "pending" | "routed" | "failed";
 export type TaskCommentOperationState =
   | "recorded+routed"
-  | "recorded-route-failed-with-retry"
-  | "terminal failure";
+  | "recorded-but-route-failed-with-retry"
+  | "terminal-failure"
+  | "not-recorded";
 
 export interface TaskCommentRoutingResult {
   target_agent: string;
@@ -35,6 +36,7 @@ export interface TaskCommentRow {
   actor: string;
   occurred_at: number;
   hash: string;
+  client_op_id: string | null;
   event_seq: number | null;
   routing_status: TaskCommentRoutingStatus;
   routing_results_json: string;
@@ -55,6 +57,7 @@ export interface TaskCommentView {
   source: string;
   timestamp: string;
   hash: string;
+  client_op_id: string | null;
   event_seq: number | null;
   routing_status: TaskCommentRoutingStatus;
   operation_state: TaskCommentOperationState;
@@ -72,6 +75,7 @@ export interface AppendTaskCommentInput {
   text: string;
   actor: string;
   occurredAtMs?: number;
+  clientOpId?: string | null;
 }
 
 export interface AppendTaskCommentResult {
@@ -94,6 +98,7 @@ export async function migrateTaskCommentTables(adapter: DbAdapter): Promise<void
       actor TEXT NOT NULL,
       occurred_at INTEGER NOT NULL,
       hash TEXT NOT NULL,
+      client_op_id TEXT,
       event_seq INTEGER,
       routing_status TEXT NOT NULL DEFAULT 'pending',
       routing_results_json TEXT NOT NULL DEFAULT '[]',
@@ -102,8 +107,10 @@ export async function migrateTaskCommentTables(adapter: DbAdapter): Promise<void
       UNIQUE(team_id, hash)
     )
   `);
+  await addTaskCommentColumnIfMissing(adapter, "client_op_id", "TEXT");
   await adapter.query(`CREATE INDEX IF NOT EXISTS task_comment_events_task_idx ON task_comment_events(team_id, task_id, occurred_at)`);
   await adapter.query(`CREATE INDEX IF NOT EXISTS task_comment_events_status_idx ON task_comment_events(team_id, routing_status, updated_at)`);
+  await adapter.query(`CREATE UNIQUE INDEX IF NOT EXISTS task_comment_events_client_op_idx ON task_comment_events(team_id, client_op_id) WHERE client_op_id IS NOT NULL`);
 }
 
 export function stableTaskCommentHash(input: {
@@ -137,6 +144,11 @@ export async function appendTaskComment(
     ? Math.max(1, Math.floor(input.sourceLine))
     : null;
   const occurredAt = input.occurredAtMs ?? Date.now();
+  const clientOpId = normalizeClientOpId(input.clientOpId);
+  if (clientOpId) {
+    const existing = await getTaskCommentByClientOpId(adapter, input.teamId, clientOpId);
+    if (existing) return { row: existing, inserted: false };
+  }
   const hash = stableTaskCommentHash({
     teamId: input.teamId,
     taskUuid: input.task.uuid ?? null,
@@ -152,9 +164,9 @@ export async function appendTaskComment(
   const inserted = await adapter.query(
     `INSERT INTO task_comment_events
        (id, team_id, task_id, task_uuid, task_name, task_title, source_path, source_line,
-        comment_text, actor, occurred_at, hash, event_seq, routing_status,
+        comment_text, actor, occurred_at, hash, client_op_id, event_seq, routing_status,
         routing_results_json, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 'pending', '[]', ?, ?)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 'pending', '[]', ?, ?)
      ON CONFLICT(team_id, hash) DO NOTHING`,
     [
       id,
@@ -169,12 +181,15 @@ export async function appendTaskComment(
       actor,
       occurredAt,
       hash,
+      clientOpId,
       now,
       now,
     ],
   );
 
-  const row = await getTaskCommentByHash(adapter, input.teamId, hash);
+  const row = clientOpId
+    ? await getTaskCommentByClientOpId(adapter, input.teamId, clientOpId)
+    : await getTaskCommentByHash(adapter, input.teamId, hash);
   if (!row) throw new Error("task comment insert/read failed");
   return { row, inserted: (inserted.rowCount ?? 0) > 0 };
 }
@@ -187,6 +202,20 @@ export async function getTaskCommentByHash(
   const { rows } = await adapter.query<TaskCommentRow>(
     `SELECT * FROM task_comment_events WHERE team_id = ? AND hash = ?`,
     [teamId, hash],
+  );
+  return rows[0] ?? null;
+}
+
+export async function getTaskCommentByClientOpId(
+  adapter: DbAdapter,
+  teamId: string,
+  clientOpId: string,
+): Promise<TaskCommentRow | null> {
+  const normalized = normalizeClientOpId(clientOpId);
+  if (!normalized) return null;
+  const { rows } = await adapter.query<TaskCommentRow>(
+    `SELECT * FROM task_comment_events WHERE team_id = ? AND client_op_id = ?`,
+    [teamId, normalized],
   );
   return rows[0] ?? null;
 }
@@ -246,9 +275,10 @@ export async function listPendingTaskComments(
 }
 
 export function taskCommentOperationState(results: TaskCommentRoutingResult[]): TaskCommentOperationState {
+  if (results.length === 0) return "recorded-but-route-failed-with-retry";
   if (results.length > 0 && results.every((r) => r.status === "routed")) return "recorded+routed";
-  if (results.some((r) => r.retryable || r.status === "pending")) return "recorded-route-failed-with-retry";
-  return "terminal failure";
+  if (results.some((r) => r.retryable || r.status === "pending")) return "recorded-but-route-failed-with-retry";
+  return "terminal-failure";
 }
 
 export function taskCommentView(row: TaskCommentRow): TaskCommentView {
@@ -267,6 +297,7 @@ export function taskCommentView(row: TaskCommentRow): TaskCommentView {
     source: row.actor,
     timestamp: new Date(row.occurred_at).toISOString(),
     hash: row.hash,
+    client_op_id: row.client_op_id ?? null,
     event_seq: row.event_seq ?? null,
     routing_status: row.routing_status,
     operation_state: operationState,
@@ -315,4 +346,25 @@ function isRoutingResult(v: unknown): v is TaskCommentRoutingResult {
 
 function normalizeCommentText(text: string): string {
   return text.trim().replace(/\s+/g, " ");
+}
+
+function normalizeClientOpId(value: string | null | undefined): string | null {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed.slice(0, 200) : null;
+}
+
+async function addTaskCommentColumnIfMissing(adapter: DbAdapter, column: string, definition: string): Promise<void> {
+  try {
+    await adapter.query(`ALTER TABLE task_comment_events ADD COLUMN ${column} ${definition}`);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    if (
+      /duplicate column|already exists/i.test(message) ||
+      /SQLITE_ERROR: duplicate column name/i.test(message)
+    ) {
+      return;
+    }
+    throw err;
+  }
 }

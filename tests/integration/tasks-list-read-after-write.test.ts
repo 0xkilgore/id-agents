@@ -779,6 +779,11 @@ describe('GET /tasks read-model immediate reflect', () => {
     expect(res.status).toBe(201);
     const body = await res.json();
     expect(body.visible_state).toBe('recorded+routed');
+    expect(body.operation_ack).toMatchObject({
+      type: 'ADD_TASK_COMMENT',
+      visibleState: 'recorded+routed',
+    });
+    expect(body.invalidated_views).toEqual(['task_detail', 'task_table', 'project', 'timeline']);
     expect(body.note).toMatchObject({
       actor: 'user:chris',
       source: 'user:chris',
@@ -817,7 +822,7 @@ describe('GET /tasks read-model immediate reflect', () => {
 
     expect(res.status).toBe(201);
     const body = await res.json();
-    expect(body.visible_state).toBe('recorded-route-failed-with-retry');
+    expect(body.visible_state).toBe('recorded-but-route-failed-with-retry');
     const serialized = JSON.stringify(body);
     expect(serialized).not.toContain('ECONNREFUSED');
     expect(serialized).not.toContain('raw stack frame');
@@ -827,7 +832,7 @@ describe('GET /tasks read-model immediate reflect', () => {
       headers: { 'X-Id-Team': TEAM },
     }).then((r) => r.json());
     const detailText = JSON.stringify(detail);
-    expect(detail.task.notes[0].operation_state).toBe('recorded-route-failed-with-retry');
+    expect(detail.task.notes[0].operation_state).toBe('recorded-but-route-failed-with-retry');
     expect(detailText).not.toContain('ECONNREFUSED');
     expect(detail.task.currentness.stale_reason).toBe('task_comment_routing_failed');
   });
@@ -844,6 +849,7 @@ describe('GET /tasks read-model immediate reflect', () => {
       }),
     };
     const payload = {
+      clientOpId: 'client-op-comment-route-duplicate',
       actor: 'user:chris',
       text: 'Duplicate me once.',
       source_path: '/tasks/comment-route-duplicate',
@@ -858,13 +864,16 @@ describe('GET /tasks read-model immediate reflect', () => {
     const secondRes = await fetch(`${baseUrl}/tasks/${taskName}/notes`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'X-Id-Team': TEAM },
-      body: JSON.stringify(payload),
+      body: JSON.stringify({ ...payload, text: 'Different replay body should be ignored by clientOpId.' }),
     });
     const second = await secondRes.json();
 
     expect(secondRes.status).toBe(200);
     expect(second.idempotent).toBe(true);
     expect(second.note.id).toBe(first.note.id);
+    expect(second.note.text).toBe('Duplicate me once.');
+    expect(second.note.client_op_id).toBe('client-op-comment-route-duplicate');
+    expect(second.operation_ack.clientOpId).toBe('client-op-comment-route-duplicate');
     expect(second.note.operation_state).toBe('recorded+routed');
     expect(count).toBe(2);
 
@@ -888,7 +897,7 @@ describe('GET /tasks read-model immediate reflect', () => {
     const body = await res.json();
 
     expect(res.status).toBe(201);
-    expect(body.visible_state).toBe('terminal failure');
+    expect(body.visible_state).toBe('terminal-failure');
     expect(body.note.routing_results).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ target_agent: 'cane', status: 'routed' }),
@@ -905,7 +914,7 @@ describe('GET /tasks read-model immediate reflect', () => {
     const detail = await fetch(`${baseUrl}/tasks/${taskName}`, {
       headers: { 'X-Id-Team': TEAM },
     }).then((r) => r.json());
-    expect(detail.task.notes[0].operation_state).toBe('terminal failure');
+    expect(detail.task.notes[0].operation_state).toBe('terminal-failure');
     expect(detail.task.openTarget).toMatchObject({ kind: 'task', route: `/tasks/${taskName}` });
   });
 });

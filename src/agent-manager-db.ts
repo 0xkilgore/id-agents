@@ -127,6 +127,7 @@ import {
   type TaskCommentRow,
   type TaskCommentRoutingResult,
 } from './task-comments/storage.js';
+import { buildTaskCommentOperationAck, TASK_COMMENT_INVALIDATED_VIEWS } from './task-comments/operations.js';
 import {
   DEFAULT_CLOSE_WHEN,
   DEFAULT_INTERVAL_SECONDS,
@@ -8457,6 +8458,11 @@ export class AgentManagerDb {
           return res.status(400).json({ error: 'Missing required field: text' });
         }
         const sourceLine = body.source_line ?? body.sourceLine;
+        const clientOpId = typeof body.clientOpId === 'string'
+          ? body.clientOpId
+          : typeof body.client_op_id === 'string'
+          ? body.client_op_id
+          : null;
         const occurredAt = parseTaskCommentOccurredAt(body.timestamp ?? body.occurred_at ?? body.occurredAt);
         if (occurredAt === null) {
           return res.status(400).json({ error: 'invalid_timestamp' });
@@ -8473,6 +8479,7 @@ export class AgentManagerDb {
             : `/tasks/${task.name}`,
           sourceLine: sourceLine == null ? null : Number(sourceLine),
           occurredAtMs: occurredAt,
+          clientOpId,
         });
 
         if (append.inserted) {
@@ -8506,10 +8513,21 @@ export class AgentManagerDb {
         this.invalidateTaskDetailCache(teamId, task);
         if (updated) this.invalidateTaskDetailCache(teamId, updated);
         const note = taskCommentView(noteRow ?? append.row);
+        const operationAck = buildTaskCommentOperationAck({
+          type: append.inserted ? 'ADD_TASK_COMMENT' : 'ROUTE_TASK_COMMENT',
+          clientOpId: note.client_op_id ?? clientOpId ?? undefined,
+          taskId: task.uuid ?? task.id,
+          commentId: note.id,
+          visibleState: note.operation_state,
+          routingResults: note.routing_results,
+          createdAt: note.updated_at,
+        });
         res.status(append.inserted ? 201 : 200).json({
           ok: true,
           idempotent: !append.inserted,
           visible_state: note.operation_state,
+          operation_ack: operationAck,
+          invalidated_views: TASK_COMMENT_INVALIDATED_VIEWS,
           note,
           task: await this.buildTaskResult(updated ?? task, teamId),
         });
