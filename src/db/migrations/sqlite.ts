@@ -488,6 +488,7 @@ export async function migrateSqlite(adapter: SqliteAdapter): Promise<void> {
       body_markdown               TEXT NOT NULL,
       provider                    TEXT NOT NULL,
       runtime                     TEXT NOT NULL,
+      logical_agent_json          TEXT,
       priority                    INTEGER NOT NULL DEFAULT 5,
       status                      TEXT NOT NULL,
       not_before_at               TEXT NOT NULL,
@@ -530,6 +531,36 @@ export async function migrateSqlite(adapter: SqliteAdapter): Promise<void> {
       WHERE agent_query_id IS NOT NULL;
     CREATE UNIQUE INDEX IF NOT EXISTS dispatch_scheduler_team_query_idx
       ON dispatch_scheduler_queue(team_id, query_id);
+
+    CREATE TABLE IF NOT EXISTS dispatch_attempt_ledger (
+      id TEXT PRIMARY KEY,
+      team_id TEXT NOT NULL,
+      correlation_key TEXT NOT NULL,
+      terminal_status TEXT NOT NULL DEFAULT 'pending',
+      to_agent TEXT,
+      from_actor TEXT,
+      original_query_id TEXT,
+      original_dispatch_id TEXT,
+      subject TEXT,
+      talk_to_attempted INTEGER NOT NULL DEFAULT 0,
+      talk_to_ok INTEGER,
+      talk_to_status_code INTEGER,
+      talk_to_error TEXT,
+      talk_to_at TEXT,
+      news_to_attempted INTEGER NOT NULL DEFAULT 0,
+      news_to_ok INTEGER,
+      news_to_status_code INTEGER,
+      news_to_error TEXT,
+      news_to_at TEXT,
+      fallback_used INTEGER NOT NULL DEFAULT 0,
+      fallback_ok INTEGER,
+      attempts_json TEXT NOT NULL DEFAULT '[]',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      UNIQUE(team_id, correlation_key)
+    );
+    CREATE INDEX IF NOT EXISTS dispatch_attempt_ledger_team_updated_idx
+      ON dispatch_attempt_ledger(team_id, updated_at DESC);
 
     -- ── Usage Meter (Spec 2026-05-31) ────────────────────────────────
     -- Per-event Anthropic token usage attributed to an agent.
@@ -911,6 +942,9 @@ export async function migrateSqlite(adapter: SqliteAdapter): Promise<void> {
     `ALTER TABLE dispatch_scheduler_queue ADD COLUMN promotion_strategy TEXT NOT NULL DEFAULT 'auto'`,
     `ALTER TABLE dispatch_scheduler_queue ADD COLUMN promotion_required_reason TEXT`,
     `ALTER TABLE dispatch_scheduler_queue ADD COLUMN promotion_result_json TEXT`,
+    // T-RELY Slice A: durable logical project-agent identity snapshot,
+    // separated from provider/runtime execution lanes on the row.
+    `ALTER TABLE dispatch_scheduler_queue ADD COLUMN logical_agent_json TEXT`,
     // Spec 054 v2 Part 2 ─ enqueue-side promotion input (repo, branch,
     // base, remote, optional skip-reason). JSON-encoded; null on
     // non-build dispatches.
@@ -1017,6 +1051,7 @@ export async function migrateSqlite(adapter: SqliteAdapter): Promise<void> {
   // SQLite does not support DROP CONSTRAINT, so we use the rename-copy-swap pattern
   // guarded by a PRAGMA check to detect whether the old global uniqueness is still present.
   await migrateTasks_TeamNameUnique(adapter);
+  await migrateCheckins_LinkedTaskFkToTasks(adapter);
 
   // P6 Agent Performance Telemetry tables (idempotent — CREATE IF NOT EXISTS).
   const { migrateTelemetryTables } = await import('../../telemetry/storage.js');
@@ -1097,6 +1132,108 @@ async function migrateTasks_TeamNameUnique(adapter: SqliteAdapter): Promise<void
     CREATE INDEX IF NOT EXISTS tasks_owner_idx ON tasks(owner, status, updated_at);
     CREATE INDEX IF NOT EXISTS tasks_team_idx ON tasks(team_id, status, updated_at);
     CREATE UNIQUE INDEX IF NOT EXISTS tasks_uuid_idx ON tasks(uuid);
+  `);
+}
+
+/**
+ * Repair databases where SQLite rewrote checkins.linked_task_id to reference
+ * tasks_old during the tasks table rename-copy-swap migration. That stale FK
+ * makes every new checkin linked to a current task fail with
+ * SQLITE_CONSTRAINT_FOREIGNKEY.
+ */
+async function migrateCheckins_LinkedTaskFkToTasks(adapter: SqliteAdapter): Promise<void> {
+  const table = await adapter.query<{ name: string }>(
+    `SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'checkins'`,
+  );
+  if (!table.rows[0]) return;
+
+  const fk = await adapter.query<{ table: string; from: string }>(
+    `SELECT * FROM pragma_foreign_key_list('checkins')`,
+  );
+  const linkedTaskFk = fk.rows.find((row) => row.from === 'linked_task_id');
+  if (!linkedTaskFk || linkedTaskFk.table === 'tasks') return;
+
+  adapter.exec(`
+    PRAGMA foreign_keys = OFF;
+
+    ALTER TABLE checkins RENAME TO checkins_old_task_fk;
+
+    CREATE TABLE checkins (
+      id TEXT PRIMARY KEY,
+      team_id TEXT NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+      owner_agent_id TEXT REFERENCES agents(id) ON DELETE SET NULL,
+      created_by_agent_id TEXT REFERENCES agents(id) ON DELETE SET NULL,
+      linked_task_id TEXT REFERENCES tasks(id) ON DELETE CASCADE,
+      interval_seconds INTEGER NOT NULL,
+      priority TEXT NOT NULL DEFAULT 'normal',
+      status TEXT NOT NULL,
+      close_when TEXT NOT NULL,
+      max_iterations INTEGER,
+      iteration_count INTEGER NOT NULL DEFAULT 0,
+      next_fire_at INTEGER,
+      snooze_until INTEGER,
+      ttl_expires_at INTEGER,
+      last_fire_at INTEGER,
+      last_event_seq INTEGER REFERENCES event_log(seq) ON DELETE SET NULL,
+      note TEXT,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      closed_at INTEGER,
+      closed_reason TEXT
+    );
+
+    INSERT INTO checkins
+      (id, team_id, owner_agent_id, created_by_agent_id, linked_task_id,
+       interval_seconds, priority, status, close_when, max_iterations,
+       iteration_count, next_fire_at, snooze_until, ttl_expires_at,
+       last_fire_at, last_event_seq, note, created_at, updated_at,
+       closed_at, closed_reason)
+    SELECT
+      id,
+      team_id,
+      owner_agent_id,
+      created_by_agent_id,
+      CASE
+        WHEN linked_task_id IS NULL THEN NULL
+        WHEN EXISTS (SELECT 1 FROM tasks WHERE tasks.id = checkins_old_task_fk.linked_task_id)
+          THEN linked_task_id
+        ELSE NULL
+      END,
+      interval_seconds,
+      priority,
+      status,
+      close_when,
+      max_iterations,
+      iteration_count,
+      next_fire_at,
+      snooze_until,
+      ttl_expires_at,
+      last_fire_at,
+      last_event_seq,
+      note,
+      created_at,
+      updated_at,
+      closed_at,
+      closed_reason
+    FROM checkins_old_task_fk;
+
+    DROP TABLE checkins_old_task_fk;
+
+    CREATE INDEX IF NOT EXISTS checkins_due_idx
+      ON checkins(team_id, status, next_fire_at)
+      WHERE next_fire_at IS NOT NULL;
+
+    CREATE INDEX IF NOT EXISTS checkins_owner_idx
+      ON checkins(team_id, owner_agent_id, status, updated_at);
+
+    CREATE INDEX IF NOT EXISTS checkins_task_idx
+      ON checkins(team_id, linked_task_id, status);
+
+    CREATE INDEX IF NOT EXISTS checkins_ttl_idx
+      ON checkins(team_id, ttl_expires_at)
+      WHERE ttl_expires_at IS NOT NULL;
+
+    PRAGMA foreign_keys = ON;
   `);
 }
 

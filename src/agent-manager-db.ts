@@ -13,7 +13,7 @@
 import express from 'express';
 import crypto from 'crypto';
 import path from 'path';
-import { deriveMetadataWithRuntime, reconcileAgentRuntime } from './db/agent-runtime-sot.js';
+import { deriveMetadataWithRuntime, reconcileAgentRuntime, reconcileCatalogModelTruth } from './db/agent-runtime-sot.js';
 import { createServer as createHttpServer, type Server as HttpServer } from 'http';
 import { existsSync, mkdirSync, rmSync, readFileSync, writeFileSync, readdirSync, copyFileSync, statSync, lstatSync, openSync, closeSync } from 'fs';
 import { execFileSync, spawn } from 'child_process';
@@ -43,6 +43,8 @@ import {
   type BuildApprovalInput,
 } from './decisions-needs-chris/projection.js';
 import { listBacklogByState } from './continuous-orchestration/storage.js';
+import { readOrchestrationHealthProjection } from './continuous-orchestration/health-projection.js';
+import type { ContinuousOrchestrationDaemon } from './continuous-orchestration/daemon.js';
 import {
   buildTaskRow,
   draftFromAutoAttach,
@@ -59,13 +61,20 @@ import {
 } from './control-plane/read-guard.js';
 import { resolveManagerNode } from './lib/native-node.js';
 import { createActionDeliverer, type ActionStatus } from './action-delivery/deliver.js';
+import { emitNotificationReactorEvent } from './notifications/reactor.js';
 import { isBootSpawnableAgent } from './lib/boot-spawn.js';
 import { sweepOrphanAgents, listMatchingProcesses } from './lib/orphan-sweep.js';
 import {
   agentDoneAuthConfigFromEnv,
   authenticateAgentDone,
 } from './lib/agent-done-auth.js';
-import { migrateOutputsTables, registerArtifactPathDelivery } from './outputs/storage.js';
+import { artifactIdFromPath, migrateOutputsTables, registerArtifactPathDelivery } from './outputs/storage.js';
+import {
+  appendAuditEvent,
+  migrateInboxTables,
+  updateOperatorState,
+  upsertLink,
+} from './inbox/storage.js';
 import { type Db } from './db/db-service.js';
 import type { AgentRow, ScheduleDefinitionRow, TaskRow } from './db/types.js';
 import fetch from 'node-fetch';
@@ -104,6 +113,13 @@ import {
   emitQueryFailed,
   emitTaskClaimed,
   emitTaskCompleted,
+  emitReadModelChange,
+  READ_MODEL_ARTIFACT_CHANGED,
+  READ_MODEL_COMMENT_CHANGED,
+  READ_MODEL_READ_STATE_CHANGED,
+  READ_MODEL_TASK_CHANGED,
+  READ_MODEL_PROJECT_CHANGED,
+  READ_MODEL_CURSOR_EXPIRED,
   recordCheckinCreated,
 } from './wakeup-service/event-producer.js';
 import { RetentionService } from './wakeup-service/retention.js';
@@ -152,6 +168,11 @@ import {
 } from './dispatch-scheduler/dirty-worktree-policy.js';
 import { deliverClarificationResume } from './dispatch-scheduler/clarification-resume-delivery.js';
 import { readFleetBlockages } from './dispatch-scheduler/fleet-blockages.js';
+import {
+  migrateDispatchAttemptLedger,
+  readDispatchAttemptLedger,
+  recordDispatchAttempt,
+} from './dispatch-attempt-ledger/storage.js';
 import {
   parsePromotionEnforcement,
   validatePromotionMetadata,
@@ -203,12 +224,14 @@ import {
   buildPromotionHygieneRun,
   classifyPromotionHygieneFailure,
   hygieneDedupeKey,
+  upsertWorktreeHygieneCleanupRoute,
 } from './loops/worktree-hygiene.js';
 import { loadModelPolicy, type ModelPolicyService } from './model-policy/policy.js';
 import { mountRuntimePolicyRoutes } from './model-policy/runtime-policy-routes.js';
 import { loadApprovalPolicy, type ApprovalPolicyService } from './approval-policy/policy.js';
 import { resolveManagerBindHost } from './manager-bind-host.js';
 import { getBuildStatusCached, loadBuildStatus, type BuildStatus } from './build-info.js';
+import { readDiskHeadroom } from './disk-health.js';
 import {
   INITIAL_FRESHNESS,
   type FreshnessTrackerState,
@@ -274,6 +297,149 @@ const MODEL_ALIASES: Record<string, string> = {
 
 function resolveModelAlias(model: string): string {
   return MODEL_ALIASES[model.toLowerCase()] || model;
+}
+
+function extractDispatchAttemptMetadata(body: any): {
+  to_agent: string | null;
+  from_actor: string | null;
+  original_query_id: string | null;
+  original_dispatch_id: string | null;
+  subject: string | null;
+} {
+  const data = body && typeof body.data === 'object' && body.data !== null ? body.data : {};
+  const to = attemptStringField(body?.to) ?? attemptStringField(body?.agent) ?? attemptStringField(data.to) ?? attemptStringField(data.agent);
+  const from = attemptStringField(body?.from) ?? attemptStringField(data.from);
+  const queryId =
+    attemptStringField(body?.original_query_id) ??
+    attemptStringField(body?.query_id) ??
+    attemptStringField(body?.queryId) ??
+    attemptStringField(body?.in_reply_to) ??
+    attemptStringField(data.original_query_id) ??
+    attemptStringField(data.query_id) ??
+    attemptStringField(data.queryId) ??
+    attemptStringField(data.in_reply_to);
+  const dispatchId =
+    attemptStringField(body?.original_dispatch_id) ??
+    attemptStringField(body?.dispatch_id) ??
+    attemptStringField(body?.dispatchId) ??
+    attemptStringField(data.original_dispatch_id) ??
+    attemptStringField(data.dispatch_id) ??
+    attemptStringField(data.dispatchId);
+  const message = attemptStringField(body?.message) ?? attemptStringField(data.message);
+  return {
+    to_agent: to,
+    from_actor: from,
+    original_query_id: queryId,
+    original_dispatch_id: dispatchId,
+    subject: message ? message.slice(0, 160) : null,
+  };
+}
+
+function responseErrorMessage(payload: unknown): string | null {
+  if (!payload || typeof payload !== 'object') return null;
+  const rec = payload as Record<string, unknown>;
+  return attemptStringField(rec.error) ?? attemptStringField(rec.message);
+}
+
+function attemptStringField(value: unknown): string | null {
+  return typeof value === 'string' && value.length > 0 ? value : null;
+}
+
+type NormalizedAgentDoneResult = {
+  result: Record<string, unknown> | null;
+  artifact_path: string | null;
+  report_id: string | null;
+};
+
+type TaskDetailCacheEntry = {
+  body: Record<string, unknown>;
+  listKey: string;
+};
+
+function normalizeAgentDoneResult(body: {
+  result?: unknown;
+  artifact_path?: unknown;
+  report_id?: unknown;
+}): NormalizedAgentDoneResult {
+  const source =
+    body.result && typeof body.result === 'object' && !Array.isArray(body.result)
+      ? { ...(body.result as Record<string, unknown>) }
+      : {};
+  const artifactPath =
+    stringField(source.artifact_path) ??
+    stringField(source.artifactPath) ??
+    stringField(body.artifact_path);
+  const reportId =
+    stringField(source.report_id) ??
+    stringField(source.reportId) ??
+    stringField(body.report_id) ??
+    (artifactPath ? artifactIdFromPath(artifactPath) : null);
+
+  if (artifactPath) source.artifact_path = artifactPath;
+  if (reportId) source.report_id = reportId;
+
+  return {
+    result: Object.keys(source).length > 0 ? source : null,
+    artifact_path: artifactPath,
+    report_id: reportId,
+  };
+}
+
+function stringField(value: unknown): string | null {
+  return typeof value === 'string' && value.trim() ? value.trim() : null;
+}
+
+async function updateOriginatingInboxRowsForAgentDone(
+  adapter: Db['adapter'],
+  input: {
+    dispatch_id: string;
+    query_id: string | null;
+    artifact_path: string;
+    report_id: string | null;
+    agent: string;
+  },
+): Promise<string[]> {
+  migrateInboxTables(adapter);
+  const targets = [input.dispatch_id, input.query_id].filter((v): v is string => Boolean(v));
+  if (targets.length === 0) return [];
+  const placeholders = targets.map((_, i) => `$${i + 1}`).join(', ');
+  const { rows } = await adapter.query<{ inbox_phid: string }>(
+    `SELECT DISTINCT inbox_phid
+       FROM inbox_links
+      WHERE kind = 'dispatch'
+        AND target IN (${placeholders})`,
+    targets,
+  );
+  const refs = rows.map((row) => row.inbox_phid).filter(Boolean);
+  const now = new Date().toISOString();
+  for (const inboxPhid of refs) {
+    await upsertLink(adapter, inboxPhid, 'dispatch', input.dispatch_id);
+    await upsertLink(adapter, inboxPhid, 'artifact', input.artifact_path);
+    if (input.report_id) {
+      await upsertLink(adapter, inboxPhid, 'artifact', input.report_id);
+    }
+    await updateOperatorState(adapter, inboxPhid, 'output_ready', {
+      resolved_at: now,
+      checked_off_at: now,
+      checked_off_reason: 'agent_done_output_ready',
+    });
+    await appendAuditEvent(adapter, {
+      inbox_phid: inboxPhid,
+      op_id: `agent-done:${input.dispatch_id}`,
+      op_type: 'DISPATCH_RESPONSE_READY',
+      actor_id: `agent:${input.agent}`,
+      ts: now,
+      reason: null,
+      summary: `Dispatch ${input.dispatch_id} completed with artifact response ready`,
+      input_revision: null,
+      links_json: JSON.stringify([
+        { kind: 'dispatch', target: input.dispatch_id },
+        { kind: 'artifact', target: input.artifact_path },
+        ...(input.report_id ? [{ kind: 'artifact', target: input.report_id }] : []),
+      ]),
+    });
+  }
+  return refs;
 }
 
 type FleetMetricsHistoryRange = FleetMetricsHistoryResponse["range"];
@@ -389,6 +555,14 @@ const TOPIC_ALIASES: Record<string, readonly string[]> = {
   'query:terminal': ['query:delivered', 'query:failed', 'query:expired'],
   'task:status': ['task:created', 'task:claimed', 'task:completed'],
   'agent:lifecycle': ['agent:started', 'agent:stopped', 'agent:rebuild'],
+  'read_model:changes': [
+    READ_MODEL_ARTIFACT_CHANGED,
+    READ_MODEL_COMMENT_CHANGED,
+    READ_MODEL_READ_STATE_CHANGED,
+    READ_MODEL_TASK_CHANGED,
+    READ_MODEL_PROJECT_CHANGED,
+    READ_MODEL_CURSOR_EXPIRED,
+  ],
 };
 
 function expandTopicAliases(topics: readonly string[]): string[] {
@@ -404,11 +578,85 @@ function expandTopicAliases(topics: readonly string[]): string[] {
   return Array.from(out);
 }
 
+function eventStableId(teamName: string, seq: number): string {
+  return `evt:${teamName}:${seq}`;
+}
+
+function cursorExpiredEvent(teamName: string, since: number, earliestAvailableSeq: number | null) {
+  const nextAvailableSeq = earliestAvailableSeq ?? since;
+  return {
+    id: `evt:${teamName}:cursor_expired:${since}:${nextAvailableSeq}`,
+    seq: since,
+    team: teamName,
+    topic: READ_MODEL_CURSOR_EXPIRED,
+    occurred_at: Date.now(),
+    actor: null,
+    subject: null,
+    data: {
+      cursor: since,
+      earliest_available_seq: earliestAvailableSeq,
+      invalidates: {
+        keys: [],
+        scopes: ['artifacts', 'tasks', 'projects'],
+        reason: 'cursor_expired',
+      },
+      resync_required: true,
+    },
+  };
+}
+
+function eventInvalidates(row: {
+  topic: string;
+  subject_kind: string | null;
+  subject_id: string | null;
+  data: Record<string, unknown>;
+}) {
+  const existing = row.data.invalidates;
+  if (existing && typeof existing === 'object') return existing;
+  const kind = row.subject_kind;
+  const id = row.subject_id;
+  if (kind === 'task' && id) {
+    return {
+      keys: [`task:${id}`, 'read-model:tasks', 'read-model:search'],
+      scopes: ['tasks', 'projects'],
+      reason: row.topic,
+    };
+  }
+  if (kind === 'artifact' && id) {
+    return {
+      keys: [`artifact:${id}`, `artifact:${id}:detail`, 'read-model:artifacts', 'read-model:search'],
+      scopes: ['artifacts', 'projects'],
+      reason: row.topic,
+    };
+  }
+  return null;
+}
+
 function parseTodayQuery(value: unknown): string | null {
   if (typeof value !== 'string') return null;
   if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return null;
   const parsed = new Date(`${value}T00:00:00.000Z`);
   return Number.isFinite(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value ? value : null;
+}
+
+function firstNonEmptyString(...values: unknown[]): string | null {
+  for (const value of values) {
+    if (typeof value === 'string' && value.trim().length > 0) {
+      return value.trim();
+    }
+  }
+  return null;
+}
+
+function createdAtMs(value: unknown): number {
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  if (typeof value === 'string') {
+    const numeric = Number(value);
+    if (Number.isFinite(numeric)) return numeric;
+    const parsed = Date.parse(value);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return 0;
 }
 
 /**
@@ -655,6 +903,7 @@ export class AgentManagerDb {
   private fleetMetricsHistoryStorage: FleetMetricsHistoryStorage | null = null;
   private dispatchVerificationJob: DispatchVerificationJob | null = null;
   private dispatchRecoveryService: DispatchRecoveryService | null = null;
+  private continuousOrchestrationDaemon: ContinuousOrchestrationDaemon | null = null;
   private usageGateSnapshotProvider: (() => Promise<UsageGateSnapshot>) | null = null;
   private fleetBlockageMonitorInterval: NodeJS.Timeout | null = null;
   private fleetBlockageAlertFingerprint = '';
@@ -701,6 +950,8 @@ export class AgentManagerDb {
   private retentionService: RetentionService | null = null;
   private checkinService: CheckinService | null = null;
   private supervisorWatcher: { stop(): void } | null = null;
+  private readonly taskDetailCache = new Map<string, TaskDetailCacheEntry>();
+  private static readonly TASK_DETAIL_CACHE_MAX = 100;
   /**
    * Stuck-query sweeper timeout, in minutes. Queries whose status is still
    * pending/processing this long after their `created` timestamp are assumed
@@ -805,6 +1056,7 @@ export class AgentManagerDb {
       completed_at: nowSec,
       updated_at: nowSec,
     });
+    this.clearTaskDetailCache();
     const updated = await this.db.tasks.getByNameForTeam(task.name, teamId);
     if (!updated) {
       // updateFields succeeded against `task.id` but the re-read missed
@@ -1225,6 +1477,58 @@ export class AgentManagerDb {
     return getBuildStatusCached({ repoDir: process.cwd(), distDir: __dirname });
   }
 
+  private async buildConsoleHealth(teamName: string, teamId: string): Promise<Record<string, unknown>> {
+    try {
+      const orchestration = await readOrchestrationHealthProjection(this.db.adapter, teamName);
+      const readyAdmission = this.continuousOrchestrationDaemon
+        ? await this.continuousOrchestrationDaemon.explainReadyAdmission()
+        : null;
+      const admissionBreakdown = this.continuousOrchestrationDaemon
+        ? await this.continuousOrchestrationDaemon.explainAdmissionBreakdown()
+        : null;
+      const admissibleNow = readyAdmission?.admissible_now ?? orchestration.orchestration_loop.actionable_ready_count;
+      const readyBlockedByReason =
+        readyAdmission?.block_reason_counts ??
+        Object.fromEntries(orchestration.ready_item_blockers.categories.map((row) => [row.code, row.count]));
+      return {
+        ok: orchestration.ok,
+        team: teamName,
+        generated_at: orchestration.generated_at,
+        orchestration: {
+          state: orchestration.orchestration_loop.state,
+          reason: orchestration.orchestration_loop.reason,
+          ready_count: orchestration.orchestration_loop.ready_count,
+          admissible_now: admissibleNow,
+          actionable_ready_count: admissibleNow,
+          ready_blocked_by_reason: readyBlockedByReason,
+          noop_tick_count: orchestration.orchestration_loop.noop_tick_count,
+          last_tick_at: orchestration.orchestration_loop.last_tick_at,
+          last_launch_at: orchestration.orchestration_loop.last_launch_at,
+          last_noop_reason: orchestration.orchestration_loop.last_noop_reason,
+          first_stalled_at: orchestration.orchestration_loop.first_stalled_at,
+          scheduler_loop_id: orchestration.orchestration_loop.scheduler_loop_id,
+          ready_item_blockers: orchestration.ready_item_blockers,
+          admission_breakdown: admissionBreakdown,
+        },
+      };
+    } catch (err) {
+      return {
+        ok: false,
+        team: teamName,
+        generated_at: new Date().toISOString(),
+        orchestration: {
+          state: 'misconfigured',
+          reason: err instanceof Error ? err.message : String(err),
+          ready_count: null,
+          noop_tick_count: null,
+          last_launch_at: null,
+          last_noop_reason: null,
+          scheduler_loop_id: `continuous-orchestration:${teamId}`,
+        },
+      };
+    }
+  }
+
   /**
    * T-RECON.2: classification options for the dispatch read-model. Threads the
    * model-policy constrained_providers so a failure on an intentionally-disabled
@@ -1518,7 +1822,7 @@ export class AgentManagerDb {
       // canonical `runtime` column at read time, so the API can never emit a
       // top-level runtime that disagrees with metadata.runtime (the CTO/Regina/
       // Rams divergence bug). The column is the single source of truth.
-      metadata: deriveMetadataWithRuntime(a.metadata, a.runtime),
+      metadata: deriveMetadataWithRuntime(a.metadata, a.runtime, a.model),
       // Identity fields
       tokenId: a.token_id,
       domain,
@@ -1541,6 +1845,18 @@ export class AgentManagerDb {
 
   private async dbQueryAgentByNameMostRecent(teamId: string, name: string): Promise<AgentRow | null> {
     return this.db.agents.getByName(teamId, name);
+  }
+
+  private async dbQueryAgentByRefMostRecent(teamId: string, ref: string): Promise<AgentRow | null> {
+    const byId = await this.dbQueryAgentById(teamId, ref);
+    if (byId) return byId;
+    try {
+      const matches = await this.dbResolveAgents(teamId, ref);
+      if (matches.length === 0) return null;
+      return matches.sort((a, b) => createdAtMs(b.created_at) - createdAtMs(a.created_at))[0];
+    } catch {
+      return null;
+    }
   }
 
   private async dbListAgents(teamId: string, includeAutomator: boolean = false): Promise<AgentRow[]> {
@@ -2125,6 +2441,44 @@ export class AgentManagerDb {
     return { ok: true, data };
   }
 
+  private async forwardNewsToAgent(
+    targetUrl: string,
+    input: {
+      message: string;
+      from: string;
+      data?: unknown;
+      trigger?: boolean;
+      session_id?: string;
+    },
+  ): Promise<{ ok: true; data: any } | { ok: false; status: number; error: string }> {
+    const newsRes = await fetch(`${targetUrl}/news`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        type: 'message',
+        message: input.message,
+        from: input.from,
+        data: input.data,
+        session_id: input.session_id,
+        ...(input.trigger === true ? { trigger: true } : {}),
+      }),
+      signal: AbortSignal.timeout(5000),
+    });
+
+    if (!newsRes.ok) {
+      const errorText = await newsRes.text().catch(() => newsRes.statusText);
+      return { ok: false, status: newsRes.status, error: errorText };
+    }
+
+    let data: any = {};
+    try {
+      data = await newsRes.json();
+    } catch {
+      data = { accepted: true };
+    }
+    return { ok: true, data };
+  }
+
   /**
    * Unified message handler for /message, /talk-to, and /news-to.
    * Default: fire-and-forget. With wait:true or timeout: waits for reply.
@@ -2134,9 +2488,10 @@ export class AgentManagerDb {
   private async handleMessage(req: express.Request, res: express.Response) {
     try {
       const { id: teamId } = await this.getTeam(req);
-      const { agent: agentField, to: toField, message, from, session_id, wait, timeout: requestTimeout } = req.body || {};
+      const { agent: agentField, to: toField, message, from, session_id, wait, timeout: requestTimeout, data, trigger } = req.body || {};
       const agent = toField || agentField;
       const preferDispatchReceipt = (req as any)._preferDispatchReceipt === true;
+      const newsTo = (req as any)._newsTo === true;
 
       if (!agent || !message) {
         return res.status(400).json({ error: 'Missing "to" (agent name) or "message"' });
@@ -2261,6 +2616,27 @@ export class AgentManagerDb {
       }
 
       this.managerLog(`${shouldWait ? 'Forwarding' : 'Sending async'} message to ${targetDisplayId} at ${targetUrl}`);
+
+      if (newsTo) {
+        const newsResult = await this.forwardNewsToAgent(targetUrl, {
+          message,
+          from: from || 'manager',
+          data,
+          trigger,
+          session_id,
+        });
+        if (!newsResult.ok) {
+          console.error(`[Manager] Failed to deliver news to ${targetDisplayId}: ${newsResult.status}`);
+          return res.status(newsResult.status).json({ error: newsResult.error });
+        }
+        return res.status(202).json({
+          success: true,
+          delivered_to: targetDisplayId,
+          status: 'delivered',
+          triggered: trigger === true || newsResult.data?.triggered === true,
+          query_id: newsResult.data?.query_id ?? newsResult.data?.queryId ?? null,
+        });
+      }
 
       // Gateway path: under DISPATCH_GATEWAY_MODE=shadow|enforce, enqueue a
       // Dispatch doc and let the scheduler drain the queue at safe
@@ -2540,7 +2916,17 @@ export class AgentManagerDb {
       closed_at: null,
       closed_reason: null,
     };
-    await this.db.checkins.create(checkinRow);
+    try {
+      await this.db.checkins.create(checkinRow);
+    } catch (err: any) {
+      try {
+        await this.db.tasks.delete(taskRow.id);
+      } catch (cleanupErr) {
+        console.error('[Manager] Failed to roll back auto-attached task after checkin create failure:', cleanupErr);
+      }
+      console.error('[Manager] Failed to create auto-attach checkin; rolled back task:', err);
+      throw makeAutoAttachError(500, 'checkin_auto_attach_failed');
+    }
 
     try {
       await recordCheckinCreated(this.db.events, this.db.checkins, {
@@ -2661,6 +3047,46 @@ export class AgentManagerDb {
     return model;
   }
 
+  private async installDispatchAttemptRecorder(
+    req: express.Request,
+    res: express.Response,
+    route: "/talk-to" | "/news-to",
+  ): Promise<void> {
+    const { id: teamId } = await this.getTeam(req);
+    const body = req.body || {};
+    let responseJson: unknown = null;
+    const originalJson = res.json.bind(res);
+    res.json = ((payload: unknown) => {
+      responseJson = payload;
+      return originalJson(payload);
+    }) as typeof res.json;
+
+    res.once("finish", () => {
+      const metadata = extractDispatchAttemptMetadata(body);
+      void recordDispatchAttempt(this.db.adapter, {
+        team_id: teamId,
+        route,
+        to_agent: metadata.to_agent,
+        from_actor: metadata.from_actor,
+        original_query_id: metadata.original_query_id,
+        original_dispatch_id: metadata.original_dispatch_id,
+        subject: metadata.subject,
+        status_code: res.statusCode,
+        ok: res.statusCode >= 200 && res.statusCode < 300,
+        error: res.statusCode >= 400
+          ? responseErrorMessage(responseJson) ?? res.statusMessage ?? null
+          : null,
+        response_json: responseJson,
+        created_at: new Date().toISOString(),
+      }).catch((err) => {
+        console.warn(
+          "[Manager] dispatch attempt ledger write failed:",
+          err instanceof Error ? err.message : String(err),
+        );
+      });
+    });
+  }
+
   private setupRoutes() {
     // Phase 6.1: deterministic concurrency snapshot for /system-live and
     // operator probes. Returns in_flight, queued, bounced, available_slots,
@@ -2678,6 +3104,27 @@ export class AgentManagerDb {
         return res.json({ ok: true, dispatch: snap });
       } catch (err) {
         return res.status(500).json({
+          ok: false,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    });
+
+    this.managementApp.get('/dispatch-attempt-ledger', async (req, res) => {
+      try {
+        const { id: teamId } = await this.getTeam(req);
+        await migrateDispatchAttemptLedger(this.db.adapter);
+        const limit = parseReadLimit(req.query.limit, { defaultLimit: 25, maxLimit: 100 });
+        const rows = await readDispatchAttemptLedger(this.db.adapter, teamId, limit);
+        res.json({
+          ok: true,
+          schema_version: 'dispatch-attempt-ledger.v1',
+          team_id: teamId,
+          limit,
+          attempts: rows,
+        });
+      } catch (err) {
+        res.status(500).json({
           ok: false,
           error: err instanceof Error ? err.message : String(err),
         });
@@ -3051,6 +3498,27 @@ export class AgentManagerDb {
     };
     const operatorActionDedupKey = (kind: 'retry' | 'reassign', dispatchPhid: string, toAgent: string) =>
       `operator-action:${kind}:${dispatchPhid}:${toAgent}`;
+    const emitOperatorActionTimeoutNotification = async (
+      req: express.Request,
+      doc: { dispatch_phid: string; query_id?: string | null; to_agent: string },
+      action: { idempotency_key: string },
+      ownerRoute: string,
+    ) => {
+      const { id: teamId } = await this.getTeam(req);
+      return emitNotificationReactorEvent(this.db.adapter, {
+        team_id: teamId,
+        reason: 'action_delivery_timeout',
+        classification: 'retryable',
+        owner_route: ownerRoute,
+        source: {
+          dispatch_id: doc.dispatch_phid,
+          query_id: doc.query_id ?? null,
+          action_id: action.idempotency_key,
+        },
+        occurred_at: new Date().toISOString(),
+        safe_message: `Operator action timed out for dispatch ${doc.dispatch_phid}; retry with the same idempotency key will not double-fire.`,
+      });
+    };
 
     // POST /dispatches/:id/moot — dismiss a dead failure out of NEEDS-YOU.
     this.managementApp.post('/dispatches/:dispatch_id/moot', async (req, res) => {
@@ -3079,13 +3547,17 @@ export class AgentManagerDb {
           run: () => this.dispatchScheduler!.reactor.markMoot(doc.dispatch_phid, reason),
         });
         if (action.status === 'timed_out') {
+          const notification = await emitOperatorActionTimeoutNotification(req, doc, action, doc.to_agent);
           return res.status(504).json({
             ok: false,
             action_status: action.status,
             idempotency_key: action.idempotency_key,
             latency_ms: action.latency_ms,
             deduped: action.deduped,
-            error: 'operator action timed out',
+            notification_id: notification.notification_id,
+            classification: notification.classification,
+            owner_route: notification.owner_route,
+            error: notification.safe_message,
           });
         }
         if (action.status === 'failed') {
@@ -3162,13 +3634,17 @@ export class AgentManagerDb {
           },
         });
         if (action.status === 'timed_out') {
+          const notification = await emitOperatorActionTimeoutNotification(req, doc, action, toAgent);
           return res.status(504).json({
             ok: false,
             action_status: action.status,
             idempotency_key: action.idempotency_key,
             latency_ms: action.latency_ms,
             deduped: action.deduped,
-            error: 'operator action timed out',
+            notification_id: notification.notification_id,
+            classification: notification.classification,
+            owner_route: notification.owner_route,
+            error: notification.safe_message,
           });
         }
         if (action.status === 'failed') {
@@ -3712,6 +4188,7 @@ export class AgentManagerDb {
           agent?: unknown;
           // Verify-on-done gate: the deliverable the agent claims it produced.
           artifact_path?: unknown;
+          report_id?: unknown;
           // Harness-resilience (Spec 2026-05-29): structured terminal
           // failure on success:false. failure_kind must be one of the
           // canonical FailureKind values; error is a short prose detail.
@@ -3795,6 +4272,7 @@ export class AgentManagerDb {
             : null;
 
         const success = body.success !== false;
+        const normalizedResult = normalizeAgentDoneResult(body);
 
         // Harness-resilience (Spec 2026-05-29): failed dispatches do NOT
         // need promotion metadata — promotion only applies to successful
@@ -3862,6 +4340,34 @@ export class AgentManagerDb {
               `[agent-done] recordPromotionResult failed (continuing): ${err instanceof Error ? err.message : String(err)}`,
             );
           }
+          try {
+            const incident = classifyPromotionHygieneFailure({
+              repo: doc.promotion_input?.repo ?? null,
+              branch: doc.promotion_input?.branch ?? null,
+              dispatch_id: doc.dispatch_phid,
+              text: JSON.stringify({
+                failure_detail: typeof body.error === 'string' ? body.error : null,
+                promotion,
+              }),
+              payload: promotion,
+            });
+            if (incident) {
+              const loop = await getLoopRecord(this.db.adapter, 'worktree-hygiene');
+              if (loop) {
+                const nowIso = new Date().toISOString();
+                const run = buildPromotionHygieneRun(loop, incident, nowIso, {
+                  source: 'orchestration',
+                  actor: { kind: 'system', id: 'agent-done-promotion-hygiene', label: 'Agent Done Promotion Hygiene' },
+                });
+                await createLoopRun(this.db.adapter, run);
+                await upsertWorktreeHygieneCleanupRoute(this.db.adapter, incident, { nowIso });
+              }
+            }
+          } catch (err) {
+            this.managerLog(
+              `[agent-done] promotion hygiene loop routing failed (continuing): ${err instanceof Error ? err.message : String(err)}`,
+            );
+          }
         }
 
         // Map structured failure metadata when success === false. Whitelist
@@ -3891,10 +4397,7 @@ export class AgentManagerDb {
         try {
           await this.dispatchScheduler.handleAgentDone({
             query_id: doc.query_id,
-            result:
-              body.result && typeof body.result === 'object'
-                ? (body.result as Record<string, unknown>)
-                : null,
+            result: normalizedResult.result,
             success,
             failure_kind: failureKind,
             error: errorDetail,
@@ -3909,21 +4412,33 @@ export class AgentManagerDb {
           });
         }
 
+        let artifactRegistration: {
+          artifact_id: string;
+          title: string;
+          source_path: string;
+          source_proof: {
+            source: string;
+            source_badges: string[];
+            dispatch_ref: string | null;
+            source_host: string | null;
+          };
+          freshness: 'current' | 'body_unavailable';
+          content_hash: string | null;
+          stable_url: string;
+          copy_text_url: string;
+          download_url: string;
+          cached_body: boolean;
+          body_unavailable: boolean;
+          body_error: string | null;
+        } | null = null;
+
         // Fresh artifact delivery: /agent-done is the first reliable event that
         // an output exists. Register the claimed path immediately so Desk /
         // Recent Output can surface stable artifact metadata and explicit
         // missing-body state without waiting for filesystem reconciliation.
         if (success) {
-          const resultProjection: Record<string, unknown> | null =
-            body.result && typeof body.result === 'object'
-              ? (body.result as Record<string, unknown>)
-              : null;
-          const artifactPath =
-            typeof resultProjection?.artifact_path === 'string' && resultProjection.artifact_path.trim()
-              ? resultProjection.artifact_path.trim()
-              : typeof body.artifact_path === 'string' && body.artifact_path.trim()
-                ? body.artifact_path.trim()
-                : null;
+          const resultProjection = normalizedResult.result;
+          const artifactPath = normalizedResult.artifact_path;
           if (artifactPath) {
             try {
               await migrateOutputsTables(this.db.adapter);
@@ -3943,7 +4458,7 @@ export class AgentManagerDb {
                 typeof resultProjection?.source_host === 'string' && resultProjection.source_host.trim()
                   ? resultProjection.source_host.trim()
                   : null;
-              await registerArtifactPathDelivery(
+              const registered = await registerArtifactPathDelivery(
                 this.db.adapter,
                 {
                   abs_path: artifactPath,
@@ -3956,6 +4471,25 @@ export class AgentManagerDb {
                 },
                 new Date().toISOString(),
               );
+              artifactRegistration = {
+                artifact_id: registered.row.artifact_id,
+                title: registered.row.title ?? registered.row.basename,
+                source_path: registered.row.abs_path,
+                source_proof: {
+                  source: registered.row.source,
+                  source_badges: JSON.parse(registered.row.source_badges || '[]'),
+                  dispatch_ref: registered.row.dispatch_ref,
+                  source_host: registered.row.source_host,
+                },
+                freshness: registered.body_cached ? 'current' : 'body_unavailable',
+                content_hash: registered.row.content_hash,
+                stable_url: `/artifacts/${encodeURIComponent(registered.row.artifact_id)}/detail`,
+                copy_text_url: `/artifacts/${encodeURIComponent(registered.row.artifact_id)}/copy-text`,
+                download_url: `/artifacts/${encodeURIComponent(registered.row.artifact_id)}/download`,
+                cached_body: registered.body_cached,
+                body_unavailable: !registered.body_cached,
+                body_error: registered.body_error,
+              };
             } catch (err) {
               this.managerLog(
                 `[agent-done] artifact registration failed for ${doc.dispatch_phid}: ${err instanceof Error ? err.message : String(err)}`,
@@ -3963,6 +4497,21 @@ export class AgentManagerDb {
             }
           }
         }
+
+        const inboxRefs = success && normalizedResult.artifact_path
+          ? await updateOriginatingInboxRowsForAgentDone(this.db.adapter, {
+            dispatch_id: doc.dispatch_phid,
+            query_id: doc.query_id,
+            artifact_path: normalizedResult.artifact_path,
+            report_id: normalizedResult.report_id,
+            agent: typeof body.agent === 'string' && body.agent.trim() ? body.agent.trim() : doc.to_agent,
+          }).catch((err) => {
+            this.managerLog(
+              `[agent-done] originating inbox update failed for ${doc.dispatch_phid}: ${err instanceof Error ? err.message : String(err)}`,
+            );
+            return [] as string[];
+          })
+          : [];
 
         // Read-model back-write (2026-06-13): the scheduler closes
         // dispatch_scheduler_queue above, but historically nothing
@@ -3978,10 +4527,7 @@ export class AgentManagerDb {
         // dispatch closeout that the scheduler already committed.
         // See: cane/output/2026-06-13-query-row-not-resolved-after-dispatch-done.md
         try {
-          const resultProjection: Record<string, unknown> | null =
-            body.result && typeof body.result === 'object'
-              ? (body.result as Record<string, unknown>)
-              : null;
+          const resultProjection = normalizedResult.result;
           // DispatchDoc doesn't carry team_id, so look it up from the
           // queries table directly. If no matching queries row exists
           // (e.g. dispatch issued via a path that didn't pre-create the
@@ -4023,6 +4569,16 @@ export class AgentManagerDb {
           state: success ? 'done' : 'failed',
           mode,
           promotion_warning: ('warning' in validation ? validation.warning : null) ?? null,
+          receipt: {
+            schema_version: 'agent_done.receipt.v1',
+            dispatch_id: doc.dispatch_phid,
+            query_id: doc.query_id,
+            response_status: success ? (normalizedResult.artifact_path ? 'output_ready' : 'done') : 'failed',
+            artifact_path: normalizedResult.artifact_path,
+            report_id: normalizedResult.report_id,
+            artifact_registration: artifactRegistration,
+            inbox_refs: inboxRefs,
+          },
         });
       } catch (err) {
         return res.status(500).json({
@@ -4141,6 +4697,21 @@ export class AgentManagerDb {
       const recovery_backfill = this.dispatchRecoveryService
         ? this.dispatchRecoveryService.getBackfillMetrics()
         : { recovery_backfill_runs_total: 0, recovery_backfill_rows_reclassified_total: 0 };
+      const consoleHealth = dbProbe.timedOut || !dbProbe.value.teamId
+        ? {
+            ok: false,
+            team: teamName,
+            generated_at: new Date().toISOString(),
+            orchestration: {
+              state: 'misconfigured',
+              reason: dbProbe.timedOut ? 'health DB probe timed out' : 'team not found',
+              ready_count: null,
+              noop_tick_count: null,
+              last_launch_at: null,
+              last_noop_reason: null,
+            },
+          }
+        : await this.buildConsoleHealth(teamName, dbProbe.value.teamId);
       res.json({
         status: 'ok',
         team: teamName,
@@ -4150,6 +4721,9 @@ export class AgentManagerDb {
         recovery_backfill,
         // T11.1: the running build identity + staleness-vs-origin signal.
         build: this.getBuildStatus(),
+        // T-RELY: fail-loud disk headroom so build waves see ENOSPC risk before
+        // database I/O and test runs start failing mid-flight.
+        disk: readDiskHeadroom(),
         // T-DEPLOY.1: how long the running build has been behind origin/main +
         // whether the freshness monitor has alerted (the drift watchdog state).
         freshness: {
@@ -4161,7 +4735,33 @@ export class AgentManagerDb {
         // configured nodes (console-server / kapelle-site), so /ops can surface
         // drift on ANY node, not just the manager.
         fleet_freshness: this.fleetFreshnessSummary,
+        console: consoleHealth,
       });
+    });
+
+    this.managementApp.get('/health/console', async (req, res) => {
+      const teamName = this.getTeamName(req);
+      try {
+        const team = await this.db.teams.getTeamByName(teamName);
+        if (!team) {
+          return res.status(404).json({
+            ok: false,
+            team: teamName,
+            generated_at: new Date().toISOString(),
+            orchestration: {
+              state: 'misconfigured',
+              reason: 'team not found',
+              ready_count: null,
+              noop_tick_count: null,
+              last_launch_at: null,
+              last_noop_reason: null,
+            },
+          });
+        }
+        return res.json(await this.buildConsoleHealth(teamName, team.id));
+      } catch (err) {
+        return res.status(500).json({ ok: false, error: err instanceof Error ? err.message : String(err) });
+      }
     });
 
     // Install team/principal context middleware for all remaining routes.
@@ -4229,7 +4829,7 @@ export class AgentManagerDb {
     this.managementApp.get('/dispatches/health', async (req, res) => {
       try {
         const { id: teamId, name: teamName } = await this.getTeam(req);
-        const health = await readDispatchHealth(this.db.adapter, teamId, this.runtimeDriftSummary);
+        const health = await readDispatchHealth(this.db.adapter, teamId, this.runtimeDriftSummary, teamName);
         return res.json({ ok: true, team: teamName, ...health });
       } catch (err) {
         return res.status(500).json({
@@ -4539,6 +5139,7 @@ export class AgentManagerDb {
           actor: { kind: 'system', id: 'promotion-hygiene-router', label: 'Promotion Hygiene Router' },
         });
         const result = await createLoopRun(this.db.adapter, run);
+        const cleanupRoute = await upsertWorktreeHygieneCleanupRoute(this.db.adapter, incident, { nowIso });
         return res.json({
           ok: true,
           loop_phid: loop.loop_phid,
@@ -4547,6 +5148,13 @@ export class AgentManagerDb {
           duplicate: !result.created,
           dedupe_key: hygieneDedupeKey(incident),
           incident,
+          cleanup_route: {
+            owner_lane: cleanupRoute.owner_lane,
+            task_name: cleanupRoute.task_name,
+            item_id: cleanupRoute.item.item_id,
+            cleanup_dispatch_id: cleanupRoute.cleanup_dispatch_id,
+            created: cleanupRoute.created,
+          },
           status_url: `/loops/runs/${result.run.loop_run_phid}`,
         });
       } catch (err) {
@@ -5159,6 +5767,7 @@ export class AgentManagerDb {
     this.managementApp.post('/talk-to', async (req, res, next) => {
       (req as any)._preferDispatchReceipt = true;
       try {
+        await this.installDispatchAttemptRecorder(req, res, '/talk-to');
         const result = await this.maybeAutoAttachForTalkTo(req);
         if (result) (req as any)._autoAttach = result;
       } catch (err: any) {
@@ -5174,7 +5783,10 @@ export class AgentManagerDb {
       if (req.body) {
         req.body.wait = false;
       }
-      this.handleMessage(req, res).catch(next);
+      (req as any)._newsTo = true;
+      this.installDispatchAttemptRecorder(req, res, '/news-to')
+        .then(() => this.handleMessage(req, res))
+        .catch(next);
     });
 
     // REST-AP /news endpoint - receive replies from agents
@@ -5880,7 +6492,7 @@ export class AgentManagerDb {
         if (name.toLowerCase() === 'manager') {
           return res.status(404).json({ error: 'Agent not found' });
         }
-        const agent = await this.dbQueryAgentByNameMostRecent(teamId, name);
+        const agent = await this.dbQueryAgentByRefMostRecent(teamId, name);
         if (!agent) return res.status(404).json({ error: `Agent "${name}" not found` });
         const metadata = (agent.metadata as Record<string, unknown> | undefined) ?? {};
         const detail = await assembleAgentDetail(this.db.adapter, {
@@ -5982,7 +6594,7 @@ export class AgentManagerDb {
 
     this.managementApp.get('/agents/:id', async (req, res) => {
       const { id: teamId } = await this.getTeam(req);
-      const agent = await this.dbQueryAgentById(teamId, req.params.id);
+      const agent = await this.dbQueryAgentByRefMostRecent(teamId, req.params.id);
       if (!agent) return res.status(404).json({ error: 'Agent not found' });
       res.json(this.agentToResponse(agent, { isAdmin: this.isAdminRequest(req) }));
     });
@@ -7530,6 +8142,37 @@ export class AgentManagerDb {
         );
 
         await this.db.tasks.create(taskRow);
+        await emitReadModelChange(this.db.events, {
+          teamId: taskTeamId,
+          topic: READ_MODEL_TASK_CHANGED,
+          entityKind: 'task',
+          entityId: taskRow.uuid,
+          actorAgentId: createdBy,
+          occurredAt: Date.now(),
+          invalidates: {
+            keys: [`task:${taskRow.uuid}`, `task:${taskRow.name}`, 'read-model:tasks', 'read-model:search'],
+            scopes: ['tasks', 'projects'],
+            reason: 'task_project_changed',
+          },
+          data: { change: 'created', task_uuid: taskRow.uuid, task_name: taskRow.name },
+        });
+        if (track !== '(unassigned)') {
+          await emitReadModelChange(this.db.events, {
+            teamId: taskTeamId,
+            topic: READ_MODEL_PROJECT_CHANGED,
+            entityKind: 'project',
+            entityId: track,
+            actorAgentId: createdBy,
+            occurredAt: Date.now(),
+            invalidates: {
+              keys: [`project:${track}`, 'read-model:projects', 'read-model:search'],
+              scopes: [`project:${track}`, 'projects'],
+              reason: 'task_project_changed',
+            },
+            data: { change: 'task_linked', task_uuid: taskRow.uuid, task_name: taskRow.name, track },
+          });
+        }
+        this.clearTaskDetailCache();
         res.status(201).json({ ok: true, task: await this.buildTaskResult(taskRow, teamId) });
       } catch (err: any) {
         console.error('[Manager] Error in POST /tasks:', err);
@@ -7566,9 +8209,34 @@ export class AgentManagerDb {
           teamId: teamIdFilter,
         });
 
+        const listKey = JSON.stringify({
+          route: 'tasks',
+          teamId: teamIdFilter,
+          status: status && validStatuses.includes(status) ? status : null,
+          owner: ownerIdFilter ?? null,
+          today,
+        });
         const results = [];
-        for (const t of tasks) {
-          results.push(await this.buildTaskResult(t, teamId, today));
+        for (const [index, t] of tasks.entries()) {
+          const task = await this.buildTaskResult(t, teamId, today);
+          results.push(task);
+          this.rememberTaskDetail(teamIdFilter, t.name, listKey, {
+            ok: true,
+            schema_version: 'task.detail.v1',
+            version_key: this.taskDetailVersionKey(t),
+            task,
+            adjacent_prefetch: {
+              list_key: listKey,
+              index,
+              list_length: tasks.length,
+              previous: index > 0
+                ? { name: tasks[index - 1].name, url: `/tasks/${encodeURIComponent(tasks[index - 1].name)}/detail` }
+                : null,
+              next: index < tasks.length - 1
+                ? { name: tasks[index + 1].name, url: `/tasks/${encodeURIComponent(tasks[index + 1].name)}/detail` }
+                : null,
+            },
+          });
         }
         res.json({ ok: true, tasks: results, today, summary: summarizeTaskRows(tasks, today) });
       } catch (err: any) {
@@ -7628,6 +8296,241 @@ export class AgentManagerDb {
       }
     });
 
+    this.managementApp.post('/task-notes', async (req, res) => {
+      try {
+        const { id: teamId, name: teamName } = await this.getTeam(req);
+        const body = req.body || {};
+        const noteBody = typeof body.note_body === 'string'
+          ? body.note_body.trim()
+          : typeof body.note === 'string'
+            ? body.note.trim()
+            : '';
+        if (!noteBody) {
+          return res.status(400).json({ ok: false, error: 'note_body is required', code: 'missing_note_body' });
+        }
+
+        const actorRef = typeof body.actor_ref === 'string' && body.actor_ref.trim()
+          ? body.actor_ref.trim()
+          : typeof body.actor === 'string' && body.actor.trim()
+            ? body.actor.trim()
+            : 'user:chris';
+        const sourcePath = typeof body.source_path === 'string' && body.source_path.trim()
+          ? body.source_path.trim()
+          : null;
+        const sourceProject = typeof body.source_project === 'string' && body.source_project.trim()
+          ? body.source_project.trim()
+          : null;
+        const lineNumber = Number.isInteger(body.line_number) ? Number(body.line_number) : null;
+        const sourceSurface = typeof body.source_surface === 'string' && body.source_surface.trim()
+          ? body.source_surface.trim()
+          : 'task-notes';
+        const rawTaskRef = firstNonEmptyString(body.task_ref, body.task_id, body.task_name, body.task);
+        const taskRef = rawTaskRef ?? `${sourceProject ?? 'task'}:${lineNumber ?? 'unknown'}`;
+
+        const resolved = rawTaskRef ? await this.resolveTaskRefForTaskNote(rawTaskRef, teamId) : { task: undefined };
+        let updatedTask: TaskRow | null = null;
+        let idempotent = false;
+        if (resolved.task) {
+          const existingDescription = resolved.task.description ?? '';
+          idempotent = existingDescription
+            .split('\n')
+            .some((line) => line.trim() === noteBody);
+          if (!idempotent) {
+            const next = this.applyTaskFieldPatch(resolved.task, { note: noteBody });
+            const nowSec = Math.floor(Date.now() / 1000);
+            await this.db.tasks.updateFields(resolved.task.id, {
+              description: next.description,
+              updated_at: nowSec,
+            });
+            await emitReadModelChange(this.db.events, {
+              teamId,
+              topic: READ_MODEL_COMMENT_CHANGED,
+              entityKind: 'task',
+              entityId: resolved.task.uuid,
+              actorAgentId: null,
+              occurredAt: Date.now(),
+              invalidates: {
+                keys: [`task:${resolved.task.uuid}`, `task:${resolved.task.name}`, 'read-model:tasks', 'read-model:search'],
+                scopes: ['tasks', 'projects'],
+                reason: 'comment_timeline_changed',
+              },
+              data: { change: 'task_note', task_uuid: resolved.task.uuid, task_name: resolved.task.name },
+            });
+            this.clearTaskDetailCache();
+            updatedTask = await this.db.tasks.getByNameForTeam(resolved.task.name, teamId);
+          } else {
+            updatedTask = resolved.task;
+          }
+        }
+
+        const occurredAt = Date.now();
+        const noteId = `tasknote_${crypto.createHash('sha256').update(JSON.stringify({
+          teamId,
+          taskRef,
+          actorRef,
+          noteBody,
+          sourcePath,
+          sourceProject,
+          lineNumber,
+        })).digest('hex').slice(0, 24)}`;
+        const event = await this.db.events.insert({
+          team_id: teamId,
+          topic: 'task:commented',
+          actor_agent_id: null,
+          subject_kind: 'task',
+          subject_id: updatedTask?.uuid ?? taskRef,
+          occurred_at: occurredAt,
+          data: {
+            note_id: noteId,
+            task_ref: taskRef,
+            task_uuid: updatedTask?.uuid ?? null,
+            task_name: updatedTask?.name ?? (typeof body.task_name === 'string' ? body.task_name : null),
+            actor_ref: actorRef,
+            note_body: noteBody,
+            source_path: sourcePath,
+            source_project: sourceProject,
+            line_number: lineNumber,
+            source_surface: sourceSurface,
+            status: 'queued',
+          },
+        });
+
+        res.status(201).json({
+          ok: true,
+          schema_version: 'task.note.v1',
+          team_id: teamId,
+          team_name: teamName,
+          task_note: {
+            note_id: noteId,
+            task_ref: taskRef,
+            task_uuid: updatedTask?.uuid ?? null,
+            task_name: updatedTask?.name ?? null,
+            actor_ref: actorRef,
+            note_body: noteBody,
+            source_path: sourcePath,
+            source_project: sourceProject,
+            line_number: lineNumber,
+            status: 'queued',
+            event_seq: event.seq,
+            event_topic: 'task:commented',
+            resolved: Boolean(updatedTask),
+          },
+          idempotent,
+        });
+      } catch (err: any) {
+        console.error('[Manager] Error in POST /task-notes:', err);
+        res.status(500).json({ ok: false, error: err?.message || 'Internal server error' });
+      }
+    });
+
+    this.managementApp.get('/tasks/:ref/version', async (req, res) => {
+      try {
+        const { id: currentTeamId } = await this.getTeam(req);
+        const { team: teamRef } = req.query as Record<string, string>;
+        let teamIdFilter: string = currentTeamId;
+        if (teamRef) {
+          const teamRow = await this.db.teams.getTeamByName(teamRef);
+          if (!teamRow) return res.status(404).json({ error: `Team "${teamRef}" not found` });
+          teamIdFilter = teamRow.id;
+        }
+        const { task, error } = await this.resolveTaskRef(req.params.ref, teamIdFilter);
+        if (!task) return res.status(404).json({ ok: false, error: error || `Task "${req.params.ref}" not found` });
+        res.setHeader('Cache-Control', 'no-store');
+        res.json({
+          ok: true,
+          schema_version: 'task.detail.version.v1',
+          generated_at: new Date().toISOString(),
+          task_ref: req.params.ref,
+          task_name: task.name,
+          task_uuid: task.uuid,
+          version_key: this.taskDetailVersionKey(task),
+        });
+      } catch (err: any) {
+        console.error('[Manager] Error in GET /tasks/:ref/version:', err);
+        res.status(500).json({ ok: false, error: err?.message || 'Internal server error' });
+      }
+    });
+
+    this.managementApp.get('/tasks/:ref/detail', async (req, res) => {
+      try {
+        const { id: currentTeamId } = await this.getTeam(req);
+        const { status, owner, team: teamRef } = req.query as Record<string, string>;
+        const today = parseTodayQuery(req.query.today) ?? todayIso();
+
+        let ownerIdFilter: string | undefined;
+        if (owner) {
+          const { agent, error } = await this.resolveSingleAgentForCommand(currentTeamId, owner);
+          if (!agent) return res.status(404).json({ error: error || `Agent "${owner}" not found` });
+          ownerIdFilter = agent.id;
+        }
+
+        let teamIdFilter: string = currentTeamId;
+        if (teamRef) {
+          const teamRow = await this.db.teams.getTeamByName(teamRef);
+          if (!teamRow) return res.status(404).json({ error: `Team "${teamRef}" not found` });
+          teamIdFilter = teamRow.id;
+        }
+
+        const validStatuses = ['todo', 'doing', 'done'];
+        const statusFilter = status && validStatuses.includes(status) ? status as 'todo' | 'doing' | 'done' : undefined;
+        const listKey = JSON.stringify({
+          route: 'tasks',
+          teamId: teamIdFilter,
+          status: statusFilter ?? null,
+          owner: ownerIdFilter ?? null,
+          today,
+        });
+        const cacheKey = this.taskDetailCacheKey(teamIdFilter, req.params.ref, listKey);
+        const hit = this.taskDetailCache.get(cacheKey);
+        if (hit) {
+          res.setHeader('X-Task-Detail-Cache', 'hit');
+          return res.json(hit.body);
+        }
+
+        const tasks = await this.db.tasks.list({
+          status: statusFilter,
+          owner: ownerIdFilter,
+          teamId: teamIdFilter,
+        });
+        const index = tasks.findIndex((t) => t.name === req.params.ref || `#${(t.uuid || '').replace(/-/g, '').slice(0, 8)}` === req.params.ref);
+        const task = index >= 0 ? tasks[index] : (await this.resolveTaskRef(req.params.ref, teamIdFilter)).task;
+        if (!task) return res.status(404).json({ error: `Task "${req.params.ref}" not found` });
+        const listIndex = index >= 0 ? index : null;
+        const previousTask = listIndex != null && listIndex > 0 ? tasks[listIndex - 1] : null;
+        const nextTask = listIndex != null && listIndex < tasks.length - 1 ? tasks[listIndex + 1] : null;
+        const body = await this.buildTaskDetailResponse({
+          task,
+          teamId: teamIdFilter,
+          today,
+          listKey,
+          index: listIndex,
+          listLength: listIndex == null ? null : tasks.length,
+          previousTask,
+          nextTask,
+        });
+        this.rememberTaskDetail(teamIdFilter, task.name, listKey, body);
+        for (const adjacent of [previousTask, nextTask]) {
+          if (!adjacent) continue;
+          const adjacentIndex = tasks.findIndex((t) => t.id === adjacent.id);
+          this.rememberTaskDetail(teamIdFilter, adjacent.name, listKey, await this.buildTaskDetailResponse({
+            task: adjacent,
+            teamId: teamIdFilter,
+            today,
+            listKey,
+            index: adjacentIndex,
+            listLength: tasks.length,
+            previousTask: adjacentIndex > 0 ? tasks[adjacentIndex - 1] : null,
+            nextTask: adjacentIndex < tasks.length - 1 ? tasks[adjacentIndex + 1] : null,
+          }));
+        }
+        res.setHeader('X-Task-Detail-Cache', 'miss');
+        res.json(body);
+      } catch (err: any) {
+        console.error('[Manager] Error in GET /tasks/:ref/detail:', err);
+        res.status(500).json({ error: err?.message || 'Internal server error' });
+      }
+    });
+
     this.managementApp.get('/tasks/:ref', async (req, res) => {
       try {
         const { id: teamId } = await this.getTeam(req);
@@ -7663,6 +8566,21 @@ export class AgentManagerDb {
           description: next.description,
           updated_at: Math.floor(Date.now() / 1000),
         });
+        await emitReadModelChange(this.db.events, {
+          teamId,
+          topic: READ_MODEL_TASK_CHANGED,
+          entityKind: 'task',
+          entityId: task.uuid,
+          actorAgentId: null,
+          occurredAt: Date.now(),
+          invalidates: {
+            keys: [`task:${task.uuid}`, `task:${task.name}`, 'read-model:tasks', 'read-model:search'],
+            scopes: ['tasks', 'projects'],
+            reason: 'task_project_changed',
+          },
+          data: { change: 'updated', task_uuid: task.uuid, task_name: task.name },
+        });
+        this.clearTaskDetailCache();
 
         const updated = await this.db.tasks.getByNameForTeam(task.name, teamId);
         res.json({ ok: true, task: await this.buildTaskResult(updated!, teamId) });
@@ -7713,6 +8631,7 @@ export class AgentManagerDb {
         if (!claimed) {
           return res.status(409).json({ error: `Cannot claim "${task.name}" — already owned or not in todo status` });
         }
+        this.clearTaskDetailCache();
 
         const updated = await this.db.tasks.getByNameForTeam(task.name, teamId);
         await emitTaskClaimed(this.db.events, {
@@ -7722,6 +8641,20 @@ export class AgentManagerDb {
           title: updated!.title,
           ownerAgentId: agent.id,
           occurredAt: Date.now(),
+        });
+        await emitReadModelChange(this.db.events, {
+          teamId,
+          topic: READ_MODEL_TASK_CHANGED,
+          entityKind: 'task',
+          entityId: updated!.uuid,
+          actorAgentId: agent.id,
+          occurredAt: Date.now(),
+          invalidates: {
+            keys: [`task:${updated!.uuid}`, `task:${updated!.name}`, 'read-model:tasks', 'read-model:search'],
+            scopes: ['tasks', 'projects'],
+            reason: 'task_project_changed',
+          },
+          data: { change: 'claimed', task_uuid: updated!.uuid, task_name: updated!.name, owner: agent.id },
         });
         res.json({ ok: true, task: await this.buildTaskResult(updated!, teamId) });
       } catch (err: any) {
@@ -7771,6 +8704,20 @@ export class AgentManagerDb {
           teamId,
           actorAgentId: callerAgent?.id ?? null,
         });
+        await emitReadModelChange(this.db.events, {
+          teamId,
+          topic: READ_MODEL_TASK_CHANGED,
+          entityKind: 'task',
+          entityId: updated.uuid,
+          actorAgentId: callerAgent?.id ?? null,
+          occurredAt: Date.now(),
+          invalidates: {
+            keys: [`task:${updated.uuid}`, `task:${updated.name}`, 'read-model:tasks', 'read-model:search'],
+            scopes: ['tasks', 'projects'],
+            reason: 'task_project_changed',
+          },
+          data: { change: 'completed', task_uuid: updated.uuid, task_name: updated.name },
+        });
         res.json({ ok: true, task: await this.buildTaskResult(updated, teamId) });
       } catch (err: any) {
         console.error('[Manager] Error in POST /tasks/:ref/done:', err);
@@ -7784,6 +8731,21 @@ export class AgentManagerDb {
         const { task, error } = await this.resolveTaskRef(req.params.ref, teamId);
         if (!task) return res.status(404).json({ error: error || `Task "${req.params.ref}" not found` });
         await this.db.tasks.delete(task.id);
+        await emitReadModelChange(this.db.events, {
+          teamId,
+          topic: READ_MODEL_TASK_CHANGED,
+          entityKind: 'task',
+          entityId: task.uuid,
+          actorAgentId: null,
+          occurredAt: Date.now(),
+          invalidates: {
+            keys: [`task:${task.uuid}`, `task:${task.name}`, 'read-model:tasks', 'read-model:search'],
+            scopes: ['tasks', 'projects'],
+            reason: 'task_project_changed',
+          },
+          data: { change: 'deleted', task_uuid: task.uuid, task_name: task.name },
+        });
+        this.clearTaskDetailCache();
         res.json({ ok: true, removed: task.name });
       } catch (err: any) {
         console.error('[Manager] Error in DELETE /tasks/:ref:', err);
@@ -7852,18 +8814,22 @@ export class AgentManagerDb {
         });
         const earliestAvailableSeq = await this.db.events.earliestSeq(teamId);
 
-        const events = rows.map((row) => ({
-          seq: row.seq,
-          team: teamName,
-          topic: row.topic,
-          occurred_at: row.occurred_at,
-          actor: row.actor_agent_id,
-          subject:
-            row.subject_kind === null && row.subject_id === null
-              ? null
-              : { kind: row.subject_kind, id: row.subject_id },
-          data: row.data,
-        }));
+        const events = rows.map((row) => {
+          const invalidates = eventInvalidates(row);
+          return {
+            id: eventStableId(teamName, row.seq),
+            seq: row.seq,
+            team: teamName,
+            topic: row.topic,
+            occurred_at: row.occurred_at,
+            actor: row.actor_agent_id,
+            subject:
+              row.subject_kind === null && row.subject_id === null
+                ? null
+                : { kind: row.subject_kind, id: row.subject_id },
+            data: invalidates ? { ...row.data, invalidates } : row.data,
+          };
+        });
 
         const nextSeq = events.length > 0
           ? events[events.length - 1].seq
@@ -7876,12 +8842,16 @@ export class AgentManagerDb {
         // An empty log (earliestAvailableSeq === null) is never truncated.
         const replayTruncated =
           earliestAvailableSeq !== null && since + 1 < earliestAvailableSeq;
+        const responseEvents = replayTruncated && (!topics || topics.includes(READ_MODEL_CURSOR_EXPIRED))
+          ? [cursorExpiredEvent(teamName, since, earliestAvailableSeq), ...events]
+          : events;
 
         res.json({
-          events,
+          events: responseEvents,
           next_seq: nextSeq,
           replay_truncated: replayTruncated,
           earliest_available_seq: earliestAvailableSeq,
+          cursor_expired: replayTruncated,
         });
       } catch (err: any) {
         console.error('[Manager] Error in GET /events:', err);
@@ -8434,6 +9404,72 @@ export class AgentManagerDb {
     };
   }
 
+  private clearTaskDetailCache(): void {
+    this.taskDetailCache.clear();
+  }
+
+  private taskDetailCacheKey(teamId: string, taskName: string, listKey: string): string {
+    return `${teamId}:${listKey}:${taskName}`;
+  }
+
+  private rememberTaskDetail(teamId: string, taskName: string, listKey: string, body: Record<string, unknown>): void {
+    const key = this.taskDetailCacheKey(teamId, taskName, listKey);
+    if (this.taskDetailCache.has(key)) this.taskDetailCache.delete(key);
+    this.taskDetailCache.set(key, { body, listKey });
+    while (this.taskDetailCache.size > AgentManagerDb.TASK_DETAIL_CACHE_MAX) {
+      const oldest = this.taskDetailCache.keys().next().value;
+      if (!oldest) break;
+      this.taskDetailCache.delete(oldest);
+    }
+  }
+
+  private taskDetailVersionKey(task: TaskRow): string {
+    const payload = {
+      id: task.id,
+      uuid: task.uuid,
+      name: task.name,
+      title: task.title,
+      description: task.description,
+      status: task.status,
+      owner: task.owner,
+      track: task.track,
+      created_at: task.created_at,
+      updated_at: task.updated_at,
+      completed_at: task.completed_at,
+    };
+    return `task:${crypto.createHash('sha256').update(JSON.stringify(payload)).digest('hex').slice(0, 24)}`;
+  }
+
+  private async buildTaskDetailResponse(input: {
+    task: TaskRow;
+    teamId: string;
+    today: string;
+    listKey: string;
+    index: number | null;
+    listLength: number | null;
+    previousTask: TaskRow | null;
+    nextTask: TaskRow | null;
+  }): Promise<Record<string, unknown>> {
+    const task = await this.buildTaskResult(input.task, input.teamId, input.today);
+    return {
+      ok: true,
+      schema_version: 'task.detail.v1',
+      version_key: this.taskDetailVersionKey(input.task),
+      task,
+      adjacent_prefetch: {
+        list_key: input.listKey,
+        index: input.index,
+        list_length: input.listLength,
+        previous: input.previousTask
+          ? { name: input.previousTask.name, url: `/tasks/${encodeURIComponent(input.previousTask.name)}/detail` }
+          : null,
+        next: input.nextTask
+          ? { name: input.nextTask.name, url: `/tasks/${encodeURIComponent(input.nextTask.name)}/detail` }
+          : null,
+      },
+    };
+  }
+
   private parseTaskFieldPatch(body: Record<string, unknown>): {
     ok: true;
     changed: boolean;
@@ -8582,6 +9618,19 @@ export class AgentManagerDb {
     const task = await this.db.tasks.getByName(ref);
     if (!task) return { error: `Task "${ref}" not found` };
     return { task };
+  }
+
+  private async resolveTaskRefForTaskNote(ref: string, teamId: string): Promise<{ task?: TaskRow; error?: string }> {
+    const direct = await this.resolveTaskRef(ref, teamId);
+    if (direct.task || ref.startsWith('#')) return direct;
+
+    const normalized = normalizeAlias(ref);
+    if (normalized && normalized !== ref) {
+      const byNormalizedName = await this.resolveTaskRef(normalized, teamId);
+      if (byNormalizedName.task) return byNormalizedName;
+    }
+
+    return direct;
   }
 
   private async listTeamSchedules(teamId: string): Promise<Array<{ definition: ScheduleDefinitionRow; targets: AgentRow[] }>> {
@@ -10889,6 +11938,7 @@ export class AgentManagerDb {
           );
 
           await this.db.tasks.create(taskRow, eventIds.length > 0 ? eventIds : undefined);
+          this.clearTaskDetailCache();
 
           return {
             ok: true,
@@ -10973,6 +12023,7 @@ export class AgentManagerDb {
             status: 'doing',
             updated_at: now,
           });
+          this.clearTaskDetailCache();
 
           const updated = await this.db.tasks.getByNameForTeam(task.name, teamId);
           return { ok: true, result: { task: await this.buildTaskResult(updated!, teamId) } };
@@ -11006,6 +12057,7 @@ export class AgentManagerDb {
           if (!claimed) {
             return { ok: false, error: `Cannot claim "${task.name}" — task is already owned or not in todo status` };
           }
+          this.clearTaskDetailCache();
 
           const updated = await this.db.tasks.getByNameForTeam(task.name, teamId);
           return { ok: true, result: { task: await this.buildTaskResult(updated!, teamId) } };
@@ -11064,6 +12116,7 @@ export class AgentManagerDb {
           if (!task) return { ok: false, error: taskErr || `Task "${taskRef}" not found` };
 
           await this.db.tasks.delete(task.id);
+          this.clearTaskDetailCache();
           return { ok: true, result: { removed: task.name } };
         }
 
@@ -11797,6 +12850,7 @@ export class AgentManagerDb {
                 adapter: this.db.adapter,
                 config: coConfig,
               });
+              this.continuousOrchestrationDaemon = daemon;
               daemon.start(); // no-op unless CONTINUOUS_ORCHESTRATION_ENABLED=true
               console.log(
                 `[Manager] Continuous Orchestration mounted (/orchestration/*); ` +
@@ -11972,6 +13026,19 @@ export class AgentManagerDb {
           mountOutputsRoutes(this.managementApp, this.db.adapter, {
             tasks: this.db.tasks,
             resolveTeamId: async (req) => (await this.getTeam(req)).id,
+            emitReadModelEvent: async (req, event) => {
+              const { id: teamId } = await this.getTeam(req);
+              await emitReadModelChange(this.db.events, {
+                teamId,
+                topic: event.topic,
+                entityKind: event.entityKind,
+                entityId: event.entityId,
+                actorAgentId: null,
+                occurredAt: Date.now(),
+                invalidates: event.invalidates,
+                data: event.data,
+              });
+            },
             filesystemArtifactRoots: async (req) => this.filesystemArtifactRootsForTeam((await this.getTeam(req)).id),
             onFilesystemReconcileError: (err) => {
               console.warn(
@@ -12022,6 +13089,13 @@ export class AgentManagerDb {
               if (r.reconciled > 0) console.log(`[Manager] agent-runtime SoT reconcile: fixed ${r.reconciled}/${r.scanned} (${r.already_consistent} already consistent)`);
             })
             .catch((err) => console.warn('[Manager] agent-runtime SoT reconcile failed:', err instanceof Error ? err.message : String(err)));
+          void reconcileCatalogModelTruth(this.db.adapter)
+            .then((r) => {
+              if (r.reconciled > 0 || r.stale_desired_model > 0) {
+                console.log(`[Manager] catalog model truth reconcile: moved ${r.reconciled}/${r.scanned} legacy catalog.model value(s); ${r.stale_desired_model} desired model(s) differ from live model`);
+              }
+            })
+            .catch((err) => console.warn('[Manager] catalog model truth reconcile failed:', err instanceof Error ? err.message : String(err)));
           console.log('[Manager] Kapelle B11 outputs routes mounted (/outputs/inbox, /artifacts/:id/*) with P3 emit target + B2 comment auto-dispatch + filesystem reconciler + worktree reaper');
         } catch (err) {
           console.warn('[Manager] B11 outputs routes failed to mount:', err instanceof Error ? err.message : String(err));

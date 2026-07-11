@@ -1,5 +1,16 @@
 export interface AgentMetadata {
   runtime?: string;
+  runtimeUsageTruth?: {
+    actualRuntime: string;
+    actualModel: string;
+    catalogDesiredModel: string | null;
+    catalogModelStale: boolean;
+    usageTelemetry: {
+      provider: string;
+      source: string;
+      authoritativeFields: string[];
+    };
+  };
   description?: string;
   heartbeat?: boolean;
   pid?: number;
@@ -14,6 +25,7 @@ export interface Agent {
   status: string;
   health: string;
   model?: string;
+  runtime?: string;
   type?: string;
   url?: string;
   workingDirectory?: string;
@@ -146,7 +158,13 @@ export interface AgentDetailCommentReceipt {
   actor: string;
   time: string;
   route_status: string;
-  visible_state: 'recorded+routed' | 'recorded-but-route-failed-with-retry' | 'not-recorded';
+  visible_state:
+    | 'recorded+routed'
+    | 'recorded-but-route-failed-with-retry'
+    | 'recorded-route-failed-retryable'
+    | 'disabled/not-recorded'
+    | 'terminal-failure'
+    | 'not-recorded';
   retryable: boolean;
   route_kind: 'acknowledgement' | 'approval_signal' | 'substantive_follow_up' | 'question';
   target_agent: string | null;
@@ -228,4 +246,39 @@ export interface AgentDetailResponse {
   skills: string[];
   loops: AgentDetailLoop[];
   scripts: string[];
+}
+
+export interface DispatchAttemptLedgerRow {
+  id: string;
+  team_id: string;
+  correlation_key: string;
+  terminal_status: 'sent' | 'fallback_sent' | 'failed' | 'pending';
+  to_agent: string | null;
+  from_actor: string | null;
+  original_query_id: string | null;
+  original_dispatch_id: string | null;
+  subject: string | null;
+  talk_to_attempted: boolean;
+  talk_to_ok: boolean | null;
+  talk_to_status_code: number | null;
+  talk_to_error: string | null;
+  talk_to_at: string | null;
+  news_to_attempted: boolean;
+  news_to_ok: boolean | null;
+  news_to_status_code: number | null;
+  news_to_error: string | null;
+  news_to_at: string | null;
+  fallback_used: boolean;
+  fallback_ok: boolean | null;
+  attempts_json: unknown[];
+  created_at: string;
+  updated_at: string;
+}
+
+export interface DispatchAttemptLedgerResponse {
+  ok: boolean;
+  schema_version: 'dispatch-attempt-ledger.v1';
+  team_id: string;
+  limit: number;
+  attempts: DispatchAttemptLedgerRow[];
 }
