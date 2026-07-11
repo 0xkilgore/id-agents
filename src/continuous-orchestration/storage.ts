@@ -576,6 +576,24 @@ export async function getAgentRuntimeMap(
   return out;
 }
 
+/**
+ * Live runtime telemetry for all known logical agent names. Prefer a running
+ * non-deleted row when duplicate process rows exist for the same name.
+ */
+export async function getAllAgentRuntimeMap(adapter: DbAdapter): Promise<Map<string, string>> {
+  const out = new Map<string, string>();
+  const { rows } = await adapter.query<{ name: string; runtime: string | null; running_rank: number }>(
+    `SELECT name, runtime, CASE WHEN status = 'running' AND deleted_at IS NULL THEN 0 ELSE 1 END AS running_rank
+       FROM agents
+      WHERE deleted_at IS NULL
+      ORDER BY running_rank ASC, name ASC`,
+  );
+  for (const r of rows) {
+    if (r.runtime && !out.has(r.name)) out.set(r.name, r.runtime);
+  }
+  return out;
+}
+
 export interface ReadyRuntimeRepair {
   item_id: string;
   to_agent: string;

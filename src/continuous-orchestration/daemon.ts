@@ -41,6 +41,7 @@ import {
   readWorkShareDirectiveDrift,
   type WorkShareDirectiveDrift,
 } from "../model-policy/work-share-drift.js";
+import { readRuntimeMixDrift, type RuntimeMixDrift } from "../model-policy/runtime-mix-drift.js";
 
 /** Dispatch/effective statuses that mean the work is finished — its write-scope
  *  lock can be released. Mirrors dispatch terminal states plus recovery moot. */
@@ -115,8 +116,16 @@ export interface DaemonDeps {
   emitNews?: (event: { type: string; message: string; data?: Record<string, unknown> }) => Promise<void>;
   /** Absolute path to configs/model-policy.json for the directive drift guard. */
   modelPolicyPath?: string;
+  /** Absolute path to generated runtime-mode config for desired-vs-actual mix drift. */
+  runtimeModePath?: string | null;
+  /** Tolerance for desired-vs-actual provider-share drift. */
+  runtimeMixTolerance?: number;
   /** Test seam for the directive drift guard. */
   readModelPolicyDirectiveDrift?: () => WorkShareDirectiveDrift;
+  /** Test seam for runtime/model mix drift. */
+  readRuntimeMixDrift?: () => RuntimeMixDrift | Promise<RuntimeMixDrift>;
+  /** Live agent runtime telemetry, usually sourced from the agents table. */
+  resolveAllAgentRuntimes?: () => Promise<Map<string, string>>;
   now?: () => number;
   /** Override the kill-switch check (defaults to fs existence of the file). */
   killSwitchActive?: () => boolean;
@@ -361,11 +370,39 @@ export class ContinuousOrchestrationDaemon {
     await send(message);
   }
 
-  private readModelPolicyDirectiveDrift(): WorkShareDirectiveDrift {
+  private async readModelPolicyDirectiveDrift(): Promise<WorkShareDirectiveDrift> {
     if (this.deps.readModelPolicyDirectiveDrift) return this.deps.readModelPolicyDirectiveDrift();
-    return readWorkShareDirectiveDrift({
-      policyPath: this.deps.modelPolicyPath ?? path.join(process.cwd(), "configs", "model-policy.json"),
+    const policyPath = this.deps.modelPolicyPath ?? path.join(process.cwd(), "configs", "model-policy.json");
+    const directive = readWorkShareDirectiveDrift({
+      policyPath,
     });
+    const defaultRuntimeModePath = path.join(process.cwd(), "configs", "runtime-mode.generated.yaml");
+    const runtimeModePath =
+      this.deps.runtimeModePath === undefined
+        ? fs.existsSync(defaultRuntimeModePath)
+          ? defaultRuntimeModePath
+          : null
+        : this.deps.runtimeModePath;
+    const runtimeMix = this.deps.readRuntimeMixDrift
+      ? await this.deps.readRuntimeMixDrift()
+      : runtimeModePath || this.deps.resolveAllAgentRuntimes
+        ? readRuntimeMixDrift({
+            policyPath,
+            runtimeModePath,
+            actualAgentRuntimes: this.deps.resolveAllAgentRuntimes
+              ? await this.deps.resolveAllAgentRuntimes()
+              : null,
+            tolerance: this.deps.runtimeMixTolerance,
+          })
+        : null;
+
+    if (!runtimeMix || runtimeMix.status === "match") return runtimeMix ? { ...directive, runtime_mix: runtimeMix } : directive;
+    return {
+      ...directive,
+      status: "drift",
+      message: directive.status === "match" ? runtimeMix.message : `${directive.message}; ${runtimeMix.message}`,
+      runtime_mix: runtimeMix,
+    };
   }
 
   /** Run exactly one orchestration tick. Idempotent w.r.t. external state. */
@@ -474,7 +511,7 @@ export class ContinuousOrchestrationDaemon {
     const plan = planAdmission(ordered, ctx, config);
     const decisions: DecisionRecord[] = [...reconcileDecisions];
     const admitted: Array<{ item_id: string; dispatch_phid: string | null }> = [];
-    const modelPolicyDrift = this.readModelPolicyDirectiveDrift();
+    const modelPolicyDrift = await this.readModelPolicyDirectiveDrift();
 
     for (const repair of readyRuntimeRepairs) {
       decisions.push({
@@ -686,6 +723,7 @@ export class ContinuousOrchestrationDaemon {
           diffs: modelPolicyDrift.diffs,
           directive_targets: modelPolicyDrift.directive_targets,
           work_share_targets: modelPolicyDrift.work_share_targets,
+          runtime_mix: modelPolicyDrift.runtime_mix,
         },
       });
       await this.alert(`Continuous orchestration model-policy drift: ${message}`);
@@ -696,6 +734,7 @@ export class ContinuousOrchestrationDaemon {
         diffs: modelPolicyDrift.diffs,
         directive_targets: modelPolicyDrift.directive_targets,
         work_share_targets: modelPolicyDrift.work_share_targets,
+        runtime_mix: modelPolicyDrift.runtime_mix,
       });
     }
 

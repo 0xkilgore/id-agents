@@ -53,7 +53,9 @@ function makeDaemon(
     // matches every pre-RD-014 test in this file exactly (no gating at all).
     resolveAgentHealth?: (names: string[]) => Promise<Set<string>>;
     resolveAgentRuntimes?: (names: string[]) => Promise<Map<string, string>>;
+    resolveAllAgentRuntimes?: () => Promise<Map<string, string>>;
     modelPolicyPath?: string;
+    runtimeModePath?: string | null;
   } = {},
 ) {
   const fired: BacklogItem[] = [];
@@ -73,6 +75,7 @@ function makeDaemon(
       Promise.resolve({ count: over.inFlight ?? 0, active_write_scopes: over.activeScopes ?? new Set() }),
     resolveAgentHealth: over.resolveAgentHealth,
     resolveAgentRuntimes: over.resolveAgentRuntimes,
+    resolveAllAgentRuntimes: over.resolveAllAgentRuntimes,
     alert: async (m) => {
       alerts.push(m);
     },
@@ -80,6 +83,7 @@ function makeDaemon(
       newsEvents.push(event);
     },
     modelPolicyPath: over.modelPolicyPath,
+    runtimeModePath: over.runtimeModePath,
     readModelPolicyDirectiveDrift: over.modelPolicyPath
       ? undefined
       : () => ({
@@ -991,6 +995,70 @@ describe("daemon — guardrail alerts", () => {
     expect(r.decisions.some((d) => d.action === "model_policy_drift_alert")).toBe(false);
     expect(alerts.some((a) => /model-policy drift/.test(a))).toBe(false);
     expect(newsEvents).toEqual([]);
+  });
+
+  it("fires a drift alert when desired provider mix disagrees with generated runtime-mode", async () => {
+    const modelPolicyPath = writeModelPolicy({
+      directive: { anthropic: 0.05, openai: 0.95, cursor: 0 },
+      workShare: { anthropic: 0.05, openai: 0.95, cursor: 0 },
+    });
+    const runtimeModePath = join(mkdtempSync(join(tmpdir(), "runtime-mode-drift-")), "runtime-mode.generated.yaml");
+    writeFileSync(
+      runtimeModePath,
+      [
+        "agents:",
+        "  substrate-api-codex:",
+        "    runtime: codex",
+        "  substrate-db-codex:",
+        "    runtime: codex",
+      ].join("\n"),
+    );
+    const { daemon, alerts, newsEvents } = makeDaemon(adapter, { modelPolicyPath, runtimeModePath });
+
+    const r = await daemon.runTick();
+
+    expect(r.model_policy_drift.status).toBe("drift");
+    expect(r.model_policy_drift.runtime_mix?.status).toBe("drift");
+    expect(r.model_policy_drift.runtime_mix?.diffs).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ source: "runtime_mode", provider: "anthropic", desired: 0.05, actual: 0 }),
+      ]),
+    );
+    expect(r.decisions.some((d) => d.action === "model_policy_drift_alert")).toBe(true);
+    expect(alerts.some((a) => /runtime mix drift/.test(a))).toBe(true);
+    expect(newsEvents).toEqual([
+      expect.objectContaining({
+        type: "model_policy.drift",
+        data: expect.objectContaining({
+          runtime_mix: expect.objectContaining({ status: "drift", runtime_mode_path: runtimeModePath }),
+        }),
+      }),
+    ]);
+  });
+
+  it("fires a drift alert when desired provider mix disagrees with live agent runtime telemetry", async () => {
+    const modelPolicyPath = writeModelPolicy({
+      directive: { anthropic: 0.05, openai: 0.95, cursor: 0 },
+      workShare: { anthropic: 0.05, openai: 0.95, cursor: 0 },
+    });
+    const { daemon, alerts } = makeDaemon(adapter, {
+      modelPolicyPath,
+      runtimeModePath: null,
+      resolveAllAgentRuntimes: async () =>
+        new Map([
+          ["substrate-api-codex", "codex"],
+          ["substrate-db-codex", "codex"],
+        ]),
+    });
+
+    const r = await daemon.runTick();
+
+    expect(r.model_policy_drift.runtime_mix?.diffs).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ source: "agent_actual", provider: "anthropic", desired: 0.05, actual: 0 }),
+      ]),
+    );
+    expect(alerts.some((a) => /runtime mix drift/.test(a))).toBe(true);
   });
 
   it("warns but does not auto-pause when the configured token reference is hit", async () => {

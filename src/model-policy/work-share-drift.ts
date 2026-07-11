@@ -5,6 +5,7 @@
 // silently changing the standing routing directive.
 
 import { readFileSync } from "node:fs";
+import type { RuntimeMixDrift } from "./runtime-mix-drift.js";
 
 export type WorkShareTargets = Record<string, number>;
 
@@ -15,6 +16,7 @@ export interface WorkShareDirectiveDrift {
   work_share_targets: WorkShareTargets | null;
   diffs: Array<{ provider: string; directive: number | null; work_share: number | null }>;
   message: string | null;
+  runtime_mix?: RuntimeMixDrift;
 }
 
 export interface ReadWorkShareDirectiveDriftOptions {
