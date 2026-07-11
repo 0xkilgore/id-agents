@@ -88,13 +88,23 @@ export function scoreConfidence(item: BacklogItem, lane: FleshLane, config: Fles
   return Math.min(1, Math.max(0, Number(c.toFixed(4))));
 }
 
+function authoredTargetAgent(item: BacklogItem): string | null {
+  const target = item.to_agent?.trim();
+  return target && target.length > 0 ? target : null;
+}
+
 /** Build the canonical Kapelle dispatch body for a skeleton. */
-export function generateDispatchBody(item: BacklogItem, lane: FleshLane, config: FleshConfig): string {
+export function generateDispatchBody(
+  item: BacklogItem,
+  lane: FleshLane,
+  config: FleshConfig,
+  targetAgent = lane.agent,
+): string {
   const desc = descriptionOf(item);
   const src = item.source_refs[0] ? ` (per ${item.source_refs[0]})` : "";
   return (
     `[project: ${config.project}]${trackTag(item)}[BUILD] ` +
-    `${lane.agent}: implement "${desc}"${src}. ` +
+    `${targetAgent}: implement "${desc}"${src}. ` +
     `Read the existing code first, make the smallest change that works, and add unit tests. ` +
     `Verify with \`npm run build && npm test\` (clean tsc build + green vitest) before reporting done. ` +
     `Spec 054 v2 promotion to main required after green unless the dispatcher sets promote:false.`
@@ -124,14 +134,18 @@ export function fleshItem(input: FleshInput): FleshResult {
   const { item, config } = input;
   const lane = resolveLane(item.track, config);
   const risk_class: RiskClass = config.default_risk_class;
-  const dispatch_body = generateDispatchBody(item, lane, config);
+  const targetAgent = authoredTargetAgent(item) ?? lane.agent;
+  const authoredDispatchBody =
+    typeof item.dispatch_body === "string" && item.dispatch_body.trim().length > 0 ? item.dispatch_body : null;
+  const dispatch_body = authoredDispatchBody ?? generateDispatchBody(item, lane, config, targetAgent);
   const confidence = scoreConfidence(item, lane, config);
 
   const validate = validateOptionsFromConfig(config);
+  validate.knownAgents.add(targetAgent);
 
   // Provisional patch (ready_decision filled by the policy below).
   const patch: FleshPatch = {
-    to_agent: lane.agent,
+    to_agent: targetAgent,
     dispatch_body,
     risk_class,
     write_scope: lane.write_scopes.length > 0 ? [lane.write_scopes[0]] : [],

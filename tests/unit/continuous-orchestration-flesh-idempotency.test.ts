@@ -121,6 +121,27 @@ describe("recordFleshOutcome — sticky routing guard (operator-set to_agent/pri
     expect(result?.dispatch_body).toBe("auto body"); // generated payload still filled
   });
 
+  it("keeps an authored to_agent on the row even if a stale flesh patch defaults to roger", async () => {
+    const created = await insertBacklogItem(adapter, {
+      title: "T-AUTHORED - authored non-roger target, needs review",
+      readiness_state: "needs_review",
+      to_agent: "hopper",
+    });
+
+    const result = await recordFleshOutcome(adapter, {
+      item_id: created.item_id,
+      flesh_status: "approved_ready",
+      flesh_source: "roadmap",
+      flesh_confidence: 0.9,
+      patch: patch({ to_agent: "roger", priority: 9, dispatch_body: "auto body" }),
+      promote: true,
+    });
+
+    expect(result?.to_agent).toBe("hopper");
+    expect(result?.readiness_state).toBe("ready");
+    expect(result?.dispatch_body).toBe("auto body");
+  });
+
   it("regression: a plain needs_review item (no operator routing) takes the flesher's to_agent/priority", async () => {
     const created = await insertBacklogItem(adapter, {
       title: "T-W — unrouted needs review",

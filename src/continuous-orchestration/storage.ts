@@ -773,9 +773,11 @@ export async function recordFleshOutcome(
     return item;
   }
   // Sticky routing guard: never overwrite a to_agent / priority an operator or
-  // human explicitly set (signalled by `updated_by`, which only the field-PATCH
-  // endpoint sets — the flesher never does), preserving Claude-Light lane routing.
+  // human explicitly set. Actor-attributed PATCHes set `updated_by`, while
+  // authored backlog rows can arrive with a target already on the row before a
+  // flesh tick fills the rest of the dispatch fields.
   const operatorRouted = item.updated_by != null;
+  const hasAuthoredTargetAgent = typeof item.to_agent === "string" && item.to_agent.trim().length > 0;
 
   const now = new Date().toISOString();
   const patch = outcome.patch ?? null;
@@ -822,9 +824,9 @@ export async function recordFleshOutcome(
     push("provider", patch.provider);
     push("runtime", patch.runtime);
     if (patch.value_score !== null && patch.value_score !== undefined) push("value_score", patch.value_score);
-    // Routing fields are sticky: keep an operator/human-set to_agent + priority
-    // (sticky-routing guard above) instead of resetting it to the flesher's pick.
-    if (!operatorRouted) {
+    // Routing fields are sticky: keep an operator/human-authored to_agent +
+    // priority instead of resetting it to the flesher's default lane pick.
+    if (!operatorRouted && !hasAuthoredTargetAgent) {
       push("to_agent", patch.to_agent);
       push("priority", patch.priority);
     }

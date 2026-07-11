@@ -96,6 +96,19 @@ describe("flesher — deterministic generation", () => {
     expect(r.validation_errors).toEqual([]);
   });
 
+  it("preserves an authored non-default target in the proposed FleshPatch", () => {
+    const r = runFlesh(
+      skeleton({
+        track: "T-ORCH",
+        title: "T-ORCH.11 — keep authored build-pool target",
+        to_agent: "substrate-orch-codex",
+      }),
+    );
+    expect(r.patch.to_agent).toBe("substrate-orch-codex");
+    expect(r.patch.dispatch_body).toContain("substrate-orch-codex:");
+    expect(r.validation_errors).toEqual([]);
+  });
+
   it("an unrecognized track still fleshes but holds for batch (lower confidence)", () => {
     const r = runFlesh(skeleton({ track: "T-ZZZ", title: "T-ZZZ.9 — speculative idea" }));
     // default lane still assigns roger, but confidence stays below the auto bar.
@@ -253,5 +266,25 @@ describe("runFleshPass — DB-backed pass", () => {
 
     const log = await listFleshLog(adapter, {});
     expect(log.length).toBe(2);
+  });
+
+  it("live run preserves authored to_agent instead of defaulting the item or flesh_patch to roger", async () => {
+    const authored = await insertBacklogItem(adapter, {
+      title: "T-ORCH.12 — authored backend pool target",
+      track: "T-ORCH",
+      readiness_state: "needs_review",
+      to_agent: "hopper",
+      source_refs: ["roadmap.md"],
+    });
+
+    const summary = await runFleshPass(adapter, cfg, { dry_run: false, item_ids: [authored.item_id] });
+    expect(summary.considered).toBe(1);
+    expect(summary.results[0]?.patch?.to_agent).toBe("hopper");
+
+    const after = await getBacklogItem(adapter, authored.item_id);
+    expect(after?.readiness_state).toBe("ready");
+    expect(after?.to_agent).toBe("hopper");
+    expect(after?.flesh_patch?.to_agent).toBe("hopper");
+    expect(after?.dispatch_body).toContain("hopper:");
   });
 });
