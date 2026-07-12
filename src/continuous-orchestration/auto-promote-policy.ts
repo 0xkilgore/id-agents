@@ -93,8 +93,9 @@ export function autoPromoteRejections(
   // (root-caused 2026-07-04: a phantom-locked pool build and a stale
   // needs_clarification each got reaped then immediately auto-promoted and
   // re-fired in the SAME tick). Any previously-dispatched item requires a
-  // human /promote, never this automatic path.
-  if (item.last_dispatch_phid) {
+  // human /promote with an explicit retry-safe marker, never this automatic
+  // path by default.
+  if (item.last_dispatch_phid && !item.retry_safe) {
     reasons.push(`already dispatched once (last_dispatch_phid=${item.last_dispatch_phid}) — requires human /promote, not auto-promote`);
   }
   // Confidence is required unless a human/system approval already exists. The

@@ -40,6 +40,7 @@ interface BacklogRow {
   approved_by: string | null;
   approved_at: string | null;
   last_dispatch_phid: string | null;
+  retry_safe: number | null;
   updated_by: string | null;
   track_drift: number | null;
   flesh_status: string | null;
@@ -88,6 +89,7 @@ export function rowToBacklogItem(r: BacklogRow): BacklogItem {
     approved_by: r.approved_by,
     approved_at: r.approved_at,
     last_dispatch_phid: r.last_dispatch_phid,
+    retry_safe: r.retry_safe === 1,
     updated_by: r.updated_by,
     track_drift: r.track_drift === 1,
     flesh_status: (r.flesh_status as BacklogItem["flesh_status"]) ?? "unfleshed",
@@ -132,6 +134,7 @@ export interface NewBacklogItem {
   runtime?: string | null;
   is_north_star?: boolean;
   source_refs?: string[];
+  retry_safe?: boolean;
   /** Set when the item's track does not conform to the canonical-track-registry. */
   track_drift?: boolean;
 }
@@ -143,8 +146,8 @@ export async function insertBacklogItem(adapter: DbAdapter, input: NewBacklogIte
     `INSERT INTO orchestration_backlog_item (
        item_id, team_id, logical_key, title, track, to_agent, dispatch_body, priority, value_score,
        readiness_state, risk_class, write_scope_json, dependencies_json, token_estimate,
-       provider, runtime, is_north_star, source_refs_json, track_drift, created_at, updated_at
-     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)`,
+       provider, runtime, is_north_star, source_refs_json, retry_safe, track_drift, created_at, updated_at
+     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22)`,
     [
       item_id,
       input.team_id ?? "default",
@@ -164,6 +167,7 @@ export async function insertBacklogItem(adapter: DbAdapter, input: NewBacklogIte
       input.runtime ?? null,
       input.is_north_star ? 1 : 0,
       JSON.stringify(input.source_refs ?? []),
+      input.retry_safe ? 1 : 0,
       input.track_drift ? 1 : 0,
       now,
       now,
@@ -357,6 +361,7 @@ export async function promoteToReady(
   adapter: DbAdapter,
   item_id: string,
   approved_by: string,
+  opts: { retry_safe?: boolean } = {},
 ): Promise<{ ok: boolean; reason?: string; item?: BacklogItem }> {
   const item = await getBacklogItem(adapter, item_id);
   if (!item) return { ok: false, reason: "not_found" };
@@ -365,6 +370,9 @@ export async function promoteToReady(
   }
   if (!item.to_agent || !item.dispatch_body) {
     return { ok: false, reason: "missing to_agent or dispatch_body" };
+  }
+  if (item.last_dispatch_phid && !opts.retry_safe && !item.retry_safe) {
+    return { ok: false, reason: "previously dispatched row requires retry_safe=true to promote" };
   }
   if (item.logical_key) {
     const existing = await getBacklogItemByLogicalKey(adapter, item.team_id, item.logical_key);
@@ -375,9 +383,13 @@ export async function promoteToReady(
   const now = new Date().toISOString();
   await adapter.query(
     `UPDATE orchestration_backlog_item
-       SET readiness_state = 'ready', approved_by = $1, approved_at = $2, updated_at = $3
-     WHERE item_id = $4`,
-    [approved_by, now, now, item_id],
+       SET readiness_state = 'ready',
+           approved_by = $1,
+           approved_at = $2,
+           retry_safe = CASE WHEN $3 = 1 THEN 1 ELSE retry_safe END,
+           updated_at = $4
+     WHERE item_id = $5`,
+    [approved_by, now, opts.retry_safe ? 1 : 0, now, item_id],
   );
   const updated = await getBacklogItem(adapter, item_id);
   return { ok: true, item: updated ?? undefined };

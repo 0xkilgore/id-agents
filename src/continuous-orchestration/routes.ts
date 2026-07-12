@@ -311,7 +311,7 @@ export function mountContinuousOrchestrationRoutes(app: Application, opts: Orche
       const approvedBy = typeof body.approved_by === "string" && body.approved_by ? body.approved_by : DEFAULT_ACTOR_ID;
       const patch = body.patch && typeof body.patch === "object" ? (body.patch as Partial<NewBacklogItem>) : undefined;
       if (patch) await updateBacklogFields(adapter, id, patch);
-      const result = await promoteToReady(adapter, id, approvedBy);
+      const result = await promoteToReady(adapter, id, approvedBy, { retry_safe: body.retry_safe === true });
       if (!result.ok) return res.status(409).json({ ok: false, error: result.reason });
       res.json({ ok: true, item: result.item });
     } catch (err) {

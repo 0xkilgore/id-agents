@@ -95,6 +95,8 @@ export interface BacklogItem {
   approved_by: string | null;
   approved_at: string | null;
   last_dispatch_phid: string | null;
+  /** Explicit marker allowing a previously-dispatched row to fire again. */
+  retry_safe?: boolean;
   /** Actor who last edited this item via PATCH (actor-attributed updates). */
   updated_by: string | null;
   /**

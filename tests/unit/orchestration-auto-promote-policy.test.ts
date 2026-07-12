@@ -174,6 +174,14 @@ describe("autoPromoteRejections — safety gate (never auto-promote unsafe work)
     );
   });
 
+  it("allows a previously-dispatched item only when it is explicitly retry-safe", () => {
+    expect(autoPromoteRejections(item({
+      approved_by: "operator",
+      last_dispatch_phid: "phid:disp-failed",
+      retry_safe: true,
+    }), thr)).toEqual([]);
+  });
+
   it("keeps duplicate-dispatch retry ledger rows visible without silently auto-promoting them", () => {
     const retryLedger = [
       {
@@ -197,6 +205,19 @@ describe("autoPromoteRejections — safety gate (never auto-promote unsafe work)
         }),
       },
       {
+        status: "failed_retry_safe",
+        row: item({
+          item_id: "retry-ledger-failed-human-approved-safe",
+          title: "failed dispatch human-approved retry",
+          write_scope: ["repo/failed-safe"],
+          approved_by: "operator",
+          approved_at: "2026-07-12T12:00:00.000Z",
+          last_dispatch_phid: "phid:disp-failed-safe",
+          retry_safe: true,
+          flesh_confidence: 0.99,
+        }),
+      },
+      {
         status: "needs_clarification",
         row: item({
           item_id: "retry-ledger-needs-clarification",
@@ -214,6 +235,15 @@ describe("autoPromoteRejections — safety gate (never auto-promote unsafe work)
           last_dispatch_phid: "phid:disp-done",
         }),
       },
+      {
+        status: "superseded",
+        row: item({
+          item_id: "retry-ledger-superseded",
+          title: "superseded duplicate dispatch",
+          write_scope: ["repo/superseded"],
+          last_dispatch_phid: "phid:disp-superseded",
+        }),
+      },
     ] as const;
     const fresh = item({ item_id: "fresh-ready-fuel", write_scope: ["repo/fresh"] });
 
@@ -223,11 +253,14 @@ describe("autoPromoteRejections — safety gate (never auto-promote unsafe work)
       { floor: 5, minLanes: 1, maxPerPass: 10 },
     );
 
-    expect(plan.promote.map((p) => p.item_id)).toEqual(["fresh-ready-fuel"]);
+    expect(plan.promote.map((p) => p.item_id)).toEqual([
+      "retry-ledger-failed-human-approved-safe",
+      "fresh-ready-fuel",
+    ]);
     expect(plan.skipped.map((s) => s.item_id).sort()).toEqual(
-      retryLedger.map((entry) => entry.row.item_id).sort(),
+      retryLedger.filter((entry) => !entry.row.retry_safe).map((entry) => entry.row.item_id).sort(),
     );
-    for (const entry of retryLedger) {
+    for (const entry of retryLedger.filter((entry) => !entry.row.retry_safe)) {
       expect(plan.skipped).toContainEqual({
         item_id: entry.row.item_id,
         reasons: expect.arrayContaining([
@@ -242,8 +275,10 @@ describe("autoPromoteRejections — safety gate (never auto-promote unsafe work)
     expect(retryLedger.map((entry) => entry.status)).toEqual([
       "queued",
       "failed",
+      "failed_retry_safe",
       "needs_clarification",
       "done",
+      "superseded",
     ]);
   });
 

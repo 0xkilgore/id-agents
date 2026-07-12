@@ -428,6 +428,30 @@ describe("planAdmission — per-item guardrails", () => {
     });
   });
 
+  it("holds manually promoted already-dispatched rows unless explicitly marked retry-safe", () => {
+    const unsafeRetry = planAdmission(
+      [item({ item_id: "unsafe-retry", last_dispatch_phid: "phid:disp-failed" })],
+      ctx(),
+      cfg,
+    );
+    expect(unsafeRetry.admit).toHaveLength(0);
+    expect(unsafeRetry.skipped[0]).toMatchObject({
+      action: "held",
+      metadata: {
+        code: "duplicate_dispatch_retry_required",
+        class: "retry_safety",
+        last_dispatch_phid: "phid:disp-failed",
+      },
+    });
+
+    const safeRetry = planAdmission(
+      [item({ item_id: "safe-retry", last_dispatch_phid: "phid:disp-failed", retry_safe: true })],
+      ctx(),
+      cfg,
+    );
+    expect(safeRetry.admit.map((i) => i.item_id)).toEqual(["safe-retry"]);
+  });
+
   it("never admits a non-ready item even if passed in", () => {
     const p = planAdmission([item({ readiness_state: "needs_review" })], ctx(), cfg);
     expect(p.admit).toHaveLength(0);

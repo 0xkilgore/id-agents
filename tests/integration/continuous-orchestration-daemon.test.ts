@@ -285,6 +285,31 @@ describe("storage — backlog + approval gate", () => {
     expect(r2.item?.approved_by).toBe("chris");
   });
 
+  it("requires retry_safe=true before manually promoting an already-dispatched row", async () => {
+    const retry = await insertBacklogItem(adapter, {
+      title: "manual retry",
+      readiness_state: "needs_review",
+      to_agent: "roger",
+      dispatch_body: "go",
+    });
+    await adapter.query(
+      `UPDATE orchestration_backlog_item
+         SET last_dispatch_phid = $1
+       WHERE item_id = $2`,
+      ["phid:disp-failed", retry.item_id],
+    );
+
+    const blocked = await promoteToReady(adapter, retry.item_id, "chris");
+    expect(blocked.ok).toBe(false);
+    expect(blocked.reason).toMatch(/retry_safe=true/);
+
+    const approved = await promoteToReady(adapter, retry.item_id, "chris", { retry_safe: true });
+    expect(approved.ok).toBe(true);
+    expect(approved.item?.readiness_state).toBe("ready");
+    expect(approved.item?.retry_safe).toBe(true);
+    expect(approved.item?.last_dispatch_phid).toBe("phid:disp-failed");
+  });
+
   it("refuses to promote from a non-reviewable state", async () => {
     const done = await insertBacklogItem(adapter, {
       title: "d",

@@ -85,7 +85,8 @@ export type NonAdmissionCode =
   | "target_unhealthy"
   | "provider_runtime_mismatch"
   | "clarification_blocker"
-  | "promotion_blocker";
+  | "promotion_blocker"
+  | "duplicate_dispatch_retry_required";
 
 function reasonClass(code: NonAdmissionCode): string {
   switch (code) {
@@ -106,6 +107,8 @@ function reasonClass(code: NonAdmissionCode): string {
       return "clarification_blocker";
     case "promotion_blocker":
       return "promotion_blocker";
+    case "duplicate_dispatch_retry_required":
+      return "retry_safety";
     case "tick_admission_cap":
     case "no_in_flight_slots":
     case "pool_capacity_full":
@@ -223,6 +226,16 @@ export function planAdmission(
         activeBlocker.code,
         activeBlocker.reason,
         activeBlocker.metadata ?? {},
+      ));
+      continue;
+    }
+    if (item.last_dispatch_phid && !item.retry_safe) {
+      skipped.push(nonAdmission(
+        item.item_id,
+        "held",
+        "duplicate_dispatch_retry_required",
+        `previously-dispatched row ${item.last_dispatch_phid} requires retry_safe=true before it can fire again`,
+        { last_dispatch_phid: item.last_dispatch_phid },
       ));
       continue;
     }
