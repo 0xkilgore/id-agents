@@ -15,8 +15,10 @@ import { SqliteTeamsRepo } from "../../src/db/repos/sqlite/teams-repo.js";
 import { migrateDecisionsTables } from "../../src/decisions/storage.js";
 import { buildDeskNeedsMe } from "../../src/desk/needs-me.js";
 import { ARTIFACT_COMMENT_DISPATCH_CHANNEL, type CommentDispatchEnqueueFn } from "../../src/outputs/comment-dispatch.js";
+import { commentArtifact, updateCommentRouteStatus } from "../../src/outputs/ops.js";
 import { mountOutputsRoutes } from "../../src/outputs/routes.js";
 import { migrateOutputsTables, registerArtifact } from "../../src/outputs/storage.js";
+import type { ArtifactCommentRouteStatus } from "../../src/outputs/types.js";
 
 const ART = "art-comment-reliability";
 const NOW = "2026-07-07T12:00:00.000Z";
@@ -177,6 +179,36 @@ describe("comment reliability acceptance states", () => {
     });
   });
 
+  it("dedupes a same-op replay without creating a duplicate dispatch", async () => {
+    const { fn, calls } = makeEnqueue();
+    const { app, adapter } = await boot(fn);
+    await catalogArtifact(adapter, "regina");
+
+    const first = await call(app, "POST", `/artifacts/${ART}/comments`, {
+      actor_ref: "user:chris",
+      body: "Route this once only.",
+      idempotency_key: "same-op-routed",
+    });
+    const second = await call(app, "POST", `/artifacts/${ART}/comments`, {
+      actor_ref: "user:chris",
+      body: "Route this once only.",
+      idempotency_key: "same-op-routed",
+    });
+
+    expect(first.status).toBe(200);
+    expect(second.status).toBe(200);
+    expect(second.body.op_id).toBe(first.body.op_id);
+    expect(second.body.comment.comment_id).toBe(first.body.comment.comment_id);
+    expect(second.body.idempotent).toBe(true);
+    expect(second.body.dispatch_routed).toBe(true);
+    expect(second.body.dispatch.dispatch_phid).toBe("phid:disp-comment-1");
+    expect(calls).toHaveLength(1);
+
+    const comments = await call(app, "GET", `/artifacts/${ART}/comments`);
+    expect(comments.body.comments).toHaveLength(1);
+    expect(comments.body.comments[0].route_status.dispatch.dispatch_phid).toBe("phid:disp-comment-1");
+  });
+
   it("records project:<slug> target failures as retryable and reroutes the same comment on retry", async () => {
     const { fn, calls } = makeEnqueue({ failFirst: true });
     const { app, adapter } = await boot(fn);
@@ -205,6 +237,18 @@ describe("comment reliability acceptance states", () => {
       target_agent: "kapelle",
       target_agent_raw: "project:kapelle",
       error: { message: "route target unavailable" },
+    });
+
+    const failedRead = await call(app, "GET", `/artifacts/${ART}/comments`);
+    expect(failedRead.body.comments).toHaveLength(1);
+    expect(failedRead.body.comments[0]).toMatchObject({
+      op_id: first.body.op_id,
+      route_status: {
+        visible_state: "recorded-route-failed-retryable",
+        target_agent: "kapelle",
+        target_agent_raw: "project:kapelle",
+        error: { message: "route target unavailable" },
+      },
     });
 
     const retry = await call(
@@ -237,6 +281,39 @@ describe("comment reliability acceptance states", () => {
     expect(comments.body.comments[0].route_status.visible_state).toBe("recorded+routed");
   });
 
+  it("does not replay approval side effects for an idempotent approval-signal comment", async () => {
+    const { fn, calls } = makeEnqueue();
+    const { app, adapter } = await boot(fn);
+    await catalogArtifact(adapter, "regina");
+
+    const first = await call(app, "POST", `/artifacts/${ART}/comments`, {
+      actor_ref: "user:chris",
+      body: "Ship it",
+      idempotency_key: "approval-signal-once",
+    });
+    const second = await call(app, "POST", `/artifacts/${ART}/comments`, {
+      actor_ref: "user:chris",
+      body: "Ship it",
+      idempotency_key: "approval-signal-once",
+    });
+
+    expect(first.status).toBe(200);
+    expect(first.body.route_kind).toBe("approval_signal");
+    expect(second.status).toBe(200);
+    expect(second.body.op_id).toBe(first.body.op_id);
+    expect(second.body.idempotent).toBe(true);
+    expect(second.body.dispatch_skipped).toBe("approval_signal");
+    expect(calls).toHaveLength(0);
+
+    const approvalOps = await adapter.query<{ n: number }>(
+      `SELECT COUNT(*) AS n FROM artifact_operations WHERE artifact_id = ? AND op_type = 'approve'`,
+      [ART],
+    );
+    const comments = await call(app, "GET", `/artifacts/${ART}/comments`);
+    expect(Number(approvalOps.rows[0]?.n ?? 0)).toBe(1);
+    expect(comments.body.comments).toHaveLength(1);
+  });
+
   it("returns not-recorded when durable comment persistence fails", async () => {
     const base = new SqliteAdapter(":memory:");
     await migrateSqlite(base);
@@ -263,6 +340,37 @@ describe("comment reliability acceptance states", () => {
     const comments = await call(app, "GET", `/artifacts/${ART}/comments`);
     expect(comments.status).toBe(200);
     expect(comments.body.comments).toHaveLength(0);
+  });
+
+  it("keeps terminal route failure visible in comments and feedback projections", async () => {
+    const { app, adapter } = await boot(makeEnqueue().fn);
+    await catalogArtifact(adapter, "regina");
+    const { op_id } = await commentArtifact(adapter, ART, {
+      actor: "user:chris",
+      body: "This terminal route failure must remain visible.",
+      idempotency_key: "terminal-failure-visible",
+    });
+    await updateCommentRouteStatus(adapter, ART, op_id, terminalRouteStatus(op_id));
+
+    const comments = await call(app, "GET", `/artifacts/${ART}/comments`);
+    expect(comments.status).toBe(200);
+    expect(comments.body.comments).toHaveLength(1);
+    expect(comments.body.comments[0].route_status).toMatchObject({
+      visible_state: "terminal-failure",
+      feedback_status: "terminal-failure",
+      retryable: false,
+      error: { message: "target agent retired-agent no longer exists" },
+    });
+
+    const feedback = await call(app, "GET", `/artifacts/${ART}/feedback`);
+    expect(feedback.status).toBe(200);
+    expect(feedback.body.items[0].routing).toBeNull();
+    expect(feedback.body.items[0].route_status).toMatchObject({
+      visible_state: "terminal-failure",
+      feedback_status: "terminal-failure",
+      retryable: false,
+      error: { message: "target agent retired-agent no longer exists" },
+    });
   });
 
   it("excludes artifact-comment routed dispatches from the needs-you digest", async () => {
@@ -355,4 +463,27 @@ async function insertDispatch(
       null,
     ],
   );
+}
+
+function terminalRouteStatus(opId: number): ArtifactCommentRouteStatus {
+  return {
+    visible_state: "terminal-failure",
+    compat_status: "terminal-failure",
+    feedback_status: "terminal-failure",
+    route_kind: "substantive_follow_up",
+    routed: false,
+    retryable: false,
+    recorded_op_id: opId,
+    target_agent: "retired-agent",
+    target_agent_raw: "retired-agent",
+    dispatch: null,
+    skipped: null,
+    error: { message: "target agent retired-agent no longer exists" },
+    deadline_at: null,
+    timed_out_at: null,
+    notification_status: "suppressed",
+    next_retry_at: null,
+    suppress_duplicate_key: `artifact-comment:${opId}:timeout`,
+    updated_at: NOW,
+  };
 }

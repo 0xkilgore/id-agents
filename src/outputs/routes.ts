@@ -1570,6 +1570,65 @@ export function mountOutputsRoutes(
         idempotency_key: writeIdempotencyKey(req),
       });
 
+      const existingComment = replay
+        ? (await listComments(adapter, artifactId, 1000, 0)).find((candidate) => candidate.op_id === op_id)
+        : null;
+      if (existingComment?.route_status && existingComment.route_status.retryable !== true) {
+        const ackVersion = await artifactMutationVersion(adapter, artifactId);
+        const route_status = existingComment.route_status;
+        const base = {
+          ok: true,
+          schema_version: 'artifact.comment.v1',
+          visible_state: route_status.visible_state,
+          compat_status: route_status.compat_status,
+          feedback_status: route_status.feedback_status,
+          route_status,
+          op_id,
+          comment: existingComment,
+          actor,
+          route_kind: route_status.route_kind,
+          approval: null,
+          version: ackVersion,
+          reconciliation: localFirstReconciliation({
+            artifactId,
+            clientMutationId: mutationId,
+            baseVersion: requestedBaseVersion ?? undefined,
+            ackVersion,
+            visibleState: route_status.visible_state,
+            idempotent: true,
+          }),
+        };
+        if (route_status.routed && route_status.dispatch) {
+          return res.json({
+            ...base,
+            dispatch_routed: true,
+            dispatch: {
+              query_id: route_status.dispatch.query_id,
+              dispatch_phid: route_status.dispatch.dispatch_phid,
+              to_agent: route_status.dispatch.to_agent,
+              to_agent_raw: route_status.target_agent_raw ?? route_status.dispatch.to_agent,
+            },
+            idempotent: true,
+          });
+        }
+        if (route_status.skipped) {
+          return res.json({
+            ...base,
+            dispatch_routed: false,
+            dispatch: null,
+            dispatch_skipped: route_status.skipped,
+            idempotent: true,
+          });
+        }
+        return res.json({
+          ...base,
+          dispatch_routed: false,
+          dispatch: null,
+          dispatch_error: route_status.error,
+          idempotent: true,
+        });
+      }
+
       // Artifact comment routing policy: durable comments are internal artifact
       // signals. Approval signals approve the artifact; questions stay threaded
       // on the artifact; only substantive follow-up dispatches to the owner.
