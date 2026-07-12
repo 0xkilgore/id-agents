@@ -41,6 +41,7 @@ interface BacklogRow {
   approved_at: string | null;
   last_dispatch_phid: string | null;
   retry_safe: number | null;
+  dispatch_retry_count: number | null;
   updated_by: string | null;
   track_drift: number | null;
   flesh_status: string | null;
@@ -90,6 +91,7 @@ export function rowToBacklogItem(r: BacklogRow): BacklogItem {
     approved_at: r.approved_at,
     last_dispatch_phid: r.last_dispatch_phid,
     retry_safe: r.retry_safe === 1,
+    dispatch_retry_count: Number(r.dispatch_retry_count ?? 0),
     updated_by: r.updated_by,
     track_drift: r.track_drift === 1,
     flesh_status: (r.flesh_status as BacklogItem["flesh_status"]) ?? "unfleshed",
@@ -530,6 +532,64 @@ export async function getDispatchStatusesByPhid(
   );
   for (const r of rows) {
     out.set(r.dispatch_phid, r.recovery_status === "moot" ? "moot" : r.status);
+  }
+  return out;
+}
+
+export interface DispatchOutcome {
+  dispatch_phid: string;
+  status: string;
+  recovery_status: string | null;
+  failure_kind: string | null;
+  failure_detail: string | null;
+  recovery_attempts: number;
+  promote: boolean;
+  promotion_required_reason: string | null;
+  promotion_result_json: string | null;
+}
+
+/**
+ * Read dispatch details for backlog retry-readiness. Phid-only lookup mirrors
+ * getDispatchStatusesByPhid because dispatch phids are globally unique while
+ * orchestration team ids are display names.
+ */
+export async function getDispatchOutcomesByPhid(
+  adapter: DbAdapter,
+  phids: string[],
+): Promise<Map<string, DispatchOutcome>> {
+  const out = new Map<string, DispatchOutcome>();
+  const unique = [...new Set(phids.filter((p): p is string => !!p))];
+  if (unique.length === 0) return out;
+  const placeholders = unique.map((_, i) => `$${i + 1}`).join(",");
+  const { rows } = await adapter.query<{
+    dispatch_phid: string;
+    status: string;
+    recovery_status: string | null;
+    failure_kind: string | null;
+    failure_detail: string | null;
+    recovery_attempts: number | null;
+    promote: number | null;
+    promotion_required_reason: string | null;
+    promotion_result_json: string | null;
+  }>(
+    `SELECT dispatch_phid, status, recovery_status, failure_kind, failure_detail,
+            recovery_attempts, promote, promotion_required_reason, promotion_result_json
+       FROM dispatch_scheduler_queue
+      WHERE dispatch_phid IN (${placeholders})`,
+    unique,
+  );
+  for (const r of rows) {
+    out.set(r.dispatch_phid, {
+      dispatch_phid: r.dispatch_phid,
+      status: r.recovery_status === "moot" ? "moot" : r.status,
+      recovery_status: r.recovery_status,
+      failure_kind: r.failure_kind,
+      failure_detail: r.failure_detail,
+      recovery_attempts: Number(r.recovery_attempts ?? 0),
+      promote: r.promote == null ? true : Number(r.promote) === 1,
+      promotion_required_reason: r.promotion_required_reason,
+      promotion_result_json: r.promotion_result_json,
+    });
   }
   return out;
 }

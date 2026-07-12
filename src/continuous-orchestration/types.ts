@@ -31,6 +31,30 @@ export type ReadinessState =
 
 export type RiskClass = "routine" | "build" | "external" | "destructive" | "costly" | "novel";
 
+export type BacklogRetryReadinessStatus =
+  | "not_retry_candidate"
+  | "retryable_failed_row"
+  | "retry_cap_reached"
+  | "non_retryable_failed_row"
+  | "waiting_on_live_dispatch"
+  | "stale_duplicate";
+
+export interface BacklogRetryReadiness {
+  schema_version: "backlog.retry_readiness.v1";
+  status: BacklogRetryReadinessStatus;
+  retryable: boolean;
+  stale_duplicate: boolean;
+  reason: string;
+  next_action: "retry" | "wait" | "close_or_ignore" | "operator_review" | "none";
+  prior_dispatch_phid: string | null;
+  prior_dispatch_status: string | null;
+  dispatch_retry_count: number;
+  retry_cap: number;
+  failure_kind: string | null;
+  failure_detail: string | null;
+  recovery_status: string | null;
+}
+
 /**
  * Auto-flesh lifecycle (daemon SELF-REFUEL). An imported roadmap skeleton lands
  * `unfleshed`; the flesher fills its dispatch fields (`fleshed`), the auto-ready
@@ -97,6 +121,14 @@ export interface BacklogItem {
   last_dispatch_phid: string | null;
   /** Explicit marker allowing a previously-dispatched row to fire again. */
   retry_safe?: boolean;
+  /** Bounded daemon retries after a prior dispatch failed for a known transient. */
+  dispatch_retry_count: number;
+  /**
+   * Additive UI/read-model contract for already-dispatched feedback/backlog rows.
+   * Present on `/orchestration/backlog` responses that can read dispatch outcome
+   * state; storage-only callers may receive this as undefined.
+   */
+  retry_readiness?: BacklogRetryReadiness;
   /** Actor who last edited this item via PATCH (actor-attributed updates). */
   updated_by: string | null;
   /**

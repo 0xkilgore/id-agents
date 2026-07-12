@@ -15,6 +15,7 @@ import {
   countFleshLogSince,
   findProbableDuplicateByRegisterId,
   getBacklogItem,
+  getDispatchOutcomesByPhid,
   getDispatchStatusesByPhid,
   getFleshCounts,
   insertBacklogItem,
@@ -31,6 +32,7 @@ import {
   updateBacklogFields,
   type NewBacklogItem,
 } from "./storage.js";
+import { attachBacklogRetryReadiness } from "./backlog-retry-readiness.js";
 import type { RiskClass } from "./types.js";
 import { autoPromoteRejections } from "./auto-promote-policy.js";
 import { parseRoadmapToBacklog } from "./roadmap-import.js";
@@ -186,7 +188,11 @@ export function mountContinuousOrchestrationRoutes(app: Application, opts: Orche
     try {
       const state = typeof req.query.state === "string" ? (req.query.state as ReadinessState) : undefined;
       const items = await listBacklogByState(adapter, { team_id: teamId, state });
-      res.json({ ok: true, items });
+      const outcomes = await getDispatchOutcomesByPhid(
+        adapter,
+        items.map((item) => item.last_dispatch_phid).filter((phid): phid is string => !!phid),
+      );
+      res.json({ ok: true, items: attachBacklogRetryReadiness(items, outcomes) });
     } catch (err) {
       res.status(500).json({ ok: false, error: err instanceof Error ? err.message : String(err) });
     }
