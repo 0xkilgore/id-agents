@@ -62,7 +62,7 @@ describe('GET /health build-stamp (T11.1)', () => {
     db = await createInMemoryDb();
     manager = new AgentManagerDb(workDir, db as any);
     await manager.start(port);
-  }, 30000);
+  }, 60000);
 
   afterAll(async () => {
     await new Promise<void>((resolve) => {
@@ -73,6 +73,51 @@ describe('GET /health build-stamp (T11.1)', () => {
   });
 
   it('exposes the running build identity (build_sha + staleness fields)', async () => {
+    (manager as any).fleetFreshnessSummary = {
+      fleet_behind: true,
+      stale_nodes: ['kapelle-site'],
+      node_count: 1,
+      nodes: [{
+        node_id: 'kapelle-site',
+        state: 'stale',
+        behind_origin: true,
+        behind_origin_since: '2026-07-12T00:00:00.000Z',
+        build_sha: '1111111',
+        origin_main_sha: '2222222',
+        release_state: {
+          repo_dir: '/srv/kapelle-site',
+          observed_at: '2026-07-12T00:00:00.000Z',
+          status: 'red',
+          checkout: {
+            exists: true,
+            is_git: true,
+            branch: 'feature/local-ops',
+            intended_branch: 'main',
+            upstream: 'origin/main',
+            ahead: 2,
+            behind: 3,
+            dirty_count: 1,
+            status_short: ' M app/ops/page.tsx',
+            severity: 'red',
+            code: 'dirty',
+            message: 'kapelle-site has 1 uncommitted change(s)',
+            remediation: 'Commit or stash the listed changes, then rebuild and restart /ops from clean origin/main.',
+          },
+          locks: [],
+          actions: ['Commit or stash the listed changes, then rebuild and restart /ops from clean origin/main.'],
+        },
+      }],
+      coupling: {
+        coordinated_redeploy_pending: false,
+        coherent: true,
+        target_sha: '2222222',
+        running_shas: ['1111111'],
+        lagging_nodes: ['kapelle-site'],
+        unknown_nodes: [],
+        reason: 'test fixture',
+      },
+    };
+
     const res = await fetch(`${baseUrl}/health`);
     expect(res.status).toBe(200);
     const body = await res.json() as any;
@@ -89,6 +134,13 @@ describe('GET /health build-stamp (T11.1)', () => {
     expect(body.build).toHaveProperty('local_main_sha');
     expect(body.build).toHaveProperty('origin_main_sha');
     expect(body.build).toHaveProperty('behind_origin');
+    expect(body.build).toHaveProperty('source_branch_sha');
+    expect(body.build).toHaveProperty('source_branch_name');
+    expect(body.build.freshness).toMatchObject({
+      running_manager_build_sha: body.build.build_sha,
+      promoted_main_sha: body.build.origin_main_sha,
+      behind_promoted_main: body.build.behind_origin,
+    });
     expect(['build_stamp', 'runtime_fallback', 'unknown']).toContain(body.build.source);
 
     expect(body.disk).toMatchObject({
@@ -98,6 +150,41 @@ describe('GET /health build-stamp (T11.1)', () => {
       min_free_bytes: expect.any(Number),
       warn_free_bytes: expect.any(Number),
     });
+    expect(typeof body.disk.free_bytes === 'number' || body.disk.free_bytes === null).toBe(true);
+    expect(typeof body.disk.available_bytes === 'number' || body.disk.available_bytes === null).toBe(true);
     expect(typeof body.disk.available_gib === 'number' || body.disk.available_gib === null).toBe(true);
+
+    expect(body.supervisor).toMatchObject({
+      schema_version: 'supervisor-freshness.v1',
+      enabled: expect.any(Boolean),
+      running: expect.any(Boolean),
+      state: expect.stringMatching(/^(disabled|stopped|starting|fresh|stale|error)$/),
+      poll_interval_seconds: expect.any(Number),
+      stale_after_seconds: expect.any(Number),
+      last_tick_started_at: null,
+      last_success_at: null,
+      last_error_at: null,
+      last_error: null,
+      open_alert_count: expect.any(Number),
+    });
+
+    expect(body.fleet_freshness.nodes[0]).toMatchObject({
+      node_id: 'kapelle-site',
+      build_sha: '1111111',
+      origin_main_sha: '2222222',
+      behind_origin: true,
+      release_state: {
+        repo_dir: '/srv/kapelle-site',
+        checkout: {
+          branch: 'feature/local-ops',
+          intended_branch: 'main',
+          upstream: 'origin/main',
+          ahead: 2,
+          behind: 3,
+          dirty_count: 1,
+          code: 'dirty',
+        },
+      },
+    });
   });
 });

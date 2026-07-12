@@ -1,5 +1,10 @@
 // Supervisor v0 — Public API.
-export { SupervisorWatcher, type SupervisorSourceReader, type SupervisorWatcherOptions } from './watcher.js';
+export {
+  SupervisorWatcher,
+  type SupervisorHealthStatus,
+  type SupervisorSourceReader,
+  type SupervisorWatcherOptions,
+} from './watcher.js';
 export { parseSupervisorConfig, type SupervisorWatchConfig } from './config.js';
 export { AlertStateManager } from './alerts.js';
 export { createDefaultSinks, LogSink, JsonlFileSink, CompositeSink, type AlertSink } from './sinks.js';

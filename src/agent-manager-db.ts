@@ -243,6 +243,7 @@ import { loadApprovalPolicy, type ApprovalPolicyService } from './approval-polic
 import { resolveManagerBindHost } from './manager-bind-host.js';
 import { getBuildStatusCached, loadBuildStatus, type BuildStatus } from './build-info.js';
 import { readDiskHeadroom } from './disk-health.js';
+import { parseSupervisorConfig, type SupervisorHealthStatus } from './supervisor/index.js';
 import {
   INITIAL_FRESHNESS,
   type FreshnessTrackerState,
@@ -1159,7 +1160,7 @@ export class AgentManagerDb {
   private worktreeReaperInterval: NodeJS.Timeout | null = null;
   private retentionService: RetentionService | null = null;
   private checkinService: CheckinService | null = null;
-  private supervisorWatcher: { stop(): void } | null = null;
+  private supervisorWatcher: { stop(): void; getHealthStatus?(nowMs?: number): SupervisorHealthStatus } | null = null;
   /**
    * Stuck-query sweeper timeout, in minutes. Queries whose status is still
    * pending/processing this long after their `created` timestamp are assumed
@@ -1684,6 +1685,27 @@ export class AgentManagerDb {
    */
   private getBuildStatus(): BuildStatus {
     return getBuildStatusCached({ repoDir: process.cwd(), distDir: __dirname });
+  }
+
+  private getSupervisorHealthStatus(nowMs: number = Date.now()): SupervisorHealthStatus {
+    const liveStatus = this.supervisorWatcher?.getHealthStatus?.(nowMs);
+    if (liveStatus) return liveStatus;
+
+    const config = parseSupervisorConfig(process.env);
+    const staleAfterSeconds = Math.max(config.pollIntervalSeconds * 3, config.pollIntervalSeconds + 5);
+    return {
+      schema_version: 'supervisor-freshness.v1',
+      enabled: config.enabled,
+      running: false,
+      state: config.enabled ? 'stopped' : 'disabled',
+      poll_interval_seconds: config.pollIntervalSeconds,
+      stale_after_seconds: staleAfterSeconds,
+      last_tick_started_at: null,
+      last_success_at: null,
+      last_error_at: null,
+      last_error: null,
+      open_alert_count: 0,
+    };
   }
 
   /**
@@ -5328,6 +5350,9 @@ export class AgentManagerDb {
         // T-RELY: fail-loud disk headroom so build waves see ENOSPC risk before
         // database I/O and test runs start failing mid-flight.
         disk: readDiskHeadroom(),
+        // Supervisor freshness: is the watch-and-alert loop itself running
+        // recently enough to trust stale-manager / low-disk warnings?
+        supervisor: this.getSupervisorHealthStatus(now),
         // T-DEPLOY.1: how long the running build has been behind origin/main +
         // whether the freshness monitor has alerted (the drift watchdog state).
         freshness: {

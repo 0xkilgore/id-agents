@@ -30,6 +30,22 @@ export interface SupervisorWatcherOptions {
   now?: () => number;
 }
 
+export type SupervisorFreshnessState = 'disabled' | 'stopped' | 'starting' | 'fresh' | 'stale' | 'error';
+
+export interface SupervisorHealthStatus {
+  schema_version: 'supervisor-freshness.v1';
+  enabled: boolean;
+  running: boolean;
+  state: SupervisorFreshnessState;
+  poll_interval_seconds: number;
+  stale_after_seconds: number;
+  last_tick_started_at: string | null;
+  last_success_at: string | null;
+  last_error_at: string | null;
+  last_error: string | null;
+  open_alert_count: number;
+}
+
 export class SupervisorWatcher {
   private config: SupervisorWatchConfig;
   private sourceReader: SupervisorSourceReader;
@@ -40,6 +56,10 @@ export class SupervisorWatcher {
   private getNow: () => number;
   private lastTerminalCheck: string;
   private lastNewsCheck: string;
+  private lastTickStartedAt: string | null = null;
+  private lastSuccessAt: string | null = null;
+  private lastErrorAt: string | null = null;
+  private lastError: string | null = null;
 
   constructor(options: SupervisorWatcherOptions) {
     this.config = options.config ?? parseSupervisorConfig();
@@ -97,30 +117,79 @@ export class SupervisorWatcher {
     return this.alertState.getOpenAlerts();
   }
 
+  getHealthStatus(nowMs: number = this.getNow()): SupervisorHealthStatus {
+    const staleAfterSeconds = Math.max(this.config.pollIntervalSeconds * 3, this.config.pollIntervalSeconds + 5);
+    const successAgeSeconds = this.lastSuccessAt
+      ? (nowMs - Date.parse(this.lastSuccessAt)) / 1000
+      : null;
+    const errorIsCurrent =
+      this.lastErrorAt != null &&
+      (this.lastSuccessAt == null || Date.parse(this.lastErrorAt) > Date.parse(this.lastSuccessAt));
+
+    let state: SupervisorFreshnessState;
+    if (!this.config.enabled) {
+      state = 'disabled';
+    } else if (errorIsCurrent) {
+      state = 'error';
+    } else if (!this.running) {
+      state = 'stopped';
+    } else if (!this.lastSuccessAt) {
+      state = 'starting';
+    } else if (successAgeSeconds != null && successAgeSeconds > staleAfterSeconds) {
+      state = 'stale';
+    } else {
+      state = 'fresh';
+    }
+
+    return {
+      schema_version: 'supervisor-freshness.v1',
+      enabled: this.config.enabled,
+      running: this.running,
+      state,
+      poll_interval_seconds: this.config.pollIntervalSeconds,
+      stale_after_seconds: staleAfterSeconds,
+      last_tick_started_at: this.lastTickStartedAt,
+      last_success_at: this.lastSuccessAt,
+      last_error_at: this.lastErrorAt,
+      last_error: this.lastError,
+      open_alert_count: this.alertState.getOpenAlerts().length,
+    };
+  }
+
   async tick(): Promise<void> {
     if (!this.config.enabled) return;
 
     const now = this.getNow();
     const nowIso = new Date(now).toISOString();
+    this.lastTickStartedAt = nowIso;
 
-    // Collect sources with per-source error tolerance
-    const snapshot = await this.collectSources(nowIso);
+    try {
+      // Collect sources with per-source error tolerance
+      const snapshot = await this.collectSources(nowIso);
 
-    // Evaluate rules
-    const findings = evaluateAllRules(snapshot, this.config, now);
+      // Evaluate rules
+      const findings = evaluateAllRules(snapshot, this.config, now);
 
-    // Process findings through alert state
-    const configSnap = configToSnapshot(this.config);
-    const records = this.alertState.processTick(findings, configSnap, nowIso);
+      // Process findings through alert state
+      const configSnap = configToSnapshot(this.config);
+      const records = this.alertState.processTick(findings, configSnap, nowIso);
 
-    // Emit to sinks
-    for (const record of records) {
-      this.sink.emit(record);
+      // Emit to sinks
+      for (const record of records) {
+        this.sink.emit(record);
+      }
+
+      // Update lookback markers
+      this.lastTerminalCheck = nowIso;
+      this.lastNewsCheck = nowIso;
+      this.lastSuccessAt = nowIso;
+      this.lastErrorAt = null;
+      this.lastError = null;
+    } catch (err) {
+      this.lastErrorAt = nowIso;
+      this.lastError = err instanceof Error ? err.message : String(err);
+      throw err;
     }
-
-    // Update lookback markers
-    this.lastTerminalCheck = nowIso;
-    this.lastNewsCheck = nowIso;
   }
 
   private async collectSources(nowIso: string): Promise<SourceSnapshot> {

@@ -270,4 +270,76 @@ describe('SupervisorWatcher — integration', () => {
     watcher.stop();
     expect(watcher.isRunning()).toBe(false);
   });
+
+  it('reports supervisor freshness status from tick timing', async () => {
+    let now = new Date('2026-07-12T12:00:00.000Z').getTime();
+    const watcher = new SupervisorWatcher({
+      config: cfg({ enabled: true, pollIntervalSeconds: 30 }),
+      sourceReader: reader,
+      sink,
+      now: () => now,
+    });
+
+    expect(watcher.getHealthStatus(now)).toMatchObject({
+      schema_version: 'supervisor-freshness.v1',
+      enabled: true,
+      running: false,
+      state: 'stopped',
+      poll_interval_seconds: 30,
+      stale_after_seconds: 90,
+      last_tick_started_at: null,
+      last_success_at: null,
+      last_error_at: null,
+      last_error: null,
+      open_alert_count: 0,
+    });
+
+    watcher.start();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(watcher.getHealthStatus(now).state).toBe('fresh');
+
+    now += 91_000;
+    expect(watcher.getHealthStatus(now)).toMatchObject({
+      running: true,
+      state: 'stale',
+      last_success_at: '2026-07-12T12:00:00.000Z',
+    });
+
+    watcher.stop();
+  });
+
+  it('reports supervisor error status when a tick throws', async () => {
+    const failingSink = {
+      emit() {
+        throw new Error('sink unavailable');
+      },
+    };
+    reader.activeDispatches = [{
+      dispatch_phid: 'phid:test-error-status',
+      query_id: 'q-error-status',
+      to_agent: 'roger',
+      status: 'in_flight',
+      started_at: '2026-07-12T11:00:00.000Z',
+      updated_at: '2026-07-12T11:00:00.000Z',
+      subject: 'Test dispatch',
+      promote: false,
+      promotion_input: null,
+    }];
+    const now = new Date('2026-07-12T12:00:00.000Z').getTime();
+    const watcher = new SupervisorWatcher({
+      config: cfg({ stuckQuerySeconds: 1800 }),
+      sourceReader: reader,
+      sink: failingSink,
+      now: () => now,
+    });
+
+    await expect(watcher.tick()).rejects.toThrow('sink unavailable');
+    expect(watcher.getHealthStatus(now)).toMatchObject({
+      state: 'error',
+      last_tick_started_at: '2026-07-12T12:00:00.000Z',
+      last_success_at: null,
+      last_error_at: '2026-07-12T12:00:00.000Z',
+      last_error: 'sink unavailable',
+    });
+  });
 });
