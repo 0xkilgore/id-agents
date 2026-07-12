@@ -37,6 +37,7 @@ import {
   resolveRuntime,
   supportsSessionResume,
 } from './runtime/registry.js';
+import { sanitizeCatalogRuntimeTruth } from './db/agent-runtime-sot.js';
 // XMTP is dynamically imported only when needed (native bindings may not be available)
 type XmtpMessagingType = import('./xmtp/xmtp-messaging.js').XmtpMessaging;
 const __filename = fileURLToPath(import.meta.url);
@@ -258,7 +259,7 @@ export class AgentRestServer {
 
     // Load catalog from agent metadata if available
     if (this.agentIdentity?.metadata?.catalog) {
-      this.catalog = { ...this.agentIdentity.metadata.catalog };
+      this.catalog = { ...(sanitizeCatalogRuntimeTruth(this.agentIdentity.metadata.catalog) as Record<string, any>) };
     }
 
     // Initialize harness based on ID_HARNESS env var (defaults to 'claude-agent-sdk')
@@ -693,6 +694,7 @@ export class AgentRestServer {
           this.catalog[key] = value;
         }
       }
+      this.catalog = sanitizeCatalogRuntimeTruth(this.catalog) as Record<string, any>;
 
       // Sync to database if connected
       if (this.db && this.dbTeamId && this.dbAgentId) {
@@ -1516,7 +1518,7 @@ export class AgentRestServer {
     }
     // Also load catalog from metadata if present
     if (identity?.metadata?.catalog) {
-      this.catalog = { ...this.catalog, ...identity.metadata.catalog };
+      this.catalog = sanitizeCatalogRuntimeTruth({ ...this.catalog, ...identity.metadata.catalog }) as Record<string, any>;
     }
   }
 
@@ -1531,6 +1533,7 @@ export class AgentRestServer {
         this.catalog[key] = value;
       }
     }
+    this.catalog = sanitizeCatalogRuntimeTruth(this.catalog) as Record<string, any>;
     console.log(`${logTime()} [Agent] 📋 Catalog updated via manager:`, this.catalog);
   }
 

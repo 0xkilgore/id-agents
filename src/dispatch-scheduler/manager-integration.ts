@@ -24,6 +24,7 @@ import {
 } from "../dispatch-recovery/service.js";
 import { DEFAULT_RECOVERY_CONFIG } from "../dispatch-recovery/classifier.js";
 import { makeRecoveryReactor } from "../dispatch-recovery/reactor-adapter.js";
+import { emitNotificationReactorEvent } from "../notifications/reactor.js";
 import type {
   RoutingHealthReadModel,
   RuntimeLiveness,
@@ -35,6 +36,7 @@ import {
 } from "./policy.js";
 import type {
   DispatchDoc,
+  DispatchLogicalAgentIdentity,
   EnqueueInput,
   FailureKind,
   PromotionInput,
@@ -418,6 +420,12 @@ export class SchedulerHandle {
       // a rate-limit bounce retries — prefers a fallback lane over hammering
       // the SAME already-throttled provider.
       modelPolicy: this.modelPolicy,
+      notificationTeamId: this.teamId,
+      notificationSink: {
+        notify: async (event) => {
+          await emitNotificationReactorEvent(opts.adapter, event);
+        },
+      },
     });
     if (opts.agentsRepository) {
       this.scheduler.setAdmissionGateProvider({
@@ -604,6 +612,47 @@ export class SchedulerHandle {
     }
   }
 
+  private async resolveLogicalAgentIdentity(
+    teamId: string,
+    logicalAgentName: string,
+  ): Promise<DispatchLogicalAgentIdentity> {
+    const fallback: DispatchLogicalAgentIdentity = {
+      logical_agent: logicalAgentName,
+      display_name: logicalAgentName,
+      source_agent_id: null,
+      source_agent_name: null,
+      home_runtime: null,
+      home_provider: null,
+      metadata: null,
+    };
+    if (!this.agentsRepository) return fallback;
+    try {
+      const agent = await this.agentsRepository.getByName(teamId, logicalAgentName);
+      const metadata = agent?.metadata ?? null;
+      const explicitLogical =
+        metadata && typeof metadata.logical_agent === "string" && metadata.logical_agent.trim()
+          ? metadata.logical_agent.trim()
+          : logicalAgentName;
+      const identity =
+        await this.agentsRepository.getLogicalIdentity(teamId, explicitLogical) ??
+        (explicitLogical !== logicalAgentName
+          ? await this.agentsRepository.getLogicalIdentity(teamId, logicalAgentName)
+          : null);
+      const homeRuntime = agent ? normalizeRuntime(agent.runtime) : null;
+      return {
+        logical_agent: identity?.logical_agent ?? explicitLogical,
+        display_name: identity?.display_name ?? explicitLogical,
+        source_agent_id: agent?.id ?? null,
+        source_agent_name: agent?.name ?? null,
+        home_runtime: homeRuntime,
+        home_provider: homeRuntime ? resolveProviderFromRuntime(homeRuntime) : null,
+        metadata: identity?.metadata ?? null,
+      };
+    } catch {
+      return fallback;
+    }
+  }
+
   /**
    * Run a single recovery pass. Bounded: overlapping ticks are skipped so a
    * slow DB never stacks passes. Never throws — the service already swallows
@@ -749,13 +798,8 @@ export class SchedulerHandle {
     } else {
       runtime = normalizeRuntime("claude-code-cli");
     }
-    const targetAgent = await this.agentsRepository
-      ?.getByName(this.teamId, input.to_agent)
-      .catch(() => null);
-    if (targetAgent?.runtime && (input.runtime || input.provider)) {
-      runtime = normalizeRuntime(targetAgent.runtime);
-    }
     const provider: Provider = resolveProviderFromRuntime(runtime);
+    const logicalAgent = await this.resolveLogicalAgentIdentity(teamId, input.to_agent);
     const payload: EnqueueInput = {
       query_id: queryId,
       to_agent: input.to_agent,
@@ -765,6 +809,7 @@ export class SchedulerHandle {
       body_markdown: input.message,
       provider,
       runtime,
+      logical_agent: logicalAgent,
       priority: input.priority ?? 5,
       not_before_at: input.not_before_at,
       dedup_key: input.dedup_key,
@@ -786,6 +831,7 @@ export class SchedulerHandle {
       priority: doc.priority,
       runtime: doc.runtime,
       provider: doc.provider,
+      logical_agent: doc.logical_agent,
       model_policy: modelPolicyTrace
         ? {
             source: modelPolicyTrace.source,

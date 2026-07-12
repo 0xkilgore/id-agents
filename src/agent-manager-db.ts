@@ -1497,10 +1497,13 @@ export class AgentManagerDb {
         orchestration: {
           state: orchestration.orchestration_loop.state,
           reason: orchestration.orchestration_loop.reason,
+          raw_ready: readyAdmission?.raw_ready ?? orchestration.orchestration_loop.raw_ready,
+          useful_ready: readyAdmission?.useful_ready ?? orchestration.orchestration_loop.useful_ready,
           ready_count: orchestration.orchestration_loop.ready_count,
           admissible_now: admissibleNow,
           actionable_ready_count: admissibleNow,
           ready_blocked_by_reason: readyBlockedByReason,
+          top_blocking_lanes: readyAdmission?.top_blocking_lanes ?? orchestration.ready_item_blockers.top_blocking_lanes,
           noop_tick_count: orchestration.orchestration_loop.noop_tick_count,
           last_tick_at: orchestration.orchestration_loop.last_tick_at,
           last_launch_at: orchestration.orchestration_loop.last_launch_at,

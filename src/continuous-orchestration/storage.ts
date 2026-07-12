@@ -544,11 +544,10 @@ export interface ReadyRuntimeRepair {
  * Repair stale ready-fuel metadata after an agent lane changes runtime.
  *
  * The flesher stamps provider/runtime before the final lane may be known. A
- * ready, approved row targeting a Codex agent must not stay pinned to the old
- * Anthropic/Claude lane, because admission will correctly hold it forever as a
- * provider/runtime mismatch. This pass is deliberately narrow and idempotent:
- * only approved READY rows with a known target agent runtime of `codex` are
- * updated, and already-correct rows are ignored.
+ * ready, approved row must not stay pinned to the old lane, because admission
+ * will correctly hold it forever as a provider/runtime mismatch. This pass is
+ * deliberately narrow and idempotent: only approved READY rows with a known
+ * target agent runtime are updated, and already-correct rows are ignored.
  */
 export async function repairReadyCodexRuntimeMetadata(
   adapter: DbAdapter,
@@ -582,7 +581,6 @@ export async function repairReadyCodexRuntimeMetadata(
   const repairs: ReadyRuntimeRepair[] = [];
   for (const row of rows) {
     const targetRuntime = normalizeRuntime(row.agent_runtime);
-    if (targetRuntime !== "codex") continue;
     const targetProvider = resolveProviderFromRuntime(targetRuntime);
     const currentRuntime = row.runtime ? normalizeRuntime(row.runtime) : null;
     const currentProvider = row.provider ?? (currentRuntime ? resolveProviderFromRuntime(currentRuntime) : null);

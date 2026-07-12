@@ -39,6 +39,10 @@ interface ArtifactRow {
   source_host: string | null;
   body_text: string | null;
   body_error: string | null;
+  body_content_hash: string | null;
+  body_source_mtime: string | null;
+  body_cached_at: string | null;
+  body_updated_at: string | null;
   updated_at: string;
   first_viewed_at: string | null;
   last_viewed_at: string | null;
@@ -254,15 +258,148 @@ export function executeSurfacedArtifactsSavedView(
   nowIso = new Date().toISOString(),
 ): SavedViewExecutionResult<SurfacedArtifactRow> {
   const errors = validateSavedViewPredicateFields(predicate);
+  const filteredRows = errors.length === 0 ? rows.filter((row) => evaluateSavedViewPredicate(row, predicate)) : [];
   return {
     ok: errors.length === 0,
     schema_version: "view-execution.v1",
     view_id: SURFACED_ARTIFACTS_SAVED_VIEW.id,
     generated_at: nowIso,
-    rows: errors.length === 0 ? rows : [],
-    count: errors.length === 0 ? rows.length : 0,
+    rows: filteredRows,
+    count: filteredRows.length,
     errors,
   };
+}
+
+function evaluateSavedViewPredicate(row: SurfacedArtifactRow, input: unknown): boolean {
+  if (!input || typeof input !== "object") return true;
+  if (Array.isArray(input)) return input.every((node) => evaluateSavedViewPredicate(row, node));
+  const record = input as Record<string, unknown>;
+  if (Array.isArray(record.and)) return record.and.every((node) => evaluateSavedViewPredicate(row, node));
+  if (Array.isArray(record.or)) return record.or.some((node) => evaluateSavedViewPredicate(row, node));
+  if ("not" in record) return !evaluateSavedViewPredicate(row, record.not);
+  for (const key of ["predicates", "filters", "where", "query"]) {
+    if (key in record) return evaluateSavedViewPredicate(row, record[key]);
+  }
+  if (typeof record.field !== "string") return true;
+
+  const actual = savedViewFieldValue(row, record.field);
+  const expected = record.value;
+  const op = typeof record.op === "string" ? record.op : "eq";
+  switch (op) {
+    case "eq":
+      return compareSavedViewValue(actual, expected) === 0;
+    case "neq":
+      return compareSavedViewValue(actual, expected) !== 0;
+    case "in":
+      return Array.isArray(expected) && expected.some((v) => compareSavedViewValue(actual, v) === 0);
+    case "not_in":
+      return Array.isArray(expected) && expected.every((v) => compareSavedViewValue(actual, v) !== 0);
+    case "contains":
+      return Array.isArray(actual)
+        ? actual.some((v) => compareSavedViewValue(v, expected) === 0)
+        : String(actual ?? "").toLowerCase().includes(String(expected ?? "").toLowerCase());
+    case "exists":
+      return actual !== undefined && actual !== null && actual !== "";
+    case "gt":
+    case "gte":
+    case "lt":
+    case "lte": {
+      const a = comparableSavedViewNumber(actual);
+      const b = comparableSavedViewNumber(expected);
+      if (a == null || b == null) return false;
+      if (op === "gt") return a > b;
+      if (op === "gte") return a >= b;
+      if (op === "lt") return a < b;
+      return a <= b;
+    }
+    default:
+      return true;
+  }
+}
+
+function savedViewFieldValue(row: SurfacedArtifactRow, field: string): unknown {
+  switch (field as SavedViewFieldId) {
+    case "artifact.id": return row.id;
+    case "artifact.title":
+    case "dispatch.title":
+    case "user_task.title": return row.title;
+    case "artifact.subtitle": return row.subtitle;
+    case "artifact.workItemRef": return row.work_item_ref;
+    case "artifact.groupCount": return row.group_count;
+    case "artifact.groupedSourceKinds": return row.grouped_source_kinds;
+    case "artifact.rankScore":
+    case "work_item.rank": return row.rank_score;
+    case "artifact.status":
+    case "dispatch.status":
+    case "user_task.status":
+    case "project.status":
+    case "task.status": return row.status;
+    case "artifact.relevanceReason": return row.relevance_reason;
+    case "artifact.needs":
+    case "work_item.attentionState": return row.needs;
+    case "artifact.artifactRef": return row.artifact_ref;
+    case "artifact.dispatchRef":
+    case "dispatch.id": return row.dispatch_ref;
+    case "artifact.taskRef":
+    case "dispatch.taskName": return row.task_ref;
+    case "artifact.projectRef":
+    case "user_task.projectRef":
+    case "project.id":
+    case "task.projectId":
+    case "work_item.projectId": return row.project_ref;
+    case "artifact.programRef": return row.program_ref;
+    case "artifact.trackRef": return row.track_ref;
+    case "artifact.agentName":
+    case "dispatch.agentId":
+    case "work_item.actor": return row.agent_name;
+    case "artifact.createdAt":
+    case "dispatch.createdAt": return row.created_at;
+    case "artifact.updatedAt":
+    case "dispatch.completedAt":
+    case "dispatch.updatedAt":
+    case "user_task.updatedAt":
+    case "project.updatedAt":
+    case "task.updatedAt":
+    case "work_item.updatedAt": return row.updated_at;
+    case "artifact.sourceKind": return row.source_kind;
+    case "artifact.sourceLabel": return row.source_label;
+    case "artifact.visibility.discoveredBy": return row.visibility_proof.discovered_by;
+    case "artifact.visibility.pathPresent": return row.visibility_proof.artifact_path_present;
+    case "artifact.visibility.bodyRenderable": return row.visibility_proof.body_renderable;
+    case "artifact.delivery.stableUrl": return row.delivery.stable_url;
+    case "artifact.delivery.copyTextUrl": return row.delivery.copy_text_url;
+    case "artifact.delivery.downloadUrl": return row.delivery.download_url;
+    case "artifact.delivery.mediaType": return row.delivery.media_type;
+    case "artifact.delivery.freshness": return row.delivery.freshness;
+    case "artifact.delivery.sourceHost": return row.delivery.source_host;
+    case "artifact.delivery.sourceMtime": return row.delivery.source_mtime;
+    case "artifact.delivery.contentHash":
+    case "artifact.contentHash": return row.delivery.content_hash;
+    case "artifact.delivery.bodyCached": return row.delivery.body_cached;
+    case "artifact.readState": return row.status;
+    case "artifact.hasComments": return row.status === "commented" || row.status === "routed";
+    case "dispatch.needsOperator": return row.needs === "approve" || row.needs === "route" || row.needs === "inspect_closeout";
+    case "work_item.entityType": return row.dispatch_ref ? "dispatch" : row.task_ref ? "task" : row.artifact_ref ? "artifact" : "work_item";
+    default: return undefined;
+  }
+}
+
+function compareSavedViewValue(actual: unknown, expected: unknown): number {
+  if (actual == null && expected == null) return 0;
+  if (typeof actual === "number" || typeof expected === "number") return Number(actual) === Number(expected) ? 0 : 1;
+  if (typeof actual === "boolean" || typeof expected === "boolean") return Boolean(actual) === Boolean(expected) ? 0 : 1;
+  return String(actual ?? "").toLowerCase() === String(expected ?? "").toLowerCase() ? 0 : 1;
+}
+
+function comparableSavedViewNumber(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string") {
+    const ts = Date.parse(value);
+    if (Number.isFinite(ts)) return ts;
+    const n = Number(value);
+    if (Number.isFinite(n)) return n;
+  }
+  return null;
 }
 
 function buildFieldRegistry(fieldIds: SavedViewFieldId[]): SavedViewFieldRegistryEntry[] {
@@ -344,6 +481,7 @@ function metadataSignalsFromText(text: string | null | undefined): {
   project: string | null;
   program: string | null;
   track: string | null;
+  task: string | null;
 } {
   const body = text ?? "";
   const frontmatter = body.match(/^---\s*\n([\s\S]*?)\n---\s*(?:\n|$)/)?.[1] ?? "";
@@ -360,10 +498,17 @@ function metadataSignalsFromText(text: string | null | undefined): {
     frontmatter.match(/^track:\s*["']?([^\n]+?)["']?\s*$/m)?.[1],
     body.match(TRACK_RE)?.[0],
   ]));
+  const task = firstClean([
+    frontmatter.match(/^task:\s*["']?([^\n]+?)["']?\s*$/m)?.[1],
+    frontmatter.match(/^task_name:\s*["']?([^\n]+?)["']?\s*$/m)?.[1],
+    body.match(/\btask:\s*`?([A-Za-z0-9_.-]+)`?/i)?.[1],
+    body.match(/\bTask:\s*`?([A-Za-z0-9_.-]+)`?/i)?.[1],
+  ]);
   return {
     project: project ? slugify(project) : null,
     program: programFromText(program) ?? slugify(program),
     track,
+    task: task ? slugify(task) : null,
   };
 }
 
@@ -411,7 +556,7 @@ export async function buildSurfacedArtifactsReadModel(
 
   const rawRows: SurfacedArtifactRow[] = [];
   for (const artifact of artifacts) {
-    const body = await readRenderableBody(artifact.abs_path, readFile);
+    const body = await projectArtifactBody(artifact, readFile);
     const signals = titleSignalsFromBody(body.text);
     const metadata = metadataSignalsFromText(body.text);
     const project = projectFromPath(artifact.abs_path) ?? metadata.project ?? projectFromText([artifact.title, artifact.basename, artifact.tag].join(" "));
@@ -437,7 +582,8 @@ export async function buildSurfacedArtifactsReadModel(
       status,
       relevance_reason: reason,
       needs: needForReason(reason, status),
-      artifact_ref: artifact.abs_path || artifact.artifact_id,
+      artifact_ref: artifact.artifact_id,
+      task_ref: metadata.task ?? undefined,
       project_ref: project ?? undefined,
       program_ref: program ?? undefined,
       track_ref: track ?? undefined,
@@ -445,20 +591,21 @@ export async function buildSurfacedArtifactsReadModel(
       created_at: artifact.produced_at,
       updated_at: artifact.last_op_at ?? artifact.updated_at ?? artifact.produced_at,
       source_kind: sourceKind,
-      source_label: sourceLabel([project, artifact.agent, artifact.title ?? artifact.basename]),
+      source_label: artifactSourceLabel(artifact, [project, artifact.agent, artifact.title ?? artifact.basename]),
       visibility_proof: {
         discovered_by: discoveredBy(artifact.source),
         artifact_path_present: Boolean(artifact.abs_path),
         body_renderable: body.renderable,
       },
       delivery: artifactDelivery(artifact.artifact_id, {
+        sourcePath: artifact.abs_path,
         mediaType: artifact.media_type,
-        freshness: body.renderable ? "current" : artifact.body_error ? "error" : "body_unavailable",
+        freshness: body.freshness,
         sourceHost: artifact.source_host,
         sourceMtime: artifact.source_mtime,
         contentHash: artifact.content_hash,
         bodyCached: Boolean(artifact.body_text),
-        bodyPreview: artifact.body_text?.slice(0, 1200) ?? body.text?.slice(0, 1200) ?? null,
+        bodyPreview: body.text?.slice(0, 1200) ?? artifact.body_text?.slice(0, 1200) ?? null,
       }),
     }));
   }
@@ -472,9 +619,11 @@ export async function buildSurfacedArtifactsReadModel(
     const project = projectFromPath(artifactPath) ?? metadata.project ?? projectFromText([dispatch.subject, dispatch.body_markdown, dispatch.result_json].join(" "));
     const track = metadata.track ?? trackFromText([dispatch.subject, dispatch.body_markdown, dispatch.result_json].join(" "));
     const program = metadata.program ?? programFromText([dispatch.subject, dispatch.body_markdown].join(" "));
+    const task = metadata.task ?? taskFromText([dispatch.subject, dispatch.body_markdown, dispatch.result_json].join(" "));
     const reason = missing ? "blocked_or_stale" : dispatchReasonFor(dispatch);
     const status: SurfacedArtifactStatus = "unread";
     const sourceKind = dispatchSourceKind(dispatch, missing);
+    const stableArtifactId = artifactPath ? artifactIdFromPath(artifactPath) : dispatch.dispatch_phid;
     rawRows.push(withRank({
       id: missing ? `dispatch-missing:${dispatch.dispatch_phid}` : `dispatch:${dispatch.dispatch_phid}`,
       title: humanTitleFromParts({
@@ -486,14 +635,15 @@ export async function buildSurfacedArtifactsReadModel(
         date: dispatch.completed_at ?? dispatch.updated_at,
       }),
       subtitle: subtitle([project, dispatch.to_agent, dispatch.query_id]),
-      work_item_ref: dispatchWorkItemRef(dispatch, artifactPath, project),
+      work_item_ref: dispatchWorkItemRef(dispatch, artifactPath, project, task),
       group_count: 1,
       grouped_source_kinds: [sourceKind],
       status,
       relevance_reason: reason,
       needs: missing ? "inspect_closeout" : needForReason(reason, status),
-      artifact_ref: artifactPath ?? undefined,
+      artifact_ref: artifactPath ? stableArtifactId : undefined,
       dispatch_ref: dispatch.dispatch_phid,
+      task_ref: task ?? undefined,
       project_ref: project ?? undefined,
       program_ref: program ?? undefined,
       track_ref: track ?? undefined,
@@ -507,7 +657,8 @@ export async function buildSurfacedArtifactsReadModel(
         artifact_path_present: Boolean(artifactPath),
         body_renderable: !missing,
       },
-      delivery: artifactDelivery(artifactPath ? artifactIdFromPath(artifactPath) : dispatch.dispatch_phid, {
+      delivery: artifactDelivery(stableArtifactId, {
+        sourcePath: artifactPath,
         mediaType: mediaTypeFromPathForDelivery(artifactPath),
         freshness: missing ? "body_unavailable" : "current",
         sourceHost: null,
@@ -549,6 +700,7 @@ export async function buildSurfacedArtifactsReadModel(
       source_label: sourceLabel([comment.agent, title]),
       visibility_proof: { discovered_by: "comment", artifact_path_present: Boolean(comment.abs_path) },
       delivery: artifactDelivery(comment.artifact_id, {
+        sourcePath: comment.abs_path,
         mediaType: mediaTypeFromPathForDelivery(comment.abs_path),
         freshness: comment.abs_path ? "current" : "body_unavailable",
         sourceHost: null,
@@ -644,6 +796,8 @@ async function readArtifacts(adapter: DbAdapter, limit: number): Promise<Artifac
     `SELECT a.artifact_id, a.basename, a.agent, a.tag, a.abs_path, a.title,
             a.produced_at, a.source, a.availability, a.media_type, a.content_hash,
             a.source_mtime, a.source_host, b.body_text, b.body_error, a.updated_at,
+            b.content_hash AS body_content_hash, b.source_mtime AS body_source_mtime,
+            b.cached_at AS body_cached_at, b.updated_at AS body_updated_at,
             rs.first_viewed_at, rs.last_viewed_at, rs.approved_at, rs.rejected_at,
             rs.shipped_at,
             SUM(CASE WHEN op.op_type = 'comment_recorded' THEN 1 ELSE 0 END) AS comment_count,
@@ -656,6 +810,7 @@ async function readArtifacts(adapter: DbAdapter, limit: number): Promise<Artifac
    GROUP BY a.artifact_id, a.basename, a.agent, a.tag, a.abs_path, a.title,
             a.produced_at, a.source, a.availability, a.media_type, a.content_hash,
             a.source_mtime, a.source_host, b.body_text, b.body_error, a.updated_at,
+            b.content_hash, b.source_mtime, b.cached_at, b.updated_at,
             rs.first_viewed_at, rs.last_viewed_at, rs.approved_at, rs.rejected_at, rs.shipped_at
    ORDER BY COALESCE(MAX(op.ts), a.produced_at) DESC
       LIMIT ?`,
@@ -740,13 +895,16 @@ function dispatchSourceKind(row: DispatchDoneRow, missing: boolean): SurfacedArt
 }
 
 function artifactWorkItemRef(row: ArtifactRow, project: string | null): string {
+  const metadata = metadataSignalsFromText(row.body_text);
+  if (metadata.task) return `task:${metadata.task}`;
   const scope = project ?? row.tag ?? row.agent;
   return `work:${scope}:${artifactFamily(row.basename || row.title || row.artifact_id)}`;
 }
 
-function dispatchWorkItemRef(row: DispatchDoneRow, artifactPath: string | null, project: string | null): string {
+function dispatchWorkItemRef(row: DispatchDoneRow, artifactPath: string | null, project: string | null, task: string | null = null): string {
   const promotion = parsePromotionInput(row.promotion_input_json);
   if (promotion?.branch) return `branch:${promotion.branch}`;
+  if (task) return `task:${task}`;
   if (project) return `project:${project}:${artifactFamily(artifactPath ? basename(artifactPath) : row.subject)}`;
   return `dispatch:${row.dispatch_phid}`;
 }
@@ -766,6 +924,47 @@ async function readRenderableBody(path: string | null | undefined, readFile: (pa
   } catch {
     return { renderable: false, text: null };
   }
+}
+
+async function projectArtifactBody(
+  row: ArtifactRow,
+  readFile: (path: string) => Promise<string>,
+): Promise<{ renderable: boolean; text: string | null; source: "file" | "artifact_body_cache" | "none"; freshness: ArtifactDeliveryFreshness }> {
+  const fileBody = await readRenderableBody(row.abs_path, readFile);
+  if (fileBody.renderable) {
+    return { ...fileBody, source: "file", freshness: "current" };
+  }
+
+  if (row.body_text?.trim()) {
+    return {
+      renderable: true,
+      text: row.body_text,
+      source: "artifact_body_cache",
+      freshness: artifactCacheFreshness(row),
+    };
+  }
+
+  return {
+    renderable: false,
+    text: fileBody.text,
+    source: "none",
+    freshness: row.body_error ? "error" : "body_unavailable",
+  };
+}
+
+function artifactCacheFreshness(row: ArtifactRow): ArtifactDeliveryFreshness {
+  const cacheHash = row.body_content_hash;
+  const catalogHash = row.content_hash;
+  if (cacheHash && catalogHash && cacheHash !== catalogHash) return "stale";
+
+  const cacheMtime = row.body_source_mtime;
+  const catalogMtime = row.source_mtime;
+  if (cacheMtime && catalogMtime && cacheMtime !== catalogMtime) return "stale";
+
+  if (!row.body_cached_at) return "event_gap";
+  if (!cacheHash && catalogHash) return "syncing";
+  if (!cacheMtime && catalogMtime) return "syncing";
+  return "current";
 }
 
 function dispatchArtifactPath(row: DispatchDoneRow): string | null {
@@ -818,6 +1017,7 @@ function groupPrimaryRows(rawRows: SurfacedArtifactRow[]): SurfacedArtifactRow[]
   return [...groups.entries()].map(([key, rows]) => {
     const sorted = [...rows].sort(compareSurfacedRows);
     const primary = { ...sorted[0] };
+    primary.artifact_ref = primary.delivery.artifact_id;
     primary.id = rows.length > 1 ? `group:${key}` : primary.id;
     primary.work_item_ref = key;
     primary.group_count = rows.length;
@@ -944,6 +1144,14 @@ function trackFromText(value: string | null | undefined): string | null {
   return normalizeTrack((value ?? "").match(TRACK_RE)?.[0]);
 }
 
+function taskFromText(value: string | null | undefined): string | null {
+  const s = value ?? "";
+  const explicit = s.match(/\bTask:\s*`?([A-Za-z0-9_.-]+)`?/i)?.[1]
+    ?? s.match(/\btask:\s*`?([A-Za-z0-9_.-]+)`?/i)?.[1]
+    ?? s.match(/\btask_name:\s*`?([A-Za-z0-9_.-]+)`?/i)?.[1];
+  return slugify(explicit);
+}
+
 function normalizeTrack(value: string | null | undefined): string | null {
   return (value ?? "").match(TRACK_RE)?.[0] ?? null;
 }
@@ -966,6 +1174,11 @@ function sourceLabel(parts: Array<string | null | undefined>): string {
   return subtitle(parts) ?? "Artifact source";
 }
 
+function artifactSourceLabel(row: ArtifactRow, parts: Array<string | null | undefined>): string {
+  const label = sourceLabel(parts);
+  return discoveredBy(row.source) === "manual_fixture" ? `Fixture: ${label}` : label;
+}
+
 function discoveredBy(source: ArtifactSource): SurfacedArtifactRow["visibility_proof"]["discovered_by"] {
   if (source === "agent-done") return "agent_done";
   if (source === "delivery-log") return "delivery_log";
@@ -976,6 +1189,7 @@ function discoveredBy(source: ArtifactSource): SurfacedArtifactRow["visibility_p
 function artifactDelivery(
   artifactId: string,
   input: {
+    sourcePath?: string | null;
     mediaType: string | null | undefined;
     freshness: ArtifactDeliveryFreshness;
     sourceHost: string | null | undefined;
@@ -986,9 +1200,11 @@ function artifactDelivery(
   },
 ): SurfacedArtifactRow["delivery"] {
   return {
+    artifact_id: artifactId,
     stable_url: `/artifacts/${encodeURIComponent(artifactId)}/detail`,
     copy_text_url: `/artifacts/${encodeURIComponent(artifactId)}/copy-text`,
     download_url: `/artifacts/${encodeURIComponent(artifactId)}/download`,
+    source_path: input.sourcePath ?? null,
     media_type: normalizeDeliveryMediaType(input.mediaType),
     freshness: input.freshness,
     source_host: input.sourceHost ?? null,

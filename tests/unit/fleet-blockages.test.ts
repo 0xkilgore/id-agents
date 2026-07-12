@@ -4,10 +4,11 @@ import { readFleetBlockages } from "../../src/dispatch-scheduler/fleet-blockages
 
 class MemoryAdapter {
   public dispatchSql = "";
+  public orchestrationParams: unknown[] = [];
 
   constructor(private rows: Array<Record<string, unknown>>) {}
 
-  async query<T = Record<string, unknown>>(sql: string): Promise<{ rows: T[] }> {
+  async query<T = Record<string, unknown>>(sql: string, params: unknown[] = []): Promise<{ rows: T[] }> {
     if (sql.includes("FROM dispatch_scheduler_queue")) {
       this.dispatchSql = sql;
       return {
@@ -20,6 +21,7 @@ class MemoryAdapter {
       };
     }
     if (sql.includes("FROM orchestration_state")) {
+      this.orchestrationParams = params;
       return { rows: [{ mode: "running", consecutive_zero_ticks: 0 }] as T[] };
     }
     return { rows: [] };
@@ -97,5 +99,12 @@ describe("readFleetBlockages", () => {
   it("omits stall_class_pending_agent when no drift summary is passed at all (back-compat)", async () => {
     const report = await readFleetBlockages(new MemoryAdapter([]), "personal");
     expect(report.blockages.find((b) => b.kind === "stall_class_pending_agent")).toBeUndefined();
+  });
+
+  it("checks orchestration state by team id and team name so /dispatches/health is not blind to name-keyed CO rows", async () => {
+    const adapter = new MemoryAdapter([]);
+    await readFleetBlockages(adapter, "36ee78b1-d817-4a29-b631-c93945404c7b", null, "default");
+
+    expect(adapter.orchestrationParams).toEqual(["36ee78b1-d817-4a29-b631-c93945404c7b", "default"]);
   });
 });

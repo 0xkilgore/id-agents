@@ -15,6 +15,7 @@ import {
   shouldRunZeroAdmitStallWatchdog,
   type AdmissionContext,
 } from "../../src/continuous-orchestration/admission.js";
+import { buildAdmissionBreakdown } from "../../src/continuous-orchestration/daemon.js";
 import { defaultConfig } from "../../src/continuous-orchestration/config.js";
 import type { BacklogItem, UsageGateView } from "../../src/continuous-orchestration/types.js";
 
@@ -263,6 +264,33 @@ describe("planAdmission — per-item guardrails", () => {
     expect(p.admit).toHaveLength(1); // only 1 slot free (5-4)
   });
 
+  it("breaks down a ready lane stuck on capacity while another item is admitting", () => {
+    const ready = item({ item_id: "ready-capacity", to_agent: "roger" });
+    const admitting = item({ item_id: "in-flight", readiness_state: "in_flight", to_agent: "roger" });
+    const p = planAdmission([ready], ctx({ in_flight: 5, admit_limit: 5 }), cfg);
+
+    const breakdown = buildAdmissionBreakdown({
+      ready: [ready],
+      admitting: [admitting],
+      plan: p,
+      generated_at: "2026-07-10T00:00:00.000Z",
+    });
+
+    expect(breakdown).toMatchObject({
+      ready_count: 1,
+      admitting_count: 1,
+      lanes: [
+        {
+          lane: "roger",
+          ready_count: 1,
+          admitting_count: 1,
+          stuck_reason: "no_in_flight_slots",
+          block_reason_counts: { no_in_flight_slots: 1 },
+        },
+      ],
+    });
+  });
+
   it("holds risky classes for approval", () => {
     const p = planAdmission([item({ risk_class: "external" }), item({ risk_class: "destructive" })], ctx(), cfg);
     expect(p.admit).toHaveLength(0);
@@ -355,6 +383,25 @@ describe("planAdmission — per-item guardrails", () => {
     });
   });
 
+  it("holds Codex-stamped rows targeting a Claude lane until runtime metadata is reconciled", () => {
+    const p = planAdmission(
+      [item({ to_agent: "cto", provider: "openai", runtime: "codex" })],
+      ctx({ target_agent_runtimes: new Map([["cto", "claude-code-cli"]]) }),
+      cfg,
+    );
+    expect(p.admit).toHaveLength(0);
+    expect(p.skipped[0]).toMatchObject({
+      action: "held",
+      metadata: {
+        code: "provider_runtime_mismatch",
+        class: "provider_runtime",
+        target: "cto",
+        target_runtime: "claude-code-cli",
+        target_provider: "anthropic",
+      },
+    });
+  });
+
   it("holds rows blocked by active clarification or promotion blockers", () => {
     const clarification = planAdmission(
       [item({ item_id: "needs-answer" })],
@@ -383,6 +430,60 @@ describe("planAdmission — per-item guardrails", () => {
       code: "promotion_blocker",
       class: "promotion_blocker",
     });
+  });
+
+  it("breaks raw ready down into admissible now and exact post-guardrail block reasons", () => {
+    const cfg = { ...defaultConfig(), max_in_flight: 10 };
+    const ready = [
+      item({ item_id: "admissible", write_scope: ["repo/free"] }),
+      item({ item_id: "blocked-dep", dependencies: ["missing"], write_scope: ["repo/dep"] }),
+      item({ item_id: "needs-approval", risk_class: "external", write_scope: ["repo/risk"] }),
+      item({ item_id: "busy-lane", write_scope: ["repo/busy"] }),
+      item({ item_id: "pool-full", write_scope: ["repo/pool-full"] }),
+      item({ item_id: "no-builder", write_scope: ["repo/no-builder"] }),
+    ];
+
+    const plan = planAdmission(
+      ready,
+      ctx({
+        active_write_scopes: new Set(["repo/busy"]),
+        pool_for: (candidate) => {
+          if (candidate.item_id === "pool-full") return "full-pool";
+          if (candidate.item_id === "no-builder") return "empty-builder-pool";
+          return null;
+        },
+        pool_free_slots: new Map([
+          ["full-pool", 0],
+          ["empty-builder-pool", 1],
+        ]),
+        pool_free_builders: new Map([
+          ["full-pool", ["builder-a"]],
+          ["empty-builder-pool", []],
+        ]),
+      }),
+      cfg,
+    );
+
+    const breakdown = Object.fromEntries(
+      Object.entries(
+        plan.skipped.reduce<Record<string, number>>((counts, decision) => {
+          const code = String(decision.metadata?.code ?? "unknown");
+          counts[code] = (counts[code] ?? 0) + 1;
+          return counts;
+        }, {}),
+      ).sort(([a], [b]) => a.localeCompare(b)),
+    );
+    const blockedTotal = Object.values(breakdown).reduce((sum, count) => sum + count, 0);
+
+    expect(plan.admit.map((candidate) => candidate.item_id)).toEqual(["admissible"]);
+    expect(breakdown).toEqual({
+      blocked_dependency: 1,
+      no_free_pool_builder: 1,
+      pool_capacity_full: 1,
+      risk_requires_approval: 1,
+      single_writer_lane_busy: 1,
+    });
+    expect(blockedTotal).toBe(ready.length - plan.admit.length);
   });
 
   it("never admits a non-ready item even if passed in", () => {
@@ -493,10 +594,14 @@ describe("evaluateStall", () => {
 describe("shouldRunZeroAdmitStallWatchdog", () => {
   const cfg = { ...defaultConfig(), stall_threshold_ticks: 3, min_ready_fuel: 8 };
 
-  it("trips only at the zero-admit threshold while ready fuel is below floor", () => {
+  it("trips only at the zero-admit threshold while admissible ready fuel is below floor", () => {
     expect(shouldRunZeroAdmitStallWatchdog(2, 3, cfg)).toBe(false);
     expect(shouldRunZeroAdmitStallWatchdog(3, 8, cfg)).toBe(false);
     expect(shouldRunZeroAdmitStallWatchdog(3, 7, cfg)).toBe(true);
     expect(shouldRunZeroAdmitStallWatchdog(24, 3, cfg)).toBe(true);
+  });
+
+  it("treats a full raw READY queue as below floor when zero items are admissible", () => {
+    expect(shouldRunZeroAdmitStallWatchdog(174, 0, cfg)).toBe(true);
   });
 });

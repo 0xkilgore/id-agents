@@ -17,6 +17,7 @@ import type {
 } from "./fake-reactor.js";
 import {
   type DispatchDoc,
+  type DispatchLogicalAgentIdentity,
   type EnqueueInput,
   type FailureKind,
   type Provider,
@@ -68,6 +69,7 @@ interface Row {
   body_markdown: string;
   provider: Provider;
   runtime: Runtime;
+  logical_agent_json: string | null;
   priority: number;
   status: SchedulerStatus;
   not_before_at: string;
@@ -159,6 +161,7 @@ export class SqliteDispatchReactor {
       body_markdown: input.body_markdown,
       provider: input.provider,
       runtime: input.runtime,
+      logical_agent: input.logical_agent ?? null,
       priority,
       status: "queued",
       not_before_at: input.not_before_at ?? now,
@@ -187,7 +190,7 @@ export class SqliteDispatchReactor {
     await this.adapter.query(
       `INSERT INTO dispatch_scheduler_queue (
         dispatch_phid, team_id, query_id, to_agent, from_actor, channel,
-        subject, body_markdown, provider, runtime, priority, status,
+        subject, body_markdown, provider, runtime, logical_agent_json, priority, status,
         not_before_at, attempt_count, bounce_count, last_bounce_json,
         bounce_history_json, started_at, completed_at, updated_at,
         agent_query_id, usage_policy_snapshot_json, failure_kind,
@@ -198,7 +201,7 @@ export class SqliteDispatchReactor {
         resume_delivery_status, promote, promotion_strategy,
         promotion_required_reason, promotion_result_json, promotion_input_json,
         dedup_key
-      ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       [
         doc.dispatch_phid,
         this.teamId,
@@ -210,6 +213,7 @@ export class SqliteDispatchReactor {
         doc.body_markdown,
         doc.provider,
         doc.runtime,
+        doc.logical_agent ? JSON.stringify(doc.logical_agent) : null,
         doc.priority,
         doc.status,
         doc.not_before_at,
@@ -1398,6 +1402,7 @@ function rowToDoc(row: Row): DispatchDoc {
     body_markdown: row.body_markdown,
     provider: row.provider,
     runtime: row.runtime,
+    logical_agent: parseLogicalAgentIdentity(row.logical_agent_json),
     priority: Number(row.priority),
     status: row.status,
     not_before_at: row.not_before_at,
@@ -1430,6 +1435,31 @@ function rowToDoc(row: Row): DispatchDoc {
     allow_auto_retry: row.allow_auto_retry != null && Number(row.allow_auto_retry) === 1,
     promotion_input: parsePromotionInput(row.promotion_input_json),
   };
+}
+
+function parseLogicalAgentIdentity(raw: string | null | undefined): DispatchLogicalAgentIdentity | null {
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object") return null;
+    const p = parsed as Record<string, unknown>;
+    if (typeof p.logical_agent !== "string" || !p.logical_agent.trim()) return null;
+    return {
+      logical_agent: p.logical_agent,
+      display_name: typeof p.display_name === "string" && p.display_name.trim()
+        ? p.display_name
+        : p.logical_agent,
+      source_agent_id: typeof p.source_agent_id === "string" ? p.source_agent_id : null,
+      source_agent_name: typeof p.source_agent_name === "string" ? p.source_agent_name : null,
+      home_runtime: typeof p.home_runtime === "string" ? (p.home_runtime as Runtime) : null,
+      home_provider: typeof p.home_provider === "string" ? (p.home_provider as Provider) : null,
+      metadata: p.metadata && typeof p.metadata === "object" && !Array.isArray(p.metadata)
+        ? (p.metadata as Record<string, unknown>)
+        : null,
+    };
+  } catch {
+    return null;
+  }
 }
 
 function parseClarificationBlocker(raw: string | null): ClarificationBlocker | null {

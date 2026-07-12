@@ -73,6 +73,25 @@ export interface ReportDefinition {
   artifact_required: boolean;
 }
 
+export type LoopTriggerDefinition =
+  | {
+      kind: "scheduled_interval";
+      source: "manager_recurring_loop";
+      every_hours: number;
+      jitter_minutes: number;
+    }
+  | {
+      kind: "event";
+      source: "promotion_hygiene_classifier";
+      event: "promotion_hygiene_failure";
+    }
+  | {
+      kind: "review";
+      source: "artifact_review_queue";
+      event: "execution_artifact_recorded";
+      after_output_required: boolean;
+    };
+
 export interface LoopSummary {
   loop_phid: string;
   slug: string;
@@ -90,6 +109,8 @@ export interface LoopSummary {
   last_output: LoopLastOutput | null;
   /** Additive scheduler/report facts consumed by dashboard/API due projections. */
   report_definitions: ReportDefinition[];
+  /** Durable trigger contract; runtime must derive runs from these records, not agent memory. */
+  trigger_definitions: LoopTriggerDefinition[];
   customization_summary: string | null;
 }
 
@@ -157,6 +178,7 @@ interface SeedLoopDef {
   schedule_label: string;
   stale_after_minutes: number | null;
   report_definitions?: ReportDefinition[];
+  trigger_definitions?: LoopTriggerDefinition[];
 }
 
 const KAPELLE_PROJECT: LoopProjectRef = {
@@ -223,20 +245,39 @@ const SEED_LOOP_DEFS: SeedLoopDef[] = [
     enabled: true,
     allow_scheduled_run: true,
     allow_manual_run: true,
-    schedule_label: "Every 36h and on hygiene-classified promotion failures",
-    stale_after_minutes: 48 * 60,
+    schedule_label: "Every 18h + jitter, and on hygiene-classified promotion failures",
+    stale_after_minutes: 24 * 60,
+    trigger_definitions: [
+      {
+        kind: "scheduled_interval",
+        source: "manager_recurring_loop",
+        every_hours: 18,
+        jitter_minutes: 90,
+      },
+      {
+        kind: "event",
+        source: "promotion_hygiene_classifier",
+        event: "promotion_hygiene_failure",
+      },
+      {
+        kind: "review",
+        source: "artifact_review_queue",
+        event: "execution_artifact_recorded",
+        after_output_required: true,
+      },
+    ],
     report_definitions: [
       {
         report_key: "worktree-hygiene:guard",
         label: "Worktree Hygiene Guard",
         cadence: {
           kind: "interval_hours",
-          every_hours: 36,
+          every_hours: 18,
           anchor_due_at: "2026-07-08T15:00:00.000Z",
         },
         enabled: true,
-        grace_minutes: 12 * 60,
-        stale_after_minutes: 48 * 60,
+        grace_minutes: 4 * 60,
+        stale_after_minutes: 24 * 60,
         artifact_required: true,
       },
     ],
@@ -636,6 +677,7 @@ function toSummary(def: SeedLoopDef): LoopSummary {
     health: placeholderHealth(def),
     last_output: null, // no runs yet
     report_definitions: def.report_definitions ?? [],
+    trigger_definitions: def.trigger_definitions ?? [],
     customization_summary: null,
   };
 }

@@ -74,9 +74,11 @@ export interface SurfacedArtifactRow {
     body_renderable?: boolean;
   };
   delivery: {
+    artifact_id: string;
     stable_url: string;
     copy_text_url: string;
     download_url: string;
+    source_path?: string | null;
     media_type: "text/markdown" | "text/html" | "text/plain" | "application/json" | "application/pdf" | "unknown";
     freshness: ArtifactDeliveryFreshness;
     source_host?: string | null;

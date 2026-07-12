@@ -70,6 +70,7 @@ export interface DispatchReadRow {
   // one that still needs intervention without re-parsing result_json.
   evidence: {
     artifact_path: string | null;
+    report_id: string | null;
     promotion_result: unknown | null;
   };
   // Cn-EVE.1 (2026-06-16): false_expire_recovered ledger classification.
@@ -564,6 +565,7 @@ export async function readDispatchHealth(
   adapter: DbAdapterLike,
   teamId: string,
   driftSummary?: FleetRuntimeDriftSummary | null,
+  teamName?: string | null,
 ): Promise<{
   status: 'ok';
   team_id: string;
@@ -574,6 +576,7 @@ export async function readDispatchHealth(
   oldest_active_at: string | null;
   newest_terminal_at: string | null;
   generated_at: string;
+  scheduler_health: DispatchSchedulerHealthProjection;
   blockages: FleetBlockagesReport;
 }> {
   const { rows: countsRows } = await adapter.query<{ status: string; count: number }>(
@@ -601,7 +604,8 @@ export async function readDispatchHealth(
     [...ACTIVE_STATUSES, ...TERMINAL_STATUSES, teamId],
   );
 
-  const blockages = await readFleetBlockages(adapter, teamId, driftSummary);
+  const blockages = await readFleetBlockages(adapter, teamId, driftSummary, teamName);
+  const schedulerHealth = await readDispatchSchedulerHealthProjection(adapter, teamId, teamName, counts, active, blockages);
 
   return {
     status: 'ok',
@@ -613,8 +617,115 @@ export async function readDispatchHealth(
     oldest_active_at: ageRows[0]?.oldest_active_at ?? null,
     newest_terminal_at: ageRows[0]?.newest_terminal_at ?? null,
     generated_at: new Date().toISOString(),
+    scheduler_health: schedulerHealth,
     blockages,
   };
+}
+
+export type DispatchSchedulerHealthState =
+  | 'running'
+  | 'idle_no_ready_work'
+  | 'blocked_backpressure'
+  | 'blocked_no_capacity'
+  | 'stalled_ready_not_launching'
+  | 'paused'
+  | 'misconfigured';
+
+export interface DispatchSchedulerHealthProjection {
+  state: DispatchSchedulerHealthState;
+  reason: string | null;
+  evidence: {
+    ready_count: number;
+    noop_tick_count: number;
+    last_launch_at: string | null;
+    last_tick_at: string | null;
+    last_noop_reason: string | null;
+    first_stalled_at: string | null;
+    scheduler_loop_id: string;
+  };
+}
+
+interface DispatchOrchestrationStateRow {
+  mode: string;
+  consecutive_zero_ticks: number;
+  last_tick_at: string | null;
+  last_dispatch_at: string | null;
+  auto_pause_reason: string | null;
+}
+
+async function readDispatchSchedulerHealthProjection(
+  adapter: DbAdapterLike,
+  teamId: string,
+  teamName: string | null | undefined,
+  counts: Record<string, number>,
+  active: number,
+  blockages: FleetBlockagesReport,
+): Promise<DispatchSchedulerHealthProjection> {
+  const teamKeys = [...new Set([teamId, teamName].filter((v): v is string => !!v))];
+  const { rows: stateRows } = await adapter.query<DispatchOrchestrationStateRow>(
+    `SELECT mode, consecutive_zero_ticks, last_tick_at, last_dispatch_at, auto_pause_reason
+       FROM orchestration_state
+      WHERE team_id IN (${teamKeys.map(() => "?").join(", ")})
+      LIMIT 1`,
+    teamKeys,
+  );
+  const state = stateRows[0] ?? null;
+  const readyCount = await readReadyBacklogCount(adapter, teamKeys);
+  const noopTicks = Number(state?.consecutive_zero_ticks ?? 0);
+  const explicitBlockages = blockages.blockages.filter((b) => b.kind !== 'co_stall');
+  const lastNoopReason =
+    state?.auto_pause_reason ??
+    explicitBlockages[0]?.message ??
+    (readyCount > 0 && noopTicks > 0 ? 'ready backlog not launching' : null);
+
+  const evidence = {
+    ready_count: readyCount,
+    noop_tick_count: noopTicks,
+    last_launch_at: state?.last_dispatch_at ?? null,
+    last_tick_at: state?.last_tick_at ?? null,
+    last_noop_reason: lastNoopReason,
+    first_stalled_at: readyCount > 0 && noopTicks >= 3 ? state?.last_tick_at ?? null : null,
+    scheduler_loop_id: teamKeys.join('|'),
+  };
+
+  if (!state) {
+    return { state: 'misconfigured', reason: 'missing orchestration_state row', evidence };
+  }
+  if (state.mode === 'paused') {
+    return { state: 'paused', reason: state.auto_pause_reason ?? 'continuous orchestration paused', evidence };
+  }
+  if (readyCount > 0 && noopTicks >= 3 && explicitBlockages.length === 0) {
+    return {
+      state: 'stalled_ready_not_launching',
+      reason: `${readyCount} ready item(s), ${noopTicks} no-op tick(s), no explicit blocking reason`,
+      evidence,
+    };
+  }
+  if (explicitBlockages.length > 0) {
+    return { state: 'blocked_backpressure', reason: explicitBlockages[0]?.message ?? 'blocked', evidence };
+  }
+  if (Number(counts.queued ?? 0) > 0 && Number(counts.in_flight ?? 0) > 0 && noopTicks > 0) {
+    return { state: 'blocked_no_capacity', reason: 'queued dispatches are waiting behind in-flight work', evidence };
+  }
+  if (active > 0 || Number(counts.in_flight ?? 0) > 0) {
+    return { state: 'running', reason: null, evidence };
+  }
+  return { state: 'idle_no_ready_work', reason: null, evidence };
+}
+
+async function readReadyBacklogCount(adapter: DbAdapterLike, teamKeys: string[]): Promise<number> {
+  try {
+    const { rows } = await adapter.query<{ count: number }>(
+      `SELECT COUNT(*) AS count
+         FROM orchestration_backlog_item
+        WHERE team_id IN (${teamKeys.map(() => "?").join(", ")})
+          AND readiness_state = 'ready'`,
+      teamKeys,
+    );
+    return Number(rows[0]?.count ?? 0);
+  } catch {
+    return 0;
+  }
 }
 
 /**
@@ -911,6 +1022,7 @@ function rowToDispatch(row: DispatchDbRow, opts: DeriveOptions = {}): DispatchRe
     },
     evidence: {
       artifact_path: row.artifact_path ?? null,
+      report_id: reportIdFromResult(row.result_json, row.artifact_path),
       promotion_result: parseJsonOrNull(row.promotion_result_json),
     },
     recovery_classification: deriveRecoveryClassification(row),
@@ -1115,7 +1227,7 @@ export function deriveEmptySuccessCandidate(row: EmptySuccessCandidateRow): Empt
   if (row.artifact_path && row.artifact_path.trim().length > 0) {
     return emptySuccess(false, null, elapsedMs, resultTextLength, resultKeys);
   }
-  if (promotionCompletedAndVerified(row.promotion_result_json)) {
+  if (hasPromotionCloseoutEvidence(row.promotion_result_json)) {
     return emptySuccess(false, null, elapsedMs, resultTextLength, resultKeys);
   }
   if (elapsedMs === null || elapsedMs > EMPTY_SUCCESS_FAST_MS) {
@@ -1401,6 +1513,15 @@ export function deriveEffectiveState(row: EffectiveStateRow, opts: DeriveOptions
 
 export function promotionCompletedAndVerified(raw: string | null | undefined): boolean {
   const parsed = parseJsonOrNull(raw);
+  return promotionObjectCompletedAndVerified(parsed);
+}
+
+function hasPromotionCloseoutEvidence(raw: string | null | undefined): boolean {
+  const parsed = parseJsonOrNull(raw);
+  return promotionObjectCompletedAndVerified(parsed) || promotionObjectExplicitlyNotRequired(parsed);
+}
+
+function promotionObjectCompletedAndVerified(parsed: unknown): boolean {
   if (!parsed || typeof parsed !== "object") return false;
   const promotion = parsed as { completed?: unknown; repos?: unknown };
   if (promotion.completed !== true || !Array.isArray(promotion.repos) || promotion.repos.length === 0) {
@@ -1410,6 +1531,16 @@ export function promotionCompletedAndVerified(raw: string | null | undefined): b
     if (!repo || typeof repo !== "object") return false;
     return (repo as { verified?: unknown }).verified === true;
   });
+}
+
+function promotionObjectExplicitlyNotRequired(parsed: unknown): boolean {
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return false;
+  const promotion = parsed as { required?: unknown; status?: unknown; reason?: unknown; reason_code?: unknown };
+  const notRequired =
+    promotion.required === false ||
+    promotion.status === "not_required" ||
+    promotion.reason_code === "coordinator_no_code";
+  return notRequired && typeof promotion.reason === "string" && promotion.reason.trim().length >= 20;
 }
 
 /**
@@ -1519,6 +1650,20 @@ function parseJsonObject(raw: string | null | undefined): Record<string, unknown
   return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
     ? (parsed as Record<string, unknown>)
     : null;
+}
+
+function reportIdFromResult(
+  raw: string | null | undefined,
+  artifactPath: string | null | undefined,
+): string | null {
+  const parsed = parseJsonObject(raw);
+  const explicit =
+    typeof parsed?.report_id === 'string' && parsed.report_id.trim()
+      ? parsed.report_id.trim()
+      : typeof parsed?.reportId === 'string' && parsed.reportId.trim()
+        ? parsed.reportId.trim()
+        : null;
+  return explicit ?? (artifactPath?.trim() ? artifactPath.trim() : null);
 }
 
 function parseJsonArray(raw: string | null | undefined): unknown[] {

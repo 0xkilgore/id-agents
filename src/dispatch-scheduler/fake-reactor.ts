@@ -108,6 +108,7 @@ export class FakeReactor {
       body_markdown: input.body_markdown,
       provider: input.provider,
       runtime: input.runtime,
+      logical_agent: input.logical_agent ?? null,
       priority,
       status: "queued",
       not_before_at: input.not_before_at ?? now,

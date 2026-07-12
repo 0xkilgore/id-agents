@@ -71,6 +71,7 @@ describe("GET /ops/surfaced-artifacts", () => {
       rank_score: expect.any(Number),
       group_count: 1,
       source_kind: "artifact",
+      source_label: "Fixture: kapelle / maestra / Kapelle route test",
       visibility_proof: { discovered_by: "manual_fixture", artifact_path_present: true, body_renderable: false },
       delivery: expect.objectContaining({
         stable_url: "/artifacts/art-route/detail",
@@ -96,7 +97,7 @@ describe("GET /ops/surfaced-artifacts", () => {
           topic: "artifact.surfacing.body_unavailable",
           severity: "error",
           subject_kind: "artifact",
-          subject_id: "/tmp/does-not-need-to-exist.md",
+          subject_id: "art-route",
         }),
       ],
     });
@@ -107,7 +108,7 @@ describe("GET /ops/surfaced-artifacts", () => {
     expect(eventRows.rows).toHaveLength(1);
     expect(eventRows.rows[0]).toMatchObject({
       topic: "artifact.surfacing.body_unavailable",
-      subject_id: "/tmp/does-not-need-to-exist.md",
+      subject_id: "art-route",
     });
 
     const second = await fetch(`${b.base}/ops/surfaced-artifacts`);
@@ -145,6 +146,53 @@ describe("GET /ops/surfaced-artifacts", () => {
           canonical_field: "artifact.projectRef",
         },
       ],
+    });
+  });
+
+  it("executes saved views with canonical dotted predicate fields", async () => {
+    const b = await boot();
+    server = b.server;
+    await registerArtifact(b.adapter, {
+      artifact_id: "art-kapelle-route",
+      basename: "2026-07-07-kapelle-route.md",
+      agent: "substrate-api-codex",
+      tag: "critical",
+      abs_path: "/Users/kilgore/Dropbox/Code/kapelle-site/output/2026-07-07-kapelle-route.md",
+      title: "Kapelle route output",
+      produced_at: "2026-07-07T12:00:00.000Z",
+      source: "delivery-log",
+    }, "2026-07-07T12:00:00.000Z");
+    await registerArtifact(b.adapter, {
+      artifact_id: "art-finances-route",
+      basename: "2026-07-07-finance-route.md",
+      agent: "finances",
+      tag: "finance",
+      abs_path: "/Users/kilgore/Dropbox/Code/finances/output/2026-07-07-finance-route.md",
+      title: "Finance route output",
+      produced_at: "2026-07-07T12:00:00.000Z",
+      source: "delivery-log",
+    }, "2026-07-07T12:00:00.000Z");
+
+    const res = await fetch(`${b.base}/ops/views/surfaced-artifacts.v1.primary/execute`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        query: { op: "eq", field: "artifact.projectRef", value: "finances" },
+      }),
+    });
+
+    expect(res.status).toBe(200);
+    const body = await res.json() as any;
+    expect(body).toMatchObject({
+      ok: true,
+      schema_version: "view-execution.v1",
+      view_id: "surfaced-artifacts.v1.primary",
+      count: 1,
+      errors: [],
+      rows: [expect.objectContaining({
+        id: "artifact:art-finances-route",
+        project_ref: "finances",
+      })],
     });
   });
 });

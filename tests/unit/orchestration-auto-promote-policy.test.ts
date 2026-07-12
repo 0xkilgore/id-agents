@@ -174,6 +174,19 @@ describe("autoPromoteRejections — safety gate (never auto-promote unsafe work)
     );
   });
 
+  it("allows previously dispatched rows only when the daemon explicitly permits approved retries", () => {
+    expect(autoPromoteRejections(
+      item({ approved_by: "maestra", last_dispatch_phid: "phid:disp-approved-retry" }),
+      thr,
+      { allowApprovedRetries: true },
+    )).toEqual([]);
+    expect(autoPromoteRejections(
+      item({ flesh_status: "approved_ready", last_dispatch_phid: "phid:disp-status-only" }),
+      thr,
+      { allowApprovedRetries: true },
+    )).toContainEqual(expect.stringContaining("already dispatched once"));
+  });
+
   it("rejects non-needs_review state, unfleshed items, and empty write_scope", () => {
     expect(autoPromoteRejections(item({ readiness_state: "ready" }), thr).length).toBeGreaterThan(0);
     expect(autoPromoteRejections(item({ dispatch_body: null }), thr)).toContainEqual(

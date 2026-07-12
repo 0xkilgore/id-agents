@@ -1,5 +1,12 @@
 import { loopPhidForSlug } from "./registry.js";
 import { loopRunPhid } from "./storage.js";
+import type { DbAdapter } from "../db/db-adapter.js";
+import {
+  getBacklogItem,
+  getBacklogItemByLogicalKey,
+  insertBacklogItem,
+} from "../continuous-orchestration/storage.js";
+import type { BacklogItem } from "../continuous-orchestration/types.js";
 import type {
   ActorRef,
   LoopRecord,
@@ -22,6 +29,16 @@ export interface WorktreeHygieneIncident {
   linked_rd: string | null;
   action: WorktreeHygieneAction;
   detail: string | null;
+}
+
+export interface WorktreeHygieneCleanupRoute {
+  dedupe_key: string;
+  logical_key: string;
+  task_name: string;
+  owner_lane: string;
+  cleanup_dispatch_id: string | null;
+  item: BacklogItem;
+  created: boolean;
 }
 
 export interface WorktreeHygieneNeedsOperatorInput {
@@ -82,6 +99,9 @@ export function classifyPromotionHygieneFailure(input: {
   } else if (/unlinked branch|no linked dispatch|no linked rd|no linked task|without linked dispatch/.test(text)) {
     incident_code = "unlinked_branch";
     action = "link_or_retire_branch";
+  } else if (/missing clean promotion path|no clean promotion path|clean promotion path missing|cannot find clean promotion path/.test(text)) {
+    incident_code = "missing_clean_promotion_path";
+    action = "create_or_update_hygiene_task";
   }
 
   if (!incident_code) return null;
@@ -112,6 +132,102 @@ export function shouldEmitNeedsOperatorInput(input: {
     question: emit ? question : null,
     recommended_option: emit ? recommended : null,
     options: emit ? options : [],
+  };
+}
+
+export function hygieneOwnerLane(repo: string): string {
+  const r = repo.toLowerCase();
+  if (/(kapelle-site|frontend|console|ui)(\/|$)/.test(r)) return "frontend-ui-codex";
+  if (/(id-agents|agent-platform|manager|substrate|cane)(\/|$)/.test(r)) return "substrate-api-codex";
+  return "roger";
+}
+
+export async function upsertWorktreeHygieneCleanupRoute(
+  adapter: DbAdapter,
+  incident: WorktreeHygieneIncident,
+  opts: { team_id?: string; nowIso?: string } = {},
+): Promise<WorktreeHygieneCleanupRoute> {
+  const teamId = opts.team_id ?? "default";
+  const nowIso = opts.nowIso ?? new Date().toISOString();
+  const dedupeKey = hygieneDedupeKey(incident);
+  const logicalKey = `worktree-hygiene:${dedupeKey}`;
+  const ownerLane = hygieneOwnerLane(incident.repo);
+  const taskName = hygieneTaskName(incident);
+  const title = `Worktree hygiene: ${incident.incident_code} on ${incident.branch}`;
+  const dispatchBody = [
+    `[project: kapelle][T-OPRESET][HYGIENE] ${ownerLane}: Resolve Worktree Hygiene cleanup route.`,
+    ``,
+    `Dedupe key: ${dedupeKey}`,
+    `Repo: ${incident.repo}`,
+    `Branch: ${incident.branch}`,
+    `Class: ${incident.incident_code}`,
+    `Recommended action: ${incident.action}`,
+    incident.linked_dispatch ? `Linked dispatch: ${incident.linked_dispatch}` : null,
+    incident.linked_task ? `Linked task: ${incident.linked_task}` : null,
+    incident.detail ? `Evidence: ${incident.detail}` : null,
+    ``,
+    `Preserve product blocker visibility, but own the cleanup in this lane. Update the same route on repeated failures; do not create duplicate cleanup work.`,
+  ].filter((line): line is string => line != null).join("\n");
+
+  const existing = await getBacklogItemByLogicalKey(adapter, teamId, logicalKey);
+  if (existing) {
+    await adapter.query(
+      `UPDATE orchestration_backlog_item
+          SET title = $1,
+              track = $2,
+              to_agent = $3,
+              dispatch_body = $4,
+              priority = $5,
+              risk_class = $6,
+              source_refs_json = $7,
+              updated_by = $8,
+              updated_at = $9
+        WHERE item_id = $10`,
+      [
+        title,
+        "T-OPRESET",
+        ownerLane,
+        dispatchBody,
+        3,
+        "routine",
+        JSON.stringify(sourceRefsForIncident(incident, dedupeKey)),
+        "worktree-hygiene-router",
+        nowIso,
+        existing.item_id,
+      ],
+    );
+    const item = await getBacklogItem(adapter, existing.item_id);
+    return {
+      dedupe_key: dedupeKey,
+      logical_key: logicalKey,
+      task_name: taskName,
+      owner_lane: ownerLane,
+      cleanup_dispatch_id: item?.last_dispatch_phid ?? existing.last_dispatch_phid,
+      item: item ?? existing,
+      created: false,
+    };
+  }
+
+  const item = await insertBacklogItem(adapter, {
+    team_id: teamId,
+    logical_key: logicalKey,
+    title,
+    track: "T-OPRESET",
+    to_agent: ownerLane,
+    dispatch_body: dispatchBody,
+    priority: 3,
+    readiness_state: "ready",
+    risk_class: "routine",
+    source_refs: sourceRefsForIncident(incident, dedupeKey),
+  });
+  return {
+    dedupe_key: dedupeKey,
+    logical_key: logicalKey,
+    task_name: taskName,
+    owner_lane: ownerLane,
+    cleanup_dispatch_id: item.last_dispatch_phid,
+    item,
+    created: true,
   };
 }
 
@@ -172,6 +288,74 @@ export function buildPromotionHygieneRun(
     created_by: actor,
     updated_at: nowIso,
   };
+}
+
+export function buildScheduledWorktreeHygieneRun(
+  loop: Pick<LoopRecord, "loop_phid">,
+  input: {
+    recurrence_phid: string;
+    scheduled_for: string;
+    recurrence_instance_phid?: string | null;
+    fired_at?: string | null;
+    actor?: ActorRef | null;
+  },
+): LoopRunRecord {
+  const firedAt = input.fired_at ?? input.scheduled_for;
+  const idempotencyKey = `scheduled:${input.scheduled_for}`;
+  const actor = input.actor ?? { kind: "system", id: "manager-recurring-loop", label: "Manager Recurring Loop" };
+  const trigger: Extract<LoopTrigger, { kind: "scheduled" }> = {
+    kind: "scheduled",
+    recurrence_phid: input.recurrence_phid,
+    recurrence_instance_phid: input.recurrence_instance_phid ?? null,
+    scheduled_for: input.scheduled_for,
+    dedup_key: idempotencyKey,
+  };
+  return {
+    loop_run_phid: loopRunPhid(loop.loop_phid, idempotencyKey),
+    loop_phid: loop.loop_phid,
+    trigger,
+    status: "queued",
+    failure_reason: null,
+    failure_detail: null,
+    step_log: [
+      {
+        step_id: "worktree-hygiene-scheduled-admission",
+        phase: "admission",
+        name: "scheduled worktree hygiene admitted",
+        status: "succeeded",
+        started_at: firedAt,
+        finished_at: firedAt,
+        failure_reason: null,
+        detail: "Manager-owned recurring Worktree Hygiene guard run; scanner/runtime state is supplied by durable loop evidence, not LLM memory.",
+        evidence_refs: [
+          { kind: "loop", ref: loop.loop_phid },
+          { kind: "recurrence", ref: input.recurrence_phid },
+          { kind: "scheduled_for", ref: input.scheduled_for },
+          ...(input.recurrence_instance_phid ? [{ kind: "recurrence_instance", ref: input.recurrence_instance_phid }] : []),
+        ],
+      },
+    ],
+    output_refs: [],
+    spawned_dispatch_phids: [],
+    idempotency_key: idempotencyKey,
+    retry_of_phid: null,
+    fired_at: firedAt,
+    queued_at: firedAt,
+    admitted_at: null,
+    started_at: null,
+    finished_at: null,
+    created_by: actor,
+    updated_at: firedAt,
+  };
+}
+
+function sourceRefsForIncident(incident: WorktreeHygieneIncident, dedupeKey: string): string[] {
+  return [
+    `worktree-hygiene:${dedupeKey}`,
+    ...(incident.linked_dispatch ? [`dispatch:${incident.linked_dispatch}`] : []),
+    ...(incident.linked_task ? [`task:${incident.linked_task}`] : []),
+    ...(incident.linked_rd ? [`rd:${incident.linked_rd}`] : []),
+  ];
 }
 
 function normalizeRepo(repo: string): string {

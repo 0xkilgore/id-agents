@@ -83,6 +83,49 @@ describe("seed catalog", () => {
     expect(l.allow_scheduled_run).toBe(true);
   });
 
+  it("registers Worktree Hygiene as a manager-owned 18h+jitter loop with event and review triggers", () => {
+    const l = SEED_LOOPS.find((x) => x.slug === "worktree-hygiene")!;
+    expect(l.kind).toBe("maintenance");
+    expect(l.owner_agent).toBe("maestra");
+    expect(l.enabled).toBe(true);
+    expect(l.schedule_label).toBe("Every 18h + jitter, and on hygiene-classified promotion failures");
+    expect(l.health.stale_after_minutes).toBe(24 * 60);
+    expect(l.report_definitions).toHaveLength(1);
+    expect(l.report_definitions[0]).toMatchObject({
+      report_key: "worktree-hygiene:guard",
+      cadence: { kind: "interval_hours", every_hours: 18 },
+      artifact_required: true,
+    });
+    expect(l.trigger_definitions).toEqual([
+      {
+        kind: "scheduled_interval",
+        source: "manager_recurring_loop",
+        every_hours: 18,
+        jitter_minutes: 90,
+      },
+      {
+        kind: "event",
+        source: "promotion_hygiene_classifier",
+        event: "promotion_hygiene_failure",
+      },
+      {
+        kind: "review",
+        source: "artifact_review_queue",
+        event: "execution_artifact_recorded",
+        after_output_required: true,
+      },
+    ]);
+  });
+
+  it("keeps Worktree Hygiene scheduled inside the ops-manual 12-24h cadence band", () => {
+    const l = SEED_LOOPS.find((x) => x.slug === "worktree-hygiene")!;
+    const interval = l.report_definitions[0]?.cadence;
+    expect(interval).toMatchObject({ kind: "interval_hours" });
+    if (interval?.kind !== "interval_hours") throw new Error("worktree-hygiene cadence is not interval_hours");
+    expect(interval.every_hours).toBeGreaterThanOrEqual(12);
+    expect(interval.every_hours).toBeLessThanOrEqual(24);
+  });
+
   it("registers the T-PERSONAL Gideon sports agent as three Personal-project loops (owner gideon, Phase-2 disabled)", () => {
     const sports = SEED_LOOPS.filter((l) => l.owner_agent === "gideon");
     expect(sports.map((l) => l.slug).sort()).toEqual([
@@ -132,6 +175,7 @@ describe("seed catalog", () => {
       expect(typeof l.allow_manual_run).toBe("boolean");
       expect(typeof l.schedule_label).toBe("string");
       expect(Array.isArray(l.report_definitions)).toBe(true);
+      expect(Array.isArray(l.trigger_definitions)).toBe(true);
       // health is a placeholder rollup (no runs yet)
       expect(l.health.last_run_at).toBeNull();
       expect(l.health.runs_last_7d).toBe(0);

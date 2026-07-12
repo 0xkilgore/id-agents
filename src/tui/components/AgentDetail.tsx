@@ -95,13 +95,19 @@ export function AgentDetail(props: AgentDetailProps): React.ReactElement {
   }
 
   const isRemote = agent.deploymentShape === 'remote-endpoint' ||
+    agent.runtime === 'public-agent-remote' ||
     agent.metadata?.runtime === 'public-agent-remote';
 
   const lines: Array<{ label: string; value: string; color?: string }> = [];
   const agentName = agent.alias ?? agent.name;
 
   lines.push({ label: 'name', value: agentName });
-  lines.push({ label: 'runtime', value: agent.metadata?.runtime ?? '—' });
+  lines.push({ label: 'runtime', value: agent.runtime ?? agent.metadata?.runtime ?? '—' });
+  lines.push({ label: 'model', value: agent.model ?? '—' });
+  const desiredModel = agent.metadata?.runtimeUsageTruth?.catalogDesiredModel;
+  if (desiredModel && desiredModel !== agent.model) {
+    lines.push({ label: 'desired_model', value: desiredModel });
+  }
   lines.push({ label: 'health', value: agent.health, color: healthColor(agent.health) });
   lines.push({ label: 'status', value: agent.status });
 

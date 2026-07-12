@@ -3,6 +3,9 @@
 // runs on the actual schema and that attribution filters by the right agent.
 
 import { describe, it, expect, beforeEach } from "vitest";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { SqliteAdapter } from "../../src/db/sqlite-adapter.js";
 import { migrateSqlite } from "../../src/db/migrations/sqlite.js";
 import { registerArtifact } from "../../src/outputs/storage.js";
@@ -158,6 +161,39 @@ describe("assembleAgentDetail (real schema)", () => {
     }
   });
 
+  it("includes artifacts written directly under the agent workingDirectory/output", async () => {
+    const workDir = fs.mkdtempSync(path.join(os.tmpdir(), "agent-detail-output-"));
+    try {
+      const outputDir = path.join(workDir, "output");
+      fs.mkdirSync(outputDir, { recursive: true });
+      const outputPath = path.join(outputDir, "2026-07-09-fall-fest-verbal-brief-for-tonight.md");
+      fs.writeFileSync(outputPath, "# Fall Fest\n");
+      const mtime = new Date("2026-07-09T23:19:22.931Z");
+      fs.utimesSync(outputPath, mtime, mtime);
+
+      const d = await assembleAgentDetail(adapter, {
+        teamId: TID,
+        name: "cleveland-park",
+        agentId: "agent_1783370589161_iu78t2m",
+        runtime: "claude-code-cli",
+        workingDirectory: workDir,
+        consecutiveFailures: 0,
+        lastError: null,
+        nowIso: "2026-07-10T16:00:00.000Z",
+      });
+
+      expect(d.recent_outputs[0]).toMatchObject({
+        artifact_id: "output:agent_1783370589161_iu78t2m:2026-07-09-fall-fest-verbal-brief-for-tonight.md",
+        basename: "2026-07-09-fall-fest-verbal-brief-for-tonight.md",
+        abs_path: outputPath,
+        tag: "output",
+        produced_at: "2026-07-09T23:19:22.931Z",
+      });
+    } finally {
+      fs.rmSync(workDir, { recursive: true, force: true });
+    }
+  });
+
   it("maps alias/detail name/project basename to recent artifacts and verified dispatches", async () => {
     const storage = new DispatchVerificationStorage(adapter);
     await storage.migrate();
@@ -188,23 +224,30 @@ describe("assembleAgentDetail (real schema)", () => {
       }),
     ]);
 
-    const d = await assembleAgentDetail(adapter, {
-      teamId: TID,
-      name: "maestra",
-      attributionNames: ["maestra"],
-      agentId: AID,
-      runtime: "claude-code-cli",
-      workingDirectory: "/Users/kilgore/Dropbox/Code/agent-platform",
-      consecutiveFailures: 0,
-      lastError: null,
-      nowIso: "2026-06-28T13:00:00.000Z",
-    });
+    const parentDir = fs.mkdtempSync(path.join(os.tmpdir(), "agent-detail-alias-"));
+    const workDir = path.join(parentDir, "agent-platform");
+    fs.mkdirSync(workDir);
+    try {
+      const d = await assembleAgentDetail(adapter, {
+        teamId: TID,
+        name: "maestra",
+        attributionNames: ["maestra"],
+        agentId: AID,
+        runtime: "claude-code-cli",
+        workingDirectory: workDir,
+        consecutiveFailures: 0,
+        lastError: null,
+        nowIso: "2026-06-28T13:00:00.000Z",
+      });
 
-    expect(d.name).toBe("maestra");
-    expect(d.recent_outputs.map((o) => o.basename)).toEqual(["agent-platform-roadmap.md"]);
-    expect(d.recent_dispatches.map((x) => x.dispatch_id)).toEqual(["phid:disp-maestra"]);
-    expect(d.verified_landings.map((x) => x.artifact_path)).toEqual(["/out/agent-platform-roadmap.md"]);
-    expect(d.recent_dispatches[0].attributed_agent).toBe("agent-platform");
+      expect(d.name).toBe("maestra");
+      expect(d.recent_outputs.map((o) => o.basename)).toContain("agent-platform-roadmap.md");
+      expect(d.recent_dispatches.map((x) => x.dispatch_id)).toEqual(["phid:disp-maestra"]);
+      expect(d.verified_landings.map((x) => x.artifact_path)).toEqual(["/out/agent-platform-roadmap.md"]);
+      expect(d.recent_dispatches[0].attributed_agent).toBe("agent-platform");
+    } finally {
+      fs.rmSync(parentDir, { recursive: true, force: true });
+    }
   });
 
   it("degrades to a zeroed dossier when nothing is seeded (never throws)", async () => {

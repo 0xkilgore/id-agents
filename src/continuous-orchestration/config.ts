@@ -184,6 +184,19 @@ export function defaultConfig(): ContinuousOrchestrationConfig {
   };
 }
 
+/**
+ * The ready floor is a fuel target, not a demand that the manager hold more
+ * READY work than the configured pool can run. A too-high floor makes the
+ * console look stalled even when the daemon is correctly bounded by capacity.
+ * max_in_flight=0 is used in tests/maintenance as an admission pause, so it
+ * deliberately does not cap auto-promote.
+ */
+export function effectiveAutoPromoteFloor(
+  config: Pick<ContinuousOrchestrationConfig, "auto_promote_floor" | "max_in_flight">,
+): number {
+  return config.max_in_flight > 0 ? Math.min(config.auto_promote_floor, config.max_in_flight) : config.auto_promote_floor;
+}
+
 /** Load config from env over the conservative defaults. */
 export function loadContinuousOrchestrationConfig(
   env: NodeJS.ProcessEnv = process.env,

@@ -45,6 +45,20 @@ interface AgentObligationRow {
   failure_detail: string | null;
 }
 
+interface TaskObligationRow {
+  id: string;
+  name: string;
+  title: string;
+  status: string;
+  owner_id: string | null;
+  owner_name: string | null;
+  created_by_id: string | null;
+  created_by_name: string | null;
+  created_at: number;
+  updated_at: number;
+  completed_at: number | null;
+}
+
 export interface ReadAgentObligationsOptions {
   limit?: number;
   now?: string;
@@ -109,11 +123,17 @@ export async function readAgentObligations(
   );
 
   const dispatchObligations = rows.map((row) => rowToAgentObligation(row, { now, staleAfterMs }));
+  const taskObligations = await taskObligationsFor(adapter as DbAdapter, teamId, {
+    now,
+    agent,
+    staleAfterMs,
+    limit: Math.max(limit * 2, limit),
+  });
   const reportObligations = opts.includeReports === false
     ? []
     : await reportObligationsFor(adapter as DbAdapter, teamId, { now, agent });
 
-  const obligations = dedupeObligations([...dispatchObligations, ...reportObligations])
+  const obligations = dedupeObligations([...dispatchObligations, ...taskObligations, ...reportObligations])
     .filter((o) => (agent ? sameAgent(o.agent, agent) : true))
     .filter((o) => status === "all" || o.status === status)
     .sort(compareObligations)
@@ -158,6 +178,76 @@ export function rowToAgentObligation(
   };
 }
 
+async function taskObligationsFor(
+  adapter: DbAdapter,
+  teamId: string,
+  opts: { now: string; agent: string | null; staleAfterMs: number; limit: number },
+): Promise<AgentObligation[]> {
+  const params: unknown[] = [teamId];
+  const agentClause = opts.agent ? "AND (a.name = ? OR t.owner = ?)" : "";
+  if (opts.agent) params.push(opts.agent, opts.agent);
+  params.push(opts.limit);
+
+  try {
+    const { rows } = await adapter.query<TaskObligationRow>(
+      `SELECT t.id, t.name, t.title, t.status,
+              t.owner AS owner_id,
+              a.name AS owner_name,
+              t.created_by AS created_by_id,
+              ca.name AS created_by_name,
+              t.created_at, t.updated_at, t.completed_at
+         FROM tasks t
+         LEFT JOIN agents a ON a.id = t.owner
+         LEFT JOIN agents ca ON ca.id = t.created_by
+        WHERE t.team_id = ?
+          AND t.owner IS NOT NULL
+          ${agentClause}
+        ORDER BY COALESCE(t.completed_at, t.updated_at, t.created_at) DESC,
+                 t.name ASC
+        LIMIT ?`,
+      params,
+    );
+    return rows.map((row) => taskRowToObligation(row, opts));
+  } catch {
+    return [];
+  }
+}
+
+function taskRowToObligation(
+  row: TaskObligationRow,
+  opts: { now: string; staleAfterMs: number },
+): AgentObligation {
+  const agent = row.owner_name ?? row.owner_id ?? "unknown";
+  const owner = row.created_by_name ?? row.created_by_id ?? "manager";
+  const done = row.status === "done" || row.completed_at != null;
+  const staleAfter = done ? null : isoFromEpochMs(row.updated_at + opts.staleAfterMs);
+  const status = done ? "done" : deriveObligationStatus(row.status, staleAfter, opts.now);
+  const escalation = escalationFields(status, staleAfter, opts.now);
+  const sourceRecord = `task:${row.name}`;
+  const lastEventAt = isoFromEpochMs(row.completed_at ?? row.updated_at ?? row.created_at);
+
+  return {
+    obligation_id: obligationId(sourceRecord, "closeout"),
+    source_kind: "closeout",
+    obligation_type: "closeout",
+    source_record: sourceRecord,
+    source_ref: row.name || row.id,
+    agent,
+    owner,
+    status,
+    stale_after: staleAfter,
+    due_at: staleAfter,
+    last_event_at: lastEventAt,
+    ...escalation,
+    dashboard_reason:
+      status === "done"
+        ? `Task closeout complete: ${row.title}`
+        : status === "late"
+          ? `Stale missing task closeout: ${row.title}`
+          : `Task closeout expected from ${agent}: ${row.title}`,
+  };
+}
+
 function staleAfterFor(row: AgentObligationRow, staleAfterMs: number): string | null {
   if (!ACTIVE_STATUSES.has(row.status)) return null;
   const base = row.started_at ?? row.not_before_at ?? row.updated_at;
@@ -172,6 +262,11 @@ function deriveObligationStatus(rawStatus: string, staleAfter: string | null, no
   if (TERMINAL_FAILED_STATUSES.has(rawStatus)) return "failed";
   if (staleAfter && Date.parse(staleAfter) <= Date.parse(now)) return "late";
   return "expected";
+}
+
+function isoFromEpochMs(ms: number | null | undefined): string | null {
+  if (typeof ms !== "number" || !Number.isFinite(ms)) return null;
+  return new Date(ms).toISOString();
 }
 
 function inferSourceKind(row: AgentObligationRow): AgentObligationSourceKind {

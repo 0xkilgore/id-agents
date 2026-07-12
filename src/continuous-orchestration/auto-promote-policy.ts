@@ -36,6 +36,13 @@ export interface AutoPromoteOptions {
   maxPerPass: number;
   /** Confidence floor; defaults to the flesh-policy auto-ready threshold. */
   confidenceThreshold?: number;
+  /**
+   * Permit a previously-fired needs_review row to retry only when it carries a
+   * durable approval marker. Default false keeps the pure safety gate strict for
+   * tests/callers that cannot distinguish a deliberate retry from a just-reaped
+   * phantom lock.
+   */
+  allowApprovedRetries?: boolean;
 }
 
 export interface AutoPromoteSkip {
@@ -60,6 +67,7 @@ export interface AutoPromotePlan {
 export function autoPromoteRejections(
   item: BacklogItem,
   confidenceThreshold: number,
+  opts: Pick<AutoPromoteOptions, "allowApprovedRetries"> = {},
 ): string[] {
   const reasons: string[] = [];
   const explicitlyApproved = !!item.approved_by || item.flesh_status === "approved_ready" || !!item.auto_ready_approved_at;
@@ -74,6 +82,9 @@ export function autoPromoteRejections(
   }
   if (item.write_scope.length === 0) {
     reasons.push("empty write_scope (build work must declare a lane)");
+  }
+  if (item.dependencies.length > 0) {
+    reasons.push(`blocked dependencies: ${item.dependencies.join(", ")}`);
   }
   const denyHit = matchesHighRiskDenylist(item.dispatch_body, item.title);
   if (denyHit) reasons.push(`high-risk denylist match: /${denyHit}/`);
@@ -92,11 +103,16 @@ export function autoPromoteRejections(
   // re-fired in the SAME tick). Any previously-dispatched item requires a
   // human /promote, never this automatic path.
   if (item.last_dispatch_phid) {
-    reasons.push(`already dispatched once (last_dispatch_phid=${item.last_dispatch_phid}) — requires human /promote, not auto-promote`);
+    const retryApproved = !!item.approved_by || !!item.auto_ready_approved_at;
+    if (!opts.allowApprovedRetries || !retryApproved) {
+      reasons.push(`already dispatched once (last_dispatch_phid=${item.last_dispatch_phid}) — requires human /promote, not auto-promote`);
+    }
   }
   // Confidence is required unless a human/system approval already exists. The
   // approval override drains stale approved/fleshed fuel without weakening the
-  // structural safety gates above.
+  // structural safety gates above. For retry safety, `approved_ready` is NOT
+  // enough to bypass the previous-dispatch gate; that gate requires approved_by
+  // or auto_ready_approved_at when allowApprovedRetries is enabled.
   if (!explicitlyApproved) {
     if (item.flesh_confidence == null) {
       reasons.push("no flesh_confidence (cannot assert it is high-confidence)");
@@ -148,7 +164,7 @@ export function selectAutoPromotions(
   const skipped: AutoPromoteSkip[] = [];
   const safe: BacklogItem[] = [];
   for (const item of needsReview) {
-    const reasons = autoPromoteRejections(item, confidenceThreshold);
+    const reasons = autoPromoteRejections(item, confidenceThreshold, opts);
     if (reasons.length === 0) safe.push(item);
     else skipped.push({ item_id: item.item_id, reasons });
   }

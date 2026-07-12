@@ -15,6 +15,7 @@ export type DispatchDetailTimelineEvent = {
 
 export type DispatchDetailLinkedArtifact = {
   id: string;
+  report_id: string | null;
   basename: string | null;
   path_redacted: string | null;
   status: "available" | "missing" | "unknown";
@@ -177,7 +178,8 @@ export function deriveLinkedArtifact(
   const sourceKind = resultPath ? "result_json" : source.artifact_path ? "artifact_path" : "unknown";
   const promotionInput = parsePromotionInput(source.promotion_input_json);
   return {
-    id: `dispatch:${summary.dispatch_id}`,
+    id: reportIdFromResult(parsed) ?? `dispatch:${summary.dispatch_id}`,
+    report_id: reportIdFromResult(parsed) ?? summary.evidence.report_id ?? null,
     basename: path.basename(artifactPath),
     path_redacted: redactLocalPath(artifactPath, promotionInput?.repo),
     status: artifactPath ? "available" : "unknown",
@@ -212,6 +214,12 @@ function parsePromotionInput(raw: string | null | undefined): PromotionInput | n
     remote: stringOrNull(parsed.remote) ?? "origin",
     promotion_skip_reason: stringOrNull(parsed.promotion_skip_reason),
   };
+}
+
+function reportIdFromResult(parsed: Record<string, unknown> | null): string | null {
+  if (typeof parsed?.report_id === "string" && parsed.report_id.trim()) return parsed.report_id.trim();
+  if (typeof parsed?.reportId === "string" && parsed.reportId.trim()) return parsed.reportId.trim();
+  return null;
 }
 
 function parseJsonObject(raw: string | null | undefined): Record<string, unknown> | null {

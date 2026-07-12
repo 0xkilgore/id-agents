@@ -16,7 +16,7 @@ import {
   getHealthyAgentNames,
 } from "../../src/continuous-orchestration/storage.js";
 import { parseRoadmapToBacklog } from "../../src/continuous-orchestration/roadmap-import.js";
-import { ContinuousOrchestrationDaemon } from "../../src/continuous-orchestration/daemon.js";
+import { ContinuousOrchestrationDaemon, type PoolRouting } from "../../src/continuous-orchestration/daemon.js";
 import { defaultConfig, type ContinuousOrchestrationConfig } from "../../src/continuous-orchestration/config.js";
 import { mountContinuousOrchestrationRoutes } from "../../src/continuous-orchestration/routes.js";
 import type { BacklogItem, UsageGateView } from "../../src/continuous-orchestration/types.js";
@@ -47,6 +47,7 @@ function makeDaemon(
     // matches every pre-RD-014 test in this file exactly (no gating at all).
     resolveAgentHealth?: (names: string[]) => Promise<Set<string>>;
     resolveAgentRuntimes?: (names: string[]) => Promise<Map<string, string>>;
+    pools?: PoolRouting;
   } = {},
 ) {
   const fired: BacklogItem[] = [];
@@ -66,6 +67,7 @@ function makeDaemon(
       Promise.resolve({ count: over.inFlight ?? 0, active_write_scopes: over.activeScopes ?? new Set() }),
     resolveAgentHealth: over.resolveAgentHealth,
     resolveAgentRuntimes: over.resolveAgentRuntimes,
+    pools: over.pools,
     alert: async (m) => {
       alerts.push(m);
     },
@@ -87,9 +89,11 @@ async function seedReady(adapter: SqliteAdapter, over: Partial<BacklogItem> = {}
     risk_class: over.risk_class ?? "build",
     priority: over.priority ?? 5,
     write_scope: over.write_scope ?? [],
+    dependencies: over.dependencies ?? [],
     token_estimate: over.token_estimate ?? 0,
     provider: over.provider ?? null,
     runtime: over.runtime ?? null,
+    source_refs: over.source_refs ?? [],
   });
   return item;
 }
@@ -114,6 +118,7 @@ async function seedApprovedReview(adapter: SqliteAdapter, over: Partial<BacklogI
     risk_class: over.risk_class ?? "build",
     priority: over.priority ?? 5,
     write_scope: over.write_scope ?? ["repo/a"],
+    dependencies: over.dependencies ?? [],
     token_estimate: over.token_estimate ?? 1000,
     provider: over.provider ?? "openai",
     runtime: over.runtime ?? "codex",
@@ -358,6 +363,151 @@ describe("daemon — dry-run vs live", () => {
     ]);
   });
 
+  it("status exposes raw ready versus admissible now with block-reason breakdown", async () => {
+    const admissible = await seedReady(adapter, { title: "admissible now", write_scope: ["repo/free"] });
+    await seedReady(adapter, { title: "blocked dependency", dependencies: ["coitem_missing"], write_scope: ["repo/dep"] });
+    await seedReady(adapter, { title: "risk approval", risk_class: "external", write_scope: ["repo/risk"] });
+    await seedReady(adapter, { title: "single writer busy", write_scope: ["repo/busy"] });
+    await seedReady(adapter, { title: "pool full candidate", write_scope: ["repo/pool-full"] });
+    await seedReady(adapter, { title: "no free builder candidate", write_scope: ["repo/no-builder"] });
+    await insertBacklogItem(adapter, {
+      title: "pool full active",
+      to_agent: "builder-a",
+      dispatch_body: "already running",
+      readiness_state: "in_flight",
+      risk_class: "build",
+      write_scope: ["repo/pool-full-active"],
+    });
+    const poolForItem: PoolRouting["poolForItem"] = (item) => {
+      if (item.title.includes("pool full")) {
+        return { pool_id: "pool-full", repo_root: "/repo/full", max_parallel: 1, members: ["builder-a"] };
+      }
+      if (item.title.includes("no free builder")) {
+        return { pool_id: "no-builder", repo_root: "/repo/no-builder", max_parallel: 1, members: ["builder-b"] };
+      }
+      return null;
+    };
+    const { app, daemon } = mountStatusApp(
+      adapter,
+      { dry_run: true, max_in_flight: 10 },
+      {
+        activeScopes: new Set(["repo/busy"]),
+        pools: {
+          poolForItem,
+          availableBuilders: (pool) => (pool.pool_id === "no-builder" ? [] : pool.members),
+          allocateWorktree: async ({ agent, item }) => ({ path: `/tmp/${item.item_id}`, branch: item.item_id, lease_id: agent }),
+        },
+      },
+    );
+    await daemon.setMode("running");
+
+    const res = await callApp(app, "/orchestration/status");
+    const breakdown = res.body.counts.ready_blocked_by_reason;
+    const blockedTotal = Object.values(breakdown).reduce((sum: number, n) => sum + Number(n), 0);
+
+    expect(res.status).toBe(200);
+    expect(res.body.counts.ready).toBe(6);
+    expect(res.body.counts.admissible_now).toBe(1);
+    expect(res.body.ready_admission.admissible_now).toBe(1);
+    expect(res.body.ready_admission.admissible).toEqual([
+      expect.objectContaining({ item_id: admissible.item_id }),
+    ]);
+    expect(breakdown).toMatchObject({
+      blocked_dependency: 1,
+      risk_requires_approval: 1,
+      pool_capacity_full: 1,
+      single_writer_lane_busy: 1,
+      no_free_pool_builder: 1,
+    });
+    expect(blockedTotal).toBe(res.body.counts.ready - res.body.counts.admissible_now);
+  });
+
+  it("status reports capacity saturation, not low fuel, when raw ready is above floor but in-flight slots are full", async () => {
+    for (let i = 0; i < 10; i++) {
+      await seedReady(adapter, { title: `capacity-held ready ${i}`, write_scope: [`repo/capacity-${i}`] });
+    }
+    const { app, daemon } = mountStatusApp(
+      adapter,
+      { dry_run: true, min_ready_fuel: 8, max_in_flight: 4 },
+      { inFlight: 4 },
+    );
+    await daemon.setMode("running");
+
+    const res = await callApp(app, "/orchestration/status");
+
+    expect(res.status).toBe(200);
+    expect(res.body.counts.ready).toBe(10);
+    expect(res.body.counts.admissible_now).toBe(0);
+    expect(res.body.counts.ready_blocked_by_reason).toMatchObject({ no_in_flight_slots: 10 });
+    expect(res.body.ready_admission.stale_ready_floor).toMatchObject({
+      stale: true,
+      status: "capacity_saturated",
+      ready: 10,
+      admissible: 0,
+      min_ready_fuel: 8,
+    });
+    expect(res.body.ready_admission.stale_ready_floor.summary).toMatch(/capacity saturated/);
+    expect(res.body.ready_admission.stale_ready_floor.next_action).toMatch(/Do not refuel/);
+    expect(res.body.ready_admission.stale_ready_floor.summary).not.toMatch(/low ready fuel/);
+  });
+
+  it("status reports raw ready as unusable when all ready rows are blocked by write-scope locks", async () => {
+    for (let i = 0; i < 11; i++) {
+      await seedReady(adapter, { title: `locked ready ${i}`, write_scope: ["repo/locked"] });
+    }
+    const { app, daemon } = mountStatusApp(
+      adapter,
+      { dry_run: true, min_ready_fuel: 8, max_in_flight: 20 },
+      { activeScopes: new Set(["repo/locked"]) },
+    );
+    await daemon.setMode("running");
+
+    const res = await callApp(app, "/orchestration/status");
+
+    expect(res.status).toBe(200);
+    expect(res.body.counts).toMatchObject({
+      ready: 11,
+      raw_ready: 11,
+      useful_ready: 0,
+      admissible_now: 0,
+      ready_blocked_by_reason: { single_writer_lane_busy: 11 },
+    });
+    expect(res.body.counts.top_blocking_lanes[0]).toMatchObject({
+      lane: "repo/locked",
+      code: "single_writer_lane_busy",
+      count: 11,
+    });
+    expect(res.body.ready_admission).toMatchObject({
+      raw_ready: 11,
+      useful_ready: 0,
+      admissible_now: 0,
+    });
+    expect(res.body.ready_admission.stale_ready_floor.next_action).toMatch(/widen\/split|locks to clear/);
+    expect(res.body.ready_admission.stale_ready_floor.next_action).not.toMatch(/author filler/i);
+  });
+
+  it("status reports low fuel only when raw ready itself is below the floor", async () => {
+    for (let i = 0; i < 3; i++) {
+      await seedReady(adapter, { title: `low fuel ready ${i}`, write_scope: [`repo/low-${i}`] });
+    }
+    const { app, daemon } = mountStatusApp(adapter, { dry_run: true, min_ready_fuel: 8, max_in_flight: 8 });
+    await daemon.setMode("running");
+
+    const res = await callApp(app, "/orchestration/status");
+
+    expect(res.status).toBe(200);
+    expect(res.body.counts.ready).toBe(3);
+    expect(res.body.counts.admissible_now).toBe(3);
+    expect(res.body.ready_admission.stale_ready_floor).toMatchObject({
+      stale: false,
+      status: "low_ready_fuel",
+      ready: 3,
+      admissible: 3,
+      min_ready_fuel: 8,
+    });
+    expect(res.body.ready_admission.stale_ready_floor.next_action).toMatch(/Refuel or promote/);
+  });
+
   it("repairs stale Claude metadata for approved Roger Codex ready fuel before admission and logs it", async () => {
     await seedAgent(adapter, "roger", "running", "codex");
     const stale = await seedReady(adapter, {
@@ -418,6 +568,45 @@ describe("daemon — dry-run vs live", () => {
     expect(repaired).toMatchObject({ provider: "openai", runtime: "codex", readiness_state: "ready" });
   });
 
+  it("repairs stale Codex metadata for approved CTO Claude artifact ready fuel in status admission", async () => {
+    await seedAgent(adapter, "cto", "running", "claude-code-cli");
+    const stale = await seedReady(adapter, {
+      title: "CTO artifact-only ready fuel with stale codex runtime",
+      to_agent: "cto",
+      provider: "openai",
+      runtime: "codex",
+      source_refs: ["cto/output/2026-07-12-ready-floor-blocker.md"],
+    });
+    await markApproved(adapter, stale.item_id);
+    const { app, daemon } = mountStatusApp(
+      adapter,
+      { dry_run: true, max_in_flight: 4 },
+      { resolveAgentRuntimes: (names) => getAgentRuntimeMap(adapter, names) },
+    );
+    await daemon.setMode("running");
+
+    const res = await callApp(app, "/orchestration/status");
+    const repaired = await getBacklogItem(adapter, stale.item_id);
+
+    expect(res.status).toBe(200);
+    expect(res.body.auto_promote_health.ready_runtime_repairs).toEqual([
+      expect.objectContaining({
+        item_id: stale.item_id,
+        to_agent: "cto",
+        from_provider: "openai",
+        from_runtime: "codex",
+        to_provider: "anthropic",
+        to_runtime: "claude-code-cli",
+      }),
+    ]);
+    expect(res.body.ready_admission.admissible).toEqual([
+      expect.objectContaining({ item_id: stale.item_id, to_agent: "cto" }),
+    ]);
+    expect(res.body.ready_admission.ready_runtime_repairs).toEqual([]);
+    expect(res.body.ready_admission.non_admitted).toHaveLength(0);
+    expect(repaired).toMatchObject({ provider: "anthropic", runtime: "claude-code-cli", readiness_state: "ready" });
+  });
+
   it("halts (fires nothing) when not running", async () => {
     await seedReady(adapter);
     const { daemon, fired } = makeDaemon(adapter, { config: { dry_run: false } });
@@ -436,7 +625,7 @@ describe("daemon — dry-run vs live", () => {
     expect(r.halted).toMatch(/kill switch/);
   });
 
-  it("auto-promotes approved fleshed build fuel to restore the ready floor with duplicate gate evidence", async () => {
+  it("auto-promotes approved fleshed build fuel to restore the ready floor and permits approved retry fuel", async () => {
     await seedApprovedReview(adapter);
     await seedApprovedReview(adapter, { write_scope: ["repo/b"] });
     await seedApprovedReview(adapter, { write_scope: ["repo/c"] });
@@ -453,7 +642,7 @@ describe("daemon — dry-run vs live", () => {
         auto_promote_enabled: true,
         auto_promote_floor: 3,
         auto_promote_min_lanes: 3,
-        auto_promote_max_per_tick: 1,
+        auto_promote_max_per_tick: 4,
       },
     });
     await daemon.setMode("running");
@@ -462,12 +651,7 @@ describe("daemon — dry-run vs live", () => {
 
     expect(fired).toHaveLength(0);
     expect(r.auto_promote?.promoted).toBe(3);
-    expect(r.auto_promote?.skipped_items).toEqual([
-      expect.objectContaining({
-        item_id: dup.item_id,
-        reasons: expect.arrayContaining([expect.stringContaining("already dispatched once")]),
-      }),
-    ]);
+    expect(r.auto_promote?.skipped_items).not.toEqual(expect.arrayContaining([expect.objectContaining({ item_id: dup.item_id })]));
     const ready = await listBacklogByState(adapter, { state: "ready" });
     expect(ready).toHaveLength(3);
     expect(new Set(ready.map((i) => i.write_scope[0])).size).toBe(3);
@@ -482,6 +666,7 @@ describe("daemon — dry-run vs live", () => {
       auto_flesh_enabled: true,
       auto_promote_enabled: true,
       auto_promote_floor: 12,
+      max_in_flight: 12,
       auto_promote_min_lanes: 1,
     });
     await daemon.setMode("running");
@@ -512,11 +697,45 @@ describe("daemon — dry-run vs live", () => {
       risk_class: "destructive",
       write_scope: ["repo/risky"],
     });
+    const alreadyDispatched = await seedApprovedReview(adapter, {
+      title: "blocked already dispatched candidate",
+      write_scope: ["repo/already-dispatched"],
+      last_dispatch_phid: "phid:disp-already-dispatched",
+    });
+    await adapter.query(
+      `UPDATE orchestration_backlog_item
+          SET approved_by = NULL,
+              approved_at = NULL,
+              auto_ready_approved_at = NULL,
+              flesh_confidence = 0.95
+        WHERE item_id = $1`,
+      [alreadyDispatched.item_id],
+    );
+    const blockedDependency = await seedApprovedReview(adapter, {
+      title: "blocked dependency candidate",
+      write_scope: ["repo/dependency"],
+      dependencies: ["dep-123"],
+    });
+    const lowConfidence = await seedApprovedReview(adapter, {
+      title: "blocked low confidence candidate",
+      write_scope: ["repo/low-confidence"],
+      flesh_status: "fleshed",
+      flesh_confidence: 0.4,
+    });
+    await adapter.query(
+      `UPDATE orchestration_backlog_item
+          SET approved_by = NULL,
+              approved_at = NULL,
+              auto_ready_approved_at = NULL
+        WHERE item_id = $1`,
+      [lowConfidence.item_id],
+    );
     const { app, daemon } = mountStatusApp(adapter, {
       dry_run: true,
       auto_flesh_enabled: true,
       auto_promote_enabled: true,
       auto_promote_floor: 12,
+      max_in_flight: 12,
       auto_promote_min_lanes: 1,
     });
     await daemon.setMode("running");
@@ -527,18 +746,49 @@ describe("daemon — dry-run vs live", () => {
     expect(res.body.auto_promote_health).toMatchObject({
       floor: 12,
       below_floor: true,
-      candidates_considered: 1,
+      candidates_considered: 4,
       promoted_count: 0,
-      skipped_count: 1,
+      skipped_count: 4,
+      blocker_counts: {
+        already_dispatched: 1,
+        review_held_risk: 1,
+        blocked_dependencies: 1,
+        confidence_threshold: 1,
+      },
     });
-    expect(res.body.auto_promote_health.skipped_items).toEqual([
+    expect(res.body.auto_promote_health.blocker_classes).toEqual(
+      expect.arrayContaining([
+        { blocker_class: "already_dispatched", count: 1 },
+        { blocker_class: "review_held_risk", count: 1 },
+        { blocker_class: "blocked_dependencies", count: 1 },
+        { blocker_class: "confidence_threshold", count: 1 },
+      ]),
+    );
+    expect(res.body.auto_promote_health.next_action).toMatch(/already-dispatched|review-held|dependency|confidence|flesh/);
+    expect(res.body.auto_promote_health.summary).toMatch(/promoted 0 of 4; blockers:/);
+    expect(res.body.auto_promote_health.summary).toMatch(/next:/);
+    expect(res.body.auto_promote_health.skipped_items).toEqual(expect.arrayContaining([
       expect.objectContaining({
         item_id: risky.item_id,
         reasons: expect.arrayContaining([expect.stringContaining("not auto-promotable")]),
       }),
-    ]);
-    expect(res.body.auto_promote_health.top_skip_reasons[0]).toEqual(
-      expect.objectContaining({ reason: expect.stringContaining("not auto-promotable"), count: 1 }),
+      expect.objectContaining({
+        item_id: alreadyDispatched.item_id,
+        reasons: expect.arrayContaining([expect.stringContaining("already dispatched once")]),
+      }),
+      expect.objectContaining({
+        item_id: blockedDependency.item_id,
+        reasons: expect.arrayContaining([expect.stringContaining("blocked dependencies")]),
+      }),
+      expect.objectContaining({
+        item_id: lowConfidence.item_id,
+        reasons: expect.arrayContaining([expect.stringContaining("confidence 0.40 <")]),
+      }),
+    ]));
+    expect(res.body.auto_promote_health.top_skip_reasons).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ reason: expect.stringContaining("not auto-promotable"), count: 1 }),
+      ]),
     );
   });
 
@@ -559,6 +809,7 @@ describe("daemon — dry-run vs live", () => {
         auto_flesh_enabled: true,
         auto_promote_enabled: true,
         auto_promote_floor: 12,
+        max_in_flight: 12,
       },
       { resolveAgentRuntimes: (names) => getAgentRuntimeMap(adapter, names) },
     );

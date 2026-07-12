@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { SqliteAdapter } from "../../src/db/sqlite-adapter.js";
 import { migrateSqlite } from "../../src/db/migrations/sqlite.js";
 import { mountOutputsRoutes } from "../../src/outputs/routes.js";
-import { artifactIdFromPath, migrateOutputsTables, registerArtifact, registerArtifactPathDelivery } from "../../src/outputs/storage.js";
+import { artifactIdFromPath, getArtifact, getArtifactBodyCache, migrateOutputsTables, registerArtifact, registerArtifactPathDelivery } from "../../src/outputs/storage.js";
 
 let app: Express;
 let adapter: SqliteAdapter;
@@ -282,5 +282,209 @@ describe("GET /artifacts/:id/detail", () => {
     expect(download.status).toBe(200);
     expect(download.headers.get("content-disposition")).toContain("fresh-report.html");
     expect(download.text).toContain("Readable without sync.");
+  });
+
+  it("caches readable body and exposes stable delivery fields from /artifacts/register", async () => {
+    const filePath = path.join(tmp, "registered-output.md");
+    writeFileSync(filePath, "# Registered Output\n\nReadable after source removal.\n");
+    const artifactId = artifactIdFromPath(filePath);
+
+    const res = await call("POST", "/artifacts/register", {
+      basename: "registered-output.md",
+      agent: "finances",
+      abs_path: filePath,
+      title: "Registered Output",
+      produced_at: "2026-07-08T13:00:00.000Z",
+      source: "manual",
+      project_ref: "finances",
+      dispatch_ref: "phid:disp-register",
+      source_host: "M4",
+    });
+
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({
+      schema_version: "artifact.register.v1",
+      artifact_id: artifactId,
+      title: "Registered Output",
+      source_path: filePath,
+      freshness: "current",
+      stable_url: `/artifacts/${artifactId}/detail`,
+      copy_text_url: `/artifacts/${artifactId}/copy-text`,
+      download_url: `/artifacts/${artifactId}/download`,
+      cached_body: true,
+      body_unavailable: false,
+      body_error: null,
+      source_proof: {
+        source: "manual",
+        source_badges: ["manual"],
+        dispatch_ref: "phid:disp-register",
+        source_host: "M4",
+      },
+    });
+    expect(res.body.content_hash).toMatch(/^[a-f0-9]{64}$/);
+
+    unlinkSync(filePath);
+    const detail = await call("GET", `/artifacts/${artifactId}/detail`);
+    expect(detail.status).toBe(200);
+    expect(detail.body).toMatchObject({
+      displayTitle: "Registered Output",
+      metadata: {
+        content_hash: res.body.content_hash,
+        source: "manual",
+        project_ref: "finances",
+      },
+      body: {
+        kind: "markdown",
+        source: "artifact_body_cache",
+      },
+      delivery: {
+        bodyRenderable: true,
+        bodyUnavailable: false,
+        freshness: "current",
+        discoveredBy: "manual_fixture",
+      },
+    });
+    expect(detail.body.body.text).toContain("Readable after source removal.");
+  });
+
+  it("backfills the two finance outputs with stable urls and cached bodies without Dropbox fixtures", async () => {
+    const htmlPath = path.join(tmp, "2026-07-08-coming-month-cash-flow-preview.html");
+    const mdPath = path.join(tmp, "2026-07-08-cash-flow-cobra-boxx-addendum.md");
+    writeFileSync(htmlPath, "<h1>Coming Month Cash-Flow Preview</h1><p>Cache me.</p>");
+    writeFileSync(mdPath, "# Cash-Flow Preview Correction Addendum\n\nCOBRA + BOXX lots.\n");
+
+    const res = await call("POST", "/artifacts/finance/backfill", {
+      artifacts: [
+        {
+          path: htmlPath,
+          title: "Coming Month Cash-Flow Preview",
+          project: "finances",
+          source_host: "M4",
+        },
+        {
+          path: mdPath,
+          title: "Cash-Flow Preview Correction Addendum - COBRA + BOXX LT Lots",
+          project: "finances",
+          source_host: "M4",
+        },
+      ],
+    });
+
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({
+      ok: true,
+      schema_version: "artifact.finance_backfill.v1",
+      count: 2,
+    });
+    const htmlResult = res.body.results[0];
+    const mdResult = res.body.results[1];
+    expect(htmlResult).toMatchObject({
+      source_path: htmlPath,
+      media_type: "text/html",
+      stable_artifact_id: artifactIdFromPath(htmlPath),
+      stable_url: `/artifacts/${artifactIdFromPath(htmlPath)}/detail`,
+      cached_body: true,
+      body_unavailable: false,
+      body_error: null,
+    });
+    expect(mdResult).toMatchObject({
+      source_path: mdPath,
+      media_type: "text/markdown",
+      stable_artifact_id: artifactIdFromPath(mdPath),
+      cached_body: true,
+      body_unavailable: false,
+      body_error: null,
+    });
+    expect(htmlResult.content_hash).toMatch(/^[a-f0-9]{64}$/);
+    expect(mdResult.source_mtime).toBeTruthy();
+
+    unlinkSync(htmlPath);
+    unlinkSync(mdPath);
+
+    const htmlDetail = await call("GET", `/artifacts/${artifactIdFromPath(htmlPath)}/detail`);
+    expect(htmlDetail.status).toBe(200);
+    expect(htmlDetail.body).toMatchObject({
+      metadata: {
+        project_ref: "finances",
+        source: "filesystem",
+        source_host: "M4",
+        media_type: "text/html",
+      },
+      body: {
+        kind: "html",
+        source: "artifact_body_cache",
+      },
+      delivery: {
+        discoveredBy: "filesystem_reconcile",
+        bodyRenderable: true,
+        freshness: "current",
+      },
+    });
+    expect(htmlDetail.body.body.text).toContain("Cache me.");
+
+    const copy = await callRaw(`/artifacts/${artifactIdFromPath(mdPath)}/copy-text`);
+    expect(copy.status).toBe(200);
+    expect(copy.text).toContain("COBRA + BOXX lots");
+  });
+
+  it("records body_unavailable explicitly when a finance source path is unreachable", async () => {
+    const missingPath = path.join(tmp, "2026-07-08-missing-finance.md");
+    const artifactId = artifactIdFromPath(missingPath);
+
+    const res = await call("POST", "/artifacts/finance/backfill", {
+      artifacts: [
+        {
+          path: missingPath,
+          title: "Missing Finance Output",
+          project: "finances",
+          source_host: "M4",
+        },
+      ],
+    });
+
+    expect(res.status).toBe(200);
+    expect(res.body.results[0]).toMatchObject({
+      source_path: missingPath,
+      stable_artifact_id: artifactId,
+      media_type: "text/markdown",
+      cached_body: false,
+      body_unavailable: true,
+    });
+    expect(res.body.results[0].body_error).toBeTruthy();
+
+    const row = await getArtifact(adapter, artifactId);
+    expect(row).toMatchObject({
+      artifact_id: artifactId,
+      abs_path: missingPath,
+      availability: "missing",
+      source: "filesystem",
+      project_ref: "finances",
+      source_host: "M4",
+      media_type: "text/markdown",
+    });
+    expect(row?.content_hash).toBeNull();
+    expect(row?.source_mtime).toBeNull();
+
+    const cache = await getArtifactBodyCache(adapter, artifactId);
+    expect(cache).toMatchObject({
+      artifact_id: artifactId,
+      media_type: "text/markdown",
+      body_text: null,
+    });
+    expect(cache?.body_error).toBeTruthy();
+
+    const detail = await call("GET", `/artifacts/${artifactId}/detail`);
+    expect(detail.status).toBe(200);
+    expect(detail.body).toMatchObject({
+      delivery: {
+        bodyRenderable: false,
+        bodyUnavailable: true,
+        freshness: "body_unavailable",
+        discoveredBy: "filesystem_reconcile",
+      },
+      body: {
+        kind: "missing",
+      },
+    });
   });
 });

@@ -4252,7 +4252,7 @@ async function checkAgentStatus(longFormat: boolean = false, liveCheck: boolean 
           console.log(`${typeEmoji} ${colors.bold}${agent.name}${colors.reset}${automatorTag} ${statusEmoji} ${statusText}${heartbeatTag}`);
 
           // Runtime and model
-          const runtime = agent.metadata?.runtime || agent.type || 'claude';
+          const runtime = agent.runtime || agent.metadata?.runtime || agent.type || 'claude';
           const modelInfo = model ? ` / ${model}` : '';
           console.log(`   ${colors.gray}Runtime:${colors.reset} ${runtime}${modelInfo}`);
 
@@ -4682,7 +4682,7 @@ async function listAgents(_showAll: boolean = false) {
         console.log(`   ${colors.gray}Alias:${colors.reset} ${agent.alias}`);
       }
       // Show runtime if available, otherwise fall back to type
-      const runtime = agent.metadata?.runtime || agent.type || 'claude';
+      const runtime = agent.runtime || agent.metadata?.runtime || agent.type || 'claude';
       console.log(`   ${colors.gray}Runtime:${colors.reset} ${runtime}`);
       if (agent.model) {
         console.log(`   ${colors.gray}Model:${colors.reset} ${agent.model}`);

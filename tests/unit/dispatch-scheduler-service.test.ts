@@ -109,6 +109,7 @@ function harness(opts?: {
   now?: string;
   modelPolicy?: ModelPolicyResolver;
   admissionGateProvider?: AdmissionGateProvider;
+  notificationSink?: { notify(event: any): Promise<void> | void };
 }) {
   const now = opts?.now ?? "2026-05-19T20:00:00.000Z";
   const reactor = new FakeReactor({ now: () => now });
@@ -125,6 +126,8 @@ function harness(opts?: {
     now: () => reactor.now(),
     rng: () => 0.5,
     modelPolicy: opts?.modelPolicy,
+    notificationSink: opts?.notificationSink,
+    notificationTeamId: "test-team",
   });
   if (opts?.admissionGateProvider) {
     scheduler.setAdmissionGateProvider(opts.admissionGateProvider);
@@ -479,9 +482,11 @@ describe("SchedulerService — crash tolerance (Phase 3.4)", () => {
   });
 
   it("stale in_flight without agent_query_id past starting_timeout_ms is reaped and recovered", async () => {
+    const notifications: any[] = [];
     const { client, reactor, scheduler, transport } = harness({
       max: 3,
       now: "2026-05-19T20:00:00.000Z",
+      notificationSink: { notify: (event) => notifications.push(event) },
     });
     // First tick: transport returns ok but with no agent_query_id —
     // simulates a crash between /talk acceptance and recordAgentStart.
@@ -501,6 +506,15 @@ describe("SchedulerService — crash tolerance (Phase 3.4)", () => {
     transport.setNextResponses([{ ok: true, agent_query_id: "agent-recovered" }]);
     const report = await scheduler.tick();
     expect(report.wedged_reaped).toBe(1);
+    expect(notifications).toHaveLength(1);
+    expect(notifications[0]).toMatchObject({
+      team_id: "test-team",
+      reason: "dispatch_expired",
+      classification: "retryable",
+      owner_route: "coder-max",
+      source: { query_id: "q" },
+    });
+    expect(notifications[0].safe_message).not.toMatch(/Error:| at /);
 
     const recovered = await client.getByQueryId("q");
     if (!recovered.ok) throw new Error();

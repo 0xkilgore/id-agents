@@ -9,6 +9,7 @@ import { join } from "node:path";
 import { rmSync, mkdtempSync } from "node:fs";
 import { SqliteAdapter } from "../../src/db/sqlite-adapter.js";
 import { migrateSqlite } from "../../src/db/migrations/sqlite.js";
+import { SqliteAgentsRepo } from "../../src/db/repos/sqlite/agents-repo.js";
 import {
   SchedulerHandle,
   parseGatewayMode,
@@ -120,6 +121,87 @@ describe("SchedulerHandle recovery wiring", () => {
 });
 
 describe("SchedulerHandle bootstrap + flow", () => {
+  it("keeps logical finances addressable on a fallback runtime lane", async () => {
+    const agentsRepository = new SqliteAgentsRepo(adapter);
+    await adapter.query(
+      `INSERT INTO agents (team_id, id, name, type, model, port, endpoint, status, created_at, runtime, metadata)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        "team",
+        "agent_finances_claude_session_1",
+        "finances",
+        "claude",
+        "claude-sonnet-4-20250514",
+        4254,
+        "http://localhost:4254",
+        "exhausted",
+        1000,
+        "claude-code-cli",
+        JSON.stringify({ logical_agent: "finances", runtime_lane: "claude-code-cli", provider_lane: "anthropic" }),
+      ],
+    );
+    await adapter.query(
+      `INSERT INTO agents (team_id, id, name, type, model, port, endpoint, status, created_at, runtime, metadata)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        "team",
+        "agent_codex_lane_1",
+        "substrate-api-codex",
+        "claude",
+        "gpt-5.5",
+        4275,
+        "http://localhost:4275",
+        "running",
+        2000,
+        "codex",
+        JSON.stringify({ runtime_lane: "codex", provider_lane: "openai" }),
+      ],
+    );
+    await agentsRepository.upsertLogicalIdentityFromAgent({
+      team_id: "team",
+      name: "finances",
+      created_at: 1000,
+      metadata: {
+        logical_agent: "finances",
+        description: "Finance specialist",
+        runtime_lane: "claude-code-cli",
+        provider_lane: "anthropic",
+      },
+    });
+    const fetchSpy = vi.spyOn(globalThis, "fetch") as ReturnType<typeof vi.spyOn>;
+    fetchSpy.mockResolvedValueOnce(
+      new Response(JSON.stringify({ query_id: "agent-q-codex" }), { status: 200 }) as unknown as Response,
+    );
+    const handle = new SchedulerHandle({
+      adapter,
+      teamId: "team",
+      agentsRepository,
+      resolveTargetUrl: () => "http://localhost:4254",
+      env: { DISPATCH_MAX_IN_FLIGHT_OPENAI: "1" } as any,
+    });
+
+    const enq = await handle.enqueue({
+      to_agent: "finances",
+      from_actor: "manager",
+      message: "finance follow-up after Claude exhaustion",
+      runtime: "codex",
+    });
+    await handle.tick();
+
+    const doc = await handle.client.getByQueryId(enq.query_id);
+    if (!doc.ok) throw new Error();
+    expect(doc.value.to_agent).toBe("finances");
+    expect(doc.value.runtime).toBe("codex");
+    expect(doc.value.provider).toBe("openai");
+    expect(fetchSpy.mock.calls[0]?.[0]).toBe("http://localhost:4275/talk");
+    const logical = await agentsRepository.getLogicalIdentity("team", "finances");
+    expect(logical?.logical_agent).toBe("finances");
+    expect(logical?.metadata).toMatchObject({ description: "Finance specialist" });
+    expect(logical?.metadata).not.toHaveProperty("runtime_lane");
+    expect(logical?.metadata).not.toHaveProperty("provider_lane");
+    fetchSpy.mockRestore();
+  });
+
   it("enqueue → tick → done with mocked transport", async () => {
     const fetchSpy = vi.spyOn(globalThis, "fetch") as ReturnType<typeof vi.spyOn>;
     fetchSpy.mockResolvedValueOnce(

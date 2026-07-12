@@ -209,6 +209,16 @@ export interface UsagePolicySnapshot {
   policy_version: string;
 }
 
+export interface DispatchLogicalAgentIdentity {
+  logical_agent: string;
+  display_name: string;
+  source_agent_id: string | null;
+  source_agent_name: string | null;
+  home_runtime: Runtime | null;
+  home_provider: Provider | null;
+  metadata: Record<string, unknown> | null;
+}
+
 export interface DispatchDoc {
   dispatch_phid: string;
   query_id: string;
@@ -219,6 +229,8 @@ export interface DispatchDoc {
   body_markdown: string;
   provider: Provider;
   runtime: Runtime;
+  /** Durable project-agent identity, independent of the physical execution lane. */
+  logical_agent: DispatchLogicalAgentIdentity | null;
   priority: number;
   status: SchedulerStatus;
   not_before_at: string;
@@ -529,6 +541,7 @@ export interface EnqueueInput {
   body_markdown: string;
   provider: Provider;
   runtime: Runtime;
+  logical_agent?: DispatchLogicalAgentIdentity | null;
   priority?: number;
   not_before_at?: string;
   usage_policy_snapshot?: UsagePolicySnapshot;

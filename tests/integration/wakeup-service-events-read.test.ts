@@ -180,6 +180,7 @@ describe('GET /events — wakeup-service catch-up read', () => {
 
     // Spot-check envelope shape on the first event.
     expect(body.events[0]).toEqual({
+      id: `evt:${TEAM}:${a.seq}`,
       seq: a.seq,
       team: TEAM,
       topic: 'query:delivered',
@@ -280,6 +281,65 @@ describe('GET /events — wakeup-service catch-up read', () => {
     expect(body.next_seq).toBe(body.events[body.events.length - 1].seq);
   });
 
+  it('returns read-model invalidation events with stable ids and resumable cursors', async () => {
+    const first = await db.events.insert({
+      team_id: teamId,
+      topic: 'read_model:artifact_changed',
+      actor_agent_id: null,
+      subject_kind: 'artifact',
+      subject_id: 'art-local-feed',
+      occurred_at: 1_777_300_030_000,
+      data: {
+        change: 'updated',
+        invalidates: {
+          keys: ['artifact:art-local-feed', 'read-model:artifacts'],
+          scopes: ['artifacts'],
+          reason: 'artifact_metadata_body_version_changed',
+        },
+      },
+    });
+    const second = await db.events.insert({
+      team_id: teamId,
+      topic: 'read_model:comment_changed',
+      actor_agent_id: null,
+      subject_kind: 'artifact',
+      subject_id: 'art-local-feed',
+      occurred_at: 1_777_300_031_000,
+      data: {
+        op_id: 7,
+        invalidates: {
+          keys: ['artifact:art-local-feed:timeline', 'read-model:artifacts'],
+          scopes: ['artifacts'],
+          reason: 'comment_timeline_changed',
+        },
+      },
+    });
+
+    const firstPage = await getEvents(baseUrl, TEAM, {
+      since: first.seq - 1,
+      limit: 1,
+      topics: 'read_model:changes',
+    });
+    expect(firstPage.status).toBe(200);
+    expect(firstPage.body.events).toHaveLength(1);
+    expect(firstPage.body.events[0]).toMatchObject({
+      id: `evt:${TEAM}:${first.seq}`,
+      seq: first.seq,
+      topic: 'read_model:artifact_changed',
+      subject: { kind: 'artifact', id: 'art-local-feed' },
+    });
+    expect(firstPage.body.events[0].data.invalidates.keys).toContain('artifact:art-local-feed');
+    expect(firstPage.body.next_seq).toBe(first.seq);
+
+    const resumed = await getEvents(baseUrl, TEAM, {
+      since: firstPage.body.next_seq,
+      topics: 'read_model:changes',
+    });
+    expect(resumed.status).toBe(200);
+    expect(resumed.body.events.map((e) => e.seq)).toContain(second.seq);
+    expect(resumed.body.events.find((e) => e.seq === second.seq)?.id).toBe(`evt:${TEAM}:${second.seq}`);
+  });
+
   it('rejects malformed `since` and `limit` query params with 400', async () => {
     const sinceBad = await fetch(`${baseUrl}/events?since=abc`, { headers: teamHeaders(TEAM) });
     expect(sinceBad.status).toBe(400);
@@ -313,9 +373,10 @@ describe('GET /events — wakeup-service catch-up read', () => {
     // tests in this file.
     const { status, body } = await getEvents(baseUrl, otherTeam, { since: 0 });
     expect(status).toBe(200);
-    expect(body.events.length).toBe(1);
-    expect(body.events[0].subject?.id).toBe('task_other');
-    expect(body.events[0].team).toBe(otherTeam);
+    const concreteEvents = body.events.filter((e) => e.topic !== 'read_model:cursor_expired');
+    expect(concreteEvents.length).toBe(1);
+    expect(concreteEvents[0].subject?.id).toBe('task_other');
+    expect(concreteEvents[0].team).toBe(otherTeam);
   });
 });
 
@@ -376,8 +437,19 @@ describe('GET /events — replay_truncated semantics', () => {
     const { status, body } = await getEvents(baseUrl, truncTeam, { since: 0 });
     expect(status).toBe(200);
     expect(body.replay_truncated).toBe(true);
+    expect(body.cursor_expired).toBe(true);
     expect(body.earliest_available_seq).toBe(earliest);
-    expect(body.events.length).toBe(1);
+    expect(body.events.length).toBe(2);
+    expect(body.events[0]).toMatchObject({
+      seq: 0,
+      topic: 'read_model:cursor_expired',
+      data: {
+        cursor: 0,
+        earliest_available_seq: earliest,
+        resync_required: true,
+      },
+    });
+    expect(body.events[0].data.invalidates.scopes).toEqual(['artifacts', 'tasks', 'projects']);
     expect(body.next_seq).toBe(earliest);
   });
 
@@ -388,6 +460,7 @@ describe('GET /events — replay_truncated semantics', () => {
     const { status, body } = await getEvents(baseUrl, truncTeam, { since: earliest! });
     expect(status).toBe(200);
     expect(body.replay_truncated).toBe(false);
+    expect(body.cursor_expired).toBe(false);
     // No events with seq > earliest yet, so next_seq holds the cursor.
     expect(body.events).toEqual([]);
     expect(body.next_seq).toBe(earliest);

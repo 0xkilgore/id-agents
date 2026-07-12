@@ -169,6 +169,18 @@ describe('Admin principal sees unredacted record', () => {
 });
 
 describe('Non-admin principal gets redacted record', () => {
+  it('GET /agents/:ref resolves by name while preserving redaction', async () => {
+    const resp = await fetch(`${baseUrl}/agents/sensitive-agent`, {
+      headers: anonHeaders('public'),
+    });
+    expect(resp.status).toBe(200);
+    const body = await resp.json() as any;
+    expect(body.id).toBe(agentId);
+    expect(body.name).toBe('sensitive-agent');
+    expect(body.ssh_target).toBeUndefined();
+    expect(body.metadata?.api_secret).toBeUndefined();
+  });
+
   it('GET /agents/:id omits ssh_target for non-admin', async () => {
     const resp = await fetch(`${baseUrl}/agents/${agentId}`, {
       headers: anonHeaders('public'),

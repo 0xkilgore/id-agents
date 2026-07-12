@@ -100,7 +100,7 @@ export async function assembleAgentDetail(
     const rows = await Promise.all(
       attributionNames.map((agent) => listArtifactCatalog(adapter, { agent, limit: RECENT_OUTPUT_LIMIT })),
     );
-    return rows.flat().map((a) => ({
+    const catalogRows = rows.flat().map((a) => ({
       artifact_id: a.artifact_id,
       basename: a.basename,
       title: a.title ?? null,
@@ -108,6 +108,10 @@ export async function assembleAgentDetail(
       abs_path: a.abs_path,
       produced_at: a.produced_at,
     }));
+    return dedupeRecentOutputsByPath([
+      ...catalogRows,
+      ...listWorkingDirectoryOutputArtifacts(workingDirectory, agentId),
+    ]);
   }, [] as AgentDetailResponse["recent_outputs"]);
 
   const recent_dispatches = await safe(async () => {
@@ -247,6 +251,47 @@ export function normalizeAttributionNames(values: Array<string | null | undefine
   return out.length > 0 ? out : ["unknown"];
 }
 
+function dedupeRecentOutputsByPath(
+  rows: AgentDetailResponse["recent_outputs"],
+): AgentDetailResponse["recent_outputs"] {
+  const byPath = new Map<string, AgentDetailResponse["recent_outputs"][number]>();
+  for (const row of rows) {
+    const existing = byPath.get(row.abs_path);
+    if (!existing || row.produced_at > existing.produced_at) {
+      byPath.set(row.abs_path, row);
+    }
+  }
+  return [...byPath.values()];
+}
+
+function listWorkingDirectoryOutputArtifacts(
+  workingDirectory: string | null,
+  agentId: string,
+): AgentDetailResponse["recent_outputs"] {
+  if (!workingDirectory) return [];
+  const outputDir = path.join(workingDirectory, "output");
+  try {
+    if (!fs.existsSync(outputDir)) return [];
+    return fs
+      .readdirSync(outputDir, { withFileTypes: true })
+      .filter((entry) => entry.isFile())
+      .map((entry) => {
+        const absPath = path.join(outputDir, entry.name);
+        const stat = fs.statSync(absPath);
+        return {
+          artifact_id: `output:${agentId}:${entry.name}`,
+          basename: entry.name,
+          title: null,
+          tag: "output",
+          abs_path: absPath,
+          produced_at: stat.mtime.toISOString(),
+        };
+      });
+  } catch {
+    return [];
+  }
+}
+
 function placeholders(count: number): string {
   return Array.from({ length: Math.max(1, count) }, () => "?").join(",");
 }
@@ -270,6 +315,9 @@ function commentReceiptFromOperation(
   if (
     visibleState !== "recorded+routed" &&
     visibleState !== "recorded-but-route-failed-with-retry" &&
+    visibleState !== "recorded-route-failed-retryable" &&
+    visibleState !== "disabled/not-recorded" &&
+    visibleState !== "terminal-failure" &&
     visibleState !== "not-recorded"
   ) {
     return null;
@@ -306,8 +354,13 @@ function commentReceiptFromOperation(
   const routeStatusLabel =
     visibleState === "recorded+routed"
       ? "routed"
-      : visibleState === "recorded-but-route-failed-with-retry"
+      : visibleState === "recorded-but-route-failed-with-retry" ||
+          visibleState === "recorded-route-failed-retryable"
         ? "recorded-but-route-failed"
+        : visibleState === "terminal-failure"
+          ? "terminal-failure"
+          : visibleState === "disabled/not-recorded"
+            ? "disabled/not-recorded"
         : "not-recorded";
 
   return {

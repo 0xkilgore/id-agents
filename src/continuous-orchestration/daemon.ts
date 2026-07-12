@@ -12,11 +12,17 @@
 import fs from "node:fs";
 import crypto from "node:crypto";
 import type { DbAdapter } from "../db/db-adapter.js";
-import type { ContinuousOrchestrationConfig } from "./config.js";
+import { effectiveAutoPromoteFloor, type ContinuousOrchestrationConfig } from "./config.js";
 import type { BacklogItem, DecisionRecord, OrchestrationMode, ReadinessState, UsageGateView } from "./types.js";
 import { fairInterleaveByLane, laneKeyOf, needsRefuel, orderCandidates } from "./selection.js";
 import { tickAdmitLimit } from "./cadence.js";
-import { planAdmission, evaluateStall, shouldRunZeroAdmitStallWatchdog, type AdmissionContext } from "./admission.js";
+import {
+  planAdmission,
+  evaluateStall,
+  shouldRunZeroAdmitStallWatchdog,
+  type AdmissionContext,
+  type AdmissionPlan,
+} from "./admission.js";
 import { computeNextDelay, tickWriteCaps } from "./backpressure.js";
 import {
   appendDecisions,
@@ -140,6 +146,12 @@ export interface TickResult {
 
 export interface ReadyAdmissionExplanation {
   candidates: number;
+  /** Raw READY rows before admission guardrails. */
+  raw_ready: number;
+  /** READY rows that are useful as immediate dispatch fuel after guardrails. */
+  useful_ready: number;
+  /** Post-guardrail READY rows that can be dispatched now. */
+  admissible_now: number;
   admissible: Array<{ item_id: string; title: string; to_agent: string | null; risk_class: string }>;
   non_admitted: Array<{
     item_id: string;
@@ -151,9 +163,65 @@ export interface ReadyAdmissionExplanation {
     reason: string;
     metadata?: Record<string, unknown>;
   }>;
+  blocker_counts: Array<{
+    code: string;
+    category: ReadyAdmissionBlockerCategory;
+    owner: string;
+    reason_code: string;
+    reason_text: string;
+    next_action: string;
+    count: number;
+  }>;
+  top_blocking_lanes: Array<{
+    lane: string;
+    code: string;
+    count: number;
+    item_ids: string[];
+    next_action: string;
+  }>;
+  /** Same counts keyed by the exact non-admission code for compact UI/API consumers. */
+  block_reason_counts: Record<string, number>;
+  stale_ready_floor: {
+    stale: boolean;
+    status: "ok" | "low_ready_fuel" | "capacity_saturated" | "blocked_ready_fuel";
+    ready: number;
+    admissible: number;
+    min_ready_fuel: number;
+    reason: string | null;
+    summary: string;
+    next_action: string;
+  };
   halted: string | null;
   ready_runtime_repairs: ReadyRuntimeRepair[];
 }
+
+export interface AdmissionBreakdownLane {
+  lane: string;
+  lane_kind: "pool" | "agent" | "write_scope";
+  ready_count: number;
+  admitting_count: number;
+  stuck_reason: string | null;
+  stuck_count: number;
+  block_reason_counts: Record<string, number>;
+  ready_item_ids: string[];
+  admitting_item_ids: string[];
+}
+
+export interface AdmissionBreakdownExplanation {
+  generated_at: string;
+  ready_count: number;
+  admitting_count: number;
+  lanes: AdmissionBreakdownLane[];
+}
+
+export type ReadyAdmissionBlockerCategory =
+  | "usage_gate"
+  | "capacity_gate"
+  | "lane_eligibility"
+  | "runtime_unavailable"
+  | "dispatch_admission"
+  | "route_sync"
+  | "stale_ready_floor";
 
 export interface AutoPromoteHealth {
   enabled: boolean;
@@ -184,9 +252,20 @@ export interface AutoPromoteHealth {
   skipped_count: number;
   skipped_items: Array<{ item_id: string; reasons: string[] }>;
   top_skip_reasons: Array<{ reason: string; count: number }>;
+  blocker_counts: Record<AutoPromoteBlockerClass, number>;
+  blocker_classes: Array<{ blocker_class: AutoPromoteBlockerClass; count: number }>;
+  next_action: string;
   ready_runtime_repairs: ReadyRuntimeRepair[];
   summary: string;
 }
+
+type AutoPromoteBlockerClass =
+  | "already_dispatched"
+  | "review_held_risk"
+  | "blocked_dependencies"
+  | "confidence_threshold"
+  | "incomplete_flesh"
+  | "other";
 
 /** Outcome of one floor-triggered auto-promote pass. */
 export interface AutoPromoteRunSummary {
@@ -205,6 +284,323 @@ export interface AutoPromoteRunSummary {
   /** Build-ready total/lanes before the pass. */
   before: { build_ready: number; build_lanes: number };
   dry_run: boolean;
+}
+
+function readyAdmissionBlockerCategory(code: string): ReadyAdmissionBlockerCategory {
+  switch (code) {
+    case "daily_token_ceiling":
+      return "usage_gate";
+    case "no_in_flight_slots":
+    case "tick_admission_cap":
+    case "pool_capacity_full":
+    case "no_free_pool_builder":
+      return "capacity_gate";
+    case "risk_requires_approval":
+    case "blocked_dependency":
+    case "single_writer_lane_busy":
+      return "lane_eligibility";
+    case "target_unhealthy":
+    case "provider_runtime_mismatch":
+      return "runtime_unavailable";
+    case "missing_dispatch_target":
+      return "dispatch_admission";
+    case "clarification_blocker":
+    case "promotion_blocker":
+      return "route_sync";
+    default:
+      return "stale_ready_floor";
+  }
+}
+
+function readyAdmissionBlockerCounts(plan: { skipped: DecisionRecord[] }): ReadyAdmissionExplanation["blocker_counts"] {
+  const counts = new Map<string, ReadyAdmissionExplanation["blocker_counts"][number]>();
+  for (const decision of plan.skipped) {
+    const code = typeof decision.metadata?.code === "string" ? decision.metadata.code : "unknown";
+    const category = readyAdmissionBlockerCategory(code);
+    const key = `${category}:${code}`;
+    const existing = counts.get(key);
+    if (existing) existing.count += 1;
+    else counts.set(key, { code, category, ...readyAdmissionBlockerDetails(code), reason_code: code, count: 1 });
+  }
+  return [...counts.values()].sort((a, b) => b.count - a.count || a.category.localeCompare(b.category) || a.code.localeCompare(b.code));
+}
+
+function readyAdmissionBlockerDetails(code: string): {
+  owner: string;
+  reason_text: string;
+  next_action: string;
+} {
+  switch (code) {
+    case "daily_token_ceiling":
+      return {
+        owner: "operator",
+        reason_text: "Usage gate is blocking new admission.",
+        next_action: "Raise the budget, wait for reset, or switch the usage gate to warning mode.",
+      };
+    case "no_in_flight_slots":
+    case "tick_admission_cap":
+    case "pool_capacity_full":
+    case "no_free_pool_builder":
+      return {
+        owner: "scheduler",
+        reason_text: "Scheduler or build-pool capacity is saturated.",
+        next_action: "Do not refuel; wait for in-flight work or builder capacity to free.",
+      };
+    case "risk_requires_approval":
+      return {
+        owner: "operator",
+        reason_text: "Ready item has a risk class that is not eligible for unattended admission.",
+        next_action: "Approve, downgrade, or batch the item before dispatch.",
+      };
+    case "blocked_dependency":
+      return {
+        owner: "dependency_owner",
+        reason_text: "Ready item depends on work that has not landed.",
+        next_action: "Complete or clear the blocking dependency before admitting this item.",
+      };
+    case "single_writer_lane_busy":
+      return {
+        owner: "scheduler",
+        reason_text: "A write scope for this ready item is already locked.",
+        next_action: "Wait for the active writer to finish or split the write scope.",
+      };
+    case "target_unhealthy":
+      return {
+        owner: "runtime_owner",
+        reason_text: "Target agent is not currently healthy for admission.",
+        next_action: "Recover the target agent or reroute the item to a healthy lane.",
+      };
+    case "provider_runtime_mismatch":
+      return {
+        owner: "route_owner",
+        reason_text: "Requested provider/runtime does not match the target lane.",
+        next_action: "Repair the ready row runtime metadata or choose a matching target agent.",
+      };
+    case "missing_dispatch_target":
+      return {
+        owner: "orchestration_flesher",
+        reason_text: "Ready item is missing a target agent or dispatch body.",
+        next_action: "Fill to_agent and dispatch_body, then re-run admission.",
+      };
+    case "clarification_blocker":
+      return {
+        owner: "operator",
+        reason_text: "A dependency dispatch is waiting on clarification.",
+        next_action: "Answer the clarification or mark the dispatch moot.",
+      };
+    case "promotion_blocker":
+      return {
+        owner: "build_owner",
+        reason_text: "A dependency dispatch has not completed required promotion.",
+        next_action: "Promote the dependency branch or record an explicit promotion skip.",
+      };
+    default:
+      return {
+        owner: "scheduler",
+        reason_text: `Ready item is blocked by ${code}.`,
+        next_action: "Inspect the matching non-admission records and clear the leading blocker.",
+      };
+  }
+}
+
+function readyAdmissionBlockReasonCounts(
+  blockerCounts: ReadyAdmissionExplanation["blocker_counts"],
+): ReadyAdmissionExplanation["block_reason_counts"] {
+  return Object.fromEntries(blockerCounts.map((row) => [row.code, row.count]));
+}
+
+function readyAdmissionTopBlockingLanes(
+  skipped: DecisionRecord[],
+): ReadyAdmissionExplanation["top_blocking_lanes"] {
+  const counts = new Map<string, { lane: string; code: string; count: number; item_ids: string[] }>();
+  for (const decision of skipped) {
+    const code = typeof decision.metadata?.code === "string" ? decision.metadata.code : "unknown";
+    const lane =
+      typeof decision.metadata?.write_scope === "string" ? decision.metadata.write_scope :
+      typeof decision.metadata?.pool_id === "string" ? decision.metadata.pool_id :
+      typeof decision.metadata?.target === "string" ? decision.metadata.target :
+      "unknown";
+    if (lane === "unknown" && code !== "single_writer_lane_busy" && code !== "pool_capacity_full" && code !== "no_free_pool_builder") {
+      continue;
+    }
+    const key = `${code}:${lane}`;
+    const current = counts.get(key) ?? { lane, code, count: 0, item_ids: [] };
+    current.count += 1;
+    if (decision.item_id && current.item_ids.length < 5) current.item_ids.push(decision.item_id);
+    counts.set(key, current);
+  }
+  return [...counts.values()]
+    .sort((a, b) => b.count - a.count || a.code.localeCompare(b.code) || a.lane.localeCompare(b.lane))
+    .slice(0, 5)
+    .map((row) => ({
+      ...row,
+      next_action: readyAdmissionBlockerDetails(row.code).next_action,
+    }));
+}
+
+function summarizeReadyFloorStatus(args: {
+  ready: number;
+  admissible: number;
+  minReadyFuel: number;
+  blockerCounts: ReadyAdmissionExplanation["blocker_counts"];
+}): ReadyAdmissionExplanation["stale_ready_floor"] {
+  const stale = args.ready >= args.minReadyFuel && args.admissible < args.minReadyFuel && args.blockerCounts.length > 0;
+  const capacityBlocked = args.blockerCounts
+    .filter((row) => row.category === "capacity_gate")
+    .reduce((sum, row) => sum + row.count, 0);
+  const mostlyCapacity = stale && capacityBlocked > 0 && capacityBlocked >= args.ready - args.admissible;
+
+  if (mostlyCapacity) {
+    return {
+      stale,
+      status: "capacity_saturated",
+      ready: args.ready,
+      admissible: args.admissible,
+      min_ready_fuel: args.minReadyFuel,
+      reason:
+        `raw READY floor is satisfied (${args.ready}) but only ${args.admissible} item(s) are admissible ` +
+        "because scheduler capacity is saturated",
+      summary: `capacity saturated: raw READY=${args.ready}, admissible=${args.admissible}, floor=${args.minReadyFuel}`,
+      next_action: "Do not refuel. Wait for in-flight work or pool capacity to free, then re-check admission.",
+    };
+  }
+
+  if (stale) {
+    const topBlocker = args.blockerCounts[0];
+    const lockOnly = args.blockerCounts.length === 1 && topBlocker?.code === "single_writer_lane_busy";
+    return {
+      stale,
+      status: "blocked_ready_fuel",
+      ready: args.ready,
+      admissible: args.admissible,
+      min_ready_fuel: args.minReadyFuel,
+      reason: `raw READY floor is satisfied (${args.ready}) but only ${args.admissible} item(s) are admissible`,
+      summary: `ready fuel blocked: raw READY=${args.ready}, admissible=${args.admissible}, floor=${args.minReadyFuel}`,
+      next_action: lockOnly
+        ? "Wait for the active writer locks to clear or widen/split the blocking write-scope lanes."
+        : "Clear the leading ready-admission blockers before adding more fuel.",
+    };
+  }
+
+  if (args.ready < args.minReadyFuel) {
+    return {
+      stale: false,
+      status: "low_ready_fuel",
+      ready: args.ready,
+      admissible: args.admissible,
+      min_ready_fuel: args.minReadyFuel,
+      reason: null,
+      summary: `low ready fuel: raw READY=${args.ready}, floor=${args.minReadyFuel}`,
+      next_action: "Refuel or promote eligible review fuel if the daemon is not already doing so.",
+    };
+  }
+
+  return {
+    stale: false,
+    status: "ok",
+    ready: args.ready,
+    admissible: args.admissible,
+    min_ready_fuel: args.minReadyFuel,
+    reason: null,
+    summary: `ready fuel ok: raw READY=${args.ready}, admissible=${args.admissible}, floor=${args.minReadyFuel}`,
+    next_action: "No ready-fuel action needed.",
+  };
+}
+
+function laneForAdmissionBreakdown(
+  item: BacklogItem,
+  poolFor?: ((item: BacklogItem) => string | null) | undefined,
+): Pick<AdmissionBreakdownLane, "lane" | "lane_kind"> {
+  const pool = poolFor?.(item) ?? null;
+  if (pool) return { lane: pool, lane_kind: "pool" };
+  if (item.to_agent) return { lane: item.to_agent, lane_kind: "agent" };
+  return { lane: laneKeyOf(item), lane_kind: "write_scope" };
+}
+
+function emptyAdmissionBreakdownLane(
+  lane: string,
+  lane_kind: AdmissionBreakdownLane["lane_kind"],
+): AdmissionBreakdownLane {
+  return {
+    lane,
+    lane_kind,
+    ready_count: 0,
+    admitting_count: 0,
+    stuck_reason: null,
+    stuck_count: 0,
+    block_reason_counts: {},
+    ready_item_ids: [],
+    admitting_item_ids: [],
+  };
+}
+
+export function buildAdmissionBreakdown(input: {
+  ready: BacklogItem[];
+  admitting: BacklogItem[];
+  plan: AdmissionPlan;
+  pool_for?: (item: BacklogItem) => string | null;
+  generated_at?: string;
+}): AdmissionBreakdownExplanation {
+  const lanes = new Map<string, AdmissionBreakdownLane>();
+  const laneFor = (item: BacklogItem): AdmissionBreakdownLane => {
+    const key = laneForAdmissionBreakdown(item, input.pool_for);
+    const existing = lanes.get(key.lane);
+    if (existing) return existing;
+    const created = emptyAdmissionBreakdownLane(key.lane, key.lane_kind);
+    lanes.set(key.lane, created);
+    return created;
+  };
+
+  for (const item of input.ready) {
+    const lane = laneFor(item);
+    lane.ready_count += 1;
+    lane.ready_item_ids.push(item.item_id);
+  }
+  for (const item of input.admitting) {
+    const lane = laneFor(item);
+    lane.admitting_count += 1;
+    lane.admitting_item_ids.push(item.item_id);
+  }
+
+  if (input.plan.halt) {
+    for (const lane of lanes.values()) {
+      if (lane.ready_count > 0) {
+        lane.stuck_reason = input.plan.halt.reason;
+        lane.stuck_count = lane.ready_count;
+      }
+    }
+  }
+
+  const readyById = new Map(input.ready.map((item) => [item.item_id, item]));
+  for (const decision of input.plan.skipped) {
+    if (!decision.item_id) continue;
+    const item = readyById.get(decision.item_id);
+    if (!item) continue;
+    const lane = laneFor(item);
+    const code = typeof decision.metadata?.code === "string" ? decision.metadata.code : "unknown";
+    lane.block_reason_counts[code] = (lane.block_reason_counts[code] ?? 0) + 1;
+    lane.stuck_count += 1;
+  }
+
+  for (const lane of lanes.values()) {
+    if (!lane.stuck_reason) {
+      const top = Object.entries(lane.block_reason_counts)
+        .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))[0];
+      lane.stuck_reason = top?.[0] ?? null;
+    }
+    lane.ready_item_ids.sort();
+    lane.admitting_item_ids.sort();
+  }
+
+  return {
+    generated_at: input.generated_at ?? new Date().toISOString(),
+    ready_count: input.ready.length,
+    admitting_count: input.admitting.length,
+    lanes: [...lanes.values()].sort((a, b) => {
+      const severity = Number(b.ready_count > 0 && b.stuck_count > 0) - Number(a.ready_count > 0 && a.stuck_count > 0);
+      return severity || b.ready_count - a.ready_count || b.admitting_count - a.admitting_count || a.lane.localeCompare(b.lane);
+    }),
+  };
 }
 
 export class ContinuousOrchestrationDaemon {
@@ -494,10 +890,11 @@ export class ContinuousOrchestrationDaemon {
       );
     }
 
-    if (shouldRunZeroAdmitStallWatchdog(stall.zero_ticks, ready.length, config)) {
+    const admissibleReady = plan.admit.length;
+    if (shouldRunZeroAdmitStallWatchdog(stall.zero_ticks, admissibleReady, config)) {
       const message =
         `Continuous orchestration zero-admit stall: ${stall.zero_ticks} consecutive zero-admit ticks, ` +
-        `${ready.length} ready item(s), min_ready_fuel=${config.min_ready_fuel}`;
+        `${ready.length} ready item(s), ${admissibleReady} admissible, min_ready_fuel=${config.min_ready_fuel}`;
       decisions.push({
         item_id: null,
         action: "fleet_blockage",
@@ -506,6 +903,7 @@ export class ContinuousOrchestrationDaemon {
           event_type: "fleet.blockage",
           zero_ticks: stall.zero_ticks,
           ready: ready.length,
+          admissible_ready: admissibleReady,
           min_ready_fuel: config.min_ready_fuel,
         },
       });
@@ -513,6 +911,7 @@ export class ContinuousOrchestrationDaemon {
         tick_id,
         zero_ticks: stall.zero_ticks,
         ready: ready.length,
+        admissible_ready: admissibleReady,
         min_ready_fuel: config.min_ready_fuel,
         candidates: ordered.length,
       });
@@ -623,8 +1022,12 @@ export class ContinuousOrchestrationDaemon {
 
     const plan = planAdmission(ordered, ctx, config);
     const byId = new Map(ordered.map((item) => [item.item_id, item]));
+    const blockerCounts = readyAdmissionBlockerCounts(plan);
     return {
       candidates: ordered.length,
+      raw_ready: ordered.length,
+      useful_ready: plan.admit.length,
+      admissible_now: plan.admit.length,
       admissible: plan.admit.map((item) => ({
         item_id: item.item_id,
         title: item.title,
@@ -644,9 +1047,77 @@ export class ContinuousOrchestrationDaemon {
           metadata: decision.metadata,
         };
       }),
+      blocker_counts: blockerCounts,
+      top_blocking_lanes: readyAdmissionTopBlockingLanes(plan.skipped),
+      block_reason_counts: readyAdmissionBlockReasonCounts(blockerCounts),
+      stale_ready_floor: summarizeReadyFloorStatus({
+        ready: ordered.length,
+        admissible: plan.admit.length,
+        minReadyFuel: config.min_ready_fuel,
+        blockerCounts,
+      }),
       halted: plan.halt?.reason ?? null,
       ready_runtime_repairs: readyRuntimeRepairs,
     };
+  }
+
+  async explainAdmissionBreakdown(): Promise<AdmissionBreakdownExplanation> {
+    const config = this.deps.config;
+    const nowMs = this.now();
+    const generatedAt = new Date(nowMs).toISOString();
+    const state = await getOrchestrationState(this.deps.adapter, this.teamId);
+    const killSwitch = this.killSwitchActive();
+    const { view: usage, daily_tokens_used } = await this.deps.readUsage();
+    const { count: in_flight, active_write_scopes } = await this.deps.readInFlight();
+    await repairReadyCodexRuntimeMetadata(this.deps.adapter, this.teamId);
+    const [ready, admitting, done_item_ids] = await Promise.all([
+      listReadyItems(this.deps.adapter, this.teamId),
+      listBacklogByState(this.deps.adapter, { team_id: this.teamId, state: "in_flight" }),
+      listDoneItemIds(this.deps.adapter, this.teamId),
+    ]);
+    const ordered = fairInterleaveByLane(orderCandidates(ready));
+    const poolGate = await this.buildPoolGate(ordered);
+
+    const candidateAgentNames = new Set<string>();
+    for (const item of ordered) if (item.to_agent) candidateAgentNames.add(item.to_agent);
+    if (poolGate) for (const builders of poolGate.pool_free_builders.values()) for (const b of builders) candidateAgentNames.add(b);
+    const healthy_agents = this.deps.resolveAgentHealth
+      ? await this.deps.resolveAgentHealth([...candidateAgentNames])
+      : undefined;
+    const target_agent_runtimes = this.deps.resolveAgentRuntimes
+      ? await this.deps.resolveAgentRuntimes([...candidateAgentNames])
+      : undefined;
+    const ready_item_blockers = await this.readyItemBlockers();
+
+    const writeCfg = {
+      maxEnqueuesPerTick: config.max_enqueues_per_tick,
+      maxFleshPerTick: config.max_flesh_per_tick,
+      maxNewPerTick: config.max_new_per_tick,
+    };
+    const ctx: AdmissionContext = {
+      mode: state.mode,
+      kill_switch_active: killSwitch,
+      usage,
+      daily_tokens_used,
+      in_flight,
+      active_write_scopes,
+      done_item_ids,
+      admit_limit: Math.min(tickAdmitLimit(nowMs, config), tickWriteCaps(writeCfg, 0).admitCap),
+      pool_for: poolGate?.pool_for,
+      pool_free_slots: poolGate?.pool_free_slots,
+      pool_free_builders: poolGate?.pool_free_builders,
+      healthy_agents,
+      target_agent_runtimes,
+      ready_item_blockers,
+    };
+
+    return buildAdmissionBreakdown({
+      ready: ordered,
+      admitting,
+      plan: planAdmission(ordered, ctx, config),
+      pool_for: poolGate?.pool_for,
+      generated_at: generatedAt,
+    });
   }
 
   async explainAutoPromoteHealth(): Promise<AutoPromoteHealth> {
@@ -660,10 +1131,12 @@ export class ContinuousOrchestrationDaemon {
       listReadyItems(this.deps.adapter, this.teamId),
       listBacklogByState(this.deps.adapter, { team_id: this.teamId, state: "needs_review" }),
     ]);
+    const floor = effectiveAutoPromoteFloor(config);
     const plan = selectAutoPromotions(needsReview, ready, {
-      floor: config.auto_promote_floor,
+      floor,
       minLanes: config.auto_promote_min_lanes,
       maxPerPass: config.auto_promote_max_per_tick,
+      allowApprovedRetries: true,
     });
     const readyLaneKeys = [...new Set(ready.filter((item) => item.risk_class === "build").map(laneKeyOf))].sort();
     const candidateLaneKeys = [...new Set(needsReview.map(laneKeyOf))].sort();
@@ -674,7 +1147,7 @@ export class ContinuousOrchestrationDaemon {
       killSwitch ? "kill_switch_active" :
       usage.hard_paused ? "usage_hard_paused" :
       null;
-    const belowFloor = plan.before.build_ready < config.auto_promote_floor;
+    const belowFloor = plan.before.build_ready < floor;
     const belowLanes = plan.before.build_lanes < config.auto_promote_min_lanes;
     const skippedItems = plan.skipped;
     const promotedItems = plan.promote.map((item) => ({
@@ -683,29 +1156,40 @@ export class ContinuousOrchestrationDaemon {
       lane: laneKeyOf(item),
     }));
     const topSkipReasons = topSkipReasonsFrom(skippedItems);
+    const blockerCounts = blockerCountsFrom(skippedItems);
+    const blockerClasses = blockerClassesFrom(blockerCounts);
     const promotedCount = blockedReason ? 0 : plan.promote.length;
     const triggered = blockedReason ? false : plan.triggered;
     const candidatesConsidered = triggered ? plan.candidates_considered : 0;
+    const nextAction = nextAutoPromoteAction({
+      blockedReason,
+      triggered,
+      candidates: candidatesConsidered,
+      promoted: promotedCount,
+      blockerCounts,
+    });
     const summary = summarizeAutoPromoteHealth({
       blockedReason,
       belowFloor,
       belowLanes,
       triggered,
       ready: plan.before.build_ready,
-      floor: config.auto_promote_floor,
+      floor,
       lanes: plan.before.build_lanes,
       minLanes: config.auto_promote_min_lanes,
       candidates: candidatesConsidered,
       promoted: promotedCount,
       skipped: triggered ? skippedItems.length : 0,
       topReason: topSkipReasons[0]?.reason ?? null,
+      blockerCounts,
+      nextAction,
     });
 
     return {
       enabled: config.auto_flesh_enabled && config.auto_promote_enabled,
       blocked_reason: blockedReason,
       min_ready_fuel: config.min_ready_fuel,
-      floor: config.auto_promote_floor,
+      floor,
       min_ready_lanes: config.auto_promote_min_lanes,
       lanes: {
         build_ready: plan.before.build_ready,
@@ -732,6 +1216,9 @@ export class ContinuousOrchestrationDaemon {
       skipped_count: triggered ? skippedItems.length : 0,
       skipped_items: triggered ? skippedItems : [],
       top_skip_reasons: triggered ? topSkipReasons : [],
+      blocker_counts: triggered ? blockerCounts : emptyAutoPromoteBlockerCounts(),
+      blocker_classes: triggered ? blockerClasses : [],
+      next_action: nextAction,
       ready_runtime_repairs: readyRuntimeRepairs,
       summary,
     };
@@ -1025,10 +1512,12 @@ export class ContinuousOrchestrationDaemon {
         listReadyItems(this.deps.adapter, this.teamId),
         listBacklogByState(this.deps.adapter, { team_id: this.teamId, state: "needs_review" }),
       ]);
+      const floor = effectiveAutoPromoteFloor(config);
       const plan = selectAutoPromotions(needsReview, ready, {
-        floor: config.auto_promote_floor,
+        floor,
         minLanes: config.auto_promote_min_lanes,
         maxPerPass: config.auto_promote_max_per_tick,
+        allowApprovedRetries: true,
       });
       if (!plan.triggered) return null;
 
@@ -1132,6 +1621,92 @@ function topSkipReasonsFrom(
     .slice(0, 5);
 }
 
+function emptyAutoPromoteBlockerCounts(): Record<AutoPromoteBlockerClass, number> {
+  return {
+    already_dispatched: 0,
+    review_held_risk: 0,
+    blocked_dependencies: 0,
+    confidence_threshold: 0,
+    incomplete_flesh: 0,
+    other: 0,
+  };
+}
+
+function classifyAutoPromoteReason(reason: string): AutoPromoteBlockerClass {
+  if (reason.startsWith("already dispatched once")) return "already_dispatched";
+  if (reason.startsWith("risk_class ") || reason.startsWith("high-risk denylist match")) return "review_held_risk";
+  if (reason.startsWith("blocked dependencies:")) return "blocked_dependencies";
+  if (
+    reason.startsWith("no flesh_confidence") ||
+    reason.startsWith("confidence ")
+  ) {
+    return "confidence_threshold";
+  }
+  if (
+    reason.startsWith("missing to_agent or dispatch_body") ||
+    reason.startsWith("empty write_scope")
+  ) {
+    return "incomplete_flesh";
+  }
+  return "other";
+}
+
+function blockerCountsFrom(
+  skipped: Array<{ reasons: string[] }>,
+): Record<AutoPromoteBlockerClass, number> {
+  const counts = emptyAutoPromoteBlockerCounts();
+  for (const item of skipped) {
+    const classes = new Set(item.reasons.map(classifyAutoPromoteReason));
+    for (const cls of classes) counts[cls] += 1;
+  }
+  return counts;
+}
+
+function blockerClassesFrom(
+  counts: Record<AutoPromoteBlockerClass, number>,
+): Array<{ blocker_class: AutoPromoteBlockerClass; count: number }> {
+  return (Object.entries(counts) as Array<[AutoPromoteBlockerClass, number]>)
+    .filter(([, count]) => count > 0)
+    .map(([blocker_class, count]) => ({ blocker_class, count }))
+    .sort((a, b) => b.count - a.count || a.blocker_class.localeCompare(b.blocker_class));
+}
+
+function formatBlockerCounts(counts: Record<AutoPromoteBlockerClass, number>): string {
+  const classes = blockerClassesFrom(counts);
+  if (classes.length === 0) return "none";
+  return classes.map((c) => `${c.blocker_class}=${c.count}`).join(", ");
+}
+
+function nextAutoPromoteAction(args: {
+  blockedReason: string | null;
+  triggered: boolean;
+  candidates: number;
+  promoted: number;
+  blockerCounts: Record<AutoPromoteBlockerClass, number>;
+}): string {
+  if (args.blockedReason) return `Clear auto-promote blocker: ${args.blockedReason}.`;
+  if (!args.triggered) return "No refuel action needed; ready build fuel already meets the configured floor and lane target.";
+  if (args.promoted > 0) return "Let the daemon promote eligible review fuel, then re-check ready admission.";
+  if (args.candidates === 0) return "Refuel by adding or fleshing needs_review build rows for the target lanes.";
+
+  const ranked = blockerClassesFrom(args.blockerCounts);
+  const top = ranked[0]?.blocker_class ?? "other";
+  switch (top) {
+    case "already_dispatched":
+      return "Manually review already-dispatched needs_review rows and /promote only the ones safe to retry.";
+    case "review_held_risk":
+      return "Approve or reroute review-held risk rows manually; auto-promote only handles build-risk work.";
+    case "blocked_dependencies":
+      return "Complete or clear blocked dependency item_ids before expecting auto-promote to refill ready fuel.";
+    case "confidence_threshold":
+      return "Run another flesh pass, improve the dispatch patch confidence, or explicitly approve safe rows.";
+    case "incomplete_flesh":
+      return "Flesh incomplete rows so they have to_agent, dispatch_body, and write_scope before promotion.";
+    case "other":
+      return "Inspect skipped_items/top_skip_reasons, then manually approve or repair the leading blocker.";
+  }
+}
+
 function summarizeAutoPromoteHealth(args: {
   blockedReason: string | null;
   belowFloor: boolean;
@@ -1145,6 +1720,8 @@ function summarizeAutoPromoteHealth(args: {
   promoted: number;
   skipped: number;
   topReason: string | null;
+  blockerCounts: Record<AutoPromoteBlockerClass, number>;
+  nextAction: string;
 }): string {
   if (args.blockedReason) return `auto-promote blocked: ${args.blockedReason}`;
   if (!args.belowFloor && !args.belowLanes) {
@@ -1156,5 +1733,9 @@ function summarizeAutoPromoteHealth(args: {
   if (args.promoted > 0) {
     return `ready build fuel below floor: ready=${args.ready} floor=${args.floor}, lanes=${args.lanes}/${args.minLanes}; would promote ${args.promoted}, skipped ${args.skipped}`;
   }
-  return `ready build fuel below floor: ready=${args.ready} floor=${args.floor}, lanes=${args.lanes}/${args.minLanes}; promoted 0 of ${args.candidates}, top skip reason: ${args.topReason ?? "none"}`;
+  return (
+    `ready build fuel below floor: ready=${args.ready} floor=${args.floor}, lanes=${args.lanes}/${args.minLanes}; ` +
+    `promoted 0 of ${args.candidates}; blockers: ${formatBlockerCounts(args.blockerCounts)}; ` +
+    `top skip reason: ${args.topReason ?? "none"}; next: ${args.nextAction}`
+  );
 }

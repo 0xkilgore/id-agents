@@ -49,7 +49,31 @@ On **pass**: the current `build_sha` is recorded as the last-good build at
 
 On **fail**: prints the smoke failures + the rollback decision. Exit 1.
 
-## 3. Auto-rollback (T-DEPLOY.5)
+## 3. External freshness watchdog (T-DEPLOY.5)
+
+`scripts/deploy-freshness-watchdog.mjs` is a launchd-managed process outside
+the agent fleet. It checks `/health` every 15 minutes and runs the manager
+redeploy sequence when either:
+
+- `freshness.state` is `stale` or `stale_alerted` for 2 consecutive checks.
+- the dedicated deploy checkout is missing.
+- the manager launchd plist no longer points at the dedicated deploy checkout.
+- `/health` is unreadable immediately after a prior watchdog action.
+
+Redeploys use `/Users/kilgore/Dropbox/Code/cane/id-agents-deploy-main`, a clean
+`origin/main` checkout, and leave the primary developer checkout untouched. If
+closeout still classifies stale, the watchdog writes a failure artifact and
+posts the exact manual command:
+
+```bash
+/Users/kilgore/Dropbox/Code/cane/scripts/manager-promote-rebuild-restart.sh && curl -sS http://localhost:4100/health
+```
+
+Use `touch /tmp/deploy-watchdog.pause` as the kill switch while investigating.
+Logs are in `/tmp/deploy-watchdog.log` and launchd output is in
+`/tmp/deploy-watchdog.launchd.log`.
+
+## 4. Auto-rollback (T-DEPLOY.5)
 
 On a failing smoke, `decideRollback` picks the **last-good SHA** as the target.
 With `--auto-rollback --execute`, the CLI performs:

@@ -30,6 +30,11 @@ import {
 } from "./retry-policy.js";
 import type { DispatchDoc, Provider, Runtime } from "./types.js";
 import type { ModelPolicyResolver } from "../model-policy/types.js";
+import type {
+  NotificationClassification,
+  NotificationReason,
+  NotificationReactorEventInput,
+} from "../notifications/reactor.js";
 
 export type AgentTransportResult =
   | { ok: true; agent_query_id: string }
@@ -145,6 +150,9 @@ export interface SchedulerServiceOptions {
    * Omitted → same-lane retry (pre-fallback behavior, unchanged).
    */
   modelPolicy?: ModelPolicyResolver;
+  /** Optional durable notification handoff; failures are logged and never break scheduler progress. */
+  notificationSink?: SchedulerNotificationSink;
+  notificationTeamId?: string;
 }
 
 export interface TickReport {
@@ -185,6 +193,10 @@ export interface SchedulerLogger {
   error(event: string, payload: Record<string, unknown>): void;
 }
 
+export interface SchedulerNotificationSink {
+  notify(event: NotificationReactorEventInput): Promise<void> | void;
+}
+
 const NULL_LOGGER: SchedulerLogger = {
   info: () => undefined,
   warn: () => undefined,
@@ -205,6 +217,8 @@ export class SchedulerService {
   private admissionGateProvider?: AdmissionGateProvider;
   private queryEvidence?: QueryEvidenceClient;
   private modelPolicy?: ModelPolicyResolver;
+  private notificationSink?: SchedulerNotificationSink;
+  private notificationTeamId: string;
 
   constructor(opts: SchedulerServiceOptions) {
     this.client = opts.client;
@@ -223,6 +237,8 @@ export class SchedulerService {
     this.admissionGateProvider = opts.admissionGateProvider;
     this.queryEvidence = opts.queryEvidence;
     this.modelPolicy = opts.modelPolicy;
+    this.notificationSink = opts.notificationSink;
+    this.notificationTeamId = opts.notificationTeamId ?? "default";
   }
 
   setUsageGateProvider(p: UsageGateProvider | undefined): void {
@@ -525,6 +541,14 @@ export class SchedulerService {
         });
         if (b.ok) {
           report.bounced += 1;
+          await this.notifyDispatch(b.value, {
+            reason: classified.kind === "provider_throttle" ? "provider_rate_exhausted" : "target_unavailable",
+            classification: "retryable",
+            safe_message:
+              classified.kind === "provider_throttle"
+                ? `Provider capacity throttled dispatch ${doc.dispatch_phid}; retry is backed off.`
+                : `Target ${doc.to_agent} was unavailable for dispatch ${doc.dispatch_phid}; retry is backed off.`,
+          });
           this.logger.warn("scheduler_bounced", {
             phid: doc.dispatch_phid,
             attempt: doc.attempt_count,
@@ -551,6 +575,14 @@ export class SchedulerService {
         );
         if (ex.ok) {
           report.failed += 1;
+          await this.notifyDispatch(ex.value, {
+            reason: classified.kind === "provider_throttle" ? "provider_rate_exhausted" : "target_unavailable",
+            classification: "terminal",
+            safe_message:
+              classified.kind === "provider_throttle"
+                ? `Provider capacity retries are exhausted for dispatch ${doc.dispatch_phid}.`
+                : `Target ${doc.to_agent} remained unavailable after retries for dispatch ${doc.dispatch_phid}.`,
+          });
           this.logger.warn("scheduler_retry_exhausted", {
             phid: doc.dispatch_phid,
             attempts: doc.attempt_count,
@@ -568,6 +600,11 @@ export class SchedulerService {
       });
       if (t.ok) {
         report.failed += 1;
+        await this.notifyDispatch(t.value, {
+          reason: "route_failure",
+          classification: "terminal",
+          safe_message: `Dispatch ${doc.dispatch_phid} cannot be routed without operator action.`,
+        });
         this.logger.warn("scheduler_failed_terminal", {
           phid: doc.dispatch_phid,
           kind: classified.kind,
@@ -585,6 +622,11 @@ export class SchedulerService {
     });
     if (f.ok) {
       report.failed += 1;
+      await this.notifyDispatch(f.value, {
+        reason: "route_failure",
+        classification: "terminal",
+        safe_message: `Dispatch ${doc.dispatch_phid} failed before agent handoff.`,
+      });
       this.logger.warn("scheduler_failed", {
         phid: doc.dispatch_phid,
         kind: classified.kind,
@@ -614,6 +656,11 @@ export class SchedulerService {
           `bounce_count=${doc.bounce_count} attempts=${doc.attempt_count}`,
         );
         if (ex.ok) {
+          await this.notifyDispatch(ex.value, {
+            reason: ex.value.failure_kind === "agent_unreachable_exhausted" ? "target_unavailable" : "provider_rate_exhausted",
+            classification: "terminal",
+            safe_message: `Dispatch ${doc.dispatch_phid} retry attempts are exhausted.`,
+          });
           this.logger.warn("scheduler_retry_exhausted_sweep", {
             phid: doc.dispatch_phid,
             attempts: doc.attempt_count,
@@ -660,6 +707,11 @@ export class SchedulerService {
       const r = await this.client.requeueAfterBounce(doc.dispatch_phid);
       if (r.ok) {
         reaped += 1;
+        await this.notifyDispatch(r.value, {
+          reason: "dispatch_expired",
+          classification: "retryable",
+          safe_message: `Dispatch ${doc.dispatch_phid} timed out before an agent query id was recorded; it was requeued.`,
+        });
         this.logger.warn("scheduler_wedged_reaped", {
           phid: doc.dispatch_phid,
           age_ms: age,
@@ -756,6 +808,11 @@ export class SchedulerService {
         });
         if (r.ok) {
           report.evidence_closed_failed += 1;
+          await this.notifyDispatch(r.value, {
+            reason: "route_failure",
+            classification: "terminal",
+            safe_message: `Dispatch ${doc.dispatch_phid} completed with incomplete waiting text and needs review.`,
+          });
           this.logger.warn("scheduler_evidence_completed_but_incomplete", {
             phid: doc.dispatch_phid,
             agent_query_id: doc.agent_query_id,
@@ -781,6 +838,11 @@ export class SchedulerService {
         });
         if (r.ok) {
           report.evidence_closed_failed += 1;
+          await this.notifyDispatch(r.value, {
+            reason: evidence.status === "expired" ? "dispatch_expired" : "route_failure",
+            classification: "terminal",
+            safe_message: `Linked query for dispatch ${doc.dispatch_phid} ended ${evidence.status}; dispatch needs review.`,
+          });
           this.logger.warn("scheduler_evidence_closed_failed", {
             phid: doc.dispatch_phid,
             agent_query_id: doc.agent_query_id,
@@ -801,6 +863,11 @@ export class SchedulerService {
           `silence ${silence}ms past threshold and attempts ${doc.attempt_count} exhausted`,
         );
         if (ex.ok) {
+          await this.notifyDispatch(ex.value, {
+            reason: "dispatch_expired",
+            classification: "terminal",
+            safe_message: `Dispatch ${doc.dispatch_phid} was silent past threshold and retry attempts are exhausted.`,
+          });
           this.logger.warn("scheduler_evidence_silence_exhausted", {
             phid: doc.dispatch_phid,
             silence_ms: silence,
@@ -828,6 +895,11 @@ export class SchedulerService {
       // bounce / requeue separation clean and consistent with the
       // existing provider-throttle path.
       report.evidence_silence_bounced += 1;
+      await this.notifyDispatch(b.value, {
+        reason: "dispatch_expired",
+        classification: "retryable",
+        safe_message: `Dispatch ${doc.dispatch_phid} was silent past threshold; retry is backed off.`,
+      });
       this.logger.warn("scheduler_evidence_silence_bounced", {
         phid: doc.dispatch_phid,
         agent_query_id: doc.agent_query_id,
@@ -889,6 +961,11 @@ export class SchedulerService {
       });
       if (r.ok) {
         failed += 1;
+        await this.notifyDispatch(r.value, {
+          reason: "dispatch_expired",
+          classification: "terminal",
+          safe_message: `Dispatch ${doc.dispatch_phid} had no progress before the stale in-flight timeout.`,
+        });
         this.logger.warn("scheduler_stale_in_flight_failed", {
           phid: doc.dispatch_phid,
           agent_query_id: doc.agent_query_id,
@@ -905,6 +982,38 @@ export class SchedulerService {
   private async countInFlight(provider: Provider = this.provider): Promise<number> {
     const r = await this.client.dispatchesInFlight({ provider });
     return r.ok ? r.value.length : 0;
+  }
+
+  private async notifyDispatch(
+    doc: DispatchDoc,
+    event: {
+      reason: NotificationReason;
+      classification: NotificationClassification;
+      safe_message: string;
+    },
+  ): Promise<void> {
+    if (!this.notificationSink) return;
+    try {
+      await this.notificationSink.notify({
+        team_id: this.notificationTeamId,
+        reason: event.reason,
+        classification: event.classification,
+        owner_route: doc.to_agent,
+        source: {
+          dispatch_id: doc.dispatch_phid,
+          query_id: doc.query_id,
+          artifact_id: doc.artifact_path,
+        },
+        occurred_at: this.now(),
+        safe_message: event.safe_message,
+      });
+    } catch (err) {
+      this.logger.warn("scheduler_notification_failed", {
+        phid: doc.dispatch_phid,
+        reason: event.reason,
+        detail: err instanceof Error ? err.message : String(err),
+      });
+    }
   }
 }
 

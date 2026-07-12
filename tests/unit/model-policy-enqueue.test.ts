@@ -87,7 +87,12 @@ async function enqueuedRuntime(handle: SchedulerHandle, input: Parameters<Schedu
   const { query_id } = await handle.enqueue(input);
   const r = await handle.client.getByQueryId(query_id);
   if (!r.ok) throw new Error("doc not found");
-  return { runtime: r.value.runtime, provider: r.value.provider };
+  return {
+    runtime: r.value.runtime,
+    provider: r.value.provider,
+    to_agent: r.value.to_agent,
+    logical_agent: r.value.logical_agent,
+  };
 }
 
 describe("model policy at enqueue", () => {
@@ -114,7 +119,7 @@ describe("model policy at enqueue", () => {
     expect(got.provider).toBe("cursor");
   });
 
-  it("registered target agent runtime is the source of truth for stored provider/runtime metadata", async () => {
+  it("registered target agent runtime is preserved as logical home metadata when execution runtime is pinned", async () => {
     await insertAgentRuntime("eames", "claude-code-cli");
     const handle = makeHandleWithAgents([]);
     const got = await enqueuedRuntime(handle, {
@@ -125,11 +130,17 @@ describe("model policy at enqueue", () => {
       runtime: "codex",
     });
 
-    expect(got.runtime).toBe("claude-code-cli");
-    expect(got.provider).toBe("anthropic");
+    expect(got.runtime).toBe("codex");
+    expect(got.provider).toBe("openai");
+    expect(got.logical_agent).toMatchObject({
+      logical_agent: "eames",
+      source_agent_name: "eames",
+      home_runtime: "claude-code-cli",
+      home_provider: "anthropic",
+    });
   });
 
-  it("Claude-constrained project agent dispatches to a live Codex executor lane", async () => {
+  it("Claude-constrained project agent remains addressable while dispatching through a live Codex executor lane", async () => {
     const fetchSpy = vi.spyOn(globalThis, "fetch") as ReturnType<typeof vi.spyOn>;
     fetchSpy.mockResolvedValueOnce(
       new Response(JSON.stringify({ query_id: "agent-q-codex" }), { status: 200 }) as unknown as Response,
@@ -145,6 +156,14 @@ describe("model policy at enqueue", () => {
     });
     expect(got.runtime).toBe("codex");
     expect(got.provider).toBe("openai");
+    expect(got.to_agent).toBe("finances");
+    expect(got.logical_agent).toMatchObject({
+      logical_agent: "finances",
+      display_name: "finances",
+      source_agent_name: "finances",
+      home_runtime: "claude-code-cli",
+      home_provider: "anthropic",
+    });
 
     await handle.tick();
     expect(fetchSpy).toHaveBeenCalledTimes(1);

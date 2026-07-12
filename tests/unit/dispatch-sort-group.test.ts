@@ -222,6 +222,60 @@ test("readDispatches surfaces fast empty success as needs_review", async () => {
   expect(rows[0].recovery_classification?.empty_success_candidate).toBe(true);
 });
 
+test("readDispatches preserves Maestra refuel closeout with explicit no-promotion evidence as clean done", async () => {
+  const rows = await readDispatches(
+    adapterWithRow({
+      dispatch_phid: "phid:disp-31c817c39c86cf2d",
+      to_agent: "maestra",
+      subject: "[project: kapelle][AUTONOMOUS project-load-loop - backlog ran low, refueling] Re",
+      status: "done",
+      not_before_at: "2026-07-12T14:28:33.526Z",
+      started_at: "2026-07-12T14:29:55.429Z",
+      completed_at: "2026-07-12T14:30:25.479Z",
+      updated_at: "2026-07-12T14:30:25.479Z",
+      result_json: null,
+      artifact_path: null,
+      promotion_result_json: JSON.stringify({
+        required: false,
+        completed: false,
+        reason: "Backlog-only orchestration dispatch; no repo branch/build metadata and no code promotion required.",
+      }),
+    }),
+    "t",
+    "all",
+    10,
+  );
+  expect(rows[0].effective_state).toBe("done");
+  expect(rows[0].needs_operator).toBe(false);
+  expect(rows[0].sort_group).toBe(4);
+  expect(rows[0].recovery_classification).toBeNull();
+});
+
+test("readDispatches keeps Maestra refuel closeout without evidence in needs_review", async () => {
+  const rows = await readDispatches(
+    adapterWithRow({
+      dispatch_phid: "phid:disp-d8a6eb6aca41f9e7",
+      to_agent: "maestra",
+      subject: "[project: kapelle][AUTONOMOUS project-load-loop - backlog ran low, refueling] Re",
+      status: "done",
+      not_before_at: "2026-07-11T21:43:08.828Z",
+      started_at: "2026-07-11T21:43:11.456Z",
+      completed_at: "2026-07-11T21:43:41.830Z",
+      updated_at: "2026-07-11T21:43:41.830Z",
+      result_json: null,
+      artifact_path: null,
+      promotion_result_json: null,
+    }),
+    "t",
+    "all",
+    10,
+  );
+  expect(rows[0].effective_state).toBe("needs_review");
+  expect(rows[0].needs_operator).toBe(true);
+  expect(rows[0].sort_group).toBe(0);
+  expect(rows[0].recovery_classification?.empty_success_candidate).toBe(true);
+});
+
 test("readDispatches preserves explicit skip closeouts as clean done", async () => {
   const rows = await readDispatches(
     adapterWithRow({

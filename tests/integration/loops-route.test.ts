@@ -198,6 +198,12 @@ describe('GET /loops registry routes', () => {
     expect(body.definitions.map((d: any) => d.report_key)).toContain('kapelle:product-overview-weekly');
     expect(body.definitions.map((d: any) => d.report_key)).toContain('kapelle:surface-feeder-6h');
     expect(body.definitions.map((d: any) => d.report_key)).toContain('kapelle:task-reconciliation-6h');
+    expect(body.definitions.find((d: any) => d.report_key === 'worktree-hygiene:guard')).toMatchObject({
+      owner_agent: 'maestra',
+      cadence: { kind: 'interval_hours', every_hours: 18 },
+      artifact_required: true,
+      closeout_required: true,
+    });
     expect(body.definitions.find((d: any) => d.report_key === 'kapelle:product-overview-weekly')).toMatchObject({
       owner_agent: 'maestra',
       artifact_required: true,

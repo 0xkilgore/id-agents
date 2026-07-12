@@ -16,6 +16,12 @@ export class PgCheckinsRepo implements CheckinsRepository {
   constructor(private readonly db: DbAdapter) {}
 
   async create(row: CheckinRow): Promise<void> {
+    if (row.owner_agent_id !== null) {
+      await this.assertSameTeamAgent(row.owner_agent_id, row.team_id, 'owner_agent_id');
+    }
+    if (row.created_by_agent_id !== null) {
+      await this.assertSameTeamAgent(row.created_by_agent_id, row.team_id, 'created_by_agent_id');
+    }
     if (row.linked_task_id !== null) {
       await this.assertSameTeamTask(row.linked_task_id, row.team_id);
     }
@@ -219,6 +225,21 @@ export class PgCheckinsRepo implements CheckinsRepository {
     if (rows[0].team_id !== teamId) {
       throw new Error(
         `linked_task_id "${taskId}" belongs to a different team (cross-team checkin links are not allowed)`,
+      );
+    }
+  }
+
+  private async assertSameTeamAgent(agentId: string, teamId: string, column: string): Promise<void> {
+    const { rows } = await this.db.query<{ team_id: string | null }>(
+      `SELECT team_id FROM agents WHERE id = $1 AND deleted_at IS NULL`,
+      [agentId],
+    );
+    if (rows.length === 0) {
+      throw new Error(`${column} "${agentId}" not found`);
+    }
+    if (rows[0].team_id !== teamId) {
+      throw new Error(
+        `${column} "${agentId}" belongs to a different team (cross-team checkin owners are not allowed)`,
       );
     }
   }

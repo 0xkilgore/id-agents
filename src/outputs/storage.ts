@@ -537,6 +537,7 @@ export async function registerArtifactPathDelivery(
     project_ref?: string | null;
     dispatch_ref?: string | null;
     source_host?: string | null;
+    source?: ArtifactCatalogRow["source"];
   },
   nowIso: string,
 ): Promise<{ row: ArtifactCatalogRow; inserted: boolean; body_cached: boolean; body_error: string | null }> {
@@ -583,7 +584,7 @@ export async function registerArtifactPathDelivery(
       abs_path: input.abs_path,
       title: input.title ?? undefined,
       produced_at: input.produced_at,
-      source: "agent-done",
+      source: input.source ?? "agent-done",
       availability,
       media_type: mediaType,
       content_hash: contentHash,
@@ -592,7 +593,7 @@ export async function registerArtifactPathDelivery(
       project_ref: input.project_ref ?? inferProjectRefFromPath(input.abs_path),
       dispatch_ref: input.dispatch_ref ?? null,
       source_host: input.source_host ?? hostname(),
-      source_badges: ["agent-done"],
+      source_badges: [input.source ?? "agent-done"],
     },
     nowIso,
   );
@@ -616,7 +617,7 @@ export async function registerArtifactPathDelivery(
     adapter,
     {
       artifact_id: artifactId,
-      source: "agent-done",
+      source: input.source ?? "agent-done",
       source_ref: input.dispatch_ref ?? input.abs_path,
       observed_at: nowIso,
       metadata_json: JSON.stringify({

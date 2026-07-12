@@ -11,10 +11,12 @@
 // Fast no-op (one probe) when already matching.
 
 import { execFileSync } from "node:child_process";
-import { dirname } from "node:path";
+import { dirname, join } from "node:path";
 import { managerNode } from "./native-node.mjs";
 
 const node = managerNode();
+const mode = process.argv[2] ?? "preflight";
+const npm = process.env.NPM_BIN || join(dirname(node), "npm");
 
 function nodeVersion(n) {
   try {
@@ -39,23 +41,23 @@ function loadsUnderManager() {
   }
 }
 
-if (loadsUnderManager()) {
+if (mode !== "rebuild-and-retry" && loadsUnderManager()) {
   console.log(`[ensure-native-abi] better-sqlite3 OK for manager node ${node} (${nodeVersion(node)})`);
   process.exit(0);
 }
 
 console.warn(
-  `[ensure-native-abi] better-sqlite3 not loadable under manager node ${node} (${nodeVersion(node)}) — rebuilding for its ABI…`,
+  `[ensure-native-abi] better-sqlite3 ${mode === "rebuild-and-retry" ? "rebuild requested after ERR_DLOPEN_FAILED" : "not loadable"} under manager node ${node} (${nodeVersion(node)}) — rebuilding for its ABI…`,
 );
 try {
   // Prepend the manager node's dir so `npm` + node-gyp resolve to it and compile
   // for ITS ABI, even though this script itself may run under the shell node.
-  execFileSync("npm", ["rebuild", "better-sqlite3"], {
+  execFileSync(npm, ["rebuild", "better-sqlite3"], {
     stdio: "inherit",
     env: { ...process.env, PATH: `${dirname(node)}:${process.env.PATH}` },
   });
 } catch (err) {
-  console.error(`[ensure-native-abi] npm rebuild better-sqlite3 failed: ${err?.message ?? err}`);
+  console.error(`[ensure-native-abi] ${npm} rebuild better-sqlite3 failed: ${err?.message ?? err}`);
   process.exit(1);
 }
 if (!loadsUnderManager()) {

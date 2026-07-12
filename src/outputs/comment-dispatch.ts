@@ -98,8 +98,12 @@ export function resolveArtifactCommentTargetAgent(
   const raw = catalog?.agent?.trim() || null;
   if (!raw) return { target_agent: null, target_agent_raw: raw };
   const projectMatch = raw.match(/^project:\s*(.+)$/i);
-  const target = (projectMatch?.[1] ?? raw).trim();
+  const target = canonicalizeTargetAgent((projectMatch?.[1] ?? raw).trim());
   return { target_agent: target || null, target_agent_raw: raw };
+}
+
+function canonicalizeTargetAgent(raw: string): string {
+  return raw.toLowerCase() === "default" ? "default" : raw;
 }
 
 function normalizeCommentText(raw: string): string {

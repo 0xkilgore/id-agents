@@ -139,6 +139,24 @@ describe('CheckinsRepository.create + get', () => {
       repo.create(buildRow({ id: 'chk_x', team_id: teamId, linked_task_id: otherTaskId })),
     ).rejects.toThrow(/different team/);
   });
+
+  it('rejects creating a checkin whose owner belongs to another team before SQLite FK insert', async () => {
+    const otherTeamId = await new SqliteTeamsRepo(adapter).getOrCreateTeamId('other');
+    const otherOwnerId = await insertAgent(adapter, otherTeamId, 'other-manager');
+    await expect(
+      repo.create(buildRow({ id: 'chk_bad_owner', team_id: teamId, owner_agent_id: otherOwnerId })),
+    ).rejects.toThrow(/owner_agent_id .*different team/);
+  });
+
+  it('rejects creating a checkin whose creator agent does not exist before SQLite FK insert', async () => {
+    await expect(
+      repo.create(buildRow({
+        id: 'chk_bad_creator',
+        team_id: teamId,
+        created_by_agent_id: 'agent_missing',
+      })),
+    ).rejects.toThrow(/created_by_agent_id "agent_missing" not found/);
+  });
 });
 
 describe('CheckinsRepository.list', () => {
@@ -148,6 +166,7 @@ describe('CheckinsRepository.list', () => {
   let otherTeamId: string;
   let ownerA: string;
   let ownerB: string;
+  let otherOwner: string;
   let taskId: string;
 
   beforeEach(async () => {
@@ -158,6 +177,7 @@ describe('CheckinsRepository.list', () => {
     otherTeamId = await teams.getOrCreateTeamId('other');
     ownerA = await insertAgent(adapter, teamId, 'manager');
     ownerB = await insertAgent(adapter, teamId, 'cto');
+    otherOwner = await insertAgent(adapter, otherTeamId, 'other-manager');
     taskId = await insertTask(adapter, teamId, 'task-x');
 
     const now = 1_777_000_000;
@@ -178,7 +198,7 @@ describe('CheckinsRepository.list', () => {
     }));
     // active, different team
     await repo.create(buildRow({
-      id: 'chk_d', team_id: otherTeamId, owner_agent_id: ownerA,
+      id: 'chk_d', team_id: otherTeamId, owner_agent_id: otherOwner,
       next_fire_at: now + 30, status: 'active', updated_at: now + 15,
     }));
   });

@@ -1,4 +1,5 @@
 import { promises as fsp } from "node:fs";
+import crypto from "node:crypto";
 import { basename as pathBasename, extname } from "node:path";
 import type { DbAdapter } from "../db/db-adapter.js";
 import { artifactRowToEntry } from "./entry-projection.js";
@@ -22,6 +23,7 @@ import type {
   ArtifactDetailBody,
   ArtifactDetailRender,
   ArtifactDetailResponse,
+  ArtifactDetailVersionResponse,
   ArtifactReviewStateRow,
   OutputsInboxRow,
 } from "./types.js";
@@ -94,6 +96,18 @@ export async function buildArtifactDetail(
     ok: true,
     schema_version: "artifact.detail.v1",
     generated_at: nowIso,
+    version_key: artifactDetailVersionKey({
+      artifactId: ref.artifactId,
+      catalog: syntheticCatalog,
+      review,
+      operationsCount,
+      commentsCount: comments.length,
+      timelineCount: timeline.length,
+      latestCommentAt: latestComment?.ts ?? null,
+      latestTimelineOpId: latestTimeline?.op_id ?? null,
+      latestTimelineAt: latestTimeline?.ts ?? null,
+      draftUpdatedAt: draftRow?.updated_at ?? null,
+    }),
     artifact_id: ref.artifactId,
     requested_ref: ref.requestedRef,
     resolved_from: ref.resolvedFrom,
@@ -160,6 +174,77 @@ export async function buildArtifactDetail(
     },
     draft,
   };
+}
+
+export async function buildArtifactDetailVersion(
+  adapter: DbAdapter,
+  ref: ArtifactDetailRef,
+  nowIso = new Date().toISOString(),
+): Promise<ArtifactDetailVersionResponse | null> {
+  const [catalog, review, operationsCount, comments, timeline, draftRow] = await Promise.all([
+    getArtifact(adapter, ref.artifactId),
+    getReviewState(adapter, ref.artifactId),
+    countOperations(adapter, ref.artifactId),
+    listComments(adapter, ref.artifactId, 1, 0),
+    listTimelineEvents(adapter, ref.artifactId, 1, 0),
+    getArtifactDraft(adapter, ref.artifactId),
+  ]);
+  const fallbackPath = ref.decodedPath;
+  const draft = parseDraftPayload(draftRow);
+  if (!catalog && !review && !draft && !fallbackPath) return null;
+  const syntheticCatalog = catalog ?? syntheticCatalogFromPath(ref.artifactId, fallbackPath, nowIso);
+  if (!syntheticCatalog && !review && !draft) return null;
+  const latestComment = comments[comments.length - 1] ?? null;
+  const latestTimeline = timeline[timeline.length - 1] ?? null;
+
+  return {
+    ok: true,
+    schema_version: "artifact.detail.version.v1",
+    generated_at: nowIso,
+    artifact_id: ref.artifactId,
+    requested_ref: ref.requestedRef,
+    resolved_from: ref.resolvedFrom,
+    version_key: artifactDetailVersionKey({
+      artifactId: ref.artifactId,
+      catalog: syntheticCatalog,
+      review,
+      operationsCount,
+      commentsCount: comments.length,
+      timelineCount: timeline.length,
+      latestCommentAt: latestComment?.ts ?? null,
+      latestTimelineOpId: latestTimeline?.op_id ?? null,
+      latestTimelineAt: latestTimeline?.ts ?? null,
+      draftUpdatedAt: draftRow?.updated_at ?? null,
+    }),
+  };
+}
+
+function artifactDetailVersionKey(input: {
+  artifactId: string;
+  catalog: ArtifactCatalogRow | null;
+  review: ArtifactReviewStateRow | null;
+  operationsCount: number;
+  commentsCount: number;
+  timelineCount: number;
+  latestCommentAt: string | null;
+  latestTimelineOpId: number | null;
+  latestTimelineAt: string | null;
+  draftUpdatedAt: string | null;
+}): string {
+  const payload = {
+    artifactId: input.artifactId,
+    catalogUpdatedAt: input.catalog?.updated_at ?? null,
+    catalogContentHash: input.catalog?.content_hash ?? null,
+    reviewUpdatedAt: input.review?.updated_at ?? null,
+    operationsCount: input.operationsCount,
+    commentsCount: input.commentsCount,
+    timelineCount: input.timelineCount,
+    latestCommentAt: input.latestCommentAt,
+    latestTimelineOpId: input.latestTimelineOpId,
+    latestTimelineAt: input.latestTimelineAt,
+    draftUpdatedAt: input.draftUpdatedAt,
+  };
+  return `artifact:${crypto.createHash("sha256").update(JSON.stringify(payload)).digest("hex").slice(0, 24)}`;
 }
 
 function decodePathRef(ref: string): string | null {

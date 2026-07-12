@@ -34,6 +34,7 @@ import {
   listOperations,
   parseDraftPayload,
   registerArtifact,
+  registerArtifactPathDelivery,
   searchArtifacts,
   upsertArtifactDraft,
 } from './storage.js';
@@ -89,6 +90,7 @@ import type {
   ApproveRequest,
   ArtifactAvailability,
   ArtifactDetailResponse,
+  ArtifactFeedbackCompatStatus,
   ArtifactOperationsResponse,
   ArtifactComment,
   ArtifactCommentRouteStatus,
@@ -125,12 +127,24 @@ import {
 } from './filesystem-reconciler.js';
 import {
   buildArtifactDetail,
+  buildArtifactDetailVersion,
   resolveArtifactDetailRef,
   type ArtifactDetailRef,
 } from './detail-projection.js';
+import {
+  backfillFreshFinanceOutputs,
+  DEFAULT_FINANCE_OUTPUT_BACKFILL_SPECS,
+  type FreshOutputBackfillSpec,
+} from './finance-output-backfill.js';
 
 function asString(v: unknown): string | undefined {
   return typeof v === 'string' && v.length > 0 ? v : undefined;
+}
+
+function asArtifactSource(v: unknown): RegisterArtifactRequest['source'] {
+  return v === 'delivery-log' || v === 'manual' || v === 'filesystem' || v === 'agent-done'
+    ? v
+    : 'agent-done';
 }
 
 function idempotencyKey(req: Request, suffix?: string): string | null {
@@ -203,6 +217,23 @@ export interface MountOutputsRoutesOptions {
    * never hit the network. Defaults to defaultCaneDraftSender(CANE_BASE_URL).
    */
   caneDraftSender?: CaneDraftSender;
+  /**
+   * Local read-model invalidation feed. Manager injects this to append monotonic
+   * /events rows; tests and legacy mounts can omit it.
+   */
+  emitReadModelEvent?: (
+    req: Request,
+    event: {
+      topic:
+        | 'read_model:artifact_changed'
+        | 'read_model:comment_changed'
+        | 'read_model:read_state_changed';
+      entityKind: 'artifact';
+      entityId: string;
+      invalidates: { keys: string[]; scopes?: string[]; reason?: string };
+      data?: Record<string, unknown>;
+    },
+  ) => Promise<void>;
 }
 
 /** C0: persist the feedback→dispatch linkage (comment_routed op) after a
@@ -233,6 +264,38 @@ async function persistRoutedLinkage(
   } catch {
     /* swallow — durable capture + receipt already succeeded */
   }
+}
+
+async function emitArtifactReadModelEvent(
+  req: Request,
+  opts: MountOutputsRoutesOptions,
+  event: Parameters<NonNullable<MountOutputsRoutesOptions['emitReadModelEvent']>>[1],
+): Promise<void> {
+  if (!opts.emitReadModelEvent) return;
+  try {
+    await opts.emitReadModelEvent(req, event);
+  } catch {
+    /* best-effort: mutation durability is the source of truth */
+  }
+}
+
+function artifactInvalidation(
+  artifactId: string,
+  reason: string,
+  scopes: string[] = [],
+): { keys: string[]; scopes: string[]; reason: string } {
+  return {
+    keys: [
+      `artifact:${artifactId}`,
+      `artifact:${artifactId}:detail`,
+      `artifact:${artifactId}:timeline`,
+      `artifact:${artifactId}:feedback`,
+      `read-model:artifacts`,
+      `read-model:search`,
+    ],
+    scopes,
+    reason,
+  };
 }
 
 async function handleClassifiedCommentRouting(
@@ -363,6 +426,8 @@ function commentRouteStatus(
   if (result.routed) {
     return {
       visible_state: "recorded+routed",
+      compat_status: "recorded+routed",
+      feedback_status: "recorded+routed",
       route_kind: routeKind,
       routed: true,
       retryable: false,
@@ -381,11 +446,19 @@ function commentRouteStatus(
   }
   const skipped = "skipped" in result ? result.skipped : null;
   const isPolicySkip = skipped === "acknowledged" || skipped === "approval_signal" || skipped === "question_threaded";
+  const compatStatus: ArtifactFeedbackCompatStatus =
+    skipped === "scheduler_unavailable"
+      ? "disabled/not-recorded"
+      : isPolicySkip
+        ? "recorded+routed"
+        : "recorded-route-failed-retryable";
   return {
-    visible_state: isPolicySkip ? "recorded+routed" : "recorded-but-route-failed-with-retry",
+    visible_state: compatStatus,
+    compat_status: compatStatus,
+    feedback_status: compatStatus,
     route_kind: routeKind,
     routed: false,
-    retryable: !isPolicySkip,
+    retryable: compatStatus === "recorded-route-failed-retryable",
     recorded_op_id: recordedOpId,
     target_agent: "target_agent" in result && typeof result.target_agent === "string" ? result.target_agent : null,
     target_agent_raw: "target_agent_raw" in result && typeof result.target_agent_raw === "string" ? result.target_agent_raw : null,
@@ -393,6 +466,31 @@ function commentRouteStatus(
     skipped,
     error: "error" in result ? result.error : null,
     updated_at: updatedAt,
+  };
+}
+
+function artifactFeedbackCapability(env: NodeJS.ProcessEnv, opts: MountOutputsRoutesOptions) {
+  const commentRoutingEnabled = Boolean(opts.enqueueDispatch);
+  const reactionsEnabled = isC0FeedbackReactionsEnabled(env);
+  return {
+    ok: true,
+    schema_version: "artifact.feedback.capability.v1",
+    comments: {
+      recordable: true,
+      route_enabled: commentRoutingEnabled,
+      route_status: commentRoutingEnabled ? "enabled" : "disabled",
+    },
+    reactions: {
+      recordable: reactionsEnabled,
+      route_enabled: reactionsEnabled && commentRoutingEnabled,
+      route_status: !reactionsEnabled ? "disabled" : commentRoutingEnabled ? "enabled" : "disabled",
+    },
+    statuses: [
+      "recorded+routed",
+      "recorded-route-failed-retryable",
+      "disabled/not-recorded",
+      "terminal-failure",
+    ] satisfies ArtifactFeedbackCompatStatus[],
   };
 }
 
@@ -579,7 +677,59 @@ export function mountOutputsRoutes(
     }
   });
 
+  // ── POST /artifacts/finance/backfill ──────────────────────────────
+  // Bounded incident backfill for fresh finance deliverables that must be
+  // readable through stable artifact URLs even if Dropbox sync/local path access
+  // is unavailable on the operator laptop. Defaults to the two 2026-07-08
+  // finance outputs; tests may pass temp specs so they never depend on Dropbox.
+  app.post('/artifacts/finance/backfill', async (req: Request, res: Response) => {
+    try {
+      const body = (req.body ?? {}) as Record<string, unknown>;
+      const rawSpecs = Array.isArray(body.artifacts) ? body.artifacts : null;
+      const specs = rawSpecs
+        ? rawSpecs.map((raw): FreshOutputBackfillSpec | null => {
+          if (!raw || typeof raw !== 'object') return null;
+          const candidate = raw as Record<string, unknown>;
+          const absPath = asString(candidate.abs_path) ?? asString(candidate.source_path) ?? asString(candidate.path);
+          const title = asString(candidate.title);
+          if (!absPath || !title) return null;
+          return {
+            abs_path: absPath,
+            title,
+            project_ref: asString(candidate.project_ref) ?? asString(candidate.project) ?? 'finances',
+            agent: asString(candidate.agent) ?? 'finances',
+            produced_at: asString(candidate.produced_at),
+            dispatch_ref: asString(candidate.dispatch_ref) ?? null,
+            source_host: asString(candidate.source_host) ?? 'M4',
+          };
+        })
+        : [...DEFAULT_FINANCE_OUTPUT_BACKFILL_SPECS];
+      if (specs.some((spec) => spec == null)) {
+        return res.status(400).json({ ok: false, error: 'each artifact requires abs_path/path and title' });
+      }
+      const maxArtifacts = Number.parseInt(asString(body.max_artifacts) ?? asString(req.query.max_artifacts) ?? '', 10);
+      const results = await backfillFreshFinanceOutputs(adapter, {
+        specs: specs as FreshOutputBackfillSpec[],
+        maxArtifacts: Number.isFinite(maxArtifacts) ? maxArtifacts : undefined,
+      });
+      clearArtifactDetailCache();
+      res.json({
+        ok: true,
+        schema_version: 'artifact.finance_backfill.v1',
+        default_paths: rawSpecs ? false : true,
+        count: results.length,
+        results,
+      });
+    } catch (err) {
+      res.status(500).json({ ok: false, error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
   // ── GET /outputs/inbox ─────────────────────────────────────────────
+
+  app.get('/artifacts/feedback/status', (_req: Request, res: Response) => {
+    res.json(artifactFeedbackCapability(env, opts));
+  });
 
   app.get('/outputs/inbox', async (req: Request, res: Response) => {
     try {
@@ -785,6 +935,28 @@ export function mountOutputsRoutes(
     }
   });
 
+  // ── GET /artifacts/:id/version ────────────────────────────────────
+  // Poll/SSE-friendly freshness probe for already-open detail panes. Returns
+  // only the reusable version_key; clients refetch /detail when it changes.
+  app.get('/artifacts/:id/version', async (req: Request<{ id: string }>, res: Response) => {
+    try {
+      const ref = resolveArtifactDetailRef(req.params.id);
+      const version = await buildArtifactDetailVersion(adapter, ref);
+      if (!version) {
+        return res.status(404).json({
+          ok: false,
+          code: 'artifact_not_found',
+          error: `Artifact "${ref.requestedRef}" not found`,
+          artifact_id: ref.artifactId,
+        });
+      }
+      res.setHeader('Cache-Control', 'no-store');
+      res.json(version);
+    } catch (err) {
+      res.status(500).json({ ok: false, error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
   // ── GET /artifacts/:id/detail ─────────────────────────────────────
   // One request hydrates body/render metadata, compact catalog fields, review
   // summary, comments/timeline, and provenance for the center reader pane.
@@ -894,6 +1066,7 @@ export function mountOutputsRoutes(
         res.status(400).json({ error: `missing fields: ${missing.join(', ')}` });
         return;
       }
+      const source = asArtifactSource(body.source);
       const payload: RegisterArtifactRequest = {
         artifact_id: typeof body.artifact_id === 'string' ? body.artifact_id : undefined,
         basename: String(body.basename),
@@ -902,7 +1075,7 @@ export function mountOutputsRoutes(
         abs_path: String(body.abs_path),
         title: typeof body.title === 'string' ? body.title : undefined,
         produced_at: String(body.produced_at),
-        source: body.source === 'delivery-log' || body.source === 'manual' ? body.source : 'agent-done',
+        source,
         availability: body.availability === 'missing' || body.availability === 'unknown' ? body.availability : 'present',
         media_type: typeof body.media_type === 'string' ? body.media_type as RegisterArtifactRequest['media_type'] : undefined,
         content_hash: typeof body.content_hash === 'string' ? body.content_hash : undefined,
@@ -912,15 +1085,63 @@ export function mountOutputsRoutes(
         dispatch_ref: typeof body.dispatch_ref === 'string' ? body.dispatch_ref : undefined,
         source_host: typeof body.source_host === 'string' ? body.source_host : undefined,
       };
-      const { row, inserted } = await registerArtifact(adapter, payload, new Date().toISOString());
+      const registered = await registerArtifactPathDelivery(
+        adapter,
+        {
+          abs_path: payload.abs_path,
+          agent: payload.agent,
+          produced_at: payload.produced_at,
+          title: payload.title ?? null,
+          project_ref: payload.project_ref ?? null,
+          dispatch_ref: payload.dispatch_ref ?? null,
+          source_host: payload.source_host ?? null,
+          source,
+        },
+        new Date().toISOString(),
+      );
+      const row = registered.row;
+      const inserted = registered.inserted;
       invalidateArtifactDetail(row.artifact_id);
+      await emitArtifactReadModelEvent(req, opts, {
+        topic: 'read_model:artifact_changed',
+        entityKind: 'artifact',
+        entityId: row.artifact_id,
+        invalidates: artifactInvalidation(row.artifact_id, 'artifact_metadata_body_version_changed', [
+          'artifacts',
+          row.project_ref ? `project:${row.project_ref}` : '',
+        ].filter(Boolean)),
+        data: {
+          change: inserted ? 'created' : 'updated',
+          artifact_id: row.artifact_id,
+          content_hash: row.content_hash,
+          body_cached: registered.body_cached,
+        },
+      });
       const response: RegisterArtifactResponse = {
         schema_version: 'artifact.register.v1',
         artifact_id: row.artifact_id,
         inserted,
         row,
       };
-      res.json(response);
+      res.json({
+        ...response,
+        title: row.title ?? row.basename,
+        source_path: row.abs_path,
+        source_proof: {
+          source: row.source,
+          source_badges: JSON.parse(row.source_badges || '[]'),
+          dispatch_ref: row.dispatch_ref,
+          source_host: row.source_host,
+        },
+        freshness: registered.body_cached ? 'current' : 'body_unavailable',
+        content_hash: row.content_hash,
+        stable_url: `/artifacts/${encodeURIComponent(row.artifact_id)}/detail`,
+        copy_text_url: `/artifacts/${encodeURIComponent(row.artifact_id)}/copy-text`,
+        download_url: `/artifacts/${encodeURIComponent(row.artifact_id)}/download`,
+        cached_body: registered.body_cached,
+        body_unavailable: !registered.body_cached,
+        body_error: registered.body_error,
+      });
     } catch (err) {
       res.status(400).json({ error: err instanceof Error ? err.message : String(err) });
     }
@@ -987,6 +1208,17 @@ export function mountOutputsRoutes(
       );
       const { inserted: draftInserted } = await upsertArtifactDraft(adapter, artifactId, payload, nowIso);
       invalidateArtifactDetail(artifactId);
+      await emitArtifactReadModelEvent(req, opts, {
+        topic: 'read_model:artifact_changed',
+        entityKind: 'artifact',
+        entityId: artifactId,
+        invalidates: artifactInvalidation(artifactId, 'artifact_metadata_body_version_changed', ['artifacts']),
+        data: {
+          change: catalogInserted && draftInserted ? 'created' : 'updated',
+          artifact_id: artifactId,
+          draft_id: draftId,
+        },
+      });
       res.json({
         ok: true,
         schema_version: 'cane.draft.register.v1',
@@ -1067,6 +1299,13 @@ export function mountOutputsRoutes(
       };
       const { state, op_id } = await viewArtifact(adapter, req.params.id, reqBody);
       invalidateArtifactDetail(req.params.id);
+      await emitArtifactReadModelEvent(req, opts, {
+        topic: 'read_model:read_state_changed',
+        entityKind: 'artifact',
+        entityId: req.params.id,
+        invalidates: artifactInvalidation(req.params.id, 'read_state_changed', ['artifacts']),
+        data: { artifact_id: req.params.id, op_id, read_state: 'viewed' },
+      });
       res.json({ ok: true, state, op_id });
     } catch (err) {
       res.status(400).json({ error: err instanceof Error ? err.message : String(err) });
@@ -1100,6 +1339,13 @@ export function mountOutputsRoutes(
         'manager:/artifacts/edit',
       );
       invalidateArtifactDetail(req.params.id);
+      await emitArtifactReadModelEvent(req, opts, {
+        topic: 'read_model:artifact_changed',
+        entityKind: 'artifact',
+        entityId: req.params.id,
+        invalidates: artifactInvalidation(req.params.id, 'artifact_body_version_changed', ['artifacts']),
+        data: { artifact_id: req.params.id, op_id, change: 'edit' },
+      });
       res.json({ ok: true, op_id, edited_at: nowIso });
     } catch (err) {
       res.status(400).json({ error: err instanceof Error ? err.message : String(err) });
@@ -1195,6 +1441,13 @@ export function mountOutputsRoutes(
         };
         const result = await suggestArtifactChange(adapter, artifactId, reqBody, clock);
         invalidateArtifactDetail(artifactId);
+        await emitArtifactReadModelEvent(req, opts, {
+          topic: 'read_model:comment_changed',
+          entityKind: 'artifact',
+          entityId: artifactId,
+          invalidates: artifactInvalidation(artifactId, 'comment_timeline_changed', ['artifacts']),
+          data: { artifact_id: artifactId, op_id: result.op_id, timeline_kind: 'suggested_change' },
+        });
         return res.json({
           ok: true,
           schema_version: 'artifact.timeline.write.v1',
@@ -1216,6 +1469,13 @@ export function mountOutputsRoutes(
         };
         const result = await recordDispatchFollowUp(adapter, artifactId, reqBody, clock);
         invalidateArtifactDetail(artifactId);
+        await emitArtifactReadModelEvent(req, opts, {
+          topic: 'read_model:comment_changed',
+          entityKind: 'artifact',
+          entityId: artifactId,
+          invalidates: artifactInvalidation(artifactId, 'comment_timeline_changed', ['artifacts']),
+          data: { artifact_id: artifactId, op_id: result.op_id, timeline_kind: 'dispatch_follow_up' },
+        });
         return res.json({
           ok: true,
           schema_version: 'artifact.timeline.write.v1',
@@ -1279,10 +1539,19 @@ export function mountOutputsRoutes(
       comment.route_status = route_status;
 
       invalidateArtifactDetail(artifactId);
+      await emitArtifactReadModelEvent(req, opts, {
+        topic: 'read_model:comment_changed',
+        entityKind: 'artifact',
+        entityId: artifactId,
+        invalidates: artifactInvalidation(artifactId, 'comment_timeline_changed', ['artifacts']),
+        data: { artifact_id: artifactId, op_id, comment_id: comment.comment_id, route_kind: routed.route_kind },
+      });
       const base = {
         ok: true,
         schema_version: 'artifact.comment.v1',
         visible_state: route_status.visible_state,
+        compat_status: route_status.compat_status,
+        feedback_status: route_status.feedback_status,
         route_status,
         op_id,
         comment,
@@ -1301,6 +1570,8 @@ export function mountOutputsRoutes(
       res.status(500).json({
         ok: false,
         visible_state: "not-recorded",
+        compat_status: "disabled/not-recorded",
+        feedback_status: "disabled/not-recorded",
         error: err instanceof Error ? err.message : String(err),
       });
     }
@@ -1523,7 +1794,14 @@ export function mountOutputsRoutes(
   app.post('/artifacts/:id/reactions', async (req: Request<{ id: string }>, res: Response) => {
     try {
       if (!isC0FeedbackReactionsEnabled(env)) {
-        return res.status(404).json({ ok: false, error: 'c0_feedback_reactions_disabled' });
+        return res.status(404).json({
+          ok: false,
+          error: 'c0_feedback_reactions_disabled',
+          visible_state: "disabled/not-recorded",
+          compat_status: "disabled/not-recorded",
+          feedback_status: "disabled/not-recorded",
+          capability: artifactFeedbackCapability(env, opts),
+        });
       }
       const artifactId = resolveMutationArtifactId(req, res);
       if (!artifactId) return;
@@ -1566,10 +1844,19 @@ export function mountOutputsRoutes(
       comment.route_status = route_status;
 
       invalidateArtifactDetail(artifactId);
+      await emitArtifactReadModelEvent(req, opts, {
+        topic: 'read_model:comment_changed',
+        entityKind: 'artifact',
+        entityId: artifactId,
+        invalidates: artifactInvalidation(artifactId, 'comment_timeline_changed', ['artifacts']),
+        data: { artifact_id: artifactId, op_id, comment_id: comment.comment_id, reaction },
+      });
       const base = {
         ok: true,
         schema_version: 'artifact.reaction.v1',
         visible_state: route_status.visible_state,
+        compat_status: route_status.compat_status,
+        feedback_status: route_status.feedback_status,
         route_status,
         op_id,
         comment,
@@ -1679,6 +1966,18 @@ export function mountOutputsRoutes(
         : null;
       const { state, op_id, idempotent } = await approveArtifact(adapter, artifactId, reqBody, clock);
       invalidateArtifactDetail(artifactId);
+      await emitArtifactReadModelEvent(req, opts, {
+        topic: 'read_model:comment_changed',
+        entityKind: 'artifact',
+        entityId: artifactId,
+        invalidates: artifactInvalidation(artifactId, 'comment_timeline_changed', ['artifacts']),
+        data: {
+          artifact_id: artifactId,
+          op_id,
+          action: 'approve',
+          comment_op_id: approvalComment?.op_id ?? null,
+        },
+      });
       const baseReceipt = {
         approval: { state: "approved", label: "Approved", op_id, idempotent },
         comment: approvalComment

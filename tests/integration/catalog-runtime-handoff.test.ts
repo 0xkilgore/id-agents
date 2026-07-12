@@ -91,6 +91,7 @@ describe('catalog runtime handoff', () => {
       costTier: 'low',
       notSuitableFor: ['security-key-handling'],
       status: 'available',
+      model: 'gpt-5-codex',
     };
     const catalogEnv = Buffer.from(JSON.stringify(seed), 'utf8').toString('base64');
 
@@ -137,6 +138,8 @@ describe('catalog runtime handoff', () => {
     expect(body.notSuitableFor).toEqual(['security-key-handling']);
     expect(body.status).toBe('available');
     expect(body.description).toBe('Seeded via env var');
+    expect(body.model).toBeUndefined();
+    expect(body.desiredModel).toBe('gpt-5-codex');
 
     child.kill('SIGTERM');
   }, 30000);

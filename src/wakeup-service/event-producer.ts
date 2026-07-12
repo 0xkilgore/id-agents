@@ -26,6 +26,13 @@ export const CHECKIN_SNOOZED = 'checkin:snoozed';
 export const CHECKIN_DUE = 'checkin:due';
 export const CHECKIN_EXPIRED = 'checkin:expired';
 
+export const READ_MODEL_ARTIFACT_CHANGED = 'read_model:artifact_changed';
+export const READ_MODEL_COMMENT_CHANGED = 'read_model:comment_changed';
+export const READ_MODEL_READ_STATE_CHANGED = 'read_model:read_state_changed';
+export const READ_MODEL_TASK_CHANGED = 'read_model:task_changed';
+export const READ_MODEL_PROJECT_CHANGED = 'read_model:project_changed';
+export const READ_MODEL_CURSOR_EXPIRED = 'read_model:cursor_expired';
+
 const PREVIEW_MAX = 280;
 
 export interface TaskClaimedInput {
@@ -109,6 +116,50 @@ export async function emitTaskCompleted(
       owner: input.ownerAgentId,
       completed_at: input.occurredAt,
       ...(input.title ? { title_preview: truncate(input.title) } : {}),
+    },
+  });
+}
+
+export interface ReadModelInvalidation {
+  keys: string[];
+  scopes?: string[];
+  reason?: string;
+}
+
+export interface ReadModelChangeInput {
+  teamId: string;
+  topic:
+    | typeof READ_MODEL_ARTIFACT_CHANGED
+    | typeof READ_MODEL_COMMENT_CHANGED
+    | typeof READ_MODEL_READ_STATE_CHANGED
+    | typeof READ_MODEL_TASK_CHANGED
+    | typeof READ_MODEL_PROJECT_CHANGED;
+  entityKind: 'artifact' | 'task' | 'project';
+  entityId: string;
+  actorAgentId?: string | null;
+  occurredAt: number;
+  invalidates: ReadModelInvalidation;
+  data?: Record<string, unknown>;
+}
+
+export async function emitReadModelChange(
+  events: EventsRepository,
+  input: ReadModelChangeInput,
+): Promise<{ seq: number }> {
+  return events.insert({
+    team_id: input.teamId,
+    topic: input.topic,
+    actor_agent_id: input.actorAgentId ?? null,
+    subject_kind: input.entityKind,
+    subject_id: input.entityId,
+    occurred_at: input.occurredAt,
+    data: {
+      ...(input.data ?? {}),
+      invalidates: {
+        keys: Array.from(new Set(input.invalidates.keys)).sort(),
+        scopes: Array.from(new Set(input.invalidates.scopes ?? [])).sort(),
+        reason: input.invalidates.reason ?? input.topic,
+      },
     },
   });
 }

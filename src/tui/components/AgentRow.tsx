@@ -65,13 +65,14 @@ function renderHealth(health: string): string {
 
 function isRemoteAgent(agent: Agent): boolean {
   return agent.deploymentShape === 'remote-endpoint' ||
+    agent.runtime === 'public-agent-remote' ||
     agent.metadata?.runtime === 'public-agent-remote';
 }
 
 function AgentRowInner({ agent, selected, uptime, newsColor, memBytes, nowMs }: AgentRowProps): React.ReactElement {
   const marker = selected ? '▶ ' : '  ';
   const name = padRight(agent.alias ?? agent.name, COLS.name);
-  const runtime = padRight(abbrevRuntime(agent.metadata?.runtime), COLS.runtime);
+  const runtime = padRight(abbrevRuntime(agent.runtime ?? agent.metadata?.runtime), COLS.runtime);
   const model = padRight(truncate(abbrevModel(agent.model), COLS.model - 1), COLS.model);
   const health = padRight(renderHealth(agent.health), COLS.health);
   const hb = padRight(agent.metadata?.heartbeat ? '♥' : '-', COLS.hb);
@@ -151,6 +152,7 @@ export const AgentRow = React.memo(AgentRowInner, (prev, next) => {
     a.status === b.status &&
     a.health === b.health &&
     a.model === b.model &&
+    a.runtime === b.runtime &&
     a.metadata?.runtime === b.metadata?.runtime &&
     a.metadata?.heartbeat === b.metadata?.heartbeat &&
     (a.metadata as Record<string, unknown> | undefined)?.dmz ===

@@ -32,12 +32,58 @@ import { parseRoadmapToBacklog } from "./roadmap-import.js";
 import { runFleshPass } from "./flesh-runner.js";
 import { resolveTrack } from "../track-registry/registry.js";
 import { readOrchestrationHealthProjection } from "./health-projection.js";
+import { BuildPoolRegistry } from "../build-pools/registry.js";
 
 export interface OrchestrationRouteOptions {
   daemon: ContinuousOrchestrationDaemon;
   adapter: DbAdapter;
   config: ContinuousOrchestrationConfig;
   teamId?: string;
+}
+
+interface BacklogWarning {
+  code: string;
+  message: string;
+  details: Record<string, unknown>;
+}
+
+const NAMED_POOL_AGENT_REASON_RE = /\b(continuity|judgment|architecture)\b/i;
+const LEGACY_POOL_OPT_IN_AGENTS = new Set(["frontend-ui-codex", "frontend-qa-cursor"]);
+
+function normalizedPath(path: string): string {
+  return path.replace(/\/+$/, "");
+}
+
+function backlogPoolRoutingWarnings(body: Partial<NewBacklogItem>, env: NodeJS.ProcessEnv = process.env): BacklogWarning[] {
+  const requestedAgent = typeof body.to_agent === "string" ? body.to_agent.trim() : "";
+  if (!requestedAgent || requestedAgent.startsWith("pool:") || LEGACY_POOL_OPT_IN_AGENTS.has(requestedAgent)) return [];
+  if (!Array.isArray(body.write_scope) || !body.write_scope.every((scope) => typeof scope === "string")) return [];
+  if (typeof body.dispatch_body === "string" && NAMED_POOL_AGENT_REASON_RE.test(body.dispatch_body)) return [];
+
+  const registry = BuildPoolRegistry.load(env);
+  const warnings: BacklogWarning[] = [];
+  for (const pool of registry.list()) {
+    if (!pool.members.includes(requestedAgent)) continue;
+    const hasBareRepoScope = body.write_scope.some(
+      (scope) => !scope.includes("/.worktrees/") && normalizedPath(scope) === normalizedPath(pool.repo_root),
+    );
+    if (!hasBareRepoScope) continue;
+    warnings.push({
+      code: "named_pool_agent_bare_repo_write_scope",
+      message:
+        `Backlog item targets pool member "${requestedAgent}" with bare ${pool.pool_id} repo_root in write_scope; ` +
+        `this bypasses pool isolation and can serialize pool-eligible work. ` +
+        `Use to_agent: "pool:${pool.pool_id}" instead, or include an explicit continuity/judgment/architecture reason if the named agent is required.`,
+      details: {
+        to_agent: requestedAgent,
+        pool_id: pool.pool_id,
+        repo_root: pool.repo_root,
+        suggested_to_agent: `pool:${pool.pool_id}`,
+        accepted_reason_keywords: ["continuity", "judgment", "architecture"],
+      },
+    });
+  }
+  return warnings;
 }
 
 export function mountContinuousOrchestrationRoutes(app: Application, opts: OrchestrationRouteOptions): void {
@@ -88,6 +134,11 @@ export function mountContinuousOrchestrationRoutes(app: Application, opts: Orche
         kill_switch_active: killSwitch,
         counts: {
           ready: ready.length,
+          raw_ready: readyAdmission.raw_ready,
+          useful_ready: readyAdmission.useful_ready,
+          admissible_now: readyAdmission.admissible_now,
+          ready_blocked_by_reason: readyAdmission.block_reason_counts,
+          top_blocking_lanes: readyAdmission.top_blocking_lanes,
           needs_review: needsReview.length,
           in_flight: inFlight.length,
           needs_chris_batch: needsChrisBatch.length,
@@ -159,10 +210,23 @@ export function mountContinuousOrchestrationRoutes(app: Application, opts: Orche
     }
   });
 
+  app.get("/orchestration/backlog/admission-breakdown", async (_req: Request, res: Response) => {
+    try {
+      const breakdown = await daemon.explainAdmissionBreakdown();
+      res.json({ ok: true, ...breakdown });
+    } catch (err) {
+      res.status(500).json({ ok: false, error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
   app.post("/orchestration/backlog", async (req: Request, res: Response) => {
     try {
       const body = (req.body ?? {}) as NewBacklogItem & { force?: boolean };
       if (!body.title) return res.status(400).json({ ok: false, error: "title required" });
+      const warnings = backlogPoolRoutingWarnings(body);
+      for (const warning of warnings) {
+        console.warn(`[orchestration] POST /orchestration/backlog: ${warning.message}`);
+      }
       // Validate the item's track against the canonical-track-registry. A
       // provided-but-non-conforming track is DRIFT: warn + tag, never block.
       let trackDrift = false;
@@ -207,7 +271,7 @@ export function mountContinuousOrchestrationRoutes(app: Application, opts: Orche
         track_drift: trackDrift,
       };
       const item = await insertBacklogItem(adapter, safe);
-      res.json({ ok: true, item });
+      res.json({ ok: true, item, warnings });
     } catch (err) {
       res.status(500).json({ ok: false, error: err instanceof Error ? err.message : String(err) });
     }

@@ -8,6 +8,7 @@
 import 'dotenv/config';
 import { AgentManagerDb } from './agent-manager-db.js';
 import { createDb, migrateDb } from './db.js';
+import { openManagerDbWithAbiRebuildRetry } from './manager-startup-db.js';
 import { AgentRestServer } from './agent-rest-server.js';
 import { resolveRuntime } from './runtime/registry.js';
 import { detectSessionHandoffVars } from './lib/env-hygiene.js';
@@ -68,8 +69,7 @@ async function startManagerAgent() {
   const workingDir = process.env.AGENT_MANAGER_WORKDIR || resolveDefaultWorkspaceDir();
 
   // Initialize DB (required for persistence)
-  const db = await createDb();
-  await migrateDb(db);
+  const db = await openManagerDbWithAbiRebuildRetry();
 
   const manager = new AgentManagerDb(workingDir, db);
 

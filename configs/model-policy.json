@@ -1,25 +1,28 @@
 {
   "schema_version": 1,
-  "_comment": "Codex-primary policy set 2026-07-06 by manager per Chris: 95% OpenAI Codex / 5% Anthropic / 0% Cursor. Claude and Codex are both unblocked, but preserve Claude for sparse specialist/escalation use. Standing rule: new unpinned scheduler-created implementation work prefers Codex, then Claude. Cursor disabled for now (constrained_providers). NOTE: a prior watcher has reverted this file before; if policy drifts, reconcile the watcher rather than accepting silent reversion.",
+  "_comment": "Codex/Anthropic policy set 2026-07-13 by manager per Chris authorization: fleet default codex gpt-5.6 primary with claude-sonnet-5 fallback; rams, cto, and maestra use claude-fable-5 primary with codex gpt-5.6 fallback. Target effective work share is ~88% OpenAI / 12% Anthropic; Cursor remains disabled (constrained_providers). NOTE: a prior watcher has reverted this file before; if policy drifts, reconcile the watcher rather than accepting silent reversion.",
   "work_share": {
-    "label": "codex-primary-95-5-0",
+    "label": "codex-gpt-5.6-fable-exceptions-88-12-0",
     "targets": {
-      "anthropic": 0.05,
-      "openai": 0.95,
-      "cursor": 0.0
+      "anthropic": 0.12,
+      "openai": 0.88,
+      "cursor": 0
     }
   },
-  "constrained_providers": ["cursor"],
+  "constrained_providers": [
+    "cursor"
+  ],
   "known_models": [
     "claude-opus-4-8",
     "claude-fable-5",
     "claude-sonnet-5",
-    "gpt-5.5"
+    "gpt-5.5",
+    "gpt-5.6"
   ],
   "default": {
     "primary": {
       "runtime": "codex",
-      "model": "gpt-5.5"
+      "model": "gpt-5.6"
     },
     "fallback": [
       {
@@ -29,10 +32,118 @@
     ]
   },
   "agents": {
-    "cto": {
+    "blowout": {
       "primary": {
         "runtime": "codex",
-        "model": "gpt-5.5"
+        "model": "gpt-5.6"
+      },
+      "fallback": [
+        {
+          "runtime": "claude-code-cli",
+          "model": "claude-sonnet-5"
+        }
+      ]
+    },
+    "brunel": {
+      "primary": {
+        "runtime": "codex",
+        "model": "gpt-5.6"
+      },
+      "fallback": [
+        {
+          "runtime": "claude-code-cli",
+          "model": "claude-sonnet-5"
+        }
+      ]
+    },
+    "cane": {
+      "primary": {
+        "runtime": "codex",
+        "model": "gpt-5.6"
+      },
+      "fallback": [
+        {
+          "runtime": "claude-code-cli",
+          "model": "claude-sonnet-5"
+        }
+      ]
+    },
+    "cleveland-park": {
+      "primary": {
+        "runtime": "codex",
+        "model": "gpt-5.6"
+      },
+      "fallback": [
+        {
+          "runtime": "claude-code-cli",
+          "model": "claude-sonnet-5"
+        }
+      ]
+    },
+    "cto": {
+      "primary": {
+        "runtime": "claude-code-cli",
+        "model": "claude-fable-5"
+      },
+      "fallback": [
+        {
+          "runtime": "codex",
+          "model": "gpt-5.6"
+        }
+      ]
+    },
+    "defi": {
+      "primary": {
+        "runtime": "codex",
+        "model": "gpt-5.6"
+      },
+      "fallback": [
+        {
+          "runtime": "claude-code-cli",
+          "model": "claude-sonnet-5"
+        }
+      ]
+    },
+    "eames": {
+      "primary": {
+        "runtime": "codex",
+        "model": "gpt-5.6"
+      },
+      "fallback": [
+        {
+          "runtime": "claude-code-cli",
+          "model": "claude-sonnet-5"
+        }
+      ]
+    },
+    "finances": {
+      "primary": {
+        "runtime": "codex",
+        "model": "gpt-5.6"
+      },
+      "fallback": [
+        {
+          "runtime": "claude-code-cli",
+          "model": "claude-sonnet-5"
+        }
+      ]
+    },
+    "gaudi": {
+      "primary": {
+        "runtime": "codex",
+        "model": "gpt-5.6"
+      },
+      "fallback": [
+        {
+          "runtime": "claude-code-cli",
+          "model": "claude-sonnet-5"
+        }
+      ]
+    },
+    "hopper": {
+      "primary": {
+        "runtime": "codex",
+        "model": "gpt-5.6"
       },
       "fallback": [
         {
@@ -43,8 +154,80 @@
     },
     "maestra": {
       "primary": {
+        "runtime": "claude-code-cli",
+        "model": "claude-fable-5"
+      },
+      "fallback": [
+        {
+          "runtime": "codex",
+          "model": "gpt-5.6"
+        }
+      ]
+    },
+    "personal": {
+      "primary": {
         "runtime": "codex",
-        "model": "gpt-5.5"
+        "model": "gpt-5.6"
+      },
+      "fallback": [
+        {
+          "runtime": "claude-code-cli",
+          "model": "claude-sonnet-5"
+        }
+      ]
+    },
+    "pipeline": {
+      "primary": {
+        "runtime": "codex",
+        "model": "gpt-5.6"
+      },
+      "fallback": [
+        {
+          "runtime": "claude-code-cli",
+          "model": "claude-sonnet-5"
+        }
+      ]
+    },
+    "politics": {
+      "primary": {
+        "runtime": "codex",
+        "model": "gpt-5.6"
+      },
+      "fallback": [
+        {
+          "runtime": "claude-code-cli",
+          "model": "claude-sonnet-5"
+        }
+      ]
+    },
+    "rams": {
+      "primary": {
+        "runtime": "claude-code-cli",
+        "model": "claude-fable-5"
+      },
+      "fallback": [
+        {
+          "runtime": "codex",
+          "model": "gpt-5.6"
+        }
+      ]
+    },
+    "regina": {
+      "primary": {
+        "runtime": "codex",
+        "model": "gpt-5.6"
+      },
+      "fallback": [
+        {
+          "runtime": "claude-code-cli",
+          "model": "claude-sonnet-5"
+        }
+      ]
+    },
+    "roger": {
+      "primary": {
+        "runtime": "codex",
+        "model": "gpt-5.6"
       },
       "fallback": [
         {
@@ -56,7 +239,7 @@
     "sentinel": {
       "primary": {
         "runtime": "codex",
-        "model": "gpt-5.5"
+        "model": "gpt-5.6"
       },
       "fallback": [
         {
@@ -65,10 +248,10 @@
         }
       ]
     },
-    "rams": {
+    "trinity": {
       "primary": {
         "runtime": "codex",
-        "model": "gpt-5.5"
+        "model": "gpt-5.6"
       },
       "fallback": [
         {
@@ -77,5 +260,25 @@
         }
       ]
     }
+  },
+  "authorized_directive": {
+    "date": "2026-07-13",
+    "authorized_by": "Chris",
+    "work_share": {
+      "targets": {
+        "anthropic": 0.12,
+        "openai": 0.88,
+        "cursor": 0
+      }
+    },
+    "default_primary": {
+      "runtime": "codex",
+      "model": "gpt-5.6"
+    },
+    "exceptions": [
+      "rams",
+      "cto",
+      "maestra"
+    ]
   }
 }

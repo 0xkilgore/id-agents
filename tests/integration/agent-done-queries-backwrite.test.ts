@@ -241,6 +241,137 @@ describe('POST /agent-done — queries-row back-write', () => {
     expect(cached?.body_text).toContain('COBRA and BOXX detail');
   });
 
+  it('registers an HTML agent-done artifact and serves it by stable id after the source file disappears', async () => {
+    const { dispatch_phid, query_id } = await setupDispatchWithQueryRow();
+    const artifactPath = path.join(workDir, 'output', 'portfolio-preview.html');
+    fs.mkdirSync(path.dirname(artifactPath), { recursive: true });
+    fs.writeFileSync(artifactPath, '<!doctype html><html><body><h1>Finance Preview</h1></body></html>');
+    const artifactId = artifactIdFromPath(artifactPath);
+
+    const doneRes = await fetch(`${baseUrl}/agent-done`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Id-Team': TEAM },
+      body: JSON.stringify({
+        dispatch_id: dispatch_phid,
+        query_id,
+        success: true,
+        agent: 'finances',
+        result: {
+          artifact_path: artifactPath,
+          title: 'Finance HTML Preview',
+          project_ref: 'finances',
+        },
+      }),
+    });
+    expect(doneRes.status).toBe(200);
+    const doneBody = await doneRes.json() as any;
+    expect(doneBody.receipt.artifact_registration).toMatchObject({
+      artifact_id: artifactId,
+      source_path: artifactPath,
+      freshness: 'current',
+      cached_body: true,
+      body_unavailable: false,
+      stable_url: `/artifacts/${encodeURIComponent(artifactId)}/detail`,
+      copy_text_url: `/artifacts/${encodeURIComponent(artifactId)}/copy-text`,
+      download_url: `/artifacts/${encodeURIComponent(artifactId)}/download`,
+    });
+
+    const catalog = await getArtifact(db.adapter, artifactId);
+    expect(catalog).toMatchObject({
+      artifact_id: artifactId,
+      agent: 'finances',
+      project_ref: 'finances',
+      dispatch_ref: dispatch_phid,
+      media_type: 'text/html',
+      availability: 'present',
+      abs_path: artifactPath,
+    });
+    expect(catalog?.content_hash).toMatch(/^[a-f0-9]{64}$/);
+    expect(catalog?.source_mtime).toBeTruthy();
+
+    fs.unlinkSync(artifactPath);
+
+    const detailRes = await fetch(`${baseUrl}/artifacts/${encodeURIComponent(artifactId)}/detail`, {
+      headers: { 'X-Id-Team': 'default' },
+    });
+    if (detailRes.status !== 200) {
+      throw new Error(`detail route failed: ${detailRes.status} ${await detailRes.text()}`);
+    }
+    const detail = await detailRes.json() as any;
+    expect(detail.body).toMatchObject({
+      kind: 'html',
+      source: 'artifact_body_cache',
+    });
+    expect(detail.body.text).toContain('<h1>Finance Preview</h1>');
+    expect(detail.delivery).toMatchObject({
+      bodyRenderable: true,
+      bodyUnavailable: false,
+      freshness: 'current',
+    });
+
+    const copyRes = await fetch(`${baseUrl}/artifacts/${encodeURIComponent(artifactId)}/copy-text`, {
+      headers: { 'X-Id-Team': 'default' },
+    });
+    expect(copyRes.status).toBe(200);
+    expect(await copyRes.text()).toContain('<h1>Finance Preview</h1>');
+
+    const downloadRes = await fetch(`${baseUrl}/artifacts/${encodeURIComponent(artifactId)}/download`, {
+      headers: { 'X-Id-Team': 'default' },
+    });
+    expect(downloadRes.status).toBe(200);
+    expect(downloadRes.headers.get('content-type')).toContain('text/html');
+    expect(await downloadRes.text()).toContain('<h1>Finance Preview</h1>');
+  });
+
+  it('returns explicit body_unavailable registration metadata when an artifact body cannot be reached', async () => {
+    const { dispatch_phid, query_id } = await setupDispatchWithQueryRow();
+    const artifactPath = path.join(workDir, 'output', 'missing-finance-report.html');
+    const artifactId = artifactIdFromPath(artifactPath);
+
+    const res = await fetch(`${baseUrl}/agent-done`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Id-Team': TEAM },
+      body: JSON.stringify({
+        dispatch_id: dispatch_phid,
+        query_id,
+        success: true,
+        agent: 'finances',
+        result: {
+          artifact_path: artifactPath,
+          title: 'Missing Finance Report',
+          project: 'finances',
+        },
+      }),
+    });
+    expect(res.status).toBe(200);
+    const body = await res.json() as any;
+    expect(body.receipt.artifact_registration).toMatchObject({
+      artifact_id: artifactId,
+      source_path: artifactPath,
+      freshness: 'body_unavailable',
+      cached_body: false,
+      body_unavailable: true,
+      body_error: 'ENOENT',
+    });
+
+    const detailRes = await fetch(`${baseUrl}/artifacts/${encodeURIComponent(artifactId)}/detail`, {
+      headers: { 'X-Id-Team': 'default' },
+    });
+    if (detailRes.status !== 200) {
+      throw new Error(`detail route failed: ${detailRes.status} ${await detailRes.text()}`);
+    }
+    const detail = await detailRes.json() as any;
+    expect(detail.delivery).toMatchObject({
+      bodyRenderable: false,
+      bodyUnavailable: true,
+      freshness: 'body_unavailable',
+    });
+    expect(detail.body).toMatchObject({
+      kind: 'missing',
+      text: null,
+    });
+  });
+
   it('marks the matching queries row as failed on success=false with the error string', async () => {
     const { dispatch_phid, query_id } = await setupDispatchWithQueryRow();
 

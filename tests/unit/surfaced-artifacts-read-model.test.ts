@@ -9,6 +9,7 @@ import {
   artifactIdForSurfacingPath,
   buildSurfacedArtifacts,
   buildSurfacedArtifactsReadModel,
+  executeSurfacedArtifactsSavedView,
   humanTitleFromParts,
   isRawPrimaryTitle,
   SURFACED_ARTIFACTS_SAVED_VIEW,
@@ -149,6 +150,48 @@ describe("buildSurfacedArtifacts", () => {
     ]);
   });
 
+  it("executes saved views against canonical dotted field ids", async () => {
+    await registerArtifact(adapter, {
+      artifact_id: "art-kapelle",
+      basename: "2026-07-07-kapelle-task.md",
+      agent: "substrate-api-codex",
+      tag: "KG-03",
+      abs_path: "/tmp/kapelle-task.md",
+      title: "Kapelle task output",
+      produced_at: NOW,
+      source: "delivery-log",
+    }, NOW);
+    await registerArtifact(adapter, {
+      artifact_id: "art-finance",
+      basename: "2026-07-07-finances-task.md",
+      agent: "finances",
+      tag: "KG-06",
+      abs_path: "/Users/kilgore/Dropbox/Code/finances/output/2026-07-07-finances-task.md",
+      title: "Finance task output",
+      produced_at: NOW,
+      source: "delivery-log",
+    }, NOW);
+
+    const rows = await buildSurfacedArtifacts(adapter, { limit: 7, readFile });
+    const result = executeSurfacedArtifactsSavedView(rows, {
+      and: [
+        { op: "eq", field: "artifact.projectRef", value: "finances" },
+        { op: "eq", field: "artifact.agentName", value: "finances" },
+      ],
+    }, NOW);
+
+    expect(result).toMatchObject({
+      ok: true,
+      count: 1,
+      errors: [],
+      rows: [expect.objectContaining({
+        id: "artifact:art-finance",
+        project_ref: "finances",
+        agent_name: "finances",
+      })],
+    });
+  });
+
   it("emits the row shape and orders relevance before freshness", async () => {
     const criticalPath = "/Users/kilgore/Dropbox/Code/trinity/output/2026-06-02-zach-meeting-prep.md";
     files.set(criticalPath, "# Zach meeting - scan-before-you-walk-in prep\n\nBody");
@@ -183,6 +226,83 @@ describe("buildSurfacedArtifacts", () => {
     expect(rows.find((r) => r.dispatch_ref === "phid:disp-missing")?.relevance_reason).toBe("blocked_or_stale");
   });
 
+  it("projects cached artifact bodies as renderable when the source path is unavailable", async () => {
+    const artifactId = "art-cache-fallback";
+    await registerArtifact(adapter, {
+      artifact_id: artifactId,
+      basename: "2026-07-07-cache-fallback.md",
+      agent: "substrate-api-codex",
+      tag: "T-RELY",
+      abs_path: "/tmp/cache-fallback.md",
+      title: null,
+      produced_at: NOW,
+      source: "agent-done",
+      media_type: "text/markdown",
+      content_hash: "hash-current",
+      source_mtime: "2026-07-07T11:59:00.000Z",
+    }, NOW);
+    await adapter.query(
+      `INSERT INTO artifact_bodies
+         (artifact_id, media_type, content_hash, source_mtime, source_size,
+          body_text, body_truncated, body_error, cached_at, updated_at)
+       VALUES (?, 'text/markdown', 'hash-current', '2026-07-07T11:59:00.000Z',
+               37, '# Cache-backed artifact\n\nReadable.', 0, NULL, ?, ?)`,
+      [artifactId, NOW, NOW],
+    );
+
+    const row = (await buildSurfacedArtifacts(adapter, { limit: 7, readFile }))
+      .find((r) => r.id === `artifact:${artifactId}`);
+    expect(row).toMatchObject({
+      title: "Cache-backed artifact",
+      visibility_proof: {
+        discovered_by: "agent_done",
+        artifact_path_present: true,
+        body_renderable: true,
+      },
+      delivery: expect.objectContaining({
+        freshness: "current",
+        body_cached: true,
+        body_preview: "# Cache-backed artifact\n\nReadable.",
+      }),
+    });
+  });
+
+  it("projects stale freshness when cached artifact body evidence no longer matches the catalog", async () => {
+    const artifactId = "art-stale-cache";
+    await registerArtifact(adapter, {
+      artifact_id: artifactId,
+      basename: "2026-07-07-stale-cache.md",
+      agent: "substrate-api-codex",
+      tag: "T-RELY",
+      abs_path: "/tmp/stale-cache.md",
+      title: "Stale cache",
+      produced_at: NOW,
+      source: "agent-done",
+      media_type: "text/markdown",
+      content_hash: "hash-new",
+      source_mtime: "2026-07-07T12:00:00.000Z",
+    }, NOW);
+    await adapter.query(
+      `INSERT INTO artifact_bodies
+         (artifact_id, media_type, content_hash, source_mtime, source_size,
+          body_text, body_truncated, body_error, cached_at, updated_at)
+       VALUES (?, 'text/markdown', 'hash-old', '2026-07-07T11:00:00.000Z',
+               22, '# Older cache body', 0, NULL, ?, ?)`,
+      [artifactId, NOW, NOW],
+    );
+
+    const row = (await buildSurfacedArtifacts(adapter, { limit: 7, readFile }))
+      .find((r) => r.id === `artifact:${artifactId}`);
+    expect(row).toMatchObject({
+      visibility_proof: { body_renderable: true },
+      delivery: expect.objectContaining({
+        freshness: "stale",
+        body_cached: true,
+        content_hash: "hash-new",
+      }),
+    });
+  });
+
   it("surfaces done dispatches with null, missing, empty, and renderable artifact paths", async () => {
     await seedDone(adapter, { dispatch_phid: "phid:disp-null", subject: "Null artifact path" });
     await seedDone(adapter, { dispatch_phid: "phid:disp-missing-path", subject: "Missing artifact path", artifact_path: "/tmp/vanished.md" });
@@ -199,6 +319,36 @@ describe("buildSurfacedArtifacts", () => {
       title: "Renderable closeout",
       visibility_proof: { discovered_by: "agent_done", artifact_path_present: true, body_renderable: true },
     });
+  });
+
+  it("normalizes the KG-04 local-path closeout to a stable full-view artifact id", async () => {
+    const kg04Path = "/Users/kilgore/Dropbox/Code/cane/id-agents-kg04-worktree/output/kg-04-task-doc-backend-fix-closeout.md";
+    files.set(kg04Path, "# KG-04 Task Doc Backend Fix Closeout\n\nDispatch: `phid:disp-f207819b3d1db8cf`");
+    await seedDone(adapter, {
+      dispatch_phid: "phid:disp-kg04",
+      subject: "KG-04 Task Doc Backend Fix Closeout",
+      artifact_path: kg04Path,
+    });
+
+    const stableId = artifactIdForSurfacingPath(kg04Path);
+    const row = (await buildSurfacedArtifacts(adapter, { limit: 7, readFile }))
+      .find((candidate) => candidate.dispatch_ref === "phid:disp-kg04");
+
+    expect(row).toMatchObject({
+      title: "KG-04 Task Doc Backend Fix Closeout",
+      artifact_ref: stableId,
+      visibility_proof: {
+        artifact_path_present: true,
+        body_renderable: true,
+      },
+      delivery: expect.objectContaining({
+        artifact_id: stableId,
+        source_path: kg04Path,
+        stable_url: `/artifacts/${stableId}/detail`,
+        freshness: "current",
+      }),
+    });
+    expect(row?.artifact_ref).not.toBe(kg04Path);
   });
 
   it("emits fail-loud health events for unreadable bodies and rows missing from the primary surface", async () => {
@@ -237,7 +387,7 @@ describe("buildSurfacedArtifacts", () => {
         subject_id: "phid:disp-unreadable",
         data: expect.objectContaining({
           dispatch_ref: "phid:disp-unreadable",
-          artifact_ref: "/tmp/vanished.md",
+          artifact_ref: artifactIdForSurfacingPath("/tmp/vanished.md"),
           discovered_by: "agent_done",
           body_renderable: false,
         }),
@@ -249,7 +399,7 @@ describe("buildSurfacedArtifacts", () => {
         subject_id: "phid:disp-suppressed",
         data: expect.objectContaining({
           dispatch_ref: "phid:disp-suppressed",
-          artifact_ref: "/tmp/suppressed.md",
+          artifact_ref: artifactIdForSurfacingPath("/tmp/suppressed.md"),
           discovered_by: "agent_done",
           body_renderable: true,
         }),
@@ -571,6 +721,79 @@ This program should be queued as the Local-First Project/Artifact Surfacing prog
       dispatch_ref: "phid:disp-local-first",
       source_kind: "dispatch_done",
     });
+  });
+
+  it("groups repeated dispatch, task, branch, and project artifacts behind one primary row", async () => {
+    files.set("/tmp/task-closeout.md", [
+      "---",
+      "project: kapelle",
+      "task: kg03-read-this-next-saved-views-backend",
+      "---",
+      "# Read This Next closeout",
+    ].join("\n"));
+    files.set("/tmp/task-verification.md", [
+      "---",
+      "project: kapelle",
+      "task: kg03-read-this-next-saved-views-backend",
+      "---",
+      "# Read This Next verification",
+    ].join("\n"));
+    await seedDone(adapter, {
+      dispatch_phid: "phid:disp-task-closeout",
+      subject: "Read This Next closeout",
+      body_markdown: "Task: kg03-read-this-next-saved-views-backend",
+      artifact_path: "/tmp/task-closeout.md",
+    });
+    await seedDone(adapter, {
+      dispatch_phid: "phid:disp-task-verification",
+      subject: "Read This Next verification",
+      body_markdown: "Task: kg03-read-this-next-saved-views-backend",
+      artifact_path: "/tmp/task-verification.md",
+    });
+    await seedDone(adapter, {
+      dispatch_phid: "phid:disp-branch-promo-a",
+      subject: "Promotion record A",
+      promote: 1,
+      promotion_input_json: JSON.stringify({ repo: "/repo/id-agents", branch: "feat/read-this-next", base: "main", remote: "origin" }),
+      promotion_result_json: JSON.stringify({ completed: true }),
+      artifact_path: "/tmp/task-closeout.md",
+    });
+    await seedDone(adapter, {
+      dispatch_phid: "phid:disp-branch-promo-b",
+      subject: "Promotion record B",
+      promote: 1,
+      promotion_input_json: JSON.stringify({ repo: "/repo/id-agents", branch: "feat/read-this-next", base: "main", remote: "origin" }),
+      promotion_result_json: JSON.stringify({ completed: true }),
+      artifact_path: "/tmp/task-verification.md",
+    });
+
+    const model = await buildSurfacedArtifactsReadModel(adapter, { limit: 7, readFile });
+    const taskGroup = model.rows.find((row) => row.work_item_ref === "task:kg03-read-this-next-saved-views-backend");
+    const branchGroup = model.rows.find((row) => row.work_item_ref === "branch:feat/read-this-next");
+
+    expect(taskGroup).toMatchObject({
+      id: "group:task:kg03-read-this-next-saved-views-backend",
+      task_ref: "kg03-read-this-next-saved-views-backend",
+      project_ref: "kapelle",
+      group_count: 2,
+      grouped_source_kinds: expect.arrayContaining(["dispatch_done", "verification"]),
+    });
+    expect(branchGroup).toMatchObject({
+      id: "group:branch:feat/read-this-next",
+      group_count: 2,
+      grouped_source_kinds: expect.arrayContaining(["promotion"]),
+    });
+    expect(model.recent_flood.groups).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        work_item_ref: "task:kg03-read-this-next-saved-views-backend",
+        raw_count: 2,
+        project_ref: "kapelle",
+      }),
+      expect.objectContaining({
+        work_item_ref: "branch:feat/read-this-next",
+        raw_count: 2,
+      }),
+    ]));
   });
 
   it("registers canonical saved-view ids for surfaced row fields", () => {

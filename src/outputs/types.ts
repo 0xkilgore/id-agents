@@ -279,10 +279,21 @@ export interface ArtifactDispatchReceipt {
 export type ArtifactCommentVisibleState =
   | "recorded+routed"
   | "recorded-but-route-failed-with-retry"
+  | "recorded-route-failed-retryable"
+  | "disabled/not-recorded"
+  | "terminal-failure"
   | "not-recorded";
+
+export type ArtifactFeedbackCompatStatus =
+  | "recorded+routed"
+  | "recorded-route-failed-retryable"
+  | "disabled/not-recorded"
+  | "terminal-failure";
 
 export interface ArtifactCommentRouteStatus {
   visible_state: ArtifactCommentVisibleState;
+  compat_status: ArtifactFeedbackCompatStatus;
+  feedback_status: ArtifactFeedbackCompatStatus;
   route_kind: "acknowledgement" | "approval_signal" | "substantive_follow_up" | "question";
   routed: boolean;
   retryable: boolean;
@@ -604,6 +615,7 @@ export interface ArtifactDetailResponse {
   ok: true;
   schema_version: "artifact.detail.v1";
   generated_at: string;
+  version_key: string;
   artifact_id: string;
   requested_ref: string;
   resolved_from: "artifact_id" | "encoded_path" | "path";
@@ -620,6 +632,16 @@ export interface ArtifactDetailResponse {
   timeline: ArtifactTimelineEvent[];
   provenance: ArtifactDetailProvenanceSummary;
   draft: CaneDraftPayload | null;
+}
+
+export interface ArtifactDetailVersionResponse {
+  ok: true;
+  schema_version: "artifact.detail.version.v1";
+  generated_at: string;
+  artifact_id: string;
+  requested_ref: string;
+  resolved_from: "artifact_id" | "encoded_path" | "path";
+  version_key: string;
 }
 
 // Stub-response from POST /artifacts/:id/ship. Blockers explain why

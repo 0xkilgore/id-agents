@@ -626,12 +626,28 @@ function parseRouteStatus(value: unknown): ArtifactCommentRouteStatus | null {
   if (
     v.visible_state !== "recorded+routed" &&
     v.visible_state !== "recorded-but-route-failed-with-retry" &&
+    v.visible_state !== "recorded-route-failed-retryable" &&
+    v.visible_state !== "disabled/not-recorded" &&
+    v.visible_state !== "terminal-failure" &&
     v.visible_state !== "not-recorded"
   ) {
     return null;
   }
+  const compat =
+    v.compat_status === "recorded+routed" ||
+    v.compat_status === "recorded-route-failed-retryable" ||
+    v.compat_status === "disabled/not-recorded" ||
+    v.compat_status === "terminal-failure"
+      ? v.compat_status
+      : v.visible_state === "recorded-but-route-failed-with-retry"
+        ? "recorded-route-failed-retryable"
+        : v.visible_state === "not-recorded"
+          ? "disabled/not-recorded"
+          : (v.visible_state as ArtifactCommentRouteStatus["compat_status"]);
   return {
     visible_state: v.visible_state,
+    compat_status: compat,
+    feedback_status: compat,
     route_kind:
       v.route_kind === "acknowledgement" ||
       v.route_kind === "approval_signal" ||

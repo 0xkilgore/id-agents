@@ -44,9 +44,17 @@ export interface ProtectedRootEntry {
  */
 export const DEFAULT_PROTECTED_ROOTS: ProtectedRootEntry[] = [
   {
+    root: "/Users/kilgore/Dropbox/Code/cane/id-agents-deploy-main",
+    repo_name: "id-agents-deploy-main",
+    role: "public manager/runtime, clean launchd deploy checkout",
+    intended_canonical_branch: "main",
+    dirty_severity: "critical",
+    block_builds_without_lease: true,
+  },
+  {
     root: "/Users/kilgore/Dropbox/Code/cane/id-agents",
     repo_name: "id-agents",
-    role: "public manager/runtime, deploy checkout",
+    role: "public manager/runtime source checkout",
     intended_canonical_branch: "main",
     dirty_severity: "critical",
     block_builds_without_lease: true,

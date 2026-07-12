@@ -29,6 +29,7 @@ import {
   usesCliLogin,
 } from './runtime/registry.js';
 import { resolveDefaultWorkspaceDir } from './lib/data-root.js';
+import { sanitizeCatalogRuntimeTruth } from './db/agent-runtime-sot.js';
 
 interface LocalAgentConfig {
   name: string;
@@ -253,7 +254,7 @@ export async function startLocalAgent(config: LocalAgentConfig): Promise<{
       const decoded = Buffer.from(rawCatalog, 'base64').toString('utf8');
       const parsed = JSON.parse(decoded);
       if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-        catalogSeed = parsed as Record<string, unknown>;
+        catalogSeed = sanitizeCatalogRuntimeTruth(parsed) as Record<string, unknown>;
       }
     } catch (err: any) {
       console.warn(`⚠️  Failed to decode ID_AGENT_CATALOG: ${err?.message || err}`);

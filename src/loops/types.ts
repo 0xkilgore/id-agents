@@ -107,7 +107,8 @@ export type WorktreeHygieneIncidentCode =
   | "stale_base"
   | "branch_held_by_worktree"
   | "ahead_behind_divergence"
-  | "unlinked_branch";
+  | "unlinked_branch"
+  | "missing_clean_promotion_path";
 
 export type WorktreeHygieneAction =
   | "route_to_worktree_hygiene"

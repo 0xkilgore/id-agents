@@ -27,10 +27,13 @@ import {
 } from "../../src/loops/manual-trigger.js";
 import {
   buildPromotionHygieneRun,
+  buildScheduledWorktreeHygieneRun,
   classifyPromotionHygieneFailure,
   hygieneDedupeKey,
+  hygieneOwnerLane,
   hygieneTaskName,
   shouldEmitNeedsOperatorInput,
+  upsertWorktreeHygieneCleanupRoute,
 } from "../../src/loops/worktree-hygiene.js";
 import type { LoopRecord } from "../../src/loops/types.js";
 
@@ -163,6 +166,55 @@ describe("LoopRun evidence contract — idempotency, cap, transitions", () => {
       action: "create_fresh_branch_from_base",
     });
     expect(run.idempotency_key).toBe("promotion-hygiene:/repo/app:feature/a:ahead_behind_divergence");
+    expect(run.created_by).toMatchObject({ kind: "system", id: "worktree-hygiene-router" });
+    expect(run.step_log).toEqual([
+      expect.objectContaining({
+        phase: "admission",
+        evidence_refs: expect.arrayContaining([
+          { kind: "worktree_hygiene_dedupe", ref: "/repo/app:feature/a:ahead_behind_divergence" },
+          { kind: "dispatch", ref: "phid:disp-1" },
+        ]),
+      }),
+    ]);
+    expect(run.step_log.some((step) => step.phase === "llm_step")).toBe(false);
+
+    const first = await createLoopRun(adapter, run);
+    const second = await createLoopRun(adapter, run);
+    expect(first.created).toBe(true);
+    expect(second.created).toBe(false);
+    expect(await listLoopRuns(adapter, loop.loop_phid, {})).toHaveLength(1);
+  });
+
+  it("records scheduled Worktree Hygiene guard runs without LLM-memory state and dedupes by scheduled instant", async () => {
+    const loop = await getLoop(adapter, "worktree-hygiene");
+    if (!loop) throw new Error("seed missing worktree-hygiene");
+
+    const run = buildScheduledWorktreeHygieneRun(loop, {
+      recurrence_phid: "phid:recurrence-worktree-hygiene",
+      recurrence_instance_phid: "phid:recurrence-instance-worktree-hygiene-1",
+      scheduled_for: "2026-07-08T15:00:00.000Z",
+      fired_at: "2026-07-08T15:03:00.000Z",
+    });
+
+    expect(run.trigger).toMatchObject({
+      kind: "scheduled",
+      recurrence_phid: "phid:recurrence-worktree-hygiene",
+      recurrence_instance_phid: "phid:recurrence-instance-worktree-hygiene-1",
+      scheduled_for: "2026-07-08T15:00:00.000Z",
+      dedup_key: "scheduled:2026-07-08T15:00:00.000Z",
+    });
+    expect(run.created_by).toMatchObject({ kind: "system", id: "manager-recurring-loop" });
+    expect(run.step_log).toEqual([
+      expect.objectContaining({
+        phase: "admission",
+        evidence_refs: expect.arrayContaining([
+          { kind: "loop", ref: "phid:loop:worktree-hygiene" },
+          { kind: "recurrence", ref: "phid:recurrence-worktree-hygiene" },
+          { kind: "scheduled_for", ref: "2026-07-08T15:00:00.000Z" },
+        ]),
+      }),
+    ]);
+    expect(run.step_log.some((step) => step.phase === "llm_step")).toBe(false);
 
     const first = await createLoopRun(adapter, run);
     const second = await createLoopRun(adapter, run);
@@ -249,6 +301,51 @@ describe("worktree hygiene classification", () => {
     expect(incident).toMatchObject({
       incident_code: "ahead_behind_divergence",
       action: "create_fresh_branch_from_base",
+    });
+  });
+
+  it("classifies missing clean promotion path as a cleanup task route", () => {
+    const incident = classifyPromotionHygieneFailure({
+      repo: "/repo/app",
+      branch: "feature/no-clean-path",
+      text: "promotion failed: missing clean promotion path for feature/no-clean-path",
+    });
+    expect(incident).toMatchObject({
+      incident_code: "missing_clean_promotion_path",
+      action: "create_or_update_hygiene_task",
+    });
+  });
+
+  it("upserts cleanup route by repo:branch:class_code and preserves owner lane", async () => {
+    const incident = classifyPromotionHygieneFailure({
+      repo: "/Users/kilgore/Dropbox/Code/cane/id-agents",
+      branch: "feature/diverged",
+      dispatch_id: "phid:disp-one",
+      text: "branch feature/diverged has diverged from main (ahead=1, behind=2)",
+    });
+    expect(incident).not.toBeNull();
+    expect(hygieneOwnerLane(incident!.repo)).toBe("substrate-api-codex");
+
+    const first = await upsertWorktreeHygieneCleanupRoute(adapter, incident!, { nowIso: NOW });
+    const second = await upsertWorktreeHygieneCleanupRoute(adapter, {
+      ...incident!,
+      linked_dispatch: "phid:disp-two",
+      detail: "repeated failure with same repo/branch/class",
+    }, { nowIso: "2026-06-22T19:00:00.000Z" });
+
+    expect(first.created).toBe(true);
+    expect(second.created).toBe(false);
+    expect(second.item.item_id).toBe(first.item.item_id);
+    expect(second).toMatchObject({
+      dedupe_key: "/Users/kilgore/Dropbox/Code/cane/id-agents:feature/diverged:ahead_behind_divergence",
+      owner_lane: "substrate-api-codex",
+      cleanup_dispatch_id: null,
+    });
+    expect(second.item).toMatchObject({
+      logical_key: "worktree-hygiene:/Users/kilgore/Dropbox/Code/cane/id-agents:feature/diverged:ahead_behind_divergence",
+      readiness_state: "ready",
+      risk_class: "routine",
+      to_agent: "substrate-api-codex",
     });
   });
 

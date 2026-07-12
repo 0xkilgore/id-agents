@@ -14,6 +14,9 @@ import { SqliteQueriesRepo } from "../../src/db/repos/sqlite/queries-repo.js";
 import { SqliteNewsRepo } from "../../src/db/repos/sqlite/news-repo.js";
 import { SqliteSchedulesRepo } from "../../src/db/repos/sqlite/schedules-repo.js";
 import { SqliteTasksRepo } from "../../src/db/repos/sqlite/tasks-repo.js";
+import { migrateInboxTables, upsertInboxItem, upsertLink, getLinks } from "../../src/inbox/storage.js";
+import type { InboxItemRow } from "../../src/inbox/types.js";
+import { getLoopRunByKey } from "../../src/loops/storage.js";
 
 async function createInMemoryDb() {
   const adapter = new SqliteAdapter(":memory:");
@@ -101,6 +104,46 @@ async function claim(phid: string) {
   const handle = (manager as any).dispatchScheduler;
   await handle.reactor.claim({ max_in_flight: 10 });
   return handle.reactor.getByPhid(phid);
+}
+
+function writeArtifact(name: string, body = "# Report\n\nDone.\n"): string {
+  const artifactPath = path.join(workDir, "output", name);
+  fs.mkdirSync(path.dirname(artifactPath), { recursive: true });
+  fs.writeFileSync(artifactPath, body);
+  return artifactPath;
+}
+
+function inboxFixture(inbox_phid: string): InboxItemRow {
+  const now = new Date().toISOString();
+  return {
+    inbox_phid,
+    operator_state: "waiting_on_agent",
+    source_kind: "manual_capture",
+    source_external_id: null,
+    source_text: "Stormwater assessment request",
+    source_excerpt: "Stormwater assessment request",
+    source_subject: "Stormwater assessment",
+    source_from: "Chris",
+    classification_label: "dispatch",
+    classification_confidence: null,
+    classification_classifier: "human",
+    classification_rationale: null,
+    project_hint: "blowout",
+    agent_hint: "blowout",
+    origin_ref: "cane:stormwater",
+    received_at: now,
+    triaged_at: now,
+    resolved_at: null,
+    snoozed_until: null,
+    checked_off_at: null,
+    checked_off_reason: null,
+    source: "index",
+    parity_status: "ok",
+    generated_at: now,
+    projection_version: 1,
+    legacy_inbox_md_line: null,
+    legacy_shadow_path: null,
+  };
 }
 
 describe("enqueue promotion metadata propagation", () => {
@@ -406,6 +449,40 @@ describe("POST /agent-done — enforce mode", () => {
     expect(doc.status).toBe("done");
     expect(doc.promotion_result).toMatchObject({ completed: true });
   });
+
+  it("hygiene-classified promotion failure enqueues a Worktree Hygiene loop run", async () => {
+    const enq = await enqueue({ repo: "/abs/repo-hygiene", branch: "feature/diverged" });
+    await claim(enq.dispatch_phid);
+    const r = await fetch(`${baseUrl}/agent-done`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        dispatch_id: enq.dispatch_phid,
+        success: true,
+        promotion: {
+          required: true,
+          completed: false,
+          failure_detail: "branch feature/diverged has diverged from main (ahead=1, behind=2)",
+          repos: [],
+        },
+      }),
+    });
+    expect(r.status).toBe(200);
+
+    const run = await getLoopRunByKey(
+      db.adapter,
+      "phid:loop:worktree-hygiene",
+      "promotion-hygiene:/abs/repo-hygiene:feature/diverged:ahead_behind_divergence",
+    );
+    expect(run?.trigger).toMatchObject({
+      kind: "promotion_hygiene",
+      source: "orchestration",
+      repo: "/abs/repo-hygiene",
+      branch: "feature/diverged",
+      incident_code: "ahead_behind_divergence",
+      linked_dispatch: enq.dispatch_phid,
+    });
+  });
 });
 
 describe("POST /agent-done — input validation", () => {
@@ -443,6 +520,7 @@ describe("POST /agent-done — input validation", () => {
 describe("POST /agent-done — queued-dispatch closeout (out-of-band success)", () => {
   it("closes a still-queued non-build dispatch as done with persisted result", async () => {
     const enq = await enqueue({ /* non-build, queued, never ticked */ });
+    const artifactPath = writeArtifact("spec.md");
 
     const r = await fetch(`${baseUrl}/agent-done`, {
       method: "POST",
@@ -450,7 +528,7 @@ describe("POST /agent-done — queued-dispatch closeout (out-of-band success)", 
       body: JSON.stringify({
         dispatch_id: enq.dispatch_phid,
         success: true,
-        result: { artifact_path: "/tmp/spec.md" },
+        result: { artifact_path: artifactPath },
       }),
     });
     expect(r.status).toBe(200);
@@ -465,25 +543,99 @@ describe("POST /agent-done — queued-dispatch closeout (out-of-band success)", 
     expect(doc.status).toBe("done");
     expect(doc.completed_at).not.toBeNull();
     const result = await reactor.getResult(enq.dispatch_phid);
-    expect(result).toEqual({ artifact_path: "/tmp/spec.md" });
+    expect(result).toMatchObject({ artifact_path: artifactPath });
+    expect((result as any).report_id).toMatch(/^art-/);
     const artifactRows = await db.adapter.query<{ abs_path: string; source: string; availability: string; dispatch_ref: string | null }>(
       `SELECT abs_path, source, availability, dispatch_ref
          FROM artifacts
         WHERE abs_path = ?`,
-      ["/tmp/spec.md"],
+      [artifactPath],
     );
     expect(artifactRows.rows).toEqual([
       {
-        abs_path: "/tmp/spec.md",
+        abs_path: artifactPath,
         source: "agent-done",
-        availability: "missing",
+        availability: "present",
         dispatch_ref: enq.dispatch_phid,
       },
     ]);
   });
 
+  it("regression: stormwater-style top-level artifact closeout persists artifact/report evidence, inbox links, and receipt", async () => {
+    const enq = await enqueue({ /* queued external ask */ });
+    const artifactPath = writeArtifact(
+      "2026-07-08-stormwater-assessment-recommendation.md",
+      "# Stormwater assessment recommendation\n\nMachine-readable closeout fixture.\n",
+    );
+    migrateInboxTables(db.adapter);
+    await upsertInboxItem(db.adapter, inboxFixture("inbox-stormwater-001"));
+    await upsertLink(db.adapter, "inbox-stormwater-001", "dispatch", enq.dispatch_phid);
+
+    const r = await fetch(`${baseUrl}/agent-done`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        dispatch_id: enq.dispatch_phid,
+        success: true,
+        artifact_path: artifactPath,
+        result: { tl_dr: "Stormwater recommendation ready" },
+      }),
+    });
+
+    expect(r.status).toBe(200);
+    const body = await r.json() as any;
+    expect(body.receipt).toMatchObject({
+      schema_version: "agent_done.receipt.v1",
+      dispatch_id: enq.dispatch_phid,
+      query_id: enq.query_id,
+      response_status: "output_ready",
+      artifact_path: artifactPath,
+      inbox_refs: ["inbox-stormwater-001"],
+    });
+    expect(body.receipt.report_id).toMatch(/^art-/);
+
+    const reactor = (manager as any).dispatchScheduler.reactor;
+    const doc = await reactor.getByPhid(enq.dispatch_phid);
+    expect(doc.status).toBe("done");
+    expect(doc.artifact_path).toBe(artifactPath);
+    const result = await reactor.getResult(enq.dispatch_phid);
+    expect(result).toMatchObject({
+      tl_dr: "Stormwater recommendation ready",
+      artifact_path: artifactPath,
+      report_id: body.receipt.report_id,
+    });
+
+    const inboxRows = await db.adapter.query<{ operator_state: string; resolved_at: string | null }>(
+      `SELECT operator_state, resolved_at FROM inbox_items WHERE inbox_phid = ?`,
+      ["inbox-stormwater-001"],
+    );
+    expect(inboxRows.rows[0]).toMatchObject({
+      operator_state: "output_ready",
+    });
+    expect(inboxRows.rows[0].resolved_at).not.toBeNull();
+    const links = await getLinks(db.adapter, "inbox-stormwater-001");
+    expect(links).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: "dispatch", target: enq.dispatch_phid }),
+      expect.objectContaining({ kind: "artifact", target: artifactPath }),
+      expect.objectContaining({ kind: "artifact", target: body.receipt.report_id }),
+    ]));
+
+    const detailRes = await fetch(`${baseUrl}/dispatches/${encodeURIComponent(enq.dispatch_phid)}/detail`, {
+      headers: { "X-Id-Team": "default" },
+    });
+    expect(detailRes.status).toBe(200);
+    const detail = await detailRes.json() as any;
+    expect(detail.dispatch.linked_artifact).toMatchObject({
+      id: body.receipt.report_id,
+      report_id: body.receipt.report_id,
+      source: "result_json",
+    });
+  });
+
   it("idempotent: a second /agent-done is a terminal no-op (no 500, state stays done)", async () => {
     const enq = await enqueue({});
+    const firstArtifact = writeArtifact("first.md");
+    const secondArtifact = writeArtifact("second.md");
 
     const first = await fetch(`${baseUrl}/agent-done`, {
       method: "POST",
@@ -491,7 +643,7 @@ describe("POST /agent-done — queued-dispatch closeout (out-of-band success)", 
       body: JSON.stringify({
         dispatch_id: enq.dispatch_phid,
         success: true,
-        result: { artifact_path: "/tmp/first.md" },
+        result: { artifact_path: firstArtifact },
       }),
     });
     expect(first.status).toBe(200);
@@ -502,7 +654,7 @@ describe("POST /agent-done — queued-dispatch closeout (out-of-band success)", 
       body: JSON.stringify({
         dispatch_id: enq.dispatch_phid,
         success: true,
-        result: { artifact_path: "/tmp/second.md" },
+        result: { artifact_path: secondArtifact },
       }),
     });
     expect(second.status).toBe(200);
@@ -512,7 +664,7 @@ describe("POST /agent-done — queued-dispatch closeout (out-of-band success)", 
     // First result wins (terminal no-op semantics).
     const reactor = (manager as any).dispatchScheduler.reactor;
     const result = await reactor.getResult(enq.dispatch_phid);
-    expect(result).toEqual({ artifact_path: "/tmp/first.md" });
+    expect(result).toMatchObject({ artifact_path: firstArtifact });
   });
 
   it("queued failure path still works via markFailed (existing behavior unchanged)", async () => {

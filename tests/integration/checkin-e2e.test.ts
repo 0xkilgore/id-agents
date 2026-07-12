@@ -272,4 +272,37 @@ describe('Checkin end-to-end: /talk-to → fire → auto-close', () => {
     const tickAfterClose = await svc.tickTeam(teamId, t2 + 10 * DEFAULT_INTERVAL_MS);
     expect(tickAfterClose).toMatchObject({ scanned: 0, fired: 0, expired: 0 });
   }, 30000);
+
+  it('rolls back the auto-attached task when checkin creation fails', async () => {
+    const originalCreate = db.checkins.create.bind(db.checkins);
+    let attempted = false;
+    db.checkins.create = async () => {
+      attempted = true;
+      throw new Error('owner_agent_id "agent_stale" belongs to a different team');
+    };
+
+    try {
+      const dispatchRes = await fetch(`${baseUrl}/talk-to`, {
+        method: 'POST',
+        headers: adminHeaders(TEAM),
+        body: JSON.stringify({
+          to: 'coder',
+          from: 'cto',
+          message: 'please implement the rollback widget',
+          wait: false,
+          task: { title: 'Build rollback widget', name: 'build-rollback-widget' },
+        }),
+      });
+
+      expect(dispatchRes.status).toBe(500);
+      const body = (await dispatchRes.json()) as { error: string };
+      expect(body.error).toBe('checkin_auto_attach_failed');
+      expect(attempted).toBe(true);
+    } finally {
+      db.checkins.create = originalCreate;
+    }
+
+    const task = await db.tasks.getByNameForTeam('build-rollback-widget', teamId);
+    expect(task).toBeNull();
+  });
 });

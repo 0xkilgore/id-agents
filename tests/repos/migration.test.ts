@@ -517,3 +517,81 @@ describe('SQLite migration — inbox ownership (manager foundation)', () => {
     await adapter.close();
   });
 });
+
+describe('SQLite migration — checkins linked_task FK repair', () => {
+  it('repairs stale checkins.linked_task_id FK references to tasks_old', async () => {
+    const adapter = await freshDb();
+    const teamsRepo = new SqliteTeamsRepo(adapter);
+    const teamId = await teamsRepo.getOrCreateTeamId('fk-repair-team');
+    const now = Date.now();
+
+    await adapter.query(
+      `INSERT INTO tasks (id, name, uuid, team_id, title, status, created_at, updated_at)
+       VALUES ('task_fk_repair_1', 'fk-repair-task', 'uuid-fk-repair-1', ?, 'FK repair task', 'doing', ?, ?)`,
+      [teamId, now, now],
+    );
+
+    adapter.exec(`
+      PRAGMA foreign_keys = OFF;
+      ALTER TABLE checkins RENAME TO checkins_good_fk;
+      CREATE TABLE tasks_old (id TEXT PRIMARY KEY);
+      CREATE TABLE checkins (
+        id TEXT PRIMARY KEY,
+        team_id TEXT NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+        owner_agent_id TEXT REFERENCES agents(id) ON DELETE SET NULL,
+        created_by_agent_id TEXT REFERENCES agents(id) ON DELETE SET NULL,
+        linked_task_id TEXT REFERENCES tasks_old(id) ON DELETE CASCADE,
+        interval_seconds INTEGER NOT NULL,
+        priority TEXT NOT NULL DEFAULT 'normal',
+        status TEXT NOT NULL,
+        close_when TEXT NOT NULL,
+        max_iterations INTEGER,
+        iteration_count INTEGER NOT NULL DEFAULT 0,
+        next_fire_at INTEGER,
+        snooze_until INTEGER,
+        ttl_expires_at INTEGER,
+        last_fire_at INTEGER,
+        last_event_seq INTEGER REFERENCES event_log(seq) ON DELETE SET NULL,
+        note TEXT,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        closed_at INTEGER,
+        closed_reason TEXT
+      );
+      INSERT INTO checkins
+        (id, team_id, linked_task_id, interval_seconds, priority, status, close_when, iteration_count, created_at, updated_at)
+      VALUES
+        ('chk_fk_repair_1', '${teamId}', 'task_fk_repair_1', 60, 'normal', 'active', '{}', 0, ${now}, ${now});
+      DROP TABLE checkins_good_fk;
+      DROP TABLE tasks_old;
+      PRAGMA foreign_keys = ON;
+    `);
+
+    const before = await adapter.query<{ table: string; from: string }>(
+      `SELECT * FROM pragma_foreign_key_list('checkins')`,
+    );
+    expect(before.rows.find((row) => row.from === 'linked_task_id')?.table).toBe('tasks_old');
+
+    await migrateSqlite(adapter);
+
+    const after = await adapter.query<{ table: string; from: string }>(
+      `SELECT * FROM pragma_foreign_key_list('checkins')`,
+    );
+    expect(after.rows.find((row) => row.from === 'linked_task_id')?.table).toBe('tasks');
+
+    await expect(adapter.query(
+      `INSERT INTO checkins
+        (id, team_id, linked_task_id, interval_seconds, priority, status, close_when, iteration_count, created_at, updated_at)
+       VALUES
+        ('chk_fk_repair_2', ?, 'task_fk_repair_1', 60, 'normal', 'active', '{}', 0, ?, ?)`,
+      [teamId, now + 1, now + 1],
+    )).resolves.toBeDefined();
+
+    const rows = await adapter.query<{ linked_task_id: string | null }>(
+      `SELECT linked_task_id FROM checkins WHERE id = 'chk_fk_repair_1'`,
+    );
+    expect(rows.rows[0]?.linked_task_id).toBe('task_fk_repair_1');
+
+    await adapter.close();
+  });
+});

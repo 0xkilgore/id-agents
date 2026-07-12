@@ -4,13 +4,14 @@
 <dict>
     <key>Label</key>
     <string>com.kilgore.deploy-freshness-watchdog</string>
-    <!-- T-DEPLOY.5: detect persistent stale_alerted (manager behind origin/main)
-         and auto-redeploy per manager-redeploy-gotchas-20260702.md. Runs OUTSIDE
-         the fleet because fleet agents cannot restart their own manager (Gotcha 0). -->
+    <!-- T-DEPLOY.5: detect persistent stale manager freshness or broken
+         deploy-checkout/plist hygiene and auto-redeploy per
+         manager-redeploy-gotchas-20260702.md. Runs OUTSIDE the fleet because
+         fleet agents cannot restart their own manager (Gotcha 0). -->
     <key>ProgramArguments</key>
     <array>
         <string>/opt/homebrew/bin/node</string>
-        <string>/Users/kilgore/Dropbox/Code/cane/id-agents/scripts/deploy-freshness-watchdog.mjs</string>
+        <string>/Users/kilgore/Dropbox/Code/cane/id-agents-deploy-main/scripts/deploy-freshness-watchdog.mjs</string>
     </array>
     <!-- every 15 minutes; acts only after 2 consecutive stale readings (>15 min). -->
     <key>StartInterval</key>
