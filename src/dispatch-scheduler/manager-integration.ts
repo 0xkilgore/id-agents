@@ -967,11 +967,27 @@ export class SchedulerHandle {
     // in_flight transition just to satisfy markDoneWithResult's guard.
     // Every other non-in_flight state keeps the existing guard.
     if (doc.status === "queued") {
+      const emptyProductiveCloseout = classifyQueuedProductiveCloseout(doc, args.result ?? null);
+      if (emptyProductiveCloseout.action === "fail") {
+        this.logger.warn("queued_productive_empty_success_guardrail", {
+          phid: doc.dispatch_phid,
+          query_id: doc.query_id,
+          reason: emptyProductiveCloseout.reason,
+        });
+        const r = await this.client.markFailed(doc.dispatch_phid, {
+          failure_kind: "validation_failed",
+          detail: emptyProductiveCloseout.reason,
+        });
+        return r.ok ? r.value : doc;
+      }
       this.logger.warn("agent_done_unexpected_status", {
         phid: doc.dispatch_phid,
         status: doc.status,
         accepted: true,
         closeout_path: "queued_out_of_band",
+        ...(emptyProductiveCloseout.action === "explicit_noop"
+          ? { classified_as: "explicit_noop", reason: emptyProductiveCloseout.reason }
+          : {}),
       });
       return this.reactor.markQueuedDoneWithResult(
         doc.dispatch_phid,
@@ -1063,4 +1079,72 @@ function mintQueryId(): string {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+type QueuedProductiveCloseout =
+  | { action: "allow"; reason: null }
+  | { action: "explicit_noop"; reason: string }
+  | { action: "fail"; reason: string };
+
+const PRODUCTIVE_ORCHESTRATION_RE = /\b(load[- ]?loop|refuel|re[- ]?fuel|auto[- ]?flesh|self[- ]?refuel|seed(?:ed|ing)? rows?|orchestration fuel)\b/i;
+
+function classifyQueuedProductiveCloseout(
+  doc: DispatchDoc,
+  result: Record<string, unknown> | null,
+): QueuedProductiveCloseout {
+  if (!isProductiveOrchestrationDispatch(doc)) return { action: "allow", reason: null };
+  if (hasArtifactEvidence(result) || hasQueuedWorkEvidence(result)) return { action: "allow", reason: null };
+  const noopReason = explicitNoopReason(result);
+  if (noopReason) return { action: "explicit_noop", reason: noopReason };
+  return {
+    action: "fail",
+    reason:
+      "productive orchestration closeout produced no artifact evidence, queued work evidence, or explicit no-op reason",
+  };
+}
+
+function isProductiveOrchestrationDispatch(doc: DispatchDoc): boolean {
+  return PRODUCTIVE_ORCHESTRATION_RE.test(
+    [doc.subject, doc.body_markdown, doc.from_actor, doc.channel].filter(Boolean).join("\n"),
+  );
+}
+
+function hasArtifactEvidence(result: Record<string, unknown> | null): boolean {
+  if (!result) return false;
+  return ["artifact_path", "artifact_id", "output_path", "output"].some((key) => nonEmptyString(result[key]));
+}
+
+function hasQueuedWorkEvidence(result: Record<string, unknown> | null): boolean {
+  if (!result) return false;
+  const numericKeys = ["queued", "queued_count", "queued_work", "dispatches_queued", "seeded_rows", "inserted", "created"];
+  if (numericKeys.some((key) => positiveNumber(result[key]))) return true;
+  if (Array.isArray(result.dispatches) && result.dispatches.length > 0) return true;
+  if (Array.isArray(result.queued_dispatches) && result.queued_dispatches.length > 0) return true;
+  if (Array.isArray(result.items) && result.items.length > 0) return true;
+  if (nonEmptyString(result.dispatch_phid) || nonEmptyString(result.query_id)) return true;
+  return result.status === "queued";
+}
+
+function explicitNoopReason(result: Record<string, unknown> | null): string | null {
+  if (!result) return null;
+  const reason =
+    stringValue(result.noop_reason) ??
+    stringValue(result.no_op_reason) ??
+    stringValue(result.explicit_noop_reason) ??
+    stringValue(result.reason);
+  const noopFlag = result.noop === true || result.no_op === true || result.status === "no_op" || result.status === "noop";
+  if (!noopFlag || !reason || reason.trim().length === 0) return null;
+  return `explicit no-op: ${reason.trim()}`;
+}
+
+function positiveNumber(value: unknown): boolean {
+  return typeof value === "number" && Number.isFinite(value) && value > 0;
+}
+
+function nonEmptyString(value: unknown): boolean {
+  return typeof value === "string" && value.trim().length > 0;
+}
+
+function stringValue(value: unknown): string | null {
+  return typeof value === "string" ? value : null;
 }

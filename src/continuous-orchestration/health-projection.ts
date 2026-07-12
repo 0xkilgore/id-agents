@@ -7,6 +7,7 @@
 import type { DbAdapter } from "../db/db-adapter.js";
 import { createHash } from "node:crypto";
 import { classifyPromotionHygieneFailure } from "../loops/worktree-hygiene.js";
+import { AUTO_READY_CONFIDENCE_THRESHOLD } from "./flesh-policy.js";
 
 export interface OrchestrationHealthBlocker {
   dispatch_phid: string;
@@ -46,9 +47,20 @@ export interface OrchestrationQueueNoisePattern {
 }
 
 export interface OrchestrationQueueQualityProjection {
+  /**
+   * Console-facing status contract:
+   * - ready: at least one dispatchable ready row can admit now.
+   * - underfed_needs_fuel: no ready fuel exists, but low-confidence held rows could refuel after review.
+   * - blocked_or_failed: queue is stopped by blockers/failures rather than lack of fuel.
+   * - needs_approval: non-low-confidence review/approval rows exist.
+   * - healthy_idle: no queued work, no ready fuel, and no held review backlog.
+   */
+  operating_state: "ready" | "underfed_needs_fuel" | "blocked_or_failed" | "needs_approval" | "healthy_idle";
   raw_queued: number;
+  ready_total: number;
   actionable_ready: number;
   needs_approval: number;
+  held_low_confidence: number;
   duplicate_or_noop_backfill: number;
   suppressed_by_dedupe: number;
   blocked_or_failed: number;
@@ -80,6 +92,8 @@ interface BacklogQueueRow {
   to_agent: string | null;
   dispatch_body: string | null;
   dependencies_json: string | null;
+  flesh_status: string | null;
+  flesh_confidence: number | null;
 }
 
 interface DispatchQueueCountRow {
@@ -153,6 +167,7 @@ async function readQueueQualityProjection(
   const rawQueued = Number(dispatchByStatus.get("queued") ?? 0) + Number(dispatchByStatus.get("bounced") ?? 0);
 
   const readyRows = backlogRows.filter((row) => row.readiness_state === "ready");
+  const heldLowConfidence = backlogRows.filter(isHeldLowConfidence).length;
   const blockedDependencyItemIds = new Set<string>();
   for (const ids of dependencyImpact.values()) for (const id of ids) blockedDependencyItemIds.add(id);
 
@@ -182,18 +197,31 @@ async function readQueueQualityProjection(
   const blockedOrFailed = blockedBacklog + failedDispatches + noise.retryableRouteFailures;
   const explanation = queueQualityExplanation({
     actionableReady,
+    readyTotal: readyRows.length,
     rawQueued,
     needsApproval,
+    heldLowConfidence,
     duplicateOrNoop: noise.duplicateOrNoop,
     suppressedByDedupe: noise.suppressedByDedupe,
     blockedOrFailed,
     activeBlockerCounts,
   });
+  const operatingState = queueOperatingState({
+    actionableReady,
+    readyTotal: readyRows.length,
+    heldLowConfidence,
+    needsApproval,
+    blockedOrFailed,
+    activeBlockerCounts,
+  });
 
   return {
+    operating_state: operatingState,
     raw_queued: rawQueued,
+    ready_total: readyRows.length,
     actionable_ready: actionableReady,
     needs_approval: needsApproval,
+    held_low_confidence: heldLowConfidence,
     duplicate_or_noop_backfill: noise.duplicateOrNoop,
     suppressed_by_dedupe: noise.suppressedByDedupe,
     blocked_or_failed: blockedOrFailed,
@@ -204,7 +232,8 @@ async function readQueueQualityProjection(
 
 async function readBacklogQueueRows(adapter: DbAdapter, teamId: string): Promise<BacklogQueueRow[]> {
   const { rows } = await adapter.query<BacklogQueueRow>(
-    `SELECT item_id, title, readiness_state, risk_class, to_agent, dispatch_body, dependencies_json
+    `SELECT item_id, title, readiness_state, risk_class, to_agent, dispatch_body, dependencies_json,
+            flesh_status, flesh_confidence
        FROM orchestration_backlog_item
       WHERE team_id = ?
         AND readiness_state NOT IN ('done', 'cancelled', 'superseded')`,
@@ -359,16 +388,49 @@ function isAutoRunRisk(risk: string | null | undefined): boolean {
   return risk === "routine" || risk === "build";
 }
 
+function isHeldLowConfidence(row: BacklogQueueRow): boolean {
+  if (row.readiness_state !== "needs_review" && row.readiness_state !== "needs_chris_batch") return false;
+  if (row.flesh_status !== "needs_chris_batch") return false;
+  const confidence = typeof row.flesh_confidence === "number" ? row.flesh_confidence : null;
+  return confidence !== null && confidence < AUTO_READY_CONFIDENCE_THRESHOLD;
+}
+
+function queueOperatingState(input: {
+  actionableReady: number;
+  readyTotal: number;
+  heldLowConfidence: number;
+  needsApproval: number;
+  blockedOrFailed: number;
+  activeBlockerCounts: { needsClarification: number; promotion: number };
+}): OrchestrationQueueQualityProjection["operating_state"] {
+  if (input.actionableReady > 0) return "ready";
+  if (input.readyTotal === 0 && input.heldLowConfidence > 0) return "underfed_needs_fuel";
+  if (
+    input.blockedOrFailed > 0 ||
+    input.activeBlockerCounts.needsClarification > 0 ||
+    input.activeBlockerCounts.promotion > 0
+  ) {
+    return "blocked_or_failed";
+  }
+  if (input.needsApproval > 0) return "needs_approval";
+  return "healthy_idle";
+}
+
 function queueQualityExplanation(input: {
   actionableReady: number;
+  readyTotal: number;
   rawQueued: number;
   needsApproval: number;
+  heldLowConfidence: number;
   duplicateOrNoop: number;
   suppressedByDedupe: number;
   blockedOrFailed: number;
   activeBlockerCounts: { needsClarification: number; promotion: number };
 }): string {
   if (input.actionableReady > 0) return `${input.actionableReady} ready row(s) are admissible now.`;
+  if (input.readyTotal === 0 && input.heldLowConfidence > 0) {
+    return `Underfed: 0 ready row(s), ${input.heldLowConfidence} held low-confidence row(s) need review/refuel before admission.`;
+  }
   const reasons: string[] = [];
   if (input.needsApproval > 0) reasons.push(`${input.needsApproval} need approval/review`);
   if (input.blockedOrFailed > 0) reasons.push(`${input.blockedOrFailed} blocked or failed`);

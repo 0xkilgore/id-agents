@@ -310,6 +310,32 @@ describe("orchestration health projection", () => {
       examples: ["art:triage:ack.md#1", "art:triage:ack.md#3"],
     });
   });
+
+  it("reports zero ready plus held low-confidence rows as underfed, not healthy idle", async () => {
+    const held = await insertBacklogItem(adapter, {
+      title: "T-ORCH refuel candidate held by confidence",
+      readiness_state: "needs_review",
+      to_agent: "maestra",
+      dispatch_body: "seed refuel rows",
+      risk_class: "build",
+    });
+    await adapter.query(
+      `UPDATE orchestration_backlog_item
+          SET flesh_status = ?, flesh_confidence = ?
+        WHERE item_id = ?`,
+      ["needs_chris_batch", 0.64, held.item_id],
+    );
+
+    const health = await readOrchestrationHealthProjection(adapter, "default");
+
+    expect(health.queue_quality).toMatchObject({
+      operating_state: "underfed_needs_fuel",
+      ready_total: 0,
+      actionable_ready: 0,
+      held_low_confidence: 1,
+    });
+    expect(health.queue_quality.explanation).toContain("Underfed: 0 ready row(s)");
+  });
 });
 
 async function insertArtifact(artifactId: string, agent: string): Promise<void> {
