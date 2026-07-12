@@ -662,6 +662,109 @@ describe("daemon — dry-run vs live", () => {
     expect(res.body.auto_promote_health.summary).toMatch(/no needs_review candidates/);
   });
 
+  it("status reports one-lane below-floor lane diversity health consistently", async () => {
+    for (let i = 0; i < 12; i++) {
+      await seedReady(adapter, { title: `same lane ready ${i}`, write_scope: ["repo/one-lane"] });
+    }
+    await seedApprovedReview(adapter, {
+      title: "candidate same lane",
+      write_scope: ["repo/one-lane"],
+      last_dispatch_phid: "phid:disp-old",
+    });
+    await seedApprovedReview(adapter, {
+      title: "candidate second lane",
+      approved_by: null,
+      approved_at: null,
+      flesh_status: "fleshed",
+      flesh_confidence: 0.55,
+      write_scope: ["repo/two-lane"],
+    });
+    const { app, daemon } = mountStatusApp(adapter, {
+      dry_run: true,
+      auto_flesh_enabled: true,
+      auto_promote_enabled: true,
+      auto_promote_floor: 12,
+      auto_promote_min_lanes: 2,
+    });
+    await daemon.setMode("running");
+
+    const res = await callApp(app, "/orchestration/status");
+
+    expect(res.status).toBe(200);
+    expect(res.body.auto_promote_health).toMatchObject({
+      ready_count: 12,
+      build_ready_lanes: 1,
+      candidate_lanes: 2,
+      candidate_lane_keys: ["repo/one-lane", "repo/two-lane"],
+      below_floor: false,
+      below_lanes: true,
+      triggered: true,
+      candidates_considered: 2,
+      promoted_count: 0,
+      skipped_count: 2,
+    });
+    expect(res.body.auto_promote_health.lanes).toMatchObject({
+      build_ready: 12,
+      build_ready_lanes: 1,
+      ready_lane_keys: ["repo/one-lane"],
+      candidate_lane_keys: ["repo/one-lane", "repo/two-lane"],
+    });
+    expect(res.body.auto_promote_health.top_blocker_classes).toEqual([
+      expect.objectContaining({ class: "already_dispatched", count: 1 }),
+      expect.objectContaining({ class: "confidence_threshold", count: 1 }),
+    ]);
+    expect(res.body.auto_promote_health.summary).toMatch(/ready=12 floor=12/);
+    expect(res.body.auto_promote_health.summary).toMatch(/build-ready lanes=1\/2/);
+    expect(res.body.auto_promote_health.summary).toMatch(/candidate lanes=2/);
+    expect(res.body.auto_promote_health.summary).toMatch(/blocker classes:/);
+  });
+
+  it("status reports two-lane healthy auto-promote health consistently", async () => {
+    for (let i = 0; i < 6; i++) {
+      await seedReady(adapter, { title: `lane a ready ${i}`, write_scope: ["repo/a"] });
+      await seedReady(adapter, { title: `lane b ready ${i}`, write_scope: ["repo/b"] });
+    }
+    await seedApprovedReview(adapter, {
+      title: "extra candidate lane c",
+      write_scope: ["repo/c"],
+    });
+    const { app, daemon } = mountStatusApp(adapter, {
+      dry_run: true,
+      auto_flesh_enabled: true,
+      auto_promote_enabled: true,
+      auto_promote_floor: 12,
+      auto_promote_min_lanes: 2,
+    });
+    await daemon.setMode("running");
+
+    const res = await callApp(app, "/orchestration/status");
+
+    expect(res.status).toBe(200);
+    expect(res.body.auto_promote_health).toMatchObject({
+      ready_count: 12,
+      build_ready_lanes: 2,
+      candidate_lanes: 1,
+      candidate_lane_keys: ["repo/c"],
+      below_floor: false,
+      below_lanes: false,
+      triggered: false,
+      candidates_considered: 0,
+      promoted_count: 0,
+      skipped_count: 0,
+      top_blocker_classes: [],
+    });
+    expect(res.body.auto_promote_health.lanes).toMatchObject({
+      build_ready: 12,
+      build_ready_lanes: 2,
+      ready_lane_keys: ["repo/a", "repo/b"],
+      candidate_lane_keys: ["repo/c"],
+    });
+    expect(res.body.auto_promote_health.summary).toMatch(/ready build fuel meets floor/);
+    expect(res.body.auto_promote_health.summary).toMatch(/ready=12 floor=12/);
+    expect(res.body.auto_promote_health.summary).toMatch(/build-ready lanes=2\/2/);
+    expect(res.body.auto_promote_health.summary).toMatch(/candidate lanes=1/);
+  });
+
   it("status exposes admissible_now separately from raw ready with ready block reasons", async () => {
     await seedReady(adapter, { title: "admissible now", write_scope: ["repo/open"] });
 

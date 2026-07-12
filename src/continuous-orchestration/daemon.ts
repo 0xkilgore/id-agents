@@ -213,6 +213,10 @@ export interface AutoPromoteHealth {
   min_ready_fuel: number;
   floor: number;
   min_ready_lanes: number;
+  ready_count: number;
+  build_ready_lanes: number;
+  candidate_lanes: number;
+  candidate_lane_keys: string[];
   lanes: {
     build_ready: number;
     build_ready_lanes: number;
@@ -237,6 +241,7 @@ export interface AutoPromoteHealth {
   skipped_items: Array<{ item_id: string; reasons: string[] }>;
   top_skip_reasons: Array<{ reason: string; count: number }>;
   blocker_class_counts: AutoPromoteBlockerClassCount[];
+  top_blocker_classes: AutoPromoteBlockerClassCount[];
   next_action: AutoPromoteNextAction;
   empty_pipe_alert: AutoPromoteEmptyPipeAlert;
   ready_runtime_repairs: ReadyRuntimeRepair[];
@@ -946,6 +951,7 @@ export class ContinuousOrchestrationDaemon {
     const triggered = blockedReason ? false : plan.triggered;
     const candidatesConsidered = triggered ? plan.candidates_considered : 0;
     const blockerClassCounts = triggered ? blockerClassCountsFrom(skippedItems) : [];
+    const topBlockerClasses = blockerClassCounts.slice(0, 3);
     const nextAction = nextAutoPromoteAction({
       blockedReason,
       belowFloor,
@@ -977,11 +983,12 @@ export class ContinuousOrchestrationDaemon {
       floor: config.auto_promote_floor,
       lanes: plan.before.build_lanes,
       minLanes: config.auto_promote_min_lanes,
+      candidateLanes: candidateLaneKeys.length,
       candidates: candidatesConsidered,
       promoted: promotedCount,
       skipped: triggered ? skippedItems.length : 0,
       topReason: topSkipReasons[0]?.reason ?? null,
-      blockerClassCounts,
+      blockerClassCounts: topBlockerClasses,
       nextAction,
     });
 
@@ -991,6 +998,10 @@ export class ContinuousOrchestrationDaemon {
       min_ready_fuel: config.min_ready_fuel,
       floor: config.auto_promote_floor,
       min_ready_lanes: config.auto_promote_min_lanes,
+      ready_count: plan.before.build_ready,
+      build_ready_lanes: plan.before.build_lanes,
+      candidate_lanes: candidateLaneKeys.length,
+      candidate_lane_keys: candidateLaneKeys,
       lanes: {
         build_ready: plan.before.build_ready,
         build_ready_lanes: plan.before.build_lanes,
@@ -1017,6 +1028,7 @@ export class ContinuousOrchestrationDaemon {
       skipped_items: triggered ? skippedItems : [],
       top_skip_reasons: triggered ? topSkipReasons : [],
       blocker_class_counts: blockerClassCounts,
+      top_blocker_classes: topBlockerClasses,
       next_action: nextAction,
       empty_pipe_alert: emptyPipeAlert,
       ready_runtime_repairs: readyRuntimeRepairs,
@@ -1585,6 +1597,7 @@ function summarizeAutoPromoteHealth(args: {
   floor: number;
   lanes: number;
   minLanes: number;
+  candidateLanes: number;
   candidates: number;
   promoted: number;
   skipped: number;
@@ -1594,17 +1607,18 @@ function summarizeAutoPromoteHealth(args: {
 }): string {
   if (args.blockedReason) return `auto-promote blocked: ${args.blockedReason}`;
   if (!args.belowFloor && !args.belowLanes) {
-    return `ready build fuel meets floor: ready=${args.ready} floor=${args.floor}, lanes=${args.lanes}/${args.minLanes}`;
+    return `ready build fuel meets floor: ready=${args.ready} floor=${args.floor}, build-ready lanes=${args.lanes}/${args.minLanes}, candidate lanes=${args.candidateLanes}`;
   }
   const blockers = args.blockerClassCounts.length > 0
     ? `; blocker classes: ${args.blockerClassCounts.map((b) => `${b.class}=${b.count}`).join(", ")}`
     : "";
   const next = `; next: ${args.nextAction.summary}`;
+  const state = `ready=${args.ready} floor=${args.floor}, build-ready lanes=${args.lanes}/${args.minLanes}, candidate lanes=${args.candidateLanes}`;
   if (!args.triggered || args.candidates === 0) {
-    return `ready build fuel below floor: ready=${args.ready} floor=${args.floor}, lanes=${args.lanes}/${args.minLanes}; no needs_review candidates considered${next}`;
+    return `ready build fuel below floor: ${state}; no needs_review candidates considered${next}`;
   }
   if (args.promoted > 0) {
-    return `ready build fuel below floor: ready=${args.ready} floor=${args.floor}, lanes=${args.lanes}/${args.minLanes}; would promote ${args.promoted}, skipped ${args.skipped}${blockers}${next}`;
+    return `ready build fuel below floor: ${state}; would promote ${args.promoted}, skipped ${args.skipped}${blockers}${next}`;
   }
-  return `ready build fuel below floor: ready=${args.ready} floor=${args.floor}, lanes=${args.lanes}/${args.minLanes}; promoted 0 of ${args.candidates}, top skip reason: ${args.topReason ?? "none"}${blockers}${next}`;
+  return `ready build fuel below floor: ${state}; promoted 0 of ${args.candidates}, top skip reason: ${args.topReason ?? "none"}${blockers}${next}`;
 }
