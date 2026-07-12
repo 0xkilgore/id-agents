@@ -134,6 +134,82 @@ describe("orchestration health projection", () => {
     });
   });
 
+  it("classifies needs_clarification rows as dependency blockers, retryable noise, or operator input", async () => {
+    const owner = await insertBacklogItem(adapter, {
+      title: "blocked upstream",
+      readiness_state: "done",
+    });
+    await setItemState(adapter, owner.item_id, "done", { dispatch_phid: "phid:disp-expired-but-blocks" });
+    await insertBacklogItem(adapter, {
+      title: "dependent downstream",
+      readiness_state: "ready",
+      to_agent: "roger",
+      dispatch_body: "continue",
+      dependencies: [owner.item_id],
+    });
+
+    await insertDispatch({
+      dispatch_phid: "phid:disp-expired-but-blocks",
+      query_id: "query_expired_blocks",
+      status: "needs_clarification",
+      updated_at: "2026-07-01T16:00:00.000Z",
+      active_clarification_json: JSON.stringify({
+        question: "linked query terminated expired; should this dependency be retried?",
+        context: {
+          blocking_reasons: ["linked query terminated expired"],
+        },
+      }),
+    });
+    await insertDispatch({
+      dispatch_phid: "phid:disp-expired-noise",
+      query_id: "query_expired_noise",
+      status: "needs_clarification",
+      updated_at: "2026-07-01T15:00:00.000Z",
+      active_clarification_json: JSON.stringify({
+        question: "linked query terminated expired",
+        context: {
+          summary: "Closeout expired as retryable noise; no operator decision required.",
+          blocking_reasons: ["linked query terminated expired"],
+        },
+      }),
+    });
+    await insertDispatch({
+      dispatch_phid: "phid:disp-operator-input",
+      query_id: "query_operator_input",
+      status: "needs_clarification",
+      updated_at: "2026-07-01T14:00:00.000Z",
+      active_clarification_json: JSON.stringify({
+        question: "Which customer-facing copy should ship?",
+        context: {
+          blocking_reasons: ["operator decision required"],
+        },
+      }),
+    });
+
+    const health = await readOrchestrationHealthProjection(adapter, "default");
+
+    expect(health.blockers.needs_clarification.count).toBe(2);
+    expect(health.blockers.needs_clarification.recent_dispatch_ids).toEqual([
+      "phid:disp-expired-but-blocks",
+      "phid:disp-operator-input",
+    ]);
+    expect(health.blockers.needs_clarification.blocks_backlog_dependency_count).toBe(1);
+    expect(health.blockers.needs_clarification.items).toEqual([
+      expect.objectContaining({
+        dispatch_phid: "phid:disp-expired-but-blocks",
+        blocks_backlog_dependency: true,
+        blocked_dependency_item_ids: [expect.any(String)],
+      }),
+      expect.objectContaining({
+        dispatch_phid: "phid:disp-operator-input",
+        owner_lane: "chris",
+        recommended_action: "ask Chris for the product or operator decision needed to resume",
+        needs_chris: true,
+        blocks_backlog_dependency: false,
+      }),
+    ]);
+  });
+
   it("routes known deterministic needs_clarification infra blockers away from Chris", async () => {
     await insertDispatch({
       dispatch_phid: "phid:disp-dirty-ui",

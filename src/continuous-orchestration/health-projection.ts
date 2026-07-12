@@ -149,7 +149,9 @@ export async function readOrchestrationHealthProjection(
   ]);
 
   const needsClarification = clarifications
-    .map((row) => blockerFromRow(row, dependencyImpact, clarificationReason(row)))
+    .map((row) => ({ row, reason: clarificationReason(row) }))
+    .filter(({ row, reason }) => !isRetryableClarificationNoise(row, reason, dependencyImpact))
+    .map(({ row, reason }) => blockerFromRow(row, dependencyImpact, reason))
     .sort(compareBlockersRecent);
 
   const promotion = promotionRows
@@ -712,6 +714,39 @@ function clarificationReason(row: DispatchRow): string {
   const active = parseJson(row.active_clarification_json);
   const question = active && typeof active.question === "string" ? active.question.trim() : "";
   return question ? `needs clarification: ${question}` : "needs clarification";
+}
+
+function isRetryableClarificationNoise(
+  row: DispatchRow,
+  reason: string,
+  dependencyImpact: Map<string, string[]>,
+): boolean {
+  if ((dependencyImpact.get(row.dispatch_phid) ?? []).length > 0) return false;
+
+  const text = [
+    row.dispatch_phid,
+    row.query_id,
+    row.to_agent,
+    reason,
+    row.active_clarification_json,
+  ]
+    .filter((x): x is string => typeof x === "string" && x.length > 0)
+    .join(" ")
+    .toLowerCase();
+
+  return matchesAny(text, [
+    "linked query terminated expired",
+    "expired as retryable",
+    "retryable noise",
+    "retryable closeout",
+    "stale in_flight",
+    "scheduler_wedged",
+    "provider_timeout",
+    "provider timeout",
+    "provider_server_error",
+    "rate_limit",
+    "rate limit",
+  ]);
 }
 
 interface ClarificationRoute {
