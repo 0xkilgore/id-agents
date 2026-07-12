@@ -178,6 +178,19 @@ export function buildPoolRouting(env: NodeJS.ProcessEnv = process.env): PoolRout
       const requestedAgent = item.to_agent?.trim();
       const requestedPool = explicitPoolRequest(requestedAgent);
       if (requestedPool) return requestedPool;
+      const lateBoundPoolBuild =
+        !!trackPool &&
+        !!requestedAgent &&
+        trackPool.members.includes(requestedAgent) &&
+        item.write_scope.some((scope) => scope.includes("/.worktrees/"));
+      if (lateBoundPoolBuild) {
+        return {
+          pool_id: trackPool.pool_id,
+          repo_root: trackPool.repo_root,
+          max_parallel: trackPool.max_parallel,
+          members: [...trackPool.members],
+        };
+      }
       if (requestedAgent && !legacyPoolOptInAgents.has(requestedAgent)) return null;
       const p = looksLikeKapelleFrontendWork(item) ? registry.byId("frontend") : trackPool;
       if (!p) return null;

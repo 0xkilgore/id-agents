@@ -54,7 +54,11 @@ function fakePools(over: { max_parallel?: number; members?: string[] } = {}): Po
   };
 }
 
-function makeDaemon(over: { config?: Partial<ContinuousOrchestrationConfig>; pools?: PoolRouting } = {}) {
+function makeDaemon(over: {
+  config?: Partial<ContinuousOrchestrationConfig>;
+  pools?: PoolRouting;
+  healthyAgents?: Set<string>;
+} = {}) {
   const fired: BacklogItem[] = [];
   const daemon = new ContinuousOrchestrationDaemon({
     adapter,
@@ -71,6 +75,7 @@ function makeDaemon(over: { config?: Partial<ContinuousOrchestrationConfig>; poo
       return { count: inFlight.length, active_write_scopes: scopes };
     },
     resolveDispatchStates: (phids) => getDispatchStatusesByPhid(adapter, phids),
+    resolveAgentHealth: over.healthyAgents ? async () => over.healthyAgents! : undefined,
     pools: over.pools ?? fakePools(),
     alert: async () => {},
     now: () => Date.parse("2026-06-17T18:00:00Z"), // not a load-point
@@ -250,6 +255,80 @@ describe("backend pool routing (real registry)", () => {
     for (const name of ["roger", "substrate-orch-codex", "substrate-api-codex"]) {
       expect(poolFires.some((d) => d.reason?.includes(`→ ${name} `))).toBe(true);
     }
+  });
+
+  it("frontend pool skips an expired Regina lane and selects healthy codex/cursor capacity", async () => {
+    await seedBuildItem(0, {
+      title: "Kapelle P1 - frontend source metadata rendering",
+      track: "T-UI",
+      to_agent: "pool:frontend",
+      dispatch_body: "Patch kapelle-site /ops source metadata rendering.",
+      write_scope: ["/repo/kapelle-site"],
+    });
+    const { daemon, fired } = makeDaemon({
+      config: { max_in_flight: 10 },
+      pools: buildPoolRouting({ BUILD_POOL_FRONTEND_MAX_PARALLEL: "6" }),
+      healthyAgents: new Set(["frontend-ui-codex", "frontend-qa-cursor"]),
+    });
+    await daemon.setMode("running");
+
+    const tick = await daemon.runTick();
+
+    expect(fired).toHaveLength(1);
+    expect(["frontend-ui-codex", "frontend-qa-cursor"]).toContain(fired[0].to_agent);
+    expect(fired[0].to_agent).not.toBe("regina");
+    const dispatch = tick.decisions.find((d) => d.action === "dispatched");
+    expect(dispatch?.metadata?.lane_blockers).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          agent: "regina",
+          code: "target_unhealthy",
+          reason: "agent is not healthy/online",
+        }),
+      ]),
+    );
+  });
+
+  it("frontend pool does not keep selecting overloaded Regina when codex/cursor lanes are free", async () => {
+    const busy = await seedBuildItem(0, {
+      title: "Kapelle P1 - existing Regina build",
+      track: "T-UI",
+      to_agent: "pool:frontend",
+      dispatch_body: "Existing frontend build.",
+      write_scope: ["/repo/kapelle-site/.worktrees/regina-busy"],
+    });
+    await setItemState(adapter, busy.item_id, "in_flight", { dispatch_phid: "phid:disp-regina-busy" });
+    await adapter.query(`UPDATE orchestration_backlog_item SET to_agent = $1 WHERE item_id = $2`, ["regina", busy.item_id]);
+    await completeDispatch("phid:disp-regina-busy", "active");
+    await seedBuildItem(1, {
+      title: "Kapelle P1 - next frontend capacity build",
+      track: "T-UI",
+      to_agent: "pool:frontend",
+      dispatch_body: "Use available frontend pool capacity.",
+      write_scope: ["/repo/kapelle-site"],
+    });
+    const { daemon, fired } = makeDaemon({
+      config: { max_in_flight: 10 },
+      pools: buildPoolRouting({ BUILD_POOL_FRONTEND_MAX_PARALLEL: "6" }),
+      healthyAgents: new Set(["regina", "frontend-ui-codex", "frontend-qa-cursor"]),
+    });
+    await daemon.setMode("running");
+
+    const tick = await daemon.runTick();
+
+    expect(fired).toHaveLength(1);
+    expect(["frontend-ui-codex", "frontend-qa-cursor"]).toContain(fired[0].to_agent);
+    expect(fired[0].to_agent).not.toBe("regina");
+    const dispatch = tick.decisions.find((d) => d.action === "dispatched");
+    expect(dispatch?.metadata?.lane_blockers).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          agent: "regina",
+          code: "lane_busy",
+          reason: "builder already has an in-flight pool item",
+        }),
+      ]),
+    );
   });
 
   it("default backend width is bounded by available maintained backend lanes", async () => {
