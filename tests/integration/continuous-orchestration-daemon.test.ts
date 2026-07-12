@@ -1009,6 +1009,20 @@ describe("daemon — guardrail alerts", () => {
     ]);
   });
 
+  it("dedupes unchanged model-policy drift alerts across repeated ticks", async () => {
+    const modelPolicyPath = writeModelPolicy({
+      directive: { anthropic: 0.5, openai: 0.5, cursor: 0 },
+      workShare: { anthropic: 0.05, openai: 0.95, cursor: 0 },
+    });
+    const { daemon, alerts } = makeDaemon(adapter, { modelPolicyPath });
+
+    await daemon.runTick();
+    await daemon.runTick();
+    await daemon.runTick();
+
+    expect(alerts.filter((a) => /model-policy drift/.test(a))).toHaveLength(1);
+  });
+
   it("does not alert when model-policy work_share matches the authorized directive", async () => {
     const modelPolicyPath = writeModelPolicy({
       directive: { anthropic: 0.5, openai: 0.5, cursor: 0 },
@@ -1117,6 +1131,23 @@ describe("daemon — guardrail alerts", () => {
     expect(r2.zero_ticks).toBe(2);
     expect(r2.stall_alert).toBe(true);
     expect(alerts.some((a) => /STALL/.test(a))).toBe(true);
+  });
+
+  it("dedupes unchanged STALL alerts across repeated ticks and emits one recovery", async () => {
+    await seedReady(adapter);
+    const { daemon, alerts } = makeDaemon(adapter, {
+      config: { dry_run: false, stall_threshold_ticks: 2, max_in_flight: 0 },
+    });
+    await daemon.setMode("running");
+
+    await daemon.runTick();
+    await daemon.runTick();
+    await daemon.runTick();
+    expect(alerts.filter((a) => /STALL/.test(a))).toHaveLength(1);
+
+    await daemon.setMode("paused");
+    await daemon.runTick();
+    expect(alerts.filter((a) => /STALL recovered/.test(a))).toHaveLength(1);
   });
 
   it("emits fleet.blockage and runs flesh/run when zero-admit stall has low ready fuel", async () => {

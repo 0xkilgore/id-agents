@@ -46,6 +46,40 @@ import { readRuntimeMixDrift, type RuntimeMixDrift } from "../model-policy/runti
 /** Dispatch/effective statuses that mean the work is finished — its write-scope
  *  lock can be released. Mirrors dispatch terminal states plus recovery moot. */
 const TERMINAL_DISPATCH_STATUSES = new Set(["done", "failed", "failed_needs_operator", "cancelled", "moot"]);
+const INCIDENT_ALERT_COOLDOWN_MS = 60 * 60 * 1000;
+
+type OrchestrationIncidentKind = "stall" | "model_policy_drift";
+
+interface AlertIncidentState {
+  kind: OrchestrationIncidentKind;
+  cause: string;
+  recovery_message: string;
+  opened_at_ms: number;
+  last_alert_at_ms: number;
+}
+
+function stableJson(value: unknown): string {
+  if (value === null || typeof value !== "object") return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map((v) => stableJson(v)).join(",")}]`;
+  const obj = value as Record<string, unknown>;
+  return `{${Object.keys(obj)
+    .sort()
+    .map((k) => `${JSON.stringify(k)}:${stableJson(obj[k])}`)
+    .join(",")}}`;
+}
+
+function incidentKey(kind: OrchestrationIncidentKind, cause: string): string {
+  return `${kind}:${crypto.createHash("sha256").update(cause).digest("hex")}`;
+}
+
+function formatIncidentKind(kind: OrchestrationIncidentKind): string {
+  switch (kind) {
+    case "stall":
+      return "STALL";
+    case "model_policy_drift":
+      return "model-policy drift";
+  }
+}
 
 /** A pool an item routes to (resolved from its track). */
 export interface ResolvedPool {
@@ -371,6 +405,7 @@ export class ContinuousOrchestrationDaemon {
   // Slice 4: adaptive-backoff carry + stop flag for the self-scheduling loop.
   private backoffMult = 1;
   private stopped = false;
+  private readonly alertIncidents = new Map<string, AlertIncidentState>();
 
   constructor(deps: DaemonDeps) {
     this.deps = deps;
@@ -393,6 +428,46 @@ export class ContinuousOrchestrationDaemon {
   private async alert(message: string): Promise<void> {
     const send: AlertSender = this.deps.alert ?? ((m) => sendTelegramAlert(m, this.deps.env));
     await send(message);
+  }
+
+  private async alertIncident(input: {
+    kind: OrchestrationIncidentKind;
+    cause: string;
+    message: string;
+    recoveryMessage: string;
+    nowMs: number;
+    activeIncidentKeys: Set<string>;
+  }): Promise<boolean> {
+    const key = incidentKey(input.kind, input.cause);
+    input.activeIncidentKeys.add(key);
+    const existing = this.alertIncidents.get(key);
+    if (!existing) {
+      this.alertIncidents.set(key, {
+        kind: input.kind,
+        cause: input.cause,
+        recovery_message: input.recoveryMessage,
+        opened_at_ms: input.nowMs,
+        last_alert_at_ms: input.nowMs,
+      });
+      await this.alert(input.message);
+      return true;
+    }
+
+    if (input.nowMs - existing.last_alert_at_ms >= INCIDENT_ALERT_COOLDOWN_MS) {
+      existing.last_alert_at_ms = input.nowMs;
+      await this.alert(`${input.message} Still active for ${Math.floor((input.nowMs - existing.opened_at_ms) / 60_000)} minute(s).`);
+      return true;
+    }
+
+    return false;
+  }
+
+  private async recoverInactiveIncidents(activeIncidentKeys: Set<string>): Promise<void> {
+    for (const [key, incident] of [...this.alertIncidents.entries()]) {
+      if (activeIncidentKeys.has(key)) continue;
+      this.alertIncidents.delete(key);
+      await this.alert(incident.recovery_message);
+    }
   }
 
   private async readModelPolicyDirectiveDrift(): Promise<WorkShareDirectiveDrift> {
@@ -436,6 +511,7 @@ export class ContinuousOrchestrationDaemon {
     const nowMs = this.now();
     const nowIso = new Date(nowMs).toISOString();
     const tick_id = `tick_${crypto.randomUUID()}`;
+    const activeIncidentKeys = new Set<string>();
 
     const state = await getOrchestrationState(this.deps.adapter, this.teamId);
     const killSwitch = this.killSwitchActive();
@@ -682,14 +758,25 @@ export class ContinuousOrchestrationDaemon {
       config,
     );
     if (stall.alert) {
+      const cause = stableJson({
+        ready_waiting: ordered.length,
+        block_reasons: readyAdmissionBlockReasonCounts(plan),
+      });
       decisions.push({
         item_id: null,
         action: "stall_alert",
         reason: `STALL: ${stall.zero_ticks} consecutive ticks fired 0 dispatches with ${ordered.length} ready item(s) waiting`,
       });
-      await this.alert(
-        `⚠️ Continuous orchestration STALL — ${stall.zero_ticks} ticks in a row fired nothing while ${ordered.length} ready item(s) wait. Check lanes/budget.`,
-      );
+      await this.alertIncident({
+        kind: "stall",
+        cause,
+        message:
+          `⚠️ Continuous orchestration STALL — ${stall.zero_ticks} ticks in a row fired nothing while ` +
+          `${ordered.length} ready item(s) wait. Check lanes/budget.`,
+        recoveryMessage: `✅ Continuous orchestration ${formatIncidentKind("stall")} recovered.`,
+        nowMs,
+        activeIncidentKeys,
+      });
     }
 
     const admissibleReady = plan.admit.length;
@@ -774,6 +861,23 @@ export class ContinuousOrchestrationDaemon {
 
     if (modelPolicyDrift.status !== "match") {
       const message = modelPolicyDrift.message ?? `model-policy directive guard failed with status ${modelPolicyDrift.status}`;
+      const cause = stableJson({
+        status: modelPolicyDrift.status,
+        policy_path: modelPolicyDrift.policy_path,
+        diffs: modelPolicyDrift.diffs,
+        directive_targets: modelPolicyDrift.directive_targets,
+        work_share_targets: modelPolicyDrift.work_share_targets,
+        runtime_mix: modelPolicyDrift.runtime_mix
+          ? {
+              status: modelPolicyDrift.runtime_mix.status,
+              runtime_mode_path: modelPolicyDrift.runtime_mix.runtime_mode_path,
+              diffs: modelPolicyDrift.runtime_mix.diffs,
+              desired_targets: modelPolicyDrift.runtime_mix.desired_targets,
+              runtime_mode_actual: modelPolicyDrift.runtime_mix.runtime_mode_actual,
+              agent_actual: modelPolicyDrift.runtime_mix.agent_actual,
+            }
+          : null,
+      });
       decisions.push({
         item_id: null,
         action: "model_policy_drift_alert",
@@ -788,7 +892,14 @@ export class ContinuousOrchestrationDaemon {
           runtime_mix: modelPolicyDrift.runtime_mix,
         },
       });
-      await this.alert(`Continuous orchestration model-policy drift: ${message}`);
+      await this.alertIncident({
+        kind: "model_policy_drift",
+        cause,
+        message: `Continuous orchestration model-policy drift: ${message}`,
+        recoveryMessage: `✅ Continuous orchestration ${formatIncidentKind("model_policy_drift")} recovered.`,
+        nowMs,
+        activeIncidentKeys,
+      });
       await this.emitModelPolicyDrift(message, {
         tick_id,
         status: modelPolicyDrift.status,
@@ -799,6 +910,8 @@ export class ContinuousOrchestrationDaemon {
         runtime_mix: modelPolicyDrift.runtime_mix,
       });
     }
+
+    await this.recoverInactiveIncidents(activeIncidentKeys);
 
     await appendDecisions(this.deps.adapter, { team_id: this.teamId, tick_id, dry_run: config.dry_run, records: decisions });
     await recordTickOutcome(this.deps.adapter, this.teamId, {
