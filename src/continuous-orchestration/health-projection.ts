@@ -734,6 +734,8 @@ function isRetryableClarificationNoise(
     .join(" ")
     .toLowerCase();
 
+  if (isOverloadedQaOrUiLinkedQueryExpiry(text)) return false;
+
   return matchesAny(text, [
     "linked query terminated expired",
     "expired as retryable",
@@ -767,6 +769,14 @@ function classifyClarificationBlocker(row: DispatchRow, reason: string): Clarifi
     .join(" ")
     .toLowerCase();
 
+  if (isOverloadedQaOrUiLinkedQueryExpiry(text)) {
+    return {
+      owner_lane: "ui-builder",
+      recommended_action: "treat as stale UI/QA lane capacity; retry when the lane has free capacity or reassign within the UI pool",
+      needs_chris: false,
+    };
+  }
+
   if (matchesAny(text, ["dirty ui worktree", "ui worktree", "worktree dirty", "dirty worktree"])) {
     return {
       owner_lane: "ui-builder",
@@ -796,6 +806,14 @@ function classifyClarificationBlocker(row: DispatchRow, reason: string): Clarifi
     recommended_action: "ask Chris for the product or operator decision needed to resume",
     needs_chris: true,
   };
+}
+
+function isOverloadedQaOrUiLinkedQueryExpiry(text: string): boolean {
+  if (!text.includes("linked query terminated expired")) return false;
+  if (!matchesAny(text, ["overloaded", "all_members_busy_with_backlog", "single_writer_lane_busy", "pool_capacity_full", "no_free_pool_builder", "lane busy", "at capacity"])) {
+    return false;
+  }
+  return matchesAny(text, ["qa", "ui", "frontend", "regina", "live-ui", "playwright", "browser"]);
 }
 
 function matchesAny(text: string, needles: string[]): boolean {

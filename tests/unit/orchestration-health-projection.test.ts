@@ -266,6 +266,54 @@ describe("orchestration health projection", () => {
     ]);
   });
 
+  it("classifies overloaded QA/UI linked-query expiries as stale-lane signals", async () => {
+    await insertDispatch({
+      dispatch_phid: "phid:disp-ui-expired-overloaded",
+      query_id: "query_ui_expired_overloaded",
+      to_agent: "regina",
+      status: "needs_clarification",
+      updated_at: "2026-07-01T15:00:00.000Z",
+      active_clarification_json: JSON.stringify({
+        question: "linked query terminated expired",
+        context: {
+          summary: "QA dispatch expired while the target UI lane was overloaded.",
+          blocking_reasons: ["linked query terminated expired", "all_members_busy_with_backlog"],
+          target_lane: "live-UI",
+        },
+      }),
+    });
+    await insertDispatch({
+      dispatch_phid: "phid:disp-real-agent-error",
+      query_id: "query_real_agent_error",
+      to_agent: "roger",
+      status: "needs_clarification",
+      updated_at: "2026-07-01T14:00:00.000Z",
+      active_clarification_json: JSON.stringify({
+        question: "agent_error: test suite failed with assertion mismatch",
+        context: {
+          blocking_reasons: ["assertion mismatch"],
+        },
+      }),
+    });
+
+    const health = await readOrchestrationHealthProjection(adapter, "default");
+
+    expect(health.blockers.needs_clarification.items).toEqual([
+      expect.objectContaining({
+        dispatch_phid: "phid:disp-ui-expired-overloaded",
+        owner_lane: "ui-builder",
+        recommended_action: "treat as stale UI/QA lane capacity; retry when the lane has free capacity or reassign within the UI pool",
+        needs_chris: false,
+      }),
+      expect.objectContaining({
+        dispatch_phid: "phid:disp-real-agent-error",
+        owner_lane: "chris",
+        recommended_action: "ask Chris for the product or operator decision needed to resume",
+        needs_chris: true,
+      }),
+    ]);
+  });
+
   it("classifies promotion blockers and ignores verified or explicitly skipped promotions", async () => {
     const owner = await insertBacklogItem(adapter, {
       title: "ship base package",
