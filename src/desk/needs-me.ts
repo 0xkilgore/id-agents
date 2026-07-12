@@ -21,6 +21,13 @@ export function isArtifactCommentDispatch(row: DispatchReadRow): boolean {
   return row.source_metadata?.channel === ARTIFACT_COMMENT_DISPATCH_CHANNEL;
 }
 
+const CLOSED_RECOVERY_STATUSES = new Set(["moot", "landed_reconciled", "verified_done", "retry_done"]);
+
+function countsAsRoutedNeedsYou(row: DispatchReadRow): boolean {
+  if (CLOSED_RECOVERY_STATUSES.has(row.recovery.status)) return false;
+  return row.needs_operator || row.needs_input.active != null;
+}
+
 interface TeamRef {
   id: string | null;
   name: string | null;
@@ -60,7 +67,7 @@ export async function buildDeskNeedsMe(
     .filter((row) => row.status !== "shipped")
     .map(artifactInboxToNeedsMeItem);
   const routedItems = dispatchRows
-    .filter((row) => (row.needs_operator || row.needs_input.active != null) && !isArtifactCommentDispatch(row))
+    .filter((row) => countsAsRoutedNeedsYou(row) && !isArtifactCommentDispatch(row))
     .map(dispatchToNeedsMeItem);
 
   const items = [...approvalItems, ...artifactItems, ...routedItems]

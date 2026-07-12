@@ -230,6 +230,87 @@ describe('manager dispatch read routes', () => {
     expect(healthBody.active).toBe(0);
   });
 
+  it('keeps dispatch health needs_input aligned with effective Needs You routed count', async () => {
+    const team = 'dispatch-read-needs-input-contract';
+    const teamId = await db.teams.getOrCreateTeamId(team);
+
+    await insertDispatch(teamId, {
+      dispatch_phid: 'phid:disp-historical-linked-query-expired',
+      query_id: 'query_historical_linked_query_expired',
+      status: 'needs_clarification',
+      completed_at: '2026-06-04T09:00:00.000Z',
+      updated_at: '2026-06-04T09:00:00.000Z',
+      failure_kind: 'expired',
+      failure_detail: 'linked query terminated expired',
+      recovery_status: 'moot',
+      active_clarification_json: JSON.stringify({
+        clarification_id: 'clar_historical',
+        question: 'Historical expired linked query?',
+        created_at: '2026-06-04T08:00:00.000Z',
+      }),
+    });
+    await insertDispatch(teamId, {
+      dispatch_phid: 'phid:disp-failed-work-landed',
+      query_id: 'query_failed_work_landed',
+      status: 'failed',
+      completed_at: '2026-06-04T09:30:00.000Z',
+      updated_at: '2026-06-04T09:30:00.000Z',
+      failure_kind: 'expired',
+      failure_detail: 'linked query terminated expired',
+      promotion_result_json: JSON.stringify({
+        required: true,
+        completed: true,
+        repos: [{ path: '/repo/id-agents', verified: true }],
+      }),
+    });
+
+    const zeroHealth = await fetch(`${baseUrl}/dispatches/health`, { headers: headers(team) });
+    const zeroHealthBody = await zeroHealth.json() as any;
+    expect(zeroHealth.status).toBe(200);
+    expect(zeroHealthBody.needs_input).toBe(0);
+
+    const zeroNeedsYou = await fetch(`${baseUrl}/desk/needs-me?team=${encodeURIComponent(team)}&limit=20`, {
+      headers: headers(team),
+    });
+    const zeroNeedsYouBody = await zeroNeedsYou.json() as any;
+    expect(zeroNeedsYou.status).toBe(200);
+    expect(zeroNeedsYouBody.counts.routed_items).toBe(0);
+
+    await insertDispatch(teamId, {
+      dispatch_phid: 'phid:disp-active-clarification-contract',
+      query_id: 'query_active_clarification_contract',
+      status: 'needs_clarification',
+      updated_at: '2026-06-04T10:00:00.000Z',
+      clarification_id: 'clar_active_contract',
+      active_clarification_json: JSON.stringify({
+        clarification_id: 'clar_active_contract',
+        agent_id: 'roger',
+        query_id: 'query_active_clarification_contract',
+        question: 'Which branch should be promoted?',
+        created_at: '2026-06-04T10:00:00.000Z',
+        stale_at: '2999-01-01T00:00:00.000Z',
+      }),
+      clarification_history_json: JSON.stringify([{ type: 'NEEDS_CLARIFICATION', clarification_id: 'clar_active_contract' }]),
+    });
+
+    const oneHealth = await fetch(`${baseUrl}/dispatches/health`, { headers: headers(team) });
+    const oneHealthBody = await oneHealth.json() as any;
+    expect(oneHealth.status).toBe(200);
+    expect(oneHealthBody.needs_input).toBe(1);
+
+    const oneNeedsYou = await fetch(`${baseUrl}/desk/needs-me?team=${encodeURIComponent(team)}&limit=20`, {
+      headers: headers(team),
+    });
+    const oneNeedsYouBody = await oneNeedsYou.json() as any;
+    expect(oneNeedsYou.status).toBe(200);
+    expect(oneNeedsYouBody.counts.routed_items).toBe(1);
+    expect(oneNeedsYouBody.items
+      .filter((item: any) => item.source_type === 'routed_item')
+      .map((item: any) => item.source_ref)).toEqual([
+      'phid:disp-active-clarification-contract',
+    ]);
+  });
+
   it('lists artifacts from dispatch results and agent output directories', async () => {
     const teamId = await db.teams.getOrCreateTeamId('dispatch-read-artifacts');
     const agentDir = path.join(workDir, 'artifact-agent');
@@ -438,6 +519,7 @@ async function insertDispatch(teamId: string, overrides: Partial<{
   promotion_input_json: string | null;
   promotion_result_json: string | null;
   result_json: string | null;
+  recovery_status: string | null;
 }> = {}) {
   const now = '2026-06-04T11:00:00.000Z';
   const dispatchPhid = overrides.dispatch_phid ?? `phid:disp-${Math.random().toString(16).slice(2)}`;
@@ -451,8 +533,9 @@ async function insertDispatch(teamId: string, overrides: Partial<{
       failure_detail, target_url, result_json, clarification_id,
       active_clarification_json, clarification_history_json,
       resume_delivery_status, promote, promotion_strategy,
-      promotion_required_reason, promotion_result_json, promotion_input_json
-    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      promotion_required_reason, promotion_result_json, promotion_input_json,
+      recovery_status
+    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
     [
       dispatchPhid,
       teamId,
@@ -489,6 +572,7 @@ async function insertDispatch(teamId: string, overrides: Partial<{
       null,
       overrides.promotion_result_json ?? null,
       overrides.promotion_input_json ?? null,
+      overrides.recovery_status ?? 'none',
     ],
   );
 }
