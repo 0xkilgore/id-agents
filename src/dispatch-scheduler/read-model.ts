@@ -1325,6 +1325,8 @@ const RETRYABLE_PROVIDER_REASONS = new Set([
   "rate_limit_error",
   "provider_server_error",
   "provider_timeout",
+  "qa_ui_lane_overloaded_expired",
+  "stale_lane_expired",
 ]);
 
 // Recovery statuses that prove the work landed (rule 3 / 2).

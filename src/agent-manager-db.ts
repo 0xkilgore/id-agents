@@ -4384,6 +4384,8 @@ export class AgentManagerDb {
           'model_api_error_exhausted',
           'harness_empty_result_exhausted',
           'harness_process_error_exhausted',
+          'qa_ui_lane_overloaded_expired',
+          'stale_lane_expired',
         ] as const);
         const failureKind = typeof body.failure_kind === 'string' && ALLOWED_FAILURE_KINDS.has(body.failure_kind as any)
           ? (body.failure_kind as FailureKind)

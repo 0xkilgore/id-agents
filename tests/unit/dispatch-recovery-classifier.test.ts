@@ -53,6 +53,28 @@ describe("classifyRecovery", () => {
     expect(d.decision).toBe("retryable");
   });
 
+  it("QA/UI overloaded linked-query expiry is retryable even when detail text is terse", () => {
+    const d = classifyRecovery(
+      input({
+        failure_kind: "qa_ui_lane_overloaded_expired",
+        failure_detail: "linked query terminated expired",
+      }),
+      DEFAULT_RECOVERY_CONFIG,
+    );
+    expect(d.decision).toBe("retryable");
+  });
+
+  it("stale-lane linked-query expiry is a retryable recovery signal", () => {
+    const d = classifyRecovery(
+      input({
+        failure_kind: "stale_lane_expired",
+        failure_detail: "linked query terminated expired",
+      }),
+      DEFAULT_RECOVERY_CONFIG,
+    );
+    expect(d.decision).toBe("retryable");
+  });
+
   it("a dispatch that actually LANDED (artifact present) is not retried", () => {
     const d = classifyRecovery(input({ artifact_path: "/abs/report.md" }), DEFAULT_RECOVERY_CONFIG);
     expect(d.decision).toBe("landed");

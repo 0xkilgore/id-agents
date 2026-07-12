@@ -108,6 +108,12 @@ function hasExternalSideEffect(input: RecoveryInput): boolean {
 
 function isRecoverableFailure(input: RecoveryInput, config: RecoveryConfig): boolean {
   if (input.failure_kind === "scheduler_wedged") return true;
+  if (
+    input.failure_kind === "qa_ui_lane_overloaded_expired" ||
+    input.failure_kind === "stale_lane_expired"
+  ) {
+    return true;
+  }
   const detail = (input.failure_detail ?? "").toLowerCase();
   return config.retryable_detail_markers.some((m) => detail.includes(m.toLowerCase()));
 }

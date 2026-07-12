@@ -53,6 +53,8 @@ export const BACKFILL_FAILURE_KINDS = [
   // provider_rate_limit_exhausted (and thus backfilled). Keep them recoverable
   // now that they carry their honest kind.
   "agent_unreachable_exhausted",
+  "qa_ui_lane_overloaded_expired",
+  "stale_lane_expired",
 ];
 /** T1.11 boot-backfill target failure reasons (by failure_detail substring). */
 export const BACKFILL_DETAIL_MARKERS = ["linked query terminated"];

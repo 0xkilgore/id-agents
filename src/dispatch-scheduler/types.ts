@@ -179,6 +179,10 @@ export type FailureKind =
   // Anthropic provider rate limit. Kept distinct so it is never misdiagnosed
   // as a 429 (the Sentinel mislabel).
   | "agent_unreachable_exhausted"
+  // Linked-query expiry where the target QA/UI lane is the durable signal, not
+  // an agent semantic failure.
+  | "qa_ui_lane_overloaded_expired"
+  | "stale_lane_expired"
   // Verify-on-done gate: /agent-done claimed `done` but the claimed deliverable
   // could not be verified (artifact missing on disk, or promoted commit not on
   // base). NOT done, NOT auto-retryable — surfaces the hollow-done.

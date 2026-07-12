@@ -582,6 +582,94 @@ describe("handleAgentDone — structured failure_kind", () => {
     fetchSpy.mockRestore();
   });
 
+  it("classifies overloaded QA/UI linked-query expiry as retryable lane noise instead of agent_error", async () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch") as ReturnType<typeof vi.spyOn>;
+    fetchSpy.mockResolvedValue(
+      new Response(JSON.stringify({ query_id: "agent-q-qa-overloaded" }), { status: 200 }) as unknown as Response,
+    );
+    const handle = new SchedulerHandle({
+      adapter,
+      teamId: "team",
+      resolveTargetUrl: () => "http://localhost:9999",
+    });
+    const enq = await handle.enqueue({
+      to_agent: "qa-ui",
+      from_actor: "manager",
+      subject: "QA UI verification",
+      message: "Run Playwright checks on the known overloaded QA/UI lane.",
+      channel: "qa",
+    });
+    await handle.tick();
+
+    const final = await handle.handleAgentDone({
+      query_id: enq.query_id,
+      success: false,
+      error: "linked query terminated expired; target lane overloaded",
+    });
+
+    expect(final?.status).toBe("failed");
+    expect(final?.failure_kind).toBe("qa_ui_lane_overloaded_expired");
+    fetchSpy.mockRestore();
+  });
+
+  it("classifies QA/UI linked-query expiry without overload evidence as stale_lane_expired", async () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch") as ReturnType<typeof vi.spyOn>;
+    fetchSpy.mockResolvedValue(
+      new Response(JSON.stringify({ query_id: "agent-q-qa-stale" }), { status: 200 }) as unknown as Response,
+    );
+    const handle = new SchedulerHandle({
+      adapter,
+      teamId: "team",
+      resolveTargetUrl: () => "http://localhost:9999",
+    });
+    const enq = await handle.enqueue({
+      to_agent: "frontend-qa",
+      from_actor: "manager",
+      subject: "UI QA verification",
+      message: "Run browser validation.",
+    });
+    await handle.tick();
+
+    const final = await handle.handleAgentDone({
+      query_id: enq.query_id,
+      success: false,
+      error: "linked query terminated expired",
+    });
+
+    expect(final?.status).toBe("failed");
+    expect(final?.failure_kind).toBe("stale_lane_expired");
+    fetchSpy.mockRestore();
+  });
+
+  it("preserves true non-linked failures as agent_error when no failure_kind is supplied", async () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch") as ReturnType<typeof vi.spyOn>;
+    fetchSpy.mockResolvedValue(
+      new Response(JSON.stringify({ query_id: "agent-q-real-fail" }), { status: 200 }) as unknown as Response,
+    );
+    const handle = new SchedulerHandle({
+      adapter,
+      teamId: "team",
+      resolveTargetUrl: () => "http://localhost:9999",
+    });
+    const enq = await handle.enqueue({
+      to_agent: "frontend-qa",
+      from_actor: "manager",
+      subject: "UI QA verification",
+      message: "Run browser validation.",
+    });
+    await handle.tick();
+
+    const final = await handle.handleAgentDone({
+      query_id: enq.query_id,
+      success: false,
+      error: "assertion failed: expected dashboard panel to exist",
+    });
+
+    expect(final?.status).toBe("failed");
+    expect(final?.failure_kind).toBe("agent_error");
+    fetchSpy.mockRestore();
+  });
+
   it("repeated /agent-done on already-failed doc is a no-op", async () => {
     const fetchSpy = vi.spyOn(globalThis, "fetch") as ReturnType<typeof vi.spyOn>;
     fetchSpy.mockResolvedValue(

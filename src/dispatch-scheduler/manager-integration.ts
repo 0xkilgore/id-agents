@@ -286,6 +286,25 @@ export function actorRefForAgentCompletion(agent: string): ActorRef {
   return { kind: "agent", id: agent, label: agent, source: "manager" };
 }
 
+function classifyImplicitAgentDoneFailure(doc: DispatchDoc, detail: string): FailureKind {
+  if (!/linked query terminated expired/i.test(detail)) return "agent_error";
+  if (!isQaUiLane(doc)) return "agent_error";
+  return laneOverloadEvidence(doc, detail) ? "qa_ui_lane_overloaded_expired" : "stale_lane_expired";
+}
+
+function isQaUiLane(doc: Pick<DispatchDoc, "to_agent" | "subject" | "body_markdown" | "channel">): boolean {
+  const haystack = [doc.to_agent, doc.subject, doc.body_markdown, doc.channel].filter(Boolean).join("\n");
+  return /\b(qa|ui|frontend|browser|playwright|visual)\b/i.test(haystack);
+}
+
+function laneOverloadEvidence(
+  doc: Pick<DispatchDoc, "to_agent" | "subject" | "body_markdown" | "channel">,
+  detail: string,
+): boolean {
+  const haystack = [detail, doc.to_agent, doc.subject, doc.body_markdown, doc.channel].filter(Boolean).join("\n");
+  return /\b(overloaded|over capacity|capacity constrained|saturated|no healthy capacity|lane full)\b/i.test(haystack);
+}
+
 export interface EnqueueInputV2 {
   team_id?: string;
   to_agent: string;
@@ -894,10 +913,11 @@ export class SchedulerHandle {
       success: args.success !== false,
     });
     if (args.success === false) {
+      const detail = args.error ?? "agent reported failure";
       // markFailed already accepts queued rows; this branch is unchanged.
       const r = await this.client.markFailed(doc.dispatch_phid, {
-        failure_kind: args.failure_kind ?? "agent_error",
-        detail: args.error ?? "agent reported failure",
+        failure_kind: args.failure_kind ?? classifyImplicitAgentDoneFailure(doc, detail),
+        detail,
       });
       return r.ok ? r.value : doc;
     }

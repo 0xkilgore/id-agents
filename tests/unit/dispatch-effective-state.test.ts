@@ -273,6 +273,8 @@ test.each([
   "rate_limit_error",
   "provider_server_error",
   "provider_timeout",
+  "qa_ui_lane_overloaded_expired",
+  "stale_lane_expired",
 ])("Rule 7: failed + %s without supersede/landed -> failed_needs_operator", (kind) => {
   expect(
     deriveEffectiveState(row({ status: "failed", failure_kind: kind })),
