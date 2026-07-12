@@ -107,10 +107,16 @@ async function seedNeedsReview(overrides: {
 }
 
 describe("GET /orchestration/backlog/needs-promote-report", () => {
-  it("groups needs_review rows by skip class and includes prior dispatch terminal status", async () => {
+  it("groups needs_review rows by skip class and includes prior dispatch retry ledger status", async () => {
+    await seedDispatch("phid:disp-queued", "queued");
     await seedDispatch("phid:disp-done", "done");
     await seedDispatch("phid:disp-failed", "failed");
+    await seedDispatch("phid:disp-needs-clarification", "needs_clarification");
 
+    const queuedDup = await seedNeedsReview({
+      title: "already dispatched queued duplicate",
+      last_dispatch_phid: "phid:disp-queued",
+    });
     const doneDup = await seedNeedsReview({
       title: "already dispatched done duplicate",
       last_dispatch_phid: "phid:disp-done",
@@ -118,6 +124,10 @@ describe("GET /orchestration/backlog/needs-promote-report", () => {
     const failedDup = await seedNeedsReview({
       title: "already dispatched failed duplicate",
       last_dispatch_phid: "phid:disp-failed",
+    });
+    const needsClarificationDup = await seedNeedsReview({
+      title: "already dispatched needs clarification duplicate",
+      last_dispatch_phid: "phid:disp-needs-clarification",
     });
     await seedNeedsReview({
       title: "confidence held",
@@ -128,28 +138,42 @@ describe("GET /orchestration/backlog/needs-promote-report", () => {
       risk_class: "destructive",
       flesh_confidence: 0.95,
     });
+    const safeManualRetry = await seedNeedsReview({
+      title: "safe manual retry still visible",
+    });
 
     const r = await call("GET", "/orchestration/backlog/needs-promote-report");
 
     expect(r.status).toBe(200);
     expect(r.body.ok).toBe(true);
-    expect(r.body.total_needs_review).toBe(4);
+    expect(r.body.total_needs_review).toBe(7);
+    expect(r.body.auto_promotable).toBe(1);
+    expect(r.body.auto_promotable_items).toEqual([
+      {
+        item_id: safeManualRetry.item_id,
+        title: "safe manual retry still visible",
+      },
+    ]);
     expect(r.body.counts).toEqual({
-      already_dispatched: 2,
+      already_dispatched: 4,
       confidence_threshold: 1,
       review_held_risk: 1,
     });
 
-    expect(r.body.groups.already_dispatched.count).toBe(2);
+    expect(r.body.groups.already_dispatched.count).toBe(4);
     expect(r.body.groups.confidence_threshold.count).toBe(1);
     expect(r.body.groups.review_held_risk.count).toBe(1);
 
     const priorByItem = Object.fromEntries(
       r.body.groups.already_dispatched.items.map((item: any) => [item.item_id, item]),
     );
+    expect(priorByItem[queuedDup.item_id].prior_dispatch_phid).toBe("phid:disp-queued");
+    expect(priorByItem[queuedDup.item_id].prior_dispatch_status).toBe("queued");
     expect(priorByItem[doneDup.item_id].prior_dispatch_phid).toBe("phid:disp-done");
     expect(priorByItem[doneDup.item_id].prior_dispatch_status).toBe("done");
     expect(priorByItem[failedDup.item_id].prior_dispatch_phid).toBe("phid:disp-failed");
     expect(priorByItem[failedDup.item_id].prior_dispatch_status).toBe("failed");
+    expect(priorByItem[needsClarificationDup.item_id].prior_dispatch_phid).toBe("phid:disp-needs-clarification");
+    expect(priorByItem[needsClarificationDup.item_id].prior_dispatch_status).toBe("needs_clarification");
   });
 });

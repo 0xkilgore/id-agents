@@ -206,12 +206,14 @@ export function mountContinuousOrchestrationRoutes(app: Application, opts: Orche
         review_held_risk: { count: 0, items: [] },
       };
       let autoPromotable = 0;
+      const autoPromotableItems: Array<{ item_id: string; title: string }> = [];
 
       for (const item of items) {
         const reasons = autoPromoteRejections(item, AUTO_READY_CONFIDENCE_THRESHOLD);
         const klass = classifyNeedsPromoteSkip(reasons);
         if (!klass) {
           autoPromotable += 1;
+          autoPromotableItems.push({ item_id: item.item_id, title: item.title });
           continue;
         }
         const priorDispatchPhid = item.last_dispatch_phid ?? undefined;
@@ -233,6 +235,7 @@ export function mountContinuousOrchestrationRoutes(app: Application, opts: Orche
         ok: true,
         total_needs_review: items.length,
         auto_promotable: autoPromotable,
+        auto_promotable_items: autoPromotableItems,
         counts: {
           already_dispatched: groups.already_dispatched.count,
           confidence_threshold: groups.confidence_threshold.count,
