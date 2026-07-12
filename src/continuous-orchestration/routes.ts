@@ -22,6 +22,7 @@ import {
   listFleshLog,
   listRecentDecisions,
   promoteToReady,
+  reconcileStaleAlreadyDispatchedReadyRows,
   recordFleshOutcome,
   setItemState,
   updateBacklogFields,
@@ -144,6 +145,16 @@ export function mountContinuousOrchestrationRoutes(app: Application, opts: Orche
   app.post("/orchestration/tick", async (_req: Request, res: Response) => {
     try {
       const result = await daemon.runTick();
+      res.json({ ok: true, result });
+    } catch (err) {
+      res.status(500).json({ ok: false, error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  app.post("/orchestration/reconcile/stale-ready", async (req: Request, res: Response) => {
+    try {
+      const dryRun = (req.body ?? {})?.dry_run === true;
+      const result = await reconcileStaleAlreadyDispatchedReadyRows(adapter, { team_id: teamId, dry_run: dryRun });
       res.json({ ok: true, result });
     } catch (err) {
       res.status(500).json({ ok: false, error: err instanceof Error ? err.message : String(err) });
