@@ -406,6 +406,80 @@ test("empty-success guard: wave 17 promoted count is substantial evidence", () =
   expect(cls.result_keys).toEqual(["accepted_count", "promoted_count"]);
 });
 
+test("empty-success guard: wave 18 output sources and created rows are substantial evidence", () => {
+  const cls = deriveEmptySuccessCandidate({
+    status: "done",
+    subject: "[project: kapelle][AUTONOMOUS project-load-loop - backlog ran low, refueling] Re",
+    started_at: "2026-07-12T14:29:55.429Z",
+    completed_at: "2026-07-12T14:30:07.000Z",
+    artifact_path: null,
+    promotion_result_json: null,
+    result_json: JSON.stringify({
+      sources: [
+        "agent-platform/output/2026-07-12-kapelle-refuel-wave-18.md",
+        "cto/output/2026-07-12-kapelle-pool-status.md",
+      ],
+      created_rows: [
+        { item_id: "coitem_18a", title: "Kapelle P1: Verify source links", readiness_state: "needs_review" },
+        { item_id: "coitem_18b", title: "Kapelle P1: Patch source badges", readiness_state: "needs_review" },
+      ],
+    }),
+  });
+
+  expect(cls.empty_success_candidate).toBe(false);
+  expect(cls.result_keys).toEqual(["created_rows", "sources"]);
+});
+
+test("empty-success guard: wave 19 promote counts and post-status verification are substantial evidence", () => {
+  const cls = deriveEmptySuccessCandidate({
+    status: "done",
+    subject: "[project: kapelle][AUTONOMOUS project-load-loop - backlog ran low, refueling] Re",
+    started_at: "2026-07-12T14:45:10.000Z",
+    completed_at: "2026-07-12T14:45:17.000Z",
+    artifact_path: null,
+    promotion_result_json: null,
+    result_json: JSON.stringify({
+      promote_counts: {
+        considered: 12,
+        promoted: 5,
+        skipped: 7,
+      },
+      post_status_verification: {
+        ready_before: 7,
+        ready_after: 12,
+        needs_review_after: 34,
+        verified: true,
+      },
+    }),
+  });
+
+  expect(cls.empty_success_candidate).toBe(false);
+  expect(cls.result_keys).toEqual(["post_status_verification", "promote_counts"]);
+});
+
+test("empty-success guard: empty wave evidence containers still need review", () => {
+  expect(
+    deriveEmptySuccessCandidate({
+      status: "done",
+      subject: "[project: kapelle][AUTONOMOUS project-load-loop - backlog ran low, refueling] Re",
+      started_at: "2026-07-12T14:45:10.000Z",
+      completed_at: "2026-07-12T14:45:17.000Z",
+      artifact_path: null,
+      promotion_result_json: null,
+      result_json: JSON.stringify({
+        sources: [],
+        created_rows: [],
+        promote_counts: {
+          considered: 0,
+          promoted: 0,
+          skipped: 0,
+        },
+        post_status_verification: {},
+      }),
+    }).empty_success_candidate,
+  ).toBe(true);
+});
+
 test("empty-success guard: zero accepted/promoted counts without artifact still need review", () => {
   expect(
     deriveEmptySuccessCandidate({

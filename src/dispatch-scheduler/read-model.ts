@@ -1225,8 +1225,8 @@ export interface EmptySuccessCandidate {
 const EMPTY_SUCCESS_FAST_MS = 2 * 60_000;
 const SUBSTANTIAL_RESULT_TEXT_MIN = 120;
 const EXPLICIT_NOOP_RE = /\b(no-?op|skip(?:ped)?|not applicable|already (?:done|current|up to date)|no changes? (?:needed|required)|intentionally no work)\b/i;
-const EVIDENCE_KEY_RE = /^(artifact_path|artifact|artifact_id|output_path|output|comment_id|comment|timeline_event_id|timeline_id|commit_sha|sha|promotion|promotion_result|diff|summary|closeout|task|task_name|task_id|tasks|created_tasks|claimed_tasks|accepted_tasks|promoted_tasks|created_count|claimed_count|accepted_count|promoted_count|actionable_ready_after|coitem|coitem_id|coitems|backlog_item|backlog_items|follow_up_backlog_item|follow_up_task)$/i;
-const COUNT_EVIDENCE_KEY_RE = /^(accepted_count|promoted_count|created_count|claimed_count|created_tasks|claimed_tasks|accepted_tasks|promoted_tasks|actionable_ready_after)$/i;
+const EVIDENCE_KEY_RE = /^(artifact_path|artifact|artifact_id|artifacts|output_path|output|output_artifact|output_artifacts|comment_id|comment|timeline_event_id|timeline_id|commit_sha|sha|promotion|promotion_result|promotion_counts|promote_count|promote_counts|diff|summary|closeout|source|sources|source_ref|source_refs|source_path|source_paths|task|task_name|task_id|tasks|created_task|created_tasks|claimed_task|claimed_tasks|accepted_task|accepted_tasks|promoted_task|promoted_tasks|created_row|created_rows|claimed_row|claimed_rows|accepted_row|accepted_rows|promoted_row|promoted_rows|created_count|claimed_count|accepted_count|promoted_count|post_status|post_status_verification|post_status_verified|verification|verified_count|actionable_ready_after|coitem|coitem_id|coitems|backlog_item|backlog_items|follow_up_backlog_item|follow_up_task)$/i;
+const COUNT_EVIDENCE_KEY_RE = /^(accepted_count|promoted_count|created_count|claimed_count|promote_count|created_tasks|claimed_tasks|accepted_tasks|promoted_tasks|created_rows|claimed_rows|accepted_rows|promoted_rows|verified_count|actionable_ready_after)$/i;
 const COORDINATOR_REFUEL_SUBJECT_RE = /\b(?:project-load-loop|backlog ran low|refuel(?:ing)?)\b/i;
 
 export function deriveEmptySuccessCandidate(row: EmptySuccessCandidateRow): EmptySuccessCandidate {
@@ -1328,12 +1328,19 @@ function hasSubstantialResultEvidence(parsed: Record<string, unknown> | null, re
   if (resultTextLength >= SUBSTANTIAL_RESULT_TEXT_MIN) return true;
   return Object.entries(parsed).some(([key, value]) => {
     if (!EVIDENCE_KEY_RE.test(key)) return false;
-    if (typeof value === "string") return value.trim().length > 0;
-    if (typeof value === "number") return Number.isFinite(value) && value > 0 && COUNT_EVIDENCE_KEY_RE.test(key);
-    if (typeof value === "boolean") return value;
-    if (Array.isArray(value)) return value.length > 0;
-    return value != null;
+    return hasEvidenceValue(value, COUNT_EVIDENCE_KEY_RE.test(key));
   });
+}
+
+function hasEvidenceValue(value: unknown, requirePositiveNumber = false): boolean {
+  if (typeof value === "string") return value.trim().length > 0;
+  if (typeof value === "number") return Number.isFinite(value) && (!requirePositiveNumber || value > 0);
+  if (typeof value === "boolean") return value;
+  if (Array.isArray(value)) return value.some((item) => hasEvidenceValue(item, true));
+  if (value && typeof value === "object") {
+    return Object.values(value as Record<string, unknown>).some((item) => hasEvidenceValue(item, true));
+  }
+  return false;
 }
 
 /**
