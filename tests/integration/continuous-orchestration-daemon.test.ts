@@ -512,6 +512,86 @@ describe("daemon — dry-run vs live", () => {
     expect(res.body.auto_promote_health.summary).toMatch(/no needs_review candidates/);
   });
 
+  it("status reports one-lane below-floor ready-lane diversity health", async () => {
+    await seedReady(adapter, { title: "ready lane a", write_scope: ["repo/a"] });
+    await seedApprovedReview(adapter, {
+      title: "candidate lane b",
+      write_scope: ["repo/b"],
+    });
+    const { app, daemon } = mountStatusApp(adapter, {
+      dry_run: true,
+      auto_flesh_enabled: true,
+      auto_promote_enabled: true,
+      auto_promote_floor: 2,
+      auto_promote_min_lanes: 2,
+    });
+    await daemon.setMode("running");
+
+    const res = await callApp(app, "/orchestration/status");
+
+    expect(res.status).toBe(200);
+    expect(res.body.auto_promote_health).toMatchObject({
+      ready_count: 1,
+      floor: 2,
+      min_ready_lanes: 2,
+      below_floor: true,
+      below_lanes: true,
+      triggered: true,
+      candidates_considered: 1,
+      promoted_count: 1,
+      skipped_count: 0,
+      blocker_class_counts: [],
+      lanes: {
+        build_ready: 1,
+        build_ready_lanes: 1,
+        ready_lane_keys: ["repo/a"],
+        candidate_lane_keys: ["repo/b"],
+      },
+    });
+    expect(res.body.auto_promote_health.candidates).toEqual([
+      expect.objectContaining({ title: "candidate lane b", lane: "repo/b", risk_class: "build" }),
+    ]);
+    expect(res.body.auto_promote_health.summary).toMatch(/ready=1 floor=2, lanes=1\/2/);
+    expect(res.body.auto_promote_health.summary).toMatch(/would promote 1/);
+  });
+
+  it("status reports two-lane healthy ready-lane diversity health", async () => {
+    await seedReady(adapter, { title: "ready lane a", write_scope: ["repo/a"] });
+    await seedReady(adapter, { title: "ready lane b", write_scope: ["repo/b"] });
+    const { app, daemon } = mountStatusApp(adapter, {
+      dry_run: true,
+      auto_flesh_enabled: true,
+      auto_promote_enabled: true,
+      auto_promote_floor: 2,
+      auto_promote_min_lanes: 2,
+    });
+    await daemon.setMode("running");
+
+    const res = await callApp(app, "/orchestration/status");
+
+    expect(res.status).toBe(200);
+    expect(res.body.auto_promote_health).toMatchObject({
+      ready_count: 2,
+      floor: 2,
+      min_ready_lanes: 2,
+      below_floor: false,
+      below_lanes: false,
+      triggered: false,
+      candidates_considered: 0,
+      candidates: [],
+      promoted_count: 0,
+      skipped_count: 0,
+      blocker_class_counts: [],
+      lanes: {
+        build_ready: 2,
+        build_ready_lanes: 2,
+        ready_lane_keys: ["repo/a", "repo/b"],
+        candidate_lane_keys: [],
+      },
+    });
+    expect(res.body.auto_promote_health.summary).toMatch(/ready build fuel meets floor: ready=2 floor=2, lanes=2\/2/);
+  });
+
   it("status explains below-floor auto-promote blocked by safety risk", async () => {
     for (let i = 0; i < 8; i++) {
       await seedReady(adapter, { title: `ready ${i}`, write_scope: [`repo/ready-${i}`] });

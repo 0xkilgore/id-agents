@@ -164,6 +164,7 @@ export interface ReadyAdmissionExplanation {
 export interface AutoPromoteHealth {
   enabled: boolean;
   blocked_reason: string | null;
+  ready_count: number;
   min_ready_fuel: number;
   floor: number;
   min_ready_lanes: number;
@@ -713,8 +714,6 @@ export class ContinuousOrchestrationDaemon {
       minLanes: config.auto_promote_min_lanes,
       maxPerPass: config.auto_promote_max_per_tick,
     });
-    const readyLaneKeys = [...new Set(ready.filter((item) => item.risk_class === "build").map(laneKeyOf))].sort();
-    const candidateLaneKeys = [...new Set(needsReview.map(laneKeyOf))].sort();
     const blockedReason =
       !config.auto_flesh_enabled ? "auto_flesh_disabled" :
       !config.auto_promote_enabled ? "auto_promote_disabled" :
@@ -735,6 +734,9 @@ export class ContinuousOrchestrationDaemon {
     const promotedCount = blockedReason ? 0 : plan.promote.length;
     const triggered = blockedReason ? false : plan.triggered;
     const candidatesConsidered = triggered ? plan.candidates_considered : 0;
+    const consideredCandidates = triggered ? needsReview : [];
+    const readyLaneKeys = [...new Set(ready.filter((item) => item.risk_class === "build").map(laneKeyOf))].sort();
+    const candidateLaneKeys = [...new Set(consideredCandidates.map(laneKeyOf))].sort();
     const nextAction = nextAutoPromoteAction({
       blockedReason,
       belowFloor,
@@ -764,6 +766,7 @@ export class ContinuousOrchestrationDaemon {
     return {
       enabled: config.auto_flesh_enabled && config.auto_promote_enabled,
       blocked_reason: blockedReason,
+      ready_count: plan.before.build_ready,
       min_ready_fuel: config.min_ready_fuel,
       floor: config.auto_promote_floor,
       min_ready_lanes: config.auto_promote_min_lanes,
@@ -778,7 +781,7 @@ export class ContinuousOrchestrationDaemon {
       triggered,
       candidates_considered: candidatesConsidered,
       candidates: triggered
-        ? needsReview.map((item) => ({
+        ? consideredCandidates.map((item) => ({
           item_id: item.item_id,
           title: item.title,
           lane: laneKeyOf(item),
