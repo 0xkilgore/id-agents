@@ -12,6 +12,8 @@ import {
   gitCurrentBranch,
   gitAheadBehind,
   gitFetch,
+  gitHeadSha,
+  gitRevParse,
   protectedRootStatus,
   stripWorktreeNoise,
 } from "./allocator.js";
@@ -25,6 +27,8 @@ export interface DirtyRootRecord {
   branch: string | null;
   /** Intended canonical branch from the registry. */
   intended_branch: string;
+  head_sha: string | null;
+  origin_main_sha: string | null;
   /** True when the checkout is off its intended canonical branch. */
   off_canonical_branch: boolean;
   remote: string;
@@ -32,6 +36,8 @@ export interface DirtyRootRecord {
   ahead: number | null;
   behind: number | null;
   dirty_count: number;
+  dirty_tracked_count: number;
+  dirty_untracked_count: number;
   /** Truncated `git status --short --branch` preview. */
   status_short: string;
   last_lease_id: string | null;
@@ -85,12 +91,16 @@ export function sampleProtectedRoot(entry: ProtectedRootEntry, opts: SampleOptio
     repo_name: entry.repo_name,
     branch: null,
     intended_branch: entry.intended_canonical_branch,
+    head_sha: null,
+    origin_main_sha: null,
     off_canonical_branch: false,
     remote,
     base,
     ahead: null,
     behind: null,
     dirty_count: 0,
+    dirty_tracked_count: 0,
+    dirty_untracked_count: 0,
     status_short: "",
     last_lease_id: opts.ownership?.last_lease_id ?? null,
     last_dispatch_id: opts.ownership?.last_dispatch_id ?? null,
@@ -107,8 +117,11 @@ export function sampleProtectedRoot(entry: ProtectedRootEntry, opts: SampleOptio
   const status = protectedRootStatus(entry.root);
   const statusShortFull = stripWorktreeNoise(gitStatusShort(entry.root));
   const branch = gitCurrentBranch(entry.root);
+  const headSha = gitHeadSha(entry.root);
+  const originMainSha = gitRevParse(entry.root, `${remote}/${base}`);
   const ab = gitAheadBehind(entry.root, `${remote}/${base}`);
-  const dirtyCount = status.trim().length === 0 ? 0 : status.trim().split("\n").length;
+  const dirtyStats = countDirtyStatus(status);
+  const dirtyCount = dirtyStats.tracked + dirtyStats.untracked;
   const offCanonical = branch != null && branch !== entry.intended_canonical_branch;
 
   const severity = classifySeverity({
@@ -122,10 +135,14 @@ export function sampleProtectedRoot(entry: ProtectedRootEntry, opts: SampleOptio
   return {
     ...baseRecord,
     branch,
+    head_sha: headSha,
+    origin_main_sha: originMainSha,
     off_canonical_branch: offCanonical,
     ahead: ab?.ahead ?? null,
     behind: ab?.behind ?? null,
     dirty_count: dirtyCount,
+    dirty_tracked_count: dirtyStats.tracked,
+    dirty_untracked_count: dirtyStats.untracked,
     status_short: statusShortFull.slice(0, previewChars),
     severity,
   };
@@ -145,4 +162,15 @@ export function dirtyRootAlerts(records: DirtyRootRecord[]): DirtyRootRecord[] {
   return records
     .filter((r) => r.severity === "critical" || (r.severity === "warning" && r.dirty_count > 0))
     .sort((a, b) => rank[a.severity] - rank[b.severity]);
+}
+
+function countDirtyStatus(status: string): { tracked: number; untracked: number } {
+  let tracked = 0;
+  let untracked = 0;
+  for (const line of status.split("\n")) {
+    if (!line.trim()) continue;
+    if (line.startsWith("??")) untracked += 1;
+    else tracked += 1;
+  }
+  return { tracked, untracked };
 }

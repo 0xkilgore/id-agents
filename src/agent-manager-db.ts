@@ -13947,6 +13947,18 @@ export class AgentManagerDb {
           console.warn('[Manager] Branch Ledger routes failed to mount:', err instanceof Error ? err.message : String(err));
         }
 
+        // Worktree Hygiene live read-model — the console contract endpoint:
+        // protected roots + branch ledger + promotion/release state.
+        try {
+          const { mountWorktreeHygieneRoutes } = await import('./worktree-hygiene/routes.js');
+          await mountWorktreeHygieneRoutes(this.managementApp, this.db.adapter, {
+            buildStatus: () => this.getBuildStatus(),
+          });
+          console.log('[Manager] Worktree Hygiene /worktree-hygiene route mounted');
+        } catch (err) {
+          console.warn('[Manager] Worktree Hygiene route failed to mount:', err instanceof Error ? err.message : String(err));
+        }
+
         // Surfaced Artifacts v1 — authoritative Read This Next query layer.
         // Composes artifact catalog/review state, dispatch done closeouts, and
         // comment routing rows. Filesystem reads are only fallback evidence.

@@ -182,6 +182,11 @@ export function gitHeadSha(root: string): string | null {
   return r.ok ? r.out.trim() : null;
 }
 
+export function gitRevParse(root: string, ref: string): string | null {
+  const r = gitSafe(["rev-parse", ref], root);
+  return r.ok ? r.out.trim() : null;
+}
+
 export function gitCurrentBranch(root: string): string | null {
   const r = gitSafe(["rev-parse", "--abbrev-ref", "HEAD"], root);
   if (!r.ok) return null;
