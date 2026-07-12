@@ -311,6 +311,104 @@ describe("orchestration health projection", () => {
     });
   });
 
+  it("counts acknowledgement and approval receipts as consumed noise while preserving failed and pending route signals", async () => {
+    await migrateOutputsTables(adapter);
+    await insertArtifact("art:signals:ack.md", "regina");
+    await insertDispatch({
+      dispatch_phid: "phid:disp-real-failure",
+      query_id: "query_real_failure",
+      status: "failed",
+    });
+    await insertDispatch({
+      dispatch_phid: "phid:disp-pending-route",
+      query_id: "query_pending_route",
+      status: "queued",
+    });
+
+    await insertCommentOp({
+      artifact_id: "art:signals:ack.md",
+      actor: "user:chris",
+      body: "acknowledged",
+      reaction: "acknowledged",
+      route_status: {
+        visible_state: "recorded+routed",
+        route_kind: "acknowledgement",
+        routed: false,
+        retryable: false,
+        recorded_op_id: 1,
+        target_agent: "regina",
+        target_agent_raw: "regina",
+        dispatch: null,
+        skipped: "acknowledged",
+        error: null,
+        updated_at: "2026-07-01T15:00:00.000Z",
+      },
+    });
+    await insertCommentOp({
+      artifact_id: "art:signals:ack.md",
+      actor: "user:chris",
+      body: "ship it",
+      reaction: "ship_it",
+      route_status: {
+        visible_state: "recorded+routed",
+        route_kind: "approval_signal",
+        routed: false,
+        retryable: false,
+        recorded_op_id: 2,
+        target_agent: "regina",
+        target_agent_raw: "regina",
+        dispatch: null,
+        skipped: "approval_signal",
+        error: null,
+        updated_at: "2026-07-01T15:01:00.000Z",
+      },
+    });
+    await insertCommentOp({
+      artifact_id: "art:signals:ack.md",
+      actor: "user:chris",
+      body: "please route this to the owner",
+      reaction: "iterate",
+      route_status: {
+        visible_state: "recorded-but-route-failed-with-retry",
+        route_kind: "substantive_follow_up",
+        routed: false,
+        retryable: true,
+        recorded_op_id: 3,
+        target_agent: "regina",
+        target_agent_raw: "regina",
+        dispatch: null,
+        skipped: null,
+        error: { message: "scheduler unavailable" },
+        updated_at: "2026-07-01T15:02:00.000Z",
+      },
+    });
+
+    const health = await readOrchestrationHealthProjection(adapter, "default");
+
+    expect(health.queue_quality).toMatchObject({
+      operating_state: "blocked_or_failed",
+      raw_queued: 1,
+      actionable_ready: 0,
+      duplicate_or_noop_backfill: 2,
+      blocked_or_failed: 2,
+    });
+    expect(health.queue_quality.explanation).toContain("2 blocked or failed");
+    expect(health.queue_quality.explanation).toContain("2 duplicate/no-op artifact acknowledgement(s)");
+    expect(health.queue_quality.explanation).toContain("1 raw queued dispatch(es) are not ready fuel");
+    expect(health.queue_quality.top_noise_patterns).toEqual([
+      {
+        pattern: "acknowledgement:regina:acknowledged",
+        count: 1,
+        examples: ["art:signals:ack.md#1"],
+      },
+      {
+        pattern: "approval_signal:regina:approval_signal",
+        count: 1,
+        examples: ["art:signals:ack.md#2"],
+      },
+    ]);
+  });
+
   it("reports zero ready plus held low-confidence rows as underfed, not healthy idle", async () => {
     const held = await insertBacklogItem(adapter, {
       title: "T-ORCH refuel candidate held by confidence",
