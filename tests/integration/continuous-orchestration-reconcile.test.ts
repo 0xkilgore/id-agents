@@ -16,7 +16,7 @@ import {
   getDispatchStatusesByPhid,
   setItemState,
 } from "../../src/continuous-orchestration/storage.js";
-import { ContinuousOrchestrationDaemon } from "../../src/continuous-orchestration/daemon.js";
+import { ContinuousOrchestrationDaemon, type PoolRouting } from "../../src/continuous-orchestration/daemon.js";
 import { defaultConfig, type ContinuousOrchestrationConfig } from "../../src/continuous-orchestration/config.js";
 import type { BacklogItem, UsageGateView } from "../../src/continuous-orchestration/types.js";
 
@@ -95,15 +95,17 @@ function makeDaemon(over: {
   config?: Partial<ContinuousOrchestrationConfig>;
   nowMs?: number;
   fired?: BacklogItem[];
+  enqueue?: (item: BacklogItem) => Promise<{ dispatch_phid: string; query_id: string }>;
+  pools?: PoolRouting;
 } = {}) {
   const fired = over.fired ?? [];
   const daemon = new ContinuousOrchestrationDaemon({
     adapter,
     config: { ...defaultConfig(), enabled: true, dry_run: false, ...over.config },
-    enqueue: async (item) => {
+    enqueue: over.enqueue ?? (async (item) => {
       fired.push(item);
       return { dispatch_phid: `phid:disp-${item.item_id}`, query_id: `q_${item.item_id}` };
-    },
+    }),
     readUsage: async () => okUsage(),
     // Real in-flight read so lock release is observable through admission.
     readInFlight: async () => {
@@ -113,6 +115,7 @@ function makeDaemon(over: {
       return { count: inFlight.length, active_write_scopes: scopes };
     },
     resolveDispatchStates: (phids) => getDispatchStatusesByPhid(adapter, phids),
+    pools: over.pools,
     alert: async () => {},
     now: () => over.nowMs ?? BASE,
   });
@@ -314,6 +317,118 @@ describe("POOL builds — completion + zombie reaping frees the pool slot", () =
     expect(tick.reconciled).toBe(1);
     expect((await getBacklogItem(adapter, pool.item_id))!.readiness_state).toBe("needs_review"); // pool reaped fast
     expect((await getBacklogItem(adapter, main.item_id))!.readiness_state).toBe("in_flight");    // main still protected
+  });
+});
+
+describe("POOL backend dispatch routing — isolated roger/substrate worktree lanes", () => {
+  const backendPool = {
+    pool_id: "backend",
+    repo_root: "/repo/id-agents",
+    max_parallel: 2,
+    members: ["roger", "substrate-orch-codex"],
+  };
+
+  async function seedReadyBackendBuild(title: string) {
+    return insertBacklogItem(adapter, {
+      title,
+      track: "T-ORCH",
+      to_agent: null,
+      dispatch_body: `build ${title}`,
+      readiness_state: "ready",
+      risk_class: "build",
+      priority: 5,
+      write_scope: [backendPool.repo_root],
+      token_estimate: 0,
+    });
+  }
+
+  it("fires two backend pool builds to distinct roger/substrate worktrees in the same tick", async () => {
+    const first = await seedReadyBackendBuild("backend lane A");
+    const second = await seedReadyBackendBuild("backend lane B");
+    const enqueued: BacklogItem[] = [];
+    const allocated: Array<{ agent: string; item_id: string; path: string }> = [];
+    const { daemon } = makeDaemon({
+      config: {
+        dry_run: false,
+        max_in_flight: 2,
+        max_new_per_tick: 2,
+        max_enqueues_per_tick: 2,
+      },
+      enqueue: async (item) => {
+        enqueued.push(item);
+        return { dispatch_phid: `phid:disp-${item.item_id}`, query_id: `q_${item.item_id}` };
+      },
+      pools: {
+        poolForItem: (item) => (item.track?.startsWith("T-ORCH") ? backendPool : null),
+        availableBuilders: (pool, building) => pool.members.filter((member) => !building.has(member)),
+        allocateWorktree: async ({ agent, item }) => {
+          const path = `/repo/id-agents/.worktrees/${agent}-${item.item_id}`;
+          allocated.push({ agent, item_id: item.item_id, path });
+          return { path, branch: `${agent}/${item.item_id}`, lease_id: `lease-${agent}-${item.item_id}` };
+        },
+      },
+    });
+    await daemon.setMode("running");
+
+    const tick = await daemon.runTick();
+
+    expect(tick.admitted).toHaveLength(2);
+    expect(enqueued.map((item) => item.to_agent).sort()).toEqual(["roger", "substrate-orch-codex"]);
+    expect(new Set(enqueued.flatMap((item) => item.write_scope)).size).toBe(2);
+    expect(enqueued.every((item) => item.write_scope[0]?.startsWith("/repo/id-agents/.worktrees/"))).toBe(true);
+    expect(allocated.map((a) => a.agent).sort()).toEqual(["roger", "substrate-orch-codex"]);
+
+    const afterFirst = (await getBacklogItem(adapter, first.item_id))!;
+    const afterSecond = (await getBacklogItem(adapter, second.item_id))!;
+    expect([afterFirst.to_agent, afterSecond.to_agent].sort()).toEqual(["roger", "substrate-orch-codex"]);
+    expect(new Set([afterFirst.write_scope[0], afterSecond.write_scope[0]]).size).toBe(2);
+    expect([afterFirst.readiness_state, afterSecond.readiness_state]).toEqual(["in_flight", "in_flight"]);
+    expect(tick.decisions.filter((d) => d.action === "dispatched").map((d) => d.metadata)).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ pool_id: "backend", builder: "roger" }),
+        expect.objectContaining({ pool_id: "backend", builder: "substrate-orch-codex" }),
+      ]),
+    );
+  });
+
+  it("reports a worktree allocation blocker without binding the item to a fake lane", async () => {
+    const item = await seedReadyBackendBuild("backend lane blocked");
+    const { daemon } = makeDaemon({
+      config: {
+        dry_run: false,
+        max_in_flight: 1,
+        max_new_per_tick: 1,
+        max_enqueues_per_tick: 1,
+      },
+      enqueue: async () => {
+        throw new Error("enqueue should not run after allocation failure");
+      },
+      pools: {
+        poolForItem: (candidate) => (candidate.track?.startsWith("T-ORCH") ? backendPool : null),
+        availableBuilders: (pool, building) => pool.members.filter((member) => !building.has(member)),
+        allocateWorktree: async ({ agent }) => {
+          throw new Error(`worktree allocation blocked for ${agent}: branch held by existing worktree`);
+        },
+      },
+    });
+    await daemon.setMode("running");
+
+    const tick = await daemon.runTick();
+    const after = (await getBacklogItem(adapter, item.item_id))!;
+
+    expect(tick.admitted).toHaveLength(0);
+    expect(after.readiness_state).toBe("ready");
+    expect(after.to_agent).toBeNull();
+    expect(after.write_scope).toEqual([backendPool.repo_root]);
+    expect(tick.decisions).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          item_id: item.item_id,
+          action: "skipped",
+          reason: expect.stringContaining("worktree allocation blocked for roger"),
+        }),
+      ]),
+    );
   });
 });
 
