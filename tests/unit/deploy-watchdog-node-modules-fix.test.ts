@@ -24,6 +24,8 @@ describe('deploy-freshness-watchdog source — clean deploy checkout hygiene', (
     expect(WATCHDOG_SRC).not.toContain('git stash push');
     expect(WATCHDOG_SRC).not.toContain('wip/pre-redeploy-snapshot');
     expect(WATCHDOG_SRC).not.toContain('git switch -c wip/pre-redeploy-snapshot');
+    expect(WATCHDOG_SRC).not.toContain('git reset --hard');
+    expect(WATCHDOG_SRC).not.toContain('git clean -ffd');
   });
 
   it('defaults to a dedicated deploy checkout and reports primary hygiene blocks', () => {
