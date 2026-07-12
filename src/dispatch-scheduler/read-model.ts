@@ -610,6 +610,14 @@ export async function readDispatchHealth(
   );
 
   const blockages = await readFleetBlockages(adapter, teamId, driftSummary, teamName);
+  const { rows: liveNeedsInputRows } = await adapter.query<{ count: number }>(
+    `SELECT COUNT(*) as count
+       FROM dispatch_scheduler_queue
+       WHERE team_id = ?
+         AND status = 'needs_clarification'
+         AND COALESCE(recovery_status, 'none') NOT IN ('moot', 'landed_reconciled', 'verified_done', 'retry_done')`,
+    [teamId],
+  );
 
   return {
     status: 'ok',
@@ -617,7 +625,7 @@ export async function readDispatchHealth(
     counts,
     active,
     terminal,
-    needs_input: Number(counts.needs_clarification ?? 0),
+    needs_input: Number(liveNeedsInputRows[0]?.count ?? 0),
     oldest_active_at: ageRows[0]?.oldest_active_at ?? null,
     newest_terminal_at: ageRows[0]?.newest_terminal_at ?? null,
     generated_at: new Date().toISOString(),
