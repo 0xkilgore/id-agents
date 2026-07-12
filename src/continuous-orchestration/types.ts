@@ -95,6 +95,10 @@ export interface BacklogItem {
   approved_by: string | null;
   approved_at: string | null;
   last_dispatch_phid: string | null;
+  /** One-shot operator override allowing an already-dispatched row to fire again. */
+  retry_safe: boolean;
+  retry_approved_by: string | null;
+  retry_approved_at: string | null;
   /** Actor who last edited this item via PATCH (actor-attributed updates). */
   updated_by: string | null;
   /**

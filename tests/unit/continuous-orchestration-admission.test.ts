@@ -42,6 +42,9 @@ function item(over: Partial<BacklogItem> = {}): BacklogItem {
     approved_by: "chris",
     approved_at: "2026-06-17T00:00:00Z",
     last_dispatch_phid: null,
+    retry_safe: false,
+    retry_approved_by: null,
+    retry_approved_at: null,
     track_drift: false,
     created_at: "2026-06-17T00:00:00Z",
     updated_at: "2026-06-17T00:00:00Z",
@@ -255,6 +258,65 @@ describe("planAdmission — per-item guardrails", () => {
       max_in_flight: 4,
     });
     expect(p.admit.map((i) => i.item_id)).toEqual(["ready-build"]);
+    expect(p.skipped).toHaveLength(0);
+  });
+
+  it("holds an already-dispatched ready row unless it has explicit retry-safe approval", () => {
+    const p = planAdmission(
+      [item({ item_id: "manual-repromote", last_dispatch_phid: "phid:disp-old-failed" })],
+      ctx(),
+      cfg,
+    );
+
+    expect(p.admit).toHaveLength(0);
+    expect(p.skipped[0]).toMatchObject({
+      item_id: "manual-repromote",
+      action: "held",
+      metadata: expect.objectContaining({
+        code: "duplicate_dispatch_guard",
+        last_dispatch_phid: "phid:disp-old-failed",
+      }),
+    });
+  });
+
+  it("holds a manually promoted needs_clarification row with last_dispatch_phid", () => {
+    const p = planAdmission(
+      [item({ item_id: "manual-clarification", last_dispatch_phid: "phid:disp-needs-clarification" })],
+      ctx(),
+      cfg,
+    );
+
+    expect(p.admit).toHaveLength(0);
+    expect(p.skipped[0].metadata?.code).toBe("duplicate_dispatch_guard");
+  });
+
+  it("does not admit superseded rows", () => {
+    const p = planAdmission(
+      [item({ item_id: "superseded", readiness_state: "superseded", last_dispatch_phid: "phid:disp-old" })],
+      ctx(),
+      cfg,
+    );
+
+    expect(p.admit).toHaveLength(0);
+    expect(p.skipped[0].metadata?.code).toBe("not_ready");
+  });
+
+  it("admits a human-approved retry once", () => {
+    const p = planAdmission(
+      [
+        item({
+          item_id: "retry-approved",
+          last_dispatch_phid: "phid:disp-old-failed",
+          retry_safe: true,
+          retry_approved_by: "chris",
+          retry_approved_at: "2026-07-12T00:00:00Z",
+        }),
+      ],
+      ctx(),
+      cfg,
+    );
+
+    expect(p.admit.map((i) => i.item_id)).toEqual(["retry-approved"]);
     expect(p.skipped).toHaveLength(0);
   });
 

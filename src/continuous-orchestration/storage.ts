@@ -40,6 +40,9 @@ interface BacklogRow {
   approved_by: string | null;
   approved_at: string | null;
   last_dispatch_phid: string | null;
+  retry_safe: number | null;
+  retry_approved_by: string | null;
+  retry_approved_at: string | null;
   updated_by: string | null;
   track_drift: number | null;
   flesh_status: string | null;
@@ -88,6 +91,9 @@ export function rowToBacklogItem(r: BacklogRow): BacklogItem {
     approved_by: r.approved_by,
     approved_at: r.approved_at,
     last_dispatch_phid: r.last_dispatch_phid,
+    retry_safe: r.retry_safe === 1,
+    retry_approved_by: r.retry_approved_by ?? null,
+    retry_approved_at: r.retry_approved_at ?? null,
     updated_by: r.updated_by,
     track_drift: r.track_drift === 1,
     flesh_status: (r.flesh_status as BacklogItem["flesh_status"]) ?? "unfleshed",
@@ -312,6 +318,7 @@ export async function promoteToReady(
   adapter: DbAdapter,
   item_id: string,
   approved_by: string,
+  opts: { retry_safe?: boolean } = {},
 ): Promise<{ ok: boolean; reason?: string; item?: BacklogItem }> {
   const item = await getBacklogItem(adapter, item_id);
   if (!item) return { ok: false, reason: "not_found" };
@@ -328,11 +335,18 @@ export async function promoteToReady(
     }
   }
   const now = new Date().toISOString();
+  const retrySafe = opts.retry_safe === true && !!item.last_dispatch_phid;
   await adapter.query(
     `UPDATE orchestration_backlog_item
-       SET readiness_state = 'ready', approved_by = $1, approved_at = $2, updated_at = $3
-     WHERE item_id = $4`,
-    [approved_by, now, now, item_id],
+       SET readiness_state = 'ready',
+           approved_by = $1,
+           approved_at = $2,
+           updated_at = $3,
+           retry_safe = $4,
+           retry_approved_by = $5,
+           retry_approved_at = $6
+     WHERE item_id = $7`,
+    [approved_by, now, now, retrySafe ? 1 : 0, retrySafe ? approved_by : null, retrySafe ? now : null, item_id],
   );
   const updated = await getBacklogItem(adapter, item_id);
   return { ok: true, item: updated ?? undefined };
@@ -415,9 +429,10 @@ export async function setItemState(
   await adapter.query(
     `UPDATE orchestration_backlog_item
        SET readiness_state = $1, updated_at = $2,
-           last_dispatch_phid = COALESCE($3, last_dispatch_phid)
-     WHERE item_id = $4`,
-    [state, now, opts.dispatch_phid ?? null, item_id],
+           last_dispatch_phid = COALESCE($3, last_dispatch_phid),
+           retry_safe = CASE WHEN $4 THEN 0 ELSE retry_safe END
+     WHERE item_id = $5`,
+    [state, now, opts.dispatch_phid ?? null, state === "in_flight" ? 1 : 0, item_id],
   );
 }
 

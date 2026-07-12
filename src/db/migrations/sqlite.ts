@@ -656,6 +656,9 @@ export async function migrateSqlite(adapter: SqliteAdapter): Promise<void> {
       approved_by        TEXT,
       approved_at        TEXT,
       last_dispatch_phid TEXT,
+      retry_safe         INTEGER NOT NULL DEFAULT 0,
+      retry_approved_by  TEXT,
+      retry_approved_at  TEXT,
       updated_by         TEXT,
       track_drift        INTEGER NOT NULL DEFAULT 0,
       created_at         TEXT NOT NULL,
@@ -732,6 +735,20 @@ export async function migrateSqlite(adapter: SqliteAdapter): Promise<void> {
     adapter.exec(`ALTER TABLE orchestration_backlog_item ADD COLUMN updated_by TEXT`);
   } catch {
     // Column already exists in upgraded databases.
+  }
+
+  // Continuous-orchestration backlog: one-shot human-approved retry marker for
+  // already-dispatched rows. Default false preserves duplicate-fire safety.
+  for (const stmt of [
+    `ALTER TABLE orchestration_backlog_item ADD COLUMN retry_safe INTEGER NOT NULL DEFAULT 0`,
+    `ALTER TABLE orchestration_backlog_item ADD COLUMN retry_approved_by TEXT`,
+    `ALTER TABLE orchestration_backlog_item ADD COLUMN retry_approved_at TEXT`,
+  ]) {
+    try {
+      adapter.exec(stmt);
+    } catch {
+      // Column already exists in upgraded databases.
+    }
   }
 
   // Continuous-orchestration backlog: track-conformance drift flag (Spec L1b).

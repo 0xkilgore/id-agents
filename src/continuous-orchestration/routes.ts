@@ -220,9 +220,10 @@ export function mountContinuousOrchestrationRoutes(app: Application, opts: Orche
       const id = String(req.params.id);
       const body = (req.body ?? {}) as Record<string, unknown>;
       const approvedBy = typeof body.approved_by === "string" && body.approved_by ? body.approved_by : "chris";
+      const retrySafe = body.retry_safe === true;
       const patch = body.patch && typeof body.patch === "object" ? (body.patch as Partial<NewBacklogItem>) : undefined;
       if (patch) await updateBacklogFields(adapter, id, patch);
-      const result = await promoteToReady(adapter, id, approvedBy);
+      const result = await promoteToReady(adapter, id, approvedBy, { retry_safe: retrySafe });
       if (!result.ok) return res.status(409).json({ ok: false, error: result.reason });
       res.json({ ok: true, item: result.item });
     } catch (err) {
