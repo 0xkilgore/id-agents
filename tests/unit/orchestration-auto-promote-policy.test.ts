@@ -174,6 +174,79 @@ describe("autoPromoteRejections — safety gate (never auto-promote unsafe work)
     );
   });
 
+  it("keeps duplicate-dispatch retry ledger rows visible without silently auto-promoting them", () => {
+    const retryLedger = [
+      {
+        status: "queued",
+        row: item({
+          item_id: "retry-ledger-queued",
+          title: "queued duplicate dispatch",
+          write_scope: ["repo/queued"],
+          last_dispatch_phid: "phid:disp-queued",
+        }),
+      },
+      {
+        status: "failed",
+        row: item({
+          item_id: "retry-ledger-failed-manual",
+          title: "failed dispatch safe manual retry",
+          write_scope: ["repo/failed"],
+          approved_by: "operator",
+          approved_at: "2026-07-12T12:00:00.000Z",
+          last_dispatch_phid: "phid:disp-failed",
+        }),
+      },
+      {
+        status: "needs_clarification",
+        row: item({
+          item_id: "retry-ledger-needs-clarification",
+          title: "needs clarification duplicate dispatch",
+          write_scope: ["repo/clarification"],
+          last_dispatch_phid: "phid:disp-needs-clarification",
+        }),
+      },
+      {
+        status: "done",
+        row: item({
+          item_id: "retry-ledger-done-terminal",
+          title: "terminal done duplicate dispatch",
+          write_scope: ["repo/done"],
+          last_dispatch_phid: "phid:disp-done",
+        }),
+      },
+    ] as const;
+    const fresh = item({ item_id: "fresh-ready-fuel", write_scope: ["repo/fresh"] });
+
+    const plan = selectAutoPromotions(
+      [...retryLedger.map((entry) => entry.row), fresh],
+      [],
+      { floor: 5, minLanes: 1, maxPerPass: 10 },
+    );
+
+    expect(plan.promote.map((p) => p.item_id)).toEqual(["fresh-ready-fuel"]);
+    expect(plan.skipped.map((s) => s.item_id).sort()).toEqual(
+      retryLedger.map((entry) => entry.row.item_id).sort(),
+    );
+    for (const entry of retryLedger) {
+      expect(plan.skipped).toContainEqual({
+        item_id: entry.row.item_id,
+        reasons: expect.arrayContaining([
+          expect.stringContaining(`already dispatched once (last_dispatch_phid=${entry.row.last_dispatch_phid})`),
+        ]),
+      });
+    }
+    expect(plan.skipped).toContainEqual({
+      item_id: "retry-ledger-failed-manual",
+      reasons: expect.arrayContaining([expect.stringContaining("requires human /promote")]),
+    });
+    expect(retryLedger.map((entry) => entry.status)).toEqual([
+      "queued",
+      "failed",
+      "needs_clarification",
+      "done",
+    ]);
+  });
+
   it("rejects non-needs_review state, unfleshed items, and empty write_scope", () => {
     expect(autoPromoteRejections(item({ readiness_state: "ready" }), thr).length).toBeGreaterThan(0);
     expect(autoPromoteRejections(item({ dispatch_body: null }), thr)).toContainEqual(
