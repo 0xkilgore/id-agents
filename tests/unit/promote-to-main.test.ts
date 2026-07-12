@@ -14,6 +14,10 @@
 //     - push-verify failure (remote SHA mismatch) returns non-zero exit
 //     - divergent ancestry pauses with /agent-needs-input payload
 
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, it, expect } from "vitest";
 import {
   parsePromoteArgs,
@@ -80,6 +84,58 @@ function captureIo() {
     stderr: (s: string) => { err.push(s); },
     outText: () => out.join(""),
     errText: () => err.join(""),
+  };
+}
+
+function captureProcessIo() {
+  const out: string[] = [];
+  const err: string[] = [];
+  const origOut = process.stdout.write;
+  const origErr = process.stderr.write;
+  (process.stdout as unknown as { write: (s: string) => boolean }).write = (s: string) => {
+    out.push(String(s));
+    return true;
+  };
+  (process.stderr as unknown as { write: (s: string) => boolean }).write = (s: string) => {
+    err.push(String(s));
+    return true;
+  };
+  return {
+    restore: () => {
+      process.stdout.write = origOut;
+      process.stderr.write = origErr;
+    },
+    outText: () => out.join(""),
+    errText: () => err.join(""),
+  };
+}
+
+function git(cwd: string, args: string[]) {
+  execFileSync("git", args, { cwd, stdio: "pipe" });
+}
+
+function commitFile(repo: string, file: string, contents: string, message: string) {
+  writeFileSync(join(repo, file), contents);
+  git(repo, ["add", file]);
+  git(repo, ["commit", "-m", message]);
+}
+
+function withPromotionRepo(fn: (repo: string) => Promise<void>) {
+  return async () => {
+    const root = mkdtempSync(join(tmpdir(), "promote-to-main-dry-run-"));
+    const origin = join(root, "origin.git");
+    const repo = join(root, "repo");
+    try {
+      execFileSync("git", ["init", "--bare", "--initial-branch=main", origin], { stdio: "pipe" });
+      execFileSync("git", ["clone", origin, repo], { stdio: "pipe" });
+      git(repo, ["config", "user.email", "test@example.com"]);
+      git(repo, ["config", "user.name", "Test Agent"]);
+      commitFile(repo, "README.md", "base\n", "base");
+      git(repo, ["push", "origin", "main"]);
+      await fn(repo);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   };
 }
 
@@ -383,6 +439,118 @@ describe("maybeRunPromoteToMainCli", () => {
     }
     expect(exit).toBe(0);
   });
+});
+
+describe("id-agents promote-to-main — real-git dry-run smoke", () => {
+  it("reports fast-forward promotion JSON for a pure-ahead feature branch", withPromotionRepo(async (repo) => {
+    git(repo, ["checkout", "-b", "feat-fast-forward"]);
+    commitFile(repo, "feature.txt", "feature\n", "feature work");
+
+    const io = captureProcessIo();
+    let exit: number | null;
+    try {
+      exit = await maybeRunPromoteToMainCli([
+        "promote-to-main",
+        "--repo", repo,
+        "--branch", "feat-fast-forward",
+        "--json",
+      ]);
+    } finally {
+      io.restore();
+    }
+
+    expect(exit).toBe(0);
+    const payload = JSON.parse(io.outText());
+    expect(payload).toMatchObject({
+      path: repo,
+      base: "main",
+      source_branch: "feat-fast-forward",
+      strategy: "fast_forward",
+      pushed: false,
+      verified: false,
+      preflight: true,
+    });
+    expect(payload.promoted_sha).toMatch(/^[0-9a-f]{40}$/);
+    expect(payload.remote_main_sha).toMatch(/^[0-9a-f]{40}$/);
+    expect(io.errText()).toBe("");
+  }));
+
+  it("reports merge promotion JSON for a branch behind current remote main", withPromotionRepo(async (repo) => {
+    git(repo, ["checkout", "-b", "feat-merge-path"]);
+    git(repo, ["checkout", "main"]);
+    commitFile(repo, "main.txt", "base moved\n", "advance main");
+    git(repo, ["push", "origin", "main"]);
+    git(repo, ["checkout", "feat-merge-path"]);
+
+    const io = captureProcessIo();
+    let exit: number | null;
+    try {
+      exit = await maybeRunPromoteToMainCli([
+        "promote-to-main",
+        "--repo", repo,
+        "--branch", "feat-merge-path",
+        "--json",
+      ]);
+    } finally {
+      io.restore();
+    }
+
+    expect(exit).toBe(0);
+    const payload = JSON.parse(io.outText());
+    expect(payload).toMatchObject({
+      path: repo,
+      base: "main",
+      source_branch: "feat-merge-path",
+      strategy: "merge_commit",
+      pushed: false,
+      verified: false,
+      preflight: true,
+    });
+    expect(payload.summary).toContain("would merge-commit feat-merge-path");
+  }));
+
+  it("emits a needs-input payload for divergent ancestry", withPromotionRepo(async (repo) => {
+    git(repo, ["checkout", "-b", "feat-diverged"]);
+    commitFile(repo, "feature.txt", "feature\n", "feature work");
+    git(repo, ["checkout", "main"]);
+    commitFile(repo, "main.txt", "base moved\n", "advance main");
+    git(repo, ["push", "origin", "main"]);
+    git(repo, ["checkout", "feat-diverged"]);
+
+    const io = captureProcessIo();
+    let exit: number | null;
+    try {
+      exit = await maybeRunPromoteToMainCli([
+        "promote-to-main",
+        "--repo", repo,
+        "--branch", "feat-diverged",
+        "--dispatch-id", "phid:disp-dry-run",
+        "--json",
+      ]);
+    } finally {
+      io.restore();
+    }
+
+    expect(exit).toBe(10);
+    expect(io.errText()).toMatch(/diverged from main/);
+    const payload = JSON.parse(io.outText());
+    expect(payload).toMatchObject({
+      dispatch_id: "phid:disp-dry-run",
+      agent_id: "promote-to-main",
+      urgency: "normal",
+      context: {
+        repo,
+        branch: "feat-diverged",
+        base: "main",
+        remote: "origin",
+        ahead: 1,
+        behind: 1,
+        incident_code: "ahead_behind_divergence",
+        action: "route_to_worktree_hygiene",
+      },
+    });
+    expect(payload.question).toMatch(/diverged/);
+  }));
 });
 
 // ────────────────────────────────────────────────────────────────────
