@@ -676,7 +676,85 @@ describe("handleAgentDone — queued-dispatch closeout (Spec 2026-06-01)", () =>
 
     expect(final?.status).toBe("failed");
     expect(final?.failure_kind).toBe("validation_failed");
-    expect(final?.failure_detail).toContain("productive orchestration closeout produced no artifact evidence");
+    expect(final?.failure_detail).toContain("productive orchestration closeout produced no complete refuel artifact evidence");
+  });
+
+  it("queued load-loop/refuel artifact without required closeout evidence fails", async () => {
+    const handle = new SchedulerHandle({
+      adapter,
+      teamId: "team",
+      resolveTargetUrl: () => "http://localhost:9999",
+    });
+    const enq = await handle.enqueue({
+      to_agent: "maestra",
+      from_actor: "manager",
+      subject: "Kapelle overnight refuel load-loop",
+      message: "Run a refuel load-loop and seed rows for orchestration fuel.",
+    });
+
+    const final = await handle.handleAgentDone({
+      query_id: enq.query_id,
+      success: true,
+      result: {
+        artifact_path: "/tmp/refuel-closeout.md",
+        rows_created: 3,
+        post_refuel_status_counts: { ready: 2, queued: 0 },
+      },
+    });
+
+    expect(final?.status).toBe("failed");
+    expect(final?.failure_kind).toBe("validation_failed");
+    expect(final?.failure_detail).toContain(
+      "missing sources scanned, rows created, verified promotion, or post-refuel /orchestration/status counts",
+    );
+  });
+
+  it("queued load-loop/refuel artifact with sources, created rows, promotion, and status counts is accepted", async () => {
+    const handle = new SchedulerHandle({
+      adapter,
+      teamId: "team",
+      resolveTargetUrl: () => "http://localhost:9999",
+    });
+    const enq = await handle.enqueue({
+      to_agent: "maestra",
+      from_actor: "manager",
+      subject: "Kapelle overnight refuel load-loop",
+      message: "Run a refuel load-loop and seed rows for orchestration fuel.",
+    });
+
+    const final = await handle.handleAgentDone({
+      query_id: enq.query_id,
+      success: true,
+      result: {
+        artifact_path: "/tmp/refuel-closeout.md",
+        sources_scanned: 4,
+        rows_created: 3,
+        promotion: {
+          required: true,
+          completed: true,
+          repos: [{
+            path: "/repo/id-agents",
+            base: "main",
+            source_branch: "refuel-closeout-artifact-validator",
+            strategy: "fast_forward",
+            promoted_sha: "abc123",
+            remote_main_sha: "abc123",
+            pushed: true,
+            verified: true,
+          }],
+        },
+        post_refuel_status_counts: { ready: 2, queued: 0 },
+      },
+    });
+
+    expect(final?.status).toBe("done");
+    const r = await handle.reactor.getResult(enq.dispatch_phid);
+    expect(r).toMatchObject({
+      artifact_path: "/tmp/refuel-closeout.md",
+      sources_scanned: 4,
+      rows_created: 3,
+      post_refuel_status_counts: { ready: 2, queued: 0 },
+    });
   });
 
   it("queued load-loop/refuel explicit no-op with reason is accepted as an intentional no-op", async () => {

@@ -37,6 +37,7 @@ import type {
   DispatchDoc,
   EnqueueInput,
   FailureKind,
+  PromotionAgentDone,
   PromotionInput,
   Provider,
   Runtime,
@@ -1093,13 +1094,21 @@ function classifyQueuedProductiveCloseout(
   result: Record<string, unknown> | null,
 ): QueuedProductiveCloseout {
   if (!isProductiveOrchestrationDispatch(doc)) return { action: "allow", reason: null };
-  if (hasArtifactEvidence(result) || hasQueuedWorkEvidence(result)) return { action: "allow", reason: null };
+  if (hasArtifactEvidence(result)) {
+    if (hasRefuelCloseoutEvidence(doc, result)) return { action: "allow", reason: null };
+    return {
+      action: "fail",
+      reason:
+        "productive orchestration closeout artifact is missing sources scanned, rows created, verified promotion, or post-refuel /orchestration/status counts",
+    };
+  }
+  if (hasQueuedWorkEvidence(result)) return { action: "allow", reason: null };
   const noopReason = explicitNoopReason(result);
   if (noopReason) return { action: "explicit_noop", reason: noopReason };
   return {
     action: "fail",
     reason:
-      "productive orchestration closeout produced no artifact evidence, queued work evidence, or explicit no-op reason",
+      "productive orchestration closeout produced no complete refuel artifact evidence, queued work evidence, or explicit no-op reason",
   };
 }
 
@@ -1112,6 +1121,49 @@ function isProductiveOrchestrationDispatch(doc: DispatchDoc): boolean {
 function hasArtifactEvidence(result: Record<string, unknown> | null): boolean {
   if (!result) return false;
   return ["artifact_path", "artifact_id", "output_path", "output"].some((key) => nonEmptyString(result[key]));
+}
+
+function hasRefuelCloseoutEvidence(doc: DispatchDoc, result: Record<string, unknown> | null): boolean {
+  if (!hasArtifactEvidence(result)) return false;
+  const promotion = parsePromotionAgentDone(result?.promotion) ?? parsePromotionAgentDone(doc.promotion_result);
+  return (
+    hasSourcesScannedEvidence(result) &&
+    hasRowsCreatedEvidence(result) &&
+    hasVerifiedPromotionEvidence(promotion) &&
+    hasPostRefuelStatusCounts(result)
+  );
+}
+
+function hasSourcesScannedEvidence(result: Record<string, unknown> | null): boolean {
+  if (!result) return false;
+  if (positiveNumber(result.sources_scanned) || positiveNumber(result.sourcesScanned)) return true;
+  const sources = result.sources ?? result.scanned_sources ?? result.scannedSources;
+  return Array.isArray(sources) && sources.length > 0;
+}
+
+function hasRowsCreatedEvidence(result: Record<string, unknown> | null): boolean {
+  if (!result) return false;
+  if (positiveNumber(result.rows_created) || positiveNumber(result.rowsCreated)) return true;
+  return ["seeded_rows", "inserted", "created", "created_rows"].some((key) => positiveNumber(result[key]));
+}
+
+function hasVerifiedPromotionEvidence(promotion: PromotionAgentDone | null): boolean {
+  if (!promotion || promotion.completed !== true) return false;
+  if (!Array.isArray(promotion.repos) || promotion.repos.length === 0) return false;
+  return promotion.repos.every((repo) =>
+    nonEmptyString(repo.promoted_sha) &&
+    nonEmptyString(repo.remote_main_sha) &&
+    repo.promoted_sha === repo.remote_main_sha &&
+    repo.pushed === true &&
+    repo.verified === true
+  );
+}
+
+function hasPostRefuelStatusCounts(result: Record<string, unknown> | null): boolean {
+  if (!result) return false;
+  const counts = objectValue(result.post_refuel_status_counts) ?? objectValue(result.postRefuelStatusCounts);
+  if (!counts) return false;
+  return ["ready", "queued", "in_flight", "needs_review", "blocked"].some((key) => nonNegativeNumber(counts[key]));
 }
 
 function hasQueuedWorkEvidence(result: Record<string, unknown> | null): boolean {
@@ -1141,8 +1193,24 @@ function positiveNumber(value: unknown): boolean {
   return typeof value === "number" && Number.isFinite(value) && value > 0;
 }
 
+function nonNegativeNumber(value: unknown): boolean {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0;
+}
+
 function nonEmptyString(value: unknown): boolean {
   return typeof value === "string" && value.trim().length > 0;
+}
+
+function objectValue(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
+function parsePromotionAgentDone(value: unknown): PromotionAgentDone | null {
+  const promotion = objectValue(value);
+  if (!promotion) return null;
+  return promotion as unknown as PromotionAgentDone;
 }
 
 function stringValue(value: unknown): string | null {
