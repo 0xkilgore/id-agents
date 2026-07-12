@@ -302,7 +302,7 @@ test("Cn-EVE.1: recovery_status='landed_reconciled' without artifact OR promotio
   expect(cls!.recovery_evidence.promotion_sha).toBeNull();
 });
 
-test("empty-success guard: fast done with no artifact/promotion/substantial output is classified", () => {
+test("empty-success guard: fast done with no artifact/promotion/structured work/substantial output is classified", () => {
   const cls = deriveRecoveryClassification({
     status: "done",
     not_before_at: "2026-06-30T03:26:00.000Z",
@@ -320,6 +320,54 @@ test("empty-success guard: fast done with no artifact/promotion/substantial outp
   expect(cls!.false_expire_recovered).toBe(false);
   expect(cls!.empty_success_candidate).toBe(true);
   expect(cls!.completion_evidence?.elapsed_ms).toBe(21_000);
+});
+
+test("empty-success guard: recent Maestra structured closeout is preserved as clean done", () => {
+  expect(
+    deriveEmptySuccessCandidate({
+      status: "done",
+      started_at: "2026-07-12T11:00:00.000Z",
+      completed_at: "2026-07-12T11:00:35.000Z",
+      artifact_path: null,
+      promotion_result_json: null,
+      result_json: JSON.stringify({
+        summary: "Queued follow-up work.",
+        dispatches_queued: 2,
+        dispatches: ["phid:disp-maestra-a", "phid:disp-maestra-b"],
+      }),
+    }).empty_success_candidate,
+  ).toBe(false);
+});
+
+test("empty-success guard: refuel closeout with ready/fleshed counts is not suspect", () => {
+  expect(
+    deriveEmptySuccessCandidate({
+      status: "done",
+      started_at: "2026-07-12T11:05:00.000Z",
+      completed_at: "2026-07-12T11:05:18.000Z",
+      artifact_path: null,
+      promotion_result_json: null,
+      result_json: JSON.stringify({
+        summary: "Refuel pass completed.",
+        considered: 5,
+        auto_ready: 3,
+        fleshed: 3,
+      }),
+    }).empty_success_candidate,
+  ).toBe(false);
+});
+
+test("empty-success guard: tiny summary text alone is still suspect", () => {
+  expect(
+    deriveEmptySuccessCandidate({
+      status: "done",
+      started_at: "2026-07-12T11:10:00.000Z",
+      completed_at: "2026-07-12T11:10:08.000Z",
+      artifact_path: null,
+      promotion_result_json: null,
+      result_json: JSON.stringify({ summary: "Done." }),
+    }).empty_success_candidate,
+  ).toBe(true);
 });
 
 test("empty-success guard: explicit skip/noop evidence is preserved as clean done", () => {

@@ -1100,7 +1100,7 @@ export interface EmptySuccessCandidate {
 const EMPTY_SUCCESS_FAST_MS = 2 * 60_000;
 const SUBSTANTIAL_RESULT_TEXT_MIN = 120;
 const EXPLICIT_NOOP_RE = /\b(no-?op|skip(?:ped)?|not applicable|already (?:done|current|up to date)|no changes? (?:needed|required)|intentionally no work)\b/i;
-const EVIDENCE_KEY_RE = /^(artifact_path|artifact|artifact_id|output_path|output|comment_id|comment|timeline_event_id|timeline_id|commit_sha|sha|promotion|promotion_result|diff|summary|closeout)$/i;
+const DURABLE_EVIDENCE_KEY_RE = /^(artifact_path|artifact|artifact_id|output_path|output|comment_id|timeline_event_id|timeline_id|commit_sha|sha|promotion|promotion_result)$/i;
 
 export function deriveEmptySuccessCandidate(row: EmptySuccessCandidateRow): EmptySuccessCandidate {
   const parsed = parseJsonObject(row.result_json);
@@ -1124,13 +1124,16 @@ export function deriveEmptySuccessCandidate(row: EmptySuccessCandidateRow): Empt
   if (hasExplicitNoopEvidence(parsed, resultText)) {
     return emptySuccess(false, null, elapsedMs, resultTextLength, resultKeys);
   }
+  if (hasStructuredWorkEvidence(parsed)) {
+    return emptySuccess(false, null, elapsedMs, resultTextLength, resultKeys);
+  }
   if (hasSubstantialResultEvidence(parsed, resultTextLength)) {
     return emptySuccess(false, null, elapsedMs, resultTextLength, resultKeys);
   }
 
   return emptySuccess(
     true,
-    "done within 2m with no artifact_path, verified promotion, explicit noop/skip evidence, or substantial result output",
+    "done within 2m with no artifact_path, verified promotion, explicit noop/skip evidence, structured work evidence, or substantial result output",
     elapsedMs,
     resultTextLength,
     resultKeys,
@@ -1192,12 +1195,44 @@ function hasSubstantialResultEvidence(parsed: Record<string, unknown> | null, re
   if (!parsed) return false;
   if (resultTextLength >= SUBSTANTIAL_RESULT_TEXT_MIN) return true;
   return Object.entries(parsed).some(([key, value]) => {
-    if (!EVIDENCE_KEY_RE.test(key)) return false;
+    if (!DURABLE_EVIDENCE_KEY_RE.test(key)) return false;
     if (typeof value === "string") return value.trim().length > 0;
     if (typeof value === "boolean") return value;
     if (Array.isArray(value)) return value.length > 0;
     return value != null;
   });
+}
+
+function hasStructuredWorkEvidence(parsed: Record<string, unknown> | null): boolean {
+  if (!parsed) return false;
+  const numericKeys = [
+    "queued",
+    "queued_count",
+    "queued_work",
+    "dispatches_queued",
+    "seeded_rows",
+    "inserted",
+    "created",
+    "promoted",
+    "auto_ready",
+    "fleshed",
+    "considered",
+  ];
+  if (numericKeys.some((key) => positiveNumber(parsed[key]))) return true;
+  if (nonEmptyString(parsed.dispatch_phid) || nonEmptyString(parsed.query_id)) return true;
+  if (parsed.status === "queued" || parsed.status === "seeded" || parsed.status === "created") return true;
+  return ["dispatches", "queued_dispatches", "items", "created_items", "seeded_items", "promoted_items"].some((key) => {
+    const value = parsed[key];
+    return Array.isArray(value) && value.length > 0;
+  });
+}
+
+function positiveNumber(value: unknown): boolean {
+  return typeof value === "number" && Number.isFinite(value) && value > 0;
+}
+
+function nonEmptyString(value: unknown): boolean {
+  return typeof value === "string" && value.trim().length > 0;
 }
 
 /**
