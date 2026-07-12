@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import * as fs from "fs";
 import * as http from "http";
 import * as net from "net";
@@ -66,6 +66,20 @@ async function closeServer(server: http.Server): Promise<void> {
   });
 }
 
+async function waitForLog(
+  spy: ReturnType<typeof vi.spyOn>,
+  predicate: (line: string) => boolean,
+): Promise<string> {
+  for (let i = 0; i < 20; i += 1) {
+    const line = spy.mock.calls
+      .map((call) => call.map(String).join(" "))
+      .find(predicate);
+    if (line) return line;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error("expected dispatch attempt ledger log was not emitted");
+}
+
 describe("dispatch attempt ledger route", () => {
   const savedGatewayMode = process.env.DISPATCH_GATEWAY_MODE;
   let db: Awaited<ReturnType<typeof createInMemoryDb>>;
@@ -128,6 +142,7 @@ describe("dispatch attempt ledger route", () => {
   });
 
   it("records one ledger row for a failed /talk-to followed by /news-to fallback", async () => {
+    const consoleLog = vi.spyOn(console, "log").mockImplementation(() => {});
     const body = {
       to: "ledger-target",
       from: "continuous-orchestration",
@@ -135,38 +150,65 @@ describe("dispatch attempt ledger route", () => {
       query_id: "query_1783439711510_sacmggk",
       dispatch_id: "phid:disp-route-ledger",
     };
-    const talk = await fetch(`${baseUrl}/talk-to`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "X-Id-Team": "default" },
-      body: JSON.stringify(body),
-    });
-    expect(talk.status).toBe(502);
+    try {
+      const talk = await fetch(`${baseUrl}/talk-to`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-Id-Team": "default" },
+        body: JSON.stringify(body),
+      });
+      expect(talk.status).toBe(502);
 
-    const news = await fetch(`${baseUrl}/news-to`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "X-Id-Team": "default" },
-      body: JSON.stringify({ ...body, trigger: true }),
-    });
-    expect(news.status).toBe(202);
+      const news = await fetch(`${baseUrl}/news-to`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-Id-Team": "default" },
+        body: JSON.stringify({ ...body, trigger: true }),
+      });
+      expect(news.status).toBe(202);
 
-    const ledger = await fetch(`${baseUrl}/dispatch-attempt-ledger`, {
-      headers: { "X-Id-Team": "default" },
-    });
-    expect(ledger.status).toBe(200);
-    const payload = await ledger.json() as any;
-    expect(payload.attempts).toHaveLength(1);
-    expect(payload.attempts[0]).toMatchObject({
-      to_agent: "ledger-target",
-      original_query_id: "query_1783439711510_sacmggk",
-      original_dispatch_id: "phid:disp-route-ledger",
-      talk_to_attempted: true,
-      talk_to_ok: false,
-      talk_to_status_code: 502,
-      news_to_attempted: true,
-      news_to_ok: true,
-      news_to_status_code: 202,
-      fallback_used: true,
-      fallback_ok: true,
-    });
+      const ledger = await fetch(`${baseUrl}/dispatch-attempt-ledger`, {
+        headers: { "X-Id-Team": "default" },
+      });
+      expect(ledger.status).toBe(200);
+      const payload = await ledger.json() as any;
+      expect(payload.attempts).toHaveLength(1);
+      expect(payload.attempts[0]).toMatchObject({
+        to_agent: "ledger-target",
+        original_query_id: "query_1783439711510_sacmggk",
+        original_dispatch_id: "phid:disp-route-ledger",
+        talk_to_attempted: true,
+        talk_to_ok: false,
+        talk_to_status_code: 502,
+        news_to_attempted: true,
+        news_to_ok: true,
+        news_to_status_code: 202,
+        fallback_used: true,
+        fallback_ok: true,
+      });
+
+      const talkLog = await waitForLog(
+        consoleLog,
+        (line) => line.includes("dispatch attempt ledger") &&
+          line.includes('"path":"/talk-to"') &&
+          line.includes('"status":"failed"') &&
+          line.includes('"target_agent":"ledger-target"') &&
+          line.includes('"original_query_id":"query_1783439711510_sacmggk"') &&
+          line.includes('"original_dispatch_id":"phid:disp-route-ledger"'),
+      );
+      expect(talkLog).toContain('"status_code":502');
+
+      const fallbackLog = await waitForLog(
+        consoleLog,
+        (line) => line.includes("dispatch attempt ledger") &&
+          line.includes('"path":"/news-to"') &&
+          line.includes('"status":"fallback sent"') &&
+          line.includes('"fallback_used":true') &&
+          line.includes('"fallback_ok":true') &&
+          line.includes('"original_query_id":"query_1783439711510_sacmggk"') &&
+          line.includes('"original_dispatch_id":"phid:disp-route-ledger"'),
+      );
+      expect(fallbackLog).toContain('"status_code":202');
+    } finally {
+      consoleLog.mockRestore();
+    }
   });
 });
