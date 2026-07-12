@@ -115,6 +115,7 @@ async function seedReady(adapter: SqliteAdapter, over: Partial<BacklogItem> = {}
     token_estimate: over.token_estimate ?? 0,
     provider: over.provider ?? null,
     runtime: over.runtime ?? null,
+    source_refs: over.source_refs ?? [],
   });
   return item;
 }
@@ -187,6 +188,15 @@ function writeModelPolicy(seed: {
 }
 
 async function callApp(app: Express, path: string): Promise<{ status: number; body: any }> {
+  return callAppRequest(app, "GET", path);
+}
+
+async function callAppRequest(
+  app: Express,
+  method: "GET" | "POST",
+  path: string,
+  body?: unknown,
+): Promise<{ status: number; body: any }> {
   return new Promise((resolve, reject) => {
     const server = app.listen(0, "127.0.0.1", async () => {
       const addr = server.address();
@@ -196,7 +206,11 @@ async function callApp(app: Express, path: string): Promise<{ status: number; bo
         return;
       }
       try {
-        const r = await fetch(`http://127.0.0.1:${addr.port}${path}`);
+        const r = await fetch(`http://127.0.0.1:${addr.port}${path}`, {
+          method,
+          headers: method === "POST" ? { "content-type": "application/json" } : undefined,
+          body: method === "POST" ? JSON.stringify(body ?? {}) : undefined,
+        });
         const text = await r.text();
         server.close(() => resolve({ status: r.status, body: JSON.parse(text) }));
       } catch (e) {
@@ -204,6 +218,56 @@ async function callApp(app: Express, path: string): Promise<{ status: number; bo
       }
     });
   });
+}
+
+async function seedDispatch(
+  adapter: SqliteAdapter,
+  over: { dispatch_phid: string; status: string; artifact_path?: string | null; recovery_status?: string | null },
+) {
+  const now = "2026-07-08T12:00:00Z";
+  await adapter.query(
+    `INSERT INTO dispatch_scheduler_queue
+       (dispatch_phid, team_id, query_id, to_agent, from_actor, channel, subject,
+        body_markdown, provider, runtime, status, not_before_at, completed_at, updated_at,
+        result_json, artifact_path, recovery_status)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)`,
+    [
+      over.dispatch_phid,
+      "team-uuid-9999",
+      `q_${over.dispatch_phid}`,
+      "roger",
+      "co",
+      "manager",
+      "subject",
+      "body",
+      "openai",
+      "codex",
+      over.status,
+      now,
+      now,
+      now,
+      over.artifact_path ? JSON.stringify({ artifact_path: over.artifact_path }) : null,
+      over.artifact_path ?? null,
+      over.recovery_status ?? "none",
+    ],
+  );
+}
+
+async function markReadyAlreadyDispatched(
+  adapter: SqliteAdapter,
+  itemId: string,
+  phid: string,
+  opts: { retry_safe?: boolean } = {},
+) {
+  await adapter.query(
+    `UPDATE orchestration_backlog_item
+        SET last_dispatch_phid = $1,
+            retry_safe = $2,
+            updated_at = $3
+      WHERE item_id = $4`,
+    [phid, opts.retry_safe ? 1 : 0, "2026-07-08T12:01:00Z", itemId],
+  );
+  return (await getBacklogItem(adapter, itemId))!;
 }
 
 function mountStatusApp(
@@ -1417,6 +1481,105 @@ describe("daemon — guardrail alerts", () => {
         }),
       ]),
     });
+  });
+});
+
+describe("stale already-dispatched ready reconciliation route", () => {
+  it("closes or supersedes terminal rows, preserves retry-safe work, cites artifacts, and corrects ready counts", async () => {
+    const closed = await seedReady(adapter, {
+      title: "terminal done duplicate",
+      write_scope: ["repo/closed"],
+      source_refs: ["roadmap:t-orch:closed"],
+    });
+    const superseded = await seedReady(adapter, {
+      title: "terminal failed duplicate",
+      write_scope: ["repo/superseded"],
+      source_refs: ["roadmap:t-orch:superseded"],
+    });
+    const retry = await seedReady(adapter, {
+      title: "operator-approved unsafe retry",
+      write_scope: ["repo/retry"],
+      source_refs: ["roadmap:t-orch:retry"],
+    });
+
+    await markReadyAlreadyDispatched(adapter, closed.item_id, "phid:disp-closed");
+    await markReadyAlreadyDispatched(adapter, superseded.item_id, "phid:disp-superseded");
+    await markReadyAlreadyDispatched(adapter, retry.item_id, "phid:disp-retry", { retry_safe: true });
+    await seedDispatch(adapter, {
+      dispatch_phid: "phid:disp-closed",
+      status: "done",
+      artifact_path: "/repo/output/closed.md",
+    });
+    await seedDispatch(adapter, {
+      dispatch_phid: "phid:disp-superseded",
+      status: "failed",
+      artifact_path: "/repo/output/superseded.md",
+    });
+    await seedDispatch(adapter, {
+      dispatch_phid: "phid:disp-retry",
+      status: "done",
+      artifact_path: "/repo/output/retry.md",
+    });
+
+    const { app, daemon } = mountStatusApp(adapter, {
+      dry_run: false,
+      auto_flesh_enabled: true,
+      auto_promote_enabled: true,
+      auto_promote_floor: 3,
+    });
+    await daemon.setMode("running");
+
+    const before = await callApp(app, "/orchestration/status");
+    expect(before.status).toBe(200);
+    expect(before.body.counts.ready).toBe(3);
+    expect(before.body.ready_admission.candidates).toBe(3);
+
+    const res = await callAppRequest(app, "POST", "/orchestration/reconcile/stale-ready");
+
+    expect(res.status).toBe(200);
+    expect(res.body.result).toMatchObject({
+      scanned: 3,
+      closed: 1,
+      superseded: 1,
+      preserved_retry_safe: 1,
+      dry_run: false,
+    });
+    expect(res.body.result.items).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          item_id: closed.item_id,
+          dispatch_phid: "phid:disp-closed",
+          to_state: "done",
+          artifact_path: "/repo/output/closed.md",
+        }),
+        expect.objectContaining({
+          item_id: superseded.item_id,
+          dispatch_phid: "phid:disp-superseded",
+          to_state: "superseded",
+          artifact_path: "/repo/output/superseded.md",
+        }),
+      ]),
+    );
+
+    const closedAfter = (await getBacklogItem(adapter, closed.item_id))!;
+    const supersededAfter = (await getBacklogItem(adapter, superseded.item_id))!;
+    const retryAfter = (await getBacklogItem(adapter, retry.item_id))!;
+    expect(closedAfter.readiness_state).toBe("done");
+    expect(closedAfter.source_refs).toContain("roadmap:t-orch:closed");
+    expect(closedAfter.source_refs).toContain("dispatch_artifact:/repo/output/closed.md");
+    expect(supersededAfter.readiness_state).toBe("superseded");
+    expect(supersededAfter.source_refs).toContain("dispatch_artifact:/repo/output/superseded.md");
+    expect(retryAfter.readiness_state).toBe("ready");
+    expect(retryAfter.retry_safe).toBe(true);
+    expect(retryAfter.source_refs).toEqual(["roadmap:t-orch:retry"]);
+
+    const after = await callApp(app, "/orchestration/status");
+    expect(after.status).toBe(200);
+    expect(after.body.counts.ready).toBe(1);
+    expect(after.body.ready_admission.candidates).toBe(1);
+    expect(after.body.ready_admission.admissible.map((item: { item_id: string }) => item.item_id)).toEqual([
+      retry.item_id,
+    ]);
   });
 });
 

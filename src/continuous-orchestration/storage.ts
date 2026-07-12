@@ -616,6 +616,126 @@ export interface ReadyRuntimeRepair {
   reason?: string;
 }
 
+export interface StaleReadyReconcileResult {
+  scanned: number;
+  closed: number;
+  superseded: number;
+  preserved_retry_safe: number;
+  dry_run: boolean;
+  items: Array<{
+    item_id: string;
+    dispatch_phid: string;
+    from_state: "ready";
+    to_state: "done" | "superseded";
+    dispatch_status: string;
+    artifact_path: string | null;
+    reason: string;
+  }>;
+}
+
+const READY_RECONCILE_TERMINAL_STATUSES = new Set(["done", "failed", "cancelled", "moot"]);
+
+function appendSourceRef(sourceRefsJson: string, artifactPath: string | null): string {
+  const refs = parseArr(sourceRefsJson);
+  if (artifactPath) {
+    const ref = `dispatch_artifact:${artifactPath}`;
+    if (!refs.includes(ref)) refs.push(ref);
+  }
+  return JSON.stringify(refs);
+}
+
+/**
+ * Close stale READY rows that were already dispatched and now have terminal
+ * scheduler evidence. This is deliberately operator-triggered and conservative:
+ * retry_safe rows are preserved because a human explicitly approved a refire.
+ */
+export async function reconcileStaleAlreadyDispatchedReadyRows(
+  adapter: DbAdapter,
+  opts: { team_id?: string; dry_run?: boolean } = {},
+): Promise<StaleReadyReconcileResult> {
+  const teamId = opts.team_id ?? "default";
+  const dryRun = opts.dry_run === true;
+  const { rows } = await adapter.query<
+    BacklogRow & {
+      dispatch_status: string | null;
+      dispatch_recovery_status: string | null;
+      artifact_path: string | null;
+    }
+  >(
+    `SELECT i.*,
+            q.status AS dispatch_status,
+            q.recovery_status AS dispatch_recovery_status,
+            q.artifact_path AS artifact_path
+       FROM orchestration_backlog_item i
+       LEFT JOIN dispatch_scheduler_queue q
+         ON q.dispatch_phid = i.last_dispatch_phid
+      WHERE i.team_id = $1
+        AND i.readiness_state = 'ready'
+        AND i.last_dispatch_phid IS NOT NULL
+      ORDER BY i.updated_at ASC, i.created_at ASC`,
+    [teamId],
+  );
+
+  const result: StaleReadyReconcileResult = {
+    scanned: rows.length,
+    closed: 0,
+    superseded: 0,
+    preserved_retry_safe: 0,
+    dry_run: dryRun,
+    items: [],
+  };
+
+  for (const row of rows) {
+    if (row.retry_safe === 1) {
+      result.preserved_retry_safe += 1;
+      continue;
+    }
+
+    const status = row.dispatch_recovery_status === "moot" ? "moot" : row.dispatch_status;
+    if (!status || !READY_RECONCILE_TERMINAL_STATUSES.has(status)) continue;
+
+    const toState: "done" | "superseded" = status === "done" ? "done" : "superseded";
+    const reason =
+      toState === "done"
+        ? `already-dispatched ready row closed after terminal dispatch ${status}`
+        : `already-dispatched ready row superseded after terminal dispatch ${status}`;
+
+    if (!dryRun) {
+      const now = new Date().toISOString();
+      await adapter.query(
+        `UPDATE orchestration_backlog_item
+            SET readiness_state = $1,
+                source_refs_json = $2,
+                retry_safe = 0,
+                updated_at = $3
+          WHERE item_id = $4
+            AND readiness_state = 'ready'
+            AND COALESCE(retry_safe, 0) = 0`,
+        [
+          toState,
+          appendSourceRef(row.source_refs_json, row.artifact_path),
+          now,
+          row.item_id,
+        ],
+      );
+    }
+
+    if (toState === "done") result.closed += 1;
+    else result.superseded += 1;
+    result.items.push({
+      item_id: row.item_id,
+      dispatch_phid: row.last_dispatch_phid ?? "",
+      from_state: "ready",
+      to_state: toState,
+      dispatch_status: status,
+      artifact_path: row.artifact_path ?? null,
+      reason,
+    });
+  }
+
+  return result;
+}
+
 /**
  * Repair stale ready-fuel metadata after an agent lane changes runtime.
  *
