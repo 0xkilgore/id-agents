@@ -546,6 +546,7 @@ export async function buildSurfacedArtifactsReadModel(
 
   const rawRows: SurfacedArtifactRow[] = [];
   for (const artifact of artifacts) {
+    const stableArtifactId = canonicalArtifactIdForArtifactRow(artifact);
     const body = await readRenderableBody(artifact.abs_path, readFile);
     const signals = titleSignalsFromBody(body.text);
     const metadata = metadataSignalsFromText(body.text);
@@ -562,7 +563,7 @@ export async function buildSurfacedArtifactsReadModel(
     const reason = artifactReason(artifact);
     const status = artifactStatus(artifact, feedbackEnabled);
     rawRows.push(withRank({
-      id: `artifact:${artifact.artifact_id}`,
+      id: `artifact:${stableArtifactId}`,
       title: humanTitleFromParts({
         frontmatterTitle: signals.frontmatterTitle,
         firstH1: signals.firstH1,
@@ -596,7 +597,7 @@ export async function buildSurfacedArtifactsReadModel(
         artifact_path_present: Boolean(artifact.abs_path),
         body_renderable: body.renderable,
       },
-      delivery: artifactDelivery(artifact.artifact_id, {
+      delivery: artifactDelivery(stableArtifactId, {
         mediaType: artifact.media_type,
         freshness: body.renderable ? "current" : artifact.body_error ? "error" : "body_unavailable",
         sourceHost: artifact.source_host,
@@ -612,6 +613,7 @@ export async function buildSurfacedArtifactsReadModel(
 
   for (const dispatch of dispatches) {
     const artifactPath = dispatchArtifactPath(dispatch);
+    const stableArtifactId = artifactPath ? artifactIdFromPath(artifactPath) : dispatch.dispatch_phid;
     const body = artifactPath ? await readRenderableBody(artifactPath, readFile) : { renderable: false, text: null };
     const signals = titleSignalsFromBody(body.text);
     const metadata = metadataSignalsFromText([body.text, dispatch.body_markdown].filter(Boolean).join("\n"));
@@ -629,7 +631,7 @@ export async function buildSurfacedArtifactsReadModel(
       body: body.text ?? dispatch.body_markdown,
     });
     rawRows.push(withRank({
-      id: missing ? `dispatch-missing:${dispatch.dispatch_phid}` : `dispatch:${dispatch.dispatch_phid}`,
+      id: missing ? `dispatch-missing:${dispatch.dispatch_phid}` : `artifact:${stableArtifactId}`,
       title: humanTitleFromParts({
         frontmatterTitle: signals.frontmatterTitle,
         firstH1: signals.firstH1,
@@ -663,7 +665,7 @@ export async function buildSurfacedArtifactsReadModel(
         artifact_path_present: Boolean(artifactPath),
         body_renderable: !missing,
       },
-      delivery: artifactDelivery(artifactPath ? artifactIdFromPath(artifactPath) : dispatch.dispatch_phid, {
+      delivery: artifactDelivery(stableArtifactId, {
         mediaType: mediaTypeFromPathForDelivery(artifactPath),
         freshness: missing ? "body_unavailable" : "current",
         sourceHost: null,
@@ -680,6 +682,7 @@ export async function buildSurfacedArtifactsReadModel(
   if (feedbackEnabled) {
     for (const comment of comments) {
       if (!commentNeedsRouting(comment.payload_json)) continue;
+      const stableArtifactId = canonicalArtifactIdForCommentRow(comment);
       const project = projectFromPath(comment.abs_path) ?? projectFromText([comment.artifact_title, comment.basename, comment.tag].join(" "));
       const track = trackFromText([comment.tag, comment.artifact_title, comment.basename, parseCommentBody(comment.payload_json)].join(" "));
       const title = humanTitleFromParts({
@@ -692,7 +695,7 @@ export async function buildSurfacedArtifactsReadModel(
         id: `comment:${comment.artifact_id}:${comment.op_id}`,
         title: `Route comment on ${title}`,
         subtitle: subtitle([comment.agent, truncate(parseCommentBody(comment.payload_json), 72)]),
-        work_item_ref: `artifact:${comment.artifact_id}`,
+        work_item_ref: `artifact:${stableArtifactId}`,
         group_count: 1,
         grouped_source_kinds: ["comment"],
         status: "commented",
@@ -710,7 +713,7 @@ export async function buildSurfacedArtifactsReadModel(
         source_path: comment.abs_path ?? undefined,
         source_proof: comment.abs_path ? sourceProof(comment.abs_path, "comment", null) : `comment:${comment.artifact_id}:${comment.op_id}`,
         visibility_proof: { discovered_by: "comment", artifact_path_present: Boolean(comment.abs_path) },
-        delivery: artifactDelivery(comment.artifact_id, {
+        delivery: artifactDelivery(stableArtifactId, {
           mediaType: mediaTypeFromPathForDelivery(comment.abs_path),
           freshness: comment.abs_path ? "current" : "body_unavailable",
           sourceHost: null,
@@ -977,15 +980,16 @@ function rankScore(row: Pick<SurfacedArtifactRow, "relevance_reason" | "status" 
 }
 
 function groupPrimaryRows(rawRows: SurfacedArtifactRow[]): SurfacedArtifactRow[] {
+  const idCounts = artifactIdCounts(rawRows);
   const groups = new Map<string, SurfacedArtifactRow[]>();
   for (const row of rawRows) {
-    const key = row.work_item_ref ?? row.id;
+    const key = groupKeyForRow(row, idCounts);
     groups.set(key, [...(groups.get(key) ?? []), row]);
   }
   return [...groups.entries()].map(([key, rows]) => {
     const sorted = [...rows].sort(compareSurfacedRows);
     const primary = { ...sorted[0] };
-    primary.id = rows.length > 1 ? `group:${key}` : primary.id;
+    primary.id = rows.length > 1 ? (key.startsWith("artifact:") ? key : `group:${key}`) : primary.id;
     primary.work_item_ref = key;
     primary.group_count = rows.length;
     primary.grouped_source_kinds = [...new Set(rows.map((r) => r.source_kind))].sort();
@@ -1009,9 +1013,10 @@ function buildRecentFloodDiagnostic(
   primaryRows: SurfacedArtifactRow[],
   limits: { rawLimit: number; primaryLimit: number },
 ): RecentFloodDiagnostic {
+  const idCounts = artifactIdCounts(rawRows);
   const groups = new Map<string, SurfacedArtifactRow[]>();
   for (const row of rawRows) {
-    const key = row.work_item_ref ?? row.id;
+    const key = groupKeyForRow(row, idCounts);
     groups.set(key, [...(groups.get(key) ?? []), row]);
   }
   return {
@@ -1047,6 +1052,20 @@ function buildRecentFloodDiagnostic(
   };
 }
 
+function artifactIdCounts(rows: SurfacedArtifactRow[]): Map<string, number> {
+  const counts = new Map<string, number>();
+  for (const row of rows) {
+    if (!row.id.startsWith("artifact:")) continue;
+    counts.set(row.id, (counts.get(row.id) ?? 0) + 1);
+  }
+  return counts;
+}
+
+function groupKeyForRow(row: SurfacedArtifactRow, idCounts: Map<string, number>): string {
+  if (row.id.startsWith("artifact:") && (idCounts.get(row.id) ?? 0) > 1) return row.id;
+  return row.work_item_ref ?? row.id;
+}
+
 function artifactFamily(value: string | null | undefined): string {
   const stem = (basename(value ?? "untitled").replace(/\.[^.]+$/, "") || "untitled")
     .replace(/^\d{4}-\d{2}-\d{2}[-_ ]*/, "")
@@ -1057,6 +1076,14 @@ function artifactFamily(value: string | null | undefined): string {
     .replace(/\s+/g, " ")
     .trim();
   return (stem || "untitled").replace(/\s+/g, "-");
+}
+
+function canonicalArtifactIdForArtifactRow(row: Pick<ArtifactRow, "artifact_id" | "abs_path">): string {
+  return row.abs_path?.trim() ? artifactIdFromPath(row.abs_path.trim()) : row.artifact_id;
+}
+
+function canonicalArtifactIdForCommentRow(row: Pick<CommentRow, "artifact_id" | "abs_path">): string {
+  return row.abs_path?.trim() ? artifactIdFromPath(row.abs_path.trim()) : row.artifact_id;
 }
 
 function titleFromBasename(value: string | null | undefined): string | null {

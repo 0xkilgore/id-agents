@@ -176,6 +176,37 @@ function remountWithDefaultTeam(): Express {
 }
 
 describe("GET /artifacts/:id/detail", () => {
+  it("opens a legacy catalog row by path-stable artifact id", async () => {
+    const filePath = path.join(tmp, "legacy-id-stable-detail.md");
+    writeFileSync(filePath, "# Stable detail\n\nLegacy catalog id, stable surfaced link.\n");
+    const stableArtifactId = artifactIdFromPath(filePath);
+    await registerArtifact(
+      adapter,
+      {
+        artifact_id: "legacy-catalog-id",
+        basename: "legacy-id-stable-detail.md",
+        agent: "substrate-api-codex",
+        tag: "T-LOCALREAD",
+        abs_path: filePath,
+        title: "Legacy ID stable detail",
+        produced_at: "2026-07-07T12:00:00.000Z",
+        source: "manual",
+      },
+      "2026-07-07T12:01:00.000Z",
+    );
+
+    const res = await call("GET", `/artifacts/${stableArtifactId}/detail`);
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({
+      artifact_id: stableArtifactId,
+      resolved_from: "artifact_id",
+      body: {
+        kind: "markdown",
+        text: expect.stringContaining("Stable detail"),
+      },
+    });
+  });
+
   it("hydrates the reader pane from one bounded detail projection", async () => {
     const { artifactId } = await catalogFile("normal.md", "Readable title");
     await call("POST", `/artifacts/${artifactId}/approve`, {

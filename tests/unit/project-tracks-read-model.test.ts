@@ -6,7 +6,7 @@ import { describe, expect, it } from "vitest";
 import { migrateSqlite } from "../../src/db/migrations/sqlite.js";
 import { SqliteAdapter } from "../../src/db/sqlite-adapter.js";
 import { loadLocalSearchDocuments } from "../../src/local-search/db-documents.js";
-import { migrateOutputsTables } from "../../src/outputs/storage.js";
+import { artifactIdFromPath, migrateOutputsTables } from "../../src/outputs/storage.js";
 import { buildProjectTracksEnvelope, canonicalProjectName } from "../../src/project-tracks/read-model.js";
 import { mountProjectTracksRoutes } from "../../src/project-tracks/routes.js";
 import { buildProjectSourcesEnvelope } from "../../src/project-tracks/sources-read-model.js";
@@ -316,6 +316,7 @@ describe("project tracks read-model", () => {
            ('art_cp_report',NULL,NULL,0,$1,$2)`,
         [NOW, NOW],
       );
+      const stableArtifactId = artifactIdFromPath(artifactPath);
 
       const envelope = await buildProjectSourcesEnvelope(adapter, {
         project: "cleveland-park",
@@ -341,9 +342,11 @@ describe("project tracks read-model", () => {
       expect(envelope.groups.artifacts_reports).toBeGreaterThanOrEqual(1);
       expect(envelope.groups.other_files).toBeGreaterThanOrEqual(1);
       expect(byTitle.get("Cleveland Park agent artifact report")).toMatchObject({
+        id: `artifact:${stableArtifactId}`,
         source: { kind: "artifact_catalog", path: artifactPath, proof: "artifacts.abs_path" },
         ownership: { project: "cleveland-park", agent: "cleveland-park" },
-        links: { dispatch_id: "phid:disp-cp", artifact_id: "art_cp_report" },
+        links: { dispatch_id: "phid:disp-cp", artifact_id: stableArtifactId },
+        open: { href: `/artifacts/${stableArtifactId}` },
         preview: { renderable: true, state: "inline" },
         read: { state: "unread" },
         freshness: { status: "fresh" },
@@ -384,7 +387,7 @@ describe("project tracks read-model", () => {
           sourceType: "artifact",
           sourcePath: artifactPath,
           sourceProof: "artifacts.abs_path",
-          linkedArtifact: "art_cp_report",
+          linkedArtifact: stableArtifactId,
           linkedDispatch: "phid:disp-cp",
           bodyAvailable: true,
         },
