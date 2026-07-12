@@ -124,6 +124,44 @@ test("Rule 2: refuel wave with accepted/promoted counts stays done, not needs_re
   ).toBe("done");
 });
 
+test("Rule 2: refuel no-code promotion closeout stays done, not needs_review", () => {
+  expect(
+    deriveEffectiveState(
+      row({
+        status: "done",
+        subject: "[project: kapelle][AUTONOMOUS project-load-loop - backlog ran low, refueling] Re",
+        recovery_status: null,
+        not_before_at: "2026-07-12T14:28:33.526Z",
+        completed_at: "2026-07-12T14:28:35.479Z",
+        artifact_path: null,
+        promotion_result_json: JSON.stringify({
+          required: false,
+          completed: false,
+          reason: "Backlog-only orchestration dispatch; no repo branch/build metadata and no code promotion required.",
+        }),
+        result_json: null,
+      }),
+    ),
+  ).toBe("done");
+});
+
+test("Rule 2: fast empty maestra closeout without evidence still needs_review", () => {
+  expect(
+    deriveEffectiveState(
+      row({
+        status: "done",
+        subject: "Kapelle P1: Draft Chris feedback and infra status brief",
+        recovery_status: null,
+        not_before_at: "2026-07-12T13:26:56.568Z",
+        completed_at: "2026-07-12T13:26:59.243Z",
+        artifact_path: null,
+        promotion_result_json: null,
+        result_json: null,
+      }),
+    ),
+  ).toBe("needs_review");
+});
+
 test("Rule 2: clean done with no failure_kind -> done (even with landed_reconciled)", () => {
   // Edge: row reached done via the recovery wiring but was never marked failed
   // (admin override / non-failure landed_reconciled). Still emit `done` — the

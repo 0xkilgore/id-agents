@@ -1242,7 +1242,7 @@ export function deriveEmptySuccessCandidate(row: EmptySuccessCandidateRow): Empt
   if (row.artifact_path && row.artifact_path.trim().length > 0) {
     return emptySuccess(false, null, elapsedMs, resultTextLength, resultKeys);
   }
-  if (promotionCompletedAndVerified(row.promotion_result_json)) {
+  if (hasPromotionCloseoutEvidence(row.promotion_result_json)) {
     return emptySuccess(false, null, elapsedMs, resultTextLength, resultKeys);
   }
   if (elapsedMs === null || elapsedMs > EMPTY_SUCCESS_FAST_MS) {
@@ -1327,6 +1327,7 @@ function hasSubstantialResultEvidence(parsed: Record<string, unknown> | null, re
   if (!parsed) return false;
   if (resultTextLength >= SUBSTANTIAL_RESULT_TEXT_MIN) return true;
   return Object.entries(parsed).some(([key, value]) => {
+    if (/^(summary|closeout)$/i.test(key)) return false;
     if (!EVIDENCE_KEY_RE.test(key)) return false;
     return hasEvidenceValue(value, COUNT_EVIDENCE_KEY_RE.test(key));
   });
@@ -1341,6 +1342,20 @@ function hasEvidenceValue(value: unknown, requirePositiveNumber = false): boolea
     return Object.values(value as Record<string, unknown>).some((item) => hasEvidenceValue(item, true));
   }
   return false;
+}
+
+function hasPromotionCloseoutEvidence(raw: string | null): boolean {
+  if (promotionCompletedAndVerified(raw)) return true;
+  const promo = parseJsonOrNull(raw);
+  if (!promo || typeof promo !== "object" || Array.isArray(promo)) return false;
+  const p = promo as { required?: unknown; reason?: unknown; skip_reason?: unknown };
+  if (p.required !== false) return false;
+  const reason = typeof p.reason === "string"
+    ? p.reason
+    : typeof p.skip_reason === "string"
+      ? p.skip_reason
+      : "";
+  return /\b(no (?:repo|branch|code|promotion)|not required|backlog-only|spec-only|no-code)\b/i.test(reason);
 }
 
 /**

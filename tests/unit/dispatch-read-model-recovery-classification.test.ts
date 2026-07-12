@@ -480,6 +480,42 @@ test("empty-success guard: empty wave evidence containers still need review", ()
   ).toBe(true);
 });
 
+test("empty-success guard: recent maestra refuel with explicit no-code promotion closeout is clean", () => {
+  const cls = deriveEmptySuccessCandidate({
+    status: "done",
+    subject: "[project: kapelle][AUTONOMOUS project-load-loop - backlog ran low, refueling] Re",
+    not_before_at: "2026-07-12T14:28:33.526Z",
+    completed_at: "2026-07-12T14:28:35.479Z",
+    artifact_path: null,
+    promotion_result_json: JSON.stringify({
+      required: false,
+      completed: false,
+      reason: "Backlog-only orchestration dispatch; no repo branch/build metadata and no code promotion required.",
+    }),
+    result_json: null,
+  });
+
+  expect(cls.empty_success_candidate).toBe(false);
+  expect(cls.result_keys).toEqual([]);
+});
+
+test("empty-success guard: recent maestra empty closeout without evidence still needs review", () => {
+  const cls = deriveEmptySuccessCandidate({
+    status: "done",
+    subject: "Kapelle P1: Draft Chris feedback and infra status brief",
+    not_before_at: "2026-07-12T13:26:56.568Z",
+    completed_at: "2026-07-12T13:26:59.243Z",
+    artifact_path: null,
+    promotion_result_json: null,
+    result_json: null,
+  });
+
+  expect(cls.empty_success_candidate).toBe(true);
+  expect(cls.reason).toBe(
+    "done within 2m with no artifact_path, verified promotion, explicit noop/skip evidence, or substantial result output",
+  );
+});
+
 test("empty-success guard: zero accepted/promoted counts without artifact still need review", () => {
   expect(
     deriveEmptySuccessCandidate({
@@ -543,6 +579,19 @@ test("empty-success guard: substantial worker output is not suspect", () => {
       result_json: JSON.stringify({ summary: substantial }),
     }).empty_success_candidate,
   ).toBe(false);
+});
+
+test("empty-success guard: terse summary or closeout text is not substantial evidence", () => {
+  expect(
+    deriveEmptySuccessCandidate({
+      status: "done",
+      started_at: "2026-07-12T13:26:56.568Z",
+      completed_at: "2026-07-12T13:26:59.243Z",
+      artifact_path: null,
+      promotion_result_json: null,
+      result_json: JSON.stringify({ summary: "Done.", closeout: "OK" }),
+    }).empty_success_candidate,
+  ).toBe(true);
 });
 
 test("empty-success guard: missing timing does not classify legacy done rows", () => {
