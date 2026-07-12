@@ -69,6 +69,12 @@ export interface PoolRouting {
   allocateWorktree: (input: { agent: string; item: BacklogItem; pool: ResolvedPool }) => Promise<BuildWorktree>;
 }
 
+interface PoolLaneBlocker {
+  agent: string;
+  code: string;
+  reason: string;
+}
+
 export interface DaemonDeps {
   adapter: DbAdapter;
   config: ContinuousOrchestrationConfig;
@@ -322,6 +328,7 @@ export class ContinuousOrchestrationDaemon {
     const target_agent_runtimes = this.deps.resolveAgentRuntimes
       ? await this.deps.resolveAgentRuntimes([...candidateAgentNames])
       : undefined;
+    const pool_lane_blockers = poolGate ? this.applyPoolHealthGate(poolGate, healthy_agents) : undefined;
     const ready_item_blockers = await this.readyItemBlockers();
 
     const ctx: AdmissionContext = {
@@ -336,6 +343,7 @@ export class ContinuousOrchestrationDaemon {
       pool_for: poolGate?.pool_for,
       pool_free_slots: poolGate?.pool_free_slots,
       pool_free_builders: poolGate?.pool_free_builders,
+      pool_lane_blockers,
       healthy_agents,
       target_agent_runtimes,
       ready_item_blockers,
@@ -444,7 +452,14 @@ export class ContinuousOrchestrationDaemon {
               action: "dispatched",
               reason: `fired to ${fireItem.to_agent}${builderNote}`,
               dispatch_phid: res.dispatch_phid,
-              metadata: assignedBuilder ? { pool_id: pool?.pool_id, builder: assignedBuilder, write_scope: fireItem.write_scope } : undefined,
+              metadata: assignedBuilder
+                ? {
+                    pool_id: pool?.pool_id,
+                    builder: assignedBuilder,
+                    write_scope: fireItem.write_scope,
+                    lane_blockers: pool?.pool_id ? (pool_lane_blockers?.get(pool.pool_id) ?? []) : [],
+                  }
+                : undefined,
             });
             admitted.push({ item_id: item.item_id, dispatch_phid: res.dispatch_phid });
           } catch (err) {
@@ -883,6 +898,7 @@ export class ContinuousOrchestrationDaemon {
     pool_for: (item: BacklogItem) => string | null;
     pool_free_slots: Map<string, number>;
     pool_free_builders: Map<string, string[]>;
+    pool_lane_blockers: Map<string, PoolLaneBlocker[]>;
   } | null> {
     const pools = this.deps.pools;
     if (!pools) return null;
@@ -913,16 +929,58 @@ export class ContinuousOrchestrationDaemon {
 
     const pool_free_slots = new Map<string, number>();
     const pool_free_builders = new Map<string, string[]>();
+    const pool_lane_blockers = new Map<string, PoolLaneBlocker[]>();
     for (const [pid, pool] of resolved) {
+      const buildingSet = building.get(pid) ?? new Set<string>();
       pool_free_slots.set(pid, Math.max(0, pool.max_parallel - (inFlightCount.get(pid) ?? 0)));
-      pool_free_builders.set(pid, pools.availableBuilders(pool, building.get(pid) ?? new Set<string>()));
+      pool_free_builders.set(pid, pools.availableBuilders(pool, buildingSet));
+      pool_lane_blockers.set(
+        pid,
+        pool.members
+          .filter((agent) => buildingSet.has(agent))
+          .map((agent) => ({
+            agent,
+            code: "lane_busy",
+            reason: "builder already has an in-flight pool item",
+          })),
+      );
     }
 
     return {
       pool_for: (item: BacklogItem) => pools.poolForItem(item)?.pool_id ?? null,
       pool_free_slots,
       pool_free_builders,
+      pool_lane_blockers,
     };
+  }
+
+  private applyPoolHealthGate(
+    poolGate: {
+      pool_free_builders: Map<string, string[]>;
+      pool_lane_blockers: Map<string, PoolLaneBlocker[]>;
+    },
+    healthyAgents: Set<string> | undefined,
+  ): Map<string, PoolLaneBlocker[]> {
+    const blockers = new Map<string, PoolLaneBlocker[]>();
+    for (const [poolId, entries] of poolGate.pool_lane_blockers) blockers.set(poolId, [...entries]);
+    if (!healthyAgents) return blockers;
+
+    for (const [poolId, builders] of poolGate.pool_free_builders) {
+      const healthyBuilders = builders.filter((agent) => healthyAgents.has(agent));
+      const unhealthyBuilders = builders.filter((agent) => !healthyAgents.has(agent));
+      poolGate.pool_free_builders.set(poolId, healthyBuilders);
+      if (unhealthyBuilders.length > 0) {
+        blockers.set(poolId, [
+          ...(blockers.get(poolId) ?? []),
+          ...unhealthyBuilders.map((agent) => ({
+            agent,
+            code: "target_unhealthy",
+            reason: "agent is not healthy/online",
+          })),
+        ]);
+      }
+    }
+    return blockers;
   }
 
   /**

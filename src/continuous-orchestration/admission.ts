@@ -38,6 +38,8 @@ export interface AdmissionContext {
   pool_free_slots?: Map<string, number>;
   /** Available builders per pool, in preference order (consumed as admitted). */
   pool_free_builders?: Map<string, string[]>;
+  /** Blocked pool members by pool, surfaced in decision metadata for routing/debug views. */
+  pool_lane_blockers?: Map<string, Array<{ agent: string; code: string; reason: string }>>;
   /**
    * RD-014: agent names currently healthy/online. When provided, admission
    * rejects any candidate whose resolved target (the pool-assigned builder,
@@ -278,6 +280,7 @@ export function planAdmission(
       if (free <= 0) {
         skipped.push(nonAdmission(item.item_id, "held", "pool_capacity_full", `pool capacity full: ${poolId}`, {
           pool_id: poolId,
+          lane_blockers: ctx.pool_lane_blockers?.get(poolId) ?? [],
         }));
         continue;
       }
@@ -286,6 +289,7 @@ export function planAdmission(
       if (!assignedBuilder) {
         skipped.push(nonAdmission(item.item_id, "held", "no_free_pool_builder", `no free builder in pool: ${poolId}`, {
           pool_id: poolId,
+          lane_blockers: ctx.pool_lane_blockers?.get(poolId) ?? [],
         }));
         continue;
       }
