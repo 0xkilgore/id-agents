@@ -19,6 +19,12 @@ import { decideWatchdogAction } from './lib/deploy-watchdog-decision.mjs';
 import { retryLaunchdBootstrap } from './lib/deploy-watchdog-bootstrap.mjs';
 import { acquireWatchdogLock, DEFAULT_LOCK_STALE_MS } from './lib/deploy-watchdog-lock.mjs';
 import {
+  assertCleanDeployCheckout,
+  formatChangedFiles,
+  getWorktreeHygiene,
+  gitOutput,
+} from './lib/deploy-watchdog-worktree-hygiene.mjs';
+import {
   DEFAULT_REDEPLOY_COMMAND,
   classifyCloseout,
   formatCloseoutMarkdown,
@@ -37,6 +43,7 @@ const LOCK_FILE = process.env.DEPLOY_WATCHDOG_LOCK_FILE || '/tmp/deploy-watchdog
 const LOCK_STALE_MS = Number(process.env.DEPLOY_WATCHDOG_LOCK_STALE_MS || DEFAULT_LOCK_STALE_MS);
 const ARTIFACT_DIR = process.env.DEPLOY_WATCHDOG_ARTIFACT_DIR || `${HOME}/Dropbox/Code/agent-platform/output`;
 const DRY_RUN = process.env.DEPLOY_WATCHDOG_DRY_RUN === '1' || process.argv.includes('--dry-run');
+const ALLOW_DIRTY_CHECKOUT = process.env.DEPLOY_WATCHDOG_ALLOW_DIRTY_CHECKOUT === '1';
 const ENV_FILES = process.env.DEPLOY_WATCHDOG_ENV_FILE
   ? [process.env.DEPLOY_WATCHDOG_ENV_FILE]
   : [`${HOME}/Dropbox/Code/cane/taskview/.env`, `${HOME}/Dropbox/Code/cane/taskview/.env.cane`];
@@ -195,30 +202,18 @@ function sh(cmd, opts = {}) {
   return execSync(cmd, { cwd: CANE, stdio: ['ignore', 'pipe', 'pipe'], encoding: 'utf8', ...opts });
 }
 
-function gitOutput(repo, args) {
-  return execFileSync('git', args, {
-    cwd: repo,
-    encoding: 'utf8',
-    timeout: 10000,
-    stdio: ['ignore', 'pipe', 'pipe'],
-  }).trim();
-}
-
-function repoBranch(repo) {
-  try { return gitOutput(repo, ['rev-parse', '--abbrev-ref', 'HEAD']) || 'unknown'; } catch { return 'unknown'; }
-}
-
-function repoDirtyCount(repo) {
-  try {
-    const out = gitOutput(repo, ['status', '--porcelain']);
-    return out ? out.split('\n').length : 0;
-  } catch {
-    return -1;
-  }
-}
-
 function deployCheckoutExists() {
   return existsSync(`${CANE}/.git`) && existsSync(`${CANE}/scripts/start-id-agents-manager.sh`);
+}
+
+function deployCheckoutReady() {
+  if (!deployCheckoutExists()) return false;
+  try {
+    const hygiene = getWorktreeHygiene(CANE);
+    return hygiene.branch === 'main' && !hygiene.dirty;
+  } catch {
+    return false;
+  }
 }
 
 function plistValue(keyPath) {
@@ -243,12 +238,11 @@ function managerPlistPointsAtDeployCheckout() {
 }
 
 function logPrimaryHygiene() {
-  const branch = repoBranch(PRIMARY_CANE);
-  const dirtyCount = repoDirtyCount(PRIMARY_CANE);
-  if (branch !== 'main' || dirtyCount !== 0) {
-    log(`HYGIENE-BLOCKED repo=${PRIMARY_CANE} branch=${branch} dirty_count=${dirtyCount} next_action=preserve primary work; rebuild from clean deploy checkout ${CANE}`);
+  const hygiene = getWorktreeHygiene(PRIMARY_CANE);
+  if (hygiene.branch !== 'main' || hygiene.dirty) {
+    log(`HYGIENE-BLOCKED repo=${PRIMARY_CANE} branch=${hygiene.branch} dirty_count=${hygiene.dirtyCount} changed_files=${formatChangedFiles(hygiene.changedFiles)} next_action=preserve primary work; rebuild from clean deploy checkout ${CANE}`);
   } else {
-    log(`primary hygiene ok repo=${PRIMARY_CANE} branch=${branch} dirty_count=${dirtyCount}`);
+    log(`primary hygiene ok repo=${PRIMARY_CANE} branch=${hygiene.branch} dirty_count=${hygiene.dirtyCount}`);
   }
 }
 
@@ -262,14 +256,20 @@ function ensureDeployCheckout() {
     execFileSync('git', ['clone', remoteUrl, CANE], { stdio: ['ignore', 'pipe', 'pipe'] });
   }
   sh('git fetch --quiet origin');
-  sh('git checkout -q -B main origin/main');
-  sh('git reset --hard -q origin/main');
-  sh("git clean -ffd -e node_modules -e 'node_modules/**' -q");
-  const branch = repoBranch(CANE);
-  const dirtyCount = repoDirtyCount(CANE);
-  if (branch !== 'main' || dirtyCount !== 0) {
-    throw new Error(`deploy checkout not clean main: repo=${CANE} branch=${branch} dirty_count=${dirtyCount}`);
+  const before = assertCleanDeployCheckout({
+    repo: CANE,
+    allowDirty: ALLOW_DIRTY_CHECKOUT,
+    purpose: 'deploy watchdog before rebuild/restart/promotion',
+  });
+  if (before.dirty && ALLOW_DIRTY_CHECKOUT) {
+    log(`WARN dirty deploy checkout explicitly allowed repo=${CANE} branch=${before.branch} dirty_count=${before.dirtyCount} changed_files=${formatChangedFiles(before.changedFiles)}`);
   }
+  sh('git merge --ff-only -q origin/main');
+  assertCleanDeployCheckout({
+    repo: CANE,
+    allowDirty: ALLOW_DIRTY_CHECKOUT,
+    purpose: 'deploy watchdog after origin/main fast-forward',
+  });
 }
 
 function ensureManagerPlistUsesDeployCheckout() {
@@ -463,7 +463,7 @@ async function main() {
       priorConsecutiveStale: prior,
       pauseFileExists,
       healthOk: health.ok,
-      deployCheckoutOk: deployCheckoutExists(),
+      deployCheckoutOk: deployCheckoutReady(),
       managerPlistOk: managerPlistPointsAtDeployCheckout(),
       priorLastAction: state.lastAction ?? null,
       targetSha,

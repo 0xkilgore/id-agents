@@ -88,7 +88,7 @@ export function decideWatchdogAction(input) {
       nextConsecutiveStale: priorConsecutiveStale,
       ...targetState,
       reason: [
-        !deployCheckoutOk ? 'deploy checkout missing' : null,
+        !deployCheckoutOk ? 'deploy checkout missing or not clean main' : null,
         !managerPlistOk ? 'manager launchd plist not pointed at deploy checkout' : null,
       ].filter(Boolean).join('; '),
     };
