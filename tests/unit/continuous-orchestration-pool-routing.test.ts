@@ -128,6 +128,98 @@ describe("continuous orchestration pool routing", () => {
     expect(pool?.members).toContain("regina");
   });
 
+  it("smokes pool:frontend saturation: active captains are skipped, worktrees are isolated, blockers are explicit", async () => {
+    const pools = buildPoolRouting({});
+    const pool = pools.poolForItem(
+      item({
+        item_id: "coitem_frontend_smoke",
+        to_agent: "pool:frontend",
+        track: "T-UI",
+        title: "[project: kapelle][T-UI][BUILD] pool:frontend smoke",
+        write_scope: ["/Users/kilgore/Dropbox/Code/kapelle-site"],
+      }),
+    )!;
+
+    expect(pool.pool_id).toBe("frontend");
+
+    // Regina/Brunel/Eames are already building in the saturated wave, so the
+    // next frontend dispatches must spill to the remaining lanes instead of
+    // colliding with those active branches.
+    const activeCaptains = new Set(["regina", "brunel", "eames"]);
+    const freeBuilders = pools.availableBuilders(pool, activeCaptains);
+    expect(freeBuilders).toEqual(["gaudi", "hopper", "frontend-ui-codex", "frontend-qa-cursor"]);
+
+    const first = item({
+      item_id: "coitem_frontend_first",
+      to_agent: "pool:frontend",
+      track: "T-UI",
+      title: "Kapelle /ops projects frontend polish",
+      write_scope: ["/Users/kilgore/Dropbox/Code/kapelle-site"],
+    });
+    const second = item({
+      item_id: "coitem_frontend_second",
+      to_agent: "pool:frontend",
+      track: "T-UI",
+      title: "Kapelle artifact inbox frontend polish",
+      write_scope: ["/Users/kilgore/Dropbox/Code/kapelle-site"],
+    });
+
+    const [firstWt, secondWt] = await Promise.all([
+      pools.allocateWorktree({ agent: freeBuilders[0]!, item: first, pool }),
+      pools.allocateWorktree({ agent: freeBuilders[1]!, item: second, pool }),
+    ]);
+    expect(firstWt.path).toContain("/.worktrees/");
+    expect(secondWt.path).toContain("/.worktrees/");
+    expect(firstWt.path).not.toBe(secondWt.path);
+    expect(firstWt.branch).not.toBe(secondWt.branch);
+    expect(firstWt.path).toContain("gaudi-");
+    expect(secondWt.path).toContain("hopper-");
+
+    const saturatedByCapacity = planAdmission(
+      [first],
+      {
+        mode: "running",
+        kill_switch_active: false,
+        usage: { hard_paused: false, daily_percent: 0, weekly_percent: 0, enforcement: "enforce" },
+        daily_tokens_used: 0,
+        in_flight: 0,
+        active_write_scopes: new Set(),
+        done_item_ids: new Set(),
+        admit_limit: 1,
+        pool_for: () => "frontend",
+        pool_free_slots: new Map([["frontend", 0]]),
+        pool_free_builders: new Map([["frontend", freeBuilders]]),
+      },
+      defaultConfig(),
+    );
+    expect(saturatedByCapacity.skipped[0]).toMatchObject({
+      action: "held",
+      metadata: { code: "pool_capacity_full", pool_id: "frontend" },
+    });
+
+    const saturatedByBuilders = planAdmission(
+      [first],
+      {
+        mode: "running",
+        kill_switch_active: false,
+        usage: { hard_paused: false, daily_percent: 0, weekly_percent: 0, enforcement: "enforce" },
+        daily_tokens_used: 0,
+        in_flight: 0,
+        active_write_scopes: new Set(),
+        done_item_ids: new Set(),
+        admit_limit: 1,
+        pool_for: () => "frontend",
+        pool_free_slots: new Map([["frontend", 1]]),
+        pool_free_builders: new Map([["frontend", []]]),
+      },
+      defaultConfig(),
+    );
+    expect(saturatedByBuilders.skipped[0]).toMatchObject({
+      action: "held",
+      metadata: { code: "no_free_pool_builder", pool_id: "frontend" },
+    });
+  });
+
   it("honors a backend-track operator target instead of rerouting to frontend or roger", () => {
     const pools = buildPoolRouting({});
     const backendItem = item({
