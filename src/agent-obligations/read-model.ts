@@ -7,7 +7,8 @@ const TERMINAL_DONE_STATUSES = new Set(["done"]);
 const TERMINAL_FAILED_STATUSES = new Set(["failed", "cancelled"]);
 
 export type AgentObligationStatus = "expected" | "done" | "late" | "failed";
-export type AgentObligationSourceKind = "report" | "handoff" | "comment" | "closeout";
+export type AgentObligationSourceKind = "report" | "handoff" | "comment" | "closeout" | "task";
+export type AgentObligationCloseSignal = "artifact" | "receipt" | "done" | null;
 
 export interface AgentObligation {
   obligation_id: string;
@@ -25,6 +26,8 @@ export interface AgentObligation {
   stale_seconds: number;
   escalation_level: "none" | "stale" | "critical";
   escalates_at: string | null;
+  close_signal: AgentObligationCloseSignal;
+  close_signal_ref: string | null;
   dashboard_reason: string;
 }
 
@@ -43,6 +46,31 @@ interface AgentObligationRow {
   updated_at: string | null;
   failure_kind: string | null;
   failure_detail: string | null;
+  artifact_path?: string | null;
+  result_json?: string | null;
+}
+
+interface TaskObligationRow {
+  id: string;
+  name: string;
+  title: string;
+  status: string;
+  owner: string | null;
+  owner_name: string | null;
+  created_by: string | null;
+  created_by_name: string | null;
+  created_at: number;
+  updated_at: number;
+  completed_at: number | null;
+}
+
+interface CommentObligationRow {
+  op_id: number;
+  artifact_id: string;
+  actor: string;
+  ts: string;
+  payload_json: string | null;
+  source_link: string | null;
 }
 
 export interface ReadAgentObligationsOptions {
@@ -98,7 +126,7 @@ export async function readAgentObligations(
   const { rows } = await adapter.query<AgentObligationRow>(
     `SELECT dispatch_phid, query_id, to_agent, from_actor, channel, subject,
             body_markdown, status, not_before_at, started_at, completed_at,
-            updated_at, failure_kind, failure_detail
+            updated_at, failure_kind, failure_detail, artifact_path, result_json
        FROM dispatch_scheduler_queue
       WHERE team_id = ?
         ${agentClause}
@@ -109,11 +137,13 @@ export async function readAgentObligations(
   );
 
   const dispatchObligations = rows.map((row) => rowToAgentObligation(row, { now, staleAfterMs }));
+  const taskObligations = await taskObligationsFor(adapter, teamId, { now, staleAfterMs, agent, limit });
+  const commentObligations = await commentObligationsFor(adapter, { now, staleAfterMs, agent, limit });
   const reportObligations = opts.includeReports === false
     ? []
     : await reportObligationsFor(adapter as DbAdapter, teamId, { now, agent });
 
-  const obligations = dedupeObligations([...dispatchObligations, ...reportObligations])
+  const obligations = dedupeObligations([...dispatchObligations, ...taskObligations, ...commentObligations, ...reportObligations])
     .filter((o) => (agent ? sameAgent(o.agent, agent) : true))
     .filter((o) => status === "all" || o.status === status)
     .sort(compareObligations)
@@ -140,6 +170,7 @@ export function rowToAgentObligation(
   const staleAfter = staleAfterFor(row, opts.staleAfterMs);
   const status = deriveObligationStatus(row.status, staleAfter, opts.now);
   const escalation = escalationFields(status, staleAfter, opts.now);
+  const closeSignal = dispatchCloseSignal(row, status);
 
   return {
     obligation_id: obligationId(sourceRecord, sourceKind),
@@ -154,6 +185,8 @@ export function rowToAgentObligation(
     due_at: staleAfter,
     last_event_at: lastEventAt,
     ...escalation,
+    close_signal: closeSignal.signal,
+    close_signal_ref: closeSignal.ref,
     dashboard_reason: dashboardReason(row, sourceKind, status, staleAfter),
   };
 }
@@ -180,6 +213,31 @@ function inferSourceKind(row: AgentObligationRow): AgentObligationSourceKind {
   if (haystack.includes("handoff")) return "handoff";
   if (haystack.includes("report")) return "report";
   return "closeout";
+}
+
+function dispatchCloseSignal(
+  row: AgentObligationRow,
+  status: AgentObligationStatus,
+): { signal: AgentObligationCloseSignal; ref: string | null } {
+  if (status !== "done") return { signal: null, ref: null };
+  if (row.artifact_path) return { signal: "artifact", ref: row.artifact_path };
+  const resultArtifact = artifactPathFromResult(row.result_json);
+  if (resultArtifact) return { signal: "artifact", ref: resultArtifact };
+  return { signal: "done", ref: row.dispatch_phid };
+}
+
+function artifactPathFromResult(resultJson: string | null | undefined): string | null {
+  if (!resultJson) return null;
+  try {
+    const parsed = JSON.parse(resultJson) as Record<string, unknown>;
+    for (const key of ["artifact_path", "artifactPath", "output_path", "path"]) {
+      const value = parsed[key];
+      if (typeof value === "string" && value.length > 0) return value;
+    }
+  } catch {
+    return null;
+  }
+  return null;
 }
 
 function dashboardReason(
@@ -240,6 +298,8 @@ function reportRunToObligation(run: ReportRunFact, now: string): AgentObligation
     due_at: run.due_at,
     last_event_at: run.finished_at ?? run.fired_at,
     ...escalation,
+    close_signal: status === "done" ? (run.loop_run_phid ? "receipt" : "done") : null,
+    close_signal_ref: status === "done" ? (run.loop_run_phid ?? run.report_key) : null,
     dashboard_reason:
       status === "done"
         ? "Report complete"
@@ -251,8 +311,185 @@ function reportRunToObligation(run: ReportRunFact, now: string): AgentObligation
   };
 }
 
+async function taskObligationsFor(
+  adapter: DbAdapterLike,
+  teamId: string,
+  opts: { now: string; staleAfterMs: number; agent: string | null; limit: number },
+): Promise<AgentObligation[]> {
+  const params: unknown[] = [teamId];
+  const agentClause = opts.agent ? "AND (owner_agent.name = ? OR t.owner = ?)" : "";
+  if (opts.agent) params.push(opts.agent, opts.agent);
+  params.push(Math.max(opts.limit * 2, opts.limit));
+
+  try {
+    const { rows } = await adapter.query<TaskObligationRow>(
+      `SELECT t.id, t.name, t.title, t.status, t.owner, owner_agent.name AS owner_name,
+              t.created_by, creator_agent.name AS created_by_name,
+              t.created_at, t.updated_at, t.completed_at
+         FROM tasks t
+         LEFT JOIN agents owner_agent ON owner_agent.id = t.owner
+         LEFT JOIN agents creator_agent ON creator_agent.id = t.created_by
+        WHERE t.team_id = ?
+          AND t.owner IS NOT NULL
+          ${agentClause}
+        ORDER BY COALESCE(t.completed_at, t.updated_at, t.created_at) DESC, t.name DESC
+        LIMIT ?`,
+      params,
+    );
+    return rows.map((row) => taskRowToObligation(row, opts));
+  } catch {
+    return [];
+  }
+}
+
+function taskRowToObligation(
+  row: TaskObligationRow,
+  opts: { now: string; staleAfterMs: number },
+): AgentObligation {
+  const agent = row.owner_name ?? row.owner ?? "unknown";
+  const updatedAt = epochToIso(row.completed_at ?? row.updated_at ?? row.created_at);
+  const staleAfter = row.status === "done" ? null : addMs(updatedAt, opts.staleAfterMs);
+  const status = row.status === "done" ? "done" : deriveObligationStatus(row.status, staleAfter, opts.now);
+  const escalation = escalationFields(status, staleAfter, opts.now);
+  return {
+    obligation_id: obligationId(row.name, "task"),
+    source_kind: "task",
+    obligation_type: "task",
+    source_record: row.name,
+    source_ref: row.id,
+    agent,
+    owner: row.created_by_name ?? row.created_by ?? "manager",
+    status,
+    stale_after: staleAfter,
+    due_at: staleAfter,
+    last_event_at: updatedAt,
+    ...escalation,
+    close_signal: status === "done" ? "done" : null,
+    close_signal_ref: status === "done" ? row.name : null,
+    dashboard_reason:
+      status === "done"
+        ? "Task complete"
+        : status === "late"
+          ? `Stale task ownership: ${row.title}`
+          : `Task ownership expected from ${agent}`,
+  };
+}
+
+async function commentObligationsFor(
+  adapter: DbAdapterLike,
+  opts: { now: string; staleAfterMs: number; agent: string | null; limit: number },
+): Promise<AgentObligation[]> {
+  try {
+    const { rows } = await adapter.query<CommentObligationRow>(
+      `SELECT op_id, artifact_id, actor, ts, payload_json, source_link
+         FROM artifact_operations
+        WHERE op_type = 'comment_recorded'
+        ORDER BY ts DESC, op_id DESC
+        LIMIT ?`,
+      [Math.max(opts.limit * 4, opts.limit)],
+    );
+    return rows
+      .map((row) => commentRowToObligation(row, opts))
+      .filter((o): o is AgentObligation => o != null)
+      .filter((o) => (opts.agent ? sameAgent(o.agent, opts.agent) : true));
+  } catch {
+    return [];
+  }
+}
+
+function commentRowToObligation(
+  row: CommentObligationRow,
+  opts: { now: string; staleAfterMs: number },
+): AgentObligation | null {
+  const routeStatus = routeStatusFromCommentPayload(row.payload_json);
+  const targetAgent = routeStatus?.target_agent ?? routeStatus?.dispatch?.to_agent ?? null;
+  if (!targetAgent) return null;
+  const sourceRecord = `artifact-comment:${row.artifact_id}:${row.op_id}`;
+  const staleAfter = routeStatus?.deadline_at ?? addMs(row.ts, opts.staleAfterMs);
+  const routed = routeStatus?.visible_state === "recorded+routed" && routeStatus.dispatch;
+  const failed = routeStatus?.visible_state === "terminal-failure";
+  const retryable = routeStatus?.retryable === true;
+  const status: AgentObligationStatus = routed
+    ? "done"
+    : failed
+      ? "failed"
+      : retryable && Date.parse(staleAfter) <= Date.parse(opts.now)
+        ? "late"
+        : "expected";
+  const escalation = escalationFields(status, status === "done" ? null : staleAfter, opts.now);
+  return {
+    obligation_id: obligationId(sourceRecord, "comment"),
+    source_kind: "comment",
+    obligation_type: "comment",
+    source_record: sourceRecord,
+    source_ref: routeStatus?.dispatch?.dispatch_phid ?? row.source_link ?? row.artifact_id,
+    agent: targetAgent,
+    owner: row.actor,
+    status,
+    stale_after: status === "done" ? null : staleAfter,
+    due_at: status === "done" ? null : staleAfter,
+    last_event_at: routeStatus?.updated_at ?? row.ts,
+    ...escalation,
+    close_signal: routed ? "receipt" : null,
+    close_signal_ref: routed ? routeStatus.dispatch!.dispatch_phid : null,
+    dashboard_reason:
+      status === "done"
+        ? "Comment follow-up routed"
+        : status === "failed"
+          ? `Comment follow-up failed: ${routeStatus?.error?.message ?? "terminal failure"}`
+          : status === "late"
+            ? `Stale missing comment receipt: no route receipt after ${staleAfter}`
+            : `Comment follow-up expected from ${targetAgent}`,
+  };
+}
+
+function routeStatusFromCommentPayload(payloadJson: string | null): {
+  visible_state?: string;
+  retryable?: boolean;
+  target_agent?: string | null;
+  deadline_at?: string | null;
+  updated_at?: string | null;
+  error?: { message?: string | null } | null;
+  dispatch?: { dispatch_phid: string; to_agent: string } | null;
+} | null {
+  if (!payloadJson) return null;
+  try {
+    const payload = JSON.parse(payloadJson) as { route_status?: unknown };
+    const routeStatus = payload.route_status as Record<string, unknown> | undefined;
+    if (!routeStatus || typeof routeStatus !== "object") return null;
+    const dispatch = routeStatus.dispatch && typeof routeStatus.dispatch === "object"
+      ? routeStatus.dispatch as Record<string, unknown>
+      : null;
+    const error = routeStatus.error && typeof routeStatus.error === "object"
+      ? routeStatus.error as Record<string, unknown>
+      : null;
+    return {
+      visible_state: typeof routeStatus.visible_state === "string" ? routeStatus.visible_state : undefined,
+      retryable: typeof routeStatus.retryable === "boolean" ? routeStatus.retryable : undefined,
+      target_agent: typeof routeStatus.target_agent === "string" ? routeStatus.target_agent : null,
+      deadline_at: typeof routeStatus.deadline_at === "string" ? routeStatus.deadline_at : null,
+      updated_at: typeof routeStatus.updated_at === "string" ? routeStatus.updated_at : null,
+      error: error ? { message: typeof error.message === "string" ? error.message : null } : null,
+      dispatch: dispatch && typeof dispatch.dispatch_phid === "string" && typeof dispatch.to_agent === "string"
+        ? { dispatch_phid: dispatch.dispatch_phid, to_agent: dispatch.to_agent }
+        : null,
+    };
+  } catch {
+    return null;
+  }
+}
+
 function obligationId(sourceRecord: string, obligationType: AgentObligationSourceKind): string {
   return `agent-obligation:${sourceRecord}:${obligationType}`;
+}
+
+function epochToIso(value: number): string {
+  return new Date(value < 10_000_000_000 ? value * 1000 : value).toISOString();
+}
+
+function addMs(iso: string, ms: number): string {
+  const parsed = Date.parse(iso);
+  return Number.isFinite(parsed) ? new Date(parsed + ms).toISOString() : iso;
 }
 
 function dedupeObligations(obligations: AgentObligation[]): AgentObligation[] {
