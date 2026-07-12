@@ -15,6 +15,12 @@ import { installFatalHandlers } from './lib/fatal-handlers.js';
 import { isAbiMismatchError, abiMismatchDiagnostic } from './lib/native-node.js';
 import { resolveDefaultWorkspaceDir } from './lib/data-root.js';
 import { createManagerDbWithAbiRecovery } from './lib/startup-db.js';
+import {
+  detectClaudeAuthPreflightHandoffVars,
+  formatClaudeAuthPreflightLog,
+  resolveClaudeAuthPreflightTimeoutMs,
+  runClaudeWorkerAuthPreflight,
+} from './harness/claude-worker-auth-preflight.js';
 
 // Silent-stop incidents had the scheduler die behind a swallowed rejection —
 // the process stayed up but the tick loop was dead. Fail loud and exit so the
@@ -115,6 +121,29 @@ async function startWorkerAgent(agentId?: string) {
   const managerUrl = process.env.MANAGER_URL || 'http://localhost:4100';
 
   console.log(`🤖 Starting worker agent: ${agentId} on port ${port}`);
+
+  const workerHarness = resolveRuntime(process.env.ID_HARNESS || process.env.HARNESS || 'claude-agent-sdk');
+  if (workerHarness === 'claude-code-cli' || workerHarness === 'claude-code-local') {
+    const timeoutMs = resolveClaudeAuthPreflightTimeoutMs(process.env);
+    const result = await runClaudeWorkerAuthPreflight({
+      workingDirectory: workingDir,
+      model: process.env.CLAUDE_CLI_MODEL || process.env.CLAUDE_MODEL,
+      timeoutMs,
+      env: process.env,
+    });
+    console.log(formatClaudeAuthPreflightLog(result, {
+      runtime: workerHarness,
+      model: process.env.CLAUDE_CLI_MODEL || process.env.CLAUDE_MODEL,
+      timeoutMs,
+      handoffVars: detectClaudeAuthPreflightHandoffVars(process.env),
+    }));
+    if (result.status === 'fail') {
+      process.exit(1);
+    }
+    if (result.status === 'provider_transient') {
+      process.exit(75);
+    }
+  }
 
   // Always open the shared DB so queries and news land where the manager daemon
   // at :4100 can serve /query/<id> and /news polling. Memory-only fallback stays
