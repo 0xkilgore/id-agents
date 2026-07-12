@@ -182,6 +182,39 @@ describe("SOAK — backlog drains in parallel with no strangle", () => {
 });
 
 describe("backend pool routing (real registry)", () => {
+  it("a frontend-pool tick fans out to isolated Kapelle worktrees instead of serializing through Regina", async () => {
+    for (let i = 0; i < 4; i++) {
+      await seedBuildItem(i, {
+        title: `T-UI /ops smoke ${i}`,
+        track: "T-UI",
+        to_agent: "pool:frontend",
+        dispatch_body: "Verify /ops frontend routing health in kapelle-site",
+        write_scope: ["/Users/kilgore/Dropbox/Code/kapelle-site"],
+      });
+    }
+    const { daemon, fired } = makeDaemon({
+      config: { max_in_flight: 10 },
+      pools: buildPoolRouting({ BUILD_POOL_FRONTEND_MAX_PARALLEL: "3" }),
+    });
+    await daemon.setMode("running");
+
+    const tick = await daemon.runTick();
+
+    expect(fired).toHaveLength(3);
+    expect(fired.map((i) => i.to_agent)).toEqual(["regina", "brunel", "eames"]);
+    const scopes = fired.flatMap((i) => i.write_scope);
+    expect(new Set(scopes).size).toBe(3);
+    expect(scopes.every((s) => s.startsWith("/Users/kilgore/Dropbox/Code/kapelle-site/.worktrees/"))).toBe(true);
+    expect(scopes.every((s) => !s.endsWith("/Code/regina") && !s.includes("/Dropbox/Code/regina/"))).toBe(true);
+
+    const poolFires = tick.decisions.filter((d) => d.reason?.includes("pool frontend →"));
+    expect(poolFires).toHaveLength(3);
+    for (const name of ["regina", "brunel", "eames"]) {
+      expect(poolFires.some((d) => d.reason?.includes(`→ ${name} `))).toBe(true);
+    }
+    expect(tick.decisions.some((d) => d.reason?.includes("pool capacity full"))).toBe(true);
+  });
+
   it("preserves wave17/wave18 explicit kapelle-site to_agent values instead of reassigning them to the frontend pool", async () => {
     const explicitRows = [
       {
