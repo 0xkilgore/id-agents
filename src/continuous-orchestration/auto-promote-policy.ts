@@ -75,6 +75,9 @@ export function autoPromoteRejections(
   if (item.write_scope.length === 0) {
     reasons.push("empty write_scope (build work must declare a lane)");
   }
+  if (item.dependencies.length > 0) {
+    reasons.push(`blocked dependencies not done (${item.dependencies.join(", ")})`);
+  }
   const denyHit = matchesHighRiskDenylist(item.dispatch_body, item.title);
   if (denyHit) reasons.push(`high-risk denylist match: /${denyHit}/`);
   // A needs_review item with a last_dispatch_phid was already fired once —

@@ -114,6 +114,7 @@ async function seedApprovedReview(adapter: SqliteAdapter, over: Partial<BacklogI
     risk_class: over.risk_class ?? "build",
     priority: over.priority ?? 5,
     write_scope: over.write_scope ?? ["repo/a"],
+    dependencies: over.dependencies ?? [],
     token_estimate: over.token_estimate ?? 1000,
     provider: over.provider ?? "openai",
     runtime: over.runtime ?? "codex",
@@ -125,10 +126,10 @@ async function seedApprovedReview(adapter: SqliteAdapter, over: Partial<BacklogI
            flesh_status = $3,
            flesh_confidence = $4,
            last_dispatch_phid = $5
-     WHERE item_id = $6`,
+    WHERE item_id = $6`,
     [
-      over.approved_by ?? "maestra",
-      over.approved_at ?? "2026-07-07T00:00:00Z",
+      over.approved_by === undefined ? "maestra" : over.approved_by,
+      over.approved_at === undefined ? "2026-07-07T00:00:00Z" : over.approved_at,
       over.flesh_status ?? "needs_chris_batch",
       over.flesh_confidence ?? 0.65,
       over.last_dispatch_phid ?? null,
@@ -540,6 +541,67 @@ describe("daemon — dry-run vs live", () => {
     expect(res.body.auto_promote_health.top_skip_reasons[0]).toEqual(
       expect.objectContaining({ reason: expect.stringContaining("not auto-promotable"), count: 1 }),
     );
+  });
+
+  it("status groups below-floor auto-promote blockers and recommends the next move", async () => {
+    for (let i = 0; i < 8; i++) {
+      await seedReady(adapter, { title: `ready ${i}`, write_scope: [`repo/ready-${i}`] });
+    }
+    await seedApprovedReview(adapter, {
+      title: "already dispatched retry",
+      write_scope: ["repo/already"],
+      last_dispatch_phid: "phid:disp-old",
+    });
+    await seedApprovedReview(adapter, {
+      title: "review held external",
+      risk_class: "external",
+      write_scope: ["repo/risk"],
+    });
+    await seedApprovedReview(adapter, {
+      title: "dependency blocked",
+      write_scope: ["repo/deps"],
+      dependencies: ["coitem_upstream"],
+    });
+    await seedApprovedReview(adapter, {
+      title: "low confidence",
+      approved_by: null,
+      flesh_status: "fleshed",
+      flesh_confidence: 0.55,
+      write_scope: ["repo/confidence"],
+    });
+    const { app, daemon } = mountStatusApp(adapter, {
+      dry_run: true,
+      auto_flesh_enabled: true,
+      auto_promote_enabled: true,
+      auto_promote_floor: 12,
+      auto_promote_min_lanes: 1,
+    });
+    await daemon.setMode("running");
+
+    const res = await callApp(app, "/orchestration/status");
+
+    expect(res.status).toBe(200);
+    expect(res.body.auto_promote_health).toMatchObject({
+      floor: 12,
+      below_floor: true,
+      candidates_considered: 4,
+      promoted_count: 0,
+      skipped_count: 4,
+      next_action: {
+        code: "manual_promote_or_close_already_dispatched",
+      },
+    });
+    expect(res.body.auto_promote_health.blocker_class_counts).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ class: "already_dispatched", count: 1 }),
+        expect.objectContaining({ class: "review_held_risk", count: 1 }),
+        expect.objectContaining({ class: "blocked_dependencies", count: 1 }),
+        expect.objectContaining({ class: "confidence_threshold", count: 1 }),
+      ]),
+    );
+    expect(res.body.auto_promote_health.summary).toMatch(/blocker classes:/);
+    expect(res.body.auto_promote_health.summary).toMatch(/already_dispatched=1/);
+    expect(res.body.auto_promote_health.summary).toMatch(/next: manually \/promote/);
   });
 
   it("status includes provider/runtime repair interaction before admission diagnostics", async () => {
