@@ -1725,13 +1725,18 @@ export function mountOutputsRoutes(
 
   // ── GET /comment-routing/attempts ─────────────────────────────────
   // Operator/debug projection over durable artifact/task comment route rows.
-  // Read-only: pending rows may project as timeout, but no storage state mutates.
+  // Read-only: pending rows may project as retry-pending/retryable, but no storage state mutates.
   app.get('/comment-routing/attempts', async (req: Request, res: Response) => {
     try {
       const teamId = resolveTeamId ? await resolveTeamId(req) : 'default';
       const rawStatus = asString(req.query.status);
       const status: CommentRouteAttemptStatus | 'all' =
-        rawStatus === 'pending' || rawStatus === 'routed' || rawStatus === 'failed' || rawStatus === 'timeout'
+        rawStatus === 'retryable' ||
+        rawStatus === 'retry-pending' ||
+        rawStatus === 'routed' ||
+        rawStatus === 'terminal-deadletter' ||
+        rawStatus === 'disabled' ||
+        rawStatus === 'not-recorded'
           ? rawStatus
           : 'all';
       const timeoutAfterMs = Number(req.query.timeout_after_ms);

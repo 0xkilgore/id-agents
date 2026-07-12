@@ -2,13 +2,21 @@ import type { DbAdapter } from "../db/db-adapter.js";
 import { artifactCommentId } from "../outputs/types.js";
 import { parseRoutingResults, type TaskCommentRoutingStatus } from "../task-comments/storage.js";
 
-export type CommentRouteAttemptStatus = "pending" | "routed" | "failed" | "timeout";
+export type CommentRouteAttemptStatus =
+  | "retryable"
+  | "retry-pending"
+  | "routed"
+  | "terminal-deadletter"
+  | "disabled"
+  | "not-recorded";
+export type CommentRouteAttemptLegacyStatus = "pending" | "routed" | "failed" | "timeout";
 export type CommentRouteAttemptSource = "artifact_comment" | "task_comment";
 
 export interface CommentRouteAttempt {
   attempt_id: string;
   source: CommentRouteAttemptSource;
   status: CommentRouteAttemptStatus;
+  legacy_status: CommentRouteAttemptLegacyStatus;
   artifact_id: string | null;
   task_id: string | null;
   task_name: string | null;
@@ -33,6 +41,7 @@ export interface CommentRouteAttemptsProjection {
   ok: true;
   schema_version: "comment.route_attempts.v1";
   counts: Record<CommentRouteAttemptStatus, number>;
+  legacy_counts: Record<CommentRouteAttemptLegacyStatus, number>;
   items: CommentRouteAttempt[];
   count: number;
 }
@@ -81,17 +90,29 @@ export async function buildCommentRouteAttemptsProjection(
     .sort((a, b) => b.updated_at.localeCompare(a.updated_at))
     .slice(0, limit);
   const counts: Record<CommentRouteAttemptStatus, number> = {
+    retryable: 0,
+    "retry-pending": 0,
+    routed: 0,
+    "terminal-deadletter": 0,
+    disabled: 0,
+    "not-recorded": 0,
+  };
+  const legacyCounts: Record<CommentRouteAttemptLegacyStatus, number> = {
     pending: 0,
     routed: 0,
     failed: 0,
     timeout: 0,
   };
-  for (const item of items) counts[item.status] += 1;
+  for (const item of items) {
+    counts[item.status] += 1;
+    legacyCounts[item.legacy_status] += 1;
+  }
 
   return {
     ok: true,
     schema_version: "comment.route_attempts.v1",
     counts,
+    legacy_counts: legacyCounts,
     items,
     count: items.length,
   };
@@ -119,19 +140,15 @@ async function artifactCommentRouteAttempts(
     if (!routeStatus) continue;
     const commentId = artifactCommentId(row.artifact_id, Number(row.op_id));
     const sourceRef = `artifact:${row.artifact_id}:comment:${row.op_id}`;
-    const projectedStatus = routeStatus.routed
-      ? "routed"
-      : routeStatus.retryable && isTimedOut(routeStatus.updated_at, now, timeoutAfterMs)
-        ? "timeout"
-        : routeStatus.retryable
-          ? "pending"
-          : "failed";
+    const legacyStatus = artifactLegacyStatus(routeStatus, now, timeoutAfterMs);
+    const projectedStatus = artifactAttemptStatus(routeStatus, legacyStatus);
     const targetAgent = routeStatus.target_agent ?? routeStatus.dispatch?.to_agent ?? null;
     attempts.push(
       withRetry({
         attempt_id: `artifact:${row.artifact_id}:${row.op_id}:${targetAgent ?? "unassigned"}`,
         source: "artifact_comment",
         status: projectedStatus,
+        legacy_status: legacyStatus,
         artifact_id: row.artifact_id,
         task_id: null,
         task_name: null,
@@ -192,12 +209,15 @@ async function taskCommentRouteAttempts(
           routed_at: null,
         }];
     for (const result of effectiveResults) {
-      const projectedStatus = taskAttemptStatus(result.status, updatedAt, now, timeoutAfterMs);
+      const retryable = result.retryable ?? result.status !== "routed";
+      const projectedStatus = taskAttemptStatus(result.status, retryable);
+      const legacyStatus = taskLegacyStatus(result.status, updatedAt, now, timeoutAfterMs);
       attempts.push(
         withRetry({
           attempt_id: `task:${row.id}:${result.target_agent ?? "unassigned"}`,
           source: "task_comment",
           status: projectedStatus,
+          legacy_status: legacyStatus,
           artifact_id: null,
           task_id: row.task_id,
           task_name: row.task_name,
@@ -208,7 +228,7 @@ async function taskCommentRouteAttempts(
           dispatch_phid: result.dispatch_phid ?? null,
           query_id: result.query_id ?? null,
           error: result.error ?? null,
-          retryable: result.retryable ?? result.status !== "routed",
+          retryable,
           retry: placeholderRetry(),
           updated_at: result.routed_at ?? updatedAt,
         }),
@@ -220,10 +240,19 @@ async function taskCommentRouteAttempts(
 
 function taskAttemptStatus(
   status: string,
+  retryable: boolean,
+): CommentRouteAttemptStatus {
+  if (status === "routed") return "routed";
+  if (status === "failed") return retryable ? "retryable" : "terminal-deadletter";
+  return "retry-pending";
+}
+
+function taskLegacyStatus(
+  status: string,
   updatedAt: string,
   now: Date,
   timeoutAfterMs: number,
-): CommentRouteAttemptStatus {
+): CommentRouteAttemptLegacyStatus {
   if (status === "routed") return "routed";
   if (status === "failed") return "failed";
   return isTimedOut(updatedAt, now, timeoutAfterMs) ? "timeout" : "pending";
@@ -264,6 +293,8 @@ function parseArtifactRouteStatus(payloadJson: string | null): {
   dispatch: { query_id: string; dispatch_phid: string; to_agent: string } | null;
   skipped: string | null;
   error: { message: string } | null;
+  visible_state: string | null;
+  feedback_status: string | null;
   updated_at: string;
 } | null {
   try {
@@ -291,9 +322,34 @@ function parseArtifactRouteStatus(payloadJson: string | null): {
         : null,
       skipped: typeof r.skipped === "string" ? r.skipped : null,
       error: error && typeof error.message === "string" ? { message: error.message } : null,
+      visible_state: typeof r.visible_state === "string" ? r.visible_state : null,
+      feedback_status: typeof r.feedback_status === "string" ? r.feedback_status : null,
       updated_at: typeof r.updated_at === "string" ? r.updated_at : "",
     };
   } catch {
     return null;
   }
+}
+
+function artifactAttemptStatus(
+  routeStatus: NonNullable<ReturnType<typeof parseArtifactRouteStatus>>,
+  legacyStatus: CommentRouteAttemptLegacyStatus,
+): CommentRouteAttemptStatus {
+  if (routeStatus.visible_state === "not-recorded") return "not-recorded";
+  if (routeStatus.visible_state === "disabled/not-recorded" || routeStatus.feedback_status === "disabled/not-recorded") return "disabled";
+  if (routeStatus.visible_state === "terminal-failure" || routeStatus.feedback_status === "terminal-failure") return "terminal-deadletter";
+  if (routeStatus.routed) return "routed";
+  if (!routeStatus.retryable) return "terminal-deadletter";
+  return legacyStatus === "timeout" ? "retryable" : "retry-pending";
+}
+
+function artifactLegacyStatus(
+  routeStatus: NonNullable<ReturnType<typeof parseArtifactRouteStatus>>,
+  now: Date,
+  timeoutAfterMs: number,
+): CommentRouteAttemptLegacyStatus {
+  if (routeStatus.routed) return "routed";
+  if (routeStatus.retryable && isTimedOut(routeStatus.updated_at, now, timeoutAfterMs)) return "timeout";
+  if (routeStatus.retryable) return "pending";
+  return "failed";
 }
