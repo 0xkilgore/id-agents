@@ -491,6 +491,14 @@ describe("daemon — dry-run vs live", () => {
 
     expect(res.status).toBe(200);
     expect(res.body.counts.ready).toBe(8);
+    expect(res.body.feedback_outbox_retry_drain).toEqual({
+      pending: 0,
+      retryable: 0,
+      "retry-succeeded": 0,
+      "hard-failed": 0,
+      disabled: 0,
+      "not-recorded": 0,
+    });
     expect(res.body.auto_promote_health).toMatchObject({
       min_ready_fuel: 8,
       floor: 12,

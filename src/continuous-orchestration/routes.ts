@@ -109,6 +109,7 @@ export function mountContinuousOrchestrationRoutes(app: Application, opts: Orche
         },
         auto_promote_health: autoPromoteHealth,
         ready_admission: readyAdmission,
+        feedback_outbox_retry_drain: health.feedback_outbox_retry_drain,
         health,
       });
     } catch (err) {
