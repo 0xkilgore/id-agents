@@ -142,8 +142,9 @@ export function draftFromScheduleDerived(p: {
   return { source: "schedule_derived", ...p };
 }
 
-/** Dispatch-approval emitter — manager-owned (no agent creator), unowned,
- *  status todo. Converged onto canonical seconds/id (was ms + UUID). */
+/** Dispatch-approval emitter — manager-owned (no agent creator), unowned.
+ *  Status defaults to todo; approval-emit may close non-Chris FYI rows after
+ *  building the canonical row. Converged onto canonical seconds/id (was ms + UUID). */
 export function draftFromDispatchApproval(p: {
   name: string;
   team_id: string | null;

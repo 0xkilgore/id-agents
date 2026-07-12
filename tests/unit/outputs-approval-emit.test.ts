@@ -27,6 +27,10 @@ import {
   parseApprovalPayload,
   type ApprovalEmitInput,
 } from "../../src/outputs/approval-emit.js";
+import {
+  summarizeTaskReconciliation,
+  taskReconciliationFacts,
+} from "../../src/task-reconciliation/currentness.js";
 
 async function setup() {
   const adapter = new SqliteAdapter(":memory:");
@@ -83,6 +87,96 @@ describe("Kapelle P3 — approval emit producer", () => {
       "/ops/artifacts/art:regina:2026-06-09-digest.md",
     );
     expect(payload?.approved_at).toBe("2026-06-09T14:00:00.000Z");
+  });
+
+  it("preserves real Chris approvals as open approval tasks", async () => {
+    const { adapter, tasks, teamId } = await setup();
+    const result = await emitApprovalTask({ adapter, tasks, input: makeInput(teamId) });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.task.status).toBe("todo");
+    expect(result.task.completed_at).toBeNull();
+
+    const facts = taskReconciliationFacts(result.task, {
+      today: "2026-06-09",
+      nowEpochSeconds: Math.floor(new Date("2026-06-09T14:00:00.000Z").getTime() / 1000),
+    });
+    expect(facts.currentness).toMatchObject({
+      state: "needs_chris",
+      bucket: "needs_approval",
+      needs_chris: true,
+    });
+  });
+
+  it("closes non-Chris approval FYI tasks so they do not inflate needs_chris", async () => {
+    const { adapter, tasks, teamId } = await setup();
+    const result = await emitApprovalTask({
+      adapter,
+      tasks,
+      input: makeInput(teamId, {
+        artifact_id: "art:regina:liz-reviewed.md",
+        reviewer: { kind: "human", id: "liz", label: "Liz" },
+      }),
+      now: () => new Date("2026-06-09T14:00:00.000Z"),
+    });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.task.status).toBe("done");
+    expect(result.task.completed_at).toBe(1781013600);
+
+    const facts = taskReconciliationFacts(result.task, {
+      today: "2026-06-09",
+      nowEpochSeconds: 1781013600,
+    });
+    expect(facts.currentness).toMatchObject({
+      state: "done",
+      bucket: "done",
+      needs_chris: false,
+    });
+
+    expect(summarizeTaskReconciliation([result.task], {
+      today: "2026-06-09",
+      nowEpochSeconds: 1781013600,
+    })).toMatchObject({
+      needs_approval: 0,
+      done: 1,
+    });
+  });
+
+  it("demotes an older open non-Chris approval FYI row on idempotent emit", async () => {
+    const { adapter, tasks, teamId } = await setup();
+    const input = makeInput(teamId, {
+      artifact_id: "art:regina:old-liz-row.md",
+      reviewer: { kind: "human", id: "liz", label: "Liz" },
+    });
+    const first = await emitApprovalTask({
+      adapter,
+      tasks,
+      input,
+      now: () => new Date("2026-06-09T14:00:00.000Z"),
+    });
+    expect(first.ok).toBe(true);
+    if (!first.ok) return;
+    await tasks.updateFields(first.task.id, {
+      status: "todo",
+      completed_at: null,
+      updated_at: first.task.updated_at + 1,
+    });
+
+    const second = await emitApprovalTask({
+      adapter,
+      tasks,
+      input,
+      now: () => new Date("2026-06-09T14:05:00.000Z"),
+    });
+    expect(second.ok).toBe(true);
+    if (!second.ok) return;
+    expect(second.idempotent).toBe(true);
+    expect(second.task.id).toBe(first.task.id);
+    expect(second.task.status).toBe("done");
+    expect(second.task.completed_at).toBe(1781013900);
   });
 
   it("is idempotent — a second emit for the same artifact returns the existing task", async () => {
@@ -191,5 +285,3 @@ describe("Kapelle P3 — approval emit producer", () => {
     expect(result.task.title.toLowerCase()).toContain("approved");
   });
 });
-
-

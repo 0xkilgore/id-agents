@@ -1,4 +1,9 @@
 import type { TaskRow } from "../db/types.js";
+import {
+  APPROVAL_TASK_NAME_PREFIX,
+  approvalFyiCloseoutForPayload,
+  parseApprovalPayload,
+} from "../outputs/approval-emit.js";
 import { classifyTaskBand, extractTaskScheduleFacts, type TaskBandKind } from "../tasks-readmodel/bands.js";
 
 export type TaskCurrentnessState = "current" | "stale" | "blocked" | "needs_chris" | "done" | "archived";
@@ -107,6 +112,19 @@ export function taskCurrentness(
   if (facts.done) {
     return finish("done", "done", "none", false, null, false, "none", ["task is terminal"], band);
   }
+  if (isClosedApprovalFyi(row)) {
+    return finish(
+      "done",
+      "done",
+      "none",
+      false,
+      null,
+      false,
+      "none",
+      ["approval FYI is not a real Chris approval"],
+      band,
+    );
+  }
 
   if (facts.due_iso && facts.due_iso < opts.today) {
     evidence.push(`due ${facts.due_iso} before ${opts.today}`);
@@ -130,6 +148,11 @@ export function taskCurrentness(
 
   evidence.push("open, assigned, and within currentness threshold");
   return finish("current", "actionable_ready", urgencyForBand(band), false, null, false, "none", evidence, band);
+}
+
+function isClosedApprovalFyi(row: TaskRow): boolean {
+  if (!row.name.startsWith(APPROVAL_TASK_NAME_PREFIX)) return false;
+  return approvalFyiCloseoutForPayload(parseApprovalPayload(row.description ?? "")) !== null;
 }
 
 export function summarizeTaskReconciliation(

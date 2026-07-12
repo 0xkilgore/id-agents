@@ -62,6 +62,11 @@ export interface ApprovalPayload {
   approval_note: string | null;
 }
 
+export interface ApprovalFyiCloseout {
+  closeout: true;
+  reason: "approval_fyi_not_real_chris_approval";
+}
+
 export type ApprovalEmitErrorKind =
   | "validation"
   | "tasks_repository"
@@ -110,10 +115,32 @@ export async function emitApprovalTask(
     return tasksRepoFailure(existing.__error__, opts.input);
   }
   if (existing) {
-    return { ok: true, task: existing as TaskRow, idempotent: true };
+    const existingTask = existing as TaskRow;
+    const closeout = approvalFyiCloseoutForPayload(approvalPayloadFromInput(opts.input));
+    if (closeout && existingTask.status !== "done") {
+      const completedAt = Math.floor((opts.now ? opts.now() : new Date()).getTime() / 1000);
+      try {
+        await opts.tasks.updateFields(existingTask.id, {
+          status: "done",
+          completed_at: completedAt,
+          updated_at: completedAt,
+        });
+      } catch (err) {
+        return tasksRepoFailure(err, opts.input);
+      }
+      return {
+        ok: true,
+        task: { ...existingTask, status: "done", completed_at: completedAt, updated_at: completedAt },
+        idempotent: true,
+      };
+    }
+    return { ok: true, task: existingTask, idempotent: true };
   }
 
   const nowMs = (opts.now ? opts.now() : new Date()).getTime();
+  const nowSec = Math.floor(nowMs / 1000);
+  const payload = approvalPayloadFromInput(opts.input);
+  const closeout = approvalFyiCloseoutForPayload(payload);
   // tasks.created_by REFERENCES agents(id); the manager service is not a
   // registered agent, so created_by stays NULL (the "creator" trace lives in
   // the description payload's schema_version + the artifact_operations op_id
@@ -129,6 +156,11 @@ export async function emitApprovalTask(
     }),
     { nowMs },
   );
+  if (closeout) {
+    row.status = "done";
+    row.completed_at = nowSec;
+    row.updated_at = nowSec;
+  }
 
   try {
     await opts.tasks.create(row);
@@ -150,6 +182,33 @@ export function parseApprovalPayload(description: string): ApprovalPayload | nul
   } catch {
     return null;
   }
+}
+
+export function approvalPayloadFromInput(input: ApprovalEmitInput): ApprovalPayload {
+  return {
+    schema_version: APPROVAL_PAYLOAD_SCHEMA_VERSION,
+    artifact_id: input.artifact_id,
+    reviewer: input.reviewer,
+    approval_state: input.approval_state,
+    source_surface: input.source_surface,
+    approved_at: input.approved_at,
+    op_id: input.op_id,
+    approval_note: input.approval_note,
+  };
+}
+
+export function isRealChrisApprovalPayload(payload: ApprovalPayload): boolean {
+  return (
+    payload.approval_state === "approved" &&
+    payload.reviewer.kind === "human" &&
+    payload.reviewer.id.trim().toLowerCase() === "chris"
+  );
+}
+
+export function approvalFyiCloseoutForPayload(payload: ApprovalPayload | null): ApprovalFyiCloseout | null {
+  if (!payload) return null;
+  if (isRealChrisApprovalPayload(payload)) return null;
+  return { closeout: true, reason: "approval_fyi_not_real_chris_approval" };
 }
 
 function validateInput(input: ApprovalEmitInput): ApprovalEmitError | null {
@@ -206,16 +265,7 @@ function taskTitle(input: ApprovalEmitInput): string {
 }
 
 function taskDescription(input: ApprovalEmitInput): string {
-  const payload: ApprovalPayload = {
-    schema_version: APPROVAL_PAYLOAD_SCHEMA_VERSION,
-    artifact_id: input.artifact_id,
-    reviewer: input.reviewer,
-    approval_state: input.approval_state,
-    source_surface: input.source_surface,
-    approved_at: input.approved_at,
-    op_id: input.op_id,
-    approval_note: input.approval_note,
-  };
+  const payload = approvalPayloadFromInput(input);
   const reviewerLabel = input.reviewer.label || input.reviewer.id;
   return [
     "# Approval-emitted task",
