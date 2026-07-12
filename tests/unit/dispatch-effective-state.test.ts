@@ -104,6 +104,26 @@ test("Rule 2: refuel wave with task evidence and artifact_path stays done, not n
   ).toBe("done");
 });
 
+test("Rule 2: refuel wave with accepted/promoted counts stays done, not needs_review", () => {
+  expect(
+    deriveEffectiveState(
+      row({
+        status: "done",
+        subject: "[project: kapelle][AUTONOMOUS project-load-loop - backlog ran low, refueling] Re",
+        recovery_status: null,
+        started_at: "2026-07-12T14:04:31.000Z",
+        completed_at: "2026-07-12T14:04:33.000Z",
+        artifact_path: null,
+        promotion_result_json: null,
+        result_json: JSON.stringify({
+          accepted_count: 8,
+          promoted_count: 8,
+        }),
+      }),
+    ),
+  ).toBe("done");
+});
+
 test("Rule 2: clean done with no failure_kind -> done (even with landed_reconciled)", () => {
   // Edge: row reached done via the recovery wiring but was never marked failed
   // (admin override / non-failure landed_reconciled). Still emit `done` — the

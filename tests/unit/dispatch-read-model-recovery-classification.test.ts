@@ -371,6 +371,58 @@ test("empty-success guard: recent refuel wave with task evidence and artifact_pa
   ).toBe(false);
 });
 
+test("empty-success guard: wave 16 artifact-backed refuel with accepted count is clean", () => {
+  expect(
+    deriveEmptySuccessCandidate({
+      status: "done",
+      subject: "[project: kapelle][AUTONOMOUS project-load-loop - backlog ran low, refueling] Re",
+      started_at: "2026-07-12T13:16:07.191Z",
+      completed_at: "2026-07-12T13:16:09.189Z",
+      artifact_path: "output/refuel-kapelle-ready-backlog-wave-16.md",
+      promotion_result_json: null,
+      result_json: JSON.stringify({
+        artifact_path: "output/refuel-kapelle-ready-backlog-wave-16.md",
+        accepted_count: 12,
+      }),
+    }).empty_success_candidate,
+  ).toBe(false);
+});
+
+test("empty-success guard: wave 17 promoted count is substantial evidence", () => {
+  const cls = deriveEmptySuccessCandidate({
+    status: "done",
+    subject: "[project: kapelle][AUTONOMOUS project-load-loop - backlog ran low, refueling] Re",
+    started_at: "2026-07-12T14:04:31.000Z",
+    completed_at: "2026-07-12T14:04:33.000Z",
+    artifact_path: null,
+    promotion_result_json: null,
+    result_json: JSON.stringify({
+      promoted_count: 8,
+      accepted_count: 8,
+    }),
+  });
+
+  expect(cls.empty_success_candidate).toBe(false);
+  expect(cls.result_keys).toEqual(["accepted_count", "promoted_count"]);
+});
+
+test("empty-success guard: zero accepted/promoted counts without artifact still need review", () => {
+  expect(
+    deriveEmptySuccessCandidate({
+      status: "done",
+      subject: "[project: kapelle][AUTONOMOUS project-load-loop - backlog ran low, refueling] Re",
+      started_at: "2026-07-12T14:04:31.000Z",
+      completed_at: "2026-07-12T14:04:33.000Z",
+      artifact_path: null,
+      promotion_result_json: null,
+      result_json: JSON.stringify({
+        accepted_count: 0,
+        promoted_count: 0,
+      }),
+    }).empty_success_candidate,
+  ).toBe(true);
+});
+
 test("empty-success guard: task/coitem evidence counts as substantial even with terse result text", () => {
   expect(
     deriveEmptySuccessCandidate({
