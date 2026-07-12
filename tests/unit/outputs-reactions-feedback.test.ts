@@ -247,6 +247,15 @@ describe("POST /artifacts/:id/reactions — C0 ambient reactions", () => {
     expect(fb.body.acted_upon.state).toBe("captured");
     expect(fb.body.acted_upon.routed_count).toBe(0);
     expect(fb.body.items[0].routing).toBeNull();
+    expect(fb.body.items[0].retry_readiness).toMatchObject({
+      schema_version: "feedback.retry_readiness.v1",
+      status: "retryable_failed_row",
+      retryable: true,
+      stale_duplicate: false,
+      next_action: "retry",
+      route_visible_state: "recorded-route-failed-retryable",
+      route_retryable: true,
+    });
   });
 
   it("survives a routing crash without losing the durable reaction", async () => {

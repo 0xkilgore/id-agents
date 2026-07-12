@@ -520,6 +520,34 @@ export interface FeedbackItem {
    *  never routed (no owner / no scheduler / flag was off at capture time). */
   routing: FeedbackRouting | null;
   route_status?: ArtifactCommentRouteStatus | null;
+  /**
+   * UI-facing retry/readiness discriminator. This is derived from route_status
+   * plus reconciled routing status when available; it lets clients distinguish
+   * retryable route failures from routed feedback whose dispatch is already
+   * terminal and should be treated as a stale duplicate.
+   */
+  retry_readiness?: FeedbackRetryReadiness;
+}
+
+export type FeedbackRetryReadinessStatus =
+  | "retryable_failed_row"
+  | "stale_duplicate"
+  | "waiting_on_live_dispatch"
+  | "routed_unresolved"
+  | "captured_unrouted"
+  | "not_retryable";
+
+export interface FeedbackRetryReadiness {
+  schema_version: "feedback.retry_readiness.v1";
+  status: FeedbackRetryReadinessStatus;
+  retryable: boolean;
+  stale_duplicate: boolean;
+  next_action: "retry" | "close_or_ignore" | "wait" | "inspect" | "none";
+  prior_dispatch_phid: string | null;
+  prior_dispatch_status: string | null;
+  route_visible_state: ArtifactCommentVisibleState | null;
+  route_retryable: boolean;
+  reason: string;
 }
 
 /** Rolled-up acted-upon state for the chip. `routed` = at least one piece of

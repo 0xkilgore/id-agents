@@ -20,6 +20,7 @@ import { reconcileFeedbackDispatchStatus } from "../../src/outputs/ops.js";
 import type { CommentDispatchEnqueueFn } from "../../src/outputs/comment-dispatch.js";
 import type {
   ActedUponSummary,
+  ArtifactCommentRouteStatus,
   DispatchStatusLite,
   FeedbackItem,
   FeedbackRouting,
@@ -33,8 +34,36 @@ const ON = { C0_FEEDBACK_REACTIONS: "1" } as NodeJS.ProcessEnv;
 function routing(dispatch_phid: string, to_agent = "regina"): FeedbackRouting {
   return { dispatch_phid, query_id: null, to_agent, routed_at: "2026-06-29T00:00:00.000Z" };
 }
-function commentItem(op_id: number, r: FeedbackRouting | null): FeedbackItem {
+function retryableRouteStatus(op_id: number): ArtifactCommentRouteStatus {
   return {
+    visible_state: "recorded-route-failed-retryable",
+    compat_status: "recorded-route-failed-retryable",
+    feedback_status: "recorded-route-failed-retryable",
+    route_kind: "substantive_follow_up",
+    routed: false,
+    retryable: true,
+    recorded_op_id: op_id,
+    target_agent: "regina",
+    target_agent_raw: "regina",
+    dispatch: null,
+    skipped: "scheduler_unavailable",
+    error: null,
+    deadline_at: "2026-06-29T00:05:00.000Z",
+    timed_out_at: null,
+    notification_status: "pending",
+    next_retry_at: "2026-06-29T00:05:00.000Z",
+    suppress_duplicate_key: `artifact-comment:${op_id}:timeout`,
+    updated_at: "2026-06-29T00:00:00.000Z",
+  };
+}
+
+function commentItem(
+  op_id: number,
+  r: FeedbackRouting | null,
+  route_status: ArtifactCommentRouteStatus | null = null,
+): FeedbackItem {
+  return {
+    comment_id: `acmt:${ART}:${op_id}`,
     op_id,
     actor: "user:chris",
     kind: "comment",
@@ -43,6 +72,7 @@ function commentItem(op_id: number, r: FeedbackRouting | null): FeedbackItem {
     anchor: null,
     ts: "2026-06-29T00:00:00.000Z",
     routing: r,
+    route_status,
   };
 }
 function feedbackFixture(items: FeedbackItem[]): { items: FeedbackItem[]; acted_upon: ActedUponSummary } {
@@ -180,6 +210,43 @@ describe("reconcileFeedbackDispatchStatus — pure dispatch join", () => {
     const out = await reconcileFeedbackDispatchStatus(fb, resolve);
     expect(out.items[0].routing?.status).toBe("done");
     expect(out.items[0].routing?.is_terminal).toBe(true);
+    expect(out.items[0].retry_readiness).toMatchObject({
+      schema_version: "feedback.retry_readiness.v1",
+      status: "stale_duplicate",
+      retryable: false,
+      stale_duplicate: true,
+      next_action: "close_or_ignore",
+      prior_dispatch_phid: "phid:disp-DONE",
+      prior_dispatch_status: "done",
+    });
+  });
+
+  it("projects retryable route failures separately from stale duplicate routed rows", async () => {
+    const fb = feedbackFixture([
+      commentItem(1, null, retryableRouteStatus(1)),
+      commentItem(2, routing("phid:disp-DONE")),
+    ]);
+    const out = await reconcileFeedbackDispatchStatus(fb, async (phid) =>
+      phid === "phid:disp-DONE"
+        ? { status: "done", effective_state: "done", is_terminal: true }
+        : null,
+    );
+
+    expect(out.items[0].retry_readiness).toMatchObject({
+      status: "retryable_failed_row",
+      retryable: true,
+      stale_duplicate: false,
+      next_action: "retry",
+      route_visible_state: "recorded-route-failed-retryable",
+      route_retryable: true,
+    });
+    expect(out.items[1].retry_readiness).toMatchObject({
+      status: "stale_duplicate",
+      retryable: false,
+      stale_duplicate: true,
+      next_action: "close_or_ignore",
+      prior_dispatch_status: "done",
+    });
   });
 
   it("leaves an unresolved (purged/unknown) dispatch status:null and treats it as live", async () => {
@@ -237,6 +304,15 @@ describe("GET /artifacts/:id/feedback?reconcile=1 — wired reconciliation", () 
       dispatch_phid: phid,
       status: "in_flight",
       is_terminal: false,
+    });
+    expect(fb.body.items[0].retry_readiness).toMatchObject({
+      schema_version: "feedback.retry_readiness.v1",
+      status: "waiting_on_live_dispatch",
+      retryable: false,
+      stale_duplicate: false,
+      next_action: "wait",
+      prior_dispatch_phid: phid,
+      prior_dispatch_status: "in_flight",
     });
     expect(fb.body.acted_upon.routed_dispatches[0].status).toBe("in_flight");
   });

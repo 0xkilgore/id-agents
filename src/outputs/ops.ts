@@ -36,6 +36,7 @@ import type {
   DispatchFollowUpRequest,
   DispatchStatusResolver,
   FeedbackItem,
+  FeedbackRetryReadiness,
   FeedbackRouting,
   ReactionKind,
   ReactionRequest,
@@ -850,6 +851,9 @@ export async function listFeedback(
   // listOperations is op_id ASC (oldest-first). For the chip/feed we surface
   // newest-first so items[0] is the most recent piece of feedback.
   items.reverse();
+  for (const item of items) {
+    item.retry_readiness = feedbackRetryReadiness(item);
+  }
 
   // Build the summary off the newest-first items.
   const reactionItems = items.filter((i) => i.reaction);
@@ -898,14 +902,113 @@ export async function reconcileFeedbackDispatchStatus(
       : { ...r, status: null, effective_state: null, is_terminal: false };
   };
 
-  const items = feedback.items.map((it) =>
-    it.routing ? { ...it, routing: enrich(it.routing) } : it,
-  );
+  const items = feedback.items.map((it) => {
+    const item = it.routing ? { ...it, routing: enrich(it.routing) } : { ...it };
+    return { ...item, retry_readiness: feedbackRetryReadiness(item) };
+  });
   const acted_upon: ActedUponSummary = {
     ...feedback.acted_upon,
     routed_dispatches: feedback.acted_upon.routed_dispatches.map(enrich),
   };
   return { items, acted_upon };
+}
+
+function feedbackRetryReadiness(item: FeedbackItem): FeedbackRetryReadiness {
+  const routing = item.routing;
+  const routeStatus = item.route_status ?? null;
+  const dispatchStatus = routing && Object.prototype.hasOwnProperty.call(routing, "status")
+    ? routing.status ?? null
+    : null;
+  const visibleState = routeStatus?.visible_state ?? null;
+  const routeRetryable = routeStatus?.retryable === true;
+
+  if (routeRetryable && routeStatus?.routed !== true) {
+    return {
+      schema_version: "feedback.retry_readiness.v1",
+      status: "retryable_failed_row",
+      retryable: true,
+      stale_duplicate: false,
+      next_action: "retry",
+      prior_dispatch_phid: routing?.dispatch_phid ?? routeStatus.dispatch?.dispatch_phid ?? null,
+      prior_dispatch_status: dispatchStatus,
+      route_visible_state: visibleState,
+      route_retryable: true,
+      reason: "feedback_route_failed_retryable",
+    };
+  }
+
+  if (routing?.is_terminal === true) {
+    return {
+      schema_version: "feedback.retry_readiness.v1",
+      status: "stale_duplicate",
+      retryable: false,
+      stale_duplicate: true,
+      next_action: "close_or_ignore",
+      prior_dispatch_phid: routing.dispatch_phid,
+      prior_dispatch_status: dispatchStatus,
+      route_visible_state: visibleState,
+      route_retryable: routeRetryable,
+      reason: "routed_dispatch_already_terminal",
+    };
+  }
+
+  if (routing && routing.is_terminal === false && dispatchStatus) {
+    return {
+      schema_version: "feedback.retry_readiness.v1",
+      status: "waiting_on_live_dispatch",
+      retryable: false,
+      stale_duplicate: false,
+      next_action: "wait",
+      prior_dispatch_phid: routing.dispatch_phid,
+      prior_dispatch_status: dispatchStatus,
+      route_visible_state: visibleState,
+      route_retryable: routeRetryable,
+      reason: "routed_dispatch_still_live",
+    };
+  }
+
+  if (routing) {
+    return {
+      schema_version: "feedback.retry_readiness.v1",
+      status: "routed_unresolved",
+      retryable: false,
+      stale_duplicate: false,
+      next_action: "inspect",
+      prior_dispatch_phid: routing.dispatch_phid,
+      prior_dispatch_status: dispatchStatus,
+      route_visible_state: visibleState,
+      route_retryable: routeRetryable,
+      reason: "routed_dispatch_status_unresolved",
+    };
+  }
+
+  if (!routeStatus) {
+    return {
+      schema_version: "feedback.retry_readiness.v1",
+      status: "captured_unrouted",
+      retryable: false,
+      stale_duplicate: false,
+      next_action: "none",
+      prior_dispatch_phid: null,
+      prior_dispatch_status: null,
+      route_visible_state: null,
+      route_retryable: false,
+      reason: "feedback_captured_without_route_status",
+    };
+  }
+
+  return {
+    schema_version: "feedback.retry_readiness.v1",
+    status: "not_retryable",
+    retryable: false,
+    stale_duplicate: false,
+    next_action: "none",
+    prior_dispatch_phid: routeStatus.dispatch?.dispatch_phid ?? null,
+    prior_dispatch_status: dispatchStatus,
+    route_visible_state: visibleState,
+    route_retryable: routeRetryable,
+    reason: "route_status_not_retryable",
+  };
 }
 
 // ── Artifact review timeline (T-CKPT Artifact Review v1) ───────────
