@@ -7,6 +7,9 @@
 // C0_FEEDBACK_REACTIONS — 404 when off.
 
 import express, { type Express } from "express";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, it, expect } from "vitest";
 import { SqliteAdapter } from "../../src/db/sqlite-adapter.js";
 import { migrateSqlite } from "../../src/db/migrations/sqlite.js";
@@ -69,6 +72,28 @@ async function catalogArtifact(adapter: SqliteAdapter, agent: string): Promise<v
     },
     new Date().toISOString(),
   );
+}
+
+async function catalogLocalBodyArtifact(adapter: SqliteAdapter, artifactId = ART): Promise<string> {
+  const dir = mkdtempSync(join(tmpdir(), "artifact-feedback-source-"));
+  const absPath = join(dir, "local-feedback-source.md");
+  writeFileSync(absPath, "# Local feedback source\n\nBody exists locally.\n");
+  await registerArtifact(
+    adapter,
+    {
+      artifact_id: artifactId,
+      basename: "local-feedback-source.md",
+      agent: "regina",
+      abs_path: absPath,
+      title: "Local feedback source",
+      produced_at: "2026-07-12T12:00:00.000Z",
+      source: "manual",
+      availability: "present",
+    },
+    "2026-07-12T12:00:01.000Z",
+  );
+  rmSync(dir, { recursive: true, force: true });
+  return absPath;
 }
 
 async function call(
@@ -138,6 +163,13 @@ describe("POST /artifacts/:id/reactions — C0 ambient reactions", () => {
     expect(fb.body.acted_upon.last_reaction).toBe("wrong");
     expect(fb.body.items).toHaveLength(1);
     expect(fb.body.items[0].kind).toBe("reaction");
+    expect(fb.body.items[0]).toMatchObject({
+      artifact_title: "C0 plan",
+      retry_state: "routed",
+      terminal_reason: null,
+      error_reason: null,
+      source_link_status: { state: "not_requested", reason: null },
+    });
     expect(fb.body.items[0].routing).toMatchObject({
       dispatch_phid: "phid:disp-c0-1",
       to_agent: "regina",
@@ -166,7 +198,7 @@ describe("POST /artifacts/:id/reactions — C0 ambient reactions", () => {
 
     const comments = await call(app, "GET", `/artifacts/${ART}/comments`);
     expect(comments.body.comments[0].route_status).toMatchObject({
-      visible_state: "recorded+routed",
+      visible_state: "recorded_route_pending",
       route_kind: "acknowledgement",
       routed: false,
       retryable: false,
@@ -246,7 +278,12 @@ describe("POST /artifacts/:id/reactions — C0 ambient reactions", () => {
     const fb = await call(app, "GET", `/artifacts/${ART}/feedback`);
     expect(fb.body.acted_upon.state).toBe("captured");
     expect(fb.body.acted_upon.routed_count).toBe(0);
-    expect(fb.body.items[0].routing).toBeNull();
+    expect(fb.body.items[0]).toMatchObject({
+      routing: null,
+      retry_state: "retryable",
+      terminal_reason: null,
+      error_reason: "recorded_route_failed_retryable",
+    });
   });
 
   it("survives a routing crash without losing the durable reaction", async () => {
@@ -265,6 +302,12 @@ describe("POST /artifacts/:id/reactions — C0 ambient reactions", () => {
     const comments = await call(app, "GET", `/artifacts/${ART}/comments`);
     expect(comments.body.comments).toHaveLength(1);
     expect(comments.body.comments[0].reaction).toBe("wrong");
+    const fb = await call(app, "GET", `/artifacts/${ART}/feedback`);
+    expect(fb.body.items[0]).toMatchObject({
+      retry_state: "retryable",
+      terminal_reason: null,
+      error_reason: "scheduler boom",
+    });
   });
 });
 
@@ -355,5 +398,88 @@ describe("GET /artifacts/:id/feedback — mixed comments + reactions", () => {
     const fb = await call(app, "GET", `/artifacts/${ART}/feedback`);
     expect(fb.body.acted_upon.state).toBe("none");
     expect(fb.body.items).toHaveLength(0);
+  });
+
+  it("exposes only safe local artifact source links for feedback items", async () => {
+    const { app, adapter } = await buildApp();
+    await catalogLocalBodyArtifact(adapter);
+
+    await call(app, "POST", `/artifacts/${ART}/comments`, {
+      actor_ref: "user:chris",
+      body: "local body exists",
+      source_link: `manager:/artifacts/${ART}`,
+    });
+    await call(app, "POST", `/artifacts/${ART}/comments`, {
+      actor_ref: "user:chris",
+      body: "source missing",
+    });
+    await call(app, "POST", `/artifacts/${ART}/comments`, {
+      actor_ref: "user:chris",
+      body: "source redacted",
+      source_link: "[local-path]/output/redacted.md",
+    });
+    await call(app, "POST", `/artifacts/${ART}/comments`, {
+      actor_ref: "user:chris",
+      body: "unsupported href",
+      source_link: "https://example.test/artifact.md",
+    });
+    await call(app, "POST", `/artifacts/${ART}/comments`, {
+      actor_ref: "user:chris",
+      body: "stale generated artifact",
+      source_link: "manager:/artifacts/generated-preview-old",
+    });
+
+    const fb = await call(app, "GET", `/artifacts/${ART}/feedback`);
+    const byBody = new Map(fb.body.items.map((item: any) => [item.body, item]));
+
+    expect(byBody.get("local body exists")?.source_link).toEqual({
+      href: `/artifacts/${ART}/detail`,
+      label: "Artifact body",
+      source: "local_artifact_body",
+    });
+    expect(byBody.get("local body exists")?.source_link_status).toMatchObject({
+      state: "available",
+      artifact_id: ART,
+      href: `/artifacts/${ART}/detail`,
+      label: "Artifact body",
+      source: "local_artifact_body",
+    });
+    expect(byBody.get("source missing")?.source_link).toBeNull();
+    expect(byBody.get("source missing")?.source_link_status).toMatchObject({
+      state: "not_requested",
+      reason: null,
+    });
+    expect(byBody.get("source redacted")?.source_link).toBeNull();
+    expect(byBody.get("source redacted")?.source_link_status).toMatchObject({
+      state: "unsupported_ref",
+      reason: "source_link is not a manager artifact ref",
+    });
+    expect(byBody.get("unsupported href")?.source_link).toBeNull();
+    expect(byBody.get("unsupported href")?.source_link_status.state).toBe("unsupported_ref");
+    expect(byBody.get("stale generated artifact")?.source_link).toBeNull();
+    expect(byBody.get("stale generated artifact")?.source_link_status).toMatchObject({
+      state: "artifact_mismatch",
+      artifact_id: "generated-preview-old",
+    });
+  });
+
+  it("does not expose a source link for an unversioned generated artifact body", async () => {
+    const { app, adapter } = await buildApp();
+    await catalogLocalBodyArtifact(adapter);
+    await adapter.query(`UPDATE artifact_bodies SET version_key = NULL WHERE artifact_id = ?`, [ART]);
+
+    await call(app, "POST", `/artifacts/${ART}/comments`, {
+      actor_ref: "user:chris",
+      body: "generated body is stale",
+      source_link: `manager:/artifacts/${ART}`,
+    });
+
+    const fb = await call(app, "GET", `/artifacts/${ART}/feedback`);
+    expect(fb.body.items[0].source_link).toBeNull();
+    expect(fb.body.items[0].source_link_status).toMatchObject({
+      state: "body_unversioned",
+      reason: "artifact body cache has no version key",
+      artifact_id: ART,
+    });
   });
 });

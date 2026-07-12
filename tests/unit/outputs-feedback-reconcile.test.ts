@@ -42,7 +42,20 @@ function commentItem(op_id: number, r: FeedbackRouting | null): FeedbackItem {
     body: `comment ${op_id}`,
     anchor: null,
     ts: "2026-06-29T00:00:00.000Z",
+    artifact_title: "S4 plan",
     routing: r,
+    retry_state: r ? "routed" : "not_applicable",
+    terminal_reason: null,
+    error_reason: null,
+    source_link: null,
+    source_link_status: {
+      state: "not_requested",
+      reason: null,
+      artifact_id: null,
+      href: null,
+      label: null,
+      source: null,
+    },
   };
 }
 function feedbackFixture(items: FeedbackItem[]): { items: FeedbackItem[]; acted_upon: ActedUponSummary } {

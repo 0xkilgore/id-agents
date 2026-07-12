@@ -276,19 +276,46 @@ export interface ArtifactDispatchReceipt {
   status: string | null;
 }
 
-export type ArtifactCommentVisibleState =
-  | "recorded+routed"
-  | "recorded-but-route-failed-with-retry"
-  | "recorded-route-failed-retryable"
-  | "disabled/not-recorded"
-  | "terminal-failure"
-  | "not-recorded";
+export const COMMENT_ROUTE_STATUSES = [
+  "rejected_not_recorded",
+  "recorded_route_pending",
+  "recorded_and_routed",
+  "recorded_route_failed_retryable",
+  "recorded_route_failed_terminal",
+] as const;
 
-export type ArtifactFeedbackCompatStatus =
-  | "recorded+routed"
-  | "recorded-route-failed-retryable"
-  | "disabled/not-recorded"
-  | "terminal-failure";
+export type CommentRouteStatus = (typeof COMMENT_ROUTE_STATUSES)[number];
+export type ArtifactCommentVisibleState = CommentRouteStatus;
+export type ArtifactFeedbackCompatStatus = CommentRouteStatus;
+
+export function normalizeCommentRouteStatus(value: unknown): CommentRouteStatus | null {
+  switch (value) {
+    case "rejected_not_recorded":
+    case "recorded_route_pending":
+    case "recorded_and_routed":
+    case "recorded_route_failed_retryable":
+    case "recorded_route_failed_terminal":
+      return value;
+    case "recorded+routed":
+    case "recorded_routed":
+      return "recorded_and_routed";
+    case "recorded-route-failed-retryable":
+    case "recorded-route-failed-with-retry":
+    case "recorded-but-route-failed-with-retry":
+    case "recorded_route_failed_retry":
+      return "recorded_route_failed_retryable";
+    case "recorded_unrouted":
+      return "recorded_route_pending";
+    case "disabled/not-recorded":
+    case "not-recorded":
+      return "rejected_not_recorded";
+    case "terminal-failure":
+    case "terminal failure":
+      return "recorded_route_failed_terminal";
+    default:
+      return null;
+  }
+}
 
 export interface ArtifactCommentRouteStatus {
   visible_state: ArtifactCommentVisibleState;
@@ -501,6 +528,37 @@ export type TeamAwareDispatchStatusResolver = (
   teamId: string,
 ) => Promise<DispatchStatusLite | null>;
 
+export interface FeedbackSourceLink {
+  href: string;
+  label: string;
+  source: "local_artifact_body";
+}
+
+export type FeedbackSourceLinkState =
+  | "available"
+  | "not_requested"
+  | "unsupported_ref"
+  | "invalid_ref"
+  | "artifact_mismatch"
+  | "body_unavailable"
+  | "body_unversioned";
+
+export interface FeedbackSourceLinkStatus {
+  state: FeedbackSourceLinkState;
+  reason: string | null;
+  artifact_id: string | null;
+  href: string | null;
+  label: string | null;
+  source: FeedbackSourceLink["source"] | null;
+}
+
+export type FeedbackRetryState =
+  | "not_applicable"
+  | "pending"
+  | "routed"
+  | "retryable"
+  | "terminal";
+
 export interface FeedbackItem {
   /** Stable, globally-unique dedup key = artifactCommentId(artifact_id, op_id).
    *  FeedbackItem carries no artifact_id, so op_id alone is not globally unique —
@@ -514,10 +572,26 @@ export interface FeedbackItem {
   body: string;
   anchor: string | null;
   ts: string;
+  /** Generated/catalog title for the artifact this feedback was left on.
+   *  Null for legacy rows without catalog metadata. */
+  artifact_title: string | null;
   /** The dispatch this feedback routed to its owning agent, or null when it
    *  never routed (no owner / no scheduler / flag was off at capture time). */
   routing: FeedbackRouting | null;
   route_status?: ArtifactCommentRouteStatus | null;
+  /** Retry-safe route state derived from route_status. Consumers should prefer
+   *  this over inferring retryability from null routing/error fields. */
+  retry_state: FeedbackRetryState;
+  /** Explicit terminal/skip reason when retry_state=terminal. */
+  terminal_reason: string | null;
+  /** Explicit route error reason when routing failed. */
+  error_reason: string | null;
+  /** Safe source link for the local artifact body that produced this feedback.
+   *  Raw source refs are deliberately not exposed here. */
+  source_link: FeedbackSourceLink | null;
+  /** Explicit reason source_link is present or absent; source_link remains for
+   *  backwards-compatible consumers. */
+  source_link_status: FeedbackSourceLinkStatus;
 }
 
 /** Rolled-up acted-upon state for the chip. `routed` = at least one piece of

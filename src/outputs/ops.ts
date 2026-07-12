@@ -13,7 +13,9 @@
 import type { DbAdapter } from "../db/db-adapter.js";
 import {
   appendOperation,
+  getArtifact,
   getArtifactDraft,
+  getArtifactBodyCache,
   getLastOperationByActor,
   getReviewState,
   listOperations,
@@ -30,6 +32,9 @@ import type {
   ArtifactOpRow,
   ArtifactOpType,
   ArtifactReviewStateRow,
+  FeedbackSourceLink,
+  FeedbackSourceLinkStatus,
+  FeedbackRetryState,
   ArtifactTimelineEvent,
   CaneDraftPayload,
   CommentRequest,
@@ -45,7 +50,7 @@ import type {
   SuggestedChangeRequest,
   ViewRequest,
 } from "./types.js";
-import { ARTIFACT_REACTIONS, artifactCommentId, isReactionKind } from "./types.js";
+import { ARTIFACT_REACTIONS, artifactCommentId, isReactionKind, normalizeCommentRouteStatus } from "./types.js";
 import type { CaneDraftSender } from "./ship-executor.js";
 import { pendingIdFromDraftId } from "./ship-executor.js";
 import { EDIT_OP_TYPE, buildEditPayload } from "./edit.js";
@@ -251,7 +256,7 @@ export async function commentArtifact(
     actor,
     ts,
     JSON.stringify({ body: req.body, anchor }),
-    req.source_link ?? existing?.source_link ?? null,
+    req.source_link ?? null,
     req.idempotency_key,
   );
   return {
@@ -623,31 +628,13 @@ function parseCommentPayload(payloadJson: string | null): {
 function parseRouteStatus(value: unknown): ArtifactCommentRouteStatus | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const v = value as Partial<ArtifactCommentRouteStatus>;
-  if (
-    v.visible_state !== "recorded+routed" &&
-    v.visible_state !== "recorded-but-route-failed-with-retry" &&
-    v.visible_state !== "recorded-route-failed-retryable" &&
-    v.visible_state !== "disabled/not-recorded" &&
-    v.visible_state !== "terminal-failure" &&
-    v.visible_state !== "not-recorded"
-  ) {
-    return null;
-  }
-  const compat =
-    v.compat_status === "recorded+routed" ||
-    v.compat_status === "recorded-route-failed-retryable" ||
-    v.compat_status === "disabled/not-recorded" ||
-    v.compat_status === "terminal-failure"
-      ? v.compat_status
-      : v.visible_state === "recorded-but-route-failed-with-retry"
-        ? "recorded-route-failed-retryable"
-        : v.visible_state === "not-recorded"
-          ? "disabled/not-recorded"
-          : v.visible_state;
+  const visible = normalizeCommentRouteStatus(v.visible_state);
+  if (!visible) return null;
+  const compat = normalizeCommentRouteStatus(v.compat_status) ?? visible;
   return {
-    visible_state: v.visible_state,
+    visible_state: visible,
     compat_status: compat,
-    feedback_status: compat,
+    feedback_status: normalizeCommentRouteStatus(v.feedback_status) ?? compat,
     route_kind:
       v.route_kind === "acknowledgement" ||
       v.route_kind === "approval_signal" ||
@@ -729,7 +716,7 @@ export async function reactArtifact(
     actor,
     ts,
     JSON.stringify({ body, anchor, reaction: req.reaction, note }),
-    req.source_link ?? existing?.source_link ?? null,
+    req.source_link ?? null,
   );
   return {
     op_id: opId,
@@ -810,6 +797,92 @@ function parseRoutedPayload(
   }
 }
 
+async function feedbackSourceLinkStatus(
+  adapter: DbAdapter,
+  artifactId: string,
+  sourceLink: string | null,
+): Promise<{ link: FeedbackSourceLink | null; status: FeedbackSourceLinkStatus }> {
+  const unavailable = (
+    state: FeedbackSourceLinkStatus["state"],
+    reason: string | null,
+    sourceArtifactId: string | null = null,
+  ): { link: null; status: FeedbackSourceLinkStatus } => ({
+    link: null,
+    status: { state, reason, artifact_id: sourceArtifactId, href: null, label: null, source: null },
+  });
+
+  if (!sourceLink) return unavailable("not_requested", null);
+
+  const match = sourceLink.match(/^manager:\/artifacts\/([^/?#]+)$/);
+  if (!match) return unavailable("unsupported_ref", "source_link is not a manager artifact ref");
+
+  let sourceArtifactId: string;
+  try {
+    sourceArtifactId = decodeURIComponent(match[1]);
+  } catch {
+    return unavailable("invalid_ref", "source artifact id is not valid URI encoding");
+  }
+  if (sourceArtifactId !== artifactId) {
+    return unavailable("artifact_mismatch", "source artifact id does not match feedback artifact", sourceArtifactId);
+  }
+
+  const cached = await getArtifactBodyCache(adapter, artifactId).catch(() => null);
+  if (!cached?.body_text) return unavailable("body_unavailable", "artifact body is not cached", sourceArtifactId);
+  if (!cached.version_key) return unavailable("body_unversioned", "artifact body cache has no version key", sourceArtifactId);
+
+  const link: FeedbackSourceLink = {
+    href: `/artifacts/${encodeURIComponent(artifactId)}/detail`,
+    label: "Artifact body",
+    source: "local_artifact_body",
+  };
+  return {
+    link,
+    status: {
+      state: "available",
+      reason: null,
+      artifact_id: sourceArtifactId,
+      href: link.href,
+      label: link.label,
+      source: link.source,
+    },
+  };
+}
+
+function feedbackRetryState(routeStatus: ArtifactCommentRouteStatus | null, routing: FeedbackRouting | null): FeedbackRetryState {
+  if (!routeStatus) return routing ? "routed" : "not_applicable";
+  switch (routeStatus.visible_state) {
+    case "recorded_and_routed":
+      return "routed";
+    case "recorded_route_pending":
+      return "pending";
+    case "recorded_route_failed_retryable":
+      return "retryable";
+    case "recorded_route_failed_terminal":
+    case "rejected_not_recorded":
+      return "terminal";
+  }
+}
+
+function feedbackTerminalReason(routeStatus: ArtifactCommentRouteStatus | null): string | null {
+  if (!routeStatus) return null;
+  if (routeStatus.visible_state !== "recorded_route_failed_terminal" && routeStatus.visible_state !== "rejected_not_recorded") {
+    return null;
+  }
+  return routeStatus.error?.message ?? routeStatus.skipped ?? routeStatus.visible_state;
+}
+
+function feedbackErrorReason(routeStatus: ArtifactCommentRouteStatus | null): string | null {
+  if (!routeStatus) return null;
+  if (routeStatus.error?.message) return routeStatus.error.message;
+  if (
+    routeStatus.visible_state === "recorded_route_failed_retryable" ||
+    routeStatus.visible_state === "recorded_route_failed_terminal"
+  ) {
+    return routeStatus.visible_state;
+  }
+  return null;
+}
+
 export async function listFeedback(
   adapter: DbAdapter,
   artifactId: string,
@@ -817,6 +890,8 @@ export async function listFeedback(
   offset = 0,
 ): Promise<{ items: FeedbackItem[]; acted_upon: ActedUponSummary }> {
   const ops = await listOperations(adapter, artifactId, limit, offset);
+  const catalog = await getArtifact(adapter, artifactId).catch(() => null);
+  const artifactTitle = catalog?.title || catalog?.basename || null;
   // Index routing ops by the comment op_id they reference. Latest routed wins
   // for a given source (re-routes are rare but additive).
   const routingBySource = new Map<number, FeedbackRouting>();
@@ -834,6 +909,8 @@ export async function listFeedback(
   for (const op of ops) {
     if (op.op_type !== "comment_recorded") continue;
     const { body, anchor, reaction, route_status } = parseCommentPayload(op.payload_json);
+    const source = await feedbackSourceLinkStatus(adapter, artifactId, op.source_link);
+    const routing = routingBySource.get(op.op_id) ?? null;
     items.push({
       comment_id: artifactCommentId(op.artifact_id, op.op_id),
       op_id: op.op_id,
@@ -843,8 +920,14 @@ export async function listFeedback(
       body,
       anchor,
       ts: op.ts,
-      routing: routingBySource.get(op.op_id) ?? null,
+      artifact_title: artifactTitle,
+      routing,
       route_status,
+      retry_state: feedbackRetryState(route_status, routing),
+      terminal_reason: feedbackTerminalReason(route_status),
+      error_reason: feedbackErrorReason(route_status),
+      source_link: source.link,
+      source_link_status: source.status,
     });
   }
   // listOperations is op_id ASC (oldest-first). For the chip/feed we surface
