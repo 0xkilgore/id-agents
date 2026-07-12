@@ -16,14 +16,17 @@ import {
 
 type RowFields = {
   status: string;
+  subject?: string | null;
   recovery_status: string | null;
   recovery_reason: string | null;
   failure_kind: string | null;
   failure_detail: string | null;
   artifact_path: string | null;
   promotion_result_json: string | null;
+  result_json?: string | null;
   not_before_at: string | null;
   started_at: string | null;
+  completed_at?: string | null;
   updated_at: string;
 };
 
@@ -77,6 +80,27 @@ test("Rule 1: in_flight -> in_flight", () => {
 test("Rule 2: clean done -> done (no recovery_status)", () => {
   expect(
     deriveEffectiveState(row({ status: "done", recovery_status: "none" })),
+  ).toBe("done");
+});
+
+test("Rule 2: refuel wave with task evidence and artifact_path stays done, not needs_review", () => {
+  expect(
+    deriveEffectiveState(
+      row({
+        status: "done",
+        subject: "[project: kapelle][AUTONOMOUS project-load-loop - backlog ran low, refueling] Re",
+        recovery_status: null,
+        started_at: "2026-07-12T12:26:12.949Z",
+        completed_at: "2026-07-12T12:28:51.091Z",
+        artifact_path: "output/refuel-kapelle-ready-backlog-wave-15.md",
+        promotion_result_json: null,
+        result_json: JSON.stringify({
+          artifact_path: "output/refuel-kapelle-ready-backlog-wave-15.md",
+          created_tasks: 16,
+          claimed_tasks: 16,
+        }),
+      }),
+    ),
   ).toBe("done");
 });
 

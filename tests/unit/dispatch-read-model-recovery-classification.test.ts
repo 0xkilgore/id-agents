@@ -28,6 +28,10 @@ import {
 // Shape matching the `RecoveryClassificationRow` Pick from read-model.ts.
 type RowFields = {
   status: string;
+  subject?: string | null;
+  not_before_at?: string | null;
+  started_at?: string | null;
+  completed_at?: string | null;
   recovery_status: string | null;
   recovery_reason: string | null;
   failure_kind: string | null;
@@ -320,6 +324,68 @@ test("empty-success guard: fast done with no artifact/promotion/substantial outp
   expect(cls!.false_expire_recovered).toBe(false);
   expect(cls!.empty_success_candidate).toBe(true);
   expect(cls!.completion_evidence?.elapsed_ms).toBe(21_000);
+});
+
+test("empty-success guard: recent coordinator refuel with no artifact is flagged with refuel-specific reason", () => {
+  const cls = deriveRecoveryClassification({
+    status: "done",
+    subject: "[project: kapelle][AUTONOMOUS project-load-loop - backlog ran low, refueling] Re",
+    started_at: "2026-07-12T12:06:07.191Z",
+    completed_at: "2026-07-12T12:06:09.189Z",
+    recovery_status: null,
+    recovery_reason: null,
+    failure_kind: null,
+    failure_detail: null,
+    artifact_path: null,
+    promotion_result_json: null,
+    result_json: null,
+  });
+  expect(cls).not.toBeNull();
+  expect(cls!.false_expire_recovered).toBe(false);
+  expect(cls!.empty_success_candidate).toBe(true);
+  expect(cls!.empty_success_reason).toBe(
+    "coordinator refuel done within 2m with no artifact_path or result evidence",
+  );
+  expect(cls!.completion_evidence?.result_keys).toEqual([]);
+});
+
+test("empty-success guard: recent refuel wave with task evidence and artifact_path is clean", () => {
+  const result = {
+    summary:
+      "Created and owner-claimed 16 Kapelle backlog tasks; exact-name verification found 16/16 assigned, doing, tracked, and actionable_ready.",
+    artifact_path: "output/refuel-kapelle-ready-backlog-wave-15.md",
+    created_tasks: 16,
+    claimed_tasks: 16,
+    actionable_ready_after: 282,
+  };
+  expect(
+    deriveEmptySuccessCandidate({
+      status: "done",
+      subject: "[project: kapelle][AUTONOMOUS project-load-loop - backlog ran low, refueling] Re",
+      started_at: "2026-07-12T12:26:12.949Z",
+      completed_at: "2026-07-12T12:28:51.091Z",
+      artifact_path: "output/refuel-kapelle-ready-backlog-wave-15.md",
+      promotion_result_json: null,
+      result_json: JSON.stringify(result),
+    }).empty_success_candidate,
+  ).toBe(false);
+});
+
+test("empty-success guard: task/coitem evidence counts as substantial even with terse result text", () => {
+  expect(
+    deriveEmptySuccessCandidate({
+      status: "done",
+      subject: "[project: kapelle][AUTONOMOUS project-load-loop - backlog ran low, refueling] Re",
+      started_at: "2026-07-12T12:26:12.949Z",
+      completed_at: "2026-07-12T12:26:20.000Z",
+      artifact_path: null,
+      promotion_result_json: null,
+      result_json: JSON.stringify({
+        created_tasks: 3,
+        follow_up_backlog_item: "coitem_9a123d92-df4d-4e1c-8a22-c49441b7c97b",
+      }),
+    }).empty_success_candidate,
+  ).toBe(false);
 });
 
 test("empty-success guard: explicit skip/noop evidence is preserved as clean done", () => {

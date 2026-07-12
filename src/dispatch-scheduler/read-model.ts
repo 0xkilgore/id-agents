@@ -1085,6 +1085,7 @@ function rowToDispatch(row: DispatchDbRow, opts: DeriveOptions = {}): DispatchRe
  */
 export interface RecoveryClassificationRow {
   status: string;
+  subject?: string | null;
   not_before_at?: string | null;
   started_at?: string | null;
   completed_at?: string | null;
@@ -1204,6 +1205,7 @@ export function deriveRecoveryClassification(
 
 export interface EmptySuccessCandidateRow {
   status: string;
+  subject?: string | null;
   not_before_at?: string | null;
   started_at?: string | null;
   completed_at?: string | null;
@@ -1223,7 +1225,8 @@ export interface EmptySuccessCandidate {
 const EMPTY_SUCCESS_FAST_MS = 2 * 60_000;
 const SUBSTANTIAL_RESULT_TEXT_MIN = 120;
 const EXPLICIT_NOOP_RE = /\b(no-?op|skip(?:ped)?|not applicable|already (?:done|current|up to date)|no changes? (?:needed|required)|intentionally no work)\b/i;
-const EVIDENCE_KEY_RE = /^(artifact_path|artifact|artifact_id|output_path|output|comment_id|comment|timeline_event_id|timeline_id|commit_sha|sha|promotion|promotion_result|diff|summary|closeout)$/i;
+const EVIDENCE_KEY_RE = /^(artifact_path|artifact|artifact_id|output_path|output|comment_id|comment|timeline_event_id|timeline_id|commit_sha|sha|promotion|promotion_result|diff|summary|closeout|task|task_name|task_id|tasks|created_tasks|claimed_tasks|coitem|coitem_id|coitems|backlog_item|backlog_items|follow_up_backlog_item|follow_up_task)$/i;
+const COORDINATOR_REFUEL_SUBJECT_RE = /\b(?:project-load-loop|backlog ran low|refuel(?:ing)?)\b/i;
 
 export function deriveEmptySuccessCandidate(row: EmptySuccessCandidateRow): EmptySuccessCandidate {
   const parsed = parseJsonObject(row.result_json);
@@ -1253,11 +1256,19 @@ export function deriveEmptySuccessCandidate(row: EmptySuccessCandidateRow): Empt
 
   return emptySuccess(
     true,
-    "done within 2m with no artifact_path, verified promotion, explicit noop/skip evidence, or substantial result output",
+    emptySuccessReason(row),
     elapsedMs,
     resultTextLength,
     resultKeys,
   );
+}
+
+function emptySuccessReason(row: EmptySuccessCandidateRow): string {
+  const subject = row.subject ?? "";
+  if (COORDINATOR_REFUEL_SUBJECT_RE.test(subject)) {
+    return "coordinator refuel done within 2m with no artifact_path or result evidence";
+  }
+  return "done within 2m with no artifact_path, verified promotion, explicit noop/skip evidence, or substantial result output";
 }
 
 function emptySuccess(
@@ -1360,7 +1371,7 @@ export type EffectiveStateRow = Pick<
   | "updated_at"
   | "provider"
   | "supersede_link"
->;
+> & { subject?: string | null };
 
 /**
  * T-RECON.2 (2026-06-22): options threaded into the classification so a failure
