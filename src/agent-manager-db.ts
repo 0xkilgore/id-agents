@@ -257,6 +257,7 @@ import {
   type FleetNodeInput,
 } from './deploy-guard/fleet-freshness.js';
 import { readReleaseState } from './deploy-guard/release-state.js';
+import { getTelegramAlertDeliveryHealth } from './continuous-orchestration/alert-delivery-health.js';
 import { sendTelegramAlert } from './continuous-orchestration/telegram.js';
 import {
   evaluateFleetRuntimeDrift,
@@ -5353,6 +5354,9 @@ export class AgentManagerDb {
         // Supervisor freshness: is the watch-and-alert loop itself running
         // recently enough to trust stale-manager / low-disk warnings?
         supervisor: this.getSupervisorHealthStatus(now),
+        alert_delivery: {
+          telegram: getTelegramAlertDeliveryHealth(),
+        },
         // T-DEPLOY.1: how long the running build has been behind origin/main +
         // whether the freshness monitor has alerted (the drift watchdog state).
         freshness: {
