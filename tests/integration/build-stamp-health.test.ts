@@ -19,6 +19,7 @@ import { SqliteTasksRepo } from '../../src/db/repos/sqlite/tasks-repo.js';
 import { SqliteEventsRepo } from '../../src/db/repos/sqlite/events-repo.js';
 import { SqliteSubscriptionsRepo } from '../../src/db/repos/sqlite/subscriptions-repo.js';
 import { SqliteCheckinsRepo } from '../../src/db/repos/sqlite/checkins-repo.js';
+import { migrateOutputsTables } from '../../src/outputs/storage.js';
 
 async function createInMemoryDb() {
   const adapter = new SqliteAdapter(':memory:');
@@ -73,6 +74,33 @@ describe('GET /health build-stamp (T11.1)', () => {
   });
 
   it('exposes the running build identity (build_sha + staleness fields)', async () => {
+    await migrateOutputsTables(db.adapter);
+    await db.adapter.query(
+      `INSERT INTO artifact_operations (artifact_id, op_type, actor, ts, payload_json, source_link, idempotency_key)
+       VALUES (?, 'comment_recorded', ?, ?, ?, NULL, NULL)`,
+      [
+        'art-health-feedback',
+        'user:chris',
+        '2026-07-01T15:01:00.000Z',
+        JSON.stringify({
+          body: 'please retry route',
+          route_status: {
+            visible_state: 'recorded-but-route-failed-with-retry',
+            route_kind: 'substantive_follow_up',
+            routed: false,
+            retryable: true,
+            recorded_op_id: 1,
+            target_agent: 'regina',
+            target_agent_raw: 'regina',
+            dispatch: null,
+            skipped: null,
+            error: { message: 'scheduler unavailable' },
+            updated_at: '2026-07-01T15:01:00.000Z',
+          },
+        }),
+      ],
+    );
+
     const res = await fetch(`${baseUrl}/health`);
     expect(res.status).toBe(200);
     const body = await res.json() as any;
@@ -90,5 +118,13 @@ describe('GET /health build-stamp (T11.1)', () => {
     expect(body.build).toHaveProperty('origin_main_sha');
     expect(body.build).toHaveProperty('behind_origin');
     expect(['build_stamp', 'runtime_fallback', 'unknown']).toContain(body.build.source);
+    expect(body.feedback_outbox_retry_drain).toMatchObject({
+      pending: 0,
+      retryable: 1,
+      'retry-succeeded': 0,
+      'hard-failed': 0,
+      disabled: 0,
+      'not-recorded': 0,
+    });
   });
 });

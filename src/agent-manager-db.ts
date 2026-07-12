@@ -43,7 +43,10 @@ import {
   type BuildApprovalInput,
 } from './decisions-needs-chris/projection.js';
 import { listBacklogByState } from './continuous-orchestration/storage.js';
-import { readOrchestrationHealthProjection } from './continuous-orchestration/health-projection.js';
+import {
+  readFeedbackOutboxRetryDrain,
+  readOrchestrationHealthProjection,
+} from './continuous-orchestration/health-projection.js';
 import type { ContinuousOrchestrationDaemon } from './continuous-orchestration/daemon.js';
 import {
   buildTaskRow,
@@ -4697,6 +4700,7 @@ export class AgentManagerDb {
       const recovery_backfill = this.dispatchRecoveryService
         ? this.dispatchRecoveryService.getBackfillMetrics()
         : { recovery_backfill_runs_total: 0, recovery_backfill_rows_reclassified_total: 0 };
+      const feedback_outbox_retry_drain = await readFeedbackOutboxRetryDrain(this.db.adapter);
       const consoleHealth = dbProbe.timedOut || !dbProbe.value.teamId
         ? {
             ok: false,
@@ -4719,6 +4723,7 @@ export class AgentManagerDb {
         datastore: dbProbe.timedOut ? { state: 'degraded', reason: 'health_db_probe_timeout' } : { state: 'ok' },
         timestamp: Date.now(),
         recovery_backfill,
+        feedback_outbox_retry_drain,
         // T11.1: the running build identity + staleness-vs-origin signal.
         build: this.getBuildStatus(),
         // T-RELY: fail-loud disk headroom so build waves see ENOSPC risk before

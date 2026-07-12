@@ -22,6 +22,7 @@ export interface OrchestrationHealthBlocker {
 export interface OrchestrationHealthProjection {
   ok: boolean;
   generated_at: string;
+  feedback_outbox_retry_drain: FeedbackOutboxRetryDrainCounters;
   queue_quality: OrchestrationQueueQualityProjection;
   blockers: {
     blocked: boolean;
@@ -38,6 +39,15 @@ export interface OrchestrationHealthProjection {
       items: OrchestrationHealthBlocker[];
     };
   };
+}
+
+export interface FeedbackOutboxRetryDrainCounters {
+  pending: number;
+  retryable: number;
+  "retry-succeeded": number;
+  "hard-failed": number;
+  disabled: number;
+  "not-recorded": number;
 }
 
 export interface OrchestrationQueueNoisePattern {
@@ -112,6 +122,15 @@ interface ArtifactCommentNoiseRow {
 
 const RECOVERED_STATUSES = ["moot", "landed_reconciled", "verified_done", "retry_done"];
 
+const ZERO_FEEDBACK_OUTBOX_RETRY_DRAIN: FeedbackOutboxRetryDrainCounters = {
+  pending: 0,
+  retryable: 0,
+  "retry-succeeded": 0,
+  "hard-failed": 0,
+  disabled: 0,
+  "not-recorded": 0,
+};
+
 export async function readOrchestrationHealthProjection(
   adapter: DbAdapter,
   teamId = "default",
@@ -120,9 +139,10 @@ export async function readOrchestrationHealthProjection(
   const recentLimit = Math.max(1, opts.recentLimit ?? 5);
   const dependencyImpact = await readDependencyImpact(adapter, teamId);
 
-  const [clarifications, promotionRows] = await Promise.all([
+  const [clarifications, promotionRows, feedbackOutboxRetryDrain] = await Promise.all([
     readActiveClarifications(adapter, teamId),
     readDoneBuildDispatches(adapter, teamId),
+    readFeedbackOutboxRetryDrain(adapter),
   ]);
 
   const needsClarification = clarifications
@@ -139,6 +159,7 @@ export async function readOrchestrationHealthProjection(
   return {
     ok: true,
     generated_at: new Date().toISOString(),
+    feedback_outbox_retry_drain: feedbackOutboxRetryDrain,
     queue_quality: await readQueueQualityProjection(adapter, teamId, dependencyImpact, {
       needsClarification: needsClarification.length,
       promotion: promotion.length,
@@ -149,6 +170,37 @@ export async function readOrchestrationHealthProjection(
       promotion: summarize(promotion, recentLimit),
     },
   };
+}
+
+export async function readFeedbackOutboxRetryDrain(adapter: DbAdapter): Promise<FeedbackOutboxRetryDrainCounters> {
+  const rows = await readArtifactCommentNoise(adapter);
+  const counters = { ...ZERO_FEEDBACK_OUTBOX_RETRY_DRAIN };
+
+  for (const row of rows) {
+    const payload = parseJson(row.payload_json);
+    const routeStatus = parseRouteStatus(payload?.route_status);
+    const state = classifyFeedbackOutboxRetryDrainState(routeStatus);
+    counters[state] += 1;
+  }
+
+  return counters;
+}
+
+function classifyFeedbackOutboxRetryDrainState(
+  routeStatus: ParsedRouteStatus | null,
+): keyof FeedbackOutboxRetryDrainCounters {
+  if (!routeStatus) return "pending";
+  if (routeStatus.visible_state === "not-recorded") return "not-recorded";
+  if (routeStatus.routed === true && routeStatus.dispatch?.dispatch_phid) return "retry-succeeded";
+  if (routeStatus.skipped === "acknowledged" ||
+      routeStatus.skipped === "approval_signal" ||
+      routeStatus.skipped === "question_threaded" ||
+      routeStatus.skipped === "scheduler_unavailable") {
+    return "disabled";
+  }
+  if (routeStatus.retryable === true) return "retryable";
+  if (routeStatus.error || routeStatus.visible_state === "recorded-but-route-failed-with-retry") return "hard-failed";
+  return "pending";
 }
 
 async function readQueueQualityProjection(
@@ -322,11 +374,13 @@ function isNoopAckRoute(routeStatus: ParsedRouteStatus | null): routeStatus is P
 }
 
 interface ParsedRouteStatus {
+  visible_state: string | null;
   route_kind: string | null;
   routed: boolean;
   retryable: boolean;
   target_agent: string | null;
   skipped: string | null;
+  error: { message?: string | null } | null;
   dispatch: { dispatch_phid?: string | null } | null;
   task_triage_id: string | null;
 }
@@ -338,11 +392,15 @@ function parseRouteStatus(value: unknown): ParsedRouteStatus | null {
     ? v.dispatch as { dispatch_phid?: string | null }
     : null;
   return {
+    visible_state: typeof v.visible_state === "string" ? v.visible_state : null,
     route_kind: typeof v.route_kind === "string" ? v.route_kind : null,
     routed: v.routed === true,
     retryable: v.retryable === true,
     target_agent: typeof v.target_agent === "string" ? v.target_agent : null,
     skipped: typeof v.skipped === "string" ? v.skipped : null,
+    error: v.error && typeof v.error === "object" && !Array.isArray(v.error)
+      ? v.error as { message?: string | null }
+      : null,
     dispatch,
     task_triage_id: firstString(v.task_triage_id, v.taskTriageId, v.triage_id, v.triageId),
   };

@@ -409,6 +409,123 @@ describe("orchestration health projection", () => {
     ]);
   });
 
+  it("exposes concise feedback outbox retry drain counters", async () => {
+    await migrateOutputsTables(adapter);
+    await insertArtifact("art:feedback:drain.md", "regina");
+    await insertRawCommentOp({
+      artifact_id: "art:feedback:drain.md",
+      actor: "user:chris",
+      ts: "2026-07-01T15:00:00.000Z",
+      payload: { body: "captured before routing receipt" },
+    });
+    await insertCommentOp({
+      artifact_id: "art:feedback:drain.md",
+      actor: "user:chris",
+      body: "please retry route",
+      reaction: "iterate",
+      route_status: {
+        visible_state: "recorded-but-route-failed-with-retry",
+        route_kind: "substantive_follow_up",
+        routed: false,
+        retryable: true,
+        recorded_op_id: 2,
+        target_agent: "regina",
+        target_agent_raw: "regina",
+        dispatch: null,
+        skipped: null,
+        error: { message: "scheduler unavailable" },
+        updated_at: "2026-07-01T15:01:00.000Z",
+      },
+    });
+    await insertCommentOp({
+      artifact_id: "art:feedback:drain.md",
+      actor: "user:chris",
+      body: "retry now routed",
+      reaction: "iterate",
+      route_status: {
+        visible_state: "recorded+routed",
+        route_kind: "substantive_follow_up",
+        routed: true,
+        retryable: false,
+        recorded_op_id: 3,
+        target_agent: "regina",
+        target_agent_raw: "regina",
+        dispatch: { dispatch_phid: "phid:disp-drained", query_id: "query_drained", to_agent: "regina" },
+        skipped: null,
+        error: null,
+        updated_at: "2026-07-01T15:02:00.000Z",
+      },
+    });
+    await insertCommentOp({
+      artifact_id: "art:feedback:drain.md",
+      actor: "user:chris",
+      body: "hard failure",
+      reaction: "iterate",
+      route_status: {
+        visible_state: "recorded-but-route-failed-with-retry",
+        route_kind: "substantive_follow_up",
+        routed: false,
+        retryable: false,
+        recorded_op_id: 4,
+        target_agent: "regina",
+        target_agent_raw: "regina",
+        dispatch: null,
+        skipped: null,
+        error: { message: "invalid target" },
+        updated_at: "2026-07-01T15:03:00.000Z",
+      },
+    });
+    await insertCommentOp({
+      artifact_id: "art:feedback:drain.md",
+      actor: "user:chris",
+      body: "scheduler disabled",
+      reaction: "iterate",
+      route_status: {
+        visible_state: "recorded-but-route-failed-with-retry",
+        route_kind: "substantive_follow_up",
+        routed: false,
+        retryable: true,
+        recorded_op_id: 5,
+        target_agent: null,
+        target_agent_raw: null,
+        dispatch: null,
+        skipped: "scheduler_unavailable",
+        error: null,
+        updated_at: "2026-07-01T15:04:00.000Z",
+      },
+    });
+    await insertCommentOp({
+      artifact_id: "art:feedback:drain.md",
+      actor: "user:chris",
+      body: "not recorded marker",
+      reaction: "iterate",
+      route_status: {
+        visible_state: "not-recorded",
+        route_kind: "substantive_follow_up",
+        routed: false,
+        retryable: false,
+        recorded_op_id: 6,
+        target_agent: "regina",
+        target_agent_raw: "regina",
+        dispatch: null,
+        skipped: null,
+        error: { message: "comment write failed" },
+        updated_at: "2026-07-01T15:05:00.000Z",
+      },
+    });
+
+    const health = await readOrchestrationHealthProjection(adapter, "default");
+
+    expect(health.feedback_outbox_retry_drain).toEqual({
+      pending: 1,
+      retryable: 1,
+      "retry-succeeded": 1,
+      "hard-failed": 1,
+      disabled: 1,
+      "not-recorded": 1,
+    });
+  });
+
   it("reports zero ready plus held low-confidence rows as underfed, not healthy idle", async () => {
     const held = await insertBacklogItem(adapter, {
       title: "T-ORCH refuel candidate held by confidence",
@@ -468,19 +585,33 @@ async function insertCommentOp(input: {
   task_triage_id?: string;
   route_status: Record<string, unknown>;
 }): Promise<void> {
+  await insertRawCommentOp({
+    artifact_id: input.artifact_id,
+    actor: input.actor,
+    ts: String(input.route_status.updated_at),
+    payload: {
+      body: input.body,
+      reaction: input.reaction,
+      task_triage_id: input.task_triage_id,
+      route_status: input.route_status,
+    },
+  });
+}
+
+async function insertRawCommentOp(input: {
+  artifact_id: string;
+  actor: string;
+  ts: string;
+  payload: Record<string, unknown>;
+}): Promise<void> {
   await adapter.query(
     `INSERT INTO artifact_operations (artifact_id, op_type, actor, ts, payload_json, source_link, idempotency_key)
      VALUES (?, 'comment_recorded', ?, ?, ?, NULL, NULL)`,
     [
       input.artifact_id,
       input.actor,
-      String(input.route_status.updated_at),
-      JSON.stringify({
-        body: input.body,
-        reaction: input.reaction,
-        task_triage_id: input.task_triage_id,
-        route_status: input.route_status,
-      }),
+      input.ts,
+      JSON.stringify(input.payload),
     ],
   );
 }
