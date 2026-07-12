@@ -149,6 +149,132 @@ export interface RemoteSchedulesResponse {
   error?: string;
 }
 
+export type ArtifactDeskStatus =
+  | 'unread'
+  | 'in_review'
+  | 'commented'
+  | 'approved'
+  | 'rejected'
+  | 'shipped'
+  | 'missing'
+  | string;
+
+export interface ArtifactDeskRow {
+  id: string;
+  title: string;
+  subtitle?: string | null;
+  status: ArtifactDeskStatus;
+  relevance_reason?: string | null;
+  needs?: string | null;
+  artifact_ref?: string | null;
+  dispatch_ref?: string | null;
+  task_ref?: string | null;
+  agent_name?: string | null;
+  updated_at?: string | null;
+  source_kind?: string | null;
+  source_path?: string | null;
+  visibility_proof?: {
+    discovered_by?: string;
+    artifact_path_present?: boolean;
+    body_renderable?: boolean;
+  };
+  delivery?: {
+    stable_url?: string | null;
+    copy_text_url?: string | null;
+    download_url?: string | null;
+    media_type?: string | null;
+    freshness?: string | null;
+    body_available?: boolean;
+    body_source?: string | null;
+    body_preview?: string | null;
+    open_url?: string | null;
+  };
+}
+
+export interface ArtifactDeskResponse {
+  ok: boolean;
+  schema_version: 'surfaced-artifacts.v1';
+  rows: ArtifactDeskRow[];
+  count: number;
+  health?: {
+    ok: boolean;
+    event_count: number;
+    events?: Array<{
+      topic: string;
+      severity?: string;
+      subject_id?: string;
+    }>;
+  };
+  recent_flood?: {
+    total_raw_count: number;
+    grouped_count: number;
+    suppressed_from_primary_count: number;
+  };
+}
+
+export interface ArtifactReviewState {
+  artifact_id: string;
+  viewed_at?: string | null;
+  viewed_by?: string | null;
+  approved_at?: string | null;
+  approved_by?: string | null;
+  rejected_at?: string | null;
+  rejected_by?: string | null;
+  shipped_at?: string | null;
+  shipped_by?: string | null;
+}
+
+export interface ArtifactReviewResponse {
+  ok?: boolean;
+  artifact_id?: string;
+  state?: ArtifactReviewState | null;
+  operations_count?: number;
+  comments_count?: number;
+  latest_comment?: ArtifactComment | null;
+  [key: string]: unknown;
+}
+
+export interface ArtifactComment {
+  op_id: number;
+  artifact_id: string;
+  actor: string;
+  body: string;
+  ts: string;
+  route_status?: {
+    visible_state?: string;
+    feedback_status?: string;
+    retryable?: boolean;
+    failure_reason?: string | null;
+  } | null;
+}
+
+export interface ArtifactCommentsResponse {
+  ok: boolean;
+  schema_version: 'artifact.comments.v1';
+  artifact_id: string;
+  comments: ArtifactComment[];
+  count: number;
+  version?: number;
+}
+
+export interface ArtifactMutationReceipt {
+  ok?: boolean;
+  status?: string;
+  code?: string;
+  error?: string;
+  visible_state?: string;
+  compat_status?: string;
+  feedback_status?: string;
+  op_id?: number;
+  recorded_op_id?: number;
+  version?: number;
+  comment?: ArtifactComment | null;
+  dispatch_error?: unknown;
+  dispatch_skipped?: string;
+  blockers?: string[];
+  state?: ArtifactReviewState;
+}
+
 // Agent detail v2 (T-CKPT.agent-v2) — the GET /agents/:name/detail contract.
 export interface AgentDetailTokenSeriesPoint {
   date: string;

@@ -1,6 +1,10 @@
 import type {
   Agent,
   AgentDetailResponse,
+  ArtifactCommentsResponse,
+  ArtifactDeskResponse,
+  ArtifactMutationReceipt,
+  ArtifactReviewResponse,
   AgentsResponse,
   DispatchAttemptLedgerResponse,
   DispatchAttemptLedgerRow,
@@ -271,6 +275,111 @@ export async function fetchAgentDetail(
     throw new Error(`GET /agents/${name}/detail → ${res.status} ${res.statusText}`);
   }
   return (await res.json()) as AgentDetailResponse;
+}
+
+export async function fetchArtifactDesk(
+  manager: string,
+  signal: AbortSignal,
+): Promise<ArtifactDeskResponse> {
+  const data = await getJson<ArtifactDeskResponse>(`${manager}/ops/surfaced-artifacts`, signal);
+  return {
+    ...data,
+    rows: data.rows ?? [],
+    count: data.count ?? data.rows?.length ?? 0,
+  };
+}
+
+export async function fetchArtifactReview(
+  manager: string,
+  artifactId: string,
+  signal: AbortSignal,
+): Promise<ArtifactReviewResponse | null> {
+  const res = await fetch(`${manager}/artifacts/${encodeURIComponent(artifactId)}/review`, { signal });
+  if (res.status === 404) return null;
+  if (!res.ok) {
+    throw new Error(`GET /artifacts/${artifactId}/review -> ${res.status} ${res.statusText}`);
+  }
+  return (await res.json()) as ArtifactReviewResponse;
+}
+
+export async function fetchArtifactComments(
+  manager: string,
+  artifactId: string,
+  signal: AbortSignal,
+): Promise<ArtifactCommentsResponse> {
+  const res = await fetch(`${manager}/artifacts/${encodeURIComponent(artifactId)}/comments`, { signal });
+  if (res.status === 404) {
+    return {
+      ok: false,
+      schema_version: 'artifact.comments.v1',
+      artifact_id: artifactId,
+      comments: [],
+      count: 0,
+    };
+  }
+  if (!res.ok) {
+    throw new Error(`GET /artifacts/${artifactId}/comments -> ${res.status} ${res.statusText}`);
+  }
+  const data = (await res.json()) as ArtifactCommentsResponse;
+  return { ...data, comments: data.comments ?? [], count: data.count ?? data.comments?.length ?? 0 };
+}
+
+export async function postArtifactComment(
+  manager: string,
+  artifactId: string,
+  body: string,
+  actorRef = 'user:chris',
+  signal?: AbortSignal,
+): Promise<ArtifactMutationReceipt> {
+  return postArtifactMutation(manager, artifactId, 'comments', { actor_ref: actorRef, body }, signal);
+}
+
+export async function approveArtifact(
+  manager: string,
+  artifactId: string,
+  actorRef = 'user:chris',
+  signal?: AbortSignal,
+): Promise<ArtifactMutationReceipt> {
+  return postArtifactMutation(manager, artifactId, 'approve', { actor_ref: actorRef }, signal);
+}
+
+export async function shipArtifact(
+  manager: string,
+  artifactId: string,
+  actorRef = 'user:chris',
+  signal?: AbortSignal,
+): Promise<ArtifactMutationReceipt> {
+  return postArtifactMutation(manager, artifactId, 'ship', { actor_ref: actorRef }, signal);
+}
+
+async function postArtifactMutation(
+  manager: string,
+  artifactId: string,
+  action: 'comments' | 'approve' | 'ship',
+  body: Record<string, unknown>,
+  signal?: AbortSignal,
+): Promise<ArtifactMutationReceipt> {
+  const res = await fetch(`${manager}/artifacts/${encodeURIComponent(artifactId)}/${action}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+    signal,
+  });
+  let data: ArtifactMutationReceipt = {};
+  try {
+    data = (await res.json()) as ArtifactMutationReceipt;
+  } catch {
+    data = {};
+  }
+  if (!res.ok || data.ok === false) {
+    return {
+      ...data,
+      ok: false,
+      status: data.status ?? 'failed',
+      error: data.error ?? `${res.status} ${res.statusText}`,
+    };
+  }
+  return data;
 }
 
 export async function fetchDispatchAttemptLedger(

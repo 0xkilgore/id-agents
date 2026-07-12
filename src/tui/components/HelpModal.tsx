@@ -11,6 +11,7 @@ const VIEWS: Group = {
   rows: [
     ['a', 'Agents'],
     ['t', 'Tasks'],
+    ['o', 'Artifacts'],
     ['n', 'News'],
     ['c', 'Calendar'],
     ['h', 'Heartbeats'],

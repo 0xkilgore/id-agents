@@ -11,6 +11,8 @@ export type FooterView =
   | 'calendar'
   | 'heartbeats'
   | 'heartbeat-detail'
+  | 'artifacts'
+  | 'artifact-detail'
   | 'library-agents'
   | 'library-agent-detail'
   | 'library-skills'
@@ -32,6 +34,8 @@ const HAS_BACK: Record<FooterView, boolean> = {
   heartbeats: false,
   'task-detail': true,
   'heartbeat-detail': true,
+  artifacts: true,
+  'artifact-detail': true,
   news: true,
   'news-detail': true,
   'library-agents': true,

@@ -18,12 +18,18 @@ import { LibraryAgentsTable } from './components/LibraryAgentsTable.js';
 import { LibraryAgentDetail } from './components/LibraryAgentDetail.js';
 import { LibrarySkillsTable } from './components/LibrarySkillsTable.js';
 import { LibrarySkillDetail } from './components/LibrarySkillDetail.js';
-import type { Agent, AgentDetailResponse, NewsItem, Schedule, Task, Team } from './api/types.js';
+import { ArtifactDesk } from './components/ArtifactDesk.js';
+import { ArtifactReviewBox, type ArtifactActionState } from './components/ArtifactReviewBox.js';
+import type { Agent, AgentDetailResponse, ArtifactCommentsResponse, ArtifactDeskResponse, ArtifactReviewResponse, NewsItem, Schedule, Task, Team } from './api/types.js';
 import {
+  approveArtifact,
   fetchAgentDetail,
   fetchAgentNews,
   fetchAgentsAllTeams,
   fetchAgentsLatestNewsTs,
+  fetchArtifactComments,
+  fetchArtifactDesk,
+  fetchArtifactReview,
   fetchDispatchAttemptLedger,
   fetchLibraryAgent,
   fetchLibraryAgents,
@@ -34,6 +40,8 @@ import {
   fetchTeams,
   getManagerUrl,
   enqueueAgentDispatch,
+  postArtifactComment,
+  shipArtifact,
   type LibraryAgentDetailResponse,
   type LibraryAgentListResponse,
   type LibrarySkillDetailResponse,
@@ -67,6 +75,8 @@ type View =
   | 'calendar'
   | 'heartbeats'
   | 'heartbeat-detail'
+  | 'artifacts'
+  | 'artifact-detail'
   | 'library-agents'
   | 'library-agent-detail'
   | 'library-skills'
@@ -80,6 +90,7 @@ const DISPATCH_ATTEMPTS_POLL_MS = 5000;
 const TASKS_STALE_AFTER_MS = 15_000;
 const SCHEDULES_POLL_MS = 5000;
 const LIBRARY_POLL_MS = 5000;
+const ARTIFACTS_POLL_MS = 5000;
 const NEWS_COOLDOWN_TICK_MS = 10_000;
 const AGENTS_CHROME_ROWS = 12;
 const NEWS_CHROME_ROWS = 6;
@@ -97,6 +108,7 @@ const HEARTBEATS_CHROME_ROWS = 7;
 // Library tables include a one-line subtitle (the libraryRoot path) on top
 // of the standard list-box chrome, so they need 1 extra row vs Heartbeats.
 const LIBRARY_CHROME_ROWS = 8;
+const ARTIFACTS_CHROME_ROWS = 8;
 const DETAIL_CONTENT_WIDTH = 76;
 const MIN_VISIBLE = 3;
 const SELF_AGENT = 'tui';
@@ -145,6 +157,8 @@ export function App({ staticMode = false }: AppProps = {}): React.ReactElement {
   const [schedWindowStart, setSchedWindowStart] = useState(0);
   const [hbSelectedIndex, setHbSelectedIndex] = useState(0);
   const [hbWindowStart, setHbWindowStart] = useState(0);
+  const [artifactSelectedIndex, setArtifactSelectedIndex] = useState(0);
+  const [artifactWindowStart, setArtifactWindowStart] = useState(0);
   const [libAgentSelectedIndex, setLibAgentSelectedIndex] = useState(0);
   const [libAgentWindowStart, setLibAgentWindowStart] = useState(0);
   const [libSkillSelectedIndex, setLibSkillSelectedIndex] = useState(0);
@@ -352,6 +366,7 @@ export function App({ staticMode = false }: AppProps = {}): React.ReactElement {
   const calendarWindowSize = Math.max(MIN_VISIBLE, rows - CALENDAR_CHROME_ROWS);
   const heartbeatsWindowSize = Math.max(MIN_VISIBLE, rows - HEARTBEATS_CHROME_ROWS);
   const libraryWindowSize = Math.max(MIN_VISIBLE, rows - LIBRARY_CHROME_ROWS);
+  const artifactsWindowSize = Math.max(MIN_VISIBLE, rows - ARTIFACTS_CHROME_ROWS);
   const total = visibleAgents.length;
 
   // Tasks polling
@@ -629,7 +644,13 @@ export function App({ staticMode = false }: AppProps = {}): React.ReactElement {
   const [detailScroll, setDetailScroll] = useState(0);
   const [taskDetailScroll, setTaskDetailScroll] = useState(0);
   const [hbDetailScroll, setHbDetailScroll] = useState(0);
+  const [artifactDetailScroll, setArtifactDetailScroll] = useState(0);
   const [agentDetailScroll, setAgentDetailScroll] = useState(0);
+  const [artifactActionState, setArtifactActionState] = useState<ArtifactActionState>({
+    kind: 'idle',
+    action: null,
+    message: null,
+  });
 
   // AP8 — "dispatch to this agent" composer state (agent-detail view only).
   const [dispatchComposer, setDispatchComposer] = useState<AgentDispatchComposer>({
@@ -692,6 +713,76 @@ export function App({ staticMode = false }: AppProps = {}): React.ReactElement {
     [newsTotal],
   );
 
+  const artifactsFetcher = useCallback(
+    (signal: AbortSignal): Promise<ArtifactDeskResponse> => fetchArtifactDesk(manager, signal),
+    [manager],
+  );
+  const artifactsPoll = usePolling<ArtifactDeskResponse>(
+    artifactsFetcher,
+    ARTIFACTS_POLL_MS,
+    staticMode || (view !== 'artifacts' && view !== 'artifact-detail'),
+    [manager, view],
+  );
+  const artifactRows = artifactsPoll.data?.rows ?? [];
+  const artifactTotal = artifactRows.length;
+  const selectedArtifact = artifactRows[artifactSelectedIndex] ?? null;
+  const selectedArtifactId = selectedArtifact?.id?.startsWith('artifact:')
+    ? selectedArtifact.id.slice('artifact:'.length)
+    : selectedArtifact?.artifact_ref ?? selectedArtifact?.id ?? null;
+
+  const artifactReviewFetcher = useCallback(
+    (signal: AbortSignal): Promise<ArtifactReviewResponse | null> => {
+      if (!selectedArtifactId) return Promise.resolve(null);
+      return fetchArtifactReview(manager, selectedArtifactId, signal);
+    },
+    [manager, selectedArtifactId],
+  );
+  const artifactReviewPoll = usePolling<ArtifactReviewResponse | null>(
+    artifactReviewFetcher,
+    ARTIFACTS_POLL_MS,
+    staticMode || view !== 'artifact-detail' || !selectedArtifactId,
+    [manager, selectedArtifactId ?? '', view],
+  );
+  const artifactCommentsFetcher = useCallback(
+    (signal: AbortSignal): Promise<ArtifactCommentsResponse> => {
+      if (!selectedArtifactId) {
+        return Promise.resolve({
+          ok: false,
+          schema_version: 'artifact.comments.v1',
+          artifact_id: '',
+          comments: [],
+          count: 0,
+        });
+      }
+      return fetchArtifactComments(manager, selectedArtifactId, signal);
+    },
+    [manager, selectedArtifactId],
+  );
+  const artifactCommentsPoll = usePolling<ArtifactCommentsResponse>(
+    artifactCommentsFetcher,
+    ARTIFACTS_POLL_MS,
+    staticMode || view !== 'artifact-detail' || !selectedArtifactId,
+    [manager, selectedArtifactId ?? '', view],
+  );
+
+  useEffect(() => {
+    if (artifactTotal === 0) {
+      if (artifactSelectedIndex !== 0) setArtifactSelectedIndex(0);
+      if (artifactWindowStart !== 0) setArtifactWindowStart(0);
+      return;
+    }
+    const clampedSel = Math.min(artifactSelectedIndex, artifactTotal - 1);
+    if (clampedSel !== artifactSelectedIndex) setArtifactSelectedIndex(clampedSel);
+    const maxStart = Math.max(0, artifactTotal - artifactsWindowSize);
+    let nextStart = artifactWindowStart;
+    if (clampedSel < nextStart) nextStart = clampedSel;
+    if (clampedSel >= nextStart + artifactsWindowSize)
+      nextStart = clampedSel - artifactsWindowSize + 1;
+    if (nextStart > maxStart) nextStart = maxStart;
+    if (nextStart < 0) nextStart = 0;
+    if (nextStart !== artifactWindowStart) setArtifactWindowStart(nextStart);
+  }, [artifactTotal, artifactSelectedIndex, artifactWindowStart, artifactsWindowSize]);
+
   const moveTaskSel = useCallback(
     (delta: number) => {
       if (tasksTotal === 0) return;
@@ -724,6 +815,12 @@ export function App({ staticMode = false }: AppProps = {}): React.ReactElement {
     setView('heartbeats');
   }, []);
 
+  const openArtifacts = useCallback(() => {
+    setArtifactSelectedIndex(0);
+    setArtifactWindowStart(0);
+    setView('artifacts');
+  }, []);
+
   const openHeartbeatDetail = useCallback(() => {
     setHbDetailScroll(0);
     setView('heartbeat-detail');
@@ -746,6 +843,78 @@ export function App({ staticMode = false }: AppProps = {}): React.ReactElement {
       setHbSelectedIndex((idx) => clamp(idx + delta, 0, hbTotal - 1));
     },
     [hbTotal],
+  );
+
+  const moveArtifactSel = useCallback(
+    (delta: number) => {
+      if (artifactTotal === 0) return;
+      setArtifactSelectedIndex((idx) => clamp(idx + delta, 0, artifactTotal - 1));
+    },
+    [artifactTotal],
+  );
+
+  const openArtifactDetail = useCallback(() => {
+    if (!selectedArtifact) return;
+    setArtifactDetailScroll(0);
+    setArtifactActionState({ kind: 'idle', action: null, message: null });
+    setView('artifact-detail');
+  }, [selectedArtifact]);
+
+  const backToArtifacts = useCallback(() => {
+    setView('artifacts');
+  }, []);
+
+  const moveArtifactDetailScroll = useCallback(
+    (delta: number) => {
+      setArtifactDetailScroll((off) => Math.max(0, off + delta));
+    },
+    [],
+  );
+
+  const refreshArtifactDeskNow = useCallback(() => {
+    const ac = new AbortController();
+    void fetchArtifactDesk(manager, ac.signal).catch(() => null);
+  }, [manager]);
+
+  const submitArtifactAction = useCallback(
+    (action: 'comment' | 'approve' | 'ship') => {
+      if (!selectedArtifactId || artifactActionState.kind === 'posting') return;
+      setArtifactActionState({ kind: 'posting', action, message: null });
+      const run =
+        action === 'comment'
+          ? postArtifactComment(manager, selectedArtifactId, 'Reviewed from dashboard durability smoke.')
+          : action === 'approve'
+            ? approveArtifact(manager, selectedArtifactId)
+            : shipArtifact(manager, selectedArtifactId);
+      void run.then((receipt) => {
+        if (receipt.ok === false || receipt.status === 'failed') {
+          setArtifactActionState({
+            kind: 'failed',
+            action,
+            message: receipt.error ?? receipt.code ?? `${action} failed`,
+            receipt,
+          });
+          return;
+        }
+        const opId = receipt.op_id ?? receipt.recorded_op_id;
+        const blocked = receipt.status === 'blocked';
+        setArtifactActionState({
+          kind: blocked ? 'failed' : 'posted',
+          action,
+          message: blocked
+            ? `${action} blocked: ${(receipt.blockers ?? ['blocked']).join(', ')}`
+            : `${action} recorded${opId ? ` op ${opId}` : ''}`,
+          receipt,
+        });
+      }).catch((err: unknown) => {
+        setArtifactActionState({
+          kind: 'failed',
+          action,
+          message: err instanceof Error ? err.message : String(err),
+        });
+      });
+    },
+    [artifactActionState.kind, manager, selectedArtifactId],
   );
 
   const closeDispatchComposer = useCallback(() => {
@@ -1097,6 +1266,7 @@ export function App({ staticMode = false }: AppProps = {}): React.ReactElement {
       }
       if (view === 'agents') {
         if (input === 't') return toggleTasksView();
+        if (input === 'o') return openArtifacts();
         if (input === 'c') return openCalendar();
         if (input === 'h') return openHeartbeats();
         if (input === 'l') return openLibraryAgents();
@@ -1120,6 +1290,7 @@ export function App({ staticMode = false }: AppProps = {}): React.ReactElement {
       if (view === 'tasks') {
         if (input === 'r') return refreshTasksNow();
         if (input === 't') return toggleTasksView();
+        if (input === 'o') return openArtifacts();
         if (input === 'c') return openCalendar();
         if (input === 'h') return openHeartbeats();
         if (input === 'l') return openLibraryAgents();
@@ -1151,6 +1322,7 @@ export function App({ staticMode = false }: AppProps = {}): React.ReactElement {
       if (view === 'calendar') {
         if (input === 'a') return setView('agents');
         if (input === 't') return setView('tasks');
+        if (input === 'o') return openArtifacts();
         if (input === 'h') return openHeartbeats();
         if (input === 'l') return openLibraryAgents();
         if (input === 's') return openLibrarySkills();
@@ -1178,6 +1350,7 @@ export function App({ staticMode = false }: AppProps = {}): React.ReactElement {
       if (view === 'heartbeats') {
         if (input === 'a') return setView('agents');
         if (input === 't') return setView('tasks');
+        if (input === 'o') return openArtifacts();
         if (input === 'c') return openCalendar();
         if (input === 'l') return openLibraryAgents();
         if (input === 's') return openLibrarySkills();
@@ -1202,9 +1375,44 @@ export function App({ staticMode = false }: AppProps = {}): React.ReactElement {
         return;
       }
 
+      if (view === 'artifacts') {
+        if (input === 'a') return setView('agents');
+        if (input === 't') return setView('tasks');
+        if (input === 'c') return openCalendar();
+        if (input === 'h') return openHeartbeats();
+        if (input === 'l') return openLibraryAgents();
+        if (input === 's') return openLibrarySkills();
+        if (input === 'r') return refreshArtifactDeskNow();
+        if (key.leftArrow || key.escape) return setView('agents');
+        if (key.rightArrow) return openArtifactDetail();
+        if (key.upArrow) return moveArtifactSel(-1);
+        if (key.downArrow) return moveArtifactSel(1);
+        if (key.pageUp) return moveArtifactSel(-artifactsWindowSize);
+        if (key.pageDown) return moveArtifactSel(artifactsWindowSize);
+        if (isHomeKey(input)) return setArtifactSelectedIndex(0);
+        if (isEndKey(input)) return setArtifactSelectedIndex(Math.max(0, artifactTotal - 1));
+        return;
+      }
+
+      if (view === 'artifact-detail') {
+        if (input === 'r') return refreshArtifactDeskNow();
+        if (input === 'm') return submitArtifactAction('comment');
+        if (input === 'v') return submitArtifactAction('approve');
+        if (input === 'p') return submitArtifactAction('ship');
+        if (key.leftArrow || key.escape) return backToArtifacts();
+        if (key.upArrow) return moveArtifactDetailScroll(-1);
+        if (key.downArrow) return moveArtifactDetailScroll(1);
+        if (key.pageUp) return moveArtifactDetailScroll(-detailWindowSize);
+        if (key.pageDown) return moveArtifactDetailScroll(detailWindowSize);
+        if (isHomeKey(input)) return setArtifactDetailScroll(0);
+        if (isEndKey(input)) return setArtifactDetailScroll(Number.MAX_SAFE_INTEGER);
+        return;
+      }
+
       if (view === 'library-agents') {
         if (input === 'a') return setView('agents');
         if (input === 't') return setView('tasks');
+        if (input === 'o') return openArtifacts();
         if (input === 'c') return openCalendar();
         if (input === 'h') return openHeartbeats();
         if (input === 's') return openLibrarySkills();
@@ -1233,6 +1441,7 @@ export function App({ staticMode = false }: AppProps = {}): React.ReactElement {
       if (view === 'library-skills') {
         if (input === 'a') return setView('agents');
         if (input === 't') return setView('tasks');
+        if (input === 'o') return openArtifacts();
         if (input === 'c') return openCalendar();
         if (input === 'h') return openHeartbeats();
         if (input === 'l') return openLibraryAgents();
@@ -1420,6 +1629,36 @@ export function App({ staticMode = false }: AppProps = {}): React.ReactElement {
             />
           );
         })()
+      ) : view === 'artifacts' ? (
+        <ArtifactDesk
+          response={artifactsPoll.data ?? null}
+          loading={artifactsPoll.lastUpdated === 0 && !artifactsPoll.error && !staticMode}
+          error={artifactsPoll.error}
+          selectedIndex={artifactSelectedIndex}
+          windowStart={artifactWindowStart}
+          windowSize={artifactsWindowSize}
+        />
+      ) : view === 'artifact-detail' ? (
+        <ArtifactReviewBox
+          artifact={selectedArtifact}
+          review={artifactReviewPoll.data ?? null}
+          comments={artifactCommentsPoll.data?.comments ?? []}
+          loading={
+            (artifactReviewPoll.lastUpdated === 0 || artifactCommentsPoll.lastUpdated === 0) &&
+            !artifactReviewPoll.error &&
+            !artifactCommentsPoll.error
+          }
+          error={artifactReviewPoll.error ?? artifactCommentsPoll.error}
+          positionLabel={
+            artifactTotal > 0
+              ? `artifact ${artifactSelectedIndex + 1} of ${artifactTotal}`
+              : ''
+          }
+          windowSize={detailWindowSize}
+          scrollOffset={artifactDetailScroll}
+          contentWidth={DETAIL_CONTENT_WIDTH}
+          actionState={artifactActionState}
+        />
       ) : view === 'task-detail' ? (
         <TaskDetail
           task={visibleTasks[taskSelectedIndex] ?? null}
