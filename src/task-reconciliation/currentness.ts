@@ -46,6 +46,8 @@ export interface TaskReconciliationSummary {
 
 const DEFAULT_TITLE_MAX = 90;
 const DEFAULT_STALE_AFTER_DAYS = 7;
+const APPROVAL_TASK_NAME_RE = /^artifact-approval-[a-f0-9]{12}$/;
+const APPROVAL_PAYLOAD_SCHEMA_VERSION = "artifact.approval.v1";
 
 export function compactTaskTitle(title: string, maxChars = DEFAULT_TITLE_MAX): TaskTitleAudit {
   const normalized = title.trim().replace(/\s+/g, " ");
@@ -108,6 +110,11 @@ export function taskCurrentness(
     return finish("done", "done", "none", false, null, false, "none", ["task is terminal"], band);
   }
 
+  if (!row.owner && isApprovalFyiTask(row)) {
+    evidence.push("approval-emitted FYI task with canonical artifact.approval.v1 payload");
+    return finish("current", "duplicate_or_noop", "none", false, null, false, "none", evidence, band);
+  }
+
   if (facts.due_iso && facts.due_iso < opts.today) {
     evidence.push(`due ${facts.due_iso} before ${opts.today}`);
     return finish("stale", "stale", "now", true, "past_due", true, "review_stale", evidence, band);
@@ -130,6 +137,32 @@ export function taskCurrentness(
 
   evidence.push("open, assigned, and within currentness threshold");
   return finish("current", "actionable_ready", urgencyForBand(band), false, null, false, "none", evidence, band);
+}
+
+function isApprovalFyiTask(row: TaskRow): boolean {
+  if (!APPROVAL_TASK_NAME_RE.test(row.name)) return false;
+  const payload = parseDescriptionJson(row.description ?? "");
+  if (!payload || typeof payload !== "object") return false;
+  const record = payload as Record<string, unknown>;
+  return (
+    record.schema_version === APPROVAL_PAYLOAD_SCHEMA_VERSION &&
+    typeof record.artifact_id === "string" &&
+    !!record.artifact_id &&
+    typeof record.op_id === "number" &&
+    !!record.reviewer &&
+    typeof record.reviewer === "object" &&
+    typeof record.approval_state === "string"
+  );
+}
+
+function parseDescriptionJson(description: string): unknown | null {
+  const match = description.match(/```json\s*([\s\S]*?)```/);
+  if (!match) return null;
+  try {
+    return JSON.parse(match[1] ?? "");
+  } catch {
+    return null;
+  }
 }
 
 export function summarizeTaskReconciliation(

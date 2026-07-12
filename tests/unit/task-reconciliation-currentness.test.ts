@@ -23,6 +23,30 @@ const ROW: TaskRow = {
   track: "(unassigned)",
 };
 
+function approvalDescription(overrides: Record<string, unknown> = {}): string {
+  return [
+    "# Approval-emitted task",
+    "",
+    "```json",
+    JSON.stringify(
+      {
+        schema_version: "artifact.approval.v1",
+        artifact_id: "art-approval-fyi",
+        reviewer: { kind: "human", id: "chris", label: "Chris" },
+        approval_state: "approved",
+        source_surface: "/ops/artifacts/art-approval-fyi",
+        approved_at: "2026-07-08T14:00:00.000Z",
+        op_id: 42,
+        approval_note: null,
+        ...overrides,
+      },
+      null,
+      2,
+    ),
+    "```",
+  ].join("\n");
+}
+
 describe("task reconciliation currentness", () => {
   it("compacts display titles to <=90 chars while retaining the full title in audit", () => {
     const title = compactTaskTitle(ROW.title);
@@ -64,6 +88,71 @@ describe("task reconciliation currentness", () => {
     });
   });
 
+  it("demotes approval-emitted FYI rows so they do not inflate Needs Chris", () => {
+    const facts = taskReconciliationFacts(
+      {
+        ...ROW,
+        name: "artifact-approval-123456abcdef",
+        title: "Artifact approved: art-approval-fyi by Chris",
+        description: approvalDescription(),
+        owner: null,
+      },
+      { today: "2026-07-08", nowEpochSeconds: 1783523200 },
+    );
+
+    expect(facts.currentness).toMatchObject({
+      state: "current",
+      bucket: "duplicate_or_noop",
+      urgency: "none",
+      stale: false,
+      needs_chris: false,
+      proposed_action: "none",
+    });
+    expect(facts.currentness.evidence).toContain(
+      "approval-emitted FYI task with canonical artifact.approval.v1 payload",
+    );
+  });
+
+  it("preserves unowned approval-looking rows without the canonical payload as real owner asks", () => {
+    const facts = taskReconciliationFacts(
+      {
+        ...ROW,
+        name: "artifact-approval-123456abcdef",
+        title: "Approval needed for follow-up artifact",
+        description: "Please review this real approval request.",
+        owner: null,
+      },
+      { today: "2026-07-08", nowEpochSeconds: 1783523200 },
+    );
+
+    expect(facts.currentness).toMatchObject({
+      state: "needs_chris",
+      bucket: "needs_approval",
+      needs_chris: true,
+      proposed_action: "assign_owner",
+    });
+  });
+
+  it("preserves claimed approval tasks as normal actionable work", () => {
+    const facts = taskReconciliationFacts(
+      {
+        ...ROW,
+        name: "artifact-approval-123456abcdef",
+        title: "Artifact approved: art-approval-fyi by Chris",
+        description: approvalDescription(),
+        owner: "roger",
+      },
+      { today: "2026-07-08", nowEpochSeconds: 1783523200 },
+    );
+
+    expect(facts.currentness).toMatchObject({
+      state: "current",
+      bucket: "actionable_ready",
+      needs_chris: false,
+      proposed_action: "none",
+    });
+  });
+
   it("marks stale doing tasks as blocked_or_failed", () => {
     const facts = taskReconciliationFacts(
       { ...ROW, status: "doing", updated_at: 1782319000 },
@@ -83,6 +172,14 @@ describe("task reconciliation currentness", () => {
       { ...ROW, id: "ready", name: "ready", title: "Ready due:2026-07-09", updated_at: 1783523000 },
       { ...ROW, id: "stale", name: "stale", title: "Past due due:2026-07-01" },
       { ...ROW, id: "approval", name: "approval", owner: null, title: "Needs owner" },
+      {
+        ...ROW,
+        id: "approval-fyi",
+        name: "artifact-approval-123456abcdef",
+        owner: null,
+        title: "Artifact approved: art-approval-fyi by Chris",
+        description: approvalDescription(),
+      },
       { ...ROW, id: "blocked", name: "blocked", status: "doing", updated_at: 1782319000 },
       { ...ROW, id: "done", name: "done", status: "done", completed_at: 1783523000 },
     ];
@@ -95,7 +192,7 @@ describe("task reconciliation currentness", () => {
       stale: 1,
       blocked_or_failed: 1,
       done: 1,
-      duplicate_or_noop: 0,
+      duplicate_or_noop: 1,
     });
   });
 });
