@@ -335,6 +335,58 @@ describe("planAdmission — per-item guardrails", () => {
     expect(p.skipped[0].metadata?.code).toBe("single_writer_lane_busy");
   });
 
+  it("does not put coordinator-only or artifact-only dispatches in the exclusive repo write lane", () => {
+    const p = planAdmission(
+      [
+        item({ item_id: "coordinator", title: "coordinate backend work", risk_class: "routine", write_scope: [] }),
+        item({ item_id: "artifact", title: "write handoff artifact", risk_class: "routine", write_scope: [] }),
+        item({ item_id: "repo-build", write_scope: ["repo/kapelle"] }),
+      ],
+      ctx({ active_write_scopes: new Set(["repo/kapelle"]), admit_limit: 5 }),
+      cfg,
+    );
+
+    expect(p.admit.map((i) => i.item_id)).toEqual(["coordinator", "artifact"]);
+    expect(p.skipped).toEqual([
+      expect.objectContaining({
+        item_id: "repo-build",
+        action: "skipped",
+        reason: "single-writer lane busy: repo/kapelle",
+      }),
+    ]);
+  });
+
+  it("requires later-declared repo mutation intent to pass lane admission before writing", () => {
+    const artifactOnly = item({
+      item_id: "artifact-only",
+      title: "draft output summary",
+      risk_class: "routine",
+      write_scope: [],
+    });
+    const declaresMutation = { ...artifactOnly, write_scope: ["repo/kapelle"] };
+
+    const artifactPlan = planAdmission(
+      [artifactOnly],
+      ctx({ active_write_scopes: new Set(["repo/kapelle"]) }),
+      cfg,
+    );
+    expect(artifactPlan.admit.map((i) => i.item_id)).toEqual(["artifact-only"]);
+
+    const mutationPlan = planAdmission(
+      [declaresMutation],
+      ctx({ active_write_scopes: new Set(["repo/kapelle"]) }),
+      cfg,
+    );
+    expect(mutationPlan.admit).toHaveLength(0);
+    expect(mutationPlan.skipped).toEqual([
+      expect.objectContaining({
+        item_id: "artifact-only",
+        action: "skipped",
+        reason: "single-writer lane busy: repo/kapelle",
+      }),
+    ]);
+  });
+
   it("does not enforce the token reference per-item across the tick", () => {
     const c = { ...cfg, daily_token_ceiling: 100 };
     const a = item({ item_id: "a", token_estimate: 60 });
