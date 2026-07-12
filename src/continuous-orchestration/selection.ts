@@ -9,13 +9,24 @@ import type { BacklogItem } from "./types.js";
 export const NO_LANE_KEY = "∅"; // ∅
 
 /**
- * The lane an item belongs to, identified by its write_scope. Items that write
- * the same scope set are the same lane (a build dispatch's single-writer unit);
- * scope-less items share one bucket. Stable: scopes are sorted so ordering can't
- * make two equal scope sets look distinct.
+ * The lane an item belongs to, identified by its repo/write_scope. Pool builds
+ * late-bind write_scope to a concrete `/.worktrees/...` path when they fire;
+ * lane accounting must collapse those paths back to the repo root so stale
+ * duplicate rows cannot look like fresh distinct lane fuel.
+ *
+ * Items that write the same normalized scope set are the same lane; scope-less
+ * items share one bucket. Stable: scopes are sorted so ordering can't make two
+ * equal scope sets look distinct.
  */
 export function laneKeyOf(item: BacklogItem): string {
-  return item.write_scope.length ? [...item.write_scope].sort().join("|") : NO_LANE_KEY;
+  return item.write_scope.length ? item.write_scope.map(normalizeLaneScope).sort().join("|") : NO_LANE_KEY;
+}
+
+function normalizeLaneScope(scope: string): string {
+  const worktreeMarker = "/.worktrees/";
+  const worktreeAt = scope.indexOf(worktreeMarker);
+  if (worktreeAt >= 0) return scope.slice(0, worktreeAt);
+  return scope;
 }
 
 /** Order READY candidates highest-value first. Stable + deterministic. */

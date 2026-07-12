@@ -97,6 +97,37 @@ describe("selectAutoPromotions — floor trigger", () => {
 });
 
 describe("selectAutoPromotions — lane coverage first", () => {
+  it("counts pool worktree scopes by repo so stale duplicate ready rows are not fresh lane fuel", () => {
+    const ready = [
+      item({
+        item_id: "stale-worktree-a",
+        readiness_state: "ready",
+        write_scope: ["/repo/kapelle/.worktrees/backend-a"],
+        last_dispatch_phid: "phid:disp-stale-a",
+      }),
+      item({
+        item_id: "stale-worktree-b",
+        readiness_state: "ready",
+        write_scope: ["/repo/kapelle/.worktrees/backend-b"],
+        last_dispatch_phid: "phid:disp-stale-b",
+      }),
+    ];
+    const needsReview = [
+      item({
+        item_id: "fresh-other-repo",
+        write_scope: ["/repo/id-agents"],
+        approved_by: "maestra",
+        flesh_confidence: 0.65,
+      }),
+    ];
+
+    const plan = selectAutoPromotions(needsReview, ready, { floor: 2, minLanes: 2, maxPerPass: 1 });
+
+    expect(plan.before).toEqual({ build_ready: 2, build_lanes: 1 });
+    expect(plan.triggered).toBe(true);
+    expect(plan.promote.map((p) => p.item_id)).toEqual(["fresh-other-repo"]);
+  });
+
   it("prefers candidates that introduce a NEW write-scope to meet minLanes", () => {
     const ready = [item({ readiness_state: "ready", write_scope: ["a"] })]; // lanes: {a}
     // Many same-lane (a) high-confidence + a couple new-lane (b, c) lower-confidence.

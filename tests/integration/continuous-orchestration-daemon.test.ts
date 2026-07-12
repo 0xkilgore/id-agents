@@ -687,6 +687,54 @@ describe("daemon — dry-run vs live", () => {
     expect(res.body.auto_promote_health.summary).toMatch(/no needs_review candidates/);
   });
 
+  it("status auto-promote health counts pool worktree duplicates as one repo/write-scope lane", async () => {
+    const staleA = await seedReady(adapter, {
+      title: "stale duplicate pool row A",
+      write_scope: ["/repo/kapelle/.worktrees/backend-a"],
+    });
+    const staleB = await seedReady(adapter, {
+      title: "stale duplicate pool row B",
+      write_scope: ["/repo/kapelle/.worktrees/backend-b"],
+    });
+    await adapter.query(
+      `UPDATE orchestration_backlog_item
+         SET last_dispatch_phid = $1
+       WHERE item_id IN ($2, $3)`,
+      ["phid:disp-stale", staleA.item_id, staleB.item_id],
+    );
+    await seedApprovedReview(adapter, {
+      title: "fresh distinct repo fuel",
+      write_scope: ["/repo/id-agents"],
+    });
+
+    const { app, daemon } = mountStatusApp(adapter, {
+      dry_run: true,
+      auto_flesh_enabled: true,
+      auto_promote_enabled: true,
+      auto_promote_floor: 2,
+      auto_promote_min_lanes: 2,
+      auto_promote_max_per_tick: 1,
+    });
+    await daemon.setMode("running");
+
+    const res = await callApp(app, "/orchestration/status");
+
+    expect(res.status).toBe(200);
+    expect(res.body.auto_promote_health).toMatchObject({
+      below_floor: false,
+      below_lanes: true,
+      triggered: true,
+      promoted_count: 1,
+      lanes: {
+        build_ready: 2,
+        build_ready_lanes: 1,
+        ready_lane_keys: ["/repo/kapelle"],
+        candidate_lane_keys: ["/repo/id-agents"],
+      },
+    });
+    expect(res.body.flesh.auto_promote.health.lanes).toEqual(res.body.auto_promote_health.lanes);
+  });
+
   it("status exposes admissible_now separately from raw ready with ready block reasons", async () => {
     await seedReady(adapter, { title: "admissible now", write_scope: ["repo/open"] });
 
