@@ -45,7 +45,7 @@ import { readRuntimeMixDrift, type RuntimeMixDrift } from "../model-policy/runti
 
 /** Dispatch/effective statuses that mean the work is finished — its write-scope
  *  lock can be released. Mirrors dispatch terminal states plus recovery moot. */
-const TERMINAL_DISPATCH_STATUSES = new Set(["done", "failed", "cancelled", "moot"]);
+const TERMINAL_DISPATCH_STATUSES = new Set(["done", "failed", "failed_needs_operator", "cancelled", "moot"]);
 
 /** A pool an item routes to (resolved from its track). */
 export interface ResolvedPool {
@@ -441,12 +441,12 @@ export class ContinuousOrchestrationDaemon {
     const killSwitch = this.killSwitchActive();
 
     // COMPLETION RECONCILIATION + REAPER — the missing half of the loop. Release
-    // the write-scope lock of any in_flight item whose dispatch has terminated
-    // (or is stuck unresolvable past the stale window). MUST run BEFORE
+    // the write-scope lock of any already-dispatched item whose dispatch has
+    // terminated. The stale reaper remains limited to in_flight rows. MUST run BEFORE
     // readInFlight so the freed lanes are admissible THIS tick — otherwise a
     // fired item holds its lock forever and the lanes strangle after
     // ~max_in_flight fires (the overnight self-strangle this fixes).
-    const reconcileDecisions = await this.reconcileInFlight(nowMs, config.dry_run);
+    const reconcileDecisions = await this.reconcileDispatchedItems(nowMs, config.dry_run);
 
     const { view: usage, daily_tokens_used } = await this.deps.readUsage();
     const { count: in_flight, active_write_scopes } = await this.deps.readInFlight();
@@ -1069,15 +1069,17 @@ export class ContinuousOrchestrationDaemon {
 
   /**
    * COMPLETION RECONCILIATION + STALE REAPER — the missing half of the loop.
-   * Releases the write-scope lock of in_flight items whose dispatch has finished.
+   * Releases the write-scope lock of already-dispatched items whose dispatch has finished.
    *
-   * Per in_flight backlog item:
+   * Per queued/in_flight backlog item:
    *  - dispatch TERMINAL (done/failed/cancelled) → release immediately:
    *    done→done, cancelled→cancelled, failed→needs_review (a human/approval
    *    gate re-promotes rather than the loop auto-retrying a failure).
-   *  - dispatch UNRESOLVABLE (missing row / null phid) AND stuck past
-   *    stale_in_flight_ms → reaper releases it to needs_review (self-heals
-   *    missed completions, pruned rows, daemon restarts).
+   *  - in_flight dispatch UNRESOLVABLE (missing row / null phid) AND stuck past
+   *    stale_in_flight_ms → reaper releases it to needs_review (self-heals missed
+   *    completions, pruned rows, daemon restarts).
+   *  - queued dispatch UNRESOLVABLE → LEFT ALONE: without clear dispatch terminal
+   *    evidence, preserving it avoids a duplicate re-fire.
    *  - dispatch resolvable but NON-terminal (active/queued) → LEFT ALONE: the
    *    scheduler owns its recovery; reaping a live build would double-fire.
    *
@@ -1085,11 +1087,18 @@ export class ContinuousOrchestrationDaemon {
    * tick. Dry-run mirrors the refuel posture: compute + log "would_reconcile",
    * mutate nothing.
    */
-  private async reconcileInFlight(nowMs: number, dryRun: boolean): Promise<DecisionRecord[]> {
-    const items = await listBacklogByState(this.deps.adapter, {
-      team_id: this.teamId,
-      state: "in_flight",
-    });
+  private async reconcileDispatchedItems(nowMs: number, dryRun: boolean): Promise<DecisionRecord[]> {
+    const [queuedItems, inFlightItems] = await Promise.all([
+      listBacklogByState(this.deps.adapter, {
+        team_id: this.teamId,
+        state: "queued",
+      }),
+      listBacklogByState(this.deps.adapter, {
+        team_id: this.teamId,
+        state: "in_flight",
+      }),
+    ]);
+    const items = [...queuedItems, ...inFlightItems];
     if (items.length === 0) return [];
 
     const phids = items.map((i) => i.last_dispatch_phid).filter((p): p is string => !!p);
@@ -1125,7 +1134,7 @@ export class ContinuousOrchestrationDaemon {
         // above, which IS terminal) — leave a live, non-moot clarification
         // in_flight indefinitely and let that signal (or the eventual
         // manager resume) be what moves it, never this staleness window.
-      } else {
+      } else if (item.readiness_state === "in_flight") {
         // Non-terminal: either RESOLVABLE-but-stuck (the dispatch is still
         // in_flight/queued because its worker died, was killed, or is parked,
         // and the scheduler isn't recovering it) OR UNRESOLVABLE (pruned/

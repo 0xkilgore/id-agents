@@ -58,6 +58,28 @@ async function seedInFlight(
   return (await getBacklogItem(adapter, item.item_id))!;
 }
 
+/** Insert a ready item then move it to queued with a dispatch phid. This covers
+ *  the already-dispatched/pre-run handoff where the scheduler row may terminally
+ *  close before the backlog item ever flips to in_flight. */
+async function seedQueued(
+  over: Partial<BacklogItem> & { dispatch_phid?: string | null } = {},
+): Promise<BacklogItem> {
+  const item = await insertBacklogItem(adapter, {
+    title: over.title ?? "queued work",
+    to_agent: over.to_agent ?? "roger",
+    dispatch_body: over.dispatch_body ?? "do queued X",
+    readiness_state: "ready",
+    risk_class: "build",
+    priority: over.priority ?? 5,
+    write_scope: over.write_scope ?? ["repoX"],
+    token_estimate: 0,
+  });
+  await setItemState(adapter, item.item_id, "queued", {
+    dispatch_phid: over.dispatch_phid ?? `phid:disp-${item.item_id}`,
+  });
+  return (await getBacklogItem(adapter, item.item_id))!;
+}
+
 /** Backdate an item's updated_at so the daemon's injected clock can age it past
  *  the stale window deterministically (setItemState stamps real wall-clock). */
 async function backdateUpdatedAt(itemId: string, iso: string) {
@@ -120,6 +142,50 @@ function makeDaemon(over: {
 }
 
 describe("completion reconciliation — terminal dispatch releases the lock", () => {
+  it("already-dispatched queued rows close when their dispatch is terminal done/failed_needs_operator", async () => {
+    const done = await seedQueued({ dispatch_phid: "phid:disp-queued-done" });
+    const failed = await seedQueued({ dispatch_phid: "phid:disp-queued-failed-needs-operator" });
+    await seedDispatch("phid:disp-queued-done", "done");
+    await seedDispatch("phid:disp-queued-failed-needs-operator", "failed_needs_operator");
+
+    const { daemon, fired } = makeDaemon();
+    const tick = await daemon.runTick();
+
+    expect(tick.reconciled).toBe(2);
+    expect((await getBacklogItem(adapter, done.item_id))!.readiness_state).toBe("done");
+    expect((await getBacklogItem(adapter, failed.item_id))!.readiness_state).toBe("needs_review");
+    expect(fired.map((i) => i.item_id)).not.toContain(done.item_id);
+    expect(fired.map((i) => i.item_id)).not.toContain(failed.item_id);
+    expect(await listBacklogByState(adapter, { state: "queued" })).toHaveLength(0);
+  });
+
+  it("preserves queued and in_flight rows whose dispatch is still active", async () => {
+    const queued = await seedQueued({ dispatch_phid: "phid:disp-still-queued" });
+    const inFlight = await seedInFlight({ dispatch_phid: "phid:disp-still-in-flight" });
+    await seedDispatch("phid:disp-still-queued", "queued");
+    await seedDispatch("phid:disp-still-in-flight", "in_flight");
+    await backdateUpdatedAt(inFlight.item_id, new Date(BASE + 29 * 60_000).toISOString());
+
+    const { daemon } = makeDaemon({ config: { stale_in_flight_ms: 30 * 60_000 }, nowMs: BASE + 31 * 60_000 });
+    const tick = await daemon.runTick();
+
+    expect(tick.reconciled).toBe(0);
+    expect((await getBacklogItem(adapter, queued.item_id))!.readiness_state).toBe("queued");
+    expect((await getBacklogItem(adapter, inFlight.item_id))!.readiness_state).toBe("in_flight");
+  });
+
+  it("preserves queued rows waiting on needs_input/clarification", async () => {
+    const item = await seedQueued({ dispatch_phid: "phid:disp-queued-needs-input" });
+    await seedDispatch("phid:disp-queued-needs-input", "needs_clarification");
+    await backdateUpdatedAt(item.item_id, new Date(BASE).toISOString());
+
+    const { daemon } = makeDaemon({ config: { stale_in_flight_ms: 30 * 60_000 }, nowMs: BASE + 31 * 60_000 });
+    const tick = await daemon.runTick();
+
+    expect(tick.reconciled).toBe(0);
+    expect((await getBacklogItem(adapter, item.item_id))!.readiness_state).toBe("queued");
+  });
+
   it("done → done, failed → needs_review, cancelled → cancelled", async () => {
     const done = await seedInFlight({ dispatch_phid: "phid:disp-done" });
     const failed = await seedInFlight({ dispatch_phid: "phid:disp-failed" });
