@@ -352,6 +352,18 @@ function responseErrorMessage(payload: unknown): string | null {
   return attemptStringField(rec.error) ?? attemptStringField(rec.message);
 }
 
+function dispatchAttemptVisibleStatus(input: {
+  route: "/talk-to" | "/news-to";
+  ok: boolean;
+  fallback_used: boolean;
+  fallback_ok: boolean | null;
+}): "sent" | "failed" | "fallback sent" | "fallback failed" {
+  if (input.route === "/news-to" && input.fallback_used) {
+    return input.fallback_ok === true ? "fallback sent" : "fallback failed";
+  }
+  return input.ok ? "sent" : "failed";
+}
+
 function attemptStringField(value: unknown): string | null {
   return typeof value === 'string' && value.length > 0 ? value : null;
 }
@@ -3729,6 +3741,11 @@ export class AgentManagerDb {
 
     res.once("finish", () => {
       const metadata = extractDispatchAttemptMetadata(body);
+      const createdAt = new Date().toISOString();
+      const ok = res.statusCode >= 200 && res.statusCode < 300;
+      const error = res.statusCode >= 400
+        ? responseErrorMessage(responseJson) ?? res.statusMessage ?? null
+        : null;
       void recordDispatchAttempt(this.db.adapter, {
         team_id: teamId,
         route,
@@ -3738,12 +3755,34 @@ export class AgentManagerDb {
         original_dispatch_id: metadata.original_dispatch_id,
         subject: metadata.subject,
         status_code: res.statusCode,
-        ok: res.statusCode >= 200 && res.statusCode < 300,
-        error: res.statusCode >= 400
-          ? responseErrorMessage(responseJson) ?? res.statusMessage ?? null
-          : null,
+        ok,
+        error,
         response_json: responseJson,
-        created_at: new Date().toISOString(),
+        created_at: createdAt,
+      }).then((row) => {
+        const visible = {
+          event: "dispatch_attempt_ledger",
+          timestamp: createdAt,
+          target_agent: metadata.to_agent,
+          path: route,
+          status: dispatchAttemptVisibleStatus({
+            route,
+            ok,
+            fallback_used: row.fallback_used,
+            fallback_ok: row.fallback_ok,
+          }),
+          status_code: res.statusCode,
+          fallback_used: row.fallback_used,
+          fallback_ok: row.fallback_ok,
+          original_query_id: metadata.original_query_id,
+          original_dispatch_id: metadata.original_dispatch_id,
+          from_actor: metadata.from_actor,
+          subject: metadata.subject,
+          error,
+        };
+        const line = `[Manager] dispatch attempt ledger ${JSON.stringify(visible)}`;
+        console.log(line);
+        this.managerLog(line);
       }).catch((err) => {
         console.warn(
           "[Manager] dispatch attempt ledger write failed:",
