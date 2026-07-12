@@ -243,6 +243,7 @@ export type ReadyAdmissionBlockerCategory =
   | "capacity_gate"
   | "lane_eligibility"
   | "runtime_unavailable"
+  | "retry_safety"
   | "dispatch_admission"
   | "route_sync"
   | "stale_ready_floor";
@@ -366,6 +367,8 @@ function readyAdmissionBlockerCategory(code: string): ReadyAdmissionBlockerCateg
     case "target_unhealthy":
     case "provider_runtime_mismatch":
       return "runtime_unavailable";
+    case "duplicate_dispatch_retry_required":
+      return "retry_safety";
     case "missing_dispatch_target":
       return "dispatch_admission";
     case "clarification_blocker":

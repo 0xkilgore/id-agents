@@ -777,6 +777,94 @@ describe("daemon — dry-run vs live", () => {
     expect(blockedSum).toBe(res.body.counts.ready - res.body.counts.admissible_now);
   });
 
+  it("status preserves queue-quality blocker labels used by /ops", async () => {
+    await insertBacklogItem(adapter, {
+      title: "pending dependency",
+      logical_key: "dep-pending-for-ops",
+      readiness_state: "draft",
+      risk_class: "build",
+    });
+    await seedReady(adapter, {
+      title: "dependency blocked ready",
+      dependencies: ["dep-pending-for-ops"],
+      write_scope: ["repo/dependency"],
+    });
+    const retryGuarded = await seedReady(adapter, {
+      title: "duplicate retry guard",
+      write_scope: ["repo/retry"],
+    });
+    await adapter.query(
+      `UPDATE orchestration_backlog_item
+         SET last_dispatch_phid = $1
+       WHERE item_id = $2`,
+      ["phid:disp-already-fired", retryGuarded.item_id],
+    );
+    await seedReady(adapter, {
+      title: "pool at capacity",
+      track: "T-FULL",
+      to_agent: null,
+      write_scope: ["repo/pool-full"],
+    });
+    await seedAgent(adapter, "substrate-orch-codex", "running", "codex");
+    await seedReady(adapter, {
+      title: "runtime mismatch",
+      to_agent: "substrate-orch-codex",
+      provider: "anthropic",
+      runtime: "claude-code-cli",
+      write_scope: ["repo/runtime"],
+    });
+
+    const pools: PoolRouting = {
+      poolForItem: (item) =>
+        item.track === "T-FULL"
+          ? { pool_id: "full", repo_root: "/repo/full", max_parallel: 0, members: ["substrate-orch-codex"] }
+          : null,
+      availableBuilders: (pool) => pool.members,
+      allocateWorktree: async ({ agent, item, pool }) => ({
+        path: `${pool.repo_root}/.worktrees/${agent}-${item.item_id.slice(-6)}`,
+        branch: `build/${agent}-${item.item_id.slice(-6)}`,
+        lease_id: null,
+      }),
+    };
+    const { app, daemon } = mountStatusApp(
+      adapter,
+      {
+        dry_run: true,
+        auto_flesh_enabled: false,
+        auto_promote_enabled: false,
+        max_in_flight: 20,
+        max_new_per_tick: 20,
+      },
+      {
+        pools,
+        resolveAgentRuntimes: (names) => getAgentRuntimeMap(adapter, names),
+      },
+    );
+    await daemon.setMode("running");
+
+    const res = await callApp(app, "/orchestration/status");
+
+    expect(res.status).toBe(200);
+    expect(res.body.counts.ready).toBe(4);
+    expect(res.body.counts.admissible_now).toBe(0);
+    expect(res.body.ready_admission.blocker_counts).toEqual(
+      expect.arrayContaining([
+        { code: "blocked_dependency", category: "lane_eligibility", count: 1 },
+        { code: "duplicate_dispatch_retry_required", category: "retry_safety", count: 1 },
+        { code: "pool_capacity_full", category: "capacity_gate", count: 1 },
+        { code: "provider_runtime_mismatch", category: "runtime_unavailable", count: 1 },
+      ]),
+    );
+    expect(res.body.ready_admission.non_admitted).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ code: "blocked_dependency", action: "skipped" }),
+        expect.objectContaining({ code: "duplicate_dispatch_retry_required", action: "held" }),
+        expect.objectContaining({ code: "pool_capacity_full", action: "held" }),
+        expect.objectContaining({ code: "provider_runtime_mismatch", action: "held" }),
+      ]),
+    );
+  });
+
   it("status explains below-floor auto-promote blocked by safety risk", async () => {
     for (let i = 0; i < 8; i++) {
       await seedReady(adapter, { title: `ready ${i}`, write_scope: [`repo/ready-${i}`] });
