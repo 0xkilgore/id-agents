@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { promises as fsp } from "node:fs";
 import path from "node:path";
 import type { DbAdapter } from "../db/db-adapter.js";
+import { artifactIdFromPath } from "../outputs/storage.js";
 import { canonicalProjectName, projectAliases } from "./read-model.js";
 import type {
   ProjectRootRegistration,
@@ -332,21 +333,26 @@ async function scanProjectRootFiles(
 
 function artifactRowToSource(row: ArtifactRow, project: string, dispatchId: string | null): ProjectSourceRow {
   const ext = path.extname(row.abs_path || row.basename).toLowerCase();
+  const stableArtifactId = canonicalArtifactIdForProjectSource(row);
   return {
-    id: `artifact:${row.artifact_id}`,
+    id: `artifact:${stableArtifactId}`,
     group: groupForPath(row.abs_path, row.tag, row.title),
     title: cleanTitle(row.title) ?? titleFromBasename(row.basename),
     source: { kind: "artifact_catalog", path: row.abs_path, proof: "artifacts.abs_path" },
     dates: { created_at: row.produced_at, modified_at: row.updated_at ?? row.source_mtime },
     ownership: { project, agent: row.agent },
-    links: { dispatch_id: dispatchId, artifact_id: row.artifact_id, query_id: null },
+    links: { dispatch_id: dispatchId, artifact_id: stableArtifactId, query_id: null },
     preview: previewForExt(ext, row.media_type),
     read: readState(row),
     freshness: row.availability === "missing"
       ? { status: "missing", reason: "catalog availability is missing" }
       : { status: "fresh", reason: "cataloged artifact source" },
-    open: { href: `/artifacts/${encodeURIComponent(row.artifact_id)}`, fallback: "artifact" },
+    open: { href: `/artifacts/${encodeURIComponent(stableArtifactId)}`, fallback: "artifact" },
   };
+}
+
+function canonicalArtifactIdForProjectSource(row: Pick<ArtifactRow, "artifact_id" | "abs_path">): string {
+  return row.abs_path?.trim() ? artifactIdFromPath(row.abs_path.trim()) : row.artifact_id;
 }
 
 function queryRowToSource(row: QueryRow, project: string, dispatchId: string | null): ProjectSourceRow {

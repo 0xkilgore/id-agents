@@ -69,6 +69,9 @@ export async function buildArtifactDetail(
   ]);
   const draft = parseDraftPayload(draftRow);
   let fallbackPath = ref.decodedPath;
+  if (!catalog && !fallbackPath && /^art-[a-f0-9]{16}$/.test(ref.artifactId)) {
+    fallbackPath = await findCatalogPathByStableArtifactId(adapter, ref.artifactId).catch(() => null);
+  }
   // query:<query_id>:<basename> / dispatch:<dispatch_phid> ids are synthesized
   // read-time by readArtifacts (GET /artifacts) from the queries/dispatch
   // tables and never written to the `artifacts` catalog table, so the direct
@@ -189,6 +192,17 @@ export async function buildArtifactDetail(
     },
     draft,
   };
+}
+
+async function findCatalogPathByStableArtifactId(adapter: DbAdapter, artifactId: string): Promise<string | null> {
+  const { rows } = await adapter.query<{ abs_path: string | null }>(
+    `SELECT abs_path FROM artifacts WHERE abs_path IS NOT NULL`,
+  );
+  for (const row of rows) {
+    const absPath = row.abs_path?.trim();
+    if (absPath && artifactIdFromPath(absPath) === artifactId) return absPath;
+  }
+  return null;
 }
 
 function artifactDetailVersionKey(input: {

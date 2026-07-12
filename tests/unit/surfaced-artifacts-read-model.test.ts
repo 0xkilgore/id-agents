@@ -234,6 +234,57 @@ describe("buildSurfacedArtifacts", () => {
     });
   });
 
+  it("coalesces filesystem, agent-done, manual, and delivery-log rows by stable path artifact id", async () => {
+    const sharedPath = "/Users/kilgore/Dropbox/Code/kapelle/output/2026-07-07-stable-artifact-id.md";
+    const stableArtifactId = artifactIdForSurfacingPath(sharedPath);
+    files.set(sharedPath, `---
+project: kapelle
+---
+
+# Stable Artifact ID
+
+One local file observed through multiple local-first sources.
+`);
+
+    for (const source of ["manual", "delivery-log", "filesystem", "agent-done"] as const) {
+      await registerArtifact(adapter, {
+        artifact_id: `legacy-${source}`,
+        basename: "2026-07-07-stable-artifact-id.md",
+        agent: "substrate-api-codex",
+        tag: "T-LOCALREAD",
+        abs_path: sharedPath,
+        title: `${source} observation`,
+        produced_at: "2026-07-07T12:05:00.000Z",
+        source,
+      }, NOW);
+    }
+    await seedDone(adapter, {
+      dispatch_phid: "phid:disp-stable-artifact-id",
+      subject: "Agent done stable artifact id",
+      completed_at: "2026-07-07T12:06:00.000Z",
+      updated_at: "2026-07-07T12:06:00.000Z",
+      artifact_path: sharedPath,
+    });
+
+    const model = await buildSurfacedArtifactsReadModel(adapter, { limit: 7, readFile });
+    const row = model.rows.find((r) => r.id === `artifact:${stableArtifactId}`);
+    expect(row).toMatchObject({
+      id: `artifact:${stableArtifactId}`,
+      artifact_ref: sharedPath,
+      project_ref: "kapelle",
+      group_count: 5,
+      grouped_source_kinds: expect.arrayContaining(["artifact", "dispatch_done", "filesystem_reconcile"]),
+      delivery: expect.objectContaining({
+        stable_url: `/artifacts/${stableArtifactId}/detail`,
+        copy_text_url: `/artifacts/${stableArtifactId}/copy-text`,
+        download_url: `/artifacts/${stableArtifactId}/download`,
+      }),
+    });
+    expect(model.recent_flood.groups.find((g) => g.work_item_ref === `artifact:${stableArtifactId}`))
+      .toMatchObject({ raw_count: 5, project_ref: "kapelle" });
+    expect(model.recent_flood.raw_rows.filter((r) => r.id === `artifact:${stableArtifactId}`)).toHaveLength(5);
+  });
+
   it("emits fail-loud health events for unreadable bodies and rows missing from the primary surface", async () => {
     files.set("/tmp/current.md", "# Current surfaced artifact\n\nReadable.");
     files.set("/tmp/suppressed.md", "# Suppressed readable artifact\n\nReadable but outside the cap.");
@@ -323,7 +374,7 @@ describe("buildSurfacedArtifacts", () => {
 
     const rows = await buildSurfacedArtifacts(adapter, { limit: 7, readFile, env: {} as NodeJS.ProcessEnv });
     expect(rows.some((r) => r.id.startsWith("comment:art-disabled-comment:"))).toBe(false);
-    expect(rows.find((r) => r.id === "artifact:art-disabled-comment")?.status).toBe("unread");
+    expect(rows.find((r) => r.id === `artifact:${artifactIdForSurfacingPath("/tmp/disabled-comment.md")}`)?.status).toBe("unread");
   });
 
   it("emits read, commented, routed, and approved statuses deterministically", async () => {
@@ -344,10 +395,10 @@ describe("buildSurfacedArtifacts", () => {
     await approveArtifact(adapter, "art-approved", { approver: "human:chris" }, () => new Date(NOW));
 
     const byId = new Map((await buildSurfacedArtifacts(adapter, { limit: 7, readFile, env: C0_ON })).map((r) => [r.id, r.status]));
-    expect(byId.get("artifact:art-read")).toBe("read");
-    expect(byId.get("artifact:art-commented")).toBe("commented");
-    expect(byId.get("artifact:art-routed")).toBe("routed");
-    expect(byId.get("artifact:art-approved")).toBe("approved");
+    expect(byId.get(`artifact:${artifactIdForSurfacingPath("/tmp/art-read.md")}`)).toBe("read");
+    expect(byId.get(`artifact:${artifactIdForSurfacingPath("/tmp/art-commented.md")}`)).toBe("commented");
+    expect(byId.get(`artifact:${artifactIdForSurfacingPath("/tmp/art-routed.md")}`)).toBe("routed");
+    expect(byId.get(`artifact:${artifactIdForSurfacingPath("/tmp/art-approved.md")}`)).toBe("approved");
   });
 
   it("ranks accepted reasons before freshness", async () => {
@@ -365,12 +416,13 @@ describe("buildSurfacedArtifacts", () => {
       updated_at: "2026-07-07T12:04:00.000Z",
       artifact_path: "/tmp/final.md",
     });
+    files.set("/tmp/product.md", "# Product behavior change");
     await seedDone(adapter, {
       dispatch_phid: "phid:disp-product",
       subject: "Promote changed product behavior",
       completed_at: "2026-07-07T12:03:00.000Z",
       updated_at: "2026-07-07T12:03:00.000Z",
-      artifact_path: "/tmp/final.md",
+      artifact_path: "/tmp/product.md",
       promote: 1,
       promotion_input_json: JSON.stringify({ repo: "/repo/id-agents", branch: "feat/x", base: "main", remote: "origin" }),
     });
@@ -410,12 +462,13 @@ describe("buildSurfacedArtifacts", () => {
 
   it("groups a 30-45 minute artifact flood and exposes Recent Flood raw provenance", async () => {
     files.set("/tmp/final.md", "# Final user deliverable");
+    files.set("/tmp/promoted.md", "# Promoted artifact surfacing behavior");
     await seedDone(adapter, {
       dispatch_phid: "phid:disp-final",
       subject: "Final user deliverable",
       completed_at: "2026-07-07T12:15:00.000Z",
       updated_at: "2026-07-07T12:15:00.000Z",
-      artifact_path: "/tmp/final.md",
+      artifact_path: "/tmp/promoted.md",
     });
     await seedDone(adapter, {
       dispatch_phid: "phid:disp-blocked",

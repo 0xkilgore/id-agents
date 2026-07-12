@@ -4,7 +4,7 @@ import * as net from "node:net";
 import type { Server } from "node:http";
 import { SqliteAdapter } from "../../src/db/sqlite-adapter.js";
 import { migrateSqlite } from "../../src/db/migrations/sqlite.js";
-import { migrateOutputsTables, registerArtifact } from "../../src/outputs/storage.js";
+import { artifactIdFromPath, migrateOutputsTables, registerArtifact } from "../../src/outputs/storage.js";
 import { mountSurfacedArtifactsRoutes } from "../../src/surfaced-artifacts/routes.js";
 
 async function boot(): Promise<{ base: string; server: Server; adapter: SqliteAdapter }> {
@@ -39,12 +39,14 @@ describe("GET /ops/surfaced-artifacts", () => {
   it("returns the surfaced artifact envelope and row contract", async () => {
     const b = await boot();
     server = b.server;
+    const artifactPath = "/tmp/does-not-need-to-exist.md";
+    const stableArtifactId = artifactIdFromPath(artifactPath);
     await registerArtifact(b.adapter, {
       artifact_id: "art-route",
       basename: "2026-07-07-kapelle-route-test.md",
       agent: "maestra",
       tag: "critical",
-      abs_path: "/tmp/does-not-need-to-exist.md",
+      abs_path: artifactPath,
       title: "Kapelle route test",
       produced_at: "2026-07-07T12:00:00.000Z",
       source: "manual",
@@ -64,7 +66,7 @@ describe("GET /ops/surfaced-artifacts", () => {
       },
     });
     expect(body.rows[0]).toMatchObject({
-      id: "artifact:art-route",
+      id: `artifact:${stableArtifactId}`,
       title: "Kapelle route test",
       status: "unread",
       relevance_reason: "changed_product_behavior",
@@ -73,9 +75,9 @@ describe("GET /ops/surfaced-artifacts", () => {
       source_kind: "artifact",
       visibility_proof: { discovered_by: "manual_fixture", artifact_path_present: true, body_renderable: false },
       delivery: expect.objectContaining({
-        stable_url: "/artifacts/art-route/detail",
-        copy_text_url: "/artifacts/art-route/copy-text",
-        download_url: "/artifacts/art-route/download",
+        stable_url: `/artifacts/${stableArtifactId}/detail`,
+        copy_text_url: `/artifacts/${stableArtifactId}/copy-text`,
+        download_url: `/artifacts/${stableArtifactId}/download`,
         freshness: "body_unavailable",
         body_cached: false,
       }),
@@ -96,7 +98,7 @@ describe("GET /ops/surfaced-artifacts", () => {
           topic: "artifact.surfacing.body_unavailable",
           severity: "error",
           subject_kind: "artifact",
-          subject_id: "/tmp/does-not-need-to-exist.md",
+          subject_id: artifactPath,
         }),
       ],
     });
@@ -107,7 +109,7 @@ describe("GET /ops/surfaced-artifacts", () => {
     expect(eventRows.rows).toHaveLength(1);
     expect(eventRows.rows[0]).toMatchObject({
       topic: "artifact.surfacing.body_unavailable",
-      subject_id: "/tmp/does-not-need-to-exist.md",
+      subject_id: artifactPath,
     });
 
     const second = await fetch(`${b.base}/ops/surfaced-artifacts`);
@@ -151,12 +153,14 @@ describe("GET /ops/surfaced-artifacts", () => {
   it("filters saved-view execution rows with canonical dotted fields", async () => {
     const b = await boot();
     server = b.server;
+    const kapellePath = "/tmp/kapelle-filter.md";
+    const kapelleStableId = artifactIdFromPath(kapellePath);
     await registerArtifact(b.adapter, {
       artifact_id: "art-kapelle-filter",
       basename: "2026-07-07-kapelle-filter.md",
       agent: "maestra",
       tag: "critical",
-      abs_path: "/tmp/kapelle-filter.md",
+      abs_path: kapellePath,
       title: "Kapelle saved view filter",
       produced_at: "2026-07-07T12:00:00.000Z",
       source: "manual",
@@ -193,7 +197,7 @@ describe("GET /ops/surfaced-artifacts", () => {
     });
     expect(body.rows).toHaveLength(1);
     expect(body.rows[0]).toMatchObject({
-      id: "artifact:art-kapelle-filter",
+      id: `artifact:${kapelleStableId}`,
       project_ref: "kapelle",
       title: "Kapelle saved view filter",
     });
