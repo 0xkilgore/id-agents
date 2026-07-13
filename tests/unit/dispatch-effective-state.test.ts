@@ -10,6 +10,7 @@
 import { test, expect } from "vitest";
 
 import {
+  deriveEffectiveActionableState,
   deriveEffectiveState,
   deriveNeedsOperator,
 } from "../../src/dispatch-scheduler/read-model";
@@ -270,7 +271,7 @@ test("Rule 3: failed linked-query-expired + completed verified promotion -> fail
   ).toBe("failed_work_landed_recoverable");
 });
 
-test("Rule 3: completed promotion with unverified repo does not mask failure", () => {
+test("Rule 3: completed promotion with unverified repo does not mask historical linked-query expiry", () => {
   expect(
     deriveEffectiveState(
       row({
@@ -285,7 +286,25 @@ test("Rule 3: completed promotion with unverified repo does not mask failure", (
         }),
       }),
     ),
-  ).toBe("failed_needs_operator");
+  ).toBe("historical_failure");
+});
+
+test("linked-query-expired terminal failures are historical and non-actionable", () => {
+  const expired = row({
+    status: "failed",
+    recovery_status: "none",
+    failure_kind: "agent_error",
+    failure_detail: "linked query terminated expired",
+  });
+  const effective = deriveEffectiveState(expired);
+
+  expect(effective).toBe("historical_failure");
+  expect(deriveNeedsOperator(expired)).toBe(false);
+  expect(deriveEffectiveActionableState(effective, false)).toEqual({
+    state: "historical_failure",
+    action_kind: "none",
+    needs_you: false,
+  });
 });
 
 // ============================================================
