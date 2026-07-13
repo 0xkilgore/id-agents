@@ -1055,6 +1055,94 @@ describe("daemon — dry-run vs live", () => {
     ]);
   });
 
+  it("status reports build-ready fuel lanes and top blockers when raw ready is above floor but admissible is zero", async () => {
+    await seedReady(adapter, {
+      title: "ready capacity gated A",
+      write_scope: ["repo/ready-a"],
+    });
+    await seedReady(adapter, {
+      title: "ready capacity gated B",
+      write_scope: ["repo/ready-b"],
+    });
+    await seedReady(adapter, {
+      title: "ready capacity gated C",
+      write_scope: ["repo/ready-c"],
+    });
+    await seedApprovedReview(adapter, {
+      title: "candidate review lane B",
+      write_scope: ["repo/candidate-b"],
+    });
+    await seedApprovedReview(adapter, {
+      title: "candidate review lane A",
+      write_scope: ["repo/candidate-a"],
+    });
+
+    const { app, daemon } = mountStatusApp(
+      adapter,
+      {
+        dry_run: true,
+        auto_flesh_enabled: true,
+        auto_promote_enabled: true,
+        auto_promote_floor: 2,
+        auto_promote_min_lanes: 2,
+        min_ready_fuel: 2,
+        max_in_flight: 1,
+        max_new_per_tick: 10,
+      },
+      { inFlight: 1 },
+    );
+    await daemon.setMode("running");
+
+    const res = await callApp(app, "/orchestration/status");
+
+    expect(res.status).toBe(200);
+    expect(res.body.counts).toMatchObject({
+      ready: 3,
+      admissible_now: 0,
+      ready_block_reasons: {
+        no_in_flight_slots: 3,
+      },
+    });
+    expect(res.body.ready_admission).toMatchObject({
+      candidates: 3,
+      admissible_now: 0,
+      block_reason_counts: res.body.counts.ready_block_reasons,
+      stale_ready_floor: {
+        stale: true,
+        ready: 3,
+        admissible: 0,
+        min_ready_fuel: 2,
+      },
+    });
+    expect(res.body.ready_admission.blocker_counts).toEqual([
+      { code: "no_in_flight_slots", category: "capacity_gate", count: 3 },
+    ]);
+    expect(res.body.ready_admission.non_admitted).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ code: "no_in_flight_slots", action: "held" }),
+      ]),
+    );
+    expect(res.body.auto_promote_health).toMatchObject({
+      below_floor: false,
+      below_lanes: false,
+      triggered: false,
+      candidates_considered: 0,
+      promoted_count: 0,
+      lanes: {
+        build_ready: 3,
+        build_ready_lanes: 3,
+        ready_lane_keys: ["repo/ready-a", "repo/ready-b", "repo/ready-c"],
+        candidate_lane_keys: ["repo/candidate-a", "repo/candidate-b"],
+      },
+      next_action: {
+        code: "none",
+        summary: "ready build fuel meets the configured floor",
+      },
+    });
+    expect(res.body.auto_promote_health.summary).toBe("ready build fuel meets floor: ready=3 floor=2, lanes=3/2");
+    expect(res.body.flesh.auto_promote.health.lanes).toEqual(res.body.auto_promote_health.lanes);
+  });
+
   it("status reports clean capacity-only ready rows without stale queue-quality floor", async () => {
     await seedReady(adapter, {
       title: "clean capacity only A",
