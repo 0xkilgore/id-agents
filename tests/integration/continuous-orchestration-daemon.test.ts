@@ -1771,6 +1771,88 @@ describe("daemon — dry-run vs live", () => {
     );
   });
 
+  it("status summarizes manual-promote health without implying empty fuel", async () => {
+    const retryable = await seedApprovedReview(adapter, {
+      title: "retryable failed candidate",
+      write_scope: ["repo/retryable"],
+      last_dispatch_phid: "phid:disp-retryable",
+    });
+    await seedDispatch(adapter, {
+      dispatch_phid: "phid:disp-retryable",
+      status: "failed",
+      failure_kind: "scheduler_wedged",
+      failure_detail: "stale in_flight claim released by reconciler",
+      recovery_attempts: 1,
+    });
+    const stale = await seedApprovedReview(adapter, {
+      title: "stale landed candidate",
+      write_scope: ["repo/stale"],
+      last_dispatch_phid: "phid:disp-landed",
+    });
+    await seedDispatch(adapter, {
+      dispatch_phid: "phid:disp-landed",
+      status: "done",
+      promotion_result_json: JSON.stringify({ completed: true, repos: [{ verified: true }] }),
+    });
+    const held = await seedApprovedReview(adapter, {
+      title: "confidence-held candidate",
+      approved_by: null,
+      approved_at: null,
+      flesh_status: "fleshed",
+      flesh_confidence: AUTO_READY_CONFIDENCE_THRESHOLD - 0.01,
+      write_scope: ["repo/confidence-held"],
+    });
+
+    const { app, daemon } = mountStatusApp(adapter, {
+      dry_run: true,
+      auto_flesh_enabled: true,
+      auto_promote_enabled: true,
+      auto_promote_floor: 12,
+      auto_promote_min_lanes: 1,
+    });
+    await daemon.setMode("running");
+
+    const res = await callApp(app, "/orchestration/status");
+
+    expect(res.status).toBe(200);
+    expect(res.body.auto_promote_health).toMatchObject({
+      triggered: true,
+      candidates_considered: 3,
+      promoted_count: 0,
+      skipped_count: 3,
+      next_action: {
+        code: "manual_promote_or_close_already_dispatched",
+      },
+      operator_summary: {
+        schema_version: "orchestration.auto_promote_operator_summary.v1",
+        retryable_failed_rows: 1,
+        stale_duplicate_rows: 1,
+        confidence_held_rows: 1,
+        empty_fuel: false,
+      },
+    });
+    expect(res.body.auto_promote_health.skipped_items).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ item_id: retryable.item_id }),
+        expect.objectContaining({ item_id: stale.item_id }),
+        expect.objectContaining({ item_id: held.item_id }),
+      ]),
+    );
+    expect(res.body.auto_promote_health.operator_summary.summary).toMatch(/retryable_failed_rows=1/);
+    expect(res.body.auto_promote_health.operator_summary.summary).toMatch(/stale_duplicate_rows=1/);
+    expect(res.body.auto_promote_health.operator_summary.summary).toMatch(/confidence_held_rows=1/);
+    expect(res.body.auto_promote_health.operator_summary.summary).toMatch(/gated fuel/i);
+    expect(res.body.auto_promote_health.operator_summary.summary).not.toMatch(/empty fuel/i);
+    expect(res.body.auto_promote_health.operator_summary.safe_actions).toEqual(
+      expect.arrayContaining([
+        expect.stringMatching(/manually \/promote retryable failed rows/i),
+        expect.stringMatching(/close stale duplicate rows/i),
+        expect.stringMatching(/re-flesh confidence-held rows/i),
+        expect.stringMatching(/gated fuel; rows exist/i),
+      ]),
+    );
+  });
+
   it("status reports below-floor and below-lane build-ready health without fake idle action", async () => {
     await seedReady(adapter, {
       title: "only ready build lane",
