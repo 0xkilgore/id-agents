@@ -210,6 +210,9 @@ describe("reconcileFeedbackDispatchStatus — pure dispatch join", () => {
     const out = await reconcileFeedbackDispatchStatus(fb, resolve);
     expect(out.items[0].routing?.status).toBe("done");
     expect(out.items[0].routing?.is_terminal).toBe(true);
+    expect(out.items[0].routing?.work_success).toBe(true);
+    expect(out.items[0].routing?.work_success_evidence).toBe("done");
+    expect(out.items[0].routing?.work_success_blocker).toBeNull();
     expect(out.items[0].retry_readiness).toMatchObject({
       schema_version: "feedback.retry_readiness.v1",
       status: "stale_duplicate",
@@ -246,6 +249,36 @@ describe("reconcileFeedbackDispatchStatus — pure dispatch join", () => {
       stale_duplicate: true,
       next_action: "close_or_ignore",
       prior_dispatch_status: "done",
+    });
+  });
+
+  it.each([
+    ["acknowledgement-only manager closeout", "acknowledgement_only"],
+    ["approval-FYI manager closeout", "approval_fyi_only"],
+    ["linked-query expiry terminal record", "linked_query_expired"],
+    ["empty-success output", "empty_success_candidate"],
+  ])("does not stamp routed feedback as successful work for %s", async (_label, blocker) => {
+    const fb = feedbackFixture([commentItem(1, routing("phid:disp-FALSE-SUCCESS"))]);
+    const resolve = async (): Promise<DispatchStatusLite | null> => ({
+      status: blocker === "linked_query_expired" ? "failed" : "done",
+      effective_state: blocker === "linked_query_expired" ? "failed_needs_operator" : "needs_review",
+      is_terminal: true,
+      work_success: false,
+      work_success_blocker: blocker,
+    });
+
+    const out = await reconcileFeedbackDispatchStatus(fb, resolve);
+
+    expect(out.items[0].routing).toMatchObject({
+      dispatch_phid: "phid:disp-FALSE-SUCCESS",
+      is_terminal: true,
+      work_success: false,
+      work_success_evidence: null,
+      work_success_blocker: blocker,
+    });
+    expect(out.acted_upon.routed_dispatches[0]).toMatchObject({
+      work_success: false,
+      work_success_blocker: blocker,
     });
   });
 
@@ -315,6 +348,7 @@ describe("GET /artifacts/:id/feedback?reconcile=1 — wired reconciliation", () 
       prior_dispatch_status: "in_flight",
     });
     expect(fb.body.acted_upon.routed_dispatches[0].status).toBe("in_flight");
+    expect(fb.body.acted_upon.routed_dispatches[0].work_success).toBeNull();
   });
 
   it("passes the routed dispatch_phid to the resolver so status reflects THAT dispatch", async () => {
@@ -330,6 +364,62 @@ describe("GET /artifacts/:id/feedback?reconcile=1 — wired reconciliation", () 
     const fb = await call(app, "GET", `/artifacts/${ART}/feedback?reconcile=1`);
     expect(asked).toContain(phid);
     expect(fb.body.items[0].routing.is_terminal).toBe(true);
+    expect(fb.body.items[0].routing.work_success).toBe(true);
+  });
+
+  it.each([
+    {
+      label: "acknowledgement-only manager closeout",
+      status: "done",
+      effective_state: "needs_review",
+      blocker: "acknowledgement_only",
+    },
+    {
+      label: "approval-FYI manager closeout",
+      status: "done",
+      effective_state: "needs_review",
+      blocker: "approval_fyi_only",
+    },
+    {
+      label: "linked-query expiry terminal record",
+      status: "failed",
+      effective_state: "failed_needs_operator",
+      blocker: "linked_query_expired",
+    },
+    {
+      label: "empty-success output",
+      status: "done",
+      effective_state: "needs_review",
+      blocker: "empty_success_candidate",
+    },
+  ])("does not report success from the feedback route when manager recorded $label", async (fixture) => {
+    const { fn } = makeFakeEnqueue();
+    const resolveDispatchStatus: TeamAwareDispatchStatusResolver = async () => ({
+      status: fixture.status,
+      effective_state: fixture.effective_state,
+      is_terminal: true,
+      work_success: false,
+      work_success_blocker: fixture.blocker,
+    });
+    const { app, adapter } = await buildApp({ enqueue: fn, resolveDispatchStatus });
+    await seedRoutedComment(app, adapter);
+
+    const fb = await call(app, "GET", `/artifacts/${ART}/feedback?reconcile=1`);
+
+    expect(fb.status).toBe(200);
+    expect(fb.body.acted_upon.state).toBe("routed");
+    expect(fb.body.items[0].routing).toMatchObject({
+      status: fixture.status,
+      effective_state: fixture.effective_state,
+      is_terminal: true,
+      work_success: false,
+      work_success_evidence: null,
+      work_success_blocker: fixture.blocker,
+    });
+    expect(fb.body.acted_upon.routed_dispatches[0]).toMatchObject({
+      work_success: false,
+      work_success_blocker: fixture.blocker,
+    });
   });
 
   it("is a no-op by default (no ?reconcile): routing carries no live status", async () => {

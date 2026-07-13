@@ -897,9 +897,27 @@ export async function reconcileFeedbackDispatchStatus(
 
   const enrich = (r: FeedbackRouting): FeedbackRouting => {
     const s = statusByPhid.get(r.dispatch_phid) ?? null;
-    return s
-      ? { ...r, status: s.status, effective_state: s.effective_state, is_terminal: s.is_terminal }
-      : { ...r, status: null, effective_state: null, is_terminal: false };
+    if (!s) {
+      return {
+        ...r,
+        status: null,
+        effective_state: null,
+        is_terminal: false,
+        work_success: null,
+        work_success_evidence: null,
+        work_success_blocker: "dispatch_status_unresolved",
+      };
+    }
+    const work = classifyDispatchWorkSuccess(s);
+    return {
+      ...r,
+      status: s.status,
+      effective_state: s.effective_state,
+      is_terminal: s.is_terminal,
+      work_success: work.work_success,
+      work_success_evidence: work.work_success_evidence,
+      work_success_blocker: work.work_success_blocker,
+    };
   };
 
   const items = feedback.items.map((it) => {
@@ -1008,6 +1026,38 @@ function feedbackRetryReadiness(item: FeedbackItem): FeedbackRetryReadiness {
     route_visible_state: visibleState,
     route_retryable: routeRetryable,
     reason: "route_status_not_retryable",
+  };
+}
+
+function classifyDispatchWorkSuccess(s: Awaited<ReturnType<DispatchStatusResolver>>): {
+  work_success: boolean | null;
+  work_success_evidence: string | null;
+  work_success_blocker: string | null;
+} {
+  if (!s) {
+    return {
+      work_success: null,
+      work_success_evidence: null,
+      work_success_blocker: "dispatch_status_unresolved",
+    };
+  }
+  if (typeof s.work_success === "boolean") {
+    return {
+      work_success: s.work_success,
+      work_success_evidence: s.work_success ? s.work_success_evidence ?? "manager_work_success" : null,
+      work_success_blocker: s.work_success ? null : s.work_success_blocker ?? "manager_reported_no_work_success",
+    };
+  }
+  if (!s.is_terminal) {
+    return { work_success: null, work_success_evidence: null, work_success_blocker: null };
+  }
+  if (s.status === "done" && (s.effective_state === "done" || s.effective_state === "done_recovered")) {
+    return { work_success: true, work_success_evidence: s.effective_state, work_success_blocker: null };
+  }
+  return {
+    work_success: false,
+    work_success_evidence: null,
+    work_success_blocker: s.effective_state ?? s.status,
   };
 }
 

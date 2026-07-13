@@ -477,6 +477,9 @@ export interface FeedbackRouting {
   status?: string | null;
   effective_state?: string | null;
   is_terminal?: boolean;
+  work_success?: boolean | null;
+  work_success_evidence?: string | null;
+  work_success_blocker?: string | null;
 }
 
 /** S4: the minimal live-status view of a routed dispatch, returned by the
@@ -485,6 +488,9 @@ export interface DispatchStatusLite {
   status: string;
   effective_state: string | null;
   is_terminal: boolean;
+  work_success?: boolean | null;
+  work_success_evidence?: string | null;
+  work_success_blocker?: string | null;
 }
 
 /** S4: resolves a routed dispatch's live status by its stable `dispatch_phid`.

@@ -14104,6 +14104,26 @@ export class AgentManagerDb {
                 status: row.status,
                 effective_state: row.effective_state ?? null,
                 is_terminal: isTerminalDispatchStatus(row.status),
+                work_success:
+                  row.recovery_classification?.empty_success_candidate === true
+                    ? false
+                    : row.status === "done" && (row.effective_state === "done" || row.effective_state === "done_recovered")
+                      ? true
+                      : isTerminalDispatchStatus(row.status)
+                        ? false
+                        : null,
+                work_success_evidence:
+                  row.status === "done" && (row.effective_state === "done" || row.effective_state === "done_recovered")
+                    ? row.effective_state
+                    : null,
+                work_success_blocker:
+                  row.recovery_classification?.empty_success_candidate === true
+                    ? "empty_success_candidate"
+                    : row.status === "done" && (row.effective_state === "done" || row.effective_state === "done_recovered")
+                      ? null
+                      : isTerminalDispatchStatus(row.status)
+                        ? row.effective_state ?? row.status
+                        : null,
               };
             },
           });

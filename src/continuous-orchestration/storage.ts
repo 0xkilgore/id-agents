@@ -842,12 +842,36 @@ export async function reconcileStaleAlreadyDispatchedReadyRows(
  * provider/runtime mismatch. Build-pool rows can also keep the logical owner
  * lane (`roger`, `regina`, or `pool:*`) while the actual admission target
  * late-binds to a maintained Codex builder, so stale Claude metadata must be
- * normalized before the admission planner sees it. This pass is deliberately
- * narrow and idempotent: only approved READY rows that either target a known
- * Codex runtime or still carry Claude metadata for a legacy/pool owner lane are
- * updated, and already-correct rows are ignored. It never changes `to_agent`.
+ * normalized before the admission planner sees it.
+ *
+ * The mirror case is artifact-only CTO/Claude-lane rows: they do not write repo
+ * code and must stay on Anthropic/Claude metadata when a previous repair or
+ * manual edit stamped them as Codex. This pass is deliberately narrow and
+ * idempotent, and already-correct rows are ignored. It never changes `to_agent`.
  */
 const LEGACY_CODEX_OWNER_LANES = new Set(["roger", "regina"]);
+const LEGACY_CLAUDE_OWNER_LANES = new Set(["cto", "maestra", "claude"]);
+const CLAUDE_RUNTIMES = new Set(["claude-code-cli", "claude-agent-sdk", "claude-code-local"]);
+
+function isClaudeRuntime(runtime: string | null): boolean {
+  return runtime ? CLAUDE_RUNTIMES.has(normalizeRuntime(runtime)) : false;
+}
+
+function isArtifactOnlyReadyRow(row: BacklogRow): boolean {
+  const writeScopes = parseArr(row.write_scope_json).map((scope) => scope.trim().toLowerCase()).filter(Boolean);
+  const sourceRefs = parseArr(row.source_refs_json).map((ref) => ref.trim().toLowerCase()).filter(Boolean);
+  const artifactLike = (value: string) =>
+    value === "output" ||
+    value === "output/" ||
+    value.includes("/output/") ||
+    value.endsWith("/output") ||
+    value.startsWith("output/") ||
+    value.startsWith("artifact:") ||
+    value.startsWith("artifacts/");
+
+  if (writeScopes.length > 0) return writeScopes.every(artifactLike);
+  return sourceRefs.length > 0 && sourceRefs.every(artifactLike);
+}
 
 function shouldRepairReadyRowToCodex(row: BacklogRow & { agent_runtime: string | null; agent_status: string | null }): {
   repair: boolean;
@@ -871,6 +895,29 @@ function shouldRepairReadyRowToCodex(row: BacklogRow & { agent_runtime: string |
     return { repair: true, reason: "legacy_owner_lane_unavailable" };
   }
   return { repair: false, reason: "not_codex_repair_candidate" };
+}
+
+function shouldRepairReadyRowToClaude(row: BacklogRow & { agent_runtime: string | null; agent_status: string | null }): {
+  repair: boolean;
+  reason: string;
+} {
+  if (!isArtifactOnlyReadyRow(row)) return { repair: false, reason: "not_artifact_only" };
+
+  const targetRuntime = row.agent_runtime ? normalizeRuntime(row.agent_runtime) : null;
+  const target = row.to_agent?.trim().toLowerCase() ?? "";
+  const targetsClaudeLane = isClaudeRuntime(targetRuntime) || LEGACY_CLAUDE_OWNER_LANES.has(target);
+  if (!targetsClaudeLane) return { repair: false, reason: "not_claude_lane" };
+
+  const currentRuntime = row.runtime ? normalizeRuntime(row.runtime) : null;
+  const currentProvider = row.provider ?? (currentRuntime ? resolveProviderFromRuntime(currentRuntime) : null);
+  if (currentRuntime === "claude-code-cli" && currentProvider === "anthropic") {
+    return { repair: false, reason: "already_claude_metadata" };
+  }
+
+  return {
+    repair: true,
+    reason: targetRuntime && isClaudeRuntime(targetRuntime) ? "artifact_only_target_agent_runtime_claude" : "artifact_only_legacy_claude_lane",
+  };
 }
 
 export async function repairReadyCodexRuntimeMetadata(
@@ -903,9 +950,10 @@ export async function repairReadyCodexRuntimeMetadata(
 
   const repairs: ReadyRuntimeRepair[] = [];
   for (const row of rows) {
-    const decision = shouldRepairReadyRowToCodex(row);
+    const claudeDecision = shouldRepairReadyRowToClaude(row);
+    const decision = claudeDecision.repair ? claudeDecision : shouldRepairReadyRowToCodex(row);
     if (!decision.repair) continue;
-    const targetRuntime = "codex";
+    const targetRuntime = claudeDecision.repair ? "claude-code-cli" : "codex";
     const targetProvider = resolveProviderFromRuntime(targetRuntime);
     const currentRuntime = row.runtime ? normalizeRuntime(row.runtime) : null;
     const currentProvider = row.provider ?? (currentRuntime ? resolveProviderFromRuntime(currentRuntime) : null);

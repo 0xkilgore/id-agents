@@ -172,6 +172,108 @@ describe("GET /comment-routing/attempts", () => {
     expect(filtered.body.count).toBe(2);
     expect(filtered.body.items.every((item: any) => item.status === "terminal-deadletter")).toBe(true);
   });
+
+  it("contracts retry drain states for queued retry, routed retry, terminal failure, disabled route, and duplicate acknowledgement", async () => {
+    await seedArtifactComment("artifact-queued", {
+      routed: false,
+      retryable: true,
+      target_agent: "regina",
+      target_agent_raw: "project:kapelle",
+      error: { message: "route_failed_retryable" },
+      updated_at: "2026-07-08T17:59:00.000Z",
+    });
+    await seedArtifactComment("artifact-routed-retry", {
+      routed: true,
+      retryable: false,
+      target_agent: "regina",
+      dispatch: { dispatch_phid: "phid:disp-routed-retry", query_id: "query_routed_retry", to_agent: "regina" },
+      updated_at: "2026-07-08T17:58:00.000Z",
+    });
+    await seedArtifactComment("artifact-terminal", {
+      routed: false,
+      retryable: false,
+      target_agent: "retired-agent",
+      error: { message: "target agent retired-agent no longer exists" },
+      updated_at: "2026-07-08T17:57:00.000Z",
+    });
+    await seedArtifactComment("artifact-disabled", {
+      routed: false,
+      retryable: false,
+      target_agent: "regina",
+      skipped: "CO_FEEDBACK_REACTIONS_DISABLED",
+      error: { message: "CO_FEEDBACK_REACTIONS_DISABLED" },
+      updated_at: "2026-07-08T17:56:00.000Z",
+    });
+    await seedArtifactComment("artifact-ack-duplicate", {
+      route_kind: "acknowledgement",
+      routed: false,
+      retryable: false,
+      target_agent: null,
+      skipped: "acknowledged",
+      updated_at: "2026-07-08T17:55:00.000Z",
+    });
+
+    const res = await call("GET", "/comment-routing/attempts?timeout_after_ms=900000");
+
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({
+      ok: true,
+      schema_version: "comment.route_attempts.v1",
+      count: 4,
+      counts: {
+        retryable: 0,
+        "retry-pending": 1,
+        routed: 1,
+        "terminal-deadletter": 2,
+        disabled: 0,
+        "not-recorded": 0,
+      },
+      legacy_counts: {
+        pending: 1,
+        routed: 1,
+        failed: 2,
+        timeout: 0,
+      },
+    });
+    expect(res.body.items.map((item: any) => item.artifact_id).sort()).toEqual([
+      "artifact-disabled",
+      "artifact-queued",
+      "artifact-routed-retry",
+      "artifact-terminal",
+    ]);
+    expect(res.body.items).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          artifact_id: "artifact-queued",
+          status: "retry-pending",
+          target_agent: "regina",
+          target_agent_raw: "project:kapelle",
+          retry: expect.objectContaining({ available: true, reason: "retryable_route_attempt" }),
+        }),
+        expect.objectContaining({
+          artifact_id: "artifact-routed-retry",
+          status: "routed",
+          dispatch_phid: "phid:disp-routed-retry",
+          query_id: "query_routed_retry",
+          retry: expect.objectContaining({ available: false }),
+        }),
+        expect.objectContaining({
+          artifact_id: "artifact-terminal",
+          status: "terminal-deadletter",
+          error: "target agent retired-agent no longer exists",
+          retryable: false,
+          retry: expect.objectContaining({ available: false }),
+        }),
+        expect.objectContaining({
+          artifact_id: "artifact-disabled",
+          status: "terminal-deadletter",
+          error: "CO_FEEDBACK_REACTIONS_DISABLED",
+          retryable: false,
+          retry: expect.objectContaining({ available: false }),
+        }),
+      ]),
+    );
+  });
 });
 
 function routeResult(overrides: Partial<TaskCommentRoutingResult> & { target_agent: string; status: TaskCommentRoutingResult["status"] }): TaskCommentRoutingResult {
@@ -221,9 +323,11 @@ async function seedTaskComment(
 
 async function seedArtifactComment(
   artifactId: string,
-  opIdHint: number,
-  routeStatus: Record<string, unknown>,
+  opIdHintOrRouteStatus: number | Record<string, unknown>,
+  maybeRouteStatus?: Record<string, unknown>,
 ): Promise<void> {
+  const opIdHint = typeof opIdHintOrRouteStatus === "number" ? opIdHintOrRouteStatus : 0;
+  const routeStatus = typeof opIdHintOrRouteStatus === "number" ? maybeRouteStatus ?? {} : opIdHintOrRouteStatus;
   await appendOperation(
     adapter,
     artifactId,

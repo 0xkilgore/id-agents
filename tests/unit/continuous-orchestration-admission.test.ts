@@ -42,6 +42,7 @@ function item(over: Partial<BacklogItem> = {}): BacklogItem {
     approved_by: "chris",
     approved_at: "2026-06-17T00:00:00Z",
     last_dispatch_phid: null,
+    retry_safe: false,
     track_drift: false,
     created_at: "2026-06-17T00:00:00Z",
     updated_at: "2026-06-17T00:00:00Z",
@@ -428,6 +429,11 @@ describe("planAdmission — per-item guardrails", () => {
         name: "config_cap",
         plan: planAdmission([item()], ctx({ in_flight: 5 }), cfg),
         code: "no_in_flight_slots",
+      },
+      {
+        name: "retry_safety",
+        plan: planAdmission([item({ last_dispatch_phid: "phid:disp-failed" })], ctx(), cfg),
+        code: "duplicate_dispatch_retry_required",
       },
     ];
 

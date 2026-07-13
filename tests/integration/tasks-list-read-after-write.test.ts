@@ -917,4 +917,107 @@ describe('GET /tasks read-model immediate reflect', () => {
     expect(detail.task.notes[0].operation_state).toBe('terminal-failure');
     expect(detail.task.openTarget).toMatchObject({ kind: 'task', route: `/tasks/${taskName}` });
   });
+
+  it('surfaces mixed pending, routed, and failed retry-drain counts in task operationTimeline', async () => {
+    const taskName = 'comment-route-mixed-drain-counts';
+    const task = await insertTaskDirect(db, teamId, taskName, coderAgentId, 'doing');
+    const commentId = 'task_comment_mixed_drain_counts';
+    const now = Date.now();
+    await db.adapter.query(
+      `INSERT INTO task_comment_events (
+        id, team_id, task_id, task_uuid, task_name, task_title,
+        source_path, source_line, comment_text, actor, occurred_at,
+        hash, event_seq, routing_status, routing_results_json,
+        created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?, ?, NULL, ?, ?, ?, ?)`,
+      [
+        commentId,
+        teamId,
+        task.id,
+        task.uuid,
+        taskName,
+        'Mixed retry drain counts',
+        'Drain these queued retries truthfully.',
+        'user:chris',
+        now,
+        `hash-${commentId}`,
+        'failed',
+        JSON.stringify([
+          {
+            target_agent: 'queued-agent',
+            target_agent_raw: 'project:queued',
+            status: 'pending',
+            dispatch_phid: null,
+            query_id: null,
+            error: 'route_queued_for_retry',
+            retryable: true,
+            routed_at: '2026-07-09T13:00:00.000Z',
+          },
+          {
+            target_agent: 'routed-agent',
+            target_agent_raw: 'project:routed',
+            status: 'routed',
+            dispatch_phid: 'phid:disp-routed-drain',
+            query_id: 'query_routed_drain',
+            error: null,
+            retryable: false,
+            routed_at: '2026-07-09T13:01:00.000Z',
+          },
+          {
+            target_agent: 'terminal-agent',
+            target_agent_raw: 'project:terminal',
+            status: 'failed',
+            dispatch_phid: null,
+            query_id: null,
+            error: 'target_agent_unresolved',
+            retryable: false,
+            routed_at: '2026-07-09T13:02:00.000Z',
+          },
+        ]),
+        now,
+        now,
+      ],
+    );
+
+    const detail = await fetch(`${baseUrl}/tasks/${taskName}`, {
+      headers: { 'X-Id-Team': TEAM },
+    }).then((r) => r.json());
+
+    expect(detail.task.commentRouting).toMatchObject({
+      status: 'failed',
+      pending_count: 1,
+      routed_count: 1,
+      failed_count: 1,
+      latest_dispatch_id: 'phid:disp-routed-drain',
+    });
+    expect(detail.task.operationTimeline).toMatchObject({
+      schema_version: 'task.operation_timeline.v1',
+      count: 4,
+      counts: { recorded: 1, pending: 1, routed: 1, failed: 1 },
+    });
+    expect(detail.task.operationTimeline.items).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          kind: 'route_attempt',
+          state: 'pending',
+          target_agent: 'queued-agent',
+          retry: expect.objectContaining({ available: true, reason: 'retryable_route_attempt' }),
+        }),
+        expect.objectContaining({
+          kind: 'route_attempt',
+          state: 'routed',
+          target_agent: 'routed-agent',
+          dispatch_phid: 'phid:disp-routed-drain',
+          retry: expect.objectContaining({ available: false }),
+        }),
+        expect.objectContaining({
+          kind: 'route_attempt',
+          state: 'failed',
+          target_agent: 'terminal-agent',
+          error: 'target_agent_unresolved',
+          retry: expect.objectContaining({ available: false, reason: 'route_attempt_not_retryable' }),
+        }),
+      ]),
+    );
+  });
 });

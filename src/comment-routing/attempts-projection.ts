@@ -138,6 +138,7 @@ async function artifactCommentRouteAttempts(
   for (const row of rows) {
     const routeStatus = parseArtifactRouteStatus(row.payload_json);
     if (!routeStatus) continue;
+    if (isNoopAcknowledgementRoute(routeStatus)) continue;
     const commentId = artifactCommentId(row.artifact_id, Number(row.op_id));
     const sourceRef = `artifact:${row.artifact_id}:comment:${row.op_id}`;
     const legacyStatus = artifactLegacyStatus(routeStatus, now, timeoutAfterMs);
@@ -288,6 +289,7 @@ function clampLimit(input: number | undefined): number {
 function parseArtifactRouteStatus(payloadJson: string | null): {
   routed: boolean;
   retryable: boolean;
+  route_kind: string | null;
   target_agent: string | null;
   target_agent_raw: string | null;
   dispatch: { query_id: string; dispatch_phid: string; to_agent: string } | null;
@@ -311,6 +313,7 @@ function parseArtifactRouteStatus(payloadJson: string | null): {
     return {
       routed: r.routed === true,
       retryable: r.retryable === true,
+      route_kind: typeof r.route_kind === "string" ? r.route_kind : null,
       target_agent: typeof r.target_agent === "string" ? r.target_agent : null,
       target_agent_raw: typeof r.target_agent_raw === "string" ? r.target_agent_raw : null,
       dispatch: dispatch && typeof dispatch.dispatch_phid === "string" && typeof dispatch.to_agent === "string"
@@ -352,4 +355,13 @@ function artifactLegacyStatus(
   if (routeStatus.retryable && isTimedOut(routeStatus.updated_at, now, timeoutAfterMs)) return "timeout";
   if (routeStatus.retryable) return "pending";
   return "failed";
+}
+
+function isNoopAcknowledgementRoute(routeStatus: NonNullable<ReturnType<typeof parseArtifactRouteStatus>>): boolean {
+  return routeStatus.routed === false &&
+    routeStatus.retryable === false &&
+    (routeStatus.route_kind === "acknowledgement" ||
+      routeStatus.route_kind === "approval_signal" ||
+      routeStatus.skipped === "acknowledged" ||
+      routeStatus.skipped === "approval_signal");
 }

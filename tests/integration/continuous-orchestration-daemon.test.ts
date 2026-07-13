@@ -18,6 +18,7 @@ import {
   getAgentRuntimeMap,
   getHealthyAgentNames,
   listHeldConfidenceReviewItems,
+  setItemState,
 } from "../../src/continuous-orchestration/storage.js";
 import { parseRoadmapToBacklog } from "../../src/continuous-orchestration/roadmap-import.js";
 import { ContinuousOrchestrationDaemon, type PoolRouting } from "../../src/continuous-orchestration/daemon.js";
@@ -163,6 +164,31 @@ async function seedApprovedReview(adapter: SqliteAdapter, over: Partial<BacklogI
     ],
   );
   return (await getBacklogItem(adapter, item.item_id))!;
+}
+
+async function seedDispatchStatus(adapter: SqliteAdapter, phid: string, status: "done" | "failed") {
+  const now = "2026-07-10T00:00:00.000Z";
+  await adapter.query(
+    `INSERT INTO dispatch_scheduler_queue
+       (dispatch_phid, team_id, query_id, to_agent, from_actor, channel, subject,
+        body_markdown, provider, runtime, status, not_before_at, updated_at)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
+    [
+      phid,
+      "team-uuid-test",
+      `q_${phid}`,
+      "roger",
+      "co",
+      "manager",
+      "subject",
+      "body",
+      "openai",
+      "codex",
+      status,
+      now,
+      now,
+    ],
+  );
 }
 
 function writeModelPolicy(seed: {
@@ -664,6 +690,81 @@ describe("daemon — dry-run vs live", () => {
       expect.objectContaining({ item_id: stale.item_id, to_agent: "substrate-orch-codex" }),
     ]);
     expect(repaired).toMatchObject({ to_agent: "pool:backend", provider: "openai", runtime: "codex" });
+  });
+
+  it("repairs artifact-only CTO ready fuel back to Anthropic Claude in ready admission status", async () => {
+    await seedAgent(adapter, "cto", "running", "claude-code-cli");
+    const stale = await seedReady(adapter, {
+      title: "cto artifact-only status report with stale codex runtime",
+      track: "T-MODEL",
+      to_agent: "cto",
+      provider: "openai",
+      runtime: "codex",
+      write_scope: ["cto/output"],
+      source_refs: ["cto/output/2026-07-12-model-report.md"],
+    });
+    await markApproved(adapter, stale.item_id);
+    const { daemon } = makeDaemon(adapter, {
+      config: { dry_run: false, max_in_flight: 4 },
+      resolveAgentRuntimes: (names) => getAgentRuntimeMap(adapter, names),
+    });
+    await daemon.setMode("running");
+
+    const explanation = await daemon.explainReadyAdmission();
+    const repaired = await getBacklogItem(adapter, stale.item_id);
+
+    expect(explanation.ready_runtime_repairs).toEqual([
+      expect.objectContaining({
+        item_id: stale.item_id,
+        to_agent: "cto",
+        from_provider: "openai",
+        from_runtime: "codex",
+        to_provider: "anthropic",
+        to_runtime: "claude-code-cli",
+        reason: "artifact_only_target_agent_runtime_claude",
+      }),
+    ]);
+    expect(explanation.admissible).toEqual([
+      expect.objectContaining({ item_id: stale.item_id, to_agent: "cto" }),
+    ]);
+    expect(explanation.non_admitted).toHaveLength(0);
+    expect(repaired).toMatchObject({ provider: "anthropic", runtime: "claude-code-cli", readiness_state: "ready" });
+  });
+
+  it("keeps real code-scoped build rows strict when provider/runtime mismatches the target lane", async () => {
+    await seedAgent(adapter, "cto", "running", "claude-code-cli");
+    const stale = await seedReady(adapter, {
+      title: "cto code build row with stale codex runtime",
+      track: "T-MODEL",
+      to_agent: "cto",
+      provider: "openai",
+      runtime: "codex",
+      write_scope: ["src/model-policy"],
+    });
+    await markApproved(adapter, stale.item_id);
+    const { daemon } = makeDaemon(adapter, {
+      config: { dry_run: false, max_in_flight: 4 },
+      resolveAgentRuntimes: (names) => getAgentRuntimeMap(adapter, names),
+    });
+    await daemon.setMode("running");
+
+    const explanation = await daemon.explainReadyAdmission();
+    const unrepaired = await getBacklogItem(adapter, stale.item_id);
+
+    expect(explanation.ready_runtime_repairs).toHaveLength(0);
+    expect(explanation.admissible).toHaveLength(0);
+    expect(explanation.non_admitted).toEqual([
+      expect.objectContaining({
+        item_id: stale.item_id,
+        action: "held",
+        code: "provider_runtime_mismatch",
+        metadata: expect.objectContaining({
+          class: "provider_runtime",
+          target_runtime: "claude-code-cli",
+        }),
+      }),
+    ]);
+    expect(unrepaired).toMatchObject({ provider: "openai", runtime: "codex", readiness_state: "ready" });
   });
 
   it("halts (fires nothing) when not running", async () => {
@@ -1202,23 +1303,23 @@ describe("daemon — dry-run vs live", () => {
     expect(res.status).toBe(200);
     expect(res.body.auto_promote_health).toMatchObject({
       below_floor: false,
-      below_lanes: true,
-      triggered: true,
-      candidates_considered: 1,
-      promoted_count: 1,
+      below_lanes: false,
+      triggered: false,
+      candidates_considered: 0,
+      promoted_count: 0,
       lanes: {
         build_ready: 2,
-        build_ready_lanes: 2,
+        build_ready_lanes: 3,
         ready_lane_keys: ["repo/kept-ready-a", "repo/kept-ready-b"],
         candidate_lane_keys: ["repo/candidate-restores-diversity"],
       },
       next_action: {
         code: "none",
-        summary: "auto-promote has safe candidates; let the daemon promote them on the next live tick",
+        summary: "ready build fuel meets the configured floor",
       },
     });
     expect(res.body.auto_promote_health.summary).toBe(
-      "ready build fuel below floor: ready=2 floor=2, lanes=2/3; would promote 1, skipped 0; next: auto-promote has safe candidates; let the daemon promote them on the next live tick",
+      "ready build fuel below raw floor but daemon capacity is occupied: ready_plus_in_flight=3 floor=2, in_flight=1/1, lanes=3/3",
     );
     expect(res.body.flesh.auto_promote.health.lanes).toEqual(res.body.auto_promote_health.lanes);
   });
@@ -1473,7 +1574,7 @@ describe("daemon — dry-run vs live", () => {
     );
     expect(res.body.auto_promote_health.summary).toMatch(/blocker classes:/);
     expect(res.body.auto_promote_health.summary).toMatch(/already_dispatched=1/);
-    expect(res.body.auto_promote_health.summary).toMatch(/next: close stale already-dispatched rows or manually \/promote retry-safe rows/);
+    expect(res.body.auto_promote_health.summary).toMatch(/next: manually \/promote safe retries or close stale already-dispatched rows/);
   });
 
   it("status next action distinguishes stale already-dispatched auto-promote blockers", async () => {
@@ -1511,14 +1612,14 @@ describe("daemon — dry-run vs live", () => {
       skipped_count: 2,
       next_action: {
         code: "manual_promote_or_close_already_dispatched",
-        summary: "close stale already-dispatched rows or manually /promote retry-safe rows",
+        summary: "manually /promote safe retries or close stale already-dispatched rows",
       },
     });
     expect(res.body.auto_promote_health.blocker_class_counts).toEqual([
       expect.objectContaining({ class: "already_dispatched", count: 2 }),
     ]);
     expect(res.body.auto_promote_health.summary).toMatch(/close stale already-dispatched rows/);
-    expect(res.body.auto_promote_health.summary).toMatch(/manually \/promote retry-safe rows/);
+    expect(res.body.auto_promote_health.summary).toMatch(/manually \/promote safe retries/);
     expect(res.body.auto_promote_health.summary).not.toMatch(/author new lane-diverse rows/);
   });
 
@@ -1562,14 +1663,14 @@ describe("daemon — dry-run vs live", () => {
       promoted_count: 0,
       skipped_count: 2,
       next_action: {
-        code: "raise_candidate_confidence",
-        summary: "author new lane-diverse rows or manually review/promote confidence-held candidates",
+        code: "author_lane_diverse_rows",
+        summary: "author new lane-diverse build rows; confidence-held candidates are not auto-promote fuel",
       },
     });
     expect(res.body.auto_promote_health.blocker_class_counts).toEqual([
       expect.objectContaining({ class: "confidence_threshold", count: 2 }),
     ]);
-    expect(res.body.auto_promote_health.summary).toMatch(/author new lane-diverse rows/);
+    expect(res.body.auto_promote_health.summary).toMatch(/author new lane-diverse build rows/);
     expect(res.body.auto_promote_health.summary).toMatch(/confidence-held candidates/);
     expect(res.body.auto_promote_health.summary).not.toMatch(/close stale already-dispatched rows/);
   });
@@ -1632,8 +1733,114 @@ describe("daemon — dry-run vs live", () => {
     );
     expect(res.body.auto_promote_health.summary).toMatch(/ready=1 floor=4, lanes=1\/3/);
     expect(res.body.auto_promote_health.summary).toMatch(/blocker classes:/);
-    expect(res.body.auto_promote_health.summary).toMatch(/next: close stale already-dispatched rows or manually \/promote retry-safe rows/);
+    expect(res.body.auto_promote_health.summary).toMatch(/next: manually \/promote safe retries or close stale already-dispatched rows/);
     expect(res.body.flesh.auto_promote.health.next_action).toEqual(res.body.auto_promote_health.next_action);
+  });
+
+  it("status recommends closing stale already-dispatched rows when prior dispatch is done", async () => {
+    await seedDispatchStatus(adapter, "phid:disp-stale-done", "done");
+    const stale = await seedApprovedReview(adapter, {
+      title: "already dispatched completed row",
+      write_scope: ["repo/already-done"],
+      last_dispatch_phid: "phid:disp-stale-done",
+    });
+    const { app, daemon } = mountStatusApp(adapter, {
+      dry_run: true,
+      auto_flesh_enabled: true,
+      auto_promote_enabled: true,
+      auto_promote_floor: 12,
+      auto_promote_min_lanes: 1,
+    });
+    await daemon.setMode("running");
+
+    const res = await callApp(app, "/orchestration/status");
+
+    expect(res.status).toBe(200);
+    expect(res.body.auto_promote_health.next_action).toMatchObject({
+      code: "close_stale_already_dispatched_rows",
+      summary: expect.stringMatching(/close stale already-dispatched rows/i),
+    });
+    expect(res.body.auto_promote_health.skipped_items).toEqual([
+      expect.objectContaining({
+        item_id: stale.item_id,
+        prior_dispatch_phid: "phid:disp-stale-done",
+        prior_dispatch_status: "done",
+      }),
+    ]);
+    expect(res.body.auto_promote_health.summary).toMatch(/already-dispatched statuses: done=1, retryable=0, unknown=0/);
+    expect(res.body.auto_promote_health.summary).toMatch(/next: close stale already-dispatched rows/i);
+  });
+
+  it("status recommends manual promotion for already-dispatched safe retries when prior dispatch failed", async () => {
+    await seedDispatchStatus(adapter, "phid:disp-safe-retry", "failed");
+    const retry = await seedApprovedReview(adapter, {
+      title: "already dispatched failed retry",
+      write_scope: ["repo/already-failed"],
+      last_dispatch_phid: "phid:disp-safe-retry",
+    });
+    const { app, daemon } = mountStatusApp(adapter, {
+      dry_run: true,
+      auto_flesh_enabled: true,
+      auto_promote_enabled: true,
+      auto_promote_floor: 12,
+      auto_promote_min_lanes: 1,
+    });
+    await daemon.setMode("running");
+
+    const res = await callApp(app, "/orchestration/status");
+
+    expect(res.status).toBe(200);
+    expect(res.body.auto_promote_health.next_action).toMatchObject({
+      code: "manual_promote_safe_retries",
+      summary: expect.stringMatching(/manually \/promote safe retry rows/i),
+    });
+    expect(res.body.auto_promote_health.skipped_items).toEqual([
+      expect.objectContaining({
+        item_id: retry.item_id,
+        prior_dispatch_phid: "phid:disp-safe-retry",
+        prior_dispatch_status: "failed",
+      }),
+    ]);
+    expect(res.body.auto_promote_health.summary).toMatch(/already-dispatched statuses: done=0, retryable=1, unknown=0/);
+    expect(res.body.auto_promote_health.summary).toMatch(/next: manually \/promote safe retry rows/i);
+  });
+
+  it("status recommends authoring new lane-diverse rows for true confidence-held candidates", async () => {
+    await seedApprovedReview(adapter, {
+      title: "true confidence-held candidate",
+      approved_by: null,
+      approved_at: null,
+      flesh_status: "fleshed",
+      flesh_confidence: AUTO_READY_CONFIDENCE_THRESHOLD - 0.02,
+      write_scope: ["repo/confidence-held"],
+    });
+    const { app, daemon } = mountStatusApp(adapter, {
+      dry_run: true,
+      auto_flesh_enabled: true,
+      auto_promote_enabled: true,
+      auto_promote_floor: 12,
+      auto_promote_min_lanes: 2,
+    });
+    await daemon.setMode("running");
+
+    const res = await callApp(app, "/orchestration/status");
+
+    expect(res.status).toBe(200);
+    expect(res.body.auto_promote_health).toMatchObject({
+      below_floor: true,
+      below_lanes: true,
+      candidates_considered: 1,
+      promoted_count: 0,
+      skipped_count: 1,
+      next_action: {
+        code: "author_lane_diverse_rows",
+        summary: expect.stringMatching(/author new lane-diverse build rows/i),
+      },
+    });
+    expect(res.body.auto_promote_health.blocker_class_counts).toEqual([
+      expect.objectContaining({ class: "confidence_threshold", count: 1 }),
+    ]);
+    expect(res.body.auto_promote_health.summary).toMatch(/confidence-held candidates are not auto-promote fuel/i);
   });
 
   it("surfaces below-threshold flesh rows as held confidence review, separate from plain needs_review", async () => {
@@ -1744,6 +1951,46 @@ describe("daemon — dry-run vs live", () => {
       expect.objectContaining({ item_id: stale.item_id, to_agent: "roger" }),
     ]);
     expect(repaired).toMatchObject({ provider: "openai", runtime: "codex", readiness_state: "ready" });
+  });
+
+  it("status treats dispatched refuel-wave rows as capacity fuel when raw ready drops below floor", async () => {
+    const first = await seedReady(adapter, { title: "wave item one", write_scope: ["repo/wave-a"] });
+    const second = await seedReady(adapter, { title: "wave item two", write_scope: ["repo/wave-b"] });
+    await setItemState(adapter, first.item_id, "in_flight", { dispatch_phid: "phid:disp-wave-a" });
+    await setItemState(adapter, second.item_id, "in_flight", { dispatch_phid: "phid:disp-wave-b" });
+
+    const { app, daemon } = mountStatusApp(
+      adapter,
+      {
+        dry_run: true,
+        max_in_flight: 2,
+        auto_flesh_enabled: true,
+        auto_promote_enabled: true,
+        auto_promote_floor: 8,
+        auto_promote_min_lanes: 2,
+      },
+      { inFlight: 2 },
+    );
+    await daemon.setMode("running");
+
+    const res = await callApp(app, "/orchestration/status");
+
+    expect(res.status).toBe(200);
+    expect(res.body.counts.ready).toBe(0);
+    expect(res.body.counts.in_flight).toBe(2);
+    expect(res.body.auto_promote_health).toMatchObject({
+      below_floor: false,
+      triggered: false,
+      promoted_count: 0,
+      lanes: {
+        build_ready: 0,
+        build_in_flight: 2,
+        ready_plus_in_flight: 2,
+        capacity_occupied: true,
+      },
+    });
+    expect(res.body.auto_promote_health.summary).toMatch(/capacity is occupied/);
+    expect(res.body.auto_promote_health.summary).toMatch(/in_flight=2\/2/);
   });
 });
 
@@ -1947,6 +2194,43 @@ describe("daemon — guardrail alerts", () => {
 
     const readyAfter = await listBacklogByState(adapter, { state: "ready" });
     expect(readyAfter).toHaveLength(4);
+  });
+
+  it("does not run low-fuel refuel loops when raw ready is below floor because in_flight is full", async () => {
+    for (let i = 0; i < 2; i++) {
+      const item = await seedReady(adapter, { title: `capacity held ${i}`, write_scope: [`repo/capacity-${i}`] });
+      await setItemState(adapter, item.item_id, "in_flight", { dispatch_phid: `phid:disp-capacity-${i}` });
+    }
+    await seedReady(adapter, { title: "raw ready remains below floor", write_scope: ["repo/raw-ready"] });
+    await seedApprovedReview(adapter, { title: "safe follow-up candidate", write_scope: ["repo/follow-up"] });
+
+    const { daemon, newsEvents } = makeDaemon(adapter, {
+      config: {
+        dry_run: false,
+        stall_threshold_ticks: 2,
+        min_ready_fuel: 8,
+        max_in_flight: 2,
+        auto_flesh_enabled: true,
+        auto_promote_enabled: true,
+        auto_promote_floor: 8,
+        auto_promote_min_lanes: 2,
+      },
+      inFlight: 2,
+    });
+    await daemon.setMode("running");
+
+    const r1 = await daemon.runTick();
+    const r2 = await daemon.runTick();
+
+    expect(r1.admitted).toHaveLength(0);
+    expect(r1.auto_promote).toBeNull();
+    expect(r1.refuel).toBeNull();
+    expect(r2.zero_ticks).toBe(2);
+    expect(r2.stall_alert).toBe(true);
+    expect(r2.refuel).toBeNull();
+    expect(r2.decisions.some((d) => d.action === "refuel")).toBe(false);
+    expect(r2.decisions.some((d) => d.action === "fleet_blockage")).toBe(false);
+    expect(newsEvents).toHaveLength(0);
   });
 
   it("fires a single-tick empty-pipe alert when all needs_review candidates are confidence or already-dispatched skips", async () => {

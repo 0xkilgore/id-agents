@@ -26,6 +26,7 @@ import {
   listBacklogByState,
   listDependencyResolution,
   listReadyItems,
+  getDispatchStatusesByPhid,
   promoteToReady,
   recordTickOutcome,
   repairReadyCodexRuntimeMetadata,
@@ -258,7 +259,11 @@ export interface AutoPromoteHealth {
   lanes: {
     build_ready: number;
     build_ready_lanes: number;
+    build_in_flight: number;
+    ready_plus_in_flight: number;
+    capacity_occupied: boolean;
     ready_lane_keys: string[];
+    in_flight_lane_keys: string[];
     candidate_lane_keys: string[];
   };
   below_floor: boolean;
@@ -276,7 +281,7 @@ export interface AutoPromoteHealth {
   promoted_count: number;
   promoted_items: Array<{ item_id: string; title: string; lane: string }>;
   skipped_count: number;
-  skipped_items: Array<{ item_id: string; reasons: string[] }>;
+  skipped_items: AutoPromoteHealthSkippedItem[];
   top_skip_reasons: Array<{ reason: string; count: number }>;
   blocker_class_counts: AutoPromoteBlockerClassCount[];
   next_action: AutoPromoteNextAction;
@@ -304,12 +309,22 @@ export interface AutoPromoteBlockerClassCount {
 export interface AutoPromoteNextAction {
   code:
     | "none"
+    | "close_stale_already_dispatched_rows"
+    | "manual_promote_safe_retries"
     | "manual_promote_or_close_already_dispatched"
     | "approve_review_held_risk"
     | "resolve_blocked_dependencies"
     | "raise_candidate_confidence"
-    | "flesh_or_refuel_candidates";
+    | "flesh_or_refuel_candidates"
+    | "author_lane_diverse_rows";
   summary: string;
+}
+
+export interface AutoPromoteHealthSkippedItem {
+  item_id: string;
+  reasons: string[];
+  prior_dispatch_phid?: string;
+  prior_dispatch_status?: string | null;
 }
 
 export interface AutoPromoteEmptyPipeAlertItem {
@@ -784,7 +799,8 @@ export class ContinuousOrchestrationDaemon {
     }
 
     const admissibleReady = plan.admit.length;
-    if (shouldRunZeroAdmitStallWatchdog(stall.zero_ticks, admissibleReady, config)) {
+    const inFlightCapacityFull = config.max_in_flight > 0 && in_flight >= config.max_in_flight;
+    if (!inFlightCapacityFull && shouldRunZeroAdmitStallWatchdog(stall.zero_ticks, ready.length, config)) {
       const message =
         `Continuous orchestration zero-admit stall: ${stall.zero_ticks} consecutive zero-admit ticks, ` +
         `${ready.length} ready item(s), ${admissibleReady} admissible, min_ready_fuel=${config.min_ready_fuel}`;
@@ -1047,16 +1063,19 @@ export class ContinuousOrchestrationDaemon {
     const { view: usage } = await this.deps.readUsage();
     const readyRuntimeRepairs = await repairReadyCodexRuntimeMetadata(this.deps.adapter, this.teamId);
 
-    const [ready, needsReview] = await Promise.all([
+    const [ready, needsReview, inFlight] = await Promise.all([
       listReadyItems(this.deps.adapter, this.teamId),
       listBacklogByState(this.deps.adapter, { team_id: this.teamId, state: "needs_review" }),
+      listBacklogByState(this.deps.adapter, { team_id: this.teamId, state: "in_flight" }),
     ]);
-    const plan = selectAutoPromotions(needsReview, ready, {
+    const capacityFuel = buildCapacityFuel(ready, inFlight, config.max_in_flight);
+    const plan = selectAutoPromotions(needsReview, capacityFuel.floorItems, {
       floor: config.auto_promote_floor,
       minLanes: config.auto_promote_min_lanes,
       maxPerPass: config.auto_promote_max_per_tick,
     });
-    const readyLaneKeys = [...new Set(ready.filter((item) => item.risk_class === "build").map(laneKeyOf))].sort();
+    const readyLaneKeys = [...new Set(capacityFuel.readyBuild.map(laneKeyOf))].sort();
+    const inFlightLaneKeys = [...new Set(capacityFuel.inFlightBuild.map(laneKeyOf))].sort();
     const candidateLaneKeys = [...new Set(needsReview.map(laneKeyOf))].sort();
     const blockedReason =
       !config.auto_flesh_enabled ? "auto_flesh_disabled" :
@@ -1065,17 +1084,36 @@ export class ContinuousOrchestrationDaemon {
       killSwitch ? "kill_switch_active" :
       usage.hard_paused ? "usage_hard_paused" :
       null;
-    const belowFloor = plan.before.build_ready < config.auto_promote_floor;
-    const belowLanes = plan.before.build_lanes < config.auto_promote_min_lanes;
+    const belowFloor = !capacityFuel.capacityOccupied && plan.before.build_ready < config.auto_promote_floor;
+    const belowLanes = !capacityFuel.capacityOccupied && plan.before.build_lanes < config.auto_promote_min_lanes;
     const skippedItems = plan.skipped;
+    const dispatchStatuses = await getDispatchStatusesByPhid(
+      this.deps.adapter,
+      needsReview.map((item) => item.last_dispatch_phid).filter((phid): phid is string => !!phid),
+    );
+    const itemById = new Map(needsReview.map((item) => [item.item_id, item]));
+    const healthSkippedItems = skippedItems.map((item): AutoPromoteHealthSkippedItem => {
+      const backlogItem = itemById.get(item.item_id);
+      const priorDispatchPhid = backlogItem?.last_dispatch_phid ?? undefined;
+      return {
+        ...item,
+        ...(priorDispatchPhid
+          ? {
+              prior_dispatch_phid: priorDispatchPhid,
+              prior_dispatch_status: dispatchStatuses.get(priorDispatchPhid) ?? null,
+            }
+          : {}),
+      };
+    });
+    const priorDispatchStatusCounts = alreadyDispatchedStatusCounts(healthSkippedItems);
     const promotedItems = plan.promote.map((item) => ({
       item_id: item.item_id,
       title: item.title,
       lane: laneKeyOf(item),
     }));
     const topSkipReasons = topSkipReasonsFrom(skippedItems);
-    const promotedCount = blockedReason ? 0 : plan.promote.length;
-    const triggered = blockedReason ? false : plan.triggered;
+    const promotedCount = blockedReason || capacityFuel.capacityOccupied ? 0 : plan.promote.length;
+    const triggered = blockedReason || capacityFuel.capacityOccupied ? false : plan.triggered;
     const candidatesConsidered = triggered ? plan.candidates_considered : 0;
     const blockerClassCounts = triggered ? blockerClassCountsFrom(skippedItems) : [];
     const nextAction = nextAutoPromoteAction({
@@ -1086,6 +1124,7 @@ export class ContinuousOrchestrationDaemon {
       candidates: candidatesConsidered,
       promoted: promotedCount,
       blockerClassCounts,
+      priorDispatchStatusCounts,
     });
     const emptyPipeAlert = autoPromoteEmptyPipeAlertFrom({
       ready: plan.before.build_ready,
@@ -1096,7 +1135,7 @@ export class ContinuousOrchestrationDaemon {
           promoted: promotedCount,
           skipped: skippedItems.length,
           candidates_considered: candidatesConsidered,
-          skipped_items: skippedItems,
+          skipped_items: healthSkippedItems,
         }
         : null,
     });
@@ -1107,6 +1146,9 @@ export class ContinuousOrchestrationDaemon {
       triggered,
       ready: plan.before.build_ready,
       floor: config.auto_promote_floor,
+      inFlight: capacityFuel.inFlightBuild.length,
+      maxInFlight: config.max_in_flight,
+      capacityOccupied: capacityFuel.capacityOccupied,
       lanes: plan.before.build_lanes,
       minLanes: config.auto_promote_min_lanes,
       candidates: candidatesConsidered,
@@ -1114,6 +1156,7 @@ export class ContinuousOrchestrationDaemon {
       skipped: triggered ? skippedItems.length : 0,
       topReason: topSkipReasons[0]?.reason ?? null,
       blockerClassCounts,
+      priorDispatchStatusCounts,
       nextAction,
     });
 
@@ -1124,9 +1167,13 @@ export class ContinuousOrchestrationDaemon {
       floor: config.auto_promote_floor,
       min_ready_lanes: config.auto_promote_min_lanes,
       lanes: {
-        build_ready: plan.before.build_ready,
+        build_ready: capacityFuel.readyBuild.length,
+        build_in_flight: capacityFuel.inFlightBuild.length,
+        ready_plus_in_flight: plan.before.build_ready,
+        capacity_occupied: capacityFuel.capacityOccupied,
         build_ready_lanes: plan.before.build_lanes,
         ready_lane_keys: readyLaneKeys,
+        in_flight_lane_keys: inFlightLaneKeys,
         candidate_lane_keys: candidateLaneKeys,
       },
       below_floor: belowFloor,
@@ -1146,7 +1193,7 @@ export class ContinuousOrchestrationDaemon {
       promoted_count: promotedCount,
       promoted_items: blockedReason ? [] : promotedItems,
       skipped_count: triggered ? skippedItems.length : 0,
-      skipped_items: triggered ? skippedItems : [],
+      skipped_items: triggered ? healthSkippedItems : [],
       top_skip_reasons: triggered ? topSkipReasons : [],
       blocker_class_counts: blockerClassCounts,
       next_action: nextAction,
@@ -1416,7 +1463,12 @@ export class ContinuousOrchestrationDaemon {
     if (!config.auto_flesh_enabled) return null;
     if (args.mode !== "running" || args.killSwitch || args.hardPaused) return null;
 
-    const ready = await listReadyItems(this.deps.adapter, this.teamId);
+    const [ready, inFlight] = await Promise.all([
+      listReadyItems(this.deps.adapter, this.teamId),
+      listBacklogByState(this.deps.adapter, { team_id: this.teamId, state: "in_flight" }),
+    ]);
+    if (inFlight.length >= config.max_in_flight) return null;
+    const floorReady = [...ready, ...inFlight];
     // T-ORCH P0 (continuous self-refuel): refuel on ANY tick where READY fuel is
     // below threshold — not only at the 3 batch load-points. Low ready-fuel
     // auto-promotes+fleshes backlog items into READY as the daemon drains them,
@@ -1425,7 +1477,7 @@ export class ContinuousOrchestrationDaemon {
     // ADMISSION-V2 parallel-fuel floor: also refuel when READY spans too FEW
     // distinct lanes (even if the total is fine) so the parallel pool stays fed
     // across lanes, not just in aggregate.
-    if (!needsRefuel(ready, { minReadyFuel: config.min_ready_fuel, minReadyLanes: config.min_ready_lanes })) {
+    if (!needsRefuel(floorReady, { minReadyFuel: config.min_ready_fuel, minReadyLanes: config.min_ready_lanes })) {
       return null;
     }
 
@@ -1501,11 +1553,14 @@ export class ContinuousOrchestrationDaemon {
     if (args.mode !== "running" || args.killSwitch || args.hardPaused) return null;
 
     try {
-      const [ready, needsReview] = await Promise.all([
+      const [ready, needsReview, inFlight] = await Promise.all([
         listReadyItems(this.deps.adapter, this.teamId),
         listBacklogByState(this.deps.adapter, { team_id: this.teamId, state: "needs_review" }),
+        listBacklogByState(this.deps.adapter, { team_id: this.teamId, state: "in_flight" }),
       ]);
-      const plan = selectAutoPromotions(needsReview, ready, {
+      const capacityFuel = buildCapacityFuel(ready, inFlight, config.max_in_flight);
+      if (capacityFuel.capacityOccupied) return null;
+      const plan = selectAutoPromotions(needsReview, capacityFuel.floorItems, {
         floor: config.auto_promote_floor,
         minLanes: config.auto_promote_min_lanes,
         maxPerPass: config.auto_promote_max_per_tick,
@@ -1623,6 +1678,22 @@ function topSkipReasonsFrom(
     .slice(0, 5);
 }
 
+function buildCapacityFuel(ready: BacklogItem[], inFlight: BacklogItem[], maxInFlight: number): {
+  readyBuild: BacklogItem[];
+  inFlightBuild: BacklogItem[];
+  floorItems: BacklogItem[];
+  capacityOccupied: boolean;
+} {
+  const readyBuild = ready.filter((item) => item.risk_class === "build");
+  const inFlightBuild = inFlight.filter((item) => item.risk_class === "build");
+  return {
+    readyBuild,
+    inFlightBuild,
+    floorItems: [...readyBuild, ...inFlightBuild],
+    capacityOccupied: maxInFlight > 0 && inFlight.length >= maxInFlight,
+  };
+}
+
 function autoPromoteBlockerClass(reason: string): AutoPromoteBlockerClass {
   if (reason.includes("already dispatched once")) return "already_dispatched";
   if (reason.includes("blocked dependencies") || reason.includes("dependency")) return "blocked_dependencies";
@@ -1658,6 +1729,22 @@ function blockerClassCountsFrom(
   return [...counts.entries()]
     .map(([cls, count]) => ({ class: cls, count, label: autoPromoteBlockerLabel(cls) }))
     .sort((a, b) => b.count - a.count || a.class.localeCompare(b.class));
+}
+
+function alreadyDispatchedStatusCounts(
+  skipped: AutoPromoteHealthSkippedItem[],
+): { done: number; retryable: number; unknown: number } {
+  let done = 0;
+  let retryable = 0;
+  let unknown = 0;
+  for (const item of skipped) {
+    if (!item.reasons.some((reason) => autoPromoteBlockerClass(reason) === "already_dispatched")) continue;
+    const status = item.prior_dispatch_status;
+    if (status === "done" || status === "moot" || status === "cancelled") done += 1;
+    else if (status === "failed") retryable += 1;
+    else unknown += 1;
+  }
+  return { done, retryable, unknown };
 }
 
 function emptyPipeNextAction(cls: AutoPromoteBlockerClass): string | null {
@@ -1731,6 +1818,7 @@ function nextAutoPromoteAction(args: {
   candidates: number;
   promoted: number;
   blockerClassCounts: AutoPromoteBlockerClassCount[];
+  priorDispatchStatusCounts?: { done: number; retryable: number; unknown: number };
 }): AutoPromoteNextAction {
   if (args.blockedReason) {
     return { code: "none", summary: `clear auto-promote block: ${args.blockedReason}` };
@@ -1748,13 +1836,22 @@ function nextAutoPromoteAction(args: {
   const top = args.blockerClassCounts[0]?.class;
   switch (top) {
     case "already_dispatched":
-      return { code: "manual_promote_or_close_already_dispatched", summary: "close stale already-dispatched rows or manually /promote retry-safe rows" };
+      if (args.priorDispatchStatusCounts) {
+        const { done, retryable, unknown } = args.priorDispatchStatusCounts;
+        if (done > 0 && retryable === 0 && unknown === 0) {
+          return { code: "close_stale_already_dispatched_rows", summary: "close stale already-dispatched rows whose prior dispatch is terminal done" };
+        }
+        if (done === 0 && retryable > 0 && unknown === 0) {
+          return { code: "manual_promote_safe_retries", summary: "manually /promote safe retry rows after reviewing the prior failed or unresolved dispatch" };
+        }
+      }
+      return { code: "manual_promote_or_close_already_dispatched", summary: "manually /promote safe retries or close stale already-dispatched rows" };
     case "review_held_risk":
       return { code: "approve_review_held_risk", summary: "review and explicitly approve held risk classes; auto-promote only moves build risk" };
     case "blocked_dependencies":
       return { code: "resolve_blocked_dependencies", summary: "finish or unblock dependency items before refueling this lane" };
     case "confidence_threshold":
-      return { code: "raise_candidate_confidence", summary: "author new lane-diverse rows or manually review/promote confidence-held candidates" };
+      return { code: "author_lane_diverse_rows", summary: "author new lane-diverse build rows; confidence-held candidates are not auto-promote fuel" };
     default:
       return { code: "flesh_or_refuel_candidates", summary: "author new lane-diverse safe build rows or inspect skipped_items for manual approval" };
   }
@@ -1767,6 +1864,9 @@ function summarizeAutoPromoteHealth(args: {
   triggered: boolean;
   ready: number;
   floor: number;
+  inFlight: number;
+  maxInFlight: number;
+  capacityOccupied: boolean;
   lanes: number;
   minLanes: number;
   candidates: number;
@@ -1774,21 +1874,32 @@ function summarizeAutoPromoteHealth(args: {
   skipped: number;
   topReason: string | null;
   blockerClassCounts: AutoPromoteBlockerClassCount[];
+  priorDispatchStatusCounts: { done: number; retryable: number; unknown: number };
   nextAction: AutoPromoteNextAction;
 }): string {
   if (args.blockedReason) return `auto-promote blocked: ${args.blockedReason}`;
+  if (args.capacityOccupied) {
+    return (
+      `ready build fuel below raw floor but daemon capacity is occupied: ` +
+      `ready_plus_in_flight=${args.ready} floor=${args.floor}, ` +
+      `in_flight=${args.inFlight}/${args.maxInFlight}, lanes=${args.lanes}/${args.minLanes}`
+    );
+  }
   if (!args.belowFloor && !args.belowLanes) {
     return `ready build fuel meets floor: ready=${args.ready} floor=${args.floor}, lanes=${args.lanes}/${args.minLanes}`;
   }
   const blockers = args.blockerClassCounts.length > 0
     ? `; blocker classes: ${args.blockerClassCounts.map((b) => `${b.class}=${b.count}`).join(", ")}`
     : "";
+  const alreadyDispatchedStatus = args.priorDispatchStatusCounts.done || args.priorDispatchStatusCounts.retryable || args.priorDispatchStatusCounts.unknown
+    ? `; already-dispatched statuses: done=${args.priorDispatchStatusCounts.done}, retryable=${args.priorDispatchStatusCounts.retryable}, unknown=${args.priorDispatchStatusCounts.unknown}`
+    : "";
   const next = `; next: ${args.nextAction.summary}`;
   if (!args.triggered || args.candidates === 0) {
     return `ready build fuel below floor: ready=${args.ready} floor=${args.floor}, lanes=${args.lanes}/${args.minLanes}; no needs_review candidates considered${next}`;
   }
   if (args.promoted > 0) {
-    return `ready build fuel below floor: ready=${args.ready} floor=${args.floor}, lanes=${args.lanes}/${args.minLanes}; would promote ${args.promoted}, skipped ${args.skipped}${blockers}${next}`;
+    return `ready build fuel below floor: ready=${args.ready} floor=${args.floor}, lanes=${args.lanes}/${args.minLanes}; would promote ${args.promoted}, skipped ${args.skipped}${blockers}${alreadyDispatchedStatus}${next}`;
   }
-  return `ready build fuel below floor: ready=${args.ready} floor=${args.floor}, lanes=${args.lanes}/${args.minLanes}; promoted 0 of ${args.candidates}, top skip reason: ${args.topReason ?? "none"}${blockers}${next}`;
+  return `ready build fuel below floor: ready=${args.ready} floor=${args.floor}, lanes=${args.lanes}/${args.minLanes}; promoted 0 of ${args.candidates}, top skip reason: ${args.topReason ?? "none"}${blockers}${alreadyDispatchedStatus}${next}`;
 }
