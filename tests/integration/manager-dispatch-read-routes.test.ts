@@ -14,6 +14,7 @@ import { SqliteQueriesRepo } from '../../src/db/repos/sqlite/queries-repo.js';
 import { SqliteSchedulesRepo } from '../../src/db/repos/sqlite/schedules-repo.js';
 import { SqliteTasksRepo } from '../../src/db/repos/sqlite/tasks-repo.js';
 import { SqliteTeamsRepo } from '../../src/db/repos/sqlite/teams-repo.js';
+import { registerArtifactPathDelivery } from '../../src/outputs/storage.js';
 
 async function createInMemoryDb() {
   const adapter = new SqliteAdapter(':memory:');
@@ -197,6 +198,82 @@ describe('manager dispatch read routes', () => {
       basename: 'report.md',
       source: 'result_json',
     });
+  });
+
+  it('surfaces catalog-reconciled artifact paths on dispatch receipts', async () => {
+    const teamId = await db.teams.getOrCreateTeamId('dispatch-read-catalog-reconciled');
+    const artifactPath = path.join(workDir, 'catalog-reconciled-output.md');
+    fs.writeFileSync(artifactPath, '# Catalog Reconciled\n\nReceipt evidence should not be null.\n');
+    await insertDispatch(teamId, {
+      dispatch_phid: 'phid:disp-catalog-reconciled',
+      query_id: 'query_catalog_reconciled',
+      to_agent: 'cleveland-park',
+      status: 'done',
+      completed_at: '2026-07-13T14:00:00.000Z',
+      result_json: JSON.stringify({ tl_dr: 'completed successfully' }),
+    });
+    await db.adapter.query(
+      `INSERT INTO artifacts
+         (artifact_id, basename, agent, tag, abs_path, title, produced_at, source,
+          availability, source_badges, dispatch_ref, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        'art-catalog-reconciled',
+        path.basename(artifactPath),
+        'cleveland-park',
+        'output',
+        artifactPath,
+        'Catalog Reconciled Output',
+        '2026-07-13T14:00:00.000Z',
+        'filesystem',
+        'present',
+        '["filesystem"]',
+        'phid:disp-catalog-reconciled',
+        '2026-07-13T14:00:00.000Z',
+        '2026-07-13T14:00:00.000Z',
+      ],
+    );
+
+    const res = await fetch(`${baseUrl}/dispatches/phid:disp-catalog-reconciled`, {
+      headers: headers('dispatch-read-catalog-reconciled'),
+    });
+    expect(res.status).toBe(200);
+    const body = await res.json() as any;
+    expect(body.dispatch.evidence.artifact_path).toBe(artifactPath);
+  });
+
+  it('backfills dispatch artifact_path when registering a successful artifact delivery', async () => {
+    const teamId = await db.teams.getOrCreateTeamId('dispatch-read-register-backfill');
+    const artifactPath = path.join(workDir, 'registered-delivery-output.md');
+    fs.writeFileSync(artifactPath, '# Registered Delivery\n\nBackfill the dispatch row.\n');
+    await insertDispatch(teamId, {
+      dispatch_phid: 'phid:disp-register-backfill',
+      query_id: 'query_register_backfill',
+      to_agent: 'cleveland-park',
+      status: 'done',
+      completed_at: '2026-07-13T15:00:00.000Z',
+      result_json: JSON.stringify({ tl_dr: 'completed successfully' }),
+    });
+
+    await registerArtifactPathDelivery(
+      db.adapter,
+      {
+        abs_path: artifactPath,
+        agent: 'cleveland-park',
+        tag: 'output',
+        produced_at: '2026-07-13T15:00:00.000Z',
+        dispatch_ref: 'phid:disp-register-backfill',
+        source: 'filesystem',
+        source_badges: ['filesystem'],
+      },
+      '2026-07-13T15:01:00.000Z',
+    );
+
+    const { rows } = await db.adapter.query<{ artifact_path: string | null }>(
+      `SELECT artifact_path FROM dispatch_scheduler_queue WHERE dispatch_phid = ?`,
+      ['phid:disp-register-backfill'],
+    );
+    expect(rows[0]?.artifact_path).toBe(artifactPath);
   });
 
   it('honors limit for all dispatches', async () => {
