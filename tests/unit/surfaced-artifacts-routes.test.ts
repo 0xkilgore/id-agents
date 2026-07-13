@@ -36,6 +36,45 @@ afterEach(() => {
 });
 
 describe("GET /ops/surfaced-artifacts", () => {
+  it("clamps oversized HTTP limits before reading artifact body/list rows", async () => {
+    const b = await boot();
+    server = b.server;
+    const artifactReadLimits: number[] = [];
+    const originalQuery = b.adapter.query.bind(b.adapter);
+    (b.adapter as any).query = (async (sql: string, params?: unknown[]) => {
+      const normalizedSql = String(sql).replace(/\s+/g, " ").trim();
+      if (/\bFROM artifacts a\b/i.test(normalizedSql) && /\bLEFT JOIN artifact_bodies\b/i.test(normalizedSql)) {
+        artifactReadLimits.push(Number(params?.[0]));
+      }
+      return originalQuery(sql, params as any);
+    }) as typeof b.adapter.query;
+
+    for (let i = 0; i < 12; i += 1) {
+      await registerArtifact(b.adapter, {
+        artifact_id: `art-bounded-${i}`,
+        basename: `2026-07-07-bounded-${i}.md`,
+        agent: "maestra",
+        tag: "critical",
+        abs_path: `/tmp/bounded-${i}.md`,
+        title: `Bounded artifact ${i}`,
+        produced_at: `2026-07-07T12:${String(i).padStart(2, "0")}:00.000Z`,
+        source: "manual",
+      }, "2026-07-07T12:00:00.000Z");
+    }
+
+    const res = await fetch(`${b.base}/ops/surfaced-artifacts?limit=100000`);
+    expect(res.status).toBe(200);
+    const body = await res.json() as any;
+    expect(body.count).toBeLessThanOrEqual(7);
+    expect(body.rows).toHaveLength(body.count);
+    expect(body.recent_flood.source_data).toMatchObject({
+      raw_limit: 250,
+      primary_limit: 7,
+      capped: true,
+    });
+    expect(artifactReadLimits).toEqual([250]);
+  });
+
   it("returns the surfaced artifact envelope and row contract", async () => {
     const b = await boot();
     server = b.server;
