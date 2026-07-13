@@ -6,10 +6,13 @@
 
 import type { DbAdapter } from "../db/db-adapter.js";
 import { createHash } from "node:crypto";
+import { DEFAULT_RECOVERY_CONFIG } from "../dispatch-recovery/classifier.js";
+import { promotionCompletedAndVerified } from "../dispatch-scheduler/read-model.js";
 import { classifyPromotionHygieneFailure } from "../loops/worktree-hygiene.js";
 import { loadContinuousOrchestrationConfig } from "./config.js";
 import { normalizeRuntime, resolveProviderFromRuntime } from "../dispatch-scheduler/types.js";
 import { laneKeyOf } from "./selection.js";
+import { getDispatchOutcomesByPhid, type DispatchOutcome } from "./storage.js";
 import type { BacklogItem } from "./types.js";
 
 export type OrchestrationLoopState =
@@ -110,6 +113,19 @@ export interface OrchestrationReadyItemBlockerProjection {
     owner_lane: string;
     reason: string;
     recommended_action: string;
+    prior_dispatch_summary?: ReadyItemPriorDispatchSummary;
+  }>;
+}
+
+export interface ReadyItemPriorDispatchSummary {
+  status_counts: Record<string, number>;
+  disposition_counts: Record<string, number>;
+  examples: Array<{
+    item_id: string;
+    prior_dispatch_phid: string;
+    prior_dispatch_status: string | null;
+    prior_recovery_status: string | null;
+    recommended_disposition: string;
   }>;
 }
 
@@ -409,6 +425,10 @@ async function readReadyItemBlockerProjection(
   const blockedDependencyItemIds = new Set<string>();
   for (const ids of dependencyImpact.values()) for (const id of ids) blockedDependencyItemIds.add(id);
   const agentRuntimes = await readAgentRuntimeMap(adapter, rows.map((row) => row.to_agent).filter((name): name is string => !!name));
+  const dispatchOutcomes = await getDispatchOutcomesByPhid(
+    adapter,
+    rows.map((row) => row.last_dispatch_phid).filter((phid): phid is string => !!phid),
+  );
   const minReadyFuel = Math.max(0, Math.floor(opts.minReadyFuel ?? loadContinuousOrchestrationConfig().min_ready_fuel));
   const admissibleNow = opts.readyAdmission?.admissibleNow ?? null;
 
@@ -420,20 +440,22 @@ async function readReadyItemBlockerProjection(
     owner_lane: string;
     reason: string;
     recommended_action: string;
+    prior_dispatch_summary?: ReadyItemPriorDispatchSummary;
   }>();
   let actionable = 0;
-  const add = (blocker: ReadyAdmissionBlocker, itemId: string) => {
+  const add = (blocker: ReadyAdmissionBlocker, row: BacklogQueueRow) => {
     const key = `${blocker.category}:${blocker.code}`;
     const current = categories.get(key) ?? { ...blocker, count: 0, examples: [] };
     current.count += 1;
-    if (current.examples.length < 5) current.examples.push(itemId);
+    if (current.examples.length < 5) current.examples.push(row.item_id);
+    addPriorDispatchSummary(current, row, dispatchOutcomes);
     categories.set(key, current);
   };
 
   for (const row of rows) {
     const blocker = classifyReadyAdmissionBlocker(row, blockedDependencyItemIds, agentRuntimes);
     if (blocker) {
-      add(blocker, row.item_id);
+      add(blocker, row);
     } else {
       actionable += 1;
     }
@@ -458,6 +480,51 @@ async function readReadyItemBlockerProjection(
     stale_ready_fuel: staleReadyFuel,
     categories: categoryValues,
   };
+}
+
+function addPriorDispatchSummary(
+  category: { code: string; prior_dispatch_summary?: ReadyItemPriorDispatchSummary },
+  row: BacklogQueueRow,
+  outcomes: Map<string, DispatchOutcome>,
+): void {
+  if (category.code !== "duplicate_dispatch_retry_required" || !row.last_dispatch_phid) return;
+
+  const outcome = outcomes.get(row.last_dispatch_phid);
+  const status = outcome?.status ?? "missing";
+  const disposition = duplicateReadyDisposition(outcome);
+  const summary = category.prior_dispatch_summary ?? {
+    status_counts: {},
+    disposition_counts: {},
+    examples: [],
+  };
+
+  summary.status_counts[status] = (summary.status_counts[status] ?? 0) + 1;
+  summary.disposition_counts[disposition] = (summary.disposition_counts[disposition] ?? 0) + 1;
+  if (summary.examples.length < 5) {
+    summary.examples.push({
+      item_id: row.item_id,
+      prior_dispatch_phid: row.last_dispatch_phid,
+      prior_dispatch_status: outcome?.status ?? null,
+      prior_recovery_status: outcome?.recovery_status ?? null,
+      recommended_disposition: disposition,
+    });
+  }
+
+  category.prior_dispatch_summary = summary;
+}
+
+function duplicateReadyDisposition(outcome: DispatchOutcome | undefined): string {
+  if (!outcome) return "supersede-missing-prior";
+  if (promotionCompletedAndVerified(outcome.promotion_result_json) || outcome.status === "done") return "close-terminal-duplicate";
+  if (outcome.status === "failed" && dispatchFailureRetryable(outcome)) return "mark-retry-safe";
+  if (outcome.status === "failed" || outcome.status === "cancelled" || outcome.status === "moot") return "supersede-terminal-prior";
+  return "wait-or-supersede-active-prior";
+}
+
+function dispatchFailureRetryable(outcome: Pick<DispatchOutcome, "failure_kind" | "failure_detail">): boolean {
+  if (outcome.failure_kind === "scheduler_wedged") return true;
+  const detail = (outcome.failure_detail ?? "").toLowerCase();
+  return DEFAULT_RECOVERY_CONFIG.retryable_detail_markers.some((marker) => detail.includes(marker.toLowerCase()));
 }
 
 function staleReadyFuelProjection(input: {

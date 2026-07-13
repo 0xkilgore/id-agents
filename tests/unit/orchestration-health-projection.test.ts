@@ -987,6 +987,136 @@ describe("orchestration health projection", () => {
       }),
     ]);
   });
+
+  it("accounts duplicate ready blockers by prior dispatch status without counting retry-safe rows as blocked", async () => {
+    await setMode(adapter, "default", "running");
+    await insertDispatch({
+      dispatch_phid: "phid:disp-terminal-done",
+      status: "done",
+      completed_at: "2026-07-01T12:00:00.000Z",
+    });
+    await insertDispatch({
+      dispatch_phid: "phid:disp-active-prior",
+      status: "in_flight",
+      updated_at: "2026-07-01T13:00:00.000Z",
+    });
+    await insertDispatch({
+      dispatch_phid: "phid:disp-retryable-failed",
+      status: "failed",
+      failure_kind: "scheduler_wedged",
+      failure_detail: "stale in_flight claim",
+      updated_at: "2026-07-01T14:00:00.000Z",
+    });
+
+    const terminal = await insertBacklogItem(adapter, {
+      title: "terminal done duplicate",
+      readiness_state: "ready",
+      risk_class: "build",
+      to_agent: "roger",
+      dispatch_body: "continue",
+      write_scope: ["repo/kapelle"],
+    });
+    await setItemState(adapter, terminal.item_id, "ready", { dispatch_phid: "phid:disp-terminal-done" });
+
+    const active = await insertBacklogItem(adapter, {
+      title: "active prior duplicate",
+      readiness_state: "ready",
+      risk_class: "build",
+      to_agent: "roger",
+      dispatch_body: "continue",
+      write_scope: ["repo/kapelle"],
+    });
+    await setItemState(adapter, active.item_id, "ready", { dispatch_phid: "phid:disp-active-prior" });
+
+    const retryable = await insertBacklogItem(adapter, {
+      title: "retryable failed duplicate",
+      readiness_state: "ready",
+      risk_class: "build",
+      to_agent: "roger",
+      dispatch_body: "continue",
+      write_scope: ["repo/kapelle"],
+    });
+    await setItemState(adapter, retryable.item_id, "ready", { dispatch_phid: "phid:disp-retryable-failed" });
+
+    const retrySafe = await insertBacklogItem(adapter, {
+      title: "operator approved retry",
+      readiness_state: "ready",
+      risk_class: "build",
+      to_agent: "roger",
+      dispatch_body: "continue",
+      write_scope: ["repo/kapelle"],
+      retry_safe: true,
+    });
+    await setItemState(adapter, retrySafe.item_id, "ready", { dispatch_phid: "phid:disp-retryable-failed" });
+
+    await insertBacklogItem(adapter, {
+      title: "ordinary lane holder",
+      readiness_state: "in_flight",
+      risk_class: "build",
+      to_agent: "roger",
+      dispatch_body: "continue",
+      write_scope: ["repo/kapelle"],
+    });
+    await recordTickOutcome(adapter, "default", {
+      zero_ticks: 5,
+      fired: false,
+      admission_block_reasons: {
+        single_writer_lane_busy: 1,
+        duplicate_dispatch_retry_required: 3,
+      },
+    });
+
+    const health = await readOrchestrationHealthProjection(adapter, "default");
+    const duplicateBlocker = health.ready_item_blockers.categories.find(
+      (category) => category.code === "duplicate_dispatch_retry_required",
+    );
+
+    expect(health.queue_quality.actionable_ready).toBe(1);
+    expect(health.orchestration_loop.last_admission_block_reasons).toMatchObject({
+      single_writer_lane_busy: 1,
+      duplicate_dispatch_retry_required: 3,
+    });
+    expect(duplicateBlocker).toMatchObject({
+      category: "retry_safety",
+      count: 3,
+      examples: [terminal.item_id, active.item_id, retryable.item_id],
+      prior_dispatch_summary: {
+        status_counts: {
+          done: 1,
+          in_flight: 1,
+          failed: 1,
+        },
+        disposition_counts: {
+          "close-terminal-duplicate": 1,
+          "wait-or-supersede-active-prior": 1,
+          "mark-retry-safe": 1,
+        },
+      },
+    });
+    expect(duplicateBlocker?.prior_dispatch_summary?.examples).toEqual([
+      {
+        item_id: terminal.item_id,
+        prior_dispatch_phid: "phid:disp-terminal-done",
+        prior_dispatch_status: "done",
+        prior_recovery_status: "none",
+        recommended_disposition: "close-terminal-duplicate",
+      },
+      {
+        item_id: active.item_id,
+        prior_dispatch_phid: "phid:disp-active-prior",
+        prior_dispatch_status: "in_flight",
+        prior_recovery_status: "none",
+        recommended_disposition: "wait-or-supersede-active-prior",
+      },
+      {
+        item_id: retryable.item_id,
+        prior_dispatch_phid: "phid:disp-retryable-failed",
+        prior_dispatch_status: "failed",
+        prior_recovery_status: "none",
+        recommended_disposition: "mark-retry-safe",
+      },
+    ]);
+  });
 });
 
 async function insertArtifact(artifactId: string, agent: string): Promise<void> {
@@ -1078,6 +1208,8 @@ async function insertDispatch(overrides: Partial<{
   active_clarification_json: string | null;
   promotion_input_json: string | null;
   promotion_result_json: string | null;
+  failure_kind: string | null;
+  failure_detail: string | null;
 }>): Promise<void> {
   const dispatchPhid = overrides.dispatch_phid ?? `phid:disp-${Math.random().toString(36).slice(2)}`;
   const updatedAt = overrides.updated_at ?? "2026-07-01T00:00:00.000Z";
@@ -1085,8 +1217,9 @@ async function insertDispatch(overrides: Partial<{
     `INSERT INTO dispatch_scheduler_queue (
        dispatch_phid, team_id, query_id, to_agent, from_actor, channel, subject, body_markdown,
        provider, runtime, priority, status, not_before_at, updated_at, completed_at,
-       recovery_status, active_clarification_json, promote, promotion_input_json, promotion_result_json
-     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       recovery_status, active_clarification_json, promote, promotion_input_json, promotion_result_json,
+       failure_kind, failure_detail
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       dispatchPhid,
       "default",
@@ -1108,6 +1241,8 @@ async function insertDispatch(overrides: Partial<{
       1,
       overrides.promotion_input_json ?? null,
       overrides.promotion_result_json ?? null,
+      overrides.failure_kind ?? null,
+      overrides.failure_detail ?? null,
     ],
   );
 }
