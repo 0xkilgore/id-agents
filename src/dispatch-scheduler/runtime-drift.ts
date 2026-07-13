@@ -23,6 +23,8 @@ import {
 import { resolveProviderFromRuntime } from "./types.js";
 
 export type RuntimeDriftState = "healthy" | "pending" | "offline" | "unknown";
+export type AgentLifecycle = "always_on" | "optional";
+export type AgentHealthProbeState = "ok" | "failed" | "unknown";
 
 export interface AgentDriftTrackerState {
   state: RuntimeDriftState;
@@ -126,6 +128,8 @@ export interface AgentDriftInput {
   agent_id: string;
   agent_name: string;
   state: RuntimeDriftState;
+  lifecycle?: AgentLifecycle;
+  health_probe?: AgentHealthProbeState;
 }
 
 /** Per-agent drift tracker state, keyed by agent_id. */
@@ -142,6 +146,8 @@ export interface DriftedAgentSummary {
   agent_name: string;
   state: RuntimeDriftState;
   since: string | null;
+  lifecycle?: AgentLifecycle;
+  health_probe?: AgentHealthProbeState;
 }
 
 export interface FleetRuntimeDriftSummary {
@@ -175,16 +181,19 @@ export function evaluateFleetRuntimeDrift(
   const drifted: DriftedAgentSummary[] = [];
 
   for (const input of inputs) {
+    const observedState: RuntimeDriftState = input.health_probe === "ok" ? "healthy" : input.state;
     const prevState = prev[input.agent_id] ?? INITIAL_DRIFT;
-    const { next: nodeNext, alert } = evaluateRuntimeDrift(prevState, input.state, nowMs, opts);
+    const { next: nodeNext, alert } = evaluateRuntimeDrift(prevState, observedState, nowMs, opts);
     next[input.agent_id] = nodeNext;
     if (alert) alerts.push({ agent_id: input.agent_id, agent_name: input.agent_name, alert });
-    if (isDegraded(nodeNext.state)) {
+    if (isDegraded(nodeNext.state) && input.lifecycle !== "optional") {
       drifted.push({
         agent_id: input.agent_id,
         agent_name: input.agent_name,
         state: nodeNext.state,
         since: nodeNext.since,
+        lifecycle: input.lifecycle ?? "always_on",
+        health_probe: input.health_probe ?? "unknown",
       });
     }
   }
@@ -229,4 +238,30 @@ export function deriveRuntimeDriftState(
     return laneDown ? "pending" : "healthy";
   }
   return "pending";
+}
+
+const DEFAULT_OPTIONAL_AGENT_NAMES = new Set(["coder-max", "cursor-coder-pilot", "eames"]);
+
+export function deriveAgentLifecycle(
+  agent: Pick<AgentRow, "name" | "metadata">,
+): AgentLifecycle {
+  const metadata = agent.metadata ?? {};
+  const catalog = metadata.catalog && typeof metadata.catalog === "object" && !Array.isArray(metadata.catalog)
+    ? metadata.catalog as Record<string, unknown>
+    : {};
+  const raw = [
+    metadata.lifecycle,
+    metadata.availability,
+    metadata.scheduling,
+    catalog.lifecycle,
+    catalog.availability,
+    catalog.scheduling,
+  ]
+    .filter((v): v is string => typeof v === "string")
+    .map((v) => v.trim().toLowerCase());
+  if (raw.some((v) => v === "optional" || v === "on_demand" || v === "on-demand")) return "optional";
+  if (DEFAULT_OPTIONAL_AGENT_NAMES.has(agent.name)) return "optional";
+  const description = typeof metadata.description === "string" ? metadata.description.toLowerCase() : "";
+  if (description.includes("on-demand") || description.includes("on demand")) return "optional";
+  return "always_on";
 }

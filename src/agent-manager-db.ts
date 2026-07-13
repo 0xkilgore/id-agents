@@ -261,8 +261,10 @@ import { getTelegramAlertDeliveryHealth } from './continuous-orchestration/alert
 import { sendTelegramAlert } from './continuous-orchestration/telegram.js';
 import {
   evaluateFleetRuntimeDrift,
+  deriveAgentLifecycle,
   deriveRuntimeDriftState,
   EMPTY_FLEET_DRIFT_SUMMARY,
+  type AgentHealthProbeState,
   type FleetRuntimeDriftState,
   type FleetRuntimeDriftSummary,
   type AgentDriftInput,
@@ -13200,10 +13202,19 @@ export class AgentManagerDb {
           dispatches: [],
           runtimes,
         });
+        const healthProbeResults = await Promise.all(
+          agents.map(async (a): Promise<[string, AgentHealthProbeState]> => [
+            a.id,
+            await this.probeAgentHealthForRuntimeDrift(a),
+          ]),
+        );
+        const healthProbeByAgent = new Map(healthProbeResults);
         const driftInputs: AgentDriftInput[] = agents.map((a) => ({
           agent_id: a.id,
           agent_name: a.name,
           state: deriveRuntimeDriftState(a, healthModel),
+          lifecycle: deriveAgentLifecycle(a),
+          health_probe: healthProbeByAgent.get(a.id) ?? "unknown",
         }));
         const { next: nextDrift, alerts: driftAlerts, summary: driftSummary } = evaluateFleetRuntimeDrift(
           this.runtimeDriftState,
@@ -13334,6 +13345,24 @@ export class AgentManagerDb {
       console.log(
         `[Manager] Query sweeper expired ${count} stale queries (>${this.QUERY_EXPIRY_MINUTES} min old)`,
       );
+    }
+  }
+
+  private async probeAgentHealthForRuntimeDrift(agent: AgentRow): Promise<AgentHealthProbeState> {
+    if (agent.type === 'virtual') return "unknown";
+    if (isRemoteEndpointRuntime(agent.runtime)) return "unknown";
+    const agentUrl = agent.type === 'interactive' ? agent.endpoint : `http://localhost:${agent.port}`;
+    if (!agentUrl) return "unknown";
+
+    try {
+      const resp = await fetch(`${agentUrl.replace(/\/+$/, '')}/health`, {
+        signal: AbortSignal.timeout(1500),
+      });
+      if (!resp.ok) return "failed";
+      const body = await resp.json().catch(() => null) as { status?: unknown } | null;
+      return body?.status === "ok" ? "ok" : "unknown";
+    } catch {
+      return "failed";
     }
   }
 

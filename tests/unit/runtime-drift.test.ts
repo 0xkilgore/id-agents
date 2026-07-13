@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  deriveAgentLifecycle,
   deriveRuntimeDriftState,
   evaluateFleetRuntimeDrift,
   evaluateRuntimeDrift,
@@ -101,6 +102,30 @@ describe("evaluateRuntimeDrift", () => {
 });
 
 describe("evaluateFleetRuntimeDrift", () => {
+  it("direct /health ok overrides an offline process-list observation", () => {
+    const prev: FleetRuntimeDriftState = { a1: healthy(T0) };
+    const { alerts, summary, next } = evaluateFleetRuntimeDrift(
+      prev,
+      [{ agent_id: "a1", agent_name: "cto", state: "offline", health_probe: "ok", lifecycle: "always_on" }],
+      T0 + MIN,
+    );
+    expect(alerts).toEqual([]);
+    expect(next.a1.state).toBe("healthy");
+    expect(summary.drifted_agents).toEqual([]);
+  });
+
+  it("suppresses optional on-demand agents from the critical drift summary", () => {
+    const prev: FleetRuntimeDriftState = { a1: healthy(T0) };
+    const { alerts, summary, next } = evaluateFleetRuntimeDrift(
+      prev,
+      [{ agent_id: "a1", agent_name: "coder-max", state: "offline", health_probe: "failed", lifecycle: "optional" }],
+      T0 + MIN,
+    );
+    expect(alerts).toHaveLength(1);
+    expect(next.a1.state).toBe("offline");
+    expect(summary.drifted_agents).toEqual([]);
+  });
+
   it("no alert for an agent that was never live (first-ever observation is pending)", () => {
     const prev: FleetRuntimeDriftState = {};
     const { alerts, summary, next } = evaluateFleetRuntimeDrift(
@@ -109,7 +134,16 @@ describe("evaluateFleetRuntimeDrift", () => {
       T0,
     );
     expect(alerts).toEqual([]);
-    expect(summary.drifted_agents).toEqual([{ agent_id: "a1", agent_name: "roger", state: "pending", since: next.a1.since }]);
+    expect(summary.drifted_agents).toEqual([
+      {
+        agent_id: "a1",
+        agent_name: "roger",
+        state: "pending",
+        since: next.a1.since,
+        lifecycle: "always_on",
+        health_probe: "unknown",
+      },
+    ]);
   });
 
   it("fires exactly one alert within one tick on a live -> non-live transition", () => {
@@ -146,6 +180,10 @@ describe("evaluateFleetRuntimeDrift", () => {
 
 function agent(overrides: Partial<AgentRow>): Pick<AgentRow, "status" | "runtime"> {
   return { status: "running", runtime: "claude-code-cli", ...overrides };
+}
+
+function agentLifecycle(overrides: Partial<AgentRow>): Pick<AgentRow, "name" | "metadata"> {
+  return { name: "roger", metadata: {}, ...overrides };
 }
 
 function healthModelWith(runtimesDown: string[]): RoutingHealthReadModel {
@@ -193,5 +231,17 @@ describe("deriveRuntimeDriftState", () => {
 
   it("the manager's own literal 'pending' status → pending", () => {
     expect(deriveRuntimeDriftState(agent({ status: "pending" }), healthModelWith([]))).toBe("pending");
+  });
+});
+
+describe("deriveAgentLifecycle", () => {
+  it("treats known on-demand lanes as optional", () => {
+    expect(deriveAgentLifecycle(agentLifecycle({ name: "coder-max" }))).toBe("optional");
+    expect(deriveAgentLifecycle(agentLifecycle({ name: "cursor-coder-pilot" }))).toBe("optional");
+    expect(deriveAgentLifecycle(agentLifecycle({ name: "eames" }))).toBe("optional");
+  });
+
+  it("honors explicit lifecycle metadata", () => {
+    expect(deriveAgentLifecycle(agentLifecycle({ name: "builder", metadata: { lifecycle: "on_demand" } }))).toBe("optional");
   });
 });

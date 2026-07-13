@@ -27,6 +27,7 @@ export type FleetBlockagesReport = {
 };
 
 const STALE_CLARIFICATION_MS = 30 * 60 * 1000;
+const STALE_AGENT_WORK_MS = 30 * 60 * 1000;
 
 export async function readFleetBlockages(
   adapter: DbAdapterLike,
@@ -119,11 +120,17 @@ export async function readFleetBlockages(
     });
   }
 
-  const drifted = driftSummary?.drifted_agents ?? [];
+  const drifted = await driftedAgentsWithStaleOrFailedWork(
+    adapter,
+    teamId,
+    driftSummary?.drifted_agents ?? [],
+    nowMs,
+  );
   if (drifted.length > 0) {
     const oldestDrifted = drifted.reduce<string | null>((oldest, a) => {
-      if (!a.since) return oldest;
-      return !oldest || a.since < oldest ? a.since : oldest;
+      const since = a.oldest_work_at ?? a.since;
+      if (!since) return oldest;
+      return !oldest || since < oldest ? since : oldest;
     }, null);
     blockages.push({
       kind: "stall_class_pending_agent",
@@ -143,6 +150,45 @@ export async function readFleetBlockages(
     blockages,
     generated_at: new Date(nowMs).toISOString(),
   };
+}
+
+async function driftedAgentsWithStaleOrFailedWork(
+  adapter: DbAdapterLike,
+  teamId: string,
+  driftedAgents: NonNullable<FleetRuntimeDriftSummary["drifted_agents"]>,
+  nowMs: number,
+): Promise<Array<FleetRuntimeDriftSummary["drifted_agents"][number] & { stale_or_failed_work_count: number; oldest_work_at: string | null }>> {
+  const staleCutoff = new Date(nowMs - STALE_AGENT_WORK_MS).toISOString();
+  const rows = await Promise.all(
+    driftedAgents.map(async (agent) => {
+      if ((agent.lifecycle ?? "always_on") === "optional") return null;
+      if (agent.health_probe === "ok") return null;
+      const { rows: workRows } = await adapter.query<{ count: number; oldest_work_at: string | null }>(
+        `SELECT COUNT(*) AS count,
+                MIN(COALESCE(started_at, updated_at)) AS oldest_work_at
+           FROM dispatch_scheduler_queue
+          WHERE team_id = ?
+            AND to_agent = ?
+            AND COALESCE(recovery_status, 'none') NOT IN ('moot', 'landed_reconciled', 'verified_done', 'retry_done')
+            AND (
+              status = 'failed'
+              OR (
+                status IN ('in_flight', 'bounced', 'resume_delivery_failed')
+                AND COALESCE(started_at, updated_at) <= ?
+              )
+            )`,
+        [teamId, agent.agent_name, staleCutoff],
+      );
+      const count = Number(workRows[0]?.count ?? 0);
+      if (count <= 0) return null;
+      return {
+        ...agent,
+        stale_or_failed_work_count: count,
+        oldest_work_at: workRows[0]?.oldest_work_at ?? null,
+      };
+    }),
+  );
+  return rows.filter((row): row is NonNullable<(typeof rows)[number]> => row !== null);
 }
 
 async function readFirstOrchestrationLoopHealth(

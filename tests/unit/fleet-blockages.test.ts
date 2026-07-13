@@ -14,6 +14,25 @@ class MemoryAdapter {
   async query<T = Record<string, unknown>>(sql: string, params: unknown[] = []): Promise<{ rows: T[] }> {
     if (sql.includes("FROM dispatch_scheduler_queue")) {
       this.dispatchSql = sql;
+      if (sql.includes("to_agent = ?")) {
+        return {
+          rows: [{
+            count: this.rows.filter((row) => {
+              const status = String(row.status ?? "");
+              if (row.to_agent !== params[1]) return false;
+              if (["moot", "landed_reconciled", "verified_done", "retry_done"].includes(String(row.recovery_status ?? "none"))) {
+                return false;
+              }
+              return status === "failed" || ["in_flight", "bounced", "resume_delivery_failed"].includes(status);
+            }).length,
+            oldest_work_at: this.rows
+              .filter((row) => row.to_agent === params[1])
+              .map((row) => String(row.started_at ?? row.updated_at ?? ""))
+              .filter(Boolean)
+              .sort()[0] ?? null,
+          }] as T[],
+        };
+      }
       return {
         rows: this.rows.filter((row) => {
           if (row.status !== "needs_clarification") return false;
@@ -82,10 +101,72 @@ describe("readFleetBlockages", () => {
   // RD-014 drift-guard Ticket A — the in-memory runtime-drift summary is
   // threaded through as a 3rd param (it can't be queried via `adapter` like
   // every other blockage source here, since the tracker is in-memory).
-  it("includes stall_class_pending_agent when >=1 agent is currently drifted", async () => {
-    const report = await readFleetBlockages(new MemoryAdapter([]), "personal", {
+  it("does not flag a drifted agent when its direct /health probe returned ok", async () => {
+    const report = await readFleetBlockages(new MemoryAdapter([
+      {
+        to_agent: "cto",
+        status: "failed",
+        recovery_status: "none",
+        updated_at: "2026-07-05T00:10:00.000Z",
+      },
+    ]), "personal", {
       drifted_agents: [
-        { agent_id: "a1", agent_name: "roger", state: "pending", since: "2026-07-05T00:00:00.000Z" },
+        {
+          agent_id: "a1",
+          agent_name: "cto",
+          state: "offline",
+          since: "2026-07-05T00:00:00.000Z",
+          lifecycle: "always_on",
+          health_probe: "ok",
+        },
+      ],
+    });
+
+    expect(report.blockages.find((b) => b.kind === "stall_class_pending_agent")).toBeUndefined();
+  });
+
+  it("does not raise critical drift for optional on-demand agents", async () => {
+    const report = await readFleetBlockages(new MemoryAdapter([
+      {
+        to_agent: "coder-max",
+        status: "failed",
+        recovery_status: "none",
+        updated_at: "2026-07-05T00:10:00.000Z",
+      },
+    ]), "personal", {
+      drifted_agents: [
+        {
+          agent_id: "a1",
+          agent_name: "coder-max",
+          state: "offline",
+          since: "2026-07-05T00:00:00.000Z",
+          lifecycle: "optional",
+          health_probe: "failed",
+        },
+      ],
+    });
+
+    expect(report.blockages.find((b) => b.kind === "stall_class_pending_agent")).toBeUndefined();
+  });
+
+  it("includes stall_class_pending_agent when an always-on agent is unreachable with stale or failed work", async () => {
+    const report = await readFleetBlockages(new MemoryAdapter([
+      {
+        to_agent: "roger",
+        status: "failed",
+        recovery_status: "none",
+        updated_at: "2026-07-05T00:10:00.000Z",
+      },
+    ]), "personal", {
+      drifted_agents: [
+        {
+          agent_id: "a1",
+          agent_name: "roger",
+          state: "offline",
+          since: "2026-07-05T00:00:00.000Z",
+          lifecycle: "always_on",
+          health_probe: "failed",
+        },
       ],
     });
 
@@ -94,7 +175,7 @@ describe("readFleetBlockages", () => {
     expect(block).toBeDefined();
     expect(block?.severity).toBe("critical");
     expect(block?.count).toBe(1);
-    expect(block?.message).toContain("roger (pending)");
+    expect(block?.message).toContain("roger (offline)");
   });
 
   it("omits stall_class_pending_agent when no agent is drifted", async () => {
