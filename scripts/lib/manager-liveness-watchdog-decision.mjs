@@ -65,7 +65,8 @@ export function decideManagerLivenessWatchdog(input) {
     };
   }
 
-  if (healthOk && healthLatencyMs !== null && healthLatencyMs <= 2000) {
+  const healthWithinBudget = healthOk && healthLatencyMs !== null && healthLatencyMs <= 2000;
+  if (healthWithinBudget) {
     if (!dispatchHealthOk && dispatchHealthTimedOut) {
       return {
         action: 'wait',
@@ -82,15 +83,7 @@ export function decideManagerLivenessWatchdog(input) {
     };
   }
 
-  const httpFailure = healthTimedOut || !healthOk;
-  if (!httpFailure) {
-    return {
-      action: 'wait',
-      class: 'degraded_db_route',
-      nextConsecutiveFailures: 0,
-      reason: `/health responded outside liveness budget${formatLatency(healthLatencyMs)}; waiting`,
-    };
-  }
+  const httpFailure = healthTimedOut || !healthOk || (healthOk && !healthWithinBudget);
 
   const nextConsecutiveFailures = priorConsecutiveFailures + 1;
   const failureClass = listenerPid == null ? 'manager_down' : 'http_unresponsive_listener_alive';
