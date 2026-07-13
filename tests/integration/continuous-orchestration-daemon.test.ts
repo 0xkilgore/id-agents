@@ -1143,6 +1143,76 @@ describe("daemon — dry-run vs live", () => {
     expect(res.body.flesh.auto_promote.health.lanes).toEqual(res.body.auto_promote_health.lanes);
   });
 
+  it("status preserves auto-promote lane health after immediate dispatch drains one ready lane", async () => {
+    const drained = await seedReady(adapter, {
+      title: "ready lane drained by dispatch",
+      priority: 1,
+      write_scope: ["repo/drained-ready"],
+    });
+    await seedReady(adapter, {
+      title: "ready lane kept A",
+      priority: 5,
+      write_scope: ["repo/kept-ready-a"],
+    });
+    await seedReady(adapter, {
+      title: "ready lane kept B",
+      priority: 5,
+      write_scope: ["repo/kept-ready-b"],
+    });
+    await seedApprovedReview(adapter, {
+      title: "candidate restores lane diversity",
+      priority: 1,
+      write_scope: ["repo/candidate-restores-diversity"],
+    });
+
+    const config: Partial<ContinuousOrchestrationConfig> = {
+      dry_run: false,
+      auto_flesh_enabled: true,
+      auto_promote_enabled: true,
+      auto_promote_floor: 2,
+      auto_promote_min_lanes: 3,
+      min_ready_fuel: 2,
+      max_in_flight: 1,
+      max_new_per_tick: 1,
+    };
+    const { daemon, fired } = makeDaemon(adapter, { config });
+    await daemon.setMode("running");
+
+    const tick = await daemon.runTick();
+
+    expect(fired.map((item) => item.item_id)).toEqual([drained.item_id]);
+    expect(tick.admitted).toEqual([{ item_id: drained.item_id, dispatch_phid: `phid:disp-${drained.item_id}` }]);
+    await daemon.stop();
+
+    const { app, daemon: statusDaemon } = mountStatusApp(adapter, config, { inFlight: 1 });
+    await statusDaemon.setMode("running");
+
+    const res = await callApp(app, "/orchestration/status");
+
+    expect(res.status).toBe(200);
+    expect(res.body.auto_promote_health).toMatchObject({
+      below_floor: false,
+      below_lanes: true,
+      triggered: true,
+      candidates_considered: 1,
+      promoted_count: 1,
+      lanes: {
+        build_ready: 2,
+        build_ready_lanes: 2,
+        ready_lane_keys: ["repo/kept-ready-a", "repo/kept-ready-b"],
+        candidate_lane_keys: ["repo/candidate-restores-diversity"],
+      },
+      next_action: {
+        code: "none",
+        summary: "auto-promote has safe candidates; let the daemon promote them on the next live tick",
+      },
+    });
+    expect(res.body.auto_promote_health.summary).toBe(
+      "ready build fuel below floor: ready=2 floor=2, lanes=2/3; would promote 1, skipped 0; next: auto-promote has safe candidates; let the daemon promote them on the next live tick",
+    );
+    expect(res.body.flesh.auto_promote.health.lanes).toEqual(res.body.auto_promote_health.lanes);
+  });
+
   it("status reports clean capacity-only ready rows without stale queue-quality floor", async () => {
     await seedReady(adapter, {
       title: "clean capacity only A",
