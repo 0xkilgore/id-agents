@@ -61,6 +61,59 @@ describe("orchestration health projection", () => {
     expect(dispatches.blockages.blockages.find((b) => b.kind === "co_stall")).toBeUndefined();
   });
 
+  it("blocks build-ready lane diversity when ready fuel is at the floor but lanes are below minimum", async () => {
+    await setMode(adapter, "default", "running");
+    for (let i = 0; i < 12; i += 1) {
+      await insertBacklogItem(adapter, {
+        title: `single-lane build ready ${i}`,
+        readiness_state: "ready",
+        risk_class: "build",
+        to_agent: "roger",
+        dispatch_body: "continue",
+        write_scope: ["/repo/kapelle"],
+      });
+    }
+    await insertBacklogItem(adapter, {
+      title: "single writer lane holder",
+      readiness_state: "in_flight",
+      risk_class: "build",
+      to_agent: "roger",
+      dispatch_body: "continue",
+      write_scope: ["/repo/kapelle"],
+    });
+    await recordTickOutcome(adapter, "default", {
+      zero_ticks: 5,
+      fired: false,
+      admission_block_reasons: {
+        duplicate_dispatch_retry_required: 1,
+        single_writer_lane_busy: 1,
+      },
+    });
+
+    const health = await readOrchestrationHealthProjection(adapter, "default");
+
+    expect(health.ok).toBe(false);
+    expect(health.blockers.blocked).toBe(true);
+    expect(health.orchestration_loop.state).not.toBe("running");
+    expect(health.orchestration_loop.state).not.toBe("paused");
+    expect(health.build_ready_floor).toMatchObject({
+      blocked: true,
+      blocker_code: "build_ready_lane_diversity_below_min_lanes",
+      useful_ready_count: 12,
+      floor: 12,
+      build_ready_lanes: 1,
+      min_lanes: 2,
+      candidate_lanes: ["/repo/kapelle"],
+      blocker_reasons: {
+        duplicate_dispatch_retry_required: 1,
+        single_writer_lane_busy: 1,
+        build_ready_lane_diversity_below_min_lanes: 1,
+      },
+    });
+    expect(health.build_ready_floor.next_action).toContain("new lane");
+    expect(health.queue_quality.actionable_ready).toBe(12);
+  });
+
   it("escalates unexplained zero-admit ticks after the stall threshold", async () => {
     await setMode(adapter, "default", "running");
     await recordTickOutcome(adapter, "default", {

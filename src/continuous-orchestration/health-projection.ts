@@ -9,6 +9,8 @@ import { createHash } from "node:crypto";
 import { classifyPromotionHygieneFailure } from "../loops/worktree-hygiene.js";
 import { loadContinuousOrchestrationConfig } from "./config.js";
 import { normalizeRuntime, resolveProviderFromRuntime } from "../dispatch-scheduler/types.js";
+import { laneKeyOf } from "./selection.js";
+import type { BacklogItem } from "./types.js";
 
 export type OrchestrationLoopState =
   | "paused"
@@ -44,6 +46,7 @@ export interface OrchestrationHealthProjection {
   generated_at: string;
   orchestration_loop: OrchestrationLoopHealthProjection;
   queue_quality: OrchestrationQueueQualityProjection;
+  build_ready_floor: OrchestrationBuildReadyFloorProjection;
   ready_item_blockers: OrchestrationReadyItemBlockerProjection;
   blockers: {
     blocked: boolean;
@@ -110,6 +113,18 @@ export interface OrchestrationReadyItemBlockerProjection {
   }>;
 }
 
+export interface OrchestrationBuildReadyFloorProjection {
+  blocked: boolean;
+  blocker_code: "build_ready_lane_diversity_below_min_lanes" | "build_ready_below_floor" | null;
+  useful_ready_count: number;
+  floor: number;
+  build_ready_lanes: number;
+  min_lanes: number;
+  candidate_lanes: string[];
+  blocker_reasons: Record<string, number>;
+  next_action: string;
+}
+
 export interface TaskActionReceiptCounts {
   routed: number;
   failed: number;
@@ -142,6 +157,7 @@ interface BacklogQueueRow {
   provider: string | null;
   runtime: string | null;
   dispatch_body: string | null;
+  write_scope_json: string | null;
   dependencies_json: string | null;
   last_dispatch_phid: string | null;
   retry_safe: number | null;
@@ -218,15 +234,22 @@ export async function readOrchestrationHealthProjection(
     needsClarification: needsClarification.length,
     promotion: promotion.length,
   });
+  const readyItemBlockers = await readReadyItemBlockerProjection(adapter, teamId, dependencyImpact, opts);
+  const buildReadyFloor = await readBuildReadyFloorProjection(adapter, teamId);
+  const blocked =
+    needsClarification.length > 0 ||
+    promotion.length > 0 ||
+    buildReadyFloor.blocked;
 
   return {
-    ok: true,
+    ok: !blocked,
     generated_at: new Date().toISOString(),
     orchestration_loop: await readOrchestrationLoopHealthProjection(adapter, teamId),
     queue_quality: queueQuality,
-    ready_item_blockers: await readReadyItemBlockerProjection(adapter, teamId, dependencyImpact, opts),
+    build_ready_floor: buildReadyFloor,
+    ready_item_blockers: readyItemBlockers,
     blockers: {
-      blocked: needsClarification.length > 0 || promotion.length > 0,
+      blocked,
       needs_clarification: summarize(needsClarification, recentLimit),
       promotion: summarize(promotion, recentLimit),
     },
@@ -523,6 +546,74 @@ function uniqueStrings(values: string[]): string[] {
   return [...new Set(values.filter((value) => value.trim() !== ""))];
 }
 
+async function readBuildReadyFloorProjection(
+  adapter: DbAdapter,
+  teamId: string,
+): Promise<OrchestrationBuildReadyFloorProjection> {
+  const config = loadContinuousOrchestrationConfig();
+  const [backlogRows, persistedAdmissionBlockReasons] = await Promise.all([
+    readBacklogQueueRows(adapter, teamId),
+    readPersistedAdmissionBlockReasonCounts(adapter, teamId),
+  ]);
+  const readyRows = backlogRows
+    .filter((row) => row.readiness_state === "ready" && row.risk_class === "build");
+  const laneCounts = new Map<string, number>();
+  const blockerReasons: Record<string, number> = {};
+  let usefulReadyCount = 0;
+
+  for (const row of readyRows) {
+    if (row.last_dispatch_phid && row.retry_safe !== 1) {
+      blockerReasons.duplicate_dispatch_retry_required =
+        (blockerReasons.duplicate_dispatch_retry_required ?? 0) + 1;
+      continue;
+    }
+    usefulReadyCount += 1;
+    const lane = laneKeyOf(backlogQueueRowToLaneItem(row));
+    laneCounts.set(lane, (laneCounts.get(lane) ?? 0) + 1);
+  }
+  for (const [code, count] of Object.entries(persistedAdmissionBlockReasons)) {
+    if (
+      count > 0 &&
+      (
+        code === "duplicate_dispatch_retry_required" ||
+        code === "single_writer_lane_busy" ||
+        code === "pool_capacity_full" ||
+        code === "no_free_pool_builder"
+      )
+    ) {
+      blockerReasons[code] = (blockerReasons[code] ?? 0) + count;
+    }
+  }
+
+  const candidateLanes = [...laneCounts.entries()]
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .map(([lane]) => lane);
+  const buildReadyLanes = candidateLanes.length;
+  const belowFloor = usefulReadyCount < config.auto_promote_floor;
+  const belowLanes = buildReadyLanes < config.auto_promote_min_lanes;
+  const blockerCode = belowLanes
+    ? "build_ready_lane_diversity_below_min_lanes"
+    : belowFloor
+      ? "build_ready_below_floor"
+      : null;
+  if (belowLanes) blockerReasons.build_ready_lane_diversity_below_min_lanes = 1;
+  if (belowFloor) blockerReasons.build_ready_below_floor = 1;
+
+  return {
+    blocked: blockerCode !== null,
+    blocker_code: blockerCode,
+    useful_ready_count: usefulReadyCount,
+    floor: config.auto_promote_floor,
+    build_ready_lanes: buildReadyLanes,
+    min_lanes: config.auto_promote_min_lanes,
+    candidate_lanes: candidateLanes,
+    blocker_reasons: blockerReasons,
+    next_action: blockerCode
+      ? `auto-promote or flesh build work in a new lane until build ready lanes reach ${buildReadyLanes}/${config.auto_promote_min_lanes} and ready fuel reaches ${usefulReadyCount}/${config.auto_promote_floor}`
+      : "build-ready fuel satisfies floor and lane diversity",
+  };
+}
+
 async function readQueueQualityProjection(
   adapter: DbAdapter,
   teamId: string,
@@ -590,13 +681,17 @@ async function readQueueQualityProjection(
 async function readBacklogQueueRows(adapter: DbAdapter, teamId: string): Promise<BacklogQueueRow[]> {
   const { rows } = await adapter.query<BacklogQueueRow>(
     `SELECT item_id, title, readiness_state, risk_class, to_agent, provider, runtime,
-            dispatch_body, dependencies_json, last_dispatch_phid, retry_safe
+            dispatch_body, write_scope_json, dependencies_json, last_dispatch_phid, retry_safe
        FROM orchestration_backlog_item
       WHERE team_id = ?
         AND readiness_state NOT IN ('done', 'cancelled', 'superseded')`,
     [teamId],
   );
   return rows;
+}
+
+function backlogQueueRowToLaneItem(row: BacklogQueueRow): BacklogItem {
+  return { write_scope: parseStringArray(row.write_scope_json) } as BacklogItem;
 }
 
 async function readReadyAdmissionBlockReasonCounts(adapter: DbAdapter, teamId: string): Promise<Record<string, number>> {
@@ -609,6 +704,17 @@ async function readReadyAdmissionBlockReasonCounts(adapter: DbAdapter, teamId: s
     counts[blocker.code] = (counts[blocker.code] ?? 0) + 1;
   }
   return counts;
+}
+
+async function readPersistedAdmissionBlockReasonCounts(adapter: DbAdapter, teamId: string): Promise<Record<string, number>> {
+  const { rows } = await adapter.query<{ last_admission_block_reasons_json: string | null }>(
+    `SELECT last_admission_block_reasons_json
+       FROM orchestration_state
+      WHERE team_id = ?
+      LIMIT 1`,
+    [teamId],
+  );
+  return parseCountMap(rows[0]?.last_admission_block_reasons_json ?? null);
 }
 
 async function readAgentRuntimeMap(adapter: DbAdapter, names: string[]): Promise<Map<string, string>> {
