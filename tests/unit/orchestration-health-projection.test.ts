@@ -131,18 +131,18 @@ describe("orchestration health projection", () => {
       actionable: 0,
     });
     expect(orchestration.ready_item_blockers.categories).toEqual([
-      {
+      expect.objectContaining({
         code: "duplicate_dispatch_retry_required",
         category: "retry_safety",
         count: 1,
         examples: [expect.any(String)],
-      },
-      {
+      }),
+      expect.objectContaining({
         code: "provider_runtime_mismatch",
         category: "runtime_unavailable",
         count: 1,
         examples: [expect.any(String)],
-      },
+      }),
     ]);
     expect(dispatches.blockages.blockages).toEqual([
       expect.objectContaining({
@@ -718,6 +718,40 @@ describe("orchestration health projection", () => {
     expect(health.queue_quality.blocked_or_failed).toBe(1);
   });
 
+  it("does not treat historical failed linked-query receipts as live Chris action", async () => {
+    await migrateOutputsTables(adapter);
+    await insertArtifact("art:triage:historical-linked-query.md", "roger");
+
+    await insertCommentOp({
+      artifact_id: "art:triage:historical-linked-query.md",
+      actor: "system",
+      body: "historical linked query failure",
+      reaction: "comment",
+      route_status: {
+        visible_state: "recorded-but-route-failed",
+        route_kind: "linked_query",
+        routed: false,
+        retryable: false,
+        target_agent: "roger",
+        dispatch: null,
+        skipped: "needs_chris",
+        error: null,
+        needs_chris: true,
+        failure_detail: "linked query terminated expired",
+        updated_at: "2026-07-01T15:00:00.000Z",
+      },
+    });
+
+    const health = await readOrchestrationHealthProjection(adapter, "default");
+
+    expect(health.queue_quality.task_action_receipts).toEqual({
+      routed: 0,
+      failed: 1,
+      needs_chris: 0,
+      consumed: 0,
+    });
+  });
+
   it("surfaces reason-coded ready item blockers and stale ready floor", async () => {
     await insertBacklogItem(adapter, {
       title: "dependency-blocked ready item",
@@ -748,13 +782,78 @@ describe("orchestration health projection", () => {
         category: "lane_eligibility",
         count: 1,
         examples: [expect.any(String)],
+        owner_lane: "orchestration",
+        reason: "ready row still has unresolved backlog dependencies",
+        recommended_action: "land, clear, or supersede the dependency before admission",
       },
       {
         code: "risk_requires_approval",
         category: "lane_eligibility",
         count: 1,
         examples: [expect.any(String)],
+        owner_lane: "chris",
+        reason: "ready row has a risk class that cannot auto-run",
+        recommended_action: "review and approve the item or lower the risk class before admission",
       },
+    ]);
+  });
+
+  it("includes owner, reason, and next action for admission metadata blockers", async () => {
+    await insertAgent("cto", "claude-code-cli");
+    const duplicate = await insertBacklogItem(adapter, {
+      title: "duplicate retry guard",
+      readiness_state: "ready",
+      risk_class: "build",
+      to_agent: "roger",
+      dispatch_body: "continue",
+    });
+    await setItemState(adapter, duplicate.item_id, "ready", { dispatch_phid: "phid:disp-already-fired" });
+    await insertBacklogItem(adapter, {
+      title: "missing target",
+      readiness_state: "ready",
+      risk_class: "build",
+      to_agent: "",
+      dispatch_body: "",
+    });
+    await insertBacklogItem(adapter, {
+      title: "runtime mismatch",
+      readiness_state: "ready",
+      risk_class: "routine",
+      to_agent: "cto",
+      dispatch_body: "review",
+      provider: "openai",
+      runtime: "codex",
+    });
+
+    const health = await readOrchestrationHealthProjection(adapter, "default");
+
+    expect(health.ready_item_blockers).toMatchObject({
+      ready: 3,
+      actionable: 0,
+      stale_ready_floor: true,
+    });
+    expect(health.ready_item_blockers.categories).toEqual([
+      expect.objectContaining({
+        code: "missing_dispatch_target",
+        category: "dispatch_admission",
+        owner_lane: "orchestration",
+        reason: "ready row is missing a target agent or dispatch body",
+        recommended_action: "repair ready metadata before admission can launch the item",
+      }),
+      expect.objectContaining({
+        code: "duplicate_dispatch_retry_required",
+        category: "retry_safety",
+        owner_lane: "orchestration",
+        reason: "ready row is still linked to a prior dispatch and has not been marked retry-safe",
+        recommended_action: "mark the item retry-safe or create an explicit retry before readmitting it",
+      }),
+      expect.objectContaining({
+        code: "provider_runtime_mismatch",
+        category: "runtime_unavailable",
+        owner_lane: "fleet-ops",
+        reason: "ready row requests a provider/runtime the target agent is not running",
+        recommended_action: "route to a compatible agent or update the requested provider/runtime",
+      }),
     ]);
   });
 });
