@@ -22,6 +22,7 @@ import { computeNextDelay, tickWriteCaps } from "./backpressure.js";
 import {
   appendDecisions,
   bindItemForFire,
+  getDispatchStatusesByPhid,
   getOrchestrationState,
   listBacklogByState,
   listDependencyResolution,
@@ -46,6 +47,7 @@ import { readRuntimeMixDrift, type RuntimeMixDrift } from "../model-policy/runti
 /** Dispatch/effective statuses that mean the work is finished — its write-scope
  *  lock can be released. Mirrors dispatch terminal states plus recovery moot. */
 const TERMINAL_DISPATCH_STATUSES = new Set(["done", "failed", "failed_needs_operator", "cancelled", "moot"]);
+const AUTO_PROMOTE_HEALTH_STALE_ALREADY_DISPATCHED_STATUSES = new Set(["done", "cancelled", "moot", "failed_needs_operator"]);
 const INCIDENT_ALERT_COOLDOWN_MS = 60 * 60 * 1000;
 
 type OrchestrationIncidentKind = "stall" | "model_policy_drift";
@@ -1047,10 +1049,19 @@ export class ContinuousOrchestrationDaemon {
     const { view: usage } = await this.deps.readUsage();
     const readyRuntimeRepairs = await repairReadyCodexRuntimeMetadata(this.deps.adapter, this.teamId);
 
-    const [ready, needsReview] = await Promise.all([
+    const [ready, allNeedsReview] = await Promise.all([
       listReadyItems(this.deps.adapter, this.teamId),
       listBacklogByState(this.deps.adapter, { team_id: this.teamId, state: "needs_review" }),
     ]);
+    const dispatchStatuses = await getDispatchStatusesByPhid(
+      this.deps.adapter,
+      allNeedsReview.map((item) => item.last_dispatch_phid).filter((phid): phid is string => !!phid),
+    );
+    const needsReview = allNeedsReview.filter((item) => {
+      if (!item.last_dispatch_phid) return true;
+      const status = dispatchStatuses.get(item.last_dispatch_phid);
+      return !status || !AUTO_PROMOTE_HEALTH_STALE_ALREADY_DISPATCHED_STATUSES.has(status);
+    });
     const plan = selectAutoPromotions(needsReview, ready, {
       floor: config.auto_promote_floor,
       minLanes: config.auto_promote_min_lanes,

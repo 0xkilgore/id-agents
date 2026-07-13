@@ -87,6 +87,49 @@ async function seedReadyItem(adapter: SqliteAdapter): Promise<BacklogItem> {
   });
 }
 
+async function seedReadyBuildFuel(adapter: SqliteAdapter, index: number): Promise<BacklogItem> {
+  await setMode(adapter, "default", "running");
+  return insertBacklogItem(adapter, {
+    team_id: "default",
+    logical_key: `ready-fuel-${index}`,
+    title: `ready fuel ${index}`,
+    track: "T-ORCH",
+    to_agent: "roger",
+    dispatch_body: `[project: kapelle][T-ORCH][BUILD] roger: ready fuel ${index}`,
+    readiness_state: "ready",
+    risk_class: "build",
+    write_scope: [`repo/ready-${index}`],
+    token_estimate: 1000,
+    provider: "openai",
+    runtime: "codex",
+  });
+}
+
+async function seedDispatchStatus(adapter: SqliteAdapter, phid: string, status: string): Promise<void> {
+  const now = "2026-07-13T12:00:00.000Z";
+  await adapter.query(
+    `INSERT INTO dispatch_scheduler_queue
+       (dispatch_phid, team_id, query_id, to_agent, from_actor, channel, subject,
+        body_markdown, provider, runtime, status, not_before_at, updated_at)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
+    [
+      phid,
+      "team-uuid-test",
+      `q_${phid}`,
+      "roger",
+      "co",
+      "manager",
+      "subject",
+      "body",
+      "openai",
+      "codex",
+      status,
+      now,
+      now,
+    ],
+  );
+}
+
 describe("RD-003 — atomic CO fire", () => {
   it("mode (a): enqueue rejects after the worktree bind → item is REVERTED, not stranded", async () => {
     const adapter = new SqliteAdapter(":memory:");
@@ -178,6 +221,80 @@ describe("RD-003 — atomic CO fire", () => {
 });
 
 describe("empty auto-promote pipe alert", () => {
+  it("excludes stale terminal already-dispatched rows from low-fuel health while preserving failed retry blockers", async () => {
+    const adapter = new SqliteAdapter(":memory:");
+    await migrateSqlite(adapter);
+    await setMode(adapter, "default", "running");
+
+    for (let i = 1; i <= 6; i += 1) {
+      await seedReadyBuildFuel(adapter, i);
+    }
+
+    for (let i = 1; i <= 5; i += 1) {
+      await seedDispatchStatus(adapter, `phid:disp-done-${i}`, "done");
+      await seedNeedsReviewItem(adapter, {
+        title: `stale terminal already dispatched ${i}`,
+        last_dispatch_phid: `phid:disp-done-${i}`,
+        write_scope: [`repo/stale-done-${i}`],
+      });
+    }
+
+    const failedRows: BacklogItem[] = [];
+    for (let i = 1; i <= 3; i += 1) {
+      await seedDispatchStatus(adapter, `phid:disp-failed-${i}`, "failed");
+      failedRows.push(await seedNeedsReviewItem(adapter, {
+        title: `retryable failed already dispatched ${i}`,
+        last_dispatch_phid: `phid:disp-failed-${i}`,
+        write_scope: [`repo/failed-${i}`],
+      }));
+    }
+
+    const lowConfidence = await seedNeedsReviewItem(adapter, {
+      title: "low confidence non-dispatched candidate",
+      approved_by: null,
+      approved_at: null,
+      flesh_confidence: 0.55,
+      write_scope: ["repo/low-confidence-contract"],
+    });
+
+    const daemon = new ContinuousOrchestrationDaemon({
+      adapter,
+      config: {
+        ...config(),
+        auto_flesh_enabled: true,
+        auto_promote_enabled: true,
+        auto_promote_floor: 12,
+        auto_promote_min_lanes: 1,
+        max_flesh_per_tick: 0,
+      },
+      enqueue: async (item) => ({ dispatch_phid: `phid:disp-${item.item_id}`, query_id: `q-${item.item_id}` }),
+      readUsage: usage,
+      readInFlight: noInFlight,
+    });
+
+    const status = await daemon.explainAutoPromoteHealth();
+
+    expect(status.lanes.build_ready).toBe(6);
+    expect(status.floor).toBe(12);
+    expect(status.below_floor).toBe(true);
+    expect(status.triggered).toBe(true);
+    expect(status.promoted_count).toBe(0);
+    expect(status.candidates_considered).toBe(4);
+    expect(status.candidates.map((item) => item.item_id).sort()).toEqual(
+      [...failedRows.map((item) => item.item_id), lowConfidence.item_id].sort(),
+    );
+    expect(status.candidates.map((item) => item.title)).not.toContain("stale terminal already dispatched 1");
+    expect(status.skipped_count).toBe(4);
+    expect(status.blocker_class_counts).toEqual([
+      { class: "already_dispatched", count: 3, label: "already-dispatched rows" },
+      { class: "confidence_threshold", count: 1, label: "confidence threshold" },
+    ]);
+    expect(status.next_action).toEqual({
+      code: "manual_promote_or_close_already_dispatched",
+      summary: "manually /promote safe retries or close stale already-dispatched rows",
+    });
+  });
+
   it("fires on one tick when every needs_review candidate is confidence-threshold or already-dispatched blocked", async () => {
     const adapter = new SqliteAdapter(":memory:");
     await migrateSqlite(adapter);
