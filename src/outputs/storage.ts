@@ -727,7 +727,34 @@ export async function registerArtifactPathDelivery(
     nowIso,
   );
 
+  await reconcileDispatchReceiptArtifactPath(adapter, {
+    dispatch_ref: input.dispatch_ref ?? null,
+    abs_path: input.abs_path,
+    nowIso,
+  });
+
   return { ...result, body_cached: snapshot.bodyText != null, body_error: snapshot.bodyError, evidence_inserted: evidence.inserted };
+}
+
+export async function reconcileDispatchReceiptArtifactPath(
+  adapter: DbAdapter,
+  input: { dispatch_ref: string | null; abs_path: string; nowIso: string },
+): Promise<{ updated: boolean }> {
+  const dispatchRef = input.dispatch_ref?.trim();
+  if (!dispatchRef || !input.abs_path.trim()) return { updated: false };
+  try {
+    const result = await adapter.query(
+      `UPDATE dispatch_scheduler_queue
+          SET artifact_path = ?, updated_at = ?
+        WHERE dispatch_phid = ?
+          AND status = 'done'
+          AND (artifact_path IS NULL OR artifact_path = '')`,
+      [input.abs_path, input.nowIso, dispatchRef],
+    );
+    return { updated: (result.rowCount ?? 0) > 0 };
+  } catch {
+    return { updated: false };
+  }
 }
 
 export function artifactBodyVersionKey(
