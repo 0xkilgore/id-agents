@@ -84,7 +84,15 @@ export interface OrchestrationReadyItemBlockerProjection {
   ready: number;
   actionable: number;
   stale_ready_floor: boolean;
-  categories: Array<{ code: string; category: string; count: number; examples: string[] }>;
+  categories: Array<{
+    code: string;
+    category: string;
+    count: number;
+    examples: string[];
+    owner_lane: string;
+    reason: string;
+    recommended_action: string;
+  }>;
 }
 
 export interface TaskActionReceiptCounts {
@@ -342,11 +350,19 @@ async function readReadyItemBlockerProjection(
   for (const ids of dependencyImpact.values()) for (const id of ids) blockedDependencyItemIds.add(id);
   const agentRuntimes = await readAgentRuntimeMap(adapter, rows.map((row) => row.to_agent).filter((name): name is string => !!name));
 
-  const categories = new Map<string, { code: string; category: string; count: number; examples: string[] }>();
+  const categories = new Map<string, {
+    code: string;
+    category: string;
+    count: number;
+    examples: string[];
+    owner_lane: string;
+    reason: string;
+    recommended_action: string;
+  }>();
   let actionable = 0;
-  const add = (code: string, category: string, itemId: string) => {
-    const key = `${category}:${code}`;
-    const current = categories.get(key) ?? { code, category, count: 0, examples: [] };
+  const add = (blocker: ReadyAdmissionBlocker, itemId: string) => {
+    const key = `${blocker.category}:${blocker.code}`;
+    const current = categories.get(key) ?? { ...blocker, count: 0, examples: [] };
     current.count += 1;
     if (current.examples.length < 5) current.examples.push(itemId);
     categories.set(key, current);
@@ -355,7 +371,7 @@ async function readReadyItemBlockerProjection(
   for (const row of rows) {
     const blocker = classifyReadyAdmissionBlocker(row, blockedDependencyItemIds, agentRuntimes);
     if (blocker) {
-      add(blocker.code, blocker.category, row.item_id);
+      add(blocker, row.item_id);
     } else {
       actionable += 1;
     }
@@ -475,19 +491,63 @@ async function readAgentRuntimeMap(adapter: DbAdapter, names: string[]): Promise
   return out;
 }
 
+interface ReadyAdmissionBlocker {
+  code: string;
+  category: string;
+  owner_lane: string;
+  reason: string;
+  recommended_action: string;
+}
+
 function classifyReadyAdmissionBlocker(
   row: BacklogQueueRow,
   blockedDependencyItemIds: Set<string>,
   agentRuntimes: Map<string, string>,
-): { code: string; category: string } | null {
-  if (!hasDispatchPayload(row)) return { code: "missing_dispatch_target", category: "dispatch_admission" };
-  if (row.last_dispatch_phid && row.retry_safe !== 1) return { code: "duplicate_dispatch_retry_required", category: "retry_safety" };
-  if (!isAutoRunRisk(row.risk_class)) return { code: "risk_requires_approval", category: "lane_eligibility" };
+): ReadyAdmissionBlocker | null {
+  if (!hasDispatchPayload(row)) {
+    return {
+      code: "missing_dispatch_target",
+      category: "dispatch_admission",
+      owner_lane: "orchestration",
+      reason: "ready row is missing a target agent or dispatch body",
+      recommended_action: "repair ready metadata before admission can launch the item",
+    };
+  }
+  if (row.last_dispatch_phid && row.retry_safe !== 1) {
+    return {
+      code: "duplicate_dispatch_retry_required",
+      category: "retry_safety",
+      owner_lane: "orchestration",
+      reason: "ready row is still linked to a prior dispatch and has not been marked retry-safe",
+      recommended_action: "mark the item retry-safe or create an explicit retry before readmitting it",
+    };
+  }
+  if (!isAutoRunRisk(row.risk_class)) {
+    return {
+      code: "risk_requires_approval",
+      category: "lane_eligibility",
+      owner_lane: "chris",
+      reason: "ready row has a risk class that cannot auto-run",
+      recommended_action: "review and approve the item or lower the risk class before admission",
+    };
+  }
   if (parseStringArray(row.dependencies_json).length > 0 || blockedDependencyItemIds.has(row.item_id)) {
-    return { code: "blocked_dependency", category: "lane_eligibility" };
+    return {
+      code: "blocked_dependency",
+      category: "lane_eligibility",
+      owner_lane: "orchestration",
+      reason: "ready row still has unresolved backlog dependencies",
+      recommended_action: "land, clear, or supersede the dependency before admission",
+    };
   }
   if (hasProviderRuntimeMismatch(row, agentRuntimes.get(row.to_agent ?? ""))) {
-    return { code: "provider_runtime_mismatch", category: "runtime_unavailable" };
+    return {
+      code: "provider_runtime_mismatch",
+      category: "runtime_unavailable",
+      owner_lane: "fleet-ops",
+      reason: "ready row requests a provider/runtime the target agent is not running",
+      recommended_action: "route to a compatible agent or update the requested provider/runtime",
+    };
   }
   return null;
 }
@@ -579,6 +639,7 @@ function countTaskActionReceipt(counts: TaskActionReceiptCounts, routeStatus: Pa
   if (!routeStatus) return;
   if (routeStatus.routed) counts.routed += 1;
   else if (routeStatus.retryable || routeStatus.error) counts.failed += 1;
+  else if (isHistoricalLinkedQueryFailure(routeStatus)) counts.failed += 1;
   else if (routeStatus.needs_chris) counts.needs_chris += 1;
   else if (
     routeStatus.skipped === "acknowledged" ||
@@ -590,6 +651,20 @@ function countTaskActionReceipt(counts: TaskActionReceiptCounts, routeStatus: Pa
   ) {
     counts.consumed += 1;
   }
+}
+
+function isHistoricalLinkedQueryFailure(routeStatus: ParsedRouteStatus): boolean {
+  const text = [
+    routeStatus.route_kind,
+    routeStatus.visible_state,
+    routeStatus.skipped,
+    routeStatus.failure_detail,
+  ]
+    .filter((x): x is string => typeof x === "string" && x.trim() !== "")
+    .join(" ")
+    .toLowerCase();
+  return text.includes("linked query terminated expired") ||
+    (text.includes("linked") && text.includes("query") && text.includes("failed"));
 }
 
 function isNoopAckRoute(routeStatus: ParsedRouteStatus | null): routeStatus is ParsedRouteStatus {
@@ -604,11 +679,13 @@ function isNoopAckRoute(routeStatus: ParsedRouteStatus | null): routeStatus is P
 
 interface ParsedRouteStatus {
   route_kind: string | null;
+  visible_state: string | null;
   routed: boolean;
   retryable: boolean;
   target_agent: string | null;
   skipped: string | null;
   error: string | null;
+  failure_detail: string | null;
   needs_chris: boolean;
   dispatch: { dispatch_phid?: string | null } | null;
   task_triage_id: string | null;
@@ -622,11 +699,13 @@ function parseRouteStatus(value: unknown): ParsedRouteStatus | null {
     : null;
   return {
     route_kind: typeof v.route_kind === "string" ? v.route_kind : null,
+    visible_state: typeof v.visible_state === "string" ? v.visible_state : null,
     routed: v.routed === true,
     retryable: v.retryable === true,
     target_agent: typeof v.target_agent === "string" ? v.target_agent : null,
     skipped: typeof v.skipped === "string" ? v.skipped : null,
     error: typeof v.error === "string" && v.error.trim() !== "" ? v.error : null,
+    failure_detail: typeof v.failure_detail === "string" && v.failure_detail.trim() !== "" ? v.failure_detail : null,
     needs_chris: v.needs_chris === true || v.requires_chris === true || v.skipped === "needs_chris",
     dispatch,
     task_triage_id: firstString(v.task_triage_id, v.taskTriageId, v.triage_id, v.triageId),

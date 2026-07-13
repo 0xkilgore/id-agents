@@ -1046,12 +1046,12 @@ describe("daemon — dry-run vs live", () => {
       stale_ready_floor: false,
     });
     expect(res.body.health.ready_item_blockers.categories).toEqual([
-      {
+      expect.objectContaining({
         code: "duplicate_dispatch_retry_required",
         category: "retry_safety",
         count: 1,
         examples: [expect.any(String)],
-      },
+      }),
     ]);
   });
 
