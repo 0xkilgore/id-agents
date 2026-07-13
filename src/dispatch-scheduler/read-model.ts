@@ -293,6 +293,7 @@ export async function readDispatchById(
   dispatchId: string,
   opts: DeriveOptions = {},
 ): Promise<DispatchReadRow | null> {
+  await reconcileDispatchArtifactPathFromCatalog(adapter, teamId, dispatchId);
   const { rows } = await adapter.query<DispatchDbRow>(
     `SELECT d.dispatch_phid, d.team_id, d.query_id, d.to_agent, d.from_actor, d.channel, d.subject,
             d.provider, d.runtime, d.priority, d.status, d.not_before_at, d.attempt_count,
@@ -318,6 +319,48 @@ export async function readDispatchById(
     [teamId, dispatchId, dispatchId, dispatchId],
   );
   return rows[0] ? rowToDispatch(rows[0], opts) : null;
+}
+
+export async function reconcileDispatchArtifactPathFromCatalog(
+  adapter: DbAdapterLike,
+  teamId: string,
+  dispatchId: string,
+  nowIso: string = new Date().toISOString(),
+): Promise<{ updated: boolean; artifact_path: string | null }> {
+  try {
+    const { rows } = await adapter.query<{ dispatch_phid: string; abs_path: string }>(
+      `SELECT d.dispatch_phid, a.abs_path
+         FROM dispatch_scheduler_queue d
+         JOIN artifacts a ON a.dispatch_ref = d.dispatch_phid
+        WHERE d.team_id = ?
+          AND (d.dispatch_phid = ? OR d.query_id = ? OR d.agent_query_id = ?)
+          AND d.status = 'done'
+          AND (d.artifact_path IS NULL OR d.artifact_path = '')
+          AND a.abs_path IS NOT NULL
+          AND a.abs_path != ''
+        ORDER BY a.produced_at DESC, a.updated_at DESC, a.artifact_id ASC
+        LIMIT 1`,
+      [teamId, dispatchId, dispatchId, dispatchId],
+    );
+    const match = rows[0];
+    if (!match) return { updated: false, artifact_path: null };
+
+    await adapter.query(
+      `UPDATE dispatch_scheduler_queue
+          SET artifact_path = ?, updated_at = ?
+        WHERE team_id = ?
+          AND dispatch_phid = ?
+          AND status = 'done'
+          AND (artifact_path IS NULL OR artifact_path = '')`,
+      [match.abs_path, nowIso, teamId, match.dispatch_phid],
+    );
+    return {
+      updated: true,
+      artifact_path: match.abs_path,
+    };
+  } catch {
+    return { updated: false, artifact_path: null };
+  }
 }
 
 /** Normalize an optional provider iterable into a Set for O(1) membership. */

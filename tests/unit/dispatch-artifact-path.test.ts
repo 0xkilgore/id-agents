@@ -10,6 +10,8 @@ import { SqliteAdapter } from "../../src/db/sqlite-adapter.js";
 import { migrateSqlite } from "../../src/db/migrations/sqlite.js";
 import { SqliteDispatchReactor } from "../../src/dispatch-scheduler/sqlite-dispatch-reactor.js";
 import { DispatchDocClient } from "../../src/dispatch-scheduler/dispatch-doc-client.js";
+import { readDispatchById } from "../../src/dispatch-scheduler/read-model.js";
+import { registerArtifact } from "../../src/outputs/storage.js";
 import type { EnqueueInput } from "../../src/dispatch-scheduler/types.js";
 
 const base: EnqueueInput = {
@@ -99,5 +101,42 @@ describe("Spec 056 — dispatch artifact_path", () => {
     await reactor.markDoneWithResult(phid, { artifact_path: "", tl_dr: "x" });
     const reloaded = await reactor.getByPhid(phid);
     expect(reloaded?.artifact_path).toBeNull();
+  });
+
+  it("readDispatchById reconciles an existing catalog artifact into an empty dispatch receipt", async () => {
+    const { client, reactor } = harness("2026-07-13T16:00:00.000Z");
+    const phid = await enqueueInFlight(client, reactor, "q-catalog", "agent-q-catalog");
+    await reactor.markDoneWithResult(phid, { tl_dr: "artifact registered separately" });
+    await registerArtifact(
+      adapter,
+      {
+        basename: "receipt-reconcile.md",
+        agent: "coder-max",
+        abs_path: "/Users/kilgore/Dropbox/Code/cleveland-park/output/receipt-reconcile.md",
+        title: "Receipt reconcile",
+        produced_at: "2026-07-13T16:01:00.000Z",
+        source: "agent-done",
+        dispatch_ref: phid,
+      },
+      "2026-07-13T16:01:00.000Z",
+    );
+
+    const before = await reactor.getByPhid(phid);
+    expect(before?.artifact_path).toBeNull();
+
+    const read = await readDispatchById(
+      adapter,
+      "team-test",
+      phid,
+      {},
+    );
+    expect(read?.evidence.artifact_path).toBe(
+      "/Users/kilgore/Dropbox/Code/cleveland-park/output/receipt-reconcile.md",
+    );
+
+    const persisted = await reactor.getByPhid(phid);
+    expect(persisted?.artifact_path).toBe(
+      "/Users/kilgore/Dropbox/Code/cleveland-park/output/receipt-reconcile.md",
+    );
   });
 });
