@@ -35,6 +35,7 @@ import {
 import { attachBacklogRetryReadiness } from "./backlog-retry-readiness.js";
 import type { RiskClass } from "./types.js";
 import { autoPromoteRejections } from "./auto-promote-policy.js";
+import { buildStaleDuplicateBacklogReport } from "./stale-duplicate-report.js";
 import { parseRoadmapToBacklog } from "./roadmap-import.js";
 import { runFleshPass } from "./flesh-runner.js";
 import { resolveTrack } from "../track-registry/registry.js";
@@ -260,6 +261,23 @@ export function mountContinuousOrchestrationRoutes(app: Application, opts: Orche
         },
         groups,
       });
+    } catch (err) {
+      res.status(500).json({ ok: false, error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  app.get("/orchestration/backlog/stale-duplicates", async (_req: Request, res: Response) => {
+    try {
+      const [needsReview, ready] = await Promise.all([
+        listBacklogByState(adapter, { team_id: teamId, state: "needs_review" }),
+        listBacklogByState(adapter, { team_id: teamId, state: "ready" }),
+      ]);
+      const items = [...needsReview, ...ready];
+      const outcomes = await getDispatchOutcomesByPhid(
+        adapter,
+        items.map((item) => item.last_dispatch_phid).filter((phid): phid is string => !!phid),
+      );
+      res.json({ ok: true, report: buildStaleDuplicateBacklogReport(items, outcomes) });
     } catch (err) {
       res.status(500).json({ ok: false, error: err instanceof Error ? err.message : String(err) });
     }
