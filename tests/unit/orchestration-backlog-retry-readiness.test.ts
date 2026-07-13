@@ -96,6 +96,90 @@ async function seedNeedsReview(title: string, phid: string) {
 }
 
 describe("GET /orchestration/backlog retry_readiness", () => {
+  it("classifies focused retry-readiness fixtures without conflating duplicates and retry fuel", async () => {
+    await seedDispatch({
+      phid: "phid:disp-terminal-success",
+      status: "done",
+      promotion_result_json: JSON.stringify({
+        completed: true,
+        repos: [{ pushed: true, verified: true, promoted_sha: "abc123", remote_main_sha: "abc123" }],
+      }),
+    });
+    await seedDispatch({
+      phid: "phid:disp-active-failed-retry",
+      status: "failed",
+      failure_kind: "scheduler_wedged",
+      failure_detail: "agent process lost during dispatch",
+      recovery_attempts: 1,
+    });
+    await seedDispatch({
+      phid: "phid:disp-linked-query-expired",
+      status: "failed",
+      failure_kind: "expired",
+      failure_detail: "linked query terminated expired",
+    });
+    await seedDispatch({
+      phid: "phid:disp-manual-promote",
+      status: "failed",
+      failure_kind: "provider_timeout",
+      failure_detail: "provider_timeout while waiting for agent reply",
+    });
+
+    const terminalSuccess = await seedNeedsReview(
+      "terminal-success stale duplicate fixture",
+      "phid:disp-terminal-success",
+    );
+    const failedRetry = await seedNeedsReview("active failed retry candidate fixture", "phid:disp-active-failed-retry");
+    const linkedQueryExpired = await seedNeedsReview(
+      "linked-query-expired noise fixture",
+      "phid:disp-linked-query-expired",
+    );
+    const manualPromote = await seedNeedsReview("manual promote required fixture", "phid:disp-manual-promote");
+
+    const r = await call("/orchestration/backlog?state=needs_review");
+
+    expect(r.status).toBe(200);
+    const byId = Object.fromEntries(r.body.items.map((item: any) => [item.item_id, item]));
+
+    expect(byId[terminalSuccess.item_id].retry_readiness).toMatchObject({
+      status: "stale_duplicate",
+      retryable: false,
+      stale_duplicate: true,
+      manual_promote_required: false,
+      next_action: "close_or_ignore",
+      prior_dispatch_status: "done",
+    });
+    expect(byId[failedRetry.item_id].retry_readiness).toMatchObject({
+      status: "retryable_failed_row",
+      retryable: true,
+      stale_duplicate: false,
+      manual_promote_required: true,
+      next_action: "retry",
+      prior_dispatch_status: "failed",
+      dispatch_retry_count: 1,
+      failure_kind: "scheduler_wedged",
+    });
+    expect(byId[linkedQueryExpired.item_id].retry_readiness).toMatchObject({
+      status: "retryable_failed_row",
+      retryable: true,
+      stale_duplicate: false,
+      manual_promote_required: true,
+      next_action: "retry",
+      prior_dispatch_status: "failed",
+      failure_kind: "expired",
+      failure_detail: "linked query terminated expired",
+    });
+    expect(byId[manualPromote.item_id].retry_readiness).toMatchObject({
+      status: "retryable_failed_row",
+      retryable: true,
+      stale_duplicate: false,
+      manual_promote_required: true,
+      next_action: "retry",
+      prior_dispatch_status: "failed",
+      failure_kind: "provider_timeout",
+    });
+  });
+
   it("distinguishes retryable failed rows from stale duplicates", async () => {
     await seedDispatch({
       phid: "phid:disp-retryable",
@@ -122,6 +206,7 @@ describe("GET /orchestration/backlog retry_readiness", () => {
       status: "retryable_failed_row",
       retryable: true,
       stale_duplicate: false,
+      manual_promote_required: true,
       next_action: "retry",
       prior_dispatch_phid: "phid:disp-retryable",
       prior_dispatch_status: "failed",
@@ -131,6 +216,7 @@ describe("GET /orchestration/backlog retry_readiness", () => {
       status: "stale_duplicate",
       retryable: false,
       stale_duplicate: true,
+      manual_promote_required: false,
       next_action: "close_or_ignore",
       prior_dispatch_phid: "phid:disp-done",
       prior_dispatch_status: "done",
@@ -148,6 +234,7 @@ describe("GET /orchestration/backlog retry_readiness", () => {
       status: "waiting_on_live_dispatch",
       retryable: false,
       stale_duplicate: false,
+      manual_promote_required: false,
       next_action: "wait",
       prior_dispatch_status: "in_flight",
     });

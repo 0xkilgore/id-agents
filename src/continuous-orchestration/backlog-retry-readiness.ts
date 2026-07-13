@@ -29,6 +29,7 @@ export function deriveBacklogRetryReadiness(
     failure_kind: outcome?.failure_kind ?? null,
     failure_detail: outcome?.failure_detail ?? null,
     recovery_status: outcome?.recovery_status ?? null,
+    manual_promote_required: false,
   };
 
   if (item.readiness_state !== "needs_review" || !item.last_dispatch_phid) {
@@ -121,6 +122,7 @@ export function deriveBacklogRetryReadiness(
     status: "retryable_failed_row",
     retryable: true,
     stale_duplicate: false,
+    manual_promote_required: true,
     next_action: "retry",
     reason: `prior dispatch failed with retryable transient; retry ${attempts + 1}/${BACKLOG_RETRY_CAP} is allowed`,
   };

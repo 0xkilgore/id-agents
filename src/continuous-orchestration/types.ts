@@ -44,6 +44,7 @@ export interface BacklogRetryReadiness {
   status: BacklogRetryReadinessStatus;
   retryable: boolean;
   stale_duplicate: boolean;
+  manual_promote_required: boolean;
   reason: string;
   next_action: "retry" | "wait" | "close_or_ignore" | "operator_review" | "none";
   prior_dispatch_phid: string | null;
