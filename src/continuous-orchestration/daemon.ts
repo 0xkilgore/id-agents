@@ -23,6 +23,7 @@ import {
   appendDecisions,
   bindItemForFire,
   getOrchestrationState,
+  getDispatchOutcomesByPhid,
   listBacklogByState,
   listDependencyResolution,
   listReadyItems,
@@ -34,6 +35,7 @@ import {
   setMode,
   type ReadyRuntimeRepair,
 } from "./storage.js";
+import { deriveBacklogRetryReadiness } from "./backlog-retry-readiness.js";
 import { runFleshPass, type FleshRunSummary } from "./flesh-runner.js";
 import { selectAutoPromotions } from "./auto-promote-policy.js";
 import { sendTelegramAlert, type AlertSender } from "./telegram.js";
@@ -285,8 +287,19 @@ export interface AutoPromoteHealth {
   top_skip_reasons: Array<{ reason: string; count: number }>;
   blocker_class_counts: AutoPromoteBlockerClassCount[];
   next_action: AutoPromoteNextAction;
+  operator_summary: AutoPromoteOperatorSummary;
   empty_pipe_alert: AutoPromoteEmptyPipeAlert;
   ready_runtime_repairs: ReadyRuntimeRepair[];
+  summary: string;
+}
+
+export interface AutoPromoteOperatorSummary {
+  schema_version: "orchestration.auto_promote_operator_summary.v1";
+  retryable_failed_rows: number;
+  stale_duplicate_rows: number;
+  confidence_held_rows: number;
+  safe_actions: string[];
+  empty_fuel: boolean;
   summary: string;
 }
 
@@ -1116,6 +1129,13 @@ export class ContinuousOrchestrationDaemon {
     const triggered = blockedReason || capacityFuel.capacityOccupied ? false : plan.triggered;
     const candidatesConsidered = triggered ? plan.candidates_considered : 0;
     const blockerClassCounts = triggered ? blockerClassCountsFrom(skippedItems) : [];
+    const operatorSummary = await buildAutoPromoteOperatorSummary(this.deps.adapter, {
+      triggered,
+      ready: plan.before.build_ready,
+      candidatesConsidered,
+      needsReview,
+      skippedItems,
+    });
     const nextAction = nextAutoPromoteAction({
       blockedReason,
       belowFloor,
@@ -1197,6 +1217,7 @@ export class ContinuousOrchestrationDaemon {
       top_skip_reasons: triggered ? topSkipReasons : [],
       blocker_class_counts: blockerClassCounts,
       next_action: nextAction,
+      operator_summary: operatorSummary,
       empty_pipe_alert: emptyPipeAlert,
       ready_runtime_repairs: readyRuntimeRepairs,
       summary,
@@ -1663,6 +1684,68 @@ export class ContinuousOrchestrationDaemon {
   getState() {
     return getOrchestrationState(this.deps.adapter, this.teamId);
   }
+}
+
+async function buildAutoPromoteOperatorSummary(
+  adapter: DbAdapter,
+  args: {
+    triggered: boolean;
+    ready: number;
+    candidatesConsidered: number;
+    needsReview: BacklogItem[];
+    skippedItems: Array<{ item_id: string; reasons: string[] }>;
+  },
+): Promise<AutoPromoteOperatorSummary> {
+  const outcomes = await getDispatchOutcomesByPhid(
+    adapter,
+    args.needsReview.map((item) => item.last_dispatch_phid).filter((phid): phid is string => !!phid),
+  );
+  let retryableFailedRows = 0;
+  let staleDuplicateRows = 0;
+  for (const item of args.needsReview) {
+    const readiness = deriveBacklogRetryReadiness(item, outcomes.get(item.last_dispatch_phid ?? ""));
+    if (readiness.status === "retryable_failed_row") retryableFailedRows += 1;
+    if (readiness.status === "stale_duplicate") staleDuplicateRows += 1;
+  }
+
+  const confidenceHeldRows = args.skippedItems.filter((item) =>
+    item.reasons.some((reason) => autoPromoteBlockerClass(reason) === "confidence_threshold"),
+  ).length;
+  const hasGatedFuel =
+    args.ready > 0 ||
+    args.candidatesConsidered > 0 ||
+    retryableFailedRows > 0 ||
+    staleDuplicateRows > 0 ||
+    confidenceHeldRows > 0;
+  const safeActions: string[] = [];
+  if (retryableFailedRows > 0) {
+    safeActions.push("Manually /promote retryable failed rows only after confirming the retry_safe gate.");
+  }
+  if (staleDuplicateRows > 0) {
+    safeActions.push("Close stale duplicate rows whose prior dispatch already landed or was superseded; do not refire them.");
+  }
+  if (confidenceHeldRows > 0) {
+    safeActions.push("Re-flesh confidence-held rows or manually approve them after review.");
+  }
+  if (safeActions.length === 0) {
+    safeActions.push("Inspect skipped_items before approving or refueling candidates.");
+  }
+  if (hasGatedFuel) {
+    safeActions.push("Treat this as gated fuel; rows exist but require operator gates.");
+  }
+
+  const summary = hasGatedFuel
+    ? `gated fuel: retryable_failed_rows=${retryableFailedRows}, stale_duplicate_rows=${staleDuplicateRows}, confidence_held_rows=${confidenceHeldRows}; safe actions: ${safeActions.join(" ")}`
+    : "no ready or needs_review build fuel is currently visible";
+  return {
+    schema_version: "orchestration.auto_promote_operator_summary.v1",
+    retryable_failed_rows: retryableFailedRows,
+    stale_duplicate_rows: staleDuplicateRows,
+    confidence_held_rows: confidenceHeldRows,
+    safe_actions: safeActions,
+    empty_fuel: !hasGatedFuel,
+    summary,
+  };
 }
 
 function topSkipReasonsFrom(
