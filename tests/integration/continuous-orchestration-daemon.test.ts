@@ -706,6 +706,46 @@ describe("daemon — dry-run vs live", () => {
     expect(repaired).toMatchObject({ to_agent: "pool:backend", provider: "openai", runtime: "codex" });
   });
 
+  it("canonicalizes wave32 build-pool codex-cli metadata before late-bound builder admission", async () => {
+    await seedAgent(adapter, "substrate-orch-codex", "running", "codex");
+    const stale = await seedReady(adapter, {
+      title: "wave32 backend pool ready fuel",
+      track: "T-ORCH",
+      to_agent: "pool:backend",
+      provider: "openai",
+      runtime: "codex-cli",
+      write_scope: ["repos/id-agents"],
+      source_refs: ["wave32:kapelle:T-ORCH:backend"],
+    });
+    await markApproved(adapter, stale.item_id);
+    const { daemon } = makeDaemon(adapter, {
+      config: { dry_run: false, max_in_flight: 4 },
+      pools: testPoolRouting(),
+      resolveAgentRuntimes: (names) => getAgentRuntimeMap(adapter, names),
+    });
+    await daemon.setMode("running");
+
+    const explanation = await daemon.explainReadyAdmission();
+    const repaired = await getBacklogItem(adapter, stale.item_id);
+
+    expect(explanation.ready_runtime_repairs).toEqual([
+      expect.objectContaining({
+        item_id: stale.item_id,
+        to_agent: "pool:backend",
+        from_provider: "openai",
+        from_runtime: "codex-cli",
+        to_provider: "openai",
+        to_runtime: "codex",
+        reason: "explicit_pool_owner_lane",
+      }),
+    ]);
+    expect(explanation.admissible).toEqual([
+      expect.objectContaining({ item_id: stale.item_id, to_agent: "substrate-orch-codex" }),
+    ]);
+    expect(explanation.non_admitted).toHaveLength(0);
+    expect(repaired).toMatchObject({ to_agent: "pool:backend", provider: "openai", runtime: "codex" });
+  });
+
   it("repairs artifact-only CTO ready fuel back to Anthropic Claude in ready admission status", async () => {
     await seedAgent(adapter, "cto", "running", "claude-code-cli");
     const stale = await seedReady(adapter, {

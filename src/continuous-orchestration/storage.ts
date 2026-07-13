@@ -880,6 +880,9 @@ function shouldRepairReadyRowToCodex(row: BacklogRow & { agent_runtime: string |
   const targetRuntime = row.agent_runtime ? normalizeRuntime(row.agent_runtime) : null;
   if (targetRuntime === "codex") return { repair: true, reason: "target_agent_runtime_codex" };
 
+  const target = row.to_agent?.trim().toLowerCase() ?? "";
+  if (target.startsWith("pool:")) return { repair: true, reason: "explicit_pool_owner_lane" };
+
   const currentRuntime = row.runtime ? normalizeRuntime(row.runtime) : null;
   const currentProvider = row.provider ?? (currentRuntime ? resolveProviderFromRuntime(currentRuntime) : null);
   const carriesClaudeMetadata =
@@ -889,8 +892,6 @@ function shouldRepairReadyRowToCodex(row: BacklogRow & { agent_runtime: string |
     currentRuntime === "claude-code-local";
   if (!carriesClaudeMetadata) return { repair: false, reason: "not_claude_metadata" };
 
-  const target = row.to_agent?.trim().toLowerCase() ?? "";
-  if (target.startsWith("pool:")) return { repair: true, reason: "explicit_pool_owner_lane" };
   if (LEGACY_CODEX_OWNER_LANES.has(target) && row.agent_status !== "running") {
     return { repair: true, reason: "legacy_owner_lane_unavailable" };
   }
@@ -957,7 +958,8 @@ export async function repairReadyCodexRuntimeMetadata(
     const targetProvider = resolveProviderFromRuntime(targetRuntime);
     const currentRuntime = row.runtime ? normalizeRuntime(row.runtime) : null;
     const currentProvider = row.provider ?? (currentRuntime ? resolveProviderFromRuntime(currentRuntime) : null);
-    if (currentRuntime === targetRuntime && currentProvider === targetProvider) continue;
+    const rawRuntime = row.runtime?.trim() || null;
+    if (currentRuntime === targetRuntime && currentProvider === targetProvider && rawRuntime === targetRuntime) continue;
 
     const now = new Date().toISOString();
     await adapter.query(
