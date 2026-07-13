@@ -780,7 +780,7 @@ export async function reconcileStaleAlreadyDispatchedReadyRows(
       closed_at: new Date().toISOString(),
       from_state: "ready",
       to_state: toState,
-      reason,
+      reason: "close_or_ignore",
       prior_dispatch_phid: row.last_dispatch_phid ?? "",
       prior_dispatch_status: status,
       successor_dispatch_phid: null,

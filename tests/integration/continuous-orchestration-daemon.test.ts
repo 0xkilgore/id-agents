@@ -1844,6 +1844,7 @@ describe("stale already-dispatched ready reconciliation route", () => {
             closed_by: "hopper",
             from_state: "ready",
             to_state: "done",
+            reason: "close_or_ignore",
             prior_dispatch_phid: "phid:disp-closed",
             prior_dispatch_status: "done",
             successor_dispatch_phid: null,
@@ -1860,7 +1861,7 @@ describe("stale already-dispatched ready reconciliation route", () => {
           artifact_path: "/repo/output/superseded.md",
           receipt: expect.objectContaining({
             closed_by: "hopper",
-            reason: "already-dispatched ready row superseded after terminal dispatch failed",
+            reason: "close_or_ignore",
             successor_dispatch_phid: null,
             redispatch_safety: expect.objectContaining({
               safe_to_not_redispatch: true,
@@ -1880,6 +1881,7 @@ describe("stale already-dispatched ready reconciliation route", () => {
       closed_by: "hopper",
       from_state: "ready",
       to_state: "done",
+      reason: "close_or_ignore",
       prior_dispatch_phid: "phid:disp-closed",
       prior_dispatch_status: "done",
       successor_dispatch_phid: null,
@@ -1896,6 +1898,7 @@ describe("stale already-dispatched ready reconciliation route", () => {
       closed_by: "hopper",
       from_state: "ready",
       to_state: "superseded",
+      reason: "close_or_ignore",
       prior_dispatch_phid: "phid:disp-superseded",
       prior_dispatch_status: "failed",
       successor_dispatch_phid: null,

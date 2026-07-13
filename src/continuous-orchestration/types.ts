@@ -62,7 +62,7 @@ export interface StaleDuplicateCloseoutReceipt {
   closed_at: string;
   from_state: "ready";
   to_state: "done" | "superseded" | "ready";
-  reason: string;
+  reason: "close_or_ignore";
   prior_dispatch_phid: string;
   prior_dispatch_status: string;
   successor_dispatch_phid: string | null;

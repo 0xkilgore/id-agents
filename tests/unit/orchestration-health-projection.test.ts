@@ -200,6 +200,8 @@ describe("orchestration health projection", () => {
           to_state: "done",
           receipt: {
             closed_by: "hopper",
+            reason: "close_or_ignore",
+            prior_dispatch_phid: "phid:disp-already-done",
             prior_dispatch_status: "done",
             successor_dispatch_phid: null,
             redispatch_safety: {
@@ -216,12 +218,17 @@ describe("orchestration health projection", () => {
     expect(closed?.stale_duplicate_closeout_receipt).toMatchObject({
       closed_by: "hopper",
       to_state: "done",
+      reason: "close_or_ignore",
       prior_dispatch_phid: "phid:disp-already-done",
+      prior_dispatch_status: "done",
       redispatch_safety: { safe_to_not_redispatch: true },
     });
+    expect(closed?.updated_by).toBe("hopper");
 
     const after = await readOrchestrationHealthProjection(adapter, "default");
     expect(after.ready_item_blockers.categories).toEqual([]);
+    expect(after.ready_item_blockers.ready).toBe(0);
+    expect(after.ready_item_blockers.actionable).toBe(0);
   });
 
   it("counts active needs_clarification blockers, recent ids, and backlog dependency impact", async () => {
