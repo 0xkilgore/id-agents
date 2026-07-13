@@ -18,6 +18,8 @@ export interface SmokeProbe {
   build_sha: string | null;
   origin_main_sha: string | null;
   behind_origin: boolean | null;
+  nominal?: boolean | null;
+  nominal_reasons?: string[];
   routes: RouteProbe[];
   /** Startup/migration errors the freshly-booted manager reported (e.g.
    *  "no such column: provider"). A non-empty list is a boot-failure class and
@@ -40,7 +42,7 @@ export interface SmokeResult {
 }
 
 /** Pure: evaluate a probe against the post-deploy acceptance criteria. */
-export function evaluateSmoke(probe: SmokeProbe): SmokeResult {
+export function evaluateSmoke(probe: SmokeProbe, opts: { requireNominal?: boolean } = {}): SmokeResult {
   const checks: SmokeCheck[] = [];
 
   // 1. The process actually restarted.
@@ -78,6 +80,15 @@ export function evaluateSmoke(probe: SmokeProbe): SmokeResult {
       : `${startupErrors.length} startup error(s): ${startupErrors[0]}`,
   });
 
+  if (opts.requireNominal) {
+    const reasons = probe.nominal_reasons ?? [];
+    checks.push({
+      name: "manager_nominal",
+      pass: probe.nominal === true,
+      detail: probe.nominal === true ? "nominal=true" : `nominal=${probe.nominal}; reasons=${reasons.join(",") || "unknown"}`,
+    });
+  }
+
   // 5. Every key route answers 200.
   for (const r of probe.routes) {
     checks.push({
@@ -99,6 +110,7 @@ export interface RunSmokeOptions {
   routes?: string[];
   timeoutMs?: number;
   fetchImpl?: typeof fetch;
+  requireNominal?: boolean;
 }
 
 export const DEFAULT_SMOKE_ROUTES = ["/health", "/loops", "/outputs/inbox"];
@@ -128,6 +140,8 @@ export async function runSmokeProbe(opts: RunSmokeOptions): Promise<SmokeResult>
   let build_sha: string | null = null;
   let origin_main_sha: string | null = null;
   let behind_origin: boolean | null = null;
+  let nominal: boolean | null = null;
+  let nominal_reasons: string[] = [];
   let startup_errors: string[] = [];
   try {
     const ctrl = new AbortController();
@@ -137,10 +151,16 @@ export async function runSmokeProbe(opts: RunSmokeOptions): Promise<SmokeResult>
     const body = (await res.json()) as {
       build?: { build_sha?: string; origin_main_sha?: string; behind_origin?: boolean | null; startup_errors?: string[] };
       startup_errors?: string[];
+      nominal?: boolean;
+      nominal_reasons?: string[];
     };
     build_sha = body.build?.build_sha ?? null;
     origin_main_sha = body.build?.origin_main_sha ?? null;
     behind_origin = body.build?.behind_origin ?? null;
+    nominal = typeof body.nominal === "boolean" ? body.nominal : null;
+    if (Array.isArray(body.nominal_reasons)) {
+      nominal_reasons = body.nominal_reasons.filter((r): r is string => typeof r === "string");
+    }
     // Accept startup_errors at either build.startup_errors or the top level.
     const errs = body.build?.startup_errors ?? body.startup_errors;
     if (Array.isArray(errs)) startup_errors = errs.filter((e): e is string => typeof e === "string");
@@ -154,9 +174,11 @@ export async function runSmokeProbe(opts: RunSmokeOptions): Promise<SmokeResult>
     build_sha,
     origin_main_sha,
     behind_origin,
+    nominal,
+    nominal_reasons,
     routes,
     startup_errors,
-  });
+  }, { requireNominal: opts.requireNominal });
 }
 
 function shortSha(sha: string | null): string {

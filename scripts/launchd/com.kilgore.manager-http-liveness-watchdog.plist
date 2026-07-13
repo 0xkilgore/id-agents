@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.kilgore.manager-http-liveness-watchdog</string>
+    <!-- T-RELY: external HTTP-liveness watchdog. Detects /health wedges even
+         when launchd PID and port listener still look alive. Captures bounded
+         diagnostics before restarting com.kilgore.id-agents-manager. -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/opt/homebrew/bin/node</string>
+        <string>/Users/kilgore/Dropbox/Code/cane/id-agents-deploy-main/scripts/manager-http-liveness-watchdog.mjs</string>
+    </array>
+    <key>StartInterval</key>
+    <integer>60</integer>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>HOME</key>
+        <string>/Users/kilgore</string>
+    </dict>
+    <key>StandardOutPath</key>
+    <string>/tmp/manager-http-liveness-watchdog.launchd.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/manager-http-liveness-watchdog.launchd.log</string>
+    <key>RunAtLoad</key>
+    <true/>
+</dict>
+</plist>

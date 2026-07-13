@@ -122,6 +122,8 @@ describe('GET /health build-stamp (T11.1)', () => {
     expect(res.status).toBe(200);
     const body = await res.json() as any;
     expect(body.status).toBe('ok');
+    expect(typeof body.nominal).toBe('boolean');
+    expect(Array.isArray(body.nominal_reasons)).toBe(true);
     expect(body.build).toBeTruthy();
     // The SHA the running binary was built from must be present (this is the
     // exact field the operator needs to see on /health).

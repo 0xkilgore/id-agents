@@ -1709,6 +1709,31 @@ export class AgentManagerDb {
     };
   }
 
+  private evaluateNominalHealth(input: {
+    build: BuildStatus;
+    disk: ReturnType<typeof readDiskHeadroom>;
+    supervisor: SupervisorHealthStatus;
+    startupErrors?: string[];
+  }): { nominal: boolean; nominal_reasons: string[] } {
+    const reasons: string[] = [];
+    if (input.build.behind_origin === true) reasons.push('build_behind_origin');
+    if (Array.isArray(input.startupErrors) && input.startupErrors.length > 0) {
+      reasons.push('startup_errors');
+    }
+    if (['warn', 'critical', 'unknown'].includes(input.disk.state)) {
+      reasons.push(`disk_${input.disk.state}`);
+    }
+    const supervisorOptional = process.env.SUPERVISOR_OPTIONAL === 'true';
+    if (!supervisorOptional) {
+      if (!input.supervisor.enabled || input.supervisor.state === 'disabled') {
+        reasons.push('supervisor_disabled');
+      } else if (!input.supervisor.running) {
+        reasons.push('supervisor_not_running');
+      }
+    }
+    return { nominal: reasons.length === 0, nominal_reasons: reasons };
+  }
+
   /**
    * T-RECON.2: classification options for the dispatch read-model. Threads the
    * model-policy constrained_providers so a failure on an intentionally-disabled
@@ -5338,8 +5363,13 @@ export class AgentManagerDb {
             error: err instanceof Error ? err.message : String(err),
             counts: { total: 0, accepted: 0, quarantined: 0, unassigned: 0, track_unknown: 0 },
           }));
+      const build = this.getBuildStatus();
+      const disk = readDiskHeadroom();
+      const supervisor = this.getSupervisorHealthStatus(now);
+      const nominal = this.evaluateNominalHealth({ build, disk, supervisor });
       const body = {
         status: 'ok',
+        ...nominal,
         team: teamName,
         agents: dbProbe.timedOut || dbProbe.value.count == null ? null : parseInt(dbProbe.value.count || '0'),
         datastore: dbProbe.timedOut ? { state: 'degraded', reason: 'health_db_probe_timeout' } : { state: 'ok' },
@@ -5347,13 +5377,13 @@ export class AgentManagerDb {
         recovery_backfill,
         conformance,
         // T11.1: the running build identity + staleness-vs-origin signal.
-        build: this.getBuildStatus(),
+        build,
         // T-RELY: fail-loud disk headroom so build waves see ENOSPC risk before
         // database I/O and test runs start failing mid-flight.
-        disk: readDiskHeadroom(),
+        disk,
         // Supervisor freshness: is the watch-and-alert loop itself running
         // recently enough to trust stale-manager / low-disk warnings?
-        supervisor: this.getSupervisorHealthStatus(now),
+        supervisor,
         alert_delivery: {
           telegram: getTelegramAlertDeliveryHealth(),
         },

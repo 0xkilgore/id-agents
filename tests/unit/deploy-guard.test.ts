@@ -118,6 +118,19 @@ describe("post-deploy smoke (T-DEPLOY.5)", () => {
   it("passes with an explicit clean boot (empty startup_errors)", () => {
     expect(evaluateSmoke({ ...good, startup_errors: [] }).pass).toBe(true);
   });
+
+  it("fails on nominal=false only when nominality is required", () => {
+    const degraded = { ...good, nominal: false, nominal_reasons: ["supervisor_disabled"] };
+    expect(evaluateSmoke(degraded).pass).toBe(true);
+    const r = evaluateSmoke(degraded, { requireNominal: true });
+    expect(r.pass).toBe(false);
+    expect(r.failures.join()).toMatch(/manager_nominal/);
+    expect(r.failures.join()).toMatch(/supervisor_disabled/);
+  });
+
+  it("passes required nominality when /health reports nominal=true", () => {
+    expect(evaluateSmoke({ ...good, nominal: true, nominal_reasons: [] }, { requireNominal: true }).pass).toBe(true);
+  });
 });
 
 describe("rollback decision + last-good store (T-DEPLOY.5)", () => {

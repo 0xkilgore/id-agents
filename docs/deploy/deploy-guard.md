@@ -1,4 +1,4 @@
-# Deploy Guard — fleet freshness + post-deploy smoke + auto-rollback (T-DEPLOY.1/.5)
+# Deploy Guard — fleet freshness + HTTP liveness + post-deploy smoke + auto-rollback (T-DEPLOY.1/.5)
 
 Automates the "merged != running" drift recovery so it stops costing manual
 intervention. Three parts:
@@ -41,6 +41,8 @@ Smoke checks (all must pass):
 - `pid_changed` — the process actually restarted.
 - `build_sha_matches_origin` — running build == `origin/main`.
 - `not_behind_origin` — `behind_origin === false`.
+- `manager_nominal` — optional; enabled by callers that require
+  `/health.nominal === true`.
 - each key route returns 200 (`/health`, `/loops`, `/outputs/inbox`; override
   with `--routes a,b,c`).
 
@@ -49,7 +51,47 @@ On **pass**: the current `build_sha` is recorded as the last-good build at
 
 On **fail**: prints the smoke failures + the rollback decision. Exit 1.
 
-## 3. External freshness watchdog (T-DEPLOY.5)
+## 3. External HTTP-liveness watchdog (T-RELY)
+
+`scripts/manager-http-liveness-watchdog.mjs` is a launchd-managed process
+outside the agent fleet. It checks `GET /health` every minute with a 2s budget,
+checks `/dispatches/health` only when `/health` returns quickly enough, and
+treats listener PID / launchd PID as diagnostics rather than success.
+
+Decision contract:
+- `/health` success resets the HTTP failure streak.
+- `/health` success with `/dispatches/health` timeout is degraded, not a
+  restart trigger.
+- two consecutive `/health` failures trigger diagnostics plus
+  `launchctl kickstart -k gui/$(id -u)/com.kilgore.id-agents-manager`.
+- diagnostics are captured before restart under
+  `/tmp/manager-http-liveness-watchdog-diagnostics`.
+- restart loops are bounded by a 5 minute cooldown and escalation after repeated
+  restart attempts or exceeded recovery budget.
+
+Dry run:
+
+```bash
+node scripts/manager-http-liveness-watchdog.mjs --dry-run
+```
+
+Install/update launchd job after deploying the script to the clean deploy
+checkout:
+
+```bash
+cp scripts/launchd/com.kilgore.manager-http-liveness-watchdog.plist ~/Library/LaunchAgents/
+plutil -lint ~/Library/LaunchAgents/com.kilgore.manager-http-liveness-watchdog.plist
+launchctl bootstrap "gui/$(id -u)" ~/Library/LaunchAgents/com.kilgore.manager-http-liveness-watchdog.plist
+launchctl kickstart -k "gui/$(id -u)/com.kilgore.manager-http-liveness-watchdog"
+```
+
+Use `touch /tmp/manager-http-liveness-watchdog.pause` as the kill switch while
+investigating. Logs are in `/tmp/manager-http-liveness-watchdog.log` and launchd
+output is in `/tmp/manager-http-liveness-watchdog.launchd.log`. Incident
+artifacts are written only on restart/escalation to
+`/Users/kilgore/Dropbox/Code/agent-platform/output`.
+
+## 4. External freshness watchdog (T-DEPLOY.5)
 
 `scripts/deploy-freshness-watchdog.mjs` is a launchd-managed process outside
 the agent fleet. It checks `/health` every 15 minutes and runs the manager
@@ -73,7 +115,7 @@ Use `touch /tmp/deploy-watchdog.pause` as the kill switch while investigating.
 Logs are in `/tmp/deploy-watchdog.log` and launchd output is in
 `/tmp/deploy-watchdog.launchd.log`.
 
-## 4. Auto-rollback (T-DEPLOY.5)
+## 5. Auto-rollback (T-DEPLOY.5)
 
 On a failing smoke, `decideRollback` picks the **last-good SHA** as the target.
 With `--auto-rollback --execute`, the CLI performs:
