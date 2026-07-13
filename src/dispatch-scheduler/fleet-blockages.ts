@@ -102,10 +102,17 @@ export async function readFleetBlockages(
       action: "/ops",
     });
   } else if (loopHealth?.state === "stalled_ready_not_launching") {
+    const reasons = Object.entries(loopHealth.last_admission_block_reasons ?? {})
+      .filter(([, count]) => Number(count) > 0)
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([code, count]) => `${code}=${count}`)
+      .join(", ");
     blockages.push({
       kind: "co_stall",
       severity: "critical",
-      message: `CO stall: ${loopHealth.consecutive_zero_ticks} ticks admitted nothing without structured explanation`,
+      message: reasons
+        ? `CO stall: ${loopHealth.consecutive_zero_ticks} ticks admitted nothing; blockers: ${reasons}`
+        : `CO stall: ${loopHealth.consecutive_zero_ticks} ticks admitted nothing without structured explanation`,
       count: loopHealth.consecutive_zero_ticks,
       oldest_at: null,
       action: "/ops",

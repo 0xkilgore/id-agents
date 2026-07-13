@@ -8,6 +8,7 @@ import type { DbAdapter } from "../db/db-adapter.js";
 import { createHash } from "node:crypto";
 import { classifyPromotionHygieneFailure } from "../loops/worktree-hygiene.js";
 import { loadContinuousOrchestrationConfig } from "./config.js";
+import { normalizeRuntime, resolveProviderFromRuntime } from "../dispatch-scheduler/types.js";
 
 export type OrchestrationLoopState =
   | "paused"
@@ -115,8 +116,12 @@ interface BacklogQueueRow {
   readiness_state: string;
   risk_class: string | null;
   to_agent: string | null;
+  provider: string | null;
+  runtime: string | null;
   dispatch_body: string | null;
   dependencies_json: string | null;
+  last_dispatch_phid: string | null;
+  retry_safe: number | null;
 }
 
 interface DispatchQueueCountRow {
@@ -207,7 +212,7 @@ export async function readOrchestrationLoopHealthProjection(
     1,
     Math.floor(opts.stallThresholdTicks ?? loadContinuousOrchestrationConfig().stall_threshold_ticks),
   );
-  const [{ rows: stateRows }, { rows: inFlightRows }] = await Promise.all([
+  const [{ rows: stateRows }, { rows: inFlightRows }, readyBlockReasons] = await Promise.all([
     adapter.query<OrchestrationLoopStateRow>(
       `SELECT mode, consecutive_zero_ticks, last_admission_block_reasons_json
          FROM orchestration_state
@@ -222,12 +227,17 @@ export async function readOrchestrationLoopHealthProjection(
           AND readiness_state = 'in_flight'`,
       [teamId],
     ),
+    readReadyAdmissionBlockReasonCounts(adapter, teamId),
   ]);
   const state = stateRows[0];
   const mode = state?.mode ?? "paused";
   const consecutiveZeroTicks = Number(state?.consecutive_zero_ticks ?? 0);
   const inFlight = Number(inFlightRows[0]?.count ?? 0);
-  const lastAdmissionBlockReasons = parseCountMap(state?.last_admission_block_reasons_json ?? null);
+  const persistedAdmissionBlockReasons = parseCountMap(state?.last_admission_block_reasons_json ?? null);
+  const persistedExplainedCount = Object.values(persistedAdmissionBlockReasons).reduce((sum, count) => sum + count, 0);
+  const lastAdmissionBlockReasons = persistedExplainedCount > 0
+    ? persistedAdmissionBlockReasons
+    : readyBlockReasons;
   const explainedCount = Object.values(lastAdmissionBlockReasons).reduce((sum, count) => sum + count, 0);
   const allCapacityOrLane =
     explainedCount > 0 &&
@@ -271,6 +281,20 @@ export async function readOrchestrationLoopHealthProjection(
     };
   }
 
+  if (consecutiveZeroTicks >= stallThresholdTicks && explainedCount > 0) {
+    return {
+      state: "stalled_ready_not_launching",
+      severity: "critical",
+      consecutive_zero_ticks: consecutiveZeroTicks,
+      stall_threshold_ticks: stallThresholdTicks,
+      in_flight: inFlight,
+      last_admission_block_reasons: lastAdmissionBlockReasons,
+      explanation:
+        `${consecutiveZeroTicks} consecutive zero-admit ticks blocked by ` +
+        formatCountMap(lastAdmissionBlockReasons),
+    };
+  }
+
   return {
     state: "running",
     severity: "ok",
@@ -282,6 +306,14 @@ export async function readOrchestrationLoopHealthProjection(
       ? "zero-admit ticks have structured admission explanations"
       : "orchestration loop is below the zero-admit stall threshold",
   };
+}
+
+function formatCountMap(counts: Record<string, number>): string {
+  return Object.entries(counts)
+    .filter(([, count]) => count > 0)
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([code, count]) => `${code}=${count}`)
+    .join(", ");
 }
 
 function parseCountMap(json: string | null): Record<string, number> {
@@ -308,6 +340,7 @@ async function readReadyItemBlockerProjection(
   const rows = (await readBacklogQueueRows(adapter, teamId)).filter((row) => row.readiness_state === "ready");
   const blockedDependencyItemIds = new Set<string>();
   for (const ids of dependencyImpact.values()) for (const id of ids) blockedDependencyItemIds.add(id);
+  const agentRuntimes = await readAgentRuntimeMap(adapter, rows.map((row) => row.to_agent).filter((name): name is string => !!name));
 
   const categories = new Map<string, { code: string; category: string; count: number; examples: string[] }>();
   let actionable = 0;
@@ -320,12 +353,9 @@ async function readReadyItemBlockerProjection(
   };
 
   for (const row of rows) {
-    if (!hasDispatchPayload(row)) {
-      add("missing_dispatch_target", "dispatch_admission", row.item_id);
-    } else if (!isAutoRunRisk(row.risk_class)) {
-      add("risk_requires_approval", "lane_eligibility", row.item_id);
-    } else if (parseStringArray(row.dependencies_json).length > 0 || blockedDependencyItemIds.has(row.item_id)) {
-      add("blocked_dependency", "lane_eligibility", row.item_id);
+    const blocker = classifyReadyAdmissionBlocker(row, blockedDependencyItemIds, agentRuntimes);
+    if (blocker) {
+      add(blocker.code, blocker.category, row.item_id);
     } else {
       actionable += 1;
     }
@@ -357,12 +387,10 @@ async function readQueueQualityProjection(
   const readyRows = backlogRows.filter((row) => row.readiness_state === "ready");
   const blockedDependencyItemIds = new Set<string>();
   for (const ids of dependencyImpact.values()) for (const id of ids) blockedDependencyItemIds.add(id);
+  const agentRuntimes = await readAgentRuntimeMap(adapter, readyRows.map((row) => row.to_agent).filter((name): name is string => !!name));
 
   const actionableReady = readyRows.filter((row) =>
-    hasDispatchPayload(row) &&
-    isAutoRunRisk(row.risk_class) &&
-    parseStringArray(row.dependencies_json).length === 0 &&
-    !blockedDependencyItemIds.has(row.item_id)
+    classifyReadyAdmissionBlocker(row, blockedDependencyItemIds, agentRuntimes) == null
   ).length;
 
   const needsApproval = backlogRows.filter((row) =>
@@ -407,13 +435,72 @@ async function readQueueQualityProjection(
 
 async function readBacklogQueueRows(adapter: DbAdapter, teamId: string): Promise<BacklogQueueRow[]> {
   const { rows } = await adapter.query<BacklogQueueRow>(
-    `SELECT item_id, title, readiness_state, risk_class, to_agent, dispatch_body, dependencies_json
+    `SELECT item_id, title, readiness_state, risk_class, to_agent, provider, runtime,
+            dispatch_body, dependencies_json, last_dispatch_phid, retry_safe
        FROM orchestration_backlog_item
       WHERE team_id = ?
         AND readiness_state NOT IN ('done', 'cancelled', 'superseded')`,
     [teamId],
   );
   return rows;
+}
+
+async function readReadyAdmissionBlockReasonCounts(adapter: DbAdapter, teamId: string): Promise<Record<string, number>> {
+  const rows = (await readBacklogQueueRows(adapter, teamId)).filter((row) => row.readiness_state === "ready");
+  const agentRuntimes = await readAgentRuntimeMap(adapter, rows.map((row) => row.to_agent).filter((name): name is string => !!name));
+  const counts: Record<string, number> = {};
+  for (const row of rows) {
+    const blocker = classifyReadyAdmissionBlocker(row, new Set(), agentRuntimes);
+    if (!blocker) continue;
+    counts[blocker.code] = (counts[blocker.code] ?? 0) + 1;
+  }
+  return counts;
+}
+
+async function readAgentRuntimeMap(adapter: DbAdapter, names: string[]): Promise<Map<string, string>> {
+  const out = new Map<string, string>();
+  const unique = [...new Set(names.filter((name) => name.trim() !== ""))];
+  if (unique.length === 0) return out;
+  const placeholders = unique.map((_, i) => `$${i + 1}`).join(",");
+  const { rows } = await adapter.query<{ name: string; runtime: string | null; running_rank: number }>(
+    `SELECT name, runtime, CASE WHEN status = 'running' AND deleted_at IS NULL THEN 0 ELSE 1 END AS running_rank
+       FROM agents
+      WHERE name IN (${placeholders}) AND deleted_at IS NULL
+      ORDER BY running_rank ASC, name ASC`,
+    unique,
+  );
+  for (const row of rows) {
+    if (row.runtime && !out.has(row.name)) out.set(row.name, row.runtime);
+  }
+  return out;
+}
+
+function classifyReadyAdmissionBlocker(
+  row: BacklogQueueRow,
+  blockedDependencyItemIds: Set<string>,
+  agentRuntimes: Map<string, string>,
+): { code: string; category: string } | null {
+  if (!hasDispatchPayload(row)) return { code: "missing_dispatch_target", category: "dispatch_admission" };
+  if (row.last_dispatch_phid && row.retry_safe !== 1) return { code: "duplicate_dispatch_retry_required", category: "retry_safety" };
+  if (!isAutoRunRisk(row.risk_class)) return { code: "risk_requires_approval", category: "lane_eligibility" };
+  if (parseStringArray(row.dependencies_json).length > 0 || blockedDependencyItemIds.has(row.item_id)) {
+    return { code: "blocked_dependency", category: "lane_eligibility" };
+  }
+  if (hasProviderRuntimeMismatch(row, agentRuntimes.get(row.to_agent ?? ""))) {
+    return { code: "provider_runtime_mismatch", category: "runtime_unavailable" };
+  }
+  return null;
+}
+
+function hasProviderRuntimeMismatch(row: BacklogQueueRow, targetRuntime: string | undefined): boolean {
+  if (!row.provider && !row.runtime) return false;
+  const requestedRuntime = row.runtime ? normalizeRuntime(row.runtime) : null;
+  const requestedProvider = row.provider ?? (requestedRuntime ? resolveProviderFromRuntime(requestedRuntime) : null);
+  const providerFromRequestedRuntime = requestedRuntime ? resolveProviderFromRuntime(requestedRuntime) : null;
+  if (row.provider && requestedRuntime && row.provider !== providerFromRequestedRuntime) return true;
+  if (!requestedRuntime || !targetRuntime) return false;
+  const normalizedTargetRuntime = normalizeRuntime(targetRuntime);
+  return requestedRuntime !== normalizedTargetRuntime || requestedProvider !== resolveProviderFromRuntime(normalizedTargetRuntime);
 }
 
 async function readDispatchQueueCounts(adapter: DbAdapter, teamId: string): Promise<DispatchQueueCountRow[]> {

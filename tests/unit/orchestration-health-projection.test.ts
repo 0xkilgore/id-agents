@@ -80,6 +80,79 @@ describe("orchestration health projection", () => {
     ]);
   });
 
+  it("derives zero-admit blocker reasons from ready rows when persisted tick JSON is empty", async () => {
+    await setMode(adapter, "default", "running");
+    await insertAgent("cto", "claude-code-cli");
+    const duplicate = await insertBacklogItem(adapter, {
+      title: "failed dispatch retry guard",
+      readiness_state: "ready",
+      risk_class: "build",
+      to_agent: "roger",
+      dispatch_body: "continue",
+    });
+    await setItemState(adapter, duplicate.item_id, "ready", { dispatch_phid: "phid:disp-failed-prior" });
+    await insertBacklogItem(adapter, {
+      title: "cto runtime mismatch",
+      readiness_state: "ready",
+      risk_class: "routine",
+      to_agent: "cto",
+      dispatch_body: "review",
+      provider: "openai",
+      runtime: "codex",
+    });
+    await recordTickOutcome(adapter, "default", {
+      zero_ticks: 5,
+      fired: false,
+      admission_block_reasons: {
+        no_in_flight_slots: 0,
+        tick_admission_cap: 0,
+      },
+    });
+
+    const orchestration = await readOrchestrationHealthProjection(adapter, "default");
+    const dispatches = await readDispatchHealth(adapter, "default");
+
+    expect(orchestration.orchestration_loop).toMatchObject({
+      state: "stalled_ready_not_launching",
+      severity: "critical",
+      consecutive_zero_ticks: 5,
+      last_admission_block_reasons: {
+        duplicate_dispatch_retry_required: 1,
+        provider_runtime_mismatch: 1,
+      },
+    });
+    expect(orchestration.orchestration_loop.explanation).toContain("duplicate_dispatch_retry_required=1");
+    expect(orchestration.orchestration_loop.explanation).toContain("provider_runtime_mismatch=1");
+    expect(orchestration.queue_quality).toMatchObject({
+      actionable_ready: 0,
+    });
+    expect(orchestration.ready_item_blockers).toMatchObject({
+      ready: 2,
+      actionable: 0,
+    });
+    expect(orchestration.ready_item_blockers.categories).toEqual([
+      {
+        code: "duplicate_dispatch_retry_required",
+        category: "retry_safety",
+        count: 1,
+        examples: [expect.any(String)],
+      },
+      {
+        code: "provider_runtime_mismatch",
+        category: "runtime_unavailable",
+        count: 1,
+        examples: [expect.any(String)],
+      },
+    ]);
+    expect(dispatches.blockages.blockages).toEqual([
+      expect.objectContaining({
+        kind: "co_stall",
+        message: expect.stringContaining("duplicate_dispatch_retry_required=1"),
+      }),
+    ]);
+    expect(dispatches.blockages.blockages[0]?.message).toContain("provider_runtime_mismatch=1");
+  });
+
   it("counts active needs_clarification blockers, recent ids, and backlog dependency impact", async () => {
     const owner = await insertBacklogItem(adapter, {
       title: "land upstream change",
@@ -731,6 +804,35 @@ async function insertCommentOp(input: {
         task_triage_id: input.task_triage_id,
         route_status: input.route_status,
       }),
+    ],
+  );
+}
+
+async function insertAgent(name: string, runtime: string): Promise<void> {
+  await adapter.query(
+    `INSERT OR IGNORE INTO teams (id, name, config) VALUES (?, ?, ?)`,
+    ["default", "default", "{}"],
+  );
+  await adapter.query(
+    `INSERT INTO agents (
+       id, team_id, name, type, model, port, endpoint, working_directory,
+       status, created_at, registry, metadata, deleted_at, runtime
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      `agent-${name}`,
+      "default",
+      name,
+      "claude",
+      "test-model",
+      0,
+      `http://localhost/${name}`,
+      "/tmp",
+      "running",
+      1780000000000,
+      null,
+      "{}",
+      null,
+      runtime,
     ],
   );
 }
