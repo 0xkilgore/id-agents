@@ -4668,7 +4668,8 @@ export class AgentManagerDb {
       }
       try {
         const staleOnly = req.query.stale === 'true' || req.query.stale === '1';
-        const docs = await this.dispatchScheduler.reactor.listOpenClarifications({ staleOnly });
+        const limit = parseReadLimit(req.query.limit, { defaultLimit: 50, maxLimit: 100 });
+        const docs = await this.dispatchScheduler.reactor.listOpenClarifications({ staleOnly, limit });
         const now = Date.now();
         const items = docs.map((d) => {
           const blocker = d.active_clarification;
@@ -4686,7 +4687,7 @@ export class AgentManagerDb {
             age_seconds: createdMs ? Math.max(0, Math.floor((now - createdMs) / 1000)) : 0,
           };
         });
-        return res.json({ ok: true, items });
+        return res.json({ ok: true, count: items.length, limit, items });
       } catch (err) {
         return res.status(500).json({
           ok: false,
@@ -4710,7 +4711,8 @@ export class AgentManagerDb {
         // when the scheduler isn't initialised (the build feed still returns).
         let clarifications: ClarificationInput[] = [];
         if (this.dispatchScheduler) {
-          const docs = await this.dispatchScheduler.reactor.listOpenClarifications({});
+          const clarificationLimit = parseReadLimit(req.query.limit, { defaultLimit: 50, maxLimit: 100 });
+          const docs = await this.dispatchScheduler.reactor.listOpenClarifications({ limit: clarificationLimit });
           clarifications = docs.map((d) => {
             const blocker = d.active_clarification;
             const createdMs = blocker ? Date.parse(blocker.created_at) : 0;

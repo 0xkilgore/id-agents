@@ -44,6 +44,8 @@ import { randomBytes } from "node:crypto";
 
 /** Default recovery lookback: only reconcile failures from the last 7 days. */
 export const DEFAULT_RECOVERY_LOOKBACK_MS = 7 * 24 * 60 * 60 * 1000;
+export const DEFAULT_OPEN_CLARIFICATIONS_LIMIT = 100;
+export const MAX_OPEN_CLARIFICATIONS_LIMIT = 500;
 
 /** T1.11 boot-backfill target failure reasons (by failure_kind). */
 export const BACKFILL_FAILURE_KINDS = [
@@ -1004,21 +1006,27 @@ export class SqliteDispatchReactor {
   async listOpenClarifications(opts: {
     staleOnly?: boolean;
     now?: string;
+    limit?: number;
   } = {}): Promise<DispatchDoc[]> {
+    const limit = clampReadLimit(opts.limit, DEFAULT_OPEN_CLARIFICATIONS_LIMIT, MAX_OPEN_CLARIFICATIONS_LIMIT);
+    const params: unknown[] = [this.teamId];
+    let staleClause = "";
+    if (opts.staleOnly) {
+      staleClause = `
+         AND active_clarification_json IS NOT NULL
+         AND json_extract(active_clarification_json, '$.stale_at') <= ?`;
+      params.push(opts.now ?? this.nowFn());
+    }
+    params.push(limit);
     const { rows } = await this.adapter.query<Row>(
       `SELECT * FROM dispatch_scheduler_queue
        WHERE team_id = ? AND status = 'needs_clarification'
-       ORDER BY updated_at ASC`,
-      [this.teamId],
+       ${staleClause}
+       ORDER BY updated_at ASC, dispatch_phid ASC
+       LIMIT ?`,
+      params,
     );
-    const docs = rows.map(rowToDoc);
-    if (opts.staleOnly) {
-      const now = opts.now ?? this.nowFn();
-      return docs.filter(
-        (d) => d.active_clarification != null && d.active_clarification.stale_at <= now,
-      );
-    }
-    return docs;
+    return rows.map(rowToDoc);
   }
 
   /** Read the stashed agent reply payload (Phase 5.2 talk-to waiter). */
@@ -1350,6 +1358,11 @@ function rowToVerificationSourceRow(row: Row): DispatchVerificationSourceRow {
 function clampPriority(p: number | undefined): number {
   if (p == null || !Number.isFinite(p)) return 5;
   return Math.max(0, Math.floor(p));
+}
+
+function clampReadLimit(p: number | undefined, defaultLimit: number, maxLimit: number): number {
+  if (p == null || !Number.isFinite(p) || p <= 0) return defaultLimit;
+  return Math.min(maxLimit, Math.floor(p));
 }
 
 function mintPhid(): string {

@@ -521,6 +521,8 @@ export async function migrateSqlite(adapter: SqliteAdapter): Promise<void> {
       ON dispatch_scheduler_queue(team_id, status, provider, runtime, not_before_at, dispatch_phid);
     CREATE INDEX IF NOT EXISTS dispatch_scheduler_recent_terminal_idx
       ON dispatch_scheduler_queue(team_id, status, completed_at DESC, dispatch_phid);
+    CREATE INDEX IF NOT EXISTS dispatch_scheduler_clarifications_read_idx
+      ON dispatch_scheduler_queue(team_id, status, updated_at, dispatch_phid);
     CREATE INDEX IF NOT EXISTS dispatch_scheduler_query_id_idx
       ON dispatch_scheduler_queue(query_id);
     CREATE INDEX IF NOT EXISTS dispatch_scheduler_agent_query_id_idx
@@ -997,6 +999,8 @@ export async function migrateSqlite(adapter: SqliteAdapter): Promise<void> {
       ON dispatch_scheduler_queue(team_id, status, provider, runtime, not_before_at, dispatch_phid);
     CREATE INDEX IF NOT EXISTS dispatch_scheduler_recent_terminal_idx
       ON dispatch_scheduler_queue(team_id, status, completed_at DESC, dispatch_phid);
+    CREATE INDEX IF NOT EXISTS dispatch_scheduler_clarifications_read_idx
+      ON dispatch_scheduler_queue(team_id, status, updated_at, dispatch_phid);
     CREATE INDEX IF NOT EXISTS dispatch_scheduler_team_agent_query_idx
       ON dispatch_scheduler_queue(team_id, agent_query_id)
       WHERE agent_query_id IS NOT NULL;

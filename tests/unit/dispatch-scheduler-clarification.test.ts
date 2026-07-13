@@ -294,4 +294,24 @@ describe("markClarificationStale + listOpenClarifications", () => {
       }),
     ).toHaveLength(1);
   });
+
+  it("listOpenClarifications caps hydrated rows", async () => {
+    const reactor = harness();
+    for (let i = 0; i < 5; i++) {
+      reactor.setNow(`2026-05-21T10:00:0${i}.000Z`);
+      const enq = await enqueueAndStart(reactor, {
+        ...base,
+        query_id: `q-clar-limit-${i}`,
+        subject: `blocked ${i}`,
+      });
+      await reactor.markNeedsClarification(enq.dispatch_phid, {
+        agent_id: "roger",
+        question: `question ${i}`,
+      });
+    }
+
+    const open = await reactor.listOpenClarifications({ limit: 2 });
+    expect(open).toHaveLength(2);
+    expect(open.map((d) => d.subject)).toEqual(["blocked 0", "blocked 1"]);
+  });
 });
