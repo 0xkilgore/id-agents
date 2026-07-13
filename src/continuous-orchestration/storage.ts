@@ -15,6 +15,7 @@ import type {
   OrchestrationMode,
   ReadinessState,
   RiskClass,
+  StaleDuplicateCloseoutReceipt,
 } from "./types.js";
 import { extractRegisterIds } from "./register-id-extraction.js";
 
@@ -42,6 +43,7 @@ interface BacklogRow {
   last_dispatch_phid: string | null;
   retry_safe: number | null;
   dispatch_retry_count: number | null;
+  stale_duplicate_closeout_receipt_json: string | null;
   updated_by: string | null;
   track_drift: number | null;
   flesh_status: string | null;
@@ -92,6 +94,7 @@ export function rowToBacklogItem(r: BacklogRow): BacklogItem {
     last_dispatch_phid: r.last_dispatch_phid,
     retry_safe: r.retry_safe === 1,
     dispatch_retry_count: Number(r.dispatch_retry_count ?? 0),
+    stale_duplicate_closeout_receipt: parseStaleDuplicateCloseoutReceipt(r.stale_duplicate_closeout_receipt_json),
     updated_by: r.updated_by,
     track_drift: r.track_drift === 1,
     flesh_status: (r.flesh_status as BacklogItem["flesh_status"]) ?? "unfleshed",
@@ -113,6 +116,16 @@ function parseFleshPatch(json: string | null): FleshPatch | null {
   try {
     const v = JSON.parse(json);
     return v && typeof v === "object" ? (v as FleshPatch) : null;
+  } catch {
+    return null;
+  }
+}
+
+function parseStaleDuplicateCloseoutReceipt(json: string | null): StaleDuplicateCloseoutReceipt | null {
+  if (!json) return null;
+  try {
+    const v = JSON.parse(json);
+    return v && typeof v === "object" ? (v as StaleDuplicateCloseoutReceipt) : null;
   } catch {
     return null;
   }
@@ -690,6 +703,7 @@ export interface StaleReadyReconcileResult {
     dispatch_status: string;
     artifact_path: string | null;
     reason: string;
+    receipt: StaleDuplicateCloseoutReceipt;
   }>;
 }
 
@@ -711,10 +725,11 @@ function appendSourceRef(sourceRefsJson: string, artifactPath: string | null): s
  */
 export async function reconcileStaleAlreadyDispatchedReadyRows(
   adapter: DbAdapter,
-  opts: { team_id?: string; dry_run?: boolean } = {},
+  opts: { team_id?: string; dry_run?: boolean; actor?: string } = {},
 ): Promise<StaleReadyReconcileResult> {
   const teamId = opts.team_id ?? "default";
   const dryRun = opts.dry_run === true;
+  const actor = opts.actor?.trim() || "operator";
   const { rows } = await adapter.query<
     BacklogRow & {
       dispatch_status: string | null;
@@ -759,22 +774,43 @@ export async function reconcileStaleAlreadyDispatchedReadyRows(
       toState === "done"
         ? `already-dispatched ready row closed after terminal dispatch ${status}`
         : `already-dispatched ready row superseded after terminal dispatch ${status}`;
+    const receipt: StaleDuplicateCloseoutReceipt = {
+      schema_version: "orchestration.stale_duplicate_closeout_receipt.v1",
+      closed_by: actor,
+      closed_at: new Date().toISOString(),
+      from_state: "ready",
+      to_state: toState,
+      reason,
+      prior_dispatch_phid: row.last_dispatch_phid ?? "",
+      prior_dispatch_status: status,
+      successor_dispatch_phid: null,
+      redispatch_safety: {
+        safe_to_not_redispatch: true,
+        reason:
+          toState === "done"
+            ? "prior dispatch already reached terminal done state; reopening would duplicate completed work"
+            : `prior dispatch is terminal ${status}; this row is stale duplicate backlog state and not retry fuel`,
+      },
+    };
 
     if (!dryRun) {
-      const now = new Date().toISOString();
       await adapter.query(
         `UPDATE orchestration_backlog_item
             SET readiness_state = $1,
                 source_refs_json = $2,
                 retry_safe = 0,
-                updated_at = $3
-          WHERE item_id = $4
+                stale_duplicate_closeout_receipt_json = $3,
+                updated_by = $4,
+                updated_at = $5
+          WHERE item_id = $6
             AND readiness_state = 'ready'
             AND COALESCE(retry_safe, 0) = 0`,
         [
           toState,
           appendSourceRef(row.source_refs_json, row.artifact_path),
-          now,
+          JSON.stringify(receipt),
+          actor,
+          receipt.closed_at,
           row.item_id,
         ],
       );
@@ -790,6 +826,7 @@ export async function reconcileStaleAlreadyDispatchedReadyRows(
       dispatch_status: status,
       artifact_path: row.artifact_path ?? null,
       reason,
+      receipt,
     });
   }
 

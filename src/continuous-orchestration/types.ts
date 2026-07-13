@@ -56,6 +56,22 @@ export interface BacklogRetryReadiness {
   recovery_status: string | null;
 }
 
+export interface StaleDuplicateCloseoutReceipt {
+  schema_version: "orchestration.stale_duplicate_closeout_receipt.v1";
+  closed_by: string;
+  closed_at: string;
+  from_state: "ready";
+  to_state: "done" | "superseded" | "ready";
+  reason: string;
+  prior_dispatch_phid: string;
+  prior_dispatch_status: string;
+  successor_dispatch_phid: string | null;
+  redispatch_safety: {
+    safe_to_not_redispatch: boolean;
+    reason: string;
+  };
+}
+
 /**
  * Auto-flesh lifecycle (daemon SELF-REFUEL). An imported roadmap skeleton lands
  * `unfleshed`; the flesher fills its dispatch fields (`fleshed`), the auto-ready
@@ -130,6 +146,7 @@ export interface BacklogItem {
    * state; storage-only callers may receive this as undefined.
    */
   retry_readiness?: BacklogRetryReadiness;
+  stale_duplicate_closeout_receipt?: StaleDuplicateCloseoutReceipt | null;
   /** Actor who last edited this item via PATCH (actor-attributed updates). */
   updated_by: string | null;
   /**

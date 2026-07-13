@@ -1752,7 +1752,7 @@ describe("stale already-dispatched ready reconciliation route", () => {
     expect(before.body.counts.ready).toBe(3);
     expect(before.body.ready_admission.candidates).toBe(3);
 
-    const res = await callAppRequest(app, "POST", "/orchestration/reconcile/stale-ready");
+    const res = await callAppRequest(app, "POST", "/orchestration/reconcile/stale-ready", { actor: "hopper" });
 
     expect(res.status).toBe(200);
     expect(res.body.result).toMatchObject({
@@ -1769,12 +1769,34 @@ describe("stale already-dispatched ready reconciliation route", () => {
           dispatch_phid: "phid:disp-closed",
           to_state: "done",
           artifact_path: "/repo/output/closed.md",
+          receipt: expect.objectContaining({
+            schema_version: "orchestration.stale_duplicate_closeout_receipt.v1",
+            closed_by: "hopper",
+            from_state: "ready",
+            to_state: "done",
+            prior_dispatch_phid: "phid:disp-closed",
+            prior_dispatch_status: "done",
+            successor_dispatch_phid: null,
+            redispatch_safety: expect.objectContaining({
+              safe_to_not_redispatch: true,
+              reason: expect.stringContaining("duplicate completed work"),
+            }),
+          }),
         }),
         expect.objectContaining({
           item_id: superseded.item_id,
           dispatch_phid: "phid:disp-superseded",
           to_state: "superseded",
           artifact_path: "/repo/output/superseded.md",
+          receipt: expect.objectContaining({
+            closed_by: "hopper",
+            reason: "already-dispatched ready row superseded after terminal dispatch failed",
+            successor_dispatch_phid: null,
+            redispatch_safety: expect.objectContaining({
+              safe_to_not_redispatch: true,
+              reason: expect.stringContaining("not retry fuel"),
+            }),
+          }),
         }),
       ]),
     );
@@ -1783,12 +1805,39 @@ describe("stale already-dispatched ready reconciliation route", () => {
     const supersededAfter = (await getBacklogItem(adapter, superseded.item_id))!;
     const retryAfter = (await getBacklogItem(adapter, retry.item_id))!;
     expect(closedAfter.readiness_state).toBe("done");
+    expect(closedAfter.updated_by).toBe("hopper");
+    expect(closedAfter.stale_duplicate_closeout_receipt).toMatchObject({
+      closed_by: "hopper",
+      from_state: "ready",
+      to_state: "done",
+      prior_dispatch_phid: "phid:disp-closed",
+      prior_dispatch_status: "done",
+      successor_dispatch_phid: null,
+      redispatch_safety: {
+        safe_to_not_redispatch: true,
+        reason: expect.stringContaining("duplicate completed work"),
+      },
+    });
     expect(closedAfter.source_refs).toContain("roadmap:t-orch:closed");
     expect(closedAfter.source_refs).toContain("dispatch_artifact:/repo/output/closed.md");
     expect(supersededAfter.readiness_state).toBe("superseded");
+    expect(supersededAfter.updated_by).toBe("hopper");
+    expect(supersededAfter.stale_duplicate_closeout_receipt).toMatchObject({
+      closed_by: "hopper",
+      from_state: "ready",
+      to_state: "superseded",
+      prior_dispatch_phid: "phid:disp-superseded",
+      prior_dispatch_status: "failed",
+      successor_dispatch_phid: null,
+      redispatch_safety: {
+        safe_to_not_redispatch: true,
+        reason: expect.stringContaining("not retry fuel"),
+      },
+    });
     expect(supersededAfter.source_refs).toContain("dispatch_artifact:/repo/output/superseded.md");
     expect(retryAfter.readiness_state).toBe("ready");
     expect(retryAfter.retry_safe).toBe(true);
+    expect(retryAfter.stale_duplicate_closeout_receipt).toBeNull();
     expect(retryAfter.source_refs).toEqual(["roadmap:t-orch:retry"]);
 
     const after = await callApp(app, "/orchestration/status");

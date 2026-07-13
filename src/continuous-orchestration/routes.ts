@@ -177,8 +177,14 @@ export function mountContinuousOrchestrationRoutes(app: Application, opts: Orche
 
   app.post("/orchestration/reconcile/stale-ready", async (req: Request, res: Response) => {
     try {
-      const dryRun = (req.body ?? {})?.dry_run === true;
-      const result = await reconcileStaleAlreadyDispatchedReadyRows(adapter, { team_id: teamId, dry_run: dryRun });
+      const body = req.body ?? {};
+      const dryRun = body?.dry_run === true;
+      const actor = typeof body.actor === "string"
+        ? body.actor
+        : typeof body.closed_by === "string"
+          ? body.closed_by
+          : DEFAULT_ACTOR_ID;
+      const result = await reconcileStaleAlreadyDispatchedReadyRows(adapter, { team_id: teamId, dry_run: dryRun, actor });
       res.json({ ok: true, result });
     } catch (err) {
       res.status(500).json({ ok: false, error: err instanceof Error ? err.message : String(err) });

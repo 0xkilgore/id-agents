@@ -2,7 +2,14 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { readDispatchHealth } from "../../src/dispatch-scheduler/read-model.js";
 import { readOrchestrationHealthProjection } from "../../src/continuous-orchestration/health-projection.js";
-import { insertBacklogItem, recordTickOutcome, setItemState, setMode } from "../../src/continuous-orchestration/storage.js";
+import {
+  getBacklogItem,
+  insertBacklogItem,
+  reconcileStaleAlreadyDispatchedReadyRows,
+  recordTickOutcome,
+  setItemState,
+  setMode,
+} from "../../src/continuous-orchestration/storage.js";
 import { migrateSqlite } from "../../src/db/migrations/sqlite.js";
 import { SqliteAdapter } from "../../src/db/sqlite-adapter.js";
 import { migrateOutputsTables } from "../../src/outputs/storage.js";
@@ -151,6 +158,70 @@ describe("orchestration health projection", () => {
       }),
     ]);
     expect(dispatches.blockages.blockages[0]?.message).toContain("provider_runtime_mismatch=1");
+  });
+
+  it("reduces duplicate_dispatch_retry_required only after receipt-backed stale duplicate closeout", async () => {
+    await setMode(adapter, "default", "running");
+    const duplicate = await insertBacklogItem(adapter, {
+      title: "already shipped duplicate",
+      readiness_state: "ready",
+      risk_class: "build",
+      to_agent: "roger",
+      dispatch_body: "continue",
+    });
+    await setItemState(adapter, duplicate.item_id, "ready", { dispatch_phid: "phid:disp-already-done" });
+    await insertDispatch({
+      dispatch_phid: "phid:disp-already-done",
+      status: "done",
+      completed_at: "2026-07-01T12:00:00.000Z",
+    });
+    await recordTickOutcome(adapter, "default", {
+      zero_ticks: 5,
+      fired: false,
+      admission_block_reasons: {},
+    });
+
+    const before = await readOrchestrationHealthProjection(adapter, "default");
+    expect(before.ready_item_blockers.categories).toEqual([
+      expect.objectContaining({ code: "duplicate_dispatch_retry_required", count: 1 }),
+    ]);
+
+    const closeout = await reconcileStaleAlreadyDispatchedReadyRows(adapter, {
+      team_id: "default",
+      actor: "hopper",
+    });
+    expect(closeout).toMatchObject({
+      closed: 1,
+      superseded: 0,
+      items: [
+        {
+          item_id: duplicate.item_id,
+          dispatch_phid: "phid:disp-already-done",
+          to_state: "done",
+          receipt: {
+            closed_by: "hopper",
+            prior_dispatch_status: "done",
+            successor_dispatch_phid: null,
+            redispatch_safety: {
+              safe_to_not_redispatch: true,
+              reason: expect.stringContaining("duplicate completed work"),
+            },
+          },
+        },
+      ],
+    });
+
+    const closed = await getBacklogItem(adapter, duplicate.item_id);
+    expect(closed?.readiness_state).toBe("done");
+    expect(closed?.stale_duplicate_closeout_receipt).toMatchObject({
+      closed_by: "hopper",
+      to_state: "done",
+      prior_dispatch_phid: "phid:disp-already-done",
+      redispatch_safety: { safe_to_not_redispatch: true },
+    });
+
+    const after = await readOrchestrationHealthProjection(adapter, "default");
+    expect(after.ready_item_blockers.categories).toEqual([]);
   });
 
   it("counts active needs_clarification blockers, recent ids, and backlog dependency impact", async () => {

@@ -627,6 +627,7 @@ export async function migrateSqlite(adapter: SqliteAdapter): Promise<void> {
       last_dispatch_phid TEXT,
       retry_safe         INTEGER NOT NULL DEFAULT 0,
       dispatch_retry_count INTEGER NOT NULL DEFAULT 0,
+      stale_duplicate_closeout_receipt_json TEXT,
       updated_by         TEXT,
       track_drift        INTEGER NOT NULL DEFAULT 0,
       created_at         TEXT NOT NULL,
@@ -726,6 +727,7 @@ export async function migrateSqlite(adapter: SqliteAdapter): Promise<void> {
   for (const stmt of [
     `ALTER TABLE orchestration_backlog_item ADD COLUMN retry_safe INTEGER NOT NULL DEFAULT 0`,
     `ALTER TABLE orchestration_backlog_item ADD COLUMN dispatch_retry_count INTEGER NOT NULL DEFAULT 0`,
+    `ALTER TABLE orchestration_backlog_item ADD COLUMN stale_duplicate_closeout_receipt_json TEXT`,
     `ALTER TABLE orchestration_backlog_item ADD COLUMN flesh_status TEXT NOT NULL DEFAULT 'unfleshed'`,
     `ALTER TABLE orchestration_backlog_item ADD COLUMN flesh_source TEXT`,
     `ALTER TABLE orchestration_backlog_item ADD COLUMN flesh_confidence REAL`,
