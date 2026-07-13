@@ -1365,6 +1365,68 @@ describe("daemon — dry-run vs live", () => {
     expect(res.body.auto_promote_health.summary).toMatch(/next: manually \/promote/);
   });
 
+  it("status reports below-floor and below-lane build-ready health without fake idle action", async () => {
+    await seedReady(adapter, {
+      title: "only ready build lane",
+      write_scope: ["repo/ready-a"],
+    });
+    await seedApprovedReview(adapter, {
+      title: "already dispatched candidate",
+      write_scope: ["repo/candidate-a"],
+      last_dispatch_phid: "phid:disp-prior",
+    });
+    await seedApprovedReview(adapter, {
+      title: "review held candidate",
+      risk_class: "external",
+      write_scope: ["repo/candidate-b"],
+    });
+
+    const { app, daemon } = mountStatusApp(adapter, {
+      dry_run: true,
+      auto_flesh_enabled: true,
+      auto_promote_enabled: true,
+      auto_promote_floor: 4,
+      auto_promote_min_lanes: 3,
+    });
+    await daemon.setMode("running");
+
+    const res = await callApp(app, "/orchestration/status");
+
+    expect(res.status).toBe(200);
+    expect(res.body.counts.ready).toBe(1);
+    expect(res.body.auto_promote_health).toMatchObject({
+      floor: 4,
+      min_ready_lanes: 3,
+      below_floor: true,
+      below_lanes: true,
+      triggered: true,
+      candidates_considered: 2,
+      promoted_count: 0,
+      skipped_count: 2,
+      lanes: {
+        build_ready: 1,
+        build_ready_lanes: 1,
+        ready_lane_keys: ["repo/ready-a"],
+        candidate_lane_keys: ["repo/candidate-a", "repo/candidate-b"],
+      },
+      next_action: {
+        code: "manual_promote_or_close_already_dispatched",
+      },
+    });
+    expect(res.body.auto_promote_health.next_action.code).not.toBe("none");
+    expect(res.body.auto_promote_health.next_action.summary).not.toMatch(/\b(?:ok|idle)\b/i);
+    expect(res.body.auto_promote_health.blocker_class_counts).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ class: "already_dispatched", count: 1 }),
+        expect.objectContaining({ class: "review_held_risk", count: 1 }),
+      ]),
+    );
+    expect(res.body.auto_promote_health.summary).toMatch(/ready=1 floor=4, lanes=1\/3/);
+    expect(res.body.auto_promote_health.summary).toMatch(/blocker classes:/);
+    expect(res.body.auto_promote_health.summary).toMatch(/next: manually \/promote/);
+    expect(res.body.flesh.auto_promote.health.next_action).toEqual(res.body.auto_promote_health.next_action);
+  });
+
   it("surfaces below-threshold flesh rows as held confidence review, separate from plain needs_review", async () => {
     await seedApprovedReview(adapter, {
       title: "below confidence held one",
