@@ -260,7 +260,7 @@ export async function readOrchestrationHealthProjection(
   const queueQuality = await readQueueQualityProjection(adapter, teamId, dependencyImpact, {
     needsClarification: needsClarification.length,
     promotion: promotion.length,
-  });
+  }, opts.readyAdmission);
   const readyItemBlockers = await readReadyItemBlockerProjection(adapter, teamId, dependencyImpact, opts);
   const buildReadyFloor = await readBuildReadyFloorProjection(adapter, teamId);
   const blocked =
@@ -696,6 +696,7 @@ async function readQueueQualityProjection(
   teamId: string,
   dependencyImpact: Map<string, string[]>,
   activeBlockerCounts: { needsClarification: number; promotion: number },
+  readyAdmission?: OrchestrationHealthProjectionOptions["readyAdmission"],
 ): Promise<OrchestrationQueueQualityProjection> {
   const [backlogRows, dispatchCounts, artifactNoise] = await Promise.all([
     readBacklogQueueRows(adapter, teamId),
@@ -734,6 +735,7 @@ async function readQueueQualityProjection(
   const blockedOrFailed = blockedBacklog + failedDispatches + noise.retryableRouteFailures;
   const explanation = queueQualityExplanation({
     actionableReady,
+    readyAdmission,
     rawQueued,
     needsApproval,
     duplicateOrNoop: noise.duplicateOrNoop,
@@ -1076,6 +1078,7 @@ function isAutoRunRisk(risk: string | null | undefined): boolean {
 
 function queueQualityExplanation(input: {
   actionableReady: number;
+  readyAdmission?: OrchestrationHealthProjectionOptions["readyAdmission"];
   rawQueued: number;
   needsApproval: number;
   duplicateOrNoop: number;
@@ -1083,8 +1086,20 @@ function queueQualityExplanation(input: {
   blockedOrFailed: number;
   activeBlockerCounts: { needsClarification: number; promotion: number };
 }): string {
-  if (input.actionableReady > 0) return `${input.actionableReady} ready row(s) are admissible now.`;
+  if (input.readyAdmission) {
+    if (input.readyAdmission.admissibleNow > 0) {
+      return `${input.readyAdmission.admissibleNow} ready row(s) are admissible now.`;
+    }
+  } else if (input.actionableReady > 0) {
+    return `${input.actionableReady} ready row(s) are admissible now.`;
+  }
   const reasons: string[] = [];
+  if (input.readyAdmission && input.actionableReady > 0) {
+    reasons.push(`${input.actionableReady} actionable ready row(s) blocked by live admission guardrails`);
+  }
+  for (const { code, count } of input.readyAdmission?.blockerCounts ?? []) {
+    if (count > 0) reasons.push(`${count} ${code}`);
+  }
   if (input.needsApproval > 0) reasons.push(`${input.needsApproval} need approval/review`);
   if (input.blockedOrFailed > 0) reasons.push(`${input.blockedOrFailed} blocked or failed`);
   if (input.duplicateOrNoop > 0) reasons.push(`${input.duplicateOrNoop} duplicate/no-op artifact acknowledgement(s)`);

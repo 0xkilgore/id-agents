@@ -1259,6 +1259,63 @@ describe("daemon — dry-run vs live", () => {
     ]);
   });
 
+  it("status does not call single-writer-busy actionable rows admissible", async () => {
+    await seedReady(adapter, {
+      title: "single writer busy A",
+      write_scope: ["repo/busy-a"],
+    });
+    await seedReady(adapter, {
+      title: "single writer busy B",
+      write_scope: ["repo/busy-b"],
+    });
+    const duplicate = await seedReady(adapter, {
+      title: "duplicate retry guard",
+      write_scope: ["repo/duplicate"],
+    });
+    await markReadyAlreadyDispatched(adapter, duplicate.item_id, "phid:disp-prior");
+
+    const { app, daemon } = mountStatusApp(
+      adapter,
+      {
+        dry_run: true,
+        auto_flesh_enabled: false,
+        auto_promote_enabled: false,
+        max_in_flight: 20,
+        max_new_per_tick: 10,
+        min_ready_fuel: 2,
+      },
+      { activeScopes: new Set(["repo/busy-a", "repo/busy-b"]) },
+    );
+    await daemon.setMode("running");
+
+    const res = await callApp(app, "/orchestration/status");
+
+    expect(res.status).toBe(200);
+    expect(res.body.counts.ready).toBe(3);
+    expect(res.body.counts.admissible_now).toBe(0);
+    expect(res.body.counts.ready_block_reasons).toMatchObject({
+      single_writer_lane_busy: 2,
+      duplicate_dispatch_retry_required: 1,
+    });
+    expect(res.body.ready_admission.blocker_counts).toEqual(
+      expect.arrayContaining([
+        { code: "single_writer_lane_busy", category: "lane_eligibility", count: 2 },
+        { code: "duplicate_dispatch_retry_required", category: "retry_safety", count: 1 },
+      ]),
+    );
+    expect(res.body.ready_admission.non_admitted).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ code: "single_writer_lane_busy", action: "skipped" }),
+        expect.objectContaining({ code: "duplicate_dispatch_retry_required", action: "held" }),
+      ]),
+    );
+    expect(res.body.health.queue_quality.actionable_ready).toBe(2);
+    expect(res.body.health.queue_quality.explanation).toContain("No ready fuel is admissible");
+    expect(res.body.health.queue_quality.explanation).toContain("single_writer_lane_busy");
+    expect(res.body.health.queue_quality.explanation).toContain("duplicate_dispatch_retry_required");
+    expect(res.body.health.queue_quality.explanation).not.toContain("2 ready row(s) are admissible now");
+  });
+
   it("status reports build-ready fuel lanes and top blockers when raw ready is above floor but admissible is zero", async () => {
     await seedReady(adapter, {
       title: "ready capacity gated A",
