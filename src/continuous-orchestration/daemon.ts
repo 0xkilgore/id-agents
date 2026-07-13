@@ -1742,21 +1742,21 @@ function nextAutoPromoteAction(args: {
     return { code: "none", summary: "auto-promote has safe candidates; let the daemon promote them on the next live tick" };
   }
   if (!args.triggered || args.candidates === 0) {
-    return { code: "flesh_or_refuel_candidates", summary: "refuel or flesh more needs_review build candidates" };
+    return { code: "flesh_or_refuel_candidates", summary: "author new lane-diverse build rows or flesh more needs_review candidates" };
   }
 
   const top = args.blockerClassCounts[0]?.class;
   switch (top) {
     case "already_dispatched":
-      return { code: "manual_promote_or_close_already_dispatched", summary: "manually /promote safe retries or close stale already-dispatched rows" };
+      return { code: "manual_promote_or_close_already_dispatched", summary: "close stale already-dispatched rows or manually /promote retry-safe rows" };
     case "review_held_risk":
       return { code: "approve_review_held_risk", summary: "review and explicitly approve held risk classes; auto-promote only moves build risk" };
     case "blocked_dependencies":
       return { code: "resolve_blocked_dependencies", summary: "finish or unblock dependency items before refueling this lane" };
     case "confidence_threshold":
-      return { code: "raise_candidate_confidence", summary: "re-flesh low-confidence rows or approve them manually after review" };
+      return { code: "raise_candidate_confidence", summary: "author new lane-diverse rows or manually review/promote confidence-held candidates" };
     default:
-      return { code: "flesh_or_refuel_candidates", summary: "refuel with safe build rows or inspect skipped_items for manual approval" };
+      return { code: "flesh_or_refuel_candidates", summary: "author new lane-diverse safe build rows or inspect skipped_items for manual approval" };
   }
 }
 
