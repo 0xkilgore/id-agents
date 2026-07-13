@@ -182,6 +182,28 @@ describe("reconcileFeedbackDispatchStatus — pure dispatch join", () => {
     expect(out.items[0].routing?.is_terminal).toBe(true);
   });
 
+  it("marks a terminal failed dispatch without returning a false routed success state", async () => {
+    const fb = feedbackFixture([commentItem(1, routing("phid:disp-FAILED"))]);
+    const resolve = async (): Promise<DispatchStatusLite | null> => ({
+      status: "failed",
+      effective_state: "failed",
+      is_terminal: true,
+    });
+
+    const out = await reconcileFeedbackDispatchStatus(fb, resolve);
+    expect(out.acted_upon.state).toBe("captured");
+    expect(out.items[0].terminal_failure_reason).toBe("failed");
+    expect(out.items[0].routing).toMatchObject({
+      dispatch_phid: "phid:disp-FAILED",
+      status: "failed",
+      is_terminal: true,
+      route_status: "receipt_terminal_failed",
+      retryable: false,
+      terminal_failure_reason: "failed",
+      last_receipt_at: "2026-06-29T00:00:00.000Z",
+    });
+  });
+
   it("leaves an unresolved (purged/unknown) dispatch status:null and treats it as live", async () => {
     const fb = feedbackFixture([commentItem(1, routing("phid:disp-GONE"))]);
     const resolve = async (): Promise<DispatchStatusLite | null> => null;
@@ -254,6 +276,27 @@ describe("GET /artifacts/:id/feedback?reconcile=1 — wired reconciliation", () 
     const fb = await call(app, "GET", `/artifacts/${ART}/feedback?reconcile=1`);
     expect(asked).toContain(phid);
     expect(fb.body.items[0].routing.is_terminal).toBe(true);
+  });
+
+  it("surfaces terminal failure receipts on the wired route", async () => {
+    const { fn } = makeFakeEnqueue();
+    const resolveDispatchStatus: TeamAwareDispatchStatusResolver = async () => ({
+      status: "failed",
+      effective_state: "failed",
+      is_terminal: true,
+    });
+    const { app, adapter } = await buildApp({ enqueue: fn, resolveDispatchStatus });
+    await seedRoutedComment(app, adapter);
+
+    const fb = await call(app, "GET", `/artifacts/${ART}/feedback?reconcile=1`);
+    expect(fb.body.acted_upon.state).toBe("captured");
+    expect(fb.body.items[0].terminal_failure_reason).toBe("failed");
+    expect(fb.body.items[0].routing).toMatchObject({
+      status: "failed",
+      route_status: "receipt_terminal_failed",
+      terminal_failure_reason: "failed",
+      last_receipt_at: expect.any(String),
+    });
   });
 
   it("is a no-op by default (no ?reconcile): routing carries no live status", async () => {

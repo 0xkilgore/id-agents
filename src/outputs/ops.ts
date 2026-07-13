@@ -13,6 +13,7 @@
 import type { DbAdapter } from "../db/db-adapter.js";
 import {
   appendOperation,
+  getArtifact,
   getArtifactDraft,
   getLastOperationByActor,
   getReviewState,
@@ -27,6 +28,9 @@ import type {
   ArtifactCommentRouteStatus,
   ArtifactDispatchReceipt,
   ArtifactComment,
+  ArtifactFeedbackRouteStatus,
+  ArtifactFeedbackSourceArtifact,
+  ArtifactFeedbackSourceLinkStatus,
   ArtifactOpRow,
   ArtifactOpType,
   ArtifactReviewStateRow,
@@ -651,6 +655,40 @@ function parseRouteStatus(value: unknown): ArtifactCommentRouteStatus | null {
   };
 }
 
+function feedbackRouteStatusEnum(routeStatus: ArtifactCommentRouteStatus | null): ArtifactFeedbackRouteStatus {
+  if (!routeStatus) return "unknown";
+  if (routeStatus.visible_state === "not-recorded") return "not_recorded";
+  if (routeStatus.visible_state === "recorded-but-route-failed-with-retry") return "recorded_route_failed_retryable";
+  if (routeStatus.visible_state === "recorded+routed" && routeStatus.routed) return "recorded_routed";
+  return "recorded_terminal_no_route";
+}
+
+function terminalFailureReason(routeStatus: ArtifactCommentRouteStatus | null): string | null {
+  if (!routeStatus) return null;
+  if (routeStatus.error?.message) return routeStatus.error.message;
+  if (!routeStatus.retryable && !routeStatus.routed && routeStatus.skipped) return routeStatus.skipped;
+  return null;
+}
+
+function sourceArtifactFallback(
+  artifactId: string,
+  catalog: Awaited<ReturnType<typeof getArtifact>>,
+): ArtifactFeedbackSourceArtifact {
+  return {
+    artifact_id: artifactId,
+    title: catalog?.title ?? catalog?.basename ?? null,
+    path: catalog?.abs_path ?? null,
+  };
+}
+
+function sourceLinkStatus(
+  sourceLink: string | null,
+  sourceArtifact: ArtifactFeedbackSourceArtifact,
+): ArtifactFeedbackSourceLinkStatus {
+  if (sourceLink) return "linked";
+  return sourceArtifact.title || sourceArtifact.path ? "source_link_missing_fallback" : "source_missing";
+}
+
 // ── C0 ambient reactions (T-CKPT.feedback-system/C0) ────────────────
 // A reaction is the lowest-click comment: one tap → a typed reaction (and an
 // optional one-sentence note). It is persisted as a `comment_recorded` op with
@@ -784,7 +822,11 @@ export async function listFeedback(
   limit = 200,
   offset = 0,
 ): Promise<{ items: FeedbackItem[]; acted_upon: ActedUponSummary }> {
-  const ops = await listOperations(adapter, artifactId, limit, offset);
+  const [ops, catalog] = await Promise.all([
+    listOperations(adapter, artifactId, limit, offset),
+    getArtifact(adapter, artifactId),
+  ]);
+  const sourceArtifact = sourceArtifactFallback(artifactId, catalog);
   // Index routing ops by the comment op_id they reference. Latest routed wins
   // for a given source (re-routes are rare but additive).
   const routingBySource = new Map<number, FeedbackRouting>();
@@ -795,24 +837,40 @@ export async function listFeedback(
     // ops are newest-first, so the first routed op seen for a source is the
     // latest — keep it, skip older re-routes.
     if (routingBySource.has(parsed.source_op_id)) continue;
-    routingBySource.set(parsed.source_op_id, { ...parsed.routing, routed_at: op.ts });
+    routingBySource.set(parsed.source_op_id, {
+      ...parsed.routing,
+      routed_at: op.ts,
+      route_status: "receipt_recorded",
+      retryable: false,
+      terminal_failure_reason: null,
+      last_receipt_at: op.ts,
+    });
   }
 
   const items: FeedbackItem[] = [];
   for (const op of ops) {
     if (op.op_type !== "comment_recorded") continue;
     const { body, anchor, reaction, route_status } = parseCommentPayload(op.payload_json);
+    const routing = routingBySource.get(op.op_id) ?? null;
     items.push({
       comment_id: artifactCommentId(op.artifact_id, op.op_id),
       op_id: op.op_id,
+      artifact_id: op.artifact_id,
+      source_artifact: sourceArtifact,
+      source_link: op.source_link,
+      source_link_status: sourceLinkStatus(op.source_link, sourceArtifact),
       actor: op.actor,
       kind: reaction ? "reaction" : "comment",
       reaction,
       body,
       anchor,
       ts: op.ts,
-      routing: routingBySource.get(op.op_id) ?? null,
+      routing,
       route_status,
+      route_status_enum: feedbackRouteStatusEnum(route_status),
+      retryable: route_status?.retryable ?? false,
+      terminal_failure_reason: terminalFailureReason(route_status),
+      last_receipt_at: routing?.last_receipt_at ?? route_status?.updated_at ?? null,
     });
   }
   // listOperations is op_id ASC (oldest-first). For the chip/feed we surface
@@ -861,17 +919,50 @@ export async function reconcileFeedbackDispatchStatus(
 
   const enrich = (r: FeedbackRouting): FeedbackRouting => {
     const s = statusByPhid.get(r.dispatch_phid) ?? null;
-    return s
-      ? { ...r, status: s.status, effective_state: s.effective_state, is_terminal: s.is_terminal }
-      : { ...r, status: null, effective_state: null, is_terminal: false };
+    if (!s) {
+      return {
+        ...r,
+        status: null,
+        effective_state: null,
+        is_terminal: false,
+        route_status: r.route_status ?? "receipt_unknown",
+        retryable: false,
+        terminal_failure_reason: null,
+        last_receipt_at: r.last_receipt_at ?? r.routed_at,
+      };
+    }
+    const terminalFailure = s.is_terminal && (s.status === "failed" || s.effective_state === "failed");
+    return {
+      ...r,
+      status: s.status,
+      effective_state: s.effective_state,
+      is_terminal: s.is_terminal,
+      route_status: terminalFailure ? "receipt_terminal_failed" : s.is_terminal ? "receipt_terminal" : "receipt_live",
+      retryable: false,
+      terminal_failure_reason: terminalFailure ? s.effective_state ?? s.status : null,
+      last_receipt_at: r.last_receipt_at ?? r.routed_at,
+    };
   };
 
   const items = feedback.items.map((it) =>
-    it.routing ? { ...it, routing: enrich(it.routing) } : it,
+    it.routing
+      ? (() => {
+          const routing = enrich(it.routing);
+          return {
+            ...it,
+            routing,
+            terminal_failure_reason: routing.terminal_failure_reason ?? it.terminal_failure_reason ?? null,
+            last_receipt_at: routing.last_receipt_at ?? it.last_receipt_at ?? null,
+          };
+        })()
+      : it,
   );
+  const routedDispatches = feedback.acted_upon.routed_dispatches.map(enrich);
+  const hasTerminalFailure = routedDispatches.some((routing) => routing.route_status === "receipt_terminal_failed");
   const acted_upon: ActedUponSummary = {
     ...feedback.acted_upon,
-    routed_dispatches: feedback.acted_upon.routed_dispatches.map(enrich),
+    state: hasTerminalFailure ? "captured" : feedback.acted_upon.state,
+    routed_dispatches: routedDispatches,
   };
   return { items, acted_upon };
 }

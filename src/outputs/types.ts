@@ -299,6 +299,24 @@ export interface ArtifactCommentRouteStatus {
   updated_at: string;
 }
 
+export type ArtifactFeedbackRouteStatus =
+  | "recorded_routed"
+  | "recorded_route_failed_retryable"
+  | "recorded_terminal_no_route"
+  | "not_recorded"
+  | "unknown";
+
+export type ArtifactFeedbackSourceLinkStatus =
+  | "linked"
+  | "source_link_missing_fallback"
+  | "source_missing";
+
+export interface ArtifactFeedbackSourceArtifact {
+  artifact_id: string;
+  title: string | null;
+  path: string | null;
+}
+
 export interface ArtifactTimelineEvent {
   event_id: string;
   op_id: number;
@@ -449,6 +467,10 @@ export interface FeedbackRouting {
   query_id: string | null;
   to_agent: string;
   routed_at: string;
+  route_status?: "receipt_recorded" | "receipt_live" | "receipt_terminal" | "receipt_terminal_failed" | "receipt_unknown";
+  retryable?: boolean;
+  terminal_failure_reason?: string | null;
+  last_receipt_at?: string;
   // S4 (inbox-digest-manager-source): the routed dispatch's LIVE status,
   // resolved only on the reconcile view (GET /artifacts/:id/feedback?reconcile=1)
   // when the manager binds a dispatch-status resolver. On the default decoupled
@@ -491,6 +513,10 @@ export interface FeedbackItem {
    *  this is the id the digest ledger dedups/reconciles on (fix-spec §S5). */
   comment_id: string;
   op_id: number;
+  artifact_id?: string;
+  source_artifact?: ArtifactFeedbackSourceArtifact;
+  source_link?: string | null;
+  source_link_status?: ArtifactFeedbackSourceLinkStatus;
   actor: string;
   /** "reaction" when reaction != null, else "comment". */
   kind: "reaction" | "comment";
@@ -502,6 +528,10 @@ export interface FeedbackItem {
    *  never routed (no owner / no scheduler / flag was off at capture time). */
   routing: FeedbackRouting | null;
   route_status?: ArtifactCommentRouteStatus | null;
+  route_status_enum?: ArtifactFeedbackRouteStatus;
+  retryable?: boolean;
+  terminal_failure_reason?: string | null;
+  last_receipt_at?: string | null;
 }
 
 /** Rolled-up acted-upon state for the chip. `routed` = at least one piece of

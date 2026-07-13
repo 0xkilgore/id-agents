@@ -38,13 +38,20 @@ function makeFakeEnqueue(opts: { throws?: boolean } = {}): {
 async function buildApp(enqueue?: CommentDispatchEnqueueFn): Promise<{
   app: Express;
   adapter: SqliteAdapter;
+}>;
+async function buildApp(
+  enqueue?: CommentDispatchEnqueueFn,
+  opts: { env?: NodeJS.ProcessEnv } = {},
+): Promise<{
+  app: Express;
+  adapter: SqliteAdapter;
 }> {
   const adapter = new SqliteAdapter(":memory:");
   await migrateSqlite(adapter);
   await migrateOutputsTables(adapter);
   const app = express();
   app.use(express.json());
-  mountOutputsRoutes(app, adapter, { enqueueDispatch: enqueue });
+  mountOutputsRoutes(app, adapter, { enqueueDispatch: enqueue, env: opts.env });
   return { app, adapter };
 }
 
@@ -93,7 +100,7 @@ async function call(
 describe("POST /artifacts/:id/comments — B2 auto-dispatch", () => {
   it("routes the comment to the artifact's owning agent and returns a receipt", async () => {
     const { fn, calls } = makeFakeEnqueue();
-    const { app, adapter } = await buildApp(fn);
+    const { app, adapter } = await buildApp(fn, { env: { C0_FEEDBACK_REACTIONS: "1" } });
     await catalogArtifact(adapter, "regina");
 
     const res = await call(app, "POST", `/artifacts/${ART}/comments`, {
@@ -143,6 +150,34 @@ describe("POST /artifacts/:id/comments — B2 auto-dispatch", () => {
       visible_state: "recorded+routed",
       target_agent: "regina",
       dispatch: { dispatch_phid: "phid:disp-b2-1" },
+    });
+
+    const feedback = await call(app, "GET", `/artifacts/${ART}/feedback`);
+    expect(feedback.status).toBe(200);
+    expect(feedback.body.acted_upon).toMatchObject({
+      state: "routed",
+      routed_count: 1,
+    });
+    expect(feedback.body.items[0]).toMatchObject({
+      artifact_id: ART,
+      source_artifact: {
+        artifact_id: ART,
+        title: "B2 ops plan",
+        path: "/Users/kilgore/Dropbox/Code/regina/output/b2-plan.md",
+      },
+      source_link: null,
+      source_link_status: "source_link_missing_fallback",
+      route_status_enum: "recorded_routed",
+      retryable: false,
+      terminal_failure_reason: null,
+      last_receipt_at: expect.any(String),
+      routing: {
+        dispatch_phid: "phid:disp-b2-1",
+        route_status: "receipt_recorded",
+        retryable: false,
+        terminal_failure_reason: null,
+        last_receipt_at: expect.any(String),
+      },
     });
   });
 
@@ -243,7 +278,7 @@ describe("POST /artifacts/:id/comments — B2 auto-dispatch", () => {
 
   it("preserves the durable comment and returns dispatch_error when enqueue throws", async () => {
     const { fn, calls } = makeFakeEnqueue({ throws: true });
-    const { app, adapter } = await buildApp(fn);
+    const { app, adapter } = await buildApp(fn, { env: { C0_FEEDBACK_REACTIONS: "1" } });
     await catalogArtifact(adapter, "regina");
 
     const res = await call(app, "POST", `/artifacts/${ART}/comments`, {
@@ -272,5 +307,109 @@ describe("POST /artifacts/:id/comments — B2 auto-dispatch", () => {
     expect(get.body.comments).toHaveLength(1);
     expect(get.body.comments[0].body).toBe("route crash but I must persist");
     expect(get.body.comments[0].route_status.error.message).toContain("scheduler boom");
+
+    const feedback = await call(app, "GET", `/artifacts/${ART}/feedback`);
+    expect(feedback.body.acted_upon).toMatchObject({
+      state: "captured",
+      routed_count: 0,
+    });
+    expect(feedback.body.items[0]).toMatchObject({
+      route_status_enum: "recorded_route_failed_retryable",
+      retryable: true,
+      terminal_failure_reason: "scheduler boom",
+      routing: null,
+    });
+  });
+
+  it("proves retry-drain semantics: retryable failures reuse the op key; terminal feedback does not duplicate tasks", async () => {
+    const calls: EnqueueCall[] = [];
+    let attempts = 0;
+    const enqueue: CommentDispatchEnqueueFn = async (input) => {
+      calls.push(input);
+      attempts += 1;
+      if (attempts === 1) throw new Error("transient scheduler outage");
+      return { query_id: "q-drain-1", dispatch_phid: "phid:disp-drain-1", status: "queued" };
+    };
+    const { app, adapter } = await buildApp(enqueue, { env: { C0_FEEDBACK_REACTIONS: "1" } });
+    await catalogArtifact(adapter, "regina");
+
+    const first = await call(app, "POST", `/artifacts/${ART}/comments`, {
+      actor_ref: "user:chris",
+      body: "Please retry this route after the scheduler recovers.",
+      idempotency_key: "feedback-drain-retryable",
+    });
+    const retry = await call(app, "POST", `/artifacts/${ART}/comments`, {
+      actor_ref: "user:chris",
+      body: "Please retry this route after the scheduler recovers.",
+      idempotency_key: "feedback-drain-retryable",
+    });
+
+    expect(first.status).toBe(200);
+    expect(first.body.op_id).toBe(retry.body.op_id);
+    expect(first.body.route_status).toMatchObject({
+      visible_state: "recorded-but-route-failed-with-retry",
+      retryable: true,
+      error: { message: "transient scheduler outage" },
+    });
+    expect(retry.body.route_status).toMatchObject({
+      visible_state: "recorded+routed",
+      retryable: false,
+      dispatch: { dispatch_phid: "phid:disp-drain-1", query_id: "q-drain-1" },
+    });
+    expect(calls).toHaveLength(2);
+
+    const terminal = await call(app, "POST", `/artifacts/${ART}/comments`, {
+      actor_ref: "user:chris",
+      body: "Ship it",
+      idempotency_key: "feedback-drain-terminal",
+    });
+    const terminalReplay = await call(app, "POST", `/artifacts/${ART}/comments`, {
+      actor_ref: "user:chris",
+      body: "Ship it",
+      idempotency_key: "feedback-drain-terminal",
+    });
+
+    expect(terminal.status).toBe(200);
+    expect(terminal.body.op_id).toBe(terminalReplay.body.op_id);
+    expect(terminal.body.route_status).toMatchObject({
+      route_kind: "approval_signal",
+      visible_state: "recorded+routed",
+      routed: false,
+      retryable: false,
+      skipped: "approval_signal",
+    });
+    expect(terminalReplay.body.approval.op_id).toBe(terminal.body.approval.op_id);
+    expect(terminalReplay.body.approval.idempotent).toBe(true);
+
+    const { rows: ops } = await adapter.query<{ op_type: string; n: number }>(
+      `SELECT op_type, COUNT(*) AS n
+         FROM artifact_operations
+        WHERE artifact_id = ?
+        GROUP BY op_type
+        ORDER BY op_type`,
+      [ART],
+    );
+    expect(Object.fromEntries(ops.map((row) => [row.op_type, Number(row.n)]))).toEqual({
+      approve: 1,
+      comment_recorded: 2,
+      comment_routed: 1,
+    });
+
+    const { rows: idempotencyRows } = await adapter.query<{ idempotency_key: string | null; n: number }>(
+      `SELECT idempotency_key, COUNT(*) AS n
+         FROM artifact_operations
+        WHERE artifact_id = ? AND idempotency_key IS NOT NULL
+        GROUP BY idempotency_key
+        ORDER BY idempotency_key`,
+      [ART],
+    );
+    expect(Object.fromEntries(idempotencyRows.map((row) => [row.idempotency_key, Number(row.n)]))).toEqual({
+      [`comment-approval:${terminal.body.op_id}`]: 1,
+      "feedback-drain-retryable": 1,
+      "feedback-drain-terminal": 1,
+    });
+
+    const { rows: taskRows } = await adapter.query<{ n: number }>("SELECT COUNT(*) AS n FROM tasks");
+    expect(Number(taskRows[0]?.n ?? 0)).toBe(0);
   });
 });
