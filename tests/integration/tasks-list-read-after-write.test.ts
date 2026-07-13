@@ -206,6 +206,54 @@ describe('GET /tasks read-model immediate reflect', () => {
     ).toBeDefined();
   });
 
+  it('GET /tasks enforces limit/offset and returns the slim list projection by default', async () => {
+    for (let i = 0; i < 12; i += 1) {
+      await insertTaskDirect(db, teamId, `bounded-list-${i}`, null, 'todo');
+    }
+
+    const res = await fetch(`${baseUrl}/tasks?limit=5`, {
+      headers: { 'X-Id-Team': TEAM },
+    });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.limit).toBe(5);
+    expect(body.offset).toBe(0);
+    expect(body.count).toBe(5);
+    expect(body.tasks).toHaveLength(5);
+
+    const row = body.tasks[0] as Record<string, unknown>;
+    expect(row.name).toMatch(/^bounded-list-/);
+    expect(row.title).toBeDefined();
+    expect(row.status).toBe('todo');
+    expect(row.updated_at).toBeTypeOf('number');
+    expect(row).not.toHaveProperty('title_audit');
+    expect(row).not.toHaveProperty('currentness');
+    expect(row).not.toHaveProperty('linkFields');
+    expect(row).not.toHaveProperty('operationTimeline');
+    expect(row).not.toHaveProperty('commentRouting');
+    expect(row).not.toHaveProperty('openTarget');
+  });
+
+  it('GET /tasks defaults to a capped list payload under the console budget', async () => {
+    for (let i = 0; i < 150; i += 1) {
+      await insertTaskDirect(db, teamId, `default-cap-${i}`, null, 'todo', {
+        title: `Default cap task ${i} !high due:2026-07-20`,
+        description: 'This description should not inflate the default list payload.',
+      });
+    }
+
+    const res = await fetch(`${baseUrl}/tasks`, {
+      headers: { 'X-Id-Team': TEAM },
+    });
+    expect(res.status).toBe(200);
+    const text = await res.text();
+    const body = JSON.parse(text);
+    expect(body.limit).toBe(100);
+    expect(body.count).toBe(100);
+    expect(body.tasks).toHaveLength(100);
+    expect(Buffer.byteLength(text, 'utf8')).toBeLessThan(200_000);
+  });
+
   it('REGRESSION — zero today with overdue/high tasks still returns nonzero task summary and read-model bands', async () => {
     const today = '2026-06-29';
     await insertTaskDirect(db, teamId, 'cobra-election', null, 'todo', {
@@ -443,7 +491,7 @@ describe('GET /tasks read-model immediate reflect', () => {
     expect(detail.task.linkFields.task).toMatchObject({ kind: 'task', ref: taskName, href: `/tasks/${taskName}` });
     expect(detail.task.created_at).toBe(detail.task.createdAt);
 
-    const list = await fetch(`${baseUrl}/tasks`, {
+    const list = await fetch(`${baseUrl}/tasks?include=detail`, {
       headers: { 'X-Id-Team': TEAM },
     }).then((r) => r.json());
     const listTask = list.tasks.find((task: Record<string, unknown>) => task.name === taskName);

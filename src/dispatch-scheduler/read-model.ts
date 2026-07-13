@@ -1007,11 +1007,13 @@ async function readAgentOutputArtifacts(
     `SELECT id, name, working_directory
        FROM agents
        WHERE team_id = ? AND deleted_at IS NULL
-       ORDER BY name ASC`,
-    [teamId],
+       ORDER BY name ASC
+       LIMIT ?`,
+    [teamId, limit],
   );
   const artifacts: Array<Record<string, unknown>> = [];
   for (const agent of agents) {
+    if (artifacts.length >= limit) break;
     if (!agent.working_directory) continue;
     const outputDir = path.join(agent.working_directory, 'output');
     if (!existsSync(outputDir)) continue;
@@ -1022,6 +1024,7 @@ async function readAgentOutputArtifacts(
       continue;
     }
     for (const entry of entries) {
+      if (artifacts.length >= limit) break;
       if (!entry.isFile()) continue;
       const filePath = path.join(outputDir, entry.name);
       const stat = safeStat(filePath);

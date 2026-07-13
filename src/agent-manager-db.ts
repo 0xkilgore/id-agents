@@ -9002,6 +9002,10 @@ export class AgentManagerDb {
         const { id: teamId } = await this.getTeam(req);
         const { status, owner, team: teamRef } = req.query as Record<string, string>;
         const today = parseTodayQuery(req.query.today) ?? todayIso();
+        const limit = parseReadLimit(req.query.limit, { defaultLimit: 100, maxLimit: 500 });
+        const offset = Math.max(parseInt(String(req.query.offset ?? '0'), 10) || 0, 0);
+        const include = typeof req.query.include === 'string' ? req.query.include : '';
+        const includeDetail = include.split(',').map((part) => part.trim()).includes('detail');
 
         // Resolve owner
         let ownerIdFilter: string | undefined;
@@ -9024,8 +9028,10 @@ export class AgentManagerDb {
           status: status && validStatuses.includes(status) ? status as 'todo' | 'doing' | 'done' : undefined,
           owner: ownerIdFilter,
           teamId: teamIdFilter,
+          limit,
+          offset,
         });
-        this.cacheTaskList({
+        if (offset === 0) this.cacheTaskList({
           teamId: teamIdFilter,
           status: status && validStatuses.includes(status) ? status as 'todo' | 'doing' | 'done' : undefined,
           owner: ownerIdFilter,
@@ -9034,11 +9040,14 @@ export class AgentManagerDb {
 
         const results = [];
         for (const t of tasks) {
-          results.push(await this.buildTaskResult(t, teamId, today));
+          results.push(includeDetail ? await this.buildTaskResult(t, teamId, today) : await this.buildTaskListResult(t, teamId, today));
         }
         res.json({
           ok: true,
           tasks: results,
+          count: results.length,
+          limit,
+          offset,
           today,
           summary: summarizeTaskRows(tasks, today),
           task_reconciliation: summarizeTaskReconciliation(tasks, { today }),
@@ -9057,8 +9066,8 @@ export class AgentManagerDb {
       try {
         const { id: teamId } = await this.getTeam(req);
         const { status, owner } = req.query as Record<string, string>;
-        const limit = Math.min(parseInt(req.query.limit as string, 10) || 100, 1000);
-        const offset = parseInt(req.query.offset as string, 10) || 0;
+        const limit = parseReadLimit(req.query.limit, { defaultLimit: 100, maxLimit: 1000 });
+        const offset = Math.max(parseInt(String(req.query.offset ?? '0'), 10) || 0, 0);
         const today = parseTodayQuery(req.query.today) ?? todayIso();
 
         let ownerIdFilter: string | undefined;
@@ -9072,11 +9081,14 @@ export class AgentManagerDb {
           status: status && validStatuses.includes(status) ? status as 'todo' | 'doing' | 'done' : undefined,
           owner: ownerIdFilter,
           teamId,
+          limit,
+          offset,
         });
         const agents = await this.dbListAgents(teamId, true);
         const agentNames = new Map(agents.map((a) => [a.id, a.name]));
-        const envelope = buildTasksEntriesEnvelope(tasks, agentNames, { limit, offset, today });
-        await Promise.all(tasks.slice(offset, offset + limit).map((task) =>
+        const envelope = buildTasksEntriesEnvelope(tasks, agentNames, { limit, offset: 0, today });
+        envelope.offset = offset;
+        await Promise.all(tasks.map((task) =>
           this.buildTaskDetailCached(task, teamId, today).catch((err) => {
             this.managerLog(`[task-detail-cache] prefetch failed for ${task.name}: ${err instanceof Error ? err.message : String(err)}`);
             return null;
@@ -9251,6 +9263,8 @@ export class AgentManagerDb {
             status: statusFilter,
             owner: ownerIdFilter,
             teamId,
+            limit: 100,
+            offset: 0,
           });
           this.cacheTaskList({ teamId, status: statusFilter, owner: ownerIdFilter, rows: tasks });
         }
@@ -10282,6 +10296,37 @@ export class AgentManagerDb {
       openTarget: { kind: 'task', ref: task.name, route: `/tasks/${encodeURIComponent(task.name)}`, href: `/tasks/${encodeURIComponent(task.name)}` },
       created_at: task.created_at,
       createdAt: task.created_at,
+      updated_at: task.updated_at,
+      updatedAt: task.updated_at,
+      completed_at: task.completed_at,
+      completedAt: task.completed_at,
+    };
+  }
+
+  private async buildTaskListResult(task: TaskRow, teamId: string, today: string = todayIso()): Promise<Record<string, unknown>> {
+    let ownerName: string | null = null;
+    if (task.owner) {
+      const ownerAgent = await this.db.agents.getById(task.owner);
+      if (ownerAgent) {
+        ownerName = (ownerAgent.metadata as any)?.alias || ownerAgent.name;
+      }
+    }
+
+    const facts = extractTaskScheduleFacts(task);
+    return {
+      id: task.uuid ?? task.id,
+      name: task.name,
+      uuid: task.uuid,
+      shortId: task.uuid ? `#${task.uuid.replace(/-/g, '').slice(0, 8)}` : null,
+      title: task.title,
+      status: task.status,
+      track: task.track ?? '(unassigned)',
+      owner: task.owner,
+      ownerName,
+      priority: facts.priority,
+      due_iso: facts.due_iso,
+      due: facts.due_iso,
+      band: classifyTaskBand(facts, today),
       updated_at: task.updated_at,
       updatedAt: task.updated_at,
       completed_at: task.completed_at,

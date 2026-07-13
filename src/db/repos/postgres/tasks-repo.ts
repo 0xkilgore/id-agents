@@ -68,6 +68,8 @@ export class PgTasksRepo implements TasksRepository {
     status?: 'todo' | 'doing' | 'done';
     owner?: string;
     teamId?: string | null;
+    limit?: number;
+    offset?: number;
   }): Promise<TaskRow[]> {
     const clauses: string[] = [];
     const params: unknown[] = [];
@@ -91,8 +93,11 @@ export class PgTasksRepo implements TasksRepository {
     }
 
     const where = clauses.length > 0 ? `WHERE ${clauses.join(' AND ')}` : '';
+    const limit = clampTaskListLimit(filters?.limit);
+    const offset = clampTaskListOffset(filters?.offset);
+    params.push(limit, offset);
     const r = await this.db.query<TaskRow>(
-      `SELECT * FROM tasks ${where} ORDER BY updated_at DESC`,
+      `SELECT * FROM tasks ${where} ORDER BY updated_at DESC LIMIT $${idx++} OFFSET $${idx++}`,
       params,
     );
     return r.rows;
@@ -177,4 +182,17 @@ export class PgTasksRepo implements TasksRepository {
     );
     return r.rows;
   }
+}
+
+const DEFAULT_TASK_LIST_LIMIT = 100;
+const MAX_TASK_LIST_LIMIT = 1000;
+
+function clampTaskListLimit(limit: number | undefined): number {
+  if (limit === undefined || !Number.isFinite(limit) || limit <= 0) return DEFAULT_TASK_LIST_LIMIT;
+  return Math.min(Math.floor(limit), MAX_TASK_LIST_LIMIT);
+}
+
+function clampTaskListOffset(offset: number | undefined): number {
+  if (offset === undefined || !Number.isFinite(offset) || offset < 0) return 0;
+  return Math.floor(offset);
 }

@@ -505,6 +505,8 @@ export interface TasksRepository {
     status?: 'todo' | 'doing' | 'done';
     owner?: string;
     teamId?: string | null;
+    limit?: number;
+    offset?: number;
   }): Promise<TaskRow[]>;
 
   /** Update one or more mutable fields on a task. */
