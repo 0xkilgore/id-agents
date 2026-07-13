@@ -32,6 +32,7 @@ import { maybeRunCommentsCli } from './cli/comments.js';
 import { maybeRunPromoteToMainCli } from './cli/promote-to-main.js';
 import { maybeRunPromoteScopedCommitCli } from './cli/promote-scoped-commit.js';
 import { maybeRunPromotionRescueAdmitCli } from './cli/promotion-rescue-admit.js';
+import { maybeRunStaleDuplicateBacklogCli } from './cli/stale-duplicate-backlog.js';
 import { waitForAgentReady } from './cli/agent-readiness.js';
 
 const oneShotSyncExit = await maybeRunWorkspaceSyncCli(process.argv.slice(2));
@@ -61,6 +62,10 @@ if (oneShotPromoteScopedExit !== null) {
 const oneShotPromotionRescueAdmitExit = await maybeRunPromotionRescueAdmitCli(process.argv.slice(2));
 if (oneShotPromotionRescueAdmitExit !== null) {
   process.exit(oneShotPromotionRescueAdmitExit);
+}
+const oneShotStaleDuplicateBacklogExit = await maybeRunStaleDuplicateBacklogCli(process.argv.slice(2));
+if (oneShotStaleDuplicateBacklogExit !== null) {
+  process.exit(oneShotStaleDuplicateBacklogExit);
 }
 
 const colors = {
