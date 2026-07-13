@@ -41,6 +41,7 @@ import { parseRoadmapToBacklog } from "./roadmap-import.js";
 import { runFleshPass } from "./flesh-runner.js";
 import { resolveTrack } from "../track-registry/registry.js";
 import { readOrchestrationHealthProjection } from "./health-projection.js";
+import { readReleaseProofReadiness } from "./release-proof-readiness.js";
 import { DEFAULT_ACTOR_ID } from "../lib/default-actor.js";
 
 export interface OrchestrationRouteOptions {
@@ -146,6 +147,17 @@ export function mountContinuousOrchestrationRoutes(app: Application, opts: Orche
   app.get("/orchestration/health", async (_req: Request, res: Response) => {
     try {
       res.json(await readOrchestrationHealthProjection(adapter, teamId));
+    } catch (err) {
+      res.status(500).json({ ok: false, error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  app.get("/orchestration/release-proof-readiness", async (req: Request, res: Response) => {
+    try {
+      const project = typeof req.query.project === "string" && req.query.project.trim()
+        ? req.query.project.trim()
+        : "kapelle";
+      res.json(await readReleaseProofReadiness(adapter, { teamId, project }));
     } catch (err) {
       res.status(500).json({ ok: false, error: err instanceof Error ? err.message : String(err) });
     }
