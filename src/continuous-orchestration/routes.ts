@@ -36,6 +36,7 @@ import { attachBacklogRetryReadiness } from "./backlog-retry-readiness.js";
 import type { RiskClass } from "./types.js";
 import { autoPromoteRejections } from "./auto-promote-policy.js";
 import { buildStaleDuplicateBacklogReport } from "./stale-duplicate-report.js";
+import { buildDuplicateDispatchRetryClassificationReport } from "./duplicate-dispatch-retry-classifier.js";
 import { parseRoadmapToBacklog } from "./roadmap-import.js";
 import { runFleshPass } from "./flesh-runner.js";
 import { resolveTrack } from "../track-registry/registry.js";
@@ -284,6 +285,19 @@ export function mountContinuousOrchestrationRoutes(app: Application, opts: Orche
         items.map((item) => item.last_dispatch_phid).filter((phid): phid is string => !!phid),
       );
       res.json({ ok: true, report: buildStaleDuplicateBacklogReport(items, outcomes) });
+    } catch (err) {
+      res.status(500).json({ ok: false, error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  app.get("/orchestration/backlog/duplicate-dispatch-retry-blockers", async (_req: Request, res: Response) => {
+    try {
+      const items = await listBacklogByState(adapter, { team_id: teamId, state: "ready" });
+      const outcomes = await getDispatchOutcomesByPhid(
+        adapter,
+        items.map((item) => item.last_dispatch_phid).filter((phid): phid is string => !!phid),
+      );
+      res.json({ ok: true, report: buildDuplicateDispatchRetryClassificationReport(items, outcomes) });
     } catch (err) {
       res.status(500).json({ ok: false, error: err instanceof Error ? err.message : String(err) });
     }
