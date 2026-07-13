@@ -23,7 +23,7 @@ describe("duplicate-dispatch-retry-blockers CLI", () => {
           JSON.stringify({
             ok: true,
             report: {
-              schema_version: "orchestration.duplicate_dispatch_retry_classification.v1",
+              schema_version: "orchestration.duplicate_dispatch_retry_classification.v2",
               dry_run: true,
               scanned: 7,
               count: 1,
@@ -33,6 +33,8 @@ describe("duplicate-dispatch-retry-blockers CLI", () => {
                   owner: "roger",
                   prior_dispatch_id: "phid:disp-1",
                   prior_dispatch_status: "failed",
+                  retry_safe_recommendation: "set_true",
+                  operator_disposition: "retry",
                   recommended_disposition: "mark-retry-safe",
                   reason: "prior dispatch failed with retryable transient evidence",
                 },
@@ -47,6 +49,8 @@ describe("duplicate-dispatch-retry-blockers CLI", () => {
     expect(exit).toBe(0);
     expect(seenUrls).toEqual(["http://manager/orchestration/backlog/duplicate-dispatch-retry-blockers"]);
     expect(chunks.join("")).toContain("duplicate dispatch retry blockers: 1 (scanned 7, dry-run)");
-    expect(chunks.join("")).toContain("coitem_1 owner=roger prior=phid:disp-1 status=failed disposition=mark-retry-safe");
+    expect(chunks.join("")).toContain(
+      "coitem_1 owner=roger prior=phid:disp-1 status=failed retry_safe=set_true disposition=retry",
+    );
   });
 });

@@ -238,6 +238,20 @@ describe("orchestration health projection", () => {
     expect(before.ready_item_blockers.categories).toEqual([
       expect.objectContaining({ code: "duplicate_dispatch_retry_required", count: 1 }),
     ]);
+    expect(before.ready_item_blockers.items).toEqual([
+      expect.objectContaining({
+        item_id: duplicate.item_id,
+        code: "duplicate_dispatch_retry_required",
+        prior_dispatch_id: "phid:disp-already-done",
+        prior_dispatch_status: "done",
+        retry_safe_required: true,
+        retry_safe_recommendation: "leave_false",
+        operator_disposition: "close",
+        recommended_disposition: "close",
+        recommended_action: "close or supersede the stale duplicate row; do not mark it retry-safe",
+        stale_duplicate_closeout_receipt_exists: false,
+      }),
+    ]);
 
     const closeout = await reconcileStaleAlreadyDispatchedReadyRows(adapter, {
       team_id: "default",

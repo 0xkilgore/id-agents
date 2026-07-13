@@ -82,7 +82,8 @@ export async function runDuplicateDispatchRetryBlockersCli(
   for (const item of report.items ?? []) {
     stdout(
       `- ${item.item_id} owner=${item.owner ?? "unassigned"} prior=${item.prior_dispatch_id} ` +
-        `status=${item.prior_dispatch_status ?? "unknown"} disposition=${item.recommended_disposition}: ${item.reason}\n`,
+        `status=${item.prior_dispatch_status ?? "unknown"} retry_safe=${item.retry_safe_recommendation ?? "unknown"} ` +
+        `disposition=${item.operator_disposition ?? item.recommended_disposition}: ${item.reason}\n`,
     );
   }
   return 0;

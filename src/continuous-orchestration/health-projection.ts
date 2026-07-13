@@ -11,6 +11,13 @@ import { loadContinuousOrchestrationConfig } from "./config.js";
 import { normalizeRuntime, resolveProviderFromRuntime } from "../dispatch-scheduler/types.js";
 import { laneKeyOf } from "./selection.js";
 import type { BacklogItem } from "./types.js";
+import { getDispatchOutcomesByPhid } from "./storage.js";
+import {
+  classifyDuplicateDispatchRetryDisposition,
+  type DuplicateDispatchRetryDisposition,
+  type DuplicateDispatchRetryOperatorDisposition,
+  type DuplicateDispatchRetrySafeRecommendation,
+} from "./duplicate-dispatch-retry-classifier.js";
 
 export type OrchestrationLoopState =
   | "paused"
@@ -111,6 +118,25 @@ export interface OrchestrationReadyItemBlockerProjection {
     reason: string;
     recommended_action: string;
   }>;
+  items: OrchestrationReadyItemBlockerDetail[];
+}
+
+export interface OrchestrationReadyItemBlockerDetail {
+  item_id: string;
+  title: string | null;
+  code: string;
+  category: string;
+  owner_lane: string;
+  reason: string;
+  recommended_action: string;
+  prior_dispatch_id: string | null;
+  prior_dispatch_status: string | null;
+  prior_recovery_status: string | null;
+  retry_safe_required: boolean;
+  retry_safe_recommendation: DuplicateDispatchRetrySafeRecommendation | null;
+  operator_disposition: DuplicateDispatchRetryOperatorDisposition | null;
+  recommended_disposition: DuplicateDispatchRetryDisposition | null;
+  stale_duplicate_closeout_receipt_exists: boolean;
 }
 
 export interface OrchestrationBuildReadyFloorProjection {
@@ -161,6 +187,7 @@ interface BacklogQueueRow {
   dependencies_json: string | null;
   last_dispatch_phid: string | null;
   retry_safe: number | null;
+  stale_duplicate_closeout_receipt_json: string | null;
 }
 
 interface DispatchQueueCountRow {
@@ -409,6 +436,13 @@ async function readReadyItemBlockerProjection(
   const blockedDependencyItemIds = new Set<string>();
   for (const ids of dependencyImpact.values()) for (const id of ids) blockedDependencyItemIds.add(id);
   const agentRuntimes = await readAgentRuntimeMap(adapter, rows.map((row) => row.to_agent).filter((name): name is string => !!name));
+  const duplicateDispatchOutcomes = await getDispatchOutcomesByPhid(
+    adapter,
+    rows
+      .filter((row) => row.last_dispatch_phid && row.retry_safe !== 1)
+      .map((row) => row.last_dispatch_phid)
+      .filter((phid): phid is string => !!phid),
+  );
   const minReadyFuel = Math.max(0, Math.floor(opts.minReadyFuel ?? loadContinuousOrchestrationConfig().min_ready_fuel));
   const admissibleNow = opts.readyAdmission?.admissibleNow ?? null;
 
@@ -421,6 +455,7 @@ async function readReadyItemBlockerProjection(
     reason: string;
     recommended_action: string;
   }>();
+  const details: OrchestrationReadyItemBlockerDetail[] = [];
   let actionable = 0;
   const add = (blocker: ReadyAdmissionBlocker, itemId: string) => {
     const key = `${blocker.category}:${blocker.code}`;
@@ -434,6 +469,7 @@ async function readReadyItemBlockerProjection(
     const blocker = classifyReadyAdmissionBlocker(row, blockedDependencyItemIds, agentRuntimes);
     if (blocker) {
       add(blocker, row.item_id);
+      details.push(readyItemBlockerDetail(row, blocker, duplicateDispatchOutcomes));
     } else {
       actionable += 1;
     }
@@ -457,7 +493,48 @@ async function readReadyItemBlockerProjection(
     stale_ready_floor: staleReadyFuel.active,
     stale_ready_fuel: staleReadyFuel,
     categories: categoryValues,
+    items: details.sort((a, b) => a.item_id.localeCompare(b.item_id)),
   };
+}
+
+function readyItemBlockerDetail(
+  row: BacklogQueueRow,
+  blocker: ReadyAdmissionBlocker,
+  duplicateDispatchOutcomes: Awaited<ReturnType<typeof getDispatchOutcomesByPhid>>,
+): OrchestrationReadyItemBlockerDetail {
+  const outcome = row.last_dispatch_phid ? duplicateDispatchOutcomes.get(row.last_dispatch_phid) : undefined;
+  const duplicateDisposition = blocker.code === "duplicate_dispatch_retry_required"
+    ? classifyDuplicateDispatchRetryDisposition(outcome)
+    : null;
+  return {
+    item_id: row.item_id,
+    title: row.title,
+    code: blocker.code,
+    category: blocker.category,
+    owner_lane: blocker.owner_lane,
+    reason: duplicateDisposition?.reason ?? blocker.reason,
+    recommended_action: duplicateDisposition
+      ? duplicateDispatchRecommendedAction(duplicateDisposition.operator_disposition)
+      : blocker.recommended_action,
+    prior_dispatch_id: row.last_dispatch_phid,
+    prior_dispatch_status: outcome?.status ?? null,
+    prior_recovery_status: outcome?.recovery_status ?? null,
+    retry_safe_required: blocker.code === "duplicate_dispatch_retry_required",
+    retry_safe_recommendation: duplicateDisposition?.retry_safe_recommendation ?? null,
+    operator_disposition: duplicateDisposition?.operator_disposition ?? null,
+    recommended_disposition: duplicateDisposition?.recommended_disposition ?? null,
+    stale_duplicate_closeout_receipt_exists: !!row.stale_duplicate_closeout_receipt_json,
+  };
+}
+
+function duplicateDispatchRecommendedAction(disposition: DuplicateDispatchRetryOperatorDisposition): string {
+  if (disposition === "close") {
+    return "close or supersede the stale duplicate row; do not mark it retry-safe";
+  }
+  if (disposition === "retry") {
+    return "mark retry_safe only when the operator wants a bounded refire";
+  }
+  return "hold the row and wait for the prior dispatch, or supersede it after operator review";
 }
 
 function staleReadyFuelProjection(input: {
@@ -681,7 +758,8 @@ async function readQueueQualityProjection(
 async function readBacklogQueueRows(adapter: DbAdapter, teamId: string): Promise<BacklogQueueRow[]> {
   const { rows } = await adapter.query<BacklogQueueRow>(
     `SELECT item_id, title, readiness_state, risk_class, to_agent, provider, runtime,
-            dispatch_body, write_scope_json, dependencies_json, last_dispatch_phid, retry_safe
+            dispatch_body, write_scope_json, dependencies_json, last_dispatch_phid, retry_safe,
+            stale_duplicate_closeout_receipt_json
        FROM orchestration_backlog_item
       WHERE team_id = ?
         AND readiness_state NOT IN ('done', 'cancelled', 'superseded')`,

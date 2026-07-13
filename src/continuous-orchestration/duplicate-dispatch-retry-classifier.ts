@@ -4,9 +4,11 @@ import type { BacklogItem } from "./types.js";
 import type { DispatchOutcome } from "./storage.js";
 
 export const DUPLICATE_DISPATCH_RETRY_CLASSIFICATION_SCHEMA_VERSION =
-  "orchestration.duplicate_dispatch_retry_classification.v1" as const;
+  "orchestration.duplicate_dispatch_retry_classification.v2" as const;
 
 export type DuplicateDispatchRetryDisposition = "close" | "supersede" | "mark-retry-safe";
+export type DuplicateDispatchRetryOperatorDisposition = "close" | "retry" | "hold";
+export type DuplicateDispatchRetrySafeRecommendation = "set_true" | "leave_false";
 
 export interface DuplicateDispatchRetryClassificationItem {
   item_id: string;
@@ -16,6 +18,8 @@ export interface DuplicateDispatchRetryClassificationItem {
   prior_dispatch_id: string;
   prior_dispatch_status: string | null;
   prior_recovery_status: string | null;
+  retry_safe_recommendation: DuplicateDispatchRetrySafeRecommendation;
+  operator_disposition: DuplicateDispatchRetryOperatorDisposition;
   recommended_disposition: DuplicateDispatchRetryDisposition;
   reason: string;
 }
@@ -43,7 +47,7 @@ export function buildDuplicateDispatchRetryClassificationReport(
     if (item.retry_safe) continue;
 
     const outcome = outcomes.get(item.last_dispatch_phid);
-    const disposition = classifyDisposition(outcome);
+    const disposition = classifyDuplicateDispatchRetryDisposition(outcome);
     reportItems.push({
       item_id: item.item_id,
       title: item.title,
@@ -52,6 +56,8 @@ export function buildDuplicateDispatchRetryClassificationReport(
       prior_dispatch_id: item.last_dispatch_phid,
       prior_dispatch_status: outcome?.status ?? null,
       prior_recovery_status: outcome?.recovery_status ?? null,
+      retry_safe_recommendation: disposition.retry_safe_recommendation,
+      operator_disposition: disposition.operator_disposition,
       recommended_disposition: disposition.recommended_disposition,
       reason: disposition.reason,
     });
@@ -68,13 +74,17 @@ export function buildDuplicateDispatchRetryClassificationReport(
   };
 }
 
-function classifyDisposition(outcome: DispatchOutcome | undefined): {
+export function classifyDuplicateDispatchRetryDisposition(outcome: DispatchOutcome | undefined): {
   recommended_disposition: DuplicateDispatchRetryDisposition;
+  operator_disposition: DuplicateDispatchRetryOperatorDisposition;
+  retry_safe_recommendation: DuplicateDispatchRetrySafeRecommendation;
   reason: string;
 } {
   if (!outcome) {
     return {
       recommended_disposition: "supersede",
+      operator_disposition: "hold",
+      retry_safe_recommendation: "leave_false",
       reason: "prior dispatch id is recorded but no dispatch row is readable; supersede the duplicate ready row before any refire",
     };
   }
@@ -82,6 +92,8 @@ function classifyDisposition(outcome: DispatchOutcome | undefined): {
   if (promotionCompletedAndVerified(outcome.promotion_result_json) || TERMINAL_CLOSE_STATUSES.has(outcome.status)) {
     return {
       recommended_disposition: "close",
+      operator_disposition: "close",
+      retry_safe_recommendation: "leave_false",
       reason: `prior dispatch ${outcome.dispatch_phid} is ${outcome.status} or promotion-verified; close the duplicate ready blocker`,
     };
   }
@@ -89,6 +101,8 @@ function classifyDisposition(outcome: DispatchOutcome | undefined): {
   if (TERMINAL_SUPERSEDE_STATUSES.has(outcome.status)) {
     return {
       recommended_disposition: "supersede",
+      operator_disposition: "close",
+      retry_safe_recommendation: "leave_false",
       reason: `prior dispatch ${outcome.dispatch_phid} is terminal ${outcome.status}; supersede the stale duplicate ready row`,
     };
   }
@@ -96,6 +110,8 @@ function classifyDisposition(outcome: DispatchOutcome | undefined): {
   if (outcome.status === "failed" && dispatchFailureRetryable(outcome)) {
     return {
       recommended_disposition: "mark-retry-safe",
+      operator_disposition: "retry",
+      retry_safe_recommendation: "set_true",
       reason: `prior dispatch ${outcome.dispatch_phid} failed with retryable transient evidence; mark retry_safe only if the operator wants a bounded refire`,
     };
   }
@@ -103,12 +119,16 @@ function classifyDisposition(outcome: DispatchOutcome | undefined): {
   if (outcome.status === "failed") {
     return {
       recommended_disposition: "supersede",
+      operator_disposition: "close",
+      retry_safe_recommendation: "leave_false",
       reason: `prior dispatch ${outcome.dispatch_phid} failed non-transiently (${outcome.failure_kind ?? "unknown"}); supersede instead of blind retry`,
     };
   }
 
   return {
     recommended_disposition: "supersede",
+    operator_disposition: "hold",
+    retry_safe_recommendation: "leave_false",
     reason: `prior dispatch ${outcome.dispatch_phid} is non-terminal ${outcome.status}; supersede or wait on the prior dispatch rather than refiring this ready row`,
   };
 }

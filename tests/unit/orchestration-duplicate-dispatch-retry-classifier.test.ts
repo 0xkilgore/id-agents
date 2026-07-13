@@ -145,7 +145,7 @@ describe("GET /orchestration/backlog/duplicate-dispatch-retry-blockers", () => {
     expect(r.status).toBe(200);
     expect(r.body.ok).toBe(true);
     expect(r.body.report).toMatchObject({
-      schema_version: "orchestration.duplicate_dispatch_retry_classification.v1",
+      schema_version: "orchestration.duplicate_dispatch_retry_classification.v2",
       dry_run: true,
       scanned: 6,
       count: 5,
@@ -156,27 +156,37 @@ describe("GET /orchestration/backlog/duplicate-dispatch-retry-blockers", () => {
     expect(byId[done.item_id]).toMatchObject({
       item_id: done.item_id,
       prior_dispatch_id: "phid:done",
+      operator_disposition: "close",
+      retry_safe_recommendation: "leave_false",
       recommended_disposition: "close",
       owner: "roger",
     });
     expect(byId[promoted.item_id]).toMatchObject({
       prior_dispatch_id: "phid:promoted",
       prior_dispatch_status: "failed",
+      operator_disposition: "close",
+      retry_safe_recommendation: "leave_false",
       recommended_disposition: "close",
     });
     expect(byId[cancelled.item_id]).toMatchObject({
       prior_dispatch_id: "phid:cancelled",
+      operator_disposition: "close",
+      retry_safe_recommendation: "leave_false",
       recommended_disposition: "supersede",
       owner: "hopper",
     });
     expect(byId[live.item_id]).toMatchObject({
       prior_dispatch_id: "phid:in-flight",
       prior_dispatch_status: "in_flight",
+      operator_disposition: "hold",
+      retry_safe_recommendation: "leave_false",
       recommended_disposition: "supersede",
     });
     expect(byId[retryable.item_id]).toMatchObject({
       prior_dispatch_id: "phid:retryable",
       prior_dispatch_status: "failed",
+      operator_disposition: "retry",
+      retry_safe_recommendation: "set_true",
       recommended_disposition: "mark-retry-safe",
     });
   });

@@ -1045,6 +1045,45 @@ describe("daemon — dry-run vs live", () => {
     expect(blockedSum).toBe(res.body.counts.ready - res.body.counts.admissible_now);
   });
 
+  it("status exposes duplicate-dispatch retry disposition receipts in health", async () => {
+    const retryGuarded = await seedReady(adapter, {
+      title: "retryable duplicate blocker",
+      write_scope: ["repo/retry-guarded"],
+    });
+    await markReadyAlreadyDispatched(adapter, retryGuarded.item_id, "phid:disp-retryable");
+    await seedDispatch(adapter, {
+      dispatch_phid: "phid:disp-retryable",
+      status: "failed",
+      failure_kind: "scheduler_wedged",
+      failure_detail: "stale in_flight claim",
+    });
+
+    const { app, daemon } = mountStatusApp(adapter, {
+      dry_run: true,
+      auto_flesh_enabled: false,
+      auto_promote_enabled: false,
+    });
+    await daemon.setMode("running");
+
+    const res = await callApp(app, "/orchestration/status");
+
+    expect(res.status).toBe(200);
+    expect(res.body.health.ready_item_blockers.items).toEqual([
+      expect.objectContaining({
+        item_id: retryGuarded.item_id,
+        code: "duplicate_dispatch_retry_required",
+        prior_dispatch_id: "phid:disp-retryable",
+        prior_dispatch_status: "failed",
+        retry_safe_required: true,
+        retry_safe_recommendation: "set_true",
+        operator_disposition: "retry",
+        recommended_disposition: "mark-retry-safe",
+        recommended_action: "mark retry_safe only when the operator wants a bounded refire",
+        stale_duplicate_closeout_receipt_exists: false,
+      }),
+    ]);
+  });
+
   it("status preserves queue-quality blocker labels used by /ops", async () => {
     await insertBacklogItem(adapter, {
       title: "pending dependency",
