@@ -1043,7 +1043,17 @@ describe("daemon — dry-run vs live", () => {
     expect(res.body.health.ready_item_blockers).toMatchObject({
       ready: 3,
       actionable: 2,
-      stale_ready_floor: false,
+      min_ready_fuel: 2,
+      admissible_now: 0,
+      stale_ready_floor: true,
+      stale_ready_fuel: {
+        active: true,
+        reason: "admissible_now=0",
+        counts_by_blocker_class: expect.arrayContaining([
+          { code: "duplicate_dispatch_retry_required", category: "retry_safety", count: 1, examples: [duplicate.item_id] },
+          { code: "no_in_flight_slots", category: "capacity_gate", count: 2, examples: [expect.any(String), expect.any(String)] },
+        ]),
+      },
     });
     expect(res.body.health.ready_item_blockers.categories).toEqual([
       expect.objectContaining({
@@ -1260,9 +1270,110 @@ describe("daemon — dry-run vs live", () => {
     expect(res.body.health.ready_item_blockers).toMatchObject({
       ready: 2,
       actionable: 2,
-      stale_ready_floor: false,
+      min_ready_fuel: 2,
+      admissible_now: 0,
+      stale_ready_floor: true,
       categories: [],
+      stale_ready_fuel: {
+        active: true,
+        owner_lane: "orchestration",
+        reason: "admissible_now=0",
+        counts_by_blocker_class: [
+          {
+            code: "no_in_flight_slots",
+            category: "capacity_gate",
+            count: 2,
+            examples: [expect.any(String), expect.any(String)],
+          },
+        ],
+      },
     });
+  });
+
+  it("status exposes stale-ready fuel as actionable when ready=11 is below floor=12 with retry and lane blockers", async () => {
+    const duplicate = await seedReady(adapter, {
+      title: "duplicate retry guard below floor",
+      write_scope: ["repo/duplicate-floor"],
+    });
+    await markReadyAlreadyDispatched(adapter, duplicate.item_id, "phid:disp-prior-floor");
+    const laneBusy = await seedReady(adapter, {
+      title: "single writer lane busy below floor",
+      write_scope: ["repo/busy-floor"],
+    });
+    for (let i = 0; i < 9; i++) {
+      await seedReady(adapter, {
+        title: `clean below-floor ready ${i}`,
+        write_scope: [`repo/clean-below-floor-${i}`],
+      });
+    }
+
+    const { app, daemon } = mountStatusApp(
+      adapter,
+      {
+        dry_run: true,
+        auto_flesh_enabled: false,
+        auto_promote_enabled: false,
+        max_in_flight: 20,
+        max_new_per_tick: 20,
+        min_ready_fuel: 12,
+      },
+      { activeScopes: new Set(["repo/busy-floor"]) },
+    );
+    await daemon.setMode("running");
+
+    const res = await callApp(app, "/orchestration/status");
+
+    expect(res.status).toBe(200);
+    expect(res.body.counts).toMatchObject({
+      ready: 11,
+      admissible_now: 9,
+      ready_block_reasons: {
+        duplicate_dispatch_retry_required: 1,
+        single_writer_lane_busy: 1,
+      },
+    });
+    expect(res.body.ready_admission).toMatchObject({
+      candidates: 11,
+      admissible_now: 9,
+      stale_ready_floor: {
+        stale: false,
+        ready: 11,
+        admissible: 9,
+        min_ready_fuel: 12,
+      },
+    });
+    expect(res.body.health.ready_item_blockers).toMatchObject({
+      ready: 11,
+      actionable: 10,
+      min_ready_fuel: 12,
+      admissible_now: 9,
+      stale_ready_floor: true,
+      stale_ready_fuel: {
+        active: true,
+        owner_lane: "orchestration",
+        recommended_action: "clear the top ready-admission blockers or promote/refuel safe backlog candidates until ready fuel is admissible",
+        reason: "actionable_ready=10 is below min_ready_fuel=12",
+      },
+    });
+    expect(res.body.health.ready_item_blockers.stale_ready_fuel.counts_by_blocker_class).toEqual(
+      expect.arrayContaining([
+        {
+          code: "duplicate_dispatch_retry_required",
+          category: "retry_safety",
+          count: 1,
+          examples: [duplicate.item_id],
+        },
+        {
+          code: "single_writer_lane_busy",
+          category: "lane_eligibility",
+          count: 1,
+          examples: [laneBusy.item_id],
+        },
+      ]),
+    );
+    expect(res.body.health.ready_item_blockers.stale_ready_fuel.examples).toEqual(
+      expect.arrayContaining([duplicate.item_id, laneBusy.item_id]),
+    );
   });
 
   it("status explains below-floor auto-promote blocked by safety risk", async () => {

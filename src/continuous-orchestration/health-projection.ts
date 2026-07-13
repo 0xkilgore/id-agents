@@ -83,7 +83,22 @@ export interface OrchestrationQueueQualityProjection {
 export interface OrchestrationReadyItemBlockerProjection {
   ready: number;
   actionable: number;
+  min_ready_fuel: number;
+  admissible_now: number | null;
   stale_ready_floor: boolean;
+  stale_ready_fuel: {
+    active: boolean;
+    owner_lane: string;
+    recommended_action: string;
+    reason: string | null;
+    counts_by_blocker_class: Array<{
+      code: string;
+      category: string;
+      count: number;
+      examples: string[];
+    }>;
+    examples: string[];
+  };
   categories: Array<{
     code: string;
     category: string;
@@ -146,12 +161,33 @@ interface ArtifactCommentNoiseRow {
   artifact_agent: string | null;
 }
 
+interface ReadyAdmissionBlockerSummary {
+  code: string;
+  category: string;
+  count: number;
+}
+
+interface ReadyAdmissionNonAdmittedSummary {
+  item_id: string;
+  code: string;
+}
+
+interface OrchestrationHealthProjectionOptions {
+  recentLimit?: number;
+  minReadyFuel?: number;
+  readyAdmission?: {
+    admissibleNow: number;
+    blockerCounts: ReadyAdmissionBlockerSummary[];
+    nonAdmitted: ReadyAdmissionNonAdmittedSummary[];
+  };
+}
+
 const RECOVERED_STATUSES = ["moot", "landed_reconciled", "verified_done", "retry_done"];
 
 export async function readOrchestrationHealthProjection(
   adapter: DbAdapter,
   teamId = "default",
-  opts: { recentLimit?: number } = {},
+  opts: OrchestrationHealthProjectionOptions = {},
 ): Promise<OrchestrationHealthProjection> {
   const recentLimit = Math.max(1, opts.recentLimit ?? 5);
   const dependencyImpact = await readDependencyImpact(adapter, teamId);
@@ -188,7 +224,7 @@ export async function readOrchestrationHealthProjection(
     generated_at: new Date().toISOString(),
     orchestration_loop: await readOrchestrationLoopHealthProjection(adapter, teamId),
     queue_quality: queueQuality,
-    ready_item_blockers: await readReadyItemBlockerProjection(adapter, teamId, dependencyImpact),
+    ready_item_blockers: await readReadyItemBlockerProjection(adapter, teamId, dependencyImpact, opts),
     blockers: {
       blocked: needsClarification.length > 0 || promotion.length > 0,
       needs_clarification: summarize(needsClarification, recentLimit),
@@ -344,11 +380,14 @@ async function readReadyItemBlockerProjection(
   adapter: DbAdapter,
   teamId: string,
   dependencyImpact: Map<string, string[]>,
+  opts: OrchestrationHealthProjectionOptions,
 ): Promise<OrchestrationReadyItemBlockerProjection> {
   const rows = (await readBacklogQueueRows(adapter, teamId)).filter((row) => row.readiness_state === "ready");
   const blockedDependencyItemIds = new Set<string>();
   for (const ids of dependencyImpact.values()) for (const id of ids) blockedDependencyItemIds.add(id);
   const agentRuntimes = await readAgentRuntimeMap(adapter, rows.map((row) => row.to_agent).filter((name): name is string => !!name));
+  const minReadyFuel = Math.max(0, Math.floor(opts.minReadyFuel ?? loadContinuousOrchestrationConfig().min_ready_fuel));
+  const admissibleNow = opts.readyAdmission?.admissibleNow ?? null;
 
   const categories = new Map<string, {
     code: string;
@@ -377,12 +416,111 @@ async function readReadyItemBlockerProjection(
     }
   }
 
+  const categoryValues = [...categories.values()].sort(sortBlockerCounts);
+  const staleReadyFuel = staleReadyFuelProjection({
+    ready: rows.length,
+    actionable,
+    minReadyFuel,
+    admissibleNow,
+    categories: categoryValues,
+    readyAdmission: opts.readyAdmission,
+  });
+
   return {
     ready: rows.length,
     actionable,
-    stale_ready_floor: rows.length > 0 && actionable === 0,
-    categories: [...categories.values()].sort((a, b) => b.count - a.count || a.category.localeCompare(b.category) || a.code.localeCompare(b.code)),
+    min_ready_fuel: minReadyFuel,
+    admissible_now: admissibleNow,
+    stale_ready_floor: staleReadyFuel.active,
+    stale_ready_fuel: staleReadyFuel,
+    categories: categoryValues,
   };
+}
+
+function staleReadyFuelProjection(input: {
+  ready: number;
+  actionable: number;
+  minReadyFuel: number;
+  admissibleNow: number | null;
+  categories: Array<{
+    code: string;
+    category: string;
+    count: number;
+    examples: string[];
+  }>;
+  readyAdmission?: OrchestrationHealthProjectionOptions["readyAdmission"];
+}): OrchestrationReadyItemBlockerProjection["stale_ready_fuel"] {
+  const belowActionableFloor = input.actionable < input.minReadyFuel;
+  const zeroAdmissible = input.admissibleNow === 0 && input.ready > 0;
+  const active = input.ready > 0 && (belowActionableFloor || zeroAdmissible);
+  const counts = staleReadyFuelCounts(input);
+  const examples = uniqueStrings(counts.flatMap((count) => count.examples)).slice(0, 5);
+  const reasonParts: string[] = [];
+  if (belowActionableFloor) {
+    reasonParts.push(`actionable_ready=${input.actionable} is below min_ready_fuel=${input.minReadyFuel}`);
+  }
+  if (zeroAdmissible) {
+    reasonParts.push("admissible_now=0");
+  }
+
+  return {
+    active,
+    owner_lane: "orchestration",
+    recommended_action: active
+      ? "clear the top ready-admission blockers or promote/refuel safe backlog candidates until ready fuel is admissible"
+      : "none",
+    reason: active ? reasonParts.join("; ") : null,
+    counts_by_blocker_class: counts,
+    examples,
+  };
+}
+
+function staleReadyFuelCounts(input: {
+  categories: Array<{
+    code: string;
+    category: string;
+    count: number;
+    examples: string[];
+  }>;
+  readyAdmission?: OrchestrationHealthProjectionOptions["readyAdmission"];
+}): OrchestrationReadyItemBlockerProjection["stale_ready_fuel"]["counts_by_blocker_class"] {
+  if (!input.readyAdmission) {
+    return input.categories.map((category) => ({
+      code: category.code,
+      category: category.category,
+      count: category.count,
+      examples: category.examples,
+    }));
+  }
+
+  const examplesByCode = new Map<string, string[]>();
+  for (const row of input.readyAdmission.nonAdmitted) {
+    if (!row.item_id || !row.code) continue;
+    const examples = examplesByCode.get(row.code) ?? [];
+    if (examples.length < 5) examples.push(row.item_id);
+    examplesByCode.set(row.code, examples);
+  }
+
+  return input.readyAdmission.blockerCounts
+    .filter((count) => count.count > 0)
+    .map((count) => ({
+      code: count.code,
+      category: count.category,
+      count: count.count,
+      examples: examplesByCode.get(count.code) ?? [],
+    }))
+    .sort(sortBlockerCounts);
+}
+
+function sortBlockerCounts(
+  a: { count: number; category: string; code: string },
+  b: { count: number; category: string; code: string },
+): number {
+  return b.count - a.count || a.category.localeCompare(b.category) || a.code.localeCompare(b.code);
+}
+
+function uniqueStrings(values: string[]): string[] {
+  return [...new Set(values.filter((value) => value.trim() !== ""))];
 }
 
 async function readQueueQualityProjection(

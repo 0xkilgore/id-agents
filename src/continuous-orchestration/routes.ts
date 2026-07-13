@@ -78,7 +78,6 @@ export function mountContinuousOrchestrationRoutes(app: Application, opts: Orche
         listBacklogByState(adapter, { team_id: teamId, state: "needs_chris_batch" }),
         getFleshCounts(adapter, teamId),
       ]);
-      const health = await readOrchestrationHealthProjection(adapter, teamId);
       // Auto-fleshed today = approved_ready flesh-log decisions since local midnight.
       const startOfDay = new Date();
       startOfDay.setHours(0, 0, 0, 0);
@@ -89,6 +88,17 @@ export function mountContinuousOrchestrationRoutes(app: Application, opts: Orche
       });
       const autoPromoteHealth = await daemon.explainAutoPromoteHealth();
       const readyAdmission = await daemon.explainReadyAdmission();
+      const health = await readOrchestrationHealthProjection(adapter, teamId, {
+        minReadyFuel: config.min_ready_fuel,
+        readyAdmission: {
+          admissibleNow: readyAdmission.admissible_now,
+          blockerCounts: readyAdmission.blocker_counts,
+          nonAdmitted: readyAdmission.non_admitted.map((item) => ({
+            item_id: item.item_id,
+            code: item.code,
+          })),
+        },
+      });
       let killSwitch = false;
       try {
         killSwitch = fs.existsSync(config.kill_switch_path);
