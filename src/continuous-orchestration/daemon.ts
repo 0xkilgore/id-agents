@@ -233,6 +233,7 @@ export const READY_ADMISSION_BLOCK_REASONS = [
   "pool_capacity_full",
   "single_writer_lane_busy",
   "no_free_pool_builder",
+  "duplicate_dispatch_retry_required",
 ] as const;
 
 export type ReadyAdmissionBlockReason = typeof READY_ADMISSION_BLOCK_REASONS[number];

@@ -878,6 +878,7 @@ describe("daemon — dry-run vs live", () => {
       pool_capacity_full: 1,
       single_writer_lane_busy: 1,
       no_free_pool_builder: 1,
+      duplicate_dispatch_retry_required: 0,
     });
     expect(res.body.ready_admission).toMatchObject({
       candidates: 6,
@@ -975,6 +976,135 @@ describe("daemon — dry-run vs live", () => {
         expect.objectContaining({ code: "provider_runtime_mismatch", action: "held" }),
       ]),
     );
+  });
+
+  it("status keeps ready admission and queue quality aligned for retry blockers versus capacity gates", async () => {
+    const duplicate = await seedReady(adapter, {
+      title: "duplicate retry guard",
+      write_scope: ["repo/duplicate"],
+    });
+    await markReadyAlreadyDispatched(adapter, duplicate.item_id, "phid:disp-prior");
+    await seedReady(adapter, {
+      title: "clean but capacity gated A",
+      write_scope: ["repo/capacity-a"],
+    });
+    await seedReady(adapter, {
+      title: "clean but capacity gated B",
+      write_scope: ["repo/capacity-b"],
+    });
+
+    const { app, daemon } = mountStatusApp(
+      adapter,
+      {
+        dry_run: true,
+        auto_flesh_enabled: false,
+        auto_promote_enabled: false,
+        max_in_flight: 1,
+        max_new_per_tick: 10,
+        min_ready_fuel: 2,
+      },
+      { inFlight: 1 },
+    );
+    await daemon.setMode("running");
+
+    const res = await callApp(app, "/orchestration/status");
+
+    expect(res.status).toBe(200);
+    expect(res.body.counts.ready).toBe(3);
+    expect(res.body.counts.admissible_now).toBe(0);
+    expect(res.body.counts.ready_block_reasons).toMatchObject({
+      duplicate_dispatch_retry_required: 1,
+      no_in_flight_slots: 2,
+    });
+    expect(res.body.ready_admission).toMatchObject({
+      candidates: 3,
+      admissible_now: 0,
+      block_reason_counts: res.body.counts.ready_block_reasons,
+      stale_ready_floor: {
+        stale: true,
+        ready: 3,
+        admissible: 0,
+        min_ready_fuel: 2,
+      },
+    });
+    expect(res.body.ready_admission.blocker_counts).toEqual(
+      expect.arrayContaining([
+        { code: "duplicate_dispatch_retry_required", category: "retry_safety", count: 1 },
+        { code: "no_in_flight_slots", category: "capacity_gate", count: 2 },
+      ]),
+    );
+    expect(res.body.ready_admission.non_admitted).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ code: "duplicate_dispatch_retry_required", action: "held" }),
+        expect.objectContaining({ code: "no_in_flight_slots", action: "held" }),
+      ]),
+    );
+    expect(res.body.health.queue_quality.actionable_ready).toBe(2);
+    expect(res.body.health.ready_item_blockers).toMatchObject({
+      ready: 3,
+      actionable: 2,
+      stale_ready_floor: false,
+    });
+    expect(res.body.health.ready_item_blockers.categories).toEqual([
+      {
+        code: "duplicate_dispatch_retry_required",
+        category: "retry_safety",
+        count: 1,
+        examples: [expect.any(String)],
+      },
+    ]);
+  });
+
+  it("status reports clean capacity-only ready rows without stale queue-quality floor", async () => {
+    await seedReady(adapter, {
+      title: "clean capacity only A",
+      write_scope: ["repo/capacity-only-a"],
+    });
+    await seedReady(adapter, {
+      title: "clean capacity only B",
+      write_scope: ["repo/capacity-only-b"],
+    });
+
+    const { app, daemon } = mountStatusApp(
+      adapter,
+      {
+        dry_run: true,
+        auto_flesh_enabled: false,
+        auto_promote_enabled: false,
+        max_in_flight: 1,
+        max_new_per_tick: 10,
+        min_ready_fuel: 2,
+      },
+      { inFlight: 1 },
+    );
+    await daemon.setMode("running");
+
+    const res = await callApp(app, "/orchestration/status");
+
+    expect(res.status).toBe(200);
+    expect(res.body.ready_admission).toMatchObject({
+      candidates: 2,
+      admissible_now: 0,
+      block_reason_counts: {
+        no_in_flight_slots: 2,
+      },
+      stale_ready_floor: {
+        stale: true,
+        ready: 2,
+        admissible: 0,
+        min_ready_fuel: 2,
+      },
+    });
+    expect(res.body.ready_admission.blocker_counts).toEqual([
+      { code: "no_in_flight_slots", category: "capacity_gate", count: 2 },
+    ]);
+    expect(res.body.health.queue_quality.actionable_ready).toBe(2);
+    expect(res.body.health.ready_item_blockers).toMatchObject({
+      ready: 2,
+      actionable: 2,
+      stale_ready_floor: false,
+      categories: [],
+    });
   });
 
   it("status explains below-floor auto-promote blocked by safety risk", async () => {
