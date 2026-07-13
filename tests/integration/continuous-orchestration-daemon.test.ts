@@ -1324,6 +1324,58 @@ describe("daemon — dry-run vs live", () => {
     expect(res.body.flesh.auto_promote.health.lanes).toEqual(res.body.auto_promote_health.lanes);
   });
 
+  it("status does not let in-flight lanes mask a ready-lane deficit while capacity has headroom", async () => {
+    await seedReady(adapter, {
+      title: "only ready backend lane",
+      write_scope: ["repo/id-agents"],
+    });
+    const inFlight = await seedReady(adapter, {
+      title: "in-flight frontend lane",
+      write_scope: ["repo/kapelle-site"],
+    });
+    await setItemState(adapter, inFlight.item_id, "in_flight", { dispatch_phid: "phid:disp-frontend" });
+    await seedApprovedReview(adapter, {
+      title: "candidate restores ready lane diversity",
+      write_scope: ["repo/fresh-ready-lane"],
+    });
+
+    const { app, daemon } = mountStatusApp(
+      adapter,
+      {
+        dry_run: true,
+        max_in_flight: 4,
+        auto_flesh_enabled: true,
+        auto_promote_enabled: true,
+        auto_promote_floor: 1,
+        auto_promote_min_lanes: 2,
+      },
+      { inFlight: 1 },
+    );
+    await daemon.setMode("running");
+
+    const res = await callApp(app, "/orchestration/status");
+
+    expect(res.status).toBe(200);
+    expect(res.body.auto_promote_health).toMatchObject({
+      below_floor: false,
+      below_lanes: true,
+      triggered: true,
+      candidates_considered: 1,
+      promoted_count: 1,
+      lanes: {
+        build_ready: 1,
+        build_in_flight: 1,
+        ready_plus_in_flight: 2,
+        capacity_occupied: false,
+        build_ready_lanes: 1,
+        ready_lane_keys: ["repo/id-agents"],
+        in_flight_lane_keys: ["repo/kapelle-site"],
+        candidate_lane_keys: ["repo/fresh-ready-lane"],
+      },
+    });
+    expect(res.body.auto_promote_health.summary).toMatch(/lanes=1\/2/);
+  });
+
   it("status reports clean capacity-only ready rows without stale queue-quality floor", async () => {
     await seedReady(adapter, {
       title: "clean capacity only A",
@@ -2233,6 +2285,53 @@ describe("daemon — guardrail alerts", () => {
     expect(newsEvents).toHaveLength(0);
   });
 
+  it("auto-promotes a fresh ready lane when in-flight work would otherwise mask lane collapse", async () => {
+    await seedReady(adapter, {
+      title: "ready backend lane",
+      write_scope: ["repo/id-agents"],
+    });
+    const inFlight = await seedReady(adapter, {
+      title: "in-flight frontend lane",
+      write_scope: ["repo/kapelle-site"],
+    });
+    await setItemState(adapter, inFlight.item_id, "in_flight", { dispatch_phid: "phid:disp-frontend" });
+    const candidate = await seedApprovedReview(adapter, {
+      title: "fresh lane candidate",
+      write_scope: ["repo/fresh-ready-lane"],
+    });
+
+    const { daemon } = makeDaemon(adapter, {
+      config: {
+        dry_run: false,
+        max_in_flight: 4,
+        max_new_per_tick: 0,
+        auto_flesh_enabled: true,
+        auto_promote_enabled: true,
+        auto_promote_floor: 1,
+        auto_promote_min_lanes: 2,
+      },
+      inFlight: 1,
+      activeScopes: new Set(["repo/kapelle-site"]),
+    });
+    await daemon.setMode("running");
+
+    const tick = await daemon.runTick();
+
+    expect(tick.auto_promote).toMatchObject({
+      candidates_considered: 1,
+      promoted: 1,
+      before: { build_ready: 1, build_lanes: 1 },
+    });
+    const promoted = await getBacklogItem(adapter, candidate.item_id);
+    expect(promoted?.readiness_state).not.toBe("needs_review");
+    const readyAndInFlight = [
+      ...(await listBacklogByState(adapter, { state: "ready" })),
+      ...(await listBacklogByState(adapter, { state: "in_flight" })),
+    ];
+    const buildFuelLaneKeys = new Set(readyAndInFlight.map((item) => item.write_scope[0]));
+    expect(buildFuelLaneKeys).toEqual(new Set(["repo/id-agents", "repo/kapelle-site", "repo/fresh-ready-lane"]));
+  });
+
   it("fires a single-tick empty-pipe alert when all needs_review candidates are confidence or already-dispatched skips", async () => {
     const lowConfidence = await seedApprovedReview(adapter, {
       title: "low confidence needs human decision",
@@ -2475,6 +2574,14 @@ describe("stale already-dispatched ready reconciliation route", () => {
     expect(after.body.ready_admission.admissible.map((item: { item_id: string }) => item.item_id)).toEqual([
       retry.item_id,
     ]);
+    expect(after.body.auto_promote_health).toMatchObject({
+      below_floor: true,
+      lanes: {
+        build_ready: 1,
+        ready_plus_in_flight: 1,
+        ready_lane_keys: ["repo/retry"],
+      },
+    });
   });
 });
 
