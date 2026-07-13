@@ -756,6 +756,64 @@ describe("daemon — dry-run vs live", () => {
     expect(res.body.auto_promote_health.summary).toMatch(/next: manually \/promote/);
   });
 
+  it("status shows raw ready fuel as stale when every ready row is blocked by single-writer lane", async () => {
+    for (let i = 0; i < 3; i++) {
+      await seedReady(adapter, {
+        title: `busy lane ready ${i}`,
+        write_scope: ["repo/busy"],
+      });
+    }
+    const { app, daemon } = mountStatusApp(
+      adapter,
+      {
+        dry_run: true,
+        auto_flesh_enabled: false,
+        auto_promote_enabled: false,
+        min_ready_fuel: 3,
+        max_in_flight: 10,
+      },
+      {
+        activeScopes: new Set(["repo/busy"]),
+      },
+    );
+    await daemon.setMode("running");
+
+    const res = await callApp(app, "/orchestration/status");
+
+    expect(res.status).toBe(200);
+    expect(res.body.counts).toMatchObject({
+      ready: 3,
+      raw_ready_fuel: 3,
+      admissible_now: 0,
+      stale_ready_fuel: true,
+    });
+    expect(res.body.ready_admission).toMatchObject({
+      candidates: 3,
+      admissible_now: 0,
+      block_reason_counts: {
+        single_writer_lane_busy: 3,
+      },
+      stale_ready_floor: {
+        stale: true,
+        ready: 3,
+        admissible: 0,
+        min_ready_fuel: 3,
+      },
+    });
+    expect(res.body.ready_admission.blocker_counts).toEqual([
+      { code: "single_writer_lane_busy", category: "lane_eligibility", count: 3 },
+    ]);
+    expect(res.body.ready_admission.non_admitted).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          action: "skipped",
+          code: "single_writer_lane_busy",
+          metadata: expect.objectContaining({ write_scope: "repo/busy" }),
+        }),
+      ]),
+    );
+  });
+
   it("status includes provider/runtime repair interaction before admission diagnostics", async () => {
     await seedAgent(adapter, "roger", "running", "codex");
     const stale = await seedReady(adapter, {

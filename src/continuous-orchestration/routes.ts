@@ -89,6 +89,10 @@ export function mountContinuousOrchestrationRoutes(app: Application, opts: Orche
         kill_switch_active: killSwitch,
         counts: {
           ready: ready.length,
+          raw_ready_fuel: readyAdmission.candidates,
+          admissible_now: readyAdmission.admissible_now,
+          stale_ready_fuel: readyAdmission.stale_ready_floor.stale,
+          ready_block_reasons: readyAdmission.block_reason_counts,
           needs_review: needsReview.length,
           in_flight: inFlight.length,
           needs_chris_batch: needsChrisBatch.length,
