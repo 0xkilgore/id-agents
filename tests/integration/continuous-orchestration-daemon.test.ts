@@ -1473,7 +1473,105 @@ describe("daemon — dry-run vs live", () => {
     );
     expect(res.body.auto_promote_health.summary).toMatch(/blocker classes:/);
     expect(res.body.auto_promote_health.summary).toMatch(/already_dispatched=1/);
-    expect(res.body.auto_promote_health.summary).toMatch(/next: manually \/promote/);
+    expect(res.body.auto_promote_health.summary).toMatch(/next: close stale already-dispatched rows or manually \/promote retry-safe rows/);
+  });
+
+  it("status next action distinguishes stale already-dispatched auto-promote blockers", async () => {
+    await seedReady(adapter, {
+      title: "only ready build fuel",
+      write_scope: ["repo/ready"],
+    });
+    await seedApprovedReview(adapter, {
+      title: "stale already-dispatched candidate",
+      write_scope: ["repo/stale-a"],
+      last_dispatch_phid: "phid:disp-stale-a",
+    });
+    await seedApprovedReview(adapter, {
+      title: "stale already-dispatched candidate two",
+      write_scope: ["repo/stale-b"],
+      last_dispatch_phid: "phid:disp-stale-b",
+    });
+    const { app, daemon } = mountStatusApp(adapter, {
+      dry_run: true,
+      auto_flesh_enabled: true,
+      auto_promote_enabled: true,
+      auto_promote_floor: 4,
+      auto_promote_min_lanes: 3,
+    });
+    await daemon.setMode("running");
+
+    const res = await callApp(app, "/orchestration/status");
+
+    expect(res.status).toBe(200);
+    expect(res.body.auto_promote_health).toMatchObject({
+      below_floor: true,
+      below_lanes: true,
+      candidates_considered: 2,
+      promoted_count: 0,
+      skipped_count: 2,
+      next_action: {
+        code: "manual_promote_or_close_already_dispatched",
+        summary: "close stale already-dispatched rows or manually /promote retry-safe rows",
+      },
+    });
+    expect(res.body.auto_promote_health.blocker_class_counts).toEqual([
+      expect.objectContaining({ class: "already_dispatched", count: 2 }),
+    ]);
+    expect(res.body.auto_promote_health.summary).toMatch(/close stale already-dispatched rows/);
+    expect(res.body.auto_promote_health.summary).toMatch(/manually \/promote retry-safe rows/);
+    expect(res.body.auto_promote_health.summary).not.toMatch(/author new lane-diverse rows/);
+  });
+
+  it("status next action distinguishes true confidence-held auto-promote blockers", async () => {
+    await seedReady(adapter, {
+      title: "only ready build fuel",
+      write_scope: ["repo/ready"],
+    });
+    await seedApprovedReview(adapter, {
+      title: "confidence-held candidate",
+      approved_by: null,
+      approved_at: null,
+      flesh_status: "fleshed",
+      flesh_confidence: AUTO_READY_CONFIDENCE_THRESHOLD - 0.05,
+      write_scope: ["repo/confidence-a"],
+    });
+    await seedApprovedReview(adapter, {
+      title: "confidence-held candidate two",
+      approved_by: null,
+      approved_at: null,
+      flesh_status: "needs_chris_batch",
+      flesh_confidence: AUTO_READY_CONFIDENCE_THRESHOLD - 0.03,
+      write_scope: ["repo/confidence-b"],
+    });
+    const { app, daemon } = mountStatusApp(adapter, {
+      dry_run: true,
+      auto_flesh_enabled: true,
+      auto_promote_enabled: true,
+      auto_promote_floor: 4,
+      auto_promote_min_lanes: 3,
+    });
+    await daemon.setMode("running");
+
+    const res = await callApp(app, "/orchestration/status");
+
+    expect(res.status).toBe(200);
+    expect(res.body.auto_promote_health).toMatchObject({
+      below_floor: true,
+      below_lanes: true,
+      candidates_considered: 2,
+      promoted_count: 0,
+      skipped_count: 2,
+      next_action: {
+        code: "raise_candidate_confidence",
+        summary: "author new lane-diverse rows or manually review/promote confidence-held candidates",
+      },
+    });
+    expect(res.body.auto_promote_health.blocker_class_counts).toEqual([
+      expect.objectContaining({ class: "confidence_threshold", count: 2 }),
+    ]);
+    expect(res.body.auto_promote_health.summary).toMatch(/author new lane-diverse rows/);
+    expect(res.body.auto_promote_health.summary).toMatch(/confidence-held candidates/);
+    expect(res.body.auto_promote_health.summary).not.toMatch(/close stale already-dispatched rows/);
   });
 
   it("status reports below-floor and below-lane build-ready health without fake idle action", async () => {
@@ -1534,7 +1632,7 @@ describe("daemon — dry-run vs live", () => {
     );
     expect(res.body.auto_promote_health.summary).toMatch(/ready=1 floor=4, lanes=1\/3/);
     expect(res.body.auto_promote_health.summary).toMatch(/blocker classes:/);
-    expect(res.body.auto_promote_health.summary).toMatch(/next: manually \/promote/);
+    expect(res.body.auto_promote_health.summary).toMatch(/next: close stale already-dispatched rows or manually \/promote retry-safe rows/);
     expect(res.body.flesh.auto_promote.health.next_action).toEqual(res.body.auto_promote_health.next_action);
   });
 
