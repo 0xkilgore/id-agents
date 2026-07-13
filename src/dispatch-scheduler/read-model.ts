@@ -124,12 +124,16 @@ export interface DispatchReadRow {
     | "failed_work_landed_recoverable"
     | "moot_or_superseded"
     | "failed_needs_operator"
+    | "historical_failure"
     | "queued"
     | "in_flight"
     | "needs_review"
     | "done"
     | "done_recovered"
     | string; // string fallback preserves forwards-compat with unknown raw states
+  effective_actionable_state: EffectiveActionableStateContract;
+  action_kind: EffectiveActionKind;
+  needs_you: boolean;
   // Companion sort signal. UI groups `needs_operator=true` to the top
   // regardless of `effective_state`. Per the scope §"Needs-You Flag".
   needs_operator: boolean;
@@ -1000,6 +1004,7 @@ function rowToDispatch(row: DispatchDbRow, opts: DeriveOptions = {}): DispatchRe
   // effective_state / needs_operator it is computed from.
   const effectiveState = deriveEffectiveState(row, opts);
   const needsOperator = deriveNeedsOperator(row, Date.now(), opts);
+  const actionable = deriveEffectiveActionableState(effectiveState, needsOperator);
   return {
     id: row.dispatch_phid,
     dispatch_id: row.dispatch_phid,
@@ -1046,6 +1051,9 @@ function rowToDispatch(row: DispatchDbRow, opts: DeriveOptions = {}): DispatchRe
     },
     recovery_classification: deriveRecoveryClassification(row),
     effective_state: effectiveState,
+    effective_actionable_state: actionable,
+    action_kind: actionable.action_kind,
+    needs_you: actionable.needs_you,
     needs_operator: needsOperator,
     sort_group: deriveSortGroup(effectiveState, needsOperator),
     supersede_link: row.supersede_link,
@@ -1474,6 +1482,8 @@ const RECOVERY_TERMINAL_FAILURE_STATUSES = new Set([
   "needs_operator",
 ]);
 
+const LINKED_QUERY_EXPIRED_RE = /linked query (?:terminated )?expired|linked-query-expired/i;
+
 export function deriveEffectiveState(row: EffectiveStateRow, opts: DeriveOptions = {}): string {
   // Rule 1 — raw active states.
   if (row.status === "queued") return "queued";
@@ -1520,6 +1530,13 @@ export function deriveEffectiveState(row: EffectiveStateRow, opts: DeriveOptions
     return "failed_work_landed_recoverable";
   }
 
+  // A linked query expiry is a transport/query TTL terminal, not a fresh
+  // operator action. If no promotion/evidence proved the work landed, keep the
+  // row visible as historical failure while keeping it out of Needs You.
+  if (linkedQueryExpired(row)) {
+    return "historical_failure";
+  }
+
   // Rule 4 — triaged MOOT: a dispatch reconciled as an infra-death (scheduler
   // wedge / manager↔agent transport-exhaustion / closeout-expiry) or superseded
   // by a later run is NOT a genuine operator-action item. It carries
@@ -1563,6 +1580,45 @@ export function deriveEffectiveState(row: EffectiveStateRow, opts: DeriveOptions
 
   // Rule 8 — fallback. Unknown failures surface as needs_operator.
   return "failed_needs_operator";
+}
+
+function linkedQueryExpired(row: Pick<EffectiveStateRow, "failure_kind" | "failure_detail" | "recovery_reason">): boolean {
+  return [row.failure_kind, row.failure_detail, row.recovery_reason]
+    .filter((v): v is string => typeof v === "string" && v.length > 0)
+    .some((v) => LINKED_QUERY_EXPIRED_RE.test(v));
+}
+
+export type EffectiveActionKind = "none" | "operator_review" | "monitor";
+
+export interface EffectiveActionableStateContract {
+  state: "needs_you" | "live" | "historical_success" | "historical_recovered" | "historical_failure" | "historical_moot";
+  action_kind: EffectiveActionKind;
+  needs_you: boolean;
+}
+
+export function deriveEffectiveActionableState(
+  effectiveState: string,
+  needsOperator: boolean,
+): EffectiveActionableStateContract {
+  if (needsOperator || effectiveState === "failed_needs_operator" || effectiveState === "needs_review") {
+    return { state: "needs_you", action_kind: "operator_review", needs_you: true };
+  }
+  switch (effectiveState) {
+    case "queued":
+    case "in_flight":
+      return { state: "live", action_kind: "monitor", needs_you: false };
+    case "done":
+      return { state: "historical_success", action_kind: "none", needs_you: false };
+    case "done_recovered":
+    case "failed_work_landed_recoverable":
+      return { state: "historical_recovered", action_kind: "none", needs_you: false };
+    case "historical_failure":
+      return { state: "historical_failure", action_kind: "none", needs_you: false };
+    case "moot_or_superseded":
+      return { state: "historical_moot", action_kind: "none", needs_you: false };
+    default:
+      return { state: "live", action_kind: "monitor", needs_you: false };
+  }
 }
 
 export function promotionCompletedAndVerified(raw: string | null | undefined): boolean {
@@ -1667,6 +1723,7 @@ export function deriveSortGroup(effectiveState: string, needsOperator: boolean):
     case "done":
       return 4;
     case "moot_or_superseded":
+    case "historical_failure":
       return 5;
     default:
       return 2;
