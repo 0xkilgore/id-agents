@@ -239,4 +239,29 @@ describe("GET /orchestration/backlog retry_readiness", () => {
       prior_dispatch_status: "in_flight",
     });
   });
+
+  it("keeps needs-clarification prior dispatches as wait rows, not stale false needs_review fuel", async () => {
+    await seedDispatch({
+      phid: "phid:disp-clarification",
+      status: "needs_clarification",
+      failure_kind: null,
+      failure_detail: null,
+    });
+    const item = await seedNeedsReview("clarification-blocked feedback row", "phid:disp-clarification");
+
+    const r = await call("/orchestration/backlog?state=needs_review");
+    const got = r.body.items.find((row: any) => row.item_id === item.item_id);
+
+    expect(got.retry_readiness).toMatchObject({
+      status: "waiting_on_live_dispatch",
+      retryable: false,
+      stale_duplicate: false,
+      manual_promote_required: false,
+      next_action: "wait",
+      prior_dispatch_status: "needs_clarification",
+    });
+    expect(got.retry_readiness.reason).toContain(
+      "prior dispatch is needs_clarification; retrying now would duplicate live work",
+    );
+  });
 });
