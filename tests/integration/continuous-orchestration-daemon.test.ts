@@ -1603,9 +1603,74 @@ describe("daemon — dry-run vs live", () => {
       },
     });
     expect(res.body.auto_promote_health.summary).toBe(
-      "ready build fuel below raw floor but daemon capacity is occupied: ready_plus_in_flight=3 floor=2, in_flight=1/1, lanes=3/3",
+      "ready build fuel raw floor satisfied but daemon capacity is occupied: ready_plus_in_flight=3 floor=2, in_flight=1/1, lanes=3/3; lane diversity satisfied",
     );
     expect(res.body.flesh.auto_promote.health.lanes).toEqual(res.body.auto_promote_health.lanes);
+  });
+
+  it("status names lane-diversity topoff when capacity is full but raw ready fuel exists", async () => {
+    await seedReady(adapter, {
+      title: "same lane ready A",
+      write_scope: ["repo/same-lane"],
+    });
+    await seedReady(adapter, {
+      title: "same lane ready B",
+      write_scope: ["repo/same-lane"],
+    });
+    const inFlight = await seedReady(adapter, {
+      title: "same lane in flight",
+      write_scope: ["repo/same-lane"],
+    });
+    await setItemState(adapter, inFlight.item_id, "in_flight", { dispatch_phid: "phid:disp-same-lane" });
+
+    const { app, daemon } = mountStatusApp(
+      adapter,
+      {
+        dry_run: true,
+        auto_flesh_enabled: true,
+        auto_promote_enabled: true,
+        auto_promote_floor: 2,
+        auto_promote_min_lanes: 2,
+        min_ready_fuel: 2,
+        max_in_flight: 1,
+        max_new_per_tick: 10,
+      },
+      { inFlight: 1 },
+    );
+    await daemon.setMode("running");
+
+    const res = await callApp(app, "/orchestration/status");
+
+    expect(res.status).toBe(200);
+    expect(res.body.counts.ready).toBe(2);
+    expect(res.body.auto_promote_health).toMatchObject({
+      below_floor: false,
+      below_lanes: true,
+      triggered: false,
+      lanes: {
+        build_ready: 2,
+        build_in_flight: 1,
+        ready_plus_in_flight: 3,
+        capacity_occupied: true,
+        build_ready_lanes: 1,
+      },
+      operator_summary: {
+        empty_fuel: false,
+        capacity_gated: true,
+        lane_diversity_topoff_needed: true,
+        lane_diversity_deficit: 1,
+      },
+    });
+    expect(res.body.auto_promote_health.summary).toContain("daemon capacity is occupied");
+    expect(res.body.auto_promote_health.summary).toContain("lane diversity topoff needed");
+    expect(res.body.auto_promote_health.operator_summary.summary).toContain("gated fuel (capacity full, lane diversity 1/2)");
+    expect(res.body.auto_promote_health.operator_summary.summary).not.toMatch(/empty fuel/i);
+    expect(res.body.auto_promote_health.operator_summary.safe_actions).toEqual(
+      expect.arrayContaining([
+        expect.stringMatching(/Capacity is full/i),
+        expect.stringMatching(/Top off lane diversity/i),
+      ]),
+    );
   });
 
   it("status reports clean capacity-only ready rows without stale queue-quality floor", async () => {

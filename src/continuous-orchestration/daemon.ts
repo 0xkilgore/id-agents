@@ -309,6 +309,9 @@ export interface AutoPromoteOperatorSummary {
   retryable_failed_rows: number;
   stale_duplicate_rows: number;
   confidence_held_rows: number;
+  capacity_gated: boolean;
+  lane_diversity_topoff_needed: boolean;
+  lane_diversity_deficit: number;
   safe_actions: string[];
   empty_fuel: boolean;
   summary: string;
@@ -1167,8 +1170,9 @@ export class ContinuousOrchestrationDaemon {
       killSwitch ? "kill_switch_active" :
       usage.hard_paused ? "usage_hard_paused" :
       null;
-    const belowFloor = !capacityFuel.capacityOccupied && plan.before.build_ready < config.auto_promote_floor;
-    const belowLanes = !capacityFuel.capacityOccupied && plan.before.build_lanes < config.auto_promote_min_lanes;
+    const rawBelowFloor = plan.before.build_ready < config.auto_promote_floor;
+    const belowFloor = !capacityFuel.capacityOccupied && rawBelowFloor;
+    const belowLanes = plan.before.build_lanes < config.auto_promote_min_lanes;
     const skippedItems = plan.skipped;
     const itemById = new Map(needsReview.map((item) => [item.item_id, item]));
     const healthSkippedItems = skippedItems.map((item): AutoPromoteHealthSkippedItem => {
@@ -1201,10 +1205,15 @@ export class ContinuousOrchestrationDaemon {
       candidatesConsidered,
       needsReview,
       skippedItems,
+      capacityOccupied: capacityFuel.capacityOccupied,
+      readyRows: capacityFuel.readyBuild.length,
+      readyPlusInFlight: plan.before.build_ready,
+      buildReadyLanes: plan.before.build_lanes,
+      minLanes: config.auto_promote_min_lanes,
     });
     const nextAction = nextAutoPromoteAction({
       blockedReason,
-      belowFloor,
+      belowFloor: rawBelowFloor,
       belowLanes,
       triggered,
       candidates: candidatesConsidered,
@@ -1751,6 +1760,11 @@ async function buildAutoPromoteOperatorSummary(
     candidatesConsidered: number;
     needsReview: BacklogItem[];
     skippedItems: Array<{ item_id: string; reasons: string[] }>;
+    capacityOccupied: boolean;
+    readyRows: number;
+    readyPlusInFlight: number;
+    buildReadyLanes: number;
+    minLanes: number;
   },
 ): Promise<AutoPromoteOperatorSummary> {
   const outcomes = await getDispatchOutcomesByPhid(
@@ -1770,11 +1784,23 @@ async function buildAutoPromoteOperatorSummary(
   ).length;
   const hasGatedFuel =
     args.ready > 0 ||
+    args.readyRows > 0 ||
+    args.readyPlusInFlight > 0 ||
     args.candidatesConsidered > 0 ||
     retryableFailedRows > 0 ||
     staleDuplicateRows > 0 ||
     confidenceHeldRows > 0;
+  const laneDiversityDeficit = Math.max(0, args.minLanes - args.buildReadyLanes);
+  const laneDiversityTopoffNeeded = laneDiversityDeficit > 0;
   const safeActions: string[] = [];
+  if (args.capacityOccupied) {
+    safeActions.push("Capacity is full; wait for an in-flight build slot before dispatching additional ready rows.");
+  }
+  if (laneDiversityTopoffNeeded) {
+    safeActions.push(
+      `Top off lane diversity by adding or promoting build-ready work in ${laneDiversityDeficit} new lane(s).`,
+    );
+  }
   if (retryableFailedRows > 0) {
     safeActions.push("Manually /promote retryable failed rows only after confirming the retry_safe gate.");
   }
@@ -1791,14 +1817,26 @@ async function buildAutoPromoteOperatorSummary(
     safeActions.push("Treat this as gated fuel; rows exist but require operator gates.");
   }
 
+  const gates = [
+    args.capacityOccupied ? "capacity full" : null,
+    laneDiversityTopoffNeeded ? `lane diversity ${args.buildReadyLanes}/${args.minLanes}` : null,
+  ].filter((part): part is string => part != null);
+  const prefix = hasGatedFuel
+    ? gates.length > 0
+      ? `gated fuel (${gates.join(", ")}):`
+      : "gated fuel:"
+    : "no ready or needs_review build fuel is currently visible";
   const summary = hasGatedFuel
-    ? `gated fuel: retryable_failed_rows=${retryableFailedRows}, stale_duplicate_rows=${staleDuplicateRows}, confidence_held_rows=${confidenceHeldRows}; safe actions: ${safeActions.join(" ")}`
+    ? `${prefix} retryable_failed_rows=${retryableFailedRows}, stale_duplicate_rows=${staleDuplicateRows}, confidence_held_rows=${confidenceHeldRows}; safe actions: ${safeActions.join(" ")}`
     : "no ready or needs_review build fuel is currently visible";
   return {
     schema_version: "orchestration.auto_promote_operator_summary.v1",
     retryable_failed_rows: retryableFailedRows,
     stale_duplicate_rows: staleDuplicateRows,
     confidence_held_rows: confidenceHeldRows,
+    capacity_gated: args.capacityOccupied,
+    lane_diversity_topoff_needed: laneDiversityTopoffNeeded,
+    lane_diversity_deficit: laneDiversityDeficit,
     safe_actions: safeActions,
     empty_fuel: !hasGatedFuel,
     summary,
@@ -2019,10 +2057,17 @@ function summarizeAutoPromoteHealth(args: {
 }): string {
   if (args.blockedReason) return `auto-promote blocked: ${args.blockedReason}`;
   if (args.capacityOccupied) {
+    const fuelState = args.belowFloor
+      ? "ready build fuel below raw floor"
+      : "ready build fuel raw floor satisfied";
+    const laneState = args.belowLanes
+      ? `; lane diversity topoff needed: add/promote ${Math.max(0, args.minLanes - args.lanes)} new build lane(s)`
+      : "; lane diversity satisfied";
     return (
-      `ready build fuel below raw floor but daemon capacity is occupied: ` +
+      `${fuelState} but daemon capacity is occupied: ` +
       `ready_plus_in_flight=${args.ready} floor=${args.floor}, ` +
-      `in_flight=${args.inFlight}/${args.maxInFlight}, lanes=${args.lanes}/${args.minLanes}`
+      `in_flight=${args.inFlight}/${args.maxInFlight}, lanes=${args.lanes}/${args.minLanes}` +
+      laneState
     );
   }
   if (!args.belowFloor && !args.belowLanes) {
