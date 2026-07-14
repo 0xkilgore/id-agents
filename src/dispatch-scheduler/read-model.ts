@@ -259,29 +259,45 @@ export async function readDispatches(
   const statuses = statusesForFilter(status);
   const placeholders = statuses.map(() => '?').join(', ');
   const { rows } = await adapter.query<DispatchDbRow>(
-    `SELECT d.dispatch_phid, d.team_id, d.query_id, d.to_agent, d.from_actor, d.channel, d.subject,
-            d.provider, d.runtime, d.priority, d.status, d.not_before_at, d.attempt_count,
-            d.bounce_count, d.started_at, d.completed_at, d.updated_at, d.agent_query_id,
-            d.failure_kind, d.failure_detail, d.clarification_id,
-            d.active_clarification_json, d.clarification_history_json,
-            d.resume_delivery_status, d.promote, d.promotion_strategy,
-            d.promotion_required_reason, d.promotion_input_json,
-            d.promotion_result_json, d.result_json,
-            COALESCE(NULLIF(d.artifact_path, ''), (
+    `WITH page AS (
+       SELECT d.dispatch_phid, d.team_id, d.query_id, d.to_agent, d.from_actor, d.channel, d.subject,
+              d.provider, d.runtime, d.priority, d.status, d.not_before_at, d.attempt_count,
+              d.bounce_count, d.started_at, d.completed_at, d.updated_at, d.agent_query_id,
+              d.failure_kind, d.failure_detail, d.clarification_id,
+              d.active_clarification_json, d.clarification_history_json,
+              d.resume_delivery_status, d.promote, d.promotion_strategy,
+              d.promotion_required_reason, d.promotion_input_json,
+              d.promotion_result_json, d.result_json, d.artifact_path,
+              d.recovery_status, d.recovery_attempts, d.recovery_reason,
+              d.side_effect, d.allow_auto_retry, d.supersede_link,
+              d.reliability_classification, d.reliability_classification_reason
+         FROM dispatch_scheduler_queue d
+        WHERE d.team_id = ? AND d.status IN (${placeholders})
+        ORDER BY COALESCE(d.completed_at, d.started_at, d.updated_at, d.not_before_at) DESC,
+                 d.dispatch_phid DESC
+        LIMIT ?
+     )
+     SELECT p.dispatch_phid, p.team_id, p.query_id, p.to_agent, p.from_actor, p.channel, p.subject,
+            p.provider, p.runtime, p.priority, p.status, p.not_before_at, p.attempt_count,
+            p.bounce_count, p.started_at, p.completed_at, p.updated_at, p.agent_query_id,
+            p.failure_kind, p.failure_detail, p.clarification_id,
+            p.active_clarification_json, p.clarification_history_json,
+            p.resume_delivery_status, p.promote, p.promotion_strategy,
+            p.promotion_required_reason, p.promotion_input_json,
+            p.promotion_result_json, p.result_json,
+            COALESCE(NULLIF(p.artifact_path, ''), (
               SELECT a.abs_path
                 FROM artifacts a
-               WHERE a.dispatch_ref = d.dispatch_phid
+               WHERE a.dispatch_ref = p.dispatch_phid
                ORDER BY a.produced_at DESC, a.updated_at DESC, a.artifact_id ASC
                LIMIT 1
             )) AS artifact_path,
-            d.recovery_status, d.recovery_attempts, d.recovery_reason,
-            d.side_effect, d.allow_auto_retry, d.supersede_link,
-            d.reliability_classification, d.reliability_classification_reason
-       FROM dispatch_scheduler_queue d
-       WHERE d.team_id = ? AND d.status IN (${placeholders})
-       ORDER BY COALESCE(d.completed_at, d.started_at, d.updated_at, d.not_before_at) DESC,
-                d.dispatch_phid DESC
-       LIMIT ?`,
+            p.recovery_status, p.recovery_attempts, p.recovery_reason,
+            p.side_effect, p.allow_auto_retry, p.supersede_link,
+            p.reliability_classification, p.reliability_classification_reason
+       FROM page p
+      ORDER BY COALESCE(p.completed_at, p.started_at, p.updated_at, p.not_before_at) DESC,
+               p.dispatch_phid DESC`,
     [teamId, ...statuses, limit],
   );
   return rows.map((row) => rowToDispatch(row, opts));

@@ -288,6 +288,88 @@ describe('manager dispatch read routes', () => {
     expect(body.dispatches).toHaveLength(1);
   });
 
+  it('uses a page-first projection for dispatch list reads', async () => {
+    const teamId = await db.teams.getOrCreateTeamId('dispatch-read-page-first');
+    for (let i = 0; i < 25; i += 1) {
+      await insertDispatch(teamId, {
+        dispatch_phid: `phid:disp-page-first-${String(i).padStart(2, '0')}`,
+        query_id: `query_page_first_${i}`,
+        status: i % 2 === 0 ? 'queued' : 'done',
+        completed_at: i % 2 === 0 ? null : `2026-06-04T12:${String(i).padStart(2, '0')}:00.000Z`,
+        updated_at: `2026-06-04T11:${String(i).padStart(2, '0')}:00.000Z`,
+      });
+    }
+
+    const originalQuery = db.adapter.query.bind(db.adapter);
+    const dispatchSql: string[] = [];
+    (db.adapter as any).query = (async (sql: string, ...args: any[]) => {
+      const normalized = String(sql).replace(/\s+/g, ' ').trim();
+      if (normalized.includes('FROM dispatch_scheduler_queue d') && normalized.includes('WITH page AS')) {
+        dispatchSql.push(normalized);
+      }
+      return originalQuery(sql, ...args);
+    }) as typeof db.adapter.query;
+
+    try {
+      const res = await fetch(`${baseUrl}/dispatches?status=all&limit=5`, { headers: headers('dispatch-read-page-first') });
+      expect(res.status).toBe(200);
+      const body = await res.json() as any;
+      expect(body.dispatches).toHaveLength(5);
+    } finally {
+      (db.adapter as any).query = originalQuery as typeof db.adapter.query;
+    }
+
+    expect(dispatchSql).toHaveLength(1);
+    expect(dispatchSql[0]).toMatch(/^WITH page AS/i);
+    expect(dispatchSql[0]).toMatch(/LIMIT \?/i);
+    expect(dispatchSql[0].indexOf('LIMIT ?')).toBeLessThan(dispatchSql[0].indexOf('SELECT p.dispatch_phid'));
+  });
+
+  it('keeps /agents bounded in SQL while preserving total count', async () => {
+    const teamId = await db.teams.getOrCreateTeamId('agents-read-bounded-page');
+    for (let i = 0; i < 12; i += 1) {
+      await db.agents.create({
+        team_id: teamId,
+        id: `bounded-agent-${i}`,
+        name: `bounded-agent-${i}`,
+        type: 'claude',
+        model: 'test',
+        status: 'running',
+        created_at: 1_780_000_000_000 + i,
+      });
+    }
+
+    const originalQuery = db.adapter.query.bind(db.adapter);
+    const agentSql: string[] = [];
+    (db.adapter as any).query = (async (sql: string, ...args: any[]) => {
+      const normalized = String(sql).replace(/\s+/g, ' ').trim();
+      if (normalized.includes('FROM agents') && normalized.includes('ORDER BY created_at DESC')) {
+        agentSql.push(normalized);
+      }
+      return originalQuery(sql, ...args);
+    }) as typeof db.adapter.query;
+
+    try {
+      const res = await fetch(`${baseUrl}/agents?limit=3`, { headers: headers('agents-read-bounded-page') });
+      expect(res.status).toBe(200);
+      const body = await res.json() as any;
+      expect(body.count).toBe(3);
+      expect(body.total).toBe(12);
+      expect(body.agents).toHaveLength(3);
+      expect(body.agents.map((agent: any) => agent.name)).toEqual([
+        'bounded-agent-11',
+        'bounded-agent-10',
+        'bounded-agent-9',
+      ]);
+    } finally {
+      (db.adapter as any).query = originalQuery as typeof db.adapter.query;
+    }
+
+    expect(agentSql).toHaveLength(1);
+    expect(agentSql[0]).toMatch(/^SELECT id, team_id, name, type, model/i);
+    expect(agentSql[0]).toMatch(/LIMIT \?/i);
+  });
+
   it('scopes dispatches and health by team', async () => {
     const alphaId = await db.teams.getOrCreateTeamId('dispatch-read-alpha');
     const betaId = await db.teams.getOrCreateTeamId('dispatch-read-beta');
@@ -310,6 +392,15 @@ describe('manager dispatch read routes', () => {
   it('keeps dispatch health needs_input aligned with effective Needs You routed count', async () => {
     const team = 'dispatch-read-needs-input-contract';
     const teamId = await db.teams.getOrCreateTeamId(team);
+    await db.agents.create({
+      team_id: teamId,
+      id: 'needs-input-roger',
+      name: 'roger',
+      type: 'claude',
+      model: 'test',
+      status: 'running',
+      created_at: Date.now(),
+    });
 
     await insertDispatch(teamId, {
       dispatch_phid: 'phid:disp-historical-linked-query-expired',
@@ -375,7 +466,7 @@ describe('manager dispatch read routes', () => {
     expect(oneHealth.status).toBe(200);
     expect(oneHealthBody.needs_input).toBe(1);
 
-    const oneNeedsYou = await fetch(`${baseUrl}/desk/needs-me?team=${encodeURIComponent(team)}&limit=20`, {
+    const oneNeedsYou = await fetch(`${baseUrl}/desk/needs-me?team=${encodeURIComponent(team)}&limit=100`, {
       headers: headers(team),
     });
     const oneNeedsYouBody = await oneNeedsYou.json() as any;

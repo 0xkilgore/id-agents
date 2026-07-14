@@ -238,6 +238,29 @@ export class SqliteAgentsRepo implements AgentsRepository {
     return this.parseRows(rows);
   }
 
+  async listPage(teamId: string, includeAutomator: boolean = false, limit: number): Promise<AgentRow[]> {
+    const typeFilter = includeAutomator ? '' : `AND type != 'automator'`;
+    const boundedLimit = Math.max(1, Math.floor(limit));
+    const { rows } = await this.db.query(
+      `SELECT id, team_id, name, type, model, port, endpoint, working_directory,
+              status, created_at, registry, metadata, deleted_at, runtime,
+              token_id, domain, api_key, customer_domain, public_endpoint_url,
+              internal_endpoint_url, ssh_target
+       FROM agents
+       WHERE team_id = ?
+         AND deleted_at IS NULL
+         AND (
+           type NOT IN ('interactive', 'virtual')
+           OR runtime = 'public-agent-remote'
+         )
+         ${typeFilter}
+       ORDER BY created_at DESC, id DESC
+       LIMIT ?`,
+      [teamId, boundedLimit],
+    );
+    return this.parseRows(rows);
+  }
+
   async nextPort(): Promise<number> {
     const { rows } = await this.db.query<{ max_port: number | null }>(
       `SELECT MAX(port) as max_port FROM agents
@@ -247,7 +270,8 @@ export class SqliteAgentsRepo implements AgentsRepository {
     return maxPort ? maxPort + 1 : 4101;
   }
 
-  async count(teamId: string): Promise<string> {
+  async count(teamId: string, includeAutomator: boolean = false): Promise<string> {
+    const typeFilter = includeAutomator ? '' : `AND type != 'automator'`;
     const { rows } = await this.db.query<{ count: string }>(
       `SELECT CAST(COUNT(*) AS TEXT) as count FROM agents
        WHERE team_id = ?
@@ -255,7 +279,8 @@ export class SqliteAgentsRepo implements AgentsRepository {
          AND (
            type NOT IN ('interactive', 'virtual')
            OR runtime = 'public-agent-remote'
-         )`,
+         )
+         ${typeFilter}`,
       [teamId],
     );
     return rows[0]?.count ?? '0';

@@ -199,6 +199,29 @@ export class PgAgentsRepo implements AgentsRepository {
     return r.rows;
   }
 
+  async listPage(teamId: string, includeAutomator: boolean = false, limit: number): Promise<AgentRow[]> {
+    const typeFilter = includeAutomator ? '' : `AND type != 'automator'`;
+    const boundedLimit = Math.max(1, Math.floor(limit));
+    const r = await this.db.query<AgentRow>(
+      `SELECT id, team_id, name, type, model, port, endpoint, working_directory,
+              status, created_at, registry, metadata, deleted_at, runtime,
+              token_id, domain, api_key, customer_domain, public_endpoint_url,
+              internal_endpoint_url, ssh_target
+       FROM agents
+       WHERE team_id = $1
+         AND deleted_at IS NULL
+         AND (
+           type NOT IN ('interactive', 'virtual')
+           OR runtime = 'public-agent-remote'
+         )
+         ${typeFilter}
+       ORDER BY created_at DESC, id DESC
+       LIMIT $2`,
+      [teamId, boundedLimit],
+    );
+    return r.rows;
+  }
+
   async nextPort(): Promise<number> {
     const r = await this.db.query<{ max_port: number | null }>(
       `SELECT MAX(port) as max_port FROM agents
@@ -208,7 +231,8 @@ export class PgAgentsRepo implements AgentsRepository {
     return maxPort ? maxPort + 1 : 4101;
   }
 
-  async count(teamId: string): Promise<string> {
+  async count(teamId: string, includeAutomator: boolean = false): Promise<string> {
+    const typeFilter = includeAutomator ? '' : `AND type != 'automator'`;
     const r = await this.db.query<{ count: string }>(
       `SELECT COUNT(*)::text as count FROM agents
        WHERE team_id = $1
@@ -216,7 +240,8 @@ export class PgAgentsRepo implements AgentsRepository {
          AND (
            type NOT IN ('interactive', 'virtual')
            OR runtime = 'public-agent-remote'
-         )`,
+         )
+         ${typeFilter}`,
       [teamId],
     );
     return r.rows[0]?.count || '0';

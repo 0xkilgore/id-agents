@@ -2064,20 +2064,25 @@ export class AgentManagerDb {
     teamId: string,
     includeAll: boolean,
     isAdmin: boolean,
+    limit: number,
   ): Promise<AgentsListCacheEntry> {
     const now = Date.now();
-    const cacheKey = `${teamId}:${includeAll ? 'all' : 'default'}:${isAdmin ? 'admin' : 'redacted'}`;
+    const cacheKey = `${teamId}:${includeAll ? 'all' : 'default'}:${isAdmin ? 'admin' : 'redacted'}:${limit}`;
     const cached = this.agentsListCache.get(cacheKey);
     if (cached) {
       if (now - cached.at >= CONSOLE_ENDPOINT_CACHE_TTL_MS) {
-        this.refreshAgentsListCache(cacheKey, teamId, includeAll, isAdmin);
+        this.refreshAgentsListCache(cacheKey, teamId, includeAll, isAdmin, limit);
       }
       return cached;
     }
 
-    const agents = await this.dbListAgents(teamId, includeAll);
+    const [agents, totalRaw] = await Promise.all([
+      this.db.agents.listPage(teamId, includeAll, limit),
+      this.db.agents.count(teamId, includeAll),
+    ]);
     const mapped = agents.map(a => this.agentToResponse(a, { isAdmin }));
-    const entry = { at: now, total: mapped.length, agents: mapped };
+    const total = Number(totalRaw);
+    const entry = { at: now, total: Number.isFinite(total) ? total : mapped.length, agents: mapped };
     this.agentsListCache.set(cacheKey, entry);
     return entry;
   }
@@ -2087,13 +2092,22 @@ export class AgentManagerDb {
     teamId: string,
     includeAll: boolean,
     isAdmin: boolean,
+    limit: number,
   ): void {
     if (this.agentsListRefreshes.has(cacheKey)) return;
     const refresh = (async () => {
       try {
-        const agents = await this.dbListAgents(teamId, includeAll);
+        const [agents, totalRaw] = await Promise.all([
+          this.db.agents.listPage(teamId, includeAll, limit),
+          this.db.agents.count(teamId, includeAll),
+        ]);
         const mapped = agents.map(a => this.agentToResponse(a, { isAdmin }));
-        this.agentsListCache.set(cacheKey, { at: Date.now(), total: mapped.length, agents: mapped });
+        const total = Number(totalRaw);
+        this.agentsListCache.set(cacheKey, {
+          at: Date.now(),
+          total: Number.isFinite(total) ? total : mapped.length,
+          agents: mapped,
+        });
       } catch (err) {
         console.warn(`[Manager] /agents cache refresh failed: ${err instanceof Error ? err.message : String(err)}`);
       } finally {
@@ -7111,11 +7125,11 @@ export class AgentManagerDb {
       // P0 control-plane Slice 1 (c): bound the result so the list read can't
       // serialize an unbounded full scan. Default 100, max 500 (?limit clamps).
       const limit = parseReadLimit(req.query.limit);
-      const cached = await this.cachedAgentsListResponse(teamId, includeAll, isAdmin);
+      const cached = await this.cachedAgentsListResponse(teamId, includeAll, isAdmin, limit);
       res.json({
-        count: Math.min(cached.total, limit),
+        count: cached.agents.length,
         total: cached.total,
-        agents: cached.agents.slice(0, limit),
+        agents: cached.agents,
       });
     });
 

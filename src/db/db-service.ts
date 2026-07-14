@@ -114,14 +114,20 @@ export interface AgentsRepository {
   list(teamId: string, includeAutomator?: boolean): Promise<AgentRow[]>;
 
   /**
+   * List a bounded page of non-deleted agents in a team.
+   * By default hides automator agents; pass includeAutomator=true to include them.
+   */
+  listPage(teamId: string, includeAutomator: boolean | undefined, limit: number): Promise<AgentRow[]>;
+
+  /**
    * Global sequential port allocation.
    * Returns the next available port (max port across all claude agents + 1,
    * starting at 4101 if no agents exist).
    */
   nextPort(): Promise<number>;
 
-  /** Count non-deleted agents in a team. Returns count as a string. */
-  count(teamId: string): Promise<string>;
+  /** Count visible non-deleted agents in a team. Returns count as a string. */
+  count(teamId: string, includeAutomator?: boolean): Promise<string>;
 
   /** Find the interactive-type agent for a team (most recent, non-deleted). */
   findInteractive(teamId: string): Promise<AgentRow | null>;

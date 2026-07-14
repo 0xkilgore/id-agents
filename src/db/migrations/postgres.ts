@@ -307,6 +307,7 @@ export async function migratePostgres(adapter: DbAdapter): Promise<void> {
       IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='agents' AND column_name='team_id')
       THEN
         EXECUTE 'CREATE INDEX IF NOT EXISTS agents_team_name_idx ON agents(team_id, name)';
+        EXECUTE 'CREATE INDEX IF NOT EXISTS agents_team_visible_list_idx ON agents(team_id, deleted_at, created_at DESC, id DESC)';
       END IF;
 
       IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='news_items' AND column_name='team_id')
@@ -326,6 +327,10 @@ export async function migratePostgres(adapter: DbAdapter): Promise<void> {
     CREATE INDEX IF NOT EXISTS agents_token_idx
     ON agents(token_id)
     WHERE token_id IS NOT NULL;
+  `);
+  await adapter.query(`
+    CREATE INDEX IF NOT EXISTS agents_team_visible_list_idx
+    ON agents(team_id, deleted_at, created_at DESC, id DESC);
   `);
 
   // Multi-LLM Slice B: runtime policy read model. A logical agent ("*" for
@@ -802,6 +807,13 @@ export async function migratePostgres(adapter: DbAdapter): Promise<void> {
         CREATE INDEX IF NOT EXISTS dispatch_scheduler_artifact_path_idx
           ON dispatch_scheduler_queue(team_id, artifact_path)
           WHERE artifact_path IS NOT NULL;
+        CREATE INDEX IF NOT EXISTS dispatch_scheduler_recent_list_idx
+          ON dispatch_scheduler_queue(
+            team_id,
+            status,
+            (COALESCE(completed_at, started_at, updated_at, not_before_at)) DESC,
+            dispatch_phid DESC
+          );
         UPDATE dispatch_scheduler_queue
         SET artifact_path = (result_json::jsonb ->> 'artifact_path')
         WHERE artifact_path IS NULL

@@ -279,6 +279,8 @@ export async function migrateSqlite(adapter: SqliteAdapter): Promise<void> {
     );
 
     CREATE INDEX IF NOT EXISTS agents_team_name_idx ON agents(team_id, name);
+    CREATE INDEX IF NOT EXISTS agents_team_visible_list_idx
+      ON agents(team_id, deleted_at, created_at DESC, id DESC);
     CREATE INDEX IF NOT EXISTS logical_agent_identities_team_idx
       ON logical_agent_identities(team_id, logical_agent);
     CREATE INDEX IF NOT EXISTS news_items_agent_time_idx ON news_items(team_id, agent_id, timestamp);
@@ -521,6 +523,13 @@ export async function migrateSqlite(adapter: SqliteAdapter): Promise<void> {
       ON dispatch_scheduler_queue(team_id, status, provider, runtime, not_before_at, dispatch_phid);
     CREATE INDEX IF NOT EXISTS dispatch_scheduler_recent_terminal_idx
       ON dispatch_scheduler_queue(team_id, status, completed_at DESC, dispatch_phid);
+    CREATE INDEX IF NOT EXISTS dispatch_scheduler_recent_list_idx
+      ON dispatch_scheduler_queue(
+        team_id,
+        status,
+        COALESCE(completed_at, started_at, updated_at, not_before_at) DESC,
+        dispatch_phid DESC
+      );
     CREATE INDEX IF NOT EXISTS dispatch_scheduler_clarifications_read_idx
       ON dispatch_scheduler_queue(team_id, status, updated_at, dispatch_phid);
     CREATE INDEX IF NOT EXISTS dispatch_scheduler_query_id_idx
@@ -991,6 +1000,8 @@ export async function migrateSqlite(adapter: SqliteAdapter): Promise<void> {
   `);
 
   adapter.exec(`
+    CREATE INDEX IF NOT EXISTS agents_team_visible_list_idx
+      ON agents(team_id, deleted_at, created_at DESC, id DESC);
     CREATE INDEX IF NOT EXISTS dispatch_scheduler_queue_read_idx
       ON dispatch_scheduler_queue(team_id, status, provider, runtime, priority DESC, not_before_at, dispatch_phid);
     CREATE INDEX IF NOT EXISTS dispatch_scheduler_in_flight_read_idx
@@ -999,6 +1010,13 @@ export async function migrateSqlite(adapter: SqliteAdapter): Promise<void> {
       ON dispatch_scheduler_queue(team_id, status, provider, runtime, not_before_at, dispatch_phid);
     CREATE INDEX IF NOT EXISTS dispatch_scheduler_recent_terminal_idx
       ON dispatch_scheduler_queue(team_id, status, completed_at DESC, dispatch_phid);
+    CREATE INDEX IF NOT EXISTS dispatch_scheduler_recent_list_idx
+      ON dispatch_scheduler_queue(
+        team_id,
+        status,
+        COALESCE(completed_at, started_at, updated_at, not_before_at) DESC,
+        dispatch_phid DESC
+      );
     CREATE INDEX IF NOT EXISTS dispatch_scheduler_clarifications_read_idx
       ON dispatch_scheduler_queue(team_id, status, updated_at, dispatch_phid);
     CREATE INDEX IF NOT EXISTS dispatch_scheduler_team_agent_query_idx
