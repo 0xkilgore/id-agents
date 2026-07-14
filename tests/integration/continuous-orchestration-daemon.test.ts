@@ -1172,6 +1172,73 @@ describe("daemon — dry-run vs live", () => {
     );
   });
 
+  it("status explains retry_safe=false duplicate dispatch holds and live admission does not refire them", async () => {
+    const duplicate = await seedReady(adapter, {
+      title: "held previously dispatched retry row",
+      write_scope: ["repo/retry-held"],
+    });
+    await markReadyAlreadyDispatched(adapter, duplicate.item_id, "phid:disp-terminal-prior");
+    await seedDispatch(adapter, { dispatch_phid: "phid:disp-terminal-prior", status: "done" });
+
+    const fired: BacklogItem[] = [];
+    const { app, daemon } = mountStatusApp(
+      adapter,
+      {
+        dry_run: false,
+        auto_flesh_enabled: false,
+        auto_promote_enabled: false,
+        max_in_flight: 5,
+        max_new_per_tick: 5,
+      },
+      {
+        enqueue: async (item) => {
+          fired.push(item);
+          return { dispatch_phid: `phid:disp-refired-${item.item_id}`, query_id: `q_refired_${item.item_id}` };
+        },
+      },
+    );
+    await daemon.setMode("running");
+
+    const status = await callApp(app, "/orchestration/status");
+
+    expect(status.status).toBe(200);
+    expect(status.body.ready_admission.non_admitted).toEqual([
+      expect.objectContaining({
+        item_id: duplicate.item_id,
+        action: "held",
+        code: "duplicate_dispatch_retry_required",
+        metadata: expect.objectContaining({
+          last_dispatch_phid: "phid:disp-terminal-prior",
+          duplicate_retry: expect.objectContaining({
+            last_dispatch_phid: "phid:disp-terminal-prior",
+            prior_dispatch_status: "done",
+            retry_safe_required: true,
+            next_action: "close_duplicate_row",
+            operator_disposition: "close",
+            retry_safe_recommendation: "leave_false",
+          }),
+        }),
+      }),
+    ]);
+
+    const tick = await daemon.runTick();
+
+    expect(tick.admitted).toEqual([]);
+    expect(fired).toHaveLength(0);
+    expect(tick.decisions).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          item_id: duplicate.item_id,
+          action: "held",
+          metadata: expect.objectContaining({
+            code: "duplicate_dispatch_retry_required",
+            last_dispatch_phid: "phid:disp-terminal-prior",
+          }),
+        }),
+      ]),
+    );
+  });
+
   it("status keeps ready admission and queue quality aligned for retry blockers versus capacity gates", async () => {
     const duplicate = await seedReady(adapter, {
       title: "duplicate retry guard",
@@ -1871,16 +1938,16 @@ describe("daemon — dry-run vs live", () => {
     expect(res.status).toBe(200);
     expect(res.body.auto_promote_health).toMatchObject({
       triggered: true,
-      candidates_considered: 3,
+      candidates_considered: 2,
       promoted_count: 0,
-      skipped_count: 3,
+      skipped_count: 2,
       next_action: {
-        code: "manual_promote_or_close_already_dispatched",
+        code: "manual_promote_safe_retries",
       },
       operator_summary: {
         schema_version: "orchestration.auto_promote_operator_summary.v1",
         retryable_failed_rows: 1,
-        stale_duplicate_rows: 1,
+        stale_duplicate_rows: 0,
         confidence_held_rows: 1,
         empty_fuel: false,
       },
@@ -1888,19 +1955,20 @@ describe("daemon — dry-run vs live", () => {
     expect(res.body.auto_promote_health.skipped_items).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ item_id: retryable.item_id }),
-        expect.objectContaining({ item_id: stale.item_id }),
         expect.objectContaining({ item_id: held.item_id }),
       ]),
     );
+    expect(res.body.auto_promote_health.skipped_items).not.toEqual(
+      expect.arrayContaining([expect.objectContaining({ item_id: stale.item_id })]),
+    );
     expect(res.body.auto_promote_health.operator_summary.summary).toMatch(/retryable_failed_rows=1/);
-    expect(res.body.auto_promote_health.operator_summary.summary).toMatch(/stale_duplicate_rows=1/);
+    expect(res.body.auto_promote_health.operator_summary.summary).toMatch(/stale_duplicate_rows=0/);
     expect(res.body.auto_promote_health.operator_summary.summary).toMatch(/confidence_held_rows=1/);
     expect(res.body.auto_promote_health.operator_summary.summary).toMatch(/gated fuel/i);
     expect(res.body.auto_promote_health.operator_summary.summary).not.toMatch(/empty fuel/i);
     expect(res.body.auto_promote_health.operator_summary.safe_actions).toEqual(
       expect.arrayContaining([
         expect.stringMatching(/manually \/promote retryable failed rows/i),
-        expect.stringMatching(/close stale duplicate rows/i),
         expect.stringMatching(/re-flesh confidence-held rows/i),
         expect.stringMatching(/gated fuel; rows exist/i),
       ]),
@@ -1953,16 +2021,16 @@ describe("daemon — dry-run vs live", () => {
     expect(res.status).toBe(200);
     expect(res.body.auto_promote_health).toMatchObject({
       triggered: true,
-      candidates_considered: 3,
+      candidates_considered: 2,
       promoted_count: 0,
-      skipped_count: 3,
+      skipped_count: 2,
       next_action: {
-        code: "manual_promote_or_close_already_dispatched",
+        code: "manual_promote_safe_retries",
       },
       operator_summary: {
         schema_version: "orchestration.auto_promote_operator_summary.v1",
         retryable_failed_rows: 1,
-        stale_duplicate_rows: 1,
+        stale_duplicate_rows: 0,
         confidence_held_rows: 1,
         empty_fuel: false,
       },
@@ -1970,19 +2038,20 @@ describe("daemon — dry-run vs live", () => {
     expect(res.body.auto_promote_health.skipped_items).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ item_id: retryable.item_id }),
-        expect.objectContaining({ item_id: stale.item_id }),
         expect.objectContaining({ item_id: held.item_id }),
       ]),
     );
+    expect(res.body.auto_promote_health.skipped_items).not.toEqual(
+      expect.arrayContaining([expect.objectContaining({ item_id: stale.item_id })]),
+    );
     expect(res.body.auto_promote_health.operator_summary.summary).toMatch(/retryable_failed_rows=1/);
-    expect(res.body.auto_promote_health.operator_summary.summary).toMatch(/stale_duplicate_rows=1/);
+    expect(res.body.auto_promote_health.operator_summary.summary).toMatch(/stale_duplicate_rows=0/);
     expect(res.body.auto_promote_health.operator_summary.summary).toMatch(/confidence_held_rows=1/);
     expect(res.body.auto_promote_health.operator_summary.summary).toMatch(/gated fuel/i);
     expect(res.body.auto_promote_health.operator_summary.summary).not.toMatch(/empty fuel/i);
     expect(res.body.auto_promote_health.operator_summary.safe_actions).toEqual(
       expect.arrayContaining([
         expect.stringMatching(/manually \/promote retryable failed rows/i),
-        expect.stringMatching(/close stale duplicate rows/i),
         expect.stringMatching(/re-flesh confidence-held rows/i),
         expect.stringMatching(/gated fuel; rows exist/i),
       ]),
@@ -2051,7 +2120,7 @@ describe("daemon — dry-run vs live", () => {
     expect(res.body.flesh.auto_promote.health.next_action).toEqual(res.body.auto_promote_health.next_action);
   });
 
-  it("status recommends closing stale already-dispatched rows when prior dispatch is done", async () => {
+  it("status excludes stale already-dispatched rows when prior dispatch is done", async () => {
     await seedDispatchStatus(adapter, "phid:disp-stale-done", "done");
     const stale = await seedApprovedReview(adapter, {
       title: "already dispatched completed row",
@@ -2071,18 +2140,14 @@ describe("daemon — dry-run vs live", () => {
 
     expect(res.status).toBe(200);
     expect(res.body.auto_promote_health.next_action).toMatchObject({
-      code: "close_stale_already_dispatched_rows",
-      summary: expect.stringMatching(/close stale already-dispatched rows/i),
+      code: "flesh_or_refuel_candidates",
+      summary: expect.stringMatching(/author new lane-diverse build rows/i),
     });
-    expect(res.body.auto_promote_health.skipped_items).toEqual([
-      expect.objectContaining({
-        item_id: stale.item_id,
-        prior_dispatch_phid: "phid:disp-stale-done",
-        prior_dispatch_status: "done",
-      }),
-    ]);
-    expect(res.body.auto_promote_health.summary).toMatch(/already-dispatched statuses: done=1, retryable=0, unknown=0/);
-    expect(res.body.auto_promote_health.summary).toMatch(/next: close stale already-dispatched rows/i);
+    expect(res.body.auto_promote_health.candidates).toEqual([]);
+    expect(res.body.auto_promote_health.skipped_items).toEqual([]);
+    expect(res.body.auto_promote_health.summary).not.toMatch(/already-dispatched statuses: done=1/);
+    expect(res.body.auto_promote_health.summary).toMatch(/next: author new lane-diverse build rows/i);
+    expect(stale.last_dispatch_phid).toBe("phid:disp-stale-done");
   });
 
   it("status recommends manual promotion for already-dispatched safe retries when prior dispatch failed", async () => {
