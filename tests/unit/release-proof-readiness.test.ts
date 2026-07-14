@@ -5,7 +5,7 @@ import {
   readReleaseProofReadiness,
   type ReleaseProofReadinessInput,
 } from "../../src/continuous-orchestration/release-proof-readiness.js";
-import { setMode } from "../../src/continuous-orchestration/storage.js";
+import { recordTickOutcome, setMode } from "../../src/continuous-orchestration/storage.js";
 import { migrateSqlite } from "../../src/db/migrations/sqlite.js";
 import { SqliteAdapter } from "../../src/db/sqlite-adapter.js";
 import { migrateOutputsTables } from "../../src/outputs/storage.js";
@@ -59,7 +59,7 @@ describe("buildReleaseProofReadiness", () => {
       release_readiness: "ready",
       chris_readable_release_ready: "READY",
       feedback_evidence: { state: "present", count: 1 },
-      infra_warnings: { state: "clear", count: 0 },
+      infra_warnings: { state: "clear", count: 0, source: "none", action: null },
       sources: { state: "present" },
       generated_artifacts: { state: "present", count: 1 },
     });
@@ -118,7 +118,12 @@ describe("buildReleaseProofReadiness", () => {
 
     expect(view.release_readiness).toBe("not_ready");
     expect(view.feedback_evidence.state).toBe("error");
-    expect(view.infra_warnings.state).toBe("error");
+    expect(view.infra_warnings).toMatchObject({
+      state: "error",
+      count: 0,
+      source: "readiness_loader",
+      action: "restore release-proof data sources and retry readiness",
+    });
     expect(view.error_reasons).toEqual(["artifact_operations table unavailable"]);
     expect(view.summary).toBe("Release proof is not ready: artifact_operations table unavailable.");
   });
@@ -271,6 +276,8 @@ describe("buildReleaseProofReadiness", () => {
     expect(view.infra_warnings).toMatchObject({
       state: "clear",
       count: 0,
+      source: "none",
+      action: null,
       items: [],
     });
     expect(view.sources.state).toBe("present");
@@ -386,8 +393,156 @@ describe("buildReleaseProofReadiness", () => {
     expect(view.infra_warnings).toMatchObject({
       state: "warning",
       count: 1,
+      source: "orchestration_health_projection",
+      action: "review orchestration health and resolve infra warnings before release proof sign-off",
       items: ["promotion blocker phid:disp-1: remote tip not verified"],
     });
     expect(view.summary).toContain("infra warnings");
+  });
+
+  it("exposes warning source and action while keeping stale feedback separate", () => {
+    const view = buildReleaseProofReadiness(base({
+      feedback_evidence: [
+        {
+          id: "op:stale-missing-source",
+          kind: "comment_recorded",
+          observed_at: "2026-07-12T10:00:00.000Z",
+          source_link: null,
+          artifact_id: "art-kapelle",
+          summary: "Old feedback without durable source.",
+        },
+      ],
+      infra_warnings: ["orchestration loop critical: 3 consecutive zero-admit ticks with no structured admission explanation"],
+      stale_after_ms: 24 * 60 * 60 * 1000,
+    }));
+
+    expect(view.release_readiness).toBe("not_ready");
+    expect(view.feedback_evidence.state).toBe("stale");
+    expect(view.infra_warnings).toMatchObject({
+      state: "warning",
+      count: 1,
+      source: "orchestration_health_projection",
+      action: "review orchestration health and resolve infra warnings before release proof sign-off",
+      items: [
+        "orchestration loop critical: 3 consecutive zero-admit ticks with no structured admission explanation",
+      ],
+    });
+    expect(view.stale_reasons).toEqual(["latest feedback evidence is older than 24h"]);
+    expect(view.missing_reasons).toEqual(["one or more feedback evidence items are missing safe source links"]);
+    expect(view.summary).toBe("Release proof is not ready: infra warnings require operator review.");
+  });
+
+  it("does not report clear infra state as the blocker when stale feedback is the issue", () => {
+    const view = buildReleaseProofReadiness(base({
+      feedback_evidence: [
+        {
+          id: "op:old",
+          kind: "comment_recorded",
+          observed_at: "2026-07-12T10:00:00.000Z",
+          source_link: "https://manager.local/artifacts/art-kapelle/comments#op-old",
+          artifact_id: "art-kapelle",
+          summary: "Old feedback.",
+        },
+      ],
+      infra_warnings: [],
+    }));
+
+    expect(view.infra_warnings).toMatchObject({ state: "clear", count: 0, source: "none", action: null });
+    expect(view.summary).toBe("Release proof is not ready: latest feedback evidence is older than 1h.");
+    expect(view.summary).not.toContain("infra warnings");
+  });
+
+  it("maps degraded orchestration status to infra warnings without hiding missing safe source links", async () => {
+    const adapter = new SqliteAdapter(":memory:");
+    try {
+      await migrateSqlite(adapter);
+      await migrateOutputsTables(adapter);
+      await setMode(adapter, "default", "running");
+      await recordTickOutcome(adapter, "default", { zero_ticks: 3, fired: false });
+      await adapter.query(
+        `INSERT INTO artifacts
+           (artifact_id, basename, agent, tag, abs_path, title, produced_at, source, availability,
+            project_ref, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          "art-kapelle-proof",
+          "kapelle-release-proof.md",
+          "roger",
+          "release-proof",
+          "/tmp/output/kapelle-release-proof.md",
+          "Kapelle release proof evidence",
+          "2026-07-13T11:20:00.000Z",
+          "manager:/artifacts/art-kapelle-proof",
+          "present",
+          "kapelle",
+          "2026-07-13T11:20:00.000Z",
+          "2026-07-13T11:20:00.000Z",
+        ],
+      );
+      await adapter.query(
+        `INSERT INTO artifact_operations
+           (artifact_id, op_type, actor, ts, payload_json, source_link, idempotency_key)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        [
+          "art-kapelle-proof",
+          "comment_recorded",
+          "chris",
+          "2026-07-13T10:30:00.000Z",
+          JSON.stringify({ body: "Approved, but this comment lacks a durable source." }),
+          null,
+          "comment-stale-missing-source",
+        ],
+      );
+      await adapter.query(
+        `INSERT INTO orchestration_backlog_item
+           (item_id, team_id, title, track, to_agent, dispatch_body, readiness_state, risk_class,
+            source_refs_json, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          "backlog-kapelle-proof",
+          "default",
+          "Kapelle release proof source context",
+          "kapelle",
+          "roger",
+          "Release-proof readiness follow-up",
+          "done",
+          "build",
+          JSON.stringify(["manager:/backlog/backlog-kapelle-proof"]),
+          "2026-07-13T11:00:00.000Z",
+          "2026-07-13T11:00:00.000Z",
+        ],
+      );
+
+      const view = await readReleaseProofReadiness(adapter, {
+        teamId: "default",
+        project: "kapelle",
+        now: NOW,
+        staleAfterMs: 60 * 60 * 1000,
+      });
+
+      expect(view.release_readiness).toBe("not_ready");
+      expect(view.feedback_evidence).toMatchObject({ state: "stale", count: 1 });
+      expect(view.infra_warnings).toMatchObject({
+        state: "warning",
+        count: 1,
+        source: "orchestration_health_projection",
+        action: "review orchestration health and resolve infra warnings before release proof sign-off",
+        items: [
+          "orchestration loop critical: 3 consecutive zero-admit ticks with no structured admission explanation",
+        ],
+      });
+      expect(view.sources).toMatchObject({
+        state: "present",
+        links: expect.arrayContaining([
+          expect.objectContaining({ source: "artifact", href: "manager:/artifacts/art-kapelle-proof" }),
+          expect.objectContaining({ source: "backlog", href: "manager:/backlog/backlog-kapelle-proof" }),
+        ]),
+      });
+      expect(view.stale_reasons).toEqual(["latest feedback evidence is older than 1h"]);
+      expect(view.missing_reasons).toEqual(["one or more feedback evidence items are missing safe source links"]);
+      expect(view.summary).toBe("Release proof is not ready: infra warnings require operator review.");
+    } finally {
+      await adapter.close();
+    }
   });
 });

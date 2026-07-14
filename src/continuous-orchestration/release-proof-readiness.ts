@@ -4,6 +4,7 @@ import { readOrchestrationHealthProjection } from "./health-projection.js";
 export type ReleaseProofReadinessState = "ready" | "not_ready";
 export type EvidenceState = "present" | "empty" | "stale" | "error";
 export type InfraWarningState = "clear" | "warning" | "error";
+export type InfraWarningSource = "none" | "readiness_loader" | "orchestration_health_projection";
 export type LinkState = "present" | "missing";
 
 export interface ReleaseProofFeedbackEvidence {
@@ -58,6 +59,8 @@ export interface ReleaseProofReadinessResponse {
   infra_warnings: {
     state: InfraWarningState;
     count: number;
+    source: InfraWarningSource;
+    action: string | null;
     items: string[];
   };
   sources: {
@@ -133,6 +136,16 @@ export function buildReleaseProofReadiness(
     : input.infra_warnings.length > 0
       ? "warning"
       : "clear";
+  const infraSource: InfraWarningSource = input.load_error
+    ? "readiness_loader"
+    : input.infra_warnings.length > 0
+      ? "orchestration_health_projection"
+      : "none";
+  const infraAction = input.load_error
+    ? "restore release-proof data sources and retry readiness"
+    : input.infra_warnings.length > 0
+      ? "review orchestration health and resolve infra warnings before release proof sign-off"
+      : null;
 
   const ready =
     feedbackState === "present" &&
@@ -164,6 +177,8 @@ export function buildReleaseProofReadiness(
     infra_warnings: {
       state: infraState,
       count: input.infra_warnings.length,
+      source: infraSource,
+      action: infraAction,
       items: input.infra_warnings,
     },
     sources: {
