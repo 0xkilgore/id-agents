@@ -59,12 +59,20 @@ export interface OrchestrationHealthProjection {
     blocked: boolean;
     needs_clarification: {
       count: number;
+      needs_chris_count: number;
+      non_chris_count: number;
+      stale_non_chris_count: number;
+      recommended_action: string;
       recent_dispatch_ids: string[];
       blocks_backlog_dependency_count: number;
       items: OrchestrationHealthBlocker[];
     };
     promotion: {
       count: number;
+      needs_chris_count: number;
+      non_chris_count: number;
+      stale_non_chris_count: number;
+      recommended_action: string;
       recent_dispatch_ids: string[];
       blocks_backlog_dependency_count: number;
       items: OrchestrationHealthBlocker[];
@@ -1200,12 +1208,31 @@ function blockerFromRow(
 
 function summarize(items: OrchestrationHealthBlocker[], recentLimit: number) {
   const recent = items.slice(0, recentLimit);
+  const needsChrisCount = items.filter((item) => item.needs_chris).length;
+  const nonChrisCount = items.length - needsChrisCount;
   return {
     count: items.length,
+    needs_chris_count: needsChrisCount,
+    non_chris_count: nonChrisCount,
+    stale_non_chris_count: nonChrisCount,
+    recommended_action: summarizeRecommendedAction(items, needsChrisCount, nonChrisCount),
     recent_dispatch_ids: recent.map((item) => item.dispatch_phid),
     blocks_backlog_dependency_count: items.filter((item) => item.blocks_backlog_dependency).length,
     items: recent,
   };
+}
+
+function summarizeRecommendedAction(
+  items: OrchestrationHealthBlocker[],
+  needsChrisCount: number,
+  nonChrisCount: number,
+): string {
+  if (items.length === 0) return "none";
+  if (needsChrisCount > 0 && nonChrisCount > 0) {
+    return "route non-Chris stale clarification rows to their owner lanes; ask Chris only for true product or operator decisions";
+  }
+  if (needsChrisCount > 0) return "ask Chris for the product or operator decisions needed to resume";
+  return "route stale clarification rows to their owner lanes without asking Chris";
 }
 
 function compareBlockersRecent(a: OrchestrationHealthBlocker, b: OrchestrationHealthBlocker): number {
@@ -1292,6 +1319,19 @@ function classifyClarificationBlocker(row: DispatchRow, reason: string): Clarifi
     return {
       owner_lane: "release-engineering",
       recommended_action: "run promotion preflight and resolve the task-cleanup branch divergence with the repo owner",
+      needs_chris: false,
+    };
+  }
+
+  const hygieneIncident = classifyPromotionHygieneFailure({
+    dispatch_id: row.dispatch_phid,
+    text,
+    payload: parseJson(row.active_clarification_json),
+  });
+  if (hygieneIncident) {
+    return {
+      owner_lane: "release-engineering",
+      recommended_action: `route promotion hygiene to release-engineering: ${hygieneIncident.action}`,
       needs_chris: false,
     };
   }
