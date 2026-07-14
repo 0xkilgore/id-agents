@@ -189,6 +189,7 @@ export interface DecisionRecord {
     | "model_policy_drift_alert"
     | "auto_promote"
     | "ready_metadata_repair"
+    | "stale_ready_reconcile"
     | "reconciled"
     | "would_reconcile";
   reason: string;

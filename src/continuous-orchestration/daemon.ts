@@ -37,9 +37,11 @@ import {
   promoteToReady,
   recordTickOutcome,
   repairReadyCodexRuntimeMetadata,
+  reconcileStaleAlreadyDispatchedReadyRows,
   setItemState,
   setMode,
   type ReadyRuntimeRepair,
+  type StaleReadyReconcileResult,
 } from "./storage.js";
 import { deriveBacklogRetryReadiness } from "./backlog-retry-readiness.js";
 import { duplicateDispatchRetryReceipt } from "./duplicate-dispatch-retry-receipt.js";
@@ -195,6 +197,8 @@ export interface TickResult {
   admitted: Array<{ item_id: string; dispatch_phid: string | null }>;
   /** In-flight items whose lock was released this tick (completion + reaper). */
   reconciled: number;
+  /** Ready rows closed/superseded because their prior dispatch already reached a safe terminal state. */
+  stale_ready_reconciled: StaleReadyReconcileResult;
   skipped: number;
   zero_ticks: number;
   stall_alert: boolean;
@@ -636,6 +640,11 @@ export class ContinuousOrchestrationDaemon {
     // fired item holds its lock forever and the lanes strangle after
     // ~max_in_flight fires (the overnight self-strangle this fixes).
     const reconcileDecisions = await this.reconcileDispatchedItems(nowMs, config.dry_run);
+    let staleReadyReconcile = await reconcileStaleAlreadyDispatchedReadyRows(this.deps.adapter, {
+      team_id: this.teamId,
+      dry_run: config.dry_run,
+      actor: "continuous-orchestration",
+    });
 
     const { view: usage, daily_tokens_used } = await this.deps.readUsage();
     const { count: in_flight, active_write_scopes } = await this.deps.readInFlight();
@@ -650,6 +659,19 @@ export class ContinuousOrchestrationDaemon {
       killSwitch,
       hardPaused: usage.hard_paused,
     });
+    const postAutoPromoteStaleReadyReconcile = await reconcileStaleAlreadyDispatchedReadyRows(this.deps.adapter, {
+      team_id: this.teamId,
+      dry_run: config.dry_run,
+      actor: "continuous-orchestration",
+    });
+    staleReadyReconcile = {
+      scanned: staleReadyReconcile.scanned + postAutoPromoteStaleReadyReconcile.scanned,
+      closed: staleReadyReconcile.closed + postAutoPromoteStaleReadyReconcile.closed,
+      superseded: staleReadyReconcile.superseded + postAutoPromoteStaleReadyReconcile.superseded,
+      preserved_retry_safe: staleReadyReconcile.preserved_retry_safe + postAutoPromoteStaleReadyReconcile.preserved_retry_safe,
+      dry_run: config.dry_run,
+      items: [...staleReadyReconcile.items, ...postAutoPromoteStaleReadyReconcile.items],
+    };
 
     // Daemon SELF-REFUEL: when READY fuel runs low — at a batch load-point or
     // when fully dry — flesh skeletons into dispatchable READY items BEFORE
@@ -671,6 +693,19 @@ export class ContinuousOrchestrationDaemon {
       dailyTokensUsed: daily_tokens_used,
       fleshLimit: refuelCap,
     });
+    const postRefuelStaleReadyReconcile = await reconcileStaleAlreadyDispatchedReadyRows(this.deps.adapter, {
+      team_id: this.teamId,
+      dry_run: config.dry_run,
+      actor: "continuous-orchestration",
+    });
+    staleReadyReconcile = {
+      scanned: staleReadyReconcile.scanned + postRefuelStaleReadyReconcile.scanned,
+      closed: staleReadyReconcile.closed + postRefuelStaleReadyReconcile.closed,
+      superseded: staleReadyReconcile.superseded + postRefuelStaleReadyReconcile.superseded,
+      preserved_retry_safe: staleReadyReconcile.preserved_retry_safe + postRefuelStaleReadyReconcile.preserved_retry_safe,
+      dry_run: config.dry_run,
+      items: [...staleReadyReconcile.items, ...postRefuelStaleReadyReconcile.items],
+    };
     // Slice 4 mechanism 2: if the refuel fleshed anything this tick, suppress
     // admission so the daemon never stacks two write bursts in one tick.
     const refuelFleshed = refuel?.auto_ready ?? 0;
@@ -726,6 +761,21 @@ export class ContinuousOrchestrationDaemon {
 
     const plan = planAdmission(ordered, ctx, config);
     const decisions: DecisionRecord[] = [...reconcileDecisions];
+    for (const item of staleReadyReconcile.items) {
+      decisions.push({
+        item_id: item.item_id,
+        action: "stale_ready_reconcile",
+        reason: item.reason,
+        dispatch_phid: item.dispatch_phid,
+        metadata: {
+          dry_run: staleReadyReconcile.dry_run,
+          from_state: item.from_state,
+          to_state: item.to_state,
+          dispatch_status: item.dispatch_status,
+          receipt: item.receipt,
+        },
+      });
+    }
     const admitted: Array<{ item_id: string; dispatch_phid: string | null }> = [];
     const modelPolicyDrift = await this.readModelPolicyDirectiveDrift();
 
@@ -1044,6 +1094,7 @@ export class ContinuousOrchestrationDaemon {
       candidates: ordered.length,
       admitted,
       reconciled: reconcileDecisions.length,
+      stale_ready_reconciled: staleReadyReconcile,
       skipped: plan.skipped.length,
       zero_ticks: stall.zero_ticks,
       stall_alert: stall.alert,

@@ -6,6 +6,8 @@
 
 import crypto from "node:crypto";
 import type { DbAdapter } from "../db/db-adapter.js";
+import { DEFAULT_RECOVERY_CONFIG } from "../dispatch-recovery/classifier.js";
+import { promotionCompletedAndVerified } from "../dispatch-scheduler/read-model.js";
 import { normalizeRuntime, resolveProviderFromRuntime } from "../dispatch-scheduler/types.js";
 import type {
   BacklogItem,
@@ -735,12 +737,18 @@ export async function reconcileStaleAlreadyDispatchedReadyRows(
       dispatch_status: string | null;
       dispatch_recovery_status: string | null;
       artifact_path: string | null;
+      failure_kind: string | null;
+      failure_detail: string | null;
+      promotion_result_json: string | null;
     }
   >(
     `SELECT i.*,
             q.status AS dispatch_status,
             q.recovery_status AS dispatch_recovery_status,
-            q.artifact_path AS artifact_path
+            q.artifact_path AS artifact_path,
+            q.failure_kind AS failure_kind,
+            q.failure_detail AS failure_detail,
+            q.promotion_result_json AS promotion_result_json
        FROM orchestration_backlog_item i
        LEFT JOIN dispatch_scheduler_queue q
          ON q.dispatch_phid = i.last_dispatch_phid
@@ -768,8 +776,12 @@ export async function reconcileStaleAlreadyDispatchedReadyRows(
 
     const status = row.dispatch_recovery_status === "moot" ? "moot" : row.dispatch_status;
     if (!status || !READY_RECONCILE_TERMINAL_STATUSES.has(status)) continue;
+    if (status === "failed" && !promotionCompletedAndVerified(row.promotion_result_json) && dispatchFailureRetryable(row)) {
+      continue;
+    }
 
-    const toState: "done" | "superseded" = status === "done" ? "done" : "superseded";
+    const toState: "done" | "superseded" =
+      status === "done" || promotionCompletedAndVerified(row.promotion_result_json) ? "done" : "superseded";
     const reason =
       toState === "done"
         ? `already-dispatched ready row closed after terminal dispatch ${status}`
@@ -833,6 +845,12 @@ export async function reconcileStaleAlreadyDispatchedReadyRows(
   }
 
   return result;
+}
+
+function dispatchFailureRetryable(outcome: { failure_kind: string | null; failure_detail: string | null }): boolean {
+  if (outcome.failure_kind === "scheduler_wedged") return true;
+  const detail = (outcome.failure_detail ?? "").toLowerCase();
+  return DEFAULT_RECOVERY_CONFIG.retryable_detail_markers.some((marker) => detail.includes(marker.toLowerCase()));
 }
 
 /**

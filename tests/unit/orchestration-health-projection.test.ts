@@ -451,6 +451,51 @@ describe("orchestration health projection", () => {
     expect(after.ready_item_blockers.actionable).toBe(0);
   });
 
+  it("preserves retryable failed duplicate ready rows for explicit operator retry", async () => {
+    await setMode(adapter, "default", "running");
+    const duplicate = await insertBacklogItem(adapter, {
+      title: "retryable failed duplicate",
+      track: "T-ORCH",
+      readiness_state: "ready",
+      risk_class: "build",
+      to_agent: "roger",
+      dispatch_body: "continue",
+    });
+    await setItemState(adapter, duplicate.item_id, "ready", { dispatch_phid: "phid:disp-retryable-failed" });
+    await insertDispatch({
+      dispatch_phid: "phid:disp-retryable-failed",
+      status: "failed",
+      failure_kind: "scheduler_wedged",
+      failure_detail: "scheduler wedged during dispatch handoff",
+    });
+
+    const closeout = await reconcileStaleAlreadyDispatchedReadyRows(adapter, {
+      team_id: "default",
+      actor: "hopper",
+    });
+
+    expect(closeout).toMatchObject({
+      scanned: 1,
+      closed: 0,
+      superseded: 0,
+      items: [],
+    });
+    const preserved = await getBacklogItem(adapter, duplicate.item_id);
+    expect(preserved?.readiness_state).toBe("ready");
+
+    const health = await readOrchestrationHealthProjection(adapter, "default");
+    expect(health.ready_item_blockers.items).toEqual([
+      expect.objectContaining({
+        item_id: duplicate.item_id,
+        code: "duplicate_dispatch_retry_required",
+        prior_dispatch_status: "failed",
+        retry_safe_recommendation: "set_true",
+        operator_disposition: "retry",
+        recommended_disposition: "mark-retry-safe",
+      }),
+    ]);
+  });
+
   it("counts active needs_clarification blockers, recent ids, and backlog dependency impact", async () => {
     const owner = await insertBacklogItem(adapter, {
       title: "land upstream change",
@@ -1392,6 +1437,8 @@ async function insertDispatch(overrides: Partial<{
   recovery_status: string;
   updated_at: string;
   completed_at: string | null;
+  failure_kind: string | null;
+  failure_detail: string | null;
   active_clarification_json: string | null;
   promotion_input_json: string | null;
   promotion_result_json: string | null;
@@ -1402,8 +1449,9 @@ async function insertDispatch(overrides: Partial<{
     `INSERT INTO dispatch_scheduler_queue (
        dispatch_phid, team_id, query_id, to_agent, from_actor, channel, subject, body_markdown,
        provider, runtime, priority, status, not_before_at, updated_at, completed_at,
-       recovery_status, active_clarification_json, promote, promotion_input_json, promotion_result_json
-     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       recovery_status, failure_kind, failure_detail, active_clarification_json,
+       promote, promotion_input_json, promotion_result_json
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       dispatchPhid,
       "default",
@@ -1421,6 +1469,8 @@ async function insertDispatch(overrides: Partial<{
       updatedAt,
       overrides.completed_at ?? null,
       overrides.recovery_status ?? "none",
+      overrides.failure_kind ?? null,
+      overrides.failure_detail ?? null,
       overrides.active_clarification_json ?? null,
       1,
       overrides.promotion_input_json ?? null,

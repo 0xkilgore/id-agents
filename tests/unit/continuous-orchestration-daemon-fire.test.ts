@@ -6,7 +6,7 @@ import { describe, expect, it } from "vitest";
 import { ContinuousOrchestrationDaemon, type DaemonDeps } from "../../src/continuous-orchestration/daemon.js";
 import { SqliteAdapter } from "../../src/db/sqlite-adapter.js";
 import { migrateSqlite } from "../../src/db/migrations/sqlite.js";
-import { insertBacklogItem, getBacklogItem, setMode } from "../../src/continuous-orchestration/storage.js";
+import { insertBacklogItem, getBacklogItem, setItemState, setMode } from "../../src/continuous-orchestration/storage.js";
 import { defaultConfig } from "../../src/continuous-orchestration/config.js";
 import type { BacklogItem } from "../../src/continuous-orchestration/types.js";
 
@@ -217,6 +217,96 @@ describe("RD-003 — atomic CO fire", () => {
     const finalItem = await getBacklogItem(real, seeded.item_id);
     expect(finalItem?.readiness_state).toBe("in_flight");
     expect(finalItem?.last_dispatch_phid).toBe(`phid:disp-rd003-fire-key`);
+  });
+
+  it("reconciles terminal stale ready rows before admission without weakening retry-safe failed rows", async () => {
+    const adapter = new SqliteAdapter(":memory:");
+    await migrateSqlite(adapter);
+    await setMode(adapter, "default", "running");
+
+    await seedDispatchStatus(adapter, "phid:disp-already-done", "done");
+    const staleDone = await insertBacklogItem(adapter, {
+      team_id: "default",
+      title: "already completed duplicate",
+      to_agent: "roger",
+      dispatch_body: "duplicate",
+      readiness_state: "ready",
+      risk_class: "build",
+      write_scope: ["repo/stale-done"],
+    });
+    await setItemState(adapter, staleDone.item_id, "ready", { dispatch_phid: "phid:disp-already-done" });
+
+    await seedDispatchStatus(adapter, "phid:disp-retryable-failed", "failed");
+    await adapter.query(
+      `UPDATE dispatch_scheduler_queue
+          SET failure_kind = $1,
+              failure_detail = $2
+        WHERE dispatch_phid = $3`,
+      ["scheduler_wedged", "transient scheduler wedge", "phid:disp-retryable-failed"],
+    );
+    const retryableFailed = await insertBacklogItem(adapter, {
+      team_id: "default",
+      title: "retryable failed duplicate",
+      to_agent: "roger",
+      dispatch_body: "retry only after operator approval",
+      readiness_state: "ready",
+      risk_class: "build",
+      write_scope: ["repo/retryable-failed"],
+    });
+    await setItemState(adapter, retryableFailed.item_id, "ready", { dispatch_phid: "phid:disp-retryable-failed" });
+
+    const fresh = await insertBacklogItem(adapter, {
+      team_id: "default",
+      logical_key: "fresh-after-stale-reconcile",
+      title: "fresh admissible work",
+      to_agent: "roger",
+      dispatch_body: "do fresh work",
+      readiness_state: "ready",
+      risk_class: "build",
+      write_scope: ["repo/fresh"],
+    });
+
+    const daemon = new ContinuousOrchestrationDaemon({
+      adapter,
+      config: config(),
+      enqueue: async (item) => ({ dispatch_phid: `phid:disp-${item.item_id}`, query_id: `q-${item.item_id}` }),
+      readUsage: usage,
+      readInFlight: noInFlight,
+    });
+
+    const result = await daemon.runTick();
+
+    expect(result.stale_ready_reconciled).toMatchObject({
+      closed: 1,
+      superseded: 0,
+      preserved_retry_safe: 0,
+      dry_run: false,
+      items: [
+        {
+          item_id: staleDone.item_id,
+          dispatch_phid: "phid:disp-already-done",
+          to_state: "done",
+        },
+      ],
+    });
+    expect(result.admitted.map((item) => item.item_id)).toEqual([fresh.item_id]);
+    expect(result.decisions).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          item_id: staleDone.item_id,
+          action: "stale_ready_reconcile",
+          dispatch_phid: "phid:disp-already-done",
+        }),
+        expect.objectContaining({
+          item_id: retryableFailed.item_id,
+          action: "held",
+          metadata: expect.objectContaining({ code: "duplicate_dispatch_retry_required" }),
+        }),
+      ]),
+    );
+    expect((await getBacklogItem(adapter, staleDone.item_id))?.readiness_state).toBe("done");
+    expect((await getBacklogItem(adapter, retryableFailed.item_id))?.readiness_state).toBe("ready");
+    expect((await getBacklogItem(adapter, fresh.item_id))?.readiness_state).toBe("in_flight");
   });
 });
 
