@@ -318,6 +318,13 @@ const CAPACITY_OR_LANE_REASONS = new Set([
   "tick_admission_cap",
 ]);
 
+const CAPACITY_ONLY_REASONS = new Set([
+  "pool_capacity_full",
+  "no_free_pool_builder",
+  "no_in_flight_slots",
+  "tick_admission_cap",
+]);
+
 interface OrchestrationLoopStateRow {
   mode: string;
   consecutive_zero_ticks: number | null;
@@ -646,7 +653,11 @@ function staleReadyFuelProjection(input: {
   readyAdmission?: OrchestrationHealthProjectionOptions["readyAdmission"];
 }): OrchestrationReadyItemBlockerProjection["stale_ready_fuel"] {
   const belowActionableFloor = input.actionable < input.minReadyFuel;
-  const zeroAdmissible = input.admissibleNow === 0 && input.ready > 0;
+  const capacityOnlyZeroAdmissible =
+    input.admissibleNow === 0 &&
+    input.ready > 0 &&
+    allReadyAdmissionBlockersIn(input.readyAdmission, CAPACITY_ONLY_REASONS);
+  const zeroAdmissible = input.admissibleNow === 0 && input.ready > 0 && !capacityOnlyZeroAdmissible;
   const active = input.ready > 0 && (belowActionableFloor || zeroAdmissible);
   const counts = staleReadyFuelCounts(input);
   const examples = uniqueStrings(counts.flatMap((count) => count.examples)).slice(0, 5);
@@ -668,6 +679,14 @@ function staleReadyFuelProjection(input: {
     counts_by_blocker_class: counts,
     examples,
   };
+}
+
+function allReadyAdmissionBlockersIn(
+  readyAdmission: OrchestrationHealthProjectionOptions["readyAdmission"] | undefined,
+  allowedCodes: Set<string>,
+): boolean {
+  const blockers = readyAdmission?.blockerCounts.filter((count) => count.count > 0) ?? [];
+  return blockers.length > 0 && blockers.every((count) => allowedCodes.has(count.code));
 }
 
 function staleReadyFuelCounts(input: {

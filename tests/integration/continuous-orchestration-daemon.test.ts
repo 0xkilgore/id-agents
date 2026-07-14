@@ -1861,12 +1861,13 @@ describe("daemon — dry-run vs live", () => {
       actionable: 2,
       min_ready_fuel: 2,
       admissible_now: 0,
-      stale_ready_floor: true,
+      stale_ready_floor: false,
       categories: [],
       stale_ready_fuel: {
-        active: true,
+        active: false,
         owner_lane: "orchestration",
-        reason: "admissible_now=0",
+        recommended_action: "none",
+        reason: null,
         counts_by_blocker_class: [
           {
             code: "no_in_flight_slots",
