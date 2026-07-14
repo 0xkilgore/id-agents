@@ -57,6 +57,8 @@ export interface AdmissionContext {
   target_agent_runtimes?: Map<string, string> | null;
   /** Active clarification/promotion blockers keyed by ready backlog item_id. */
   ready_item_blockers?: Map<string, { code: "clarification_blocker" | "promotion_blocker"; reason: string; metadata?: Record<string, unknown> }> | null;
+  /** Active scheduler dispatches keyed by the dedup key this item would enqueue with. */
+  active_dispatch_by_dedup_key?: Map<string, { dispatch_phid: string; status: string }> | null;
 }
 
 export interface AdmissionPlan {
@@ -124,6 +126,10 @@ function nonAdmission(
   extra: Record<string, unknown> = {},
 ): DecisionRecord {
   return { item_id, action, reason, metadata: { code, class: reasonClass(code), ...extra } };
+}
+
+export function dedupKeyForBacklogItem(item: Pick<BacklogItem, "item_id" | "logical_key">): string {
+  return item.logical_key ?? `orchestration-item:${item.item_id}`;
 }
 
 function providerRuntimeMismatch(
@@ -228,6 +234,21 @@ export function planAdmission(
         activeBlocker.code,
         activeBlocker.reason,
         activeBlocker.metadata ?? {},
+      ));
+      continue;
+    }
+    const activeDispatch = ctx.active_dispatch_by_dedup_key?.get(dedupKeyForBacklogItem(item));
+    if (activeDispatch) {
+      skipped.push(nonAdmission(
+        item.item_id,
+        "held",
+        "duplicate_dispatch_guard",
+        `active dispatch already exists for backlog item (${activeDispatch.dispatch_phid}, status=${activeDispatch.status}); recovery must complete before refire`,
+        {
+          dispatch_phid: activeDispatch.dispatch_phid,
+          dispatch_status: activeDispatch.status,
+          dedup_key: dedupKeyForBacklogItem(item),
+        },
       ));
       continue;
     }

@@ -16,11 +16,18 @@ import type { ContinuousOrchestrationConfig } from "./config.js";
 import type { BacklogItem, DecisionRecord, OrchestrationMode, ReadinessState, UsageGateView } from "./types.js";
 import { fairInterleaveByLane, laneKeyOf, needsRefuel, orderCandidates } from "./selection.js";
 import { tickAdmitLimit } from "./cadence.js";
-import { planAdmission, evaluateStall, shouldRunZeroAdmitStallWatchdog, type AdmissionContext } from "./admission.js";
+import {
+  dedupKeyForBacklogItem,
+  planAdmission,
+  evaluateStall,
+  shouldRunZeroAdmitStallWatchdog,
+  type AdmissionContext,
+} from "./admission.js";
 import { computeNextDelay, tickWriteCaps } from "./backpressure.js";
 import {
   appendDecisions,
   bindItemForFire,
+  getActiveDispatchesByDedupKey,
   getOrchestrationState,
   listBacklogByState,
   listDoneItemIds,
@@ -398,6 +405,10 @@ export class ContinuousOrchestrationDaemon {
       : undefined;
     const pool_lane_blockers = poolGate ? this.applyPoolHealthGate(poolGate, healthy_agents) : undefined;
     const ready_item_blockers = await this.readyItemBlockers();
+    const active_dispatch_by_dedup_key = await getActiveDispatchesByDedupKey(
+      this.deps.adapter,
+      ordered.map(dedupKeyForBacklogItem),
+    );
 
     const ctx: AdmissionContext = {
       mode: state.mode,
@@ -415,6 +426,7 @@ export class ContinuousOrchestrationDaemon {
       healthy_agents,
       target_agent_runtimes,
       ready_item_blockers,
+      active_dispatch_by_dedup_key,
     };
 
     const plan = planAdmission(ordered, ctx, config);
@@ -681,6 +693,10 @@ export class ContinuousOrchestrationDaemon {
       ? await this.deps.resolveAgentRuntimes([...candidateAgentNames])
       : undefined;
     const ready_item_blockers = await this.readyItemBlockers();
+    const active_dispatch_by_dedup_key = await getActiveDispatchesByDedupKey(
+      this.deps.adapter,
+      ordered.map(dedupKeyForBacklogItem),
+    );
 
     const writeCfg = {
       maxEnqueuesPerTick: config.max_enqueues_per_tick,
@@ -702,6 +718,7 @@ export class ContinuousOrchestrationDaemon {
       healthy_agents,
       target_agent_runtimes,
       ready_item_blockers,
+      active_dispatch_by_dedup_key,
     };
 
     const plan = planAdmission(ordered, ctx, config);

@@ -10,6 +10,7 @@ import type { EnqueueInputV2 } from "../dispatch-scheduler/manager-integration.j
 import type { Provider, Runtime } from "../dispatch-scheduler/types.js";
 import type { DaemonUsageReport, UsageReportV2 } from "../usage-meter/types.js";
 import { ContinuousOrchestrationDaemon } from "./daemon.js";
+import { dedupKeyForBacklogItem } from "./admission.js";
 import { loadContinuousOrchestrationConfig, type ContinuousOrchestrationConfig } from "./config.js";
 import { getAgentRuntimeMap, getDispatchStatusesByPhid, getHealthyAgentNames, listBacklogByState } from "./storage.js";
 import type { BacklogItem } from "./types.js";
@@ -74,7 +75,7 @@ export function createContinuousOrchestrationDaemon(opts: BuildDaemonOptions): {
           label: "Continuous Orchestration",
           source: "manager",
         },
-        dedup_key: item.logical_key ?? `orchestration-item:${item.item_id}`,
+        dedup_key: dedupKeyForBacklogItem(item),
       };
       if (item.provider) input.provider = item.provider as Provider;
       if (item.runtime) input.runtime = item.runtime as Runtime;

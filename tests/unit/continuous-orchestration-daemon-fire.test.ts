@@ -24,10 +24,10 @@ function config() {
 
 /** A pool routing seam that always routes to a one-builder backend pool and hands
  *  out a distinct worktree — enough to exercise the bind→enqueue→persist path. */
-function fakePools(): NonNullable<DaemonDeps["pools"]> {
+function fakePools(builders: string[] = ["roger"]): NonNullable<DaemonDeps["pools"]> {
   return {
-    poolForItem: () => ({ pool_id: "backend", repo_root: "/repo", max_parallel: 3, members: ["roger"] }),
-    availableBuilders: () => ["roger"],
+    poolForItem: () => ({ pool_id: "backend", repo_root: "/repo", max_parallel: 3, members: ["roger", "regina"] }),
+    availableBuilders: () => [...builders],
     allocateWorktree: async () => ({ path: "/repo/.worktrees/wt1", branch: "b1", lease_id: null }),
   };
 }
@@ -51,6 +51,57 @@ async function seedReadyItem(adapter: SqliteAdapter): Promise<BacklogItem> {
     risk_class: "build",
     write_scope: ["/repo/orig"], // ORIGINAL write_scope
   });
+}
+
+async function insertActiveDispatch(adapter: SqliteAdapter, dedupKey: string): Promise<void> {
+  const now = new Date().toISOString();
+  await adapter.query(
+    `INSERT INTO dispatch_scheduler_queue (
+       dispatch_phid, team_id, query_id, to_agent, from_actor, channel,
+       subject, body_markdown, provider, runtime, priority, status,
+       not_before_at, attempt_count, bounce_count, last_bounce_json,
+       bounce_history_json, started_at, completed_at, updated_at,
+       agent_query_id, usage_policy_snapshot_json, failure_kind,
+       failure_detail, target_url, result_json, artifact_path,
+       recovery_status, recovery_attempts, recovery_reason, side_effect,
+       allow_auto_retry, dedup_key
+     ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+    [
+      `phid:disp-${dedupKey}`,
+      "team-default",
+      `q-${dedupKey}`,
+      "roger",
+      "continuous-orchestration",
+      "dispatch",
+      "T-ORCH backend build",
+      "do the backend work",
+      "openai",
+      "codex",
+      5,
+      "queued",
+      now,
+      0,
+      0,
+      null,
+      "[]",
+      null,
+      null,
+      now,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      "none",
+      0,
+      null,
+      "none",
+      0,
+      dedupKey,
+    ],
+  );
 }
 
 describe("RD-003 — atomic CO fire", () => {
@@ -80,7 +131,7 @@ describe("RD-003 — atomic CO fire", () => {
     expect(after?.write_scope).toEqual(["/repo/orig"]);
   });
 
-  it("mode (b): enqueue resolves but setItemState crashes → next tick does NOT double-fire (single dispatch per dedup_key)", async () => {
+  it("mode (b): enqueue resolves but setItemState crashes → next tick is held, not re-fired to an alternate pool builder", async () => {
     const real = new SqliteAdapter(":memory:");
     await migrateSqlite(real);
     const seeded = await seedReadyItem(real);
@@ -103,17 +154,12 @@ describe("RD-003 — atomic CO fire", () => {
       },
     }) as unknown as SqliteAdapter;
 
-    // Idempotent mock scheduler: one dispatch per dedup_key (mirrors the real
-    // dedup_key convention). A re-fire of the same item returns the SAME dispatch.
-    const byDedup = new Map<string, { dispatch_phid: string; query_id: string }>();
     let enqueueCalls = 0;
     const enqueue = async (item: BacklogItem) => {
       enqueueCalls += 1;
       const dedup = item.logical_key ?? `orchestration-item:${item.item_id}`;
-      const existing = byDedup.get(dedup);
-      if (existing) return existing;
       const res = { dispatch_phid: `phid:disp-${dedup}`, query_id: `q-${dedup}` };
-      byDedup.set(dedup, res);
+      await insertActiveDispatch(real, dedup);
       return res;
     };
 
@@ -123,22 +169,32 @@ describe("RD-003 — atomic CO fire", () => {
       enqueue,
       readUsage: usage,
       readInFlight: noInFlight,
-      pools: fakePools(),
+      pools: fakePools(["regina"]),
     };
     const daemon = new ContinuousOrchestrationDaemon(deps);
 
     // Tick 1: enqueue succeeds, setItemState crashes → item stays 'ready'.
     await daemon.runTick();
-    expect(byDedup.size).toBe(1); // one dispatch created
+    expect(enqueueCalls).toBe(1);
     expect((await getBacklogItem(real, seeded.item_id))?.readiness_state).toBe("ready");
 
-    // Tick 2: item re-admitted, re-fired with the SAME dedup_key → the idempotent
-    // scheduler returns the SAME dispatch (no second), and the persist now succeeds.
-    await daemon.runTick();
-    expect(byDedup.size).toBe(1); // STILL one dispatch — no double-fire
-    expect(enqueueCalls).toBeGreaterThanOrEqual(2); // fired twice, but deduped to one
+    // Tick 2: the ready row could route to another pool builder, but admission
+    // sees the active scheduler dispatch for its dedup key and refuses to fire.
+    const second = await daemon.runTick();
+    expect(enqueueCalls).toBe(1);
     const finalItem = await getBacklogItem(real, seeded.item_id);
-    expect(finalItem?.readiness_state).toBe("in_flight");
-    expect(finalItem?.last_dispatch_phid).toBe(`phid:disp-rd003-fire-key`);
+    expect(finalItem?.readiness_state).toBe("ready");
+    expect(finalItem?.last_dispatch_phid).toBeNull();
+    expect(second.decisions).toContainEqual(
+      expect.objectContaining({
+        item_id: seeded.item_id,
+        action: "held",
+        metadata: expect.objectContaining({
+          code: "duplicate_dispatch_guard",
+          dispatch_phid: "phid:disp-rd003-fire-key",
+          dedup_key: "rd003-fire-key",
+        }),
+      }),
+    );
   });
 });

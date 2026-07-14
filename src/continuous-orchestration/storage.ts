@@ -492,6 +492,29 @@ export async function getDispatchStatusesByPhid(
   return out;
 }
 
+export async function getActiveDispatchesByDedupKey(
+  adapter: DbAdapter,
+  dedupKeys: string[],
+): Promise<Map<string, { dispatch_phid: string; status: string }>> {
+  const out = new Map<string, { dispatch_phid: string; status: string }>();
+  const unique = [...new Set(dedupKeys.filter((k): k is string => !!k))];
+  if (unique.length === 0) return out;
+  const placeholders = unique.map((_, i) => `$${i + 1}`).join(",");
+  const { rows } = await adapter.query<{ dedup_key: string; dispatch_phid: string; status: string }>(
+    `SELECT dedup_key, dispatch_phid, status
+       FROM dispatch_scheduler_queue
+      WHERE dedup_key IN (${placeholders})
+        AND status IN ('queued','in_flight','bounced','needs_clarification','resume_delivery_failed')
+        AND COALESCE(recovery_status, 'none') NOT IN ('moot', 'landed_reconciled', 'verified_done', 'retry_done')
+      ORDER BY updated_at ASC, dispatch_phid ASC`,
+    unique,
+  );
+  for (const row of rows) {
+    if (!out.has(row.dedup_key)) out.set(row.dedup_key, { dispatch_phid: row.dispatch_phid, status: row.status });
+  }
+  return out;
+}
+
 /**
  * RD-014: which of `names` are currently a healthy/running agent. No team
  * filter, by name only — mirrors getDispatchStatusesByPhid's "phid-only, no

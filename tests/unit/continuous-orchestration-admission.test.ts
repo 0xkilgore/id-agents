@@ -279,6 +279,36 @@ describe("planAdmission — per-item guardrails", () => {
     });
   });
 
+  it("holds a ready row with an active scheduler dispatch before pool routing can refire it", () => {
+    const duplicate = item({ item_id: "pool-duplicate", logical_key: "coitem/shared" });
+    const unrelated = item({ item_id: "pool-next", logical_key: "coitem/next" });
+    const p = planAdmission(
+      [duplicate, unrelated],
+      ctx({
+        admit_limit: 5,
+        pool_for: () => "backend",
+        pool_free_slots: new Map([["backend", 1]]),
+        pool_free_builders: new Map([["backend", ["regina"]]]),
+        active_dispatch_by_dedup_key: new Map([
+          ["coitem/shared", { dispatch_phid: "phid:disp-active", status: "in_flight" }],
+        ]),
+      }),
+      cfg,
+    );
+
+    expect(p.admit.map((i) => i.item_id)).toEqual(["pool-next"]);
+    expect(p.assignments["pool-next"]).toBe("regina");
+    expect(p.skipped[0]).toMatchObject({
+      item_id: "pool-duplicate",
+      action: "held",
+      metadata: expect.objectContaining({
+        code: "duplicate_dispatch_guard",
+        dispatch_phid: "phid:disp-active",
+        dedup_key: "coitem/shared",
+      }),
+    });
+  });
+
   it("holds a manually promoted needs_clarification row with last_dispatch_phid", () => {
     const p = planAdmission(
       [item({ item_id: "manual-clarification", last_dispatch_phid: "phid:disp-needs-clarification" })],
