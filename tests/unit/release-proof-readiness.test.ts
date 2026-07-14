@@ -159,6 +159,40 @@ describe("buildReleaseProofReadiness", () => {
     ]);
   });
 
+  it("keeps stale missing-source feedback as the blocker even when infra is clear", () => {
+    const view = buildReleaseProofReadiness(base({
+      feedback_evidence: [
+        {
+          id: "op:stale-missing-source",
+          kind: "comment_recorded",
+          observed_at: "2026-07-12T10:00:00.000Z",
+          source_link: null,
+          artifact_id: "art-kapelle",
+          summary: "Old feedback without durable source.",
+        },
+      ],
+      stale_after_ms: 24 * 60 * 60 * 1000,
+    }));
+
+    expect(view.release_readiness).toBe("not_ready");
+    expect(view.chris_readable_release_ready).toBe("NOT READY");
+    expect(view.feedback_evidence).toMatchObject({
+      state: "stale",
+      count: 1,
+      stale_after_ms: 24 * 60 * 60 * 1000,
+    });
+    expect(view.infra_warnings).toMatchObject({
+      state: "clear",
+      count: 0,
+      items: [],
+    });
+    expect(view.sources.state).toBe("present");
+    expect(view.generated_artifacts.state).toBe("present");
+    expect(view.stale_reasons).toEqual(["latest feedback evidence is older than 24h"]);
+    expect(view.missing_reasons).toEqual(["one or more feedback evidence items are missing source links"]);
+    expect(view.summary).toContain("latest feedback evidence is older than 24h");
+  });
+
   it("keeps missing-source feedback as a deterministic blocker when artifact and backlog sources exist", async () => {
     const adapter = new SqliteAdapter(":memory:");
     try {
