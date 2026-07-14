@@ -102,19 +102,30 @@ export function buildReleaseProofReadiness(
   if (artifactPointers.length === 0) {
     missingReasons.push("no generated release proof artifacts are registered");
   }
-  const missingArtifactSources = artifactPointers.filter((item) => !item.source_link && !item.path);
+  const missingArtifactSources = artifactPointers.filter((item) => !isSafeSourceToken(item.source_link));
   if (missingArtifactSources.length > 0) {
-    missingReasons.push("one or more generated artifacts are missing source links or file paths");
+    missingReasons.push("one or more generated artifacts are missing safe source links");
+  }
+  const staleArtifacts = artifactPointers.filter((item) =>
+    Number.isFinite(Date.parse(item.produced_at)) &&
+    Date.parse(input.generated_at) - Date.parse(item.produced_at) > staleAfterMs
+  );
+  if (staleArtifacts.length > 0) {
+    staleReasons.push(`one or more generated artifacts are older than ${Math.round(staleAfterMs / 3_600_000)}h`);
   }
 
+  const invalidSourceLinks = input.source_links.filter((item) => !isSafeSourceHref(item.href));
+  if (invalidSourceLinks.length > 0) {
+    missingReasons.push("one or more source links are redacted or unsupported");
+  }
   const sourceLinks = dedupeSourceLinks(input.source_links);
   if (sourceLinks.length === 0) {
     missingReasons.push("no source links are attached to the release proof");
   }
 
-  const feedbackMissingSources = input.feedback_evidence.filter((item) => !item.source_link);
+  const feedbackMissingSources = input.feedback_evidence.filter((item) => !isSafeSourceHref(item.source_link));
   if (feedbackMissingSources.length > 0) {
-    missingReasons.push("one or more feedback evidence items are missing source links");
+    missingReasons.push("one or more feedback evidence items are missing safe source links");
   }
 
   const infraState: InfraWarningState = input.load_error
@@ -205,10 +216,14 @@ export async function readReleaseProofReadiness(
       source_links: [
         ...backlogSources,
         ...feedback.flatMap((item) =>
-          item.source_link ? [{ label: `feedback:${item.id}`, href: item.source_link, source: "feedback" as const }] : [],
+          isSafeSourceHref(item.source_link)
+            ? [{ label: `feedback:${item.id}`, href: item.source_link, source: "feedback" as const }]
+            : [],
         ),
         ...artifacts.flatMap((item) =>
-          item.source_link ? [{ label: `artifact:${item.artifact_id}`, href: item.source_link, source: "artifact" as const }] : [],
+          isSafeSourceHref(item.source_link)
+            ? [{ label: `artifact:${item.artifact_id}`, href: item.source_link, source: "artifact" as const }]
+            : [],
         ),
       ],
       generated_artifacts: artifacts,
@@ -340,11 +355,38 @@ function dedupeSourceLinks(links: ReleaseProofSourceLink[]): ReleaseProofSourceL
   const out: ReleaseProofSourceLink[] = [];
   for (const link of links) {
     const href = link.href.trim();
-    if (!href || seen.has(href)) continue;
+    if (!isSafeSourceHref(href) || seen.has(href)) continue;
     seen.add(href);
     out.push({ ...link, href });
   }
   return out;
+}
+
+function isSafeSourceHref(value: string | null | undefined): value is string {
+  if (!value) return false;
+  const href = value.trim();
+  if (!href || isRedactedSource(href) || isLocalPathExposure(href)) return false;
+  if (href.startsWith("manager:/") || href.startsWith("/") || href.startsWith("http://") || href.startsWith("https://")) {
+    return true;
+  }
+  return false;
+}
+
+function isSafeSourceToken(value: string | null | undefined): value is string {
+  if (!value) return false;
+  const source = value.trim();
+  if (!source || isRedactedSource(source) || isLocalPathExposure(source)) return false;
+  if (isSafeSourceHref(source)) return true;
+  return /^[a-z][a-z0-9_-]*(?::[a-z0-9._/-]+)?$/i.test(source);
+}
+
+function isRedactedSource(value: string): boolean {
+  return /^\[?redacted\]?$/i.test(value.trim()) || value.includes("<redacted>");
+}
+
+function isLocalPathExposure(value: string): boolean {
+  const source = value.trim();
+  return source.startsWith("file://") || source.startsWith("/Users/") || source.startsWith("/home/") || source.startsWith("/tmp/");
 }
 
 function parseStringArray(json: string | null): string[] {
@@ -380,7 +422,7 @@ function summaryForNotReady(input: {
 }): string {
   if (input.errorReasons.length > 0) return `Release proof is not ready: ${input.errorReasons[0]}.`;
   if (input.infraState !== "clear") return "Release proof is not ready: infra warnings require operator review.";
-  if (input.feedbackState === "stale") return `Release proof is not ready: ${input.staleReasons[0]}.`;
+  if (input.staleReasons.length > 0) return `Release proof is not ready: ${input.staleReasons[0]}.`;
   if (input.missingReasons.length > 0) return `Release proof is not ready: ${input.missingReasons[0]}.`;
   return "Release proof is not ready.";
 }

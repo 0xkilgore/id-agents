@@ -153,10 +153,97 @@ describe("buildReleaseProofReadiness", () => {
     expect(view.generated_artifacts.state).toBe("missing");
     expect(view.sources.state).toBe("missing");
     expect(view.missing_reasons).toEqual([
-      "one or more generated artifacts are missing source links or file paths",
+      "one or more generated artifacts are missing safe source links",
       "no source links are attached to the release proof",
-      "one or more feedback evidence items are missing source links",
+      "one or more feedback evidence items are missing safe source links",
     ]);
+  });
+
+  it("does not treat a local generated body as a source link when artifact source is missing", () => {
+    const view = buildReleaseProofReadiness(base({
+      generated_artifacts: [
+        {
+          artifact_id: "art-local-body-only",
+          path: "/tmp/output/kapelle-release-proof.md",
+          title: "Kapelle release proof",
+          produced_at: "2026-07-13T11:45:00.000Z",
+          source_link: null,
+          availability: "present",
+        },
+      ],
+    }));
+
+    expect(view.release_readiness).toBe("not_ready");
+    expect(view.generated_artifacts.state).toBe("missing");
+    expect(view.missing_reasons).toEqual(["one or more generated artifacts are missing safe source links"]);
+    expect(view.sources.links).not.toEqual(
+      expect.arrayContaining([expect.objectContaining({ href: "/tmp/output/kapelle-release-proof.md" })]),
+    );
+  });
+
+  it("blocks redacted feedback sources and does not expose the redacted href", () => {
+    const view = buildReleaseProofReadiness(base({
+      feedback_evidence: [
+        {
+          id: "op:redacted-source",
+          kind: "comment_recorded",
+          observed_at: "2026-07-13T11:30:00.000Z",
+          source_link: "[redacted]",
+          artifact_id: "art-kapelle",
+          summary: "Feedback with redacted source.",
+        },
+      ],
+    }));
+
+    expect(view.release_readiness).toBe("not_ready");
+    expect(view.missing_reasons).toEqual(["one or more feedback evidence items are missing safe source links"]);
+    expect(view.sources.links).not.toEqual(
+      expect.arrayContaining([expect.objectContaining({ href: "[redacted]" })]),
+    );
+  });
+
+  it("blocks unsupported source hrefs and omits them from exposed sources", () => {
+    const view = buildReleaseProofReadiness(base({
+      source_links: [
+        {
+          label: "unsafe-local-file",
+          href: "file:///Users/kilgore/Dropbox/Code/roger/output/kapelle-release-proof.md",
+          source: "backlog",
+        },
+        {
+          label: "unsafe-js",
+          href: "javascript:alert(1)",
+          source: "feedback",
+        },
+      ],
+    }));
+
+    expect(view.release_readiness).toBe("not_ready");
+    expect(view.sources).toEqual({ state: "missing", links: [] });
+    expect(view.missing_reasons).toEqual([
+      "one or more source links are redacted or unsupported",
+      "no source links are attached to the release proof",
+    ]);
+  });
+
+  it("blocks stale generated artifacts without reporting false release success", () => {
+    const view = buildReleaseProofReadiness(base({
+      generated_artifacts: [
+        {
+          artifact_id: "art-stale-generated",
+          path: "/tmp/output/kapelle-release-proof.md",
+          title: "Kapelle release proof",
+          produced_at: "2026-07-13T09:00:00.000Z",
+          source_link: "delivery-log",
+          availability: "present",
+        },
+      ],
+    }));
+
+    expect(view.release_readiness).toBe("not_ready");
+    expect(view.generated_artifacts.state).toBe("present");
+    expect(view.stale_reasons).toEqual(["one or more generated artifacts are older than 1h"]);
+    expect(view.summary).toContain("one or more generated artifacts are older than 1h");
   });
 
   it("keeps stale missing-source feedback as the blocker even when infra is clear", () => {
@@ -189,7 +276,7 @@ describe("buildReleaseProofReadiness", () => {
     expect(view.sources.state).toBe("present");
     expect(view.generated_artifacts.state).toBe("present");
     expect(view.stale_reasons).toEqual(["latest feedback evidence is older than 24h"]);
-    expect(view.missing_reasons).toEqual(["one or more feedback evidence items are missing source links"]);
+    expect(view.missing_reasons).toEqual(["one or more feedback evidence items are missing safe source links"]);
     expect(view.summary).toContain("latest feedback evidence is older than 24h");
   });
 
@@ -281,9 +368,9 @@ describe("buildReleaseProofReadiness", () => {
           expect.objectContaining({ source: "backlog", href: "manager:/backlog/backlog-kapelle-proof" }),
         ]),
       });
-      expect(view.missing_reasons).toEqual(["one or more feedback evidence items are missing source links"]);
+      expect(view.missing_reasons).toEqual(["one or more feedback evidence items are missing safe source links"]);
       expect(view.summary).toBe(
-        "Release proof is not ready: one or more feedback evidence items are missing source links.",
+        "Release proof is not ready: one or more feedback evidence items are missing safe source links.",
       );
     } finally {
       await adapter.close();
