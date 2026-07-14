@@ -494,15 +494,20 @@ describe("orchestration health projection", () => {
 
     const health = await readOrchestrationHealthProjection(adapter, "default");
 
+    const itemIds = health.blockers.needs_clarification.items.map((item) => item.dispatch_phid);
     expect(health.blockers.needs_clarification.count).toBe(2);
     expect(health.blockers.needs_clarification.recent_dispatch_ids).toEqual([
       "phid:disp-expired-but-blocks",
       "phid:disp-operator-input",
     ]);
+    expect(itemIds).not.toContain("phid:disp-expired-noise");
     expect(health.blockers.needs_clarification.blocks_backlog_dependency_count).toBe(1);
     expect(health.blockers.needs_clarification.items).toEqual([
       expect.objectContaining({
         dispatch_phid: "phid:disp-expired-but-blocks",
+        owner_lane: "chris",
+        recommended_action: "ask Chris for the product or operator decision needed to resume",
+        needs_chris: true,
         blocks_backlog_dependency: true,
         blocked_dependency_item_ids: [expect.any(String)],
       }),
@@ -514,6 +519,9 @@ describe("orchestration health projection", () => {
         blocks_backlog_dependency: false,
       }),
     ]);
+    expect(health.queue_quality.blocked_or_failed).toBe(3);
+    expect(health.queue_quality.explanation).toContain("3 blocked or failed");
+    expect(health.queue_quality.explanation).toContain("2 clarification blocker(s)");
   });
 
   it("routes known deterministic needs_clarification infra blockers away from Chris", async () => {

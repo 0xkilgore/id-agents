@@ -852,7 +852,7 @@ async function readQueueQualityProjection(
   const failedDispatches =
     Number(dispatchByStatus.get("failed") ?? 0) +
     Number(dispatchByStatus.get("cancelled") ?? 0) +
-    Number(dispatchByStatus.get("needs_clarification") ?? 0);
+    activeBlockerCounts.needsClarification;
 
   const noise = classifyArtifactNoise(artifactNoise);
   const blockedOrFailed = blockedBacklog + failedDispatches + noise.retryableRouteFailures;
