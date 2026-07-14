@@ -180,6 +180,7 @@ import {
   validateCloseoutPromotionPolicy,
 } from './workspaces/policy.js';
 import { deliverClarificationResume } from './dispatch-scheduler/clarification-resume-delivery.js';
+import { reconcileStaleClarifications } from './dispatch-scheduler/clarification-ttl-reconciler.js';
 import { readFleetBlockages } from './dispatch-scheduler/fleet-blockages.js';
 import {
   migrateDispatchAttemptLedger,
@@ -4691,6 +4692,43 @@ export class AgentManagerDb {
           };
         });
         return res.json({ ok: true, count: items.length, limit, items });
+      } catch (err) {
+        return res.status(500).json({
+          ok: false,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    });
+
+    this.managementApp.post('/dispatches/clarifications/reconcile-stale', async (req, res) => {
+      if (!this.dispatchScheduler) {
+        return res.status(503).json({
+          ok: false,
+          error: 'dispatch_scheduler_not_initialised',
+        });
+      }
+      try {
+        const body = (req.body || {}) as { dry_run?: unknown; limit?: unknown };
+        const limit = parseReadLimit(body.limit, { defaultLimit: 25, maxLimit: 100 });
+        const dryRun = body.dry_run === true || body.dry_run === 'true';
+        const teamId = await this.db.teams.getOrCreateTeamId('default');
+        const result = await reconcileStaleClarifications({
+          reactor: this.dispatchScheduler.reactor,
+          events: (this.db as unknown as { events?: Db['events'] }).events ?? null,
+          teamId,
+          limit,
+          dryRun,
+          resolveEndpoint: async (agentName: string) => {
+            const agent = await this.db.agents.getByName(teamId, agentName).catch(() => null);
+            return agent?.endpoint ?? null;
+          },
+        });
+        for (const item of result.items) {
+          if (item.action === 'auto_resumed') {
+            this.evaluateGraphsForDispatchBestEffort(item.dispatch_id, 'dispatch_resumed');
+          }
+        }
+        return res.json({ ok: true, result });
       } catch (err) {
         return res.status(500).json({
           ok: false,
