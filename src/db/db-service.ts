@@ -518,6 +518,7 @@ export interface TasksRepository {
       status?: 'todo' | 'doing' | 'done';
       title?: string;
       description?: string | null;
+      track?: string;
       completed_at?: number | null;
       updated_at: number;
     },

@@ -38,6 +38,7 @@ import { SqliteTasksRepo } from '../../src/db/repos/sqlite/tasks-repo.js';
 import { SqliteEventsRepo } from '../../src/db/repos/sqlite/events-repo.js';
 import { SqliteSubscriptionsRepo } from '../../src/db/repos/sqlite/subscriptions-repo.js';
 import { SqliteCheckinsRepo } from '../../src/db/repos/sqlite/checkins-repo.js';
+import { buildResetConformanceSummary } from '../../src/conformance/reset.js';
 
 const TEAM = 'tasks-readmodel-test';
 
@@ -177,6 +178,47 @@ describe('GET /tasks read-model immediate reflect', () => {
     expect(afterRow?.status).toBe('done');
     expect(afterRow?.completedAt).not.toBeNull();
     expect(typeof afterRow?.updatedAt).toBe('number');
+  });
+
+  it('POST /tasks creates reset-conformance metadata and PATCH /tasks/:ref updates track', async () => {
+    const create = await fetch(`${baseUrl}/tasks`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Id-Team': TEAM },
+      body: JSON.stringify({
+        title: 'Reset conformance write-path proof',
+        name: 'reset-conformance-write-path-proof',
+        from: 'coder',
+      }),
+    });
+    expect(create.status).toBe(201);
+    const createBody = await create.json() as { task: Record<string, unknown> };
+    expect(createBody.task.track).toBe('T-ORCH');
+    expect(createBody.task.description).toMatch(/Next action:/i);
+
+    const claim = await fetch(`${baseUrl}/tasks/reset-conformance-write-path-proof/claim`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Id-Team': TEAM },
+      body: JSON.stringify({ agent_id: 'coder' }),
+    });
+    expect(claim.status).toBe(200);
+
+    let summary = await buildResetConformanceSummary(db.adapter, { teamId });
+    let record = summary.records.find((r) => r.kind === 'task');
+    expect(record).toBeUndefined();
+    expect(summary.counts.by_kind.task.quarantined).toBe(0);
+
+    const patch = await fetch(`${baseUrl}/tasks/reset-conformance-write-path-proof`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json', 'X-Id-Team': TEAM },
+      body: JSON.stringify({ track: 'T-CKPT' }),
+    });
+    expect(patch.status).toBe(200);
+    const patchBody = await patch.json() as { task: Record<string, unknown> };
+    expect(patchBody.task.track).toBe('T-CKPT');
+
+    summary = await buildResetConformanceSummary(db.adapter, { teamId });
+    record = summary.records.find((r) => r.kind === 'task');
+    expect(record).toBeUndefined();
   });
 
   it('GET /tasks?status=done lists the just-closed task; ?status=doing does NOT list it', async () => {

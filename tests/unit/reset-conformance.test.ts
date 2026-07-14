@@ -3,6 +3,12 @@ import { migrateSqlite } from "../../src/db/migrations/sqlite.js";
 import { SqliteAdapter } from "../../src/db/sqlite-adapter.js";
 import { migrateOutputsTables } from "../../src/outputs/storage.js";
 import { buildResetConformanceSummary } from "../../src/conformance/reset.js";
+import {
+  buildTaskRow,
+  draftFromManagerApi,
+  normalizeTaskCreateTrack,
+  normalizeTaskDescriptionNextAction,
+} from "../../src/tasks-readmodel/task-draft.js";
 
 const TEAM = "team_reset_conformance";
 const NOW = "2026-07-08T12:00:00.000Z";
@@ -80,6 +86,58 @@ describe("reset conformance quarantine", () => {
     const report = summary.records.find((r) => r.kind === "report" && r.id === "report_bad");
     expect(report?.track_state).toBe("unknown");
     expect(report?.missing).toContain("track");
+
+    await adapter.close();
+  });
+
+  it("accepts a task row produced by the POST /tasks metadata normalizer", async () => {
+    const adapter = new SqliteAdapter(":memory:");
+    await seedBase(adapter);
+
+    const row = buildTaskRow(
+      draftFromManagerApi({
+        name: "reset-conformance-new-task",
+        team_id: TEAM,
+        title: "Reset conformance new task",
+        description: normalizeTaskDescriptionNextAction({
+          description: null,
+          title: "Reset conformance new task",
+        }),
+        created_by: "agent_api",
+        owner: "agent_api",
+        track: normalizeTaskCreateTrack({ title: "Reset conformance new task" }),
+      }),
+      { nowMs: 1_783_520_000_000, id: "task_from_post", uuid: "uuid-from-post" },
+    );
+
+    await adapter.query(
+      `INSERT INTO tasks
+       (id, name, uuid, team_id, title, description, status, created_by, owner, created_at, updated_at, completed_at, track)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        row.id,
+        row.name,
+        row.uuid,
+        row.team_id,
+        row.title,
+        row.description,
+        row.status,
+        row.created_by,
+        row.owner,
+        row.created_at,
+        row.updated_at,
+        row.completed_at,
+        row.track,
+      ],
+    );
+
+    const summary = await buildResetConformanceSummary(adapter, {
+      teamId: TEAM,
+      generatedAt: NOW,
+    });
+
+    expect(summary.counts.by_kind.task).toEqual({ total: 1, quarantined: 0 });
+    expect(summary.records.find((r) => r.id === row.id)).toBeUndefined();
 
     await adapter.close();
   });

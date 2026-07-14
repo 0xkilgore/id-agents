@@ -17,6 +17,8 @@
 
 import crypto from "crypto";
 import type { TaskRow } from "../db/types.js";
+import { parseTrackTag } from "../project-tracks/read-model.js";
+import { resolveTrack } from "../track-registry/registry.js";
 
 /** Every place a task can be born. Each has a `draftFrom*` adapter below. */
 export type TaskCreationSource =
@@ -59,6 +61,47 @@ export interface BuildTaskRowOptions {
 }
 
 export const UNASSIGNED_TRACK = "(unassigned)";
+export const RESET_CONFORMANT_DEFAULT_TRACK = "T-ORCH";
+
+export function hasNextActionText(value: string | null | undefined): boolean {
+  return /(?:^|\n)\s*(?:next[_\s-]*action|next)\s*:/i.test(value ?? "");
+}
+
+export function normalizeTaskCreateTrack(input: {
+  track?: string | null;
+  title?: string | null;
+  description?: string | null;
+  fallback?: string;
+}): string {
+  const explicit = input.track?.trim();
+  if (explicit) return explicit;
+  const tagged = parseTrackTag(input.title) ?? parseTrackTag(input.description);
+  if (tagged) return tagged;
+  return input.fallback ?? RESET_CONFORMANT_DEFAULT_TRACK;
+}
+
+export function normalizeTaskDescriptionNextAction(input: {
+  description?: string | null;
+  title: string;
+  ownerName?: string | null;
+}): string {
+  const base = input.description?.trim();
+  if (hasNextActionText(base)) return base!;
+  const owner = input.ownerName?.trim();
+  const next = owner
+    ? `Next action: ${owner} advances "${input.title.trim()}".`
+    : `Next action: claim and advance "${input.title.trim()}".`;
+  return base ? `${base}\n${next}` : next;
+}
+
+export function validateTaskTrackForStorage(track: string | null | undefined): string {
+  const trimmed = track?.trim() ?? "";
+  return trimmed.length > 0 ? trimmed : UNASSIGNED_TRACK;
+}
+
+export function isTaskTrackConformant(track: string | null | undefined): boolean {
+  return resolveTrack(track).conforms;
+}
 
 /** Canonical status derivation: an explicit status wins, else owner presence. */
 export function deriveTaskStatus(draft: TaskDraft): TaskRow["status"] {
@@ -94,7 +137,7 @@ export function buildTaskRow(draft: TaskDraft, opts: BuildTaskRowOptions = {}): 
     created_at: nowSec,
     updated_at: nowSec,
     completed_at: null,
-    track: draft.track?.trim() || UNASSIGNED_TRACK,
+    track: validateTaskTrackForStorage(draft.track ?? null),
   };
 }
 
