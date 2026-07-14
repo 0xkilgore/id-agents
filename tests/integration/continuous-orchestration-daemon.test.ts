@@ -1045,6 +1045,84 @@ describe("daemon — dry-run vs live", () => {
     expect(blockedSum).toBe(res.body.counts.ready - res.body.counts.admissible_now);
   });
 
+  it("status exposes raw ready fuel and stale fuel when all ready rows are single-writer blocked", async () => {
+    const busyA = await seedReady(adapter, {
+      title: "busy lane A",
+      write_scope: ["repo/busy-a"],
+    });
+    const busyB = await seedReady(adapter, {
+      title: "busy lane B",
+      write_scope: ["repo/busy-b"],
+    });
+    const busyC = await seedReady(adapter, {
+      title: "busy lane C",
+      write_scope: ["repo/busy-c"],
+    });
+
+    const { app, daemon } = mountStatusApp(
+      adapter,
+      {
+        dry_run: true,
+        auto_flesh_enabled: false,
+        auto_promote_enabled: false,
+        max_in_flight: 20,
+        max_new_per_tick: 20,
+        min_ready_fuel: 2,
+      },
+      { activeScopes: new Set(["repo/busy-a", "repo/busy-b", "repo/busy-c"]) },
+    );
+    await daemon.setMode("running");
+
+    const res = await callApp(app, "/orchestration/status");
+
+    expect(res.status).toBe(200);
+    expect(res.body.counts).toMatchObject({
+      ready: 3,
+      admissible_now: 0,
+      ready_block_reasons: {
+        single_writer_lane_busy: 3,
+      },
+    });
+    expect(res.body.ready_admission).toMatchObject({
+      candidates: 3,
+      admissible_now: 0,
+      stale_ready_floor: {
+        stale: true,
+        ready: 3,
+        admissible: 0,
+        min_ready_fuel: 2,
+      },
+    });
+    expect(res.body.ready_admission.blocker_counts).toEqual([
+      { code: "single_writer_lane_busy", category: "lane_eligibility", count: 3 },
+    ]);
+    expect(res.body.health.ready_item_blockers).toMatchObject({
+      ready: 3,
+      actionable: 3,
+      min_ready_fuel: 2,
+      admissible_now: 0,
+      stale_ready_floor: true,
+      stale_ready_fuel: {
+        active: true,
+        owner_lane: "orchestration",
+        reason: "admissible_now=0",
+        counts_by_blocker_class: [
+          {
+            code: "single_writer_lane_busy",
+            category: "lane_eligibility",
+            count: 3,
+            examples: [busyA.item_id, busyB.item_id, busyC.item_id],
+          },
+        ],
+      },
+    });
+    expect(res.body.health.ready_item_blockers.stale_ready_fuel.examples).toEqual([
+      busyA.item_id,
+      busyB.item_id,
+      busyC.item_id,
+    ]);
+  });
+
   it("status exposes duplicate-dispatch retry disposition receipts in health", async () => {
     const retryGuarded = await seedReady(adapter, {
       title: "retryable duplicate blocker",
