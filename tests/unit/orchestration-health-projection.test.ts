@@ -1142,6 +1142,58 @@ describe("orchestration health projection", () => {
       }),
     ]);
   });
+
+  it("computes a safe reroute/update repair suggestion for provider_runtime_mismatch rows without marking them admissible", async () => {
+    await insertAgent("cto", "claude-code-cli");
+    await insertAgent("brunel", "codex");
+    await insertBacklogItem(adapter, {
+      title: "Wave57 P1: Infra clear versus warning truth fixture",
+      readiness_state: "ready",
+      risk_class: "build",
+      to_agent: "cto",
+      dispatch_body: "review",
+      provider: "openai",
+      runtime: "codex",
+    });
+
+    const health = await readOrchestrationHealthProjection(adapter, "default");
+
+    expect(health.ready_item_blockers.ready).toBe(1);
+    // The row must stay out of `actionable`/admissible fuel even though a
+    // repair suggestion is available — a suggestion is not a fix.
+    expect(health.ready_item_blockers.actionable).toBe(0);
+
+    const item = health.ready_item_blockers.items.find((i) => i.code === "provider_runtime_mismatch");
+    expect(item?.provider_runtime_repair).toEqual({
+      requested_provider: "openai",
+      requested_runtime: "codex",
+      current_to_agent: "cto",
+      current_to_agent_runtime: "claude-code-cli",
+      reroute_to_agent: "brunel",
+      update_metadata_to: { provider: "anthropic", runtime: "claude-code-cli" },
+    });
+  });
+
+  it("leaves reroute_to_agent null when no live agent already runs the requested runtime", async () => {
+    await insertAgent("cto", "claude-code-cli");
+    await insertBacklogItem(adapter, {
+      title: "runtime mismatch, no candidate",
+      readiness_state: "ready",
+      risk_class: "build",
+      to_agent: "cto",
+      dispatch_body: "review",
+      provider: "openai",
+      runtime: "codex",
+    });
+
+    const health = await readOrchestrationHealthProjection(adapter, "default");
+
+    const item = health.ready_item_blockers.items.find((i) => i.code === "provider_runtime_mismatch");
+    expect(item?.provider_runtime_repair).toMatchObject({
+      reroute_to_agent: null,
+      update_metadata_to: { provider: "anthropic", runtime: "claude-code-cli" },
+    });
+  });
 });
 
 async function insertArtifact(artifactId: string, agent: string): Promise<void> {

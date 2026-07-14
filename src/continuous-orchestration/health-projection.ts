@@ -145,6 +145,25 @@ export interface OrchestrationReadyItemBlockerDetail {
   operator_disposition: DuplicateDispatchRetryOperatorDisposition | null;
   recommended_disposition: DuplicateDispatchRetryDisposition | null;
   stale_duplicate_closeout_receipt_exists: boolean;
+  provider_runtime_repair: OrchestrationProviderRuntimeRepairSuggestion | null;
+}
+
+/**
+ * Safe repair options for a `provider_runtime_mismatch` ready row. Only
+ * `code: "provider_runtime_mismatch"` items ever carry this; it is diagnostic
+ * data for an operator/agent to apply via PATCH /orchestration/backlog/:id —
+ * nothing here is auto-applied, and the row stays out of `actionable`/
+ * admissible fuel regardless of whether a candidate is found.
+ */
+export interface OrchestrationProviderRuntimeRepairSuggestion {
+  requested_provider: string | null;
+  requested_runtime: string | null;
+  current_to_agent: string | null;
+  current_to_agent_runtime: string | null;
+  /** A currently live agent already running the requested runtime, if any. */
+  reroute_to_agent: string | null;
+  /** What to set provider/runtime to so the row matches its current to_agent. */
+  update_metadata_to: { provider: string; runtime: string } | null;
 }
 
 export interface OrchestrationBuildReadyFloorProjection {
@@ -464,6 +483,7 @@ async function readReadyItemBlockerProjection(
     recommended_action: string;
   }>();
   const details: OrchestrationReadyItemBlockerDetail[] = [];
+  const mismatchRows: Array<{ row: BacklogQueueRow; blocker: ReadyAdmissionBlocker }> = [];
   let actionable = 0;
   const add = (blocker: ReadyAdmissionBlocker, itemId: string) => {
     const key = `${blocker.category}:${blocker.code}`;
@@ -477,9 +497,24 @@ async function readReadyItemBlockerProjection(
     const blocker = classifyReadyAdmissionBlocker(row, blockedDependencyItemIds, agentRuntimes);
     if (blocker) {
       add(blocker, row.item_id);
-      details.push(readyItemBlockerDetail(row, blocker, duplicateDispatchOutcomes));
+      if (blocker.code === "provider_runtime_mismatch") {
+        mismatchRows.push({ row, blocker });
+      } else {
+        details.push(readyItemBlockerDetail(row, blocker, duplicateDispatchOutcomes));
+      }
     } else {
       actionable += 1;
+    }
+  }
+
+  if (mismatchRows.length > 0) {
+    const requestedRuntimes = mismatchRows
+      .map(({ row }) => (row.runtime ? normalizeRuntime(row.runtime) : null))
+      .filter((runtime): runtime is NonNullable<typeof runtime> => runtime !== null);
+    const compatibleAgentsByRuntime = await readAgentsByRuntime(adapter, requestedRuntimes);
+    for (const { row, blocker } of mismatchRows) {
+      const repair = buildProviderRuntimeRepairSuggestion(row, agentRuntimes, compatibleAgentsByRuntime);
+      details.push(readyItemBlockerDetail(row, blocker, duplicateDispatchOutcomes, repair));
     }
   }
 
@@ -509,6 +544,7 @@ function readyItemBlockerDetail(
   row: BacklogQueueRow,
   blocker: ReadyAdmissionBlocker,
   duplicateDispatchOutcomes: Awaited<ReturnType<typeof getDispatchOutcomesByPhid>>,
+  providerRuntimeRepair: OrchestrationProviderRuntimeRepairSuggestion | null = null,
 ): OrchestrationReadyItemBlockerDetail {
   const outcome = row.last_dispatch_phid ? duplicateDispatchOutcomes.get(row.last_dispatch_phid) : undefined;
   const duplicateDisposition = blocker.code === "duplicate_dispatch_retry_required"
@@ -532,6 +568,57 @@ function readyItemBlockerDetail(
     operator_disposition: duplicateDisposition?.operator_disposition ?? null,
     recommended_disposition: duplicateDisposition?.recommended_disposition ?? null,
     stale_duplicate_closeout_receipt_exists: !!row.stale_duplicate_closeout_receipt_json,
+    provider_runtime_repair: providerRuntimeRepair,
+  };
+}
+
+// RD — a provider_runtime_mismatch row will never self-heal by waiting for
+// capacity: the requested provider/runtime and the current to_agent's actual
+// runtime are structurally incompatible. Compute the two safe repair options
+// (reroute to a currently-live compatible agent, or update the row's
+// provider/runtime to match its current to_agent) so an operator/agent can
+// apply one via the existing PATCH /orchestration/backlog/:id route. This
+// only *suggests* — it never applies a patch and never counts toward
+// `actionable`/admissible fuel.
+async function readAgentsByRuntime(adapter: DbAdapter, runtimes: string[]): Promise<Map<string, string[]>> {
+  const out = new Map<string, string[]>();
+  const unique = [...new Set(runtimes.filter((runtime) => runtime.trim() !== ""))];
+  if (unique.length === 0) return out;
+  const placeholders = unique.map((_, i) => `$${i + 1}`).join(",");
+  const { rows } = await adapter.query<{ name: string; runtime: string }>(
+    `SELECT name, runtime
+       FROM agents
+      WHERE runtime IN (${placeholders}) AND status = 'running' AND deleted_at IS NULL
+      ORDER BY name ASC`,
+    unique,
+  );
+  for (const row of rows) {
+    const list = out.get(row.runtime) ?? [];
+    list.push(row.name);
+    out.set(row.runtime, list);
+  }
+  return out;
+}
+
+function buildProviderRuntimeRepairSuggestion(
+  row: BacklogQueueRow,
+  agentRuntimes: Map<string, string>,
+  compatibleAgentsByRuntime: Map<string, string[]>,
+): OrchestrationProviderRuntimeRepairSuggestion {
+  const requestedRuntime = row.runtime ? normalizeRuntime(row.runtime) : null;
+  const requestedProvider = row.provider ?? (requestedRuntime ? resolveProviderFromRuntime(requestedRuntime) : null);
+  const currentToAgentRuntime = row.to_agent ? agentRuntimes.get(row.to_agent) ?? null : null;
+  const candidates = requestedRuntime ? compatibleAgentsByRuntime.get(requestedRuntime) ?? [] : [];
+  const rerouteCandidateAgent = candidates.find((name) => name !== row.to_agent) ?? null;
+  return {
+    requested_provider: requestedProvider,
+    requested_runtime: requestedRuntime,
+    current_to_agent: row.to_agent ?? null,
+    current_to_agent_runtime: currentToAgentRuntime,
+    reroute_to_agent: rerouteCandidateAgent,
+    update_metadata_to: currentToAgentRuntime
+      ? { provider: resolveProviderFromRuntime(currentToAgentRuntime), runtime: currentToAgentRuntime }
+      : null,
   };
 }
 
