@@ -533,6 +533,13 @@ export interface FeedbackItem {
    * terminal and should be treated as a stale duplicate.
    */
   retry_readiness?: FeedbackRetryReadiness;
+  /**
+   * Deterministic manager-side evidence contract for /ops first viewport.
+   * This gathers the route state, retry/drain status, dispatch/query refs, and
+   * proof classification in one stable object so clients do not infer success
+   * by combining optional legacy fields.
+   */
+  feedback_evidence?: FeedbackEvidence;
 }
 
 export type FeedbackRetryReadinessStatus =
@@ -556,6 +563,41 @@ export interface FeedbackRetryReadiness {
   reason: string;
 }
 
+export type FeedbackProofClassification =
+  | "proved"
+  | "failed"
+  | "missing"
+  | "stale"
+  | "not_required";
+
+export interface FeedbackEvidenceRef {
+  dispatch_phid: string | null;
+  query_id: string | null;
+  to_agent: string | null;
+}
+
+export interface FeedbackEvidence {
+  schema_version: "feedback.evidence.v1";
+  route_visible_state: ArtifactCommentVisibleState | null;
+  route_compat_status: ArtifactFeedbackCompatStatus | null;
+  route_state: ArtifactFeedbackCompatStatus | "missing_route_status";
+  route_kind: ArtifactCommentRouteStatus["route_kind"] | null;
+  route_routed: boolean;
+  route_retryable: boolean;
+  disabled_route_reason: string | null;
+  retry_drain_status: FeedbackRetryReadinessStatus;
+  retryable: boolean;
+  stale_duplicate: boolean;
+  next_action: FeedbackRetryReadiness["next_action"];
+  dispatch_ref: FeedbackEvidenceRef | null;
+  query_ref: string | null;
+  proof_classification: FeedbackProofClassification;
+  proof_evidence: string | null;
+  missing_proof_reason: string | null;
+  work_success: boolean | null;
+  work_success_blocker: string | null;
+}
+
 /** Rolled-up acted-upon state for the chip. `routed` = at least one piece of
  *  feedback fired a dispatch to the owning agent (the loop is in motion).
  *  Live dispatch terminal status (done/in_flight) is intentionally NOT resolved
@@ -569,6 +611,14 @@ export interface ActedUponSummary {
   last_reaction: ReactionKind | null;
   last_feedback_at: string | null;
   routed_dispatches: FeedbackRouting[];
+  feedback_evidence?: {
+    schema_version: "feedback.evidence_rollup.v1";
+    counts: Record<FeedbackProofClassification, number>;
+    retryable_count: number;
+    stale_duplicate_count: number;
+    missing_proof_count: number;
+    false_success_blocked: boolean;
+  };
 }
 
 export interface ArtifactFeedbackResponse {

@@ -35,6 +35,8 @@ import type {
   CommentRequest,
   DispatchFollowUpRequest,
   DispatchStatusResolver,
+  FeedbackEvidence,
+  FeedbackProofClassification,
   FeedbackItem,
   FeedbackRetryReadiness,
   FeedbackRouting,
@@ -853,6 +855,7 @@ export async function listFeedback(
   items.reverse();
   for (const item of items) {
     item.retry_readiness = feedbackRetryReadiness(item);
+    item.feedback_evidence = feedbackEvidence(item);
   }
 
   // Build the summary off the newest-first items.
@@ -868,6 +871,7 @@ export async function listFeedback(
     last_reaction: reactionItems[0]?.reaction ?? null,
     last_feedback_at: items[0]?.ts ?? null,
     routed_dispatches: routedDispatches,
+    feedback_evidence: feedbackEvidenceRollup(items),
   };
   return { items, acted_upon };
 }
@@ -922,11 +926,14 @@ export async function reconcileFeedbackDispatchStatus(
 
   const items = feedback.items.map((it) => {
     const item = it.routing ? { ...it, routing: enrich(it.routing) } : { ...it };
-    return { ...item, retry_readiness: feedbackRetryReadiness(item) };
+    const retry_readiness = feedbackRetryReadiness(item);
+    const withReadiness = { ...item, retry_readiness };
+    return { ...withReadiness, feedback_evidence: feedbackEvidence(withReadiness) };
   });
   const acted_upon: ActedUponSummary = {
     ...feedback.acted_upon,
     routed_dispatches: feedback.acted_upon.routed_dispatches.map(enrich),
+    feedback_evidence: feedbackEvidenceRollup(items),
   };
   return { items, acted_upon };
 }
@@ -1029,6 +1036,124 @@ function feedbackRetryReadiness(item: FeedbackItem): FeedbackRetryReadiness {
   };
 }
 
+function feedbackEvidence(item: FeedbackItem): FeedbackEvidence {
+  const routeStatus = item.route_status ?? null;
+  const readiness = item.retry_readiness ?? feedbackRetryReadiness(item);
+  const routing = item.routing;
+  const dispatchRef = routing
+    ? { dispatch_phid: routing.dispatch_phid, query_id: routing.query_id, to_agent: routing.to_agent }
+    : routeStatus?.dispatch
+      ? {
+          dispatch_phid: routeStatus.dispatch.dispatch_phid,
+          query_id: routeStatus.dispatch.query_id,
+          to_agent: routeStatus.dispatch.to_agent,
+        }
+      : null;
+  const proof = classifyFeedbackProof(item, readiness);
+  return {
+    schema_version: "feedback.evidence.v1",
+    route_visible_state: routeStatus?.visible_state ?? null,
+    route_compat_status: routeStatus?.compat_status ?? null,
+    route_state: routeStatus?.compat_status ?? "missing_route_status",
+    route_kind: routeStatus?.route_kind ?? null,
+    route_routed: routeStatus?.routed === true || Boolean(routing),
+    route_retryable: routeStatus?.retryable === true,
+    disabled_route_reason: disabledRouteReason(routeStatus),
+    retry_drain_status: readiness.status,
+    retryable: readiness.retryable,
+    stale_duplicate: readiness.stale_duplicate,
+    next_action: readiness.next_action,
+    dispatch_ref: dispatchRef,
+    query_ref: dispatchRef?.query_id ?? null,
+    proof_classification: proof.proof_classification,
+    proof_evidence: proof.proof_evidence,
+    missing_proof_reason: proof.missing_proof_reason,
+    work_success: routing && Object.prototype.hasOwnProperty.call(routing, "work_success")
+      ? routing.work_success ?? null
+      : null,
+    work_success_blocker: routing?.work_success_blocker ?? proof.missing_proof_reason,
+  };
+}
+
+function disabledRouteReason(routeStatus: ArtifactCommentRouteStatus | null): string | null {
+  if (!routeStatus) return "missing_route_status";
+  if (routeStatus.compat_status !== "disabled/not-recorded") return null;
+  return routeStatus.skipped ?? routeStatus.error?.message ?? routeStatus.visible_state;
+}
+
+function classifyFeedbackProof(
+  item: FeedbackItem,
+  readiness: FeedbackRetryReadiness,
+): Pick<FeedbackEvidence, "proof_classification" | "proof_evidence" | "missing_proof_reason"> {
+  const routing = item.routing;
+  if (!routing) {
+    return {
+      proof_classification: readiness.retryable ? "missing" : "not_required",
+      proof_evidence: null,
+      missing_proof_reason: readiness.retryable ? readiness.reason : null,
+    };
+  }
+  if (routing.work_success === true) {
+    return {
+      proof_classification: readiness.stale_duplicate ? "stale" : "proved",
+      proof_evidence: routing.work_success_evidence ?? "manager_work_success",
+      missing_proof_reason: null,
+    };
+  }
+  if (routing.work_success === false) {
+    const blocker = routing.work_success_blocker ?? "manager_reported_no_work_success";
+    return {
+      proof_classification: blocker === "work_success_proof_missing" ? "missing" : "failed",
+      proof_evidence: null,
+      missing_proof_reason: blocker,
+    };
+  }
+  if (Object.prototype.hasOwnProperty.call(routing, "work_success")) {
+    return {
+      proof_classification: "missing",
+      proof_evidence: null,
+      missing_proof_reason: routing.work_success_blocker ?? null,
+    };
+  }
+  return {
+    proof_classification: "missing",
+    proof_evidence: null,
+    missing_proof_reason: "dispatch_status_not_reconciled",
+  };
+}
+
+function feedbackEvidenceRollup(items: FeedbackItem[]): ActedUponSummary["feedback_evidence"] {
+  const counts: Record<FeedbackProofClassification, number> = {
+    proved: 0,
+    failed: 0,
+    missing: 0,
+    stale: 0,
+    not_required: 0,
+  };
+  let retryableCount = 0;
+  let staleDuplicateCount = 0;
+  let missingProofCount = 0;
+  let falseSuccessBlocked = false;
+  for (const item of items) {
+    const evidence = item.feedback_evidence ?? feedbackEvidence(item);
+    counts[evidence.proof_classification] += 1;
+    if (evidence.retryable) retryableCount += 1;
+    if (evidence.stale_duplicate) staleDuplicateCount += 1;
+    if (evidence.proof_classification === "missing") missingProofCount += 1;
+    if (evidence.work_success === false && evidence.proof_classification !== "proved") {
+      falseSuccessBlocked = true;
+    }
+  }
+  return {
+    schema_version: "feedback.evidence_rollup.v1",
+    counts,
+    retryable_count: retryableCount,
+    stale_duplicate_count: staleDuplicateCount,
+    missing_proof_count: missingProofCount,
+    false_success_blocked: falseSuccessBlocked,
+  };
+}
+
 function classifyDispatchWorkSuccess(s: Awaited<ReturnType<DispatchStatusResolver>>): {
   work_success: boolean | null;
   work_success_evidence: string | null;
@@ -1052,7 +1177,7 @@ function classifyDispatchWorkSuccess(s: Awaited<ReturnType<DispatchStatusResolve
     return { work_success: null, work_success_evidence: null, work_success_blocker: null };
   }
   if (s.status === "done" && (s.effective_state === "done" || s.effective_state === "done_recovered")) {
-    return { work_success: true, work_success_evidence: s.effective_state, work_success_blocker: null };
+    return { work_success: false, work_success_evidence: null, work_success_blocker: "work_success_proof_missing" };
   }
   return {
     work_success: false,

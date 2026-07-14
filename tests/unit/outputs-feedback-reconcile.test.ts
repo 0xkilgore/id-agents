@@ -56,6 +56,28 @@ function retryableRouteStatus(op_id: number): ArtifactCommentRouteStatus {
     updated_at: "2026-06-29T00:00:00.000Z",
   };
 }
+function disabledRouteStatus(op_id: number): ArtifactCommentRouteStatus {
+  return {
+    visible_state: "disabled/not-recorded",
+    compat_status: "disabled/not-recorded",
+    feedback_status: "disabled/not-recorded",
+    route_kind: "substantive_follow_up",
+    routed: false,
+    retryable: false,
+    recorded_op_id: op_id,
+    target_agent: "regina",
+    target_agent_raw: "regina",
+    dispatch: null,
+    skipped: "scheduler_unavailable",
+    error: null,
+    deadline_at: null,
+    timed_out_at: null,
+    notification_status: "suppressed",
+    next_retry_at: null,
+    suppress_duplicate_key: `artifact-comment:${op_id}:timeout`,
+    updated_at: "2026-06-29T00:00:00.000Z",
+  };
+}
 
 function commentItem(
   op_id: number,
@@ -199,7 +221,7 @@ describe("reconcileFeedbackDispatchStatus — pure dispatch join", () => {
     });
   });
 
-  it("marks a done dispatch is_terminal so the digest can drop the closed loop", async () => {
+  it("marks terminal dispatches stale but does not call done-without-proof successful work", async () => {
     const fb = feedbackFixture([commentItem(1, routing("phid:disp-DONE"))]);
     const resolve = async (): Promise<DispatchStatusLite | null> => ({
       status: "done",
@@ -210,9 +232,9 @@ describe("reconcileFeedbackDispatchStatus — pure dispatch join", () => {
     const out = await reconcileFeedbackDispatchStatus(fb, resolve);
     expect(out.items[0].routing?.status).toBe("done");
     expect(out.items[0].routing?.is_terminal).toBe(true);
-    expect(out.items[0].routing?.work_success).toBe(true);
-    expect(out.items[0].routing?.work_success_evidence).toBe("done");
-    expect(out.items[0].routing?.work_success_blocker).toBeNull();
+    expect(out.items[0].routing?.work_success).toBe(false);
+    expect(out.items[0].routing?.work_success_evidence).toBeNull();
+    expect(out.items[0].routing?.work_success_blocker).toBe("work_success_proof_missing");
     expect(out.items[0].retry_readiness).toMatchObject({
       schema_version: "feedback.retry_readiness.v1",
       status: "stale_duplicate",
@@ -221,6 +243,49 @@ describe("reconcileFeedbackDispatchStatus — pure dispatch join", () => {
       next_action: "close_or_ignore",
       prior_dispatch_phid: "phid:disp-DONE",
       prior_dispatch_status: "done",
+    });
+    expect(out.items[0].feedback_evidence).toMatchObject({
+      schema_version: "feedback.evidence.v1",
+      route_state: "missing_route_status",
+      retry_drain_status: "stale_duplicate",
+      dispatch_ref: {
+        dispatch_phid: "phid:disp-DONE",
+        query_id: null,
+        to_agent: "regina",
+      },
+      query_ref: null,
+      proof_classification: "missing",
+      missing_proof_reason: "work_success_proof_missing",
+      work_success: false,
+    });
+    expect(out.acted_upon.feedback_evidence).toMatchObject({
+      schema_version: "feedback.evidence_rollup.v1",
+      missing_proof_count: 1,
+      stale_duplicate_count: 1,
+      false_success_blocked: true,
+    });
+  });
+
+  it("surfaces explicit manager success proof without relying on terminal status alone", async () => {
+    const fb = feedbackFixture([commentItem(1, routing("phid:disp-PROVED"))]);
+    const out = await reconcileFeedbackDispatchStatus(fb, async (): Promise<DispatchStatusLite | null> => ({
+      status: "done",
+      effective_state: "done",
+      is_terminal: true,
+      work_success: true,
+      work_success_evidence: "artifact_update_confirmed",
+    }));
+
+    expect(out.items[0].routing).toMatchObject({
+      work_success: true,
+      work_success_evidence: "artifact_update_confirmed",
+      work_success_blocker: null,
+    });
+    expect(out.items[0].feedback_evidence).toMatchObject({
+      retry_drain_status: "stale_duplicate",
+      proof_classification: "stale",
+      proof_evidence: "artifact_update_confirmed",
+      missing_proof_reason: null,
     });
   });
 
@@ -242,6 +307,15 @@ describe("reconcileFeedbackDispatchStatus — pure dispatch join", () => {
       next_action: "retry",
       route_visible_state: "recorded-route-failed-retryable",
       route_retryable: true,
+    });
+    expect(out.items[0].feedback_evidence).toMatchObject({
+      route_visible_state: "recorded-route-failed-retryable",
+      route_state: "recorded-route-failed-retryable",
+      route_retryable: true,
+      retry_drain_status: "retryable_failed_row",
+      retryable: true,
+      proof_classification: "missing",
+      missing_proof_reason: "feedback_route_failed_retryable",
     });
     expect(out.items[1].retry_readiness).toMatchObject({
       status: "stale_duplicate",
@@ -289,6 +363,11 @@ describe("reconcileFeedbackDispatchStatus — pure dispatch join", () => {
     const out = await reconcileFeedbackDispatchStatus(fb, resolve);
     expect(out.items[0].routing?.status).toBeNull();
     expect(out.items[0].routing?.is_terminal).toBe(false);
+    expect(out.items[0].feedback_evidence).toMatchObject({
+      proof_classification: "missing",
+      missing_proof_reason: "dispatch_status_unresolved",
+      work_success: null,
+    });
   });
 
   it("resolves each unique dispatch_phid exactly once (dedup across items)", async () => {
@@ -316,6 +395,30 @@ describe("reconcileFeedbackDispatchStatus — pure dispatch join", () => {
       is_terminal: true,
     }));
     expect(out.items[0].routing).toBeNull();
+  });
+
+  it("classifies disabled route evidence with a deterministic disabled reason", async () => {
+    const fb = feedbackFixture([commentItem(1, null, disabledRouteStatus(1))]);
+    const out = await reconcileFeedbackDispatchStatus(fb, async () => ({
+      status: "done",
+      effective_state: "done",
+      is_terminal: true,
+    }));
+
+    expect(out.items[0].retry_readiness).toMatchObject({
+      status: "not_retryable",
+      retryable: false,
+      next_action: "none",
+      route_visible_state: "disabled/not-recorded",
+    });
+    expect(out.items[0].feedback_evidence).toMatchObject({
+      route_visible_state: "disabled/not-recorded",
+      route_state: "disabled/not-recorded",
+      disabled_route_reason: "scheduler_unavailable",
+      retry_drain_status: "not_retryable",
+      proof_classification: "not_required",
+      dispatch_ref: null,
+    });
   });
 });
 
@@ -347,6 +450,21 @@ describe("GET /artifacts/:id/feedback?reconcile=1 — wired reconciliation", () 
       prior_dispatch_phid: phid,
       prior_dispatch_status: "in_flight",
     });
+    expect(fb.body.items[0].feedback_evidence).toMatchObject({
+      schema_version: "feedback.evidence.v1",
+      route_visible_state: "recorded+routed",
+      route_state: "recorded+routed",
+      route_routed: true,
+      retry_drain_status: "waiting_on_live_dispatch",
+      dispatch_ref: {
+        dispatch_phid: phid,
+        query_id: "q-s4-1",
+        to_agent: "regina",
+      },
+      query_ref: "q-s4-1",
+      proof_classification: "missing",
+      missing_proof_reason: null,
+    });
     expect(fb.body.acted_upon.routed_dispatches[0].status).toBe("in_flight");
     expect(fb.body.acted_upon.routed_dispatches[0].work_success).toBeNull();
   });
@@ -364,7 +482,11 @@ describe("GET /artifacts/:id/feedback?reconcile=1 — wired reconciliation", () 
     const fb = await call(app, "GET", `/artifacts/${ART}/feedback?reconcile=1`);
     expect(asked).toContain(phid);
     expect(fb.body.items[0].routing.is_terminal).toBe(true);
-    expect(fb.body.items[0].routing.work_success).toBe(true);
+    expect(fb.body.items[0].routing.work_success).toBe(false);
+    expect(fb.body.items[0].feedback_evidence).toMatchObject({
+      proof_classification: "missing",
+      missing_proof_reason: "work_success_proof_missing",
+    });
   });
 
   it.each([
