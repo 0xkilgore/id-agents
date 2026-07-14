@@ -114,6 +114,59 @@ describe("orchestration health projection", () => {
     expect(health.queue_quality.actionable_ready).toBe(12);
   });
 
+  it("keeps the 2026-07-13 build-ready current shape blocked on lane diversity, not ok or idle", async () => {
+    await setMode(adapter, "default", "running");
+    for (let i = 0; i < 12; i += 1) {
+      await insertBacklogItem(adapter, {
+        title: `2026-07-13 ready build row ${i}`,
+        readiness_state: "ready",
+        risk_class: "build",
+        to_agent: "substrate-api-codex",
+        dispatch_body: "continue",
+        write_scope: ["/repo/id-agents"],
+      });
+    }
+    await insertBacklogItem(adapter, {
+      title: "2026-07-13 single writer lane holder",
+      readiness_state: "in_flight",
+      risk_class: "build",
+      to_agent: "substrate-api-codex",
+      dispatch_body: "continue",
+      write_scope: ["/repo/id-agents"],
+    });
+    await recordTickOutcome(adapter, "default", {
+      zero_ticks: 5,
+      fired: false,
+      admission_block_reasons: {
+        duplicate_dispatch_retry_required: 1,
+        single_writer_lane_busy: 1,
+      },
+    });
+
+    const health = await readOrchestrationHealthProjection(adapter, "default");
+
+    expect(health.ok).toBe(false);
+    expect(health.blockers.blocked).toBe(true);
+    expect(health.build_ready_floor).toMatchObject({
+      blocked: true,
+      blocker_code: "build_ready_lane_diversity_below_min_lanes",
+      useful_ready_count: 12,
+      floor: 12,
+      build_ready_lanes: 1,
+      min_lanes: 2,
+      candidate_lanes: ["/repo/id-agents"],
+      blocker_reasons: {
+        duplicate_dispatch_retry_required: 1,
+        single_writer_lane_busy: 1,
+        build_ready_lane_diversity_below_min_lanes: 1,
+      },
+    });
+    expect(health.build_ready_floor.next_action).toMatch(/new lane/i);
+    expect(health.build_ready_floor.next_action).toMatch(/1\/2/);
+    expect(health.build_ready_floor.next_action).toMatch(/12\/12/);
+    expect(health.build_ready_floor.next_action).not.toMatch(/\b(ok|idle)\b/i);
+  });
+
   it("escalates unexplained zero-admit ticks after the stall threshold", async () => {
     await setMode(adapter, "default", "running");
     await recordTickOutcome(adapter, "default", {
