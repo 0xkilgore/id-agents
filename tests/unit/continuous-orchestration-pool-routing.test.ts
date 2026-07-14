@@ -215,7 +215,7 @@ describe("continuous orchestration pool routing", () => {
     expect(plan.skipped).toHaveLength(1);
     expect(plan.skipped[0]).toMatchObject({
       item_id: "backend_blocked_substrate",
-      action: "skipped",
+      action: "held",
       metadata: {
         code: "target_unhealthy",
         class: "agent_availability",

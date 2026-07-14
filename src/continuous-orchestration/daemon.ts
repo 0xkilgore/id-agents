@@ -735,10 +735,10 @@ export class ContinuousOrchestrationDaemon {
     const healthy_agents = this.deps.resolveAgentHealth
       ? await this.deps.resolveAgentHealth([...candidateAgentNames])
       : undefined;
+    const pool_lane_blockers = poolGate ? this.applyPoolHealthGate(poolGate, healthy_agents) : undefined;
     const target_agent_runtimes = this.deps.resolveAgentRuntimes
       ? await this.deps.resolveAgentRuntimes([...candidateAgentNames])
       : undefined;
-    const pool_lane_blockers = poolGate ? this.applyPoolHealthGate(poolGate, healthy_agents) : undefined;
     const ready_item_blockers = await this.readyItemBlockers();
 
     const ctx: AdmissionContext = {
@@ -1131,6 +1131,7 @@ export class ContinuousOrchestrationDaemon {
     const healthy_agents = this.deps.resolveAgentHealth
       ? await this.deps.resolveAgentHealth([...candidateAgentNames])
       : undefined;
+    const pool_lane_blockers = poolGate ? this.applyPoolHealthGate(poolGate, healthy_agents) : undefined;
     const target_agent_runtimes = this.deps.resolveAgentRuntimes
       ? await this.deps.resolveAgentRuntimes([...candidateAgentNames])
       : undefined;
@@ -1153,6 +1154,7 @@ export class ContinuousOrchestrationDaemon {
       pool_for: poolGate?.pool_for,
       pool_free_slots: poolGate?.pool_free_slots,
       pool_free_builders: poolGate?.pool_free_builders,
+      pool_lane_blockers,
       healthy_agents,
       target_agent_runtimes,
       ready_item_blockers,

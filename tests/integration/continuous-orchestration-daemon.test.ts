@@ -1249,9 +1249,99 @@ describe("daemon — dry-run vs live", () => {
         expect.objectContaining({ code: "duplicate_dispatch_retry_required", action: "held" }),
         expect.objectContaining({ code: "pool_capacity_full", action: "held" }),
         expect.objectContaining({ code: "provider_runtime_mismatch", action: "held" }),
-        expect.objectContaining({ code: "target_unhealthy", action: "skipped" }),
+        expect.objectContaining({ code: "target_unhealthy", action: "held" }),
       ]),
     );
+  });
+
+  it("status holds unhealthy explicit target rows while admitting healthy pool rows and recommending reroute/topoff", async () => {
+    await seedAgent(adapter, "gaudi", "pending", "claude-code-cli");
+    await seedAgent(adapter, "eames", "pending", "claude-code-cli");
+    await seedAgent(adapter, "substrate-orch-codex", "running", "codex");
+    await seedAgent(adapter, "substrate-api-codex", "running", "codex");
+
+    await seedReady(adapter, {
+      title: "explicit unhealthy target A",
+      to_agent: "gaudi",
+      write_scope: ["repo/explicit-a"],
+    });
+    await seedReady(adapter, {
+      title: "explicit unhealthy target B",
+      to_agent: "eames",
+      write_scope: ["repo/explicit-b"],
+    });
+    await seedReady(adapter, {
+      title: "backend pool admissible A",
+      to_agent: "pool:backend",
+      write_scope: ["repo/backend"],
+    });
+    await seedReady(adapter, {
+      title: "backend pool admissible B",
+      to_agent: "pool:backend",
+      write_scope: ["repo/backend"],
+    });
+
+    const pools: PoolRouting = {
+      poolForItem: (item) =>
+        item.to_agent === "pool:backend"
+          ? {
+              pool_id: "backend",
+              repo_root: "/repo/backend",
+              max_parallel: 2,
+              members: ["gaudi", "eames", "substrate-orch-codex", "substrate-api-codex"],
+            }
+          : null,
+      availableBuilders: (pool) => pool.members,
+      allocateWorktree: async ({ agent, item, pool }) => ({
+        path: `${pool.repo_root}/.worktrees/${agent}-${item.item_id.slice(-6)}`,
+        branch: `build/${agent}-${item.item_id.slice(-6)}`,
+        lease_id: null,
+      }),
+    };
+    const { app, daemon } = mountStatusApp(
+      adapter,
+      {
+        dry_run: true,
+        auto_flesh_enabled: false,
+        auto_promote_enabled: false,
+        max_in_flight: 20,
+        max_new_per_tick: 20,
+      },
+      {
+        pools,
+        resolveAgentHealth: (names) => getHealthyAgentNames(adapter, names),
+        resolveAgentRuntimes: (names) => getAgentRuntimeMap(adapter, names),
+      },
+    );
+    await daemon.setMode("running");
+
+    const res = await callApp(app, "/orchestration/status");
+
+    expect(res.status).toBe(200);
+    expect(res.body.counts.ready).toBe(4);
+    expect(res.body.counts.admissible_now).toBe(2);
+    expect(res.body.ready_admission.blocker_counts).toEqual([
+      { code: "target_unhealthy", category: "runtime_unavailable", count: 2 },
+    ]);
+    expect(res.body.ready_admission.non_admitted).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ title: "explicit unhealthy target A", code: "target_unhealthy", action: "held" }),
+        expect.objectContaining({ title: "explicit unhealthy target B", code: "target_unhealthy", action: "held" }),
+      ]),
+    );
+    expect(res.body.ready_admission.admissible.map((item: any) => item.title).sort()).toEqual([
+      "backend pool admissible A",
+      "backend pool admissible B",
+    ]);
+    expect(res.body.ready_admission.admissible.map((item: any) => item.to_agent).sort()).toEqual([
+      "substrate-api-codex",
+      "substrate-orch-codex",
+    ]);
+    expect(res.body.auto_promote_health.operator_summary.safe_actions[0]).toContain("Reroute 2 target_unhealthy");
+    expect(res.body.auto_promote_health.operator_summary.safe_actions[0]).toContain("compatible healthy agents");
+    expect(res.body.auto_promote_health.operator_summary.safe_actions[0]).toContain("top off compatible pool fuel");
+    expect(res.body.auto_promote_health.operator_summary.summary).toContain("2 admissible row(s)");
+    expect(res.body.auto_promote_health.operator_summary.summary).toContain("2 target_unhealthy row(s)");
   });
 
   it("status explains retry_safe=false duplicate dispatch holds and live admission does not refire them", async () => {

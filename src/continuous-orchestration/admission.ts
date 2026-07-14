@@ -356,7 +356,7 @@ export function planAdmission(
     if (ctx.healthy_agents && target && !ctx.healthy_agents.has(target)) {
       skipped.push(nonAdmission(
         item.item_id,
-        "skipped",
+        "held",
         "target_unhealthy",
         `target agent '${target}' is not healthy/online (RD-014 admission health gate)`,
         { target },

@@ -7,7 +7,7 @@
 import fs from "node:fs";
 import type { Application, Request, Response } from "express";
 import type { DbAdapter } from "../db/db-adapter.js";
-import type { ContinuousOrchestrationDaemon } from "./daemon.js";
+import type { AutoPromoteHealth, ContinuousOrchestrationDaemon, ReadyAdmissionExplanation } from "./daemon.js";
 import type { ContinuousOrchestrationConfig } from "./config.js";
 import { AUTO_READY_CONFIDENCE_THRESHOLD } from "./flesh-policy.js";
 import type { OrchestrationMode, ReadinessState } from "./types.js";
@@ -62,6 +62,30 @@ function classifyNeedsPromoteSkip(reasons: string[]): NeedsPromoteSkipClass | nu
   return null;
 }
 
+function withReadyAdmissionOperatorSummary(
+  health: AutoPromoteHealth,
+  readyAdmission: ReadyAdmissionExplanation,
+): AutoPromoteHealth {
+  const unhealthyTargets = readyAdmission.blocker_counts.find((count) => count.code === "target_unhealthy")?.count ?? 0;
+  if (unhealthyTargets === 0 || readyAdmission.admissible_now === 0) return health;
+
+  const action =
+    `Reroute ${unhealthyTargets} target_unhealthy ready row(s) to compatible healthy agents; ` +
+    "keep admitting available pool rows while capacity exists, and top off compatible pool fuel only if healthy capacity runs short.";
+  const safeActions = health.operator_summary.safe_actions.includes(action)
+    ? health.operator_summary.safe_actions
+    : [action, ...health.operator_summary.safe_actions];
+  return {
+    ...health,
+    operator_summary: {
+      ...health.operator_summary,
+      safe_actions: safeActions,
+      empty_fuel: false,
+      summary: `${health.operator_summary.summary}; ready admission has ${readyAdmission.admissible_now} admissible row(s) alongside ${unhealthyTargets} target_unhealthy row(s); safe actions: ${action}`,
+    },
+  };
+}
+
 export function mountContinuousOrchestrationRoutes(app: Application, opts: OrchestrationRouteOptions): void {
   const teamId = opts.teamId ?? "default";
   const { daemon, adapter, config } = opts;
@@ -86,8 +110,12 @@ export function mountContinuousOrchestrationRoutes(app: Application, opts: Orche
         since_iso: startOfDay.toISOString(),
         decision: "auto_ready",
       });
-      const autoPromoteHealth = await daemon.explainAutoPromoteHealth();
+      const baseAutoPromoteHealth = await daemon.explainAutoPromoteHealth();
       const readyAdmission = await daemon.explainReadyAdmission();
+      const autoPromoteHealth = withReadyAdmissionOperatorSummary(
+        baseAutoPromoteHealth,
+        readyAdmission,
+      );
       const health = await readOrchestrationHealthProjection(adapter, teamId, {
         minReadyFuel: config.min_ready_fuel,
         readyAdmission: {
