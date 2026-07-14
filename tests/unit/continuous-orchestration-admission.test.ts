@@ -611,6 +611,33 @@ describe("planAdmission — RD-014 agent-health gate", () => {
     expect(p.admit).toHaveLength(1);
     expect(p.assignments["pool-item"]).toBe("roger");
   });
+
+  it("admits manual refuel pool rows without explicit provider/runtime pins when the assigned builder is registered", () => {
+    const p = planAdmission(
+      [
+        item({
+          item_id: "manual-refuel-pool-no-runtime",
+          title: "Manual refuel row with pool lane and legacy metadata",
+          to_agent: "pool:backend",
+          provider: null,
+          runtime: null,
+          write_scope: [],
+        }),
+      ],
+      ctx({
+        admit_limit: 5,
+        pool_for: () => "backend",
+        pool_free_slots: new Map([["backend", 1]]),
+        pool_free_builders: new Map([["backend", ["substrate-api-codex"]]]),
+        target_agent_runtimes: new Map([["substrate-api-codex", "codex"]]),
+      }),
+      cfg,
+    );
+
+    expect(p.admit.map((i) => i.item_id)).toEqual(["manual-refuel-pool-no-runtime"]);
+    expect(p.assignments["manual-refuel-pool-no-runtime"]).toBe("substrate-api-codex");
+    expect(p.skipped).toHaveLength(0);
+  });
 });
 
 describe("evaluateStall", () => {
