@@ -781,6 +781,8 @@ export async function reconcileStaleAlreadyDispatchedReadyRows(
       from_state: "ready",
       to_state: toState,
       reason: "close_or_ignore",
+      track: row.track ?? null,
+      next_action: toState === "done" ? "close_duplicate_row" : "supersede_duplicate_row",
       prior_dispatch_phid: row.last_dispatch_phid ?? "",
       prior_dispatch_status: status,
       successor_dispatch_phid: null,

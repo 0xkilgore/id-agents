@@ -270,6 +270,7 @@ describe("orchestration health projection", () => {
     await setMode(adapter, "default", "running");
     const duplicate = await insertBacklogItem(adapter, {
       title: "already shipped duplicate",
+      track: "T-ORCH",
       readiness_state: "ready",
       risk_class: "build",
       to_agent: "roger",
@@ -321,6 +322,8 @@ describe("orchestration health projection", () => {
           receipt: {
             closed_by: "hopper",
             reason: "close_or_ignore",
+            track: "T-ORCH",
+            next_action: "close_duplicate_row",
             prior_dispatch_phid: "phid:disp-already-done",
             prior_dispatch_status: "done",
             successor_dispatch_phid: null,
@@ -339,6 +342,8 @@ describe("orchestration health projection", () => {
       closed_by: "hopper",
       to_state: "done",
       reason: "close_or_ignore",
+      track: "T-ORCH",
+      next_action: "close_duplicate_row",
       prior_dispatch_phid: "phid:disp-already-done",
       prior_dispatch_status: "done",
       redispatch_safety: { safe_to_not_redispatch: true },

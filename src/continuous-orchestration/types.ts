@@ -63,6 +63,10 @@ export interface StaleDuplicateCloseoutReceipt {
   from_state: "ready";
   to_state: "done" | "superseded" | "ready";
   reason: "close_or_ignore";
+  /** Roadmap track of the closed row, e.g. "T-ORCH" — carried through so ops surfaces don't have to re-join the backlog row. */
+  track: string | null;
+  /** Same vocabulary as DuplicateDispatchRetryReceipt.next_action for consistent ops-surface parsing. */
+  next_action: "close_duplicate_row" | "supersede_duplicate_row";
   prior_dispatch_phid: string;
   prior_dispatch_status: string;
   successor_dispatch_phid: string | null;

@@ -2777,11 +2777,13 @@ describe("stale already-dispatched ready reconciliation route", () => {
   it("closes or supersedes terminal rows, preserves retry-safe work, cites artifacts, and corrects ready counts", async () => {
     const closed = await seedReady(adapter, {
       title: "terminal done duplicate",
+      track: "T-ORCH",
       write_scope: ["repo/closed"],
       source_refs: ["roadmap:t-orch:closed"],
     });
     const superseded = await seedReady(adapter, {
       title: "terminal failed duplicate",
+      track: "T-ORCH",
       write_scope: ["repo/superseded"],
       source_refs: ["roadmap:t-orch:superseded"],
     });
@@ -2846,6 +2848,8 @@ describe("stale already-dispatched ready reconciliation route", () => {
             from_state: "ready",
             to_state: "done",
             reason: "close_or_ignore",
+            track: "T-ORCH",
+            next_action: "close_duplicate_row",
             prior_dispatch_phid: "phid:disp-closed",
             prior_dispatch_status: "done",
             successor_dispatch_phid: null,
@@ -2863,6 +2867,8 @@ describe("stale already-dispatched ready reconciliation route", () => {
           receipt: expect.objectContaining({
             closed_by: "hopper",
             reason: "close_or_ignore",
+            track: "T-ORCH",
+            next_action: "supersede_duplicate_row",
             successor_dispatch_phid: null,
             redispatch_safety: expect.objectContaining({
               safe_to_not_redispatch: true,
@@ -2883,6 +2889,8 @@ describe("stale already-dispatched ready reconciliation route", () => {
       from_state: "ready",
       to_state: "done",
       reason: "close_or_ignore",
+      track: "T-ORCH",
+      next_action: "close_duplicate_row",
       prior_dispatch_phid: "phid:disp-closed",
       prior_dispatch_status: "done",
       successor_dispatch_phid: null,
@@ -2900,6 +2908,8 @@ describe("stale already-dispatched ready reconciliation route", () => {
       from_state: "ready",
       to_state: "superseded",
       reason: "close_or_ignore",
+      track: "T-ORCH",
+      next_action: "supersede_duplicate_row",
       prior_dispatch_phid: "phid:disp-superseded",
       prior_dispatch_status: "failed",
       successor_dispatch_phid: null,
