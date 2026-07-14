@@ -1,0 +1,189 @@
+// Doc-model substrate slice 2 — the console's five surfaces (Now / Inbox /
+// Activity / Projects / Reports), stamped via Maestra's audience/kind
+// convention and projected purely from the artifact-document op log.
+
+import express, { type Express } from "express";
+import { describe, it, expect, beforeEach } from "vitest";
+import { SqliteAdapter } from "../../src/db/sqlite-adapter.js";
+import { migrateSqlite } from "../../src/db/migrations/sqlite.js";
+import {
+  authorArtifactDocument,
+  appendArtifactComment,
+  appendArtifactReceipt,
+} from "../../src/doc-model/artifact-document.js";
+import { mountArtifactSurfaceRoutes } from "../../src/doc-model/artifact-surface-routes.js";
+
+async function freshDb() {
+  const adapter = new SqliteAdapter(":memory:");
+  await migrateSqlite(adapter);
+  return adapter;
+}
+
+async function callAppRequest(app: Express, path: string): Promise<{ status: number; body: any }> {
+  return new Promise((resolve, reject) => {
+    const server = app.listen(0, "127.0.0.1", async () => {
+      const addr = server.address();
+      if (!addr || typeof addr === "string") {
+        server.close();
+        reject(new Error("no addr"));
+        return;
+      }
+      try {
+        const r = await fetch(`http://127.0.0.1:${addr.port}${path}`);
+        const text = await r.text();
+        server.close(() => resolve({ status: r.status, body: JSON.parse(text) }));
+      } catch (e) {
+        server.close(() => reject(e));
+      }
+    });
+  });
+}
+
+function mountApp(adapter: SqliteAdapter): Express {
+  const app = express();
+  mountArtifactSurfaceRoutes(app, adapter);
+  return app;
+}
+
+let adapter: SqliteAdapter;
+beforeEach(async () => {
+  adapter = await freshDb();
+});
+
+async function author(overrides: {
+  documentId: string;
+  title: string;
+  audience: "operator" | "system";
+  kind: "action-needed" | "report" | "document" | "receipt";
+  project?: string | null;
+  now?: string;
+}) {
+  await authorArtifactDocument(adapter, {
+    teamId: "default",
+    documentId: overrides.documentId,
+    ownerAgent: "rams",
+    actor: "rams",
+    title: overrides.title,
+    tag: "ux-research-weekly",
+    content: `# ${overrides.title}`,
+    sourceLink: null,
+    availability: "present",
+    audience: overrides.audience,
+    kind: overrides.kind,
+    project: overrides.project ?? null,
+    now: overrides.now,
+  });
+}
+
+describe("doc-model artifact surfaces — Now", () => {
+  it("shows only open (unreceipted) operator/action-needed documents", async () => {
+    await author({ documentId: "doc:open", title: "Open action item", audience: "operator", kind: "action-needed" });
+    await author({ documentId: "doc:closed", title: "Closed action item", audience: "operator", kind: "action-needed" });
+    await appendArtifactReceipt(adapter, { documentId: "doc:closed", actor: "chris", kind: "approve" });
+    await author({ documentId: "doc:system", title: "System action item", audience: "system", kind: "action-needed" });
+    await author({ documentId: "doc:report", title: "A report", audience: "operator", kind: "report" });
+
+    const app = mountApp(adapter);
+    const res = await callAppRequest(app, "/doc-model/surfaces/now");
+
+    expect(res.status).toBe(200);
+    expect(res.body.items.map((e: any) => e.phid)).toEqual(["doc:open"]);
+    expect(res.body.items[0].stamp).toEqual({ audience: "operator", kind: "action-needed" });
+  });
+});
+
+describe("doc-model artifact surfaces — Inbox", () => {
+  it("shows documents awaiting a response after the latest comment, not ones already receipted", async () => {
+    await author({ documentId: "doc:awaiting", title: "Awaiting response", audience: "operator", kind: "document" });
+    await appendArtifactComment(adapter, { documentId: "doc:awaiting", actor: "chris", body: "Can you clarify?" });
+
+    await author({ documentId: "doc:resolved", title: "Resolved thread", audience: "operator", kind: "document" });
+    await appendArtifactComment(adapter, { documentId: "doc:resolved", actor: "chris", body: "Ship it" });
+    await appendArtifactReceipt(adapter, { documentId: "doc:resolved", actor: "rams", kind: "ship_attempted" });
+
+    await author({ documentId: "doc:no-comments", title: "No comments yet", audience: "operator", kind: "document" });
+
+    const app = mountApp(adapter);
+    const res = await callAppRequest(app, "/doc-model/surfaces/inbox");
+
+    expect(res.status).toBe(200);
+    expect(res.body.items).toHaveLength(1);
+    expect(res.body.items[0].entry.phid).toBe("doc:awaiting");
+    expect(res.body.items[0].disposition).toBe("awaiting_response");
+    expect(res.body.items[0].latest_comment.body).toBe("Can you clarify?");
+  });
+});
+
+describe("doc-model artifact surfaces — Activity", () => {
+  it("lists receipt ops across documents, newest first", async () => {
+    await author({ documentId: "doc:a", title: "A", audience: "operator", kind: "document" });
+    await author({ documentId: "doc:b", title: "B", audience: "operator", kind: "document" });
+    await appendArtifactReceipt(adapter, {
+      documentId: "doc:a",
+      actor: "chris",
+      kind: "approve",
+      now: "2026-07-14T10:00:00.000Z",
+    });
+    await appendArtifactReceipt(adapter, {
+      documentId: "doc:b",
+      actor: "chris",
+      kind: "reject",
+      note: "needs rework",
+      now: "2026-07-14T11:00:00.000Z",
+    });
+
+    const app = mountApp(adapter);
+    const res = await callAppRequest(app, "/doc-model/surfaces/activity");
+
+    expect(res.status).toBe(200);
+    expect(res.body.items.map((e: any) => ({ document_id: e.document_id, receipt_kind: e.receipt_kind }))).toEqual([
+      { document_id: "doc:b", receipt_kind: "reject" },
+      { document_id: "doc:a", receipt_kind: "approve" },
+    ]);
+    expect(res.body.items[0].note).toBe("needs rework");
+  });
+});
+
+describe("doc-model artifact surfaces — Projects", () => {
+  it("groups documents by project, file-system-like, with an (unassigned) bucket", async () => {
+    await author({ documentId: "doc:kap-1", title: "Kap 1", audience: "operator", kind: "document", project: "kapelle" });
+    await author({ documentId: "doc:kap-2", title: "Kap 2", audience: "operator", kind: "document", project: "kapelle" });
+    await author({ documentId: "doc:idagents-1", title: "id-agents 1", audience: "system", kind: "document", project: "id-agents" });
+    await author({ documentId: "doc:none", title: "No project", audience: "system", kind: "document", project: null });
+
+    const app = mountApp(adapter);
+    const res = await callAppRequest(app, "/doc-model/surfaces/projects");
+
+    expect(res.status).toBe(200);
+    expect(res.body.items.map((g: any) => g.project)).toEqual(["(unassigned)", "id-agents", "kapelle"]);
+    const kapelle = res.body.items.find((g: any) => g.project === "kapelle");
+    expect(kapelle.documents.map((d: any) => d.document_id).sort()).toEqual(["doc:kap-1", "doc:kap-2"]);
+  });
+});
+
+describe("doc-model artifact surfaces — Reports", () => {
+  it("shows only operator/report documents, reverse-chron", async () => {
+    await author({
+      documentId: "doc:report-old",
+      title: "Older report",
+      audience: "operator",
+      kind: "report",
+      now: "2026-07-13T09:00:00.000Z",
+    });
+    await author({
+      documentId: "doc:report-new",
+      title: "Newer report",
+      audience: "operator",
+      kind: "report",
+      now: "2026-07-14T09:00:00.000Z",
+    });
+    await author({ documentId: "doc:action", title: "Not a report", audience: "operator", kind: "action-needed" });
+    await author({ documentId: "doc:system-report", title: "System report", audience: "system", kind: "report" });
+
+    const app = mountApp(adapter);
+    const res = await callAppRequest(app, "/doc-model/surfaces/reports");
+
+    expect(res.status).toBe(200);
+    expect(res.body.items.map((e: any) => e.phid)).toEqual(["doc:report-new", "doc:report-old"]);
+  });
+});

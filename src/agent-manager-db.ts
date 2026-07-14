@@ -14068,6 +14068,15 @@ export class AgentManagerDb {
           console.warn('[Manager] Doc-model artifact-document routes failed to mount:', err instanceof Error ? err.message : String(err));
         }
 
+        // Doc-model substrate slice 2 — console five-surface projections (Now/Inbox/Activity/Projects/Reports).
+        try {
+          const { mountArtifactSurfaceRoutes } = await import('./doc-model/artifact-surface-routes.js');
+          mountArtifactSurfaceRoutes(this.managementApp, this.db.adapter);
+          console.log('[Manager] Doc-model /doc-model/surfaces/* routes mounted');
+        } catch (err) {
+          console.warn('[Manager] Doc-model artifact-surface routes failed to mount:', err instanceof Error ? err.message : String(err));
+        }
+
         // Local-first read-model search v0 — shared frontend/server contract for
         // artifacts, projects, and tasks. The core contract is storage-neutral;
         // this manager mount feeds it from durable tables.

@@ -90,5 +90,8 @@ export function artifactRowToEntry(
       catalogPresent: true,
     }),
     provenance,
+    // Legacy filesystem-projected rows predate Maestra's stamping convention.
+    // Left null rather than guessed; doc-model substrate rows always stamp.
+    stamp: null,
   };
 }

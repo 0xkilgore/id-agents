@@ -16,12 +16,16 @@
 // reducer output; callers of the projection shape do not change.
 
 import type { DbAdapter } from "../db/db-adapter.js";
+import type { ActorRef, ArtifactEntry, ArtifactProvenance, EntryStamp, EntryStampAudience, EntryStampKind } from "../outputs/entry.js";
+import { buildProvenanceFromOpLog, finalizeEntryProvenance, parseActorRef } from "./provenance.js";
+import { localHealthVisualState } from "../local-search/visual-state.js";
 
 export const ARTIFACT_DOCUMENT_SCHEMA_VERSION = "doc_model.artifact_document.v1" as const;
 
 export type ArtifactDocumentOpType = "artifact_authored" | "comment_appended" | "receipt_appended";
 export type ArtifactDocumentAvailability = "present" | "missing" | "unknown";
 export type ArtifactDocumentReceiptKind = "approve" | "reject" | "ship_attempted" | "ship_blocked";
+export type { EntryStampAudience, EntryStampKind, EntryStamp };
 
 export interface ArtifactAuthoredOpPayload {
   title: string;
@@ -29,6 +33,9 @@ export interface ArtifactAuthoredOpPayload {
   content: string;
   source_link: string | null;
   availability: ArtifactDocumentAvailability;
+  audience: EntryStampAudience;
+  kind: EntryStampKind;
+  project: string | null;
 }
 
 export interface ArtifactCommentOpPayload {
@@ -46,6 +53,9 @@ export interface ArtifactDocumentProjection {
   doc_type: "artifact";
   owner_agent: string;
   revision: number;
+  /** Maestra's stamping convention — drives which of the five console surfaces this document appears on. */
+  stamp: EntryStamp;
+  project: string | null;
   frontmatter: {
     title: string;
     tag: string | null;
@@ -57,6 +67,8 @@ export interface ArtifactDocumentProjection {
   content: string;
   comments: Array<{ op_id: number; actor: string; ts: string; body: string }>;
   receipts: Array<{ op_id: number; actor: string; ts: string; kind: ArtifactDocumentReceiptKind; note: string | null }>;
+  /** Generic DV2 provenance over the same op log, for cross-kind (ArtifactEntry) compatibility. */
+  provenance: ArtifactProvenance;
   op_count: number;
   created_at: string;
   updated_at: string;
@@ -68,6 +80,9 @@ interface DocumentRow {
   doc_type: string;
   owner_agent: string;
   revision: number;
+  audience: EntryStampAudience;
+  kind: EntryStampKind;
+  project: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -101,6 +116,9 @@ export async function migrateDocModelDocumentTables(adapter: DbAdapter): Promise
       doc_type TEXT NOT NULL,
       owner_agent TEXT NOT NULL,
       revision INTEGER NOT NULL DEFAULT 0,
+      audience TEXT NOT NULL,
+      kind TEXT NOT NULL,
+      project TEXT,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
     )
@@ -120,6 +138,9 @@ export async function migrateDocModelDocumentTables(adapter: DbAdapter): Promise
 
   await exec(`CREATE INDEX IF NOT EXISTS doc_model_document_op_by_doc ON doc_model_document_op(document_id, op_id)`);
   await exec(`CREATE INDEX IF NOT EXISTS doc_model_document_by_team ON doc_model_document(team_id, doc_type, updated_at)`);
+  // Surface-projection lookups (Now/Reports filter on audience+kind; Projects groups by project).
+  await exec(`CREATE INDEX IF NOT EXISTS doc_model_document_by_stamp ON doc_model_document(team_id, audience, kind, updated_at)`);
+  await exec(`CREATE INDEX IF NOT EXISTS doc_model_document_by_project ON doc_model_document(team_id, project, updated_at)`);
 }
 
 /**
@@ -140,15 +161,18 @@ export async function authorArtifactDocument(
     content: string;
     sourceLink: string | null;
     availability: ArtifactDocumentAvailability;
+    audience: EntryStampAudience;
+    kind: EntryStampKind;
+    project: string | null;
     now?: string;
   },
 ): Promise<{ inserted: boolean }> {
   const now = input.now ?? new Date().toISOString();
   const inserted = await adapter.query(
-    `INSERT INTO doc_model_document (document_id, team_id, doc_type, owner_agent, revision, created_at, updated_at)
-     VALUES ($1, $2, 'artifact', $3, 1, $4, $5)
+    `INSERT INTO doc_model_document (document_id, team_id, doc_type, owner_agent, revision, audience, kind, project, created_at, updated_at)
+     VALUES ($1, $2, 'artifact', $3, 1, $4, $5, $6, $7, $8)
      ON CONFLICT(document_id) DO NOTHING`,
-    [input.documentId, input.teamId, input.ownerAgent, now, now],
+    [input.documentId, input.teamId, input.ownerAgent, input.audience, input.kind, input.project, now, now],
   );
   if ((inserted.rowCount ?? 0) === 0) return { inserted: false };
 
@@ -158,6 +182,9 @@ export async function authorArtifactDocument(
     content: input.content,
     source_link: input.sourceLink,
     availability: input.availability,
+    audience: input.audience,
+    kind: input.kind,
+    project: input.project,
   };
   await adapter.query(
     `INSERT INTO doc_model_document_op (document_id, revision, op_type, actor, ts, payload_json)
@@ -220,7 +247,7 @@ export async function projectArtifactDocument(
   documentId: string,
 ): Promise<ArtifactDocumentProjection | null> {
   const { rows: docRows } = await adapter.query<DocumentRow>(
-    `SELECT document_id, team_id, doc_type, owner_agent, revision, created_at, updated_at
+    `SELECT document_id, team_id, doc_type, owner_agent, revision, audience, kind, project, created_at, updated_at
        FROM doc_model_document WHERE document_id = $1`,
     [documentId],
   );
@@ -264,18 +291,105 @@ export async function projectArtifactDocument(
 
   if (!frontmatter) throw new Error(`doc-model document ${documentId} has no artifact_authored op`);
 
+  const createdBy = parseActorRef(frontmatter.authored_by);
+  const provenanceBase = finalizeEntryProvenance(
+    buildProvenanceFromOpLog(opRows, {
+      source: frontmatter.source_link,
+      origin: "substrate",
+      actor_ref: createdBy,
+    }),
+    createdBy,
+  );
+  const provenance: ArtifactProvenance = { ...provenanceBase, produced_by: [], references: [] };
+
   return {
     schema_version: ARTIFACT_DOCUMENT_SCHEMA_VERSION,
     document_id: doc.document_id,
     doc_type: "artifact",
     owner_agent: doc.owner_agent,
     revision: doc.revision,
+    stamp: { audience: doc.audience, kind: doc.kind },
+    project: doc.project,
     frontmatter,
     content,
     comments,
     receipts,
+    provenance,
     op_count: opRows.length,
     created_at: doc.created_at,
     updated_at: doc.updated_at,
   };
+}
+
+/**
+ * Map a doc-model projection onto the SAME canonical `ArtifactEntry` shape
+ * the legacy filesystem-projected route (`GET /artifacts/entries`, see
+ * outputs/entry-projection.ts) already emits. This is the "swap is a
+ * data-source change, not a rewrite" seam: a console coded against
+ * `ArtifactEntry[]` / `ReadModelEnvelope<ArtifactEntry>` does not change when
+ * its source flips from the legacy projection to this one.
+ */
+export function artifactDocumentToEntry(projection: ArtifactDocumentProjection): ArtifactEntry {
+  const lastRevision = projection.provenance.revisions[projection.provenance.revisions.length - 1];
+  const createdBy: ActorRef = projection.provenance.contributors[0] ?? { type: "agent", id: projection.owner_agent };
+  return {
+    phid: projection.document_id,
+    kind: "artifact",
+    schema_version: 1,
+    title: projection.frontmatter.title,
+    body_markdown: projection.content,
+    display_id: projection.document_id,
+    artifact_kind: projection.frontmatter.tag ?? "artifact",
+    project: projection.project,
+    path: null,
+    source_dispatch_phid: projection.provenance.source_dispatch_phid,
+    produced_by_agent: projection.owner_agent,
+    links: [],
+    created_at: projection.created_at,
+    created_by: createdBy,
+    updated_at: projection.updated_at,
+    updated_by: lastRevision?.by ?? createdBy,
+    // Doc-model rows have no separate on-disk file to drift from — the DB op
+    // log is the only source, so they are always "current".
+    local_visual_state: localHealthVisualState("current", "artifact"),
+    provenance: projection.provenance,
+    stamp: projection.stamp,
+  };
+}
+
+interface DocumentSummaryRow {
+  document_id: string;
+  updated_at: string;
+}
+
+/**
+ * List document_ids matching a stamp/project filter, ordered by updated_at.
+ * Queries the hoisted `doc_model_document` columns only (no op replay) — the
+ * cheap index-backed pass surface routes use before projecting full content.
+ */
+export async function listArtifactDocumentIds(
+  adapter: DbAdapter,
+  teamId: string,
+  filter: { audience?: EntryStampAudience; kind?: EntryStampKind; project?: string; order?: "asc" | "desc" } = {},
+): Promise<string[]> {
+  const clauses = ["team_id = $1", "doc_type = 'artifact'"];
+  const params: unknown[] = [teamId];
+  if (filter.audience) {
+    params.push(filter.audience);
+    clauses.push(`audience = $${params.length}`);
+  }
+  if (filter.kind) {
+    params.push(filter.kind);
+    clauses.push(`kind = $${params.length}`);
+  }
+  if (filter.project !== undefined) {
+    params.push(filter.project);
+    clauses.push(`project = $${params.length}`);
+  }
+  const order = filter.order === "desc" ? "DESC" : "ASC";
+  const { rows } = await adapter.query<DocumentSummaryRow>(
+    `SELECT document_id, updated_at FROM doc_model_document WHERE ${clauses.join(" AND ")} ORDER BY updated_at ${order}`,
+    params,
+  );
+  return rows.map((row) => row.document_id);
 }

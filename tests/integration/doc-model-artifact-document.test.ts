@@ -75,6 +75,9 @@ describe("doc-model artifact documents — storage", () => {
       content: "# Findings\n\n1. Console artifact reader reads markdown-on-disk.",
       sourceLink: "https://manager.local/artifacts/docart:rams:ux-research-weekly:2026-07-14",
       availability: "present",
+      audience: "operator",
+      kind: "report",
+      project: "kapelle",
     });
     expect(first.inserted).toBe(true);
 
@@ -88,6 +91,9 @@ describe("doc-model artifact documents — storage", () => {
       content: "should not overwrite",
       sourceLink: null,
       availability: "present",
+      audience: "operator",
+      kind: "report",
+      project: "kapelle",
     });
     expect(retry.inserted).toBe(false);
 
@@ -121,6 +127,9 @@ describe("doc-model artifact documents — storage", () => {
       content: "# Findings",
       sourceLink: null,
       availability: "present",
+      audience: "operator",
+      kind: "report",
+      project: "kapelle",
     });
 
     const commentResult = await appendArtifactComment(adapter, {
@@ -175,6 +184,9 @@ describe("doc-model artifact documents — /doc-model/artifacts route (rams pilo
       content: "# Findings\n\n1. Console artifact reader reads markdown-on-disk.\n2. Kill the grep pattern.",
       sourceLink: "https://manager.local/artifacts/docart:rams:ux-research-weekly:2026-07-14",
       availability: "present",
+      audience: "operator",
+      kind: "report",
+      project: "kapelle",
     });
 
     const app = mountApp(adapter);

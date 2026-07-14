@@ -76,6 +76,21 @@ export interface ArtifactProvenance extends EntryProvenance {
 }
 
 /**
+ * Maestra's stamping convention: who an entry is for (audience) and what
+ * triage bucket it belongs to (kind). Drives the console's five surfaces
+ * (Now / Inbox / Activity / Projects / Reports). Nullable/additive on
+ * ArtifactEntry — legacy filesystem-projected rows (entry-projection.ts)
+ * predate the convention and carry `stamp: null` until backfilled; doc-model
+ * substrate rows (doc-model/artifact-document.ts) always carry one.
+ */
+export type EntryStampAudience = "operator" | "system";
+export type EntryStampKind = "action-needed" | "report" | "document" | "receipt";
+export interface EntryStamp {
+  audience: EntryStampAudience;
+  kind: EntryStampKind;
+}
+
+/**
  * DV1 ArtifactEntry — the row shape the operator surfaces query. A pure
  * projection over the existing `artifacts` / `artifact_review_state` /
  * `artifact_operations` tables (see entry-projection.ts) — no schema migration.
@@ -100,6 +115,7 @@ export interface ArtifactEntry {
   updated_by: ActorRef;
   local_visual_state: LocalHealthVisual;
   provenance: ArtifactProvenance;
+  stamp: EntryStamp | null;
 }
 
 /** Shared read-model envelope (parent contract §3) for the substrate surfaces. */
