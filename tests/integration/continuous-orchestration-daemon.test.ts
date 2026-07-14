@@ -2585,7 +2585,7 @@ describe("daemon — dry-run vs live", () => {
     expect(repaired).toMatchObject({ provider: "openai", runtime: "codex", readiness_state: "ready" });
   });
 
-  it("status treats dispatched refuel-wave rows as capacity fuel when raw ready drops below floor", async () => {
+  it("status treats dispatched refuel-wave rows as healthy capacity fuel when raw ready drops below floor", async () => {
     const first = await seedReady(adapter, { title: "wave item one", write_scope: ["repo/wave-a"] });
     const second = await seedReady(adapter, { title: "wave item two", write_scope: ["repo/wave-b"] });
     await setItemState(adapter, first.item_id, "in_flight", { dispatch_phid: "phid:disp-wave-a" });
@@ -2598,7 +2598,7 @@ describe("daemon — dry-run vs live", () => {
         max_in_flight: 2,
         auto_flesh_enabled: true,
         auto_promote_enabled: true,
-        auto_promote_floor: 8,
+        auto_promote_floor: 2,
         auto_promote_min_lanes: 2,
       },
       { inFlight: 2 },
@@ -2619,10 +2619,20 @@ describe("daemon — dry-run vs live", () => {
         build_in_flight: 2,
         ready_plus_in_flight: 2,
         capacity_occupied: true,
+        build_ready_lanes: 2,
+      },
+      operator_summary: {
+        empty_fuel: false,
+        capacity_gated: true,
+        lane_diversity_topoff_needed: false,
       },
     });
-    expect(res.body.auto_promote_health.summary).toMatch(/capacity is occupied/);
-    expect(res.body.auto_promote_health.summary).toMatch(/in_flight=2\/2/);
+    expect(res.body.auto_promote_health.summary).toBe(
+      "ready build fuel raw floor satisfied but daemon capacity is occupied: ready_plus_in_flight=2 floor=2, in_flight=2/2, lanes=2/2; lane diversity satisfied",
+    );
+    expect(res.body.auto_promote_health.summary).not.toMatch(/empty fuel/i);
+    expect(res.body.auto_promote_health.operator_summary.summary).toContain("gated fuel (capacity full)");
+    expect(res.body.auto_promote_health.operator_summary.summary).not.toMatch(/empty fuel/i);
   });
 });
 
