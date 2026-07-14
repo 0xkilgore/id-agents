@@ -265,11 +265,11 @@ import { getTelegramAlertDeliveryHealth } from './continuous-orchestration/alert
 import { sendTelegramAlert } from './continuous-orchestration/telegram.js';
 import {
   evaluateFleetRuntimeDrift,
-  deriveRuntimeDriftState,
+  deriveFleetRuntimeDriftInputs,
+  formatFleetRuntimeDriftAlert,
   EMPTY_FLEET_DRIFT_SUMMARY,
   type FleetRuntimeDriftState,
   type FleetRuntimeDriftSummary,
-  type AgentDriftInput,
 } from './dispatch-scheduler/runtime-drift.js';
 import { normalizeActorRef } from './actor-identity.js';
 import {
@@ -13342,11 +13342,7 @@ export class AgentManagerDb {
           dispatches: [],
           runtimes,
         });
-        const driftInputs: AgentDriftInput[] = agents.map((a) => ({
-          agent_id: a.id,
-          agent_name: a.name,
-          state: deriveRuntimeDriftState(a, healthModel),
-        }));
+        const driftInputs = deriveFleetRuntimeDriftInputs(agents, healthModel);
         const { next: nextDrift, alerts: driftAlerts, summary: driftSummary } = evaluateFleetRuntimeDrift(
           this.runtimeDriftState,
           driftInputs,
@@ -13356,7 +13352,10 @@ export class AgentManagerDb {
         this.runtimeDriftSummary = driftSummary;
         for (const { agent_name, alert } of driftAlerts) {
           console.warn(`[Manager] runtime-drift ${agent_name} ${alert.kind}: ${alert.message}`);
-          void sendTelegramAlert(`[${agent_name}] ${alert.message}`).catch(() => {});
+        }
+        const driftAlertMessage = formatFleetRuntimeDriftAlert(driftAlerts);
+        if (driftAlertMessage) {
+          void sendTelegramAlert(driftAlertMessage).catch(() => {});
         }
       } catch (err) {
         console.warn('[Manager] runtime-drift monitor tick failed:', err instanceof Error ? err.message : String(err));

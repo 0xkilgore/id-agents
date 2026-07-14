@@ -2,10 +2,13 @@ import { describe, expect, it } from "vitest";
 
 import {
   deriveRuntimeDriftState,
+  deriveFleetRuntimeDriftInputs,
   evaluateFleetRuntimeDrift,
   evaluateRuntimeDrift,
+  formatFleetRuntimeDriftAlert,
   INITIAL_DRIFT,
   type AgentDriftTrackerState,
+  type RuntimeDriftAgent,
   type FleetRuntimeDriftState,
 } from "../../src/dispatch-scheduler/runtime-drift.js";
 import { computeRoutingHealth } from "../../src/routing-health/read-model.js";
@@ -141,6 +144,111 @@ describe("evaluateFleetRuntimeDrift", () => {
       T0,
     );
     expect(summary.drifted_agents).toEqual([]);
+  });
+});
+
+function driftAgent(name: string, status: string, runtime = "claude-code-cli"): RuntimeDriftAgent {
+  return { id: `agent-${name}`, name, status, runtime };
+}
+
+describe("deriveFleetRuntimeDriftInputs", () => {
+  it("uses the current desired-online set and ignores intentionally parked specialists", () => {
+    const currentAgents = [
+      driftAgent("cursor-coder-pilot", "stopped"),
+      driftAgent("substrate-orch-codex", "running", "codex"),
+      driftAgent("substrate-api-codex", "stopped"),
+      driftAgent("frontend-qa-cursor", "stopped"),
+      driftAgent("frontend-ui-codex", "running"),
+      driftAgent("gaudi", "stopped", "codex"),
+      driftAgent("eames", "stopped", "codex"),
+      driftAgent("brunel", "stopped"),
+      driftAgent("hopper", "stopped", "codex"),
+      driftAgent("rams", "running"),
+      driftAgent("coder-max", "stopped"),
+      driftAgent("regina", "running", "codex"),
+      driftAgent("cto", "running"),
+      driftAgent("blowout", "offline"),
+      driftAgent("politics", "offline"),
+      driftAgent("sentinel", "running", "codex"),
+      driftAgent("roger", "running", "codex"),
+      driftAgent("maestra", "running"),
+      driftAgent("defi", "offline"),
+      driftAgent("trinity", "offline"),
+      driftAgent("cleveland-park", "offline"),
+      driftAgent("pipeline", "offline"),
+      driftAgent("personal", "offline", "codex"),
+      driftAgent("finances", "running"),
+      driftAgent("cane", "running"),
+    ];
+
+    const inputs = deriveFleetRuntimeDriftInputs(currentAgents, healthModelWith([]));
+    expect(inputs.map((a) => a.agent_name)).toEqual([
+      "substrate-orch-codex",
+      "frontend-ui-codex",
+      "rams",
+      "regina",
+      "cto",
+      "sentinel",
+      "roger",
+      "maestra",
+      "finances",
+      "cane",
+    ]);
+  });
+
+  it("preserves alerts for desired-online lanes while parked agents on the same runtime are ignored", () => {
+    const inputs = deriveFleetRuntimeDriftInputs(
+      [
+        driftAgent("parked-claude-specialist", "stopped"),
+        driftAgent("required-claude-lane", "running"),
+      ],
+      healthModelWith(["claude"]),
+    );
+
+    const { alerts, summary } = evaluateFleetRuntimeDrift(
+      { "agent-required-claude-lane": healthy(T0) },
+      inputs,
+      T0 + MIN,
+    );
+    expect(alerts.map((a) => a.agent_name)).toEqual(["required-claude-lane"]);
+    expect(summary.drifted_agents.map((a) => a.agent_name)).toEqual(["required-claude-lane"]);
+  });
+});
+
+describe("formatFleetRuntimeDriftAlert", () => {
+  it("aggregates repeated drift and recovery events into one actionable Telegram summary", () => {
+    const { alerts } = evaluateFleetRuntimeDrift(
+      {
+        "agent-roger": healthy(T0),
+        "agent-regina": healthy(T0),
+        "agent-cane": pending(T0, T0),
+      },
+      [
+        { agent_id: "agent-roger", agent_name: "roger", state: "offline" },
+        { agent_id: "agent-regina", agent_name: "regina", state: "pending" },
+        { agent_id: "agent-cane", agent_name: "cane", state: "healthy" },
+      ],
+      T0 + MIN,
+    );
+
+    const message = formatFleetRuntimeDriftAlert(alerts);
+    expect(message).toBe([
+      "Runtime drift incident",
+      "Drifted desired-online agents (2):",
+      "- roger: Agent runtime flipped healthy -> offline.",
+      "- regina: Agent runtime flipped healthy -> pending.",
+      "Recovered desired-online agents (1):",
+      "- cane: Agent runtime recovered — was pending, now healthy.",
+    ].join("\n"));
+  });
+
+  it("returns no Telegram message when per-agent re-alert suppression produces no alerts", () => {
+    const { alerts } = evaluateFleetRuntimeDrift(
+      { "agent-roger": pending(T0, T0) },
+      [{ agent_id: "agent-roger", agent_name: "roger", state: "pending" }],
+      T0 + 5 * MIN,
+    );
+    expect(formatFleetRuntimeDriftAlert(alerts)).toBeNull();
   });
 });
 

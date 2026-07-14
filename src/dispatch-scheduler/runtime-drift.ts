@@ -128,6 +128,8 @@ export interface AgentDriftInput {
   state: RuntimeDriftState;
 }
 
+export type RuntimeDriftAgent = Pick<AgentRow, "id" | "name" | "status" | "runtime">;
+
 /** Per-agent drift tracker state, keyed by agent_id. */
 export type FleetRuntimeDriftState = Record<string, AgentDriftTrackerState>;
 
@@ -156,6 +158,45 @@ export interface FleetDriftResult {
 }
 
 export const EMPTY_FLEET_DRIFT_SUMMARY: FleetRuntimeDriftSummary = { drifted_agents: [] };
+
+export function isDesiredOnlineAgent(agent: Pick<AgentRow, "status">): boolean {
+  const status = (agent.status ?? "").trim().toLowerCase();
+  return LIVE_AGENT_STATUSES.has(status);
+}
+
+export function deriveFleetRuntimeDriftInputs(
+  agents: RuntimeDriftAgent[],
+  model: RoutingHealthReadModel | null | undefined,
+): AgentDriftInput[] {
+  return agents
+    .filter(isDesiredOnlineAgent)
+    .map((agent) => ({
+      agent_id: agent.id,
+      agent_name: agent.name,
+      state: deriveRuntimeDriftState(agent, model),
+    }));
+}
+
+function formatAlertLine(alert: AgentDriftAlert): string {
+  return `- ${alert.agent_name}: ${alert.alert.message}`;
+}
+
+export function formatFleetRuntimeDriftAlert(alerts: AgentDriftAlert[]): string | null {
+  if (alerts.length === 0) return null;
+
+  const drifted = alerts.filter((a) => a.alert.kind === "drifted");
+  const recovered = alerts.filter((a) => a.alert.kind === "recovered");
+  const parts = ["Runtime drift incident"];
+
+  if (drifted.length > 0) {
+    parts.push(`Drifted desired-online agents (${drifted.length}):`, ...drifted.map(formatAlertLine));
+  }
+  if (recovered.length > 0) {
+    parts.push(`Recovered desired-online agents (${recovered.length}):`, ...recovered.map(formatAlertLine));
+  }
+
+  return parts.join("\n");
+}
 
 /**
  * Advance every agent's drift tracker by one observation, folding the results
