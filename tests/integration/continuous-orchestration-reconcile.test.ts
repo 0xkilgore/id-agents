@@ -245,24 +245,50 @@ describe("completion reconciliation — terminal dispatch releases the lock", ()
     expect((await getBacklogItem(adapter, item.item_id))!.readiness_state).toBe("needs_review");
   });
 
-  it("does NOT reap a PENDING (non-moot) needs_clarification dispatch, no matter how stale", async () => {
-    // Root-caused 2026-07-04: a dispatch parked in needs_clarification (waiting
-    // on an external human/manager decision — its duration is unrelated to
-    // whether the worker is alive) got phantom-lock-reaped by this exact
-    // staleness window every ~10 min for 3+ hours. Only recovery_status='moot'
-    // (the ALREADY-CORRECT signal for an abandoned clarification, covered by
-    // the "mooted dispatch clarification" test above) should release it.
+  it("keeps a fresh PENDING (non-moot) needs_clarification dispatch in_flight", async () => {
     const item = await seedInFlight({ dispatch_phid: "phid:disp-pending-clarification" });
     await seedDispatch("phid:disp-pending-clarification", "needs_clarification"); // recovery_status default "none", NOT moot
     await backdateUpdatedAt(item.item_id, new Date(BASE).toISOString());
 
-    // Absurdly far past any stale window (10x the default pool window) —
-    // proves this is not merely "not stale yet", it is exempt entirely.
-    const { daemon } = makeDaemon({ config: { pool_stale_in_flight_ms: 10 * 60_000 }, nowMs: BASE + 100 * 60_000 });
+    const { daemon } = makeDaemon({ config: { stale_in_flight_ms: 30 * 60_000 }, nowMs: BASE + 5 * 60_000 });
     const tick = await daemon.runTick();
 
     expect(tick.reconciled).toBe(0);
     expect((await getBacklogItem(adapter, item.item_id))!.readiness_state).toBe("in_flight");
+  });
+
+  it("releases a stale PENDING needs_clarification lock before admission", async () => {
+    const first = await seedInFlight({
+      dispatch_phid: "phid:disp-stale-clarification",
+      write_scope: ["repoX"],
+    });
+    const second = await insertBacklogItem(adapter, {
+      title: "same lane after clarification",
+      to_agent: "roger",
+      dispatch_body: "do next X",
+      readiness_state: "ready",
+      risk_class: "build",
+      priority: 5,
+      write_scope: ["repoX"],
+      token_estimate: 0,
+    });
+    await seedDispatch("phid:disp-stale-clarification", "needs_clarification");
+    await backdateUpdatedAt(first.item_id, new Date(BASE).toISOString());
+
+    const { daemon: modeSetter } = makeDaemon({ config: { max_in_flight: 1, stale_in_flight_ms: 30 * 60_000 } });
+    await modeSetter.setMode("running");
+
+    const fired: BacklogItem[] = [];
+    const { daemon } = makeDaemon({
+      fired,
+      config: { max_in_flight: 1, stale_in_flight_ms: 30 * 60_000 },
+      nowMs: BASE + 31 * 60_000,
+    });
+    const tick = await daemon.runTick();
+
+    expect(tick.reconciled).toBe(1);
+    expect((await getBacklogItem(adapter, first.item_id))!.readiness_state).toBe("needs_review");
+    expect(fired.map((i) => i.item_id)).toContain(second.item_id);
   });
 });
 

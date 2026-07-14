@@ -1294,8 +1294,12 @@ export class ContinuousOrchestrationDaemon {
    *    completions, pruned rows, daemon restarts).
    *  - queued dispatch UNRESOLVABLE → LEFT ALONE: without clear dispatch terminal
    *    evidence, preserving it avoids a duplicate re-fire.
-   *  - dispatch resolvable but NON-terminal (active/queued) → LEFT ALONE: the
-   *    scheduler owns its recovery; reaping a live build would double-fire.
+   *  - dispatch resolvable but NON-terminal (active/queued/needs_clarification)
+   *    and fresh → LEFT ALONE: the scheduler owns its recovery; reaping a live
+   *    build would double-fire.
+   *  - dispatch resolvable but NON-terminal and stale → release to needs_review
+   *    so a parked clarification or zombie build cannot hold a write scope
+   *    indefinitely.
    *
    * Runs every tick BEFORE readInFlight so freed lanes are admissible the same
    * tick. Dry-run mirrors the refuel posture: compute + log "would_reconcile",
@@ -1334,27 +1338,14 @@ export class ContinuousOrchestrationDaemon {
         toState = status === "done" ? "done" : status === "cancelled" ? "cancelled" : "needs_review";
         via = "completion";
         reason = `dispatch ${status} → ${toState} (lock released)`;
-      } else if (status === "needs_clarification") {
-        // A pending clarification is waiting on an external human/manager
-        // decision — its duration is unbounded and unrelated to whether the
-        // worker is alive, so the stale-in_flight/pool windows (10-30 min)
-        // are the wrong signal for it entirely. Root-caused 2026-07-04: a
-        // dispatch parked in needs_clarification got phantom-lock-reaped to
-        // needs_review every ~10 min for 3+ hours while genuinely awaiting a
-        // reply, and (see auto-promote-policy.ts) each reap was immediately
-        // auto-promoted back to ready and re-fired as a duplicate dispatch.
-        // The ALREADY-CORRECT release path for an abandoned clarification is
-        // recovery_status='moot' (resolved to the synthetic "moot" status
-        // above, which IS terminal) — leave a live, non-moot clarification
-        // in_flight indefinitely and let that signal (or the eventual
-        // manager resume) be what moves it, never this staleness window.
       } else if (item.readiness_state === "in_flight") {
         // Non-terminal: either RESOLVABLE-but-stuck (the dispatch is still
         // in_flight/queued because its worker died, was killed, or is parked,
         // and the scheduler isn't recovering it) OR UNRESOLVABLE (pruned/
-        // missing row, null phid). Both are PHANTOM LOCKS once aged out.
-        // needs_clarification is handled separately above — it is never a
-        // phantom-lock candidate on this timer.
+        // missing row, null phid). Both are PHANTOM LOCKS once aged out. A
+        // needs_clarification dispatch is also a lock candidate once stale:
+        // the dispatch may remain parked for operator input, but its backlog
+        // row must not hold the write scope indefinitely.
         // This is the build-POOL strangle: Stage C routes each build to its own
         // worktree, and a dead pool worker's dispatch frequently never reaches a
         // terminal status — so without this it would hold its pool slot +
