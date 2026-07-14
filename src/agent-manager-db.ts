@@ -5368,6 +5368,7 @@ export class AgentManagerDb {
       const build = this.getBuildStatus();
       const disk = readDiskHeadroom();
       const supervisor = this.getSupervisorHealthStatus(now);
+      const supervisorRequiredForNominal = process.env.SUPERVISOR_OPTIONAL !== 'true';
       const nominal = this.evaluateNominalHealth({ build, disk, supervisor });
       const body = {
         status: 'ok',
@@ -5385,7 +5386,11 @@ export class AgentManagerDb {
         disk,
         // Supervisor freshness: is the watch-and-alert loop itself running
         // recently enough to trust stale-manager / low-disk warnings?
-        supervisor,
+        supervisor: {
+          ...supervisor,
+          required_for_nominal: supervisorRequiredForNominal,
+          nominal_mode: supervisorRequiredForNominal ? 'required' : 'optional',
+        },
         alert_delivery: {
           telegram: getTelegramAlertDeliveryHealth(),
         },

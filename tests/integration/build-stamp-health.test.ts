@@ -161,6 +161,8 @@ describe('GET /health build-stamp (T11.1)', () => {
       enabled: expect.any(Boolean),
       running: expect.any(Boolean),
       state: expect.stringMatching(/^(disabled|stopped|starting|fresh|stale|error)$/),
+      required_for_nominal: expect.any(Boolean),
+      nominal_mode: expect.stringMatching(/^(required|optional)$/),
       poll_interval_seconds: expect.any(Number),
       stale_after_seconds: expect.any(Number),
       last_tick_started_at: null,
@@ -168,6 +170,12 @@ describe('GET /health build-stamp (T11.1)', () => {
       last_error_at: null,
       last_error: null,
       open_alert_count: expect.any(Number),
+    });
+
+    expect(body.worktree_os_policy.deploy_checkout_dependency).toMatchObject({
+      state: 'satisfied',
+      health: 'green',
+      required_repair: 'none',
     });
 
     expect(body.fleet_freshness.nodes[0]).toMatchObject({

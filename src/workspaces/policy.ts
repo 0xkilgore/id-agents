@@ -3,11 +3,17 @@ import type { PromotionAgentDone } from "../dispatch-scheduler/types.js";
 export const WORKTREE_OS_POLICY_VERSION = "worktree-os-policy.v1";
 
 export const CLEAN_DEPLOY_CHECKOUT_REPAIR_DEPENDENCY = {
-  dispatch_id: "phid:disp-be115010513e4105",
+  resolved_by_dispatch_id: "phid:disp-be115010513e4105",
   owner: "cto",
   repo_name: "id-agents-deploy-main",
-  state: "external_active_dependency",
-  required_repair: "restore missing clean deploy checkout before treating deploy-root health as green",
+  state: "satisfied",
+  health: "green",
+  checkout_path: "/Users/kilgore/Dropbox/Code/cane/id-agents-deploy-main",
+  required_repair: "none",
+  evidence: [
+    "manager launchd plist executes scripts/start-id-agents-manager.sh from id-agents-deploy-main",
+    "clean deploy checkout is registered as a protected root with critical dirty-root severity",
+  ],
 } as const;
 
 export type AdmissionPolicyAction = "admit" | "reject" | "quarantine";

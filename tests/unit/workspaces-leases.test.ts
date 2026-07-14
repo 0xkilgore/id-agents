@@ -20,6 +20,7 @@ import {
   validatePromotionLeaseFields,
 } from "../../src/workspaces/closeout.js";
 import { classifySeverity } from "../../src/workspaces/monitor.js";
+import { CLEAN_DEPLOY_CHECKOUT_REPAIR_DEPENDENCY } from "../../src/workspaces/policy.js";
 import type { ProtectedRootEntry } from "../../src/workspaces/repo-registry.js";
 
 const idAgents = "/Users/kilgore/Dropbox/Code/cane/id-agents";
@@ -59,6 +60,16 @@ describe("RepoRegistry", () => {
       repo_name: "id-agents-deploy-main",
       dirty_severity: "critical",
       block_builds_without_lease: true,
+    });
+  });
+
+  it("reports the clean deploy checkout dependency as satisfied, not active external work", () => {
+    expect(CLEAN_DEPLOY_CHECKOUT_REPAIR_DEPENDENCY).toMatchObject({
+      repo_name: "id-agents-deploy-main",
+      state: "satisfied",
+      health: "green",
+      checkout_path: "/Users/kilgore/Dropbox/Code/cane/id-agents-deploy-main",
+      required_repair: "none",
     });
   });
 
