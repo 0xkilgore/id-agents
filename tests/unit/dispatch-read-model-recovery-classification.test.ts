@@ -23,6 +23,7 @@ import { test, expect } from "vitest";
 import {
   deriveEmptySuccessCandidate,
   deriveRecoveryClassification,
+  validateRefuelCloseoutArtifact,
 } from "../../src/dispatch-scheduler/read-model";
 
 // Shape matching the `RecoveryClassificationRow` Pick from read-model.ts.
@@ -455,6 +456,61 @@ test("empty-success guard: wave 19 promote counts and post-status verification a
 
   expect(cls.empty_success_candidate).toBe(false);
   expect(cls.result_keys).toEqual(["post_status_verification", "promote_counts"]);
+});
+
+test("refuel closeout artifact validator requires sources, created rows, promote results, and post-refuel status counts", () => {
+  const validation = validateRefuelCloseoutArtifact(JSON.stringify({
+    sources_scanned: [
+      "GET /projects/kapelle/sources",
+      "GET /orchestration/status",
+    ],
+    created_rows: [
+      { id: "kapelle-refuel-001", lane: "backend" },
+      { id: "kapelle-refuel-002", lane: "backend" },
+    ],
+    promote_counts: {
+      considered: 6,
+      promoted: 4,
+      skipped: 2,
+    },
+    post_status_verification: {
+      ready_before: 1,
+      ready_after: 5,
+      needs_review_after: 12,
+      verified: true,
+    },
+  }));
+
+  expect(validation).toEqual({
+    ok: true,
+    missing: [],
+    present: [
+      "sources_scanned",
+      "rows_created",
+      "promote_results",
+      "post_refuel_orchestration_status_counts",
+    ],
+  });
+});
+
+test("refuel closeout artifact validator is advisory for incomplete closeout evidence", () => {
+  const validation = validateRefuelCloseoutArtifact(JSON.stringify({
+    sources_scanned: ["GET /projects/kapelle/sources"],
+    created_rows: [{ id: "kapelle-refuel-001" }],
+    promote_counts: {
+      considered: 1,
+      promoted: 1,
+      skipped: 0,
+    },
+  }));
+
+  expect(validation.ok).toBe(false);
+  expect(validation.present).toEqual([
+    "sources_scanned",
+    "rows_created",
+    "promote_results",
+  ]);
+  expect(validation.missing).toEqual(["post_refuel_orchestration_status_counts"]);
 });
 
 test("empty-success guard: empty wave evidence containers still need review", () => {

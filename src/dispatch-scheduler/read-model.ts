@@ -1314,6 +1314,12 @@ export interface EmptySuccessCandidate {
   result_keys: string[];
 }
 
+export interface RefuelCloseoutArtifactValidation {
+  ok: boolean;
+  missing: string[];
+  present: string[];
+}
+
 const EMPTY_SUCCESS_FAST_MS = 2 * 60_000;
 const SUBSTANTIAL_RESULT_TEXT_MIN = 120;
 const EXPLICIT_NOOP_RE = /\b(no-?op|skip(?:ped)?|not applicable|already (?:done|current|up to date)|no changes? (?:needed|required)|intentionally no work)\b/i;
@@ -1354,6 +1360,21 @@ export function deriveEmptySuccessCandidate(row: EmptySuccessCandidateRow): Empt
     resultTextLength,
     resultKeys,
   );
+}
+
+export function validateRefuelCloseoutArtifact(raw: string | null | undefined): RefuelCloseoutArtifactValidation {
+  const parsed = parseJsonObject(raw);
+  const checks: Array<[string, boolean]> = [
+    ["sources_scanned", hasSourcesScanned(parsed)],
+    ["rows_created", hasRowsCreated(parsed)],
+    ["promote_results", hasPromoteResults(parsed)],
+    ["post_refuel_orchestration_status_counts", hasPostRefuelStatusCounts(parsed)],
+  ];
+  return {
+    ok: checks.every(([, ok]) => ok),
+    missing: checks.filter(([, ok]) => !ok).map(([name]) => name),
+    present: checks.filter(([, ok]) => ok).map(([name]) => name),
+  };
 }
 
 function emptySuccessReason(row: EmptySuccessCandidateRow): string {
@@ -1413,6 +1434,59 @@ function hasExplicitNoopEvidence(parsed: Record<string, unknown> | null, resultT
     return resultText.trim().length >= 20 || typeof parsed.reason === "string";
   }
   return EXPLICIT_NOOP_RE.test(resultText) && resultText.trim().length >= 20;
+}
+
+function hasSourcesScanned(parsed: Record<string, unknown> | null): boolean {
+  if (!parsed) return false;
+  return hasNonEmptyArray(parsed.sources_scanned)
+    || hasNonEmptyArray(parsed.sources)
+    || positiveNumber(parsed.source_count)
+    || positiveNumber(parsed.sources_scanned_count);
+}
+
+function hasRowsCreated(parsed: Record<string, unknown> | null): boolean {
+  if (!parsed) return false;
+  return positiveNumber(parsed.rows_created)
+    || positiveNumber(parsed.created_rows)
+    || hasNonEmptyArray(parsed.created_rows)
+    || hasNonEmptyArray(parsed.rows);
+}
+
+function hasPromoteResults(parsed: Record<string, unknown> | null): boolean {
+  if (!parsed) return false;
+  if (positiveNumber(parsed.promoted_count)) return true;
+  const promoteCounts = objectValue(parsed.promote_counts);
+  if (positiveNumber(promoteCounts?.promoted) || positiveNumber(promoteCounts?.accepted)) return true;
+  const promoteResults = objectValue(parsed.promote_results);
+  if (positiveNumber(promoteResults?.promoted) || positiveNumber(promoteResults?.accepted)) return true;
+  return hasNonEmptyArray(parsed.promoted_rows) || hasNonEmptyArray(parsed.promote_results);
+}
+
+function hasPostRefuelStatusCounts(parsed: Record<string, unknown> | null): boolean {
+  if (!parsed) return false;
+  const status = objectValue(parsed.post_status_verification)
+    ?? objectValue(parsed.post_refuel_status)
+    ?? objectValue(parsed.orchestration_status_counts)
+    ?? objectValue(parsed.post_refuel_orchestration_status_counts);
+  if (!status) return false;
+  return positiveNumber(status.ready_after)
+    || positiveNumber(status.actionable_ready_after)
+    || positiveNumber(status.ready)
+    || positiveNumber(status.ready_count);
+}
+
+function objectValue(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+function hasNonEmptyArray(value: unknown): boolean {
+  return Array.isArray(value) && value.length > 0;
+}
+
+function positiveNumber(value: unknown): boolean {
+  return typeof value === "number" && Number.isFinite(value) && value > 0;
 }
 
 function hasSubstantialResultEvidence(parsed: Record<string, unknown> | null, resultTextLength: number): boolean {
