@@ -65,6 +65,11 @@ export interface ReleaseProofReadinessResponse {
   };
   sources: {
     state: LinkState;
+    counts: {
+      safe: number;
+      unsafe: number;
+      total: number;
+    };
     links: ReleaseProofSourceLink[];
   };
   generated_artifacts: {
@@ -122,6 +127,11 @@ export function buildReleaseProofReadiness(
     missingReasons.push("one or more source links are redacted or unsupported");
   }
   const sourceLinks = dedupeSourceLinks(input.source_links);
+  const sourceLinkCounts = {
+    safe: sourceLinks.length,
+    unsafe: invalidSourceLinks.length,
+    total: input.source_links.length,
+  };
   if (sourceLinks.length === 0) {
     missingReasons.push("no source links are attached to the release proof");
   }
@@ -183,6 +193,7 @@ export function buildReleaseProofReadiness(
     },
     sources: {
       state: sourceLinks.length > 0 ? "present" : "missing",
+      counts: sourceLinkCounts,
       links: sourceLinks,
     },
     generated_artifacts: {

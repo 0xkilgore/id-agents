@@ -63,6 +63,7 @@ describe("buildReleaseProofReadiness", () => {
       sources: { state: "present" },
       generated_artifacts: { state: "present", count: 1 },
     });
+    expect(view.sources.counts).toEqual({ safe: 1, unsafe: 0, total: 1 });
     expect(view.stale_reasons).toEqual([]);
     expect(view.error_reasons).toEqual([]);
     expect(view.missing_reasons).toEqual([]);
@@ -224,7 +225,11 @@ describe("buildReleaseProofReadiness", () => {
     }));
 
     expect(view.release_readiness).toBe("not_ready");
-    expect(view.sources).toEqual({ state: "missing", links: [] });
+    expect(view.sources).toEqual({
+      state: "missing",
+      counts: { safe: 0, unsafe: 2, total: 2 },
+      links: [],
+    });
     expect(view.missing_reasons).toEqual([
       "one or more source links are redacted or unsupported",
       "no source links are attached to the release proof",
@@ -285,6 +290,66 @@ describe("buildReleaseProofReadiness", () => {
     expect(view.stale_reasons).toEqual(["latest feedback evidence is older than 24h"]);
     expect(view.missing_reasons).toEqual(["one or more feedback evidence items are missing safe source links"]);
     expect(view.summary).toContain("latest feedback evidence is older than 24h");
+  });
+
+  it("keeps stale and missing reasons separate when stale feedback has unsafe source evidence", () => {
+    const view = buildReleaseProofReadiness(base({
+      feedback_evidence: [
+        {
+          id: "op:redacted-stale",
+          kind: "comment_recorded",
+          observed_at: "2026-07-12T10:00:00.000Z",
+          source_link: "[redacted]",
+          artifact_id: "art-kapelle",
+          summary: "Old feedback with redacted source.",
+        },
+        {
+          id: "op:unsupported-stale",
+          kind: "comment_recorded",
+          observed_at: "2026-07-12T09:00:00.000Z",
+          source_link: "file:///Users/kilgore/Dropbox/Code/roger/output/kapelle-release-proof.md",
+          artifact_id: "art-kapelle",
+          summary: "Old feedback with local source.",
+        },
+        {
+          id: "op:missing-stale",
+          kind: "comment_recorded",
+          observed_at: "2026-07-12T08:00:00.000Z",
+          source_link: null,
+          artifact_id: "art-kapelle",
+          summary: "Old feedback without source.",
+        },
+      ],
+      source_links: [
+        {
+          label: "redacted-backlog-ref",
+          href: "[redacted]",
+          source: "backlog",
+        },
+        {
+          label: "unsupported-local-ref",
+          href: "file:///Users/kilgore/Dropbox/Code/roger/output/kapelle-release-proof.md",
+          source: "backlog",
+        },
+      ],
+      stale_after_ms: 24 * 60 * 60 * 1000,
+    }));
+
+    expect(view.release_readiness).toBe("not_ready");
+    expect(view.feedback_evidence.state).toBe("stale");
+    expect(view.infra_warnings).toMatchObject({ state: "clear", count: 0, source: "none", action: null });
+    expect(view.sources).toEqual({
+      state: "missing",
+      counts: { safe: 0, unsafe: 2, total: 2 },
+      links: [],
+    });
+    expect(view.stale_reasons).toEqual(["latest feedback evidence is older than 24h"]);
+    expect(view.missing_reasons).toEqual([
+      "one or more source links are redacted or unsupported",
+      "no source links are attached to the release proof",
+      "one or more feedback evidence items are missing safe source links",
+    ]);
+    expect(view.summary).toBe("Release proof is not ready: latest feedback evidence is older than 24h.");
   });
 
   it("keeps missing-source feedback as a deterministic blocker when artifact and backlog sources exist", async () => {
@@ -370,6 +435,7 @@ describe("buildReleaseProofReadiness", () => {
       expect(view.generated_artifacts.state).toBe("present");
       expect(view.sources).toMatchObject({
         state: "present",
+        counts: { safe: 2, unsafe: 0, total: 2 },
         links: expect.arrayContaining([
           expect.objectContaining({ source: "artifact", href: "manager:/artifacts/art-kapelle-proof" }),
           expect.objectContaining({ source: "backlog", href: "manager:/backlog/backlog-kapelle-proof" }),
@@ -533,6 +599,7 @@ describe("buildReleaseProofReadiness", () => {
       });
       expect(view.sources).toMatchObject({
         state: "present",
+        counts: { safe: 2, unsafe: 0, total: 2 },
         links: expect.arrayContaining([
           expect.objectContaining({ source: "artifact", href: "manager:/artifacts/art-kapelle-proof" }),
           expect.objectContaining({ source: "backlog", href: "manager:/backlog/backlog-kapelle-proof" }),
