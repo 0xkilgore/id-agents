@@ -2934,6 +2934,61 @@ describe("stale already-dispatched ready reconciliation route", () => {
   });
 });
 
+describe("release-proof-readiness route", () => {
+  it("reports NOT READY with stale_reasons populated while infra_warnings stay clear", async () => {
+    await adapter.query(
+      `INSERT INTO artifacts (
+         artifact_id, basename, agent, tag, abs_path, title, produced_at, source,
+         availability, source_badges, reconciled_at, project_ref, created_at, updated_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        "art-kapelle-proof",
+        "kapelle-release-proof.md",
+        "roger",
+        null,
+        "/tmp/output/kapelle-release-proof.md",
+        "Kapelle release proof",
+        "2020-01-01T11:20:00.000Z",
+        "delivery-log",
+        "present",
+        "[]",
+        null,
+        "kapelle",
+        "2020-01-01T11:20:00.000Z",
+        "2020-01-01T11:20:00.000Z",
+      ],
+    );
+    await adapter.query(
+      `INSERT INTO artifact_operations (artifact_id, op_type, actor, ts, payload_json, source_link, idempotency_key)
+       VALUES (?, 'comment_recorded', ?, ?, ?, ?, NULL)`,
+      [
+        "art-kapelle-proof",
+        "chris",
+        "2020-01-01T12:00:00.000Z",
+        JSON.stringify({ body: "Old feedback, long since superseded." }),
+        "https://manager.local/artifacts/art-kapelle-proof/comments#op-1",
+      ],
+    );
+
+    const { app, daemon } = mountStatusApp(adapter, { dry_run: true });
+    await daemon.setMode("running");
+
+    const res = await callApp(app, "/orchestration/release-proof-readiness?project=kapelle");
+
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({
+      schema_version: "release_proof.readiness.v1",
+      release_readiness: "not_ready",
+      chris_readable_release_ready: "NOT READY",
+      feedback_evidence: { state: "stale" },
+      infra_warnings: { state: "clear", count: 0, items: [] },
+      error_reasons: [],
+    });
+    expect(res.body.stale_reasons.length).toBeGreaterThan(0);
+    expect(res.body.missing_reasons).toEqual([]);
+  });
+});
+
 // RD-014: admission previously fired to a lane with no live check the target
 // runtime was actually up — root cause of the pending-lane cascade (+149
 // failed dispatches in one overnight wave per the routing audit).
