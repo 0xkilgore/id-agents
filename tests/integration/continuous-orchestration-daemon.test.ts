@@ -1450,6 +1450,140 @@ describe("daemon — dry-run vs live", () => {
     expect(res.body.health.queue_quality.explanation).not.toContain("2 ready row(s) are admissible now");
   });
 
+  it("status distinguishes gated saturation from true low fuel", async () => {
+    await seedReady(adapter, {
+      title: "pool saturated ready row",
+      track: "T-SATURATED",
+      to_agent: null,
+      write_scope: ["repo/pool-saturated"],
+    });
+    await seedAgent(adapter, "substrate-orch-codex", "running", "codex");
+    await seedReady(adapter, {
+      title: "runtime mismatch ready row",
+      to_agent: "substrate-orch-codex",
+      provider: "anthropic",
+      runtime: "claude-code-cli",
+      write_scope: ["repo/runtime-mismatch"],
+    });
+    await seedReady(adapter, {
+      title: "single writer busy ready row",
+      write_scope: ["repo/single-writer-busy"],
+    });
+
+    const pools: PoolRouting = {
+      poolForItem: (item) =>
+        item.track === "T-SATURATED"
+          ? { pool_id: "saturated", repo_root: "/repo/saturated", max_parallel: 0, members: ["substrate-orch-codex"] }
+          : null,
+      availableBuilders: (pool) => pool.members,
+      allocateWorktree: async ({ agent, item, pool }) => ({
+        path: `${pool.repo_root}/.worktrees/${agent}-${item.item_id.slice(-6)}`,
+        branch: `build/${agent}-${item.item_id.slice(-6)}`,
+        lease_id: null,
+      }),
+    };
+    const { app, daemon } = mountStatusApp(
+      adapter,
+      {
+        dry_run: true,
+        auto_flesh_enabled: true,
+        auto_promote_enabled: true,
+        auto_promote_floor: 2,
+        auto_promote_min_lanes: 2,
+        min_ready_fuel: 2,
+        max_in_flight: 10,
+        max_new_per_tick: 10,
+      },
+      {
+        activeScopes: new Set(["repo/single-writer-busy"]),
+        pools,
+        resolveAgentRuntimes: (names) => getAgentRuntimeMap(adapter, names),
+      },
+    );
+    await daemon.setMode("running");
+
+    const saturated = await callApp(app, "/orchestration/status");
+
+    expect(saturated.status).toBe(200);
+    expect(saturated.body.counts).toMatchObject({
+      ready: 3,
+      raw_ready_fuel: 3,
+      useful_ready_fuel: 3,
+      admissible_now: 0,
+      ready_block_reasons: {
+        pool_capacity_full: 1,
+        single_writer_lane_busy: 1,
+      },
+    });
+    expect(saturated.body.ready_admission).toMatchObject({
+      candidates: 3,
+      useful_ready: 3,
+      admissible_now: 0,
+      stale_ready_floor: {
+        stale: true,
+        ready: 3,
+        admissible: 0,
+        min_ready_fuel: 2,
+        reason: "raw READY floor is satisfied (3) but only 0 item(s) are admissible",
+      },
+    });
+    expect(saturated.body.ready_admission.blocker_counts).toEqual(
+      expect.arrayContaining([
+        { code: "pool_capacity_full", category: "capacity_gate", count: 1 },
+        { code: "provider_runtime_mismatch", category: "runtime_unavailable", count: 1 },
+        { code: "single_writer_lane_busy", category: "lane_eligibility", count: 1 },
+      ]),
+    );
+    expect(saturated.body.ready_admission.non_admitted).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ title: "pool saturated ready row", code: "pool_capacity_full", action: "held" }),
+        expect.objectContaining({ title: "runtime mismatch ready row", code: "provider_runtime_mismatch", action: "held" }),
+        expect.objectContaining({ title: "single writer busy ready row", code: "single_writer_lane_busy", action: "skipped" }),
+      ]),
+    );
+    expect(saturated.body.auto_promote_health.operator_summary).toMatchObject({
+      empty_fuel: false,
+      capacity_gated: false,
+      summary: expect.stringContaining("gated fuel:"),
+    });
+    expect(saturated.body.auto_promote_health.summary).toBe("ready build fuel meets floor: ready=3 floor=2, lanes=3/2");
+
+    const emptyAdapter = await freshDb();
+    const { app: emptyApp, daemon: emptyDaemon } = mountStatusApp(emptyAdapter, {
+      dry_run: true,
+      auto_flesh_enabled: true,
+      auto_promote_enabled: true,
+      auto_promote_floor: 2,
+      auto_promote_min_lanes: 2,
+      min_ready_fuel: 2,
+    });
+    await emptyDaemon.setMode("running");
+
+    const lowFuel = await callApp(emptyApp, "/orchestration/status");
+
+    expect(lowFuel.status).toBe(200);
+    expect(lowFuel.body.counts).toMatchObject({
+      ready: 0,
+      raw_ready_fuel: 0,
+      useful_ready_fuel: 0,
+      admissible_now: 0,
+    });
+    expect(lowFuel.body.ready_admission.blocker_counts).toEqual([]);
+    expect(lowFuel.body.ready_admission.stale_ready_floor).toMatchObject({
+      stale: false,
+      ready: 0,
+      admissible: 0,
+      min_ready_fuel: 2,
+    });
+    expect(lowFuel.body.auto_promote_health.operator_summary).toMatchObject({
+      empty_fuel: true,
+      summary: "no ready or needs_review build fuel is currently visible",
+    });
+    expect(lowFuel.body.auto_promote_health.summary).toMatch(
+      /ready build fuel below floor: ready=0 floor=2/,
+    );
+  });
+
   it("status reports build-ready fuel lanes and top blockers when raw ready is above floor but admissible is zero", async () => {
     await seedReady(adapter, {
       title: "ready capacity gated A",
