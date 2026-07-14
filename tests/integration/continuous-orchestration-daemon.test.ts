@@ -1187,6 +1187,12 @@ describe("daemon — dry-run vs live", () => {
       runtime: "claude-code-cli",
       write_scope: ["repo/runtime"],
     });
+    await seedAgent(adapter, "unhealthy-agent", "pending", "claude-code-cli");
+    await seedReady(adapter, {
+      title: "unhealthy target",
+      to_agent: "unhealthy-agent",
+      write_scope: ["repo/unhealthy"],
+    });
 
     const pools: PoolRouting = {
       poolForItem: (item) =>
@@ -1211,6 +1217,7 @@ describe("daemon — dry-run vs live", () => {
       },
       {
         pools,
+        resolveAgentHealth: (names) => getHealthyAgentNames(adapter, names),
         resolveAgentRuntimes: (names) => getAgentRuntimeMap(adapter, names),
       },
     );
@@ -1219,7 +1226,7 @@ describe("daemon — dry-run vs live", () => {
     const res = await callApp(app, "/orchestration/status");
 
     expect(res.status).toBe(200);
-    expect(res.body.counts.ready).toBe(4);
+    expect(res.body.counts.ready).toBe(5);
     expect(res.body.counts.admissible_now).toBe(0);
     expect(res.body.ready_admission.blocker_counts).toEqual(
       expect.arrayContaining([
@@ -1227,6 +1234,13 @@ describe("daemon — dry-run vs live", () => {
         { code: "duplicate_dispatch_retry_required", category: "retry_safety", count: 1 },
         { code: "pool_capacity_full", category: "capacity_gate", count: 1 },
         { code: "provider_runtime_mismatch", category: "runtime_unavailable", count: 1 },
+        { code: "target_unhealthy", category: "runtime_unavailable", count: 1 },
+      ]),
+    );
+    expect(res.body.health.ready_item_blockers.stale_ready_fuel.counts_by_blocker_class).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ code: "duplicate_dispatch_retry_required", category: "retry_safety", count: 1 }),
+        expect.objectContaining({ code: "target_unhealthy", category: "runtime_unavailable", count: 1 }),
       ]),
     );
     expect(res.body.ready_admission.non_admitted).toEqual(
@@ -1235,6 +1249,7 @@ describe("daemon — dry-run vs live", () => {
         expect.objectContaining({ code: "duplicate_dispatch_retry_required", action: "held" }),
         expect.objectContaining({ code: "pool_capacity_full", action: "held" }),
         expect.objectContaining({ code: "provider_runtime_mismatch", action: "held" }),
+        expect.objectContaining({ code: "target_unhealthy", action: "skipped" }),
       ]),
     );
   });
@@ -1292,18 +1307,24 @@ describe("daemon — dry-run vs live", () => {
 
     expect(tick.admitted).toEqual([]);
     expect(fired).toHaveLength(0);
-    expect(tick.decisions).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          item_id: duplicate.item_id,
-          action: "held",
-          metadata: expect.objectContaining({
-            code: "duplicate_dispatch_retry_required",
-            last_dispatch_phid: "phid:disp-terminal-prior",
+    expect(tick.decisions).toEqual([
+      expect.objectContaining({
+        item_id: duplicate.item_id,
+        action: "stale_ready_reconcile",
+        dispatch_phid: "phid:disp-terminal-prior",
+        metadata: expect.objectContaining({
+          dispatch_status: "done",
+          from_state: "ready",
+          to_state: "done",
+          receipt: expect.objectContaining({
+            prior_dispatch_phid: "phid:disp-terminal-prior",
+            prior_dispatch_status: "done",
+            next_action: "close_duplicate_row",
+            reason: "close_or_ignore",
           }),
         }),
-      ]),
-    );
+      }),
+    ]);
   });
 
   it("status keeps ready admission and queue quality aligned for retry blockers versus capacity gates", async () => {

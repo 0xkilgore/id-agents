@@ -269,6 +269,12 @@ describe("orchestration health projection", () => {
       dispatch_body: "continue",
     });
     await setItemState(adapter, duplicate.item_id, "ready", { dispatch_phid: "phid:disp-failed-prior" });
+    await insertDispatch({
+      dispatch_phid: "phid:disp-failed-prior",
+      status: "failed",
+      failure_kind: "scheduler_wedged",
+      failure_detail: "stale in-flight claim",
+    });
     await insertBacklogItem(adapter, {
       title: "cto runtime mismatch",
       readiness_state: "ready",
@@ -322,6 +328,22 @@ describe("orchestration health projection", () => {
         examples: [expect.any(String)],
       }),
     ]);
+    expect(orchestration.ready_item_blockers.items).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          item_id: duplicate.item_id,
+          code: "duplicate_dispatch_retry_required",
+          category: "retry_safety",
+          prior_dispatch_id: "phid:disp-failed-prior",
+          prior_dispatch_status: "failed",
+          retry_safe_required: true,
+          retry_safe_recommendation: "set_true",
+          operator_disposition: "retry",
+          recommended_disposition: "mark-retry-safe",
+          recommended_action: "mark retry_safe only when the operator wants a bounded refire",
+        }),
+      ]),
+    );
     expect(dispatches.blockages.blockages).toEqual([
       expect.objectContaining({
         kind: "co_stall",
