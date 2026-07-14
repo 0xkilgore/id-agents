@@ -1054,6 +1054,10 @@ export async function migrateSqlite(adapter: SqliteAdapter): Promise<void> {
   const { migrateDocModelFtsIndexes } = await import('../../doc-model/fts-migration.js');
   await migrateDocModelFtsIndexes(adapter);
 
+  // Doc-model substrate slice 1 — artifacts as documents (op-log + projection).
+  const { migrateDocModelDocumentTables } = await import('../../doc-model/artifact-document.js');
+  await migrateDocModelDocumentTables(adapter);
+
   // P1 Dependency-Graph Orchestrator tables (idempotent — CREATE IF NOT EXISTS).
   const { migrateGraphTables } = await import('../../graph/storage.js');
   migrateGraphTables(adapter);

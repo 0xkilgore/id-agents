@@ -14059,6 +14059,15 @@ export class AgentManagerDb {
           console.warn('[Manager] DV3 doc-model search routes failed to mount:', err instanceof Error ? err.message : String(err));
         }
 
+        // Doc-model substrate slice 1 — artifacts as documents (op-log + projection).
+        try {
+          const { mountArtifactDocumentRoutes } = await import('./doc-model/artifact-document-routes.js');
+          mountArtifactDocumentRoutes(this.managementApp, this.db.adapter);
+          console.log('[Manager] Doc-model /doc-model/artifacts/* routes mounted');
+        } catch (err) {
+          console.warn('[Manager] Doc-model artifact-document routes failed to mount:', err instanceof Error ? err.message : String(err));
+        }
+
         // Local-first read-model search v0 — shared frontend/server contract for
         // artifacts, projects, and tasks. The core contract is storage-neutral;
         // this manager mount feeds it from durable tables.
