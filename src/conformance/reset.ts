@@ -138,14 +138,37 @@ export async function buildResetConformanceSummary(
     `),
     safeQuery<{
       artifact_id: string; basename: string; agent: string | null; tag: string | null; abs_path: string | null;
-      title: string | null; availability: string | null;
+      title: string | null; availability: string | null; dispatch_ref: string | null;
     }>(adapter, `
-      SELECT artifact_id, basename, agent, tag, abs_path, title, availability
+      SELECT artifact_id, basename, agent, tag, abs_path, title, availability, dispatch_ref
         FROM artifacts
     ORDER BY produced_at DESC
        LIMIT ${limit}
     `),
   ]);
+
+  // A minority of artifacts carry a `dispatch_ref` back to the dispatch that
+  // produced them. Their own tag/title/basename almost never carry a track
+  // tag, so fall back to the originating dispatch's subject/body — the same
+  // source dispatch-kind records already use — before giving up on track.
+  const artifactDispatchRefs = Array.from(
+    new Set(
+      artifacts.rows
+        .map((row) => row.dispatch_ref)
+        .filter((ref): ref is string => typeof ref === "string" && ref.trim() !== ""),
+    ),
+  );
+  const dispatchByPhid = new Map<string, { subject: string | null; body_markdown: string | null }>();
+  if (artifactDispatchRefs.length > 0) {
+    const placeholders = artifactDispatchRefs.map((ref) => `'${ref.replace(/'/g, "''")}'`).join(", ");
+    const { rows: refRows } = await safeQuery<{ dispatch_phid: string; subject: string | null; body_markdown: string | null }>(
+      adapter,
+      `SELECT dispatch_phid, subject, body_markdown FROM dispatch_scheduler_queue WHERE dispatch_phid IN (${placeholders})`,
+    );
+    for (const row of refRows) {
+      dispatchByPhid.set(row.dispatch_phid, { subject: row.subject, body_markdown: row.body_markdown });
+    }
+  }
 
   const records: ResetConformanceRecord[] = [];
 
@@ -171,8 +194,10 @@ export async function buildResetConformanceSummary(
 
   for (const row of artifacts.rows) {
     const isReport = /(^|[\\/])reports?[\\/]/i.test(row.abs_path ?? "") || /report/i.test(row.tag ?? row.basename ?? "");
+    const sourceDispatch = row.dispatch_ref ? dispatchByPhid.get(row.dispatch_ref) : undefined;
     records.push(record(isReport ? "report" : "artifact", row.artifact_id, {
-      track: parseTrackTag(row.tag) ?? parseTrackTag(row.title) ?? parseTrackTag(row.basename),
+      track: parseTrackTag(row.tag) ?? parseTrackTag(row.title) ?? parseTrackTag(row.basename)
+        ?? parseTrackTag(sourceDispatch?.subject) ?? parseTrackTag(sourceDispatch?.body_markdown),
       project: projectFromPath(row.abs_path),
       owner: text(row.agent),
       status: text(row.availability),

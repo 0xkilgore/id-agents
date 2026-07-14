@@ -141,4 +141,37 @@ describe("reset conformance quarantine", () => {
 
     await adapter.close();
   });
+
+  it("falls back to the originating dispatch's track tag when an artifact's own tag/title/basename carry none", async () => {
+    const adapter = new SqliteAdapter(":memory:");
+    await seedBase(adapter);
+
+    await adapter.query(
+      `INSERT INTO dispatch_scheduler_queue
+         (dispatch_phid, team_id, query_id, to_agent, from_actor, channel, subject, body_markdown, provider, runtime,
+          priority, status, not_before_at, updated_at)
+       VALUES
+         ('phid:disp-source',?,'query_source','agent_api','manager','dispatch',
+          '[project: kapelle][T-OPRESET] Untagged artifact producer','plain body','openai','codex',5,'queued',?,?)`,
+      [TEAM, NOW, NOW],
+    );
+
+    await adapter.query(
+      `INSERT INTO artifacts
+       (artifact_id, basename, agent, tag, abs_path, title, produced_at, source, availability, dispatch_ref, created_at, updated_at)
+       VALUES
+         ('art_untagged','receipt.md','substrate-api-codex',NULL,'/Users/kilgore/Dropbox/Code/kapelle/output/receipt.md','Next action: none',?,'test','present','phid:disp-source',?,?)`,
+      [NOW, NOW, NOW],
+    );
+
+    const summary = await buildResetConformanceSummary(adapter, {
+      teamId: TEAM,
+      generatedAt: NOW,
+    });
+
+    const artifact = summary.records.find((r) => r.kind === "artifact" && r.id === "art_untagged");
+    expect(artifact).toBeUndefined();
+
+    await adapter.close();
+  });
 });
