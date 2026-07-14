@@ -12,6 +12,7 @@ export ID_AGENTS_HOME="${ID_AGENTS_HOME:-"${HOME}/.id-agents"}"
 export AGENT_MANAGER_WORKDIR="${AGENT_MANAGER_WORKDIR:-"${ID_AGENTS_HOME}/workspace"}"
 export SUPERVISOR_WATCH_ENABLED="${SUPERVISOR_WATCH_ENABLED:-true}"
 export SUPERVISOR_OPTIONAL="${SUPERVISOR_OPTIONAL:-false}"
+export SUPERVISOR_ALERT_FILE_PATH="${SUPERVISOR_ALERT_FILE_PATH:-"${ID_AGENTS_HOME}/supervisor-alerts.jsonl"}"
 export PATH="/opt/homebrew/bin:/opt/homebrew/sbin:${HOME}/.local/bin:${HOME}/.bun/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:${PATH:-}"
 
 manager_alert_warn() {
