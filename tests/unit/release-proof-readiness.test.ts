@@ -167,4 +167,62 @@ describe("buildReleaseProofReadiness", () => {
     });
     expect(view.summary).toContain("infra warnings");
   });
+
+  it("keeps stale feedback, missing source links, and infra warnings release-proof visible together", () => {
+    const view = buildReleaseProofReadiness(base({
+      feedback_evidence: [
+        {
+          id: "op:stale-source-missing",
+          kind: "comment_recorded",
+          observed_at: "2026-07-12T10:00:00.000Z",
+          source_link: null,
+          artifact_id: "art-kapelle",
+          summary: "Old feedback without durable source.",
+        },
+      ],
+      infra_warnings: ["orchestration loop degraded: scheduler freshness warning"],
+      source_links: [],
+      generated_artifacts: [
+        {
+          artifact_id: "art-source-missing",
+          path: null,
+          title: "Kapelle release proof",
+          produced_at: "2026-07-13T11:20:00.000Z",
+          source_link: null,
+          availability: "present",
+        },
+      ],
+    }));
+
+    expect(view).toMatchObject({
+      release_readiness: "not_ready",
+      chris_readable_release_ready: "NOT READY",
+      feedback_evidence: {
+        state: "stale",
+        count: 1,
+        latest_at: "2026-07-12T10:00:00.000Z",
+      },
+      infra_warnings: {
+        state: "warning",
+        count: 1,
+        items: ["orchestration loop degraded: scheduler freshness warning"],
+      },
+      sources: {
+        state: "missing",
+        links: [],
+      },
+      generated_artifacts: {
+        state: "missing",
+        count: 1,
+      },
+    });
+    expect(view.stale_reasons).toEqual(["latest feedback evidence is older than 1h"]);
+    expect(view.missing_reasons).toEqual([
+      "one or more generated artifacts are missing source links or file paths",
+      "no source links are attached to the release proof",
+      "one or more feedback evidence items are missing source links",
+    ]);
+    expect(view.error_reasons).toEqual([]);
+    expect(view.summary).toBe("Release proof is not ready: infra warnings require operator review.");
+  });
 });
