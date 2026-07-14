@@ -18,6 +18,7 @@ import {
   getAgentRuntimeMap,
   getHealthyAgentNames,
   listHeldConfidenceReviewItems,
+  recordTickOutcome,
   setItemState,
 } from "../../src/continuous-orchestration/storage.js";
 import { parseRoadmapToBacklog } from "../../src/continuous-orchestration/roadmap-import.js";
@@ -1082,6 +1083,72 @@ describe("daemon — dry-run vs live", () => {
         stale_duplicate_closeout_receipt_exists: false,
       }),
     ]);
+  });
+
+  it("status keeps wave48 build-ready floor blocked when raw ready is same-lane or retry-guarded", async () => {
+    for (let i = 0; i < 6; i += 1) {
+      await seedReady(adapter, {
+        title: `wave48 same-lane ready ${i}`,
+        write_scope: ["/repo/id-agents"],
+      });
+    }
+    for (let i = 0; i < 2; i += 1) {
+      const duplicate = await seedReady(adapter, {
+        title: `wave48 duplicate retry blocker ${i}`,
+        write_scope: ["/repo/id-agents"],
+      });
+      await markReadyAlreadyDispatched(adapter, duplicate.item_id, `phid:disp-wave48-${i}`);
+    }
+    await recordTickOutcome(adapter, "default", {
+      zero_ticks: 5,
+      fired: false,
+      admission_block_reasons: {
+        single_writer_lane_busy: 6,
+      },
+    });
+
+    const { app, daemon } = mountStatusApp(
+      adapter,
+      {
+        dry_run: true,
+        auto_flesh_enabled: false,
+        auto_promote_enabled: false,
+        max_in_flight: 20,
+        max_new_per_tick: 20,
+      },
+      { activeScopes: new Set(["/repo/id-agents"]) },
+    );
+    await daemon.setMode("running");
+
+    const res = await callApp(app, "/orchestration/status");
+
+    expect(res.status).toBe(200);
+    expect(res.body.counts.ready).toBeGreaterThanOrEqual(8);
+    expect(res.body.counts.admissible_now).toBe(0);
+    expect(res.body.ready_admission.blocker_counts).toEqual(
+      expect.arrayContaining([
+        { code: "single_writer_lane_busy", category: "lane_eligibility", count: 6 },
+        { code: "duplicate_dispatch_retry_required", category: "retry_safety", count: 2 },
+      ]),
+    );
+    expect(res.body.health.queue_quality.actionable_ready).toBe(6);
+    expect(res.body.health.build_ready_floor).toMatchObject({
+      blocked: true,
+      blocker_code: "build_ready_lane_diversity_below_min_lanes",
+      useful_ready_count: 6,
+      floor: 12,
+      build_ready_lanes: 1,
+      min_lanes: 2,
+      candidate_lanes: ["/repo/id-agents"],
+      blocker_reasons: {
+        duplicate_dispatch_retry_required: 2,
+        single_writer_lane_busy: 6,
+        build_ready_lane_diversity_below_min_lanes: 1,
+        build_ready_below_floor: 1,
+      },
+    });
+    expect(res.body.health.build_ready_floor.next_action).toMatch(/new lane/i);
+    expect(res.body.health.build_ready_floor.next_action).not.toMatch(/same-lane/i);
   });
 
   it("status preserves queue-quality blocker labels used by /ops", async () => {
