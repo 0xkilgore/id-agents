@@ -1450,6 +1450,66 @@ describe("daemon — dry-run vs live", () => {
     expect(res.body.health.queue_quality.explanation).not.toContain("2 ready row(s) are admissible now");
   });
 
+  it("status names Wave49 single-writer blocked lanes and recommends cross-lane fuel", async () => {
+    for (let i = 0; i < 8; i += 1) {
+      await seedReady(adapter, {
+        title: `wave49 same-lane ready ${i}`,
+        write_scope: ["/repo/id-agents"],
+      });
+    }
+
+    const { app, daemon } = mountStatusApp(
+      adapter,
+      {
+        dry_run: true,
+        auto_flesh_enabled: false,
+        auto_promote_enabled: false,
+        max_in_flight: 20,
+        max_new_per_tick: 20,
+        min_ready_fuel: 8,
+      },
+      { activeScopes: new Set(["/repo/id-agents"]) },
+    );
+    await daemon.setMode("running");
+
+    const res = await callApp(app, "/orchestration/status");
+
+    expect(res.status).toBe(200);
+    expect(res.body.counts).toMatchObject({
+      ready: 8,
+      admissible_now: 0,
+      ready_block_reasons: {
+        single_writer_lane_busy: 8,
+      },
+    });
+    expect(res.body.ready_admission.blocker_counts).toEqual([
+      { code: "single_writer_lane_busy", category: "lane_eligibility", count: 8 },
+    ]);
+    expect(res.body.ready_admission.blocked_lanes).toEqual([
+      {
+        lane: "/repo/id-agents",
+        count: 8,
+        blocker_counts: [
+          { code: "single_writer_lane_busy", category: "lane_eligibility", count: 8 },
+        ],
+      },
+    ]);
+    expect(res.body.ready_admission.recommended_action).toBe(
+      "add cross-lane fuel outside blocked lane(s): /repo/id-agents",
+    );
+    expect(res.body.health.ready_item_blockers).toMatchObject({
+      ready: 8,
+      admissible_now: 0,
+      blocked_lanes: res.body.ready_admission.blocked_lanes,
+      recommended_action: "add cross-lane fuel outside blocked lane(s): /repo/id-agents",
+      stale_ready_fuel: {
+        active: true,
+        blocked_lanes: res.body.ready_admission.blocked_lanes,
+        recommended_action: "add cross-lane fuel outside blocked lane(s): /repo/id-agents",
+      },
+    });
+  });
+
   it("status distinguishes gated saturation from true low fuel", async () => {
     await seedReady(adapter, {
       title: "pool saturated ready row",

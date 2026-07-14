@@ -167,6 +167,71 @@ describe("orchestration health projection", () => {
     expect(health.build_ready_floor.next_action).not.toMatch(/\b(ok|idle)\b/i);
   });
 
+  it("projects Wave49 all-single-writer-busy ready fuel with blocked lane keys and cross-lane action", async () => {
+    await setMode(adapter, "default", "running");
+    const itemIds: string[] = [];
+    for (let i = 0; i < 8; i += 1) {
+      const item = await insertBacklogItem(adapter, {
+        title: `wave49 same-lane ready ${i}`,
+        readiness_state: "ready",
+        risk_class: "build",
+        to_agent: "roger",
+        dispatch_body: "continue",
+        write_scope: ["/repo/id-agents"],
+      });
+      itemIds.push(item.item_id);
+    }
+
+    const health = await readOrchestrationHealthProjection(adapter, "default", {
+      minReadyFuel: 8,
+      readyAdmission: {
+        admissibleNow: 0,
+        blockerCounts: [
+          { code: "single_writer_lane_busy", category: "lane_eligibility", count: 8 },
+        ],
+        nonAdmitted: itemIds.map((item_id) => ({ item_id, code: "single_writer_lane_busy" })),
+        blockedLanes: [
+          {
+            lane: "/repo/id-agents",
+            count: 8,
+            blocker_counts: [
+              { code: "single_writer_lane_busy", category: "lane_eligibility", count: 8 },
+            ],
+          },
+        ],
+        recommendedAction: "add cross-lane fuel outside blocked lane(s): /repo/id-agents",
+      },
+    });
+
+    expect(health.ready_item_blockers).toMatchObject({
+      ready: 8,
+      admissible_now: 0,
+      blocked_lanes: [
+        {
+          lane: "/repo/id-agents",
+          count: 8,
+          blocker_counts: [
+            { code: "single_writer_lane_busy", category: "lane_eligibility", count: 8 },
+          ],
+        },
+      ],
+      recommended_action: "add cross-lane fuel outside blocked lane(s): /repo/id-agents",
+      stale_ready_fuel: {
+        active: true,
+        recommended_action: "add cross-lane fuel outside blocked lane(s): /repo/id-agents",
+        blocked_lanes: [
+          {
+            lane: "/repo/id-agents",
+            count: 8,
+            blocker_counts: [
+              { code: "single_writer_lane_busy", category: "lane_eligibility", count: 8 },
+            ],
+          },
+        ],
+      },
+    });
+  });
+
   it("escalates unexplained zero-admit ticks after the stall threshold", async () => {
     await setMode(adapter, "default", "running");
     await recordTickOutcome(adapter, "default", {

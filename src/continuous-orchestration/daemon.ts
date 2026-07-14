@@ -222,6 +222,8 @@ export interface ReadyAdmissionExplanation {
   };
   block_reason_counts: ReadyAdmissionBlockReasonCounts;
   top_block_reasons: Array<{ code: string; category: ReadyAdmissionBlockerCategory; count: number }>;
+  blocked_lanes: ReadyAdmissionBlockedLane[];
+  recommended_action: string;
   admissible: Array<{ item_id: string; title: string; to_agent: string | null; risk_class: string }>;
   non_admitted: Array<{
     item_id: string;
@@ -243,6 +245,12 @@ export interface ReadyAdmissionExplanation {
   };
   halted: string | null;
   ready_runtime_repairs: ReadyRuntimeRepair[];
+}
+
+export interface ReadyAdmissionBlockedLane {
+  lane: string;
+  count: number;
+  blocker_counts: Array<{ code: string; category: ReadyAdmissionBlockerCategory; count: number }>;
 }
 
 export const READY_ADMISSION_BLOCK_REASONS = [
@@ -449,6 +457,58 @@ function readyAdmissionBlockReasonCounts(plan: { skipped: DecisionRecord[] }): R
     if (typeof code === "string" && code in counts) counts[code as ReadyAdmissionBlockReason] += 1;
   }
   return counts;
+}
+
+function readyAdmissionBlockedLanes(
+  plan: { skipped: DecisionRecord[] },
+  byId: Map<string, BacklogItem>,
+): ReadyAdmissionBlockedLane[] {
+  const lanes = new Map<string, ReadyAdmissionBlockedLane>();
+  for (const decision of plan.skipped) {
+    if (!decision.item_id) continue;
+    const item = byId.get(decision.item_id);
+    if (!item) continue;
+    const lane = laneKeyOf(item);
+    const code = typeof decision.metadata?.code === "string" ? decision.metadata.code : "unknown";
+    const category = readyAdmissionBlockerCategory(code);
+    const current = lanes.get(lane) ?? { lane, count: 0, blocker_counts: [] };
+    current.count += 1;
+    const existing = current.blocker_counts.find((count) => count.code === code && count.category === category);
+    if (existing) existing.count += 1;
+    else current.blocker_counts.push({ code, category, count: 1 });
+    lanes.set(lane, current);
+  }
+  return [...lanes.values()]
+    .map((lane) => ({
+      ...lane,
+      blocker_counts: lane.blocker_counts.sort((a, b) =>
+        b.count - a.count || a.category.localeCompare(b.category) || a.code.localeCompare(b.code),
+      ),
+    }))
+    .sort((a, b) => b.count - a.count || a.lane.localeCompare(b.lane));
+}
+
+function readyAdmissionRecommendedAction(input: {
+  candidates: number;
+  admissibleNow: number;
+  blockerCounts: ReadyAdmissionExplanation["blocker_counts"];
+  blockedLanes: ReadyAdmissionBlockedLane[];
+}): string {
+  if (input.candidates === 0) return "flesh or promote ready fuel";
+  if (input.admissibleNow > 0) return "admit available ready rows";
+  const blocked = input.blockerCounts.reduce((sum, count) => sum + count.count, 0);
+  const onlySingleWriterBusy =
+    blocked === input.candidates &&
+    input.blockerCounts.length === 1 &&
+    input.blockerCounts[0]?.code === "single_writer_lane_busy";
+  if (onlySingleWriterBusy) {
+    const lanes = input.blockedLanes.map((lane) => lane.lane).join(", ");
+    return `add cross-lane fuel outside blocked lane(s): ${lanes}`;
+  }
+  const top = input.blockerCounts[0];
+  return top
+    ? `clear top ready-admission blocker ${top.code}=${top.count}`
+    : "inspect ready admission blockers before refueling";
 }
 
 export class ContinuousOrchestrationDaemon {
@@ -1085,6 +1145,13 @@ export class ContinuousOrchestrationDaemon {
     }
     const staleReadyFloor =
       ordered.length >= config.min_ready_fuel && plan.admit.length < config.min_ready_fuel && plan.skipped.length > 0;
+    const blockedLanes = readyAdmissionBlockedLanes(plan, byId);
+    const recommendedAction = readyAdmissionRecommendedAction({
+      candidates: ordered.length,
+      admissibleNow: plan.admit.length,
+      blockerCounts,
+      blockedLanes,
+    });
     return {
       candidates: ordered.length,
       useful_ready: ordered.length - nonUsefulItemIds.size,
@@ -1097,6 +1164,8 @@ export class ContinuousOrchestrationDaemon {
       },
       block_reason_counts: readyAdmissionBlockReasonCounts(plan),
       top_block_reasons: blockerCounts.slice(0, 5),
+      blocked_lanes: blockedLanes,
+      recommended_action: recommendedAction,
       admissible: plan.admit.map((item) => ({
         item_id: item.item_id,
         title: item.title,

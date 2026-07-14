@@ -104,11 +104,14 @@ export interface OrchestrationReadyItemBlockerProjection {
   min_ready_fuel: number;
   admissible_now: number | null;
   stale_ready_floor: boolean;
+  blocked_lanes: OrchestrationReadyAdmissionBlockedLane[];
+  recommended_action: string;
   stale_ready_fuel: {
     active: boolean;
     owner_lane: string;
     recommended_action: string;
     reason: string | null;
+    blocked_lanes: OrchestrationReadyAdmissionBlockedLane[];
     counts_by_blocker_class: Array<{
       code: string;
       category: string;
@@ -127,6 +130,16 @@ export interface OrchestrationReadyItemBlockerProjection {
     recommended_action: string;
   }>;
   items: OrchestrationReadyItemBlockerDetail[];
+}
+
+export interface OrchestrationReadyAdmissionBlockedLane {
+  lane: string;
+  count: number;
+  blocker_counts: Array<{
+    code: string;
+    category: string;
+    count: number;
+  }>;
 }
 
 export interface OrchestrationReadyItemBlockerDetail {
@@ -249,6 +262,8 @@ interface OrchestrationHealthProjectionOptions {
     admissibleNow: number;
     blockerCounts: ReadyAdmissionBlockerSummary[];
     nonAdmitted: ReadyAdmissionNonAdmittedSummary[];
+    blockedLanes?: OrchestrationReadyAdmissionBlockedLane[];
+    recommendedAction?: string;
   };
 }
 
@@ -534,6 +549,7 @@ async function readReadyItemBlockerProjection(
     categories: categoryValues,
     readyAdmission: opts.readyAdmission,
   });
+  const recommendedAction = opts.readyAdmission?.recommendedAction ?? staleReadyFuel.recommended_action;
 
   return {
     ready: rows.length,
@@ -541,6 +557,8 @@ async function readReadyItemBlockerProjection(
     min_ready_fuel: minReadyFuel,
     admissible_now: admissibleNow,
     stale_ready_floor: staleReadyFuel.active,
+    blocked_lanes: opts.readyAdmission?.blockedLanes ?? [],
+    recommended_action: recommendedAction,
     stale_ready_fuel: staleReadyFuel,
     categories: categoryValues,
     items: details.sort((a, b) => a.item_id.localeCompare(b.item_id)),
@@ -661,6 +679,7 @@ function staleReadyFuelProjection(input: {
   const active = input.ready > 0 && (belowActionableFloor || zeroAdmissible);
   const counts = staleReadyFuelCounts(input);
   const examples = uniqueStrings(counts.flatMap((count) => count.examples)).slice(0, 5);
+  const blockedLanes = input.readyAdmission?.blockedLanes ?? [];
   const reasonParts: string[] = [];
   if (belowActionableFloor) {
     reasonParts.push(`actionable_ready=${input.actionable} is below min_ready_fuel=${input.minReadyFuel}`);
@@ -673,9 +692,13 @@ function staleReadyFuelProjection(input: {
     active,
     owner_lane: "orchestration",
     recommended_action: active
-      ? "clear the top ready-admission blockers or promote/refuel safe backlog candidates until ready fuel is admissible"
+      ? input.admissibleNow === 0
+        ? input.readyAdmission?.recommendedAction ??
+          "clear the top ready-admission blockers or promote/refuel safe backlog candidates until ready fuel is admissible"
+        : "clear the top ready-admission blockers or promote/refuel safe backlog candidates until ready fuel is admissible"
       : "none",
     reason: active ? reasonParts.join("; ") : null,
+    blocked_lanes: blockedLanes,
     counts_by_blocker_class: counts,
     examples,
   };

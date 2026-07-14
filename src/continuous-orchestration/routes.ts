@@ -97,6 +97,8 @@ export function mountContinuousOrchestrationRoutes(app: Application, opts: Orche
             item_id: item.item_id,
             code: item.code,
           })),
+          blockedLanes: readyAdmission.blocked_lanes,
+          recommendedAction: readyAdmission.recommended_action,
         },
       });
       let killSwitch = false;
