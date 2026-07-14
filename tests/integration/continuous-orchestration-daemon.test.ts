@@ -2031,7 +2031,7 @@ describe("daemon — dry-run vs live", () => {
         build_ready: 1,
         build_ready_lanes: 1,
         ready_lane_keys: ["repo/ready-a"],
-        candidate_lane_keys: ["repo/candidate-a", "repo/candidate-b"],
+        candidate_lane_keys: [],
       },
       next_action: {
         code: "manual_promote_or_close_already_dispatched",

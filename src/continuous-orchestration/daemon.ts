@@ -37,7 +37,8 @@ import {
 } from "./storage.js";
 import { deriveBacklogRetryReadiness } from "./backlog-retry-readiness.js";
 import { runFleshPass, type FleshRunSummary } from "./flesh-runner.js";
-import { selectAutoPromotions } from "./auto-promote-policy.js";
+import { AUTO_READY_CONFIDENCE_THRESHOLD } from "./flesh-policy.js";
+import { autoPromoteRejections, selectAutoPromotions } from "./auto-promote-policy.js";
 import { sendTelegramAlert, type AlertSender } from "./telegram.js";
 import { readOrchestrationHealthProjection } from "./health-projection.js";
 import {
@@ -1089,7 +1090,10 @@ export class ContinuousOrchestrationDaemon {
     });
     const readyLaneKeys = [...new Set(capacityFuel.readyBuild.map(laneKeyOf))].sort();
     const inFlightLaneKeys = [...new Set(capacityFuel.inFlightBuild.map(laneKeyOf))].sort();
-    const candidateLaneKeys = [...new Set(needsReview.map(laneKeyOf))].sort();
+    const safeAutoPromoteCandidates = needsReview.filter(
+      (item) => autoPromoteRejections(item, AUTO_READY_CONFIDENCE_THRESHOLD).length === 0,
+    );
+    const candidateLaneKeys = [...new Set(safeAutoPromoteCandidates.map(laneKeyOf))].sort();
     const blockedReason =
       !config.auto_flesh_enabled ? "auto_flesh_disabled" :
       !config.auto_promote_enabled ? "auto_promote_disabled" :
