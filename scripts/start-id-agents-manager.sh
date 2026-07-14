@@ -10,8 +10,8 @@ export AGENT_MANAGER_PORT="${AGENT_MANAGER_PORT:-4100}"
 export ID_TEAM="${ID_TEAM:-default}"
 export ID_AGENTS_HOME="${ID_AGENTS_HOME:-"${HOME}/.id-agents"}"
 export AGENT_MANAGER_WORKDIR="${AGENT_MANAGER_WORKDIR:-"${ID_AGENTS_HOME}/workspace"}"
-export SUPERVISOR_WATCH_ENABLED="${SUPERVISOR_WATCH_ENABLED:-false}"
-export SUPERVISOR_OPTIONAL="${SUPERVISOR_OPTIONAL:-true}"
+export SUPERVISOR_WATCH_ENABLED="${SUPERVISOR_WATCH_ENABLED:-true}"
+export SUPERVISOR_OPTIONAL="${SUPERVISOR_OPTIONAL:-false}"
 export PATH="/opt/homebrew/bin:/opt/homebrew/sbin:${HOME}/.local/bin:${HOME}/.bun/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:${PATH:-}"
 
 manager_alert_warn() {
