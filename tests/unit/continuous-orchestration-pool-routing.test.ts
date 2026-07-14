@@ -128,6 +128,103 @@ describe("continuous orchestration pool routing", () => {
     expect(pool?.members).toContain("regina");
   });
 
+  it("routes explicit pool:backend work across roger/substrate lanes with isolated worktrees", async () => {
+    const pools = buildPoolRouting({});
+    const backendItems = [
+      item({ item_id: "backend_roger", to_agent: "pool:backend", write_scope: ["/Users/kilgore/Dropbox/Code/cane/id-agents"] }),
+      item({ item_id: "backend_substrate_orch", to_agent: "pool:backend", write_scope: ["/Users/kilgore/Dropbox/Code/cane/id-agents"] }),
+      item({ item_id: "backend_substrate_api", to_agent: "pool:backend", write_scope: ["/Users/kilgore/Dropbox/Code/cane/id-agents"] }),
+    ];
+    const pool = pools.poolForItem(backendItems[0])!;
+
+    expect(pool).toMatchObject({
+      pool_id: "backend",
+      repo_root: "/Users/kilgore/Dropbox/Code/cane/id-agents",
+      members: ["roger", "substrate-orch-codex", "substrate-api-codex"],
+    });
+
+    const plan = planAdmission(
+      backendItems,
+      {
+        mode: "running",
+        kill_switch_active: false,
+        usage: { hard_paused: false, daily_percent: 0, weekly_percent: 0, enforcement: "enforce" },
+        daily_tokens_used: 0,
+        in_flight: 0,
+        active_write_scopes: new Set(["/Users/kilgore/Dropbox/Code/cane/id-agents"]),
+        dependency_index: new Map(),
+        admit_limit: 3,
+        pool_for: (it) => pools.poolForItem(it)?.pool_id ?? null,
+        pool_free_slots: new Map([["backend", 3]]),
+        pool_free_builders: new Map([["backend", ["roger", "substrate-orch-codex", "substrate-api-codex"]]]),
+      },
+      { ...defaultConfig(), max_in_flight: 3 },
+    );
+
+    expect(plan.skipped).toEqual([]);
+    expect(plan.admit.map((it) => it.item_id)).toEqual([
+      "backend_roger",
+      "backend_substrate_orch",
+      "backend_substrate_api",
+    ]);
+    expect(plan.assignments).toEqual({
+      backend_roger: "roger",
+      backend_substrate_orch: "substrate-orch-codex",
+      backend_substrate_api: "substrate-api-codex",
+    });
+
+    const leases = await Promise.all(
+      plan.admit.map((it) => pools.allocateWorktree({ agent: plan.assignments[it.item_id], item: it, pool })),
+    );
+    expect(new Set(leases.map((lease) => lease.path)).size).toBe(3);
+    expect(leases.map((lease) => lease.path).sort()).toEqual([
+      expect.stringMatching(/\/cane\/id-agents\/\.worktrees\/roger-[a-z0-9]{8}-build-roger-[a-z0-9]{8}-t-ckpt$/),
+      expect.stringMatching(/\/cane\/id-agents\/\.worktrees\/substrate-api-codex-[a-z0-9]{8}-build-substrate-api-codex-[a-z0-9]{8}-t-ckpt$/),
+      expect.stringMatching(/\/cane\/id-agents\/\.worktrees\/substrate-orch-codex-[a-z0-9]{8}-build-substrate-orch-codex-[a-z0-9]{8}-t-ckpt$/),
+    ]);
+  });
+
+  it("reports backend pool lane blockers with the blocked builder in decision metadata", () => {
+    const pools = buildPoolRouting({});
+    const backendItem = item({
+      item_id: "backend_blocked_substrate",
+      to_agent: "pool:backend",
+      write_scope: ["/Users/kilgore/Dropbox/Code/cane/id-agents"],
+    });
+
+    const plan = planAdmission(
+      [backendItem],
+      {
+        mode: "running",
+        kill_switch_active: false,
+        usage: { hard_paused: false, daily_percent: 0, weekly_percent: 0, enforcement: "enforce" },
+        daily_tokens_used: 0,
+        in_flight: 0,
+        active_write_scopes: new Set(),
+        dependency_index: new Map(),
+        admit_limit: 1,
+        pool_for: (it) => pools.poolForItem(it)?.pool_id ?? null,
+        pool_free_slots: new Map([["backend", 1]]),
+        pool_free_builders: new Map([["backend", ["substrate-orch-codex"]]]),
+        healthy_agents: new Set(["roger"]),
+      },
+      defaultConfig(),
+    );
+
+    expect(plan.admit).toEqual([]);
+    expect(plan.skipped).toHaveLength(1);
+    expect(plan.skipped[0]).toMatchObject({
+      item_id: "backend_blocked_substrate",
+      action: "skipped",
+      metadata: {
+        code: "target_unhealthy",
+        class: "agent_availability",
+        target: "substrate-orch-codex",
+      },
+    });
+    expect(plan.skipped[0].reason).toContain("substrate-orch-codex");
+  });
+
   it("smokes pool:frontend saturation: active captains are skipped, worktrees are isolated, blockers are explicit", async () => {
     const pools = buildPoolRouting({});
     const pool = pools.poolForItem(
