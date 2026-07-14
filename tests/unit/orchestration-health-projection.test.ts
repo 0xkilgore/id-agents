@@ -484,6 +484,89 @@ describe("orchestration health projection", () => {
     ]);
   });
 
+  it("separates stale non-Chris clarifications from true operator decisions and promotion hygiene", async () => {
+    await insertDispatch({
+      dispatch_phid: "phid:disp-stale-needs-you-false",
+      query_id: "query_stale_needs_you_false",
+      to_agent: "regina",
+      status: "needs_clarification",
+      updated_at: "2026-07-01T16:00:00.000Z",
+      active_clarification_json: JSON.stringify({
+        needs_you: false,
+        question: "linked query terminated expired while UI lane was at capacity",
+        context: {
+          summary: "Stale row from a saturated UI lane; no Chris decision required.",
+          blocking_reasons: ["linked query terminated expired", "all_members_busy_with_backlog"],
+          target_lane: "live-UI",
+        },
+      }),
+    });
+    await insertDispatch({
+      dispatch_phid: "phid:disp-product-decision",
+      query_id: "query_product_decision",
+      to_agent: "roger",
+      status: "needs_clarification",
+      updated_at: "2026-07-01T15:00:00.000Z",
+      active_clarification_json: JSON.stringify({
+        needs_you: true,
+        question: "Should the checkout flow require approval before release?",
+        context: {
+          blocking_reasons: ["operator decision required"],
+        },
+      }),
+    });
+    await insertDispatch({
+      dispatch_phid: "phid:disp-promotion-hygiene",
+      query_id: "query_promotion_hygiene",
+      to_agent: "release-agent",
+      status: "needs_clarification",
+      updated_at: "2026-07-01T14:00:00.000Z",
+      active_clarification_json: JSON.stringify({
+        needs_you: false,
+        question: "Promotion blocked: branch kapelle/fix-health is behind origin/main by 28 commits.",
+        context: {
+          repo: "/repo/kapelle",
+          branch: "kapelle/fix-health",
+          blocking_reasons: ["stale base", "branch-promotion hygiene should auto-route"],
+          recommended_option: "route_to_worktree_hygiene",
+        },
+      }),
+    });
+
+    const health = await readOrchestrationHealthProjection(adapter, "default");
+
+    expect(health.blockers.needs_clarification).toMatchObject({
+      count: 3,
+      needs_chris_count: 1,
+      non_chris_count: 2,
+      stale_non_chris_count: 2,
+      recommended_action: "route non-Chris stale clarification rows to their owner lanes; ask Chris only for true product or operator decisions",
+      recent_dispatch_ids: [
+        "phid:disp-stale-needs-you-false",
+        "phid:disp-product-decision",
+        "phid:disp-promotion-hygiene",
+      ],
+    });
+    expect(health.blockers.needs_clarification.items).toEqual([
+      expect.objectContaining({
+        dispatch_phid: "phid:disp-stale-needs-you-false",
+        owner_lane: "ui-builder",
+        needs_chris: false,
+      }),
+      expect.objectContaining({
+        dispatch_phid: "phid:disp-product-decision",
+        owner_lane: "chris",
+        needs_chris: true,
+      }),
+      expect.objectContaining({
+        dispatch_phid: "phid:disp-promotion-hygiene",
+        owner_lane: "release-engineering",
+        recommended_action: "route promotion hygiene to release-engineering: create_fresh_branch_from_base",
+        needs_chris: false,
+      }),
+    ]);
+  });
+
   it("classifies overloaded QA/UI linked-query expiries as stale-lane signals", async () => {
     await insertDispatch({
       dispatch_phid: "phid:disp-ui-expired-overloaded",
