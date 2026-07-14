@@ -456,6 +456,25 @@ describe("planAdmission — per-item guardrails", () => {
     });
   });
 
+  it("admits manual refuel rows that omit provider/runtime when the target lane is registered", () => {
+    const p = planAdmission(
+      [
+        item({
+          item_id: "wave53-manual-refuel-no-runtime",
+          title: "Wave53 manual refuel row with legacy metadata",
+          to_agent: "substrate-api-codex",
+          provider: null,
+          runtime: null,
+        }),
+      ],
+      ctx({ target_agent_runtimes: new Map([["substrate-api-codex", "codex"]]) }),
+      cfg,
+    );
+
+    expect(p.admit.map((i) => i.item_id)).toEqual(["wave53-manual-refuel-no-runtime"]);
+    expect(p.skipped).toHaveLength(0);
+  });
+
   it("holds rows blocked by active clarification or promotion blockers", () => {
     const clarification = planAdmission(
       [item({ item_id: "needs-answer" })],

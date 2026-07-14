@@ -266,6 +266,36 @@ describe("orchestration health projection", () => {
     expect(dispatches.blockages.blockages[0]?.message).toContain("provider_runtime_mismatch=1");
   });
 
+  it("does not classify manual refuel rows that omit provider/runtime as provider_runtime_mismatch", async () => {
+    await setMode(adapter, "default", "running");
+    await insertAgent("substrate-api-codex", "codex");
+    await insertBacklogItem(adapter, {
+      title: "Wave53 manual refuel row with omitted runtime metadata",
+      readiness_state: "ready",
+      risk_class: "build",
+      to_agent: "substrate-api-codex",
+      dispatch_body: "Add regression coverage for a contract-focused backlog item.",
+      provider: null,
+      runtime: null,
+    });
+    await recordTickOutcome(adapter, "default", {
+      zero_ticks: 5,
+      fired: false,
+      admission_block_reasons: {},
+    });
+
+    const orchestration = await readOrchestrationHealthProjection(adapter, "default");
+
+    expect(orchestration.ready_item_blockers).toMatchObject({
+      ready: 1,
+      actionable: 1,
+    });
+    expect(orchestration.ready_item_blockers.categories).toEqual([]);
+    expect(orchestration.orchestration_loop.last_admission_block_reasons).not.toHaveProperty(
+      "provider_runtime_mismatch",
+    );
+  });
+
   it("reduces duplicate_dispatch_retry_required only after receipt-backed stale duplicate closeout", async () => {
     await setMode(adapter, "default", "running");
     const duplicate = await insertBacklogItem(adapter, {
