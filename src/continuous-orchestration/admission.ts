@@ -129,7 +129,7 @@ function nonAdmission(
   return { item_id, action, reason, metadata: { code, class: reasonClass(code), ...extra } };
 }
 
-function providerRuntimeMismatch(
+export function providerRuntimeMismatch(
   item: BacklogItem,
   target: string | null,
   targetRuntime: string | undefined,

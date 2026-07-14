@@ -1172,6 +1172,13 @@ describe("orchestration health projection", () => {
       reroute_to_agent: "brunel",
       update_metadata_to: { provider: "anthropic", runtime: "claude-code-cli" },
     });
+    expect(health.build_ready_floor).toMatchObject({
+      useful_ready_count: 0,
+      blocker_reasons: {
+        provider_runtime_mismatch: 1,
+        build_ready_below_floor: 1,
+      },
+    });
   });
 
   it("leaves reroute_to_agent null when no live agent already runs the requested runtime", async () => {

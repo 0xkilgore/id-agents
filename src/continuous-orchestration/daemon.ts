@@ -17,7 +17,13 @@ import type { ContinuousOrchestrationConfig } from "./config.js";
 import type { BacklogItem, DecisionRecord, OrchestrationMode, ReadinessState, UsageGateView } from "./types.js";
 import { fairInterleaveByLane, laneKeyOf, needsRefuel, orderCandidates } from "./selection.js";
 import { tickAdmitLimit } from "./cadence.js";
-import { planAdmission, evaluateStall, shouldRunZeroAdmitStallWatchdog, type AdmissionContext } from "./admission.js";
+import {
+  planAdmission,
+  evaluateStall,
+  providerRuntimeMismatch,
+  shouldRunZeroAdmitStallWatchdog,
+  type AdmissionContext,
+} from "./admission.js";
 import { computeNextDelay, tickWriteCaps } from "./backpressure.js";
 import {
   appendDecisions,
@@ -1057,7 +1063,11 @@ export class ContinuousOrchestrationDaemon {
       plan.skipped
         .filter((decision) => {
           const code = decision.metadata?.code;
-          return code === "duplicate_dispatch_guard" || code === "duplicate_dispatch_retry_required";
+          return (
+            code === "duplicate_dispatch_guard" ||
+            code === "duplicate_dispatch_retry_required" ||
+            code === "provider_runtime_mismatch"
+          );
         })
         .map((decision) => decision.item_id)
         .filter((itemId): itemId is string => !!itemId),
@@ -1151,7 +1161,8 @@ export class ContinuousOrchestrationDaemon {
       const status = dispatchStatuses.get(item.last_dispatch_phid);
       return !status || !AUTO_PROMOTE_HEALTH_STALE_ALREADY_DISPATCHED_STATUSES.has(status);
     });
-    const capacityFuel = buildCapacityFuel(ready, inFlight, config.max_in_flight);
+    const nonUsefulReadyFuelIds = await this.nonUsefulProviderRuntimeReadyFuelIds(ready);
+    const capacityFuel = buildCapacityFuel(ready, inFlight, config.max_in_flight, nonUsefulReadyFuelIds);
     const plan = selectAutoPromotions(needsReview, capacityFuel.floorItems, {
       floor: config.auto_promote_floor,
       minLanes: config.auto_promote_min_lanes,
@@ -1325,6 +1336,20 @@ export class ContinuousOrchestrationDaemon {
       }
     }
     return out;
+  }
+
+  private async nonUsefulProviderRuntimeReadyFuelIds(ready: BacklogItem[]): Promise<Set<string>> {
+    const readyBuild = ready.filter((item) => item.risk_class === "build");
+    if (readyBuild.length === 0 || !this.deps.resolveAgentRuntimes) return new Set();
+    const agentNames = readyBuild.map((item) => item.to_agent).filter((name): name is string => !!name);
+    const runtimes = await this.deps.resolveAgentRuntimes([...new Set(agentNames)]);
+    return new Set(
+      readyBuild
+        .filter((item) =>
+          providerRuntimeMismatch(item, item.to_agent, item.to_agent ? runtimes.get(item.to_agent) : undefined),
+        )
+        .map((item) => item.item_id),
+    );
   }
 
   /**
@@ -1645,7 +1670,8 @@ export class ContinuousOrchestrationDaemon {
         listBacklogByState(this.deps.adapter, { team_id: this.teamId, state: "needs_review" }),
         listBacklogByState(this.deps.adapter, { team_id: this.teamId, state: "in_flight" }),
       ]);
-      const capacityFuel = buildCapacityFuel(ready, inFlight, config.max_in_flight);
+      const nonUsefulReadyFuelIds = await this.nonUsefulProviderRuntimeReadyFuelIds(ready);
+      const capacityFuel = buildCapacityFuel(ready, inFlight, config.max_in_flight, nonUsefulReadyFuelIds);
       if (capacityFuel.capacityOccupied) return null;
       const plan = selectAutoPromotions(needsReview, capacityFuel.floorItems, {
         floor: config.auto_promote_floor,
@@ -1856,18 +1882,24 @@ function topSkipReasonsFrom(
     .slice(0, 5);
 }
 
-function buildCapacityFuel(ready: BacklogItem[], inFlight: BacklogItem[], maxInFlight: number): {
+function buildCapacityFuel(
+  ready: BacklogItem[],
+  inFlight: BacklogItem[],
+  maxInFlight: number,
+  nonUsefulReadyItemIds: Set<string> = new Set(),
+): {
   readyBuild: BacklogItem[];
   inFlightBuild: BacklogItem[];
   floorItems: BacklogItem[];
   capacityOccupied: boolean;
 } {
   const readyBuild = ready.filter((item) => item.risk_class === "build");
+  const usefulReadyBuild = readyBuild.filter((item) => !nonUsefulReadyItemIds.has(item.item_id));
   const inFlightBuild = inFlight.filter((item) => item.risk_class === "build");
   return {
     readyBuild,
     inFlightBuild,
-    floorItems: [...readyBuild, ...inFlightBuild],
+    floorItems: [...usefulReadyBuild, ...inFlightBuild],
     capacityOccupied: maxInFlight > 0 && inFlight.length >= maxInFlight,
   };
 }

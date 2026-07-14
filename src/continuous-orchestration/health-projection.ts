@@ -729,6 +729,10 @@ async function readBuildReadyFloorProjection(
   ]);
   const readyRows = backlogRows
     .filter((row) => row.readiness_state === "ready" && row.risk_class === "build");
+  const agentRuntimes = await readAgentRuntimeMap(
+    adapter,
+    readyRows.map((row) => row.to_agent).filter((name): name is string => !!name),
+  );
   const laneCounts = new Map<string, number>();
   const blockerReasons: Record<string, number> = {};
   let usefulReadyCount = 0;
@@ -737,6 +741,11 @@ async function readBuildReadyFloorProjection(
     if (row.last_dispatch_phid && row.retry_safe !== 1) {
       blockerReasons.duplicate_dispatch_retry_required =
         (blockerReasons.duplicate_dispatch_retry_required ?? 0) + 1;
+      continue;
+    }
+    if (hasProviderRuntimeMismatch(row, agentRuntimes.get(row.to_agent ?? ""))) {
+      blockerReasons.provider_runtime_mismatch =
+        (blockerReasons.provider_runtime_mismatch ?? 0) + 1;
       continue;
     }
     usefulReadyCount += 1;

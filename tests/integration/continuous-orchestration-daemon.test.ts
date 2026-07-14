@@ -1508,7 +1508,7 @@ describe("daemon — dry-run vs live", () => {
     expect(saturated.body.counts).toMatchObject({
       ready: 3,
       raw_ready_fuel: 3,
-      useful_ready_fuel: 3,
+      useful_ready_fuel: 2,
       admissible_now: 0,
       ready_block_reasons: {
         pool_capacity_full: 1,
@@ -1517,8 +1517,13 @@ describe("daemon — dry-run vs live", () => {
     });
     expect(saturated.body.ready_admission).toMatchObject({
       candidates: 3,
-      useful_ready: 3,
+      useful_ready: 2,
       admissible_now: 0,
+      lanes: {
+        raw_ready: 3,
+        useful_ready: 2,
+        admissible_now: 0,
+      },
       stale_ready_floor: {
         stale: true,
         ready: 3,
@@ -1546,7 +1551,7 @@ describe("daemon — dry-run vs live", () => {
       capacity_gated: false,
       summary: expect.stringContaining("gated fuel:"),
     });
-    expect(saturated.body.auto_promote_health.summary).toBe("ready build fuel meets floor: ready=3 floor=2, lanes=3/2");
+    expect(saturated.body.auto_promote_health.summary).toBe("ready build fuel meets floor: ready=2 floor=2, lanes=2/2");
 
     const emptyAdapter = await freshDb();
     const { app: emptyApp, daemon: emptyDaemon } = mountStatusApp(emptyAdapter, {
