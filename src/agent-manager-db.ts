@@ -2565,9 +2565,26 @@ export class AgentManagerDb {
         for (const entry of RepoRegistry.load().list()) {
           if (!existsSync(entry.root)) continue;
           const r = reapMergedWorktrees(entry.root, { base: entry.intended_canonical_branch });
-          if (r.removed > 0) {
-            console.log(`[Manager] worktree reaper: removed ${r.removed} merged worktree(s) from ${entry.repo_name} (kept ${r.kept})`);
-          }
+          const byAction = r.worktrees.reduce<Record<string, number>>((acc, wt) => {
+            acc[wt.action] = (acc[wt.action] ?? 0) + 1;
+            return acc;
+          }, {});
+          console.log(
+            '[Manager] worktree cleanup telemetry ' +
+              JSON.stringify({
+                schema_version: r.schema_version,
+                repo_name: entry.repo_name,
+                protected_root: r.protected_root,
+                base: r.base,
+                dry_run: r.dry_run,
+                scanned: r.scanned,
+                removed: r.removed,
+                kept: r.kept,
+                would_remove: r.would_remove,
+                bytes_reclaimed: r.bytes_reclaimed,
+                by_action: byAction,
+              }),
+          );
         }
       } catch (err) {
         console.warn('[Manager] worktree reaper failed:', err instanceof Error ? err.message : String(err));

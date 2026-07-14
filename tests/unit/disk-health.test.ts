@@ -29,6 +29,28 @@ describe("readDiskHeadroom", () => {
     expect(health.reason).toMatch(/available disk headroom is below/);
   });
 
+  it("fires the warning before available headroom falls below 10 GiB", () => {
+    const gib = 1024 ** 3;
+    const health = readDiskHeadroom({
+      path: process.cwd(),
+      minFreeBytes: 5 * gib,
+      warnFreeBytes: 10 * gib,
+      statfs: () => ({
+        type: 0,
+        bsize: 1024,
+        blocks: 100 * 1024 * 1024,
+        bfree: Math.floor(7.4 * 1024 * 1024),
+        bavail: Math.floor(7.4 * 1024 * 1024),
+        files: 0,
+        ffree: 0,
+      }),
+    });
+
+    expect(health.state).toBe("warn");
+    expect(health.available_gib).toBe(7.4);
+    expect(health.reason).toContain("10 GiB");
+  });
+
   it("returns unknown when the probe path is unreadable", () => {
     const health = readDiskHeadroom({ path: "/definitely/missing/id-agents-disk-health-test" });
 

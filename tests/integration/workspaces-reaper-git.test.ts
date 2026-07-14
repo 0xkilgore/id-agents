@@ -22,6 +22,7 @@ beforeEach(() => {
   git(["config", "user.email", "t@t.dev"]);
   git(["config", "user.name", "t"]);
   writeFileSync(path.join(repo, "README.md"), "hi\n");
+  writeFileSync(path.join(repo, ".gitignore"), "node_modules/\n");
   git(["add", "."]);
   git(["commit", "-m", "init"]);
 });
@@ -57,14 +58,16 @@ describe("reapMergedWorktrees", () => {
     expect(r.worktrees[0].action).toBe("removed");
   });
 
-  it("removes a merged worktree even with untracked node_modules present", () => {
+  it("keeps a merged worktree when untracked files are present", () => {
     const wt = addWorktree("deps", "feat-deps");
     mkdirSync(path.join(wt, "node_modules", "pkg"), { recursive: true });
     writeFileSync(path.join(wt, "node_modules", "pkg", "index.js"), "x\n");
 
     const r = reapMergedWorktrees(repo, { base: "main" });
-    expect(r.removed).toBe(1);
-    expect(existsSync(wt)).toBe(false);
+    expect(r.removed).toBe(0);
+    expect(existsSync(wt)).toBe(true);
+    expect(r.worktrees[0].action).toBe("kept");
+    expect(r.worktrees[0].reason).toMatch(/uncommitted change/);
   });
 
   it("keeps a worktree with unmerged commits (in-flight build)", () => {
@@ -87,7 +90,7 @@ describe("reapMergedWorktrees", () => {
     const r = reapMergedWorktrees(repo, { base: "main" });
     expect(r.removed).toBe(0);
     expect(existsSync(wt)).toBe(true);
-    expect(r.worktrees[0].reason).toMatch(/uncommitted tracked/);
+    expect(r.worktrees[0].reason).toMatch(/uncommitted change/);
   });
 
   it("never removes the canonical root", () => {
@@ -99,7 +102,69 @@ describe("reapMergedWorktrees", () => {
     const wt = addWorktree("dryrun", "feat-dry");
     const r = reapMergedWorktrees(repo, { base: "main", dryRun: true });
     expect(r.removed).toBe(0);
+    expect(r.would_remove).toBe(1);
+    expect(r.bytes_reclaimable_dry_run).toBeGreaterThan(0);
     expect(existsSync(wt)).toBe(true);
     expect(r.worktrees[0].action).toBe("would_remove");
+  });
+
+  it("cleans only terminal merged sibling clones and repeated runs do not regress headroom", () => {
+    git(["remote", "add", "origin", repo]);
+    git(["checkout", "-b", "terminal-merged"]);
+    writeFileSync(path.join(repo, "terminal.txt"), "terminal\n");
+    git(["add", "."]);
+    git(["commit", "-m", "terminal branch"]);
+    git(["checkout", "main"]);
+    git(["merge", "--no-ff", "-m", "merge terminal", "terminal-merged"]);
+
+    git(["checkout", "-b", "still-unmerged"]);
+    writeFileSync(path.join(repo, "unmerged.txt"), "unmerged\n");
+    git(["add", "."]);
+    git(["commit", "-m", "unmerged branch"]);
+    git(["checkout", "main"]);
+
+    const cleanClone = path.join(path.dirname(repo), `${path.basename(repo)}-clean-clone`);
+    const dirtyClone = path.join(path.dirname(repo), `${path.basename(repo)}-dirty-clone`);
+    const unmergedClone = path.join(path.dirname(repo), `${path.basename(repo)}-unmerged-clone`);
+    execFileSync("git", ["clone", repo, cleanClone], { stdio: "ignore" });
+    execFileSync("git", ["clone", repo, dirtyClone], { stdio: "ignore" });
+    execFileSync("git", ["clone", repo, unmergedClone], { stdio: "ignore" });
+    git(["checkout", "terminal-merged"], cleanClone);
+    git(["checkout", "terminal-merged"], dirtyClone);
+    writeFileSync(path.join(dirtyClone, "leftover.log"), "do not delete\n");
+    git(["checkout", "still-unmerged"], unmergedClone);
+
+    const dry = reapMergedWorktrees(repo, { base: "main", dryRun: true });
+    expect(dry.worktrees.find((w) => w.path === cleanClone)).toMatchObject({
+      kind: "sibling_clone",
+      action: "would_remove",
+      clean: true,
+      merged: true,
+    });
+    expect(dry.worktrees.find((w) => w.path === dirtyClone)).toMatchObject({
+      kind: "sibling_clone",
+      action: "kept",
+      clean: false,
+    });
+    expect(dry.worktrees.find((w) => w.path === unmergedClone)).toMatchObject({
+      kind: "sibling_clone",
+      action: "kept",
+      clean: true,
+      merged: false,
+    });
+    expect(existsSync(cleanClone)).toBe(true);
+
+    const first = reapMergedWorktrees(repo, { base: "main" });
+    expect(first.removed).toBe(1);
+    expect(first.bytes_reclaimed).toBeGreaterThan(0);
+    expect(existsSync(cleanClone)).toBe(false);
+    expect(existsSync(dirtyClone)).toBe(true);
+    expect(existsSync(unmergedClone)).toBe(true);
+
+    const second = reapMergedWorktrees(repo, { base: "main" });
+    expect(second.removed).toBe(0);
+    expect(second.bytes_reclaimed).toBe(0);
+    expect(existsSync(dirtyClone)).toBe(true);
+    expect(existsSync(unmergedClone)).toBe(true);
   });
 });

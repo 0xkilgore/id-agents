@@ -68,9 +68,11 @@ export {
 } from "./monitor.js";
 
 export {
+  discoverCleanupCandidates,
   reapMergedWorktrees,
   type ReapResult,
   type ReapedWorktree,
   type ReapOptions,
   type ReapAction,
+  type ReapCandidateKind,
 } from "./reaper.js";

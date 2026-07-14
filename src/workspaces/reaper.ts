@@ -9,16 +9,15 @@
 // The reaper removes a worktree ONLY when it is provably safe:
 //   1. it is NOT the protected (canonical) root itself, and
 //   2. its branch is fully merged into the base (no unique commits), and
-//   3. it has no uncommitted TRACKED changes (untracked node_modules/.worktrees
-//      noise is ignored — that is disposable build detritus).
+//   3. it has no uncommitted changes, including untracked files.
 // Anything ahead of base, detached, or carrying tracked edits is KEPT. This is
 // conservative by construction: an in-flight build either has committed work
 // (ahead > 0 → kept) or uncommitted work (tracked-dirty → kept).
 
 import { execFileSync } from "node:child_process";
-import { lstatSync } from "node:fs";
+import { existsSync, lstatSync, readdirSync, rmSync } from "node:fs";
 import path from "node:path";
-import { listWorktrees, stripWorktreeNoise, type WorktreeEntry } from "./allocator.js";
+import { listWorktrees, stripWorktreeNoise } from "./allocator.js";
 
 /**
  * A linked (non-canonical) worktree has a `.git` FILE (gitdir pointer); the
@@ -48,14 +47,25 @@ function gitSafe(args: string[], cwd?: string): { ok: boolean; out: string } {
   }
 }
 
-/** Drop untracked dependency/custody detritus from a porcelain status blob. */
-function trackedDirtyLines(porcelain: string): string[] {
+function dirSizeBytes(dir: string): number {
+  try {
+    const out = execFileSync("du", ["-sk", dir], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    }).toString();
+    const kib = Number(out.trim().split(/\s+/)[0]);
+    return Number.isFinite(kib) ? kib * 1024 : 0;
+  } catch {
+    return 0;
+  }
+}
+
+/** Any porcelain entry is dirty for cleanup purposes, including untracked files. */
+function dirtyLines(porcelain: string): string[] {
   return stripWorktreeNoise(porcelain)
     .split("\n")
     .map((l) => l.trimEnd())
-    .filter((l) => l.length > 0)
-    // `?? .../node_modules` (and the dir entry itself) is disposable.
-    .filter((l) => !/^\?\?\s+.*node_modules(\/|$)/.test(l));
+    .filter((l) => l.length > 0);
 }
 
 /**
@@ -77,20 +87,30 @@ function isMerged(protectedRoot: string, base: string, branch: string): boolean 
 }
 
 export type ReapAction = "removed" | "kept" | "would_remove";
+export type ReapCandidateKind = "linked_worktree" | "sibling_clone";
 
 export interface ReapedWorktree {
   path: string;
   branch: string | null;
+  kind: ReapCandidateKind;
   action: ReapAction;
   reason: string;
+  clean: boolean;
+  merged: boolean | null;
+  reclaimable_bytes: number;
 }
 
 export interface ReapResult {
+  schema_version: "worktree-cleanup.v2";
   protected_root: string;
   base: string;
+  dry_run: boolean;
   scanned: number;
   removed: number;
   kept: number;
+  would_remove: number;
+  bytes_reclaimed: number;
+  bytes_reclaimable_dry_run: number;
   worktrees: ReapedWorktree[];
 }
 
@@ -101,6 +121,94 @@ export interface ReapOptions {
   includeSiblings?: boolean;
   /** Report what WOULD be removed without removing. Default false. */
   dryRun?: boolean;
+  /** Restrict sibling clone cleanup to clones whose origin URL matches the protected root. Default true. */
+  sameOriginOnly?: boolean;
+}
+
+interface ReapCandidate {
+  path: string;
+  branch: string | null;
+  kind: ReapCandidateKind;
+}
+
+function currentBranch(repo: string): string | null {
+  const r = gitSafe(["rev-parse", "--abbrev-ref", "HEAD"], repo);
+  if (!r.ok) return null;
+  const branch = r.out.trim();
+  return branch === "HEAD" ? null : branch;
+}
+
+function remoteOrigin(repo: string): string | null {
+  const r = gitSafe(["config", "--get", "remote.origin.url"], repo);
+  if (!r.ok) return null;
+  const url = r.out.trim();
+  return url.length > 0 ? url : null;
+}
+
+function resolveBaseRef(repo: string, base: string): string | null {
+  if (gitSafe(["rev-parse", "--verify", base], repo).ok) return base;
+  const originBase = `origin/${base}`;
+  if (gitSafe(["rev-parse", "--verify", originBase], repo).ok) return originBase;
+  return null;
+}
+
+function discoverSiblingClones(root: string, rootOrigin: string | null, sameOriginOnly: boolean): ReapCandidate[] {
+  const parent = path.dirname(root);
+  const prefix = `${path.basename(root)}-`;
+  let entries: string[] = [];
+  try {
+    entries = readdirSync(parent);
+  } catch {
+    return [];
+  }
+
+  return entries
+    .filter((name) => name.startsWith(prefix))
+    .map((name) => path.join(parent, name))
+    .filter((candidate) => {
+      if (path.resolve(candidate) === root) return false;
+      try {
+        if (!lstatSync(candidate).isDirectory()) return false;
+      } catch {
+        return false;
+      }
+      const gitDir = path.join(candidate, ".git");
+      if (!existsSync(gitDir) || !lstatSync(gitDir).isDirectory()) return false;
+      if (sameOriginOnly) {
+        if (!rootOrigin) return false;
+        if (remoteOrigin(candidate) !== rootOrigin) return false;
+      }
+      return true;
+    })
+    .map((candidate) => ({
+      path: path.resolve(candidate),
+      branch: currentBranch(candidate),
+      kind: "sibling_clone" as const,
+    }));
+}
+
+export function discoverCleanupCandidates(protectedRoot: string, opts: ReapOptions = {}): ReapCandidate[] {
+  const root = path.resolve(protectedRoot);
+  const includeSiblings = opts.includeSiblings !== false;
+  const sameOriginOnly = opts.sameOriginOnly !== false;
+  const rootOrigin = remoteOrigin(root);
+  const candidates = new Map<string, ReapCandidate>();
+
+  for (const wt of listWorktrees(root)) {
+    const wtPath = path.resolve(wt.path);
+    if (!isLinkedWorktreeDir(wtPath)) continue;
+    const underCustody = wtPath.split(path.sep).includes(".worktrees");
+    if (!underCustody && !includeSiblings) continue;
+    candidates.set(wtPath, { path: wtPath, branch: wt.branch, kind: "linked_worktree" });
+  }
+
+  if (includeSiblings) {
+    for (const clone of discoverSiblingClones(root, rootOrigin, sameOriginOnly)) {
+      candidates.set(clone.path, clone);
+    }
+  }
+
+  return [...candidates.values()].sort((a, b) => a.path.localeCompare(b.path));
 }
 
 /**
@@ -110,74 +218,106 @@ export interface ReapOptions {
 export function reapMergedWorktrees(protectedRoot: string, opts: ReapOptions = {}): ReapResult {
   const root = path.resolve(protectedRoot);
   const base = opts.base ?? "main";
-  const includeSiblings = opts.includeSiblings !== false;
   const dryRun = opts.dryRun === true;
 
   const result: ReapResult = {
+    schema_version: "worktree-cleanup.v2",
     protected_root: root,
     base,
+    dry_run: dryRun,
     scanned: 0,
     removed: 0,
     kept: 0,
+    would_remove: 0,
+    bytes_reclaimed: 0,
+    bytes_reclaimable_dry_run: 0,
     worktrees: [],
   };
 
   // Base must resolve, or "merged" is undefined and we reap nothing.
-  if (!gitSafe(["rev-parse", "--verify", base], root).ok) {
+  if (!resolveBaseRef(root, base)) {
     return result;
   }
 
-  const worktrees: WorktreeEntry[] = listWorktrees(root);
-  for (const wt of worktrees) {
-    const wtPath = path.resolve(wt.path);
-    // Only linked worktrees are reapable; the canonical checkout (`.git` is a
-    // directory) is never touched. Robust against /var↔/private/var symlinks.
-    if (!isLinkedWorktreeDir(wtPath)) continue;
-    const underCustody = wtPath.split(path.sep).includes(".worktrees");
-    if (!underCustody && !includeSiblings) continue;
+  for (const wt of discoverCleanupCandidates(root, opts)) {
+    const wtPath = wt.path;
     result.scanned++;
 
-    const record = (action: ReapAction, reason: string) => {
-      result.worktrees.push({ path: wtPath, branch: wt.branch, action, reason });
-      if (action === "removed") result.removed++;
-      else result.kept++;
+    const record = (action: ReapAction, reason: string, clean: boolean, merged: boolean | null, reclaimableBytes = 0) => {
+      result.worktrees.push({
+        path: wtPath,
+        branch: wt.branch,
+        kind: wt.kind,
+        action,
+        reason,
+        clean,
+        merged,
+        reclaimable_bytes: reclaimableBytes,
+      });
+      if (action === "removed") {
+        result.removed++;
+        result.bytes_reclaimed += reclaimableBytes;
+      } else if (action === "would_remove") {
+        result.would_remove++;
+        result.kept++;
+        result.bytes_reclaimable_dry_run += reclaimableBytes;
+      } else {
+        result.kept++;
+      }
     };
 
     if (!wt.branch) {
-      record("kept", "detached HEAD — not provably merged");
+      record("kept", "detached HEAD — not provably merged", false, null);
       continue;
     }
-    const status = gitSafe(["status", "--porcelain=v1"], wtPath);
+    const status = gitSafe(["status", "--porcelain=v1", "--untracked-files=all", "--ignored=matching"], wtPath);
     if (!status.ok) {
-      record("kept", "could not read worktree status");
+      record("kept", "could not read worktree status", false, null);
       continue;
     }
-    const dirty = trackedDirtyLines(status.out);
+    const dirty = dirtyLines(status.out);
     if (dirty.length > 0) {
-      record("kept", `${dirty.length} uncommitted tracked change(s)`);
+      record("kept", `${dirty.length} uncommitted change(s)`, false, null);
       continue;
     }
-    const merged = isMerged(root, base, wt.branch);
+    const baseRef = wt.kind === "sibling_clone" ? resolveBaseRef(wtPath, base) : resolveBaseRef(root, base);
+    if (!baseRef) {
+      record("kept", "could not resolve base", true, null);
+      continue;
+    }
+    const merged = isMerged(wt.kind === "sibling_clone" ? wtPath : root, baseRef, wt.branch);
     if (merged === null) {
-      record("kept", "could not compare against base");
+      record("kept", "could not compare against base", true, null);
       continue;
     }
     if (!merged) {
-      record("kept", `unmerged: branch not an ancestor of ${base}`);
+      record("kept", `unmerged: branch not an ancestor of ${baseRef}`, true, false);
       continue;
     }
 
-    // Merged + tracked-clean → safe to remove. `--force` only discards the
-    // untracked node_modules/build detritus we already vetted as disposable.
+    const reclaimableBytes = dirSizeBytes(wtPath);
     if (dryRun) {
-      record("would_remove", `merged into ${base}, tracked-clean`);
+      record("would_remove", `merged into ${baseRef}, clean`, true, true, reclaimableBytes);
       continue;
     }
-    const rm = gitSafe(["worktree", "remove", "--force", wtPath], root);
-    if (rm.ok) {
-      record("removed", `merged into ${base}, tracked-clean`);
+    let removed = false;
+    let removeError = "";
+    if (wt.kind === "linked_worktree") {
+      const rm = gitSafe(["worktree", "remove", wtPath], root);
+      removed = rm.ok;
+      removeError = rm.out;
     } else {
-      record("kept", `git worktree remove failed: ${rm.out.split("\n")[0]}`);
+      try {
+        rmSync(wtPath, { recursive: true, force: false });
+        removed = true;
+      } catch (err) {
+        removeError = err instanceof Error ? err.message : String(err);
+      }
+    }
+    if (removed) {
+      record("removed", `merged into ${baseRef}, clean`, true, true, reclaimableBytes);
+    } else {
+      record("kept", `remove failed: ${removeError.split("\n")[0]}`, true, true);
     }
   }
 
