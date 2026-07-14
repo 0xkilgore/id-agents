@@ -49,9 +49,12 @@ import {
   draftFromAutoAttach,
   draftFromManagerApi,
   draftFromScheduleDerived,
+  isTaskTrackConformant,
+  normalizeTaskCreateTrack,
+  normalizeTaskDescriptionNextAction,
+  validateTaskTrackForStorage,
 } from './tasks-readmodel/task-draft.js';
 import { buildResetConformanceSummary } from './conformance/reset.js';
-import { resolveTrack } from './track-registry/registry.js';
 import { assembleAgentDetail } from './agent-detail/assemble.js';
 import { buildAllocationTelemetry, clampTrailingHours } from './telemetry/allocation-telemetry.js';
 import {
@@ -8909,21 +8912,16 @@ export class AgentManagerDb {
           return res.status(400).json({ error: 'Missing required field: title' });
         }
 
-        // Validate optional `track` against the canonical-track-registry.
-        // Missing tracks are explicit `(unassigned)` quarantine candidates.
-        // Non-conforming tracks are stored verbatim so `track:unknown` remains
-        // countable on dashboards/system health; never silently rewrite them.
-        let track = '(unassigned)';
-        if (rawTrack != null && typeof rawTrack === 'string' && rawTrack.trim() !== '') {
-          const resolved = resolveTrack(rawTrack);
-          if (resolved.conforms) {
-            track = rawTrack.trim();
-          } else {
-            track = rawTrack.trim();
-            console.warn(
-              `[Manager] POST /tasks: non-conforming track "${rawTrack}" — storing verbatim for track:unknown quarantine (see canonical-track-registry)`,
-            );
-          }
+        const bodyDescription = typeof description === 'string' ? description : null;
+        const track = normalizeTaskCreateTrack({
+          track: typeof rawTrack === 'string' ? rawTrack : null,
+          title,
+          description: bodyDescription,
+        });
+        if (!isTaskTrackConformant(track)) {
+          console.warn(
+            `[Manager] POST /tasks: non-conforming track "${track}" — storing verbatim for track:unknown quarantine (see canonical-track-registry)`,
+          );
         }
 
         // Resolve created_by from `from` field first so we can recover the
@@ -8976,7 +8974,11 @@ export class AgentManagerDb {
             name,
             team_id: taskTeamId,
             title,
-            description: description || null,
+            description: normalizeTaskDescriptionNextAction({
+              description: bodyDescription,
+              title,
+              ownerName: null,
+            }),
             created_by: createdBy,
             owner: null,
             track,
@@ -9347,6 +9349,7 @@ export class AgentManagerDb {
         await this.db.tasks.updateFields(task.id, {
           title: next.title,
           description: next.description,
+          track: next.track,
           updated_at: Math.floor(Date.now() / 1000),
         });
         this.clearTaskListCache(teamId);
@@ -10504,12 +10507,14 @@ export class AgentManagerDb {
       priority?: 'high' | 'med' | 'low' | '';
       due?: string;
       note?: string;
+      track?: string;
     };
   } | { ok: false; error: string } {
     const fields: {
       priority?: 'high' | 'med' | 'low' | '';
       due?: string;
       note?: string;
+      track?: string;
     } = {};
 
     if (body.priority !== undefined) {
@@ -10533,19 +10538,32 @@ export class AgentManagerDb {
       fields.note = body.note.trim();
     }
 
+    if (body.track !== undefined) {
+      if (typeof body.track !== 'string') {
+        return { ok: false, error: 'track must be a string' };
+      }
+      const track = validateTaskTrackForStorage(body.track);
+      if (!isTaskTrackConformant(track)) {
+        return { ok: false, error: 'track must conform to the canonical-track-registry' };
+      }
+      fields.track = track;
+    }
+
     return { ok: true, changed: Object.keys(fields).length > 0, fields };
   }
 
   private applyTaskFieldPatch(
-    task: Pick<TaskRow, 'title' | 'description'>,
+    task: Pick<TaskRow, 'title' | 'description' | 'track'>,
     fields: {
       priority?: 'high' | 'med' | 'low' | '';
       due?: string;
       note?: string;
+      track?: string;
     },
-  ): { title: string; description: string | null } {
+  ): { title: string; description: string | null; track: string } {
     let title = task.title;
     let description = task.description;
+    let track = task.track;
 
     if (fields.priority !== undefined) {
       ({ title, description } = this.replaceTaskToken(title, description, /(?:^|\s)!(high|med|low)\b/gi, fields.priority ? `!${fields.priority}` : ''));
@@ -10561,7 +10579,17 @@ export class AgentManagerDb {
         : fields.note;
     }
 
-    return { title, description };
+    if (fields.track !== undefined) {
+      track = fields.track;
+    }
+
+    description = normalizeTaskDescriptionNextAction({
+      description,
+      title,
+      ownerName: null,
+    });
+
+    return { title, description, track };
   }
 
   private replaceTaskToken(
@@ -12878,20 +12906,11 @@ export class AgentManagerDb {
             return { ok: false, error: 'Usage: /task create "<title>" [--name <slug>] [--description "..."] [--team <team>] [--owner <agent>] [--track <id>] [--event <schedule-id>]...' };
           }
 
-          // Validate optional --track via the canonical-track-registry. Missing
-          // tracks remain `(unassigned)`; non-conforming tracks are stored
-          // verbatim so `track:unknown` remains visible instead of silently
-          // becoming canonical metadata.
-          let track = '(unassigned)';
-          if (trackRef != null && trackRef.trim() !== '') {
-            if (resolveTrack(trackRef).conforms) {
-              track = trackRef.trim();
-            } else {
-              track = trackRef.trim();
-              console.warn(
-                `[Manager] /task create: non-conforming track "${trackRef}" — storing verbatim for track:unknown quarantine (see canonical-track-registry)`,
-              );
-            }
+          const track = normalizeTaskCreateTrack({ track: trackRef ?? null, title, description: description ?? null });
+          if (!isTaskTrackConformant(track)) {
+            console.warn(
+              `[Manager] /task create: non-conforming track "${track}" — storing verbatim for track:unknown quarantine (see canonical-track-registry)`,
+            );
           }
 
           // Resolve optional team first (needed for name uniqueness check)
@@ -12947,7 +12966,11 @@ export class AgentManagerDb {
               name,
               team_id: taskTeamId,
               title,
-              description: description || null,
+              description: normalizeTaskDescriptionNextAction({
+                description: description ?? null,
+                title,
+                ownerName: ownerRef ?? null,
+              }),
               created_by: createdBy,
               owner: ownerId,
               track,

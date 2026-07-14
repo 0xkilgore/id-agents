@@ -111,6 +111,7 @@ export class PgTasksRepo implements TasksRepository {
       status?: 'todo' | 'doing' | 'done';
       title?: string;
       description?: string | null;
+      track?: string;
       completed_at?: number | null;
       updated_at: number;
     },
@@ -127,6 +128,7 @@ export class PgTasksRepo implements TasksRepository {
     if (fields.status !== undefined) { sets.push(`status = $${idx++}`); params.push(fields.status); }
     if (fields.title !== undefined) { sets.push(`title = $${idx++}`); params.push(fields.title); }
     if (fields.description !== undefined) { sets.push(`description = $${idx++}`); params.push(fields.description); }
+    if (fields.track !== undefined) { sets.push(`track = $${idx++}`); params.push(fields.track); }
     if (fields.completed_at !== undefined) { sets.push(`completed_at = $${idx++}`); params.push(fields.completed_at); }
 
     params.push(taskId);

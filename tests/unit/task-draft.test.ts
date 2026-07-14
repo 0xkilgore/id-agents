@@ -15,6 +15,10 @@ import {
   draftFromManagerApi,
   draftFromScheduleDerived,
   draftFromTaskviewCli,
+  hasNextActionText,
+  normalizeTaskCreateTrack,
+  normalizeTaskDescriptionNextAction,
+  RESET_CONFORMANT_DEFAULT_TRACK,
   UNASSIGNED_TRACK,
   type TaskDraft,
 } from "../../src/tasks-readmodel/task-draft.js";
@@ -41,6 +45,30 @@ describe("buildTaskRow", () => {
   it("generates the canonical task_<ms>_<rand> id when none is injected", () => {
     const row = buildTaskRow(draftFromManagerApi({ name: "x", team_id: null, title: "X" }), { nowMs: 1700000000000 });
     expect(row.id).toMatch(/^task_1700000000000_[a-z0-9]+$/);
+  });
+});
+
+describe("reset-conformant task creation metadata", () => {
+  it("defaults missing create tracks to a canonical reset-conformant track", () => {
+    expect(normalizeTaskCreateTrack({ title: "Close the write-path gap" })).toBe(RESET_CONFORMANT_DEFAULT_TRACK);
+  });
+
+  it("inherits explicit and tagged tracks before using the fallback", () => {
+    expect(normalizeTaskCreateTrack({ track: " T-CKPT ", title: "X" })).toBe("T-CKPT");
+    expect(normalizeTaskCreateTrack({ title: "[project: kapelle][T-OPRESET] X" })).toBe("T-OPRESET");
+    expect(normalizeTaskCreateTrack({ title: "X", description: "body\n[track: T-QA]" })).toBe("T-QA");
+  });
+
+  it("adds a Next action line when the caller did not provide one", () => {
+    const description = normalizeTaskDescriptionNextAction({ description: "Context", title: "Ship the fix", ownerName: "maestra" });
+    expect(description).toContain("Context");
+    expect(description).toContain('Next action: maestra advances "Ship the fix".');
+    expect(hasNextActionText(description)).toBe(true);
+  });
+
+  it("preserves caller-provided next action text", () => {
+    const description = normalizeTaskDescriptionNextAction({ description: "Next action: run smoke", title: "Ship the fix" });
+    expect(description).toBe("Next action: run smoke");
   });
 });
 
