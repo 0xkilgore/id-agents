@@ -413,6 +413,79 @@ test("needs_clarification passes through (operator clarification is its own stat
   );
 });
 
+test("needs_clarification that blocks dependencies stays a live clarification blocker", () => {
+  const r = row({
+    status: "needs_clarification",
+    subject: "[project: kapelle][T-DEP] blocked on upstream API contract",
+    not_before_at: "2026-07-13T10:00:00.000Z",
+    started_at: "2026-07-13T10:00:15.000Z",
+    completed_at: null,
+    updated_at: "2026-07-13T10:02:00.000Z",
+    recovery_status: "none",
+    failure_kind: null,
+    failure_detail: null,
+    artifact_path: null,
+    promotion_result_json: null,
+    result_json: JSON.stringify({
+      clarification_id: "clar_dependency_contract",
+      blocked_dependency_item_ids: ["coitem-downstream-build"],
+      question: "Which API contract version should downstream builds target?",
+    }),
+  });
+
+  expect(deriveEffectiveState(r)).toBe("needs_clarification");
+  expect(deriveNeedsOperator(r, Date.parse("2026-07-13T12:00:00.000Z"))).toBe(false);
+});
+
+test("expired retryable clarification noise is not promoted to needs_review fuel by closeout classification", () => {
+  const r = row({
+    status: "needs_clarification",
+    subject: "[project: kapelle][T-ORCH] retryable provider noise clarification",
+    not_before_at: "2026-07-13T09:00:00.000Z",
+    started_at: "2026-07-13T09:00:10.000Z",
+    completed_at: null,
+    updated_at: "2026-07-13T09:01:00.000Z",
+    recovery_status: "moot",
+    recovery_reason: "clarification expired as retryable noise after replacement dispatch succeeded",
+    failure_kind: "provider_timeout",
+    failure_detail: "transient provider timeout while waiting for clarification resume",
+    artifact_path: null,
+    promotion_result_json: null,
+    result_json: JSON.stringify({
+      clarification_id: "clar_retryable_noise",
+      expired: true,
+      retryable_noise: true,
+    }),
+  });
+
+  expect(deriveEffectiveState(r)).toBe("needs_clarification");
+  expect(deriveNeedsOperator(r, Date.parse("2026-07-13T12:00:00.000Z"))).toBe(false);
+});
+
+test("needs_clarification requiring operator input preserves the clarification state", () => {
+  const r = row({
+    status: "needs_clarification",
+    subject: "[project: kapelle][T-ORCH] choose promotion strategy",
+    not_before_at: "2026-07-13T11:00:00.000Z",
+    started_at: "2026-07-13T11:00:10.000Z",
+    completed_at: null,
+    updated_at: "2026-07-13T11:01:00.000Z",
+    recovery_status: "none",
+    failure_kind: null,
+    failure_detail: null,
+    artifact_path: null,
+    promotion_result_json: null,
+    result_json: JSON.stringify({
+      clarification_id: "clar_operator_strategy",
+      question: "Should this divergent branch merge, squash, or wait?",
+      options: ["merge", "squash", "wait"],
+    }),
+  });
+
+  expect(deriveEffectiveState(r)).toBe("needs_clarification");
+  expect(deriveNeedsOperator(r, Date.parse("2026-07-13T12:00:00.000Z"))).toBe(false);
+});
+
 // ============================================================
 // 44-failed corpus (2026-06-16 operator-trust incident)
 // ============================================================

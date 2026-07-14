@@ -22,12 +22,12 @@ import { computeNextDelay, tickWriteCaps } from "./backpressure.js";
 import {
   appendDecisions,
   bindItemForFire,
-  getOrchestrationState,
   getDispatchOutcomesByPhid,
+  getDispatchStatusesByPhid,
+  getOrchestrationState,
   listBacklogByState,
   listDependencyResolution,
   listReadyItems,
-  getDispatchStatusesByPhid,
   promoteToReady,
   recordTickOutcome,
   repairReadyCodexRuntimeMetadata,
@@ -36,6 +36,7 @@ import {
   type ReadyRuntimeRepair,
 } from "./storage.js";
 import { deriveBacklogRetryReadiness } from "./backlog-retry-readiness.js";
+import { duplicateDispatchRetryReceipt } from "./duplicate-dispatch-retry-receipt.js";
 import { runFleshPass, type FleshRunSummary } from "./flesh-runner.js";
 import { selectAutoPromotions } from "./auto-promote-policy.js";
 import { sendTelegramAlert, type AlertSender } from "./telegram.js";
@@ -49,6 +50,7 @@ import { readRuntimeMixDrift, type RuntimeMixDrift } from "../model-policy/runti
 /** Dispatch/effective statuses that mean the work is finished — its write-scope
  *  lock can be released. Mirrors dispatch terminal states plus recovery moot. */
 const TERMINAL_DISPATCH_STATUSES = new Set(["done", "failed", "failed_needs_operator", "cancelled", "moot"]);
+const AUTO_PROMOTE_HEALTH_STALE_ALREADY_DISPATCHED_STATUSES = new Set(["done", "cancelled", "moot", "failed_needs_operator"]);
 const INCIDENT_ALERT_COOLDOWN_MS = 60 * 60 * 1000;
 
 type OrchestrationIncidentKind = "stall" | "model_policy_drift";
@@ -1028,6 +1030,15 @@ export class ContinuousOrchestrationDaemon {
 
     const plan = planAdmission(ordered, ctx, config);
     const byId = new Map(ordered.map((item) => [item.item_id, item]));
+    const duplicateRetryOutcomes = await getDispatchOutcomesByPhid(
+      this.deps.adapter,
+      plan.skipped
+        .filter((decision) => decision.metadata?.code === "duplicate_dispatch_retry_required")
+        .map((decision) =>
+          typeof decision.metadata?.last_dispatch_phid === "string" ? decision.metadata.last_dispatch_phid : null,
+        )
+        .filter((phid): phid is string => phid != null),
+    );
     const blockerCounts = readyAdmissionBlockerCounts(plan);
     const staleReadyFloor =
       ordered.length >= config.min_ready_fuel && plan.admit.length < config.min_ready_fuel && plan.skipped.length > 0;
@@ -1043,6 +1054,15 @@ export class ContinuousOrchestrationDaemon {
       })),
       non_admitted: plan.skipped.map((decision) => {
         const item = decision.item_id ? byId.get(decision.item_id) : undefined;
+        const lastDispatchPhid =
+          decision.metadata?.code === "duplicate_dispatch_retry_required" &&
+          typeof decision.metadata.last_dispatch_phid === "string"
+            ? decision.metadata.last_dispatch_phid
+            : null;
+        const duplicateRetry =
+          lastDispatchPhid != null
+            ? duplicateDispatchRetryReceipt(lastDispatchPhid, duplicateRetryOutcomes.get(lastDispatchPhid))
+            : null;
         return {
           item_id: decision.item_id ?? "",
           title: item?.title ?? "",
@@ -1051,7 +1071,7 @@ export class ContinuousOrchestrationDaemon {
           action: decision.action === "held" ? "held" : "skipped",
           code: typeof decision.metadata?.code === "string" ? decision.metadata.code : "unknown",
           reason: decision.reason,
-          metadata: decision.metadata,
+          metadata: duplicateRetry ? { ...decision.metadata, duplicate_retry: duplicateRetry } : decision.metadata,
         };
       }),
       blocker_counts: blockerCounts,
@@ -1076,11 +1096,20 @@ export class ContinuousOrchestrationDaemon {
     const { view: usage } = await this.deps.readUsage();
     const readyRuntimeRepairs = await repairReadyCodexRuntimeMetadata(this.deps.adapter, this.teamId);
 
-    const [ready, needsReview, inFlight] = await Promise.all([
+    const [ready, allNeedsReview, inFlight] = await Promise.all([
       listReadyItems(this.deps.adapter, this.teamId),
       listBacklogByState(this.deps.adapter, { team_id: this.teamId, state: "needs_review" }),
       listBacklogByState(this.deps.adapter, { team_id: this.teamId, state: "in_flight" }),
     ]);
+    const dispatchStatuses = await getDispatchStatusesByPhid(
+      this.deps.adapter,
+      allNeedsReview.map((item) => item.last_dispatch_phid).filter((phid): phid is string => !!phid),
+    );
+    const needsReview = allNeedsReview.filter((item) => {
+      if (!item.last_dispatch_phid) return true;
+      const status = dispatchStatuses.get(item.last_dispatch_phid);
+      return !status || !AUTO_PROMOTE_HEALTH_STALE_ALREADY_DISPATCHED_STATUSES.has(status);
+    });
     const capacityFuel = buildCapacityFuel(ready, inFlight, config.max_in_flight);
     const plan = selectAutoPromotions(needsReview, capacityFuel.floorItems, {
       floor: config.auto_promote_floor,
@@ -1100,10 +1129,6 @@ export class ContinuousOrchestrationDaemon {
     const belowFloor = !capacityFuel.capacityOccupied && plan.before.build_ready < config.auto_promote_floor;
     const belowLanes = !capacityFuel.capacityOccupied && plan.before.build_lanes < config.auto_promote_min_lanes;
     const skippedItems = plan.skipped;
-    const dispatchStatuses = await getDispatchStatusesByPhid(
-      this.deps.adapter,
-      needsReview.map((item) => item.last_dispatch_phid).filter((phid): phid is string => !!phid),
-    );
     const itemById = new Map(needsReview.map((item) => [item.item_id, item]));
     const healthSkippedItems = skippedItems.map((item): AutoPromoteHealthSkippedItem => {
       const backlogItem = itemById.get(item.item_id);
