@@ -206,8 +206,16 @@ export interface TickResult {
 
 export interface ReadyAdmissionExplanation {
   candidates: number;
+  useful_ready: number;
   admissible_now: number;
+  lanes: {
+    raw_ready: number;
+    useful_ready: number;
+    admissible_now: number;
+    by_lane: Array<{ lane: string; raw_ready: number; useful_ready: number; admissible_now: number; blocked: number }>;
+  };
   block_reason_counts: ReadyAdmissionBlockReasonCounts;
+  top_block_reasons: Array<{ code: string; category: ReadyAdmissionBlockerCategory; count: number }>;
   admissible: Array<{ item_id: string; title: string; to_agent: string | null; risk_class: string }>;
   non_admitted: Array<{
     item_id: string;
@@ -399,6 +407,7 @@ function readyAdmissionBlockerCategory(code: string): ReadyAdmissionBlockerCateg
     case "target_unhealthy":
     case "provider_runtime_mismatch":
       return "runtime_unavailable";
+    case "duplicate_dispatch_guard":
     case "duplicate_dispatch_retry_required":
       return "retry_safety";
     case "missing_dispatch_target":
@@ -1041,12 +1050,40 @@ export class ContinuousOrchestrationDaemon {
         .filter((phid): phid is string => phid != null),
     );
     const blockerCounts = readyAdmissionBlockerCounts(plan);
+    const nonUsefulItemIds = new Set(
+      plan.skipped
+        .filter((decision) => {
+          const code = decision.metadata?.code;
+          return code === "duplicate_dispatch_guard" || code === "duplicate_dispatch_retry_required";
+        })
+        .map((decision) => decision.item_id)
+        .filter((itemId): itemId is string => !!itemId),
+    );
+    const admittedItemIds = new Set(plan.admit.map((item) => item.item_id));
+    const laneCounts = new Map<string, { lane: string; raw_ready: number; useful_ready: number; admissible_now: number; blocked: number }>();
+    for (const item of ordered) {
+      const lane = laneKeyOf(item);
+      const counts = laneCounts.get(lane) ?? { lane, raw_ready: 0, useful_ready: 0, admissible_now: 0, blocked: 0 };
+      counts.raw_ready += 1;
+      if (!nonUsefulItemIds.has(item.item_id)) counts.useful_ready += 1;
+      if (admittedItemIds.has(item.item_id)) counts.admissible_now += 1;
+      else counts.blocked += 1;
+      laneCounts.set(lane, counts);
+    }
     const staleReadyFloor =
       ordered.length >= config.min_ready_fuel && plan.admit.length < config.min_ready_fuel && plan.skipped.length > 0;
     return {
       candidates: ordered.length,
+      useful_ready: ordered.length - nonUsefulItemIds.size,
       admissible_now: plan.admit.length,
+      lanes: {
+        raw_ready: new Set(ordered.map(laneKeyOf)).size,
+        useful_ready: new Set(ordered.filter((item) => !nonUsefulItemIds.has(item.item_id)).map(laneKeyOf)).size,
+        admissible_now: new Set(plan.admit.map(laneKeyOf)).size,
+        by_lane: [...laneCounts.values()].sort((a, b) => a.lane.localeCompare(b.lane)),
+      },
       block_reason_counts: readyAdmissionBlockReasonCounts(plan),
+      top_block_reasons: blockerCounts.slice(0, 5),
       admissible: plan.admit.map((item) => ({
         item_id: item.item_id,
         title: item.title,

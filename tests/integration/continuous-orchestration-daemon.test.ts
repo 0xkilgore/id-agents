@@ -1861,6 +1861,127 @@ describe("daemon — dry-run vs live", () => {
     expect(res.body.auto_promote_health.summary).toMatch(/next: manually \/promote safe retries or close stale already-dispatched rows/);
   });
 
+  it("status separates raw ready, useful ready, admissible-now, lanes, and top blockers", async () => {
+    for (let i = 0; i < 2; i++) {
+      await seedReady(adapter, {
+        title: `busy lane ready ${i}`,
+        write_scope: ["repo/busy"],
+      });
+    }
+    await seedReady(adapter, {
+      title: "pool row with no available builder",
+      track: "T-POOL",
+      to_agent: "pool:backend",
+      write_scope: ["repo/pool"],
+    });
+    const duplicate = await seedReady(adapter, {
+      title: "retry guarded duplicate",
+      write_scope: ["repo/duplicate"],
+    });
+    await markReadyAlreadyDispatched(adapter, duplicate.item_id, "phid:disp-old");
+    await seedReady(adapter, {
+      title: "actually admissible row",
+      write_scope: ["repo/free"],
+    });
+    const noFreeBuilderPool: PoolRouting = {
+      poolForItem: (item) =>
+        item.track === "T-POOL"
+          ? { pool_id: "backend", repo_root: "/repo/id-agents", max_parallel: 2, members: ["builder-a"] }
+          : null,
+      availableBuilders: () => [],
+      allocateWorktree: async ({ agent, item }) => ({
+        path: `/repo/id-agents/.worktrees/${agent}-${item.item_id}`,
+        branch: `build/${agent}-${item.item_id}`,
+        lease_id: null,
+      }),
+    };
+    const { app, daemon } = mountStatusApp(
+      adapter,
+      {
+        dry_run: true,
+        auto_flesh_enabled: false,
+        auto_promote_enabled: false,
+        min_ready_fuel: 3,
+        max_in_flight: 10,
+      },
+      {
+        activeScopes: new Set(["repo/busy"]),
+        pools: noFreeBuilderPool,
+      },
+    );
+    await daemon.setMode("running");
+
+    const res = await callApp(app, "/orchestration/status");
+
+    expect(res.status).toBe(200);
+    expect(res.body.counts).toMatchObject({
+      ready: 5,
+      raw_ready_fuel: 5,
+      useful_ready_fuel: 4,
+      admissible_now: 1,
+      raw_ready_lanes: 4,
+      useful_ready_lanes: 3,
+      admissible_lanes: 1,
+      stale_ready_fuel: true,
+    });
+    expect(res.body.ready_admission).toMatchObject({
+      candidates: 5,
+      useful_ready: 4,
+      admissible_now: 1,
+      lanes: {
+        raw_ready: 4,
+        useful_ready: 3,
+        admissible_now: 1,
+      },
+      block_reason_counts: {
+        single_writer_lane_busy: 2,
+        no_free_pool_builder: 1,
+        duplicate_dispatch_retry_required: 1,
+      },
+      stale_ready_floor: {
+        stale: true,
+        ready: 5,
+        admissible: 1,
+        min_ready_fuel: 3,
+      },
+    });
+    expect(res.body.ready_admission.lanes.by_lane).toEqual(
+      expect.arrayContaining([
+        { lane: "repo/busy", raw_ready: 2, useful_ready: 2, admissible_now: 0, blocked: 2 },
+        { lane: "repo/free", raw_ready: 1, useful_ready: 1, admissible_now: 1, blocked: 0 },
+        { lane: "repo/pool", raw_ready: 1, useful_ready: 1, admissible_now: 0, blocked: 1 },
+        { lane: "repo/duplicate", raw_ready: 1, useful_ready: 0, admissible_now: 0, blocked: 1 },
+      ]),
+    );
+    expect(res.body.ready_admission.blocker_counts).toEqual(
+      expect.arrayContaining([
+        { code: "single_writer_lane_busy", category: "lane_eligibility", count: 2 },
+        { code: "no_free_pool_builder", category: "capacity_gate", count: 1 },
+        { code: "duplicate_dispatch_retry_required", category: "retry_safety", count: 1 },
+      ]),
+    );
+    expect(res.body.counts.top_ready_block_reasons).toEqual(res.body.ready_admission.top_block_reasons);
+    expect(res.body.ready_admission.non_admitted).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          action: "skipped",
+          code: "single_writer_lane_busy",
+          metadata: expect.objectContaining({ write_scope: "repo/busy" }),
+        }),
+        expect.objectContaining({
+          action: "held",
+          code: "no_free_pool_builder",
+          metadata: expect.objectContaining({ pool_id: "backend" }),
+        }),
+        expect.objectContaining({
+          action: "held",
+          code: "duplicate_dispatch_retry_required",
+          metadata: expect.objectContaining({ last_dispatch_phid: "phid:disp-old" }),
+        }),
+      ]),
+    );
+  });
+
   it("status next action distinguishes stale already-dispatched auto-promote blockers", async () => {
     await seedReady(adapter, {
       title: "only ready build fuel",
