@@ -79,6 +79,73 @@ describe("readFleetBlockages", () => {
     expect(report.blockages[0]?.count).toBe(1);
   });
 
+  it("separates the current five deterministic branch/promotion hygiene clarifications from Chris-needed input", async () => {
+    const rows = [
+      {
+        dispatch_phid: "phid:disp-ahead-behind",
+        query_id: "query_ahead_behind",
+        to_agent: "roger",
+        question: "Promotion preflight failed: branch ahead=1 behind=3 relative to main.",
+      },
+      {
+        dispatch_phid: "phid:disp-stale-base",
+        query_id: "query_stale_base",
+        to_agent: "release-agent",
+        question: "Promotion blocked because branch kapelle/fix-health is behind origin/main by 28 commits.",
+      },
+      {
+        dispatch_phid: "phid:disp-dirty-checkout",
+        query_id: "query_dirty_checkout",
+        to_agent: "builder",
+        question: "Working tree has unapproved dirty paths before promotion.",
+      },
+      {
+        dispatch_phid: "phid:disp-held-worktree",
+        query_id: "query_held_worktree",
+        to_agent: "release-agent",
+        question: "Branch kapelle/fix-health is already checked out by another worktree.",
+      },
+      {
+        dispatch_phid: "phid:disp-unlinked-branch",
+        query_id: "query_unlinked_branch",
+        to_agent: "release-agent",
+        question: "Unlinked branch without linked dispatch cannot be promoted safely.",
+      },
+    ].map((row) => ({
+      ...row,
+      status: "needs_clarification",
+      recovery_status: "none",
+      updated_at: "2026-07-13T10:00:00.000Z",
+      active_clarification_json: JSON.stringify({
+        needs_you: true,
+        question: row.question,
+        created_at: "2026-07-13T10:00:00.000Z",
+        stale_at: "2026-07-13T10:30:00.000Z",
+        context: {
+          repo: "/repo/kapelle",
+          branch: "kapelle/fix-health",
+        },
+      }),
+    }));
+
+    const report = await readFleetBlockages(new MemoryAdapter(rows), "personal");
+
+    expect(report.needs_clarification).toEqual({
+      count: 5,
+      needs_chris_count: 0,
+      non_chris_count: 5,
+      stale_non_chris_count: 5,
+    });
+    expect(report.blockages.find((b) => b.kind === "needs_clarification")).toMatchObject({
+      severity: "critical",
+      count: 5,
+    });
+    expect(report.blockages.find((b) => b.kind === "stale_clarification")).toMatchObject({
+      severity: "critical",
+      count: 5,
+    });
+  });
+
   // RD-014 drift-guard Ticket A — the in-memory runtime-drift summary is
   // threaded through as a 3rd param (it can't be queried via `adapter` like
   // every other blockage source here, since the tracker is in-memory).
