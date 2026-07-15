@@ -7,6 +7,7 @@ export type InfraWarningState = "clear" | "warning" | "error";
 export type InfraWarningSource = "none" | "readiness_loader" | "orchestration_health_projection";
 export type LinkState = "present" | "missing";
 export type ReleaseProofNextOwnerLane = "none" | "chris" | "operator" | "release-engineering";
+export type ReleaseProofSystemHealthState = "clear" | "warning" | "critical" | "unknown";
 
 export interface ReleaseProofFeedbackEvidence {
   id: string;
@@ -39,8 +40,15 @@ export interface ReleaseProofReadinessInput {
   infra_warnings: string[];
   source_links: ReleaseProofSourceLink[];
   generated_artifacts: ReleaseProofArtifactPointer[];
+  system_health?: ReleaseProofSystemHealthInput;
   stale_after_ms?: number;
   load_error?: string | null;
+}
+
+export interface ReleaseProofSystemHealthInput {
+  disk_state?: "ok" | "warn" | "critical" | "unknown" | null;
+  build_behind_origin?: boolean | null;
+  deploy_blockers?: string[];
 }
 
 export interface ReleaseProofReadinessResponse {
@@ -69,6 +77,20 @@ export interface ReleaseProofReadinessResponse {
     safe_count: number;
     unsafe_count: number;
     total_count: number;
+  };
+  system_health: {
+    state: ReleaseProofSystemHealthState;
+    disk: {
+      state: "ok" | "warn" | "critical" | "unknown";
+      disk_critical: boolean;
+    };
+    build: {
+      build_behind_origin: boolean | null;
+    };
+    deploy_blockers: {
+      blocked: boolean;
+      reasons: string[];
+    };
   };
   next_owner: {
     lane: ReleaseProofNextOwnerLane;
@@ -122,6 +144,7 @@ export function buildReleaseProofReadiness(
   const staleReasons: string[] = [];
   const errorReasons: string[] = [];
   const missingReasons: string[] = [];
+  const systemHealth = buildSystemHealth(input.system_health);
 
   if (input.load_error) errorReasons.push(input.load_error);
 
@@ -246,6 +269,7 @@ export function buildReleaseProofReadiness(
       unsafe_count: sourceLinkCounts.unsafe,
       total_count: sourceLinkCounts.total,
     },
+    system_health: systemHealth,
     next_owner: nextOwner,
     feedback_evidence: {
       state: feedbackState,
@@ -274,6 +298,35 @@ export function buildReleaseProofReadiness(
     stale_reasons: staleReasons,
     error_reasons: errorReasons,
     missing_reasons: missingReasons,
+  };
+}
+
+function buildSystemHealth(input: ReleaseProofSystemHealthInput | undefined): ReleaseProofReadinessResponse["system_health"] {
+  const diskState = input?.disk_state ?? "ok";
+  const deployBlockers = input?.deploy_blockers?.filter((reason) => reason.trim() !== "") ?? [];
+  const buildBehindOrigin = input?.build_behind_origin ?? null;
+  const state: ReleaseProofSystemHealthState =
+    diskState === "critical" || deployBlockers.length > 0
+      ? "critical"
+      : diskState === "warn" || buildBehindOrigin === true
+        ? "warning"
+        : diskState === "unknown"
+          ? "unknown"
+          : "clear";
+
+  return {
+    state,
+    disk: {
+      state: diskState,
+      disk_critical: diskState === "critical",
+    },
+    build: {
+      build_behind_origin: buildBehindOrigin,
+    },
+    deploy_blockers: {
+      blocked: deployBlockers.length > 0,
+      reasons: deployBlockers,
+    },
   };
 }
 

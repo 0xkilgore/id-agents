@@ -4251,6 +4251,12 @@ describe("release-proof-readiness route", () => {
       chris_readable_release_ready: "NOT READY",
       feedback_evidence: { state: "stale" },
       infra_warnings: { state: "clear", count: 0, items: [] },
+      system_health: {
+        state: "clear",
+        disk: { state: "ok", disk_critical: false },
+        build: { build_behind_origin: null },
+        deploy_blockers: { blocked: false, reasons: [] },
+      },
       error_reasons: [],
     });
     expect(res.body.stale_reasons.length).toBeGreaterThan(0);
