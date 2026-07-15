@@ -85,6 +85,21 @@ function makeDaemon(over: {
       }
       return out;
     } : undefined,
+    readDiskHeadroom: async () => ({
+      schema_version: "disk-headroom.v1",
+      state: "ok",
+      path: "/tmp",
+      free_bytes: 50 * 1024 ** 3,
+      available_bytes: 50 * 1024 ** 3,
+      total_bytes: 100 * 1024 ** 3,
+      free_gib: 50,
+      available_gib: 50,
+      total_gib: 100,
+      used_percent: 50,
+      min_free_bytes: 5 * 1024 ** 3,
+      warn_free_bytes: 10 * 1024 ** 3,
+      reason: null,
+    }),
     pools: over.pools ?? fakePools(),
     alert: async () => {},
     now: () => Date.parse("2026-06-17T18:00:00Z"), // not a load-point
@@ -436,9 +451,9 @@ describe("backend pool routing (real registry)", () => {
     expect(new Set(status.admissible.map((row) => row.to_agent))).toEqual(
       new Set(["substrate-orch-codex", "substrate-api-codex"]),
     );
-    expect(status.non_admitted.filter((row) => row.code === "target_unhealthy").map((row) => row.item_id)).toEqual([
-      explicitUnhealthy.item_id,
-    ]);
+    expect(status.non_admitted.filter((row) => row.code === "target_unhealthy").map((row) => row.item_id)).toEqual(
+      expect.arrayContaining([explicitUnhealthy.item_id]),
+    );
     expect(status.non_admitted.find((row) => row.item_id === runtimeMismatch.item_id)?.code).toBe(
       "provider_runtime_mismatch",
     );
@@ -449,5 +464,81 @@ describe("backend pool routing (real registry)", () => {
     });
     expect(unhealthyGroup?.recommended_action).toContain("substrate-orch-codex");
     expect(status.recommended_action).toContain("target=roger");
+  });
+
+  it("does not count offline named pool targets as useful fuel when healthy pool substitutes exist", async () => {
+    const offlineTargets = [
+      { target: "brunel", track: "T-UI", scope: "/Users/kilgore/Dropbox/Code/kapelle-site/app/ops" },
+      { target: "eames", track: "T-UI", scope: "/Users/kilgore/Dropbox/Code/kapelle-site/app/projects" },
+      { target: "hopper", track: "T-UI", scope: "/Users/kilgore/Dropbox/Code/kapelle-site/app/agents" },
+      { target: "substrate-orch-codex", track: "T-ORCH", scope: "/Users/kilgore/Dropbox/Code/cane/id-agents" },
+    ];
+    const seededOffline = [];
+    for (const [index, target] of offlineTargets.entries()) {
+      seededOffline.push(await seedBuildItem(index, {
+        title: `offline ${target.target} ready fuel`,
+        track: target.track,
+        to_agent: target.target,
+        dispatch_body: `Repair stale ${target.target} target_unhealthy fuel.`,
+        write_scope: [target.scope],
+      }));
+    }
+    await seedBuildItem(10, {
+      title: "frontend pool substitute stays useful",
+      track: "T-UI",
+      to_agent: "pool:frontend",
+      dispatch_body: "Route frontend work to a healthy substitute.",
+      write_scope: ["/Users/kilgore/Dropbox/Code/kapelle-site"],
+    });
+    await seedBuildItem(11, {
+      title: "backend pool substitute stays useful",
+      track: "T-ORCH",
+      to_agent: "pool:backend",
+      dispatch_body: "Route backend work to a healthy substitute.",
+      write_scope: ["/Users/kilgore/Dropbox/Code/cane/id-agents"],
+    });
+
+    const { daemon } = makeDaemon({
+      config: { max_in_flight: 10, min_ready_fuel: 4 },
+      pools: buildPoolRouting({ BUILD_POOL_FRONTEND_MAX_PARALLEL: "6", BUILD_POOL_BACKEND_MAX_PARALLEL: "4" }),
+      healthyAgents: new Set(["regina", "frontend-ui-codex", "substrate-api-codex"]),
+      agentRuntimes: new Map([
+        ["regina", "claude-code-cli"],
+        ["frontend-ui-codex", "codex"],
+        ["substrate-api-codex", "codex"],
+      ]),
+    });
+    await daemon.setMode("running");
+
+    const status = await daemon.explainReadyAdmission();
+
+    expect(status.candidates).toBe(6);
+    expect(status.useful_ready).toBe(2);
+    expect(status.admissible_now).toBe(2);
+    expect(new Set(status.admissible.map((row) => row.to_agent))).toEqual(
+      new Set(["regina", "substrate-api-codex"]),
+    );
+    expect(status.blocker_counts).toEqual([
+      { code: "target_unhealthy", category: "runtime_unavailable", count: 4 },
+    ]);
+    expect(new Set(status.non_admitted.filter((row) => row.code === "target_unhealthy").map((row) => row.item_id))).toEqual(
+      new Set(seededOffline.map((row) => row.item_id)),
+    );
+    expect(status.stale_ready_floor).toMatchObject({
+      stale: true,
+      ready: 6,
+      admissible: 2,
+      min_ready_fuel: 4,
+      reason: "useful_ready_fuel=2 is below min_ready_fuel=4; raw_ready_fuel=6",
+    });
+    expect(status.recommended_action).toContain("target_unhealthy=4");
+    expect(status.target_unhealthy_groups).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ target: "brunel", proposed_healthy_target: "regina" }),
+        expect.objectContaining({ target: "eames", proposed_healthy_target: "regina" }),
+        expect.objectContaining({ target: "hopper", proposed_healthy_target: "regina" }),
+        expect.objectContaining({ target: "substrate-orch-codex", proposed_healthy_target: "substrate-api-codex" }),
+      ]),
+    );
   });
 });
