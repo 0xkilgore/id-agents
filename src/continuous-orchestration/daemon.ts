@@ -534,12 +534,17 @@ function readyAdmissionRecommendedAction(input: {
   minReadyFuel: number;
   blockerCounts: ReadyAdmissionExplanation["blocker_counts"];
   blockedLanes: ReadyAdmissionBlockedLane[];
+  targetUnhealthyGroups: ReadyAdmissionTargetUnhealthyGroup[];
 }): string {
   if (input.candidates === 0) return "flesh or promote ready fuel";
   if (input.usefulReady < input.minReadyFuel) {
     const actions = input.blockerCounts.flatMap((count) => {
       if (count.code === "target_unhealthy") {
-        return [`reroute/downclassify/owner-restart target_unhealthy=${count.count} rows where safe`];
+        const examples = input.targetUnhealthyGroups.slice(0, 3).map((group) =>
+          `target=${group.target} lane=${group.lane} count=${group.count}`,
+        );
+        const suffix = examples.length > 0 ? ` (${examples.join("; ")})` : "";
+        return [`reroute/downclassify/owner-restart target_unhealthy=${count.count} rows where safe${suffix}`];
       }
       if (count.code === "provider_runtime_mismatch") {
         return [`reroute or update provider_runtime_mismatch=${count.count} rows to match a live runtime`];
@@ -1345,6 +1350,7 @@ export class ContinuousOrchestrationDaemon {
       minReadyFuel: config.min_ready_fuel,
       blockerCounts,
       blockedLanes,
+      targetUnhealthyGroups,
     });
     return {
       candidates: ordered.length,
@@ -1436,7 +1442,13 @@ export class ContinuousOrchestrationDaemon {
       const status = dispatchStatuses.get(item.last_dispatch_phid);
       return !status || !AUTO_PROMOTE_HEALTH_STALE_ALREADY_DISPATCHED_STATUSES.has(status);
     });
+    const readyAdmission = await this.explainReadyAdmission();
     const nonUsefulReadyFuelIds = await this.nonUsefulProviderRuntimeReadyFuelIds(ready);
+    for (const row of readyAdmission.non_admitted) {
+      if (isNonUsefulReadyBlockerCode(row.code)) {
+        nonUsefulReadyFuelIds.add(row.item_id);
+      }
+    }
     const capacityFuel = buildCapacityFuel(ready, inFlight, config.max_in_flight, nonUsefulReadyFuelIds);
     const plan = selectAutoPromotions(needsReview, capacityFuel.floorItems, {
       floor: config.auto_promote_floor,

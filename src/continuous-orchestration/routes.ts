@@ -71,8 +71,12 @@ function withReadyAdmissionOperatorSummary(
   const unhealthyTargets = readyAdmission.blocker_counts.find((count) => count.code === "target_unhealthy")?.count ?? 0;
   if (unhealthyTargets === 0 || readyAdmission.admissible_now === 0) return health;
 
+  const groupExamples = readyAdmission.target_unhealthy_groups.slice(0, 3).map((group) =>
+    `${group.target} on ${group.lane} (${group.count})`,
+  );
+  const exampleText = groupExamples.length > 0 ? `: ${groupExamples.join("; ")}` : "";
   const action =
-    `Reroute, downclassify/supersede, or restart owners for ${unhealthyTargets} target_unhealthy ready row(s) where safe; ` +
+    `Reroute, downclassify/supersede, or restart owners for ${unhealthyTargets} target_unhealthy ready row(s) where safe${exampleText}; ` +
     "keep admitting available pool rows while capacity exists, and top off compatible pool fuel only if healthy capacity runs short.";
   const safeActions = health.operator_summary.safe_actions.includes(action)
     ? health.operator_summary.safe_actions

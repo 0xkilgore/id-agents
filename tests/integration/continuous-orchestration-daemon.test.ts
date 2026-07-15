@@ -964,7 +964,7 @@ describe("daemon — dry-run vs live", () => {
     expect(res.body.auto_promote_health.summary).toMatch(/no needs_review candidates/);
   });
 
-  it("status auto-promote health counts pool worktree duplicates as one repo/write-scope lane", async () => {
+  it("status auto-promote health excludes pool worktree duplicates from useful floor fuel", async () => {
     const staleA = await seedReady(adapter, {
       title: "stale duplicate pool row A",
       write_scope: ["/repo/kapelle/.worktrees/backend-a"],
@@ -998,13 +998,13 @@ describe("daemon — dry-run vs live", () => {
 
     expect(res.status).toBe(200);
     expect(res.body.auto_promote_health).toMatchObject({
-      below_floor: false,
+      below_floor: true,
       below_lanes: true,
       triggered: true,
       promoted_count: 1,
       lanes: {
         build_ready: 2,
-        build_ready_lanes: 1,
+        build_ready_lanes: 0,
         ready_lane_keys: ["/repo/kapelle"],
         candidate_lane_keys: ["/repo/id-agents"],
       },
@@ -1602,8 +1602,6 @@ describe("daemon — dry-run vs live", () => {
       candidates: 4,
       useful_ready: 2,
       admissible_now: 2,
-      recommended_action:
-        "useful_ready_fuel=2 is below min_ready_fuel=12; run auto-promote/flesh for safe backlog candidates or reroute/downclassify/owner-restart target_unhealthy=2 rows where safe",
       stale_ready_floor: {
         stale: true,
         ready: 4,
@@ -1612,6 +1610,15 @@ describe("daemon — dry-run vs live", () => {
         reason: "useful_ready_fuel=2 is below min_ready_fuel=12; raw_ready_fuel=4",
       },
     });
+    expect(res.body.ready_admission.recommended_action).toContain(
+      "useful_ready_fuel=2 is below min_ready_fuel=12",
+    );
+    expect(res.body.ready_admission.recommended_action).toContain(
+      "target=eames lane=repo/explicit-b count=1",
+    );
+    expect(res.body.ready_admission.recommended_action).toContain(
+      "target=gaudi lane=repo/explicit-a count=1",
+    );
     expect(res.body.counts.admissible_now).toBe(2);
     expect(res.body.ready_admission.blocker_counts).toEqual([
       { code: "target_unhealthy", category: "runtime_unavailable", count: 2 },
@@ -1665,6 +1672,8 @@ describe("daemon — dry-run vs live", () => {
     ]);
     expect(res.body.auto_promote_health.operator_summary.safe_actions[0]).toContain("Reroute, downclassify/supersede, or restart owners for 2 target_unhealthy");
     expect(res.body.auto_promote_health.operator_summary.safe_actions[0]).toContain("where safe");
+    expect(res.body.auto_promote_health.operator_summary.safe_actions[0]).toContain("eames on repo/explicit-b (1)");
+    expect(res.body.auto_promote_health.operator_summary.safe_actions[0]).toContain("gaudi on repo/explicit-a (1)");
     expect(res.body.auto_promote_health.operator_summary.safe_actions[0]).toContain("top off compatible pool fuel");
     expect(res.body.auto_promote_health.operator_summary.summary).toContain("2 admissible row(s)");
     expect(res.body.auto_promote_health.operator_summary.summary).toContain("2 target_unhealthy row(s)");
@@ -1750,8 +1759,6 @@ describe("daemon — dry-run vs live", () => {
       candidates: 13,
       useful_ready: 2,
       admissible_now: 2,
-      recommended_action:
-        "raw_ready_fuel=13 meets min_ready_fuel=12 but useful_ready_fuel=2 is below floor; reroute/downclassify/owner-restart target_unhealthy=10 rows where safe; review duplicate_dispatch_retry_required=1 rows and mark retry_safe only for bounded refires or close stale duplicates",
       stale_ready_floor: {
         stale: true,
         ready: 13,
@@ -1760,6 +1767,15 @@ describe("daemon — dry-run vs live", () => {
         reason: "useful_ready_fuel=2 is below min_ready_fuel=12; raw_ready_fuel=13",
       },
     });
+    expect(res.body.ready_admission.recommended_action).toContain(
+      "raw_ready_fuel=13 meets min_ready_fuel=12 but useful_ready_fuel=2 is below floor",
+    );
+    expect(res.body.ready_admission.recommended_action).toContain(
+      "target=gaudi lane=repo/unhealthy-0 count=1",
+    );
+    expect(res.body.ready_admission.recommended_action).toContain(
+      "review duplicate_dispatch_retry_required=1 rows",
+    );
     expect(res.body.ready_admission.blocker_counts).toEqual(
       expect.arrayContaining([
         { code: "target_unhealthy", category: "runtime_unavailable", count: 10 },
@@ -1784,18 +1800,21 @@ describe("daemon — dry-run vs live", () => {
       ]),
     );
     expect(res.body.auto_promote_health).toMatchObject({
-      below_floor: false,
-      triggered: false,
+      below_floor: true,
+      triggered: true,
       candidates_considered: 0,
       promoted_count: 0,
       skipped_count: 0,
       next_action: {
-        code: "none",
-        summary: "ready build fuel meets the configured floor",
+        code: "flesh_or_refuel_candidates",
+        summary: "author new lane-diverse build rows or flesh more needs_review candidates",
       },
     });
-    expect(res.body.auto_promote_health.summary).toBe("ready build fuel meets floor: ready=13 floor=12, lanes=13/2");
+    expect(res.body.auto_promote_health.summary).toBe(
+      "ready build fuel below floor: ready=2 floor=12, lanes=2/2; no needs_review candidates considered; next: author new lane-diverse build rows or flesh more needs_review candidates",
+    );
     expect(res.body.auto_promote_health.operator_summary.safe_actions[0]).toContain("target_unhealthy");
+    expect(res.body.auto_promote_health.operator_summary.safe_actions[0]).toContain("gaudi on repo/unhealthy-0 (1)");
   });
 
   it("status clears stale zero-admit warnings after a successful admission tick", async () => {
