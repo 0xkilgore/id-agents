@@ -154,7 +154,38 @@ function withReadyAdmissionOperatorSummary(
   readyAdmission: ReadyAdmissionExplanation,
 ): AutoPromoteHealth {
   const unhealthyTargets = readyAdmission.blocker_counts.find((count) => count.code === "target_unhealthy")?.count ?? 0;
+  const noInFlightSlots = readyAdmission.blocker_counts.find((count) => count.code === "no_in_flight_slots")?.count ?? 0;
   if (readyAdmission.blocker_counts.length === 0) return health;
+
+  if (noInFlightSlots > 0 && readyAdmission.admissible_now === 0) {
+    const capacityAction =
+      `Capacity is full with no_in_flight_slots=${noInFlightSlots}; wait for in-flight work to drain or close completed dispatches before dispatching additional ready rows.`;
+    const safeActions = health.operator_summary.safe_actions.includes(capacityAction)
+      ? health.operator_summary.safe_actions
+      : [capacityAction, ...health.operator_summary.safe_actions];
+    const laneState = health.below_lanes
+      ? `; lane diversity topoff needed: add/promote ${Math.max(0, health.min_ready_lanes - health.lanes.build_ready_lanes)} new build lane(s)`
+      : "; lane diversity satisfied";
+    const summary =
+      `capacity-gated ready fuel: ready=${readyAdmission.useful_ready} floor=${health.floor}, ` +
+      `ready_plus_in_flight=${health.lanes.ready_plus_in_flight}, no_in_flight_slots=${noInFlightSlots}, ` +
+      `lanes=${health.lanes.build_ready_lanes}/${health.min_ready_lanes}${laneState}`;
+    return {
+      ...health,
+      next_action: {
+        code: "wait_for_capacity",
+        summary: "wait for in-flight slots to free or close completed dispatches before adding filler ready rows",
+      },
+      operator_summary: {
+        ...health.operator_summary,
+        capacity_gated: true,
+        safe_actions: safeActions,
+        empty_fuel: false,
+        summary: `${health.operator_summary.summary}; ${capacityAction}`,
+      },
+      summary,
+    };
+  }
 
   if (readyAdmission.admissible_now === 0 && readyAdmission.candidates > 0) {
     const runtimeUnavailable = readyAdmission.blocker_counts

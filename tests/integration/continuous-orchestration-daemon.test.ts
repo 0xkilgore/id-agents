@@ -3559,7 +3559,7 @@ describe("daemon — dry-run vs live", () => {
     expect(res.body.counts).toMatchObject({
       ready: 10,
       raw_ready_fuel: 10,
-      useful_ready_fuel: 6,
+      useful_ready_fuel: 3,
       admissible_now: 0,
       ready_block_reasons: {
         blocked_dependency: 3,
@@ -3573,7 +3573,7 @@ describe("daemon — dry-run vs live", () => {
     ]);
     expect(res.body.ready_admission).toMatchObject({
       candidates: 10,
-      useful_ready: 6,
+      useful_ready: 3,
       admissible_now: 0,
       recommended_action: expect.stringContaining("target_unhealthy=4"),
     });
@@ -3760,11 +3760,18 @@ describe("daemon — dry-run vs live", () => {
         candidate_lane_keys: ["repo/candidate-a", "repo/candidate-b"],
       },
       next_action: {
-        code: "none",
-        summary: "ready build fuel meets the configured floor",
+        code: "wait_for_capacity",
+        summary: "wait for in-flight slots to free or close completed dispatches before adding filler ready rows",
       },
     });
-    expect(res.body.auto_promote_health.summary).toBe("ready build fuel meets floor: ready=3 floor=2, lanes=3/2");
+    expect(res.body.auto_promote_health.operator_summary).toMatchObject({
+      capacity_gated: true,
+      empty_fuel: false,
+    });
+    expect(res.body.auto_promote_health.summary).toBe(
+      "capacity-gated ready fuel: ready=3 floor=2, ready_plus_in_flight=3, no_in_flight_slots=3, lanes=3/2; lane diversity satisfied",
+    );
+    expect(res.body.auto_promote_health.summary).not.toMatch(/meets floor/i);
     expect(res.body.flesh.auto_promote.health.lanes).toEqual(res.body.auto_promote_health.lanes);
   });
 
@@ -3920,13 +3927,18 @@ describe("daemon — dry-run vs live", () => {
         candidate_lane_keys: ["repo/candidate-restores-diversity"],
       },
       next_action: {
-        code: "none",
-        summary: "ready build fuel meets the configured floor",
+        code: "wait_for_capacity",
+        summary: "wait for in-flight slots to free or close completed dispatches before adding filler ready rows",
       },
     });
     expect(res.body.auto_promote_health.summary).toBe(
-      "raw ready floor satisfied but daemon capacity is occupied: ready_plus_in_flight=3 floor=2, in_flight=1/1, lanes=3/3; lane diversity satisfied",
+      "capacity-gated ready fuel: ready=2 floor=2, ready_plus_in_flight=3, no_in_flight_slots=2, lanes=3/3; lane diversity satisfied",
     );
+    expect(res.body.auto_promote_health.operator_summary).toMatchObject({
+      capacity_gated: true,
+      empty_fuel: false,
+      lane_diversity_topoff_needed: false,
+    });
     expect(res.body.flesh.auto_promote.health.lanes).toEqual(res.body.auto_promote_health.lanes);
   });
 
@@ -3983,8 +3995,12 @@ describe("daemon — dry-run vs live", () => {
         lane_diversity_deficit: 1,
       },
     });
-    expect(res.body.auto_promote_health.summary).toContain("daemon capacity is occupied");
+    expect(res.body.auto_promote_health.summary).toContain("capacity-gated ready fuel");
     expect(res.body.auto_promote_health.summary).toContain("lane diversity topoff needed");
+    expect(res.body.auto_promote_health.next_action).toMatchObject({
+      code: "wait_for_capacity",
+      summary: "wait for in-flight slots to free or close completed dispatches before adding filler ready rows",
+    });
     expect(res.body.auto_promote_health.operator_summary.summary).toContain("gated fuel (capacity full, lane diversity 1/2)");
     expect(res.body.auto_promote_health.operator_summary.summary).not.toMatch(/empty fuel/i);
     expect(res.body.auto_promote_health.operator_summary.safe_actions).toEqual(
@@ -4066,6 +4082,19 @@ describe("daemon — dry-run vs live", () => {
         ],
       },
     });
+    expect(res.body.auto_promote_health).toMatchObject({
+      next_action: {
+        code: "wait_for_capacity",
+      },
+      operator_summary: {
+        capacity_gated: true,
+        empty_fuel: false,
+      },
+    });
+    expect(res.body.auto_promote_health.summary).toBe(
+      "capacity-gated ready fuel: ready=2 floor=12, ready_plus_in_flight=2, no_in_flight_slots=2, lanes=2/2; lane diversity satisfied",
+    );
+    expect(res.body.auto_promote_health.summary).not.toMatch(/meets floor|empty fuel/i);
   });
 
   it("status exposes stale-ready fuel as actionable when ready=11 is below floor=12 with retry and lane blockers", async () => {

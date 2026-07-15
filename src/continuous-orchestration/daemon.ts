@@ -429,6 +429,7 @@ export interface AutoPromoteBlockerClassCount {
 export interface AutoPromoteNextAction {
   code:
     | "none"
+    | "wait_for_capacity"
     | "close_stale_already_dispatched_rows"
     | "manual_promote_safe_retries"
     | "manual_promote_or_close_already_dispatched"
