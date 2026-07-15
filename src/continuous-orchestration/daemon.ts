@@ -526,6 +526,7 @@ function isNonUsefulReadyBlockerCode(code: unknown): boolean {
   return (
     code === "duplicate_dispatch_guard" ||
     code === "duplicate_dispatch_retry_required" ||
+    code === "no_free_pool_builder" ||
     code === "provider_runtime_mismatch" ||
     code === "target_unhealthy"
   );
@@ -581,6 +582,22 @@ function readyAdmissionRecommendedAction(input: {
       }
       if (count.code === "provider_runtime_mismatch") {
         return [`reroute or update provider_runtime_mismatch=${count.count} rows to match a live runtime`];
+      }
+      if (count.code === "no_free_pool_builder") {
+        const examples = input.blockedLanes
+          .filter((lane) => lane.blocker_counts.some((blocker) => blocker.code === "no_free_pool_builder"))
+          .slice(0, 3)
+          .map((lane) => `lane=${lane.lane} count=${lane.blocker_counts.find((blocker) => blocker.code === "no_free_pool_builder")?.count ?? lane.count}`);
+        const suffix = examples.length > 0 ? ` (${examples.join("; ")})` : "";
+        return [`top off or repair builder pool capacity for no_free_pool_builder=${count.count} row(s)${suffix}`];
+      }
+      if (count.code === "single_writer_lane_busy") {
+        const examples = input.blockedLanes
+          .filter((lane) => lane.blocker_counts.some((blocker) => blocker.code === "single_writer_lane_busy"))
+          .slice(0, 3)
+          .map((lane) => `lane=${lane.lane} count=${lane.blocker_counts.find((blocker) => blocker.code === "single_writer_lane_busy")?.count ?? lane.count}`);
+        const suffix = examples.length > 0 ? ` (${examples.join("; ")})` : "";
+        return [`wait for or clear single_writer_lane_busy=${count.count} lane lock(s)${suffix}`];
       }
       if (count.code === "duplicate_dispatch_retry_required") {
         return [`review duplicate_dispatch_retry_required=${count.count} rows and mark retry_safe only for bounded refires or close stale duplicates`];

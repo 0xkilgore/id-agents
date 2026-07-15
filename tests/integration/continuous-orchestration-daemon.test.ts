@@ -1302,13 +1302,14 @@ describe("daemon — dry-run vs live", () => {
       useful_ready: 2,
       admissible_now: 1,
       block_reason_counts: expect.objectContaining({
+        no_free_pool_builder: 1,
         pool_capacity_full: 1,
         duplicate_dispatch_retry_required: 1,
       }),
     });
     expect(status.body.ready_admission.blocker_counts).toEqual(
       expect.arrayContaining([
-        { code: "target_unhealthy", category: "runtime_unavailable", count: 1 },
+        { code: "no_free_pool_builder", category: "capacity_gate", count: 1 },
         { code: "pool_capacity_full", category: "capacity_gate", count: 1 },
         { code: "duplicate_dispatch_retry_required", category: "retry_safety", count: 1 },
       ]),
@@ -1324,7 +1325,7 @@ describe("daemon — dry-run vs live", () => {
         expect.objectContaining({
           item_id: unhealthy.item_id,
           action: "held",
-          code: "target_unhealthy",
+          code: "no_free_pool_builder",
           metadata: expect.objectContaining({
             target: "unhealthy-builder",
             targets: ["unhealthy-builder"],
@@ -1348,12 +1349,12 @@ describe("daemon — dry-run vs live", () => {
         }),
       ]),
     );
-    expect(status.body.ready_admission.recommended_action).toContain("target_unhealthy=1");
-    expect(status.body.ready_admission.recommended_action).toContain("target=unhealthy-builder");
+    expect(status.body.ready_admission.recommended_action).toContain("no_free_pool_builder=1");
+    expect(status.body.ready_admission.recommended_action).toContain("top off or repair builder pool capacity");
     expect(status.body.ready_admission.recommended_action).toContain("duplicate_dispatch_retry_required=1");
     expect(status.body.health.ready_item_blockers.stale_ready_fuel.counts_by_blocker_class).toEqual(
       expect.arrayContaining([
-        expect.objectContaining({ code: "target_unhealthy", category: "runtime_unavailable", count: 1 }),
+        expect.objectContaining({ code: "no_free_pool_builder", category: "capacity_gate", count: 1 }),
         expect.objectContaining({ code: "pool_capacity_full", category: "capacity_gate", count: 1 }),
         expect.objectContaining({ code: "duplicate_dispatch_retry_required", category: "retry_safety", count: 1 }),
       ]),
@@ -1366,13 +1367,21 @@ describe("daemon — dry-run vs live", () => {
         safe_action_copy: expect.stringContaining("retry_safe=true"),
       }),
     ]);
-    expect(status.body.ready_admission.target_unhealthy_groups).toEqual([
-      expect.objectContaining({
-        target: "unhealthy-builder",
-        count: 1,
-        recommended_action: expect.stringContaining("Reroute to a compatible healthy agent"),
-      }),
-    ]);
+    expect(status.body.ready_admission.target_unhealthy_groups).toEqual([]);
+    expect(status.body.ready_admission.non_admitted).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          item_id: unhealthy.item_id,
+          code: "no_free_pool_builder",
+          metadata: expect.objectContaining({
+            target: "unhealthy-builder",
+            lane_blockers: expect.arrayContaining([
+              expect.objectContaining({ agent: "unhealthy-builder", code: "target_unhealthy" }),
+            ]),
+          }),
+        }),
+      ]),
+    );
 
     const tick = await daemon.runTick();
 
@@ -1676,20 +1685,24 @@ describe("daemon — dry-run vs live", () => {
     expect(res.body.health.queue_quality.actionable_ready).toBe(6);
     expect(res.body.health.build_ready_floor).toMatchObject({
       blocked: true,
-      blocker_code: "build_ready_lane_diversity_below_min_lanes",
-      useful_ready_count: 6,
+      blocker_code: "build_ready_below_floor",
+      useful_ready_count: 0,
       floor: 12,
-      build_ready_lanes: 1,
+      build_ready_lanes: 0,
       min_lanes: 2,
-      candidate_lanes: ["/repo/id-agents"],
+      candidate_lanes: [],
       blocker_reasons: {
         duplicate_dispatch_retry_required: 2,
-        single_writer_lane_busy: 6,
+        single_writer_lane_busy: 12,
         build_ready_lane_diversity_below_min_lanes: 1,
         build_ready_below_floor: 1,
       },
     });
-    expect(res.body.health.build_ready_floor.next_action).toMatch(/new lane/i);
+    expect(res.body.health.build_ready_floor.next_action).toContain(
+      "raw_ready_fuel=8 meets min_ready_fuel=8 but useful_ready_fuel=6 is below floor",
+    );
+    expect(res.body.health.build_ready_floor.next_action).toContain("single_writer_lane_busy=6");
+    expect(res.body.health.build_ready_floor.next_action).toContain("duplicate_dispatch_retry_required=2");
     expect(res.body.health.build_ready_floor.next_action).not.toMatch(/same-lane/i);
   });
 
@@ -1947,6 +1960,145 @@ describe("daemon — dry-run vs live", () => {
     expect(res.body.auto_promote_health.operator_summary.safe_actions[0]).toContain("top off compatible pool fuel");
     expect(res.body.auto_promote_health.operator_summary.summary).toContain("2 admissible row(s)");
     expect(res.body.auto_promote_health.operator_summary.summary).toContain("2 target_unhealthy row(s)");
+  });
+
+  it("status explains build-ready 8/12 when unhealthy targets and builder saturation block ready rows", async () => {
+    await seedAgent(adapter, "roger", "running", "codex");
+    await seedAgent(adapter, "gaudi", "pending", "codex");
+
+    for (let i = 0; i < 8; i += 1) {
+      await seedReady(adapter, {
+        title: `useful build-ready row ${i}`,
+        to_agent: "roger",
+        write_scope: [`repo/useful-${i}`],
+      });
+    }
+    await seedReady(adapter, {
+      title: "explicit unhealthy target A",
+      to_agent: "gaudi",
+      write_scope: ["repo/unhealthy-a"],
+    });
+    await seedReady(adapter, {
+      title: "explicit unhealthy target B",
+      to_agent: "gaudi",
+      write_scope: ["repo/unhealthy-b"],
+    });
+    await seedReady(adapter, {
+      title: "backend pool has no free builder",
+      track: "T-BACKEND",
+      to_agent: "pool:backend",
+      write_scope: ["repo/backend-pool"],
+    });
+    await seedReady(adapter, {
+      title: "backend pool still has no free builder",
+      track: "T-BACKEND",
+      to_agent: "pool:backend",
+      write_scope: ["repo/backend-pool-2"],
+    });
+
+    const pools: PoolRouting = {
+      poolForItem: (item) =>
+        item.track === "T-BACKEND"
+          ? {
+              pool_id: "backend",
+              repo_root: "/repo/backend",
+              max_parallel: 2,
+              members: ["builder-a"],
+            }
+          : null,
+      availableBuilders: () => [],
+      allocateWorktree: async ({ agent, item, pool }) => ({
+        path: `${pool.repo_root}/.worktrees/${agent}-${item.item_id.slice(-6)}`,
+        branch: `build/${agent}-${item.item_id.slice(-6)}`,
+        lease_id: null,
+      }),
+    };
+    const { app, daemon } = mountStatusApp(
+      adapter,
+      {
+        dry_run: true,
+        auto_flesh_enabled: true,
+        auto_promote_enabled: true,
+        auto_promote_floor: 12,
+        auto_promote_min_lanes: 2,
+        min_ready_fuel: 12,
+        max_in_flight: 20,
+        max_new_per_tick: 20,
+      },
+      {
+        pools,
+        resolveAgentHealth: (names) => getHealthyAgentNames(adapter, names),
+        resolveAgentRuntimes: (names) => getAgentRuntimeMap(adapter, names),
+      },
+    );
+    await daemon.setMode("running");
+
+    const res = await callApp(app, "/orchestration/status");
+
+    expect(res.status).toBe(200);
+    expect(res.body.counts).toMatchObject({
+      ready: 12,
+      raw_ready_fuel: 12,
+      useful_ready_fuel: 8,
+      admissible_now: 8,
+      stale_ready_fuel: true,
+      ready_block_reasons: {
+        no_free_pool_builder: 2,
+      },
+    });
+    expect(res.body.ready_admission).toMatchObject({
+      candidates: 12,
+      useful_ready: 8,
+      admissible_now: 8,
+      stale_ready_floor: {
+        stale: true,
+        ready: 12,
+        admissible: 8,
+        min_ready_fuel: 12,
+        reason: "useful_ready_fuel=8 is below min_ready_fuel=12; raw_ready_fuel=12",
+      },
+    });
+    expect(res.body.ready_admission.blocker_counts).toEqual(
+      expect.arrayContaining([
+        { code: "target_unhealthy", category: "runtime_unavailable", count: 2 },
+        { code: "no_free_pool_builder", category: "capacity_gate", count: 2 },
+      ]),
+    );
+    expect(res.body.ready_admission.recommended_action).toContain(
+      "raw_ready_fuel=12 meets min_ready_fuel=12 but useful_ready_fuel=8 is below floor",
+    );
+    expect(res.body.ready_admission.recommended_action).toContain(
+      "reroute/downclassify/owner-restart target_unhealthy=2 rows where safe",
+    );
+    expect(res.body.ready_admission.recommended_action).toContain(
+      "top off or repair builder pool capacity for no_free_pool_builder=2 row(s)",
+    );
+    expect(res.body.ready_admission.recommended_action).not.toContain("duplicate_dispatch_retry_required");
+    expect(res.body.ready_admission.recommended_action).not.toContain("mark retry_safe");
+    expect(res.body.ready_admission.recommended_action).not.toContain("stale duplicates");
+    expect(res.body.health.build_ready_floor).toMatchObject({
+      blocked: true,
+      blocker_code: "build_ready_below_floor",
+      useful_ready_count: 8,
+      floor: 12,
+      blocker_reasons: {
+        target_unhealthy: 2,
+        no_free_pool_builder: 2,
+        build_ready_below_floor: 1,
+      },
+    });
+    expect(res.body.health.ready_item_blockers.stale_ready_fuel.counts_by_blocker_class).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ code: "target_unhealthy", category: "runtime_unavailable", count: 2 }),
+        expect.objectContaining({ code: "no_free_pool_builder", category: "capacity_gate", count: 2 }),
+      ]),
+    );
+    expect(res.body.auto_promote_health.operator_summary.safe_actions.join(" ")).toContain(
+      "Reroute, downclassify/supersede, or restart owners for 2 target_unhealthy",
+    );
+    expect(res.body.auto_promote_health.operator_summary.safe_actions.join(" ")).toContain(
+      "top off compatible pool fuel",
+    );
   });
 
   it("status skips virtual pool aliases and admits healthy Claude builders from the same pool", async () => {
@@ -2762,7 +2914,10 @@ describe("daemon — dry-run vs live", () => {
         build_ready_below_floor: 1,
       },
     });
-    expect(res.body.health.build_ready_floor.next_action).toMatch(/ready fuel reaches 11\/12/);
+    expect(res.body.health.build_ready_floor.next_action).toContain(
+      "raw_ready_fuel=12 meets min_ready_fuel=12 but useful_ready_fuel=11 is below floor",
+    );
+    expect(res.body.health.build_ready_floor.next_action).toContain("duplicate_dispatch_retry_required=1");
     expect(res.body.health.build_ready_floor.next_action).not.toMatch(/empty|satisfies/i);
   });
 
@@ -3629,20 +3784,20 @@ describe("daemon — dry-run vs live", () => {
     expect(res.body.counts).toMatchObject({
       ready: 5,
       raw_ready_fuel: 5,
-      useful_ready_fuel: 4,
+      useful_ready_fuel: 3,
       admissible_now: 1,
       raw_ready_lanes: 4,
-      useful_ready_lanes: 3,
+      useful_ready_lanes: 2,
       admissible_lanes: 1,
       stale_ready_fuel: true,
     });
     expect(res.body.ready_admission).toMatchObject({
       candidates: 5,
-      useful_ready: 4,
+      useful_ready: 3,
       admissible_now: 1,
       lanes: {
         raw_ready: 4,
-        useful_ready: 3,
+        useful_ready: 2,
         admissible_now: 1,
       },
       block_reason_counts: {
@@ -3661,7 +3816,7 @@ describe("daemon — dry-run vs live", () => {
       expect.arrayContaining([
         { lane: "repo/busy", raw_ready: 2, useful_ready: 2, admissible_now: 0, blocked: 2 },
         { lane: "repo/free", raw_ready: 1, useful_ready: 1, admissible_now: 1, blocked: 0 },
-        { lane: "repo/pool", raw_ready: 1, useful_ready: 1, admissible_now: 0, blocked: 1 },
+        { lane: "repo/pool", raw_ready: 1, useful_ready: 0, admissible_now: 0, blocked: 1 },
         { lane: "repo/duplicate", raw_ready: 1, useful_ready: 0, admissible_now: 0, blocked: 1 },
       ]),
     );
@@ -4452,7 +4607,7 @@ describe("daemon — dry-run vs live", () => {
     });
     expect(res.body.health.build_ready_floor).toMatchObject({
       blocked: true,
-      blocker_code: "build_ready_lane_diversity_below_min_lanes",
+      blocker_code: "build_ready_below_floor",
       useful_ready_count: 0,
       floor: 12,
       build_ready_lanes: 0,

@@ -352,13 +352,12 @@ export function planAdmission(
         const unhealthyTargets = laneBlockers
           .filter((blocker) => blocker.code === "target_unhealthy")
           .map((blocker) => blocker.agent);
-        const code = unhealthyTargets.length > 0 ? "target_unhealthy" : "no_free_pool_builder";
         const reason = ctx.healthy_agents && builders.length > 0
           ? `no healthy free builder in pool: ${poolId}`
           : unhealthyTargets.length > 0
             ? `pool ${poolId} has no healthy/online builder`
             : `no free builder in pool: ${poolId}`;
-        skipped.push(nonAdmission(item.item_id, "held", code, reason, {
+        skipped.push(nonAdmission(item.item_id, "held", "no_free_pool_builder", reason, {
           pool_id: poolId,
           ...(ctx.healthy_agents ? { candidate_builders: builders } : {}),
           lane_blockers: laneBlockers,

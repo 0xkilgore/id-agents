@@ -980,6 +980,7 @@ function isNonUsefulReadyBlockerCode(code: string): boolean {
   return (
     code === "duplicate_dispatch_guard" ||
     code === "duplicate_dispatch_retry_required" ||
+    code === "no_free_pool_builder" ||
     code === "provider_runtime_mismatch" ||
     code === "risk_requires_approval" ||
     code === "single_writer_lane_busy" ||
