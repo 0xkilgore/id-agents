@@ -56,9 +56,69 @@ export interface OrchestrationRouteOptions {
   adapter: DbAdapter;
   config: ContinuousOrchestrationConfig;
   teamId?: string;
+  runtimeHealth?: () => RuntimeHealthSource;
 }
 
 type NeedsPromoteSkipClass = "already_dispatched" | "confidence_threshold" | "review_held_risk";
+
+export interface RuntimeHealthSource {
+  disk?: { state?: string | null } | null;
+  build?: { behind_origin?: boolean | null } | null;
+}
+
+export interface RuntimeStatusProjection {
+  schema_version: "orchestration.runtime_status_projection.v1";
+  disk_critical: boolean;
+  disk_state: string | null;
+  build_behind_origin: boolean | null;
+  capacity_full: boolean;
+  ready_count: number;
+  raw_ready_fuel: number;
+  useful_ready_fuel: number;
+  admissible_now: number;
+  operator_summary: string;
+  recommended_actions: string[];
+}
+
+export function buildRuntimeStatusProjection(input: {
+  runtimeHealth?: RuntimeHealthSource | null;
+  autoPromoteHealth: AutoPromoteHealth;
+  readyAdmission: ReadyAdmissionExplanation;
+}): RuntimeStatusProjection {
+  const diskState = input.runtimeHealth?.disk?.state ?? null;
+  const diskCritical = diskState === "critical";
+  const buildBehindOrigin = input.runtimeHealth?.build?.behind_origin ?? null;
+  const capacityFull =
+    input.autoPromoteHealth.lanes.capacity_occupied ||
+    input.readyAdmission.blocker_counts.some((count) =>
+      count.category === "capacity_gate" && count.count > 0,
+    );
+  const recommendedActions: string[] = [];
+  if (diskCritical) recommendedActions.push("clear disk headroom before dispatching or handing off");
+  if (buildBehindOrigin === true) recommendedActions.push("deploy/promote the current manager build before Chris handoff");
+  if (capacityFull) recommendedActions.push("wait for in-flight build capacity to free or close completed dispatches");
+  if (input.readyAdmission.admissible_now > 0) recommendedActions.push("admit currently admissible ready rows");
+  if (recommendedActions.length === 0) recommendedActions.push(input.readyAdmission.recommended_action);
+
+  const infraFirst = diskCritical || buildBehindOrigin === true;
+  const operatorSummary = infraFirst
+    ? `disk/deploy unblock before Chris handoff: ${recommendedActions.join("; ")}`
+    : `ready=${input.readyAdmission.candidates} admissible=${input.readyAdmission.admissible_now}; ${input.readyAdmission.recommended_action}`;
+
+  return {
+    schema_version: "orchestration.runtime_status_projection.v1",
+    disk_critical: diskCritical,
+    disk_state: diskState,
+    build_behind_origin: buildBehindOrigin,
+    capacity_full: capacityFull,
+    ready_count: input.readyAdmission.candidates,
+    raw_ready_fuel: input.readyAdmission.candidates,
+    useful_ready_fuel: input.readyAdmission.useful_ready,
+    admissible_now: input.readyAdmission.admissible_now,
+    operator_summary: operatorSummary,
+    recommended_actions: recommendedActions,
+  };
+}
 
 function classifyNeedsPromoteSkip(reasons: string[]): NeedsPromoteSkipClass | null {
   if (reasons.some((r) => r.includes("already dispatched once"))) return "already_dispatched";
@@ -127,6 +187,11 @@ export function mountContinuousOrchestrationRoutes(app: Application, opts: Orche
         baseAutoPromoteHealth,
         readyAdmission,
       );
+      const runtime_status = buildRuntimeStatusProjection({
+        runtimeHealth: opts.runtimeHealth?.() ?? null,
+        autoPromoteHealth,
+        readyAdmission,
+      });
       const needsReviewDispatchStatuses = await getDispatchStatusesByPhid(
         adapter,
         needsReview.map((item) => item.last_dispatch_phid).filter((phid): phid is string => !!phid),
@@ -211,6 +276,7 @@ export function mountContinuousOrchestrationRoutes(app: Application, opts: Orche
         },
         auto_promote_health: autoPromoteHealth,
         ready_admission: readyAdmission,
+        runtime_status,
         health,
       });
     } catch (err) {

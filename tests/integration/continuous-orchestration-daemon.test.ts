@@ -2502,6 +2502,75 @@ describe("daemon — dry-run vs live", () => {
     expect(res.body.flesh.auto_promote.health.lanes).toEqual(res.body.auto_promote_health.lanes);
   });
 
+  it("status exposes infra and admission projection fields for full-capacity handoff decisions", async () => {
+    await seedReady(adapter, {
+      title: "ready capacity gated A",
+      write_scope: ["repo/capacity-a"],
+    });
+    await seedReady(adapter, {
+      title: "ready capacity gated B",
+      write_scope: ["repo/capacity-b"],
+    });
+
+    const fullConfig = {
+      ...defaultConfig(),
+      dry_run: true,
+      auto_flesh_enabled: true,
+      auto_promote_enabled: true,
+      auto_promote_floor: 2,
+      auto_promote_min_lanes: 1,
+      min_ready_fuel: 2,
+      max_in_flight: 1,
+      max_new_per_tick: 10,
+    };
+    const { daemon } = makeDaemon(
+      adapter,
+      { config: fullConfig, inFlight: 1 },
+    );
+    await daemon.setMode("running");
+
+    const runtimeApp = express();
+    runtimeApp.use(express.json());
+    mountContinuousOrchestrationRoutes(runtimeApp, {
+      daemon,
+      adapter,
+      config: fullConfig,
+      teamId: "default",
+      runtimeHealth: () => ({
+        disk: { state: "critical" },
+        build: { behind_origin: true },
+      }),
+    });
+
+    const res = await callApp(runtimeApp, "/orchestration/status");
+
+    expect(res.status).toBe(200);
+    expect(res.body.runtime_status).toMatchObject({
+      schema_version: "orchestration.runtime_status_projection.v1",
+      disk_critical: true,
+      disk_state: "critical",
+      build_behind_origin: true,
+      capacity_full: true,
+      ready_count: 2,
+      raw_ready_fuel: 2,
+      useful_ready_fuel: 2,
+      admissible_now: 0,
+    });
+    expect(res.body.runtime_status.operator_summary).toContain("disk/deploy unblock before Chris handoff");
+    expect(res.body.runtime_status.recommended_actions).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining("clear disk headroom"),
+        expect.stringContaining("deploy/promote"),
+        expect.stringContaining("capacity"),
+      ]),
+    );
+    expect(res.body.counts.ready).toBe(2);
+    expect(res.body.counts.admissible_now).toBe(0);
+    expect(res.body.ready_admission.blocker_counts).toEqual([
+      { code: "no_in_flight_slots", category: "capacity_gate", count: 2 },
+    ]);
+  });
+
   it("status preserves auto-promote lane health after immediate dispatch drains one ready lane", async () => {
     const drained = await seedReady(adapter, {
       title: "ready lane drained by dispatch",

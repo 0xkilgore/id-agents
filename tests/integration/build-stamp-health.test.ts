@@ -178,6 +178,9 @@ describe('GET /health build-stamp (T11.1)', () => {
       required_repair: 'none',
     });
 
+    expect(body).toHaveProperty('orchestration_runtime_status');
+    expect(body.orchestration_runtime_status === null || typeof body.orchestration_runtime_status === 'object').toBe(true);
+
     expect(body.fleet_freshness.nodes[0]).toMatchObject({
       node_id: 'kapelle-site',
       build_sha: '1111111',
