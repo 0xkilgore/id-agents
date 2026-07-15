@@ -3407,6 +3407,85 @@ describe("daemon — dry-run vs live", () => {
     expect(res.body.auto_promote_health.summary).toMatch(/next: mark retry_safe=true only for an intentional bounded refire/i);
   });
 
+  it("status holds failed duplicate-dispatch rows until an explicit bounded retry-safe decision", async () => {
+    const retryRows: BacklogItem[] = [];
+    for (let i = 1; i <= 3; i += 1) {
+      const phid = `phid:disp-duplicate-retry-${i}`;
+      await seedDispatch(adapter, {
+        dispatch_phid: phid,
+        status: "failed",
+        failure_kind: "scheduler_wedged",
+        failure_detail: "prior dispatch failed before promotion",
+        recovery_attempts: 1,
+      });
+      retryRows.push(await seedApprovedReview(adapter, {
+        title: `duplicate dispatch retry blocker ${i}`,
+        write_scope: [`repo/duplicate-retry-${i}`],
+        last_dispatch_phid: phid,
+        flesh_confidence: 0.99,
+        flesh_status: "approved_ready",
+      }));
+    }
+
+    const { app, daemon } = mountStatusApp(adapter, {
+      dry_run: true,
+      auto_flesh_enabled: true,
+      auto_promote_enabled: true,
+      auto_promote_floor: 12,
+      auto_promote_min_lanes: 1,
+    });
+    await daemon.setMode("running");
+
+    const res = await callApp(app, "/orchestration/status");
+
+    expect(res.status).toBe(200);
+    expect(res.body.auto_promote_health).toMatchObject({
+      triggered: true,
+      candidates_considered: 3,
+      promoted_count: 0,
+      skipped_count: 3,
+      next_action: {
+        code: "manual_promote_safe_retries",
+        summary: expect.stringMatching(/retry_safe=true.*bounded refire/i),
+      },
+      operator_summary: {
+        retryable_failed_rows: 3,
+        stale_duplicate_rows: 0,
+        empty_fuel: false,
+      },
+    });
+    expect(res.body.auto_promote_health.promoted_items).toEqual([]);
+    expect(res.body.auto_promote_health.skipped_items).toEqual(
+      expect.arrayContaining(
+        retryRows.map((row, index) =>
+          expect.objectContaining({
+            item_id: row.item_id,
+            prior_dispatch_phid: `phid:disp-duplicate-retry-${index + 1}`,
+            prior_dispatch_status: "failed",
+          }),
+        ),
+      ),
+    );
+    expect(res.body.auto_promote_health.operator_summary.summary).toMatch(/retryable_failed_rows=3/);
+    expect(res.body.auto_promote_health.operator_summary.summary).toMatch(/explicit retry_safe=true gate/i);
+    expect(res.body.auto_promote_health.operator_summary.safe_actions).toEqual(
+      expect.arrayContaining([
+        expect.stringMatching(/explicit retry_safe=true gate/i),
+        expect.stringMatching(/do not auto-refire/i),
+      ]),
+    );
+    expect(res.body.auto_promote_health.operator_summary.duplicate_dispatch_retry_required_examples).toEqual(
+      retryRows.map((row, index) => ({
+        item_id: row.item_id,
+        prior_dispatch_phid: `phid:disp-duplicate-retry-${index + 1}`,
+        retry_readiness_status: "retryable_failed_row",
+      })),
+    );
+    expect(res.body.auto_promote_health.summary).toMatch(/already-dispatched statuses: done=0, retryable=3, unknown=0/);
+    expect(res.body.auto_promote_health.summary).toMatch(/next: mark retry_safe=true only for an intentional bounded refire/i);
+    expect(res.body.auto_promote_health.summary).not.toMatch(/would promote 3|auto-promote has safe candidates/i);
+  });
+
   it("status recommends authoring new lane-diverse rows for true confidence-held candidates", async () => {
     await seedApprovedReview(adapter, {
       title: "true confidence-held candidate",

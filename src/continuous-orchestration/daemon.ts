@@ -376,6 +376,11 @@ export interface AutoPromoteOperatorSummary {
   waiting_on_live_dispatch_rows: number;
   non_retryable_failed_rows: number;
   confidence_held_rows: number;
+  duplicate_dispatch_retry_required_examples: Array<{
+    item_id: string;
+    prior_dispatch_phid: string;
+    retry_readiness_status: string;
+  }>;
   capacity_gated: boolean;
   lane_diversity_topoff_needed: boolean;
   lane_diversity_deficit: number;
@@ -2351,6 +2356,7 @@ async function buildAutoPromoteOperatorSummary(
   let staleDuplicateRows = 0;
   let waitingOnLiveDispatchRows = 0;
   let nonRetryableFailedRows = 0;
+  const duplicateDispatchRetryRequiredExamples: AutoPromoteOperatorSummary["duplicate_dispatch_retry_required_examples"] = [];
   for (const item of args.needsReview) {
     const readiness = deriveBacklogRetryReadiness(item, outcomes.get(item.last_dispatch_phid ?? ""));
     if (readiness.status === "retryable_failed_row") retryableFailedRows += 1;
@@ -2358,6 +2364,17 @@ async function buildAutoPromoteOperatorSummary(
     if (readiness.status === "waiting_on_live_dispatch") waitingOnLiveDispatchRows += 1;
     if (readiness.status === "non_retryable_failed_row" || readiness.status === "retry_cap_reached") {
       nonRetryableFailedRows += 1;
+    }
+    if (
+      item.last_dispatch_phid &&
+      readiness.status !== "not_retry_candidate" &&
+      duplicateDispatchRetryRequiredExamples.length < 3
+    ) {
+      duplicateDispatchRetryRequiredExamples.push({
+        item_id: item.item_id,
+        prior_dispatch_phid: item.last_dispatch_phid,
+        retry_readiness_status: readiness.status,
+      });
     }
   }
 
@@ -2437,6 +2454,7 @@ async function buildAutoPromoteOperatorSummary(
     waiting_on_live_dispatch_rows: waitingOnLiveDispatchRows,
     non_retryable_failed_rows: nonRetryableFailedRows,
     confidence_held_rows: confidenceHeldRows,
+    duplicate_dispatch_retry_required_examples: duplicateDispatchRetryRequiredExamples,
     capacity_gated: args.capacityOccupied,
     lane_diversity_topoff_needed: laneDiversityTopoffNeeded,
     lane_diversity_deficit: laneDiversityDeficit,
