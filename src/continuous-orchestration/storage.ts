@@ -806,6 +806,7 @@ export interface ReadyRuntimeRepair {
   to_provider: string;
   to_runtime: string;
   reason?: string;
+  applied?: boolean;
 }
 
 export interface StaleReadyReconcileResult {
@@ -1217,7 +1218,9 @@ function shouldRepairReadyRowToClaude(row: BacklogRow & { agent_runtime: string 
 export async function repairReadyCodexRuntimeMetadata(
   adapter: DbAdapter,
   team_id = "default",
+  opts: { apply?: boolean } = {},
 ): Promise<ReadyRuntimeRepair[]> {
+  const apply = opts.apply ?? true;
   const { rows } = await adapter.query<BacklogRow & { agent_runtime: string | null; agent_status: string | null }>(
     `SELECT i.*, a.runtime AS agent_runtime, a.status AS agent_status
        FROM orchestration_backlog_item i
@@ -1254,16 +1257,18 @@ export async function repairReadyCodexRuntimeMetadata(
     const rawRuntime = row.runtime?.trim() || null;
     if (currentRuntime === targetRuntime && currentProvider === targetProvider && rawRuntime === targetRuntime) continue;
 
-    const now = new Date().toISOString();
-    await adapter.query(
-      `UPDATE orchestration_backlog_item
-          SET provider = $1, runtime = $2, updated_at = $3
-        WHERE item_id = $4
-          AND readiness_state = 'ready'
-          AND approved_by IS NOT NULL
-          AND approved_at IS NOT NULL`,
-      [targetProvider, targetRuntime, now, row.item_id],
-    );
+    if (apply) {
+      const now = new Date().toISOString();
+      await adapter.query(
+        `UPDATE orchestration_backlog_item
+            SET provider = $1, runtime = $2, updated_at = $3
+          WHERE item_id = $4
+            AND readiness_state = 'ready'
+            AND approved_by IS NOT NULL
+            AND approved_at IS NOT NULL`,
+        [targetProvider, targetRuntime, now, row.item_id],
+      );
+    }
     repairs.push({
       item_id: row.item_id,
       to_agent: row.to_agent ?? "",
@@ -1272,6 +1277,7 @@ export async function repairReadyCodexRuntimeMetadata(
       to_provider: targetProvider,
       to_runtime: targetRuntime,
       reason: decision.reason,
+      applied: apply,
     });
   }
   return repairs;

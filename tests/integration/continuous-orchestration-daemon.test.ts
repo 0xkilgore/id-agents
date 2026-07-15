@@ -590,7 +590,7 @@ describe("daemon — dry-run vs live", () => {
     expect(decisions.some((d) => d.action === "ready_metadata_repair" && d.item_id === stale.item_id)).toBe(true);
   });
 
-  it("repairs stale Claude metadata for approved frontend Codex ready fuel in ready admission status", async () => {
+  it("previews stale Claude metadata repair for approved frontend Codex ready fuel in ready admission status", async () => {
     await seedAgent(adapter, "frontend-ui-codex", "running", "codex");
     const stale = await seedReady(adapter, {
       title: "frontend lane ready fuel with stale runtime",
@@ -608,11 +608,32 @@ describe("daemon — dry-run vs live", () => {
     const explanation = await daemon.explainReadyAdmission();
     const repaired = await getBacklogItem(adapter, stale.item_id);
 
-    expect(explanation.admissible).toEqual([
-      expect.objectContaining({ item_id: stale.item_id, to_agent: "frontend-ui-codex" }),
+    expect(explanation.ready_runtime_repairs).toEqual([
+      expect.objectContaining({
+        item_id: stale.item_id,
+        to_agent: "frontend-ui-codex",
+        from_provider: "anthropic",
+        from_runtime: "claude-code-cli",
+        to_provider: "openai",
+        to_runtime: "codex",
+        reason: "target_agent_runtime_codex",
+        applied: false,
+      }),
     ]);
-    expect(explanation.non_admitted).toHaveLength(0);
-    expect(repaired).toMatchObject({ provider: "openai", runtime: "codex", readiness_state: "ready" });
+    expect(explanation.admissible).toHaveLength(0);
+    expect(explanation.useful_ready).toBe(0);
+    expect(explanation.non_admitted).toEqual([
+      expect.objectContaining({
+        item_id: stale.item_id,
+        action: "held",
+        code: "provider_runtime_mismatch",
+        metadata: expect.objectContaining({
+          class: "provider_runtime",
+          target_runtime: "codex",
+        }),
+      }),
+    ]);
+    expect(repaired).toMatchObject({ provider: "anthropic", runtime: "claude-code-cli", readiness_state: "ready" });
   });
 
   it("repairs stale Claude metadata for approved Regina ready fuel without changing the logical owner", async () => {
@@ -673,7 +694,7 @@ describe("daemon — dry-run vs live", () => {
     expect(repaired).toMatchObject({ to_agent: "roger", provider: "openai", runtime: "codex" });
   });
 
-  it("repairs stale Claude metadata for explicit build-pool ready fuel before admission without changing the logical owner", async () => {
+  it("previews stale Claude metadata repair for explicit build-pool ready fuel without counting it useful", async () => {
     await seedAgent(adapter, "substrate-orch-codex", "running", "codex");
     const stale = await seedReady(adapter, {
       title: "pool-owned backend ready fuel with stale runtime",
@@ -700,15 +721,27 @@ describe("daemon — dry-run vs live", () => {
         to_provider: "openai",
         to_runtime: "codex",
         reason: "explicit_pool_owner_lane",
+        applied: false,
       }),
     ]);
-    expect(explanation.admissible).toEqual([
-      expect.objectContaining({ item_id: stale.item_id, to_agent: "substrate-orch-codex" }),
+    expect(explanation.admissible).toHaveLength(0);
+    expect(explanation.useful_ready).toBe(0);
+    expect(explanation.non_admitted).toEqual([
+      expect.objectContaining({
+        item_id: stale.item_id,
+        to_agent: "pool:backend",
+        code: "provider_runtime_mismatch",
+        action: "held",
+        metadata: expect.objectContaining({
+          target: "substrate-orch-codex",
+          target_runtime: "codex",
+        }),
+      }),
     ]);
-    expect(repaired).toMatchObject({ to_agent: "pool:backend", provider: "openai", runtime: "codex" });
+    expect(repaired).toMatchObject({ to_agent: "pool:backend", provider: "anthropic", runtime: "claude-code-cli" });
   });
 
-  it("canonicalizes wave32 build-pool codex-cli metadata before late-bound builder admission", async () => {
+  it("previews wave32 build-pool codex-cli metadata repair before late-bound builder admission", async () => {
     await seedAgent(adapter, "substrate-orch-codex", "running", "codex");
     const stale = await seedReady(adapter, {
       title: "wave32 backend pool ready fuel",
@@ -739,16 +772,28 @@ describe("daemon — dry-run vs live", () => {
         to_provider: "openai",
         to_runtime: "codex",
         reason: "explicit_pool_owner_lane",
+        applied: false,
       }),
     ]);
-    expect(explanation.admissible).toEqual([
-      expect.objectContaining({ item_id: stale.item_id, to_agent: "substrate-orch-codex" }),
+    expect(explanation.admissible).toHaveLength(0);
+    expect(explanation.useful_ready).toBe(0);
+    expect(explanation.non_admitted).toEqual([
+      expect.objectContaining({
+        item_id: stale.item_id,
+        to_agent: "pool:backend",
+        code: "provider_runtime_mismatch",
+        action: "held",
+        metadata: expect.objectContaining({
+          provider: "openai",
+          runtime: "other",
+          expected_provider: "other",
+        }),
+      }),
     ]);
-    expect(explanation.non_admitted).toHaveLength(0);
-    expect(repaired).toMatchObject({ to_agent: "pool:backend", provider: "openai", runtime: "codex" });
+    expect(repaired).toMatchObject({ to_agent: "pool:backend", provider: "openai", runtime: "codex-cli" });
   });
 
-  it("repairs artifact-only CTO ready fuel back to Anthropic Claude in ready admission status", async () => {
+  it("previews artifact-only CTO ready fuel repair back to Anthropic Claude in ready admission status", async () => {
     await seedAgent(adapter, "cto", "running", "claude-code-cli");
     const stale = await seedReady(adapter, {
       title: "cto artifact-only status report with stale codex runtime",
@@ -778,13 +823,24 @@ describe("daemon — dry-run vs live", () => {
         to_provider: "anthropic",
         to_runtime: "claude-code-cli",
         reason: "artifact_only_target_agent_runtime_claude",
+        applied: false,
       }),
     ]);
-    expect(explanation.admissible).toEqual([
-      expect.objectContaining({ item_id: stale.item_id, to_agent: "cto" }),
+    expect(explanation.admissible).toHaveLength(0);
+    expect(explanation.useful_ready).toBe(0);
+    expect(explanation.non_admitted).toEqual([
+      expect.objectContaining({
+        item_id: stale.item_id,
+        to_agent: "cto",
+        code: "provider_runtime_mismatch",
+        action: "held",
+        metadata: expect.objectContaining({
+          runtime: "codex",
+          target_runtime: "claude-code-cli",
+        }),
+      }),
     ]);
-    expect(explanation.non_admitted).toHaveLength(0);
-    expect(repaired).toMatchObject({ provider: "anthropic", runtime: "claude-code-cli", readiness_state: "ready" });
+    expect(repaired).toMatchObject({ provider: "openai", runtime: "codex", readiness_state: "ready" });
   });
 
   it("keeps real code-scoped build rows strict when provider/runtime mismatches the target lane", async () => {
@@ -3261,7 +3317,7 @@ describe("daemon — dry-run vs live", () => {
     expect(direct.map((item) => item.title)).toEqual(held.body.items.map((item: BacklogItem) => item.title));
   });
 
-  it("status includes provider/runtime repair interaction before admission diagnostics", async () => {
+  it("status previews provider/runtime repair interaction without applying it", async () => {
     await seedAgent(adapter, "roger", "running", "codex");
     const stale = await seedReady(adapter, {
       title: "approved stale runtime ready fuel",
@@ -3294,12 +3350,115 @@ describe("daemon — dry-run vs live", () => {
         from_runtime: "claude-code-cli",
         to_provider: "openai",
         to_runtime: "codex",
+        applied: false,
       }),
     ]);
-    expect(res.body.ready_admission.admissible).toEqual([
-      expect.objectContaining({ item_id: stale.item_id, to_agent: "roger" }),
+    expect(res.body.ready_admission).toMatchObject({
+      candidates: 1,
+      useful_ready: 0,
+      admissible_now: 0,
+      blocker_counts: [
+        { code: "provider_runtime_mismatch", category: "runtime_unavailable", count: 1 },
+      ],
+    });
+    expect(res.body.ready_admission.non_admitted).toEqual([
+      expect.objectContaining({
+        item_id: stale.item_id,
+        code: "provider_runtime_mismatch",
+        action: "held",
+      }),
     ]);
-    expect(repaired).toMatchObject({ provider: "openai", runtime: "codex", readiness_state: "ready" });
+    expect(repaired).toMatchObject({ provider: "anthropic", runtime: "claude-code-cli", readiness_state: "ready" });
+  });
+
+  it("status names Wave76 frontend-ui provider/runtime mismatch and offers safe repair without useful fuel", async () => {
+    await seedAgent(adapter, "frontend-ui-codex", "running", "codex");
+    const stale = await seedReady(adapter, {
+      title: "Wave76 frontend-ui stale runtime row",
+      track: "T-ORCH",
+      to_agent: "frontend-ui-codex",
+      provider: "anthropic",
+      runtime: "claude-code-cli",
+      write_scope: ["kapelle-site/app/ops"],
+      source_refs: ["wave76:kapelle:frontend-ui"],
+    });
+    await markApproved(adapter, stale.item_id);
+    const { app, daemon } = mountStatusApp(
+      adapter,
+      {
+        dry_run: true,
+        auto_flesh_enabled: true,
+        auto_promote_enabled: true,
+        auto_promote_floor: 8,
+        min_ready_fuel: 8,
+        max_in_flight: 4,
+        max_new_per_tick: 4,
+      },
+      {
+        resolveAgentHealth: (names) => getHealthyAgentNames(adapter, names),
+        resolveAgentRuntimes: (names) => getAgentRuntimeMap(adapter, names),
+      },
+    );
+    await daemon.setMode("running");
+
+    const res = await callApp(app, "/orchestration/status");
+    const unchanged = await getBacklogItem(adapter, stale.item_id);
+
+    expect(res.status).toBe(200);
+    expect(res.body.counts).toMatchObject({
+      ready: 1,
+      raw_ready_fuel: 1,
+      useful_ready_fuel: 0,
+      admissible_now: 0,
+      ready_block_reasons: {
+        duplicate_dispatch_retry_required: 0,
+      },
+    });
+    expect(res.body.counts.top_ready_block_reasons).toEqual([
+      { code: "provider_runtime_mismatch", category: "runtime_unavailable", count: 1 },
+    ]);
+    expect(res.body.ready_admission.blocker_counts).toEqual([
+      { code: "provider_runtime_mismatch", category: "runtime_unavailable", count: 1 },
+    ]);
+    expect(res.body.ready_admission.blocker_counts).not.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ code: "target_unhealthy" }),
+        expect.objectContaining({ code: "duplicate_dispatch_retry_required" }),
+      ]),
+    );
+    expect(res.body.ready_admission.non_admitted).toEqual([
+      expect.objectContaining({
+        item_id: stale.item_id,
+        title: "Wave76 frontend-ui stale runtime row",
+        to_agent: "frontend-ui-codex",
+        code: "provider_runtime_mismatch",
+        action: "held",
+        metadata: expect.objectContaining({
+          provider: "anthropic",
+          runtime: "claude-code-cli",
+          target: "frontend-ui-codex",
+          target_provider: "openai",
+          target_runtime: "codex",
+        }),
+      }),
+    ]);
+    expect(res.body.ready_admission.ready_runtime_repairs).toEqual([
+      expect.objectContaining({
+        item_id: stale.item_id,
+        to_agent: "frontend-ui-codex",
+        from_provider: "anthropic",
+        from_runtime: "claude-code-cli",
+        to_provider: "openai",
+        to_runtime: "codex",
+        reason: "target_agent_runtime_codex",
+        applied: false,
+      }),
+    ]);
+    expect(res.body.ready_admission.recommended_action).toContain("provider_runtime_mismatch=1");
+    expect(res.body.auto_promote_health.ready_runtime_repairs).toEqual(
+      res.body.ready_admission.ready_runtime_repairs,
+    );
+    expect(unchanged).toMatchObject({ provider: "anthropic", runtime: "claude-code-cli", readiness_state: "ready" });
   });
 
   it("status treats dispatched refuel-wave rows as healthy capacity fuel when raw ready drops below floor", async () => {

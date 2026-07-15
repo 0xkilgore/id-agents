@@ -747,7 +747,7 @@ export class ContinuousOrchestrationDaemon {
     const refuelFleshed = refuel?.auto_ready ?? 0;
     const admitCap = tickWriteCaps(writeCfg, refuelFleshed).admitCap;
 
-    const readyRuntimeRepairs = await repairReadyCodexRuntimeMetadata(this.deps.adapter, this.teamId);
+    const readyRuntimeRepairs = await repairReadyCodexRuntimeMetadata(this.deps.adapter, this.teamId, { apply: true });
     const ready = await listReadyItems(this.deps.adapter, this.teamId);
     const dependency_index = await listDependencyResolution(this.deps.adapter, this.teamId);
     // Priority-rank, then FAIR-interleave across distinct write_scope lanes so a
@@ -1161,7 +1161,7 @@ export class ContinuousOrchestrationDaemon {
     const killSwitch = this.killSwitchActive();
     const { view: usage, daily_tokens_used } = await this.deps.readUsage();
     const { count: in_flight, active_write_scopes } = await this.deps.readInFlight();
-    const readyRuntimeRepairs = await repairReadyCodexRuntimeMetadata(this.deps.adapter, this.teamId);
+    const readyRuntimeRepairs = await repairReadyCodexRuntimeMetadata(this.deps.adapter, this.teamId, { apply: false });
     const ready = await listReadyItems(this.deps.adapter, this.teamId);
     const dependency_index = await listDependencyResolution(this.deps.adapter, this.teamId);
     const ordered = fairInterleaveByLane(orderCandidates(ready));
@@ -1308,7 +1308,7 @@ export class ContinuousOrchestrationDaemon {
     const state = await getOrchestrationState(this.deps.adapter, this.teamId);
     const killSwitch = this.killSwitchActive();
     const { view: usage } = await this.deps.readUsage();
-    const readyRuntimeRepairs = await repairReadyCodexRuntimeMetadata(this.deps.adapter, this.teamId);
+    const readyRuntimeRepairs = await repairReadyCodexRuntimeMetadata(this.deps.adapter, this.teamId, { apply: false });
 
     const [ready, allNeedsReview, inFlight] = await Promise.all([
       listReadyItems(this.deps.adapter, this.teamId),
