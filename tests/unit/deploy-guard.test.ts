@@ -45,18 +45,53 @@ describe("freshness tracker (T-DEPLOY.1)", () => {
     expect(start.alert).toBeNull();
     const later = evaluateFreshness(start.next, behindInput, t0 + DEFAULT_STALE_THRESHOLD_MS + 1);
     expect(later.alert?.kind).toBe("stale");
-    expect(later.alert?.message).toMatch(/STALE/);
+    expect(later.alert?.message).toMatch(/BUILD_BEHIND_ORIGIN incident/);
+    expect(later.alert?.message).toContain("running_sha=aaaa1111");
+    expect(later.alert?.message).toContain("promoted_sha=bbbb2222");
+    expect(later.alert?.message).toContain("clean deploy-checkout");
     expect(later.next.state).toBe("stale_alerted");
   });
 
-  it("does not re-alert before the re-alert window, then re-alerts after", () => {
+  it("suppresses repetitive symptom spam for the same running/promoted SHA pair", () => {
     const t0 = 0;
     const a = evaluateFreshness(INITIAL_FRESHNESS, behindInput, t0, { thresholdMs: 0 });
     expect(a.alert?.kind).toBe("stale");
-    const b = evaluateFreshness(a.next, behindInput, t0 + 1000, { thresholdMs: 0, reAlertMs: 10_000 });
-    expect(b.alert).toBeNull(); // within re-alert window
-    const c = evaluateFreshness(b.next, behindInput, t0 + 20_000, { thresholdMs: 0, reAlertMs: 10_000 });
-    expect(c.alert?.kind).toBe("stale"); // re-alert fired
+    const b = evaluateFreshness(a.next, behindInput, t0 + 1000, { thresholdMs: 0 });
+    expect(b.alert).toBeNull();
+    const c = evaluateFreshness(b.next, behindInput, t0 + 20_000, { thresholdMs: 0 });
+    expect(c.alert).toBeNull();
+  });
+
+  it("opens a new incident when the promoted SHA changes while the manager is still stale", () => {
+    const t0 = 0;
+    const a = evaluateFreshness(INITIAL_FRESHNESS, behindInput, t0, { thresholdMs: 0 });
+    expect(a.alert?.kind).toBe("stale");
+    const b = evaluateFreshness(
+      a.next,
+      { ...behindInput, origin_main_sha: "cccc3333" },
+      t0 + 1000,
+      { thresholdMs: 0 },
+    );
+    expect(b.alert?.kind).toBe("stale");
+    expect(b.alert?.message).toContain("promoted_sha=cccc3333");
+  });
+
+  it("includes source-branch-stale context in the actionable incident", () => {
+    const r = evaluateFreshness(
+      INITIAL_FRESHNESS,
+      {
+        ...behindInput,
+        source_branch_sha: "cccc3333",
+        source_branch_name: "roger/build-work",
+        classification: "server_stale_and_source_unpromoted",
+      },
+      0,
+      { thresholdMs: 0 },
+    );
+
+    expect(r.alert?.message).toContain("source_branch_sha=cccc3333");
+    expect(r.alert?.message).toContain("source_branch=roger/build-work");
+    expect(r.alert?.message).toContain("classification=server_stale_and_source_unpromoted");
   });
 
   it("emits a recovered alert when the build catches up after alerting", () => {
@@ -64,6 +99,10 @@ describe("freshness tracker (T-DEPLOY.1)", () => {
     const r = evaluateFreshness(alerted, freshInput, 10_000);
     expect(r.next.state).toBe("fresh");
     expect(r.alert?.kind).toBe("recovered");
+    expect(r.alert?.message).toContain("BUILD_BEHIND_ORIGIN resolved");
+    expect(r.alert?.message).toContain("running_sha=bbbb2222");
+    expect(r.alert?.message).toContain("promoted_sha=bbbb2222");
+    expect(r.alert?.message).toContain("auto-closed");
   });
 
   it("holds state and never alerts when behind_origin is unknown (null)", () => {

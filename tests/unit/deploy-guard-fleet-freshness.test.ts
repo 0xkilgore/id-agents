@@ -20,6 +20,9 @@ function node(over: Partial<FleetNodeInput> = {}): FleetNodeInput {
     behind_origin: over.behind_origin === undefined ? false : over.behind_origin,
     build_sha: over.build_sha ?? "aaaaaaa",
     origin_main_sha: over.origin_main_sha ?? "aaaaaaa",
+    source_branch_sha: over.source_branch_sha ?? null,
+    source_branch_name: over.source_branch_name ?? null,
+    classification: over.classification ?? null,
     release_state: over.release_state ?? null,
   };
 }
@@ -88,6 +91,24 @@ describe("evaluateFleetFreshness", () => {
     expect(later.alerts[0].node_id).toBe("kapelle-site");
     expect(later.alerts[0].alert.kind).toBe("stale");
     expect(later.next["kapelle-site"].state).toBe("stale_alerted");
+  });
+
+  it("passes build/source diagnostic fields into the actionable incident alert", () => {
+    const behind = node({
+      node_id: "manager",
+      behind_origin: true,
+      build_sha: "old1111",
+      origin_main_sha: "main2222",
+      source_branch_sha: "branch3333",
+      source_branch_name: "roger/build-behind-origin-incident",
+      classification: "server_stale_and_source_unpromoted",
+    });
+    const r = evaluateFleetFreshness({}, [behind], T0, { thresholdMs: 0 });
+    expect(r.alerts).toHaveLength(1);
+    expect(r.alerts[0].alert.message).toContain("running_sha=old1111");
+    expect(r.alerts[0].alert.message).toContain("promoted_sha=main2222");
+    expect(r.alerts[0].alert.message).toContain("source_branch_sha=branch33");
+    expect(r.alerts[0].alert.message).toContain("classification=server_stale_and_source_unpromoted");
   });
 
   it("isolates nodes: a stale node does not implicate a fresh one", () => {

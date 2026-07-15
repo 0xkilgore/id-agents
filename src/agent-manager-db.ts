@@ -13388,6 +13388,9 @@ export class AgentManagerDb {
             behind_origin: build.behind_origin,
             build_sha: build.build_sha,
             origin_main_sha: build.origin_main_sha,
+            source_branch_sha: build.freshness.source_branch_sha,
+            source_branch_name: build.freshness.source_branch_name,
+            classification: build.freshness.classification,
             release_state: releaseState,
           };
         });
