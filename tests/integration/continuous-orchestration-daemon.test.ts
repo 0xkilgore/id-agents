@@ -1750,6 +1750,62 @@ describe("daemon — dry-run vs live", () => {
     expect(res.body.auto_promote_health.operator_summary.summary).toContain("2 target_unhealthy row(s)");
   });
 
+  it("status skips virtual pool aliases and admits healthy Claude builders from the same pool", async () => {
+    await seedAgent(adapter, "gaudi", "running", "claude-code-cli");
+
+    await seedReady(adapter, {
+      title: "backend pool should use real Claude capacity",
+      to_agent: "pool:backend",
+      write_scope: ["repo/backend"],
+    });
+
+    const pools: PoolRouting = {
+      poolForItem: (item) =>
+        item.to_agent === "pool:backend"
+          ? {
+              pool_id: "backend",
+              repo_root: "/repo/backend",
+              max_parallel: 2,
+              members: ["pool:backend", "gaudi"],
+            }
+          : null,
+      availableBuilders: (pool) => pool.members,
+      allocateWorktree: async ({ agent, item, pool }) => ({
+        path: `${pool.repo_root}/.worktrees/${agent}-${item.item_id.slice(-6)}`,
+        branch: `build/${agent}-${item.item_id.slice(-6)}`,
+        lease_id: null,
+      }),
+    };
+    const { app, daemon } = mountStatusApp(
+      adapter,
+      {
+        dry_run: true,
+        auto_flesh_enabled: false,
+        auto_promote_enabled: false,
+        max_in_flight: 20,
+        max_new_per_tick: 20,
+      },
+      {
+        pools,
+        resolveAgentHealth: (names) => getHealthyAgentNames(adapter, names),
+        resolveAgentRuntimes: (names) => getAgentRuntimeMap(adapter, names),
+      },
+    );
+    await daemon.setMode("running");
+
+    const res = await callApp(app, "/orchestration/status");
+
+    expect(res.status).toBe(200);
+    expect(res.body.counts.admissible_now).toBe(1);
+    expect(res.body.ready_admission.admissible).toEqual([
+      expect.objectContaining({
+        title: "backend pool should use real Claude capacity",
+        to_agent: "gaudi",
+      }),
+    ]);
+    expect(res.body.ready_admission.blocker_counts).toEqual([]);
+  });
+
   it("status names Wave66 target-unhealthy blockers and excludes them from useful/admissible fuel", async () => {
     await seedAgent(adapter, "substrate-api-codex", "pending", "codex");
     await seedAgent(adapter, "brunel", "pending", "claude-code-cli");

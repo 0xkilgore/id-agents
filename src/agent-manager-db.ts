@@ -5445,40 +5445,56 @@ export class AgentManagerDb {
       const recovery_backfill = this.dispatchRecoveryService
         ? this.dispatchRecoveryService.getBackfillMetrics()
         : { recovery_backfill_runs_total: 0, recovery_backfill_rows_reclassified_total: 0 };
-      const conformance = dbProbe.timedOut || !dbProbe.value.teamId
-        ? {
-            schema_version: 'reset-conformance.v1',
-            state: 'unavailable',
-            counts: { total: 0, accepted: 0, quarantined: 0, unassigned: 0, track_unknown: 0 },
-          }
-        : await buildResetConformanceSummary(this.db.adapter, {
-            teamId: dbProbe.value.teamId,
-            limit: 1000,
-          }).then((summary) => ({
-            schema_version: summary.schema_version,
-            state: summary.state,
-            counts: {
-              total: summary.counts.total,
-              accepted: summary.counts.accepted,
-              quarantined: summary.counts.quarantined,
-              unassigned: summary.counts.unassigned,
-              track_unknown: summary.counts.track_unknown,
-              by_kind: summary.counts.by_kind,
-            },
-            sample: summary.records.slice(0, 10),
-            sources: summary.sources,
-          })).catch((err) => ({
-            schema_version: 'reset-conformance.v1',
-            state: 'unavailable',
-            error: err instanceof Error ? err.message : String(err),
-            counts: { total: 0, accepted: 0, quarantined: 0, unassigned: 0, track_unknown: 0 },
-          }));
       const build = this.getBuildStatus();
       const disk = readDiskHeadroom();
       const supervisor = this.getSupervisorHealthStatus(now);
       const supervisorRequiredForNominal = process.env.SUPERVISOR_OPTIONAL !== 'true';
       const nominal = this.evaluateNominalHealth({ build, disk, supervisor });
-      const orchestration_runtime_status = await this.getContinuousOrchestrationRuntimeStatus({ build, disk });
+      const unavailableConformance = {
+        schema_version: 'reset-conformance.v1',
+        state: 'unavailable',
+        counts: { total: 0, accepted: 0, quarantined: 0, unassigned: 0, track_unknown: 0 },
+      };
+      const conformanceResult = dbProbe.timedOut || !dbProbe.value.teamId
+        ? { timedOut: false as const, value: unavailableConformance }
+        : await withTimeout(
+            buildResetConformanceSummary(this.db.adapter, {
+              teamId: dbProbe.value.teamId,
+              limit: 1000,
+            }).then((summary) => ({
+              schema_version: summary.schema_version,
+              state: summary.state,
+              counts: {
+                total: summary.counts.total,
+                accepted: summary.counts.accepted,
+                quarantined: summary.counts.quarantined,
+                unassigned: summary.counts.unassigned,
+                track_unknown: summary.counts.track_unknown,
+                by_kind: summary.counts.by_kind,
+              },
+              sample: summary.records.slice(0, 10),
+              sources: summary.sources,
+            })).catch((err) => ({
+              ...unavailableConformance,
+              error: err instanceof Error ? err.message : String(err),
+            })),
+            750,
+          );
+      const conformance = conformanceResult.timedOut
+        ? {
+            schema_version: 'reset-conformance.v1',
+            state: 'unavailable',
+            reason: 'health_conformance_timeout',
+            counts: { total: 0, accepted: 0, quarantined: 0, unassigned: 0, track_unknown: 0 },
+          }
+        : conformanceResult.value;
+      const runtimeResult = await withTimeout(
+        this.getContinuousOrchestrationRuntimeStatus({ build, disk }),
+        750,
+      );
+      const orchestration_runtime_status = runtimeResult.timedOut
+        ? { state: 'degraded', reason: 'health_orchestration_runtime_timeout' }
+        : runtimeResult.value;
       const body = {
         status: 'ok',
         ...nominal,
@@ -5590,8 +5606,23 @@ export class AgentManagerDb {
     this.managementApp.get('/dispatches/health', async (req, res) => {
       try {
         const { id: teamId, name: teamName } = await this.getTeam(req);
-        const health = await readDispatchHealth(this.db.adapter, teamId, this.runtimeDriftSummary, teamName);
-        return res.json({ ok: true, team: teamName, ...health });
+        const now = Date.now();
+        const result = await withTimeout(
+          readDispatchHealth(this.db.adapter, teamId, this.runtimeDriftSummary, teamName),
+          2_000,
+        );
+        if (result.timedOut) {
+          return res.status(503).json({
+            ok: false,
+            team: teamName,
+            team_id: teamId,
+            status: 'degraded',
+            error: 'dispatch_health_timeout',
+            generated_at: new Date(now).toISOString(),
+          });
+        }
+        const body = { ok: true, team: teamName, ...result.value };
+        return res.json(body);
       } catch (err) {
         return res.status(500).json({
           ok: false,

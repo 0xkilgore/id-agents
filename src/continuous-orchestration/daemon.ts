@@ -144,6 +144,10 @@ interface PoolLaneBlocker {
   reason: string;
 }
 
+function isVirtualPoolTarget(agent: string): boolean {
+  return agent.trim().toLowerCase().startsWith("pool:");
+}
+
 export interface DaemonDeps {
   adapter: DbAdapter;
   config: ContinuousOrchestrationConfig;
@@ -2064,17 +2068,27 @@ export class ContinuousOrchestrationDaemon {
     const pool_lane_blockers = new Map<string, PoolLaneBlocker[]>();
     for (const [pid, pool] of resolved) {
       const buildingSet = building.get(pid) ?? new Set<string>();
+      const available = pools.availableBuilders(pool, buildingSet);
+      const runnableBuilders = available.filter((agent) => !isVirtualPoolTarget(agent));
+      const virtualBuilders = available.filter(isVirtualPoolTarget);
       pool_free_slots.set(pid, Math.max(0, pool.max_parallel - (inFlightCount.get(pid) ?? 0)));
-      pool_free_builders.set(pid, pools.availableBuilders(pool, buildingSet));
+      pool_free_builders.set(pid, runnableBuilders);
       pool_lane_blockers.set(
         pid,
-        pool.members
-          .filter((agent) => buildingSet.has(agent))
-          .map((agent) => ({
+        [
+          ...pool.members
+            .filter((agent) => buildingSet.has(agent))
+            .map((agent) => ({
+              agent,
+              code: "lane_busy",
+              reason: "builder already has an in-flight pool item",
+            })),
+          ...virtualBuilders.map((agent) => ({
             agent,
-            code: "lane_busy",
-            reason: "builder already has an in-flight pool item",
+            code: "virtual_pool_alias",
+            reason: "virtual pool aliases are dispatch targets, not runnable builder agents",
           })),
+        ],
       );
     }
 
