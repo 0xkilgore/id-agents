@@ -122,7 +122,9 @@ export function buildRuntimeStatusProjection(input: {
   const infraFirst = diskCritical || buildBehindOrigin === true;
   const operatorSummary = infraFirst
     ? `disk/deploy unblock before Chris handoff: ${recommendedActions.join("; ")}`
-    : `ready=${input.readyAdmission.candidates} admissible=${input.readyAdmission.admissible_now}; ${input.readyAdmission.recommended_action}`;
+    : capacityFull
+      ? input.autoPromoteHealth.summary
+      : `ready=${input.readyAdmission.candidates} admissible=${input.readyAdmission.admissible_now}; ${input.readyAdmission.recommended_action}`;
 
   return {
     schema_version: "orchestration.runtime_status_projection.v1",
@@ -166,9 +168,17 @@ function withReadyAdmissionOperatorSummary(
     const laneState = health.below_lanes
       ? `; lane diversity topoff needed: add/promote ${Math.max(0, health.min_ready_lanes - health.lanes.build_ready_lanes)} new build lane(s)`
       : "; lane diversity satisfied";
+    const buildReadyFloorState = health.lanes.build_ready < health.floor
+      ? "below floor"
+      : "meets floor";
+    const readyPlusFloorState = health.lanes.ready_plus_in_flight < health.floor
+      ? "below floor"
+      : "covers floor";
     const summary =
-      `capacity-gated ready fuel: ready=${readyAdmission.useful_ready} floor=${health.floor}, ` +
-      `ready_plus_in_flight=${health.lanes.ready_plus_in_flight}, no_in_flight_slots=${noInFlightSlots}, ` +
+      `capacity-gated build-ready floor: build_ready=${health.lanes.build_ready}/${health.floor} ${buildReadyFloorState}, ` +
+      `ready=${readyAdmission.candidates}, useful_ready=${readyAdmission.useful_ready}, ` +
+      `in_flight=${health.lanes.build_in_flight}, ready_plus_in_flight=${health.lanes.ready_plus_in_flight}/${health.floor} ${readyPlusFloorState}, ` +
+      `no_in_flight_slots=${noInFlightSlots}, ` +
       `lanes=${health.lanes.build_ready_lanes}/${health.min_ready_lanes}${laneState}`;
     return {
       ...health,
@@ -181,7 +191,7 @@ function withReadyAdmissionOperatorSummary(
         capacity_gated: true,
         safe_actions: safeActions,
         empty_fuel: false,
-        summary: `${health.operator_summary.summary}; ${capacityAction}`,
+        summary,
       },
       summary,
     };

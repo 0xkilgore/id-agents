@@ -1886,6 +1886,74 @@ describe("daemon — dry-run vs live", () => {
     expect(res.body.health.build_ready_floor.next_action).not.toMatch(/same-lane/i);
   });
 
+  it("status keeps capacity-full low-fuel summaries coherent across ready and build-ready floor views", async () => {
+    for (let i = 0; i < 5; i += 1) {
+      await seedReady(adapter, {
+        title: `capacity-gated ready row ${i}`,
+        write_scope: [`repo/ready-low-fuel-${i}`],
+      });
+    }
+    for (let i = 0; i < 12; i += 1) {
+      const item = await seedReady(adapter, {
+        title: `capacity-gated in-flight row ${i}`,
+        write_scope: [`repo/in-flight-low-fuel-${i}`],
+      });
+      await setItemState(adapter, item.item_id, "in_flight", { dispatch_phid: `phid:disp-low-fuel-${i}` });
+    }
+
+    const { app, daemon } = mountStatusApp(adapter, {
+      dry_run: true,
+      auto_flesh_enabled: true,
+      auto_promote_enabled: true,
+      auto_promote_floor: 12,
+      auto_promote_min_lanes: 2,
+      max_in_flight: 12,
+      max_new_per_tick: 20,
+      min_ready_fuel: 12,
+    }, { inFlight: 12 });
+    await daemon.setMode("running");
+
+    const res = await callApp(app, "/orchestration/status");
+
+    expect(res.status).toBe(200);
+    expect(res.body.counts).toMatchObject({
+      ready: 5,
+      raw_ready_fuel: 5,
+      useful_ready_fuel: 5,
+      admissible_now: 0,
+      in_flight: 12,
+    });
+    expect(res.body.ready_admission.blocker_counts).toEqual([
+      { code: "no_in_flight_slots", category: "capacity_gate", count: 5 },
+    ]);
+    const coherentSummary =
+      "capacity-gated build-ready floor: build_ready=5/12 below floor, ready=5, useful_ready=5, in_flight=12, ready_plus_in_flight=17/12 covers floor, no_in_flight_slots=5, lanes=17/2; lane diversity satisfied";
+    expect(res.body.auto_promote_health).toMatchObject({
+      summary: coherentSummary,
+      operator_summary: {
+        capacity_gated: true,
+        summary: coherentSummary,
+      },
+      lanes: {
+        build_ready: 5,
+        build_in_flight: 12,
+        ready_plus_in_flight: 17,
+        capacity_occupied: true,
+        build_ready_lanes: 17,
+      },
+    });
+    expect(res.body.runtime_status.operator_summary).toBe(coherentSummary);
+    expect(res.body.health.build_ready_floor).toMatchObject({
+      blocked: true,
+      blocker_code: "build_ready_below_floor",
+      useful_ready_count: 5,
+      floor: 12,
+      build_ready_lanes: 5,
+      min_lanes: 2,
+    });
+    expect(res.body.auto_promote_health.operator_summary.summary).not.toContain("ready=5 floor=20");
+  });
+
   it("status preserves queue-quality blocker labels used by /ops", async () => {
     await insertBacklogItem(adapter, {
       title: "pending dependency",
@@ -3769,9 +3837,9 @@ describe("daemon — dry-run vs live", () => {
       empty_fuel: false,
     });
     expect(res.body.auto_promote_health.summary).toBe(
-      "capacity-gated ready fuel: ready=3 floor=2, ready_plus_in_flight=3, no_in_flight_slots=3, lanes=3/2; lane diversity satisfied",
+      "capacity-gated build-ready floor: build_ready=3/2 meets floor, ready=3, useful_ready=3, in_flight=0, ready_plus_in_flight=3/2 covers floor, no_in_flight_slots=3, lanes=3/2; lane diversity satisfied",
     );
-    expect(res.body.auto_promote_health.summary).not.toMatch(/meets floor/i);
+    expect(res.body.auto_promote_health.summary).toContain("build_ready=3/2 meets floor");
     expect(res.body.flesh.auto_promote.health.lanes).toEqual(res.body.auto_promote_health.lanes);
   });
 
@@ -3932,7 +4000,7 @@ describe("daemon — dry-run vs live", () => {
       },
     });
     expect(res.body.auto_promote_health.summary).toBe(
-      "capacity-gated ready fuel: ready=2 floor=2, ready_plus_in_flight=3, no_in_flight_slots=2, lanes=3/3; lane diversity satisfied",
+      "capacity-gated build-ready floor: build_ready=2/2 meets floor, ready=2, useful_ready=2, in_flight=1, ready_plus_in_flight=3/2 covers floor, no_in_flight_slots=2, lanes=3/3; lane diversity satisfied",
     );
     expect(res.body.auto_promote_health.operator_summary).toMatchObject({
       capacity_gated: true,
@@ -3995,13 +4063,14 @@ describe("daemon — dry-run vs live", () => {
         lane_diversity_deficit: 1,
       },
     });
-    expect(res.body.auto_promote_health.summary).toContain("capacity-gated ready fuel");
+    expect(res.body.auto_promote_health.summary).toContain("capacity-gated build-ready floor");
     expect(res.body.auto_promote_health.summary).toContain("lane diversity topoff needed");
     expect(res.body.auto_promote_health.next_action).toMatchObject({
       code: "wait_for_capacity",
       summary: "wait for in-flight slots to free or close completed dispatches before adding filler ready rows",
     });
-    expect(res.body.auto_promote_health.operator_summary.summary).toContain("gated fuel (capacity full, lane diversity 1/2)");
+    expect(res.body.auto_promote_health.operator_summary.summary).toBe(res.body.auto_promote_health.summary);
+    expect(res.body.auto_promote_health.operator_summary.summary).toContain("lanes=1/2; lane diversity topoff needed");
     expect(res.body.auto_promote_health.operator_summary.summary).not.toMatch(/empty fuel/i);
     expect(res.body.auto_promote_health.operator_summary.safe_actions).toEqual(
       expect.arrayContaining([
@@ -4092,7 +4161,7 @@ describe("daemon — dry-run vs live", () => {
       },
     });
     expect(res.body.auto_promote_health.summary).toBe(
-      "capacity-gated ready fuel: ready=2 floor=12, ready_plus_in_flight=2, no_in_flight_slots=2, lanes=2/2; lane diversity satisfied",
+      "capacity-gated build-ready floor: build_ready=2/12 below floor, ready=2, useful_ready=2, in_flight=0, ready_plus_in_flight=2/12 below floor, no_in_flight_slots=2, lanes=2/2; lane diversity satisfied",
     );
     expect(res.body.auto_promote_health.summary).not.toMatch(/meets floor|empty fuel/i);
   });
@@ -5193,9 +5262,9 @@ describe("daemon — dry-run vs live", () => {
       },
     });
     expect(res.body.auto_promote_health.summary).toBe(
-      "ready-plus-in-flight capacity satisfies floor but daemon capacity is occupied: ready_plus_in_flight=2 floor=2, in_flight=2/2, lanes=2/2; lane diversity satisfied",
+      "build-ready below floor but ready-plus-in-flight capacity covers floor but daemon capacity is occupied: build_ready=0/2, ready_plus_in_flight=2/2, in_flight=2/2, lanes=2/2; lane diversity satisfied",
     );
-    expect(res.body.auto_promote_health.summary).not.toMatch(/raw floor satisfied/i);
+    expect(res.body.auto_promote_health.summary).toContain("build-ready below floor");
     expect(res.body.auto_promote_health.summary).not.toMatch(/empty fuel/i);
     expect(res.body.auto_promote_health.operator_summary.summary).toContain("gated fuel (capacity full");
     expect(res.body.auto_promote_health.operator_summary.summary).toContain("ready_plus_in_flight=2");
