@@ -259,6 +259,8 @@ import { buildSourceDiagnostic, getBuildStatusCached, loadBuildStatus, type Buil
 import { readDiskHeadroom } from './disk-health.js';
 import { parseSupervisorConfig, type SupervisorHealthStatus } from './supervisor/index.js';
 import {
+  buildDeployFreshnessIncidentOpener,
+  DEPLOY_FRESHNESS_TASK_NAME,
   INITIAL_FRESHNESS,
   type FreshnessTrackerState,
 } from './deploy-guard/freshness.js';
@@ -13411,6 +13413,10 @@ export class AgentManagerDb {
         this.fleetFreshnessSummary = summary;
         // Back-compat: surface the manager node on the existing /health field.
         this.freshnessState = next.manager ?? this.freshnessState;
+        const managerInput = inputs.find((input) => input.node_id === 'manager');
+        if (managerInput) {
+          await this.openOrUpdateDeployFreshnessIncident(managerInput, this.freshnessState);
+        }
         for (const { node_id, alert } of alerts) {
           const message = node_id === 'manager' ? alert.message : `[${node_id}] ${alert.message}`;
           console.warn(`[Manager] fleet-freshness ${node_id} ${alert.kind}: ${message}`);
@@ -13465,6 +13471,68 @@ export class AgentManagerDb {
     void tick();
     this.freshnessMonitorInterval = setInterval(tick, 60_000);
     this.freshnessMonitorInterval.unref?.();
+  }
+
+  private async openOrUpdateDeployFreshnessIncident(
+    input: FleetNodeInput,
+    state: FreshnessTrackerState,
+  ): Promise<void> {
+    if (input.node_id !== 'manager') return;
+    const teamId = await this.db.teams.getOrCreateTeamId('default');
+    const existing = await this.db.tasks.getByNameForTeam(DEPLOY_FRESHNESS_TASK_NAME, teamId);
+    const opener = buildDeployFreshnessIncidentOpener(
+      {
+        behind_origin: input.behind_origin,
+        build_sha: input.build_sha,
+        origin_main_sha: input.origin_main_sha,
+        source_branch_sha: input.source_branch_sha,
+        source_branch_name: input.source_branch_name,
+        classification: input.classification,
+        behind_origin_since: state.behind_origin_since,
+      },
+      existing
+        ? { name: existing.name, status: existing.status, description: existing.description }
+        : null,
+    );
+    if (opener.action === 'none') return;
+
+    if (!existing) {
+      const taskRow = buildTaskRow(
+        draftFromManagerApi({
+          name: opener.task_name,
+          team_id: teamId,
+          title: opener.title,
+          description: opener.description,
+          created_by: null,
+          owner: null,
+          track: 'T-DEPLOY',
+        }),
+      );
+      await this.db.tasks.create(taskRow);
+      if (this.db.events) {
+        await emitTaskCreated(this.db.events, {
+          teamId,
+          taskUuid: taskRow.uuid,
+          taskName: taskRow.name,
+          title: taskRow.title,
+          createdByAgentId: taskRow.created_by,
+          occurredAt: Date.now(),
+        });
+      }
+      this.clearTaskListCache(teamId);
+      return;
+    }
+
+    await this.db.tasks.updateFields(existing.id, {
+      title: opener.title,
+      description: opener.description,
+      status: existing.status === 'done' ? 'todo' : undefined,
+      completed_at: existing.status === 'done' ? null : undefined,
+      track: 'T-DEPLOY',
+      updated_at: Math.floor(Date.now() / 1000),
+    });
+    this.clearTaskListCache(teamId);
+    this.invalidateTaskDetailCache(teamId, existing);
   }
 
   /**
