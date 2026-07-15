@@ -387,6 +387,90 @@ describe("orchestration health projection", () => {
     );
   });
 
+  it("exposes bounded target-unhealthy blockers with item ids, alternatives, and operator action", async () => {
+    await setMode(adapter, "default", "running");
+    const rogerIds: string[] = [];
+    const brunelIds: string[] = [];
+    for (let i = 0; i < 6; i += 1) {
+      const row = await insertBacklogItem(adapter, {
+        title: `roger unhealthy target row ${i}`,
+        readiness_state: "ready",
+        risk_class: "build",
+        to_agent: "roger",
+        dispatch_body: "continue",
+        write_scope: [`/repo/roger-${i}`],
+      });
+      rogerIds.push(row.item_id);
+    }
+    for (let i = 0; i < 2; i += 1) {
+      const row = await insertBacklogItem(adapter, {
+        title: `brunel unhealthy target row ${i}`,
+        readiness_state: "ready",
+        risk_class: "build",
+        to_agent: "brunel",
+        dispatch_body: "continue",
+        write_scope: [`/repo/brunel-${i}`],
+      });
+      brunelIds.push(row.item_id);
+    }
+
+    const health = await readOrchestrationHealthProjection(adapter, "default", {
+      readyAdmission: {
+        rawReady: 8,
+        usefulReady: 0,
+        admissibleNow: 0,
+        blockerCounts: [
+          { code: "target_unhealthy", category: "runtime_unavailable", count: 8 },
+        ],
+        nonAdmitted: [
+          ...rogerIds.map((item_id) => ({ item_id, code: "target_unhealthy", to_agent: "roger" })),
+          ...brunelIds.map((item_id) => ({ item_id, code: "target_unhealthy", to_agent: "brunel" })),
+        ],
+        targetUnhealthyGroups: [
+          {
+            target: "roger",
+            lane: "/repo/id-agents",
+            count: 6,
+            proposed_healthy_target: "regina",
+            examples: rogerIds.map((item_id) => ({ item_id })),
+            recommended_action: "reroute roger rows to regina or restart roger",
+          },
+          {
+            target: "brunel",
+            lane: "/repo/kapelle-site",
+            count: 2,
+            proposed_healthy_target: null,
+            examples: brunelIds.map((item_id) => ({ item_id })),
+            recommended_action: "restart brunel or downclassify stale target pins",
+          },
+        ],
+        recommendedAction: "repair target_unhealthy lanes before adding more ready fuel",
+      },
+    });
+
+    expect(health.ready_item_blockers.target_unhealthy).toEqual({
+      count: 8,
+      top_blockers: [
+        {
+          target_agent: "roger",
+          lane: "/repo/id-agents",
+          count: 6,
+          item_ids: rogerIds.slice(0, 5),
+          online_alternatives: ["regina"],
+          recommended_action: "reroute roger rows to regina or restart roger",
+        },
+        {
+          target_agent: "brunel",
+          lane: "/repo/kapelle-site",
+          count: 2,
+          item_ids: brunelIds,
+          online_alternatives: [],
+          recommended_action: "restart brunel or downclassify stale target pins",
+        },
+      ],
+    });
+  });
+
   it("persists enough zero-admit audit detail for stale target-unhealthy ready rows", async () => {
     await setMode(adapter, "default", "running");
     const staleA = await insertBacklogItem(adapter, {

@@ -237,19 +237,7 @@ export function mountContinuousOrchestrationRoutes(app: Application, opts: Orche
       );
       const health = await readOrchestrationHealthProjection(adapter, teamId, {
         minReadyFuel: config.min_ready_fuel,
-        readyAdmission: {
-          rawReady: readyAdmission.candidates,
-          usefulReady: readyAdmission.useful_ready,
-          admissibleNow: readyAdmission.admissible_now,
-          blockerCounts: readyAdmission.blocker_counts,
-          nonAdmitted: readyAdmission.non_admitted.map((item) => ({
-            item_id: item.item_id,
-            code: item.code,
-            to_agent: item.to_agent,
-          })),
-          blockedLanes: readyAdmission.blocked_lanes,
-          recommendedAction: readyAdmission.recommended_action,
-        },
+        readyAdmission: healthReadyAdmissionOptions(readyAdmission),
       });
       let killSwitch = false;
       try {
@@ -317,7 +305,11 @@ export function mountContinuousOrchestrationRoutes(app: Application, opts: Orche
 
   app.get("/orchestration/health", async (_req: Request, res: Response) => {
     try {
-      res.json(await readOrchestrationHealthProjection(adapter, teamId));
+      const readyAdmission = await daemon.explainReadyAdmission();
+      res.json(await readOrchestrationHealthProjection(adapter, teamId, {
+        minReadyFuel: config.min_ready_fuel,
+        readyAdmission: healthReadyAdmissionOptions(readyAdmission),
+      }));
     } catch (err) {
       res.status(500).json({ ok: false, error: err instanceof Error ? err.message : String(err) });
     }
@@ -881,4 +873,22 @@ export function mountContinuousOrchestrationRoutes(app: Application, opts: Orche
       res.status(500).json({ ok: false, error: err instanceof Error ? err.message : String(err) });
     }
   });
+}
+
+function healthReadyAdmissionOptions(readyAdmission: ReadyAdmissionExplanation) {
+  return {
+    rawReady: readyAdmission.candidates,
+    usefulReady: readyAdmission.useful_ready,
+    admissibleNow: readyAdmission.admissible_now,
+    blockerCounts: readyAdmission.blocker_counts,
+    nonAdmitted: readyAdmission.non_admitted.map((item) => ({
+      item_id: item.item_id,
+      code: item.code,
+      to_agent: item.to_agent,
+      last_dispatch_phid: item.target_unhealthy_receipt?.prior_dispatch_evidence.last_dispatch_phid ?? null,
+    })),
+    blockedLanes: readyAdmission.blocked_lanes,
+    targetUnhealthyGroups: readyAdmission.target_unhealthy_groups,
+    recommendedAction: readyAdmission.recommended_action,
+  };
 }

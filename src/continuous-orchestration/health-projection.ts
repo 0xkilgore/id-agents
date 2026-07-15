@@ -116,6 +116,10 @@ export interface OrchestrationReadyItemBlockerProjection {
   actionable: number;
   min_ready_fuel: number;
   admissible_now: number | null;
+  target_unhealthy: {
+    count: number;
+    top_blockers: OrchestrationTargetUnhealthyBlocker[];
+  };
   stale_ready_floor: boolean;
   blocked_lanes: OrchestrationReadyAdmissionBlockedLane[];
   recommended_action: string;
@@ -143,6 +147,15 @@ export interface OrchestrationReadyItemBlockerProjection {
     recommended_action: string;
   }>;
   items: OrchestrationReadyItemBlockerDetail[];
+}
+
+export interface OrchestrationTargetUnhealthyBlocker {
+  target_agent: string;
+  lane: string;
+  count: number;
+  item_ids: string[];
+  online_alternatives: string[];
+  recommended_action: string;
 }
 
 export interface OrchestrationReadyAdmissionBlockedLane {
@@ -275,6 +288,15 @@ interface ReadyAdmissionNonAdmittedSummary {
   last_dispatch_phid?: string | null;
 }
 
+interface ReadyAdmissionTargetUnhealthyGroupSummary {
+  target: string;
+  lane: string;
+  count: number;
+  proposed_healthy_target?: string | null;
+  examples?: Array<{ item_id: string }>;
+  recommended_action?: string;
+}
+
 interface OrchestrationHealthProjectionOptions {
   recentLimit?: number;
   minReadyFuel?: number;
@@ -285,6 +307,7 @@ interface OrchestrationHealthProjectionOptions {
     blockerCounts: ReadyAdmissionBlockerSummary[];
     nonAdmitted: ReadyAdmissionNonAdmittedSummary[];
     blockedLanes?: OrchestrationReadyAdmissionBlockedLane[];
+    targetUnhealthyGroups?: ReadyAdmissionTargetUnhealthyGroupSummary[];
     recommendedAction?: string;
   };
 }
@@ -624,6 +647,7 @@ async function readReadyItemBlockerProjection(
   }
 
   const categoryValues = [...categories.values()].sort(sortBlockerCounts);
+  const targetUnhealthy = targetUnhealthyProjection(opts.readyAdmission);
   const staleReadyFuel = staleReadyFuelProjection({
     ready: rows.length,
     actionable,
@@ -639,6 +663,7 @@ async function readReadyItemBlockerProjection(
     actionable,
     min_ready_fuel: minReadyFuel,
     admissible_now: admissibleNow,
+    target_unhealthy: targetUnhealthy,
     stale_ready_floor: staleReadyFuel.active,
     blocked_lanes: opts.readyAdmission?.blockedLanes ?? [],
     recommended_action: recommendedAction,
@@ -646,6 +671,28 @@ async function readReadyItemBlockerProjection(
     categories: categoryValues,
     items: details.sort((a, b) => a.item_id.localeCompare(b.item_id)),
   };
+}
+
+function targetUnhealthyProjection(
+  readyAdmission: OrchestrationHealthProjectionOptions["readyAdmission"] | undefined,
+): OrchestrationReadyItemBlockerProjection["target_unhealthy"] {
+  const targetCount = readyAdmission?.blockerCounts.find((count) => count.code === "target_unhealthy")?.count ?? 0;
+  const topBlockers = (readyAdmission?.targetUnhealthyGroups ?? [])
+    .filter((group) => group.count > 0)
+    .slice(0, 5)
+    .map((group) => ({
+      target_agent: group.target,
+      lane: group.lane,
+      count: group.count,
+      item_ids: uniqueStrings((group.examples ?? []).map((example) => example.item_id)).slice(0, 5),
+      online_alternatives: uniqueStrings([group.proposed_healthy_target ?? ""]),
+      recommended_action:
+        group.recommended_action ??
+        (group.proposed_healthy_target
+          ? `reroute to healthy compatible target ${group.proposed_healthy_target}`
+          : `restore ${group.target} health or reroute to a compatible healthy target`),
+    }));
+  return { count: targetCount, top_blockers: topBlockers };
 }
 
 function readyItemBlockerDetail(
