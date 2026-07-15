@@ -26,6 +26,7 @@ import { ContinuousOrchestrationDaemon, type PoolRouting } from "../../src/conti
 import { defaultConfig, type ContinuousOrchestrationConfig } from "../../src/continuous-orchestration/config.js";
 import { mountContinuousOrchestrationRoutes } from "../../src/continuous-orchestration/routes.js";
 import { AUTO_READY_CONFIDENCE_THRESHOLD } from "../../src/continuous-orchestration/flesh-policy.js";
+import { BACKLOG_RETRY_CAP } from "../../src/continuous-orchestration/backlog-retry-readiness.js";
 import type { BacklogItem, UsageGateView } from "../../src/continuous-orchestration/types.js";
 
 async function freshDb() {
@@ -1083,6 +1084,125 @@ describe("daemon — dry-run vs live", () => {
         stale_duplicate_closeout_receipt_exists: false,
       }),
     ]);
+  });
+
+  it("marks only failed retryable duplicate-dispatch ready rows retry-safe and clears the status blocker", async () => {
+    const retryGuarded = await seedReady(adapter, {
+      title: "retryable duplicate blocker",
+      write_scope: ["repo/retry-guarded"],
+    });
+    await markReadyAlreadyDispatched(adapter, retryGuarded.item_id, "phid:disp-retryable");
+    await seedDispatch(adapter, {
+      dispatch_phid: "phid:disp-retryable",
+      status: "failed",
+      failure_kind: "scheduler_wedged",
+      failure_detail: "stale in_flight claim",
+    });
+
+    const { app, daemon } = mountStatusApp(adapter, {
+      dry_run: true,
+      auto_flesh_enabled: false,
+      auto_promote_enabled: false,
+    });
+    await daemon.setMode("running");
+
+    const before = await callApp(app, "/orchestration/status");
+    expect(before.body.counts.ready_block_reasons.duplicate_dispatch_retry_required).toBe(1);
+
+    const marked = await callAppRequest(app, "POST", `/orchestration/backlog/${retryGuarded.item_id}/mark-retry-safe`, {
+      actor: "substrate-orch-codex",
+      reason: "bounded refire after scheduler_wedged failure",
+    });
+
+    expect(marked.status).toBe(200);
+    expect(marked.body.item).toMatchObject({
+      item_id: retryGuarded.item_id,
+      retry_safe: true,
+      retry_safe_actor: "substrate-orch-codex",
+      retry_safe_reason: "bounded refire after scheduler_wedged failure",
+      dispatch_retry_count: 1,
+    });
+    expect(marked.body.item.retry_safe_marked_at).toEqual(expect.any(String));
+
+    const after = await callApp(app, "/orchestration/status");
+    expect(after.status).toBe(200);
+    expect(after.body.counts.ready_block_reasons.duplicate_dispatch_retry_required).toBe(0);
+    expect(after.body.health.ready_item_blockers.items).not.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          item_id: retryGuarded.item_id,
+          code: "duplicate_dispatch_retry_required",
+        }),
+      ]),
+    );
+  });
+
+  it("refuses to mark terminal prior dispatches retry-safe", async () => {
+    const duplicate = await seedReady(adapter, {
+      title: "done duplicate blocker",
+      write_scope: ["repo/done-duplicate"],
+    });
+    await markReadyAlreadyDispatched(adapter, duplicate.item_id, "phid:disp-done-prior");
+    await seedDispatch(adapter, { dispatch_phid: "phid:disp-done-prior", status: "done" });
+
+    const { app } = mountStatusApp(adapter, {
+      dry_run: true,
+      auto_flesh_enabled: false,
+      auto_promote_enabled: false,
+    });
+
+    const marked = await callAppRequest(app, "POST", `/orchestration/backlog/${duplicate.item_id}/mark-retry-safe`, {
+      actor: "substrate-orch-codex",
+      reason: "try to refire terminal work",
+    });
+
+    expect(marked.status).toBe(409);
+    expect(marked.body).toMatchObject({
+      ok: false,
+      error: "prior_dispatch_not_failed",
+      reason: expect.stringContaining("is done"),
+    });
+    expect((await getBacklogItem(adapter, duplicate.item_id))?.retry_safe).toBe(false);
+  });
+
+  it("refuses to mark retry-safe when the retry count cap is reached", async () => {
+    const duplicate = await seedReady(adapter, {
+      title: "retry cap duplicate blocker",
+      write_scope: ["repo/retry-cap"],
+    });
+    await markReadyAlreadyDispatched(adapter, duplicate.item_id, "phid:disp-cap");
+    await adapter.query(
+      `UPDATE orchestration_backlog_item
+         SET dispatch_retry_count = $1
+       WHERE item_id = $2`,
+      [BACKLOG_RETRY_CAP, duplicate.item_id],
+    );
+    await seedDispatch(adapter, {
+      dispatch_phid: "phid:disp-cap",
+      status: "failed",
+      failure_kind: "scheduler_wedged",
+      failure_detail: "stale in_flight claim",
+    });
+
+    const { app } = mountStatusApp(adapter, {
+      dry_run: true,
+      auto_flesh_enabled: false,
+      auto_promote_enabled: false,
+    });
+
+    const marked = await callAppRequest(app, "POST", `/orchestration/backlog/${duplicate.item_id}/mark-retry-safe`, {
+      actor: "substrate-orch-codex",
+      reason: "bounded refire after retryable failure",
+    });
+
+    expect(marked.status).toBe(409);
+    expect(marked.body).toMatchObject({
+      ok: false,
+      error: "retry_cap_reached",
+      retry_count: BACKLOG_RETRY_CAP,
+      retry_cap: BACKLOG_RETRY_CAP,
+    });
+    expect((await getBacklogItem(adapter, duplicate.item_id))?.retry_safe).toBe(false);
   });
 
   it("status keeps wave48 build-ready floor blocked when raw ready is same-lane or retry-guarded", async () => {

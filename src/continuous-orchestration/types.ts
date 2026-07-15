@@ -142,6 +142,12 @@ export interface BacklogItem {
   last_dispatch_phid: string | null;
   /** Explicit marker allowing a previously-dispatched row to fire again. */
   retry_safe?: boolean;
+  /** Actor who explicitly marked an already-dispatched row retry-safe. */
+  retry_safe_actor?: string | null;
+  /** Operator reason for the bounded retry-safe refire. */
+  retry_safe_reason?: string | null;
+  /** Timestamp when retry_safe was explicitly marked for a bounded refire. */
+  retry_safe_marked_at?: string | null;
   /** Bounded daemon retries after a prior dispatch failed for a known transient. */
   dispatch_retry_count: number;
   /**

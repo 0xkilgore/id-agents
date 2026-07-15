@@ -44,6 +44,9 @@ interface BacklogRow {
   approved_at: string | null;
   last_dispatch_phid: string | null;
   retry_safe: number | null;
+  retry_safe_actor: string | null;
+  retry_safe_reason: string | null;
+  retry_safe_marked_at: string | null;
   dispatch_retry_count: number | null;
   stale_duplicate_closeout_receipt_json: string | null;
   updated_by: string | null;
@@ -95,6 +98,9 @@ export function rowToBacklogItem(r: BacklogRow): BacklogItem {
     approved_at: r.approved_at,
     last_dispatch_phid: r.last_dispatch_phid,
     retry_safe: r.retry_safe === 1,
+    retry_safe_actor: r.retry_safe_actor ?? null,
+    retry_safe_reason: r.retry_safe_reason ?? null,
+    retry_safe_marked_at: r.retry_safe_marked_at ?? null,
     dispatch_retry_count: Number(r.dispatch_retry_count ?? 0),
     stale_duplicate_closeout_receipt: parseStaleDuplicateCloseoutReceipt(r.stale_duplicate_closeout_receipt_json),
     updated_by: r.updated_by,
@@ -563,6 +569,10 @@ export interface DispatchOutcome {
   promotion_result_json: string | null;
 }
 
+export type MarkDuplicateDispatchRetrySafeResult =
+  | { ok: true; item: BacklogItem; retry_count: number }
+  | { ok: false; status: number; error: string; reason: string; item?: BacklogItem; retry_count?: number; retry_cap?: number };
+
 /**
  * Read dispatch details for backlog retry-readiness. Phid-only lookup mirrors
  * getDispatchStatusesByPhid because dispatch phids are globally unique while
@@ -607,6 +617,113 @@ export async function getDispatchOutcomesByPhid(
     });
   }
   return out;
+}
+
+export async function markFailedDuplicateDispatchRetrySafe(
+  adapter: DbAdapter,
+  item_id: string,
+  opts: { actor: string; reason: string; team_id?: string },
+): Promise<MarkDuplicateDispatchRetrySafeResult> {
+  const actor = opts.actor.trim();
+  const reason = opts.reason.trim();
+  if (!actor) return { ok: false, status: 400, error: "actor_required", reason: "actor is required" };
+  if (!reason) return { ok: false, status: 400, error: "reason_required", reason: "reason is required" };
+
+  const item = await getBacklogItem(adapter, item_id);
+  if (!item || (opts.team_id && item.team_id !== opts.team_id)) {
+    return { ok: false, status: 404, error: "not_found", reason: "backlog item not found" };
+  }
+  if (item.readiness_state !== "ready") {
+    return {
+      ok: false,
+      status: 409,
+      error: "not_ready_duplicate_dispatch_row",
+      reason: `cannot mark retry-safe from ${item.readiness_state}`,
+      item,
+    };
+  }
+  if (!item.last_dispatch_phid) {
+    return {
+      ok: false,
+      status: 409,
+      error: "missing_prior_dispatch",
+      reason: "row has no prior dispatch phid",
+      item,
+    };
+  }
+
+  const outcome = (await getDispatchOutcomesByPhid(adapter, [item.last_dispatch_phid])).get(item.last_dispatch_phid);
+  if (!outcome) {
+    return {
+      ok: false,
+      status: 409,
+      error: "prior_dispatch_unreadable",
+      reason: "prior dispatch outcome is not readable",
+      item,
+    };
+  }
+  if (outcome.status !== "failed") {
+    return {
+      ok: false,
+      status: 409,
+      error: "prior_dispatch_not_failed",
+      reason: `prior dispatch ${outcome.dispatch_phid} is ${outcome.status}; retry_safe is only allowed for failed retryable rows`,
+      item,
+    };
+  }
+  if (!dispatchFailureRetryable(outcome)) {
+    return {
+      ok: false,
+      status: 409,
+      error: "prior_dispatch_not_retryable",
+      reason: `prior dispatch ${outcome.dispatch_phid} failed non-transiently (${outcome.failure_kind ?? "unknown"})`,
+      item,
+    };
+  }
+
+  const attempts = Math.max(item.dispatch_retry_count, outcome.recovery_attempts);
+  const retryCap = DEFAULT_RECOVERY_CONFIG.max_attempts;
+  if (attempts >= retryCap) {
+    return {
+      ok: false,
+      status: 409,
+      error: "retry_cap_reached",
+      reason: `retry cap reached (${attempts}/${retryCap})`,
+      item,
+      retry_count: attempts,
+      retry_cap: retryCap,
+    };
+  }
+
+  const now = new Date().toISOString();
+  const nextRetryCount = attempts + 1;
+  await adapter.query(
+    `UPDATE orchestration_backlog_item
+        SET retry_safe = 1,
+            retry_safe_actor = $1,
+            retry_safe_reason = $2,
+            retry_safe_marked_at = $3,
+            dispatch_retry_count = $4,
+            updated_by = $5,
+            updated_at = $6
+      WHERE item_id = $7
+        AND team_id = $8
+        AND readiness_state = 'ready'
+        AND last_dispatch_phid = $9
+        AND COALESCE(retry_safe, 0) = 0`,
+    [actor, reason, now, nextRetryCount, actor, now, item.item_id, item.team_id, item.last_dispatch_phid],
+  );
+  const updated = await getBacklogItem(adapter, item.item_id);
+  if (!updated?.retry_safe) {
+    return {
+      ok: false,
+      status: 409,
+      error: "retry_safe_not_updated",
+      reason: "row changed before retry-safe marker was applied",
+      item: updated ?? item,
+    };
+  }
+  return { ok: true, item: updated, retry_count: nextRetryCount };
 }
 
 /**

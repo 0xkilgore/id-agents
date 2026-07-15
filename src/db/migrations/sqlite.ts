@@ -637,6 +637,9 @@ export async function migrateSqlite(adapter: SqliteAdapter): Promise<void> {
       approved_at        TEXT,
       last_dispatch_phid TEXT,
       retry_safe         INTEGER NOT NULL DEFAULT 0,
+      retry_safe_actor   TEXT,
+      retry_safe_reason  TEXT,
+      retry_safe_marked_at TEXT,
       dispatch_retry_count INTEGER NOT NULL DEFAULT 0,
       stale_duplicate_closeout_receipt_json TEXT,
       updated_by         TEXT,
@@ -737,6 +740,9 @@ export async function migrateSqlite(adapter: SqliteAdapter): Promise<void> {
   // idempotent. See cto/output/2026-06-22-daemon-autonomous-engine-gap-scope.md.
   for (const stmt of [
     `ALTER TABLE orchestration_backlog_item ADD COLUMN retry_safe INTEGER NOT NULL DEFAULT 0`,
+    `ALTER TABLE orchestration_backlog_item ADD COLUMN retry_safe_actor TEXT`,
+    `ALTER TABLE orchestration_backlog_item ADD COLUMN retry_safe_reason TEXT`,
+    `ALTER TABLE orchestration_backlog_item ADD COLUMN retry_safe_marked_at TEXT`,
     `ALTER TABLE orchestration_backlog_item ADD COLUMN dispatch_retry_count INTEGER NOT NULL DEFAULT 0`,
     `ALTER TABLE orchestration_backlog_item ADD COLUMN stale_duplicate_closeout_receipt_json TEXT`,
     `ALTER TABLE orchestration_backlog_item ADD COLUMN flesh_status TEXT NOT NULL DEFAULT 'unfleshed'`,

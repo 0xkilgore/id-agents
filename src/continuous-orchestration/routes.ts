@@ -25,6 +25,7 @@ import {
   listHeldConfidenceReviewItems,
   listFleshLog,
   listRecentDecisions,
+  markFailedDuplicateDispatchRetrySafe,
   promoteToReady,
   reconcileStaleAlreadyDispatchedReadyRows,
   recordFleshOutcome,
@@ -428,6 +429,36 @@ export function mountContinuousOrchestrationRoutes(app: Application, opts: Orche
       const result = await promoteToReady(adapter, id, approvedBy, { retry_safe: body.retry_safe === true });
       if (!result.ok) return res.status(409).json({ ok: false, error: result.reason });
       res.json({ ok: true, item: result.item });
+    } catch (err) {
+      res.status(500).json({ ok: false, error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  app.post("/orchestration/backlog/:id/mark-retry-safe", async (req: Request, res: Response) => {
+    try {
+      const id = String(req.params.id);
+      const body = (req.body ?? {}) as Record<string, unknown>;
+      const actor =
+        typeof body.actor_ref === "string" && body.actor_ref
+          ? body.actor_ref
+          : typeof body.actor === "string" && body.actor
+            ? body.actor
+            : typeof body.updated_by === "string" && body.updated_by
+              ? body.updated_by
+              : "";
+      const reason = typeof body.reason === "string" ? body.reason : "";
+      const result = await markFailedDuplicateDispatchRetrySafe(adapter, id, { actor, reason, team_id: teamId });
+      if (!result.ok) {
+        return res.status(result.status).json({
+          ok: false,
+          error: result.error,
+          reason: result.reason,
+          item: result.item,
+          retry_count: result.retry_count,
+          retry_cap: result.retry_cap,
+        });
+      }
+      res.json({ ok: true, item: result.item, retry_count: result.retry_count });
     } catch (err) {
       res.status(500).json({ ok: false, error: err instanceof Error ? err.message : String(err) });
     }
