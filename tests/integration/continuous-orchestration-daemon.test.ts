@@ -1179,6 +1179,7 @@ describe("daemon — dry-run vs live", () => {
         recommended_disposition: "mark-retry-safe",
         recommended_action: "mark retry_safe only when the operator wants a bounded refire",
         safe_action_copy: expect.stringContaining("retry_safe=true"),
+        safe_action_path: `/orchestration/backlog/${retryGuarded.item_id}/mark-retry-safe`,
         stale_duplicate_closeout_receipt_exists: false,
       }),
     ]);
@@ -1249,6 +1250,7 @@ describe("daemon — dry-run vs live", () => {
       recommended_disposition: "mark-retry-safe",
       recommended_action: "mark retry_safe only when the operator wants a bounded refire",
       safe_action_copy: "Safe action: mark retry_safe=true only after operator approval for a bounded refire; no automatic refire occurs while retry_safe=false.",
+      safe_action_path: `/orchestration/backlog/${retryable.item_id}/mark-retry-safe`,
     });
     expect(byId[stale.item_id]).toMatchObject({
       retry_readiness_status: "stale_duplicate",
@@ -1257,6 +1259,7 @@ describe("daemon — dry-run vs live", () => {
       recommended_disposition: "close",
       recommended_action: "close or supersede the stale duplicate row; do not mark it retry-safe",
       safe_action_copy: "Safe action: close or supersede this stale duplicate row; do not mark retry_safe and do not refire.",
+      safe_action_path: null,
     });
     expect(byId[live.item_id]).toMatchObject({
       retry_readiness_status: "waiting_on_live_dispatch",
@@ -1265,6 +1268,7 @@ describe("daemon — dry-run vs live", () => {
       recommended_disposition: "supersede",
       recommended_action: "hold the row and wait for the prior dispatch, or supersede it after operator review",
       safe_action_copy: "Safe action: wait on the live prior dispatch or supersede after operator review; do not refire while the prior dispatch is live or unreadable.",
+      safe_action_path: null,
     });
     expect(byId[nonRetryable.item_id]).toMatchObject({
       retry_readiness_status: "non_retryable_failed_row",
@@ -1273,6 +1277,7 @@ describe("daemon — dry-run vs live", () => {
       recommended_disposition: "supersede",
       recommended_action: "close or supersede the stale duplicate row; do not mark it retry-safe",
       safe_action_copy: "Safe action: operator review required; supersede or replace the row instead of marking retry_safe.",
+      safe_action_path: null,
     });
     expect(res.body.health.ready_item_blockers.stale_ready_fuel.reason).not.toContain("empty fuel");
     expect(res.body.health.ready_item_blockers.recommended_action).not.toContain("ready for Chris");
@@ -1291,17 +1296,43 @@ describe("daemon — dry-run vs live", () => {
       failure_detail: "stale in_flight claim",
     });
 
-    const { app, daemon } = mountStatusApp(adapter, {
-      dry_run: true,
-      auto_flesh_enabled: false,
-      auto_promote_enabled: false,
-    });
+    const fired: BacklogItem[] = [];
+    const { app, daemon } = mountStatusApp(
+      adapter,
+      {
+        dry_run: false,
+        auto_flesh_enabled: false,
+        auto_promote_enabled: false,
+        max_in_flight: 5,
+        max_new_per_tick: 5,
+      },
+      {
+        enqueue: async (item) => {
+          fired.push(item);
+          return { dispatch_phid: `phid:disp-refired-${item.item_id}`, query_id: `q_refired_${item.item_id}` };
+        },
+      },
+    );
     await daemon.setMode("running");
 
     const before = await callApp(app, "/orchestration/status");
     expect(before.body.counts.ready_block_reasons.duplicate_dispatch_retry_required).toBe(1);
+    expect(before.body.health.ready_item_blockers.items).toEqual([
+      expect.objectContaining({
+        item_id: retryGuarded.item_id,
+        prior_dispatch_id: "phid:disp-retryable",
+        retry_safe_recommendation: "set_true",
+        operator_disposition: "retry",
+        recommended_disposition: "mark-retry-safe",
+        safe_action_path: `/orchestration/backlog/${retryGuarded.item_id}/mark-retry-safe`,
+      }),
+    ]);
 
-    const marked = await callAppRequest(app, "POST", `/orchestration/backlog/${retryGuarded.item_id}/mark-retry-safe`, {
+    const held = await daemon.runTick();
+    expect(held.admitted).toEqual([]);
+    expect(fired).toHaveLength(0);
+
+    const marked = await callAppRequest(app, "POST", before.body.health.ready_item_blockers.items[0].safe_action_path, {
       actor: "substrate-orch-codex",
       reason: "bounded refire after scheduler_wedged failure",
     });

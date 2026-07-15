@@ -161,6 +161,7 @@ export interface OrchestrationReadyItemBlockerDetail {
   operator_disposition: DuplicateDispatchRetryOperatorDisposition | null;
   recommended_disposition: DuplicateDispatchRetryDisposition | null;
   safe_action_copy: string | null;
+  safe_action_path: string | null;
   stale_duplicate_closeout_receipt_exists: boolean;
   provider_runtime_repair: OrchestrationProviderRuntimeRepairSuggestion | null;
 }
@@ -608,6 +609,9 @@ function readyItemBlockerDetail(
     operator_disposition: duplicateDisposition?.operator_disposition ?? null,
     recommended_disposition: duplicateDisposition?.recommended_disposition ?? null,
     safe_action_copy: retryReadiness ? duplicateDispatchSafeActionCopy(retryReadiness) : null,
+    safe_action_path: duplicateDisposition?.retry_safe_recommendation === "set_true"
+      ? `/orchestration/backlog/${encodeURIComponent(row.item_id)}/mark-retry-safe`
+      : null,
     stale_duplicate_closeout_receipt_exists: !!row.stale_duplicate_closeout_receipt_json,
     provider_runtime_repair: providerRuntimeRepair,
   };
