@@ -57,7 +57,7 @@ export function duplicateDispatchRetryReceipt(
     };
   }
 
-  if (outcome.status === "cancelled" || outcome.status === "moot") {
+  if (outcome.status === "cancelled" || outcome.status === "moot" || outcome.status === "superseded") {
     return {
       ...base,
       next_action: "supersede_duplicate_row",

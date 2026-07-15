@@ -68,6 +68,7 @@ export function deriveBacklogRetryReadiness(
   if (
     outcome.status === "done" ||
     outcome.status === "moot" ||
+    outcome.status === "superseded" ||
     outcome.status === "cancelled" ||
     promotionCompletedAndVerified(outcome.promotion_result_json)
   ) {

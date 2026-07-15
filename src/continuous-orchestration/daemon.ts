@@ -1994,10 +1994,14 @@ async function buildAutoPromoteOperatorSummary(
     );
   }
   if (retryableFailedRows > 0) {
-    safeActions.push("Manually /promote retryable failed rows only after confirming the retry_safe gate.");
+    safeActions.push(
+      "For retryable failed duplicate rows, use the explicit retry_safe=true gate before a bounded refire; do not auto-refire.",
+    );
   }
   if (staleDuplicateRows > 0) {
-    safeActions.push("Close stale duplicate rows whose prior dispatch already landed or was superseded; do not refire them.");
+    safeActions.push(
+      "For stale duplicate rows whose prior dispatch is done, moot, or superseded, close them with a stale_duplicate_closeout_receipt; do not refire.",
+    );
   }
   if (confidenceHeldRows > 0) {
     safeActions.push("Re-flesh confidence-held rows or manually approve them after review.");
@@ -2117,7 +2121,7 @@ function alreadyDispatchedStatusCounts(
   for (const item of skipped) {
     if (!item.reasons.some((reason) => autoPromoteBlockerClass(reason) === "already_dispatched")) continue;
     const status = item.prior_dispatch_status;
-    if (status === "done" || status === "moot" || status === "cancelled") done += 1;
+    if (status === "done" || status === "moot" || status === "cancelled" || status === "superseded") done += 1;
     else if (status === "failed") retryable += 1;
     else unknown += 1;
   }
@@ -2216,13 +2220,13 @@ function nextAutoPromoteAction(args: {
       if (args.priorDispatchStatusCounts) {
         const { done, retryable, unknown } = args.priorDispatchStatusCounts;
         if (done > 0 && retryable === 0 && unknown === 0) {
-          return { code: "close_stale_already_dispatched_rows", summary: "close stale already-dispatched rows whose prior dispatch is terminal done" };
+          return { code: "close_stale_already_dispatched_rows", summary: "close stale already-dispatched rows with stale_duplicate_closeout_receipt when prior dispatch is done, moot, or superseded" };
         }
         if (done === 0 && retryable > 0 && unknown === 0) {
-          return { code: "manual_promote_safe_retries", summary: "manually /promote safe retry rows after reviewing the prior failed or unresolved dispatch" };
+          return { code: "manual_promote_safe_retries", summary: "mark retry_safe=true only for an intentional bounded refire of retryable failed rows" };
         }
       }
-      return { code: "manual_promote_or_close_already_dispatched", summary: "manually /promote safe retries or close stale already-dispatched rows" };
+      return { code: "manual_promote_or_close_already_dispatched", summary: "close stale duplicates with stale_duplicate_closeout_receipt or mark retry_safe=true only for bounded retryable failed refires" };
     case "review_held_risk":
       return { code: "approve_review_held_risk", summary: "review and explicitly approve held risk classes; auto-promote only moves build risk" };
     case "blocked_dependencies":

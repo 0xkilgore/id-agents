@@ -2640,7 +2640,7 @@ describe("daemon — dry-run vs live", () => {
     );
     expect(res.body.auto_promote_health.summary).toMatch(/blocker classes:/);
     expect(res.body.auto_promote_health.summary).toMatch(/already_dispatched=1/);
-    expect(res.body.auto_promote_health.summary).toMatch(/next: manually \/promote safe retries or close stale already-dispatched rows/);
+    expect(res.body.auto_promote_health.summary).toMatch(/next: close stale duplicates with stale_duplicate_closeout_receipt or mark retry_safe=true/);
   });
 
   it("status separates raw ready, useful ready, admissible-now, lanes, and top blockers", async () => {
@@ -2799,14 +2799,14 @@ describe("daemon — dry-run vs live", () => {
       skipped_count: 2,
       next_action: {
         code: "manual_promote_or_close_already_dispatched",
-        summary: "manually /promote safe retries or close stale already-dispatched rows",
+        summary: "close stale duplicates with stale_duplicate_closeout_receipt or mark retry_safe=true only for bounded retryable failed refires",
       },
     });
     expect(res.body.auto_promote_health.blocker_class_counts).toEqual([
       expect.objectContaining({ class: "already_dispatched", count: 2 }),
     ]);
-    expect(res.body.auto_promote_health.summary).toMatch(/close stale already-dispatched rows/);
-    expect(res.body.auto_promote_health.summary).toMatch(/manually \/promote safe retries/);
+    expect(res.body.auto_promote_health.summary).toMatch(/stale_duplicate_closeout_receipt/);
+    expect(res.body.auto_promote_health.summary).toMatch(/retry_safe=true/);
     expect(res.body.auto_promote_health.summary).not.toMatch(/author new lane-diverse rows/);
   });
 
@@ -2938,7 +2938,7 @@ describe("daemon — dry-run vs live", () => {
     expect(res.body.auto_promote_health.operator_summary.summary).not.toMatch(/empty fuel/i);
     expect(res.body.auto_promote_health.operator_summary.safe_actions).toEqual(
       expect.arrayContaining([
-        expect.stringMatching(/manually \/promote retryable failed rows/i),
+        expect.stringMatching(/explicit retry_safe=true gate/i),
         expect.stringMatching(/re-flesh confidence-held rows/i),
         expect.stringMatching(/gated fuel; rows exist/i),
       ]),
@@ -3021,7 +3021,7 @@ describe("daemon — dry-run vs live", () => {
     expect(res.body.auto_promote_health.operator_summary.summary).not.toMatch(/empty fuel/i);
     expect(res.body.auto_promote_health.operator_summary.safe_actions).toEqual(
       expect.arrayContaining([
-        expect.stringMatching(/manually \/promote retryable failed rows/i),
+        expect.stringMatching(/explicit retry_safe=true gate/i),
         expect.stringMatching(/re-flesh confidence-held rows/i),
         expect.stringMatching(/gated fuel; rows exist/i),
       ]),
@@ -3086,7 +3086,7 @@ describe("daemon — dry-run vs live", () => {
     );
     expect(res.body.auto_promote_health.summary).toMatch(/ready=1 floor=4, lanes=1\/3/);
     expect(res.body.auto_promote_health.summary).toMatch(/blocker classes:/);
-    expect(res.body.auto_promote_health.summary).toMatch(/next: manually \/promote safe retries or close stale already-dispatched rows/);
+    expect(res.body.auto_promote_health.summary).toMatch(/next: close stale duplicates with stale_duplicate_closeout_receipt or mark retry_safe=true/);
     expect(res.body.flesh.auto_promote.health.next_action).toEqual(res.body.auto_promote_health.next_action);
   });
 
@@ -3141,7 +3141,7 @@ describe("daemon — dry-run vs live", () => {
     expect(res.status).toBe(200);
     expect(res.body.auto_promote_health.next_action).toMatchObject({
       code: "manual_promote_safe_retries",
-      summary: expect.stringMatching(/manually \/promote safe retry rows/i),
+      summary: expect.stringMatching(/retry_safe=true.*bounded refire/i),
     });
     expect(res.body.auto_promote_health.skipped_items).toEqual([
       expect.objectContaining({
@@ -3151,7 +3151,7 @@ describe("daemon — dry-run vs live", () => {
       }),
     ]);
     expect(res.body.auto_promote_health.summary).toMatch(/already-dispatched statuses: done=0, retryable=1, unknown=0/);
-    expect(res.body.auto_promote_health.summary).toMatch(/next: manually \/promote safe retry rows/i);
+    expect(res.body.auto_promote_health.summary).toMatch(/next: mark retry_safe=true only for an intentional bounded refire/i);
   });
 
   it("status recommends authoring new lane-diverse rows for true confidence-held candidates", async () => {
@@ -3731,6 +3731,18 @@ describe("stale already-dispatched ready reconciliation route", () => {
       write_scope: ["repo/superseded"],
       source_refs: ["roadmap:t-orch:superseded"],
     });
+    const moot = await seedReady(adapter, {
+      title: "terminal moot duplicate",
+      track: "T-ORCH",
+      write_scope: ["repo/moot"],
+      source_refs: ["roadmap:t-orch:moot"],
+    });
+    const priorSuperseded = await seedReady(adapter, {
+      title: "terminal superseded duplicate",
+      track: "T-ORCH",
+      write_scope: ["repo/prior-superseded"],
+      source_refs: ["roadmap:t-orch:prior-superseded"],
+    });
     const retry = await seedReady(adapter, {
       title: "operator-approved unsafe retry",
       write_scope: ["repo/retry"],
@@ -3739,6 +3751,8 @@ describe("stale already-dispatched ready reconciliation route", () => {
 
     await markReadyAlreadyDispatched(adapter, closed.item_id, "phid:disp-closed");
     await markReadyAlreadyDispatched(adapter, superseded.item_id, "phid:disp-superseded");
+    await markReadyAlreadyDispatched(adapter, moot.item_id, "phid:disp-moot");
+    await markReadyAlreadyDispatched(adapter, priorSuperseded.item_id, "phid:disp-prior-superseded");
     await markReadyAlreadyDispatched(adapter, retry.item_id, "phid:disp-retry", { retry_safe: true });
     await seedDispatch(adapter, {
       dispatch_phid: "phid:disp-closed",
@@ -3749,6 +3763,17 @@ describe("stale already-dispatched ready reconciliation route", () => {
       dispatch_phid: "phid:disp-superseded",
       status: "failed",
       artifact_path: "/repo/output/superseded.md",
+    });
+    await seedDispatch(adapter, {
+      dispatch_phid: "phid:disp-moot",
+      status: "failed",
+      recovery_status: "moot",
+      artifact_path: "/repo/output/moot.md",
+    });
+    await seedDispatch(adapter, {
+      dispatch_phid: "phid:disp-prior-superseded",
+      status: "superseded",
+      artifact_path: "/repo/output/prior-superseded.md",
     });
     await seedDispatch(adapter, {
       dispatch_phid: "phid:disp-retry",
@@ -3766,16 +3791,16 @@ describe("stale already-dispatched ready reconciliation route", () => {
 
     const before = await callApp(app, "/orchestration/status");
     expect(before.status).toBe(200);
-    expect(before.body.counts.ready).toBe(3);
-    expect(before.body.ready_admission.candidates).toBe(3);
+    expect(before.body.counts.ready).toBe(5);
+    expect(before.body.ready_admission.candidates).toBe(5);
 
     const res = await callAppRequest(app, "POST", "/orchestration/reconcile/stale-ready", { actor: "hopper" });
 
     expect(res.status).toBe(200);
     expect(res.body.result).toMatchObject({
-      scanned: 3,
+      scanned: 5,
       closed: 1,
-      superseded: 1,
+      superseded: 3,
       preserved_retry_safe: 1,
       dry_run: false,
     });
@@ -3820,11 +3845,37 @@ describe("stale already-dispatched ready reconciliation route", () => {
             }),
           }),
         }),
+        expect.objectContaining({
+          item_id: moot.item_id,
+          dispatch_phid: "phid:disp-moot",
+          to_state: "superseded",
+          artifact_path: "/repo/output/moot.md",
+          receipt: expect.objectContaining({
+            closed_by: "hopper",
+            next_action: "supersede_duplicate_row",
+            prior_dispatch_phid: "phid:disp-moot",
+            prior_dispatch_status: "moot",
+          }),
+        }),
+        expect.objectContaining({
+          item_id: priorSuperseded.item_id,
+          dispatch_phid: "phid:disp-prior-superseded",
+          to_state: "superseded",
+          artifact_path: "/repo/output/prior-superseded.md",
+          receipt: expect.objectContaining({
+            closed_by: "hopper",
+            next_action: "supersede_duplicate_row",
+            prior_dispatch_phid: "phid:disp-prior-superseded",
+            prior_dispatch_status: "superseded",
+          }),
+        }),
       ]),
     );
 
     const closedAfter = (await getBacklogItem(adapter, closed.item_id))!;
     const supersededAfter = (await getBacklogItem(adapter, superseded.item_id))!;
+    const mootAfter = (await getBacklogItem(adapter, moot.item_id))!;
+    const priorSupersededAfter = (await getBacklogItem(adapter, priorSuperseded.item_id))!;
     const retryAfter = (await getBacklogItem(adapter, retry.item_id))!;
     expect(closedAfter.readiness_state).toBe("done");
     expect(closedAfter.updated_by).toBe("hopper");
@@ -3863,6 +3914,20 @@ describe("stale already-dispatched ready reconciliation route", () => {
       },
     });
     expect(supersededAfter.source_refs).toContain("dispatch_artifact:/repo/output/superseded.md");
+    expect(mootAfter.readiness_state).toBe("superseded");
+    expect(mootAfter.stale_duplicate_closeout_receipt).toMatchObject({
+      prior_dispatch_phid: "phid:disp-moot",
+      prior_dispatch_status: "moot",
+      redispatch_safety: { safe_to_not_redispatch: true },
+    });
+    expect(mootAfter.source_refs).toContain("dispatch_artifact:/repo/output/moot.md");
+    expect(priorSupersededAfter.readiness_state).toBe("superseded");
+    expect(priorSupersededAfter.stale_duplicate_closeout_receipt).toMatchObject({
+      prior_dispatch_phid: "phid:disp-prior-superseded",
+      prior_dispatch_status: "superseded",
+      redispatch_safety: { safe_to_not_redispatch: true },
+    });
+    expect(priorSupersededAfter.source_refs).toContain("dispatch_artifact:/repo/output/prior-superseded.md");
     expect(retryAfter.readiness_state).toBe("ready");
     expect(retryAfter.retry_safe).toBe(true);
     expect(retryAfter.stale_duplicate_closeout_receipt).toBeNull();

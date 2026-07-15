@@ -112,6 +112,8 @@ async function stateCounts() {
 describe("GET /orchestration/backlog/stale-duplicates", () => {
   it("lists only open already-dispatched rows with terminal prior dispatches and safe closeout payloads", async () => {
     await seedDispatch({ phid: "phid:done", status: "done" });
+    await seedDispatch({ phid: "phid:moot", status: "failed", recovery_status: "moot" });
+    await seedDispatch({ phid: "phid:superseded", status: "superseded" });
     await seedDispatch({ phid: "phid:cancelled", status: "cancelled" });
     await seedDispatch({
       phid: "phid:failed-promoted",
@@ -121,6 +123,8 @@ describe("GET /orchestration/backlog/stale-duplicates", () => {
     await seedDispatch({ phid: "phid:live", status: "in_flight" });
 
     const done = await seedBacklog({ title: "done duplicate", state: "needs_review", phid: "phid:done" });
+    const moot = await seedBacklog({ title: "moot duplicate", state: "ready", phid: "phid:moot" });
+    const superseded = await seedBacklog({ title: "superseded duplicate", state: "ready", phid: "phid:superseded" });
     const cancelled = await seedBacklog({ title: "cancelled duplicate", state: "ready", phid: "phid:cancelled" });
     const promoted = await seedBacklog({ title: "verified promotion duplicate", state: "needs_review", phid: "phid:failed-promoted" });
     await seedBacklog({ title: "live dispatch", state: "needs_review", phid: "phid:live" });
@@ -136,8 +140,8 @@ describe("GET /orchestration/backlog/stale-duplicates", () => {
     expect(r.body.report).toMatchObject({
       schema_version: "orchestration.stale_duplicate_backlog_report.v1",
       dry_run: true,
-      scanned: 5,
-      count: 3,
+      scanned: 7,
+      count: 5,
     });
     expect(after).toEqual(before);
 
@@ -157,6 +161,24 @@ describe("GET /orchestration/backlog/stale-duplicates", () => {
       recommended_action: "mark_superseded",
       safe_closeout_payload: {
         expected_last_dispatch_phid: "phid:cancelled",
+        from_state: "ready",
+        to_state: "superseded",
+      },
+    });
+    expect(byId[moot.item_id]).toMatchObject({
+      prior_terminal_status: "moot",
+      recommended_action: "mark_superseded",
+      safe_closeout_payload: {
+        expected_last_dispatch_phid: "phid:moot",
+        from_state: "ready",
+        to_state: "superseded",
+      },
+    });
+    expect(byId[superseded.item_id]).toMatchObject({
+      prior_terminal_status: "superseded",
+      recommended_action: "mark_superseded",
+      safe_closeout_payload: {
+        expected_last_dispatch_phid: "phid:superseded",
         from_state: "ready",
         to_state: "superseded",
       },

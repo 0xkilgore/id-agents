@@ -33,7 +33,7 @@ export interface DuplicateDispatchRetryClassificationReport {
 }
 
 const TERMINAL_CLOSE_STATUSES = new Set(["done"]);
-const TERMINAL_SUPERSEDE_STATUSES = new Set(["cancelled", "moot"]);
+const TERMINAL_SUPERSEDE_STATUSES = new Set(["cancelled", "moot", "superseded"]);
 
 export function buildDuplicateDispatchRetryClassificationReport(
   items: BacklogItem[],

@@ -117,6 +117,7 @@ describe("GET /orchestration/backlog/duplicate-dispatch-retry-blockers", () => {
   it("classifies terminal, non-terminal, and retry-safe duplicate ready blockers without mutating", async () => {
     await seedDispatch({ phid: "phid:done", status: "done" });
     await seedDispatch({ phid: "phid:cancelled", status: "cancelled" });
+    await seedDispatch({ phid: "phid:superseded", status: "superseded" });
     await seedDispatch({ phid: "phid:in-flight", status: "in_flight" });
     await seedDispatch({
       phid: "phid:retryable",
@@ -132,6 +133,7 @@ describe("GET /orchestration/backlog/duplicate-dispatch-retry-blockers", () => {
 
     const done = await seedReadyBlocker({ title: "done duplicate", phid: "phid:done" });
     const cancelled = await seedReadyBlocker({ title: "cancelled duplicate", phid: "phid:cancelled", to_agent: "hopper" });
+    const superseded = await seedReadyBlocker({ title: "superseded duplicate", phid: "phid:superseded" });
     const live = await seedReadyBlocker({ title: "live duplicate", phid: "phid:in-flight" });
     const retryable = await seedReadyBlocker({ title: "retryable duplicate", phid: "phid:retryable" });
     const promoted = await seedReadyBlocker({ title: "promoted duplicate", phid: "phid:promoted" });
@@ -147,8 +149,8 @@ describe("GET /orchestration/backlog/duplicate-dispatch-retry-blockers", () => {
     expect(r.body.report).toMatchObject({
       schema_version: "orchestration.duplicate_dispatch_retry_classification.v2",
       dry_run: true,
-      scanned: 6,
-      count: 5,
+      scanned: 7,
+      count: 6,
     });
     expect(after).toEqual(before);
 
@@ -174,6 +176,13 @@ describe("GET /orchestration/backlog/duplicate-dispatch-retry-blockers", () => {
       retry_safe_recommendation: "leave_false",
       recommended_disposition: "supersede",
       owner: "hopper",
+    });
+    expect(byId[superseded.item_id]).toMatchObject({
+      prior_dispatch_id: "phid:superseded",
+      prior_dispatch_status: "superseded",
+      operator_disposition: "close",
+      retry_safe_recommendation: "leave_false",
+      recommended_disposition: "supersede",
     });
     expect(byId[live.item_id]).toMatchObject({
       prior_dispatch_id: "phid:in-flight",

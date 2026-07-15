@@ -46,7 +46,7 @@ export interface StaleDuplicateBacklogReport {
 type ReportableReadinessState = "needs_review" | "ready";
 
 const REPORTABLE_STATES = new Set<ReadinessState>(["needs_review", "ready"]);
-const TERMINAL_STATUSES = new Set(["done", "cancelled", "moot"]);
+const TERMINAL_STATUSES = new Set(["done", "cancelled", "moot", "superseded"]);
 
 function isReportableState(state: ReadinessState): state is ReportableReadinessState {
   return REPORTABLE_STATES.has(state);

@@ -826,7 +826,7 @@ export interface StaleReadyReconcileResult {
   }>;
 }
 
-const READY_RECONCILE_TERMINAL_STATUSES = new Set(["done", "failed", "cancelled", "moot"]);
+const READY_RECONCILE_TERMINAL_STATUSES = new Set(["done", "failed", "cancelled", "moot", "superseded"]);
 const OFFLINE_AGENT_STATUSES = new Set(["stopped", "offline", "deleted", "unhealthy", "error"]);
 
 function appendSourceRefs(sourceRefsJson: string, refsToAppend: Array<string | null>): string {

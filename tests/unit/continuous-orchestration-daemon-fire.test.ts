@@ -381,7 +381,7 @@ describe("empty auto-promote pipe alert", () => {
     ]);
     expect(status.next_action).toEqual({
       code: "manual_promote_safe_retries",
-      summary: "manually /promote safe retry rows after reviewing the prior failed or unresolved dispatch",
+      summary: "mark retry_safe=true only for an intentional bounded refire of retryable failed rows",
     });
   });
 
