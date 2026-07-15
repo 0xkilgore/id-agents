@@ -1967,6 +1967,111 @@ describe("daemon — dry-run vs live", () => {
     ]);
   });
 
+  it("status names Wave66 target-unhealthy blockers with healthy backend-pool reroute recommendations", async () => {
+    for (const name of ["substrate-api-codex", "brunel", "coder-max", "eames"]) {
+      await seedAgent(adapter, name, "pending", name === "substrate-api-codex" ? "codex" : "claude-code-cli");
+    }
+    await seedAgent(adapter, "roger", "running", "codex");
+    await seedAgent(adapter, "substrate-orch-codex", "running", "codex");
+
+    const blocked = [];
+    for (const target of ["substrate-api-codex", "brunel", "coder-max", "eames"]) {
+      blocked.push(
+        await seedReady(adapter, {
+          title: `Wave66 ${target} offline blocker`,
+          to_agent: target,
+          write_scope: [`/repo/wave66/${target}`],
+          priority: 1,
+        }),
+      );
+    }
+    await seedReady(adapter, {
+      title: "Wave66 backend pool alternate A",
+      to_agent: "pool:backend",
+      write_scope: ["/repo/backend/a"],
+      priority: 5,
+    });
+    await seedReady(adapter, {
+      title: "Wave66 backend pool alternate B",
+      to_agent: "pool:backend",
+      write_scope: ["/repo/backend/b"],
+      priority: 5,
+    });
+
+    const pools: PoolRouting = {
+      poolForItem: (item) =>
+        item.to_agent === "pool:backend"
+          ? {
+              pool_id: "backend",
+              repo_root: "/repo/backend",
+              max_parallel: 2,
+              members: ["substrate-api-codex", "brunel", "coder-max", "eames", "roger", "substrate-orch-codex"],
+            }
+          : null,
+      availableBuilders: (pool) => pool.members,
+      allocateWorktree: async ({ agent, item, pool }) => ({
+        path: `${pool.repo_root}/.worktrees/${agent}-${item.item_id.slice(-6)}`,
+        branch: `build/${agent}-${item.item_id.slice(-6)}`,
+        lease_id: null,
+      }),
+    };
+    const { app, daemon } = mountStatusApp(
+      adapter,
+      {
+        dry_run: true,
+        auto_flesh_enabled: false,
+        auto_promote_enabled: false,
+        min_ready_fuel: 12,
+        max_in_flight: 20,
+        max_new_per_tick: 20,
+      },
+      {
+        pools,
+        resolveAgentHealth: (names) => getHealthyAgentNames(adapter, names),
+        resolveAgentRuntimes: (names) => getAgentRuntimeMap(adapter, names),
+      },
+    );
+    await daemon.setMode("running");
+
+    const res = await callApp(app, "/orchestration/status");
+
+    expect(res.status).toBe(200);
+    expect(res.body.counts).toMatchObject({
+      raw_ready_fuel: 6,
+      useful_ready_fuel: 2,
+      admissible_now: 2,
+    });
+    expect(res.body.ready_admission.blocker_counts).toEqual([
+      { code: "target_unhealthy", category: "runtime_unavailable", count: 4 },
+    ]);
+    for (const item of blocked) {
+      expect(res.body.ready_admission.non_admitted).toContainEqual(
+        expect.objectContaining({
+          item_id: item.item_id,
+          title: item.title,
+          to_agent: item.to_agent,
+          code: "target_unhealthy",
+          action: "held",
+          metadata: expect.objectContaining({
+            target: item.to_agent,
+            unhealthy_target: item.to_agent,
+            healthy_alternate_owner: "roger",
+            healthy_alternate_pool: "backend",
+            recommended_action: "reroute to roger via pool:backend",
+          }),
+        }),
+      );
+    }
+    expect(res.body.ready_admission.admissible.map((item: any) => item.title).sort()).toEqual([
+      "Wave66 backend pool alternate A",
+      "Wave66 backend pool alternate B",
+    ]);
+    expect(res.body.ready_admission.admissible.map((item: any) => item.to_agent).sort()).toEqual([
+      "roger",
+      "substrate-orch-codex",
+    ]);
+  });
+
   it("status treats raw-ready-above-floor target-unhealthy and duplicate retry rows as useful-ready below floor without adding filler", async () => {
     await seedAgent(adapter, "gaudi", "pending", "claude-code-cli");
     await seedAgent(adapter, "eames", "running", "claude-code-cli");

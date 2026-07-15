@@ -129,6 +129,29 @@ function nonAdmission(
   return { item_id, action, reason, metadata: { code, class: reasonClass(code), ...extra } };
 }
 
+function healthyAlternateRecommendation(
+  target: string,
+  ctx: AdmissionContext,
+): Record<string, unknown> {
+  for (const [poolId, builders] of ctx.pool_free_builders ?? []) {
+    const alternate = builders.find((agent) => agent !== target && (ctx.healthy_agents == null || ctx.healthy_agents.has(agent)));
+    if (alternate) {
+      return {
+        unhealthy_target: target,
+        healthy_alternate_owner: alternate,
+        healthy_alternate_pool: poolId,
+        recommended_action: `reroute to ${alternate} via pool:${poolId}`,
+      };
+    }
+  }
+  return {
+    unhealthy_target: target,
+    healthy_alternate_owner: null,
+    healthy_alternate_pool: null,
+    recommended_action: `restore ${target} health or reroute to a compatible healthy owner before admission`,
+  };
+}
+
 export function providerRuntimeMismatch(
   item: BacklogItem,
   target: string | null,
@@ -359,7 +382,7 @@ export function planAdmission(
         "held",
         "target_unhealthy",
         `target agent '${target}' is not healthy/online (RD-014 admission health gate)`,
-        { target },
+        { target, ...healthyAlternateRecommendation(target, ctx) },
       ));
       continue;
     }

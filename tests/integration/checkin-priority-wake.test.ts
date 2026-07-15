@@ -298,6 +298,12 @@ describe('CheckinService wake on every fire (priority is metadata, not a gate)',
     });
     const managerPort = await findFreePort();
     const workDir = fs.mkdtempSync(path.join(os.tmpdir(), 'checkin-wake-mgr-'));
+    const prevSchedulerEnabled = process.env.DISPATCH_SCHEDULER_ENABLED;
+    const prevWorktreeReaperEnabled = process.env.WORKTREE_REAPER_ENABLED;
+    const prevBootSpawnPendingEnabled = process.env.BOOT_SPAWN_PENDING_ENABLED;
+    process.env.DISPATCH_SCHEDULER_ENABLED = 'false';
+    process.env.WORKTREE_REAPER_ENABLED = 'false';
+    process.env.BOOT_SPAWN_PENDING_ENABLED = 'false';
 
     // Build a fresh DB so this case stays isolated from the suite-level rows.
     const localDb = await createInMemoryDb();
@@ -350,6 +356,12 @@ describe('CheckinService wake on every fire (priority is metadata, not a gate)',
       await ownerServer.stop();
       await localDb.close();
       try { fs.rmSync(workDir, { recursive: true, force: true }); } catch { /* ignore */ }
+      if (prevSchedulerEnabled === undefined) delete process.env.DISPATCH_SCHEDULER_ENABLED;
+      else process.env.DISPATCH_SCHEDULER_ENABLED = prevSchedulerEnabled;
+      if (prevWorktreeReaperEnabled === undefined) delete process.env.WORKTREE_REAPER_ENABLED;
+      else process.env.WORKTREE_REAPER_ENABLED = prevWorktreeReaperEnabled;
+      if (prevBootSpawnPendingEnabled === undefined) delete process.env.BOOT_SPAWN_PENDING_ENABLED;
+      else process.env.BOOT_SPAWN_PENDING_ENABLED = prevBootSpawnPendingEnabled;
     }
   }, 15000);
 

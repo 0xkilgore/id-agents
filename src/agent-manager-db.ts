@@ -2938,6 +2938,7 @@ export class AgentManagerDb {
       endpoint: dbEndpoint,
       metadata,
     });
+    this.invalidateAgentsListCache(teamId);
 
     if (isRemote) {
       // ── Phase 4: push identity.json to the remote VPS ─────────────────────
@@ -7999,6 +8000,7 @@ export class AgentManagerDb {
           ssh_target: ssh_target ?? null,
           metadata: { wallet: remoteWalletOptIn },
         });
+        this.invalidateAgentsListCache(teamId);
 
         return res.status(201).json({
           id: remoteId,
