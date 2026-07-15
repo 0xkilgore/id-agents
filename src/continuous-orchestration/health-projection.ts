@@ -304,7 +304,7 @@ export async function readOrchestrationHealthProjection(
     promotion: promotion.length,
   }, opts.readyAdmission);
   const readyItemBlockers = await readReadyItemBlockerProjection(adapter, teamId, dependencyImpact, opts);
-  const buildReadyFloor = await readBuildReadyFloorProjection(adapter, teamId);
+  const buildReadyFloor = await readBuildReadyFloorProjection(adapter, teamId, opts.readyAdmission);
   const blocked =
     needsClarification.length > 0 ||
     promotion.length > 0 ||
@@ -763,6 +763,7 @@ function uniqueStrings(values: string[]): string[] {
 async function readBuildReadyFloorProjection(
   adapter: DbAdapter,
   teamId: string,
+  readyAdmission?: OrchestrationHealthProjectionOptions["readyAdmission"],
 ): Promise<OrchestrationBuildReadyFloorProjection> {
   const config = loadContinuousOrchestrationConfig();
   const [backlogRows, persistedAdmissionBlockReasons] = await Promise.all([
@@ -777,9 +778,20 @@ async function readBuildReadyFloorProjection(
   );
   const laneCounts = new Map<string, number>();
   const blockerReasons: Record<string, number> = {};
+  const nonUsefulAdmissionBlockers = new Map<string, string>();
+  for (const row of readyAdmission?.nonAdmitted ?? []) {
+    if (isNonUsefulReadyBlockerCode(row.code)) {
+      nonUsefulAdmissionBlockers.set(row.item_id, row.code);
+    }
+  }
   let usefulReadyCount = 0;
 
   for (const row of readyRows) {
+    const admissionBlockerCode = nonUsefulAdmissionBlockers.get(row.item_id);
+    if (admissionBlockerCode) {
+      blockerReasons[admissionBlockerCode] = (blockerReasons[admissionBlockerCode] ?? 0) + 1;
+      continue;
+    }
     if (row.last_dispatch_phid && row.retry_safe !== 1) {
       blockerReasons.duplicate_dispatch_retry_required =
         (blockerReasons.duplicate_dispatch_retry_required ?? 0) + 1;
@@ -835,6 +847,15 @@ async function readBuildReadyFloorProjection(
       ? `auto-promote or flesh build work in a new lane until build ready lanes reach ${buildReadyLanes}/${config.auto_promote_min_lanes} and ready fuel reaches ${usefulReadyCount}/${config.auto_promote_floor}`
       : "build-ready fuel satisfies floor and lane diversity",
   };
+}
+
+function isNonUsefulReadyBlockerCode(code: string): boolean {
+  return (
+    code === "duplicate_dispatch_guard" ||
+    code === "duplicate_dispatch_retry_required" ||
+    code === "provider_runtime_mismatch" ||
+    code === "target_unhealthy"
+  );
 }
 
 async function readQueueQualityProjection(

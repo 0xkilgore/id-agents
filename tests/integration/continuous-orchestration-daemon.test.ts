@@ -1464,6 +1464,13 @@ describe("daemon — dry-run vs live", () => {
     expect(res.body.ready_admission.blocker_counts).toEqual([
       { code: "target_unhealthy", category: "runtime_unavailable", count: 2 },
     ]);
+    expect(res.body.health.build_ready_floor).toMatchObject({
+      useful_ready_count: 2,
+      blocker_reasons: {
+        target_unhealthy: 2,
+        build_ready_below_floor: 1,
+      },
+    });
     expect(res.body.ready_admission.non_admitted).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ title: "explicit unhealthy target A", code: "target_unhealthy", action: "held" }),
@@ -1478,7 +1485,7 @@ describe("daemon — dry-run vs live", () => {
       "substrate-api-codex",
       "substrate-orch-codex",
     ]);
-    expect(res.body.auto_promote_health.operator_summary.safe_actions[0]).toContain("Reroute 2 target_unhealthy");
+    expect(res.body.auto_promote_health.operator_summary.safe_actions[0]).toContain("Reroute or supersede 2 target_unhealthy");
     expect(res.body.auto_promote_health.operator_summary.safe_actions[0]).toContain("compatible healthy agents");
     expect(res.body.auto_promote_health.operator_summary.safe_actions[0]).toContain("top off compatible pool fuel");
     expect(res.body.auto_promote_health.operator_summary.summary).toContain("2 admissible row(s)");

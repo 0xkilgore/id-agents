@@ -167,6 +167,47 @@ describe("orchestration health projection", () => {
     expect(health.build_ready_floor.next_action).not.toMatch(/\b(ok|idle)\b/i);
   });
 
+  it("does not count non-useful admission blockers as clean build-ready fuel", async () => {
+    await setMode(adapter, "default", "running");
+    const blockedIds: string[] = [];
+    for (let i = 0; i < 12; i += 1) {
+      const item = await insertBacklogItem(adapter, {
+        title: `build ready projection row ${i}`,
+        readiness_state: "ready",
+        risk_class: "build",
+        to_agent: "roger",
+        dispatch_body: "continue",
+        write_scope: [`/repo/kapelle-${i}`],
+      });
+      if (i < 2) blockedIds.push(item.item_id);
+    }
+
+    const health = await readOrchestrationHealthProjection(adapter, "default", {
+      readyAdmission: {
+        admissibleNow: 10,
+        blockerCounts: [
+          { code: "target_unhealthy", category: "runtime_unavailable", count: 2 },
+        ],
+        nonAdmitted: blockedIds.map((item_id) => ({ item_id, code: "target_unhealthy" })),
+      },
+    });
+
+    expect(health.build_ready_floor).toMatchObject({
+      blocked: true,
+      blocker_code: "build_ready_below_floor",
+      useful_ready_count: 10,
+      floor: 12,
+      blocker_reasons: {
+        target_unhealthy: 2,
+        build_ready_below_floor: 1,
+      },
+    });
+    expect(health.build_ready_floor.candidate_lanes).toHaveLength(10);
+    expect(health.ready_item_blockers.stale_ready_fuel.counts_by_blocker_class).toEqual([
+      { code: "target_unhealthy", category: "runtime_unavailable", count: 2, examples: blockedIds },
+    ]);
+  });
+
   it("projects Wave49 all-single-writer-busy ready fuel with blocked lane keys and cross-lane action", async () => {
     await setMode(adapter, "default", "running");
     const itemIds: string[] = [];
