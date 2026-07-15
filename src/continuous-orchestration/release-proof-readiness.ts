@@ -6,6 +6,7 @@ export type EvidenceState = "present" | "empty" | "stale" | "error";
 export type InfraWarningState = "clear" | "warning" | "error";
 export type InfraWarningSource = "none" | "readiness_loader" | "orchestration_health_projection";
 export type LinkState = "present" | "missing";
+export type ReleaseProofNextOwnerLane = "none" | "chris" | "operator" | "release-engineering";
 
 export interface ReleaseProofFeedbackEvidence {
   id: string;
@@ -49,6 +50,36 @@ export interface ReleaseProofReadinessResponse {
   release_readiness: ReleaseProofReadinessState;
   chris_readable_release_ready: "READY" | "NOT READY";
   summary: string;
+  feedback_freshness: {
+    state: EvidenceState;
+    latest_at: string | null;
+    stale_after_ms: number;
+    stale: boolean;
+    reason: string | null;
+  };
+  infra_warning: {
+    state: InfraWarningState;
+    count: number;
+    requires_operator_review: boolean;
+    source: InfraWarningSource;
+    action: string | null;
+  };
+  source_link_state: {
+    state: LinkState;
+    safe_count: number;
+    unsafe_count: number;
+    total_count: number;
+  };
+  next_owner: {
+    lane: ReleaseProofNextOwnerLane;
+    action: string | null;
+    reason: string | null;
+    candidates: Array<{
+      lane: ReleaseProofNextOwnerLane;
+      reason: "feedback_freshness" | "infra_warning" | "source_link_state" | "artifact_state" | "loader_error";
+      action: string;
+    }>;
+  };
   feedback_evidence: {
     state: EvidenceState;
     count: number;
@@ -160,6 +191,19 @@ export function buildReleaseProofReadiness(
     : input.infra_warnings.length > 0
       ? "review orchestration health and resolve infra warnings before release proof sign-off"
       : null;
+  const nextOwner = deriveNextOwner({
+    feedbackState,
+    infraState,
+    sourceLinks,
+    artifactPointers,
+    missingArtifactSources,
+    unavailableArtifacts,
+    feedbackMissingSources,
+    staleReasons,
+    errorReasons,
+    missingReasons,
+    infraAction,
+  });
 
   const ready =
     feedbackState === "present" &&
@@ -182,6 +226,27 @@ export function buildReleaseProofReadiness(
     summary: ready
       ? "Release proof is ready for Chris: feedback evidence, source links, generated artifacts, and infra state are clean."
       : summaryForNotReady({ feedbackState, infraState, staleReasons, errorReasons, missingReasons }),
+    feedback_freshness: {
+      state: feedbackState,
+      latest_at: latestFeedbackAt,
+      stale_after_ms: staleAfterMs,
+      stale: feedbackState === "stale",
+      reason: feedbackState === "stale" ? staleReasons.find((reason) => reason.includes("feedback evidence")) ?? null : null,
+    },
+    infra_warning: {
+      state: infraState,
+      count: input.infra_warnings.length,
+      requires_operator_review: infraState === "warning",
+      source: infraSource,
+      action: infraAction,
+    },
+    source_link_state: {
+      state: sourceLinks.length > 0 ? "present" : "missing",
+      safe_count: sourceLinkCounts.safe,
+      unsafe_count: sourceLinkCounts.unsafe,
+      total_count: sourceLinkCounts.total,
+    },
+    next_owner: nextOwner,
     feedback_evidence: {
       state: feedbackState,
       count: input.feedback_evidence.length,
@@ -460,4 +525,71 @@ function summaryForNotReady(input: {
   if (input.staleReasons.length > 0) return `Release proof is not ready: ${input.staleReasons[0]}.`;
   if (input.missingReasons.length > 0) return `Release proof is not ready: ${input.missingReasons[0]}.`;
   return "Release proof is not ready.";
+}
+
+function deriveNextOwner(input: {
+  feedbackState: EvidenceState;
+  infraState: InfraWarningState;
+  sourceLinks: ReleaseProofSourceLink[];
+  artifactPointers: ReleaseProofArtifactPointer[];
+  missingArtifactSources: ReleaseProofArtifactPointer[];
+  unavailableArtifacts: ReleaseProofArtifactPointer[];
+  feedbackMissingSources: ReleaseProofFeedbackEvidence[];
+  staleReasons: string[];
+  errorReasons: string[];
+  missingReasons: string[];
+  infraAction: string | null;
+}): ReleaseProofReadinessResponse["next_owner"] {
+  const candidates: ReleaseProofReadinessResponse["next_owner"]["candidates"] = [];
+
+  if (input.errorReasons.length > 0 || input.feedbackState === "error") {
+    candidates.push({
+      lane: "release-engineering",
+      reason: "loader_error",
+      action: input.errorReasons[0] ?? "restore release-proof data sources and retry readiness",
+    });
+  }
+  if (input.infraState === "warning") {
+    candidates.push({
+      lane: "operator",
+      reason: "infra_warning",
+      action: input.infraAction ?? "review orchestration health and resolve infra warnings before release proof sign-off",
+    });
+  }
+  if (input.feedbackState === "stale") {
+    candidates.push({
+      lane: "chris",
+      reason: "feedback_freshness",
+      action: input.staleReasons.find((reason) => reason.includes("feedback evidence")) ??
+        "refresh release-proof feedback evidence before sign-off",
+    });
+  }
+  if (input.sourceLinks.length === 0 || input.feedbackMissingSources.length > 0) {
+    candidates.push({
+      lane: "release-engineering",
+      reason: "source_link_state",
+      action: input.missingReasons.find((reason) => reason.includes("source link")) ??
+        "attach safe source links to release-proof evidence",
+    });
+  }
+  if (
+    input.artifactPointers.length === 0 ||
+    input.missingArtifactSources.length > 0 ||
+    input.unavailableArtifacts.length > 0
+  ) {
+    candidates.push({
+      lane: "release-engineering",
+      reason: "artifact_state",
+      action: input.missingReasons.find((reason) => reason.includes("artifact")) ??
+        "restore generated release-proof artifacts",
+    });
+  }
+
+  const primary = candidates[0] ?? null;
+  return {
+    lane: primary?.lane ?? "none",
+    action: primary?.action ?? null,
+    reason: primary?.reason ?? null,
+    candidates,
+  };
 }

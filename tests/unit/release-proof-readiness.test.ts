@@ -62,6 +62,10 @@ describe("buildReleaseProofReadiness", () => {
       project: "kapelle",
       release_readiness: "ready",
       chris_readable_release_ready: "READY",
+      feedback_freshness: { state: "present", stale: false, reason: null },
+      infra_warning: { state: "clear", count: 0, requires_operator_review: false },
+      source_link_state: { state: "present", safe_count: 1, unsafe_count: 0, total_count: 1 },
+      next_owner: { lane: "none", action: null, reason: null, candidates: [] },
       feedback_evidence: { state: "present", count: 1 },
       infra_warnings: { state: "clear", count: 0, source: "none", action: null },
       sources: { state: "present" },
@@ -710,6 +714,68 @@ describe("buildReleaseProofReadiness", () => {
     });
     expect(view.stale_reasons).toEqual(["latest feedback evidence is older than 24h"]);
     expect(view.missing_reasons).toEqual(["one or more feedback evidence items are missing safe source links"]);
+    expect(view.summary).toBe("Release proof is not ready: infra warnings require operator review.");
+  });
+
+  it("exposes separate machine fields when feedback is older than 24h and infra needs operator review", () => {
+    const view = buildReleaseProofReadiness(base({
+      feedback_evidence: [
+        {
+          id: "op:older-than-24h",
+          kind: "comment_recorded",
+          observed_at: "2026-07-12T10:00:00.000Z",
+          source_link: "https://manager.local/artifacts/art-kapelle/comments#op-old",
+          artifact_id: "art-kapelle",
+          summary: "Old feedback with a durable source.",
+        },
+      ],
+      infra_warnings: ["promotion blocker phid:disp-1: remote tip not verified"],
+      stale_after_ms: 24 * 60 * 60 * 1000,
+    }));
+
+    expect(view.release_readiness).toBe("not_ready");
+    expect(view.chris_readable_release_ready).toBe("NOT READY");
+    expect(view.feedback_freshness).toEqual({
+      state: "stale",
+      latest_at: "2026-07-12T10:00:00.000Z",
+      stale_after_ms: 24 * 60 * 60 * 1000,
+      stale: true,
+      reason: "latest feedback evidence is older than 24h",
+    });
+    expect(view.infra_warning).toEqual({
+      state: "warning",
+      count: 1,
+      requires_operator_review: true,
+      source: "orchestration_health_projection",
+      action: "review orchestration health and resolve infra warnings before release proof sign-off",
+    });
+    expect(view.source_link_state).toEqual({
+      state: "present",
+      safe_count: 1,
+      unsafe_count: 0,
+      total_count: 1,
+    });
+    expect(view.next_owner).toEqual({
+      lane: "operator",
+      action: "review orchestration health and resolve infra warnings before release proof sign-off",
+      reason: "infra_warning",
+      candidates: [
+        {
+          lane: "operator",
+          reason: "infra_warning",
+          action: "review orchestration health and resolve infra warnings before release proof sign-off",
+        },
+        {
+          lane: "chris",
+          reason: "feedback_freshness",
+          action: "latest feedback evidence is older than 24h",
+        },
+      ],
+    });
+    expect(view.feedback_evidence.state).toBe("stale");
+    expect(view.infra_warnings.state).toBe("warning");
+    expect(view.sources.state).toBe("present");
+    expect(view.stale_reasons).toEqual(["latest feedback evidence is older than 24h"]);
     expect(view.summary).toBe("Release proof is not ready: infra warnings require operator review.");
   });
 
