@@ -3177,6 +3177,96 @@ describe("daemon — dry-run vs live", () => {
     );
   });
 
+  it("status summarizes zero-admit currentness blockers by runtime versus lane and capacity classes", async () => {
+    for (const target of ["offline-a", "offline-b", "offline-c", "offline-d"]) {
+      await seedAgent(adapter, target, "pending", "claude-code-cli");
+      await seedReady(adapter, {
+        title: `live ${target} target_unhealthy blocker`,
+        to_agent: target,
+        write_scope: [`repo/runtime/${target}`],
+      });
+    }
+
+    const dependency = await seedApprovedReview(adapter, {
+      title: "upstream dependency still pending",
+      write_scope: ["repo/dependency"],
+    });
+    for (let i = 0; i < 3; i += 1) {
+      await seedReady(adapter, {
+        title: `blocked dependency ready row ${i + 1}`,
+        to_agent: "roger",
+        dependencies: [dependency.item_id],
+        write_scope: [`repo/dependency-blocked-${i + 1}`],
+      });
+    }
+
+    for (let i = 0; i < 3; i += 1) {
+      await seedReady(adapter, {
+        title: `single writer busy ready row ${i + 1}`,
+        to_agent: "roger",
+        write_scope: [`repo/single-writer-${i + 1}`],
+      });
+    }
+
+    const { app, daemon } = mountStatusApp(
+      adapter,
+      {
+        dry_run: true,
+        auto_flesh_enabled: true,
+        auto_promote_enabled: true,
+        auto_promote_floor: 2,
+        auto_promote_min_lanes: 2,
+        min_ready_fuel: 8,
+        max_in_flight: 20,
+        max_new_per_tick: 20,
+      },
+      {
+        activeScopes: new Set(["repo/single-writer-1", "repo/single-writer-2", "repo/single-writer-3"]),
+        resolveAgentHealth: async () => new Set(["roger"]),
+        resolveAgentRuntimes: (names) => getAgentRuntimeMap(adapter, names),
+      },
+    );
+    await daemon.setMode("running");
+
+    const res = await callApp(app, "/orchestration/status");
+
+    expect(res.status).toBe(200);
+    expect(res.body.counts).toMatchObject({
+      ready: 10,
+      raw_ready_fuel: 10,
+      useful_ready_fuel: 6,
+      admissible_now: 0,
+      ready_block_reasons: {
+        blocked_dependency: 3,
+        single_writer_lane_busy: 3,
+      },
+    });
+    expect(res.body.counts.top_ready_block_reasons).toEqual([
+      { code: "target_unhealthy", category: "runtime_unavailable", count: 4 },
+      { code: "blocked_dependency", category: "lane_eligibility", count: 3 },
+      { code: "single_writer_lane_busy", category: "lane_eligibility", count: 3 },
+    ]);
+    expect(res.body.ready_admission).toMatchObject({
+      candidates: 10,
+      useful_ready: 6,
+      admissible_now: 0,
+      recommended_action: expect.stringContaining("target_unhealthy=4"),
+    });
+    expect(res.body.ready_admission.recommended_action).toContain("single_writer_lane_busy=3");
+    expect(res.body.ready_admission.recommended_action).not.toMatch(/waiting on Chris|ask Chris/i);
+
+    const operatorSummary = res.body.auto_promote_health.operator_summary;
+    expect(operatorSummary.empty_fuel).toBe(false);
+    expect(operatorSummary.summary).toContain("runtime-unavailable blockers: target_unhealthy=4");
+    expect(operatorSummary.summary).toContain("lane/capacity blockers: blocked_dependency=3, single_writer_lane_busy=3");
+    expect(operatorSummary.summary).toContain("recommended next action:");
+    expect(operatorSummary.summary).not.toMatch(/waiting on Chris|ask Chris/i);
+    expect(operatorSummary.safe_actions[0]).toContain("runtime-unavailable blockers: target_unhealthy=4");
+    expect(operatorSummary.safe_actions[0]).toContain("lane/capacity blockers: blocked_dependency=3, single_writer_lane_busy=3");
+    expect(res.body.runtime_status.operator_summary).toContain("ready=10 admissible=0");
+    expect(res.body.runtime_status.operator_summary).not.toMatch(/waiting on Chris|ask Chris/i);
+  });
+
   it("status reports build-ready fuel lanes and top blockers when raw ready is above floor but admissible is zero", async () => {
     await seedReady(adapter, {
       title: "ready capacity gated A",

@@ -134,7 +134,37 @@ function withReadyAdmissionOperatorSummary(
   readyAdmission: ReadyAdmissionExplanation,
 ): AutoPromoteHealth {
   const unhealthyTargets = readyAdmission.blocker_counts.find((count) => count.code === "target_unhealthy")?.count ?? 0;
-  if (unhealthyTargets === 0 || readyAdmission.admissible_now === 0) return health;
+  if (readyAdmission.blocker_counts.length === 0) return health;
+
+  if (readyAdmission.admissible_now === 0 && readyAdmission.candidates > 0) {
+    const runtimeUnavailable = readyAdmission.blocker_counts
+      .filter((count) => count.category === "runtime_unavailable")
+      .map((count) => `${count.code}=${count.count}`);
+    const laneOrCapacity = readyAdmission.blocker_counts
+      .filter((count) => count.category === "lane_eligibility" || count.category === "capacity_gate")
+      .map((count) => `${count.code}=${count.count}`);
+    const blockerParts = [
+      runtimeUnavailable.length > 0 ? `runtime-unavailable blockers: ${runtimeUnavailable.join(", ")}` : null,
+      laneOrCapacity.length > 0 ? `lane/capacity blockers: ${laneOrCapacity.join(", ")}` : null,
+    ].filter((part): part is string => part != null);
+    const action =
+      `Zero-admit ready fuel has ${readyAdmission.candidates} ready row(s) but admissible_now=0; ` +
+      `${blockerParts.join("; ")}; recommended next action: ${readyAdmission.recommended_action}`;
+    const safeActions = health.operator_summary.safe_actions.includes(action)
+      ? health.operator_summary.safe_actions
+      : [action, ...health.operator_summary.safe_actions];
+    return {
+      ...health,
+      operator_summary: {
+        ...health.operator_summary,
+        safe_actions: safeActions,
+        empty_fuel: false,
+        summary: `${health.operator_summary.summary}; ${action}`,
+      },
+    };
+  }
+
+  if (unhealthyTargets === 0) return health;
 
   const groupExamples = readyAdmission.target_unhealthy_groups.slice(0, 3).map((group) =>
     `${group.target} on ${group.lane} (${group.count})`,
