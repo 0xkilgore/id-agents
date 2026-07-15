@@ -828,10 +828,10 @@ export interface StaleReadyReconcileResult {
 
 const READY_RECONCILE_TERMINAL_STATUSES = new Set(["done", "failed", "cancelled", "moot"]);
 
-function appendSourceRef(sourceRefsJson: string, artifactPath: string | null): string {
+function appendSourceRefs(sourceRefsJson: string, refsToAppend: Array<string | null>): string {
   const refs = parseArr(sourceRefsJson);
-  if (artifactPath) {
-    const ref = `dispatch_artifact:${artifactPath}`;
+  for (const ref of refsToAppend) {
+    if (!ref) continue;
     if (!refs.includes(ref)) refs.push(ref);
   }
   return JSON.stringify(refs);
@@ -938,7 +938,10 @@ export async function reconcileStaleAlreadyDispatchedReadyRows(
             AND COALESCE(retry_safe, 0) = 0`,
         [
           toState,
-          appendSourceRef(row.source_refs_json, row.artifact_path),
+          appendSourceRefs(row.source_refs_json, [
+            row.artifact_path ? `dispatch_artifact:${row.artifact_path}` : null,
+            `manager:/orchestration/backlog/${row.item_id}#stale-duplicate-closeout-receipt`,
+          ]),
           JSON.stringify(receipt),
           actor,
           receipt.closed_at,
