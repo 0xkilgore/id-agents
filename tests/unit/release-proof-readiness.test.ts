@@ -500,6 +500,79 @@ describe("buildReleaseProofReadiness", () => {
     }
   });
 
+  it("backfills live Chris feedback op:10023 from its present filesystem artifact origin", async () => {
+    const adapter = new SqliteAdapter(":memory:");
+    try {
+      await migrateSqlite(adapter);
+      await migrateOutputsTables(adapter);
+      await setMode(adapter, "default", "running");
+      await adapter.query(
+        `INSERT INTO artifacts
+           (artifact_id, basename, agent, tag, abs_path, title, produced_at, source, availability,
+            project_ref, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          "art-4337fb88dd2228aa",
+          "kapelle-ready-lane-diversity-health-closeout.md",
+          "roger",
+          "output",
+          "/Users/kilgore/Dropbox/Code/roger/output/kapelle-ready-lane-diversity-health-closeout.md",
+          "kapelle-ready-lane-diversity-health-closeout.md",
+          "2026-07-12T18:34:55.044Z",
+          "filesystem",
+          "present",
+          "kapelle",
+          "2026-07-12T18:35:03.911Z",
+          "2026-07-15T17:27:40.641Z",
+        ],
+      );
+      await adapter.query(
+        `INSERT INTO artifact_operations
+           (op_id, artifact_id, op_type, actor, ts, payload_json, source_link, idempotency_key)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          10023,
+          "art-4337fb88dd2228aa",
+          "approve",
+          "user:chris",
+          "2026-07-12T18:35:52.064Z",
+          JSON.stringify({ note: null, idempotent: false }),
+          null,
+          "artifact-action:approve:live-op-10023:approval",
+        ],
+      );
+
+      const view = await readReleaseProofReadiness(adapter, {
+        teamId: "default",
+        project: "kapelle",
+        now: "2026-07-12T19:00:00.000Z",
+      });
+
+      expect(view.feedback_evidence.items).toEqual([
+        expect.objectContaining({
+          id: "op:10023",
+          kind: "approve",
+          artifact_id: "art-4337fb88dd2228aa",
+          source_link: "manager:/artifacts/art-4337fb88dd2228aa/operations/10023",
+          source_link_status: "derived",
+          source_link_reason: "derived from durable artifact operation",
+        }),
+      ]);
+      expect(view.sources.links).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            label: "feedback:op:10023",
+            href: "manager:/artifacts/art-4337fb88dd2228aa/operations/10023",
+            source: "feedback",
+          }),
+        ]),
+      );
+      expect(view.missing_reasons).toEqual([]);
+    } finally {
+      await adapter.close();
+    }
+  });
+
   it("maps present filesystem proof artifacts to stable source links with availability", async () => {
     const adapter = new SqliteAdapter(":memory:");
     try {
