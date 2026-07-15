@@ -2916,17 +2916,17 @@ function summarizeAutoPromoteHealth(args: {
 }): string {
   if (args.blockedReason) return `auto-promote blocked: ${args.blockedReason}`;
   if (args.capacityOccupied) {
-    const fuelState = args.ready < args.floor
-      ? "ready-plus-in-flight capacity below floor"
-      : args.rawReady < args.floor
-        ? "ready-plus-in-flight capacity satisfies floor"
-        : "raw ready floor satisfied";
+    const fuelState = args.rawReady < args.floor
+      ? args.ready < args.floor
+        ? "build-ready plus in-flight remains below floor"
+        : "build-ready below floor but ready-plus-in-flight capacity covers floor"
+      : "build-ready floor satisfied";
     const laneState = args.belowLanes
       ? `; lane diversity topoff needed: add/promote ${Math.max(0, args.minLanes - args.lanes)} new build lane(s)`
       : "; lane diversity satisfied";
     return (
       `${fuelState} but daemon capacity is occupied: ` +
-      `ready_plus_in_flight=${args.ready} floor=${args.floor}, ` +
+      `build_ready=${args.rawReady}/${args.floor}, ready_plus_in_flight=${args.ready}/${args.floor}, ` +
       `in_flight=${args.inFlight}/${args.maxInFlight}, lanes=${args.lanes}/${args.minLanes}` +
       laneState
     );
