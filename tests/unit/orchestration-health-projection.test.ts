@@ -208,6 +208,122 @@ describe("orchestration health projection", () => {
     ]);
   });
 
+  it("projects stopped target_unhealthy ready blockers with healthy reroute candidates and no false-success copy", async () => {
+    await setMode(adapter, "default", "running");
+    await insertAgent("brunel", "codex", "stopped");
+    await insertAgent("roger", "codex", "running");
+    const blocked = await insertBacklogItem(adapter, {
+      title: "backend ready row aimed at stopped target",
+      readiness_state: "ready",
+      risk_class: "build",
+      to_agent: "brunel",
+      dispatch_body: "continue",
+      provider: "openai",
+      runtime: "codex",
+      write_scope: ["/repo/kapelle"],
+    });
+
+    const health = await readOrchestrationHealthProjection(adapter, "default", {
+      readyAdmission: {
+        rawReady: 1,
+        usefulReady: 0,
+        admissibleNow: 0,
+        blockerCounts: [
+          { code: "target_unhealthy", category: "runtime_unavailable", count: 1 },
+        ],
+        nonAdmitted: [
+          {
+            item_id: blocked.item_id,
+            code: "target_unhealthy",
+            target_unhealthy_receipt: {
+              target: "brunel",
+              prior_owner: "brunel",
+              counts_as_useful_build_fuel: false,
+            },
+          },
+        ],
+      },
+    });
+
+    expect(health.ready_item_blockers.target_unhealthy).toMatchObject({
+      count: 1,
+      recommended_action: expect.stringContaining("reroute 1 target_unhealthy"),
+      no_false_success_copy: expect.stringContaining("not successful admissions"),
+      items: [
+        {
+          item_id: blocked.item_id,
+          target: "brunel",
+          prior_owner: "brunel",
+          health_state: "stopped",
+          target_runtime: "codex",
+          requested_provider: "openai",
+          requested_runtime: "codex",
+          healthy_reroute_candidates: ["roger"],
+          recommended_action: "reroute_to_healthy_compatible_agent",
+          counts_as_useful_build_fuel: false,
+        },
+      ],
+    });
+    expect(health.ready_item_blockers.target_unhealthy.items[0]?.no_false_success_copy).toContain("do not report this row as admitted or retried");
+
+    const unchanged = await getBacklogItem(adapter, blocked.item_id);
+    expect(unchanged?.readiness_state).toBe("ready");
+    expect(unchanged?.retry_safe).toBe(false);
+    expect(unchanged?.last_dispatch_phid).toBeNull();
+  });
+
+  it("projects target_unhealthy rows without healthy candidates as park-or-supersede blockers", async () => {
+    await setMode(adapter, "default", "running");
+    await insertAgent("brunel", "codex", "stopped");
+    const blocked = await insertBacklogItem(adapter, {
+      title: "backend row with no healthy compatible target",
+      readiness_state: "ready",
+      risk_class: "build",
+      to_agent: "brunel",
+      dispatch_body: "continue",
+      provider: "openai",
+      runtime: "codex",
+    });
+
+    const health = await readOrchestrationHealthProjection(adapter, "default", {
+      readyAdmission: {
+        rawReady: 1,
+        usefulReady: 0,
+        admissibleNow: 0,
+        blockerCounts: [
+          { code: "target_unhealthy", category: "runtime_unavailable", count: 1 },
+        ],
+        nonAdmitted: [
+          {
+            item_id: blocked.item_id,
+            code: "target_unhealthy",
+            target_unhealthy_receipt: {
+              target: "brunel",
+              prior_owner: "brunel",
+              counts_as_useful_build_fuel: false,
+            },
+          },
+        ],
+      },
+    });
+
+    expect(health.ready_item_blockers.target_unhealthy).toMatchObject({
+      count: 1,
+      recommended_action: "park or supersede target_unhealthy ready rows until their targets are healthy; do not refire silently",
+      items: [
+        {
+          item_id: blocked.item_id,
+          target: "brunel",
+          health_state: "stopped",
+          healthy_reroute_candidates: [],
+          recommended_action: "park_or_supersede_until_target_healthy",
+          counts_as_useful_build_fuel: false,
+        },
+      ],
+    });
+    expect(health.ready_item_blockers.target_unhealthy.items[0]?.no_false_success_copy).toContain("Park or supersede");
+  });
+
   it("projects Wave49 all-single-writer-busy ready fuel with blocked lane keys and cross-lane action", async () => {
     await setMode(adapter, "default", "running");
     const itemIds: string[] = [];
@@ -1465,7 +1581,7 @@ async function insertCommentOp(input: {
   );
 }
 
-async function insertAgent(name: string, runtime: string): Promise<void> {
+async function insertAgent(name: string, runtime: string, status = "running"): Promise<void> {
   await adapter.query(
     `INSERT OR IGNORE INTO teams (id, name, config) VALUES (?, ?, ?)`,
     ["default", "default", "{}"],
@@ -1484,7 +1600,7 @@ async function insertAgent(name: string, runtime: string): Promise<void> {
       0,
       `http://localhost/${name}`,
       "/tmp",
-      "running",
+      status,
       1780000000000,
       null,
       "{}",

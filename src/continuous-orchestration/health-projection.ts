@@ -129,6 +129,7 @@ export interface OrchestrationReadyItemBlockerProjection {
     reason: string;
     recommended_action: string;
   }>;
+  target_unhealthy: OrchestrationTargetUnhealthyProjection;
   items: OrchestrationReadyItemBlockerDetail[];
 }
 
@@ -159,6 +160,28 @@ export interface OrchestrationReadyItemBlockerDetail {
   recommended_disposition: DuplicateDispatchRetryDisposition | null;
   stale_duplicate_closeout_receipt_exists: boolean;
   provider_runtime_repair: OrchestrationProviderRuntimeRepairSuggestion | null;
+}
+
+export interface OrchestrationTargetUnhealthyProjection {
+  count: number;
+  items: OrchestrationTargetUnhealthyDetail[];
+  recommended_action: string;
+  no_false_success_copy: string;
+}
+
+export interface OrchestrationTargetUnhealthyDetail {
+  item_id: string;
+  title: string | null;
+  target: string;
+  prior_owner: string | null;
+  health_state: string;
+  target_runtime: string | null;
+  requested_provider: string | null;
+  requested_runtime: string | null;
+  healthy_reroute_candidates: string[];
+  recommended_action: "reroute_to_healthy_compatible_agent" | "park_or_supersede_until_target_healthy";
+  no_false_success_copy: string;
+  counts_as_useful_build_fuel: false;
 }
 
 /**
@@ -253,6 +276,11 @@ interface ReadyAdmissionBlockerSummary {
 interface ReadyAdmissionNonAdmittedSummary {
   item_id: string;
   code: string;
+  target_unhealthy_receipt?: {
+    target?: unknown;
+    prior_owner?: unknown;
+    counts_as_useful_build_fuel?: unknown;
+  } | null;
 }
 
 interface OrchestrationHealthProjectionOptions {
@@ -541,6 +569,7 @@ async function readReadyItemBlockerProjection(
       details.push(readyItemBlockerDetail(row, blocker, duplicateDispatchOutcomes, repair));
     }
   }
+  const targetUnhealthy = await readTargetUnhealthyProjection(adapter, rows, opts.readyAdmission);
 
   const categoryValues = [...categories.values()].sort(sortBlockerCounts);
   const staleReadyFuel = staleReadyFuelProjection({
@@ -563,8 +592,102 @@ async function readReadyItemBlockerProjection(
     recommended_action: recommendedAction,
     stale_ready_fuel: staleReadyFuel,
     categories: categoryValues,
+    target_unhealthy: targetUnhealthy,
     items: details.sort((a, b) => a.item_id.localeCompare(b.item_id)),
   };
+}
+
+async function readTargetUnhealthyProjection(
+  adapter: DbAdapter,
+  rows: BacklogQueueRow[],
+  readyAdmission: OrchestrationHealthProjectionOptions["readyAdmission"] | undefined,
+): Promise<OrchestrationTargetUnhealthyProjection> {
+  const receipts = (readyAdmission?.nonAdmitted ?? [])
+    .filter((row) => row.code === "target_unhealthy")
+    .map((row) => ({
+      item_id: row.item_id,
+      target: firstString(row.target_unhealthy_receipt?.target),
+      prior_owner: firstString(row.target_unhealthy_receipt?.prior_owner),
+    }))
+    .filter((row): row is { item_id: string; target: string; prior_owner: string | null } =>
+      row.item_id.trim() !== "" && row.target !== null
+    );
+  if (receipts.length === 0) {
+    return {
+      count: 0,
+      items: [],
+      recommended_action: "none",
+      no_false_success_copy: "No target_unhealthy ready blockers are currently projected.",
+    };
+  }
+
+  const rowsById = new Map(rows.map((row) => [row.item_id, row]));
+  const targetHealth = await readAgentHealthRows(adapter, receipts.map((receipt) => receipt.target));
+  const compatibleRuntimes = uniqueStrings(receipts.flatMap((receipt) => {
+    const row = rowsById.get(receipt.item_id);
+    const target = targetHealth.get(receipt.target);
+    return [row?.runtime ? normalizeRuntime(row.runtime) : null, target?.runtime ?? null]
+      .filter((runtime): runtime is string => !!runtime);
+  }));
+  const healthyByRuntime = await readAgentsByRuntime(adapter, compatibleRuntimes);
+
+  const items = receipts.map((receipt): OrchestrationTargetUnhealthyDetail => {
+    const row = rowsById.get(receipt.item_id);
+    const target = targetHealth.get(receipt.target);
+    const requestedRuntime = row?.runtime ? normalizeRuntime(row.runtime) : target?.runtime ?? null;
+    const requestedProvider = row?.provider ?? (requestedRuntime ? resolveProviderFromRuntime(requestedRuntime) : null);
+    const candidates = requestedRuntime
+      ? (healthyByRuntime.get(requestedRuntime) ?? []).filter((name) => name !== receipt.target)
+      : [];
+    const recommendedAction = candidates.length > 0
+      ? "reroute_to_healthy_compatible_agent"
+      : "park_or_supersede_until_target_healthy";
+    return {
+      item_id: receipt.item_id,
+      title: row?.title ?? null,
+      target: receipt.target,
+      prior_owner: receipt.prior_owner,
+      health_state: target?.status ?? "missing",
+      target_runtime: target?.runtime ?? null,
+      requested_provider: requestedProvider,
+      requested_runtime: requestedRuntime,
+      healthy_reroute_candidates: candidates,
+      recommended_action: recommendedAction,
+      no_false_success_copy: candidates.length > 0
+        ? `Blocked: target ${receipt.target} is not healthy. Reroute to a listed healthy compatible agent; do not report this row as admitted or retried.`
+        : `Blocked: target ${receipt.target} is not healthy. Park or supersede the row until the target is healthy; do not report this row as admitted or retried.`,
+      counts_as_useful_build_fuel: false,
+    };
+  }).sort((a, b) => a.item_id.localeCompare(b.item_id));
+
+  const reroutable = items.filter((item) => item.healthy_reroute_candidates.length > 0).length;
+  return {
+    count: items.length,
+    items,
+    recommended_action: reroutable > 0
+      ? `reroute ${reroutable} target_unhealthy ready row(s) to healthy compatible agents; park or supersede the rest until targets recover`
+      : "park or supersede target_unhealthy ready rows until their targets are healthy; do not refire silently",
+    no_false_success_copy:
+      "target_unhealthy rows are blocked ready fuel, not successful admissions; do not retry, auto-promote, or mark them done without an explicit operator action.",
+  };
+}
+
+async function readAgentHealthRows(adapter: DbAdapter, names: string[]): Promise<Map<string, { status: string; runtime: string | null }>> {
+  const out = new Map<string, { status: string; runtime: string | null }>();
+  const unique = uniqueStrings(names);
+  if (unique.length === 0) return out;
+  const placeholders = unique.map((_, i) => `$${i + 1}`).join(",");
+  const { rows } = await adapter.query<{ name: string; status: string | null; runtime: string | null }>(
+    `SELECT name, status, runtime
+       FROM agents
+      WHERE name IN (${placeholders}) AND deleted_at IS NULL
+      ORDER BY name ASC`,
+    unique,
+  );
+  for (const row of rows) {
+    out.set(row.name, { status: row.status ?? "unknown", runtime: row.runtime });
+  }
+  return out;
 }
 
 function readyItemBlockerDetail(

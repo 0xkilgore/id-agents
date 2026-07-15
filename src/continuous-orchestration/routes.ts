@@ -128,6 +128,7 @@ export function mountContinuousOrchestrationRoutes(app: Application, opts: Orche
           nonAdmitted: readyAdmission.non_admitted.map((item) => ({
             item_id: item.item_id,
             code: item.code,
+            target_unhealthy_receipt: item.target_unhealthy_receipt,
           })),
           blockedLanes: readyAdmission.blocked_lanes,
           recommendedAction: readyAdmission.recommended_action,
