@@ -166,6 +166,59 @@ describe("parallel-fuel floor (needsRefuel / readyFuel)", () => {
     expect(readyFuel(ready)).toEqual({ total: 3, lanes: 2 });
   });
 
+  it("excludes receipt-backed stale duplicate closeouts from useful fuel", () => {
+    const ready = [
+      item({ item_id: "fresh-ready", write_scope: ["A"] }),
+      item({
+        item_id: "done-duplicate",
+        write_scope: ["B"],
+        last_dispatch_phid: "phid:disp-landed",
+        stale_duplicate_closeout_receipt: {
+          schema_version: "orchestration.stale_duplicate_closeout_receipt.v1",
+          closed_by: "operator",
+          closed_at: "2026-07-15T12:00:00.000Z",
+          from_state: "ready",
+          to_state: "done",
+          reason: "close_or_ignore",
+          track: "T-ORCH",
+          next_action: "close_duplicate_row",
+          prior_dispatch_phid: "phid:disp-landed",
+          prior_dispatch_status: "done",
+          successor_dispatch_phid: null,
+          redispatch_safety: {
+            safe_to_not_redispatch: true,
+            reason: "prior dispatch landed; row is stale duplicate fuel",
+          },
+        },
+      }),
+      item({
+        item_id: "superseded-duplicate",
+        write_scope: ["C"],
+        last_dispatch_phid: "phid:disp-superseded",
+        stale_duplicate_closeout_receipt: {
+          schema_version: "orchestration.stale_duplicate_closeout_receipt.v1",
+          closed_by: "operator",
+          closed_at: "2026-07-15T12:01:00.000Z",
+          from_state: "ready",
+          to_state: "superseded",
+          reason: "close_or_ignore",
+          track: "T-ORCH",
+          next_action: "supersede_duplicate_row",
+          prior_dispatch_phid: "phid:disp-superseded",
+          prior_dispatch_status: "superseded",
+          successor_dispatch_phid: null,
+          redispatch_safety: {
+            safe_to_not_redispatch: true,
+            reason: "prior dispatch was superseded; row is stale duplicate fuel",
+          },
+        },
+      }),
+    ];
+
+    expect(readyFuel(ready)).toEqual({ total: 1, lanes: 1 });
+    expect(needsRefuel(ready, { minReadyFuel: 2, minReadyLanes: 2 })).toBe(true);
+  });
+
   it("refuels when total fuel is short", () => {
     const ready = [item({ write_scope: ["A"] })];
     expect(needsRefuel(ready, { minReadyFuel: 8, minReadyLanes: 1 })).toBe(true);
@@ -527,6 +580,44 @@ describe("planAdmission — per-item guardrails", () => {
       cfg,
     );
     expect(safeRetry.admit.map((i) => i.item_id)).toEqual(["safe-retry"]);
+  });
+
+  it("still holds retryable failed duplicate rows until retry_safe is explicitly set", () => {
+    const retryableFailed = item({
+      item_id: "retryable-failed-duplicate",
+      last_dispatch_phid: "phid:disp-retryable-failed",
+      retry_readiness: {
+        schema_version: "backlog.retry_readiness.v1",
+        status: "retryable_failed_row",
+        retryable: true,
+        stale_duplicate: false,
+        manual_promote_required: true,
+        reason: "prior dispatch failed with retryable transient evidence",
+        next_action: "retry",
+        prior_dispatch_phid: "phid:disp-retryable-failed",
+        prior_dispatch_status: "failed",
+        dispatch_retry_count: 0,
+        retry_cap: 1,
+        failure_kind: "scheduler_wedged",
+        failure_detail: "scheduler wedged during dispatch handoff",
+        recovery_status: null,
+      },
+    });
+
+    const held = planAdmission([retryableFailed], ctx(), cfg);
+    expect(held.admit).toHaveLength(0);
+    expect(held.skipped[0]).toMatchObject({
+      item_id: "retryable-failed-duplicate",
+      action: "held",
+      metadata: {
+        code: "duplicate_dispatch_retry_required",
+        class: "retry_safety",
+        last_dispatch_phid: "phid:disp-retryable-failed",
+      },
+    });
+
+    const approved = planAdmission([{ ...retryableFailed, retry_safe: true }], ctx(), cfg);
+    expect(approved.admit.map((i) => i.item_id)).toEqual(["retryable-failed-duplicate"]);
   });
 
   it("never admits a non-ready item even if passed in", () => {

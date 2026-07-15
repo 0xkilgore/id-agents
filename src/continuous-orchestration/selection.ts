@@ -78,9 +78,20 @@ export function fairInterleaveByLane(ordered: BacklogItem[]): BacklogItem[] {
   return out;
 }
 
+export function isUsefulReadyFuelItem(item: BacklogItem): boolean {
+  const receipt = item.stale_duplicate_closeout_receipt;
+  if (!receipt) return true;
+  return !(
+    receipt.from_state === "ready" &&
+    (receipt.to_state === "done" || receipt.to_state === "superseded") &&
+    receipt.redispatch_safety?.safe_to_not_redispatch === true
+  );
+}
+
 /** READY-fuel shape used by the daemon's parallel-fuel floor. */
 export function readyFuel(ready: BacklogItem[]): { total: number; lanes: number } {
-  return { total: ready.length, lanes: new Set(ready.map(laneKeyOf)).size };
+  const useful = ready.filter(isUsefulReadyFuelItem);
+  return { total: useful.length, lanes: new Set(useful.map(laneKeyOf)).size };
 }
 
 /**

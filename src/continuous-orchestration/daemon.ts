@@ -15,7 +15,7 @@ import path from "node:path";
 import type { DbAdapter } from "../db/db-adapter.js";
 import type { ContinuousOrchestrationConfig } from "./config.js";
 import type { BacklogItem, DecisionRecord, OrchestrationMode, ReadinessState, UsageGateView } from "./types.js";
-import { fairInterleaveByLane, laneKeyOf, needsRefuel, orderCandidates } from "./selection.js";
+import { fairInterleaveByLane, isUsefulReadyFuelItem, laneKeyOf, needsRefuel, orderCandidates } from "./selection.js";
 import { tickAdmitLimit } from "./cadence.js";
 import {
   planAdmission,
@@ -2494,7 +2494,9 @@ function buildCapacityFuel(
   capacityOccupied: boolean;
 } {
   const readyBuild = ready.filter((item) => item.risk_class === "build");
-  const usefulReadyBuild = readyBuild.filter((item) => !nonUsefulReadyItemIds.has(item.item_id));
+  const usefulReadyBuild = readyBuild.filter(
+    (item) => isUsefulReadyFuelItem(item) && !nonUsefulReadyItemIds.has(item.item_id),
+  );
   const inFlightBuild = inFlight.filter((item) => item.risk_class === "build");
   return {
     readyBuild,
