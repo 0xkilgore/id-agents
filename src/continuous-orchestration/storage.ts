@@ -827,6 +827,7 @@ export interface StaleReadyReconcileResult {
 }
 
 const READY_RECONCILE_TERMINAL_STATUSES = new Set(["done", "failed", "cancelled", "moot"]);
+const OFFLINE_AGENT_STATUSES = new Set(["stopped", "offline", "deleted", "unhealthy", "error"]);
 
 function appendSourceRefs(sourceRefsJson: string, refsToAppend: Array<string | null>): string {
   const refs = parseArr(sourceRefsJson);
@@ -835,6 +836,158 @@ function appendSourceRefs(sourceRefsJson: string, refsToAppend: Array<string | n
     if (!refs.includes(ref)) refs.push(ref);
   }
   return JSON.stringify(refs);
+}
+
+function appendSourceRef(sourceRefsJson: string, artifactPath: string | null): string {
+  return appendSourceRefValue(sourceRefsJson, artifactPath ? `dispatch_artifact:${artifactPath}` : null);
+}
+
+function appendSourceRefValue(sourceRefsJson: string, ref: string | null): string {
+  return appendSourceRefs(sourceRefsJson, [ref]);
+}
+
+function itemContainsWave66(row: BacklogRow): boolean {
+  const haystack = [
+    row.title,
+    row.dispatch_body,
+    row.logical_key,
+    row.track,
+    ...parseArr(row.source_refs_json),
+  ]
+    .filter((v): v is string => typeof v === "string")
+    .join(" ");
+  return /\bwave\s*66\b/i.test(haystack);
+}
+
+async function isOfflineTargetAgent(adapter: DbAdapter, target: string | null): Promise<boolean> {
+  const name = target?.trim();
+  if (!name) return true;
+  if (name.startsWith("pool:")) return false;
+  const { rows } = await adapter.query<{ status: string | null }>(
+    `SELECT status
+       FROM agents
+      WHERE name = $1 AND deleted_at IS NULL
+      ORDER BY CASE WHEN status = 'running' THEN 0 ELSE 1 END, created_at DESC
+      LIMIT 1`,
+    [name],
+  );
+  const status = rows[0]?.status?.trim().toLowerCase() ?? null;
+  return !status || OFFLINE_AGENT_STATUSES.has(status);
+}
+
+export interface OfflineSupersededReadyReconcileResult {
+  ok: boolean;
+  dry_run: boolean;
+  item_id: string;
+  superseding_coitem_id: string;
+  from_state: "ready";
+  to_state: "superseded";
+  old_target_agent: string | null;
+  reason: string;
+  receipt: StaleDuplicateCloseoutReceipt;
+}
+
+export async function reconcileOfflineSupersededReadyRow(
+  adapter: DbAdapter,
+  opts: {
+    team_id?: string;
+    item_id: string;
+    superseding_coitem_id: string;
+    reason: string;
+    actor?: string;
+    dry_run?: boolean;
+  },
+): Promise<OfflineSupersededReadyReconcileResult> {
+  const teamId = opts.team_id ?? "default";
+  const itemId = opts.item_id.trim();
+  const supersedingCoitemId = opts.superseding_coitem_id.trim();
+  const actor = opts.actor?.trim() || "operator";
+  const reason = opts.reason.trim();
+  const dryRun = opts.dry_run === true;
+
+  if (!itemId) throw new Error("item_id is required");
+  if (!supersedingCoitemId) throw new Error("superseding_coitem_id is required");
+  if (!reason) throw new Error("reason is required");
+  if (itemId === supersedingCoitemId) throw new Error("superseding_coitem_id must differ from item_id");
+
+  const { rows } = await adapter.query<BacklogRow>(
+    `SELECT * FROM orchestration_backlog_item
+      WHERE team_id = $1 AND item_id IN ($2, $3)`,
+    [teamId, itemId, supersedingCoitemId],
+  );
+  const stale = rows.find((row) => row.item_id === itemId);
+  const superseding = rows.find((row) => row.item_id === supersedingCoitemId);
+  if (!stale) throw new Error(`ready row not found: ${itemId}`);
+  if (!superseding) throw new Error(`superseding coitem not found: ${supersedingCoitemId}`);
+  if (stale.readiness_state !== "ready") throw new Error(`cannot supersede ${itemId} from ${stale.readiness_state}`);
+  if (!(await isOfflineTargetAgent(adapter, stale.to_agent))) {
+    throw new Error(`target agent is not offline: ${stale.to_agent ?? "(none)"}`);
+  }
+  if (!itemContainsWave66(superseding)) {
+    throw new Error(`superseding coitem is not marked as Wave66 work: ${supersedingCoitemId}`);
+  }
+  if (Date.parse(superseding.created_at) < Date.parse(stale.created_at)) {
+    throw new Error(`superseding coitem is not fresher than ${itemId}`);
+  }
+
+  const closedAt = new Date().toISOString();
+  const receipt: StaleDuplicateCloseoutReceipt = {
+    schema_version: "orchestration.stale_duplicate_closeout_receipt.v1",
+    closed_by: actor,
+    closed_at: closedAt,
+    actor,
+    timestamp: closedAt,
+    from_state: "ready",
+    to_state: "superseded",
+    reason: "offline_target_superseded_by_fresher_wave66",
+    track: stale.track ?? null,
+    next_action: "supersede_offline_ready_row",
+    prior_dispatch_phid: stale.last_dispatch_phid ?? "",
+    prior_dispatch_status: "target_offline",
+    successor_dispatch_phid: superseding.last_dispatch_phid ?? null,
+    old_target_agent: stale.to_agent ?? null,
+    superseding_coitem_id: supersedingCoitemId,
+    supersession_reason: reason,
+    redispatch_safety: {
+      safe_to_not_redispatch: true,
+      reason,
+    },
+  };
+
+  if (!dryRun) {
+    await adapter.query(
+      `UPDATE orchestration_backlog_item
+          SET readiness_state = 'superseded',
+              source_refs_json = $1,
+              retry_safe = 0,
+              stale_duplicate_closeout_receipt_json = $2,
+              updated_by = $3,
+              updated_at = $4
+        WHERE team_id = $5
+          AND item_id = $6
+          AND readiness_state = 'ready'`,
+      [
+        appendSourceRefValue(stale.source_refs_json, `superseded_by:${supersedingCoitemId}`),
+        JSON.stringify(receipt),
+        actor,
+        closedAt,
+        teamId,
+        itemId,
+      ],
+    );
+  }
+
+  return {
+    ok: true,
+    dry_run: dryRun,
+    item_id: itemId,
+    superseding_coitem_id: supersedingCoitemId,
+    from_state: "ready",
+    to_state: "superseded",
+    old_target_agent: stale.to_agent ?? null,
+    reason,
+    receipt,
+  };
 }
 
 /**

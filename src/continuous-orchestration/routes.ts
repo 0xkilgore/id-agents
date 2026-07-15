@@ -27,6 +27,7 @@ import {
   listRecentDecisions,
   markFailedDuplicateDispatchRetrySafe,
   promoteToReady,
+  reconcileOfflineSupersededReadyRow,
   reconcileStaleAlreadyDispatchedReadyRows,
   recordFleshOutcome,
   setItemState,
@@ -249,6 +250,35 @@ export function mountContinuousOrchestrationRoutes(app: Application, opts: Orche
       res.json({ ok: true, result });
     } catch (err) {
       res.status(500).json({ ok: false, error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  app.post("/orchestration/reconcile/offline-superseded-ready", async (req: Request, res: Response) => {
+    try {
+      const body = req.body ?? {};
+      const itemId = typeof body.item_id === "string" ? body.item_id : "";
+      const supersedingCoitemId = typeof body.superseding_coitem_id === "string"
+        ? body.superseding_coitem_id
+        : typeof body.superseding_item_id === "string"
+          ? body.superseding_item_id
+          : "";
+      const reason = typeof body.reason === "string" ? body.reason : "";
+      const actor = typeof body.actor === "string"
+        ? body.actor
+        : typeof body.closed_by === "string"
+          ? body.closed_by
+          : DEFAULT_ACTOR_ID;
+      const result = await reconcileOfflineSupersededReadyRow(adapter, {
+        team_id: teamId,
+        item_id: itemId,
+        superseding_coitem_id: supersedingCoitemId,
+        reason,
+        actor,
+        dry_run: body.dry_run === true,
+      });
+      res.json({ ok: true, result });
+    } catch (err) {
+      res.status(400).json({ ok: false, error: err instanceof Error ? err.message : String(err) });
     }
   });
 

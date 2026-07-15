@@ -60,16 +60,22 @@ export interface StaleDuplicateCloseoutReceipt {
   schema_version: "orchestration.stale_duplicate_closeout_receipt.v1";
   closed_by: string;
   closed_at: string;
+  /** Alias fields for newer receipt consumers that expect actor/timestamp naming. */
+  actor?: string;
+  timestamp?: string;
   from_state: "ready";
   to_state: "done" | "superseded" | "ready";
-  reason: "close_or_ignore";
+  reason: "close_or_ignore" | "offline_target_superseded_by_fresher_wave66";
   /** Roadmap track of the closed row, e.g. "T-ORCH" — carried through so ops surfaces don't have to re-join the backlog row. */
   track: string | null;
   /** Same vocabulary as DuplicateDispatchRetryReceipt.next_action for consistent ops-surface parsing. */
-  next_action: "close_duplicate_row" | "supersede_duplicate_row";
+  next_action: "close_duplicate_row" | "supersede_duplicate_row" | "supersede_offline_ready_row";
   prior_dispatch_phid: string;
   prior_dispatch_status: string;
   successor_dispatch_phid: string | null;
+  old_target_agent?: string | null;
+  superseding_coitem_id?: string;
+  supersession_reason?: string;
   redispatch_safety: {
     safe_to_not_redispatch: boolean;
     reason: string;
