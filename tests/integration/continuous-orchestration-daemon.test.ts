@@ -1750,6 +1750,223 @@ describe("daemon — dry-run vs live", () => {
     expect(res.body.auto_promote_health.operator_summary.summary).toContain("2 target_unhealthy row(s)");
   });
 
+  it("status names Wave66 target-unhealthy blockers and excludes them from useful/admissible fuel", async () => {
+    await seedAgent(adapter, "substrate-api-codex", "pending", "codex");
+    await seedAgent(adapter, "brunel", "pending", "claude-code-cli");
+    await seedAgent(adapter, "coder-max", "pending", "claude-code-cli");
+    await seedAgent(adapter, "eames", "pending", "claude-code-cli");
+    await seedAgent(adapter, "roger", "running", "codex");
+    await seedAgent(adapter, "substrate-orch-codex", "running", "codex");
+    await seedAgent(adapter, "gaudi", "running", "claude-code-cli");
+    await seedAgent(adapter, "hopper", "running", "claude-code-cli");
+
+    const blockers = [
+      await seedReady(adapter, {
+        title: "Wave66 substrate-api-codex target_unhealthy blocker",
+        to_agent: "substrate-api-codex",
+        write_scope: ["id-agents/backend/substrate-api"],
+        source_refs: ["Wave66:substrate-api-codex"],
+      }),
+      await seedReady(adapter, {
+        title: "Wave66 brunel target_unhealthy blocker",
+        to_agent: "brunel",
+        write_scope: ["kapelle/frontend/brunel"],
+        source_refs: ["Wave66:brunel"],
+      }),
+      await seedReady(adapter, {
+        title: "Wave66 coder-max target_unhealthy blocker",
+        to_agent: "coder-max",
+        write_scope: ["kapelle/frontend/coder-max"],
+        source_refs: ["Wave66:coder-max"],
+      }),
+      await seedReady(adapter, {
+        title: "Wave66 eames target_unhealthy blocker",
+        to_agent: "eames",
+        write_scope: ["kapelle/frontend/eames"],
+        source_refs: ["Wave66:eames"],
+      }),
+    ];
+    const blockerIdsByTarget = new Map(blockers.map((item) => [item.to_agent, item.item_id]));
+
+    const backendPool = {
+      pool_id: "backend",
+      repo_root: "/repo/backend",
+      max_parallel: 2,
+      members: ["roger", "substrate-orch-codex", "substrate-api-codex"],
+    };
+    const frontendPool = {
+      pool_id: "frontend",
+      repo_root: "/repo/frontend",
+      max_parallel: 2,
+      members: ["brunel", "coder-max", "eames", "gaudi", "hopper"],
+    };
+    const poolForTarget = (target: string) =>
+      backendPool.members.includes(target) ? backendPool :
+        frontendPool.members.includes(target) ? frontendPool :
+          null;
+    const pools: PoolRouting = {
+      poolForItem: () => null,
+      availableBuilders: (pool, building) => pool.members.filter((agent) => !building.has(agent)),
+      healthyEquivalentTarget: ({ unhealthyTarget, healthyAgents, busyAgents }) => {
+        const pool = poolForTarget(unhealthyTarget);
+        if (!pool) return null;
+        const candidates = pool.members.filter((agent) =>
+          agent !== unhealthyTarget &&
+          healthyAgents.has(agent) &&
+          !busyAgents.has(agent)
+        );
+        const target = candidates[0];
+        return target ? { pool, target, candidates } : null;
+      },
+      allocateWorktree: async ({ agent, item, pool }) => ({
+        path: `${pool.repo_root}/.worktrees/${agent}-${item.item_id.slice(-6)}`,
+        branch: `build/${agent}-${item.item_id.slice(-6)}`,
+        lease_id: null,
+      }),
+    };
+    const { app, daemon } = mountStatusApp(
+      adapter,
+      {
+        dry_run: true,
+        auto_flesh_enabled: false,
+        auto_promote_enabled: false,
+        min_ready_fuel: 8,
+        max_in_flight: 20,
+        max_new_per_tick: 20,
+      },
+      {
+        pools,
+        resolveAgentHealth: async () => new Set(["roger", "substrate-orch-codex", "gaudi", "hopper"]),
+        resolveAgentRuntimes: (names) => getAgentRuntimeMap(adapter, names),
+      },
+    );
+    await daemon.setMode("running");
+
+    const res = await callApp(app, "/orchestration/status");
+
+    expect(res.status).toBe(200);
+    expect(res.body.counts).toMatchObject({
+      ready: 4,
+      raw_ready_fuel: 4,
+      useful_ready_fuel: 0,
+      admissible_now: 0,
+    });
+    expect(res.body.counts.top_ready_block_reasons).toEqual([
+      { code: "target_unhealthy", category: "runtime_unavailable", count: 4 },
+    ]);
+    expect(res.body.ready_admission).toMatchObject({
+      candidates: 4,
+      useful_ready: 0,
+      admissible_now: 0,
+      blocker_counts: [
+        { code: "target_unhealthy", category: "runtime_unavailable", count: 4 },
+      ],
+      stale_ready_floor: {
+        stale: true,
+        ready: 4,
+        admissible: 0,
+        min_ready_fuel: 8,
+        reason: "useful_ready_fuel=0 is below min_ready_fuel=8; raw_ready_fuel=4",
+      },
+    });
+    expect(res.body.ready_admission.admissible).toEqual([]);
+    expect(res.body.ready_admission.non_admitted).toEqual(
+      expect.arrayContaining(
+        blockers.map((item) =>
+          expect.objectContaining({
+            item_id: item.item_id,
+            title: item.title,
+            to_agent: item.to_agent,
+            code: "target_unhealthy",
+            action: "held",
+            target_unhealthy_receipt: expect.objectContaining({
+              target: item.to_agent,
+              prior_owner: item.to_agent,
+              counts_as_useful_build_fuel: false,
+              proposed_healthy_target: expect.any(String),
+            }),
+          }),
+        ),
+      ),
+    );
+    expect(res.body.ready_admission.target_unhealthy_groups).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          target: "substrate-api-codex",
+          proposed_healthy_target: "roger",
+          recommended_action: expect.stringContaining("Reroute to healthy compatible target roger"),
+          examples: [
+            expect.objectContaining({
+              item_id: blockerIdsByTarget.get("substrate-api-codex"),
+              title: "Wave66 substrate-api-codex target_unhealthy blocker",
+              prior_owner: "substrate-api-codex",
+            }),
+          ],
+        }),
+        expect.objectContaining({
+          target: "brunel",
+          proposed_healthy_target: "gaudi",
+          recommended_action: expect.stringContaining("Reroute to healthy compatible target gaudi"),
+          examples: [
+            expect.objectContaining({
+              item_id: blockerIdsByTarget.get("brunel"),
+              title: "Wave66 brunel target_unhealthy blocker",
+              prior_owner: "brunel",
+            }),
+          ],
+        }),
+        expect.objectContaining({
+          target: "coder-max",
+          proposed_healthy_target: "gaudi",
+          recommended_action: expect.stringContaining("Reroute to healthy compatible target gaudi"),
+          examples: [
+            expect.objectContaining({
+              item_id: blockerIdsByTarget.get("coder-max"),
+              title: "Wave66 coder-max target_unhealthy blocker",
+              prior_owner: "coder-max",
+            }),
+          ],
+        }),
+        expect.objectContaining({
+          target: "eames",
+          proposed_healthy_target: "gaudi",
+          recommended_action: expect.stringContaining("Reroute to healthy compatible target gaudi"),
+          examples: [
+            expect.objectContaining({
+              item_id: blockerIdsByTarget.get("eames"),
+              title: "Wave66 eames target_unhealthy blocker",
+              prior_owner: "eames",
+            }),
+          ],
+        }),
+      ]),
+    );
+    expect(res.body.ready_admission.recommended_action).toContain("target_unhealthy=4");
+    expect(res.body.ready_admission.recommended_action).toContain("target=brunel");
+    expect(res.body.ready_admission.recommended_action).toContain("target=coder-max");
+    expect(res.body.ready_admission.recommended_action).toContain("target=eames");
+    expect(res.body.ready_admission.recommended_action).not.toContain("target=substrate-api-codex");
+    expect(res.body.health.build_ready_floor).toMatchObject({
+      useful_ready_count: 0,
+      blocker_reasons: {
+        target_unhealthy: 4,
+        build_ready_below_floor: 1,
+      },
+    });
+    expect(res.body.health.ready_item_blockers.stale_ready_fuel).toMatchObject({
+      active: true,
+      reason: "useful_ready_fuel=0 is below min_ready_fuel=8; raw_ready_fuel=4; admissible_now=0",
+    });
+    expect(res.body.health.ready_item_blockers.stale_ready_fuel.counts_by_blocker_class).toEqual([
+      expect.objectContaining({
+        code: "target_unhealthy",
+        category: "runtime_unavailable",
+        count: 4,
+        examples: expect.arrayContaining(blockers.map((item) => item.item_id)),
+      }),
+    ]);
+  });
+
   it("status treats raw-ready-above-floor target-unhealthy and duplicate retry rows as useful-ready below floor without adding filler", async () => {
     await seedAgent(adapter, "gaudi", "pending", "claude-code-cli");
     await seedAgent(adapter, "eames", "running", "claude-code-cli");
