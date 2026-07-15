@@ -274,7 +274,14 @@ describe("project tracks read-model", () => {
       writeFileSync(path.join(root, "newsletters", "july-newsletter-source.md"), "Newsletter source copy\n");
       writeFileSync(path.join(root, "source", "vendor-list.csv"), "name\n");
       const artifactPath = path.join(root, "output", "agent-artifact-report.md");
+      const finalDocumentPath = path.join(root, "output", "cleveland-park-final-document.md");
+      const transcriptArtifactPath = path.join(root, "output", "cleveland-park-launch-transcript.md");
+      const screenshotArtifactPath = path.join(root, "output", "screenshots", "cleveland-park-homepage-final.png");
       writeFileSync(artifactPath, "# Agent artifact report\n");
+      mkdirSync(path.dirname(screenshotArtifactPath), { recursive: true });
+      writeFileSync(finalDocumentPath, "# Cleveland Park final document\n");
+      writeFileSync(transcriptArtifactPath, "Cleveland Park launch transcript\n");
+      writeFileSync(screenshotArtifactPath, "png");
 
       await adapter.query(`INSERT INTO teams (id, name) VALUES ($1, $2)`, ["team_cleveland", "cleveland-park"]);
       await adapter.query(
@@ -305,18 +312,35 @@ describe("project tracks read-model", () => {
            (artifact_id, basename, agent, tag, abs_path, title, produced_at, source, availability, media_type,
             source_mtime, source_size, project_ref, dispatch_ref, created_at, updated_at)
          VALUES
-           ('art_cp_report','agent-artifact-report.md','cleveland-park','[T-LOCALREAD] artifact report',$1,
-            'Cleveland Park agent artifact report',$2,'test','present','text/markdown',$3,1024,'cleveland-park','phid:disp-cp',$4,$5)`,
-        [artifactPath, NOW, NOW, NOW, NOW],
+           ('legacy_cp_report','agent-artifact-report.md','cleveland-park','[T-LOCALREAD] artifact report',$1,
+            'Cleveland Park agent artifact report',$2,'test','present','text/markdown',$3,1024,'cleveland-park','phid:disp-cp',$4,$5),
+           ('legacy_cp_final','cleveland-park-final-document.md','cleveland-park','final-document',$6,
+            'Cleveland Park final document',$7,'test','present','text/markdown',$8,2048,'cleveland-park','phid:disp-cp',$9,$10),
+           ('legacy_cp_transcript','cleveland-park-launch-transcript.md','cleveland-park','transcript',$11,
+            'Cleveland Park launch transcript',$12,'test','present','text/markdown',$13,2048,'cleveland-park','phid:disp-cp',$14,$15),
+           ('legacy_cp_screenshot','cleveland-park-homepage-final.png','cleveland-park','screenshot',$16,
+            'Cleveland Park homepage final screenshot',$17,'test','present','image/png',$18,2048,'cleveland-park','phid:disp-cp',$19,$20)`,
+        [
+          artifactPath, NOW, NOW, NOW, NOW,
+          finalDocumentPath, NOW, NOW, NOW, NOW,
+          transcriptArtifactPath, NOW, NOW, NOW, NOW,
+          screenshotArtifactPath, NOW, NOW, NOW, NOW,
+        ],
       );
       await adapter.query(
         `INSERT INTO artifact_review_state
            (artifact_id, first_viewed_at, last_viewed_at, viewed_count, created_at, updated_at)
          VALUES
-           ('art_cp_report',NULL,NULL,0,$1,$2)`,
-        [NOW, NOW],
+           ('legacy_cp_report',NULL,NULL,0,$1,$2),
+           ('legacy_cp_final',NULL,NULL,0,$1,$2),
+           ('legacy_cp_transcript',NULL,NULL,0,$1,$2),
+           ('legacy_cp_screenshot',NULL,NULL,0,$1,$2)`,
+        [NOW, NOW, NOW, NOW, NOW, NOW, NOW, NOW],
       );
       const stableArtifactId = artifactIdFromPath(artifactPath);
+      const stableFinalId = artifactIdFromPath(finalDocumentPath);
+      const stableTranscriptId = artifactIdFromPath(transcriptArtifactPath);
+      const stableScreenshotId = artifactIdFromPath(screenshotArtifactPath);
 
       const envelope = await buildProjectSourcesEnvelope(adapter, {
         project: "cleveland-park",
@@ -337,7 +361,7 @@ describe("project tracks read-model", () => {
       ]);
       expect(envelope.groups.transcripts).toBeGreaterThanOrEqual(2);
       expect(envelope.groups.pdfs_forms).toBeGreaterThanOrEqual(1);
-      expect(envelope.groups.images_screenshots_logos).toBeGreaterThanOrEqual(1);
+      expect(envelope.groups.images_screenshots_logos).toBeGreaterThanOrEqual(2);
       expect(envelope.groups.emails_captures).toBeGreaterThanOrEqual(1);
       expect(envelope.groups.artifacts_reports).toBeGreaterThanOrEqual(1);
       expect(envelope.groups.other_files).toBeGreaterThanOrEqual(1);
@@ -351,12 +375,31 @@ describe("project tracks read-model", () => {
         read: { state: "unread" },
         freshness: { status: "fresh" },
       });
+      for (const [title, stableId] of [
+        ["Cleveland Park final document", stableFinalId],
+        ["Cleveland Park launch transcript", stableTranscriptId],
+        ["Cleveland Park homepage final screenshot", stableScreenshotId],
+      ] as const) {
+        expect(byTitle.get(title)).toMatchObject({
+          id: `artifact:${stableId}`,
+          links: { dispatch_id: "phid:disp-cp", artifact_id: stableId, query_id: null },
+          open: { href: `/artifacts/${stableId}`, fallback: "artifact" },
+          source: { kind: "artifact_catalog" },
+        });
+        expect(byTitle.get(title)?.id).not.toContain(finalDocumentPath);
+        expect(byTitle.get(title)?.open.href).not.toContain("query_cp_agent");
+      }
       expect(byTitle.get("Neighborhood Parks transcript capture")).toMatchObject({
         group: "transcripts",
         links: { dispatch_id: "phid:disp-cp", query_id: "query_cp_agent" },
       });
       expect(byTitle.get("park permit form")).toMatchObject({ group: "pdfs_forms", preview: { renderable: true } });
       expect(byTitle.get("cleveland park logo")).toMatchObject({ group: "images_screenshots_logos", preview: { renderable: true } });
+      expect(byTitle.get("Cleveland Park homepage final screenshot")).toMatchObject({
+        group: "images_screenshots_logos",
+        source: { path: screenshotArtifactPath },
+        preview: { renderable: true, state: "inline", media_type: "image/png" },
+      });
       expect(byTitle.get("july newsletter source")).toMatchObject({ group: "emails_captures" });
       expect(byTitle.get("vendor list")).toMatchObject({ group: "other_files" });
 
@@ -368,13 +411,13 @@ describe("project tracks read-model", () => {
 
       const app = express();
       mountProjectTracksRoutes(app, adapter);
-      const route = await request(app, "/projects/cleveland-park/sources?q=logo&type=images_screenshots_logos");
+      const route = await request(app, "/projects/cleveland-park/sources?q=homepage&type=images_screenshots_logos");
       expect(route.status).toBe(200);
       expect(route.body).toMatchObject({
         schema_version: "project-sources.v1",
-        filters: { q: "logo", type: "images_screenshots_logos", project: "cleveland-park" },
+        filters: { q: "homepage", type: "images_screenshots_logos", project: "cleveland-park" },
       });
-      expect(route.body.rows.map((row: any) => row.title)).toEqual(["cleveland park logo"]);
+      expect(route.body.rows.map((row: any) => row.title)).toEqual(["Cleveland Park homepage final screenshot"]);
 
       const searchDocs = await loadLocalSearchDocuments(adapter);
       const sourceHit = searchDocs.find((doc) => doc.entityType === "source" && doc.title === "Cleveland Park agent artifact report");

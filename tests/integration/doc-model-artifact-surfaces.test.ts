@@ -18,6 +18,7 @@ import {
   appendArtifactReceipt,
 } from "../../src/doc-model/artifact-document.js";
 import { mountArtifactSurfaceRoutes } from "../../src/doc-model/artifact-surface-routes.js";
+import { mountArtifactDocumentRoutes } from "../../src/doc-model/artifact-document-routes.js";
 import type { EntryStampKind } from "../../src/outputs/entry.js";
 
 async function freshDb() {
@@ -49,6 +50,7 @@ async function callAppRequest(app: Express, path: string): Promise<{ status: num
 function mountApp(adapter: SqliteAdapter): Express {
   const app = express();
   mountArtifactSurfaceRoutes(app, adapter);
+  mountArtifactDocumentRoutes(app, adapter);
   return app;
 }
 
@@ -90,6 +92,9 @@ async function seedArtifactRegistryDocument(input: {
   title: string;
   project: string;
   producedAt: string;
+  tag?: string;
+  mediaType?: string;
+  content?: string;
   bodyText?: string | null;
   bodyError?: string | null;
 }) {
@@ -99,14 +104,16 @@ async function seedArtifactRegistryDocument(input: {
        (artifact_id, basename, agent, tag, abs_path, title, produced_at, source, availability, media_type,
         source_mtime, source_size, project_ref, dispatch_ref, created_at, updated_at)
      VALUES
-       ($1,$2,'spencer','final-document',$3,$4,$5,'local-snapshot','present','text/markdown',
-        $6,4096,$7,$8,$9,$10)`,
+       ($1,$2,'spencer',$3,$4,$5,$6,'local-snapshot','present',$7,
+        $8,4096,$9,$10,$11,$12)`,
     [
       artifactId,
       input.path.split("/").pop(),
+      input.tag ?? "final-document",
       input.path,
       input.title,
       input.producedAt,
+      input.mediaType ?? "text/markdown",
       input.producedAt,
       input.project,
       `phid:disp-spencer-${input.project}`,
@@ -119,12 +126,13 @@ async function seedArtifactRegistryDocument(input: {
        (artifact_id, media_type, content_hash, version_key, source_mtime, source_size,
         body_text, body_truncated, body_error, cached_at, updated_at)
      VALUES
-       ($1,'text/markdown',NULL,$2,$3,4096,$4,0,$5,$6,$7)`,
+       ($1,$2,NULL,$3,$4,4096,$5,0,$6,$7,$8)`,
     [
       artifactId,
+      input.mediaType ?? "text/markdown",
       `snapshot:${artifactId}`,
       input.producedAt,
-      input.bodyText ?? `# ${input.title}\n\nSpencer demo local snapshot.`,
+      input.bodyText === undefined ? `# ${input.title}\n\nSpencer demo local snapshot.` : input.bodyText,
       input.bodyError ?? null,
       input.producedAt,
       input.producedAt,
@@ -134,11 +142,11 @@ async function seedArtifactRegistryDocument(input: {
     documentId: artifactId,
     title: input.title,
     audience: "operator",
-    kind: "final-document",
+    kind: input.tag === "transcript" ? "document" : input.tag === "image" ? "qa-evidence" : "final-document",
     project: input.project,
     now: input.producedAt,
     sourceLink: input.path,
-    content: `# ${input.title}\n\nFinal document for ${input.project}.`,
+    content: input.content ?? `# ${input.title}\n\nFinal document for ${input.project}.`,
   });
   return artifactId;
 }
@@ -429,6 +437,12 @@ describe("doc-model artifact surfaces — Projects", () => {
       body: { available: true, source: "doc_model_op_log" },
       cache: { available: false, source: "none", error: null },
     });
+    expect(kapelle.documents[1].open).toMatchObject({
+      href: "/doc-model/artifacts/doc%3Akap-final",
+      target: "doc_model_artifact",
+      artifact_id: "doc:kap-final",
+      recoverable: true,
+    });
   });
 
   it("includes system diagnostics and receipts only when include_system=true", async () => {
@@ -474,7 +488,7 @@ describe("doc-model artifact surfaces — Projects", () => {
     ]);
   });
 
-  it("lists Spencer demo final documents by stable ID, source path, and project mapping from the local snapshot", async () => {
+  it("opens Cleveland Park and Finance final documents from Projects by durable snapshot artifact ID", async () => {
     const samples = [
       {
         project: "cleveland-park",
@@ -517,10 +531,133 @@ describe("doc-model artifact surfaces — Projects", () => {
         source_path: sample.path,
         source_proof: "artifact_registry",
         freshness: { status: "fresh" },
-        body: { available: true, source: "doc_model_op_log" },
-        cache: { available: true, source: "artifact_body_cache", error: null },
+        open: {
+          href: `/doc-model/artifacts/${stableIds.get(sample.project)}`,
+          target: "doc_model_artifact",
+          artifact_id: stableIds.get(sample.project),
+          recoverable: true,
+        },
+        body: { available: true, status: "available", source: "doc_model_op_log" },
+        cache: { available: true, status: "available", source: "artifact_body_cache", error: null },
+      });
+
+      const opened = await callAppRequest(app, doc.open.href);
+      expect(opened.status).toBe(200);
+      expect(opened.body.document).toMatchObject({
+        document_id: stableIds.get(sample.project),
+        frontmatter: {
+          title: sample.title,
+          source_link: sample.path,
+        },
+        content: expect.stringContaining(sample.title),
       });
     }
+  });
+
+  it("opens final document, transcript, and image fixture rows from Projects without path/query identifiers", async () => {
+    const fixtures = [
+      {
+        project: "cleveland-park",
+        title: "Cleveland Park final website screenshot notes",
+        path: "/Users/kilgore/Dropbox/Code/cleveland-park/output/final-site-notes.md",
+        producedAt: "2026-07-15T16:00:00.000Z",
+        tag: "final-document",
+        mediaType: "text/markdown",
+        content: "# Cleveland Park final website screenshot notes\n\nScreenshot QA notes.",
+      },
+      {
+        project: "cleveland-park",
+        title: "Cleveland Park launch transcript",
+        path: "/Users/kilgore/Dropbox/Code/cleveland-park/output/launch-transcript.md",
+        producedAt: "2026-07-15T16:05:00.000Z",
+        tag: "transcript",
+        mediaType: "text/markdown",
+        content: "Transcript: final launch review for Cleveland Park.",
+      },
+      {
+        project: "cleveland-park",
+        title: "Cleveland Park final homepage image",
+        path: "/Users/kilgore/Dropbox/Code/cleveland-park/output/screenshots/final-homepage.png",
+        producedAt: "2026-07-15T16:10:00.000Z",
+        tag: "image",
+        mediaType: "image/png",
+        content: "Image artifact metadata: Cleveland Park final homepage screenshot.",
+      },
+    ];
+    const stableIds = new Map<string, string>();
+    for (const fixture of fixtures) {
+      stableIds.set(fixture.title, await seedArtifactRegistryDocument(fixture));
+    }
+
+    const app = mountApp(adapter);
+    const res = await callAppRequest(app, "/doc-model/surfaces/projects");
+
+    expect(res.status).toBe(200);
+    const group = res.body.items.find((item: any) => item.project === "cleveland-park");
+    for (const fixture of fixtures) {
+      const stableId = stableIds.get(fixture.title);
+      const doc = group.documents.find((item: any) => item.title === fixture.title);
+      expect(doc).toMatchObject({
+        document_id: stableId,
+        stable_id: stableId,
+        source_path: fixture.path,
+        source_proof: "artifact_registry",
+        open: {
+          href: `/doc-model/artifacts/${stableId}`,
+          target: "doc_model_artifact",
+          artifact_id: stableId,
+          recoverable: true,
+        },
+      });
+      expect(doc.document_id).not.toBe(fixture.path);
+      expect(doc.document_id).not.toContain("query:");
+
+      const opened = await callAppRequest(app, doc.open.href);
+      expect(opened.status).toBe(200);
+      expect(opened.body.document.document_id).toBe(stableId);
+      expect(opened.body.document.content).toContain(fixture.title.split(" ").slice(0, 2).join(" "));
+    }
+  });
+
+  it("shows a recoverable Projects state when a document body is missing", async () => {
+    const sourcePath = "/Users/kilgore/Dropbox/Code/cleveland-park/output/missing-body-final.md";
+    const stableId = await seedArtifactRegistryDocument({
+      project: "cleveland-park",
+      title: "Cleveland Park final document with missing body",
+      path: sourcePath,
+      producedAt: "2026-07-15T16:20:00.000Z",
+      content: "",
+      bodyText: null,
+      bodyError: "body_unavailable",
+    });
+
+    const app = mountApp(adapter);
+    const res = await callAppRequest(app, "/doc-model/surfaces/projects");
+
+    expect(res.status).toBe(200);
+    const group = res.body.items.find((item: any) => item.project === "cleveland-park");
+    const doc = group.documents.find((item: any) => item.document_id === stableId);
+    expect(doc).toMatchObject({
+      document_id: stableId,
+      open: {
+        href: `/doc-model/artifacts/${stableId}`,
+        target: "doc_model_artifact",
+        artifact_id: stableId,
+        recoverable: false,
+      },
+      source_path: sourcePath,
+      freshness: { status: "error" },
+      body: { available: false, status: "missing", source: "doc_model_op_log" },
+      cache: { available: false, status: "error", source: "artifact_body_cache", error: "body_unavailable" },
+    });
+
+    const opened = await callAppRequest(app, doc.open.href);
+    expect(opened.status).toBe(200);
+    expect(opened.body.document).toMatchObject({
+      document_id: stableId,
+      frontmatter: { title: "Cleveland Park final document with missing body" },
+      content: "",
+    });
   });
 
   it("falls back to the authored source path when a final document has no artifact registry row", async () => {

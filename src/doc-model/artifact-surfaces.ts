@@ -249,6 +249,12 @@ export interface ProjectDocumentSummary {
   kind: string;
   project: string;
   updated_at: string;
+  open: {
+    href: string;
+    target: "doc_model_artifact";
+    artifact_id: string;
+    recoverable: boolean;
+  };
   source_path: string | null;
   source_proof: "artifact_registry" | "document_source_link" | "missing";
   freshness: {
@@ -257,10 +263,12 @@ export interface ProjectDocumentSummary {
   };
   body: {
     available: boolean;
+    status: "available" | "missing";
     source: "doc_model_op_log";
   };
   cache: {
     available: boolean;
+    status: "available" | "missing" | "error";
     source: "artifact_body_cache" | "none";
     error: string | null;
   };
@@ -334,6 +342,7 @@ function projectDocumentSummary(
   const fallbackSourcePath = sourcePathFromSourceLink(projection.frontmatter.source_link);
   const bodyAvailable = projection.content.trim().length > 0;
   const cacheAvailable = !!registry?.body_text && !registry.body_error;
+  const recoverable = bodyAvailable || cacheAvailable;
   return {
     document_id: projection.document_id,
     stable_id: projection.document_id,
@@ -341,6 +350,12 @@ function projectDocumentSummary(
     kind: projection.stamp.kind,
     project,
     updated_at: projection.updated_at,
+    open: {
+      href: `/doc-model/artifacts/${encodeURIComponent(projection.document_id)}`,
+      target: "doc_model_artifact",
+      artifact_id: projection.document_id,
+      recoverable,
+    },
     source_path: registry?.abs_path ?? fallbackSourcePath,
     source_proof: registry?.abs_path ? "artifact_registry" : fallbackSourcePath ? "document_source_link" : "missing",
     freshness: {
@@ -349,10 +364,12 @@ function projectDocumentSummary(
     },
     body: {
       available: bodyAvailable,
+      status: bodyAvailable ? "available" : "missing",
       source: "doc_model_op_log",
     },
     cache: {
       available: cacheAvailable,
+      status: cacheStatus(registry),
       source: registry ? "artifact_body_cache" : "none",
       error: registry?.body_error ?? null,
     },
@@ -373,6 +390,12 @@ function freshnessStatus(
   if (availability === "present") return "fresh";
   if (availability === "missing") return "missing";
   return "unknown";
+}
+
+function cacheStatus(registry: ProjectDocumentRegistryRow | null): ProjectDocumentSummary["cache"]["status"] {
+  if (!registry) return "missing";
+  if (registry.body_error) return "error";
+  return registry.body_text ? "available" : "missing";
 }
 
 /** Reports — operator report/evidence artifacts, reverse-chron by updated_at. */
