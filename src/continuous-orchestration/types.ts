@@ -199,6 +199,7 @@ export interface DecisionRecord {
     | "refuel"
     | "fleet_blockage"
     | "model_policy_drift_alert"
+    | "target_unhealthy_incident"
     | "auto_promote"
     | "ready_metadata_repair"
     | "target_unhealthy_reroute"

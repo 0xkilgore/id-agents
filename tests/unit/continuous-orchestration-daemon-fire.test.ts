@@ -6,7 +6,7 @@ import { describe, expect, it } from "vitest";
 import { ContinuousOrchestrationDaemon, type DaemonDeps } from "../../src/continuous-orchestration/daemon.js";
 import { SqliteAdapter } from "../../src/db/sqlite-adapter.js";
 import { migrateSqlite } from "../../src/db/migrations/sqlite.js";
-import { insertBacklogItem, getBacklogItem, setItemState, setMode } from "../../src/continuous-orchestration/storage.js";
+import { insertBacklogItem, getBacklogItem, recordTickOutcome, setItemState, setMode } from "../../src/continuous-orchestration/storage.js";
 import { defaultConfig } from "../../src/continuous-orchestration/config.js";
 import type { BacklogItem } from "../../src/continuous-orchestration/types.js";
 
@@ -790,6 +790,118 @@ describe("ready admission target-unhealthy receipts", () => {
       expect(row.target_unhealthy_receipt?.safe_action_summary).toContain("downclassify/supersede");
       expect(row.target_unhealthy_receipt?.safe_action_summary).toContain("restart the owner only when safe");
     }
+  });
+
+  it("deduplicates target-unhealthy ready-blocked Telegram incidents across consecutive ticks", async () => {
+    const adapter = new SqliteAdapter(":memory:");
+    await migrateSqlite(adapter);
+    await setMode(adapter, "default", "running");
+
+    for (let i = 0; i < 7; i += 1) {
+      await insertBacklogItem(adapter, {
+        team_id: "default",
+        logical_key: `wave91-unhealthy-${i}`,
+        title: `wave91 target unhealthy ${i}`,
+        track: "T-RELY",
+        to_agent: i < 4 ? "brunel" : "coder-max",
+        dispatch_body: "hold until target is healthy",
+        readiness_state: "ready",
+        risk_class: "build",
+        write_scope: [`/repo/wave91/unhealthy-${i}`],
+      });
+    }
+    const dependency = await insertBacklogItem(adapter, {
+      team_id: "default",
+      logical_key: "wave91-blocking-dependency",
+      title: "wave91 dependency not done",
+      track: "T-RELY",
+      to_agent: "roger",
+      dispatch_body: "dependency",
+      readiness_state: "blocked_dependency",
+      risk_class: "build",
+      write_scope: ["/repo/wave91/dependency-root"],
+    });
+    for (let i = 0; i < 3; i += 1) {
+      await insertBacklogItem(adapter, {
+        team_id: "default",
+        logical_key: `wave91-blocked-dependency-${i}`,
+        title: `wave91 blocked dependency ${i}`,
+        track: "T-RELY",
+        to_agent: "roger",
+        dispatch_body: "blocked until dependency finishes",
+        readiness_state: "ready",
+        risk_class: "build",
+        write_scope: [`/repo/wave91/dependency-${i}`],
+        dependencies: [dependency.item_id],
+      });
+    }
+    await recordTickOutcome(adapter, "default", {
+      zero_ticks: 2,
+      fired: false,
+      admission_block_reasons: {
+        target_unhealthy: 7,
+        blocked_dependency: 3,
+      },
+    });
+
+    const alerts: string[] = [];
+    const daemon = new ContinuousOrchestrationDaemon({
+      adapter,
+      config: {
+        ...config(),
+        min_ready_fuel: 8,
+        max_enqueues_per_tick: 20,
+        max_new_per_tick: 20,
+        max_in_flight: 20,
+        stall_threshold_ticks: 3,
+      },
+      enqueue: async (item) => ({ dispatch_phid: `phid:disp-${item.item_id}`, query_id: `q-${item.item_id}` }),
+      readUsage: usage,
+      readInFlight: noInFlight,
+      resolveAgentHealth: async () => new Set(["roger"]),
+      readDiskHeadroom: async () => ({
+        schema_version: "disk-headroom.v1",
+        state: "ok",
+        path: "/tmp",
+        free_bytes: 50 * 1024 ** 3,
+        available_bytes: 50 * 1024 ** 3,
+        total_bytes: 100 * 1024 ** 3,
+        free_gib: 50,
+        available_gib: 50,
+        total_gib: 100,
+        used_percent: 50,
+        min_free_bytes: 5 * 1024 ** 3,
+        warn_free_bytes: 10 * 1024 ** 3,
+        reason: null,
+      }),
+      alert: async (message) => { alerts.push(message); },
+    });
+
+    const first = await daemon.runTick();
+    const second = await daemon.runTick();
+
+    expect(first.decisions).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          action: "target_unhealthy_incident",
+          metadata: expect.objectContaining({
+            incident_code: "ready_fuel_blocked_by_target_unhealthy",
+            affected_targets: ["brunel", "coder-max"],
+            blocker_counts: [
+              { code: "target_unhealthy", category: "runtime_unavailable", count: 7 },
+              { code: "blocked_dependency", category: "lane_eligibility", count: 3 },
+            ],
+          }),
+        }),
+      ]),
+    );
+    expect(first.decisions.some((decision) => decision.action === "stall_alert")).toBe(false);
+    expect(second.decisions.some((decision) => decision.action === "target_unhealthy_incident")).toBe(true);
+    expect(alerts).toHaveLength(1);
+    expect(alerts[0]).toContain("target-unhealthy ready-blocked incident");
+    expect(alerts[0]).toContain("target_unhealthy=7");
+    expect(alerts[0]).toContain("blocked_dependency=3");
+    expect(alerts[0]).toContain("Affected targets: brunel, coder-max");
   });
 });
 

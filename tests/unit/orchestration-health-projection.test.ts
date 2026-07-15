@@ -455,6 +455,7 @@ describe("orchestration health projection", () => {
 
     expect(health.ready_item_blockers.target_unhealthy).toEqual({
       count: 8,
+      incident: null,
       top_blockers: [
         {
           target_agent: "roger",
@@ -496,6 +497,118 @@ describe("orchestration health projection", () => {
         },
       ],
     });
+  });
+
+  it("emits one bounded target-unhealthy incident when raw ready is blocked but not admissible", async () => {
+    await setMode(adapter, "default", "running");
+    const unhealthyIds: string[] = [];
+    const dependencyIds: string[] = [];
+    for (let i = 0; i < 7; i += 1) {
+      const row = await insertBacklogItem(adapter, {
+        title: `target unhealthy incident row ${i}`,
+        readiness_state: "ready",
+        risk_class: "build",
+        to_agent: i < 4 ? "brunel" : "coder-max",
+        dispatch_body: "continue",
+        write_scope: [`/repo/kapelle-unhealthy-${i}`],
+      });
+      unhealthyIds.push(row.item_id);
+    }
+    for (let i = 0; i < 3; i += 1) {
+      const row = await insertBacklogItem(adapter, {
+        title: `blocked dependency incident row ${i}`,
+        readiness_state: "ready",
+        risk_class: "build",
+        to_agent: "roger",
+        dispatch_body: "continue",
+        write_scope: [`/repo/kapelle-dependency-${i}`],
+      });
+      dependencyIds.push(row.item_id);
+    }
+    await recordTickOutcome(adapter, "default", {
+      zero_ticks: 3,
+      fired: false,
+      admission_block_reasons: {
+        target_unhealthy: 7,
+        blocked_dependency: 3,
+      },
+    });
+
+    const health = await readOrchestrationHealthProjection(adapter, "default", {
+      minReadyFuel: 8,
+      readyAdmission: {
+        rawReady: 10,
+        usefulReady: 0,
+        admissibleNow: 0,
+        blockerCounts: [
+          { code: "target_unhealthy", category: "runtime_unavailable", count: 7 },
+          { code: "blocked_dependency", category: "lane_eligibility", count: 3 },
+        ],
+        nonAdmitted: [
+          ...unhealthyIds.map((item_id, index) => ({
+            item_id,
+            code: "target_unhealthy",
+            to_agent: index < 4 ? "brunel" : "coder-max",
+          })),
+          ...dependencyIds.map((item_id) => ({ item_id, code: "blocked_dependency", to_agent: "roger" })),
+        ],
+        targetUnhealthyGroups: [
+          {
+            target: "brunel",
+            lane: "/repo/kapelle-unhealthy",
+            count: 4,
+            proposed_healthy_target: "regina",
+            examples: unhealthyIds.slice(0, 4).map((item_id) => ({ item_id, risk_class: "build" })),
+            recommended_action: "reroute brunel rows to regina or restart brunel",
+          },
+          {
+            target: "coder-max",
+            lane: "/repo/kapelle-unhealthy",
+            count: 3,
+            proposed_healthy_target: null,
+            examples: unhealthyIds.slice(4).map((item_id) => ({ item_id, risk_class: "build" })),
+            recommended_action: "restart coder-max or downclassify stale target pins",
+          },
+        ],
+        recommendedAction:
+          "repair target_unhealthy=7 rows before treating raw ready fuel as useful; resolve blocked_dependency=3 rows separately",
+      },
+    });
+
+    expect(health.ok).toBe(false);
+    expect(health.ready_item_blockers.ready).toBe(10);
+    expect(health.ready_item_blockers.admissible_now).toBe(0);
+    expect(health.build_ready_floor).toMatchObject({
+      blocked: true,
+      useful_ready_count: 0,
+      blocker_reasons: {
+        target_unhealthy: 7,
+        blocked_dependency: 3,
+        build_ready_below_floor: 1,
+      },
+    });
+    expect(health.ready_item_blockers.target_unhealthy.incident).toEqual({
+      schema_version: "orchestration.target_unhealthy_incident.v1",
+      incident_code: "ready_fuel_blocked_by_target_unhealthy",
+      dedupe_key: "ready_fuel_blocked_by_target_unhealthy|targets=brunel,coder-max|floor=8",
+      severity: "critical",
+      ready: 10,
+      floor: 8,
+      admissible_now: 0,
+      consecutive_zero_ticks: 3,
+      affected_targets: ["brunel", "coder-max"],
+      example_item_ids: unhealthyIds.slice(0, 5),
+      blocker_counts: [
+        { code: "target_unhealthy", category: "runtime_unavailable", count: 7 },
+        { code: "blocked_dependency", category: "lane_eligibility", count: 3 },
+      ],
+      recommended_action: "reroute 4 target_unhealthy row(s) from brunel to regina",
+    });
+    expect(health.ready_item_blockers.stale_ready_fuel.reason).toBe(
+      "useful_ready_fuel=0 is below min_ready_fuel=8; raw_ready_fuel=10; admissible_now=0",
+    );
+    expect(health.queue_quality.explanation).toContain("7 target_unhealthy");
+    expect(health.queue_quality.explanation).not.toContain("ready row(s) are admissible now");
   });
 
   it("persists enough zero-admit audit detail for stale target-unhealthy ready rows", async () => {
