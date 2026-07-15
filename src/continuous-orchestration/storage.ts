@@ -818,7 +818,7 @@ export interface StaleReadyReconcileResult {
   items: Array<{
     item_id: string;
     dispatch_phid: string;
-    from_state: "ready";
+    from_state: "ready" | "needs_review";
     to_state: "done" | "superseded";
     dispatch_status: string;
     artifact_path: string | null;
@@ -992,9 +992,9 @@ export async function reconcileOfflineSupersededReadyRow(
 }
 
 /**
- * Close stale READY rows that were already dispatched and now have terminal
- * scheduler evidence. This is deliberately operator-triggered and conservative:
- * retry_safe rows are preserved because a human explicitly approved a refire.
+ * Close stale READY/needs_review rows that were already dispatched and now have
+ * terminal scheduler evidence. This is deliberately conservative: retry_safe
+ * rows are preserved because a human explicitly approved a refire.
  */
 export async function reconcileStaleAlreadyDispatchedReadyRows(
   adapter: DbAdapter,
@@ -1024,7 +1024,7 @@ export async function reconcileStaleAlreadyDispatchedReadyRows(
        LEFT JOIN dispatch_scheduler_queue q
          ON q.dispatch_phid = i.last_dispatch_phid
       WHERE i.team_id = $1
-        AND i.readiness_state = 'ready'
+        AND i.readiness_state IN ('ready', 'needs_review')
         AND i.last_dispatch_phid IS NOT NULL
       ORDER BY i.updated_at ASC, i.created_at ASC`,
     [teamId],
@@ -1053,15 +1053,17 @@ export async function reconcileStaleAlreadyDispatchedReadyRows(
 
     const toState: "done" | "superseded" =
       status === "done" || promotionCompletedAndVerified(row.promotion_result_json) ? "done" : "superseded";
+    const fromState = row.readiness_state as "ready" | "needs_review";
+    const rowLabel = fromState === "needs_review" ? "needs_review row" : "ready row";
     const reason =
       toState === "done"
-        ? `already-dispatched ready row closed after terminal dispatch ${status}`
-        : `already-dispatched ready row superseded after terminal dispatch ${status}`;
+        ? `already-dispatched ${rowLabel} closed after terminal dispatch ${status}`
+        : `already-dispatched ${rowLabel} superseded after terminal dispatch ${status}`;
     const receipt: StaleDuplicateCloseoutReceipt = {
       schema_version: "orchestration.stale_duplicate_closeout_receipt.v1",
       closed_by: actor,
       closed_at: new Date().toISOString(),
-      from_state: "ready",
+      from_state: fromState,
       to_state: toState,
       reason: "close_or_ignore",
       track: row.track ?? null,
@@ -1088,7 +1090,7 @@ export async function reconcileStaleAlreadyDispatchedReadyRows(
                 updated_by = $4,
                 updated_at = $5
           WHERE item_id = $6
-            AND readiness_state = 'ready'
+            AND readiness_state IN ('ready', 'needs_review')
             AND COALESCE(retry_safe, 0) = 0`,
         [
           toState,
@@ -1109,7 +1111,7 @@ export async function reconcileStaleAlreadyDispatchedReadyRows(
     result.items.push({
       item_id: row.item_id,
       dispatch_phid: row.last_dispatch_phid ?? "",
-      from_state: "ready",
+      from_state: fromState,
       to_state: toState,
       dispatch_status: status,
       artifact_path: row.artifact_path ?? null,

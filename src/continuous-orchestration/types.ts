@@ -63,7 +63,7 @@ export interface StaleDuplicateCloseoutReceipt {
   /** Alias fields for newer receipt consumers that expect actor/timestamp naming. */
   actor?: string;
   timestamp?: string;
-  from_state: "ready";
+  from_state: "ready" | "needs_review";
   to_state: "done" | "superseded" | "ready";
   reason: "close_or_ignore" | "offline_target_superseded_by_fresher_wave66";
   /** Roadmap track of the closed row, e.g. "T-ORCH" — carried through so ops surfaces don't have to re-join the backlog row. */

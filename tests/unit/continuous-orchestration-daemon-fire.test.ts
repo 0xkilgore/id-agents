@@ -676,6 +676,90 @@ describe("ready admission target-unhealthy receipts", () => {
 });
 
 describe("empty auto-promote pipe alert", () => {
+  it("closes terminal stale needs_review rows and promotes safe current rows when useful fuel is 4 of 12", async () => {
+    const adapter = new SqliteAdapter(":memory:");
+    await migrateSqlite(adapter);
+    await setMode(adapter, "default", "running");
+
+    for (let i = 1; i <= 4; i += 1) {
+      await seedReadyBuildFuel(adapter, i);
+    }
+
+    const staleReviewRows: BacklogItem[] = [];
+    for (let i = 1; i <= 6; i += 1) {
+      await seedDispatchStatus(adapter, `phid:disp-stale-review-${i}`, "done");
+      staleReviewRows.push(await seedNeedsReviewItem(adapter, {
+        title: `terminal stale review duplicate ${i}`,
+        last_dispatch_phid: `phid:disp-stale-review-${i}`,
+        write_scope: [`repo/stale-review-${i}`],
+      }));
+    }
+
+    const safeRows: BacklogItem[] = [];
+    for (let i = 1; i <= 8; i += 1) {
+      safeRows.push(await seedNeedsReviewItem(adapter, {
+        title: `safe current review fuel ${i}`,
+        write_scope: [`repo/current-review-${i}`],
+      }));
+    }
+
+    const daemon = new ContinuousOrchestrationDaemon({
+      adapter,
+      config: {
+        ...config(),
+        auto_flesh_enabled: true,
+        auto_promote_enabled: true,
+        auto_promote_floor: 12,
+        auto_promote_min_lanes: 1,
+        max_flesh_per_tick: 0,
+      },
+      enqueue: async (item) => ({ dispatch_phid: `phid:disp-${item.item_id}`, query_id: `q-${item.item_id}` }),
+      readUsage: usage,
+      readInFlight: noInFlight,
+    });
+
+    const tick = await daemon.runTick();
+
+    expect(tick.stale_ready_reconciled).toMatchObject({
+      closed: 6,
+      superseded: 0,
+      preserved_retry_safe: 0,
+      dry_run: false,
+    });
+    expect(tick.stale_ready_reconciled.items.map((item) => item.from_state)).toEqual(
+      Array(6).fill("needs_review"),
+    );
+    expect(tick.auto_promote).toMatchObject({
+      triggered: true,
+      promoted: 8,
+      skipped: 0,
+      candidates_considered: 8,
+      before: { build_ready: 4 },
+    });
+
+    for (const stale of staleReviewRows) {
+      const row = await getBacklogItem(adapter, stale.item_id);
+      expect(row?.readiness_state).toBe("done");
+      expect(row?.stale_duplicate_closeout_receipt).toMatchObject({
+        from_state: "needs_review",
+        to_state: "done",
+        prior_dispatch_status: "done",
+      });
+    }
+    for (const safe of safeRows) {
+      expect(["ready", "in_flight"]).toContain((await getBacklogItem(adapter, safe.item_id))?.readiness_state);
+    }
+
+    const status = await daemon.explainAutoPromoteHealth();
+    expect(status.lanes.ready_plus_in_flight).toBeGreaterThanOrEqual(7);
+    expect(status.below_floor).toBe(false);
+    expect(status.triggered).toBe(false);
+    expect(status.candidates_considered).toBe(0);
+    expect(status.candidates.map((item) => item.item_id)).not.toEqual(
+      expect.arrayContaining(staleReviewRows.map((item) => item.item_id)),
+    );
+  });
+
   it("excludes stale terminal already-dispatched rows from low-fuel health while preserving failed retry blockers", async () => {
     const adapter = new SqliteAdapter(":memory:");
     await migrateSqlite(adapter);
