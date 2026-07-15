@@ -208,6 +208,99 @@ describe("orchestration health projection", () => {
     ]);
   });
 
+  it("keeps approval-gated raw ready rows out of actionable and useful build fuel", async () => {
+    await setMode(adapter, "default", "running");
+    const approvalRequiredIds: string[] = [];
+    for (let i = 0; i < 2; i += 1) {
+      await insertBacklogItem(adapter, {
+        title: `admissible build ready ${i}`,
+        readiness_state: "ready",
+        risk_class: "build",
+        to_agent: "roger",
+        dispatch_body: "continue",
+        write_scope: [`/repo/build-fuel-${i}`],
+      });
+    }
+    for (let i = 0; i < 11; i += 1) {
+      const item = await insertBacklogItem(adapter, {
+        title: `approval-gated ready ${i}`,
+        readiness_state: "ready",
+        risk_class: "external",
+        to_agent: "roger",
+        dispatch_body: "continue",
+        write_scope: [`/repo/approval-${i}`],
+      });
+      approvalRequiredIds.push(item.item_id);
+    }
+
+    const health = await readOrchestrationHealthProjection(adapter, "default", {
+      minReadyFuel: 12,
+      readyAdmission: {
+        rawReady: 13,
+        usefulReady: 2,
+        admissibleNow: 2,
+        blockerCounts: [
+          { code: "risk_requires_approval", category: "lane_eligibility", count: 11 },
+        ],
+        nonAdmitted: approvalRequiredIds.map((item_id) => ({ item_id, code: "risk_requires_approval" })),
+      },
+    });
+
+    expect(health.queue_quality.actionable_ready).toBe(2);
+    expect(health.ready_item_blockers).toMatchObject({
+      ready: 13,
+      actionable: 2,
+      admissible_now: 2,
+      stale_ready_floor: true,
+    });
+    expect(health.ready_item_blockers.stale_ready_fuel).toMatchObject({
+      active: true,
+      reason: "useful_ready_fuel=2 is below min_ready_fuel=12; raw_ready_fuel=13",
+      recommended_action:
+        "clear the top ready-admission blockers or promote/refuel safe backlog candidates until ready fuel is admissible",
+      counts_by_blocker_class: [
+        {
+          code: "risk_requires_approval",
+          category: "lane_eligibility",
+          count: 11,
+          examples: approvalRequiredIds.slice(0, 5),
+        },
+      ],
+      examples: approvalRequiredIds.slice(0, 5),
+    });
+    expect(health.ready_item_blockers.categories).toEqual([
+      expect.objectContaining({
+        code: "risk_requires_approval",
+        category: "lane_eligibility",
+        owner_lane: "chris",
+        count: 11,
+        examples: approvalRequiredIds.slice(0, 5),
+        recommended_action: "review and approve the item or lower the risk class before admission",
+      }),
+    ]);
+    expect(health.ready_item_blockers.items).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          item_id: approvalRequiredIds[0],
+          code: "risk_requires_approval",
+          category: "lane_eligibility",
+          owner_lane: "chris",
+          recommended_action: "review and approve the item or lower the risk class before admission",
+        }),
+      ]),
+    );
+    expect(health.build_ready_floor).toMatchObject({
+      blocked: true,
+      blocker_code: "build_ready_below_floor",
+      useful_ready_count: 2,
+      floor: 12,
+      build_ready_lanes: 2,
+      blocker_reasons: {
+        build_ready_below_floor: 1,
+      },
+    });
+  });
+
   it("projects Wave49 all-single-writer-busy ready fuel with blocked lane keys and cross-lane action", async () => {
     await setMode(adapter, "default", "running");
     const itemIds: string[] = [];
