@@ -95,11 +95,17 @@ describe("doc-model artifact surfaces — Now", () => {
     expect(res.status).toBe(200);
     expect(res.body.items.map((e: any) => e.phid)).toEqual(["doc:open"]);
     expect(res.body.items[0].stamp).toEqual({ audience: "operator", kind: "action-needed" });
+    expect(res.body.items[0].now_state).toMatchObject({
+      blocker_kind: "artifact_action",
+      route_state: "action_open",
+      receipt_state: "unreceipted",
+      source_link_state: "missing",
+    });
     expect(res.body.admission).toEqual({
-      source: "stamp",
+      source: "comment_thread",
       audience: "operator",
       kinds: ["action-needed", "direction-brief"],
-      reason: "operator audience with action-needed or direction-brief kind and no receipt",
+      reason: "operator action-needed/direction-brief rows with no receipt, plus Chris feedback comments awaiting a later receipt",
     });
   });
 
@@ -124,6 +130,88 @@ describe("doc-model artifact surfaces — Now", () => {
 
     expect(res.status).toBe(200);
     expect(res.body.items.map((e: any) => e.phid)).toEqual(["doc:direction"]);
+  });
+
+  it("fronts Chris feedback blockers with source-link and receipt state, not system receipts", async () => {
+    await author({
+      documentId: "doc:feedback",
+      title: "Kapelle feedback blocker",
+      audience: "operator",
+      kind: "document",
+      now: "2026-07-14T08:00:00.000Z",
+    });
+    await adapter.query(
+      `UPDATE doc_model_document_op
+          SET payload_json = json_set(payload_json, '$.source_link', 'manager:/artifacts/art-kapelle-feedback/comments#op-7')
+        WHERE document_id = $1 AND op_type = 'artifact_authored'`,
+      ["doc:feedback"],
+    );
+    await appendArtifactComment(adapter, {
+      documentId: "doc:feedback",
+      actor: "human:chris",
+      body: "This needs a source-linked receipt before sign-off.",
+      now: "2026-07-14T09:00:00.000Z",
+    });
+
+    await author({
+      documentId: "doc:answered",
+      title: "Already answered feedback",
+      audience: "operator",
+      kind: "document",
+      now: "2026-07-14T08:30:00.000Z",
+    });
+    await appendArtifactComment(adapter, {
+      documentId: "doc:answered",
+      actor: "chris",
+      body: "Looks blocked.",
+      now: "2026-07-14T09:30:00.000Z",
+    });
+    await appendArtifactReceipt(adapter, {
+      documentId: "doc:answered",
+      actor: "rams",
+      kind: "ship_blocked",
+      note: "routed to owner",
+      now: "2026-07-14T10:00:00.000Z",
+    });
+
+    await author({
+      documentId: "doc:system-receipt",
+      title: "System receipt flood row",
+      audience: "system",
+      kind: "receipt",
+      now: "2026-07-14T11:00:00.000Z",
+    });
+    await appendArtifactReceipt(adapter, {
+      documentId: "doc:system-receipt",
+      actor: "monitor",
+      kind: "ship_attempted",
+      note: "internal receipt",
+      now: "2026-07-14T11:01:00.000Z",
+    });
+
+    const app = mountApp(adapter);
+    const [now, system] = await Promise.all([
+      callAppRequest(app, "/doc-model/surfaces/now"),
+      callAppRequest(app, "/doc-model/surfaces/system"),
+    ]);
+
+    expect(now.status).toBe(200);
+    expect(now.body.items.map((e: any) => e.phid)).toEqual(["doc:feedback"]);
+    expect(now.body.items[0].now_state).toEqual({
+      blocker_kind: "feedback_blocker",
+      source_link: "manager:/artifacts/art-kapelle-feedback/comments#op-7",
+      source_link_state: "present",
+      route_state: "awaiting_response",
+      receipt_state: "unreceipted",
+      latest_comment: {
+        op_id: expect.any(Number),
+        actor: "human:chris",
+        ts: "2026-07-14T09:00:00.000Z",
+        body: "This needs a source-linked receipt before sign-off.",
+      },
+      latest_receipt: null,
+    });
+    expect(system.body.items.map((e: any) => e.phid)).toEqual(["doc:system-receipt"]);
   });
 });
 

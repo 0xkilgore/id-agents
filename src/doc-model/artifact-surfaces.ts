@@ -6,7 +6,7 @@
 // coded against that shape does not change when a surface's source flips
 // from a static JSON snapshot to these live routes.
 //
-// Now       — audience:operator + action-oriented kind, still open (no receipt yet).
+// Now       — audience:operator action rows plus Chris feedback blockers, still open.
 // Inbox     — documents whose latest op is an incoming comment awaiting disposition.
 // Activity  — receipt ops across all documents, reverse-chron.
 // Projects  — documents grouped by project, file-system-like listing.
@@ -46,6 +46,22 @@ function envelope<T>(items: T[], projection: string, admission: SurfaceAdmission
 const NOW_KINDS: EntryStampKind[] = ["action-needed", "direction-brief"];
 const REPORT_KINDS: EntryStampKind[] = ["report", "final-document", "closeout", "qa-evidence"];
 
+export type NowSurfaceReceiptState = "unreceipted" | "receipted";
+export type NowSurfaceRouteState = "awaiting_response" | "action_open";
+export type NowSurfaceSourceLinkState = "present" | "missing" | "unsafe";
+
+export interface NowSurfaceState {
+  blocker_kind: "artifact_action" | "feedback_blocker";
+  source_link: string | null;
+  source_link_state: NowSurfaceSourceLinkState;
+  route_state: NowSurfaceRouteState;
+  receipt_state: NowSurfaceReceiptState;
+  latest_comment: { op_id: number; actor: string; ts: string; body: string } | null;
+  latest_receipt: { op_id: number; actor: string; ts: string; kind: ArtifactDocumentReceiptKind; note: string | null } | null;
+}
+
+export type NowSurfaceEntry = ArtifactEntry & { now_state: NowSurfaceState };
+
 export function admitsNowSurface(stamp: EntryStamp | null | undefined): boolean {
   return stamp?.audience === "operator" && NOW_KINDS.includes(stamp.kind);
 }
@@ -67,28 +83,77 @@ async function projectAll(adapter: DbAdapter, documentIds: string[]): Promise<Ar
   return entries;
 }
 
-/** Now — action-oriented items for the operator that have not been receipted yet. */
+/** Now — action rows and Chris feedback blockers for the operator, not system receipts/artifacts. */
 export async function projectNowSurface(
   adapter: DbAdapter,
   teamId: string,
-): Promise<ReadModelEnvelope<ArtifactEntry>> {
+): Promise<ReadModelEnvelope<NowSurfaceEntry>> {
   const documentIds = await listArtifactDocumentIds(adapter, teamId, {
     audience: "operator",
     order: "asc",
   });
-  const open: ArtifactEntry[] = [];
+  const open: NowSurfaceEntry[] = [];
   for (const documentId of documentIds) {
     const projection = await projectArtifactDocument(adapter, documentId);
-    if (projection && admitsNowSurface(projection.stamp) && projection.receipts.length === 0) {
-      open.push(artifactDocumentToEntry(projection));
+    if (!projection) continue;
+    const latestComment = projection.comments[projection.comments.length - 1] ?? null;
+    const latestReceipt = projection.receipts[projection.receipts.length - 1] ?? null;
+    const receiptAfterLatestComment = !!latestComment && !!latestReceipt && latestReceipt.op_id > latestComment.op_id;
+    const isFeedbackBlocker =
+      !!latestComment &&
+      !receiptAfterLatestComment &&
+      isChrisFeedbackActor(latestComment.actor);
+    if (admitsNowSurface(projection.stamp) && projection.receipts.length === 0) {
+      open.push(withNowState(projection, {
+        blocker_kind: "artifact_action",
+        route_state: "action_open",
+        latest_comment: latestComment,
+        latest_receipt: latestReceipt,
+      }));
+    } else if (isFeedbackBlocker) {
+      open.push(withNowState(projection, {
+        blocker_kind: "feedback_blocker",
+        route_state: "awaiting_response",
+        latest_comment: latestComment,
+        latest_receipt: latestReceipt,
+      }));
     }
   }
   return envelope(open, "doc_model_now", {
-    source: "stamp",
+    source: "comment_thread",
     audience: "operator",
     kinds: NOW_KINDS,
-    reason: "operator audience with action-needed or direction-brief kind and no receipt",
+    reason: "operator action-needed/direction-brief rows with no receipt, plus Chris feedback comments awaiting a later receipt",
   });
+}
+
+function withNowState(
+  projection: Awaited<ReturnType<typeof projectArtifactDocument>> & {},
+  state: Pick<NowSurfaceState, "blocker_kind" | "route_state" | "latest_comment" | "latest_receipt">,
+): NowSurfaceEntry {
+  const sourceLink = projection.frontmatter.source_link;
+  return {
+    ...artifactDocumentToEntry(projection),
+    now_state: {
+      ...state,
+      source_link: sourceLink,
+      source_link_state: sourceLinkState(sourceLink),
+      receipt_state: state.latest_receipt ? "receipted" : "unreceipted",
+    },
+  };
+}
+
+function isChrisFeedbackActor(actor: string): boolean {
+  return /^(human:)?chris$/i.test(actor.trim());
+}
+
+function sourceLinkState(sourceLink: string | null): NowSurfaceSourceLinkState {
+  if (!sourceLink || sourceLink.trim() === "") return "missing";
+  const href = sourceLink.trim();
+  if (href.startsWith("file://") || href.startsWith("/Users/") || href.startsWith("/home/") || href.startsWith("/tmp/")) {
+    return "unsafe";
+  }
+  return "present";
 }
 
 export interface InboxSurfaceEntry {
