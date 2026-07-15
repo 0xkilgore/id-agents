@@ -3980,7 +3980,7 @@ describe("stale already-dispatched ready reconciliation route", () => {
 });
 
 describe("release-proof-readiness route", () => {
-  it("reports NOT READY with stale_reasons populated while infra_warnings stay clear", async () => {
+  it("keeps stale feedback and missing source links distinct when infra warnings are clear", async () => {
     await adapter.query(
       `INSERT INTO artifacts (
          artifact_id, basename, agent, tag, abs_path, title, produced_at, source,
@@ -4011,7 +4011,26 @@ describe("release-proof-readiness route", () => {
         "chris",
         "2020-01-01T12:00:00.000Z",
         JSON.stringify({ body: "Old feedback, long since superseded." }),
-        "https://manager.local/artifacts/art-kapelle-proof/comments#op-1",
+        "[redacted]",
+      ],
+    );
+    await adapter.query(
+      `INSERT INTO orchestration_backlog_item
+         (item_id, team_id, title, track, to_agent, dispatch_body, readiness_state, risk_class,
+          source_refs_json, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        "backlog-kapelle-proof-redacted",
+        "default",
+        "Kapelle release proof source context",
+        "kapelle",
+        "roger",
+        "Release-proof readiness follow-up",
+        "done",
+        "build",
+        JSON.stringify(["[redacted]"]),
+        "2020-01-01T11:00:00.000Z",
+        "2020-01-01T11:00:00.000Z",
       ],
     );
 
@@ -4025,12 +4044,56 @@ describe("release-proof-readiness route", () => {
       schema_version: "release_proof.readiness.v1",
       release_readiness: "not_ready",
       chris_readable_release_ready: "NOT READY",
-      feedback_evidence: { state: "stale" },
+      feedback_freshness: {
+        state: "stale",
+        latest_at: "2020-01-01T12:00:00.000Z",
+        stale: true,
+        reason: expect.stringContaining("latest feedback evidence is older than"),
+      },
+      source_link_state: {
+        state: "present",
+        safe_count: 1,
+        unsafe_count: 1,
+        total_count: 2,
+      },
+      infra_warning: {
+        state: "clear",
+        count: 0,
+        requires_operator_review: false,
+        source: "none",
+        action: null,
+      },
+      next_owner: {
+        lane: "chris",
+        action: expect.stringContaining("latest feedback evidence is older than"),
+        reason: "feedback_freshness",
+        candidates: [
+          {
+            lane: "chris",
+            reason: "feedback_freshness",
+            action: expect.stringContaining("latest feedback evidence is older than"),
+          },
+          {
+            lane: "release-engineering",
+            reason: "source_link_state",
+            action: "one or more source links are redacted or unsupported",
+          },
+        ],
+      },
+      feedback_evidence: { state: "stale", count: 1 },
       infra_warnings: { state: "clear", count: 0, items: [] },
+      sources: {
+        state: "present",
+        counts: { safe: 1, unsafe: 1, total: 2 },
+      },
       error_reasons: [],
     });
     expect(res.body.stale_reasons.length).toBeGreaterThan(0);
-    expect(res.body.missing_reasons).toEqual([]);
+    expect(res.body.missing_reasons).toEqual([
+      "one or more source links are redacted or unsupported",
+      "one or more feedback evidence items are missing safe source links",
+    ]);
+    expect(res.body.summary).not.toContain("infra warnings");
   });
 });
 
