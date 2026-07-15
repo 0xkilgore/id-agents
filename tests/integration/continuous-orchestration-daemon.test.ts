@@ -1686,6 +1686,102 @@ describe("daemon — dry-run vs live", () => {
     ]);
   });
 
+  it("status separates raw ready floor from below-floor useful fuel when retry safety and capacity block admission", async () => {
+    const duplicate = await seedReady(adapter, {
+      title: "duplicate retry guard at raw floor",
+      write_scope: ["repo/duplicate"],
+    });
+    await markReadyAlreadyDispatched(adapter, duplicate.item_id, "phid:disp-prior");
+    for (let i = 0; i < 11; i += 1) {
+      await seedReady(adapter, {
+        title: `capacity saturated raw ready ${i}`,
+        write_scope: [`repo/capacity-${i}`],
+      });
+    }
+
+    const { app, daemon } = mountStatusApp(
+      adapter,
+      {
+        dry_run: true,
+        auto_flesh_enabled: true,
+        auto_promote_enabled: true,
+        min_ready_fuel: 12,
+        max_in_flight: 1,
+        max_new_per_tick: 12,
+      },
+      { inFlight: 1 },
+    );
+    await daemon.setMode("running");
+
+    const res = await callApp(app, "/orchestration/status");
+
+    expect(res.status).toBe(200);
+    expect(res.body.counts).toMatchObject({
+      ready: 12,
+      raw_ready_fuel: 12,
+      useful_ready_fuel: 11,
+      admissible_now: 0,
+      raw_ready_lanes: 12,
+      useful_ready_lanes: 11,
+      admissible_lanes: 0,
+      ready_block_reasons: {
+        duplicate_dispatch_retry_required: 1,
+        no_in_flight_slots: 11,
+      },
+    });
+    expect(res.body.ready_admission).toMatchObject({
+      candidates: 12,
+      useful_ready: 11,
+      admissible_now: 0,
+      stale_ready_floor: {
+        stale: true,
+        ready: 12,
+        admissible: 0,
+        min_ready_fuel: 12,
+      },
+    });
+    expect(res.body.ready_admission.blocker_counts).toEqual(
+      expect.arrayContaining([
+        { code: "duplicate_dispatch_retry_required", category: "retry_safety", count: 1 },
+        { code: "no_in_flight_slots", category: "capacity_gate", count: 11 },
+      ]),
+    );
+    expect(res.body.ready_admission.non_admitted).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ code: "duplicate_dispatch_retry_required", action: "held" }),
+        expect.objectContaining({ code: "no_in_flight_slots", action: "held" }),
+      ]),
+    );
+    expect(res.body.health.ready_item_blockers).toMatchObject({
+      ready: 12,
+      actionable: 11,
+      min_ready_fuel: 12,
+      admissible_now: 0,
+      stale_ready_floor: true,
+      stale_ready_fuel: {
+        active: true,
+        reason: "actionable_ready=11 is below min_ready_fuel=12; admissible_now=0",
+        counts_by_blocker_class: expect.arrayContaining([
+          { code: "duplicate_dispatch_retry_required", category: "retry_safety", count: 1, examples: [duplicate.item_id] },
+          { code: "no_in_flight_slots", category: "capacity_gate", count: 11, examples: expect.any(Array) },
+        ]),
+      },
+    });
+    expect(res.body.health.build_ready_floor).toMatchObject({
+      blocked: true,
+      blocker_code: "build_ready_below_floor",
+      useful_ready_count: 11,
+      floor: 12,
+      build_ready_lanes: 11,
+      blocker_reasons: {
+        duplicate_dispatch_retry_required: 1,
+        build_ready_below_floor: 1,
+      },
+    });
+    expect(res.body.health.build_ready_floor.next_action).toMatch(/ready fuel reaches 11\/12/);
+    expect(res.body.health.build_ready_floor.next_action).not.toMatch(/empty|satisfies/i);
+  });
+
   it("status does not call single-writer-busy actionable rows admissible", async () => {
     await seedReady(adapter, {
       title: "single writer busy A",
