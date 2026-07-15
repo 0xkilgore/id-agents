@@ -34,6 +34,7 @@ export type FleetBlockagesReport = {
 };
 
 const STALE_CLARIFICATION_MS = 30 * 60 * 1000;
+const STALE_CLARIFICATION_SAMPLE_LIMIT = 64;
 
 export async function readFleetBlockages(
   adapter: DbAdapterLike,
@@ -52,41 +53,50 @@ export async function readFleetBlockages(
   const nowMs = Date.now();
   const blockages: FleetBlockage[] = [];
 
-  const { rows } = await adapter.query<{
-    dispatch_phid: string;
-    query_id: string | null;
-    to_agent: string | null;
-    active_clarification_json: string | null;
-    updated_at: string | null;
+  const { staleSql, staleParams } = staleClarificationSql(adapter, teamId, new Date(nowMs).toISOString());
+
+  const { rows: activeStatsRows } = await adapter.query<{
+    count: number | string;
+    oldest_at: string | null;
   }>(
-    `SELECT dispatch_phid, query_id, to_agent, active_clarification_json, updated_at
+    `SELECT COUNT(*) as count,
+            MIN(COALESCE(started_at, not_before_at, updated_at)) as oldest_at
        FROM dispatch_scheduler_queue
        WHERE team_id = ?
          AND status = 'needs_clarification'
          AND COALESCE(recovery_status, 'none') NOT IN ('moot', 'landed_reconciled', 'verified_done', 'retry_done')`,
     [teamId],
   );
+  const { rows: staleCountRows } = await adapter.query<{ count: number | string }>(
+    `SELECT COUNT(*) as count FROM (${staleSql}) stale_clarifications`,
+    staleParams,
+  );
+  const { rows: staleRows } = await adapter.query<{
+    dispatch_phid: string;
+    query_id: string | null;
+    to_agent: string | null;
+    active_clarification_json: string | null;
+    updated_at: string | null;
+  }>(
+    `${staleSql}
+      LIMIT ?`,
+    [...staleParams, STALE_CLARIFICATION_SAMPLE_LIMIT],
+  );
 
-  let oldestAt: string | null = null;
-  let staleCount = 0;
+  const clarificationCount = Number(activeStatsRows[0]?.count ?? 0);
+  const staleCount = Number(staleCountRows[0]?.count ?? 0);
+  const oldestAt = activeStatsRows[0]?.oldest_at ?? null;
   let needsChrisCount = 0;
   let nonChrisCount = 0;
   let staleNonChrisCount = 0;
-  for (const row of rows) {
-    const active = parseActiveClarification(row.active_clarification_json);
-    const createdAt = active?.created_at ?? row.updated_at ?? null;
-    if (createdAt && (!oldestAt || createdAt < oldestAt)) oldestAt = createdAt;
-    const staleAt = active?.stale_at ?? null;
-    const stale = (staleAt && Date.parse(staleAt) <= nowMs) || clarificationAgeIsStale(createdAt, nowMs);
-    if (stale) staleCount += 1;
+  for (const row of staleRows) {
     if (clarificationNeedsChris(row)) {
       needsChrisCount += 1;
     } else {
       nonChrisCount += 1;
-      if (stale) staleNonChrisCount += 1;
+      staleNonChrisCount += 1;
     }
   }
-  const clarificationCount = rows.length;
 
   if (clarificationCount > 0) {
     blockages.push({
@@ -99,10 +109,13 @@ export async function readFleetBlockages(
     });
   }
   if (staleCount > 0) {
+    const staleSampleSuffix = staleCount > staleRows.length
+      ? `; classified sample=${staleRows.length}/${staleCount}`
+      : "";
     blockages.push({
       kind: "stale_clarification",
       severity: "critical",
-      message: `${staleCount} clarification(s) past stale threshold`,
+      message: `${staleCount} clarification(s) past stale threshold; non-Chris=${staleNonChrisCount}, Chris-needed=${needsChrisCount}${staleSampleSuffix}`,
       count: staleCount,
       oldest_at: oldestAt,
       action: "/ops/dispatches?status=active",
@@ -167,6 +180,29 @@ export async function readFleetBlockages(
     },
     blockages,
     generated_at: new Date(nowMs).toISOString(),
+  };
+}
+
+function staleClarificationSql(
+  adapter: DbAdapterLike,
+  teamId: string,
+  nowIso: string,
+): { staleSql: string; staleParams: unknown[] } {
+  const dialect = (adapter as { dialect?: string }).dialect;
+  const staleAtExpr = dialect === "postgres"
+    ? "(active_clarification_json::jsonb ->> 'stale_at')"
+    : "json_extract(active_clarification_json, '$.stale_at')";
+  return {
+    staleSql: `SELECT dispatch_phid, query_id, to_agent, active_clarification_json, updated_at
+       FROM dispatch_scheduler_queue
+       WHERE team_id = ?
+         AND status = 'needs_clarification'
+         AND COALESCE(recovery_status, 'none') NOT IN ('moot', 'landed_reconciled', 'verified_done', 'retry_done')
+         AND active_clarification_json IS NOT NULL
+         AND ${staleAtExpr} IS NOT NULL
+         AND ${staleAtExpr} <= ?
+       ORDER BY ${staleAtExpr} ASC, dispatch_phid ASC`,
+    staleParams: [teamId, nowIso],
   };
 }
 

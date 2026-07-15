@@ -1025,6 +1025,15 @@ export async function migrateSqlite(adapter: SqliteAdapter): Promise<void> {
       );
     CREATE INDEX IF NOT EXISTS dispatch_scheduler_clarifications_read_idx
       ON dispatch_scheduler_queue(team_id, status, updated_at, dispatch_phid);
+    CREATE INDEX IF NOT EXISTS dispatch_scheduler_stale_clarifications_health_idx
+      ON dispatch_scheduler_queue(
+        team_id,
+        json_extract(active_clarification_json, '$.stale_at'),
+        COALESCE(started_at, not_before_at, updated_at),
+        dispatch_phid
+      )
+      WHERE status = 'needs_clarification'
+        AND COALESCE(recovery_status, 'none') NOT IN ('moot', 'landed_reconciled', 'verified_done', 'retry_done');
     CREATE INDEX IF NOT EXISTS dispatch_scheduler_team_agent_query_idx
       ON dispatch_scheduler_queue(team_id, agent_query_id)
       WHERE agent_query_id IS NOT NULL;

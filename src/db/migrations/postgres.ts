@@ -814,6 +814,15 @@ export async function migratePostgres(adapter: DbAdapter): Promise<void> {
             (COALESCE(completed_at, started_at, updated_at, not_before_at)) DESC,
             dispatch_phid DESC
           );
+        CREATE INDEX IF NOT EXISTS dispatch_scheduler_stale_clarifications_health_idx
+          ON dispatch_scheduler_queue(
+            team_id,
+            ((active_clarification_json::jsonb ->> 'stale_at')),
+            (COALESCE(started_at, not_before_at, updated_at)),
+            dispatch_phid
+          )
+          WHERE status = 'needs_clarification'
+            AND COALESCE(recovery_status, 'none') NOT IN ('moot', 'landed_reconciled', 'verified_done', 'retry_done');
         UPDATE dispatch_scheduler_queue
         SET artifact_path = (result_json::jsonb ->> 'artifact_path')
         WHERE artifact_path IS NULL
