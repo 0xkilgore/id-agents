@@ -71,7 +71,7 @@ function withReadyAdmissionOperatorSummary(
   if (unhealthyTargets === 0 || readyAdmission.admissible_now === 0) return health;
 
   const action =
-    `Reroute ${unhealthyTargets} target_unhealthy ready row(s) to compatible healthy agents; ` +
+    `Reroute or supersede ${unhealthyTargets} target_unhealthy ready row(s) to compatible healthy agents; ` +
     "keep admitting available pool rows while capacity exists, and top off compatible pool fuel only if healthy capacity runs short.";
   const safeActions = health.operator_summary.safe_actions.includes(action)
     ? health.operator_summary.safe_actions
