@@ -40,8 +40,10 @@ import {
   reconcileStaleAlreadyDispatchedReadyRows,
   setItemState,
   setMode,
+  updateBacklogFields,
   type ReadyRuntimeRepair,
   type StaleReadyReconcileResult,
+  type DispatchOutcome,
 } from "./storage.js";
 import { deriveBacklogRetryReadiness } from "./backlog-retry-readiness.js";
 import { duplicateDispatchRetryReceipt } from "./duplicate-dispatch-retry-receipt.js";
@@ -119,6 +121,14 @@ export interface PoolRouting {
   poolForItem: (item: BacklogItem) => ResolvedPool | null;
   /** Pool members available to take work (members minus `building`, online/healthy), in preference order. */
   availableBuilders: (pool: ResolvedPool, building: Set<string>) => string[];
+  /** Resolve a same-pool healthy target for an unhealthy explicitly targeted row. */
+  healthyEquivalentTarget?: (input: {
+    item: BacklogItem;
+    unhealthyTarget: string;
+    healthyAgents: Set<string>;
+    busyAgents: Set<string>;
+    targetAgentRuntimes?: Map<string, string>;
+  }) => { pool: ResolvedPool; target: string; candidates: string[] } | null;
   /** Allocate a distinct worktree for one build off the pool repo. */
   allocateWorktree: (input: { agent: string; item: BacklogItem; pool: ResolvedPool }) => Promise<BuildWorktree>;
 }
@@ -257,6 +267,13 @@ export interface ReadyAdmissionTargetUnhealthyReceipt {
   code: "target_unhealthy";
   target: string;
   prior_owner: string | null;
+  proposed_healthy_target: string | null;
+  prior_dispatch_evidence: {
+    last_dispatch_phid: string | null;
+    status: string | null;
+    recovery_status: string | null;
+    retry_safe: boolean;
+  };
   safe_action: "reroute_downclassify_or_owner_restart";
   safe_action_summary: string;
   counts_as_useful_build_fuel: false;
@@ -634,9 +651,25 @@ function readyAdmissionTargetUnhealthyGroups(
   );
 }
 
+function priorDispatchEvidence(
+  item: BacklogItem | undefined,
+  outcomes: Map<string, DispatchOutcome> = new Map(),
+): ReadyAdmissionTargetUnhealthyReceipt["prior_dispatch_evidence"] {
+  const phid = item?.last_dispatch_phid ?? null;
+  const outcome = phid ? outcomes.get(phid) : undefined;
+  return {
+    last_dispatch_phid: phid,
+    status: outcome?.status ?? null,
+    recovery_status: outcome?.recovery_status ?? null,
+    retry_safe: item?.retry_safe === true,
+  };
+}
+
 function targetUnhealthyReceipt(
   item: BacklogItem | undefined,
   metadata: Record<string, unknown> | undefined,
+  proposedHealthyTarget: string | null = null,
+  outcomes: Map<string, DispatchOutcome> = new Map(),
 ): ReadyAdmissionTargetUnhealthyReceipt | undefined {
   const target = typeof metadata?.target === "string" && metadata.target.trim() !== ""
     ? metadata.target
@@ -649,9 +682,11 @@ function targetUnhealthyReceipt(
     code: "target_unhealthy",
     target,
     prior_owner: priorOwner,
+    proposed_healthy_target: proposedHealthyTarget,
+    prior_dispatch_evidence: priorDispatchEvidence(item, outcomes),
     safe_action: "reroute_downclassify_or_owner_restart",
     safe_action_summary:
-      `Do not refire silently. Reroute this ready row to a healthy compatible ${repairScope} agent, ` +
+      `Do not refire silently. Reroute this ready row to ${proposedHealthyTarget ?? "a healthy compatible"} ${repairScope} agent, ` +
       "downclassify/supersede it if the target pin is stale, or restart the owner only when safe.",
     counts_as_useful_build_fuel: false,
   };
@@ -854,34 +889,55 @@ export class ContinuousOrchestrationDaemon {
     const admitCap = tickWriteCaps(writeCfg, refuelFleshed).admitCap;
 
     const readyRuntimeRepairs = await repairReadyCodexRuntimeMetadata(this.deps.adapter, this.teamId, { apply: true });
-    const ready = await listReadyItems(this.deps.adapter, this.teamId);
+    let ready = await listReadyItems(this.deps.adapter, this.teamId);
     const dependency_index = await listDependencyResolution(this.deps.adapter, this.teamId);
     // Priority-rank, then FAIR-interleave across distinct write_scope lanes so a
     // single busy lane can't monopolize this tick's admission slots — admission
     // consumes this order greedily, so a lane-diverse order => lane-diverse fires.
-    const ordered = fairInterleaveByLane(orderCandidates(ready));
+    let ordered = fairInterleaveByLane(orderCandidates(ready));
 
     // Stage C: compute the per-pool capacity + free-builder gate from the
     // current in-flight builds, so the daemon spills across pool members instead
     // of serializing the whole backlog onto one lane.
-    const poolGate = await this.buildPoolGate(ordered);
+    let poolGate = await this.buildPoolGate(ordered);
 
     // RD-014: resolve live health for every agent name admission might target
     // this tick — non-pool candidates' to_agent, plus every pool's builder
     // list (any of them could be late-bound). Root cause of the pending-lane
     // cascade (+149 failed dispatches in one overnight wave): admission fired
     // to a lane with no check the target runtime was actually up.
-    const candidateAgentNames = new Set<string>();
+    let candidateAgentNames = new Set<string>();
     for (const item of ordered) if (item.to_agent) candidateAgentNames.add(item.to_agent);
     if (poolGate) for (const builders of poolGate.pool_free_builders.values()) for (const b of builders) candidateAgentNames.add(b);
-    const healthy_agents = this.deps.resolveAgentHealth
+    let healthy_agents = this.deps.resolveAgentHealth
       ? await this.deps.resolveAgentHealth([...candidateAgentNames])
       : undefined;
-    const pool_lane_blockers = poolGate ? this.applyPoolHealthGate(poolGate, healthy_agents) : undefined;
-    const target_agent_runtimes = this.deps.resolveAgentRuntimes
+    let pool_lane_blockers = poolGate ? this.applyPoolHealthGate(poolGate, healthy_agents) : undefined;
+    let target_agent_runtimes = this.deps.resolveAgentRuntimes
       ? await this.deps.resolveAgentRuntimes([...candidateAgentNames])
       : undefined;
     const ready_item_blockers = await this.readyItemBlockers();
+    const targetUnhealthyReroutes = await this.rerouteTargetUnhealthyReadyRows({
+      items: ordered,
+      healthyAgents: healthy_agents,
+      targetAgentRuntimes: target_agent_runtimes,
+      dryRun: config.dry_run,
+    });
+    if (targetUnhealthyReroutes.changed && !config.dry_run) {
+      ready = await listReadyItems(this.deps.adapter, this.teamId);
+      ordered = fairInterleaveByLane(orderCandidates(ready));
+      poolGate = await this.buildPoolGate(ordered);
+      candidateAgentNames = new Set<string>();
+      for (const item of ordered) if (item.to_agent) candidateAgentNames.add(item.to_agent);
+      if (poolGate) for (const builders of poolGate.pool_free_builders.values()) for (const b of builders) candidateAgentNames.add(b);
+      healthy_agents = this.deps.resolveAgentHealth
+        ? await this.deps.resolveAgentHealth([...candidateAgentNames])
+        : undefined;
+      pool_lane_blockers = poolGate ? this.applyPoolHealthGate(poolGate, healthy_agents) : undefined;
+      target_agent_runtimes = this.deps.resolveAgentRuntimes
+        ? await this.deps.resolveAgentRuntimes([...candidateAgentNames])
+        : undefined;
+    }
 
     const ctx: AdmissionContext = {
       mode: state.mode,
@@ -902,7 +958,7 @@ export class ContinuousOrchestrationDaemon {
     };
 
     const plan = planAdmission(ordered, ctx, config);
-    const decisions: DecisionRecord[] = [...reconcileDecisions];
+    const decisions: DecisionRecord[] = [...reconcileDecisions, ...targetUnhealthyReroutes.decisions];
     for (const item of staleReadyReconcile.items) {
       decisions.push({
         item_id: item.item_id,
@@ -1319,6 +1375,32 @@ export class ContinuousOrchestrationDaemon {
         )
         .filter((phid): phid is string => phid != null),
     );
+    const targetUnhealthyOutcomes = await getDispatchOutcomesByPhid(
+      this.deps.adapter,
+      plan.skipped
+        .filter((decision) => decision.metadata?.code === "target_unhealthy")
+        .map((decision) => {
+          const item = decision.item_id ? byId.get(decision.item_id) : undefined;
+          return item?.last_dispatch_phid ?? null;
+        })
+        .filter((phid): phid is string => phid != null),
+    );
+    const busyAgents = await this.busyPoolAgents();
+    const proposedHealthyTargets = new Map<string, string>();
+    for (const decision of plan.skipped) {
+      if (decision.metadata?.code !== "target_unhealthy" || !decision.item_id) continue;
+      const item = byId.get(decision.item_id);
+      const target = typeof decision.metadata.target === "string" ? decision.metadata.target : item?.to_agent;
+      if (!item || !target) continue;
+      const proposal = this.proposeHealthyEquivalentTarget({
+        item,
+        unhealthyTarget: target,
+        healthyAgents: healthy_agents,
+        busyAgents,
+        targetAgentRuntimes: target_agent_runtimes,
+      });
+      if (proposal) proposedHealthyTargets.set(item.item_id, proposal.target);
+    }
     const blockerCounts = readyAdmissionBlockerCounts(plan);
     const nonUsefulItemIds = new Set(
       plan.skipped
@@ -1377,7 +1459,12 @@ export class ContinuousOrchestrationDaemon {
         const item = decision.item_id ? byId.get(decision.item_id) : undefined;
         const code = typeof decision.metadata?.code === "string" ? decision.metadata.code : "unknown";
         const unhealthyReceipt = code === "target_unhealthy"
-          ? targetUnhealthyReceipt(item, decision.metadata)
+          ? targetUnhealthyReceipt(
+            item,
+            decision.metadata,
+            decision.item_id ? proposedHealthyTargets.get(decision.item_id) ?? null : null,
+            targetUnhealthyOutcomes,
+          )
           : undefined;
         const lastDispatchPhid =
           decision.metadata?.code === "duplicate_dispatch_retry_required" &&
@@ -1624,6 +1711,157 @@ export class ContinuousOrchestrationDaemon {
       }
     }
     return out;
+  }
+
+  private async busyPoolAgents(): Promise<Set<string>> {
+    const inFlight = await listBacklogByState(this.deps.adapter, {
+      team_id: this.teamId,
+      state: "in_flight",
+    });
+    return new Set(inFlight.map((item) => item.to_agent).filter((agent): agent is string => !!agent));
+  }
+
+  private proposeHealthyEquivalentTarget(args: {
+    item: BacklogItem;
+    unhealthyTarget: string;
+    healthyAgents: Set<string> | undefined;
+    busyAgents: Set<string>;
+    targetAgentRuntimes?: Map<string, string>;
+  }): { pool: ResolvedPool; target: string; candidates: string[] } | null {
+    if (!args.healthyAgents || !this.deps.pools?.healthyEquivalentTarget) return null;
+    return this.deps.pools.healthyEquivalentTarget({
+      item: args.item,
+      unhealthyTarget: args.unhealthyTarget,
+      healthyAgents: args.healthyAgents,
+      busyAgents: args.busyAgents,
+      targetAgentRuntimes: args.targetAgentRuntimes,
+    });
+  }
+
+  private targetUnhealthyRerouteReceipt(args: {
+    item: BacklogItem;
+    unhealthyTarget: string;
+    proposedHealthyTarget: string | null;
+    action: "rerouted" | "held";
+    reason: string;
+    outcomes?: Map<string, DispatchOutcome>;
+  }): Record<string, unknown> {
+    return {
+      schema_version: "orchestration.target_unhealthy_reroute_receipt.v1",
+      code: "target_unhealthy",
+      action: args.action,
+      unhealthy_target: args.unhealthyTarget,
+      proposed_healthy_target: args.proposedHealthyTarget,
+      prior_owner: args.item.to_agent,
+      item_id: args.item.item_id,
+      title: args.item.title,
+      prior_dispatch_evidence: priorDispatchEvidence(args.item, args.outcomes),
+      duplicate_retry_refired: false,
+      reason: args.reason,
+    };
+  }
+
+  private async rerouteTargetUnhealthyReadyRows(args: {
+    items: BacklogItem[];
+    healthyAgents: Set<string> | undefined;
+    targetAgentRuntimes?: Map<string, string>;
+    dryRun: boolean;
+  }): Promise<{ changed: boolean; decisions: DecisionRecord[] }> {
+    if (!args.healthyAgents || !this.deps.pools?.healthyEquivalentTarget) return { changed: false, decisions: [] };
+    const busyAgents = await this.busyPoolAgents();
+    const priorOutcomes = await getDispatchOutcomesByPhid(
+      this.deps.adapter,
+      args.items.map((item) => item.last_dispatch_phid).filter((phid): phid is string => !!phid),
+    );
+    const decisions: DecisionRecord[] = [];
+    let changed = false;
+
+    for (const item of args.items) {
+      const unhealthyTarget = item.to_agent?.trim();
+      if (!unhealthyTarget || args.healthyAgents.has(unhealthyTarget)) continue;
+
+      const proposal = this.proposeHealthyEquivalentTarget({
+        item,
+        unhealthyTarget,
+        healthyAgents: args.healthyAgents,
+        busyAgents,
+        targetAgentRuntimes: args.targetAgentRuntimes,
+      });
+
+      if (item.last_dispatch_phid) {
+        const reason = `held target_unhealthy row for ${unhealthyTarget}; prior dispatch ${item.last_dispatch_phid} requires duplicate-retry review before any reroute/refire`;
+        decisions.push({
+          item_id: item.item_id,
+          action: "target_unhealthy_reroute",
+          reason,
+          dispatch_phid: item.last_dispatch_phid,
+          metadata: {
+            receipt: this.targetUnhealthyRerouteReceipt({
+              item,
+              unhealthyTarget,
+              proposedHealthyTarget: proposal?.target ?? null,
+              action: "held",
+              reason,
+              outcomes: priorOutcomes,
+            }),
+          },
+        });
+        continue;
+      }
+
+      if (!proposal) {
+        const reason = `held target_unhealthy row for ${unhealthyTarget}; no healthy same-pool equivalent target is currently available`;
+        decisions.push({
+          item_id: item.item_id,
+          action: "target_unhealthy_reroute",
+          reason,
+          metadata: {
+            receipt: this.targetUnhealthyRerouteReceipt({
+              item,
+              unhealthyTarget,
+              proposedHealthyTarget: null,
+              action: "held",
+              reason,
+              outcomes: priorOutcomes,
+            }),
+          },
+        });
+        continue;
+      }
+
+      const reason = `${args.dryRun ? "would reroute" : "rerouted"} target_unhealthy ready row from ${unhealthyTarget} to healthy equivalent ${proposal.target} in pool ${proposal.pool.pool_id}`;
+      if (!args.dryRun) {
+        const updated = await updateBacklogFields(
+          this.deps.adapter,
+          item.item_id,
+          { to_agent: proposal.target },
+          { updated_by: "continuous-orchestration" },
+        );
+        if (updated) changed = true;
+      }
+      decisions.push({
+        item_id: item.item_id,
+        action: "target_unhealthy_reroute",
+        reason,
+        metadata: {
+          pool_id: proposal.pool.pool_id,
+          unhealthy_target: unhealthyTarget,
+          proposed_healthy_target: proposal.target,
+          candidate_targets: proposal.candidates,
+          dry_run: args.dryRun,
+          receipt: this.targetUnhealthyRerouteReceipt({
+            item,
+            unhealthyTarget,
+            proposedHealthyTarget: proposal.target,
+            action: args.dryRun ? "held" : "rerouted",
+            reason,
+            outcomes: priorOutcomes,
+          }),
+        },
+      });
+    }
+
+    return { changed, decisions };
   }
 
   private async nonUsefulProviderRuntimeReadyFuelIds(ready: BacklogItem[]): Promise<Set<string>> {

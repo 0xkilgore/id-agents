@@ -201,6 +201,7 @@ export interface DecisionRecord {
     | "model_policy_drift_alert"
     | "auto_promote"
     | "ready_metadata_repair"
+    | "target_unhealthy_reroute"
     | "stale_ready_reconcile"
     | "reconciled"
     | "would_reconcile";

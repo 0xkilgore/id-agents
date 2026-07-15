@@ -17,6 +17,7 @@ import type { PoolRouting, ResolvedPool } from "./daemon.js";
 import { BuildPoolRegistry } from "../build-pools/index.js";
 import { leaseWorktreePath } from "../workspaces/allocator.js";
 import { randomUUID } from "node:crypto";
+import { normalizeRuntime } from "../dispatch-scheduler/types.js";
 
 interface SchedulerLike {
   enqueue(
@@ -198,6 +199,34 @@ export function buildPoolRouting(env: NodeJS.ProcessEnv = process.env): PoolRout
     },
     availableBuilders: (pool: ResolvedPool, building: Set<string>): string[] =>
       pool.members.filter((m) => !building.has(m)),
+    healthyEquivalentTarget: ({ item, unhealthyTarget, healthyAgents, busyAgents, targetAgentRuntimes }) => {
+      const trackPool = item.track ? registry.resolvePool(item.track) : undefined;
+      const explicitPool = explicitPoolRequest(item.to_agent ?? undefined);
+      const pool = explicitPool ?? (
+        trackPool && trackPool.members.includes(unhealthyTarget)
+          ? trackPool
+          : undefined
+      );
+      if (!pool) return null;
+      const requestedRuntime = item.runtime ? normalizeRuntime(item.runtime) : null;
+      const candidates = pool.members.filter((agent) => {
+        if (agent === unhealthyTarget) return false;
+        if (busyAgents.has(agent)) return false;
+        if (!healthyAgents.has(agent)) return false;
+        if (requestedRuntime && targetAgentRuntimes?.has(agent)) {
+          return normalizeRuntime(targetAgentRuntimes.get(agent)!) === requestedRuntime;
+        }
+        return true;
+      });
+      const target = candidates[0];
+      return target
+        ? {
+          pool: { pool_id: pool.pool_id, repo_root: pool.repo_root, max_parallel: pool.max_parallel, members: [...pool.members] },
+          target,
+          candidates,
+        }
+        : null;
+    },
     allocateWorktree: async ({ agent, item, pool }) => {
       const token = randomUUID().slice(0, 8);
       const slug = (item.track ?? "build").toLowerCase().replace(/[^a-z0-9]+/g, "-").slice(0, 24) || "build";

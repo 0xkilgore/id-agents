@@ -32,6 +32,29 @@ function fakePools(): NonNullable<DaemonDeps["pools"]> {
   };
 }
 
+function targetUnhealthyReroutePools(): NonNullable<DaemonDeps["pools"]> {
+  const pool = {
+    pool_id: "backend",
+    repo_root: "/repo",
+    max_parallel: 3,
+    members: ["roger", "substrate-orch-codex", "substrate-api-codex"],
+  };
+  return {
+    poolForItem: () => null,
+    availableBuilders: () => ["roger"],
+    healthyEquivalentTarget: ({ unhealthyTarget, healthyAgents, busyAgents }) => {
+      if (!pool.members.includes(unhealthyTarget)) return null;
+      const candidates = pool.members.filter((agent) =>
+        agent !== unhealthyTarget &&
+        healthyAgents.has(agent) &&
+        !busyAgents.has(agent)
+      );
+      return candidates[0] ? { pool, target: candidates[0], candidates } : null;
+    },
+    allocateWorktree: async () => ({ path: "/repo/.worktrees/wt-reroute", branch: "b-reroute", lease_id: null }),
+  };
+}
+
 const usage = async () => ({
   view: { hard_paused: false, daily_percent: 0, weekly_percent: 0, enforcement: "enforce" as const },
   daily_tokens_used: 0,
@@ -85,6 +108,31 @@ async function seedReadyItem(adapter: SqliteAdapter): Promise<BacklogItem> {
     risk_class: "build",
     write_scope: ["/repo/orig"], // ORIGINAL write_scope
   });
+}
+
+async function seedTargetUnhealthyReadyItem(adapter: SqliteAdapter, overrides: Partial<BacklogItem> = {}): Promise<BacklogItem> {
+  await setMode(adapter, "default", "running");
+  const seeded = await insertBacklogItem(adapter, {
+    team_id: "default",
+    logical_key: overrides.logical_key ?? "target-unhealthy-ready",
+    title: overrides.title ?? "[project: kapelle][T-ORCH][BUILD] unhealthy backend target",
+    track: "T-ORCH",
+    to_agent: overrides.to_agent ?? "substrate-api-codex",
+    dispatch_body: overrides.dispatch_body ?? "do backend work",
+    readiness_state: "ready",
+    risk_class: "build",
+    write_scope: overrides.write_scope ?? ["/repo/backend"],
+    token_estimate: 1000,
+    provider: "openai",
+    runtime: "codex",
+  });
+  if (overrides.last_dispatch_phid) {
+    await adapter.query(
+      `UPDATE orchestration_backlog_item SET last_dispatch_phid = $1 WHERE item_id = $2`,
+      [overrides.last_dispatch_phid, seeded.item_id],
+    );
+  }
+  return (await getBacklogItem(adapter, seeded.item_id))!;
 }
 
 async function seedReadyBuildFuel(adapter: SqliteAdapter, index: number): Promise<BacklogItem> {
@@ -407,6 +455,114 @@ describe("RD-003 — atomic CO fire", () => {
     const freshStates = await Promise.all(freshRows.map((item) => getBacklogItem(adapter, item.item_id)));
     expect(freshStates.filter((item) => item?.readiness_state === "in_flight")).toHaveLength(2);
     expect(freshStates.filter((item) => item?.readiness_state === "ready")).toHaveLength(1);
+  });
+});
+
+describe("target_unhealthy reroute receipts", () => {
+  it("reroutes a fresh target_unhealthy ready row to a healthy same-pool equivalent and emits a receipt", async () => {
+    const adapter = new SqliteAdapter(":memory:");
+    await migrateSqlite(adapter);
+    const seeded = await seedTargetUnhealthyReadyItem(adapter);
+    const enqueued: BacklogItem[] = [];
+
+    const daemon = new ContinuousOrchestrationDaemon({
+      adapter,
+      config: config(),
+      enqueue: async (item) => {
+        enqueued.push(item);
+        return { dispatch_phid: `phid:disp-${item.item_id}`, query_id: `q-${item.item_id}` };
+      },
+      readUsage: usage,
+      readInFlight: noInFlight,
+      resolveAgentHealth: async () => new Set(["roger"]),
+      resolveAgentRuntimes: async () => new Map([["roger", "codex"], ["substrate-api-codex", "codex"]]),
+      pools: targetUnhealthyReroutePools(),
+    });
+
+    const result = await daemon.runTick();
+    const updated = await getBacklogItem(adapter, seeded.item_id);
+    const rerouteDecision = result.decisions.find((decision) => decision.action === "target_unhealthy_reroute");
+
+    expect(enqueued.map((item) => item.to_agent)).toEqual(["roger"]);
+    expect(updated?.to_agent).toBe("roger");
+    expect(updated?.readiness_state).toBe("in_flight");
+    expect(rerouteDecision).toMatchObject({
+      item_id: seeded.item_id,
+      metadata: {
+        unhealthy_target: "substrate-api-codex",
+        proposed_healthy_target: "roger",
+        receipt: {
+          action: "rerouted",
+          unhealthy_target: "substrate-api-codex",
+          proposed_healthy_target: "roger",
+          duplicate_retry_refired: false,
+          prior_dispatch_evidence: {
+            last_dispatch_phid: null,
+            status: null,
+            retry_safe: false,
+          },
+        },
+      },
+    });
+  });
+
+  it("holds a previously dispatched target_unhealthy row with prior dispatch evidence and does not refire it", async () => {
+    const adapter = new SqliteAdapter(":memory:");
+    await migrateSqlite(adapter);
+    await seedDispatchStatus(adapter, "phid:disp-prior-unhealthy", "queued");
+    const seeded = await seedTargetUnhealthyReadyItem(adapter, {
+      logical_key: "target-unhealthy-duplicate",
+      last_dispatch_phid: "phid:disp-prior-unhealthy",
+    });
+    const enqueued: BacklogItem[] = [];
+
+    const daemon = new ContinuousOrchestrationDaemon({
+      adapter,
+      config: config(),
+      enqueue: async (item) => {
+        enqueued.push(item);
+        return { dispatch_phid: `phid:disp-${item.item_id}`, query_id: `q-${item.item_id}` };
+      },
+      readUsage: usage,
+      readInFlight: noInFlight,
+      resolveAgentHealth: async () => new Set(["roger"]),
+      resolveAgentRuntimes: async () => new Map([["roger", "codex"], ["substrate-api-codex", "codex"]]),
+      pools: targetUnhealthyReroutePools(),
+    });
+
+    const result = await daemon.runTick();
+    const updated = await getBacklogItem(adapter, seeded.item_id);
+    const rerouteDecision = result.decisions.find((decision) => decision.action === "target_unhealthy_reroute");
+
+    expect(enqueued).toEqual([]);
+    expect(updated?.to_agent).toBe("substrate-api-codex");
+    expect(updated?.readiness_state).toBe("ready");
+    expect(rerouteDecision).toMatchObject({
+      item_id: seeded.item_id,
+      dispatch_phid: "phid:disp-prior-unhealthy",
+      metadata: {
+        receipt: {
+          action: "held",
+          unhealthy_target: "substrate-api-codex",
+          proposed_healthy_target: "roger",
+          duplicate_retry_refired: false,
+          prior_dispatch_evidence: {
+            last_dispatch_phid: "phid:disp-prior-unhealthy",
+            status: "queued",
+            retry_safe: false,
+          },
+        },
+      },
+    });
+    expect(result.decisions).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          item_id: seeded.item_id,
+          action: "held",
+          metadata: expect.objectContaining({ code: "duplicate_dispatch_retry_required" }),
+        }),
+      ]),
+    );
   });
 });
 
