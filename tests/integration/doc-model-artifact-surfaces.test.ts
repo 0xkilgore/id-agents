@@ -243,9 +243,66 @@ describe("doc-model artifact surfaces — Reports", () => {
     expect(res.body.admission).toEqual({
       source: "stamp",
       audience: "operator",
-      kinds: ["report", "closeout", "qa-evidence"],
-      reason: "operator audience with report, closeout, or qa-evidence kind",
+      kinds: ["report", "final-document", "closeout", "qa-evidence"],
+      reason: "operator audience with report, final-document, closeout, or qa-evidence kind",
     });
+  });
+
+  it("admits only operator report/final documents from mixed receipt and diagnostics fixture", async () => {
+    await author({
+      documentId: "doc:system-receipt",
+      title: "Weekly report receipt",
+      audience: "system",
+      kind: "receipt",
+      now: "2026-07-14T08:00:00.000Z",
+    });
+    await author({
+      documentId: "doc:orchestration-diagnostic",
+      title: "Recurring digest orchestration diagnostic",
+      audience: "system",
+      kind: "diagnostics",
+      now: "2026-07-14T09:00:00.000Z",
+    });
+    await author({
+      documentId: "doc:weekly-report",
+      title: "Kapelle weekly operator report",
+      audience: "operator",
+      kind: "report",
+      now: "2026-07-14T10:00:00.000Z",
+    });
+    await author({
+      documentId: "doc:final-operator-report",
+      title: "Kapelle final operator report",
+      audience: "operator",
+      kind: "final-document",
+      now: "2026-07-14T11:00:00.000Z",
+    });
+
+    const app = mountApp(adapter);
+    const [reports, system] = await Promise.all([
+      callAppRequest(app, "/doc-model/surfaces/reports"),
+      callAppRequest(app, "/doc-model/surfaces/system"),
+    ]);
+
+    expect(reports.status).toBe(200);
+    expect(reports.body.items.map((e: any) => e.phid)).toEqual([
+      "doc:final-operator-report",
+      "doc:weekly-report",
+    ]);
+    expect(reports.body.items.map((e: any) => e.stamp)).toEqual([
+      { audience: "operator", kind: "final-document" },
+      { audience: "operator", kind: "report" },
+    ]);
+
+    expect(system.status).toBe(200);
+    expect(system.body.items.map((e: any) => e.phid)).toEqual([
+      "doc:orchestration-diagnostic",
+      "doc:system-receipt",
+    ]);
+    expect(system.body.items.map((e: any) => e.stamp)).toEqual([
+      { audience: "system", kind: "diagnostics" },
+      { audience: "system", kind: "receipt" },
+    ]);
   });
 
   it("admits operator closeout and QA evidence artifacts without title/path heuristics", async () => {

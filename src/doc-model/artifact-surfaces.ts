@@ -10,7 +10,7 @@
 // Inbox     — documents whose latest op is an incoming comment awaiting disposition.
 // Activity  — receipt ops across all documents, reverse-chron.
 // Projects  — documents grouped by project, file-system-like listing.
-// Reports   — audience:operator + report/evidence kind, reverse-chron.
+// Reports   — audience:operator + report/final/evidence kind, reverse-chron.
 // System    — audience:system, reverse-chron.
 
 import type { DbAdapter } from "../db/db-adapter.js";
@@ -44,7 +44,7 @@ function envelope<T>(items: T[], projection: string, admission: SurfaceAdmission
 }
 
 const NOW_KINDS: EntryStampKind[] = ["action-needed", "direction-brief"];
-const REPORT_KINDS: EntryStampKind[] = ["report", "closeout", "qa-evidence"];
+const REPORT_KINDS: EntryStampKind[] = ["report", "final-document", "closeout", "qa-evidence"];
 
 export function admitsNowSurface(stamp: EntryStamp | null | undefined): boolean {
   return stamp?.audience === "operator" && NOW_KINDS.includes(stamp.kind);
@@ -220,7 +220,7 @@ export async function projectReportsSurface(
     source: "stamp",
     audience: "operator",
     kinds: REPORT_KINDS,
-    reason: "operator audience with report, closeout, or qa-evidence kind",
+    reason: "operator audience with report, final-document, closeout, or qa-evidence kind",
   });
 }
 

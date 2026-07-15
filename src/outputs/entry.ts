@@ -92,7 +92,8 @@ export type EntryStampKind =
   | "direction-brief"
   | "closeout"
   | "diagnostics"
-  | "qa-evidence";
+  | "qa-evidence"
+  | "final-document";
 export interface EntryStamp {
   audience: EntryStampAudience;
   kind: EntryStampKind;
