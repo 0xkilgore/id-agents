@@ -795,6 +795,18 @@ describe("buildReleaseProofReadiness", () => {
           source_link_reason: "stored source link uses an unsupported or local scheme",
         }),
       ]);
+      for (const item of view.feedback_evidence.items) {
+        expect(
+          (item.source_link?.startsWith("manager:/artifacts/") ?? false) ||
+            item.source_link_reason === "stored source link uses an unsupported or local scheme",
+        ).toBe(true);
+      }
+      expect(view.source_link_state).toEqual({
+        state: "present",
+        safe_count: 2,
+        unsafe_count: 0,
+        total_count: 2,
+      });
       expect(view.sources.links).toEqual(
         expect.arrayContaining([
           expect.objectContaining({
@@ -814,6 +826,9 @@ describe("buildReleaseProofReadiness", () => {
       );
       expect(view.stale_reasons).toEqual([]);
       expect(view.missing_reasons).toEqual(["one or more feedback evidence items are missing safe source links"]);
+      expect(view.missing_reasons).not.toEqual(expect.arrayContaining([
+        expect.stringContaining("older than"),
+      ]));
       expect(view.next_owner.candidates).toEqual([
         {
           lane: "release-engineering",
