@@ -16,6 +16,8 @@ export interface FreshnessTrackerState {
   last_alert_at: string | null;
   /** Stable incident key for the currently-alerted running/promoted SHA pair. */
   incident_key?: string | null;
+  /** Consecutive live checks where behind_origin was false after an alert. */
+  recovery_green_ticks?: number;
 }
 
 export const INITIAL_FRESHNESS: FreshnessTrackerState = {
@@ -41,6 +43,7 @@ export interface FreshnessAlert {
 
 export interface FreshnessEvalOptions {
   thresholdMs?: number;
+  recoveryConsecutiveChecks?: number;
 }
 
 export interface FreshnessEvalResult {
@@ -86,6 +89,7 @@ export function evaluateFreshness(
   opts: FreshnessEvalOptions = {},
 ): FreshnessEvalResult {
   const thresholdMs = opts.thresholdMs ?? DEFAULT_STALE_THRESHOLD_MS;
+  const recoveryConsecutiveChecks = Math.max(1, Math.floor(opts.recoveryConsecutiveChecks ?? 2));
   const nowIso = new Date(nowMs).toISOString();
 
   if (input.behind_origin === null) {
@@ -94,6 +98,13 @@ export function evaluateFreshness(
 
   if (input.behind_origin === false) {
     if (prev.state === "stale_alerted") {
+      const recoveryGreenTicks = (prev.recovery_green_ticks ?? 0) + 1;
+      if (recoveryGreenTicks < recoveryConsecutiveChecks) {
+        return {
+          next: { ...prev, recovery_green_ticks: recoveryGreenTicks },
+          alert: null,
+        };
+      }
       return {
         next: INITIAL_FRESHNESS,
         alert: {
@@ -114,23 +125,27 @@ export function evaluateFreshness(
   const elapsedMs = Number.isFinite(sinceMs) ? nowMs - sinceMs : 0;
   const incidentKey = buildIncidentKey(input);
 
+  if (prev.state === "stale_alerted" && elapsedMs < thresholdMs) {
+    return { next: { ...prev, behind_origin_since: since, incident_key: incidentKey, recovery_green_ticks: 0 }, alert: null };
+  }
+
   if (elapsedMs >= thresholdMs) {
     const shouldAlert =
       prev.state !== "stale_alerted" ||
       prev.incident_key !== incidentKey;
     if (shouldAlert) {
       return {
-        next: { state: "stale_alerted", behind_origin_since: since, last_alert_at: nowIso, incident_key: incidentKey },
+        next: { state: "stale_alerted", behind_origin_since: since, last_alert_at: nowIso, incident_key: incidentKey, recovery_green_ticks: 0 },
         alert: {
           kind: "stale",
           message: formatBuildBehindOriginIncident(input, elapsedMs),
         },
       };
     }
-    return { next: { ...prev, state: "stale_alerted", behind_origin_since: since, incident_key: incidentKey }, alert: null };
+    return { next: { ...prev, state: "stale_alerted", behind_origin_since: since, incident_key: incidentKey, recovery_green_ticks: 0 }, alert: null };
   }
 
-  return { next: { state: "stale", behind_origin_since: since, last_alert_at: prev.last_alert_at, incident_key: prev.incident_key ?? null }, alert: null };
+  return { next: { state: "stale", behind_origin_since: since, last_alert_at: prev.last_alert_at, incident_key: prev.incident_key ?? null, recovery_green_ticks: 0 }, alert: null };
 }
 
 function short(sha: string | null): string {

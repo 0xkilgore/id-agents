@@ -11,6 +11,8 @@ export type AlertKind =
   | 'worktree_hygiene'
   | 'news_repeated_error'
   | 'protocol_gap'
+  | 'disk_warn'
+  | 'build_behind_origin'
   // Harness-resilience (Spec: 2026-05-29-harness-resilience-spec.md):
   // raised when a dispatch fails with one of the structured model/API/harness
   // failure kinds — distinguishes infra reliability from semantic build/test

@@ -96,15 +96,47 @@ describe("freshness tracker (T-DEPLOY.1)", () => {
     expect(r.alert?.message).toContain("classification=server_stale_and_source_unpromoted");
   });
 
-  it("emits a recovered alert when the build catches up after alerting", () => {
-    const alerted: FreshnessTrackerState = { state: "stale_alerted", behind_origin_since: new Date(0).toISOString(), last_alert_at: new Date(0).toISOString() };
-    const r = evaluateFreshness(alerted, freshInput, 10_000);
-    expect(r.next.state).toBe("fresh");
-    expect(r.alert?.kind).toBe("recovered");
-    expect(r.alert?.message).toContain("BUILD_BEHIND_ORIGIN resolved");
-    expect(r.alert?.message).toContain("running_sha=bbbb2222");
-    expect(r.alert?.message).toContain("promoted_sha=bbbb2222");
-    expect(r.alert?.message).toContain("auto-closed");
+  it("recovers build_behind_origin only after configured consecutive live-green checks", () => {
+    const alerted: FreshnessTrackerState = {
+      state: "stale_alerted",
+      behind_origin_since: new Date(0).toISOString(),
+      last_alert_at: new Date(0).toISOString(),
+      incident_key: "build_behind_origin:aaaa1111:bbbb2222",
+    };
+
+    const unknown = evaluateFreshness(alerted, { behind_origin: null, build_sha: null, origin_main_sha: null }, 10_000, {
+      recoveryConsecutiveChecks: 2,
+    });
+    expect(unknown.next).toEqual(alerted);
+    expect(unknown.alert).toBeNull();
+
+    const firstGreen = evaluateFreshness(unknown.next, freshInput, 20_000, {
+      recoveryConsecutiveChecks: 2,
+    });
+    expect(firstGreen.next.state).toBe("stale_alerted");
+    expect(firstGreen.next.recovery_green_ticks).toBe(1);
+    expect(firstGreen.alert).toBeNull();
+
+    const degradedAgain = evaluateFreshness(firstGreen.next, behindInput, 30_000, {
+      recoveryConsecutiveChecks: 2,
+    });
+    expect(degradedAgain.next.state).toBe("stale_alerted");
+    expect(degradedAgain.next.recovery_green_ticks).toBe(0);
+    expect(degradedAgain.alert).toBeNull();
+
+    const greenAgain = evaluateFreshness(degradedAgain.next, freshInput, 40_000, {
+      recoveryConsecutiveChecks: 2,
+    });
+    expect(greenAgain.alert).toBeNull();
+    const recovered = evaluateFreshness(greenAgain.next, freshInput, 50_000, {
+      recoveryConsecutiveChecks: 2,
+    });
+    expect(recovered.next.state).toBe("fresh");
+    expect(recovered.alert?.kind).toBe("recovered");
+    expect(recovered.alert?.message).toContain("BUILD_BEHIND_ORIGIN resolved");
+    expect(recovered.alert?.message).toContain("running_sha=bbbb2222");
+    expect(recovered.alert?.message).toContain("promoted_sha=bbbb2222");
+    expect(recovered.alert?.message).toContain("auto-closed");
   });
 
   it("holds state and never alerts when behind_origin is unknown (null)", () => {

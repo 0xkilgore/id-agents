@@ -25,6 +25,23 @@ function makeFinding(overrides: Partial<RuleFinding> = {}): RuleFinding {
   };
 }
 
+function makeHealthFinding(
+  kind: 'disk_warn' | 'build_behind_origin',
+  overrides: Partial<RuleFinding> = {},
+): RuleFinding {
+  return makeFinding({
+    dedupe_key: `${kind}:live-health`,
+    kind,
+    severity: 'warning',
+    confidence: 'high',
+    title: `${kind} live health alert`,
+    summary: `${kind} degraded from live health source`,
+    evidence: [{ source: 'system_health', observed_at: '2026-05-28T12:00:00Z', detail: `${kind}=degraded` }],
+    counters: { affected: 1 },
+    ...overrides,
+  });
+}
+
 describe('AlertStateManager', () => {
   it('emits an open record for a new finding', () => {
     const mgr = new AlertStateManager();
@@ -117,6 +134,51 @@ describe('AlertStateManager', () => {
     expect(mgr.getOpenAlerts()).toHaveLength(1);
     expect(mgr.getOpenAlerts()[0].dedupe_key).toBe('stuck_query:q1');
   });
+
+  it.each(['disk_warn', 'build_behind_origin'] as const)(
+    'keeps %s open until the live health source is green for configured consecutive checks',
+    (kind) => {
+      const mgr = new AlertStateManager(3);
+      const finding = makeHealthFinding(kind);
+
+      const opened = mgr.processTick([finding], configSnapshot, '2026-05-28T12:00:00Z');
+      expect(opened).toHaveLength(1);
+      expect(opened[0]).toMatchObject({ status: 'open', kind, dedupe_key: `${kind}:live-health` });
+
+      const firstGreen = mgr.processTick([], configSnapshot, '2026-05-28T12:00:30Z');
+      const secondGreen = mgr.processTick([], configSnapshot, '2026-05-28T12:01:00Z');
+      expect(firstGreen).toEqual([]);
+      expect(secondGreen).toEqual([]);
+      expect(mgr.getOpenAlerts()).toHaveLength(1);
+
+      const thirdGreen = mgr.processTick([], configSnapshot, '2026-05-28T12:01:30Z');
+      expect(thirdGreen).toHaveLength(1);
+      expect(thirdGreen[0]).toMatchObject({ status: 'resolved', kind, dedupe_key: `${kind}:live-health` });
+      expect(mgr.getOpenAlerts()).toHaveLength(0);
+    },
+  );
+
+  it.each(['disk_warn', 'build_behind_origin'] as const)(
+    'collapses repeated %s degraded checks into one actionable incident',
+    (kind) => {
+      const mgr = new AlertStateManager(2);
+      const finding = makeHealthFinding(kind);
+
+      const opened = mgr.processTick([finding], configSnapshot, '2026-05-28T12:00:00Z');
+      const repeated = mgr.processTick([finding], configSnapshot, '2026-05-28T12:00:30Z');
+      const repeatedAgain = mgr.processTick([finding], configSnapshot, '2026-05-28T12:01:00Z');
+
+      expect(opened).toHaveLength(1);
+      expect(repeated).toEqual([]);
+      expect(repeatedAgain).toEqual([]);
+      expect(mgr.getOpenAlerts()).toHaveLength(1);
+      expect(mgr.getOpenAlerts()[0]).toMatchObject({
+        dedupe_key: `${kind}:live-health`,
+        occurrence_count: 1,
+        status: 'open',
+      });
+    },
+  );
 
   it('preserves alert_id across updates', () => {
     const mgr = new AlertStateManager();
