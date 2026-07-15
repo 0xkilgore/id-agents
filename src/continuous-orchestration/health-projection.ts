@@ -879,13 +879,17 @@ async function readBuildReadyFloorProjection(
   const buildReadyLanes = candidateLanes.length;
   const belowFloor = usefulReadyCount < config.auto_promote_floor;
   const belowLanes = buildReadyLanes < config.auto_promote_min_lanes;
-  const blockerCode = belowLanes
-    ? "build_ready_lane_diversity_below_min_lanes"
-    : belowFloor
-      ? "build_ready_below_floor"
+  const blockerCode = belowFloor
+    ? "build_ready_below_floor"
+    : belowLanes
+      ? "build_ready_lane_diversity_below_min_lanes"
       : null;
   if (belowLanes) blockerReasons.build_ready_lane_diversity_below_min_lanes = 1;
   if (belowFloor) blockerReasons.build_ready_below_floor = 1;
+  const nextAction = blockerCode
+    ? readyAdmission?.recommendedAction ??
+      `auto-promote or flesh build work in a new lane until build ready lanes reach ${buildReadyLanes}/${config.auto_promote_min_lanes} and ready fuel reaches ${usefulReadyCount}/${config.auto_promote_floor}`
+    : "build-ready fuel satisfies floor and lane diversity";
 
   return {
     blocked: blockerCode !== null,
@@ -896,9 +900,7 @@ async function readBuildReadyFloorProjection(
     min_lanes: config.auto_promote_min_lanes,
     candidate_lanes: candidateLanes,
     blocker_reasons: blockerReasons,
-    next_action: blockerCode
-      ? `auto-promote or flesh build work in a new lane until build ready lanes reach ${buildReadyLanes}/${config.auto_promote_min_lanes} and ready fuel reaches ${usefulReadyCount}/${config.auto_promote_floor}`
-      : "build-ready fuel satisfies floor and lane diversity",
+    next_action: nextAction,
   };
 }
 
@@ -908,6 +910,7 @@ function isNonUsefulReadyBlockerCode(code: string): boolean {
     code === "duplicate_dispatch_retry_required" ||
     code === "provider_runtime_mismatch" ||
     code === "risk_requires_approval" ||
+    code === "single_writer_lane_busy" ||
     code === "target_unhealthy"
   );
 }

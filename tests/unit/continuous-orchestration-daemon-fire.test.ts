@@ -567,6 +567,124 @@ describe("target_unhealthy reroute receipts", () => {
 });
 
 describe("ready admission target-unhealthy receipts", () => {
+  it("reports Wave79-style zero-admissible target_unhealthy rows with safe reroute or hold receipts", async () => {
+    const adapter = new SqliteAdapter(":memory:");
+    await migrateSqlite(adapter);
+    await setMode(adapter, "default", "running");
+
+    const seeded: BacklogItem[] = [];
+    for (const target of ["substrate-api-codex", "brunel", "coder-max"]) {
+      for (let i = 1; i <= 3; i += 1) {
+        seeded.push(await insertBacklogItem(adapter, {
+          team_id: "default",
+          logical_key: `wave79-${target}-${i}`,
+          title: `[project: kapelle][T-ORCH][BUILD] Wave79 ${target} target_unhealthy ${i}`,
+          track: "T-ORCH",
+          to_agent: target,
+          dispatch_body: `Wave79 fixture ${i}: hold or safely reroute ${target}.`,
+          readiness_state: "ready",
+          risk_class: "build",
+          write_scope: [`/repo/wave79/${target}/${i}`],
+          provider: "openai",
+          runtime: "codex",
+        }));
+      }
+    }
+
+    const daemon = new ContinuousOrchestrationDaemon({
+      adapter,
+      config: config(),
+      enqueue: async (item) => ({ dispatch_phid: `phid:disp-${item.item_id}`, query_id: `q-${item.item_id}` }),
+      readUsage: usage,
+      readInFlight: noInFlight,
+      resolveAgentHealth: async () => new Set(["roger"]),
+      resolveAgentRuntimes: async () => new Map([["roger", "codex"], ["substrate-api-codex", "codex"]]),
+      pools: targetUnhealthyReroutePools(),
+    });
+
+    const status = await daemon.explainReadyAdmission();
+    const rowsById = new Map(status.non_admitted.map((row) => [row.item_id, row]));
+    const substrateRows = seeded.filter((row) => row.to_agent === "substrate-api-codex");
+    const heldRows = seeded.filter((row) => row.to_agent !== "substrate-api-codex");
+
+    expect(status.candidates).toBe(9);
+    expect(status.admissible_now).toBe(0);
+    expect(status.admissible).toEqual([]);
+    expect(status.useful_ready).toBe(0);
+    expect(status.blocker_counts).toEqual([
+      { code: "target_unhealthy", category: "runtime_unavailable", count: 9 },
+    ]);
+    expect(status.non_admitted.map((row) => row.item_id).sort()).toEqual(
+      seeded.map((row) => row.item_id).sort(),
+    );
+    expect(status.recommended_action).toContain("target_unhealthy=9 rows");
+    const countByTarget = (target: string) =>
+      status.target_unhealthy_groups
+        .filter((group) => group.target === target)
+        .reduce((sum, group) => sum + group.count, 0);
+    expect(countByTarget("substrate-api-codex")).toBe(3);
+    expect(countByTarget("brunel")).toBe(3);
+    expect(countByTarget("coder-max")).toBe(3);
+    expect(status.target_unhealthy_groups).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          target: "substrate-api-codex",
+          count: 1,
+          proposed_healthy_target: "roger",
+          examples: expect.arrayContaining([
+            expect.objectContaining({ item_id: substrateRows[0].item_id, prior_owner: "substrate-api-codex" }),
+          ]),
+        }),
+        expect.objectContaining({
+          target: "brunel",
+          count: 1,
+          proposed_healthy_target: null,
+        }),
+        expect.objectContaining({
+          target: "coder-max",
+          count: 1,
+          proposed_healthy_target: null,
+        }),
+      ]),
+    );
+
+    for (const row of substrateRows) {
+      const receipt = rowsById.get(row.item_id)?.target_unhealthy_receipt;
+      expect(receipt).toMatchObject({
+        code: "target_unhealthy",
+        target: "substrate-api-codex",
+        prior_owner: "substrate-api-codex",
+        proposed_healthy_target: "roger",
+        hold_reason: null,
+        prior_dispatch_evidence: {
+          last_dispatch_phid: null,
+          status: null,
+          recovery_status: null,
+          retry_safe: false,
+        },
+        counts_as_useful_build_fuel: false,
+      });
+    }
+    for (const row of heldRows) {
+      const receipt = rowsById.get(row.item_id)?.target_unhealthy_receipt;
+      expect(receipt).toMatchObject({
+        code: "target_unhealthy",
+        target: row.to_agent,
+        prior_owner: row.to_agent,
+        proposed_healthy_target: null,
+        hold_reason: expect.stringContaining("no healthy compatible target"),
+        prior_dispatch_evidence: {
+          last_dispatch_phid: null,
+          status: null,
+          recovery_status: null,
+          retry_safe: false,
+        },
+        counts_as_useful_build_fuel: false,
+      });
+      expect(receipt?.safe_action_summary).toContain("Do not refire silently");
+    }
+  });
+
   it("surfaces operator-readable receipts for offline explicit targets without admitting them", async () => {
     const adapter = new SqliteAdapter(":memory:");
     await migrateSqlite(adapter);

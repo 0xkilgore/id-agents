@@ -332,6 +332,78 @@ describe("orchestration health projection", () => {
     });
   });
 
+  it("does not satisfy the useful-ready floor when all raw build-ready rows share a busy writer lane", async () => {
+    await setMode(adapter, "default", "running");
+    const itemIds: string[] = [];
+    for (let i = 0; i < 12; i += 1) {
+      const item = await insertBacklogItem(adapter, {
+        title: `busy single-writer raw ready ${i}`,
+        readiness_state: "ready",
+        risk_class: "build",
+        to_agent: "roger",
+        dispatch_body: "continue",
+        write_scope: ["/repo/kapelle"],
+      });
+      itemIds.push(item.item_id);
+    }
+
+    const health = await readOrchestrationHealthProjection(adapter, "default", {
+      minReadyFuel: 12,
+      readyAdmission: {
+        rawReady: 12,
+        usefulReady: 0,
+        admissibleNow: 0,
+        blockerCounts: [
+          { code: "single_writer_lane_busy", category: "lane_eligibility", count: 12 },
+        ],
+        nonAdmitted: itemIds.map((item_id) => ({ item_id, code: "single_writer_lane_busy" })),
+        blockedLanes: [
+          {
+            lane: "/repo/kapelle",
+            count: 12,
+            blocker_counts: [
+              { code: "single_writer_lane_busy", category: "lane_eligibility", count: 12 },
+            ],
+          },
+        ],
+        recommendedAction: "add cross-lane fuel outside blocked lane(s): /repo/kapelle",
+      },
+    });
+
+    expect(health.ok).toBe(false);
+    expect(health.build_ready_floor).toMatchObject({
+      blocked: true,
+      blocker_code: "build_ready_below_floor",
+      useful_ready_count: 0,
+      floor: 12,
+      build_ready_lanes: 0,
+      blocker_reasons: {
+        single_writer_lane_busy: 12,
+        build_ready_below_floor: 1,
+      },
+      next_action: "add cross-lane fuel outside blocked lane(s): /repo/kapelle",
+    });
+    expect(health.build_ready_floor.candidate_lanes).toEqual([]);
+    expect(health.ready_item_blockers).toMatchObject({
+      ready: 12,
+      actionable: 12,
+      admissible_now: 0,
+      recommended_action: "add cross-lane fuel outside blocked lane(s): /repo/kapelle",
+      stale_ready_fuel: {
+        active: true,
+        reason: "useful_ready_fuel=0 is below min_ready_fuel=12; raw_ready_fuel=12; admissible_now=0",
+        recommended_action: "add cross-lane fuel outside blocked lane(s): /repo/kapelle",
+      },
+    });
+    expect(health.ready_item_blockers.stale_ready_fuel.counts_by_blocker_class).toEqual([
+      { code: "single_writer_lane_busy", category: "lane_eligibility", count: 12, examples: itemIds.slice(0, 5) },
+    ]);
+    expect(health.queue_quality.explanation).toContain(
+      "12 actionable ready row(s) blocked by live admission guardrails",
+    );
+    expect(health.queue_quality.explanation).not.toContain("ready row(s) are admissible now");
+  });
+
   it("escalates unexplained zero-admit ticks after the stall threshold", async () => {
     await setMode(adapter, "default", "running");
     await recordTickOutcome(adapter, "default", {

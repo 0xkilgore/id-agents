@@ -273,6 +273,7 @@ export interface ReadyAdmissionTargetUnhealthyReceipt {
   target: string;
   prior_owner: string | null;
   proposed_healthy_target: string | null;
+  hold_reason: string | null;
   prior_dispatch_evidence: {
     last_dispatch_phid: string | null;
     status: string | null;
@@ -707,11 +708,15 @@ function targetUnhealthyReceipt(
   const priorOwner = item?.to_agent ?? null;
   const poolName = priorOwner?.startsWith("pool:") ? priorOwner.slice("pool:".length) : null;
   const repairScope = poolName ? `${poolName} pool` : "target lane";
+  const holdReason = proposedHealthyTarget
+    ? null
+    : "no healthy compatible target is currently available; hold, downclassify/supersede, or restart the owner only when safe";
   return {
     code: "target_unhealthy",
     target,
     prior_owner: priorOwner,
     proposed_healthy_target: proposedHealthyTarget,
+    hold_reason: holdReason,
     prior_dispatch_evidence: priorDispatchEvidence(item, outcomes),
     safe_action: "reroute_downclassify_or_owner_restart",
     safe_action_summary:
