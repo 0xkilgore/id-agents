@@ -10,8 +10,9 @@ import { classifyPromotionHygieneFailure } from "../loops/worktree-hygiene.js";
 import { loadContinuousOrchestrationConfig } from "./config.js";
 import { normalizeRuntime, resolveProviderFromRuntime } from "../dispatch-scheduler/types.js";
 import { laneKeyOf } from "./selection.js";
-import type { BacklogItem } from "./types.js";
+import type { BacklogItem, BacklogRetryReadiness, BacklogRetryReadinessStatus } from "./types.js";
 import { getDispatchOutcomesByPhid } from "./storage.js";
+import { deriveBacklogRetryReadiness } from "./backlog-retry-readiness.js";
 import {
   classifyDuplicateDispatchRetryDisposition,
   type DuplicateDispatchRetryDisposition,
@@ -153,10 +154,13 @@ export interface OrchestrationReadyItemBlockerDetail {
   prior_dispatch_id: string | null;
   prior_dispatch_status: string | null;
   prior_recovery_status: string | null;
+  retry_readiness_status: BacklogRetryReadinessStatus | null;
+  retry_readiness_reason: string | null;
   retry_safe_required: boolean;
   retry_safe_recommendation: DuplicateDispatchRetrySafeRecommendation | null;
   operator_disposition: DuplicateDispatchRetryOperatorDisposition | null;
   recommended_disposition: DuplicateDispatchRetryDisposition | null;
+  safe_action_copy: string | null;
   stale_duplicate_closeout_receipt_exists: boolean;
   provider_runtime_repair: OrchestrationProviderRuntimeRepairSuggestion | null;
 }
@@ -217,7 +221,7 @@ interface BacklogDependencyRow {
 interface BacklogQueueRow {
   item_id: string;
   title: string | null;
-  readiness_state: string;
+  readiness_state: BacklogItem["readiness_state"];
   risk_class: string | null;
   to_agent: string | null;
   provider: string | null;
@@ -227,6 +231,7 @@ interface BacklogQueueRow {
   dependencies_json: string | null;
   last_dispatch_phid: string | null;
   retry_safe: number | null;
+  dispatch_retry_count: number;
   stale_duplicate_closeout_receipt_json: string | null;
 }
 
@@ -577,6 +582,9 @@ function readyItemBlockerDetail(
   const duplicateDisposition = blocker.code === "duplicate_dispatch_retry_required"
     ? classifyDuplicateDispatchRetryDisposition(outcome)
     : null;
+  const retryReadiness = blocker.code === "duplicate_dispatch_retry_required"
+    ? deriveBacklogRetryReadiness(row, outcome)
+    : null;
   return {
     item_id: row.item_id,
     title: row.title,
@@ -590,10 +598,13 @@ function readyItemBlockerDetail(
     prior_dispatch_id: row.last_dispatch_phid,
     prior_dispatch_status: outcome?.status ?? null,
     prior_recovery_status: outcome?.recovery_status ?? null,
+    retry_readiness_status: retryReadiness?.status ?? null,
+    retry_readiness_reason: retryReadiness?.reason ?? null,
     retry_safe_required: blocker.code === "duplicate_dispatch_retry_required",
     retry_safe_recommendation: duplicateDisposition?.retry_safe_recommendation ?? null,
     operator_disposition: duplicateDisposition?.operator_disposition ?? null,
     recommended_disposition: duplicateDisposition?.recommended_disposition ?? null,
+    safe_action_copy: retryReadiness ? duplicateDispatchSafeActionCopy(retryReadiness) : null,
     stale_duplicate_closeout_receipt_exists: !!row.stale_duplicate_closeout_receipt_json,
     provider_runtime_repair: providerRuntimeRepair,
   };
@@ -657,6 +668,23 @@ function duplicateDispatchRecommendedAction(disposition: DuplicateDispatchRetryO
     return "mark retry_safe only when the operator wants a bounded refire";
   }
   return "hold the row and wait for the prior dispatch, or supersede it after operator review";
+}
+
+function duplicateDispatchSafeActionCopy(readiness: BacklogRetryReadiness): string {
+  switch (readiness.status) {
+    case "retryable_failed_row":
+      return "Safe action: mark retry_safe=true only after operator approval for a bounded refire; no automatic refire occurs while retry_safe=false.";
+    case "stale_duplicate":
+      return "Safe action: close or supersede this stale duplicate row; do not mark retry_safe and do not refire.";
+    case "waiting_on_live_dispatch":
+      return "Safe action: wait on the live prior dispatch or supersede after operator review; do not refire while the prior dispatch is live or unreadable.";
+    case "non_retryable_failed_row":
+      return "Safe action: operator review required; supersede or replace the row instead of marking retry_safe.";
+    case "retry_cap_reached":
+      return "Safe action: retry cap reached; operator review required before replacing or superseding the row.";
+    case "not_retry_candidate":
+      return "Safe action: no retry action is available for this row.";
+  }
 }
 
 function staleReadyFuelProjection(input: {
@@ -933,7 +961,7 @@ async function readBacklogQueueRows(adapter: DbAdapter, teamId: string): Promise
   const { rows } = await adapter.query<BacklogQueueRow>(
     `SELECT item_id, title, readiness_state, risk_class, to_agent, provider, runtime,
             dispatch_body, write_scope_json, dependencies_json, last_dispatch_phid, retry_safe,
-            stale_duplicate_closeout_receipt_json
+            dispatch_retry_count, stale_duplicate_closeout_receipt_json
        FROM orchestration_backlog_item
       WHERE team_id = ?
         AND readiness_state NOT IN ('done', 'cancelled', 'superseded')`,

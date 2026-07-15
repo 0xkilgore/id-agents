@@ -32,14 +32,14 @@ export function deriveBacklogRetryReadiness(
     manual_promote_required: false,
   };
 
-  if (item.readiness_state !== "needs_review" || !item.last_dispatch_phid) {
+  if ((item.readiness_state !== "needs_review" && item.readiness_state !== "ready") || !item.last_dispatch_phid) {
     return {
       ...base,
       status: "not_retry_candidate",
       retryable: false,
       stale_duplicate: false,
       next_action: "none",
-      reason: "row is not an already-dispatched needs_review retry candidate",
+      reason: "row is not an already-dispatched ready/needs_review retry candidate",
     };
   }
 
