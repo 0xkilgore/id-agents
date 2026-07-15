@@ -33,7 +33,19 @@ export interface OrchestrationLoopHealthProjection {
   stall_threshold_ticks: number;
   in_flight: number;
   last_admission_block_reasons: Record<string, number>;
+  zero_admit_audit: OrchestrationZeroAdmitAudit;
   explanation: string;
+}
+
+export interface OrchestrationZeroAdmitAudit {
+  recent_zero_admit_ticks: number;
+  top_blocker: {
+    code: string;
+    category: string | null;
+    count: number;
+  } | null;
+  affected_targets: string[];
+  last_dispatch_at: string | null;
 }
 
 export interface OrchestrationHealthBlocker {
@@ -259,6 +271,8 @@ interface ReadyAdmissionBlockerSummary {
 interface ReadyAdmissionNonAdmittedSummary {
   item_id: string;
   code: string;
+  to_agent?: string | null;
+  last_dispatch_phid?: string | null;
 }
 
 interface OrchestrationHealthProjectionOptions {
@@ -321,7 +335,9 @@ export async function readOrchestrationHealthProjection(
   return {
     ok: !blocked,
     generated_at: new Date().toISOString(),
-    orchestration_loop: await readOrchestrationLoopHealthProjection(adapter, teamId),
+    orchestration_loop: await readOrchestrationLoopHealthProjection(adapter, teamId, {
+      readyAdmission: opts.readyAdmission,
+    }),
     queue_quality: queueQuality,
     build_ready_floor: buildReadyFloor,
     ready_item_blockers: readyItemBlockers,
@@ -355,12 +371,13 @@ interface OrchestrationLoopStateRow {
   mode: string;
   consecutive_zero_ticks: number | null;
   last_admission_block_reasons_json: string | null;
+  last_dispatch_at: string | null;
 }
 
 export async function readOrchestrationLoopHealthProjection(
   adapter: DbAdapter,
   teamId = "default",
-  opts: { stallThresholdTicks?: number } = {},
+  opts: { stallThresholdTicks?: number; readyAdmission?: OrchestrationHealthProjectionOptions["readyAdmission"] } = {},
 ): Promise<OrchestrationLoopHealthProjection> {
   const stallThresholdTicks = Math.max(
     1,
@@ -368,7 +385,7 @@ export async function readOrchestrationLoopHealthProjection(
   );
   const [{ rows: stateRows }, { rows: inFlightRows }, readyBlockReasons] = await Promise.all([
     adapter.query<OrchestrationLoopStateRow>(
-      `SELECT mode, consecutive_zero_ticks, last_admission_block_reasons_json
+      `SELECT mode, consecutive_zero_ticks, last_admission_block_reasons_json, last_dispatch_at
          FROM orchestration_state
         WHERE team_id = ?
         LIMIT 1`,
@@ -398,6 +415,12 @@ export async function readOrchestrationLoopHealthProjection(
     Object.entries(lastAdmissionBlockReasons)
       .filter(([, count]) => count > 0)
       .every(([code]) => CAPACITY_OR_LANE_REASONS.has(code));
+  const zeroAdmitAudit = buildZeroAdmitAudit({
+    consecutiveZeroTicks,
+    lastDispatchAt: state?.last_dispatch_at ?? null,
+    lastAdmissionBlockReasons,
+    readyAdmission: opts.readyAdmission,
+  });
 
   if (mode === "paused" || mode === "stopped") {
     return {
@@ -407,6 +430,7 @@ export async function readOrchestrationLoopHealthProjection(
       stall_threshold_ticks: stallThresholdTicks,
       in_flight: inFlight,
       last_admission_block_reasons: lastAdmissionBlockReasons,
+      zero_admit_audit: zeroAdmitAudit,
       explanation: `orchestration mode is ${mode}`,
     };
   }
@@ -419,6 +443,7 @@ export async function readOrchestrationLoopHealthProjection(
       stall_threshold_ticks: stallThresholdTicks,
       in_flight: inFlight,
       last_admission_block_reasons: lastAdmissionBlockReasons,
+      zero_admit_audit: zeroAdmitAudit,
       explanation: `${consecutiveZeroTicks} consecutive zero-admit ticks with no structured admission explanation`,
     };
   }
@@ -431,6 +456,7 @@ export async function readOrchestrationLoopHealthProjection(
       stall_threshold_ticks: stallThresholdTicks,
       in_flight: inFlight,
       last_admission_block_reasons: lastAdmissionBlockReasons,
+      zero_admit_audit: zeroAdmitAudit,
       explanation: `${consecutiveZeroTicks} consecutive zero-admit ticks explained by capacity or lane eligibility`,
     };
   }
@@ -443,6 +469,7 @@ export async function readOrchestrationLoopHealthProjection(
       stall_threshold_ticks: stallThresholdTicks,
       in_flight: inFlight,
       last_admission_block_reasons: lastAdmissionBlockReasons,
+      zero_admit_audit: zeroAdmitAudit,
       explanation:
         `${consecutiveZeroTicks} consecutive zero-admit ticks blocked by ` +
         formatCountMap(lastAdmissionBlockReasons),
@@ -456,10 +483,55 @@ export async function readOrchestrationLoopHealthProjection(
     stall_threshold_ticks: stallThresholdTicks,
     in_flight: inFlight,
     last_admission_block_reasons: lastAdmissionBlockReasons,
+    zero_admit_audit: zeroAdmitAudit,
     explanation: explainedCount > 0
       ? "zero-admit ticks have structured admission explanations"
       : "orchestration loop is below the zero-admit stall threshold",
   };
+}
+
+function buildZeroAdmitAudit(input: {
+  consecutiveZeroTicks: number;
+  lastDispatchAt: string | null;
+  lastAdmissionBlockReasons: Record<string, number>;
+  readyAdmission?: OrchestrationHealthProjectionOptions["readyAdmission"];
+}): OrchestrationZeroAdmitAudit {
+  const topBlocker = topZeroAdmitBlocker(input.readyAdmission?.blockerCounts, input.lastAdmissionBlockReasons);
+  const affectedTargets = topBlocker
+    ? uniqueStrings(
+        (input.readyAdmission?.nonAdmitted ?? [])
+          .filter((row) => row.code === topBlocker.code)
+          .map((row) => row.to_agent ?? "")
+          .filter((name): name is string => !!name),
+      ).sort((a, b) => a.localeCompare(b))
+    : [];
+  return {
+    recent_zero_admit_ticks: input.consecutiveZeroTicks,
+    top_blocker: topBlocker,
+    affected_targets: affectedTargets,
+    last_dispatch_at: input.lastDispatchAt,
+  };
+}
+
+function topZeroAdmitBlocker(
+  readyAdmissionCounts: ReadyAdmissionBlockerSummary[] | undefined,
+  persistedCounts: Record<string, number>,
+): OrchestrationZeroAdmitAudit["top_blocker"] {
+  const fromReadyAdmission = (readyAdmissionCounts ?? [])
+    .filter((row) => row.count > 0)
+    .sort(sortBlockerCounts)[0];
+  if (fromReadyAdmission) {
+    return {
+      code: fromReadyAdmission.code,
+      category: fromReadyAdmission.category,
+      count: fromReadyAdmission.count,
+    };
+  }
+
+  const [code, count] = Object.entries(persistedCounts)
+    .filter(([, value]) => value > 0)
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))[0] ?? [];
+  return code ? { code, category: null, count } : null;
 }
 
 function formatCountMap(counts: Record<string, number>): string {

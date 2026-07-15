@@ -225,6 +225,11 @@ describe("orchestration health projection", () => {
       else retryBlockedId = row.item_id;
     }
     await recordTickOutcome(adapter, "default", {
+      zero_ticks: 0,
+      fired: true,
+      admission_block_reasons: {},
+    });
+    await recordTickOutcome(adapter, "default", {
       zero_ticks: 8,
       fired: false,
       admission_block_reasons: {
@@ -242,8 +247,8 @@ describe("orchestration health projection", () => {
           { code: "duplicate_dispatch_retry_required", category: "retry_safety", count: 1 },
         ],
         nonAdmitted: [
-          ...targetUnhealthyIds.map((item_id) => ({ item_id, code: "target_unhealthy" })),
-          { item_id: retryBlockedId, code: "duplicate_dispatch_retry_required" },
+          ...targetUnhealthyIds.map((item_id) => ({ item_id, code: "target_unhealthy", to_agent: "roger" })),
+          { item_id: retryBlockedId, code: "duplicate_dispatch_retry_required", to_agent: "roger" },
         ],
         recommendedAction:
           "reroute/downclassify/owner-restart target_unhealthy=6 rows where safe; review duplicate_dispatch_retry_required=1 rows and mark retry_safe only for bounded refires or close stale duplicates",
@@ -252,6 +257,12 @@ describe("orchestration health projection", () => {
 
     expect(health.orchestration_loop.last_admission_block_reasons).toEqual({
       duplicate_dispatch_retry_required: 1,
+    });
+    expect(health.orchestration_loop.zero_admit_audit).toEqual({
+      recent_zero_admit_ticks: 8,
+      top_blocker: { code: "target_unhealthy", category: "runtime_unavailable", count: 6 },
+      affected_targets: ["roger"],
+      last_dispatch_at: expect.any(String),
     });
     expect(health.ready_item_blockers.stale_ready_fuel.counts_by_blocker_class).toEqual([
       { code: "target_unhealthy", category: "runtime_unavailable", count: 6, examples: targetUnhealthyIds.slice(0, 5) },
@@ -263,6 +274,72 @@ describe("orchestration health projection", () => {
     expect(health.ready_item_blockers.recommended_action).toContain(
       "review duplicate_dispatch_retry_required=1 rows",
     );
+  });
+
+  it("persists enough zero-admit audit detail for stale target-unhealthy ready rows", async () => {
+    await setMode(adapter, "default", "running");
+    const staleA = await insertBacklogItem(adapter, {
+      title: "stale target unhealthy roger row",
+      readiness_state: "ready",
+      risk_class: "build",
+      to_agent: "roger",
+      dispatch_body: "continue",
+      write_scope: ["/repo/kapelle-a"],
+    });
+    const staleB = await insertBacklogItem(adapter, {
+      title: "stale target unhealthy brunel row",
+      readiness_state: "ready",
+      risk_class: "build",
+      to_agent: "brunel",
+      dispatch_body: "continue",
+      write_scope: ["/repo/kapelle-b"],
+    });
+    await adapter.query(
+      `UPDATE orchestration_backlog_item
+          SET last_dispatch_phid = CASE item_id
+            WHEN $1 THEN 'phid:disp-stale-roger'
+            WHEN $2 THEN 'phid:disp-stale-brunel'
+          END
+        WHERE item_id IN ($3, $4)`,
+      [staleA.item_id, staleB.item_id, staleA.item_id, staleB.item_id],
+    );
+    await recordTickOutcome(adapter, "default", {
+      zero_ticks: 0,
+      fired: true,
+      admission_block_reasons: {},
+    });
+    await recordTickOutcome(adapter, "default", {
+      zero_ticks: 6,
+      fired: false,
+      admission_block_reasons: { target_unhealthy: 2 },
+    });
+
+    const health = await readOrchestrationHealthProjection(adapter, "default", {
+      readyAdmission: {
+        rawReady: 2,
+        usefulReady: 0,
+        admissibleNow: 0,
+        blockerCounts: [
+          { code: "target_unhealthy", category: "runtime_unavailable", count: 2 },
+        ],
+        nonAdmitted: [
+          { item_id: staleA.item_id, code: "target_unhealthy", to_agent: "roger", last_dispatch_phid: "phid:disp-stale-roger" },
+          { item_id: staleB.item_id, code: "target_unhealthy", to_agent: "brunel", last_dispatch_phid: "phid:disp-stale-brunel" },
+        ],
+      },
+    });
+
+    expect(health.orchestration_loop).toMatchObject({
+      state: "stalled_ready_not_launching",
+      consecutive_zero_ticks: 6,
+      last_admission_block_reasons: { target_unhealthy: 2 },
+      zero_admit_audit: {
+        recent_zero_admit_ticks: 6,
+        top_blocker: { code: "target_unhealthy", category: "runtime_unavailable", count: 2 },
+        affected_targets: ["brunel", "roger"],
+        last_dispatch_at: expect.any(String),
+      },
+    });
   });
 
   it("projects Wave49 all-single-writer-busy ready fuel with blocked lane keys and cross-lane action", async () => {
