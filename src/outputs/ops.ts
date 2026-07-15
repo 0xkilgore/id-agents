@@ -40,6 +40,7 @@ import type {
   FeedbackItem,
   FeedbackRetryReadiness,
   FeedbackRouting,
+  FeedbackSourceLinkState,
   ReactionKind,
   ReactionRequest,
   RejectRequest,
@@ -837,6 +838,7 @@ export async function listFeedback(
   for (const op of ops) {
     if (op.op_type !== "comment_recorded") continue;
     const { body, anchor, reaction, route_status } = parseCommentPayload(op.payload_json);
+    const sourceLink = classifyFeedbackSourceLink(op.source_link);
     items.push({
       comment_id: artifactCommentId(op.artifact_id, op.op_id),
       op_id: op.op_id,
@@ -846,6 +848,9 @@ export async function listFeedback(
       body,
       anchor,
       ts: op.ts,
+      source_link: sourceLink.href,
+      source_link_state: sourceLink.state,
+      source_link_reason: sourceLink.reason,
       routing: routingBySource.get(op.op_id) ?? null,
       route_status,
     });
@@ -1068,11 +1073,34 @@ function feedbackEvidence(item: FeedbackItem): FeedbackEvidence {
     proof_classification: proof.proof_classification,
     proof_evidence: proof.proof_evidence,
     missing_proof_reason: proof.missing_proof_reason,
+    source_link_state: item.source_link_state,
+    source_link: item.source_link,
+    source_link_reason: item.source_link_reason,
     work_success: routing && Object.prototype.hasOwnProperty.call(routing, "work_success")
       ? routing.work_success ?? null
       : null,
     work_success_blocker: routing?.work_success_blocker ?? proof.missing_proof_reason,
   };
+}
+
+function classifyFeedbackSourceLink(sourceLink: string | null): {
+  state: FeedbackSourceLinkState;
+  href: string | null;
+  reason: string | null;
+} {
+  const value = sourceLink?.trim() ?? "";
+  if (!value) {
+    return { state: "missing", href: null, reason: "source_link_missing" };
+  }
+  if (isRedactedSourceLink(value)) {
+    return { state: "redacted", href: null, reason: "source_link_redacted" };
+  }
+  return { state: "present", href: value, reason: null };
+}
+
+function isRedactedSourceLink(value: string): boolean {
+  const normalized = value.trim().toLowerCase();
+  return normalized === "[redacted]" || normalized === "<redacted>" || normalized === "redacted";
 }
 
 function disabledRouteReason(routeStatus: ArtifactCommentRouteStatus | null): string | null {

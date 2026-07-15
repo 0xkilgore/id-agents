@@ -34,6 +34,32 @@ const ON = { C0_FEEDBACK_REACTIONS: "1" } as NodeJS.ProcessEnv;
 function routing(dispatch_phid: string, to_agent = "regina"): FeedbackRouting {
   return { dispatch_phid, query_id: null, to_agent, routed_at: "2026-06-29T00:00:00.000Z" };
 }
+function routedRouteStatus(op_id: number): ArtifactCommentRouteStatus {
+  return {
+    visible_state: "recorded+routed",
+    compat_status: "recorded+routed",
+    feedback_status: "recorded+routed",
+    route_kind: "substantive_follow_up",
+    routed: true,
+    retryable: false,
+    recorded_op_id: op_id,
+    target_agent: "regina",
+    target_agent_raw: "regina",
+    dispatch: {
+      query_id: "q-routed",
+      dispatch_phid: "phid:disp-routed",
+      to_agent: "regina",
+    },
+    skipped: null,
+    error: null,
+    deadline_at: "2026-06-29T00:05:00.000Z",
+    timed_out_at: null,
+    notification_status: "pending",
+    next_retry_at: null,
+    suppress_duplicate_key: `artifact-comment:${op_id}:timeout`,
+    updated_at: "2026-06-29T00:00:00.000Z",
+  };
+}
 function retryableRouteStatus(op_id: number): ArtifactCommentRouteStatus {
   return {
     visible_state: "recorded-route-failed-retryable",
@@ -83,7 +109,15 @@ function commentItem(
   op_id: number,
   r: FeedbackRouting | null,
   route_status: ArtifactCommentRouteStatus | null = null,
+  source_link: string | null = "manager:/artifacts/art-s4-1/comments#op-source",
 ): FeedbackItem {
+  const trimmedSourceLink = source_link?.trim() ?? "";
+  const source_link_state = !trimmedSourceLink
+    ? "missing"
+    : trimmedSourceLink.toLowerCase() === "[redacted]"
+      ? "redacted"
+      : "present";
+  const sanitizedSourceLink = source_link_state === "present" ? trimmedSourceLink : null;
   return {
     comment_id: `acmt:${ART}:${op_id}`,
     op_id,
@@ -93,6 +127,14 @@ function commentItem(
     body: `comment ${op_id}`,
     anchor: null,
     ts: "2026-06-29T00:00:00.000Z",
+    source_link: sanitizedSourceLink,
+    source_link_state,
+    source_link_reason:
+      source_link_state === "missing"
+        ? "source_link_missing"
+        : source_link_state === "redacted"
+          ? "source_link_redacted"
+          : null,
     routing: r,
     route_status,
   };
@@ -420,6 +462,46 @@ describe("reconcileFeedbackDispatchStatus — pure dispatch join", () => {
       dispatch_ref: null,
     });
   });
+
+  it("exposes distinct UI contract states for routed, route-failed, redacted-source, and missing-source feedback", async () => {
+    const fb = feedbackFixture([
+      commentItem(1, routing("phid:disp-routed"), routedRouteStatus(1), "manager:/artifacts/art-s4-1/comments#op-1"),
+      commentItem(2, null, retryableRouteStatus(2), "manager:/artifacts/art-s4-1/comments#op-2"),
+      commentItem(3, null, disabledRouteStatus(3), "[redacted]"),
+      commentItem(4, null, disabledRouteStatus(4), null),
+    ]);
+
+    const out = await reconcileFeedbackDispatchStatus(fb, async () => ({
+      status: "in_flight",
+      effective_state: "in_flight",
+      is_terminal: false,
+    }));
+
+    expect(out.items[0].feedback_evidence).toMatchObject({
+      route_state: "recorded+routed",
+      route_routed: true,
+      source_link_state: "present",
+      source_link: "manager:/artifacts/art-s4-1/comments#op-1",
+      source_link_reason: null,
+    });
+    expect(out.items[1].feedback_evidence).toMatchObject({
+      route_state: "recorded-route-failed-retryable",
+      retry_drain_status: "retryable_failed_row",
+      route_retryable: true,
+      source_link_state: "present",
+      source_link: "manager:/artifacts/art-s4-1/comments#op-2",
+    });
+    expect(out.items[2].feedback_evidence).toMatchObject({
+      source_link_state: "redacted",
+      source_link: null,
+      source_link_reason: "source_link_redacted",
+    });
+    expect(out.items[3].feedback_evidence).toMatchObject({
+      source_link_state: "missing",
+      source_link: null,
+      source_link_reason: "source_link_missing",
+    });
+  });
 });
 
 describe("GET /artifacts/:id/feedback?reconcile=1 — wired reconciliation", () => {
@@ -568,5 +650,29 @@ describe("GET /artifacts/:id/feedback?reconcile=1 — wired reconciliation", () 
     expect(fb.status).toBe(200);
     expect(fb.body.reconciled).toBe(false);
     expect(fb.body.items[0].routing.status).toBeUndefined();
+  });
+
+  it("projects redacted feedback source links without exposing the redacted href", async () => {
+    const { app, adapter } = await buildApp();
+    await catalogArtifact(adapter, "regina");
+    const res = await call(app, "POST", `/artifacts/${ART}/comments`, {
+      actor_ref: "user:chris",
+      body: "scheduler unavailable but source redacted",
+      source_link: "[redacted]",
+    });
+    expect(res.status).toBe(200);
+
+    const fb = await call(app, "GET", `/artifacts/${ART}/feedback`);
+
+    expect(fb.status).toBe(200);
+    expect(fb.body.items[0].source_link).toBeNull();
+    expect(fb.body.items[0].source_link_state).toBe("redacted");
+    expect(fb.body.items[0].source_link_reason).toBe("source_link_redacted");
+    expect(fb.body.items[0].feedback_evidence).toMatchObject({
+      route_state: "recorded-route-failed-retryable",
+      source_link_state: "redacted",
+      source_link: null,
+      source_link_reason: "source_link_redacted",
+    });
   });
 });

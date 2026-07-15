@@ -522,6 +522,9 @@ export interface FeedbackItem {
   body: string;
   anchor: string | null;
   ts: string;
+  source_link: string | null;
+  source_link_state: FeedbackSourceLinkState;
+  source_link_reason: string | null;
   /** The dispatch this feedback routed to its owning agent, or null when it
    *  never routed (no owner / no scheduler / flag was off at capture time). */
   routing: FeedbackRouting | null;
@@ -570,6 +573,11 @@ export type FeedbackProofClassification =
   | "stale"
   | "not_required";
 
+export type FeedbackSourceLinkState =
+  | "present"
+  | "redacted"
+  | "missing";
+
 export interface FeedbackEvidenceRef {
   dispatch_phid: string | null;
   query_id: string | null;
@@ -594,6 +602,9 @@ export interface FeedbackEvidence {
   proof_classification: FeedbackProofClassification;
   proof_evidence: string | null;
   missing_proof_reason: string | null;
+  source_link_state: FeedbackSourceLinkState;
+  source_link: string | null;
+  source_link_reason: string | null;
   work_success: boolean | null;
   work_success_blocker: string | null;
 }
