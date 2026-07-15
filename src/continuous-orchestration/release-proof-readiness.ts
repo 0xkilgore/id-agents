@@ -114,6 +114,10 @@ export function buildReleaseProofReadiness(
   if (missingArtifactSources.length > 0) {
     missingReasons.push("one or more generated artifacts are missing safe source links");
   }
+  const unavailableArtifacts = artifactPointers.filter((item) => item.availability !== "present");
+  if (unavailableArtifacts.length > 0) {
+    missingReasons.push("one or more generated proof artifacts are not present");
+  }
   const staleArtifacts = artifactPointers.filter((item) =>
     Number.isFinite(Date.parse(item.produced_at)) &&
     Date.parse(input.generated_at) - Date.parse(item.produced_at) > staleAfterMs
@@ -163,6 +167,7 @@ export function buildReleaseProofReadiness(
     sourceLinks.length > 0 &&
     artifactPointers.length > 0 &&
     missingArtifactSources.length === 0 &&
+    unavailableArtifacts.length === 0 &&
     feedbackMissingSources.length === 0 &&
     staleReasons.length === 0 &&
     errorReasons.length === 0 &&
@@ -197,7 +202,7 @@ export function buildReleaseProofReadiness(
       links: sourceLinks,
     },
     generated_artifacts: {
-      state: artifactPointers.length > 0 && missingArtifactSources.length === 0 ? "present" : "missing",
+      state: artifactPointers.length > 0 && missingArtifactSources.length === 0 && unavailableArtifacts.length === 0 ? "present" : "missing",
       count: artifactPointers.length,
       items: artifactPointers,
     },
@@ -362,9 +367,13 @@ async function readGeneratedArtifacts(adapter: DbAdapter, project: string): Prom
     path: row.abs_path,
     title: row.title,
     produced_at: row.produced_at,
-    source_link: row.source,
+    source_link: stableArtifactSourceLink(row.artifact_id),
     availability: row.availability,
   }));
+}
+
+function stableArtifactSourceLink(artifactId: string): string {
+  return `manager:/artifacts/${encodeURIComponent(artifactId)}`;
 }
 
 function latestIso(values: string[]): string | null {

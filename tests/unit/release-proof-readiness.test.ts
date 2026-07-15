@@ -260,6 +260,33 @@ describe("buildReleaseProofReadiness", () => {
     expect(view.summary).toContain("one or more generated artifacts are older than 1h");
   });
 
+  it("blocks missing generated proof artifacts even when feedback source links and infra are clean", () => {
+    const view = buildReleaseProofReadiness(base({
+      generated_artifacts: [
+        {
+          artifact_id: "art-missing-generated",
+          path: "/tmp/output/kapelle-release-proof.md",
+          title: "Kapelle release proof",
+          produced_at: "2026-07-13T11:45:00.000Z",
+          source_link: "manager:/artifacts/art-missing-generated",
+          availability: "missing",
+        },
+      ],
+    }));
+
+    expect(view.release_readiness).toBe("not_ready");
+    expect(view.chris_readable_release_ready).toBe("NOT READY");
+    expect(view.feedback_evidence).toMatchObject({ state: "present", count: 1 });
+    expect(view.infra_warnings).toMatchObject({ state: "clear", count: 0, source: "none", action: null });
+    expect(view.sources.state).toBe("present");
+    expect(view.generated_artifacts).toMatchObject({ state: "missing", count: 1 });
+    expect(view.stale_reasons).toEqual([]);
+    expect(view.missing_reasons).toEqual(["one or more generated proof artifacts are not present"]);
+    expect(view.summary).toBe("Release proof is not ready: one or more generated proof artifacts are not present.");
+    expect(view.summary).not.toContain("feedback evidence items are missing safe source links");
+    expect(view.summary).not.toContain("infra warnings");
+  });
+
   it("keeps stale missing-source feedback as the blocker even when infra is clear", () => {
     const view = buildReleaseProofReadiness(base({
       feedback_evidence: [
@@ -449,6 +476,81 @@ describe("buildReleaseProofReadiness", () => {
       expect(view.summary).toBe(
         "Release proof is not ready: one or more feedback evidence items are missing safe source links.",
       );
+    } finally {
+      await adapter.close();
+    }
+  });
+
+  it("maps present filesystem proof artifacts to stable source links with availability", async () => {
+    const adapter = new SqliteAdapter(":memory:");
+    try {
+      await migrateSqlite(adapter);
+      await migrateOutputsTables(adapter);
+      await setMode(adapter, "default", "running");
+      await adapter.query(
+        `INSERT INTO artifacts
+           (artifact_id, basename, agent, tag, abs_path, title, produced_at, source, availability,
+            project_ref, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          "art-kapelle-filesystem-proof",
+          "kapelle-release-proof.md",
+          "roger",
+          "release-proof",
+          "/tmp/output/kapelle-release-proof.md",
+          "Kapelle release proof evidence",
+          "2026-07-13T11:20:00.000Z",
+          "filesystem",
+          "present",
+          "kapelle",
+          "2026-07-13T11:20:00.000Z",
+          "2026-07-13T11:20:00.000Z",
+        ],
+      );
+      await adapter.query(
+        `INSERT INTO artifact_operations
+           (artifact_id, op_type, actor, ts, payload_json, source_link, idempotency_key)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        [
+          "art-kapelle-filesystem-proof",
+          "comment_recorded",
+          "chris",
+          "2026-07-13T11:30:00.000Z",
+          JSON.stringify({ body: "Filesystem proof artifact is present and readable." }),
+          "manager:/artifacts/art-kapelle-filesystem-proof/comments#op-1",
+          "comment-filesystem-proof",
+        ],
+      );
+
+      const view = await readReleaseProofReadiness(adapter, {
+        teamId: "default",
+        project: "kapelle",
+        now: NOW,
+      });
+
+      expect(view.release_readiness).toBe("ready");
+      expect(view.chris_readable_release_ready).toBe("READY");
+      expect(view.generated_artifacts).toMatchObject({
+        state: "present",
+        count: 1,
+        items: [
+          expect.objectContaining({
+            artifact_id: "art-kapelle-filesystem-proof",
+            source_link: "manager:/artifacts/art-kapelle-filesystem-proof",
+            availability: "present",
+          }),
+        ],
+      });
+      expect(view.sources.links).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            source: "artifact",
+            href: "manager:/artifacts/art-kapelle-filesystem-proof",
+          }),
+        ]),
+      );
+      expect(view.missing_reasons).toEqual([]);
+      expect(view.stale_reasons).toEqual([]);
     } finally {
       await adapter.close();
     }
