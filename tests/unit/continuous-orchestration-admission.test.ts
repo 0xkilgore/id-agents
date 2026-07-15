@@ -706,6 +706,106 @@ describe("planAdmission — RD-014 agent-health gate", () => {
     expect(p.skipped).toHaveLength(0);
   });
 
+  it("assigns a later healthy runtime-compatible builder instead of holding the pool row", () => {
+    const p = planAdmission(
+      [
+        item({
+          item_id: "pool-runtime-item",
+          to_agent: "pool:builder",
+          provider: "openai",
+          runtime: "codex",
+          write_scope: [],
+        }),
+      ],
+      ctx({
+        admit_limit: 5,
+        pool_for: () => "backend",
+        pool_free_slots: new Map([["backend", 1]]),
+        pool_free_builders: new Map([["backend", ["gaudi", "roger"]]]),
+        healthy_agents: new Set(["gaudi", "roger"]),
+        target_agent_runtimes: new Map([
+          ["gaudi", "claude-code-cli"],
+          ["roger", "codex"],
+        ]),
+      }),
+      cfg,
+    );
+
+    expect(p.admit.map((it) => it.item_id)).toEqual(["pool-runtime-item"]);
+    expect(p.assignments["pool-runtime-item"]).toBe("roger");
+    expect(p.skipped).toHaveLength(0);
+  });
+
+  it("keeps provider_runtime_mismatch distinct when no healthy pool builder runs the requested runtime", () => {
+    const p = planAdmission(
+      [
+        item({
+          item_id: "pool-runtime-mismatch",
+          to_agent: "pool:builder",
+          provider: "openai",
+          runtime: "codex",
+          write_scope: [],
+        }),
+      ],
+      ctx({
+        admit_limit: 5,
+        pool_for: () => "backend",
+        pool_free_slots: new Map([["backend", 1]]),
+        pool_free_builders: new Map([["backend", ["gaudi"]]]),
+        healthy_agents: new Set(["gaudi"]),
+        target_agent_runtimes: new Map([["gaudi", "claude-code-cli"]]),
+      }),
+      cfg,
+    );
+
+    expect(p.admit).toHaveLength(0);
+    expect(p.skipped[0]).toMatchObject({
+      item_id: "pool-runtime-mismatch",
+      action: "held",
+      metadata: {
+        code: "provider_runtime_mismatch",
+        class: "provider_runtime",
+        target: "gaudi",
+        target_runtime: "claude-code-cli",
+      },
+    });
+  });
+
+  it("keeps duplicate retry safety ahead of target health and runtime repair blockers", () => {
+    const p = planAdmission(
+      [
+        item({
+          item_id: "pool-duplicate",
+          to_agent: "pool:builder",
+          provider: "openai",
+          runtime: "codex",
+          last_dispatch_phid: "phid:disp-prior",
+          write_scope: [],
+        }),
+      ],
+      ctx({
+        admit_limit: 5,
+        pool_for: () => "backend",
+        pool_free_slots: new Map([["backend", 1]]),
+        pool_free_builders: new Map([["backend", ["gaudi"]]]),
+        healthy_agents: new Set(["gaudi"]),
+        target_agent_runtimes: new Map([["gaudi", "claude-code-cli"]]),
+      }),
+      cfg,
+    );
+
+    expect(p.admit).toHaveLength(0);
+    expect(p.skipped[0]).toMatchObject({
+      item_id: "pool-duplicate",
+      action: "held",
+      metadata: {
+        code: "duplicate_dispatch_retry_required",
+        class: "retry_safety",
+        last_dispatch_phid: "phid:disp-prior",
+      },
+    });
+  });
+
   it("admits a POOL item whose assigned builder IS healthy", () => {
     const p = planAdmission(
       [item({ item_id: "pool-item", write_scope: [] })],

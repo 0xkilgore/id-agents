@@ -152,6 +152,17 @@ function healthyAlternateRecommendation(
   };
 }
 
+function poolBuilderMatchesRequestedRuntime(
+  item: BacklogItem,
+  builder: string,
+  ctx: AdmissionContext,
+): boolean {
+  const requestedRuntime = item.runtime ? normalizeRuntime(item.runtime) : null;
+  const targetRuntime = ctx.target_agent_runtimes?.get(builder);
+  if (requestedRuntime && !targetRuntime) return false;
+  return providerRuntimeMismatch(item, builder, targetRuntime) === null;
+}
+
 export function providerRuntimeMismatch(
   item: BacklogItem,
   target: string | null,
@@ -326,11 +337,16 @@ export function planAdmission(
       }
       const builders = poolBuilders.get(poolId) ?? [];
       const builderIndex = ctx.healthy_agents
-        ? builders.findIndex((builder) => ctx.healthy_agents?.has(builder))
-        : builders.length > 0
-          ? 0
-          : -1;
-      assignedBuilder = builderIndex >= 0 ? builders.splice(builderIndex, 1)[0] : null;
+        ? builders.findIndex((builder) => ctx.healthy_agents?.has(builder) && poolBuilderMatchesRequestedRuntime(item, builder, ctx))
+        : builders.findIndex((builder) => poolBuilderMatchesRequestedRuntime(item, builder, ctx));
+      const fallbackBuilderIndex = builderIndex >= 0
+        ? builderIndex
+        : ctx.healthy_agents
+          ? builders.findIndex((builder) => ctx.healthy_agents?.has(builder))
+          : builders.length > 0
+            ? 0
+            : -1;
+      assignedBuilder = fallbackBuilderIndex >= 0 ? builders.splice(fallbackBuilderIndex, 1)[0] : null;
       if (!assignedBuilder) {
         const reason = ctx.healthy_agents && builders.length > 0
           ? `no healthy free builder in pool: ${poolId}`
