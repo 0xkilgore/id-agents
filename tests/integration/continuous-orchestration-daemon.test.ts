@@ -4353,6 +4353,128 @@ describe("release-proof-readiness route", () => {
     expect(res.body.stale_reasons.length).toBeGreaterThan(0);
     expect(res.body.missing_reasons).toEqual([]);
   });
+
+  it("reports duplicate-dispatch retry blockers as infra warnings without hiding proof evidence gaps", async () => {
+    const producedAt = new Date().toISOString();
+    await adapter.query(
+      `INSERT INTO artifacts (
+         artifact_id, basename, agent, tag, abs_path, title, produced_at, source,
+         availability, source_badges, reconciled_at, project_ref, created_at, updated_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        "art-kapelle-proof",
+        "kapelle-release-proof.md",
+        "roger",
+        null,
+        "/tmp/output/kapelle-release-proof.md",
+        "Kapelle release proof",
+        producedAt,
+        "delivery-log",
+        "present",
+        "[]",
+        null,
+        "kapelle",
+        producedAt,
+        producedAt,
+      ],
+    );
+    await adapter.query(
+      `INSERT INTO artifact_operations (artifact_id, op_type, actor, ts, payload_json, source_link, idempotency_key)
+       VALUES (?, 'comment_recorded', ?, ?, ?, ?, NULL)`,
+      [
+        "art-kapelle-proof",
+        "chris",
+        "2020-01-01T12:00:00.000Z",
+        JSON.stringify({ body: "Old feedback that still needs a durable source." }),
+        null,
+      ],
+    );
+    await adapter.query(
+      `INSERT INTO orchestration_backlog_item
+         (item_id, team_id, title, track, to_agent, dispatch_body, readiness_state, risk_class,
+          source_refs_json, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        "backlog-kapelle-proof-source",
+        "default",
+        "Kapelle release proof source context",
+        "kapelle",
+        "roger",
+        "Release-proof readiness source context",
+        "done",
+        "build",
+        JSON.stringify(["manager:/backlog/backlog-kapelle-proof-source"]),
+        producedAt,
+        producedAt,
+      ],
+    );
+    const duplicate = await seedReady(adapter, {
+      title: "Kapelle duplicate retry safety blocker",
+      track: "kapelle",
+      write_scope: ["repo/kapelle-release-proof"],
+      source_refs: ["manager:/orchestration/backlog/duplicate-retry-blocker"],
+    });
+    await markReadyAlreadyDispatched(adapter, duplicate.item_id, "phid:disp-kapelle-duplicate");
+    await seedDispatch(adapter, {
+      dispatch_phid: "phid:disp-kapelle-duplicate",
+      status: "failed",
+      failure_kind: "scheduler_wedged",
+      failure_detail: "stale in_flight claim",
+    });
+    await recordTickOutcome(adapter, "default", { zero_ticks: 3, fired: false });
+
+    const { app, daemon } = mountStatusApp(adapter, {
+      dry_run: true,
+      auto_flesh_enabled: false,
+      auto_promote_enabled: false,
+    });
+    await daemon.setMode("running");
+
+    const res = await callApp(app, "/orchestration/release-proof-readiness?project=kapelle");
+
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({
+      schema_version: "release_proof.readiness.v1",
+      release_readiness: "not_ready",
+      chris_readable_release_ready: "NOT READY",
+      feedback_evidence: { state: "stale", count: 1 },
+      infra_warnings: {
+        state: "warning",
+        count: 1,
+        source: "orchestration_health_projection",
+        action: "review orchestration health and resolve infra warnings before release proof sign-off",
+      },
+      generated_artifacts: {
+        state: "present",
+        count: 1,
+        items: [
+          expect.objectContaining({
+            artifact_id: "art-kapelle-proof",
+            source_link: "manager:/artifacts/art-kapelle-proof",
+          }),
+        ],
+      },
+      sources: {
+        state: "present",
+        links: expect.arrayContaining([
+          expect.objectContaining({ source: "artifact", href: "manager:/artifacts/art-kapelle-proof" }),
+          expect.objectContaining({ source: "backlog", href: "manager:/backlog/backlog-kapelle-proof-source" }),
+        ]),
+      },
+    });
+    const warning = res.body.infra_warnings.items[0] ?? "";
+    expect(warning).toContain("top blocker duplicate_dispatch_retry_required=1");
+    expect(warning).toContain("source route /orchestration/status ready_admission.blocker_counts");
+    expect(warning).toContain(
+      "safe next action: mark the item retry-safe or create an explicit retry before readmitting it",
+    );
+    expect(warning).not.toContain("feedback evidence");
+    expect(warning).not.toContain("source links");
+    expect(res.body.stale_reasons).toEqual(["latest feedback evidence is older than 24h"]);
+    expect(res.body.missing_reasons).toEqual(["one or more feedback evidence items are missing safe source links"]);
+    expect(res.body.summary).toBe("Release proof is not ready: infra warnings require operator review.");
+    expect(res.body.summary).not.toContain("ready for Chris");
+  });
 });
 
 // RD-014: admission previously fired to a lane with no live check the target
