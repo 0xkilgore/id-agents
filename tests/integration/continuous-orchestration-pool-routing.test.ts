@@ -58,6 +58,7 @@ function makeDaemon(over: {
   config?: Partial<ContinuousOrchestrationConfig>;
   pools?: PoolRouting;
   healthyAgents?: Set<string>;
+  agentRuntimes?: Map<string, string>;
 } = {}) {
   const fired: BacklogItem[] = [];
   const daemon = new ContinuousOrchestrationDaemon({
@@ -76,6 +77,14 @@ function makeDaemon(over: {
     },
     resolveDispatchStates: (phids) => getDispatchStatusesByPhid(adapter, phids),
     resolveAgentHealth: over.healthyAgents ? async () => over.healthyAgents! : undefined,
+    resolveAgentRuntimes: over.agentRuntimes ? async (names) => {
+      const out = new Map<string, string>();
+      for (const name of names) {
+        const runtime = over.agentRuntimes!.get(name);
+        if (runtime) out.set(name, runtime);
+      }
+      return out;
+    } : undefined,
     pools: over.pools ?? fakePools(),
     alert: async () => {},
     now: () => Date.parse("2026-06-17T18:00:00Z"), // not a load-point
@@ -85,7 +94,7 @@ function makeDaemon(over: {
 
 async function seedBuildItem(
   n: number,
-  over: Partial<Pick<BacklogItem, "title" | "track" | "to_agent" | "dispatch_body" | "write_scope">> = {},
+  over: Partial<BacklogItem> = {},
 ) {
   return insertBacklogItem(adapter, {
     title: over.title ?? `build ${n}`,
@@ -97,6 +106,8 @@ async function seedBuildItem(
     priority: 5,
     write_scope: over.write_scope ?? ["/repo/id-agents"], // repo root at flesh; daemon late-binds to a worktree
     token_estimate: 0,
+    provider: over.provider,
+    runtime: over.runtime,
   });
 }
 
@@ -375,5 +386,68 @@ describe("backend pool routing (real registry)", () => {
 
     expect(fired).toHaveLength(3);
     expect(new Set(fired.map((i) => i.to_agent)).size).toBe(3); // 3 DISTINCT maintained builders
+  });
+
+  it("Wave76 backend rows admit healthy pool targets and recommend concrete repair for an unhealthy explicit target", async () => {
+    for (let i = 0; i < 5; i++) {
+      await seedBuildItem(i, {
+        item_id: `wave76_pool_${i}`,
+        title: `Wave76 backend repair ${i}`,
+        track: "T-ORCH",
+        to_agent: "pool:backend",
+        dispatch_body: "Repair backend ready-admission status projection.",
+        write_scope: ["/Users/kilgore/Dropbox/Code/cane/id-agents"],
+      });
+    }
+    const explicitUnhealthy = await seedBuildItem(10, {
+      item_id: "wave76_explicit_unhealthy",
+      title: "Wave76 explicit unhealthy backend lane",
+      track: "T-ORCH",
+      to_agent: "roger",
+      dispatch_body: "Repair target_unhealthy reroute receipt.",
+      write_scope: ["/Users/kilgore/Dropbox/Code/cane/id-agents"],
+    });
+    const runtimeMismatch = await seedBuildItem(11, {
+      item_id: "wave76_runtime_mismatch",
+      title: "Wave76 provider runtime mismatch remains distinct",
+      track: "T-ORCH",
+      to_agent: "substrate-orch-codex",
+      provider: "anthropic",
+      runtime: "claude-code-cli",
+      dispatch_body: "Keep provider runtime mismatch separate from health.",
+      write_scope: ["/Users/kilgore/Dropbox/Code/cane/id-agents"],
+    });
+
+    const { daemon } = makeDaemon({
+      config: { max_in_flight: 10, min_ready_fuel: 8 },
+      pools: buildPoolRouting({ BUILD_POOL_BACKEND_MAX_PARALLEL: "3" }),
+      healthyAgents: new Set(["substrate-orch-codex", "substrate-api-codex"]),
+      agentRuntimes: new Map([
+        ["roger", "claude-code-cli"],
+        ["substrate-orch-codex", "codex"],
+        ["substrate-api-codex", "codex"],
+      ]),
+    });
+    await daemon.setMode("running");
+
+    const status = await daemon.explainReadyAdmission();
+
+    expect(status.admissible).toHaveLength(2);
+    expect(new Set(status.admissible.map((row) => row.to_agent))).toEqual(
+      new Set(["substrate-orch-codex", "substrate-api-codex"]),
+    );
+    expect(status.non_admitted.filter((row) => row.code === "target_unhealthy").map((row) => row.item_id)).toEqual([
+      explicitUnhealthy.item_id,
+    ]);
+    expect(status.non_admitted.find((row) => row.item_id === runtimeMismatch.item_id)?.code).toBe(
+      "provider_runtime_mismatch",
+    );
+    const unhealthyGroup = status.target_unhealthy_groups.find((group) => group.target === "roger");
+    expect(unhealthyGroup).toMatchObject({
+      target: "roger",
+      proposed_healthy_target: "substrate-orch-codex",
+    });
+    expect(unhealthyGroup?.recommended_action).toContain("substrate-orch-codex");
+    expect(status.recommended_action).toContain("target=roger");
   });
 });

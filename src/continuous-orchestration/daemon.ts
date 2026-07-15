@@ -283,6 +283,7 @@ export interface ReadyAdmissionTargetUnhealthyGroup {
   target: string;
   lane: string;
   count: number;
+  proposed_healthy_target: string | null;
   examples: Array<{
     item_id: string;
     title: string;
@@ -604,8 +605,19 @@ function readyAdmissionRecommendedAction(input: {
     : "inspect ready admission blockers before refueling";
 }
 
-function targetUnhealthyGroupRecommendedAction(target: string, lane: string, priorOwner: string | null): string {
+function targetUnhealthyGroupRecommendedAction(
+  target: string,
+  lane: string,
+  priorOwner: string | null,
+  proposedHealthyTarget: string | null,
+): string {
   const ownerText = priorOwner && priorOwner !== target ? `original owner ${priorOwner}` : `target owner ${target}`;
+  if (proposedHealthyTarget) {
+    return (
+      `Reroute to healthy compatible target ${proposedHealthyTarget} for lane ${lane}; ` +
+      `downclassify/supersede the row if the target pin is stale; or restart ${ownerText} only when that owner is expected to resume safely.`
+    );
+  }
   return (
     `Reroute to a compatible healthy agent for lane ${lane}; downclassify/supersede the row if the target pin is stale; ` +
     `or restart ${ownerText} only when that owner is expected to resume safely.`
@@ -615,6 +627,7 @@ function targetUnhealthyGroupRecommendedAction(target: string, lane: string, pri
 function readyAdmissionTargetUnhealthyGroups(
   plan: { skipped: DecisionRecord[] },
   byId: Map<string, BacklogItem>,
+  proposedHealthyTargets: Map<string, string> = new Map(),
 ): ReadyAdmissionTargetUnhealthyGroup[] {
   const groups = new Map<string, ReadyAdmissionTargetUnhealthyGroup>();
   for (const decision of plan.skipped) {
@@ -627,13 +640,19 @@ function readyAdmissionTargetUnhealthyGroups(
 
     const lane = laneKeyOf(item);
     const key = `${target}\u0000${lane}`;
+    const proposedHealthyTarget = proposedHealthyTargets.get(item.item_id) ?? null;
     const current = groups.get(key) ?? {
       target,
       lane,
       count: 0,
+      proposed_healthy_target: proposedHealthyTarget,
       examples: [],
-      recommended_action: targetUnhealthyGroupRecommendedAction(target, lane, item.to_agent ?? null),
+      recommended_action: targetUnhealthyGroupRecommendedAction(target, lane, item.to_agent ?? null, proposedHealthyTarget),
     };
+    if (!current.proposed_healthy_target && proposedHealthyTarget) {
+      current.proposed_healthy_target = proposedHealthyTarget;
+      current.recommended_action = targetUnhealthyGroupRecommendedAction(target, lane, item.to_agent ?? null, proposedHealthyTarget);
+    }
     current.count += 1;
     if (current.examples.length < 5) {
       current.examples.push({
@@ -1424,7 +1443,7 @@ export class ContinuousOrchestrationDaemon {
       (usefulReady < config.min_ready_fuel && ordered.length > 0) ||
       (usefulReady >= config.min_ready_fuel && plan.admit.length < config.min_ready_fuel && plan.skipped.length > 0);
     const blockedLanes = readyAdmissionBlockedLanes(plan, byId);
-    const targetUnhealthyGroups = readyAdmissionTargetUnhealthyGroups(plan, byId);
+    const targetUnhealthyGroups = readyAdmissionTargetUnhealthyGroups(plan, byId, proposedHealthyTargets);
     const recommendedAction = readyAdmissionRecommendedAction({
       candidates: ordered.length,
       usefulReady,
