@@ -50,6 +50,7 @@ import { resolveTrack } from "../track-registry/registry.js";
 import { readOrchestrationHealthProjection } from "./health-projection.js";
 import { readReleaseProofReadiness } from "./release-proof-readiness.js";
 import { DEFAULT_ACTOR_ID } from "../lib/default-actor.js";
+import { buildSourceDiagnostic, type BuildStatus, type BuildSourceDiagnostic } from "../build-info.js";
 
 export interface OrchestrationRouteOptions {
   daemon: ContinuousOrchestrationDaemon;
@@ -63,7 +64,13 @@ type NeedsPromoteSkipClass = "already_dispatched" | "confidence_threshold" | "re
 
 export interface RuntimeHealthSource {
   disk?: { state?: string | null } | null;
-  build?: { behind_origin?: boolean | null } | null;
+  build?: {
+    behind_origin?: boolean | null;
+    build_sha?: string | null;
+    origin_main_sha?: string | null;
+    freshness?: BuildStatus["freshness"];
+  } | null;
+  build_behind_origin_since?: string | null;
 }
 
 export interface RuntimeStatusProjection {
@@ -71,6 +78,7 @@ export interface RuntimeStatusProjection {
   disk_critical: boolean;
   disk_state: string | null;
   build_behind_origin: boolean | null;
+  build_source: BuildSourceDiagnostic | null;
   capacity_full: boolean;
   ready_count: number;
   raw_ready_fuel: number;
@@ -88,6 +96,13 @@ export function buildRuntimeStatusProjection(input: {
   const diskState = input.runtimeHealth?.disk?.state ?? null;
   const diskCritical = diskState === "critical";
   const buildBehindOrigin = input.runtimeHealth?.build?.behind_origin ?? null;
+  const buildSource = input.runtimeHealth?.build?.freshness
+    ? buildSourceDiagnostic({
+        build_sha: input.runtimeHealth.build.build_sha ?? null,
+        origin_main_sha: input.runtimeHealth.build.origin_main_sha ?? null,
+        freshness: input.runtimeHealth.build.freshness,
+      }, input.runtimeHealth.build_behind_origin_since ?? null)
+    : null;
   const capacityFull =
     input.autoPromoteHealth.lanes.capacity_occupied ||
     input.readyAdmission.blocker_counts.some((count) =>
@@ -95,7 +110,11 @@ export function buildRuntimeStatusProjection(input: {
     );
   const recommendedActions: string[] = [];
   if (diskCritical) recommendedActions.push("clear disk headroom before dispatching or handing off");
-  if (buildBehindOrigin === true) recommendedActions.push("deploy/promote the current manager build before Chris handoff");
+  if (buildSource?.recommended_redeploy_action) {
+    recommendedActions.push(buildSource.recommended_redeploy_action);
+  } else if (buildBehindOrigin === true) {
+    recommendedActions.push("deploy/promote the current manager build before Chris handoff");
+  }
   if (capacityFull) recommendedActions.push("wait for in-flight build capacity to free or close completed dispatches");
   if (input.readyAdmission.admissible_now > 0) recommendedActions.push("admit currently admissible ready rows");
   if (recommendedActions.length === 0) recommendedActions.push(input.readyAdmission.recommended_action);
@@ -110,6 +129,7 @@ export function buildRuntimeStatusProjection(input: {
     disk_critical: diskCritical,
     disk_state: diskState,
     build_behind_origin: buildBehindOrigin,
+    build_source: buildSource,
     capacity_full: capacityFull,
     ready_count: input.readyAdmission.candidates,
     raw_ready_fuel: input.readyAdmission.candidates,

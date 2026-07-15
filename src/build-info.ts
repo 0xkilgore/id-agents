@@ -67,6 +67,18 @@ export interface BuildStatus extends BuildStatusInput {
   freshness: BuildFreshnessSignal;
 }
 
+export interface BuildSourceDiagnostic {
+  schema_version: "manager.build_source_diagnostic.v1";
+  surface: "System/Diagnostics";
+  state: "ok" | "diagnostic" | "unknown";
+  classification: BuildFreshnessClassification;
+  build_sha: string | null;
+  origin_main_sha: string | null;
+  behind_origin_since: string | null;
+  recommended_redeploy_action: string | null;
+  message: string;
+}
+
 /** Paths read at RUNTIME by the manager (not compiled into `dist/`), so a commit
  *  confined to these does NOT make the running binary stale. Kept deliberately
  *  tight: runtime policy/config (e.g. configs/model-policy.json) + pure docs.
@@ -200,6 +212,37 @@ export function classifyBuildFreshness(input: Omit<BuildFreshnessSignal, "classi
     behind_promoted_main,
     source_differs_from_promoted_main,
     message,
+  };
+}
+
+export function buildSourceDiagnostic(
+  build: Pick<BuildStatus, "build_sha" | "origin_main_sha" | "freshness">,
+  behindOriginSince: string | null = null,
+): BuildSourceDiagnostic {
+  const classification = build.freshness.classification;
+  const recommended_redeploy_action =
+    classification === "server_stale_and_source_unpromoted"
+      ? "Promote the checked-out manager source branch to main, then redeploy the manager from clean origin/main and verify /health build.build_sha equals build.origin_main_sha."
+      : classification === "server_not_rebuilt"
+        ? "Redeploy the manager from clean origin/main and verify /health build.build_sha equals build.origin_main_sha."
+        : null;
+  const state =
+    classification === "unknown"
+      ? "unknown"
+      : recommended_redeploy_action
+        ? "diagnostic"
+        : "ok";
+
+  return {
+    schema_version: "manager.build_source_diagnostic.v1",
+    surface: "System/Diagnostics",
+    state,
+    classification,
+    build_sha: build.build_sha,
+    origin_main_sha: build.origin_main_sha,
+    behind_origin_since: behindOriginSince,
+    recommended_redeploy_action,
+    message: build.freshness.message,
   };
 }
 

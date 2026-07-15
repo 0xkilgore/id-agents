@@ -8,6 +8,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
   classifyBuildFreshness,
+  buildSourceDiagnostic,
   computeBuildStatus,
   isRuntimeOnlyPath,
   isRuntimePolicyOnlyDelta,
@@ -97,6 +98,45 @@ describe("computeBuildStatus", () => {
       source_differs_from_promoted_main: true,
     });
     expect(s.classification).toBe("server_stale_and_source_unpromoted");
+  });
+
+  it("projects server_stale_and_source_unpromoted as System/Diagnostics redeploy state", () => {
+    const s = computeBuildStatus(input({
+      build_sha: "old1234",
+      source_branch_sha: "feature999",
+      source_branch_name: "wave91-build-behind-origin-health",
+      origin_main_sha: "main9999",
+    }));
+
+    const diagnostic = buildSourceDiagnostic(s, "2026-07-12T00:00:00.000Z");
+
+    expect(diagnostic).toMatchObject({
+      schema_version: "manager.build_source_diagnostic.v1",
+      surface: "System/Diagnostics",
+      state: "diagnostic",
+      classification: "server_stale_and_source_unpromoted",
+      build_sha: "old1234",
+      origin_main_sha: "main9999",
+      behind_origin_since: "2026-07-12T00:00:00.000Z",
+    });
+    expect(diagnostic.recommended_redeploy_action).toContain("Promote");
+    expect(diagnostic.recommended_redeploy_action).toContain("redeploy the manager");
+  });
+
+  it("projects nominal build source as ok with no redeploy action", () => {
+    const s = computeBuildStatus(input());
+
+    const diagnostic = buildSourceDiagnostic(s, null);
+
+    expect(diagnostic).toMatchObject({
+      surface: "System/Diagnostics",
+      state: "ok",
+      classification: "fresh",
+      build_sha: "aaaaaaa",
+      origin_main_sha: "aaaaaaa",
+      behind_origin_since: null,
+      recommended_redeploy_action: null,
+    });
   });
 });
 

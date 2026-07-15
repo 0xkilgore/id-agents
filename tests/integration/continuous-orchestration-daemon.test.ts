@@ -3598,7 +3598,22 @@ describe("daemon — dry-run vs live", () => {
       teamId: "default",
       runtimeHealth: () => ({
         disk: { state: "critical" },
-        build: { behind_origin: true },
+        build_behind_origin_since: "2026-07-12T00:00:00.000Z",
+        build: {
+          behind_origin: true,
+          build_sha: "1111111",
+          origin_main_sha: "2222222",
+          freshness: {
+            classification: "server_stale_and_source_unpromoted",
+            running_manager_build_sha: "1111111",
+            source_branch_sha: "3333333",
+            source_branch_name: "wave91-build-behind-origin-health",
+            promoted_main_sha: "2222222",
+            behind_promoted_main: true,
+            source_differs_from_promoted_main: true,
+            message: "running manager is behind promoted main, and the checked-out source branch also differs from promoted main",
+          },
+        },
       }),
     });
 
@@ -3610,6 +3625,14 @@ describe("daemon — dry-run vs live", () => {
       disk_critical: true,
       disk_state: "critical",
       build_behind_origin: true,
+      build_source: {
+        surface: "System/Diagnostics",
+        state: "diagnostic",
+        classification: "server_stale_and_source_unpromoted",
+        build_sha: "1111111",
+        origin_main_sha: "2222222",
+        behind_origin_since: "2026-07-12T00:00:00.000Z",
+      },
       capacity_full: true,
       ready_count: 2,
       raw_ready_fuel: 2,
@@ -3620,7 +3643,7 @@ describe("daemon — dry-run vs live", () => {
     expect(res.body.runtime_status.recommended_actions).toEqual(
       expect.arrayContaining([
         expect.stringContaining("clear disk headroom"),
-        expect.stringContaining("deploy/promote"),
+        expect.stringContaining("redeploy the manager"),
         expect.stringContaining("capacity"),
       ]),
     );

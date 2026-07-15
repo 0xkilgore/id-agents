@@ -254,7 +254,7 @@ import { loadModelPolicy, type ModelPolicyService } from './model-policy/policy.
 import { mountRuntimePolicyRoutes } from './model-policy/runtime-policy-routes.js';
 import { loadApprovalPolicy, type ApprovalPolicyService } from './approval-policy/policy.js';
 import { resolveManagerBindHost } from './manager-bind-host.js';
-import { getBuildStatusCached, loadBuildStatus, type BuildStatus } from './build-info.js';
+import { buildSourceDiagnostic, getBuildStatusCached, loadBuildStatus, type BuildStatus } from './build-info.js';
 import { readDiskHeadroom } from './disk-health.js';
 import { parseSupervisorConfig, type SupervisorHealthStatus } from './supervisor/index.js';
 import {
@@ -1164,7 +1164,11 @@ export class AgentManagerDb {
   private healthResponseCache: Map<string, { at: number; body: unknown }> = new Map();
   private continuousOrchestrationStatusSource: {
     daemon: ContinuousOrchestrationDaemon;
-    runtimeHealth: () => { build: BuildStatus; disk: ReturnType<typeof readDiskHeadroom> };
+    runtimeHealth: () => {
+      build: BuildStatus;
+      build_behind_origin_since: string | null;
+      disk: ReturnType<typeof readDiskHeadroom>;
+    };
   } | null = null;
   private taskListCache: Map<string, TaskListCacheEntry> = new Map();
   private static readonly TASK_LIST_CACHE_TTL_MS = 10_000;
@@ -1753,6 +1757,7 @@ export class AgentManagerDb {
 
   private async getContinuousOrchestrationRuntimeStatus(input: {
     build: BuildStatus;
+    build_behind_origin_since?: string | null;
     disk: ReturnType<typeof readDiskHeadroom>;
   }): Promise<RuntimeStatusProjection | null> {
     const source = this.continuousOrchestrationStatusSource;
@@ -5446,6 +5451,13 @@ export class AgentManagerDb {
         ? this.dispatchRecoveryService.getBackfillMetrics()
         : { recovery_backfill_runs_total: 0, recovery_backfill_rows_reclassified_total: 0 };
       const build = this.getBuildStatus();
+      const buildDiagnostic = buildSourceDiagnostic(build, this.freshnessState.behind_origin_since);
+      const healthBuild = {
+        ...build,
+        behind_origin_since: buildDiagnostic.behind_origin_since,
+        recommended_redeploy_action: buildDiagnostic.recommended_redeploy_action,
+        diagnostics: buildDiagnostic,
+      };
       const disk = readDiskHeadroom();
       const supervisor = this.getSupervisorHealthStatus(now);
       const supervisorRequiredForNominal = process.env.SUPERVISOR_OPTIONAL !== 'true';
@@ -5489,7 +5501,11 @@ export class AgentManagerDb {
           }
         : conformanceResult.value;
       const runtimeResult = await withTimeout(
-        this.getContinuousOrchestrationRuntimeStatus({ build, disk }),
+        this.getContinuousOrchestrationRuntimeStatus({
+          build,
+          build_behind_origin_since: this.freshnessState.behind_origin_since,
+          disk,
+        }),
         750,
       );
       const orchestration_runtime_status = runtimeResult.timedOut
@@ -5505,7 +5521,12 @@ export class AgentManagerDb {
         recovery_backfill,
         conformance,
         // T11.1: the running build identity + staleness-vs-origin signal.
-        build,
+        build: healthBuild,
+        system_diagnostics: {
+          schema_version: 'manager.system_diagnostics.v1',
+          state: buildDiagnostic.state === 'diagnostic' ? 'degraded' : buildDiagnostic.state,
+          build_source: buildDiagnostic,
+        },
         // T-RELY: fail-loud disk headroom so build waves see ENOSPC risk before
         // database I/O and test runs start failing mid-flight.
         disk,
@@ -14079,6 +14100,7 @@ export class AgentManagerDb {
                 daemon,
                 runtimeHealth: () => ({
                   build: this.getBuildStatus(),
+                  build_behind_origin_since: this.freshnessState.behind_origin_since,
                   disk: readDiskHeadroom(),
                 }),
               };

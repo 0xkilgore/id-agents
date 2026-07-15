@@ -19,6 +19,7 @@ import { SqliteTasksRepo } from '../../src/db/repos/sqlite/tasks-repo.js';
 import { SqliteEventsRepo } from '../../src/db/repos/sqlite/events-repo.js';
 import { SqliteSubscriptionsRepo } from '../../src/db/repos/sqlite/subscriptions-repo.js';
 import { SqliteCheckinsRepo } from '../../src/db/repos/sqlite/checkins-repo.js';
+import { computeBuildStatus } from '../../src/build-info.js';
 
 async function createInMemoryDb() {
   const adapter = new SqliteAdapter(':memory:');
@@ -61,6 +62,20 @@ describe('GET /health build-stamp (T11.1)', () => {
     workDir = fs.mkdtempSync(path.join(os.tmpdir(), 'build-stamp-test-'));
     db = await createInMemoryDb();
     manager = new AgentManagerDb(workDir, db as any);
+    (manager as any).getBuildStatus = () => computeBuildStatus({
+      build_sha: '1111111',
+      build_time: '2026-07-11T00:00:00.000Z',
+      source_branch_sha: '3333333',
+      source_branch_name: 'wave91-build-behind-origin-health',
+      local_main_sha: '2222222',
+      origin_main_sha: '2222222',
+      source: 'build_stamp',
+    }, ['src/agent-manager-db.ts']);
+    (manager as any).freshnessState = {
+      state: 'behind',
+      behind_origin_since: '2026-07-12T00:00:00.000Z',
+      last_alert_at: null,
+    };
     await manager.start(port);
   }, 60000);
 
@@ -142,6 +157,28 @@ describe('GET /health build-stamp (T11.1)', () => {
       running_manager_build_sha: body.build.build_sha,
       promoted_main_sha: body.build.origin_main_sha,
       behind_promoted_main: body.build.behind_origin,
+      classification: 'server_stale_and_source_unpromoted',
+    });
+    expect(body.build).toMatchObject({
+      build_sha: '1111111',
+      origin_main_sha: '2222222',
+      behind_origin: true,
+      behind_origin_since: expect.any(String),
+    });
+    expect(body.build.recommended_redeploy_action).toContain('redeploy the manager');
+    expect(body.build.diagnostics).toMatchObject({
+      surface: 'System/Diagnostics',
+      state: 'diagnostic',
+      classification: 'server_stale_and_source_unpromoted',
+      build_sha: '1111111',
+      origin_main_sha: '2222222',
+      behind_origin_since: body.build.behind_origin_since,
+    });
+    expect(body.system_diagnostics).toMatchObject({
+      state: 'degraded',
+      build_source: {
+        recommended_redeploy_action: expect.stringContaining('redeploy the manager'),
+      },
     });
     expect(['build_stamp', 'runtime_fallback', 'unknown']).toContain(body.build.source);
 
@@ -180,6 +217,17 @@ describe('GET /health build-stamp (T11.1)', () => {
 
     expect(body).toHaveProperty('orchestration_runtime_status');
     expect(body.orchestration_runtime_status === null || typeof body.orchestration_runtime_status === 'object').toBe(true);
+    if (body.orchestration_runtime_status) {
+      expect(body.orchestration_runtime_status.build_source).toMatchObject({
+        surface: 'System/Diagnostics',
+        build_sha: '1111111',
+        origin_main_sha: '2222222',
+        behind_origin_since: body.build.behind_origin_since,
+      });
+      expect(body.orchestration_runtime_status.recommended_actions).toEqual(
+        expect.arrayContaining([expect.stringContaining('redeploy the manager')]),
+      );
+    }
 
     expect(body.fleet_freshness.nodes[0]).toMatchObject({
       node_id: 'kapelle-site',
