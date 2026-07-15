@@ -3645,6 +3645,107 @@ describe("stale already-dispatched ready reconciliation route", () => {
       retry.item_id,
     ]);
   });
+
+  it("supersedes an offline-agent ready row when fresher Wave66 work covers the same acceptance", async () => {
+    await seedAgent(adapter, "retired-worker", "offline", "codex");
+    const stale = await seedReady(adapter, {
+      title: "old acceptance path",
+      track: "T-ORCH",
+      to_agent: "retired-worker",
+      write_scope: ["repo/kapelle"],
+      source_refs: ["acceptance:kapelle-closeout"],
+    });
+    const wave66 = await seedReady(adapter, {
+      title: "Wave66 replacement covers kapelle closeout acceptance",
+      track: "T-ORCH",
+      to_agent: "roger",
+      write_scope: ["repo/kapelle-wave66"],
+      source_refs: ["wave66", "acceptance:kapelle-closeout"],
+    });
+    await adapter.query(
+      `UPDATE orchestration_backlog_item
+          SET created_at = $1, updated_at = $2
+        WHERE item_id = $3`,
+      ["2026-07-11T12:00:00.000Z", "2026-07-11T12:00:00.000Z", stale.item_id],
+    );
+    await adapter.query(
+      `UPDATE orchestration_backlog_item
+          SET created_at = $1, updated_at = $2
+        WHERE item_id = $3`,
+      ["2026-07-12T12:00:00.000Z", "2026-07-12T12:00:00.000Z", wave66.item_id],
+    );
+
+    const { app, daemon } = mountStatusApp(adapter, {
+      dry_run: false,
+      auto_flesh_enabled: true,
+      auto_promote_enabled: true,
+      auto_promote_floor: 2,
+    });
+    await daemon.setMode("running");
+
+    const before = await callApp(app, "/orchestration/status");
+    expect(before.status).toBe(200);
+    expect(before.body.counts.ready).toBe(2);
+    expect(before.body.counts.raw_ready_fuel).toBe(2);
+    expect(before.body.counts.useful_ready_fuel).toBe(2);
+
+    const reason = "target agent is offline and fresher Wave66 work covers the same acceptance";
+    const res = await callAppRequest(app, "POST", "/orchestration/reconcile/offline-superseded-ready", {
+      item_id: stale.item_id,
+      superseding_coitem_id: wave66.item_id,
+      actor: "continuous-orchestration",
+      reason,
+    });
+
+    expect(res.status).toBe(200);
+    expect(res.body.result).toMatchObject({
+      ok: true,
+      item_id: stale.item_id,
+      superseding_coitem_id: wave66.item_id,
+      from_state: "ready",
+      to_state: "superseded",
+      old_target_agent: "retired-worker",
+      reason,
+      receipt: expect.objectContaining({
+        schema_version: "orchestration.stale_duplicate_closeout_receipt.v1",
+        closed_by: "continuous-orchestration",
+        actor: "continuous-orchestration",
+        from_state: "ready",
+        to_state: "superseded",
+        reason: "offline_target_superseded_by_fresher_wave66",
+        next_action: "supersede_offline_ready_row",
+        old_target_agent: "retired-worker",
+        superseding_coitem_id: wave66.item_id,
+        supersession_reason: reason,
+        redispatch_safety: {
+          safe_to_not_redispatch: true,
+          reason,
+        },
+      }),
+    });
+    expect(res.body.result.receipt.timestamp).toEqual(res.body.result.receipt.closed_at);
+
+    const staleAfter = (await getBacklogItem(adapter, stale.item_id))!;
+    expect(staleAfter.readiness_state).toBe("superseded");
+    expect(staleAfter.updated_by).toBe("continuous-orchestration");
+    expect(staleAfter.source_refs).toContain(`superseded_by:${wave66.item_id}`);
+    expect(staleAfter.stale_duplicate_closeout_receipt).toMatchObject({
+      actor: "continuous-orchestration",
+      timestamp: staleAfter.stale_duplicate_closeout_receipt?.closed_at,
+      old_target_agent: "retired-worker",
+      superseding_coitem_id: wave66.item_id,
+      supersession_reason: reason,
+    });
+
+    const after = await callApp(app, "/orchestration/status");
+    expect(after.status).toBe(200);
+    expect(after.body.counts.ready).toBe(1);
+    expect(after.body.counts.raw_ready_fuel).toBe(1);
+    expect(after.body.counts.useful_ready_fuel).toBe(1);
+    expect(after.body.ready_admission.admissible.map((item: { item_id: string }) => item.item_id)).toEqual([
+      wave66.item_id,
+    ]);
+  });
 });
 
 describe("release-proof-readiness route", () => {
