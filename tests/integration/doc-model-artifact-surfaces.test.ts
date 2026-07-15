@@ -6,6 +6,7 @@ import express, { type Express } from "express";
 import { describe, it, expect, beforeEach } from "vitest";
 import { SqliteAdapter } from "../../src/db/sqlite-adapter.js";
 import { migrateSqlite } from "../../src/db/migrations/sqlite.js";
+import { artifactIdFromPath } from "../../src/outputs/storage.js";
 import {
   admitsNowSurface,
   admitsReportsSurface,
@@ -63,6 +64,9 @@ async function author(overrides: {
   kind: EntryStampKind;
   project?: string | null;
   now?: string;
+  content?: string;
+  sourceLink?: string | null;
+  availability?: "present" | "missing" | "unknown";
 }) {
   await authorArtifactDocument(adapter, {
     teamId: "default",
@@ -71,14 +75,72 @@ async function author(overrides: {
     actor: "rams",
     title: overrides.title,
     tag: "ux-research-weekly",
-    content: `# ${overrides.title}`,
-    sourceLink: null,
-    availability: "present",
+    content: overrides.content ?? `# ${overrides.title}`,
+    sourceLink: overrides.sourceLink ?? null,
+    availability: overrides.availability ?? "present",
     audience: overrides.audience,
     kind: overrides.kind,
     project: overrides.project ?? null,
     now: overrides.now,
   });
+}
+
+async function seedArtifactRegistryDocument(input: {
+  path: string;
+  title: string;
+  project: string;
+  producedAt: string;
+  bodyText?: string | null;
+  bodyError?: string | null;
+}) {
+  const artifactId = artifactIdFromPath(input.path);
+  await adapter.query(
+    `INSERT INTO artifacts
+       (artifact_id, basename, agent, tag, abs_path, title, produced_at, source, availability, media_type,
+        source_mtime, source_size, project_ref, dispatch_ref, created_at, updated_at)
+     VALUES
+       ($1,$2,'spencer','final-document',$3,$4,$5,'local-snapshot','present','text/markdown',
+        $6,4096,$7,$8,$9,$10)`,
+    [
+      artifactId,
+      input.path.split("/").pop(),
+      input.path,
+      input.title,
+      input.producedAt,
+      input.producedAt,
+      input.project,
+      `phid:disp-spencer-${input.project}`,
+      input.producedAt,
+      input.producedAt,
+    ],
+  );
+  await adapter.query(
+    `INSERT INTO artifact_bodies
+       (artifact_id, media_type, content_hash, version_key, source_mtime, source_size,
+        body_text, body_truncated, body_error, cached_at, updated_at)
+     VALUES
+       ($1,'text/markdown',NULL,$2,$3,4096,$4,0,$5,$6,$7)`,
+    [
+      artifactId,
+      `snapshot:${artifactId}`,
+      input.producedAt,
+      input.bodyText ?? `# ${input.title}\n\nSpencer demo local snapshot.`,
+      input.bodyError ?? null,
+      input.producedAt,
+      input.producedAt,
+    ],
+  );
+  await author({
+    documentId: artifactId,
+    title: input.title,
+    audience: "operator",
+    kind: "final-document",
+    project: input.project,
+    now: input.producedAt,
+    sourceLink: input.path,
+    content: `# ${input.title}\n\nFinal document for ${input.project}.`,
+  });
+  return artifactId;
 }
 
 describe("doc-model artifact surfaces — Now", () => {
@@ -356,6 +418,17 @@ describe("doc-model artifact surfaces — Projects", () => {
       "doc:kap-digest-old",
     ]);
     expect(kapelle.documents.map((d: any) => d.kind)).toEqual(["report", "final-document", "report"]);
+    expect(kapelle.documents[1]).toMatchObject({
+      document_id: "doc:kap-final",
+      stable_id: "doc:kap-final",
+      title: "Kap final package",
+      project: "kapelle",
+      source_path: null,
+      source_proof: "missing",
+      freshness: { status: "fresh" },
+      body: { available: true, source: "doc_model_op_log" },
+      cache: { available: false, source: "none", error: null },
+    });
   });
 
   it("includes system diagnostics and receipts only when include_system=true", async () => {
@@ -399,6 +472,88 @@ describe("doc-model artifact surfaces — Projects", () => {
       { document_id: "doc:kap-diagnostics", kind: "diagnostics" },
       { document_id: "doc:kap-report", kind: "report" },
     ]);
+  });
+
+  it("lists Spencer demo final documents by stable ID, source path, and project mapping from the local snapshot", async () => {
+    const samples = [
+      {
+        project: "cleveland-park",
+        title: "Cleveland Park Spencer final one-pager",
+        path: "/Users/kilgore/Dropbox/Code/cleveland-park/output/spencer-demo-final.md",
+        producedAt: "2026-07-15T14:00:00.000Z",
+      },
+      {
+        project: "trinity",
+        title: "Trinity Spencer final briefing",
+        path: "/Users/kilgore/Dropbox/Code/trinity/output/spencer-demo-final.md",
+        producedAt: "2026-07-15T14:05:00.000Z",
+      },
+      {
+        project: "finance",
+        title: "Finance Spencer final packet",
+        path: "/Users/kilgore/Dropbox/Code/finance/output/spencer-demo-final.md",
+        producedAt: "2026-07-15T14:10:00.000Z",
+      },
+    ];
+    const stableIds = new Map<string, string>();
+    for (const sample of samples) {
+      stableIds.set(sample.project, await seedArtifactRegistryDocument(sample));
+    }
+
+    const app = mountApp(adapter);
+    const res = await callAppRequest(app, "/doc-model/surfaces/projects");
+
+    expect(res.status).toBe(200);
+    for (const sample of samples) {
+      const group = res.body.items.find((item: any) => item.project === sample.project);
+      const doc = group?.documents.find((item: any) => item.title === sample.title);
+      expect(doc).toMatchObject({
+        document_id: stableIds.get(sample.project),
+        stable_id: stableIds.get(sample.project),
+        title: sample.title,
+        kind: "final-document",
+        project: sample.project,
+        updated_at: sample.producedAt,
+        source_path: sample.path,
+        source_proof: "artifact_registry",
+        freshness: { status: "fresh" },
+        body: { available: true, source: "doc_model_op_log" },
+        cache: { available: true, source: "artifact_body_cache", error: null },
+      });
+    }
+  });
+
+  it("falls back to the authored source path when a final document has no artifact registry row", async () => {
+    const sourcePath = "/Users/kilgore/Dropbox/Code/finance/output/spencer-demo-unregistered-final.md";
+    const stableId = artifactIdFromPath(sourcePath);
+    await author({
+      documentId: stableId,
+      title: "Finance Spencer unregistered final packet",
+      audience: "operator",
+      kind: "final-document",
+      project: "finance",
+      now: "2026-07-15T15:00:00.000Z",
+      sourceLink: sourcePath,
+      content: "# Finance Spencer unregistered final packet\n\nLocal snapshot body.",
+    });
+
+    const app = mountApp(adapter);
+    const res = await callAppRequest(app, "/doc-model/surfaces/projects");
+
+    expect(res.status).toBe(200);
+    const finance = res.body.items.find((item: any) => item.project === "finance");
+    expect(finance.documents[0]).toMatchObject({
+      document_id: stableId,
+      stable_id: stableId,
+      title: "Finance Spencer unregistered final packet",
+      kind: "final-document",
+      project: "finance",
+      source_path: sourcePath,
+      source_proof: "document_source_link",
+      freshness: { status: "fresh" },
+      body: { available: true, source: "doc_model_op_log" },
+      cache: { available: false, source: "none", error: null },
+    });
   });
 });
 

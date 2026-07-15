@@ -239,7 +239,31 @@ export async function projectActivitySurface(
 
 export interface ProjectGroup {
   project: string;
-  documents: Array<{ document_id: string; title: string; kind: string; updated_at: string }>;
+  documents: ProjectDocumentSummary[];
+}
+
+export interface ProjectDocumentSummary {
+  document_id: string;
+  stable_id: string;
+  title: string;
+  kind: string;
+  project: string;
+  updated_at: string;
+  source_path: string | null;
+  source_proof: "artifact_registry" | "document_source_link" | "missing";
+  freshness: {
+    status: "fresh" | "missing" | "unknown" | "error";
+    checked_at: string;
+  };
+  body: {
+    available: boolean;
+    source: "doc_model_op_log";
+  };
+  cache: {
+    available: boolean;
+    source: "artifact_body_cache" | "none";
+    error: string | null;
+  };
 }
 
 /** Projects — operator-facing documents grouped by project, newest first within each group. */
@@ -249,6 +273,8 @@ export async function projectProjectsSurface(
   opts: { includeSystem?: boolean } = {},
 ): Promise<ReadModelEnvelope<ProjectGroup>> {
   const documentIds = await listArtifactDocumentIds(adapter, teamId, { order: "desc" });
+  const registry = await loadProjectDocumentRegistry(adapter, documentIds);
+  const generatedAt = new Date().toISOString();
   const groups = new Map<string, ProjectGroup>();
   for (const documentId of documentIds) {
     const projection = await projectArtifactDocument(adapter, documentId);
@@ -256,12 +282,7 @@ export async function projectProjectsSurface(
     if (!opts.includeSystem && projection.stamp.audience === "system") continue;
     const key = projection.project ?? "(unassigned)";
     const group = groups.get(key) ?? { project: key, documents: [] };
-    group.documents.push({
-      document_id: projection.document_id,
-      title: projection.frontmatter.title,
-      kind: projection.stamp.kind,
-      updated_at: projection.updated_at,
-    });
+    group.documents.push(projectDocumentSummary(projection, key, registry.get(projection.document_id) ?? null, generatedAt));
     groups.set(key, group);
   }
   const items = [...groups.values()].sort((a, b) => a.project.localeCompare(b.project));
@@ -273,6 +294,85 @@ export async function projectProjectsSurface(
       ? "artifact documents grouped by project metadata"
       : "operator-facing artifact documents grouped by project metadata; system rows remain on System unless include_system=true",
   });
+}
+
+interface ProjectDocumentRegistryRow {
+  artifact_id: string;
+  abs_path: string;
+  availability: string;
+  body_text: string | null;
+  body_error: string | null;
+}
+
+async function loadProjectDocumentRegistry(
+  adapter: DbAdapter,
+  documentIds: string[],
+): Promise<Map<string, ProjectDocumentRegistryRow>> {
+  if (documentIds.length === 0) return new Map();
+  const params = documentIds;
+  const placeholders = params.map((_, i) => `$${i + 1}`).join(", ");
+  try {
+    const { rows } = await adapter.query<ProjectDocumentRegistryRow>(
+      `SELECT a.artifact_id, a.abs_path, a.availability, b.body_text, b.body_error
+         FROM artifacts a
+    LEFT JOIN artifact_bodies b ON b.artifact_id = a.artifact_id
+        WHERE a.artifact_id IN (${placeholders})`,
+      params,
+    );
+    return new Map(rows.map((row) => [row.artifact_id, row]));
+  } catch {
+    return new Map();
+  }
+}
+
+function projectDocumentSummary(
+  projection: Awaited<ReturnType<typeof projectArtifactDocument>> & {},
+  project: string,
+  registry: ProjectDocumentRegistryRow | null,
+  generatedAt: string,
+): ProjectDocumentSummary {
+  const fallbackSourcePath = sourcePathFromSourceLink(projection.frontmatter.source_link);
+  const bodyAvailable = projection.content.trim().length > 0;
+  const cacheAvailable = !!registry?.body_text && !registry.body_error;
+  return {
+    document_id: projection.document_id,
+    stable_id: projection.document_id,
+    title: projection.frontmatter.title,
+    kind: projection.stamp.kind,
+    project,
+    updated_at: projection.updated_at,
+    source_path: registry?.abs_path ?? fallbackSourcePath,
+    source_proof: registry?.abs_path ? "artifact_registry" : fallbackSourcePath ? "document_source_link" : "missing",
+    freshness: {
+      status: freshnessStatus(registry?.availability ?? projection.frontmatter.availability, registry?.body_error ?? null),
+      checked_at: generatedAt,
+    },
+    body: {
+      available: bodyAvailable,
+      source: "doc_model_op_log",
+    },
+    cache: {
+      available: cacheAvailable,
+      source: registry ? "artifact_body_cache" : "none",
+      error: registry?.body_error ?? null,
+    },
+  };
+}
+
+function sourcePathFromSourceLink(sourceLink: string | null): string | null {
+  if (!sourceLink) return null;
+  const trimmed = sourceLink.trim();
+  return trimmed.startsWith("/") ? trimmed : null;
+}
+
+function freshnessStatus(
+  availability: string | null | undefined,
+  bodyError: string | null,
+): ProjectDocumentSummary["freshness"]["status"] {
+  if (bodyError) return "error";
+  if (availability === "present") return "fresh";
+  if (availability === "missing") return "missing";
+  return "unknown";
 }
 
 /** Reports — operator report/evidence artifacts, reverse-chron by updated_at. */
