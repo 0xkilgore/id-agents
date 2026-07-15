@@ -103,6 +103,7 @@ import {
   resolveDefaultLibraryRoot,
 } from './lib/library-inventory.js';
 import { PROTOCOL_DEFAULTS } from './protocol-defaults.js';
+import { buildClarificationBatchProjection } from './dispatch-scheduler/clarification-batches.js';
 import { computeSyncPlan, formatSyncSummary, formatSyncVerbose } from './sync.js';
 import { validateName } from './name-validation.js';
 import { checkCursorFallbackHealth } from './harness/cursor-fallback-health.js';
@@ -4763,7 +4764,13 @@ export class AgentManagerDb {
             age_seconds: createdMs ? Math.max(0, Math.floor((now - createdMs) / 1000)) : 0,
           };
         });
-        return res.json({ ok: true, count: items.length, limit, items });
+        return res.json({
+          ok: true,
+          count: items.length,
+          limit,
+          items,
+          batches: buildClarificationBatchProjection(items),
+        });
       } catch (err) {
         return res.status(500).json({
           ok: false,

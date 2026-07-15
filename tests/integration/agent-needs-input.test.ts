@@ -51,6 +51,7 @@ let baseUrl: string;
 let workDir: string;
 let teamId: string;
 let dispatchPhid: string;
+let handle: any;
 
 beforeAll(async () => {
   port = await findFreePort();
@@ -75,7 +76,7 @@ beforeAll(async () => {
   });
 
   // Enqueue + claim a dispatch so the reactor has something in_flight.
-  const handle = (manager as any).dispatchScheduler;
+  handle = (manager as any).dispatchScheduler;
   if (!handle) throw new Error('dispatchScheduler should be initialised on sqlite');
   const enq = await handle.enqueue({
     to_agent: 'coder-max',
@@ -88,6 +89,35 @@ beforeAll(async () => {
   // Claim it so it's in_flight.
   await handle.reactor.claim({ max_in_flight: 10 });
 }, 30000);
+
+async function enqueueClarification(input: {
+  subject: string;
+  question: string;
+  context?: unknown;
+  agent_id?: string;
+}) {
+  const enq = await handle.enqueue({
+    to_agent: input.agent_id ?? 'coder-max',
+    from_actor: 'manager',
+    message: input.subject,
+    subject: input.subject,
+    priority: 5,
+  });
+  await handle.reactor.claim({ max_in_flight: 10 });
+  const r = await fetch(`${baseUrl}/agent-needs-input`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      dispatch_id: enq.dispatch_phid,
+      agent_id: input.agent_id ?? 'coder-max',
+      question: input.question,
+      context: input.context ?? null,
+      urgency: 'normal',
+    }),
+  });
+  expect(r.status).toBe(200);
+  return enq.dispatch_phid as string;
+}
 
 afterAll(async () => {
   if (manager) {
@@ -209,6 +239,87 @@ describe('POST /agent-needs-input', () => {
     expect(body.items[0].dispatch_id).toBe(dispatchPhid);
     expect(body.items[0].question).toBe('should I squash?');
     expect(body.items[0].urgency).toBe('normal');
+  });
+
+  it('GET /dispatches/clarifications groups repeated Spec 054 promotion questions into bounded action classes', async () => {
+    const noRemoteIds = [
+      await enqueueClarification({
+        subject: 'promote no remote 1',
+        question: 'Spec 054 promotion blocked: repo has no configured remote.',
+        context: { repo: '/repo/kapelle', branch: 'fix/no-remote' },
+      }),
+      await enqueueClarification({
+        subject: 'promote no remote 2',
+        question: 'Spec 054 promotion blocked: remote origin not found.',
+        context: { repo: '/repo/kapelle', branch: 'fix/no-remote-2' },
+      }),
+    ];
+    const divergentId = await enqueueClarification({
+      subject: 'promote divergent',
+      question: 'promote-to-main preflight found branch ahead=1 behind=14; divergent ancestry needs operator input.',
+      context: { repo: '/repo/kapelle', branch: 'fix/diverged' },
+    });
+    const focusedId = await enqueueClarification({
+      subject: 'promote focused green broad red',
+      question: 'Focused tests passed green, but broad test suite is red. Should promotion continue?',
+      context: { focused: 'vitest agent-needs-input', broad: 'npm test failed' },
+    });
+    const ambiguousRepoId = await enqueueClarification({
+      subject: 'promote ambiguous repo',
+      question: 'Spec 054 promotion blocked: ambiguous repo metadata; which repo should be promoted?',
+      context: { repos: ['/repo/a', '/repo/b'] },
+    });
+
+    const r = await fetch(`${baseUrl}/dispatches/clarifications`);
+    expect(r.status).toBe(200);
+    const body = (await r.json()) as {
+      batches: {
+        schema_version: string;
+        dispatch_id_limit: number;
+        action_classes: Array<{
+          action_class: string;
+          count: number;
+          oldest_age_seconds: number;
+          dispatch_ids: string[];
+          recommended_owner: string;
+        }>;
+      };
+    };
+
+    expect(body.batches.schema_version).toBe('dispatch_clarification_batches.v1');
+    expect(body.batches.dispatch_id_limit).toBe(10);
+    expect(body.batches.action_classes).toHaveLength(4);
+    expect(body.batches.action_classes).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          action_class: 'no_remote',
+          count: 2,
+          dispatch_ids: expect.arrayContaining(noRemoteIds),
+          recommended_owner: 'release-engineering',
+        }),
+        expect.objectContaining({
+          action_class: 'divergent_branch',
+          count: 1,
+          dispatch_ids: [divergentId],
+          recommended_owner: 'release-engineering',
+        }),
+        expect.objectContaining({
+          action_class: 'focused_green_broad_red',
+          count: 1,
+          dispatch_ids: [focusedId],
+          recommended_owner: 'test-owner',
+        }),
+        expect.objectContaining({
+          action_class: 'ambiguous_repo',
+          count: 1,
+          dispatch_ids: [ambiguousRepoId],
+          recommended_owner: 'dispatcher',
+        }),
+      ]),
+    );
+    for (const batch of body.batches.action_classes) {
+      expect(batch.oldest_age_seconds).toBeGreaterThanOrEqual(0);
+    }
   });
 
   it('GET /dispatches/clarifications?stale=true filters before stale_at', async () => {
