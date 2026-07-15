@@ -106,6 +106,17 @@ describe("verifyDoneClaims", () => {
     expect(r.reason).toMatch(/screenshot_or_evidence/);
   });
 
+  it("does not require site delivery evidence for manager-side verifier work about Finance/Cleveland Park", () => {
+    const claim: DoneClaim = {
+      dispatch_context: {
+        subject: "pool:builder: add a manager-side verifier/contract for small site-fix delivery chains",
+        body_markdown: "Finance/Cleveland Park changes cannot close without owner acceptance, production URL, and screenshot/evidence.",
+      },
+    };
+    expect(requiresSmallSiteFixContract(claim)).toMatchObject({ required: false });
+    expect(verifyDoneClaims(claim, probes()).ok).toBe(true);
+  });
+
   it("accepts a complete small site-fix delivery contract", () => {
     const claim: DoneClaim = {
       dispatch_context: {

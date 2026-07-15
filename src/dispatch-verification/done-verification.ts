@@ -142,6 +142,9 @@ export function requiresSmallSiteFixContract(claim: DoneClaim): { required: bool
   ].filter(isNonEmpty).join("\n").toLowerCase();
 
   if (!text) return { required: false, reason: "no dispatch text" };
+  if (/\bmanager-side\b/.test(text) && /\b(verifier|contract)\b/.test(text)) {
+    return { required: false, reason: "manager-side verifier/contract work is not a small site-fix delivery" };
+  }
 
   const mentionsSmallSiteFix =
     /\b(site|website|page|frontend|ui|graph|chart|pdf preview|preview)\b/.test(text) &&
