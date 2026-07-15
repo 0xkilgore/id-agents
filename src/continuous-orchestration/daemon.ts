@@ -238,6 +238,7 @@ export interface ReadyAdmissionExplanation {
     code: string;
     reason: string;
     metadata?: Record<string, unknown>;
+    target_unhealthy_receipt?: ReadyAdmissionTargetUnhealthyReceipt;
   }>;
   blocker_counts: Array<{ code: string; category: ReadyAdmissionBlockerCategory; count: number }>;
   stale_ready_floor: {
@@ -249,6 +250,15 @@ export interface ReadyAdmissionExplanation {
   };
   halted: string | null;
   ready_runtime_repairs: ReadyRuntimeRepair[];
+}
+
+export interface ReadyAdmissionTargetUnhealthyReceipt {
+  code: "target_unhealthy";
+  target: string;
+  prior_owner: string | null;
+  safe_action: "reroute_or_supersede";
+  safe_action_summary: string;
+  counts_as_useful_build_fuel: false;
 }
 
 export interface ReadyAdmissionBlockedLane {
@@ -549,6 +559,29 @@ function readyAdmissionRecommendedAction(input: {
   return top
     ? `clear top ready-admission blocker ${top.code}=${top.count}`
     : "inspect ready admission blockers before refueling";
+}
+
+function targetUnhealthyReceipt(
+  item: BacklogItem | undefined,
+  metadata: Record<string, unknown> | undefined,
+): ReadyAdmissionTargetUnhealthyReceipt | undefined {
+  const target = typeof metadata?.target === "string" && metadata.target.trim() !== ""
+    ? metadata.target
+    : null;
+  if (!target) return undefined;
+  const priorOwner = item?.to_agent ?? null;
+  const poolName = priorOwner?.startsWith("pool:") ? priorOwner.slice("pool:".length) : null;
+  const repairScope = poolName ? `${poolName} pool` : "target lane";
+  return {
+    code: "target_unhealthy",
+    target,
+    prior_owner: priorOwner,
+    safe_action: "reroute_or_supersede",
+    safe_action_summary:
+      `Do not refire silently. Reroute this ready row to a healthy compatible ${repairScope} agent, ` +
+      "or supersede it with an explicit replacement row if the original target should remain offline.",
+    counts_as_useful_build_fuel: false,
+  };
 }
 
 export class ContinuousOrchestrationDaemon {
@@ -1266,6 +1299,10 @@ export class ContinuousOrchestrationDaemon {
       })),
       non_admitted: plan.skipped.map((decision) => {
         const item = decision.item_id ? byId.get(decision.item_id) : undefined;
+        const code = typeof decision.metadata?.code === "string" ? decision.metadata.code : "unknown";
+        const unhealthyReceipt = code === "target_unhealthy"
+          ? targetUnhealthyReceipt(item, decision.metadata)
+          : undefined;
         const lastDispatchPhid =
           decision.metadata?.code === "duplicate_dispatch_retry_required" &&
           typeof decision.metadata.last_dispatch_phid === "string"
@@ -1281,9 +1318,14 @@ export class ContinuousOrchestrationDaemon {
           to_agent: item?.to_agent ?? null,
           risk_class: item?.risk_class ?? "",
           action: decision.action === "held" ? "held" : "skipped",
-          code: typeof decision.metadata?.code === "string" ? decision.metadata.code : "unknown",
+          code,
           reason: decision.reason,
-          metadata: duplicateRetry ? { ...decision.metadata, duplicate_retry: duplicateRetry } : decision.metadata,
+          metadata: {
+            ...decision.metadata,
+            ...(duplicateRetry ? { duplicate_retry: duplicateRetry } : {}),
+            ...(unhealthyReceipt ? { target_unhealthy_receipt: unhealthyReceipt } : {}),
+          },
+          ...(unhealthyReceipt ? { target_unhealthy_receipt: unhealthyReceipt } : {}),
         };
       }),
       blocker_counts: blockerCounts,

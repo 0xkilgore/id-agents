@@ -310,6 +310,86 @@ describe("RD-003 — atomic CO fire", () => {
   });
 });
 
+describe("ready admission target-unhealthy receipts", () => {
+  it("surfaces operator-readable receipts for offline explicit targets without admitting them", async () => {
+    const adapter = new SqliteAdapter(":memory:");
+    await migrateSqlite(adapter);
+    await setMode(adapter, "default", "running");
+
+    const substrateApi = await insertBacklogItem(adapter, {
+      team_id: "default",
+      logical_key: "live-queue-substrate-api-offline",
+      title: "[project: kapelle][T-RELY][BUILD] substrate-api-codex offline fixture",
+      track: "T-RELY",
+      to_agent: "substrate-api-codex",
+      dispatch_body: "Live queue fixture: backend row held because substrate-api-codex is offline.",
+      readiness_state: "ready",
+      risk_class: "build",
+      write_scope: ["/Users/kilgore/Dropbox/Code/cane/id-agents/src/continuous-orchestration"],
+    });
+    const brunel = await insertBacklogItem(adapter, {
+      team_id: "default",
+      logical_key: "live-queue-brunel-offline",
+      title: "[project: kapelle][T-UI][BUILD] brunel offline fixture",
+      track: "T-UI",
+      to_agent: "brunel",
+      dispatch_body: "Live queue fixture: frontend row held because brunel is offline.",
+      readiness_state: "ready",
+      risk_class: "build",
+      write_scope: ["/Users/kilgore/Dropbox/Code/kapelle-site/app/ops"],
+    });
+    const coderMax = await insertBacklogItem(adapter, {
+      team_id: "default",
+      logical_key: "live-queue-coder-max-offline",
+      title: "[project: kapelle][T-RELY][BUILD] coder-max offline fixture",
+      track: "T-RELY",
+      to_agent: "coder-max",
+      dispatch_body: "Live queue fixture: backend row held because coder-max is offline.",
+      readiness_state: "ready",
+      risk_class: "build",
+      write_scope: ["/Users/kilgore/Dropbox/Code/cane/id-agents/src/dispatch-scheduler"],
+    });
+
+    const daemon = new ContinuousOrchestrationDaemon({
+      adapter,
+      config: config(),
+      enqueue: async (item) => ({ dispatch_phid: `phid:disp-${item.item_id}`, query_id: `q-${item.item_id}` }),
+      readUsage: usage,
+      readInFlight: noInFlight,
+      resolveAgentHealth: async () => new Set(["roger"]),
+    });
+
+    const status = await daemon.explainReadyAdmission();
+
+    expect(status.admissible).toEqual([]);
+    expect(status.useful_ready).toBe(0);
+    expect(status.blocker_counts).toEqual([
+      { code: "target_unhealthy", category: "runtime_unavailable", count: 3 },
+    ]);
+    expect(status.non_admitted.map((row) => row.item_id).sort()).toEqual(
+      [substrateApi.item_id, brunel.item_id, coderMax.item_id].sort(),
+    );
+    for (const row of status.non_admitted) {
+      expect(row.action).toBe("held");
+      expect(row.code).toBe("target_unhealthy");
+      expect(row.metadata).toMatchObject({
+        code: "target_unhealthy",
+        class: "agent_availability",
+        target: row.to_agent,
+        target_unhealthy_receipt: {
+          code: "target_unhealthy",
+          target: row.to_agent,
+          prior_owner: row.to_agent,
+          safe_action: "reroute_or_supersede",
+          counts_as_useful_build_fuel: false,
+        },
+      });
+      expect(row.target_unhealthy_receipt).toEqual(row.metadata?.target_unhealthy_receipt);
+      expect(row.target_unhealthy_receipt?.safe_action_summary).toContain("Do not refire silently");
+    }
+  });
+});
+
 describe("empty auto-promote pipe alert", () => {
   it("excludes stale terminal already-dispatched rows from low-fuel health while preserving failed retry blockers", async () => {
     const adapter = new SqliteAdapter(":memory:");
