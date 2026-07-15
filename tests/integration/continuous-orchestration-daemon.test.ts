@@ -2088,7 +2088,7 @@ describe("daemon — dry-run vs live", () => {
       },
     });
     expect(res.body.auto_promote_health.summary).toBe(
-      "ready build fuel raw floor satisfied but daemon capacity is occupied: ready_plus_in_flight=3 floor=2, in_flight=1/1, lanes=3/3; lane diversity satisfied",
+      "raw ready floor satisfied but daemon capacity is occupied: ready_plus_in_flight=3 floor=2, in_flight=1/1, lanes=3/3; lane diversity satisfied",
     );
     expect(res.body.flesh.auto_promote.health.lanes).toEqual(res.body.auto_promote_health.lanes);
   });
@@ -3094,6 +3094,32 @@ describe("daemon — dry-run vs live", () => {
     const res = await callApp(app, "/orchestration/status");
 
     expect(res.status).toBe(200);
+    expect(res.body.counts).toMatchObject({
+      ready: 0,
+      raw_ready_fuel: 0,
+      useful_ready_fuel: 0,
+      admissible_now: 0,
+      in_flight: 2,
+    });
+    expect(res.body.ready_admission).toMatchObject({
+      candidates: 0,
+      useful_ready: 0,
+      admissible_now: 0,
+      blocker_counts: [],
+    });
+    expect(res.body.health.build_ready_floor).toMatchObject({
+      blocked: true,
+      blocker_code: "build_ready_lane_diversity_below_min_lanes",
+      useful_ready_count: 0,
+      floor: 12,
+      build_ready_lanes: 0,
+      min_lanes: 2,
+      candidate_lanes: [],
+      blocker_reasons: {
+        build_ready_lane_diversity_below_min_lanes: 1,
+        build_ready_below_floor: 1,
+      },
+    });
     expect(res.body.counts.ready).toBe(0);
     expect(res.body.counts.in_flight).toBe(2);
     expect(res.body.auto_promote_health).toMatchObject({
@@ -3114,11 +3140,16 @@ describe("daemon — dry-run vs live", () => {
       },
     });
     expect(res.body.auto_promote_health.summary).toBe(
-      "ready build fuel raw floor satisfied but daemon capacity is occupied: ready_plus_in_flight=2 floor=2, in_flight=2/2, lanes=2/2; lane diversity satisfied",
+      "ready-plus-in-flight capacity satisfies floor but daemon capacity is occupied: ready_plus_in_flight=2 floor=2, in_flight=2/2, lanes=2/2; lane diversity satisfied",
     );
+    expect(res.body.auto_promote_health.summary).not.toMatch(/raw floor satisfied/i);
     expect(res.body.auto_promote_health.summary).not.toMatch(/empty fuel/i);
-    expect(res.body.auto_promote_health.operator_summary.summary).toContain("gated fuel (capacity full)");
+    expect(res.body.auto_promote_health.operator_summary.summary).toContain("gated fuel (capacity full");
+    expect(res.body.auto_promote_health.operator_summary.summary).toContain("ready_plus_in_flight=2");
     expect(res.body.auto_promote_health.operator_summary.summary).not.toMatch(/empty fuel/i);
+    expect(res.body.auto_promote_health.operator_summary.safe_actions).toEqual(
+      expect.arrayContaining([expect.stringMatching(/ready_plus_in_flight=2/)]),
+    );
   });
 });
 

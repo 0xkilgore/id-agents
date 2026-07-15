@@ -1402,6 +1402,7 @@ export class ContinuousOrchestrationDaemon {
       belowLanes,
       triggered,
       ready: plan.before.build_ready,
+      rawReady: capacityFuel.readyBuild.length,
       floor: config.auto_promote_floor,
       inFlight: capacityFuel.inFlightBuild.length,
       maxInFlight: config.max_in_flight,
@@ -1971,7 +1972,9 @@ async function buildAutoPromoteOperatorSummary(
   const laneDiversityTopoffNeeded = laneDiversityDeficit > 0;
   const safeActions: string[] = [];
   if (args.capacityOccupied) {
-    safeActions.push("Capacity is full; wait for an in-flight build slot before dispatching additional ready rows.");
+    safeActions.push(
+      `Capacity is full with ready_plus_in_flight=${args.readyPlusInFlight}; wait for an in-flight build slot before dispatching additional ready rows.`,
+    );
   }
   if (laneDiversityTopoffNeeded) {
     safeActions.push(
@@ -2003,8 +2006,9 @@ async function buildAutoPromoteOperatorSummary(
       ? `gated fuel (${gates.join(", ")}):`
       : "gated fuel:"
     : "no ready or needs_review build fuel is currently visible";
+  const capacityDetail = args.capacityOccupied ? ` ready_plus_in_flight=${args.readyPlusInFlight};` : "";
   const summary = hasGatedFuel
-    ? `${prefix} retryable_failed_rows=${retryableFailedRows}, stale_duplicate_rows=${staleDuplicateRows}, confidence_held_rows=${confidenceHeldRows}; safe actions: ${safeActions.join(" ")}`
+    ? `${prefix}${capacityDetail} retryable_failed_rows=${retryableFailedRows}, stale_duplicate_rows=${staleDuplicateRows}, confidence_held_rows=${confidenceHeldRows}; safe actions: ${safeActions.join(" ")}`
     : "no ready or needs_review build fuel is currently visible";
   return {
     schema_version: "orchestration.auto_promote_operator_summary.v1",
@@ -2224,6 +2228,7 @@ function summarizeAutoPromoteHealth(args: {
   belowLanes: boolean;
   triggered: boolean;
   ready: number;
+  rawReady: number;
   floor: number;
   inFlight: number;
   maxInFlight: number;
@@ -2240,9 +2245,11 @@ function summarizeAutoPromoteHealth(args: {
 }): string {
   if (args.blockedReason) return `auto-promote blocked: ${args.blockedReason}`;
   if (args.capacityOccupied) {
-    const fuelState = args.belowFloor
-      ? "ready build fuel below raw floor"
-      : "ready build fuel raw floor satisfied";
+    const fuelState = args.ready < args.floor
+      ? "ready-plus-in-flight capacity below floor"
+      : args.rawReady < args.floor
+        ? "ready-plus-in-flight capacity satisfies floor"
+        : "raw ready floor satisfied";
     const laneState = args.belowLanes
       ? `; lane diversity topoff needed: add/promote ${Math.max(0, args.minLanes - args.lanes)} new build lane(s)`
       : "; lane diversity satisfied";
