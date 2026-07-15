@@ -14,7 +14,9 @@ import type { BacklogItem, BacklogRetryReadiness, BacklogRetryReadinessStatus } 
 import { getDispatchOutcomesByPhid } from "./storage.js";
 import { deriveBacklogRetryReadiness } from "./backlog-retry-readiness.js";
 import {
+  classifyDuplicateDispatchFailure,
   classifyDuplicateDispatchRetryDisposition,
+  type DuplicateDispatchFailureClass,
   type DuplicateDispatchRetryDisposition,
   type DuplicateDispatchRetryOperatorDisposition,
   type DuplicateDispatchRetrySafeRecommendation,
@@ -213,6 +215,11 @@ export interface OrchestrationReadyItemBlockerDetail {
   prior_dispatch_id: string | null;
   prior_dispatch_status: string | null;
   prior_recovery_status: string | null;
+  failure_kind: string | null;
+  failure_detail: string | null;
+  failure_class: DuplicateDispatchFailureClass | null;
+  age_ms: number | null;
+  age_hours: number | null;
   retry_readiness_status: BacklogRetryReadinessStatus | null;
   retry_readiness_reason: string | null;
   retry_safe_required: boolean;
@@ -293,6 +300,7 @@ interface BacklogQueueRow {
   retry_safe: number | null;
   dispatch_retry_count: number;
   stale_duplicate_closeout_receipt_json: string | null;
+  created_at: string;
 }
 
 interface DispatchQueueCountRow {
@@ -923,6 +931,9 @@ function readyItemBlockerDetail(
   const retryReadiness = blocker.code === "duplicate_dispatch_retry_required"
     ? deriveBacklogRetryReadiness(row, outcome)
     : null;
+  const duplicateAgeMs = blocker.code === "duplicate_dispatch_retry_required"
+    ? ageMsFromIso(row.created_at, Date.now())
+    : null;
   return {
     item_id: row.item_id,
     title: row.title,
@@ -936,6 +947,13 @@ function readyItemBlockerDetail(
     prior_dispatch_id: row.last_dispatch_phid,
     prior_dispatch_status: outcome?.status ?? null,
     prior_recovery_status: outcome?.recovery_status ?? null,
+    failure_kind: outcome?.failure_kind ?? null,
+    failure_detail: outcome?.failure_detail ?? null,
+    failure_class: blocker.code === "duplicate_dispatch_retry_required"
+      ? classifyDuplicateDispatchFailure(outcome)
+      : null,
+    age_ms: duplicateAgeMs,
+    age_hours: duplicateAgeMs == null ? null : hours(duplicateAgeMs),
     retry_readiness_status: retryReadiness?.status ?? null,
     retry_readiness_reason: retryReadiness?.reason ?? null,
     retry_safe_required: blocker.code === "duplicate_dispatch_retry_required",
@@ -1026,6 +1044,16 @@ function duplicateDispatchSafeActionCopy(readiness: BacklogRetryReadiness): stri
     case "not_retry_candidate":
       return "Safe action: no retry action is available for this row.";
   }
+}
+
+function ageMsFromIso(value: string, nowMs: number): number {
+  const then = Date.parse(value);
+  if (!Number.isFinite(then)) return 0;
+  return Math.max(0, nowMs - then);
+}
+
+function hours(ms: number): number {
+  return Math.round((ms / 3_600_000) * 100) / 100;
 }
 
 function staleReadyFuelProjection(input: {
@@ -1322,7 +1350,7 @@ async function readBacklogQueueRows(adapter: DbAdapter, teamId: string): Promise
   const { rows } = await adapter.query<BacklogQueueRow>(
     `SELECT item_id, title, readiness_state, risk_class, to_agent, provider, runtime,
             dispatch_body, write_scope_json, dependencies_json, last_dispatch_phid, retry_safe,
-            dispatch_retry_count, stale_duplicate_closeout_receipt_json
+            dispatch_retry_count, stale_duplicate_closeout_receipt_json, created_at
        FROM orchestration_backlog_item
       WHERE team_id = ?
         AND readiness_state NOT IN ('done', 'cancelled', 'superseded')`,
