@@ -424,7 +424,12 @@ describe("orchestration health projection", () => {
         ],
         nonAdmitted: [
           ...rogerIds.map((item_id) => ({ item_id, code: "target_unhealthy", to_agent: "roger" })),
-          ...brunelIds.map((item_id) => ({ item_id, code: "target_unhealthy", to_agent: "brunel" })),
+          ...brunelIds.map((item_id) => ({
+            item_id,
+            code: "target_unhealthy",
+            to_agent: "brunel",
+            last_dispatch_phid: `phid:disp-${item_id}`,
+          })),
         ],
         targetUnhealthyGroups: [
           {
@@ -466,6 +471,28 @@ describe("orchestration health projection", () => {
           item_ids: brunelIds,
           online_alternatives: [],
           recommended_action: "restart brunel or downclassify stale target pins",
+        },
+      ],
+      repair_actions: [
+        {
+          target_agent: "roger",
+          desired_action: "reroute",
+          affected_item_ids: rogerIds.slice(0, 5),
+          blocks_build_ready_floor: false,
+          lane: "/repo/id-agents",
+          proposed_target_agent: "regina",
+          reason: "a healthy compatible target is available for these target_unhealthy ready rows",
+          recommended_action: "reroute 6 target_unhealthy row(s) from roger to regina",
+        },
+        {
+          target_agent: "brunel",
+          desired_action: "supersede",
+          affected_item_ids: brunelIds,
+          blocks_build_ready_floor: false,
+          lane: "/repo/kapelle-site",
+          proposed_target_agent: null,
+          reason: "target_unhealthy ready rows have prior dispatch evidence and need explicit replacement before any reroute or refire",
+          recommended_action: "supersede or replace 2 target_unhealthy row(s) for brunel before readmission",
         },
       ],
     });

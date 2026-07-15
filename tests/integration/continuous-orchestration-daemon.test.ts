@@ -2494,6 +2494,152 @@ describe("daemon — dry-run vs live", () => {
     ]);
   });
 
+  it("status emits deterministic repair actions for offline eames/brunel/hopper/coder-max ready blockers", async () => {
+    for (const name of ["eames", "brunel", "hopper", "coder-max"]) {
+      await seedAgent(adapter, name, "pending", "claude-code-cli");
+    }
+    await seedAgent(adapter, "gaudi", "running", "claude-code-cli");
+
+    const eames = await seedReady(adapter, {
+      title: "offline eames build-ready blocker",
+      to_agent: "eames",
+      write_scope: ["kapelle/frontend/eames"],
+    });
+    const brunel = await seedReady(adapter, {
+      title: "offline brunel build-ready blocker",
+      to_agent: "brunel",
+      write_scope: ["kapelle/frontend/brunel"],
+    });
+    const hopper = await seedReady(adapter, {
+      title: "offline hopper build-ready blocker",
+      to_agent: "hopper",
+      write_scope: ["kapelle/backend/hopper"],
+    });
+    const coderMax = await seedReady(adapter, {
+      title: "offline coder-max previously dispatched blocker",
+      to_agent: "coder-max",
+      write_scope: ["kapelle/frontend/coder-max"],
+    });
+    await markReadyAlreadyDispatched(adapter, coderMax.item_id, "phid:disp-coder-max-prior");
+
+    const frontendPool = {
+      pool_id: "frontend",
+      repo_root: "/repo/frontend",
+      max_parallel: 2,
+      members: ["eames", "brunel", "coder-max", "gaudi"],
+    };
+    const hopperPool = {
+      pool_id: "hopper",
+      repo_root: "/repo/hopper",
+      max_parallel: 1,
+      members: ["hopper"],
+    };
+    const poolForTarget = (target: string) =>
+      frontendPool.members.includes(target) ? frontendPool :
+        hopperPool.members.includes(target) ? hopperPool :
+          null;
+    const pools: PoolRouting = {
+      poolForItem: () => null,
+      availableBuilders: (pool, building) => pool.members.filter((agent) => !building.has(agent)),
+      healthyEquivalentTarget: ({ unhealthyTarget, healthyAgents, busyAgents }) => {
+        const pool = poolForTarget(unhealthyTarget);
+        if (!pool) return null;
+        const candidates = pool.members.filter((agent) =>
+          agent !== unhealthyTarget &&
+          healthyAgents.has(agent) &&
+          !busyAgents.has(agent)
+        );
+        const target = candidates[0];
+        return target ? { pool, target, candidates } : null;
+      },
+      allocateWorktree: async ({ agent, item, pool }) => ({
+        path: `${pool.repo_root}/.worktrees/${agent}-${item.item_id.slice(-6)}`,
+        branch: `build/${agent}-${item.item_id.slice(-6)}`,
+        lease_id: null,
+      }),
+    };
+    const { app, daemon } = mountStatusApp(
+      adapter,
+      {
+        dry_run: true,
+        auto_flesh_enabled: false,
+        auto_promote_enabled: false,
+        min_ready_fuel: 8,
+        max_in_flight: 20,
+        max_new_per_tick: 20,
+      },
+      {
+        pools,
+        resolveAgentHealth: async () => new Set(["gaudi"]),
+        resolveAgentRuntimes: (names) => getAgentRuntimeMap(adapter, names),
+        readDiskHeadroom: () => diskHeadroom("ok"),
+      },
+    );
+    await daemon.setMode("running");
+
+    const res = await callApp(app, "/orchestration/status");
+
+    expect(res.status).toBe(200);
+    expect(res.body.counts).toMatchObject({
+      raw_ready_fuel: 4,
+      useful_ready_fuel: 0,
+      admissible_now: 0,
+      stale_ready_fuel: true,
+    });
+    expect(res.body.ready_admission.blocker_counts).toEqual([
+      { code: "target_unhealthy", category: "runtime_unavailable", count: 3 },
+      { code: "duplicate_dispatch_retry_required", category: "retry_safety", count: 1 },
+    ]);
+    expect(res.body.health.ready_item_blockers.target_unhealthy.repair_actions).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          target_agent: "brunel",
+          desired_action: "reroute",
+          affected_item_ids: [brunel.item_id],
+          blocks_build_ready_floor: true,
+          proposed_target_agent: "gaudi",
+        }),
+        expect.objectContaining({
+          target_agent: "eames",
+          desired_action: "reroute",
+          affected_item_ids: [eames.item_id],
+          blocks_build_ready_floor: true,
+          proposed_target_agent: "gaudi",
+        }),
+        expect.objectContaining({
+          target_agent: "hopper",
+          desired_action: "autostart",
+          affected_item_ids: [hopper.item_id],
+          blocks_build_ready_floor: true,
+          proposed_target_agent: null,
+        }),
+      ]),
+    );
+    expect(res.body.health.ready_item_blockers.stale_ready_fuel.counts_by_blocker_class).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          code: "duplicate_dispatch_retry_required",
+          count: 1,
+          examples: [coderMax.item_id],
+        }),
+        expect.objectContaining({
+          code: "target_unhealthy",
+          count: 3,
+          examples: expect.arrayContaining([eames.item_id, brunel.item_id, hopper.item_id]),
+        }),
+      ]),
+    );
+    expect(res.body.health.build_ready_floor).toMatchObject({
+      blocked: true,
+      useful_ready_count: 0,
+      blocker_reasons: {
+        target_unhealthy: 3,
+        duplicate_dispatch_retry_required: 1,
+        build_ready_below_floor: 1,
+      },
+    });
+  });
+
   it("status names Wave66 target-unhealthy blockers with healthy backend-pool reroute recommendations", async () => {
     for (const name of ["substrate-api-codex", "brunel", "coder-max", "eames"]) {
       await seedAgent(adapter, name, "pending", name === "substrate-api-codex" ? "codex" : "claude-code-cli");

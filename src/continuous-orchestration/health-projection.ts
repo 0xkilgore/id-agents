@@ -119,6 +119,7 @@ export interface OrchestrationReadyItemBlockerProjection {
   target_unhealthy: {
     count: number;
     top_blockers: OrchestrationTargetUnhealthyBlocker[];
+    repair_actions: OrchestrationTargetUnhealthyRepairAction[];
   };
   stale_ready_floor: boolean;
   blocked_lanes: OrchestrationReadyAdmissionBlockedLane[];
@@ -155,6 +156,19 @@ export interface OrchestrationTargetUnhealthyBlocker {
   count: number;
   item_ids: string[];
   online_alternatives: string[];
+  recommended_action: string;
+}
+
+export type OrchestrationTargetUnhealthyDesiredAction = "autostart" | "reroute" | "supersede";
+
+export interface OrchestrationTargetUnhealthyRepairAction {
+  target_agent: string;
+  desired_action: OrchestrationTargetUnhealthyDesiredAction;
+  affected_item_ids: string[];
+  blocks_build_ready_floor: boolean;
+  lane: string;
+  proposed_target_agent: string | null;
+  reason: string;
   recommended_action: string;
 }
 
@@ -293,7 +307,7 @@ interface ReadyAdmissionTargetUnhealthyGroupSummary {
   lane: string;
   count: number;
   proposed_healthy_target?: string | null;
-  examples?: Array<{ item_id: string }>;
+  examples?: Array<{ item_id: string; risk_class?: string | null }>;
   recommended_action?: string;
 }
 
@@ -692,6 +706,11 @@ function targetUnhealthyProjection(
   readyAdmission: OrchestrationHealthProjectionOptions["readyAdmission"] | undefined,
 ): OrchestrationReadyItemBlockerProjection["target_unhealthy"] {
   const targetCount = readyAdmission?.blockerCounts.find((count) => count.code === "target_unhealthy")?.count ?? 0;
+  const targetUnhealthyPriorDispatchIds = new Set(
+    (readyAdmission?.nonAdmitted ?? [])
+      .filter((row) => row.code === "target_unhealthy" && typeof row.last_dispatch_phid === "string" && row.last_dispatch_phid.trim() !== "")
+      .map((row) => row.item_id),
+  );
   const topBlockers = (readyAdmission?.targetUnhealthyGroups ?? [])
     .filter((group) => group.count > 0)
     .slice(0, 5)
@@ -707,7 +726,83 @@ function targetUnhealthyProjection(
           ? `reroute to healthy compatible target ${group.proposed_healthy_target}`
           : `restore ${group.target} health or reroute to a compatible healthy target`),
     }));
-  return { count: targetCount, top_blockers: topBlockers };
+  const repairActions = (readyAdmission?.targetUnhealthyGroups ?? [])
+    .filter((group) => group.count > 0)
+    .flatMap((group) => targetUnhealthyRepairActions(group, targetUnhealthyPriorDispatchIds))
+    .sort(compareTargetUnhealthyRepairActions)
+    .slice(0, 10);
+  return { count: targetCount, top_blockers: topBlockers, repair_actions: repairActions };
+}
+
+function targetUnhealthyRepairActions(
+  group: ReadyAdmissionTargetUnhealthyGroupSummary,
+  priorDispatchItemIds: Set<string>,
+): OrchestrationTargetUnhealthyRepairAction[] {
+  const examples = group.examples ?? [];
+  const ids = uniqueStrings(examples.map((example) => example.item_id));
+  if (ids.length === 0) return [];
+  const buildIds = new Set(
+    examples
+      .filter((example) => example.risk_class === "build")
+      .map((example) => example.item_id),
+  );
+  const supersedeIds = ids.filter((id) => priorDispatchItemIds.has(id));
+  const repairableIds = ids.filter((id) => !priorDispatchItemIds.has(id));
+  const out: OrchestrationTargetUnhealthyRepairAction[] = [];
+
+  if (supersedeIds.length > 0) {
+    out.push({
+      target_agent: group.target,
+      desired_action: "supersede",
+      affected_item_ids: supersedeIds.slice(0, 5),
+      blocks_build_ready_floor: supersedeIds.some((id) => buildIds.has(id)),
+      lane: group.lane,
+      proposed_target_agent: null,
+      reason: "target_unhealthy ready rows have prior dispatch evidence and need explicit replacement before any reroute or refire",
+      recommended_action: `supersede or replace ${supersedeIds.length} target_unhealthy row(s) for ${group.target} before readmission`,
+    });
+  }
+
+  if (repairableIds.length > 0 && group.proposed_healthy_target) {
+    out.push({
+      target_agent: group.target,
+      desired_action: "reroute",
+      affected_item_ids: repairableIds.slice(0, 5),
+      blocks_build_ready_floor: repairableIds.some((id) => buildIds.has(id)),
+      lane: group.lane,
+      proposed_target_agent: group.proposed_healthy_target,
+      reason: "a healthy compatible target is available for these target_unhealthy ready rows",
+      recommended_action: `reroute ${repairableIds.length} target_unhealthy row(s) from ${group.target} to ${group.proposed_healthy_target}`,
+    });
+  } else if (repairableIds.length > 0) {
+    out.push({
+      target_agent: group.target,
+      desired_action: "autostart",
+      affected_item_ids: repairableIds.slice(0, 5),
+      blocks_build_ready_floor: repairableIds.some((id) => buildIds.has(id)),
+      lane: group.lane,
+      proposed_target_agent: null,
+      reason: "no healthy compatible reroute target is available",
+      recommended_action: `autostart or repair ${group.target} so ${repairableIds.length} target_unhealthy row(s) can be admitted`,
+    });
+  }
+
+  return out;
+}
+
+function compareTargetUnhealthyRepairActions(
+  a: OrchestrationTargetUnhealthyRepairAction,
+  b: OrchestrationTargetUnhealthyRepairAction,
+): number {
+  const actionRank: Record<OrchestrationTargetUnhealthyDesiredAction, number> = {
+    reroute: 0,
+    autostart: 1,
+    supersede: 2,
+  };
+  return Number(b.blocks_build_ready_floor) - Number(a.blocks_build_ready_floor) ||
+    actionRank[a.desired_action] - actionRank[b.desired_action] ||
+    a.target_agent.localeCompare(b.target_agent) ||
+    a.lane.localeCompare(b.lane);
 }
 
 function readyItemBlockerDetail(
