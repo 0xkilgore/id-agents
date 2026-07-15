@@ -308,6 +308,106 @@ describe("RD-003 — atomic CO fire", () => {
     expect((await getBacklogItem(adapter, retryableFailed.item_id))?.readiness_state).toBe("ready");
     expect((await getBacklogItem(adapter, fresh.item_id))?.readiness_state).toBe("in_flight");
   });
+
+  it("scans past duplicate retry blockers and admits fresh ready rows up to the tick cap", async () => {
+    const adapter = new SqliteAdapter(":memory:");
+    await migrateSqlite(adapter);
+    await setMode(adapter, "default", "running");
+
+    const duplicateRows: BacklogItem[] = [];
+    for (let i = 1; i <= 3; i += 1) {
+      const phid = `phid:disp-duplicate-retry-${i}`;
+      await seedDispatchStatus(adapter, phid, "failed");
+      await adapter.query(
+        `UPDATE dispatch_scheduler_queue
+            SET failure_kind = $1,
+                failure_detail = $2
+          WHERE dispatch_phid = $3`,
+        ["scheduler_wedged", "transient scheduler wedge", phid],
+      );
+      const row = await insertBacklogItem(adapter, {
+        team_id: "default",
+        title: `blocked duplicate retry ${i}`,
+        to_agent: "roger",
+        dispatch_body: `retry row ${i}`,
+        readiness_state: "ready",
+        risk_class: "build",
+        priority: 1,
+        write_scope: [`repo/duplicate-retry-${i}`],
+      });
+      await setItemState(adapter, row.item_id, "ready", { dispatch_phid: phid });
+      duplicateRows.push((await getBacklogItem(adapter, row.item_id))!);
+    }
+
+    const freshRows: BacklogItem[] = [];
+    for (let i = 1; i <= 3; i += 1) {
+      freshRows.push(await insertBacklogItem(adapter, {
+        team_id: "default",
+        title: `fresh admissible ready ${i}`,
+        to_agent: "roger",
+        dispatch_body: `fresh row ${i}`,
+        readiness_state: "ready",
+        risk_class: "build",
+        priority: 2,
+        write_scope: [`repo/fresh-admissible-${i}`],
+      }));
+    }
+
+    const enqueued: string[] = [];
+    const daemon = new ContinuousOrchestrationDaemon({
+      adapter,
+      config: {
+        ...config(),
+        max_enqueues_per_tick: 2,
+        max_new_per_tick: 2,
+        max_in_flight: 5,
+        stall_threshold_ticks: 3,
+      },
+      enqueue: async (item) => {
+        enqueued.push(item.item_id);
+        return { dispatch_phid: `phid:disp-${item.item_id}`, query_id: `q-${item.item_id}` };
+      },
+      readUsage: usage,
+      readInFlight: noInFlight,
+    });
+
+    const before = await daemon.explainReadyAdmission();
+    const result = await daemon.runTick();
+
+    expect(before).toMatchObject({
+      candidates: 6,
+      useful_ready: 3,
+      admissible_now: 2,
+      block_reason_counts: {
+        duplicate_dispatch_retry_required: 3,
+        tick_admission_cap: 1,
+      },
+    });
+    const admittedItemIds = result.admitted.map((item) => item.item_id);
+    const freshItemIds = new Set(freshRows.map((item) => item.item_id));
+    expect(admittedItemIds).toHaveLength(2);
+    expect(admittedItemIds.every((itemId) => freshItemIds.has(itemId))).toBe(true);
+    expect(enqueued).toEqual(admittedItemIds);
+    expect(result.zero_ticks).toBe(0);
+    expect(result.decisions).toEqual(
+      expect.arrayContaining(
+        duplicateRows.map((item, index) =>
+          expect.objectContaining({
+            item_id: item.item_id,
+            action: "held",
+            metadata: expect.objectContaining({
+              code: "duplicate_dispatch_retry_required",
+              last_dispatch_phid: `phid:disp-duplicate-retry-${index + 1}`,
+            }),
+          }),
+        ),
+      ),
+    );
+    expect((await getBacklogItem(adapter, duplicateRows[0].item_id))?.readiness_state).toBe("ready");
+    const freshStates = await Promise.all(freshRows.map((item) => getBacklogItem(adapter, item.item_id)));
+    expect(freshStates.filter((item) => item?.readiness_state === "in_flight")).toHaveLength(2);
+    expect(freshStates.filter((item) => item?.readiness_state === "ready")).toHaveLength(1);
+  });
 });
 
 describe("ready admission target-unhealthy receipts", () => {
