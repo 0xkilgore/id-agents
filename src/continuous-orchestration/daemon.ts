@@ -227,6 +227,7 @@ export interface ReadyAdmissionExplanation {
   block_reason_counts: ReadyAdmissionBlockReasonCounts;
   top_block_reasons: Array<{ code: string; category: ReadyAdmissionBlockerCategory; count: number }>;
   blocked_lanes: ReadyAdmissionBlockedLane[];
+  target_unhealthy_groups: ReadyAdmissionTargetUnhealthyGroup[];
   recommended_action: string;
   admissible: Array<{ item_id: string; title: string; to_agent: string | null; risk_class: string }>;
   non_admitted: Array<{
@@ -256,9 +257,22 @@ export interface ReadyAdmissionTargetUnhealthyReceipt {
   code: "target_unhealthy";
   target: string;
   prior_owner: string | null;
-  safe_action: "reroute_or_supersede";
+  safe_action: "reroute_downclassify_or_owner_restart";
   safe_action_summary: string;
   counts_as_useful_build_fuel: false;
+}
+
+export interface ReadyAdmissionTargetUnhealthyGroup {
+  target: string;
+  lane: string;
+  count: number;
+  examples: Array<{
+    item_id: string;
+    title: string;
+    prior_owner: string | null;
+    risk_class: string;
+  }>;
+  recommended_action: string;
 }
 
 export interface ReadyAdmissionBlockedLane {
@@ -525,7 +539,7 @@ function readyAdmissionRecommendedAction(input: {
   if (input.usefulReady < input.minReadyFuel) {
     const actions = input.blockerCounts.flatMap((count) => {
       if (count.code === "target_unhealthy") {
-        return [`reroute target_unhealthy=${count.count} rows to compatible healthy agents`];
+        return [`reroute/downclassify/owner-restart target_unhealthy=${count.count} rows where safe`];
       }
       if (count.code === "provider_runtime_mismatch") {
         return [`reroute or update provider_runtime_mismatch=${count.count} rows to match a live runtime`];
@@ -548,6 +562,11 @@ function readyAdmissionRecommendedAction(input: {
     );
   }
   if (input.admissibleNow > 0) return "admit available ready rows";
+  const capacitySaturated =
+    input.blockerCounts.some((count) => count.count > 0 && count.code === "no_in_flight_slots");
+  if (capacitySaturated) {
+    return "capacity saturated: wait for in-flight slots to free or close active dispatches; do not add filler ready rows";
+  }
   const blocked = input.blockerCounts.reduce((sum, count) => sum + count.count, 0);
   const onlySingleWriterBusy =
     blocked === input.candidates &&
@@ -561,6 +580,53 @@ function readyAdmissionRecommendedAction(input: {
   return top
     ? `clear top ready-admission blocker ${top.code}=${top.count}`
     : "inspect ready admission blockers before refueling";
+}
+
+function targetUnhealthyGroupRecommendedAction(target: string, lane: string, priorOwner: string | null): string {
+  const ownerText = priorOwner && priorOwner !== target ? `original owner ${priorOwner}` : `target owner ${target}`;
+  return (
+    `Reroute to a compatible healthy agent for lane ${lane}; downclassify/supersede the row if the target pin is stale; ` +
+    `or restart ${ownerText} only when that owner is expected to resume safely.`
+  );
+}
+
+function readyAdmissionTargetUnhealthyGroups(
+  plan: { skipped: DecisionRecord[] },
+  byId: Map<string, BacklogItem>,
+): ReadyAdmissionTargetUnhealthyGroup[] {
+  const groups = new Map<string, ReadyAdmissionTargetUnhealthyGroup>();
+  for (const decision of plan.skipped) {
+    if (decision.metadata?.code !== "target_unhealthy" || !decision.item_id) continue;
+    const item = byId.get(decision.item_id);
+    const target = typeof decision.metadata.target === "string" && decision.metadata.target.trim() !== ""
+      ? decision.metadata.target
+      : item?.to_agent;
+    if (!item || !target) continue;
+
+    const lane = laneKeyOf(item);
+    const key = `${target}\u0000${lane}`;
+    const current = groups.get(key) ?? {
+      target,
+      lane,
+      count: 0,
+      examples: [],
+      recommended_action: targetUnhealthyGroupRecommendedAction(target, lane, item.to_agent ?? null),
+    };
+    current.count += 1;
+    if (current.examples.length < 5) {
+      current.examples.push({
+        item_id: item.item_id,
+        title: item.title,
+        prior_owner: item.to_agent ?? null,
+        risk_class: item.risk_class,
+      });
+    }
+    groups.set(key, current);
+  }
+
+  return [...groups.values()].sort((a, b) =>
+    b.count - a.count || a.target.localeCompare(b.target) || a.lane.localeCompare(b.lane),
+  );
 }
 
 function targetUnhealthyReceipt(
@@ -578,10 +644,10 @@ function targetUnhealthyReceipt(
     code: "target_unhealthy",
     target,
     prior_owner: priorOwner,
-    safe_action: "reroute_or_supersede",
+    safe_action: "reroute_downclassify_or_owner_restart",
     safe_action_summary:
       `Do not refire silently. Reroute this ready row to a healthy compatible ${repairScope} agent, ` +
-      "or supersede it with an explicit replacement row if the original target should remain offline.",
+      "downclassify/supersede it if the target pin is stale, or restart the owner only when safe.",
     counts_as_useful_build_fuel: false,
   };
 }
@@ -1271,6 +1337,7 @@ export class ContinuousOrchestrationDaemon {
       (usefulReady < config.min_ready_fuel && ordered.length > 0) ||
       (usefulReady >= config.min_ready_fuel && plan.admit.length < config.min_ready_fuel && plan.skipped.length > 0);
     const blockedLanes = readyAdmissionBlockedLanes(plan, byId);
+    const targetUnhealthyGroups = readyAdmissionTargetUnhealthyGroups(plan, byId);
     const recommendedAction = readyAdmissionRecommendedAction({
       candidates: ordered.length,
       usefulReady,
@@ -1292,6 +1359,7 @@ export class ContinuousOrchestrationDaemon {
       block_reason_counts: readyAdmissionBlockReasonCounts(plan),
       top_block_reasons: blockerCounts.slice(0, 5),
       blocked_lanes: blockedLanes,
+      target_unhealthy_groups: targetUnhealthyGroups,
       recommended_action: recommendedAction,
       admissible: plan.admit.map((item) => ({
         item_id: item.item_id,

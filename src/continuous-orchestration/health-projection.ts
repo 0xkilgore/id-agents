@@ -347,6 +347,9 @@ const CAPACITY_ONLY_REASONS = new Set([
   "tick_admission_cap",
 ]);
 
+const CAPACITY_SATURATION_ACTION =
+  "capacity saturated: wait for in-flight slots to free or close active dispatches; do not add filler ready rows";
+
 interface OrchestrationLoopStateRow {
   mode: string;
   consecutive_zero_ticks: number | null;
@@ -729,7 +732,9 @@ function staleReadyFuelProjection(input: {
         ? input.readyAdmission?.recommendedAction ??
           "clear the top ready-admission blockers or promote/refuel safe backlog candidates until ready fuel is admissible"
         : "clear the top ready-admission blockers or promote/refuel safe backlog candidates until ready fuel is admissible"
-      : "none",
+      : capacityOnlyZeroAdmissible
+        ? CAPACITY_SATURATION_ACTION
+        : "none",
     reason: active ? reasonParts.join("; ") : null,
     blocked_lanes: blockedLanes,
     counts_by_blocker_class: counts,
