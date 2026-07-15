@@ -1546,16 +1546,24 @@ export class ContinuousOrchestrationDaemon {
 
   private async nonUsefulProviderRuntimeReadyFuelIds(ready: BacklogItem[]): Promise<Set<string>> {
     const readyBuild = ready.filter((item) => item.risk_class === "build");
-    if (readyBuild.length === 0 || !this.deps.resolveAgentRuntimes) return new Set();
+    if (readyBuild.length === 0) return new Set();
     const agentNames = readyBuild.map((item) => item.to_agent).filter((name): name is string => !!name);
-    const runtimes = await this.deps.resolveAgentRuntimes([...new Set(agentNames)]);
-    return new Set(
-      readyBuild
-        .filter((item) =>
-          providerRuntimeMismatch(item, item.to_agent, item.to_agent ? runtimes.get(item.to_agent) : undefined),
-        )
-        .map((item) => item.item_id),
-    );
+    const uniqueAgentNames = [...new Set(agentNames)];
+    const [runtimes, healthyAgents] = await Promise.all([
+      this.deps.resolveAgentRuntimes ? this.deps.resolveAgentRuntimes(uniqueAgentNames) : Promise.resolve(undefined),
+      this.deps.resolveAgentHealth ? this.deps.resolveAgentHealth(uniqueAgentNames) : Promise.resolve(undefined),
+    ]);
+    const nonUseful = new Set<string>();
+    for (const item of readyBuild) {
+      if (item.to_agent && healthyAgents && !healthyAgents.has(item.to_agent)) {
+        nonUseful.add(item.item_id);
+        continue;
+      }
+      if (providerRuntimeMismatch(item, item.to_agent, item.to_agent ? runtimes?.get(item.to_agent) : undefined)) {
+        nonUseful.add(item.item_id);
+      }
+    }
+    return nonUseful;
   }
 
   /**

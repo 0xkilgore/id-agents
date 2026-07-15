@@ -362,7 +362,20 @@ describe("ready admission target-unhealthy receipts", () => {
     const status = await daemon.explainReadyAdmission();
 
     expect(status.admissible).toEqual([]);
+    expect(status.candidates).toBe(3);
     expect(status.useful_ready).toBe(0);
+    expect(status.admissible_now).toBe(0);
+    expect(status.lanes).toMatchObject({
+      raw_ready: 3,
+      useful_ready: 0,
+      admissible_now: 0,
+    });
+    expect(status.stale_ready_floor).toMatchObject({
+      stale: true,
+      ready: 3,
+      admissible: 0,
+    });
+    expect(status.stale_ready_floor.reason).toContain("raw_ready_fuel=3");
     expect(status.blocker_counts).toEqual([
       { code: "target_unhealthy", category: "runtime_unavailable", count: 3 },
     ]);
@@ -391,6 +404,76 @@ describe("ready admission target-unhealthy receipts", () => {
 });
 
 describe("empty auto-promote pipe alert", () => {
+  it("counts only healthy target ready rows toward the auto-promote build-ready floor", async () => {
+    const adapter = new SqliteAdapter(":memory:");
+    await migrateSqlite(adapter);
+    await setMode(adapter, "default", "running");
+
+    await insertBacklogItem(adapter, {
+      team_id: "default",
+      logical_key: "healthy-ready-build",
+      title: "healthy ready build fuel",
+      track: "T-ORCH",
+      to_agent: "roger",
+      dispatch_body: "[project: kapelle][T-ORCH][BUILD] roger: healthy ready fuel",
+      readiness_state: "ready",
+      risk_class: "build",
+      write_scope: ["repo/healthy-ready"],
+      provider: "openai",
+      runtime: "codex",
+    });
+    await insertBacklogItem(adapter, {
+      team_id: "default",
+      logical_key: "unhealthy-ready-build",
+      title: "unhealthy ready build fuel",
+      track: "T-ORCH",
+      to_agent: "brunel",
+      dispatch_body: "[project: kapelle][T-ORCH][BUILD] brunel: unhealthy ready fuel",
+      readiness_state: "ready",
+      risk_class: "build",
+      write_scope: ["repo/unhealthy-ready"],
+      provider: "openai",
+      runtime: "codex",
+    });
+    const candidate = await seedNeedsReviewItem(adapter, {
+      title: "safe candidate replaces unhealthy floor fuel",
+      write_scope: ["repo/replacement"],
+      flesh_confidence: 0.99,
+    });
+
+    const daemon = new ContinuousOrchestrationDaemon({
+      adapter,
+      config: {
+        ...config(),
+        auto_flesh_enabled: true,
+        auto_promote_enabled: true,
+        auto_promote_floor: 2,
+        auto_promote_min_lanes: 1,
+        max_flesh_per_tick: 0,
+      },
+      enqueue: async (item) => ({ dispatch_phid: `phid:disp-${item.item_id}`, query_id: `q-${item.item_id}` }),
+      readUsage: usage,
+      readInFlight: noInFlight,
+      resolveAgentHealth: async () => new Set(["roger"]),
+      resolveAgentRuntimes: async () => new Map([
+        ["roger", "codex"],
+        ["brunel", "codex"],
+      ]),
+    });
+
+    const status = await daemon.explainAutoPromoteHealth();
+
+    expect(status.lanes.build_ready).toBe(2);
+    expect(status.lanes.ready_plus_in_flight).toBe(1);
+    expect(status.lanes.ready_lane_keys).toEqual(["repo/healthy-ready", "repo/unhealthy-ready"]);
+    expect(status.below_floor).toBe(true);
+    expect(status.triggered).toBe(true);
+    expect(status.promoted_count).toBe(1);
+    expect(status.promoted_items).toEqual([
+      { item_id: candidate.item_id, title: "safe candidate replaces unhealthy floor fuel", lane: "repo/replacement" },
+    ]);
+  });
+
   it("excludes stale terminal already-dispatched rows from low-fuel health while preserving failed retry blockers", async () => {
     const adapter = new SqliteAdapter(":memory:");
     await migrateSqlite(adapter);
