@@ -6,6 +6,7 @@ import {
   type ReleaseProofReadinessInput,
 } from "../../src/continuous-orchestration/release-proof-readiness.js";
 import {
+  insertBacklogItem,
   reconcileStaleAlreadyDispatchedReadyRows,
   recordTickOutcome,
   setMode,
@@ -806,6 +807,24 @@ describe("buildReleaseProofReadiness", () => {
       await migrateOutputsTables(adapter);
       await setMode(adapter, "default", "running");
       await recordTickOutcome(adapter, "default", { zero_ticks: 3, fired: false });
+      await insertBacklogItem(adapter, {
+        title: "Kapelle release proof runtime mismatch one",
+        readiness_state: "ready",
+        risk_class: "build",
+        to_agent: "roger",
+        dispatch_body: "Repair release-proof runtime lane one.",
+        provider: "openai",
+        runtime: "claude-code-cli",
+      });
+      await insertBacklogItem(adapter, {
+        title: "Kapelle release proof runtime mismatch two",
+        readiness_state: "ready",
+        risk_class: "build",
+        to_agent: "roger",
+        dispatch_body: "Repair release-proof runtime lane two.",
+        provider: "openai",
+        runtime: "claude-code-cli",
+      });
       await adapter.query(
         `INSERT INTO artifacts
            (artifact_id, basename, agent, tag, abs_path, title, produced_at, source, availability,
@@ -868,6 +887,7 @@ describe("buildReleaseProofReadiness", () => {
       });
 
       expect(view.release_readiness).toBe("not_ready");
+      expect(view.chris_readable_release_ready).toBe("NOT READY");
       expect(view.feedback_evidence).toMatchObject({ state: "stale", count: 1 });
       expect(view.infra_warnings).toMatchObject({
         state: "warning",
@@ -875,9 +895,15 @@ describe("buildReleaseProofReadiness", () => {
         source: "orchestration_health_projection",
         action: "review orchestration health and resolve infra warnings before release proof sign-off",
         items: [
-          "orchestration loop critical: 3 consecutive zero-admit ticks with no structured admission explanation",
+          expect.stringContaining("orchestration loop critical: 3 consecutive zero-admit ticks"),
         ],
       });
+      const warning = view.infra_warnings.items[0] ?? "";
+      expect(warning).toContain("top blocker provider_runtime_mismatch=2");
+      expect(warning).toContain("source route /orchestration/status ready_admission.blocker_counts");
+      expect(warning).toContain(
+        "safe next action: route to a compatible agent or update the requested provider/runtime",
+      );
       expect(view.sources).toMatchObject({
         state: "present",
         counts: { safe: 2, unsafe: 0, total: 2 },
@@ -886,6 +912,7 @@ describe("buildReleaseProofReadiness", () => {
           expect.objectContaining({ source: "backlog", href: "manager:/backlog/backlog-kapelle-proof" }),
         ]),
       });
+      expect(view.generated_artifacts).toMatchObject({ state: "present", count: 1 });
       expect(view.stale_reasons).toEqual(["latest feedback evidence is older than 1h"]);
       expect(view.missing_reasons).toEqual(["one or more feedback evidence items are missing safe source links"]);
       expect(view.summary).toBe("Release proof is not ready: infra warnings require operator review.");

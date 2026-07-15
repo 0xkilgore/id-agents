@@ -295,7 +295,7 @@ export async function readReleaseProofReadiness(
 
     const infraWarnings: string[] = [];
     if (health.orchestration_loop.severity !== "ok") {
-      infraWarnings.push(`orchestration loop ${health.orchestration_loop.severity}: ${health.orchestration_loop.explanation}`);
+      infraWarnings.push(formatOrchestrationLoopInfraWarning(health));
     }
     for (const item of health.blockers.needs_clarification.items) {
       if (!item.needs_chris) infraWarnings.push(`clarification blocker ${item.dispatch_phid}: ${item.reason}`);
@@ -525,6 +525,33 @@ function summaryForNotReady(input: {
   if (input.staleReasons.length > 0) return `Release proof is not ready: ${input.staleReasons[0]}.`;
   if (input.missingReasons.length > 0) return `Release proof is not ready: ${input.missingReasons[0]}.`;
   return "Release proof is not ready.";
+}
+
+function formatOrchestrationLoopInfraWarning(health: Awaited<ReturnType<typeof readOrchestrationHealthProjection>>): string {
+  const loop = health.orchestration_loop;
+  const topBlocker = topCount(loop.last_admission_block_reasons);
+  const blockerText = topBlocker
+    ? `; top blocker ${topBlocker.code}=${topBlocker.count}`
+    : "";
+  const routeText = "; source route /orchestration/status ready_admission.blocker_counts";
+  const topBlockerAction = topBlocker
+    ? health.ready_item_blockers.categories.find((category) => category.code === topBlocker.code)?.recommended_action
+    : null;
+  const action = topBlockerAction?.trim() ||
+    health.ready_item_blockers.recommended_action.trim() ||
+    "inspect ready admission blockers before release proof sign-off";
+  return (
+    `orchestration loop ${loop.severity}: ${loop.consecutive_zero_ticks} consecutive zero-admit ticks` +
+    `${blockerText}; ${loop.explanation}${routeText}; safe next action: ${action}`
+  );
+}
+
+function topCount(counts: Record<string, number>): { code: string; count: number } | null {
+  const sorted = Object.entries(counts)
+    .filter(([, count]) => count > 0)
+    .sort(([aCode, aCount], [bCode, bCount]) => bCount - aCount || aCode.localeCompare(bCode));
+  const top = sorted[0];
+  return top ? { code: top[0], count: top[1] } : null;
 }
 
 function deriveNextOwner(input: {
