@@ -964,6 +964,46 @@ describe("daemon — dry-run vs live", () => {
     expect(res.body.auto_promote_health.summary).toMatch(/no needs_review candidates/);
   });
 
+  it("status does not count stale needs_review rows as ready fuel for low-fuel health", async () => {
+    for (let i = 0; i < 4; i++) {
+      await seedReady(adapter, { title: `useful ready ${i}`, write_scope: [`repo/useful-${i}`] });
+    }
+    for (let i = 0; i < 8; i++) {
+      const phid = `phid:disp-stale-needs-review-${i}`;
+      await seedDispatch(adapter, { dispatch_phid: phid, status: "done" });
+      await seedApprovedReview(adapter, {
+        title: `stale needs_review ${i}`,
+        last_dispatch_phid: phid,
+        write_scope: [`repo/stale-review-${i}`],
+      });
+    }
+    const { app, daemon } = mountStatusApp(adapter, {
+      dry_run: true,
+      auto_flesh_enabled: true,
+      auto_promote_enabled: true,
+      auto_promote_floor: 12,
+      auto_promote_min_lanes: 1,
+    });
+    await daemon.setMode("running");
+
+    const res = await callApp(app, "/orchestration/status");
+
+    expect(res.status).toBe(200);
+    expect(res.body.counts.ready).toBe(4);
+    expect(res.body.counts.needs_review).toBe(0);
+    expect(res.body.counts.stale_needs_review).toBe(8);
+    expect(res.body.auto_promote_health).toMatchObject({
+      below_floor: true,
+      triggered: true,
+      candidates_considered: 0,
+      promoted_count: 0,
+      skipped_count: 0,
+      candidates: [],
+    });
+    expect(res.body.auto_promote_health.summary).toMatch(/ready=4 floor=12/);
+    expect(res.body.auto_promote_health.summary).toMatch(/no needs_review candidates/);
+  });
+
   it("status auto-promote health excludes pool worktree duplicates from useful floor fuel", async () => {
     const staleA = await seedReady(adapter, {
       title: "stale duplicate pool row A",

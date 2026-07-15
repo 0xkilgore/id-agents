@@ -61,7 +61,12 @@ import { readRuntimeMixDrift, type RuntimeMixDrift } from "../model-policy/runti
 /** Dispatch/effective statuses that mean the work is finished — its write-scope
  *  lock can be released. Mirrors dispatch terminal states plus recovery moot. */
 const TERMINAL_DISPATCH_STATUSES = new Set(["done", "failed", "failed_needs_operator", "cancelled", "moot"]);
-const AUTO_PROMOTE_HEALTH_STALE_ALREADY_DISPATCHED_STATUSES = new Set(["done", "cancelled", "moot", "failed_needs_operator"]);
+export const AUTO_PROMOTE_HEALTH_STALE_ALREADY_DISPATCHED_STATUSES = new Set([
+  "done",
+  "cancelled",
+  "moot",
+  "failed_needs_operator",
+]);
 const INCIDENT_ALERT_COOLDOWN_MS = 60 * 60 * 1000;
 
 type OrchestrationIncidentKind = "stall" | "model_policy_drift";

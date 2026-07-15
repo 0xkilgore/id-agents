@@ -7,7 +7,12 @@
 import fs from "node:fs";
 import type { Application, Request, Response } from "express";
 import type { DbAdapter } from "../db/db-adapter.js";
-import type { AutoPromoteHealth, ContinuousOrchestrationDaemon, ReadyAdmissionExplanation } from "./daemon.js";
+import {
+  AUTO_PROMOTE_HEALTH_STALE_ALREADY_DISPATCHED_STATUSES,
+  type AutoPromoteHealth,
+  type ContinuousOrchestrationDaemon,
+  type ReadyAdmissionExplanation,
+} from "./daemon.js";
 import type { ContinuousOrchestrationConfig } from "./config.js";
 import { AUTO_READY_CONFIDENCE_THRESHOLD } from "./flesh-policy.js";
 import type { OrchestrationMode, ReadinessState } from "./types.js";
@@ -122,6 +127,19 @@ export function mountContinuousOrchestrationRoutes(app: Application, opts: Orche
         baseAutoPromoteHealth,
         readyAdmission,
       );
+      const needsReviewDispatchStatuses = await getDispatchStatusesByPhid(
+        adapter,
+        needsReview.map((item) => item.last_dispatch_phid).filter((phid): phid is string => !!phid),
+      );
+      const staleAlreadyDispatchedNeedsReview = needsReview.filter((item) => {
+        if (!item.last_dispatch_phid) return false;
+        const status = needsReviewDispatchStatuses.get(item.last_dispatch_phid);
+        return !!status && AUTO_PROMOTE_HEALTH_STALE_ALREADY_DISPATCHED_STATUSES.has(status);
+      });
+      const usefulNeedsReview = Math.max(
+        0,
+        needsReview.length - heldConfidenceReview.length - staleAlreadyDispatchedNeedsReview.length,
+      );
       const health = await readOrchestrationHealthProjection(adapter, teamId, {
         minReadyFuel: config.min_ready_fuel,
         readyAdmission: {
@@ -169,7 +187,8 @@ export function mountContinuousOrchestrationRoutes(app: Application, opts: Orche
           stale_ready_fuel: readyAdmission.stale_ready_floor.stale,
           ready_block_reasons: readyAdmission.block_reason_counts,
           top_ready_block_reasons: readyAdmission.top_block_reasons,
-          needs_review: Math.max(0, needsReview.length - heldConfidenceReview.length),
+          needs_review: usefulNeedsReview,
+          stale_needs_review: staleAlreadyDispatchedNeedsReview.length,
           held_confidence_review: heldConfidenceReview.length,
           in_flight: inFlight.length,
           needs_chris_batch: needsChrisBatch.length,
