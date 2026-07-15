@@ -469,6 +469,33 @@ describe("ready admission target-unhealthy receipts", () => {
     expect(status.non_admitted.map((row) => row.item_id).sort()).toEqual(
       [substrateApi.item_id, brunel.item_id, coderMax.item_id].sort(),
     );
+    expect(status.target_unhealthy_groups).toEqual([
+      expect.objectContaining({
+        target: "brunel",
+        lane: "/Users/kilgore/Dropbox/Code/kapelle-site/app/ops",
+        count: 1,
+        examples: [
+          expect.objectContaining({
+            item_id: brunel.item_id,
+            title: brunel.title,
+            prior_owner: "brunel",
+          }),
+        ],
+        recommended_action: expect.stringContaining("Reroute to a compatible healthy agent"),
+      }),
+      expect.objectContaining({
+        target: "coder-max",
+        lane: "/Users/kilgore/Dropbox/Code/cane/id-agents/src/dispatch-scheduler",
+        count: 1,
+        recommended_action: expect.stringContaining("downclassify/supersede"),
+      }),
+      expect.objectContaining({
+        target: "substrate-api-codex",
+        lane: "/Users/kilgore/Dropbox/Code/cane/id-agents/src/continuous-orchestration",
+        count: 1,
+        recommended_action: expect.stringContaining("restart target owner substrate-api-codex"),
+      }),
+    ]);
     for (const row of status.non_admitted) {
       expect(row.action).toBe("held");
       expect(row.code).toBe("target_unhealthy");
@@ -480,12 +507,14 @@ describe("ready admission target-unhealthy receipts", () => {
           code: "target_unhealthy",
           target: row.to_agent,
           prior_owner: row.to_agent,
-          safe_action: "reroute_or_supersede",
+          safe_action: "reroute_downclassify_or_owner_restart",
           counts_as_useful_build_fuel: false,
         },
       });
       expect(row.target_unhealthy_receipt).toEqual(row.metadata?.target_unhealthy_receipt);
       expect(row.target_unhealthy_receipt?.safe_action_summary).toContain("Do not refire silently");
+      expect(row.target_unhealthy_receipt?.safe_action_summary).toContain("downclassify/supersede");
+      expect(row.target_unhealthy_receipt?.safe_action_summary).toContain("restart the owner only when safe");
     }
   });
 });

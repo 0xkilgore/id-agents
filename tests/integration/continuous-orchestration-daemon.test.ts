@@ -1603,7 +1603,7 @@ describe("daemon — dry-run vs live", () => {
       useful_ready: 2,
       admissible_now: 2,
       recommended_action:
-        "useful_ready_fuel=2 is below min_ready_fuel=12; run auto-promote/flesh for safe backlog candidates or reroute target_unhealthy=2 rows to compatible healthy agents",
+        "useful_ready_fuel=2 is below min_ready_fuel=12; run auto-promote/flesh for safe backlog candidates or reroute/downclassify/owner-restart target_unhealthy=2 rows where safe",
       stale_ready_floor: {
         stale: true,
         ready: 4,
@@ -1615,6 +1615,32 @@ describe("daemon — dry-run vs live", () => {
     expect(res.body.counts.admissible_now).toBe(2);
     expect(res.body.ready_admission.blocker_counts).toEqual([
       { code: "target_unhealthy", category: "runtime_unavailable", count: 2 },
+    ]);
+    expect(res.body.ready_admission.target_unhealthy_groups).toEqual([
+      expect.objectContaining({
+        target: "eames",
+        lane: "repo/explicit-b",
+        count: 1,
+        examples: [
+          expect.objectContaining({
+            title: "explicit unhealthy target B",
+            prior_owner: "eames",
+          }),
+        ],
+        recommended_action: expect.stringContaining("downclassify/supersede"),
+      }),
+      expect.objectContaining({
+        target: "gaudi",
+        lane: "repo/explicit-a",
+        count: 1,
+        examples: [
+          expect.objectContaining({
+            title: "explicit unhealthy target A",
+            prior_owner: "gaudi",
+          }),
+        ],
+        recommended_action: expect.stringContaining("restart target owner gaudi"),
+      }),
     ]);
     expect(res.body.health.build_ready_floor).toMatchObject({
       useful_ready_count: 2,
@@ -1637,8 +1663,8 @@ describe("daemon — dry-run vs live", () => {
       "substrate-api-codex",
       "substrate-orch-codex",
     ]);
-    expect(res.body.auto_promote_health.operator_summary.safe_actions[0]).toContain("Reroute or supersede 2 target_unhealthy");
-    expect(res.body.auto_promote_health.operator_summary.safe_actions[0]).toContain("compatible healthy agents");
+    expect(res.body.auto_promote_health.operator_summary.safe_actions[0]).toContain("Reroute, downclassify/supersede, or restart owners for 2 target_unhealthy");
+    expect(res.body.auto_promote_health.operator_summary.safe_actions[0]).toContain("where safe");
     expect(res.body.auto_promote_health.operator_summary.safe_actions[0]).toContain("top off compatible pool fuel");
     expect(res.body.auto_promote_health.operator_summary.summary).toContain("2 admissible row(s)");
     expect(res.body.auto_promote_health.operator_summary.summary).toContain("2 target_unhealthy row(s)");
@@ -1725,7 +1751,7 @@ describe("daemon — dry-run vs live", () => {
       useful_ready: 2,
       admissible_now: 2,
       recommended_action:
-        "raw_ready_fuel=13 meets min_ready_fuel=12 but useful_ready_fuel=2 is below floor; reroute target_unhealthy=10 rows to compatible healthy agents; review duplicate_dispatch_retry_required=1 rows and mark retry_safe only for bounded refires or close stale duplicates",
+        "raw_ready_fuel=13 meets min_ready_fuel=12 but useful_ready_fuel=2 is below floor; reroute/downclassify/owner-restart target_unhealthy=10 rows where safe; review duplicate_dispatch_retry_required=1 rows and mark retry_safe only for bounded refires or close stale duplicates",
       stale_ready_floor: {
         stale: true,
         ready: 13,
