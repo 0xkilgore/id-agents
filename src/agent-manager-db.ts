@@ -44,6 +44,15 @@ import {
   type BuildApprovalInput,
 } from './decisions-needs-chris/projection.js';
 import { listBacklogByState } from './continuous-orchestration/storage.js';
+import type {
+  AutoPromoteHealth,
+  ContinuousOrchestrationDaemon,
+  ReadyAdmissionExplanation,
+} from './continuous-orchestration/daemon.js';
+import {
+  buildRuntimeStatusProjection,
+  type RuntimeStatusProjection,
+} from './continuous-orchestration/routes.js';
 import {
   buildTaskRow,
   draftFromAutoAttach,
@@ -1153,6 +1162,10 @@ export class AgentManagerDb {
   private agentsListCache: Map<string, AgentsListCacheEntry> = new Map();
   private agentsListRefreshes: Map<string, Promise<void>> = new Map();
   private healthResponseCache: Map<string, { at: number; body: unknown }> = new Map();
+  private continuousOrchestrationStatusSource: {
+    daemon: ContinuousOrchestrationDaemon;
+    runtimeHealth: () => { build: BuildStatus; disk: ReturnType<typeof readDiskHeadroom> };
+  } | null = null;
   private taskListCache: Map<string, TaskListCacheEntry> = new Map();
   private static readonly TASK_LIST_CACHE_TTL_MS = 10_000;
   private taskDetailCache: Map<string, { taskUpdatedAt: number; detail: Record<string, unknown> }> = new Map();
@@ -1736,6 +1749,28 @@ export class AgentManagerDb {
       }
     }
     return { nominal: reasons.length === 0, nominal_reasons: reasons };
+  }
+
+  private async getContinuousOrchestrationRuntimeStatus(input: {
+    build: BuildStatus;
+    disk: ReturnType<typeof readDiskHeadroom>;
+  }): Promise<RuntimeStatusProjection | null> {
+    const source = this.continuousOrchestrationStatusSource;
+    if (!source) return null;
+    try {
+      const [autoPromoteHealth, readyAdmission]: [AutoPromoteHealth, ReadyAdmissionExplanation] =
+        await Promise.all([
+          source.daemon.explainAutoPromoteHealth(),
+          source.daemon.explainReadyAdmission(),
+        ]);
+      return buildRuntimeStatusProjection({
+        runtimeHealth: input,
+        autoPromoteHealth,
+        readyAdmission,
+      });
+    } catch {
+      return null;
+    }
   }
 
   /**
@@ -5442,6 +5477,7 @@ export class AgentManagerDb {
       const supervisor = this.getSupervisorHealthStatus(now);
       const supervisorRequiredForNominal = process.env.SUPERVISOR_OPTIONAL !== 'true';
       const nominal = this.evaluateNominalHealth({ build, disk, supervisor });
+      const orchestration_runtime_status = await this.getContinuousOrchestrationRuntimeStatus({ build, disk });
       const body = {
         status: 'ok',
         ...nominal,
@@ -5481,6 +5517,7 @@ export class AgentManagerDb {
         // configured nodes (console-server / kapelle-site), so /ops can surface
         // drift on ANY node, not just the manager.
         fleet_freshness: this.fleetFreshnessSummary,
+        orchestration_runtime_status,
       };
       this.healthResponseCache.set(teamName, { at: now, body });
       res.json(body);
@@ -14005,10 +14042,18 @@ export class AgentManagerDb {
                   });
                 },
               });
+              this.continuousOrchestrationStatusSource = {
+                daemon,
+                runtimeHealth: () => ({
+                  build: this.getBuildStatus(),
+                  disk: readDiskHeadroom(),
+                }),
+              };
               mountContinuousOrchestrationRoutes(this.managementApp, {
                 daemon,
                 adapter: this.db.adapter,
                 config: coConfig,
+                runtimeHealth: this.continuousOrchestrationStatusSource.runtimeHealth,
               });
               daemon.start(); // no-op unless CONTINUOUS_ORCHESTRATION_ENABLED=true
               console.log(
