@@ -1193,6 +1193,12 @@ describe("daemon — dry-run vs live", () => {
     const res = await callApp(app, "/orchestration/status");
 
     expect(res.status).toBe(200);
+    expect(res.body.counts.ready).toBe(4);
+    expect(res.body.counts.admissible_now).toBe(0);
+    expect(res.body.counts.useful_ready_fuel).toBe(0);
+    expect(res.body.ready_admission.blocker_counts).toEqual([
+      { code: "duplicate_dispatch_retry_required", category: "retry_safety", count: 4 },
+    ]);
     const byId = Object.fromEntries(
       res.body.health.ready_item_blockers.items.map((item: any) => [item.item_id, item]),
     );
@@ -1200,26 +1206,36 @@ describe("daemon — dry-run vs live", () => {
       retry_readiness_status: "retryable_failed_row",
       retry_safe_recommendation: "set_true",
       operator_disposition: "retry",
-      safe_action_copy: expect.stringContaining("bounded refire"),
+      recommended_disposition: "mark-retry-safe",
+      recommended_action: "mark retry_safe only when the operator wants a bounded refire",
+      safe_action_copy: "Safe action: mark retry_safe=true only after operator approval for a bounded refire; no automatic refire occurs while retry_safe=false.",
     });
     expect(byId[stale.item_id]).toMatchObject({
       retry_readiness_status: "stale_duplicate",
       retry_safe_recommendation: "leave_false",
       operator_disposition: "close",
-      safe_action_copy: expect.stringContaining("do not refire"),
+      recommended_disposition: "close",
+      recommended_action: "close or supersede the stale duplicate row; do not mark it retry-safe",
+      safe_action_copy: "Safe action: close or supersede this stale duplicate row; do not mark retry_safe and do not refire.",
     });
     expect(byId[live.item_id]).toMatchObject({
       retry_readiness_status: "waiting_on_live_dispatch",
       retry_safe_recommendation: "leave_false",
       operator_disposition: "hold",
-      safe_action_copy: expect.stringContaining("wait on the live prior dispatch"),
+      recommended_disposition: "supersede",
+      recommended_action: "hold the row and wait for the prior dispatch, or supersede it after operator review",
+      safe_action_copy: "Safe action: wait on the live prior dispatch or supersede after operator review; do not refire while the prior dispatch is live or unreadable.",
     });
     expect(byId[nonRetryable.item_id]).toMatchObject({
       retry_readiness_status: "non_retryable_failed_row",
       retry_safe_recommendation: "leave_false",
       operator_disposition: "close",
-      safe_action_copy: expect.stringContaining("operator review required"),
+      recommended_disposition: "supersede",
+      recommended_action: "close or supersede the stale duplicate row; do not mark it retry-safe",
+      safe_action_copy: "Safe action: operator review required; supersede or replace the row instead of marking retry_safe.",
     });
+    expect(res.body.health.ready_item_blockers.stale_ready_fuel.reason).not.toContain("empty fuel");
+    expect(res.body.health.ready_item_blockers.recommended_action).not.toContain("ready for Chris");
   });
 
   it("marks only failed retryable duplicate-dispatch ready rows retry-safe and clears the status blocker", async () => {
@@ -4421,6 +4437,30 @@ describe("release-proof-readiness route", () => {
       failure_kind: "scheduler_wedged",
       failure_detail: "stale in_flight claim",
     });
+    const staleDuplicate = await seedReady(adapter, {
+      title: "Kapelle stale duplicate blocker",
+      track: "kapelle",
+      write_scope: ["repo/kapelle-release-proof-stale"],
+      source_refs: ["manager:/orchestration/backlog/stale-duplicates"],
+    });
+    await markReadyAlreadyDispatched(adapter, staleDuplicate.item_id, "phid:disp-kapelle-stale");
+    await seedDispatch(adapter, {
+      dispatch_phid: "phid:disp-kapelle-stale",
+      status: "done",
+    });
+    const nonRetryableDuplicate = await seedReady(adapter, {
+      title: "Kapelle non retryable duplicate blocker",
+      track: "kapelle",
+      write_scope: ["repo/kapelle-release-proof-nonretry"],
+      source_refs: ["manager:/orchestration/backlog/duplicate-retry-blocker"],
+    });
+    await markReadyAlreadyDispatched(adapter, nonRetryableDuplicate.item_id, "phid:disp-kapelle-nonretry");
+    await seedDispatch(adapter, {
+      dispatch_phid: "phid:disp-kapelle-nonretry",
+      status: "failed",
+      failure_kind: "unsafe_side_effect",
+      failure_detail: "repository state ambiguous",
+    });
     await recordTickOutcome(adapter, "default", { zero_ticks: 3, fired: false });
 
     const { app, daemon } = mountStatusApp(adapter, {
@@ -4463,11 +4503,14 @@ describe("release-proof-readiness route", () => {
       },
     });
     const warning = res.body.infra_warnings.items[0] ?? "";
-    expect(warning).toContain("top blocker duplicate_dispatch_retry_required=1");
+    expect(warning).toContain("top blocker duplicate_dispatch_retry_required=3");
     expect(warning).toContain("source route /orchestration/status ready_admission.blocker_counts");
-    expect(warning).toContain(
-      "safe next action: mark the item retry-safe or create an explicit retry before readmitting it",
-    );
+    expect(warning).toContain("safe next action: review duplicate_dispatch_retry_required rows in /orchestration/status");
+    expect(warning).toContain("mark retry_safe only for retryable failed rows");
+    expect(warning).toContain("close stale duplicates");
+    expect(warning).toContain("keep non-retryable or live prior-dispatch rows held for operator review");
+    expect(warning).not.toContain("ready for Chris");
+    expect(warning).not.toContain("empty fuel");
     expect(warning).not.toContain("feedback evidence");
     expect(warning).not.toContain("source links");
     expect(res.body.stale_reasons).toEqual(["latest feedback evidence is older than 24h"]);

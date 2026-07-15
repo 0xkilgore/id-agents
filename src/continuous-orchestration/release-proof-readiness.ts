@@ -642,7 +642,7 @@ function formatOrchestrationLoopInfraWarning(health: Awaited<ReturnType<typeof r
     : "";
   const routeText = "; source route /orchestration/status ready_admission.blocker_counts";
   const topBlockerAction = topBlocker
-    ? health.ready_item_blockers.categories.find((category) => category.code === topBlocker.code)?.recommended_action
+    ? releaseProofSafeActionForTopBlocker(health, topBlocker.code)
     : null;
   const action = topBlockerAction?.trim() ||
     health.ready_item_blockers.recommended_action.trim() ||
@@ -651,6 +651,34 @@ function formatOrchestrationLoopInfraWarning(health: Awaited<ReturnType<typeof r
     `orchestration loop ${loop.severity}: ${loop.consecutive_zero_ticks} consecutive zero-admit ticks` +
     `${blockerText}; ${loop.explanation}${routeText}; safe next action: ${action}`
   );
+}
+
+function releaseProofSafeActionForTopBlocker(
+  health: Awaited<ReturnType<typeof readOrchestrationHealthProjection>>,
+  code: string,
+): string | null {
+  if (code !== "duplicate_dispatch_retry_required") {
+    return health.ready_item_blockers.categories.find((category) => category.code === code)?.recommended_action ?? null;
+  }
+
+  const details = health.ready_item_blockers.items.filter((item) => item.code === code);
+  const hasRetryable = details.some((item) => item.retry_readiness_status === "retryable_failed_row");
+  const hasStale = details.some((item) => item.retry_readiness_status === "stale_duplicate");
+  const hasHeld = details.some((item) =>
+    item.retry_readiness_status === "waiting_on_live_dispatch" ||
+    item.retry_readiness_status === "non_retryable_failed_row" ||
+    item.retry_readiness_status === "retry_cap_reached" ||
+    item.retry_readiness_status === null
+  );
+
+  const actions: string[] = [];
+  if (hasRetryable) actions.push("mark retry_safe only for retryable failed rows");
+  if (hasStale) actions.push("close stale duplicates");
+  if (hasHeld) actions.push("keep non-retryable or live prior-dispatch rows held for operator review");
+
+  return actions.length > 0
+    ? `review duplicate_dispatch_retry_required rows in /orchestration/status: ${actions.join("; ")}`
+    : "review duplicate_dispatch_retry_required rows in /orchestration/status before release proof sign-off";
 }
 
 function topCount(counts: Record<string, number>): { code: string; count: number } | null {
