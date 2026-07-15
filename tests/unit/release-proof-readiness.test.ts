@@ -176,7 +176,7 @@ describe("buildReleaseProofReadiness", () => {
     expect(view.missing_reasons).toEqual([
       "one or more generated artifacts are missing safe source links",
       "no source links are attached to the release proof",
-      "one or more feedback evidence items are missing safe source links",
+      "one or more feedback evidence items have null source_link",
     ]);
   });
 
@@ -217,7 +217,7 @@ describe("buildReleaseProofReadiness", () => {
     }));
 
     expect(view.release_readiness).toBe("not_ready");
-    expect(view.missing_reasons).toEqual(["one or more feedback evidence items are missing safe source links"]);
+    expect(view.missing_reasons).toEqual(["one or more feedback evidence items have redacted source_link"]);
     expect(view.sources.links).not.toEqual(
       expect.arrayContaining([expect.objectContaining({ href: "[redacted]" })]),
     );
@@ -294,7 +294,7 @@ describe("buildReleaseProofReadiness", () => {
     expect(view.stale_reasons).toEqual([]);
     expect(view.missing_reasons).toEqual(["one or more generated proof artifacts are not present"]);
     expect(view.summary).toBe("Release proof is not ready: one or more generated proof artifacts are not present.");
-    expect(view.summary).not.toContain("feedback evidence items are missing safe source links");
+    expect(view.summary).not.toContain("feedback evidence items have null source_link");
     expect(view.summary).not.toContain("infra warnings");
   });
 
@@ -330,8 +330,49 @@ describe("buildReleaseProofReadiness", () => {
     expect(view.sources.state).toBe("present");
     expect(view.generated_artifacts.state).toBe("present");
     expect(view.stale_reasons).toEqual(["latest feedback evidence is older than 24h"]);
-    expect(view.missing_reasons).toEqual(["one or more feedback evidence items are missing safe source links"]);
+    expect(view.missing_reasons).toEqual(["one or more feedback evidence items have null source_link"]);
     expect(view.summary).toContain("latest feedback evidence is older than 24h");
+  });
+
+  it("keeps stale all-null feedback not ready when artifacts are present and infra is clear", () => {
+    const view = buildReleaseProofReadiness(base({
+      feedback_evidence: [
+        {
+          id: "op:stale-null-source-a",
+          kind: "comment_recorded",
+          observed_at: "2026-07-12T10:00:00.000Z",
+          source_link: null,
+          artifact_id: "art-kapelle",
+          summary: "Old feedback without a durable source.",
+        },
+        {
+          id: "op:stale-null-source-b",
+          kind: "approve",
+          observed_at: "2026-07-12T09:30:00.000Z",
+          source_link: null,
+          artifact_id: "art-kapelle",
+          summary: "Old approval without a durable source.",
+        },
+      ],
+      infra_warnings: [],
+      stale_after_ms: 24 * 60 * 60 * 1000,
+    }));
+
+    expect(view.release_readiness).toBe("not_ready");
+    expect(view.chris_readable_release_ready).toBe("NOT READY");
+    expect(view.feedback_evidence).toMatchObject({
+      state: "stale",
+      count: 2,
+      latest_at: "2026-07-12T10:00:00.000Z",
+    });
+    expect(view.infra_warnings).toMatchObject({ state: "clear", count: 0, source: "none", action: null });
+    expect(view.generated_artifacts).toMatchObject({ state: "present", count: 1 });
+    expect(view.stale_reasons).toEqual(["latest feedback evidence is older than 24h"]);
+    expect(view.missing_reasons).toEqual(["one or more feedback evidence items have null source_link"]);
+    expect(view.missing_reasons).not.toContain("one or more generated proof artifacts are not present");
+    expect(view.summary).toBe("Release proof is not ready: latest feedback evidence is older than 24h.");
+    expect(view.summary).not.toContain("Release proof is ready for Chris");
+    expect(view.summary).not.toContain("infra warnings");
   });
 
   it("keeps stale and missing reasons separate when stale feedback has unsafe source evidence", () => {
@@ -389,7 +430,9 @@ describe("buildReleaseProofReadiness", () => {
     expect(view.missing_reasons).toEqual([
       "one or more source links are redacted or unsupported",
       "no source links are attached to the release proof",
-      "one or more feedback evidence items are missing safe source links",
+      "one or more feedback evidence items have null source_link",
+      "one or more feedback evidence items have redacted source_link",
+      "one or more feedback evidence items have unsupported source links",
     ]);
     expect(view.summary).toBe("Release proof is not ready: latest feedback evidence is older than 24h.");
   });
@@ -705,7 +748,7 @@ describe("buildReleaseProofReadiness", () => {
       ]);
       expect(view.missing_reasons).toEqual([
         "one or more generated proof artifacts are not present",
-        "one or more feedback evidence items are missing safe source links",
+        "one or more feedback evidence items have null source_link",
       ]);
       expect(view.sources.links).not.toEqual(
         expect.arrayContaining([
@@ -870,7 +913,7 @@ describe("buildReleaseProofReadiness", () => {
       ],
     });
     expect(view.stale_reasons).toEqual(["latest feedback evidence is older than 24h"]);
-    expect(view.missing_reasons).toEqual(["one or more feedback evidence items are missing safe source links"]);
+    expect(view.missing_reasons).toEqual(["one or more feedback evidence items have null source_link"]);
     expect(view.summary).toBe("Release proof is not ready: infra warnings require operator review.");
   });
 
@@ -990,7 +1033,7 @@ describe("buildReleaseProofReadiness", () => {
     expect(view.stale_reasons).toEqual(["latest feedback evidence is older than 24h"]);
     expect(view.missing_reasons).toEqual([
       "no source links are attached to the release proof",
-      "one or more feedback evidence items are missing safe source links",
+      "one or more feedback evidence items have null source_link",
     ]);
     expect(view.summary).toBe("Release proof is not ready: latest feedback evidence is older than 24h.");
   });

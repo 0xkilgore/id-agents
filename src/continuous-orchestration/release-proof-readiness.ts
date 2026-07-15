@@ -197,8 +197,23 @@ export function buildReleaseProofReadiness(
   }
 
   const feedbackMissingSources = input.feedback_evidence.filter((item) => !isSafeSourceHref(item.source_link));
-  if (feedbackMissingSources.length > 0) {
-    missingReasons.push("one or more feedback evidence items are missing safe source links");
+  const feedbackNullSources = feedbackMissingSources.filter((item) => !item.source_link?.trim());
+  const feedbackRedactedSources = feedbackMissingSources.filter((item) => {
+    const source = item.source_link?.trim();
+    return source ? isRedactedSource(source) : false;
+  });
+  const feedbackUnsupportedSources = feedbackMissingSources.filter((item) => {
+    const source = item.source_link?.trim();
+    return source ? !isRedactedSource(source) : false;
+  });
+  if (feedbackNullSources.length > 0) {
+    missingReasons.push("one or more feedback evidence items have null source_link");
+  }
+  if (feedbackRedactedSources.length > 0) {
+    missingReasons.push("one or more feedback evidence items have redacted source_link");
+  }
+  if (feedbackUnsupportedSources.length > 0) {
+    missingReasons.push("one or more feedback evidence items have unsupported source links");
   }
 
   const infraState: InfraWarningState = input.load_error
@@ -730,7 +745,7 @@ function deriveNextOwner(input: {
     candidates.push({
       lane: "release-engineering",
       reason: "source_link_state",
-      action: input.missingReasons.find((reason) => reason.includes("source link")) ??
+      action: input.missingReasons.find((reason) => reason.includes("source link") || reason.includes("source_link")) ??
         "attach safe source links to release-proof evidence",
     });
   }
