@@ -7,7 +7,7 @@ import { defaultGitDeps, type GitDeps } from "./promote-to-main.js";
 export type PromotionRescueDecision =
   | "promote"
   | "clean_clone_cherry_pick_owned_commits_rerun_smoke_promote"
-  | "route_to_agent_needs_input";
+  | "route_to_worktree_hygiene_follow_up_promotion";
 
 export interface PromotionRescueCase {
   repo: string;
@@ -36,6 +36,10 @@ export interface PromotionRescueAdmission {
   base_tip: string | null;
   dirty: boolean;
   dirty_paths: string[];
+  recovery_group: string;
+  recommended_owner: string;
+  smoke_command: string | null;
+  warning: string | null;
   proposed_follow_up: string;
   force_push: false;
   needs_input: boolean;
@@ -123,13 +127,20 @@ async function inspectCase(c: PromotionRescueCase, deps: GitDeps): Promise<Promo
   const statusCwd = worktree ?? c.repo;
   const dirtyPaths = worktree ? await dirtyPathsFor(statusCwd, deps) : [];
 
-  await deps.git(["fetch", c.remote, c.base, c.branch], c.repo);
+  const fetchOut = await deps.git(["fetch", c.remote, c.base, c.branch], c.repo);
+  if (fetchOut.code !== 0 && /no such remote|does not appear to be a git repository|could not read from remote/i.test(`${fetchOut.stderr}\n${fetchOut.stdout}`)) {
+    return {
+      ...routeToHygiene(c, `remote ${c.remote} is not available; cannot verify promotion ancestry`, worktree),
+      dirty: dirtyPaths.length > 0,
+      dirty_paths: dirtyPaths,
+    };
+  }
   const remoteBase = `${c.remote}/${c.base}`;
   const branchTipOut = await deps.git(["rev-parse", "--verify", `${c.branch}^{commit}`], c.repo);
   const baseTipOut = await deps.git(["rev-parse", "--verify", `${remoteBase}^{commit}`], c.repo);
   if (branchTipOut.code !== 0 || baseTipOut.code !== 0) {
     return {
-      ...route(c, "cannot resolve branch or remote base", worktree),
+      ...routeToHygiene(c, "cannot resolve branch or remote base", worktree),
       dirty: dirtyPaths.length > 0,
       dirty_paths: dirtyPaths,
     };
@@ -155,15 +166,20 @@ async function inspectCase(c: PromotionRescueCase, deps: GitDeps): Promise<Promo
     base_tip: baseTip,
     dirty,
     dirty_paths: dirtyPaths,
+    recovery_group: recoveryGroup(c.repo, c.branch),
+    recommended_owner: "worktree-hygiene",
+    smoke_command: null,
+    warning: null,
     force_push: false as const,
   };
 
   if (ahead > 0 && behind > 0) {
     return {
       ...common,
-      decision: "route_to_agent_needs_input",
-      proposed_follow_up: "POST /agent-needs-input with ahead/behind evidence; do not promote or force-push",
-      needs_input: true,
+      decision: "route_to_worktree_hygiene_follow_up_promotion",
+      proposed_follow_up: "group by repo/branch in Worktree Hygiene; create a clean branch from remote base, cherry-pick only owned commits, fill smoke_command, then promote the clean branch",
+      warning: "do not merge as-is: ahead+behind Spec 054 failure requires fresh-branch recovery before promotion",
+      needs_input: false,
       reason: `branch diverged from ${remoteBase} (ahead=${ahead}, behind=${behind})`,
     };
   }
@@ -172,6 +188,7 @@ async function inspectCase(c: PromotionRescueCase, deps: GitDeps): Promise<Promo
       ...common,
       decision: "clean_clone_cherry_pick_owned_commits_rerun_smoke_promote",
       proposed_follow_up: "create clean clone from remote base, cherry-pick only owned commits, rerun smoke, then promote from the clean non-diverged branch",
+      recommended_owner: "follow-up-promotion",
       needs_input: false,
       reason: `worktree has ${dirtyPaths.length} dirty path(s); direct promotion from this checkout is not admitted`,
     };
@@ -181,6 +198,7 @@ async function inspectCase(c: PromotionRescueCase, deps: GitDeps): Promise<Promo
       ...common,
       decision: "promote",
       proposed_follow_up: "rerun smoke, then id-agents promote-to-main from this clean non-diverged branch",
+      recommended_owner: "follow-up-promotion",
       needs_input: false,
       reason: `branch is clean and ${ahead} commit(s) ahead of ${remoteBase}`,
     };
@@ -189,6 +207,7 @@ async function inspectCase(c: PromotionRescueCase, deps: GitDeps): Promise<Promo
     ...common,
     decision: "promote",
     proposed_follow_up: "no-op or remote-tip verification; branch is not ahead of base",
+    recommended_owner: "follow-up-promotion",
     needs_input: false,
     reason: `branch has no commits ahead of ${remoteBase}`,
   };
@@ -227,25 +246,33 @@ async function dirtyPathsFor(worktree: string, deps: GitDeps): Promise<string[]>
   return status.stdout.split("\n").filter((l) => l.trim()).map((l) => l.slice(3));
 }
 
-function route(c: PromotionRescueCase, reason: string, worktree?: string | null): PromotionRescueAdmission {
+function routeToHygiene(c: PromotionRescueCase, reason: string, worktree?: string | null): PromotionRescueAdmission {
   return {
     repo: c.repo,
     worktree: worktree ?? c.repo,
     branch: c.branch,
     base: c.base,
     remote: c.remote,
-    decision: "route_to_agent_needs_input",
+    decision: "route_to_worktree_hygiene_follow_up_promotion",
     ahead: null,
     behind: null,
     branch_tip: null,
     base_tip: null,
     dirty: false,
     dirty_paths: [],
-    proposed_follow_up: "POST /agent-needs-input with the inspection failure; do not promote or force-push",
+    recovery_group: recoveryGroup(c.repo, c.branch),
+    recommended_owner: "worktree-hygiene",
+    smoke_command: null,
+    warning: "do not merge as-is: promotion ancestry is unverified and needs hygiene/follow-up promotion recovery",
+    proposed_follow_up: "group by repo/branch in Worktree Hygiene; restore remote ancestry evidence, fill smoke_command, then promote from a verified clean branch",
     force_push: false,
-    needs_input: true,
+    needs_input: false,
     reason,
   };
+}
+
+function recoveryGroup(repo: string, branch: string): string {
+  return `${repo.replace(/\/+$/g, "")}:${branch}`;
 }
 
 function formatAdmissions(results: PromotionRescueAdmission[]): string {
@@ -256,6 +283,10 @@ function formatAdmissions(results: PromotionRescueAdmission[]): string {
     `  decision: ${r.decision}`,
     `  ahead/behind: ${r.ahead ?? "unknown"}/${r.behind ?? "unknown"}`,
     `  dirty: ${r.dirty ? `yes (${r.dirty_paths.length})` : "no"}`,
+    `  recovery_group: ${r.recovery_group}`,
+    `  recommended_owner: ${r.recommended_owner}`,
+    `  smoke_command: ${r.smoke_command ?? "<fill before follow-up promotion>"}`,
+    ...(r.warning ? [`  warning: ${r.warning}`] : []),
     `  proposed_follow_up: ${r.proposed_follow_up}`,
     `  force_push: false`,
     `  reason: ${r.reason}`,
@@ -281,7 +312,7 @@ Options:
   --json                  Emit machine-readable JSON
   -h, --help              Show this help
 
-Read-only. Emits ahead/behind, dirty state, a deterministic follow-up, and force_push=false.`;
+Read-only. Emits ahead/behind, dirty state, recommended owner, smoke command slot, a deterministic follow-up, and force_push=false.`;
 
 export async function maybeRunPromotionRescueAdmitCli(argv: string[]): Promise<number | null> {
   if (argv[0] !== "promotion-rescue-admit") return null;

@@ -43,6 +43,14 @@ function gitCase(repo: string, branch: string, opts: { dirty?: string; ahead: nu
   ];
 }
 
+function noOriginCase(repo: string, branch: string): FakeCommand[] {
+  return [
+    { match: (a, cwd) => cwd === repo && a[0] === "worktree", out: `worktree ${repo}\nHEAD ${branch}-tip\nbranch refs/heads/${branch}\n` },
+    { match: (a, cwd) => cwd === repo && a[0] === "status", out: "" },
+    { match: (a, cwd) => cwd === repo && a[0] === "fetch" && a.includes(branch), err: "fatal: 'origin' does not appear to be a git repository\n", code: 128 },
+  ];
+}
+
 const args: PromotionRescueArgs = {
   base: "main",
   remote: "origin",
@@ -74,11 +82,15 @@ describe("promotion-rescue-admit", () => {
       "kg03-visible-project-files-saved-filters",
     ]);
     expect(r.results[0]).toMatchObject({
-      decision: "route_to_agent_needs_input",
+      decision: "route_to_worktree_hygiene_follow_up_promotion",
       ahead: 2,
       behind: 6,
-      needs_input: true,
+      needs_input: false,
       force_push: false,
+      recovery_group: "/repo/id-agents:kg04-task-comment-routing-created-at",
+      recommended_owner: "worktree-hygiene",
+      smoke_command: null,
+      warning: expect.stringContaining("do not merge as-is"),
     });
     expect(r.results[1]).toMatchObject({
       decision: "clean_clone_cherry_pick_owned_commits_rerun_smoke_promote",
@@ -92,6 +104,96 @@ describe("promotion-rescue-admit", () => {
     });
     expect(JSON.parse(writes.join("")).results).toHaveLength(3);
     expect(deps.calls.some((c) => c.includes("push"))).toBe(false);
+  });
+
+  it("groups repeated Spec 054 divergence by repo/branch and routes to hygiene instead of Chris", async () => {
+    const groupedArgs: PromotionRescueArgs = {
+      base: "main",
+      remote: "origin",
+      json: true,
+      cases: [
+        { repo: "/repo/app", branch: "feature/diverged-a", base: "main", remote: "origin" },
+        { repo: "/repo/app", branch: "feature/diverged-b", base: "main", remote: "origin" },
+        { repo: "/repo/no-origin", branch: "feature/no-origin", base: "main", remote: "origin" },
+      ],
+    };
+    const deps = fakeGitDeps([
+      ...gitCase("/repo/app", "feature/diverged-a", { ahead: 1, behind: 2 }),
+      ...gitCase("/repo/app", "feature/diverged-b", { ahead: 3, behind: 4 }),
+      ...noOriginCase("/repo/no-origin", "feature/no-origin"),
+    ]);
+    const writes: string[] = [];
+
+    const r = await runPromotionRescueAdmit(groupedArgs, deps, {
+      stdout: (s) => writes.push(s),
+      stderr: () => undefined,
+    });
+
+    expect(r.exit).toBe(0);
+    expect(r.results).toEqual([
+      expect.objectContaining({
+        repo: "/repo/app",
+        branch: "feature/diverged-a",
+        decision: "route_to_worktree_hygiene_follow_up_promotion",
+        recovery_group: "/repo/app:feature/diverged-a",
+        recommended_owner: "worktree-hygiene",
+        smoke_command: null,
+        warning: expect.stringContaining("do not merge as-is"),
+        needs_input: false,
+      }),
+      expect.objectContaining({
+        repo: "/repo/app",
+        branch: "feature/diverged-b",
+        decision: "route_to_worktree_hygiene_follow_up_promotion",
+        recovery_group: "/repo/app:feature/diverged-b",
+        recommended_owner: "worktree-hygiene",
+        smoke_command: null,
+        warning: expect.stringContaining("do not merge as-is"),
+        needs_input: false,
+      }),
+      expect.objectContaining({
+        repo: "/repo/no-origin",
+        branch: "feature/no-origin",
+        decision: "route_to_worktree_hygiene_follow_up_promotion",
+        recovery_group: "/repo/no-origin:feature/no-origin",
+        recommended_owner: "worktree-hygiene",
+        smoke_command: null,
+        warning: expect.stringContaining("do not merge as-is"),
+        needs_input: false,
+      }),
+    ]);
+
+    const output = JSON.parse(writes.join(""));
+    expect(output.results.map((x: { recovery_group: string }) => x.recovery_group)).toEqual([
+      "/repo/app:feature/diverged-a",
+      "/repo/app:feature/diverged-b",
+      "/repo/no-origin:feature/no-origin",
+    ]);
+    expect(output.results.map((x: { recommended_owner: string }) => x.recommended_owner)).toEqual([
+      "worktree-hygiene",
+      "worktree-hygiene",
+      "worktree-hygiene",
+    ]);
+  });
+
+  it("prints owner, smoke command slot, and do-not-merge-as-is warning in text output", async () => {
+    const deps = fakeGitDeps([
+      ...gitCase("/repo/app", "feature/diverged", { ahead: 1, behind: 2 }),
+    ]);
+    const writes: string[] = [];
+    await runPromotionRescueAdmit({
+      base: "main",
+      remote: "origin",
+      json: false,
+      cases: [{ repo: "/repo/app", branch: "feature/diverged", base: "main", remote: "origin" }],
+    }, deps, {
+      stdout: (s) => writes.push(s),
+      stderr: () => undefined,
+    });
+
+    expect(writes.join("")).toContain("recommended_owner: worktree-hygiene");
+    expect(writes.join("")).toContain("smoke_command: <fill before follow-up promotion>");
+    expect(writes.join("")).toContain("warning: do not merge as-is");
   });
 
   it("parses repeated --case inputs", () => {
@@ -123,5 +225,6 @@ describe("promotion-rescue-admit", () => {
     }
     expect(writes.join("")).toContain("promotion-rescue-admit");
     expect(writes.join("")).toContain("force_push=false");
+    expect(writes.join("")).toContain("recommended owner");
   });
 });
