@@ -325,10 +325,19 @@ export function planAdmission(
         continue;
       }
       const builders = poolBuilders.get(poolId) ?? [];
-      assignedBuilder = builders.shift() ?? null;
+      const builderIndex = ctx.healthy_agents
+        ? builders.findIndex((builder) => ctx.healthy_agents?.has(builder))
+        : builders.length > 0
+          ? 0
+          : -1;
+      assignedBuilder = builderIndex >= 0 ? builders.splice(builderIndex, 1)[0] : null;
       if (!assignedBuilder) {
-        skipped.push(nonAdmission(item.item_id, "held", "no_free_pool_builder", `no free builder in pool: ${poolId}`, {
+        const reason = ctx.healthy_agents && builders.length > 0
+          ? `no healthy free builder in pool: ${poolId}`
+          : `no free builder in pool: ${poolId}`;
+        skipped.push(nonAdmission(item.item_id, "held", "no_free_pool_builder", reason, {
           pool_id: poolId,
+          ...(ctx.healthy_agents ? { candidate_builders: builders } : {}),
           lane_blockers: ctx.pool_lane_blockers?.get(poolId) ?? [],
         }));
         continue;

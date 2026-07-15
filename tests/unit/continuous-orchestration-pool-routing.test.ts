@@ -128,6 +128,21 @@ describe("continuous orchestration pool routing", () => {
     expect(pool?.members).toContain("regina");
   });
 
+  it("routes the legacy pool:builder sentinel to the backend builder pool", () => {
+    const pools = buildPoolRouting({});
+    const pool = pools.poolForItem(
+      item({
+        to_agent: "pool:builder",
+        title: "Wave78 P0: Repair target-unhealthy runtime map",
+        dispatch_body: "[project: kapelle][T-ORCH][BUILD] repair builder-pool runtime health",
+        write_scope: ["/Users/kilgore/Dropbox/Code/cane/id-agents"],
+      }),
+    );
+
+    expect(pool?.pool_id).toBe("backend");
+    expect(pool?.members).toEqual(["roger", "substrate-orch-codex", "substrate-api-codex"]);
+  });
+
   it("routes explicit pool:backend work across roger/substrate lanes with isolated worktrees", async () => {
     const pools = buildPoolRouting({});
     const backendItems = [
@@ -217,12 +232,12 @@ describe("continuous orchestration pool routing", () => {
       item_id: "backend_blocked_substrate",
       action: "held",
       metadata: {
-        code: "target_unhealthy",
+        code: "no_free_pool_builder",
         class: "agent_availability",
-        target: "substrate-orch-codex",
+        candidate_builders: ["substrate-orch-codex"],
       },
     });
-    expect(plan.skipped[0].reason).toContain("substrate-orch-codex");
+    expect(plan.skipped[0].reason).toContain("no healthy free builder in pool: backend");
   });
 
   it("smokes pool:frontend saturation: active captains are skipped, worktrees are isolated, blockers are explicit", async () => {
@@ -281,7 +296,7 @@ describe("continuous orchestration pool routing", () => {
         daily_tokens_used: 0,
         in_flight: 0,
         active_write_scopes: new Set(),
-        done_item_ids: new Set(),
+        dependency_index: new Map(),
         admit_limit: 1,
         pool_for: () => "frontend",
         pool_free_slots: new Map([["frontend", 0]]),
@@ -303,7 +318,7 @@ describe("continuous orchestration pool routing", () => {
         daily_tokens_used: 0,
         in_flight: 0,
         active_write_scopes: new Set(),
-        done_item_ids: new Set(),
+        dependency_index: new Map(),
         admit_limit: 1,
         pool_for: () => "frontend",
         pool_free_slots: new Map([["frontend", 1]]),
