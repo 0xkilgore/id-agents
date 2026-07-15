@@ -8,6 +8,7 @@ import {
   projectNowSurface,
   projectProjectsSurface,
   projectReportsSurface,
+  projectSystemSurface,
 } from "./artifact-surfaces.js";
 
 function teamIdParam(req: Request): string {
@@ -35,4 +36,5 @@ export function mountArtifactSurfaceRoutes(app: Application, adapter: DbAdapter)
   route("/doc-model/surfaces/activity", projectActivitySurface);
   route("/doc-model/surfaces/projects", projectProjectsSurface);
   route("/doc-model/surfaces/reports", projectReportsSurface);
+  route("/doc-model/surfaces/system", projectSystemSurface);
 }

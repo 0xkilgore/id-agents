@@ -7,11 +7,17 @@ import { describe, it, expect, beforeEach } from "vitest";
 import { SqliteAdapter } from "../../src/db/sqlite-adapter.js";
 import { migrateSqlite } from "../../src/db/migrations/sqlite.js";
 import {
+  admitsNowSurface,
+  admitsReportsSurface,
+  admitsSystemSurface,
+} from "../../src/doc-model/artifact-surfaces.js";
+import {
   authorArtifactDocument,
   appendArtifactComment,
   appendArtifactReceipt,
 } from "../../src/doc-model/artifact-document.js";
 import { mountArtifactSurfaceRoutes } from "../../src/doc-model/artifact-surface-routes.js";
+import type { EntryStampKind } from "../../src/outputs/entry.js";
 
 async function freshDb() {
   const adapter = new SqliteAdapter(":memory:");
@@ -54,7 +60,7 @@ async function author(overrides: {
   documentId: string;
   title: string;
   audience: "operator" | "system";
-  kind: "action-needed" | "report" | "document" | "receipt";
+  kind: EntryStampKind;
   project?: string | null;
   now?: string;
 }) {
@@ -89,6 +95,29 @@ describe("doc-model artifact surfaces — Now", () => {
     expect(res.status).toBe(200);
     expect(res.body.items.map((e: any) => e.phid)).toEqual(["doc:open"]);
     expect(res.body.items[0].stamp).toEqual({ audience: "operator", kind: "action-needed" });
+  });
+
+  it("admits operator direction briefs without title/path heuristics", async () => {
+    await author({
+      documentId: "doc:direction",
+      title: "Neutral title",
+      audience: "operator",
+      kind: "direction-brief",
+      now: "2026-07-14T08:00:00.000Z",
+    });
+    await author({
+      documentId: "doc:system-direction",
+      title: "Operator-sounding action",
+      audience: "system",
+      kind: "direction-brief",
+      now: "2026-07-14T09:00:00.000Z",
+    });
+
+    const app = mountApp(adapter);
+    const res = await callAppRequest(app, "/doc-model/surfaces/now");
+
+    expect(res.status).toBe(200);
+    expect(res.body.items.map((e: any) => e.phid)).toEqual(["doc:direction"]);
   });
 });
 
@@ -185,5 +214,77 @@ describe("doc-model artifact surfaces — Reports", () => {
 
     expect(res.status).toBe(200);
     expect(res.body.items.map((e: any) => e.phid)).toEqual(["doc:report-new", "doc:report-old"]);
+  });
+
+  it("admits operator closeout and QA evidence artifacts without title/path heuristics", async () => {
+    await author({
+      documentId: "doc:closeout",
+      title: "Neutral completion",
+      audience: "operator",
+      kind: "closeout",
+      now: "2026-07-14T10:00:00.000Z",
+    });
+    await author({
+      documentId: "doc:qa",
+      title: "Verification packet",
+      audience: "operator",
+      kind: "qa-evidence",
+      now: "2026-07-14T11:00:00.000Z",
+    });
+    await author({
+      documentId: "doc:system-closeout",
+      title: "Closeout",
+      audience: "system",
+      kind: "closeout",
+      now: "2026-07-14T12:00:00.000Z",
+    });
+
+    const app = mountApp(adapter);
+    const res = await callAppRequest(app, "/doc-model/surfaces/reports");
+
+    expect(res.status).toBe(200);
+    expect(res.body.items.map((e: any) => e.phid)).toEqual(["doc:qa", "doc:closeout"]);
+  });
+});
+
+describe("doc-model artifact surfaces — System", () => {
+  it("routes system diagnostics to System and keeps them out of operator-first surfaces", async () => {
+    await author({
+      documentId: "doc:diagnostics",
+      title: "Diagnostics",
+      audience: "system",
+      kind: "diagnostics",
+      now: "2026-07-14T12:00:00.000Z",
+    });
+    await author({
+      documentId: "doc:operator-report",
+      title: "Operator report",
+      audience: "operator",
+      kind: "report",
+      now: "2026-07-14T13:00:00.000Z",
+    });
+
+    const app = mountApp(adapter);
+    const [system, now, reports] = await Promise.all([
+      callAppRequest(app, "/doc-model/surfaces/system"),
+      callAppRequest(app, "/doc-model/surfaces/now"),
+      callAppRequest(app, "/doc-model/surfaces/reports"),
+    ]);
+
+    expect(system.status).toBe(200);
+    expect(system.body.items.map((e: any) => e.phid)).toEqual(["doc:diagnostics"]);
+    expect(now.body.items.map((e: any) => e.phid)).toEqual([]);
+    expect(reports.body.items.map((e: any) => e.phid)).toEqual(["doc:operator-report"]);
+  });
+});
+
+describe("doc-model artifact surface admission predicates", () => {
+  it("rejects missing audience/kind stamps from operator-first and System surfaces", () => {
+    expect(admitsNowSurface(null)).toBe(false);
+    expect(admitsReportsSurface(null)).toBe(false);
+    expect(admitsSystemSurface(null)).toBe(false);
+    expect(admitsNowSurface({ audience: "operator" } as any)).toBe(false);
+    expect(admitsReportsSurface({ kind: "closeout" } as any)).toBe(false);
+    expect(admitsSystemSurface({ audience: "system", kind: "" } as any)).toBe(false);
   });
 });

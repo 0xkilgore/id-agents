@@ -84,7 +84,15 @@ export interface ArtifactProvenance extends EntryProvenance {
  * substrate rows (doc-model/artifact-document.ts) always carry one.
  */
 export type EntryStampAudience = "operator" | "system";
-export type EntryStampKind = "action-needed" | "report" | "document" | "receipt";
+export type EntryStampKind =
+  | "action-needed"
+  | "report"
+  | "document"
+  | "receipt"
+  | "direction-brief"
+  | "closeout"
+  | "diagnostics"
+  | "qa-evidence";
 export interface EntryStamp {
   audience: EntryStampAudience;
   kind: EntryStampKind;

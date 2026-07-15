@@ -6,14 +6,15 @@
 // coded against that shape does not change when a surface's source flips
 // from a static JSON snapshot to these live routes.
 //
-// Now       — audience:operator + kind:action-needed, still open (no receipt yet).
+// Now       — audience:operator + action-oriented kind, still open (no receipt yet).
 // Inbox     — documents whose latest op is an incoming comment awaiting disposition.
 // Activity  — receipt ops across all documents, reverse-chron.
 // Projects  — documents grouped by project, file-system-like listing.
-// Reports   — audience:operator + kind:report, reverse-chron.
+// Reports   — audience:operator + report/evidence kind, reverse-chron.
+// System    — audience:system, reverse-chron.
 
 import type { DbAdapter } from "../db/db-adapter.js";
-import type { ArtifactEntry, ReadModelEnvelope } from "../outputs/entry.js";
+import type { ArtifactEntry, EntryStamp, ReadModelEnvelope } from "../outputs/entry.js";
 import {
   artifactDocumentToEntry,
   listArtifactDocumentIds,
@@ -34,6 +35,25 @@ function envelope<T>(items: T[], projection: string): ReadModelEnvelope<T> {
   };
 }
 
+export function admitsNowSurface(stamp: EntryStamp | null | undefined): boolean {
+  return stamp?.audience === "operator" && (
+    stamp.kind === "action-needed" ||
+    stamp.kind === "direction-brief"
+  );
+}
+
+export function admitsReportsSurface(stamp: EntryStamp | null | undefined): boolean {
+  return stamp?.audience === "operator" && (
+    stamp.kind === "report" ||
+    stamp.kind === "closeout" ||
+    stamp.kind === "qa-evidence"
+  );
+}
+
+export function admitsSystemSurface(stamp: EntryStamp | null | undefined): boolean {
+  return stamp?.audience === "system" && typeof stamp.kind === "string" && stamp.kind.length > 0;
+}
+
 async function projectAll(adapter: DbAdapter, documentIds: string[]): Promise<ArtifactEntry[]> {
   const entries: ArtifactEntry[] = [];
   for (const documentId of documentIds) {
@@ -43,20 +63,21 @@ async function projectAll(adapter: DbAdapter, documentIds: string[]): Promise<Ar
   return entries;
 }
 
-/** Now — action-needed items for the operator that have not been receipted yet. */
+/** Now — action-oriented items for the operator that have not been receipted yet. */
 export async function projectNowSurface(
   adapter: DbAdapter,
   teamId: string,
 ): Promise<ReadModelEnvelope<ArtifactEntry>> {
   const documentIds = await listArtifactDocumentIds(adapter, teamId, {
     audience: "operator",
-    kind: "action-needed",
     order: "asc",
   });
   const open: ArtifactEntry[] = [];
   for (const documentId of documentIds) {
     const projection = await projectArtifactDocument(adapter, documentId);
-    if (projection && projection.receipts.length === 0) open.push(artifactDocumentToEntry(projection));
+    if (projection && admitsNowSurface(projection.stamp) && projection.receipts.length === 0) {
+      open.push(artifactDocumentToEntry(projection));
+    }
   }
   return envelope(open, "doc_model_now");
 }
@@ -161,16 +182,28 @@ export async function projectProjectsSurface(
   return envelope(items, "doc_model_projects");
 }
 
-/** Reports — audience:operator + kind:report, reverse-chron by updated_at. */
+/** Reports — operator report/evidence artifacts, reverse-chron by updated_at. */
 export async function projectReportsSurface(
   adapter: DbAdapter,
   teamId: string,
 ): Promise<ReadModelEnvelope<ArtifactEntry>> {
   const documentIds = await listArtifactDocumentIds(adapter, teamId, {
     audience: "operator",
-    kind: "report",
     order: "desc",
   });
-  const items = await projectAll(adapter, documentIds);
+  const items = (await projectAll(adapter, documentIds)).filter((entry) => admitsReportsSurface(entry.stamp));
   return envelope(items, "doc_model_reports");
+}
+
+/** System — system-facing artifacts, reverse-chron by updated_at. */
+export async function projectSystemSurface(
+  adapter: DbAdapter,
+  teamId: string,
+): Promise<ReadModelEnvelope<ArtifactEntry>> {
+  const documentIds = await listArtifactDocumentIds(adapter, teamId, {
+    audience: "system",
+    order: "desc",
+  });
+  const items = (await projectAll(adapter, documentIds)).filter((entry) => admitsSystemSurface(entry.stamp));
+  return envelope(items, "doc_model_system");
 }
