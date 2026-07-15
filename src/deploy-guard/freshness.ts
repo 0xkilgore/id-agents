@@ -48,6 +48,28 @@ export interface FreshnessEvalResult {
   alert: FreshnessAlert | null;
 }
 
+export const DEPLOY_FRESHNESS_TASK_NAME = "deploy-manager-to-origin-main";
+
+export interface DeployFreshnessIncidentInput extends FreshnessInput {
+  behind_origin_since: string | null;
+}
+
+export interface DeployFreshnessExistingIncident {
+  name: string;
+  status: "todo" | "doing" | "done";
+  description: string | null;
+}
+
+export interface DeployFreshnessIncidentOpener {
+  action: "none" | "create" | "update";
+  task_name: string;
+  title: string;
+  description: string;
+  incident_key: string;
+  target_sha: string;
+  running_sha: string | null;
+}
+
 /**
  * Advance the freshness tracker by one observation.
  *
@@ -119,6 +141,40 @@ function buildIncidentKey(input: FreshnessInput): string {
   return `build_behind_origin:${input.build_sha ?? "unknown"}:${input.origin_main_sha ?? "unknown"}`;
 }
 
+export function buildDeployFreshnessIncidentOpener(
+  input: DeployFreshnessIncidentInput,
+  existing: DeployFreshnessExistingIncident | null = null,
+): DeployFreshnessIncidentOpener {
+  if (input.behind_origin !== true || !input.origin_main_sha) {
+    return {
+      action: "none",
+      task_name: DEPLOY_FRESHNESS_TASK_NAME,
+      title: "",
+      description: "",
+      incident_key: "",
+      target_sha: "",
+      running_sha: input.build_sha ?? null,
+    };
+  }
+
+  const incidentKey = buildIncidentKey(input);
+  const description = formatDeployFreshnessRunbook(input, incidentKey);
+  const title = `Deploy manager to origin/main ${short(input.origin_main_sha)}`;
+  const existingCurrent = existing != null &&
+    existing.status !== "done" &&
+    existing.description?.includes(`incident_key: ${incidentKey}`) === true;
+
+  return {
+    action: existingCurrent ? "none" : existing ? "update" : "create",
+    task_name: DEPLOY_FRESHNESS_TASK_NAME,
+    title,
+    description,
+    incident_key: incidentKey,
+    target_sha: input.origin_main_sha,
+    running_sha: input.build_sha ?? null,
+  };
+}
+
 function formatBuildBehindOriginIncident(input: FreshnessInput, elapsedMs: number): string {
   const parts = [
     `BUILD_BEHIND_ORIGIN incident: running manager build is behind promoted main for ${Math.round(elapsedMs / 60000)} min.`,
@@ -133,4 +189,25 @@ function formatBuildBehindOriginIncident(input: FreshnessInput, elapsedMs: numbe
   );
   parts.push("Repeated ticks for the same running/promoted SHA pair are suppressed; this incident auto-closes when the clean deploy build catches up.");
   return parts.join(" ");
+}
+
+function formatDeployFreshnessRunbook(input: DeployFreshnessIncidentInput, incidentKey: string): string {
+  return [
+    `Deploy freshness incident.`,
+    `incident_key: ${incidentKey}`,
+    `running_sha: ${input.build_sha ?? "unknown"}`,
+    `target_sha: ${input.origin_main_sha ?? "unknown"}`,
+    `behind_origin_since: ${input.behind_origin_since ?? "unknown"}`,
+    input.source_branch_sha ? `source_branch_sha: ${input.source_branch_sha}` : null,
+    input.source_branch_name ? `source_branch: ${input.source_branch_name}` : null,
+    input.classification ? `classification: ${input.classification}` : null,
+    ``,
+    `Safe runbook:`,
+    `1. Confirm /health build.build_sha is still behind build.origin_main_sha.`,
+    `2. Use the clean deploy checkout for id-agents at origin/main; do not use a dirty primary worktree.`,
+    `3. Build and restart manager through the deploy runbook/watchdog only after preflight passes.`,
+    `4. Verify /health build.build_sha equals ${input.origin_main_sha} and freshness.state is fresh.`,
+    ``,
+    `Do not restart manager from the freshness monitor. This task is the bounded operator handoff for the current running/target SHA pair.`,
+  ].filter((line): line is string => line != null).join("\n");
 }

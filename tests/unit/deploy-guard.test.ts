@@ -5,6 +5,8 @@ import { tmpdir } from "node:os";
 import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import {
+  buildDeployFreshnessIncidentOpener,
+  DEPLOY_FRESHNESS_TASK_NAME,
   evaluateFreshness,
   INITIAL_FRESHNESS,
   DEFAULT_STALE_THRESHOLD_MS,
@@ -109,6 +111,54 @@ describe("freshness tracker (T-DEPLOY.1)", () => {
     const r = evaluateFreshness(INITIAL_FRESHNESS, { behind_origin: null, build_sha: null, origin_main_sha: null }, 0);
     expect(r.next).toEqual(INITIAL_FRESHNESS);
     expect(r.alert).toBeNull();
+  });
+});
+
+describe("deploy freshness task opener", () => {
+  it("fresh: does not create an incident task when the running build matches origin", () => {
+    const opener = buildDeployFreshnessIncidentOpener({
+      ...freshInput,
+      behind_origin_since: null,
+    });
+
+    expect(opener.action).toBe("none");
+    expect(opener.task_name).toBe(DEPLOY_FRESHNESS_TASK_NAME);
+  });
+
+  it("stale-new: creates one deploy/restart task with target SHA and safe runbook", () => {
+    const opener = buildDeployFreshnessIncidentOpener({
+      ...behindInput,
+      behind_origin_since: "2026-07-15T10:00:00.000Z",
+      classification: "server_stale_promoted_main_ahead",
+    });
+
+    expect(opener.action).toBe("create");
+    expect(opener.task_name).toBe(DEPLOY_FRESHNESS_TASK_NAME);
+    expect(opener.target_sha).toBe("bbbb2222");
+    expect(opener.description).toContain("target_sha: bbbb2222");
+    expect(opener.description).toContain("running_sha: aaaa1111");
+    expect(opener.description).toContain("Safe runbook:");
+    expect(opener.description).toContain("Do not restart manager from the freshness monitor");
+  });
+
+  it("stale-existing-incident: updates the bounded incident instead of opening another task", () => {
+    const opener = buildDeployFreshnessIncidentOpener(
+      {
+        ...behindInput,
+        origin_main_sha: "cccc3333",
+        behind_origin_since: "2026-07-15T10:00:00.000Z",
+      },
+      {
+        name: DEPLOY_FRESHNESS_TASK_NAME,
+        status: "todo",
+        description: "incident_key: build_behind_origin:aaaa1111:bbbb2222",
+      },
+    );
+
+    expect(opener.action).toBe("update");
+    expect(opener.task_name).toBe(DEPLOY_FRESHNESS_TASK_NAME);
+    expect(opener.description).toContain("incident_key: build_behind_origin:aaaa1111:cccc3333");
+    expect(opener.description).toContain("target_sha: cccc3333");
   });
 });
 
