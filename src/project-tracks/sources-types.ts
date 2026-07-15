@@ -1,3 +1,5 @@
+import type { LocalHealthVisual } from "../local-search/visual-state.js";
+
 export type ProjectSourceGroup =
   | "transcripts"
   | "images_screenshots_logos"
@@ -89,6 +91,11 @@ export interface ProjectSourcesEnvelope {
     aliases: string[];
   };
   saved_view: ProjectSourceSavedView;
+  metadata: {
+    source: "local_source_index";
+    local_visual_state: LocalHealthVisual;
+    source_index: ProjectSourceIndexHealth;
+  };
   filters: {
     type: ProjectSourceGroup | null;
     project: string;
@@ -104,4 +111,20 @@ export interface ProjectSourcesEnvelope {
   groups: Record<ProjectSourceGroup, number>;
   rows: ProjectSourceRow[];
   count: number;
+}
+
+export type ProjectSourceIndexState = "current" | "syncing" | "stale" | "event_gap" | "error";
+
+export interface ProjectSourceIndexHealth {
+  state: ProjectSourceIndexState;
+  scope: string;
+  last_event_seq: number;
+  last_synced_at: string | null;
+  event_gap: {
+    detected_at: string;
+    expected_seq: number;
+    earliest_available_seq: number | null;
+    observed_seq: number | null;
+  } | null;
+  error: string | null;
 }

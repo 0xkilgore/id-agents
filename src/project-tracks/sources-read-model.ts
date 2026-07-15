@@ -3,6 +3,7 @@ import { promises as fsp } from "node:fs";
 import path from "node:path";
 import type { DbAdapter } from "../db/db-adapter.js";
 import { artifactIdFromPath } from "../outputs/storage.js";
+import { localHealthVisualState } from "../local-search/visual-state.js";
 import { canonicalProjectName, projectAliases } from "./read-model.js";
 import type {
   ProjectRootRegistration,
@@ -202,6 +203,18 @@ export async function buildProjectSourcesEnvelope(
     generated_at: opts.generatedAt ?? new Date().toISOString(),
     project: { requested: opts.project, canonical, aliases },
     saved_view: PROJECT_SOURCES_SAVED_VIEW,
+    metadata: {
+      source: "local_source_index",
+      local_visual_state: localHealthVisualState("current", "source index"),
+      source_index: {
+        state: "current",
+        scope: canonical,
+        last_event_seq: 0,
+        last_synced_at: opts.generatedAt ?? new Date().toISOString(),
+        event_gap: null,
+        error: null,
+      },
+    },
     filters: {
       type: opts.type ?? null,
       project: canonical,
