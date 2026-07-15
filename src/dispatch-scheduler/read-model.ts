@@ -655,46 +655,97 @@ export async function readDispatchHealth(
   counts: Record<string, number>;
   active: number;
   terminal: number;
+  bounded: true;
+  bounds: {
+    count_per_status_limit: number;
+    in_flight_limit: number;
+    recent_verified_landings_limit: number;
+    stale_snapshot_limit: number;
+    truncated_statuses: string[];
+  };
+  snapshot: {
+    schema_version: 'dispatch-health.snapshot.v1';
+    in_flight: {
+      count: number;
+      oldest_started_at: string | null;
+      newest_updated_at: string | null;
+      items: Array<{
+        dispatch_id: string;
+        query_id: string | null;
+        agent: string;
+        status: string;
+        started_at: string | null;
+        updated_at: string;
+      }>;
+    };
+    recent_verified_landings: {
+      count: number;
+      newest_completed_at: string | null;
+      items: Array<{
+        dispatch_id: string;
+        query_id: string | null;
+        agent: string;
+        status: string;
+        completed_at: string | null;
+        updated_at: string;
+      }>;
+    };
+    stale_snapshots: {
+      needs_clarification: {
+        count: number;
+        oldest_stale_at: string | null;
+        newest_stale_at: string | null;
+        items: Array<{
+          dispatch_id: string;
+          query_id: string | null;
+          agent: string;
+          stale_at: string | null;
+          updated_at: string;
+        }>;
+      };
+    };
+  };
   needs_input: number;
   oldest_active_at: string | null;
   newest_terminal_at: string | null;
   generated_at: string;
   blockages: FleetBlockagesReport;
 }> {
-  const { rows: countsRows } = await adapter.query<{ status: string; count: number }>(
-    `SELECT status, COUNT(*) as count
-       FROM dispatch_scheduler_queue
-       WHERE team_id = ?
-       GROUP BY status`,
-    [teamId],
-  );
-  const counts = Object.fromEntries(countsRows.map((r) => [r.status, Number(r.count)]));
+  const countPerStatusLimit = 1000;
+  const inFlightLimit = 50;
+  const recentVerifiedLandingsLimit = 25;
+  const staleSnapshotLimit = 50;
+
+  const statusCounts = await readBoundedStatusCounts(adapter, teamId, ALL_STATUSES, countPerStatusLimit);
+  const counts = Object.fromEntries(statusCounts.map((r) => [r.status, r.count]));
+  const truncatedStatuses = statusCounts.filter((r) => r.truncated).map((r) => r.status);
   const active = ACTIVE_STATUSES.reduce((sum, s) => sum + Number(counts[s] ?? 0), 0);
   const terminal = TERMINAL_STATUSES.reduce((sum, s) => sum + Number(counts[s] ?? 0), 0);
 
-  const { rows: ageRows } = await adapter.query<{
-    oldest_active_at: string | null;
-    newest_terminal_at: string | null;
-  }>(
-    `SELECT
-        MIN(CASE WHEN status IN (${ACTIVE_STATUSES.map(() => '?').join(', ')})
-          THEN COALESCE(started_at, not_before_at, updated_at) END) AS oldest_active_at,
-        MAX(CASE WHEN status IN (${TERMINAL_STATUSES.map(() => '?').join(', ')})
-          THEN COALESCE(completed_at, updated_at) END) AS newest_terminal_at
-       FROM dispatch_scheduler_queue
-       WHERE team_id = ?`,
-    [...ACTIVE_STATUSES, ...TERMINAL_STATUSES, teamId],
-  );
-
-  const blockages = await readFleetBlockages(adapter, teamId, driftSummary, teamName);
-  const { rows: liveNeedsInputRows } = await adapter.query<{ count: number }>(
-    `SELECT COUNT(*) as count
-       FROM dispatch_scheduler_queue
-       WHERE team_id = ?
-         AND status = 'needs_clarification'
-         AND COALESCE(recovery_status, 'none') NOT IN ('moot', 'landed_reconciled', 'verified_done', 'retry_done')`,
-    [teamId],
-  );
+  const [activeAgeRows, terminalAgeRows, inFlightRows, verifiedLandingCandidates, staleClarificationRows, blockages, liveNeedsInputResult] = await Promise.all([
+    readOldestActiveAge(adapter, teamId),
+    readNewestTerminalAge(adapter, teamId),
+    readInFlightSnapshotRows(adapter, teamId, inFlightLimit),
+    readRecentVerifiedLandingCandidates(adapter, teamId, recentVerifiedLandingsLimit * 4),
+    readStaleClarificationSnapshotRows(adapter, teamId, staleSnapshotLimit),
+    readFleetBlockages(adapter, teamId, driftSummary, teamName),
+    adapter.query<{ count: number }>(
+      `WITH bounded AS (
+         SELECT dispatch_phid
+           FROM dispatch_scheduler_queue
+          WHERE team_id = ?
+            AND status = 'needs_clarification'
+            AND COALESCE(recovery_status, 'none') NOT IN ('moot', 'landed_reconciled', 'verified_done', 'retry_done')
+          LIMIT ?
+       )
+       SELECT COUNT(*) as count
+         FROM bounded`,
+      [teamId, countPerStatusLimit],
+    ),
+  ]);
+  const verifiedLandingRows = verifiedLandingCandidates
+    .filter((row) => promotionCompletedAndVerified(row.promotion_result_json))
+    .slice(0, recentVerifiedLandingsLimit);
 
   return {
     status: 'ok',
@@ -702,12 +753,198 @@ export async function readDispatchHealth(
     counts,
     active,
     terminal,
-    needs_input: Number(liveNeedsInputRows[0]?.count ?? 0),
-    oldest_active_at: ageRows[0]?.oldest_active_at ?? null,
-    newest_terminal_at: ageRows[0]?.newest_terminal_at ?? null,
+    bounded: true,
+    bounds: {
+      count_per_status_limit: countPerStatusLimit,
+      in_flight_limit: inFlightLimit,
+      recent_verified_landings_limit: recentVerifiedLandingsLimit,
+      stale_snapshot_limit: staleSnapshotLimit,
+      truncated_statuses: truncatedStatuses,
+    },
+    snapshot: {
+      schema_version: 'dispatch-health.snapshot.v1',
+      in_flight: {
+        count: inFlightRows.length,
+        oldest_started_at: minIso(inFlightRows.map((r) => r.started_at ?? r.updated_at)),
+        newest_updated_at: maxIso(inFlightRows.map((r) => r.updated_at)),
+        items: inFlightRows.map((r) => ({
+          dispatch_id: r.dispatch_phid,
+          query_id: r.query_id,
+          agent: r.to_agent,
+          status: r.status,
+          started_at: r.started_at,
+          updated_at: r.updated_at,
+        })),
+      },
+      recent_verified_landings: {
+        count: verifiedLandingRows.length,
+        newest_completed_at: maxIso(verifiedLandingRows.map((r) => r.completed_at ?? r.updated_at)),
+        items: verifiedLandingRows.map((r) => ({
+          dispatch_id: r.dispatch_phid,
+          query_id: r.query_id,
+          agent: r.to_agent,
+          status: r.status,
+          completed_at: r.completed_at,
+          updated_at: r.updated_at,
+        })),
+      },
+      stale_snapshots: {
+        needs_clarification: {
+          count: staleClarificationRows.length,
+          oldest_stale_at: minIso(staleClarificationRows.map((r) => r.stale_at)),
+          newest_stale_at: maxIso(staleClarificationRows.map((r) => r.stale_at)),
+          items: staleClarificationRows.map((r) => ({
+            dispatch_id: r.dispatch_phid,
+            query_id: r.query_id,
+            agent: r.to_agent,
+            stale_at: r.stale_at,
+            updated_at: r.updated_at,
+          })),
+        },
+      },
+    },
+    needs_input: Number(liveNeedsInputResult.rows[0]?.count ?? 0),
+    oldest_active_at: activeAgeRows[0]?.oldest_active_at ?? null,
+    newest_terminal_at: terminalAgeRows[0]?.newest_terminal_at ?? null,
     generated_at: new Date().toISOString(),
     blockages,
   };
+}
+
+async function readBoundedStatusCounts(
+  adapter: DbAdapterLike,
+  teamId: string,
+  statuses: string[],
+  limit: number,
+): Promise<Array<{ status: string; count: number; truncated: boolean }>> {
+  const results: Array<{ status: string; count: number; truncated: boolean }> = [];
+  for (const status of statuses) {
+    const { rows } = await adapter.query<{ count: number }>(
+      `WITH bounded AS (
+         SELECT dispatch_phid
+           FROM dispatch_scheduler_queue
+          WHERE team_id = ? AND status = ?
+          LIMIT ?
+       )
+       SELECT COUNT(*) AS count FROM bounded`,
+      [teamId, status, limit + 1],
+    );
+    const rawCount = Number(rows[0]?.count ?? 0);
+    results.push({ status, count: Math.min(rawCount, limit), truncated: rawCount > limit });
+  }
+  return results;
+}
+
+async function readOldestActiveAge(adapter: DbAdapterLike, teamId: string): Promise<Array<{ oldest_active_at: string | null }>> {
+  const { rows } = await adapter.query<{ oldest_active_at: string | null }>(
+    `SELECT COALESCE(started_at, not_before_at, updated_at) AS oldest_active_at
+       FROM dispatch_scheduler_queue
+      WHERE team_id = ? AND status IN (${ACTIVE_STATUSES.map(() => '?').join(', ')})
+      ORDER BY COALESCE(started_at, not_before_at, updated_at) ASC
+      LIMIT 1`,
+    [teamId, ...ACTIVE_STATUSES],
+  );
+  return rows;
+}
+
+async function readNewestTerminalAge(adapter: DbAdapterLike, teamId: string): Promise<Array<{ newest_terminal_at: string | null }>> {
+  const { rows } = await adapter.query<{ newest_terminal_at: string | null }>(
+    `SELECT COALESCE(completed_at, updated_at) AS newest_terminal_at
+       FROM dispatch_scheduler_queue
+      WHERE team_id = ? AND status IN (${TERMINAL_STATUSES.map(() => '?').join(', ')})
+      ORDER BY COALESCE(completed_at, updated_at) DESC
+      LIMIT 1`,
+    [teamId, ...TERMINAL_STATUSES],
+  );
+  return rows;
+}
+
+async function readInFlightSnapshotRows(
+  adapter: DbAdapterLike,
+  teamId: string,
+  limit: number,
+): Promise<Array<{ dispatch_phid: string; query_id: string | null; to_agent: string; status: string; started_at: string | null; updated_at: string }>> {
+  const { rows } = await adapter.query<{
+    dispatch_phid: string;
+    query_id: string | null;
+    to_agent: string;
+    status: string;
+    started_at: string | null;
+    updated_at: string;
+  }>(
+    `SELECT dispatch_phid, query_id, to_agent, status, started_at, updated_at
+       FROM dispatch_scheduler_queue
+      WHERE team_id = ? AND status = 'in_flight'
+      ORDER BY COALESCE(started_at, updated_at) ASC, dispatch_phid ASC
+      LIMIT ?`,
+    [teamId, limit],
+  );
+  return rows;
+}
+
+async function readRecentVerifiedLandingCandidates(
+  adapter: DbAdapterLike,
+  teamId: string,
+  limit: number,
+): Promise<Array<{ dispatch_phid: string; query_id: string | null; to_agent: string; status: string; completed_at: string | null; updated_at: string; promotion_result_json: string | null }>> {
+  const { rows } = await adapter.query<{
+    dispatch_phid: string;
+    query_id: string | null;
+    to_agent: string;
+    status: string;
+    completed_at: string | null;
+    updated_at: string;
+    promotion_result_json: string | null;
+  }>(
+    `SELECT dispatch_phid, query_id, to_agent, status, completed_at, updated_at, promotion_result_json
+       FROM dispatch_scheduler_queue
+      WHERE team_id = ?
+        AND status IN (${TERMINAL_STATUSES.map(() => '?').join(', ')})
+        AND promotion_result_json IS NOT NULL
+      ORDER BY COALESCE(completed_at, updated_at) DESC, dispatch_phid DESC
+      LIMIT ?`,
+    [teamId, ...TERMINAL_STATUSES, limit],
+  );
+  return rows;
+}
+
+async function readStaleClarificationSnapshotRows(
+  adapter: DbAdapterLike,
+  teamId: string,
+  limit: number,
+): Promise<Array<{ dispatch_phid: string; query_id: string | null; to_agent: string; stale_at: string | null; updated_at: string }>> {
+  const staleExpr = (adapter as { dialect?: string }).dialect === 'postgres'
+    ? "(active_clarification_json::jsonb ->> 'stale_at')"
+    : "json_extract(active_clarification_json, '$.stale_at')";
+  const { rows } = await adapter.query<{
+    dispatch_phid: string;
+    query_id: string | null;
+    to_agent: string;
+    stale_at: string | null;
+    updated_at: string;
+  }>(
+    `SELECT dispatch_phid, query_id, to_agent, ${staleExpr} AS stale_at, updated_at
+       FROM dispatch_scheduler_queue
+      WHERE team_id = ?
+        AND status = 'needs_clarification'
+        AND active_clarification_json IS NOT NULL
+        AND ${staleExpr} IS NOT NULL
+        AND COALESCE(recovery_status, 'none') NOT IN ('moot', 'landed_reconciled', 'verified_done', 'retry_done')
+      ORDER BY ${staleExpr} ASC, COALESCE(started_at, not_before_at, updated_at) ASC, dispatch_phid ASC
+      LIMIT ?`,
+    [teamId, limit],
+  );
+  return rows;
+}
+
+function minIso(values: Array<string | null | undefined>): string | null {
+  const picked = values.filter((v): v is string => typeof v === 'string' && v.length > 0).sort();
+  return picked[0] ?? null;
+}
+
+function maxIso(values: Array<string | null | undefined>): string | null {
+  const picked = values.filter((v): v is string => typeof v === 'string' && v.length > 0).sort();
+  return picked[picked.length - 1] ?? null;
 }
 
 /**

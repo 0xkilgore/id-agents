@@ -26,6 +26,117 @@ afterEach(async () => {
 });
 
 describe("orchestration health projection", () => {
+  it("exposes bounded dispatch-health snapshot fields for Activity refresh", async () => {
+    await insertDispatch({
+      dispatch_phid: "phid:disp-in-flight-old",
+      query_id: "query_in_flight_old",
+      status: "in_flight",
+      updated_at: "2026-07-01T10:00:00.000Z",
+    });
+    await insertDispatch({
+      dispatch_phid: "phid:disp-in-flight-new",
+      query_id: "query_in_flight_new",
+      status: "in_flight",
+      updated_at: "2026-07-01T10:05:00.000Z",
+    });
+    await insertDispatch({
+      dispatch_phid: "phid:disp-promotion-verified",
+      query_id: "query_promotion_verified",
+      status: "done",
+      completed_at: "2026-07-01T11:00:00.000Z",
+      updated_at: "2026-07-01T11:00:00.000Z",
+      promotion_result_json: JSON.stringify({
+        completed: true,
+        repos: [{ verified: true, promoted_sha: "abc", remote_main_sha: "abc" }],
+      }),
+    });
+    await insertDispatch({
+      dispatch_phid: "phid:disp-promotion-unverified",
+      query_id: "query_promotion_unverified",
+      status: "done",
+      completed_at: "2026-07-01T11:05:00.000Z",
+      updated_at: "2026-07-01T11:05:00.000Z",
+      promotion_result_json: JSON.stringify({
+        completed: true,
+        repos: [{ verified: false }],
+      }),
+    });
+    await insertDispatch({
+      dispatch_phid: "phid:disp-stale-clarification",
+      query_id: "query_stale_clarification",
+      status: "needs_clarification",
+      updated_at: "2026-07-01T09:00:00.000Z",
+      active_clarification_json: JSON.stringify({
+        clarification_id: "clar-stale",
+        question: "Which landing should Activity show?",
+        stale_at: "2026-07-01T09:30:00.000Z",
+      }),
+    });
+
+    const health = await readDispatchHealth(adapter, "default");
+
+    expect(health.bounded).toBe(true);
+    expect(health.bounds).toMatchObject({
+      count_per_status_limit: 1000,
+      in_flight_limit: 50,
+      recent_verified_landings_limit: 25,
+      stale_snapshot_limit: 50,
+      truncated_statuses: [],
+    });
+    expect(health.snapshot.schema_version).toBe("dispatch-health.snapshot.v1");
+    expect(health.snapshot.in_flight).toMatchObject({
+      count: 2,
+      oldest_started_at: "2026-07-01T10:00:00.000Z",
+      newest_updated_at: "2026-07-01T10:05:00.000Z",
+    });
+    expect(health.snapshot.in_flight.items.map((item) => item.dispatch_id)).toEqual([
+      "phid:disp-in-flight-old",
+      "phid:disp-in-flight-new",
+    ]);
+    expect(health.snapshot.recent_verified_landings.count).toBe(1);
+    expect(health.snapshot.recent_verified_landings.items.map((item) => item.dispatch_id)).toEqual([
+      "phid:disp-promotion-verified",
+    ]);
+    expect(health.snapshot.stale_snapshots.needs_clarification).toMatchObject({
+      count: 1,
+      oldest_stale_at: "2026-07-01T09:30:00.000Z",
+      newest_stale_at: "2026-07-01T09:30:00.000Z",
+    });
+  });
+
+  it("bounds dispatch-health status reads instead of grouping the full queue", async () => {
+    for (let i = 0; i < 1005; i += 1) {
+      await insertDispatch({
+        dispatch_phid: `phid:disp-bounded-${String(i).padStart(4, "0")}`,
+        query_id: `query_bounded_${i}`,
+        status: "queued",
+        updated_at: `2026-07-01T00:${String(i % 60).padStart(2, "0")}:00.000Z`,
+      });
+    }
+
+    const originalQuery = adapter.query.bind(adapter);
+    const dispatchHealthSql: string[] = [];
+    (adapter as any).query = (async (sql: string, params?: unknown[]) => {
+      const normalized = String(sql).replace(/\s+/g, " ").trim();
+      if (normalized.includes("dispatch_scheduler_queue")) {
+        dispatchHealthSql.push(normalized);
+      }
+      return originalQuery(sql, params);
+    }) as typeof adapter.query;
+
+    try {
+      const health = await readDispatchHealth(adapter, "default");
+      expect(health.counts.queued).toBe(1000);
+      expect(health.active).toBe(1000);
+      expect(health.bounds.truncated_statuses).toContain("queued");
+    } finally {
+      (adapter as any).query = originalQuery as typeof adapter.query;
+    }
+
+    expect(dispatchHealthSql.some((sql) => /GROUP BY status/i.test(sql))).toBe(false);
+    expect(dispatchHealthSql.some((sql) => /WITH bounded AS \( SELECT dispatch_phid FROM dispatch_scheduler_queue WHERE team_id = \? AND status = \? LIMIT \?/i.test(sql))).toBe(true);
+  });
+
   it("reports capacity-explained zero-admit ticks as running_at_capacity instead of critical stall", async () => {
     await setMode(adapter, "default", "running");
     await insertBacklogItem(adapter, {

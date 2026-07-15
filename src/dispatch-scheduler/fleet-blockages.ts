@@ -35,6 +35,7 @@ export type FleetBlockagesReport = {
 
 const STALE_CLARIFICATION_MS = 30 * 60 * 1000;
 const STALE_CLARIFICATION_SAMPLE_LIMIT = 64;
+const CLARIFICATION_COUNT_LIMIT = 1000;
 
 export async function readFleetBlockages(
   adapter: DbAdapterLike,
@@ -59,17 +60,23 @@ export async function readFleetBlockages(
     count: number | string;
     oldest_at: string | null;
   }>(
-    `SELECT COUNT(*) as count,
-            MIN(COALESCE(started_at, not_before_at, updated_at)) as oldest_at
-       FROM dispatch_scheduler_queue
-       WHERE team_id = ?
-         AND status = 'needs_clarification'
-         AND COALESCE(recovery_status, 'none') NOT IN ('moot', 'landed_reconciled', 'verified_done', 'retry_done')`,
-    [teamId],
+    `WITH bounded AS (
+       SELECT COALESCE(started_at, not_before_at, updated_at) AS active_at
+         FROM dispatch_scheduler_queue
+        WHERE team_id = ?
+          AND status = 'needs_clarification'
+          AND COALESCE(recovery_status, 'none') NOT IN ('moot', 'landed_reconciled', 'verified_done', 'retry_done')
+        ORDER BY COALESCE(started_at, not_before_at, updated_at) ASC
+        LIMIT ?
+     )
+     SELECT COUNT(*) as count,
+            MIN(active_at) as oldest_at
+       FROM bounded`,
+    [teamId, CLARIFICATION_COUNT_LIMIT],
   );
   const { rows: staleCountRows } = await adapter.query<{ count: number | string }>(
-    `SELECT COUNT(*) as count FROM (${staleSql}) stale_clarifications`,
-    staleParams,
+    `SELECT COUNT(*) as count FROM (${staleSql} LIMIT ?) stale_clarifications`,
+    [...staleParams, CLARIFICATION_COUNT_LIMIT],
   );
   const { rows: staleRows } = await adapter.query<{
     dispatch_phid: string;

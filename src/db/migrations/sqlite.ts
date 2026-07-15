@@ -523,6 +523,14 @@ export async function migrateSqlite(adapter: SqliteAdapter): Promise<void> {
       ON dispatch_scheduler_queue(team_id, status, provider, runtime, not_before_at, dispatch_phid);
     CREATE INDEX IF NOT EXISTS dispatch_scheduler_recent_terminal_idx
       ON dispatch_scheduler_queue(team_id, status, completed_at DESC, dispatch_phid);
+    CREATE INDEX IF NOT EXISTS dispatch_scheduler_active_age_idx
+      ON dispatch_scheduler_queue(
+        team_id,
+        status,
+        COALESCE(started_at, not_before_at, updated_at),
+        dispatch_phid
+      )
+      WHERE status IN ('queued', 'in_flight', 'bounced', 'needs_clarification', 'resume_delivery_failed');
     CREATE INDEX IF NOT EXISTS dispatch_scheduler_recent_list_idx
       ON dispatch_scheduler_queue(
         team_id,
@@ -1016,6 +1024,22 @@ export async function migrateSqlite(adapter: SqliteAdapter): Promise<void> {
       ON dispatch_scheduler_queue(team_id, status, provider, runtime, not_before_at, dispatch_phid);
     CREATE INDEX IF NOT EXISTS dispatch_scheduler_recent_terminal_idx
       ON dispatch_scheduler_queue(team_id, status, completed_at DESC, dispatch_phid);
+    CREATE INDEX IF NOT EXISTS dispatch_scheduler_active_age_idx
+      ON dispatch_scheduler_queue(
+        team_id,
+        status,
+        COALESCE(started_at, not_before_at, updated_at),
+        dispatch_phid
+      )
+      WHERE status IN ('queued', 'in_flight', 'bounced', 'needs_clarification', 'resume_delivery_failed');
+    CREATE INDEX IF NOT EXISTS dispatch_scheduler_verified_landing_candidates_idx
+      ON dispatch_scheduler_queue(
+        team_id,
+        status,
+        COALESCE(completed_at, updated_at) DESC,
+        dispatch_phid DESC
+      )
+      WHERE promotion_result_json IS NOT NULL;
     CREATE INDEX IF NOT EXISTS dispatch_scheduler_recent_list_idx
       ON dispatch_scheduler_queue(
         team_id,
