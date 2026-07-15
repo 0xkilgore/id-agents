@@ -12,11 +12,14 @@ import { isLoadPoint, tickAdmitLimit, localHHmm } from "../../src/continuous-orc
 import {
   planAdmission,
   evaluateStall,
+  isDeploySafeAdmissionItem,
+  isDiskCleanupAdmissionItem,
   shouldRunZeroAdmitStallWatchdog,
   type AdmissionContext,
 } from "../../src/continuous-orchestration/admission.js";
 import { defaultConfig } from "../../src/continuous-orchestration/config.js";
 import type { BacklogItem, UsageGateView } from "../../src/continuous-orchestration/types.js";
+import type { DiskHeadroom, DiskHeadroomState } from "../../src/disk-health.js";
 
 let seq = 0;
 function item(over: Partial<BacklogItem> = {}): BacklogItem {
@@ -63,6 +66,24 @@ function ctx(over: Partial<AdmissionContext> = {}): AdmissionContext {
     dependency_index: new Map(),
     admit_limit: 5,
     ...over,
+  };
+}
+
+function disk(state: DiskHeadroomState): DiskHeadroom {
+  return {
+    schema_version: "disk-headroom.v1",
+    state,
+    path: "/tmp",
+    free_bytes: 8,
+    available_bytes: state === "critical" ? 4 : state === "warn" ? 8 : 20,
+    total_bytes: 100,
+    free_gib: 8,
+    available_gib: state === "critical" ? 4 : state === "warn" ? 8 : 20,
+    total_gib: 100,
+    used_percent: 92,
+    min_free_bytes: 5,
+    warn_free_bytes: 10,
+    reason: state === "ok" ? null : `disk ${state}`,
   };
 }
 
@@ -153,6 +174,59 @@ describe("admission picks lane-diverse items (fair order + pool gate)", () => {
     // Fair order admits one from each lane — lane-diverse.
     const fair = planAdmission(fairInterleaveByLane(items), ctx({ admit_limit: 2, ...lanePool() }), cfg);
     expect(fair.admit.map((i) => i.item_id)).toEqual(["a1", "b1"]);
+  });
+
+  it("healthy disk admits ordinary build rows", () => {
+    const p = planAdmission(
+      [item({ item_id: "ordinary-build", title: "implement product feature" })],
+      ctx({ disk_headroom: disk("ok") }),
+      cfg,
+    );
+
+    expect(p.admit.map((i) => i.item_id)).toEqual(["ordinary-build"]);
+    expect(p.skipped).toEqual([]);
+  });
+
+  it("warning disk admits only cleanup or deploy-safe rows and codes held rows", () => {
+    const cleanup = item({ item_id: "cleanup", title: "Disk cleanup: prune old worktrees" });
+    const deploySafe = item({ item_id: "deploy-safe", track: "T-DEPLOY", title: "Promote verified build to main" });
+    const ordinary = item({ item_id: "ordinary", title: "Build new dashboard feature" });
+
+    expect(isDiskCleanupAdmissionItem(cleanup)).toBe(true);
+    expect(isDeploySafeAdmissionItem(deploySafe)).toBe(true);
+
+    const p = planAdmission(
+      [cleanup, deploySafe, ordinary],
+      ctx({ disk_headroom: disk("warn") }),
+      cfg,
+    );
+
+    expect(p.admit.map((i) => i.item_id)).toEqual(["cleanup", "deploy-safe"]);
+    expect(p.skipped).toEqual([
+      expect.objectContaining({
+        item_id: "ordinary",
+        action: "held",
+        metadata: expect.objectContaining({ code: "disk_warning_floor", class: "infra_resource" }),
+      }),
+    ]);
+  });
+
+  it("critical disk holds deploy-safe and ordinary rows but still admits cleanup", () => {
+    const cleanup = item({ item_id: "cleanup", title: "ENOSPC cleanup pass" });
+    const deploySafe = item({ item_id: "deploy-safe", track: "T-DEPLOY", title: "Deploy already verified build" });
+    const ordinary = item({ item_id: "ordinary", title: "Implement build feature" });
+
+    const p = planAdmission(
+      [cleanup, deploySafe, ordinary],
+      ctx({ disk_headroom: disk("critical") }),
+      cfg,
+    );
+
+    expect(p.admit.map((i) => i.item_id)).toEqual(["cleanup"]);
+    expect(p.skipped.map((s) => [s.item_id, s.metadata?.code])).toEqual([
+      ["deploy-safe", "disk_critical_floor"],
+      ["ordinary", "disk_critical_floor"],
+    ]);
   });
 });
 

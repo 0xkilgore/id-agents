@@ -8,6 +8,7 @@
 import type { ContinuousOrchestrationConfig } from "./config.js";
 import { normalizeRuntime, resolveProviderFromRuntime } from "../dispatch-scheduler/types.js";
 import type { BacklogItem, DecisionRecord, OrchestrationMode, UsageGateView } from "./types.js";
+import type { DiskHeadroom } from "../disk-health.js";
 
 /** Risk classes safe to auto-run unattended. Everything else escalates. */
 const AUTO_RUN_RISK = new Set(["routine", "build"]);
@@ -57,6 +58,11 @@ export interface AdmissionContext {
   target_agent_runtimes?: Map<string, string> | null;
   /** Active clarification/promotion blockers keyed by ready backlog item_id. */
   ready_item_blockers?: Map<string, { code: "clarification_blocker" | "promotion_blocker"; reason: string; metadata?: Record<string, unknown> }> | null;
+  /**
+   * Disk pressure gate. Unknown/absent is non-blocking; warn/critical narrows
+   * admission to rows that can safely recover disk or finish deploy-safe work.
+   */
+  disk_headroom?: DiskHeadroom | null;
 }
 
 export interface AdmissionPlan {
@@ -86,6 +92,8 @@ export type NonAdmissionCode =
   | "provider_runtime_mismatch"
   | "clarification_blocker"
   | "promotion_blocker"
+  | "disk_warning_floor"
+  | "disk_critical_floor"
   | "duplicate_dispatch_retry_required";
 
 function reasonClass(code: NonAdmissionCode): string {
@@ -107,6 +115,9 @@ function reasonClass(code: NonAdmissionCode): string {
       return "clarification_blocker";
     case "promotion_blocker":
       return "promotion_blocker";
+    case "disk_warning_floor":
+    case "disk_critical_floor":
+      return "infra_resource";
     case "duplicate_dispatch_retry_required":
       return "retry_safety";
     case "tick_admission_cap":
@@ -127,6 +138,94 @@ function nonAdmission(
   extra: Record<string, unknown> = {},
 ): DecisionRecord {
   return { item_id, action, reason, metadata: { code, class: reasonClass(code), ...extra } };
+}
+
+const CLEANUP_TERMS = [
+  "cleanup",
+  "clean-up",
+  "disk",
+  "enospc",
+  "hygiene",
+  "free space",
+  "prune",
+  "reclaim",
+  "reaper",
+  "worktree hygiene",
+  "node_modules cleanup",
+];
+
+const DEPLOY_SAFE_TERMS = [
+  "deploy",
+  "deployment",
+  "promotion",
+  "promote-to-main",
+  "release proof",
+  "release-proof",
+  "smoke",
+];
+
+function admissionSearchText(item: BacklogItem): string {
+  return [
+    item.track,
+    item.title,
+    item.dispatch_body,
+    ...item.write_scope,
+    ...item.source_refs,
+  ]
+    .filter((part): part is string => typeof part === "string")
+    .join("\n")
+    .toLowerCase();
+}
+
+export function isDiskCleanupAdmissionItem(item: BacklogItem): boolean {
+  if (!AUTO_RUN_RISK.has(item.risk_class)) return false;
+  const text = admissionSearchText(item);
+  return CLEANUP_TERMS.some((term) => text.includes(term));
+}
+
+export function isDeploySafeAdmissionItem(item: BacklogItem): boolean {
+  if (!AUTO_RUN_RISK.has(item.risk_class)) return false;
+  const text = admissionSearchText(item);
+  return item.track?.toUpperCase().startsWith("T-DEPLOY") === true ||
+    DEPLOY_SAFE_TERMS.some((term) => text.includes(term));
+}
+
+function diskAdmissionBlocker(item: BacklogItem, disk: DiskHeadroom | null | undefined): DecisionRecord | null {
+  if (!disk || disk.state === "ok" || disk.state === "unknown") return null;
+  const cleanup = isDiskCleanupAdmissionItem(item);
+  const deploySafe = isDeploySafeAdmissionItem(item);
+  if (disk.state === "critical") {
+    if (cleanup) return null;
+    return nonAdmission(
+      item.item_id,
+      "held",
+      "disk_critical_floor",
+      `disk headroom is critical; only cleanup rows may be admitted until available disk is above ${disk.min_free_bytes} bytes`,
+      {
+        disk_state: disk.state,
+        available_bytes: disk.available_bytes,
+        min_free_bytes: disk.min_free_bytes,
+        warn_free_bytes: disk.warn_free_bytes,
+        cleanup_safe: cleanup,
+        deploy_safe: deploySafe,
+      },
+    );
+  }
+  if (cleanup || deploySafe) return null;
+  return nonAdmission(
+    item.item_id,
+    "held",
+    "disk_warning_floor",
+    `disk headroom is below warning floor; only cleanup or deploy-safe rows may be admitted until available disk is above ${disk.warn_free_bytes} bytes`,
+    {
+      disk_state: disk.state,
+      available_bytes: disk.available_bytes,
+      min_free_bytes: disk.min_free_bytes,
+      warn_free_bytes: disk.warn_free_bytes,
+      cleanup_safe: cleanup,
+      deploy_safe: deploySafe,
+    },
+  );
 }
 
 function healthyAlternateRecommendation(
@@ -271,6 +370,11 @@ export function planAdmission(
         `previously-dispatched row ${item.last_dispatch_phid} requires retry_safe=true before it can fire again`,
         { last_dispatch_phid: item.last_dispatch_phid },
       ));
+      continue;
+    }
+    const diskBlocker = diskAdmissionBlocker(item, ctx.disk_headroom);
+    if (diskBlocker) {
+      skipped.push(diskBlocker);
       continue;
     }
     if (admit.length >= limit) {

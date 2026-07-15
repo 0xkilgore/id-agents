@@ -57,6 +57,7 @@ import {
   type WorkShareDirectiveDrift,
 } from "../model-policy/work-share-drift.js";
 import { readRuntimeMixDrift, type RuntimeMixDrift } from "../model-policy/runtime-mix-drift.js";
+import { readDiskHeadroom, type DiskHeadroom } from "../disk-health.js";
 
 /** Dispatch/effective statuses that mean the work is finished — its write-scope
  *  lock can be released. Mirrors dispatch terminal states plus recovery moot. */
@@ -199,6 +200,8 @@ export interface DaemonDeps {
   readRuntimeMixDrift?: () => RuntimeMixDrift | Promise<RuntimeMixDrift>;
   /** Live agent runtime telemetry, usually sourced from the agents table. */
   resolveAllAgentRuntimes?: () => Promise<Map<string, string>>;
+  /** Test seam for disk-pressure admission gating. */
+  readDiskHeadroom?: () => DiskHeadroom | Promise<DiskHeadroom>;
   now?: () => number;
   /** Override the kill-switch check (defaults to fs existence of the file). */
   killSwitchActive?: () => boolean;
@@ -278,6 +281,7 @@ export interface ReadyAdmissionExplanation {
   };
   halted: string | null;
   ready_runtime_repairs: ReadyRuntimeRepair[];
+  disk_headroom: DiskHeadroom | null;
 }
 
 export interface ReadyAdmissionTargetUnhealthyReceipt {
@@ -337,6 +341,7 @@ export type ReadyAdmissionBlockerCategory =
   | "capacity_gate"
   | "lane_eligibility"
   | "runtime_unavailable"
+  | "infra_resource"
   | "retry_safety"
   | "dispatch_admission"
   | "route_sync"
@@ -483,6 +488,9 @@ function readyAdmissionBlockerCategory(code: string): ReadyAdmissionBlockerCateg
   switch (code) {
     case "daily_token_ceiling":
       return "usage_gate";
+    case "disk_warning_floor":
+    case "disk_critical_floor":
+      return "infra_resource";
     case "no_in_flight_slots":
     case "tick_admission_cap":
     case "pool_capacity_full":
@@ -574,6 +582,10 @@ function readyAdmissionNextAction(code: string): string {
       return "wait for the active writer on the same write scope to finish";
     case "provider_runtime_mismatch":
       return "route to a compatible agent or update the requested provider/runtime";
+    case "disk_warning_floor":
+      return "free disk headroom or admit only cleanup/deploy-safe work until the warning floor clears";
+    case "disk_critical_floor":
+      return "free disk headroom with cleanup work before admitting non-cleanup orchestration rows";
     case "duplicate_dispatch_retry_required":
       return "mark the item retry-safe only when the operator wants a bounded refire, otherwise close or supersede it";
     default:
@@ -666,6 +678,12 @@ function readyAdmissionRecommendedAction(input: {
           .map((lane) => `lane=${lane.lane} count=${lane.blocker_counts.find((blocker) => blocker.code === "single_writer_lane_busy")?.count ?? lane.count}`);
         const suffix = examples.length > 0 ? ` (${examples.join("; ")})` : "";
         return [`wait for or clear single_writer_lane_busy=${count.count} lane lock(s)${suffix}`];
+      }
+      if (count.code === "disk_warning_floor") {
+        return [`free disk or admit cleanup/deploy-safe rows before releasing disk_warning_floor=${count.count} held row(s)`];
+      }
+      if (count.code === "disk_critical_floor") {
+        return [`run cleanup rows before releasing disk_critical_floor=${count.count} held non-cleanup row(s)`];
       }
       if (count.code === "duplicate_dispatch_retry_required") {
         return [`review duplicate_dispatch_retry_required=${count.count} rows and mark retry_safe only for bounded refires or close stale duplicates`];
@@ -842,6 +860,14 @@ export class ContinuousOrchestrationDaemon {
     }
   }
 
+  private async diskHeadroom(): Promise<DiskHeadroom | null> {
+    try {
+      return await (this.deps.readDiskHeadroom ? this.deps.readDiskHeadroom() : readDiskHeadroom());
+    } catch {
+      return null;
+    }
+  }
+
   private async alert(message: string): Promise<void> {
     const send: AlertSender = this.deps.alert ?? ((m) => sendTelegramAlert(m, this.deps.env));
     await send(message);
@@ -948,6 +974,7 @@ export class ContinuousOrchestrationDaemon {
 
     const { view: usage, daily_tokens_used } = await this.deps.readUsage();
     const { count: in_flight, active_write_scopes } = await this.deps.readInFlight();
+    const disk_headroom = await this.diskHeadroom();
 
     // ADMISSION-V2 follow-up: AUTO-PROMOTE first (free) — drain already-fleshed
     // `needs_review` build items into READY to meet the build-ready floor across
@@ -1078,6 +1105,7 @@ export class ContinuousOrchestrationDaemon {
       healthy_agents,
       target_agent_runtimes,
       ready_item_blockers,
+      disk_headroom,
     };
 
     const plan = planAdmission(ordered, ctx, config);
@@ -1446,6 +1474,7 @@ export class ContinuousOrchestrationDaemon {
     const killSwitch = this.killSwitchActive();
     const { view: usage, daily_tokens_used } = await this.deps.readUsage();
     const { count: in_flight, active_write_scopes } = await this.deps.readInFlight();
+    const disk_headroom = await this.diskHeadroom();
     const readyRuntimeRepairs = await repairReadyCodexRuntimeMetadata(this.deps.adapter, this.teamId, { apply: false });
     const ready = await listReadyItems(this.deps.adapter, this.teamId);
     const dependency_index = await listDependencyResolution(this.deps.adapter, this.teamId);
@@ -1485,6 +1514,7 @@ export class ContinuousOrchestrationDaemon {
       healthy_agents,
       target_agent_runtimes,
       ready_item_blockers,
+      disk_headroom,
     };
 
     const plan = planAdmission(ordered, ctx, config);
@@ -1629,6 +1659,7 @@ export class ContinuousOrchestrationDaemon {
       },
       halted: plan.halt?.reason ?? null,
       ready_runtime_repairs: readyRuntimeRepairs,
+      disk_headroom,
     };
   }
 

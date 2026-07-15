@@ -294,6 +294,7 @@ export function mountContinuousOrchestrationRoutes(app: Application, opts: Orche
           by_status: fleshCounts,
         },
         auto_promote_health: autoPromoteHealth,
+        disk_headroom: readyAdmission.disk_headroom,
         ready_admission: readyAdmission,
         runtime_status,
         health,

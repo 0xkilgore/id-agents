@@ -28,6 +28,7 @@ import { mountContinuousOrchestrationRoutes } from "../../src/continuous-orchest
 import { AUTO_READY_CONFIDENCE_THRESHOLD } from "../../src/continuous-orchestration/flesh-policy.js";
 import { BACKLOG_RETRY_CAP } from "../../src/continuous-orchestration/backlog-retry-readiness.js";
 import type { BacklogItem, UsageGateView } from "../../src/continuous-orchestration/types.js";
+import type { DiskHeadroom, DiskHeadroomState } from "../../src/disk-health.js";
 
 async function freshDb() {
   const adapter = new SqliteAdapter(":memory:");
@@ -39,6 +40,24 @@ const okUsage = (used = 0): { view: UsageGateView; daily_tokens_used: number } =
   view: { hard_paused: false, daily_percent: 0, weekly_percent: 0, enforcement: "enforce" },
   daily_tokens_used: used,
 });
+
+function diskHeadroom(state: DiskHeadroomState): DiskHeadroom {
+  return {
+    schema_version: "disk-headroom.v1",
+    state,
+    path: "/tmp",
+    free_bytes: 8,
+    available_bytes: state === "critical" ? 4 : state === "warn" ? 8 : 20,
+    total_bytes: 100,
+    free_gib: 8,
+    available_gib: state === "critical" ? 4 : state === "warn" ? 8 : 20,
+    total_gib: 100,
+    used_percent: 92,
+    min_free_bytes: 5,
+    warn_free_bytes: 10,
+    reason: state === "ok" ? null : `disk ${state}`,
+  };
+}
 
 function makeDaemon(
   adapter: SqliteAdapter,
@@ -57,6 +76,7 @@ function makeDaemon(
     resolveAgentHealth?: (names: string[]) => Promise<Set<string>>;
     resolveAgentRuntimes?: (names: string[]) => Promise<Map<string, string>>;
     resolveAllAgentRuntimes?: () => Promise<Map<string, string>>;
+    readDiskHeadroom?: () => DiskHeadroom | Promise<DiskHeadroom>;
     modelPolicyPath?: string;
     runtimeModePath?: string | null;
   } = {},
@@ -79,6 +99,7 @@ function makeDaemon(
     resolveAgentHealth: over.resolveAgentHealth,
     resolveAgentRuntimes: over.resolveAgentRuntimes,
     resolveAllAgentRuntimes: over.resolveAllAgentRuntimes,
+    readDiskHeadroom: over.readDiskHeadroom,
     alert: async (m) => {
       alerts.push(m);
     },
@@ -1142,6 +1163,97 @@ describe("daemon — dry-run vs live", () => {
     const blockedSum = Object.values(res.body.counts.ready_block_reasons)
       .reduce((sum: number, count: unknown) => sum + Number(count), 0);
     expect(blockedSum).toBe(res.body.counts.ready - res.body.counts.admissible_now);
+  });
+
+  it("status explains disk-warning held rows with concrete blocker codes while admitting cleanup and deploy-safe rows", async () => {
+    await seedReady(adapter, {
+      title: "ordinary feature build",
+      dispatch_body: "implement a normal feature",
+      write_scope: ["repo/ordinary"],
+    });
+    await seedReady(adapter, {
+      title: "disk cleanup old worktrees",
+      dispatch_body: "cleanup old worktrees to reclaim disk",
+      write_scope: ["repo/cleanup"],
+    });
+    await seedReady(adapter, {
+      title: "promote verified deploy",
+      track: "T-DEPLOY",
+      dispatch_body: "promote verified build to main",
+      write_scope: ["repo/deploy"],
+    });
+    const { app, daemon } = mountStatusApp(
+      adapter,
+      { dry_run: true, max_in_flight: 20, max_new_per_tick: 20 },
+      { readDiskHeadroom: () => diskHeadroom("warn") },
+    );
+    await daemon.setMode("running");
+
+    const res = await callApp(app, "/orchestration/status");
+
+    expect(res.status).toBe(200);
+    expect(res.body.disk_headroom).toMatchObject({ state: "warn", available_bytes: 8, warn_free_bytes: 10 });
+    expect(res.body.ready_admission.admissible.map((row: any) => row.title).sort()).toEqual([
+      "disk cleanup old worktrees",
+      "promote verified deploy",
+    ]);
+    expect(res.body.ready_admission.non_admitted).toEqual([
+      expect.objectContaining({
+        title: "ordinary feature build",
+        action: "held",
+        code: "disk_warning_floor",
+        metadata: expect.objectContaining({
+          code: "disk_warning_floor",
+          class: "infra_resource",
+          disk_state: "warn",
+        }),
+      }),
+    ]);
+    expect(res.body.ready_admission.blocker_counts).toContainEqual({
+      code: "disk_warning_floor",
+      category: "infra_resource",
+      count: 1,
+    });
+  });
+
+  it("status explains disk-critical holds for non-cleanup rows", async () => {
+    await seedReady(adapter, {
+      title: "disk cleanup node_modules caches",
+      dispatch_body: "cleanup caches to reclaim disk",
+      write_scope: ["repo/cleanup"],
+    });
+    await seedReady(adapter, {
+      title: "deploy verified build",
+      track: "T-DEPLOY",
+      dispatch_body: "deploy verified build",
+      write_scope: ["repo/deploy"],
+    });
+    const { app, daemon } = mountStatusApp(
+      adapter,
+      { dry_run: true, max_in_flight: 20, max_new_per_tick: 20 },
+      { readDiskHeadroom: () => diskHeadroom("critical") },
+    );
+    await daemon.setMode("running");
+
+    const res = await callApp(app, "/orchestration/status");
+
+    expect(res.status).toBe(200);
+    expect(res.body.disk_headroom).toMatchObject({ state: "critical", available_bytes: 4, min_free_bytes: 5 });
+    expect(res.body.ready_admission.admissible.map((row: any) => row.title)).toEqual([
+      "disk cleanup node_modules caches",
+    ]);
+    expect(res.body.ready_admission.non_admitted).toEqual([
+      expect.objectContaining({
+        title: "deploy verified build",
+        action: "held",
+        code: "disk_critical_floor",
+        metadata: expect.objectContaining({
+          code: "disk_critical_floor",
+          class: "infra_resource",
+          disk_state: "critical",
+        }),
+      }),
+    ]);
   });
 
   it("status exposes duplicate-dispatch retry disposition receipts in health", async () => {
