@@ -463,6 +463,15 @@ function readyAdmissionBlockReasonCounts(plan: { skipped: DecisionRecord[] }): R
   return counts;
 }
 
+function isNonUsefulReadyBlockerCode(code: unknown): boolean {
+  return (
+    code === "duplicate_dispatch_guard" ||
+    code === "duplicate_dispatch_retry_required" ||
+    code === "provider_runtime_mismatch" ||
+    code === "target_unhealthy"
+  );
+}
+
 function readyAdmissionBlockedLanes(
   plan: { skipped: DecisionRecord[] },
   byId: Map<string, BacklogItem>,
@@ -494,11 +503,26 @@ function readyAdmissionBlockedLanes(
 
 function readyAdmissionRecommendedAction(input: {
   candidates: number;
+  usefulReady: number;
   admissibleNow: number;
+  minReadyFuel: number;
   blockerCounts: ReadyAdmissionExplanation["blocker_counts"];
   blockedLanes: ReadyAdmissionBlockedLane[];
 }): string {
   if (input.candidates === 0) return "flesh or promote ready fuel";
+  if (input.usefulReady < input.minReadyFuel) {
+    const reroutable = input.blockerCounts.filter((count) =>
+      count.code === "target_unhealthy" || count.code === "provider_runtime_mismatch"
+    );
+    const rerouteText =
+      reroutable.length > 0
+        ? ` or reroute ${reroutable.map((count) => `${count.code}=${count.count}`).join(", ")} rows to compatible healthy agents`
+        : "";
+    return (
+      `useful_ready_fuel=${input.usefulReady} is below min_ready_fuel=${input.minReadyFuel}; ` +
+      `run auto-promote/flesh for safe backlog candidates${rerouteText}`
+    );
+  }
   if (input.admissibleNow > 0) return "admit available ready rows";
   const blocked = input.blockerCounts.reduce((sum, count) => sum + count.count, 0);
   const onlySingleWriterBusy =
@@ -944,10 +968,14 @@ export class ContinuousOrchestrationDaemon {
 
     const admissibleReady = plan.admit.length;
     const inFlightCapacityFull = config.max_in_flight > 0 && in_flight >= config.max_in_flight;
-    if (!inFlightCapacityFull && shouldRunZeroAdmitStallWatchdog(stall.zero_ticks, ready.length, config)) {
+    const nonUsefulReadyCount = plan.skipped.filter((decision) =>
+      isNonUsefulReadyBlockerCode(decision.metadata?.code)
+    ).length;
+    const usefulReadyCount = Math.max(0, ready.length - nonUsefulReadyCount);
+    if (!inFlightCapacityFull && shouldRunZeroAdmitStallWatchdog(stall.zero_ticks, usefulReadyCount, config)) {
       const message =
         `Continuous orchestration zero-admit stall: ${stall.zero_ticks} consecutive zero-admit ticks, ` +
-        `${ready.length} ready item(s), ${admissibleReady} admissible, min_ready_fuel=${config.min_ready_fuel}`;
+        `${usefulReadyCount} useful ready item(s), ${admissibleReady} admissible, min_ready_fuel=${config.min_ready_fuel}`;
       decisions.push({
         item_id: null,
         action: "fleet_blockage",
@@ -956,6 +984,7 @@ export class ContinuousOrchestrationDaemon {
           event_type: "fleet.blockage",
           zero_ticks: stall.zero_ticks,
           ready: ready.length,
+          useful_ready: usefulReadyCount,
           admissible_ready: admissibleReady,
           min_ready_fuel: config.min_ready_fuel,
         },
@@ -964,6 +993,7 @@ export class ContinuousOrchestrationDaemon {
         tick_id,
         zero_ticks: stall.zero_ticks,
         ready: ready.length,
+        useful_ready: usefulReadyCount,
         admissible_ready: admissibleReady,
         min_ready_fuel: config.min_ready_fuel,
         candidates: ordered.length,
@@ -1174,17 +1204,11 @@ export class ContinuousOrchestrationDaemon {
     const blockerCounts = readyAdmissionBlockerCounts(plan);
     const nonUsefulItemIds = new Set(
       plan.skipped
-        .filter((decision) => {
-          const code = decision.metadata?.code;
-          return (
-            code === "duplicate_dispatch_guard" ||
-            code === "duplicate_dispatch_retry_required" ||
-            code === "provider_runtime_mismatch"
-          );
-        })
+        .filter((decision) => isNonUsefulReadyBlockerCode(decision.metadata?.code))
         .map((decision) => decision.item_id)
         .filter((itemId): itemId is string => !!itemId),
     );
+    const usefulReady = ordered.length - nonUsefulItemIds.size;
     const admittedItemIds = new Set(plan.admit.map((item) => item.item_id));
     const laneCounts = new Map<string, { lane: string; raw_ready: number; useful_ready: number; admissible_now: number; blocked: number }>();
     for (const item of ordered) {
@@ -1197,17 +1221,20 @@ export class ContinuousOrchestrationDaemon {
       laneCounts.set(lane, counts);
     }
     const staleReadyFloor =
-      ordered.length >= config.min_ready_fuel && plan.admit.length < config.min_ready_fuel && plan.skipped.length > 0;
+      (usefulReady < config.min_ready_fuel && ordered.length > 0) ||
+      (usefulReady >= config.min_ready_fuel && plan.admit.length < config.min_ready_fuel && plan.skipped.length > 0);
     const blockedLanes = readyAdmissionBlockedLanes(plan, byId);
     const recommendedAction = readyAdmissionRecommendedAction({
       candidates: ordered.length,
+      usefulReady,
       admissibleNow: plan.admit.length,
+      minReadyFuel: config.min_ready_fuel,
       blockerCounts,
       blockedLanes,
     });
     return {
       candidates: ordered.length,
-      useful_ready: ordered.length - nonUsefulItemIds.size,
+      useful_ready: usefulReady,
       admissible_now: plan.admit.length,
       lanes: {
         raw_ready: new Set(ordered.map(laneKeyOf)).size,
@@ -1254,7 +1281,9 @@ export class ContinuousOrchestrationDaemon {
         admissible: plan.admit.length,
         min_ready_fuel: config.min_ready_fuel,
         reason: staleReadyFloor
-          ? `raw READY floor is satisfied (${ordered.length}) but only ${plan.admit.length} item(s) are admissible`
+          ? usefulReady < config.min_ready_fuel
+            ? `useful_ready_fuel=${usefulReady} is below min_ready_fuel=${config.min_ready_fuel}; raw_ready_fuel=${ordered.length}`
+            : `useful READY floor is satisfied (${usefulReady}) but only ${plan.admit.length} item(s) are admissible`
           : null,
       },
       halted: plan.halt?.reason ?? null,

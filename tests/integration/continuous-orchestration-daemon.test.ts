@@ -1424,6 +1424,7 @@ describe("daemon — dry-run vs live", () => {
         dry_run: true,
         auto_flesh_enabled: false,
         auto_promote_enabled: false,
+        min_ready_fuel: 12,
         max_in_flight: 20,
         max_new_per_tick: 20,
       },
@@ -1439,6 +1440,26 @@ describe("daemon — dry-run vs live", () => {
 
     expect(res.status).toBe(200);
     expect(res.body.counts.ready).toBe(4);
+    expect(res.body.counts).toMatchObject({
+      raw_ready_fuel: 4,
+      useful_ready_fuel: 2,
+      admissible_now: 2,
+      stale_ready_fuel: true,
+    });
+    expect(res.body.ready_admission).toMatchObject({
+      candidates: 4,
+      useful_ready: 2,
+      admissible_now: 2,
+      recommended_action:
+        "useful_ready_fuel=2 is below min_ready_fuel=12; run auto-promote/flesh for safe backlog candidates or reroute target_unhealthy=2 rows to compatible healthy agents",
+      stale_ready_floor: {
+        stale: true,
+        ready: 4,
+        admissible: 2,
+        min_ready_fuel: 12,
+        reason: "useful_ready_fuel=2 is below min_ready_fuel=12; raw_ready_fuel=4",
+      },
+    });
     expect(res.body.counts.admissible_now).toBe(2);
     expect(res.body.ready_admission.blocker_counts).toEqual([
       { code: "target_unhealthy", category: "runtime_unavailable", count: 2 },
@@ -1462,6 +1483,40 @@ describe("daemon — dry-run vs live", () => {
     expect(res.body.auto_promote_health.operator_summary.safe_actions[0]).toContain("top off compatible pool fuel");
     expect(res.body.auto_promote_health.operator_summary.summary).toContain("2 admissible row(s)");
     expect(res.body.auto_promote_health.operator_summary.summary).toContain("2 target_unhealthy row(s)");
+  });
+
+  it("status clears stale zero-admit warnings after a successful admission tick", async () => {
+    await recordTickOutcome(adapter, "default", {
+      zero_ticks: 5,
+      fired: false,
+      admission_block_reasons: {},
+    });
+    const ready = await seedReady(adapter, {
+      title: "fresh admissible recovery row",
+      write_scope: ["repo/recovery"],
+    });
+    const { app, daemon } = mountStatusApp(adapter, {
+      dry_run: false,
+      auto_flesh_enabled: false,
+      auto_promote_enabled: false,
+      max_in_flight: 10,
+      max_new_per_tick: 1,
+    });
+    await daemon.setMode("running");
+
+    const tick = await daemon.runTick();
+    const status = await callApp(app, "/orchestration/status");
+
+    expect(tick.admitted).toEqual([{ item_id: ready.item_id, dispatch_phid: `phid:disp-${ready.item_id}` }]);
+    expect(tick.zero_ticks).toBe(0);
+    expect(status.status).toBe(200);
+    expect(status.body.state.consecutive_zero_ticks).toBe(0);
+    expect(status.body.health.orchestration_loop).toMatchObject({
+      state: "running",
+      severity: "ok",
+      consecutive_zero_ticks: 0,
+    });
+    expect(status.body.health.orchestration_loop.explanation).not.toMatch(/stalled_ready_not_launching|critical/i);
   });
 
   it("status explains retry_safe=false duplicate dispatch holds and live admission does not refire them", async () => {
@@ -1820,7 +1875,7 @@ describe("daemon — dry-run vs live", () => {
         ready: 3,
         admissible: 0,
         min_ready_fuel: 2,
-        reason: "raw READY floor is satisfied (3) but only 0 item(s) are admissible",
+        reason: "useful READY floor is satisfied (2) but only 0 item(s) are admissible",
       },
     });
     expect(saturated.body.ready_admission.blocker_counts).toEqual(
@@ -2217,7 +2272,7 @@ describe("daemon — dry-run vs live", () => {
       candidates: 11,
       admissible_now: 9,
       stale_ready_floor: {
-        stale: false,
+        stale: true,
         ready: 11,
         admissible: 9,
         min_ready_fuel: 12,
