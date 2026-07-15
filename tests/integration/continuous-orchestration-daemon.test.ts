@@ -1133,13 +1133,93 @@ describe("daemon — dry-run vs live", () => {
         prior_dispatch_id: "phid:disp-retryable",
         prior_dispatch_status: "failed",
         retry_safe_required: true,
+        retry_readiness_status: "retryable_failed_row",
         retry_safe_recommendation: "set_true",
         operator_disposition: "retry",
         recommended_disposition: "mark-retry-safe",
         recommended_action: "mark retry_safe only when the operator wants a bounded refire",
+        safe_action_copy: expect.stringContaining("retry_safe=true"),
         stale_duplicate_closeout_receipt_exists: false,
       }),
     ]);
+  });
+
+  it("status distinguishes duplicate-dispatch retry blockers by operator action class", async () => {
+    const retryable = await seedReady(adapter, {
+      title: "retryable failed duplicate",
+      write_scope: ["repo/retryable-duplicate"],
+    });
+    await markReadyAlreadyDispatched(adapter, retryable.item_id, "phid:disp-retryable-class");
+    await seedDispatch(adapter, {
+      dispatch_phid: "phid:disp-retryable-class",
+      status: "failed",
+      failure_kind: "scheduler_wedged",
+      failure_detail: "stale in_flight claim",
+    });
+
+    const stale = await seedReady(adapter, {
+      title: "stale done duplicate",
+      write_scope: ["repo/stale-duplicate"],
+    });
+    await markReadyAlreadyDispatched(adapter, stale.item_id, "phid:disp-stale-class");
+    await seedDispatch(adapter, { dispatch_phid: "phid:disp-stale-class", status: "done" });
+
+    const live = await seedReady(adapter, {
+      title: "waiting live duplicate",
+      write_scope: ["repo/live-duplicate"],
+    });
+    await markReadyAlreadyDispatched(adapter, live.item_id, "phid:disp-live-class");
+    await seedDispatch(adapter, { dispatch_phid: "phid:disp-live-class", status: "in_flight" });
+
+    const nonRetryable = await seedReady(adapter, {
+      title: "non retryable failed duplicate",
+      write_scope: ["repo/non-retryable-duplicate"],
+    });
+    await markReadyAlreadyDispatched(adapter, nonRetryable.item_id, "phid:disp-non-retryable-class");
+    await seedDispatch(adapter, {
+      dispatch_phid: "phid:disp-non-retryable-class",
+      status: "failed",
+      failure_kind: "unsafe_side_effect",
+      failure_detail: "repository state ambiguous",
+    });
+
+    const { app, daemon } = mountStatusApp(adapter, {
+      dry_run: true,
+      auto_flesh_enabled: false,
+      auto_promote_enabled: false,
+    });
+    await daemon.setMode("running");
+
+    const res = await callApp(app, "/orchestration/status");
+
+    expect(res.status).toBe(200);
+    const byId = Object.fromEntries(
+      res.body.health.ready_item_blockers.items.map((item: any) => [item.item_id, item]),
+    );
+    expect(byId[retryable.item_id]).toMatchObject({
+      retry_readiness_status: "retryable_failed_row",
+      retry_safe_recommendation: "set_true",
+      operator_disposition: "retry",
+      safe_action_copy: expect.stringContaining("bounded refire"),
+    });
+    expect(byId[stale.item_id]).toMatchObject({
+      retry_readiness_status: "stale_duplicate",
+      retry_safe_recommendation: "leave_false",
+      operator_disposition: "close",
+      safe_action_copy: expect.stringContaining("do not refire"),
+    });
+    expect(byId[live.item_id]).toMatchObject({
+      retry_readiness_status: "waiting_on_live_dispatch",
+      retry_safe_recommendation: "leave_false",
+      operator_disposition: "hold",
+      safe_action_copy: expect.stringContaining("wait on the live prior dispatch"),
+    });
+    expect(byId[nonRetryable.item_id]).toMatchObject({
+      retry_readiness_status: "non_retryable_failed_row",
+      retry_safe_recommendation: "leave_false",
+      operator_disposition: "close",
+      safe_action_copy: expect.stringContaining("operator review required"),
+    });
   });
 
   it("marks only failed retryable duplicate-dispatch ready rows retry-safe and clears the status blocker", async () => {
@@ -1758,11 +1838,22 @@ describe("daemon — dry-run vs live", () => {
         }),
       }),
     ]);
+    expect(status.body.health.ready_item_blockers.items).toEqual([
+      expect.objectContaining({
+        item_id: duplicate.item_id,
+        retry_readiness_status: "stale_duplicate",
+        retry_safe_required: true,
+        safe_action_copy: expect.stringContaining("do not refire"),
+      }),
+    ]);
 
     const tick = await daemon.runTick();
 
     expect(tick.admitted).toEqual([]);
     expect(fired).toHaveLength(0);
+    const after = await getBacklogItem(adapter, duplicate.item_id);
+    expect(after?.last_dispatch_phid).toBe("phid:disp-terminal-prior");
+    expect(after?.retry_safe).toBe(false);
     expect(tick.decisions).toEqual([
       expect.objectContaining({
         item_id: duplicate.item_id,

@@ -336,6 +336,8 @@ export interface AutoPromoteOperatorSummary {
   schema_version: "orchestration.auto_promote_operator_summary.v1";
   retryable_failed_rows: number;
   stale_duplicate_rows: number;
+  waiting_on_live_dispatch_rows: number;
+  non_retryable_failed_rows: number;
   confidence_held_rows: number;
   capacity_gated: boolean;
   lane_diversity_topoff_needed: boolean;
@@ -2005,10 +2007,16 @@ async function buildAutoPromoteOperatorSummary(
   );
   let retryableFailedRows = 0;
   let staleDuplicateRows = 0;
+  let waitingOnLiveDispatchRows = 0;
+  let nonRetryableFailedRows = 0;
   for (const item of args.needsReview) {
     const readiness = deriveBacklogRetryReadiness(item, outcomes.get(item.last_dispatch_phid ?? ""));
     if (readiness.status === "retryable_failed_row") retryableFailedRows += 1;
     if (readiness.status === "stale_duplicate") staleDuplicateRows += 1;
+    if (readiness.status === "waiting_on_live_dispatch") waitingOnLiveDispatchRows += 1;
+    if (readiness.status === "non_retryable_failed_row" || readiness.status === "retry_cap_reached") {
+      nonRetryableFailedRows += 1;
+    }
   }
 
   const confidenceHeldRows = args.skippedItems.filter((item) =>
@@ -2021,6 +2029,8 @@ async function buildAutoPromoteOperatorSummary(
     args.candidatesConsidered > 0 ||
     retryableFailedRows > 0 ||
     staleDuplicateRows > 0 ||
+    waitingOnLiveDispatchRows > 0 ||
+    nonRetryableFailedRows > 0 ||
     confidenceHeldRows > 0;
   const laneDiversityDeficit = Math.max(0, args.minLanes - args.buildReadyLanes);
   const laneDiversityTopoffNeeded = laneDiversityDeficit > 0;
@@ -2045,6 +2055,16 @@ async function buildAutoPromoteOperatorSummary(
       "For stale duplicate rows whose prior dispatch is done, moot, or superseded, close them with a stale_duplicate_closeout_receipt; do not refire.",
     );
   }
+  if (waitingOnLiveDispatchRows > 0) {
+    safeActions.push(
+      "For waiting_on_live_dispatch rows, wait on the prior dispatch or supersede after operator review; do not refire while the prior dispatch is live or unreadable.",
+    );
+  }
+  if (nonRetryableFailedRows > 0) {
+    safeActions.push(
+      "For non_retryable_failed_row rows, supersede or replace after operator review; do not mark retry_safe for an automatic refire.",
+    );
+  }
   if (confidenceHeldRows > 0) {
     safeActions.push("Re-flesh confidence-held rows or manually approve them after review.");
   }
@@ -2066,12 +2086,14 @@ async function buildAutoPromoteOperatorSummary(
     : "no ready or needs_review build fuel is currently visible";
   const capacityDetail = args.capacityOccupied ? ` ready_plus_in_flight=${args.readyPlusInFlight};` : "";
   const summary = hasGatedFuel
-    ? `${prefix}${capacityDetail} retryable_failed_rows=${retryableFailedRows}, stale_duplicate_rows=${staleDuplicateRows}, confidence_held_rows=${confidenceHeldRows}; safe actions: ${safeActions.join(" ")}`
+    ? `${prefix}${capacityDetail} retryable_failed_rows=${retryableFailedRows}, stale_duplicate_rows=${staleDuplicateRows}, waiting_on_live_dispatch_rows=${waitingOnLiveDispatchRows}, non_retryable_failed_rows=${nonRetryableFailedRows}, confidence_held_rows=${confidenceHeldRows}; safe actions: ${safeActions.join(" ")}`
     : "no ready or needs_review build fuel is currently visible";
   return {
     schema_version: "orchestration.auto_promote_operator_summary.v1",
     retryable_failed_rows: retryableFailedRows,
     stale_duplicate_rows: staleDuplicateRows,
+    waiting_on_live_dispatch_rows: waitingOnLiveDispatchRows,
+    non_retryable_failed_rows: nonRetryableFailedRows,
     confidence_held_rows: confidenceHeldRows,
     capacity_gated: args.capacityOccupied,
     lane_diversity_topoff_needed: laneDiversityTopoffNeeded,
