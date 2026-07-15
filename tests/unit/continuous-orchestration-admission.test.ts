@@ -537,7 +537,7 @@ describe("planAdmission — RD-014 agent-health gate", () => {
     expect(p.skipped[0].item_id).toBe("a");
   });
 
-  it("rejects a POOL item whose assigned builder is not healthy", () => {
+  it("holds a POOL item when no free builder is healthy", () => {
     const p = planAdmission(
       [item({ item_id: "pool-item", write_scope: [] })],
       ctx({
@@ -550,7 +550,26 @@ describe("planAdmission — RD-014 agent-health gate", () => {
       cfg,
     );
     expect(p.admit).toHaveLength(0);
-    expect(p.skipped[0].reason).toMatch(/target agent 'substrate-api-codex' is not healthy/);
+    expect(p.skipped[0].metadata?.code).toBe("no_free_pool_builder");
+    expect(p.skipped[0].reason).toMatch(/no healthy free builder in pool: backend/);
+  });
+
+  it("assigns a later healthy builder instead of hiding pool work as target_unhealthy", () => {
+    const p = planAdmission(
+      [item({ item_id: "pool-item", to_agent: "pool:builder", write_scope: [] })],
+      ctx({
+        admit_limit: 5,
+        pool_for: () => "backend",
+        pool_free_slots: new Map([["backend", 1]]),
+        pool_free_builders: new Map([["backend", ["roger", "substrate-orch-codex"]]]),
+        healthy_agents: new Set(["substrate-orch-codex"]),
+      }),
+      cfg,
+    );
+
+    expect(p.admit.map((it) => it.item_id)).toEqual(["pool-item"]);
+    expect(p.assignments["pool-item"]).toBe("substrate-orch-codex");
+    expect(p.skipped).toHaveLength(0);
   });
 
   it("admits a POOL item whose assigned builder IS healthy", () => {

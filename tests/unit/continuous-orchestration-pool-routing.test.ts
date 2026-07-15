@@ -128,6 +128,21 @@ describe("continuous orchestration pool routing", () => {
     expect(pool?.members).toContain("regina");
   });
 
+  it("routes the legacy pool:builder sentinel to the backend builder pool", () => {
+    const pools = buildPoolRouting({});
+    const pool = pools.poolForItem(
+      item({
+        to_agent: "pool:builder",
+        title: "Wave78 P0: Repair target-unhealthy runtime map",
+        dispatch_body: "[project: kapelle][T-ORCH][BUILD] repair builder-pool runtime health",
+        write_scope: ["/Users/kilgore/Dropbox/Code/cane/id-agents"],
+      }),
+    );
+
+    expect(pool?.pool_id).toBe("backend");
+    expect(pool?.members).toEqual(["roger", "substrate-orch-codex", "substrate-api-codex"]);
+  });
+
   it("honors a backend-track operator target instead of rerouting to frontend or roger", () => {
     const pools = buildPoolRouting({});
     const backendItem = item({
