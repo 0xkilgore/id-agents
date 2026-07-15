@@ -53,8 +53,9 @@ async function seedDispatch(overrides: {
   failure_kind?: string | null;
   failure_detail?: string | null;
   promotion_result_json?: string | null;
+  updated_at?: string;
 }) {
-  const now = "2026-07-13T00:00:00.000Z";
+  const now = overrides.updated_at ?? "2026-07-13T00:00:00.000Z";
   await adapter.query(
     `INSERT INTO dispatch_scheduler_queue
        (dispatch_phid, team_id, query_id, to_agent, from_actor, channel, subject,
@@ -89,6 +90,7 @@ async function seedReadyBlocker(overrides: {
   to_agent?: string | null;
   retry_safe?: boolean;
   state?: "ready" | "needs_review" | "done";
+  created_at?: string;
 }) {
   const item = await insertBacklogItem(adapter, {
     title: overrides.title,
@@ -99,6 +101,15 @@ async function seedReadyBlocker(overrides: {
     write_scope: ["cane/id-agents"],
     retry_safe: overrides.retry_safe,
   });
+  if (overrides.created_at) {
+    await adapter.query(
+      `UPDATE orchestration_backlog_item
+          SET created_at = $1,
+              updated_at = $2
+        WHERE item_id = $3`,
+      [overrides.created_at, overrides.created_at, item.item_id],
+    );
+  }
   await setItemState(adapter, item.item_id, overrides.state ?? "ready", { dispatch_phid: overrides.phid });
   return item;
 }
@@ -114,11 +125,13 @@ async function stateCounts() {
 }
 
 describe("GET /orchestration/backlog/duplicate-dispatch-retry-blockers", () => {
-  it("classifies terminal, non-terminal, and retry-safe duplicate ready blockers without mutating", async () => {
+  it("classifies terminal, linked-query-expired, failed verification, needs-input, queued, and retry-safe blockers without mutating", async () => {
     await seedDispatch({ phid: "phid:done", status: "done" });
     await seedDispatch({ phid: "phid:cancelled", status: "cancelled" });
     await seedDispatch({ phid: "phid:superseded", status: "superseded" });
     await seedDispatch({ phid: "phid:in-flight", status: "in_flight" });
+    await seedDispatch({ phid: "phid:queued", status: "queued" });
+    await seedDispatch({ phid: "phid:needs-input", status: "needs_clarification" });
     await seedDispatch({
       phid: "phid:retryable",
       status: "failed",
@@ -126,16 +139,47 @@ describe("GET /orchestration/backlog/duplicate-dispatch-retry-blockers", () => {
       failure_detail: "stale in_flight claim",
     });
     await seedDispatch({
+      phid: "phid:linked-query-expired",
+      status: "failed",
+      failure_kind: "agent_error",
+      failure_detail: "linked query terminated expired",
+    });
+    await seedDispatch({
+      phid: "phid:failed-verification",
+      status: "failed",
+      failure_kind: "agent_error",
+      failure_detail: "promotion verification failed",
+      promotion_result_json: JSON.stringify({
+        required: true,
+        completed: false,
+        repos: [{ verified: false, path: "/repo" }],
+      }),
+    });
+    await seedDispatch({
       phid: "phid:promoted",
       status: "failed",
       promotion_result_json: JSON.stringify({ completed: true, repos: [{ verified: true }] }),
     });
 
-    const done = await seedReadyBlocker({ title: "done duplicate", phid: "phid:done" });
+    const done = await seedReadyBlocker({
+      title: "done duplicate",
+      phid: "phid:done",
+      created_at: "2026-07-10T00:00:00.000Z",
+    });
     const cancelled = await seedReadyBlocker({ title: "cancelled duplicate", phid: "phid:cancelled", to_agent: "hopper" });
     const superseded = await seedReadyBlocker({ title: "superseded duplicate", phid: "phid:superseded" });
     const live = await seedReadyBlocker({ title: "live duplicate", phid: "phid:in-flight" });
+    const queued = await seedReadyBlocker({ title: "queued duplicate", phid: "phid:queued" });
+    const needsInput = await seedReadyBlocker({ title: "needs input duplicate", phid: "phid:needs-input" });
     const retryable = await seedReadyBlocker({ title: "retryable duplicate", phid: "phid:retryable" });
+    const linkedQueryExpired = await seedReadyBlocker({
+      title: "linked query expired duplicate",
+      phid: "phid:linked-query-expired",
+    });
+    const failedVerification = await seedReadyBlocker({
+      title: "failed verification duplicate",
+      phid: "phid:failed-verification",
+    });
     const promoted = await seedReadyBlocker({ title: "promoted duplicate", phid: "phid:promoted" });
     await seedReadyBlocker({ title: "operator approved retry", phid: "phid:retryable", retry_safe: true });
     await seedReadyBlocker({ title: "needs review duplicate", phid: "phid:done", state: "needs_review" });
@@ -149,8 +193,10 @@ describe("GET /orchestration/backlog/duplicate-dispatch-retry-blockers", () => {
     expect(r.body.report).toMatchObject({
       schema_version: "orchestration.duplicate_dispatch_retry_classification.v2",
       dry_run: true,
-      scanned: 7,
-      count: 6,
+      scanned: 11,
+      count: 10,
+      oldest_age_ms: expect.any(Number),
+      oldest_age_hours: expect.any(Number),
     });
     expect(after).toEqual(before);
 
@@ -162,6 +208,10 @@ describe("GET /orchestration/backlog/duplicate-dispatch-retry-blockers", () => {
       retry_safe_recommendation: "leave_false",
       recommended_disposition: "close",
       owner: "roger",
+      failure_kind: null,
+      failure_class: "stale_duplicate",
+      age_ms: expect.any(Number),
+      age_hours: expect.any(Number),
     });
     expect(byId[promoted.item_id]).toMatchObject({
       prior_dispatch_id: "phid:promoted",
@@ -169,12 +219,14 @@ describe("GET /orchestration/backlog/duplicate-dispatch-retry-blockers", () => {
       operator_disposition: "close",
       retry_safe_recommendation: "leave_false",
       recommended_disposition: "close",
+      failure_class: "stale_duplicate",
     });
     expect(byId[cancelled.item_id]).toMatchObject({
       prior_dispatch_id: "phid:cancelled",
       operator_disposition: "close",
       retry_safe_recommendation: "leave_false",
       recommended_disposition: "supersede",
+      failure_class: "stale_duplicate",
       owner: "hopper",
     });
     expect(byId[superseded.item_id]).toMatchObject({
@@ -183,6 +235,7 @@ describe("GET /orchestration/backlog/duplicate-dispatch-retry-blockers", () => {
       operator_disposition: "close",
       retry_safe_recommendation: "leave_false",
       recommended_disposition: "supersede",
+      failure_class: "stale_duplicate",
     });
     expect(byId[live.item_id]).toMatchObject({
       prior_dispatch_id: "phid:in-flight",
@@ -190,6 +243,23 @@ describe("GET /orchestration/backlog/duplicate-dispatch-retry-blockers", () => {
       operator_disposition: "hold",
       retry_safe_recommendation: "leave_false",
       recommended_disposition: "supersede",
+      failure_class: "live_or_queued",
+    });
+    expect(byId[queued.item_id]).toMatchObject({
+      prior_dispatch_id: "phid:queued",
+      prior_dispatch_status: "queued",
+      operator_disposition: "hold",
+      retry_safe_recommendation: "leave_false",
+      recommended_disposition: "supersede",
+      failure_class: "live_or_queued",
+    });
+    expect(byId[needsInput.item_id]).toMatchObject({
+      prior_dispatch_id: "phid:needs-input",
+      prior_dispatch_status: "needs_clarification",
+      operator_disposition: "hold",
+      retry_safe_recommendation: "leave_false",
+      recommended_disposition: "supersede",
+      failure_class: "needs_input",
     });
     expect(byId[retryable.item_id]).toMatchObject({
       prior_dispatch_id: "phid:retryable",
@@ -197,6 +267,29 @@ describe("GET /orchestration/backlog/duplicate-dispatch-retry-blockers", () => {
       operator_disposition: "retry",
       retry_safe_recommendation: "set_true",
       recommended_disposition: "mark-retry-safe",
+      failure_class: "retryable_transient",
     });
+    expect(byId[linkedQueryExpired.item_id]).toMatchObject({
+      prior_dispatch_id: "phid:linked-query-expired",
+      prior_dispatch_status: "failed",
+      failure_kind: "agent_error",
+      failure_detail: "linked query terminated expired",
+      failure_class: "linked_query_expired",
+      operator_disposition: "retry",
+      retry_safe_recommendation: "set_true",
+      recommended_disposition: "mark-retry-safe",
+    });
+    expect(byId[failedVerification.item_id]).toMatchObject({
+      prior_dispatch_id: "phid:failed-verification",
+      prior_dispatch_status: "failed",
+      failure_kind: "agent_error",
+      failure_detail: "promotion verification failed",
+      failure_class: "failed_verification",
+      operator_disposition: "hold",
+      retry_safe_recommendation: "leave_false",
+      recommended_disposition: "supersede",
+    });
+    expect(r.body.report.oldest_age_ms).toBeGreaterThanOrEqual(byId[done.item_id].age_ms);
+    expect(r.body.report.oldest_age_hours).toBeGreaterThanOrEqual(byId[done.item_id].age_hours);
   });
 });
