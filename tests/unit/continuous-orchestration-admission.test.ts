@@ -70,19 +70,21 @@ function ctx(over: Partial<AdmissionContext> = {}): AdmissionContext {
 }
 
 function disk(state: DiskHeadroomState): DiskHeadroom {
+  const GiB = 1024 ** 3;
+  const availableGib = state === "critical" ? 4 : state === "warn" ? 8 : 20;
   return {
     schema_version: "disk-headroom.v1",
     state,
     path: "/tmp",
-    free_bytes: 8,
-    available_bytes: state === "critical" ? 4 : state === "warn" ? 8 : 20,
-    total_bytes: 100,
-    free_gib: 8,
-    available_gib: state === "critical" ? 4 : state === "warn" ? 8 : 20,
+    free_bytes: availableGib * GiB,
+    available_bytes: availableGib * GiB,
+    total_bytes: 100 * GiB,
+    free_gib: availableGib,
+    available_gib: availableGib,
     total_gib: 100,
     used_percent: 92,
-    min_free_bytes: 5,
-    warn_free_bytes: 10,
+    min_free_bytes: 5 * GiB,
+    warn_free_bytes: 10 * GiB,
     reason: state === "ok" ? null : `disk ${state}`,
   };
 }
@@ -191,13 +193,15 @@ describe("admission picks lane-diverse items (fair order + pool gate)", () => {
     const cleanup = item({ item_id: "cleanup", title: "Disk cleanup: prune old worktrees" });
     const deploySafe = item({ item_id: "deploy-safe", track: "T-DEPLOY", title: "Promote verified build to main" });
     const ordinary = item({ item_id: "ordinary", title: "Build new dashboard feature" });
+    const warningDisk = disk("warn");
 
     expect(isDiskCleanupAdmissionItem(cleanup)).toBe(true);
     expect(isDeploySafeAdmissionItem(deploySafe)).toBe(true);
+    expect(warningDisk.available_gib).toBeLessThan(10);
 
     const p = planAdmission(
       [cleanup, deploySafe, ordinary],
-      ctx({ disk_headroom: disk("warn") }),
+      ctx({ disk_headroom: warningDisk }),
       cfg,
     );
 
@@ -206,7 +210,14 @@ describe("admission picks lane-diverse items (fair order + pool gate)", () => {
       expect.objectContaining({
         item_id: "ordinary",
         action: "held",
-        metadata: expect.objectContaining({ code: "disk_warning_floor", class: "infra_resource" }),
+        metadata: expect.objectContaining({
+          code: "disk_warning_floor",
+          class: "infra_resource",
+          available_bytes: 8 * 1024 ** 3,
+          warn_free_bytes: 10 * 1024 ** 3,
+          cleanup_safe: false,
+          deploy_safe: false,
+        }),
       }),
     ]);
   });

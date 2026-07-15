@@ -42,19 +42,21 @@ const okUsage = (used = 0): { view: UsageGateView; daily_tokens_used: number } =
 });
 
 function diskHeadroom(state: DiskHeadroomState): DiskHeadroom {
+  const GiB = 1024 ** 3;
+  const availableGib = state === "critical" ? 4 : state === "warn" ? 8 : 20;
   return {
     schema_version: "disk-headroom.v1",
     state,
     path: "/tmp",
-    free_bytes: 8,
-    available_bytes: state === "critical" ? 4 : state === "warn" ? 8 : 20,
-    total_bytes: 100,
-    free_gib: 8,
-    available_gib: state === "critical" ? 4 : state === "warn" ? 8 : 20,
+    free_bytes: availableGib * GiB,
+    available_bytes: availableGib * GiB,
+    total_bytes: 100 * GiB,
+    free_gib: availableGib,
+    available_gib: availableGib,
     total_gib: 100,
     used_percent: 92,
-    min_free_bytes: 5,
-    warn_free_bytes: 10,
+    min_free_bytes: 5 * GiB,
+    warn_free_bytes: 10 * GiB,
     reason: state === "ok" ? null : `disk ${state}`,
   };
 }
@@ -99,7 +101,7 @@ function makeDaemon(
     resolveAgentHealth: over.resolveAgentHealth,
     resolveAgentRuntimes: over.resolveAgentRuntimes,
     resolveAllAgentRuntimes: over.resolveAllAgentRuntimes,
-    readDiskHeadroom: over.readDiskHeadroom,
+    readDiskHeadroom: over.readDiskHeadroom ?? (() => diskHeadroom("ok")),
     alert: async (m) => {
       alerts.push(m);
     },
@@ -1192,7 +1194,11 @@ describe("daemon — dry-run vs live", () => {
     const res = await callApp(app, "/orchestration/status");
 
     expect(res.status).toBe(200);
-    expect(res.body.disk_headroom).toMatchObject({ state: "warn", available_bytes: 8, warn_free_bytes: 10 });
+    expect(res.body.disk_headroom).toMatchObject({
+      state: "warn",
+      available_gib: 8,
+      warn_free_bytes: 10 * 1024 ** 3,
+    });
     expect(res.body.ready_admission.admissible.map((row: any) => row.title).sort()).toEqual([
       "disk cleanup old worktrees",
       "promote verified deploy",
@@ -1214,6 +1220,56 @@ describe("daemon — dry-run vs live", () => {
       category: "infra_resource",
       count: 1,
     });
+  });
+
+  it("health names one deduplicated disk-warning incident while cleanup and deploy-safe rows remain admissible", async () => {
+    await seedReady(adapter, {
+      title: "ordinary feature build A",
+      dispatch_body: "implement normal feature A",
+      write_scope: ["repo/ordinary-a"],
+    });
+    await seedReady(adapter, {
+      title: "ordinary feature build B",
+      dispatch_body: "implement normal feature B",
+      write_scope: ["repo/ordinary-b"],
+    });
+    await seedReady(adapter, {
+      title: "disk cleanup old worktrees",
+      dispatch_body: "cleanup old worktrees to reclaim disk",
+      write_scope: ["repo/cleanup"],
+    });
+    await seedReady(adapter, {
+      title: "promote verified deploy",
+      track: "T-DEPLOY",
+      dispatch_body: "promote verified build to main",
+      write_scope: ["repo/deploy"],
+    });
+    const { app, daemon } = mountStatusApp(
+      adapter,
+      { dry_run: true, min_ready_fuel: 12, max_in_flight: 20, max_new_per_tick: 20 },
+      { readDiskHeadroom: () => diskHeadroom("warn") },
+    );
+    await daemon.setMode("running");
+
+    const health = await callApp(app, "/orchestration/health");
+
+    expect(health.status).toBe(200);
+    expect(health.body.ready_item_blockers).toMatchObject({
+      ready: 4,
+      admissible_now: 2,
+      stale_ready_fuel: {
+        active: true,
+        counts_by_blocker_class: [
+          {
+            code: "disk_warning_floor",
+            category: "infra_resource",
+            count: 2,
+          },
+        ],
+      },
+    });
+    expect(health.body.ready_item_blockers.recommended_action).toContain("disk_warning_floor=2");
+    expect(health.body.ready_item_blockers.recommended_action.match(/disk_warning_floor/g)).toHaveLength(1);
   });
 
   it("status explains disk-critical holds for non-cleanup rows", async () => {
@@ -1238,7 +1294,11 @@ describe("daemon — dry-run vs live", () => {
     const res = await callApp(app, "/orchestration/status");
 
     expect(res.status).toBe(200);
-    expect(res.body.disk_headroom).toMatchObject({ state: "critical", available_bytes: 4, min_free_bytes: 5 });
+    expect(res.body.disk_headroom).toMatchObject({
+      state: "critical",
+      available_gib: 4,
+      min_free_bytes: 5 * 1024 ** 3,
+    });
     expect(res.body.ready_admission.admissible.map((row: any) => row.title)).toEqual([
       "disk cleanup node_modules caches",
     ]);
