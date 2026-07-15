@@ -27,6 +27,7 @@
 //     (non-blocking warning, not an abort). Opt out with --strict-smoke.
 
 import { spawn } from "node:child_process";
+import { rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { appendAgentTrailer, sanitizeAgentName } from "../lib/agent-attribution.js";
@@ -434,148 +435,158 @@ export async function runPromoteToMain(
   // Switch to base + update from remote.
   let execRepo = repo;
   let worktreeFallback: PromoteResult["worktree_fallback"];
-  let checkoutOut = await deps.git(["checkout", base], execRepo);
-  if (checkoutOut.code !== 0 && !noWorktreeFallback) {
-    // T-RELY snag #15: `repo` is a shared worktree and something else has it
-    // contended/dirty right now (a different branch checked out, unrelated
-    // uncommitted state, etc). Never touch or clean someone else's worktree —
-    // fall back to a disposable clone off the real remote and finish the
-    // promotion there instead of stalling on a needs_clarification round-trip.
-    const fallback = await createWorktreeFallbackClone({ repo, branch, base, remote }, deps, io);
-    if (fallback) {
-      execRepo = fallback.workdir;
-      worktreeFallback = { workdir: fallback.workdir, reason: checkoutOut.stderr.trim() };
-      checkoutOut = await deps.git(["checkout", base], execRepo);
+  try {
+    let checkoutOut = await deps.git(["checkout", base], execRepo);
+    if (checkoutOut.code !== 0 && !noWorktreeFallback) {
+      // T-RELY snag #15: `repo` is a shared worktree and something else has it
+      // contended/dirty right now (a different branch checked out, unrelated
+      // uncommitted state, etc). Never touch or clean someone else's worktree —
+      // fall back to a disposable clone off the real remote and finish the
+      // promotion there instead of stalling on a needs_clarification round-trip.
+      const fallback = await createWorktreeFallbackClone({ repo, branch, base, remote }, deps, io);
+      if (fallback) {
+        execRepo = fallback.workdir;
+        worktreeFallback = { workdir: fallback.workdir, reason: checkoutOut.stderr.trim() };
+        checkoutOut = await deps.git(["checkout", base], execRepo);
+      }
     }
-  }
-  if (checkoutOut.code !== 0) {
-    io.stderr(`git checkout ${base} failed: ${checkoutOut.stderr}\n`);
-    return { exit: 7, result: null };
-  }
-  const pullOut = await deps.git(["merge", "--ff-only", `${remote}/${base}`], execRepo);
-  if (pullOut.code !== 0) {
-    io.stderr(`git merge --ff-only ${remote}/${base} failed: ${pullOut.stderr}\n`);
-    return { exit: 7, result: null };
-  }
-
-  // Apply chosen strategy.
-  let mergeOut;
-  if (resolvedStrategy === "fast_forward") {
-    mergeOut = await deps.git(["merge", "--ff-only", branch], execRepo);
-  } else if (resolvedStrategy === "squash") {
-    const squashOut = await deps.git(["merge", "--squash", branch], execRepo);
-    if (squashOut.code !== 0) {
-      io.stderr(`git merge --squash ${branch} failed: ${squashOut.stderr}\n`);
+    if (checkoutOut.code !== 0) {
+      io.stderr(`git checkout ${base} failed: ${checkoutOut.stderr}\n`);
       return { exit: 7, result: null };
     }
-    const body = buildSquashCommitBody({
-      featureName: branch,
-      branch,
-      sourceTip: branchTip,
-      verification: smoke,
-      dispatchId,
-      agent: effectiveAgent,
-    });
-    mergeOut = await deps.git(["commit", "-m", body], execRepo);
-  } else {
-    // merge_commit
-    const mergeMsg = appendAgentTrailer(`Merge ${branch} into ${base}`, effectiveAgent);
-    mergeOut = await deps.git(
-      ["merge", "--no-ff", "-m", mergeMsg, branch],
-      execRepo,
-    );
-  }
-  if (mergeOut.code !== 0) {
-    io.stderr(`merge step failed: ${mergeOut.stderr}\n`);
-    return { exit: 8, result: null };
-  }
+    const pullOut = await deps.git(["merge", "--ff-only", `${remote}/${base}`], execRepo);
+    if (pullOut.code !== 0) {
+      io.stderr(`git merge --ff-only ${remote}/${base} failed: ${pullOut.stderr}\n`);
+      return { exit: 7, result: null };
+    }
 
-  const promotedSha = (await deps.git(["rev-parse", base], execRepo)).stdout.trim();
-
-  // Step 6: Smoke command (between merge and push).
-  let smokeAnnotation: PromoteResult["smoke"];
-  if (smoke) {
-    const smokeOut = await deps.exec(smoke, execRepo);
-    if (smokeOut.code !== 0) {
-      // T-QA.7 trap fix: a non-zero smoke aborts as before UNLESS the operator
-      // declared --smoke-exempt globs AND every failing test file matches one of
-      // them (a flaky/unrelated red test must not block an otherwise-clean
-      // promotion). With no globs, classification.all_exempt is always false, so
-      // this path is byte-identical to the prior behavior.
-      const classification = classifySmokeFailures(`${smokeOut.stdout}\n${smokeOut.stderr}`, smokeExempt);
-      let effectiveExempt = classification.exempt;
-      let effectiveNonExempt = classification.non_exempt;
-      let autoExemptFiles: string[] = [];
-      if (!strictSmoke && effectiveNonExempt.length > 0) {
-        // T-RELY snag #15: a failing test file this branch's own diff never
-        // touched is presumptively pre-existing/unrelated — auto-exempt it by
-        // default instead of blocking on a clarification round-trip. Explicit
-        // --smoke-exempt above still takes priority; this only classifies
-        // whatever it didn't already cover.
-        const diffOut = await deps.git(["diff", "--name-only", `${remoteBaseRef}..${branch}`], repo);
-        // Fail safe: if we can't determine the branch's own changed files,
-        // don't guess — leave every failure non-exempt (today's behavior).
-        if (diffOut.code === 0) {
-          const changedFiles = new Set(diffOut.stdout.split("\n").map((l) => l.trim()).filter(Boolean));
-          autoExemptFiles = effectiveNonExempt.filter((f) => !changedFiles.has(f));
-          effectiveNonExempt = effectiveNonExempt.filter((f) => changedFiles.has(f));
-          effectiveExempt = effectiveExempt.concat(autoExemptFiles);
-        }
+    // Apply chosen strategy.
+    let mergeOut;
+    if (resolvedStrategy === "fast_forward") {
+      mergeOut = await deps.git(["merge", "--ff-only", branch], execRepo);
+    } else if (resolvedStrategy === "squash") {
+      const squashOut = await deps.git(["merge", "--squash", branch], execRepo);
+      if (squashOut.code !== 0) {
+        io.stderr(`git merge --squash ${branch} failed: ${squashOut.stderr}\n`);
+        return { exit: 7, result: null };
       }
-      const allExempt = classification.failing_files.length > 0 && effectiveNonExempt.length === 0;
-      if (allExempt) {
-        smokeAnnotation = {
-          exit_code: smokeOut.code,
-          gate: "passed_with_exempt_failures",
-          exempt_failures: effectiveExempt,
-          ...(autoExemptFiles.length > 0 ? { auto_exempt_failures: autoExemptFiles } : {}),
-        };
-        io.stderr(
-          `smoke exited ${smokeOut.code} but all ${effectiveExempt.length} failing test file(s) are exempt` +
-          (autoExemptFiles.length > 0
-            ? ` (${autoExemptFiles.length} auto-exempt — outside this branch's changed scope, pre-existing/unrelated, non-blocking: ${autoExemptFiles.join(", ")})`
-            : "") +
-          `; proceeding: ${effectiveExempt.join(", ")}\n`,
-        );
-      } else {
-        io.stderr(`smoke command failed (${smoke}):\nSTDOUT: ${smokeOut.stdout}\nSTDERR: ${smokeOut.stderr}\n`);
-        if (effectiveExempt.length > 0) {
-          io.stderr(`did not cover: ${effectiveNonExempt.join(", ")}\n`);
-        }
-        return { exit: 9, result: null };
-      }
+      const body = buildSquashCommitBody({
+        featureName: branch,
+        branch,
+        sourceTip: branchTip,
+        verification: smoke,
+        dispatchId,
+        agent: effectiveAgent,
+      });
+      mergeOut = await deps.git(["commit", "-m", body], execRepo);
     } else {
-      smokeAnnotation = { exit_code: 0, gate: "passed" };
+      // merge_commit
+      const mergeMsg = appendAgentTrailer(`Merge ${branch} into ${base}`, effectiveAgent);
+      mergeOut = await deps.git(
+        ["merge", "--no-ff", "-m", mergeMsg, branch],
+        execRepo,
+      );
+    }
+    if (mergeOut.code !== 0) {
+      io.stderr(`merge step failed: ${mergeOut.stderr}\n`);
+      return { exit: 8, result: null };
+    }
+
+    const promotedSha = (await deps.git(["rev-parse", base], execRepo)).stdout.trim();
+
+    // Step 6: Smoke command (between merge and push).
+    let smokeAnnotation: PromoteResult["smoke"];
+    if (smoke) {
+      const smokeOut = await deps.exec(smoke, execRepo);
+      if (smokeOut.code !== 0) {
+        // T-QA.7 trap fix: a non-zero smoke aborts as before UNLESS the operator
+        // declared --smoke-exempt globs AND every failing test file matches one of
+        // them (a flaky/unrelated red test must not block an otherwise-clean
+        // promotion). With no globs, classification.all_exempt is always false, so
+        // this path is byte-identical to the prior behavior.
+        const classification = classifySmokeFailures(`${smokeOut.stdout}\n${smokeOut.stderr}`, smokeExempt);
+        let effectiveExempt = classification.exempt;
+        let effectiveNonExempt = classification.non_exempt;
+        let autoExemptFiles: string[] = [];
+        if (!strictSmoke && effectiveNonExempt.length > 0) {
+          // T-RELY snag #15: a failing test file this branch's own diff never
+          // touched is presumptively pre-existing/unrelated — auto-exempt it by
+          // default instead of blocking on a clarification round-trip. Explicit
+          // --smoke-exempt above still takes priority; this only classifies
+          // whatever it didn't already cover.
+          const diffOut = await deps.git(["diff", "--name-only", `${remoteBaseRef}..${branch}`], repo);
+          // Fail safe: if we can't determine the branch's own changed files,
+          // don't guess — leave every failure non-exempt (today's behavior).
+          if (diffOut.code === 0) {
+            const changedFiles = new Set(diffOut.stdout.split("\n").map((l) => l.trim()).filter(Boolean));
+            autoExemptFiles = effectiveNonExempt.filter((f) => !changedFiles.has(f));
+            effectiveNonExempt = effectiveNonExempt.filter((f) => changedFiles.has(f));
+            effectiveExempt = effectiveExempt.concat(autoExemptFiles);
+          }
+        }
+        const allExempt = classification.failing_files.length > 0 && effectiveNonExempt.length === 0;
+        if (allExempt) {
+          smokeAnnotation = {
+            exit_code: smokeOut.code,
+            gate: "passed_with_exempt_failures",
+            exempt_failures: effectiveExempt,
+            ...(autoExemptFiles.length > 0 ? { auto_exempt_failures: autoExemptFiles } : {}),
+          };
+          io.stderr(
+            `smoke exited ${smokeOut.code} but all ${effectiveExempt.length} failing test file(s) are exempt` +
+            (autoExemptFiles.length > 0
+              ? ` (${autoExemptFiles.length} auto-exempt — outside this branch's changed scope, pre-existing/unrelated, non-blocking: ${autoExemptFiles.join(", ")})`
+              : "") +
+            `; proceeding: ${effectiveExempt.join(", ")}\n`,
+          );
+        } else {
+          io.stderr(`smoke command failed (${smoke}):\nSTDOUT: ${smokeOut.stdout}\nSTDERR: ${smokeOut.stderr}\n`);
+          if (effectiveExempt.length > 0) {
+            io.stderr(`did not cover: ${effectiveNonExempt.join(", ")}\n`);
+          }
+          return { exit: 9, result: null };
+        }
+      } else {
+        smokeAnnotation = { exit_code: 0, gate: "passed" };
+      }
+    }
+
+    // Step 7: Push (never force).
+    const pushOut = await deps.git(["push", remote, base], execRepo);
+    if (pushOut.code !== 0) {
+      io.stderr(`git push ${remote} ${base} failed: ${pushOut.stderr}\n`);
+      return { exit: 11, result: null };
+    }
+
+    // Step 8: Verify remote matches.
+    const remoteOut = await deps.git(["rev-parse", `${remote}/${base}`], execRepo);
+    const remoteSha = remoteOut.stdout.trim();
+    const verified = remoteSha === promotedSha;
+
+    const exemptNote =
+      smokeAnnotation?.gate === "passed_with_exempt_failures"
+        ? ` (smoke passed with ${smokeAnnotation.exempt_failures?.length ?? 0} exempt failure(s))`
+        : "";
+    const fallbackNote = worktreeFallback ? ` (via worktree fallback clone ${worktreeFallback.workdir})` : "";
+    const result: PromoteResult = {
+      path: repo, base, source_branch: branch, strategy: resolvedStrategy,
+      promoted_sha: promotedSha, remote_main_sha: remoteSha,
+      pushed: true, verified,
+      ...(smokeAnnotation ? { smoke: smokeAnnotation } : {}),
+      ...(worktreeFallback ? { worktree_fallback: worktreeFallback } : {}),
+      summary: `promoted ${branch} -> ${base} on ${remote} (${promotedSha.slice(0, 7)})${exemptNote}${fallbackNote}${verified ? "" : " WARNING: remote SHA mismatch"}`,
+    };
+    io.stdout(json ? JSON.stringify(result, null, 2) + "\n" : result.summary + "\n");
+    return { exit: verified ? 0 : 12, result };
+  } finally {
+    if (worktreeFallback?.workdir) {
+      try {
+        rmSync(worktreeFallback.workdir, { recursive: true, force: true });
+      } catch (err) {
+        io.stderr(`warning: failed to remove temporary promotion fallback clone ${worktreeFallback.workdir}: ${err instanceof Error ? err.message : String(err)}\n`);
+      }
     }
   }
-
-  // Step 7: Push (never force).
-  const pushOut = await deps.git(["push", remote, base], execRepo);
-  if (pushOut.code !== 0) {
-    io.stderr(`git push ${remote} ${base} failed: ${pushOut.stderr}\n`);
-    return { exit: 11, result: null };
-  }
-
-  // Step 8: Verify remote matches.
-  const remoteOut = await deps.git(["rev-parse", `${remote}/${base}`], execRepo);
-  const remoteSha = remoteOut.stdout.trim();
-  const verified = remoteSha === promotedSha;
-
-  const exemptNote =
-    smokeAnnotation?.gate === "passed_with_exempt_failures"
-      ? ` (smoke passed with ${smokeAnnotation.exempt_failures?.length ?? 0} exempt failure(s))`
-      : "";
-  const fallbackNote = worktreeFallback ? ` (via worktree fallback clone ${worktreeFallback.workdir})` : "";
-  const result: PromoteResult = {
-    path: repo, base, source_branch: branch, strategy: resolvedStrategy,
-    promoted_sha: promotedSha, remote_main_sha: remoteSha,
-    pushed: true, verified,
-    ...(smokeAnnotation ? { smoke: smokeAnnotation } : {}),
-    ...(worktreeFallback ? { worktree_fallback: worktreeFallback } : {}),
-    summary: `promoted ${branch} -> ${base} on ${remote} (${promotedSha.slice(0, 7)})${exemptNote}${fallbackNote}${verified ? "" : " WARNING: remote SHA mismatch"}`,
-  };
-  io.stdout(json ? JSON.stringify(result, null, 2) + "\n" : result.summary + "\n");
-  return { exit: verified ? 0 : 12, result };
 }
 
 function buildNeedsClarification(opts: {

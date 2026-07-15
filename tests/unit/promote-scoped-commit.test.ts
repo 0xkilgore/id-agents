@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { existsSync, mkdirSync, rmSync } from "node:fs";
 import {
   maybeRunPromoteScopedCommitCli,
   parsePromoteScopedCommitArgs,
@@ -172,6 +173,59 @@ describe("runPromoteScopedCommit", () => {
     expect(deps.calls).toContainEqual(["git", "/tmp/clean-promo", "cherry-pick", "-x", "FETCH_HEAD"]);
     expect(deps.calls).toContainEqual(["exec", "/tmp/clean-promo", "npm test -- tests/unit/foo.test.ts"]);
     expect(deps.calls).toContainEqual(["git", "/tmp/clean-promo", "push", "origin", "main"]);
+  });
+
+  it("removes auto-created temporary clones after a failed scoped promotion", async () => {
+    let autoWorkdir = "";
+    const deps = fakeGitDeps([
+      { match: (a, cwd) => cwd === "/src/repo" && a[0] === "rev-parse", out: "abc1234567890abcdef\n" },
+      { match: (a, cwd) => cwd === "/src/repo" && a[0] === "rev-list" && a[1] === "--parents", out: "abc1234567890abcdef parent123\n" },
+      { match: (a, cwd) => cwd === "/src/repo" && a[0] === "config" && a[2] === "remote.origin.url", out: "git@github.com:example/id-agents.git\n" },
+      {
+        match: (a, cwd) => {
+          if (cwd !== "/src/repo" || a[0] !== "clone") return false;
+          autoWorkdir = a[3];
+          mkdirSync(autoWorkdir, { recursive: true });
+          return true;
+        },
+        out: "",
+      },
+      { match: (a, cwd) => cwd === autoWorkdir && a[0] === "remote" && a[1] === "set-url", err: "remote failed", code: 1 },
+      { match: (a, cwd) => cwd === autoWorkdir && a[0] === "remote" && a[1] === "add", err: "remote failed", code: 1 },
+    ]);
+    const io = captureIo();
+    const r = await runPromoteScopedCommit({ ...args, workdir: null }, deps, io);
+    expect(r.exit).toBe(4);
+    expect(autoWorkdir).toMatch(/id-agents-promote-scoped-abc123456789-/);
+    expect(existsSync(autoWorkdir)).toBe(false);
+  });
+
+  it("preserves caller-provided workdirs after failure", async () => {
+    const explicitWorkdir = "/tmp/id-agents-promote-scoped-explicit-test";
+    rmSync(explicitWorkdir, { recursive: true, force: true });
+    const deps = fakeGitDeps([
+      { match: (a, cwd) => cwd === "/src/repo" && a[0] === "rev-parse", out: "abc1234567890abcdef\n" },
+      { match: (a, cwd) => cwd === "/src/repo" && a[0] === "rev-list" && a[1] === "--parents", out: "abc1234567890abcdef parent123\n" },
+      { match: (a, cwd) => cwd === "/src/repo" && a[0] === "config" && a[2] === "remote.origin.url", out: "git@github.com:example/id-agents.git\n" },
+      {
+        match: (a, cwd) => {
+          if (cwd !== "/src/repo" || a[0] !== "clone") return false;
+          mkdirSync(explicitWorkdir, { recursive: true });
+          return true;
+        },
+        out: "",
+      },
+      { match: (a, cwd) => cwd === explicitWorkdir && a[0] === "remote" && a[1] === "set-url", err: "remote failed", code: 1 },
+      { match: (a, cwd) => cwd === explicitWorkdir && a[0] === "remote" && a[1] === "add", err: "remote failed", code: 1 },
+    ]);
+    try {
+      const io = captureIo();
+      const r = await runPromoteScopedCommit({ ...args, workdir: explicitWorkdir }, deps, io);
+      expect(r.exit).toBe(4);
+      expect(existsSync(explicitWorkdir)).toBe(true);
+    } finally {
+      rmSync(explicitWorkdir, { recursive: true, force: true });
+    }
   });
 
   it("refuses unrelated commit promotion when the clean branch has more than one ahead commit", async () => {

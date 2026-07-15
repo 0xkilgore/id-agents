@@ -7,6 +7,7 @@
 // promote-to-main.
 
 import { tmpdir } from "node:os";
+import { rmSync } from "node:fs";
 import { join } from "node:path";
 import {
   defaultGitDeps,
@@ -124,6 +125,7 @@ export async function runPromoteScopedCommit(
   const short = resolvedCommit.slice(0, 12);
   const cleanBranch = args.cleanBranch ?? `scoped-promotion/${short}`;
   const workdir = args.workdir ?? join(tmpdir(), `id-agents-promote-scoped-${short}-${Date.now()}`);
+  const cleanupAutoWorkdir = args.workdir === null;
   if (cleanBranch === args.base) {
     io.stderr(`clean branch ${cleanBranch} must not equal base ${args.base}\n`);
     return { exit: 64, result: null };
@@ -152,91 +154,103 @@ export async function runPromoteScopedCommit(
     return { exit: 4, result: null };
   }
 
-  const cloneOut = await deps.git(["clone", "--no-local", args.repo, workdir], args.repo);
-  if (cloneOut.code !== 0) {
-    io.stderr(`git clone failed: ${cloneOut.stderr}\n`);
-    return { exit: 4, result: null };
-  }
-  let remoteSetOut = await deps.git(["remote", "set-url", args.remote, remoteUrl], workdir);
-  if (remoteSetOut.code !== 0) {
-    remoteSetOut = await deps.git(["remote", "add", args.remote, remoteUrl], workdir);
-  }
-  if (remoteSetOut.code !== 0) {
-    io.stderr(`git remote ${args.remote} setup failed: ${remoteSetOut.stderr}\n`);
-    return { exit: 4, result: null };
-  }
-  const fetchBaseOut = await deps.git(["fetch", args.remote, args.base], workdir);
-  if (fetchBaseOut.code !== 0) {
-    io.stderr(`git fetch ${args.remote} ${args.base} failed: ${fetchBaseOut.stderr}\n`);
-    return { exit: 5, result: null };
-  }
-  const checkoutOut = await deps.git(["checkout", "-B", cleanBranch, `${args.remote}/${args.base}`], workdir);
-  if (checkoutOut.code !== 0) {
-    io.stderr(`git checkout clean branch failed: ${checkoutOut.stderr}\n`);
-    return { exit: 6, result: null };
-  }
-  const fetchCommitOut = await deps.git(["fetch", args.repo, resolvedCommit], workdir);
-  if (fetchCommitOut.code !== 0) {
-    io.stderr(`git fetch scoped commit failed: ${fetchCommitOut.stderr}\n`);
-    return { exit: 7, result: null };
-  }
-  const cherryPickOut = await deps.git(["cherry-pick", "-x", "FETCH_HEAD"], workdir);
-  if (cherryPickOut.code !== 0) {
-    io.stderr(`git cherry-pick ${resolvedCommit} failed: ${cherryPickOut.stderr}\n`);
-    return { exit: 8, result: null };
-  }
+  let cloneAttempted = false;
+  try {
+    cloneAttempted = true;
+    const cloneOut = await deps.git(["clone", "--no-local", args.repo, workdir], args.repo);
+    if (cloneOut.code !== 0) {
+      io.stderr(`git clone failed: ${cloneOut.stderr}\n`);
+      return { exit: 4, result: null };
+    }
+    let remoteSetOut = await deps.git(["remote", "set-url", args.remote, remoteUrl], workdir);
+    if (remoteSetOut.code !== 0) {
+      remoteSetOut = await deps.git(["remote", "add", args.remote, remoteUrl], workdir);
+    }
+    if (remoteSetOut.code !== 0) {
+      io.stderr(`git remote ${args.remote} setup failed: ${remoteSetOut.stderr}\n`);
+      return { exit: 4, result: null };
+    }
+    const fetchBaseOut = await deps.git(["fetch", args.remote, args.base], workdir);
+    if (fetchBaseOut.code !== 0) {
+      io.stderr(`git fetch ${args.remote} ${args.base} failed: ${fetchBaseOut.stderr}\n`);
+      return { exit: 5, result: null };
+    }
+    const checkoutOut = await deps.git(["checkout", "-B", cleanBranch, `${args.remote}/${args.base}`], workdir);
+    if (checkoutOut.code !== 0) {
+      io.stderr(`git checkout clean branch failed: ${checkoutOut.stderr}\n`);
+      return { exit: 6, result: null };
+    }
+    const fetchCommitOut = await deps.git(["fetch", args.repo, resolvedCommit], workdir);
+    if (fetchCommitOut.code !== 0) {
+      io.stderr(`git fetch scoped commit failed: ${fetchCommitOut.stderr}\n`);
+      return { exit: 7, result: null };
+    }
+    const cherryPickOut = await deps.git(["cherry-pick", "-x", "FETCH_HEAD"], workdir);
+    if (cherryPickOut.code !== 0) {
+      io.stderr(`git cherry-pick ${resolvedCommit} failed: ${cherryPickOut.stderr}\n`);
+      return { exit: 8, result: null };
+    }
 
-  const aheadOut = await deps.git(["rev-list", "--count", `${args.remote}/${args.base}..${cleanBranch}`], workdir);
-  const ahead = Number(aheadOut.stdout.trim()) || 0;
-  if (ahead !== 1) {
-    io.stderr(`clean branch ${cleanBranch} is ${ahead} commits ahead of ${args.remote}/${args.base}; refusing unrelated commit promotion\n`);
-    return { exit: 9, result: null };
-  }
-  const bodyOut = await deps.git(["log", "-1", "--format=%B", cleanBranch], workdir);
-  if (!bodyOut.stdout.includes(resolvedCommit)) {
-    io.stderr(`clean branch tip does not carry cherry-pick provenance for ${resolvedCommit}; refusing\n`);
-    return { exit: 9, result: null };
-  }
+    const aheadOut = await deps.git(["rev-list", "--count", `${args.remote}/${args.base}..${cleanBranch}`], workdir);
+    const ahead = Number(aheadOut.stdout.trim()) || 0;
+    if (ahead !== 1) {
+      io.stderr(`clean branch ${cleanBranch} is ${ahead} commits ahead of ${args.remote}/${args.base}; refusing unrelated commit promotion\n`);
+      return { exit: 9, result: null };
+    }
+    const bodyOut = await deps.git(["log", "-1", "--format=%B", cleanBranch], workdir);
+    if (!bodyOut.stdout.includes(resolvedCommit)) {
+      io.stderr(`clean branch tip does not carry cherry-pick provenance for ${resolvedCommit}; refusing\n`);
+      return { exit: 9, result: null };
+    }
 
-  const smokeOut = await deps.exec(args.smoke, workdir);
-  if (smokeOut.code !== 0) {
-    io.stderr(`smoke command failed (${args.smoke}):\nSTDOUT: ${smokeOut.stdout}\nSTDERR: ${smokeOut.stderr}\n`);
-    return { exit: 10, result: null };
-  }
+    const smokeOut = await deps.exec(args.smoke, workdir);
+    if (smokeOut.code !== 0) {
+      io.stderr(`smoke command failed (${args.smoke}):\nSTDOUT: ${smokeOut.stdout}\nSTDERR: ${smokeOut.stderr}\n`);
+      return { exit: 10, result: null };
+    }
 
-  const promote = await runPromoteToMain(
-    parsePromoteArgs([
-      "--repo", workdir,
-      "--branch", cleanBranch,
-      "--base", args.base,
-      "--remote", args.remote,
-      "--strategy", "auto",
-      ...(args.dispatchId ? ["--dispatch-id", args.dispatchId] : []),
-      ...(args.agent ? ["--agent", args.agent] : []),
-      "--json",
-      "--execute",
-    ]),
-    deps,
-    { stdout: () => undefined, stderr: io.stderr },
-  );
-  if (promote.exit !== 0 || !promote.result) {
-    return { exit: promote.exit, result: null };
-  }
+    const promote = await runPromoteToMain(
+      parsePromoteArgs([
+        "--repo", workdir,
+        "--branch", cleanBranch,
+        "--base", args.base,
+        "--remote", args.remote,
+        "--strategy", "auto",
+        ...(args.dispatchId ? ["--dispatch-id", args.dispatchId] : []),
+        ...(args.agent ? ["--agent", args.agent] : []),
+        "--json",
+        "--execute",
+      ]),
+      deps,
+      { stdout: () => undefined, stderr: io.stderr },
+    );
+    if (promote.exit !== 0 || !promote.result) {
+      return { exit: promote.exit, result: null };
+    }
 
-  const result: PromoteScopedCommitResult = {
-    source_repo: args.repo,
-    workdir,
-    base: args.base,
-    remote: args.remote,
-    requested_commit: args.commit,
-    resolved_commit: resolvedCommit,
-    clean_branch: cleanBranch,
-    smoke: { command: args.smoke, exit_code: 0, gate: "passed" },
-    promotion: promote.result,
-    summary: `promoted scoped commit ${resolvedCommit.slice(0, 12)} via ${cleanBranch}`,
-  };
-  io.stdout(args.json ? JSON.stringify(result, null, 2) + "\n" : result.summary + "\n");
-  return { exit: 0, result };
+    const result: PromoteScopedCommitResult = {
+      source_repo: args.repo,
+      workdir,
+      base: args.base,
+      remote: args.remote,
+      requested_commit: args.commit,
+      resolved_commit: resolvedCommit,
+      clean_branch: cleanBranch,
+      smoke: { command: args.smoke, exit_code: 0, gate: "passed" },
+      promotion: promote.result,
+      summary: `promoted scoped commit ${resolvedCommit.slice(0, 12)} via ${cleanBranch}`,
+    };
+    io.stdout(args.json ? JSON.stringify(result, null, 2) + "\n" : result.summary + "\n");
+    return { exit: 0, result };
+  } finally {
+    if (cleanupAutoWorkdir && cloneAttempted) {
+      try {
+        rmSync(workdir, { recursive: true, force: true });
+      } catch (err) {
+        io.stderr(`warning: failed to remove temporary promotion clone ${workdir}: ${err instanceof Error ? err.message : String(err)}\n`);
+      }
+    }
+  }
 }
 
 export const PROMOTE_SCOPED_COMMIT_USAGE = `id-agents promote-scoped-commit — clean promotion path for one scoped fix commit

@@ -15,7 +15,7 @@
 //     - divergent ancestry pauses with /agent-needs-input payload
 
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it, expect } from "vitest";
@@ -333,7 +333,14 @@ function worktreeFallbackCommands(checkoutErr: string) {
 function worktreeFallbackSetupCommands() {
   return [
     { match: (a: string[]) => a[0] === "config" && a[1] === "--get" && a[2] === "remote.origin.url", out: "https://example.com/repo.git\n" },
-    { match: (a: string[]) => a[0] === "clone", out: "" },
+    {
+      match: (a: string[]) => {
+        if (a[0] !== "clone") return false;
+        mkdirSync(a[4], { recursive: true });
+        return true;
+      },
+      out: "",
+    },
     { match: (a: string[]) => a[0] === "remote" && a[1] === "set-url", out: "" },
     { match: (a: string[]) => a[0] === "fetch" && a[1] === "origin" && a[2] === "main", out: "" }, // fallback's own base fetch, in workdir
     { match: (a: string[]) => a[0] === "branch" && a[1] === "-f" && a[2] === "main", out: "" },
@@ -370,6 +377,7 @@ describe("runPromoteToMain — T-RELY snag #15: worktree-contention auto-fallbac
     const lastCwd = deps.cwds[deps.cwds.length - 1];
     expect(lastCwd).not.toBe("/abs/repo");
     expect(lastCwd).toMatch(/id-agents-promote-worktree-fallback-feat-x-/);
+    expect(existsSync(lastCwd)).toBe(false);
   });
 
   it("--no-worktree-fallback opts out: a contended checkout fails outright, no clone attempted", async () => {
