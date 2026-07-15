@@ -1185,6 +1185,205 @@ describe("daemon — dry-run vs live", () => {
     ]);
   });
 
+  it("admits a healthy pool:builder target while holding unhealthy, capacity, and duplicate retry rows", async () => {
+    await seedAgent(adapter, "healthy-builder", "running", "codex");
+    await seedAgent(adapter, "unhealthy-builder", "stopped", "codex");
+    await seedAgent(adapter, "busy-builder", "running", "codex");
+
+    const healthy = await seedReady(adapter, {
+      title: "healthy builder pool target",
+      track: "T-HEALTHY",
+      to_agent: "pool:builder",
+      write_scope: ["/repo/kapelle"],
+      provider: "openai",
+      runtime: "codex",
+    });
+    const unhealthy = await seedReady(adapter, {
+      title: "unhealthy builder pool target",
+      track: "T-UNHEALTHY",
+      to_agent: "pool:builder",
+      write_scope: ["/repo/kapelle"],
+      provider: "openai",
+      runtime: "codex",
+    });
+    const capacity = await seedReady(adapter, {
+      title: "capacity-held builder pool target",
+      track: "T-CAPACITY",
+      to_agent: "pool:builder",
+      write_scope: ["/repo/kapelle"],
+      provider: "openai",
+      runtime: "codex",
+    });
+    const duplicate = await seedReady(adapter, {
+      title: "duplicate retry-held builder pool target",
+      track: "T-DUPLICATE",
+      to_agent: "pool:builder",
+      write_scope: ["/repo/kapelle"],
+      provider: "openai",
+      runtime: "codex",
+    });
+    await markReadyAlreadyDispatched(adapter, duplicate.item_id, "phid:disp-builder-duplicate");
+    await seedDispatch(adapter, {
+      dispatch_phid: "phid:disp-builder-duplicate",
+      status: "failed",
+      failure_kind: "scheduler_wedged",
+      failure_detail: "previous retry is waiting for operator disposition",
+    });
+
+    const pools: PoolRouting = {
+      poolForItem: (item) => {
+        if (item.to_agent !== "pool:builder") return null;
+        if (item.track === "T-HEALTHY") {
+          return {
+            pool_id: "builder-healthy",
+            repo_root: "/repo/kapelle",
+            max_parallel: 1,
+            members: ["healthy-builder"],
+          };
+        }
+        if (item.track === "T-UNHEALTHY") {
+          return {
+            pool_id: "builder-unhealthy",
+            repo_root: "/repo/kapelle",
+            max_parallel: 1,
+            members: ["unhealthy-builder"],
+          };
+        }
+        if (item.track === "T-CAPACITY") {
+          return {
+            pool_id: "builder-capacity",
+            repo_root: "/repo/kapelle",
+            max_parallel: 0,
+            members: ["busy-builder"],
+          };
+        }
+        return {
+          pool_id: "builder-duplicate",
+          repo_root: "/repo/kapelle",
+          max_parallel: 1,
+          members: ["healthy-builder"],
+        };
+      },
+      availableBuilders: (pool, building) => pool.members.filter((agent) => !building.has(agent)),
+      allocateWorktree: async ({ agent, item, pool }) => ({
+        path: `${pool.repo_root}/.worktrees/${agent}-${item.item_id.slice(-6)}`,
+        branch: `build/${agent}-${item.item_id.slice(-6)}`,
+        lease_id: null,
+      }),
+    };
+    const fired: BacklogItem[] = [];
+    const { app, daemon } = mountStatusApp(
+      adapter,
+      {
+        dry_run: false,
+        auto_flesh_enabled: false,
+        auto_promote_enabled: false,
+        min_ready_fuel: 12,
+        max_in_flight: 10,
+        max_new_per_tick: 10,
+      },
+      {
+        pools,
+        resolveAgentHealth: (names) => getHealthyAgentNames(adapter, names),
+        resolveAgentRuntimes: (names) => getAgentRuntimeMap(adapter, names),
+        enqueue: async (item) => {
+          fired.push(item);
+          return { dispatch_phid: `phid:disp-${item.item_id}`, query_id: `q_${item.item_id}` };
+        },
+      },
+    );
+    await daemon.setMode("running");
+
+    const status = await callApp(app, "/orchestration/status");
+
+    expect(status.status).toBe(200);
+    expect(status.body.ready_admission).toMatchObject({
+      candidates: 4,
+      useful_ready: 2,
+      admissible_now: 1,
+      block_reason_counts: expect.objectContaining({
+        pool_capacity_full: 1,
+        duplicate_dispatch_retry_required: 1,
+      }),
+    });
+    expect(status.body.ready_admission.blocker_counts).toEqual(
+      expect.arrayContaining([
+        { code: "target_unhealthy", category: "runtime_unavailable", count: 1 },
+        { code: "pool_capacity_full", category: "capacity_gate", count: 1 },
+        { code: "duplicate_dispatch_retry_required", category: "retry_safety", count: 1 },
+      ]),
+    );
+    expect(status.body.ready_admission.admissible).toEqual([
+      expect.objectContaining({
+        item_id: healthy.item_id,
+        to_agent: "healthy-builder",
+      }),
+    ]);
+    expect(status.body.ready_admission.non_admitted).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          item_id: unhealthy.item_id,
+          action: "held",
+          code: "target_unhealthy",
+          metadata: expect.objectContaining({
+            target: "unhealthy-builder",
+            targets: ["unhealthy-builder"],
+          }),
+        }),
+        expect.objectContaining({
+          item_id: capacity.item_id,
+          action: "held",
+          code: "pool_capacity_full",
+        }),
+        expect.objectContaining({
+          item_id: duplicate.item_id,
+          action: "held",
+          code: "duplicate_dispatch_retry_required",
+          metadata: expect.objectContaining({
+            duplicate_retry: expect.objectContaining({
+              operator_disposition: "retry",
+              retry_safe_recommendation: "set_true",
+            }),
+          }),
+        }),
+      ]),
+    );
+    expect(status.body.ready_admission.recommended_action).toContain("target_unhealthy=1");
+    expect(status.body.ready_admission.recommended_action).toContain("target=unhealthy-builder");
+    expect(status.body.ready_admission.recommended_action).toContain("duplicate_dispatch_retry_required=1");
+    expect(status.body.health.ready_item_blockers.stale_ready_fuel.counts_by_blocker_class).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ code: "target_unhealthy", category: "runtime_unavailable", count: 1 }),
+        expect.objectContaining({ code: "pool_capacity_full", category: "capacity_gate", count: 1 }),
+        expect.objectContaining({ code: "duplicate_dispatch_retry_required", category: "retry_safety", count: 1 }),
+      ]),
+    );
+    expect(status.body.health.ready_item_blockers.items).toEqual([
+      expect.objectContaining({
+        item_id: duplicate.item_id,
+        code: "duplicate_dispatch_retry_required",
+        recommended_action: "mark retry_safe only when the operator wants a bounded refire",
+        safe_action_copy: expect.stringContaining("retry_safe=true"),
+      }),
+    ]);
+    expect(status.body.ready_admission.target_unhealthy_groups).toEqual([
+      expect.objectContaining({
+        target: "unhealthy-builder",
+        count: 1,
+        recommended_action: expect.stringContaining("Reroute to a compatible healthy agent"),
+      }),
+    ]);
+
+    const tick = await daemon.runTick();
+
+    expect(tick.admitted.map((item) => item.item_id)).toEqual([healthy.item_id]);
+    expect(fired.map((item) => item.item_id)).toEqual([healthy.item_id]);
+    expect((await getBacklogItem(adapter, healthy.item_id))?.to_agent).toBe("healthy-builder");
+    expect((await getBacklogItem(adapter, unhealthy.item_id))?.readiness_state).toBe("ready");
+    expect((await getBacklogItem(adapter, capacity.item_id))?.readiness_state).toBe("ready");
+    expect((await getBacklogItem(adapter, duplicate.item_id))?.readiness_state).toBe("ready");
+  });
+
   it("status distinguishes duplicate-dispatch retry blockers by operator action class", async () => {
     const retryable = await seedReady(adapter, {
       title: "retryable failed duplicate",
