@@ -14,7 +14,7 @@
 // System    — audience:system, reverse-chron.
 
 import type { DbAdapter } from "../db/db-adapter.js";
-import type { ArtifactEntry, EntryStamp, ReadModelEnvelope } from "../outputs/entry.js";
+import type { ArtifactEntry, EntryStamp, EntryStampAudience, EntryStampKind, ReadModelEnvelope } from "../outputs/entry.js";
 import {
   artifactDocumentToEntry,
   listArtifactDocumentIds,
@@ -22,7 +22,14 @@ import {
   type ArtifactDocumentReceiptKind,
 } from "./artifact-document.js";
 
-function envelope<T>(items: T[], projection: string): ReadModelEnvelope<T> {
+interface SurfaceAdmission {
+  source: "stamp" | "comment_thread" | "receipt_log" | "project_group";
+  audience: EntryStampAudience | "any";
+  kinds: EntryStampKind[] | "any";
+  reason: string;
+}
+
+function envelope<T>(items: T[], projection: string, admission: SurfaceAdmission): ReadModelEnvelope<T> {
   return {
     schema_version: "read-model.v1",
     generated_at: new Date().toISOString(),
@@ -31,23 +38,20 @@ function envelope<T>(items: T[], projection: string): ReadModelEnvelope<T> {
     limit: items.length,
     offset: 0,
     source: { read_path: "substrate", projection },
+    admission,
     parity: { status: "unchecked" },
   };
 }
 
+const NOW_KINDS: EntryStampKind[] = ["action-needed", "direction-brief"];
+const REPORT_KINDS: EntryStampKind[] = ["report", "closeout", "qa-evidence"];
+
 export function admitsNowSurface(stamp: EntryStamp | null | undefined): boolean {
-  return stamp?.audience === "operator" && (
-    stamp.kind === "action-needed" ||
-    stamp.kind === "direction-brief"
-  );
+  return stamp?.audience === "operator" && NOW_KINDS.includes(stamp.kind);
 }
 
 export function admitsReportsSurface(stamp: EntryStamp | null | undefined): boolean {
-  return stamp?.audience === "operator" && (
-    stamp.kind === "report" ||
-    stamp.kind === "closeout" ||
-    stamp.kind === "qa-evidence"
-  );
+  return stamp?.audience === "operator" && REPORT_KINDS.includes(stamp.kind);
 }
 
 export function admitsSystemSurface(stamp: EntryStamp | null | undefined): boolean {
@@ -79,7 +83,12 @@ export async function projectNowSurface(
       open.push(artifactDocumentToEntry(projection));
     }
   }
-  return envelope(open, "doc_model_now");
+  return envelope(open, "doc_model_now", {
+    source: "stamp",
+    audience: "operator",
+    kinds: NOW_KINDS,
+    reason: "operator audience with action-needed or direction-brief kind and no receipt",
+  });
 }
 
 export interface InboxSurfaceEntry {
@@ -99,7 +108,7 @@ export async function projectInboxSurface(
   adapter: DbAdapter,
   teamId: string,
 ): Promise<ReadModelEnvelope<InboxSurfaceEntry>> {
-  const documentIds = await listArtifactDocumentIds(adapter, teamId, { order: "desc" });
+  const documentIds = await listArtifactDocumentIds(adapter, teamId, { audience: "operator", order: "desc" });
   const rows: InboxSurfaceEntry[] = [];
   for (const documentId of documentIds) {
     const projection = await projectArtifactDocument(adapter, documentId);
@@ -114,7 +123,12 @@ export async function projectInboxSurface(
       latest_comment: latestComment,
     });
   }
-  return envelope(rows, "doc_model_inbox");
+  return envelope(rows, "doc_model_inbox", {
+    source: "comment_thread",
+    audience: "operator",
+    kinds: "any",
+    reason: "operator audience document whose latest comment has no later receipt",
+  });
 }
 
 export interface ActivitySurfaceEntry {
@@ -150,7 +164,12 @@ export async function projectActivitySurface(
     }
   }
   rows.sort((a, b) => (a.ts < b.ts ? 1 : a.ts > b.ts ? -1 : b.op_id - a.op_id));
-  return envelope(rows, "doc_model_activity");
+  return envelope(rows, "doc_model_activity", {
+    source: "receipt_log",
+    audience: "any",
+    kinds: "any",
+    reason: "receipt operations across artifact documents",
+  });
 }
 
 export interface ProjectGroup {
@@ -179,7 +198,12 @@ export async function projectProjectsSurface(
     groups.set(key, group);
   }
   const items = [...groups.values()].sort((a, b) => a.project.localeCompare(b.project));
-  return envelope(items, "doc_model_projects");
+  return envelope(items, "doc_model_projects", {
+    source: "project_group",
+    audience: "any",
+    kinds: "any",
+    reason: "artifact documents grouped by project metadata",
+  });
 }
 
 /** Reports — operator report/evidence artifacts, reverse-chron by updated_at. */
@@ -192,7 +216,12 @@ export async function projectReportsSurface(
     order: "desc",
   });
   const items = (await projectAll(adapter, documentIds)).filter((entry) => admitsReportsSurface(entry.stamp));
-  return envelope(items, "doc_model_reports");
+  return envelope(items, "doc_model_reports", {
+    source: "stamp",
+    audience: "operator",
+    kinds: REPORT_KINDS,
+    reason: "operator audience with report, closeout, or qa-evidence kind",
+  });
 }
 
 /** System — system-facing artifacts, reverse-chron by updated_at. */
@@ -205,5 +234,10 @@ export async function projectSystemSurface(
     order: "desc",
   });
   const items = (await projectAll(adapter, documentIds)).filter((entry) => admitsSystemSurface(entry.stamp));
-  return envelope(items, "doc_model_system");
+  return envelope(items, "doc_model_system", {
+    source: "stamp",
+    audience: "system",
+    kinds: "any",
+    reason: "system audience with a non-empty kind",
+  });
 }

@@ -138,6 +138,12 @@ export interface ReadModelEnvelope<T> {
     read_path: "substrate" | "delivery-log-walk";
     projection: string;
   };
+  admission?: {
+    source: "stamp" | "comment_thread" | "receipt_log" | "project_group";
+    audience: EntryStampAudience | "any";
+    kinds: EntryStampKind[] | "any";
+    reason: string;
+  };
   parity: {
     status: "ok" | "drift" | "unchecked";
   };

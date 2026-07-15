@@ -95,6 +95,12 @@ describe("doc-model artifact surfaces — Now", () => {
     expect(res.status).toBe(200);
     expect(res.body.items.map((e: any) => e.phid)).toEqual(["doc:open"]);
     expect(res.body.items[0].stamp).toEqual({ audience: "operator", kind: "action-needed" });
+    expect(res.body.admission).toEqual({
+      source: "stamp",
+      audience: "operator",
+      kinds: ["action-needed", "direction-brief"],
+      reason: "operator audience with action-needed or direction-brief kind and no receipt",
+    });
   });
 
   it("admits operator direction briefs without title/path heuristics", async () => {
@@ -140,6 +146,26 @@ describe("doc-model artifact surfaces — Inbox", () => {
     expect(res.body.items[0].entry.phid).toBe("doc:awaiting");
     expect(res.body.items[0].disposition).toBe("awaiting_response");
     expect(res.body.items[0].latest_comment.body).toBe("Can you clarify?");
+    expect(res.body.admission).toEqual({
+      source: "comment_thread",
+      audience: "operator",
+      kinds: "any",
+      reason: "operator audience document whose latest comment has no later receipt",
+    });
+  });
+
+  it("admits operator comments to Inbox and excludes system comments", async () => {
+    await author({ documentId: "doc:operator-comment", title: "Operator comment", audience: "operator", kind: "document" });
+    await appendArtifactComment(adapter, { documentId: "doc:operator-comment", actor: "chris", body: "Needs reply" });
+
+    await author({ documentId: "doc:system-comment", title: "System comment", audience: "system", kind: "diagnostics" });
+    await appendArtifactComment(adapter, { documentId: "doc:system-comment", actor: "monitor", body: "Internal signal" });
+
+    const app = mountApp(adapter);
+    const res = await callAppRequest(app, "/doc-model/surfaces/inbox");
+
+    expect(res.status).toBe(200);
+    expect(res.body.items.map((e: any) => e.entry.phid)).toEqual(["doc:operator-comment"]);
   });
 });
 
@@ -214,6 +240,12 @@ describe("doc-model artifact surfaces — Reports", () => {
 
     expect(res.status).toBe(200);
     expect(res.body.items.map((e: any) => e.phid)).toEqual(["doc:report-new", "doc:report-old"]);
+    expect(res.body.admission).toEqual({
+      source: "stamp",
+      audience: "operator",
+      kinds: ["report", "closeout", "qa-evidence"],
+      reason: "operator audience with report, closeout, or qa-evidence kind",
+    });
   });
 
   it("admits operator closeout and QA evidence artifacts without title/path heuristics", async () => {
@@ -263,17 +295,26 @@ describe("doc-model artifact surfaces — System", () => {
       kind: "report",
       now: "2026-07-14T13:00:00.000Z",
     });
+    await appendArtifactComment(adapter, { documentId: "doc:diagnostics", actor: "monitor", body: "Internal only" });
 
     const app = mountApp(adapter);
-    const [system, now, reports] = await Promise.all([
+    const [system, now, inbox, reports] = await Promise.all([
       callAppRequest(app, "/doc-model/surfaces/system"),
       callAppRequest(app, "/doc-model/surfaces/now"),
+      callAppRequest(app, "/doc-model/surfaces/inbox"),
       callAppRequest(app, "/doc-model/surfaces/reports"),
     ]);
 
     expect(system.status).toBe(200);
     expect(system.body.items.map((e: any) => e.phid)).toEqual(["doc:diagnostics"]);
+    expect(system.body.admission).toEqual({
+      source: "stamp",
+      audience: "system",
+      kinds: "any",
+      reason: "system audience with a non-empty kind",
+    });
     expect(now.body.items.map((e: any) => e.phid)).toEqual([]);
+    expect(inbox.body.items.map((e: any) => e.entry.phid)).toEqual([]);
     expect(reports.body.items.map((e: any) => e.phid)).toEqual(["doc:operator-report"]);
   });
 });
@@ -286,5 +327,38 @@ describe("doc-model artifact surface admission predicates", () => {
     expect(admitsNowSurface({ audience: "operator" } as any)).toBe(false);
     expect(admitsReportsSurface({ kind: "closeout" } as any)).toBe(false);
     expect(admitsSystemSurface({ audience: "system", kind: "" } as any)).toBe(false);
+  });
+
+  it("does not leak unknown stamp kinds into Now even when title sounds actionable", async () => {
+    const now = "2026-07-14T14:00:00.000Z";
+    await adapter.query(
+      `INSERT INTO doc_model_document (document_id, team_id, doc_type, owner_agent, revision, audience, kind, project, created_at, updated_at)
+       VALUES ($1, 'default', 'artifact', 'rams', 1, 'operator', 'unknown-kind', null, $2, $3)`,
+      ["doc:unknown-kind", now, now],
+    );
+    await adapter.query(
+      `INSERT INTO doc_model_document_op (document_id, revision, op_type, actor, ts, payload_json)
+       VALUES ($1, 1, 'artifact_authored', 'rams', $2, $3)`,
+      [
+        "doc:unknown-kind",
+        now,
+        JSON.stringify({
+          title: "Urgent action report",
+          tag: "action-needed",
+          content: "# Urgent action report",
+          source_link: "/output/action-needed-report.md",
+          availability: "present",
+          audience: "operator",
+          kind: "unknown-kind",
+          project: null,
+        }),
+      ],
+    );
+
+    const app = mountApp(adapter);
+    const res = await callAppRequest(app, "/doc-model/surfaces/now");
+
+    expect(res.status).toBe(200);
+    expect(res.body.items).toEqual([]);
   });
 });
