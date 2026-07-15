@@ -693,9 +693,9 @@ function summaryForNotReady(input: {
   return "Release proof is not ready.";
 }
 
-function formatOrchestrationLoopInfraWarning(health: Awaited<ReturnType<typeof readOrchestrationHealthProjection>>): string {
+export function formatOrchestrationLoopInfraWarning(health: Awaited<ReturnType<typeof readOrchestrationHealthProjection>>): string {
   const loop = health.orchestration_loop;
-  const topBlocker = topCount(loop.last_admission_block_reasons);
+  const topBlocker = topAdmissionBlocker(health);
   const blockerText = topBlocker
     ? `; top blocker ${topBlocker.code}=${topBlocker.count}`
     : "";
@@ -712,12 +712,45 @@ function formatOrchestrationLoopInfraWarning(health: Awaited<ReturnType<typeof r
   );
 }
 
+function topAdmissionBlocker(
+  health: Awaited<ReturnType<typeof readOrchestrationHealthProjection>>,
+): { code: string; count: number } | null {
+  const counts = new Map<string, number>();
+  for (const [code, count] of Object.entries(health.orchestration_loop.last_admission_block_reasons)) {
+    if (count > 0) counts.set(code, Math.max(counts.get(code) ?? 0, count));
+  }
+  for (const blocker of health.ready_item_blockers.stale_ready_fuel.counts_by_blocker_class) {
+    if (blocker.count > 0) counts.set(blocker.code, Math.max(counts.get(blocker.code) ?? 0, blocker.count));
+  }
+  return topCount(Object.fromEntries(counts));
+}
+
 function releaseProofSafeActionForTopBlocker(
   health: Awaited<ReturnType<typeof readOrchestrationHealthProjection>>,
   code: string,
 ): string | null {
+  const action = safeActionForAdmissionBlocker(health, code);
+  const duplicateCount = Math.max(
+    health.orchestration_loop.last_admission_block_reasons.duplicate_dispatch_retry_required ?? 0,
+    health.ready_item_blockers.stale_ready_fuel.counts_by_blocker_class.find((blocker) =>
+      blocker.code === "duplicate_dispatch_retry_required"
+    )?.count ?? 0,
+  );
+  if (code === "duplicate_dispatch_retry_required" || duplicateCount === 0) return action;
+  const duplicateAction = safeActionForAdmissionBlocker(health, "duplicate_dispatch_retry_required");
+  if (!duplicateAction || action?.includes("duplicate_dispatch_retry_required")) return action;
+  return action
+    ? `${action}; retry-safety blocker also present: ${duplicateAction}`
+    : `retry-safety blocker also present: ${duplicateAction}`;
+}
+
+function safeActionForAdmissionBlocker(
+  health: Awaited<ReturnType<typeof readOrchestrationHealthProjection>>,
+  code: string,
+): string | null {
   if (code !== "duplicate_dispatch_retry_required") {
-    return health.ready_item_blockers.categories.find((category) => category.code === code)?.recommended_action ?? null;
+    return health.ready_item_blockers.categories.find((category) => category.code === code)?.recommended_action ??
+      (health.ready_item_blockers.recommended_action.trim() || null);
   }
 
   const details = health.ready_item_blockers.items.filter((item) => item.code === code);

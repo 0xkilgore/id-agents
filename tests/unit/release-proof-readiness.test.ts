@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   buildReleaseProofReadiness,
+  formatOrchestrationLoopInfraWarning,
   readReleaseProofReadiness,
   type ReleaseProofFeedbackEvidence,
   type ReleaseProofReadinessInput,
@@ -1123,6 +1124,42 @@ describe("buildReleaseProofReadiness", () => {
     expect(view.infra_warnings).toMatchObject({ state: "clear", count: 0, source: "none", action: null });
     expect(view.summary).toBe("Release proof is not ready: latest feedback evidence is older than 1h.");
     expect(view.summary).not.toContain("infra warnings");
+  });
+
+  it("surfaces target_unhealthy as the highest-impact admission repair while preserving retry safety", () => {
+    const warning = formatOrchestrationLoopInfraWarning({
+      orchestration_loop: {
+        severity: "critical",
+        consecutive_zero_ticks: 8,
+        last_admission_block_reasons: {
+          duplicate_dispatch_retry_required: 1,
+        },
+        explanation: "recent zero-admit ticks cite duplicate retry only",
+      },
+      ready_item_blockers: {
+        recommended_action:
+          "reroute/downclassify/owner-restart target_unhealthy=6 rows where safe; review duplicate_dispatch_retry_required=1 rows and mark retry_safe only for bounded refires or close stale duplicates",
+        categories: [],
+        stale_ready_fuel: {
+          counts_by_blocker_class: [
+            { code: "target_unhealthy", category: "runtime_unavailable", count: 6, examples: [] },
+            { code: "duplicate_dispatch_retry_required", category: "retry_safety", count: 1, examples: [] },
+          ],
+        },
+        items: [
+          {
+            code: "duplicate_dispatch_retry_required",
+            retry_readiness_status: "retryable_failed_row",
+          },
+        ],
+      },
+    } as any);
+
+    expect(warning).toContain("top blocker target_unhealthy=6");
+    expect(warning).toContain("source route /orchestration/status ready_admission.blocker_counts");
+    expect(warning).toContain("reroute/downclassify/owner-restart target_unhealthy=6 rows where safe");
+    expect(warning).toContain("duplicate_dispatch_retry_required=1 rows");
+    expect(warning).toContain("mark retry_safe only for bounded refires or close stale duplicates");
   });
 
   it("maps degraded orchestration status to infra warnings without hiding missing safe source links", async () => {

@@ -208,6 +208,63 @@ describe("orchestration health projection", () => {
     ]);
   });
 
+  it("keeps status health focused on higher-impact target_unhealthy repair without hiding retry blockers", async () => {
+    await setMode(adapter, "default", "running");
+    const targetUnhealthyIds: string[] = [];
+    let retryBlockedId = "";
+    for (let i = 0; i < 7; i += 1) {
+      const row = await insertBacklogItem(adapter, {
+        title: `status health blocked row ${i}`,
+        readiness_state: "ready",
+        risk_class: "build",
+        to_agent: "roger",
+        dispatch_body: "continue",
+        write_scope: [`/repo/kapelle-${i}`],
+      });
+      if (i < 6) targetUnhealthyIds.push(row.item_id);
+      else retryBlockedId = row.item_id;
+    }
+    await recordTickOutcome(adapter, "default", {
+      zero_ticks: 8,
+      fired: false,
+      admission_block_reasons: {
+        duplicate_dispatch_retry_required: 1,
+      },
+    });
+
+    const health = await readOrchestrationHealthProjection(adapter, "default", {
+      readyAdmission: {
+        rawReady: 7,
+        usefulReady: 0,
+        admissibleNow: 0,
+        blockerCounts: [
+          { code: "target_unhealthy", category: "runtime_unavailable", count: 6 },
+          { code: "duplicate_dispatch_retry_required", category: "retry_safety", count: 1 },
+        ],
+        nonAdmitted: [
+          ...targetUnhealthyIds.map((item_id) => ({ item_id, code: "target_unhealthy" })),
+          { item_id: retryBlockedId, code: "duplicate_dispatch_retry_required" },
+        ],
+        recommendedAction:
+          "reroute/downclassify/owner-restart target_unhealthy=6 rows where safe; review duplicate_dispatch_retry_required=1 rows and mark retry_safe only for bounded refires or close stale duplicates",
+      },
+    });
+
+    expect(health.orchestration_loop.last_admission_block_reasons).toEqual({
+      duplicate_dispatch_retry_required: 1,
+    });
+    expect(health.ready_item_blockers.stale_ready_fuel.counts_by_blocker_class).toEqual([
+      { code: "target_unhealthy", category: "runtime_unavailable", count: 6, examples: targetUnhealthyIds.slice(0, 5) },
+      { code: "duplicate_dispatch_retry_required", category: "retry_safety", count: 1, examples: [retryBlockedId] },
+    ]);
+    expect(health.ready_item_blockers.recommended_action).toContain(
+      "reroute/downclassify/owner-restart target_unhealthy=6 rows where safe",
+    );
+    expect(health.ready_item_blockers.recommended_action).toContain(
+      "review duplicate_dispatch_retry_required=1 rows",
+    );
+  });
+
   it("projects Wave49 all-single-writer-busy ready fuel with blocked lane keys and cross-lane action", async () => {
     await setMode(adapter, "default", "running");
     const itemIds: string[] = [];
