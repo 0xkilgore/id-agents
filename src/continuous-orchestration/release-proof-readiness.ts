@@ -14,6 +14,8 @@ export interface ReleaseProofFeedbackEvidence {
   kind: string;
   observed_at: string;
   source_link: string | null;
+  source_link_status?: "present" | "derived" | "redacted" | "unsupported" | "unavailable";
+  source_link_reason?: string | null;
   artifact_id: string | null;
   summary: string | null;
 }
@@ -402,33 +404,81 @@ async function readFeedbackEvidence(adapter: DbAdapter, project: string): Promis
     ts: string;
     payload_json: string | null;
     source_link: string | null;
+    artifact_availability: string | null;
   }>(
-    `SELECT op_id, artifact_id, op_type, actor, ts, payload_json, source_link
-       FROM artifact_operations
-      WHERE op_type IN ('comment_recorded', 'comment_routed', 'approve', 'reject', 'ship_attempted', 'ship_blocked')
+    `SELECT o.op_id, o.artifact_id, o.op_type, o.actor, o.ts, o.payload_json, o.source_link,
+            a.availability AS artifact_availability
+       FROM artifact_operations o
+       LEFT JOIN artifacts a ON a.artifact_id = o.artifact_id
+      WHERE o.op_type IN ('comment_recorded', 'comment_routed', 'approve', 'reject', 'ship_attempted', 'ship_blocked')
         AND (
-          COALESCE(source_link, '') LIKE ?
-          OR COALESCE(payload_json, '') LIKE ?
-          OR artifact_id IN (
+          COALESCE(o.source_link, '') LIKE ?
+          OR COALESCE(o.payload_json, '') LIKE ?
+          OR o.artifact_id IN (
             SELECT artifact_id FROM artifacts
              WHERE COALESCE(project_ref, '') = ?
                 OR COALESCE(title, '') LIKE ?
                 OR COALESCE(abs_path, '') LIKE ?
           )
         )
-      ORDER BY ts DESC, op_id DESC
+      ORDER BY o.ts DESC, o.op_id DESC
       LIMIT 20`,
     [like, like, project, like, like],
   );
 
-  return rows.map((row) => ({
-    id: `op:${row.op_id}`,
-    kind: row.op_type,
-    observed_at: row.ts,
-    source_link: row.source_link,
-    artifact_id: row.artifact_id,
-    summary: summarizePayload(row.payload_json) ?? `${row.op_type} by ${row.actor}`,
-  }));
+  return rows.map((row) => {
+    const source = resolveFeedbackOperationSourceLink({
+      opId: row.op_id,
+      artifactId: row.artifact_id,
+      sourceLink: row.source_link,
+      artifactAvailability: row.artifact_availability,
+    });
+    return {
+      id: `op:${row.op_id}`,
+      kind: row.op_type,
+      observed_at: row.ts,
+      source_link: source.source_link,
+      source_link_status: source.status,
+      source_link_reason: source.reason,
+      artifact_id: row.artifact_id,
+      summary: summarizePayload(row.payload_json) ?? `${row.op_type} by ${row.actor}`,
+    };
+  });
+}
+
+function resolveFeedbackOperationSourceLink(input: {
+  opId: number;
+  artifactId: string | null;
+  sourceLink: string | null;
+  artifactAvailability: string | null;
+}): {
+  source_link: string | null;
+  status: ReleaseProofFeedbackEvidence["source_link_status"];
+  reason: string | null;
+} {
+  const stored = input.sourceLink?.trim() ?? "";
+  if (stored) {
+    if (isSafeSourceHref(stored)) return { source_link: stored, status: "present", reason: null };
+    if (isRedactedSource(stored)) {
+      return { source_link: null, status: "redacted", reason: "stored source link is redacted" };
+    }
+    return { source_link: null, status: "unsupported", reason: "stored source link uses an unsupported or local scheme" };
+  }
+
+  if (!input.artifactId) {
+    return { source_link: null, status: "unavailable", reason: "operation has no artifact context" };
+  }
+  if (input.artifactAvailability === "present") {
+    return {
+      source_link: stableArtifactOperationSourceLink(input.artifactId, input.opId),
+      status: "derived",
+      reason: "derived from durable artifact operation",
+    };
+  }
+  if (input.artifactAvailability === "missing") {
+    return { source_link: null, status: "unavailable", reason: "artifact source is marked missing" };
+  }
+  return { source_link: null, status: "unavailable", reason: "artifact source availability is unknown" };
 }
 
 async function readBacklogSourceLinks(
@@ -492,6 +542,10 @@ async function readGeneratedArtifacts(adapter: DbAdapter, project: string): Prom
 
 function stableArtifactSourceLink(artifactId: string): string {
   return `manager:/artifacts/${encodeURIComponent(artifactId)}`;
+}
+
+function stableArtifactOperationSourceLink(artifactId: string, opId: number): string {
+  return `${stableArtifactSourceLink(artifactId)}/operations/${opId}`;
 }
 
 function latestIso(values: string[]): string | null {

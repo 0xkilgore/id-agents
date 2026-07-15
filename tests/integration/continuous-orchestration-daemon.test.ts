@@ -4471,7 +4471,7 @@ describe("release-proof-readiness route", () => {
     expect(warning).not.toContain("feedback evidence");
     expect(warning).not.toContain("source links");
     expect(res.body.stale_reasons).toEqual(["latest feedback evidence is older than 24h"]);
-    expect(res.body.missing_reasons).toEqual(["one or more feedback evidence items are missing safe source links"]);
+    expect(res.body.missing_reasons).toEqual([]);
     expect(res.body.summary).toBe("Release proof is not ready: infra warnings require operator review.");
     expect(res.body.summary).not.toContain("ready for Chris");
   });

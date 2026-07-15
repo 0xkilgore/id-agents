@@ -394,7 +394,7 @@ describe("buildReleaseProofReadiness", () => {
     expect(view.summary).toBe("Release proof is not ready: latest feedback evidence is older than 24h.");
   });
 
-  it("keeps missing-source feedback as a deterministic blocker when artifact and backlog sources exist", async () => {
+  it("derives feedback operation source links when artifact and backlog sources exist", async () => {
     const adapter = new SqliteAdapter(":memory:");
     try {
       await migrateSqlite(adapter);
@@ -469,24 +469,32 @@ describe("buildReleaseProofReadiness", () => {
         now: NOW,
       });
 
-      expect(view.release_readiness).toBe("not_ready");
+      expect(view.release_readiness).toBe("ready");
       expect(view.feedback_evidence).toMatchObject({
         state: "present",
         count: 2,
       });
+      expect(view.feedback_evidence.items).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            id: expect.stringMatching(/^op:/),
+            source_link: expect.stringMatching(/^manager:\/artifacts\/art-kapelle-proof\/operations\/\d+$/),
+            source_link_status: "derived",
+            source_link_reason: "derived from durable artifact operation",
+          }),
+        ]),
+      );
       expect(view.generated_artifacts.state).toBe("present");
       expect(view.sources).toMatchObject({
         state: "present",
-        counts: { safe: 2, unsafe: 0, total: 2 },
+        counts: { safe: 4, unsafe: 0, total: 4 },
         links: expect.arrayContaining([
           expect.objectContaining({ source: "artifact", href: "manager:/artifacts/art-kapelle-proof" }),
           expect.objectContaining({ source: "backlog", href: "manager:/backlog/backlog-kapelle-proof" }),
+          expect.objectContaining({ source: "feedback", href: expect.stringMatching(/^manager:\/artifacts\/art-kapelle-proof\/operations\/\d+$/) }),
         ]),
       });
-      expect(view.missing_reasons).toEqual(["one or more feedback evidence items are missing safe source links"]);
-      expect(view.summary).toBe(
-        "Release proof is not ready: one or more feedback evidence items are missing safe source links.",
-      );
+      expect(view.missing_reasons).toEqual([]);
     } finally {
       await adapter.close();
     }
@@ -562,6 +570,148 @@ describe("buildReleaseProofReadiness", () => {
       );
       expect(view.missing_reasons).toEqual([]);
       expect(view.stale_reasons).toEqual([]);
+    } finally {
+      await adapter.close();
+    }
+  });
+
+  it("resolves latest Chris feedback op:10023 to a safe manager operation source link", async () => {
+    const adapter = new SqliteAdapter(":memory:");
+    try {
+      await migrateSqlite(adapter);
+      await migrateOutputsTables(adapter);
+      await setMode(adapter, "default", "running");
+      await adapter.query(
+        `INSERT INTO artifacts
+           (artifact_id, basename, agent, tag, abs_path, title, produced_at, source, availability,
+            project_ref, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          "art-kapelle-op-10023",
+          "kapelle-release-proof.md",
+          "roger",
+          "release-proof",
+          "/tmp/output/kapelle-release-proof.md",
+          "Kapelle release proof evidence",
+          "2026-07-13T11:20:00.000Z",
+          "filesystem",
+          "present",
+          "kapelle",
+          "2026-07-13T11:20:00.000Z",
+          "2026-07-13T11:20:00.000Z",
+        ],
+      );
+      await adapter.query(
+        `INSERT INTO artifact_operations
+           (op_id, artifact_id, op_type, actor, ts, payload_json, source_link, idempotency_key)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          10023,
+          "art-kapelle-op-10023",
+          "comment_recorded",
+          "chris",
+          "2026-07-13T11:30:00.000Z",
+          JSON.stringify({ body: "Latest Chris feedback for kapelle release proof." }),
+          null,
+          "comment-op-10023",
+        ],
+      );
+
+      const view = await readReleaseProofReadiness(adapter, {
+        teamId: "default",
+        project: "kapelle",
+        now: NOW,
+      });
+
+      expect(view.release_readiness).toBe("ready");
+      expect(view.feedback_evidence.items).toEqual([
+        expect.objectContaining({
+          id: "op:10023",
+          source_link: "manager:/artifacts/art-kapelle-op-10023/operations/10023",
+          source_link_status: "derived",
+          source_link_reason: "derived from durable artifact operation",
+        }),
+      ]);
+      expect(view.sources.links).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            source: "feedback",
+            href: "manager:/artifacts/art-kapelle-op-10023/operations/10023",
+          }),
+        ]),
+      );
+      expect(view.missing_reasons).toEqual([]);
+    } finally {
+      await adapter.close();
+    }
+  });
+
+  it("keeps latest Chris feedback op:9894 null with an unavailable source reason when the artifact is missing", async () => {
+    const adapter = new SqliteAdapter(":memory:");
+    try {
+      await migrateSqlite(adapter);
+      await migrateOutputsTables(adapter);
+      await setMode(adapter, "default", "running");
+      await adapter.query(
+        `INSERT INTO artifacts
+           (artifact_id, basename, agent, tag, abs_path, title, produced_at, source, availability,
+            project_ref, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          "art-kapelle-op-9894",
+          "kapelle-release-proof.md",
+          "roger",
+          "release-proof",
+          "/tmp/output/kapelle-release-proof.md",
+          "Kapelle release proof evidence",
+          "2026-07-13T11:20:00.000Z",
+          "filesystem",
+          "missing",
+          "kapelle",
+          "2026-07-13T11:20:00.000Z",
+          "2026-07-13T11:20:00.000Z",
+        ],
+      );
+      await adapter.query(
+        `INSERT INTO artifact_operations
+           (op_id, artifact_id, op_type, actor, ts, payload_json, source_link, idempotency_key)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          9894,
+          "art-kapelle-op-9894",
+          "comment_recorded",
+          "chris",
+          "2026-07-13T11:30:00.000Z",
+          JSON.stringify({ body: "Latest Chris feedback for kapelle release proof, artifact missing." }),
+          null,
+          "comment-op-9894",
+        ],
+      );
+
+      const view = await readReleaseProofReadiness(adapter, {
+        teamId: "default",
+        project: "kapelle",
+        now: NOW,
+      });
+
+      expect(view.release_readiness).toBe("not_ready");
+      expect(view.feedback_evidence.items).toEqual([
+        expect.objectContaining({
+          id: "op:9894",
+          source_link: null,
+          source_link_status: "unavailable",
+          source_link_reason: "artifact source is marked missing",
+        }),
+      ]);
+      expect(view.missing_reasons).toEqual([
+        "one or more generated proof artifacts are not present",
+        "one or more feedback evidence items are missing safe source links",
+      ]);
+      expect(view.sources.links).not.toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ source: "feedback" }),
+        ]),
+      );
     } finally {
       await adapter.close();
     }
@@ -971,15 +1121,16 @@ describe("buildReleaseProofReadiness", () => {
       );
       expect(view.sources).toMatchObject({
         state: "present",
-        counts: { safe: 2, unsafe: 0, total: 2 },
+        counts: { safe: 3, unsafe: 0, total: 3 },
         links: expect.arrayContaining([
           expect.objectContaining({ source: "artifact", href: "manager:/artifacts/art-kapelle-proof" }),
           expect.objectContaining({ source: "backlog", href: "manager:/backlog/backlog-kapelle-proof" }),
+          expect.objectContaining({ source: "feedback", href: expect.stringMatching(/^manager:\/artifacts\/art-kapelle-proof\/operations\/\d+$/) }),
         ]),
       });
       expect(view.generated_artifacts).toMatchObject({ state: "present", count: 1 });
       expect(view.stale_reasons).toEqual(["latest feedback evidence is older than 1h"]);
-      expect(view.missing_reasons).toEqual(["one or more feedback evidence items are missing safe source links"]);
+      expect(view.missing_reasons).toEqual([]);
       expect(view.summary).toBe("Release proof is not ready: infra warnings require operator review.");
     } finally {
       await adapter.close();
