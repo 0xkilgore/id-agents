@@ -39,12 +39,16 @@ export interface StaleDuplicateBacklogReport {
   schema_version: typeof STALE_DUPLICATE_BACKLOG_REPORT_SCHEMA_VERSION;
   dry_run: true;
   scanned: number;
+  limit: number;
+  matched: number;
+  truncated: boolean;
   count: number;
   items: StaleDuplicateBacklogReportItem[];
 }
 
 type ReportableReadinessState = "needs_review" | "ready";
 
+export const DEFAULT_STALE_DUPLICATE_BACKLOG_REPORT_LIMIT = 25;
 const REPORTABLE_STATES = new Set<ReadinessState>(["needs_review", "ready"]);
 const TERMINAL_STATUSES = new Set(["done", "cancelled", "moot", "superseded"]);
 
@@ -66,7 +70,28 @@ function recommendedAction(status: string, promotionVerified: boolean): StaleDup
 export function buildStaleDuplicateBacklogReport(
   items: BacklogItem[],
   outcomes: Map<string, DispatchOutcome>,
+  opts: { limit?: number } = {},
 ): StaleDuplicateBacklogReport {
+  const limit = normalizeLimit(opts.limit);
+  const selectedItems = selectStaleDuplicateBacklogRows(items, outcomes);
+  const reportItems = selectedItems.slice(0, limit);
+
+  return {
+    schema_version: STALE_DUPLICATE_BACKLOG_REPORT_SCHEMA_VERSION,
+    dry_run: true,
+    scanned: items.length,
+    limit,
+    matched: selectedItems.length,
+    truncated: selectedItems.length > reportItems.length,
+    count: reportItems.length,
+    items: reportItems,
+  };
+}
+
+export function selectStaleDuplicateBacklogRows(
+  items: BacklogItem[],
+  outcomes: Map<string, DispatchOutcome>,
+): StaleDuplicateBacklogReportItem[] {
   const reportItems: StaleDuplicateBacklogReportItem[] = [];
 
   for (const item of items) {
@@ -121,11 +146,10 @@ export function buildStaleDuplicateBacklogReport(
     return a.item_id.localeCompare(b.item_id);
   });
 
-  return {
-    schema_version: STALE_DUPLICATE_BACKLOG_REPORT_SCHEMA_VERSION,
-    dry_run: true,
-    scanned: items.length,
-    count: reportItems.length,
-    items: reportItems,
-  };
+  return reportItems;
+}
+
+function normalizeLimit(limit: number | undefined): number {
+  if (limit == null || !Number.isFinite(limit)) return DEFAULT_STALE_DUPLICATE_BACKLOG_REPORT_LIMIT;
+  return Math.max(1, Math.min(250, Math.floor(limit)));
 }

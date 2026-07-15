@@ -455,8 +455,12 @@ export function mountContinuousOrchestrationRoutes(app: Application, opts: Orche
     }
   });
 
-  app.get("/orchestration/backlog/stale-duplicates", async (_req: Request, res: Response) => {
+  app.get("/orchestration/backlog/stale-duplicates", async (req: Request, res: Response) => {
     try {
+      const limitParam = typeof req.query.limit === "string" ? Number(req.query.limit) : undefined;
+      if (limitParam !== undefined && (!Number.isFinite(limitParam) || limitParam <= 0)) {
+        return res.status(400).json({ ok: false, error: "limit must be a positive number" });
+      }
       const [needsReview, ready] = await Promise.all([
         listBacklogByState(adapter, { team_id: teamId, state: "needs_review" }),
         listBacklogByState(adapter, { team_id: teamId, state: "ready" }),
@@ -466,7 +470,7 @@ export function mountContinuousOrchestrationRoutes(app: Application, opts: Orche
         adapter,
         items.map((item) => item.last_dispatch_phid).filter((phid): phid is string => !!phid),
       );
-      res.json({ ok: true, report: buildStaleDuplicateBacklogReport(items, outcomes) });
+      res.json({ ok: true, report: buildStaleDuplicateBacklogReport(items, outcomes, { limit: limitParam }) });
     } catch (err) {
       res.status(500).json({ ok: false, error: err instanceof Error ? err.message : String(err) });
     }

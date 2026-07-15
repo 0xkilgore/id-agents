@@ -120,6 +120,7 @@ describe("GET /orchestration/backlog/stale-duplicates", () => {
       status: "failed",
       promotion_result_json: JSON.stringify({ completed: true, repos: [{ verified: true }] }),
     });
+    await seedDispatch({ phid: "phid:failed-retry-safe", status: "failed", recovery_status: "none" });
     await seedDispatch({ phid: "phid:live", status: "in_flight" });
 
     const done = await seedBacklog({ title: "done duplicate", state: "needs_review", phid: "phid:done" });
@@ -129,6 +130,7 @@ describe("GET /orchestration/backlog/stale-duplicates", () => {
     const promoted = await seedBacklog({ title: "verified promotion duplicate", state: "needs_review", phid: "phid:failed-promoted" });
     await seedBacklog({ title: "live dispatch", state: "needs_review", phid: "phid:live" });
     await seedBacklog({ title: "human retry", state: "needs_review", phid: "phid:done", retry_safe: true });
+    await seedBacklog({ title: "failed retry-safe row", state: "ready", phid: "phid:failed-retry-safe", retry_safe: true });
     await seedBacklog({ title: "already closed", state: "done", phid: "phid:done" });
 
     const before = await stateCounts();
@@ -140,7 +142,10 @@ describe("GET /orchestration/backlog/stale-duplicates", () => {
     expect(r.body.report).toMatchObject({
       schema_version: "orchestration.stale_duplicate_backlog_report.v1",
       dry_run: true,
-      scanned: 7,
+      scanned: 8,
+      limit: 25,
+      matched: 5,
+      truncated: false,
       count: 5,
     });
     expect(after).toEqual(before);
@@ -188,5 +193,45 @@ describe("GET /orchestration/backlog/stale-duplicates", () => {
       promotion_verified: true,
       recommended_action: "mark_done",
     });
+  });
+
+  it("bounds stale duplicate suggestions without including active or retry-safe failed rows", async () => {
+    await seedDispatch({ phid: "phid:done-a", status: "done" });
+    await seedDispatch({ phid: "phid:done-b", status: "done" });
+    await seedDispatch({ phid: "phid:active", status: "queued" });
+    await seedDispatch({
+      phid: "phid:retryable-failed",
+      status: "failed",
+      recovery_status: "none",
+    });
+
+    const first = await seedBacklog({ title: "done duplicate A", state: "needs_review", phid: "phid:done-a" });
+    const second = await seedBacklog({ title: "done duplicate B", state: "ready", phid: "phid:done-b" });
+    await seedBacklog({ title: "active duplicate", state: "ready", phid: "phid:active" });
+    await seedBacklog({
+      title: "operator approved failed retry",
+      state: "ready",
+      phid: "phid:retryable-failed",
+      retry_safe: true,
+    });
+
+    const before = await stateCounts();
+    const r = await call("/orchestration/backlog/stale-duplicates?limit=1");
+    const after = await stateCounts();
+
+    expect(r.status).toBe(200);
+    expect(after).toEqual(before);
+    expect(r.body.report).toMatchObject({
+      dry_run: true,
+      scanned: 4,
+      limit: 1,
+      matched: 2,
+      truncated: true,
+      count: 1,
+    });
+    expect(r.body.report.items).toHaveLength(1);
+    expect([first.item_id, second.item_id]).toContain(r.body.report.items[0].item_id);
+    expect(r.body.report.items.map((item: any) => item.title)).not.toContain("active duplicate");
+    expect(r.body.report.items.map((item: any) => item.title)).not.toContain("operator approved failed retry");
   });
 });

@@ -6,6 +6,7 @@
 export interface StaleDuplicateBacklogArgs {
   managerUrl: string;
   json: boolean;
+  limit?: number;
 }
 
 export class StaleDuplicateBacklogArgError extends Error {}
@@ -13,6 +14,7 @@ export class StaleDuplicateBacklogArgError extends Error {}
 export function parseStaleDuplicateBacklogArgs(argv: string[], env: NodeJS.ProcessEnv = process.env): StaleDuplicateBacklogArgs {
   let managerUrl = env.MANAGER_URL || "http://127.0.0.1:4100";
   let json = false;
+  let limit: number | undefined;
   let i = 0;
   while (i < argv.length) {
     const arg = argv[i];
@@ -30,9 +32,19 @@ export function parseStaleDuplicateBacklogArgs(argv: string[], env: NodeJS.Proce
       i += 2;
       continue;
     }
+    if (arg === "--limit") {
+      const val = argv[i + 1];
+      const parsed = Number(val);
+      if (!val || val.startsWith("--") || !Number.isFinite(parsed) || parsed <= 0) {
+        throw new StaleDuplicateBacklogArgError("--limit requires a positive number");
+      }
+      limit = Math.floor(parsed);
+      i += 2;
+      continue;
+    }
     throw new StaleDuplicateBacklogArgError(`unknown argument: ${arg}`);
   }
-  return { managerUrl, json };
+  return { managerUrl, json, limit };
 }
 
 export async function runStaleDuplicateBacklogCli(
@@ -51,11 +63,12 @@ export async function runStaleDuplicateBacklogCli(
     args = parseStaleDuplicateBacklogArgs(argv, deps.env ?? process.env);
   } catch (err) {
     stderr(`${err instanceof Error ? err.message : String(err)}\n`);
-    stderr("Usage: id-agents stale-duplicate-backlog [--manager-url URL] [--json]\n");
+    stderr("Usage: id-agents stale-duplicate-backlog [--manager-url URL] [--limit N] [--json]\n");
     return 2;
   }
 
   const url = new URL("/orchestration/backlog/stale-duplicates", args.managerUrl);
+  if (args.limit !== undefined) url.searchParams.set("limit", String(args.limit));
   const fetchImpl = deps.fetchImpl ?? fetch;
   const response = await fetchImpl(url);
   const text = await response.text();
@@ -77,7 +90,8 @@ export async function runStaleDuplicateBacklogCli(
   }
 
   const report = body.report;
-  stdout(`stale duplicate backlog rows: ${report.count} (scanned ${report.scanned}, dry-run)\n`);
+  const suffix = report.truncated ? `, ${report.matched - report.count} more matched` : "";
+  stdout(`stale duplicate backlog rows: ${report.count} (matched ${report.matched}, scanned ${report.scanned}, dry-run${suffix})\n`);
   for (const item of report.items ?? []) {
     stdout(
       `- ${item.item_id} [${item.readiness_state}] prior=${item.prior_dispatch_phid} ` +
