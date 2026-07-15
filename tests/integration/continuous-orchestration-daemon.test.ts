@@ -422,6 +422,52 @@ describe("daemon — dry-run vs live", () => {
     expect(blockedTotal).toBe(res.body.counts.ready - res.body.counts.admissible_now);
   });
 
+  it("status explains builder-pool zero-admit as busy healthy members plus unhealthy free candidates", async () => {
+    await seedReady(adapter, {
+      title: "builder pool waits for free healthy member",
+      to_agent: "pool:builder",
+      write_scope: ["repo/waiting-builder"],
+    });
+    await insertBacklogItem(adapter, {
+      title: "builder pool active work",
+      to_agent: "roger",
+      dispatch_body: "already running",
+      readiness_state: "in_flight",
+      risk_class: "build",
+      write_scope: ["repo/active-builder"],
+    });
+
+    const poolForItem: PoolRouting["poolForItem"] = (item) =>
+      item.title.includes("builder pool")
+        ? { pool_id: "backend", repo_root: "/repo/backend", max_parallel: 2, members: ["roger", "substrate-api-codex"] }
+        : null;
+    const { app, daemon } = mountStatusApp(
+      adapter,
+      { dry_run: true, max_in_flight: 10 },
+      {
+        resolveAgentHealth: async () => new Set(["roger"]),
+        pools: {
+          poolForItem,
+          availableBuilders: (pool, building) => pool.members.filter((member) => !building.has(member)),
+          allocateWorktree: async ({ agent, item }) => ({ path: `/tmp/${item.item_id}`, branch: item.item_id, lease_id: agent }),
+        },
+      },
+    );
+    await daemon.setMode("running");
+
+    const res = await callApp(app, "/orchestration/status");
+    const blocked = res.body.ready_admission.non_admitted.find((row: any) => row.code === "no_free_pool_builder");
+
+    expect(res.status).toBe(200);
+    expect(res.body.ready_admission.admissible_now).toBe(0);
+    expect(blocked.metadata).toMatchObject({
+      code: "no_free_pool_builder",
+      pool_id: "backend",
+      candidate_builders: ["substrate-api-codex"],
+      busy_builders: ["roger"],
+    });
+  });
+
   it("status reports capacity saturation, not low fuel, when raw ready is above floor but in-flight slots are full", async () => {
     for (let i = 0; i < 10; i++) {
       await seedReady(adapter, { title: `capacity-held ready ${i}`, write_scope: [`repo/capacity-${i}`] });

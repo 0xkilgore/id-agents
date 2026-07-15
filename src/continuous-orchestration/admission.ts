@@ -38,6 +38,8 @@ export interface AdmissionContext {
   pool_free_slots?: Map<string, number>;
   /** Available builders per pool, in preference order (consumed as admitted). */
   pool_free_builders?: Map<string, string[]>;
+  /** Pool members already bound to in-flight build work, for status/debug evidence. */
+  pool_busy_builders?: Map<string, string[]>;
   /**
    * RD-014: agent names currently healthy/online. When provided, admission
    * rejects any candidate whose resolved target (the pool-assigned builder,
@@ -282,6 +284,7 @@ export function planAdmission(
         skipped.push(nonAdmission(item.item_id, "held", "no_free_pool_builder", reason, {
           pool_id: poolId,
           ...(ctx.healthy_agents ? { candidate_builders: builders } : {}),
+          ...(ctx.pool_busy_builders?.get(poolId)?.length ? { busy_builders: ctx.pool_busy_builders.get(poolId) } : {}),
         }));
         continue;
       }

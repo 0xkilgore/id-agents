@@ -545,6 +545,7 @@ describe("planAdmission — RD-014 agent-health gate", () => {
         pool_for: () => "backend",
         pool_free_slots: new Map([["backend", 1]]),
         pool_free_builders: new Map([["backend", ["substrate-api-codex"]]]),
+        pool_busy_builders: new Map([["backend", ["roger", "substrate-orch-codex"]]]),
         healthy_agents: new Set(["roger"]), // substrate-api-codex is NOT healthy
       }),
       cfg,
@@ -552,6 +553,7 @@ describe("planAdmission — RD-014 agent-health gate", () => {
     expect(p.admit).toHaveLength(0);
     expect(p.skipped[0].metadata?.code).toBe("no_free_pool_builder");
     expect(p.skipped[0].reason).toMatch(/no healthy free builder in pool: backend/);
+    expect(p.skipped[0].metadata?.busy_builders).toEqual(["roger", "substrate-orch-codex"]);
   });
 
   it("assigns a later healthy builder instead of hiding pool work as target_unhealthy", () => {
@@ -562,6 +564,25 @@ describe("planAdmission — RD-014 agent-health gate", () => {
         pool_for: () => "backend",
         pool_free_slots: new Map([["backend", 1]]),
         pool_free_builders: new Map([["backend", ["roger", "substrate-orch-codex"]]]),
+        healthy_agents: new Set(["substrate-orch-codex"]),
+      }),
+      cfg,
+    );
+
+    expect(p.admit.map((it) => it.item_id)).toEqual(["pool-item"]);
+    expect(p.assignments["pool-item"]).toBe("substrate-orch-codex");
+    expect(p.skipped).toHaveLength(0);
+  });
+
+  it("turns a builder-pool row admissible when a healthy builder becomes free", () => {
+    const p = planAdmission(
+      [item({ item_id: "pool-item", to_agent: "pool:builder", write_scope: [] })],
+      ctx({
+        admit_limit: 5,
+        pool_for: () => "backend",
+        pool_free_slots: new Map([["backend", 1]]),
+        pool_free_builders: new Map([["backend", ["substrate-orch-codex", "substrate-api-codex"]]]),
+        pool_busy_builders: new Map([["backend", ["roger"]]]),
         healthy_agents: new Set(["substrate-orch-codex"]),
       }),
       cfg,

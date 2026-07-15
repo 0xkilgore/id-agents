@@ -732,6 +732,7 @@ export class ContinuousOrchestrationDaemon {
       pool_for: poolGate?.pool_for,
       pool_free_slots: poolGate?.pool_free_slots,
       pool_free_builders: poolGate?.pool_free_builders,
+      pool_busy_builders: poolGate?.pool_busy_builders,
       healthy_agents,
       target_agent_runtimes,
       ready_item_blockers,
@@ -1015,6 +1016,7 @@ export class ContinuousOrchestrationDaemon {
       pool_for: poolGate?.pool_for,
       pool_free_slots: poolGate?.pool_free_slots,
       pool_free_builders: poolGate?.pool_free_builders,
+      pool_busy_builders: poolGate?.pool_busy_builders,
       healthy_agents,
       target_agent_runtimes,
       ready_item_blockers,
@@ -1106,6 +1108,7 @@ export class ContinuousOrchestrationDaemon {
       pool_for: poolGate?.pool_for,
       pool_free_slots: poolGate?.pool_free_slots,
       pool_free_builders: poolGate?.pool_free_builders,
+      pool_busy_builders: poolGate?.pool_busy_builders,
       healthy_agents,
       target_agent_runtimes,
       ready_item_blockers,
@@ -1370,6 +1373,7 @@ export class ContinuousOrchestrationDaemon {
     pool_for: (item: BacklogItem) => string | null;
     pool_free_slots: Map<string, number>;
     pool_free_builders: Map<string, string[]>;
+    pool_busy_builders: Map<string, string[]>;
   } | null> {
     const pools = this.deps.pools;
     if (!pools) return null;
@@ -1400,15 +1404,19 @@ export class ContinuousOrchestrationDaemon {
 
     const pool_free_slots = new Map<string, number>();
     const pool_free_builders = new Map<string, string[]>();
+    const pool_busy_builders = new Map<string, string[]>();
     for (const [pid, pool] of resolved) {
+      const busy = building.get(pid) ?? new Set<string>();
       pool_free_slots.set(pid, Math.max(0, pool.max_parallel - (inFlightCount.get(pid) ?? 0)));
-      pool_free_builders.set(pid, pools.availableBuilders(pool, building.get(pid) ?? new Set<string>()));
+      pool_free_builders.set(pid, pools.availableBuilders(pool, busy));
+      pool_busy_builders.set(pid, pool.members.filter((member) => busy.has(member)));
     }
 
     return {
       pool_for: (item: BacklogItem) => pools.poolForItem(item)?.pool_id ?? null,
       pool_free_slots,
       pool_free_builders,
+      pool_busy_builders,
     };
   }
 
