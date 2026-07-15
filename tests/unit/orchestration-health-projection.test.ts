@@ -1548,6 +1548,78 @@ describe("orchestration health projection", () => {
     ]);
   });
 
+  it("does not count risk-approval ready rows as useful or admissible build fuel", async () => {
+    const approvalBlockedIds: string[] = [];
+    for (let i = 0; i < 13; i += 1) {
+      const item = await insertBacklogItem(adapter, {
+        title: `risk approval blocked ready item ${i}`,
+        readiness_state: "ready",
+        risk_class: "external",
+        to_agent: "roger",
+        dispatch_body: "operator approval required",
+        write_scope: [`/repo/risk-approval-${i}`],
+      });
+      approvalBlockedIds.push(item.item_id);
+    }
+
+    const health = await readOrchestrationHealthProjection(adapter, "default", {
+      minReadyFuel: 12,
+      readyAdmission: {
+        rawReady: 13,
+        usefulReady: 0,
+        admissibleNow: 0,
+        blockerCounts: [
+          { code: "risk_requires_approval", category: "lane_eligibility", count: 13 },
+        ],
+        nonAdmitted: approvalBlockedIds.map((item_id) => ({ item_id, code: "risk_requires_approval" })),
+        recommendedAction: "review and approve risk_requires_approval=13 rows or lower risk class before admission",
+      },
+    });
+
+    expect(health.ready_item_blockers).toMatchObject({
+      ready: 13,
+      actionable: 0,
+      min_ready_fuel: 12,
+      admissible_now: 0,
+      stale_ready_floor: true,
+      recommended_action: "review and approve risk_requires_approval=13 rows or lower risk class before admission",
+      stale_ready_fuel: {
+        active: true,
+        reason: "useful_ready_fuel=0 is below min_ready_fuel=12; raw_ready_fuel=13; admissible_now=0",
+        recommended_action: "review and approve risk_requires_approval=13 rows or lower risk class before admission",
+        counts_by_blocker_class: [
+          {
+            code: "risk_requires_approval",
+            category: "lane_eligibility",
+            count: 13,
+            examples: approvalBlockedIds.slice(0, 5),
+          },
+        ],
+        examples: approvalBlockedIds.slice(0, 5),
+      },
+    });
+    expect(health.ready_item_blockers.categories).toEqual([
+      expect.objectContaining({
+        code: "risk_requires_approval",
+        category: "lane_eligibility",
+        count: 13,
+        examples: approvalBlockedIds.slice(0, 5),
+        owner_lane: "chris",
+        recommended_action: "review and approve the item or lower the risk class before admission",
+      }),
+    ]);
+    expect(health.build_ready_floor).toMatchObject({
+      blocked: true,
+      useful_ready_count: 0,
+      floor: 12,
+      build_ready_lanes: 0,
+      blocker_reasons: {
+        risk_requires_approval: 13,
+        build_ready_below_floor: 1,
+      },
+    });
+  });
+
   it("includes owner, reason, and next action for admission metadata blockers", async () => {
     await insertAgent("cto", "claude-code-cli");
     const duplicate = await insertBacklogItem(adapter, {

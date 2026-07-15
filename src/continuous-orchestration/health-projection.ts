@@ -817,9 +817,12 @@ async function readBuildReadyFloorProjection(
   const laneCounts = new Map<string, number>();
   const blockerReasons: Record<string, number> = {};
   const nonUsefulAdmissionBlockers = new Map<string, string>();
+  const nonUsefulAdmissionBlockerCounts = new Map<string, number>();
+  const countedNonUsefulAdmissionBlockers = new Map<string, number>();
   for (const row of readyAdmission?.nonAdmitted ?? []) {
     if (isNonUsefulReadyBlockerCode(row.code)) {
       nonUsefulAdmissionBlockers.set(row.item_id, row.code);
+      nonUsefulAdmissionBlockerCounts.set(row.code, (nonUsefulAdmissionBlockerCounts.get(row.code) ?? 0) + 1);
     }
   }
   let usefulReadyCount = 0;
@@ -828,6 +831,10 @@ async function readBuildReadyFloorProjection(
     const admissionBlockerCode = nonUsefulAdmissionBlockers.get(row.item_id);
     if (admissionBlockerCode) {
       blockerReasons[admissionBlockerCode] = (blockerReasons[admissionBlockerCode] ?? 0) + 1;
+      countedNonUsefulAdmissionBlockers.set(
+        admissionBlockerCode,
+        (countedNonUsefulAdmissionBlockers.get(admissionBlockerCode) ?? 0) + 1,
+      );
       continue;
     }
     if (row.last_dispatch_phid && row.retry_safe !== 1) {
@@ -843,6 +850,10 @@ async function readBuildReadyFloorProjection(
     usefulReadyCount += 1;
     const lane = laneKeyOf(backlogQueueRowToLaneItem(row));
     laneCounts.set(lane, (laneCounts.get(lane) ?? 0) + 1);
+  }
+  for (const [code, count] of nonUsefulAdmissionBlockerCounts) {
+    const uncounted = count - (countedNonUsefulAdmissionBlockers.get(code) ?? 0);
+    if (uncounted > 0) blockerReasons[code] = (blockerReasons[code] ?? 0) + uncounted;
   }
   for (const [code, count] of Object.entries(persistedAdmissionBlockReasons)) {
     if (
@@ -892,6 +903,7 @@ function isNonUsefulReadyBlockerCode(code: string): boolean {
     code === "duplicate_dispatch_guard" ||
     code === "duplicate_dispatch_retry_required" ||
     code === "provider_runtime_mismatch" ||
+    code === "risk_requires_approval" ||
     code === "target_unhealthy"
   );
 }
