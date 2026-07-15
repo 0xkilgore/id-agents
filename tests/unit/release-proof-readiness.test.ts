@@ -5,7 +5,11 @@ import {
   readReleaseProofReadiness,
   type ReleaseProofReadinessInput,
 } from "../../src/continuous-orchestration/release-proof-readiness.js";
-import { recordTickOutcome, setMode } from "../../src/continuous-orchestration/storage.js";
+import {
+  reconcileStaleAlreadyDispatchedReadyRows,
+  recordTickOutcome,
+  setMode,
+} from "../../src/continuous-orchestration/storage.js";
 import { migrateSqlite } from "../../src/db/migrations/sqlite.js";
 import { SqliteAdapter } from "../../src/db/sqlite-adapter.js";
 import { migrateOutputsTables } from "../../src/outputs/storage.js";
@@ -444,6 +448,115 @@ describe("buildReleaseProofReadiness", () => {
       expect(view.missing_reasons).toEqual(["one or more feedback evidence items are missing safe source links"]);
       expect(view.summary).toBe(
         "Release proof is not ready: one or more feedback evidence items are missing safe source links.",
+      );
+    } finally {
+      await adapter.close();
+    }
+  });
+
+  it("can cite stale duplicate closeout receipts as release-proof backlog sources", async () => {
+    const adapter = new SqliteAdapter(":memory:");
+    try {
+      await migrateSqlite(adapter);
+      await migrateOutputsTables(adapter);
+      await setMode(adapter, "default", "running");
+      await adapter.query(
+        `INSERT INTO artifacts
+           (artifact_id, basename, agent, tag, abs_path, title, produced_at, source, availability,
+            project_ref, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          "art-kapelle-receipt-proof",
+          "kapelle-release-proof.md",
+          "roger",
+          "release-proof",
+          "/tmp/output/kapelle-release-proof.md",
+          "Kapelle release proof",
+          "2026-07-13T11:20:00.000Z",
+          "manager:/artifacts/art-kapelle-receipt-proof",
+          "present",
+          "kapelle",
+          "2026-07-13T11:20:00.000Z",
+          "2026-07-13T11:20:00.000Z",
+        ],
+      );
+      await adapter.query(
+        `INSERT INTO artifact_operations
+           (artifact_id, op_type, actor, ts, payload_json, source_link, idempotency_key)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        [
+          "art-kapelle-receipt-proof",
+          "comment_recorded",
+          "chris",
+          "2026-07-13T11:30:00.000Z",
+          JSON.stringify({ body: "Receipt-backed stale duplicate closeout is visible." }),
+          "manager:/artifacts/art-kapelle-receipt-proof/comments#op-1",
+          "comment-receipt-source",
+        ],
+      );
+      await adapter.query(
+        `INSERT INTO orchestration_backlog_item
+           (item_id, team_id, title, track, to_agent, dispatch_body, readiness_state, risk_class,
+            source_refs_json, last_dispatch_phid, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          "backlog-kapelle-stale-duplicate",
+          "default",
+          "Kapelle stale duplicate closeout receipt source",
+          "T-ORCH",
+          "roger",
+          "Already completed duplicate work.",
+          "ready",
+          "build",
+          JSON.stringify(["manager:/backlog/original-kapelle-source"]),
+          "phid:disp-kapelle-stale-duplicate",
+          "2026-07-13T11:00:00.000Z",
+          "2026-07-13T11:00:00.000Z",
+        ],
+      );
+      await adapter.query(
+        `INSERT INTO dispatch_scheduler_queue
+           (dispatch_phid, team_id, query_id, to_agent, from_actor, channel, subject, body_markdown,
+            provider, runtime, status, not_before_at, completed_at, updated_at, artifact_path)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          "phid:disp-kapelle-stale-duplicate",
+          "default",
+          "query_kapelle_stale_duplicate",
+          "roger",
+          "manager",
+          "talk",
+          "Kapelle stale duplicate closeout",
+          "Done.",
+          "openai",
+          "codex",
+          "done",
+          "2026-07-13T11:00:00.000Z",
+          "2026-07-13T11:10:00.000Z",
+          "2026-07-13T11:10:00.000Z",
+          "/repo/output/kapelle-stale-duplicate-closeout.md",
+        ],
+      );
+
+      const closed = await reconcileStaleAlreadyDispatchedReadyRows(adapter, {
+        team_id: "default",
+        actor: "roger",
+      });
+      expect(closed.closed).toBe(1);
+
+      const view = await readReleaseProofReadiness(adapter, {
+        teamId: "default",
+        project: "kapelle",
+        now: NOW,
+      });
+
+      expect(view.sources.links).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            source: "backlog",
+            href: "manager:/orchestration/backlog/backlog-kapelle-stale-duplicate#stale-duplicate-closeout-receipt",
+          }),
+        ]),
       );
     } finally {
       await adapter.close();
