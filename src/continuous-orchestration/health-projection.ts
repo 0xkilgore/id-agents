@@ -120,6 +120,7 @@ export interface OrchestrationReadyItemBlockerProjection {
     count: number;
     top_blockers: OrchestrationTargetUnhealthyBlocker[];
     repair_actions: OrchestrationTargetUnhealthyRepairAction[];
+    incident: OrchestrationTargetUnhealthyIncident | null;
   };
   stale_ready_floor: boolean;
   blocked_lanes: OrchestrationReadyAdmissionBlockedLane[];
@@ -169,6 +170,25 @@ export interface OrchestrationTargetUnhealthyRepairAction {
   lane: string;
   proposed_target_agent: string | null;
   reason: string;
+  recommended_action: string;
+}
+
+export interface OrchestrationTargetUnhealthyIncident {
+  schema_version: "orchestration.target_unhealthy_incident.v1";
+  incident_code: "ready_fuel_blocked_by_target_unhealthy";
+  dedupe_key: string;
+  severity: "critical";
+  ready: number;
+  floor: number;
+  admissible_now: number;
+  consecutive_zero_ticks: number;
+  affected_targets: string[];
+  example_item_ids: string[];
+  blocker_counts: Array<{
+    code: string;
+    category: string;
+    count: number;
+  }>;
   recommended_action: string;
 }
 
@@ -362,7 +382,10 @@ export async function readOrchestrationHealthProjection(
     needsClarification: needsClarification.length,
     promotion: promotion.length,
   }, opts.readyAdmission);
-  const readyItemBlockers = await readReadyItemBlockerProjection(adapter, teamId, dependencyImpact, opts);
+  const orchestrationLoop = await readOrchestrationLoopHealthProjection(adapter, teamId, {
+    readyAdmission: opts.readyAdmission,
+  });
+  const readyItemBlockers = await readReadyItemBlockerProjection(adapter, teamId, dependencyImpact, opts, orchestrationLoop);
   const buildReadyFloor = await readBuildReadyFloorProjection(adapter, teamId, opts.readyAdmission);
   const blocked =
     needsClarification.length > 0 ||
@@ -372,9 +395,7 @@ export async function readOrchestrationHealthProjection(
   return {
     ok: !blocked,
     generated_at: new Date().toISOString(),
-    orchestration_loop: await readOrchestrationLoopHealthProjection(adapter, teamId, {
-      readyAdmission: opts.readyAdmission,
-    }),
+    orchestration_loop: orchestrationLoop,
     queue_quality: queueQuality,
     build_ready_floor: buildReadyFloor,
     ready_item_blockers: readyItemBlockers,
@@ -615,6 +636,7 @@ async function readReadyItemBlockerProjection(
   teamId: string,
   dependencyImpact: Map<string, string[]>,
   opts: OrchestrationHealthProjectionOptions,
+  orchestrationLoop?: OrchestrationLoopHealthProjection,
 ): Promise<OrchestrationReadyItemBlockerProjection> {
   const rows = (await readBacklogQueueRows(adapter, teamId)).filter((row) => row.readiness_state === "ready");
   const blockedDependencyItemIds = new Set<string>();
@@ -676,7 +698,13 @@ async function readReadyItemBlockerProjection(
   }
 
   const categoryValues = [...categories.values()].sort(sortBlockerCounts);
-  const targetUnhealthy = targetUnhealthyProjection(opts.readyAdmission);
+  const targetUnhealthy = targetUnhealthyProjection(opts.readyAdmission, {
+    rawReady: opts.readyAdmission?.rawReady ?? rows.length,
+    minReadyFuel,
+    admissibleNow,
+    consecutiveZeroTicks: orchestrationLoop?.consecutive_zero_ticks ?? 0,
+    stallThresholdTicks: orchestrationLoop?.stall_threshold_ticks ?? loadContinuousOrchestrationConfig().stall_threshold_ticks,
+  });
   const staleReadyFuel = staleReadyFuelProjection({
     ready: rows.length,
     actionable,
@@ -704,6 +732,13 @@ async function readReadyItemBlockerProjection(
 
 function targetUnhealthyProjection(
   readyAdmission: OrchestrationHealthProjectionOptions["readyAdmission"] | undefined,
+  incidentInput: {
+    rawReady: number;
+    minReadyFuel: number;
+    admissibleNow: number | null;
+    consecutiveZeroTicks: number;
+    stallThresholdTicks: number;
+  },
 ): OrchestrationReadyItemBlockerProjection["target_unhealthy"] {
   const targetCount = readyAdmission?.blockerCounts.find((count) => count.code === "target_unhealthy")?.count ?? 0;
   const targetUnhealthyPriorDispatchIds = new Set(
@@ -731,7 +766,77 @@ function targetUnhealthyProjection(
     .flatMap((group) => targetUnhealthyRepairActions(group, targetUnhealthyPriorDispatchIds))
     .sort(compareTargetUnhealthyRepairActions)
     .slice(0, 10);
-  return { count: targetCount, top_blockers: topBlockers, repair_actions: repairActions };
+  const incident = targetUnhealthyIncident(readyAdmission, topBlockers, repairActions, {
+    ...incidentInput,
+    targetCount,
+  });
+  return { count: targetCount, top_blockers: topBlockers, repair_actions: repairActions, incident };
+}
+
+function targetUnhealthyIncident(
+  readyAdmission: OrchestrationHealthProjectionOptions["readyAdmission"] | undefined,
+  topBlockers: OrchestrationTargetUnhealthyBlocker[],
+  repairActions: OrchestrationTargetUnhealthyRepairAction[],
+  input: {
+    rawReady: number;
+    minReadyFuel: number;
+    admissibleNow: number | null;
+    consecutiveZeroTicks: number;
+    stallThresholdTicks: number;
+    targetCount: number;
+  },
+): OrchestrationTargetUnhealthyIncident | null {
+  if (!readyAdmission) return null;
+  if (input.targetCount <= 0) return null;
+  if (input.rawReady < input.minReadyFuel) return null;
+  if (input.admissibleNow !== 0) return null;
+  if (input.consecutiveZeroTicks < input.stallThresholdTicks) return null;
+  const largestOtherBlocker = Math.max(
+    0,
+    ...readyAdmission.blockerCounts
+      .filter((count) => count.code !== "target_unhealthy")
+      .map((count) => count.count),
+  );
+  if (input.targetCount < largestOtherBlocker) return null;
+
+  const affectedTargets = uniqueStrings([
+    ...topBlockers.map((blocker) => blocker.target_agent),
+    ...(readyAdmission.nonAdmitted ?? [])
+      .filter((row) => row.code === "target_unhealthy")
+      .map((row) => row.to_agent ?? ""),
+  ]).sort((a, b) => a.localeCompare(b));
+  const exampleItemIds = uniqueStrings([
+    ...topBlockers.flatMap((blocker) => blocker.item_ids),
+    ...readyAdmission.nonAdmitted
+      .filter((row) => row.code === "target_unhealthy")
+      .map((row) => row.item_id),
+  ]).slice(0, 5);
+  const recommendedAction = repairActions[0]?.recommended_action ??
+    readyAdmission.recommendedAction ??
+    "restore affected target health or reroute to compatible healthy owners before treating raw ready rows as useful fuel";
+  const dedupeKey = [
+    "ready_fuel_blocked_by_target_unhealthy",
+    `targets=${affectedTargets.join(",")}`,
+    `floor=${input.minReadyFuel}`,
+  ].join("|");
+
+  return {
+    schema_version: "orchestration.target_unhealthy_incident.v1",
+    incident_code: "ready_fuel_blocked_by_target_unhealthy",
+    dedupe_key: dedupeKey,
+    severity: "critical",
+    ready: input.rawReady,
+    floor: input.minReadyFuel,
+    admissible_now: 0,
+    consecutive_zero_ticks: input.consecutiveZeroTicks,
+    affected_targets: affectedTargets,
+    example_item_ids: exampleItemIds,
+    blocker_counts: readyAdmission.blockerCounts
+      .filter((count) => count.count > 0)
+      .map((count) => ({ code: count.code, category: count.category, count: count.count }))
+      .sort(sortBlockerCounts),
+    recommended_action: recommendedAction,
+  };
 }
 
 function targetUnhealthyRepairActions(
@@ -1135,6 +1240,8 @@ async function readBuildReadyFloorProjection(
 
 function isNonUsefulReadyBlockerCode(code: string): boolean {
   return (
+    code === "blocked_dependency" ||
+    code === "broken_dependency" ||
     code === "duplicate_dispatch_guard" ||
     code === "duplicate_dispatch_retry_required" ||
     code === "no_free_pool_builder" ||

@@ -70,7 +70,7 @@ export const AUTO_PROMOTE_HEALTH_STALE_ALREADY_DISPATCHED_STATUSES = new Set([
 ]);
 const INCIDENT_ALERT_COOLDOWN_MS = 60 * 60 * 1000;
 
-type OrchestrationIncidentKind = "stall" | "model_policy_drift";
+type OrchestrationIncidentKind = "stall" | "model_policy_drift" | "target_unhealthy_ready_blocked";
 
 interface AlertIncidentState {
   kind: OrchestrationIncidentKind;
@@ -100,6 +100,8 @@ function formatIncidentKind(kind: OrchestrationIncidentKind): string {
       return "STALL";
     case "model_policy_drift":
       return "model-policy drift";
+    case "target_unhealthy_ready_blocked":
+      return "target-unhealthy ready-blocked";
   }
 }
 
@@ -530,6 +532,63 @@ function readyAdmissionBlockerCounts(plan: { skipped: DecisionRecord[] }): Ready
   return [...counts.values()].sort((a, b) => b.count - a.count || a.category.localeCompare(b.category) || a.code.localeCompare(b.code));
 }
 
+function targetUnhealthyReadyBlockedIncident(input: {
+  ready: BacklogItem[];
+  plan: { admit: BacklogItem[]; skipped: DecisionRecord[] };
+  blockerCounts: ReadyAdmissionExplanation["blocker_counts"];
+  zeroTicks: number;
+  config: ContinuousOrchestrationConfig;
+}): {
+  cause: string;
+  message: string;
+  targets: string[];
+  examples: string[];
+  targetCount: number;
+} | null {
+  if (input.ready.length < input.config.min_ready_fuel) return null;
+  if (input.plan.admit.length !== 0) return null;
+  if (input.zeroTicks < input.config.stall_threshold_ticks) return null;
+  const targetCount = input.blockerCounts.find((count) => count.code === "target_unhealthy")?.count ?? 0;
+  if (targetCount <= 0) return null;
+  const largestOtherBlocker = Math.max(
+    0,
+    ...input.blockerCounts
+      .filter((count) => count.code !== "target_unhealthy")
+      .map((count) => count.count),
+  );
+  if (targetCount < largestOtherBlocker) return null;
+
+  const targetDecisions = input.plan.skipped.filter((decision) => decision.metadata?.code === "target_unhealthy");
+  const targets = [...new Set(targetDecisions.flatMap(decisionTargets))].sort((a, b) => a.localeCompare(b));
+  const examples = targetDecisions
+    .map((decision) => decision.item_id)
+    .filter((itemId): itemId is string => !!itemId)
+    .slice(0, 5);
+  const blockerText = input.blockerCounts
+    .filter((count) => count.count > 0)
+    .map((count) => `${count.code}=${count.count}`)
+    .join(", ");
+  const repairText = targets.length > 0
+    ? `restore or reroute affected target(s): ${targets.join(", ")}`
+    : "restore unhealthy targets or reroute to compatible healthy owners";
+  return {
+    cause: stableJson({
+      code: "ready_fuel_blocked_by_target_unhealthy",
+      floor: input.config.min_ready_fuel,
+      targets,
+      blockers: input.blockerCounts.filter((count) => count.count > 0),
+    }),
+    message:
+      `Continuous orchestration target-unhealthy ready-blocked incident: ready=${input.ready.length} ` +
+      `floor=${input.config.min_ready_fuel}, admissible_now=0 for ${input.zeroTicks} consecutive tick(s); ` +
+      `${blockerText}. Affected targets: ${targets.join(", ") || "unknown"}. ` +
+      `Examples: ${examples.join(", ") || "none"}. Recommended repair: ${repairText}.`,
+    targets,
+    examples,
+    targetCount,
+  };
+}
+
 function readyAdmissionOperatorBlockers(plan: { skipped: DecisionRecord[] }): ReadyAdmissionExplanation["operator_blockers"] {
   const blockers = new Map<string, ReadyAdmissionExplanation["operator_blockers"][number]>();
   for (const decision of plan.skipped) {
@@ -604,6 +663,8 @@ function readyAdmissionBlockReasonCounts(plan: { skipped: DecisionRecord[] }): R
 
 function isNonUsefulReadyBlockerCode(code: unknown): boolean {
   return (
+    code === "blocked_dependency" ||
+    code === "broken_dependency" ||
     code === "duplicate_dispatch_guard" ||
     code === "duplicate_dispatch_retry_required" ||
     code === "no_free_pool_builder" ||
@@ -1269,7 +1330,38 @@ export class ContinuousOrchestrationDaemon {
       { mode: state.mode, halted: !!plan.halt, candidates_available: ordered.length, admitted: admitted.length },
       config,
     );
-    if (stall.alert) {
+    const admissionBlockerCountsForTick = readyAdmissionBlockerCounts(plan);
+    const targetUnhealthyIncident = targetUnhealthyReadyBlockedIncident({
+      ready,
+      plan,
+      blockerCounts: admissionBlockerCountsForTick,
+      zeroTicks: stall.zero_ticks,
+      config,
+    });
+    if (targetUnhealthyIncident) {
+      decisions.push({
+        item_id: null,
+        action: "target_unhealthy_incident",
+        reason:
+          `ready fuel blocked by target_unhealthy: ready=${ready.length} floor=${config.min_ready_fuel}, ` +
+          `admissible_now=0, target_unhealthy=${targetUnhealthyIncident.targetCount}`,
+        metadata: {
+          incident_code: "ready_fuel_blocked_by_target_unhealthy",
+          affected_targets: targetUnhealthyIncident.targets,
+          example_item_ids: targetUnhealthyIncident.examples,
+          blocker_counts: admissionBlockerCountsForTick,
+          recommended_action: "restore unhealthy targets or reroute to compatible healthy owners before treating raw ready as useful fuel",
+        },
+      });
+      await this.alertIncident({
+        kind: "target_unhealthy_ready_blocked",
+        cause: targetUnhealthyIncident.cause,
+        message: targetUnhealthyIncident.message,
+        recoveryMessage: `Continuous orchestration ${formatIncidentKind("target_unhealthy_ready_blocked")} recovered.`,
+        nowMs,
+        activeIncidentKeys,
+      });
+    } else if (stall.alert) {
       const cause = stableJson({
         ready_waiting: ordered.length,
         block_reasons: readyAdmissionBlockReasonCounts(plan),
