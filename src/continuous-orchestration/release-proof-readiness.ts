@@ -171,7 +171,12 @@ export function buildReleaseProofReadiness(
     missingReasons.push("no source links are attached to the release proof");
   }
 
-  const feedbackMissingSources = input.feedback_evidence.filter((item) => !isSafeSourceHref(item.source_link));
+  const currentFeedbackEvidence = currentFeedbackForSourceGate({
+    feedback: input.feedback_evidence,
+    generatedAt: input.generated_at,
+    staleAfterMs,
+  });
+  const feedbackMissingSources = currentFeedbackEvidence.filter((item) => !isSafeSourceHref(item.source_link));
   if (feedbackMissingSources.length > 0) {
     missingReasons.push("one or more feedback evidence items are missing safe source links");
   }
@@ -448,6 +453,21 @@ function latestIso(values: string[]): string | null {
     if (latest === null || Date.parse(value) > Date.parse(latest)) latest = value;
   }
   return latest;
+}
+
+function currentFeedbackForSourceGate(input: {
+  feedback: ReleaseProofFeedbackEvidence[];
+  generatedAt: string;
+  staleAfterMs: number;
+}): ReleaseProofFeedbackEvidence[] {
+  const generatedAtMs = Date.parse(input.generatedAt);
+  if (!Number.isFinite(generatedAtMs)) return input.feedback;
+
+  const freshFeedback = input.feedback.filter((item) => {
+    const observedAtMs = Date.parse(item.observed_at);
+    return Number.isFinite(observedAtMs) && generatedAtMs - observedAtMs <= input.staleAfterMs;
+  });
+  return freshFeedback.length > 0 ? freshFeedback : input.feedback;
 }
 
 function dedupeSourceLinks(links: ReleaseProofSourceLink[]): ReleaseProofSourceLink[] {

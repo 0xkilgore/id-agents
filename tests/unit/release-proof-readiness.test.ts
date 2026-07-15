@@ -327,6 +327,159 @@ describe("buildReleaseProofReadiness", () => {
     expect(view.summary).toContain("latest feedback evidence is older than 24h");
   });
 
+  it("allows fresh sourced Chris feedback to supersede stale missing-source feedback", () => {
+    const view = buildReleaseProofReadiness(base({
+      feedback_evidence: [
+        {
+          id: "op:stale-null-source",
+          kind: "comment_recorded",
+          observed_at: "2026-07-12T10:00:00.000Z",
+          source_link: null,
+          artifact_id: "art-kapelle",
+          summary: "Old feedback without durable source.",
+        },
+        {
+          id: "op:fresh-sourced-approval",
+          kind: "approve",
+          observed_at: "2026-07-13T11:59:00.000Z",
+          source_link: "manager:/artifacts/art-kapelle/comments#op-fresh",
+          artifact_id: "art-kapelle",
+          summary: "user:chris approved the fresh release proof.",
+        },
+      ],
+      source_links: [
+        {
+          label: "feedback:op:fresh-sourced-approval",
+          href: "manager:/artifacts/art-kapelle/comments#op-fresh",
+          source: "feedback",
+        },
+      ],
+      stale_after_ms: 24 * 60 * 60 * 1000,
+    }));
+
+    expect(view.release_readiness).toBe("ready");
+    expect(view.chris_readable_release_ready).toBe("READY");
+    expect(view.feedback_freshness).toMatchObject({ state: "present", stale: false, reason: null });
+    expect(view.source_link_state).toMatchObject({ state: "present", safe_count: 1, unsafe_count: 0 });
+    expect(view.stale_reasons).toEqual([]);
+    expect(view.missing_reasons).toEqual([]);
+  });
+
+  it("keeps fresh null-source Chris feedback as a source-link blocker", () => {
+    const view = buildReleaseProofReadiness(base({
+      feedback_evidence: [
+        {
+          id: "op:fresh-null-source",
+          kind: "comment_recorded",
+          observed_at: "2026-07-13T11:59:00.000Z",
+          source_link: null,
+          artifact_id: "art-kapelle",
+          summary: "user:chris commented without a durable source.",
+        },
+      ],
+      stale_after_ms: 24 * 60 * 60 * 1000,
+    }));
+
+    expect(view.release_readiness).toBe("not_ready");
+    expect(view.feedback_freshness).toMatchObject({ state: "present", stale: false, reason: null });
+    expect(view.missing_reasons).toEqual(["one or more feedback evidence items are missing safe source links"]);
+    expect(view.summary).toBe(
+      "Release proof is not ready: one or more feedback evidence items are missing safe source links.",
+    );
+  });
+
+  it("does not let generated artifact filesystem links substitute for feedback source links", () => {
+    const view = buildReleaseProofReadiness(base({
+      feedback_evidence: [
+        {
+          id: "op:fresh-null-source",
+          kind: "approve",
+          observed_at: "2026-07-13T11:59:00.000Z",
+          source_link: null,
+          artifact_id: "art-kapelle",
+          summary: "user:chris approved without a durable feedback source.",
+        },
+      ],
+      source_links: [
+        {
+          label: "artifact:art-kapelle",
+          href: "manager:/artifacts/art-kapelle",
+          source: "artifact",
+        },
+      ],
+      generated_artifacts: [
+        {
+          artifact_id: "art-kapelle",
+          path: "/tmp/output/kapelle-release-proof.md",
+          title: "Kapelle release proof",
+          produced_at: "2026-07-13T11:20:00.000Z",
+          source_link: "manager:/artifacts/art-kapelle",
+          availability: "present",
+        },
+      ],
+      stale_after_ms: 24 * 60 * 60 * 1000,
+    }));
+
+    expect(view.release_readiness).toBe("not_ready");
+    expect(view.sources).toMatchObject({
+      state: "present",
+      counts: { safe: 1, unsafe: 0, total: 1 },
+    });
+    expect(view.missing_reasons).toEqual(["one or more feedback evidence items are missing safe source links"]);
+  });
+
+  it("pins the 24h feedback freshness boundary", () => {
+    const atBoundary = buildReleaseProofReadiness(base({
+      feedback_evidence: [
+        {
+          id: "op:exactly-24h",
+          kind: "comment_recorded",
+          observed_at: "2026-07-12T12:00:00.000Z",
+          source_link: "manager:/artifacts/art-kapelle/comments#op-boundary",
+          artifact_id: "art-kapelle",
+          summary: "Boundary feedback.",
+        },
+      ],
+      source_links: [
+        {
+          label: "feedback:op:exactly-24h",
+          href: "manager:/artifacts/art-kapelle/comments#op-boundary",
+          source: "feedback",
+        },
+      ],
+      stale_after_ms: 24 * 60 * 60 * 1000,
+    }));
+    const justPastBoundary = buildReleaseProofReadiness(base({
+      feedback_evidence: [
+        {
+          id: "op:past-24h",
+          kind: "comment_recorded",
+          observed_at: "2026-07-12T11:59:59.999Z",
+          source_link: "manager:/artifacts/art-kapelle/comments#op-past",
+          artifact_id: "art-kapelle",
+          summary: "Just stale feedback.",
+        },
+      ],
+      source_links: [
+        {
+          label: "feedback:op:past-24h",
+          href: "manager:/artifacts/art-kapelle/comments#op-past",
+          source: "feedback",
+        },
+      ],
+      stale_after_ms: 24 * 60 * 60 * 1000,
+    }));
+
+    expect(atBoundary.release_readiness).toBe("ready");
+    expect(atBoundary.feedback_freshness).toMatchObject({ state: "present", stale: false, reason: null });
+    expect(justPastBoundary.release_readiness).toBe("not_ready");
+    expect(justPastBoundary.feedback_freshness).toMatchObject({
+      state: "stale",
+      stale: true,
+      reason: "latest feedback evidence is older than 24h",
+    });
+  });
+
   it("keeps stale and missing reasons separate when stale feedback has unsafe source evidence", () => {
     const view = buildReleaseProofReadiness(base({
       feedback_evidence: [

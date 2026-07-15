@@ -3980,6 +3980,78 @@ describe("stale already-dispatched ready reconciliation route", () => {
 });
 
 describe("release-proof-readiness route", () => {
+  it("reports READY when fresh user:chris feedback has a source link despite stale null-link history", async () => {
+    await adapter.query(
+      `INSERT INTO artifacts (
+         artifact_id, basename, agent, tag, abs_path, title, produced_at, source,
+         availability, source_badges, reconciled_at, project_ref, created_at, updated_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        "art-kapelle-proof",
+        "kapelle-release-proof.md",
+        "roger",
+        "release-proof",
+        "/tmp/output/kapelle-release-proof.md",
+        "Kapelle release proof",
+        new Date(Date.now() - 5 * 60 * 1000).toISOString(),
+        "filesystem",
+        "present",
+        "[]",
+        null,
+        "kapelle",
+        new Date(Date.now() - 5 * 60 * 1000).toISOString(),
+        new Date(Date.now() - 5 * 60 * 1000).toISOString(),
+      ],
+    );
+    await adapter.query(
+      `INSERT INTO artifact_operations (artifact_id, op_type, actor, ts, payload_json, source_link, idempotency_key)
+       VALUES
+         (?, 'comment_recorded', ?, ?, ?, ?, ?),
+         (?, 'approve', ?, ?, ?, ?, ?)`,
+      [
+        "art-kapelle-proof",
+        "user:chris",
+        "2020-01-01T12:00:00.000Z",
+        JSON.stringify({ body: "Old feedback without a durable source." }),
+        null,
+        "stale-null-feedback",
+        "art-kapelle-proof",
+        "user:chris",
+        new Date(Date.now() - 60 * 1000).toISOString(),
+        JSON.stringify({ note: "Approved from the routed artifact comment." }),
+        "manager:/artifacts/art-kapelle-proof/comments#op-fresh",
+        "fresh-sourced-approval",
+      ],
+    );
+
+    const { app, daemon } = mountStatusApp(adapter, { dry_run: true });
+    await daemon.setMode("running");
+
+    const res = await callApp(app, "/orchestration/release-proof-readiness?project=kapelle");
+
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({
+      schema_version: "release_proof.readiness.v1",
+      release_readiness: "ready",
+      chris_readable_release_ready: "READY",
+      feedback_freshness: { state: "present", stale: false, reason: null },
+      source_link_state: { state: "present", unsafe_count: 0 },
+      feedback_evidence: { state: "present", count: 2 },
+      generated_artifacts: { state: "present", count: 1 },
+      infra_warning: { state: "clear", count: 0, requires_operator_review: false },
+    });
+    expect(res.body.sources.links).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          source: "feedback",
+          href: "manager:/artifacts/art-kapelle-proof/comments#op-fresh",
+        }),
+      ]),
+    );
+    expect(res.body.missing_reasons).toEqual([]);
+    expect(res.body.stale_reasons).toEqual([]);
+  });
+
   it("keeps stale feedback and missing source links distinct when infra warnings are clear", async () => {
     await adapter.query(
       `INSERT INTO artifacts (
