@@ -429,8 +429,12 @@ export async function readOrchestrationLoopHealthProjection(
   const inFlight = Number(inFlightRows[0]?.count ?? 0);
   const persistedAdmissionBlockReasons = parseCountMap(state?.last_admission_block_reasons_json ?? null);
   const persistedExplainedCount = Object.values(persistedAdmissionBlockReasons).reduce((sum, count) => sum + count, 0);
+  const liveAdmissionBlockReasons = countMapFromReadyAdmission(opts.readyAdmission);
+  const liveExplainedCount = Object.values(liveAdmissionBlockReasons).reduce((sum, count) => sum + count, 0);
   const lastAdmissionBlockReasons = persistedExplainedCount > 0
     ? persistedAdmissionBlockReasons
+    : liveExplainedCount > 0
+      ? liveAdmissionBlockReasons
     : readyBlockReasons;
   const explainedCount = Object.values(lastAdmissionBlockReasons).reduce((sum, count) => sum + count, 0);
   const allCapacityOrLane =
@@ -555,6 +559,17 @@ function topZeroAdmitBlocker(
     .filter(([, value]) => value > 0)
     .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))[0] ?? [];
   return code ? { code, category: null, count } : null;
+}
+
+function countMapFromReadyAdmission(
+  readyAdmission: OrchestrationHealthProjectionOptions["readyAdmission"] | undefined,
+): Record<string, number> {
+  const out: Record<string, number> = {};
+  for (const row of readyAdmission?.blockerCounts ?? []) {
+    const n = Number(row.count);
+    if (row.code && Number.isFinite(n) && n > 0) out[row.code] = (out[row.code] ?? 0) + n;
+  }
+  return out;
 }
 
 function formatCountMap(counts: Record<string, number>): string {

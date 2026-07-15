@@ -261,6 +261,14 @@ export interface ReadyAdmissionExplanation {
     target_unhealthy_receipt?: ReadyAdmissionTargetUnhealthyReceipt;
   }>;
   blocker_counts: Array<{ code: string; category: ReadyAdmissionBlockerCategory; count: number }>;
+  operator_blockers: Array<{
+    code: string;
+    category: ReadyAdmissionBlockerCategory;
+    count: number;
+    examples: string[];
+    targets: string[];
+    next_action: string;
+  }>;
   stale_ready_floor: {
     stale: boolean;
     ready: number;
@@ -317,6 +325,7 @@ export const READY_ADMISSION_BLOCK_REASONS = [
   "pool_capacity_full",
   "single_writer_lane_busy",
   "no_free_pool_builder",
+  "target_unhealthy",
   "duplicate_dispatch_retry_required",
 ] as const;
 
@@ -511,6 +520,65 @@ function readyAdmissionBlockerCounts(plan: { skipped: DecisionRecord[] }): Ready
     else counts.set(key, { code, category, count: 1 });
   }
   return [...counts.values()].sort((a, b) => b.count - a.count || a.category.localeCompare(b.category) || a.code.localeCompare(b.code));
+}
+
+function readyAdmissionOperatorBlockers(plan: { skipped: DecisionRecord[] }): ReadyAdmissionExplanation["operator_blockers"] {
+  const blockers = new Map<string, ReadyAdmissionExplanation["operator_blockers"][number]>();
+  for (const decision of plan.skipped) {
+    const code = typeof decision.metadata?.code === "string" ? decision.metadata.code : "unknown";
+    const category = readyAdmissionBlockerCategory(code);
+    const key = `${category}:${code}`;
+    const current = blockers.get(key) ?? {
+      code,
+      category,
+      count: 0,
+      examples: [],
+      targets: [],
+      next_action: readyAdmissionNextAction(code),
+    };
+    current.count += 1;
+    if (decision.item_id && current.examples.length < 5) current.examples.push(decision.item_id);
+    for (const target of decisionTargets(decision)) {
+      if (current.targets.length < 5 && !current.targets.includes(target)) current.targets.push(target);
+    }
+    blockers.set(key, current);
+  }
+  return [...blockers.values()].sort((a, b) => b.count - a.count || a.category.localeCompare(b.category) || a.code.localeCompare(b.code));
+}
+
+function decisionTargets(decision: DecisionRecord): string[] {
+  const targets: string[] = [];
+  if (typeof decision.metadata?.target === "string" && decision.metadata.target.trim()) {
+    targets.push(decision.metadata.target.trim());
+  }
+  const laneBlockers = decision.metadata?.lane_blockers;
+  if (Array.isArray(laneBlockers)) {
+    for (const blocker of laneBlockers) {
+      if (blocker && typeof blocker === "object" && typeof blocker.agent === "string" && blocker.agent.trim()) {
+        targets.push(blocker.agent.trim());
+      }
+    }
+  }
+  return [...new Set(targets)];
+}
+
+function readyAdmissionNextAction(code: string): string {
+  switch (code) {
+    case "target_unhealthy":
+      return "restore the target agent health/heartbeat or route the ready item to a healthy compatible builder";
+    case "no_free_pool_builder":
+      return "free a pool builder or increase maintained pool capacity before readmitting the item";
+    case "pool_capacity_full":
+      return "wait for an in-flight pool item to complete or raise pool capacity";
+    case "single_writer_lane_busy":
+      return "wait for the active writer on the same write scope to finish";
+    case "provider_runtime_mismatch":
+      return "route to a compatible agent or update the requested provider/runtime";
+    case "duplicate_dispatch_retry_required":
+      return "mark the item retry-safe only when the operator wants a bounded refire, otherwise close or supersede it";
+    default:
+      return "clear this ready-admission blocker before readmitting the item";
+  }
 }
 
 function readyAdmissionBlockReasonCounts(plan: { skipped: DecisionRecord[] }): ReadyAdmissionBlockReasonCounts {
@@ -1547,6 +1615,7 @@ export class ContinuousOrchestrationDaemon {
         };
       }),
       blocker_counts: blockerCounts,
+      operator_blockers: readyAdmissionOperatorBlockers(plan),
       stale_ready_floor: {
         stale: staleReadyFloor,
         ready: ordered.length,

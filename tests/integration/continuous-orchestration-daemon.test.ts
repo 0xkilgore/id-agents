@@ -1131,6 +1131,7 @@ describe("daemon — dry-run vs live", () => {
       pool_capacity_full: 1,
       single_writer_lane_busy: 1,
       no_free_pool_builder: 1,
+      target_unhealthy: 0,
       duplicate_dispatch_retry_required: 0,
     });
     expect(res.body.ready_admission).toMatchObject({
@@ -1302,14 +1303,14 @@ describe("daemon — dry-run vs live", () => {
       useful_ready: 2,
       admissible_now: 1,
       block_reason_counts: expect.objectContaining({
-        no_free_pool_builder: 1,
+        target_unhealthy: 1,
         pool_capacity_full: 1,
         duplicate_dispatch_retry_required: 1,
       }),
     });
     expect(status.body.ready_admission.blocker_counts).toEqual(
       expect.arrayContaining([
-        { code: "no_free_pool_builder", category: "capacity_gate", count: 1 },
+        { code: "target_unhealthy", category: "runtime_unavailable", count: 1 },
         { code: "pool_capacity_full", category: "capacity_gate", count: 1 },
         { code: "duplicate_dispatch_retry_required", category: "retry_safety", count: 1 },
       ]),
@@ -1325,7 +1326,7 @@ describe("daemon — dry-run vs live", () => {
         expect.objectContaining({
           item_id: unhealthy.item_id,
           action: "held",
-          code: "no_free_pool_builder",
+          code: "target_unhealthy",
           metadata: expect.objectContaining({
             target: "unhealthy-builder",
             targets: ["unhealthy-builder"],
@@ -1349,12 +1350,12 @@ describe("daemon — dry-run vs live", () => {
         }),
       ]),
     );
-    expect(status.body.ready_admission.recommended_action).toContain("no_free_pool_builder=1");
-    expect(status.body.ready_admission.recommended_action).toContain("top off or repair builder pool capacity");
+    expect(status.body.ready_admission.recommended_action).toContain("target_unhealthy=1");
+    expect(status.body.ready_admission.recommended_action).toContain("reroute/downclassify/owner-restart");
     expect(status.body.ready_admission.recommended_action).toContain("duplicate_dispatch_retry_required=1");
     expect(status.body.health.ready_item_blockers.stale_ready_fuel.counts_by_blocker_class).toEqual(
       expect.arrayContaining([
-        expect.objectContaining({ code: "no_free_pool_builder", category: "capacity_gate", count: 1 }),
+        expect.objectContaining({ code: "target_unhealthy", category: "runtime_unavailable", count: 1 }),
         expect.objectContaining({ code: "pool_capacity_full", category: "capacity_gate", count: 1 }),
         expect.objectContaining({ code: "duplicate_dispatch_retry_required", category: "retry_safety", count: 1 }),
       ]),
@@ -1367,12 +1368,19 @@ describe("daemon — dry-run vs live", () => {
         safe_action_copy: expect.stringContaining("retry_safe=true"),
       }),
     ]);
-    expect(status.body.ready_admission.target_unhealthy_groups).toEqual([]);
+    expect(status.body.ready_admission.target_unhealthy_groups).toEqual([
+      expect.objectContaining({
+        target: "unhealthy-builder",
+        lane: "/repo/kapelle",
+        count: 1,
+        recommended_action: expect.stringContaining("Reroute to a compatible healthy agent"),
+      }),
+    ]);
     expect(status.body.ready_admission.non_admitted).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
           item_id: unhealthy.item_id,
-          code: "no_free_pool_builder",
+          code: "target_unhealthy",
           metadata: expect.objectContaining({
             target: "unhealthy-builder",
             lane_blockers: expect.arrayContaining([
@@ -3207,7 +3215,6 @@ describe("daemon — dry-run vs live", () => {
         write_scope: [`repo/single-writer-${i + 1}`],
       });
     }
-
     const { app, daemon } = mountStatusApp(
       adapter,
       {
@@ -3265,6 +3272,94 @@ describe("daemon — dry-run vs live", () => {
     expect(operatorSummary.safe_actions[0]).toContain("lane/capacity blockers: blocked_dependency=3, single_writer_lane_busy=3");
     expect(res.body.runtime_status.operator_summary).toContain("ready=10 admissible=0");
     expect(res.body.runtime_status.operator_summary).not.toMatch(/waiting on Chris|ask Chris/i);
+  });
+
+  it("status explains zero-admit stalls caused by unhealthy pool targets", async () => {
+    const item = await seedReady(adapter, {
+      title: "backend pool ready row with unhealthy targets",
+      track: "T-ORCH",
+      to_agent: "pool:backend",
+      write_scope: ["repo/unhealthy-target"],
+    });
+    const { app, daemon } = mountStatusApp(
+      adapter,
+      {
+        dry_run: true,
+        auto_flesh_enabled: false,
+        auto_promote_enabled: false,
+        min_ready_fuel: 1,
+        max_in_flight: 10,
+        max_new_per_tick: 10,
+        stall_threshold_ticks: 3,
+      },
+      {
+        pools: testPoolRouting(),
+        resolveAgentHealth: async () => new Set(),
+      },
+    );
+    await daemon.setMode("running");
+    await recordTickOutcome(adapter, "default", {
+      zero_ticks: 3,
+      fired: false,
+      admission_block_reasons: {},
+    });
+
+    const res = await callApp(app, "/orchestration/status");
+
+    expect(res.status).toBe(200);
+    expect(res.body.counts).toMatchObject({
+      ready: 1,
+      admissible_now: 0,
+      ready_block_reasons: {
+        target_unhealthy: 1,
+      },
+    });
+    expect(res.body.ready_admission.blocker_counts).toEqual([
+      { code: "target_unhealthy", category: "runtime_unavailable", count: 1 },
+    ]);
+    expect(res.body.ready_admission.operator_blockers).toEqual([
+      {
+        code: "target_unhealthy",
+        category: "runtime_unavailable",
+        count: 1,
+        examples: [item.item_id],
+        targets: ["substrate-orch-codex", "substrate-api-codex"],
+        next_action: "restore the target agent health/heartbeat or route the ready item to a healthy compatible builder",
+      },
+    ]);
+    expect(res.body.ready_admission.non_admitted).toEqual([
+      expect.objectContaining({
+          item_id: item.item_id,
+          title: "backend pool ready row with unhealthy targets",
+          code: "target_unhealthy",
+          action: "held",
+          metadata: expect.objectContaining({
+            target: "substrate-orch-codex",
+          }),
+      }),
+    ]);
+    expect(res.body.health.orchestration_loop).toMatchObject({
+      state: "stalled_ready_not_launching",
+      severity: "critical",
+      consecutive_zero_ticks: 3,
+      stall_threshold_ticks: 3,
+      last_admission_block_reasons: {
+        target_unhealthy: 1,
+      },
+    });
+    expect(res.body.health.orchestration_loop.explanation).toContain("target_unhealthy=1");
+    expect(res.body.health.ready_item_blockers.stale_ready_fuel).toMatchObject({
+      active: true,
+      recommended_action: expect.stringContaining("target_unhealthy=1"),
+      counts_by_blocker_class: [
+        {
+          code: "target_unhealthy",
+          category: "runtime_unavailable",
+          count: 1,
+          examples: [item.item_id],
+        },
+      ],
+    });
   });
 
   it("status reports build-ready fuel lanes and top blockers when raw ready is above floor but admissible is zero", async () => {
