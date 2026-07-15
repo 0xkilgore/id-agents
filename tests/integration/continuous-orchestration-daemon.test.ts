@@ -1662,17 +1662,19 @@ describe("daemon — dry-run vs live", () => {
       ]),
     );
     expect(res.body.auto_promote_health).toMatchObject({
-      below_floor: false,
-      triggered: false,
+      below_floor: true,
+      triggered: true,
       candidates_considered: 0,
       promoted_count: 0,
       skipped_count: 0,
       next_action: {
-        code: "none",
-        summary: "ready build fuel meets the configured floor",
+        code: "flesh_or_refuel_candidates",
+        summary: "author new lane-diverse build rows or flesh more needs_review candidates",
       },
     });
-    expect(res.body.auto_promote_health.summary).toBe("ready build fuel meets floor: ready=13 floor=12, lanes=13/2");
+    expect(res.body.auto_promote_health.summary).toBe(
+      "ready build fuel below floor: ready=1 floor=12, lanes=1/2; no needs_review candidates considered; next: author new lane-diverse build rows or flesh more needs_review candidates",
+    );
     expect(res.body.auto_promote_health.operator_summary.safe_actions[0]).toContain("target_unhealthy");
   });
 
