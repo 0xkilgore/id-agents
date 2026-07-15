@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   buildReleaseProofReadiness,
   readReleaseProofReadiness,
+  type ReleaseProofFeedbackEvidence,
   type ReleaseProofReadinessInput,
 } from "../../src/continuous-orchestration/release-proof-readiness.js";
 import {
@@ -52,6 +53,38 @@ function base(overrides: Partial<ReleaseProofReadinessInput> = {}): ReleaseProof
     stale_after_ms: 60 * 60 * 1000,
     ...overrides,
   };
+}
+
+function feedbackFixture(
+  overrides: Partial<ReleaseProofFeedbackEvidence> = {},
+): ReleaseProofFeedbackEvidence {
+  return {
+    id: "op:fixture",
+    kind: "comment_recorded",
+    observed_at: "2026-07-13T11:30:00.000Z",
+    source_link: "manager:/artifacts/art-kapelle/operations/1",
+    artifact_id: "art-kapelle",
+    summary: "Fixture feedback.",
+    ...overrides,
+  };
+}
+
+function expectSafeOrExplicitUnsupportedSource(fixtures: ReleaseProofFeedbackEvidence[]): void {
+  for (const fixture of fixtures) {
+    const source = fixture.source_link?.trim() ?? "";
+    const hasSafeManagerOrArtifactSource =
+      source.startsWith("manager:/") ||
+      source.startsWith("https://manager.local/") ||
+      source.startsWith("https://github.com/");
+    const hasExplicitUnsupportedReason =
+      fixture.source_link_status === "unsupported" &&
+      fixture.source_link_reason?.includes("unsupported-source") === true;
+
+    expect(
+      hasSafeManagerOrArtifactSource || hasExplicitUnsupportedReason,
+      `${fixture.id} must use a safe source_link or explicit unsupported-source reason`,
+    ).toBe(true);
+  }
 }
 
 describe("buildReleaseProofReadiness", () => {
@@ -335,25 +368,21 @@ describe("buildReleaseProofReadiness", () => {
   });
 
   it("keeps stale all-null feedback not ready when artifacts are present and infra is clear", () => {
+    const staleNullFeedback = Array.from({ length: 11 }, (_, index) =>
+      feedbackFixture({
+        id: `op:stale-null-source-${index + 1}`,
+        kind: index % 2 === 0 ? "comment_recorded" : "approve",
+        observed_at: `2026-07-12T${String(10 - Math.floor(index / 2)).padStart(2, "0")}:00:00.000Z`,
+        source_link: null,
+        source_link_status: "unsupported",
+        source_link_reason: "unsupported-source: fixture preserves current feedback evidence without a safe manager source_link",
+        summary: "Old feedback without a durable source.",
+      })
+    );
+    expectSafeOrExplicitUnsupportedSource(staleNullFeedback);
+
     const view = buildReleaseProofReadiness(base({
-      feedback_evidence: [
-        {
-          id: "op:stale-null-source-a",
-          kind: "comment_recorded",
-          observed_at: "2026-07-12T10:00:00.000Z",
-          source_link: null,
-          artifact_id: "art-kapelle",
-          summary: "Old feedback without a durable source.",
-        },
-        {
-          id: "op:stale-null-source-b",
-          kind: "approve",
-          observed_at: "2026-07-12T09:30:00.000Z",
-          source_link: null,
-          artifact_id: "art-kapelle",
-          summary: "Old approval without a durable source.",
-        },
-      ],
+      feedback_evidence: staleNullFeedback,
       infra_warnings: [],
       stale_after_ms: 24 * 60 * 60 * 1000,
     }));
@@ -362,14 +391,36 @@ describe("buildReleaseProofReadiness", () => {
     expect(view.chris_readable_release_ready).toBe("NOT READY");
     expect(view.feedback_evidence).toMatchObject({
       state: "stale",
-      count: 2,
+      count: 11,
       latest_at: "2026-07-12T10:00:00.000Z",
+    });
+    expect(view.source_link_state).toEqual({
+      state: "present",
+      safe_count: 1,
+      unsafe_count: 0,
+      total_count: 1,
+    });
+    expect(view.reason_codes).toEqual({
+      loader_error: [],
+      feedback_freshness: ["feedback_evidence_stale"],
+      infra_warning: [],
+      source_link_state: ["feedback_source_link_null"],
+      artifact_state: [],
     });
     expect(view.infra_warnings).toMatchObject({ state: "clear", count: 0, source: "none", action: null });
     expect(view.generated_artifacts).toMatchObject({ state: "present", count: 1 });
     expect(view.stale_reasons).toEqual(["latest feedback evidence is older than 24h"]);
     expect(view.missing_reasons).toEqual(["one or more feedback evidence items have null source_link"]);
     expect(view.missing_reasons).not.toContain("one or more generated proof artifacts are not present");
+    expect(view.generated_artifacts.items).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          artifact_id: "art-kapelle",
+          source_link: "delivery-log",
+          availability: "present",
+        }),
+      ]),
+    );
     expect(view.summary).toBe("Release proof is not ready: latest feedback evidence is older than 24h.");
     expect(view.summary).not.toContain("Release proof is ready for Chris");
     expect(view.summary).not.toContain("infra warnings");
@@ -434,6 +485,17 @@ describe("buildReleaseProofReadiness", () => {
       "one or more feedback evidence items have redacted source_link",
       "one or more feedback evidence items have unsupported source links",
     ]);
+    expect(view.reason_codes).toMatchObject({
+      feedback_freshness: ["feedback_evidence_stale"],
+      infra_warning: [],
+      source_link_state: [
+        "source_links_unsafe",
+        "source_links_missing",
+        "feedback_source_link_null",
+        "feedback_source_link_redacted",
+        "feedback_source_link_unsupported",
+      ],
+    });
     expect(view.summary).toBe("Release proof is not ready: latest feedback evidence is older than 24h.");
   });
 
@@ -977,6 +1039,11 @@ describe("buildReleaseProofReadiness", () => {
     expect(view.sources.state).toBe("present");
     expect(view.stale_reasons).toEqual(["latest feedback evidence is older than 24h"]);
     expect(view.summary).toBe("Release proof is not ready: infra warnings require operator review.");
+    expect(view.reason_codes).toMatchObject({
+      feedback_freshness: ["feedback_evidence_stale"],
+      infra_warning: ["infra_warning"],
+      source_link_state: [],
+    });
   });
 
   it("keeps release-proof evidence state separate from manager system health facts", () => {

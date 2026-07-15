@@ -8,6 +8,20 @@ export type InfraWarningSource = "none" | "readiness_loader" | "orchestration_he
 export type LinkState = "present" | "missing";
 export type ReleaseProofNextOwnerLane = "none" | "chris" | "operator" | "release-engineering";
 export type ReleaseProofSystemHealthState = "clear" | "warning" | "critical" | "unknown";
+export type ReleaseProofReasonCode =
+  | "loader_error"
+  | "feedback_evidence_empty"
+  | "feedback_evidence_stale"
+  | "infra_warning"
+  | "source_links_missing"
+  | "source_links_unsafe"
+  | "feedback_source_link_null"
+  | "feedback_source_link_redacted"
+  | "feedback_source_link_unsupported"
+  | "generated_artifacts_empty"
+  | "generated_artifact_source_link_missing"
+  | "generated_artifact_unavailable"
+  | "generated_artifact_stale";
 
 export interface ReleaseProofFeedbackEvidence {
   id: string;
@@ -132,6 +146,13 @@ export interface ReleaseProofReadinessResponse {
     count: number;
     items: ReleaseProofArtifactPointer[];
   };
+  reason_codes: {
+    loader_error: ReleaseProofReasonCode[];
+    feedback_freshness: ReleaseProofReasonCode[];
+    infra_warning: ReleaseProofReasonCode[];
+    source_link_state: ReleaseProofReasonCode[];
+    artifact_state: ReleaseProofReasonCode[];
+  };
   stale_reasons: string[];
   error_reasons: string[];
   missing_reasons: string[];
@@ -146,9 +167,19 @@ export function buildReleaseProofReadiness(
   const staleReasons: string[] = [];
   const errorReasons: string[] = [];
   const missingReasons: string[] = [];
+  const reasonCodes: ReleaseProofReadinessResponse["reason_codes"] = {
+    loader_error: [],
+    feedback_freshness: [],
+    infra_warning: [],
+    source_link_state: [],
+    artifact_state: [],
+  };
   const systemHealth = buildSystemHealth(input.system_health);
 
-  if (input.load_error) errorReasons.push(input.load_error);
+  if (input.load_error) {
+    errorReasons.push(input.load_error);
+    reasonCodes.loader_error.push("loader_error");
+  }
 
   const latestFeedbackAt = latestIso(input.feedback_evidence.map((item) => item.observed_at));
   let feedbackState: EvidenceState = "present";
@@ -157,22 +188,27 @@ export function buildReleaseProofReadiness(
   } else if (input.feedback_evidence.length === 0) {
     feedbackState = "empty";
     missingReasons.push("no feedback evidence has been recorded for this release proof");
+    reasonCodes.feedback_freshness.push("feedback_evidence_empty");
   } else if (latestFeedbackAt && Date.parse(input.generated_at) - Date.parse(latestFeedbackAt) > staleAfterMs) {
     feedbackState = "stale";
     staleReasons.push(`latest feedback evidence is older than ${Math.round(staleAfterMs / 3_600_000)}h`);
+    reasonCodes.feedback_freshness.push("feedback_evidence_stale");
   }
 
   const artifactPointers = input.generated_artifacts;
   if (artifactPointers.length === 0) {
     missingReasons.push("no generated release proof artifacts are registered");
+    reasonCodes.artifact_state.push("generated_artifacts_empty");
   }
   const missingArtifactSources = artifactPointers.filter((item) => !isSafeSourceToken(item.source_link));
   if (missingArtifactSources.length > 0) {
     missingReasons.push("one or more generated artifacts are missing safe source links");
+    reasonCodes.artifact_state.push("generated_artifact_source_link_missing");
   }
   const unavailableArtifacts = artifactPointers.filter((item) => item.availability !== "present");
   if (unavailableArtifacts.length > 0) {
     missingReasons.push("one or more generated proof artifacts are not present");
+    reasonCodes.artifact_state.push("generated_artifact_unavailable");
   }
   const staleArtifacts = artifactPointers.filter((item) =>
     Number.isFinite(Date.parse(item.produced_at)) &&
@@ -180,11 +216,13 @@ export function buildReleaseProofReadiness(
   );
   if (staleArtifacts.length > 0) {
     staleReasons.push(`one or more generated artifacts are older than ${Math.round(staleAfterMs / 3_600_000)}h`);
+    reasonCodes.artifact_state.push("generated_artifact_stale");
   }
 
   const invalidSourceLinks = input.source_links.filter((item) => !isSafeSourceHref(item.href));
   if (invalidSourceLinks.length > 0) {
     missingReasons.push("one or more source links are redacted or unsupported");
+    reasonCodes.source_link_state.push("source_links_unsafe");
   }
   const sourceLinks = dedupeSourceLinks(input.source_links);
   const sourceLinkCounts = {
@@ -194,6 +232,7 @@ export function buildReleaseProofReadiness(
   };
   if (sourceLinks.length === 0) {
     missingReasons.push("no source links are attached to the release proof");
+    reasonCodes.source_link_state.push("source_links_missing");
   }
 
   const feedbackMissingSources = input.feedback_evidence.filter((item) => !isSafeSourceHref(item.source_link));
@@ -208,12 +247,15 @@ export function buildReleaseProofReadiness(
   });
   if (feedbackNullSources.length > 0) {
     missingReasons.push("one or more feedback evidence items have null source_link");
+    reasonCodes.source_link_state.push("feedback_source_link_null");
   }
   if (feedbackRedactedSources.length > 0) {
     missingReasons.push("one or more feedback evidence items have redacted source_link");
+    reasonCodes.source_link_state.push("feedback_source_link_redacted");
   }
   if (feedbackUnsupportedSources.length > 0) {
     missingReasons.push("one or more feedback evidence items have unsupported source links");
+    reasonCodes.source_link_state.push("feedback_source_link_unsupported");
   }
 
   const infraState: InfraWarningState = input.load_error
@@ -231,6 +273,7 @@ export function buildReleaseProofReadiness(
     : input.infra_warnings.length > 0
       ? "review orchestration health and resolve infra warnings before release proof sign-off"
       : null;
+  if (infraState === "warning") reasonCodes.infra_warning.push("infra_warning");
   const nextOwner = deriveNextOwner({
     feedbackState,
     infraState,
@@ -312,6 +355,7 @@ export function buildReleaseProofReadiness(
       count: artifactPointers.length,
       items: artifactPointers,
     },
+    reason_codes: reasonCodes,
     stale_reasons: staleReasons,
     error_reasons: errorReasons,
     missing_reasons: missingReasons,
