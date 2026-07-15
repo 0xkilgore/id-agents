@@ -85,13 +85,15 @@ async function enqueue(opts: {
   branch?: string;
   promote?: boolean;
   promotion_skip_reason?: string;
+  message?: string;
+  subject?: string;
 }) {
   const handle = (manager as any).dispatchScheduler;
   return handle.enqueue({
     to_agent: "coder-max",
     from_actor: "manager",
-    message: "build the thing",
-    subject: opts.repo ? `build ${opts.branch}` : "non-build dispatch",
+    message: opts.message ?? "build the thing",
+    subject: opts.subject ?? (opts.repo ? `build ${opts.branch}` : "non-build dispatch"),
     repo: opts.repo,
     branch: opts.branch,
     promote: opts.promote,
@@ -479,6 +481,73 @@ describe("POST /agent-done — fresh artifact registration", () => {
     });
     expect(body.body.text).toContain(expectedText);
     expect(body.render).toMatchObject({ renderer, mime_type: renderMimeType });
+  });
+});
+
+describe("POST /agent-done — small site-fix delivery contract", () => {
+  it("rejects a Finance site-fix closeout without owner acceptance, production URL, and screenshot/evidence", async () => {
+    const enq = await enqueue({
+      subject: "Finance net-worth graph site fix",
+      message: "Fix the Finance net-worth graph rendering incident and ship the small site change.",
+    });
+    await claim(enq.dispatch_phid);
+
+    const r = await fetch(`${baseUrl}/agent-done`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        dispatch_id: enq.dispatch_phid,
+        success: true,
+        result: { tl_dr: "Finance net-worth graph incident fixed" },
+      }),
+    });
+
+    expect(r.status).toBe(422);
+    const body = await r.json() as any;
+    expect(body).toMatchObject({
+      ok: false,
+      dispatch_id: enq.dispatch_phid,
+      state: "failed_verification",
+    });
+    expect(body.reason).toMatch(/Finance\/Cleveland Park/);
+    expect(body.reason).toMatch(/owner_accepted=true/);
+    expect(body.reason).toMatch(/production_url/);
+    expect(body.reason).toMatch(/screenshot_or_evidence/);
+
+    const doc = await (manager as any).dispatchScheduler.reactor.getByPhid(enq.dispatch_phid);
+    expect(doc.status).toBe("failed");
+    expect(doc.failure_kind).toBe("failed_verification");
+  });
+
+  it("accepts a Cleveland Park site-fix closeout with complete production evidence", async () => {
+    const enq = await enqueue({
+      subject: "Cleveland Park website preview fix",
+      message: "Patch the Cleveland Park website preview and attach production evidence.",
+    });
+    await claim(enq.dispatch_phid);
+
+    const r = await fetch(`${baseUrl}/agent-done`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        dispatch_id: enq.dispatch_phid,
+        success: true,
+        result: { tl_dr: "Cleveland Park preview fix shipped" },
+        delivery_contract: {
+          kind: "small_site_fix",
+          project: "Cleveland Park",
+          owner_accepted: true,
+          production_url: "https://cleveland-park.example.com/parents",
+          screenshot_url: "https://cleveland-park.example.com/evidence/preview.png",
+        },
+      }),
+    });
+
+    expect(r.status).toBe(200);
+    const body = await r.json() as any;
+    expect(body.ok).toBe(true);
+    const doc = await (manager as any).dispatchScheduler.reactor.getByPhid(enq.dispatch_phid);
+    expect(doc.status).toBe("done");
   });
 });
 

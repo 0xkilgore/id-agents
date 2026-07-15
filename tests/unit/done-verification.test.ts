@@ -2,6 +2,7 @@
 
 import { describe, it, expect } from "vitest";
 import {
+  requiresSmallSiteFixContract,
   verifyDoneClaims,
   type DoneClaim,
   type DoneVerificationProbes,
@@ -86,5 +87,59 @@ describe("verifyDoneClaims", () => {
     const claim: DoneClaim = { artifact_path: "/x" };
     const r = verifyDoneClaims(claim, probes({ fileExists: () => { throw new Error("fs boom"); } }));
     expect(r.ok).toBe(false);
+  });
+
+  it("requires owner acceptance, production URL, and screenshot/evidence for Finance site-fix dispatches", () => {
+    const claim: DoneClaim = {
+      dispatch_context: {
+        subject: "Finance net-worth graph site fix",
+        body_markdown: "Fix the Finance net-worth graph rendering regression and ship the small site update.",
+      },
+    };
+    expect(requiresSmallSiteFixContract(claim)).toMatchObject({ required: true });
+
+    const r = verifyDoneClaims(claim, probes());
+    expect(r.ok).toBe(false);
+    expect(r.reason).toMatch(/Finance\/Cleveland Park/);
+    expect(r.reason).toMatch(/owner_accepted=true/);
+    expect(r.reason).toMatch(/production_url/);
+    expect(r.reason).toMatch(/screenshot_or_evidence/);
+  });
+
+  it("accepts a complete small site-fix delivery contract", () => {
+    const claim: DoneClaim = {
+      dispatch_context: {
+        subject: "Cleveland Park preview update",
+        body_markdown: "Patch the website PDF preview and deliver production evidence.",
+      },
+      delivery_contract: {
+        kind: "small_site_fix",
+        project: "Cleveland Park",
+        owner_accepted: true,
+        production_url: "https://cleveland-park.example.com/parents",
+        screenshot_url: "https://cleveland-park.example.com/evidence/preview.png",
+      },
+    };
+    const r = verifyDoneClaims(claim, probes());
+    expect(r.ok).toBe(true);
+    expect(r.checks).toContainEqual(expect.objectContaining({
+      kind: "small_site_fix_contract",
+      ok: true,
+      target: "Cleveland Park",
+    }));
+  });
+
+  it("rejects local URLs as production evidence for a small site-fix delivery contract", () => {
+    const r = verifyDoneClaims({
+      delivery_contract: {
+        kind: "small_site_fix",
+        project: "Finance",
+        owner_accepted: "accepted",
+        production_url: "http://localhost:3000/finance",
+        screenshot_path: "/tmp/finance-graph.png",
+      },
+    }, probes());
+    expect(r.ok).toBe(false);
+    expect(r.reason).toMatch(/production_url/);
   });
 });

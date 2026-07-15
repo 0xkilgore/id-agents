@@ -25,6 +25,35 @@ export interface DoneClaim {
   artifact_path?: string | null;
   /** Spec 054 promotion block, when the dispatch promoted code. */
   promotion?: { repos?: PromotionRepoClaim[] } | null;
+  /** Owner-visible delivery proof for a small production site fix. */
+  delivery_contract?: SmallSiteFixDeliveryContract | null;
+  /** Dispatch text used to infer required contracts for known small site-fix chains. */
+  dispatch_context?: SmallSiteFixDispatchContext | null;
+}
+
+export interface SmallSiteFixDeliveryContract {
+  kind?: string | null;
+  project?: string | null;
+  owner_accepted?: boolean | string | null;
+  production_url?: string | null;
+  screenshot_url?: string | null;
+  screenshot_path?: string | null;
+  evidence_url?: string | null;
+  evidence_path?: string | null;
+  evidence?: {
+    screenshot_url?: string | null;
+    screenshot_path?: string | null;
+    evidence_url?: string | null;
+    evidence_path?: string | null;
+    production_url?: string | null;
+    notes?: unknown;
+  } | null;
+}
+
+export interface SmallSiteFixDispatchContext {
+  subject?: string | null;
+  body_markdown?: string | null;
+  result_text?: string | null;
 }
 
 export interface DoneVerificationProbes {
@@ -35,7 +64,7 @@ export interface DoneVerificationProbes {
 }
 
 export interface DoneVerificationCheck {
-  kind: "artifact" | "commit";
+  kind: "artifact" | "commit" | "small_site_fix_contract";
   target: string;
   ok: boolean;
   detail?: string;
@@ -92,8 +121,90 @@ export function verifyDoneClaims(
     });
   }
 
+  const siteFixRequired = requiresSmallSiteFixContract(claim);
+  if (siteFixRequired.required) {
+    checks.push(validateSmallSiteFixDeliveryContract(claim.delivery_contract, siteFixRequired.reason));
+  }
+
   const failed = checks.find((c) => !c.ok);
   return { ok: !failed, reason: failed?.detail, checks };
+}
+
+export function requiresSmallSiteFixContract(claim: DoneClaim): { required: boolean; reason: string } {
+  if (claim.delivery_contract?.kind === "small_site_fix") {
+    return { required: true, reason: "explicit small_site_fix delivery contract" };
+  }
+
+  const text = [
+    claim.dispatch_context?.subject,
+    claim.dispatch_context?.body_markdown,
+    claim.dispatch_context?.result_text,
+  ].filter(isNonEmpty).join("\n").toLowerCase();
+
+  if (!text) return { required: false, reason: "no dispatch text" };
+
+  const mentionsSmallSiteFix =
+    /\b(site|website|page|frontend|ui|graph|chart|pdf preview|preview)\b/.test(text) &&
+    /\b(fix|change|patch|update|repair|restore|ship|deliver)\b/.test(text);
+  const mentionsProtectedProject = /\b(finance|finances|cleveland park)\b/.test(text);
+
+  return {
+    required: mentionsSmallSiteFix && mentionsProtectedProject,
+    reason: mentionsProtectedProject
+      ? "Finance/Cleveland Park small site-fix dispatch requires owner acceptance, production URL, and screenshot/evidence"
+      : "not a protected small site-fix dispatch",
+  };
+}
+
+function validateSmallSiteFixDeliveryContract(
+  contract: SmallSiteFixDeliveryContract | null | undefined,
+  reason: string,
+): DoneVerificationCheck {
+  const missing: string[] = [];
+  if (!contract || contract.kind !== "small_site_fix") missing.push("delivery_contract.kind=small_site_fix");
+  if (!ownerAccepted(contract?.owner_accepted)) missing.push("owner_accepted=true");
+
+  const productionUrl = present(contract?.production_url) ?? present(contract?.evidence?.production_url);
+  if (!isProductionUrl(productionUrl)) missing.push("production_url");
+
+  const evidence =
+    present(contract?.screenshot_url) ??
+    present(contract?.screenshot_path) ??
+    present(contract?.evidence_url) ??
+    present(contract?.evidence_path) ??
+    present(contract?.evidence?.screenshot_url) ??
+    present(contract?.evidence?.screenshot_path) ??
+    present(contract?.evidence?.evidence_url) ??
+    present(contract?.evidence?.evidence_path);
+  if (!evidence) missing.push("screenshot_or_evidence");
+
+  return {
+    kind: "small_site_fix_contract",
+    target: present(contract?.project) ?? "small_site_fix",
+    ok: missing.length === 0,
+    detail: missing.length === 0
+      ? `${reason}: delivery contract verified`
+      : `${reason}; missing ${missing.join(", ")}`,
+  };
+}
+
+function ownerAccepted(value: unknown): boolean {
+  return value === true || value === "true" || value === "accepted" || value === "approved";
+}
+
+function isProductionUrl(value: string | null): boolean {
+  if (!value) return false;
+  try {
+    const u = new URL(value);
+    if (u.protocol !== "https:") return false;
+    return !["localhost", "127.0.0.1", "::1"].includes(u.hostname);
+  } catch {
+    return false;
+  }
+}
+
+function present(value: unknown): string | null {
+  return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
 }
 
 function safeBool(fn: () => boolean): boolean {

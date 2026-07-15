@@ -370,6 +370,17 @@ function responseErrorMessage(payload: unknown): string | null {
   return attemptStringField(rec.error) ?? attemptStringField(rec.message);
 }
 
+function stringifyResultText(result: unknown): string | null {
+  if (result == null) return null;
+  if (typeof result === 'string') return result;
+  if (typeof result !== 'object') return String(result);
+  try {
+    return JSON.stringify(result);
+  } catch {
+    return null;
+  }
+}
+
 function dispatchAttemptVisibleStatus(input: {
   route: "/talk-to" | "/news-to";
   ok: boolean;
@@ -4942,6 +4953,7 @@ export class AgentManagerDb {
           promotion_mode?: unknown;
           promotion_exempt_reason?: unknown;
           manual_lab_reason?: unknown;
+          delivery_contract?: unknown;
           mode?: unknown;
           agent?: unknown;
           // Verify-on-done gate: the deliverable the agent claims it produced.
@@ -5093,7 +5105,18 @@ export class AgentManagerDb {
               ? body.artifact_path.trim()
               : null;
           const verify = verifyDoneClaims(
-            { artifact_path: claimArtifactPath, promotion },
+            {
+              artifact_path: claimArtifactPath,
+              promotion,
+              delivery_contract: body.delivery_contract && typeof body.delivery_contract === 'object'
+                ? body.delivery_contract as any
+                : null,
+              dispatch_context: {
+                subject: doc.subject,
+                body_markdown: doc.body_markdown,
+                result_text: stringifyResultText(body.result),
+              },
+            },
             makeDoneVerificationProbes(),
           );
           if (!verify.ok) {
