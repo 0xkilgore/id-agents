@@ -717,6 +717,115 @@ describe("buildReleaseProofReadiness", () => {
     }
   });
 
+  it("keeps fresh Chris feedback not ready when an operation has only an unsupported source link", async () => {
+    const adapter = new SqliteAdapter(":memory:");
+    try {
+      await migrateSqlite(adapter);
+      await migrateOutputsTables(adapter);
+      await setMode(adapter, "default", "running");
+      await adapter.query(
+        `INSERT INTO artifacts
+           (artifact_id, basename, agent, tag, abs_path, title, produced_at, source, availability,
+            project_ref, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          "art-kapelle-fresh-feedback",
+          "kapelle-release-proof.md",
+          "roger",
+          "release-proof",
+          "/tmp/output/kapelle-release-proof.md",
+          "Kapelle release proof evidence",
+          "2026-07-13T11:20:00.000Z",
+          "manager:/artifacts/art-kapelle-fresh-feedback",
+          "present",
+          "kapelle",
+          "2026-07-13T11:20:00.000Z",
+          "2026-07-13T11:20:00.000Z",
+        ],
+      );
+      await adapter.query(
+        `INSERT INTO artifact_operations
+           (op_id, artifact_id, op_type, actor, ts, payload_json, source_link, idempotency_key)
+         VALUES
+           (?, ?, ?, ?, ?, ?, ?, ?),
+           (?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          10031,
+          "art-kapelle-fresh-feedback",
+          "comment_recorded",
+          "chris",
+          "2026-07-13T11:32:00.000Z",
+          JSON.stringify({ body: "Fresh Chris feedback with a safe manager artifact link." }),
+          "manager:/artifacts/art-kapelle-fresh-feedback/comments#op-10031",
+          "comment-safe-source-10031",
+          10032,
+          "art-kapelle-fresh-feedback",
+          "comment_recorded",
+          "chris",
+          "2026-07-13T11:31:00.000Z",
+          JSON.stringify({ body: "Fresh Chris feedback whose source was a local file URL." }),
+          "file:///Users/kilgore/Dropbox/Code/roger/output/kapelle-release-proof.md",
+          "comment-unsupported-source-10032",
+        ],
+      );
+
+      const view = await readReleaseProofReadiness(adapter, {
+        teamId: "default",
+        project: "kapelle",
+        now: NOW,
+      });
+
+      expect(view.release_readiness).toBe("not_ready");
+      expect(view.chris_readable_release_ready).toBe("NOT READY");
+      expect(view.feedback_evidence).toMatchObject({
+        state: "present",
+        count: 2,
+      });
+      expect(view.feedback_evidence.items).toEqual([
+        expect.objectContaining({
+          id: "op:10031",
+          source_link: "manager:/artifacts/art-kapelle-fresh-feedback/comments#op-10031",
+          source_link_status: "present",
+          source_link_reason: null,
+        }),
+        expect.objectContaining({
+          id: "op:10032",
+          source_link: null,
+          source_link_status: "unsupported",
+          source_link_reason: "stored source link uses an unsupported or local scheme",
+        }),
+      ]);
+      expect(view.sources.links).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            source: "feedback",
+            href: "manager:/artifacts/art-kapelle-fresh-feedback/comments#op-10031",
+          }),
+          expect.objectContaining({
+            source: "artifact",
+            href: "manager:/artifacts/art-kapelle-fresh-feedback",
+          }),
+        ]),
+      );
+      expect(view.sources.links).not.toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ href: expect.stringContaining("file://") }),
+        ]),
+      );
+      expect(view.stale_reasons).toEqual([]);
+      expect(view.missing_reasons).toEqual(["one or more feedback evidence items are missing safe source links"]);
+      expect(view.next_owner.candidates).toEqual([
+        {
+          lane: "release-engineering",
+          reason: "source_link_state",
+          action: "one or more feedback evidence items are missing safe source links",
+        },
+      ]);
+    } finally {
+      await adapter.close();
+    }
+  });
+
   it("can cite stale duplicate closeout receipts as release-proof backlog sources", async () => {
     const adapter = new SqliteAdapter(":memory:");
     try {
