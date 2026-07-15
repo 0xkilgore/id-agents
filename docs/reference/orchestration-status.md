@@ -36,6 +36,9 @@ Important labels include:
   runtime cannot land on the resolved target lane.
 - `pool_capacity_full` / `capacity_gate`: the build pool has no free parallel
   capacity.
+- `no_in_flight_slots` / `capacity_gate`: global in-flight capacity is
+  saturated. `/ops` should wait for slots to free or close active dispatches;
+  it should not add filler rows just to raise ready fuel.
 - `blocked_dependency` / `lane_eligibility`: at least one declared dependency is
   known but not done.
 

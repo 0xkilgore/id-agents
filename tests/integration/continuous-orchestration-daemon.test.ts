@@ -2595,6 +2595,11 @@ describe("daemon — dry-run vs live", () => {
     expect(res.body.ready_admission.blocker_counts).toEqual([
       { code: "no_in_flight_slots", category: "capacity_gate", count: 2 },
     ]);
+    expect(res.body.ready_admission.recommended_action).toBe(
+      "capacity saturated: wait for in-flight slots to free or close active dispatches; do not add filler ready rows",
+    );
+    expect(res.body.ready_admission.recommended_action).not.toContain("duplicate_dispatch_retry_required");
+    expect(res.body.ready_admission.recommended_action).not.toContain("risk_requires_approval");
     expect(res.body.health.queue_quality.actionable_ready).toBe(2);
     expect(res.body.health.ready_item_blockers).toMatchObject({
       ready: 2,
@@ -2606,7 +2611,7 @@ describe("daemon — dry-run vs live", () => {
       stale_ready_fuel: {
         active: false,
         owner_lane: "orchestration",
-        recommended_action: "none",
+        recommended_action: "capacity saturated: wait for in-flight slots to free or close active dispatches; do not add filler ready rows",
         reason: null,
         counts_by_blocker_class: [
           {

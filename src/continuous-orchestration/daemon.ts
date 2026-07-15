@@ -548,6 +548,11 @@ function readyAdmissionRecommendedAction(input: {
     );
   }
   if (input.admissibleNow > 0) return "admit available ready rows";
+  const capacitySaturated =
+    input.blockerCounts.some((count) => count.count > 0 && count.code === "no_in_flight_slots");
+  if (capacitySaturated) {
+    return "capacity saturated: wait for in-flight slots to free or close active dispatches; do not add filler ready rows";
+  }
   const blocked = input.blockerCounts.reduce((sum, count) => sum + count.count, 0);
   const onlySingleWriterBusy =
     blocked === input.candidates &&
