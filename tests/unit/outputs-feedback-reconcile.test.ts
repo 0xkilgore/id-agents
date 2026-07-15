@@ -478,6 +478,7 @@ describe("reconcileFeedbackDispatchStatus — pure dispatch join", () => {
     }));
 
     expect(out.items[0].feedback_evidence).toMatchObject({
+      ui_state: "recorded+routed",
       route_state: "recorded+routed",
       route_routed: true,
       source_link_state: "present",
@@ -485,6 +486,7 @@ describe("reconcileFeedbackDispatchStatus — pure dispatch join", () => {
       source_link_reason: null,
     });
     expect(out.items[1].feedback_evidence).toMatchObject({
+      ui_state: "recorded-route-failed",
       route_state: "recorded-route-failed-retryable",
       retry_drain_status: "retryable_failed_row",
       route_retryable: true,
@@ -492,11 +494,13 @@ describe("reconcileFeedbackDispatchStatus — pure dispatch join", () => {
       source_link: "manager:/artifacts/art-s4-1/comments#op-2",
     });
     expect(out.items[2].feedback_evidence).toMatchObject({
+      ui_state: "redacted-source",
       source_link_state: "redacted",
       source_link: null,
       source_link_reason: "source_link_redacted",
     });
     expect(out.items[3].feedback_evidence).toMatchObject({
+      ui_state: "missing-source",
       source_link_state: "missing",
       source_link: null,
       source_link_reason: "source_link_missing",

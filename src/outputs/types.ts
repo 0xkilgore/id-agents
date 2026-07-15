@@ -578,6 +578,14 @@ export type FeedbackSourceLinkState =
   | "redacted"
   | "missing";
 
+export type FeedbackSourceRouteUiState =
+  | "recorded+routed"
+  | "recorded-route-failed"
+  | "redacted-source"
+  | "missing-source"
+  | "captured-unrouted"
+  | "not-recorded";
+
 export interface FeedbackEvidenceRef {
   dispatch_phid: string | null;
   query_id: string | null;
@@ -586,6 +594,7 @@ export interface FeedbackEvidenceRef {
 
 export interface FeedbackEvidence {
   schema_version: "feedback.evidence.v1";
+  ui_state: FeedbackSourceRouteUiState;
   route_visible_state: ArtifactCommentVisibleState | null;
   route_compat_status: ArtifactFeedbackCompatStatus | null;
   route_state: ArtifactFeedbackCompatStatus | "missing_route_status";

@@ -40,6 +40,7 @@ import type {
   FeedbackItem,
   FeedbackRetryReadiness,
   FeedbackRouting,
+  FeedbackSourceRouteUiState,
   FeedbackSourceLinkState,
   ReactionKind,
   ReactionRequest,
@@ -1057,6 +1058,7 @@ function feedbackEvidence(item: FeedbackItem): FeedbackEvidence {
   const proof = classifyFeedbackProof(item, readiness);
   return {
     schema_version: "feedback.evidence.v1",
+    ui_state: feedbackSourceRouteUiState(item, readiness),
     route_visible_state: routeStatus?.visible_state ?? null,
     route_compat_status: routeStatus?.compat_status ?? null,
     route_state: routeStatus?.compat_status ?? "missing_route_status",
@@ -1081,6 +1083,20 @@ function feedbackEvidence(item: FeedbackItem): FeedbackEvidence {
       : null,
     work_success_blocker: routing?.work_success_blocker ?? proof.missing_proof_reason,
   };
+}
+
+function feedbackSourceRouteUiState(
+  item: FeedbackItem,
+  readiness: FeedbackRetryReadiness,
+): FeedbackSourceRouteUiState {
+  if (item.source_link_state === "redacted") return "redacted-source";
+  if (item.source_link_state === "missing") return "missing-source";
+  if (item.route_status?.routed === true || item.routing) return "recorded+routed";
+  if (readiness.retryable || item.route_status?.compat_status === "terminal-failure") {
+    return "recorded-route-failed";
+  }
+  if (item.route_status?.compat_status === "disabled/not-recorded") return "not-recorded";
+  return "captured-unrouted";
 }
 
 function classifyFeedbackSourceLink(sourceLink: string | null): {
