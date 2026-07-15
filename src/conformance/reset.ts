@@ -11,12 +11,15 @@ export interface ResetConformanceRecord {
   id: string;
   state: ResetConformanceState;
   missing: string[];
+  audience: "operator" | "system" | null;
+  metadata_kind: string | null;
   track: string | null;
   track_state: "ok" | "unassigned" | "unknown";
   project: string | null;
   owner: string | null;
   status: string | null;
   next_action: string | null;
+  source: string | null;
 }
 
 export interface ResetConformanceSummary {
@@ -58,27 +61,36 @@ export function classifyTrack(raw: string | null | undefined): ResetConformanceR
 }
 
 function requiredMissing(input: {
+  audience: "operator" | "system" | null;
+  metadata_kind: string | null;
   track: string | null;
   project: string | null;
   owner: string | null;
   status: string | null;
   next_action: string | null;
+  source: string | null;
 }): string[] {
   const missing: string[] = [];
+  if (!input.audience) missing.push("audience");
+  if (!input.metadata_kind) missing.push("kind");
   if (classifyTrack(input.track) !== "ok") missing.push("track");
   if (!input.project) missing.push("project");
   if (!input.owner) missing.push("owner");
   if (!input.status) missing.push("status");
   if (!input.next_action && !DONE_STATUSES.has((input.status ?? "").toLowerCase())) missing.push("next_action");
+  if (!input.source) missing.push("source");
   return missing;
 }
 
 function record(kind: ResetConformanceKind, id: string, input: {
+  audience: "operator" | "system" | null;
+  metadata_kind: string | null;
   track: string | null;
   project: string | null;
   owner: string | null;
   status: string | null;
   next_action: string | null;
+  source: string | null;
 }): ResetConformanceRecord {
   const track_state = classifyTrack(input.track);
   const missing = requiredMissing(input);
@@ -87,12 +99,15 @@ function record(kind: ResetConformanceKind, id: string, input: {
     id,
     state: missing.length === 0 ? "accepted" : "quarantined",
     missing,
+    audience: input.audience,
+    metadata_kind: input.metadata_kind,
     track: input.track,
     track_state,
     project: input.project,
     owner: input.owner,
     status: input.status,
     next_action: input.next_action,
+    source: input.source,
   };
 }
 
@@ -111,36 +126,39 @@ export async function buildResetConformanceSummary(
 ): Promise<ResetConformanceSummary> {
   const limit = opts.limit ?? 1000;
   const teamClause = opts.teamId ? `WHERE t.team_id = '${String(opts.teamId).replace(/'/g, "''")}'` : "";
-  const dispatchTeamClause = opts.teamId ? `WHERE team_id = '${String(opts.teamId).replace(/'/g, "''")}'` : "";
 
   const [tasks, dispatches, artifacts] = await Promise.all([
     safeQuery<{
       id: string; name: string; title: string; description: string | null; status: string | null;
       owner: string | null; owner_name: string | null; created_by: string | null; created_by_name: string | null; track: string | null;
+      team_name: string | null;
     }>(adapter, `
       SELECT t.id, t.name, t.title, t.description, t.status, t.owner, owner_agent.name AS owner_name,
-             t.created_by, creator.name AS created_by_name, t.track
+             t.created_by, creator.name AS created_by_name, t.track, team.name AS team_name
         FROM tasks t
    LEFT JOIN agents owner_agent ON owner_agent.id = t.owner
    LEFT JOIN agents creator ON creator.id = t.created_by
+   LEFT JOIN teams team ON team.id = t.team_id
       ${teamClause}
     ORDER BY t.updated_at DESC
        LIMIT ${limit}
     `),
     safeQuery<{
-      dispatch_phid: string; to_agent: string | null; subject: string | null; body_markdown: string | null; status: string | null;
+      dispatch_phid: string; query_id: string | null; to_agent: string | null; subject: string | null; body_markdown: string | null; status: string | null;
+      team_name: string | null;
     }>(adapter, `
-      SELECT dispatch_phid, to_agent, subject, body_markdown, status
-        FROM dispatch_scheduler_queue
-      ${dispatchTeamClause}
-    ORDER BY updated_at DESC
+      SELECT q.dispatch_phid, q.query_id, q.to_agent, q.subject, q.body_markdown, q.status, team.name AS team_name
+        FROM dispatch_scheduler_queue q
+   LEFT JOIN teams team ON team.id = q.team_id
+      ${opts.teamId ? `WHERE q.team_id = '${String(opts.teamId).replace(/'/g, "''")}'` : ""}
+    ORDER BY q.updated_at DESC
        LIMIT ${limit}
     `),
     safeQuery<{
       artifact_id: string; basename: string; agent: string | null; tag: string | null; abs_path: string | null;
-      title: string | null; availability: string | null; dispatch_ref: string | null;
+      title: string | null; availability: string | null; dispatch_ref: string | null; project_ref: string | null; source: string | null;
     }>(adapter, `
-      SELECT artifact_id, basename, agent, tag, abs_path, title, availability, dispatch_ref
+      SELECT artifact_id, basename, agent, tag, abs_path, title, availability, dispatch_ref, project_ref, source
         FROM artifacts
     ORDER BY produced_at DESC
        LIMIT ${limit}
@@ -174,21 +192,27 @@ export async function buildResetConformanceSummary(
 
   for (const row of tasks.rows) {
     records.push(record("task", row.id, {
+      audience: "operator",
+      metadata_kind: "task",
       track: text(row.track),
-      project: text(row.created_by_name) ?? text(row.owner_name),
+      project: text(row.team_name),
       owner: text(row.owner_name) ?? text(row.owner),
       status: text(row.status),
       next_action: nextActionFromText(row.description),
+      source: text(row.name),
     }));
   }
 
   for (const row of dispatches.rows) {
     records.push(record("dispatch", row.dispatch_phid, {
+      audience: "operator",
+      metadata_kind: "dispatch",
       track: parseTrackTag(row.subject) ?? parseTrackTag(row.body_markdown),
-      project: parseProjectTag(row.subject) ?? parseProjectTag(row.body_markdown),
+      project: parseProjectTag(row.subject) ?? parseProjectTag(row.body_markdown) ?? text(row.team_name),
       owner: text(row.to_agent),
       status: text(row.status),
       next_action: nextActionFromText(row.body_markdown) ?? text(row.subject),
+      source: text(row.query_id) ?? text(row.dispatch_phid),
     }));
   }
 
@@ -196,12 +220,15 @@ export async function buildResetConformanceSummary(
     const isReport = /(^|[\\/])reports?[\\/]/i.test(row.abs_path ?? "") || /report/i.test(row.tag ?? row.basename ?? "");
     const sourceDispatch = row.dispatch_ref ? dispatchByPhid.get(row.dispatch_ref) : undefined;
     records.push(record(isReport ? "report" : "artifact", row.artifact_id, {
+      audience: "operator",
+      metadata_kind: isReport ? "report" : (text(row.tag) ?? "artifact"),
       track: parseTrackTag(row.tag) ?? parseTrackTag(row.title) ?? parseTrackTag(row.basename)
         ?? parseTrackTag(sourceDispatch?.subject) ?? parseTrackTag(sourceDispatch?.body_markdown),
-      project: projectFromPath(row.abs_path),
+      project: text(row.project_ref) ?? projectFromPath(row.abs_path),
       owner: text(row.agent),
       status: text(row.availability),
       next_action: nextActionFromText(row.title) ?? text(row.title),
+      source: text(row.abs_path) ?? text(row.source) ?? text(row.artifact_id),
     }));
   }
 

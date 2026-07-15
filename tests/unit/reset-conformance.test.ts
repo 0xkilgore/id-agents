@@ -78,14 +78,35 @@ describe("reset conformance quarantine", () => {
 
     const task = summary.records.find((r) => r.kind === "task" && r.id === "task_bad");
     expect(task?.missing).toEqual(expect.arrayContaining(["track", "owner", "next_action"]));
+    expect(task?.missing).not.toEqual(expect.arrayContaining(["audience", "kind", "project", "source"]));
+    expect(task).toMatchObject({
+      audience: "operator",
+      metadata_kind: "task",
+      project: "kapelle",
+      source: "bad-task",
+    });
     expect(task?.track_state).toBe("unassigned");
 
     const dispatch = summary.records.find((r) => r.kind === "dispatch" && r.id === "phid:disp-bad");
-    expect(dispatch?.missing).toEqual(expect.arrayContaining(["track", "project"]));
+    expect(dispatch?.missing).toEqual(expect.arrayContaining(["track"]));
+    expect(dispatch?.missing).not.toEqual(expect.arrayContaining(["audience", "kind", "project", "source"]));
+    expect(dispatch).toMatchObject({
+      audience: "operator",
+      metadata_kind: "dispatch",
+      project: "kapelle",
+      source: "query_bad",
+    });
 
     const report = summary.records.find((r) => r.kind === "report" && r.id === "report_bad");
     expect(report?.track_state).toBe("unknown");
     expect(report?.missing).toContain("track");
+    expect(report?.missing).not.toEqual(expect.arrayContaining(["audience", "kind", "project", "source"]));
+    expect(report).toMatchObject({
+      audience: "operator",
+      metadata_kind: "report",
+      project: "kapelle",
+      source: "/Users/kilgore/Dropbox/Code/kapelle/output/reports/weekly-report.md",
+    });
 
     await adapter.close();
   });
@@ -138,6 +159,37 @@ describe("reset conformance quarantine", () => {
 
     expect(summary.counts.by_kind.task).toEqual({ total: 1, quarantined: 0 });
     expect(summary.records.find((r) => r.id === row.id)).toBeUndefined();
+
+    await adapter.close();
+  });
+
+  it("quarantines direct task writes that bypass the next_action repair while preserving repaired substrate metadata", async () => {
+    const adapter = new SqliteAdapter(":memory:");
+    await seedBase(adapter);
+
+    await adapter.query(
+      `INSERT INTO tasks
+       (id, name, uuid, team_id, title, description, status, created_by, owner, created_at, updated_at, completed_at, track)
+       VALUES
+         ('task_direct_missing_action','direct-missing-action','uuid-direct',?,'Direct missing action',NULL,'todo','agent_api','agent_api',1783520000,1783520010,NULL,'T-OPRESET')`,
+      [TEAM],
+    );
+
+    const summary = await buildResetConformanceSummary(adapter, {
+      teamId: TEAM,
+      generatedAt: NOW,
+    });
+
+    expect(summary.counts.by_kind.task).toEqual({ total: 1, quarantined: 1 });
+    const task = summary.records.find((r) => r.id === "task_direct_missing_action");
+    expect(task?.missing).toEqual(["next_action"]);
+    expect(task).toMatchObject({
+      audience: "operator",
+      metadata_kind: "task",
+      project: "kapelle",
+      source: "direct-missing-action",
+      track: "T-OPRESET",
+    });
 
     await adapter.close();
   });
