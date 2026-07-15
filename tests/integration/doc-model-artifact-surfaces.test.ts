@@ -200,19 +200,117 @@ describe("doc-model artifact surfaces — Activity", () => {
 });
 
 describe("doc-model artifact surfaces — Projects", () => {
-  it("groups documents by project, file-system-like, with an (unassigned) bucket", async () => {
-    await author({ documentId: "doc:kap-1", title: "Kap 1", audience: "operator", kind: "document", project: "kapelle" });
-    await author({ documentId: "doc:kap-2", title: "Kap 2", audience: "operator", kind: "document", project: "kapelle" });
-    await author({ documentId: "doc:idagents-1", title: "id-agents 1", audience: "system", kind: "document", project: "id-agents" });
-    await author({ documentId: "doc:none", title: "No project", audience: "system", kind: "document", project: null });
+  it("groups operator-facing documents by project, newest first, with an (unassigned) bucket", async () => {
+    await author({
+      documentId: "doc:kap-digest-old",
+      title: "Kap recurring digest 1",
+      audience: "operator",
+      kind: "report",
+      project: "kapelle",
+      now: "2026-07-14T08:00:00.000Z",
+    });
+    await author({
+      documentId: "doc:kap-final",
+      title: "Kap final package",
+      audience: "operator",
+      kind: "final-document",
+      project: "kapelle",
+      now: "2026-07-14T10:00:00.000Z",
+    });
+    await author({
+      documentId: "doc:kap-digest-new",
+      title: "Kap recurring digest 2",
+      audience: "operator",
+      kind: "report",
+      project: "kapelle",
+      now: "2026-07-14T12:00:00.000Z",
+    });
+    await author({
+      documentId: "doc:kap-diagnostics",
+      title: "Kap orchestration diagnostics",
+      audience: "system",
+      kind: "diagnostics",
+      project: "kapelle",
+      now: "2026-07-14T13:00:00.000Z",
+    });
+    await author({
+      documentId: "doc:ops-receipt",
+      title: "Pool builder receipt",
+      audience: "system",
+      kind: "receipt",
+      project: "kapelle",
+      now: "2026-07-14T14:00:00.000Z",
+    });
+    await author({
+      documentId: "doc:none",
+      title: "Unassigned operator memo",
+      audience: "operator",
+      kind: "document",
+      project: null,
+      now: "2026-07-14T09:00:00.000Z",
+    });
 
     const app = mountApp(adapter);
     const res = await callAppRequest(app, "/doc-model/surfaces/projects");
 
     expect(res.status).toBe(200);
-    expect(res.body.items.map((g: any) => g.project)).toEqual(["(unassigned)", "id-agents", "kapelle"]);
+    expect(res.body.items.map((g: any) => g.project)).toEqual(["(unassigned)", "kapelle"]);
+    expect(res.body.admission).toEqual({
+      source: "project_group",
+      audience: "operator",
+      kinds: "any",
+      reason: "operator-facing artifact documents grouped by project metadata; system rows remain on System unless include_system=true",
+    });
     const kapelle = res.body.items.find((g: any) => g.project === "kapelle");
-    expect(kapelle.documents.map((d: any) => d.document_id).sort()).toEqual(["doc:kap-1", "doc:kap-2"]);
+    expect(kapelle.documents.map((d: any) => d.document_id)).toEqual([
+      "doc:kap-digest-new",
+      "doc:kap-final",
+      "doc:kap-digest-old",
+    ]);
+    expect(kapelle.documents.map((d: any) => d.kind)).toEqual(["report", "final-document", "report"]);
+  });
+
+  it("includes system diagnostics and receipts only when include_system=true", async () => {
+    await author({
+      documentId: "doc:kap-report",
+      title: "Kap report",
+      audience: "operator",
+      kind: "report",
+      project: "kapelle",
+      now: "2026-07-14T10:00:00.000Z",
+    });
+    await author({
+      documentId: "doc:kap-diagnostics",
+      title: "Kap diagnostics",
+      audience: "system",
+      kind: "diagnostics",
+      project: "kapelle",
+      now: "2026-07-14T11:00:00.000Z",
+    });
+    await author({
+      documentId: "doc:kap-receipt",
+      title: "Kap receipt",
+      audience: "system",
+      kind: "receipt",
+      project: "kapelle",
+      now: "2026-07-14T12:00:00.000Z",
+    });
+
+    const app = mountApp(adapter);
+    const res = await callAppRequest(app, "/doc-model/surfaces/projects?include_system=true");
+
+    expect(res.status).toBe(200);
+    expect(res.body.admission).toEqual({
+      source: "project_group",
+      audience: "any",
+      kinds: "any",
+      reason: "artifact documents grouped by project metadata",
+    });
+    expect(res.body.items[0].documents.map((d: any) => ({ document_id: d.document_id, kind: d.kind }))).toEqual([
+      { document_id: "doc:kap-receipt", kind: "receipt" },
+      { document_id: "doc:kap-diagnostics", kind: "diagnostics" },
+      { document_id: "doc:kap-report", kind: "report" },
+    ]);
   });
 });
 

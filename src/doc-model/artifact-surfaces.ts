@@ -177,16 +177,18 @@ export interface ProjectGroup {
   documents: Array<{ document_id: string; title: string; kind: string; updated_at: string }>;
 }
 
-/** Projects — every document grouped by project, file-system-like listing. Unassigned documents group under "(unassigned)". */
+/** Projects — operator-facing documents grouped by project, newest first within each group. */
 export async function projectProjectsSurface(
   adapter: DbAdapter,
   teamId: string,
+  opts: { includeSystem?: boolean } = {},
 ): Promise<ReadModelEnvelope<ProjectGroup>> {
-  const documentIds = await listArtifactDocumentIds(adapter, teamId, { order: "asc" });
+  const documentIds = await listArtifactDocumentIds(adapter, teamId, { order: "desc" });
   const groups = new Map<string, ProjectGroup>();
   for (const documentId of documentIds) {
     const projection = await projectArtifactDocument(adapter, documentId);
     if (!projection) continue;
+    if (!opts.includeSystem && projection.stamp.audience === "system") continue;
     const key = projection.project ?? "(unassigned)";
     const group = groups.get(key) ?? { project: key, documents: [] };
     group.documents.push({
@@ -200,9 +202,11 @@ export async function projectProjectsSurface(
   const items = [...groups.values()].sort((a, b) => a.project.localeCompare(b.project));
   return envelope(items, "doc_model_projects", {
     source: "project_group",
-    audience: "any",
+    audience: opts.includeSystem ? "any" : "operator",
     kinds: "any",
-    reason: "artifact documents grouped by project metadata",
+    reason: opts.includeSystem
+      ? "artifact documents grouped by project metadata"
+      : "operator-facing artifact documents grouped by project metadata; system rows remain on System unless include_system=true",
   });
 }
 

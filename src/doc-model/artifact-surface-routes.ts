@@ -34,7 +34,13 @@ export function mountArtifactSurfaceRoutes(app: Application, adapter: DbAdapter)
   route("/doc-model/surfaces/now", projectNowSurface);
   route("/doc-model/surfaces/inbox", projectInboxSurface);
   route("/doc-model/surfaces/activity", projectActivitySurface);
-  route("/doc-model/surfaces/projects", projectProjectsSurface);
+  app.get("/doc-model/surfaces/projects", async (req: Request, res: Response) => {
+    try {
+      res.json(await projectProjectsSurface(adapter, teamIdParam(req), { includeSystem: req.query.include_system === "true" }));
+    } catch (err) {
+      res.status(500).json({ ok: false, error: err instanceof Error ? err.message : String(err) });
+    }
+  });
   route("/doc-model/surfaces/reports", projectReportsSurface);
   route("/doc-model/surfaces/system", projectSystemSurface);
 }
