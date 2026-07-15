@@ -9,9 +9,10 @@ import { createHash } from "node:crypto";
 import { classifyPromotionHygieneFailure } from "../loops/worktree-hygiene.js";
 import { loadContinuousOrchestrationConfig } from "./config.js";
 import { normalizeRuntime, resolveProviderFromRuntime } from "../dispatch-scheduler/types.js";
+import { promotionCompletedAndVerified } from "../dispatch-scheduler/read-model.js";
 import { laneKeyOf } from "./selection.js";
 import type { BacklogItem, BacklogRetryReadiness, BacklogRetryReadinessStatus } from "./types.js";
-import { getDispatchOutcomesByPhid } from "./storage.js";
+import { getDispatchOutcomesByPhid, type DispatchOutcome } from "./storage.js";
 import { deriveBacklogRetryReadiness } from "./backlog-retry-readiness.js";
 import {
   classifyDuplicateDispatchRetryDisposition,
@@ -176,6 +177,21 @@ export interface OrchestrationReadyItemBlockerDetail {
   safe_action_path: string | null;
   stale_duplicate_closeout_receipt_exists: boolean;
   provider_runtime_repair: OrchestrationProviderRuntimeRepairSuggestion | null;
+  blocked_dependency_item_ids: string[];
+  blocked_dependency_diagnostics: OrchestrationBlockedDependencyDiagnostic[];
+}
+
+export interface OrchestrationBlockedDependencyDiagnostic {
+  dependency_item_id: string;
+  dependency_readiness_state: BacklogItem["readiness_state"] | "missing";
+  prior_dispatch_id: string | null;
+  prior_dispatch_status: string | null;
+  prior_recovery_status: string | null;
+  recommended_disposition: "landed" | "superseded" | "held";
+  should_land: boolean;
+  should_supersede: boolean;
+  should_hold: boolean;
+  reason: string;
 }
 
 /**
@@ -246,6 +262,12 @@ interface BacklogQueueRow {
   retry_safe: number | null;
   dispatch_retry_count: number;
   stale_duplicate_closeout_receipt_json: string | null;
+}
+
+interface BlockedDependencyRow {
+  item_id: string;
+  readiness_state: BacklogItem["readiness_state"];
+  last_dispatch_phid: string | null;
 }
 
 interface DispatchQueueCountRow {
@@ -575,6 +597,7 @@ async function readReadyItemBlockerProjection(
       .map((row) => row.last_dispatch_phid)
       .filter((phid): phid is string => !!phid),
   );
+  const dependencyDiagnostics = await readBlockedDependencyDiagnostics(adapter, teamId, rows);
   const minReadyFuel = Math.max(0, Math.floor(opts.minReadyFuel ?? loadContinuousOrchestrationConfig().min_ready_fuel));
   const admissibleNow = opts.readyAdmission?.admissibleNow ?? null;
 
@@ -605,7 +628,7 @@ async function readReadyItemBlockerProjection(
       if (blocker.code === "provider_runtime_mismatch") {
         mismatchRows.push({ row, blocker });
       } else {
-        details.push(readyItemBlockerDetail(row, blocker, duplicateDispatchOutcomes));
+        details.push(readyItemBlockerDetail(row, blocker, duplicateDispatchOutcomes, null, dependencyDiagnostics));
       }
     } else {
       actionable += 1;
@@ -619,7 +642,7 @@ async function readReadyItemBlockerProjection(
     const compatibleAgentsByRuntime = await readAgentsByRuntime(adapter, requestedRuntimes);
     for (const { row, blocker } of mismatchRows) {
       const repair = buildProviderRuntimeRepairSuggestion(row, agentRuntimes, compatibleAgentsByRuntime);
-      details.push(readyItemBlockerDetail(row, blocker, duplicateDispatchOutcomes, repair));
+      details.push(readyItemBlockerDetail(row, blocker, duplicateDispatchOutcomes, repair, dependencyDiagnostics));
     }
   }
 
@@ -653,6 +676,7 @@ function readyItemBlockerDetail(
   blocker: ReadyAdmissionBlocker,
   duplicateDispatchOutcomes: Awaited<ReturnType<typeof getDispatchOutcomesByPhid>>,
   providerRuntimeRepair: OrchestrationProviderRuntimeRepairSuggestion | null = null,
+  dependencyDiagnostics: Map<string, OrchestrationBlockedDependencyDiagnostic[]> = new Map(),
 ): OrchestrationReadyItemBlockerDetail {
   const outcome = row.last_dispatch_phid ? duplicateDispatchOutcomes.get(row.last_dispatch_phid) : undefined;
   const duplicateDisposition = blocker.code === "duplicate_dispatch_retry_required"
@@ -686,7 +710,130 @@ function readyItemBlockerDetail(
       : null,
     stale_duplicate_closeout_receipt_exists: !!row.stale_duplicate_closeout_receipt_json,
     provider_runtime_repair: providerRuntimeRepair,
+    blocked_dependency_item_ids: blocker.code === "blocked_dependency" ? parseStringArray(row.dependencies_json) : [],
+    blocked_dependency_diagnostics: blocker.code === "blocked_dependency"
+      ? dependencyDiagnostics.get(row.item_id) ?? []
+      : [],
   };
+}
+
+async function readBlockedDependencyDiagnostics(
+  adapter: DbAdapter,
+  teamId: string,
+  rows: BacklogQueueRow[],
+): Promise<Map<string, OrchestrationBlockedDependencyDiagnostic[]>> {
+  const dependencyIdsByItem = new Map<string, string[]>();
+  const allDependencyIds = new Set<string>();
+  for (const row of rows) {
+    const dependencyIds = parseStringArray(row.dependencies_json);
+    if (dependencyIds.length === 0) continue;
+    dependencyIdsByItem.set(row.item_id, dependencyIds);
+    for (const dependencyId of dependencyIds) allDependencyIds.add(dependencyId);
+  }
+  if (allDependencyIds.size === 0) return new Map();
+
+  const dependencyRows = await readBlockedDependencyRows(adapter, teamId, [...allDependencyIds]);
+  const outcomes = await getDispatchOutcomesByPhid(
+    adapter,
+    [...dependencyRows.values()]
+      .map((row) => row.last_dispatch_phid)
+      .filter((phid): phid is string => !!phid),
+  );
+
+  const out = new Map<string, OrchestrationBlockedDependencyDiagnostic[]>();
+  for (const [itemId, dependencyIds] of dependencyIdsByItem) {
+    out.set(
+      itemId,
+      dependencyIds.map((dependencyId) => {
+        const dependency = dependencyRows.get(dependencyId);
+        const priorDispatchId = dependency?.last_dispatch_phid ?? null;
+        const outcome = priorDispatchId ? outcomes.get(priorDispatchId) : undefined;
+        return blockedDependencyDiagnostic(dependencyId, dependency, outcome);
+      }),
+    );
+  }
+  return out;
+}
+
+async function readBlockedDependencyRows(
+  adapter: DbAdapter,
+  teamId: string,
+  dependencyIds: string[],
+): Promise<Map<string, BlockedDependencyRow>> {
+  const unique = [...new Set(dependencyIds.filter((id) => id.trim() !== ""))];
+  if (unique.length === 0) return new Map();
+  const placeholders = unique.map((_, i) => `$${i + 2}`).join(",");
+  const { rows } = await adapter.query<BlockedDependencyRow>(
+    `SELECT item_id, readiness_state, last_dispatch_phid
+       FROM orchestration_backlog_item
+      WHERE team_id = $1
+        AND item_id IN (${placeholders})`,
+    [teamId, ...unique],
+  );
+  return new Map(rows.map((row) => [row.item_id, row]));
+}
+
+function blockedDependencyDiagnostic(
+  dependencyId: string,
+  dependency: BlockedDependencyRow | undefined,
+  outcome: DispatchOutcome | undefined,
+): OrchestrationBlockedDependencyDiagnostic {
+  const priorDispatchId = dependency?.last_dispatch_phid ?? null;
+  const priorDispatchStatus = outcome?.status ?? null;
+  const priorRecoveryStatus = outcome?.recovery_status ?? null;
+  const dependencyState = dependency?.readiness_state ?? "missing";
+  const disposition = blockedDependencyDisposition(dependencyState, priorDispatchStatus, outcome?.promotion_result_json);
+  return {
+    dependency_item_id: dependencyId,
+    dependency_readiness_state: dependencyState,
+    prior_dispatch_id: priorDispatchId,
+    prior_dispatch_status: priorDispatchStatus,
+    prior_recovery_status: priorRecoveryStatus,
+    recommended_disposition: disposition,
+    should_land: disposition === "landed",
+    should_supersede: disposition === "superseded",
+    should_hold: disposition === "held",
+    reason: blockedDependencyDispositionReason(dependencyId, dependencyState, priorDispatchId, priorDispatchStatus, disposition),
+  };
+}
+
+function blockedDependencyDisposition(
+  dependencyState: BacklogItem["readiness_state"] | "missing",
+  priorDispatchStatus: string | null,
+  promotionResultJson: string | null | undefined,
+): OrchestrationBlockedDependencyDiagnostic["recommended_disposition"] {
+  if (dependencyState === "done" || promotionCompletedAndVerified(promotionResultJson) || priorDispatchStatus === "done") {
+    return "landed";
+  }
+  if (
+    dependencyState === "cancelled" ||
+    dependencyState === "superseded" ||
+    priorDispatchStatus === "cancelled" ||
+    priorDispatchStatus === "moot" ||
+    priorDispatchStatus === "superseded"
+  ) {
+    return "superseded";
+  }
+  return "held";
+}
+
+function blockedDependencyDispositionReason(
+  dependencyId: string,
+  dependencyState: BacklogItem["readiness_state"] | "missing",
+  priorDispatchId: string | null,
+  priorDispatchStatus: string | null,
+  disposition: OrchestrationBlockedDependencyDiagnostic["recommended_disposition"],
+): string {
+  const dispatchState = priorDispatchId
+    ? `prior dispatch ${priorDispatchId} is ${priorDispatchStatus ?? "unreadable"}`
+    : "no prior dispatch is recorded";
+  if (disposition === "landed") {
+    return `dependency ${dependencyId} is landed/done (${dispatchState}); clear the dependency before admitting the ready row`;
+  }
+  if (disposition === "superseded") {
+    return `dependency ${dependencyId} is ${dependencyState} (${dispatchState}); supersede or remove the dependency before admitting the ready row`;
+  }
+  return `dependency ${dependencyId} is ${dependencyState} (${dispatchState}); hold the ready row and do not refire without retry_safe`;
 }
 
 // RD — a provider_runtime_mismatch row will never self-heal by waiting for

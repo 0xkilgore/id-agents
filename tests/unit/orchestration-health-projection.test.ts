@@ -1697,6 +1697,92 @@ describe("orchestration health projection", () => {
     ]);
   });
 
+  it("diagnoses dependency-held ready rows with dependency dispatch state and disposition", async () => {
+    const landedDependency = await insertBacklogItem(adapter, {
+      title: "dependency already landed",
+      readiness_state: "ready",
+    });
+    await setItemState(adapter, landedDependency.item_id, "done", { dispatch_phid: "phid:disp-dep-landed" });
+    await insertDispatch({
+      dispatch_phid: "phid:disp-dep-landed",
+      status: "done",
+      completed_at: "2026-07-01T10:00:00.000Z",
+    });
+
+    const supersededDependency = await insertBacklogItem(adapter, {
+      title: "dependency superseded",
+      readiness_state: "ready",
+    });
+    await setItemState(adapter, supersededDependency.item_id, "superseded", { dispatch_phid: "phid:disp-dep-superseded" });
+    await insertDispatch({
+      dispatch_phid: "phid:disp-dep-superseded",
+      status: "superseded",
+      completed_at: "2026-07-01T11:00:00.000Z",
+    });
+
+    const heldDependency = await insertBacklogItem(adapter, {
+      title: "dependency still in flight",
+      readiness_state: "ready",
+    });
+    await setItemState(adapter, heldDependency.item_id, "in_flight", { dispatch_phid: "phid:disp-dep-live" });
+    await insertDispatch({
+      dispatch_phid: "phid:disp-dep-live",
+      status: "in_progress",
+      updated_at: "2026-07-01T12:00:00.000Z",
+    });
+
+    const dependent = await insertBacklogItem(adapter, {
+      title: "ready row held by dependencies",
+      readiness_state: "ready",
+      risk_class: "build",
+      to_agent: "roger",
+      dispatch_body: "continue",
+      dependencies: [landedDependency.item_id, supersededDependency.item_id, heldDependency.item_id],
+    });
+
+    const health = await readOrchestrationHealthProjection(adapter, "default");
+    const item = health.ready_item_blockers.items.find((row) => row.item_id === dependent.item_id);
+
+    expect(item).toMatchObject({
+      code: "blocked_dependency",
+      blocked_dependency_item_ids: [landedDependency.item_id, supersededDependency.item_id, heldDependency.item_id],
+      blocked_dependency_diagnostics: [
+        {
+          dependency_item_id: landedDependency.item_id,
+          dependency_readiness_state: "done",
+          prior_dispatch_id: "phid:disp-dep-landed",
+          prior_dispatch_status: "done",
+          recommended_disposition: "landed",
+          should_land: true,
+          should_supersede: false,
+          should_hold: false,
+        },
+        {
+          dependency_item_id: supersededDependency.item_id,
+          dependency_readiness_state: "superseded",
+          prior_dispatch_id: "phid:disp-dep-superseded",
+          prior_dispatch_status: "superseded",
+          recommended_disposition: "superseded",
+          should_land: false,
+          should_supersede: true,
+          should_hold: false,
+        },
+        {
+          dependency_item_id: heldDependency.item_id,
+          dependency_readiness_state: "in_flight",
+          prior_dispatch_id: "phid:disp-dep-live",
+          prior_dispatch_status: "in_progress",
+          recommended_disposition: "held",
+          should_land: false,
+          should_supersede: false,
+          should_hold: true,
+        },
+      ],
+    });
+    expect(item?.blocked_dependency_diagnostics[2]?.reason).toContain("do not refire without retry_safe");
+    expect(health.ready_item_blockers.actionable).toBe(0);
+  });
+
   it("does not count risk-approval ready rows as useful or admissible build fuel", async () => {
     const approvalBlockedIds: string[] = [];
     for (let i = 0; i < 13; i += 1) {
