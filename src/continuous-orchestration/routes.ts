@@ -121,6 +121,8 @@ export function mountContinuousOrchestrationRoutes(app: Application, opts: Orche
       const health = await readOrchestrationHealthProjection(adapter, teamId, {
         minReadyFuel: config.min_ready_fuel,
         readyAdmission: {
+          rawReady: readyAdmission.candidates,
+          usefulReady: readyAdmission.useful_ready,
           admissibleNow: readyAdmission.admissible_now,
           blockerCounts: readyAdmission.blocker_counts,
           nonAdmitted: readyAdmission.non_admitted.map((item) => ({

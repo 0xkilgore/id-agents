@@ -511,16 +511,28 @@ function readyAdmissionRecommendedAction(input: {
 }): string {
   if (input.candidates === 0) return "flesh or promote ready fuel";
   if (input.usefulReady < input.minReadyFuel) {
-    const reroutable = input.blockerCounts.filter((count) =>
-      count.code === "target_unhealthy" || count.code === "provider_runtime_mismatch"
-    );
-    const rerouteText =
-      reroutable.length > 0
-        ? ` or reroute ${reroutable.map((count) => `${count.code}=${count.count}`).join(", ")} rows to compatible healthy agents`
-        : "";
+    const actions = input.blockerCounts.flatMap((count) => {
+      if (count.code === "target_unhealthy") {
+        return [`reroute target_unhealthy=${count.count} rows to compatible healthy agents`];
+      }
+      if (count.code === "provider_runtime_mismatch") {
+        return [`reroute or update provider_runtime_mismatch=${count.count} rows to match a live runtime`];
+      }
+      if (count.code === "duplicate_dispatch_retry_required") {
+        return [`review duplicate_dispatch_retry_required=${count.count} rows and mark retry_safe only for bounded refires or close stale duplicates`];
+      }
+      return [];
+    });
+    const repairText = actions.length > 0 ? actions.join("; ") : "clear the top ready-admission blockers";
+    if (input.candidates >= input.minReadyFuel) {
+      return (
+        `raw_ready_fuel=${input.candidates} meets min_ready_fuel=${input.minReadyFuel} but ` +
+        `useful_ready_fuel=${input.usefulReady} is below floor; ${repairText}`
+      );
+    }
     return (
       `useful_ready_fuel=${input.usefulReady} is below min_ready_fuel=${input.minReadyFuel}; ` +
-      `run auto-promote/flesh for safe backlog candidates${rerouteText}`
+      `run auto-promote/flesh for safe backlog candidates or ${repairText}`
     );
   }
   if (input.admissibleNow > 0) return "admit available ready rows";

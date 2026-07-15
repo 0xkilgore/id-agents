@@ -1492,6 +1492,134 @@ describe("daemon — dry-run vs live", () => {
     expect(res.body.auto_promote_health.operator_summary.summary).toContain("2 target_unhealthy row(s)");
   });
 
+  it("status treats raw-ready-above-floor target-unhealthy and duplicate retry rows as useful-ready below floor without adding filler", async () => {
+    await seedAgent(adapter, "gaudi", "pending", "claude-code-cli");
+    await seedAgent(adapter, "eames", "running", "claude-code-cli");
+    await seedAgent(adapter, "substrate-orch-codex", "running", "codex");
+    await seedAgent(adapter, "substrate-api-codex", "running", "codex");
+
+    for (let i = 0; i < 10; i++) {
+      await seedReady(adapter, {
+        title: `explicit unhealthy target ${i}`,
+        to_agent: "gaudi",
+        write_scope: [`repo/unhealthy-${i}`],
+      });
+    }
+    const duplicate = await seedReady(adapter, {
+      title: "duplicate retry safety guard",
+      to_agent: "eames",
+      write_scope: ["repo/duplicate-retry"],
+    });
+    await markReadyAlreadyDispatched(adapter, duplicate.item_id, "phid:disp-duplicate-retry");
+    await seedReady(adapter, {
+      title: "backend pool admissible one",
+      to_agent: "pool:backend",
+      write_scope: ["repo/backend-one"],
+    });
+    await seedReady(adapter, {
+      title: "backend pool admissible two",
+      to_agent: "pool:backend",
+      write_scope: ["repo/backend-two"],
+    });
+
+    const pools: PoolRouting = {
+      poolForItem: (item) =>
+        item.to_agent === "pool:backend"
+          ? {
+              pool_id: "backend",
+              repo_root: "/repo/backend",
+              max_parallel: 2,
+              members: ["gaudi", "substrate-orch-codex", "substrate-api-codex"],
+            }
+          : null,
+      availableBuilders: (pool) => pool.members,
+      allocateWorktree: async ({ agent, item, pool }) => ({
+        path: `${pool.repo_root}/.worktrees/${agent}-${item.item_id.slice(-6)}`,
+        branch: `build/${agent}-${item.item_id.slice(-6)}`,
+        lease_id: null,
+      }),
+    };
+    const { app, daemon } = mountStatusApp(
+      adapter,
+      {
+        dry_run: true,
+        auto_flesh_enabled: true,
+        auto_promote_enabled: true,
+        auto_promote_floor: 12,
+        auto_promote_min_lanes: 2,
+        min_ready_fuel: 12,
+        max_in_flight: 20,
+        max_new_per_tick: 20,
+      },
+      {
+        pools,
+        resolveAgentHealth: (names) => getHealthyAgentNames(adapter, names),
+        resolveAgentRuntimes: (names) => getAgentRuntimeMap(adapter, names),
+      },
+    );
+    await daemon.setMode("running");
+
+    const res = await callApp(app, "/orchestration/status");
+
+    expect(res.status).toBe(200);
+    expect(res.body.counts).toMatchObject({
+      raw_ready_fuel: 13,
+      useful_ready_fuel: 2,
+      admissible_now: 2,
+      stale_ready_fuel: true,
+    });
+    expect(res.body.ready_admission).toMatchObject({
+      candidates: 13,
+      useful_ready: 2,
+      admissible_now: 2,
+      recommended_action:
+        "raw_ready_fuel=13 meets min_ready_fuel=12 but useful_ready_fuel=2 is below floor; reroute target_unhealthy=10 rows to compatible healthy agents; review duplicate_dispatch_retry_required=1 rows and mark retry_safe only for bounded refires or close stale duplicates",
+      stale_ready_floor: {
+        stale: true,
+        ready: 13,
+        admissible: 2,
+        min_ready_fuel: 12,
+        reason: "useful_ready_fuel=2 is below min_ready_fuel=12; raw_ready_fuel=13",
+      },
+    });
+    expect(res.body.ready_admission.blocker_counts).toEqual(
+      expect.arrayContaining([
+        { code: "target_unhealthy", category: "runtime_unavailable", count: 10 },
+        { code: "duplicate_dispatch_retry_required", category: "retry_safety", count: 1 },
+      ]),
+    );
+    expect(res.body.health.ready_item_blockers).toMatchObject({
+      ready: 13,
+      min_ready_fuel: 12,
+      admissible_now: 2,
+      stale_ready_floor: true,
+      recommended_action: res.body.ready_admission.recommended_action,
+      stale_ready_fuel: {
+        active: true,
+        reason: "useful_ready_fuel=2 is below min_ready_fuel=12; raw_ready_fuel=13",
+      },
+    });
+    expect(res.body.health.ready_item_blockers.stale_ready_fuel.counts_by_blocker_class).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ code: "target_unhealthy", category: "runtime_unavailable", count: 10 }),
+        expect.objectContaining({ code: "duplicate_dispatch_retry_required", category: "retry_safety", count: 1 }),
+      ]),
+    );
+    expect(res.body.auto_promote_health).toMatchObject({
+      below_floor: false,
+      triggered: false,
+      candidates_considered: 0,
+      promoted_count: 0,
+      skipped_count: 0,
+      next_action: {
+        code: "none",
+        summary: "ready build fuel meets the configured floor",
+      },
+    });
+    expect(res.body.auto_promote_health.summary).toBe("ready build fuel meets floor: ready=13 floor=12, lanes=13/2");
+    expect(res.body.auto_promote_health.operator_summary.safe_actions[0]).toContain("target_unhealthy");
+  });
+
   it("status clears stale zero-admit warnings after a successful admission tick", async () => {
     await recordTickOutcome(adapter, "default", {
       zero_ticks: 5,
@@ -1760,7 +1888,7 @@ describe("daemon — dry-run vs live", () => {
       stale_ready_floor: true,
       stale_ready_fuel: {
         active: true,
-        reason: "actionable_ready=11 is below min_ready_fuel=12; admissible_now=0",
+        reason: "useful_ready_fuel=11 is below min_ready_fuel=12; raw_ready_fuel=12; admissible_now=0",
         counts_by_blocker_class: expect.arrayContaining([
           { code: "duplicate_dispatch_retry_required", category: "retry_safety", count: 1, examples: [duplicate.item_id] },
           { code: "no_in_flight_slots", category: "capacity_gate", count: 11, examples: expect.any(Array) },
@@ -2391,7 +2519,7 @@ describe("daemon — dry-run vs live", () => {
         active: true,
         owner_lane: "orchestration",
         recommended_action: "clear the top ready-admission blockers or promote/refuel safe backlog candidates until ready fuel is admissible",
-        reason: "actionable_ready=10 is below min_ready_fuel=12",
+        reason: "useful_ready_fuel=10 is below min_ready_fuel=12; raw_ready_fuel=11",
       },
     });
     expect(res.body.health.ready_item_blockers.stale_ready_fuel.counts_by_blocker_class).toEqual(

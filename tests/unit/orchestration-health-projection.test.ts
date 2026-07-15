@@ -226,6 +226,8 @@ describe("orchestration health projection", () => {
     const health = await readOrchestrationHealthProjection(adapter, "default", {
       minReadyFuel: 8,
       readyAdmission: {
+        rawReady: 8,
+        usefulReady: 8,
         admissibleNow: 0,
         blockerCounts: [
           { code: "single_writer_lane_busy", category: "lane_eligibility", count: 8 },

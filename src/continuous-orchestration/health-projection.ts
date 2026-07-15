@@ -259,6 +259,8 @@ interface OrchestrationHealthProjectionOptions {
   recentLimit?: number;
   minReadyFuel?: number;
   readyAdmission?: {
+    rawReady: number;
+    usefulReady: number;
     admissibleNow: number;
     blockerCounts: ReadyAdmissionBlockerSummary[];
     nonAdmitted: ReadyAdmissionNonAdmittedSummary[];
@@ -670,7 +672,9 @@ function staleReadyFuelProjection(input: {
   }>;
   readyAdmission?: OrchestrationHealthProjectionOptions["readyAdmission"];
 }): OrchestrationReadyItemBlockerProjection["stale_ready_fuel"] {
-  const belowActionableFloor = input.actionable < input.minReadyFuel;
+  const usefulReady = input.readyAdmission?.usefulReady ?? input.actionable;
+  const rawReady = input.readyAdmission?.rawReady ?? input.ready;
+  const belowActionableFloor = usefulReady < input.minReadyFuel;
   const capacityOnlyZeroAdmissible =
     input.admissibleNow === 0 &&
     input.ready > 0 &&
@@ -682,7 +686,8 @@ function staleReadyFuelProjection(input: {
   const blockedLanes = input.readyAdmission?.blockedLanes ?? [];
   const reasonParts: string[] = [];
   if (belowActionableFloor) {
-    reasonParts.push(`actionable_ready=${input.actionable} is below min_ready_fuel=${input.minReadyFuel}`);
+    reasonParts.push(`useful_ready_fuel=${usefulReady} is below min_ready_fuel=${input.minReadyFuel}`);
+    if (rawReady !== usefulReady) reasonParts.push(`raw_ready_fuel=${rawReady}`);
   }
   if (zeroAdmissible) {
     reasonParts.push("admissible_now=0");
