@@ -47,6 +47,7 @@ import {
 } from "./storage.js";
 import { deriveBacklogRetryReadiness } from "./backlog-retry-readiness.js";
 import { duplicateDispatchRetryReceipt } from "./duplicate-dispatch-retry-receipt.js";
+import { promotionCompletedAndVerified } from "../dispatch-scheduler/read-model.js";
 import { runFleshPass, type FleshRunSummary } from "./flesh-runner.js";
 import { AUTO_READY_CONFIDENCE_THRESHOLD } from "./flesh-policy.js";
 import { autoPromoteRejections, selectAutoPromotions } from "./auto-promote-policy.js";
@@ -62,6 +63,7 @@ import { readDiskHeadroom, type DiskHeadroom } from "../disk-health.js";
 /** Dispatch/effective statuses that mean the work is finished — its write-scope
  *  lock can be released. Mirrors dispatch terminal states plus recovery moot. */
 const TERMINAL_DISPATCH_STATUSES = new Set(["done", "failed", "failed_needs_operator", "cancelled", "moot"]);
+const TERMINAL_DUPLICATE_READY_STATUSES = new Set(["done", "cancelled", "moot", "superseded"]);
 export const AUTO_PROMOTE_HEALTH_STALE_ALREADY_DISPATCHED_STATUSES = new Set([
   "done",
   "cancelled",
@@ -735,6 +737,21 @@ function isNonUsefulReadyBlockerCode(code: unknown): boolean {
     code === "provider_runtime_mismatch" ||
     code === "target_unhealthy"
   );
+}
+
+function isTerminalDuplicateReadyFuel(
+  decision: DecisionRecord,
+  duplicateRetryOutcomes: Map<string, DispatchOutcome>,
+): boolean {
+  if (decision.metadata?.code !== "duplicate_dispatch_retry_required") return false;
+  const lastDispatchPhid = typeof decision.metadata.last_dispatch_phid === "string"
+    ? decision.metadata.last_dispatch_phid
+    : null;
+  if (!lastDispatchPhid) return false;
+  const outcome = duplicateRetryOutcomes.get(lastDispatchPhid);
+  if (!outcome) return false;
+  return TERMINAL_DUPLICATE_READY_STATUSES.has(outcome.status) ||
+    promotionCompletedAndVerified(outcome.promotion_result_json);
 }
 
 function readyAdmissionBlockedLanes(
@@ -1749,16 +1766,23 @@ export class ContinuousOrchestrationDaemon {
       if (proposal) proposedHealthyTargets.set(item.item_id, proposal.target);
     }
     const blockerCounts = readyAdmissionBlockerCounts(plan);
+    const terminalDuplicateItemIds = new Set(
+      plan.skipped
+        .filter((decision) => isTerminalDuplicateReadyFuel(decision, duplicateRetryOutcomes))
+        .map((decision) => decision.item_id)
+        .filter((itemId): itemId is string => !!itemId),
+    );
     const nonUsefulItemIds = new Set(
       plan.skipped
         .filter((decision) => isNonUsefulReadyBlockerCode(decision.metadata?.code))
         .map((decision) => decision.item_id)
         .filter((itemId): itemId is string => !!itemId),
     );
+    const activeReady = ordered.filter((item) => !terminalDuplicateItemIds.has(item.item_id));
     const usefulReady = ordered.length - nonUsefulItemIds.size;
     const admittedItemIds = new Set(plan.admit.map((item) => item.item_id));
     const laneCounts = new Map<string, { lane: string; raw_ready: number; useful_ready: number; admissible_now: number; blocked: number }>();
-    for (const item of ordered) {
+    for (const item of activeReady) {
       const lane = laneKeyOf(item);
       const counts = laneCounts.get(lane) ?? { lane, raw_ready: 0, useful_ready: 0, admissible_now: 0, blocked: 0 };
       counts.raw_ready += 1;
@@ -1768,12 +1792,12 @@ export class ContinuousOrchestrationDaemon {
       laneCounts.set(lane, counts);
     }
     const staleReadyFloor =
-      (usefulReady < config.min_ready_fuel && ordered.length > 0) ||
+      (usefulReady < config.min_ready_fuel && activeReady.length > 0) ||
       (usefulReady >= config.min_ready_fuel && plan.admit.length < config.min_ready_fuel && plan.skipped.length > 0);
     const blockedLanes = readyAdmissionBlockedLanes(plan, byId);
     const targetUnhealthyGroups = readyAdmissionTargetUnhealthyGroups(plan, byId, proposedHealthyTargets);
     const recommendedAction = readyAdmissionRecommendedAction({
-      candidates: ordered.length,
+      candidates: activeReady.length,
       usefulReady,
       admissibleNow: plan.admit.length,
       minReadyFuel: config.min_ready_fuel,
@@ -1782,12 +1806,12 @@ export class ContinuousOrchestrationDaemon {
       targetUnhealthyGroups,
     });
     return {
-      candidates: ordered.length,
+      candidates: activeReady.length,
       useful_ready: usefulReady,
       admissible_now: plan.admit.length,
       lanes: {
-        raw_ready: new Set(ordered.map(laneKeyOf)).size,
-        useful_ready: new Set(ordered.filter((item) => !nonUsefulItemIds.has(item.item_id)).map(laneKeyOf)).size,
+        raw_ready: new Set(activeReady.map(laneKeyOf)).size,
+        useful_ready: new Set(activeReady.filter((item) => !nonUsefulItemIds.has(item.item_id)).map(laneKeyOf)).size,
         admissible_now: new Set(plan.admit.map(laneKeyOf)).size,
         by_lane: [...laneCounts.values()].sort((a, b) => a.lane.localeCompare(b.lane)),
       },
@@ -1842,12 +1866,12 @@ export class ContinuousOrchestrationDaemon {
       operator_blockers: readyAdmissionOperatorBlockers(plan),
       stale_ready_floor: {
         stale: staleReadyFloor,
-        ready: ordered.length,
+        ready: activeReady.length,
         admissible: plan.admit.length,
         min_ready_fuel: config.min_ready_fuel,
         reason: staleReadyFloor
           ? usefulReady < config.min_ready_fuel
-            ? `useful_ready_fuel=${usefulReady} is below min_ready_fuel=${config.min_ready_fuel}; raw_ready_fuel=${ordered.length}`
+            ? `useful_ready_fuel=${usefulReady} is below min_ready_fuel=${config.min_ready_fuel}; raw_ready_fuel=${activeReady.length}`
             : `useful READY floor is satisfied (${usefulReady}) but only ${plan.admit.length} item(s) are admissible`
           : null,
       },

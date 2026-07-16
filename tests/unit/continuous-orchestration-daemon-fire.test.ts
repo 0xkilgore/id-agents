@@ -938,6 +938,77 @@ describe("ready admission target-unhealthy receipts", () => {
     }
   });
 
+  it("excludes terminal duplicate-dispatch ready rows from ready fuel while preserving manual retry blockers", async () => {
+    const adapter = new SqliteAdapter(":memory:");
+    await migrateSqlite(adapter);
+    await setMode(adapter, "default", "running");
+
+    const terminalStatuses = ["done", "cancelled", "moot", "superseded"] as const;
+    for (let i = 0; i < 8; i += 1) {
+      const phid = `phid:disp-terminal-duplicate-${i}`;
+      const item = await seedReadyBuildFuel(adapter, i + 1);
+      await setItemState(adapter, item.item_id, "ready", { dispatch_phid: phid });
+      await seedDispatchStatus(adapter, phid, terminalStatuses[i % terminalStatuses.length]);
+    }
+
+    const promotedPhid = "phid:disp-promotion-verified-duplicate";
+    const promoted = await seedReadyBuildFuel(adapter, 9);
+    await setItemState(adapter, promoted.item_id, "ready", { dispatch_phid: promotedPhid });
+    await seedDispatchStatus(adapter, promotedPhid, "failed");
+    await adapter.query(
+      `UPDATE dispatch_scheduler_queue
+          SET promotion_result_json = $1
+        WHERE dispatch_phid = $2`,
+      [
+        JSON.stringify({ completed: true, repos: [{ verified: true, promoted_sha: "abc", remote_main_sha: "abc" }] }),
+        promotedPhid,
+      ],
+    );
+
+    const retryable = await seedReadyBuildFuel(adapter, 10);
+    await setItemState(adapter, retryable.item_id, "ready", { dispatch_phid: "phid:disp-retryable-duplicate" });
+    await seedDispatchStatus(adapter, "phid:disp-retryable-duplicate", "failed");
+    await adapter.query(
+      `UPDATE dispatch_scheduler_queue
+          SET failure_kind = 'scheduler_wedged',
+              failure_detail = 'stale in-flight claim'
+        WHERE dispatch_phid = 'phid:disp-retryable-duplicate'`,
+    );
+
+    const daemon = new ContinuousOrchestrationDaemon({
+      adapter,
+      config: config(),
+      enqueue: async (item) => ({ dispatch_phid: `phid:disp-${item.item_id}`, query_id: `q-${item.item_id}` }),
+      readUsage: usage,
+      readInFlight: noInFlight,
+    });
+
+    const status = await daemon.explainReadyAdmission();
+
+    expect(status.candidates).toBe(1);
+    expect(status.useful_ready).toBe(0);
+    expect(status.stale_ready_floor).toMatchObject({
+      stale: true,
+      ready: 1,
+      reason: expect.stringContaining("raw_ready_fuel=1"),
+    });
+    expect(status.blocker_counts).toEqual([
+      { code: "duplicate_dispatch_retry_required", category: "retry_safety", count: 10 },
+    ]);
+    expect(status.recommended_action).toContain("duplicate_dispatch_retry_required=10 rows");
+    expect(status.non_admitted).toHaveLength(10);
+    expect(status.non_admitted.find((row) => row.item_id === retryable.item_id)).toMatchObject({
+      code: "duplicate_dispatch_retry_required",
+      metadata: {
+        duplicate_retry: {
+          next_action: "mark_retry_safe_to_refire",
+          operator_disposition: "retry",
+          retry_safe_recommendation: "set_true",
+        },
+      },
+    });
+  });
+
   it("deduplicates target-unhealthy ready-blocked Telegram incidents across consecutive ticks", async () => {
     const adapter = new SqliteAdapter(":memory:");
     await migrateSqlite(adapter);
