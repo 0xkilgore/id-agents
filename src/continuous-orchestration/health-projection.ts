@@ -120,6 +120,7 @@ export interface OrchestrationReadyItemBlockerProjection {
   stale_ready_floor: boolean;
   blocked_lanes: OrchestrationReadyAdmissionBlockedLane[];
   recommended_action: string;
+  blocked_dependency_summary: OrchestrationBlockedDependencySummary;
   stale_ready_fuel: {
     active: boolean;
     owner_lane: string;
@@ -144,6 +145,44 @@ export interface OrchestrationReadyItemBlockerProjection {
     recommended_action: string;
   }>;
   items: OrchestrationReadyItemBlockerDetail[];
+}
+
+export interface OrchestrationBlockedDependencySummary {
+  total_ready_blocked: number;
+  shown_ready_rows: number;
+  dependency_status_counts: {
+    done: number;
+    queued: number;
+    failed: number;
+    missing: number;
+  };
+  clearable_dependencies: number;
+  supersedable_dependencies: number;
+  held_dependencies: number;
+  missing_dependencies: number;
+  recommended_action: string;
+  items: OrchestrationBlockedDependencySummaryItem[];
+}
+
+export interface OrchestrationBlockedDependencySummaryItem {
+  item_id: string;
+  title: string | null;
+  dependency_ids: string[];
+  dependencies: OrchestrationBlockedDependencySummaryDependency[];
+  safe_patch_path: string;
+  safe_clear_patch_body: { dependencies: string[] } | null;
+}
+
+export interface OrchestrationBlockedDependencySummaryDependency {
+  dependency_item_id: string;
+  status: "done" | "queued" | "failed" | "missing";
+  dependency_readiness_state: BacklogItem["readiness_state"] | "missing";
+  prior_dispatch_id: string | null;
+  prior_dispatch_status: string | null;
+  recommended_action: "clear_dependency" | "supersede_or_clear_dependency" | "hold_dependency" | "repair_missing_dependency";
+  safe_patch_path: string;
+  safe_patch_body: { dependencies: string[] } | null;
+  reason: string;
 }
 
 export interface OrchestrationReadyAdmissionBlockedLane {
@@ -266,6 +305,7 @@ interface BacklogQueueRow {
 
 interface BlockedDependencyRow {
   item_id: string;
+  logical_key: string | null;
   readiness_state: BacklogItem["readiness_state"];
   last_dispatch_phid: string | null;
 }
@@ -665,10 +705,125 @@ async function readReadyItemBlockerProjection(
     stale_ready_floor: staleReadyFuel.active,
     blocked_lanes: opts.readyAdmission?.blockedLanes ?? [],
     recommended_action: recommendedAction,
+    blocked_dependency_summary: blockedDependencySummary(
+      rows,
+      details.filter((item) => item.code === "blocked_dependency"),
+    ),
     stale_ready_fuel: staleReadyFuel,
     categories: categoryValues,
     items: details.sort((a, b) => a.item_id.localeCompare(b.item_id)),
   };
+}
+
+function blockedDependencySummary(
+  readyRows: BacklogQueueRow[],
+  blockedItems: OrchestrationReadyItemBlockerDetail[],
+): OrchestrationBlockedDependencySummary {
+  const rowsById = new Map(readyRows.map((row) => [row.item_id, row]));
+  const counts = { done: 0, queued: 0, failed: 0, missing: 0 };
+  let clearable = 0;
+  let supersedable = 0;
+  let held = 0;
+  let missing = 0;
+
+  const items = blockedItems
+    .sort((a, b) => a.item_id.localeCompare(b.item_id))
+    .slice(0, 5)
+    .map((item): OrchestrationBlockedDependencySummaryItem => {
+      const allDependencyIds = item.blocked_dependency_item_ids;
+      const clearableIds = new Set<string>();
+      const deps = item.blocked_dependency_diagnostics.map((diagnostic) => {
+        const status = dependencySummaryStatus(diagnostic);
+        counts[status] += 1;
+        if (diagnostic.should_land) {
+          clearable += 1;
+          clearableIds.add(diagnostic.dependency_item_id);
+        } else if (diagnostic.should_supersede) {
+          supersedable += 1;
+          clearableIds.add(diagnostic.dependency_item_id);
+        } else if (status === "missing") {
+          missing += 1;
+        } else {
+          held += 1;
+        }
+        return {
+          dependency_item_id: diagnostic.dependency_item_id,
+          status,
+          dependency_readiness_state: diagnostic.dependency_readiness_state,
+          prior_dispatch_id: diagnostic.prior_dispatch_id,
+          prior_dispatch_status: diagnostic.prior_dispatch_status,
+          recommended_action: dependencySafeAction(diagnostic),
+          safe_patch_path: `/orchestration/backlog/${encodeURIComponent(item.item_id)}`,
+          safe_patch_body: diagnostic.should_land || diagnostic.should_supersede
+            ? { dependencies: allDependencyIds.filter((id) => id !== diagnostic.dependency_item_id) }
+            : null,
+          reason: diagnostic.reason,
+        };
+      });
+      const remainingDependencies = allDependencyIds.filter((id) => !clearableIds.has(id));
+      return {
+        item_id: item.item_id,
+        title: rowsById.get(item.item_id)?.title ?? item.title,
+        dependency_ids: allDependencyIds,
+        dependencies: deps,
+        safe_patch_path: `/orchestration/backlog/${encodeURIComponent(item.item_id)}`,
+        safe_clear_patch_body: remainingDependencies.length < allDependencyIds.length
+          ? { dependencies: remainingDependencies }
+          : null,
+      };
+    });
+
+  return {
+    total_ready_blocked: blockedItems.length,
+    shown_ready_rows: items.length,
+    dependency_status_counts: counts,
+    clearable_dependencies: clearable,
+    supersedable_dependencies: supersedable,
+    held_dependencies: held,
+    missing_dependencies: missing,
+    recommended_action: blockedDependencyRecommendedAction({ clearable, supersedable, held, missing }),
+    items,
+  };
+}
+
+function dependencySummaryStatus(
+  diagnostic: OrchestrationBlockedDependencyDiagnostic,
+): OrchestrationBlockedDependencySummaryDependency["status"] {
+  if (diagnostic.dependency_readiness_state === "missing") return "missing";
+  if (diagnostic.recommended_disposition === "landed") return "done";
+  if (diagnostic.recommended_disposition === "superseded") return "failed";
+  if (
+    diagnostic.dependency_readiness_state === "failed" ||
+    diagnostic.dependency_readiness_state === "cancelled" ||
+    diagnostic.prior_dispatch_status === "failed" ||
+    diagnostic.prior_dispatch_status === "cancelled"
+  ) {
+    return "failed";
+  }
+  return "queued";
+}
+
+function dependencySafeAction(
+  diagnostic: OrchestrationBlockedDependencyDiagnostic,
+): OrchestrationBlockedDependencySummaryDependency["recommended_action"] {
+  if (diagnostic.should_land) return "clear_dependency";
+  if (diagnostic.should_supersede) return "supersede_or_clear_dependency";
+  if (diagnostic.dependency_readiness_state === "missing") return "repair_missing_dependency";
+  return "hold_dependency";
+}
+
+function blockedDependencyRecommendedAction(input: {
+  clearable: number;
+  supersedable: number;
+  held: number;
+  missing: number;
+}): string {
+  const actions: string[] = [];
+  if (input.clearable > 0) actions.push(`clear ${input.clearable} landed dependency link(s) via PATCH /orchestration/backlog/:id`);
+  if (input.supersedable > 0) actions.push(`supersede-or-clear ${input.supersedable} dependency link(s) whose upstream was superseded`);
+  if (input.missing > 0) actions.push(`repair ${input.missing} missing dependency id(s) before admission`);
+  if (input.held > 0) actions.push(`hold ${input.held} queued dependency link(s) until upstream completes`);
+  return actions.length > 0 ? actions.join("; ") : "none";
 }
 
 function readyItemBlockerDetail(
@@ -762,15 +917,21 @@ async function readBlockedDependencyRows(
 ): Promise<Map<string, BlockedDependencyRow>> {
   const unique = [...new Set(dependencyIds.filter((id) => id.trim() !== ""))];
   if (unique.length === 0) return new Map();
-  const placeholders = unique.map((_, i) => `$${i + 2}`).join(",");
+  const itemPlaceholders = unique.map((_, i) => `$${i + 2}`).join(",");
+  const logicalPlaceholders = unique.map((_, i) => `$${i + 2 + unique.length}`).join(",");
   const { rows } = await adapter.query<BlockedDependencyRow>(
-    `SELECT item_id, readiness_state, last_dispatch_phid
+    `SELECT item_id, logical_key, readiness_state, last_dispatch_phid
        FROM orchestration_backlog_item
       WHERE team_id = $1
-        AND item_id IN (${placeholders})`,
-    [teamId, ...unique],
+        AND (item_id IN (${itemPlaceholders}) OR logical_key IN (${logicalPlaceholders}))`,
+    [teamId, ...unique, ...unique],
   );
-  return new Map(rows.map((row) => [row.item_id, row]));
+  const out = new Map<string, BlockedDependencyRow>();
+  for (const row of rows) {
+    out.set(row.item_id, row);
+    if (row.logical_key) out.set(row.logical_key, row);
+  }
+  return out;
 }
 
 function blockedDependencyDiagnostic(

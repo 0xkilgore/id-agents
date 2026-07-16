@@ -1783,6 +1783,182 @@ describe("orchestration health projection", () => {
     expect(health.ready_item_blockers.actionable).toBe(0);
   });
 
+  it("summarizes the five current blocked_dependency ready rows with dependency status and safe clear paths", async () => {
+    const seedDependency = async (
+      logical_key: string,
+      state: "done" | "needs_review" | "ready" | "failed" | "superseded",
+      dispatch_phid: string | null,
+      dispatch: Parameters<typeof insertDispatch>[0] | null = null,
+    ) => {
+      const item = await insertBacklogItem(adapter, {
+        logical_key,
+        title: logical_key,
+        readiness_state: "ready",
+        risk_class: "build",
+        to_agent: "roger",
+        dispatch_body: "upstream",
+      });
+      if (dispatch_phid) await setItemState(adapter, item.item_id, state, { dispatch_phid });
+      else await setItemState(adapter, item.item_id, state);
+      if (dispatch_phid && dispatch) await insertDispatch({ dispatch_phid, ...dispatch });
+      return item;
+    };
+
+    await seedDependency("wave83-02-regina-chris-feedback-warning-first-viewport", "done", "phid:disp-wave83-02", {
+      status: "done",
+      completed_at: "2026-07-15T18:00:00.000Z",
+    });
+    await seedDependency("wave83-03-builder-target-health-slot-unblock", "needs_review", "phid:disp-wave83-03", {
+      status: "queued",
+      updated_at: "2026-07-15T18:05:00.000Z",
+    });
+    await seedDependency("wave91-01-cto-target-health-recovery-router", "failed", "phid:disp-wave91-01", {
+      status: "failed",
+      failure_kind: "agent_error",
+      failure_detail: "target unhealthy",
+    });
+    await seedDependency("wave91-03-roger-target-unhealthy-auto-incident", "superseded", "phid:disp-wave91-03", {
+      status: "superseded",
+      completed_at: "2026-07-15T20:00:00.000Z",
+    });
+    await seedDependency("wave92-03-roger-offline-target-auto-reroute-contract", "needs_review", "phid:disp-wave92-03", {
+      status: "failed",
+      promotion_result_json: JSON.stringify({ completed: true, repos: [{ verified: true }] }),
+    });
+
+    const readyRows = [
+      {
+        logical_key: "wave83-05-cto-chris-ask-gate-after-proof",
+        title: "Wave83 P1: Recheck Chris ask gate after UI and infra proof",
+        dependencies: [
+          "wave83-02-regina-chris-feedback-warning-first-viewport",
+          "wave83-03-builder-target-health-slot-unblock",
+        ],
+      },
+      {
+        logical_key: "wave83-06-builder-feedback-source-link-capture-drain",
+        title: "Wave83 P1: Drain feedback source-link capture after target repair",
+        dependencies: ["wave83-03-builder-target-health-slot-unblock"],
+      },
+      {
+        logical_key: "wave83-07-regina-post-repair-release-proof-sweep",
+        title: "Wave83 P1: Post-repair release-proof viewport sweep",
+        dependencies: ["wave83-06-builder-feedback-source-link-capture-drain"],
+      },
+      {
+        logical_key: "wave91-10-sentinel-zero-admit-regression-smoke",
+        title: "Wave91 P1: Zero-admit regression smoke after repair rows launch",
+        dependencies: [
+          "wave91-01-cto-target-health-recovery-router",
+          "wave91-03-roger-target-unhealthy-auto-incident",
+        ],
+      },
+      {
+        logical_key: "wave92-10-sentinel-ready-fuel-target-health-regression",
+        title: "Wave92 P1: Ready-fuel target-health regression after wave92 launch",
+        dependencies: [
+          "wave92-03-roger-offline-target-auto-reroute-contract",
+          "wave92-06-cto-offline-builder-lane-retirement-board",
+        ],
+      },
+    ];
+    const insertedReadyRows = [];
+    for (const row of readyRows) {
+      insertedReadyRows.push(await insertBacklogItem(adapter, {
+        ...row,
+        readiness_state: "ready",
+        risk_class: "build",
+        to_agent: "roger",
+        dispatch_body: "downstream",
+      }));
+    }
+
+    const health = await readOrchestrationHealthProjection(adapter, "default");
+
+    expect(health.ready_item_blockers.categories).toEqual([
+      expect.objectContaining({
+        code: "blocked_dependency",
+        count: 5,
+        examples: expect.arrayContaining(insertedReadyRows.map((row) => row.item_id)),
+      }),
+    ]);
+    expect(health.ready_item_blockers.blocked_dependency_summary).toMatchObject({
+      total_ready_blocked: 5,
+      shown_ready_rows: 5,
+      dependency_status_counts: {
+        done: 2,
+        queued: 3,
+        failed: 2,
+        missing: 1,
+      },
+      clearable_dependencies: 2,
+      supersedable_dependencies: 1,
+      held_dependencies: 4,
+      missing_dependencies: 1,
+    });
+    expect(health.ready_item_blockers.blocked_dependency_summary.recommended_action).toContain(
+      "clear 2 landed dependency link(s)",
+    );
+    expect(health.ready_item_blockers.blocked_dependency_summary.recommended_action).toContain(
+      "supersede-or-clear 1 dependency link(s)",
+    );
+    const summary = health.ready_item_blockers.blocked_dependency_summary;
+    const wave83AskGate = summary.items.find((item) => item.item_id === insertedReadyRows[0].item_id);
+    const wave91Smoke = summary.items.find((item) => item.item_id === insertedReadyRows[3].item_id);
+    const wave92Regression = summary.items.find((item) => item.item_id === insertedReadyRows[4].item_id);
+    expect(wave83AskGate).toMatchObject({
+      item_id: insertedReadyRows[0].item_id,
+      dependency_ids: [
+        "wave83-02-regina-chris-feedback-warning-first-viewport",
+        "wave83-03-builder-target-health-slot-unblock",
+      ],
+      dependencies: [
+        expect.objectContaining({
+          dependency_item_id: "wave83-02-regina-chris-feedback-warning-first-viewport",
+          status: "done",
+          recommended_action: "clear_dependency",
+          safe_patch_path: `/orchestration/backlog/${encodeURIComponent(insertedReadyRows[0].item_id)}`,
+          safe_patch_body: { dependencies: ["wave83-03-builder-target-health-slot-unblock"] },
+        }),
+        expect.objectContaining({
+          dependency_item_id: "wave83-03-builder-target-health-slot-unblock",
+          status: "queued",
+          recommended_action: "hold_dependency",
+          safe_patch_body: null,
+        }),
+      ],
+      safe_patch_path: `/orchestration/backlog/${encodeURIComponent(insertedReadyRows[0].item_id)}`,
+      safe_clear_patch_body: { dependencies: ["wave83-03-builder-target-health-slot-unblock"] },
+    });
+    expect(wave91Smoke?.dependencies).toEqual([
+      expect.objectContaining({
+        dependency_item_id: "wave91-01-cto-target-health-recovery-router",
+        status: "failed",
+        recommended_action: "hold_dependency",
+        safe_patch_body: null,
+      }),
+      expect.objectContaining({
+        dependency_item_id: "wave91-03-roger-target-unhealthy-auto-incident",
+        status: "failed",
+        recommended_action: "supersede_or_clear_dependency",
+        safe_patch_body: { dependencies: ["wave91-01-cto-target-health-recovery-router"] },
+      }),
+    ]);
+    expect(wave92Regression?.dependencies).toEqual([
+      expect.objectContaining({
+        dependency_item_id: "wave92-03-roger-offline-target-auto-reroute-contract",
+        status: "done",
+        recommended_action: "clear_dependency",
+      }),
+      expect.objectContaining({
+        dependency_item_id: "wave92-06-cto-offline-builder-lane-retirement-board",
+        status: "missing",
+        recommended_action: "repair_missing_dependency",
+        safe_patch_body: null,
+      }),
+    ]);
+  });
+
   it("does not count risk-approval ready rows as useful or admissible build fuel", async () => {
     const approvalBlockedIds: string[] = [];
     for (let i = 0; i < 13; i += 1) {
