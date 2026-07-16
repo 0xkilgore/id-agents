@@ -1102,6 +1102,55 @@ describe("orchestration health projection", () => {
     ]);
   });
 
+  it("classifies Gaudi verification HTTP 404 route failures with a concrete reroute recommendation", async () => {
+    await setMode(adapter, "default", "running");
+    const row = await insertBacklogItem(adapter, {
+      title: "Gaudi verification dispatch route failure",
+      track: "T-RELY",
+      readiness_state: "ready",
+      risk_class: "build",
+      to_agent: "gaudi",
+      dispatch_body: "[project: kapelle][T-RELY][VERIFY] gaudi: verify promoted build",
+      write_scope: ["/repo/kapelle"],
+    });
+    await setItemState(adapter, row.item_id, "ready", { dispatch_phid: "phid:disp-gaudi-404" });
+    await insertDispatch({
+      dispatch_phid: "phid:disp-gaudi-404",
+      to_agent: "gaudi",
+      status: "failed",
+      failure_kind: "agent_error",
+      failure_detail: 'dispatch routing failed: HTTP 404 from /talk for agent "gaudi"',
+    });
+
+    const health = await readOrchestrationHealthProjection(adapter, "default");
+
+    expect(health.ready_item_blockers.categories).toEqual([
+      expect.objectContaining({
+        code: "duplicate_dispatch_retry_required",
+        category: "retry_safety",
+        count: 1,
+        recommended_action: "mark the item retry-safe or create an explicit retry before readmitting it",
+      }),
+    ]);
+    expect(health.ready_item_blockers.items).toEqual([
+      expect.objectContaining({
+        item_id: row.item_id,
+        code: "duplicate_dispatch_retry_required",
+        prior_dispatch_id: "phid:disp-gaudi-404",
+        prior_dispatch_status: "failed",
+        failure_class: "dispatch_route_not_found",
+        retry_readiness_status: "non_retryable_failed_row",
+        retry_safe_required: true,
+        retry_safe_recommendation: "leave_false",
+        operator_disposition: "reroute",
+        recommended_disposition: "supersede",
+        reason: expect.stringContaining("target route returned HTTP 404"),
+        recommended_action:
+          "reroute to a healthy compatible owner or supersede the stale target pin; do not mark it retry-safe",
+      }),
+    ]);
+  });
+
   it("exposes the current duplicate-dispatch retry blockers and closes terminal stale duplicates with receipts", async () => {
     await setMode(adapter, "default", "running");
     const seedDuplicate = async (

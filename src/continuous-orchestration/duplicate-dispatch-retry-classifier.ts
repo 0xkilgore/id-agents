@@ -7,10 +7,11 @@ export const DUPLICATE_DISPATCH_RETRY_CLASSIFICATION_SCHEMA_VERSION =
   "orchestration.duplicate_dispatch_retry_classification.v2" as const;
 
 export type DuplicateDispatchRetryDisposition = "close" | "supersede" | "mark-retry-safe";
-export type DuplicateDispatchRetryOperatorDisposition = "close" | "retry" | "hold";
+export type DuplicateDispatchRetryOperatorDisposition = "close" | "retry" | "reroute" | "hold";
 export type DuplicateDispatchRetrySafeRecommendation = "set_true" | "leave_false";
 export type DuplicateDispatchFailureClass =
   | "linked_query_expired"
+  | "dispatch_route_not_found"
   | "failed_verification"
   | "needs_input"
   | "live_or_queued"
@@ -114,6 +115,7 @@ export function classifyDuplicateDispatchFailure(outcome: DispatchOutcome | unde
   if (outcome.status === "queued" || outcome.status === "in_flight" || outcome.status === "bounced") {
     return "live_or_queued";
   }
+  if (outcome.status === "failed" && isDispatchRouteNotFound(outcome)) return "dispatch_route_not_found";
   if (outcome.status === "failed" && isLinkedQueryExpired(outcome)) return "linked_query_expired";
   if (outcome.status === "failed" && isFailedVerification(outcome)) return "failed_verification";
   if (outcome.status === "failed" && dispatchFailureRetryable(outcome)) return "retryable_transient";
@@ -151,6 +153,17 @@ export function classifyDuplicateDispatchRetryDisposition(outcome: DispatchOutco
       operator_disposition: "close",
       retry_safe_recommendation: "leave_false",
       reason: `prior dispatch ${outcome.dispatch_phid} is terminal ${outcome.status}; supersede the stale duplicate ready row`,
+    };
+  }
+
+  if (outcome.status === "failed" && isDispatchRouteNotFound(outcome)) {
+    return {
+      recommended_disposition: "supersede",
+      operator_disposition: "reroute",
+      retry_safe_recommendation: "leave_false",
+      reason:
+        `prior dispatch ${outcome.dispatch_phid} failed because the target route returned HTTP 404; ` +
+        "reroute to a healthy compatible owner or supersede the stale target pin before retry",
     };
   }
 
@@ -200,6 +213,14 @@ function dispatchFailureRetryable(outcome: {
 
 function isLinkedQueryExpired(outcome: { failure_detail: string | null }): boolean {
   return (outcome.failure_detail ?? "").toLowerCase().includes("linked query terminated expired");
+}
+
+function isDispatchRouteNotFound(outcome: { failure_kind: string | null; failure_detail: string | null }): boolean {
+  const text = `${outcome.failure_kind ?? ""}\n${outcome.failure_detail ?? ""}`.toLowerCase();
+  if (!/(?:\bhttp\s*404\b|\b404\b|not found|not_found|no url for agent|agent .* not found)/i.test(text)) {
+    return false;
+  }
+  return /(?:dispatch|route|routing|target|agent|gaudi|verification|verify)/i.test(text);
 }
 
 function isFailedVerification(outcome: DispatchOutcome): boolean {

@@ -1054,6 +1054,9 @@ function duplicateDispatchRecommendedAction(disposition: DuplicateDispatchRetryO
   if (disposition === "retry") {
     return "mark retry_safe only when the operator wants a bounded refire";
   }
+  if (disposition === "reroute") {
+    return "reroute to a healthy compatible owner or supersede the stale target pin; do not mark it retry-safe";
+  }
   return "hold the row and wait for the prior dispatch, or supersede it after operator review";
 }
 
