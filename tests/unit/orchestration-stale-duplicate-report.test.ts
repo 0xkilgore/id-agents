@@ -50,6 +50,11 @@ async function seedDispatch(overrides: {
   phid: string;
   status: string;
   recovery_status?: string | null;
+  recovery_reason?: string | null;
+  reliability_classification?: string | null;
+  reliability_classification_reason?: string | null;
+  failure_kind?: string | null;
+  failure_detail?: string | null;
   promotion_result_json?: string | null;
 }) {
   const now = "2026-07-13T00:00:00.000Z";
@@ -57,8 +62,9 @@ async function seedDispatch(overrides: {
     `INSERT INTO dispatch_scheduler_queue
        (dispatch_phid, team_id, query_id, to_agent, from_actor, channel, subject,
         body_markdown, provider, runtime, status, not_before_at, updated_at,
-        recovery_status, promotion_result_json)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`,
+        recovery_status, recovery_reason, reliability_classification, reliability_classification_reason,
+        failure_kind, failure_detail, promotion_result_json)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)`,
     [
       overrides.phid,
       "team-uuid-test",
@@ -74,6 +80,11 @@ async function seedDispatch(overrides: {
       now,
       now,
       overrides.recovery_status ?? "none",
+      overrides.recovery_reason ?? null,
+      overrides.reliability_classification ?? null,
+      overrides.reliability_classification_reason ?? null,
+      overrides.failure_kind ?? null,
+      overrides.failure_detail ?? null,
       overrides.promotion_result_json ?? null,
     ],
   );
@@ -233,5 +244,73 @@ describe("GET /orchestration/backlog/stale-duplicates", () => {
     expect([first.item_id, second.item_id]).toContain(r.body.report.items[0].item_id);
     expect(r.body.report.items.map((item: any) => item.title)).not.toContain("active duplicate");
     expect(r.body.report.items.map((item: any) => item.title)).not.toContain("operator approved failed retry");
+  });
+
+  it("covers done, retry_safe failed, active, and expired linked-query supersession cases", async () => {
+    await seedDispatch({ phid: "phid:done-link", status: "done" });
+    await seedDispatch({
+      phid: "phid:retry-safe-failed-link",
+      status: "failed",
+      failure_kind: "linked_query_terminated",
+      failure_detail: "linked query terminated expired",
+    });
+    await seedDispatch({ phid: "phid:active-link", status: "in_flight" });
+    await seedDispatch({
+      phid: "phid:expired-superseded-link",
+      status: "failed",
+      recovery_status: "none",
+      recovery_reason: "Superseded by a later landed dispatch after linked query expired.",
+      reliability_classification: "superseded",
+      reliability_classification_reason: "linked query expired, later duplicate landed",
+      failure_kind: "linked_query_terminated",
+      failure_detail: "linked query terminated expired",
+    });
+
+    const done = await seedBacklog({ title: "done landed duplicate", state: "ready", phid: "phid:done-link" });
+    await seedBacklog({
+      title: "failed retry_safe linked-query row",
+      state: "ready",
+      phid: "phid:retry-safe-failed-link",
+      retry_safe: true,
+    });
+    await seedBacklog({ title: "active linked-query row", state: "ready", phid: "phid:active-link" });
+    const expiredSuperseded = await seedBacklog({
+      title: "expired linked-query superseded duplicate",
+      state: "needs_review",
+      phid: "phid:expired-superseded-link",
+    });
+
+    const before = await stateCounts();
+    const r = await call("/orchestration/backlog/stale-duplicates");
+    const after = await stateCounts();
+
+    expect(r.status).toBe(200);
+    expect(after).toEqual(before);
+    expect(r.body.report).toMatchObject({
+      dry_run: true,
+      scanned: 4,
+      matched: 2,
+      count: 2,
+    });
+
+    const byId = Object.fromEntries(r.body.report.items.map((item: any) => [item.item_id, item]));
+    expect(byId[done.item_id]).toMatchObject({
+      prior_terminal_status: "done",
+      recommended_action: "mark_done",
+      safe_closeout_payload: {
+        to_state: "done",
+        expected_last_dispatch_phid: "phid:done-link",
+      },
+    });
+    expect(byId[expiredSuperseded.item_id]).toMatchObject({
+      prior_terminal_status: "superseded",
+      recommended_action: "mark_superseded",
+      safe_closeout_payload: {
+        to_state: "superseded",
+        expected_last_dispatch_phid: "phid:expired-superseded-link",
+      },
+    });
+    expect(r.body.report.items.map((item: any) => item.title)).not.toContain("failed retry_safe linked-query row");
+    expect(r.body.report.items.map((item: any) => item.title)).not.toContain("active linked-query row");
   });
 });

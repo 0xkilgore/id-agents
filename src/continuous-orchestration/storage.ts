@@ -589,6 +589,9 @@ export interface DispatchOutcome {
   started_at: string | null;
   updated_at: string | null;
   recovery_status: string | null;
+  recovery_reason: string | null;
+  reliability_classification: string | null;
+  reliability_classification_reason: string | null;
   failure_kind: string | null;
   failure_detail: string | null;
   recovery_attempts: number;
@@ -621,6 +624,9 @@ export async function getDispatchOutcomesByPhid(
     started_at: string | null;
     updated_at: string | null;
     recovery_status: string | null;
+    recovery_reason: string | null;
+    reliability_classification: string | null;
+    reliability_classification_reason: string | null;
     failure_kind: string | null;
     failure_detail: string | null;
     recovery_attempts: number | null;
@@ -628,8 +634,9 @@ export async function getDispatchOutcomesByPhid(
     promotion_required_reason: string | null;
     promotion_result_json: string | null;
   }>(
-    `SELECT dispatch_phid, status, not_before_at, started_at, updated_at, recovery_status, failure_kind, failure_detail,
-            recovery_attempts, promote, promotion_required_reason, promotion_result_json
+    `SELECT dispatch_phid, status, not_before_at, started_at, updated_at,
+            recovery_status, recovery_reason, reliability_classification, reliability_classification_reason,
+            failure_kind, failure_detail, recovery_attempts, promote, promotion_required_reason, promotion_result_json
        FROM dispatch_scheduler_queue
       WHERE dispatch_phid IN (${placeholders})`,
     unique,
@@ -642,6 +649,9 @@ export async function getDispatchOutcomesByPhid(
       started_at: r.started_at,
       updated_at: r.updated_at,
       recovery_status: r.recovery_status,
+      recovery_reason: r.recovery_reason,
+      reliability_classification: r.reliability_classification,
+      reliability_classification_reason: r.reliability_classification_reason,
       failure_kind: r.failure_kind,
       failure_detail: r.failure_detail,
       recovery_attempts: Number(r.recovery_attempts ?? 0),
@@ -1166,6 +1176,9 @@ export async function reconcileStaleAlreadyDispatchedReadyRows(
     BacklogRow & {
       dispatch_status: string | null;
       dispatch_recovery_status: string | null;
+      dispatch_recovery_reason: string | null;
+      reliability_classification: string | null;
+      reliability_classification_reason: string | null;
       artifact_path: string | null;
       failure_kind: string | null;
       failure_detail: string | null;
@@ -1175,6 +1188,9 @@ export async function reconcileStaleAlreadyDispatchedReadyRows(
     `SELECT i.*,
             q.status AS dispatch_status,
             q.recovery_status AS dispatch_recovery_status,
+            q.recovery_reason AS dispatch_recovery_reason,
+            q.reliability_classification AS reliability_classification,
+            q.reliability_classification_reason AS reliability_classification_reason,
             q.artifact_path AS artifact_path,
             q.failure_kind AS failure_kind,
             q.failure_detail AS failure_detail,
@@ -1214,6 +1230,9 @@ export async function reconcileStaleAlreadyDispatchedReadyRows(
       started_at: null,
       updated_at: null,
       recovery_status: row.dispatch_recovery_status,
+      recovery_reason: row.dispatch_recovery_reason,
+      reliability_classification: row.reliability_classification,
+      reliability_classification_reason: row.reliability_classification_reason,
       failure_kind: row.failure_kind,
       failure_detail: row.failure_detail,
       promotion_result_json: row.promotion_result_json,
