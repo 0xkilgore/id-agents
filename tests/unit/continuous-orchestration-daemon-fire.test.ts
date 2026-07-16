@@ -315,10 +315,14 @@ describe("RD-003 — atomic CO fire", () => {
       write_scope: ["repo/fresh"],
     });
 
+    const enqueued: string[] = [];
     const daemon = new ContinuousOrchestrationDaemon({
       adapter,
       config: config(),
-      enqueue: async (item) => ({ dispatch_phid: `phid:disp-${item.item_id}`, query_id: `q-${item.item_id}` }),
+      enqueue: async (item) => {
+        enqueued.push(item.item_id);
+        return { dispatch_phid: `phid:disp-${item.item_id}`, query_id: `q-${item.item_id}` };
+      },
       readUsage: usage,
       readInFlight: noInFlight,
     });
@@ -339,6 +343,7 @@ describe("RD-003 — atomic CO fire", () => {
       ],
     });
     expect(result.admitted.map((item) => item.item_id)).toEqual([fresh.item_id]);
+    expect(enqueued).toEqual([fresh.item_id]);
     expect(result.decisions).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
@@ -353,7 +358,19 @@ describe("RD-003 — atomic CO fire", () => {
         }),
       ]),
     );
-    expect((await getBacklogItem(adapter, staleDone.item_id))?.readiness_state).toBe("done");
+    const closed = await getBacklogItem(adapter, staleDone.item_id);
+    expect(closed?.readiness_state).toBe("done");
+    expect(closed?.stale_duplicate_closeout_receipt).toMatchObject({
+      schema_version: "orchestration.stale_duplicate_closeout_receipt.v1",
+      from_state: "ready",
+      to_state: "done",
+      next_action: "close_duplicate_row",
+      prior_dispatch_phid: "phid:disp-already-done",
+      prior_dispatch_status: "done",
+      redispatch_safety: {
+        safe_to_not_redispatch: true,
+      },
+    });
     expect((await getBacklogItem(adapter, retryableFailed.item_id))?.readiness_state).toBe("ready");
     expect((await getBacklogItem(adapter, fresh.item_id))?.readiness_state).toBe("in_flight");
   });
