@@ -52,7 +52,6 @@ export const DEFAULT_STALE_DUPLICATE_BACKLOG_REPORT_LIMIT = 25;
 const REPORTABLE_STATES = new Set<ReadinessState>(["needs_review", "ready"]);
 const TERMINAL_STATUSES = new Set(["done", "cancelled", "moot", "superseded"]);
 const LANDED_RECOVERY_STATUSES = new Set(["landed_reconciled", "verified_done", "retry_done"]);
-const LINKED_QUERY_EXPIRED_RE = /linked query (?:terminated )?expired|linked-query-expired/i;
 
 function isReportableState(state: ReadinessState): state is ReportableReadinessState {
   return REPORTABLE_STATES.has(state);
@@ -63,12 +62,6 @@ function effectiveTerminalStatus(outcome: DispatchOutcome): string | null {
   if (outcome.reliability_classification === "superseded") return "superseded";
   if (outcome.status === "moot" || outcome.recovery_status === "moot") return "moot";
   if (TERMINAL_STATUSES.has(outcome.status)) return outcome.status;
-  if (
-    outcome.status === "failed" &&
-    LINKED_QUERY_EXPIRED_RE.test(`${outcome.failure_kind ?? ""} ${outcome.failure_detail ?? ""}`)
-  ) {
-    return "linked_query_expired";
-  }
   if (promotionCompletedAndVerified(outcome.promotion_result_json)) return outcome.status;
   return null;
 }

@@ -148,7 +148,7 @@ describe("GET /orchestration/backlog/stale-duplicates", () => {
     const superseded = await seedBacklog({ title: "superseded duplicate", state: "ready", phid: "phid:superseded" });
     const cancelled = await seedBacklog({ title: "cancelled duplicate", state: "ready", phid: "phid:cancelled" });
     const promoted = await seedBacklog({ title: "verified promotion duplicate", state: "needs_review", phid: "phid:failed-promoted" });
-    const linkedQueryExpired = await seedBacklog({
+    await seedBacklog({
       title: "expired linked query duplicate",
       state: "needs_review",
       phid: "phid:linked-query-expired",
@@ -169,9 +169,9 @@ describe("GET /orchestration/backlog/stale-duplicates", () => {
       dry_run: true,
       scanned: 9,
       limit: 25,
-      matched: 6,
+      matched: 5,
       truncated: false,
-      count: 6,
+      count: 5,
     });
     expect(after).toEqual(before);
 
@@ -218,20 +218,7 @@ describe("GET /orchestration/backlog/stale-duplicates", () => {
       promotion_verified: true,
       recommended_action: "mark_done",
     });
-    expect(byId[linkedQueryExpired.item_id]).toMatchObject({
-      prior_terminal_status: "linked_query_expired",
-      promotion_verified: false,
-      recommended_action: "mark_superseded",
-      safe_closeout_payload: {
-        expected_last_dispatch_phid: "phid:linked-query-expired",
-        from_state: "needs_review",
-        to_state: "superseded",
-        evidence: {
-          prior_dispatch_status: "linked_query_expired",
-          promotion_verified: false,
-        },
-      },
-    });
+    expect(r.body.report.items.map((item: any) => item.title)).not.toContain("expired linked query duplicate");
   });
 
   it("bounds stale duplicate suggestions without including active or retry-safe failed rows", async () => {
@@ -351,9 +338,16 @@ describe("GET /orchestration/backlog/stale-duplicates", () => {
     });
     await seedDispatch({ phid: "phid:active-linked-query", agent_query_id: "query_active_linked", status: "in_flight" });
     await seedDispatch({ phid: "phid:failed-linked-query", agent_query_id: "query_failed_retry_safe", status: "failed" });
+    await seedDispatch({
+      phid: "phid:expired-unproved-link",
+      agent_query_id: "query_expired_unproved",
+      status: "failed",
+      failure_kind: "linked_query_terminated",
+      failure_detail: "linked query terminated expired",
+    });
 
     const linkedDone = await seedBacklog({
-      title: "expired linked query duplicate",
+      title: "expired linked query landed duplicate",
       state: "ready",
       phid: "query_expired_linked",
     });
@@ -364,6 +358,11 @@ describe("GET /orchestration/backlog/stale-duplicates", () => {
       phid: "query_failed_retry_safe",
       retry_safe: true,
     });
+    await seedBacklog({
+      title: "unproved expired linked query",
+      state: "needs_review",
+      phid: "query_expired_unproved",
+    });
 
     const before = await stateCounts();
     const r = await call("/orchestration/backlog/stale-duplicates");
@@ -373,7 +372,7 @@ describe("GET /orchestration/backlog/stale-duplicates", () => {
     expect(after).toEqual(before);
     expect(r.body.report).toMatchObject({
       dry_run: true,
-      scanned: 3,
+      scanned: 4,
       matched: 1,
       count: 1,
     });
@@ -381,7 +380,7 @@ describe("GET /orchestration/backlog/stale-duplicates", () => {
     expect(r.body.report.items).toHaveLength(1);
     expect(r.body.report.items[0]).toMatchObject({
       item_id: linkedDone.item_id,
-      title: "expired linked query duplicate",
+      title: "expired linked query landed duplicate",
       readiness_state: "ready",
       prior_dispatch_phid: "phid:landed-linked-query",
       prior_terminal_status: "done",
@@ -400,5 +399,6 @@ describe("GET /orchestration/backlog/stale-duplicates", () => {
     });
     expect(r.body.report.items.map((item: any) => item.title)).not.toContain("active linked query duplicate");
     expect(r.body.report.items.map((item: any) => item.title)).not.toContain("retry-safe failed linked query");
+    expect(r.body.report.items.map((item: any) => item.title)).not.toContain("unproved expired linked query");
   });
 });
