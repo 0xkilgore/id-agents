@@ -986,7 +986,11 @@ function healthReadyAdmissionOptions(readyAdmission: ReadyAdmissionExplanation) 
       item_id: item.item_id,
       code: item.code,
       to_agent: item.to_agent,
-      last_dispatch_phid: item.target_unhealthy_receipt?.prior_dispatch_evidence.last_dispatch_phid ?? null,
+      last_dispatch_phid:
+        item.target_unhealthy_receipt?.prior_dispatch_evidence.last_dispatch_phid ??
+        (typeof item.metadata?.last_dispatch_phid === "string" ? item.metadata.last_dispatch_phid : null),
+      age_hours: item.age_hours ?? null,
+      next_action: item.next_action ?? null,
     })),
     blockedLanes: readyAdmission.blocked_lanes,
     targetUnhealthyGroups: readyAdmission.target_unhealthy_groups,

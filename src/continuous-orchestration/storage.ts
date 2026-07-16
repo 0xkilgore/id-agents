@@ -560,6 +560,9 @@ export async function getDispatchStatusesByPhid(
 export interface DispatchOutcome {
   dispatch_phid: string;
   status: string;
+  not_before_at: string | null;
+  started_at: string | null;
+  updated_at: string | null;
   recovery_status: string | null;
   failure_kind: string | null;
   failure_detail: string | null;
@@ -589,6 +592,9 @@ export async function getDispatchOutcomesByPhid(
   const { rows } = await adapter.query<{
     dispatch_phid: string;
     status: string;
+    not_before_at: string | null;
+    started_at: string | null;
+    updated_at: string | null;
     recovery_status: string | null;
     failure_kind: string | null;
     failure_detail: string | null;
@@ -597,7 +603,7 @@ export async function getDispatchOutcomesByPhid(
     promotion_required_reason: string | null;
     promotion_result_json: string | null;
   }>(
-    `SELECT dispatch_phid, status, recovery_status, failure_kind, failure_detail,
+    `SELECT dispatch_phid, status, not_before_at, started_at, updated_at, recovery_status, failure_kind, failure_detail,
             recovery_attempts, promote, promotion_required_reason, promotion_result_json
        FROM dispatch_scheduler_queue
       WHERE dispatch_phid IN (${placeholders})`,
@@ -607,6 +613,9 @@ export async function getDispatchOutcomesByPhid(
     out.set(r.dispatch_phid, {
       dispatch_phid: r.dispatch_phid,
       status: r.recovery_status === "moot" ? "moot" : r.status,
+      not_before_at: r.not_before_at,
+      started_at: r.started_at,
+      updated_at: r.updated_at,
       recovery_status: r.recovery_status,
       failure_kind: r.failure_kind,
       failure_detail: r.failure_detail,

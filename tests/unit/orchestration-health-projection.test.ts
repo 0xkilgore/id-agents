@@ -172,6 +172,59 @@ describe("orchestration health projection", () => {
     expect(dispatches.blockages.blockages.find((b) => b.kind === "co_stall")).toBeUndefined();
   });
 
+  it("exposes stale queued prior dispatch age buckets and closeout/reroute action", async () => {
+    await insertBacklogItem(adapter, {
+      title: "stale queued prior dispatch",
+      readiness_state: "ready",
+      risk_class: "build",
+      to_agent: "gaudi",
+      dispatch_body: "continue",
+      write_scope: ["/repo/kapelle"],
+    });
+
+    const health = await readOrchestrationHealthProjection(adapter, "default", {
+      readyAdmission: {
+        rawReady: 1,
+        usefulReady: 0,
+        admissibleNow: 0,
+        blockerCounts: [
+          { code: "stale_queued_prior_dispatch", category: "route_sync", count: 1 },
+        ],
+        nonAdmitted: [
+          {
+            item_id: "coitem-stale-queued",
+            code: "stale_queued_prior_dispatch",
+            to_agent: "gaudi",
+            last_dispatch_phid: "phid:disp-stale-queued",
+            age_hours: 7.5,
+            next_action: "closeout_or_reroute",
+          },
+        ],
+        recommendedAction: "close out stale queued dispatches or reroute to healthy lanes; do not spam refires",
+      },
+    });
+
+    expect(health.queue_quality.stale_queued_prior_dispatch).toMatchObject({
+      count: 1,
+      age_buckets: {
+        lt_1h: 0,
+        "1h_6h": 0,
+        "6h_24h": 1,
+        gt_24h: 0,
+      },
+      examples: [
+        {
+          item_id: "coitem-stale-queued",
+          dispatch_phid: "phid:disp-stale-queued",
+          to_agent: "gaudi",
+          age_hours: 7.5,
+          next_action: "closeout_or_reroute",
+        },
+      ],
+    });
+    expect(health.ready_item_blockers.stale_ready_fuel.recommended_action).toContain("do not spam refires");
+  });
+
   it("blocks build-ready lane diversity when ready fuel is at the floor but lanes are below minimum", async () => {
     await setMode(adapter, "default", "running");
     for (let i = 0; i < 12; i += 1) {

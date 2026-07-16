@@ -705,6 +705,44 @@ describe("planAdmission — per-item guardrails", () => {
     expect(approved.admit.map((i) => i.item_id)).toEqual(["retryable-failed-duplicate"]);
   });
 
+  it("holds stale queued prior dispatch rows for closeout instead of requiring retry_safe", () => {
+    const staleQueued = item({
+      item_id: "stale-queued-prior",
+      last_dispatch_phid: "phid:disp-stale-queued",
+      retry_readiness: {
+        schema_version: "backlog.retry_readiness.v1",
+        status: "waiting_on_live_dispatch",
+        retryable: false,
+        stale_duplicate: false,
+        manual_promote_required: false,
+        reason: "prior dispatch is queued; retrying now would duplicate live work",
+        next_action: "wait",
+        prior_dispatch_phid: "phid:disp-stale-queued",
+        prior_dispatch_status: "queued",
+        dispatch_retry_count: 0,
+        retry_cap: 1,
+        failure_kind: null,
+        failure_detail: null,
+        recovery_status: null,
+      },
+    });
+
+    const held = planAdmission([staleQueued], ctx({ healthy_agents: new Set() }), cfg);
+
+    expect(held.admit).toHaveLength(0);
+    expect(held.skipped[0]).toMatchObject({
+      item_id: "stale-queued-prior",
+      action: "held",
+      metadata: {
+        code: "stale_queued_prior_dispatch",
+        class: "route_sync",
+        last_dispatch_phid: "phid:disp-stale-queued",
+        prior_dispatch_status: "queued",
+        next_action: "wait",
+      },
+    });
+  });
+
   it("never admits a non-ready item even if passed in", () => {
     const p = planAdmission([item({ readiness_state: "needs_review" })], ctx(), cfg);
     expect(p.admit).toHaveLength(0);

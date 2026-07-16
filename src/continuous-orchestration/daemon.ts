@@ -45,7 +45,7 @@ import {
   type StaleReadyReconcileResult,
   type DispatchOutcome,
 } from "./storage.js";
-import { deriveBacklogRetryReadiness } from "./backlog-retry-readiness.js";
+import { attachBacklogRetryReadiness, deriveBacklogRetryReadiness } from "./backlog-retry-readiness.js";
 import { duplicateDispatchRetryReceipt } from "./duplicate-dispatch-retry-receipt.js";
 import { promotionCompletedAndVerified } from "../dispatch-scheduler/read-model.js";
 import { runFleshPass, type FleshRunSummary } from "./flesh-runner.js";
@@ -94,6 +94,16 @@ function stableJson(value: unknown): string {
     .sort()
     .map((k) => `${JSON.stringify(k)}:${stableJson(obj[k])}`)
     .join(",")}}`;
+}
+
+function ageMsFromIso(value: string, nowMs: number): number {
+  const then = Date.parse(value);
+  if (!Number.isFinite(then)) return 0;
+  return Math.max(0, nowMs - then);
+}
+
+function hours(ms: number): number {
+  return Math.round((ms / 3_600_000) * 100) / 100;
 }
 
 function incidentKey(kind: OrchestrationIncidentKind, cause: string): string {
@@ -270,6 +280,8 @@ export interface ReadyAdmissionExplanation {
     action: "skipped" | "held";
     code: string;
     reason: string;
+    age_hours?: number | null;
+    next_action?: string | null;
     metadata?: Record<string, unknown>;
     target_unhealthy_receipt?: ReadyAdmissionTargetUnhealthyReceipt;
   }>;
@@ -531,6 +543,7 @@ function readyAdmissionBlockerCategory(code: string): ReadyAdmissionBlockerCateg
       return "dispatch_admission";
     case "clarification_blocker":
     case "promotion_blocker":
+    case "stale_queued_prior_dispatch":
       return "route_sync";
     default:
       return "stale_ready_floor";
@@ -713,6 +726,8 @@ function readyAdmissionNextAction(code: string): string {
       return "free disk headroom with cleanup work before admitting non-cleanup orchestration rows";
     case "duplicate_dispatch_retry_required":
       return "mark the item retry-safe only when the operator wants a bounded refire, otherwise close or supersede it";
+    case "stale_queued_prior_dispatch":
+      return "close out the stale queued dispatch or reroute/supersede the row; do not mark retry_safe unless a prior dispatch actually ran and failed";
     default:
       return "clear this ready-admission blocker before readmitting the item";
   }
@@ -1010,6 +1025,14 @@ export class ContinuousOrchestrationDaemon {
     }
   }
 
+  private async withRetryReadiness(items: BacklogItem[]): Promise<BacklogItem[]> {
+    const outcomes = await getDispatchOutcomesByPhid(
+      this.deps.adapter,
+      items.map((item) => item.last_dispatch_phid).filter((phid): phid is string => !!phid),
+    );
+    return attachBacklogRetryReadiness(items, outcomes);
+  }
+
   private async alert(message: string): Promise<void> {
     const send: AlertSender = this.deps.alert ?? ((m) => sendTelegramAlert(m, this.deps.env));
     await send(message);
@@ -1186,7 +1209,7 @@ export class ContinuousOrchestrationDaemon {
     // Priority-rank, then FAIR-interleave across distinct write_scope lanes so a
     // single busy lane can't monopolize this tick's admission slots — admission
     // consumes this order greedily, so a lane-diverse order => lane-diverse fires.
-    let ordered = fairInterleaveByLane(orderCandidates(ready));
+    let ordered = fairInterleaveByLane(orderCandidates(await this.withRetryReadiness(ready)));
 
     // Stage C: compute the per-pool capacity + free-builder gate from the
     // current in-flight builds, so the daemon spills across pool members instead
@@ -1217,7 +1240,7 @@ export class ContinuousOrchestrationDaemon {
     });
     if (targetUnhealthyReroutes.changed && !config.dry_run) {
       ready = await listReadyItems(this.deps.adapter, this.teamId);
-      ordered = fairInterleaveByLane(orderCandidates(ready));
+      ordered = fairInterleaveByLane(orderCandidates(await this.withRetryReadiness(ready)));
       poolGate = await this.buildPoolGate(ordered);
       candidateAgentNames = new Set<string>();
       for (const item of ordered) if (item.to_agent) candidateAgentNames.add(item.to_agent);
@@ -1689,7 +1712,7 @@ export class ContinuousOrchestrationDaemon {
     const readyRuntimeRepairs = await repairReadyCodexRuntimeMetadata(this.deps.adapter, this.teamId, { apply: false });
     const ready = await listReadyItems(this.deps.adapter, this.teamId);
     const dependency_index = await listDependencyResolution(this.deps.adapter, this.teamId);
-    const ordered = fairInterleaveByLane(orderCandidates(ready));
+    const ordered = fairInterleaveByLane(orderCandidates(await this.withRetryReadiness(ready)));
     const poolGate = await this.buildPoolGate(ordered);
 
     const candidateAgentNames = new Set<string>();
@@ -1747,6 +1770,15 @@ export class ContinuousOrchestrationDaemon {
           const item = decision.item_id ? byId.get(decision.item_id) : undefined;
           return item?.last_dispatch_phid ?? null;
         })
+        .filter((phid): phid is string => phid != null),
+    );
+    const staleQueuedOutcomes = await getDispatchOutcomesByPhid(
+      this.deps.adapter,
+      plan.skipped
+        .filter((decision) => decision.metadata?.code === "stale_queued_prior_dispatch")
+        .map((decision) =>
+          typeof decision.metadata?.last_dispatch_phid === "string" ? decision.metadata.last_dispatch_phid : null,
+        )
         .filter((phid): phid is string => phid != null),
     );
     const busyAgents = await this.busyPoolAgents();
@@ -1846,6 +1878,15 @@ export class ContinuousOrchestrationDaemon {
           lastDispatchPhid != null
             ? duplicateDispatchRetryReceipt(lastDispatchPhid, duplicateRetryOutcomes.get(lastDispatchPhid))
             : null;
+        const staleQueuedPhid =
+          decision.metadata?.code === "stale_queued_prior_dispatch" &&
+          typeof decision.metadata.last_dispatch_phid === "string"
+            ? decision.metadata.last_dispatch_phid
+            : null;
+        const staleQueuedOutcome = staleQueuedPhid ? staleQueuedOutcomes.get(staleQueuedPhid) : null;
+        const staleQueuedAgeMs = staleQueuedOutcome
+          ? ageMsFromIso(staleQueuedOutcome.not_before_at ?? staleQueuedOutcome.updated_at ?? "", this.now())
+          : null;
         return {
           item_id: decision.item_id ?? "",
           title: item?.title ?? "",
@@ -1854,8 +1895,11 @@ export class ContinuousOrchestrationDaemon {
           action: decision.action === "held" ? "held" : "skipped",
           code,
           reason: decision.reason,
+          age_hours: staleQueuedAgeMs != null ? hours(staleQueuedAgeMs) : null,
+          next_action: typeof decision.metadata?.next_action === "string" ? decision.metadata.next_action : null,
           metadata: {
             ...decision.metadata,
+            ...(staleQueuedAgeMs != null ? { age_hours: hours(staleQueuedAgeMs) } : {}),
             ...(duplicateRetry ? { duplicate_retry: duplicateRetry } : {}),
             ...(unhealthyReceipt ? { target_unhealthy_receipt: unhealthyReceipt } : {}),
           },

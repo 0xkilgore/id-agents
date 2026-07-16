@@ -103,6 +103,17 @@ export interface OrchestrationQueueNoisePattern {
 
 export interface OrchestrationQueueQualityProjection {
   raw_queued: number;
+  stale_queued_prior_dispatch: {
+    count: number;
+    age_buckets: Record<"lt_1h" | "1h_6h" | "6h_24h" | "gt_24h", number>;
+    examples: Array<{
+      item_id: string;
+      dispatch_phid: string;
+      to_agent: string | null;
+      age_hours: number | null;
+      next_action: string;
+    }>;
+  };
   actionable_ready: number;
   needs_approval: number;
   duplicate_or_noop_backfill: number;
@@ -355,6 +366,8 @@ interface ReadyAdmissionNonAdmittedSummary {
   code: string;
   to_agent?: string | null;
   last_dispatch_phid?: string | null;
+  age_hours?: number | null;
+  next_action?: string | null;
 }
 
 interface ReadyAdmissionTargetUnhealthyGroupSummary {
@@ -1191,6 +1204,35 @@ function sortBlockerCounts(
   return b.count - a.count || a.category.localeCompare(b.category) || a.code.localeCompare(b.code);
 }
 
+function staleQueuedPriorDispatchProjection(
+  readyAdmission: OrchestrationHealthProjectionOptions["readyAdmission"] | undefined,
+): OrchestrationQueueQualityProjection["stale_queued_prior_dispatch"] {
+  const age_buckets = { lt_1h: 0, "1h_6h": 0, "6h_24h": 0, gt_24h: 0 };
+  const examples: OrchestrationQueueQualityProjection["stale_queued_prior_dispatch"]["examples"] = [];
+  for (const row of readyAdmission?.nonAdmitted ?? []) {
+    if (row.code !== "stale_queued_prior_dispatch") continue;
+    const ageHours = typeof row.age_hours === "number" && Number.isFinite(row.age_hours) ? row.age_hours : null;
+    if (ageHours == null || ageHours < 1) age_buckets.lt_1h += 1;
+    else if (ageHours < 6) age_buckets["1h_6h"] += 1;
+    else if (ageHours < 24) age_buckets["6h_24h"] += 1;
+    else age_buckets.gt_24h += 1;
+    if (examples.length < 5 && row.last_dispatch_phid) {
+      examples.push({
+        item_id: row.item_id,
+        dispatch_phid: row.last_dispatch_phid,
+        to_agent: row.to_agent ?? null,
+        age_hours: ageHours,
+        next_action: row.next_action ?? "closeout_or_reroute",
+      });
+    }
+  }
+  return {
+    count: age_buckets.lt_1h + age_buckets["1h_6h"] + age_buckets["6h_24h"] + age_buckets.gt_24h,
+    age_buckets,
+    examples,
+  };
+}
+
 function uniqueStrings(values: string[]): string[] {
   return [...new Set(values.filter((value) => value.trim() !== ""))];
 }
@@ -1307,6 +1349,7 @@ function isNonUsefulReadyBlockerCode(code: string): boolean {
     code === "provider_runtime_mismatch" ||
     code === "risk_requires_approval" ||
     code === "single_writer_lane_busy" ||
+    code === "stale_queued_prior_dispatch" ||
     code === "target_unhealthy"
   );
 }
@@ -1326,6 +1369,7 @@ async function readQueueQualityProjection(
 
   const dispatchByStatus = new Map(dispatchCounts.map((r) => [r.status ?? "unknown", Number(r.n)]));
   const rawQueued = Number(dispatchByStatus.get("queued") ?? 0) + Number(dispatchByStatus.get("bounced") ?? 0);
+  const staleQueuedPriorDispatch = staleQueuedPriorDispatchProjection(readyAdmission);
 
   const readyRows = backlogRows.filter((row) => row.readiness_state === "ready");
   const blockedDependencyItemIds = new Set<string>();
@@ -1367,6 +1411,7 @@ async function readQueueQualityProjection(
 
   return {
     raw_queued: rawQueued,
+    stale_queued_prior_dispatch: staleQueuedPriorDispatch,
     actionable_ready: actionableReady,
     needs_approval: needsApproval,
     duplicate_or_noop_backfill: noise.duplicateOrNoop,

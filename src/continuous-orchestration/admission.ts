@@ -94,6 +94,7 @@ export type NonAdmissionCode =
   | "promotion_blocker"
   | "disk_warning_floor"
   | "disk_critical_floor"
+  | "stale_queued_prior_dispatch"
   | "duplicate_dispatch_retry_required";
 
 function reasonClass(code: NonAdmissionCode): string {
@@ -120,6 +121,8 @@ function reasonClass(code: NonAdmissionCode): string {
       return "infra_resource";
     case "duplicate_dispatch_retry_required":
       return "retry_safety";
+    case "stale_queued_prior_dispatch":
+      return "route_sync";
     case "tick_admission_cap":
     case "no_in_flight_slots":
     case "pool_capacity_full":
@@ -363,6 +366,23 @@ export function planAdmission(
       continue;
     }
     if (item.last_dispatch_phid && !item.retry_safe) {
+      if (
+        item.retry_readiness?.status === "waiting_on_live_dispatch" &&
+        item.retry_readiness.prior_dispatch_status === "queued"
+      ) {
+        skipped.push(nonAdmission(
+          item.item_id,
+          "held",
+          "stale_queued_prior_dispatch",
+          item.retry_readiness.reason,
+          {
+            last_dispatch_phid: item.last_dispatch_phid,
+            prior_dispatch_status: item.retry_readiness.prior_dispatch_status,
+            next_action: item.retry_readiness.next_action,
+          },
+        ));
+        continue;
+      }
       skipped.push(nonAdmission(
         item.item_id,
         "held",
