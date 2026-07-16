@@ -375,6 +375,30 @@ export async function listDependencyResolution(adapter: DbAdapter, team_id = "de
   return map;
 }
 
+export interface DependencyResolutionState {
+  item_id: string;
+  logical_key: string | null;
+  readiness_state: ReadinessState;
+}
+
+/**
+ * Dependency status index for operator surfaces. Every item_id and non-empty
+ * logical_key maps to the resolved upstream row; absence means missing/broken.
+ */
+export async function listDependencyStates(adapter: DbAdapter, team_id = "default"): Promise<Map<string, DependencyResolutionState>> {
+  const { rows } = await adapter.query<{ item_id: string; logical_key: string | null; readiness_state: ReadinessState }>(
+    `SELECT item_id, logical_key, readiness_state FROM orchestration_backlog_item WHERE team_id = $1`,
+    [team_id],
+  );
+  const map = new Map<string, DependencyResolutionState>();
+  for (const r of rows) {
+    const state = { item_id: r.item_id, logical_key: r.logical_key, readiness_state: r.readiness_state };
+    map.set(r.item_id, state);
+    if (r.logical_key) map.set(r.logical_key, state);
+  }
+  return map;
+}
+
 /**
  * The human/approval gate: promote a draft/needs_review item to READY. Refuses
  * to promote from any other state, and refuses items with no dispatch body/agent

@@ -120,6 +120,7 @@ async function seedBuildItem(
     risk_class: "build",
     priority: 5,
     write_scope: over.write_scope ?? ["/repo/id-agents"], // repo root at flesh; daemon late-binds to a worktree
+    dependencies: over.dependencies,
     token_estimate: 0,
     provider: over.provider,
     runtime: over.runtime,
@@ -540,5 +541,101 @@ describe("backend pool routing (real registry)", () => {
         expect.objectContaining({ target: "substrate-orch-codex", proposed_healthy_target: "substrate-api-codex" }),
       ]),
     );
+  });
+
+  it("summarizes five dependency-blocked rows with upstream status and safe actions", async () => {
+    const upstreamDone = await insertBacklogItem(adapter, {
+      title: "landed upstream",
+      logical_key: "dep:landed",
+      readiness_state: "done",
+      risk_class: "build",
+      write_scope: ["/repo/id-agents/dep-landed"],
+      token_estimate: 0,
+    });
+    const upstreamSuperseded = await insertBacklogItem(adapter, {
+      title: "superseded upstream",
+      logical_key: "dep:superseded",
+      readiness_state: "superseded",
+      risk_class: "build",
+      write_scope: ["/repo/id-agents/dep-superseded"],
+      token_estimate: 0,
+    });
+    const upstreamQueued = await insertBacklogItem(adapter, {
+      title: "queued upstream",
+      logical_key: "dep:queued",
+      readiness_state: "queued",
+      risk_class: "build",
+      write_scope: ["/repo/id-agents/dep-queued"],
+      token_estimate: 0,
+    });
+    const upstreamFailed = await insertBacklogItem(adapter, {
+      title: "failed upstream",
+      logical_key: "dep:failed",
+      readiness_state: "failed",
+      risk_class: "build",
+      write_scope: ["/repo/id-agents/dep-failed"],
+      token_estimate: 0,
+    });
+    const deps = [
+      upstreamDone.item_id,
+      upstreamSuperseded.item_id,
+      upstreamQueued.item_id,
+      upstreamFailed.item_id,
+      "dep:missing",
+    ];
+    for (const [index, dependency] of deps.entries()) {
+      await insertBacklogItem(adapter, {
+        title: `blocked dependency fixture ${index + 1}`,
+        track: "T-RELY",
+        to_agent: "roger",
+        dispatch_body: `Resolve dependency fixture ${index + 1}.`,
+        readiness_state: "blocked_dependency",
+        risk_class: "build",
+        write_scope: [`/repo/id-agents/blocked-${index + 1}`],
+        dependencies: [dependency],
+        token_estimate: 0,
+      });
+    }
+
+    const { daemon } = makeDaemon({ config: { max_in_flight: 10, min_ready_fuel: 1 } });
+    await daemon.setMode("running");
+
+    const status = await daemon.explainReadyAdmission();
+    const byDependency = new Map(status.blocked_dependency_summary.dependencies.map((row) => [row.dependency, row]));
+
+    expect(status.blocked_dependency_summary).toMatchObject({
+      schema_version: "ready_admission.blocked_dependency_summary.v1",
+      total_ready_rows: 5,
+      shown_ready_rows: 5,
+      truncated: false,
+    });
+    expect(byDependency.get(upstreamDone.item_id)).toMatchObject({
+      status: "done",
+      upstream_item_id: upstreamDone.item_id,
+      action: "clear_dependency_blocker",
+      safe_to_clear: true,
+    });
+    expect(byDependency.get(upstreamSuperseded.item_id)).toMatchObject({
+      status: "done",
+      upstream_readiness_state: "superseded",
+      action: "clear_dependency_blocker",
+      safe_to_clear: true,
+    });
+    expect(byDependency.get(upstreamQueued.item_id)).toMatchObject({
+      status: "queued",
+      action: "wait_for_upstream",
+      safe_to_clear: false,
+    });
+    expect(byDependency.get(upstreamFailed.item_id)).toMatchObject({
+      status: "failed",
+      action: "review_failed_upstream",
+      safe_to_clear: false,
+    });
+    expect(byDependency.get("dep:missing")).toMatchObject({
+      status: "missing",
+      upstream_item_id: null,
+      action: "repair_missing_dependency",
+      safe_to_clear: false,
+    });
   });
 });

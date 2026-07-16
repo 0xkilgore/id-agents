@@ -33,6 +33,7 @@ import {
   getOrchestrationState,
   listBacklogByState,
   listDependencyResolution,
+  listDependencyStates,
   listReadyItems,
   promoteToReady,
   recordTickOutcome,
@@ -44,6 +45,7 @@ import {
   type ReadyRuntimeRepair,
   type StaleReadyReconcileResult,
   type DispatchOutcome,
+  type DependencyResolutionState,
 } from "./storage.js";
 import { attachBacklogRetryReadiness, deriveBacklogRetryReadiness } from "./backlog-retry-readiness.js";
 import { duplicateDispatchRetryReceipt } from "./duplicate-dispatch-retry-receipt.js";
@@ -269,6 +271,7 @@ export interface ReadyAdmissionExplanation {
   block_reason_counts: ReadyAdmissionBlockReasonCounts;
   top_block_reasons: Array<{ code: string; category: ReadyAdmissionBlockerCategory; count: number }>;
   blocked_lanes: ReadyAdmissionBlockedLane[];
+  blocked_dependency_summary: ReadyAdmissionBlockedDependencySummary;
   target_unhealthy_groups: ReadyAdmissionTargetUnhealthyGroup[];
   recommended_action: string;
   admissible: Array<{ item_id: string; title: string; to_agent: string | null; risk_class: string }>;
@@ -342,6 +345,26 @@ export interface ReadyAdmissionBlockedLane {
   count: number;
   blocker_counts: Array<{ code: string; category: ReadyAdmissionBlockerCategory; count: number }>;
 }
+
+export interface ReadyAdmissionBlockedDependencySummary {
+  schema_version: "ready_admission.blocked_dependency_summary.v1";
+  total_ready_rows: number;
+  shown_ready_rows: number;
+  truncated: boolean;
+  dependencies: Array<{
+    dependency: string;
+    status: "done" | "queued" | "failed" | "missing";
+    upstream_item_id: string | null;
+    upstream_logical_key: string | null;
+    upstream_readiness_state: ReadinessState | null;
+    dependents: Array<{ item_id: string; title: string }>;
+    action: "clear_dependency_blocker" | "wait_for_upstream" | "review_failed_upstream" | "repair_missing_dependency";
+    safe_to_clear: boolean;
+    safe_action_summary: string;
+  }>;
+}
+
+const BLOCKED_DEPENDENCY_SUMMARY_LIMIT = 5;
 
 interface ZeroAdmitReadyBlockedIncident {
   cause: string;
@@ -796,6 +819,102 @@ function readyAdmissionBlockedLanes(
       ),
     }))
     .sort((a, b) => b.count - a.count || a.lane.localeCompare(b.lane));
+}
+
+function dependencyOperatorStatus(state: DependencyResolutionState | undefined): ReadyAdmissionBlockedDependencySummary["dependencies"][number]["status"] {
+  if (!state) return "missing";
+  if (state.readiness_state === "done" || state.readiness_state === "superseded") return "done";
+  if (state.readiness_state === "failed" || state.readiness_state === "cancelled") return "failed";
+  return "queued";
+}
+
+function dependencyOperatorAction(
+  status: ReadyAdmissionBlockedDependencySummary["dependencies"][number]["status"],
+): ReadyAdmissionBlockedDependencySummary["dependencies"][number]["action"] {
+  switch (status) {
+    case "done":
+      return "clear_dependency_blocker";
+    case "failed":
+      return "review_failed_upstream";
+    case "missing":
+      return "repair_missing_dependency";
+    case "queued":
+      return "wait_for_upstream";
+  }
+}
+
+function dependencySafeActionSummary(input: {
+  dependency: string;
+  status: ReadyAdmissionBlockedDependencySummary["dependencies"][number]["status"];
+  upstreamState: ReadinessState | null;
+}): string {
+  if (input.status === "done") {
+    return `Safe to clear ${input.dependency}: upstream is ${input.upstreamState}; use clear_dependency_blocker with an operator reason.`;
+  }
+  if (input.status === "failed") {
+    return `Do not clear ${input.dependency} automatically: upstream is ${input.upstreamState}; supersede or repair the upstream item first.`;
+  }
+  if (input.status === "missing") {
+    return `Do not clear ${input.dependency}: no upstream item_id or logical_key resolves; repair the dependency reference or attach a landed upstream.`;
+  }
+  return `Do not clear ${input.dependency} yet: upstream is ${input.upstreamState}; wait for done/superseded evidence.`;
+}
+
+function readyAdmissionBlockedDependencySummary(input: {
+  plan: { skipped: DecisionRecord[] };
+  byId: Map<string, BacklogItem>;
+  dependencyStates: Map<string, DependencyResolutionState>;
+  blockedDependencyItems: BacklogItem[];
+}): ReadyAdmissionBlockedDependencySummary {
+  const allBlocked = input.plan.skipped.filter(
+    (decision) => decision.metadata?.code === "blocked_dependency" || decision.metadata?.code === "broken_dependency",
+  );
+  const syntheticBlocked = input.blockedDependencyItems.map((item): DecisionRecord => ({
+    item_id: item.item_id,
+    action: "held",
+    reason: `blocked_dependency row waiting on dependencies: ${item.dependencies.join(", ")}`,
+    metadata: { code: "blocked_dependency", dependencies: item.dependencies },
+  }));
+  const rows = [...allBlocked, ...syntheticBlocked];
+  const shownBlocked = rows.slice(0, BLOCKED_DEPENDENCY_SUMMARY_LIMIT);
+  const dependencies = new Map<string, ReadyAdmissionBlockedDependencySummary["dependencies"][number]>();
+
+  for (const decision of shownBlocked) {
+    const item = decision.item_id ? input.byId.get(decision.item_id) : undefined;
+    const metadataDependencies = decision.metadata?.dependencies;
+    if (!Array.isArray(metadataDependencies)) continue;
+    for (const rawDependency of metadataDependencies) {
+      if (typeof rawDependency !== "string" || !rawDependency.trim()) continue;
+      const dependency = rawDependency.trim();
+      const state = input.dependencyStates.get(dependency);
+      const status = dependencyOperatorStatus(state);
+      const upstreamState = state?.readiness_state ?? null;
+      const existing = dependencies.get(dependency);
+      const entry = existing ?? {
+        dependency,
+        status,
+        upstream_item_id: state?.item_id ?? null,
+        upstream_logical_key: state?.logical_key ?? null,
+        upstream_readiness_state: upstreamState,
+        dependents: [],
+        action: dependencyOperatorAction(status),
+        safe_to_clear: status === "done",
+        safe_action_summary: dependencySafeActionSummary({ dependency, status, upstreamState }),
+      };
+      if (decision.item_id && item && entry.dependents.length < BLOCKED_DEPENDENCY_SUMMARY_LIMIT) {
+        entry.dependents.push({ item_id: decision.item_id, title: item.title });
+      }
+      dependencies.set(dependency, entry);
+    }
+  }
+
+  return {
+    schema_version: "ready_admission.blocked_dependency_summary.v1",
+    total_ready_rows: rows.length,
+    shown_ready_rows: shownBlocked.length,
+    truncated: rows.length > shownBlocked.length,
+    dependencies: [...dependencies.values()].sort((a, b) => a.dependency.localeCompare(b.dependency)),
+  };
 }
 
 function readyAdmissionRecommendedAction(input: {
@@ -1711,7 +1830,9 @@ export class ContinuousOrchestrationDaemon {
     const disk_headroom = await this.diskHeadroom();
     const readyRuntimeRepairs = await repairReadyCodexRuntimeMetadata(this.deps.adapter, this.teamId, { apply: false });
     const ready = await listReadyItems(this.deps.adapter, this.teamId);
+    const blockedDependencyItems = await listBacklogByState(this.deps.adapter, { team_id: this.teamId, state: "blocked_dependency" });
     const dependency_index = await listDependencyResolution(this.deps.adapter, this.teamId);
+    const dependency_states = await listDependencyStates(this.deps.adapter, this.teamId);
     const ordered = fairInterleaveByLane(orderCandidates(await this.withRetryReadiness(ready)));
     const poolGate = await this.buildPoolGate(ordered);
 
@@ -1827,6 +1948,12 @@ export class ContinuousOrchestrationDaemon {
       (usefulReady < config.min_ready_fuel && activeReady.length > 0) ||
       (usefulReady >= config.min_ready_fuel && plan.admit.length < config.min_ready_fuel && plan.skipped.length > 0);
     const blockedLanes = readyAdmissionBlockedLanes(plan, byId);
+    const blockedDependencySummary = readyAdmissionBlockedDependencySummary({
+      plan,
+      byId,
+      dependencyStates: dependency_states,
+      blockedDependencyItems,
+    });
     const targetUnhealthyGroups = readyAdmissionTargetUnhealthyGroups(plan, byId, proposedHealthyTargets);
     const recommendedAction = readyAdmissionRecommendedAction({
       candidates: activeReady.length,
@@ -1850,6 +1977,7 @@ export class ContinuousOrchestrationDaemon {
       block_reason_counts: readyAdmissionBlockReasonCounts(plan),
       top_block_reasons: blockerCounts.slice(0, 5),
       blocked_lanes: blockedLanes,
+      blocked_dependency_summary: blockedDependencySummary,
       target_unhealthy_groups: targetUnhealthyGroups,
       recommended_action: recommendedAction,
       admissible: plan.admit.map((item) => ({

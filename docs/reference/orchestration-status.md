@@ -45,6 +45,14 @@ Important labels include:
 `ready_admission.non_admitted` carries per-item details with `item_id`, `title`,
 `to_agent`, `risk_class`, `action`, `code`, `reason`, and optional `metadata`.
 
+`ready_admission.blocked_dependency_summary` is a bounded operator summary for
+READY/`blocked_dependency` rows held only by backlog dependencies. It reports up
+to five rows, the dependency ids they wait on, each dependency status
+(`done`, `queued`, `failed`, or `missing`), and a safe action:
+`clear_dependency_blocker` is offered only when the upstream item is already
+`done` or `superseded`; queued, failed, and missing upstreams stay review/wait
+actions and should not be cleared automatically.
+
 ## Queue Quality
 
 `health.queue_quality` summarizes broader queue health:
