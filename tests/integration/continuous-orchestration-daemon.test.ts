@@ -5782,7 +5782,7 @@ describe("stale already-dispatched ready reconciliation route", () => {
     const before = await callApp(app, "/orchestration/status");
     expect(before.status).toBe(200);
     expect(before.body.counts.ready).toBe(5);
-    expect(before.body.ready_admission.candidates).toBe(5);
+    expect(before.body.ready_admission.candidates).toBe(2);
 
     const res = await callAppRequest(app, "POST", "/orchestration/reconcile/stale-ready", { actor: "hopper" });
 
@@ -5937,6 +5937,137 @@ describe("stale already-dispatched ready reconciliation route", () => {
         ready_plus_in_flight: 1,
         ready_lane_keys: ["repo/retry"],
       },
+    });
+  });
+
+  it("dry-runs stale duplicate closeout candidates without retry-safe failed rows or active dispatches", async () => {
+    const done = await seedReady(adapter, {
+      title: "landed duplicate ready",
+      track: "T-ORCH",
+      write_scope: ["repo/done"],
+      source_refs: ["roadmap:t-orch:done"],
+    });
+    const retrySafeFailed = await seedReady(adapter, {
+      title: "retry safe failed row",
+      track: "T-ORCH",
+      write_scope: ["repo/retry-safe"],
+      source_refs: ["roadmap:t-orch:retry-safe"],
+    });
+    const active = await seedReady(adapter, {
+      title: "active duplicate ready",
+      track: "T-ORCH",
+      write_scope: ["repo/active"],
+      source_refs: ["roadmap:t-orch:active"],
+    });
+    const expiredLinkedQuery = await seedReady(adapter, {
+      title: "expired linked query needs review",
+      track: "T-ORCH",
+      write_scope: ["repo/expired-linked-query"],
+      source_refs: ["roadmap:t-orch:expired-linked-query"],
+    });
+    await adapter.query(
+      `UPDATE orchestration_backlog_item
+          SET readiness_state = 'needs_review'
+        WHERE item_id = $1`,
+      [expiredLinkedQuery.item_id],
+    );
+
+    await markReadyAlreadyDispatched(adapter, done.item_id, "phid:disp-done");
+    await markReadyAlreadyDispatched(adapter, retrySafeFailed.item_id, "phid:disp-retry-safe", { retry_safe: true });
+    await markReadyAlreadyDispatched(adapter, active.item_id, "phid:disp-active");
+    await markReadyAlreadyDispatched(adapter, expiredLinkedQuery.item_id, "phid:disp-expired-linked-query");
+    await seedDispatch(adapter, {
+      dispatch_phid: "phid:disp-done",
+      status: "done",
+      artifact_path: "/repo/output/done.md",
+    });
+    await seedDispatch(adapter, {
+      dispatch_phid: "phid:disp-retry-safe",
+      status: "failed",
+      failure_kind: "scheduler_wedged",
+      failure_detail: "scheduler wedged after provider timeout",
+      artifact_path: "/repo/output/retry-safe.md",
+    });
+    await seedDispatch(adapter, {
+      dispatch_phid: "phid:disp-active",
+      status: "in_flight",
+      artifact_path: "/repo/output/active.md",
+    });
+    await seedDispatch(adapter, {
+      dispatch_phid: "phid:disp-expired-linked-query",
+      status: "failed",
+      failure_kind: "expired",
+      failure_detail: "linked query terminated expired",
+      artifact_path: "/repo/output/expired-linked-query.md",
+    });
+
+    const { app } = mountStatusApp(adapter);
+    const res = await callAppRequest(app, "POST", "/orchestration/reconcile/stale-ready", {
+      dry_run: true,
+      actor: "continuous-orchestration",
+    });
+
+    expect(res.status).toBe(200);
+    expect(res.body.result).toMatchObject({
+      scanned: 4,
+      closed: 1,
+      superseded: 1,
+      preserved_retry_safe: 1,
+      dry_run: true,
+    });
+    expect(res.body.result.items).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          item_id: done.item_id,
+          dispatch_phid: "phid:disp-done",
+          from_state: "ready",
+          to_state: "done",
+          reason: expect.stringContaining("closed after terminal dispatch done"),
+          receipt: expect.objectContaining({
+            next_action: "close_duplicate_row",
+            prior_dispatch_status: "done",
+            redispatch_safety: expect.objectContaining({
+              safe_to_not_redispatch: true,
+              reason: expect.stringContaining("duplicate completed work"),
+            }),
+          }),
+        }),
+        expect.objectContaining({
+          item_id: expiredLinkedQuery.item_id,
+          dispatch_phid: "phid:disp-expired-linked-query",
+          from_state: "needs_review",
+          to_state: "superseded",
+          reason: expect.stringContaining("superseded after terminal dispatch failed"),
+          receipt: expect.objectContaining({
+            next_action: "supersede_duplicate_row",
+            prior_dispatch_status: "failed",
+            redispatch_safety: expect.objectContaining({
+              safe_to_not_redispatch: true,
+              reason: expect.stringContaining("not retry fuel"),
+            }),
+          }),
+        }),
+      ]),
+    );
+    expect(res.body.result.items.map((item: { item_id: string }) => item.item_id)).not.toContain(retrySafeFailed.item_id);
+    expect(res.body.result.items.map((item: { item_id: string }) => item.item_id)).not.toContain(active.item_id);
+
+    await expect(getBacklogItem(adapter, done.item_id)).resolves.toMatchObject({
+      readiness_state: "ready",
+      stale_duplicate_closeout_receipt: null,
+    });
+    await expect(getBacklogItem(adapter, retrySafeFailed.item_id)).resolves.toMatchObject({
+      readiness_state: "ready",
+      retry_safe: true,
+      stale_duplicate_closeout_receipt: null,
+    });
+    await expect(getBacklogItem(adapter, active.item_id)).resolves.toMatchObject({
+      readiness_state: "ready",
+      stale_duplicate_closeout_receipt: null,
+    });
+    await expect(getBacklogItem(adapter, expiredLinkedQuery.item_id)).resolves.toMatchObject({
+      readiness_state: "needs_review",
+      stale_duplicate_closeout_receipt: null,
     });
   });
 

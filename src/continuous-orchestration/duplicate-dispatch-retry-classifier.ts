@@ -167,6 +167,15 @@ export function classifyDuplicateDispatchRetryDisposition(outcome: DispatchOutco
     };
   }
 
+  if (outcome.status === "failed" && isLinkedQueryExpired(outcome)) {
+    return {
+      recommended_disposition: "supersede",
+      operator_disposition: "close",
+      retry_safe_recommendation: "leave_false",
+      reason: `prior dispatch ${outcome.dispatch_phid} ended after linked query expiry; supersede the stale duplicate ready row instead of refiring`,
+    };
+  }
+
   if (outcome.status === "failed" && dispatchFailureRetryable(outcome)) {
     return {
       recommended_disposition: "mark-retry-safe",

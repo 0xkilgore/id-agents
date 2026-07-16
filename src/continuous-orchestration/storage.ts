@@ -1281,6 +1281,7 @@ export async function reconcileStaleAlreadyDispatchedReadyRows(
                 updated_by = $4,
                 updated_at = $5
           WHERE item_id = $6
+            AND team_id = $7
             AND readiness_state IN ('ready', 'needs_review')
             AND COALESCE(retry_safe, 0) = 0`,
         [
@@ -1293,6 +1294,7 @@ export async function reconcileStaleAlreadyDispatchedReadyRows(
           actor,
           receipt.closed_at,
           row.item_id,
+          teamId,
         ],
       );
     }
