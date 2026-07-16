@@ -1400,6 +1400,74 @@ describe("buildReleaseProofReadiness", () => {
     expect(warning).toContain("mark retry_safe only for bounded refires or close stale duplicates");
   });
 
+  it("keeps the current build-ready floor warning focused on one more independent lane instead of stale duplicate refires", () => {
+    const staleLatest = "2026-07-12T18:35:52.064Z";
+    const warning = formatOrchestrationLoopInfraWarning({
+      orchestration_loop: {
+        severity: "critical",
+        consecutive_zero_ticks: 4,
+        last_admission_block_reasons: {
+          build_ready_below_floor: 1,
+          build_ready_lane_diversity_below_min_lanes: 1,
+        },
+        explanation:
+          "ready=17, useful_ready=17, build_ready=11/12, admissible_now=3; operator summary: add 1 more independent build lane to reach 12/12 build-ready coverage",
+      },
+      ready_item_blockers: {
+        recommended_action:
+          "author or promote build-ready work in 1 more independent lane; stale duplicate rows are not the fix for this floor deficit",
+        categories: [
+          {
+            code: "build_ready_below_floor",
+            category: "lane_eligibility",
+            count: 1,
+            examples: [],
+            owner_lane: "orchestration",
+            recommended_action:
+              "author or promote build-ready work in 1 more independent lane; stale duplicate rows are not the fix for this floor deficit",
+          },
+        ],
+        stale_ready_fuel: {
+          counts_by_blocker_class: [
+            { code: "build_ready_below_floor", category: "lane_eligibility", count: 1, examples: [] },
+            { code: "infra_warning", category: "operator_review", count: 1, examples: [] },
+          ],
+        },
+        items: [
+          {
+            code: "duplicate_dispatch_retry_required",
+            retry_readiness_status: "stale_duplicate",
+          },
+        ],
+      },
+    } as any);
+
+    const view = buildReleaseProofReadiness(base({
+      feedback_evidence: [feedbackFixture({ id: "op:stale-floor", observed_at: staleLatest })],
+      infra_warnings: [warning],
+    }));
+
+    expect(view.feedback_evidence).toMatchObject({
+      state: "stale",
+      latest_at: staleLatest,
+      count: 1,
+    });
+    expect(view.infra_warning).toEqual({
+      state: "warning",
+      count: 1,
+      requires_operator_review: true,
+      source: "orchestration_health_projection",
+      action: "review orchestration health and resolve infra warnings before release proof sign-off",
+    });
+    expect(view.summary).toBe("Release proof is not ready: infra warnings require operator review.");
+    const rendered = view.infra_warnings.items[0] ?? "";
+    expect(rendered).toContain("ready=17, useful_ready=17, build_ready=11/12, admissible_now=3");
+    expect(rendered).toContain("add 1 more independent build lane");
+    expect(rendered).toContain("top blocker build_ready_below_floor=1");
+    expect(rendered).not.toContain("mark retry_safe only for bounded refires");
+    expect(rendered).not.toContain("close stale duplicates");
+  });
+
   it("maps degraded orchestration status to infra warnings without hiding missing safe source links", async () => {
     const adapter = new SqliteAdapter(":memory:");
     try {
