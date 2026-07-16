@@ -63,13 +63,13 @@ export interface StaleDuplicateCloseoutReceipt {
   /** Alias fields for newer receipt consumers that expect actor/timestamp naming. */
   actor?: string;
   timestamp?: string;
-  from_state: "ready" | "needs_review";
+  from_state: "ready" | "needs_review" | "blocked_dependency";
   to_state: "done" | "superseded" | "ready";
-  reason: "close_or_ignore" | "offline_target_superseded_by_fresher_wave66";
+  reason: "close_or_ignore" | "offline_target_superseded_by_fresher_wave66" | "dependency_blocker_cleared";
   /** Roadmap track of the closed row, e.g. "T-ORCH" — carried through so ops surfaces don't have to re-join the backlog row. */
   track: string | null;
   /** Same vocabulary as DuplicateDispatchRetryReceipt.next_action for consistent ops-surface parsing. */
-  next_action: "close_duplicate_row" | "supersede_duplicate_row" | "supersede_offline_ready_row";
+  next_action: "close_duplicate_row" | "supersede_duplicate_row" | "supersede_offline_ready_row" | "clear_dependency_blocker";
   prior_dispatch_phid: string;
   prior_dispatch_status: string;
   successor_dispatch_phid: string | null;
