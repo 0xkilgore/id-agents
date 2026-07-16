@@ -266,6 +266,10 @@ import {
   type FreshnessTrackerState,
 } from './deploy-guard/freshness.js';
 import {
+  evaluateManagerRedeployReadiness,
+  readDeployCheckoutStatus,
+} from './deploy-guard/manager-redeploy-readiness.js';
+import {
   evaluateFleetFreshness,
   resolveFleetNodes,
   EMPTY_FLEET_SUMMARY,
@@ -1743,6 +1747,12 @@ export class AgentManagerDb {
       last_error: null,
       open_alert_count: 0,
     };
+  }
+
+  private getProtectedDeployCheckoutRepo(): string {
+    if (process.env.DEPLOY_WATCHDOG_REPO) return process.env.DEPLOY_WATCHDOG_REPO;
+    const home = process.env.HOME ?? '/Users/kilgore';
+    return path.join(home, 'Dropbox/Code/cane/id-agents-deploy-main');
   }
 
   private evaluateNominalHealth(input: {
@@ -5495,6 +5505,13 @@ export class AgentManagerDb {
       const supervisor = this.getSupervisorHealthStatus(now);
       const supervisorRequiredForNominal = process.env.SUPERVISOR_OPTIONAL !== 'true';
       const nominal = this.evaluateNominalHealth({ build, disk, supervisor });
+      const deployCheckout = readDeployCheckoutStatus(this.getProtectedDeployCheckoutRepo());
+      const managerRedeployReadiness = evaluateManagerRedeployReadiness({
+        build,
+        disk,
+        supervisor,
+        deployCheckout,
+      });
       const unavailableConformance = {
         schema_version: 'reset-conformance.v1',
         state: 'unavailable',
@@ -5580,6 +5597,10 @@ export class AgentManagerDb {
           behind_origin_since: this.freshnessState.behind_origin_since,
           last_alert_at: this.freshnessState.last_alert_at,
         },
+        // T-RELY: bounded readiness gate for an operator-managed manager
+        // redeploy from the protected checkout. This reports only; it never
+        // restarts the manager.
+        manager_redeploy_readiness: managerRedeployReadiness,
         worktree_os_policy: {
           schema_version: WORKTREE_OS_POLICY_VERSION,
           deploy_checkout_dependency: CLEAN_DEPLOY_CHECKOUT_REPAIR_DEPENDENCY,
