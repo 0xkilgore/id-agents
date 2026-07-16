@@ -756,6 +756,45 @@ describe("planAdmission — RD-014 agent-health gate", () => {
     expect(p.skipped[0].item_id).toBe("a");
   });
 
+  it("recovers target_unhealthy rows for healthy real targets while holding stopped substrate-api-codex", () => {
+    const p = planAdmission(
+      [
+        item({ item_id: "healthy-regina", to_agent: "regina", write_scope: ["repo/frontend"] }),
+        item({ item_id: "healthy-roger", to_agent: "roger", write_scope: ["repo/backend"] }),
+        item({ item_id: "healthy-cto", to_agent: "cto", write_scope: ["repo/spec"] }),
+        item({ item_id: "stopped-substrate", to_agent: "substrate-api-codex", write_scope: ["repo/substrate"] }),
+        item({ item_id: "pool-builder", to_agent: "pool:builder", write_scope: ["repo/pool"] }),
+      ],
+      ctx({
+        admit_limit: 5,
+        pool_for: (candidate) => (candidate.to_agent === "pool:builder" ? "backend" : null),
+        pool_free_slots: new Map([["backend", 1]]),
+        pool_free_builders: new Map([["backend", ["substrate-api-codex", "roger"]]]),
+        healthy_agents: new Set(["regina", "roger", "cto"]),
+        target_agent_runtimes: new Map([
+          ["regina", "claude-code-cli"],
+          ["roger", "codex"],
+          ["cto", "claude-code-cli"],
+          ["substrate-api-codex", "codex"],
+        ]),
+      }),
+      cfg,
+    );
+
+    expect(p.admit.map((i) => i.item_id)).toEqual(["healthy-regina", "healthy-roger", "healthy-cto", "pool-builder"]);
+    expect(p.assignments["pool-builder"]).toBe("roger");
+    expect(p.skipped).toEqual([
+      expect.objectContaining({
+        item_id: "stopped-substrate",
+        action: "held",
+        metadata: expect.objectContaining({
+          code: "target_unhealthy",
+          target: "substrate-api-codex",
+        }),
+      }),
+    ]);
+  });
+
   it("holds a POOL item when no free builder is healthy", () => {
     const p = planAdmission(
       [item({ item_id: "pool-item", write_scope: [] })],

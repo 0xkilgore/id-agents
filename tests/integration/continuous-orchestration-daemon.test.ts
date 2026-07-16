@@ -1523,7 +1523,7 @@ describe("daemon — dry-run vs live", () => {
       ]),
     );
     expect(status.body.ready_admission.recommended_action).toContain("target_unhealthy=1");
-    expect(status.body.ready_admission.recommended_action).toContain("reroute/downclassify/owner-restart");
+    expect(status.body.ready_admission.recommended_action).toContain("runtime repair for target_unhealthy=1");
     expect(status.body.ready_admission.recommended_action).toContain("duplicate_dispatch_retry_required=1");
     expect(status.body.health.ready_item_blockers.stale_ready_fuel.counts_by_blocker_class).toEqual(
       expect.arrayContaining([
@@ -2201,7 +2201,7 @@ describe("daemon — dry-run vs live", () => {
       "substrate-api-codex",
       "substrate-orch-codex",
     ]);
-    expect(res.body.auto_promote_health.operator_summary.safe_actions[0]).toContain("Reroute, downclassify/supersede, or restart owners for 2 target_unhealthy");
+    expect(res.body.auto_promote_health.operator_summary.safe_actions[0]).toContain("Runtime repair for 2 target_unhealthy");
     expect(res.body.auto_promote_health.operator_summary.safe_actions[0]).toContain("where safe");
     expect(res.body.auto_promote_health.operator_summary.safe_actions[0]).toContain("eames on repo/explicit-b (1)");
     expect(res.body.auto_promote_health.operator_summary.safe_actions[0]).toContain("gaudi on repo/explicit-a (1)");
@@ -2316,7 +2316,7 @@ describe("daemon — dry-run vs live", () => {
       "raw_ready_fuel=12 meets min_ready_fuel=12 but useful_ready_fuel=8 is below floor",
     );
     expect(res.body.ready_admission.recommended_action).toContain(
-      "reroute/downclassify/owner-restart target_unhealthy=2 rows where safe",
+      "runtime repair for target_unhealthy=2 rows where safe",
     );
     expect(res.body.ready_admission.recommended_action).toContain(
       "top off or repair builder pool capacity for no_free_pool_builder=2 row(s)",
@@ -2342,7 +2342,7 @@ describe("daemon — dry-run vs live", () => {
       ]),
     );
     expect(res.body.auto_promote_health.operator_summary.safe_actions.join(" ")).toContain(
-      "Reroute, downclassify/supersede, or restart owners for 2 target_unhealthy",
+      "Runtime repair for 2 target_unhealthy",
     );
     expect(res.body.auto_promote_health.operator_summary.safe_actions.join(" ")).toContain(
       "top off compatible pool fuel",

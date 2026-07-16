@@ -800,7 +800,7 @@ function readyAdmissionRecommendedAction(input: {
           `target=${group.target} lane=${group.lane} count=${group.count}`,
         );
         const suffix = examples.length > 0 ? ` (${examples.join("; ")})` : "";
-        return [`reroute/downclassify/owner-restart target_unhealthy=${count.count} rows where safe${suffix}`];
+        return [`runtime repair for target_unhealthy=${count.count} rows where safe${suffix}`];
       }
       if (count.code === "provider_runtime_mismatch") {
         return [`reroute or update provider_runtime_mismatch=${count.count} rows to match a live runtime`];

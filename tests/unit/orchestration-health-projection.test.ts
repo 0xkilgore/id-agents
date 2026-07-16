@@ -362,7 +362,7 @@ describe("orchestration health projection", () => {
           { item_id: retryBlockedId, code: "duplicate_dispatch_retry_required", to_agent: "roger" },
         ],
         recommendedAction:
-          "reroute/downclassify/owner-restart target_unhealthy=6 rows where safe; review duplicate_dispatch_retry_required=1 rows and mark retry_safe only for bounded refires or close stale duplicates",
+          "runtime repair for target_unhealthy=6 rows where safe; review duplicate_dispatch_retry_required=1 rows and mark retry_safe only for bounded refires or close stale duplicates",
       },
     });
 
@@ -380,7 +380,7 @@ describe("orchestration health projection", () => {
       { code: "duplicate_dispatch_retry_required", category: "retry_safety", count: 1, examples: [retryBlockedId] },
     ]);
     expect(health.ready_item_blockers.recommended_action).toContain(
-      "reroute/downclassify/owner-restart target_unhealthy=6 rows where safe",
+      "runtime repair for target_unhealthy=6 rows where safe",
     );
     expect(health.ready_item_blockers.recommended_action).toContain(
       "review duplicate_dispatch_retry_required=1 rows",

@@ -1260,7 +1260,7 @@ describe("buildReleaseProofReadiness", () => {
       },
       ready_item_blockers: {
         recommended_action:
-          "reroute/downclassify/owner-restart target_unhealthy=6 rows where safe; review duplicate_dispatch_retry_required=1 rows and mark retry_safe only for bounded refires or close stale duplicates",
+          "runtime repair for target_unhealthy=6 rows where safe; review duplicate_dispatch_retry_required=1 rows and mark retry_safe only for bounded refires or close stale duplicates",
         categories: [],
         stale_ready_fuel: {
           counts_by_blocker_class: [
@@ -1279,7 +1279,7 @@ describe("buildReleaseProofReadiness", () => {
 
     expect(warning).toContain("top blocker target_unhealthy=6");
     expect(warning).toContain("source route /orchestration/status ready_admission.blocker_counts");
-    expect(warning).toContain("reroute/downclassify/owner-restart target_unhealthy=6 rows where safe");
+    expect(warning).toContain("runtime repair for target_unhealthy=6 rows where safe");
     expect(warning).toContain("duplicate_dispatch_retry_required=1 rows");
     expect(warning).toContain("mark retry_safe only for bounded refires or close stale duplicates");
   });

@@ -271,7 +271,7 @@ function withReadyAdmissionOperatorSummary(
   );
   const exampleText = groupExamples.length > 0 ? `: ${groupExamples.join("; ")}` : "";
   const action =
-    `Reroute, downclassify/supersede, or restart owners for ${unhealthyTargets} target_unhealthy ready row(s) where safe${exampleText}; ` +
+    `Runtime repair for ${unhealthyTargets} target_unhealthy ready row(s) where safe${exampleText}; ` +
     "keep admitting available pool rows while capacity exists, and top off compatible pool fuel only if healthy capacity runs short.";
   const safeActions = health.operator_summary.safe_actions.includes(action)
     ? health.operator_summary.safe_actions
