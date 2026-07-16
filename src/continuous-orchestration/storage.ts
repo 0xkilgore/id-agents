@@ -991,6 +991,131 @@ export async function reconcileOfflineSupersededReadyRow(
   };
 }
 
+export type ClearDependencyBlockerResult =
+  | {
+      ok: true;
+      item: BacklogItem;
+      dependency: string;
+      dependency_state: "done" | "superseded";
+      actor: string;
+      reason: string;
+      cleared: boolean;
+      receipt: StaleDuplicateCloseoutReceipt;
+    }
+  | { ok: false; status: number; error: string; reason: string; item?: BacklogItem };
+
+export async function clearBacklogDependencyBlocker(
+  adapter: DbAdapter,
+  item_id: string,
+  opts: { team_id?: string; dependency: string; actor: string; reason: string },
+): Promise<ClearDependencyBlockerResult> {
+  const teamId = opts.team_id ?? "default";
+  const dependency = opts.dependency.trim();
+  const actor = opts.actor.trim();
+  const reason = opts.reason.trim();
+  if (!dependency) return { ok: false, status: 400, error: "dependency required", reason: "dependency_required" };
+  if (!actor) return { ok: false, status: 400, error: "actor required", reason: "actor_required" };
+  if (!reason) return { ok: false, status: 400, error: "reason required", reason: "reason_required" };
+
+  const item = await getBacklogItem(adapter, item_id);
+  if (!item || item.team_id !== teamId) {
+    return { ok: false, status: 404, error: "backlog item not found", reason: "not_found" };
+  }
+  if (item.readiness_state !== "ready" && item.readiness_state !== "blocked_dependency") {
+    return {
+      ok: false,
+      status: 409,
+      error: `cannot clear dependency blocker from ${item.readiness_state}`,
+      reason: "invalid_state",
+      item,
+    };
+  }
+  if (!item.dependencies.includes(dependency)) {
+    return { ok: false, status: 409, error: "dependency is not attached to backlog item", reason: "dependency_not_attached", item };
+  }
+
+  const { rows } = await adapter.query<BacklogRow>(
+    `SELECT * FROM orchestration_backlog_item
+      WHERE team_id = $1 AND (item_id = $2 OR logical_key = $3)
+      ORDER BY CASE WHEN item_id = $4 THEN 0 ELSE 1 END, updated_at DESC
+      LIMIT 1`,
+    [teamId, dependency, dependency, dependency],
+  );
+  const upstream = rows[0] ? rowToBacklogItem(rows[0]) : null;
+  if (!upstream || (upstream.readiness_state !== "done" && upstream.readiness_state !== "superseded")) {
+    return {
+      ok: false,
+      status: 409,
+      error: "dependency is not landed or superseded",
+      reason: "dependency_not_terminal",
+      item,
+    };
+  }
+
+  const nextDependencies = item.dependencies.filter((d) => d !== dependency);
+  const now = new Date().toISOString();
+  const receipt: StaleDuplicateCloseoutReceipt = {
+    schema_version: "orchestration.stale_duplicate_closeout_receipt.v1",
+    closed_by: actor,
+    closed_at: now,
+    actor,
+    timestamp: now,
+    from_state: item.readiness_state,
+    to_state: "ready",
+    reason: "dependency_blocker_cleared",
+    track: item.track ?? null,
+    next_action: "clear_dependency_blocker",
+    prior_dispatch_phid: item.last_dispatch_phid ?? "",
+    prior_dispatch_status: upstream.readiness_state,
+    successor_dispatch_phid: null,
+    redispatch_safety: {
+      safe_to_not_redispatch: true,
+      reason,
+    },
+  };
+
+  await adapter.query(
+    `UPDATE orchestration_backlog_item
+        SET readiness_state = 'ready',
+            dependencies_json = $1,
+            stale_duplicate_closeout_receipt_json = $2,
+            updated_by = $3,
+            updated_at = $4
+      WHERE team_id = $5 AND item_id = $6`,
+    [JSON.stringify(nextDependencies), JSON.stringify(receipt), actor, now, teamId, item.item_id],
+  );
+  await appendDecisions(adapter, {
+    team_id: teamId,
+    tick_id: "operator:clear_dependency_blocker",
+    dry_run: false,
+    records: [{
+      item_id: item.item_id,
+      action: "reconciled",
+      reason,
+      metadata: {
+        operation: "clear_dependency_blocker",
+        actor,
+        dependency,
+        dependency_state: upstream.readiness_state,
+        dependencies_before: item.dependencies,
+        dependencies_after: nextDependencies,
+      },
+    }],
+  });
+  const updated = await getBacklogItem(adapter, item.item_id);
+  if (!updated) throw new Error("clearBacklogDependencyBlocker: row not found after update");
+  return {
+    ok: true,
+    item: updated,
+    dependency,
+    dependency_state: upstream.readiness_state,
+    actor,
+    reason,
+    cleared: nextDependencies.length < item.dependencies.length,
+    receipt,
+  };
+}
+
 /**
  * Close stale READY/needs_review rows that were already dispatched and now have
  * terminal scheduler evidence. This is deliberately conservative: retry_safe
