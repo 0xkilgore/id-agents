@@ -109,6 +109,7 @@ export interface OrchestrationQueueQualityProjection {
   suppressed_by_dedupe: number;
   blocked_or_failed: number;
   task_action_receipts: TaskActionReceiptCounts;
+  failed_task_action_receipts: FailedTaskActionReceiptProjection;
   top_noise_patterns: OrchestrationQueueNoisePattern[];
   explanation: string;
 }
@@ -269,6 +270,32 @@ export interface TaskActionReceiptCounts {
   consumed: number;
 }
 
+export type FailedTaskActionReceiptRecommendation = "retry" | "noop" | "supersede";
+
+export interface FailedTaskActionReceiptItem {
+  artifact_id: string;
+  op_id: number;
+  actor: string | null;
+  route_kind: string | null;
+  target_agent: string | null;
+  updated_at: string | null;
+  retryable: boolean;
+  skipped: string | null;
+  error: string | null;
+  failure_detail: string | null;
+  recommendation: FailedTaskActionReceiptRecommendation;
+  reason: string;
+}
+
+export interface FailedTaskActionReceiptProjection {
+  schema_version: "orchestration.failed_task_action_receipts.v1";
+  count: number;
+  limit: number;
+  truncated: boolean;
+  recommendations: Record<FailedTaskActionReceiptRecommendation, number>;
+  items: FailedTaskActionReceiptItem[];
+}
+
 interface DispatchRow {
   dispatch_phid: string;
   query_id: string | null;
@@ -355,6 +382,7 @@ interface OrchestrationHealthProjectionOptions {
 }
 
 const RECOVERED_STATUSES = ["moot", "landed_reconciled", "verified_done", "retry_done"];
+const FAILED_TASK_ACTION_RECEIPT_LIMIT = 25;
 
 export async function readOrchestrationHealthProjection(
   adapter: DbAdapter,
@@ -1321,7 +1349,7 @@ async function readQueueQualityProjection(
     activeBlockerCounts.needsClarification;
 
   const noise = classifyArtifactNoise(artifactNoise);
-  const blockedOrFailed = blockedBacklog + failedDispatches + noise.retryableRouteFailures;
+  const blockedOrFailed = blockedBacklog + failedDispatches + noise.taskActionReceipts.failed;
   const explanation = queueQualityExplanation({
     actionableReady,
     readyAdmission,
@@ -1329,6 +1357,7 @@ async function readQueueQualityProjection(
     needsApproval,
     duplicateOrNoop: noise.duplicateOrNoop,
     suppressedByDedupe: noise.suppressedByDedupe,
+    failedTaskActionReceipts: noise.failedTaskActionReceipts.count,
     blockedOrFailed,
     activeBlockerCounts,
   });
@@ -1341,6 +1370,7 @@ async function readQueueQualityProjection(
     suppressed_by_dedupe: noise.suppressedByDedupe,
     blocked_or_failed: blockedOrFailed,
     task_action_receipts: noise.taskActionReceipts,
+    failed_task_action_receipts: noise.failedTaskActionReceipts,
     top_noise_patterns: noise.topPatterns,
     explanation,
   };
@@ -1511,18 +1541,30 @@ function classifyArtifactNoise(rows: ArtifactCommentNoiseRow[]): {
   suppressedByDedupe: number;
   retryableRouteFailures: number;
   taskActionReceipts: TaskActionReceiptCounts;
+  failedTaskActionReceipts: FailedTaskActionReceiptProjection;
   topPatterns: OrchestrationQueueNoisePattern[];
 } {
   const groups = new Map<string, { count: number; examples: string[]; pattern: string }>();
   let duplicateOrNoop = 0;
   let retryableRouteFailures = 0;
   const taskActionReceipts: TaskActionReceiptCounts = { routed: 0, failed: 0, needs_chris: 0, consumed: 0 };
+  const failedItems: FailedTaskActionReceiptItem[] = [];
+  const failedRecommendations: Record<FailedTaskActionReceiptRecommendation, number> = {
+    retry: 0,
+    noop: 0,
+    supersede: 0,
+  };
 
   for (const row of rows) {
     const payload = parseJson(row.payload_json);
     const routeStatus = parseRouteStatus(payload?.route_status);
     countTaskActionReceipt(taskActionReceipts, routeStatus);
     if (routeStatus?.retryable) retryableRouteFailures += 1;
+    const failedReceipt = classifyFailedTaskActionReceipt(row, routeStatus);
+    if (failedReceipt) {
+      failedRecommendations[failedReceipt.recommendation] += 1;
+      failedItems.push(failedReceipt);
+    }
     if (!isNoopAckRoute(routeStatus)) continue;
 
     duplicateOrNoop += 1;
@@ -1544,8 +1586,25 @@ function classifyArtifactNoise(rows: ArtifactCommentNoiseRow[]): {
     .sort((a, b) => b.count - a.count || a.pattern.localeCompare(b.pattern))
     .slice(0, 5)
     .map((group) => ({ pattern: group.pattern, count: group.count, examples: group.examples }));
+  const failedTaskActionReceipts: FailedTaskActionReceiptProjection = {
+    schema_version: "orchestration.failed_task_action_receipts.v1",
+    count: failedItems.length,
+    limit: FAILED_TASK_ACTION_RECEIPT_LIMIT,
+    truncated: failedItems.length > FAILED_TASK_ACTION_RECEIPT_LIMIT,
+    recommendations: failedRecommendations,
+    items: failedItems
+      .sort(compareFailedTaskActionReceiptItems)
+      .slice(0, FAILED_TASK_ACTION_RECEIPT_LIMIT),
+  };
 
-  return { duplicateOrNoop, suppressedByDedupe, retryableRouteFailures, taskActionReceipts, topPatterns };
+  return {
+    duplicateOrNoop,
+    suppressedByDedupe,
+    retryableRouteFailures,
+    taskActionReceipts,
+    failedTaskActionReceipts,
+    topPatterns,
+  };
 }
 
 function countTaskActionReceipt(counts: TaskActionReceiptCounts, routeStatus: ParsedRouteStatus | null): void {
@@ -1564,6 +1623,55 @@ function countTaskActionReceipt(counts: TaskActionReceiptCounts, routeStatus: Pa
   ) {
     counts.consumed += 1;
   }
+}
+
+function classifyFailedTaskActionReceipt(
+  row: ArtifactCommentNoiseRow,
+  routeStatus: ParsedRouteStatus | null,
+): FailedTaskActionReceiptItem | null {
+  if (!routeStatus) return null;
+  const failed =
+    routeStatus.retryable ||
+    !!routeStatus.error ||
+    isHistoricalLinkedQueryFailure(routeStatus);
+  if (!failed) return null;
+
+  let recommendation: FailedTaskActionReceiptRecommendation;
+  let reason: string;
+  if (routeStatus.retryable) {
+    recommendation = "retry";
+    reason = "route status is retryable";
+  } else if (isHistoricalLinkedQueryFailure(routeStatus)) {
+    recommendation = "noop";
+    reason = "historical linked-query failure is terminal noise";
+  } else {
+    recommendation = "supersede";
+    reason = "route failed without retryable evidence";
+  }
+
+  return {
+    artifact_id: row.artifact_id,
+    op_id: row.op_id,
+    actor: row.actor ?? null,
+    route_kind: routeStatus.route_kind,
+    target_agent: routeStatus.target_agent ?? row.artifact_agent ?? null,
+    updated_at: routeStatus.updated_at,
+    retryable: routeStatus.retryable,
+    skipped: routeStatus.skipped,
+    error: routeStatus.error,
+    failure_detail: routeStatus.failure_detail,
+    recommendation,
+    reason,
+  };
+}
+
+function compareFailedTaskActionReceiptItems(
+  a: FailedTaskActionReceiptItem,
+  b: FailedTaskActionReceiptItem,
+): number {
+  return String(b.updated_at ?? "").localeCompare(String(a.updated_at ?? "")) ||
+    a.artifact_id.localeCompare(b.artifact_id) ||
+    a.op_id - b.op_id;
 }
 
 function isHistoricalLinkedQueryFailure(routeStatus: ParsedRouteStatus): boolean {
@@ -1599,6 +1707,7 @@ interface ParsedRouteStatus {
   skipped: string | null;
   error: string | null;
   failure_detail: string | null;
+  updated_at: string | null;
   needs_chris: boolean;
   dispatch: { dispatch_phid?: string | null } | null;
   task_triage_id: string | null;
@@ -1619,6 +1728,7 @@ function parseRouteStatus(value: unknown): ParsedRouteStatus | null {
     skipped: typeof v.skipped === "string" ? v.skipped : null,
     error: typeof v.error === "string" && v.error.trim() !== "" ? v.error : null,
     failure_detail: typeof v.failure_detail === "string" && v.failure_detail.trim() !== "" ? v.failure_detail : null,
+    updated_at: typeof v.updated_at === "string" && v.updated_at.trim() !== "" ? v.updated_at : null,
     needs_chris: v.needs_chris === true || v.requires_chris === true || v.skipped === "needs_chris",
     dispatch,
     task_triage_id: firstString(v.task_triage_id, v.taskTriageId, v.triage_id, v.triageId),
@@ -1672,6 +1782,7 @@ function queueQualityExplanation(input: {
   needsApproval: number;
   duplicateOrNoop: number;
   suppressedByDedupe: number;
+  failedTaskActionReceipts: number;
   blockedOrFailed: number;
   activeBlockerCounts: { needsClarification: number; promotion: number };
 }): string {
@@ -1691,6 +1802,9 @@ function queueQualityExplanation(input: {
   }
   if (input.needsApproval > 0) reasons.push(`${input.needsApproval} need approval/review`);
   if (input.blockedOrFailed > 0) reasons.push(`${input.blockedOrFailed} blocked or failed`);
+  if (input.failedTaskActionReceipts > 0) {
+    reasons.push(`${input.failedTaskActionReceipts} failed task-action receipt(s) require retry/noop/supersede disposition`);
+  }
   if (input.duplicateOrNoop > 0) reasons.push(`${input.duplicateOrNoop} duplicate/no-op artifact acknowledgement(s)`);
   if (input.suppressedByDedupe > 0) reasons.push(`${input.suppressedByDedupe} suppressed by dedupe`);
   if (input.activeBlockerCounts.needsClarification > 0) reasons.push(`${input.activeBlockerCounts.needsClarification} clarification blocker(s)`);

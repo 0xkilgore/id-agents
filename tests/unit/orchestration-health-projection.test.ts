@@ -1949,7 +1949,28 @@ describe("orchestration health projection", () => {
       needs_chris: 1,
       consumed: 1,
     });
+    expect(health.queue_quality.failed_task_action_receipts).toMatchObject({
+      schema_version: "orchestration.failed_task_action_receipts.v1",
+      count: 1,
+      limit: 25,
+      truncated: false,
+      recommendations: { retry: 1, noop: 0, supersede: 0 },
+      items: [
+        {
+          artifact_id: "art:triage:receipts.md",
+          op_id: 2,
+          route_kind: "task_note",
+          target_agent: "roger",
+          updated_at: "2026-07-01T15:01:00.000Z",
+          retryable: true,
+          error: "agent unavailable",
+          recommendation: "retry",
+          reason: "route status is retryable",
+        },
+      ],
+    });
     expect(health.queue_quality.blocked_or_failed).toBe(1);
+    expect(health.queue_quality.explanation).toContain("1 failed task-action receipt(s) require retry/noop/supersede disposition");
   });
 
   it("does not treat historical failed linked-query receipts as live Chris action", async () => {
@@ -1983,6 +2004,98 @@ describe("orchestration health projection", () => {
       failed: 1,
       needs_chris: 0,
       consumed: 0,
+    });
+    expect(health.queue_quality.failed_task_action_receipts).toMatchObject({
+      count: 1,
+      recommendations: { retry: 0, noop: 1, supersede: 0 },
+      items: [
+        {
+          artifact_id: "art:triage:historical-linked-query.md",
+          route_kind: "linked_query",
+          target_agent: "roger",
+          recommendation: "noop",
+          reason: "historical linked-query failure is terminal noise",
+        },
+      ],
+    });
+  });
+
+  it("bounds failed task-action receipt examples and classifies retry/noop/supersede recommendations", async () => {
+    await migrateOutputsTables(adapter);
+    await insertArtifact("art:triage:failed-receipts.md", "roger");
+
+    await insertCommentOp({
+      artifact_id: "art:triage:failed-receipts.md",
+      actor: "user:chris",
+      body: "retry me",
+      reaction: "comment",
+      route_status: {
+        route_kind: "task_note",
+        routed: false,
+        retryable: true,
+        target_agent: "roger",
+        dispatch: null,
+        skipped: null,
+        error: "scheduler unavailable",
+        updated_at: "2026-07-01T15:00:00.000Z",
+      },
+    });
+    await insertCommentOp({
+      artifact_id: "art:triage:failed-receipts.md",
+      actor: "system",
+      body: "old linked query failed",
+      reaction: "comment",
+      route_status: {
+        visible_state: "recorded-but-route-failed",
+        route_kind: "linked_query",
+        routed: false,
+        retryable: false,
+        target_agent: "roger",
+        dispatch: null,
+        skipped: null,
+        error: null,
+        failure_detail: "linked query terminated expired",
+        updated_at: "2026-07-01T15:01:00.000Z",
+      },
+    });
+
+    for (let i = 0; i < 28; i += 1) {
+      await insertCommentOp({
+        artifact_id: "art:triage:failed-receipts.md",
+        actor: "user:chris",
+        body: `supersede ${i}`,
+        reaction: "comment",
+        route_status: {
+          route_kind: "task_note",
+          routed: false,
+          retryable: false,
+          target_agent: "roger",
+          dispatch: null,
+          skipped: null,
+          error: "target_agent_unresolved",
+          updated_at: `2026-07-01T15:${String(i + 2).padStart(2, "0")}:00.000Z`,
+        },
+      });
+    }
+
+    const health = await readOrchestrationHealthProjection(adapter, "default");
+
+    expect(health.queue_quality.task_action_receipts.failed).toBe(30);
+    expect(health.queue_quality.blocked_or_failed).toBe(30);
+    expect(health.queue_quality.failed_task_action_receipts).toMatchObject({
+      schema_version: "orchestration.failed_task_action_receipts.v1",
+      count: 30,
+      limit: 25,
+      truncated: true,
+      recommendations: { retry: 1, noop: 1, supersede: 28 },
+    });
+    expect(health.queue_quality.failed_task_action_receipts.items).toHaveLength(25);
+    expect(health.queue_quality.failed_task_action_receipts.items[0]).toMatchObject({
+      artifact_id: "art:triage:failed-receipts.md",
+      route_kind: "task_note",
+      recommendation: "supersede",
+      reason: "route failed without retryable evidence",
+      updated_at: "2026-07-01T15:29:00.000Z",
     });
   });
 
