@@ -1284,11 +1284,11 @@ describe("buildReleaseProofReadiness", () => {
     });
   });
 
-  it("keeps release-proof evidence state separate from manager system health facts", () => {
+  it("keeps stale feedback, missing source links, and infra warnings release-proof visible together", () => {
     const view = buildReleaseProofReadiness(base({
       feedback_evidence: [
         {
-          id: "op:stale-missing-source",
+          id: "op:stale-source-missing",
           kind: "comment_recorded",
           observed_at: "2026-07-12T10:00:00.000Z",
           source_link: null,
@@ -1296,51 +1296,52 @@ describe("buildReleaseProofReadiness", () => {
           summary: "Old feedback without durable source.",
         },
       ],
+      infra_warnings: ["orchestration loop degraded: scheduler freshness warning"],
       source_links: [],
-      infra_warnings: [],
-      system_health: {
-        disk_state: "critical",
-        build_behind_origin: true,
-        deploy_blockers: ["deploy checkout dirty"],
-      },
-      stale_after_ms: 24 * 60 * 60 * 1000,
+      generated_artifacts: [
+        {
+          artifact_id: "art-source-missing",
+          path: null,
+          title: "Kapelle release proof",
+          produced_at: "2026-07-13T11:20:00.000Z",
+          source_link: null,
+          availability: "present",
+        },
+      ],
     }));
 
-    expect(view.release_readiness).toBe("not_ready");
-    expect(view.chris_readable_release_ready).toBe("NOT READY");
-    expect(view.feedback_freshness).toEqual({
-      state: "stale",
-      latest_at: "2026-07-12T10:00:00.000Z",
-      stale_after_ms: 24 * 60 * 60 * 1000,
-      stale: true,
-      reason: "latest feedback evidence is older than 24h",
+    expect(view).toMatchObject({
+      release_readiness: "not_ready",
+      chris_readable_release_ready: "NOT READY",
+      feedback_evidence: {
+        state: "stale",
+        count: 1,
+        latest_at: "2026-07-12T10:00:00.000Z",
+      },
+      infra_warnings: {
+        state: "warning",
+        count: 1,
+        source: "orchestration_health_projection",
+        action: "review orchestration health and resolve infra warnings before release proof sign-off",
+        items: ["orchestration loop degraded: scheduler freshness warning"],
+      },
+      sources: {
+        state: "missing",
+        links: [],
+      },
+      generated_artifacts: {
+        state: "missing",
+        count: 1,
+      },
     });
-    expect(view.source_link_state).toEqual({
-      state: "missing",
-      safe_count: 0,
-      unsafe_count: 0,
-      total_count: 0,
-    });
-    expect(view.infra_warning).toEqual({
-      state: "clear",
-      count: 0,
-      requires_operator_review: false,
-      source: "none",
-      action: null,
-    });
-    expect(view.infra_warnings).toMatchObject({ state: "clear", count: 0, source: "none", action: null, items: [] });
-    expect(view.system_health).toEqual({
-      state: "critical",
-      disk: { state: "critical", disk_critical: true },
-      build: { build_behind_origin: true },
-      deploy_blockers: { blocked: true, reasons: ["deploy checkout dirty"] },
-    });
-    expect(view.stale_reasons).toEqual(["latest feedback evidence is older than 24h"]);
+    expect(view.stale_reasons).toEqual(["latest feedback evidence is older than 1h"]);
     expect(view.missing_reasons).toEqual([
+      "one or more generated artifacts are missing safe source links",
       "no source links are attached to the release proof",
       "one or more feedback evidence items have null source_link",
     ]);
-    expect(view.summary).toBe("Release proof is not ready: latest feedback evidence is older than 24h.");
+    expect(view.error_reasons).toEqual([]);
+    expect(view.summary).toBe("Release proof is not ready: infra warnings require operator review.");
   });
 
   it("does not report clear infra state as the blocker when stale feedback is the issue", () => {

@@ -1910,7 +1910,8 @@ export class ContinuousOrchestrationDaemon {
       }
     }
     const capacityFuel = buildCapacityFuel(ready, inFlight, config.max_in_flight, nonUsefulReadyFuelIds);
-    const plan = selectAutoPromotions(needsReview, capacityFuel.floorItems, {
+    const floorItems = capacityFuel.capacityOccupied ? capacityFuel.floorItems : capacityFuel.usefulReadyBuild;
+    const plan = selectAutoPromotions(needsReview, floorItems, {
       floor: config.auto_promote_floor,
       minLanes: config.auto_promote_min_lanes,
       maxPerPass: config.auto_promote_max_per_tick,
@@ -2023,7 +2024,7 @@ export class ContinuousOrchestrationDaemon {
       lanes: {
         build_ready: capacityFuel.readyBuild.length,
         build_in_flight: capacityFuel.inFlightBuild.length,
-        ready_plus_in_flight: plan.before.build_ready,
+        ready_plus_in_flight: capacityFuel.floorItems.length,
         capacity_occupied: capacityFuel.capacityOccupied,
         build_ready_lanes: plan.before.build_lanes,
         ready_lane_keys: readyLaneKeys,
@@ -2489,7 +2490,6 @@ export class ContinuousOrchestrationDaemon {
       listBacklogByState(this.deps.adapter, { team_id: this.teamId, state: "in_flight" }),
     ]);
     if (inFlight.length >= config.max_in_flight) return null;
-    const floorReady = [...ready, ...inFlight];
     // T-ORCH P0 (continuous self-refuel): refuel on ANY tick where READY fuel is
     // below threshold — not only at the 3 batch load-points. Low ready-fuel
     // auto-promotes+fleshes backlog items into READY as the daemon drains them,
@@ -2498,7 +2498,7 @@ export class ContinuousOrchestrationDaemon {
     // ADMISSION-V2 parallel-fuel floor: also refuel when READY spans too FEW
     // distinct lanes (even if the total is fine) so the parallel pool stays fed
     // across lanes, not just in aggregate.
-    if (!needsRefuel(floorReady, { minReadyFuel: config.min_ready_fuel, minReadyLanes: config.min_ready_lanes })) {
+    if (!needsRefuel(ready, { minReadyFuel: config.min_ready_fuel, minReadyLanes: config.min_ready_lanes })) {
       return null;
     }
 
@@ -2582,7 +2582,7 @@ export class ContinuousOrchestrationDaemon {
       const nonUsefulReadyFuelIds = await this.nonUsefulProviderRuntimeReadyFuelIds(ready);
       const capacityFuel = buildCapacityFuel(ready, inFlight, config.max_in_flight, nonUsefulReadyFuelIds);
       if (capacityFuel.capacityOccupied) return null;
-      const plan = selectAutoPromotions(needsReview, capacityFuel.floorItems, {
+      const plan = selectAutoPromotions(needsReview, capacityFuel.usefulReadyBuild, {
         floor: config.auto_promote_floor,
         minLanes: config.auto_promote_min_lanes,
         maxPerPass: config.auto_promote_max_per_tick,
@@ -2838,6 +2838,7 @@ function buildCapacityFuel(
   nonUsefulReadyItemIds: Set<string> = new Set(),
 ): {
   readyBuild: BacklogItem[];
+  usefulReadyBuild: BacklogItem[];
   inFlightBuild: BacklogItem[];
   floorItems: BacklogItem[];
   capacityOccupied: boolean;
@@ -2849,6 +2850,7 @@ function buildCapacityFuel(
   const inFlightBuild = inFlight.filter((item) => item.risk_class === "build");
   return {
     readyBuild,
+    usefulReadyBuild,
     inFlightBuild,
     floorItems: [...usefulReadyBuild, ...inFlightBuild],
     capacityOccupied: maxInFlight > 0 && inFlight.length >= maxInFlight,
