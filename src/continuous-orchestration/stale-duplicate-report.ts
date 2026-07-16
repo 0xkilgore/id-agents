@@ -127,7 +127,7 @@ export function selectStaleDuplicateBacklogRows(
       item_id: item.item_id,
       title: item.title,
       readiness_state: item.readiness_state,
-      prior_dispatch_phid: item.last_dispatch_phid,
+      prior_dispatch_phid: outcome.dispatch_phid,
       prior_terminal_status: terminalStatus,
       promotion_verified: promotionVerified,
       recommended_action: action,
@@ -142,7 +142,7 @@ export function selectStaleDuplicateBacklogRows(
         actor: "operator",
         reason,
         evidence: {
-          prior_dispatch_phid: item.last_dispatch_phid,
+          prior_dispatch_phid: outcome.dispatch_phid,
           prior_dispatch_status: terminalStatus,
           promotion_verified: promotionVerified,
         },

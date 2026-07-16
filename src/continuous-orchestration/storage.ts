@@ -584,6 +584,8 @@ export async function getDispatchStatusesByPhid(
 
 export interface DispatchOutcome {
   dispatch_phid: string;
+  query_id: string | null;
+  agent_query_id: string | null;
   status: string;
   not_before_at: string | null;
   started_at: string | null;
@@ -613,12 +615,29 @@ export async function getDispatchOutcomesByPhid(
   adapter: DbAdapter,
   phids: string[],
 ): Promise<Map<string, DispatchOutcome>> {
+  return getDispatchOutcomesByIdentifier(adapter, phids);
+}
+
+/**
+ * Read dispatch details by any stable dispatch identifier we may have persisted
+ * on a backlog row: dispatch PHID, scheduler query id, or agent linked query id.
+ * Values are mapped back under every known identifier so callers can preserve
+ * their compare-and-set field while still reporting the canonical dispatch PHID.
+ */
+export async function getDispatchOutcomesByIdentifier(
+  adapter: DbAdapter,
+  identifiers: string[],
+): Promise<Map<string, DispatchOutcome>> {
   const out = new Map<string, DispatchOutcome>();
-  const unique = [...new Set(phids.filter((p): p is string => !!p))];
+  const unique = [...new Set(identifiers.map((p) => p?.trim()).filter((p): p is string => !!p))];
   if (unique.length === 0) return out;
-  const placeholders = unique.map((_, i) => `$${i + 1}`).join(",");
+  const dispatchPlaceholders = unique.map((_, i) => `$${i + 1}`).join(",");
+  const queryPlaceholders = unique.map((_, i) => `$${unique.length + i + 1}`).join(",");
+  const agentQueryPlaceholders = unique.map((_, i) => `$${unique.length * 2 + i + 1}`).join(",");
   const { rows } = await adapter.query<{
     dispatch_phid: string;
+    query_id: string | null;
+    agent_query_id: string | null;
     status: string;
     not_before_at: string | null;
     started_at: string | null;
@@ -634,16 +653,20 @@ export async function getDispatchOutcomesByPhid(
     promotion_required_reason: string | null;
     promotion_result_json: string | null;
   }>(
-    `SELECT dispatch_phid, status, not_before_at, started_at, updated_at,
+    `SELECT dispatch_phid, query_id, agent_query_id, status, not_before_at, started_at, updated_at,
             recovery_status, recovery_reason, reliability_classification, reliability_classification_reason,
             failure_kind, failure_detail, recovery_attempts, promote, promotion_required_reason, promotion_result_json
        FROM dispatch_scheduler_queue
-      WHERE dispatch_phid IN (${placeholders})`,
-    unique,
+      WHERE dispatch_phid IN (${dispatchPlaceholders})
+         OR query_id IN (${queryPlaceholders})
+         OR agent_query_id IN (${agentQueryPlaceholders})`,
+    [...unique, ...unique, ...unique],
   );
   for (const r of rows) {
-    out.set(r.dispatch_phid, {
+    const outcome = {
       dispatch_phid: r.dispatch_phid,
+      query_id: r.query_id,
+      agent_query_id: r.agent_query_id,
       status: r.recovery_status === "moot" ? "moot" : r.status,
       not_before_at: r.not_before_at,
       started_at: r.started_at,
@@ -658,7 +681,10 @@ export async function getDispatchOutcomesByPhid(
       promote: r.promote == null ? true : Number(r.promote) === 1,
       promotion_required_reason: r.promotion_required_reason,
       promotion_result_json: r.promotion_result_json,
-    });
+    };
+    for (const key of [r.dispatch_phid, r.query_id, r.agent_query_id]) {
+      if (key) out.set(key, outcome);
+    }
   }
   return out;
 }
@@ -1225,6 +1251,8 @@ export async function reconcileStaleAlreadyDispatchedReadyRows(
     const promotionVerified = promotionCompletedAndVerified(row.promotion_result_json);
     const disposition = classifyDuplicateDispatchRetryDisposition({
       dispatch_phid: row.last_dispatch_phid ?? "",
+      query_id: null,
+      agent_query_id: null,
       status,
       not_before_at: null,
       started_at: null,

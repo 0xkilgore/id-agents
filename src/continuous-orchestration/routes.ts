@@ -21,6 +21,7 @@ import {
   clearBacklogDependencyBlocker,
   findProbableDuplicateByRegisterId,
   getBacklogItem,
+  getDispatchOutcomesByIdentifier,
   getDispatchOutcomesByPhid,
   getDispatchStatusesByPhid,
   getFleshCounts,
@@ -590,7 +591,7 @@ export function mountContinuousOrchestrationRoutes(app: Application, opts: Orche
         listBacklogByState(adapter, { team_id: teamId, state: "ready" }),
       ]);
       const items = [...needsReview, ...ready];
-      const outcomes = await getDispatchOutcomesByPhid(
+      const outcomes = await getDispatchOutcomesByIdentifier(
         adapter,
         items.map((item) => item.last_dispatch_phid).filter((phid): phid is string => !!phid),
       );

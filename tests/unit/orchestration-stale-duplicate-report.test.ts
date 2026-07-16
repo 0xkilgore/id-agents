@@ -49,6 +49,8 @@ async function call(path: string): Promise<{ status: number; body: any }> {
 async function seedDispatch(overrides: {
   phid: string;
   status: string;
+  query_id?: string;
+  agent_query_id?: string | null;
   recovery_status?: string | null;
   recovery_reason?: string | null;
   reliability_classification?: string | null;
@@ -63,12 +65,12 @@ async function seedDispatch(overrides: {
        (dispatch_phid, team_id, query_id, to_agent, from_actor, channel, subject,
         body_markdown, provider, runtime, status, not_before_at, updated_at,
         recovery_status, recovery_reason, reliability_classification, reliability_classification_reason,
-        failure_kind, failure_detail, promotion_result_json)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)`,
+        failure_kind, failure_detail, promotion_result_json, agent_query_id)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)`,
     [
       overrides.phid,
       "team-uuid-test",
-      `q_${overrides.phid}`,
+      overrides.query_id ?? `q_${overrides.phid}`,
       "roger",
       "co",
       "manager",
@@ -86,6 +88,7 @@ async function seedDispatch(overrides: {
       overrides.failure_kind ?? null,
       overrides.failure_detail ?? null,
       overrides.promotion_result_json ?? null,
+      overrides.agent_query_id ?? null,
     ],
   );
 }
@@ -159,7 +162,7 @@ describe("GET /orchestration/backlog/stale-duplicates", () => {
     const r = await call("/orchestration/backlog/stale-duplicates");
     const after = await stateCounts();
 
-    expect(r.status).toBe(200);
+    expect(r.status, JSON.stringify(r.body)).toBe(200);
     expect(r.body.ok).toBe(true);
     expect(r.body.report).toMatchObject({
       schema_version: "orchestration.stale_duplicate_backlog_report.v1",
@@ -255,7 +258,7 @@ describe("GET /orchestration/backlog/stale-duplicates", () => {
     const r = await call("/orchestration/backlog/stale-duplicates?limit=1");
     const after = await stateCounts();
 
-    expect(r.status).toBe(200);
+    expect(r.status, JSON.stringify(r.body)).toBe(200);
     expect(after).toEqual(before);
     expect(r.body.report).toMatchObject({
       dry_run: true,
@@ -309,7 +312,7 @@ describe("GET /orchestration/backlog/stale-duplicates", () => {
     const r = await call("/orchestration/backlog/stale-duplicates");
     const after = await stateCounts();
 
-    expect(r.status).toBe(200);
+    expect(r.status, JSON.stringify(r.body)).toBe(200);
     expect(after).toEqual(before);
     expect(r.body.report).toMatchObject({
       dry_run: true,
@@ -337,5 +340,65 @@ describe("GET /orchestration/backlog/stale-duplicates", () => {
     });
     expect(r.body.report.items.map((item: any) => item.title)).not.toContain("failed retry_safe linked-query row");
     expect(r.body.report.items.map((item: any) => item.title)).not.toContain("active linked-query row");
+  });
+
+  it("resolves expired linked query ids to landed dispatches without refiring retry-safe failures or active rows", async () => {
+    await seedDispatch({
+      phid: "phid:landed-linked-query",
+      query_id: "query_manager_landed",
+      agent_query_id: "query_expired_linked",
+      status: "done",
+    });
+    await seedDispatch({ phid: "phid:active-linked-query", agent_query_id: "query_active_linked", status: "in_flight" });
+    await seedDispatch({ phid: "phid:failed-linked-query", agent_query_id: "query_failed_retry_safe", status: "failed" });
+
+    const linkedDone = await seedBacklog({
+      title: "expired linked query duplicate",
+      state: "ready",
+      phid: "query_expired_linked",
+    });
+    await seedBacklog({ title: "active linked query duplicate", state: "ready", phid: "query_active_linked" });
+    await seedBacklog({
+      title: "retry-safe failed linked query",
+      state: "ready",
+      phid: "query_failed_retry_safe",
+      retry_safe: true,
+    });
+
+    const before = await stateCounts();
+    const r = await call("/orchestration/backlog/stale-duplicates");
+    const after = await stateCounts();
+
+    expect(r.status, JSON.stringify(r.body)).toBe(200);
+    expect(after).toEqual(before);
+    expect(r.body.report).toMatchObject({
+      dry_run: true,
+      scanned: 3,
+      matched: 1,
+      count: 1,
+    });
+
+    expect(r.body.report.items).toHaveLength(1);
+    expect(r.body.report.items[0]).toMatchObject({
+      item_id: linkedDone.item_id,
+      title: "expired linked query duplicate",
+      readiness_state: "ready",
+      prior_dispatch_phid: "phid:landed-linked-query",
+      prior_terminal_status: "done",
+      recommended_action: "mark_done",
+      safe_closeout_payload: {
+        dry_run: true,
+        item_id: linkedDone.item_id,
+        expected_last_dispatch_phid: "query_expired_linked",
+        from_state: "ready",
+        to_state: "done",
+        evidence: {
+          prior_dispatch_phid: "phid:landed-linked-query",
+          prior_dispatch_status: "done",
+        },
+      },
+    });
+    expect(r.body.report.items.map((item: any) => item.title)).not.toContain("active linked query duplicate");
+    expect(r.body.report.items.map((item: any) => item.title)).not.toContain("retry-safe failed linked query");
   });
 });
