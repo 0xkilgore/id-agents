@@ -1057,10 +1057,13 @@ export async function reconcileStaleAlreadyDispatchedReadyRows(
       toState === "done"
         ? `already-dispatched ready row closed after terminal dispatch ${status}`
         : `already-dispatched ready row superseded after terminal dispatch ${status}`;
+    const closedAt = new Date().toISOString();
     const receipt: StaleDuplicateCloseoutReceipt = {
       schema_version: "orchestration.stale_duplicate_closeout_receipt.v1",
       closed_by: actor,
-      closed_at: new Date().toISOString(),
+      closed_at: closedAt,
+      actor,
+      timestamp: closedAt,
       from_state: "ready",
       to_state: toState,
       reason: "close_or_ignore",
@@ -1088,6 +1091,7 @@ export async function reconcileStaleAlreadyDispatchedReadyRows(
                 updated_by = $4,
                 updated_at = $5
           WHERE item_id = $6
+            AND team_id = $7
             AND readiness_state = 'ready'
             AND COALESCE(retry_safe, 0) = 0`,
         [
@@ -1100,6 +1104,7 @@ export async function reconcileStaleAlreadyDispatchedReadyRows(
           actor,
           receipt.closed_at,
           row.item_id,
+          teamId,
         ],
       );
     }

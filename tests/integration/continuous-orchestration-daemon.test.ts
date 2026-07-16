@@ -1712,13 +1712,24 @@ describe("daemon — dry-run vs live", () => {
     expect(status.body.health.orchestration_loop.explanation).not.toMatch(/stalled_ready_not_launching|critical/i);
   });
 
-  it("status explains retry_safe=false duplicate dispatch holds and live admission does not refire them", async () => {
-    const duplicate = await seedReady(adapter, {
+  it("status explains close-disposition duplicate dispatch holds and live admission closes them with receipts", async () => {
+    const doneDuplicate = await seedReady(adapter, {
       title: "held previously dispatched retry row",
       write_scope: ["repo/retry-held"],
     });
-    await markReadyAlreadyDispatched(adapter, duplicate.item_id, "phid:disp-terminal-prior");
+    const failedDuplicate = await seedReady(adapter, {
+      title: "held non-retryable failed dispatch duplicate",
+      write_scope: ["repo/failed-duplicate"],
+    });
+    await markReadyAlreadyDispatched(adapter, doneDuplicate.item_id, "phid:disp-terminal-prior");
     await seedDispatch(adapter, { dispatch_phid: "phid:disp-terminal-prior", status: "done" });
+    await markReadyAlreadyDispatched(adapter, failedDuplicate.item_id, "phid:disp-failed-prior");
+    await seedDispatch(adapter, {
+      dispatch_phid: "phid:disp-failed-prior",
+      status: "failed",
+      failure_kind: "agent_error",
+      failure_detail: "implementation returned a deterministic assertion failure",
+    });
 
     const fired: BacklogItem[] = [];
     const { app, daemon } = mountStatusApp(
@@ -1742,9 +1753,15 @@ describe("daemon — dry-run vs live", () => {
     const status = await callApp(app, "/orchestration/status");
 
     expect(status.status).toBe(200);
-    expect(status.body.ready_admission.non_admitted).toEqual([
+    expect(status.body.ready_admission).toMatchObject({
+      candidates: 2,
+      useful_ready: 0,
+      admissible_now: 0,
+    });
+    expect(status.body.ready_admission.non_admitted).toHaveLength(2);
+    expect(status.body.ready_admission.non_admitted).toEqual(expect.arrayContaining([
       expect.objectContaining({
-        item_id: duplicate.item_id,
+        item_id: doneDuplicate.item_id,
         action: "held",
         code: "duplicate_dispatch_retry_required",
         metadata: expect.objectContaining({
@@ -1759,7 +1776,23 @@ describe("daemon — dry-run vs live", () => {
           }),
         }),
       }),
-    ]);
+      expect.objectContaining({
+        item_id: failedDuplicate.item_id,
+        action: "held",
+        code: "duplicate_dispatch_retry_required",
+        metadata: expect.objectContaining({
+          last_dispatch_phid: "phid:disp-failed-prior",
+          duplicate_retry: expect.objectContaining({
+            last_dispatch_phid: "phid:disp-failed-prior",
+            prior_dispatch_status: "failed",
+            retry_safe_required: true,
+            next_action: "supersede_duplicate_row",
+            operator_disposition: "close",
+            retry_safe_recommendation: "leave_false",
+          }),
+        }),
+      }),
+    ]));
 
     const tick = await daemon.runTick();
 
@@ -1767,7 +1800,7 @@ describe("daemon — dry-run vs live", () => {
     expect(fired).toHaveLength(0);
     expect(tick.decisions).toEqual([
       expect.objectContaining({
-        item_id: duplicate.item_id,
+        item_id: doneDuplicate.item_id,
         action: "stale_ready_reconcile",
         dispatch_phid: "phid:disp-terminal-prior",
         metadata: expect.objectContaining({
@@ -1779,10 +1812,39 @@ describe("daemon — dry-run vs live", () => {
             prior_dispatch_status: "done",
             next_action: "close_duplicate_row",
             reason: "close_or_ignore",
+            actor: "continuous-orchestration",
+            timestamp: expect.any(String),
+          }),
+        }),
+      }),
+      expect.objectContaining({
+        item_id: failedDuplicate.item_id,
+        action: "stale_ready_reconcile",
+        dispatch_phid: "phid:disp-failed-prior",
+        metadata: expect.objectContaining({
+          dispatch_status: "failed",
+          from_state: "ready",
+          to_state: "superseded",
+          receipt: expect.objectContaining({
+            prior_dispatch_phid: "phid:disp-failed-prior",
+            prior_dispatch_status: "failed",
+            next_action: "supersede_duplicate_row",
+            reason: "close_or_ignore",
+            actor: "continuous-orchestration",
+            timestamp: expect.any(String),
           }),
         }),
       }),
     ]);
+    expect((await getBacklogItem(adapter, doneDuplicate.item_id))?.readiness_state).toBe("done");
+    expect((await getBacklogItem(adapter, failedDuplicate.item_id))?.readiness_state).toBe("superseded");
+
+    const postCloseoutStatus = await callApp(app, "/orchestration/status");
+    expect(postCloseoutStatus.body.ready_admission).toMatchObject({
+      candidates: 0,
+      useful_ready: 0,
+      admissible_now: 0,
+    });
   });
 
   it("status keeps ready admission and queue quality aligned for retry blockers versus capacity gates", async () => {
