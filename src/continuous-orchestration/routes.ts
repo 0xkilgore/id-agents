@@ -18,6 +18,7 @@ import { AUTO_READY_CONFIDENCE_THRESHOLD } from "./flesh-policy.js";
 import type { OrchestrationMode, ReadinessState } from "./types.js";
 import {
   countFleshLogSince,
+  clearBacklogDependencyBlocker,
   findProbableDuplicateByRegisterId,
   getBacklogItem,
   getDispatchOutcomesByPhid,
@@ -708,6 +709,45 @@ export function mountContinuousOrchestrationRoutes(app: Application, opts: Orche
         });
       }
       res.json({ ok: true, item: result.item, retry_count: result.retry_count });
+    } catch (err) {
+      res.status(500).json({ ok: false, error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  app.post("/orchestration/backlog/:id/clear-dependency-blocker", async (req: Request, res: Response) => {
+    try {
+      const id = String(req.params.id);
+      const body = (req.body ?? {}) as Record<string, unknown>;
+      const dependency = typeof body.dependency === "string" ? body.dependency : "";
+      const actor = typeof body.actor === "string"
+        ? body.actor
+        : typeof body.actor_ref === "string"
+          ? body.actor_ref
+          : "";
+      const reason = typeof body.reason === "string" ? body.reason : "";
+      const result = await clearBacklogDependencyBlocker(adapter, id, {
+        team_id: teamId,
+        dependency,
+        actor,
+        reason,
+      });
+      if (!result.ok) {
+        return res.status(result.status).json({
+          ok: false,
+          error: result.error,
+          reason: result.reason,
+          item: result.item,
+        });
+      }
+      res.json({
+        ok: true,
+        item: result.item,
+        dependency: result.dependency,
+        dependency_state: result.dependency_state,
+        actor: result.actor,
+        reason: result.reason,
+        receipt: result.receipt,
+      });
     } catch (err) {
       res.status(500).json({ ok: false, error: err instanceof Error ? err.message : String(err) });
     }
