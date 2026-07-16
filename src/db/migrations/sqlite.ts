@@ -1024,6 +1024,12 @@ export async function migrateSqlite(adapter: SqliteAdapter): Promise<void> {
       WHERE agent_query_id IS NOT NULL;
     CREATE INDEX IF NOT EXISTS dispatch_scheduler_reliability_idx
       ON dispatch_scheduler_queue(team_id, status, reliability_classification);
+    CREATE INDEX IF NOT EXISTS dispatch_scheduler_active_clarification_health_idx
+      ON dispatch_scheduler_queue(team_id, status, recovery_status, started_at, not_before_at, updated_at, dispatch_phid)
+      WHERE status = 'needs_clarification';
+    CREATE INDEX IF NOT EXISTS dispatch_scheduler_stale_clarifications_health_idx
+      ON dispatch_scheduler_queue(team_id, status, json_extract(active_clarification_json, '$.stale_at'), dispatch_phid)
+      WHERE status = 'needs_clarification' AND active_clarification_json IS NOT NULL;
   `);
 
   await migrateQueriesTeamQueryPkSqlite(adapter);

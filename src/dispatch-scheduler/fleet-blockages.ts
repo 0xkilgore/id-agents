@@ -20,6 +20,12 @@ export type FleetBlockage = {
 
 export type FleetBlockagesReport = {
   blocked: boolean;
+  needs_clarification: {
+    count: number;
+    needs_chris_count: number;
+    non_chris_count: number;
+    stale_non_chris_count: number;
+  };
   blockages: FleetBlockage[];
   generated_at: string;
 };
@@ -44,11 +50,12 @@ export async function readFleetBlockages(
   const nowMs = Date.now();
   const blockages: FleetBlockage[] = [];
 
-  const { rows } = await adapter.query<{
-    active_clarification_json: string | null;
-    updated_at: string | null;
+  const { rows: activeStatsRows } = await adapter.query<{
+    count: number | string;
+    oldest_at: string | null;
   }>(
-    `SELECT active_clarification_json, updated_at
+    `SELECT COUNT(*) as count,
+            MIN(COALESCE(started_at, not_before_at, updated_at)) as oldest_at
        FROM dispatch_scheduler_queue
        WHERE team_id = ?
          AND status = 'needs_clarification'
@@ -56,17 +63,19 @@ export async function readFleetBlockages(
     [teamId],
   );
 
-  let oldestAt: string | null = null;
-  let staleCount = 0;
-  for (const row of rows) {
-    const active = parseActiveClarification(row.active_clarification_json);
-    const createdAt = active?.created_at ?? row.updated_at ?? null;
-    if (createdAt && (!oldestAt || createdAt < oldestAt)) oldestAt = createdAt;
-    const staleAt = active?.stale_at ?? null;
-    if (staleAt && Date.parse(staleAt) <= nowMs) staleCount += 1;
-    else if (clarificationAgeIsStale(createdAt, nowMs)) staleCount += 1;
-  }
-  const clarificationCount = rows.length;
+  const { staleParams, staleWhereSql } = staleClarificationSql(adapter, teamId, new Date(nowMs).toISOString());
+  const { rows: staleStatsRows } = await adapter.query<{
+    stale_count: number | string;
+    needs_chris_count: number | string;
+    non_chris_count: number | string;
+  }>(staleWhereSql, staleParams);
+
+  const clarificationCount = Number(activeStatsRows[0]?.count ?? 0);
+  const oldestAt = activeStatsRows[0]?.oldest_at ?? null;
+  const staleCount = Number(staleStatsRows[0]?.stale_count ?? 0);
+  const needsChrisCount = Number(staleStatsRows[0]?.needs_chris_count ?? 0);
+  const nonChrisCount = Number(staleStatsRows[0]?.non_chris_count ?? 0);
+  const staleNonChrisCount = nonChrisCount;
 
   if (clarificationCount > 0) {
     blockages.push({
@@ -82,7 +91,7 @@ export async function readFleetBlockages(
     blockages.push({
       kind: "stale_clarification",
       severity: "critical",
-      message: `${staleCount} clarification(s) past stale threshold`,
+      message: `${staleCount} clarification(s) past stale threshold; non-Chris=${staleNonChrisCount}, Chris-needed=${needsChrisCount}`,
       count: staleCount,
       oldest_at: oldestAt,
       action: "/ops/dispatches?status=active",
@@ -142,21 +151,52 @@ export async function readFleetBlockages(
   const blocked = blockages.some((b) => b.severity === "critical") || blockages.length > 0;
   return {
     blocked,
+    needs_clarification: {
+      count: clarificationCount,
+      needs_chris_count: needsChrisCount,
+      non_chris_count: nonChrisCount,
+      stale_non_chris_count: staleNonChrisCount,
+    },
     blockages,
     generated_at: new Date(nowMs).toISOString(),
   };
 }
 
-function parseActiveClarification(
-  raw: string | null,
-): { created_at?: string; stale_at?: string | null } | null {
-  if (!raw) return null;
-  try {
-    const parsed = JSON.parse(raw) as { created_at?: string; stale_at?: string | null };
-    return parsed && typeof parsed === "object" ? parsed : null;
-  } catch {
-    return null;
-  }
+function staleClarificationSql(
+  adapter: DbAdapterLike,
+  teamId: string,
+  nowIso: string,
+): { staleParams: unknown[]; staleWhereSql: string } {
+  const dialect = (adapter as { dialect?: string }).dialect;
+  const staleAtExpr = dialect === "postgres"
+    ? "(active_clarification_json::jsonb ->> 'stale_at')"
+    : "json_extract(active_clarification_json, '$.stale_at')";
+  const needsYouExpr = dialect === "postgres"
+    ? "(active_clarification_json::jsonb ->> 'needs_you')"
+    : "json_extract(active_clarification_json, '$.needs_you')";
+  const requiresChrisExpr = dialect === "postgres"
+    ? "(active_clarification_json::jsonb ->> 'requires_chris')"
+    : "json_extract(active_clarification_json, '$.requires_chris')";
+  const needsChrisExpr = dialect === "postgres"
+    ? "(active_clarification_json::jsonb ->> 'needs_chris')"
+    : "json_extract(active_clarification_json, '$.needs_chris')";
+  const nonChrisPredicate = dialect === "postgres"
+    ? `(${needsYouExpr} = 'false' OR ${requiresChrisExpr} = 'false' OR ${needsChrisExpr} = 'false')`
+    : `(${needsYouExpr} = 0 OR ${requiresChrisExpr} = 0 OR ${needsChrisExpr} = 0)`;
+  const where = `FROM dispatch_scheduler_queue
+       WHERE team_id = ?
+         AND status = 'needs_clarification'
+         AND COALESCE(recovery_status, 'none') NOT IN ('moot', 'landed_reconciled', 'verified_done', 'retry_done')
+         AND active_clarification_json IS NOT NULL
+         AND ${staleAtExpr} IS NOT NULL
+         AND ${staleAtExpr} <= ?`;
+  return {
+    staleWhereSql: `SELECT COUNT(*) as stale_count,
+          SUM(CASE WHEN ${nonChrisPredicate} THEN 0 ELSE 1 END) as needs_chris_count,
+          SUM(CASE WHEN ${nonChrisPredicate} THEN 1 ELSE 0 END) as non_chris_count
+       ${where}`,
+    staleParams: [teamId, nowIso],
+  };
 }
 
 /** True when a clarification row is older than the stale threshold. */
