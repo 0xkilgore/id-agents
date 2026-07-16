@@ -7,12 +7,15 @@ import {
   artifactIdForSurfacingPath,
   buildSurfacedArtifacts,
   buildSurfacedArtifactsReadModel,
+  executeSeededSurfacedArtifactsSavedView,
   humanTitleFromParts,
   isRawPrimaryTitle,
+  SEEDED_SURFACED_ARTIFACTS_SAVED_VIEWS,
   SURFACED_ARTIFACTS_SAVED_VIEW,
   validateSavedViewField,
   validateSavedViewPredicateFields,
 } from "../../src/surfaced-artifacts/read-model.js";
+import type { SurfacedArtifactRow } from "../../src/surfaced-artifacts/types.js";
 
 const NOW = "2026-07-07T12:00:00.000Z";
 const C0_ON = { C0_FEEDBACK_REACTIONS: "1" } as NodeJS.ProcessEnv;
@@ -692,4 +695,132 @@ Vendor staging and volunteer assignments for this morning.
     });
     expect(SURFACED_ARTIFACTS_SAVED_VIEW.field_ids).not.toContain("surfaced_artifacts.row.project_ref");
   });
+
+  it("seeds artifactDesk, personalTasks, and workQueue through the same saved-view executor", () => {
+    const rows: SurfacedArtifactRow[] = [
+      fixtureRow({
+        id: "artifact:a",
+        title: "Artifact desk row",
+        artifact_ref: "/tmp/a.md",
+        task_ref: undefined,
+        dispatch_ref: undefined,
+        project_ref: "kapelle",
+        needs: "read",
+        rank_score: 50,
+      }),
+      fixtureRow({
+        id: "artifact:t",
+        title: "Personal task row",
+        task_ref: "task:personal",
+        project_ref: "personal",
+        needs: "comment",
+        rank_score: 70,
+      }),
+      fixtureRow({
+        id: "artifact:w",
+        title: "Work queue dispatch",
+        dispatch_ref: "phid:disp-work",
+        project_ref: "kapelle",
+        needs: "inspect_closeout",
+        rank_score: 90,
+      }),
+    ];
+
+    expect(Object.keys(SEEDED_SURFACED_ARTIFACTS_SAVED_VIEWS).sort()).toEqual([
+      "artifactDesk",
+      "personalTasks",
+      "workQueue",
+    ]);
+    expect(SEEDED_SURFACED_ARTIFACTS_SAVED_VIEWS.personalTasks.field_ids).toEqual(
+      expect.arrayContaining(["user_task.id", "user_task.title", "user_task.owner", "user_task.updatedAt"]),
+    );
+
+    const artifactDesk = executeSeededSurfacedArtifactsSavedView(rows, "artifactDesk", {
+      field: "artifact.projectRef",
+      op: "eq",
+      value: "kapelle",
+    }, NOW);
+    const personalTasks = executeSeededSurfacedArtifactsSavedView(rows, "personalTasks", {
+      field: "user_task.projectRef",
+      op: "eq",
+      value: "personal",
+    }, NOW);
+    const workQueue = executeSeededSurfacedArtifactsSavedView(rows, "workQueue", {
+      field: "work_item.rank",
+      op: "gte",
+      value: 80,
+    }, NOW);
+
+    expect(artifactDesk).toMatchObject({
+      ok: true,
+      view_id: "surfaced-artifacts.v1.artifactDesk",
+      rows: [{ id: "artifact:a" }, { id: "artifact:w" }],
+      count: 2,
+    });
+    expect(personalTasks).toMatchObject({
+      ok: true,
+      view_id: "surfaced-artifacts.v1.personalTasks",
+      rows: [{ id: "artifact:t" }],
+      count: 1,
+    });
+    expect(workQueue).toMatchObject({
+      ok: true,
+      view_id: "surfaced-artifacts.v1.workQueue",
+      rows: [{ id: "artifact:w" }],
+      count: 1,
+    });
+
+    expect(executeSeededSurfacedArtifactsSavedView(rows, "workQueue", {
+      field: "rank_score",
+      op: "gte",
+      value: 80,
+    }, NOW).errors).toEqual([
+      expect.objectContaining({
+        code: "unsupported_field",
+        field: "rank_score",
+        canonical_field: "artifact.rankScore",
+      }),
+    ]);
+  });
 });
+
+function fixtureRow(overrides: Partial<SurfacedArtifactRow>): SurfacedArtifactRow {
+  return {
+    id: "artifact:fixture",
+    title: "Fixture row",
+    subtitle: "Fixture subtitle",
+    rank_score: 10,
+    status: "unread",
+    relevance_reason: "final_user_facing_deliverable",
+    needs: "read",
+    artifact_ref: "/tmp/fixture.md",
+    dispatch_ref: "phid:disp-fixture",
+    task_ref: "task:fixture",
+    project_ref: "kapelle",
+    agent_name: "roger",
+    created_at: NOW,
+    updated_at: NOW,
+    source_kind: "artifact",
+    source_type: "artifact",
+    source_label: "Fixture",
+    source_path: "/tmp/fixture.md",
+    source_proof: "fixture",
+    visibility_proof: {
+      discovered_by: "manual_fixture",
+      artifact_path_present: true,
+      body_renderable: true,
+    },
+    delivery: {
+      stable_url: "/artifacts/fixture/detail",
+      copy_text_url: "/artifacts/fixture/copy-text",
+      download_url: "/artifacts/fixture/download",
+      media_type: "text/markdown",
+      freshness: "current",
+      body_cached: false,
+      body_available: true,
+      body_source: "filesystem",
+      open_url: "/artifacts/fixture/detail",
+    },
+    ...overrides,
+  };
+}

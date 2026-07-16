@@ -12,6 +12,8 @@ import type {
   SavedViewFieldId,
   SavedViewFieldRegistryEntry,
   SavedViewUnsupportedFieldError,
+  SeededSurfacedArtifactsSavedView,
+  SeededSurfacedArtifactsViewName,
   SurfacedArtifactHealthEvent,
   SurfacedArtifactsHealth,
   SurfacedArtifactsSavedView,
@@ -194,6 +196,28 @@ export const SURFACED_ARTIFACTS_SAVED_VIEW: SurfacedArtifactsSavedView = {
     "user_task.context",
     "user_task.projectRef",
     "user_task.updatedAt",
+    "project.id",
+    "project.status",
+    "project.owner",
+    "project.updatedAt",
+    "project.hasUnreadArtifacts",
+    "project.hasOpenTasks",
+    "task.id",
+    "task.projectId",
+    "task.owner",
+    "task.status",
+    "task.due",
+    "task.priority",
+    "task.tickler",
+    "task.source",
+    "task.updatedAt",
+    "work_item.entityType",
+    "work_item.projectId",
+    "work_item.actor",
+    "work_item.attentionState",
+    "work_item.updatedAt",
+    "work_item.due",
+    "work_item.rank",
   ],
   field_registry: [],
   raw_row_key_mapping: {
@@ -237,6 +261,62 @@ export const SURFACED_ARTIFACTS_SAVED_VIEW: SurfacedArtifactsSavedView = {
 
 SURFACED_ARTIFACTS_SAVED_VIEW.field_registry = buildFieldRegistry(SURFACED_ARTIFACTS_SAVED_VIEW.field_ids);
 
+export const SEEDED_SURFACED_ARTIFACTS_SAVED_VIEWS: Record<SeededSurfacedArtifactsViewName, SeededSurfacedArtifactsSavedView> = {
+  artifactDesk: {
+    name: "artifactDesk",
+    id: "surfaced-artifacts.v1.artifactDesk",
+    execution: "saved_view_backed",
+    field_ids: [
+      "artifact.id",
+      "artifact.title",
+      "artifact.status",
+      "artifact.relevanceReason",
+      "artifact.projectRef",
+      "artifact.agentName",
+      "artifact.updatedAt",
+      "artifact.delivery.openUrl",
+      "artifact.delivery.bodyAvailable",
+    ],
+    predicate: { field: "artifact.id", op: "exists" },
+  },
+  personalTasks: {
+    name: "personalTasks",
+    id: "surfaced-artifacts.v1.personalTasks",
+    execution: "saved_view_backed",
+    field_ids: [
+      "user_task.id",
+      "user_task.title",
+      "user_task.status",
+      "user_task.owner",
+      "user_task.context",
+      "user_task.projectRef",
+      "user_task.updatedAt",
+    ],
+    predicate: { field: "user_task.id", op: "exists" },
+  },
+  workQueue: {
+    name: "workQueue",
+    id: "surfaced-artifacts.v1.workQueue",
+    execution: "saved_view_backed",
+    field_ids: [
+      "work_item.entityType",
+      "work_item.projectId",
+      "work_item.actor",
+      "work_item.attentionState",
+      "work_item.updatedAt",
+      "work_item.rank",
+      "dispatch.id",
+      "task.id",
+    ],
+    predicate: {
+      or: [
+        { field: "dispatch.id", op: "exists" },
+        { field: "task.id", op: "exists" },
+      ],
+    },
+  },
+};
+
 const FIELD_IDS = new Set<SavedViewFieldId>(SURFACED_ARTIFACTS_SAVED_VIEW.field_ids);
 const RAW_TO_CANONICAL = SURFACED_ARTIFACTS_SAVED_VIEW.raw_row_key_mapping;
 
@@ -267,18 +347,42 @@ export function executeSurfacedArtifactsSavedView(
   rows: SurfacedArtifactRow[],
   predicate: unknown,
   nowIso = new Date().toISOString(),
+  view: { id: string; predicate?: unknown } = SURFACED_ARTIFACTS_SAVED_VIEW,
 ): SavedViewExecutionResult<SurfacedArtifactRow> {
-  const errors = validateSavedViewPredicateFields(predicate);
-  const filtered = errors.length === 0 ? rows.filter((row) => matchesSavedViewPredicate(row, predicate)) : [];
+  const composedPredicate = composeSavedViewPredicate(view.predicate, predicate);
+  const errors = validateSavedViewPredicateFields(composedPredicate);
+  const filtered = errors.length === 0 ? rows.filter((row) => matchesSavedViewPredicate(row, composedPredicate)) : [];
   return {
     ok: errors.length === 0,
     schema_version: "view-execution.v1",
-    view_id: SURFACED_ARTIFACTS_SAVED_VIEW.id,
+    view_id: view.id,
     generated_at: nowIso,
     rows: filtered,
     count: filtered.length,
     errors,
   };
+}
+
+export function executeSeededSurfacedArtifactsSavedView(
+  rows: SurfacedArtifactRow[],
+  name: SeededSurfacedArtifactsViewName,
+  predicate?: unknown,
+  nowIso = new Date().toISOString(),
+): SavedViewExecutionResult<SurfacedArtifactRow> {
+  return executeSurfacedArtifactsSavedView(
+    rows,
+    predicate,
+    nowIso,
+    SEEDED_SURFACED_ARTIFACTS_SAVED_VIEWS[name],
+  );
+}
+
+function composeSavedViewPredicate(seedPredicate: unknown, callerPredicate: unknown): unknown {
+  if (!seedPredicate) return callerPredicate;
+  if (!callerPredicate || (typeof callerPredicate === "object" && !Array.isArray(callerPredicate) && Object.keys(callerPredicate).length === 0)) {
+    return seedPredicate;
+  }
+  return { and: [seedPredicate, callerPredicate] };
 }
 
 function matchesSavedViewPredicate(row: SurfacedArtifactRow, input: unknown): boolean {
@@ -355,6 +459,33 @@ function valueForSavedViewField(row: SurfacedArtifactRow, field: SavedViewFieldI
     case "user_task.status": return row.status;
     case "user_task.owner": return row.agent_name;
     case "user_task.context": return row.subtitle;
+    case "user_task.source": return row.source_kind;
+    case "user_task.due": return undefined;
+    case "project.id":
+    case "task.projectId":
+    case "work_item.projectId":
+      return row.project_ref;
+    case "project.status": return row.status;
+    case "project.owner":
+    case "task.owner":
+    case "work_item.actor":
+      return row.agent_name;
+    case "project.updatedAt":
+    case "task.updatedAt":
+    case "work_item.updatedAt":
+      return row.updated_at;
+    case "project.hasUnreadArtifacts": return row.needs === "read";
+    case "project.hasOpenTasks": return row.task_ref != null && row.status !== "approved" && row.status !== "routed";
+    case "task.id": return row.task_ref;
+    case "task.status": return row.status;
+    case "task.due": return undefined;
+    case "task.priority": return row.rank_score;
+    case "task.tickler": return row.needs;
+    case "task.source": return row.source_kind;
+    case "work_item.entityType": return row.task_ref ? "task" : row.dispatch_ref ? "dispatch" : "artifact";
+    case "work_item.attentionState": return row.needs ?? row.relevance_reason;
+    case "work_item.due": return undefined;
+    case "work_item.rank": return row.rank_score;
     default: return undefined;
   }
 }

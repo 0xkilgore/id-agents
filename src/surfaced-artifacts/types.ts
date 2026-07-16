@@ -310,6 +310,16 @@ export interface SavedViewExecutionResult<T> {
   errors: SavedViewUnsupportedFieldError[];
 }
 
+export type SeededSurfacedArtifactsViewName = "artifactDesk" | "personalTasks" | "workQueue";
+
+export interface SeededSurfacedArtifactsSavedView {
+  name: SeededSurfacedArtifactsViewName;
+  id: `surfaced-artifacts.v1.${SeededSurfacedArtifactsViewName}`;
+  execution: "saved_view_backed";
+  field_ids: SavedViewFieldId[];
+  predicate: unknown;
+}
+
 export interface SurfacedArtifactsSavedView {
   id: "surfaced-artifacts.v1.primary";
   execution: "saved_view_backed";
@@ -333,6 +343,7 @@ export interface SurfacedArtifactsResponse {
   schema_version: "surfaced-artifacts.v1";
   generated_at: string;
   saved_view: SurfacedArtifactsSavedView;
+  seeded_views: Record<SeededSurfacedArtifactsViewName, SeededSurfacedArtifactsSavedView>;
   rows: SurfacedArtifactRow[];
   count: number;
   recent_flood: RecentFloodDiagnostic;
