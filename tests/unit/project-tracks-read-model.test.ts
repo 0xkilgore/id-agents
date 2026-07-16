@@ -1,5 +1,6 @@
 import express, { type Express } from "express";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { readdir } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
@@ -260,6 +261,9 @@ describe("project tracks read-model", () => {
     const adapter = new SqliteAdapter(":memory:");
     const tmp = mkdtempSync(path.join(os.tmpdir(), "id-agents-cleveland-park-"));
     const root = path.join(tmp, "Dropbox", "Code", "cleveland-park");
+    const readDirWithoutMachineRoot = async (absPath: string) => absPath.startsWith("/Users/kilgore/Dropbox/Code/cleveland-park")
+      ? []
+      : readdir(absPath, { withFileTypes: true });
     try {
       await seedBase(adapter);
       mkdirSync(path.join(root, "meetings"), { recursive: true });
@@ -346,19 +350,26 @@ describe("project tracks read-model", () => {
         project: "cleveland-park",
         generatedAt: NOW,
         limit: 50,
+        readDir: readDirWithoutMachineRoot,
       });
       const byTitle = new Map(envelope.rows.map((row) => [row.title, row]));
 
       expect(envelope.schema_version).toBe("project-sources.v1");
       expect(envelope.saved_view.filters).toEqual(["type", "project", "agent", "date", "read_state", "status", "q"]);
-      expect(envelope.roots).toEqual([
+      expect(envelope.roots).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          project: "cleveland-park",
+          root_path: "/Users/kilgore/Dropbox/Code/cleveland-park",
+          owner_agent: null,
+          proof: "agent.working_directory",
+        }),
         expect.objectContaining({
           project: "cleveland-park",
           root_path: root,
           owner_agent: "cleveland-park",
           proof: "agent.working_directory",
         }),
-      ]);
+      ]));
       expect(envelope.groups.transcripts).toBeGreaterThanOrEqual(2);
       expect(envelope.groups.pdfs_forms).toBeGreaterThanOrEqual(1);
       expect(envelope.groups.images_screenshots_logos).toBeGreaterThanOrEqual(2);
@@ -403,7 +414,12 @@ describe("project tracks read-model", () => {
       expect(byTitle.get("july newsletter source")).toMatchObject({ group: "emails_captures" });
       expect(byTitle.get("vendor list")).toMatchObject({ group: "other_files" });
 
-      const filtered = await buildProjectSourcesEnvelope(adapter, { project: "cleveland-park", q: "Parks", type: "transcripts" });
+      const filtered = await buildProjectSourcesEnvelope(adapter, {
+        project: "cleveland-park",
+        q: "Parks",
+        type: "transcripts",
+        readDir: readDirWithoutMachineRoot,
+      });
       expect(filtered.rows.map((row) => row.title)).toEqual(expect.arrayContaining([
         "Neighborhood Parks transcript capture",
         "neighborhood parks transcript",
@@ -438,6 +454,73 @@ describe("project tracks read-model", () => {
     } finally {
       await adapter.close();
       rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it("registers built-in Cleveland Park and Trinity roots and classifies fixture source files", async () => {
+    const adapter = new SqliteAdapter(":memory:");
+    const fixtureRoot = path.resolve("tests/fixtures/project-sources/cleveland-park");
+    const registeredRoot = "/Users/kilgore/Dropbox/Code/cleveland-park";
+    const toFixturePath = (absPath: string) => path.join(fixtureRoot, path.relative(registeredRoot, absPath));
+    try {
+      await seedBase(adapter);
+      const envelope = await buildProjectSourcesEnvelope(adapter, {
+        project: "Cleveland Park",
+        generatedAt: NOW,
+        maxFiles: 20,
+        readDir: async (absPath) => {
+          const fixturePath = toFixturePath(absPath);
+          return readdir(fixturePath, { withFileTypes: true });
+        },
+        statFile: async (absPath) => {
+          const fixturePath = toFixturePath(absPath);
+          const stat = statSync(fixturePath);
+          return {
+            path: absPath,
+            mtimeMs: stat.mtimeMs,
+            birthtimeMs: stat.birthtimeMs,
+            size: stat.size,
+          };
+        },
+      });
+      const byTitle = new Map(envelope.rows.map((row) => [row.title, row]));
+
+      expect(envelope.roots).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          project: "cleveland-park",
+          root_path: registeredRoot,
+          proof: "agent.working_directory",
+        }),
+      ]));
+      expect(byTitle.get("neighborhood parks transcript")).toMatchObject({
+        group: "transcripts",
+        source: { kind: "filesystem", proof: "deterministic_project_root" },
+        ownership: { project: "cleveland-park", agent: null },
+        open: { href: `${"file://"}${registeredRoot}/meetings/neighborhood-parks-transcript.md`, fallback: "file" },
+      });
+      expect(byTitle.get("park permit form")).toMatchObject({
+        group: "pdfs_forms",
+        preview: { renderable: true, state: "download", media_type: "application/pdf" },
+      });
+      expect(byTitle.get("cleveland park logo")).toMatchObject({
+        group: "images_screenshots_logos",
+        preview: { renderable: true, state: "inline", media_type: "image/png" },
+      });
+
+      const trinity = await buildProjectSourcesEnvelope(adapter, {
+        project: "Trinity",
+        generatedAt: NOW,
+        maxFiles: 0,
+      });
+      expect(trinity.roots).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          project: "trinity",
+          root_path: "/Users/kilgore/Dropbox/Code/trinity",
+          proof: "agent.working_directory",
+        }),
+      ]));
+    } finally {
+      await adapter.close();
     }
   });
 });

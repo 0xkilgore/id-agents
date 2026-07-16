@@ -107,6 +107,10 @@ const SKIP_DIRS = new Set([".git", "node_modules", "dist", "build", ".next", ".t
 const INLINE_TEXT_EXT = new Set([".md", ".markdown", ".txt", ".json", ".csv", ".tsv", ".log", ".html", ".htm"]);
 const IMAGE_EXT = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg"]);
 const PDF_EXT = new Set([".pdf"]);
+const REGISTERED_PROJECT_ROOTS: Record<string, string[]> = {
+  "cleveland-park": ["/Users/kilgore/Dropbox/Code/cleveland-park"],
+  trinity: ["/Users/kilgore/Dropbox/Code/trinity"],
+};
 
 export const PROJECT_SOURCES_SAVED_VIEW: ProjectSourceSavedView = {
   id: "project-sources.v1.index",
@@ -294,6 +298,9 @@ export function deterministicProjectRoots(
       proof,
     });
   };
+  for (const rootPath of REGISTERED_PROJECT_ROOTS[canonical] ?? []) {
+    addRoot(rootPath, null, "agent.working_directory");
+  }
   for (const agent of agents) addRoot(agent.working_directory, agent.name, "agent.working_directory");
   for (const artifact of artifacts) addRoot(projectRootFromPath(artifact.abs_path), artifact.agent, "artifact.abs_path");
   return [...roots.values()].sort((a, b) => a.root_path.localeCompare(b.root_path));
