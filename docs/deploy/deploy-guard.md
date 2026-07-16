@@ -111,6 +111,18 @@ posts the exact manual command:
 /Users/kilgore/Dropbox/Code/cane/scripts/manager-promote-rebuild-restart.sh && curl -sS http://localhost:4100/health
 ```
 
+Executable acceptance check:
+
+```bash
+node scripts/accept-manager-deploy-source.mjs --config configs/default.yaml
+```
+
+The JSON output identifies the deploy checkout, resolved deploy config path,
+`HEAD`/`origin/main` freshness, deploy checkout hygiene, and dirty primary
+checkout non-use. The command exits non-zero if the config resolves outside the
+deploy checkout, if the deploy checkout is dirty/off-main/stale, or if a
+rebuild/reset script path is supplied as the deploy config.
+
 Use `touch /tmp/deploy-watchdog.pause` as the kill switch while investigating.
 Logs are in `/tmp/deploy-watchdog.log` and launchd output is in
 `/tmp/deploy-watchdog.launchd.log`.
