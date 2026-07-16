@@ -19,6 +19,7 @@ function config() {
     max_enqueues_per_tick: 5,
     max_new_per_tick: 5,
     max_in_flight: 5,
+    kill_switch_path: "/tmp/id-agents-test-kill-switch-never",
   };
 }
 
@@ -455,6 +456,134 @@ describe("RD-003 — atomic CO fire", () => {
     const freshStates = await Promise.all(freshRows.map((item) => getBacklogItem(adapter, item.item_id)));
     expect(freshStates.filter((item) => item?.readiness_state === "in_flight")).toHaveLength(2);
     expect(freshStates.filter((item) => item?.readiness_state === "ready")).toHaveLength(1);
+  });
+
+  it("emits one actionable zero-admit incident for repeated full-capacity ticks until blocker state changes", async () => {
+    const adapter = new SqliteAdapter(":memory:");
+    await migrateSqlite(adapter);
+    await setMode(adapter, "default", "running");
+    await recordTickOutcome(adapter, "default", {
+      zero_ticks: 2,
+      fired: false,
+      admission_block_reasons: {
+        no_in_flight_slots: 2,
+        duplicate_dispatch_retry_required: 1,
+      },
+    });
+
+    const duplicate = await insertBacklogItem(adapter, {
+      team_id: "default",
+      title: "duplicate retry needs operator decision",
+      to_agent: "roger",
+      dispatch_body: "retry only with explicit operator approval",
+      readiness_state: "ready",
+      risk_class: "build",
+      priority: 1,
+      write_scope: ["/repo/kapelle/duplicate"],
+    });
+    await setItemState(adapter, duplicate.item_id, "ready", { dispatch_phid: "phid:disp-still-active" });
+    for (let i = 0; i < 2; i += 1) {
+      await insertBacklogItem(adapter, {
+        team_id: "default",
+        title: `capacity-held ready row ${i}`,
+        to_agent: "roger",
+        dispatch_body: "ready but capacity is full",
+        readiness_state: "ready",
+        risk_class: "build",
+        priority: 2,
+        write_scope: [`/repo/kapelle/capacity-${i}`],
+      });
+    }
+
+    const alerts: string[] = [];
+    const fullRuntime = async () => ({ count: 2, active_write_scopes: new Set<string>() });
+    const daemon = new ContinuousOrchestrationDaemon({
+      adapter,
+      config: {
+        ...config(),
+        max_in_flight: 2,
+        max_enqueues_per_tick: 5,
+        max_new_per_tick: 5,
+        stall_threshold_ticks: 3,
+      },
+      enqueue: async (item) => ({ dispatch_phid: `phid:disp-${item.item_id}`, query_id: `q-${item.item_id}` }),
+      readUsage: usage,
+      readInFlight: fullRuntime,
+      resolveAgentHealth: async () => new Set(["roger"]),
+      readDiskHeadroom: async () => ({
+        schema_version: "disk-headroom.v1",
+        state: "ok",
+        path: "/tmp",
+        free_bytes: 50 * 1024 ** 3,
+        available_bytes: 50 * 1024 ** 3,
+        total_bytes: 100 * 1024 ** 3,
+        free_gib: 50,
+        available_gib: 50,
+        total_gib: 100,
+        used_percent: 50,
+        min_free_bytes: 5 * 1024 ** 3,
+        warn_free_bytes: 10 * 1024 ** 3,
+        reason: null,
+      }),
+      alert: async (message) => { alerts.push(message); },
+    });
+
+    const first = await daemon.runTick();
+    const second = await daemon.runTick();
+    const third = await daemon.runTick();
+
+    const incidentAlerts = () => alerts.filter((message) => message.includes("zero-admit incident"));
+    expect(first.zero_ticks).toBe(3);
+    expect(first.decisions).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          action: "zero_admit_incident",
+          metadata: expect.objectContaining({
+            incident_code: "zero_admit_ready_blocked",
+            no_in_flight_slots: 2,
+            duplicate_dispatch_retry_required: 1,
+            recommended_action: expect.stringContaining("wait for in-flight slots to free"),
+            blocker_counts: [
+              { code: "no_in_flight_slots", category: "capacity_gate", count: 2 },
+              { code: "duplicate_dispatch_retry_required", category: "retry_safety", count: 1 },
+            ],
+          }),
+        }),
+      ]),
+    );
+    expect(first.decisions.some((decision) => decision.action === "stall_alert")).toBe(false);
+    expect(second.decisions.some((decision) => decision.action === "zero_admit_incident")).toBe(false);
+    expect(third.decisions.some((decision) => decision.action === "zero_admit_incident")).toBe(false);
+    expect(incidentAlerts()).toHaveLength(1);
+    expect(incidentAlerts()[0]).toContain("no_in_flight_slots=2");
+    expect(incidentAlerts()[0]).toContain("duplicate_dispatch_retry_required=1");
+    expect(incidentAlerts()[0]).toContain("Recommended action");
+
+    const secondDuplicate = await insertBacklogItem(adapter, {
+      team_id: "default",
+      title: "second duplicate retry needs operator decision",
+      to_agent: "roger",
+      dispatch_body: "retry only with explicit operator approval",
+      readiness_state: "ready",
+      risk_class: "build",
+      priority: 1,
+      write_scope: ["/repo/kapelle/duplicate-2"],
+    });
+    await setItemState(adapter, secondDuplicate.item_id, "ready", { dispatch_phid: "phid:disp-still-active-2" });
+
+    const changed = await daemon.runTick();
+    expect(changed.decisions).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          action: "zero_admit_incident",
+          metadata: expect.objectContaining({
+            duplicate_dispatch_retry_required: 2,
+            recommended_action: expect.stringContaining("duplicate_dispatch_retry_required=2"),
+          }),
+        }),
+      ]),
+    );
+    expect(incidentAlerts()).toHaveLength(2);
   });
 });
 

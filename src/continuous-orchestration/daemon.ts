@@ -70,7 +70,11 @@ export const AUTO_PROMOTE_HEALTH_STALE_ALREADY_DISPATCHED_STATUSES = new Set([
 ]);
 const INCIDENT_ALERT_COOLDOWN_MS = 60 * 60 * 1000;
 
-type OrchestrationIncidentKind = "stall" | "model_policy_drift" | "target_unhealthy_ready_blocked";
+type OrchestrationIncidentKind =
+  | "stall"
+  | "model_policy_drift"
+  | "target_unhealthy_ready_blocked"
+  | "zero_admit_ready_blocked";
 
 interface AlertIncidentState {
   kind: OrchestrationIncidentKind;
@@ -102,6 +106,8 @@ function formatIncidentKind(kind: OrchestrationIncidentKind): string {
       return "model-policy drift";
     case "target_unhealthy_ready_blocked":
       return "target-unhealthy ready-blocked";
+    case "zero_admit_ready_blocked":
+      return "zero-admit ready-blocked";
   }
 }
 
@@ -321,6 +327,15 @@ export interface ReadyAdmissionBlockedLane {
   lane: string;
   count: number;
   blocker_counts: Array<{ code: string; category: ReadyAdmissionBlockerCategory; count: number }>;
+}
+
+interface ZeroAdmitReadyBlockedIncident {
+  cause: string;
+  message: string;
+  recommended_action: string;
+  blocker_counts: ReadyAdmissionExplanation["blocker_counts"];
+  no_in_flight_slots: number;
+  duplicate_dispatch_retry_required: number;
 }
 
 export const READY_ADMISSION_BLOCK_REASONS = [
@@ -587,6 +602,54 @@ function targetUnhealthyReadyBlockedIncident(input: {
     targets,
     examples,
     targetCount,
+  };
+}
+
+function zeroAdmitReadyBlockedIncident(input: {
+  ready: BacklogItem[];
+  plan: { admit: BacklogItem[] };
+  blockerCounts: ReadyAdmissionExplanation["blocker_counts"];
+  zeroTicks: number;
+  inFlight: number;
+  config: ContinuousOrchestrationConfig;
+}): ZeroAdmitReadyBlockedIncident | null {
+  if (input.zeroTicks < input.config.stall_threshold_ticks) return null;
+  if (input.ready.length === 0) return null;
+  if (input.plan.admit.length > 0) return null;
+  const noInFlightSlots = input.blockerCounts.find((count) => count.code === "no_in_flight_slots")?.count ?? 0;
+  if (noInFlightSlots <= 0) return null;
+
+  const duplicateRetryRequired =
+    input.blockerCounts.find((count) => count.code === "duplicate_dispatch_retry_required")?.count ?? 0;
+  const blockerCounts = input.blockerCounts
+    .filter((count) => count.count > 0)
+    .sort((a, b) => b.count - a.count || a.category.localeCompare(b.category) || a.code.localeCompare(b.code));
+  const recommendedParts = [
+    "capacity saturated: wait for in-flight slots to free or close active dispatches; do not add filler ready rows",
+  ];
+  if (duplicateRetryRequired > 0) {
+    recommendedParts.push(
+      `review duplicate_dispatch_retry_required=${duplicateRetryRequired} rows and mark retry_safe only for bounded refires or close stale duplicates`,
+    );
+  }
+  const recommendedAction = recommendedParts.join("; ");
+  const cause = stableJson({
+    ready: input.ready.length,
+    in_flight: input.inFlight,
+    max_in_flight: input.config.max_in_flight,
+    blocker_counts: blockerCounts,
+  });
+
+  return {
+    cause,
+    message:
+      `Continuous orchestration zero-admit incident: ${input.zeroTicks} consecutive zero-admit ticks with ` +
+      `${input.ready.length} ready item(s), runtime capacity full (${input.inFlight}/${input.config.max_in_flight}), ` +
+      `no_in_flight_slots=${noInFlightSlots}. Recommended action: ${recommendedAction}.`,
+    recommended_action: recommendedAction,
+    blocker_counts: blockerCounts,
+    no_in_flight_slots: noInFlightSlots,
+    duplicate_dispatch_retry_required: duplicateRetryRequired,
   };
 }
 
@@ -1339,6 +1402,14 @@ export class ContinuousOrchestrationDaemon {
       zeroTicks: stall.zero_ticks,
       config,
     });
+    const zeroAdmitIncident = zeroAdmitReadyBlockedIncident({
+      ready,
+      plan,
+      blockerCounts: admissionBlockerCountsForTick,
+      zeroTicks: stall.zero_ticks,
+      inFlight: in_flight,
+      config,
+    });
     if (targetUnhealthyIncident) {
       decisions.push({
         item_id: null,
@@ -1362,6 +1433,36 @@ export class ContinuousOrchestrationDaemon {
         nowMs,
         activeIncidentKeys,
       });
+    } else if (zeroAdmitIncident) {
+      const opened = await this.alertIncident({
+        kind: "zero_admit_ready_blocked",
+        cause: zeroAdmitIncident.cause,
+        message: zeroAdmitIncident.message,
+        recoveryMessage: `✅ Continuous orchestration ${formatIncidentKind("zero_admit_ready_blocked")} recovered.`,
+        nowMs,
+        activeIncidentKeys,
+      });
+      if (opened) {
+        decisions.push({
+          item_id: null,
+          action: "zero_admit_incident",
+          reason:
+            `zero-admit ready-blocked incident: ready=${ready.length}, in_flight=${in_flight}/${config.max_in_flight}, ` +
+            `no_in_flight_slots=${zeroAdmitIncident.no_in_flight_slots}`,
+          metadata: {
+            incident_code: "zero_admit_ready_blocked",
+            dedupe_key: incidentKey("zero_admit_ready_blocked", zeroAdmitIncident.cause),
+            zero_ticks: stall.zero_ticks,
+            ready: ready.length,
+            in_flight,
+            max_in_flight: config.max_in_flight,
+            blocker_counts: zeroAdmitIncident.blocker_counts,
+            no_in_flight_slots: zeroAdmitIncident.no_in_flight_slots,
+            duplicate_dispatch_retry_required: zeroAdmitIncident.duplicate_dispatch_retry_required,
+            recommended_action: zeroAdmitIncident.recommended_action,
+          },
+        });
+      }
     } else if (stall.alert) {
       const cause = stableJson({
         ready_waiting: ordered.length,

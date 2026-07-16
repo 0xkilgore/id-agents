@@ -198,6 +198,7 @@ export interface DecisionRecord {
     | "auto_pause"
     | "refuel"
     | "fleet_blockage"
+    | "zero_admit_incident"
     | "model_policy_drift_alert"
     | "target_unhealthy_incident"
     | "auto_promote"
