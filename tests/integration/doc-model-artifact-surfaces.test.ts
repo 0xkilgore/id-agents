@@ -3,6 +3,7 @@
 // convention and projected purely from the artifact-document op log.
 
 import express, { type Express } from "express";
+import fs from "node:fs";
 import { describe, it, expect, beforeEach } from "vitest";
 import { SqliteAdapter } from "../../src/db/sqlite-adapter.js";
 import { migrateSqlite } from "../../src/db/migrations/sqlite.js";
@@ -65,9 +66,9 @@ async function author(overrides: {
   audience: "operator" | "system";
   kind: EntryStampKind;
   project?: string | null;
+  sourceLink?: string | null;
   now?: string;
   content?: string;
-  sourceLink?: string | null;
   availability?: "present" | "missing" | "unknown";
 }) {
   await authorArtifactDocument(adapter, {
@@ -324,6 +325,72 @@ describe("doc-model artifact surfaces — Inbox", () => {
 
     expect(res.status).toBe(200);
     expect(res.body.items.map((e: any) => e.entry.phid)).toEqual(["doc:operator-comment"]);
+  });
+
+  it("exposes a routed Chris feedback artifact with console-safe source links", async () => {
+    await author({
+      documentId: "art-kapelle-feedback-source-link-exemplar",
+      title: "Kapelle clean-console feedback exemplar",
+      audience: "operator",
+      kind: "document",
+      project: "kapelle",
+      sourceLink: "manager:/artifacts/art-kapelle-feedback-source-link-exemplar/comments#op-2",
+      now: "2026-07-16T15:20:00.000Z",
+    });
+    await appendArtifactComment(adapter, {
+      documentId: "art-kapelle-feedback-source-link-exemplar",
+      actor: "user:chris",
+      body: "Please route this source-linked feedback before the release receipt.",
+      now: "2026-07-16T15:21:00.000Z",
+    });
+
+    const app = mountApp(adapter);
+    const res = await callAppRequest(app, "/doc-model/surfaces/inbox");
+
+    expect(res.status).toBe(200);
+    expect(res.body.items).toHaveLength(1);
+    expect(res.body.items[0]).toMatchObject({
+      disposition: "awaiting_response",
+      latest_comment: {
+        actor: "user:chris",
+        body: "Please route this source-linked feedback before the release receipt.",
+      },
+      feedback_artifact: {
+        artifact_id: "art-kapelle-feedback-source-link-exemplar",
+        project: "kapelle",
+        audience: "operator",
+        kind: "document",
+        source_url: "manager:/artifacts/art-kapelle-feedback-source-link-exemplar/comments#op-2",
+        source_path: null,
+        next_action: {
+          id: "route-feedback:art-kapelle-feedback-source-link-exemplar",
+          kind: "route_feedback",
+          label: "Route feedback",
+          href: "/ops/artifacts/art-kapelle-feedback-source-link-exemplar/feedback",
+        },
+      },
+    });
+    expect(JSON.stringify(res.body.items[0])).not.toMatch(/file:\/\/|\/Users\/|\/tmp\//);
+  });
+
+  it("keeps the clean-console consumer fixture free of raw local paths", () => {
+    const fixture = JSON.parse(fs.readFileSync("tests/fixtures/console/chris-feedback-source-link-receipt.json", "utf8"));
+
+    expect(fixture.schema_version).toBe("console.clean_feedback_receipt.v1");
+    expect(fixture.feedback_artifact).toMatchObject({
+      artifact_id: "art-kapelle-feedback-source-link-exemplar",
+      project: "kapelle",
+      audience: "operator",
+      kind: "document",
+      source_url: "manager:/artifacts/art-kapelle-feedback-source-link-exemplar/comments#op-2",
+      source_path: null,
+      next_action: {
+        id: "route-feedback:art-kapelle-feedback-source-link-exemplar",
+        kind: "route_feedback",
+        href: "/ops/artifacts/art-kapelle-feedback-source-link-exemplar/feedback",
+      },
+    });
+    expect(JSON.stringify(fixture)).not.toMatch(/file:\/\/|\/Users\/|\/tmp\//);
   });
 });
 

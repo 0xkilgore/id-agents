@@ -160,6 +160,20 @@ export interface InboxSurfaceEntry {
   entry: ArtifactEntry;
   disposition: "awaiting_response";
   latest_comment: { op_id: number; actor: string; ts: string; body: string };
+  feedback_artifact: {
+    artifact_id: string;
+    project: string | null;
+    audience: EntryStampAudience;
+    kind: EntryStampKind;
+    source_url: string | null;
+    source_path: null;
+    next_action: {
+      id: string;
+      kind: "route_feedback";
+      label: string;
+      href: string;
+    };
+  };
 }
 
 /**
@@ -186,6 +200,7 @@ export async function projectInboxSurface(
       entry: artifactDocumentToEntry(projection),
       disposition: "awaiting_response",
       latest_comment: latestComment,
+      feedback_artifact: feedbackArtifactForConsole(projection),
     });
   }
   return envelope(rows, "doc_model_inbox", {
@@ -194,6 +209,31 @@ export async function projectInboxSurface(
     kinds: "any",
     reason: "operator audience document whose latest comment has no later receipt",
   });
+}
+
+function feedbackArtifactForConsole(projection: Awaited<ReturnType<typeof projectArtifactDocument>> & {}): InboxSurfaceEntry["feedback_artifact"] {
+  const sourceUrl = sourceLinkForConsole(projection.frontmatter.source_link);
+  return {
+    artifact_id: projection.document_id,
+    project: projection.project,
+    audience: projection.stamp.audience,
+    kind: projection.stamp.kind,
+    source_url: sourceUrl,
+    source_path: null,
+    next_action: {
+      id: `route-feedback:${projection.document_id}`,
+      kind: "route_feedback",
+      label: "Route feedback",
+      href: `/ops/artifacts/${encodeURIComponent(projection.document_id)}/feedback`,
+    },
+  };
+}
+
+function sourceLinkForConsole(sourceLink: string | null): string | null {
+  const trimmed = sourceLink?.trim();
+  if (!trimmed) return null;
+  if (trimmed.startsWith("/") || trimmed.startsWith("file:")) return null;
+  return trimmed;
 }
 
 export interface ActivitySurfaceEntry {

@@ -1,0 +1,25 @@
+{
+  "schema_version": "console.clean_feedback_receipt.v1",
+  "generated_at": "2026-07-16T15:22:00.000Z",
+  "disposition": "awaiting_response",
+  "latest_comment": {
+    "op_id": 2,
+    "actor": "user:chris",
+    "ts": "2026-07-16T15:21:00.000Z",
+    "body": "Please route this source-linked feedback before the release receipt."
+  },
+  "feedback_artifact": {
+    "artifact_id": "art-kapelle-feedback-source-link-exemplar",
+    "project": "kapelle",
+    "audience": "operator",
+    "kind": "document",
+    "source_url": "manager:/artifacts/art-kapelle-feedback-source-link-exemplar/comments#op-2",
+    "source_path": null,
+    "next_action": {
+      "id": "route-feedback:art-kapelle-feedback-source-link-exemplar",
+      "kind": "route_feedback",
+      "label": "Route feedback",
+      "href": "/ops/artifacts/art-kapelle-feedback-source-link-exemplar/feedback"
+    }
+  }
+}
