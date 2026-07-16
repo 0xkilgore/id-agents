@@ -77,6 +77,13 @@ export interface RuntimeStatusProjection {
   schema_version: "orchestration.runtime_status_projection.v1";
   disk_critical: boolean;
   disk_state: string | null;
+  disk_admission: {
+    state: string | null;
+    ordinary_builds_paused: boolean;
+    admitted_work: string[];
+    held_ready_rows: number;
+    reason: string | null;
+  };
   build_behind_origin: boolean | null;
   build_source: BuildSourceDiagnostic | null;
   capacity_full: boolean;
@@ -93,8 +100,36 @@ export function buildRuntimeStatusProjection(input: {
   autoPromoteHealth: AutoPromoteHealth;
   readyAdmission: ReadyAdmissionExplanation;
 }): RuntimeStatusProjection {
-  const diskState = input.runtimeHealth?.disk?.state ?? null;
+  const diskState = input.runtimeHealth?.disk?.state ?? input.readyAdmission.disk_headroom?.state ?? null;
   const diskCritical = diskState === "critical";
+  const diskWarn = diskState === "warn";
+  const diskCriticalHeldRows = input.readyAdmission.blocker_counts.find((count) => count.code === "disk_critical_floor")?.count ?? 0;
+  const diskWarningHeldRows = input.readyAdmission.blocker_counts.find((count) => count.code === "disk_warning_floor")?.count ?? 0;
+  const diskAdmission = diskCritical
+    ? {
+        state: diskState,
+        ordinary_builds_paused: true,
+        admitted_work: ["disk cleanup", "disk repair"],
+        held_ready_rows: diskCriticalHeldRows,
+        reason:
+          `manager disk headroom is below the critical floor; ordinary build rows are paused and only disk cleanup/repair rows may be admitted`,
+      }
+    : diskWarn
+      ? {
+          state: diskState,
+          ordinary_builds_paused: false,
+          admitted_work: ["disk cleanup", "disk repair", "deploy-safe"],
+          held_ready_rows: diskWarningHeldRows,
+          reason:
+            `manager disk headroom is below the warning floor; ordinary rows may be held while cleanup/repair or deploy-safe rows are admitted first`,
+        }
+      : {
+          state: diskState,
+          ordinary_builds_paused: false,
+          admitted_work: ["ordinary build", "disk cleanup", "disk repair", "deploy-safe"],
+          held_ready_rows: 0,
+          reason: null,
+        };
   const buildBehindOrigin = input.runtimeHealth?.build?.behind_origin ?? null;
   const buildSource = input.runtimeHealth?.build?.freshness
     ? buildSourceDiagnostic({
@@ -109,7 +144,8 @@ export function buildRuntimeStatusProjection(input: {
       count.category === "capacity_gate" && count.count > 0,
     );
   const recommendedActions: string[] = [];
-  if (diskCritical) recommendedActions.push("clear disk headroom before dispatching or handing off");
+  if (diskCritical) recommendedActions.push("admit only disk cleanup/repair rows until disk headroom clears the critical floor");
+  else if (diskWarn) recommendedActions.push("prefer disk cleanup/repair or deploy-safe rows until disk headroom clears the warning floor");
   if (buildSource?.recommended_redeploy_action) {
     recommendedActions.push(buildSource.recommended_redeploy_action);
   } else if (buildBehindOrigin === true) {
@@ -121,7 +157,9 @@ export function buildRuntimeStatusProjection(input: {
 
   const infraFirst = diskCritical || buildBehindOrigin === true;
   const operatorSummary = infraFirst
-    ? `disk/deploy unblock before Chris handoff: ${recommendedActions.join("; ")}`
+    ? diskCritical
+      ? `disk-critical admission guard active: ordinary build rows are paused because manager disk headroom is below the critical floor; only disk cleanup/repair rows may be admitted. ${recommendedActions.join("; ")}`
+      : `disk/deploy unblock before Chris handoff: ${recommendedActions.join("; ")}`
     : capacityFull
       ? input.autoPromoteHealth.summary
       : `ready=${input.readyAdmission.candidates} admissible=${input.readyAdmission.admissible_now}; ${input.readyAdmission.recommended_action}`;
@@ -130,6 +168,7 @@ export function buildRuntimeStatusProjection(input: {
     schema_version: "orchestration.runtime_status_projection.v1",
     disk_critical: diskCritical,
     disk_state: diskState,
+    disk_admission: diskAdmission,
     build_behind_origin: buildBehindOrigin,
     build_source: buildSource,
     capacity_full: capacityFull,
