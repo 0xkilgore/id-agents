@@ -100,6 +100,18 @@ describe("buildReleaseProofReadiness", () => {
       feedback_freshness: { state: "present", stale: false, reason: null },
       infra_warning: { state: "clear", count: 0, requires_operator_review: false },
       source_link_state: { state: "present", safe_count: 1, unsafe_count: 0, total_count: 1 },
+      feedback_source_link_state: {
+        state: "present",
+        counts: { present: 1, missing: 0, redacted: 0, unsupported: 0, total: 1 },
+        items: [
+          {
+            id: "op:1",
+            state: "present",
+            source_link: "https://manager.local/artifacts/art-kapelle/comments#op-1",
+            reason: null,
+          },
+        ],
+      },
       system_health: {
         state: "clear",
         disk: { state: "ok", disk_critical: false },
@@ -207,6 +219,18 @@ describe("buildReleaseProofReadiness", () => {
     expect(view.feedback_evidence.state).toBe("present");
     expect(view.generated_artifacts.state).toBe("missing");
     expect(view.sources.state).toBe("missing");
+    expect(view.feedback_source_link_state).toMatchObject({
+      state: "missing",
+      counts: { present: 0, missing: 1, redacted: 0, unsupported: 0, total: 1 },
+      items: [{ id: "op:source-missing", state: "missing", source_link: null }],
+    });
+    expect(view.next_owner).toMatchObject({
+      lane: "release-engineering",
+      reason: "source_link_state",
+    });
+    expect(view.next_owner.candidates).not.toEqual(
+      expect.arrayContaining([expect.objectContaining({ lane: "chris" })]),
+    );
     expect(view.missing_reasons).toEqual([
       "one or more generated artifacts are missing safe source links",
       "no source links are attached to the release proof",
@@ -251,10 +275,82 @@ describe("buildReleaseProofReadiness", () => {
     }));
 
     expect(view.release_readiness).toBe("not_ready");
+    expect(view.feedback_source_link_state).toMatchObject({
+      state: "redacted",
+      counts: { present: 0, missing: 0, redacted: 1, unsupported: 0, total: 1 },
+      items: [{ id: "op:redacted-source", state: "redacted", source_link: null }],
+    });
     expect(view.missing_reasons).toEqual(["one or more feedback evidence items have redacted source_link"]);
     expect(view.sources.links).not.toEqual(
       expect.arrayContaining([expect.objectContaining({ href: "[redacted]" })]),
     );
+  });
+
+  it("distinguishes mixed feedback source-link states at receipt level", () => {
+    const view = buildReleaseProofReadiness(base({
+      feedback_evidence: [
+        feedbackFixture({
+          id: "op:present",
+          source_link: "manager:/artifacts/art-kapelle/operations/1",
+          source_link_status: "derived",
+        }),
+        feedbackFixture({
+          id: "op:missing",
+          source_link: null,
+          source_link_status: "unavailable",
+          source_link_reason: "artifact source is marked missing",
+        }),
+        feedbackFixture({
+          id: "op:redacted",
+          source_link: null,
+          source_link_status: "redacted",
+          source_link_reason: "stored source link is redacted",
+        }),
+        feedbackFixture({
+          id: "op:unsupported",
+          source_link: null,
+          source_link_status: "unsupported",
+          source_link_reason: "stored source link uses an unsupported or local scheme",
+        }),
+      ],
+    }));
+
+    expect(view.release_readiness).toBe("not_ready");
+    expect(view.feedback_source_link_state).toEqual({
+      state: "missing",
+      counts: { present: 1, missing: 1, redacted: 1, unsupported: 1, total: 4 },
+      items: [
+        {
+          id: "op:present",
+          state: "present",
+          source_link: "manager:/artifacts/art-kapelle/operations/1",
+          reason: null,
+        },
+        {
+          id: "op:missing",
+          state: "missing",
+          source_link: null,
+          reason: "artifact source is marked missing",
+        },
+        {
+          id: "op:redacted",
+          state: "redacted",
+          source_link: null,
+          reason: "stored source link is redacted",
+        },
+        {
+          id: "op:unsupported",
+          state: "unsupported",
+          source_link: null,
+          reason: "stored source link uses an unsupported or local scheme",
+        },
+      ],
+    });
+    expect(view.reason_codes.source_link_state).toEqual([
+      "feedback_source_link_null",
+      "feedback_source_link_redacted",
+      "feedback_source_link_unsupported",
+    ]);
   });
 
   it("blocks unsupported source hrefs and omits them from exposed sources", () => {
@@ -405,13 +501,13 @@ describe("buildReleaseProofReadiness", () => {
       loader_error: [],
       feedback_freshness: ["feedback_evidence_stale"],
       infra_warning: [],
-      source_link_state: ["feedback_source_link_null"],
+      source_link_state: ["feedback_source_link_unsupported"],
       artifact_state: [],
     });
     expect(view.infra_warnings).toMatchObject({ state: "clear", count: 0, source: "none", action: null });
     expect(view.generated_artifacts).toMatchObject({ state: "present", count: 1 });
     expect(view.stale_reasons).toEqual(["latest feedback evidence is older than 24h"]);
-    expect(view.missing_reasons).toEqual(["one or more feedback evidence items have null source_link"]);
+    expect(view.missing_reasons).toEqual(["one or more feedback evidence items have unsupported source links"]);
     expect(view.missing_reasons).not.toContain("one or more generated proof artifacts are not present");
     expect(view.generated_artifacts.items).toEqual(
       expect.arrayContaining([
@@ -735,9 +831,22 @@ describe("buildReleaseProofReadiness", () => {
           id: "op:10023",
           source_link: "manager:/artifacts/art-kapelle-op-10023/operations/10023",
           source_link_status: "derived",
+          source_link_safe_state: "present",
           source_link_reason: "derived from durable artifact operation",
         }),
       ]);
+      expect(view.feedback_source_link_state).toMatchObject({
+        state: "present",
+        counts: { present: 1, missing: 0, redacted: 0, unsupported: 0, total: 1 },
+        items: [
+          {
+            id: "op:10023",
+            state: "present",
+            source_link: "manager:/artifacts/art-kapelle-op-10023/operations/10023",
+            reason: "derived from durable artifact operation",
+          },
+        ],
+      });
       expect(view.sources.links).toEqual(
         expect.arrayContaining([
           expect.objectContaining({
@@ -806,9 +915,15 @@ describe("buildReleaseProofReadiness", () => {
           id: "op:9894",
           source_link: null,
           source_link_status: "unavailable",
+          source_link_safe_state: "missing",
           source_link_reason: "artifact source is marked missing",
         }),
       ]);
+      expect(view.feedback_source_link_state).toMatchObject({
+        state: "missing",
+        counts: { present: 0, missing: 1, redacted: 0, unsupported: 0, total: 1 },
+        items: [{ id: "op:9894", state: "missing", source_link: null, reason: "artifact source is marked missing" }],
+      });
       expect(view.missing_reasons).toEqual([
         "one or more generated proof artifacts are not present",
         "one or more feedback evidence items have null source_link",
@@ -930,14 +1045,14 @@ describe("buildReleaseProofReadiness", () => {
           expect.objectContaining({ href: expect.stringContaining("file://") }),
         ]),
       );
-      expect(view.reason_codes.source_link_state).toEqual(["feedback_source_link_null"]);
+      expect(view.reason_codes.source_link_state).toEqual(["feedback_source_link_unsupported"]);
       expect(view.stale_reasons).toEqual([]);
-      expect(view.missing_reasons).toEqual(["one or more feedback evidence items have null source_link"]);
+      expect(view.missing_reasons).toEqual(["one or more feedback evidence items have unsupported source links"]);
       expect(view.next_owner.candidates).toEqual([
         {
           lane: "release-engineering",
           reason: "source_link_state",
-          action: "one or more feedback evidence items have null source_link",
+          action: "one or more feedback evidence items have unsupported source links",
         },
       ]);
     } finally {

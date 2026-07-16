@@ -6,6 +6,7 @@ export type EvidenceState = "present" | "empty" | "stale" | "error";
 export type InfraWarningState = "clear" | "warning" | "error";
 export type InfraWarningSource = "none" | "readiness_loader" | "orchestration_health_projection";
 export type LinkState = "present" | "missing";
+export type FeedbackSourceLinkState = "present" | "missing" | "redacted" | "unsupported";
 export type ReleaseProofNextOwnerLane = "none" | "chris" | "operator" | "release-engineering";
 export type ReleaseProofSystemHealthState = "clear" | "warning" | "critical" | "unknown";
 export type ReleaseProofReasonCode =
@@ -29,6 +30,7 @@ export interface ReleaseProofFeedbackEvidence {
   observed_at: string;
   source_link: string | null;
   source_link_status?: "present" | "derived" | "redacted" | "unsupported" | "unavailable";
+  source_link_safe_state?: FeedbackSourceLinkState;
   source_link_reason?: string | null;
   artifact_id: string | null;
   summary: string | null;
@@ -93,6 +95,22 @@ export interface ReleaseProofReadinessResponse {
     safe_count: number;
     unsafe_count: number;
     total_count: number;
+  };
+  feedback_source_link_state: {
+    state: FeedbackSourceLinkState;
+    counts: {
+      present: number;
+      missing: number;
+      redacted: number;
+      unsupported: number;
+      total: number;
+    };
+    items: Array<{
+      id: string;
+      state: FeedbackSourceLinkState;
+      source_link: string | null;
+      reason: string | null;
+    }>;
   };
   system_health: {
     state: ReleaseProofSystemHealthState;
@@ -235,16 +253,13 @@ export function buildReleaseProofReadiness(
     reasonCodes.source_link_state.push("source_links_missing");
   }
 
-  const feedbackMissingSources = input.feedback_evidence.filter((item) => !isSafeSourceHref(item.source_link));
-  const feedbackNullSources = feedbackMissingSources.filter((item) => !item.source_link?.trim());
-  const feedbackRedactedSources = feedbackMissingSources.filter((item) => {
-    const source = item.source_link?.trim();
-    return source ? isRedactedSource(source) : false;
-  });
-  const feedbackUnsupportedSources = feedbackMissingSources.filter((item) => {
-    const source = item.source_link?.trim();
-    return source ? !isRedactedSource(source) : false;
-  });
+  const feedbackSourceLinkState = buildFeedbackSourceLinkState(input.feedback_evidence);
+  const feedbackMissingSources = input.feedback_evidence.filter((item) =>
+    classifyFeedbackSourceLink(item) !== "present"
+  );
+  const feedbackNullSources = feedbackSourceLinkState.items.filter((item) => item.state === "missing");
+  const feedbackRedactedSources = feedbackSourceLinkState.items.filter((item) => item.state === "redacted");
+  const feedbackUnsupportedSources = feedbackSourceLinkState.items.filter((item) => item.state === "unsupported");
   if (feedbackNullSources.length > 0) {
     missingReasons.push("one or more feedback evidence items have null source_link");
     reasonCodes.source_link_state.push("feedback_source_link_null");
@@ -329,6 +344,7 @@ export function buildReleaseProofReadiness(
       unsafe_count: sourceLinkCounts.unsafe,
       total_count: sourceLinkCounts.total,
     },
+    feedback_source_link_state: feedbackSourceLinkState,
     system_health: systemHealth,
     next_owner: nextOwner,
     feedback_evidence: {
@@ -425,16 +441,18 @@ export async function readReleaseProofReadiness(
       infra_warnings: infraWarnings,
       source_links: [
         ...backlogSources,
-        ...feedback.flatMap((item) =>
-          isSafeSourceHref(item.source_link)
-            ? [{ label: `feedback:${item.id}`, href: item.source_link, source: "feedback" as const }]
-            : [],
-        ),
-        ...artifacts.flatMap((item) =>
-          isSafeSourceHref(item.source_link)
-            ? [{ label: `artifact:${item.artifact_id}`, href: item.source_link, source: "artifact" as const }]
-            : [],
-        ),
+        ...feedback.flatMap((item) => {
+          const href = item.source_link;
+          return typeof href === "string" && isSafeSourceHref(href)
+            ? [{ label: `feedback:${item.id}`, href, source: "feedback" as const }]
+            : [];
+        }),
+        ...artifacts.flatMap((item) => {
+          const href = item.source_link;
+          return typeof href === "string" && isSafeSourceHref(href)
+            ? [{ label: `artifact:${item.artifact_id}`, href, source: "artifact" as const }]
+            : [];
+        }),
       ],
       generated_artifacts: artifacts,
       stale_after_ms: opts.staleAfterMs,
@@ -498,6 +516,16 @@ async function readFeedbackEvidence(adapter: DbAdapter, project: string): Promis
       observed_at: row.ts,
       source_link: source.source_link,
       source_link_status: source.status,
+      source_link_safe_state: classifyFeedbackSourceLink({
+        id: `op:${row.op_id}`,
+        kind: row.op_type,
+        observed_at: row.ts,
+        source_link: source.source_link,
+        source_link_status: source.status,
+        source_link_reason: source.reason,
+        artifact_id: row.artifact_id,
+        summary: null,
+      }),
       source_link_reason: source.reason,
       artifact_id: row.artifact_id,
       summary: summarizePayload(row.payload_json) ?? `${row.op_type} by ${row.actor}`,
@@ -607,6 +635,68 @@ function stableArtifactOperationSourceLink(artifactId: string, opId: number): st
   return `${stableArtifactSourceLink(artifactId)}/operations/${opId}`;
 }
 
+function buildFeedbackSourceLinkState(
+  items: ReleaseProofFeedbackEvidence[],
+): ReleaseProofReadinessResponse["feedback_source_link_state"] {
+  const classified = items.map((item) => {
+    const state = classifyFeedbackSourceLink(item);
+    return {
+      id: item.id,
+      state,
+      source_link: state === "present" ? item.source_link : null,
+      reason: item.source_link_reason ?? (state === "present" ? null : defaultFeedbackSourceLinkReason(state)),
+    };
+  });
+  const counts = {
+    present: classified.filter((item) => item.state === "present").length,
+    missing: classified.filter((item) => item.state === "missing").length,
+    redacted: classified.filter((item) => item.state === "redacted").length,
+    unsupported: classified.filter((item) => item.state === "unsupported").length,
+    total: classified.length,
+  };
+  return {
+    state: firstNonPresentFeedbackSourceState(counts) ?? "present",
+    counts,
+    items: classified,
+  };
+}
+
+function classifyFeedbackSourceLink(item: ReleaseProofFeedbackEvidence): FeedbackSourceLinkState {
+  if (item.source_link_safe_state) return item.source_link_safe_state;
+  if (item.source_link_status === "redacted") return "redacted";
+  if (item.source_link_status === "unsupported") return "unsupported";
+  if (item.source_link_status === "unavailable") return "missing";
+  const rawSource = item.source_link;
+  if (isSafeSourceHref(rawSource)) return "present";
+
+  const source = typeof rawSource === "string" ? rawSource.trim() : "";
+  if (!source) return "missing";
+  if (isRedactedSource(source)) return "redacted";
+  return "unsupported";
+}
+
+function firstNonPresentFeedbackSourceState(
+  counts: ReleaseProofReadinessResponse["feedback_source_link_state"]["counts"],
+): FeedbackSourceLinkState | null {
+  if (counts.missing > 0) return "missing";
+  if (counts.redacted > 0) return "redacted";
+  if (counts.unsupported > 0) return "unsupported";
+  return null;
+}
+
+function defaultFeedbackSourceLinkReason(state: FeedbackSourceLinkState): string | null {
+  switch (state) {
+    case "missing":
+      return "feedback source link is missing";
+    case "redacted":
+      return "feedback source link is redacted";
+    case "unsupported":
+      return "feedback source link uses an unsupported or local scheme";
+    case "present":
+      return null;
+  }
+}
+
 function latestIso(values: string[]): string | null {
   let latest: string | null = null;
   for (const value of values) {
@@ -628,7 +718,7 @@ function dedupeSourceLinks(links: ReleaseProofSourceLink[]): ReleaseProofSourceL
   return out;
 }
 
-function isSafeSourceHref(value: string | null | undefined): value is string {
+function isSafeSourceHref(value: string | null | undefined): boolean {
   if (!value) return false;
   const href = value.trim();
   if (!href || isRedactedSource(href) || isLocalPathExposure(href)) return false;
@@ -638,7 +728,7 @@ function isSafeSourceHref(value: string | null | undefined): value is string {
   return false;
 }
 
-function isSafeSourceToken(value: string | null | undefined): value is string {
+function isSafeSourceToken(value: string | null | undefined): boolean {
   if (!value) return false;
   const source = value.trim();
   if (!source || isRedactedSource(source) || isLocalPathExposure(source)) return false;
