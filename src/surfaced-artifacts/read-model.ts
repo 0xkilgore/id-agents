@@ -136,6 +136,12 @@ export const SURFACED_ARTIFACTS_SAVED_VIEW: SurfacedArtifactsSavedView = {
     "artifact.projectRef",
     "artifact.programRef",
     "artifact.trackRef",
+    "artifact.legacy.audience",
+    "artifact.legacy.kind",
+    "artifact.legacy.projectRef",
+    "artifact.legacy.trackRef",
+    "artifact.legacy.confidence",
+    "artifact.legacy.reason",
     "artifact.agentName",
     "artifact.createdAt",
     "artifact.updatedAt",
@@ -237,6 +243,7 @@ export const SURFACED_ARTIFACTS_SAVED_VIEW: SurfacedArtifactsSavedView = {
     project_ref: "artifact.projectRef",
     program_ref: "artifact.programRef",
     track_ref: "artifact.trackRef",
+    legacy_classification: "artifact.legacy.kind",
     agent_name: "artifact.agentName",
     created_at: "artifact.createdAt",
     updated_at: "artifact.updatedAt",
@@ -428,6 +435,12 @@ function valueForSavedViewField(row: SurfacedArtifactRow, field: SavedViewFieldI
       return row.project_ref;
     case "artifact.programRef": return row.program_ref;
     case "artifact.trackRef": return row.track_ref;
+    case "artifact.legacy.audience": return row.legacy_classification?.audience;
+    case "artifact.legacy.kind": return row.legacy_classification?.kind;
+    case "artifact.legacy.projectRef": return row.legacy_classification?.project_ref;
+    case "artifact.legacy.trackRef": return row.legacy_classification?.track_ref;
+    case "artifact.legacy.confidence": return row.legacy_classification?.confidence;
+    case "artifact.legacy.reason": return row.legacy_classification?.reason;
     case "artifact.agentName": return row.agent_name;
     case "artifact.createdAt": return row.created_at;
     case "artifact.updatedAt":
@@ -546,10 +559,10 @@ function rawKeyForCanonical(id: SavedViewFieldId): RawSurfacedArtifactRowKey | u
 
 function fieldValueType(id: SavedViewFieldId): SavedViewFieldRegistryEntry["value_type"] {
   if (id.endsWith("At") || id === "task.due" || id === "work_item.due" || id === "user_task.due" || id === "dispatch.completedAt") return "timestamp";
-  if (id === "artifact.rankScore" || id === "artifact.groupCount" || id === "work_item.rank") return "number";
+  if (id === "artifact.rankScore" || id === "artifact.groupCount" || id === "artifact.legacy.confidence" || id === "work_item.rank") return "number";
   if (id === "artifact.groupedSourceKinds" || id === "artifact.tags") return "string[]";
   if (id.includes(".has") || id === "loop.late" || id === "dispatch.needsOperator" || id === "artifact.visibility.pathPresent" || id === "artifact.visibility.bodyRenderable" || id === "artifact.delivery.bodyCached" || id === "artifact.delivery.bodyAvailable") return "boolean";
-  if (id.endsWith("status") || id.endsWith("Status") || id.endsWith("freshness") || id.endsWith("Freshness") || id === "artifact.needs") return "enum";
+  if (id.endsWith("status") || id.endsWith("Status") || id.endsWith("freshness") || id.endsWith("Freshness") || id === "artifact.needs" || id === "artifact.legacy.audience" || id === "artifact.legacy.kind") return "enum";
   return "string";
 }
 
@@ -681,8 +694,21 @@ export async function buildSurfacedArtifactsReadModel(
     const body = await readRenderableBody(artifact.abs_path, readFile);
     const signals = titleSignalsFromBody(body.text);
     const metadata = metadataSignalsFromText(body.text);
-    const project = cleanTitle(artifact.project_ref) ?? projectFromPath(artifact.abs_path) ?? metadata.project ?? projectFromText([artifact.title, artifact.basename, artifact.tag].join(" "));
-    const track = metadata.track ?? trackFromText([artifact.tag, artifact.title, artifact.basename, body.text].join(" "));
+    const directProject = cleanTitle(artifact.project_ref) ?? projectFromPath(artifact.abs_path) ?? metadata.project ?? projectFromText([artifact.title, artifact.basename, artifact.tag].join(" "));
+    const directTrack = metadata.track ?? trackFromText([artifact.tag, artifact.title, artifact.basename, body.text].join(" "));
+    const legacyClassification = classifyLegacyArtifactFallback({
+      sourceKind: "artifact",
+      title: artifact.title,
+      basename: artifact.basename,
+      tag: artifact.tag,
+      path: artifact.abs_path,
+      body: body.text ?? artifact.body_text,
+      agent: artifact.agent,
+      directProject,
+      directTrack,
+    });
+    const project = directProject ?? legacyClassification.project_ref ?? null;
+    const track = directTrack ?? legacyClassification.track_ref ?? null;
     const program = metadata.program ?? programFromText([artifact.title, artifact.basename, body.text].join(" "));
     const sourceKind = artifactSourceKind(artifact);
     const sourceType = sourceTypeFromPath({
@@ -715,6 +741,7 @@ export async function buildSurfacedArtifactsReadModel(
       project_ref: project ?? undefined,
       program_ref: program ?? undefined,
       track_ref: track ?? undefined,
+      legacy_classification: legacyClassification,
       agent_name: artifact.agent,
       created_at: artifact.produced_at,
       updated_at: artifact.last_op_at ?? artifact.updated_at ?? artifact.produced_at,
@@ -749,8 +776,24 @@ export async function buildSurfacedArtifactsReadModel(
     const signals = titleSignalsFromBody(body.text);
     const metadata = metadataSignalsFromText([body.text, dispatch.body_markdown].filter(Boolean).join("\n"));
     const missing = !artifactPath || !body.renderable;
-    const project = projectFromPath(artifactPath) ?? metadata.project ?? projectFromText([dispatch.subject, dispatch.body_markdown, dispatch.result_json].join(" "));
-    const track = metadata.track ?? trackFromText([dispatch.subject, dispatch.body_markdown, dispatch.result_json].join(" "));
+    const directProject = projectFromPath(artifactPath) ?? metadata.project ?? projectFromText([dispatch.subject, dispatch.body_markdown, dispatch.result_json].join(" "));
+    const directTrack = metadata.track ?? trackFromText([dispatch.subject, dispatch.body_markdown, dispatch.result_json].join(" "));
+    const legacyClassification = classifyLegacyArtifactFallback({
+      sourceKind: "dispatch_done",
+      title: dispatch.subject,
+      basename: artifactPath ? basename(artifactPath) : null,
+      path: artifactPath,
+      body: body.text,
+      dispatchBody: dispatch.body_markdown,
+      resultJson: dispatch.result_json,
+      promotionInputJson: dispatch.promotion_input_json,
+      promotionResultJson: dispatch.promotion_result_json,
+      agent: dispatch.to_agent,
+      directProject,
+      directTrack,
+    });
+    const project = directProject ?? legacyClassification.project_ref ?? null;
+    const track = directTrack ?? legacyClassification.track_ref ?? null;
     const program = metadata.program ?? programFromText([dispatch.subject, dispatch.body_markdown].join(" "));
     const reason = missing ? "blocked_or_stale" : dispatchReasonFor(dispatch);
     const status: SurfacedArtifactStatus = "unread";
@@ -783,6 +826,7 @@ export async function buildSurfacedArtifactsReadModel(
       project_ref: project ?? undefined,
       program_ref: program ?? undefined,
       track_ref: track ?? undefined,
+      legacy_classification: legacyClassification,
       agent_name: dispatch.to_agent,
       created_at: dispatch.completed_at ?? dispatch.updated_at,
       updated_at: dispatch.completed_at ?? dispatch.updated_at,
@@ -991,6 +1035,111 @@ async function readDoneDispatches(adapter: DbAdapter, limit: number): Promise<Di
     [limit],
   );
   return rows;
+}
+
+function classifyLegacyArtifactFallback(input: {
+  sourceKind: "artifact" | "dispatch_done";
+  title?: string | null;
+  basename?: string | null;
+  tag?: string | null;
+  path?: string | null;
+  body?: string | null;
+  dispatchBody?: string | null;
+  resultJson?: string | null;
+  promotionInputJson?: string | null;
+  promotionResultJson?: string | null;
+  agent?: string | null;
+  directProject?: string | null;
+  directTrack?: string | null;
+}): NonNullable<SurfacedArtifactRow["legacy_classification"]> {
+  const sourceFields = boundedLegacySourceFields([
+    ["source_kind", input.sourceKind],
+    ["title", input.title],
+    ["basename", input.basename],
+    ["tag", input.tag],
+    ["path", input.path],
+    ["agent", input.agent],
+    ["body", input.body],
+    ["dispatch_body", input.dispatchBody],
+    ["result_json", input.resultJson],
+    ["promotion_input_json", input.promotionInputJson],
+    ["promotion_result_json", input.promotionResultJson],
+  ]);
+  const text = sourceFields.map((field) => field.value).join(" ").toLowerCase();
+  const project = input.directProject
+    ?? projectFromPath(input.path)
+    ?? projectFromText(sourceFields.map((field) => field.value).join(" "));
+  const track = input.directTrack
+    ?? trackFromText(sourceFields.map((field) => field.value).join(" "));
+
+  if (/\b(needs?[-_ ]?(?:action|approval|decision|chris)|operator[-_ ]?(?:action|input|decision)|action[-_ ]?required|approval[-_ ]?required|please (?:approve|choose|decide)|unblock)\b/.test(text)) {
+    return {
+      audience: "operator",
+      kind: "operator_action",
+      project_ref: project ?? undefined,
+      track_ref: track ?? undefined,
+      confidence: 0.9,
+      reason: "operator-action-keyword",
+      source_fields: sourceFields,
+    };
+  }
+
+  if (/\b(qa|smoke|test[-_ ]?report|test(?:s|ed)?)\b/.test(text) && /\b(pass(?:ed)?|green|verified|receipt|complete|success)\b/.test(text)) {
+    return {
+      audience: "system",
+      kind: "qa_receipt",
+      project_ref: project ?? undefined,
+      track_ref: track ?? undefined,
+      confidence: 0.86,
+      reason: "qa-receipt-keyword",
+      source_fields: sourceFields,
+    };
+  }
+
+  if (/\b(system|scheduler|manager|agent[-_ ]done|closeout|promotion|promoted|merge[-_ ]main|receipt)\b/.test(text) && /\b(done|closed|completed|receipt|promoted|pushed|verified)\b/.test(text)) {
+    return {
+      audience: "system",
+      kind: "system_receipt",
+      project_ref: project ?? undefined,
+      track_ref: track ?? undefined,
+      confidence: 0.82,
+      reason: "system-receipt-keyword",
+      source_fields: sourceFields,
+    };
+  }
+
+  if (/\b(final|deliverable|document|handoff|brief|rundown|addendum)\b/.test(text)) {
+    return {
+      audience: "reader",
+      kind: "final_document",
+      project_ref: project ?? undefined,
+      track_ref: track ?? undefined,
+      confidence: 0.84,
+      reason: "final-document-keyword",
+      source_fields: sourceFields,
+    };
+  }
+
+  return {
+    audience: "reader",
+    kind: "regular_report",
+    project_ref: project ?? undefined,
+    track_ref: track ?? undefined,
+    confidence: 0.66,
+    reason: /\breport\b/.test(text) ? "regular-report-keyword" : "bounded-default-report",
+    source_fields: sourceFields,
+  };
+}
+
+function boundedLegacySourceFields(fields: Array<[string, string | null | undefined]>): NonNullable<SurfacedArtifactRow["legacy_classification"]>["source_fields"] {
+  const out: NonNullable<SurfacedArtifactRow["legacy_classification"]>["source_fields"] = [];
+  for (const [field, raw] of fields) {
+    const value = cleanTitle(raw?.slice(0, 500));
+    if (!value) continue;
+    out.push({ field, value: value.length > 160 ? `${value.slice(0, 157)}...` : value });
+    if (out.length >= 10) break;
+  }
+  return out;
 }
 
 function artifactReason(row: ArtifactRow): SurfacedArtifactRelevanceReason {

@@ -4,7 +4,7 @@ import * as net from "node:net";
 import type { Server } from "node:http";
 import { SqliteAdapter } from "../../src/db/sqlite-adapter.js";
 import { migrateSqlite } from "../../src/db/migrations/sqlite.js";
-import { artifactIdFromPath, migrateOutputsTables, registerArtifact } from "../../src/outputs/storage.js";
+import { artifactIdFromPath, migrateOutputsTables, registerArtifact as registerArtifactRaw } from "../../src/outputs/storage.js";
 import { mountSurfacedArtifactsRoutes } from "../../src/surfaced-artifacts/routes.js";
 
 async function boot(): Promise<{ base: string; server: Server; adapter: SqliteAdapter }> {
@@ -34,6 +34,17 @@ afterEach(() => {
   server?.close();
   server = null;
 });
+
+async function registerArtifact(
+  adapter: SqliteAdapter,
+  req: Parameters<typeof registerArtifactRaw>[1],
+  nowIso: string,
+) {
+  return registerArtifactRaw(adapter, {
+    project_ref: "kapelle",
+    ...req,
+  }, nowIso);
+}
 
 describe("GET /ops/surfaced-artifacts", () => {
   it("clamps oversized HTTP limits before reading artifact body/list rows", async () => {

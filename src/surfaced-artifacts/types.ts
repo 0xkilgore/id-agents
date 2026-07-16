@@ -56,6 +56,28 @@ export type SurfacedArtifactSourceType =
 
 export type SurfacedArtifactBodySource = "cache" | "filesystem" | "unavailable";
 
+export type LegacyArtifactAudience = "operator" | "reader" | "system";
+
+export type LegacyArtifactKind =
+  | "operator_action"
+  | "regular_report"
+  | "final_document"
+  | "qa_receipt"
+  | "system_receipt";
+
+export interface LegacyArtifactClassification {
+  audience: LegacyArtifactAudience;
+  kind: LegacyArtifactKind;
+  project_ref?: string;
+  track_ref?: string;
+  confidence: number;
+  reason: string;
+  source_fields: Array<{
+    field: string;
+    value: string;
+  }>;
+}
+
 export interface SurfacedArtifactRow {
   id: string;
   title: string;
@@ -73,6 +95,7 @@ export interface SurfacedArtifactRow {
   project_ref?: string;
   program_ref?: string;
   track_ref?: string;
+  legacy_classification?: LegacyArtifactClassification;
   agent_name?: string;
   created_at: string;
   updated_at: string;
@@ -176,6 +199,12 @@ export type SavedViewFieldId =
   | "artifact.projectRef"
   | "artifact.programRef"
   | "artifact.trackRef"
+  | "artifact.legacy.audience"
+  | "artifact.legacy.kind"
+  | "artifact.legacy.projectRef"
+  | "artifact.legacy.trackRef"
+  | "artifact.legacy.confidence"
+  | "artifact.legacy.reason"
   | "artifact.agentName"
   | "artifact.createdAt"
   | "artifact.updatedAt"
@@ -276,6 +305,7 @@ export type RawSurfacedArtifactRowKey =
   | "project_ref"
   | "program_ref"
   | "track_ref"
+  | "legacy_classification"
   | "agent_name"
   | "created_at"
   | "updated_at"

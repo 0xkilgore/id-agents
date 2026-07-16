@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { SqliteAdapter } from "../../src/db/sqlite-adapter.js";
 import { migrateSqlite } from "../../src/db/migrations/sqlite.js";
 import { approveArtifact, viewArtifact } from "../../src/outputs/ops.js";
-import { appendOperation, migrateOutputsTables, registerArtifact } from "../../src/outputs/storage.js";
+import { appendOperation, migrateOutputsTables, registerArtifact as registerArtifactRaw } from "../../src/outputs/storage.js";
 import {
   artifactIdForSurfacingPath,
   buildSurfacedArtifacts,
@@ -25,6 +25,22 @@ async function setup() {
   await migrateSqlite(adapter);
   await migrateOutputsTables(adapter);
   return adapter;
+}
+
+async function registerArtifact(
+  adapter: SqliteAdapter,
+  req: Parameters<typeof registerArtifactRaw>[1],
+  nowIso: string,
+) {
+  return registerArtifactRaw(adapter, {
+    project_ref: inferFixtureProject(req.abs_path),
+    ...req,
+  }, nowIso);
+}
+
+function inferFixtureProject(path: string): string {
+  const match = path.match(/\/Code\/([^/]+)\//);
+  return match?.[1] ?? "kapelle";
 }
 
 async function seedDone(adapter: SqliteAdapter, input: Partial<{
@@ -595,6 +611,109 @@ This program should be queued as the Local-First Project/Artifact Surfacing prog
       }),
     });
     expect(isRawPrimaryTitle(row!.title)).toBe(false);
+  });
+
+  it("classifies legacy artifacts for audience, kind, project, and track with bounded provenance", async () => {
+    const finalPath = "/Users/kilgore/Dropbox/Code/kapelle/output/2026-07-07-final-project-document.md";
+    files.set(finalPath, "# Final Kapelle Project Document\n\nFinal handoff for [T-LOCALREAD].");
+    await registerArtifact(adapter, {
+      artifact_id: "art-final-project-document",
+      basename: "2026-07-07-final-project-document.md",
+      agent: "substrate-api-codex",
+      tag: null,
+      abs_path: finalPath,
+      title: "Final project document",
+      produced_at: "2026-07-07T12:35:00.000Z",
+      source: "manual",
+    }, NOW);
+
+    await registerArtifact(adapter, {
+      artifact_id: "art-qa-receipt",
+      basename: "2026-07-07-qa-receipt.md",
+      agent: "substrate-api-codex",
+      tag: "T-LOCALREAD",
+      abs_path: "/tmp/qa-receipt.md",
+      title: "QA receipt - smoke tests green",
+      produced_at: "2026-07-07T12:36:00.000Z",
+      source: "manual",
+    }, NOW);
+
+    await seedDone(adapter, {
+      dispatch_phid: "phid:disp-system-closeout",
+      subject: "System closeout receipt promoted and verified",
+      body_markdown: "[project: kapelle][T-LOCALREAD] agent-done closeout receipt completed.",
+      completed_at: "2026-07-07T12:37:00.000Z",
+      updated_at: "2026-07-07T12:37:00.000Z",
+      artifact_path: null,
+    });
+
+    await seedDone(adapter, {
+      dispatch_phid: "phid:disp-operator-action",
+      subject: "Operator action required",
+      body_markdown: "[project: kapelle][T-LOCALREAD] Please approve the final document before routing.",
+      completed_at: "2026-07-07T12:38:00.000Z",
+      updated_at: "2026-07-07T12:38:00.000Z",
+      artifact_path: null,
+    });
+
+    const model = await buildSurfacedArtifactsReadModel(adapter, { limit: 7, readFile });
+    const byDispatch = new Map(model.recent_flood.raw_rows.map((row) => [row.dispatch_ref, row]));
+    const byArtifact = new Map(model.recent_flood.raw_rows.map((row) => [row.artifact_ref, row]));
+
+    expect(byDispatch.get("phid:disp-operator-action")).toMatchObject({
+      project_ref: "kapelle",
+      track_ref: "T-LOCALREAD",
+      legacy_classification: {
+        audience: "operator",
+        kind: "operator_action",
+        project_ref: "kapelle",
+        track_ref: "T-LOCALREAD",
+        confidence: 0.9,
+        reason: "operator-action-keyword",
+        source_fields: expect.arrayContaining([
+          expect.objectContaining({ field: "title", value: "Operator action required" }),
+          expect.objectContaining({ field: "dispatch_body", value: "[project: kapelle][T-LOCALREAD] Please approve the final document before routing." }),
+        ]),
+      },
+    });
+    expect(byDispatch.get("phid:disp-system-closeout")).toMatchObject({
+      legacy_classification: {
+        audience: "system",
+        kind: "system_receipt",
+        confidence: 0.82,
+        reason: "system-receipt-keyword",
+      },
+    });
+    expect(byArtifact.get("/tmp/qa-receipt.md")).toMatchObject({
+      track_ref: "T-LOCALREAD",
+      legacy_classification: {
+        audience: "system",
+        kind: "qa_receipt",
+        track_ref: "T-LOCALREAD",
+        confidence: 0.86,
+        reason: "qa-receipt-keyword",
+      },
+    });
+    expect(byArtifact.get(finalPath)).toMatchObject({
+      project_ref: "kapelle",
+      track_ref: "T-LOCALREAD",
+      legacy_classification: {
+        audience: "reader",
+        kind: "final_document",
+        project_ref: "kapelle",
+        track_ref: "T-LOCALREAD",
+        confidence: 0.84,
+        reason: "final-document-keyword",
+      },
+    });
+
+    const operatorRows = executeSeededSurfacedArtifactsSavedView(model.recent_flood.raw_rows, "workQueue", {
+      field: "artifact.legacy.audience",
+      op: "eq",
+      value: "operator",
+    }, NOW);
+    expect(operatorRows.rows.map((row) => row.dispatch_ref)).toEqual(["phid:disp-operator-action"]);
+    expect(model.recent_flood.raw_rows.every((row) => (row.legacy_classification?.source_fields.length ?? 0) <= 10)).toBe(true);
   });
 
   it("keeps a Cleveland Park same-morning artifact visible as a domain action after grouping", async () => {
