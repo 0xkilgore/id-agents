@@ -131,6 +131,12 @@ describe("GET /orchestration/backlog/stale-duplicates", () => {
       status: "failed",
       promotion_result_json: JSON.stringify({ completed: true, repos: [{ verified: true }] }),
     });
+    await seedDispatch({
+      phid: "phid:linked-query-expired",
+      status: "failed",
+      failure_kind: "linked_query_terminated",
+      failure_detail: "linked query terminated expired",
+    });
     await seedDispatch({ phid: "phid:failed-retry-safe", status: "failed", recovery_status: "none" });
     await seedDispatch({ phid: "phid:live", status: "in_flight" });
 
@@ -139,6 +145,11 @@ describe("GET /orchestration/backlog/stale-duplicates", () => {
     const superseded = await seedBacklog({ title: "superseded duplicate", state: "ready", phid: "phid:superseded" });
     const cancelled = await seedBacklog({ title: "cancelled duplicate", state: "ready", phid: "phid:cancelled" });
     const promoted = await seedBacklog({ title: "verified promotion duplicate", state: "needs_review", phid: "phid:failed-promoted" });
+    const linkedQueryExpired = await seedBacklog({
+      title: "expired linked query duplicate",
+      state: "needs_review",
+      phid: "phid:linked-query-expired",
+    });
     await seedBacklog({ title: "live dispatch", state: "needs_review", phid: "phid:live" });
     await seedBacklog({ title: "human retry", state: "needs_review", phid: "phid:done", retry_safe: true });
     await seedBacklog({ title: "failed retry-safe row", state: "ready", phid: "phid:failed-retry-safe", retry_safe: true });
@@ -153,11 +164,11 @@ describe("GET /orchestration/backlog/stale-duplicates", () => {
     expect(r.body.report).toMatchObject({
       schema_version: "orchestration.stale_duplicate_backlog_report.v1",
       dry_run: true,
-      scanned: 8,
+      scanned: 9,
       limit: 25,
-      matched: 5,
+      matched: 6,
       truncated: false,
-      count: 5,
+      count: 6,
     });
     expect(after).toEqual(before);
 
@@ -203,6 +214,20 @@ describe("GET /orchestration/backlog/stale-duplicates", () => {
       prior_terminal_status: "failed",
       promotion_verified: true,
       recommended_action: "mark_done",
+    });
+    expect(byId[linkedQueryExpired.item_id]).toMatchObject({
+      prior_terminal_status: "linked_query_expired",
+      promotion_verified: false,
+      recommended_action: "mark_superseded",
+      safe_closeout_payload: {
+        expected_last_dispatch_phid: "phid:linked-query-expired",
+        from_state: "needs_review",
+        to_state: "superseded",
+        evidence: {
+          prior_dispatch_status: "linked_query_expired",
+          promotion_verified: false,
+        },
+      },
     });
   });
 
