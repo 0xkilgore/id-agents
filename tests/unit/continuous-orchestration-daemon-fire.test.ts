@@ -705,7 +705,7 @@ describe("target_unhealthy reroute receipts", () => {
         expect.objectContaining({
           item_id: seeded.item_id,
           action: "held",
-          metadata: expect.objectContaining({ code: "duplicate_dispatch_retry_required" }),
+          metadata: expect.objectContaining({ code: "stale_queued_prior_dispatch" }),
         }),
       ]),
     );

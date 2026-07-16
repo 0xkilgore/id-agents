@@ -1231,6 +1231,12 @@ describe("orchestration health projection", () => {
       failure_kind: "scheduler_wedged",
       failure_detail: "stale in-flight claim",
     });
+    const nonRetryableFailed = await seedDuplicate("non retryable failed prior", "phid:disp-non-retryable-prior", {
+      status: "failed",
+      recovery_status: "none",
+      failure_kind: "process_exit",
+      failure_detail: "agent exited after deterministic test failure",
+    });
     const done = await seedDuplicate("terminal done prior", "phid:disp-done-prior", {
       status: "done",
       completed_at: "2026-07-14T12:00:00.000Z",
@@ -1247,7 +1253,7 @@ describe("orchestration health projection", () => {
       zero_ticks: 5,
       fired: false,
       admission_block_reasons: {
-        duplicate_dispatch_retry_required: 4,
+        duplicate_dispatch_retry_required: 5,
         target_unhealthy: 1,
       },
     });
@@ -1257,18 +1263,18 @@ describe("orchestration health projection", () => {
       state: "stalled_ready_not_launching",
       severity: "critical",
       last_admission_block_reasons: {
-        duplicate_dispatch_retry_required: 4,
+        duplicate_dispatch_retry_required: 5,
         target_unhealthy: 1,
       },
     });
-    expect(before.orchestration_loop.explanation).toContain("duplicate_dispatch_retry_required=4");
+    expect(before.orchestration_loop.explanation).toContain("duplicate_dispatch_retry_required=5");
     expect(before.orchestration_loop.explanation).toContain("target_unhealthy=1");
     expect(before.ready_item_blockers.categories).toEqual([
       expect.objectContaining({
         code: "duplicate_dispatch_retry_required",
         category: "retry_safety",
-        count: 4,
-        examples: [retryable.item_id, done.item_id, superseded.item_id, promoted.item_id],
+        count: 5,
+        examples: [retryable.item_id, nonRetryableFailed.item_id, done.item_id, superseded.item_id, promoted.item_id],
       }),
     ]);
     expect(before.ready_item_blockers.items).toEqual(
@@ -1284,6 +1290,17 @@ describe("orchestration health projection", () => {
           recommended_disposition: "mark-retry-safe",
           reason: expect.stringContaining("failed with retryable transient"),
           safe_action_copy: expect.stringContaining("mark retry_safe=true only after operator approval"),
+        }),
+        expect.objectContaining({
+          item_id: nonRetryableFailed.item_id,
+          prior_dispatch_id: "phid:disp-non-retryable-prior",
+          prior_dispatch_status: "failed",
+          retry_readiness_status: "non_retryable_failed_row",
+          retry_safe_recommendation: "leave_false",
+          operator_disposition: "close",
+          recommended_disposition: "supersede",
+          reason: expect.stringContaining("failed non-transiently"),
+          safe_action_copy: expect.stringContaining("supersede or replace the row"),
         }),
         expect.objectContaining({
           item_id: done.item_id,
@@ -1324,12 +1341,23 @@ describe("orchestration health projection", () => {
       actor: "roger",
     });
     expect(closeout).toMatchObject({
-      scanned: 4,
+      scanned: 5,
       closed: 2,
-      superseded: 1,
+      superseded: 2,
       preserved_retry_safe: 0,
     });
     expect(closeout.items).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        item_id: nonRetryableFailed.item_id,
+        to_state: "superseded",
+        receipt: expect.objectContaining({
+          closed_by: "roger",
+          next_action: "supersede_duplicate_row",
+          prior_dispatch_phid: "phid:disp-non-retryable-prior",
+          prior_dispatch_status: "failed",
+          redispatch_safety: expect.objectContaining({ safe_to_not_redispatch: true }),
+        }),
+      }),
       expect.objectContaining({
         item_id: done.item_id,
         to_state: "done",
@@ -1387,6 +1415,14 @@ describe("orchestration health projection", () => {
       stale_duplicate_closeout_receipt: expect.objectContaining({
         prior_dispatch_phid: "phid:disp-done-prior",
         next_action: "close_duplicate_row",
+      }),
+    });
+    await expect(getBacklogItem(adapter, nonRetryableFailed.item_id)).resolves.toMatchObject({
+      readiness_state: "superseded",
+      stale_duplicate_closeout_receipt: expect.objectContaining({
+        prior_dispatch_phid: "phid:disp-non-retryable-prior",
+        prior_dispatch_status: "failed",
+        next_action: "supersede_duplicate_row",
       }),
     });
     await expect(getBacklogItem(adapter, superseded.item_id)).resolves.toMatchObject({

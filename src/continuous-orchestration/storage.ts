@@ -9,6 +9,7 @@ import type { DbAdapter } from "../db/db-adapter.js";
 import { DEFAULT_RECOVERY_CONFIG } from "../dispatch-recovery/classifier.js";
 import { promotionCompletedAndVerified } from "../dispatch-scheduler/read-model.js";
 import { normalizeRuntime, resolveProviderFromRuntime } from "../dispatch-scheduler/types.js";
+import { classifyDuplicateDispatchRetryDisposition } from "./duplicate-dispatch-retry-classifier.js";
 import type {
   BacklogItem,
   DecisionRecord,
@@ -1205,12 +1206,25 @@ export async function reconcileStaleAlreadyDispatchedReadyRows(
 
     const status = row.dispatch_recovery_status === "moot" ? "moot" : row.dispatch_status;
     if (!status || !READY_RECONCILE_TERMINAL_STATUSES.has(status)) continue;
-    if (status === "failed" && !promotionCompletedAndVerified(row.promotion_result_json) && dispatchFailureRetryable(row)) {
-      continue;
-    }
+    const promotionVerified = promotionCompletedAndVerified(row.promotion_result_json);
+    const disposition = classifyDuplicateDispatchRetryDisposition({
+      dispatch_phid: row.last_dispatch_phid ?? "",
+      status,
+      not_before_at: null,
+      started_at: null,
+      updated_at: null,
+      recovery_status: row.dispatch_recovery_status,
+      failure_kind: row.failure_kind,
+      failure_detail: row.failure_detail,
+      promotion_result_json: row.promotion_result_json,
+      recovery_attempts: 0,
+      promote: false,
+      promotion_required_reason: null,
+    });
+    if (disposition.operator_disposition !== "close") continue;
 
     const toState: "done" | "superseded" =
-      status === "done" || promotionCompletedAndVerified(row.promotion_result_json) ? "done" : "superseded";
+      status === "done" || promotionVerified ? "done" : "superseded";
     const fromState = row.readiness_state as "ready" | "needs_review";
     const rowLabel = fromState === "needs_review" ? "needs_review row" : "ready row";
     const reason =
@@ -1234,7 +1248,7 @@ export async function reconcileStaleAlreadyDispatchedReadyRows(
         reason:
           toState === "done"
             ? "prior dispatch already reached terminal done state; reopening would duplicate completed work"
-            : `prior dispatch is terminal ${status}; this row is stale duplicate backlog state and not retry fuel`,
+            : `prior dispatch is ${status} with close disposition; this row is stale duplicate backlog state and not retry fuel`,
       },
     };
 
