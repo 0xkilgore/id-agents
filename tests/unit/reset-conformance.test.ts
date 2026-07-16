@@ -75,6 +75,11 @@ describe("reset conformance quarantine", () => {
     expect(summary.counts.by_kind.report).toEqual({ total: 1, quarantined: 1 });
     expect(summary.counts.unassigned).toBe(2);
     expect(summary.counts.track_unknown).toBe(1);
+    expect(summary.counts.missing_fields).toMatchObject({
+      track: 3,
+      owner: 1,
+      next_action: 1,
+    });
 
     const task = summary.records.find((r) => r.kind === "task" && r.id === "task_bad");
     expect(task?.missing).toEqual(expect.arrayContaining(["track", "owner", "next_action"]));

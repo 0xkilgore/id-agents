@@ -64,6 +64,7 @@ import {
   validateTaskTrackForStorage,
 } from './tasks-readmodel/task-draft.js';
 import { buildResetConformanceSummary } from './conformance/reset.js';
+import { guardTaskCreate } from './conformance/write-guard.js';
 import { assembleAgentDetail } from './agent-detail/assemble.js';
 import { buildAllocationTelemetry, clampTrailingHours } from './telemetry/allocation-telemetry.js';
 import {
@@ -9161,19 +9162,31 @@ export class AgentManagerDb {
           name = candidate;
         }
 
+        const guarded = guardTaskCreate({
+          title,
+          description: bodyDescription,
+          track,
+          owner: null,
+          created_by: createdBy,
+          owner_name: callerAgent?.name ?? null,
+          team_id: taskTeamId,
+        });
+        if (guarded.decision === 'rejected') {
+          return res.status(400).json({
+            error: 'conformance_write_guard_rejected',
+            missing_fields: guarded.rejected_fields,
+          });
+        }
+
         const taskRow: TaskRow = buildTaskRow(
           draftFromManagerApi({
             name,
             team_id: taskTeamId,
             title,
-            description: normalizeTaskDescriptionNextAction({
-              description: bodyDescription,
-              title,
-              ownerName: null,
-            }),
+            description: guarded.value.description,
             created_by: createdBy,
-            owner: null,
-            track,
+            owner: guarded.value.owner,
+            track: guarded.value.track,
           }),
         );
 
@@ -9595,6 +9608,9 @@ export class AgentManagerDb {
         const now = Math.floor(Date.now() / 1000);
         const claimed = await this.db.tasks.claim(task.id, agent.id, now);
         if (!claimed) {
+          if (task.owner === agent.id && task.status === 'doing') {
+            return res.json({ ok: true, task: await this.buildTaskResult(task, teamId) });
+          }
           return res.status(409).json({ error: `Cannot claim "${task.name}" — already owned or not in todo status` });
         }
         this.clearTaskListCache(teamId);

@@ -28,6 +28,7 @@ import type {
   RegisterArtifactRequest,
 } from "./types.js";
 import { artifactListVisualState } from "./local-health.js";
+import { guardArtifactCreate } from "../conformance/write-guard.js";
 
 // Derive a stable artifact_id from an absolute path. Same path → same id,
 // across machines and across days. Used by /deliver, /agent-done, and the
@@ -370,6 +371,24 @@ export async function registerArtifact(
   req: RegisterArtifactRequest,
   nowIso: string,
 ): Promise<{ row: ArtifactCatalogRow; inserted: boolean }> {
+  const guarded = guardArtifactCreate({
+    basename: req.basename,
+    agent: req.agent,
+    tag: req.tag ?? null,
+    abs_path: req.abs_path,
+    title: req.title ?? null,
+    project_ref: req.project_ref ?? null,
+  });
+  if (guarded.decision === "rejected") {
+    throw new Error(`conformance_write_guard_rejected: ${guarded.rejected_fields.join(", ")}`);
+  }
+  req = {
+    ...req,
+    tag: guarded.value.tag ?? undefined,
+    title: guarded.value.title,
+    project_ref: guarded.value.project_ref,
+  };
+
   const artifactId = req.artifact_id ?? artifactIdFromPath(req.abs_path);
   const existing = await getArtifact(adapter, artifactId);
   const source = req.source ?? "agent-done";

@@ -14,6 +14,7 @@
 //     to the Dispatch doc.
 
 import { DispatchDocClient } from "./dispatch-doc-client.js";
+import { guardDispatchCreate } from "../conformance/write-guard.js";
 import { HttpAgentTransport } from "./http-agent-transport.js";
 import { SchedulerService } from "./scheduler-service.js";
 import { SqliteDispatchReactor } from "./sqlite-dispatch-reactor.js";
@@ -756,13 +757,23 @@ export class SchedulerHandle {
       runtime = normalizeRuntime(targetAgent.runtime);
     }
     const provider: Provider = resolveProviderFromRuntime(runtime);
+    const guardedDispatch = guardDispatchCreate({
+      subject: input.subject ?? null,
+      body_markdown: input.message,
+      team_name: teamId,
+      to_agent: input.to_agent,
+    });
+    if (guardedDispatch.decision === "rejected") {
+      throw new Error(`enqueue: conformance_write_guard_rejected: ${guardedDispatch.rejected_fields.join(", ")}`);
+    }
+
     const payload: EnqueueInput = {
       query_id: queryId,
       to_agent: input.to_agent,
       from_actor: input.from_actor || "manager",
       channel: input.channel ?? "dispatch",
-      subject: input.subject ?? input.message.slice(0, 80),
-      body_markdown: input.message,
+      subject: guardedDispatch.value.subject,
+      body_markdown: guardedDispatch.value.body_markdown,
       provider,
       runtime,
       priority: input.priority ?? 5,

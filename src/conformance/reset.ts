@@ -33,6 +33,7 @@ export interface ResetConformanceSummary {
     by_kind: Record<ResetConformanceKind, { total: number; quarantined: number }>;
     unassigned: number;
     track_unknown: number;
+    missing_fields: Record<string, number>;
   };
   records: ResetConformanceRecord[];
   sources: Record<ResetConformanceKind, "available" | "unavailable">;
@@ -242,12 +243,16 @@ export async function buildResetConformanceSummary(
   let quarantined = 0;
   let unassigned = 0;
   let trackUnknown = 0;
+  const missingFields: Record<string, number> = {};
   for (const r of records) {
     by_kind[r.kind].total += 1;
     if (r.state === "accepted") accepted += 1;
     else {
       quarantined += 1;
       by_kind[r.kind].quarantined += 1;
+      for (const field of r.missing) {
+        missingFields[field] = (missingFields[field] ?? 0) + 1;
+      }
     }
     if (r.track_state === "unassigned") unassigned += 1;
     if (r.track_state === "unknown") trackUnknown += 1;
@@ -264,6 +269,7 @@ export async function buildResetConformanceSummary(
       by_kind,
       unassigned,
       track_unknown: trackUnknown,
+      missing_fields: missingFields,
     },
     records: records.filter((r) => r.state === "quarantined").slice(0, 100),
     sources: {
