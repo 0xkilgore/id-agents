@@ -274,6 +274,7 @@ export interface ReadyAdmissionExplanation {
   top_block_reasons: Array<{ code: string; category: ReadyAdmissionBlockerCategory; count: number }>;
   blocked_lanes: ReadyAdmissionBlockedLane[];
   blocked_dependency_summary: ReadyAdmissionBlockedDependencySummary;
+  blocker_contracts: ReadyAdmissionBlockerContract[];
   target_unhealthy_groups: ReadyAdmissionTargetUnhealthyGroup[];
   recommended_action: string;
   admissible: Array<{ item_id: string; title: string; to_agent: string | null; risk_class: string }>;
@@ -309,6 +310,19 @@ export interface ReadyAdmissionExplanation {
   halted: string | null;
   ready_runtime_repairs: ReadyRuntimeRepair[];
   disk_headroom: DiskHeadroom | null;
+}
+
+export interface ReadyAdmissionBlockerContract {
+  schema_version: "ready_admission.blocker_contract.v1";
+  item_id: string;
+  title: string;
+  code: "duplicate_dispatch_retry_required" | "blocked_dependency";
+  owner_lane: string;
+  disposition: "retry" | "hold" | "close" | "clear" | "repair_upstream";
+  safe_to_retry: boolean;
+  safe_to_close_or_supersede: boolean;
+  next_action: string;
+  supersede_close_instructions: string;
 }
 
 export interface ReadyAdmissionTargetUnhealthyReceipt {
@@ -917,6 +931,67 @@ function readyAdmissionBlockedDependencySummary(input: {
     truncated: rows.length > shownBlocked.length,
     dependencies: [...dependencies.values()].sort((a, b) => a.dependency.localeCompare(b.dependency)),
   };
+}
+
+function readyAdmissionBlockerContracts(input: {
+  plan: { skipped: DecisionRecord[] };
+  byId: Map<string, BacklogItem>;
+  duplicateRetryOutcomes: Map<string, DispatchOutcome>;
+  dependencyStates: Map<string, DependencyResolutionState>;
+  blockedDependencyItems: BacklogItem[];
+}): ReadyAdmissionBlockerContract[] {
+  const contracts: ReadyAdmissionBlockerContract[] = [];
+  for (const decision of input.plan.skipped) {
+    if (decision.metadata?.code !== "duplicate_dispatch_retry_required" || !decision.item_id) continue;
+    const item = input.byId.get(decision.item_id);
+    const phid = typeof decision.metadata.last_dispatch_phid === "string"
+      ? decision.metadata.last_dispatch_phid
+      : item?.last_dispatch_phid ?? null;
+    if (!item || !phid) continue;
+    const receipt = duplicateDispatchRetryReceipt(phid, input.duplicateRetryOutcomes.get(phid));
+    contracts.push({
+      schema_version: "ready_admission.blocker_contract.v1",
+      item_id: item.item_id,
+      title: item.title,
+      code: "duplicate_dispatch_retry_required",
+      owner_lane: laneKeyOf(item),
+      disposition: receipt.operator_disposition,
+      safe_to_retry: receipt.retry_safe_recommendation === "set_true",
+      safe_to_close_or_supersede: receipt.next_action === "close_duplicate_row" || receipt.next_action === "supersede_duplicate_row",
+      next_action: receipt.next_action,
+      supersede_close_instructions: receipt.operator_disposition === "retry"
+        ? "Do not close or supersede while choosing a bounded retry; mark retry_safe only with operator approval."
+        : receipt.operator_disposition === "close"
+          ? "Close or supersede this duplicate row; leave retry_safe=false and do not refire it."
+          : "Hold while the prior dispatch is live or unreadable; supersede only after operator review, and do not refire it.",
+    });
+  }
+
+  for (const item of input.blockedDependencyItems) {
+    const states = item.dependencies.map((dependency) => input.dependencyStates.get(dependency));
+    const allDone = states.length > 0 && states.every((state) => dependencyOperatorStatus(state) === "done");
+    const hasFailedOrMissing = states.some((state) => {
+      const status = dependencyOperatorStatus(state);
+      return status === "failed" || status === "missing";
+    });
+    contracts.push({
+      schema_version: "ready_admission.blocker_contract.v1",
+      item_id: item.item_id,
+      title: item.title,
+      code: "blocked_dependency",
+      owner_lane: laneKeyOf(item),
+      disposition: allDone ? "clear" : hasFailedOrMissing ? "repair_upstream" : "hold",
+      safe_to_retry: false,
+      safe_to_close_or_supersede: false,
+      next_action: allDone ? "clear_dependency_blocker" : hasFailedOrMissing ? "repair_or_supersede_upstream" : "wait_for_upstream",
+      supersede_close_instructions: allDone
+        ? "Clear the dependency blocker with operator evidence; do not close or supersede the dependent row."
+        : hasFailedOrMissing
+          ? "Repair or supersede the failed/missing upstream first; do not close or supersede the dependent row as a retry shortcut."
+          : "Keep the dependent row held until upstream is done or superseded; do not close, supersede, or retry the dependent row.",
+    });
+  }
+  return contracts.sort((a, b) => a.owner_lane.localeCompare(b.owner_lane) || a.item_id.localeCompare(b.item_id));
 }
 
 function readyAdmissionRecommendedAction(input: {
@@ -1968,6 +2043,13 @@ export class ContinuousOrchestrationDaemon {
       dependencyStates: dependency_states,
       blockedDependencyItems,
     });
+    const blockerContracts = readyAdmissionBlockerContracts({
+      plan,
+      byId,
+      duplicateRetryOutcomes,
+      dependencyStates: dependency_states,
+      blockedDependencyItems,
+    });
     const targetUnhealthyGroups = readyAdmissionTargetUnhealthyGroups(plan, byId, proposedHealthyTargets);
     const recommendedAction = readyAdmissionRecommendedAction({
       candidates: activeReady.length,
@@ -1992,6 +2074,7 @@ export class ContinuousOrchestrationDaemon {
       top_block_reasons: blockerCounts.slice(0, 5),
       blocked_lanes: blockedLanes,
       blocked_dependency_summary: blockedDependencySummary,
+      blocker_contracts: blockerContracts,
       target_unhealthy_groups: targetUnhealthyGroups,
       recommended_action: recommendedAction,
       admissible: plan.admit.map((item) => ({
