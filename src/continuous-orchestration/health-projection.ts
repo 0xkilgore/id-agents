@@ -1004,7 +1004,9 @@ function readyItemBlockerDetail(
     safe_action_copy: retryReadiness ? duplicateDispatchSafeActionCopy(retryReadiness) : null,
     safe_action_path: duplicateDisposition?.retry_safe_recommendation === "set_true"
       ? `/orchestration/backlog/${encodeURIComponent(row.item_id)}/mark-retry-safe`
-      : null,
+      : blocker.code === "duplicate_dispatch_retry_required" && classifyDuplicateDispatchFailure(outcome) === "non_retryable_failure"
+        ? `/orchestration/backlog/${encodeURIComponent(row.item_id)}/disposition`
+        : null,
     stale_duplicate_closeout_receipt_exists: !!row.stale_duplicate_closeout_receipt_json,
     provider_runtime_repair: providerRuntimeRepair,
   };

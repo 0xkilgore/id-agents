@@ -1730,7 +1730,7 @@ describe("daemon — dry-run vs live", () => {
       recommended_disposition: "supersede",
       recommended_action: "close or supersede the stale duplicate row; do not mark it retry-safe",
       safe_action_copy: "Safe action: operator review required; supersede or replace the row instead of marking retry_safe.",
-      safe_action_path: null,
+      safe_action_path: `/orchestration/backlog/${nonRetryable.item_id}/disposition`,
     });
     expect(res.body.health.ready_item_blockers.stale_ready_fuel.reason).not.toContain("empty fuel");
     expect(res.body.health.ready_item_blockers.recommended_action).not.toContain("ready for Chris");
@@ -1811,6 +1811,90 @@ describe("daemon — dry-run vs live", () => {
         }),
       ]),
     );
+  });
+
+  it("dispositions one non-transient failed duplicate with a durable receipt without unlocking retryable failures", async () => {
+    const nonTransient = await seedReady(adapter, {
+      title: "deterministic failure duplicate blocker",
+      write_scope: ["repo/non-transient-duplicate"],
+    });
+    await markReadyAlreadyDispatched(adapter, nonTransient.item_id, "phid:disp-non-transient-prior");
+    await seedDispatch(adapter, {
+      dispatch_phid: "phid:disp-non-transient-prior",
+      status: "failed",
+      failure_kind: "process_exit",
+      failure_detail: "deterministic focused test failure",
+    });
+
+    const retryable = await seedReady(adapter, {
+      title: "transient failure duplicate blocker",
+      write_scope: ["repo/retryable-duplicate"],
+    });
+    await markReadyAlreadyDispatched(adapter, retryable.item_id, "phid:disp-retryable-prior-bounded");
+    await seedDispatch(adapter, {
+      dispatch_phid: "phid:disp-retryable-prior-bounded",
+      status: "failed",
+      failure_kind: "scheduler_wedged",
+      failure_detail: "stale in-flight claim",
+    });
+
+    const { app } = mountStatusApp(adapter, {
+      dry_run: true,
+      auto_flesh_enabled: false,
+      auto_promote_enabled: false,
+    });
+    const before = await callApp(app, "/orchestration/status");
+    const blocker = before.body.health.ready_item_blockers.items.find((item: any) => item.item_id === nonTransient.item_id);
+    expect(blocker).toMatchObject({
+      failure_class: "non_retryable_failure",
+      recommended_disposition: "supersede",
+      safe_action_path: `/orchestration/backlog/${nonTransient.item_id}/disposition`,
+    });
+
+    const disposed = await callAppRequest(app, "POST", blocker.safe_action_path, {
+      disposition: "supersede",
+      actor: "substrate-orch-codex",
+      reason: "deterministic failure requires replacement work, not a blind refire",
+    });
+    expect(disposed.status, JSON.stringify(disposed.body)).toBe(200);
+    expect(disposed.body.item).toMatchObject({
+      item_id: nonTransient.item_id,
+      readiness_state: "superseded",
+      retry_safe: false,
+      stale_duplicate_closeout_receipt: {
+        schema_version: "orchestration.stale_duplicate_closeout_receipt.v1",
+        closed_by: "substrate-orch-codex",
+        to_state: "superseded",
+        next_action: "supersede_duplicate_row",
+        prior_dispatch_phid: "phid:disp-non-transient-prior",
+        prior_dispatch_status: "failed",
+        supersession_reason: "deterministic failure requires replacement work, not a blind refire",
+        redispatch_safety: {
+          safe_to_not_redispatch: true,
+          reason: "deterministic failure requires replacement work, not a blind refire",
+        },
+      },
+    });
+
+    const refusedRetryable = await callAppRequest(app, "POST", `/orchestration/backlog/${retryable.item_id}/disposition`, {
+      disposition: "supersede",
+      actor: "substrate-orch-codex",
+      reason: "attempt to bypass bounded retry gate",
+    });
+    expect(refusedRetryable.status).toBe(409);
+    expect(refusedRetryable.body).toMatchObject({
+      ok: false,
+      safe_action: "mark-retry-safe",
+      classification: {
+        failure_class: "retryable_transient",
+        retry_safe_recommendation: "set_true",
+      },
+    });
+    await expect(getBacklogItem(adapter, retryable.item_id)).resolves.toMatchObject({
+      readiness_state: "ready",
+      retry_safe: false,
+      stale_duplicate_closeout_receipt: null,
+    });
   });
 
   it("refuses to mark terminal prior dispatches retry-safe", async () => {

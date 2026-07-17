@@ -715,6 +715,67 @@ export function mountContinuousOrchestrationRoutes(app: Application, opts: Orche
     }
   });
 
+  app.post("/orchestration/backlog/:id/disposition", async (req: Request, res: Response) => {
+    try {
+      const id = String(req.params.id);
+      const body = (req.body ?? {}) as Record<string, unknown>;
+      const disposition = typeof body.disposition === "string" ? body.disposition.trim() : "";
+      const actor =
+        typeof body.actor_ref === "string" && body.actor_ref
+          ? body.actor_ref
+          : typeof body.actor === "string" && body.actor
+            ? body.actor
+            : "";
+      const reason = typeof body.reason === "string" ? body.reason.trim() : "";
+      if (disposition !== "close" && disposition !== "supersede") {
+        return res.status(400).json({ ok: false, error: "disposition must be close or supersede" });
+      }
+      if (!actor || !reason) {
+        return res.status(400).json({ ok: false, error: "actor and reason are required" });
+      }
+
+      const item = await getBacklogItem(adapter, id);
+      if (!item || item.team_id !== teamId) {
+        return res.status(404).json({ ok: false, error: "backlog item not found" });
+      }
+      if (item.readiness_state !== "ready" || !item.last_dispatch_phid || item.retry_safe) {
+        return res.status(409).json({ ok: false, error: "item is not a duplicate-dispatch ready blocker", item });
+      }
+      const outcomes = await getDispatchOutcomesByPhid(adapter, [item.last_dispatch_phid]);
+      const report = buildDuplicateDispatchRetryClassificationReport([item], outcomes);
+      const classification = report.items[0];
+      if (!classification || classification.failure_class !== "non_retryable_failure") {
+        return res.status(409).json({
+          ok: false,
+          error: "bounded disposition only supports non-transient failed prior dispatches",
+          classification,
+          safe_action: classification?.retry_safe_recommendation === "set_true" ? "mark-retry-safe" : "operator-review",
+        });
+      }
+      if (classification.recommended_disposition !== disposition) {
+        return res.status(409).json({
+          ok: false,
+          error: `safe disposition is ${classification.recommended_disposition}`,
+          classification,
+        });
+      }
+
+      const result = await reconcileStaleAlreadyDispatchedReadyRows(adapter, {
+        team_id: teamId,
+        actor,
+        item_id: id,
+        reason,
+      });
+      const disposed = result.items[0];
+      if (!disposed) {
+        return res.status(409).json({ ok: false, error: "item disposition did not apply", classification });
+      }
+      res.json({ ok: true, item: await getBacklogItem(adapter, id), disposition: disposed, classification });
+    } catch (err) {
+      res.status(500).json({ ok: false, error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
   app.post("/orchestration/backlog/:id/clear-dependency-blocker", async (req: Request, res: Response) => {
     try {
       const id = String(req.params.id);

@@ -1193,11 +1193,12 @@ export async function clearBacklogDependencyBlocker(
  */
 export async function reconcileStaleAlreadyDispatchedReadyRows(
   adapter: DbAdapter,
-  opts: { team_id?: string; dry_run?: boolean; actor?: string } = {},
+  opts: { team_id?: string; dry_run?: boolean; actor?: string; item_id?: string; reason?: string } = {},
 ): Promise<StaleReadyReconcileResult> {
   const teamId = opts.team_id ?? "default";
   const dryRun = opts.dry_run === true;
   const actor = opts.actor?.trim() || "operator";
+  const itemId = opts.item_id?.trim() || null;
   const { rows } = await adapter.query<
     BacklogRow & {
       dispatch_status: string | null;
@@ -1225,10 +1226,11 @@ export async function reconcileStaleAlreadyDispatchedReadyRows(
        LEFT JOIN dispatch_scheduler_queue q
          ON q.dispatch_phid = i.last_dispatch_phid
       WHERE i.team_id = $1
+        ${itemId ? "AND i.item_id = $2" : ""}
         AND i.readiness_state IN ('ready', 'needs_review')
         AND i.last_dispatch_phid IS NOT NULL
       ORDER BY i.updated_at ASC, i.created_at ASC`,
-    [teamId],
+    itemId ? [teamId, itemId] : [teamId],
   );
 
   const result: StaleReadyReconcileResult = {
@@ -1290,17 +1292,18 @@ export async function reconcileStaleAlreadyDispatchedReadyRows(
       prior_dispatch_phid: row.last_dispatch_phid ?? "",
       prior_dispatch_status: status,
       successor_dispatch_phid: null,
+      supersession_reason: opts.reason?.trim() || undefined,
       redispatch_safety: {
         safe_to_not_redispatch: true,
         reason:
-          toState === "done"
+          opts.reason?.trim() || (toState === "done"
             ? "prior dispatch already reached terminal done state; reopening would duplicate completed work"
-            : `prior dispatch is ${status} with close disposition; this row is stale duplicate backlog state and not retry fuel`,
+            : `prior dispatch is ${status} with close disposition; this row is stale duplicate backlog state and not retry fuel`),
       },
     };
 
     if (!dryRun) {
-      await adapter.query(
+      const updated = await adapter.query(
         `UPDATE orchestration_backlog_item
             SET readiness_state = $1,
                 source_refs_json = $2,
@@ -1311,7 +1314,8 @@ export async function reconcileStaleAlreadyDispatchedReadyRows(
           WHERE item_id = $6
             AND team_id = $7
             AND readiness_state IN ('ready', 'needs_review')
-            AND COALESCE(retry_safe, 0) = 0`,
+            AND COALESCE(retry_safe, 0) = 0
+            AND last_dispatch_phid = $8`,
         [
           toState,
           appendSourceRefs(row.source_refs_json, [
@@ -1323,8 +1327,10 @@ export async function reconcileStaleAlreadyDispatchedReadyRows(
           receipt.closed_at,
           row.item_id,
           teamId,
+          row.last_dispatch_phid,
         ],
       );
+      if (updated.rowCount !== 1) continue;
     }
 
     if (toState === "done") result.closed += 1;
