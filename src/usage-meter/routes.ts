@@ -71,6 +71,62 @@ export function mountUsageMeterRoutes(app: Application, opts: UsageMeterRouteOpt
     }
   };
 
+  // GET /usage/scope — operator-facing build-scope reconciliation.
+  //
+  // This intentionally points at the existing manager-owned meter instead of
+  // creating another telemetry path. It makes the OP-7 implementation boundary
+  // inspectable: Chris can click the canonical report, see which supporting
+  // surfaces are mounted, and distinguish calibrated omissions from unfinished
+  // work.
+  app.get("/usage/scope", async (_req: Request, res: Response) => {
+    try {
+      const gate = await opts.service.getSnapshotForScheduler();
+      res.json({
+        schema_version: "usage-meter-scope.v1",
+        status: "built",
+        canonical_meter: {
+          href: "/usage",
+          schema_version: "usage-meter-v2",
+          source: "manager-usage-meter",
+        },
+        operator_links: [
+          { rel: "meter", href: "/usage", method: "GET" },
+          { rel: "gate", href: "/usage/gate", method: "GET" },
+          { rel: "daily_report", href: "/usage/daily-report", method: "GET" },
+          { rel: "daemon_usage", href: "/usage/daemon", method: "GET" },
+          ...(adapter
+            ? [
+                { rel: "runtime_mix", href: "/usage/runtime-mix", method: "GET" },
+                { rel: "capture_now", href: "/usage/ingest", method: "POST" },
+              ]
+            : []),
+        ],
+        telemetry: {
+          storage_available: !!adapter,
+          manual_capture_available: !!adapter,
+          capture_on_read: captureOnRead,
+          background_capture: !!adapter && opts.backgroundIngest === true,
+        },
+        gating: {
+          admission: "implemented",
+          queue_release: "implemented",
+          enforcement: gate.enforcement,
+          default_enforcement: "warn",
+        },
+        intentionally_not_modeled: [
+          "provider_plan_percent_without_calibrated_limit",
+          "per_artifact_cost_attribution",
+        ],
+      });
+    } catch (err) {
+      res.status(500).json({
+        schema_version: "usage-meter-scope.v1",
+        status: "degraded",
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  });
+
   app.get("/usage", async (req: Request, res: Response) => {
     try {
       triggerUsageCapture();

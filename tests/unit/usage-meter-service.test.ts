@@ -249,6 +249,63 @@ describe("UsageMeterService — enforce mode (opt-in)", () => {
 // ─────────────────────────────────────────────────────────────────────
 
 describe("GET /usage — v2 schema contract", () => {
+  it("exposes the built OP-7 scope without creating a second meter", async () => {
+    const app = mkAppWithAdapter(mkService());
+    const res = await request(app).get("/usage/scope");
+
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({
+      schema_version: "usage-meter-scope.v1",
+      status: "built",
+      canonical_meter: {
+        href: "/usage",
+        schema_version: "usage-meter-v2",
+        source: "manager-usage-meter",
+      },
+      telemetry: {
+        storage_available: true,
+        manual_capture_available: true,
+        capture_on_read: false,
+        background_capture: false,
+      },
+      gating: {
+        admission: "implemented",
+        queue_release: "implemented",
+        enforcement: "warn",
+        default_enforcement: "warn",
+      },
+    });
+    expect(res.body.operator_links).toContainEqual({
+      rel: "meter",
+      href: "/usage",
+      method: "GET",
+    });
+    expect(res.body.operator_links).toContainEqual({
+      rel: "capture_now",
+      href: "/usage/ingest",
+      method: "POST",
+    });
+    expect(res.body.intentionally_not_modeled).toEqual(
+      expect.arrayContaining([
+        "provider_plan_percent_without_calibrated_limit",
+        "per_artifact_cost_attribution",
+      ]),
+    );
+  });
+
+  it("omits storage-backed links when the manager has no usage adapter", async () => {
+    const res = await request(mkApp(mkService())).get("/usage/scope");
+
+    expect(res.status).toBe(200);
+    expect(res.body.telemetry.storage_available).toBe(false);
+    expect(res.body.operator_links).not.toContainEqual(
+      expect.objectContaining({ rel: "capture_now" }),
+    );
+    expect(res.body.operator_links).not.toContainEqual(
+      expect.objectContaining({ rel: "runtime_mix" }),
+    );
+  });
+
   it("returns usage-meter-v2 with all required top-level keys", async () => {
     const svc = mkService();
     const app = mkApp(svc);
