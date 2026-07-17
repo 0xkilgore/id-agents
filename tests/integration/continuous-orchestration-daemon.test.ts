@@ -1358,6 +1358,71 @@ describe("daemon — dry-run vs live", () => {
     ]);
   });
 
+  it("status exposes a consistent safe blocker contract for duplicate retry and dependency-held fixtures", async () => {
+    const upstream = await insertBacklogItem(adapter, {
+      title: "dependency still running",
+      logical_key: "fixture:upstream-running",
+      readiness_state: "in_flight",
+      risk_class: "build",
+      write_scope: ["/repo/kapelle/upstream"],
+      token_estimate: 0,
+    });
+    const dependent = await insertBacklogItem(adapter, {
+      title: "dependency-held fixture",
+      readiness_state: "blocked_dependency",
+      risk_class: "build",
+      to_agent: "roger",
+      write_scope: ["/repo/kapelle/dependent"],
+      dependencies: [upstream.item_id],
+      token_estimate: 0,
+    });
+    const duplicate = await seedReady(adapter, {
+      title: "duplicate retry fixture",
+      to_agent: "roger",
+      write_scope: ["/repo/kapelle/duplicate"],
+    });
+    await markReadyAlreadyDispatched(adapter, duplicate.item_id, "phid:disp-contract-fixture");
+    await seedDispatch(adapter, {
+      dispatch_phid: "phid:disp-contract-fixture",
+      status: "failed",
+      failure_kind: "scheduler_wedged",
+      failure_detail: "bounded retry requires operator disposition",
+    });
+
+    const { app, daemon } = mountStatusApp(adapter, {
+      dry_run: true,
+      auto_flesh_enabled: false,
+      auto_promote_enabled: false,
+    });
+    await daemon.setMode("running");
+    const res = await callApp(app, "/orchestration/status");
+
+    expect(res.status).toBe(200);
+    const byItem = Object.fromEntries(
+      res.body.ready_admission.blocker_contracts.map((row: any) => [row.item_id, row]),
+    );
+    expect(byItem[duplicate.item_id]).toMatchObject({
+      schema_version: "ready_admission.blocker_contract.v1",
+      code: "duplicate_dispatch_retry_required",
+      owner_lane: "/repo/kapelle/duplicate",
+      disposition: "retry",
+      safe_to_retry: true,
+      safe_to_close_or_supersede: false,
+      next_action: "mark_retry_safe_to_refire",
+      supersede_close_instructions: expect.stringContaining("Do not close or supersede"),
+    });
+    expect(byItem[dependent.item_id]).toMatchObject({
+      schema_version: "ready_admission.blocker_contract.v1",
+      code: "blocked_dependency",
+      owner_lane: "/repo/kapelle/dependent",
+      disposition: "hold",
+      safe_to_retry: false,
+      safe_to_close_or_supersede: false,
+      next_action: "wait_for_upstream",
+      supersede_close_instructions: expect.stringContaining("do not close, supersede, or retry"),
+    });
+  });
+
   it("admits a healthy pool:builder target while holding unhealthy, capacity, and duplicate retry rows", async () => {
     await seedAgent(adapter, "healthy-builder", "running", "codex");
     await seedAgent(adapter, "unhealthy-builder", "stopped", "codex");
