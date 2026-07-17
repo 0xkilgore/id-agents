@@ -847,6 +847,92 @@ export async function reconcileStaleAlreadyDispatchedReadyRows(
   return result;
 }
 
+export interface AutoRetrySafeDuplicateDispatchResult {
+  scanned: number;
+  marked_retry_safe: number;
+  dry_run: boolean;
+  items: Array<{
+    item_id: string;
+    dispatch_phid: string;
+    failure_kind: string | null;
+    failure_detail: string | null;
+  }>;
+}
+
+export async function markRetryableFailedDuplicateDispatchRowsRetrySafe(
+  adapter: DbAdapter,
+  opts: { team_id?: string; dry_run?: boolean; actor?: string } = {},
+): Promise<AutoRetrySafeDuplicateDispatchResult> {
+  const teamId = opts.team_id ?? "default";
+  const dryRun = opts.dry_run === true;
+  const actor = opts.actor?.trim() || "continuous-orchestration";
+  const { rows } = await adapter.query<
+    BacklogRow & {
+      dispatch_status: string | null;
+      dispatch_recovery_status: string | null;
+      failure_kind: string | null;
+      failure_detail: string | null;
+      promotion_result_json: string | null;
+    }
+  >(
+    `SELECT i.*,
+            q.status AS dispatch_status,
+            q.recovery_status AS dispatch_recovery_status,
+            q.failure_kind AS failure_kind,
+            q.failure_detail AS failure_detail,
+            q.promotion_result_json AS promotion_result_json
+       FROM orchestration_backlog_item i
+       LEFT JOIN dispatch_scheduler_queue q
+         ON q.dispatch_phid = i.last_dispatch_phid
+      WHERE i.team_id = $1
+        AND i.readiness_state = 'ready'
+        AND i.last_dispatch_phid IS NOT NULL
+        AND COALESCE(i.retry_safe, 0) = 0
+      ORDER BY i.updated_at ASC, i.created_at ASC`,
+    [teamId],
+  );
+
+  const result: AutoRetrySafeDuplicateDispatchResult = {
+    scanned: rows.length,
+    marked_retry_safe: 0,
+    dry_run: dryRun,
+    items: [],
+  };
+  const now = new Date().toISOString();
+
+  for (const row of rows) {
+    const status = row.dispatch_recovery_status === "moot" ? "moot" : row.dispatch_status;
+    if (status !== "failed") continue;
+    if (promotionCompletedAndVerified(row.promotion_result_json)) continue;
+    if (!dispatchFailureRetryable(row)) continue;
+
+    result.marked_retry_safe += 1;
+    result.items.push({
+      item_id: row.item_id,
+      dispatch_phid: row.last_dispatch_phid ?? "",
+      failure_kind: row.failure_kind ?? null,
+      failure_detail: row.failure_detail ?? null,
+    });
+
+    if (dryRun) continue;
+    await adapter.query(
+      `UPDATE orchestration_backlog_item
+          SET retry_safe = 1,
+              dispatch_retry_count = CASE WHEN dispatch_retry_count < 1 THEN 1 ELSE dispatch_retry_count END,
+              updated_by = $1,
+              updated_at = $2
+        WHERE item_id = $3
+          AND team_id = $4
+          AND readiness_state = 'ready'
+          AND last_dispatch_phid = $5
+          AND COALESCE(retry_safe, 0) = 0`,
+      [actor, now, row.item_id, teamId, row.last_dispatch_phid],
+    );
+  }
+
+  return result;
+}
+
 function dispatchFailureRetryable(outcome: { failure_kind: string | null; failure_detail: string | null }): boolean {
   if (outcome.failure_kind === "scheduler_wedged") return true;
   const detail = (outcome.failure_detail ?? "").toLowerCase();

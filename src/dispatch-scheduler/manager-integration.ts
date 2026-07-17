@@ -752,8 +752,9 @@ export class SchedulerHandle {
     const targetAgent = await this.agentsRepository
       ?.getByName(this.teamId, input.to_agent)
       .catch(() => null);
-    if (targetAgent?.runtime && (input.runtime || input.provider)) {
-      runtime = normalizeRuntime(targetAgent.runtime);
+    const targetRuntime = targetAgent?.runtime ? normalizeRuntime(targetAgent.runtime) : null;
+    if (targetRuntime && (targetRuntime === "codex" || input.runtime || input.provider)) {
+      runtime = targetRuntime;
     }
     const provider: Provider = resolveProviderFromRuntime(runtime);
     const payload: EnqueueInput = {

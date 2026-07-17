@@ -153,7 +153,8 @@ export function buildPoolRouting(env: NodeJS.ProcessEnv = process.env): PoolRout
   const explicitPoolRequest = (raw: string | undefined): ResolvedPool | null => {
     const normalized = raw?.trim().toLowerCase();
     if (!normalized?.startsWith("pool:")) return null;
-    const requestedPoolId = normalized.slice("pool:".length);
+    const requested = normalized.slice("pool:".length);
+    const requestedPoolId = requested === "builder" ? "backend" : requested;
     const pool = registry.list().find((candidate) => candidate.pool_id === requestedPoolId);
     return pool
       ? { pool_id: pool.pool_id, repo_root: pool.repo_root, max_parallel: pool.max_parallel, members: [...pool.members] }

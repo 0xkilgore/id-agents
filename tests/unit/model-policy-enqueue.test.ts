@@ -129,6 +129,19 @@ describe("model policy at enqueue", () => {
     expect(got.provider).toBe("anthropic");
   });
 
+  it("registered Codex target runtime wins even when no runtime is pinned", async () => {
+    await insertAgentRuntime("maestra", "codex");
+    const handle = makeHandleWithAgents(["openai"]);
+    const got = await enqueuedRuntime(handle, {
+      to_agent: "maestra",
+      from_actor: "test",
+      message: "run product loop",
+    });
+
+    expect(got.runtime).toBe("codex");
+    expect(got.provider).toBe("openai");
+  });
+
   it("Claude-constrained project agent dispatches to a live Codex executor lane", async () => {
     const fetchSpy = vi.spyOn(globalThis, "fetch") as ReturnType<typeof vi.spyOn>;
     fetchSpy.mockResolvedValueOnce(

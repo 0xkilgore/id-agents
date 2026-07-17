@@ -34,6 +34,7 @@ import {
   listBacklogByState,
   listDependencyResolution,
   listReadyItems,
+  markRetryableFailedDuplicateDispatchRowsRetrySafe,
   promoteToReady,
   recordTickOutcome,
   repairReadyCodexRuntimeMetadata,
@@ -712,6 +713,11 @@ export class ContinuousOrchestrationDaemon {
     const admitCap = tickWriteCaps(writeCfg, refuelFleshed).admitCap;
 
     const readyRuntimeRepairs = await repairReadyCodexRuntimeMetadata(this.deps.adapter, this.teamId);
+    await markRetryableFailedDuplicateDispatchRowsRetrySafe(this.deps.adapter, {
+      team_id: this.teamId,
+      dry_run: config.dry_run,
+      actor: "continuous-orchestration",
+    });
     const ready = await listReadyItems(this.deps.adapter, this.teamId);
     const dependency_index = await listDependencyResolution(this.deps.adapter, this.teamId);
     // Priority-rank, then FAIR-interleave across distinct write_scope lanes so a

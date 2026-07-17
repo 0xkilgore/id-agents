@@ -23,16 +23,17 @@ export interface BootSpawnCandidate {
 
 /**
  * A roster agent the manager should (re)spawn at boot: registered but never
- * started (`status==="pending"`), a locally-spawnable runtime, with a real
- * port. Virtual/external agents (port 0) and remote-endpoint runtimes
+ * started (`status==="pending"`) or marked down by a prior health/readiness
+ * pass (`status==="offline"`), a locally-spawnable runtime, with a real port.
+ * Virtual/external agents (port 0) and remote-endpoint runtimes
  * (public-agent-remote) are NEVER spawned here — they live elsewhere.
  *
- * Intentionally narrow to `pending`: `stopped` is an operator's deliberate
- * "off", and `running` rows are handled by the live fleet (their detached
- * processes survive a manager restart).
+ * Keep `stopped` as an operator's deliberate "off". Treating `offline` as
+ * recoverable prevents a legitimate roster restore from preserving stale
+ * health state forever and keeping those agents in scheduler exclusions.
  */
 export function isBootSpawnableAgent(a: BootSpawnCandidate): boolean {
-  if (a.status !== "pending") return false;
+  if (a.status !== "pending" && a.status !== "offline") return false;
   if (a.type === "virtual") return false;
   if (!a.port || a.port <= 0) return false;
   if (isRemoteEndpointRuntime(a.runtime)) return false;

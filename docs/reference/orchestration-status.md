@@ -10,6 +10,11 @@ continuous orchestration ready queue is, or is not, dispatching work.
 read-only status check. The status route does not enqueue, reconcile, or mutate
 tick counters.
 
+`config.cadence_load_points` are batch/refuel landmarks, not hard dispatch
+windows. When the daemon is running and work remains admissible, regular ticks
+may dispatch outside those times; `last_dispatch_at` only advances on a live
+tick that actually fires at least one dispatch.
+
 `counts.ready_block_reasons` is a compact legacy summary for the common capacity
 and lane blockers:
 

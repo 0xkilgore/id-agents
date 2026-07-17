@@ -128,6 +128,21 @@ describe("continuous orchestration pool routing", () => {
     expect(pool?.members).toContain("regina");
   });
 
+  it("routes the legacy pool:builder sentinel to the backend builder pool", () => {
+    const pools = buildPoolRouting({});
+    const pool = pools.poolForItem(
+      item({
+        to_agent: "pool:builder",
+        title: "Wave78 P0: Repair target-unhealthy runtime map",
+        dispatch_body: "[project: kapelle][T-ORCH][BUILD] repair builder-pool runtime health",
+        write_scope: ["/Users/kilgore/Dropbox/Code/cane/id-agents"],
+      }),
+    );
+
+    expect(pool?.pool_id).toBe("backend");
+    expect(pool?.members).toEqual(["roger", "substrate-orch-codex", "substrate-api-codex"]);
+  });
+
   it("routes explicit pool:backend work across roger/substrate lanes with isolated worktrees", async () => {
     const pools = buildPoolRouting({});
     const backendItems = [
@@ -215,14 +230,14 @@ describe("continuous orchestration pool routing", () => {
     expect(plan.skipped).toHaveLength(1);
     expect(plan.skipped[0]).toMatchObject({
       item_id: "backend_blocked_substrate",
-      action: "skipped",
+      action: "held",
       metadata: {
-        code: "target_unhealthy",
+        code: "no_free_pool_builder",
         class: "agent_availability",
-        target: "substrate-orch-codex",
+        candidate_builders: ["substrate-orch-codex"],
       },
     });
-    expect(plan.skipped[0].reason).toContain("substrate-orch-codex");
+    expect(plan.skipped[0].reason).toContain("no healthy free builder in pool: backend");
   });
 
   it("smokes pool:frontend saturation: active captains are skipped, worktrees are isolated, blockers are explicit", async () => {

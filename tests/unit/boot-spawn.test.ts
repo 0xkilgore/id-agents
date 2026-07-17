@@ -14,10 +14,13 @@ describe("isBootSpawnableAgent", () => {
     expect(isBootSpawnableAgent(cand({ runtime: "cursor-cli" }))).toBe(true);
   });
 
-  it("does NOT spawn non-pending agents (running/stopped are not boot's job)", () => {
+  it("spawns offline local agents so restored rosters do not stay excluded", () => {
+    expect(isBootSpawnableAgent(cand({ status: "offline" }))).toBe(true);
+  });
+
+  it("does NOT spawn running/stopped agents", () => {
     expect(isBootSpawnableAgent(cand({ status: "running" }))).toBe(false);
     expect(isBootSpawnableAgent(cand({ status: "stopped" }))).toBe(false);
-    expect(isBootSpawnableAgent(cand({ status: "offline" }))).toBe(false);
   });
 
   it("does NOT spawn virtual/external agents (port 0)", () => {
