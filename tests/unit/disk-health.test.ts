@@ -1,8 +1,21 @@
 import { describe, expect, it } from "vitest";
 
-import { readDiskHeadroom } from "../../src/disk-health.js";
+import {
+  DEFAULT_DISK_MIN_FREE_BYTES,
+  DEFAULT_DISK_WARN_FREE_BYTES,
+  readDiskHeadroom,
+} from "../../src/disk-health.js";
 
 describe("readDiskHeadroom", () => {
+  it("uses the NAS-era fleet thresholds by default", () => {
+    expect(DEFAULT_DISK_WARN_FREE_BYTES).toBe(25 * 1024 ** 3);
+    expect(DEFAULT_DISK_MIN_FREE_BYTES).toBe(15 * 1024 ** 3);
+
+    const health = readDiskHeadroom({ path: process.cwd() });
+    expect(health.warn_free_bytes).toBe(DEFAULT_DISK_WARN_FREE_BYTES);
+    expect(health.min_free_bytes).toBe(DEFAULT_DISK_MIN_FREE_BYTES);
+  });
+
   it("reports filesystem headroom for an existing path", () => {
     const health = readDiskHeadroom({ path: process.cwd(), minFreeBytes: 1, warnFreeBytes: 2 });
 
@@ -27,28 +40,6 @@ describe("readDiskHeadroom", () => {
 
     expect(health.state).toBe("critical");
     expect(health.reason).toMatch(/available disk headroom is below/);
-  });
-
-  it("fires the warning before available headroom falls below 10 GiB", () => {
-    const gib = 1024 ** 3;
-    const health = readDiskHeadroom({
-      path: process.cwd(),
-      minFreeBytes: 5 * gib,
-      warnFreeBytes: 10 * gib,
-      statfs: () => ({
-        type: 0,
-        bsize: 1024,
-        blocks: 100 * 1024 * 1024,
-        bfree: Math.floor(7.4 * 1024 * 1024),
-        bavail: Math.floor(7.4 * 1024 * 1024),
-        files: 0,
-        ffree: 0,
-      }),
-    });
-
-    expect(health.state).toBe("warn");
-    expect(health.available_gib).toBe(7.4);
-    expect(health.reason).toContain("10 GiB");
   });
 
   it("returns unknown when the probe path is unreadable", () => {

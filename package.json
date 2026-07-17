@@ -37,6 +37,7 @@
     "test:e2e": "ID_CONTROL_API_KEY=${ID_CONTROL_API_KEY:?set ID_CONTROL_API_KEY to run external-manager integration tests} vitest run tests/integration/agent-capabilities.test.ts tests/integration/agent-lifecycle.test.ts tests/integration/agent-relay.test.ts tests/integration/external-client.test.ts tests/integration/remote-commands.test.ts tests/integration/api-key-auth.test.ts tests/integration/require-auth-config.test.ts tests/integration/sync-command.test.ts",
     "test:clean-machine": "vitest run tests/unit/clean-machine-spike.test.ts tests/unit/clean-machine-byo-claude.test.ts && npm run build && node scripts/clean-machine-stranger-smoke.mjs",
     "smoke:orchestration-http": "node scripts/orchestration-http-smoke.mjs",
+    "scratch:reap": "npm run build:core && node scripts/scratch-reaper.mjs",
     "local-agent": "npm run build && node dist/local-agent-server.js",
     "tui:dev": "tsx src/tui/index.tsx",
     "tui:build": "npm run build:tui",

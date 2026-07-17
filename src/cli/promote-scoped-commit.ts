@@ -6,9 +6,8 @@
 // required smoke, then delegates the final merge/push verification to
 // promote-to-main.
 
-import { tmpdir } from "node:os";
 import { rmSync } from "node:fs";
-import { join } from "node:path";
+import { scratchPath } from "../scratch-policy.js";
 import {
   defaultGitDeps,
   parsePromoteArgs,
@@ -124,7 +123,7 @@ export async function runPromoteScopedCommit(
 
   const short = resolvedCommit.slice(0, 12);
   const cleanBranch = args.cleanBranch ?? `scoped-promotion/${short}`;
-  const workdir = args.workdir ?? join(tmpdir(), `id-agents-promote-scoped-${short}-${Date.now()}`);
+  const workdir = args.workdir ?? scratchPath("promotions", `id-agents-promote-scoped-${short}`);
   const cleanupAutoWorkdir = args.workdir === null;
   if (cleanBranch === args.base) {
     io.stderr(`clean branch ${cleanBranch} must not equal base ${args.base}\n`);
@@ -263,7 +262,7 @@ Options:
   --commit <sha>         Single-parent fix commit to cherry-pick (required)
   --smoke <cmd>          Smoke command to run in the clean clone before promotion (required)
   --clean-branch <name>  Clean branch to create (default: scoped-promotion/<short-sha>)
-  --workdir <path>       Temporary clone destination (default: OS temp dir)
+  --workdir <path>       Temporary clone destination (default: ~/scratch/promotions)
   --base <branch>        Base branch (default: main)
   --remote <name>        Remote to push (default: origin)
   --dispatch-id <id>     Dispatch id forwarded to promote-to-main

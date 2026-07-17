@@ -28,9 +28,9 @@
 
 import { spawn } from "node:child_process";
 import { rmSync } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { appendAgentTrailer, sanitizeAgentName } from "../lib/agent-attribution.js";
+import { scratchPath } from "../scratch-policy.js";
 import { classifySmokeFailures } from "./smoke-exempt.js";
 
 export type Strategy =
@@ -638,7 +638,7 @@ export async function createWorktreeFallbackClone(
 ): Promise<{ workdir: string } | null> {
   const { repo, branch, base, remote } = opts;
   const safeBranch = branch.replace(/[^a-zA-Z0-9._-]/g, "-");
-  const workdir = join(tmpdir(), `id-agents-promote-worktree-fallback-${safeBranch}-${Date.now()}`);
+  const workdir = scratchPath("promotions", `id-agents-promote-worktree-fallback-${safeBranch}`);
 
   const remoteUrlOut = await deps.git(["config", "--get", `remote.${remote}.url`], repo);
   const remoteUrl = remoteUrlOut.stdout.trim();

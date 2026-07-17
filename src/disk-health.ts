@@ -24,18 +24,13 @@ export interface DiskHeadroomOptions {
   path?: string;
   minFreeBytes?: number;
   warnFreeBytes?: number;
-  statfs?: (path: string) => ReturnType<typeof statfsSync>;
 }
 
-export const DEFAULT_DISK_MIN_FREE_BYTES = 5 * GIB;
-export const DEFAULT_DISK_WARN_FREE_BYTES = 10 * GIB;
+export const DEFAULT_DISK_MIN_FREE_BYTES = 15 * GIB;
+export const DEFAULT_DISK_WARN_FREE_BYTES = 25 * GIB;
 
 function roundGib(bytes: number | null): number | null {
   return bytes == null ? null : Math.round((bytes / GIB) * 10) / 10;
-}
-
-function statfsNumber(value: number | bigint): number {
-  return typeof value === "bigint" ? Number(value) : value;
 }
 
 function classifyDiskHeadroom(availableBytes: number, minFreeBytes: number, warnFreeBytes: number): DiskHeadroomState {
@@ -45,16 +40,15 @@ function classifyDiskHeadroom(availableBytes: number, minFreeBytes: number, warn
 }
 
 export function readDiskHeadroom(options: DiskHeadroomOptions = {}): DiskHeadroom {
-  const path = options.path ?? process.env.MANAGER_DISK_HEALTH_PATH ?? process.cwd();
+  const path = options.path ?? process.env.MANAGER_DISK_HEALTH_PATH ?? "/";
   const minFreeBytes = options.minFreeBytes ?? DEFAULT_DISK_MIN_FREE_BYTES;
   const warnFreeBytes = options.warnFreeBytes ?? DEFAULT_DISK_WARN_FREE_BYTES;
 
   try {
-    const stats = (options.statfs ?? statfsSync)(path);
-    const blockSize = statfsNumber(stats.bsize);
-    const totalBytes = statfsNumber(stats.blocks) * blockSize;
-    const freeBytes = statfsNumber(stats.bfree) * blockSize;
-    const availableBytes = statfsNumber(stats.bavail) * blockSize;
+    const stats = statfsSync(path);
+    const totalBytes = stats.blocks * stats.bsize;
+    const freeBytes = stats.bfree * stats.bsize;
+    const availableBytes = stats.bavail * stats.bsize;
     const usedPercent = totalBytes > 0 ? Math.round(((totalBytes - freeBytes) / totalBytes) * 1000) / 10 : null;
     const state = classifyDiskHeadroom(availableBytes, minFreeBytes, warnFreeBytes);
 

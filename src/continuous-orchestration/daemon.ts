@@ -61,6 +61,7 @@ import {
 } from "../model-policy/work-share-drift.js";
 import { readRuntimeMixDrift, type RuntimeMixDrift } from "../model-policy/runtime-mix-drift.js";
 import { readDiskHeadroom, type DiskHeadroom } from "../disk-health.js";
+import { runSafeDiskReclaim, type DiskReclaimResult } from "../disk-reclaim.js";
 
 /** Dispatch/effective statuses that mean the work is finished — its write-scope
  *  lock can be released. Mirrors dispatch terminal states plus recovery moot. */
@@ -249,6 +250,7 @@ export interface TickResult {
   auto_paused: { reason: string } | null;
   /** Auto-flesh refuel summary, when a refuel pass ran this tick. */
   refuel: FleshRunSummary | null;
+  disk_reclaim: DiskReclaimResult | null;
   /** Floor-triggered auto-promote summary, when an auto-promote pass ran. */
   auto_promote: AutoPromoteRunSummary | null;
   /** Ready rows whose stale provider/runtime metadata was corrected before admission. */
@@ -1116,6 +1118,7 @@ export class ContinuousOrchestrationDaemon {
   // Slice 4: adaptive-backoff carry + stop flag for the self-scheduling loop.
   private backoffMult = 1;
   private stopped = false;
+  private diskReclaimEpisode = false;
   private readonly alertIncidents = new Map<string, AlertIncidentState>();
 
   constructor(deps: DaemonDeps) {
@@ -1258,7 +1261,17 @@ export class ContinuousOrchestrationDaemon {
 
     const { view: usage, daily_tokens_used } = await this.deps.readUsage();
     const { count: in_flight, active_write_scopes } = await this.deps.readInFlight();
-    const disk_headroom = await this.diskHeadroom();
+    let disk_headroom = await this.diskHeadroom();
+    let disk_reclaim: DiskReclaimResult | null = null;
+    if (disk_headroom?.state === "ok" || disk_headroom?.state === "unknown" || !disk_headroom) {
+      this.diskReclaimEpisode = false;
+    } else if (!this.diskReclaimEpisode) {
+      this.diskReclaimEpisode = true;
+      disk_reclaim = runSafeDiskReclaim({ env: this.deps.env });
+      // Admission must use post-reclaim truth, not the warning snapshot that
+      // triggered cleanup.
+      disk_headroom = await this.diskHeadroom();
+    }
 
     // ADMISSION-V2 follow-up: AUTO-PROMOTE first (free) — drain already-fleshed
     // `needs_review` build items into READY to meet the build-ready floor across
@@ -1808,6 +1821,7 @@ export class ContinuousOrchestrationDaemon {
       stall_alert: stall.alert,
       auto_paused,
       refuel,
+      disk_reclaim,
       auto_promote: autoPromote,
       ready_runtime_repairs: readyRuntimeRepairs,
       model_policy_drift: modelPolicyDrift,
