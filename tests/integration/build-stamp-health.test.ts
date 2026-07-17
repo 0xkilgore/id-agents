@@ -76,7 +76,38 @@ describe('GET /health build-stamp (T11.1)', () => {
       behind_origin_since: '2026-07-12T00:00:00.000Z',
       last_alert_at: null,
     };
+    (manager as any).getManagerHttpLivenessStatus = () => ({
+      schema_version: 'manager-http-liveness.v1',
+      state: 'launchd_running_but_unreachable',
+      service: 'com.kilgore.id-agents-manager',
+      manager_url: 'http://127.0.0.1:4100',
+      launchd_loaded: true,
+      launchd_pid: 91348,
+      listener_pid: 91348,
+      watchdog_last_at: '2026-07-17T16:35:00.000Z',
+      watchdog_last_class: 'http_unresponsive_listener_alive',
+      watchdog_last_action: 'diagnose_restart',
+      watchdog_consecutive_failures: 2,
+      state_file: '/tmp/manager-http-liveness-watchdog.state',
+      reason: 'launchd reports the manager loaded, and a listener pid exists, but HTTP liveness is failing',
+      recommended_action: 'Inspect the manager HTTP liveness watchdog artifacts, then kickstart the launchd service if the manager remains unreachable.',
+      last_unhealthy_at: '2026-07-17T16:35:00.000Z',
+      last_unhealthy_class: 'http_unresponsive_listener_alive',
+      last_unhealthy_reason: 'launchd reports the manager loaded, and a listener pid exists, but HTTP liveness is failing',
+      recent_restart_attempts: 1,
+    });
     await manager.start(port);
+    (manager as any).orphanSweepHealth = {
+      schema_version: 'manager.orphan_sweep_health.v1',
+      scanned: 25,
+      orphan_count: 25,
+      orphan_pids: [901, 902, 903],
+      killed: 0,
+      errors: 0,
+      list_error: null,
+      kill_enabled: false,
+      detected_at: '2026-07-17T16:35:05.000Z',
+    };
   }, 60000);
 
   afterAll(async () => {
@@ -139,6 +170,8 @@ describe('GET /health build-stamp (T11.1)', () => {
     expect(body.status).toBe('ok');
     expect(typeof body.nominal).toBe('boolean');
     expect(Array.isArray(body.nominal_reasons)).toBe(true);
+    expect(body.nominal).toBe(false);
+    expect(body.nominal_reasons).toContain('manager_http_unreachable_under_launchd');
     expect(body.build).toBeTruthy();
     // The SHA the running binary was built from must be present (this is the
     // exact field the operator needs to see on /health).
@@ -207,6 +240,36 @@ describe('GET /health build-stamp (T11.1)', () => {
       last_error_at: null,
       last_error: null,
       open_alert_count: expect.any(Number),
+    });
+
+    expect(body.manager_http_liveness).toMatchObject({
+      schema_version: 'manager-http-liveness.v1',
+      state: 'launchd_running_but_unreachable',
+      launchd_loaded: true,
+      launchd_pid: 91348,
+      listener_pid: 91348,
+      watchdog_last_class: 'http_unresponsive_listener_alive',
+      last_unhealthy_class: 'http_unresponsive_listener_alive',
+      recent_restart_attempts: 1,
+    });
+
+    expect(body.orphan_sweep).toMatchObject({
+      schema_version: 'manager.orphan_sweep_health.v1',
+      scanned: 25,
+      orphan_count: 25,
+      kill_enabled: false,
+    });
+
+    expect(body.actionable_health).toMatchObject({
+      schema_version: 'manager.actionable_health.v1',
+      nominal: false,
+      reasons: expect.arrayContaining(['build_behind_origin', 'manager_http_unreachable_under_launchd']),
+      summary: expect.stringContaining('running build 1111111 is behind origin/main 2222222'),
+      recommended_actions: expect.arrayContaining([
+        expect.stringContaining('redeploy the manager'),
+        expect.stringContaining('kickstart the launchd service'),
+        expect.stringContaining('orphan agent servers'),
+      ]),
     });
 
     expect(body.worktree_os_policy.deploy_checkout_dependency).toMatchObject({

@@ -74,6 +74,7 @@ import {
   type ReadGuard,
 } from './control-plane/read-guard.js';
 import { resolveManagerNode } from './lib/native-node.js';
+import { readManagerHttpLivenessStatus, type ManagerHttpLivenessStatus } from './manager-http-liveness.js';
 import { createActionDeliverer, type ActionStatus } from './action-delivery/deliver.js';
 import { isBootSpawnableAgent } from './lib/boot-spawn.js';
 import { sweepOrphanAgents, listMatchingProcesses } from './lib/orphan-sweep.js';
@@ -403,6 +404,26 @@ function attemptStringField(value: unknown): string | null {
 }
 
 type FleetMetricsHistoryRange = FleetMetricsHistoryResponse["range"];
+
+interface OrphanSweepHealth {
+  schema_version: 'manager.orphan_sweep_health.v1';
+  scanned: number;
+  orphan_count: number;
+  orphan_pids: number[];
+  killed: number;
+  errors: number;
+  list_error: string | null;
+  kill_enabled: boolean;
+  detected_at: string | null;
+}
+
+interface ActionableHealthStatus {
+  schema_version: 'manager.actionable_health.v1';
+  nominal: boolean;
+  reasons: string[];
+  summary: string;
+  recommended_actions: string[];
+}
 
 function parseFleetMetricsHistoryRange(raw: unknown): FleetMetricsHistoryRange | null {
   if (raw === undefined || raw === null || raw === "") return "30d";
@@ -1181,6 +1202,17 @@ export class AgentManagerDb {
   private agentsListCache: Map<string, AgentsListCacheEntry> = new Map();
   private agentsListRefreshes: Map<string, Promise<void>> = new Map();
   private healthResponseCache: Map<string, { at: number; body: unknown }> = new Map();
+  private orphanSweepHealth: OrphanSweepHealth = {
+    schema_version: 'manager.orphan_sweep_health.v1',
+    scanned: 0,
+    orphan_count: 0,
+    orphan_pids: [],
+    killed: 0,
+    errors: 0,
+    list_error: null,
+    kill_enabled: false,
+    detected_at: null,
+  };
   private continuousOrchestrationStatusSource: {
     daemon: ContinuousOrchestrationDaemon;
     runtimeHealth: () => {
@@ -1749,6 +1781,10 @@ export class AgentManagerDb {
     };
   }
 
+  private getManagerHttpLivenessStatus(): ManagerHttpLivenessStatus {
+    return readManagerHttpLivenessStatus();
+  }
+
   private getProtectedDeployCheckoutRepo(): string {
     if (process.env.DEPLOY_WATCHDOG_REPO) return process.env.DEPLOY_WATCHDOG_REPO;
     const home = process.env.HOME ?? '/Users/kilgore';
@@ -1759,6 +1795,7 @@ export class AgentManagerDb {
     build: BuildStatus;
     disk: ReturnType<typeof readDiskHeadroom>;
     supervisor: SupervisorHealthStatus;
+    managerHttpLiveness: ManagerHttpLivenessStatus;
     startupErrors?: string[];
   }): { nominal: boolean; nominal_reasons: string[] } {
     const reasons: string[] = [];
@@ -1769,6 +1806,13 @@ export class AgentManagerDb {
     if (['warn', 'critical', 'unknown'].includes(input.disk.state)) {
       reasons.push(`disk_${input.disk.state}`);
     }
+    if (input.managerHttpLiveness.state === 'launchd_running_but_unreachable') {
+      reasons.push('manager_http_unreachable_under_launchd');
+    } else if (input.managerHttpLiveness.state === 'manager_down') {
+      reasons.push('manager_http_down');
+    } else if (input.managerHttpLiveness.state === 'watchdog_paused') {
+      reasons.push('manager_http_watchdog_paused');
+    }
     const supervisorOptional = process.env.SUPERVISOR_OPTIONAL === 'true';
     if (!supervisorOptional) {
       if (!input.supervisor.enabled || input.supervisor.state === 'disabled') {
@@ -1778,6 +1822,66 @@ export class AgentManagerDb {
       }
     }
     return { nominal: reasons.length === 0, nominal_reasons: reasons };
+  }
+
+  private buildActionableHealth(input: {
+    nominal: { nominal: boolean; nominal_reasons: string[] };
+    build: BuildStatus;
+    supervisor: SupervisorHealthStatus;
+    managerHttpLiveness: ManagerHttpLivenessStatus;
+    orphanSweep: OrphanSweepHealth;
+    orchestrationRuntimeStatus: RuntimeStatusProjection | { state: string; reason: string } | null;
+  }): ActionableHealthStatus {
+    const recommended_actions: string[] = [];
+    const summaryParts: string[] = [];
+
+    if (input.build.behind_origin) {
+      summaryParts.push(`running build ${input.build.build_sha?.slice(0, 7) ?? 'unknown'} is behind origin/main ${input.build.origin_main_sha?.slice(0, 7) ?? 'unknown'}`);
+      recommended_actions.push('redeploy the manager from clean promoted main and verify /health build.build_sha equals build.origin_main_sha');
+    }
+
+    if (input.managerHttpLiveness.state !== 'healthy') {
+      summaryParts.push(`manager HTTP liveness is ${input.managerHttpLiveness.state}`);
+      if (input.managerHttpLiveness.recommended_action) {
+        recommended_actions.push(input.managerHttpLiveness.recommended_action);
+      }
+    } else if (input.managerHttpLiveness.last_unhealthy_class && input.managerHttpLiveness.last_unhealthy_at) {
+      summaryParts.push(
+        `last launchd/liveness incident ${input.managerHttpLiveness.last_unhealthy_class} at ${input.managerHttpLiveness.last_unhealthy_at}`,
+      );
+    }
+
+    if (input.supervisor.enabled && !input.supervisor.running) {
+      summaryParts.push(`supervisor enabled but ${input.supervisor.state}`);
+      recommended_actions.push('inspect supervisor watcher startup and confirm last_tick_started_at advances');
+    }
+
+    if (input.orphanSweep.orphan_count > 0) {
+      summaryParts.push(`${input.orphanSweep.orphan_count} orphan agent server process(es) detected`);
+      recommended_actions.push(
+        input.orphanSweep.kill_enabled
+          ? 'verify orphan agent servers were reaped cleanly and no stale listeners remain'
+          : 'review orphan agent servers and enable DISPATCH_ORPHAN_SWEEP_KILL only when safe to reap them',
+      );
+    }
+
+    if (input.orchestrationRuntimeStatus && 'recommended_actions' in input.orchestrationRuntimeStatus) {
+      const runtime = input.orchestrationRuntimeStatus;
+      summaryParts.push(runtime.operator_summary);
+      recommended_actions.push(...runtime.recommended_actions);
+    } else if (input.orchestrationRuntimeStatus && 'reason' in input.orchestrationRuntimeStatus) {
+      summaryParts.push(`orchestration runtime health is ${input.orchestrationRuntimeStatus.state}`);
+      recommended_actions.push(`inspect orchestration runtime status: ${input.orchestrationRuntimeStatus.reason}`);
+    }
+
+    const uniqueActions = Array.from(new Set(recommended_actions.filter((action) => action.length > 0)));
+    return {
+      schema_version: 'manager.actionable_health.v1',
+      nominal: input.nominal.nominal,
+      reasons: input.nominal.nominal_reasons,
+      summary: summaryParts.length > 0 ? summaryParts.join('; ') : 'manager health is nominal',
+      recommended_actions: uniqueActions,
+    };
   }
 
   private async getContinuousOrchestrationRuntimeStatus(input: {
@@ -5503,8 +5607,9 @@ export class AgentManagerDb {
       };
       const disk = readDiskHeadroom();
       const supervisor = this.getSupervisorHealthStatus(now);
+      const manager_http_liveness = this.getManagerHttpLivenessStatus();
       const supervisorRequiredForNominal = process.env.SUPERVISOR_OPTIONAL !== 'true';
-      const nominal = this.evaluateNominalHealth({ build, disk, supervisor });
+      const nominal = this.evaluateNominalHealth({ build, disk, supervisor, managerHttpLiveness: manager_http_liveness });
       const deployCheckout = readDeployCheckoutStatus(this.getProtectedDeployCheckoutRepo());
       const managerRedeployReadiness = evaluateManagerRedeployReadiness({
         build,
@@ -5561,6 +5666,14 @@ export class AgentManagerDb {
       const orchestration_runtime_status = runtimeResult.timedOut
         ? { state: 'degraded', reason: 'health_orchestration_runtime_timeout' }
         : runtimeResult.value;
+      const actionable_health = this.buildActionableHealth({
+        nominal,
+        build,
+        supervisor,
+        managerHttpLiveness: manager_http_liveness,
+        orphanSweep: this.orphanSweepHealth,
+        orchestrationRuntimeStatus: orchestration_runtime_status,
+      });
       const body = {
         status: 'ok',
         ...nominal,
@@ -5587,6 +5700,9 @@ export class AgentManagerDb {
           required_for_nominal: supervisorRequiredForNominal,
           nominal_mode: supervisorRequiredForNominal ? 'required' : 'optional',
         },
+        manager_http_liveness,
+        orphan_sweep: this.orphanSweepHealth,
+        actionable_health,
         alert_delivery: {
           telegram: getTelegramAlertDeliveryHealth(),
         },
@@ -14082,6 +14198,17 @@ export class AgentManagerDb {
                   ? (pid, signal) => process.kill(pid, signal)
                   : () => undefined, // detect-only by default
               });
+              this.orphanSweepHealth = {
+                schema_version: 'manager.orphan_sweep_health.v1',
+                scanned: sweep.scanned,
+                orphan_count: sweep.orphan_pids.length,
+                orphan_pids: sweep.orphan_pids,
+                killed: sweep.killed,
+                errors: sweep.errors,
+                list_error: sweep.list_error,
+                kill_enabled: killEnabled,
+                detected_at: new Date().toISOString(),
+              };
               if (sweep.orphan_pids.length > 0) {
                 console.warn(
                   `[Manager] orphan agent-server sweep: ${sweep.orphan_pids.length} orphan(s) ` +
@@ -14092,6 +14219,11 @@ export class AgentManagerDb {
                 console.warn('[Manager] orphan agent-server sweep skipped:', sweep.list_error);
               }
             } catch (sweepErr) {
+              this.orphanSweepHealth = {
+                ...this.orphanSweepHealth,
+                list_error: sweepErr instanceof Error ? sweepErr.message : String(sweepErr),
+                detected_at: new Date().toISOString(),
+              };
               console.warn(
                 '[Manager] orphan agent-server sweep failed:',
                 sweepErr instanceof Error ? sweepErr.message : String(sweepErr),

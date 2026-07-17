@@ -302,7 +302,16 @@ async function main() {
       lastReason: decision.reason,
       lastAt: new Date(nowMs).toISOString(),
       restartAttempts: pruneAttempts(state.restartAttempts, nowMs),
+      lastUnhealthyAt: state.lastUnhealthyAt ?? null,
+      lastUnhealthyClass: state.lastUnhealthyClass ?? null,
+      lastUnhealthyReason: state.lastUnhealthyReason ?? null,
     };
+
+    if (decision.class !== 'healthy') {
+      nextState.lastUnhealthyAt = nextState.lastAt;
+      nextState.lastUnhealthyClass = decision.class;
+      nextState.lastUnhealthyReason = decision.reason;
+    }
 
     if (decision.action === 'diagnose_restart') {
       const diagnosticsDir = captureDiagnostics({ decision, state, launchd, oldPid: pid });
