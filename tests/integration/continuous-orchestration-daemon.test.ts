@@ -4453,6 +4453,91 @@ describe("daemon — dry-run vs live", () => {
     );
   });
 
+  it("preserves the Wave79 build-floor zero-admit health fixture", async () => {
+    await seedAgent(adapter, "roger", "running", "codex");
+    for (const target of ["substrate-api-codex", "brunel", "coder-max"]) {
+      await seedAgent(adapter, target, "pending", "codex");
+      for (let i = 1; i <= 3; i += 1) {
+        await seedReady(adapter, {
+          title: `Wave79 ${target} target_unhealthy ${i}`,
+          to_agent: target,
+          write_scope: [`repo/wave79/${target}/${i}`],
+        });
+      }
+    }
+    const busyRows = [];
+    for (let i = 1; i <= 2; i += 1) {
+      busyRows.push(await seedReady(adapter, {
+        title: `Wave79 single-writer lane busy ${i}`,
+        to_agent: "roger",
+        write_scope: [`repo/wave79/busy/${i}`],
+      }));
+    }
+
+    const { app, daemon } = mountStatusApp(
+      adapter,
+      {
+        dry_run: true,
+        auto_flesh_enabled: false,
+        auto_promote_enabled: false,
+        auto_promote_floor: 12,
+        max_in_flight: 20,
+        max_new_per_tick: 20,
+        min_ready_fuel: 12,
+      },
+      {
+        activeScopes: new Set(busyRows.flatMap((row) => row.write_scope)),
+        resolveAgentHealth: (names) => getHealthyAgentNames(adapter, names),
+        resolveAgentRuntimes: (names) => getAgentRuntimeMap(adapter, names),
+      },
+    );
+    await daemon.setMode("running");
+
+    const res = await callApp(app, "/orchestration/status");
+
+    expect(res.status).toBe(200);
+    expect(res.body.counts).toMatchObject({
+      ready: 11,
+      admissible_now: 0,
+      ready_block_reasons: {
+        target_unhealthy: 9,
+        single_writer_lane_busy: 2,
+      },
+    });
+    expect(res.body.ready_admission.blocker_counts).toEqual([
+      { code: "target_unhealthy", category: "runtime_unavailable", count: 9 },
+      { code: "single_writer_lane_busy", category: "lane_eligibility", count: 2 },
+    ]);
+    expect(res.body.health.build_ready_floor).toMatchObject({
+      blocked: true,
+      blocker_code: "build_ready_below_floor",
+      floor: 12,
+      blocker_reasons: {
+        target_unhealthy: 9,
+        single_writer_lane_busy: 2,
+        build_ready_below_floor: 1,
+      },
+    });
+    expect(res.body.health.ready_item_blockers.stale_ready_fuel).toMatchObject({
+      active: true,
+      owner_lane: "orchestration",
+    });
+    expect(res.body.health.ready_item_blockers.stale_ready_fuel.reason).not.toMatch(/empty fuel/i);
+    expect(res.body.auto_promote_health).toMatchObject({
+      floor: 12,
+      lanes: { build_ready: 11 },
+      operator_summary: { empty_fuel: false },
+    });
+    const operatorText = [
+      res.body.auto_promote_health.operator_summary.summary,
+      ...res.body.auto_promote_health.operator_summary.safe_actions,
+    ].join(" ");
+    expect(operatorText).toContain("target_unhealthy");
+    expect(operatorText).toMatch(/reroute|downclassify|restart/i);
+    expect(operatorText).toMatch(/retry|refire/i);
+    expect(operatorText).not.toMatch(/empty fuel/i);
+  });
+
   it("status explains below-floor auto-promote blocked by safety risk", async () => {
     for (let i = 0; i < 8; i++) {
       await seedReady(adapter, { title: `ready ${i}`, write_scope: [`repo/ready-${i}`] });

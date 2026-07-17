@@ -249,9 +249,13 @@ function withReadyAdmissionOperatorSummary(
       runtimeUnavailable.length > 0 ? `runtime-unavailable blockers: ${runtimeUnavailable.join(", ")}` : null,
       laneOrCapacity.length > 0 ? `lane/capacity blockers: ${laneOrCapacity.join(", ")}` : null,
     ].filter((part): part is string => part != null);
+    const targetUnhealthyAction = unhealthyTargets > 0
+      ? ` Safely reroute target_unhealthy=${unhealthyTargets} rows to a healthy compatible owner, or downclassify/supersede stale target pins and restart the prior owner only when safe. ` +
+        "Do not refire silently: use an explicit manual retry only after prior-dispatch evidence is terminal and mark retry_safe only for a bounded refire."
+      : "";
     const action =
       `Zero-admit ready fuel has ${readyAdmission.candidates} ready row(s) but admissible_now=0; ` +
-      `${blockerParts.join("; ")}; recommended next action: ${readyAdmission.recommended_action}`;
+      `${blockerParts.join("; ")}; recommended next action: ${readyAdmission.recommended_action}.${targetUnhealthyAction}`;
     const safeActions = health.operator_summary.safe_actions.includes(action)
       ? health.operator_summary.safe_actions
       : [action, ...health.operator_summary.safe_actions];
