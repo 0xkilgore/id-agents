@@ -994,7 +994,7 @@ function readyAdmissionBlockerContracts(input: {
   return contracts.sort((a, b) => a.owner_lane.localeCompare(b.owner_lane) || a.item_id.localeCompare(b.item_id));
 }
 
-function readyAdmissionRecommendedAction(input: {
+export function readyAdmissionRecommendedAction(input: {
   candidates: number;
   usefulReady: number;
   admissibleNow: number;
@@ -1030,7 +1030,7 @@ function readyAdmissionRecommendedAction(input: {
           .slice(0, 3)
           .map((lane) => `lane=${lane.lane} count=${lane.blocker_counts.find((blocker) => blocker.code === "single_writer_lane_busy")?.count ?? lane.count}`);
         const suffix = examples.length > 0 ? ` (${examples.join("; ")})` : "";
-        return [`wait for or clear single_writer_lane_busy=${count.count} lane lock(s)${suffix}`];
+        return [`wait for live single_writer_lane_busy=${count.count} lane lock(s) to finish${suffix}; do not disposition ready rows blocked by active in-flight work`];
       }
       if (count.code === "disk_warning_floor") {
         return [`free disk or admit cleanup/deploy-safe rows before releasing disk_warning_floor=${count.count} held row(s)`];
@@ -1039,7 +1039,7 @@ function readyAdmissionRecommendedAction(input: {
         return [`run cleanup rows before releasing disk_critical_floor=${count.count} held non-cleanup row(s)`];
       }
       if (count.code === "duplicate_dispatch_retry_required") {
-        return [`review duplicate_dispatch_retry_required=${count.count} rows and mark retry_safe only for bounded refires or close stale duplicates`];
+        return [`disposition stale/terminal prior-dispatch blockers for duplicate_dispatch_retry_required=${count.count} row(s): close stale duplicates or mark retry_safe only for bounded refires`];
       }
       return [];
     });

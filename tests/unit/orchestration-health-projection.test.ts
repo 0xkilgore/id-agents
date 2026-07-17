@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { readDispatchHealth } from "../../src/dispatch-scheduler/read-model.js";
 import { readOrchestrationHealthProjection } from "../../src/continuous-orchestration/health-projection.js";
+import { readyAdmissionRecommendedAction } from "../../src/continuous-orchestration/daemon.js";
 import {
   getBacklogItem,
   insertBacklogItem,
@@ -795,6 +796,67 @@ describe("orchestration health projection", () => {
         ],
       },
     });
+  });
+
+  it("distinguishes live single-writer waits from stale prior-dispatch disposition in status health", async () => {
+    await setMode(adapter, "default", "running");
+    const liveLock = await insertBacklogItem(adapter, {
+      title: "ready row behind active lane writer",
+      readiness_state: "ready",
+      risk_class: "build",
+      to_agent: "roger",
+      dispatch_body: "continue",
+      write_scope: ["/repo/kapelle"],
+    });
+    const stalePriorDispatch = await insertBacklogItem(adapter, {
+      title: "ready row behind terminal prior dispatch",
+      readiness_state: "ready",
+      risk_class: "build",
+      to_agent: "roger",
+      dispatch_body: "continue",
+      write_scope: ["/repo/other"],
+    });
+
+    const blockerCounts = [
+      { code: "single_writer_lane_busy", category: "lane_eligibility", count: 1 },
+      { code: "duplicate_dispatch_retry_required", category: "retry_safety", count: 1 },
+    ];
+    const blockedLanes = [{
+      lane: "/repo/kapelle",
+      count: 1,
+      blocker_counts: [{ code: "single_writer_lane_busy", category: "lane_eligibility", count: 1 }],
+    }];
+    const health = await readOrchestrationHealthProjection(adapter, "default", {
+      minReadyFuel: 2,
+      readyAdmission: {
+        rawReady: 2,
+        usefulReady: 0,
+        admissibleNow: 0,
+        blockerCounts,
+        nonAdmitted: [
+          { item_id: liveLock.item_id, code: "single_writer_lane_busy" },
+          { item_id: stalePriorDispatch.item_id, code: "duplicate_dispatch_retry_required" },
+        ],
+        blockedLanes,
+        recommendedAction: readyAdmissionRecommendedAction({
+          candidates: 2,
+          usefulReady: 0,
+          admissibleNow: 0,
+          minReadyFuel: 2,
+          blockerCounts,
+          blockedLanes,
+          targetUnhealthyGroups: [],
+        }),
+      },
+    });
+
+    expect(health.ready_item_blockers.recommended_action).toContain(
+      "wait for live single_writer_lane_busy=1 lane lock(s) to finish",
+    );
+    expect(health.ready_item_blockers.recommended_action).toContain(
+      "disposition stale/terminal prior-dispatch blockers for duplicate_dispatch_retry_required=1 row(s)",
+    );
+    expect(health.ready_item_blockers.recommended_action).not.toContain("wait for or clear");
   });
 
   it("does not satisfy the useful-ready floor when all raw build-ready rows share a busy writer lane", async () => {
