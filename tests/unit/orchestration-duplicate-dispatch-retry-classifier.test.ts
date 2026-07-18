@@ -46,6 +46,30 @@ async function call(path: string): Promise<{ status: number; body: any }> {
   });
 }
 
+async function callPost(path: string, body: Record<string, unknown>): Promise<{ status: number; body: any }> {
+  return new Promise((resolve, reject) => {
+    const server = app.listen(0, "127.0.0.1", async () => {
+      const addr = server.address();
+      if (!addr || typeof addr === "string") {
+        server.close();
+        reject(new Error("no addr"));
+        return;
+      }
+      try {
+        const r = await fetch(`http://127.0.0.1:${addr.port}${path}`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(body),
+        });
+        const responseBody = await r.json();
+        server.close(() => resolve({ status: r.status, body: responseBody }));
+      } catch (e) {
+        server.close(() => reject(e));
+      }
+    });
+  });
+}
+
 async function seedDispatch(overrides: {
   phid: string;
   status: string;
@@ -198,5 +222,54 @@ describe("GET /orchestration/backlog/duplicate-dispatch-retry-blockers", () => {
       retry_safe_recommendation: "set_true",
       recommended_disposition: "mark-retry-safe",
     });
+  });
+
+  it("closes a terminal done duplicate row through the single-item manager action path", async () => {
+    await seedDispatch({ phid: "phid:done-close", status: "done" });
+    const duplicate = await seedReadyBlocker({ title: "done duplicate closeout", phid: "phid:done-close" });
+
+    const res = await callPost(`/orchestration/backlog/${duplicate.item_id}/close-stale-duplicate`, {
+      actor: "hopper",
+      expected_last_dispatch_phid: "phid:done-close",
+    });
+
+    expect(res.status).toBe(200);
+    expect(res.body.ok).toBe(true);
+    expect(res.body.receipt).toMatchObject({
+      closed_by: "hopper",
+      from_state: "ready",
+      to_state: "done",
+      next_action: "close_duplicate_row",
+      prior_dispatch_phid: "phid:done-close",
+      prior_dispatch_status: "done",
+    });
+    expect(res.body.item).toMatchObject({
+      item_id: duplicate.item_id,
+      readiness_state: "done",
+      updated_by: "hopper",
+    });
+    expect(res.body.item.source_refs).toContain("manager:/orchestration/backlog/" + duplicate.item_id + "#stale-duplicate-closeout-receipt");
+  });
+
+  it("refuses the single-item closeout path for retryable failed duplicate rows", async () => {
+    await seedDispatch({
+      phid: "phid:retryable-closeout",
+      status: "failed",
+      failure_kind: "scheduler_wedged",
+      failure_detail: "stale in_flight claim",
+    });
+    const duplicate = await seedReadyBlocker({ title: "retryable duplicate closeout", phid: "phid:retryable-closeout" });
+
+    const res = await callPost(`/orchestration/backlog/${duplicate.item_id}/close-stale-duplicate`, {
+      actor: "hopper",
+      expected_last_dispatch_phid: "phid:retryable-closeout",
+    });
+
+    expect(res.status).toBe(409);
+    expect(res.body).toMatchObject({
+      ok: false,
+      error: "prior_dispatch_not_terminal_or_safe",
+    });
+    expect((await stateCounts()).find(([state]) => state === "ready")).toEqual(["ready", 1]);
   });
 });
