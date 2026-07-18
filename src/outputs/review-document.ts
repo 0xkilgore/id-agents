@@ -243,7 +243,7 @@ export function commentRouteStatusFromDispatchResult(
         ? "recorded+routed"
         : "recorded-route-failed-retryable";
   return {
-    visible_state: compatStatus,
+    visible_state: isPolicySkip ? "recorded+routed" : "recorded-but-route-failed-with-retry",
     compat_status: compatStatus,
     feedback_status: compatStatus,
     route_kind: routeKind,
