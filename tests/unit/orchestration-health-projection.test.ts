@@ -859,7 +859,7 @@ describe("orchestration health projection", () => {
     expect(health.ready_item_blockers.recommended_action).not.toContain("wait for or clear");
   });
 
-  it("does not satisfy the useful-ready floor when all raw build-ready rows share a busy writer lane", async () => {
+  it("keeps busy-writer build rows useful while reporting zero admission and lane diversity", async () => {
     await setMode(adapter, "default", "running");
     const itemIds: string[] = [];
     for (let i = 0; i < 12; i += 1) {
@@ -878,7 +878,7 @@ describe("orchestration health projection", () => {
       minReadyFuel: 12,
       readyAdmission: {
         rawReady: 12,
-        usefulReady: 0,
+        usefulReady: 12,
         admissibleNow: 0,
         blockerCounts: [
           { code: "single_writer_lane_busy", category: "lane_eligibility", count: 12 },
@@ -900,17 +900,17 @@ describe("orchestration health projection", () => {
     expect(health.ok).toBe(false);
     expect(health.build_ready_floor).toMatchObject({
       blocked: true,
-      blocker_code: "build_ready_below_floor",
-      useful_ready_count: 0,
+      blocker_code: "build_ready_lane_diversity_below_min_lanes",
+      useful_ready_count: 12,
       floor: 12,
-      build_ready_lanes: 0,
+      build_ready_lanes: 1,
       blocker_reasons: {
         single_writer_lane_busy: 12,
-        build_ready_below_floor: 1,
+        build_ready_lane_diversity_below_min_lanes: 1,
       },
       next_action: "add cross-lane fuel outside blocked lane(s): /repo/kapelle",
     });
-    expect(health.build_ready_floor.candidate_lanes).toEqual([]);
+    expect(health.build_ready_floor.candidate_lanes).toEqual(["/repo/kapelle"]);
     expect(health.ready_item_blockers).toMatchObject({
       ready: 12,
       actionable: 12,
@@ -918,7 +918,7 @@ describe("orchestration health projection", () => {
       recommended_action: "add cross-lane fuel outside blocked lane(s): /repo/kapelle",
       stale_ready_fuel: {
         active: true,
-        reason: "useful_ready_fuel=0 is below min_ready_fuel=12; raw_ready_fuel=12; admissible_now=0",
+        reason: "admissible_now=0",
         recommended_action: "add cross-lane fuel outside blocked lane(s): /repo/kapelle",
       },
     });

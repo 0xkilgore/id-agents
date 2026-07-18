@@ -1296,6 +1296,14 @@ async function readBuildReadyFloorProjection(
     const uncounted = count - (countedNonUsefulAdmissionBlockers.get(code) ?? 0);
     if (uncounted > 0) blockerReasons[code] = (blockerReasons[code] ?? 0) + uncounted;
   }
+  const busyWriterCount = readyAdmission?.blockerCounts
+    .find((entry) => entry.code === "single_writer_lane_busy")?.count ?? 0;
+  if (busyWriterCount > 0) {
+    blockerReasons.single_writer_lane_busy = Math.max(
+      blockerReasons.single_writer_lane_busy ?? 0,
+      busyWriterCount,
+    );
+  }
   for (const [code, count] of Object.entries(persistedAdmissionBlockReasons)) {
     if (
       count > 0 &&
@@ -1306,7 +1314,7 @@ async function readBuildReadyFloorProjection(
         code === "no_free_pool_builder"
       )
     ) {
-      blockerReasons[code] = (blockerReasons[code] ?? 0) + count;
+      blockerReasons[code] = Math.max(blockerReasons[code] ?? 0, count);
     }
   }
 
@@ -1350,7 +1358,6 @@ function isNonUsefulReadyBlockerCode(code: string): boolean {
     code === "no_free_pool_builder" ||
     code === "provider_runtime_mismatch" ||
     code === "risk_requires_approval" ||
-    code === "single_writer_lane_busy" ||
     code === "stale_queued_prior_dispatch" ||
     code === "target_unhealthy"
   );
