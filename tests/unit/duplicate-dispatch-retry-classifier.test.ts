@@ -35,4 +35,22 @@ describe("duplicate dispatch retry classifier", () => {
         "reroute to a healthy compatible owner or supersede the stale target pin before retry",
     });
   });
+
+  it("treats failed rows with superseded reliability evidence as stale duplicates, not retry candidates", () => {
+    const failed = outcome({
+      dispatch_phid: "phid:disp-superseded-evidence",
+      failure_kind: "linked_query_terminated",
+      failure_detail: "linked query terminated expired",
+      reliability_classification: "superseded",
+      reliability_classification_reason: "later dedup_key sibling completed successfully",
+    });
+
+    expect(classifyDuplicateDispatchFailure(failed)).toBe("stale_duplicate");
+    expect(classifyDuplicateDispatchRetryDisposition(failed)).toEqual({
+      recommended_disposition: "supersede",
+      operator_disposition: "close",
+      retry_safe_recommendation: "leave_false",
+      reason: "prior dispatch phid:disp-superseded-evidence is terminal superseded; supersede the stale duplicate ready row",
+    });
+  });
 });

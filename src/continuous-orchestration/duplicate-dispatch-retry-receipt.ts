@@ -1,5 +1,5 @@
 import { DEFAULT_RECOVERY_CONFIG } from "../dispatch-recovery/classifier.js";
-import { promotionCompletedAndVerified } from "../dispatch-scheduler/read-model.js";
+import { duplicateDispatchTerminalDisposition } from "./duplicate-dispatch-terminal-disposition.js";
 import type { DispatchOutcome } from "./storage.js";
 
 export const DUPLICATE_DISPATCH_RETRY_RECEIPT_SCHEMA_VERSION =
@@ -47,7 +47,8 @@ export function duplicateDispatchRetryReceipt(
     };
   }
 
-  if (promotionCompletedAndVerified(outcome.promotion_result_json) || outcome.status === "done") {
+  const terminal = duplicateDispatchTerminalDisposition(outcome);
+  if (terminal.terminal && terminal.status === "done") {
     return {
       ...base,
       next_action: "close_duplicate_row",
@@ -57,13 +58,13 @@ export function duplicateDispatchRetryReceipt(
     };
   }
 
-  if (outcome.status === "cancelled" || outcome.status === "moot" || outcome.status === "superseded") {
+  if (terminal.terminal && terminal.status) {
     return {
       ...base,
       next_action: "supersede_duplicate_row",
       operator_disposition: "close",
       retry_safe_recommendation: "leave_false",
-      reason: `prior dispatch ${outcome.dispatch_phid} is ${outcome.status}; supersede the stale duplicate ready row`,
+      reason: `prior dispatch ${outcome.dispatch_phid} is ${terminal.status}; supersede the stale duplicate ready row`,
     };
   }
 

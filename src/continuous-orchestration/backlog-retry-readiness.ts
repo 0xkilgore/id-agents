@@ -1,5 +1,5 @@
 import { DEFAULT_RECOVERY_CONFIG } from "../dispatch-recovery/classifier.js";
-import { promotionCompletedAndVerified } from "../dispatch-scheduler/read-model.js";
+import { duplicateDispatchTerminalDisposition } from "./duplicate-dispatch-terminal-disposition.js";
 import type { BacklogItem, BacklogRetryReadiness } from "./types.js";
 import type { DispatchOutcome } from "./storage.js";
 
@@ -65,13 +65,7 @@ export function deriveBacklogRetryReadiness(
     };
   }
 
-  if (
-    outcome.status === "done" ||
-    outcome.status === "moot" ||
-    outcome.status === "superseded" ||
-    outcome.status === "cancelled" ||
-    promotionCompletedAndVerified(outcome.promotion_result_json)
-  ) {
+  if (duplicateDispatchTerminalDisposition(outcome).terminal) {
     return {
       ...base,
       status: "stale_duplicate",

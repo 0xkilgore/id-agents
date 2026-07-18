@@ -7,6 +7,7 @@
 import crypto from "node:crypto";
 import type { DbAdapter } from "../db/db-adapter.js";
 import { DEFAULT_RECOVERY_CONFIG } from "../dispatch-recovery/classifier.js";
+import { duplicateDispatchTerminalDisposition } from "./duplicate-dispatch-terminal-disposition.js";
 import { promotionCompletedAndVerified } from "../dispatch-scheduler/read-model.js";
 import { normalizeRuntime, resolveProviderFromRuntime } from "../dispatch-scheduler/types.js";
 import { classifyDuplicateDispatchRetryDisposition } from "./duplicate-dispatch-retry-classifier.js";
@@ -1261,14 +1262,11 @@ export async function reconcileStaleAlreadyDispatchedReadyRows(
   };
 
   for (const row of rows) {
-    const status = row.dispatch_recovery_status === "moot" ? "moot" : row.dispatch_status;
-    if (!status || !READY_RECONCILE_TERMINAL_STATUSES.has(status)) continue;
-    const promotionVerified = promotionCompletedAndVerified(row.promotion_result_json);
-    const disposition = classifyDuplicateDispatchRetryDisposition({
+    const outcome: DispatchOutcome = {
       dispatch_phid: row.last_dispatch_phid ?? "",
       query_id: null,
       agent_query_id: null,
-      status,
+      status: row.dispatch_status ?? "failed",
       not_before_at: null,
       started_at: null,
       updated_at: null,
@@ -1282,17 +1280,23 @@ export async function reconcileStaleAlreadyDispatchedReadyRows(
       recovery_attempts: 0,
       promote: false,
       promotion_required_reason: null,
+    };
+    const terminal = duplicateDispatchTerminalDisposition(outcome);
+    const disposition = classifyDuplicateDispatchRetryDisposition({
+      ...outcome,
+      status: terminal.status ?? outcome.status,
     });
     if (disposition.operator_disposition !== "close") continue;
+    if (!terminal.terminal && !READY_RECONCILE_TERMINAL_STATUSES.has(outcome.status)) continue;
 
     const toState: "done" | "superseded" =
-      status === "done" || promotionVerified ? "done" : "superseded";
+      terminal.status === "done" || terminal.promotion_verified ? "done" : "superseded";
     const fromState = row.readiness_state as "ready" | "needs_review";
     const rowLabel = fromState === "needs_review" ? "needs_review row" : "ready row";
     const reason =
       toState === "done"
-        ? `already-dispatched ${rowLabel} closed after terminal dispatch ${status}`
-        : `already-dispatched ${rowLabel} superseded after terminal dispatch ${status}`;
+        ? `already-dispatched ${rowLabel} closed after terminal dispatch ${terminal.status ?? outcome.status}`
+        : `already-dispatched ${rowLabel} superseded after terminal dispatch ${terminal.status ?? outcome.status}`;
     const receipt: StaleDuplicateCloseoutReceipt = {
       schema_version: "orchestration.stale_duplicate_closeout_receipt.v1",
       closed_by: actor,
@@ -1303,7 +1307,7 @@ export async function reconcileStaleAlreadyDispatchedReadyRows(
       track: row.track ?? null,
       next_action: toState === "done" ? "close_duplicate_row" : "supersede_duplicate_row",
       prior_dispatch_phid: row.last_dispatch_phid ?? "",
-      prior_dispatch_status: status,
+      prior_dispatch_status: terminal.status ?? outcome.status,
       successor_dispatch_phid: null,
       supersession_reason: opts.reason?.trim() || undefined,
       redispatch_safety: {
@@ -1311,7 +1315,7 @@ export async function reconcileStaleAlreadyDispatchedReadyRows(
         reason:
           opts.reason?.trim() || (toState === "done"
             ? "prior dispatch already reached terminal done state; reopening would duplicate completed work"
-            : `prior dispatch is ${status} with close disposition; this row is stale duplicate backlog state and not retry fuel`),
+            : `prior dispatch is ${terminal.status ?? outcome.status} with close disposition; this row is stale duplicate backlog state and not retry fuel`),
       },
     };
 
@@ -1353,7 +1357,7 @@ export async function reconcileStaleAlreadyDispatchedReadyRows(
       dispatch_phid: row.last_dispatch_phid ?? "",
       from_state: fromState,
       to_state: toState,
-      dispatch_status: status,
+      dispatch_status: terminal.status ?? outcome.status,
       artifact_path: row.artifact_path ?? null,
       reason,
       receipt,

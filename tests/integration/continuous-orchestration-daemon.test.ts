@@ -6080,10 +6080,10 @@ describe("stale already-dispatched ready reconciliation route", () => {
 
     expect(res.status).toBe(200);
     expect(res.body.result).toMatchObject({
-      scanned: 5,
+      scanned: 4,
       closed: 1,
       superseded: 3,
-      preserved_retry_safe: 1,
+      preserved_retry_safe: 0,
       dry_run: false,
     });
     expect(res.body.result.items).toEqual(

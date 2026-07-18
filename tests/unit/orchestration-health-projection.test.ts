@@ -1217,6 +1217,73 @@ describe("orchestration health projection", () => {
     ]);
   });
 
+  it("auto-supersedes a stale duplicate when a failed prior dispatch already has superseded reliability evidence", async () => {
+    await setMode(adapter, "default", "running");
+    const duplicate = await insertBacklogItem(adapter, {
+      title: "superseded reliability duplicate",
+      track: "T-ORCH",
+      readiness_state: "ready",
+      risk_class: "build",
+      to_agent: "roger",
+      dispatch_body: "continue",
+    });
+    await setItemState(adapter, duplicate.item_id, "ready", { dispatch_phid: "phid:disp-superseded-evidence" });
+    await insertDispatch({
+      dispatch_phid: "phid:disp-superseded-evidence",
+      status: "failed",
+      failure_kind: "linked_query_terminated",
+      failure_detail: "linked query terminated expired",
+      reliability_classification: "superseded",
+      reliability_classification_reason: "later dedup_key sibling completed successfully",
+    });
+
+    const before = await readOrchestrationHealthProjection(adapter, "default");
+    expect(before.ready_item_blockers.items).toEqual([
+      expect.objectContaining({
+        item_id: duplicate.item_id,
+        code: "duplicate_dispatch_retry_required",
+        prior_dispatch_status: "failed",
+        retry_readiness_status: "stale_duplicate",
+        retry_safe_recommendation: "leave_false",
+        operator_disposition: "close",
+        recommended_disposition: "supersede",
+        reason: expect.stringContaining("terminal superseded"),
+      }),
+    ]);
+
+    const closeout = await reconcileStaleAlreadyDispatchedReadyRows(adapter, {
+      team_id: "default",
+      actor: "hopper",
+    });
+
+    expect(closeout).toMatchObject({
+      scanned: 1,
+      closed: 0,
+      superseded: 1,
+      items: [
+        {
+          item_id: duplicate.item_id,
+          dispatch_phid: "phid:disp-superseded-evidence",
+          to_state: "superseded",
+          receipt: {
+            closed_by: "hopper",
+            next_action: "supersede_duplicate_row",
+            prior_dispatch_phid: "phid:disp-superseded-evidence",
+            prior_dispatch_status: "superseded",
+          },
+        },
+      ],
+    });
+
+    const after = await getBacklogItem(adapter, duplicate.item_id);
+    expect(after?.readiness_state).toBe("superseded");
+    expect(after?.stale_duplicate_closeout_receipt).toMatchObject({
+      prior_dispatch_phid: "phid:disp-superseded-evidence",
+      prior_dispatch_status: "superseded",
+      redispatch_safety: { safe_to_not_redispatch: true },
+    });
+  });
+
   it("boundedly resolves stale and non-retryable duplicate rows while leaving retry-safe approval explicit", async () => {
     await setMode(adapter, "default", "running");
     const fixtures = [
@@ -1526,7 +1593,7 @@ describe("orchestration health projection", () => {
           closed_by: "roger",
           next_action: "close_duplicate_row",
           prior_dispatch_phid: "phid:disp-promoted-prior",
-          prior_dispatch_status: "failed",
+          prior_dispatch_status: "done",
           redispatch_safety: expect.objectContaining({ safe_to_not_redispatch: true }),
         }),
       }),
@@ -2785,6 +2852,8 @@ async function insertDispatch(overrides: Partial<{
   to_agent: string;
   status: string;
   recovery_status: string;
+  reliability_classification: string | null;
+  reliability_classification_reason: string | null;
   updated_at: string;
   completed_at: string | null;
   failure_kind: string | null;
@@ -2799,9 +2868,10 @@ async function insertDispatch(overrides: Partial<{
     `INSERT INTO dispatch_scheduler_queue (
        dispatch_phid, team_id, query_id, to_agent, from_actor, channel, subject, body_markdown,
        provider, runtime, priority, status, not_before_at, updated_at, completed_at,
-       recovery_status, failure_kind, failure_detail, active_clarification_json,
+       recovery_status, reliability_classification, reliability_classification_reason,
+       failure_kind, failure_detail, active_clarification_json,
        promote, promotion_input_json, promotion_result_json
-     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       dispatchPhid,
       "default",
@@ -2819,6 +2889,8 @@ async function insertDispatch(overrides: Partial<{
       updatedAt,
       overrides.completed_at ?? null,
       overrides.recovery_status ?? "none",
+      overrides.reliability_classification ?? null,
+      overrides.reliability_classification_reason ?? null,
       overrides.failure_kind ?? null,
       overrides.failure_detail ?? null,
       overrides.active_clarification_json ?? null,

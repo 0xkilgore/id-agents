@@ -1,5 +1,5 @@
 import { DEFAULT_RECOVERY_CONFIG } from "../dispatch-recovery/classifier.js";
-import { promotionCompletedAndVerified } from "../dispatch-scheduler/read-model.js";
+import { duplicateDispatchTerminalDisposition } from "./duplicate-dispatch-terminal-disposition.js";
 import type { BacklogItem } from "./types.js";
 import type { DispatchOutcome } from "./storage.js";
 
@@ -48,9 +48,6 @@ export interface DuplicateDispatchRetryClassificationReport {
   oldest_age_hours: number | null;
   items: DuplicateDispatchRetryClassificationItem[];
 }
-
-const TERMINAL_CLOSE_STATUSES = new Set(["done"]);
-const TERMINAL_SUPERSEDE_STATUSES = new Set(["cancelled", "moot", "superseded"]);
 
 export function buildDuplicateDispatchRetryClassificationReport(
   items: BacklogItem[],
@@ -107,10 +104,7 @@ export function buildDuplicateDispatchRetryClassificationReport(
 
 export function classifyDuplicateDispatchFailure(outcome: DispatchOutcome | undefined): DuplicateDispatchFailureClass {
   if (!outcome) return "missing_prior_dispatch";
-  if (promotionCompletedAndVerified(outcome.promotion_result_json) || TERMINAL_CLOSE_STATUSES.has(outcome.status)) {
-    return "stale_duplicate";
-  }
-  if (TERMINAL_SUPERSEDE_STATUSES.has(outcome.status)) return "stale_duplicate";
+  if (duplicateDispatchTerminalDisposition(outcome).terminal) return "stale_duplicate";
   if (outcome.status === "needs_clarification") return "needs_input";
   if (outcome.status === "queued" || outcome.status === "in_flight" || outcome.status === "bounced") {
     return "live_or_queued";
@@ -138,21 +132,22 @@ export function classifyDuplicateDispatchRetryDisposition(outcome: DispatchOutco
     };
   }
 
-  if (promotionCompletedAndVerified(outcome.promotion_result_json) || TERMINAL_CLOSE_STATUSES.has(outcome.status)) {
+  const terminal = duplicateDispatchTerminalDisposition(outcome);
+  if (terminal.terminal && terminal.status === "done") {
     return {
       recommended_disposition: "close",
       operator_disposition: "close",
       retry_safe_recommendation: "leave_false",
-      reason: `prior dispatch ${outcome.dispatch_phid} is ${outcome.status} or promotion-verified; close the duplicate ready blocker`,
+      reason: `prior dispatch ${outcome.dispatch_phid} is terminal or promotion-verified; close the duplicate ready blocker`,
     };
   }
 
-  if (TERMINAL_SUPERSEDE_STATUSES.has(outcome.status)) {
+  if (terminal.terminal && terminal.status) {
     return {
       recommended_disposition: "supersede",
       operator_disposition: "close",
       retry_safe_recommendation: "leave_false",
-      reason: `prior dispatch ${outcome.dispatch_phid} is terminal ${outcome.status}; supersede the stale duplicate ready row`,
+      reason: `prior dispatch ${outcome.dispatch_phid} is terminal ${terminal.status}; supersede the stale duplicate ready row`,
     };
   }
 
@@ -234,7 +229,7 @@ function isDispatchRouteNotFound(outcome: { failure_kind: string | null; failure
 
 function isFailedVerification(outcome: DispatchOutcome): boolean {
   if (!outcome.promotion_result_json) return false;
-  if (promotionCompletedAndVerified(outcome.promotion_result_json)) return false;
+  if (duplicateDispatchTerminalDisposition(outcome).promotion_verified) return false;
   try {
     const parsed = JSON.parse(outcome.promotion_result_json) as { required?: unknown; completed?: unknown; repos?: unknown };
     return parsed.completed === false || parsed.required === true || Array.isArray(parsed.repos);
