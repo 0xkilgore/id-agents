@@ -1217,6 +1217,83 @@ describe("orchestration health projection", () => {
     ]);
   });
 
+  it("boundedly resolves stale and non-retryable duplicate rows while leaving retry-safe approval explicit", async () => {
+    await setMode(adapter, "default", "running");
+    const fixtures = [
+      {
+        key: "stale-closeout",
+        status: "done",
+        failure_kind: null,
+        failure_detail: null,
+      },
+      {
+        key: "retry-safe-required",
+        status: "failed",
+        failure_kind: "scheduler_wedged",
+        failure_detail: "scheduler wedged during dispatch handoff",
+      },
+      {
+        key: "non-retryable-terminal",
+        status: "cancelled",
+        failure_kind: "operator_cancelled",
+        failure_detail: "terminal operator cancellation",
+      },
+    ] as const;
+
+    const rows = new Map<string, Awaited<ReturnType<typeof insertBacklogItem>>>();
+    for (const fixture of fixtures) {
+      const dispatchPhid = `phid:disp-${fixture.key}`;
+      const row = await insertBacklogItem(adapter, {
+        title: fixture.key,
+        track: "T-ORCH",
+        readiness_state: "ready",
+        risk_class: "build",
+        to_agent: "roger",
+        dispatch_body: "continue",
+      });
+      rows.set(fixture.key, row);
+      await setItemState(adapter, row.item_id, "ready", { dispatch_phid: dispatchPhid });
+      await insertDispatch({
+        dispatch_phid: dispatchPhid,
+        status: fixture.status,
+        failure_kind: fixture.failure_kind,
+        failure_detail: fixture.failure_detail,
+      });
+    }
+
+    const closeout = await reconcileStaleAlreadyDispatchedReadyRows(adapter, {
+      team_id: "default",
+      actor: "continuous-orchestration",
+      max_rows: 2,
+    });
+
+    expect(closeout).toMatchObject({
+      scanned: 2,
+      closed: 1,
+      superseded: 1,
+    });
+    expect(closeout.items.map((item) => item.dispatch_phid).sort()).toEqual([
+      "phid:disp-non-retryable-terminal",
+      "phid:disp-stale-closeout",
+    ]);
+    expect((await getBacklogItem(adapter, rows.get("stale-closeout")!.item_id))?.stale_duplicate_closeout_receipt)
+      .toMatchObject({ prior_dispatch_status: "done", to_state: "done" });
+    expect((await getBacklogItem(adapter, rows.get("non-retryable-terminal")!.item_id))?.stale_duplicate_closeout_receipt)
+      .toMatchObject({ prior_dispatch_status: "cancelled", to_state: "superseded" });
+
+    const retryRequired = await getBacklogItem(adapter, rows.get("retry-safe-required")!.item_id);
+    expect(retryRequired).toMatchObject({ readiness_state: "ready", retry_safe: false });
+    const health = await readOrchestrationHealthProjection(adapter, "default");
+    expect(health.ready_item_blockers.items).toEqual([
+      expect.objectContaining({
+        item_id: retryRequired!.item_id,
+        retry_safe_required: true,
+        retry_safe_recommendation: "set_true",
+        recommended_disposition: "mark-retry-safe",
+      }),
+    ]);
+  });
+
   it("classifies Gaudi verification HTTP 404 route failures with a concrete reroute recommendation", async () => {
     await setMode(adapter, "default", "running");
     const row = await insertBacklogItem(adapter, {

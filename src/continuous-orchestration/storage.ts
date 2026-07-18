@@ -1193,12 +1193,20 @@ export async function clearBacklogDependencyBlocker(
  */
 export async function reconcileStaleAlreadyDispatchedReadyRows(
   adapter: DbAdapter,
-  opts: { team_id?: string; dry_run?: boolean; actor?: string; item_id?: string; reason?: string } = {},
+  opts: {
+    team_id?: string;
+    dry_run?: boolean;
+    actor?: string;
+    item_id?: string;
+    reason?: string;
+    max_rows?: number;
+  } = {},
 ): Promise<StaleReadyReconcileResult> {
   const teamId = opts.team_id ?? "default";
   const dryRun = opts.dry_run === true;
   const actor = opts.actor?.trim() || "operator";
   const itemId = opts.item_id?.trim() || null;
+  const maxRows = Math.max(1, Math.min(100, Math.floor(opts.max_rows ?? 25)));
   const { rows } = await adapter.query<
     BacklogRow & {
       dispatch_status: string | null;
@@ -1229,8 +1237,18 @@ export async function reconcileStaleAlreadyDispatchedReadyRows(
         ${itemId ? "AND i.item_id = $2" : ""}
         AND i.readiness_state IN ('ready', 'needs_review')
         AND i.last_dispatch_phid IS NOT NULL
-      ORDER BY i.updated_at ASC, i.created_at ASC`,
-    itemId ? [teamId, itemId] : [teamId],
+        AND COALESCE(i.retry_safe, 0) = 0
+      ORDER BY
+        CASE
+          WHEN q.recovery_status = 'moot' THEN 0
+          WHEN q.status IN ('done', 'moot', 'superseded', 'cancelled') THEN 0
+          WHEN q.status = 'failed' THEN 1
+          ELSE 2
+        END ASC,
+        i.updated_at ASC,
+        i.created_at ASC
+      LIMIT $${itemId ? 3 : 2}`,
+    itemId ? [teamId, itemId, maxRows] : [teamId, maxRows],
   );
 
   const result: StaleReadyReconcileResult = {
@@ -1243,11 +1261,6 @@ export async function reconcileStaleAlreadyDispatchedReadyRows(
   };
 
   for (const row of rows) {
-    if (row.retry_safe === 1) {
-      result.preserved_retry_safe += 1;
-      continue;
-    }
-
     const status = row.dispatch_recovery_status === "moot" ? "moot" : row.dispatch_status;
     if (!status || !READY_RECONCILE_TERMINAL_STATUSES.has(status)) continue;
     const promotionVerified = promotionCompletedAndVerified(row.promotion_result_json);
