@@ -227,10 +227,10 @@ describe("comment reliability acceptance states", () => {
     );
 
     expect(first.status).toBe(200);
-    expect(first.body.visible_state).toBe("recorded-route-failed-retryable");
+    expect(first.body.visible_state).toBe("recorded-but-route-failed-with-retry");
     expect(first.body.feedback_status).toBe("recorded-route-failed-retryable");
     expect(first.body.route_status).toMatchObject({
-      visible_state: "recorded-route-failed-retryable",
+      visible_state: "recorded-but-route-failed-with-retry",
       feedback_status: "recorded-route-failed-retryable",
       routed: false,
       retryable: true,
@@ -244,7 +244,7 @@ describe("comment reliability acceptance states", () => {
     expect(failedRead.body.comments[0]).toMatchObject({
       op_id: first.body.op_id,
       route_status: {
-        visible_state: "recorded-route-failed-retryable",
+        visible_state: "recorded-but-route-failed-with-retry",
         target_agent: "kapelle",
         target_agent_raw: "project:kapelle",
         error: { message: "route target unavailable" },

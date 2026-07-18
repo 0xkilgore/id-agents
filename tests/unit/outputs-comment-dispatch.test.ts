@@ -227,10 +227,10 @@ describe("POST /artifacts/:id/comments — B2 auto-dispatch", () => {
     expect(res.body.dispatch_routed).toBe(false);
     expect(res.body.dispatch).toBeNull();
     expect(res.body.dispatch_skipped).toBe("artifact_owner_unknown");
-    expect(res.body.visible_state).toBe("recorded-route-failed-retryable");
+    expect(res.body.visible_state).toBe("recorded-but-route-failed-with-retry");
     expect(res.body.feedback_status).toBe("recorded-route-failed-retryable");
     expect(res.body.route_status).toMatchObject({
-      visible_state: "recorded-route-failed-retryable",
+      visible_state: "recorded-but-route-failed-with-retry",
       compat_status: "recorded-route-failed-retryable",
       feedback_status: "recorded-route-failed-retryable",
       routed: false,
@@ -241,7 +241,7 @@ describe("POST /artifacts/:id/comments — B2 auto-dispatch", () => {
 
     const get = await call(app, "GET", `/artifacts/${ART}/comments`);
     expect(get.body.comments).toHaveLength(1);
-    expect(get.body.comments[0].route_status.visible_state).toBe("recorded-route-failed-retryable");
+    expect(get.body.comments[0].route_status.visible_state).toBe("recorded-but-route-failed-with-retry");
     expect(get.body.comments[0].route_status.feedback_status).toBe("recorded-route-failed-retryable");
   });
 
@@ -304,10 +304,10 @@ describe("POST /artifacts/:id/comments — B2 auto-dispatch", () => {
     expect(res.body.dispatch_routed).toBe(false);
     expect(res.body.dispatch).toBeNull();
     expect(res.body.dispatch_skipped).toBe("scheduler_unavailable");
-    expect(res.body.visible_state).toBe("recorded-route-failed-retryable");
+    expect(res.body.visible_state).toBe("recorded-but-route-failed-with-retry");
     expect(res.body.feedback_status).toBe("recorded-route-failed-retryable");
     expect(res.body.route_status).toMatchObject({
-      visible_state: "recorded-route-failed-retryable",
+      visible_state: "recorded-but-route-failed-with-retry",
       routed: false,
       retryable: true,
       skipped: "scheduler_unavailable",
@@ -339,7 +339,7 @@ describe("POST /artifacts/:id/comments — B2 auto-dispatch", () => {
     expect(res.body.dispatch_routed).toBe(false);
     expect(res.body.dispatch).toBeNull();
     expect(res.body.dispatch_skipped).toBe("scheduler_unavailable");
-    expect(res.body.visible_state).toBe("recorded-route-failed-retryable");
+    expect(res.body.visible_state).toBe("recorded-but-route-failed-with-retry");
     expect(res.body.comment.reaction).toBe("iterate");
 
     const queued = await adapter.query<{ n: number }>(
@@ -351,7 +351,7 @@ describe("POST /artifacts/:id/comments — B2 auto-dispatch", () => {
     expect(comments.body.comments).toHaveLength(1);
     expect(comments.body.comments[0].reaction).toBe("iterate");
     expect(comments.body.comments[0].route_status).toMatchObject({
-      visible_state: "recorded-route-failed-retryable",
+      visible_state: "recorded-but-route-failed-with-retry",
       skipped: "scheduler_unavailable",
       dispatch: null,
     });
@@ -372,10 +372,10 @@ describe("POST /artifacts/:id/comments — B2 auto-dispatch", () => {
     expect(res.body.dispatch_routed).toBe(false);
     expect(res.body.dispatch).toBeNull();
     expect(res.body.dispatch_error.message).toContain("scheduler boom");
-    expect(res.body.visible_state).toBe("recorded-route-failed-retryable");
+    expect(res.body.visible_state).toBe("recorded-but-route-failed-with-retry");
     expect(res.body.feedback_status).toBe("recorded-route-failed-retryable");
     expect(res.body.route_status).toMatchObject({
-      visible_state: "recorded-route-failed-retryable",
+      visible_state: "recorded-but-route-failed-with-retry",
       compat_status: "recorded-route-failed-retryable",
       feedback_status: "recorded-route-failed-retryable",
       routed: false,
