@@ -613,6 +613,57 @@ describe("planAdmission — per-item guardrails", () => {
     expect(p.skipped).toHaveLength(0);
   });
 
+  it("recovers target_unhealthy rows when the resolved target becomes healthy", () => {
+    const rows = [
+      item({ item_id: "healthy-regina", to_agent: "regina", write_scope: ["repo/regina"] }),
+      item({ item_id: "healthy-roger", to_agent: "roger", write_scope: ["repo/roger"] }),
+      item({ item_id: "healthy-cto", to_agent: "cto", write_scope: ["repo/cto"] }),
+      item({
+        item_id: "stopped-substrate-api",
+        to_agent: "substrate-api-codex",
+        write_scope: ["repo/substrate-api"],
+      }),
+      item({ item_id: "healthy-builder-pool", to_agent: "pool:builder", write_scope: [] }),
+    ];
+
+    const p = planAdmission(
+      rows,
+      ctx({
+        admit_limit: 5,
+        pool_for: (candidate) => candidate.to_agent === "pool:builder" ? "builder" : null,
+        pool_free_slots: new Map([["builder", 1]]),
+        pool_free_builders: new Map([["builder", ["roger"]]]),
+        healthy_agents: new Set(["regina", "roger", "cto"]),
+        target_agent_runtimes: new Map([
+          ["regina", "claude-code-cli"],
+          ["roger", "codex"],
+          ["cto", "claude-code-cli"],
+          ["substrate-api-codex", "codex"],
+        ]),
+      }),
+      cfg,
+    );
+
+    expect(p.admit.map((admitted) => admitted.item_id)).toEqual([
+      "healthy-regina",
+      "healthy-roger",
+      "healthy-cto",
+      "healthy-builder-pool",
+    ]);
+    expect(p.assignments).toEqual({ "healthy-builder-pool": "roger" });
+    expect(p.skipped).toEqual([
+      expect.objectContaining({
+        item_id: "stopped-substrate-api",
+        action: "held",
+        metadata: expect.objectContaining({
+          code: "target_unhealthy",
+          class: "agent_availability",
+          target: "substrate-api-codex",
+        }),
+      }),
+    ]);
+  });
+
   it("holds rows blocked by active clarification or promotion blockers", () => {
     const clarification = planAdmission(
       [item({ item_id: "needs-answer" })],
