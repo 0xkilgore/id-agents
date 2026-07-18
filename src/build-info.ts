@@ -79,6 +79,8 @@ export interface BuildSourceDiagnostic {
   message: string;
 }
 
+const PROTECTED_MANAGER_DEPLOY_CHECKOUT = "/Users/kilgore/Dropbox/Code/cane/id-agents-deploy-main";
+
 /** Paths read at RUNTIME by the manager (not compiled into `dist/`), so a commit
  *  confined to these does NOT make the running binary stale. Kept deliberately
  *  tight: runtime policy/config (e.g. configs/model-policy.json) + pure docs.
@@ -222,9 +224,9 @@ export function buildSourceDiagnostic(
   const classification = build.freshness.classification;
   const recommended_redeploy_action =
     classification === "server_stale_and_source_unpromoted"
-      ? "Promote the checked-out manager source branch to main, then redeploy the manager from clean origin/main and verify /health build.build_sha equals build.origin_main_sha."
+      ? `Promote the checked-out manager source branch to main, then redeploy the manager from the protected checkout ${PROTECTED_MANAGER_DEPLOY_CHECKOUT} at clean origin/main and verify /health build.build_sha equals build.origin_main_sha.`
       : classification === "server_not_rebuilt"
-        ? "Redeploy the manager from clean origin/main and verify /health build.build_sha equals build.origin_main_sha."
+        ? `Redeploy the manager from the protected checkout ${PROTECTED_MANAGER_DEPLOY_CHECKOUT} at clean origin/main and verify /health build.build_sha equals build.origin_main_sha.`
         : null;
   const state =
     classification === "unknown"

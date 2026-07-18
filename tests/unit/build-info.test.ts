@@ -121,6 +121,8 @@ describe("computeBuildStatus", () => {
     });
     expect(diagnostic.recommended_redeploy_action).toContain("Promote");
     expect(diagnostic.recommended_redeploy_action).toContain("redeploy the manager");
+    expect(diagnostic.recommended_redeploy_action).toContain("/Users/kilgore/Dropbox/Code/cane/id-agents-deploy-main");
+    expect(diagnostic.recommended_redeploy_action).toContain("origin/main");
   });
 
   it("projects nominal build source as ok with no redeploy action", () => {
