@@ -9973,7 +9973,12 @@ export class AgentManagerDb {
           const { task, error } = await this.resolveTaskRef(body.linked_task, teamId);
           if (!task) return res.status(404).json({ error: error || `Task "${body.linked_task}" not found` });
           if (task.status === 'done') {
-            return res.status(409).json({ error: 'linked_task_terminal', task_status: task.status });
+            return res.status(409).json({
+              error: 'canonical_task_terminal',
+              reason: 'canonical_task_terminal',
+              reconciled: true,
+              task_status: task.status,
+            });
           }
           linkedTaskId = task.id;
           linkedTaskRow = task;

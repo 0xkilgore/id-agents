@@ -12,6 +12,7 @@ import { parseJsonObject, stringifyJson } from '../../db-json.js';
 const DEFAULT_LIMIT = 100;
 const MAX_LIMIT = 1000;
 const TERMINAL_STATUSES: ReadonlyArray<CheckinStatus> = ['closed', 'expired'];
+const RECORD_ONLY_CHAIN_THRESHOLD = 3;
 
 export class SqliteCheckinsRepo implements CheckinsRepository {
   constructor(private readonly db: DbAdapter) {}
@@ -183,6 +184,50 @@ export class SqliteCheckinsRepo implements CheckinsRepository {
   }
 
   async claimDue(teamId: string, now: number, limit: number): Promise<CheckinRow[]> {
+    // Reconcile linked checkins before selecting work. This is deliberately
+    // done at the claim boundary so a terminal/stale row can never escape to
+    // the due service and create one more receipt.
+    await this.db.query(
+      `UPDATE checkins
+         SET status = 'closed',
+             closed_at = ?,
+             closed_reason = 'canonical_task_terminal',
+             next_fire_at = NULL,
+             snooze_until = NULL,
+             updated_at = ?
+       WHERE team_id = ?
+         AND status IN ('active', 'snoozed')
+         AND next_fire_at IS NOT NULL
+         AND next_fire_at <= ?
+         AND linked_task_id IN (
+           SELECT id FROM tasks WHERE team_id = ? AND status = 'done'
+         )`,
+      [now, now, teamId, now, teamId],
+    );
+
+    await this.db.query(
+      `UPDATE checkins
+         SET status = 'closed',
+             closed_at = ?,
+             closed_reason = 'record_only_chain_exhausted',
+             next_fire_at = NULL,
+             snooze_until = NULL,
+             updated_at = ?
+       WHERE team_id = ?
+         AND status IN ('active', 'snoozed')
+         AND next_fire_at IS NOT NULL
+         AND next_fire_at <= ?
+         AND iteration_count >= ?
+         AND last_fire_at IS NOT NULL
+         AND linked_task_id IN (
+           SELECT id FROM tasks
+            WHERE team_id = ?
+              AND status = 'doing'
+              AND (updated_at * 1000) <= checkins.last_fire_at
+         )`,
+      [now, now, teamId, now, RECORD_ONLY_CHAIN_THRESHOLD, teamId],
+    );
+
     const { rows } = await this.db.query<any>(
       `SELECT * FROM checkins
          WHERE team_id = ?
