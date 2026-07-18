@@ -146,16 +146,24 @@ export function buildRuntimeStatusProjection(input: {
       count.category === "capacity_gate" && count.count > 0,
     );
   const recommendedActions: string[] = [];
-  if (diskCritical) recommendedActions.push("admit only disk cleanup/repair rows until disk headroom clears the critical floor");
-  else if (diskWarn) recommendedActions.push("prefer disk cleanup/repair or deploy-safe rows until disk headroom clears the warning floor");
+  const pushRecommendedAction = (action: string | null | undefined): void => {
+    if (!action) return;
+    if (!recommendedActions.includes(action)) recommendedActions.push(action);
+  };
+  if (diskCritical) pushRecommendedAction("admit only disk cleanup/repair rows until disk headroom clears the critical floor");
+  else if (diskWarn) pushRecommendedAction("prefer disk cleanup/repair or deploy-safe rows until disk headroom clears the warning floor");
   if (buildSource?.recommended_redeploy_action) {
-    recommendedActions.push(buildSource.recommended_redeploy_action);
+    pushRecommendedAction(buildSource.recommended_redeploy_action);
   } else if (buildBehindOrigin === true) {
-    recommendedActions.push("deploy/promote the current manager build before Chris handoff");
+    pushRecommendedAction("deploy/promote the current manager build before Chris handoff");
   }
-  if (capacityFull) recommendedActions.push("wait for in-flight build capacity to free or close completed dispatches");
-  if (input.readyAdmission.admissible_now > 0) recommendedActions.push("admit currently admissible ready rows");
-  if (recommendedActions.length === 0) recommendedActions.push(input.readyAdmission.recommended_action);
+  if (capacityFull) pushRecommendedAction("wait for in-flight build capacity to free or close completed dispatches");
+  if (input.readyAdmission.admissible_now > 0) {
+    pushRecommendedAction("admit currently admissible ready rows");
+  } else if (input.readyAdmission.candidates > 0) {
+    pushRecommendedAction(input.readyAdmission.recommended_action);
+  }
+  if (recommendedActions.length === 0) pushRecommendedAction(input.readyAdmission.recommended_action);
 
   const infraFirst = diskCritical || buildBehindOrigin === true;
   const operatorSummary = infraFirst

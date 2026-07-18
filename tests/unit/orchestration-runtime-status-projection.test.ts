@@ -81,6 +81,28 @@ describe("buildRuntimeStatusProjection disk admission policy", () => {
     expect(projection.recommended_actions[0]).toContain("prefer disk cleanup/repair or deploy-safe rows");
   });
 
+  it("warning disk preserves zero-admit blocker next actions alongside the disk-first guidance", () => {
+    const projection = buildRuntimeStatusProjection({
+      runtimeHealth: runtimeHealth("warn"),
+      autoPromoteHealth: autoPromoteHealth(),
+      readyAdmission: readyAdmission({
+        admissible_now: 0,
+        useful_ready: 1,
+        blocker_counts: [
+          { code: "disk_warning_floor", category: "infra_resource", count: 3 },
+          { code: "provider_runtime_mismatch", category: "runtime_unavailable", count: 1 },
+        ],
+        recommended_action:
+          "free disk or admit cleanup/deploy-safe rows before releasing disk_warning_floor=3 held row(s); reroute or update provider_runtime_mismatch=1 rows to match a live runtime",
+      }),
+    });
+
+    expect(projection.recommended_actions).toEqual([
+      "prefer disk cleanup/repair or deploy-safe rows until disk headroom clears the warning floor",
+      "free disk or admit cleanup/deploy-safe rows before releasing disk_warning_floor=3 held row(s); reroute or update provider_runtime_mismatch=1 rows to match a live runtime",
+    ]);
+  });
+
   it("ok disk reports ordinary build admission as available and no disk-held rows", () => {
     const projection = buildRuntimeStatusProjection({
       runtimeHealth: runtimeHealth("ok"),
