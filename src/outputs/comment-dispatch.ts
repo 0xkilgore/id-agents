@@ -18,7 +18,7 @@
 // feedback, so each one routes its own fresh dispatch.
 
 import type { DbAdapter } from "../db/db-adapter.js";
-import { getArtifact } from "./storage.js";
+import { getArtifact, listArtifactSourceEvidence } from "./storage.js";
 import type { ArtifactCatalogRow, ArtifactComment } from "./types.js";
 
 export const COMMENT_DISPATCH_SCHEMA_VERSION = "artifact.comment.dispatch.v1" as const;
@@ -65,9 +65,9 @@ export type CommentDispatchSkipReason =
   | "question_threaded"; // question remains attached to the artifact thread
 
 export type CommentDispatchResult =
-  | { routed: true; dispatch: CommentDispatchReceipt }
-  | { routed: false; skipped: CommentDispatchSkipReason; target_agent?: string | null; target_agent_raw?: string | null }
-  | { routed: false; error: { message: string }; target_agent?: string | null; target_agent_raw?: string | null };
+  | { routed: true; dispatch: CommentDispatchReceipt; owner_resolution_source?: ArtifactCommentOwnerResolutionSource }
+  | { routed: false; skipped: CommentDispatchSkipReason; target_agent?: string | null; target_agent_raw?: string | null; owner_resolution_source?: ArtifactCommentOwnerResolutionSource }
+  | { routed: false; error: { message: string }; target_agent?: string | null; target_agent_raw?: string | null; owner_resolution_source?: ArtifactCommentOwnerResolutionSource };
 
 export type ArtifactCommentRouteKind = "acknowledgement" | "approval_signal" | "substantive_follow_up" | "question";
 
@@ -78,7 +78,12 @@ export interface RouteCommentInput {
   enqueue: CommentDispatchEnqueueFn | undefined;
   artifactId: string;
   comment: ArtifactComment;
+  /** Durable retry/request hint. Used only when the catalog has no owner. */
+  targetAgent?: string | null;
+  targetAgentRaw?: string | null;
 }
+
+export type ArtifactCommentOwnerResolutionSource = "catalog" | "target_agent" | "artifact_metadata" | "unknown";
 
 export function classifyArtifactComment(comment: ArtifactComment): ArtifactCommentRouteKind {
   if (comment.reaction === "acknowledged") return "acknowledgement";
@@ -142,16 +147,30 @@ export async function routeCommentToOwningAgent(
     return { routed: false, skipped: "scheduler_unavailable" };
   }
   const catalog = await getArtifact(input.adapter, input.artifactId);
-  const { target_agent: owner, target_agent_raw: rawOwner } = resolveArtifactCommentTargetAgent(catalog);
-  if (!catalog || !owner) {
-    return { routed: false, skipped: "artifact_owner_unknown", target_agent: owner, target_agent_raw: rawOwner };
+  const catalogOwner = resolveArtifactCommentTargetAgent(catalog);
+  const hintedOwner = resolveRawTargetAgent(input.targetAgentRaw ?? input.targetAgent);
+  const metadataOwner = !catalogOwner.target_agent && !hintedOwner.target_agent
+    ? await resolveArtifactMetadataOwner(input.adapter, input.artifactId)
+    : { target_agent: null, target_agent_raw: null };
+  const resolved = catalogOwner.target_agent ? catalogOwner : hintedOwner.target_agent ? hintedOwner : metadataOwner;
+  const ownerResolutionSource: ArtifactCommentOwnerResolutionSource = catalogOwner.target_agent
+    ? "catalog"
+    : hintedOwner.target_agent
+      ? "target_agent"
+      : metadataOwner.target_agent
+        ? "artifact_metadata"
+        : "unknown";
+  const owner = resolved.target_agent;
+  const rawOwner = resolved.target_agent_raw;
+  if (!owner) {
+    return { routed: false, skipped: "artifact_owner_unknown", target_agent: owner, target_agent_raw: rawOwner, owner_resolution_source: ownerResolutionSource };
   }
   try {
     const receipt = await input.enqueue({
       to_agent: owner,
       from_actor: input.comment.actor,
-      subject: commentSubject(catalog),
-      message: commentMessage(catalog, input.comment),
+      subject: commentSubject(catalog, input.artifactId),
+      message: commentMessage(catalog, input.comment, input.artifactId),
       priority: 5,
       channel: ARTIFACT_COMMENT_DISPATCH_CHANNEL,
     });
@@ -163,6 +182,7 @@ export async function routeCommentToOwningAgent(
         to_agent: owner,
         to_agent_raw: rawOwner,
       },
+      owner_resolution_source: ownerResolutionSource,
     };
   } catch (err) {
     return {
@@ -170,8 +190,39 @@ export async function routeCommentToOwningAgent(
       error: { message: err instanceof Error ? err.message : String(err) },
       target_agent: owner,
       target_agent_raw: rawOwner,
+      owner_resolution_source: ownerResolutionSource,
     };
   }
+}
+
+function resolveRawTargetAgent(rawValue: string | null | undefined): { target_agent: string | null; target_agent_raw: string | null } {
+  const raw = rawValue?.trim() || null;
+  if (!raw) return { target_agent: null, target_agent_raw: null };
+  const projectMatch = raw.match(/^project:\s*(.+)$/i);
+  const target = canonicalizeTargetAgent((projectMatch?.[1] ?? raw).trim());
+  return { target_agent: target || null, target_agent_raw: raw };
+}
+
+async function resolveArtifactMetadataOwner(
+  adapter: DbAdapter,
+  artifactId: string,
+): Promise<{ target_agent: string | null; target_agent_raw: string | null }> {
+  const evidence = await listArtifactSourceEvidence(adapter, artifactId);
+  for (const row of evidence) {
+    if (!row.metadata_json) continue;
+    try {
+      const metadata = JSON.parse(row.metadata_json) as Record<string, unknown>;
+      for (const key of ["target_agent", "owner_agent", "agent", "produced_by_agent"]) {
+        if (typeof metadata[key] === "string") {
+          const resolved = resolveRawTargetAgent(metadata[key]);
+          if (resolved.target_agent) return resolved;
+        }
+      }
+    } catch {
+      // Invalid evidence metadata is ignored; later evidence may still identify the owner.
+    }
+  }
+  return { target_agent: null, target_agent_raw: null };
 }
 
 // ── Recovered-comment batch sweep (deterministic) ─────────────────────
@@ -245,19 +296,19 @@ export async function sweepRecoveredArtifactComments(
   };
 }
 
-function artifactLabel(catalog: ArtifactCatalogRow): string {
-  return catalog.title || catalog.basename || catalog.artifact_id;
+function artifactLabel(catalog: ArtifactCatalogRow | null, artifactId: string): string {
+  return catalog?.title || catalog?.basename || catalog?.artifact_id || artifactId;
 }
 
-export function commentSubject(catalog: ArtifactCatalogRow): string {
+export function commentSubject(catalog: ArtifactCatalogRow | null, artifactId = catalog?.artifact_id ?? "unknown-artifact"): string {
   // C0: a reaction is still a comment, but the subject reads "reaction" so the
   // owning agent can triage one-tap feedback at a glance.
   const noun = "Operator comment";
-  return `${noun} on "${artifactLabel(catalog)}"`.slice(0, 80);
+  return `${noun} on "${artifactLabel(catalog, artifactId)}"`.slice(0, 80);
 }
 
-export function commentMessage(catalog: ArtifactCatalogRow, comment: ArtifactComment): string {
-  const label = artifactLabel(catalog);
+export function commentMessage(catalog: ArtifactCatalogRow | null, comment: ArtifactComment, artifactId = catalog?.artifact_id ?? comment.artifact_id): string {
+  const label = artifactLabel(catalog, artifactId);
   // C0_FEEDBACK_REACTIONS: when the comment is a one-tap reaction, the verb and
   // the section heading say "reacted" so the agent reads it as a reaction, not a
   // free-text note. The body already carries the synthesized "👎 wrong — …".
@@ -265,11 +316,11 @@ export function commentMessage(catalog: ArtifactCatalogRow, comment: ArtifactCom
   const verb = isReaction ? `reacted (${comment.reaction})` : "left a comment";
   const heading = isReaction ? "## Reaction" : "## Comment";
   const lines: (string | null)[] = [
-    `${comment.actor} ${verb} on your artifact **${label}** (\`${catalog.artifact_id}\`).`,
+    `${comment.actor} ${verb} on your artifact **${label}** (\`${artifactId}\`).`,
     "",
-    catalog.abs_path ? `File: \`${catalog.abs_path}\`` : null,
+    catalog?.abs_path ? `File: \`${catalog.abs_path}\`` : null,
     comment.anchor ? `Anchor: \`${comment.anchor}\`` : null,
-    catalog.abs_path || comment.anchor ? "" : null,
+    catalog?.abs_path || comment.anchor ? "" : null,
     heading,
     "",
     comment.body,

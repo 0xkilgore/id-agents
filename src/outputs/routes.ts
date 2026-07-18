@@ -366,6 +366,8 @@ async function handleClassifiedCommentRouting(
   actorRef: string,
   env: NodeJS.ProcessEnv,
   clock?: () => Date,
+  targetAgent?: string | null,
+  targetAgentRaw?: string | null,
 ): Promise<{
   route_kind: ArtifactCommentRouteKind;
   approval?: { state: Awaited<ReturnType<typeof approveArtifact>>["state"]; op_id: number; idempotent: boolean };
@@ -401,6 +403,8 @@ async function handleClassifiedCommentRouting(
     enqueue: opts.enqueueDispatch,
     artifactId,
     comment,
+    targetAgent,
+    targetAgentRaw,
   });
   if (routed.routed && isC0FeedbackReactionsEnabled(env)) {
     await persistRoutedLinkage(adapter, artifactId, sourceOpId, routed.dispatch, actorRef, clock);
@@ -1641,6 +1645,8 @@ export function mountOutputsRoutes(
         actor.ref,
         env,
         clock,
+        existingComment?.route_status?.target_agent ?? asString(req.body?.target_agent) ?? asString(req.body?.to_agent),
+        existingComment?.route_status?.target_agent_raw ?? asString(req.body?.target_agent_raw),
       );
       const route_status = commentRouteStatusFromDispatchResult(
         routed.route_kind,

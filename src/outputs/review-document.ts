@@ -220,6 +220,7 @@ export function commentRouteStatusFromDispatchResult(
       recorded_op_id: recordedOpId,
       target_agent: result.dispatch.to_agent,
       target_agent_raw: result.dispatch.to_agent_raw ?? result.dispatch.to_agent,
+      owner_resolution_source: result.owner_resolution_source,
       dispatch: {
         query_id: result.dispatch.query_id,
         dispatch_phid: result.dispatch.dispatch_phid,
@@ -251,6 +252,7 @@ export function commentRouteStatusFromDispatchResult(
     recorded_op_id: recordedOpId,
     target_agent: "target_agent" in result && typeof result.target_agent === "string" ? result.target_agent : null,
     target_agent_raw: "target_agent_raw" in result && typeof result.target_agent_raw === "string" ? result.target_agent_raw : null,
+    owner_resolution_source: result.owner_resolution_source,
     dispatch: null,
     skipped,
     error: "error" in result ? result.error : null,

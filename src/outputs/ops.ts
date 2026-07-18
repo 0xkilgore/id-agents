@@ -665,6 +665,13 @@ function parseRouteStatus(value: unknown): ArtifactCommentRouteStatus | null {
     recorded_op_id: typeof v.recorded_op_id === "number" ? v.recorded_op_id : 0,
     target_agent: typeof v.target_agent === "string" ? v.target_agent : null,
     target_agent_raw: typeof v.target_agent_raw === "string" ? v.target_agent_raw : null,
+    owner_resolution_source:
+      v.owner_resolution_source === "catalog" ||
+      v.owner_resolution_source === "target_agent" ||
+      v.owner_resolution_source === "artifact_metadata" ||
+      v.owner_resolution_source === "unknown"
+        ? v.owner_resolution_source
+        : undefined,
     dispatch: v.dispatch && typeof v.dispatch === "object" ? v.dispatch : null,
     skipped: typeof v.skipped === "string" ? v.skipped : null,
     error: v.error && typeof v.error.message === "string" ? { message: v.error.message } : null,

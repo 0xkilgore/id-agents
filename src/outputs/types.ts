@@ -300,6 +300,7 @@ export interface ArtifactCommentRouteStatus {
   recorded_op_id: number;
   target_agent: string | null;
   target_agent_raw: string | null;
+  owner_resolution_source?: "catalog" | "target_agent" | "artifact_metadata" | "unknown";
   dispatch: {
     query_id: string;
     dispatch_phid: string;

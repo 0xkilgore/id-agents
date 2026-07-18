@@ -6,7 +6,7 @@ import express, { type Express } from "express";
 import { describe, it, expect, beforeEach } from "vitest";
 import { SqliteAdapter } from "../../src/db/sqlite-adapter.js";
 import { migrateSqlite } from "../../src/db/migrations/sqlite.js";
-import { migrateOutputsTables, registerArtifact } from "../../src/outputs/storage.js";
+import { migrateOutputsTables, registerArtifact, upsertArtifactSourceEvidence } from "../../src/outputs/storage.js";
 import { mountOutputsRoutes } from "../../src/outputs/routes.js";
 import type { CommentDispatchEnqueueFn } from "../../src/outputs/comment-dispatch.js";
 import {
@@ -243,6 +243,52 @@ describe("POST /artifacts/:id/comments — B2 auto-dispatch", () => {
     expect(get.body.comments).toHaveLength(1);
     expect(get.body.comments[0].route_status.visible_state).toBe("recorded-route-failed-retryable");
     expect(get.body.comments[0].route_status.feedback_status).toBe("recorded-route-failed-retryable");
+  });
+
+  it("routes an uncatalogued retry from its persisted target_agent audit hint", async () => {
+    const { fn, calls } = makeFakeEnqueue();
+    const { app } = await buildApp(fn);
+
+    const res = await call(app, "POST", `/artifacts/${ART}/comments`, {
+      actor_ref: "user:liz",
+      body: "Please revise this feedback receipt.",
+      target_agent: "project:kapelle",
+    });
+
+    expect(res.status).toBe(200);
+    expect(res.body.dispatch_routed).toBe(true);
+    expect(res.body.route_status).toMatchObject({
+      target_agent: "kapelle",
+      target_agent_raw: "project:kapelle",
+      owner_resolution_source: "target_agent",
+    });
+    expect(calls[0].to_agent).toBe("kapelle");
+  });
+
+  it("routes an uncatalogued artifact from durable source metadata and audits the source", async () => {
+    const { fn, calls } = makeFakeEnqueue();
+    const { app, adapter } = await buildApp(fn);
+    await upsertArtifactSourceEvidence(adapter, {
+      artifact_id: ART,
+      source: "agent-done",
+      source_ref: "phid:disp-owner-evidence",
+      observed_at: "2026-07-17T12:00:00.000Z",
+      metadata_json: JSON.stringify({ owner_agent: "project:kapelle" }),
+    }, "2026-07-17T12:00:00.000Z");
+
+    const res = await call(app, "POST", `/artifacts/${ART}/comments`, {
+      actor_ref: "user:chris",
+      body: "Please revise using the artifact provenance owner.",
+    });
+
+    expect(res.status).toBe(200);
+    expect(res.body.dispatch_routed).toBe(true);
+    expect(res.body.route_status).toMatchObject({
+      target_agent: "kapelle",
+      target_agent_raw: "project:kapelle",
+      owner_resolution_source: "artifact_metadata",
+    });
+    expect(calls[0].to_agent).toBe("kapelle");
   });
 
   it("persists comments without misleading not-recorded state when no enqueue seam is wired", async () => {
