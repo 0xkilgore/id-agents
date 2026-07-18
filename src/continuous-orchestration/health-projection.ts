@@ -396,6 +396,17 @@ interface OrchestrationHealthProjectionOptions {
 
 const RECOVERED_STATUSES = ["moot", "landed_reconciled", "verified_done", "retry_done"];
 const FAILED_TASK_ACTION_RECEIPT_LIMIT = 25;
+const NON_USEFUL_READY_ADMISSION_CODES = new Set([
+  "blocked_dependency",
+  "broken_dependency",
+  "clarification_blocker",
+  "duplicate_dispatch_retry_required",
+  "missing_dispatch_target",
+  "promotion_blocker",
+  "provider_runtime_mismatch",
+  "risk_requires_approval",
+  "target_unhealthy",
+]);
 
 export async function readOrchestrationHealthProjection(
   adapter: DbAdapter,
@@ -1519,7 +1530,7 @@ function classifyReadyAdmissionBlocker(
       category: "retry_safety",
       owner_lane: "orchestration",
       reason: "ready row is still linked to a prior dispatch and has not been marked retry-safe",
-      recommended_action: "mark the item retry-safe or create an explicit retry before readmitting it",
+      recommended_action: "mark retry_safe only for a bounded refire or create an explicit retry before readmitting it",
     };
   }
   if (!isAutoRunRisk(row.risk_class)) {

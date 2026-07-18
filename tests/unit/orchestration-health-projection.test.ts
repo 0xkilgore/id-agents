@@ -1321,7 +1321,7 @@ describe("orchestration health projection", () => {
         code: "duplicate_dispatch_retry_required",
         category: "retry_safety",
         count: 1,
-        recommended_action: "mark the item retry-safe or create an explicit retry before readmitting it",
+        recommended_action: "mark retry_safe only for a bounded refire or create an explicit retry before readmitting it",
       }),
     ]);
     expect(health.ready_item_blockers.items).toEqual([
@@ -2541,7 +2541,7 @@ describe("orchestration health projection", () => {
         category: "retry_safety",
         owner_lane: "orchestration",
         reason: "ready row is still linked to a prior dispatch and has not been marked retry-safe",
-        recommended_action: "mark the item retry-safe or create an explicit retry before readmitting it",
+        recommended_action: "mark retry_safe only for a bounded refire or create an explicit retry before readmitting it",
       }),
       expect.objectContaining({
         code: "provider_runtime_mismatch",
@@ -2610,6 +2610,94 @@ describe("orchestration health projection", () => {
       reroute_to_agent: null,
       update_metadata_to: { provider: "anthropic", runtime: "claude-code-cli" },
     });
+  });
+
+  it("uses useful_ready when ready-admission excludes unhealthy targets and stale duplicate retries from the floor", async () => {
+    const duplicate = await insertBacklogItem(adapter, {
+      title: "duplicate retry guard",
+      readiness_state: "ready",
+      risk_class: "build",
+      to_agent: "roger",
+      dispatch_body: "continue",
+      write_scope: ["repo/duplicate-floor"],
+    });
+    await setItemState(adapter, duplicate.item_id, "ready", { dispatch_phid: "phid:disp-prior-floor" });
+
+    const unhealthyA = await insertBacklogItem(adapter, {
+      title: "unhealthy target A",
+      readiness_state: "ready",
+      risk_class: "build",
+      to_agent: "gaudi",
+      dispatch_body: "continue",
+      write_scope: ["repo/unhealthy-floor-a"],
+    });
+    const unhealthyB = await insertBacklogItem(adapter, {
+      title: "unhealthy target B",
+      readiness_state: "ready",
+      risk_class: "build",
+      to_agent: "hopper",
+      dispatch_body: "continue",
+      write_scope: ["repo/unhealthy-floor-b"],
+    });
+    for (let i = 0; i < 5; i++) {
+      await insertBacklogItem(adapter, {
+        title: `clean floor ready ${i}`,
+        readiness_state: "ready",
+        risk_class: "build",
+        to_agent: "roger",
+        dispatch_body: "continue",
+        write_scope: [`repo/clean-floor-${i}`],
+      });
+    }
+
+    const health = await readOrchestrationHealthProjection(adapter, "default", {
+      minReadyFuel: 8,
+      readyAdmission: {
+        rawReady: 8,
+        usefulReady: 5,
+        admissibleNow: 5,
+        blockerCounts: [
+          { code: "target_unhealthy", category: "runtime_unavailable", count: 2 },
+          { code: "duplicate_dispatch_retry_required", category: "retry_safety", count: 1 },
+        ],
+        nonAdmitted: [
+          { item_id: unhealthyA.item_id, code: "target_unhealthy" },
+          { item_id: unhealthyB.item_id, code: "target_unhealthy" },
+          { item_id: duplicate.item_id, code: "duplicate_dispatch_retry_required" },
+        ],
+      },
+    });
+
+    expect(health.ready_item_blockers).toMatchObject({
+      ready: 8,
+      actionable: 7,
+      admissible_now: 5,
+      stale_ready_floor: true,
+      stale_ready_fuel: {
+        active: true,
+        reason: "useful_ready_fuel=5 is below min_ready_fuel=8; raw_ready_fuel=8",
+      },
+    });
+    expect(health.ready_item_blockers.categories).toEqual([
+      expect.objectContaining({
+        code: "duplicate_dispatch_retry_required",
+        recommended_action: "mark retry_safe only for a bounded refire or create an explicit retry before readmitting it",
+      }),
+    ]);
+    expect(health.ready_item_blockers.stale_ready_fuel.counts_by_blocker_class).toEqual([
+      {
+        code: "target_unhealthy",
+        category: "runtime_unavailable",
+        count: 2,
+        examples: [unhealthyA.item_id, unhealthyB.item_id],
+      },
+      {
+        code: "duplicate_dispatch_retry_required",
+        category: "retry_safety",
+        count: 1,
+        examples: [duplicate.item_id],
+      },
+    ]);
   });
 });
 

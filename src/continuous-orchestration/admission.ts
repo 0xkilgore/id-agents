@@ -538,7 +538,7 @@ export function planAdmission(
         item.item_id,
         "held",
         "target_unhealthy",
-        `target agent '${target}' is not healthy/online (RD-014 admission health gate)`,
+        `target agent '${target}' is not healthy/online (RD-014 admission health gate); reroute to a healthy compatible owner or restore target health before retry`,
         { target, ...healthyAlternateRecommendation(target, ctx) },
       ));
       continue;

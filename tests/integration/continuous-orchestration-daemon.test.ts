@@ -4367,17 +4367,23 @@ describe("daemon — dry-run vs live", () => {
     expect(res.body.auto_promote_health.summary).not.toMatch(/meets floor|empty fuel/i);
   });
 
-  it("status exposes stale-ready fuel as actionable when ready=11 is below floor=12 with retry and lane blockers", async () => {
+  it("status keeps the auto-promote ready floor below target when raw ready=8 overstates useful fuel due to unhealthy targets and stale duplicates", async () => {
     const duplicate = await seedReady(adapter, {
       title: "duplicate retry guard below floor",
       write_scope: ["repo/duplicate-floor"],
     });
     await markReadyAlreadyDispatched(adapter, duplicate.item_id, "phid:disp-prior-floor");
-    const laneBusy = await seedReady(adapter, {
-      title: "single writer lane busy below floor",
-      write_scope: ["repo/busy-floor"],
+    const unhealthyA = await seedReady(adapter, {
+      title: "unhealthy target A below floor",
+      to_agent: "gaudi",
+      write_scope: ["repo/unhealthy-floor-a"],
     });
-    for (let i = 0; i < 9; i++) {
+    const unhealthyB = await seedReady(adapter, {
+      title: "unhealthy target B below floor",
+      to_agent: "hopper",
+      write_scope: ["repo/unhealthy-floor-b"],
+    });
+    for (let i = 0; i < 5; i++) {
       await seedReady(adapter, {
         title: `clean below-floor ready ${i}`,
         write_scope: [`repo/clean-below-floor-${i}`],
@@ -4388,13 +4394,15 @@ describe("daemon — dry-run vs live", () => {
       adapter,
       {
         dry_run: true,
-        auto_flesh_enabled: false,
-        auto_promote_enabled: false,
+        auto_flesh_enabled: true,
+        auto_promote_enabled: true,
+        auto_promote_floor: 12,
+        auto_promote_min_lanes: 4,
         max_in_flight: 20,
         max_new_per_tick: 20,
-        min_ready_fuel: 12,
+        min_ready_fuel: 8,
       },
-      { activeScopes: new Set(["repo/busy-floor"]) },
+      { resolveAgentHealth: async () => new Set(["roger"]) },
     );
     await daemon.setMode("running");
 
@@ -4402,36 +4410,69 @@ describe("daemon — dry-run vs live", () => {
 
     expect(res.status).toBe(200);
     expect(res.body.counts).toMatchObject({
-      ready: 11,
-      admissible_now: 9,
+      ready: 8,
+      admissible_now: 5,
       ready_block_reasons: {
         duplicate_dispatch_retry_required: 1,
-        single_writer_lane_busy: 1,
       },
     });
     expect(res.body.ready_admission).toMatchObject({
-      candidates: 11,
-      admissible_now: 9,
+      candidates: 8,
+      admissible_now: 5,
       stale_ready_floor: {
         stale: true,
-        ready: 11,
-        admissible: 9,
-        min_ready_fuel: 12,
+        ready: 8,
+        admissible: 5,
+        min_ready_fuel: 8,
       },
     });
+    expect(res.body.ready_admission.blocker_counts).toEqual(
+      expect.arrayContaining([
+        { code: "target_unhealthy", category: "runtime_unavailable", count: 2 },
+        { code: "duplicate_dispatch_retry_required", category: "retry_safety", count: 1 },
+      ]),
+    );
+    expect(res.body.ready_admission.non_admitted).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          item_id: unhealthyA.item_id,
+          code: "target_unhealthy",
+          action: "held",
+          reason: expect.stringContaining("reroute to a healthy compatible owner"),
+        }),
+        expect.objectContaining({
+          item_id: unhealthyB.item_id,
+          code: "target_unhealthy",
+          action: "held",
+          reason: expect.stringContaining("restore target health before retry"),
+        }),
+        expect.objectContaining({
+          item_id: duplicate.item_id,
+          code: "duplicate_dispatch_retry_required",
+          action: "held",
+          reason: expect.stringContaining("requires retry_safe=true before it can fire again"),
+        }),
+      ]),
+    );
     expect(res.body.health.ready_item_blockers).toMatchObject({
-      ready: 11,
-      actionable: 10,
-      min_ready_fuel: 12,
-      admissible_now: 9,
+      ready: 8,
+      actionable: 7,
+      min_ready_fuel: 8,
+      admissible_now: 5,
       stale_ready_floor: true,
       stale_ready_fuel: {
         active: true,
         owner_lane: "orchestration",
         recommended_action: "clear the top ready-admission blockers or promote/refuel safe backlog candidates until ready fuel is admissible",
-        reason: "useful_ready_fuel=10 is below min_ready_fuel=12; raw_ready_fuel=11",
+        reason: "useful_ready_fuel=5 is below min_ready_fuel=8; raw_ready_fuel=8",
       },
     });
+    expect(res.body.health.ready_item_blockers.categories).toEqual([
+      expect.objectContaining({
+        code: "duplicate_dispatch_retry_required",
+        recommended_action: "mark retry_safe only for a bounded refire or create an explicit retry before readmitting it",
+      }),
+    ]);
     expect(res.body.health.ready_item_blockers.stale_ready_fuel.counts_by_blocker_class).toEqual(
       expect.arrayContaining([
         {
@@ -4440,17 +4481,34 @@ describe("daemon — dry-run vs live", () => {
           count: 1,
           examples: [duplicate.item_id],
         },
-        {
-          code: "single_writer_lane_busy",
-          category: "lane_eligibility",
-          count: 1,
-          examples: [laneBusy.item_id],
-        },
+        expect.objectContaining({
+          code: "target_unhealthy",
+          category: "runtime_unavailable",
+          count: 2,
+          examples: expect.arrayContaining([unhealthyA.item_id, unhealthyB.item_id]),
+        }),
       ]),
     );
     expect(res.body.health.ready_item_blockers.stale_ready_fuel.examples).toEqual(
-      expect.arrayContaining([duplicate.item_id, laneBusy.item_id]),
+      expect.arrayContaining([duplicate.item_id, unhealthyA.item_id, unhealthyB.item_id]),
     );
+    expect(res.body.auto_promote_health.lanes).toMatchObject({
+      build_ready: 8,
+      build_ready_lanes: 5,
+    });
+    expect(res.body.auto_promote_health.lanes.ready_lane_keys).toHaveLength(8);
+    expect(res.body.auto_promote_health).toMatchObject({
+      floor: 12,
+      min_ready_lanes: 4,
+      below_floor: true,
+      below_lanes: false,
+      triggered: true,
+      candidates_considered: 0,
+      promoted_count: 0,
+      skipped_count: 0,
+    });
+    expect(res.body.auto_promote_health.summary).toMatch(/ready=5 floor=12, lanes=5\/4/);
+    expect(res.body.auto_promote_health.summary).toMatch(/no needs_review candidates/);
   });
 
   it("preserves the Wave79 build-floor zero-admit health fixture", async () => {
