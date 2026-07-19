@@ -26,11 +26,16 @@ describe('checkin terminal reconciliation at due claim', () => {
     await adapter.close();
   });
 
-  async function insertTask(id: string, status: 'doing' | 'done', updatedAt: number): Promise<void> {
+  async function insertTask(
+    id: string,
+    status: 'doing' | 'done',
+    updatedAt: number,
+    description: string | null = null,
+  ): Promise<void> {
     await adapter.query(
-      `INSERT INTO tasks (id, name, uuid, team_id, title, status, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-      [id, id, `uuid-${id}`, teamId, id, status, 1, updatedAt],
+      `INSERT INTO tasks (id, name, uuid, team_id, title, description, status, created_at, updated_at, track)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [id, id, `uuid-${id}`, teamId, id, description, status, 1, updatedAt, '(unassigned)'],
     );
   }
 
@@ -100,5 +105,34 @@ describe('checkin terminal reconciliation at due claim', () => {
     const claimed = await repo.claimDue(teamId, now, 10);
     expect(claimed.map((checkin) => checkin.id)).toEqual(['active-checkin']);
     expect((await repo.get('active-checkin', teamId))?.status).toBe('active');
+  });
+
+  it('suppresses recurring receipts when the source task was superseded or mooted in its task record', async () => {
+    await insertTask('superseded-task', 'doing', 1_600, 'Status: superseded upstream after reconciliation.');
+    await repo.create(row('superseded-checkin', 'superseded-task'));
+
+    await expect(repo.claimDue(teamId, now, 10)).resolves.toEqual([]);
+    expect(await repo.get('superseded-checkin', teamId)).toMatchObject({
+      status: 'closed',
+      closed_reason: 'canonical_task_terminal',
+      next_fire_at: null,
+    });
+  });
+
+  it('suppresses recurring receipts when the source task already records a replacement implementation commit', async () => {
+    await insertTask(
+      'replacement-task',
+      'doing',
+      1_600,
+      'Replacement implementation commit: abc1234 landed on the successor path.',
+    );
+    await repo.create(row('replacement-checkin', 'replacement-task'));
+
+    await expect(repo.claimDue(teamId, now, 10)).resolves.toEqual([]);
+    expect(await repo.get('replacement-checkin', teamId)).toMatchObject({
+      status: 'closed',
+      closed_reason: 'replacement_implementation_commit',
+      next_fire_at: null,
+    });
   });
 });

@@ -6,8 +6,10 @@ import type {
   CheckinRow,
   CheckinStatus,
   MutableCheckinFields,
+  TaskRow,
 } from '../../types.js';
 import { parseJsonObject, stringifyJson } from '../../db-json.js';
+import { CANONICAL_TASK_TERMINAL_REASON, classifyCheckinRecurrenceSuppression } from '../../../checkins/recurrence-suppression.js';
 
 const DEFAULT_LIMIT = 100;
 const MAX_LIMIT = 1000;
@@ -238,7 +240,43 @@ export class SqliteCheckinsRepo implements CheckinsRepository {
          LIMIT ?`,
       [teamId, now, clampLimit(limit)],
     );
-    return rows.map(parseRow);
+    const due = rows.map(parseRow);
+    const taskMap = await this.loadLinkedTasks(due);
+    const claimed: CheckinRow[] = [];
+    for (const row of due) {
+      const task = row.linked_task_id ? taskMap.get(row.linked_task_id) ?? null : null;
+      const suppressionReason = task ? classifyCheckinRecurrenceSuppression(task) : null;
+      if (suppressionReason) {
+        await this.close(row.id, row.team_id, now, suppressionReason);
+        continue;
+      }
+      if (task && this.shouldExhaustRecordOnlyChain(row, task)) {
+        await this.close(row.id, row.team_id, now, 'record_only_chain_exhausted');
+        continue;
+      }
+      claimed.push(row);
+    }
+    return claimed;
+  }
+
+  private shouldExhaustRecordOnlyChain(row: CheckinRow, task: Pick<TaskRow, "status" | "updated_at">): boolean {
+    return task.status === 'doing'
+      && row.iteration_count >= RECORD_ONLY_CHAIN_THRESHOLD
+      && row.last_fire_at !== null
+      && (task.updated_at * 1000) <= row.last_fire_at;
+  }
+
+  private async loadLinkedTasks(rows: readonly CheckinRow[]): Promise<Map<string, TaskRow>> {
+    const ids = [...new Set(rows.map((row) => row.linked_task_id).filter((id): id is string => !!id))];
+    if (ids.length === 0) return new Map();
+    const placeholders = ids.map(() => '?').join(', ');
+    const { rows: taskRows } = await this.db.query<TaskRow>(
+      `SELECT id, name, uuid, team_id, title, description, status, created_by, owner, created_at, updated_at, completed_at, track
+         FROM tasks
+        WHERE id IN (${placeholders})`,
+      ids,
+    );
+    return new Map(taskRows.map((task) => [task.id, task]));
   }
 
   async delete(id: string, teamId: string): Promise<boolean> {
