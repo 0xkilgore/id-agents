@@ -4,6 +4,9 @@
 export interface DuplicateDispatchRetryBlockersArgs {
   managerUrl: string;
   json: boolean;
+  staleClarifications: boolean;
+  olderThanHours: number;
+  limit: number;
 }
 
 export class DuplicateDispatchRetryBlockersArgError extends Error {}
@@ -14,12 +17,30 @@ export function parseDuplicateDispatchRetryBlockersArgs(
 ): DuplicateDispatchRetryBlockersArgs {
   let managerUrl = env.MANAGER_URL || "http://127.0.0.1:4100";
   let json = false;
+  let staleClarifications = false;
+  let olderThanHours = 24;
+  let limit = 25;
   let i = 0;
   while (i < argv.length) {
     const arg = argv[i];
     if (arg === "--json") {
       json = true;
       i += 1;
+      continue;
+    }
+    if (arg === "--stale-clarifications") {
+      staleClarifications = true;
+      i += 1;
+      continue;
+    }
+    if (arg === "--older-than-hours" || arg === "--limit") {
+      const val = Number(argv[i + 1]);
+      if (!Number.isFinite(val) || val < 1 || (arg === "--limit" && val > 100)) {
+        throw new DuplicateDispatchRetryBlockersArgError(`${arg} requires a positive number${arg === "--limit" ? " no greater than 100" : ""}`);
+      }
+      if (arg === "--older-than-hours") olderThanHours = val;
+      else limit = Math.floor(val);
+      i += 2;
       continue;
     }
     if (arg === "--manager-url") {
@@ -33,7 +54,7 @@ export function parseDuplicateDispatchRetryBlockersArgs(
     }
     throw new DuplicateDispatchRetryBlockersArgError(`unknown argument: ${arg}`);
   }
-  return { managerUrl, json };
+  return { managerUrl, json, staleClarifications, olderThanHours, limit };
 }
 
 export async function runDuplicateDispatchRetryBlockersCli(
@@ -52,11 +73,18 @@ export async function runDuplicateDispatchRetryBlockersCli(
     args = parseDuplicateDispatchRetryBlockersArgs(argv, deps.env ?? process.env);
   } catch (err) {
     stderr(`${err instanceof Error ? err.message : String(err)}\n`);
-    stderr("Usage: id-agents duplicate-dispatch-retry-blockers [--manager-url URL] [--json]\n");
+    stderr("Usage: id-agents duplicate-dispatch-retry-blockers [--manager-url URL] [--json] [--stale-clarifications] [--older-than-hours N] [--limit N]\n");
     return 2;
   }
 
-  const url = new URL("/orchestration/backlog/duplicate-dispatch-retry-blockers", args.managerUrl);
+  const path = args.staleClarifications
+    ? "/orchestration/backlog/duplicate-dispatch-retry-blockers/stale-clarifications"
+    : "/orchestration/backlog/duplicate-dispatch-retry-blockers";
+  const url = new URL(path, args.managerUrl);
+  if (args.staleClarifications) {
+    url.searchParams.set("older_than_hours", String(args.olderThanHours));
+    url.searchParams.set("limit", String(args.limit));
+  }
   const fetchImpl = deps.fetchImpl ?? fetch;
   const response = await fetchImpl(url);
   const text = await response.text();
@@ -78,6 +106,14 @@ export async function runDuplicateDispatchRetryBlockersCli(
   }
 
   const report = body.report;
+  if (args.staleClarifications) {
+    stdout(`stale needs-clarification duplicate retry blockers: ${report.count} (matched ${report.matched}, older than ${report.older_than_hours}h, dry-run)\n`);
+    stdout(`${report.guidance}\n`);
+    for (const item of report.items ?? []) {
+      stdout(`- ${item.item_id} prior=${item.prior_dispatch_id} age=${item.prior_dispatch_age_hours}h action=${item.operator_action} retry_safe=leave_false\n`);
+    }
+    return 0;
+  }
   stdout(`duplicate dispatch retry blockers: ${report.count} (scanned ${report.scanned}, dry-run)\n`);
   for (const item of report.items ?? []) {
     stdout(

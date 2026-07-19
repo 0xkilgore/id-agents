@@ -49,6 +49,65 @@ export interface DuplicateDispatchRetryClassificationReport {
   items: DuplicateDispatchRetryClassificationItem[];
 }
 
+export interface StaleNeedsClarificationRetryBlockerReport {
+  schema_version: "orchestration.stale_needs_clarification_retry_blockers.v1";
+  dry_run: true;
+  older_than_hours: number;
+  limit: number;
+  matched: number;
+  count: number;
+  truncated: boolean;
+  guidance: string;
+  items: Array<DuplicateDispatchRetryClassificationItem & {
+    prior_dispatch_updated_at: string;
+    prior_dispatch_age_ms: number;
+    prior_dispatch_age_hours: number;
+    operator_action: "review_then_supersede";
+  }>;
+}
+
+export function buildStaleNeedsClarificationRetryBlockerReport(
+  items: BacklogItem[],
+  outcomes: Map<string, DispatchOutcome>,
+  opts: { now?: Date; olderThanHours?: number; limit?: number } = {},
+): StaleNeedsClarificationRetryBlockerReport {
+  const nowMs = opts.now?.getTime() ?? Date.now();
+  const olderThanHours = Math.max(1, opts.olderThanHours ?? 24);
+  const limit = Math.max(1, Math.min(100, Math.floor(opts.limit ?? 25)));
+  const cutoffMs = olderThanHours * 60 * 60 * 1000;
+  const classified = buildDuplicateDispatchRetryClassificationReport(items, outcomes, { now: opts.now });
+  const matches = classified.items.flatMap((item) => {
+    const outcome = outcomes.get(item.prior_dispatch_id);
+    if (outcome?.status !== "needs_clarification" || !outcome.updated_at) return [];
+    const dispatchAgeMs = ageMsFromIso(outcome.updated_at, nowMs);
+    if (dispatchAgeMs <= cutoffMs) return [];
+    return [{
+      ...item,
+      prior_dispatch_updated_at: outcome.updated_at,
+      prior_dispatch_age_ms: dispatchAgeMs,
+      prior_dispatch_age_hours: hours(dispatchAgeMs),
+      operator_action: "review_then_supersede" as const,
+      retry_safe_recommendation: "leave_false" as const,
+      recommended_disposition: "supersede" as const,
+      reason:
+        `prior dispatch ${item.prior_dispatch_id} has needed clarification for more than ${olderThanHours}h; ` +
+        "after operator review, supersede the blocked ready row without marking retry_safe",
+    }];
+  }).sort((a, b) => b.prior_dispatch_age_ms - a.prior_dispatch_age_ms || a.item_id.localeCompare(b.item_id));
+
+  return {
+    schema_version: "orchestration.stale_needs_clarification_retry_blockers.v1",
+    dry_run: true,
+    older_than_hours: olderThanHours,
+    limit,
+    matched: matches.length,
+    count: Math.min(matches.length, limit),
+    truncated: matches.length > limit,
+    guidance: "Review the outstanding clarification and prior dispatch context; if obsolete, explicitly supersede the ready row. Do not mark retry_safe.",
+    items: matches.slice(0, limit),
+  };
+}
+
 export function buildDuplicateDispatchRetryClassificationReport(
   items: BacklogItem[],
   outcomes: Map<string, DispatchOutcome>,

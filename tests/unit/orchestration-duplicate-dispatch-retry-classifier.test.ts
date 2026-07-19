@@ -275,9 +275,9 @@ describe("GET /orchestration/backlog/duplicate-dispatch-retry-blockers", () => {
       failure_kind: "agent_error",
       failure_detail: "linked query terminated expired",
       failure_class: "linked_query_expired",
-      operator_disposition: "retry",
-      retry_safe_recommendation: "set_true",
-      recommended_disposition: "mark-retry-safe",
+      operator_disposition: "close",
+      retry_safe_recommendation: "leave_false",
+      recommended_disposition: "supersede",
     });
     expect(byId[failedVerification.item_id]).toMatchObject({
       prior_dispatch_id: "phid:failed-verification",
@@ -291,5 +291,42 @@ describe("GET /orchestration/backlog/duplicate-dispatch-retry-blockers", () => {
     });
     expect(r.body.report.oldest_age_ms).toBeGreaterThanOrEqual(byId[done.item_id].age_ms);
     expect(r.body.report.oldest_age_hours).toBeGreaterThanOrEqual(byId[done.item_id].age_hours);
+  });
+});
+
+describe("GET /orchestration/backlog/duplicate-dispatch-retry-blockers/stale-clarifications", () => {
+  it("lists only needs-clarification prior dispatches older than the cutoff without marking retry-safe", async () => {
+    await seedDispatch({ phid: "phid:stale-input", status: "needs_clarification", updated_at: "2026-07-16T00:00:00.000Z" });
+    await seedDispatch({ phid: "phid:fresh-input", status: "needs_clarification", updated_at: new Date().toISOString() });
+    await seedDispatch({ phid: "phid:old-queued", status: "queued", updated_at: "2026-07-16T00:00:00.000Z" });
+    const stale = await seedReadyBlocker({ title: "stale clarification", phid: "phid:stale-input" });
+    await seedReadyBlocker({ title: "fresh clarification", phid: "phid:fresh-input" });
+    await seedReadyBlocker({ title: "old queued", phid: "phid:old-queued" });
+
+    const before = await stateCounts();
+    const r = await call("/orchestration/backlog/duplicate-dispatch-retry-blockers/stale-clarifications?older_than_hours=24&limit=1");
+
+    expect(r.status).toBe(200);
+    expect(r.body.report).toMatchObject({
+      schema_version: "orchestration.stale_needs_clarification_retry_blockers.v1",
+      dry_run: true,
+      older_than_hours: 24,
+      limit: 1,
+      matched: 1,
+      count: 1,
+      truncated: false,
+      guidance: expect.stringContaining("Do not mark retry_safe"),
+    });
+    expect(r.body.report.items).toEqual([
+      expect.objectContaining({
+        item_id: stale.item_id,
+        prior_dispatch_status: "needs_clarification",
+        operator_action: "review_then_supersede",
+        recommended_disposition: "supersede",
+        retry_safe_recommendation: "leave_false",
+        reason: expect.stringContaining("after operator review"),
+      }),
+    ]);
+    expect(await stateCounts()).toEqual(before);
   });
 });
