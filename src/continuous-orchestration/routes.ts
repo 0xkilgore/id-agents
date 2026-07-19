@@ -45,7 +45,10 @@ import { attachBacklogRetryReadiness } from "./backlog-retry-readiness.js";
 import type { RiskClass } from "./types.js";
 import { autoPromoteRejections } from "./auto-promote-policy.js";
 import { buildStaleDuplicateBacklogReport } from "./stale-duplicate-report.js";
-import { buildDuplicateDispatchRetryClassificationReport } from "./duplicate-dispatch-retry-classifier.js";
+import {
+  buildDuplicateDispatchRetryClassificationReport,
+  buildStaleNeedsClarificationRetryBlockerReport,
+} from "./duplicate-dispatch-retry-classifier.js";
 import { parseRoadmapToBacklog } from "./roadmap-import.js";
 import { runFleshPass } from "./flesh-runner.js";
 import { resolveTrack } from "../track-registry/registry.js";
@@ -621,6 +624,27 @@ export function mountContinuousOrchestrationRoutes(app: Application, opts: Orche
         items.map((item) => item.last_dispatch_phid).filter((phid): phid is string => !!phid),
       );
       res.json({ ok: true, report: buildDuplicateDispatchRetryClassificationReport(items, outcomes) });
+    } catch (err) {
+      res.status(500).json({ ok: false, error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  app.get("/orchestration/backlog/duplicate-dispatch-retry-blockers/stale-clarifications", async (req: Request, res: Response) => {
+    try {
+      const olderThanHours = typeof req.query.older_than_hours === "string" ? Number(req.query.older_than_hours) : 24;
+      const limit = typeof req.query.limit === "string" ? Number(req.query.limit) : 25;
+      if (!Number.isFinite(olderThanHours) || olderThanHours < 1 || !Number.isFinite(limit) || limit < 1 || limit > 100) {
+        return res.status(400).json({ ok: false, error: "older_than_hours must be >= 1 and limit must be between 1 and 100" });
+      }
+      const items = await listBacklogByState(adapter, { team_id: teamId, state: "ready" });
+      const outcomes = await getDispatchOutcomesByPhid(
+        adapter,
+        items.map((item) => item.last_dispatch_phid).filter((phid): phid is string => !!phid),
+      );
+      res.json({
+        ok: true,
+        report: buildStaleNeedsClarificationRetryBlockerReport(items, outcomes, { olderThanHours, limit }),
+      });
     } catch (err) {
       res.status(500).json({ ok: false, error: err instanceof Error ? err.message : String(err) });
     }
