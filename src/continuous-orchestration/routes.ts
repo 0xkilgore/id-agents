@@ -15,7 +15,7 @@ import {
 } from "./daemon.js";
 import type { ContinuousOrchestrationConfig } from "./config.js";
 import { AUTO_READY_CONFIDENCE_THRESHOLD } from "./flesh-policy.js";
-import type { OrchestrationMode, ReadinessState } from "./types.js";
+import { isReadinessState, READINESS_STATES, type OrchestrationMode, type ReadinessState } from "./types.js";
 import {
   countFleshLogSince,
   closeStaleDuplicateBacklogRow,
@@ -669,8 +669,31 @@ export function mountContinuousOrchestrationRoutes(app: Application, opts: Orche
 
   app.post("/orchestration/backlog", async (req: Request, res: Response) => {
     try {
-      const body = (req.body ?? {}) as NewBacklogItem & { force?: boolean };
+      const rawBody = (req.body ?? {}) as Record<string, unknown>;
+      const body = rawBody as unknown as NewBacklogItem & { force?: boolean };
       if (!body.title) return res.status(400).json({ ok: false, error: "title required" });
+      const hasReadinessState = Object.prototype.hasOwnProperty.call(rawBody, "readiness_state");
+      const requestedReadinessState = rawBody.readiness_state;
+      // Older scheduler clients used the flesh-state value `approved_ready`
+      // here. Preserve their intent, but never persist that non-canonical
+      // value into the scheduler lifecycle column.
+      const normalizedReadinessCandidate = requestedReadinessState === "approved_ready"
+        ? "ready"
+        : requestedReadinessState;
+      if (hasReadinessState && !isReadinessState(normalizedReadinessCandidate)) {
+        return res.status(400).json({
+          ok: false,
+          error: "invalid_readiness_state",
+          message:
+            `readiness_state must be a scheduler-canonical state (${READINESS_STATES.join("|")}); ` +
+            `use readiness_state=ready for approved work (legacy approved_ready is also accepted and normalized to ready)`,
+          received: requestedReadinessState ?? null,
+          allowed: READINESS_STATES,
+        });
+      }
+      const normalizedReadinessState: ReadinessState | undefined = hasReadinessState
+        ? normalizedReadinessCandidate as ReadinessState
+        : undefined;
       // Validate the item's track against the canonical-track-registry. A
       // provided-but-non-conforming track is DRIFT: warn + tag, never block.
       let trackDrift = false;
@@ -711,7 +734,11 @@ export function mountContinuousOrchestrationRoutes(app: Application, opts: Orche
       const safe: NewBacklogItem = {
         ...body,
         team_id: teamId,
-        readiness_state: body.readiness_state === "ready" ? "needs_review" : body.readiness_state ?? "draft",
+        readiness_state: requestedReadinessState === "approved_ready"
+          ? "ready"
+          : normalizedReadinessState === "ready"
+            ? "needs_review"
+            : normalizedReadinessState ?? "draft",
         track_drift: trackDrift,
       };
       const item = await insertBacklogItem(adapter, safe);
