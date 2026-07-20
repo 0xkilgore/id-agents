@@ -308,6 +308,22 @@ function withReadyAdmissionOperatorSummary(
 export function mountContinuousOrchestrationRoutes(app: Application, opts: OrchestrationRouteOptions): void {
   const teamId = opts.teamId ?? "default";
   const { daemon, adapter, config } = opts;
+  let readyProjectionGeneration = 0;
+  const invalidateReadyProjection = (): void => {
+    readyProjectionGeneration += 1;
+  };
+  const readFreshReadyAdmission = async (): Promise<ReadyAdmissionExplanation> => {
+    // A status read can overlap a durable admission write. Fence the projection
+    // with a local generation and retry once so a pre-write snapshot cannot be
+    // returned after the write response. The bound keeps a hot writer from
+    // turning an operator read into an unbounded loop.
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const generation = readyProjectionGeneration;
+      const projection = await daemon.explainReadyAdmission();
+      if (generation === readyProjectionGeneration || attempt === 1) return projection;
+    }
+    throw new Error("unreachable ready admission refresh state");
+  };
 
   app.get("/orchestration/status", async (_req: Request, res: Response) => {
     try {
@@ -330,7 +346,7 @@ export function mountContinuousOrchestrationRoutes(app: Application, opts: Orche
         decision: "auto_ready",
       });
       const baseAutoPromoteHealth = await daemon.explainAutoPromoteHealth();
-      const readyAdmission = await daemon.explainReadyAdmission();
+      const readyAdmission = await readFreshReadyAdmission();
       const autoPromoteHealth = withReadyAdmissionOperatorSummary(
         baseAutoPromoteHealth,
         readyAdmission,
@@ -424,7 +440,7 @@ export function mountContinuousOrchestrationRoutes(app: Application, opts: Orche
 
   app.get("/orchestration/health", async (_req: Request, res: Response) => {
     try {
-      const readyAdmission = await daemon.explainReadyAdmission();
+      const readyAdmission = await readFreshReadyAdmission();
       res.json(await readOrchestrationHealthProjection(adapter, teamId, {
         minReadyFuel: config.min_ready_fuel,
         readyAdmission: healthReadyAdmissionOptions(readyAdmission),
@@ -699,6 +715,7 @@ export function mountContinuousOrchestrationRoutes(app: Application, opts: Orche
         track_drift: trackDrift,
       };
       const item = await insertBacklogItem(adapter, safe);
+      if (item.readiness_state === "ready") invalidateReadyProjection();
       res.json({ ok: true, item });
     } catch (err) {
       res.status(500).json({ ok: false, error: err instanceof Error ? err.message : String(err) });
@@ -716,6 +733,7 @@ export function mountContinuousOrchestrationRoutes(app: Application, opts: Orche
       if (patch) await updateBacklogFields(adapter, id, patch);
       const result = await promoteToReady(adapter, id, approvedBy, { retry_safe: body.retry_safe === true });
       if (!result.ok) return res.status(409).json({ ok: false, error: result.reason });
+      invalidateReadyProjection();
       res.json({ ok: true, item: result.item });
     } catch (err) {
       res.status(500).json({ ok: false, error: err instanceof Error ? err.message : String(err) });
