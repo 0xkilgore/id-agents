@@ -1897,6 +1897,48 @@ describe("daemon — dry-run vs live", () => {
     });
   });
 
+  it("supersedes a dead-route duplicate without marking it retry-safe", async () => {
+    const deadRoute = await seedReady(adapter, {
+      title: "dead agent route duplicate blocker",
+      write_scope: ["repo/dead-route-duplicate"],
+      to_agent: "gaudi",
+    });
+    await markReadyAlreadyDispatched(adapter, deadRoute.item_id, "phid:disp-dead-route-prior");
+    await seedDispatch(adapter, {
+      dispatch_phid: "phid:disp-dead-route-prior",
+      status: "failed",
+      failure_kind: "agent_error",
+      failure_detail: 'agent_error (HTTP 404): {"ok":false,"error":"not found"}',
+    });
+
+    const { app } = mountStatusApp(adapter, {
+      dry_run: true,
+      auto_flesh_enabled: false,
+      auto_promote_enabled: false,
+    });
+    const disposed = await callAppRequest(app, "POST", `/orchestration/backlog/${deadRoute.item_id}/disposition`, {
+      disposition: "supersede",
+      actor: "substrate-orch-codex",
+      reason: "dead target route requires replacement work, not a blind refire",
+    });
+
+    expect(disposed.status, JSON.stringify(disposed.body)).toBe(200);
+    expect(disposed.body.classification).toMatchObject({
+      failure_class: "dispatch_route_not_found",
+      recommended_disposition: "supersede",
+      retry_safe_recommendation: "leave_false",
+    });
+    expect(disposed.body.item).toMatchObject({
+      item_id: deadRoute.item_id,
+      readiness_state: "superseded",
+      retry_safe: false,
+      stale_duplicate_closeout_receipt: {
+        next_action: "supersede_duplicate_row",
+        prior_dispatch_phid: "phid:disp-dead-route-prior",
+      },
+    });
+  });
+
   it("refuses to mark terminal prior dispatches retry-safe", async () => {
     const duplicate = await seedReady(adapter, {
       title: "done duplicate blocker",

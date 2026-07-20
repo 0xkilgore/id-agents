@@ -780,7 +780,16 @@ export function mountContinuousOrchestrationRoutes(app: Application, opts: Orche
       const outcomes = await getDispatchOutcomesByPhid(adapter, [item.last_dispatch_phid]);
       const report = buildDuplicateDispatchRetryClassificationReport([item], outcomes);
       const classification = report.items[0];
-      if (!classification || classification.failure_class !== "non_retryable_failure") {
+      const boundedNonRetryableClasses = new Set([
+        "non_retryable_failure",
+        "dispatch_route_not_found",
+        "linked_query_expired",
+      ]);
+      if (
+        !classification ||
+        !boundedNonRetryableClasses.has(classification.failure_class) ||
+        classification.retry_safe_recommendation !== "leave_false"
+      ) {
         return res.status(409).json({
           ok: false,
           error: "bounded disposition only supports non-transient failed prior dispatches",
@@ -801,6 +810,7 @@ export function mountContinuousOrchestrationRoutes(app: Application, opts: Orche
         actor,
         item_id: id,
         reason,
+        operator_reviewed_non_retryable: true,
       });
       const disposed = result.items[0];
       if (!disposed) {

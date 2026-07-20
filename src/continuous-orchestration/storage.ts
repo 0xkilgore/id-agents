@@ -1201,12 +1201,14 @@ export async function reconcileStaleAlreadyDispatchedReadyRows(
     item_id?: string;
     reason?: string;
     max_rows?: number;
+    operator_reviewed_non_retryable?: boolean;
   } = {},
 ): Promise<StaleReadyReconcileResult> {
   const teamId = opts.team_id ?? "default";
   const dryRun = opts.dry_run === true;
   const actor = opts.actor?.trim() || "operator";
   const itemId = opts.item_id?.trim() || null;
+  const operatorReviewedNonRetryable = opts.operator_reviewed_non_retryable === true && itemId !== null;
   const maxRows = Math.max(1, Math.min(100, Math.floor(opts.max_rows ?? 25)));
   const { rows } = await adapter.query<
     BacklogRow & {
@@ -1286,7 +1288,7 @@ export async function reconcileStaleAlreadyDispatchedReadyRows(
       ...outcome,
       status: terminal.status ?? outcome.status,
     });
-    if (disposition.operator_disposition !== "close") continue;
+    if (disposition.operator_disposition !== "close" && !operatorReviewedNonRetryable) continue;
     if (!terminal.terminal && !READY_RECONCILE_TERMINAL_STATUSES.has(outcome.status)) continue;
 
     const toState: "done" | "superseded" =
