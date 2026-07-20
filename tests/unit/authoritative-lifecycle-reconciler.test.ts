@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  reconcileAuthoritativeLifecycleBatchDryRun,
   reconcileAuthoritativeLifecycleDryRun,
   type AuthoritativeLifecycleInputs,
   type AuthoritativeLifecycleStatus,
@@ -177,5 +178,49 @@ describe("authoritative lifecycle reconciler dry-run", () => {
       expect(entry.reason.length).toBeGreaterThan(0);
       expect(entry.evidence.length).toBeGreaterThan(0);
     }
+  });
+
+  it("returns stable dry-run counts for a bounded fixture snapshot", () => {
+    const fixtures = [
+      inputs(),
+      inputs({ clarification: { state: "active", owner: "operator" } }),
+      inputs({ dispatch_status: "done", task_status: "done" }),
+      inputs({ dispatch_status: "failed" }),
+      inputs({ dispatch_status: "moot" }),
+    ];
+    const before = structuredClone(fixtures);
+
+    expect(reconcileAuthoritativeLifecycleBatchDryRun(fixtures)).toEqual({
+      schema_version: "orchestration.authoritative_lifecycle_reconciliation_counts.v1",
+      mode: "dry_run",
+      total: 5,
+      counts: {
+        active: 1,
+        needs_input: 1,
+        resume_failed: 0,
+        done_unintegrated: 1,
+        promoted: 0,
+        deployed_fresh: 0,
+        accepted: 0,
+        superseded: 0,
+        failed_needs_owner: 1,
+        moot: 1,
+      },
+      results: fixtures.map((fixture) => reconcileAuthoritativeLifecycleDryRun(fixture)),
+      mutates: false,
+    });
+    expect(fixtures).toEqual(before);
+  });
+
+  it("reports an explicit zero for every lifecycle class in an empty dry-run", () => {
+    expect(reconcileAuthoritativeLifecycleBatchDryRun([])).toMatchObject({
+      total: 0,
+      counts: Object.fromEntries([
+        "active", "needs_input", "resume_failed", "done_unintegrated", "promoted",
+        "deployed_fresh", "accepted", "superseded", "failed_needs_owner", "moot",
+      ].map((status) => [status, 0])),
+      results: [],
+      mutates: false,
+    });
   });
 });

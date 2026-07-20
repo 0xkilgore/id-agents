@@ -85,6 +85,28 @@ export interface AuthoritativeLifecycleDryRun {
   mutates: false;
 }
 
+export interface AuthoritativeLifecycleDryRunCounts {
+  schema_version: "orchestration.authoritative_lifecycle_reconciliation_counts.v1";
+  mode: "dry_run";
+  total: number;
+  counts: Record<AuthoritativeLifecycleStatus, number>;
+  results: AuthoritativeLifecycleDryRun[];
+  mutates: false;
+}
+
+const LIFECYCLE_STATUSES: readonly AuthoritativeLifecycleStatus[] = [
+  "active",
+  "needs_input",
+  "resume_failed",
+  "done_unintegrated",
+  "promoted",
+  "deployed_fresh",
+  "accepted",
+  "superseded",
+  "failed_needs_owner",
+  "moot",
+];
+
 const ACTIVE_DISPATCH = new Set(["queued", "claimed", "in_flight", "running"]);
 const DONE_DISPATCH = new Set(["done", "done_recovered"]);
 const FAILED_DISPATCH = new Set(["failed", "expired", "resume_delivery_failed"]);
@@ -198,4 +220,24 @@ export function reconcileAuthoritativeLifecycleDryRun(
   }
 
   return result("active", "no terminal or integration evidence is present", ["default.non_terminal"], duplicateActions);
+}
+
+/** Classify a bounded caller-provided snapshot and return stable dry-run counts. */
+export function reconcileAuthoritativeLifecycleBatchDryRun(
+  inputs: readonly AuthoritativeLifecycleInputs[],
+): AuthoritativeLifecycleDryRunCounts {
+  const counts = Object.fromEntries(
+    LIFECYCLE_STATUSES.map((status) => [status, 0]),
+  ) as Record<AuthoritativeLifecycleStatus, number>;
+  const results = inputs.map((input) => reconcileAuthoritativeLifecycleDryRun(input));
+  for (const entry of results) counts[entry.status] += 1;
+
+  return {
+    schema_version: "orchestration.authoritative_lifecycle_reconciliation_counts.v1",
+    mode: "dry_run",
+    total: results.length,
+    counts,
+    results,
+    mutates: false,
+  };
 }
