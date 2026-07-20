@@ -55,18 +55,31 @@ describe("authoritative lifecycle reconciler dry-run", () => {
     expect(actual.status).toBe("promoted");
   });
 
-  it("requires running deployment SHA alignment before deployed_fresh", () => {
+  it.each([
+    {
+      name: "aligned build",
+      deploy: { health_available: true, fresh: true, running_sha: "abc", promoted_main_sha: "abc" },
+      expected: "deployed_fresh",
+    },
+    {
+      name: "stale build",
+      deploy: { health_available: true, fresh: true, running_sha: "old", promoted_main_sha: "abc" },
+      expected: "promoted",
+    },
+    {
+      name: "unavailable health",
+      deploy: { health_available: false, fresh: true, running_sha: "abc", promoted_main_sha: "abc" },
+      expected: "promoted",
+    },
+  ])("bounds deployed_fresh completion for $name", ({ deploy, expected }) => {
     const promotion = { required: true, completed: true, verified: true, promoted_sha: "abc", remote_main_sha: "abc" };
-    expect(reconcileAuthoritativeLifecycleDryRun(inputs({
+    const actual = reconcileAuthoritativeLifecycleDryRun(inputs({
       dispatch_status: "done",
       promotion,
-      deploy: { fresh: true, running_sha: "abc", promoted_main_sha: "abc" },
-    })).status).toBe("deployed_fresh");
-    expect(reconcileAuthoritativeLifecycleDryRun(inputs({
-      dispatch_status: "done",
-      promotion,
-      deploy: { fresh: true, running_sha: "old", promoted_main_sha: "abc" },
-    })).status).toBe("promoted");
+      deploy,
+    }));
+
+    expect(actual.status).toBe(expected);
   });
 
   it("requires evidence before acceptance can win", () => {
@@ -142,7 +155,7 @@ describe("authoritative lifecycle reconciler dry-run", () => {
     ["promoted", inputs({ promotion: { required: true, completed: true, verified: true, promoted_sha: "abc", remote_main_sha: "abc" } })],
     ["deployed_fresh", inputs({
       promotion: { required: true, completed: true, verified: true, promoted_sha: "abc", remote_main_sha: "abc" },
-      deploy: { fresh: true, running_sha: "abc", promoted_main_sha: "abc" },
+      deploy: { health_available: true, fresh: true, running_sha: "abc", promoted_main_sha: "abc" },
     })],
     ["accepted", inputs({ acceptance: { accepted: true, evidence_refs: ["artifact:/acceptance.md"] } })],
     ["superseded", inputs({ backlog: { state: "superseded", stale_duplicate: false, prior_dispatch_terminal: false, prior_work_landed: false } })],

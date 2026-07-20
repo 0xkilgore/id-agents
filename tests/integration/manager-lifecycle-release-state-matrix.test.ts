@@ -25,7 +25,7 @@ const fixture = JSON.parse(
 
 describe("manager lifecycle release-state black-box matrix", () => {
   it("advances completed work through promotion, fresh deployment, and acceptance", () => {
-    const releaseCases = fixture.cases.slice(0, 4);
+    const releaseCases = fixture.cases.slice(0, 6);
     const before = structuredClone(releaseCases);
     const result = reconcileAuthoritativeLifecycleBatchDryRun(releaseCases.map((entry) => entry.input));
 
@@ -34,11 +34,13 @@ describe("manager lifecycle release-state black-box matrix", () => {
       "done_unintegrated",
       "promoted",
       "deployed_fresh",
+      "promoted",
+      "promoted",
       "accepted",
     ]);
     expect(result.counts).toMatchObject({
       done_unintegrated: 1,
-      promoted: 1,
+      promoted: 3,
       deployed_fresh: 1,
       accepted: 1,
     });
@@ -54,7 +56,7 @@ describe("manager lifecycle release-state black-box matrix", () => {
   });
 
   it("keeps superseded and failed_needs_owner terminal outcomes out of the release path", () => {
-    const terminalCases = fixture.cases.slice(4);
+    const terminalCases = fixture.cases.slice(6);
     const result = reconcileAuthoritativeLifecycleBatchDryRun(terminalCases.map((entry) => entry.input));
 
     expect(result.results.map((entry) => entry.status)).toEqual(["superseded", "failed_needs_owner"]);

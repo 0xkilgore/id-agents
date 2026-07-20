@@ -52,7 +52,45 @@
           "promoted_sha": "release-sha",
           "remote_main_sha": "release-sha"
         },
-        "deploy": { "fresh": true, "running_sha": "release-sha", "promoted_main_sha": "release-sha" },
+        "deploy": { "health_available": true, "fresh": true, "running_sha": "release-sha", "promoted_main_sha": "release-sha" },
+        "acceptance": null,
+        "clarification": { "state": "none", "owner": null },
+        "backlog": { "state": "done", "stale_duplicate": false, "prior_dispatch_terminal": true, "prior_work_landed": true }
+      }
+    },
+    {
+      "name": "stale running manager build remains promoted",
+      "expected_status": "promoted",
+      "input": {
+        "dispatch_status": "done",
+        "task_status": "done",
+        "promotion": {
+          "required": true,
+          "completed": true,
+          "verified": true,
+          "promoted_sha": "release-sha",
+          "remote_main_sha": "release-sha"
+        },
+        "deploy": { "health_available": true, "fresh": true, "running_sha": "older-build-sha", "promoted_main_sha": "release-sha" },
+        "acceptance": null,
+        "clarification": { "state": "none", "owner": null },
+        "backlog": { "state": "done", "stale_duplicate": false, "prior_dispatch_terminal": true, "prior_work_landed": true }
+      }
+    },
+    {
+      "name": "unavailable manager health remains promoted",
+      "expected_status": "promoted",
+      "input": {
+        "dispatch_status": "done",
+        "task_status": "done",
+        "promotion": {
+          "required": true,
+          "completed": true,
+          "verified": true,
+          "promoted_sha": "release-sha",
+          "remote_main_sha": "release-sha"
+        },
+        "deploy": { "health_available": false, "fresh": true, "running_sha": "release-sha", "promoted_main_sha": "release-sha" },
         "acceptance": null,
         "clarification": { "state": "none", "owner": null },
         "backlog": { "state": "done", "stale_duplicate": false, "prior_dispatch_terminal": true, "prior_work_landed": true }
@@ -71,7 +109,7 @@
           "promoted_sha": "release-sha",
           "remote_main_sha": "release-sha"
         },
-        "deploy": { "fresh": true, "running_sha": "release-sha", "promoted_main_sha": "release-sha" },
+        "deploy": { "health_available": true, "fresh": true, "running_sha": "release-sha", "promoted_main_sha": "release-sha" },
         "acceptance": { "accepted": true, "evidence_refs": ["artifact:/release-acceptance.md"] },
         "clarification": { "state": "none", "owner": null },
         "backlog": { "state": "done", "stale_duplicate": false, "prior_dispatch_terminal": true, "prior_work_landed": true }
@@ -90,7 +128,7 @@
           "promoted_sha": "release-sha",
           "remote_main_sha": "release-sha"
         },
-        "deploy": { "fresh": true, "running_sha": "release-sha", "promoted_main_sha": "release-sha" },
+        "deploy": { "health_available": true, "fresh": true, "running_sha": "release-sha", "promoted_main_sha": "release-sha" },
         "acceptance": { "accepted": true, "evidence_refs": ["artifact:/obsolete-acceptance.md"] },
         "clarification": { "state": "none", "owner": null },
         "backlog": { "state": "superseded", "stale_duplicate": true, "prior_dispatch_terminal": true, "prior_work_landed": false }

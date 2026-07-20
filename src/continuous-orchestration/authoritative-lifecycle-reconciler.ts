@@ -35,6 +35,7 @@ export interface LifecyclePromotionRead {
 }
 
 export interface LifecycleDeployRead {
+  health_available: boolean;
   fresh: boolean;
   running_sha: string | null;
   promoted_main_sha: string | null;
@@ -120,7 +121,7 @@ function promotionVerified(read: LifecyclePromotionRead | null): boolean {
 }
 
 function deployFresh(read: LifecycleDeployRead | null, promotion: LifecyclePromotionRead | null): boolean {
-  if (!read?.fresh || !promotionVerified(promotion)) return false;
+  if (!read?.health_available || !read.fresh || !promotionVerified(promotion)) return false;
   return Boolean(read.running_sha && read.promoted_main_sha && read.running_sha === read.promoted_main_sha);
 }
 
