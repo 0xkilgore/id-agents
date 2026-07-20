@@ -281,10 +281,13 @@ describe('SupervisorWatcher — integration', () => {
     fs.writeFileSync(alertFilePath, `${JSON.stringify(record)}\n`.repeat(5_000));
 
     let replayCalls = 0;
+    let resolveFirstReplay!: () => void;
+    const firstReplay = new Promise<void>(resolve => { resolveFirstReplay = resolve; });
     class CountingAlertState extends AlertStateManager {
       override replayFromRecords(records: SupervisorAlertRecord[]): void {
         replayCalls += 1;
         super.replayFromRecords(records);
+        if (replayCalls === 1) resolveFirstReplay();
       }
     }
     const watcher = new SupervisorWatcher({
@@ -296,7 +299,7 @@ describe('SupervisorWatcher — integration', () => {
 
     try {
       watcher.start();
-      await new Promise<void>(resolve => setImmediate(resolve));
+      await firstReplay;
       expect(replayCalls).toBeGreaterThan(0);
       expect(replayCalls).toBeLessThan(5);
     } finally {

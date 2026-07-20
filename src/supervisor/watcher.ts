@@ -1,7 +1,8 @@
 // Supervisor v0 — Poll loop lifecycle.
 // Reads manager sources, runs rules, emits alerts. No intervention.
 
-import { readFileSync } from 'fs';
+import { createReadStream } from 'fs';
+import { createInterface } from 'readline';
 import type {
   SourceSnapshot,
   ActiveDispatch,
@@ -265,26 +266,29 @@ export class SupervisorWatcher {
 
   private async replayAlertFile(): Promise<void> {
     try {
-      const content = readFileSync(this.config.alertFilePath, 'utf-8');
-      const lines = content.split('\n').filter(Boolean);
       const batchSize = 1_000;
       let replayed = 0;
-      for (let offset = 0; offset < lines.length; offset += batchSize) {
-        const records = [];
-        for (const line of lines.slice(offset, offset + batchSize)) {
-          try {
-            records.push(JSON.parse(line));
-          } catch {
-            // Skip malformed lines
-          }
+      let records = [];
+      const input = createReadStream(this.config.alertFilePath, { encoding: 'utf8' });
+      const lines = createInterface({ input, crlfDelay: Infinity });
+      for await (const line of lines) {
+        if (!line) continue;
+        try {
+          records.push(JSON.parse(line));
+        } catch {
+          // Skip malformed lines
         }
-        if (records.length > 0) {
-          this.alertState.replayFromRecords(records);
-          replayed += records.length;
-        }
+        if (records.length < batchSize) continue;
+        this.alertState.replayFromRecords(records);
+        replayed += records.length;
+        records = [];
         // Keep the HTTP listener and other timers serviceable while a large
         // recovery journal is reconstructed.
         await new Promise<void>(resolve => setImmediate(resolve));
+      }
+      if (records.length > 0) {
+        this.alertState.replayFromRecords(records);
+        replayed += records.length;
       }
       if (replayed > 0) {
         console.log(`[Supervisor] Replayed ${replayed} alert records from ${this.config.alertFilePath}`);
