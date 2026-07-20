@@ -93,18 +93,18 @@ export class SupervisorWatcher {
     // alerts. Keep it behind the listener/readiness window so synchronous file
     // parsing cannot make a freshly restarted manager look unreachable.
     const startupDelayMs = this.startupRecoveryDelayMs;
-    const recover = () => {
-      this.replayAlertFile();
-      this.tick().catch(err => {
+    const recover = async () => {
+      await this.replayAlertFile();
+      await this.tick().catch(err => {
         console.error('[Supervisor] First tick error:', err instanceof Error ? err.message : String(err));
       });
     };
     if (startupDelayMs === 0) {
-      recover();
+      void recover();
     } else {
       this.startupTimer = setTimeout(() => {
         this.startupTimer = null;
-        recover();
+        void recover();
       }, startupDelayMs);
       this.startupTimer.unref?.();
     }
@@ -263,21 +263,31 @@ export class SupervisorWatcher {
     };
   }
 
-  private replayAlertFile(): void {
+  private async replayAlertFile(): Promise<void> {
     try {
       const content = readFileSync(this.config.alertFilePath, 'utf-8');
       const lines = content.split('\n').filter(Boolean);
-      const records = [];
-      for (const line of lines) {
-        try {
-          records.push(JSON.parse(line));
-        } catch {
-          // Skip malformed lines
+      const batchSize = 1_000;
+      let replayed = 0;
+      for (let offset = 0; offset < lines.length; offset += batchSize) {
+        const records = [];
+        for (const line of lines.slice(offset, offset + batchSize)) {
+          try {
+            records.push(JSON.parse(line));
+          } catch {
+            // Skip malformed lines
+          }
         }
+        if (records.length > 0) {
+          this.alertState.replayFromRecords(records);
+          replayed += records.length;
+        }
+        // Keep the HTTP listener and other timers serviceable while a large
+        // recovery journal is reconstructed.
+        await new Promise<void>(resolve => setImmediate(resolve));
       }
-      if (records.length > 0) {
-        this.alertState.replayFromRecords(records);
-        console.log(`[Supervisor] Replayed ${records.length} alert records from ${this.config.alertFilePath}`);
+      if (replayed > 0) {
+        console.log(`[Supervisor] Replayed ${replayed} alert records from ${this.config.alertFilePath}`);
       }
     } catch {
       // File doesn't exist or can't be read — start fresh

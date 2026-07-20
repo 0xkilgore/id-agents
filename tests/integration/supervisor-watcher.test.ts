@@ -1,4 +1,7 @@
 import { describe, it, expect, beforeEach } from 'vitest';
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
 import { SupervisorWatcher, type SupervisorSourceReader } from '../../src/supervisor/watcher.js';
 import { AlertStateManager } from '../../src/supervisor/alerts.js';
 import type { SupervisorWatchConfig } from '../../src/supervisor/config.js';
@@ -256,6 +259,50 @@ describe('SupervisorWatcher — integration', () => {
 
     watcher.start();
     expect(watcher.isRunning()).toBe(false);
+  });
+
+  it('yields between large startup journal replay batches', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'supervisor-replay-'));
+    const alertFilePath = path.join(dir, 'alerts.jsonl');
+    const record = {
+      alert_id: 'fixture',
+      dedupe_key: 'fixture',
+      status: 'open',
+      kind: 'agent_down',
+      severity: 'warning',
+      confidence: 'high',
+      detected_at: '2026-07-20T00:00:00.000Z',
+      updated_at: '2026-07-20T00:00:00.000Z',
+      title: 'fixture',
+      summary: 'fixture',
+      evidence: [],
+      config_snapshot: {},
+    };
+    fs.writeFileSync(alertFilePath, `${JSON.stringify(record)}\n`.repeat(5_000));
+
+    let replayCalls = 0;
+    class CountingAlertState extends AlertStateManager {
+      override replayFromRecords(records: SupervisorAlertRecord[]): void {
+        replayCalls += 1;
+        super.replayFromRecords(records);
+      }
+    }
+    const watcher = new SupervisorWatcher({
+      config: cfg({ alertFilePath, pollIntervalSeconds: 60 }),
+      sourceReader: reader,
+      sink,
+      alertStateManager: new CountingAlertState(),
+    });
+
+    try {
+      watcher.start();
+      await new Promise<void>(resolve => setImmediate(resolve));
+      expect(replayCalls).toBeGreaterThan(0);
+      expect(replayCalls).toBeLessThan(5);
+    } finally {
+      watcher.stop();
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it('start/stop lifecycle works', () => {
