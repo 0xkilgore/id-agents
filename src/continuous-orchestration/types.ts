@@ -29,6 +29,26 @@ export type ReadinessState =
   | "superseded"
   | "cancelled";
 
+/** Runtime vocabulary accepted at backlog write/read boundaries. */
+export const READINESS_STATES: readonly ReadinessState[] = [
+  "draft",
+  "needs_review",
+  "ready",
+  "queued",
+  "in_flight",
+  "blocked_dependency",
+  "needs_chris_batch",
+  "waiting_window",
+  "done",
+  "failed",
+  "superseded",
+  "cancelled",
+];
+
+export function isReadinessState(value: unknown): value is ReadinessState {
+  return typeof value === "string" && (READINESS_STATES as readonly string[]).includes(value);
+}
+
 export type RiskClass = "routine" | "build" | "external" | "destructive" | "costly" | "novel";
 
 export type BacklogRetryReadinessStatus =
