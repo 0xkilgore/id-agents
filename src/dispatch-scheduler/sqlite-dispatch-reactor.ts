@@ -538,18 +538,60 @@ export class SqliteDispatchReactor {
   ): Promise<DispatchDoc | null> {
     const doc = await this.getByPhid(phid);
     if (!doc) return null;
+    if (doc.status === "done" && hasVerifiedPromotion(doc.promotion_result)) {
+      await this.recordRejectedTerminalOverwrite(doc, args);
+      return doc;
+    }
     if (doc.status === "done" || doc.status === "cancelled") {
       throw conflict(`markFailed cannot run from terminal ${doc.status}`);
     }
     const now = this.nowFn();
-    await this.adapter.query(
+    const { rowCount } = await this.adapter.query(
       `UPDATE dispatch_scheduler_queue
        SET status = 'failed', failure_kind = ?, failure_detail = ?,
            completed_at = ?, updated_at = ?
-       WHERE dispatch_phid = ?`,
-      [args.failure_kind, args.detail, now, now, phid],
+       WHERE dispatch_phid = ? AND team_id = ?
+         AND status NOT IN ('done', 'cancelled')`,
+      [args.failure_kind, args.detail, now, now, phid, this.teamId],
     );
+    if (rowCount === 0) {
+      const latest = await this.getByPhid(phid);
+      if (latest?.status === "done" && hasVerifiedPromotion(latest.promotion_result)) {
+        await this.recordRejectedTerminalOverwrite(latest, args);
+        return latest;
+      }
+      throw conflict(`markFailed lost transition for ${phid}; latest status ${latest?.status ?? "missing"}`);
+    }
     return this.getByPhid(phid);
+  }
+
+  private async recordRejectedTerminalOverwrite(
+    doc: DispatchDoc,
+    args: { failure_kind: FailureKind; detail: string },
+  ): Promise<void> {
+    const occurredAt = Date.parse(this.nowFn());
+    await this.adapter.query(
+      `INSERT INTO event_log
+         (team_id, topic, actor_agent_id, subject_kind, subject_id, occurred_at, data)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [
+        this.teamId,
+        "dispatch:terminal_overwrite_rejected",
+        "manager:linked-query-watcher",
+        "dispatch",
+        doc.dispatch_phid,
+        Number.isFinite(occurredAt) ? occurredAt : Date.now(),
+        JSON.stringify({
+          schema_version: "dispatch.terminal_overwrite_rejected.v1",
+          preserved_status: "done",
+          precedence: "done_with_verified_promotion",
+          attempted_status: "failed",
+          failure_kind: args.failure_kind,
+          failure_detail: args.detail,
+          promotion_result: doc.promotion_result,
+        }),
+      ],
+    );
   }
 
   async markBounced(
@@ -1339,6 +1381,23 @@ function rowToRecoverable(row: Row): RecoverableDispatch {
     allow_auto_retry:
       row.allow_auto_retry != null && Number(row.allow_auto_retry) === 1,
   };
+}
+
+function hasVerifiedPromotion(value: unknown): boolean {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const promotion = value as Record<string, unknown>;
+  if (promotion.completed !== true || !Array.isArray(promotion.repos) || promotion.repos.length === 0) {
+    return false;
+  }
+  return promotion.repos.every((repo) => {
+    if (!repo || typeof repo !== "object" || Array.isArray(repo)) return false;
+    const record = repo as Record<string, unknown>;
+    return record.verified === true
+      && record.pushed === true
+      && typeof record.promoted_sha === "string"
+      && record.promoted_sha.length > 0
+      && record.promoted_sha === record.remote_main_sha;
+  });
 }
 
 /** Map a non-retry decision to the persisted recovery_status. */
