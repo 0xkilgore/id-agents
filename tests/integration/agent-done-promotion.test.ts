@@ -626,6 +626,78 @@ describe("POST /agent-done — enforce mode", () => {
     expect(doc.status).toBe("done");
     expect(doc.promotion_result).toMatchObject({ completed: true });
   });
+
+  it("does not terminalize when promotion evidence persistence fails, then succeeds on retry", async () => {
+    const enq = await enqueue({ repo: "/abs/repo-durable", branch: "f-durable" });
+    const beforeCloseout = await claim(enq.dispatch_phid);
+    const reactor = (manager as any).dispatchScheduler.reactor;
+    const originalRecordPromotionResult = reactor.recordPromotionResult.bind(reactor);
+    let failOnce = true;
+    reactor.recordPromotionResult = async (...args: any[]) => {
+      if (failOnce) {
+        failOnce = false;
+        throw new Error("injected promotion persistence failure");
+      }
+      return originalRecordPromotionResult(...args);
+    };
+
+    const payload = {
+      dispatch_id: enq.dispatch_phid,
+      success: true,
+      mode: "enforce",
+      promotion: {
+        required: true,
+        completed: true,
+        repos: [
+          {
+            path: "/abs/repo-durable",
+            base: "main",
+            source_branch: "f-durable",
+            strategy: "fast_forward",
+            promoted_sha: "durable123",
+            remote_main_sha: "durable123",
+            pushed: true,
+            verified: true,
+          },
+        ],
+      },
+    };
+
+    try {
+      const failed = await fetch(`${baseUrl}/agent-done`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      expect(failed.status).toBe(503);
+      expect(await failed.json()).toMatchObject({
+        ok: false,
+        error: "promotion_result_not_persisted",
+        dispatch_id: enq.dispatch_phid,
+        state: beforeCloseout.status,
+        retryable: true,
+      });
+      const afterFailure = await reactor.getByPhid(enq.dispatch_phid);
+      expect(afterFailure.status).toBe(beforeCloseout.status);
+      expect(afterFailure.status).not.toBe("done");
+      expect(afterFailure.promotion_result).toBeNull();
+
+      const retried = await fetch(`${baseUrl}/agent-done`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      expect(retried.status).toBe(200);
+      const terminal = await reactor.getByPhid(enq.dispatch_phid);
+      expect(terminal.status).toBe("done");
+      expect(terminal.promotion_result).toMatchObject({
+        completed: true,
+        repos: [expect.objectContaining({ promoted_sha: "durable123", verified: true })],
+      });
+    } finally {
+      reactor.recordPromotionResult = originalRecordPromotionResult;
+    }
+  });
 });
 
 describe("POST /agent-done — input validation", () => {

@@ -5266,9 +5266,18 @@ export class AgentManagerDb {
               result: promotion,
             });
           } catch (err) {
+            const detail = err instanceof Error ? err.message : String(err);
             this.managerLog(
-              `[agent-done] recordPromotionResult failed (continuing): ${err instanceof Error ? err.message : String(err)}`,
+              `[agent-done] recordPromotionResult failed; refusing terminal transition: ${detail}`,
             );
+            return res.status(503).json({
+              ok: false,
+              error: 'promotion_result_not_persisted',
+              detail,
+              dispatch_id: doc.dispatch_phid,
+              state: doc.status,
+              retryable: true,
+            });
           }
         }
 
