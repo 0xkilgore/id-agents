@@ -1,0 +1,113 @@
+{
+  "schema_version": "manager.lifecycle_release_state_matrix.v1",
+  "cases": [
+    {
+      "name": "completed build awaits integration",
+      "expected_status": "done_unintegrated",
+      "input": {
+        "dispatch_status": "done",
+        "task_status": "done",
+        "promotion": {
+          "required": true,
+          "completed": false,
+          "verified": false,
+          "promoted_sha": null,
+          "remote_main_sha": null
+        },
+        "deploy": null,
+        "acceptance": null,
+        "clarification": { "state": "none", "owner": null },
+        "backlog": { "state": "done", "stale_duplicate": false, "prior_dispatch_terminal": true, "prior_work_landed": true }
+      }
+    },
+    {
+      "name": "verified main promotion",
+      "expected_status": "promoted",
+      "input": {
+        "dispatch_status": "done",
+        "task_status": "done",
+        "promotion": {
+          "required": true,
+          "completed": true,
+          "verified": true,
+          "promoted_sha": "release-sha",
+          "remote_main_sha": "release-sha"
+        },
+        "deploy": null,
+        "acceptance": null,
+        "clarification": { "state": "none", "owner": null },
+        "backlog": { "state": "done", "stale_duplicate": false, "prior_dispatch_terminal": true, "prior_work_landed": true }
+      }
+    },
+    {
+      "name": "fresh deployment matches promoted main",
+      "expected_status": "deployed_fresh",
+      "input": {
+        "dispatch_status": "done",
+        "task_status": "done",
+        "promotion": {
+          "required": true,
+          "completed": true,
+          "verified": true,
+          "promoted_sha": "release-sha",
+          "remote_main_sha": "release-sha"
+        },
+        "deploy": { "fresh": true, "running_sha": "release-sha", "promoted_main_sha": "release-sha" },
+        "acceptance": null,
+        "clarification": { "state": "none", "owner": null },
+        "backlog": { "state": "done", "stale_duplicate": false, "prior_dispatch_terminal": true, "prior_work_landed": true }
+      }
+    },
+    {
+      "name": "accepted release has explicit evidence",
+      "expected_status": "accepted",
+      "input": {
+        "dispatch_status": "done",
+        "task_status": "done",
+        "promotion": {
+          "required": true,
+          "completed": true,
+          "verified": true,
+          "promoted_sha": "release-sha",
+          "remote_main_sha": "release-sha"
+        },
+        "deploy": { "fresh": true, "running_sha": "release-sha", "promoted_main_sha": "release-sha" },
+        "acceptance": { "accepted": true, "evidence_refs": ["artifact:/release-acceptance.md"] },
+        "clarification": { "state": "none", "owner": null },
+        "backlog": { "state": "done", "stale_duplicate": false, "prior_dispatch_terminal": true, "prior_work_landed": true }
+      }
+    },
+    {
+      "name": "superseded wins over stale release evidence",
+      "expected_status": "superseded",
+      "input": {
+        "dispatch_status": "done",
+        "task_status": "done",
+        "promotion": {
+          "required": true,
+          "completed": true,
+          "verified": true,
+          "promoted_sha": "release-sha",
+          "remote_main_sha": "release-sha"
+        },
+        "deploy": { "fresh": true, "running_sha": "release-sha", "promoted_main_sha": "release-sha" },
+        "acceptance": { "accepted": true, "evidence_refs": ["artifact:/obsolete-acceptance.md"] },
+        "clarification": { "state": "none", "owner": null },
+        "backlog": { "state": "superseded", "stale_duplicate": true, "prior_dispatch_terminal": true, "prior_work_landed": false }
+      }
+    },
+    {
+      "name": "failed dispatch needs owner despite release-shaped task metadata",
+      "expected_status": "failed_needs_owner",
+      "input": {
+        "dispatch_status": "failed",
+        "task_status": "promoted",
+        "promotion": null,
+        "deploy": null,
+        "acceptance": null,
+        "clarification": { "state": "none", "owner": null },
+        "backlog": { "state": "failed", "stale_duplicate": false, "prior_dispatch_terminal": true, "prior_work_landed": false }
+      }
+    }
+  ]
+}
