@@ -20,6 +20,8 @@ export interface ContinuousOrchestrationConfig {
   max_in_flight: number;
   /** Max NEW dispatches admitted per tick. Default 1. */
   max_new_per_tick: number;
+  /** Enable the bounded lifecycle repair loop. Default false for staged rollout. */
+  lifecycle_reconciliation_enabled: boolean;
   /** Max lifecycle repair actions classified/receipted per tick. Default 25. */
   lifecycle_reconciliation_max_per_tick: number;
   /** Consecutive zero-dispatch ticks (while work is admissible) before a loud
@@ -161,6 +163,7 @@ export function defaultConfig(): ContinuousOrchestrationConfig {
     warn_fraction: 0.75,
     max_in_flight: 2,
     max_new_per_tick: 1,
+    lifecycle_reconciliation_enabled: false,
     lifecycle_reconciliation_max_per_tick: 25,
     stall_threshold_ticks: 3,
     tick_interval_ms: 60_000,
@@ -200,6 +203,10 @@ export function loadContinuousOrchestrationConfig(
     warn_fraction: envFloat(env.CONTINUOUS_ORCHESTRATION_WARN_FRACTION, d.warn_fraction),
     max_in_flight: envInt(env.CONTINUOUS_ORCHESTRATION_MAX_IN_FLIGHT, d.max_in_flight),
     max_new_per_tick: envInt(env.CONTINUOUS_ORCHESTRATION_MAX_NEW_PER_TICK, d.max_new_per_tick),
+    lifecycle_reconciliation_enabled: envBool(
+      env.CONTINUOUS_ORCHESTRATION_LIFECYCLE_RECONCILIATION_ENABLED,
+      d.lifecycle_reconciliation_enabled,
+    ),
     lifecycle_reconciliation_max_per_tick: envInt(
       env.CONTINUOUS_ORCHESTRATION_LIFECYCLE_RECONCILIATION_MAX_PER_TICK,
       d.lifecycle_reconciliation_max_per_tick,

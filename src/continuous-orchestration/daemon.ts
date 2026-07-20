@@ -38,6 +38,7 @@ import {
   promoteToReady,
   recordTickOutcome,
   repairReadyCodexRuntimeMetadata,
+  reconcileStaleAlreadyDispatchedReadyRows,
   setItemState,
   setMode,
   updateBacklogFields,
@@ -53,6 +54,20 @@ import {
 import { attachBacklogRetryReadiness, deriveBacklogRetryReadiness } from "./backlog-retry-readiness.js";
 import { duplicateDispatchRetryReceipt } from "./duplicate-dispatch-retry-receipt.js";
 import { promotionCompletedAndVerified } from "../dispatch-scheduler/read-model.js";
+
+function mergeStaleReadyReconcile(
+  left: StaleReadyReconcileResult,
+  right: StaleReadyReconcileResult,
+): StaleReadyReconcileResult {
+  return {
+    scanned: left.scanned + right.scanned,
+    closed: left.closed + right.closed,
+    superseded: left.superseded + right.superseded,
+    preserved_retry_safe: left.preserved_retry_safe + right.preserved_retry_safe,
+    dry_run: left.dry_run,
+    items: [...left.items, ...right.items],
+  };
+}
 import { runFleshPass, type FleshRunSummary } from "./flesh-runner.js";
 import { AUTO_READY_CONFIDENCE_THRESHOLD } from "./flesh-policy.js";
 import { autoPromoteRejections, selectAutoPromotions } from "./auto-promote-policy.js";
@@ -1368,22 +1383,36 @@ export class ContinuousOrchestrationDaemon {
     // fired item holds its lock forever and the lanes strangle after
     // ~max_in_flight fires (the overnight self-strangle this fixes).
     const reconcileDecisions = await this.reconcileDispatchedItems(nowMs, config.dry_run);
-    const lifecycleReconciliation = await runBoundedLifecycleReconciliationCycle(this.deps.adapter, {
+    const lifecycleReconciliation = config.lifecycle_reconciliation_enabled
+      ? await runBoundedLifecycleReconciliationCycle(this.deps.adapter, {
       team_id: this.teamId,
       cycle_id: tick_id,
       dry_run: config.dry_run,
       actor: "continuous-orchestration:lifecycle-reconciler",
       max_actions: config.lifecycle_reconciliation_max_per_tick,
       now: new Date(nowMs),
-    });
-    let staleReadyReconcile: StaleReadyReconcileResult = {
+    })
+      : {
+        schema_version: "orchestration.bounded_lifecycle_reconciliation_cycle.v1" as const,
+        cycle_id: tick_id,
+        dry_run: config.dry_run,
+        cap: config.lifecycle_reconciliation_max_per_tick,
+        classified: 0,
+        processed: 0,
+        truncated: false,
+        actions: { auto_close: 0, supersede: 0, mark_retry_safe: 0, hold: 0 },
+        receipts: [],
+      };
+    let staleReadyReconcile: StaleReadyReconcileResult = config.lifecycle_reconciliation_enabled ? {
       scanned: lifecycleReconciliation.processed,
       closed: lifecycleReconciliation.actions.auto_close,
       superseded: lifecycleReconciliation.actions.supersede,
       preserved_retry_safe: 0,
       dry_run: config.dry_run,
       items: [],
-    };
+    } : await reconcileStaleAlreadyDispatchedReadyRows(this.deps.adapter, {
+      team_id: this.teamId, dry_run: config.dry_run, actor: "continuous-orchestration",
+    });
 
     const { view: usage, daily_tokens_used } = await this.deps.readUsage();
     const { count: in_flight, active_write_scopes } = await this.deps.readInFlight();
@@ -1409,6 +1438,12 @@ export class ContinuousOrchestrationDaemon {
       killSwitch,
       hardPaused: usage.hard_paused,
     });
+    if (!config.lifecycle_reconciliation_enabled) {
+      const pass = await reconcileStaleAlreadyDispatchedReadyRows(this.deps.adapter, {
+        team_id: this.teamId, dry_run: config.dry_run, actor: "continuous-orchestration",
+      });
+      staleReadyReconcile = mergeStaleReadyReconcile(staleReadyReconcile, pass);
+    }
 
     // Daemon SELF-REFUEL: when READY fuel runs low — at a batch load-point or
     // when fully dry — flesh skeletons into dispatchable READY items BEFORE
@@ -1430,6 +1465,12 @@ export class ContinuousOrchestrationDaemon {
       dailyTokensUsed: daily_tokens_used,
       fleshLimit: refuelCap,
     });
+    if (!config.lifecycle_reconciliation_enabled) {
+      const pass = await reconcileStaleAlreadyDispatchedReadyRows(this.deps.adapter, {
+        team_id: this.teamId, dry_run: config.dry_run, actor: "continuous-orchestration",
+      });
+      staleReadyReconcile = mergeStaleReadyReconcile(staleReadyReconcile, pass);
+    }
     // Slice 4 mechanism 2: if the refuel fleshed anything this tick, suppress
     // admission so the daemon never stacks two write bursts in one tick.
     const refuelFleshed = refuel?.auto_ready ?? 0;
