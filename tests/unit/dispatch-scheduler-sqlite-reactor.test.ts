@@ -81,6 +81,59 @@ describe("SqliteDispatchReactor — round-trip parity with FakeReactor", () => {
     expect(done.value.status).toBe("done");
   });
 
+  it("preserves accepted done with verified promotion when a linked-query watcher later reports failure", async () => {
+    const { reactor } = harness();
+    const enqueued = await reactor.enqueue({
+      ...base,
+      promote: true,
+      promotion_input: {
+        repo: "/tmp/id-agents",
+        branch: "wave135",
+        base: "main",
+        remote: "origin",
+      },
+    });
+    await reactor.claim(enqueued.dispatch_phid);
+    const promotion = {
+      required: true,
+      completed: true,
+      repos: [{
+        path: "/tmp/id-agents",
+        base: "main",
+        source_branch: "wave135",
+        strategy: "fast_forward",
+        promoted_sha: "abc123",
+        remote_main_sha: "abc123",
+        pushed: true,
+        verified: true,
+      }],
+    };
+    await reactor.recordPromotionResult(enqueued.dispatch_phid, { result: promotion });
+    await reactor.markDoneWithResult(enqueued.dispatch_phid, { success: true });
+
+    const afterWatcher = await reactor.markFailed(enqueued.dispatch_phid, {
+      failure_kind: "agent_error",
+      detail: "linked query terminated expired",
+    });
+
+    expect(afterWatcher?.status).toBe("done");
+    expect(afterWatcher?.failure_kind).toBeNull();
+    expect(afterWatcher?.promotion_result).toEqual(promotion);
+    const ledger = await adapter.query<{ topic: string; data: string }>(
+      `SELECT topic, data FROM event_log
+       WHERE subject_id = ? ORDER BY seq DESC LIMIT 1`,
+      [enqueued.dispatch_phid],
+    );
+    expect(ledger.rows).toHaveLength(1);
+    expect(ledger.rows[0].topic).toBe("dispatch:terminal_overwrite_rejected");
+    expect(JSON.parse(ledger.rows[0].data)).toMatchObject({
+      preserved_status: "done",
+      precedence: "done_with_verified_promotion",
+      attempted_status: "failed",
+      failure_detail: "linked query terminated expired",
+    });
+  });
+
   it("queued → in_flight → bounced → queued → in_flight → done preserves single canonical doc", async () => {
     const { client, reactor } = harness("2026-05-19T20:00:00.000Z");
     const enq = await client.enqueueDispatch(base);
