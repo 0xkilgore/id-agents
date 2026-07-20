@@ -987,6 +987,62 @@ describe("daemon — dry-run vs live", () => {
     expect(res.body.auto_promote_health.summary).toMatch(/no needs_review candidates/);
   });
 
+  it("refreshes a status projection once when promotion commits during the read", async () => {
+    const candidate = await insertBacklogItem(adapter, {
+      title: "newly ready projection fuel",
+      readiness_state: "needs_review",
+      to_agent: "roger",
+      dispatch_body: "verify newly ready fuel is visible immediately",
+      write_scope: ["repo/newly-ready-projection"],
+    });
+    const { app, daemon } = mountStatusApp(adapter, {
+      dry_run: true,
+      auto_flesh_enabled: false,
+      auto_promote_enabled: false,
+      max_in_flight: 20,
+      max_new_per_tick: 20,
+    });
+    await daemon.setMode("running");
+
+    const originalExplain = daemon.explainReadyAdmission.bind(daemon);
+    let explainCalls = 0;
+    let releaseSnapshot!: () => void;
+    const snapshotRelease = new Promise<void>((resolve) => { releaseSnapshot = resolve; });
+    let snapshotCaptured!: () => void;
+    const captured = new Promise<void>((resolve) => { snapshotCaptured = resolve; });
+    daemon.explainReadyAdmission = async () => {
+      explainCalls += 1;
+      const snapshot = await originalExplain();
+      // explainAutoPromoteHealth performs call 1. Stall the status route's
+      // fenced projection (call 2) after it captured the pre-promotion rowset.
+      if (explainCalls === 2) {
+        snapshotCaptured();
+        await snapshotRelease;
+      }
+      return snapshot;
+    };
+
+    const pendingStatus = callApp(app, "/orchestration/status");
+    await captured;
+    const promoted = await callAppRequest(
+      app,
+      "POST",
+      `/orchestration/backlog/${candidate.item_id}/promote`,
+      { approved_by: "projection-test" },
+    );
+    expect(promoted.status).toBe(200);
+    releaseSnapshot();
+
+    const status = await pendingStatus;
+    expect(status.status).toBe(200);
+    expect(explainCalls).toBe(3);
+    expect(status.body.counts.raw_ready_fuel).toBe(1);
+    expect(status.body.ready_admission).toMatchObject({
+      candidates: 1,
+      admissible_now: 1,
+    });
+  });
+
   it("status does not count stale needs_review rows as ready fuel for low-fuel health", async () => {
     for (let i = 0; i < 4; i++) {
       await seedReady(adapter, { title: `useful ready ${i}`, write_scope: [`repo/useful-${i}`] });
