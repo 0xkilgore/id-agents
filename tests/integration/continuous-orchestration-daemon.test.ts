@@ -1276,6 +1276,14 @@ describe("daemon — dry-run vs live", () => {
       category: "infra_resource",
       count: 1,
     });
+    expect(res.body.ready_admission.terminal_actions).toEqual([
+      {
+        code: "disk_warning_floor",
+        count: 1,
+        recommended_terminal_action:
+          "Reclaim disk until the warning floor clears; keep non-cleanup rows held and admit only cleanup/deploy-safe work meanwhile.",
+      },
+    ]);
   });
 
   it("health names one deduplicated disk-warning incident while cleanup and deploy-safe rows remain admissible", async () => {
@@ -1477,6 +1485,20 @@ describe("daemon — dry-run vs live", () => {
       next_action: "wait_for_upstream",
       supersede_close_instructions: expect.stringContaining("do not close, supersede, or retry"),
     });
+    expect(res.body.ready_admission.terminal_actions).toEqual([
+      {
+        code: "duplicate_dispatch_retry_required",
+        count: 1,
+        recommended_terminal_action:
+          "Close or supersede stale duplicates; mark retry_safe only for an operator-approved bounded refire.",
+      },
+      {
+        code: "blocked_dependency",
+        count: 1,
+        recommended_terminal_action:
+          "Clear only dependencies backed by done/superseded evidence; otherwise repair, supersede, or wait for the upstream row.",
+      },
+    ]);
   });
 
   it("admits a healthy pool:builder target while holding unhealthy, capacity, and duplicate retry rows", async () => {
