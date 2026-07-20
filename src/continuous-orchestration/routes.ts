@@ -18,6 +18,7 @@ import { AUTO_READY_CONFIDENCE_THRESHOLD } from "./flesh-policy.js";
 import type { OrchestrationMode, ReadinessState } from "./types.js";
 import {
   countFleshLogSince,
+  closeStaleDuplicateBacklogRow,
   clearBacklogDependencyBlocker,
   findProbableDuplicateByRegisterId,
   getBacklogItem,
@@ -856,6 +857,43 @@ export function mountContinuousOrchestrationRoutes(app: Application, opts: Orche
         reason: result.reason,
         receipt: result.receipt,
       });
+    } catch (err) {
+      res.status(500).json({ ok: false, error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  app.post("/orchestration/backlog/:id/close-stale-duplicate", async (req: Request, res: Response) => {
+    try {
+      const id = String(req.params.id);
+      const body = (req.body ?? {}) as Record<string, unknown>;
+      const actor =
+        typeof body.actor_ref === "string" && body.actor_ref
+          ? body.actor_ref
+          : typeof body.actor === "string" && body.actor
+            ? body.actor
+            : typeof body.closed_by === "string" && body.closed_by
+              ? body.closed_by
+              : typeof body.updated_by === "string" && body.updated_by
+                ? body.updated_by
+                : "";
+      const expectedLastDispatchPhid =
+        typeof body.expected_last_dispatch_phid === "string" && body.expected_last_dispatch_phid
+          ? body.expected_last_dispatch_phid
+          : undefined;
+      const result = await closeStaleDuplicateBacklogRow(adapter, id, {
+        actor,
+        expected_last_dispatch_phid: expectedLastDispatchPhid,
+        team_id: teamId,
+      });
+      if (!result.ok) {
+        return res.status(result.status).json({
+          ok: false,
+          error: result.error,
+          reason: result.reason,
+          item: result.item,
+        });
+      }
+      res.json({ ok: true, item: result.item, receipt: result.receipt });
     } catch (err) {
       res.status(500).json({ ok: false, error: err instanceof Error ? err.message : String(err) });
     }

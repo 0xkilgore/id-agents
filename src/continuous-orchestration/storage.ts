@@ -898,8 +898,70 @@ export interface StaleReadyReconcileResult {
   }>;
 }
 
+export type CloseStaleDuplicateBacklogRowResult =
+  | {
+      ok: true;
+      item: BacklogItem;
+      receipt: StaleDuplicateCloseoutReceipt;
+    }
+  | {
+      ok: false;
+      status: number;
+      error: string;
+      reason: string;
+      item?: BacklogItem;
+    };
+
 const READY_RECONCILE_TERMINAL_STATUSES = new Set(["done", "failed", "cancelled", "moot", "superseded"]);
 const OFFLINE_AGENT_STATUSES = new Set(["stopped", "offline", "deleted", "unhealthy", "error"]);
+
+function buildStaleDuplicateCloseoutReceipt(
+  row: BacklogRow & {
+    dispatch_status: string | null;
+    dispatch_recovery_status: string | null;
+    failure_kind: string | null;
+    failure_detail: string | null;
+    promotion_result_json: string | null;
+  },
+  actor: string,
+): { toState: "done" | "superseded"; reason: string; receipt: StaleDuplicateCloseoutReceipt } | null {
+  const status = row.dispatch_recovery_status === "moot" ? "moot" : row.dispatch_status;
+  if (!status || !READY_RECONCILE_TERMINAL_STATUSES.has(status)) return null;
+  if (status === "failed" && !promotionCompletedAndVerified(row.promotion_result_json) && dispatchFailureRetryable(row)) {
+    return null;
+  }
+
+  const toState: "done" | "superseded" =
+    status === "done" || promotionCompletedAndVerified(row.promotion_result_json) ? "done" : "superseded";
+  const reason =
+    toState === "done"
+      ? `already-dispatched ready row closed after terminal dispatch ${status}`
+      : `already-dispatched ready row superseded after terminal dispatch ${status}`;
+  return {
+    toState,
+    reason,
+    receipt: {
+      schema_version: "orchestration.stale_duplicate_closeout_receipt.v1",
+      closed_by: actor,
+      closed_at: new Date().toISOString(),
+      from_state: "ready",
+      to_state: toState,
+      reason: "close_or_ignore",
+      track: row.track ?? null,
+      next_action: toState === "done" ? "close_duplicate_row" : "supersede_duplicate_row",
+      prior_dispatch_phid: row.last_dispatch_phid ?? "",
+      prior_dispatch_status: status,
+      successor_dispatch_phid: null,
+      redispatch_safety: {
+        safe_to_not_redispatch: true,
+        reason:
+          toState === "done"
+            ? "prior dispatch already reached terminal done state; reopening would duplicate completed work"
+            : `prior dispatch is terminal ${status}; this row is stale duplicate backlog state and not retry fuel`,
+      },
+    },
+  };
+}
 
 function appendSourceRefs(sourceRefsJson: string, refsToAppend: Array<string | null>): string {
   const refs = parseArr(sourceRefsJson);
@@ -1367,6 +1429,141 @@ export async function reconcileStaleAlreadyDispatchedReadyRows(
   }
 
   return result;
+}
+
+export async function closeStaleDuplicateBacklogRow(
+  adapter: DbAdapter,
+  itemId: string,
+  opts: {
+    actor: string;
+    expected_last_dispatch_phid?: string;
+    team_id?: string;
+  },
+): Promise<CloseStaleDuplicateBacklogRowResult> {
+  const actor = opts.actor.trim();
+  if (!actor) return { ok: false, status: 400, error: "actor_required", reason: "actor is required" };
+
+  const item = await getBacklogItem(adapter, itemId);
+  if (!item || (opts.team_id && item.team_id !== opts.team_id)) {
+    return { ok: false, status: 404, error: "not_found", reason: "backlog item not found" };
+  }
+  if (item.readiness_state !== "ready") {
+    return {
+      ok: false,
+      status: 409,
+      error: "not_ready_duplicate_dispatch_row",
+      reason: `cannot close stale duplicate from ${item.readiness_state}`,
+      item,
+    };
+  }
+  if (item.retry_safe) {
+    return {
+      ok: false,
+      status: 409,
+      error: "retry_safe_duplicate_dispatch_row",
+      reason: "retry_safe rows require explicit retry handling, not stale duplicate closeout",
+      item,
+    };
+  }
+  if (!item.last_dispatch_phid) {
+    return {
+      ok: false,
+      status: 409,
+      error: "missing_prior_dispatch",
+      reason: "row has no prior dispatch phid",
+      item,
+    };
+  }
+  if (opts.expected_last_dispatch_phid && item.last_dispatch_phid !== opts.expected_last_dispatch_phid) {
+    return {
+      ok: false,
+      status: 409,
+      error: "last_dispatch_mismatch",
+      reason: `row now points at ${item.last_dispatch_phid}, expected ${opts.expected_last_dispatch_phid}`,
+      item,
+    };
+  }
+
+  const { rows } = await adapter.query<
+    BacklogRow & {
+      dispatch_status: string | null;
+      dispatch_recovery_status: string | null;
+      artifact_path: string | null;
+      failure_kind: string | null;
+      failure_detail: string | null;
+      promotion_result_json: string | null;
+    }
+  >(
+    `SELECT i.*,
+            q.status AS dispatch_status,
+            q.recovery_status AS dispatch_recovery_status,
+            q.artifact_path AS artifact_path,
+            q.failure_kind AS failure_kind,
+            q.failure_detail AS failure_detail,
+            q.promotion_result_json AS promotion_result_json
+       FROM orchestration_backlog_item i
+       LEFT JOIN dispatch_scheduler_queue q
+         ON q.dispatch_phid = i.last_dispatch_phid
+      WHERE i.item_id = $1
+        AND i.team_id = $2
+      LIMIT 1`,
+    [itemId, opts.team_id ?? item.team_id],
+  );
+  const row = rows[0];
+  if (!row) return { ok: false, status: 404, error: "not_found", reason: "backlog item not found" };
+
+  const built = buildStaleDuplicateCloseoutReceipt(row, actor);
+  if (!built) {
+    return {
+      ok: false,
+      status: 409,
+      error: "prior_dispatch_not_terminal_or_safe",
+      reason: "prior dispatch does not have terminal evidence safe for stale duplicate closeout",
+      item,
+    };
+  }
+  const { toState, receipt } = built;
+
+  await adapter.query(
+    `UPDATE orchestration_backlog_item
+        SET readiness_state = $1,
+            source_refs_json = $2,
+            retry_safe = 0,
+            stale_duplicate_closeout_receipt_json = $3,
+            updated_by = $4,
+            updated_at = $5
+      WHERE item_id = $6
+        AND team_id = $7
+        AND readiness_state = 'ready'
+        AND COALESCE(retry_safe, 0) = 0
+        AND last_dispatch_phid = $8`,
+    [
+      toState,
+      appendSourceRefs(row.source_refs_json, [
+        row.artifact_path ? `dispatch_artifact:${row.artifact_path}` : null,
+        `manager:/orchestration/backlog/${row.item_id}#stale-duplicate-closeout-receipt`,
+      ]),
+      JSON.stringify(receipt),
+      actor,
+      receipt.closed_at,
+      row.item_id,
+      row.team_id,
+      row.last_dispatch_phid ?? "",
+    ],
+  );
+
+  const updated = await getBacklogItem(adapter, itemId);
+  if (!updated || updated.readiness_state === "ready" || !updated.stale_duplicate_closeout_receipt) {
+    return {
+      ok: false,
+      status: 409,
+      error: "stale_duplicate_not_updated",
+      reason: "row changed before stale duplicate closeout was applied",
+      item: updated ?? item,
+    };
+  }
+
+  return { ok: true, item: updated, receipt };
 }
 
 function dispatchFailureRetryable(outcome: { failure_kind: string | null; failure_detail: string | null }): boolean {
