@@ -292,6 +292,11 @@ export interface ReadyAdmissionExplanation {
     target_unhealthy_receipt?: ReadyAdmissionTargetUnhealthyReceipt;
   }>;
   blocker_counts: Array<{ code: string; category: ReadyAdmissionBlockerCategory; count: number }>;
+  terminal_actions: Array<{
+    code: "duplicate_dispatch_retry_required" | "disk_warning_floor" | "blocked_dependency";
+    count: number;
+    recommended_terminal_action: string;
+  }>;
   operator_blockers: Array<{
     code: string;
     category: ReadyAdmissionBlockerCategory;
@@ -600,6 +605,36 @@ function readyAdmissionBlockerCounts(plan: { skipped: DecisionRecord[] }): Ready
     else counts.set(key, { code, category, count: 1 });
   }
   return [...counts.values()].sort((a, b) => b.count - a.count || a.category.localeCompare(b.category) || a.code.localeCompare(b.code));
+}
+
+function readyAdmissionTerminalActions(
+  blockerCounts: ReadyAdmissionExplanation["blocker_counts"],
+  blockedDependencySummary: ReadyAdmissionBlockedDependencySummary,
+): ReadyAdmissionExplanation["terminal_actions"] {
+  const actions: Record<ReadyAdmissionExplanation["terminal_actions"][number]["code"], string> = {
+    duplicate_dispatch_retry_required:
+      "Close or supersede stale duplicates; mark retry_safe only for an operator-approved bounded refire.",
+    disk_warning_floor:
+      "Reclaim disk until the warning floor clears; keep non-cleanup rows held and admit only cleanup/deploy-safe work meanwhile.",
+    blocked_dependency:
+      "Clear only dependencies backed by done/superseded evidence; otherwise repair, supersede, or wait for the upstream row.",
+  };
+  const projected = blockerCounts.flatMap((blocker) => {
+    if (!(blocker.code in actions)) return [];
+    const code = blocker.code as ReadyAdmissionExplanation["terminal_actions"][number]["code"];
+    return [{ code, count: blocker.count, recommended_terminal_action: actions[code] }];
+  });
+  if (
+    blockedDependencySummary.total_ready_rows > 0 &&
+    !projected.some((action) => action.code === "blocked_dependency")
+  ) {
+    projected.push({
+      code: "blocked_dependency",
+      count: blockedDependencySummary.total_ready_rows,
+      recommended_terminal_action: actions.blocked_dependency,
+    });
+  }
+  return projected;
 }
 
 function targetUnhealthyReadyBlockedIncident(input: {
@@ -2132,6 +2167,7 @@ export class ContinuousOrchestrationDaemon {
         };
       }),
       blocker_counts: blockerCounts,
+      terminal_actions: readyAdmissionTerminalActions(blockerCounts, blockedDependencySummary),
       operator_blockers: readyAdmissionOperatorBlockers(plan),
       stale_ready_floor: {
         stale: staleReadyFloor,
