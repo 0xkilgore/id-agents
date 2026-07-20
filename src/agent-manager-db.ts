@@ -795,6 +795,14 @@ function parseTodayQuery(value: unknown): string | null {
  */
 const AUTO_ATTACH_DEFAULT_INTERVAL_SECONDS = 600;
 
+/**
+ * Delegated check-ins must be bounded even when the caller omits
+ * `checkin_iters`. At the default ten-minute cadence this permits two hours
+ * of receipts before the check-in expires. Callers can still choose any
+ * explicit positive cap through `checkin_iters`.
+ */
+const AUTO_ATTACH_DEFAULT_MAX_ITERATIONS = 12;
+
 interface AutoAttachFlagsResult {
   disabled: boolean;
   intervalSeconds: number | null;
@@ -816,7 +824,7 @@ function parseAutoAttachFlags(body: Record<string, unknown>): AutoAttachFlagsRes
   const result: AutoAttachFlagsResult = {
     disabled: body.no_checkin === true,
     intervalSeconds: null,
-    maxIterations: null,
+    maxIterations: AUTO_ATTACH_DEFAULT_MAX_ITERATIONS,
   };
 
   if (body.checkin !== undefined && body.checkin !== null) {
@@ -3717,7 +3725,7 @@ export class AgentManagerDb {
 
     const nowMs = Date.now();
     const intervalSeconds = flagsResult.intervalSeconds ?? AUTO_ATTACH_DEFAULT_INTERVAL_SECONDS;
-    const maxIterations = flagsResult.maxIterations ?? null;
+    const maxIterations = flagsResult.maxIterations ?? AUTO_ATTACH_DEFAULT_MAX_ITERATIONS;
 
     const checkinRow: CheckinRow = {
       id: generateCheckinId(nowMs),
@@ -6824,7 +6832,7 @@ export class AgentManagerDb {
     // dispatcher. The auto-attach is governed by these flags on the body:
     //   - no_checkin: true            disables auto-attach for this dispatch
     //   - checkin: <duration|seconds> overrides interval (default 10m)
-    //   - checkin_iters: <N>          sets max_iterations (default null)
+    //   - checkin_iters: <N>          sets max_iterations (default 12)
     // If no `task` object is supplied, /talk-to only sends the dispatch.
     this.managementApp.post('/talk-to', async (req, res, next) => {
       (req as any)._preferDispatchReceipt = true;

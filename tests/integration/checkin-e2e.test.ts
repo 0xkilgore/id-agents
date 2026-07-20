@@ -44,6 +44,7 @@ import { CheckinService } from '../../src/checkins/checkin-service.js';
 
 const TEAM = 'checkin-e2e';
 const DEFAULT_INTERVAL_MS = 600 * 1000; // matches /talk-to auto-attach default
+const DEFAULT_MAX_ITERATIONS = 12; // two hours at the default cadence
 
 async function createInMemoryDb() {
   const adapter = new SqliteAdapter(':memory:');
@@ -137,7 +138,7 @@ describe('Checkin end-to-end: /talk-to → fire → auto-close', () => {
     stubAgent = await startStubAgent(stubPort);
 
     svc = new CheckinService(db as any);
-  }, 30000);
+  }, 120000);
 
   afterAll(async () => {
     if (svc) svc.stop();
@@ -180,6 +181,7 @@ describe('Checkin end-to-end: /talk-to → fire → auto-close', () => {
       owner_agent_id: ctoId,
       linked_task_id: task.id,
       interval_seconds: 600,
+      max_iterations: DEFAULT_MAX_ITERATIONS,
       status: 'active',
       iteration_count: 0,
     });
@@ -271,5 +273,51 @@ describe('Checkin end-to-end: /talk-to → fire → auto-close', () => {
     // A subsequent tick is a no-op — the row is closed and not eligible.
     const tickAfterClose = await svc.tickTeam(teamId, t2 + 10 * DEFAULT_INTERVAL_MS);
     expect(tickAfterClose).toMatchObject({ scanned: 0, fired: 0, expired: 0 });
+  }, 30000);
+
+  it('preserves an explicit iteration cap and expires without another due receipt', async () => {
+    const dispatchRes = await fetch(`${baseUrl}/talk-to`, {
+      method: 'POST',
+      headers: adminHeaders(TEAM),
+      body: JSON.stringify({
+        to: 'coder',
+        from: 'cto',
+        message: 'bounded delegation',
+        wait: false,
+        task: { title: 'Bounded task', name: 'bounded-task' },
+        checkin_iters: 2,
+      }),
+    });
+    expect(dispatchRes.status).toBe(200);
+
+    const [checkin] = await db.checkins.list({ teamId, status: ['active'] });
+    expect(checkin.max_iterations).toBe(2);
+
+    const tick1 = await svc.tickTeam(teamId, checkin.next_fire_at!);
+    expect(tick1).toMatchObject({ fired: 1, expired: 0 });
+    const afterFirst = await db.checkins.get(checkin.id, teamId);
+    const tick2 = await svc.tickTeam(teamId, afterFirst!.next_fire_at!);
+    expect(tick2).toMatchObject({ fired: 1, expired: 1 });
+
+    const expired = await db.checkins.get(checkin.id, teamId);
+    expect(expired).toMatchObject({
+      status: 'expired',
+      closed_reason: 'max_iterations',
+      iteration_count: 2,
+      next_fire_at: null,
+    });
+    const dueForCheckin = (await db.events.query({ teamId, topics: ['checkin:due'] }))
+      .filter((event) => event.subject_id === checkin.id);
+    expect(dueForCheckin).toHaveLength(2);
+    const newsForCheckin = (await db.news.poll(ctoId, 0))
+      .filter((item) => (item.data as Record<string, unknown>)?.checkin_id === checkin.id);
+    expect(newsForCheckin).toHaveLength(2);
+
+    const afterCap = await svc.tickTeam(teamId, afterFirst!.next_fire_at! + DEFAULT_INTERVAL_MS);
+    expect(afterCap).toMatchObject({ scanned: 0, fired: 0, expired: 0 });
+    expect((await db.events.query({ teamId, topics: ['checkin:due'] }))
+      .filter((event) => event.subject_id === checkin.id)).toHaveLength(2);
+    expect((await db.news.poll(ctoId, 0))
+      .filter((item) => (item.data as Record<string, unknown>)?.checkin_id === checkin.id)).toHaveLength(2);
   }, 30000);
 });

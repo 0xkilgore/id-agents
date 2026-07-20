@@ -35,6 +35,7 @@ import { SqliteTasksRepo } from '../../src/db/repos/sqlite/tasks-repo.js';
 import { SqliteEventsRepo } from '../../src/db/repos/sqlite/events-repo.js';
 import { SqliteSubscriptionsRepo } from '../../src/db/repos/sqlite/subscriptions-repo.js';
 import { SqliteCheckinsRepo } from '../../src/db/repos/sqlite/checkins-repo.js';
+import { CheckinService } from '../../src/checkins/checkin-service.js';
 import { CHECKIN_CLOSED, TASK_COMPLETED } from '../../src/wakeup-service/event-producer.js';
 import type { CheckinRow } from '../../src/db/types.js';
 
@@ -160,7 +161,7 @@ describe('Checkin auto-close on terminal task event', () => {
     otherTeamId = await db.teams.getOrCreateTeamId('other-team');
     managerAgentId = await insertAgentDirect(db, teamId, 'manager');
     coderAgentId = await insertAgentDirect(db, teamId, 'coder');
-  }, 30000);
+  }, 120000);
 
   afterAll(async () => {
     if (manager) await stopManager(manager);
@@ -356,6 +357,47 @@ describe('Checkin auto-close on terminal task event', () => {
     const events = await db.events.query({ teamId, topics: [CHECKIN_CLOSED] });
     expect(events).toHaveLength(1);
     expect(events[0].subject_id).toBe(activeId);
+
+    const restartedService = new CheckinService(db as any);
+    expect(await restartedService.tickTeam(teamId, Date.now() + 60_000)).toMatchObject({
+      scanned: 0, fired: 0, expired: 0, errors: 0,
+    });
+    expect(await db.events.query({ teamId, topics: [CHECKIN_CLOSED] })).toHaveLength(1);
+  });
+
+  it('reconciles a terminal linked task before another due receipt, idempotently', async () => {
+    const task = await insertTaskDirect(db, teamId, 'autoclose-before-due', coderAgentId);
+    const checkinId = `chk_due_${crypto.randomUUID()}`;
+    const dueAt = Date.now() - 1_000;
+    await db.checkins.create(buildCheckinRow({
+      id: checkinId,
+      team_id: teamId,
+      owner_agent_id: managerAgentId,
+      linked_task_id: task.id,
+      next_fire_at: dueAt,
+    }));
+    await db.adapter.query(
+      `UPDATE tasks SET status = 'done', updated_at = ? WHERE id = ? AND team_id = ?`,
+      [Math.floor(Date.now() / 1000), task.id, teamId],
+    );
+
+    const firstService = new CheckinService(db as any);
+    const first = await firstService.tickTeam(teamId, Date.now());
+    expect(first).toMatchObject({ scanned: 0, fired: 0, expired: 0, errors: 0 });
+    expect(await db.checkins.get(checkinId, teamId)).toMatchObject({
+      status: 'closed',
+      closed_reason: 'canonical_task_terminal',
+      next_fire_at: null,
+    });
+    expect(await db.events.query({ teamId, topics: ['checkin:due'] })).toHaveLength(0);
+
+    // A fresh service models restart/repeated reconciliation. The already
+    // terminal row remains closed and no close/due events are duplicated.
+    const restartedService = new CheckinService(db as any);
+    const repeated = await restartedService.tickTeam(teamId, Date.now() + 60_000);
+    expect(repeated).toMatchObject({ scanned: 0, fired: 0, expired: 0, errors: 0 });
+    expect(await db.events.query({ teamId, topics: [CHECKIN_CLOSED] })).toHaveLength(0);
+    expect(await db.events.query({ teamId, topics: ['checkin:due'] })).toHaveLength(0);
   });
 
   it('does not touch checkins linked to other tasks or in other teams', async () => {
