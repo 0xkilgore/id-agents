@@ -40,6 +40,7 @@ import {
   recordFleshOutcome,
   setItemState,
   updateBacklogFields,
+  InvalidBacklogReadinessStateError,
   type NewBacklogItem,
 } from "./storage.js";
 import { attachBacklogRetryReadiness } from "./backlog-retry-readiness.js";
@@ -718,6 +719,9 @@ export function mountContinuousOrchestrationRoutes(app: Application, opts: Orche
       if (item.readiness_state === "ready") invalidateReadyProjection();
       res.json({ ok: true, item });
     } catch (err) {
+      if (err instanceof InvalidBacklogReadinessStateError) {
+        return res.status(400).json({ ok: false, error: err.code, message: err.message });
+      }
       res.status(500).json({ ok: false, error: err instanceof Error ? err.message : String(err) });
     }
   });

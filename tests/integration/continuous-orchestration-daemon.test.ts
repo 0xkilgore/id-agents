@@ -397,6 +397,40 @@ describe("storage — backlog + approval gate", () => {
     expect(drafts[0].readiness_state).toBe("draft");
   });
 
+  it("rejects approved_ready at the canonical backlog write boundary", async () => {
+    await expect(
+      insertBacklogItem(adapter, {
+        title: "invalid readiness",
+        readiness_state: "approved_ready" as never,
+      }),
+    ).rejects.toMatchObject({
+      name: "InvalidBacklogReadinessStateError",
+      code: "invalid_readiness_state",
+      readinessState: "approved_ready",
+    });
+
+    const { rows } = await adapter.query<{ n: number }>(
+      `SELECT COUNT(*) AS n FROM orchestration_backlog_item WHERE title = $1`,
+      ["invalid readiness"],
+    );
+    expect(Number(rows[0]?.n ?? 0)).toBe(0);
+  });
+
+  it("returns 400 when the backlog API receives approved_ready as readiness", async () => {
+    const { app } = mountStatusApp(adapter);
+    const response = await callAppRequest(app, "POST", "/orchestration/backlog", {
+      title: "invalid API readiness",
+      readiness_state: "approved_ready",
+    });
+
+    expect(response.status).toBe(400);
+    expect(response.body).toMatchObject({
+      ok: false,
+      error: "invalid_readiness_state",
+    });
+    expect(response.body.message).toMatch(/approved_ready is a flesh_status/);
+  });
+
   it("promotes needs_review -> ready only with a dispatch body + agent (the gate)", async () => {
     const noBody = await insertBacklogItem(adapter, { title: "b", readiness_state: "needs_review" });
     const r1 = await promoteToReady(adapter, noBody.item_id, "chris");

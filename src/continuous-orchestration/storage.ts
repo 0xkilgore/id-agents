@@ -164,7 +164,42 @@ export interface NewBacklogItem {
   track_drift?: boolean;
 }
 
+const CANONICAL_READINESS_STATES = new Set<ReadinessState>([
+  "draft",
+  "needs_review",
+  "ready",
+  "queued",
+  "in_flight",
+  "blocked_dependency",
+  "needs_chris_batch",
+  "waiting_window",
+  "done",
+  "failed",
+  "superseded",
+  "cancelled",
+]);
+
+export class InvalidBacklogReadinessStateError extends Error {
+  readonly code = "invalid_readiness_state";
+
+  constructor(readonly readinessState: unknown) {
+    super(
+      `Invalid backlog readiness_state ${JSON.stringify(readinessState)}; ` +
+        `approved_ready is a flesh_status, and canonical ready backlog rows use readiness_state "ready"`,
+    );
+    this.name = "InvalidBacklogReadinessStateError";
+  }
+}
+
+function assertCanonicalReadinessState(state: unknown): asserts state is ReadinessState {
+  if (typeof state !== "string" || !CANONICAL_READINESS_STATES.has(state as ReadinessState)) {
+    throw new InvalidBacklogReadinessStateError(state);
+  }
+}
+
 export async function insertBacklogItem(adapter: DbAdapter, input: NewBacklogItem): Promise<BacklogItem> {
+  const readinessState: unknown = input.readiness_state ?? "draft";
+  assertCanonicalReadinessState(readinessState);
   const now = new Date().toISOString();
   const item_id = `coitem_${crypto.randomUUID()}`;
   await adapter.query(
@@ -183,7 +218,7 @@ export async function insertBacklogItem(adapter: DbAdapter, input: NewBacklogIte
       input.dispatch_body ?? null,
       input.priority ?? 5,
       input.value_score ?? null,
-      input.readiness_state ?? "draft",
+      readinessState,
       input.risk_class ?? "routine",
       JSON.stringify(input.write_scope ?? []),
       JSON.stringify(input.dependencies ?? []),
