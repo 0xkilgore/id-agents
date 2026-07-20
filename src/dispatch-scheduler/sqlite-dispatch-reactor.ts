@@ -27,6 +27,7 @@ import {
   type BounceRecord,
   type UsagePolicySnapshot,
   type ClarificationEvent,
+  type ResumeDeliveryRepairAction,
   type ClarificationBlocker,
   type PromotionInput,
   type DispatchVerificationSourceRow,
@@ -951,6 +952,48 @@ export class SqliteDispatchReactor {
     const updated = await this.getByPhid(phid);
     if (!updated) throw conflict(`markResumeDeliveryFailed: post-update read failed`);
     return updated;
+  }
+
+  /** Append a bounded operator decision for a failed resume delivery.
+   *  This is deliberately ledger-only: it does not deliver, enqueue, cancel,
+   *  or otherwise transition the dispatch. */
+  async recordResumeDeliveryRepair(
+    phid: string,
+    input: { action: ResumeDeliveryRepairAction; owner: string; receipt: string },
+  ): Promise<{ doc: DispatchDoc; entry: ClarificationEvent }> {
+    const doc = await this.getByPhid(phid);
+    if (!doc) throw conflict(`recordResumeDeliveryRepair: dispatch ${phid} not found`);
+    if (doc.status !== "resume_delivery_failed") {
+      throw conflict(`dispatch ${phid} is ${doc.status}, not resume_delivery_failed`);
+    }
+    const repairCount = doc.clarification_history.filter(
+      (event) => event.type === "RESUME_DELIVERY_REPAIR_RECORDED",
+    ).length;
+    if (repairCount >= 20) throw conflict(`resume delivery repair ledger is full (20 entries)`);
+    const now = this.nowFn();
+    const clarificationId = doc.clarification_history
+      .slice()
+      .reverse()
+      .find((event) => event.type === "RESUME_DELIVERY_FAILED")?.clarification_id
+      ?? doc.clarification_id
+      ?? "";
+    const entry: ClarificationEvent = {
+      type: "RESUME_DELIVERY_REPAIR_RECORDED",
+      clarification_id: clarificationId,
+      ts: now,
+      repair_action: input.action,
+      owner: input.owner,
+      receipt: input.receipt,
+    };
+    await this.adapter.query(
+      `UPDATE dispatch_scheduler_queue
+       SET clarification_history_json = ?, updated_at = ?
+       WHERE dispatch_phid = ? AND team_id = ?`,
+      [JSON.stringify([...doc.clarification_history, entry]), now, phid, this.teamId],
+    );
+    const updated = await this.getByPhid(phid);
+    if (!updated) throw conflict(`recordResumeDeliveryRepair: post-update read failed`);
+    return { doc: updated, entry };
   }
 
   /** Append a CLARIFICATION_STALE event without changing the dispatch

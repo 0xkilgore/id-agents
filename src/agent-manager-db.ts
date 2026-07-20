@@ -4873,6 +4873,52 @@ export class AgentManagerDb {
       }
     });
 
+    // Operator-only repair ledger for failed resume delivery. Recording a
+    // decision is intentionally inert: no automatic redelivery or dispatch.
+    this.managementApp.post('/dispatches/:dispatch_id/resume-delivery-repair', async (req, res) => {
+      if (!this.dispatchScheduler) {
+        return res.status(503).json({ ok: false, error: 'dispatch_scheduler_not_initialised' });
+      }
+      const actions = new Set(['redeliver', 'follow_up_dispatch', 'cancel', 'moot']);
+      try {
+        const dispatchId = normalizeDispatchIdInput(req.params.dispatch_id);
+        const body = (req.body || {}) as { action?: unknown; owner?: unknown; receipt?: unknown };
+        const action = typeof body.action === 'string' ? body.action.trim() : '';
+        const owner = typeof body.owner === 'string' ? body.owner.trim() : '';
+        const receipt = typeof body.receipt === 'string' ? body.receipt.trim() : '';
+        if (!dispatchId || !actions.has(action) || !owner || !receipt) {
+          return res.status(400).json({
+            ok: false,
+            error: 'action must be redeliver, follow_up_dispatch, cancel, or moot; non-empty owner and receipt required',
+          });
+        }
+        if (owner.length > 120 || receipt.length > 512) {
+          return res.status(400).json({ ok: false, error: 'owner max 120 chars; receipt max 512 chars' });
+        }
+        const reactor = this.dispatchScheduler.reactor;
+        let doc = dispatchId.startsWith('phid:') ? await reactor.getByPhid(dispatchId) : null;
+        if (!doc) doc = await reactor.getByQueryId(dispatchId);
+        if (!doc) return res.status(404).json({ ok: false, error: `dispatch not found: ${dispatchId}` });
+        const recorded = await reactor.recordResumeDeliveryRepair(doc.dispatch_phid, {
+          action: action as 'redeliver' | 'follow_up_dispatch' | 'cancel' | 'moot',
+          owner,
+          receipt,
+        });
+        return res.json({
+          ok: true,
+          schema_version: 'resume-delivery-repair-ledger.v1',
+          dispatch_id: recorded.doc.dispatch_phid,
+          state: recorded.doc.status,
+          executed: false,
+          repair: recorded.entry,
+        });
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        return res.status(/not resume_delivery_failed|ledger is full/i.test(message) ? 409 : 500)
+          .json({ ok: false, error: message });
+      }
+    });
+
     this.managementApp.get('/dispatch-attempt-ledger', async (req, res) => {
       try {
         const { id: teamId } = await this.getTeam(req);
