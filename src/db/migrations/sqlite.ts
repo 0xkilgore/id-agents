@@ -550,6 +550,115 @@ export async function migrateSqlite(adapter: SqliteAdapter): Promise<void> {
     CREATE UNIQUE INDEX IF NOT EXISTS dispatch_scheduler_team_query_idx
       ON dispatch_scheduler_queue(team_id, query_id);
 
+    -- Slice 2: transactional shadow journal outbox. Triggers make the
+    -- scheduler row and its operation inseparable without changing legacy
+    -- authority. The control row defaults off for an immediate rollback.
+    CREATE TABLE IF NOT EXISTS dispatch_operation_outbox_control (
+      singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+      shadow_enabled INTEGER NOT NULL DEFAULT 0 CHECK (shadow_enabled IN (0, 1))
+    );
+    INSERT OR IGNORE INTO dispatch_operation_outbox_control(singleton, shadow_enabled)
+      VALUES (1, 0);
+
+    CREATE TABLE IF NOT EXISTS dispatch_operation_outbox (
+      operation_id TEXT PRIMARY KEY,
+      idempotency_key TEXT NOT NULL UNIQUE,
+      dispatch_phid TEXT NOT NULL,
+      team_id TEXT NOT NULL,
+      operation_type TEXT NOT NULL,
+      envelope_json TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      available_at TEXT NOT NULL,
+      claimed_at TEXT,
+      claimed_by TEXT,
+      delivered_at TEXT,
+      attempt_count INTEGER NOT NULL DEFAULT 0,
+      last_error TEXT,
+      dead_lettered_at TEXT,
+      FOREIGN KEY (dispatch_phid) REFERENCES dispatch_scheduler_queue(dispatch_phid) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS dispatch_operation_outbox_ready_idx
+      ON dispatch_operation_outbox(delivered_at, dead_lettered_at, available_at, created_at);
+
+    CREATE TRIGGER IF NOT EXISTS dispatch_operation_outbox_insert
+    AFTER INSERT ON dispatch_scheduler_queue
+    WHEN (SELECT shadow_enabled FROM dispatch_operation_outbox_control WHERE singleton = 1) = 1
+    BEGIN
+      INSERT OR IGNORE INTO dispatch_operation_outbox(
+        operation_id, idempotency_key, dispatch_phid, team_id, operation_type,
+        envelope_json, created_at, available_at
+      ) VALUES (
+        'dop_' || lower(hex(randomblob(16))),
+        NEW.dispatch_phid || ':requested', NEW.dispatch_phid, NEW.team_id,
+        'dispatch.requested',
+        json_object(
+          'schema_version', 'dispatch.operation.v1',
+          'operation_type', 'dispatch.requested',
+          'dispatch_id', NEW.dispatch_phid,
+          'idempotency_key', NEW.dispatch_phid || ':requested',
+          'team_id', NEW.team_id,
+          'actor', NEW.from_actor,
+          'causation_id', NEW.query_id,
+          'occurred_at', NEW.updated_at,
+          'payload', json_object('from_status', NULL, 'to_status', NEW.status, 'agent_id', NEW.to_agent)
+        ),
+        NEW.updated_at, NEW.updated_at
+      );
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS dispatch_operation_outbox_transition
+    AFTER UPDATE OF status ON dispatch_scheduler_queue
+    WHEN OLD.status IS NOT NEW.status
+      AND (SELECT shadow_enabled FROM dispatch_operation_outbox_control WHERE singleton = 1) = 1
+    BEGIN
+      INSERT OR IGNORE INTO dispatch_operation_outbox(
+        operation_id, idempotency_key, dispatch_phid, team_id, operation_type,
+        envelope_json, created_at, available_at
+      ) VALUES (
+        'dop_' || lower(hex(randomblob(16))),
+        NEW.dispatch_phid || ':' || OLD.status || ':' || NEW.status || ':' || NEW.attempt_count || ':' || NEW.bounce_count || ':' || COALESCE(NEW.clarification_id, ''),
+        NEW.dispatch_phid, NEW.team_id,
+        CASE NEW.status
+          WHEN 'in_flight' THEN 'dispatch.started'
+          WHEN 'done' THEN 'dispatch.completed'
+          WHEN 'failed' THEN 'dispatch.failed'
+          WHEN 'cancelled' THEN 'dispatch.cancelled'
+          WHEN 'needs_clarification' THEN 'dispatch.clarification_requested'
+          WHEN 'resume_delivery_failed' THEN 'dispatch.resume_delivery_failed'
+          WHEN 'bounced' THEN 'dispatch.retry_scheduled'
+          WHEN 'queued' THEN CASE WHEN OLD.status = 'needs_clarification' THEN 'dispatch.resumed' ELSE 'dispatch.queued' END
+          ELSE 'dispatch.transitioned'
+        END,
+        json_object(
+          'schema_version', 'dispatch.operation.v1',
+          'operation_type', CASE NEW.status
+            WHEN 'in_flight' THEN 'dispatch.started'
+            WHEN 'done' THEN 'dispatch.completed'
+            WHEN 'failed' THEN 'dispatch.failed'
+            WHEN 'cancelled' THEN 'dispatch.cancelled'
+            WHEN 'needs_clarification' THEN 'dispatch.clarification_requested'
+            WHEN 'resume_delivery_failed' THEN 'dispatch.resume_delivery_failed'
+            WHEN 'bounced' THEN 'dispatch.retry_scheduled'
+            WHEN 'queued' THEN CASE WHEN OLD.status = 'needs_clarification' THEN 'dispatch.resumed' ELSE 'dispatch.queued' END
+            ELSE 'dispatch.transitioned'
+          END,
+          'dispatch_id', NEW.dispatch_phid,
+          'idempotency_key', NEW.dispatch_phid || ':' || OLD.status || ':' || NEW.status || ':' || NEW.attempt_count || ':' || NEW.bounce_count || ':' || COALESCE(NEW.clarification_id, ''),
+          'team_id', NEW.team_id,
+          'actor', 'manager:scheduler',
+          'causation_id', NEW.query_id,
+          'occurred_at', NEW.updated_at,
+          'payload', json_object(
+            'from_status', OLD.status, 'to_status', NEW.status,
+            'agent_id', NEW.to_agent, 'agent_query_id', NEW.agent_query_id,
+            'failure_kind', NEW.failure_kind, 'failure_detail', NEW.failure_detail,
+            'clarification_id', NEW.clarification_id, 'attempt_count', NEW.attempt_count
+          )
+        ),
+        NEW.updated_at, NEW.updated_at
+      );
+    END;
+
     -- ── Usage Meter (Spec 2026-05-31) ────────────────────────────────
     -- Per-event Anthropic token usage attributed to an agent.
     CREATE TABLE IF NOT EXISTS agent_usage_event (
