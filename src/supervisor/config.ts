@@ -18,6 +18,7 @@ export interface SupervisorWatchConfig {
   newsErrorWindowSeconds: number;
   newsErrorRepeatCount: number;
   alertFilePath: string;
+  alertReplayMaxBytes: number;
   localNotificationsEnabled: boolean;
   criticalNotificationKinds: AlertKind[];
   agentOverrides: SupervisorAgentOverride[];
@@ -33,6 +34,7 @@ export const DEFAULT_CONFIG: SupervisorWatchConfig = {
   newsErrorWindowSeconds: 900,
   newsErrorRepeatCount: 3,
   alertFilePath: './var/supervisor-alerts.jsonl',
+  alertReplayMaxBytes: 8 * 1024 * 1024,
   localNotificationsEnabled: false,
   criticalNotificationKinds: ['agent_down', 'promotion_failure'],
   agentOverrides: [],
@@ -84,6 +86,11 @@ export function parseSupervisorConfig(env: Record<string, string | undefined> = 
 
   if (env.SUPERVISOR_ALERT_FILE_PATH) {
     cfg.alertFilePath = env.SUPERVISOR_ALERT_FILE_PATH;
+  }
+
+  if (env.SUPERVISOR_ALERT_REPLAY_MAX_BYTES) {
+    const v = parseInt(env.SUPERVISOR_ALERT_REPLAY_MAX_BYTES, 10);
+    if (!isNaN(v) && v > 0) cfg.alertReplayMaxBytes = v;
   }
 
   if (env.SUPERVISOR_LOCAL_NOTIFICATIONS === 'true') {

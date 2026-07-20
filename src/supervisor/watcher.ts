@@ -1,7 +1,7 @@
 // Supervisor v0 — Poll loop lifecycle.
 // Reads manager sources, runs rules, emits alerts. No intervention.
 
-import { readFileSync } from 'fs';
+import { closeSync, fstatSync, openSync, readSync } from 'fs';
 import type {
   SourceSnapshot,
   ActiveDispatch,
@@ -29,6 +29,49 @@ export interface SupervisorWatcherOptions {
   alertStateManager?: AlertStateManager;
   now?: () => number;
   startupRecoveryDelayMs?: number;
+}
+
+export interface AlertReplayReadResult {
+  records: unknown[];
+  bytesRead: number;
+  fileBytes: number;
+  truncated: boolean;
+}
+
+export function readRecentAlertRecords(filePath: string, maxBytes: number): AlertReplayReadResult {
+  const fd = openSync(filePath, 'r');
+  try {
+    const fileBytes = fstatSync(fd).size;
+    const bytesRead = Math.min(fileBytes, maxBytes);
+    const start = fileBytes - bytesRead;
+    const buffer = Buffer.allocUnsafe(bytesRead);
+    let offset = 0;
+    while (offset < bytesRead) {
+      const count = readSync(fd, buffer, offset, bytesRead - offset, start + offset);
+      if (count === 0) break;
+      offset += count;
+    }
+
+    let content = buffer.subarray(0, offset).toString('utf-8');
+    const truncated = start > 0;
+    if (truncated) {
+      const firstNewline = content.indexOf('\n');
+      content = firstNewline >= 0 ? content.slice(firstNewline + 1) : '';
+    }
+
+    const records: unknown[] = [];
+    for (const line of content.split('\n')) {
+      if (!line) continue;
+      try {
+        records.push(JSON.parse(line));
+      } catch {
+        // Skip malformed or partially-written records.
+      }
+    }
+    return { records, bytesRead: offset, fileBytes, truncated };
+  } finally {
+    closeSync(fd);
+  }
 }
 
 export type SupervisorFreshnessState = 'disabled' | 'stopped' | 'starting' | 'fresh' | 'stale' | 'error';
@@ -265,29 +308,23 @@ export class SupervisorWatcher {
 
   private async replayAlertFile(): Promise<void> {
     try {
-      const content = readFileSync(this.config.alertFilePath, 'utf-8');
-      const lines = content.split('\n').filter(Boolean);
-      const batchSize = 1_000;
-      let replayed = 0;
-      for (let offset = 0; offset < lines.length; offset += batchSize) {
-        const records = [];
-        for (const line of lines.slice(offset, offset + batchSize)) {
-          try {
-            records.push(JSON.parse(line));
-          } catch {
-            // Skip malformed lines
-          }
-        }
-        if (records.length > 0) {
-          this.alertState.replayFromRecords(records);
-          replayed += records.length;
-        }
-        // Keep the HTTP listener and other timers serviceable while a large
-        // recovery journal is reconstructed.
-        await new Promise<void>(resolve => setImmediate(resolve));
+      const replay = readRecentAlertRecords(
+        this.config.alertFilePath,
+        this.config.alertReplayMaxBytes,
+      );
+      const records = replay.records as Parameters<AlertStateManager['replayFromRecords']>[0];
+      if (records.length > 0) {
+        this.alertState.replayFromRecords(records);
+        console.log(
+          `[Supervisor] Replayed ${records.length} recent alert records ` +
+          `(${replay.bytesRead}/${replay.fileBytes} bytes) from ${this.config.alertFilePath}`,
+        );
       }
-      if (replayed > 0) {
-        console.log(`[Supervisor] Replayed ${replayed} alert records from ${this.config.alertFilePath}`);
+      if (replay.truncated) {
+        console.warn(
+          `[Supervisor] Alert replay bounded to newest ${this.config.alertReplayMaxBytes} bytes; ` +
+          'current conditions will be reconciled on the first tick',
+        );
       }
     } catch {
       // File doesn't exist or can't be read — start fresh
