@@ -671,6 +671,21 @@ export function mountContinuousOrchestrationRoutes(app: Application, opts: Orche
     try {
       const body = (req.body ?? {}) as NewBacklogItem & { force?: boolean };
       if (!body.title) return res.status(400).json({ ok: false, error: "title required" });
+      // `approved_ready` is a flesh decision, not a backlog lifecycle state.
+      // Accepting it here creates a shadow state that is invisible to both the
+      // ready admission query and the status counters. Auto-flesh persists the
+      // decision in flesh_status and promotes readiness_state to canonical
+      // `ready`; direct backlog authors must use the same vocabulary boundary.
+      if ((body as { readiness_state?: unknown }).readiness_state === "approved_ready") {
+        return res.status(400).json({
+          ok: false,
+          error: "invalid_readiness_state",
+          message: "approved_ready is a flesh_status; use readiness_state=ready (which enters needs_review) or the promote endpoint",
+          field: "readiness_state",
+          received: "approved_ready",
+          canonical_state: "ready",
+        });
+      }
       // Validate the item's track against the canonical-track-registry. A
       // provided-but-non-conforming track is DRIFT: warn + tag, never block.
       let trackDrift = false;
