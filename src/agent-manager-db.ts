@@ -2735,6 +2735,7 @@ export class AgentManagerDb {
     reconcile: (recentSinceMs?: number) => Promise<unknown>,
   ): void {
     if (this.filesystemArtifactReconcileInterval) return;
+    if (String(process.env.FILESYSTEM_ARTIFACT_RECONCILE_ENABLED ?? 'true').toLowerCase() === 'false') return;
     const intervalMs = Number(process.env.FILESYSTEM_ARTIFACT_RECONCILE_INTERVAL_MS || 5 * 60 * 1000);
     const runFull = () => {
       reconcile(undefined).catch((err) => {
