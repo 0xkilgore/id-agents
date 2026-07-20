@@ -18,6 +18,7 @@ import { guardDispatchCreate } from "../conformance/write-guard.js";
 import { HttpAgentTransport } from "./http-agent-transport.js";
 import { SchedulerService } from "./scheduler-service.js";
 import { SqliteDispatchReactor } from "./sqlite-dispatch-reactor.js";
+import { configureDispatchOperationOutbox } from "./dispatch-operation-outbox.js";
 import {
   DispatchRecoveryService,
   recoveryConfigFromEnv,
@@ -67,6 +68,8 @@ export interface SchedulerEnv {
   DISPATCH_MAX_IN_FLIGHT_ANTHROPIC?: string;
   DISPATCH_STALE_IN_FLIGHT_TTL_MS?: string;
   DISPATCH_TICK_INTERVAL_MS?: string;
+  /** Slice 2 shadow journal capture. Default OFF; never changes authority. */
+  DISPATCH_OUTBOX_SHADOW_ENABLED?: string;
   // Auto-recovery (P0 disp-b329f522…). Default OFF during rollout.
   DISPATCH_RECOVERY_ENABLED?: string;
   DISPATCH_RECOVERY_INTERVAL_MS?: string;
@@ -390,6 +393,12 @@ export class SchedulerHandle {
       teamId: opts.teamId,
       now,
     });
+    // The adapter is synchronous under SQLite, so the control-row mutation is
+    // applied before the first enqueue even though the common adapter API is async.
+    void configureDispatchOperationOutbox(
+      opts.adapter,
+      env.DISPATCH_OUTBOX_SHADOW_ENABLED === "1",
+    ).catch((error) => this.logger.error("dispatch_outbox_config_failed", { error: String(error) }));
     this.client = new DispatchDocClient({ reactor: this.reactor, now, onStatusChanged: opts.onDispatchStatusChanged });
     this.transport = new HttpAgentTransport({
       resolveTargetUrl: async (doc) => {
