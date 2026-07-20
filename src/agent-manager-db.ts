@@ -425,6 +425,15 @@ interface ActionableHealthStatus {
   recommended_actions: string[];
 }
 
+interface StartupRecoveryHealth {
+  schema_version: 'manager.startup_recovery.v1';
+  state: 'pending' | 'running' | 'ready' | 'failed';
+  listener_ready_at: string | null;
+  started_at: string | null;
+  completed_at: string | null;
+  error: string | null;
+}
+
 function parseFleetMetricsHistoryRange(raw: unknown): FleetMetricsHistoryRange | null {
   if (raw === undefined || raw === null || raw === "") return "30d";
   if (raw === "24h" || raw === "7d" || raw === "30d" || raw === "90d") return raw;
@@ -1213,6 +1222,14 @@ export class AgentManagerDb {
     kill_enabled: false,
     detected_at: null,
   };
+  private startupRecoveryHealth: StartupRecoveryHealth = {
+    schema_version: 'manager.startup_recovery.v1',
+    state: 'pending',
+    listener_ready_at: null,
+    started_at: null,
+    completed_at: null,
+    error: null,
+  };
   private continuousOrchestrationStatusSource: {
     daemon: ContinuousOrchestrationDaemon;
     runtimeHealth: () => {
@@ -1230,7 +1247,9 @@ export class AgentManagerDb {
   private querySweeperInterval: NodeJS.Timeout | null = null;
   private taskCommentSweepInterval: NodeJS.Timeout | null = null;
   private filesystemArtifactReconcileInterval: NodeJS.Timeout | null = null;
+  private filesystemArtifactReconcileStartupTimer: NodeJS.Timeout | null = null;
   private worktreeReaperInterval: NodeJS.Timeout | null = null;
+  private worktreeReaperStartupTimer: NodeJS.Timeout | null = null;
   private retentionService: RetentionService | null = null;
   private checkinService: CheckinService | null = null;
   private supervisorWatcher: { stop(): void; getHealthStatus?(nowMs?: number): SupervisorHealthStatus } | null = null;
@@ -1802,6 +1821,9 @@ export class AgentManagerDb {
     if (input.build.behind_origin === true) reasons.push('build_behind_origin');
     if (Array.isArray(input.startupErrors) && input.startupErrors.length > 0) {
       reasons.push('startup_errors');
+    }
+    if (this.startupRecoveryHealth.state !== 'ready') {
+      reasons.push(`startup_recovery_${this.startupRecoveryHealth.state}`);
     }
     if (['warn', 'critical', 'unknown'].includes(input.disk.state)) {
       reasons.push(`disk_${input.disk.state}`);
@@ -2714,7 +2736,7 @@ export class AgentManagerDb {
   private startFilesystemArtifactReconciler(
     reconcile: (recentSinceMs?: number) => Promise<unknown>,
   ): void {
-    if (this.filesystemArtifactReconcileInterval) return;
+    if (this.filesystemArtifactReconcileInterval || this.filesystemArtifactReconcileStartupTimer) return;
     const intervalMs = Number(process.env.FILESYSTEM_ARTIFACT_RECONCILE_INTERVAL_MS || 5 * 60 * 1000);
     const runFull = () => {
       reconcile(undefined).catch((err) => {
@@ -2724,7 +2746,16 @@ export class AgentManagerDb {
         );
       });
     };
-    runFull();
+    const startupDelayMs = this.startupRecoveryDelayMs();
+    if (startupDelayMs === 0) {
+      runFull();
+    } else {
+      this.filesystemArtifactReconcileStartupTimer = setTimeout(() => {
+        this.filesystemArtifactReconcileStartupTimer = null;
+        runFull();
+      }, startupDelayMs);
+      this.filesystemArtifactReconcileStartupTimer.unref?.();
+    }
     this.filesystemArtifactReconcileInterval = setInterval(runFull, intervalMs);
     this.filesystemArtifactReconcileInterval.unref?.();
   }
@@ -2736,7 +2767,7 @@ export class AgentManagerDb {
   // branch AND carry no uncommitted tracked changes — in-flight builds (ahead of
   // base, or dirty) are always kept. Disable with WORKTREE_REAPER_ENABLED=false.
   private startWorktreeReaper(): void {
-    if (this.worktreeReaperInterval) return;
+    if (this.worktreeReaperInterval || this.worktreeReaperStartupTimer) return;
     if (String(process.env.WORKTREE_REAPER_ENABLED ?? 'true').toLowerCase() === 'false') return;
     const intervalMs = Number(process.env.WORKTREE_REAPER_INTERVAL_MS || 6 * 60 * 60 * 1000);
     const runReap = async () => {
@@ -2773,9 +2804,28 @@ export class AgentManagerDb {
         console.warn('[Manager] worktree reaper failed:', err instanceof Error ? err.message : String(err));
       }
     };
-    void runReap();
+    const startupDelayMs = this.startupRecoveryDelayMs();
+    if (startupDelayMs === 0) {
+      void runReap();
+    } else {
+      this.worktreeReaperStartupTimer = setTimeout(() => {
+        this.worktreeReaperStartupTimer = null;
+        void runReap();
+      }, startupDelayMs);
+      this.worktreeReaperStartupTimer.unref?.();
+    }
     this.worktreeReaperInterval = setInterval(() => { void runReap(); }, intervalMs);
     this.worktreeReaperInterval.unref?.();
+  }
+
+  private startupRecoveryDelayMs(): number {
+    return Math.max(
+      0,
+      Number(
+        process.env.MANAGER_STARTUP_RECOVERY_DELAY_MS ??
+          (process.env.NODE_ENV === 'test' ? 0 : 1_000),
+      ),
+    );
   }
 
   // Build-pool part 3b: spawn roster agents that are registered but never
@@ -5710,6 +5760,7 @@ export class AgentManagerDb {
           nominal_mode: supervisorRequiredForNominal ? 'required' : 'optional',
         },
         manager_http_liveness,
+        startup_recovery: this.startupRecoveryHealth,
         orphan_sweep: this.orphanSweepHealth,
         actionable_health,
         alert_delivery: {
@@ -13976,6 +14027,10 @@ export class AgentManagerDb {
       // manager over a private Tailscale tailnet from the Tauri desktop app.
       const bind = resolveManagerBindHost(process.env);
       this.httpServer.listen(port, bind.host, async () => {
+        this.startupRecoveryHealth = {
+          ...this.startupRecoveryHealth,
+          listener_ready_at: new Date().toISOString(),
+        };
         const displayHost = bind.isLoopback ? 'localhost' : bind.host;
         console.log(`\n🚀 ID Agent Manager (DB-backed)`);
         console.log(`===============================`);
@@ -13985,6 +14040,12 @@ export class AgentManagerDb {
           console.warn(`⚠️  [SECURITY] ${bind.warning}`);
         }
         console.log(`\n`);
+
+        this.startupRecoveryHealth = {
+          ...this.startupRecoveryHealth,
+          state: 'running',
+          started_at: new Date().toISOString(),
+        };
 
         // Initialize and start the scheduler service
         this.schedulerService = new SchedulerService(this.db, async (agentId: string) => {
@@ -14769,6 +14830,13 @@ export class AgentManagerDb {
             const watcher = new SupervisorWatcher({
               config: supervisorConfig,
               sourceReader,
+              startupRecoveryDelayMs: Math.max(
+                0,
+                Number(
+                  process.env.MANAGER_STARTUP_RECOVERY_DELAY_MS ??
+                    (process.env.NODE_ENV === 'test' ? 0 : 1_000),
+                ),
+              ),
             });
             watcher.start();
             this.supervisorWatcher = watcher;
@@ -14821,7 +14889,11 @@ export class AgentManagerDb {
         });
         this.checkinService.start();
         console.log('[Manager] CheckinService started (wake on every fire)');
-
+        this.startupRecoveryHealth = {
+          ...this.startupRecoveryHealth,
+          state: 'ready',
+          completed_at: new Date().toISOString(),
+        };
         resolve();
       });
     });
@@ -14880,6 +14952,22 @@ export class AgentManagerDb {
     if (this.remoteProbeInterval) {
       clearInterval(this.remoteProbeInterval);
       this.remoteProbeInterval = null;
+    }
+    if (this.filesystemArtifactReconcileStartupTimer) {
+      clearTimeout(this.filesystemArtifactReconcileStartupTimer);
+      this.filesystemArtifactReconcileStartupTimer = null;
+    }
+    if (this.filesystemArtifactReconcileInterval) {
+      clearInterval(this.filesystemArtifactReconcileInterval);
+      this.filesystemArtifactReconcileInterval = null;
+    }
+    if (this.worktreeReaperStartupTimer) {
+      clearTimeout(this.worktreeReaperStartupTimer);
+      this.worktreeReaperStartupTimer = null;
+    }
+    if (this.worktreeReaperInterval) {
+      clearInterval(this.worktreeReaperInterval);
+      this.worktreeReaperInterval = null;
     }
     if (this.wss) {
       try { this.wss.close(); } catch { /* swallow */ }
