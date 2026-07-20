@@ -164,7 +164,7 @@ export function buildPoolRouting(env: NodeJS.ProcessEnv = process.env): PoolRout
   const looksLikeKapelleFrontendWork = (item: BacklogItem): boolean => {
     const haystack = `${item.title}\n${item.dispatch_body ?? ""}\n${item.write_scope.join("\n")}`.toLowerCase();
     return (
-      haystack.includes("kapelle-site") ||
+      haystack.includes("kapelle-console") ||
       haystack.includes("/ops") ||
       haystack.includes("artifact") ||
       haystack.includes("inbox") ||

@@ -112,7 +112,8 @@ describe("BuildPoolRegistry", () => {
     const r = BuildPoolRegistry.load({});
     expect(r.list().map((p) => p.pool_id).sort()).toEqual(["backend", "frontend"]);
     expect(r.byId("backend")!.tracks).toContain("T-CKPT");
-    expect(r.byRepoAlias("kapelle-site")!.pool_id).toBe("frontend");
+    expect(r.byRepoAlias("kapelle-console")!.pool_id).toBe("frontend");
+    expect(r.byId("frontend")!.repo_root).toBe("/Users/kilgore/Dropbox/Code/kapelle-console");
     expect(r.byId("backend")!.members[0]).toBe("roger");
   });
 

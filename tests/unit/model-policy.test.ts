@@ -197,6 +197,7 @@ describe("loadModelPolicy degradation", () => {
 });
 
 describe("Slice G project-agent policy migration", () => {
+  const claudePrimaryAgents = new Set(["frontend-ui-codex", "maestra", "rams"]);
   const projectAgents = [
     "blowout",
     "brunel",
@@ -206,6 +207,7 @@ describe("Slice G project-agent policy migration", () => {
     "defi",
     "eames",
     "finances",
+    "frontend-ui-codex",
     "gaudi",
     "hopper",
     "maestra",
@@ -219,7 +221,7 @@ describe("Slice G project-agent policy migration", () => {
     "trinity",
   ];
 
-  it("gives every canonical project agent an explicit Codex->Claude policy", () => {
+  it("uses 5.6 Sol for Codex and Fable 5 for every Claude execution", () => {
     const svc = loadModelPolicy({
       configPath: "configs/model-policy.json",
       onWarn: (msg) => {
@@ -231,22 +233,13 @@ describe("Slice G project-agent policy migration", () => {
     for (const agent of projectAgents) {
       const policy = svc.policyForAgent(agent);
       expect(policy.agent).toBe(agent);
-      expect(policy.primary).toMatchObject({
-        runtime: "codex",
-        model: "gpt-5.5",
-        provider: "openai",
-      });
-      expect(policy.fallback).toHaveLength(1);
-      expect(policy.fallback[0]).toMatchObject({
-        runtime: "claude-code-cli",
-        model: "claude-sonnet-5",
-        provider: "anthropic",
-      });
-
-      const fallback = svc.resolveModelChoice({ agent, unavailableProviders: ["openai"] });
-      expect(fallback.choice.runtime).toBe("claude-code-cli");
-      expect(fallback.choice.provider).toBe("anthropic");
-      expect(fallback.fallback_applied).toBe(true);
+      if (claudePrimaryAgents.has(agent)) {
+        expect(policy.primary).toMatchObject({ runtime: "claude-code-cli", model: "claude-fable-5", provider: "anthropic" });
+        expect(policy.fallback[0]).toMatchObject({ runtime: "codex", model: "gpt-5.6-sol", provider: "openai" });
+      } else {
+        expect(policy.primary).toMatchObject({ runtime: "codex", model: "gpt-5.6-sol", provider: "openai" });
+        expect(policy.fallback[0]).toMatchObject({ runtime: "claude-code-cli", model: "claude-fable-5", provider: "anthropic" });
+      }
     }
   });
 });

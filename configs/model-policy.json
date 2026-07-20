@@ -1,39 +1,37 @@
 {
   "schema_version": 1,
-  "_comment": "Claude/Codex-parity policy set 2026-07-09 night by manager per Chris: 50% Anthropic / 50% OpenAI / 0% Cursor, superseding the 2026-07-06 Codex-primary (95/5) policy. Provenance: agent-platform/output/2026-07-09-overnight-5050-admissible-wave.md ('Trigger: direct order from Chris') and agent-platform/output/2026-07-10-morning-refuel-5050-wave.md ('Split ... 50/50 as directed'). This file was stale (still 95/5) for ~9h after the directive purely because nobody had edited it yet -- investigated per cto/output/2026-07-10-model-policy-5050-watcher-investigation.md and confirmed NO active watcher/generator writes this file today (every in-repo consumer, src/model-policy/policy.ts and src/agent-manager-db.ts, only reads it; grepped src/ and scripts/ for writers, found none). The 'prior watcher' warning below refers to a resolved 2026-06-25 cursor-conduit incident, not a live mechanism -- kept as a standing caution, not a current threat. This is still a manual hotfix, not the durable fix: model-policy.json and the per-agent live runtime can independently drift (exactly this incident). The durable fix is Slice 1 (Runtime Policy Schema and Persistence) of agent-platform/output/2026-07-09-runtime-mix-capacity-control.md, already CTO-architecture-approved in cto/output/2026-07-09-kg05-runtime-resilience-cto-guidance.md -- do not re-scope; extend that. Standing rule: new unpinned scheduler-created implementation work has no single deterministic preference under an even split (see NOTE on 'default' below); named-agent primary/fallback here reflects each agent's CURRENT confirmed live runtime per the wave docs above, not a policy preference. Cursor disabled for now (constrained_providers). NOTE: a prior watcher (2026-06-25 cursor-conduit bedtime watch, since removed from the codebase) reverted this file once historically; if policy drifts again, re-run the investigation above before assuming a watcher is the cause -- last time it was simply a stale manual edit.",
+  "_comment": "CHRIS-DIRECTED 2026-07-20: gpt-5.6-sol is the Codex standard, every Claude execution uses claude-fable-5, CTO stays on gpt-5.6-sol, and the bounded target is 75 percent OpenAI / 25 percent Anthropic / 0 percent Cursor.",
   "work_share": {
-    "label": "claude-codex-parity-50-50-0",
+    "label": "codex-sol-fable-only-2026-07-20",
     "targets": {
-      "anthropic": 0.5,
-      "openai": 0.5,
+      "anthropic": 0.25,
+      "openai": 0.75,
       "cursor": 0.0
     }
   },
   "authorized_directive": {
     "work_share": {
       "targets": {
-        "anthropic": 0.5,
-        "openai": 0.5,
+        "anthropic": 0.25,
+        "openai": 0.75,
         "cursor": 0.0
       }
     }
   },
   "constrained_providers": ["cursor"],
   "known_models": [
-    "claude-opus-4-8",
     "claude-fable-5",
-    "claude-sonnet-5",
-    "gpt-5.5"
+    "gpt-5.6-sol"
   ],
   "default": {
     "primary": {
       "runtime": "codex",
-      "model": "gpt-5.5"
+        "model": "gpt-5.6-sol"
     },
     "fallback": [
       {
         "runtime": "claude-code-cli",
-        "model": "claude-sonnet-5"
+        "model": "claude-fable-5"
       }
     ]
   },
@@ -41,228 +39,240 @@
     "blowout": {
       "primary": {
         "runtime": "codex",
-        "model": "gpt-5.5"
+        "model": "gpt-5.6-sol"
       },
       "fallback": [
         {
           "runtime": "claude-code-cli",
-          "model": "claude-sonnet-5"
+        "model": "claude-fable-5"
         }
       ]
     },
     "brunel": {
       "primary": {
         "runtime": "codex",
-        "model": "gpt-5.5"
+        "model": "gpt-5.6-sol"
       },
       "fallback": [
         {
           "runtime": "claude-code-cli",
-          "model": "claude-sonnet-5"
+        "model": "claude-fable-5"
         }
       ]
     },
     "cane": {
       "primary": {
         "runtime": "codex",
-        "model": "gpt-5.5"
+        "model": "gpt-5.6-sol"
       },
       "fallback": [
         {
           "runtime": "claude-code-cli",
-          "model": "claude-sonnet-5"
+        "model": "claude-fable-5"
         }
       ]
     },
     "cleveland-park": {
       "primary": {
         "runtime": "codex",
-        "model": "gpt-5.5"
+        "model": "gpt-5.6-sol"
       },
       "fallback": [
         {
           "runtime": "claude-code-cli",
-          "model": "claude-sonnet-5"
+        "model": "claude-fable-5"
         }
       ]
     },
     "cto": {
       "primary": {
         "runtime": "codex",
-        "model": "gpt-5.5"
+        "model": "gpt-5.6-sol"
       },
       "fallback": [
         {
           "runtime": "claude-code-cli",
-          "model": "claude-sonnet-5"
+        "model": "claude-fable-5"
         }
       ]
     },
     "defi": {
       "primary": {
         "runtime": "codex",
-        "model": "gpt-5.5"
+        "model": "gpt-5.6-sol"
       },
       "fallback": [
         {
           "runtime": "claude-code-cli",
-          "model": "claude-sonnet-5"
+        "model": "claude-fable-5"
         }
       ]
     },
     "eames": {
       "primary": {
         "runtime": "codex",
-        "model": "gpt-5.5"
+        "model": "gpt-5.6-sol"
       },
       "fallback": [
         {
           "runtime": "claude-code-cli",
-          "model": "claude-sonnet-5"
+        "model": "claude-fable-5"
         }
       ]
     },
     "finances": {
       "primary": {
         "runtime": "codex",
-        "model": "gpt-5.5"
+        "model": "gpt-5.6-sol"
       },
       "fallback": [
         {
           "runtime": "claude-code-cli",
-          "model": "claude-sonnet-5"
+        "model": "claude-fable-5"
+        }
+      ]
+    },
+    "frontend-ui-codex": {
+      "primary": {
+        "runtime": "claude-code-cli",
+        "model": "claude-fable-5"
+      },
+      "fallback": [
+        {
+          "runtime": "codex",
+          "model": "gpt-5.6-sol"
         }
       ]
     },
     "gaudi": {
       "primary": {
         "runtime": "codex",
-        "model": "gpt-5.5"
+        "model": "gpt-5.6-sol"
       },
       "fallback": [
         {
           "runtime": "claude-code-cli",
-          "model": "claude-sonnet-5"
+        "model": "claude-fable-5"
         }
       ]
     },
     "hopper": {
       "primary": {
         "runtime": "codex",
-        "model": "gpt-5.5"
+        "model": "gpt-5.6-sol"
       },
       "fallback": [
         {
           "runtime": "claude-code-cli",
-          "model": "claude-sonnet-5"
+        "model": "claude-fable-5"
         }
       ]
     },
     "maestra": {
       "primary": {
-        "runtime": "codex",
-        "model": "gpt-5.5"
+        "runtime": "claude-code-cli",
+        "model": "claude-fable-5"
       },
       "fallback": [
         {
-          "runtime": "claude-code-cli",
-          "model": "claude-sonnet-5"
+          "runtime": "codex",
+          "model": "gpt-5.6-sol"
         }
       ]
     },
     "personal": {
       "primary": {
         "runtime": "codex",
-        "model": "gpt-5.5"
+        "model": "gpt-5.6-sol"
       },
       "fallback": [
         {
           "runtime": "claude-code-cli",
-          "model": "claude-sonnet-5"
+        "model": "claude-fable-5"
         }
       ]
     },
     "pipeline": {
       "primary": {
         "runtime": "codex",
-        "model": "gpt-5.5"
+        "model": "gpt-5.6-sol"
       },
       "fallback": [
         {
           "runtime": "claude-code-cli",
-          "model": "claude-sonnet-5"
+        "model": "claude-fable-5"
         }
       ]
     },
     "politics": {
       "primary": {
         "runtime": "codex",
-        "model": "gpt-5.5"
+        "model": "gpt-5.6-sol"
       },
       "fallback": [
         {
           "runtime": "claude-code-cli",
-          "model": "claude-sonnet-5"
+        "model": "claude-fable-5"
         }
       ]
     },
     "rams": {
       "primary": {
-        "runtime": "codex",
-        "model": "gpt-5.5"
+        "runtime": "claude-code-cli",
+        "model": "claude-fable-5"
       },
       "fallback": [
         {
-          "runtime": "claude-code-cli",
-          "model": "claude-sonnet-5"
+          "runtime": "codex",
+          "model": "gpt-5.6-sol"
         }
       ]
     },
     "regina": {
       "primary": {
         "runtime": "codex",
-        "model": "gpt-5.5"
+        "model": "gpt-5.6-sol"
       },
       "fallback": [
         {
           "runtime": "claude-code-cli",
-          "model": "claude-sonnet-5"
+        "model": "claude-fable-5"
         }
       ]
     },
     "roger": {
       "primary": {
         "runtime": "codex",
-        "model": "gpt-5.5"
+        "model": "gpt-5.6-sol"
       },
       "fallback": [
         {
           "runtime": "claude-code-cli",
-          "model": "claude-sonnet-5"
+        "model": "claude-fable-5"
         }
       ]
     },
     "sentinel": {
       "primary": {
         "runtime": "codex",
-        "model": "gpt-5.5"
+        "model": "gpt-5.6-sol"
       },
       "fallback": [
         {
           "runtime": "claude-code-cli",
-          "model": "claude-sonnet-5"
+        "model": "claude-fable-5"
         }
       ]
     },
     "trinity": {
       "primary": {
         "runtime": "codex",
-        "model": "gpt-5.5"
+        "model": "gpt-5.6-sol"
       },
       "fallback": [
         {
           "runtime": "claude-code-cli",
-          "model": "claude-sonnet-5"
+        "model": "claude-fable-5"
         }
       ]
     }

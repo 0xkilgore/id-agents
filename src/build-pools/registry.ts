@@ -1,6 +1,6 @@
 // Build-pools — seed registry + lookup (CTO spec §3.1).
 //
-// Two pools: backend (id-agents) and frontend (kapelle-site). members[0] is the
+// Two pools: backend (id-agents) and frontend (kapelle-console). members[0] is the
 // primary owner; `coders` is the elastic generic-coder tail. max_parallel is
 // intentionally below member count for usage headroom and is env-tunable via
 // BUILD_POOL_<ID>_MAX_PARALLEL.
@@ -36,10 +36,10 @@ const SEED: readonly BuildPool[] = [
   },
   {
     pool_id: "frontend",
-    repo_alias: "kapelle-site",
-    repo_root: "/Users/kilgore/Dropbox/Code/kapelle-site",
+    repo_alias: "kapelle-console",
+    repo_root: "/Users/kilgore/Dropbox/Code/kapelle-console",
     members: ["regina", "brunel", "eames", "gaudi", "hopper", "frontend-ui-codex", "frontend-qa-cursor"],
-    tracks: ["T-UI", "T-SITE", "T-WEB"],
+    tracks: ["T-CKPT.kapelle-console", "T-UI", "T-SITE", "T-WEB"],
     max_parallel: 6,
     merge_strategy: "auto",
   },

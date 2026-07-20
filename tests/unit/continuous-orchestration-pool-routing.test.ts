@@ -11,7 +11,7 @@ function item(over: Partial<BacklogItem> = {}): BacklogItem {
     title: "UI - Full-width ops layout",
     track: "T-CKPT",
     to_agent: "frontend-ui-codex",
-    dispatch_body: "Fix /ops/projects layout in kapelle-site",
+    dispatch_body: "Fix projects layout in kapelle-console",
     priority: 5,
     value_score: null,
     readiness_state: "ready",
@@ -34,10 +34,11 @@ function item(over: Partial<BacklogItem> = {}): BacklogItem {
 }
 
 describe("continuous orchestration pool routing", () => {
-  it("routes stale T-CKPT /ops UI rows to the frontend pool", () => {
+  it("routes T-CKPT kapelle-console UI rows to the canonical frontend pool", () => {
     const pools = buildPoolRouting({});
     const pool = pools.poolForItem(item());
     expect(pool?.pool_id).toBe("frontend");
+    expect(pool?.repo_root).toBe("/Users/kilgore/Dropbox/Code/kapelle-console");
     // Snag #13: widened with live idle Claude builders (listed first) so frontend
     // work fans out instead of stalling on the 2 throttle-prone codex/cursor lanes.
     expect(pool?.members).toEqual([

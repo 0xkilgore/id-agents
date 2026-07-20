@@ -10,7 +10,7 @@
 // change. The admission/daemon rewrite (Stage C) consumes it.
 
 export type PoolId = "backend" | "frontend";
-export type RepoAlias = "id-agents" | "kapelle-site";
+export type RepoAlias = "id-agents" | "kapelle-console" | "kapelle-site";
 
 /** A pool of interchangeable builders for one repo. */
 export interface BuildPool {
