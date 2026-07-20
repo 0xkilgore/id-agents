@@ -32,7 +32,14 @@ export type ClarificationEventType =
   | "RESUME"
   | "RESUME_DELIVERED"
   | "RESUME_DELIVERY_FAILED"
+  | "RESUME_DELIVERY_REPAIR_RECORDED"
   | "CLARIFICATION_STALE";
+
+export type ResumeDeliveryRepairAction =
+  | "redeliver"
+  | "follow_up_dispatch"
+  | "cancel"
+  | "moot";
 
 export interface ClarificationEvent {
   type: ClarificationEventType;
@@ -55,6 +62,11 @@ export interface ClarificationEvent {
   agent_query_id?: string | null;
   // For RESUME_DELIVERY_FAILED:
   failure_detail?: string;
+  // For RESUME_DELIVERY_REPAIR_RECORDED. This is an operator ledger entry;
+  // recording it never executes or re-delivers the dispatch.
+  repair_action?: ResumeDeliveryRepairAction;
+  owner?: string;
+  receipt?: string;
   // For CLARIFICATION_STALE:
   age_seconds?: number;
   surfaced_at?: string;

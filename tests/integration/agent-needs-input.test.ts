@@ -401,6 +401,61 @@ describe('POST /agent-resume', () => {
     expect(body.state).toBe('resume_delivery_failed');
   });
 
+  it.each(['redeliver', 'follow_up_dispatch', 'cancel', 'moot'] as const)(
+    'records inert, structured %s repair decisions with owner and receipt',
+    async (action) => {
+      const r = await fetch(`${baseUrl}/dispatches/${encodeURIComponent(dispatchPhid)}/resume-delivery-repair`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action, owner: 'oncall', receipt: `ops-130-${action}` }),
+      });
+      expect(r.status).toBe(200);
+      const body = await r.json() as any;
+      expect(body).toMatchObject({
+        ok: true,
+        schema_version: 'resume-delivery-repair-ledger.v1',
+        dispatch_id: dispatchPhid,
+        state: 'resume_delivery_failed',
+        executed: false,
+        repair: {
+          type: 'RESUME_DELIVERY_REPAIR_RECORDED',
+          repair_action: action,
+          owner: 'oncall',
+          receipt: `ops-130-${action}`,
+        },
+      });
+      expect((await handle.reactor.getByPhid(dispatchPhid)).status).toBe('resume_delivery_failed');
+    },
+  );
+
+  it('rejects unbounded or unrecognized repair ledger input', async () => {
+    const invalid = await fetch(`${baseUrl}/dispatches/${encodeURIComponent(dispatchPhid)}/resume-delivery-repair`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'retry', owner: 'oncall', receipt: 'ops-130' }),
+    });
+    expect(invalid.status).toBe(400);
+    const oversized = await fetch(`${baseUrl}/dispatches/${encodeURIComponent(dispatchPhid)}/resume-delivery-repair`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'redeliver', owner: 'oncall', receipt: 'x'.repeat(513) }),
+    });
+    expect(oversized.status).toBe(400);
+
+    // Four entries were recorded by the table fixture above. Fill the
+    // remaining bounded slots, then prove the 21st entry cannot grow history.
+    for (let i = 4; i < 20; i += 1) {
+      const fill = await fetch(`${baseUrl}/dispatches/${encodeURIComponent(dispatchPhid)}/resume-delivery-repair`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'moot', owner: 'oncall', receipt: `bounded-${i}` }),
+      });
+      expect(fill.status).toBe(200);
+    }
+    const full = await fetch(`${baseUrl}/dispatches/${encodeURIComponent(dispatchPhid)}/resume-delivery-repair`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'moot', owner: 'oncall', receipt: 'bounded-20' }),
+    });
+    expect(full.status).toBe(409);
+  });
+
   it('rejects resume when dispatch is not currently needs_clarification', async () => {
     // After the previous test, the dispatch is in resume_delivery_failed
     // state. /agent-resume should refuse.
