@@ -28,6 +28,7 @@ export interface SupervisorWatcherOptions {
   sink?: AlertSink;
   alertStateManager?: AlertStateManager;
   now?: () => number;
+  startupRecoveryDelayMs?: number;
 }
 
 export type SupervisorFreshnessState = 'disabled' | 'stopped' | 'starting' | 'fresh' | 'stale' | 'error';
@@ -52,8 +53,10 @@ export class SupervisorWatcher {
   private sink: AlertSink;
   private alertState: AlertStateManager;
   private timer: ReturnType<typeof setInterval> | null = null;
+  private startupTimer: ReturnType<typeof setTimeout> | null = null;
   private running = false;
   private getNow: () => number;
+  private startupRecoveryDelayMs: number;
   private lastTerminalCheck: string;
   private lastNewsCheck: string;
   private lastTickStartedAt: string | null = null;
@@ -67,6 +70,7 @@ export class SupervisorWatcher {
     this.sink = options.sink ?? createDefaultSinks(this.config);
     this.alertState = options.alertStateManager ?? new AlertStateManager();
     this.getNow = options.now ?? (() => Date.now());
+    this.startupRecoveryDelayMs = Math.max(0, options.startupRecoveryDelayMs ?? 0);
 
     // Default lookback: 1 hour for terminal dispatches and news
     const lookback = new Date(this.getNow() - 3600_000).toISOString();
@@ -83,15 +87,27 @@ export class SupervisorWatcher {
     if (this.running) return;
     this.running = true;
 
-    // Replay existing JSONL if present
-    this.replayAlertFile();
-
     console.log(`[Supervisor] Watcher started (poll every ${this.config.pollIntervalSeconds}s)`);
 
-    // Run first tick immediately
-    this.tick().catch(err => {
-      console.error('[Supervisor] First tick error:', err instanceof Error ? err.message : String(err));
-    });
+    // Journal replay can be large after a long-lived manager has accumulated
+    // alerts. Keep it behind the listener/readiness window so synchronous file
+    // parsing cannot make a freshly restarted manager look unreachable.
+    const startupDelayMs = this.startupRecoveryDelayMs;
+    const recover = () => {
+      this.replayAlertFile();
+      this.tick().catch(err => {
+        console.error('[Supervisor] First tick error:', err instanceof Error ? err.message : String(err));
+      });
+    };
+    if (startupDelayMs === 0) {
+      recover();
+    } else {
+      this.startupTimer = setTimeout(() => {
+        this.startupTimer = null;
+        recover();
+      }, startupDelayMs);
+      this.startupTimer.unref?.();
+    }
 
     this.timer = setInterval(() => {
       this.tick().catch(err => {
@@ -101,6 +117,10 @@ export class SupervisorWatcher {
   }
 
   stop(): void {
+    if (this.startupTimer) {
+      clearTimeout(this.startupTimer);
+      this.startupTimer = null;
+    }
     if (this.timer) {
       clearInterval(this.timer);
       this.timer = null;

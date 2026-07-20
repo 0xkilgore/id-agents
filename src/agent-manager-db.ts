@@ -425,6 +425,15 @@ interface ActionableHealthStatus {
   recommended_actions: string[];
 }
 
+interface StartupRecoveryHealth {
+  schema_version: 'manager.startup_recovery.v1';
+  state: 'pending' | 'running' | 'ready' | 'failed';
+  listener_ready_at: string | null;
+  started_at: string | null;
+  completed_at: string | null;
+  error: string | null;
+}
+
 function parseFleetMetricsHistoryRange(raw: unknown): FleetMetricsHistoryRange | null {
   if (raw === undefined || raw === null || raw === "") return "30d";
   if (raw === "24h" || raw === "7d" || raw === "30d" || raw === "90d") return raw;
@@ -1213,6 +1222,14 @@ export class AgentManagerDb {
     kill_enabled: false,
     detected_at: null,
   };
+  private startupRecoveryHealth: StartupRecoveryHealth = {
+    schema_version: 'manager.startup_recovery.v1',
+    state: 'pending',
+    listener_ready_at: null,
+    started_at: null,
+    completed_at: null,
+    error: null,
+  };
   private continuousOrchestrationStatusSource: {
     daemon: ContinuousOrchestrationDaemon;
     runtimeHealth: () => {
@@ -1802,6 +1819,9 @@ export class AgentManagerDb {
     if (input.build.behind_origin === true) reasons.push('build_behind_origin');
     if (Array.isArray(input.startupErrors) && input.startupErrors.length > 0) {
       reasons.push('startup_errors');
+    }
+    if (this.startupRecoveryHealth.state !== 'ready') {
+      reasons.push(`startup_recovery_${this.startupRecoveryHealth.state}`);
     }
     if (['warn', 'critical', 'unknown'].includes(input.disk.state)) {
       reasons.push(`disk_${input.disk.state}`);
@@ -2773,7 +2793,17 @@ export class AgentManagerDb {
         console.warn('[Manager] worktree reaper failed:', err instanceof Error ? err.message : String(err));
       }
     };
-    void runReap();
+    const configuredDelay = process.env.MANAGER_STARTUP_RECOVERY_DELAY_MS;
+    const startupDelayMs = Math.max(
+      0,
+      Number(configuredDelay ?? (process.env.NODE_ENV === 'test' ? 0 : 1_000)),
+    );
+    if (startupDelayMs === 0) {
+      void runReap();
+    } else {
+      const startupTimer = setTimeout(() => { void runReap(); }, startupDelayMs);
+      startupTimer.unref?.();
+    }
     this.worktreeReaperInterval = setInterval(() => { void runReap(); }, intervalMs);
     this.worktreeReaperInterval.unref?.();
   }
@@ -5710,6 +5740,7 @@ export class AgentManagerDb {
           nominal_mode: supervisorRequiredForNominal ? 'required' : 'optional',
         },
         manager_http_liveness,
+        startup_recovery: this.startupRecoveryHealth,
         orphan_sweep: this.orphanSweepHealth,
         actionable_health,
         alert_delivery: {
@@ -13976,6 +14007,10 @@ export class AgentManagerDb {
       // manager over a private Tailscale tailnet from the Tauri desktop app.
       const bind = resolveManagerBindHost(process.env);
       this.httpServer.listen(port, bind.host, async () => {
+        this.startupRecoveryHealth = {
+          ...this.startupRecoveryHealth,
+          listener_ready_at: new Date().toISOString(),
+        };
         const displayHost = bind.isLoopback ? 'localhost' : bind.host;
         console.log(`\n🚀 ID Agent Manager (DB-backed)`);
         console.log(`===============================`);
@@ -13985,6 +14020,12 @@ export class AgentManagerDb {
           console.warn(`⚠️  [SECURITY] ${bind.warning}`);
         }
         console.log(`\n`);
+
+        this.startupRecoveryHealth = {
+          ...this.startupRecoveryHealth,
+          state: 'running',
+          started_at: new Date().toISOString(),
+        };
 
         // Initialize and start the scheduler service
         this.schedulerService = new SchedulerService(this.db, async (agentId: string) => {
@@ -14769,6 +14810,13 @@ export class AgentManagerDb {
             const watcher = new SupervisorWatcher({
               config: supervisorConfig,
               sourceReader,
+              startupRecoveryDelayMs: Math.max(
+                0,
+                Number(
+                  process.env.MANAGER_STARTUP_RECOVERY_DELAY_MS ??
+                    (process.env.NODE_ENV === 'test' ? 0 : 1_000),
+                ),
+              ),
             });
             watcher.start();
             this.supervisorWatcher = watcher;
@@ -14821,7 +14869,11 @@ export class AgentManagerDb {
         });
         this.checkinService.start();
         console.log('[Manager] CheckinService started (wake on every fire)');
-
+        this.startupRecoveryHealth = {
+          ...this.startupRecoveryHealth,
+          state: 'ready',
+          completed_at: new Date().toISOString(),
+        };
         resolve();
       });
     });
