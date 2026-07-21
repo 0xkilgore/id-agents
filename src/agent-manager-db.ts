@@ -193,6 +193,7 @@ import {
 } from './workspaces/policy.js';
 import { deliverClarificationResume } from './dispatch-scheduler/clarification-resume-delivery.js';
 import { reconcileStaleClarifications } from './dispatch-scheduler/clarification-ttl-reconciler.js';
+import { readDispatchClarification } from './dispatch-scheduler/clarification-read-model.js';
 import { readFleetBlockages } from './dispatch-scheduler/fleet-blockages.js';
 import {
   migrateDispatchAttemptLedger,
@@ -6374,6 +6375,45 @@ export class AgentManagerDb {
       adapter: this.db.adapter,
       getTeamId: async (req) => (await this.getTeam(req)).id,
       getModelPolicy: () => this.modelPolicy,
+    });
+
+    // Wave147 Action Center: registered before the generic dispatch-id route.
+    this.managementApp.get('/dispatches/:dispatch_id/clarification', async (req, res) => {
+      const dispatchId = req.params.dispatch_id;
+      if (!/^phid:disp-[A-Za-z0-9]+$/.test(dispatchId)) {
+        return res.status(400).json({ ok: false, error: 'invalid_dispatch_id' });
+      }
+      try {
+        const { id: teamId } = await this.getTeam(req);
+        const result = await readDispatchClarification(
+          this.db.adapter,
+          teamId,
+          dispatchId,
+          this.dispatchDeriveOpts(),
+        );
+        if (result.kind === 'ok') return res.json(result.value);
+        if (result.kind === 'dispatch_not_found') {
+          return res.status(404).json({ ok: false, error: 'dispatch_not_found' });
+        }
+        if (result.kind === 'clarification_not_found') {
+          return res.status(404).json({ ok: false, error: 'clarification_not_found' });
+        }
+        if (result.kind === 'evidence_unlinked') {
+          console.warn('[dispatch-clarification-read] clarification evidence unlinked', { dispatch_id: dispatchId });
+          return res.status(409).json({
+            ok: false,
+            error: 'clarification_evidence_unlinked',
+            source_state: 'unavailable_unlinked',
+          });
+        }
+        return res.status(422).json({
+          ok: false,
+          error: 'clarification_result_malformed',
+          original_query_id: result.original_query_id,
+        });
+      } catch (err) {
+        return res.status(500).json({ ok: false, error: err instanceof Error ? err.message : String(err) });
+      }
     });
 
     this.managementApp.get('/dispatches/:dispatch_id/detail', async (req, res) => {

@@ -17,6 +17,7 @@ import { SqliteQueriesRepo } from '../../src/db/repos/sqlite/queries-repo.js';
 import { SqliteNewsRepo } from '../../src/db/repos/sqlite/news-repo.js';
 import { SqliteSchedulesRepo } from '../../src/db/repos/sqlite/schedules-repo.js';
 import { SqliteTasksRepo } from '../../src/db/repos/sqlite/tasks-repo.js';
+import { migrateDispatchAttemptLedger } from '../../src/dispatch-attempt-ledger/storage.js';
 
 async function createInMemoryDb() {
   const adapter = new SqliteAdapter(':memory:');
@@ -239,6 +240,66 @@ describe('POST /agent-needs-input', () => {
     expect(body.items[0].dispatch_id).toBe(dispatchPhid);
     expect(body.items[0].question).toBe('should I squash?');
     expect(body.items[0].urgency).toBe('normal');
+  });
+
+  it('GET /dispatches/:id/clarification reads the exact body from linked query evidence', async () => {
+    const target = await enqueueClarification({
+      subject: 'Action Center evidence',
+      question: 'Which release lane owns this promotion?',
+      context: { branch: 'feature/action-center' },
+    });
+    const list = await fetch(`${baseUrl}/dispatches/clarifications`);
+    const listBody = (await list.json()) as { items: Array<{ dispatch_id: string; clarification_id: string }> };
+    const clarificationId = listBody.items.find((item) => item.dispatch_id === target)!.clarification_id;
+    const queryId = `query_action_center_${Date.now()}`;
+    const now = Date.now();
+    const adapter = (manager as any).db.adapter;
+    await migrateDispatchAttemptLedger(adapter);
+    await adapter.query(
+      `INSERT INTO queries (team_id, query_id, status, created, completed, result)
+       VALUES (?, ?, 'completed', ?, ?, ?)`,
+      [teamId, queryId, now, now, JSON.stringify({ result: { dispatch_id: target, clarification_id: clarificationId, agent_id: 'coder-max', question: 'Which release lane owns this promotion?', context: { branch: 'feature/action-center' }, urgency: 'normal' } })],
+    );
+    await adapter.query(
+      `INSERT INTO dispatch_attempt_ledger
+       (id, team_id, correlation_key, original_query_id, original_dispatch_id, attempts_json, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, '[]', ?, ?)`,
+      [`attempt_action_${now}`, teamId, `dispatch:${target}`, queryId, target, new Date(now).toISOString(), new Date(now).toISOString()],
+    );
+
+    const response = await fetch(`${baseUrl}/dispatches/${target}/clarification`);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      ok: true,
+      schema_version: 'dispatch-clarification-read.v1',
+      dispatch_id: target,
+      dispatch_state: 'needs_clarification',
+      clarification: {
+        clarification_id: clarificationId,
+        state: 'open',
+        question: 'Which release lane owns this promotion?',
+        context: { branch: 'feature/action-center' },
+      },
+      source: { original_query_id: queryId, complete: true },
+    });
+  });
+
+  it('returns typed validation and unlinked-evidence errors', async () => {
+    const invalid = await fetch(`${baseUrl}/dispatches/query_123/clarification`);
+    expect(invalid.status).toBe(400);
+    expect(await invalid.json()).toMatchObject({ error: 'invalid_dispatch_id' });
+
+    const unlinkedDispatch = await enqueueClarification({
+      subject: 'Unlinked Action Center evidence',
+      question: 'Where is the durable evidence?',
+    });
+    const unlinked = await fetch(`${baseUrl}/dispatches/${unlinkedDispatch}/clarification`);
+    expect(unlinked.status).toBe(409);
+    expect(await unlinked.json()).toEqual({
+      ok: false,
+      error: 'clarification_evidence_unlinked',
+      source_state: 'unavailable_unlinked',
+    });
   });
 
   it('GET /dispatches/clarifications groups repeated Spec 054 promotion questions into bounded action classes', async () => {
