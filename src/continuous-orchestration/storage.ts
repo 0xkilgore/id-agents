@@ -22,6 +22,7 @@ import type {
   StaleDuplicateCloseoutReceipt,
 } from "./types.js";
 import { extractRegisterIds } from "./register-id-extraction.js";
+import { classifyDependencyGate } from "./admission.js";
 
 interface BacklogRow {
   item_id: string;
@@ -167,6 +168,13 @@ export interface NewBacklogItem {
 export async function insertBacklogItem(adapter: DbAdapter, input: NewBacklogItem): Promise<BacklogItem> {
   const now = new Date().toISOString();
   const item_id = `coitem_${crypto.randomUUID()}`;
+  const requestedState = input.readiness_state ?? "draft";
+  const dependencyGate = requestedState === "ready"
+    ? classifyDependencyGate(input.dependencies ?? [], await listDependencyResolution(adapter, input.team_id ?? "default"))
+    : null;
+  const readinessState = dependencyGate && dependencyGate.state !== "root_ready"
+    ? "blocked_dependency"
+    : requestedState;
   await adapter.query(
     `INSERT INTO orchestration_backlog_item (
        item_id, team_id, logical_key, title, track, to_agent, dispatch_body, priority, value_score,
@@ -183,7 +191,7 @@ export async function insertBacklogItem(adapter: DbAdapter, input: NewBacklogIte
       input.dispatch_body ?? null,
       input.priority ?? 5,
       input.value_score ?? null,
-      input.readiness_state ?? "draft",
+      readinessState,
       input.risk_class ?? "routine",
       JSON.stringify(input.write_scope ?? []),
       JSON.stringify(input.dependencies ?? []),
@@ -429,17 +437,40 @@ export async function promoteToReady(
       return { ok: false, reason: `logical work already ${existing.readiness_state}` };
     }
   }
+  const dependencyGate = classifyDependencyGate(item.dependencies, await listDependencyResolution(adapter, item.team_id));
+  const resultingState: ReadinessState = dependencyGate.state === "root_ready" ? "ready" : "blocked_dependency";
   const now = new Date().toISOString();
   await adapter.query(
     `UPDATE orchestration_backlog_item
-       SET readiness_state = 'ready',
-           approved_by = $1,
-           approved_at = $2,
-           retry_safe = CASE WHEN $3 = 1 THEN 1 ELSE retry_safe END,
-           updated_at = $4
-     WHERE item_id = $5`,
-    [approved_by, now, opts.retry_safe ? 1 : 0, now, item_id],
+       SET readiness_state = $1,
+           approved_by = $2,
+           approved_at = $3,
+           retry_safe = CASE WHEN $4 = 1 THEN 1 ELSE retry_safe END,
+           updated_at = $5
+     WHERE item_id = $6`,
+    [resultingState, approved_by, now, opts.retry_safe ? 1 : 0, now, item_id],
   );
+  if (dependencyGate.state !== "root_ready") {
+    await appendDecisions(adapter, {
+      team_id: item.team_id,
+      tick_id: "readiness:dependency_gate",
+      dry_run: false,
+      records: [{
+        item_id,
+        action: "held",
+        reason: dependencyGate.state === "broken_dependency"
+          ? `promotion held by broken dependencies: ${dependencyGate.broken.join(", ")}`
+          : `promotion pipelined behind pending dependencies: ${dependencyGate.pending.join(", ")}`,
+        metadata: {
+          code: dependencyGate.state === "broken_dependency" ? "broken_dependency" : "blocked_dependency",
+          before_state: item.readiness_state,
+          after_state: resultingState,
+          pending_dependencies: dependencyGate.pending,
+          broken_dependencies: dependencyGate.broken,
+        },
+      }],
+    });
+  }
   const updated = await getBacklogItem(adapter, item_id);
   return { ok: true, item: updated ?? undefined };
 }
@@ -481,6 +512,8 @@ export async function updateBacklogFields(
   >,
   opts: { updated_by?: string | null } = {},
 ): Promise<BacklogItem | null> {
+  const current = await getBacklogItem(adapter, item_id);
+  if (!current) return null;
   const sets: string[] = [];
   const params: unknown[] = [];
   const push = (col: string, val: unknown) => {
@@ -495,7 +528,13 @@ export async function updateBacklogFields(
   if (patch.value_score !== undefined) push("value_score", patch.value_score);
   if (patch.risk_class !== undefined) push("risk_class", patch.risk_class);
   if (patch.write_scope !== undefined) push("write_scope_json", JSON.stringify(patch.write_scope));
-  if (patch.dependencies !== undefined) push("dependencies_json", JSON.stringify(patch.dependencies));
+  if (patch.dependencies !== undefined) {
+    push("dependencies_json", JSON.stringify(patch.dependencies));
+    if (current.readiness_state === "ready") {
+      const gate = classifyDependencyGate(patch.dependencies, await listDependencyResolution(adapter, current.team_id));
+      if (gate.state !== "root_ready") push("readiness_state", "blocked_dependency");
+    }
+  }
   if (patch.token_estimate !== undefined) push("token_estimate", patch.token_estimate);
   if (patch.provider !== undefined) push("provider", patch.provider);
   if (patch.runtime !== undefined) push("runtime", patch.runtime);

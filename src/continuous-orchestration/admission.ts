@@ -9,6 +9,7 @@ import type { ContinuousOrchestrationConfig } from "./config.js";
 import { normalizeRuntime, resolveProviderFromRuntime } from "../dispatch-scheduler/types.js";
 import type { BacklogItem, DecisionRecord, OrchestrationMode, UsageGateView } from "./types.js";
 import type { DiskHeadroom } from "../disk-health.js";
+import { laneKeyOf } from "./selection.js";
 
 /** Risk classes safe to auto-run unattended. Everything else escalates. */
 const AUTO_RUN_RISK = new Set(["routine", "build"]);
@@ -74,6 +75,127 @@ export interface AdmissionPlan {
   assignments: Record<string, string>;
   /** Per-candidate skip records (audit). */
   skipped: DecisionRecord[];
+}
+
+export interface DependencyGate {
+  state: "root_ready" | "dependency_blocked" | "broken_dependency";
+  pending: string[];
+  broken: string[];
+  terminal: string[];
+}
+
+/** Resolve dependency references with the same item-id/logical-key index used by admission. */
+export function classifyDependencyGate(
+  dependencies: string[],
+  dependencyIndex: Map<string, boolean>,
+): DependencyGate {
+  const pending: string[] = [];
+  const broken: string[] = [];
+  const terminal: string[] = [];
+  for (const dependency of dependencies) {
+    if (!dependencyIndex.has(dependency)) broken.push(dependency);
+    else if (dependencyIndex.get(dependency)) terminal.push(dependency);
+    else pending.push(dependency);
+  }
+  return {
+    state: broken.length > 0 ? "broken_dependency" : pending.length > 0 ? "dependency_blocked" : "root_ready",
+    pending,
+    broken,
+    terminal,
+  };
+}
+
+const ROOT_FUEL_CAPACITY_CODES = new Set([
+  "no_in_flight_slots",
+  "single_writer_lane_busy",
+  "pool_capacity_full",
+]);
+
+export interface RootReadyFuelProjection {
+  raw_ready_build: BacklogItem[];
+  root_ready_build: BacklogItem[];
+  admissible_root_build: BacklogItem[];
+  deferred_descendants: BacklogItem[];
+  broken_dependency_rows: BacklogItem[];
+  capacity_blocked_root_build: BacklogItem[];
+  root_lanes: string[];
+  exclusion_counts: Record<string, number>;
+  state_drift_ready_with_pending_dependency: number;
+}
+
+/**
+ * Project load-loop fuel from dependency resolution plus the reason-coded
+ * admission plan. Capacity-only blockers remain fuel; safety-invalid rows do not.
+ */
+export function projectRootReadyFuel(args: {
+  ready: BacklogItem[];
+  blockedDependency?: BacklogItem[];
+  dependencyIndex: Map<string, boolean>;
+  plan?: AdmissionPlan;
+  extraExclusions?: Map<string, string>;
+}): RootReadyFuelProjection {
+  const raw = args.ready.filter((item) => item.risk_class === "build");
+  const decisions = new Map(
+    (args.plan?.skipped ?? [])
+      .filter((decision) => decision.item_id)
+      .map((decision) => [decision.item_id!, String(decision.metadata?.code ?? "unknown")]),
+  );
+  const admittedIds = new Set((args.plan?.admit ?? []).map((item) => item.item_id));
+  const root: BacklogItem[] = [];
+  const admissible: BacklogItem[] = [];
+  const deferred: BacklogItem[] = [];
+  const broken: BacklogItem[] = [];
+  const capacityBlocked: BacklogItem[] = [];
+  const exclusionCounts: Record<string, number> = {};
+  let drift = 0;
+  const exclude = (code: string) => { exclusionCounts[code] = (exclusionCounts[code] ?? 0) + 1; };
+
+  for (const item of raw) {
+    const gate = classifyDependencyGate(item.dependencies, args.dependencyIndex);
+    if (gate.state === "broken_dependency") {
+      broken.push(item);
+      exclude("broken_dependency");
+      continue;
+    }
+    if (gate.state === "dependency_blocked") {
+      deferred.push(item);
+      drift += 1;
+      exclude("blocked_dependency");
+      continue;
+    }
+    const code = args.extraExclusions?.get(item.item_id) ?? decisions.get(item.item_id);
+    if (code && !ROOT_FUEL_CAPACITY_CODES.has(code) && code !== "tick_admission_cap") {
+      exclude(code);
+      continue;
+    }
+    root.push(item);
+    if (admittedIds.has(item.item_id)) admissible.push(item);
+    if (code && ROOT_FUEL_CAPACITY_CODES.has(code)) capacityBlocked.push(item);
+  }
+
+  for (const item of args.blockedDependency ?? []) {
+    if (item.risk_class !== "build") continue;
+    const gate = classifyDependencyGate(item.dependencies, args.dependencyIndex);
+    if (gate.state === "broken_dependency") {
+      broken.push(item);
+      exclude("broken_dependency");
+    } else {
+      deferred.push(item);
+      exclude("blocked_dependency");
+    }
+  }
+
+  return {
+    raw_ready_build: raw,
+    root_ready_build: root,
+    admissible_root_build: admissible,
+    deferred_descendants: deferred,
+    broken_dependency_rows: broken,
+    capacity_blocked_root_build: capacityBlocked,
+    root_lanes: [...new Set(root.map(laneKeyOf))].sort(),
+    exclusion_counts: exclusionCounts,
+    state_drift_ready_with_pending_dependency: drift,
+  };
 }
 
 export type NonAdmissionCode =
@@ -418,15 +540,9 @@ export function planAdmission(
       ));
       continue;
     }
-    const brokenDeps: string[] = [];
-    const pendingDeps: string[] = [];
-    for (const d of item.dependencies) {
-      if (!ctx.dependency_index.has(d)) {
-        brokenDeps.push(d);
-        continue;
-      }
-      if (!ctx.dependency_index.get(d)) pendingDeps.push(d);
-    }
+    const dependencyGate = classifyDependencyGate(item.dependencies, ctx.dependency_index);
+    const brokenDeps = dependencyGate.broken;
+    const pendingDeps = dependencyGate.pending;
     if (brokenDeps.length > 0) {
       skipped.push(nonAdmission(
         item.item_id,

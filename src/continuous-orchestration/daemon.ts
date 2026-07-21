@@ -19,6 +19,7 @@ import { fairInterleaveByLane, isUsefulReadyFuelItem, laneKeyOf, needsRefuel, or
 import { tickAdmitLimit } from "./cadence.js";
 import {
   planAdmission,
+  projectRootReadyFuel,
   evaluateStall,
   providerRuntimeMismatch,
   shouldRunZeroAdmitStallWatchdog,
@@ -264,6 +265,14 @@ export interface ReadyAdmissionExplanation {
   candidates: number;
   useful_ready: number;
   admissible_now: number;
+  root_ready_fuel: number;
+  root_ready_lanes: number;
+  admissible_root_now: number;
+  capacity_blocked_root: number;
+  deferred_descendants: number;
+  broken_dependency_rows: number;
+  fuel_exclusion_counts: Record<string, number>;
+  state_drift_ready_with_pending_dependency: number;
   lanes: {
     raw_ready: number;
     useful_ready: number;
@@ -2056,7 +2065,13 @@ export class ContinuousOrchestrationDaemon {
         .filter((itemId): itemId is string => !!itemId),
     );
     const activeReady = ordered.filter((item) => !terminalDuplicateItemIds.has(item.item_id));
-    const usefulReady = ordered.length - nonUsefulItemIds.size;
+    const rootFuel = projectRootReadyFuel({
+      ready: activeReady,
+      blockedDependency: blockedDependencyItems,
+      dependencyIndex: dependency_index,
+      plan,
+    });
+    const usefulReady = rootFuel.root_ready_build.length;
     const admittedItemIds = new Set(plan.admit.map((item) => item.item_id));
     const laneCounts = new Map<string, { lane: string; raw_ready: number; useful_ready: number; admissible_now: number; blocked: number }>();
     for (const item of activeReady) {
@@ -2099,9 +2114,17 @@ export class ContinuousOrchestrationDaemon {
       candidates: activeReady.length,
       useful_ready: usefulReady,
       admissible_now: plan.admit.length,
+      root_ready_fuel: rootFuel.root_ready_build.length,
+      root_ready_lanes: rootFuel.root_lanes.length,
+      admissible_root_now: rootFuel.admissible_root_build.length,
+      capacity_blocked_root: rootFuel.capacity_blocked_root_build.length,
+      deferred_descendants: rootFuel.deferred_descendants.length,
+      broken_dependency_rows: rootFuel.broken_dependency_rows.length,
+      fuel_exclusion_counts: rootFuel.exclusion_counts,
+      state_drift_ready_with_pending_dependency: rootFuel.state_drift_ready_with_pending_dependency,
       lanes: {
         raw_ready: new Set(activeReady.map(laneKeyOf)).size,
-        useful_ready: new Set(activeReady.filter((item) => !nonUsefulItemIds.has(item.item_id)).map(laneKeyOf)).size,
+        useful_ready: rootFuel.root_lanes.length,
         admissible_now: new Set(plan.admit.map(laneKeyOf)).size,
         by_lane: [...laneCounts.values()].sort((a, b) => a.lane.localeCompare(b.lane)),
       },
@@ -2209,14 +2232,26 @@ export class ContinuousOrchestrationDaemon {
     });
     const readyAdmission = await this.explainReadyAdmission();
     const nonUsefulReadyFuelIds = await this.nonUsefulProviderRuntimeReadyFuelIds(ready);
+    const dependencyIndex = await listDependencyResolution(this.deps.adapter, this.teamId);
+    const fuelExclusions = new Map<string, string>();
     for (const row of readyAdmission.non_admitted) {
       if (isNonUsefulReadyBlockerCode(row.code)) {
         nonUsefulReadyFuelIds.add(row.item_id);
+        fuelExclusions.set(row.item_id, row.code);
       }
     }
+    for (const itemId of nonUsefulReadyFuelIds) {
+      if (!fuelExclusions.has(itemId)) fuelExclusions.set(itemId, "provider_runtime_mismatch");
+    }
+    const rootFuel = projectRootReadyFuel({ ready, dependencyIndex, extraExclusions: fuelExclusions });
     const capacityFuel = buildCapacityFuel(ready, inFlight, config.max_in_flight, nonUsefulReadyFuelIds);
-    const floorItems = capacityFuel.capacityOccupied ? capacityFuel.floorItems : capacityFuel.usefulReadyBuild;
-    const plan = selectAutoPromotions(needsReview, floorItems, {
+    // Preserve the legacy capacity-health aggregate while exposing root-only
+    // fuel separately through ready_admission/build_ready_floor. The live
+    // mutation path below always uses rootFuel.root_ready_build.
+    const healthFloorItems = capacityFuel.capacityOccupied
+      ? [...rootFuel.root_ready_build, ...capacityFuel.inFlightBuild]
+      : rootFuel.root_ready_build;
+    const plan = selectAutoPromotions(needsReview, healthFloorItems, {
       floor: config.auto_promote_floor,
       minLanes: config.auto_promote_min_lanes,
       maxPerPass: config.auto_promote_max_per_tick,
@@ -2879,15 +2914,27 @@ export class ContinuousOrchestrationDaemon {
     if (args.mode !== "running" || args.killSwitch || args.hardPaused) return null;
 
     try {
-      const [ready, needsReview, inFlight] = await Promise.all([
+      const [ready, needsReview, inFlight, dependencyIndex] = await Promise.all([
         listReadyItems(this.deps.adapter, this.teamId),
         listBacklogByState(this.deps.adapter, { team_id: this.teamId, state: "needs_review" }),
         listBacklogByState(this.deps.adapter, { team_id: this.teamId, state: "in_flight" }),
+        listDependencyResolution(this.deps.adapter, this.teamId),
       ]);
+      const readyAdmission = await this.explainReadyAdmission();
       const nonUsefulReadyFuelIds = await this.nonUsefulProviderRuntimeReadyFuelIds(ready);
+      const fuelExclusions = new Map<string, string>();
+      for (const row of readyAdmission.non_admitted) {
+        if (!isNonUsefulReadyBlockerCode(row.code)) continue;
+        nonUsefulReadyFuelIds.add(row.item_id);
+        fuelExclusions.set(row.item_id, row.code);
+      }
+      for (const itemId of nonUsefulReadyFuelIds) {
+        if (!fuelExclusions.has(itemId)) fuelExclusions.set(itemId, "provider_runtime_mismatch");
+      }
+      const rootFuel = projectRootReadyFuel({ ready, dependencyIndex, extraExclusions: fuelExclusions });
       const capacityFuel = buildCapacityFuel(ready, inFlight, config.max_in_flight, nonUsefulReadyFuelIds);
       if (capacityFuel.capacityOccupied) return null;
-      const plan = selectAutoPromotions(needsReview, capacityFuel.usefulReadyBuild, {
+      const plan = selectAutoPromotions(needsReview, rootFuel.root_ready_build, {
         floor: config.auto_promote_floor,
         minLanes: config.auto_promote_min_lanes,
         maxPerPass: config.auto_promote_max_per_tick,

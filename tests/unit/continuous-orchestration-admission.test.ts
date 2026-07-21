@@ -14,6 +14,8 @@ import {
   evaluateStall,
   isDeploySafeAdmissionItem,
   isDiskCleanupAdmissionItem,
+  classifyDependencyGate,
+  projectRootReadyFuel,
   shouldRunZeroAdmitStallWatchdog,
   type AdmissionContext,
 } from "../../src/continuous-orchestration/admission.js";
@@ -88,6 +90,42 @@ function disk(state: DiskHeadroomState): DiskHeadroom {
     reason: state === "ok" ? null : `disk ${state}`,
   };
 }
+
+describe("root-ready fuel projection", () => {
+  it("classifies terminal, pending, and broken dependency references", () => {
+    const index = new Map([["done-id", true], ["done-key", true], ["pending-id", false]]);
+    expect(classifyDependencyGate([], index)).toEqual({ state: "root_ready", pending: [], broken: [], terminal: [] });
+    expect(classifyDependencyGate(["done-id", "done-key"], index)).toEqual({
+      state: "root_ready", pending: [], broken: [], terminal: ["done-id", "done-key"],
+    });
+    expect(classifyDependencyGate(["pending-id"], index)).toMatchObject({ state: "dependency_blocked", pending: ["pending-id"] });
+    expect(classifyDependencyGate(["missing"], index)).toMatchObject({ state: "broken_dependency", broken: ["missing"] });
+  });
+
+  it("counts only six roots in the Wave143 13/7 fixture while preserving capacity-blocked roots", () => {
+    const roots = Array.from({ length: 6 }, (_, i) => item({ item_id: `root-${i}`, write_scope: [`repo/root-${i}`] }));
+    const descendants = Array.from({ length: 7 }, (_, i) => item({
+      item_id: `desc-${i}`,
+      dependencies: [`upstream-${i}`],
+      write_scope: [`repo/desc-${i}`],
+    }));
+    const candidates = [...roots, ...descendants];
+    const dependencyIndex = new Map(descendants.map((_, i) => [`upstream-${i}`, false]));
+    const plan = planAdmission(candidates, ctx({ dependency_index: dependencyIndex, in_flight: 5 }), {
+      ...defaultConfig(),
+      max_in_flight: 5,
+    });
+    const projected = projectRootReadyFuel({ ready: candidates, dependencyIndex, plan });
+
+    expect(projected.raw_ready_build).toHaveLength(13);
+    expect(projected.root_ready_build).toHaveLength(6);
+    expect(projected.deferred_descendants).toHaveLength(7);
+    expect(projected.capacity_blocked_root_build).toHaveLength(6);
+    expect(projected.admissible_root_build).toHaveLength(0);
+    expect(projected.exclusion_counts.blocked_dependency).toBe(7);
+    expect(projected.state_drift_ready_with_pending_dependency).toBe(7);
+  });
+});
 
 describe("orderCandidates", () => {
   it("ranks north-star, then priority, then value, then oldest", () => {

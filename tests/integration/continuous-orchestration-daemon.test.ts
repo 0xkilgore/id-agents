@@ -414,6 +414,44 @@ describe("storage — backlog + approval gate", () => {
     expect(r2.item?.approved_by).toBe("chris");
   });
 
+  it("persists an approved descendant as blocked_dependency until its predecessor clears", async () => {
+    const upstream = await insertBacklogItem(adapter, {
+      title: "upstream",
+      logical_key: "upstream-key",
+      readiness_state: "in_flight",
+      to_agent: "roger",
+      dispatch_body: "build upstream",
+    });
+    const descendant = await insertBacklogItem(adapter, {
+      title: "descendant",
+      readiness_state: "needs_review",
+      to_agent: "roger",
+      dispatch_body: "build descendant",
+      dependencies: [upstream.logical_key!],
+    });
+
+    const promoted = await promoteToReady(adapter, descendant.item_id, "chris");
+
+    expect(promoted.ok).toBe(true);
+    expect(promoted.item).toMatchObject({
+      readiness_state: "blocked_dependency",
+      approved_by: "chris",
+      dependencies: ["upstream-key"],
+    });
+  });
+
+  it("normalizes direct ready inserts with unresolved dependencies to blocked_dependency", async () => {
+    const inserted = await insertBacklogItem(adapter, {
+      title: "direct descendant",
+      readiness_state: "ready",
+      to_agent: "roger",
+      dispatch_body: "build descendant",
+      dependencies: ["missing-upstream"],
+    });
+    expect(inserted.readiness_state).toBe("blocked_dependency");
+    expect(inserted.dependencies).toEqual(["missing-upstream"]);
+  });
+
   it("requires retry_safe=true before manually promoting an already-dispatched row", async () => {
     const retry = await insertBacklogItem(adapter, {
       title: "manual retry",

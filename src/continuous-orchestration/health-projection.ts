@@ -266,6 +266,14 @@ export interface OrchestrationBuildReadyFloorProjection {
   blocked: boolean;
   blocker_code: "build_ready_lane_diversity_below_min_lanes" | "build_ready_below_floor" | null;
   useful_ready_count: number;
+  root_ready_fuel: number;
+  root_ready_lanes: number;
+  admissible_root_now: number;
+  capacity_blocked_root: number;
+  deferred_descendants: number;
+  broken_dependency_rows: number;
+  fuel_exclusion_counts: Record<string, number>;
+  state_drift_ready_with_pending_dependency: number;
   floor: number;
   build_ready_lanes: number;
   min_lanes: number;
@@ -386,6 +394,14 @@ interface OrchestrationHealthProjectionOptions {
     rawReady: number;
     usefulReady: number;
     admissibleNow: number;
+    rootReadyFuel?: number;
+    rootReadyLanes?: number;
+    admissibleRootNow?: number;
+    capacityBlockedRoot?: number;
+    deferredDescendants?: number;
+    brokenDependencyRows?: number;
+    fuelExclusionCounts?: Record<string, number>;
+    stateDriftReadyWithPendingDependency?: number;
     blockerCounts: ReadyAdmissionBlockerSummary[];
     nonAdmitted: ReadyAdmissionNonAdmittedSummary[];
     blockedLanes?: OrchestrationReadyAdmissionBlockedLane[];
@@ -1332,8 +1348,9 @@ async function readBuildReadyFloorProjection(
   const candidateLanes = [...laneCounts.entries()]
     .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
     .map(([lane]) => lane);
-  const buildReadyLanes = candidateLanes.length;
-  const belowFloor = usefulReadyCount < config.auto_promote_floor;
+  const projectedRootReady = readyAdmission?.rootReadyFuel ?? usefulReadyCount;
+  const buildReadyLanes = readyAdmission?.rootReadyLanes ?? candidateLanes.length;
+  const belowFloor = projectedRootReady < config.auto_promote_floor;
   const belowLanes = buildReadyLanes < config.auto_promote_min_lanes;
   const blockerCode = belowFloor
     ? "build_ready_below_floor"
@@ -1344,13 +1361,21 @@ async function readBuildReadyFloorProjection(
   if (belowFloor) blockerReasons.build_ready_below_floor = 1;
   const nextAction = blockerCode
     ? readyAdmission?.recommendedAction ??
-      `auto-promote or flesh build work in a new lane until build ready lanes reach ${buildReadyLanes}/${config.auto_promote_min_lanes} and ready fuel reaches ${usefulReadyCount}/${config.auto_promote_floor}`
+      `auto-promote or flesh build work in a new lane until build ready lanes reach ${buildReadyLanes}/${config.auto_promote_min_lanes} and ready fuel reaches ${projectedRootReady}/${config.auto_promote_floor}`
     : "build-ready fuel satisfies floor and lane diversity";
 
   return {
     blocked: blockerCode !== null,
     blocker_code: blockerCode,
-    useful_ready_count: usefulReadyCount,
+    useful_ready_count: projectedRootReady,
+    root_ready_fuel: projectedRootReady,
+    root_ready_lanes: readyAdmission?.rootReadyLanes ?? buildReadyLanes,
+    admissible_root_now: readyAdmission?.admissibleRootNow ?? readyAdmission?.admissibleNow ?? 0,
+    capacity_blocked_root: readyAdmission?.capacityBlockedRoot ?? 0,
+    deferred_descendants: readyAdmission?.deferredDescendants ?? 0,
+    broken_dependency_rows: readyAdmission?.brokenDependencyRows ?? 0,
+    fuel_exclusion_counts: readyAdmission?.fuelExclusionCounts ?? blockerReasons,
+    state_drift_ready_with_pending_dependency: readyAdmission?.stateDriftReadyWithPendingDependency ?? 0,
     floor: config.auto_promote_floor,
     build_ready_lanes: buildReadyLanes,
     min_lanes: config.auto_promote_min_lanes,
