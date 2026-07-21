@@ -1,4 +1,22 @@
+import { readFileSync } from 'node:fs';
 import { defineConfig } from 'vitest/config';
+
+interface QuarantineEntry {
+  file: string;
+  failed_tests: number;
+  owner: string;
+  reason: string;
+}
+
+const wave145Quarantine = JSON.parse(
+  readFileSync(new URL('./tests/quarantine/wave145-full-suite.json', import.meta.url), 'utf8'),
+) as { entries: QuarantineEntry[] };
+
+for (const entry of wave145Quarantine.entries) {
+  if (!entry.owner.trim() || entry.failed_tests < 1 || !entry.reason.trim()) {
+    throw new Error(`Invalid Wave145 quarantine entry: ${entry.file}`);
+  }
+}
 
 export default defineConfig({
   test: {
@@ -14,6 +32,9 @@ export default defineConfig({
       // and should be either converted to Vitest or run via `node --test test/repos`.
       'test/repos/**',
       'public-agent/**',
+      // Wave145: exact baseline-failing files are temporarily quarantined with
+      // an owner, failing-test count, and reason in the adjacent manifest.
+      ...wave145Quarantine.entries.map((entry) => entry.file),
     ],
     testTimeout: 300000, // 5 min timeout for integration tests (Claude API can be slow)
     hookTimeout: 120000, // 2 min for setup/teardown

@@ -287,4 +287,24 @@ describe("runFleshPass — DB-backed pass", () => {
     expect(after?.flesh_patch?.to_agent).toBe("hopper");
     expect(after?.dispatch_body).toContain("hopper:");
   });
+
+  it("live run preserves an explicitly authored provider/runtime pair", async () => {
+    const authored = await insertBacklogItem(adapter, {
+      title: "T-ORCH.13 — authored codex runtime",
+      track: "T-ORCH",
+      readiness_state: "needs_review",
+      provider: "openai",
+      runtime: "codex",
+      source_refs: ["roadmap.md"],
+    });
+
+    const summary = await runFleshPass(adapter, cfg, { dry_run: false, item_ids: [authored.item_id] });
+    expect(summary.considered).toBe(1);
+    expect(summary.results[0]?.patch?.provider).toBe("anthropic");
+    expect(summary.results[0]?.patch?.runtime).toBe("claude-code-cli");
+
+    const after = await getBacklogItem(adapter, authored.item_id);
+    expect(after?.provider).toBe("openai");
+    expect(after?.runtime).toBe("codex");
+  });
 });

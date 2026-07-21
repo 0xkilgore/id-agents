@@ -1853,6 +1853,11 @@ export async function recordFleshOutcome(
   // guard above, applied to dispatch_body specifically: only a true empty
   // skeleton (no existing dispatch_body) may have it set by a flesh pass.
   const hasAuthoredDispatchBody = typeof item.dispatch_body === "string" && item.dispatch_body.trim().length > 0;
+  const hasAuthoredProviderRuntime =
+    typeof item.provider === "string" &&
+    item.provider.trim().length > 0 &&
+    typeof item.runtime === "string" &&
+    item.runtime.trim().length > 0;
 
   if (patch) {
     // Persist the generated dispatch payload so the row is dispatchable (or
@@ -1862,8 +1867,13 @@ export async function recordFleshOutcome(
     push("write_scope_json", JSON.stringify(patch.write_scope));
     push("dependencies_json", JSON.stringify(patch.dependencies));
     push("token_estimate", patch.token_estimate);
-    push("provider", patch.provider);
-    push("runtime", patch.runtime);
+    // Provider/runtime routing is sticky as a pair. Fleshing may fill an
+    // incomplete skeleton, but must not replace an explicitly authored pair
+    // with the flesher's default runtime.
+    if (!hasAuthoredProviderRuntime) {
+      push("provider", patch.provider);
+      push("runtime", patch.runtime);
+    }
     if (patch.value_score !== null && patch.value_score !== undefined) push("value_score", patch.value_score);
     // Routing fields are sticky: keep an operator/human-authored to_agent +
     // priority instead of resetting it to the flesher's default lane pick.
