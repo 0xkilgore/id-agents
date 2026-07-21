@@ -225,6 +225,7 @@ export interface DecisionRecord {
     | "ready_metadata_repair"
     | "target_unhealthy_reroute"
     | "stale_ready_reconcile"
+    | "lifecycle_reconciliation"
     | "reconciled"
     | "would_reconcile";
   reason: string;

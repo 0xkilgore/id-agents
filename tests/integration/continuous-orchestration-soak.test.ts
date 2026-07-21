@@ -11,6 +11,7 @@ import { describe, it, expect, beforeEach } from "vitest";
 import { SqliteAdapter } from "../../src/db/sqlite-adapter.js";
 import { migrateSqlite } from "../../src/db/migrations/sqlite.js";
 import {
+  getBacklogItem,
   insertBacklogItem,
   listBacklogByState,
   setItemState,
@@ -34,6 +35,96 @@ describe("T-ORCH P0 — continuous hands-off soak", () => {
   let adapter: SqliteAdapter;
   beforeEach(async () => {
     adapter = await freshDb();
+  });
+
+  it("runs a three-tick production-sized dry-run canary while yielding to manager HTTP", async () => {
+    await adapter.query(`
+      INSERT INTO orchestration_backlog_item (
+        item_id, team_id, title, priority, readiness_state, risk_class,
+        write_scope_json, dependencies_json, created_at, updated_at
+      )
+      WITH RECURSIVE backlog(n) AS (
+        SELECT 1 UNION ALL SELECT n + 1 FROM backlog WHERE n < 3000
+      )
+      SELECT 'large-' || n, 'default', 'large row ' || n, 5, 'draft',
+        'routine', '[]', '[]', '2026-06-17T00:00:00.000Z', '2026-06-17T00:00:00.000Z'
+      FROM backlog
+    `);
+    const daemon = new ContinuousOrchestrationDaemon({
+      adapter,
+      config: {
+        ...defaultConfig(),
+        dry_run: true,
+        max_in_flight: 0,
+        max_new_per_tick: 0,
+        auto_flesh_enabled: false,
+        auto_promote_enabled: false,
+      },
+      enqueue: async () => { throw new Error("dry-run must not enqueue"); },
+      readUsage: () => Promise.resolve(okUsage()),
+      readInFlight: async () => ({ count: 0, active_write_scopes: new Set() }),
+      alert: async () => {},
+      killSwitchActive: () => false,
+      now: () => Date.parse("2026-06-17T18:00:00Z"),
+    });
+    await daemon.setMode("running");
+
+    const tickIds: string[] = [];
+    for (let tickNumber = 0; tickNumber < 3; tickNumber += 1) {
+      let healthResponsive = false;
+      const first = daemon.runTick();
+      const duplicateTrigger = daemon.runTick();
+      setImmediate(() => { healthResponsive = true; });
+      const [firstResult, duplicateResult] = await Promise.all([first, duplicateTrigger]);
+      expect(healthResponsive).toBe(true);
+      expect(duplicateResult.tick_id).toBe(firstResult.tick_id);
+      expect(firstResult.candidates).toBe(0);
+      expect(firstResult.admitted).toEqual([]);
+      tickIds.push(firstResult.tick_id);
+    }
+    expect(new Set(tickIds).size).toBe(3);
+  });
+
+  it("contains one admission exception while the same production-shaped tick ships later lanes", async () => {
+    const candidates: BacklogItem[] = [];
+    for (let index = 0; index < 3; index += 1) {
+      candidates.push(await insertBacklogItem(adapter, {
+        title: `candidate-${index}`,
+        to_agent: "roger",
+        dispatch_body: "ship independently",
+        readiness_state: "ready",
+        risk_class: "build",
+        write_scope: [`/repo/lane-${index}`],
+      }));
+    }
+    const daemon = new ContinuousOrchestrationDaemon({
+      adapter,
+      config: {
+        ...defaultConfig(), dry_run: false, max_in_flight: 3,
+        max_new_per_tick: 3, max_enqueues_per_tick: 3,
+        auto_flesh_enabled: false, auto_promote_enabled: false,
+      },
+      enqueue: async (item) => {
+        if (item.item_id === candidates[0].item_id) throw new Error("candidate-local scheduler failure");
+        return { dispatch_phid: `phid:disp-${item.item_id}`, query_id: `q_${item.item_id}` };
+      },
+      readUsage: () => Promise.resolve(okUsage()),
+      readInFlight: async () => ({ count: 0, active_write_scopes: new Set() }),
+      alert: async () => {},
+      killSwitchActive: () => false,
+    });
+    await daemon.setMode("running");
+
+    const tick = await daemon.runTick();
+
+    expect(tick.admitted.map((item) => item.item_id)).toEqual(candidates.slice(1).map((item) => item.item_id));
+    expect(tick.decisions).toContainEqual(expect.objectContaining({
+      item_id: candidates[0].item_id,
+      action: "skipped",
+      reason: "enqueue failed: candidate-local scheduler failure",
+    }));
+    expect((await getBacklogItem(adapter, candidates[0].item_id))?.readiness_state).toBe("ready");
+    expect((await getBacklogItem(adapter, candidates[2].item_id))?.readiness_state).toBe("in_flight");
   });
 
   it("cycles ready-fuel, fires up to max_in_flight every tick, ships continuously", async () => {
