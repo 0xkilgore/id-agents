@@ -16,6 +16,7 @@
     { "file": "tests/integration/team-isolation.test.ts", "failed_tests": 7, "owner": "roger", "reason": "stale task-create fixtures omit required owner metadata" },
     { "file": "tests/integration/tasks-track-field.test.ts", "failed_tests": 7, "owner": "roger", "reason": "stale task-create fixtures omit required owner metadata" },
     { "file": "tests/integration/remote-heartbeat.test.ts", "failed_tests": 7, "owner": "roger", "reason": "machine-sensitive remote process fixture failures" },
+    { "file": "tests/integration/heartbeat-separation.test.ts", "failed_tests": 1, "owner": "roger", "reason": "machine-sensitive manager lifecycle timeout leaves background timers using a closed SQLite fixture" },
     { "file": "tests/unit/outputs-monday-actor-routes.test.ts", "failed_tests": 6, "owner": "roger", "reason": "stale pre-conformance artifact fixtures omit project metadata" },
     { "file": "tests/integration/comment-reliability-acceptance.test.ts", "failed_tests": 6, "owner": "roger", "reason": "stale pre-conformance artifact fixtures omit project metadata" },
     { "file": "tests/unit/outputs-filesystem-reconciler.test.ts", "failed_tests": 5, "owner": "roger", "reason": "stale project derivation fixtures" },
