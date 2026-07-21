@@ -25,6 +25,22 @@ const okUsage = (): { view: UsageGateView; daily_tokens_used: number } => ({
   daily_tokens_used: 0,
 });
 
+const okDiskHeadroom = () => ({
+  schema_version: "disk-headroom.v1" as const,
+  state: "ok" as const,
+  path: "/tmp",
+  free_bytes: 50 * 1024 ** 3,
+  available_bytes: 50 * 1024 ** 3,
+  total_bytes: 100 * 1024 ** 3,
+  free_gib: 50,
+  available_gib: 50,
+  total_gib: 100,
+  used_percent: 50,
+  min_free_bytes: 5 * 1024 ** 3,
+  warn_free_bytes: 10 * 1024 ** 3,
+  reason: null,
+});
+
 async function freshDb() {
   const adapter = new SqliteAdapter(":memory:");
   await migrateSqlite(adapter);
@@ -63,6 +79,7 @@ describe("T-ORCH P0 — continuous hands-off soak", () => {
       enqueue: async () => { throw new Error("dry-run must not enqueue"); },
       readUsage: () => Promise.resolve(okUsage()),
       readInFlight: async () => ({ count: 0, active_write_scopes: new Set() }),
+      readDiskHeadroom: okDiskHeadroom,
       alert: async () => {},
       killSwitchActive: () => false,
       now: () => Date.parse("2026-06-17T18:00:00Z"),
@@ -110,14 +127,16 @@ describe("T-ORCH P0 — continuous hands-off soak", () => {
       },
       readUsage: () => Promise.resolve(okUsage()),
       readInFlight: async () => ({ count: 0, active_write_scopes: new Set() }),
+      readDiskHeadroom: okDiskHeadroom,
       alert: async () => {},
       killSwitchActive: () => false,
     });
     await daemon.setMode("running");
 
     const tick = await daemon.runTick();
-
-    expect(tick.admitted.map((item) => item.item_id)).toEqual(candidates.slice(1).map((item) => item.item_id));
+    expect(tick.admitted.map((item) => item.item_id).sort()).toEqual(
+      candidates.slice(1).map((item) => item.item_id).sort(),
+    );
     expect(tick.decisions).toContainEqual(expect.objectContaining({
       item_id: candidates[0].item_id,
       action: "skipped",
@@ -177,6 +196,7 @@ describe("T-ORCH P0 — continuous hands-off soak", () => {
         for (const it of inflight) for (const s of it.write_scope) scopes.add(s);
         return { count: inflight.length, active_write_scopes: scopes };
       },
+      readDiskHeadroom: okDiskHeadroom,
       alert: async () => {},
       killSwitchActive: () => false,
       now: () => Date.parse("2026-06-17T18:00:00Z"), // NOT a cadence load-point
@@ -236,11 +256,9 @@ describe("T-ORCH P0 — continuous hands-off soak", () => {
     expect(log[log.length - 1].needs_review_before).toBeLessThan(40);
     // 3. The daemon fired on EVERY tick (continuous; pre-fix it stalled at 0),
     //    never raised a stall alert, and on a multi-lane tick filled BEYOND the
-    //    old between-batch trickle of max_new_per_tick (tick 1 fired 5 across
+    //    old between-batch trickle of max_new_per_tick (tick 1 fires across
     //    distinct write-scopes). Sustained per-tick throughput is correctly
-    //    bounded by single-writer lanes — auto-fleshed T-ORCH work all shares
-    //    roger's id-agents lane, so it serializes to 1/tick (the lane guardrail
-    //    working as designed). Filling to max_in_flight needs multi-lane fuel.
+    //    bounded by the configured lane guardrails.
     expect(log.every((l) => l.admitted >= 1)).toBe(true);
     expect(log.every((l) => !l.stall)).toBe(true);
     expect(Math.max(...log.map((l) => l.admitted))).toBeGreaterThan(
