@@ -1975,6 +1975,70 @@ describe("daemon — dry-run vs live", () => {
     });
   });
 
+  it("atomically dispositions confidence-held needs_review duplicates and replays the receipt idempotently", async () => {
+    const held = await insertBacklogItem(adapter, {
+      team_id: "default",
+      title: "confidence-held stale duplicate",
+      track: "T-ORCH",
+      to_agent: "cto",
+      dispatch_body: "stale duplicate hygiene",
+      readiness_state: "needs_review",
+      risk_class: "build",
+      write_scope: ["repo/confidence-held-stale"],
+      dependencies: [],
+      priority: 1,
+      flesh_confidence: AUTO_READY_CONFIDENCE_THRESHOLD - 0.05,
+      flesh_status: "needs_chris_batch",
+    });
+    await adapter.query(
+      `UPDATE orchestration_backlog_item
+          SET last_dispatch_phid = $1,
+              readiness_state = 'needs_review'
+        WHERE item_id = $2`,
+      ["phid:disp-confidence-held-prior", held.item_id],
+    );
+    await seedDispatch(adapter, {
+      dispatch_phid: "phid:disp-confidence-held-prior",
+      status: "failed",
+      failure_kind: "process_exit",
+      failure_detail: "deterministic stale duplicate",
+    });
+
+    const { app } = mountStatusApp(adapter, {
+      dry_run: true,
+      auto_flesh_enabled: false,
+      auto_promote_enabled: false,
+    });
+    const request = {
+      disposition: "supersede",
+      actor: "cto",
+      reason: "confidence-held row is stale duplicate work",
+    };
+    const disposed = await callAppRequest(app, "POST", `/orchestration/backlog/${held.item_id}/disposition`, request);
+    expect(disposed.status, JSON.stringify(disposed.body)).toBe(200);
+    expect(disposed.body.item).toMatchObject({
+      readiness_state: "superseded",
+      updated_by: "cto",
+      stale_duplicate_closeout_receipt: {
+        closed_by: "cto",
+        from_state: "needs_review",
+        to_state: "superseded",
+        supersession_reason: request.reason,
+      },
+    });
+
+    const replay = await callAppRequest(app, "POST", `/orchestration/backlog/${held.item_id}/disposition`, request);
+    expect(replay.status, JSON.stringify(replay.body)).toBe(200);
+    expect(replay.body).toMatchObject({
+      ok: true,
+      idempotent: true,
+      item: {
+        readiness_state: "superseded",
+        stale_duplicate_closeout_receipt: disposed.body.item.stale_duplicate_closeout_receipt,
+      },
+    });
+  });
+
   it("supersedes a dead-route duplicate without marking it retry-safe", async () => {
     const deadRoute = await seedReady(adapter, {
       title: "dead agent route duplicate blocker",

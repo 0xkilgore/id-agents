@@ -820,8 +820,29 @@ export function mountContinuousOrchestrationRoutes(app: Application, opts: Orche
       if (!item || item.team_id !== teamId) {
         return res.status(404).json({ ok: false, error: "backlog item not found" });
       }
-      if (item.readiness_state !== "ready" || !item.last_dispatch_phid || item.retry_safe) {
-        return res.status(409).json({ ok: false, error: "item is not a duplicate-dispatch ready blocker", item });
+      const existingReceipt = item.stale_duplicate_closeout_receipt;
+      if (existingReceipt && (item.readiness_state === "done" || item.readiness_state === "superseded")) {
+        const existingDisposition = existingReceipt.to_state === "done" ? "close" : "supersede";
+        if (existingDisposition !== disposition) {
+          return res.status(409).json({
+            ok: false,
+            error: `item was already dispositioned as ${existingDisposition}`,
+            item,
+          });
+        }
+        return res.json({ ok: true, idempotent: true, item, disposition: existingReceipt });
+      }
+      if (
+        (item.readiness_state !== "ready" && item.readiness_state !== "needs_review") ||
+        !item.last_dispatch_phid ||
+        item.retry_safe
+      ) {
+        return res.status(409).json({
+          ok: false,
+          error: "item is not an eligible duplicate-dispatch blocker",
+          eligible_states: ["ready", "needs_review"],
+          item,
+        });
       }
       const outcomes = await getDispatchOutcomesByPhid(adapter, [item.last_dispatch_phid]);
       const report = buildDuplicateDispatchRetryClassificationReport([item], outcomes);

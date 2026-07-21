@@ -24,7 +24,7 @@ export interface DuplicateDispatchRetryClassificationItem {
   item_id: string;
   title: string;
   owner: string | null;
-  readiness_state: "ready";
+  readiness_state: "ready" | "needs_review";
   prior_dispatch_id: string;
   prior_dispatch_status: string | null;
   prior_recovery_status: string | null;
@@ -117,7 +117,7 @@ export function buildDuplicateDispatchRetryClassificationReport(
   const nowMs = opts.now?.getTime() ?? Date.now();
 
   for (const item of items) {
-    if (item.readiness_state !== "ready") continue;
+    if (item.readiness_state !== "ready" && item.readiness_state !== "needs_review") continue;
     if (!item.last_dispatch_phid) continue;
     if (item.retry_safe) continue;
 
@@ -128,7 +128,7 @@ export function buildDuplicateDispatchRetryClassificationReport(
       item_id: item.item_id,
       title: item.title,
       owner: item.to_agent ?? null,
-      readiness_state: "ready",
+      readiness_state: item.readiness_state,
       prior_dispatch_id: item.last_dispatch_phid,
       prior_dispatch_status: outcome?.status ?? null,
       prior_recovery_status: outcome?.recovery_status ?? null,
