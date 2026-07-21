@@ -59,8 +59,17 @@ export interface NeedsChrisRow {
 export interface NeedsChrisQueue {
   schema_version: "decisions.needs-chris.v1";
   generated_at: string;
-  counts: { total: number; clarification: number; build_approval: number };
+  counts: {
+    total: number;
+    clarification: number;
+    build_approval: number;
+    input_total: number;
+    excluded_total: number;
+    excluded_by_reason: Record<string, number>;
+    classified: Record<NeedsChrisClassification, number>;
+  };
   rows: NeedsChrisRow[];
+  exclusions: NeedsChrisExclusion[];
   /** The data-driven approval policy in effect (present when supplied). The
    *  surface shows this so "what needs Chris" is visible, not implicit. */
   approval_policy?: ApprovalPolicySummary;
@@ -84,6 +93,29 @@ export interface ClarificationInput {
   urgency: string;
   stale_at: string | null;
   age_seconds: number;
+}
+
+export type NeedsChrisClassification =
+  | "operator_judgment"
+  | "external_authorization"
+  | "manager_agent_resolvable"
+  | "stale_superseded";
+
+export type NeedsChrisExclusionReason =
+  | "stale_browser_request"
+  | "stale_path_question"
+  | "stale_worktree_question"
+  | "stale_branch_question"
+  | "stale_promotion_question"
+  | "manager_agent_infrastructure";
+
+export interface NeedsChrisExclusion {
+  id: string;
+  dispatch_id: string;
+  classification: "manager_agent_resolvable" | "stale_superseded";
+  reason_code: NeedsChrisExclusionReason;
+  terminal_disposition: "moot" | "resolve_without_operator";
+  safety: "no_implicit_approval";
 }
 
 export interface BuildApprovalInput {
@@ -129,6 +161,37 @@ function ageSeconds(fromIso: string | null | undefined, nowMs: number): number {
   return Math.max(0, Math.floor((nowMs - t) / 1000));
 }
 
+const BROWSER_RE = /\b(?:in-app browser|chrome session|browser session|browser backend|iab session)\b/i;
+const PATH_RE = /\b(?:which repository|which repo|requested .* path|canonical .* (?:path|index)|where is the canonical)\b/i;
+const WORKTREE_RE = /\b(?:worktree|untracked worktrees|protected .* checkout|dirty changes|dirty and on)\b/i;
+const BRANCH_RE = /\b(?:branch .* (?:diverged|ahead|behind|does not exist)|base .* branch|rebase the dispatch)\b/i;
+const PROMOTION_RE = /\b(?:promotion|promote|fast-forward|merge_commit|squash)\b/i;
+const EXTERNAL_AUTH_RE = /\b(?:enable tailscale|admin url|external authori[sz]ation|credentials?|spend|purchase|legal approval)\b/i;
+const OPERATOR_JUDGMENT_RE = /\b(?:chris: approve|approve the .* disposition|product (?:choice|decision)|policy decision|accept .* closeout)\b/i;
+
+export function classifyClarification(
+  input: ClarificationInput,
+  nowIso: string,
+): { classification: NeedsChrisClassification; reason_code?: NeedsChrisExclusionReason } {
+  const text = `${input.subject}\n${input.question}`;
+  const stale = Boolean(input.stale_at && Date.parse(input.stale_at) <= Date.parse(nowIso));
+
+  // Genuine judgment remains queued even after its response target passes: age
+  // does not make a business choice for the operator.
+  if (OPERATOR_JUDGMENT_RE.test(text)) return { classification: "operator_judgment" };
+  if (EXTERNAL_AUTH_RE.test(text)) return { classification: "external_authorization" };
+
+  // Expired environment questions are terminal noise.  Ordering is deliberate:
+  // it provides one stable diagnostic reason for questions mentioning several
+  // implementation details.  "moot" never implies permission to mutate them.
+  if (stale && BROWSER_RE.test(text)) return { classification: "stale_superseded", reason_code: "stale_browser_request" };
+  if (stale && PROMOTION_RE.test(text)) return { classification: "stale_superseded", reason_code: "stale_promotion_question" };
+  if (stale && WORKTREE_RE.test(text)) return { classification: "stale_superseded", reason_code: "stale_worktree_question" };
+  if (stale && BRANCH_RE.test(text)) return { classification: "stale_superseded", reason_code: "stale_branch_question" };
+  if (stale && PATH_RE.test(text)) return { classification: "stale_superseded", reason_code: "stale_path_question" };
+  return { classification: "manager_agent_resolvable", reason_code: "manager_agent_infrastructure" };
+}
+
 /**
  * Build the unified needs-Chris decision queue. Clarifications (which block a
  * waiting agent) sort first; build approvals follow, ordered by priority then
@@ -142,7 +205,10 @@ export function buildNeedsChrisQueue(
 ): NeedsChrisQueue {
   const nowMs = Date.parse(nowIso);
 
-  const clarificationRows: NeedsChrisRow[] = clarifications.map((c) => {
+  const classified = clarifications.map((input) => ({ input, verdict: classifyClarification(input, nowIso) }));
+  const clarificationRows: NeedsChrisRow[] = classified
+    .filter(({ verdict }) => verdict.classification === "operator_judgment" || verdict.classification === "external_authorization")
+    .map(({ input: c }) => {
     const actions = clarificationActions();
     return {
       kind: "clarification",
@@ -157,7 +223,18 @@ export function buildNeedsChrisQueue(
       allowed_actions: actions.map((a) => a.action),
       actions,
     };
-  });
+    });
+
+  const exclusions: NeedsChrisExclusion[] = classified
+    .filter(({ verdict }) => verdict.classification === "manager_agent_resolvable" || verdict.classification === "stale_superseded")
+    .map(({ input, verdict }) => ({
+      id: input.clarification_id ?? input.dispatch_id,
+      dispatch_id: input.dispatch_id,
+      classification: verdict.classification as "manager_agent_resolvable" | "stale_superseded",
+      reason_code: verdict.reason_code!,
+      terminal_disposition: verdict.classification === "stale_superseded" ? "moot" : "resolve_without_operator",
+      safety: "no_implicit_approval",
+    }));
 
   const buildRows: NeedsChrisRow[] = [...buildApprovals]
     .sort((a, b) => (a.priority - b.priority) || (a.item_id < b.item_id ? -1 : 1))
@@ -178,7 +255,8 @@ export function buildNeedsChrisQueue(
       };
       if (options.classifyBuildApproval) row.gate = options.classifyBuildApproval(b);
       return row;
-    });
+    })
+    .filter((row) => row.gate?.needs_chris !== false);
 
   const rows = [...clarificationRows, ...buildRows];
   const queue: NeedsChrisQueue = {
@@ -188,8 +266,19 @@ export function buildNeedsChrisQueue(
       total: rows.length,
       clarification: clarificationRows.length,
       build_approval: buildRows.length,
+      input_total: clarifications.length + buildApprovals.length,
+      excluded_total: exclusions.length + (buildApprovals.length - buildRows.length),
+      excluded_by_reason: exclusions.reduce<Record<string, number>>((acc, item) => {
+        acc[item.reason_code] = (acc[item.reason_code] ?? 0) + 1;
+        return acc;
+      }, buildApprovals.length === buildRows.length ? {} : { approval_policy_auto: buildApprovals.length - buildRows.length }),
+      classified: classified.reduce<Record<NeedsChrisClassification, number>>((acc, item) => {
+        acc[item.verdict.classification] += 1;
+        return acc;
+      }, { operator_judgment: 0, external_authorization: 0, manager_agent_resolvable: 0, stale_superseded: 0 }),
     },
     rows,
+    exclusions,
   };
   if (options.approvalPolicy) queue.approval_policy = options.approvalPolicy;
   return queue;

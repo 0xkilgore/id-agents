@@ -43,12 +43,12 @@ describe("buildNeedsChrisQueue — contract", () => {
     const q = buildNeedsChrisQueue([clar()], [build(), build({ item_id: "coitem_2", priority: 1 })], NOW);
     expect(q.schema_version).toBe("decisions.needs-chris.v1");
     expect(q.generated_at).toBe(NOW);
-    expect(q.counts).toEqual({ total: 3, clarification: 1, build_approval: 2 });
-    expect(q.rows.map((r) => r.kind)).toEqual(["clarification", "build_approval", "build_approval"]);
+    expect(q.counts).toMatchObject({ total: 2, clarification: 0, build_approval: 2, input_total: 3, excluded_total: 1 });
+    expect(q.rows.map((r) => r.kind)).toEqual(["build_approval", "build_approval"]);
   });
 
   it("clarification rows expose RD-001 stable id + answer/redirect/hold actions on /agent-resume", () => {
-    const q = buildNeedsChrisQueue([clar()], [], NOW);
+    const q = buildNeedsChrisQueue([clar({ question: "Chris: approve the batch disposition?" })], [], NOW);
     const row = q.rows[0]!;
     expect(row.kind).toBe("clarification");
     expect(row.id).toBe("clar_123"); // clarification_id, not dispatch_id
@@ -63,7 +63,7 @@ describe("buildNeedsChrisQueue — contract", () => {
   });
 
   it("falls back to dispatch_id as the stable id when clarification_id is null", () => {
-    const q = buildNeedsChrisQueue([clar({ clarification_id: null })], [], NOW);
+    const q = buildNeedsChrisQueue([clar({ clarification_id: null, question: "Chris: approve the batch disposition?" })], [], NOW);
     expect(q.rows[0]!.id).toBe("phid:disp-abc");
   });
 
@@ -104,21 +104,27 @@ describe("buildNeedsChrisQueue — contract", () => {
   });
 });
 
-describe("buildNeedsChrisQueue — parity with the two feeds", () => {
-  it("emits exactly one row per input, no invented or dropped rows", () => {
-    const clars = [clar({ clarification_id: "c1" }), clar({ clarification_id: "c2" })];
+describe("buildNeedsChrisQueue — operator queue filtering", () => {
+  it("emits genuine decisions and accounts for every excluded input", () => {
+    const clars = [
+      clar({ clarification_id: "c1", question: "Chris: approve the batch disposition?" }),
+      clar({ clarification_id: "c2", question: "Which repo: cane or id-agents?" }),
+    ];
     const builds = [build({ item_id: "i1" }), build({ item_id: "i2" }), build({ item_id: "i3" })];
     const q = buildNeedsChrisQueue(clars, builds, NOW);
-    expect(q.rows).toHaveLength(5);
+    expect(q.rows).toHaveLength(4);
     const clarIds = q.rows.filter((r) => r.kind === "clarification").map((r) => r.id).sort();
-    expect(clarIds).toEqual(["c1", "c2"]);
+    expect(clarIds).toEqual(["c1"]);
     const buildIds = q.rows.filter((r) => r.kind === "build_approval").map((r) => r.id).sort();
     expect(buildIds).toEqual(["i1", "i2", "i3"]);
+    expect(q.counts.input_total).toBe(5);
+    expect(q.counts.excluded_total).toBe(1);
+    expect(q.exclusions[0]).toMatchObject({ id: "c2", reason_code: "manager_agent_infrastructure", safety: "no_implicit_approval" });
   });
 
   it("clarifications sort ahead of build approvals; builds ordered by priority", () => {
     const q = buildNeedsChrisQueue(
-      [clar({ clarification_id: "c1" })],
+      [clar({ clarification_id: "c1", question: "Chris: approve the batch disposition?" })],
       [build({ item_id: "lo", priority: 7 }), build({ item_id: "hi", priority: 1 })],
       NOW,
     );
@@ -128,6 +134,54 @@ describe("buildNeedsChrisQueue — parity with the two feeds", () => {
   it("empty feeds → empty queue with zeroed counts", () => {
     const q = buildNeedsChrisQueue([], [], NOW);
     expect(q.rows).toEqual([]);
-    expect(q.counts).toEqual({ total: 0, clarification: 0, build_approval: 0 });
+    expect(q.counts).toMatchObject({ total: 0, clarification: 0, build_approval: 0, input_total: 0, excluded_total: 0 });
+  });
+
+  it("classifies the current 29-row production shape and safely moots stale implementation questions", () => {
+    const stale = "2026-06-29T00:00:00.000Z";
+    const questions = [
+      ...Array.from({ length: 5 }, (_, i) => `Please attach an in-app browser session ${i}`),
+      ...Array.from({ length: 3 }, (_, i) => `Which canonical repo path should I use ${i}`),
+      ...Array.from({ length: 7 }, (_, i) => `May I clean the dirty protected worktree ${i}`),
+      ...Array.from({ length: 4 }, (_, i) => `Branch feature-${i} is ahead and behind main; which branch strategy?`),
+      ...Array.from({ length: 6 }, (_, i) => `Which promotion strategy should I use for commit ${i}?`),
+      "Which manager endpoint should record the receipt?",
+      "Should I wait for the release candidate branch?",
+      "Chris: approve the Wave133 batch disposition?",
+      "Please enable Tailscale using the admin URL",
+    ];
+    expect(questions).toHaveLength(29);
+    const q = buildNeedsChrisQueue(questions.map((question, i) => clar({
+      dispatch_id: `phid:disp-${i}`,
+      clarification_id: `clar_${i}`,
+      question,
+      stale_at: stale,
+    })), [], NOW);
+
+    expect(q.counts).toMatchObject({ input_total: 29, total: 2, clarification: 2, excluded_total: 27 });
+    expect(q.counts.classified).toEqual({
+      operator_judgment: 1,
+      external_authorization: 1,
+      manager_agent_resolvable: 2,
+      stale_superseded: 25,
+    });
+    expect(q.exclusions.filter((e) => e.terminal_disposition === "moot")).toHaveLength(25);
+    expect(q.exclusions.every((e) => e.safety === "no_implicit_approval")).toBe(true);
+    expect(q.counts.excluded_by_reason).toMatchObject({
+      stale_browser_request: 5,
+      stale_path_question: 3,
+      stale_worktree_question: 7,
+      stale_branch_question: 4,
+      stale_promotion_question: 6,
+      manager_agent_infrastructure: 2,
+    });
+  });
+
+  it("drops build rows that the approval policy explicitly classifies auto", () => {
+    const q = buildNeedsChrisQueue([], [build({ item_id: "auto" }), build({ item_id: "gated" })], NOW, {
+      classifyBuildApproval: (b) => ({ needs_chris: b.item_id === "gated", matched_rules: [], rationale: "fixture" }),
+    });
+    expect(q.rows.map((row) => row.id)).toEqual(["gated"]);
+    expect(q.counts.excluded_by_reason).toEqual({ approval_policy_auto: 1 });
   });
 });
