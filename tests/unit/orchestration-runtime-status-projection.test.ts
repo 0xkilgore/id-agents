@@ -22,6 +22,7 @@ function readyAdmission(overrides: Partial<ReadyAdmissionExplanation> = {}): Rea
     useful_ready: 3,
     admissible_now: 1,
     blocker_counts: [],
+    terminal_actions: [],
     recommended_action: "admit available ready rows",
     disk_headroom: null,
     ...overrides,
@@ -101,6 +102,38 @@ describe("buildRuntimeStatusProjection disk admission policy", () => {
       "prefer disk cleanup/repair or deploy-safe rows until disk headroom clears the warning floor",
       "free disk or admit cleanup/deploy-safe rows before releasing disk_warning_floor=3 held row(s); reroute or update provider_runtime_mismatch=1 rows to match a live runtime",
     ]);
+  });
+
+  it("projects terminal actions with counts for low-fuel blockers", () => {
+    const terminal_actions: ReadyAdmissionExplanation["terminal_actions"] = [
+      {
+        code: "duplicate_dispatch_retry_required",
+        count: 2,
+        recommended_terminal_action: "Close or supersede stale duplicates; mark retry_safe only for an operator-approved bounded refire.",
+      },
+      {
+        code: "disk_warning_floor",
+        count: 3,
+        recommended_terminal_action: "Reclaim disk until the warning floor clears; keep non-cleanup rows held and admit only cleanup/deploy-safe work meanwhile.",
+      },
+      {
+        code: "blocked_dependency",
+        count: 4,
+        recommended_terminal_action: "Clear only dependencies backed by done/superseded evidence; otherwise repair, supersede, or wait for the upstream row.",
+      },
+    ];
+    const projection = buildRuntimeStatusProjection({
+      runtimeHealth: runtimeHealth("warn"),
+      autoPromoteHealth: autoPromoteHealth(),
+      readyAdmission: readyAdmission({
+        candidates: 9,
+        useful_ready: 0,
+        admissible_now: 0,
+        terminal_actions,
+      }),
+    });
+
+    expect(projection.blocker_terminal_actions).toEqual(terminal_actions);
   });
 
   it("ok disk reports ordinary build admission as available and no disk-held rows", () => {

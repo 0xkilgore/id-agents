@@ -97,6 +97,7 @@ export interface RuntimeStatusProjection {
   raw_ready_fuel: number;
   useful_ready_fuel: number;
   admissible_now: number;
+  blocker_terminal_actions: ReadyAdmissionExplanation["terminal_actions"];
   operator_summary: string;
   recommended_actions: string[];
 }
@@ -190,6 +191,7 @@ export function buildRuntimeStatusProjection(input: {
     raw_ready_fuel: input.readyAdmission.candidates,
     useful_ready_fuel: input.readyAdmission.useful_ready,
     admissible_now: input.readyAdmission.admissible_now,
+    blocker_terminal_actions: input.readyAdmission.terminal_actions ?? [],
     operator_summary: operatorSummary,
     recommended_actions: recommendedActions,
   };
