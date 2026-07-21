@@ -1,0 +1,56 @@
+{
+  "schema_version": "manager.completed_implementation_promotion_gap.v1",
+  "owner": "substrate-api-codex",
+  "cases": [
+    {
+      "name": "completed implementation with absent promotion result",
+      "source": { "kind": "dispatch", "id": "phid:disp-promotion-absent" },
+      "facts": {
+        "dispatch_status": "done",
+        "task_status": "done",
+        "promotion": {
+          "required": true,
+          "completed": false,
+          "verified": false,
+          "promoted_sha": null,
+          "remote_main_sha": null
+        },
+        "deploy": null,
+        "acceptance": null,
+        "clarification": { "state": "none", "owner": null },
+        "backlog": {
+          "state": "ready",
+          "stale_duplicate": false,
+          "prior_dispatch_terminal": true,
+          "prior_work_landed": true
+        }
+      },
+      "expected_promotion_state": "missing"
+    },
+    {
+      "name": "completed implementation with failed promotion verification",
+      "source": { "kind": "dispatch", "id": "phid:disp-promotion-failed" },
+      "facts": {
+        "dispatch_status": "done",
+        "task_status": "done",
+        "promotion": {
+          "required": true,
+          "completed": true,
+          "verified": false,
+          "promoted_sha": "implementation-sha",
+          "remote_main_sha": "previous-main-sha"
+        },
+        "deploy": null,
+        "acceptance": null,
+        "clarification": { "state": "none", "owner": null },
+        "backlog": {
+          "state": "ready",
+          "stale_duplicate": false,
+          "prior_dispatch_terminal": true,
+          "prior_work_landed": true
+        }
+      },
+      "expected_promotion_state": "invalid"
+    }
+  ]
+}
