@@ -36,6 +36,49 @@ describe("T-ORCH P0 — continuous hands-off soak", () => {
     adapter = await freshDb();
   });
 
+  it("coalesces a production-sized backlog tick and yields to manager HTTP", async () => {
+    await adapter.query(`
+      INSERT INTO orchestration_backlog_item (
+        item_id, team_id, title, priority, readiness_state, risk_class,
+        write_scope_json, dependencies_json, created_at, updated_at
+      )
+      WITH RECURSIVE backlog(n) AS (
+        SELECT 1 UNION ALL SELECT n + 1 FROM backlog WHERE n < 3000
+      )
+      SELECT 'large-' || n, 'default', 'large row ' || n, 5, 'draft',
+        'routine', '[]', '[]', '2026-06-17T00:00:00.000Z', '2026-06-17T00:00:00.000Z'
+      FROM backlog
+    `);
+    const daemon = new ContinuousOrchestrationDaemon({
+      adapter,
+      config: {
+        ...defaultConfig(),
+        dry_run: true,
+        max_in_flight: 0,
+        max_new_per_tick: 0,
+        auto_flesh_enabled: false,
+        auto_promote_enabled: false,
+      },
+      enqueue: async () => { throw new Error("dry-run must not enqueue"); },
+      readUsage: () => Promise.resolve(okUsage()),
+      readInFlight: async () => ({ count: 0, active_write_scopes: new Set() }),
+      alert: async () => {},
+      killSwitchActive: () => false,
+      now: () => Date.parse("2026-06-17T18:00:00Z"),
+    });
+    await daemon.setMode("running");
+
+    let healthResponsive = false;
+    const first = daemon.runTick();
+    const duplicateTrigger = daemon.runTick();
+    setImmediate(() => { healthResponsive = true; });
+    const [firstResult, duplicateResult] = await Promise.all([first, duplicateTrigger]);
+
+    expect(healthResponsive).toBe(true);
+    expect(duplicateResult.tick_id).toBe(firstResult.tick_id);
+    expect(firstResult.candidates).toBe(0);
+  });
+
   it("cycles ready-fuel, fires up to max_in_flight every tick, ships continuously", async () => {
     const MAX_IN_FLIGHT = 8;
     // Seed the live-like stuck state: a little ready fuel + a big needs_review

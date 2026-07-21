@@ -1230,6 +1230,7 @@ export class ContinuousOrchestrationDaemon {
   private stopped = false;
   private diskReclaimEpisode = false;
   private readonly alertIncidents = new Map<string, AlertIncidentState>();
+  private activeTick: Promise<TickResult> | null = null;
 
   constructor(deps: DaemonDeps) {
     this.deps = deps;
@@ -1345,8 +1346,26 @@ export class ContinuousOrchestrationDaemon {
     };
   }
 
+  /**
+   * Run one orchestration tick, coalescing concurrent timer/manual triggers.
+   * Yield before the work starts so an HTTP request that triggered a tick never
+   * monopolizes the manager turn before other already-ready routes can run.
+   */
+  runTick(): Promise<TickResult> {
+    if (this.activeTick) return this.activeTick;
+    const tick = (async () => {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      return this.runTickOnce();
+    })();
+    this.activeTick = tick;
+    void tick.finally(() => {
+      if (this.activeTick === tick) this.activeTick = null;
+    }).catch(() => undefined);
+    return tick;
+  }
+
   /** Run exactly one orchestration tick. Idempotent w.r.t. external state. */
-  async runTick(): Promise<TickResult> {
+  private async runTickOnce(): Promise<TickResult> {
     const config = this.deps.config;
     const nowMs = this.now();
     const nowIso = new Date(nowMs).toISOString();
@@ -1368,6 +1387,10 @@ export class ContinuousOrchestrationDaemon {
       dry_run: config.dry_run,
       actor: "continuous-orchestration",
     });
+    // SQLite work is synchronous inside the adapter. Give manager HTTP a turn
+    // between lifecycle reconciliation and the admission projection so a large
+    // production backlog cannot make /health appear dead to the watchdog.
+    await new Promise<void>((resolve) => setImmediate(resolve));
 
     const { view: usage, daily_tokens_used } = await this.deps.readUsage();
     const { count: in_flight, active_write_scopes } = await this.deps.readInFlight();
@@ -1406,6 +1429,7 @@ export class ContinuousOrchestrationDaemon {
       dry_run: config.dry_run,
       items: [...staleReadyReconcile.items, ...postAutoPromoteStaleReadyReconcile.items],
     };
+    await new Promise<void>((resolve) => setImmediate(resolve));
 
     // Daemon SELF-REFUEL: when READY fuel runs low — at a batch load-point or
     // when fully dry — flesh skeletons into dispatchable READY items BEFORE
@@ -1440,6 +1464,7 @@ export class ContinuousOrchestrationDaemon {
       dry_run: config.dry_run,
       items: [...staleReadyReconcile.items, ...postRefuelStaleReadyReconcile.items],
     };
+    await new Promise<void>((resolve) => setImmediate(resolve));
     // Slice 4 mechanism 2: if the refuel fleshed anything this tick, suppress
     // admission so the daemon never stacks two write bursts in one tick.
     const refuelFleshed = refuel?.auto_ready ?? 0;
