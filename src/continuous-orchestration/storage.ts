@@ -401,6 +401,113 @@ export async function listDependencyStates(adapter: DbAdapter, team_id = "defaul
   return map;
 }
 
+export interface BacklogDependencyReconciliationTransition {
+  item_id: string;
+  from_state: "blocked_dependency";
+  to_state: "blocked_dependency" | "ready";
+  dependencies_before: string[];
+  dependencies_after: string[];
+  resolved: Array<{ dependency: string; dependency_state: "done" | "superseded" }>;
+  reason: string;
+  applied: boolean;
+}
+
+export interface BacklogDependencyReconciliationResult {
+  scanned: number;
+  cap: number;
+  truncated: boolean;
+  dry_run: boolean;
+  transitions: BacklogDependencyReconciliationTransition[];
+}
+
+/**
+ * Bounded pre-admission repair for dependency-held rows. Only dependencies with
+ * authoritative backlog terminal state (done/superseded) are removed. Missing,
+ * failed, needs_review, and cyclic/non-terminal references remain fail-closed.
+ */
+export async function reconcileTerminalBacklogDependencies(
+  adapter: DbAdapter,
+  opts: { team_id?: string; limit?: number; dry_run?: boolean; actor?: string; tick_id?: string } = {},
+): Promise<BacklogDependencyReconciliationResult> {
+  const teamId = opts.team_id ?? "default";
+  const cap = Math.max(0, Math.min(500, Math.trunc(opts.limit ?? 100)));
+  const dryRun = opts.dry_run ?? false;
+  if (cap === 0) return { scanned: 0, cap, truncated: false, dry_run: dryRun, transitions: [] };
+
+  const { rows } = await adapter.query<BacklogRow>(
+    `SELECT * FROM orchestration_backlog_item
+      WHERE team_id = $1 AND readiness_state = 'blocked_dependency'
+      ORDER BY priority ASC, created_at ASC, item_id ASC
+      LIMIT $2`,
+    [teamId, cap + 1],
+  );
+  const truncated = rows.length > cap;
+  const candidates = rows.slice(0, cap).map(rowToBacklogItem);
+  const states = await listDependencyStates(adapter, teamId);
+  const transitions: BacklogDependencyReconciliationTransition[] = [];
+
+  for (const item of candidates) {
+    const resolved = item.dependencies.flatMap((dependency) => {
+      const upstream = states.get(dependency);
+      return upstream?.readiness_state === "done" || upstream?.readiness_state === "superseded"
+        ? [{ dependency, dependency_state: upstream.readiness_state }]
+        : [];
+    });
+    if (resolved.length === 0) continue;
+
+    const resolvedKeys = new Set(resolved.map((entry) => entry.dependency));
+    const dependenciesAfter = item.dependencies.filter((dependency) => !resolvedKeys.has(dependency));
+    const toState = dependenciesAfter.length === 0 ? "ready" : "blocked_dependency";
+    const reason = `terminal backlog dependencies reconciled: ${resolved
+      .map((entry) => `${entry.dependency}=${entry.dependency_state}`)
+      .join(", ")}; ${dependenciesAfter.length} unresolved dependency(ies) remain`;
+    const transition: BacklogDependencyReconciliationTransition = {
+      item_id: item.item_id,
+      from_state: "blocked_dependency",
+      to_state: toState,
+      dependencies_before: item.dependencies,
+      dependencies_after: dependenciesAfter,
+      resolved,
+      reason,
+      applied: false,
+    };
+    transitions.push(transition);
+    if (dryRun) continue;
+
+    const now = new Date().toISOString();
+    const update = await adapter.query(
+      `UPDATE orchestration_backlog_item
+          SET readiness_state = $1, dependencies_json = $2, updated_by = $3, updated_at = $4
+        WHERE team_id = $5 AND item_id = $6 AND readiness_state = 'blocked_dependency'`,
+      [toState, JSON.stringify(dependenciesAfter), opts.actor ?? "continuous-orchestration:dependency-reconciler", now, teamId, item.item_id],
+    );
+    // A concurrent operator may have moved the row since the bounded read.
+    // Preserve fail-closed behavior and never emit an audit for a write we lost.
+    if (update.rowCount !== 1) continue;
+    transition.applied = true;
+    await appendDecisions(adapter, {
+      team_id: teamId,
+      tick_id: opts.tick_id ?? "dependency-reconciliation",
+      dry_run: false,
+      records: [{
+        item_id: item.item_id,
+        action: "reconciled",
+        reason,
+        metadata: {
+          operation: "reconcile_terminal_backlog_dependencies",
+          from_state: "blocked_dependency",
+          to_state: toState,
+          dependencies_before: item.dependencies,
+          dependencies_after: dependenciesAfter,
+          resolved,
+        },
+      }],
+    });
+  }
+
+  return { scanned: candidates.length, cap, truncated, dry_run: dryRun, transitions };
+}
+
 /**
  * The human/approval gate: promote a draft/needs_review item to READY. Refuses
  * to promote from any other state, and refuses items with no dispatch body/agent
