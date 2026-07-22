@@ -39,6 +39,7 @@ import {
   recordTickOutcome,
   repairReadyCodexRuntimeMetadata,
   reconcileStaleAlreadyDispatchedReadyRows,
+  reconcileTerminalBacklogDependencies,
   setItemState,
   setMode,
   updateBacklogFields,
@@ -1502,6 +1503,13 @@ export class ContinuousOrchestrationDaemon {
     const admitCap = tickWriteCaps(writeCfg, refuelFleshed).admitCap;
 
     const readyRuntimeRepairs = await repairReadyCodexRuntimeMetadata(this.deps.adapter, this.teamId, { apply: true });
+    await reconcileTerminalBacklogDependencies(this.deps.adapter, {
+      team_id: this.teamId,
+      limit: 100,
+      dry_run: config.dry_run,
+      actor: "continuous-orchestration:dependency-reconciler",
+      tick_id,
+    });
     let ready = await listReadyItems(this.deps.adapter, this.teamId);
     // A verified transient may be marked retry-safe by this cycle, but never
     // refire it in that same cycle: the receipt must become observable first.
