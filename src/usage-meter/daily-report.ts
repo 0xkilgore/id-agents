@@ -62,7 +62,7 @@ export interface DimensionUsage extends UsageTotals {
 /** One rate-limit window read live from usage-meter-v2 (`GET /usage`). */
 export interface MeterWindowSnapshot {
   /** % of the window's weighted-token budget consumed. */
-  percent: number;
+  percent: number | null;
   /** ISO timestamp the window resets, or null when unavailable. */
   reset_at: string | null;
   time_until_reset_seconds?: number | null;
@@ -324,8 +324,10 @@ export function renderDailyUsageReportMarkdown(r: DailyUsageReport): string {
     lines.push("");
     lines.push("| Window | Used % | Resets |");
     lines.push("|---|--:|---|");
-    lines.push(`| Daily (calendar-day) | ${r.meter.daily.percent}% | ${r.meter.daily.reset_at ?? "—"} |`);
-    lines.push(`| Weekly | ${r.meter.weekly.percent}% | ${r.meter.weekly.reset_at ?? "—"} |`);
+    const dailyPercent = r.meter.daily.percent == null ? "unavailable" : `${r.meter.daily.percent}%`;
+    const weeklyPercent = r.meter.weekly.percent == null ? "unavailable" : `${r.meter.weekly.percent}%`;
+    lines.push(`| Daily (calendar-day) | ${dailyPercent} | ${r.meter.daily.reset_at ?? "—"} |`);
+    lines.push(`| Weekly | ${weeklyPercent} | ${r.meter.weekly.reset_at ?? "—"} |`);
     lines.push("");
     lines.push(
       "_Read live from usage-meter-v2 `/usage`. The short window is the meter's calendar-day budget; a true 5-hour rolling window is not yet modeled (see scope)._",

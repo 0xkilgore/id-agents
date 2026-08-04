@@ -59,6 +59,26 @@ describe("readDiskHeadroom", () => {
     expect(health.reason).toEqual(expect.any(String));
   });
 
+  it("keeps the live-read path free of deep checkout size probes", () => {
+    let deepReads = 0;
+    const health = readDiskHeadroom({
+      path: process.cwd(),
+      minFreeBytes: 1,
+      warnFreeBytes: 2,
+      protectedCheckouts: [{ name: "repo", path: process.cwd() }],
+      readCheckoutBytes: () => {
+        deepReads += 1;
+        return 123;
+      },
+      measureCheckoutSizes: false,
+    });
+
+    expect(deepReads).toBe(0);
+    expect(health.protected_checkouts).toEqual([
+      expect.objectContaining({ name: "repo", present: true, size_bytes: null }),
+    ]);
+  });
+
   it("projects deterministic ok and warn states from 1h/6h consumption slopes", () => {
     const baseline = readDiskHeadroom({ path: process.cwd(), protectedCheckouts, readCheckoutBytes: allPresent });
     const available = baseline.available_bytes ?? 0;

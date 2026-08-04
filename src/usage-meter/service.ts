@@ -177,8 +177,9 @@ export class UsageMeterService {
       return this.cachedSnapshot;
     }
     try {
-      // Lazily refresh rollups in the background — don't block.
-      void this.refreshRollups();
+      // Live reads consume the last completed rollups. Refreshing can scan up
+      // to a week of raw events and is owned by explicit/background ingest;
+      // starting that scan from a scheduler or HTTP read can starve /health.
 
       const { rollupsByAgent, globalRollup } = await this.loadCurrentRollups();
       const providerLimits = await listActiveProviderLimitSignals(this.adapter, new Date(nowMs).toISOString());
@@ -273,6 +274,14 @@ export class UsageMeterService {
       const report: UsageReportV2 = {
         schema_version: "usage-meter-v2",
         generated_at: new Date(nowMs).toISOString(),
+        read_status: {
+          state: "fresh",
+          source: "manager-usage-meter",
+          source_updated_at: new Date(nowMs).toISOString(),
+          checked_at: new Date(nowMs).toISOString(),
+          max_wait_ms: null,
+          reason: null,
+        },
         windows: {
           daily: {
             start: dayWin.start,
@@ -330,6 +339,60 @@ export class UsageMeterService {
       this.cachedReportAtMs = nowMs;
       return fallback;
     }
+  }
+
+  /**
+   * Bounded live HTTP read. A slow source returns the last completed report as
+   * explicitly stale, or an explicitly unavailable report on a cold start.
+   * The in-flight refresh may finish later and populate the normal cache.
+   */
+  async buildReportWithin(maxWaitMs: number): Promise<UsageReportV2> {
+    const checkedAt = new Date(this.now()).toISOString();
+    let timer: NodeJS.Timeout | null = null;
+    const timeout = new Promise<null>((resolve) => {
+      timer = setTimeout(() => resolve(null), Math.max(1, maxWaitMs));
+      timer.unref?.();
+    });
+    const report = await Promise.race([this.buildReport(), timeout]);
+    if (timer) clearTimeout(timer);
+    if (report) {
+      return {
+        ...report,
+        read_status: {
+          state: "fresh",
+          source: "manager-usage-meter",
+          source_updated_at: report.generated_at,
+          checked_at: checkedAt,
+          max_wait_ms: maxWaitMs,
+          reason: null,
+        },
+      };
+    }
+    if (this.cachedReport) {
+      return {
+        ...this.cachedReport,
+        read_status: {
+          state: "stale",
+          source: "manager-usage-meter",
+          source_updated_at: this.cachedReport.generated_at,
+          checked_at: checkedAt,
+          max_wait_ms: maxWaitMs,
+          reason: "live usage refresh exceeded its read deadline",
+        },
+      };
+    }
+    const unavailable = degradedReport(this.policy, this.now(), new Error("live usage read deadline exceeded"));
+    return {
+      ...unavailable,
+      read_status: {
+        state: "unavailable",
+        source: "manager-usage-meter",
+        source_updated_at: null,
+        checked_at: checkedAt,
+        max_wait_ms: maxWaitMs,
+        reason: "live usage refresh exceeded its read deadline",
+      },
+    };
   }
 
   /**
@@ -579,14 +642,10 @@ export class UsageMeterService {
   }
 
   private async computeProviderWindows(
-    dayWin: { start_ms: number; end_ms: number },
-    weekWin: { start_ms: number; end_ms: number },
+    dayWin: { start: string; start_ms: number; end_ms: number },
+    weekWin: { start: string; start_ms: number; end_ms: number },
     providerLimits: UsageReportV2["gate"]["provider_limits"],
   ): Promise<UsageReportProviderWindow[]> {
-    const events = await listRecentAgentUsageEvents(this.adapter, {
-      since_ms: weekWin.start_ms,
-      limit: 200_000,
-    });
     const acc = new Map<string, {
       daily: { weighted_tokens: number; raw_tokens: number; requests: number };
       weekly: { weighted_tokens: number; raw_tokens: number; requests: number };
@@ -603,17 +662,17 @@ export class UsageMeterService {
       }
       return value;
     };
-    for (const event of events) {
-      if (event.ts < weekWin.start_ms || event.ts >= weekWin.end_ms) continue;
-      const bucket = ensure(event.provider);
-      bucket.weekly.weighted_tokens += event.weighted_tokens;
-      bucket.weekly.raw_tokens += event.raw_tokens;
-      bucket.weekly.requests += 1;
-      if (event.ts >= dayWin.start_ms && event.ts < dayWin.end_ms) {
-        bucket.daily.weighted_tokens += event.weighted_tokens;
-        bucket.daily.raw_tokens += event.raw_tokens;
-        bucket.daily.requests += 1;
-      }
+    const providers: Provider[] = ["anthropic", "openai", "cursor", "other"];
+    for (const provider of providers) {
+      const [dayRows, weekRows] = await Promise.all([
+        listAgentUsageRollupsForWindow(this.adapter, { provider, window_kind: "day", window_start: dayWin.start }),
+        listAgentUsageRollupsForWindow(this.adapter, { provider, window_kind: "week", window_start: weekWin.start }),
+      ]);
+      const daily = dayRows.find((row) => row.agent_id === "_global");
+      const weekly = weekRows.find((row) => row.agent_id === "_global");
+      const bucket = ensure(provider);
+      if (daily) bucket.daily = { weighted_tokens: daily.weighted_tokens, raw_tokens: daily.raw_tokens, requests: daily.requests };
+      if (weekly) bucket.weekly = { weighted_tokens: weekly.weighted_tokens, raw_tokens: weekly.raw_tokens, requests: weekly.requests };
     }
     for (const signal of providerLimits) ensure(signal.provider);
     return [...acc.entries()].sort((a, b) => b[1].daily.weighted_tokens - a[1].daily.weighted_tokens).map(([provider, value]) => {
@@ -624,6 +683,9 @@ export class UsageMeterService {
         weekly: { ...value.weekly, limit: null, percent_of_limit: null },
         limit_state: activeLimit ? "limited" : "unknown",
         limit_source: activeLimit ? "observed_provider_signal" : "not_available",
+        limit_available: !!activeLimit,
+        limit_observed_at: activeLimit?.observed_at ?? null,
+        limit_source_updated_at: activeLimit?.observed_at ?? null,
         reset_at: activeLimit?.reset_at ?? null,
       };
     });
@@ -819,6 +881,14 @@ function degradedReport(
   return {
     schema_version: "usage-meter-v2",
     generated_at: new Date(nowMs).toISOString(),
+    read_status: {
+      state: "unavailable",
+      source: "manager-usage-meter",
+      source_updated_at: null,
+      checked_at: new Date(nowMs).toISOString(),
+      max_wait_ms: null,
+      reason: `usage report unavailable: ${err instanceof Error ? err.message : String(err)}`,
+    },
     windows: {
       daily: { start: dayWin.start, reset_at: dayWin.end, time_until_reset_seconds: Math.max(0, Math.floor((dayWin.end_ms - nowMs) / 1000)) },
       weekly: { start: weekWin.start, reset_at: weekWin.end, time_until_reset_seconds: Math.max(0, Math.floor((weekWin.end_ms - nowMs) / 1000)) },

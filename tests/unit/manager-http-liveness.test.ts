@@ -20,6 +20,21 @@ function status(overrides: Partial<Parameters<typeof classifyManagerHttpLiveness
 }
 
 describe("classifyManagerHttpLiveness", () => {
+  it("uses an executing health request as current truth while retaining prior incident evidence", () => {
+    expect(status({
+      currentRequestLive: true,
+      watchdogState: {
+        lastClass: "http_unresponsive_listener_alive",
+        lastUnhealthyAt: "2026-08-04T18:00:00.000Z",
+        lastUnhealthyClass: "http_unresponsive_listener_alive",
+      },
+    })).toMatchObject({
+      state: "healthy",
+      reason: expect.stringContaining("current manager HTTP health request"),
+      last_unhealthy_class: "http_unresponsive_listener_alive",
+    });
+  });
+
   it("reports healthy when the watchdog last class is healthy", () => {
     expect(status()).toMatchObject({
       state: "healthy",

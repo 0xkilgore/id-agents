@@ -257,7 +257,7 @@ import { loadModelPolicy, type ModelPolicyService } from './model-policy/policy.
 import { mountRuntimePolicyRoutes } from './model-policy/runtime-policy-routes.js';
 import { loadApprovalPolicy, type ApprovalPolicyService } from './approval-policy/policy.js';
 import { resolveManagerBindHost } from './manager-bind-host.js';
-import { buildSourceDiagnostic, getBuildStatusCached, loadBuildStatus, type BuildStatus } from './build-info.js';
+import { buildSourceDiagnostic, getBuildStatusCached, getBuildStatusLive, loadBuildStatus, type BuildStatus } from './build-info.js';
 import { readDiskHeadroom } from './disk-health.js';
 import { parseSupervisorConfig, type SupervisorHealthStatus } from './supervisor/index.js';
 import {
@@ -268,7 +268,7 @@ import {
 } from './deploy-guard/freshness.js';
 import {
   evaluateManagerRedeployReadiness,
-  readDeployCheckoutStatus,
+  readDeployCheckoutStatusLive,
 } from './deploy-guard/manager-redeploy-readiness.js';
 import {
   evaluateFleetFreshness,
@@ -976,6 +976,7 @@ async function withTimeout<T>(
 const MANAGER_ROUTE_TIMEOUT_MS = 10_000;
 const MANAGER_ROUTE_TIMEOUT_MAX_MS = 60_000;
 const CONSOLE_ENDPOINT_CACHE_TTL_MS = 15_000;
+const HEALTH_LIVE_SOURCE_TIMEOUT_MS = 250;
 
 function parseManagerRouteTimeout(req: express.Request): number {
   const candidates = [
@@ -1782,7 +1783,7 @@ export class AgentManagerDb {
    * is the manager's cwd.
    */
   private getBuildStatus(): BuildStatus {
-    return getBuildStatusCached({ repoDir: process.cwd(), distDir: __dirname });
+    return getBuildStatusLive({ repoDir: process.cwd(), distDir: __dirname });
   }
 
   private getSupervisorHealthStatus(nowMs: number = Date.now()): SupervisorHealthStatus {
@@ -1807,7 +1808,9 @@ export class AgentManagerDb {
   }
 
   private getManagerHttpLivenessStatus(): ManagerHttpLivenessStatus {
-    return readManagerHttpLivenessStatus();
+    // Reaching this method from /health is itself the strongest current
+    // liveness signal. Never shell out to lsof/launchctl on the event loop.
+    return readManagerHttpLivenessStatus({ currentRequestLive: true, skipProcessProbes: true });
   }
 
   private getProtectedDeployCheckoutRepo(): string {
@@ -2766,7 +2769,12 @@ export class AgentManagerDb {
   // base, or dirty) are always kept. Disable with WORKTREE_REAPER_ENABLED=false.
   private startWorktreeReaper(): void {
     if (this.worktreeReaperInterval) return;
-    if (String(process.env.WORKTREE_REAPER_ENABLED ?? 'true').toLowerCase() === 'false') return;
+    const configured = process.env.WORKTREE_REAPER_ENABLED;
+    // Tests create managers against temporary DBs but share the developer's
+    // real cwd. Never let an unrelated integration test start the destructive
+    // fleet worktree reaper unless that test explicitly opts in.
+    if (process.env.NODE_ENV === 'test' && configured === undefined) return;
+    if (String(configured ?? 'true').toLowerCase() === 'false') return;
     const intervalMs = Number(process.env.WORKTREE_REAPER_INTERVAL_MS || 6 * 60 * 60 * 1000);
     const runReap = async () => {
       try {
@@ -5684,7 +5692,7 @@ export class AgentManagerDb {
           const count = await this.db.agents.count(team.id);
           return { teamId: team.id, count };
         })(),
-        750,
+        HEALTH_LIVE_SOURCE_TIMEOUT_MS,
       );
       // T1.11: surface dispatch-recovery boot-backfill counters so operators can
       // see the pre-restart casualty wave being reconciled (not stuck at 0).
@@ -5699,12 +5707,12 @@ export class AgentManagerDb {
         recommended_redeploy_action: buildDiagnostic.recommended_redeploy_action,
         diagnostics: buildDiagnostic,
       };
-      const disk = readDiskHeadroom();
+      const disk = readDiskHeadroom({ measureCheckoutSizes: false });
       const supervisor = this.getSupervisorHealthStatus(now);
       const manager_http_liveness = this.getManagerHttpLivenessStatus();
       const supervisorRequiredForNominal = process.env.SUPERVISOR_OPTIONAL !== 'true';
       const nominal = this.evaluateNominalHealth({ build, disk, supervisor, managerHttpLiveness: manager_http_liveness });
-      const deployCheckout = readDeployCheckoutStatus(this.getProtectedDeployCheckoutRepo());
+      const deployCheckout = readDeployCheckoutStatusLive(this.getProtectedDeployCheckoutRepo());
       const managerRedeployReadiness = evaluateManagerRedeployReadiness({
         build,
         disk,
@@ -5739,7 +5747,7 @@ export class AgentManagerDb {
               ...unavailableConformance,
               error: err instanceof Error ? err.message : String(err),
             })),
-            750,
+            HEALTH_LIVE_SOURCE_TIMEOUT_MS,
           );
       const conformance = conformanceResult.timedOut
         ? {
@@ -5755,7 +5763,7 @@ export class AgentManagerDb {
           build_behind_origin_since: this.freshnessState.behind_origin_since,
           disk,
         }),
-        750,
+        HEALTH_LIVE_SOURCE_TIMEOUT_MS,
       );
       const orchestration_runtime_status = runtimeResult.timedOut
         ? { state: 'degraded', reason: 'health_orchestration_runtime_timeout' }
@@ -13660,10 +13668,19 @@ export class AgentManagerDb {
     const thresholdMs = Number(process.env.DEPLOY_FRESHNESS_THRESHOLD_MS) || undefined;
     const tick = async () => {
       try {
-        const nodes = resolveFleetNodes(process.env, process.cwd());
+        // Tests run against temporary manager databases but share the developer
+        // checkout. Keep their monitor hermetic: probing sibling fleet repos
+        // would spawn real git/process checks and can stall an otherwise local
+        // health request for tens of seconds.
+        const resolvedNodes = resolveFleetNodes(process.env, process.cwd());
+        const nodes = process.env.NODE_ENV === 'test'
+          ? resolvedNodes.filter((node) => node.is_self)
+          : resolvedNodes;
         const inputs: FleetNodeInput[] = nodes.map((node) => {
           const build = node.is_self
-            ? this.getBuildStatus()
+            ? (process.env.NODE_ENV === 'test'
+                ? this.getBuildStatus()
+                : getBuildStatusCached({ repoDir: process.cwd(), distDir: __dirname }))
             : loadBuildStatus({ repoDir: node.repoDir!, distDir: node.distDir ?? node.repoDir! });
           const releaseState = !node.is_self && node.repoDir
             ? readReleaseState(node.repoDir)
@@ -14481,7 +14498,7 @@ export class AgentManagerDb {
                 runtimeHealth: () => ({
                   build: this.getBuildStatus(),
                   build_behind_origin_since: this.freshnessState.behind_origin_since,
-                  disk: readDiskHeadroom(),
+                  disk: readDiskHeadroom({ measureCheckoutSizes: false }),
                 }),
               };
               mountContinuousOrchestrationRoutes(this.managementApp, {

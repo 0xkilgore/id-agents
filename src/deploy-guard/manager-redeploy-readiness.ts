@@ -235,3 +235,41 @@ export function readDeployCheckoutStatus(repo: string, targetRef = "origin/main"
     };
   }
 }
+
+/**
+ * Non-blocking live-read projection. Deep branch/dirty/divergence truth requires
+ * several git subprocesses, so /health reports that source as unavailable
+ * instead of blocking the HTTP event loop or guessing.
+ */
+export function readDeployCheckoutStatusLive(repo: string): DeployCheckoutStatus {
+  if (!existsSync(repo)) {
+    return {
+      schema_version: "manager.deploy_checkout.v1",
+      repo,
+      branch: null,
+      head_sha: null,
+      target_sha: null,
+      dirty: null,
+      dirty_count: null,
+      changed_files: [],
+      ahead: null,
+      behind: null,
+      state: "missing",
+      reason: "deploy checkout does not exist",
+    };
+  }
+  return {
+    schema_version: "manager.deploy_checkout.v1",
+    repo,
+    branch: null,
+    head_sha: null,
+    target_sha: null,
+    dirty: null,
+    dirty_count: null,
+    changed_files: [],
+    ahead: null,
+    behind: null,
+    state: "unknown",
+    reason: "deep git checkout probe is not run on the live health path",
+  };
+}

@@ -176,6 +176,15 @@ export interface AgentUsageRollup {
 export interface UsageReportV2 {
   schema_version: "usage-meter-v2";
   generated_at: string;
+  /** Whether this HTTP read completed from fresh, stale, or unavailable truth. */
+  read_status?: {
+    state: "fresh" | "stale" | "unavailable";
+    source: "manager-usage-meter";
+    source_updated_at: string | null;
+    checked_at: string;
+    max_wait_ms: number | null;
+    reason: string | null;
+  };
   windows: {
     daily: {
       start: string;
@@ -272,6 +281,11 @@ export interface UsageReportProviderWindow {
   };
   limit_state: "ok" | "limited" | "unknown";
   limit_source: "observed_provider_signal" | "not_available";
+  /** Explicit availability: absence of a scheduler bounce is unknown, not 0%. */
+  limit_available?: boolean;
+  /** Timestamp supplied by the live scheduler-bounce source, if one exists. */
+  limit_observed_at?: string | null;
+  limit_source_updated_at?: string | null;
   reset_at: string | null;
 }
 

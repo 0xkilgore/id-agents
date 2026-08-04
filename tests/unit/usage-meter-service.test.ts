@@ -326,6 +326,57 @@ describe("GET /usage — v2 schema contract", () => {
     expect(res.body.gate).toBeDefined();
     expect(res.body.gate.enforcement).toBe("warn");
     expect(res.body.gate.should_pause_new_dispatches).toBe(false);
+    expect(res.body.read_status).toMatchObject({
+      state: "fresh",
+      source: "manager-usage-meter",
+      source_updated_at: expect.any(String),
+    });
+    expect(res.body.by_provider).toHaveLength(4);
+    expect(res.body.by_provider).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        provider: "openai",
+        limit_state: "unknown",
+        limit_source: "not_available",
+        limit_available: false,
+        limit_observed_at: null,
+      }),
+    ]));
+  });
+
+  it("bounds a cold live usage read and reports unavailable truth without fabricated percentages", async () => {
+    const { service } = createUsageMeterService({
+      adapter,
+      env: {},
+      now: () => FIXED_NOW,
+      concurrencyProvider: () => new Promise(() => undefined),
+    });
+    const started = Date.now();
+    const report = await service.buildReportWithin(25);
+
+    expect(Date.now() - started).toBeLessThan(500);
+    expect(report.read_status).toMatchObject({
+      state: "unavailable",
+      source_updated_at: null,
+      max_wait_ms: 25,
+    });
+    expect(report.gate.daily_percent).toBeNull();
+    expect(report.gate.weekly_percent).toBeNull();
+  });
+
+  it("exposes provider-limit source availability and observation timestamps", async () => {
+    await insertProviderLimitBounce();
+    const report = await mkService().buildReport();
+    const anthropic = report.by_provider.find((row) => row.provider === "anthropic");
+
+    expect(anthropic).toMatchObject({
+      limit_state: "limited",
+      limit_source: "observed_provider_signal",
+      limit_available: true,
+      limit_observed_at: new Date(FIXED_NOW).toISOString(),
+      limit_source_updated_at: new Date(FIXED_NOW).toISOString(),
+    });
+    expect(anthropic?.daily.percent_of_limit).toBeNull();
+    expect(anthropic?.weekly.percent_of_limit).toBeNull();
   });
 
   it("reports over-reference weighted burn without a fabricated percent denominator", async () => {

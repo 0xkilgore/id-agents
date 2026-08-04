@@ -47,6 +47,12 @@ export interface DiskHeadroomOptions {
   history?: DiskSample[];
   protectedCheckouts?: Array<{ name: string; path: string }>;
   readCheckoutBytes?: (path: string) => number | null;
+  /**
+   * Deep checkout sizing shells out to `du` and can stall a launchd manager on
+   * Dropbox-backed trees. Live control-plane reads set this false; scheduled
+   * diagnostics may keep the default deep probe.
+   */
+  measureCheckoutSizes?: boolean;
 }
 
 export const DEFAULT_DISK_MIN_FREE_BYTES = 15 * GIB;
@@ -106,10 +112,14 @@ export function readDiskHeadroom(options: DiskHeadroomOptions = {}): DiskHeadroo
   const definitions = options.protectedCheckouts ?? DEFAULT_PROTECTED_CHECKOUTS;
   const readBytes = options.readCheckoutBytes ?? checkoutBytes;
   const protectedCheckouts = definitions.map((checkout) => {
-    const size = readBytes(checkout.path);
+    const size = options.measureCheckoutSizes === false ? null : readBytes(checkout.path);
     // A size probe may time out on a large checkout; presence is a separate,
     // cheap signal and must not become a false critical in that case.
-    const present = options.readCheckoutBytes ? size != null : existsSync(checkout.path);
+    const present = options.measureCheckoutSizes === false
+      ? existsSync(checkout.path)
+      : options.readCheckoutBytes
+        ? size != null
+        : existsSync(checkout.path);
     return { ...checkout, present, size_bytes: size };
   });
   const currentCheckoutBytes = Object.fromEntries(

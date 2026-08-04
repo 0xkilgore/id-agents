@@ -55,6 +55,8 @@ interface LivenessInput {
   listenerPid: number | null;
   watchdogState: WatchdogState | null;
   pauseFileExists: boolean;
+  /** The current manager is executing its own /health handler right now. */
+  currentRequestLive?: boolean;
 }
 
 export function classifyManagerHttpLiveness(input: LivenessInput): ManagerHttpLivenessStatus {
@@ -73,7 +75,11 @@ export function classifyManagerHttpLiveness(input: LivenessInput): ManagerHttpLi
   let reason = "manager HTTP liveness is unavailable";
   let recommendedAction: string | null = "Inspect the external manager HTTP liveness watchdog and launchd state.";
 
-  if (input.pauseFileExists) {
+  if (input.currentRequestLive) {
+    state = "healthy";
+    reason = "current manager HTTP health request is executing";
+    recommendedAction = null;
+  } else if (input.pauseFileExists) {
     state = "watchdog_paused";
     reason = "manager HTTP liveness watchdog is paused by kill-switch file";
     recommendedAction = "Remove /tmp/manager-http-liveness-watchdog.pause after verifying the manager is healthy.";
@@ -125,17 +131,22 @@ export function classifyManagerHttpLiveness(input: LivenessInput): ManagerHttpLi
   };
 }
 
-export function readManagerHttpLivenessStatus(): ManagerHttpLivenessStatus {
+export function readManagerHttpLivenessStatus(
+  options: { currentRequestLive?: boolean; skipProcessProbes?: boolean } = {},
+): ManagerHttpLivenessStatus {
   const service = process.env.MANAGER_HTTP_LIVENESS_WATCHDOG_SERVICE || "com.kilgore.id-agents-manager";
   const managerUrl = process.env.MANAGER_HTTP_LIVENESS_WATCHDOG_URL || "http://127.0.0.1:4100";
   const pauseFile = process.env.MANAGER_HTTP_LIVENESS_WATCHDOG_PAUSE_FILE || "/tmp/manager-http-liveness-watchdog.pause";
   return classifyManagerHttpLiveness({
     service,
     managerUrl,
-    launchd: probeLaunchd(service),
-    listenerPid: probeListenerPid(),
+    launchd: options.skipProcessProbes
+      ? { loaded: process.env.XPC_SERVICE_NAME === service || process.env.XPC_SERVICE_NAME != null, pid: process.pid }
+      : probeLaunchd(service),
+    listenerPid: options.skipProcessProbes ? process.pid : probeListenerPid(),
     watchdogState: readWatchdogState(),
     pauseFileExists: existsSync(pauseFile),
+    currentRequestLive: options.currentRequestLive,
   });
 }
 

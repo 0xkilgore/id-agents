@@ -413,6 +413,28 @@ export function getBuildStatusCached(
   return value;
 }
 
+/**
+ * Return the last deep build probe without ever spawning git on the caller's
+ * thread.  The manager's live /health route uses this boundary: a cache miss
+ * still reports the immutable compile-time stamp, while the periodic freshness
+ * monitor owns the slower git/network refresh.
+ */
+export function getBuildStatusLive(
+  opts: LoadBuildStatusOptions,
+): BuildStatus {
+  if (cache) return cache.value;
+  const stamp = readBuildStamp(opts.distDir);
+  return computeBuildStatus({
+    build_sha: stamp?.build_sha ?? null,
+    build_time: stamp?.build_time ?? null,
+    source_branch_sha: null,
+    source_branch_name: null,
+    local_main_sha: null,
+    origin_main_sha: null,
+    source: stamp ? "build_stamp" : "unknown",
+  });
+}
+
 /** Test seam: reset the module cache. */
 export function __resetBuildStatusCache(): void {
   cache = null;

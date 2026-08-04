@@ -42,6 +42,7 @@ export interface UsageMeterRouteOptions {
 }
 
 const USAGE_ROUTE_CACHE_TTL_MS = 15_000;
+const USAGE_LIVE_READ_TIMEOUT_MS = 750;
 
 /**
  * Mount usage-meter routes. Pass an Express app (the manager's
@@ -150,7 +151,7 @@ export function mountUsageMeterRoutes(app: Application, opts: UsageMeterRouteOpt
         res.json(usageRouteCache.body);
         return;
       }
-      const body = await opts.service.buildReport();
+      const body = await opts.service.buildReportWithin(USAGE_LIVE_READ_TIMEOUT_MS);
       usageRouteCache = { at: now, key: cacheKey, body };
       res.json(body);
     } catch (err) {
@@ -318,12 +319,12 @@ async function readMeterSnapshot(service: UsageMeterService): Promise<MeterSnaps
     const r = await service.buildReport();
     return {
       daily: {
-        percent: r.gate?.daily_percent ?? 0,
+        percent: r.gate?.daily_percent ?? null,
         reset_at: r.windows?.daily?.reset_at ?? null,
         time_until_reset_seconds: r.windows?.daily?.time_until_reset_seconds ?? null,
       },
       weekly: {
-        percent: r.gate?.weekly_percent ?? 0,
+        percent: r.gate?.weekly_percent ?? null,
         reset_at: r.windows?.weekly?.reset_at ?? null,
         time_until_reset_seconds: r.windows?.weekly?.time_until_reset_seconds ?? null,
       },
