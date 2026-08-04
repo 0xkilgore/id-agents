@@ -1,0 +1,286 @@
+{
+  "schema_version": "console.artifact_feedback_receipt_fixtures.v1",
+  "contract": {
+    "canonical_response_schema": "artifact.feedback.v1",
+    "retry_readiness_schema": "feedback.retry_readiness.v1",
+    "evidence_schema": "feedback.evidence.v1",
+    "evidence_rollup_schema": "feedback.evidence_rollup.v1",
+    "now_surface_schema": "read-model.v1"
+  },
+  "cases": [
+    {
+      "id": "recorded-routed",
+      "source_link": "manager:/artifacts/art-feedback-recorded-routed/comments#op-2",
+      "route": {
+        "visible_state": "recorded+routed",
+        "routed": true,
+        "retryable": false,
+        "notification_status": "pending",
+        "next_retry_at": null
+      },
+      "routing": {
+        "dispatch_phid": "phid:disp-feedback-recorded-routed",
+        "query_id": "query-feedback-recorded-routed",
+        "to_agent": "regina"
+      },
+      "dispatch": {
+        "status": "in_flight",
+        "effective_state": "in_flight",
+        "is_terminal": false
+      },
+      "expected": {
+        "ui_state": "recorded+routed",
+        "route_state": "recorded+routed",
+        "retry_drain_status": "waiting_on_live_dispatch",
+        "retryable": false,
+        "stale_duplicate": false,
+        "proof_classification": "missing",
+        "work_success": null,
+        "work_success_blocker": null
+      },
+      "now": {
+        "receipt": null,
+        "receipt_position": null,
+        "included": true,
+        "receipt_state": "unreceipted",
+        "source_link_state": "present"
+      }
+    },
+    {
+      "id": "route-failed-retryable",
+      "source_link": "manager:/artifacts/art-feedback-route-failed/comments#op-2",
+      "route": {
+        "visible_state": "recorded-route-failed-retryable",
+        "routed": false,
+        "retryable": true,
+        "notification_status": "pending",
+        "next_retry_at": "2026-08-04T15:05:00.000Z"
+      },
+      "routing": null,
+      "dispatch": null,
+      "expected": {
+        "ui_state": "recorded-route-failed",
+        "route_state": "recorded-route-failed-retryable",
+        "retry_drain_status": "retryable_failed_row",
+        "retryable": true,
+        "stale_duplicate": false,
+        "proof_classification": "missing",
+        "work_success": null,
+        "work_success_blocker": "feedback_route_failed_retryable"
+      },
+      "now": {
+        "receipt": null,
+        "receipt_position": null,
+        "included": true,
+        "receipt_state": "unreceipted",
+        "source_link_state": "present"
+      }
+    },
+    {
+      "id": "retry-pending",
+      "source_link": "manager:/artifacts/art-feedback-retry-pending/comments#op-2",
+      "route": {
+        "visible_state": "recorded+routed",
+        "routed": true,
+        "retryable": false,
+        "notification_status": "pending",
+        "next_retry_at": null
+      },
+      "routing": {
+        "dispatch_phid": "phid:disp-feedback-retry-pending",
+        "query_id": "query-feedback-retry-pending",
+        "to_agent": "regina"
+      },
+      "dispatch": {
+        "status": "queued",
+        "effective_state": "queued",
+        "is_terminal": false
+      },
+      "expected": {
+        "ui_state": "recorded+routed",
+        "route_state": "recorded+routed",
+        "retry_drain_status": "waiting_on_live_dispatch",
+        "retryable": false,
+        "stale_duplicate": false,
+        "proof_classification": "missing",
+        "work_success": null,
+        "work_success_blocker": null
+      },
+      "now": {
+        "receipt": null,
+        "receipt_position": null,
+        "included": true,
+        "receipt_state": "unreceipted",
+        "source_link_state": "present"
+      }
+    },
+    {
+      "id": "terminal-success",
+      "source_link": "manager:/artifacts/art-feedback-terminal-success/comments#op-2",
+      "route": {
+        "visible_state": "recorded+routed",
+        "routed": true,
+        "retryable": false,
+        "notification_status": "delivered",
+        "next_retry_at": null
+      },
+      "routing": {
+        "dispatch_phid": "phid:disp-feedback-terminal-success",
+        "query_id": "query-feedback-terminal-success",
+        "to_agent": "regina"
+      },
+      "dispatch": {
+        "status": "done",
+        "effective_state": "done",
+        "is_terminal": true,
+        "work_success": true,
+        "work_success_evidence": "artifact_update_confirmed"
+      },
+      "expected": {
+        "ui_state": "recorded+routed",
+        "route_state": "recorded+routed",
+        "retry_drain_status": "stale_duplicate",
+        "retryable": false,
+        "stale_duplicate": true,
+        "proof_classification": "stale",
+        "work_success": true,
+        "work_success_blocker": null
+      },
+      "now": {
+        "receipt": {
+          "kind": "approve",
+          "actor": "regina",
+          "note": "artifact_update_confirmed"
+        },
+        "receipt_position": "after_comment",
+        "included": false,
+        "receipt_state": null,
+        "source_link_state": null
+      }
+    },
+    {
+      "id": "terminal-failure",
+      "source_link": "manager:/artifacts/art-feedback-terminal-failure/comments#op-2",
+      "route": {
+        "visible_state": "recorded+routed",
+        "routed": true,
+        "retryable": false,
+        "notification_status": "delivered",
+        "next_retry_at": null
+      },
+      "routing": {
+        "dispatch_phid": "phid:disp-feedback-terminal-failure",
+        "query_id": "query-feedback-terminal-failure",
+        "to_agent": "regina"
+      },
+      "dispatch": {
+        "status": "failed",
+        "effective_state": "failed_needs_operator",
+        "is_terminal": true,
+        "work_success": false,
+        "work_success_blocker": "linked_query_expired"
+      },
+      "expected": {
+        "ui_state": "recorded+routed",
+        "route_state": "recorded+routed",
+        "retry_drain_status": "stale_duplicate",
+        "retryable": false,
+        "stale_duplicate": true,
+        "proof_classification": "failed",
+        "work_success": false,
+        "work_success_blocker": "linked_query_expired"
+      },
+      "now": {
+        "receipt": {
+          "kind": "ship_blocked",
+          "actor": "regina",
+          "note": "linked_query_expired"
+        },
+        "receipt_position": "after_comment",
+        "included": false,
+        "receipt_state": null,
+        "source_link_state": null
+      }
+    },
+    {
+      "id": "source-link-absent",
+      "source_link": null,
+      "route": {
+        "visible_state": "recorded+routed",
+        "routed": true,
+        "retryable": false,
+        "notification_status": "pending",
+        "next_retry_at": null
+      },
+      "routing": {
+        "dispatch_phid": "phid:disp-feedback-source-link-absent",
+        "query_id": "query-feedback-source-link-absent",
+        "to_agent": "regina"
+      },
+      "dispatch": {
+        "status": "in_flight",
+        "effective_state": "in_flight",
+        "is_terminal": false
+      },
+      "expected": {
+        "ui_state": "missing-source",
+        "route_state": "recorded+routed",
+        "retry_drain_status": "waiting_on_live_dispatch",
+        "retryable": false,
+        "stale_duplicate": false,
+        "proof_classification": "missing",
+        "work_success": null,
+        "work_success_blocker": null
+      },
+      "now": {
+        "receipt": null,
+        "receipt_position": null,
+        "included": true,
+        "receipt_state": "unreceipted",
+        "source_link_state": "missing"
+      }
+    },
+    {
+      "id": "stale-receipt",
+      "source_link": "manager:/artifacts/art-feedback-stale-receipt/comments#op-3",
+      "route": {
+        "visible_state": "recorded+routed",
+        "routed": true,
+        "retryable": false,
+        "notification_status": "delivered",
+        "next_retry_at": null
+      },
+      "routing": {
+        "dispatch_phid": "phid:disp-feedback-stale-receipt",
+        "query_id": "query-feedback-stale-receipt",
+        "to_agent": "regina"
+      },
+      "dispatch": {
+        "status": "done",
+        "effective_state": "done",
+        "is_terminal": true
+      },
+      "expected": {
+        "ui_state": "recorded+routed",
+        "route_state": "recorded+routed",
+        "retry_drain_status": "stale_duplicate",
+        "retryable": false,
+        "stale_duplicate": true,
+        "proof_classification": "missing",
+        "work_success": false,
+        "work_success_blocker": "work_success_proof_missing"
+      },
+      "now": {
+        "receipt": {
+          "kind": "approve",
+          "actor": "regina",
+          "note": "older feedback was acknowledged"
+        },
+        "receipt_position": "before_comment",
+        "included": true,
+        "receipt_state": "receipted",
+        "source_link_state": "present"
+      }
+    }
+  ]
+}
