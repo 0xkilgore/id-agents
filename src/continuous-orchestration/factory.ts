@@ -18,6 +18,7 @@ import { BuildPoolRegistry } from "../build-pools/index.js";
 import { leaseWorktreePath } from "../workspaces/allocator.js";
 import { randomUUID } from "node:crypto";
 import { normalizeRuntime } from "../dispatch-scheduler/types.js";
+import { readDiskHeadroom } from "../disk-health.js";
 
 interface SchedulerLike {
   enqueue(
@@ -126,6 +127,10 @@ export function createContinuousOrchestrationDaemon(opts: BuildDaemonOptions): {
     resolveAgentHealth: (names: string[]) => getHealthyAgentNames(opts.adapter, names),
     resolveAgentRuntimes: (names: string[]) => getAgentRuntimeMap(opts.adapter, names),
     resolveAllAgentRuntimes: () => getAllAgentRuntimeMap(opts.adapter),
+    // Read-only admission/status projections run even while the daemon is
+    // disabled. Keep those control-plane reads from spawning `du` over large
+    // Dropbox-backed checkouts on the manager event loop.
+    readDiskHeadroom: () => readDiskHeadroom({ measureCheckoutSizes: false }),
     emitNews: opts.emitNews,
 
     // Stage C build-pool routing: late-bind builder + a distinct worktree

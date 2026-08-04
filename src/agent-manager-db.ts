@@ -1241,6 +1241,7 @@ export class AgentManagerDb {
   };
   private continuousOrchestrationStatusSource: {
     daemon: ContinuousOrchestrationDaemon;
+    enabled: boolean;
     runtimeHealth: () => {
       build: BuildStatus;
       build_behind_origin_since: string | null;
@@ -1921,7 +1922,10 @@ export class AgentManagerDb {
     disk: ReturnType<typeof readDiskHeadroom>;
   }): Promise<RuntimeStatusProjection | null> {
     const source = this.continuousOrchestrationStatusSource;
-    if (!source) return null;
+    // Manual admission is policy. A disabled daemon has no live admission
+    // status to compute, and running its explanation graph from /health would
+    // still trigger disk/usage probes after the route deadline expired.
+    if (!source || !source.enabled) return null;
     try {
       const [autoPromoteHealth, readyAdmission]: [AutoPromoteHealth, ReadyAdmissionExplanation] =
         await Promise.all([
@@ -14495,6 +14499,7 @@ export class AgentManagerDb {
               });
               this.continuousOrchestrationStatusSource = {
                 daemon,
+                enabled: coConfig.enabled,
                 runtimeHealth: () => ({
                   build: this.getBuildStatus(),
                   build_behind_origin_since: this.freshnessState.behind_origin_since,
