@@ -49,6 +49,7 @@ describe('Kapelle B11 — outputs/storage migration', () => {
       'artifact_bodies',
       'artifact_drafts',
       'artifact_operations',
+      'artifact_review_next_metadata',
       'artifact_review_state',
       'artifact_source_evidence',
       'artifacts',

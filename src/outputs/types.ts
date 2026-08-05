@@ -10,6 +10,7 @@
 // missing rows are created lazily on first /view or /approve mutation.
 
 import type { LocalHealthVisual } from "../local-search/visual-state.js";
+import type { ReviewNextRegistration } from "../review-next/types.js";
 
 export type ArtifactOpType =
   | "view"
@@ -213,6 +214,8 @@ export interface RegisterArtifactRequest {
   project_ref?: string | null;
   dispatch_ref?: string | null;
   source_host?: string | null;
+  /** Explicit, default-deny operator projection metadata. Omission means the artifact is not Review-next eligible. */
+  review_next?: ReviewNextRegistration;
 }
 
 export interface RegisterArtifactResponse {
