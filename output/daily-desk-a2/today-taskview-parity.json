@@ -1,0 +1,15 @@
+{
+  "fixed_today": "2026-08-05",
+  "filter": "task status != done; canonical task band == today; not archived; production-safe source id",
+  "canonical_taskview_ids": [
+    "task-today-newer",
+    "task-today-older"
+  ],
+  "daily_desk_ids": [
+    "task-today-newer",
+    "task-today-older"
+  ],
+  "canonical_count": 2,
+  "daily_desk_count": 2,
+  "parity": true
+}

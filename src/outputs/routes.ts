@@ -140,6 +140,7 @@ import {
   type SurfacingHealthEvent,
 } from './surfacing-health.js';
 import { mountReviewNextRoutes } from '../review-next/routes.js';
+import { mountDailyDeskRoutes } from '../daily-desk/routes.js';
 import { upsertReviewNextMetadata } from '../review-next/storage.js';
 import type { ReviewNextAction, ReviewNextRegistration } from '../review-next/types.js';
 
@@ -575,6 +576,14 @@ export function mountOutputsRoutes(
     ...(isC0FeedbackReactionsEnabled(env) ? ['react' as const] : []),
   ]);
   mountReviewNextRoutes(app, adapter, { now: clock, supportedActions: reviewNextSupportedActions });
+  if (tasks && resolveTeamId) {
+    mountDailyDeskRoutes(app, adapter, {
+      tasks,
+      resolveTeamId,
+      now: clock,
+      supportedReviewNextActions: reviewNextSupportedActions,
+    });
+  }
   const deliveryLogPath =
     opts.deliveryLogPath ?? join(homedir(), 'Dropbox', 'Code', 'cane', 'taskview', 'delivery-log.md');
   const readDeliveryLog =

@@ -30,6 +30,7 @@ import type {
 import { artifactListVisualState } from "./local-health.js";
 import { guardArtifactCreate } from "../conformance/write-guard.js";
 import { migrateReviewNextTables } from "../review-next/storage.js";
+import { migrateDailyDeskTables } from "../daily-desk/storage.js";
 
 // Derive a stable artifact_id from an absolute path. Same path → same id,
 // across machines and across days. Used by /deliver, /agent-done, and the
@@ -148,6 +149,7 @@ export async function migrateOutputsTables(adapter: DbAdapter): Promise<void> {
   await exec(`CREATE INDEX IF NOT EXISTS artifacts_by_agent_time ON artifacts(agent, produced_at DESC)`);
   await exec(`CREATE INDEX IF NOT EXISTS artifacts_by_basename ON artifacts(basename)`);
   await migrateReviewNextTables(adapter);
+  await migrateDailyDeskTables(adapter);
 
   // T11.7 — accessibility columns (additive for databases created before NW-6).
   for (const col of [

@@ -1,0 +1,357 @@
+{
+  "ok": true,
+  "schema_version": "daily-desk.v1",
+  "authority": {
+    "owner": "manager",
+    "projection": "daily_desk",
+    "state": "authoritative",
+    "source_cursor": "sha256:1e4ff2f55d8bff6506cdff006049bb1a34d327bdbefc729d282861181a3b5b10"
+  },
+  "projection_as_of": "2026-08-05T12:00:00.000Z",
+  "source_as_of": "2026-08-05T11:30:00.000Z",
+  "freshness_state": "current",
+  "freshness_reason": "all admitted lane rows are current manager projections",
+  "lanes": [
+    {
+      "id": "today",
+      "label": "Today",
+      "max_rows": 8,
+      "count": 2,
+      "rows": [
+        {
+          "id": "task-today-newer",
+          "lane": "today",
+          "title": "Task task-today-newer due:2026-08-05",
+          "authority": {
+            "owner": "manager",
+            "projection": "daily_desk",
+            "state": "authoritative",
+            "source_cursor": "sha256:4651406ac26f10e951c9d845190ac58f34411419e98f45def6528c0142934e64"
+          },
+          "audience": "operator",
+          "environment": "production",
+          "admission_reason": {
+            "code": "canonical_task_today",
+            "detail": "open task is in canonical today band for 2026-08-05",
+            "source": "task_entries"
+          },
+          "effective_lifecycle": "todo",
+          "canonical_url": "/ops/tasks?task=task-today-newer#task-task-today-newer",
+          "permitted_actions": [
+            "open",
+            "complete",
+            "snooze"
+          ],
+          "source_cursor": "sha256:4651406ac26f10e951c9d845190ac58f34411419e98f45def6528c0142934e64",
+          "source_as_of": "2026-08-05T11:00:00.000Z",
+          "projection_as_of": "2026-08-05T12:00:00.000Z",
+          "freshness_state": "current",
+          "freshness_reason": "task substrate updated; source is at most 24 hours old",
+          "owner": "cane"
+        },
+        {
+          "id": "task-today-older",
+          "lane": "today",
+          "title": "Task task-today-older due:2026-08-05",
+          "authority": {
+            "owner": "manager",
+            "projection": "daily_desk",
+            "state": "authoritative",
+            "source_cursor": "sha256:a9aae848f6f37a712c263efa7cd4ae94eaec1ad839e1dd54dd4e23c78cf9a521"
+          },
+          "audience": "operator",
+          "environment": "production",
+          "admission_reason": {
+            "code": "canonical_task_today",
+            "detail": "open task is in canonical today band for 2026-08-05",
+            "source": "task_entries"
+          },
+          "effective_lifecycle": "todo",
+          "canonical_url": "/ops/tasks?task=task-today-older#task-task-today-older",
+          "permitted_actions": [
+            "open",
+            "complete",
+            "snooze"
+          ],
+          "source_cursor": "sha256:a9aae848f6f37a712c263efa7cd4ae94eaec1ad839e1dd54dd4e23c78cf9a521",
+          "source_as_of": "2026-08-05T09:00:00.000Z",
+          "projection_as_of": "2026-08-05T12:00:00.000Z",
+          "freshness_state": "current",
+          "freshness_reason": "task substrate updated; source is at most 24 hours old",
+          "owner": "cane"
+        }
+      ]
+    },
+    {
+      "id": "review_next",
+      "label": "Review next",
+      "max_rows": 5,
+      "count": 2,
+      "rows": [
+        {
+          "id": "art-fresh-august",
+          "lane": "review_next",
+          "title": "Artifact art-fresh-august",
+          "authority": {
+            "owner": "manager",
+            "projection": "daily_desk",
+            "state": "authoritative",
+            "source_cursor": "sha256:dfb3150006e0d55747d0feef0251b0872d20d5f1ab826e400668cb178cdb6c72"
+          },
+          "audience": "operator",
+          "environment": "production",
+          "admission_reason": {
+            "code": "a1_review_next",
+            "detail": "explicit operator registration",
+            "source": "review_next"
+          },
+          "effective_lifecycle": "needs_review",
+          "canonical_url": "/ops/artifacts/art-fresh-august",
+          "permitted_actions": [
+            "open",
+            "comment",
+            "approve"
+          ],
+          "source_cursor": "sha256:dfb3150006e0d55747d0feef0251b0872d20d5f1ab826e400668cb178cdb6c72",
+          "source_as_of": "2026-08-05T10:00:00.000Z",
+          "projection_as_of": "2026-08-05T12:00:00.000Z",
+          "freshness_state": "current",
+          "freshness_reason": "fresh: source is at most 72 hours old",
+          "owner": "cane",
+          "review_next": {
+            "id": "art-fresh-august",
+            "canonical_url": "/ops/artifacts/art-fresh-august",
+            "title": "Artifact art-fresh-august",
+            "owner": "cane",
+            "audience": "operator",
+            "admission_reason": "explicit operator registration",
+            "attention_state": "needs_review",
+            "attention_reason": "operator deliverable is ready",
+            "attention_priority": 0,
+            "effective_lifecycle": "needs_review",
+            "created_at": "2026-08-05T10:00:00.000Z",
+            "source_as_of": "2026-08-05T10:00:00.000Z",
+            "meaningful_at": "2026-08-05T10:00:00.000Z",
+            "freshness_state": "fresh",
+            "freshness_reason": "source is at most 72 hours old",
+            "pinned": false,
+            "permitted_actions": [
+              "open",
+              "comment",
+              "approve"
+            ]
+          }
+        },
+        {
+          "id": "art-revalidated-decision",
+          "lane": "review_next",
+          "title": "Artifact art-revalidated-decision",
+          "authority": {
+            "owner": "manager",
+            "projection": "daily_desk",
+            "state": "authoritative",
+            "source_cursor": "sha256:a7519c3ce3d57d0d2ea1668f20134f2f327e630279fbee6f2a420ab7408bca52"
+          },
+          "audience": "operator",
+          "environment": "production",
+          "admission_reason": {
+            "code": "a1_review_next",
+            "detail": "explicit operator registration",
+            "source": "review_next"
+          },
+          "effective_lifecycle": "open",
+          "canonical_url": "/ops/artifacts/art-revalidated-decision",
+          "permitted_actions": [
+            "open",
+            "comment",
+            "approve"
+          ],
+          "source_cursor": "sha256:a7519c3ce3d57d0d2ea1668f20134f2f327e630279fbee6f2a420ab7408bca52",
+          "source_as_of": "2026-07-20T12:00:00.000Z",
+          "projection_as_of": "2026-08-05T12:00:00.000Z",
+          "freshness_state": "current",
+          "freshness_reason": "revalidated: older decision explicitly revalidated within 24 hours",
+          "owner": "cane",
+          "review_next": {
+            "id": "art-revalidated-decision",
+            "canonical_url": "/ops/artifacts/art-revalidated-decision",
+            "title": "Artifact art-revalidated-decision",
+            "owner": "cane",
+            "audience": "operator",
+            "admission_reason": "explicit operator registration",
+            "attention_state": "needs_review",
+            "attention_reason": "operator deliverable is ready",
+            "attention_priority": 1,
+            "effective_lifecycle": "open",
+            "created_at": "2026-07-20T12:00:00.000Z",
+            "source_as_of": "2026-07-20T12:00:00.000Z",
+            "meaningful_at": "2026-08-05T06:00:00.000Z",
+            "freshness_state": "revalidated",
+            "freshness_reason": "older decision explicitly revalidated within 24 hours",
+            "pinned": false,
+            "permitted_actions": [
+              "open",
+              "comment",
+              "approve"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "needs_response",
+      "label": "Needs a response",
+      "max_rows": 5,
+      "count": 2,
+      "rows": [
+        {
+          "id": "inbox-operator-approval",
+          "lane": "needs_response",
+          "title": "Approve board packet",
+          "authority": {
+            "owner": "manager",
+            "projection": "daily_desk",
+            "state": "authoritative",
+            "source_cursor": "sha256:db6df3202a7f0f1a4d12af1066dd6170826f6b70b3f79e2532f076d740a1e8e3"
+          },
+          "audience": "operator",
+          "environment": "production",
+          "admission_reason": {
+            "code": "operator_response_required",
+            "detail": "unresolved production message needs operator response",
+            "source": "inbox_items"
+          },
+          "effective_lifecycle": "needs_response",
+          "canonical_url": "/ops/inboxes?item=inbox-operator-approval",
+          "permitted_actions": [
+            "open",
+            "acknowledge"
+          ],
+          "source_cursor": "sha256:db6df3202a7f0f1a4d12af1066dd6170826f6b70b3f79e2532f076d740a1e8e3",
+          "source_as_of": "2026-08-05T11:30:00.000Z",
+          "projection_as_of": "2026-08-05T12:00:00.000Z",
+          "freshness_state": "current",
+          "freshness_reason": "inbox projection updated; source is at most 24 hours old",
+          "owner": "cane"
+        },
+        {
+          "id": "inbox-operator-reply",
+          "lane": "needs_response",
+          "title": "Reply to neighborhood partner",
+          "authority": {
+            "owner": "manager",
+            "projection": "daily_desk",
+            "state": "authoritative",
+            "source_cursor": "sha256:e58cedd347a97db47a78baec208fddc39eb6d973fc000293a830b35431d52d79"
+          },
+          "audience": "operator",
+          "environment": "production",
+          "admission_reason": {
+            "code": "operator_response_required",
+            "detail": "unresolved production message needs operator response",
+            "source": "inbox_items"
+          },
+          "effective_lifecycle": "needs_response",
+          "canonical_url": "/ops/inboxes?item=inbox-operator-reply",
+          "permitted_actions": [
+            "open",
+            "acknowledge"
+          ],
+          "source_cursor": "sha256:e58cedd347a97db47a78baec208fddc39eb6d973fc000293a830b35431d52d79",
+          "source_as_of": "2026-08-05T11:00:00.000Z",
+          "projection_as_of": "2026-08-05T12:00:00.000Z",
+          "freshness_state": "current",
+          "freshness_reason": "inbox projection updated; source is at most 24 hours old",
+          "owner": "cane"
+        }
+      ]
+    },
+    {
+      "id": "follow_through",
+      "label": "Follow-through",
+      "max_rows": 5,
+      "count": 2,
+      "rows": [
+        {
+          "id": "checkin-operator-soon",
+          "lane": "follow_through",
+          "title": "Follow through checkin-operator-soon",
+          "authority": {
+            "owner": "manager",
+            "projection": "daily_desk",
+            "state": "authoritative",
+            "source_cursor": "sha256:0a53e7b48d1561196806e2a1ec38a584e9542d992d26b1eb86434f3ef6704ae7"
+          },
+          "audience": "operator",
+          "environment": "production",
+          "admission_reason": {
+            "code": "active_outcome_watch",
+            "detail": "active production checkin awaits an outcome",
+            "source": "checkins"
+          },
+          "effective_lifecycle": "waiting",
+          "canonical_url": "/ops/tasks?checkin=checkin-operator-soon",
+          "permitted_actions": [
+            "open",
+            "acknowledge"
+          ],
+          "source_cursor": "sha256:0a53e7b48d1561196806e2a1ec38a584e9542d992d26b1eb86434f3ef6704ae7",
+          "source_as_of": "2026-08-05T11:00:00.000Z",
+          "projection_as_of": "2026-08-05T12:00:00.000Z",
+          "freshness_state": "current",
+          "freshness_reason": "active checkin updated; source is at most 24 hours old",
+          "owner": "cane"
+        },
+        {
+          "id": "checkin-operator-later",
+          "lane": "follow_through",
+          "title": "Follow through checkin-operator-later",
+          "authority": {
+            "owner": "manager",
+            "projection": "daily_desk",
+            "state": "authoritative",
+            "source_cursor": "sha256:396c1a0ecd1aaf745c588de5d941df75c8df3070ab4c6431ccd9592f0ca7b3be"
+          },
+          "audience": "operator",
+          "environment": "production",
+          "admission_reason": {
+            "code": "active_outcome_watch",
+            "detail": "active production checkin awaits an outcome",
+            "source": "checkins"
+          },
+          "effective_lifecycle": "waiting",
+          "canonical_url": "/ops/tasks?checkin=checkin-operator-later",
+          "permitted_actions": [
+            "open",
+            "acknowledge"
+          ],
+          "source_cursor": "sha256:396c1a0ecd1aaf745c588de5d941df75c8df3070ab4c6431ccd9592f0ca7b3be",
+          "source_as_of": "2026-08-05T11:00:00.000Z",
+          "projection_as_of": "2026-08-05T12:00:00.000Z",
+          "freshness_state": "current",
+          "freshness_reason": "active checkin updated; source is at most 24 hours old",
+          "owner": "cane"
+        }
+      ]
+    }
+  ],
+  "count": 8,
+  "max_payload_bytes": 65536,
+  "payload_bytes": 9609,
+  "review_next_receipt": {
+    "schema_version": "review-next.v1",
+    "authority": {
+      "owner": "manager",
+      "projection": "review_next",
+      "state": "authoritative",
+      "source_cursor": "sha256:b94a112cb2a89edbdce84816c6795695536ba00a6e5618a5c7756d85f06fd21e"
+    },
+    "projection_as_of": "2026-08-05T12:00:00.000Z",
+    "source_as_of": "2026-08-05T10:00:00.000Z",
+    "freshness_state": "current",
+    "freshness_reason": "manager projection queried from explicit artifact registration metadata",
+    "count": 2,
+    "max_rows": 5,
+    "payload_bytes": 1749
+  }
+}

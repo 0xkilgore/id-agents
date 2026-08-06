@@ -1,0 +1,27 @@
+{
+  "sample_count": 25,
+  "fixed_now": "2026-08-05T12:00:00.000Z",
+  "fixed_today": "2026-08-05",
+  "unique_hashes": [
+    "sha256:58fbfd3c644a638899de6986d35120686138184ab1b6a4ec5593e645c82dd3f8"
+  ],
+  "source_cursor": "sha256:1e4ff2f55d8bff6506cdff006049bb1a34d327bdbefc729d282861181a3b5b10",
+  "identical_lane_membership_and_order": {
+    "today": [
+      "task-today-newer",
+      "task-today-older"
+    ],
+    "review_next": [
+      "art-fresh-august",
+      "art-revalidated-decision"
+    ],
+    "needs_response": [
+      "inbox-operator-approval",
+      "inbox-operator-reply"
+    ],
+    "follow_through": [
+      "checkin-operator-soon",
+      "checkin-operator-later"
+    ]
+  }
+}

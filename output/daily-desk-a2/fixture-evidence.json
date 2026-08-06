@@ -1,0 +1,77 @@
+{
+  "fixed_now": "2026-08-05T12:00:00.000Z",
+  "fixed_today": "2026-08-05",
+  "admitted_membership": {
+    "today": [
+      "task-today-newer",
+      "task-today-older"
+    ],
+    "review_next": [
+      "art-fresh-august",
+      "art-revalidated-decision"
+    ],
+    "needs_response": [
+      "inbox-operator-approval",
+      "inbox-operator-reply"
+    ],
+    "follow_through": [
+      "checkin-operator-soon",
+      "checkin-operator-later"
+    ]
+  },
+  "contaminants_present_in_source": [
+    "task-system-fixture",
+    "task-terminal",
+    "art-system",
+    "art-fixture",
+    "art-terminal",
+    "art-expired",
+    "inbox-test-fixture",
+    "inbox-resolved",
+    "inbox-terminal",
+    "checkin-test-fixture",
+    "checkin-closed",
+    "checkin-expired"
+  ],
+  "admitted_contaminants": [],
+  "needs_response_lifecycle": [
+    {
+      "id": "inbox-operator-approval",
+      "effective_lifecycle": "needs_response",
+      "admission_reason": {
+        "code": "operator_response_required",
+        "detail": "unresolved production message needs operator response",
+        "source": "inbox_items"
+      }
+    },
+    {
+      "id": "inbox-operator-reply",
+      "effective_lifecycle": "needs_response",
+      "admission_reason": {
+        "code": "operator_response_required",
+        "detail": "unresolved production message needs operator response",
+        "source": "inbox_items"
+      }
+    }
+  ],
+  "follow_through_lifecycle": [
+    {
+      "id": "checkin-operator-soon",
+      "effective_lifecycle": "waiting",
+      "admission_reason": {
+        "code": "active_outcome_watch",
+        "detail": "active production checkin awaits an outcome",
+        "source": "checkins"
+      }
+    },
+    {
+      "id": "checkin-operator-later",
+      "effective_lifecycle": "waiting",
+      "admission_reason": {
+        "code": "active_outcome_watch",
+        "detail": "active production checkin awaits an outcome",
+        "source": "checkins"
+      }
+    }
+  ]
+}
