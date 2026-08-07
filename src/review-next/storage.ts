@@ -71,6 +71,20 @@ export async function upsertReviewNextMetadata(
   return rows[0];
 }
 
+export async function retireReviewNextMetadata(
+  adapter: DbAdapter,
+  artifactId: string,
+  lifecycle: "approved" | "rejected",
+  nowIso: string,
+): Promise<void> {
+  await adapter.query(
+    `UPDATE artifact_review_next_metadata
+        SET effective_lifecycle = ?, source_as_of = ?, updated_at = ?
+      WHERE artifact_id = ?`,
+    [lifecycle, nowIso, nowIso, artifactId],
+  );
+}
+
 export async function listReviewNextSourceRows(adapter: DbAdapter): Promise<ReviewNextSourceRow[]> {
   const { rows } = await adapter.query<ReviewNextSourceRow>(
     `SELECT a.artifact_id, a.title, a.created_at AS artifact_created_at,
